@@ -647,3 +647,132 @@ print("ok")
     );
     assert_eq!(crate::common::run_luajit(&driver), "ok");
 }
+
+#[test]
+fn flat_vec_bounds_checks_call_helpers_only_on_a_miss() {
+    for (decl, fields, layout) in [
+        ("value P { a: int, b: int }", "a: n, b: 2", "columns"),
+        (
+            "nobox value P { a: int, b: int, c: int, d: int, e: int }",
+            "a: n, b: 2, c: 3, d: 4, e: 5",
+            "strided",
+        ),
+    ] {
+        let append_fields = fields.replace("a: n", "a: 7");
+        let src = format!(
+            r#"{decl}
+@nomangle fn make(n: int) -> [P] {{ return [P {{ {fields} }}] }}
+@nomangle fn read(xs: [P], i: int) -> int {{ return xs[i].a }}
+@nomangle fn store(xs: [P], i: int, n: int) {{ xs[i] = P {{ {fields} }} }}
+@nomangle fn walk(xs: [P], mode: int) -> int {{
+    let sum = 0
+    for x in xs {{
+        sum += x.a
+        if mode == 0 {{ xs.push(P {{ {append_fields} }}) }}
+        if mode == 1 {{ xs.pop() }}
+        if mode == 2 {{ xs.clear() }}
+        if mode == 3 {{ xs.remove_at(0) }}
+        if mode == 4 {{ xs[1].a = 9 }}
+        if mode == 5 {{ xs = make(99) }}
+    }}
+    return sum
+}}
+fn main() {{}}
+"#,
+        );
+        let lua = emit_module(&src);
+        assert!(crate::common::has_vec_header(&lua, layout, None), "{lua}");
+        let driver = format!(
+            r#"{lua}
+local checks = 0
+local checked = __vec_checked_index
+__vec_checked_index = function(v, i) checks = checks + 1; return checked(v, i) end
+local function oob(f, i, n)
+  local ok, err = pcall(f)
+  assert(not ok and tostring(err):find("Vec index out of bounds: index " .. i .. " is outside [0, " .. n .. ")", 1, true), tostring(err))
+end
+local xs = make(1)
+assert(read(xs, 0) == 1)
+store(xs, 0, 8)
+assert(read(xs, 0) == 8)
+assert(checks == 0, "in-bounds flat accesses called the helper " .. checks .. " times")
+oob(function() read(xs, -1) end, -1, 1)
+oob(function() read(xs, 1) end, 1, 1)
+oob(function() store(xs, -1, 9) end, -1, 1)
+oob(function() store(xs, 1, 9) end, 1, 1)
+assert(read(xs, 0) == 8 and xs.len == 1)
+-- The live length remains authoritative even if physical storage is stale.
+xs.len = 0
+oob(function() read(xs, 0) end, 0, 0)
+oob(function() store(xs, 0, 9) end, 0, 0)
+for mode = 0, 5 do
+  xs = make(1)
+  store(xs, 0, 2)
+  -- Append a second element without depending on the storage layout.
+  assert(walk(xs, 0) == 2 and xs.len == 2)
+  if mode >= 1 and mode <= 3 then
+    oob(function() walk(xs, mode) end, 1, mode == 2 and 0 or 1)
+  else
+    assert(walk(xs, mode) == (mode == 4 and 11 or 9))
+  end
+end
+print("ok")
+"#
+        );
+        assert_eq!(crate::common::run_luajit(&driver), "ok", "{layout}");
+    }
+}
+
+#[test]
+fn column_vec_false_and_null_leaves_are_in_bounds() {
+    let lua = emit_module(
+        r#"
+nobox value P { flag: bool, payload: [int]? }
+@nomangle fn make() -> [P] { return [P { flag: false, payload: null }, P { flag: true, payload: [7] }] }
+@nomangle fn flag(xs: [P], i: int) -> bool { return xs[i].flag }
+@nomangle fn payload(xs: [P], i: int) -> [int]? { return xs[i].payload }
+@nomangle fn reset(xs: [P], i: int) { xs[i] = P { flag: false, payload: null } }
+fn main() {}
+"#,
+    );
+    let driver = format!(
+        r#"{lua}
+local xs = make()
+assert(flag(xs, 0) == false and payload(xs, 0) == nil)
+assert(flag(xs, 1) == true and payload(xs, 1)._data[1] == 7)
+reset(xs, 1)
+assert(flag(xs, 1) == false and payload(xs, 1) == nil)
+print("ok")
+"#
+    );
+    assert_eq!(crate::common::run_luajit(&driver), "ok");
+}
+
+#[test]
+fn plain_vec_stores_preserve_holes_bounds_and_argument_evaluation() {
+    let lua = emit_module(
+        r#"
+@nomangle fn store(xs: [int?], i: int, n: int?) { xs[i] = n }
+@nomangle fn grow(xs: [int?]) -> int? { xs.push(7); return 9 }
+@nomangle fn growing_store(xs: [int?]) { xs[1] = grow(xs) }
+fn main() {}
+"#,
+    );
+    let driver = format!(
+        r#"{lua}
+local xs = {{len = 2, _data = {{false, 3}}}}
+store(xs, 0, nil)
+store(xs, 1, 8)
+assert(xs._data[1] == nil and xs._data[2] == 8)
+for _, i in ipairs({{-1, 2}}) do
+  local ok, err = pcall(store, xs, i, 9)
+  assert(not ok and tostring(err):find("Vec index out of bounds", 1, true))
+end
+xs = {{len = 1, _data = {{1}}}}
+growing_store(xs)
+assert(xs.len == 2 and xs._data[2] == 9)
+print("ok")
+"#
+    );
+    assert_eq!(crate::common::run_luajit(&driver), "ok");
+}

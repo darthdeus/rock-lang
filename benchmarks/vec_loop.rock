@@ -148,6 +148,61 @@ fn count_arena(us: Arena<Mote>) -> int {
     return t
 }
 
+// Four scalar leaves use columns; five use dense strided storage.
+nobox value ColumnMote { x: float, y: float, life: int }
+nobox value StridedMote { x: float, y: float, life: int, dx: float, dy: float }
+
+fn columns(n: int) -> [ColumnMote] {
+    let out: [ColumnMote] = []
+    for i in 0..n { out.push(ColumnMote { x: (i % 13) as float, y: (i % 5) as float, life: i % 9 }) }
+    return out
+}
+
+fn strided(n: int) -> [StridedMote] {
+    let out: [StridedMote] = []
+    for i in 0..n { out.push(StridedMote { x: (i % 13) as float, y: (i % 5) as float, life: i % 9, dx: 1.0, dy: 2.0 }) }
+    return out
+}
+
+fn sum_columns(ms: [ColumnMote]) -> float {
+    let t = 0.0
+    for m in ms { if m.life > 2 { t += m.x * m.y } }
+    return t
+}
+
+fn sum_strided(ms: [StridedMote]) -> float {
+    let t = 0.0
+    for m in ms { if m.life > 2 { t += m.x * m.y } }
+    return t
+}
+
+fn sum_columns_indexed(ms: [ColumnMote]) -> float {
+    let t = 0.0
+    for i in 0..ms.len() { t += ms[i].x }
+    return t
+}
+
+fn sum_strided_indexed(ms: [StridedMote]) -> float {
+    let t = 0.0
+    for i in 0..ms.len() { t += ms[i].x }
+    return t
+}
+
+fn store_columns(ms: [ColumnMote]) -> float {
+    for i in 0..ms.len() { ms[i] = ColumnMote { x: (i % 13) as float, y: (i % 5) as float, life: i % 9 } }
+    return ms[ms.len() - 1].x
+}
+
+fn store_strided(ms: [StridedMote]) -> float {
+    for i in 0..ms.len() { ms[i] = StridedMote { x: (i % 13) as float, y: (i % 5) as float, life: i % 9, dx: 1.0, dy: 2.0 } }
+    return ms[ms.len() - 1].x
+}
+
+fn store_ints(xs: [int]) -> float {
+    for i in 0..xs.len() { xs[i] = i % 13 }
+    return xs[xs.len() - 1] as float
+}
+
 fn report(name: string, counts: string, elems: int, jit_s: float, interp_elems: int, interp_s: float, sink: float) {
     let ns = jit_s * 1000000000.0 / (elems as float)
     let interp_ns = interp_s * 1000000000.0 / (interp_elems as float)
@@ -191,6 +246,16 @@ fn main() {
     drive("sum_field", 1000, 20000, () => sum_field(swarm))
     drive("copy_big", 1000, 10000, () => copy_big(xs, out) as float)
     drive("sum_grid", 1000, 20000, () => sum_grid(grid) as float)
+    let cs = columns(1000)
+    let ss = strided(1000)
+    let writes = ints(1000)
+    drive("sum_columns", 1000, 20000, () => sum_columns(cs))
+    drive("sum_strided", 1000, 20000, () => sum_strided(ss))
+    drive("sum_columns_indexed", 1000, 20000, () => sum_columns_indexed(cs))
+    drive("sum_strided_indexed", 1000, 20000, () => sum_strided_indexed(ss))
+    drive("store_columns", 1000, 20000, () => store_columns(cs))
+    drive("store_strided", 1000, 20000, () => store_strided(ss))
+    drive("store_ints", 1000, 20000, () => store_ints(writes))
     // One slot in ten is free.
     let arena = units(1000)
     drive("sum_arena", 900, 20000, () => sum_arena(arena) as float)
