@@ -389,6 +389,20 @@ impl Emitter<'_> {
 
             Inst::Index { base, index, kind } => self.write_index(out, id, *base, *index, *kind),
             Inst::VecCheckedIndex { vec, index } => {
+                // The live length guards a logical element, independently of
+                // false or nil leaves and stale physical storage.
+                let fast =
+                    self.repeatable(*vec, 2) && self.repeatable(*index, 2) && self.has_home(id);
+                if fast {
+                    self.write_opnd(out, *index);
+                    out.push_str(" >= 0 and ");
+                    self.write_opnd(out, *index);
+                    out.push_str(" < ");
+                    self.write_opnd(out, *vec);
+                    out.push_str(".len and (");
+                    self.write_opnd(out, *index);
+                    out.push_str(" + 1) or ");
+                }
                 out.push_str("__vec_checked_index(");
                 self.write_opnd(out, *vec);
                 out.push_str(", ");
