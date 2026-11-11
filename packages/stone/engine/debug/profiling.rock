@@ -829,7 +829,7 @@ global GC_WIN_NEGATIVE_SECTION_ID_RESULT: int = -1
 pub global GC_WIN_NEGATIVE_DELTA_KB_RESULT: float = -1.0
 global GC_WIN_CURRENT_FRAME_MAX_KB: float = 0.0
 global GC_WIN_CURRENT_FRAME_MAX_SECTION_ID: int = -1
-// The frame history is sized to the requested window when it opens, so a
+// The frame history is sized before the requested window opens, so a
 // window of any length keeps every frame and the hot path never allocates.
 global GC_WIN_FRAME_CAPACITY: int = 0
 global GC_WIN_FRAME_TOTAL_KB: NativeBuffer<float> = native_buffer_float(0)
@@ -1135,13 +1135,30 @@ fn gc_window_trace_json(available: bool) -> string {
     return "{{\"available\":{known},\"starts\":{__perf_json_gc_int(GC_WIN_TRACE_STARTS_RESULT, known)},\"compiles\":{__perf_json_gc_int(GC_WIN_TRACE_COMPILES_RESULT, known)},\"aborts\":{__perf_json_gc_int(GC_WIN_TRACE_ABORTS_RESULT, known)},\"flushes\":{__perf_json_gc_int(GC_WIN_TRACE_FLUSHES_RESULT, known)}}}"
 }
 
-// Called at window open, before the allocator cursor starts, so the one
-// allocation for a long window is outside the measured window.
+// Reserve during setup or warmup. The open-time call also supports tests and
+// interactive callers that change the requested length between windows.
 fn gc_window_size_frame_history() {
     let capacity = if GC_WIN_N > 0 { GC_WIN_N } else { 0 }
     if capacity <= GC_WIN_FRAME_CAPACITY { return () }
     GC_WIN_FRAME_TOTAL_KB = native_buffer_float(capacity)
     GC_WIN_FRAME_CAPACITY = capacity
+}
+
+// Configuration and retained storage belong before any measured outer frame.
+// Replenish spare rows at warmup end after ordinary section admission used them.
+fn gc_window_prepare() {
+    if GC_WIN_N == -1 {
+        GC_WIN_N = get_env_int("PERF_GC_WINDOW", 0)
+        GC_WIN_START = get_env_int("PERF_GC_WINDOW_START", 100)
+        GC_WIN_AFTER_WARMUP = os_getenv("PERF_GC_WINDOW_AFTER_WARMUP") == "1"
+        if GC_WIN_AFTER_WARMUP { GC_WIN_START = GC_WIN_FRAME + 1 }
+        GC_WIN_MODE_RUNNING = (os_getenv("PERF_GC_WINDOW_MODE") ?? "stopped") == "running"
+    }
+    if GC_WIN_N <= 0 { return }
+    gc_window_size_frame_history()
+    section_pool_reserve()
+    __stone_jit_program_identity_prepare()
+    stone_lua_counter_install()
 }
 
 pub fn gc_window_clear_accounting() {
@@ -1885,6 +1902,7 @@ fn init_profiler() {
     gc_window_clear_accounting()
     IMAGE_PROFILE_STARTED = false
     for name in PROFILE_DECLARED_SECTIONS { let _ = section_id(name, "profile_declare_section") }
+    gc_window_prepare()
 }
 
 pub fn profile(name: string, f: fn() -> ()) {
@@ -2421,6 +2439,7 @@ fn profile_frame_begin() {
 }
 
 fn profiler_finish_warmup(include_current_frame: bool) {
+    gc_window_prepare()
     PROFILER.warmup_active = false
     section_time_reset()
     section_request_kb_reset()
@@ -2575,16 +2594,7 @@ fn profile_frame_end() {
     // GC allocation window. Its own frame counter is immune to warmup reset;
     // stopped mode collects once and pauses GC, while running mode preserves
     // the ordinary collector schedule.
-    if GC_WIN_N == -1 {
-        GC_WIN_N = get_env_int("PERF_GC_WINDOW", 0)
-        GC_WIN_START = get_env_int("PERF_GC_WINDOW_START", 100)
-        GC_WIN_AFTER_WARMUP = os_getenv("PERF_GC_WINDOW_AFTER_WARMUP") == "1"
-        if GC_WIN_AFTER_WARMUP { GC_WIN_START = GC_WIN_FRAME + 1 }
-        GC_WIN_MODE_RUNNING = (os_getenv("PERF_GC_WINDOW_MODE") ?? "stopped") == "running"
-        // Spare section rows cost a few hundred KB and belong in a warmup
-        // frame, not in the window's first measured one.
-        if GC_WIN_N > 0 { section_pool_reserve() }
-    }
+    if GC_WIN_N == -1 { gc_window_prepare() }
     if GC_WIN_N > 0 {
         // The requested start is a lower bound, not permission to freeze the
         // registry before the configured production warmup has admitted names.

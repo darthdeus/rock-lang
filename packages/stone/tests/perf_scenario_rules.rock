@@ -151,3 +151,62 @@ fn perf_scenario_fixed_start_rejects_late_readiness() {
     let failure = (world_fixture_raised(() => { perf_outer_frame_boundary(19, stone_get_time()) }) ?? "")
     assert(failure.contains("warmup"), "late readiness must reject the requested warmup: {failure}")
 }
+
+@nomangle
+fn perf_scenario_recorder_allocation_entry(which: int) {
+    lua_alloc_split_init()
+    os_setenv("PERF_GC_WINDOW", "3")
+    os_setenv("PERF_GC_WINDOW_START", "1")
+    os_setenv("PERF_GC_WINDOW_MODE", "running")
+    PERF_FRAME_CAPTURE = true
+    PERF_SECTION_HISTORY = which == 1
+    init_profiler()
+    ENGINE.profiler_enabled = true
+    HITCH = hitch_ledger_new()
+    PERF_RECORDS = perf_records_new()
+    perf_scenario_wait("recorder")
+    let warmup = if which >= 2 { which - 2 } else { 2 }
+    let start = max(warmup, 1)
+    perf_scenario_window("steady", warmup, 4)
+    perf_scenario_ready("recorder")
+    // A collection cannot hide setup allocation from the heap-delta check.
+    __gc_collect_stop()
+    let first_kb = 0.0
+    let ordinary_kb = 0.0
+    for frame in 0..(start + 4) {
+        perf_outer_frame_boundary(frame, stone_get_time())
+        let before_kb = lua_gc_kb()
+        profile_frame_begin()
+        profile_frame_end()
+        let delta_kb = lua_gc_kb() - before_kb
+        if frame == start { first_kb = delta_kb }
+        if frame == start + 1 { ordinary_kb = delta_kb }
+    }
+    assert(first_kb < ordinary_kb + 1.0,
+        "the first measured frame allocates like an ordinary frame: first {first_kb}KB, ordinary {ordinary_kb}KB")
+    assert_eq(PERF_RECORDS.start_frame, start, "preparation preserves the timing interval")
+    assert_eq(GC_WIN_FRAME_SAMPLES, 3, "preparation preserves the allocation interval")
+    assert(GC_WIN_ACCOUNTING_VALID, "preparation preserves allocation accounting")
+    profiler_allocator_shutdown()
+    __gc_restart()
+}
+
+@test
+fn perf_scenario_first_frame_has_no_recorder_setup_allocation() {
+    profiler_test_process("perf_scenario_recorder_allocation_entry", 0)
+}
+
+@test
+fn perf_scenario_first_frame_has_no_section_history_setup_allocation() {
+    profiler_test_process("perf_scenario_recorder_allocation_entry", 1)
+}
+
+@test
+fn perf_scenario_first_frame_without_warmup_has_no_setup_allocation() {
+    profiler_test_process("perf_scenario_recorder_allocation_entry", 2)
+}
+
+@test
+fn perf_scenario_first_frame_after_one_warmup_has_no_setup_allocation() {
+    profiler_test_process("perf_scenario_recorder_allocation_entry", 3)
+}

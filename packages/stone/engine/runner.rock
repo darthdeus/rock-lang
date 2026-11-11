@@ -1881,6 +1881,12 @@ pub @nomangle inline(lua) fn jit_trace_abort_bucket_key(
 const STONE_JIT_PROGRAM_IDENTITY_READY: bool = __stone_jit_program_identity_init(
     embed_string("engine/debug/prototype_identity.lua"))
 
+// Building the prototype registry walks the entire program. Perf prepares it
+// before measurement; opening an era only reuses the retained registry.
+@nomangle inline(lua) fn __stone_jit_program_identity_prepare() = """
+    _G.__stone_jit_program_identity()
+"""
+
 // Open the measured window: the callback clears the era at its next event, so
 // the window's abort count and its sites share one boundary.
 @nomangle inline(lua) fn __stone_jit_abort_sites_open() = """

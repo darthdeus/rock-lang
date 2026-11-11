@@ -1,5 +1,5 @@
 // `rock perf --gc-window N` can ask for a window longer than any fixed frame
-// history. The window's frame history is sized from N when the window opens,
+// history. The window's frame history is reserved from N before it opens,
 // so every requested frame is kept and nothing allocates per frame. A window
 // that cannot keep its frames invalidates the whole section attribution, which
 // is why the frame count is a contract rather than a diagnostic.
