@@ -1,0 +1,216 @@
+use stone::*
+
+// Compare the complete typed vertex buffers, including fields that a writer
+// leaves at their default values.
+@nomangle inline(lua) fn vertex_writer_bytes(buf: NativeBuffer<Vertex>) -> string = """
+    return ffi.string(ffi.cast("const char*", buf.ptr), buf.len * ffi.sizeof("Vertex"))
+"""
+
+@nomangle inline(lua) fn vertex_writer_first_difference(
+    actual: NativeBuffer<Vertex>, expected: NativeBuffer<Vertex>,
+) -> string = """
+    local a = ffi.cast("const uint8_t*", actual.ptr)
+    local e = ffi.cast("const uint8_t*", expected.ptr)
+    local n = actual.len * ffi.sizeof("Vertex")
+    for i = 0, n - 1 do
+        if a[i] ~= e[i] then
+            local lane = math.floor(i / ffi.sizeof("float"))
+            local af = ffi.cast("const float*", actual.ptr)[lane]
+            local ef = ffi.cast("const float*", expected.ptr)[lane]
+            return string.format("byte %d (vertex %d, lane %d): %g vs %g", i,
+                math.floor(lane / 13), lane % 13, af, ef)
+        end
+    end
+    return "no byte difference"
+"""
+
+fn vertex_writer_assert_bytes(
+    actual: NativeBuffer<Vertex>,
+    expected: NativeBuffer<Vertex>,
+    label: string
+) {
+    assert_eq(actual.len, expected.len, "{label}: full buffer lengths match")
+    assert(vertex_writer_bytes(actual) == vertex_writer_bytes(expected),
+        "{label}: every Vertex byte matches typed reference stores; {vertex_writer_first_difference(actual, expected)}")
+}
+
+fn vertex_writer_assert_zero_section(buf: NativeBuffer<Vertex>, count: int, label: string) {
+    for i in 0..count {
+        assert_eq(buf[i].section.x, 0.0, "{label}: vertex {i} section.x is zero")
+        assert_eq(buf[i].section.y, 0.0, "{label}: vertex {i} section.y is zero")
+    }
+}
+
+fn vertex_writer_dirty(seed: float) -> Vertex {
+    return Vertex {
+        pos: Vec2f { x: seed + 1.0, y: seed + 2.0 },
+        uv: Vec2f { x: seed + 3.0, y: seed + 4.0 },
+        color: Vec4f { x: seed + 5.0, y: seed + 6.0, z: seed + 7.0, w: seed + 8.0 },
+        pivot_y: seed + 9.0,
+        entity_id: seed + 10.0,
+        colorize: seed + 11.0,
+        section: Vec2f { x: seed + 12.0, y: seed + 13.0 },
+    }
+}
+
+fn vertex_writer_test_mesh(capacity: int) -> RetainedMesh {
+    return RetainedMesh {
+        mesh: SpriteMesh {
+            vbo: native_buffer_vertex(capacity * RECT_BATCH_VERTS_PER_RECT),
+            capacity: capacity,
+            count: 0,
+            texture: SampledTexture::Image(Image(0)),
+            tex_w: 32.0,
+            tex_h: 16.0,
+            inset_x: 0.0,
+            inset_y: 0.0,
+            z_layer: 0,
+            depth: DepthMode::Off,
+            blend: BlendMode::Alpha,
+        }
+    }
+}
+
+@test
+fn rect_quad_triangle_growth_and_reused_slots_match_vertex_bytes() {
+    let batch = rect_batch_new(1)
+    for i in 0..batch.vbo.len { batch.vbo[i] = vertex_writer_dirty(i as float * 20.0) }
+
+    let expected = native_buffer_vertex(12)
+    rect_batch_push_textured_quad4(batch,
+        v(-2.0, 3.0), v(5.0, 4.0), v(6.0, -2.0), v(-3.0, -4.0),
+        0.125, 0.25, 0.875, 0.75, 0.1, 0.2, 0.3, 0.4)
+    expected[0] = vert(-2.0, 3.0, 0.125, 0.25, 0.1, 0.2, 0.3, 0.4)
+    expected[1] = vert(5.0, 4.0, 0.875, 0.25, 0.1, 0.2, 0.3, 0.4)
+    expected[2] = vert(6.0, -2.0, 0.875, 0.75, 0.1, 0.2, 0.3, 0.4)
+    expected[3] = vert(-2.0, 3.0, 0.125, 0.25, 0.1, 0.2, 0.3, 0.4)
+    expected[4] = vert(6.0, -2.0, 0.875, 0.75, 0.1, 0.2, 0.3, 0.4)
+    expected[5] = vert(-3.0, -4.0, 0.125, 0.75, 0.1, 0.2, 0.3, 0.4)
+
+    // This append starts at a nonzero vertex index and grows the RectBatch.
+    rect_batch_push_triangle(batch, -7.0, 2.0, 3.0, 9.0, 8.0, -5.0,
+        0.6, 0.5, 0.4, 0.3)
+    expected[6] = vert(-7.0, 2.0, 0.5, 0.5, 0.6, 0.5, 0.4, 0.3)
+    expected[7] = vert(3.0, 9.0, 0.5, 0.5, 0.6, 0.5, 0.4, 0.3)
+    expected[8] = vert(8.0, -5.0, 0.5, 0.5, 0.6, 0.5, 0.4, 0.3)
+    assert_eq(batch.count, 9, "the quad and triangle append nine vertices")
+    vertex_writer_assert_bytes(batch.vbo, expected, "rect quad and triangle after growth")
+    vertex_writer_assert_zero_section(batch.vbo, batch.count, "rect quad and triangle")
+
+    // Reset keeps storage. Poison the old quad slots so the next writer must
+    // rewrite every field, including the default-zero section tail.
+    rect_batch_reset(batch)
+    for i in 0..6 { batch.vbo[i] = vertex_writer_dirty(200.0 + i as float * 20.0) }
+    rect_batch_push_textured_quad4(batch,
+        v(1.0, 2.0), v(4.0, 2.0), v(4.0, -1.0), v(1.0, -1.0),
+        0.2, 0.3, 0.6, 0.7, 0.9, 0.8, 0.7, 0.6)
+    expected[0] = vert(1.0, 2.0, 0.2, 0.3, 0.9, 0.8, 0.7, 0.6)
+    expected[1] = vert(4.0, 2.0, 0.6, 0.3, 0.9, 0.8, 0.7, 0.6)
+    expected[2] = vert(4.0, -1.0, 0.6, 0.7, 0.9, 0.8, 0.7, 0.6)
+    expected[3] = vert(1.0, 2.0, 0.2, 0.3, 0.9, 0.8, 0.7, 0.6)
+    expected[4] = vert(4.0, -1.0, 0.6, 0.7, 0.9, 0.8, 0.7, 0.6)
+    expected[5] = vert(1.0, -1.0, 0.2, 0.7, 0.9, 0.8, 0.7, 0.6)
+    vertex_writer_assert_bytes(batch.vbo, expected, "rect quad reused dirty slots")
+    vertex_writer_assert_zero_section(batch.vbo, batch.count, "rect quad reused dirty slots")
+}
+
+@test
+fn sprite_rect_arbitrary_quad_and_ribbon_match_vertex_bytes() {
+    let retained = vertex_writer_test_mesh(1)
+    for i in 0..retained.mesh.vbo.len {
+        retained.mesh.vbo[i] = vertex_writer_dirty(i as float * 20.0)
+    }
+    let expected = native_buffer_vertex(24)
+
+    let tint = Color { r: 0.2, g: 0.4, b: 0.6, a: 0.8 }
+    sprite_mesh_add(retained.mesh, v(10.0, 20.0), ir(4, 2, 8, 6), v(8.0, 4.0),
+        pivot: v(0.25, 0.75), py: 35.0, tint: tint)
+    expected[0] = vert(8.0, 21.0, 0.125, 0.125, 0.2, 0.4, 0.6, 0.8, 35.0)
+    expected[1] = vert(16.0, 21.0, 0.375, 0.125, 0.2, 0.4, 0.6, 0.8, 35.0)
+    expected[2] = vert(16.0, 17.0, 0.375, 0.5, 0.2, 0.4, 0.6, 0.8, 35.0)
+    expected[3] = vert(8.0, 17.0, 0.125, 0.5, 0.2, 0.4, 0.6, 0.8, 35.0)
+    expected[4] = vert(8.0, 21.0, 0.125, 0.125, 0.2, 0.4, 0.6, 0.8, 35.0)
+    expected[5] = vert(16.0, 17.0, 0.375, 0.5, 0.2, 0.4, 0.6, 0.8, 35.0)
+
+    let positions: [Vec2] = [v(-2.0, 3.0), v(5.0, 4.0), v(6.0, -2.0), v(-3.0, -4.0)]
+    let alpha = v(0.125, 0.375, 0.625, 0.875)
+    let colorize = v(0.2, 0.4, 0.6, 0.8)
+    let u = v(-0.1, 0.3, 0.7, 1.1)
+    let vv = v(1.3, 0.9, 0.5, 0.1)
+    retained.add_quad(positions[0], positions[1], positions[2], positions[3], ir(8, 4, 16, 8),
+        py: 42.0, tint: tint, colorize: 0.95,
+        corner_alpha: alpha, corner_colorize: colorize, corner_u: u, corner_v: vv)
+    expected[6] = vert(-2.0, 3.0, -0.1, 1.3, 0.2, 0.4, 0.6, 0.1, 42.0, colorize: 0.2)
+    expected[7] = vert(5.0, 4.0, 0.3, 0.9, 0.2, 0.4, 0.6, 0.3, 42.0, colorize: 0.4)
+    expected[8] = vert(6.0, -2.0, 0.7, 0.5, 0.2, 0.4, 0.6, 0.5, 42.0, colorize: 0.6)
+    expected[9] = vert(-3.0, -4.0, 1.1, 0.1, 0.2, 0.4, 0.6, 0.7, 42.0, colorize: 0.8)
+    expected[10] = vert(-2.0, 3.0, -0.1, 1.3, 0.2, 0.4, 0.6, 0.1, 42.0, colorize: 0.2)
+    expected[11] = vert(6.0, -2.0, 0.7, 0.5, 0.2, 0.4, 0.6, 0.5, 42.0, colorize: 0.6)
+
+    // Growth at both nonzero append points checks that old bytes survive the
+    // replacement allocation and that each new writer starts at its own base.
+    sprite_mesh_add_segment(retained.mesh,
+        v(-8.0, 1.0), v(0.05, 0.15), v(-6.0, 2.0), v(0.25, 0.35),
+        Color { r: 0.1, g: 0.2, b: 0.3, a: 0.4 },
+        v(3.0, -5.0), v(0.45, 0.55), v(5.0, -6.0), v(0.65, 0.75),
+        Color { r: 0.6, g: 0.7, b: 0.8, a: 0.9 },
+        a_py: 11.0, b_py: 22.0)
+    expected[12] = vert(-8.0, 1.0, 0.05, 0.15, 0.1, 0.2, 0.3, 0.4, 11.0)
+    expected[13] = vert(-6.0, 2.0, 0.25, 0.35, 0.1, 0.2, 0.3, 0.4, 11.0)
+    expected[14] = vert(5.0, -6.0, 0.65, 0.75, 0.6, 0.7, 0.8, 0.9, 22.0)
+    expected[15] = vert(3.0, -5.0, 0.45, 0.55, 0.6, 0.7, 0.8, 0.9, 22.0)
+    expected[16] = vert(-8.0, 1.0, 0.05, 0.15, 0.1, 0.2, 0.3, 0.4, 11.0)
+    expected[17] = vert(5.0, -6.0, 0.65, 0.75, 0.6, 0.7, 0.8, 0.9, 22.0)
+    assert_eq(retained.mesh.count, 18, "three public mesh writers append eighteen vertices")
+    assert_eq(retained.mesh.capacity, 4, "two appends grow the one-rect mesh to four rects")
+    vertex_writer_assert_bytes(retained.mesh.vbo, expected, "sprite rect, quad and ribbon after growth")
+    vertex_writer_assert_zero_section(retained.mesh.vbo, retained.mesh.count, "sprite rect, quad and ribbon")
+
+    // Refill reuses the now-dirty storage. All thirteen float lanes, including
+    // the default-zero `section`, must be rewritten for each emitted vertex.
+    retained.refill_begin()
+    for i in 0..retained.mesh.vbo.len { retained.mesh.vbo[i] = vertex_writer_dirty(500.0 + i as float * 20.0) }
+    let reused = native_buffer_vertex(retained.mesh.vbo.len)
+    for i in 0..reused.len { reused[i] = vertex_writer_dirty(500.0 + i as float * 20.0) }
+    sprite_mesh_add(retained.mesh, v(-4.0, 7.0), ir(1, 3, 5, 7), v(10.0, 6.0),
+        pivot: v(0.5, 0.5), py: -3.0, tint: Color { r: 0.9, g: 0.7, b: 0.5, a: 0.3 })
+    reused[0] = vert(-9.0, 10.0, 0.03125, 0.1875, 0.9, 0.7, 0.5, 0.3, -3.0)
+    reused[1] = vert(1.0, 10.0, 0.1875, 0.1875, 0.9, 0.7, 0.5, 0.3, -3.0)
+    reused[2] = vert(1.0, 4.0, 0.1875, 0.625, 0.9, 0.7, 0.5, 0.3, -3.0)
+    reused[3] = vert(-9.0, 4.0, 0.03125, 0.625, 0.9, 0.7, 0.5, 0.3, -3.0)
+    reused[4] = vert(-9.0, 10.0, 0.03125, 0.1875, 0.9, 0.7, 0.5, 0.3, -3.0)
+    reused[5] = vert(1.0, 4.0, 0.1875, 0.625, 0.9, 0.7, 0.5, 0.3, -3.0)
+    vertex_writer_assert_bytes(retained.mesh.vbo, reused, "sprite rect reused dirty slots")
+    vertex_writer_assert_zero_section(retained.mesh.vbo, retained.mesh.count, "sprite rect reused dirty slots")
+}
+
+@test
+fn queued_sprite_rect_matches_vertex_store_reference() {
+    // A canvas value supplies dimensions without creating a GL object. The
+    // public mask-quad API reaches batch.rock's shared sprite-rectangle writer.
+    let texture = SampledTexture::Canvas(Canvas {
+        handle: CanvasId(73021), width: 32.0, height: 16.0,
+    })
+    let pool = render_batch_pool_new()
+    push_silhouette_mask_quad(pool, texture, v(10.0, 20.0), ir(4, 2, 8, 6),
+        v(8.0, 4.0), v(0.25, 0.75), 0.0, false, false,
+        Color { r: 0.2, g: 0.4, b: 0.6, a: 0.8 }, 5.0, 17)
+    let batch = pool.get(sampled_texture_key(texture)).unwrap()
+    let expected = native_buffer_vertex(batch.verts.len)
+    let ix = ENGINE.texel_bleed_prevention / 32.0
+    let iy = ENGINE.texel_bleed_prevention / 16.0
+    let u1 = (4.0 + ix) / 32.0
+    let v1 = (2.0 + iy) / 16.0
+    let u2 = (12.0 - ix) / 32.0
+    let v2 = (8.0 - iy) / 16.0
+    expected[0] = vert(8.0, 17.0, u1, v2, 0.2, 0.4, 0.6, 0.8, 25.0, 17.0)
+    expected[1] = vert(16.0, 17.0, u2, v2, 0.2, 0.4, 0.6, 0.8, 25.0, 17.0)
+    expected[2] = vert(16.0, 21.0, u2, v1, 0.2, 0.4, 0.6, 0.8, 25.0, 17.0)
+    expected[3] = vert(8.0, 21.0, u1, v1, 0.2, 0.4, 0.6, 0.8, 25.0, 17.0)
+    expected[4] = vert(8.0, 17.0, u1, v2, 0.2, 0.4, 0.6, 0.8, 25.0, 17.0)
+    expected[5] = vert(16.0, 21.0, u2, v1, 0.2, 0.4, 0.6, 0.8, 25.0, 17.0)
+    assert_eq(batch.count, 6, "the queued sprite emits one quad")
+    vertex_writer_assert_bytes(batch.verts, expected, "queued sprite rect")
+    vertex_writer_assert_zero_section(batch.verts, batch.count, "queued sprite rect")
+    render_batch_pool_destroy(pool)
+}

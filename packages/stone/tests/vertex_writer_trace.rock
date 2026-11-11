@@ -1,0 +1,46 @@
+use stone::*
+
+@nomangle inline(lua) fn vertex_writer_trace_begin() = "jit.flush()"
+
+@nomangle inline(lua) fn vertex_writer_trace_end() -> int = """
+    jit.off(debug.getinfo(1, "f").func)
+    local util = require("jit.util")
+    local largest, tr = 0, 1
+    while true do
+        local info = util.traceinfo(tr)
+        if not info then break end
+        if info.linktype == "loop" then largest = math.max(largest, info.nk) end
+        tr = tr + 1
+    end
+    return largest
+"""
+
+// Native pointer narrowing spends different constant slots on each target.
+@nomangle inline(lua) fn vertex_writer_trace_limit() -> int = 'return jit.arch == "arm64" and 128 or 144'
+
+@nomangle fn vertex_writer_trace_loop(mesh: SpriteMesh, count: int) {
+    for i in 0..count {
+        mesh.count = (i % 128) * 6
+        let x = float(i)
+        sprite_mesh_add_quad(mesh, v(x, 3.0), v(x + 2.0, 4.0),
+            v(x + 3.0, -2.0), v(x - 1.0, -4.0), ir(8, 4, 16, 8),
+            py: 7.0, tint: Color { r: 0.25, g: 0.5, b: 0.75, a: 0.5 },
+            colorize: 0.6)
+    }
+}
+
+@test
+fn vertex_writer_running_offsets_fit_the_trace_constant_budget() {
+    let mesh = SpriteMesh {
+        vbo: native_buffer_vertex(128 * 6), capacity: 128, count: 0,
+        texture: sampled_image(Image(0)), tex_w: 32.0, tex_h: 16.0,
+        inset_x: 0.0, inset_y: 0.0, z_layer: 0,
+        depth: DepthMode::Off, blend: BlendMode::Alpha,
+    }
+    vertex_writer_trace_begin()
+    vertex_writer_trace_loop(mesh, 4096)
+    let nk = vertex_writer_trace_end()
+    assert(nk > 0, "the quad writer records a trace")
+    let limit = vertex_writer_trace_limit()
+    assert(nk <= limit, "quad writer uses {nk} constant slots, at most {limit}")
+}

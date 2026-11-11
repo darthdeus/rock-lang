@@ -49,6 +49,19 @@ as `ROCK_JIT_*` environment overrides; the test
   cutoff keeps all nine Stone append sites compact while bounding their
   extra constant cost. Isolated numeric-row benchmarks can hide the cost
   because the source's leaf expressions already use the same constants.
+- **Native vertex offsets.** A numeric index increment or literal pointer
+  increment can be narrowed and reassociated into a distinct byte-offset
+  constant at each store. Stone's quad writers reuse the native buffer's
+  cached float view and advance a pointer between vertices. The stride uses
+  `len / len` after checking a positive destination span: a runtime-derived
+  one prevents reassociation, and the division is loop invariant. Each vertex
+  reuses the same 13 field offsets. Keep the field order and zero tails checked
+  against typed `Vertex` stores. In 15 interleaved fresh-process rounds with
+  the shipped LuaJIT, the arbitrary-quad loop used 174 -> 155 constant slots
+  on Apple M1 and 192 -> 159 on Intel Core i9-14900K. Median JIT-on process CPU
+  time was 11.49 -> 10.84 and 15.03 -> 12.56 ns/quad respectively; the accepted
+  writers show no measurable slowdown. The [writer benchmark](../benchmarks/stone_vertex/README.md)
+  retains exact emitted bodies and reports every trace and process sample.
 - **Tail-call unroll.** Every recorded `CALLT` counts against `loopunroll`.
   The budget is spent by accumulation over many shallow forwarders, not deep
   chains.

@@ -331,12 +331,15 @@ fn __queue_text_quad(
     b_: float,
     alpha: float
 ) {
-    buf[vi]     = vert(a.x, a.y, u1, v1, r, g, b_, alpha)
-    buf[vi + 1] = vert(b.x, b.y, u2, v1, r, g, b_, alpha)
-    buf[vi + 2] = vert(c.x, c.y, u2, v2, r, g, b_, alpha)
-    buf[vi + 3] = vert(a.x, a.y, u1, v1, r, g, b_, alpha)
-    buf[vi + 4] = vert(c.x, c.y, u2, v2, r, g, b_, alpha)
-    buf[vi + 5] = vert(d.x, d.y, u1, v2, r, g, b_, alpha)
+    __vertex_check_span(buf, vi, 6)
+    let cursor = __vertex_float_view(buf, vi * vertex_stride(buf))
+    let step = __vertex_stride_unit(buf)
+    cursor = __write_vertex(cursor, step, a.x, a.y, u1, v1, r, g, b_, alpha)
+    cursor = __write_vertex(cursor, step, b.x, b.y, u2, v1, r, g, b_, alpha)
+    cursor = __write_vertex(cursor, step, c.x, c.y, u2, v2, r, g, b_, alpha)
+    cursor = __write_vertex(cursor, step, a.x, a.y, u1, v1, r, g, b_, alpha)
+    cursor = __write_vertex(cursor, step, c.x, c.y, u2, v2, r, g, b_, alpha)
+    cursor = __write_vertex(cursor, step, d.x, d.y, u1, v2, r, g, b_, alpha)
 }
 
 // The metric em the raster geometry scales by, plus the check that the layout

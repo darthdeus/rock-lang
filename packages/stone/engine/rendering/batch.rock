@@ -2429,12 +2429,15 @@ fn __ui_sprite_push_rotated(
     let tr = center + right - down
     let br = center + right + down
     let bl = center - right + down
-    buf[ci]     = vert(tl.x, tl.y, u0, v0, r, g, b, a, colorize: parametric_index)
-    buf[ci + 1] = vert(tr.x, tr.y, u1, v0, r, g, b, a, colorize: parametric_index)
-    buf[ci + 2] = vert(br.x, br.y, u1, v1, r, g, b, a, colorize: parametric_index)
-    buf[ci + 3] = vert(tl.x, tl.y, u0, v0, r, g, b, a, colorize: parametric_index)
-    buf[ci + 4] = vert(br.x, br.y, u1, v1, r, g, b, a, colorize: parametric_index)
-    buf[ci + 5] = vert(bl.x, bl.y, u0, v1, r, g, b, a, colorize: parametric_index)
+    __vertex_check_span(buf, ci, 6)
+    let cursor = __vertex_float_view(buf, ci * vertex_stride(buf))
+    let step = __vertex_stride_unit(buf)
+    cursor = __write_vertex(cursor, step, tl.x, tl.y, u0, v0, r, g, b, a, colorize: parametric_index)
+    cursor = __write_vertex(cursor, step, tr.x, tr.y, u1, v0, r, g, b, a, colorize: parametric_index)
+    cursor = __write_vertex(cursor, step, br.x, br.y, u1, v1, r, g, b, a, colorize: parametric_index)
+    cursor = __write_vertex(cursor, step, tl.x, tl.y, u0, v0, r, g, b, a, colorize: parametric_index)
+    cursor = __write_vertex(cursor, step, br.x, br.y, u1, v1, r, g, b, a, colorize: parametric_index)
+    cursor = __write_vertex(cursor, step, bl.x, bl.y, u0, v1, r, g, b, a, colorize: parametric_index)
     batch.count = ci + 6
 }
 
@@ -2471,13 +2474,16 @@ fn __ui_sprite_push(
     let x2 = x + w
     let y2 = y + h
     // Tri 1: TL, TR, BR (Y-down screen space, no UV flip)
-    buf[ci]     = vert(x,  y,  u0, v0, r, g, b, a, colorize: parametric_index)
-    buf[ci + 1] = vert(x2, y,  u1, v0, r, g, b, a, colorize: parametric_index)
-    buf[ci + 2] = vert(x2, y2, u1, v1, r, g, b, a, colorize: parametric_index)
+    __vertex_check_span(buf, ci, 6)
+    let cursor = __vertex_float_view(buf, ci * vertex_stride(buf))
+    let step = __vertex_stride_unit(buf)
+    cursor = __write_vertex(cursor, step, x,  y,  u0, v0, r, g, b, a, colorize: parametric_index)
+    cursor = __write_vertex(cursor, step, x2, y,  u1, v0, r, g, b, a, colorize: parametric_index)
+    cursor = __write_vertex(cursor, step, x2, y2, u1, v1, r, g, b, a, colorize: parametric_index)
     // Tri 2: TL, BR, BL
-    buf[ci + 3] = vert(x,  y,  u0, v0, r, g, b, a, colorize: parametric_index)
-    buf[ci + 4] = vert(x2, y2, u1, v1, r, g, b, a, colorize: parametric_index)
-    buf[ci + 5] = vert(x,  y2, u0, v1, r, g, b, a, colorize: parametric_index)
+    cursor = __write_vertex(cursor, step, x,  y,  u0, v0, r, g, b, a, colorize: parametric_index)
+    cursor = __write_vertex(cursor, step, x2, y2, u1, v1, r, g, b, a, colorize: parametric_index)
+    cursor = __write_vertex(cursor, step, x,  y2, u0, v1, r, g, b, a, colorize: parametric_index)
     batch.count = ci + 6
 }
 

@@ -240,7 +240,7 @@ pub fn rect_batch_reset(b: RectBatch) {
 }
 
 // One vertex, built from scalars. Leaf addressing lowers `buf[i] = vert(..)`
-// to the same `view[i*10 + k]` float stores the flat idiom wrote by hand, with
+// to `view[i*13 + k]` float stores the flat idiom wrote by hand, with
 // no Vertex_ct/Vec2_ct materialized -- so the layout comes from the struct
 // instead of from argument order, at no allocation (measured:
 // benchmarks/value-scalarize/sprite_vertex_store_ab.rock).
@@ -259,6 +259,46 @@ pub @pure fn vert(
         colorize: colorize,
     }
 }
+
+@inline inline(lua) fn __vertex_check_span(buf: NativeBuffer<Vertex>, first: int, count: int) = """
+    if first < 0 or first + count > buf.len then
+        error("NativeBuffer vertex span out of bounds")
+    end
+"""
+
+// The span check proves len > 0. A symbolic one keeps LuaJIT from folding
+// successive pointer advances into distinct byte-offset constants. The JIT
+// hoists this division out of the writer loop.
+@inline fn __vertex_stride_unit(buf: NativeBuffer<Vertex>) -> float {
+    return float(buf.len) / float(buf.len)
+}
+
+// Reuse the compiler's cached float view instead of casting another cdata.
+@inline inline(lua) fn __vertex_float_view(buf: NativeBuffer<Vertex>, at: int) -> Ptr<float> = 'return buf.__vf + at'
+
+// Keep these stores in Vertex field order; vertex_writer_bytes compares them
+// against typed stores, including every default-zero tail lane.
+@inline inline(lua) fn __write_vertex(
+    p: Ptr<float>, step: float,
+    x: float, y: float, u: float, v_: float,
+    r: float, g: float, b: float, a: float,
+    py: float = 0.0, eid: float = 0.0, colorize: float = 0.0,
+) -> Ptr<float> = """
+    p[0] = x
+    p[1] = y
+    p[2] = u
+    p[3] = v_
+    p[4] = r
+    p[5] = g
+    p[6] = b
+    p[7] = a
+    p[8] = py
+    p[9] = eid
+    p[10] = colorize
+    p[11] = 0
+    p[12] = 0
+    return p + step * 13
+"""
 
 // Push one colored rect. Two triangles, 6 vertices.
 // Grows the buffer 2x if the batch is at capacity.
@@ -284,12 +324,15 @@ fn __rect_batch_push_textured_quad4(
     u1: float, v1: float, u2: float, v2: float,
     r: float, g: float, b: float, a: float,
 ) {
-    buf[vi]     = vert(tl.x, tl.y, u1, v1, r, g, b, a)
-    buf[vi + 1] = vert(tr.x, tr.y, u2, v1, r, g, b, a)
-    buf[vi + 2] = vert(br.x, br.y, u2, v2, r, g, b, a)
-    buf[vi + 3] = vert(tl.x, tl.y, u1, v1, r, g, b, a)
-    buf[vi + 4] = vert(br.x, br.y, u2, v2, r, g, b, a)
-    buf[vi + 5] = vert(bl.x, bl.y, u1, v2, r, g, b, a)
+    __vertex_check_span(buf, vi, 6)
+    let cursor = __vertex_float_view(buf, vi * vertex_stride(buf))
+    let step = __vertex_stride_unit(buf)
+    cursor = __write_vertex(cursor, step, tl.x, tl.y, u1, v1, r, g, b, a)
+    cursor = __write_vertex(cursor, step, tr.x, tr.y, u2, v1, r, g, b, a)
+    cursor = __write_vertex(cursor, step, br.x, br.y, u2, v2, r, g, b, a)
+    cursor = __write_vertex(cursor, step, tl.x, tl.y, u1, v1, r, g, b, a)
+    cursor = __write_vertex(cursor, step, br.x, br.y, u2, v2, r, g, b, a)
+    cursor = __write_vertex(cursor, step, bl.x, bl.y, u1, v2, r, g, b, a)
 }
 
 // Push one textured rect with atlas UVs. Same geometry as rect_batch_push
@@ -333,9 +376,12 @@ fn __rect_batch_push_triangle_verts(
     x1: float, y1: float, x2: float, y2: float, x3: float, y3: float,
     r: float, g: float, bl: float, a: float,
 ) {
-    buf[vi]     = vert(x1, y1, 0.5, 0.5, r, g, bl, a)
-    buf[vi + 1] = vert(x2, y2, 0.5, 0.5, r, g, bl, a)
-    buf[vi + 2] = vert(x3, y3, 0.5, 0.5, r, g, bl, a)
+    __vertex_check_span(buf, vi, 3)
+    let cursor = __vertex_float_view(buf, vi * vertex_stride(buf))
+    let step = __vertex_stride_unit(buf)
+    cursor = __write_vertex(cursor, step, x1, y1, 0.5, 0.5, r, g, bl, a)
+    cursor = __write_vertex(cursor, step, x2, y2, 0.5, 0.5, r, g, bl, a)
+    cursor = __write_vertex(cursor, step, x3, y3, 0.5, 0.5, r, g, bl, a)
 }
 
 // Push one colored triangle. Three vertices in any winding order
@@ -585,13 +631,16 @@ fn __sprite_mesh_push_verts(
     r: float, g: float, b: float, a: float,
 ) {
     // Tri 1: TL, TR, BR (V-flip: world-top samples atlas-top)
-    buf[vi]     = vert(x1, y2, u1, v1, r, g, b, a, py)
-    buf[vi + 1] = vert(x2, y2, u2, v1, r, g, b, a, py)
-    buf[vi + 2] = vert(x2, y1, u2, v2, r, g, b, a, py)
+    __vertex_check_span(buf, vi, 6)
+    let cursor = __vertex_float_view(buf, vi * vertex_stride(buf))
+    let step = __vertex_stride_unit(buf)
+    cursor = __write_vertex(cursor, step, x1, y2, u1, v1, r, g, b, a, py)
+    cursor = __write_vertex(cursor, step, x2, y2, u2, v1, r, g, b, a, py)
+    cursor = __write_vertex(cursor, step, x2, y1, u2, v2, r, g, b, a, py)
     // Tri 2: BL, TL, BR
-    buf[vi + 3] = vert(x1, y1, u1, v2, r, g, b, a, py)
-    buf[vi + 4] = vert(x1, y2, u1, v1, r, g, b, a, py)
-    buf[vi + 5] = vert(x2, y1, u2, v2, r, g, b, a, py)
+    cursor = __write_vertex(cursor, step, x1, y1, u1, v2, r, g, b, a, py)
+    cursor = __write_vertex(cursor, step, x1, y2, u1, v1, r, g, b, a, py)
+    cursor = __write_vertex(cursor, step, x2, y1, u2, v2, r, g, b, a, py)
 }
 
 // 4-corner variant: an ARBITRARY quad (a sheared parallelogram for grid-
@@ -625,13 +674,16 @@ fn __sprite_mesh_push_quad4(
     let dv = if let uv = corner_v { uv.w } else { v2 }
 
     // Tri 1: a(TL), b(TR), c(BR).
-    buf[vi]     = vert(ax, ay, au, av, cr, cg, cb, aa, py, colorize: ac)
-    buf[vi + 1] = vert(bx, by, bu, bv, cr, cg, cb, ba, py, colorize: bc)
-    buf[vi + 2] = vert(cx, cy, cu, cv, cr, cg, cb, cca, py, colorize: cc)
+    __vertex_check_span(buf, vi, 6)
+    let cursor = __vertex_float_view(buf, vi * vertex_stride(buf))
+    let step = __vertex_stride_unit(buf)
+    cursor = __write_vertex(cursor, step, ax, ay, au, av, cr, cg, cb, aa, py, colorize: ac)
+    cursor = __write_vertex(cursor, step, bx, by, bu, bv, cr, cg, cb, ba, py, colorize: bc)
+    cursor = __write_vertex(cursor, step, cx, cy, cu, cv, cr, cg, cb, cca, py, colorize: cc)
     // Tri 2: d(BL), a(TL), c(BR)
-    buf[vi + 3] = vert(dx, dy, du, dv, cr, cg, cb, da, py, colorize: dc)
-    buf[vi + 4] = vert(ax, ay, au, av, cr, cg, cb, aa, py, colorize: ac)
-    buf[vi + 5] = vert(cx, cy, cu, cv, cr, cg, cb, cca, py, colorize: cc)
+    cursor = __write_vertex(cursor, step, dx, dy, du, dv, cr, cg, cb, da, py, colorize: dc)
+    cursor = __write_vertex(cursor, step, ax, ay, au, av, cr, cg, cb, aa, py, colorize: ac)
+    cursor = __write_vertex(cursor, step, cx, cy, cu, cv, cr, cg, cb, cca, py, colorize: cc)
 }
 
 // Ribbon cross-section writer: stitches the PREVIOUS vertex pair (a) to
@@ -650,13 +702,16 @@ fn __sprite_mesh_push_segment(
     a_py: float, b_py: float,
 ) {
     // Tri 1: a_left, a_right, b_right
-    buf[vi]     = vert(alx, aly, alu, alv, ar,  ag, ab, aa, a_py)
-    buf[vi + 1] = vert(arx, ary, aru, arv, ar,  ag, ab, aa, a_py)
-    buf[vi + 2] = vert(brx, bry, bru, brv, br_, bg, bb, ba, b_py)
+    __vertex_check_span(buf, vi, 6)
+    let cursor = __vertex_float_view(buf, vi * vertex_stride(buf))
+    let step = __vertex_stride_unit(buf)
+    cursor = __write_vertex(cursor, step, alx, aly, alu, alv, ar,  ag, ab, aa, a_py)
+    cursor = __write_vertex(cursor, step, arx, ary, aru, arv, ar,  ag, ab, aa, a_py)
+    cursor = __write_vertex(cursor, step, brx, bry, bru, brv, br_, bg, bb, ba, b_py)
     // Tri 2: b_left, a_left, b_right
-    buf[vi + 3] = vert(blx, bly, blu, blv, br_, bg, bb, ba, b_py)
-    buf[vi + 4] = vert(alx, aly, alu, alv, ar,  ag, ab, aa, a_py)
-    buf[vi + 5] = vert(brx, bry, bru, brv, br_, bg, bb, ba, b_py)
+    cursor = __write_vertex(cursor, step, blx, bly, blu, blv, br_, bg, bb, ba, b_py)
+    cursor = __write_vertex(cursor, step, alx, aly, alu, alv, ar,  ag, ab, aa, a_py)
+    cursor = __write_vertex(cursor, step, brx, bry, bru, brv, br_, bg, bb, ba, b_py)
 }
 
 // Add one ribbon segment: the quad spanning cross-section `a` (the
