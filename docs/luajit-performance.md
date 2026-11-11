@@ -297,3 +297,43 @@ column key-walk min/median from 1.405/1.447 to 1.206/1.225 ns/entry on arm64
 (-15.3% median). On x86 it showed no gain: 1.421/1.436 -> 1.435/1.453 ns/entry.
 Other direct walks were effectively unchanged in this ablation. Keep the
 simpler key-only lowering for its measured arm64 gain and smaller emitted work.
+
+### Reproducing live-float exits
+
+Run `rock run benchmarks/live_floats.rock` with the JIT on, on x86-64. The
+benchmark covers record membership with early return, a counted grid walk,
+geometric vec2/vec3 scoring, and cache acquisition with a prepared 24-leaf
+value. The scoring caller retains another 20 scalar leaves. It warms and
+times the same loop, using 300,000 and 1,000,000 iterations respectively;
+`ns_per_iter` measures process CPU time on the warmed cache. Trace counts
+cover the warmup phase.
+
+For every coalescing failure it prints the parent/exit, count, distinct
+non-constant parent snapshot double refs, inherited double SLOADs, and parent
+PHIs. These loop-root examples have two PHIs and 25-30 snapshot doubles on
+x86. The inherited caller values dominate the side-trace head. Arm64 has a
+larger floating register bank; a clean arm64 recording does not disprove the
+x86 failure.
+
+`blacklist_encounters` counts recordings encountering interpreter-only code;
+`blacklisted_entries` counts observed starts ending with interpreter-only
+entry bytecodes. `exhausted_exits` separately counts coalescing sites reaching
+156 failures, the retry cap at the shipped hotexit. Those side exits need not
+produce a blacklist event. Parent refs and inherited SLOAD IR instructions
+also do not directly report the assembler's physical live-register set.
+
+Guard arithmetic materialization and exclusive-arm float-expression deferral
+were prototyped against this benchmark. Materialization lets nil-kills precede
+a comparison; deferral can postpone wide arithmetic until after a helper
+call. Both need care: assigning the boolean introduces the guard before the
+kills, moving one division can replace one result with two live inputs, and
+an aggregate saving across arms can hide an increase on one exit. Mutable
+reads, throwing operations and coroutine frame reads must retain their order.
+Constant-only arithmetic does not consume a floating register in the snapshot.
+
+The prototypes were not retained. Reducing an individual snapshot or fixing
+one repeatedly failing exit did not establish a consistent pooled runtime
+improvement. In the scoring reproduction, even removing three doubles leaves
+more than the x86 side-head budget because the caller retains a wide value.
+The compiler still needs a way to avoid constructing or loading those leaves
+before an independent guarded call, with evaluation order preserved.

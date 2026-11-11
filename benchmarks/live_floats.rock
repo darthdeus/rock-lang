@@ -1,0 +1,223 @@
+// Guard-exit pressure from scalar value leaves. Run with the JIT on:
+//     rock run benchmarks/live_floats.rock
+// Diagnostics report per-parent/exit double refs, rather than snapshot slots.
+@nomangle inline(lua) fn clock() -> float = "return os.clock()"
+@nomangle inline(lua) fn reset() = """
+    jit.flush()
+    local u, v, bit = require('jit.util'), require('jit.vmdef'), require('bit')
+    local b = {aborts=0, coalescing=0, blacklisted=0, sites={}, current={}, max_doubles=0, exits={}, entries={}}
+    _G.__live_floats = b
+    b.hook = function(what, tr, f, pc, a, e)
+      if what=='start' or what=='abort' then
+        b.entries[tostring(f)..':'..pc]={f,pc}
+      end
+      if what == 'start' then
+        b.current = {parent=a or 0, exit=e or -1, f=f, pc=pc}
+        if a and a > 0 and e then
+          local refs,n={},0
+          local snap=u.tracesnap(a,e)
+          if snap then
+            for j=2,#snap do
+              local entry=snap[j]
+              local ref=bit.band(entry,65535)-32768
+              if ref>0 and bit.band(entry,262144)==0 then refs[ref]=true end
+            end
+            for ref in pairs(refs) do
+              local m,ot=u.traceir(a,ref)
+              if ot and bit.band(ot,31)==14 then n=n+1 end
+            end
+          end
+          b.max_doubles=math.max(b.max_doubles,n)
+          b.exits[a..':'..e]=n
+        end
+      elseif what == 'abort' then
+        b.aborts = b.aborts + 1
+        local reason = v.traceerr[a] or tostring(a)
+        if reason:find('blacklisted') then b.blacklisted=b.blacklisted+1 end
+        if reason:find('coalescing') then
+          b.coalescing=b.coalescing+1
+          local c=b.current
+          local info=u.funcinfo(c.f,c.pc)
+          local key=(info.currentline or 0)..':'..c.parent..':'..c.exit
+          local s=b.sites[key]
+          if not s then
+            s={count=0, doubles=0, inherited=0, phis=0}
+            b.sites[key]=s
+            local refs={}
+            local snap=u.tracesnap(c.parent,c.exit)
+            if snap then
+              for j=2,#snap do
+                local entry=snap[j]
+                local ref=bit.band(entry,65535)-32768
+                if ref>0 and bit.band(entry,262144)==0 then refs[ref]=true end
+              end
+            end
+            local ti=u.traceinfo(c.parent) or {}
+            for j=1,ti.nins or 0 do
+              local m,ot=u.traceir(c.parent,j)
+              local off=6*bit.rshift(ot,8)
+              local op=v.irnames:sub(off+1,off+6)
+              if refs[j] and bit.band(ot,31)==14 then s.doubles=s.doubles+1 end
+              if op=='PHI   ' then s.phis=s.phis+1 end
+            end
+            local ci=u.traceinfo(tr) or {}
+            for j=1,ci.nins or 0 do
+              local m,ot,op1,op2=u.traceir(tr,j)
+              local off=6*bit.rshift(ot,8)
+              if v.irnames:sub(off+1,off+6)=='SLOAD ' and bit.band(ot,31)==14
+                  and bit.band(op2,1)~=0 then s.inherited=s.inherited+1 end
+            end
+          end
+          s.count=s.count+1
+        end
+      end
+    end
+    jit.attach(b.hook,'trace')
+"""
+@nomangle inline(lua) fn counts() -> string = """
+    local b=_G.__live_floats
+    jit.attach(b.hook)
+    local u,v,bit=require('jit.util'),require('jit.vmdef'),require('bit')
+    local blacklisted_entries,doomed=0,0
+    for k,fp in pairs(b.entries) do
+      local ins=u.funcbc(fp[1],fp[2])
+      if ins then
+        local off=6*bit.band(ins,255)
+        local op=v.bcnames:sub(off+1,off+6)
+        if op=='IFUNCF' or op=='IFUNCV' or op=='IFORL ' or op=='IITERL' or op=='ILOOP ' then
+          blacklisted_entries=blacklisted_entries+1
+        end
+      end
+    end
+    local sites,exits={},{}
+    for k,n in pairs(b.exits) do exits[#exits+1]=k..':'..n end
+    table.sort(exits)
+    for k,s in pairs(b.sites) do
+      if s.count >= 156 then doomed=doomed+1 end
+      sites[#sites+1]=k..':count='..s.count..':doubles='..s.doubles..
+        ':inherited='..s.inherited..':phis='..s.phis
+    end
+    table.sort(sites)
+    return 'aborts='..b.aborts..' coalescing='..b.coalescing..
+      ' blacklist_encounters='..b.blacklisted..' blacklisted_entries='..blacklisted_entries..
+      ' exhausted_exits='..doomed..' max_parent_doubles='..b.max_doubles..
+      ' exits='..table.concat(exits,',')..' sites='..table.concat(sites,',')
+"""
+
+nobox value Wide {f0: float, f1: float, f2: float, f3: float, f4: float, f5: float, f6: float, f7: float, f8: float, f9: float, f10: float, f11: float, f12: float, f13: float, f14: float, f15: float, f16: float, f17: float, f18: float, f19: float, f20: float, f21: float, f22: float, f23: float }
+struct Input { f0: float, f1: float, f2: float, f3: float, f4: float, f5: float, f6: float, f7: float, f8: float, f9: float, f10: float, f11: float, f12: float, f13: float, f14: float, f15: float, f16: float, f17: float, f18: float, f19: float, f20: float, f21: float, f22: float, f23: float }
+nobox value V2 { x: float, y: float }
+nobox value V3 { x: float, y: float, z: float }
+struct Entry { key: int, weight: float }
+struct Cache { key: int, value: float }
+@inline fn prepare(s: Input, t: float) -> Wide {
+    let x = s.f0
+    let y = s.f1
+    let z = s.f2
+    return Wide { f0: (x + y * 1.125) * t + z * 2.25, f1: (x + y * 2.125) * t + z * 3.25, f2: (x + y * 3.125) * t + z * 4.25, f3: (x + y * 4.125) * t + z * 5.25, f4: (x + y * 5.125) * t + z * 6.25, f5: (x + y * 6.125) * t + z * 7.25, f6: (x + y * 7.125) * t + z * 8.25, f7: (x + y * 8.125) * t + z * 9.25, f8: (x + y * 9.125) * t + z * 10.25, f9: (x + y * 10.125) * t + z * 11.25, f10: (x + y * 11.125) * t + z * 12.25, f11: (x + y * 12.125) * t + z * 13.25, f12: (x + y * 13.125) * t + z * 14.25, f13: (x + y * 14.125) * t + z * 15.25, f14: (x + y * 15.125) * t + z * 16.25, f15: (x + y * 16.125) * t + z * 17.25, f16: (x + y * 17.125) * t + z * 18.25, f17: (x + y * 18.125) * t + z * 19.25, f18: (x + y * 19.125) * t + z * 20.25, f19: (x + y * 20.125) * t + z * 21.25, f20: (x + y * 21.125) * t + z * 22.25, f21: (x + y * 22.125) * t + z * 23.25, f22: (x + y * 23.125) * t + z * 24.25, f23: (x + y * 24.125) * t + z * 25.25 }
+}
+
+fn consume(w: Wide) -> float { return w.f0 + w.f1 + w.f2 + w.f3 + w.f4 + w.f5 + w.f6 + w.f7 + w.f8 + w.f9 + w.f10 + w.f11 + w.f12 + w.f13 + w.f14 + w.f15 + w.f16 + w.f17 + w.f18 + w.f19 + w.f20 + w.f21 + w.f22 + w.f23 }
+
+fn contains(entries: [Entry], key: int) -> bool {
+    for e in entries { if e.key == key { return true } }
+    return false
+}
+fn membership(s: Input, entries: [Entry], tick: int) -> float {
+    let w = prepare(s, (tick % 31) as float + 0.25)
+    if contains(entries, tick % 8) { return consume(w) }
+    return consume(w) * 0.5
+}
+fn blocked(cells: [int], key: int) -> bool {
+    for y in 0..2 {
+        for x in 0..2 { if cells[x + y * 2] == key { return true } }
+    }
+    return false
+}
+fn grid(s: Input, cells: [int], tick: int) -> float {
+    let w = prepare(s, (tick % 31) as float + 0.25)
+    if blocked(cells, (tick % 8) ./ 7) { return consume(w) }
+    return consume(w) * 0.5
+}
+fn acquire(c: Cache, key: int) -> float {
+    if c.key == key { return c.value }
+    c.key = key
+    c.value += 0.125
+    return c.value
+}
+fn cached(s: Input, c: Cache, tick: int) -> float {
+    let w = prepare(s, (tick % 31) as float + 0.25)
+    let handle = acquire(c, (tick ./ 8) % 8)
+    if handle % 2.0 < 1.0 { return consume(w) + handle }
+    return consume(w) * 0.5 + handle
+}
+nobox value Carry { f0: float, f1: float, f2: float, f3: float, f4: float, f5: float, f6: float, f7: float, f8: float, f9: float, f10: float, f11: float, f12: float, f13: float, f14: float, f15: float, f16: float, f17: float, f18: float, f19: float }
+fn carry(s: Input, t: float) -> Carry {
+    let scaled = V3 { x: s.f0 * t, y: s.f1 * t, z: s.f2 * t }
+    return Carry { f0: scaled.x, f1: scaled.y, f2: scaled.z, f3: s.f3 * t, f4: s.f4 * t, f5: s.f5 * t, f6: s.f6 * t, f7: s.f7 * t, f8: s.f8 * t, f9: s.f9 * t, f10: s.f10 * t, f11: s.f11 * t, f12: s.f12 * t, f13: s.f13 * t, f14: s.f14 * t, f15: s.f15 * t, f16: s.f16 * t, f17: s.f17 * t, f18: s.f18 * t, f19: s.f19 * t }
+}
+fn angle_score(origin: V2, axis: V2, mark: V2, kind: int) -> float {
+    let rx = mark.x - axis.x
+    let ry = mark.y - axis.y
+    let range2 = rx * rx + ry * ry
+    let proximity = range2 / 49.0
+    if kind == 0 {
+        if proximity < 1.5 { return proximity }
+        return -2.0
+    }
+    let ax = axis.x - origin.x
+    let ay = axis.y - origin.y
+    let bx = mark.x - origin.x
+    let by = mark.y - origin.y
+    let aa = ax * ax + ay * ay
+    let bb = bx * bx + by * by
+    if aa < 0.0005 { return -2.0 }
+    if bb < 0.0005 { return -2.0 }
+    let cross = ax * by - ay * bx
+    let denominator = aa * bb
+    if ax * bx + ay * by <= 0.0 { return -2.0 }
+    let angular = cross * cross / denominator
+    if kind == 1 {
+        if angular < 0.6 { return angular }
+        return -2.0
+    }
+    if range2 > 25.0 { return -2.0 }
+    if angular > 0.4 && proximity > 1.5 { return -2.0 }
+    return angular + proximity * 0.125
+}
+fn score(s: Input, tick: int) -> float {
+    let t = (tick % 31) as float + 0.25
+    let w = carry(s, t)
+    let origin = V2 { x: s.f0, y: s.f1 }
+    let axis = V2 { x: s.f2 * t, y: s.f3 * t }
+    let mark = V2 { x: s.f4 * ((tick % 7) as float - 2.0), y: s.f5 * ((tick % 5) as float - 1.0) }
+    let value = angle_score(origin, axis, mark, tick % 2 + 1)
+    return value + w.f0 + w.f1 + w.f2 + w.f3 + w.f4 + w.f5 + w.f6 + w.f7 + w.f8 + w.f9 + w.f10 + w.f11 + w.f12 + w.f13 + w.f14 + w.f15 + w.f16 + w.f17 + w.f18 + w.f19
+}
+
+fn batch(pass: fn(int) -> float, count: int) -> float {
+    let sum = 0.0
+    for i in 0..count { sum += pass(i) }
+    return sum
+}
+fn run(name: string, pass: fn(int) -> float) {
+    reset()
+    let warm = batch(pass, 300000)
+    let diagnostics = counts()
+    let start = clock()
+    let timed = batch(pass, 1000000)
+    let ns = (clock() - start) * 1000.0
+    let sum = warm + timed
+    print("workload={name} {diagnostics} ns_per_iter={ns} sink={sum}")
+}
+
+fn main() {
+let s = Input { f0: 0.03125, f1: 0.06250, f2: 0.09375, f3: 0.12500, f4: 0.15625, f5: 0.18750, f6: 0.21875, f7: 0.25000, f8: 0.28125, f9: 0.31250, f10: 0.34375, f11: 0.37500, f12: 0.40625, f13: 0.43750, f14: 0.46875, f15: 0.50000, f16: 0.53125, f17: 0.56250, f18: 0.59375, f19: 0.62500, f20: 0.65625, f21: 0.68750, f22: 0.71875, f23: 0.75000 }
+    let entries = [Entry { key: 0, weight: 0.5 }, Entry { key: 3, weight: 0.75 }, Entry { key: 5, weight: 1.25 }]
+    let cells = [0, 9, 9, 9, 9, 3, 9, 9, 9, 9, 5, 9, 9, 9, 9, 9]
+    let c = Cache { key: 0, value: 0.25 }
+    run("membership", i => membership(s, entries, i))
+    run("grid", i => grid(s, cells, i))
+    run("score", i => score(s, i))
+    run("cached", i => cached(s, c, i))
+}
