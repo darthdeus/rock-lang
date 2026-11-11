@@ -37,6 +37,18 @@ as `ROCK_JIT_*` environment overrides; the test
   Rock functions exhaust it. Every "trace too long" abort is this limit, and
   it comes from emission. Raising the limit converts the class into unroll
   aborts at the same starts.
+- **Strided-row offsets.** Fold `base + offset` into each store only through
+  12 leaves; wider rows advance a running index. A uniform 50-leaf push used
+  34 -> 81 constant slots on arm64 and 40 -> 183 on x86 with distinct offsets.
+  On x86, narrowing retains both a two-slot KNUM and a one-slot KINT for an
+  offset; seeing KINT operands in the final IR does not mean a one-slot cost.
+  The constants are interned by value across stores: two consecutive 50-leaf
+  pushes used 83/185 slots, not twice 81/183. A benchmark with 118 field keys
+  and 30 small callees starts at 453/459 slots on arm64/x86. Compact 24- and
+  50-leaf pushes hit the 500-slot limit on x86; 12 leaves stay at 488. This
+  cutoff keeps all nine Stone append sites compact while bounding their
+  extra constant cost. Isolated numeric-row benchmarks can hide the cost
+  because the source's leaf expressions already use the same constants.
 - **Tail-call unroll.** Every recorded `CALLT` counts against `loopunroll`.
   The budget is spent by accumulation over many shallow forwarders, not deep
   chains.

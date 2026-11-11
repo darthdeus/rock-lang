@@ -19,7 +19,7 @@
 @nomangle inline(lua) fn bench_reset() = """
     local jit = require("jit")
     jit.flush()
-    _G.__bench = { start = 0, stop = 0, abort = 0 }
+    _G.__bench = { start = 0, stop = 0, abort = 0, reasons = {}, abort_nk = {} }
     _G.__bench_cb = function(what, tr, fn, pc, otr, oex)
       local b = _G.__bench
       if what == "start" then
@@ -28,6 +28,10 @@
         b.stop = b.stop + 1
       elseif what == "abort" then
         b.abort = b.abort + 1
+        local reason = (require("jit.vmdef").traceerr[otr] or tostring(otr)):gsub("%W+", "_")
+        b.reasons[reason] = (b.reasons[reason] or 0) + 1
+        local info = require("jit.util").traceinfo(tr)
+        b.abort_nk[#b.abort_nk + 1] = info and info.nk or 0
       end
     end
     jit.attach(_G.__bench_cb, "trace")
@@ -38,17 +42,26 @@
     jit.attach(_G.__bench_cb)
     local util = require("jit.util")
     local b = _G.__bench
-    local traces, mc = 0, 0
+    local traces, mc, nk = 0, 0, {}
     for tr = 1, 32000 do
       local mcode = util.tracemc(tr)
       if mcode then
         traces = traces + 1
         mc = mc + #mcode
+        local info = util.traceinfo(tr)
+        nk[#nk + 1] = string.format("%d:%d:%s", tr, info.nk, info.linktype)
       end
     end
     collectgarbage("collect")
-    return string.format("traces=%d stops=%d aborts=%d mcode_bytes=%d",
-      traces, b.stop, b.abort, mc)
+    local reasons = {}
+    for reason, count in pairs(b.reasons) do
+      reasons[#reasons + 1] = reason .. ":" .. count
+    end
+    table.sort(reasons)
+    return string.format("traces=%d stops=%d aborts=%d mcode_bytes=%d trace_nk=%s abort_reasons=%s abort_nk=%s",
+      traces, b.stop, b.abort, mc, table.concat(nk, ","),
+      #reasons > 0 and table.concat(reasons, ",") or "none",
+      #b.abort_nk > 0 and table.concat(b.abort_nk, ",") or "none")
 """
 
 struct Mote { x: float, y: float, life: int }
@@ -285,6 +298,150 @@ fn push_rows_24(xs: [PushRow24], n: int) -> float {
     return (xs.len() + xs[n - 1].f23) as float
 }
 
+// Field keys and inlined calls spend about 450 of LuaJIT's 500 constant slots.
+// Uniform row leaves ensure distinct offsets are not already source constants.
+struct BudgetFields {
+    key000: int, key001: int, key002: int, key003: int, key004: int, key005: int, key006: int,
+    key007: int, key008: int, key009: int, key010: int, key011: int, key012: int, key013: int,
+    key014: int, key015: int, key016: int, key017: int, key018: int, key019: int, key020: int,
+    key021: int, key022: int, key023: int, key024: int, key025: int, key026: int, key027: int,
+    key028: int, key029: int, key030: int, key031: int, key032: int, key033: int, key034: int,
+    key035: int, key036: int, key037: int, key038: int, key039: int, key040: int, key041: int,
+    key042: int, key043: int, key044: int, key045: int, key046: int, key047: int, key048: int,
+    key049: int, key050: int, key051: int, key052: int, key053: int, key054: int, key055: int,
+    key056: int, key057: int, key058: int, key059: int, key060: int, key061: int, key062: int,
+    key063: int, key064: int, key065: int, key066: int, key067: int, key068: int, key069: int,
+    key070: int, key071: int, key072: int, key073: int, key074: int, key075: int, key076: int,
+    key077: int, key078: int, key079: int, key080: int, key081: int, key082: int, key083: int,
+    key084: int, key085: int, key086: int, key087: int, key088: int, key089: int, key090: int,
+    key091: int, key092: int, key093: int, key094: int, key095: int, key096: int, key097: int,
+    key098: int, key099: int, key100: int, key101: int, key102: int, key103: int, key104: int,
+    key105: int, key106: int, key107: int, key108: int, key109: int, key110: int, key111: int,
+    key112: int, key113: int, key114: int, key115: int, key116: int, key117: int,
+}
+
+fn budget_fields() -> BudgetFields {
+    return BudgetFields {
+        key000: 1000, key001: 1001, key002: 1002, key003: 1003, key004: 1004, key005: 1005, key006: 1006,
+        key007: 1007, key008: 1008, key009: 1009, key010: 1010, key011: 1011, key012: 1012, key013: 1013,
+        key014: 1014, key015: 1015, key016: 1016, key017: 1017, key018: 1018, key019: 1019, key020: 1020,
+        key021: 1021, key022: 1022, key023: 1023, key024: 1024, key025: 1025, key026: 1026, key027: 1027,
+        key028: 1028, key029: 1029, key030: 1030, key031: 1031, key032: 1032, key033: 1033, key034: 1034,
+        key035: 1035, key036: 1036, key037: 1037, key038: 1038, key039: 1039, key040: 1040, key041: 1041,
+        key042: 1042, key043: 1043, key044: 1044, key045: 1045, key046: 1046, key047: 1047, key048: 1048,
+        key049: 1049, key050: 1050, key051: 1051, key052: 1052, key053: 1053, key054: 1054, key055: 1055,
+        key056: 1056, key057: 1057, key058: 1058, key059: 1059, key060: 1060, key061: 1061, key062: 1062,
+        key063: 1063, key064: 1064, key065: 1065, key066: 1066, key067: 1067, key068: 1068, key069: 1069,
+        key070: 1070, key071: 1071, key072: 1072, key073: 1073, key074: 1074, key075: 1075, key076: 1076,
+        key077: 1077, key078: 1078, key079: 1079, key080: 1080, key081: 1081, key082: 1082, key083: 1083,
+        key084: 1084, key085: 1085, key086: 1086, key087: 1087, key088: 1088, key089: 1089, key090: 1090,
+        key091: 1091, key092: 1092, key093: 1093, key094: 1094, key095: 1095, key096: 1096, key097: 1097,
+        key098: 1098, key099: 1099, key100: 1100, key101: 1101, key102: 1102, key103: 1103, key104: 1104,
+        key105: 1105, key106: 1106, key107: 1107, key108: 1108, key109: 1109, key110: 1110, key111: 1111,
+        key112: 1112, key113: 1113, key114: 1114, key115: 1115, key116: 1116, key117: 1117,
+    }
+}
+
+fn budget_read_0(b: BudgetFields) -> int { return b.key000 + b.key001 + b.key002 + b.key003 }
+fn budget_read_4(b: BudgetFields) -> int { return b.key004 + b.key005 + b.key006 + b.key007 }
+fn budget_read_8(b: BudgetFields) -> int { return b.key008 + b.key009 + b.key010 + b.key011 }
+fn budget_read_12(b: BudgetFields) -> int { return b.key012 + b.key013 + b.key014 + b.key015 }
+fn budget_read_16(b: BudgetFields) -> int { return b.key016 + b.key017 + b.key018 + b.key019 }
+fn budget_read_20(b: BudgetFields) -> int { return b.key020 + b.key021 + b.key022 + b.key023 }
+fn budget_read_24(b: BudgetFields) -> int { return b.key024 + b.key025 + b.key026 + b.key027 }
+fn budget_read_28(b: BudgetFields) -> int { return b.key028 + b.key029 + b.key030 + b.key031 }
+fn budget_read_32(b: BudgetFields) -> int { return b.key032 + b.key033 + b.key034 + b.key035 }
+fn budget_read_36(b: BudgetFields) -> int { return b.key036 + b.key037 + b.key038 + b.key039 }
+fn budget_read_40(b: BudgetFields) -> int { return b.key040 + b.key041 + b.key042 + b.key043 }
+fn budget_read_44(b: BudgetFields) -> int { return b.key044 + b.key045 + b.key046 + b.key047 }
+fn budget_read_48(b: BudgetFields) -> int { return b.key048 + b.key049 + b.key050 + b.key051 }
+fn budget_read_52(b: BudgetFields) -> int { return b.key052 + b.key053 + b.key054 + b.key055 }
+fn budget_read_56(b: BudgetFields) -> int { return b.key056 + b.key057 + b.key058 + b.key059 }
+fn budget_read_60(b: BudgetFields) -> int { return b.key060 + b.key061 + b.key062 + b.key063 }
+fn budget_read_64(b: BudgetFields) -> int { return b.key064 + b.key065 + b.key066 + b.key067 }
+fn budget_read_68(b: BudgetFields) -> int { return b.key068 + b.key069 + b.key070 + b.key071 }
+fn budget_read_72(b: BudgetFields) -> int { return b.key072 + b.key073 + b.key074 + b.key075 }
+fn budget_read_76(b: BudgetFields) -> int { return b.key076 + b.key077 + b.key078 + b.key079 }
+fn budget_read_80(b: BudgetFields) -> int { return b.key080 + b.key081 + b.key082 + b.key083 }
+fn budget_read_84(b: BudgetFields) -> int { return b.key084 + b.key085 + b.key086 + b.key087 }
+fn budget_read_88(b: BudgetFields) -> int { return b.key088 + b.key089 + b.key090 + b.key091 }
+fn budget_read_92(b: BudgetFields) -> int { return b.key092 + b.key093 + b.key094 + b.key095 }
+fn budget_read_96(b: BudgetFields) -> int { return b.key096 + b.key097 + b.key098 + b.key099 }
+fn budget_read_100(b: BudgetFields) -> int { return b.key100 + b.key101 + b.key102 + b.key103 }
+fn budget_read_104(b: BudgetFields) -> int { return b.key104 + b.key105 + b.key106 + b.key107 }
+fn budget_read_108(b: BudgetFields) -> int { return b.key108 + b.key109 + b.key110 + b.key111 }
+fn budget_read_112(b: BudgetFields) -> int { return b.key112 + b.key113 + b.key114 + b.key115 }
+fn budget_read_116(b: BudgetFields) -> int { return b.key116 + b.key117 }
+
+fn read_budget_fields(b: BudgetFields) -> int {
+    let total = 0
+    total += budget_read_0(b)
+    total += budget_read_4(b)
+    total += budget_read_8(b)
+    total += budget_read_12(b)
+    total += budget_read_16(b)
+    total += budget_read_20(b)
+    total += budget_read_24(b)
+    total += budget_read_28(b)
+    total += budget_read_32(b)
+    total += budget_read_36(b)
+    total += budget_read_40(b)
+    total += budget_read_44(b)
+    total += budget_read_48(b)
+    total += budget_read_52(b)
+    total += budget_read_56(b)
+    total += budget_read_60(b)
+    total += budget_read_64(b)
+    total += budget_read_68(b)
+    total += budget_read_72(b)
+    total += budget_read_76(b)
+    total += budget_read_80(b)
+    total += budget_read_84(b)
+    total += budget_read_88(b)
+    total += budget_read_92(b)
+    total += budget_read_96(b)
+    total += budget_read_100(b)
+    total += budget_read_104(b)
+    total += budget_read_108(b)
+    total += budget_read_112(b)
+    total += budget_read_116(b)
+    return total
+}
+
+nobox value PushRow12 { f0: int, f1: int, f2: int, f3: int, f4: int, f5: int, f6: int, f7: int, f8: int, f9: int, f10: int, f11: int }
+
+nobox value PushRow50 { f0: int, f1: int, f2: int, f3: int, f4: int, f5: int, f6: int, f7: int, f8: int, f9: int, f10: int, f11: int, f12: int, f13: int, f14: int, f15: int, f16: int, f17: int, f18: int, f19: int, f20: int, f21: int, f22: int, f23: int, f24: int, f25: int, f26: int, f27: int, f28: int, f29: int, f30: int, f31: int, f32: int, f33: int, f34: int, f35: int, f36: int, f37: int, f38: int, f39: int, f40: int, f41: int, f42: int, f43: int, f44: int, f45: int, f46: int, f47: int, f48: int, f49: int }
+
+fn budget_push_12(b: BudgetFields, xs: [PushRow12], n: int) -> float {
+    xs.clear()
+    for i in 0..n {
+        b.key000 = i
+        let total = read_budget_fields(b)
+        xs.push(PushRow12 { f0: total, f1: total, f2: total, f3: total, f4: total, f5: total, f6: total, f7: total, f8: total, f9: total, f10: total, f11: total })
+    }
+    return xs[n - 1].f11 as float
+}
+
+fn budget_push_24(b: BudgetFields, xs: [PushRow24], n: int) -> float {
+    xs.clear()
+    for i in 0..n {
+        b.key000 = i
+        let total = read_budget_fields(b)
+        xs.push(PushRow24 { f0: total, f1: total, f2: total, f3: total, f4: total, f5: total, f6: total, f7: total, f8: total, f9: total, f10: total, f11: total, f12: total, f13: total, f14: total, f15: total, f16: total, f17: total, f18: total, f19: total, f20: total, f21: total, f22: total, f23: total })
+    }
+    return xs[n - 1].f23 as float
+}
+
+fn budget_push_50(b: BudgetFields, xs: [PushRow50], n: int) -> float {
+    xs.clear()
+    for i in 0..n {
+        b.key000 = i
+        let total = read_budget_fields(b)
+        xs.push(PushRow50 { f0: total, f1: total, f2: total, f3: total, f4: total, f5: total, f6: total, f7: total, f8: total, f9: total, f10: total, f11: total, f12: total, f13: total, f14: total, f15: total, f16: total, f17: total, f18: total, f19: total, f20: total, f21: total, f22: total, f23: total, f24: total, f25: total, f26: total, f27: total, f28: total, f29: total, f30: total, f31: total, f32: total, f33: total, f34: total, f35: total, f36: total, f37: total, f38: total, f39: total, f40: total, f41: total, f42: total, f43: total, f44: total, f45: total, f46: total, f47: total, f48: total, f49: total })
+    }
+    return xs[n - 1].f49 as float
+}
+
 fn report(name: string, counts: string, elems: int, jit_s: float, interp_elems: int, interp_s: float, sink: float) {
     let ns = jit_s * 1000000000.0 / (elems as float)
     let interp_ns = interp_s * 1000000000.0 / (interp_elems as float)
@@ -344,6 +501,12 @@ fn main() {
     drive("push_rows_8", 1000, 20000, () => push_rows_8(rows8, 1000))
     let rows24: [PushRow24] = []
     drive("push_rows_24", 1000, 20000, () => push_rows_24(rows24, 1000))
+    let budget = budget_fields()
+    let rows50: [PushRow50] = []
+    let rows12: [PushRow12] = []
+    drive("budget_push_12", 1000, 2000, () => budget_push_12(budget, rows12, 1000))
+    drive("budget_push_24", 1000, 2000, () => budget_push_24(budget, rows24, 1000))
+    drive("budget_push_50", 1000, 2000, () => budget_push_50(budget, rows50, 1000))
     // One slot in ten is free.
     let arena = units(1000)
     drive("sum_arena", 900, 20000, () => sum_arena(arena) as float)

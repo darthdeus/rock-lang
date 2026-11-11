@@ -9,7 +9,8 @@
 //! leaf, and a hot caller's root trace hits the 500-constant limit ("trace too
 //! long") inside the push.
 //! Row-major storage touches one table. Each push computes the row base once
-//! and adds each leaf offset in the store.
+//! and adds each leaf offset in the store up to 12 leaves. Wider rows keep a
+//! running index to avoid spending one of LuaJIT's 500 constant slots per offset.
 //!
 //! Unlike the numeric flat-enum tier, these leaves may be bools, strings,
 //! closures and nil (an inactive enum payload slot, an absent nullable), so the
@@ -113,8 +114,23 @@ fn wide_nobox_vec_declares_strided_storage() {
 }
 
 #[test]
-fn wide_nobox_push_stores_slots_with_one_shared_base() {
-    let lua = try_emit_module(&program(PUSH_MAIN)).expect("emits");
+fn compact_nobox_push_stores_slots_with_one_shared_base() {
+    let fields = (0..12)
+        .map(|i| format!("f{i}: int"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let values = (0..12)
+        .map(|i| format!("f{i}: {i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let src = format!(
+        r#"
+nobox value Row {{ {fields} }}
+fn emit(xs: [Row], row: Row) {{ xs.push(row) }}
+fn main() {{ let xs: [Row] = []; emit(xs, Row {{ {values} }}) }}
+"#
+    );
+    let lua = try_emit_module(&src).expect("emits");
     let push = function_body(&lua, "emit");
     assert_eq!(push.matches("._data").count(), 1, "{push}");
     assert_eq!(push.matches(".len").count(), 2, "{push}");
@@ -538,7 +554,7 @@ fn an_emptied_strided_vec_answers_like_a_boxed_one() {
 
 #[test]
 fn row_push_growth_and_iteration_preserve_all_leaves() {
-    for width in [1, 2, 8, 24] {
+    for width in [1, 2, 8, 12, 13, 24] {
         let fields = (0..width)
             .map(|i| format!("f{i}: int"))
             .collect::<Vec<_>>()
@@ -575,5 +591,42 @@ fn main() {{
         );
         let lua = try_emit_module(&src).expect("row push emits");
         assert_eq!(run_main(&lua), "ok", "row width {width}");
+    }
+}
+
+#[test]
+fn strided_row_store_bounds_the_distinct_offset_budget() {
+    for width in [12, 13] {
+        let fields = (0..width)
+            .map(|i| format!("f{i}: int"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let values = (0..width)
+            .map(|i| format!("f{i}: i"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let src = format!(
+            r#"
+nobox value Row {{ {fields} }}
+fn append(xs: [Row], i: int) {{ xs.push(Row {{ {values} }}) }}
+fn main() {{ let xs: [Row] = []; append(xs, 1) }}
+"#
+        );
+        let lua = try_emit_module(&src).expect("row push emits");
+        let push = function_body(&lua, "append");
+        assert_eq!(push.matches(".len").count(), 2, "{push}");
+        if width == 12 {
+            assert!(
+                push.contains(" + (12)"),
+                "compact offsets below the cutoff: {push}"
+            );
+        } else {
+            for offset in 2..=width {
+                assert!(
+                    !push.contains(&format!(" + ({offset})")),
+                    "wide rows must reuse the one running-index constant: {push}"
+                );
+            }
+        }
     }
 }

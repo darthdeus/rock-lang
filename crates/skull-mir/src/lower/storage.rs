@@ -158,8 +158,10 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Store one row with a shared base and single-use slot offsets, so the
-    /// backend folds each addition into its store instead of printing a local.
+    /// Fold small rows' offsets into their stores, capped at 12: each distinct
+    /// offset can cost a KNUM plus a KINT (three of LuaJIT's 500 constant slots)
+    /// on x86. Larger callers already spend most slots on keys and callees.
+    /// Wider rows advance one index so their leaves add no offset constants.
     fn strided_store_leaves_at(
         &mut self,
         vec: Idx<Inst>,
@@ -173,16 +175,28 @@ impl<'a> Builder<'a> {
             base: vec,
             field: crate::names::ustr("_data"),
         });
+        let compact = stride <= 12;
         let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
         let base = self.emit_cur(Inst::IntMul(row, width));
+        let mut at = if !compact && self.column_base_is_one() {
+            let first = self.emit_cur(Inst::Const(Lit::Int(1)));
+            self.emit_cur(Inst::IntAdd(base, first))
+        } else {
+            base
+        };
+        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
         for (offset, leaf) in leaves.into_iter().enumerate() {
-            let physical = offset + usize::from(self.column_base_is_one());
-            let at = if physical == 0 {
-                base
-            } else {
-                let offset = self.emit_cur(Inst::Const(Lit::Int(physical as i64)));
-                self.emit_cur(Inst::IntAdd(base, offset))
-            };
+            if compact {
+                let physical = offset + usize::from(self.column_base_is_one());
+                at = if physical == 0 {
+                    base
+                } else {
+                    let offset = self.emit_cur(Inst::Const(Lit::Int(physical as i64)));
+                    self.emit_cur(Inst::IntAdd(base, offset))
+                };
+            } else if offset > 0 {
+                at = self.emit_cur(Inst::IntAdd(at, one));
+            }
             let value = if raw {
                 leaf
             } else {
