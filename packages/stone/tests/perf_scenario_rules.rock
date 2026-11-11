@@ -210,3 +210,119 @@ fn perf_scenario_first_frame_without_warmup_has_no_setup_allocation() {
 fn perf_scenario_first_frame_after_one_warmup_has_no_setup_allocation() {
     profiler_test_process("perf_scenario_recorder_allocation_entry", 3)
 }
+
+fn perf_scenario_abort_reasons(report: JsonValue) -> [JsonValue] {
+    return json_as_array(json_field(report, "abort_reasons") ?? json_null()).unwrap()
+}
+
+@nomangle inline(lua) fn perf_scenario_abort_without_code(counts: any, site: any) = """
+    __stone_jit_count_event(counts, "abort", 6, site, 0, nil, nil)
+"""
+
+@test
+fn perf_scenario_trace_reasons_cover_the_allocation_window() {
+    jit_abort_sites_fixture(() => {
+        let counts = __stone_jit_trace_counts_table()
+        let site = jit_abort_sites_probe()
+        __stone_jit_count_event(counts, "abort", 1, site, 0, 2, 0)
+        jit_abort_sites_window(2, () => {
+            __stone_jit_count_event(counts, "start", 2, site, 0, 0, 0)
+            __stone_jit_count_event(counts, "stop", 2, site, 0, 0, 0)
+            __stone_jit_count_event(counts, "flush", 0, site, 0, 0, 0)
+            for _ in 0..3 {
+                __stone_jit_count_event(counts, "abort", 3, site, 0, 2, 0)
+            }
+            __stone_jit_count_event(counts, "abort", 4, site, 0, 10, 0)
+            __stone_jit_count_event(counts, "abort", 4, site, 0, 7, 2)
+            __stone_jit_count_event(counts, "abort", 4, site, 0, 7, 3)
+        })
+        // Export must retain the frozen histogram even after another abort.
+        __stone_jit_count_event(counts, "abort", 5, site, 0, 2, 0)
+        let doc = json_decode(profiler_perf_json()).unwrap()
+        let memory = json_field(doc, "memory").unwrap()
+        let window = json_field(memory, "gc_window").unwrap()
+        let trace = json_field(window, "jit_trace").unwrap()
+        let reasons = perf_scenario_abort_reasons(trace)
+        assert_eq(reasons.len(), 3, "only nonzero reason codes are exported")
+        assert_eq(json_as_int(json_field(reasons[0], "code").unwrap()).unwrap(), 2)
+        assert_eq(json_as_str(json_field(reasons[0], "reason").unwrap()).unwrap(), "trace too long")
+        assert_eq(json_as_int(json_field(reasons[0], "count").unwrap()).unwrap(), 3)
+        assert_eq(json_as_int(json_field(reasons[1], "code").unwrap()).unwrap(), 7)
+        assert_eq(json_as_str(json_field(reasons[1], "reason").unwrap()).unwrap(), "NYI: bytecode %s")
+        assert_eq(json_as_int(json_field(reasons[1], "count").unwrap()).unwrap(), 2,
+            "NYI arguments share their error-code bucket")
+        assert_eq(json_as_int(json_field(reasons[2], "code").unwrap()).unwrap(), 10)
+        assert_eq(json_as_int(json_field(reasons[2], "count").unwrap()).unwrap(), 1)
+        assert_eq(json_as_int(json_field(trace, "aborts").unwrap()).unwrap(), 6)
+        assert_eq(json_as_int(json_field(trace, "compiles").unwrap()).unwrap(), 1)
+        assert_eq(json_as_int(json_field(trace, "flushes").unwrap()).unwrap(), 1)
+        let run_trace = json_field(json_field(doc, "run").unwrap(), "jit_trace").unwrap()
+        assert_eq(json_encode(json_field(run_trace, "abort_reasons").unwrap()), json_encode(json_field(trace, "abort_reasons").unwrap()),
+            "run attribution and allocation-window counters share one histogram")
+        jit_abort_sites_window(1, () => {})
+        let empty = json_decode(gc_window_trace_json(true)).unwrap()
+        assert_eq(perf_scenario_abort_reasons(empty).len(), 0, "a second empty window drops the preceding reasons")
+        jit_abort_sites_window(1, () => {
+            perf_scenario_abort_without_code(counts, site)
+        })
+        let reused = json_decode(gc_window_trace_json(true)).unwrap()
+        let unknown = perf_scenario_abort_reasons(reused)
+        assert_eq(unknown.len(), 1, "recycled storage excludes earlier windows")
+        assert_eq(json_as_int(json_field(unknown[0], "code").unwrap()).unwrap(), -1)
+        assert_eq(json_as_int(json_field(unknown[0], "count").unwrap()).unwrap(), 1)
+        let unavailable = json_decode(gc_window_trace_json(false)).unwrap()
+        assert_eq(json_encode(json_field(unavailable, "abort_reasons").unwrap()), "null")
+    })
+}
+
+@test
+fn perf_scenario_trace_reasons_without_a_window_cover_the_process() {
+    jit_abort_sites_fixture(() => {
+        let counts = __stone_jit_trace_counts_table()
+        let site = jit_abort_sites_probe()
+        __stone_jit_count_event(counts, "abort", 1, site, 0, 5, 0)
+        __stone_jit_count_event(counts, "abort", 2, site, 0, 9, 0)
+        let reasons = perf_scenario_abort_reasons(jit_abort_sites_report())
+        assert_eq(reasons.len(), 2)
+        assert_eq(json_as_str(json_field(reasons[0], "reason").unwrap()).unwrap(), "blacklisted")
+        assert_eq(json_as_str(json_field(reasons[1], "reason").unwrap()).unwrap(), "inner loop in root trace")
+        for row in reasons {
+            assert_eq(json_as_int(json_field(row, "count").unwrap()).unwrap(), 1)
+        }
+    })
+}
+
+// Inject an event between rotating the histogram and detaching its era, just
+// as a recorder event can arrive between the snapshot's Lua statements.
+@nomangle inline(lua) fn perf_scenario_freeze_with_abort(counts: any, site: any) -> (bool, int, int) = """
+    local st = _G.__stone_jit_abort_sites
+    local injected = false
+    debug.sethook(function()
+        if not injected and _G.__stone_jit_abort_sites == st and
+            _G.__stone_jit_abort_reason_counts ~= st.reasons then
+            injected = true
+            __stone_jit_count_event(counts, "abort", 1, site, 0, 2, 0)
+        end
+    end, "l")
+    local sum, total = __stone_jit_abort_sites_freeze()
+    debug.sethook()
+    return injected, sum, total
+"""
+
+@test
+fn perf_scenario_trace_reasons_and_total_freeze_at_the_same_boundary() {
+    jit_abort_sites_fixture(() => {
+        let counts = __stone_jit_trace_counts_table()
+        let site = jit_abort_sites_probe()
+        for pending in [false, true] {
+            __stone_jit_abort_sites_open()
+            if !pending { __stone_jit_count_event(counts, "start", 1, site, 0, 0, 0) }
+            let (injected, sum, total) = perf_scenario_freeze_with_abort(counts, site)
+            assert(injected, "the test must inject an abort at the snapshot boundary, pending={pending}")
+            assert_eq(sum, 1)
+            assert_eq(total, sum, "the total includes every abort in the frozen histogram")
+            let reasons = json_as_array(json_decode(__perf_jit_abort_reasons_json(true)).unwrap()).unwrap()
+            assert_eq(json_as_int(json_field(reasons[0], "count").unwrap()).unwrap(), total)
+        }
+    })
+}

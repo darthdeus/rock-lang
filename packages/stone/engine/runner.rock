@@ -1751,6 +1751,9 @@ pub @nomangle inline(lua) fn jit_trace_counts_set_for_test(starts: int, compiles
                 (os.getenv("PERF_MODE") == "1" or os.getenv("PERF_TIMELINE") == "1") }
         _G.__stone_jit_trace_counts = counts
     end
+    if _G.__stone_jit_abort_sites == nil then
+        _G.__stone_jit_abort_sites = __stone_jit_abort_sites_new()
+    end
     return counts
 """
 
@@ -1811,6 +1814,24 @@ pub @nomangle inline(lua) fn jit_trace_abort_bucket_key(
     return rows
 """
 
+// The native health ABI reserves 64 trace-error codes. Keep every numeric
+// slot (including an absent code) present before callbacks enter the window.
+// Two retained tables let a frozen report survive subsequent recorder events
+// without allocating another histogram inside the remaining timing frames.
+@nomangle inline(lua) fn __stone_jit_abort_sites_new() -> any = """
+    local reasons = _G.__stone_jit_abort_reason_counts
+    if reasons == nil then
+        reasons = {}
+        local spare = {}
+        for code = -1, 63 do spare[code] = 0 end
+        _G.__stone_jit_abort_reason_counts = reasons
+        _G.__stone_jit_abort_reason_spare = spare
+    end
+    for code = -1, 63 do reasons[code] = 0 end
+    return { ids = {}, where_func = {}, where_pc = {}, starts = {}, sites = {},
+             reason_extra = {}, reasons = reasons, next = 0, era_aborts = 0, pending = false }
+"""
+
 // Close the measured window: detach the era (one store, so the callback can
 // only write the fresh state from then on) and keep its rows for the export.
 // Returns the walk's site sum and the era's own abort count; they are two
@@ -1819,19 +1840,20 @@ pub @nomangle inline(lua) fn jit_trace_abort_bucket_key(
     local st = _G.__stone_jit_abort_sites
     _G.__stone_jit_abort_site_report = nil
     if st == nil then return 0, 0 end
+    _G.__stone_jit_abort_reason_counts, _G.__stone_jit_abort_reason_spare =
+        _G.__stone_jit_abort_reason_spare, st.reasons
+    _G.__stone_jit_abort_sites = nil
     if st.pending then
         -- The window opened and no event followed: an empty era, not the
         -- warmup sites still sitting in the table.
-        _G.__stone_jit_abort_sites = nil
-        _G.__stone_jit_abort_site_report = { rows = {} }
+        _G.__stone_jit_abort_site_report = { rows = {}, reasons = {} }
         return 0, 0
     end
     local era = st.era_aborts
-    _G.__stone_jit_abort_sites = nil
     local rows = __stone_jit_abort_site_rows_of(st)
     local sum = 0
     for i = 1, #rows do sum = sum + rows[i].n end
-    _G.__stone_jit_abort_site_report = { rows = rows }
+    _G.__stone_jit_abort_site_report = { rows = rows, reasons = st.reasons }
     return sum, era
 """
 
@@ -1843,8 +1865,10 @@ pub @nomangle inline(lua) fn jit_trace_abort_bucket_key(
     if _G.__stone_jit_abort_site_report ~= nil then return end
     local st = _G.__stone_jit_abort_sites
     if st == nil or st.pending then return end
+    _G.__stone_jit_abort_reason_counts, _G.__stone_jit_abort_reason_spare =
+        _G.__stone_jit_abort_reason_spare, st.reasons
     _G.__stone_jit_abort_sites = nil
-    _G.__stone_jit_abort_site_report = { rows = __stone_jit_abort_site_rows_of(st) }
+    _G.__stone_jit_abort_site_report = { rows = __stone_jit_abort_site_rows_of(st), reasons = st.reasons }
 """
 
 // Capture the generated root while its initializer is on the stack. Walking
@@ -1885,6 +1909,9 @@ const STONE_JIT_PROGRAM_IDENTITY_READY: bool = __stone_jit_program_identity_init
 // before measurement; opening an era only reuses the retained registry.
 @nomangle inline(lua) fn __stone_jit_program_identity_prepare() = """
     _G.__stone_jit_program_identity()
+    if _G.__stone_jit_abort_sites == nil then
+        _G.__stone_jit_abort_sites = __stone_jit_abort_sites_new()
+    end
 """
 
 // Open the measured window: the callback clears the era at its next event, so
@@ -1894,10 +1921,8 @@ const STONE_JIT_PROGRAM_IDENTITY_READY: bool = __stone_jit_program_identity_init
     _G.__stone_jit_abort_site_report = nil
     local st = _G.__stone_jit_abort_sites
     if st == nil then
-        _G.__stone_jit_abort_sites = { ids = {}, where_func = {}, where_pc = {},
-            starts = {}, sites = {}, reason_extra = {}, next = 0,
-            era_aborts = 0, pending = true }
-        return
+        st = __stone_jit_abort_sites_new()
+        _G.__stone_jit_abort_sites = st
     end
     st.era_aborts = 0
     st.pending = true
@@ -1930,13 +1955,13 @@ const STONE_JIT_PROGRAM_IDENTITY_READY: bool = __stone_jit_program_identity_init
         if st then for k in pairs(st.starts) do st.starts[k] = nil end end
     elseif what == "start" or what == "abort" then
         if st == nil then
-            st = { ids = {}, where_func = {}, where_pc = {}, starts = {}, sites = {},
-                   reason_extra = {}, next = 0, era_aborts = 0, pending = false }
+            st = __stone_jit_abort_sites_new()
             _G.__stone_jit_abort_sites = st
         end
         if st.pending then
             st.pending = false
             st.era_aborts = 0
+            for code = -1, 63 do st.reasons[code] = 0 end
             st.next = 0
             for k in pairs(st.ids) do st.ids[k] = nil end
             for k in pairs(st.where_func) do st.where_func[k] = nil end
@@ -1979,6 +2004,7 @@ const STONE_JIT_PROGRAM_IDENTITY_READY: bool = __stone_jit_program_identity_init
             local count = by_start[sid]
             if count == nil then by_start[sid] = 1 else by_start[sid] = count + 1 end
             st.era_aborts = st.era_aborts + 1
+            st.reasons[reason] = st.reasons[reason] + 1
         end
     end
     local observe = _G.__stone_perf_jit_event

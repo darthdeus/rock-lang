@@ -156,6 +156,31 @@ distinct refs per class is.
 
 ## Measuring with a trace hook
 
+`rock perf <scenario> --gc-window N --gc-window-mode running --format json`
+reports recorder activity for the allocation window in
+`memory.gc_window.jit_trace`. `starts` counts trace starts, `compiles` counts
+completed traces (LuaJIT `stop` events), `aborts` retains the total abort count,
+and `flushes` counts trace-cache flush events. `abort_reasons` contains every
+nonzero error-code bucket, ordered by code:
+
+```json
+{"code":2,"reason":"trace too long","count":17}
+```
+
+The code indexes the running VM's `jit.vmdef.traceerr`; the message is its
+template, so NYI bytecode and FastFunc arguments share their error-code bucket.
+Code 2 covers the trace/IR constant limit, code 10 the loop unroll limit.
+Code -1 means the event supplied no error code. The reason counts sum to
+`aborts`; an available window without aborts reports `[]`, and unavailable
+counters report `null`. Counting uses preallocated numeric slots; labels and
+JSON are built after the window closes.
+
+`run.jit_trace.abort_reasons` shares the same scope and frozen histogram as
+`run.jit_trace.abort_sites`: the completed allocation window when present,
+otherwise the process up to export. Its existing `starts`, `compiles`,
+`aborts` and `flushes` retain their process scope. Use the counters under
+`memory.gc_window.jit_trace` to compare window totals with the histogram.
+
 LuaJIT keeps one handler per `jit.attach` event; a hook loaded with
 `luajit -e` must wrap `jit.attach` and chain later handlers, since an
 application prelude may install its own counter and silently replace an

@@ -1132,7 +1132,7 @@ pub fn gc_window_trace_end() {
 
 fn gc_window_trace_json(available: bool) -> string {
     let known = available && GC_WIN_TRACE_AVAILABLE && GC_WIN_TRACE_COMPILES_RESULT >= 0
-    return "{{\"available\":{known},\"starts\":{__perf_json_gc_int(GC_WIN_TRACE_STARTS_RESULT, known)},\"compiles\":{__perf_json_gc_int(GC_WIN_TRACE_COMPILES_RESULT, known)},\"aborts\":{__perf_json_gc_int(GC_WIN_TRACE_ABORTS_RESULT, known)},\"flushes\":{__perf_json_gc_int(GC_WIN_TRACE_FLUSHES_RESULT, known)}}}"
+    return "{{\"available\":{known},\"starts\":{__perf_json_gc_int(GC_WIN_TRACE_STARTS_RESULT, known)},\"compiles\":{__perf_json_gc_int(GC_WIN_TRACE_COMPILES_RESULT, known)},\"aborts\":{__perf_json_gc_int(GC_WIN_TRACE_ABORTS_RESULT, known)},\"flushes\":{__perf_json_gc_int(GC_WIN_TRACE_FLUSHES_RESULT, known)},\"abort_reasons\":{__perf_jit_abort_reasons_json(known)}}}"
 }
 
 // Reserve during setup or warmup. The open-time call also supports tests and
@@ -3576,6 +3576,26 @@ inline(lua) fn perf_section_mcode_snapshot_json() -> string = """
 // truncated list still reconciles against the abort count.
 const PERF_JIT_ABORT_SITES: int = 50
 
+// Code-keyed counters stay numeric during capture. A code's message is the
+// LuaJIT template: NYI arguments remain grouped under their common error code.
+@nomangle inline(lua) fn __perf_jit_abort_reasons_json(available: bool) -> string = """
+    if not available then return 'null' end
+    local report = _G.__stone_jit_abort_site_report
+    local st = _G.__stone_jit_abort_sites
+    local reasons = report and report.reasons or (st and not st.pending and st.reasons)
+    if not reasons then return '[]' end
+    local traceerr = require("jit.vmdef").traceerr
+    local rows = {}
+    for code = -1, 63 do
+        local count = reasons[code] or 0
+        if count > 0 then
+            rows[#rows + 1] = string.format('{"code":%d,"reason":"%s","count":%d}',
+                code, __perf_json_escape_name(traceerr[code] or tostring(code)), count)
+        end
+    end
+    return '[' .. table.concat(rows, ',') .. ']'
+"""
+
 // The counter handler keeps sites as numeric ids; this is the only place they
 // become locations and reason names, so a timing capture pays no lookup. Rows
 // come from the snapshot the window close or the export took.
@@ -3660,7 +3680,7 @@ fn __perf_json_run() -> string {
     let trace_compiles = if trace_known { jit_trace_count_of("compiles") } else { -1 }
     let trace_flushes = if trace_known { jit_trace_count_of("flushes") } else { -1 }
     let jit_native = jit_native_health_json()
-    let jit_trace = "{{\"available\":{trace_known},\"logging\":{JIT_TRACE_LOG_ENABLED},\"starts\":{__perf_json_gc_int(trace_starts, trace_known)},\"compiles\":{__perf_json_gc_int(trace_compiles, trace_known)},\"aborts\":{__perf_json_gc_int(trace_aborts, trace_known)},\"flushes\":{__perf_json_gc_int(trace_flushes, trace_known)},{__perf_json_jit_abort_sites(trace_aborts)}}}"
+    let jit_trace = "{{\"available\":{trace_known},\"logging\":{JIT_TRACE_LOG_ENABLED},\"starts\":{__perf_json_gc_int(trace_starts, trace_known)},\"compiles\":{__perf_json_gc_int(trace_compiles, trace_known)},\"aborts\":{__perf_json_gc_int(trace_aborts, trace_known)},\"flushes\":{__perf_json_gc_int(trace_flushes, trace_known)},\"abort_reasons\":{__perf_jit_abort_reasons_json(trace_known)},{__perf_json_jit_abort_sites(trace_aborts)}}}"
     let bloom_on = ENGINE.use_bloom && !fx_disabled("bloom")
     // The ablation set verbatim: a run that disabled features must say so, or
     // its numbers read as the baseline's.
