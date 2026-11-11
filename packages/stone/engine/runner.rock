@@ -2004,7 +2004,7 @@ const STONE_JIT_PROGRAM_IDENTITY_READY: bool = __stone_jit_program_identity_init
             local count = by_start[sid]
             if count == nil then by_start[sid] = 1 else by_start[sid] = count + 1 end
             st.era_aborts = st.era_aborts + 1
-            st.reasons[reason] = st.reasons[reason] + 1
+            st.reasons[reason] = (st.reasons[reason] or 0) + 1
         end
     end
     local observe = _G.__stone_perf_jit_event
