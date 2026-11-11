@@ -20,7 +20,12 @@ What the compiler is for, in priority order when goals conflict:
 4. Less compiler: prefer deleting work and code to adding machinery.
 
 Back a performance claim with a measurement, and say what was measured and
-on what.
+on what. Runtime is judged with the JIT on. An interpreter measurement can
+explain a cause, but it is not the target: it neither justifies a change nor
+blocks one.
+
+Write what a later session needs into this file, `docs/` or an issue, not
+into an agent's private memory.
 
 - Never write private information: home-directory or machine-specific paths,
   host names, email addresses, credentials, or details of games and other
