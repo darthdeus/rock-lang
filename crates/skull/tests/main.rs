@@ -20,6 +20,7 @@ mod allocation_report;
 mod nested_box_boundary;
 
 mod arena_column_oracle;
+mod arena_loop_reads;
 mod artifact_fingerprint;
 mod backend_variant_mangling;
 mod bounded_lambda_inline;

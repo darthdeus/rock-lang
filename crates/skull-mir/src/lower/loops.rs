@@ -565,17 +565,11 @@ impl<'a> Builder<'a> {
         } else {
             (None, vars.clone())
         };
-        let single = matches!(pat, BindingPattern::Leaf(_));
-        let leaves = match &pat {
-            BindingPattern::Tuple(subs) if subs.len() == 2 => None,
-            BindingPattern::Leaf(_) => Some(()),
-            _ => {
-                return Err(gap(
-                    "for-over-Arena binds one (item) or two (entity, value)",
-                ));
-            }
-        };
-        let _ = leaves;
+        // Occupancy below is the liveness check. Generations only supply the
+        // handle's payload, and an unused row needs no snapshot of the data.
+        let entity_used = self.arena_component_used(&pat, 0, body)?;
+        let data_used = self.arena_component_used(&pat, 1, body)?;
+        let enum_var = enum_var.filter(|&b| self.loop_pattern_used(&BindingPattern::Leaf(b)));
 
         // The element type, when it is column-eligible: under bookkeeping SoA the
         // arena's `data` is an ordinary `[T]`, so at an all-scalar value `T` it is
@@ -601,13 +595,17 @@ impl<'a> Builder<'a> {
             base: store,
             field: crate::names::ustr("occupied"),
         });
-        let generations = self.emit_cur(Inst::Field {
-            base: store,
-            field: crate::names::ustr("generations"),
+        let generations = entity_used.then(|| {
+            self.emit_cur(Inst::Field {
+                base: store,
+                field: crate::names::ustr("generations"),
+            })
         });
-        let data = self.emit_cur(Inst::Field {
-            base: store,
-            field: crate::names::ustr("data"),
+        let data = data_used.then(|| {
+            self.emit_cur(Inst::Field {
+                base: store,
+                field: crate::names::ustr("data"),
+            })
         });
         let n = self.emit_cur(Inst::Len {
             base: occupied,
@@ -674,7 +672,7 @@ impl<'a> Builder<'a> {
         // do: build Entity, bind, run body.
         self.cur = do_bb;
         // A slot's index IS its position, so the loop counter is the Entity's
-        // `_index` and only the generation needs a column read. The built
+        // `_slot` and only the generation needs a column read. The built
         // value is an `Entity` whose fields are `_`-prefixed (soft-private).
         // `Entity` is a `value` struct (GC-carrying tier): build it as a
         // `MakeValueStruct` so it scalarizes (a non-escaping `for (e, _)` scan
@@ -683,67 +681,79 @@ impl<'a> Builder<'a> {
         // A raw `MakeStruct` here would leak an un-tagged, metatable-less table
         // whose `==` silently mis-compares (arena-scan entities not equal to
         // pairs-scan entities).
-        let e_gen = self.emit_cur(Inst::Index {
-            base: generations,
-            index: idx,
-            kind: ContainerKind::Vec,
-        });
-        let entity_representation =
-            self.nominal_value_representation(crate::names::ustr("Entity"))?;
-        let entity = self.emit_cur(Inst::MakeValueStruct {
-            name: crate::names::ustr("Entity"),
-            representation: entity_representation,
-            form: ValueCtorForm::Declared,
-            fields: vec![
-                (crate::names::ustr("_scene_id"), scene_id),
-                (crate::names::ustr("_arena_id"), arena_id),
-                (crate::names::ustr("_slot"), idx),
-                (crate::names::ustr("_generation"), e_gen),
-            ],
-        });
+        let entity = if let Some(generations) = generations {
+            let e_gen = self.emit_cur(Inst::Index {
+                base: generations,
+                index: idx,
+                kind: ContainerKind::Vec,
+            });
+            let entity_representation =
+                self.nominal_value_representation(crate::names::ustr("Entity"))?;
+            Some(self.emit_cur(Inst::MakeValueStruct {
+                name: crate::names::ustr("Entity"),
+                representation: entity_representation,
+                form: ValueCtorForm::Declared,
+                fields: vec![
+                    (crate::names::ustr("_scene_id"), scene_id),
+                    (crate::names::ustr("_arena_id"), arena_id),
+                    (crate::names::ustr("_slot"), idx),
+                    (crate::names::ustr("_generation"), e_gen),
+                ],
+            }))
+        } else {
+            None
+        };
         // A column element is rebuilt from its leaves here. For an ordinary value
         // struct SROA folds the field reads back to the leaf cells, so the pack
         // costs nothing; for a `nobox` element it is an implicit materialization
         // and the verifier rejects it by name rather than emitting a quiet box.
-        let data = match column_elem {
-            Some(elem) => {
-                let repr = self.column_element_repr(data, idx, elem)?;
-                self.pack(repr.into_value())?
-            }
-            None => {
-                // The stored element stays the entry's; the binder gets its own
-                // copy, as `ArenaPairIter.next` gives the plain loop.
-                let stored = self.emit_cur(Inst::Index {
-                    base: data,
-                    index: idx,
-                    kind: ContainerKind::Vec,
-                });
-                let ty = match &pat {
-                    BindingPattern::Tuple(subs) if subs.len() == 2 => {
-                        self.loop_binder_ty(&subs[1], None)
-                    }
-                    _ => self.loop_binder_ty(&pat, Some(1)),
-                };
-                match ty {
-                    Some(ty) => self.copied_value_box(&ty, stored)?,
-                    None => stored,
+        let data = if let Some(data) = data {
+            Some(match column_elem {
+                Some(elem) => {
+                    let repr = self.column_element_repr(data, idx, elem)?;
+                    self.pack(repr.into_value())?
                 }
-            }
+                None => {
+                    // The stored element stays the entry's; the binder gets its own
+                    // copy, as `ArenaPairIter.next` gives the plain loop.
+                    let stored = self.emit_cur(Inst::Index {
+                        base: data,
+                        index: idx,
+                        kind: ContainerKind::Vec,
+                    });
+                    let ty = match &pat {
+                        BindingPattern::Tuple(subs) if subs.len() == 2 => {
+                            self.loop_binder_ty(&subs[1], None)
+                        }
+                        _ => self.loop_binder_ty(&pat, Some(1)),
+                    };
+                    match ty {
+                        Some(ty) => self.copied_value_box(&ty, stored)?,
+                        None => stored,
+                    }
+                }
+            })
+        } else {
+            None
         };
         match &pat {
             BindingPattern::Tuple(subs) if subs.len() == 2 => {
-                self.bind_for_pattern(&subs[0], entity);
-                self.bind_for_pattern(&subs[1], data);
+                if let Some(entity) = entity {
+                    self.bind_for_pattern(&subs[0], entity);
+                }
+                if let Some(data) = data {
+                    self.bind_for_pattern(&subs[1], data);
+                }
             }
-            _ if single => {
+            BindingPattern::Leaf(_) if entity_used || data_used => {
+                // Keep the pair's positions for projections. A whole-pair use
+                // demands both components, so no source read sees a placeholder.
+                let entity = entity.unwrap_or_else(|| self.emit_cur(Inst::Const(Lit::Nil)));
+                let data = data.unwrap_or_else(|| self.emit_cur(Inst::Const(Lit::Nil)));
                 let tup = self.emit_cur(Inst::MakeTuple(vec![entity, data]));
                 self.bind_for_pattern(&pat, tup);
             }
-            _ => {
-                return Err(gap(
-                    "for-over-Arena binds one (item) or two (entity, value)",
-                ));
-            }
+            _ => {}
         }
         // enumerate counter: bind to the current count, then bump (occupied only).
         if let (Some(ev), Some(ec)) = (enum_var, enum_cell) {
@@ -843,8 +853,8 @@ impl<'a> Builder<'a> {
 
         self.cur = body_bb;
         let needs_value = match vars {
-            BindingPattern::Tuple(subs) if subs.len() == 2 => self.map_pattern_used(&subs[1]),
-            _ => self.map_pattern_used(vars),
+            BindingPattern::Tuple(subs) if subs.len() == 2 => self.loop_pattern_used(&subs[1]),
+            _ => self.loop_pattern_used(vars),
         };
         let vv = match col.filter(|_| needs_value) {
             Some(elem) => {
@@ -948,11 +958,11 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    // An unused map binding needs no snapshot. In particular, a column read
+    // An unused loop binding needs no snapshot. In particular, a column read
     // includes a bounds check, which cleanup must otherwise preserve even
     // when none of its leaves are used. Count writes as uses too: lowering a
     // later assignment still needs the binding's cell.
-    fn map_pattern_used(&self, pattern: &BindingPattern) -> bool {
+    fn loop_pattern_used(&self, pattern: &BindingPattern) -> bool {
         let leaves = pattern.leaves();
         self.body.expr_arena.iter().any(|(_, expr)| match expr {
             Expr::Var(b)
@@ -962,6 +972,50 @@ impl<'a> Builder<'a> {
             } => leaves.contains(b),
             _ => false,
         })
+    }
+
+    /// A single arena binder holds a pair. Only a projection of the other
+    /// component can avoid its snapshot; whole-pair uses and writes demand both.
+    fn arena_component_used(
+        &self,
+        pattern: &BindingPattern,
+        component: usize,
+        body: Idx<Expr>,
+    ) -> Result<bool, CompilerError> {
+        use bone_core::hir_walk::HirChild;
+
+        let binding = match pattern {
+            BindingPattern::Tuple(subs) if subs.len() == 2 => {
+                return Ok(self.loop_pattern_used(&subs[component]));
+            }
+            BindingPattern::Leaf(b) => *b,
+            _ => {
+                return Err(gap(
+                    "for-over-Arena binds one (item) or two (entity, value)",
+                ));
+            }
+        };
+        let mut pending = vec![HirChild::Expr(body)];
+        while let Some(node) = pending.pop() {
+            if let HirChild::Expr(e) = node {
+                match self.body.expr_arena[e] {
+                    Expr::TupleIndex { tuple, index }
+                        if index != component
+                            && matches!(self.body.expr_arena[tuple], Expr::Var(b) if b == binding) =>
+                    {
+                        continue;
+                    }
+                    Expr::Var(b)
+                    | Expr::Call {
+                        callee: Callee::Local(b),
+                        ..
+                    } if b == binding => return Ok(true),
+                    _ => {}
+                }
+            }
+            self.body.for_each_child(node, |child| pending.push(child));
+        }
+        Ok(false)
     }
 
     /// `col_value` is the already-built element for a COLUMN-stored Map, whose
@@ -976,11 +1030,11 @@ impl<'a> Builder<'a> {
     ) -> Result<(), CompilerError> {
         match vars {
             BindingPattern::Tuple(subs) if subs.len() == 2 => {
-                if self.map_pattern_used(&subs[0]) {
+                if self.loop_pattern_used(&subs[0]) {
                     let kv = self.emit_cur(Inst::Load(key_cell));
                     self.bind_for_pattern(&subs[0], kv);
                 }
-                if !self.map_pattern_used(&subs[1]) {
+                if !self.loop_pattern_used(&subs[1]) {
                     return Ok(());
                 }
                 let vv = match col_value {
@@ -996,7 +1050,7 @@ impl<'a> Builder<'a> {
                 Ok(())
             }
             BindingPattern::Leaf(_) => {
-                if !self.map_pattern_used(vars) {
+                if !self.loop_pattern_used(vars) {
                     return Ok(());
                 }
                 let kv = self.emit_cur(Inst::Load(key_cell));

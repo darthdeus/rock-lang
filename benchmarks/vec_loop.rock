@@ -148,9 +148,66 @@ fn count_arena(us: Arena<Mote>) -> int {
     return t
 }
 
+fn sum_arena_generation(us: Arena<Mote>) -> float {
+    let t = 0.0
+    for (e, m) in us { t += (e._generation + m.life) as float }
+    return t
+}
+
+fn sum_arena_split_unused(us: Arena<Mote>) -> float {
+    let t = 0.0
+    for (_, m) in us { t += m.life as float }
+    return t
+}
+
+fn sum_arena_enum_index_unused(us: Arena<Mote>) -> float {
+    let t = 0.0
+    for (i, item) in enumerate(us) {
+        t += (item.0._generation + item.1.life) as float
+    }
+    return t
+}
+
+fn count_arena_no_bindings<T>(us: Arena<T>) -> float {
+    let t = 0.0
+    for (_, _) in us { t += 1.0 }
+    return t
+}
+
 // Four scalar leaves use columns; five use dense strided storage.
 nobox value ColumnMote { x: float, y: float, life: int }
 nobox value StridedMote { x: float, y: float, life: int, dx: float, dy: float }
+
+fn column_units(n: int) -> Arena<ColumnMote> {
+    let out: Arena<ColumnMote> = arena_new()
+    let drop: [Entity<ColumnMote>] = []
+    for i in 0..n {
+        let e = out.insert(ColumnMote { x: (i % 13) as float, y: (i % 5) as float, life: i % 9 })
+        if i % 10 == 3 { drop.push(e) }
+    }
+    for e in drop { out.remove(e) }
+    return out
+}
+
+fn sum_column_arena_generation(us: Arena<ColumnMote>) -> float {
+    let t = 0.0
+    for (e, m) in us { t += (e._generation + m.life) as float }
+    return t
+}
+
+fn sum_column_arena_split_unused(us: Arena<ColumnMote>) -> float {
+    let t = 0.0
+    for (_, m) in us { t += m.life as float }
+    return t
+}
+
+fn sum_column_arena_enum_index_unused(us: Arena<ColumnMote>) -> float {
+    let t = 0.0
+    for (i, (e, m)) in enumerate(us) {
+        t += (e._generation + m.life) as float
+    }
+    return t
+}
 
 fn columns(n: int) -> [ColumnMote] {
     let out: [ColumnMote] = []
@@ -260,4 +317,13 @@ fn main() {
     let arena = units(1000)
     drive("sum_arena", 900, 20000, () => sum_arena(arena) as float)
     drive("count_arena", 900, 20000, () => count_arena(arena) as float)
+    drive("sum_arena_generation", 900, 20000, () => sum_arena_generation(arena))
+    drive("sum_arena_split_unused", 900, 20000, () => sum_arena_split_unused(arena))
+    drive("sum_arena_enum_index_unused", 900, 20000, () => sum_arena_enum_index_unused(arena))
+    drive("count_arena_no_bindings", 900, 20000, () => count_arena_no_bindings(arena))
+    let column_arena = column_units(1000)
+    drive("sum_column_arena_generation", 900, 20000, () => sum_column_arena_generation(column_arena))
+    drive("sum_column_arena_split_unused", 900, 20000, () => sum_column_arena_split_unused(column_arena))
+    drive("sum_column_arena_enum_index_unused", 900, 20000, () => sum_column_arena_enum_index_unused(column_arena))
+    drive("count_column_arena_no_bindings", 900, 20000, () => count_arena_no_bindings(column_arena))
 }
