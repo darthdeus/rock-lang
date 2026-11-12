@@ -161,9 +161,11 @@ fn convert(
     if opts.counted_loops != CountedLoops::Skip {
         obs.begin(BodyPass::CountedLoop, mf);
         crate::recover_counted_loops(ws, mf);
+        crate::elide_bounds_checks(Some(ws), mf);
         if opts.counted_loops == CountedLoops::RootAndNested {
             for nf in &mut mf.nested_fns {
                 crate::recover_counted_loops(ws, nf);
+                crate::elide_bounds_checks(Some(ws), nf);
             }
         }
         obs.end(BodyPass::CountedLoop, mf);

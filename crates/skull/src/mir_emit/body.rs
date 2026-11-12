@@ -521,6 +521,7 @@ pub(crate) fn emit_nested_fns(
         let counted_before = nf.blocks.len();
         let tl = Instant::now();
         skull_transform::recover_counted_loops(ws, nf);
+        skull_transform::elide_bounds_checks(Some(ws), nf);
         times.counted_loop += tl.elapsed();
         times.counted_loop_work |= nf.blocks.len() > counted_before;
         collect_callee_frefs(nf, deps);

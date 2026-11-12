@@ -1,0 +1,245 @@
+// What a `[T]` element access does when the compiler can prove its index in
+// bounds, and when it cannot. The compiler drops the check for a counter that
+// a loop or a guard keeps below the vector's length, as long as nothing on
+// the way can shrink the vector or rebind it; everywhere else the access
+// still raises on an index outside `[0, len)`. These cases pin that the
+// results and the errors are the same either way.
+
+@intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
+    local ok, err = pcall(f)
+    return not ok
+"""
+
+struct Bag { items: [int] }
+
+fn join(xs: [int]) -> string {
+    let out = ""
+    for x in xs { out = out + "{x}," }
+    return out
+}
+
+@test(output = "0,2,4,6,")
+fn counted_fill_writes_every_slot() {
+    let xs = [9, 9, 9, 9]
+    for i in 0..xs.len() { xs[i] = i * 2 }
+    print(join(xs))
+}
+
+@test(output = "1,2,3,4,")
+fn counted_read_modify_write() {
+    let xs = [0, 1, 2, 3]
+    for i in 0..xs.len() { xs[i] = xs[i] + 1 }
+    print(join(xs))
+}
+
+@test(output = "7,1,2,3, 1,2,3,")
+fn counted_loop_over_a_field() {
+    let bag = Bag { items: [0, 1, 2, 3] }
+    let copy: [int] = []
+    for i in 0..bag.items.len() {
+        if bag.items[i] > 0 { copy.push(bag.items[i]) }
+        if i == 0 { bag.items[i] = 7 }
+    }
+    print("{join(bag.items)} {join(copy)}")
+}
+
+@test(output = "0,1,-1,-1, false")
+fn break_stops_the_fill() {
+    let xs = [-1, -1, -1, -1]
+    let failed = try_call(() => {
+        for i in 0..xs.len() {
+            if i == 2 { break }
+            xs[i] = i
+        }
+    })
+    print("{join(xs)} {failed}")
+}
+
+@test(output = "0,-1,2,-1,")
+fn continue_skips_a_slot() {
+    let xs = [-1, -1, -1, -1]
+    for i in 0..xs.len() {
+        if i % 2 == 1 { continue }
+        xs[i] = i
+    }
+    print(join(xs))
+}
+
+@test(output = "10,20,30, true")
+fn a_pop_in_the_body_still_raises_on_the_missing_slot() {
+    let xs = [1, 2, 3, 4]
+    let failed = try_call(() => {
+        for i in 0..xs.len() {
+            if i == 0 { xs.pop() }
+            xs[i] = xs[i] * 10
+        }
+    })
+    print("{join(xs)} {failed}")
+}
+
+@test(output = "0,10,20,30,4, false")
+fn a_push_in_the_body_keeps_the_writes_in_bounds() {
+    let xs = [0, 1, 2, 3]
+    let failed = try_call(() => {
+        for i in 0..xs.len() {
+            if i == 0 { xs.push(4) }
+            xs[i] = xs[i] * 10
+        }
+    })
+    print("{join(xs)} {failed}")
+}
+
+@test(output = "true 0,")
+fn a_clear_in_the_body_raises() {
+    let xs = [1, 2, 3]
+    let failed = try_call(() => {
+        for i in 0..xs.len() {
+            xs[i] = 0
+            xs.clear()
+        }
+    })
+    xs.push(0)
+    print("{failed} {join(xs)}")
+}
+
+fn shrink(xs: [int]) { xs.pop() }
+
+@test(output = "true 10,")
+fn a_call_in_the_body_that_shrinks_the_vector_raises() {
+    let xs = [1, 2]
+    let failed = try_call(() => {
+        for i in 0..xs.len() {
+            xs[i] = xs[i] * 10
+            shrink(xs)
+        }
+    })
+    print("{failed} {join(xs)}")
+}
+
+@test(output = "true 1,0, 0,0,0,")
+fn rebinding_the_vector_in_the_body_checks_the_new_one() {
+    let xs = [1, 2]
+    let ys = [0, 0, 0]
+    let failed = try_call(() => {
+        let v = ys
+        for i in 0..v.len() {
+            v[i] = 0
+            v = xs
+        }
+    })
+    print("{failed} {join(xs)} {join(ys)}")
+}
+
+@test(output = "true 1,2,")
+fn a_parallel_vector_of_a_different_length_still_raises() {
+    let xs = [1, 2, 3]
+    let ys = [5, 6]
+    let failed = try_call(() => {
+        for i in 0..xs.len() { ys[i] = xs[i] }
+    })
+    print("{failed} {join(ys)}")
+}
+
+@test(output = "0,0,3,")
+fn while_loop_against_the_live_length() {
+    let xs = [1, 2, 3]
+    let i = 0
+    while i < xs.len() - 1 {
+        xs[i] = 0
+        i += 1
+    }
+    print(join(xs))
+}
+
+fn set_slot(xs: [int], i: int, v: int) -> bool {
+    if i < 0 { return false }
+    if i >= xs.len() { return false }
+    xs[i] = v
+    return true
+}
+
+@test(output = "true false false 1,7,3,")
+fn a_guarded_slot_write() {
+    let xs = [1, 2, 3]
+    let a = set_slot(xs, 1, 7)
+    let b = set_slot(xs, 3, 8)
+    let c = set_slot(xs, -1, 9)
+    print("{a} {b} {c} {join(xs)}")
+}
+
+fn bump(xs: [int], i: int) {
+    let v = xs[i]
+    xs[i] = v + 1
+}
+
+@test(output = "1,3,3, true")
+fn a_checked_read_covers_the_write_that_follows() {
+    let xs = [1, 2, 3]
+    bump(xs, 1)
+    let failed = try_call(() => { bump(xs, 3) })
+    print("{join(xs)} {failed}")
+}
+
+@test(output = "1,2,3,4,5,6,")
+fn nested_counted_loops_over_rows() {
+    let rows = [[0, 0, 0], [0, 0, 0]]
+    let n = 1
+    for r in 0..rows.len() {
+        for c in 0..rows[r].len() {
+            rows[r][c] = n
+            n += 1
+        }
+    }
+    let out = ""
+    for row in rows { out = out + join(row) }
+    print(out)
+}
+
+@test(output = "1 of 3")
+fn a_null_element_reads_as_null_in_a_counted_loop() {
+    let xs: [int?] = [1, null, 3]
+    let nulls = 0
+    for i in 0..xs.len() {
+        if xs[i] == null { nulls += 1 }
+    }
+    print("{nulls} of {xs.len()}")
+}
+
+@test(output = "2 false,true,false,")
+fn false_elements_read_as_false_in_a_counted_loop() {
+    let xs = [false, true, false]
+    let falses = 0
+    for i in 0..xs.len() {
+        if xs[i] == false { falses += 1 }
+    }
+    let out = ""
+    for i in 0..xs.len() { out = out + "{xs[i]}," }
+    print("{falses} {out}")
+}
+
+@test(output = "true")
+fn an_empty_vector_runs_no_turn() {
+    let xs: [int] = []
+    let failed = try_call(() => {
+        for i in 0..xs.len() { xs[i] = 1 }
+    })
+    print("{!failed}")
+}
+
+@test(output = "0,1,2,3, true")
+fn a_larger_bound_still_raises() {
+    let xs = [0, 0, 0, 0]
+    let failed = try_call(() => {
+        for i in 0..xs.len() + 1 { xs[i] = i }
+    })
+    print("{join(xs)} {failed}")
+}
+
+@test(output = "9,1,2,")
+fn a_descending_subtracted_bound_stays_in_bounds() {
+    let xs = [0, 1, 2]
+    for i in 0..xs.len() - 2 { xs[i] = 9 }
+    print(join(xs))
+}
+
+fn main() {}

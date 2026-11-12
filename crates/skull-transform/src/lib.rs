@@ -12,6 +12,7 @@ mod coroutine_prepare;
 mod detached;
 mod forl;
 mod frame;
+mod in_bounds;
 mod inline;
 mod load_store_census;
 mod mem2reg;
@@ -36,6 +37,7 @@ pub use coroutine_prepare::{
 pub(crate) use detached::{erase_detached_lambdas, lower_detached_region};
 pub use forl::recover_counted_loops;
 pub use frame::{materialize_frame, materialize_frame_cells};
+pub use in_bounds::elide_bounds_checks;
 pub use inline::{
     InlineCache, InlineCandidateProfile, InlineCandidateTable, InlineCandidateTableStats,
     InlineCandidateWarm, InlineOffGuard, InlineScanStats, SpliceRecord, fn_has_bounds,

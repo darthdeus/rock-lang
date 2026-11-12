@@ -57,6 +57,8 @@ impl Emitter<'_> {
                             )));
                         }
                         ContainerKind::Vec => format!("__vec_checked_set({b}, {i}, {v});"),
+                        // Proven within `[0, len)`: the 0-based backing, raw.
+                        ContainerKind::VecInBounds => format!("{b}._data[{i}] = {v};"),
                         ContainerKind::Map => format!("__map_set({b}, {i}, {v});"),
                     };
                     self.push(&line);

@@ -474,3 +474,80 @@ collection, so the threshold stays as high as the measurements allow.
   lookup stay as they are; only the threshold test moves to the caller.
 - For a buffer that only native code reads, keep it on the native side and
   pass a handle, so no Lua-side storage exists at all.
+
+## Vector bounds checks (2026-11-11)
+
+`xs[i]` on a `[T]` reads `xs._data[i + 1] or __vec_checked_get(xs, i)` and
+`xs[i] = v` is a `__vec_checked_set(xs, i, v)` call. The elision pass
+(`skull-transform/src/in_bounds.rs`) marks an access `VecInBounds` when a
+forward dataflow proves `0 <= i < xs.len` at that point; it then prints as the
+bare `xs._data[i + 1]`, read or written. Results and errors never change,
+because an access is marked only where the check could not have raised.
+
+What proves an index, in the shapes Stone and the demos write:
+
+- `for i in 0..xs.len()`: the bound cell holds a value at most the length,
+  the counter starts nonnegative and only increments.
+- `for x in xs` after FORL recovery: the hoisted length read is the bound.
+- `while i < xs.len()`: the header re-reads the live length every turn.
+- `if i < 0 { return }` then `if i >= xs.len() { return }` before `xs[i] = v`.
+- `xs[i]` read, then `xs[i] = ..` on the same slot: the read checked it.
+- `rows[r][c] = ..` after `c < rows[r].len()`: `rows[r]` is one element place
+  as long as nothing stores into any container between the two reads.
+
+What keeps the check: a call in between that is not `@pure` (it may pop,
+clear or reassign through any field or global it can reach), a `len` store,
+a store to the vector's cell or through its field, a yield, a bound the
+vector does not cover (`for i in 0..n`), and any second vector indexed by the
+same counter (`ys[i]` next to `xs[i]`, however equal their lengths). The
+stdlib push is not a kill: it only grows the vector and only writes a slot
+that was outside it. A `break` or `return` inside the loop needs no care; it
+only removes later accesses. Mutation inside the loop body is handled by the
+same kills, so a body that pops still raises on the slot that is gone, with
+the same error as before.
+
+Facts live on SSA values and on places (cells, globals, field and element
+chains). A value is tied to the place it was read from, and the tie breaks
+when the place is written, so a `len` read into a cell before a pop does not
+borrow a fact from the `len` read after it. The pass runs after closure
+conversion, where every captured mutable variable is already a box reached
+through a field.
+
+`ROCK_SKULL_BOUNDS_OFF=1` keeps every check for one compile. On
+`packages/stone` the elision removes 10 of 65 `__vec_checked_set` sites and
+163 of 820 `__vec_checked_get` sites (4,644,880 -> 4,639,790 bytes, same
+line count); with the switch set the output is byte for byte the baseline.
+The remaining Stone stores are slot writes guarded on one vector and applied
+to a dozen parallel vectors, `if i == xs.len() { push } else { xs[i] = v }`
+free-list writes, and guards with a call between them and the store. 
+
+`benchmarks/vec_store.rock` times the shapes above, 1,000 elements per pass,
+with the JIT on and then off; `_kept` workloads are controls the pass must
+leave alone. Compile it with and without the switch and run each emitted file
+with `luajit -e 'dofile("vec_store.lua"); main()'`. Apple M4 Max, bundled
+LuaJIT 2.1, 9 interleaved rounds, min / median ns per element with the JIT on,
+then min ns per element with the JIT off, checked -> elided:
+
+| Workload | JIT checked | JIT elided | Interpreter checked -> elided | mcode bytes |
+| --- | ---: | ---: | ---: | ---: |
+| fill `xs[i] = i % 13` | 1.625 / 1.646 | 1.547 / 1.552 | 27.6 -> 9.3 | 1576 -> 1536 |
+| increment `xs[i] = xs[i] + 1` | 0.820 / 0.900 | 0.615 / 0.686 | 39.1 -> 13.3 | 1404 -> 1140 |
+| scale_field `s.items[i] = ..` | 1.945 / 1.948 | 1.864 / 1.867 | 51.3 -> 25.1 | 1584 -> 1384 |
+| set_slots (guarded setter per slot) | 0.658 / 0.660 | 0.656 / 0.659 | 60.0 -> 40.6 | 1352 -> 1112 |
+| bump_entries (read, mutate, store back) | 2.896 / 3.028 | 2.931 / 3.061 | 48.7 -> 23.2 | 1652 -> 1532 |
+| clear_pair (`while`, second vector kept) | 0.995 / 0.997 | 0.991 / 0.997 | 62.8 -> 41.9 | 1936 -> 1940 |
+| fill_pure_call (`@pure` callee) | 2.041 / 2.088 | 1.969 / 1.999 | 29.6 -> 12.1 | 1332 -> 1196 |
+| fill_and_collect (push in the body) | 5.718 / 5.798 | 5.325 / 5.343 | 45.1 -> 23.0 | 2736 -> 2428 |
+| fill_rows (`row[c]` of `rows[r]`) | 1.016 / 1.019 | 0.764 / 0.767 | 28.4 -> 10.3 | 2136 -> 1948 |
+| copy_into (`dst[i] = src[i]`, read only) | 0.741 / 0.744 | 0.662 / 0.673 | 38.8 -> 29.2 | 1456 -> 1456 |
+| fill_call_kept (control) | 1.651 / 1.660 | 1.654 / 1.658 | 41.4 -> 41.6 | 1428 -> 1532 |
+| fill_n_kept (control) | 1.639 / 1.644 | 1.641 / 1.646 | 27.7 -> 27.6 | 1316 -> 1204 |
+
+Trace and abort counts were the same or within one trace on every workload.
+With the JIT on the helper was already inlined into the trace, so the gain
+is the dropped length load and compare, the frame-less snapshot and the
+smaller trace: 4-11% on plain fills and reads, 25% where the slot is read and
+written in one turn or the vector is itself an element. A bound the loop
+proves but a setter re-checks (`set_slots`) gains nothing on trace, because
+LuaJIT folds the redundant compare itself; the interpreter gains everywhere a
+call disappears. These are isolated workloads, not an engine frame claim.

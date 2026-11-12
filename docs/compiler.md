@@ -234,6 +234,12 @@ and `@inline` scalarization.
   `while i < xs.len` must keep re-reading `len`. Snapshot semantics follow:
   `len` is read once at loop entry and mutating the collection mid-loop is
   undefined. Do not remove FORL recovery or the stdlib shapes it matches.
+- Bounds-check elision (`skull-transform/src/in_bounds.rs`) runs after it and
+  marks a `[T]` access `VecInBounds` when a forward dataflow proves the index
+  within `[0, len)`: a counted loop or guard below a `len` read, or an earlier
+  checked access of the same slot, with nothing in between that could shrink
+  or rebind the vector. Results and errors never change; see
+  `docs/luajit-performance.md` for what it covers and what it leaves.
 - Bounds require exactly `(bool, E)`. Multi-value iterators drive a `for` but
   cannot be wrapped by a combinator, so `enumerate` and `zip` are chain
   terminals. Bounded fns have no runtime identity: always force-inlined,

@@ -130,6 +130,12 @@ pub enum Lit {
 pub enum ContainerKind {
     /// `[T]` — stdlib `{ data = {..1-indexed..}, len = N }`.
     Vec,
+    /// A [`ContainerKind::Vec`] element access whose index was proven to lie
+    /// in `[0, len)` at that point (`skull_transform::elide_bounds_checks`),
+    /// so the backends index the backing raw, with no check and no call.
+    /// Appears only on [`Inst::Index`] and [`Inst::StoreIndex`]; never a
+    /// user-facing type and never a `for` head.
+    VecInBounds,
     /// `NativeBuffer<T>` — `{ ptr, len }`; `.ptr` is a 0-based C array.
     NativeBuffer,
     /// `NativeBuffer<E>` where `E` is an FFI-clean value STRUCT (`elem` = its

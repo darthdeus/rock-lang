@@ -177,7 +177,10 @@ fn drop_flagged(func: &mut MirFunc, dead: &[bool]) {
 fn index_read_is_checked(kind: &ContainerKind) -> bool {
     !matches!(
         kind,
-        ContainerKind::NativeBufferLeaf | ContainerKind::VecColumn | ContainerKind::VecStrideSlot
+        ContainerKind::NativeBufferLeaf
+            | ContainerKind::VecColumn
+            | ContainerKind::VecStrideSlot
+            | ContainerKind::VecInBounds
     )
 }
 

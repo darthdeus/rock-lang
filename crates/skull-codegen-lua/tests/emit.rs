@@ -747,6 +747,7 @@ fn run(src: &str, driver: &str) -> String {
         {
             skull_transform::cleanup(&mut func).unwrap();
             skull_transform::recover_counted_loops(&ws, &mut func);
+            skull_transform::elide_bounds_checks(Some(&ws), &mut func);
             let name = inst.symbol(&ws, scx.interner());
             let pre_nested = func.nested_fns.len();
             skull_transform::convert_closures(&mut func, &name);
@@ -775,6 +776,7 @@ fn run(src: &str, driver: &str) -> String {
             for nf in func.nested_fns[pre_nested..].iter_mut() {
                 skull_transform::cleanup_with_nobox(&ws, nf).unwrap();
                 skull_transform::recover_counted_loops(&ws, nf);
+                skull_transform::elide_bounds_checks(Some(&ws), nf);
                 lua.push_str(&skull_codegen_lua::emit_named(
                     &ws,
                     &ctx,
@@ -1556,6 +1558,7 @@ fn emit_inlined(src: &str, fn_name: &str) -> String {
     .expect("inline failed");
     skull_transform::cleanup(&mut func).unwrap();
     skull_transform::recover_counted_loops(&ws, &mut func);
+    skull_transform::elide_bounds_checks(Some(&ws), &mut func);
     let name = skull_codegen_lua::mangle_fn(&ws, &ws.module(mid).functions[fid]);
     skull_transform::convert_closures(&mut func, &name);
     let ctx = CodegenCtx::new(&ws);
@@ -2497,12 +2500,15 @@ fn vec_index_read_is_direct_with_a_checked_fallback() {
     assert!(lua.contains("._data[1] or __vec_checked_get("), "{lua}");
 }
 
+/// A call in the body may shrink the vector, so the loop's element read keeps
+/// its checked fallback.
 #[test]
 fn vec_loop_reads_its_element_directly() {
     let lua = emit_inlined(
-        "fn sum_vec(xs: [int]) -> int {
+        "fn bump(x: int) -> int { return x + 1 }
+        fn sum_vec(xs: [int]) -> int {
             let total = 0
-            for x in xs { total += x }
+            for x in xs { total += bump(x) }
             return total
         }",
         "sum_vec",
@@ -2974,4 +2980,107 @@ fn vec_push_method_is_the_append_without_inlining() {
     assert!(!lua.contains("push"), "{lua}");
     assert_eq!(lua.matches("c0.len = c0.len + 1").count(), 2, "{lua}");
     assert_eq!(run(src, "add({_data = {}, len = 0}, 7)"), "2");
+}
+
+/// A `[T]` store whose index a counted loop keeps below the vector's length
+/// is the raw backing write: no check, no call.
+#[test]
+fn counted_loop_store_within_the_length_is_raw() {
+    let lua = emit_inlined(
+        "fn fill(xs: [int]) {
+            for i in 0..xs.len() { xs[i] = i * 2 }
+        }",
+        "fill",
+    );
+    assert!(lua.contains("for "), "{lua}");
+    assert!(lua.contains("._data[") && lua.contains(" + 1] = "), "{lua}");
+    assert!(!lua.contains("__vec_checked_set("), "{lua}");
+}
+
+/// The element read of a loop over a vector needs no fallback once the loop
+/// proves the index: a nil or false slot in bounds is the element.
+#[test]
+fn vec_loop_read_without_body_effects_is_raw() {
+    let lua = emit_inlined(
+        "fn sum_vec(xs: [int]) -> int {
+            let total = 0
+            for x in xs { total += x }
+            return total
+        }",
+        "sum_vec",
+    );
+    assert!(lua.contains("for "), "{lua}");
+    assert!(lua.contains("._data["), "{lua}");
+    assert!(!lua.contains("__vec_checked_get("), "{lua}");
+}
+
+/// A call in the body may shrink the vector, so the store keeps its check; a
+/// `@pure` callee cannot, so it does not.
+#[test]
+fn a_call_in_the_loop_body_keeps_the_check_unless_pure() {
+    let lua = emit_inlined(
+        "fn shrink(xs: [int]) { xs.pop() }
+        fn fill(xs: [int]) {
+            for i in 0..xs.len() { xs[i] = i; shrink(xs) }
+        }",
+        "fill",
+    );
+    assert!(lua.contains("__vec_checked_set("), "{lua}");
+    let lua = emit_inlined(
+        "@pure fn weight(i: int) -> int { return i * 3 }
+        fn fill(xs: [int]) {
+            for i in 0..xs.len() { xs[i] = weight(i) }
+        }",
+        "fill",
+    );
+    assert!(!lua.contains("__vec_checked_set("), "{lua}");
+}
+
+/// A push onto a vector only grows it, so the stores a loop proved stay raw.
+#[test]
+fn a_push_in_the_loop_body_keeps_the_proof() {
+    let lua = emit_inlined(
+        "fn fill(xs: [int], out: [int]) {
+            for i in 0..xs.len() { xs[i] = i; if i % 7 == 0 { out.push(i) } }
+        }",
+        "fill",
+    );
+    assert!(!lua.contains("__vec_checked_set("), "{lua}");
+}
+
+/// A range guard dominating the store proves it; a second vector of unknown
+/// length keeps its check.
+#[test]
+fn a_dominating_range_guard_proves_the_store() {
+    let lua = emit_inlined(
+        "fn set_slot(xs: [int], ys: [int], i: int, v: int) -> bool {
+            if i < 0 { return false }
+            if i >= xs.len() { return false }
+            xs[i] = v
+            ys[i] = v
+            return true
+        }",
+        "set_slot",
+    );
+    assert_eq!(lua.matches("__vec_checked_set(").count(), 1, "{lua}");
+    assert!(lua.contains("._data[") && lua.contains(" + 1] = "), "{lua}");
+}
+
+/// Under luajit the raw stores write the slots and a check the compiler kept
+/// still raises.
+#[test]
+fn proven_stores_compute_the_same_under_luajit() {
+    let src = "\
+fn fill(xs: [int]) -> int {\n\
+    for i in 0..xs.len() { xs[i] = xs[i] + i }\n\
+    return xs[xs.len() - 1]\n\
+}\n\
+fn probe(n: int) -> int {\n\
+    let xs: [int] = []\n\
+    for i in 0..n { xs.push(10) }\n\
+    fill(xs)\n\
+    return fill(xs)\n\
+}";
+    assert_eq!(run(src, "probe(5)"), "18");
+    assert_eq!(run(src, "probe(1)"), "10");
 }

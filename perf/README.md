@@ -106,11 +106,15 @@ rock compile packages/stone --output /tmp/stone.lua
 perf/output_census.py /tmp/stone.lua
 perf/output_census.py game.lua --engine /tmp/stone.lua --mask   # private symbols print as hashes
 ROCK_SKULL_INLINE_OFF=1 rock compile packages/stone --output /tmp/stone-noinline.lua
+ROCK_SKULL_BOUNDS_OFF=1 rock compile packages/stone --output /tmp/stone-checked.lua
 ```
 
 `ROCK_SKULL_INLINE_OFF=1` turns the function inliner off for one compile, so
-the output and the time budget with and without splicing can be compared. It
-is a measurement switch only; the emitted program still runs.
+the output and the time budget with and without splicing can be compared.
+`ROCK_SKULL_BOUNDS_OFF=1` keeps every `[T]` bounds check, so the sites the
+elision removes (`__vec_checked_get` / `__vec_checked_set` calls) can be
+counted and timed against the checked output. Both are measurement switches
+only; the emitted program still runs.
 
 
 ## Source costs

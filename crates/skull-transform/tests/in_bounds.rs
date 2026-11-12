@@ -1,0 +1,511 @@
+//! `elide_bounds_checks` marks a `[T]` element access `VecInBounds` only when
+//! its index is provably within `[0, len)` on every path, and keeps the check
+//! wherever the body could have shrunk or rebound the vector in between.
+use comfy_la_arena::Idx;
+use skull_mir::mir::{Block, Cell, ContainerKind, Inst, Lit, MirFunc, Term};
+use skull_transform::elide_bounds_checks;
+use ustr::Ustr;
+
+fn u(s: &str) -> Ustr {
+    Ustr::from(s)
+}
+
+struct Probe {
+    f: MirFunc,
+    xs: Idx<Cell>,
+    ys: Idx<Cell>,
+    i: Idx<Cell>,
+}
+
+impl Probe {
+    fn new() -> Probe {
+        let mut f = MirFunc::new(u("probe"));
+        let xs = f.new_cell(Some(u("xs")));
+        let ys = f.new_cell(Some(u("ys")));
+        let i = f.new_cell(Some(u("i")));
+        f.params.push(xs);
+        f.params.push(ys);
+        f.params.push(i);
+        Probe { f, xs, ys, i }
+    }
+
+    fn emit(&mut self, b: Idx<Block>, inst: Inst) -> Idx<Inst> {
+        self.f.emit(b, inst)
+    }
+
+    fn load(&mut self, b: Idx<Block>, cell: Idx<Cell>) -> Idx<Inst> {
+        self.emit(b, Inst::Load(cell))
+    }
+
+    fn int(&mut self, b: Idx<Block>, n: i64) -> Idx<Inst> {
+        self.emit(b, Inst::Const(Lit::Int(n)))
+    }
+
+    fn store(&mut self, b: Idx<Block>, cell: Idx<Cell>, value: Idx<Inst>) {
+        self.emit(b, Inst::Store { cell, value });
+    }
+
+    /// `<vec>.len`, as `xs.len()` lowers.
+    fn len_of(&mut self, b: Idx<Block>, vec: Idx<Cell>) -> Idx<Inst> {
+        let base = self.load(b, vec);
+        self.emit(
+            b,
+            Inst::Field {
+                base,
+                field: u("len"),
+            },
+        )
+    }
+
+    /// `vec[index] = 1`, returning the store.
+    fn set(&mut self, b: Idx<Block>, vec: Idx<Cell>, index: Idx<Cell>) -> Idx<Inst> {
+        let base = self.load(b, vec);
+        let index = self.load(b, index);
+        let value = self.int(b, 1);
+        self.emit(
+            b,
+            Inst::StoreIndex {
+                base,
+                index,
+                value,
+                kind: ContainerKind::Vec,
+            },
+        )
+    }
+
+    /// `vec[index]`, returning the read.
+    fn get(&mut self, b: Idx<Block>, vec: Idx<Cell>, index: Idx<Cell>) -> Idx<Inst> {
+        let base = self.load(b, vec);
+        let index = self.load(b, index);
+        self.emit(
+            b,
+            Inst::Index {
+                base,
+                index,
+                kind: ContainerKind::Vec,
+            },
+        )
+    }
+
+    /// A call to an unknown function value.
+    fn unknown_call(&mut self, b: Idx<Block>) {
+        let callee = self.load(b, self.ys);
+        self.emit(
+            b,
+            Inst::CallValue {
+                callee,
+                args: vec![],
+            },
+        );
+    }
+
+    fn kind(&self, access: Idx<Inst>) -> ContainerKind {
+        match self.f.insts[access] {
+            Inst::Index { kind, .. } | Inst::StoreIndex { kind, .. } => kind,
+            ref other => panic!("not an access: {other:?}"),
+        }
+    }
+
+    fn run(&mut self) {
+        elide_bounds_checks(None, &mut self.f);
+    }
+}
+
+/// `for i in 0..xs.len() { <body(B)>; xs[i] = 1; <after(B)> }` with the
+/// `lower_for_range` shape: the bound snapshot in a cell, the counter marked
+/// as a loop binding, and a pure-increment latch.
+struct CountedLoop {
+    body: Idx<Block>,
+    latch: Idx<Block>,
+    exit: Idx<Block>,
+}
+
+fn counted_loop(
+    p: &mut Probe,
+    before: impl FnOnce(&mut Probe, Idx<Block>),
+) -> (CountedLoop, Idx<Inst>) {
+    let entry = p.f.entry;
+    let header = p.f.new_block();
+    let body = p.f.new_block();
+    let latch = p.f.new_block();
+    let exit = p.f.new_block();
+    let hi = p.f.new_cell(None);
+    p.f.mark_loop_binding(p.i);
+    let zero = p.int(entry, 0);
+    p.store(entry, p.i, zero);
+    let len = p.len_of(entry, p.xs);
+    p.store(entry, hi, len);
+    p.f.set_term(entry, Term::Goto(header));
+    let li = p.load(header, p.i);
+    let lh = p.load(header, hi);
+    let cond = p.emit(header, Inst::IntLt(li, lh));
+    p.f.set_term(
+        header,
+        Term::Branch {
+            cond,
+            then_bb: body,
+            else_bb: exit,
+        },
+    );
+    before(p, body);
+    let store = p.set(body, p.xs, p.i);
+    p.f.set_term(body, Term::Goto(latch));
+    let li = p.load(latch, p.i);
+    let one = p.int(latch, 1);
+    let next = p.emit(latch, Inst::IntAdd(li, one));
+    p.store(latch, p.i, next);
+    p.f.set_term(latch, Term::Goto(header));
+    p.f.set_term(exit, Term::Return(vec![]));
+    (CountedLoop { body, latch, exit }, store)
+}
+
+#[test]
+fn a_counted_loop_store_is_in_bounds() {
+    let mut p = Probe::new();
+    let (_, store) = counted_loop(&mut p, |_, _| {});
+    p.run();
+    assert_eq!(p.kind(store), ContainerKind::VecInBounds);
+}
+
+#[test]
+fn an_unknown_call_in_the_body_keeps_the_check() {
+    let mut p = Probe::new();
+    let (_, store) = counted_loop(&mut p, |p, b| p.unknown_call(b));
+    p.run();
+    assert_eq!(p.kind(store), ContainerKind::Vec);
+}
+
+#[test]
+fn a_call_after_the_store_still_reaches_it_around_the_back_edge() {
+    let mut p = Probe::new();
+    let (lp, store) = counted_loop(&mut p, |_, _| {});
+    p.f.set_term(lp.body, Term::Goto(lp.latch));
+    p.unknown_call(lp.latch);
+    p.run();
+    assert_eq!(p.kind(store), ContainerKind::Vec);
+}
+
+#[test]
+fn a_push_in_the_body_only_grows() {
+    let mut p = Probe::new();
+    let (_, store) = counted_loop(&mut p, |p, b| {
+        let arr = p.load(b, p.ys);
+        let value = p.int(b, 7);
+        p.emit(
+            b,
+            Inst::ArrayPush {
+                arr,
+                value,
+                kind: ContainerKind::Vec,
+            },
+        );
+    });
+    p.run();
+    assert_eq!(p.kind(store), ContainerKind::VecInBounds);
+}
+
+#[test]
+fn a_length_store_in_the_body_keeps_the_check() {
+    let mut p = Probe::new();
+    let (_, store) = counted_loop(&mut p, |p, b| {
+        let base = p.load(b, p.ys);
+        let value = p.int(b, 0);
+        p.emit(
+            b,
+            Inst::StoreField {
+                base,
+                field: u("len"),
+                value,
+            },
+        );
+    });
+    p.run();
+    assert_eq!(p.kind(store), ContainerKind::Vec);
+}
+
+#[test]
+fn rebinding_the_vector_in_the_body_keeps_the_check() {
+    let mut p = Probe::new();
+    let (_, store) = counted_loop(&mut p, |p, b| {
+        let other = p.load(b, p.ys);
+        p.store(b, p.xs, other);
+    });
+    p.run();
+    assert_eq!(p.kind(store), ContainerKind::Vec);
+}
+
+#[test]
+fn a_yield_in_the_body_keeps_the_check() {
+    let mut p = Probe::new();
+    let (lp, store) = counted_loop(&mut p, |_, _| {});
+    // Split the body: the store now runs after a yield.
+    let resume = p.f.new_block();
+    let insts = std::mem::take(&mut p.f.blocks[lp.body].insts);
+    p.f.blocks[resume].insts = insts;
+    p.f.set_term(
+        lp.body,
+        Term::Yield {
+            values: vec![],
+            resume,
+        },
+    );
+    p.f.set_term(resume, Term::Goto(lp.latch));
+    p.run();
+    assert_eq!(p.kind(store), ContainerKind::Vec);
+}
+
+#[test]
+fn an_early_exit_before_the_store_does_not_matter() {
+    let mut p = Probe::new();
+    let (lp, store) = counted_loop(&mut p, |_, _| {});
+    let rest = p.f.new_block();
+    let insts = std::mem::take(&mut p.f.blocks[lp.body].insts);
+    p.f.blocks[rest].insts = insts;
+    let li = p.load(lp.body, p.i);
+    let two = p.int(lp.body, 2);
+    let cond = p.emit(lp.body, Inst::Eq(li, two));
+    p.f.set_term(
+        lp.body,
+        Term::Branch {
+            cond,
+            then_bb: lp.exit,
+            else_bb: rest,
+        },
+    );
+    p.f.set_term(rest, Term::Goto(lp.latch));
+    p.run();
+    assert_eq!(p.kind(store), ContainerKind::VecInBounds);
+}
+
+#[test]
+fn a_second_vector_in_the_body_keeps_its_check() {
+    let mut p = Probe::new();
+    let (lp, store) = counted_loop(&mut p, |_, _| {});
+    let other = p.set(lp.body, p.ys, p.i);
+    p.run();
+    assert_eq!(p.kind(store), ContainerKind::VecInBounds);
+    assert_eq!(p.kind(other), ContainerKind::Vec);
+}
+
+#[test]
+fn a_counter_that_may_start_negative_keeps_the_check() {
+    let mut p = Probe::new();
+    let (_, store) = counted_loop(&mut p, |_, _| {});
+    // Replace the `i = 0` init with `i = ys.len - 1`, which may be -1.
+    let entry = p.f.entry;
+    let len = p.len_of(entry, p.ys);
+    let one = p.int(entry, 1);
+    let init = p.emit(entry, Inst::IntSub(len, one));
+    p.store(entry, p.i, init);
+    p.run();
+    assert_eq!(p.kind(store), ContainerKind::Vec);
+}
+
+/// `if i < 0 { return }; if i >= xs.len { return }; xs[i] = 1`.
+#[test]
+fn a_dominating_guard_proves_the_store() {
+    let mut p = Probe::new();
+    let entry = p.f.entry;
+    let second = p.f.new_block();
+    let body = p.f.new_block();
+    let exit = p.f.new_block();
+    let li = p.load(entry, p.i);
+    let zero = p.int(entry, 0);
+    let neg = p.emit(entry, Inst::IntLt(li, zero));
+    p.f.set_term(
+        entry,
+        Term::Branch {
+            cond: neg,
+            then_bb: exit,
+            else_bb: second,
+        },
+    );
+    let li = p.load(second, p.i);
+    let len = p.len_of(second, p.xs);
+    let past = p.emit(second, Inst::IntGeq(li, len));
+    p.f.set_term(
+        second,
+        Term::Branch {
+            cond: past,
+            then_bb: exit,
+            else_bb: body,
+        },
+    );
+    let store = p.set(body, p.xs, p.i);
+    let other = p.set(body, p.ys, p.i);
+    p.f.set_term(body, Term::Return(vec![]));
+    p.f.set_term(exit, Term::Return(vec![]));
+    p.run();
+    assert_eq!(p.kind(store), ContainerKind::VecInBounds);
+    assert_eq!(p.kind(other), ContainerKind::Vec);
+}
+
+/// `xs[i]` then `xs[i] = ..`: the read checked the slot.
+#[test]
+fn a_checked_read_proves_the_store_after_it() {
+    let mut p = Probe::new();
+    let b = p.f.entry;
+    let read = p.get(b, p.xs, p.i);
+    let store = p.set(b, p.xs, p.i);
+    p.f.set_term(b, Term::Return(vec![read]));
+    p.run();
+    assert_eq!(p.kind(read), ContainerKind::Vec);
+    assert_eq!(p.kind(store), ContainerKind::VecInBounds);
+}
+
+#[test]
+fn a_call_between_a_read_and_a_store_keeps_the_check() {
+    let mut p = Probe::new();
+    let b = p.f.entry;
+    let read = p.get(b, p.xs, p.i);
+    p.unknown_call(b);
+    let store = p.set(b, p.xs, p.i);
+    p.f.set_term(b, Term::Return(vec![read]));
+    p.run();
+    assert_eq!(p.kind(store), ContainerKind::Vec);
+}
+
+/// `while i < xs.len { xs[i] = 1; ys[i] = 1; i = i + 1 }` re-reads the live
+/// length each turn, so no body effect can stale it.
+#[test]
+fn a_while_loop_against_the_live_length_proves_its_vector() {
+    let mut p = Probe::new();
+    let entry = p.f.entry;
+    let header = p.f.new_block();
+    let body = p.f.new_block();
+    let exit = p.f.new_block();
+    let zero = p.int(entry, 0);
+    p.store(entry, p.i, zero);
+    p.f.set_term(entry, Term::Goto(header));
+    let li = p.load(header, p.i);
+    let len = p.len_of(header, p.xs);
+    let cond = p.emit(header, Inst::IntLt(li, len));
+    p.f.set_term(
+        header,
+        Term::Branch {
+            cond,
+            then_bb: body,
+            else_bb: exit,
+        },
+    );
+    let store = p.set(body, p.xs, p.i);
+    let other = p.set(body, p.ys, p.i);
+    let li = p.load(body, p.i);
+    let one = p.int(body, 1);
+    let next = p.emit(body, Inst::IntAdd(li, one));
+    p.store(body, p.i, next);
+    p.f.set_term(body, Term::Goto(header));
+    p.f.set_term(exit, Term::Return(vec![]));
+    p.run();
+    assert_eq!(p.kind(store), ContainerKind::VecInBounds);
+    assert_eq!(p.kind(other), ContainerKind::Vec);
+}
+
+/// `rows[r][c] = ..` after `c < rows[r].len`: the two `rows[r]` reads name
+/// the same element while nothing stores into a container.
+#[test]
+fn an_element_of_an_element_is_a_place() {
+    let mut p = Probe::new();
+    let b = p.f.entry;
+    let exit = p.f.new_block();
+    let body = p.f.new_block();
+    let rows = p.xs;
+    let r = p.ys;
+    let row = p.get(b, rows, r);
+    let len = p.emit(
+        b,
+        Inst::Field {
+            base: row,
+            field: u("len"),
+        },
+    );
+    let zero = p.int(b, 0);
+    p.store(b, p.i, zero);
+    let li = p.load(b, p.i);
+    let cond = p.emit(b, Inst::IntLt(li, len));
+    p.f.set_term(
+        b,
+        Term::Branch {
+            cond,
+            then_bb: body,
+            else_bb: exit,
+        },
+    );
+    let row2 = p.get(body, rows, r);
+    let index = p.load(body, p.i);
+    let value = p.int(body, 1);
+    let store = p.emit(
+        body,
+        Inst::StoreIndex {
+            base: row2,
+            index,
+            value,
+            kind: ContainerKind::Vec,
+        },
+    );
+    p.f.set_term(body, Term::Return(vec![]));
+    p.f.set_term(exit, Term::Return(vec![]));
+    p.run();
+    assert_eq!(p.kind(store), ContainerKind::VecInBounds);
+
+    // A store into any container between the two reads may have replaced
+    // the row.
+    let mut p = Probe::new();
+    let b = p.f.entry;
+    let row = p.get(b, p.xs, p.ys);
+    let len = p.emit(
+        b,
+        Inst::Field {
+            base: row,
+            field: u("len"),
+        },
+    );
+    let zero = p.int(b, 0);
+    p.store(b, p.i, zero);
+    let li = p.load(b, p.i);
+    let cond = p.emit(b, Inst::IntLt(li, len));
+    let body = p.f.new_block();
+    let exit = p.f.new_block();
+    p.f.set_term(
+        b,
+        Term::Branch {
+            cond,
+            then_bb: body,
+            else_bb: exit,
+        },
+    );
+    p.set(body, p.xs, p.ys);
+    let row2 = p.get(body, p.xs, p.ys);
+    let index = p.load(body, p.i);
+    let value = p.int(body, 1);
+    let store = p.emit(
+        body,
+        Inst::StoreIndex {
+            base: row2,
+            index,
+            value,
+            kind: ContainerKind::Vec,
+        },
+    );
+    p.f.set_term(body, Term::Return(vec![]));
+    p.f.set_term(exit, Term::Return(vec![]));
+    p.run();
+    assert_eq!(p.kind(store), ContainerKind::Vec);
+}
+
+#[test]
+fn a_body_with_a_lambda_is_left_alone() {
+    let mut p = Probe::new();
+    let (lp, store) = counted_loop(&mut p, |_, _| {});
+    let lambda_entry = p.f.new_block();
+    p.f.set_term(lambda_entry, Term::Return(vec![]));
+    p.emit(
+        lp.body,
+        Inst::Lambda {
+            params: vec![],
+            entry: lambda_entry,
+        },
+    );
+    p.run();
+    assert_eq!(p.kind(store), ContainerKind::Vec);
+}

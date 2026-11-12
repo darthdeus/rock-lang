@@ -82,6 +82,7 @@ pub(super) fn emit_coroutine_js(
     for nf in &mut nested[..named_nested] {
         skull_transform::cleanup_with_nobox(ws, nf)?;
         skull_transform::recover_counted_loops(ws, nf);
+        skull_transform::elide_bounds_checks(Some(ws), nf);
     }
     let bodies = nested
         .iter()

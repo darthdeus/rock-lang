@@ -412,6 +412,7 @@ impl Emitter<'_> {
             }
             Inst::Len { base, kind } => match kind {
                 ContainerKind::Vec
+                | ContainerKind::VecInBounds
                 | ContainerKind::VecValueColumns(_)
                 | ContainerKind::VecValueStrided(_)
                 | ContainerKind::NativeBuffer
@@ -597,6 +598,24 @@ impl Emitter<'_> {
             || regalloc::alias_at(self.alias, id).is_some()
     }
 
+    /// The 1-based backing slot of a 0-based Vec index: a literal is folded,
+    /// anything else prints as `<index> + 1`.
+    pub(crate) fn write_vec_slot(&self, out: &mut String, index: Idx<Inst>) {
+        match self.func.insts[index] {
+            Inst::Const(Lit::Int(i))
+                if (0..i64::from(i32::MAX)).contains(&i)
+                    && self.inlinable[raw(index) as usize]
+                    && !self.hoist.contains_key(&index) =>
+            {
+                let _ = write!(out, "{}", i + 1);
+            }
+            _ => {
+                self.write_opnd(out, index);
+                out.push_str(" + 1");
+            }
+        }
+    }
+
     /// READ index `base[index]`. NativeBuffer and Vec go through the
     /// debug-mode bounds-checked stdlib helpers (`__nb_checked_get` /
     /// `__vec_checked_get`) — skull runs debug; release stripping is future
@@ -621,19 +640,7 @@ impl Emitter<'_> {
             {
                 self.write_opnd(out, base);
                 out.push_str("._data[");
-                match self.func.insts[index] {
-                    Inst::Const(Lit::Int(i))
-                        if (0..i64::from(i32::MAX)).contains(&i)
-                            && self.inlinable[raw(index) as usize]
-                            && !self.hoist.contains_key(&index) =>
-                    {
-                        let _ = write!(out, "{}", i + 1);
-                    }
-                    _ => {
-                        self.write_opnd(out, index);
-                        out.push_str(" + 1");
-                    }
-                }
+                self.write_vec_slot(out, index);
                 out.push_str("] or __vec_checked_get(");
                 self.write_opnd(out, base);
                 out.push_str(", ");
@@ -646,6 +653,14 @@ impl Emitter<'_> {
                 out.push_str(", ");
                 self.write_opnd(out, index);
                 out.push(')');
+            }
+            // The index was proven within `[0, len)`, so the slot holds the
+            // element, nil and false included: no fallback.
+            ContainerKind::VecInBounds => {
+                self.write_opnd(out, base);
+                out.push_str("._data[");
+                self.write_vec_slot(out, index);
+                out.push(']');
             }
             // A leaf column: `index` is already 1-based and already checked
             // (`VecCheckedIndex`), so this is a raw array read.

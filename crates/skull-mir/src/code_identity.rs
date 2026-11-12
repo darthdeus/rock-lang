@@ -1218,6 +1218,7 @@ impl BodyHasher {
                 self.column_elem(elem);
             }
             ContainerKind::VecStrideSlot => self.tag(8),
+            ContainerKind::VecInBounds => self.tag(9),
         }
     }
 

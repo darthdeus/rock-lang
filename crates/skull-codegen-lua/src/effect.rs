@@ -171,6 +171,16 @@ impl Emitter<'_> {
                         self.write_opnd(out, *value);
                         out.push_str(")\n");
                     }
+                    // The index was proven within `[0, len)`: a raw slot write.
+                    ContainerKind::VecInBounds => {
+                        out.push(' ');
+                        self.write_opnd(out, *base);
+                        out.push_str("._data[");
+                        self.write_vec_slot(out, *index);
+                        out.push_str("] = ");
+                        self.write_opnd(out, *value);
+                        out.push('\n');
+                    }
                     // Raw 1-based write into one leaf column; the owning Vec's
                     // `len` was checked once by `VecCheckedIndex`.
                     ContainerKind::Map
@@ -227,7 +237,8 @@ impl Emitter<'_> {
                     }
                     // Column push bumps the shared `len` once, then writes K
                     // columns -- more than one `value`, so lowering splits it.
-                    ContainerKind::NativeBuffer
+                    ContainerKind::VecInBounds
+                    | ContainerKind::NativeBuffer
                     | ContainerKind::NativeBufferValue(_)
                     | ContainerKind::NativeBufferLeaf
                     | ContainerKind::VecValueColumns(_)
