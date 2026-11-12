@@ -205,6 +205,13 @@ compiler cannot see into an `inline(lua)` body, so this is an unchecked
 contract of the same family as `@nomangle`. The view fields are never
 serialized by state dumps or hot reload.
 
+## Purity
+
+`@pure` is a checker contract on Rock bodies, trusted on opaque ones and
+admitting `@debug_impure` callees. Null narrowing may rely on it; bounds
+elision and other value-level passes must not. `docs/purity.md` lists every
+consumer, the probes run against each, and the accepted edges.
+
 ## Iterators
 
 `for` over user types and lazy iterator chains desugar through the

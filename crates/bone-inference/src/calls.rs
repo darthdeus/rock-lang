@@ -1594,7 +1594,7 @@ pub(crate) fn resolve_named_call_inner(
                             // The callee's purity is unknown until it
                             // resolves; clear path refinements as any
                             // non-`@pure` call would.
-                            gamma.refined_nonnull.clear();
+                            gamma.invalidate_mutable_refinements();
                             queue_pending(
                                 gamma,
                                 v,
@@ -1900,7 +1900,7 @@ pub(crate) fn commit_selected_call(
         .unwrap_or_else(|| gamma.workspace.builtins.unit());
 
     if !callee_pure {
-        gamma.refined_nonnull.clear();
+        gamma.invalidate_mutable_refinements();
     }
 
     let ret_ty = substitute(gamma, ret_ty, &subs, span)?;
@@ -1992,7 +1992,7 @@ pub(crate) fn call_fn_value(
     // A fn-value callee is opaque -- we can't prove it doesn't mutate state, so
     // conservatively drop path refinements (args above were checked while
     // they still held).
-    gamma.refined_nonnull.clear();
+    gamma.invalidate_mutable_refinements();
 
     Ok(resolve(gamma, fn_ty.with_idx(ret), span))
 }

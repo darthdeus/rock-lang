@@ -127,6 +127,13 @@ pub struct Gamma<'a> {
     // share this set (whole locals peel `binding_types` instead). Calls and
     // yields clear it: globals can be reassigned and fields mutated via aliases.
     pub(crate) refined_nonnull: FxHashSet<Narrow>,
+    /// Locals assigned inside a lambda declared in this body. A call may run
+    /// that lambda and null the local, so a whole-local narrow of one of
+    /// these is revoked by the same effects that clear `refined_nonnull`.
+    pub(crate) closure_assigned: FxHashSet<Idx<BindingInfo>>,
+    /// Whole-local narrows of `closure_assigned` bindings in force, with the
+    /// type each replaced; drained by [`Gamma::invalidate_mutable_refinements`].
+    pub(crate) revocable_locals: Vec<(Idx<BindingInfo>, TyId)>,
     pub sibling_fields: Vec<FxHashMap<Ustr, TyId>>,
 
     pub dep_acc: RefCell<FxHashSet<Ustr>>,
@@ -166,6 +173,25 @@ pub struct BodyCtx<'a> {
 }
 
 impl<'a> Gamma<'a> {
+    /// An effect ran that may reassign a global, mutate a field through an
+    /// alias, or run a lambda: a call to a callee that is not `@pure`, a call
+    /// through a function value, or a suspension. Every path refinement and
+    /// every whole-local narrow a lambda could undo is dropped.
+    pub(crate) fn invalidate_mutable_refinements(&mut self) {
+        self.refined_nonnull.clear();
+        for (b, old) in self.revocable_locals.drain(..) {
+            self.out.binding_types.insert(b, old);
+        }
+    }
+
+    /// Record a whole-local narrow of `b` from `old`, so an effect can revoke
+    /// it when a lambda in this body assigns `b`.
+    pub(crate) fn note_local_narrow(&mut self, b: Idx<BindingInfo>, old: TyId) {
+        if self.closure_assigned.contains(&b) {
+            self.revocable_locals.push((b, old));
+        }
+    }
+
     pub fn new(workspace: &'a Workspace, body: &'a Body, mid: ModuleId) -> Gamma<'a> {
         Self {
             workspace,
@@ -177,6 +203,8 @@ impl<'a> Gamma<'a> {
             loop_depth: 0,
 
             refined_nonnull: Default::default(),
+            closure_assigned: narrowing::closure_assigned_locals(body),
+            revocable_locals: Vec::new(),
             sibling_fields: Default::default(),
 
             dep_acc: Default::default(),

@@ -1,0 +1,108 @@
+//! Error: a null-check narrow does not survive an effect hidden in the condition or a lambda
+//! Tags: nullable, narrowing, soundness, pure
+
+// `g.f != null && <rest>` narrows `g.f` for the then-branch only while the
+// rest of the condition cannot null it. A call that is not `@pure` can, so
+// the narrow is dropped wherever the call hides.
+
+//=== TEST CASE: call_in_safe_nav_in_cond_Generic ===
+//! expect: got (int?, int)
+struct G { f: int? }
+struct H { n: int }
+global g: G = G { f: 1 }
+fn H.evil(h) -> bool { g.f = null; return true }
+
+fn bad(h: H?) -> int {
+    if g.f != null && h?.evil() == true { return g.f + 1 }
+    return 0
+}
+
+//=== TEST CASE: call_in_index_in_cond_Generic ===
+//! expect: got (int?, int)
+struct G { f: int? }
+global g: G = G { f: 1 }
+fn evil() -> int { g.f = null; return 0 }
+
+fn bad(xs: [int]) -> int {
+    if g.f != null && xs[evil()] == 0 { return g.f + 1 }
+    return 0
+}
+
+//=== TEST CASE: call_in_interpolation_in_cond_Generic ===
+//! expect: got (int?, int)
+struct G { f: int? }
+global g: G = G { f: 1 }
+fn evil() -> int { g.f = null; return 0 }
+
+fn bad() -> int {
+    if g.f != null && "{evil()}" == "0" { return g.f + 1 }
+    return 0
+}
+
+//=== TEST CASE: call_in_cast_in_cond_Generic ===
+//! expect: got (int?, int)
+struct G { f: int? }
+global g: G = G { f: 1 }
+fn evil() -> int { g.f = null; return 0 }
+
+fn bad() -> int {
+    if g.f != null && (evil() as float) == 0.0 { return g.f + 1 }
+    return 0
+}
+
+//=== TEST CASE: call_in_match_in_cond_Generic ===
+//! expect: got (int?, int)
+struct G { f: int? }
+global g: G = G { f: 1 }
+fn evil() -> int { g.f = null; return 0 }
+
+fn bad() -> int {
+    if g.f != null && (match evil() { 0 => true, _ => false }) { return g.f + 1 }
+    return 0
+}
+
+//=== TEST CASE: call_in_safe_nav_let_in_cond_Generic ===
+//! expect: got (int?, int)
+struct G { f: int? }
+global g: G = G { f: 1 }
+fn evil() -> bool { g.f = null; return true }
+
+fn bad(v: int?) -> int {
+    if g.f != null && (v?.let { evil() } ?? false) { return g.f + 1 }
+    return 0
+}
+
+// A whole local is normally immune to calls: a callee cannot reassign it.
+// A lambda declared in the same body can, and a call may run that lambda.
+
+//=== TEST CASE: closure_nulls_local_before_fn_value_call_Generic ===
+//! expect: got (int?, int)
+fn bad() -> int {
+    let x: int? = 1
+    let kill = () => { x = null }
+    if x != null { kill(); return x + 1 }
+    return 0
+}
+
+//=== TEST CASE: closure_nulls_local_before_named_call_Generic ===
+//! expect: got (int?, int)
+fn run(f: fn()) { f() }
+
+fn bad() -> int {
+    let x: int? = 1
+    let kill = () => { x = null }
+    if x != null { run(kill); return x + 1 }
+    return 0
+}
+
+//=== TEST CASE: closure_nulls_local_guard_statement_Generic ===
+//! expect: got (int?, int)
+fn run(f: fn()) { f() }
+
+fn bad() -> int {
+    let x: int? = 1
+    let kill = () => { x = null }
+    if x == null { return 0 }
+    run(kill)
+    return x + 1
+}

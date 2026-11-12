@@ -451,7 +451,7 @@ pub(crate) fn infer_expr_used(
             // Suspension hands control to the resumer, who may reassign globals
             // or mutate aliased fields (the yielded value above was
             // computed before suspending, so it still saw them).
-            gamma.refined_nonnull.clear();
+            gamma.invalidate_mutable_refinements();
 
             n
         }
@@ -473,7 +473,7 @@ pub(crate) fn infer_expr_used(
 
             // `yield*` suspends repeatedly into the delegate; the resumer may
             // reassign globals or mutate aliased fields between resumptions.
-            gamma.refined_nonnull.clear();
+            gamma.invalidate_mutable_refinements();
 
             inner_r
         }
@@ -2056,6 +2056,7 @@ fn infer_block(
                     if let Some(cur) = gamma.out.binding_types.get(b).copied() {
                         let narrowed = peel_nullable(gamma, cur, expr_span);
                         gamma.out.binding_types.insert(b, narrowed);
+                        gamma.note_local_narrow(b, cur);
                         g_saved.push((b, cur));
                     }
                 }

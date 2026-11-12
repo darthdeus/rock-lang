@@ -89,8 +89,9 @@ Two things it does not establish: an `inline(lua)`, `inline(js)` or `extern`
 body marked `@pure` is trusted as written, and a `@debug_impure` callee (the
 escape hatch for `print`) may do anything. So `@pure` is a contract the
 checker holds the Rock body to, not a proof that a call leaves every value it
-can reach unchanged; an optimization that needs the latter must not rely on
-the annotation (see `docs/luajit-performance.md`, vector bounds checks).
+can reach unchanged. Type refinements (null narrowing across a call) rely on
+it; value-level optimizations must not. `docs/purity.md` is the audit of
+every consumer and the escape hatches.
 
 ## Macros
 

@@ -63,50 +63,110 @@ fn path_prefixes((root, fields): Narrow) -> Vec<Narrow> {
         .collect()
 }
 
-/// `@pure`-aware effect check over a CONDITION expression: true if evaluating it
-/// could mutate a path -- a non-`@pure` call, a yield, or an assignment.
-/// Used to suppress mutable-path narrows from a condition whose own
-/// evaluation has an effect AFTER the null-check (`g != null && impure()`):
-/// `impure()` may null `g` before the body runs. Whole-local bindings are immune;
-/// their fields can change through aliases.
+/// `@pure`-aware effect check over a CONDITION expression: true if evaluating
+/// it could mutate a path -- a call to a callee that is not `@pure` (named,
+/// safe-nav or through a function value), a yield, or an assignment anywhere
+/// in the expression. Used to suppress mutable-path narrows from a condition
+/// whose own evaluation has an effect AFTER the null-check
+/// (`g != null && impure()`): `impure()` may null `g` before the body runs.
+/// Whole-local bindings are immune; their fields can change through aliases.
+///
+/// Every child is visited, whatever the parent: a call hides as easily in
+/// an index, an interpolation, a cast or a `match` arm as in an operand. A
+/// lambda literal is not entered, since creating it runs nothing.
 ///
 /// Conditions have already been inferred: use the selected overload, including
-/// UFCS calls, rather than a spelling-based overload family. Arguments can
-/// still invalidate a path even when the selected callee is pure.
+/// UFCS and safe-nav calls, rather than a spelling-based overload family.
+/// Arguments can still invalidate a path even when the selected callee is pure.
 fn cond_has_effect(gamma: &Gamma, c: BodyCtx, e: Idx<Expr>) -> bool {
+    let callee_pure = |e: Idx<Expr>| {
+        gamma
+            .out
+            .resolved_overload_calls
+            .get(&e)
+            .is_some_and(|&(mid, fid)| {
+                fn_has_anno(&gamma.workspace.module(mid).functions[fid], "pure")
+            })
+    };
     match c.body.expr_arena[e] {
         Expr::Call {
             callee: Callee::Unresolved { name, .. },
-            args,
             ..
-        } => {
-            let callee_pure =
-                gamma
-                    .out
-                    .resolved_overload_calls
-                    .get(&e)
-                    .is_some_and(|&(mid, fid)| {
-                        fn_has_anno(&gamma.workspace.module(mid).functions[fid], "pure")
-                    });
-            let callee_pure = callee_pure || name.as_str() == "is_null";
-            if !callee_pure {
-                return true;
-            }
-            // Pure callee: an effect can still hide in an argument.
-            args.into_iter().any(|a| cond_has_effect(gamma, c, a))
+        } if !callee_pure(e) && name.as_str() != "is_null" => true,
+        Expr::SafeNavCall { .. } if !callee_pure(e) => true,
+        // A function value's body is opaque.
+        Expr::Call {
+            callee: Callee::Local(_) | Callee::Value(_),
+            ..
+        } => true,
+        Expr::Yield(_)
+        | Expr::YieldDelegate(_)
+        | Expr::Assign { .. }
+        | Expr::CompoundAssign { .. }
+        | Expr::IncDec { .. } => true,
+        Expr::Lambda { .. } => false,
+        _ => {
+            let mut effect = false;
+            c.body
+                .for_each_child(bone_core::hir_walk::HirChild::Expr(e), |child| {
+                    effect = effect || child_has_effect(gamma, c, child);
+                });
+            effect
         }
-        // Method / fn-value callee: opaque, can't prove purity.
-        Expr::Call { .. } => true,
-        Expr::Yield(_) | Expr::YieldDelegate(_) | Expr::Assign { .. } => true,
-        Expr::Not(i, _) => cond_has_effect(gamma, c, i),
-        Expr::BinOp { lhs, rhs, .. } => {
-            cond_has_effect(gamma, c, lhs) || cond_has_effect(gamma, c, rhs)
-        }
-        Expr::FieldAccess { base, .. } | Expr::SafeNav { base, .. } => {
-            cond_has_effect(gamma, c, base)
-        }
-        _ => false,
     }
+}
+
+fn child_has_effect(gamma: &Gamma, c: BodyCtx, child: bone_core::hir_walk::HirChild) -> bool {
+    use bone_core::hir_walk::HirChild;
+    match child {
+        HirChild::Expr(e) => cond_has_effect(gamma, c, e),
+        // A statement inside a condition (a block arm) runs when the
+        // condition does; anything but a plain expression may write.
+        HirChild::Statement(s) => match c.body.statement_arena[s] {
+            Statement::Expr(e) => cond_has_effect(gamma, c, e),
+            Statement::Let { value, .. } => cond_has_effect(gamma, c, value),
+            Statement::Comment(_) => false,
+            _ => true,
+        },
+        HirChild::Pattern(_) => false,
+    }
+}
+
+/// Locals declared outside a lambda and assigned inside one: the lambda may
+/// run at any call, so a whole-local narrow of such a binding does not
+/// survive an effect. Nested fns cannot capture, so only lambdas count.
+pub(crate) fn closure_assigned_locals(body: &hir::Body) -> FxHashSet<Idx<BindingInfo>> {
+    use bone_core::hir_walk::HirChild;
+    let mut out = FxHashSet::default();
+    for (lambda, expr) in body.expr_arena.iter() {
+        let Expr::Lambda { body: lbody, .. } = expr else {
+            continue;
+        };
+        let (lo, hi) = body.expr_spans[lambda].offset_range();
+        let declared_inside = |b: Idx<BindingInfo>| {
+            let (blo, bhi) = body.binding_spans[b].offset_range();
+            lo <= blo && bhi <= hi
+        };
+        let mut stack = vec![HirChild::Expr(*lbody)];
+        while let Some(node) = stack.pop() {
+            if let HirChild::Expr(e) = node {
+                match body.expr_arena[e] {
+                    Expr::Assign { target, .. }
+                    | Expr::CompoundAssign { target, .. }
+                    | Expr::IncDec { target, .. } => {
+                        if let Expr::Var(b) = body.expr_arena[target]
+                            && !declared_inside(b)
+                        {
+                            out.insert(b);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            body.for_each_child(node, |child| stack.push(child));
+        }
+    }
+    out
 }
 
 /// Narrowings a condition implies for its then / else branches. Detects the
@@ -208,6 +268,7 @@ pub(crate) fn infer_branch(
                 if let Some(cur) = gamma.out.binding_types.get(*b).copied() {
                     let narrowed = peel_nullable(gamma, cur, span);
                     gamma.out.binding_types.insert(*b, narrowed);
+                    gamma.note_local_narrow(*b, cur);
                     saved_bindings.push((*b, cur));
                 }
             }
