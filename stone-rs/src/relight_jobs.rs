@@ -1,4 +1,9 @@
 //! Copied occupancy snapshots; no Lua or graphics state crosses this worker.
+//!
+//! The service keeps the occupancy last published for each caller-chosen
+//! snapshot key. A job diffs new occupancy against it, and publishing a
+//! finished job moves that job's copy in as the key's snapshot, so the caller
+//! holds no copy and none is made on the publishing thread.
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
@@ -22,6 +27,7 @@ struct ResultData {
     region: [f32; 4],
 }
 struct Entry {
+    snapshot: i64,
     cancelled: Arc<AtomicBool>,
     result: Option<ResultData>,
     _reservation: Arc<Reservation>,
@@ -31,13 +37,15 @@ struct Work {
     width: usize,
     samples: usize,
     border: i32,
-    old: Vec<u8>,
+    old: Option<Arc<Vec<u8>>>,
     next: Vec<u8>,
     cancelled: Arc<AtomicBool>,
     _reservation: Arc<Reservation>,
 }
 struct Service {
     entries: Arc<Mutex<HashMap<u64, Entry>>>,
+    // Locked after `entries` wherever both are held.
+    snapshots: Mutex<HashMap<i64, Arc<Vec<u8>>>>,
     sender: mpsc::SyncSender<Work>,
     worker: JoinHandle<()>,
     reserved: Arc<AtomicUsize>,
@@ -58,7 +66,7 @@ fn start() -> Option<Service> {
                     work.width,
                     work.samples,
                     work.border,
-                    &work.old,
+                    work.old.as_ref().map_or(&[][..], |old| old.as_slice()),
                     work.next,
                     &work.cancelled,
                 );
@@ -74,6 +82,7 @@ fn start() -> Option<Service> {
         .ok()?;
     Some(Service {
         entries,
+        snapshots: Mutex::new(HashMap::new()),
         sender,
         worker,
         reserved: Arc::new(AtomicUsize::new(0)),
@@ -120,13 +129,15 @@ fn diff(
     })
 }
 
+// A positive job handle, 0 when the worker is full (retry later), -1 for
+// invalid arguments. The job compares `next` with the snapshot published for
+// `snapshot`; a key with no snapshot of this length reports the whole domain.
 #[no_mangle]
 pub unsafe extern "C" fn stone_relight_diff_submit(
+    snapshot: i64,
     width: i32,
     samples: i32,
     border: i32,
-    old: *const u8,
-    old_len: i64,
     next: *const u8,
     len: i64,
 ) -> i64 {
@@ -138,9 +149,7 @@ pub unsafe extern "C" fn stone_relight_diff_submit(
         || len % (width as i64 * 4) != 0
         || width % samples != 0
         || (len / (width as i64 * 4)) % samples as i64 != 0
-        || (old_len != 0 && old_len != len)
         || next.is_null()
-        || (old_len > 0 && old.is_null())
     {
         return -1;
     }
@@ -155,7 +164,7 @@ pub unsafe extern "C" fn stone_relight_diff_submit(
     if entries.len() >= MAX_JOBS {
         return 0;
     }
-    let bytes = len as usize + old_len as usize;
+    let bytes = len as usize;
     if service
         .reserved
         .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
@@ -174,16 +183,19 @@ pub unsafe extern "C" fn stone_relight_diff_submit(
         return 0;
     }
     let cancelled = Arc::new(AtomicBool::new(false));
+    let old = service
+        .snapshots
+        .lock()
+        .unwrap()
+        .get(&snapshot)
+        .filter(|old| old.len() == len as usize)
+        .cloned();
     let work = Work {
         handle,
         width: width as usize,
         samples: samples as usize,
         border,
-        old: if old_len == 0 {
-            Vec::new()
-        } else {
-            std::slice::from_raw_parts(old, old_len as usize).to_vec()
-        },
+        old,
         next: std::slice::from_raw_parts(next, len as usize).to_vec(),
         cancelled: Arc::clone(&cancelled),
         _reservation: Arc::clone(&reservation),
@@ -191,6 +203,7 @@ pub unsafe extern "C" fn stone_relight_diff_submit(
     entries.insert(
         handle,
         Entry {
+            snapshot,
             cancelled,
             result: None,
             _reservation: reservation,
@@ -203,14 +216,11 @@ pub unsafe extern "C" fn stone_relight_diff_submit(
     handle as i64
 }
 
-// 0 pending, 1 copied and consumed, -1 invalid. Failed copies retain the result.
+// 0 pending, 1 published and consumed, -1 invalid. Publishing writes the
+// changed tile bounds to `region` and makes the job's occupancy the snapshot
+// later jobs for its key compare against.
 #[no_mangle]
-pub unsafe extern "C" fn stone_relight_diff_copy(
-    handle: u64,
-    pixels: *mut u8,
-    len: i64,
-    region: *mut f32,
-) -> i32 {
+pub unsafe extern "C" fn stone_relight_diff_publish(handle: u64, region: *mut f32) -> i32 {
     let service_slot = slot().lock().unwrap();
     let Some(service) = service_slot.as_ref() else {
         return -1;
@@ -219,16 +229,29 @@ pub unsafe extern "C" fn stone_relight_diff_copy(
     let Some(entry) = entries.get(&handle) else {
         return -1;
     };
-    let Some(result) = entry.result.as_ref() else {
+    if entry.result.is_none() {
         return 0;
-    };
-    if pixels.is_null() || region.is_null() || len < 0 || len as usize != result.pixels.len() {
+    }
+    if region.is_null() {
         return -1;
     }
-    std::ptr::copy_nonoverlapping(result.pixels.as_ptr(), pixels, result.pixels.len());
+    let entry = entries.remove(&handle).unwrap();
+    let result = entry.result.unwrap();
     std::ptr::copy_nonoverlapping(result.region.as_ptr(), region, 4);
-    entries.remove(&handle);
+    service
+        .snapshots
+        .lock()
+        .unwrap()
+        .insert(entry.snapshot, Arc::new(result.pixels));
     1
+}
+// Forget a key's snapshot, so its next job reports the whole domain. The
+// caller cancels the key's pending job first.
+#[no_mangle]
+pub extern "C" fn stone_relight_snapshot_drop(snapshot: i64) {
+    if let Some(service) = slot().lock().unwrap().as_ref() {
+        service.snapshots.lock().unwrap().remove(&snapshot);
+    }
 }
 #[no_mangle]
 pub extern "C" fn stone_relight_diff_cancel(handle: u64) {
@@ -251,93 +274,60 @@ pub(crate) fn shutdown() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn copied_snapshot_lifecycle_and_cancellation() {
-        let old = vec![0; 8 * 8 * 4];
-        let mut next = old.clone();
-        next[0] = 7;
-        let handle = unsafe {
-            stone_relight_diff_submit(
-                8,
-                2,
-                1,
-                old.as_ptr(),
-                old.len() as i64,
-                next.as_ptr(),
-                next.len() as i64,
-            )
-        };
-        assert_ne!(handle, 0);
-        next.fill(9);
-        let mut output = vec![0; old.len()];
+    fn publish(handle: i64) -> [f32; 4] {
         let mut region = [0.0; 4];
         for _ in 0..2000 {
-            let result = unsafe {
-                stone_relight_diff_copy(
-                    handle as u64,
-                    output.as_mut_ptr(),
-                    output.len() as i64,
-                    region.as_mut_ptr(),
-                )
-            };
+            let result = unsafe { stone_relight_diff_publish(handle as u64, region.as_mut_ptr()) };
             assert!(result >= 0);
             if result == 1 {
-                break;
+                return region;
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        assert_eq!(output[0], 7);
-        assert!(output[1..].iter().all(|v| *v == 0));
+        panic!("relight diff never finished");
+    }
+    #[test]
+    fn published_snapshot_lifecycle_and_cancellation() {
+        const KEY: i64 = 3;
+        const WHOLE: [f32; 4] = [-1e9, -1e9, 1e9, 1e9];
+        let mut next = vec![0u8; 8 * 8 * 4];
+        let submit = |next: &[u8], samples: i32| unsafe {
+            stone_relight_diff_submit(KEY, 8, samples, 1, next.as_ptr(), next.len() as i64)
+        };
+        // A key with no snapshot reports the whole domain and publishes one.
+        let first = submit(&next, 2);
+        assert!(first > 0);
+        assert_eq!(publish(first), WHOLE);
+        // The job owns its copy: edits after submit are not part of it.
+        next[0] = 7;
+        let second = submit(&next, 2);
+        assert!(second > 0);
+        next.fill(9);
+        let mut region = publish(second);
         assert_eq!(region, [-1.0, 2.0, -1.0, 2.0]);
         assert_eq!(
-            unsafe {
-                stone_relight_diff_copy(
-                    handle as u64,
-                    output.as_mut_ptr(),
-                    output.len() as i64,
-                    region.as_mut_ptr(),
-                )
-            },
+            unsafe { stone_relight_diff_publish(second as u64, region.as_mut_ptr()) },
             -1
         );
-        let pending = unsafe {
-            stone_relight_diff_submit(
-                8,
-                2,
-                1,
-                old.as_ptr(),
-                old.len() as i64,
-                next.as_ptr(),
-                next.len() as i64,
-            )
-        };
+        // The second job's occupancy is now the snapshot; all nines differ
+        // from it in every tile.
+        let third = submit(&next, 2);
+        assert_eq!(publish(third), [-1.0, -1.0, 2.0, 2.0]);
+        let unchanged = submit(&next, 2);
+        let region = publish(unchanged);
+        assert!(region[0] > region[2]);
+        let pending = submit(&next, 2);
         stone_relight_diff_cancel(pending as u64);
+        let mut region = [0.0; 4];
         assert_eq!(
-            unsafe {
-                stone_relight_diff_copy(
-                    pending as u64,
-                    output.as_mut_ptr(),
-                    output.len() as i64,
-                    region.as_mut_ptr(),
-                )
-            },
+            unsafe { stone_relight_diff_publish(pending as u64, region.as_mut_ptr()) },
             -1
         );
+        stone_relight_snapshot_drop(KEY);
+        let dropped = submit(&next, 2);
+        assert_eq!(publish(dropped), WHOLE);
         shutdown();
-        assert_eq!(
-            unsafe {
-                stone_relight_diff_submit(
-                    8,
-                    0,
-                    1,
-                    old.as_ptr(),
-                    old.len() as i64,
-                    next.as_ptr(),
-                    next.len() as i64,
-                )
-            },
-            -1
-        );
+        assert_eq!(submit(&next, 0), -1);
     }
     #[test]
     fn occupancy_region_uses_rgba_and_reversed_sample_rows() {
