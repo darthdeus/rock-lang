@@ -2319,20 +2319,22 @@ pub fn text_family_font_idx(font: Font, site: string, require_atlas: bool = true
     return idx
 }
 
-fn text_family_fonts(family: TextFamily) -> [Font] {
-    let fonts: [Font] = []
-    fonts.push(family.regular)
-    for fallback in family.fallbacks { fonts.push(fallback) }
-    return fonts
-}
-
 // Validate the whole flat family before looking at spans. This also makes an
 // empty span list name every handle and atlas in the family.
+fn text_family_indices_into(family: TextFamily, site: string, require_atlas: bool,
+    fonts: [Font], indices: [int]) {
+    fonts.clear()
+    indices.clear()
+    fonts.push(family.regular)
+    for fallback in family.fallbacks { fonts.push(fallback) }
+    for font in fonts { indices.push(text_family_font_idx(font, site, require_atlas)) }
+}
+
 pub fn text_family_indices(family: TextFamily, site: string,
     require_atlas: bool = true) -> ([Font], [int]) {
-    let fonts = text_family_fonts(family)
+    let fonts: [Font] = []
     let indices: [int] = []
-    for font in fonts { indices.push(text_family_font_idx(font, site, require_atlas)) }
+    text_family_indices_into(family, site, require_atlas, fonts, indices)
     return (fonts, indices)
 }
 
@@ -2575,14 +2577,43 @@ fn text_make_run(
     divisor: float,
     color: Color
 ) -> ResolvedTextRun {
+    let part = if from == 0 && to == text.len() { text } else { text.substring(from, to) }
+    if let run = TEXT_RUN_SPARE.pop() {
+        run.text = part
+        run.font = font
+        run.face = face
+        run.size = size
+        run.scale_divisor = divisor
+        run.color = color
+        run.raster_physical_target_scale = 1.0
+        run.layout = null
+        run.draw_scale = 1.0
+        return run
+    }
     return ResolvedTextRun {
-        text: text.substring(from, to),
+        text: part,
         font: font,
         face: face,
         size: size,
         scale_divisor: divisor,
         color: color,
     }
+}
+
+// Runs whose owner has finished with them. Rich text that is resolved again
+// every frame (the deferred world overlay, the world measures) otherwise builds
+// a run per span per call. Only an owner that holds the last reference
+// releases: a run handed out by resolve_text_spans belongs to its caller.
+global TEXT_RUN_SPARE: [ResolvedTextRun] = []
+const TEXT_RUN_SPARE_MAX: int = 512
+
+pub fn text_runs_release(runs: [ResolvedTextRun]) {
+    for run in runs {
+        if TEXT_RUN_SPARE.len() >= TEXT_RUN_SPARE_MAX { break }
+        run.layout = null
+        TEXT_RUN_SPARE.push(run)
+    }
+    runs.clear()
 }
 
 fn text_run_size(font: Font, size: float, render_scale: float, world_raster: bool) -> float {
@@ -2785,7 +2816,9 @@ fn resolve_text_spans_at(
     require_atlas: bool = true,
     build_layouts: bool = true
 ) {
-    let (fonts, indices) = text_family_indices(family, site, require_atlas)
+    static fonts: [Font] = []
+    static indices: [int] = []
+    text_family_indices_into(family, site, require_atlas, fonts, indices)
     runs.clear()
     for span in spans {
         let start = runs.len()
@@ -3112,16 +3145,20 @@ fn measure_rich_text_single_font_text(
 }
 
 pub fn measure_world_rich_text(spans: [TextSpan], size: float) -> Vec2 {
-    let runs = resolve_world_text_spans(text_family_or_default(), spans, size,
-        "measure_world_rich_text", require_atlas: false)
-    let (w, _a, h) = measure_resolved_runs(runs)
+    let (w, _a, h) = measure_world_rich_text_at(spans, size, "measure_world_rich_text")
     return v(w, h)
 }
 
 pub fn measure_world_rich_text_metrics(spans: [TextSpan], size: float) -> (float, float, float) {
-    let runs = resolve_world_text_spans(text_family_or_default(), spans, size,
-        "measure_world_rich_text_metrics", require_atlas: false)
-    return measure_resolved_runs(runs)
+    return measure_world_rich_text_at(spans, size, "measure_world_rich_text_metrics")
+}
+
+fn measure_world_rich_text_at(spans: [TextSpan], size: float, site: string) -> (float, float, float) {
+    static runs: [ResolvedTextRun] = []
+    resolve_text_spans_at(runs, text_family_or_default(), spans, size, 1.0, true, site, 1.0, false)
+    let (w, ascent, h) = measure_resolved_runs(runs)
+    text_runs_release(runs)
+    return (w, ascent, h)
 }
 
 // Plain family measurement is named separately from the legacy Font-only

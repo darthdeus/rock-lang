@@ -110,7 +110,7 @@ pub fn world_overlay_begin_frame() {
         c.draw_fn = null
         c.image = null
         c.source = null
-        c.rich_runs.clear()
+        text_runs_release(c.rich_runs)
     }
     OVERLAY_CMD_LEN = 0
 }
