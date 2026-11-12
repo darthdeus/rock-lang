@@ -389,8 +389,10 @@ build at 64 KB and at 16 KB (`ROCK_NB_OFFHEAP_MIN`), interleaved pairs:
 - Frames growing the Lua heap by more than 300 KB in the main walking
   scenario: 32 of 1800 down to 5 or 6. In a riding scenario 13 to 19 down to 5.
   No change in a scenario that loads nothing new.
-- Lua heap about 215 MB down to about 165 MB; off-heap buffers about 580 up to
-  about 1400, holding about 140 MB.
+- Lua heap after a collection about 175 MB down to about 163 MB; off-heap
+  buffers about 580 up to about 1400, about 115 MB up to about 140 MB. The
+  median heap over a capture does not fall, because less debt per frame also
+  means the next cycle starts later.
 - Mean frame time unchanged beyond run-to-run variation in four scenarios; the
   forced-collection guard did not fire.
 
