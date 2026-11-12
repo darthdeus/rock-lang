@@ -48,13 +48,18 @@ pub fn shader_clock() -> float {
     return time
 }
 
+// Column stores, not `CAMERA_VIEW = camera_view_matrix(...)`: a Mat4 store
+// constructs the value, and the camera is set several times a frame. The
+// columns are those of camera_view_matrix.
 pub fn set_camera(offset: Vec2, scale: float) {
-    CAMERA_VIEW = camera_view_matrix(offset, scale)
+    CAMERA_VIEW.c0 = v(scale, 0.0, 0.0, 0.0)
+    CAMERA_VIEW.c1 = v(0.0, scale, 0.0, 0.0)
+    CAMERA_VIEW.c2 = v(0.0, 0.0, 1.0, 0.0)
+    CAMERA_VIEW.c3 = v(offset.x * scale, offset.y * scale, 0.0, 1.0)
 }
 
-// Column stores, not `CAMERA_VIEW = mat4_identity()`: a Mat4 store constructs
-// the value, and every one-draw camera clear (each target rect-batch flush and
-// immediate draw) resets it.
+// Column stores for the same reason: every one-draw camera clear (each target
+// rect-batch flush and immediate draw) resets the matrix.
 pub fn reset_camera() {
     CAMERA_VIEW.c0 = v(1.0, 0.0, 0.0, 0.0)
     CAMERA_VIEW.c1 = v(0.0, 1.0, 0.0, 0.0)
