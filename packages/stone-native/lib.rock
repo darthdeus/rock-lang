@@ -48,9 +48,10 @@ pub @nomangle inline(lua) fn stone_native_load() = """
         int stone_flow_copy(uint64_t handle, float* output, int64_t len);
         void stone_flow_cancel(uint64_t handle);
         void stone_flow_cancel_all(void);
-        int64_t stone_relight_diff_submit(int width, int samples, int border, const uint8_t* old, int64_t old_len, const uint8_t* next, int64_t len);
-        int stone_relight_diff_copy(uint64_t handle, uint8_t* pixels, int64_t len, float* region);
+        int64_t stone_relight_diff_submit(int64_t snapshot, int width, int samples, int border, const uint8_t* next, int64_t len);
+        int stone_relight_diff_publish(uint64_t handle, float* region);
         void stone_relight_diff_cancel(uint64_t handle);
+        void stone_relight_snapshot_drop(int64_t snapshot);
         int64_t stone_light_table_measure(int size, int cell_size, double epsilon, int count, const float* positions, int* counts);
         uint8_t stone_light_table_pack(int size, int cell_size, double epsilon, int count, const float* positions, const float* colors, const int* owners, const int* source_rows, const int* source_slots, const int* counts, int* offsets, float* data, int64_t data_len);
         uint8_t stone_image_data_fill_rect_rgba8(uint64_t handle, int x, int y, int width, int height, int r, int g, int b, int a);
@@ -89,9 +90,10 @@ pub extern(ffi, "stone") fn stone_flow_copy(handle: int, output: Ptr<float>, len
 pub extern(ffi, "stone") fn stone_flow_cancel(handle: int)
 pub extern(ffi, "stone") fn stone_flow_cancel_all()
 
-pub extern(ffi, "stone") fn stone_relight_diff_submit(width: int, samples: int, border: int, old: PtrU8, old_len: int, next: PtrU8, len: int) -> int
-pub extern(ffi, "stone") fn stone_relight_diff_copy(handle: int, pixels: PtrU8, len: int, region: Ptr<float>) -> int
+pub extern(ffi, "stone") fn stone_relight_diff_submit(snapshot: int, width: int, samples: int, border: int, next: PtrU8, len: int) -> int
+pub extern(ffi, "stone") fn stone_relight_diff_publish(handle: int, region: Ptr<float>) -> int
 pub extern(ffi, "stone") fn stone_relight_diff_cancel(handle: int)
+pub extern(ffi, "stone") fn stone_relight_snapshot_drop(snapshot: int)
 pub extern(ffi, "stone") fn stone_light_table_measure(size: int, cell_size: int, epsilon: float, count: int, positions: Ptr<float>, counts: Ptr<int>) -> int
 pub extern(ffi, "stone") fn stone_light_table_pack(size: int, cell_size: int, epsilon: float, count: int, positions: Ptr<float>, colors: Ptr<float>, owners: Ptr<int>, source_rows: Ptr<int>, source_slots: Ptr<int>, counts: Ptr<int>, offsets: Ptr<int>, data: Ptr<float>, data_len: int) -> bool
 pub extern(ffi, "stone") fn stone_image_data_fill_rect_rgba8(handle: int, x: int, y: int, width: int, height: int, r: int, g: int, b: int, a: int) -> bool

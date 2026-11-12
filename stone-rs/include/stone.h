@@ -456,9 +456,10 @@ int stone_read_canvas_nearest_id(uint64_t handle, int x, int y, int side);
 int stone_canvas_read_region_i32(uint64_t handle, int x, int y, int w, int h, int32_t *out, int capacity);
 
 bool stone_image_data_fill_rect_rgba8(uint64_t handle, int x, int y, int width, int height, int r, int g, int b, int a);
-int64_t stone_relight_diff_submit(int width, int samples, int border, const uint8_t* old, int64_t old_len, const uint8_t* next, int64_t len);
-int stone_relight_diff_copy(uint64_t handle, uint8_t* pixels, int64_t len, float* region);
+int64_t stone_relight_diff_submit(int64_t snapshot, int width, int samples, int border, const uint8_t* next, int64_t len);
+int stone_relight_diff_publish(uint64_t handle, float* region);
 void stone_relight_diff_cancel(uint64_t handle);
+void stone_relight_snapshot_drop(int64_t snapshot);
 int64_t stone_light_table_measure(int size, int cell_size, double epsilon, int count, const float* positions, int* counts);
 bool stone_light_table_pack(int size, int cell_size, double epsilon, int count, const float* positions, const float* colors, const int* owners, const int* source_rows, const int* source_slots, const int* counts, int* offsets, float* data, int64_t data_len);
 
