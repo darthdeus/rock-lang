@@ -26,7 +26,10 @@ pub newtype CanvasId(int)
 // bindings must use sampled_texture_matches_canvas; cached sampling uniforms
 // must also key backing dimensions and active extents. Attachments live in
 // the host registry.
-pub value Canvas {
+//
+// `nobox`: a canvas is copied into pass outputs, inputs and saved state many
+// times a frame, and a boxed copy is a table each time.
+pub nobox value Canvas {
     handle: CanvasId,
     width: float,
     height: float,
