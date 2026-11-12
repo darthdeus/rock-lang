@@ -3096,3 +3096,59 @@ fn probe(n: int) -> int {\n\
     assert_eq!(run(src, "probe(5)"), "18");
     assert_eq!(run(src, "probe(1)"), "10");
 }
+
+/// A column-stored element access inside a counted loop needs no element
+/// check: the leaf reads index their columns by the bare slot.
+#[test]
+fn column_access_in_a_counted_loop_drops_the_element_check() {
+    let lua = emit_inlined(
+        "nobox value Mote { x: float, y: float, life: int }
+        fn sum(ms: [Mote]) -> float {
+            let t = 0.0
+            for i in 0..ms.len() { t += ms[i].x }
+            return t
+        }",
+        "sum",
+    );
+    assert!(lua.contains("for "), "{lua}");
+    assert!(!lua.contains("__vec_checked_index("), "{lua}");
+    assert!(lua.contains("(c0.x)[(c2 + 1)]"), "{lua}");
+}
+
+/// Index 0 and `len - 1` are proven by a `len > 0` guard; without it the
+/// check stays.
+#[test]
+fn column_first_and_last_are_proven_by_a_nonempty_guard() {
+    let lua = emit_inlined(
+        "nobox value Mote { x: float, y: float, life: int }
+        fn ends(ms: [Mote]) -> float {
+            if ms.len() > 0 { return ms[0].x + ms[ms.len() - 1].x }
+            return 0.0
+        }",
+        "ends",
+    );
+    assert!(!lua.contains("__vec_checked_index("), "{lua}");
+    let lua = emit_inlined(
+        "nobox value Mote { x: float, y: float, life: int }
+        fn last(ms: [Mote]) -> float { return ms[ms.len() - 1].x }",
+        "last",
+    );
+    assert!(lua.contains("__vec_checked_index("), "{lua}");
+    // A ring index wraps below the length only when the length is positive;
+    // without the guard the check stays.
+    let lua = emit_inlined(
+        "nobox value Mote { x: float, y: float, life: int }
+        fn ring(ms: [Mote], k: int) -> float { return ms[k % ms.len()].x }",
+        "ring",
+    );
+    assert!(lua.contains("__vec_checked_index("), "{lua}");
+    let lua = emit_inlined(
+        "nobox value Mote { x: float, y: float, life: int }
+        fn ring(ms: [Mote], k: int) -> float {
+            if ms.len() > 0 { return ms[k % ms.len()].x }
+            return 0.0
+        }",
+        "ring",
+    );
+    assert!(!lua.contains("__vec_checked_index("), "{lua}");
+}

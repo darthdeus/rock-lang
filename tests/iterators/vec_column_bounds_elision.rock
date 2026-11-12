@@ -1,0 +1,107 @@
+// Column-stored vectors (`[E]` for an all-scalar `value` struct) check the
+// element index once per access and then read each leaf column raw. The
+// compiler drops that check where it proves the index in bounds: a counted
+// loop, a non-empty guard before index 0 or the last element, and a modulo
+// of the length. These cases pin that results and errors are unchanged.
+
+@intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
+    local ok, err = pcall(f)
+    return not ok
+"""
+
+nobox value Mote { x: float, y: float, life: int }
+struct Swarm { motes: [Mote] }
+
+fn motes(n: int) -> [Mote] {
+    let out: [Mote] = []
+    for i in 0..n { out.push(Mote { x: i as float, y: (i * 2) as float, life: i }) }
+    return out
+}
+
+fn join(ms: [Mote]) -> string {
+    let out = ""
+    for m in ms { out = out + "{m.life}," }
+    return out
+}
+
+@test(output = "0,2,4,6,")
+fn counted_loop_scales_each_element() {
+    let ms = motes(4)
+    for i in 0..ms.len() { ms[i] = Mote { x: ms[i].x, y: ms[i].y, life: ms[i].life * 2 } }
+    print(join(ms))
+}
+
+@test(output = "6")
+fn counted_loop_sums_a_leaf() {
+    let ms = motes(4)
+    let t = 0.0
+    for i in 0..ms.len() { t += ms[i].x }
+    print("{t}")
+}
+
+@test(output = "0 3")
+fn first_and_last_under_a_nonempty_guard() {
+    let ms = motes(4)
+    if ms.len() > 0 { print("{ms[0].life} {ms[ms.len() - 1].life}") }
+}
+
+@test(output = "true")
+fn the_last_element_of_an_empty_vector_still_raises() {
+    let ms: [Mote] = []
+    let failed = try_call(() => {
+        let _l = ms[ms.len() - 1].life
+    })
+    print("{failed}")
+}
+
+@test(output = "1 2 3 0")
+fn a_ring_index_wraps_under_a_nonempty_guard() {
+    let ms = motes(4)
+    let out = ""
+    if ms.len() > 0 {
+        for k in 1..5 { out = out + "{ms[k % ms.len()].life} " }
+    }
+    print(out.trim())
+}
+
+fn shrink(ms: [Mote]) { ms.pop() }
+
+@test(output = "true 0,")
+fn a_call_in_the_loop_body_still_raises_on_the_missing_element() {
+    let ms = motes(2)
+    let failed = try_call(() => {
+        for i in 0..ms.len() {
+            let m = ms[i]
+            shrink(ms)
+            ms[i] = Mote { x: m.x, y: m.y, life: 0 }
+        }
+    })
+    print("{failed} {join(ms)}")
+}
+
+@test(output = "1 2 3")
+fn a_struct_field_vector_walks_in_a_counted_loop() {
+    let s = Swarm { motes: motes(3) }
+    let out = ""
+    for i in 0..s.motes.len() { out = out + "{s.motes[i].x + 1.0} " }
+    print(out.trim())
+}
+
+@test(output = "3")
+fn a_loop_over_the_vector_reads_each_element() {
+    let ms = motes(3)
+    let n = 0
+    for m in ms { if m.life >= 0 { n += 1 } }
+    print(n)
+}
+
+@test(output = "true")
+fn an_index_past_the_end_still_raises() {
+    let ms = motes(2)
+    let failed = try_call(() => {
+        let _l = ms[2].life
+    })
+    print("{failed}")
+}
+
+fn main() {}

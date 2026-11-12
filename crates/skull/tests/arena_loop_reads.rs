@@ -112,14 +112,21 @@ fn unused_bindings_preserve_live_slots_and_removal_during_the_walk() {
     );
 }
 
+/// The unused leaf's column is never read, while the element index is
+/// still taken per turn: as the bare slot where the loop proves it (these
+/// walks), and as the checked form where it cannot (`unused_vec_element`
+/// calls `clear` in its body, so its turn after the clear must raise).
 #[test]
-fn vector_leaves_are_already_dead_but_the_element_check_stays() {
+fn vector_leaves_are_already_dead_but_the_element_index_stays() {
     let lua = emit_module(SOURCE);
     let column = function_body(&lua, "column_field");
     assert!(!column.contains(".y"), "{column}");
-    assert!(column.contains("__vec_checked_index"), "{column}");
+    assert!(column.contains(".x)[(c"), "{column}");
+    assert!(!column.contains("__vec_checked_index"), "{column}");
     let strided = function_body(&lua, "strided_field");
-    assert!(strided.contains("__vec_checked_index"), "{strided}");
+    assert!(!strided.contains("__vec_checked_index"), "{strided}");
+    let unused = function_body(&lua, "unused_vec_element");
+    assert!(unused.contains("__vec_checked_index"), "{unused}");
     assert_eq!(
         run_luajit(&format!(
             "{lua}\nlocal ok, err = pcall(unused_vec_element)\nassert(not ok and tostring(err):find('out of bounds'))\nprint('ok')"

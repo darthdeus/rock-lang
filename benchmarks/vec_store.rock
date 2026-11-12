@@ -178,6 +178,73 @@ fn fill_n_kept(xs: [int], n: int) -> float {
     return xs[0] as float
 }
 
+// --- Column-stored vectors: one element check shared by the leaf reads.
+
+nobox value Handle { scene: int, slot: int }
+nobox value Source { handle: Handle, gain: float, playing: bool }
+struct Bank { sources: [Source] }
+global SOURCES: [Source] = []
+
+fn sources(n: int) -> [Source] {
+    let out: [Source] = []
+    for i in 0..n { out.push(Source { handle: Handle { scene: i % 4, slot: i }, gain: (i % 7) as float, playing: i % 3 == 0 }) }
+    return out
+}
+
+// Stone's arena walks: a counted loop over a column vector, two leaves read.
+fn column_sum(ss: [Source]) -> float {
+    let t = 0.0
+    for i in 0..ss.len() { if ss[i].playing { t += ss[i].gain } }
+    return t
+}
+
+// The same walk through the protocol loop.
+fn column_each(ss: [Source]) -> float {
+    let t = 0.0
+    for s in ss { if s.playing { t += s.gain } }
+    return t
+}
+
+// A column vector held in a struct field, as Stone's banks hold sources.
+fn column_field(b: Bank) -> float {
+    let t = 0.0
+    for i in 0..b.sources.len() { t += b.sources[i].handle.slot as float }
+    return t
+}
+
+// A global column vector, as Stone's registries are.
+fn column_global() -> float {
+    let t = 0.0
+    for i in 0..SOURCES.len() { t += SOURCES[i].gain }
+    return t
+}
+
+// Whole-element stores into a column vector.
+fn column_store(ss: [Source]) -> float {
+    for i in 0..ss.len() { ss[i] = Source { handle: Handle { scene: i % 4, slot: i }, gain: (i % 5) as float, playing: i % 2 == 0 } }
+    return ss[0].gain
+}
+
+// Ends and a ring index under a non-empty guard, as the trail and history
+// buffers index.
+fn column_ring(ss: [Source], n: int) -> float {
+    let t = 0.0
+    if ss.len() > 0 {
+        t += ss[0].gain + ss[ss.len() - 1].gain
+        for k in 0..n { t += ss[k % ss.len()].gain }
+    }
+    return t
+}
+
+fn touch(ss: [Source], i: int) -> float { if i < 0 { ss.pop() }; return 1.0 }
+
+// A call in the body may shrink the vector: every check stays.
+fn column_call_kept(ss: [Source]) -> float {
+    let t = 0.0
+    for i in 0..ss.len() { t += ss[i].gain + touch(ss, i) }
+    return t
+}
+
 fn report(name: string, counts: string, elems: int, jit_s: float, interp_elems: int, interp_s: float, sink: float) {
     let ns = jit_s * 1000000000.0 / (elems as float)
     let interp_ns = interp_s * 1000000000.0 / (interp_elems as float)
@@ -224,4 +291,14 @@ fn main() {
     drive("copy_into", 1000, 20000, () => copy_into(xs, ys))
     drive("fill_call_kept", 1000, 20000, () => fill_call_kept(xs))
     drive("fill_n_kept", 1000, 20000, () => fill_n_kept(xs, 1000))
+    let ss = sources(1000)
+    let bank = Bank { sources: sources(1000) }
+    for s in sources(1000) { SOURCES.push(s) }
+    drive("column_sum", 1000, 20000, () => column_sum(ss))
+    drive("column_each", 1000, 20000, () => column_each(ss))
+    drive("column_field", 1000, 20000, () => column_field(bank))
+    drive("column_global", 1000, 20000, () => column_global())
+    drive("column_store", 1000, 20000, () => column_store(ss))
+    drive("column_ring", 1000, 20000, () => column_ring(ss, 998))
+    drive("column_call_kept", 1000, 20000, () => column_call_kept(ss))
 }

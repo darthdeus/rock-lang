@@ -61,6 +61,9 @@ impl Emitter<'_> {
                 self.write_opnd(out, *value);
                 out.push_str(" or false)");
             }
+            // A proven element index: the 1-based column slot, no check. A
+            // folded operand is parenthesized by its consumer.
+            Inst::VecIndexSlot(index) => self.write_vec_slot(out, *index),
             Inst::VecStrideFalseToNil(value) => {
                 out.push('(');
                 self.write_opnd(out, *value);

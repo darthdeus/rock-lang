@@ -39,6 +39,7 @@ pub fn always_inlinable(inst: &Inst) -> bool {
     matches!(
         inst,
         Inst::Const(_)
+            | Inst::VecIndexSlot(_)
             | Inst::IntAdd(..)
             | Inst::IntSub(..)
             | Inst::IntMul(..)

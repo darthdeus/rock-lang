@@ -210,14 +210,15 @@ fn column_vec_iterated_inside_a_lambda() {
         !body.contains("_data"),
         "lambda body read the single `_data` backing of a column-stored [V2]:\n{body}"
     );
-    // Columns were actually CHOSEN here: the column path bounds-checks once with
-    // `__vec_checked_index` then reads each leaf array raw, where the boxed path
-    // fetches the whole element with `__vec_checked_get`. Without this the test
-    // survives column storage being switched off entirely -- the `_data` absence
-    // above is equally true of a boxed element read that lives in the stdlib.
+    // Columns were actually CHOSEN here: the column path takes the element
+    // index once (the bare `(i + 1)` slot, since the loop proves it) then
+    // reads each leaf array raw, where the boxed path fetches the whole
+    // element with `__vec_checked_get`. Without this the test survives column
+    // storage being switched off entirely -- the `_data` absence above is
+    // equally true of a boxed element read that lives in the stdlib.
     assert!(
-        body.contains("__vec_checked_index") && !body.contains("__vec_checked_get"),
-        "lambda body must iterate COLUMN storage (one index check + per-leaf reads):\n{body}"
+        body.contains(".x)[(c") && !body.contains("__vec_checked_get"),
+        "lambda body must iterate COLUMN storage (one index + per-leaf reads):\n{body}"
     );
     assert_eq!(
         crate::common::run_main(&lua),
@@ -245,8 +246,8 @@ fn column_vec_iterated_inside_a_nested_fn() {
     // unspecialized `next` is absent -- the loop inlines to a FORL with no `next`
     // call at all, so the negative above holds under boxed storage too.
     assert!(
-        body.contains("__vec_checked_index") && !body.contains("__vec_checked_get"),
-        "nested fn must iterate COLUMN storage (one index check + per-leaf reads):\n{body}"
+        body.contains(".x)[(c") && !body.contains("__vec_checked_get"),
+        "nested fn must iterate COLUMN storage (one index + per-leaf reads):\n{body}"
     );
     assert_eq!(
         crate::common::run_main(&lua),

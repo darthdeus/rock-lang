@@ -1434,6 +1434,10 @@ impl BodyHasher {
                 self.tag(92);
                 self.inst_idx(*value);
             }
+            Inst::VecIndexSlot(index) => {
+                self.tag(93);
+                self.inst_idx(*index);
+            }
             Inst::MakeStruct { ty, fields } => {
                 self.tag(68);
                 self.option_string(*ty);

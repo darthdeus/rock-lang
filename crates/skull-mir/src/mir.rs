@@ -673,6 +673,13 @@ pub enum Inst {
         vec: Idx<Inst>,
         index: Idx<Inst>,
     },
+    /// The backing slot of a 0-based element index that was proven within
+    /// `[0, len)` (`skull_transform::elide_bounds_checks`): what
+    /// [`Inst::VecCheckedIndex`] yields, without the check. Each backend
+    /// renders its own column base (`index + 1` on Lua, `index` on JS), so
+    /// every consumer of the checked form consumes this one unchanged. Pure
+    /// and never raises.
+    VecIndexSlot(Idx<Inst>),
     /// Element count: `Vec` -> `base.len`, `NativeBuffer` -> `base.len`.
     Len {
         base: Idx<Inst>,
@@ -806,7 +813,8 @@ macro_rules! each_value_operand {
             | Inst::UintBitcastInt(value)
             | Inst::IntBitcastUint(value)
             | Inst::VecStrideNilToFalse(value)
-            | Inst::VecStrideFalseToNil(value) => $visit(value),
+            | Inst::VecStrideFalseToNil(value)
+            | Inst::VecIndexSlot(value) => $visit(value),
             Inst::Call { args, .. }
             | Inst::CallMulti { args, .. }
             | Inst::CallBoundMulti { args, .. } => args.$iter().for_each(&mut $visit),

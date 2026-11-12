@@ -129,6 +129,8 @@ impl Emitter<'_> {
             Inst::UintToInt(x) => self.render_val(*x)?,
             Inst::UintBitcastInt(x) => format!("({} | 0)", self.render_val(*x)?),
             Inst::IntBitcastUint(x) => format!("({} >>> 0)", self.render_val(*x)?),
+            // A proven element index: the 0-based column slot, no check.
+            Inst::VecIndexSlot(index) => self.render_val(*index)?,
             Inst::VecStrideNilToFalse(x) => {
                 let value = self.render_val(*x)?;
                 format!("((value) => value == null ? false : value)({value})")

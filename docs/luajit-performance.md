@@ -575,11 +575,118 @@ Other runtime checks Stone emits, counted in the same compile, that the same
 facts could prove: `__nb_checked_get` / `__nb_checked_set` /
 `__nb_checked_index` on NativeBuffers (62 / 31 / 54 sites; `{ptr, len}` has
 the same `len` shape, and the raw form is `b.ptr[i]`), `__vec_checked_index`
-on column-stored vectors (129 sites; the proven form is the 1-based index on
-Lua and the 0-based one on JS, so it needs a backend-aware slot
+on column-stored vectors (129 sites; done below, with a backend-aware slot
 instruction), and the 484 nil-key store guards
 (`if v ~= nil or getmetatable(b) ~= nil or b.f ~= nil then b.f = v end`),
 which a field-presence fact would remove where the field was read or written
 earlier on every path. `__map_col_slot_checked` (6) tests key presence, not
 an index, and `__rock_layout_check` (92) runs once at load; neither is a
 candidate.
+
+## Column element checks (2026-11-12)
+
+A column-stored `[E]` (an all-scalar `value` element) checks the element
+index once per access, `__vec_checked_index(vec, i)`, and the leaf reads
+then index their columns raw. The elision pass now proves that check with
+the same facts as the flat case and replaces it with the bare slot
+(`Inst::VecIndexSlot`: `i + 1` on Lua, `i` on JS), so every consumer of the
+checked form is unchanged. Three shapes Stone indexes with were added to the
+facts: an integer literal keys by its value, so `0 < xs.len` proves `xs[0]`;
+`xs.len - c` is below the length outright and nonnegative when `len > c - 1`
+holds; and `k % xs.len` lands in `[0, len)` once `0 < len` holds (floor
+modulo on both backends; without the guard an empty vector makes it NaN,
+which the helper passes through, an existing edge of the checker itself).
+
+`packages/stone`, same compile, checked -> elided:
+
+| Check | Before this pass | After | If every call left vectors alone |
+| --- | ---: | ---: | ---: |
+| `__vec_checked_index` | 129 | 103 | 78 |
+| `__vec_checked_get` | 661 | 633 | 327 |
+| `__vec_checked_set` | 57 | 57 | 52 |
+
+The last column is a one-off measurement with the call kill disabled, not a
+shipped mode: it is the ceiling a "this call does not shrink or rebind any
+vector" fact would reach with the present intraprocedural pass. The 103
+column checks that remain, by the shape of their index:
+
+- 32 inside a counted loop whose body calls a function (arena lookups,
+  batch pushes, removals) after the access. The call may pop the vector the
+  loop walks, so the bound read in the preheader is stale around the back
+  edge and the proof must drop. Only an effect fact about the callee opens
+  these.
+- 25 whose index is a parameter with no guard in the body: small accessors
+  (`section_time_metric(i)`, `drop_text_batch_for(i)`) whose callers hold
+  the proof. Splicing them into their callers (an `@inline` on the accessor)
+  moves the access into the caller's loop and the existing pass proves it;
+  so would a call-site specialization that carries the fact across.
+- 26 whose index is a computed register: the slot a column map hands back
+  (`__map_col_slot(m, key)` then `m.data[slot]`), the result of
+  `random_int(0, len)`, or `cur_count - 1`. These are data-structure
+  invariants (a map's slot is below its data length; the random range is
+  the length) that no local fact states.
+- 20 others: `len - 1` and literal indexes without a non-empty guard, two
+  modulo forms without one, and `i + 1` / `i - 1` of a proven `i`.
+
+`benchmarks/vec_store.rock` gained the column shapes. Apple M4 Max, bundled
+LuaJIT 2.1, 9 interleaved rounds, min / median ns per element with the JIT
+on, then min with the JIT off, checked -> elided:
+
+| Workload | JIT checked | JIT elided | Interpreter | mcode bytes |
+| --- | ---: | ---: | ---: | ---: |
+| column_sum (counted loop, two leaves) | 2.220 / 2.236 | 1.703 / 1.724 | 55.7 -> 21.9 | 1696 -> 1740 |
+| column_each (`for s in ss`) | 2.461 / 2.474 | 2.086 / 2.118 | 50.2 -> 26.2 | 1660 -> 1892 |
+| column_field (vector in a struct field) | 0.835 / 0.846 | 0.595 / 0.608 | 36.5 -> 13.6 | 1196 -> 1120 |
+| column_global (global vector) | 0.840 / 0.848 | 0.593 / 0.613 | 36.0 -> 12.6 | 1080 -> 1004 |
+| column_store (whole-element stores) | 4.630 / 4.686 | 4.270 / 4.373 | 60.4 -> 37.6 | 1728 -> 1644 |
+| column_ring (ends + modulo under a guard) | 2.173 / 2.182 | 1.896 / 1.963 | 30.2 -> 13.8 | 1640 -> 1236 |
+| column_call_kept (control) | 0.998 / 1.007 | 1.016 / 1.027 | 41.8 -> 42.1 | 1240 -> 1240 |
+
+The flat workloads of the earlier section repeated within noise. With the
+JIT on the column walks gain 15-29%: the check was already inlined, but its
+two compares and the length load sat in the trace per element and the `or`
+join kept a snapshot. The control is unchanged.
+
+### What would eliminate more
+
+The remaining checks, flat and column alike, fall to the same three causes,
+in order of weight:
+
+1. **Calls inside loops** (the 633 -> 327 ceiling above). The pass needs to
+   know that a callee does not shrink or rebind the vectors reachable from
+   the loop. `@pure` cannot say it (see `docs/purity.md`: opaque bodies are
+   trusted and `@debug_impure` is admitted), and most of these callees are
+   not pure anyway: they push to other vectors, write fields, log. The
+   practical route is an **inferred, transitive "may shrink a vector"
+   effect** over the call graph: a body shrinks if it stores `len`, calls
+   `pop` / `clear` / `remove_at` / `swap_remove` / `insert_at` / a stride
+   reserve, calls through a fn value or an opaque body, or calls a body that
+   does. Everything else keeps `le_len` facts across the call (field and
+   global rebinding still kill `same` ties, so a callee that *replaces* a
+   vector is handled by the existing memory kill). No annotation is needed
+   for the common case, and the escape hatches are exactly today's: an
+   opaque body counts as shrinking unless it is one of the stdlib's reviewed
+   growth-only forms. A declared `@noshrink` on an `inline(lua)` body would
+   extend the reviewed set without changing `@pure`.
+2. **Accessors called with a proven index.** `@inline` on the small
+   accessors moves the access to the caller, where the loop fact holds. A
+   cheaper variant that keeps the call: a per-call-site specialization that
+   passes an "index proven for parameter k" bit and emits the raw form in
+   that specialization. The inliner's plan machinery already keys bodies per
+   site, so the bit would ride on it.
+3. **Data-structure invariants.** A map slot is below its data length; a
+   random index drawn in `[0, len)` is in bounds; an arena's `cur_count - 1`
+   is below its storage. These want a fact a stdlib function can return:
+   `@returns_index_below(arg)` on `__map_col_slot_of` and `random_int`
+   would let the pass seed `lt(result, arg)` at the call. Narrow, cheap,
+   and checked nowhere but by review of the stdlib body, like `@pure` on
+   `inline(lua)` today.
+
+Guards (`len - 1` / `xs[0]` without `len > 0`) are source shapes: the index
+is unproven because the program does not check it, and adding the guard in
+Stone is the fix there.
+
+The other checked accesses carry over unchanged: `__nb_checked_*` on
+NativeBuffers (147 Stone sites) are the same proof over `{ptr, len}` and
+would take the same pass with a `NativeBufferInBounds` kind; the 484 nil-key
+store guards need a field-presence fact instead of a bounds fact.

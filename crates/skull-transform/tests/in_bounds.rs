@@ -509,3 +509,132 @@ fn a_body_with_a_lambda_is_left_alone() {
     p.run();
     assert_eq!(p.kind(store), ContainerKind::Vec);
 }
+
+// --- Column checks and the shapes Stone indexes with.
+
+impl Probe {
+    /// The shared element check of a column access, as lowering emits it.
+    fn check(&mut self, b: Idx<Block>, vec: Idx<Cell>, index: Idx<Inst>) -> Idx<Inst> {
+        let base = self.load(b, vec);
+        self.emit(b, Inst::VecCheckedIndex { vec: base, index })
+    }
+
+    fn is_slot(&self, id: Idx<Inst>) -> bool {
+        matches!(self.f.insts[id], Inst::VecIndexSlot(_))
+    }
+
+    /// `if 0 < xs.len { <body> }`: returns the guarded block.
+    fn nonempty_guard(&mut self) -> Idx<Block> {
+        let entry = self.f.entry;
+        let body = self.f.new_block();
+        let exit = self.f.new_block();
+        let zero = self.int(entry, 0);
+        let len = self.len_of(entry, self.xs);
+        let cond = self.emit(entry, Inst::IntLt(zero, len));
+        self.f.set_term(
+            entry,
+            Term::Branch {
+                cond,
+                then_bb: body,
+                else_bb: exit,
+            },
+        );
+        self.f.set_term(exit, Term::Return(vec![]));
+        body
+    }
+}
+
+#[test]
+fn a_column_check_in_a_counted_loop_becomes_the_slot() {
+    let mut p = Probe::new();
+    let (lp, _) = counted_loop(&mut p, |_, _| {});
+    let i = p.load(lp.body, p.i);
+    let check = p.check(lp.body, p.xs, i);
+    p.run();
+    assert!(p.is_slot(check), "{:?}", p.f.insts[check]);
+}
+
+#[test]
+fn a_column_check_after_a_call_in_the_loop_stays() {
+    let mut p = Probe::new();
+    let (lp, _) = counted_loop(&mut p, |p, b| p.unknown_call(b));
+    let i = p.load(lp.body, p.i);
+    let check = p.check(lp.body, p.xs, i);
+    p.run();
+    assert!(!p.is_slot(check));
+}
+
+#[test]
+fn index_zero_is_proven_by_a_nonempty_guard() {
+    let mut p = Probe::new();
+    let body = p.nonempty_guard();
+    let zero = p.int(body, 0);
+    let check = p.check(body, p.xs, zero);
+    let one = p.int(body, 1);
+    let second = p.check(body, p.xs, one);
+    p.f.set_term(body, Term::Return(vec![]));
+    p.run();
+    assert!(p.is_slot(check));
+    assert!(!p.is_slot(second), "index 1 needs `len > 1`");
+}
+
+#[test]
+fn the_last_element_is_proven_by_a_nonempty_guard() {
+    let mut p = Probe::new();
+    let body = p.nonempty_guard();
+    let len = p.len_of(body, p.xs);
+    let one = p.int(body, 1);
+    let last = p.emit(body, Inst::IntSub(len, one));
+    let check = p.check(body, p.xs, last);
+    let two = p.int(body, 2);
+    let before_last = p.emit(body, Inst::IntSub(len, two));
+    let second = p.check(body, p.xs, before_last);
+    p.f.set_term(body, Term::Return(vec![]));
+    p.run();
+    assert!(p.is_slot(check));
+    assert!(!p.is_slot(second), "`len - 2` needs `len > 1`");
+}
+
+#[test]
+fn the_last_element_without_a_guard_stays() {
+    let mut p = Probe::new();
+    let b = p.f.entry;
+    let len = p.len_of(b, p.xs);
+    let one = p.int(b, 1);
+    let last = p.emit(b, Inst::IntSub(len, one));
+    let check = p.check(b, p.xs, last);
+    p.f.set_term(b, Term::Return(vec![]));
+    p.run();
+    assert!(!p.is_slot(check));
+}
+
+#[test]
+fn a_modulo_of_the_length_is_proven_by_a_nonempty_guard() {
+    let mut p = Probe::new();
+    let body = p.nonempty_guard();
+    let i = p.load(body, p.i);
+    let len = p.len_of(body, p.xs);
+    let wrapped = p.emit(body, Inst::IntMod(i, len));
+    let check = p.check(body, p.xs, wrapped);
+    // The same shape against another vector's length proves nothing about `xs`.
+    let other_len = p.len_of(body, p.ys);
+    let wrapped_other = p.emit(body, Inst::IntMod(i, other_len));
+    let second = p.check(body, p.xs, wrapped_other);
+    p.f.set_term(body, Term::Return(vec![]));
+    p.run();
+    assert!(p.is_slot(check));
+    assert!(!p.is_slot(second));
+}
+
+#[test]
+fn a_modulo_without_a_guard_stays() {
+    let mut p = Probe::new();
+    let b = p.f.entry;
+    let i = p.load(b, p.i);
+    let len = p.len_of(b, p.xs);
+    let wrapped = p.emit(b, Inst::IntMod(i, len));
+    let check = p.check(b, p.xs, wrapped);
+    p.f.set_term(b, Term::Return(vec![]));
+    p.run();
+    assert!(!p.is_slot(check), "an empty vector makes the modulo NaN");
+}

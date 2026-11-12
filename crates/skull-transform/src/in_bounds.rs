@@ -1,7 +1,9 @@
 //! Bounds-check elision for `[T]` element accesses: a forward dataflow over
 //! in-bounds facts marks every `xs[i]` read or write whose index is provably in
 //! `[0, xs.len)` as [`ContainerKind::VecInBounds`], which the backends index
-//! raw. Results and errors are unchanged: an access is only marked where the
+//! raw, and replaces a proven column check ([`Inst::VecCheckedIndex`], the
+//! one check shared by the leaf reads of a column-stored or strided element)
+//! with the bare slot ([`Inst::VecIndexSlot`]). Results and errors are unchanged: an access is only marked where the
 //! check could not have raised.
 //!
 //! Three facts are tracked about a *key*, which is either the value an
@@ -88,7 +90,8 @@ pub fn elide_bounds_checks(ws: Option<&Workspace>, func: &mut MirFunc) -> usize 
                 | Inst::StoreIndex {
                     kind: ContainerKind::Vec,
                     ..
-                } => has_checked = true,
+                }
+                | Inst::VecCheckedIndex { .. } => has_checked = true,
                 _ => {}
             }
         }
@@ -167,7 +170,12 @@ pub fn elide_bounds_checks(ws: Option<&Workspace>, func: &mut MirFunc) -> usize 
                     index,
                     kind: ContainerKind::Vec,
                     ..
-                } if facts.in_bounds(func, index, base) => proven.push(id),
+                }
+                | Inst::VecCheckedIndex { vec: base, index }
+                    if facts.in_bounds(func, index, base) =>
+                {
+                    proven.push(id)
+                }
                 _ => {}
             }
             step(&mut facts, func, &ctx, id);
@@ -177,6 +185,10 @@ pub fn elide_bounds_checks(ws: Option<&Workspace>, func: &mut MirFunc) -> usize 
         match &mut func.insts[id] {
             Inst::Index { kind, .. } | Inst::StoreIndex { kind, .. } => {
                 *kind = ContainerKind::VecInBounds;
+            }
+            Inst::VecCheckedIndex { index, .. } => {
+                let index = *index;
+                func.insts[id] = Inst::VecIndexSlot(index);
             }
             _ => unreachable!(),
         }
@@ -216,9 +228,11 @@ fn relevant_values(func: &MirFunc, rpo: &[Idx<Block>]) -> Vec<bool> {
                 | Inst::VecCheckedIndex { vec: base, index } => {
                     mark(&[*base, *index], &mut relevant);
                 }
-                Inst::Len { base, .. } => mark(&[*base], &mut relevant),
+                // A length read is tied to its place so a later use of the
+                // value (a modulo, a `len - 1`) can name the vector.
+                Inst::Len { base, .. } => mark(&[id, *base], &mut relevant),
                 Inst::Field { base, field } if field.as_str() == LEN => {
-                    mark(&[*base], &mut relevant);
+                    mark(&[id, *base], &mut relevant);
                 }
                 Inst::Store { value, .. } => mark(&[*value], &mut relevant),
                 _ => {}
@@ -240,6 +254,7 @@ fn relevant_values(func: &MirFunc, rpo: &[Idx<Block>]) -> Vec<bool> {
                 Inst::IntAdd(a, b)
                 | Inst::IntSub(a, b)
                 | Inst::IntMul(a, b)
+                | Inst::IntMod(a, b)
                 | Inst::IntLt(a, b)
                 | Inst::IntLeq(a, b)
                 | Inst::IntGt(a, b)
@@ -274,6 +289,8 @@ fn edge_facts(func: &MirFunc, out: &Facts, from: Idx<Block>, to: Idx<Block>) -> 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum Key {
     Value(Idx<Inst>),
+    /// An integer literal, so two `Const` instructions of one value agree.
+    Const(i64),
     Cell(Idx<Cell>),
     Global(Ustr),
     Field(Box<Key>, Ustr),
@@ -298,9 +315,18 @@ impl Key {
     }
 }
 
+/// The key of `id` as a value: a literal by its value, anything else by
+/// its instruction.
+fn value_key(func: &MirFunc, id: Idx<Inst>) -> Key {
+    match func.insts[id] {
+        Inst::Const(Lit::Int(n)) => Key::Const(n),
+        _ => Key::Value(id),
+    }
+}
+
 /// The place `id` reads, when it reads one.
 fn place_of(func: &MirFunc, id: Idx<Inst>) -> Option<Key> {
-    let via = |x: Idx<Inst>| place_of(func, x).unwrap_or(Key::Value(x));
+    let via = |x: Idx<Inst>| place_of(func, x).unwrap_or_else(|| value_key(func, x));
     match &func.insts[id] {
         Inst::Load(c) => Some(Key::Cell(*c)),
         Inst::Global(g) => Some(Key::Global(*g)),
@@ -378,8 +404,8 @@ impl Facts {
     }
 
     /// The value `id` and every place known to hold it.
-    fn keys_of(&self, id: Idx<Inst>) -> Vec<Key> {
-        let mut keys = vec![Key::Value(id)];
+    fn keys_of(&self, func: &MirFunc, id: Idx<Inst>) -> Vec<Key> {
+        let mut keys = vec![value_key(func, id)];
         keys.extend(
             self.same
                 .iter()
@@ -398,7 +424,13 @@ impl Facts {
             Inst::IntAdd(a, b) | Inst::IntMul(a, b) => {
                 self.nonneg(func, *a) && self.nonneg(func, *b)
             }
-            _ => self.keys_of(id).iter().any(|k| self.nonneg.contains(k)),
+            // Floor modulo by a positive divisor lands in `[0, b)`; the
+            // divisor is positive when it is a length proven above zero.
+            Inst::IntMod(_, b) => !self.positive_lengths(func, *b).is_empty(),
+            _ => self
+                .keys_of(func, id)
+                .iter()
+                .any(|k| self.nonneg.contains(k)),
         }
     }
 
@@ -410,7 +442,7 @@ impl Facts {
         {
             return self.le_len_of(func, a);
         }
-        let keys = self.keys_of(id);
+        let keys = self.keys_of(func, id);
         self.le_len
             .iter()
             .filter(|(k, _)| keys.contains(k))
@@ -418,27 +450,77 @@ impl Facts {
             .collect()
     }
 
-    fn lt_of(&self, id: Idx<Inst>) -> Vec<Key> {
-        let keys = self.keys_of(id);
-        self.lt
+    /// The vectors whose live length `id` is below, by a recorded fact or
+    /// by shape: `n - c` for a length `n` of `v` and a constant `c >= 1`
+    /// (below `n` outright), and `x % n` for such a length (floor modulo
+    /// lands below a positive divisor).
+    fn lt_of(&self, func: &MirFunc, id: Idx<Inst>) -> Vec<Key> {
+        let keys = self.keys_of(func, id);
+        let mut out: Vec<Key> = self
+            .lt
             .iter()
             .filter(|(k, _)| keys.contains(k))
             .map(|(_, v)| v.clone())
+            .collect();
+        match func.insts[id] {
+            Inst::IntSub(a, b) if matches!(func.insts[b], Inst::Const(Lit::Int(c)) if c >= 1) => {
+                out.extend(self.lengths_of(func, a));
+            }
+            Inst::IntMod(_, b) => out.extend(self.positive_lengths(func, b)),
+            _ => {}
+        }
+        out
+    }
+
+    /// The vectors whose live length the value `id` is: a `len` read of
+    /// `v`, by the tie the read established.
+    fn lengths_of(&self, func: &MirFunc, id: Idx<Inst>) -> Vec<Key> {
+        self.keys_of(func, id)
+            .into_iter()
+            .filter_map(|k| match k {
+                Key::Field(base, f) if f.as_str() == LEN => Some(*base),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// [`Facts::lengths_of`], kept to the vectors proven non-empty
+    /// (`0 < len` holds).
+    fn positive_lengths(&self, func: &MirFunc, id: Idx<Inst>) -> Vec<Key> {
+        self.lengths_of(func, id)
+            .into_iter()
+            .filter(|v| self.lt.contains(&(Key::Const(0), v.clone())))
             .collect()
     }
 
     fn in_bounds(&self, func: &MirFunc, index: Idx<Inst>, vec: Idx<Inst>) -> bool {
-        if !self.nonneg(func, index) {
+        let below = self.lt_of(func, index);
+        if below.is_empty() {
             return false;
         }
-        let below = self.lt_of(index);
-        self.keys_of(vec).iter().any(|v| below.contains(v))
+        // `len - c` is nonnegative when `len > c - 1`; any index may also
+        // be known nonnegative by an earlier access or guard.
+        let by_length = match func.insts[index] {
+            Inst::IntSub(a, b) if matches!(func.insts[b], Inst::Const(Lit::Int(c)) if c >= 1) => {
+                let Inst::Const(Lit::Int(c)) = func.insts[b] else {
+                    unreachable!()
+                };
+                self.lengths_of(func, a)
+                    .iter()
+                    .any(|v| self.lt.contains(&(Key::Const(c - 1), v.clone())))
+            }
+            _ => false,
+        };
+        if !by_length && !self.nonneg(func, index) {
+            return false;
+        }
+        self.keys_of(func, vec).iter().any(|v| below.contains(v))
     }
 
     /// `v[k]` ran without raising, or was proven not to.
-    fn checked_access(&mut self, vec: Idx<Inst>, index: Idx<Inst>) {
-        let vecs = self.keys_of(vec);
-        for k in self.keys_of(index) {
+    fn checked_access(&mut self, func: &MirFunc, vec: Idx<Inst>, index: Idx<Inst>) {
+        let vecs = self.keys_of(func, vec);
+        for k in self.keys_of(func, index) {
             self.nonneg.insert(k.clone());
             for v in &vecs {
                 self.lt.insert((k.clone(), v.clone()));
@@ -472,7 +554,7 @@ fn cond_facts(facts: &mut Facts, func: &MirFunc, cond: Idx<Inst>, truth: bool) {
 /// `a < b` holds.
 fn lt_fact(facts: &mut Facts, func: &MirFunc, a: Idx<Inst>, b: Idx<Inst>) {
     let bounds = facts.le_len_of(func, b);
-    for k in facts.keys_of(a) {
+    for k in facts.keys_of(func, a) {
         for v in &bounds {
             facts.lt.insert((k.clone(), v.clone()));
         }
@@ -483,7 +565,7 @@ fn lt_fact(facts: &mut Facts, func: &MirFunc, a: Idx<Inst>, b: Idx<Inst>) {
         _ => facts.nonneg(func, a),
     };
     if a_floor {
-        for k in facts.keys_of(b) {
+        for k in facts.keys_of(func, b) {
             facts.nonneg.insert(k);
         }
     }
@@ -492,7 +574,7 @@ fn lt_fact(facts: &mut Facts, func: &MirFunc, a: Idx<Inst>, b: Idx<Inst>) {
 /// `a <= b` holds.
 fn leq_fact(facts: &mut Facts, func: &MirFunc, a: Idx<Inst>, b: Idx<Inst>) {
     if facts.nonneg(func, a) {
-        for k in facts.keys_of(b) {
+        for k in facts.keys_of(func, b) {
             facts.nonneg.insert(k);
         }
     }
@@ -556,12 +638,12 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
     }
     match inst {
         Inst::Len { base, .. } => {
-            for v in facts.keys_of(*base) {
+            for v in facts.keys_of(func, *base) {
                 facts.le_len.insert((Key::Value(id), v));
             }
         }
         Inst::Field { base, field } if field.as_str() == LEN => {
-            for v in facts.keys_of(*base) {
+            for v in facts.keys_of(func, *base) {
                 facts.le_len.insert((Key::Value(id), v));
             }
         }
@@ -570,19 +652,19 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
             index,
             kind: ContainerKind::Vec | ContainerKind::VecInBounds,
         }
-        | Inst::VecCheckedIndex { vec: base, index } => facts.checked_access(*base, *index),
+        | Inst::VecCheckedIndex { vec: base, index } => facts.checked_access(func, *base, *index),
         Inst::StoreIndex {
             base, index, kind, ..
         } => {
             facts.forget(|k| matches!(k, Key::Elem(..)));
             if matches!(kind, ContainerKind::Vec | ContainerKind::VecInBounds) {
-                facts.checked_access(*base, *index);
+                facts.checked_access(func, *base, *index);
             }
         }
         Inst::Store { cell, value } => {
             let nonneg = facts.nonneg(func, *value);
             let le_len = facts.le_len_of(func, *value);
-            let lt = facts.lt_of(*value);
+            let lt = facts.lt_of(func, *value);
             facts.forget_cell(*cell);
             let k = Key::Cell(*cell);
             if nonneg {
