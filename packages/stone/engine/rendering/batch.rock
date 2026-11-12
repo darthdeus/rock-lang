@@ -232,7 +232,7 @@ fn restore_after_custom_draw(target: int, depth: DepthMode, blend: BlendMode) {
     end
     local new_cap = b.capacity
     while new_cap < requested do new_cap = new_cap * 2 end
-    local new_ptr = ffi.new("Vertex[?]", new_cap)
+    local new_ptr = __rock_nb_alloc("Vertex", new_cap)
     if b.count > 0 then
         ffi.copy(new_ptr, b.verts.ptr, b.count * ffi.sizeof("Vertex"))
     end

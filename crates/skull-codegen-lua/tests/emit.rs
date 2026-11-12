@@ -728,10 +728,11 @@ fn run(src: &str, driver: &str) -> String {
     // runtime prelude, which this bare harness does not emit -- pull in the
     // canonical definition (one copy, shared with `skull::runtime_prelude`).
     let mut lua = format!(
-        "local bit = require('bit')\nlocal ffi = require('ffi')\n{}\n{}\n{}\nfunction __nb_checked_get(b, i) if i < 0 or i >= b.len then error('NativeBuffer index out of bounds') end return b.ptr[i] end\nfunction __nb_checked_set(b, i, v) if i < 0 or i >= b.len then error('NativeBuffer index out of bounds') end b.ptr[i] = v end\n",
+        "local bit = require('bit')\nlocal ffi = require('ffi')\n{}\n{}\n{}\n{}\nfunction __nb_checked_get(b, i) if i < 0 or i >= b.len then error('NativeBuffer index out of bounds') end return b.ptr[i] end\nfunction __nb_checked_set(b, i, v) if i < 0 or i >= b.len then error('NativeBuffer index out of bounds') end b.ptr[i] = v end\n",
         skull_codegen_lua::FN_MT_PRELUDE,
         skull_codegen_lua::UINT_CHECK_PRELUDE,
-        skull_codegen_lua::VEC_CHECK_SHIMS
+        skull_codegen_lua::VEC_CHECK_SHIMS,
+        skull_codegen_lua::NB_ALLOC_PRELUDE
     );
     for inst in graph.expanded() {
         let f = &ws.module(inst.func.module).functions[inst.func.func];

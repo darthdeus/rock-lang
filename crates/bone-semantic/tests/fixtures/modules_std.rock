@@ -556,6 +556,7 @@
 // prelude: native_buffer_i16
 // prelude: native_buffer_i8
 // prelude: native_buffer_int
+// prelude: native_buffer_offheap_bytes
 // prelude: native_buffer_u16
 // prelude: native_buffer_u32
 // prelude: native_buffer_u8

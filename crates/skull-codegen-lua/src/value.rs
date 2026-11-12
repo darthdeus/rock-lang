@@ -359,9 +359,10 @@ impl Emitter<'_> {
             }
 
             Inst::FfiNewArray { ctype, count, .. } => {
+                // The prelude's allocator: large buffers leave the Lua heap.
                 let _ = write!(
                     out,
-                    "ffi.new(\"{}[?]\", ",
+                    "__rock_nb_alloc(\"{}\", ",
                     skull_mir::mangle::type_symbol(self.ws, *ctype)
                 );
                 self.write_opnd(out, *count);

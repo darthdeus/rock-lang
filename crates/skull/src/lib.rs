@@ -507,6 +507,7 @@ fn runtime_prelude() -> &'static str {
         let out = PRELUDE_TEMPLATE
             .replace("{FN_MT}", "")
             .replace("{UINT_CHECK}", skull_codegen_lua::UINT_CHECK_PRELUDE)
+            .replace("{NB_ALLOC}", skull_codegen_lua::NB_ALLOC_PRELUDE)
             .replace("{LEAF_VIEWS}", &skull_mir::lower::leaf_views_lua_table())
             .replace(
                 "{NB_PRIM_STORAGE}",
@@ -700,6 +701,7 @@ local function __rock_nb_storage(ctype, elem_size, views)
   _G.__ROCK_NB_STORAGE[tostring(ct)] = { ctype = ctype, elem_size = elem_size, views = views }
 end
 _G.__rock_nb_storage = __rock_nb_storage
+{NB_ALLOC}
 {NB_PRIM_STORAGE}
 if not _G.__rock_on_hot_reload then _G.__rock_on_hot_reload = {} end
 -- Mutable globals and statics live in one table per process, created by the

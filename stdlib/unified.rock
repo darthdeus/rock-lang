@@ -87,7 +87,10 @@ value Storage { }
 // NativeBuffer<T> — typed contiguous ffi buffers
 // ============================================================================
 //
-// Wraps an `ffi.new("T[?]", n)` cdata with a phantom type parameter. Enables
+// Wraps contiguous `T` storage with a phantom type parameter. Storage under
+// 64 KB is an `ffi.new("T[?]", n)` array on the Lua heap; larger storage is
+// allocated outside it and `ptr` is a `T*` (`__rock_nb_alloc` in the emitted
+// prelude; docs/luajit-performance.md, "Large native buffers"). Enables
 // type-safe construction + indexed read/write for bulk numeric buffers, while
 // still passing through to C FFI externs as a raw pointer via `.ptr`.
 //
@@ -108,7 +111,7 @@ value NativeBuffer<T> {
 }
 
 // Compiler intrinsic: every call is expanded by skull to `NativeBuffer { ptr =
-// ffi.new("<ctype>[?]", n), len = n }` with the concrete element cdef name
+// __rock_nb_alloc("<ctype>", n), len = n }` with the concrete element cdef name
 // resolved at the call site (skull owns the value-struct ct names). Legal only
 // where `T` resolves to an FFI-clean value struct or int/float/bool; a
 // GC-carrying or opaque-generic `T` is a spanned emit-time error. The body is a
@@ -510,11 +513,15 @@ value NativeBufferU16 { ptr: PtrU16, len: int }
 value NativeBufferI16 { ptr: PtrI16, len: int }
 value NativeBufferU32 { ptr: PtrU32, len: int }
 
-@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u8(n: int)  -> PtrU8  = 'local r = ffi.new("uint8_t[?]", n); return r'
-@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i8(n: int)  -> PtrI8  = 'local r = ffi.new("int8_t[?]", n); return r'
-@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u16(n: int) -> PtrU16 = 'local r = ffi.new("uint16_t[?]", n); return r'
-@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i16(n: int) -> PtrI16 = 'local r = ffi.new("int16_t[?]", n); return r'
-@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u32(n: int) -> PtrU32 = 'local r = ffi.new("uint32_t[?]", n); return r'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u8(n: int)  -> PtrU8  = 'return __rock_nb_alloc("uint8_t", n)'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i8(n: int)  -> PtrI8  = 'return __rock_nb_alloc("int8_t", n)'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u16(n: int) -> PtrU16 = 'return __rock_nb_alloc("uint16_t", n)'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i16(n: int) -> PtrI16 = 'return __rock_nb_alloc("int16_t", n)'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u32(n: int) -> PtrU32 = 'return __rock_nb_alloc("uint32_t", n)'
+
+// Bytes of native buffer storage currently allocated outside the Lua heap,
+// which `collectgarbage("count")` does not include.
+@nomangle inline(lua) fn native_buffer_offheap_bytes() -> int = "return __ROCK_NB_OFFHEAP_STATS.live_bytes"
 
 fn native_buffer_u8(n: int)  -> NativeBufferU8  { return NativeBufferU8  { ptr: __nb_alloc_u8(n),  len: n } }
 fn native_buffer_i8(n: int)  -> NativeBufferI8  { return NativeBufferI8  { ptr: __nb_alloc_i8(n),  len: n } }
@@ -1829,21 +1836,21 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
         return obj
     end
     if type(obj) == "cdata" then
-        local info = __rock_c_struct_of(obj)
-        if info then return info.copy(obj) end
-        local storage = _G.__ROCK_NB_STORAGE
-        local desc = storage and storage[tostring(ffi.typeof(obj))]
+        -- Storage first: an off-heap struct buffer is a `T*`, which
+        -- `__rock_c_struct_of` would take for one struct.
+        local desc, bytes = __rock_nb_storage_of(obj)
         if desc then
             if seen[obj] then return seen[obj] end
-            local bytes = ffi.sizeof(obj)
             if bytes % desc.elem_size ~= 0 then
                 error("deepcopy: described storage has incomplete elements", 0)
             end
-            local copy = ffi.new(desc.ctype .. "[?]", bytes / desc.elem_size)
+            local copy = __rock_nb_alloc(desc.ctype, bytes / desc.elem_size)
             seen[obj] = copy
             ffi.copy(copy, obj, bytes)
             return copy
         end
+        local info = __rock_c_struct_of(obj)
+        if info then return info.copy(obj) end
         -- Foreign pointers have no owned storage description to copy.
         return obj
     end
@@ -1863,14 +1870,13 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
     local copy = {}
     seen[obj] = copy
     local storage_views
-    local storage = _G.__ROCK_NB_STORAGE
     for k, v in __rock_field_pairs(obj, "copy") do
         -- copy *both* key and value, in case either is a table.
         local copied_key = __rock_deepcopy_value(k, seen)
         local copied_value = __rock_deepcopy_value(v, seen)
         copy[copied_key] = copied_value
-        if storage and type(v) == "cdata" then
-            local desc = storage[tostring(ffi.typeof(v))]
+        if type(v) == "cdata" then
+            local desc = __rock_nb_storage_of(v)
             if desc and next(desc.views) then
                 storage_views = storage_views or {}
                 storage_views[#storage_views + 1] = { source = v, target = copied_value, views = desc.views }
@@ -2759,6 +2765,7 @@ const EPSILON: float = 0.0000001
 
 @intrinsic @nomangle inline(lua) fn inspect(obj: any, cycle_detect: bool = true, precision: int = -1) -> string = """
     if type(obj) == "cdata" then
+        if __rock_nb_storage_of(obj) then return tostring(obj) end
         local info = __rock_c_struct_of(obj)
         if info then return info.inspect(obj) end
         return tostring(obj)
