@@ -2699,14 +2699,19 @@ fn draw_fps_overlay() {
     if dt <= 0.0 { return () }
     FPS_OVERLAY_DRAW_COUNT += 1
 
-    // Rendered = throughput (vsync-capped); effective = the uncapped CPU
-    // ceiling (excludes the present block).
-    let timing = frame_timing_snapshot()
-    let render_fps = int(timing.rendered_fps + 0.5)
-    let eff_fps = int(timing.effective_fps + 0.5)
-    let render_ms = format_float(timing.rendered.mean, 0, 1)
-    let cpu_ms = format_float(timing.effective.mean, 0, 1)
-    let text = "FPS: {render_fps}  (eff {eff_fps})\ndt: {render_ms}ms  cpu: {cpu_ms}ms"
+    FPS_OVERLAY_TEXT_AGE += dt
+    if FPS_OVERLAY_TEXT == "" || FPS_OVERLAY_TEXT_AGE >= FPS_TEXT_REFRESH_SECS {
+        FPS_OVERLAY_TEXT_AGE = 0.0
+        // Rendered = throughput (vsync-capped); effective = the uncapped CPU
+        // ceiling (excludes the present block).
+        let timing = frame_timing_snapshot()
+        let render_fps = int(timing.rendered_fps + 0.5)
+        let eff_fps = int(timing.effective_fps + 0.5)
+        let render_ms = format_float(timing.rendered.mean, 0, 1)
+        let cpu_ms = format_float(timing.effective.mean, 0, 1)
+        FPS_OVERLAY_TEXT = "FPS: {render_fps}  (eff {eff_fps})\ndt: {render_ms}ms  cpu: {cpu_ms}ms"
+    }
+    let text = FPS_OVERLAY_TEXT
 
     // Grey text over a bright HUD is unreadable, so the readout carries its
     // own backing. Measured rather than a fixed box: the string's width moves
@@ -2718,6 +2723,11 @@ fn draw_fps_overlay() {
 }
 
 pub const FPS_TEXT_SIZE: float = 16.0
+// The numbers move almost every frame, and every new string is formatted,
+// measured and laid out again. A few readings a second are also easier to read.
+pub const FPS_TEXT_REFRESH_SECS: float = 0.25
+global FPS_OVERLAY_TEXT: string = ""
+global FPS_OVERLAY_TEXT_AGE: float = 0.0
 pub const FPS_TEXT_ORIGIN: Vec2 = v(10.0, 18.0)
 pub const FPS_BG_PAD: float = 5.0
 // Neutral grey text on a neutral near-black plate. Both are deliberately

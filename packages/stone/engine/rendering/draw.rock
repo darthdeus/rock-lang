@@ -636,12 +636,12 @@ fn set_scene_active_rects(scene: IVec2) {
     // Never past what was allocated (token-sized targets, see SCENE_TARGETS_TOKEN).
     let alloc = scene_target_extent_for(SCENE_CAPACITY)
     let scene = iv(min(scene.x, alloc.x), min(scene.y, alloc.y))
-    for c in [
-        screen_canvas, screen_canvas_2, final_canvas, final_canvas_2,
-        visible_id_canvas, outline_target_canvas
-    ] {
-        set_canvas_active(c, scene.x, scene.y)
-    }
+    set_canvas_active(screen_canvas, scene.x, scene.y)
+    set_canvas_active(screen_canvas_2, scene.x, scene.y)
+    set_canvas_active(final_canvas, scene.x, scene.y)
+    set_canvas_active(final_canvas_2, scene.x, scene.y)
+    set_canvas_active(visible_id_canvas, scene.x, scene.y)
+    set_canvas_active(outline_target_canvas, scene.x, scene.y)
     if world_surface_owner_canvas != null { set_canvas_active(world_surface_owner_canvas,scene.x,scene.y) }
     if world_normal_canvas != null { set_canvas_active(world_normal_canvas,scene.x,scene.y) }
     if world_material_canvas != null { set_canvas_active(world_material_canvas,scene.x,scene.y) }
