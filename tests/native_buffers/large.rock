@@ -1,4 +1,4 @@
-// Storage of 64 KB or more is allocated outside the Lua heap and `ptr` is a
+// Storage of 16 KB or more is allocated outside the Lua heap and `ptr` is a
 // pointer instead of an array (`__rock_nb_alloc` in the emitted prelude). The
 // buffer must behave the same; what differs is that a pointer does not know
 // its length and that a pointer to a struct passes `ffi.istype` for the
@@ -26,17 +26,17 @@ fn large_verts(n: int) -> NativeBuffer<LargeVert> {
 fn only_large_storage_leaves_the_lua_heap() {
     large_collect()
     let before = native_buffer_offheap_bytes()
-    let small = native_buffer_u8(65535)
+    let small = native_buffer_u8(16383)
     assert_eq(native_buffer_offheap_bytes(), before)
-    let large = native_buffer_u8(65536)
-    assert_eq(native_buffer_offheap_bytes(), before + 65536)
+    let large = native_buffer_u8(16384)
+    assert_eq(native_buffer_offheap_bytes(), before + 16384)
     // Zeroed like an ffi.new array, and writable to its last element.
     assert_eq(nb_get(large, 0), 0)
-    assert_eq(nb_get(large, 65535), 0)
-    nb_set(large, 65535, 200)
-    nb_set(small, 65534, 100)
-    assert_eq(nb_get(large, 65535), 200)
-    assert_eq(nb_get(small, 65534), 100)
+    assert_eq(nb_get(large, 16383), 0)
+    nb_set(large, 16383, 200)
+    nb_set(small, 16382, 100)
+    assert_eq(nb_get(large, 16383), 200)
+    assert_eq(nb_get(small, 16382), 100)
 }
 
 fn large_dropped() -> int {

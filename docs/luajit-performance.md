@@ -345,7 +345,7 @@ This section is about collector cost, not traces.
 `native_buffer_alloc<T>`, the sized constructors (`native_buffer_u8` and the
 rest) and `FlatVec` storage all allocate through `__rock_nb_alloc(ctype, n)`
 (`NB_ALLOC_PRELUDE` in `crates/skull-codegen-lua/src/preludes.rs`). Storage
-below 64 KB is an `ffi.new("T[?]", n)` array on the Lua heap. Storage of 64 KB
+below 16 KB is an `ffi.new("T[?]", n)` array on the Lua heap. Storage of 16 KB
 or more comes from `calloc`; `ptr` is then a `T*` with an `ffi.gc` finalizer
 that frees it.
 
@@ -377,6 +377,26 @@ Same game, the same build with and without the mechanism
 It does not remove collector hitches. What remains is ordinary Lua-heap
 allocation (tables, strings, small cdata) in bursts of one to two megabytes;
 those are fixed where they are allocated.
+
+### The threshold
+
+The threshold was 64 KB at first. After the megabyte buffers left the heap,
+the frames that still grew it by several hundred KB were mostly retained
+buffers of 16 to 64 KB allocated a few at a time: fitted mesh vertex storage,
+instance buffers, the first steps of a growing `FlatVec`. Same game, the same
+build at 64 KB and at 16 KB (`ROCK_NB_OFFHEAP_MIN`), interleaved pairs:
+
+- Frames growing the Lua heap by more than 300 KB in the main walking
+  scenario: 32 of 1800 down to 5 or 6. In a riding scenario 13 to 19 down to 5.
+  No change in a scenario that loads nothing new.
+- Lua heap about 215 MB down to about 165 MB; off-heap buffers about 580 up to
+  about 1400, holding about 140 MB.
+- Mean frame time unchanged beyond run-to-run variation in four scenarios; the
+  forced-collection guard did not fire.
+
+4 KB was also tried and gave no further reduction in those frames. Each
+off-heap buffer costs a `calloc`, a finalizer registration and a `free` at
+collection, so the threshold stays as high as the measurements allow.
 
 ### What differs for off-heap storage
 

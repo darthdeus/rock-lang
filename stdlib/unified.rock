@@ -88,7 +88,7 @@ value Storage { }
 // ============================================================================
 //
 // Wraps contiguous `T` storage with a phantom type parameter. Storage under
-// 64 KB is an `ffi.new("T[?]", n)` array on the Lua heap; larger storage is
+// 16 KB is an `ffi.new("T[?]", n)` array on the Lua heap; larger storage is
 // allocated outside it and `ptr` is a `T*` (`__rock_nb_alloc` in the emitted
 // prelude; docs/luajit-performance.md, "Large native buffers"). Enables
 // type-safe construction + indexed read/write for bulk numeric buffers, while
