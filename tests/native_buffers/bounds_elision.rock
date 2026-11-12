@@ -51,4 +51,18 @@ fn a_checked_read_covers_the_write_that_follows() {
     print(b[1])
 }
 
+fn read_after_native_write(xs: [int], indices: NativeBuffer<int>) -> int {
+    if indices[0] < 0 || indices[0] >= xs.len() { return 0 }
+    nb_set(indices, 0, 999)
+    return xs[indices[0]]
+}
+
+@test(output = "true")
+fn native_write_invalidates_an_element_used_as_an_index() {
+    let indices = native_buffer_int(1)
+    indices[0] = 0
+    let xs = [7]
+    print(try_call(() => { let result = read_after_native_write(xs, indices) }))
+}
+
 fn main() {}

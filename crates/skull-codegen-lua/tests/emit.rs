@@ -3116,10 +3116,18 @@ fn column_access_in_a_counted_loop_drops_the_element_check() {
     assert!(lua.contains("(c0.x)[(c2 + 1)]"), "{lua}");
 }
 
-/// Index 0 and `len - 1` are proven by a `len > 0` guard; without it the
-/// check stays.
+/// A nonempty guard proves index zero, but not a strict bound for `len - 1`.
 #[test]
-fn column_first_and_last_are_proven_by_a_nonempty_guard() {
+fn column_first_is_proven_but_length_offsets_need_a_strict_bound() {
+    let lua = emit_inlined(
+        "nobox value Mote { x: float, y: float, life: int }
+        fn first(ms: [Mote]) -> float {
+            if ms.len() > 0 { return ms[0].x }
+            return 0.0
+        }",
+        "first",
+    );
+    assert!(!lua.contains("__vec_checked_index("), "{lua}");
     let lua = emit_inlined(
         "nobox value Mote { x: float, y: float, life: int }
         fn ends(ms: [Mote]) -> float {
@@ -3128,7 +3136,7 @@ fn column_first_and_last_are_proven_by_a_nonempty_guard() {
         }",
         "ends",
     );
-    assert!(!lua.contains("__vec_checked_index("), "{lua}");
+    assert!(lua.contains("__vec_checked_index("), "{lua}");
     let lua = emit_inlined(
         "nobox value Mote { x: float, y: float, life: int }
         fn last(ms: [Mote]) -> float { return ms[ms.len() - 1].x }",
@@ -3207,6 +3215,37 @@ fn a_callee_that_provably_leaves_the_vector_alone_keeps_the_proof() {
         "inline(lua) fn raw(i: int) -> int = \"return i\"
         fn fill(xs: [int]) { for i in 0..xs.len() { xs[i] = raw(i) } }"
     ));
+}
+
+#[test]
+fn native_writes_invalidate_element_value_bounds() {
+    for writer in ["nb_set(indices, 0, 999)", "overwrite(indices.ptr, 999)"] {
+        let src = format!(
+            r#"
+extern(ffi, "probe") fn overwrite(p: Ptr<int>, value: int)
+fn lookup(xs: [int], indices: NativeBuffer<int>) -> int {{
+    if indices[0] < 0 || indices[0] >= xs.len() {{ return 0 }}
+    {writer}
+    return xs[indices[0]]
+}}
+"#
+        );
+        let lua = emit_inlined(&src, "lookup");
+        assert!(lua.contains("__vec_checked_get("), "{writer}:\n{lua}");
+    }
+}
+
+#[test]
+fn a_registered_ffi_callback_can_run_through_another_binding() {
+    let lua = emit_inlined(
+        r#"
+extern(ffi, "probe") fn register(callback: fn())
+extern(ffi, "probe") fn tick() -> int
+fn fill(xs: [int]) { for i in 0..xs.len() { xs[i] = tick() } }
+"#,
+        "fill",
+    );
+    assert!(lua.contains("__vec_checked_set("), "{lua}");
 }
 
 /// A NativeBuffer access a loop proves indexes the C array raw; the stdlib

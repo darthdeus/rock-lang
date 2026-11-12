@@ -21,7 +21,7 @@
 //! (a cycle of bodies that write nothing writes nothing), computed once per
 //! workspace and dropped whenever a module's inference is replaced.
 
-use crate::hir::{BodyOwner, Callee, Expr, Function, Statement, TyId, TypeExpr};
+use crate::hir::{BodyOwner, BuiltinTy, Callee, Expr, Function, Statement, TyId, TypeExpr};
 use crate::prelude::*;
 use crate::workspace::{BoundNext, BoundTree, Workspace};
 
@@ -115,6 +115,17 @@ impl EffectTable {
     }
 
     pub fn compute(ws: &Workspace) -> EffectTable {
+        // A callback registered with one binding can run through another
+        // binding in the same library, even when that call takes no callback.
+        let callback_libraries: FxHashSet<Ustr> = ws
+            .modules
+            .iter()
+            .flat_map(|module| module.functions.iter())
+            .filter_map(|(_, f)| {
+                f.ffi_lib
+                    .filter(|_| f.param_decls.iter().any(|p| is_fn_typed(ws, p.ty)))
+            })
+            .collect();
         // Pass one: each body's own writes and its resolved callees.
         let mut local: Vec<Vec<(MemEffect, Vec<(ModuleId, Idx<Function>)>)>> =
             Vec::with_capacity(ws.modules.len());
@@ -124,11 +135,17 @@ impl EffectTable {
             for (fid, f) in module.functions.iter() {
                 let bi = inference.and_then(|inf| inf.per_fn.get(&BodyOwner::Function(fid)));
                 let body = module.bodies.get(&BodyOwner::Function(fid));
-                fns.push(match (opaque_effect(ws, module.id, f), body, bi) {
-                    (Some(effect), _, _) => (effect, Vec::new()),
-                    (None, Some(body), Some(bi)) => body_effect(ws, body, bi),
-                    _ => (MemEffect::all(), Vec::new()),
-                });
+                fns.push(
+                    match (
+                        opaque_effect(ws, module.id, f, &callback_libraries),
+                        body,
+                        bi,
+                    ) {
+                        (Some(effect), _, _) => (effect, Vec::new()),
+                        (None, Some(body), Some(bi)) => body_effect(ws, body, bi),
+                        _ => (MemEffect::all(), Vec::new()),
+                    },
+                );
             }
             local.push(fns);
         }
@@ -175,19 +192,34 @@ const PUSH_BODY: [&str; 2] = ["vec.len = vec.len + 1", "vec._data[vec.len] = ite
 
 /// The effect of a function whose body cannot be walked, or `None` for a
 /// Rock body.
-fn opaque_effect(ws: &Workspace, mid: ModuleId, f: &Function) -> Option<MemEffect> {
+fn opaque_effect(
+    ws: &Workspace,
+    mid: ModuleId,
+    f: &Function,
+    callback_libraries: &FxHashSet<Ustr>,
+) -> Option<MemEffect> {
     if !f.is_extern && f.inline_body.is_none() {
         return None;
     }
     // A C function reached through the FFI cannot touch a Lua table or a JS
     // object: it sees only the scalars and the native memory it is handed.
-    // One that takes a function could call back into the program, so it
-    // keeps the unknown effect.
-    if f.is_extern && f.ffi_lib.is_some() && !f.param_decls.iter().any(|p| is_fn_typed(ws, p.ty)) {
-        return Some(MemEffect::none());
+    // NativeBuffer elements alias that native memory, so their value facts
+    // must be killed. A library with callback bindings may also mutate Lua.
+    if f.is_extern
+        && let Some(lib) = f.ffi_lib
+    {
+        return Some(if callback_libraries.contains(&lib) {
+            MemEffect::all()
+        } else {
+            MemEffect {
+                elems: true,
+                ..MemEffect::none()
+            }
+        });
     }
     // `@nowrite`: the body stores to no table field, element or global the
-    // program can reach (native memory, IO, allocation and raising are fine).
+    // program can reach, including NativeBuffer storage (IO, allocation and
+    // raising are fine).
     // `@writes_elems`: it stores only into elements of containers it is
     // handed. Both are promises about raw target code that nothing but
     // review can check, exactly like the body itself; `@pure` on an opaque
@@ -226,6 +258,7 @@ fn is_fn_typed(ws: &Workspace, ty: TyId) -> bool {
     };
     match ws.module(mid).ty_arena[idx] {
         TypeExpr::Function { .. } => true,
+        TypeExpr::Builtin(BuiltinTy::Any) => true,
         TypeExpr::Nullable(inner) => is_fn_typed(ws, TyId::Static(mid, inner)),
         _ => false,
     }

@@ -987,6 +987,7 @@ impl SkullEmitCache {
         );
         self.unit_comptime_reads = unit_reads;
         dependency_edges += self.absorb_spec_chunks(built_specs);
+        self.refresh_effect_snapshot(ws);
         // Baseline every `static` cell's reload key so the overlay can detect an
         // initializer edit (changed key) vs an unrelated body edit (unchanged key),
         // and its storage keys so the overlay can drop a static an edit removed.
@@ -1191,6 +1192,7 @@ pub(super) fn emit_full_build(
         scx,
         inline_cache: skull_transform::InlineCache::with_candidate_table(inline_candidate_table),
         dependents,
+        effect_snapshot: FxHashMap::default(),
         changed_consts_since_full: FxHashSet::default(),
         static_key_baseline: FxHashMap::default(),
         roots: RootCache {

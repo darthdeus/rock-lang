@@ -590,12 +590,14 @@ index once per access, `__vec_checked_index(vec, i)`, and the leaf reads
 then index their columns raw. The elision pass now proves that check with
 the same facts as the flat case and replaces it with the bare slot
 (`Inst::VecIndexSlot`: `i + 1` on Lua, `i` on JS), so every consumer of the
-checked form is unchanged. Three shapes Stone indexes with were added to the
+checked form is unchanged. Two shapes Stone indexes with were added to the
 facts: an integer literal keys by its value, so `0 < xs.len` proves `xs[0]`;
-`xs.len - c` is below the length outright and nonnegative when `len > c - 1`
-holds; and `k % xs.len` lands in `[0, len)` once `0 < len` holds (floor
+and `k % xs.len` lands in `[0, len)` once `0 < len` holds (floor
 modulo on both backends; without the guard an empty vector makes it NaN,
 which the helper passes through, an existing edge of the checker itself).
+An offset such as `xs.len - 1` retains its check unless independently proven
+below the length: infinity and large floating-point integers can remain
+unchanged by subtraction. The measurements below predate this correction.
 
 `packages/stone`, same compile, checked -> elided:
 
@@ -656,8 +658,8 @@ over the call graph (a cycle of bodies that write nothing writes nothing).
 A body the compiler cannot read -- `inline(lua)`, `extern(lua)`, a call
 through a function value, a yield, a call the inference left unresolved --
 writes everything, with these exceptions: a C function reached through
-`extern(ffi, ..)` writes no Lua table (unless it takes a function, when it
-could call back), an opaque body marked `@pure`, `@nowrite` or
+`extern(ffi, ..)` may write native elements (and may mutate any state when
+its library exposes a callback or `any` parameter), an opaque body marked `@pure`, `@nowrite` or
 `@writes_elems` does what it says, the stdlib push writes `len` only, and a
 type constructor or the `enumerate` template runs no user code. The elision
 pass then drops only the facts a call could have touched: a callee that
@@ -665,8 +667,8 @@ writes field `n` drops facts through `n` and keeps the loop's length facts.
 
 Annotating a body is a promise about raw target code that only review can
 check, exactly like writing the body; `@nowrite` says the body stores to no
-table field, element or global the program can reach (native memory, IO,
-allocation and raising are fine) and `@writes_elems` that it stores only
+table field, element or global the program can reach, including NativeBuffer
+storage (IO, allocation and raising are fine) and `@writes_elems` that it stores only
 into elements of containers it is handed. The stdlib's read-only intrinsics
 (`nb_get`, the NativeBuffer `get`, `__vec_data_get`, `table_get`, the string
 methods, `tostring`, `error`, `print`, `transmute`, allocation) carry one or
@@ -752,35 +754,42 @@ their previous spread.
 What the elided checks rest on, from a final read of `in_bounds.rs` and
 `effects.rs`, and the gaps found but left as they are:
 
-- **Proven, by construction.** The dataflow facts: intersection at joins,
+After the native-write, transitive-edit and length-offset corrections, a
+Stone compile with the pass disabled versus enabled contains 807 -> 518
+checked vector reads, 155 -> 101 column checks, 65 -> 53 vector stores and
+53 -> 41 NativeBuffer index checks (helper definitions excluded). On an
+Apple M4 Max, development build (`opt-level = 1`), eight interleaved fresh
+processes per mode after warm-up took median 93.1 -> 105.8 ms, minimum
+91.5 -> 103.3 ms. This measures the entire pass and effect analysis against
+`ROCK_SKULL_BOUNDS_OFF=1`, not just the effect-table addition or a release
+build. The earlier release measurements above cover different comparisons.
+
+- **Dataflow invariants.** Intersection at joins,
   SSA values tied to places and untied on every write, every call killing
   what its effect says it may write, yields and lambda-holding bodies
   giving up. Floor modulo (`%` on Lua, `a - floor(a / b) * b` on JS) lands
-  in `[0, b)` for `b > 0`; `len - c` needs `len > c - 1`; constants key by
+  in `[0, b)` for `b > 0`; length offsets retain their checks; constants key by
   value. The adversarial runtime cases pin each.
 - **Trusted by review, like the code itself.** An opaque body's `@pure`,
   `@nowrite`, `@writes_elems`, `@returns_index_below` and `@returns_nonneg`;
   the stdlib push matched by its text; the map slot helpers' `data.len`
   invariant. A lie in any of these is a silent out-of-bounds access.
-- **FFI.** `extern(ffi, ..)` functions are effect-free because no Stone or
-  stdlib C binding takes a function and no Lua callback is handed to C
-  (`ffi.cast` in the engine only reinterprets pointers). A future binding
-  that registers a Lua callback the C side invokes would break this: the
-  rule must then also mark functions that take a callback-typed parameter
-  anywhere in the library, or the binding must be `extern(lua)`.
+- **FFI.** Calls invalidate element-value facts because C can write memory
+  shared with a NativeBuffer. A library exposing a callback or `any`
+  parameter invalidates all memory facts on every call, including a later
+  call with no callback argument. Callbacks hidden behind raw Lua or pointer
+  casts still require review of that unsafe binding.
 - **Log sink.** `_log_once_impl` and `__rock_log_init` are `@nowrite`, yet
   the emit path calls `_G.__rock_log_sink`, a function the host installs.
   Stone's sink forwards to C `stone_log` or `print`, so the promise holds
   for Stone; a host whose sink runs Rock code that shrinks a vector would
   break it. Plain `log_*` calls go through `__rock_log` (unannotated) and
   still kill, so only `log_once` sites rely on this.
-- **Incremental emission.** A body-only rebuild re-emits a chunk when one
-  of its direct callees changes. The effect table is transitive: if `A`
-  calls `B` calls `C` and an edit makes `C` shrink a vector, `A`'s elided
-  check is stale until `A` is re-emitted, which a body edit to `C` alone
-  does not trigger. Verify whether chunk dependencies close transitively;
-  if not, a hot-reload session can run a stale raw access until the next
-  full build. Not fixed here.
+- **Incremental emission.** A chunk depends on the effects of its callees,
+  including effects inherited transitively. Body edits must re-emit a
+  caller when a callee's effect summary changes, even when the edited
+  source belongs to a deeper callee. Literal-only changes that preserve
+  effects can still reuse residual callers.
 - **`ref` parameters.** Assignment to a local is treated as writing
   nothing another body can see. A `ref T` parameter rebound as a whole
   would be a write the caller sees; the language reference says field

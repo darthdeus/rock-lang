@@ -102,6 +102,18 @@ fn a_clear_in_the_body_raises() {
     print("{failed} {join(xs)}")
 }
 
+fn endpoint_with_nonfinite_length(xs: [int]) -> int {
+    xs.len = 1 ./ 0
+    if xs.len > 0 { return xs[xs.len - 1] }
+    return 0
+}
+
+@test(output = "true")
+fn a_nonfinite_length_does_not_prove_the_last_index() {
+    let xs = [7]
+    print(try_call(() => { let result = endpoint_with_nonfinite_length(xs) }))
+}
+
 fn shrink(xs: [int]) { xs.pop() }
 
 @test(output = "true 10,")

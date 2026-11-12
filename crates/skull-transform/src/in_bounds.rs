@@ -488,9 +488,9 @@ impl Facts {
     }
 
     /// The vectors whose live length `id` is below, by a recorded fact or
-    /// by shape: `n - c` for a length `n` of `v` and a constant `c >= 1`
-    /// (below `n` outright), and `x % n` for such a length (floor modulo
-    /// lands below a positive divisor).
+    /// floor modulo with a positive divisor. Subtracting a positive integer
+    /// from a length does not prove a strict bound: infinity and large
+    /// floating-point integers can remain unchanged by the subtraction.
     fn lt_of(&self, func: &MirFunc, id: Idx<Inst>) -> Vec<Key> {
         let keys = self.keys_of(func, id);
         let mut out: Vec<Key> = self
@@ -500,9 +500,6 @@ impl Facts {
             .map(|(_, v)| v.clone())
             .collect();
         match func.insts[id] {
-            Inst::IntSub(a, b) if matches!(func.insts[b], Inst::Const(Lit::Int(c)) if c >= 1) => {
-                out.extend(self.lengths_of(func, a));
-            }
             Inst::IntMod(_, b) => out.extend(self.positive_lengths(func, b)),
             _ => {}
         }

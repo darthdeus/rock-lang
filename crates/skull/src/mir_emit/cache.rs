@@ -2,6 +2,21 @@
 
 use super::*;
 
+pub(super) type EffectSnapshot = FxHashMap<FuncRef, bone_core::effects::MemEffect>;
+
+fn current_effect_snapshot(
+    ws: &Workspace,
+    functions: impl IntoIterator<Item = FuncRef>,
+) -> EffectSnapshot {
+    let Some(effects) = ws.vec_effects.get() else {
+        return FxHashMap::default();
+    };
+    functions
+        .into_iter()
+        .map(|fref| (fref, effects.of(fref.module, fref.func)))
+        .collect()
+}
+
 /// Re-emit ONE emitted body's chunk. The shared body is the declaration's own;
 /// a specialized one lowers under its instantiation. Both go through the same
 /// invalidation, which is the point of keying the cache on the body rather than
@@ -94,6 +109,9 @@ pub struct SkullEmitCache {
     /// Built in `emit_full`, maintained as chunks re-emit. Sound on the body-edit
     /// path because the chunk key set is invariant between full builds.
     pub(super) dependents: FxHashMap<FuncRef, FxHashSet<Instance>>,
+    /// Last inferred effects for callees in the dependency index. Bounds
+    /// elimination depends on transitive callee effects, including residual calls.
+    pub(super) effect_snapshot: EffectSnapshot,
     /// `const` globals changed since the last full build (`emit_full`), accumulated
     /// by `emit_overlay`. The overlay re-emits each one's init UNGUARDED so the new
     /// literal takes effect on reload (mutable `global`s are NEVER here -- their
@@ -231,6 +249,7 @@ pub(super) struct BodyEditRollback {
     edits: Vec<crate::instance_graph::TextEditDelta>,
     changed_since_full: FxHashSet<Instance>,
     changed_consts_since_full: FxHashSet<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)>,
+    effect_snapshot: EffectSnapshot,
     static_key_baseline: FxHashMap<Ustr, StaticBaseline>,
     emitted: FxHashSet<Instance>,
     code_artifact: std::sync::Arc<skull_mir::code_identity::CodeArtifact>,
@@ -303,6 +322,16 @@ impl SkullEmitCache {
         self.repair_stats
     }
 
+    pub(super) fn refresh_effect_snapshot(&mut self, ws: &Workspace) {
+        self.effect_snapshot = current_effect_snapshot(
+            ws,
+            self.dependents
+                .iter()
+                .filter(|(_, callers)| !callers.is_empty())
+                .map(|(&callee, _)| callee),
+        );
+    }
+
     /// Route later body edits through the full-scan equivalents of the
     /// retained fast paths: the root set is re-enumerated from every module
     /// instead of read from the root cache, the inline candidate table is
@@ -328,6 +357,7 @@ impl SkullEmitCache {
             edits: edits.to_vec(),
             changed_since_full: self.changed_since_full.clone(),
             changed_consts_since_full: self.changed_consts_since_full.clone(),
+            effect_snapshot: self.effect_snapshot.clone(),
             static_key_baseline: self.static_key_baseline.clone(),
             emitted: self.emitted.clone(),
             code_artifact: self.code_artifact.clone(),
@@ -354,6 +384,7 @@ impl SkullEmitCache {
             edits,
             changed_since_full,
             changed_consts_since_full,
+            effect_snapshot,
             static_key_baseline,
             emitted,
             code_artifact,
@@ -388,6 +419,7 @@ impl SkullEmitCache {
         })();
         self.changed_since_full = changed_since_full;
         self.changed_consts_since_full = changed_consts_since_full;
+        self.effect_snapshot = effect_snapshot;
         self.static_key_baseline = static_key_baseline;
         self.emitted = emitted;
         self.code_artifact = code_artifact;
@@ -1108,6 +1140,23 @@ impl SkullEmitCache {
         // re-emit even if their own body didn't change.
         changed.extend(flipped_frefs.iter().copied());
 
+        // A function's memory effect includes every callee it reaches. If that
+        // summary changes, callers must rerun bounds elimination even when the
+        // call remains residual and its inline eligibility is unchanged.
+        let effect_changed: FxHashSet<FuncRef> =
+            if cache.effect_snapshot.is_empty() && ws.vec_effects.get().is_none() {
+                FxHashSet::default()
+            } else {
+                let effects = ws.effects();
+                cache
+                    .effect_snapshot
+                    .iter()
+                    .filter_map(|(&fref, previous)| {
+                        (effects.of(fref.module, fref.func) != *previous).then_some(fref)
+                    })
+                    .collect()
+            };
+
         // A chunk whose baked comptime input (build_var value / embedded file
         // content) no longer matches the CURRENT inputs is a body edit bone cannot
         // see -- reinferred hashes only source text. Seed
@@ -1241,21 +1290,29 @@ impl SkullEmitCache {
         // while `deps` records that a chunk's TEXT contains another declaration's
         // body (an inline splice) or specializes it. Neither is derivable from the
         // other, so both survive.
-        for c in &changed {
+        let dependency_seeds: FxHashSet<FuncRef> =
+            changed.union(&effect_changed).copied().collect();
+        for c in &dependency_seeds {
             if let Some(deps) = cache.dependents.get(c) {
                 cache.repair_stats.dependent_requests += 1;
                 cache.repair_stats.dependents_visited += deps.len();
-                let demand = skull_mir::lower::parameter_demand_key(ws, *c);
-                affected.extend(
-                    deps.iter()
-                        .filter(|body| {
-                            !stable_residual_frefs.contains(c)
-                                || !matches!(cache.chunks.get(*body), Some(Ok(chunk))
-                        if !chunk.embedded_deps.contains(c)
-                            && chunk.abi_deps.get(c).is_none_or(|key| *key == demand))
-                        })
-                        .cloned(),
-                );
+                if effect_changed.contains(c) {
+                    // The candidate decision is irrelevant to a changed memory
+                    // effect: every caller's dataflow proof may have changed.
+                    affected.extend(deps.iter().cloned());
+                } else {
+                    let demand = skull_mir::lower::parameter_demand_key(ws, *c);
+                    affected.extend(
+                        deps.iter()
+                            .filter(|body| {
+                                !stable_residual_frefs.contains(c)
+                                    || !matches!(cache.chunks.get(*body), Some(Ok(chunk))
+                            if !chunk.embedded_deps.contains(c)
+                                && chunk.abi_deps.get(c).is_none_or(|key| *key == demand))
+                            })
+                            .cloned(),
+                    );
+                }
             }
         }
         // REMOVAL is the graph's to report and emission's alone cannot see it:
@@ -1326,6 +1383,7 @@ impl SkullEmitCache {
         let (added_errors, added_fingerprint_identities) =
             Self::build_graph_added_chunks(cache, ws, &update.added);
         fingerprint_identities.extend(added_fingerprint_identities);
+        cache.refresh_effect_snapshot(ws);
         cache.repair_stats.relowering_ns = t_relow.elapsed().as_nanos() as u64;
         Ok((affected, update, added_errors, fingerprint_identities))
     }
@@ -1383,6 +1441,7 @@ pub fn emit_incremental(
     );
     cache.unit_comptime_reads = unit_reads;
     cache.absorb_spec_chunks(built_specs);
+    cache.refresh_effect_snapshot(ws);
     emit.compile_counts.chunks = cache.chunks.len();
     let reassemble = t_asm.elapsed();
     emit.phases.push(("incr: re-emit affected bodies", reemit));

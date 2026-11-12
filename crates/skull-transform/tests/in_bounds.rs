@@ -557,11 +557,25 @@ fn a_column_check_in_a_counted_loop_becomes_the_slot() {
 #[test]
 fn a_column_check_after_a_call_in_the_loop_stays() {
     let mut p = Probe::new();
+    let mut check = None;
+    counted_loop(&mut p, |p, b| {
+        p.unknown_call(b);
+        let i = p.load(b, p.i);
+        check = Some(p.check(b, p.xs, i));
+    });
+    let check = check.unwrap();
+    p.run();
+    assert!(!p.is_slot(check));
+}
+
+#[test]
+fn a_checked_store_proves_a_later_column_check() {
+    let mut p = Probe::new();
     let (lp, _) = counted_loop(&mut p, |p, b| p.unknown_call(b));
     let i = p.load(lp.body, p.i);
     let check = p.check(lp.body, p.xs, i);
     p.run();
-    assert!(!p.is_slot(check));
+    assert!(p.is_slot(check));
 }
 
 #[test]
@@ -579,7 +593,7 @@ fn index_zero_is_proven_by_a_nonempty_guard() {
 }
 
 #[test]
-fn the_last_element_is_proven_by_a_nonempty_guard() {
+fn len_minus_one_retains_its_check_after_only_a_nonempty_guard() {
     let mut p = Probe::new();
     let body = p.nonempty_guard();
     let len = p.len_of(body, p.xs);
@@ -591,7 +605,7 @@ fn the_last_element_is_proven_by_a_nonempty_guard() {
     let second = p.check(body, p.xs, before_last);
     p.f.set_term(body, Term::Return(vec![]));
     p.run();
-    assert!(p.is_slot(check));
+    assert!(!p.is_slot(check), "`len - 1` can round back to `len`");
     assert!(!p.is_slot(second), "`len - 2` needs `len > 1`");
 }
 

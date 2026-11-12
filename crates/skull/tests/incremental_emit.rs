@@ -279,6 +279,89 @@ fn body_edit_to_still_residual_inline_callee_rebuilds_only_the_callee() {
 }
 
 #[test]
+fn transitive_effect_changes_rebuild_residual_callers_in_both_directions() {
+    let before = r#"
+fn leaf(xs: [int]) { }
+fn middle(xs: [int]) { leaf(xs) }
+fn hot(xs: [int], i: int) -> int {
+    if i >= 0 && i < xs.len {
+        middle(xs)
+        return xs[i]
+    }
+    return -1
+}
+fn main() {
+    let xs: [int] = [7]
+    print("{hot(xs, 0)}")
+}
+"#;
+    let shrink = before.replace(
+        "fn leaf(xs: [int]) { }",
+        "fn leaf(xs: [int]) { xs.len = 0 }",
+    );
+    let grow = before;
+    let ws1 = ws_with_stdlib(before);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full1, mut incremental_cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let (_, mut overlay_cache) = emit_full(&ws1, mid).expect("overlay base v1");
+    let hot1 = crate::common::function_body(&full1.lua, "hot");
+    assert!(
+        !hot1.contains("__vec_checked_get(") && !hot1.contains("__vec_checked_index("),
+        "with no writer in the call chain, the guarded access should be raw:\n{hot1}"
+    );
+
+    let ws2 = ws_with_stdlib(&shrink);
+    let reinferred = [body_id(&ws2, "leaf")];
+    let incremental2 =
+        emit_incremental(&ws2, &mut incremental_cache, &reinferred).expect("incremental shrink");
+    let fresh2 = emit_full(&ws2, skull::user_module_id(&ws2).unwrap())
+        .expect("fresh shrink")
+        .0;
+    assert_eq!(
+        incremental2.lua, fresh2.lua,
+        "a transitive shrink must invalidate the cached caller's bounds proof"
+    );
+    let hot2 = crate::common::function_body(&incremental2.lua, "hot");
+    assert!(
+        hot2.contains("__vec_checked_get(") || hot2.contains("__vec_checked_index("),
+        "after leaf starts shrinking the vector, hot must retain its check:\n{hot2}"
+    );
+
+    let overlay2 = emit_overlay(&ws2, &mut overlay_cache, &reinferred);
+    let hot2_overlay = crate::common::function_body(&overlay2.lua, "hot");
+    assert!(
+        hot2_overlay.contains("__vec_checked_get(")
+            || hot2_overlay.contains("__vec_checked_index("),
+        "overlay must redefine hot with its new check:\n{hot2_overlay}"
+    );
+
+    let ws3 = ws_with_stdlib(grow);
+    let reinferred = [body_id(&ws3, "leaf")];
+    let incremental3 =
+        emit_incremental(&ws3, &mut incremental_cache, &reinferred).expect("incremental grow");
+    let fresh3 = emit_full(&ws3, skull::user_module_id(&ws3).unwrap())
+        .expect("fresh grow")
+        .0;
+    assert_eq!(
+        incremental3.lua, fresh3.lua,
+        "removing the transitive shrink must invalidate the old check too"
+    );
+    let hot3 = crate::common::function_body(&incremental3.lua, "hot");
+    assert!(
+        !hot3.contains("__vec_checked_get(") && !hot3.contains("__vec_checked_index("),
+        "after leaf stops shrinking, hot should recover the raw access:\n{hot3}"
+    );
+
+    let overlay3 = emit_overlay(&ws3, &mut overlay_cache, &reinferred);
+    let hot3_overlay = crate::common::function_body(&overlay3.lua, "hot");
+    assert!(
+        !hot3_overlay.contains("__vec_checked_get(")
+            && !hot3_overlay.contains("__vec_checked_index("),
+        "overlay must redefine hot without its obsolete check:\n{hot3_overlay}"
+    );
+}
+
+#[test]
 fn shrinking_inline_callee_flips_residual_call_to_inline_and_rebuilds_caller() {
     let v1 = inline_budget_eligibility_flip_fixture(true);
     let v2 = inline_budget_eligibility_flip_fixture(false);

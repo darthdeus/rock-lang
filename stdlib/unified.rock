@@ -134,11 +134,11 @@ value NativeBuffer<T> {
 // .ptr field directly. This avoids the extra Lua call frame a wrapper would
 // introduce and lets LuaJIT fold the field load + ffi index in one trace.
 @nowrite @intrinsic @native_required inline(lua) fn nb_get(b: NativeBuffer<float>, i: int) -> float = "return b.ptr[i]"
-@nowrite @intrinsic @native_required inline(lua) fn nb_set(b: NativeBuffer<float>, i: int, v: float) = "b.ptr[i] = v"
+@writes_elems @intrinsic @native_required inline(lua) fn nb_set(b: NativeBuffer<float>, i: int, v: float) = "b.ptr[i] = v"
 @nowrite @intrinsic @native_required inline(lua) fn nb_get(b: NativeBuffer<int>, i: int) -> int = "return b.ptr[i]"
-@nowrite @intrinsic @native_required inline(lua) fn nb_set(b: NativeBuffer<int>, i: int, v: int) = "b.ptr[i] = v"
+@writes_elems @intrinsic @native_required inline(lua) fn nb_set(b: NativeBuffer<int>, i: int, v: int) = "b.ptr[i] = v"
 @nowrite @intrinsic @native_required inline(lua) fn nb_get(b: NativeBuffer<uint>, i: int) -> uint = "return b.ptr[i]"
-@nowrite @intrinsic @native_required inline(lua) fn nb_set(b: NativeBuffer<uint>, i: int, v: uint) = "b.ptr[i] = v"
+@writes_elems @intrinsic @native_required inline(lua) fn nb_set(b: NativeBuffer<uint>, i: int, v: uint) = "b.ptr[i] = v"
 
 // Safe accessor matching the unified `.get(i) -> T?` surface used across
 // all collection types. Returns null on out-of-range; `buf[i]` is the
@@ -533,15 +533,15 @@ fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: 
 // the C<->Lua number conversion at the ffi boundary). One nb_get + nb_set
 // pair per NativeBuffer phantom variant.
 @nowrite @intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferU8,  i: int) -> int = "return b.ptr[i]"
-@nowrite @intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferU8,  i: int, v: int) = "b.ptr[i] = v"
+@writes_elems @intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferU8,  i: int, v: int) = "b.ptr[i] = v"
 @nowrite @intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferI8,  i: int) -> int = "return b.ptr[i]"
-@nowrite @intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferI8,  i: int, v: int) = "b.ptr[i] = v"
+@writes_elems @intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferI8,  i: int, v: int) = "b.ptr[i] = v"
 @nowrite @intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferU16, i: int) -> int = "return b.ptr[i]"
-@nowrite @intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferU16, i: int, v: int) = "b.ptr[i] = v"
+@writes_elems @intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferU16, i: int, v: int) = "b.ptr[i] = v"
 @nowrite @intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferI16, i: int) -> int = "return b.ptr[i]"
-@nowrite @intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferI16, i: int, v: int) = "b.ptr[i] = v"
+@writes_elems @intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferI16, i: int, v: int) = "b.ptr[i] = v"
 @nowrite @intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferU32, i: int) -> int = "return b.ptr[i]"
-@nowrite @intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferU32, i: int, v: int) = "b.ptr[i] = v"
+@writes_elems @intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferU32, i: int, v: int) = "b.ptr[i] = v"
 
 // Safe `.get(i) -> int?` per variant. Codegen for `buf[i]` emits the
 // bounds-checked helper `__nb_checked_get` (type-agnostic on struct).
