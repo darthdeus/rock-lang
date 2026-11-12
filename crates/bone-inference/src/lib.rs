@@ -134,6 +134,7 @@ pub struct Gamma<'a> {
     /// Whole-local narrows of `closure_assigned` bindings in force, with the
     /// type each replaced; drained by [`Gamma::invalidate_mutable_refinements`].
     pub(crate) revocable_locals: Vec<(Idx<BindingInfo>, TyId)>,
+    pub(crate) refinement_epoch: u64,
     pub sibling_fields: Vec<FxHashMap<Ustr, TyId>>,
 
     pub dep_acc: RefCell<FxHashSet<Ustr>>,
@@ -179,7 +180,18 @@ impl<'a> Gamma<'a> {
     /// every whole-local narrow a lambda could undo is dropped.
     pub(crate) fn invalidate_mutable_refinements(&mut self) {
         self.refined_nonnull.clear();
-        for (b, old) in self.revocable_locals.drain(..) {
+        self.refinement_epoch += 1;
+        // A path can narrow its root more than once. Restore the outermost
+        // type last, rather than retaining an inner, already narrowed type.
+        for (b, old) in self.revocable_locals.drain(..).rev() {
+            self.out.binding_types.insert(b, old);
+        }
+    }
+
+    pub(crate) fn restore_local_narrow(&mut self, b: Idx<BindingInfo>, old: TyId, epoch: u64) {
+        // Leaving an inner scope must not resurrect an outer narrow that a
+        // callback invalidated while the inner scope was being inferred.
+        if epoch == self.refinement_epoch || !self.closure_assigned.contains(&b) {
             self.out.binding_types.insert(b, old);
         }
     }
@@ -205,6 +217,7 @@ impl<'a> Gamma<'a> {
             refined_nonnull: Default::default(),
             closure_assigned: narrowing::closure_assigned_locals(body),
             revocable_locals: Vec::new(),
+            refinement_epoch: 0,
             sibling_fields: Default::default(),
 
             dep_acc: Default::default(),

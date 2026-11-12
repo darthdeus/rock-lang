@@ -2033,7 +2033,7 @@ fn infer_block(
     expr_span: Span,
     expected: Option<TyId>,
 ) -> TyId {
-    let mut g_saved: Vec<(Idx<BindingInfo>, TyId)> = vec![];
+    let mut g_saved = vec![];
     // Snapshot the path-refinement set on entry; intersect on exit. This
     // scopes to the block BOTH escaping guard narrows AND
     // assignment-refinements (`x.f = nonNull` marks `x.f` non-null):
@@ -2057,7 +2057,7 @@ fn infer_block(
                         let narrowed = peel_nullable(gamma, cur, expr_span);
                         gamma.out.binding_types.insert(b, narrowed);
                         gamma.note_local_narrow(b, cur);
-                        g_saved.push((b, cur));
+                        g_saved.push((b, cur, gamma.refinement_epoch));
                     }
                 }
                 _ => {
@@ -2105,8 +2105,8 @@ fn infer_block(
 
     // Reverse order: a local narrowed by two guards was saved twice, and only
     // the first save holds its type from before the block.
-    for (b, old) in g_saved.into_iter().rev() {
-        gamma.out.binding_types.insert(b, old);
+    for (b, old, epoch) in g_saved.into_iter().rev() {
+        gamma.restore_local_narrow(b, old, epoch);
     }
 
     // Remove block-local facts without resurrecting paths invalidated

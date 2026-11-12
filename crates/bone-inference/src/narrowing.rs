@@ -261,6 +261,7 @@ pub(crate) fn infer_branch(
 ) -> Result<TyId, CompilerError> {
     let mut saved_bindings = vec![];
     let mut added_paths = vec![];
+    let refinement_epoch = gamma.refinement_epoch;
 
     for (root, fields) in narrows {
         match root {
@@ -285,7 +286,7 @@ pub(crate) fn infer_branch(
     // Reverse order: `x != null && x.f != null` narrows `x` twice, and only the
     // first save holds its type from before the branch.
     for (b, old) in saved_bindings.into_iter().rev() {
-        gamma.out.binding_types.insert(b, old);
+        gamma.restore_local_narrow(b, old, refinement_epoch);
     }
 
     for p in added_paths {

@@ -1,0 +1,33 @@
+//- nested_guard_revokes_captured_local @fail=S?
+value S { f: int? }
+fn consume(x: S) -> int { 0 }
+fn bad() -> int {
+    let x: S? = S { f: 1 }
+    let kill = () => { x = null }
+    if x != null && x.f != null { kill(); return consume(x) }
+    return 0
+}
+
+//- leaving_inner_guard_does_not_restore_revoked_narrow @fail=S?
+value S { f: int? }
+fn consume(x: S) -> int { 0 }
+fn bad() -> int {
+    let x: S? = S { f: 1 }
+    let kill = () => { x = null }
+    if x != null {
+        if x.f != null { kill() }
+        return consume(x)
+    }
+    return 0
+}
+
+//- captured_local_can_be_checked_again_after_effect
+fn good() -> int {
+    let x: int? = 1
+    let kill = () => { x = null }
+    if x != null { kill() }
+    if x != null {
+        x
+      //^ int
+    } else { 0 }
+}
