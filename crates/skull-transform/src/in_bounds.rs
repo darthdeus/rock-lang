@@ -39,9 +39,10 @@
 //! through that global; an element store drops facts through any element. A
 //! call drops every length fact and every fact through memory (a global, a
 //! field or an element): the callee may shrink any vector it can reach or
-//! rebind any field. Only a `@pure` callee keeps them, and the stdlib push
-//! keeps them too because it only grows and only writes a slot that was
-//! outside the vector. A yield drops everything. An instruction that executes
+//! rebind any field. Only the stdlib push keeps them, because it only grows
+//! the vector and only writes a slot that was outside it; `@pure` is not
+//! trusted, since the checker admits `@debug_impure` callees and never
+//! verifies an `inline(lua)` or `extern` body. A yield drops everything. An instruction that executes
 //! again (a loop) drops the facts about its previous value.
 //!
 //! Merging at a join intersects the incoming facts, so a fact that reaches the
@@ -389,9 +390,11 @@ impl Facts {
     }
 
     fn nonneg(&self, func: &MirFunc, id: Idx<Inst>) -> bool {
+        // Only integer arithmetic over proven operands: a `len` field can be
+        // written by source code, and the unsigned representation is not
+        // vouched for here.
         match &func.insts[id] {
             Inst::Const(Lit::Int(n)) => *n >= 0,
-            Inst::Const(Lit::Uint(_)) | Inst::Len { .. } | Inst::UintToInt(_) => true,
             Inst::IntAdd(a, b) | Inst::IntMul(a, b) => {
                 self.nonneg(func, *a) && self.nonneg(func, *b)
             }
@@ -496,25 +499,35 @@ fn leq_fact(facts: &mut Facts, func: &MirFunc, a: Idx<Inst>, b: Idx<Inst>) {
 }
 
 enum CallKind {
-    /// `@pure`: changes nothing.
-    Pure,
     /// The stdlib push: a vector only grew.
     Push,
     Unknown,
 }
 
+/// The stdlib push bodies, line by line: the only call a loop body may make
+/// that provably leaves every proven index in bounds. The text is matched,
+/// not the name, so a future push that reallocates or shrinks keeps the
+/// checks until this list says otherwise.
+const PUSH_BODY: [&str; 2] = ["vec.len = vec.len + 1", "vec._data[vec.len] = item"];
+
+/// `@pure` is deliberately not trusted here: the checker admits calls to
+/// `@debug_impure` callees, and `inline(lua)` and `extern` bodies are never
+/// verified, so the annotation does not prove a callee leaves vectors alone.
 fn classify_call(ctx: &Ctx<'_>, fref: FuncRef) -> CallKind {
     let Some(ws) = ctx.ws else {
         return CallKind::Unknown;
     };
     let module = ws.module(fref.module);
     let f = &module.functions[fref.func];
-    if f.annotations.iter().any(|a| a.is_builtin("pure")) {
-        return CallKind::Pure;
-    }
     if matches!(f.name.as_str(), "push" | "vec_push")
-        && f.inline_body.is_some()
         && bone_core::modules::is_stdlib_module_file(module.file.as_str())
+        && f.inline_body.as_ref().is_some_and(|(_, body)| {
+            body.as_str()
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .eq(PUSH_BODY)
+        })
     {
         return CallKind::Push;
     }
@@ -525,7 +538,6 @@ const LEN: &str = "len";
 
 fn after_call(facts: &mut Facts, kind: CallKind) {
     match kind {
-        CallKind::Pure => {}
         CallKind::Push => facts.forget_field(Ustr::from(LEN)),
         CallKind::Unknown => facts.after_unknown_call(),
     }

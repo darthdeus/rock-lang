@@ -246,6 +246,14 @@ fn verify_pure_expr(
         Expr::IncDec { .. } => reject(
             "`@pure` function performs an increment/decrement (mutation)".to_string(),
         ),
+        // A function value's body is not vetted; only a resolved callee's
+        // annotation can be.
+        Expr::Call {
+            callee: Callee::Local(_) | Callee::Value(_),
+            ..
+        } => reject(
+            "`@pure` function calls a function value, whose body is not provably pure".to_string(),
+        ),
         Expr::Call { .. } | Expr::SafeNavCall { .. } => {
             if let Some(&(mid, fid)) = resolved.get(&e) {
                 let callee_fn = &ws.module(mid).functions[fid];

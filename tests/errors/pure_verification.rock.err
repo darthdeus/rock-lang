@@ -202,3 +202,13 @@ global OFFSET: int = 1
 fn bad_safe_nav_let(x: int?) -> int? {
     return x?.let { x + OFFSET }
 }
+
+//=== TEST CASE: pure_calls_fn_value_Generic ===
+// A function value's body is unknown at the call: it may mutate anything it
+// captured. Only a resolved callee's own annotation can vouch for it.
+//! expect: calls a function value
+@pure
+fn bad_calls_fn_value(f: fn(int) -> int, x: int) -> int {
+    return f(x)
+}
+

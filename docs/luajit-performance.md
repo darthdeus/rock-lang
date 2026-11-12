@@ -495,8 +495,11 @@ What proves an index, in the shapes Stone and the demos write:
 - `rows[r][c] = ..` after `c < rows[r].len()`: `rows[r]` is one element place
   as long as nothing stores into any container between the two reads.
 
-What keeps the check: a call in between that is not `@pure` (it may pop,
-clear or reassign through any field or global it can reach), a `len` store,
+What keeps the check: any call in between (it may pop, clear or reassign
+through any field or global it can reach; `@pure` is not trusted, because the
+checker admits `@debug_impure` callees and never verifies an `inline(lua)` or
+`extern` body, and a call through a function value or an overloaded operator
+is a call like any other), a `len` store,
 a store to the vector's cell or through its field, a yield, a bound the
 vector does not cover (`for i in 0..n`), and any second vector indexed by the
 same counter (`ys[i]` next to `xs[i]`, however equal their lengths). The
@@ -514,9 +517,9 @@ conversion, where every captured mutable variable is already a box reached
 through a field.
 
 `ROCK_SKULL_BOUNDS_OFF=1` keeps every check for one compile. On
-`packages/stone` the elision removes 10 of 65 `__vec_checked_set` sites and
-163 of 820 `__vec_checked_get` sites (4,644,880 -> 4,639,790 bytes, same
-line count); with the switch set the output is byte for byte the baseline.
+`packages/stone` the elision removes 8 of 65 `__vec_checked_set` sites and
+159 of 820 `__vec_checked_get` sites; with the switch set the output is byte
+for byte the baseline.
 The remaining Stone stores are slot writes guarded on one vector and applied
 to a dozen parallel vectors, `if i == xs.len() { push } else { xs[i] = v }`
 free-list writes, and guards with a call between them and the store. 
@@ -536,7 +539,7 @@ then min ns per element with the JIT off, checked -> elided:
 | set_slots (guarded setter per slot) | 0.658 / 0.660 | 0.656 / 0.659 | 60.0 -> 40.6 | 1352 -> 1112 |
 | bump_entries (read, mutate, store back) | 2.896 / 3.028 | 2.931 / 3.061 | 48.7 -> 23.2 | 1652 -> 1532 |
 | clear_pair (`while`, second vector kept) | 0.995 / 0.997 | 0.991 / 0.997 | 62.8 -> 41.9 | 1936 -> 1940 |
-| fill_pure_call (`@pure` callee) | 2.041 / 2.088 | 1.969 / 1.999 | 29.6 -> 12.1 | 1332 -> 1196 |
+| fill_pure_call (`@pure` callee, inlined away) | 2.046 / 2.087 | 1.972 / 1.998 | 29.5 -> 12.1 | 1376 -> 1152 |
 | fill_and_collect (push in the body) | 5.718 / 5.798 | 5.325 / 5.343 | 45.1 -> 23.0 | 2736 -> 2428 |
 | fill_rows (`row[c]` of `rows[r]`) | 1.016 / 1.019 | 0.764 / 0.767 | 28.4 -> 10.3 | 2136 -> 1948 |
 | copy_into (`dst[i] = src[i]`, read only) | 0.741 / 0.744 | 0.662 / 0.673 | 38.8 -> 29.2 | 1456 -> 1456 |
@@ -551,3 +554,32 @@ written in one turn or the vector is itself an element. A bound the loop
 proves but a setter re-checks (`set_slots`) gains nothing on trace, because
 LuaJIT folds the redundant compare itself; the interpreter gains everywhere a
 call disappears. These are isolated workloads, not an engine frame claim.
+
+What the pass assumes, and what pins each assumption: a Vec's slots outside
+`[0, len)` are nil or false and `_data` is never replaced (the stdlib's
+representation; a direct `xs.len = n` write keeps the helper's behavior,
+because the raw form and the helper write the same slot once `i < len`
+holds); every cell is a plain local after closure conversion (a captured
+mutable variable is a box reached through a field, and a body still holding
+a lambda is skipped); a call may reach anything through memory, so it drops
+every fact through a global, field or element, and only the stdlib push
+(matched by its body text, not its name) is exempt; a yield drops everything;
+a re-executed instruction drops the facts about its previous value. The
+adversarial cases in `tests/iterators/vec_bounds_elision.rock` cover a
+function value, a `@pure` wrapper around a `@debug_impure` pop, a lying
+`@pure inline(lua)` body, an overloaded operator, an alias of the vector, a
+captured closure, a row replaced inside the inner loop, an index below zero,
+a pop across a yield and a global shrunk by a call: each still raises.
+
+Other runtime checks Stone emits, counted in the same compile, that the same
+facts could prove: `__nb_checked_get` / `__nb_checked_set` /
+`__nb_checked_index` on NativeBuffers (62 / 31 / 54 sites; `{ptr, len}` has
+the same `len` shape, and the raw form is `b.ptr[i]`), `__vec_checked_index`
+on column-stored vectors (129 sites; the proven form is the 1-based index on
+Lua and the 0-based one on JS, so it needs a backend-aware slot
+instruction), and the 484 nil-key store guards
+(`if v ~= nil or getmetatable(b) ~= nil or b.f ~= nil then b.f = v end`),
+which a field-presence fact would remove where the field was read or written
+earlier on every path. `__map_col_slot_checked` (6) tests key presence, not
+an index, and `__rock_layout_check` (92) runs once at load; neither is a
+candidate.

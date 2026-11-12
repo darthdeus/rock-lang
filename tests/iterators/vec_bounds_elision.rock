@@ -243,3 +243,157 @@ fn a_descending_subtracted_bound_stays_in_bounds() {
 }
 
 fn main() {}
+
+// --- Ways a loop body can reach the vector that the compiler must not miss.
+
+fn popper(xs: [int]) -> int { xs.pop(); return 0 }
+
+@test(output = "true []")
+fn a_function_value_called_in_the_body_still_raises() {
+    let xs = [1, 2]
+    let f = popper
+    let failed = try_call(() => {
+        for i in 0..xs.len() { xs[i] = f(xs) }
+    })
+    print("{failed} [{join(xs)}]")
+}
+
+@debug_impure fn debug_pop(xs: [int]) -> int { xs.pop(); return 0 }
+@pure fn via_debug_impure(xs: [int]) -> int { return debug_pop(xs) }
+
+@test(output = "true []")
+fn a_pure_callee_that_reaches_a_pop_still_raises() {
+    let xs = [1, 2]
+    let failed = try_call(() => {
+        for i in 0..xs.len() { xs[i] = via_debug_impure(xs) }
+    })
+    print("{failed} [{join(xs)}]")
+}
+
+@pure inline(lua) fn lying_pure(xs: [int]) -> int = "xs.len = 0 return 0"
+
+@test(output = "true", backends = "lua")
+fn an_opaque_pure_body_is_not_trusted() {
+    let xs = [1, 2]
+    let failed = try_call(() => {
+        for i in 0..xs.len() { xs[i] = lying_pure(xs) }
+    })
+    print("{failed}")
+}
+
+struct Tag { items: [int] }
+fn Tag.to_string(t) -> string { t.items.pop(); return "tag" }
+
+// Interpolation renders through the runtime, never a user `to_string`, so
+// the body's only call is the renderer and nothing shrinks the vector.
+@test(output = "false 0,0,")
+fn an_interpolation_runs_no_user_to_string() {
+    let t = Tag { items: [1, 2] }
+    let out = ""
+    let failed = try_call(() => {
+        for i in 0..t.items.len() {
+            out = out + "{t}"
+            t.items[i] = 0
+        }
+    })
+    print("{failed} {join(t.items)}")
+}
+
+struct Mark { xs: [int] }
+operator +(a: Mark, b: Mark) -> int { a.xs.pop(); return 0 }
+
+@test(output = "true []")
+fn an_overloaded_operator_in_the_body_still_raises() {
+    let m = Mark { xs: [1, 2] }
+    let failed = try_call(() => {
+        for i in 0..m.xs.len() { m.xs[i] = m + m }
+    })
+    print("{failed} [{join(m.xs)}]")
+}
+
+@test(output = "true []")
+fn an_alias_of_the_vector_popped_in_the_body_still_raises() {
+    let xs = [1, 2]
+    let ys = xs
+    let failed = try_call(() => {
+        for i in 0..xs.len() {
+            ys.pop()
+            xs[i] = 0
+        }
+    })
+    print("{failed} [{join(xs)}]")
+}
+
+@test(output = "true []")
+fn a_closure_called_in_the_body_still_raises() {
+    let xs = [1, 2]
+    let shrink = () => { xs.pop() }
+    let failed = try_call(() => {
+        for i in 0..xs.len() {
+            shrink()
+            xs[i] = 0
+        }
+    })
+    print("{failed} [{join(xs)}]")
+}
+
+@test(output = "true 5,6,7, 9,9,")
+fn a_row_replaced_in_the_inner_loop_is_checked_against_the_new_row() {
+    let short = [1, 2]
+    let rows = [[5, 6, 7]]
+    let failed = try_call(() => {
+        for r in 0..rows.len() {
+            for c in 0..rows[r].len() {
+                rows[r] = short
+                rows[r][c] = 9
+            }
+        }
+    })
+    print("{failed} {join([5, 6, 7])} {join(rows[0])}")
+}
+
+@test(output = "true -1,-1,")
+fn an_index_below_zero_still_raises() {
+    let xs = [-1, -1]
+    let failed = try_call(() => {
+        for i in 0..xs.len() { xs[i - 1] = i }
+    })
+    print("{failed} {join(xs)}")
+}
+
+co fn writer(xs: [int]) -> Coroutine<int> {
+    for i in 0..xs.len() {
+        xs[i] = i + 10
+        yield i
+    }
+}
+
+@test(output = "0 1 true 10,11,")
+fn a_pop_across_a_yield_still_kills_the_coroutine() {
+    let xs = [1, 2, 3]
+    let c = writer(xs)
+    let a = c.resume() ?? -9
+    let b = c.resume() ?? -9
+    xs.pop()
+    // The resume reports the error by killing the coroutine.
+    let dead = c.resume() == null
+    print("{a} {b} {dead} {join(xs)}")
+}
+
+@test(output = "true 2,2,")
+fn a_global_vector_shrunk_by_a_call_still_raises() {
+    SHARED.clear()
+    SHARED.push(1)
+    SHARED.push(1)
+    SHARED.push(1)
+    let failed = try_call(() => {
+        for i in 0..SHARED.len() {
+            SHARED[i] = 2
+            drop_last()
+        }
+    })
+    print("{failed} {join(SHARED)}")
+}
+
+global SHARED: [int] = []
+fn drop_last() { if SHARED.len() == 3 { SHARED.pop() } }

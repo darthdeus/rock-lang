@@ -3014,10 +3014,11 @@ fn vec_loop_read_without_body_effects_is_raw() {
     assert!(!lua.contains("__vec_checked_get("), "{lua}");
 }
 
-/// A call in the body may shrink the vector, so the store keeps its check; a
-/// `@pure` callee cannot, so it does not.
+/// A call in the body may shrink the vector, so the store keeps its check. A
+/// `@pure` callee keeps it too: the annotation admits `@debug_impure` callees
+/// and unverified opaque bodies, so it does not prove the vector untouched.
 #[test]
-fn a_call_in_the_loop_body_keeps_the_check_unless_pure() {
+fn a_call_in_the_loop_body_keeps_the_check_even_when_pure() {
     let lua = emit_inlined(
         "fn shrink(xs: [int]) { xs.pop() }
         fn fill(xs: [int]) {
@@ -3026,6 +3027,9 @@ fn a_call_in_the_loop_body_keeps_the_check_unless_pure() {
         "fill",
     );
     assert!(lua.contains("__vec_checked_set("), "{lua}");
+    // A `@pure` callee the inliner splices leaves no call behind, so the
+    // store is proven; one it cannot splice (self-recursive) stays a call
+    // and keeps the check.
     let lua = emit_inlined(
         "@pure fn weight(i: int) -> int { return i * 3 }
         fn fill(xs: [int]) {
@@ -3034,6 +3038,14 @@ fn a_call_in_the_loop_body_keeps_the_check_unless_pure() {
         "fill",
     );
     assert!(!lua.contains("__vec_checked_set("), "{lua}");
+    let lua = emit_inlined(
+        "@pure fn depth(i: int) -> int { if i <= 0 { return 0 }; return depth(i - 1) + 1 }
+        fn fill(xs: [int]) {
+            for i in 0..xs.len() { xs[i] = depth(i) }
+        }",
+        "fill",
+    );
+    assert!(lua.contains("__vec_checked_set("), "{lua}");
 }
 
 /// A push onto a vector only grows it, so the stores a loop proved stay raw.

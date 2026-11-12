@@ -127,6 +127,8 @@ fn clear_pair(xs: [int], ys: [int]) -> float {
     return (xs[0] + ys[0]) as float
 }
 
+// `@pure` is not trusted by the elision, but a `@pure` callee is spliced by
+// the inliner, so no call remains in the body and the store stays proven.
 @pure fn weight(i: int) -> int { return (i * 31 + 7) % 17 }
 
 fn fill_pure_call(xs: [int]) -> float {

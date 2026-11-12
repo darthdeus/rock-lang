@@ -79,6 +79,19 @@ initializer cannot read enclosing parameters, locals or another static. Static
 locals are rejected in `@pure` and coroutine functions. A shared scratch cell
 can be overwritten by recursive or interleaved calls.
 
+## Purity
+
+`@pure` on a function makes the compiler reject, in its Rock body, reads of
+mutable globals, assignments and increments, index writes, array and heap
+struct literals, lambdas, nested functions, statics, calls through function
+values, and calls to functions that are neither `@pure` nor `@debug_impure`.
+Two things it does not establish: an `inline(lua)`, `inline(js)` or `extern`
+body marked `@pure` is trusted as written, and a `@debug_impure` callee (the
+escape hatch for `print`) may do anything. So `@pure` is a contract the
+checker holds the Rock body to, not a proof that a call leaves every value it
+can reach unchanged; an optimization that needs the latter must not rely on
+the annotation (see `docs/luajit-performance.md`, vector bounds checks).
+
 ## Macros
 
 Macros expand at call sites and can accept syntax fragments. Arguments are
