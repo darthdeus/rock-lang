@@ -1,4 +1,4 @@
-// A data image copies native buffer storage by its bytes. Storage of 64 KB or
+// A data image copies native buffer storage by its bytes. Storage of 16 KB or
 // more is a pointer (see `__rock_nb_alloc`), which carries neither its length
 // nor an array type, so the image has to take both from the allocation record.
 

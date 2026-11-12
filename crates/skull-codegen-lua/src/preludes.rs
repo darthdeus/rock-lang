@@ -376,7 +376,7 @@ end
 -- 1e18 keeps every buffer on the Lua heap), to tell this mechanism apart from
 -- another cause when diagnosing memory or frame-time behaviour.
 if not _G.__ROCK_NB_OFFHEAP_MIN then
-  _G.__ROCK_NB_OFFHEAP_MIN = tonumber(os.getenv("ROCK_NB_OFFHEAP_MIN") or "") or 65536
+  _G.__ROCK_NB_OFFHEAP_MIN = tonumber(os.getenv("ROCK_NB_OFFHEAP_MIN") or "") or 16384
 end
 if not _G.__ROCK_NB_OFFHEAP_CYCLE_MAX then _G.__ROCK_NB_OFFHEAP_CYCLE_MAX = 268435456 end
 local __rock_nb_elems = {}
