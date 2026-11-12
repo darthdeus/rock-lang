@@ -747,6 +747,51 @@ figures to read. The interpreter halves its time per element on every
 NativeBuffer loop. The earlier flat and column workloads repeated within
 their previous spread.
 
+### Trust and known gaps (review of 2026-11-12)
+
+What the elided checks rest on, from a final read of `in_bounds.rs` and
+`effects.rs`, and the gaps found but left as they are:
+
+- **Proven, by construction.** The dataflow facts: intersection at joins,
+  SSA values tied to places and untied on every write, every call killing
+  what its effect says it may write, yields and lambda-holding bodies
+  giving up. Floor modulo (`%` on Lua, `a - floor(a / b) * b` on JS) lands
+  in `[0, b)` for `b > 0`; `len - c` needs `len > c - 1`; constants key by
+  value. The adversarial runtime cases pin each.
+- **Trusted by review, like the code itself.** An opaque body's `@pure`,
+  `@nowrite`, `@writes_elems`, `@returns_index_below` and `@returns_nonneg`;
+  the stdlib push matched by its text; the map slot helpers' `data.len`
+  invariant. A lie in any of these is a silent out-of-bounds access.
+- **FFI.** `extern(ffi, ..)` functions are effect-free because no Stone or
+  stdlib C binding takes a function and no Lua callback is handed to C
+  (`ffi.cast` in the engine only reinterprets pointers). A future binding
+  that registers a Lua callback the C side invokes would break this: the
+  rule must then also mark functions that take a callback-typed parameter
+  anywhere in the library, or the binding must be `extern(lua)`.
+- **Log sink.** `_log_once_impl` and `__rock_log_init` are `@nowrite`, yet
+  the emit path calls `_G.__rock_log_sink`, a function the host installs.
+  Stone's sink forwards to C `stone_log` or `print`, so the promise holds
+  for Stone; a host whose sink runs Rock code that shrinks a vector would
+  break it. Plain `log_*` calls go through `__rock_log` (unannotated) and
+  still kill, so only `log_once` sites rely on this.
+- **Incremental emission.** A body-only rebuild re-emits a chunk when one
+  of its direct callees changes. The effect table is transitive: if `A`
+  calls `B` calls `C` and an edit makes `C` shrink a vector, `A`'s elided
+  check is stale until `A` is re-emitted, which a body edit to `C` alone
+  does not trigger. Verify whether chunk dependencies close transitively;
+  if not, a hot-reload session can run a stale raw access until the next
+  full build. Not fixed here.
+- **`ref` parameters.** Assignment to a local is treated as writing
+  nothing another body can see. A `ref T` parameter rebound as a whole
+  would be a write the caller sees; the language reference says field
+  writes go through and the probe could not form such an assignment, so
+  this is assumed, not shown.
+- **Interpolation.** `Inst::Format` and `ToString` still kill as unknown
+  calls in the pass, though the runtime renderer runs no user code; the
+  effect table does not describe them. Conservative, costs a few sites.
+- **Unused proven reads** are dropped by cleanup, where a checked read
+  stayed as a statement. Sound: a proven access cannot raise.
+
 ### What would eliminate more
 
 The remaining checks, flat and column alike, fall to the same three causes,
