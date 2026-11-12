@@ -270,17 +270,6 @@ fn a_pure_callee_that_reaches_a_pop_still_raises() {
     print("{failed} [{join(xs)}]")
 }
 
-@pure inline(lua) fn lying_pure(xs: [int]) -> int = "xs.len = 0 return 0"
-
-@test(output = "true", backends = "lua")
-fn an_opaque_pure_body_is_not_trusted() {
-    let xs = [1, 2]
-    let failed = try_call(() => {
-        for i in 0..xs.len() { xs[i] = lying_pure(xs) }
-    })
-    print("{failed}")
-}
-
 struct Tag { items: [int] }
 fn Tag.to_string(t) -> string { t.items.pop(); return "tag" }
 
@@ -397,3 +386,54 @@ fn a_global_vector_shrunk_by_a_call_still_raises() {
 
 global SHARED: [int] = []
 fn drop_last() { if SHARED.len() == 3 { SHARED.pop() } }
+
+// --- Calls the compiler proves harmless, and the writes it must still see.
+
+struct Counter { n: int }
+fn bump(c: Counter) -> int { c.n = c.n + 1; return c.n }
+
+@test(output = "1,2,3, 3")
+fn a_callee_writing_another_field_keeps_the_loop_running_raw() {
+    let xs = [0, 0, 0]
+    let c = Counter { n: 0 }
+    for i in 0..xs.len() { xs[i] = bump(c) }
+    print("{join(xs)} {c.n}")
+}
+
+fn swap_items(b: Bag) -> int { b.items = [7]; return 0 }
+
+@test(output = "true 7, 0,0,")
+fn a_callee_rebinding_the_vector_field_still_raises() {
+    let first = [0, 0]
+    let b = Bag { items: first }
+    let failed = try_call(() => {
+        for i in 0..b.items.len() {
+            b.items[i] = swap_items(b)
+        }
+    })
+    print("{failed} {join(b.items)} {join(first)}")
+}
+
+fn total(xs: [int]) -> int {
+    let t = 0
+    for x in xs { t += x }
+    return t
+}
+
+@test(output = "6,6,6,")
+fn a_read_only_callee_over_the_same_vector_keeps_the_proof() {
+    let xs = [1, 2, 3]
+    let sums: [int] = [0, 0, 0]
+    for i in 0..sums.len() { sums[i] = total(xs) }
+    print(join(sums))
+}
+
+fn collect(out: [int], v: int) -> int { out.push(v); return out.len() }
+
+@test(output = "1,2,3, 0,1,2,")
+fn a_callee_that_only_pushes_elsewhere_keeps_the_proof() {
+    let xs = [0, 0, 0]
+    let out: [int] = []
+    for i in 0..xs.len() { xs[i] = collect(out, i) }
+    print("{join(xs)} {join(out)}")
+}

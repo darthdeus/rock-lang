@@ -83,6 +83,9 @@ pub struct Workspace {
     /// keeps `Workspace: Clone` and lets the parallel dependent re-check (which
     /// holds `&Workspace`) share one counter across threads.
     pub reinferred_body_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Per-function memory effects (`crate::effects`), computed on first use
+    /// from the current inferences and dropped when one is replaced.
+    pub vec_effects: std::sync::OnceLock<crate::effects::EffectTable>,
     /// Count of function bodies LOWERED since the last reset: every function
     /// a full or partial module lowering builds, including one whose body
     /// fails to lower, and the one function the body fast path re-lowers.
@@ -236,6 +239,7 @@ impl Workspace {
             module_timings: Default::default(),
 
             reinferred_body_count: Default::default(),
+            vec_effects: Default::default(),
             relowered_body_count: Default::default(),
             comptime_inputs: Default::default(),
             ns: Default::default(),
@@ -371,6 +375,13 @@ impl Workspace {
         }
 
         self.inferences[idx] = Some(inf);
+        self.vec_effects = Default::default();
+    }
+
+    /// The memory effects of every function, over the current inferences.
+    pub fn effects(&self) -> &crate::effects::EffectTable {
+        self.vec_effects
+            .get_or_init(|| crate::effects::EffectTable::compute(self))
     }
 
     pub fn inferences_iter(&self) -> impl Iterator<Item = (ModuleId, &InferenceResult)> {

@@ -3152,3 +3152,58 @@ fn column_first_and_last_are_proven_by_a_nonempty_guard() {
     );
     assert!(!lua.contains("__vec_checked_index("), "{lua}");
 }
+
+/// A call in the loop body keeps the proof when the whole-program effect
+/// table says the callee writes nothing the loop's facts depend on: a body
+/// that only reads, a body whose writes name other fields, a foreign C
+/// function, an opaque body marked `@nowrite`, and one marked
+/// `@writes_elems`. A body that pops, or writes the field the vector is
+/// read from, keeps the check.
+#[test]
+fn a_callee_that_provably_leaves_the_vector_alone_keeps_the_proof() {
+    let proven = |src: &str| !emit_inlined(src, "fill").contains("__vec_checked_set(");
+    let kept = |src: &str| emit_inlined(src, "fill").contains("__vec_checked_set(");
+    assert!(proven(
+        "fn weigh(xs: [int], i: int) -> int { return xs.len() + i }
+        fn fill(xs: [int]) { for i in 0..xs.len() { xs[i] = weigh(xs, i) } }"
+    ));
+    assert!(proven(
+        "struct Counter { n: int }
+        fn bump(c: Counter) -> int { c.n = c.n + 1; return c.n }
+        fn fill(xs: [int], c: Counter) { for i in 0..xs.len() { xs[i] = bump(c) } }"
+    ));
+    assert!(proven(
+        "extern(ffi, \"probe\") fn probe_tick(i: int) -> int
+        fn fill(xs: [int]) { for i in 0..xs.len() { xs[i] = probe_tick(i) } }"
+    ));
+    assert!(proven(
+        "@nowrite inline(lua) fn stamp(i: int) -> int = \"return i * 2\"
+        fn fill(xs: [int]) { for i in 0..xs.len() { xs[i] = stamp(i) } }"
+    ));
+    assert!(proven(
+        "@writes_elems inline(lua) fn poke(ys: [int], i: int) -> int = \"ys._data[1] = i return i\"
+        fn fill(xs: [int], ys: [int]) { for i in 0..xs.len() { xs[i] = poke(ys, i) } }"
+    ));
+    assert!(proven(
+        "fn ping(n: int) -> int { if n <= 0 { return 0 }; return pong(n - 1) }
+        fn pong(n: int) -> int { return ping(n - 1) + 1 }
+        fn fill(xs: [int]) { for i in 0..xs.len() { xs[i] = ping(i) } }"
+    ));
+    assert!(kept(
+        "fn shrink(xs: [int]) -> int { xs.pop(); return 0 }
+        fn fill(xs: [int]) { for i in 0..xs.len() { xs[i] = shrink(xs) } }"
+    ));
+    assert!(kept(
+        "struct Bag { items: [int] }
+        fn swap(b: Bag) -> int { b.items = [1]; return 0 }
+        fn fill(b: Bag) { for i in 0..b.items.len() { b.items[i] = swap(b) } }"
+    ));
+    assert!(kept(
+        "fn apply(f: fn() -> int) -> int { return f() }
+        fn fill(xs: [int]) { for i in 0..xs.len() { xs[i] = apply(() => 1) } }"
+    ));
+    assert!(kept(
+        "inline(lua) fn raw(i: int) -> int = \"return i\"
+        fn fill(xs: [int]) { for i in 0..xs.len() { xs[i] = raw(i) } }"
+    ));
+}

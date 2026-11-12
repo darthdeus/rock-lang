@@ -278,7 +278,7 @@ pub @pure fn vert(
 
 // Keep these stores in Vertex field order; vertex_writer_bytes compares them
 // against typed stores, including every default-zero tail lane.
-@inline inline(lua) fn __write_vertex(
+@nowrite @inline inline(lua) fn __write_vertex(
     p: Ptr<float>, step: float,
     x: float, y: float, u: float, v_: float,
     r: float, g: float, b: float, a: float,

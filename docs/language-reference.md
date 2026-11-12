@@ -93,6 +93,15 @@ can reach unchanged. Type refinements (null narrowing across a call) rely on
 it; value-level optimizations must not. `docs/purity.md` is the audit of
 every consumer and the escape hatches.
 
+Two annotations describe an opaque body's writes for the optimizer, since
+nothing can read an `inline(lua)` or `extern(lua)` body: `@nowrite` says it
+stores to no table field, element or global the program can reach (native
+memory, IO, allocation and raising are fine), `@writes_elems` that it stores
+only into elements of containers it is handed. A C function declared with
+`extern(ffi, ..)` needs neither: it cannot touch a Lua value unless it takes
+a function. The compiler infers the same information for Rock bodies by
+reading them (`bone_core::effects`), so the annotations are ignored there.
+
 ## Macros
 
 Macros expand at call sites and can accept syntax fragments. Arguments are

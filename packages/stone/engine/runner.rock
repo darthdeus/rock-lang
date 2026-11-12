@@ -1726,7 +1726,7 @@ global JIT_TRACE_LAST_ABORTS: int = 0
 // Rock code. `kind` is "starts", "compiles", "aborts" or
 // "flushes"; a flush is the mcode arena filling (every live trace discarded,
 // one very expensive frame).
-pub @nomangle inline(lua) fn jit_trace_count_of(kind: string) -> int = """
+pub @nowrite @nomangle inline(lua) fn jit_trace_count_of(kind: string) -> int = """
     local counts = _G.__stone_jit_trace_counts
     if counts == nil then return 0 end
     local n = counts[kind]

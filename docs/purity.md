@@ -88,12 +88,13 @@ statics, coroutine construction, `vec_push`/`set`. What it admits and why:
    `@debug_impure` (use it only for debug printing) and opaque bodies
    (review them when adding `@pure`; the stdlib's are arithmetic wrappers).
    A violation is a runtime error at the use, not silent corruption.
-2. **Value-level optimizations must not.** Bounds-check elision, and any
-   future store-to-load forwarding, CSE or dead-call removal, need either a
-   structural proof or a stronger annotation that the checker enforces on
-   opaque bodies too. If that is wanted, the practical route is a separate
-   `@pure(verified)`-style tier that `inline(lua)` bodies cannot carry and
-   `@debug_impure` cannot satisfy; the current `@pure` keeps its meaning.
+2. **Value-level optimizations must not rely on `@pure` of a Rock body.**
+   They use the inferred effect table instead (`bone_core::effects`), which
+   walks Rock bodies and so sees through a `@pure` wrapper to its
+   `@debug_impure` callee. For an *opaque* body the table trusts `@pure`,
+   `@nowrite` and `@writes_elems` alike: there is nothing to read, and the
+   author who wrote the raw target code is the one making the promise. That
+   is the one escape hatch, the same one `inline(lua)` is on its own.
 3. **Calls are the only effect boundary the narrowing understands.** A
    yield, a fn-value call and a non-pure named call all invalidate; the
    condition walk and the closure-assigned rule close the gaps found. The

@@ -647,27 +647,63 @@ JIT on the column walks gain 15-29%: the check was already inlined, but its
 two compares and the length load sat in the trace per element and the `or`
 join kept a snapshot. The control is unchanged.
 
+### Call effects (2026-11-12)
+
+The first cause above is now addressed. `bone_core::effects` infers, once
+per workspace, what every function may write: its own field, element and
+global assignments joined with the effects of everything it calls, closed
+over the call graph (a cycle of bodies that write nothing writes nothing).
+A body the compiler cannot read -- `inline(lua)`, `extern(lua)`, a call
+through a function value, a yield, a call the inference left unresolved --
+writes everything, with these exceptions: a C function reached through
+`extern(ffi, ..)` writes no Lua table (unless it takes a function, when it
+could call back), an opaque body marked `@pure`, `@nowrite` or
+`@writes_elems` does what it says, the stdlib push writes `len` only, and a
+type constructor or the `enumerate` template runs no user code. The elision
+pass then drops only the facts a call could have touched: a callee that
+writes field `n` drops facts through `n` and keeps the loop's length facts.
+
+Annotating a body is a promise about raw target code that only review can
+check, exactly like writing the body; `@nowrite` says the body stores to no
+table field, element or global the program can reach (native memory, IO,
+allocation and raising are fine) and `@writes_elems` that it stores only
+into elements of containers it is handed. The stdlib's read-only intrinsics
+(`nb_get`, the NativeBuffer `get`, `__vec_data_get`, `table_get`, the string
+methods, `tostring`, `error`, `print`, `transmute`, allocation) carry one or
+the other; a Rock body ignores them and is walked instead.
+
+`packages/stone`, the same compile, before -> after the effect table:
+
+| Check | Before | After |
+| --- | ---: | ---: |
+| `__vec_checked_get` | 634 | 522 |
+| `__vec_checked_index` | 105 | 98 |
+| `__vec_checked_set` | 57 | 54 |
+
+Cold compile of Stone, 25 interleaved runs of each binary on the same
+sources (Apple M4 Max): min 140 -> 144 ms, median 161 -> 165 ms, within the
+run-to-run spread; the compile budget attributes the table to the codegen
+fan-out, 69.6 -> 71.2 ms. The table is a linear walk of every body plus a
+fixpoint over the call graph, and is dropped whenever a module's inference
+is replaced, so an incremental rebuild recomputes it.
+
+What still blocks a loop with a call: the logging functions (their sink is
+a function value), `Arena.get` and the arena intrinsics, Stone's own
+`stone::data` and `append_vertex` bodies (they write fields the loop's
+vector is read through, or call unresolved bounded `next`s), and
+`Map.remove` (its `table_unset` writes an element, which the pass treats
+as any element). Each is a candidate for a narrower effect, not a kill.
+
 ### What would eliminate more
 
 The remaining checks, flat and column alike, fall to the same three causes,
 in order of weight:
 
-1. **Calls inside loops** (the 633 -> 327 ceiling above). The pass needs to
-   know that a callee does not shrink or rebind the vectors reachable from
-   the loop. `@pure` cannot say it (see `docs/purity.md`: opaque bodies are
-   trusted and `@debug_impure` is admitted), and most of these callees are
-   not pure anyway: they push to other vectors, write fields, log. The
-   practical route is an **inferred, transitive "may shrink a vector"
-   effect** over the call graph: a body shrinks if it stores `len`, calls
-   `pop` / `clear` / `remove_at` / `swap_remove` / `insert_at` / a stride
-   reserve, calls through a fn value or an opaque body, or calls a body that
-   does. Everything else keeps `le_len` facts across the call (field and
-   global rebinding still kill `same` ties, so a callee that *replaces* a
-   vector is handled by the existing memory kill). No annotation is needed
-   for the common case, and the escape hatches are exactly today's: an
-   opaque body counts as shrinking unless it is one of the stdlib's reviewed
-   growth-only forms. A declared `@noshrink` on an `inline(lua)` body would
-   extend the reviewed set without changing `@pure`.
+1. **Calls inside loops**: done above (the inferred effect table). The
+   remaining gap to the 327 ceiling is the callees listed there, each
+   wanting a narrower effect: per-field writes already exist, a per-element
+   write of a *named* container would free `Map.remove`, and a sink that is
+   a function value is unknowable without a declared effect on the sink.
 2. **Accessors called with a proven index.** `@inline` on the small
    accessors moves the access to the caller, where the loop fact holds. A
    cheaper variant that keeps the call: a per-call-site specialization that

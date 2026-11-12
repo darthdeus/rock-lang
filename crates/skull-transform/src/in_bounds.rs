@@ -580,50 +580,41 @@ fn leq_fact(facts: &mut Facts, func: &MirFunc, a: Idx<Inst>, b: Idx<Inst>) {
     }
 }
 
-enum CallKind {
-    /// The stdlib push: a vector only grew.
-    Push,
-    Unknown,
-}
-
-/// The stdlib push bodies, line by line: the only call a loop body may make
-/// that provably leaves every proven index in bounds. The text is matched,
-/// not the name, so a future push that reallocates or shrinks keeps the
-/// checks until this list says otherwise.
-const PUSH_BODY: [&str; 2] = ["vec.len = vec.len + 1", "vec._data[vec.len] = item"];
-
-/// `@pure` is deliberately not trusted here: the checker admits calls to
-/// `@debug_impure` callees, and `inline(lua)` and `extern` bodies are never
-/// verified, so the annotation does not prove a callee leaves vectors alone.
-fn classify_call(ctx: &Ctx<'_>, fref: FuncRef) -> CallKind {
+/// What a direct call may have written, from the whole-program effect table
+/// (`bone_core::effects`): a callee that writes nothing keeps every fact, a
+/// push drops only facts through `len`, a callee that may shrink a vector
+/// drops the length facts, and field, global and element writes drop the
+/// facts through those places. Without a workspace every call is unknown.
+fn after_direct_call(facts: &mut Facts, ctx: &Ctx<'_>, fref: FuncRef) {
     let Some(ws) = ctx.ws else {
-        return CallKind::Unknown;
+        facts.after_unknown_call();
+        return;
     };
-    let module = ws.module(fref.module);
-    let f = &module.functions[fref.func];
-    if matches!(f.name.as_str(), "push" | "vec_push")
-        && bone_core::modules::is_stdlib_module_file(module.file.as_str())
-        && f.inline_body.as_ref().is_some_and(|(_, body)| {
-            body.as_str()
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .eq(PUSH_BODY)
-        })
-    {
-        return CallKind::Push;
+    let effect = ws.effects().of(fref.module, fref.func);
+    if effect.is_all() {
+        facts.after_unknown_call();
+        return;
     }
-    CallKind::Unknown
+    if effect.lengths {
+        facts.forget_lengths();
+    }
+    if effect.globals {
+        facts.forget(|k| matches!(k, Key::Global(_)));
+    }
+    if effect.elems {
+        facts.forget(|k| matches!(k, Key::Elem(..)));
+    }
+    match &effect.fields {
+        None => facts.forget(|k| matches!(k, Key::Field(..))),
+        Some(fields) => {
+            for &field in fields {
+                facts.forget_field(field);
+            }
+        }
+    }
 }
 
 const LEN: &str = "len";
-
-fn after_call(facts: &mut Facts, kind: CallKind) {
-    match kind {
-        CallKind::Push => facts.forget_field(Ustr::from(LEN)),
-        CallKind::Unknown => facts.after_unknown_call(),
-    }
-}
 
 /// Advance `facts` across `id`.
 fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
@@ -688,11 +679,11 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
             facts.forget_field(*field);
         }
         Inst::ArrayPush { .. } => facts.forget_field(Ustr::from(LEN)),
-        Inst::Call { func: fref, .. } => after_call(facts, classify_call(ctx, *fref)),
+        Inst::Call { func: fref, .. } => after_direct_call(facts, ctx, *fref),
         Inst::CallMulti {
             dests, func: fref, ..
         } => {
-            after_call(facts, classify_call(ctx, *fref));
+            after_direct_call(facts, ctx, *fref);
             for d in dests {
                 facts.forget_cell(*d);
             }

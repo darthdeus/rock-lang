@@ -241,6 +241,11 @@ and `@inline` scalarization.
   `while i < xs.len` must keep re-reading `len`. Snapshot semantics follow:
   `len` is read once at loop entry and mutating the collection mid-loop is
   undefined. Do not remove FORL recovery or the stdlib shapes it matches.
+- Call effects (`bone-core/src/effects.rs`) are inferred once per workspace:
+  what each function may write, closed over the call graph, with foreign C
+  functions and `@nowrite` / `@writes_elems` opaque bodies as the reviewed
+  exceptions. `Workspace::effects()` computes it on first use and drops it
+  when an inference is replaced.
 - Bounds-check elision (`skull-transform/src/in_bounds.rs`) runs after it and
   marks a `[T]` access `VecInBounds` when a forward dataflow proves the index
   within `[0, len)`: a counted loop or guard below a `len` read, or an earlier

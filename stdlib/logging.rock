@@ -18,7 +18,7 @@ global __rock_log_level: int = -1
 // sink is installed (rock test / rock run, or early global-init before the
 // install), keep an info default; the nil/<0 guard preserves the contract for
 // that ordering edge (the global-initialization tests).
-@intrinsic @nomangle inline(lua) fn __rock_log_init() = """
+@nowrite @intrinsic @nomangle inline(lua) fn __rock_log_init() = """
     local src = _G.__rock_log_level_source
     if src ~= nil then
         local lvl = src()
@@ -124,7 +124,7 @@ fn log_get_level() -> int { __rock_log_init(); return __rock_log_level }
 // inline(lua) bodies do (stone_file_read and stone_list_directory in
 // packages/stone/engine/lib.rock, the frame-error handler in runner.rock), and a
 // mangled name would turn those into calls to nil.
-@intrinsic @nomangle inline(lua) fn _log_once_impl(level: int, category: string, msg: string, site: string) = """
+@nowrite @intrinsic @nomangle inline(lua) fn _log_once_impl(level: int, category: string, msg: string, site: string) = """
     __rock_log_init()
     -- Level 0 is never gated (the minimum level is 0), which is what keeps
     -- log_once always-on.

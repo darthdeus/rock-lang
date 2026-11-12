@@ -51,11 +51,11 @@ fn is_nan(value: float) -> bool {
 fn ffi_out_int() -> Ptr<int> { return __ffi_new_int_1() }
 fn ffi_out_float() -> Ptr<float> { return __ffi_new_float_1() }
 
-inline(lua) fn read(p: Ptr<int>) -> int = "return p[0]"
-inline(lua) fn read(p: Ptr<float>) -> float = "return p[0]"
+@nowrite inline(lua) fn read(p: Ptr<int>) -> int = "return p[0]"
+@nowrite inline(lua) fn read(p: Ptr<float>) -> float = "return p[0]"
 // JS: a Ptr<T> is the TypedArray itself (NativeBuffer .ptr).
-inline(js) fn read(p: Ptr<int>) -> int = "return p[0];"
-inline(js) fn read(p: Ptr<float>) -> float = "return p[0];"
+@nowrite inline(js) fn read(p: Ptr<int>) -> int = "return p[0];"
+@nowrite inline(js) fn read(p: Ptr<float>) -> float = "return p[0];"
 
 // ============================================================================
 // Typed pointer phantoms — close the Rock-side FFI hole
@@ -116,7 +116,7 @@ value NativeBuffer<T> {
 // where `T` resolves to an FFI-clean value struct or int/float/bool; a
 // GC-carrying or opaque-generic `T` is a spanned emit-time error. The body is a
 // never-reached guard (all calls are intercepted before resolution).
-inline(lua) fn native_buffer_alloc<T>(n: int) -> NativeBuffer<T> = "error('native_buffer_alloc is a skull compiler intrinsic; a call reached runtime unexpanded')"
+@nowrite inline(lua) fn native_buffer_alloc<T>(n: int) -> NativeBuffer<T> = "error('native_buffer_alloc is a skull compiler intrinsic; a call reached runtime unexpanded')"
 
 // The primitive ctors are thin wrappers over the intrinsic (T binds concretely
 // here, so the intrinsic resolves at this site -- no per-type `__nb_alloc_*`).
@@ -133,25 +133,25 @@ inline(lua) fn native_buffer_alloc<T>(n: int) -> NativeBuffer<T> = "error('nativ
 // Single-hop accessors: the inline(lua) body reaches into the Rock struct's
 // .ptr field directly. This avoids the extra Lua call frame a wrapper would
 // introduce and lets LuaJIT fold the field load + ffi index in one trace.
-@intrinsic @native_required inline(lua) fn nb_get(b: NativeBuffer<float>, i: int) -> float = "return b.ptr[i]"
-@intrinsic @native_required inline(lua) fn nb_set(b: NativeBuffer<float>, i: int, v: float) = "b.ptr[i] = v"
-@intrinsic @native_required inline(lua) fn nb_get(b: NativeBuffer<int>, i: int) -> int = "return b.ptr[i]"
-@intrinsic @native_required inline(lua) fn nb_set(b: NativeBuffer<int>, i: int, v: int) = "b.ptr[i] = v"
-@intrinsic @native_required inline(lua) fn nb_get(b: NativeBuffer<uint>, i: int) -> uint = "return b.ptr[i]"
-@intrinsic @native_required inline(lua) fn nb_set(b: NativeBuffer<uint>, i: int, v: uint) = "b.ptr[i] = v"
+@nowrite @intrinsic @native_required inline(lua) fn nb_get(b: NativeBuffer<float>, i: int) -> float = "return b.ptr[i]"
+@nowrite @intrinsic @native_required inline(lua) fn nb_set(b: NativeBuffer<float>, i: int, v: float) = "b.ptr[i] = v"
+@nowrite @intrinsic @native_required inline(lua) fn nb_get(b: NativeBuffer<int>, i: int) -> int = "return b.ptr[i]"
+@nowrite @intrinsic @native_required inline(lua) fn nb_set(b: NativeBuffer<int>, i: int, v: int) = "b.ptr[i] = v"
+@nowrite @intrinsic @native_required inline(lua) fn nb_get(b: NativeBuffer<uint>, i: int) -> uint = "return b.ptr[i]"
+@nowrite @intrinsic @native_required inline(lua) fn nb_set(b: NativeBuffer<uint>, i: int, v: uint) = "b.ptr[i] = v"
 
 // Safe accessor matching the unified `.get(i) -> T?` surface used across
 // all collection types. Returns null on out-of-range; `buf[i]` is the
 // direct-access counterpart.
-@intrinsic @native_required inline(lua) fn get(b: NativeBuffer<float>, i: int) -> float? = """
+@nowrite @intrinsic @native_required inline(lua) fn get(b: NativeBuffer<float>, i: int) -> float? = """
     if i < 0 or i >= b.len then return nil end
     return b.ptr[i]
 """
-@intrinsic @native_required inline(lua) fn get(b: NativeBuffer<int>, i: int) -> int? = """
+@nowrite @intrinsic @native_required inline(lua) fn get(b: NativeBuffer<int>, i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end
     return b.ptr[i]
 """
-@intrinsic @native_required inline(lua) fn get(b: NativeBuffer<uint>, i: int) -> uint? = """
+@nowrite @intrinsic @native_required inline(lua) fn get(b: NativeBuffer<uint>, i: int) -> uint? = """
     if i < 0 or i >= b.len then return nil end
     return b.ptr[i]
 """
@@ -532,38 +532,38 @@ fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: 
 // Single-hop accessors per variant. All surface as int (LuaJIT handles
 // the C<->Lua number conversion at the ffi boundary). One nb_get + nb_set
 // pair per NativeBuffer phantom variant.
-@intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferU8,  i: int) -> int = "return b.ptr[i]"
-@intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferU8,  i: int, v: int) = "b.ptr[i] = v"
-@intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferI8,  i: int) -> int = "return b.ptr[i]"
-@intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferI8,  i: int, v: int) = "b.ptr[i] = v"
-@intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferU16, i: int) -> int = "return b.ptr[i]"
-@intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferU16, i: int, v: int) = "b.ptr[i] = v"
-@intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferI16, i: int) -> int = "return b.ptr[i]"
-@intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferI16, i: int, v: int) = "b.ptr[i] = v"
-@intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferU32, i: int) -> int = "return b.ptr[i]"
-@intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferU32, i: int, v: int) = "b.ptr[i] = v"
+@nowrite @intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferU8,  i: int) -> int = "return b.ptr[i]"
+@nowrite @intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferU8,  i: int, v: int) = "b.ptr[i] = v"
+@nowrite @intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferI8,  i: int) -> int = "return b.ptr[i]"
+@nowrite @intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferI8,  i: int, v: int) = "b.ptr[i] = v"
+@nowrite @intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferU16, i: int) -> int = "return b.ptr[i]"
+@nowrite @intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferU16, i: int, v: int) = "b.ptr[i] = v"
+@nowrite @intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferI16, i: int) -> int = "return b.ptr[i]"
+@nowrite @intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferI16, i: int, v: int) = "b.ptr[i] = v"
+@nowrite @intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferU32, i: int) -> int = "return b.ptr[i]"
+@nowrite @intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferU32, i: int, v: int) = "b.ptr[i] = v"
 
 // Safe `.get(i) -> int?` per variant. Codegen for `buf[i]` emits the
 // bounds-checked helper `__nb_checked_get` (type-agnostic on struct).
-@intrinsic @native_required inline(lua) fn get(b: NativeBufferU8,  i: int) -> int? = """
+@nowrite @intrinsic @native_required inline(lua) fn get(b: NativeBufferU8,  i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end; return b.ptr[i]
 """
-@intrinsic @native_required inline(lua) fn get(b: NativeBufferI8,  i: int) -> int? = """
+@nowrite @intrinsic @native_required inline(lua) fn get(b: NativeBufferI8,  i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end; return b.ptr[i]
 """
-@intrinsic @native_required inline(lua) fn get(b: NativeBufferU16, i: int) -> int? = """
+@nowrite @intrinsic @native_required inline(lua) fn get(b: NativeBufferU16, i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end; return b.ptr[i]
 """
-@intrinsic @native_required inline(lua) fn get(b: NativeBufferI16, i: int) -> int? = """
+@nowrite @intrinsic @native_required inline(lua) fn get(b: NativeBufferI16, i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end; return b.ptr[i]
 """
-@intrinsic @native_required inline(lua) fn get(b: NativeBufferU32, i: int) -> int? = """
+@nowrite @intrinsic @native_required inline(lua) fn get(b: NativeBufferU32, i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end; return b.ptr[i]
 """
 
 // Bounds-checked access. The compiler emits calls to these instead of direct
 // buf.ptr[i] access.
-@nomangle inline(lua) fn __nb_checked_get(buf: any, i: int) -> any = """
+@nowrite @nomangle inline(lua) fn __nb_checked_get(buf: any, i: int) -> any = """
     if i < 0 or i >= buf.len then
         error("NativeBuffer index out of bounds: index " .. tostring(i) ..
               " is outside [0, " .. tostring(buf.len) .. ")")
@@ -610,7 +610,7 @@ fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: 
 // and checking after would let the out-of-bounds access happen first. So the
 // check runs once, up front, and the leaves then index their views raw.
 // (Sibling of `__vec_checked_index` for column storage.)
-@nomangle inline(lua) fn __nb_checked_index(buf: any, i: int) -> int = """
+@nowrite @nomangle inline(lua) fn __nb_checked_index(buf: any, i: int) -> int = """
     if i < 0 or i >= buf.len then
         error("NativeBuffer index out of bounds: index " .. tostring(i) ..
               " is outside [0, " .. tostring(buf.len) .. ")")
@@ -618,7 +618,7 @@ fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: 
     return i
 """
 
-@nomangle inline(lua) fn __nb_checked_set(buf: any, i: int, v: any) = """
+@nowrite @nomangle inline(lua) fn __nb_checked_set(buf: any, i: int, v: any) = """
     if i < 0 or i >= buf.len then
         error("NativeBuffer index out of bounds: index " .. tostring(i) ..
               " is outside [0, " .. tostring(buf.len) .. ")")
@@ -687,7 +687,7 @@ value SceneBuilder {
 // struct/newtype/Vec carries it (set by __rock_create_struct / vec_new /
 // skull's literal emission); there is no metatable. cdata `value` structs
 // are not tables -- they reflect via __ROCK_TYPE_TABLE + ffi.istype, not here.
-@nomangle inline(lua) fn __rock_get_type(obj: any) -> string? = """
+@nowrite @nomangle inline(lua) fn __rock_get_type(obj: any) -> string? = """
     if type(obj) ~= "table" then
         return nil
     end
@@ -1299,16 +1299,16 @@ inline(lua) fn same_ref<A, B>(@repr(opaque) a: A, @repr(opaque) b: B) -> bool = 
 // (rather than a hard error) so a `print(x)` dropped into a pure
 // helper for debugging doesn't force stripping the annotation.
 @debug_impure
-@intrinsic extern(lua) fn print(args: ...any)
+@nowrite @intrinsic extern(lua) fn print(args: ...any)
 
 // Helper to ensure float formatting
 fn print_float(value: float) { print(to_string(value)) }
 
 // Error handling
-@intrinsic extern(lua) fn error(message: string)
+@nowrite @intrinsic extern(lua) fn error(message: string)
 
 // Note: Lua has built-in tostring(), declare as extern
-@intrinsic extern(lua) fn tostring(value: any) -> string
+@nowrite @intrinsic extern(lua) fn tostring(value: any) -> string
 
 // Method versions of tostring for basic types
 fn to_string(value: int) -> string { return tostring(value) }
@@ -1431,7 +1431,7 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
 // regardless of origin. `__ty` is the lone type marker (`__rock_get_type` reads
 // it, the serializer checks `v.__ty == "Vec"`, methods resolve statically via
 // UFCS).
-@intrinsic inline(lua) fn vec_new<T>() -> [T] = """
+@nowrite @intrinsic inline(lua) fn vec_new<T>() -> [T] = """
     return { _data = {}, len = 0, __ty = "Vec" }
 """
 
@@ -1699,11 +1699,11 @@ inline(lua) fn __op_null_coalesce<T>(a: T?, b: T?) -> T? = """
 """
 
 // Unwrap functions for nullable types (moved early to support vec functions)
-@intrinsic @nomangle @inline inline(lua) fn is_null(value: any) -> bool = "return value == nil"
+@nowrite @intrinsic @nomangle @inline inline(lua) fn is_null(value: any) -> bool = "return value == nil"
 
 // Out of line, so a failing site is one call. Level 2 is the function that
 // unwrapped, for both the error position and the traceback.
-@intrinsic inline(lua) fn __unwrap_failed(message: string) = """
+@nowrite @intrinsic inline(lua) fn __unwrap_failed(message: string) = """
     error(message .. "\n" .. debug.traceback("", 2), 2)
 """
 
@@ -1755,7 +1755,7 @@ fn expect<T>(@unwraps value: T?, message: string) -> T {
 }
 
 // Type introspection functions
-@inline inline(lua) fn typeof(x: any) -> string = "type(x)"
+@nowrite @inline inline(lua) fn typeof(x: any) -> string = "type(x)"
 
 // Historical aliases for `float(int)`. All three — `float`, `int_to_float`,
 // `to_float` — are `@expand("$1")` identities, substituted at call sites
@@ -1767,14 +1767,14 @@ fn expect<T>(@unwraps value: T?, message: string) -> T {
 // it needs a real bound JS fn, not a call-site template: an inline(js) sibling
 // of the inline(lua) body. bone collapses the same-name backend pair to one
 // logical fn in the value path, so the reference / call binds the right variant.
-inline(lua) fn float_to_int(value: float) -> int = """
+@nowrite inline(lua) fn float_to_int(value: float) -> int = """
     if type(value) ~= "number" then
         error("Expected a number, got " .. type(value))
     end
     local r = math.floor(value)
     return r
 """
-inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
+@nowrite inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
 
 @inline fn to_int(value: float) -> int { return float_to_int(value) }
 
@@ -1927,7 +1927,7 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
 // the Rock type, no Lua work needed. `@expand("$1")` substitutes the arg
 // at each call site with zero overhead.
 @intrinsic @inline inline(lua) fn cast<T>(value: any) -> T = "return value"
-@intrinsic @inline inline(lua) fn transmute<A, B>(x: A) -> B = "return x"
+@nowrite @intrinsic @inline inline(lua) fn transmute<A, B>(x: A) -> B = "return x"
 
 // int and float are both `number` in Lua — this cast is a no-op at runtime.
 // `@expand("$1")` substitutes the argument expression at the call site with
@@ -2072,7 +2072,7 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
 """
 
 // Low-level Lua table operations for implementing [T]
-@intrinsic inline(lua) fn table_new() -> any = """return {}"""
+@nowrite @intrinsic inline(lua) fn table_new() -> any = """return {}"""
 
 @inline inline(lua) fn table_insert(tbl: any, value: any) = "table.insert(tbl, value)"
 
@@ -2088,11 +2088,11 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
     return #tbl
 """
 
-@intrinsic @native_required @inline inline(lua) fn table_get(tbl: any, index: any) -> any = """
+@nowrite @intrinsic @native_required @inline inline(lua) fn table_get(tbl: any, index: any) -> any = """
     return tbl[index]
 """
 
-@intrinsic @native_required @inline inline(lua) fn table_set(tbl: any, index: any, value: any) = """
+@writes_elems @intrinsic @native_required @inline inline(lua) fn table_set(tbl: any, index: any, value: any) = """
     tbl[index] = value
 """
 
@@ -2119,7 +2119,7 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
 // representation, so a missing column route fell through to the boxed body.
 // Both callers are Map methods (`remove`, `clear`), and both unset only present
 // keys.
-@intrinsic @relocates @inline inline(lua) fn table_unset<K, V>(tbl: Map<K, V>, index: K) = """
+@writes_elems @intrinsic @relocates @inline inline(lua) fn table_unset<K, V>(tbl: Map<K, V>, index: K) = """
     tbl[index] = nil
 """
 
@@ -2138,9 +2138,9 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
 // creates a bare-name obligation for opaque text to call, and these are reached
 // only through ordinary Rock calls and the column intercept, which match the
 // Rock name rather than the emitted symbol.
-@intrinsic @inline inline(lua) fn __vec_data_get<T>(vec: [T], index: int) -> any = "return vec._data[index + 1]"
-@intrinsic @inline inline(lua) fn __vec_data_set<T>(vec: [T], index: int, @repr(opaque) value: T) = "vec._data[index + 1] = value"
-@intrinsic @relocates @inline inline(lua) fn __vec_data_unset<T>(vec: [T], index: int) = "vec._data[index + 1] = nil"
+@nowrite @intrinsic @inline inline(lua) fn __vec_data_get<T>(vec: [T], index: int) -> any = "return vec._data[index + 1]"
+@writes_elems @intrinsic @inline inline(lua) fn __vec_data_set<T>(vec: [T], index: int, @repr(opaque) value: T) = "vec._data[index + 1] = value"
+@writes_elems @intrinsic @relocates @inline inline(lua) fn __vec_data_unset<T>(vec: [T], index: int) = "vec._data[index + 1] = nil"
 
 // The COLD half of the same boundary. `get`/`set`/`unset` cover every op that
 // reaches storage one element at a time; these are the ops that touch the
@@ -2794,7 +2794,7 @@ const EPSILON: float = 0.0000001
 
 // A string inside a structural rendering (enum payload, value-record field):
 // quoted and escaped as a Rock literal so the text stays on one line.
-@nomangle inline(lua) fn __rock_quote_string(s: string) -> string = """
+@nowrite @nomangle inline(lua) fn __rock_quote_string(s: string) -> string = """
     local escaped = string.gsub(s, "[%c\"\\]", function(c)
         if c == "\\" then return "\\\\" end
         if c == "\"" then return "\\\"" end
@@ -2806,7 +2806,7 @@ const EPSILON: float = 0.0000001
     return "\"" .. escaped .. "\""
 """
 
-@nomangle inline(js) fn __rock_quote_string(s: string) -> string = """
+@nowrite @nomangle inline(js) fn __rock_quote_string(s: string) -> string = """
     var escaped = s.replace(/[\u0000-\u001F\u007F"\\]/g, function(c) {
         if (c === "\\") return "\\\\";
         if (c === "\"") return "\\\"";
@@ -2931,10 +2931,10 @@ inline(lua) fn get_os() -> string = """
     end
 """
 
-@intrinsic @inline inline(lua) fn phantom<T>() -> T = """return nil"""
+@nowrite @intrinsic @inline inline(lua) fn phantom<T>() -> T = """return nil"""
 @intrinsic inline(lua) fn tuple_first<A, B>(tuple: (A, B)) -> A = """return tuple[1]"""
 @intrinsic inline(lua) fn tuple_second<A, B>(tuple: (A, B)) -> B = """return tuple[2]"""
-inline(lua) fn tuple_nth<A>(tuple: any, n: int) -> A = """return tuple[n]"""
+@nowrite inline(lua) fn tuple_nth<A>(tuple: any, n: int) -> A = """return tuple[n]"""
 
 fn char_to_byte(c: string) -> int { return unit_at(c, 0) }
 
@@ -2959,7 +2959,7 @@ inline(lua) fn ffi_null() -> any = """
     return nil
 """
 
-inline(lua) fn ffi_string(ptr: any, len: int?) -> string = """
+@nowrite inline(lua) fn ffi_string(ptr: any, len: int?) -> string = """
     local r
     if len then
         r = ffi.string(ptr, len)
@@ -3005,7 +3005,7 @@ fn Map<K, V>.insert(map, key: K, value: V) {
 
 // Not `@nomangle`: reached through ordinary Rock calls and the column
 // intercept, both of which match the Rock name rather than the emitted symbol.
-@intrinsic @inline inline(lua) fn Map<K, V>.get(map, key: K) -> V? = """
+@nowrite @intrinsic @inline inline(lua) fn Map<K, V>.get(map, key: K) -> V? = """
     return map[key]
 """
 
@@ -3949,10 +3949,10 @@ fn Envelope.step_by(e, goal: float, step_dt: float) -> float {
 // String manipulation functions
 // string had a redundant `len` + `length` pair (both `string.len`); keep
 // `len` to match Vec/Map/Arena. (Vec2.length is an unrelated overload.)
-@intrinsic @inline inline(lua) fn string.len(s) -> int = "string.len(s)"
+@nowrite @intrinsic @inline inline(lua) fn string.len(s) -> int = "string.len(s)"
 
 
-@intrinsic inline(lua) fn string.substring(s, start: int, end_idx: int) -> string = """
+@nowrite @intrinsic inline(lua) fn string.substring(s, start: int, end_idx: int) -> string = """
     -- Rock uses 0-based indexing, Lua uses 1-based. Bound, then return: a
     -- `return string.sub(..)` tail call into C is a CALLT no root trace can
     -- leave through.
@@ -3960,9 +3960,9 @@ fn Envelope.step_by(e, goal: float, step_dt: float) -> float {
     return r
 """
 
-@intrinsic @inline inline(lua) fn string.upper(s) -> string = "string.upper(s)"
+@nowrite @intrinsic @inline inline(lua) fn string.upper(s) -> string = "string.upper(s)"
 
-@intrinsic @inline inline(lua) fn string.lower(s) -> string = "string.lower(s)"
+@nowrite @intrinsic @inline inline(lua) fn string.lower(s) -> string = "string.lower(s)"
 
 // Plain-text search for `substr`, starting the scan at unit index `from`.
 // Returns the 0-based unit index of the first match at or after `from`, or -1.
@@ -4063,12 +4063,12 @@ double strtod_l(const char *nptr, char **endptr, __rock_locale_t loc);
 // false cross-backend promise -- an index is opaque, feed it back to a string
 // primitive, do not do arithmetic on the value across backends. Real
 // characters come from `chars()`.
-@intrinsic inline(lua) fn string.unit_at(s, index: int) -> int = """
+@nowrite @intrinsic inline(lua) fn string.unit_at(s, index: int) -> int = """
     return string.byte(s, index + 1) or 0  -- Convert to 1-based, return 0 if out of bounds
 """
 
-@inline inline(lua) fn string.repeat(s, count: int) -> string = "string.rep(s, count)"
-@inline inline(js) fn string.repeat(s, count: int) -> string = "return count > 0 ? s.repeat(count) : \"\";"
+@nowrite @inline inline(lua) fn string.repeat(s, count: int) -> string = "string.rep(s, count)"
+@nowrite @inline inline(js) fn string.repeat(s, count: int) -> string = "return count > 0 ? s.repeat(count) : \"\";"
 
 // StringBuilder: append-and-join accumulator. Naive `+` concat in a loop is
 // O(n^2) even on luajit (immutable interned strings), so join/split/format
@@ -4086,23 +4086,23 @@ inline(lua) fn le(a: string, b: string) -> bool = "return a <= b"
 
 // Left-align `s` in a field of `width` chars by appending spaces. Returns
 // `s` unchanged when `#s >= width` (never truncates).
-inline(lua) fn string.pad_right(s, width: int) -> string = """
+@nowrite inline(lua) fn string.pad_right(s, width: int) -> string = """
     local len = #s
     if len >= width then return s end
     return s .. string.rep(" ", width - len)
 """
-inline(js) fn string.pad_right(s, width: int) -> string = """
+@nowrite inline(js) fn string.pad_right(s, width: int) -> string = """
     return s.length >= width ? s : s + " ".repeat(width - s.length);
 """
 
 // Right-align `s` in a field of `width` chars by prepending spaces. Returns
 // `s` unchanged when `#s >= width` (never truncates).
-inline(lua) fn string.pad_left(s, width: int) -> string = """
+@nowrite inline(lua) fn string.pad_left(s, width: int) -> string = """
     local len = #s
     if len >= width then return s end
     return string.rep(" ", width - len) .. s
 """
-inline(js) fn string.pad_left(s, width: int) -> string = """
+@nowrite inline(js) fn string.pad_left(s, width: int) -> string = """
     return s.length >= width ? s : " ".repeat(width - s.length) + s;
 """
 
@@ -4115,19 +4115,19 @@ inline(js) fn string.pad_left(s, width: int) -> string = """
 """
 
 // Pattern-based string matching (Lua patterns, not regex)
-@inline inline(lua) fn string_match(s: string, pattern: string) -> string? = "string.match(s, pattern)"
+@nowrite @inline inline(lua) fn string_match(s: string, pattern: string) -> string? = "string.match(s, pattern)"
 // JS: first capture (or whole match) via the shared Lua-pattern translator.
-inline(js) fn string_match(s: string, pattern: string) -> string? = """
+@nowrite inline(js) fn string_match(s: string, pattern: string) -> string? = """
     var m = s.match(new RegExp(__lua_pattern_to_regex(pattern)));
     if (!m) return null;
     return m.length > 1 ? m[1] : m[0];
 """
 
 // Lazy iterator over all matches of pattern in s — works directly in for-loops
-@inline inline(lua) fn string.gmatch(s, pattern: string) -> fn() -> string? = "string.gmatch(s, pattern)"
+@nowrite @inline inline(lua) fn string.gmatch(s, pattern: string) -> fn() -> string? = "string.gmatch(s, pattern)"
 
 // Pattern-based replacement (use replace for literal replacement)
-inline(lua) fn string.gsub(s, pattern: string, replacement: string) -> string = """
+@nowrite inline(lua) fn string.gsub(s, pattern: string, replacement: string) -> string = """
     return (string.gsub(s, pattern, replacement))
 """
 
@@ -4221,7 +4221,7 @@ inline(lua) fn string.gsub(s, pattern: string, replacement: string) -> string = 
     return out;
 """
 
-inline(js) fn string.gsub(s, pattern: string, replacement: string) -> string = """
+@nowrite inline(js) fn string.gsub(s, pattern: string, replacement: string) -> string = """
     var rx = new RegExp(__lua_pattern_to_regex(pattern), "g");
     // Lua's %1 names the whole match when the pattern has no captures.
     var captures = new RegExp(rx.source + "|").exec("").length - 1;
@@ -4247,7 +4247,7 @@ fn string.parse_int(s) -> int? {
 }
 
 // Parse a float from a string. Returns null if the string is not a valid number.
-@intrinsic @inline inline(lua) fn string.parse_float(s) -> float? = "tonumber(s)"
+@nowrite @intrinsic @inline inline(lua) fn string.parse_float(s) -> float? = "tonumber(s)"
 
 // Read an environment variable by name. Returns null if the variable is not set.
 @intrinsic @inline inline(lua) fn env_var(name: string) -> string? = "os.getenv(name)"
@@ -4267,7 +4267,7 @@ fn get_env_float(var: string, default_val: float) -> float {
 }
 
 // Durable decimal text that recovers the same IEEE double.
-@inline inline(lua) fn format_float_roundtrip(value: float) -> string = "string.format(\"%.17g\", value)"
+@nowrite @inline inline(lua) fn format_float_roundtrip(value: float) -> string = "string.format(\"%.17g\", value)"
 
 // TODO: format_lua is an escape hatch for printf-style formatting.
 // When Rock's string interpolation supports all common format specifiers

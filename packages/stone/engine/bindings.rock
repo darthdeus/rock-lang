@@ -1159,7 +1159,7 @@ fn get_game_identity() -> string {
 
 pub @inline inline(lua) fn os_time() -> int = "os.time()"
 
-pub @nomangle @inline inline(lua) fn os_getenv(var: string) -> string? = "os.getenv(var)"
+pub @nowrite @nomangle @inline inline(lua) fn os_getenv(var: string) -> string? = "os.getenv(var)"
 
 // This process's id from the C runtime; the declaration is idempotent so a
 // second call after another cdef of getpid stays harmless.

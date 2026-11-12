@@ -207,6 +207,7 @@ impl StdlibBase {
         Workspace {
             reinferred_body_count: Default::default(),
             relowered_body_count: Default::default(),
+            vec_effects: Default::default(),
             ..self.ws.clone()
         }
     }

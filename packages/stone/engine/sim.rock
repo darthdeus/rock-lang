@@ -443,7 +443,7 @@ pub fn sim_restore_vsync_latch() {
 // The C write is declared once per process: every `ffi.cdef` parse allocates
 // fresh ctypes, so declaring it per marker overflowed LuaJIT's ctype table in
 // long sims (#942). `_G` keeps the memo across hot reloads.
-inline(lua) fn _sim_emit_impl(json_line: string, site: string) = """
+@nowrite inline(lua) fn _sim_emit_impl(json_line: string, site: string) = """
     local write = _G.__rock_sim_marker_write
     if write == nil then
         local ffi = require("ffi")

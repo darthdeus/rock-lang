@@ -10,6 +10,7 @@
 pub mod prelude;
 pub mod annotations;
 pub mod comptime_files;
+pub mod effects;
 pub mod escape;
 pub mod hir;
 pub mod hir_walk;
