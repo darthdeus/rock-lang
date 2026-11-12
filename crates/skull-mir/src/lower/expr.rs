@@ -2390,10 +2390,12 @@ impl<'a> Builder<'a> {
         // All eligibility checks precede lowering: a fallback evaluates once.
         if !self.scx.values_first_class
             && let Some(ty) = self.concrete_expr_ty(e)
-            && matches!(
+            && (matches!(
                 ty.peel_nullable().0,
                 MonoTy::Int | MonoTy::Uint | MonoTy::Float | MonoTy::Bool | MonoTy::String
-            )
+            ) || ty.peel_nullable().0.nominal().is_some_and(|name| {
+                EnumPlan::for_name(self.ws, name).is_some_and(|plan| plan.is_payload_free())
+            }))
             && let Expr::FieldAccess {
                 base: owner,
                 field: slot,

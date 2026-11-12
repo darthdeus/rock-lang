@@ -25,6 +25,19 @@ fn check_edit(v1: &str, v2: &str, edited: &[&str]) {
 }
 
 #[test]
+fn nullable_enum_projection_edits_match_full_emission() {
+    let before = r#"
+enum Count { Zero, Seven }
+value Item { spare: int = 11, count: Count = Count::Seven }
+struct Holder { item: Item? }
+@nomangle fn probe(holder: Holder) -> bool { holder.item?.count == Count::Zero }
+fn main() { print(probe(Holder { item: Item {} })) }
+"#;
+    let after = before.replace("== Count::Zero", "== Count::Seven");
+    check_edit_with(ws_with_stdlib, before, &after, &["probe"]);
+}
+
+#[test]
 fn scalar_constant_edits_refresh_full_incremental_and_overlay_emission() {
     let v1 = "const BASE: float = 1.5\nconst ALIAS: float = BASE\n@nomangle fn choose() -> float { ALIAS }";
     let v2 = v1.replace("1.5", "-0.0");
