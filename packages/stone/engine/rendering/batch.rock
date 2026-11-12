@@ -1,9 +1,11 @@
 // TODO: add space to batch key
-// Default initial capacity per RenderBatch. Grows 2x on overflow via
-// __grow_vertex_buf below. Most batches finish well under this; mag's
-// grid and bitgun's dense scenes overflow into the grow path once per
-// first occurrence per key.
-const RENDER_BATCH_DEFAULT_CAP: int = 1024
+// Initial capacity per RenderBatch, in vertices; it grows 2x on overflow via
+// __grow_vertex_buf below. Kept small because most keys hold a few quads: a
+// layered character is one batch per layer per animation sheet, and at 1024
+// vertices each first draw of a sheet allocated 53 KB, hundreds of KB in the
+// frame a clothed character appears. A dense batch pays its doublings once
+// per key; pooling and parking keep the grown storage afterwards.
+const RENDER_BATCH_DEFAULT_CAP: int = 64
 
 // Stone maps world-surface intent to physical attachments. Automatic follows depth writes.
 pub enum WorldSurfaceOutputs {
@@ -499,9 +501,8 @@ global __DUMMY_VERTEX_BUF: NativeBuffer<Vertex> = native_buffer_vertex(1)
 // NativeBuffer<Vertex> stay in RENDER_BATCHES; we only truncate
 // (count = 0). Vertices are overwritten in place and only `count` of
 // them are submitted, so stale bytes are never read — no zeroing
-// needed. This makes the ~56 KB native_buffer_vertex(1024) ffi.new
-// happen once per batch key *ever seen*, not once per key *per frame*
-// (the dominant ~1 MB/frame churn).
+// needed. This makes the vertex storage allocation happen once per
+// batch key *ever seen*, not once per key *per frame*.
 //
 // custom_draw batches are NOT pooled: they hold a per-frame closure +
 // the shared dummy buffer and are keyed by the per-frame
