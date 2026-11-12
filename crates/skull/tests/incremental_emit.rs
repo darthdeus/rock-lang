@@ -208,6 +208,18 @@ fn body_edit_to_inlined_callee_reemits_callers() {
         incremental.lua, fresh.lua,
         "incremental assembly != fresh emit after editing helper"
     );
+
+    let indexed = r#"
+value Config { chosen: int, spare: int, label: string }
+@inline fn selected(items: [Config], i: int) -> int { items[i].chosen }
+@nomangle fn caller(items: [Config], i: int) -> int { selected(items, i) }
+"#;
+    check_edit_with(
+        ws_with_stdlib,
+        indexed,
+        &indexed.replace("items[i].chosen", "items[i].spare"),
+        &["selected"],
+    );
 }
 
 #[test]

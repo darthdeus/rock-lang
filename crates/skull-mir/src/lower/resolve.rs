@@ -257,6 +257,22 @@ impl<'a> Builder<'a> {
         } else {
             None
         };
+        let boxed_index = if let Expr::Index { base, index } = self.body.expr_arena[root]
+            && let Some(name) = self.value_struct_of(root)
+            && !self.is_nobox_struct(name)
+            && !self.expr_is_flat_vec(base)
+            && matches!(self.coll_kind(base)?, ContainerKind::Vec)
+            && self
+                .scx
+                .rep_arena()
+                .nominal_value_storage_required(self.ws, self.scx.target, name)
+                .map_err(|err| self.gap_here(err.message))?
+                == ValueStorage::GcTable
+        {
+            Some((base, index, name))
+        } else {
+            None
+        };
         let (binding, boxed_read, boxed) = match self.body.expr_arena[root] {
             Expr::Var(binding) if self.group_binds.contains_key(&raw(binding)) => {
                 (Some(binding), None, None)
@@ -299,6 +315,9 @@ impl<'a> Builder<'a> {
             Expr::FieldAccess { .. } if reference_field.is_some() => {
                 (None, None, Some(reference_field.unwrap().2))
             }
+            Expr::Index { .. } if boxed_index.is_some() => {
+                (None, None, Some(boxed_index.unwrap().2))
+            }
             Expr::Index { .. } if indexed.is_some() => (None, None, None),
             _ => return Ok(None),
         };
@@ -327,6 +346,11 @@ impl<'a> Builder<'a> {
         let Some((range, selected)) = self.value_projection_range(shape, &path) else {
             return Ok(None);
         };
+        // An empty range performs no demanded access, so cannot preserve a nil
+        // element's failure. Leave those subtrees on the existing copy path.
+        if boxed_index.is_some() && range.is_empty() {
+            return Ok(None);
+        }
         // An opaque value slot needs the parent's borrowed-child copy policy.
         // Keep that existing path when the type is absent too; only slice known
         // primitive leaves and shape-owned nested groups.
@@ -376,6 +400,17 @@ impl<'a> Builder<'a> {
         } else if let Some(shape) = boxed_shape {
             let value = if let Some(read) = boxed_read {
                 self.emit_cur(read)
+            } else if let Some((base, index, _)) = boxed_index {
+                let outer = self.cur_span.replace(self.body.expr_spans[root]);
+                let outer_expr = self.cur_expr.replace(root);
+                let slot = (|| {
+                    let (base, kind) = self.lower_index_base(base)?;
+                    let index = self.lower_expr(index)?;
+                    Ok::<_, CompilerError>(self.emit_cur(Inst::Index { base, index, kind }))
+                })();
+                self.cur_span = outer;
+                self.cur_expr = outer_expr;
+                slot?
             } else {
                 let (base, field, _) = reference_field.expect("reference-owned projection");
                 let base = self.lower_expr(base)?;
