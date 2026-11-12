@@ -3081,7 +3081,7 @@ fn Map<K, V>.insert(map, key: K, value: V) {
 
 // The slot of `key`, allocating one on a miss. Growth takes `data.len` with it,
 // so the caller's column store stays in bounds.
-@nomangle inline(lua) fn __map_col_slot(m: any, key: any) -> int = """
+@returns_nonneg @returns_index_below("m.data") @nomangle inline(lua) fn __map_col_slot(m: any, key: any) -> int = """
     local s = m.spine[key]
     if s ~= nil then return s end
     s = __slot_alloc(m, m.data)
@@ -3091,13 +3091,13 @@ fn Map<K, V>.insert(map, key: K, value: V) {
 
 // -1 on a miss. The columns are never read at a missing key, which is why a
 // column Map needs no presence tag of its own: the spine IS the presence.
-@nomangle inline(lua) fn __map_col_slot_of(m: any, key: any) -> int = """
+@returns_index_below("m.data") @nomangle inline(lua) fn __map_col_slot_of(m: any, key: any) -> int = """
     local s = m.spine[key]
     if s == nil then return -1 end
     return s
 """
 
-@nomangle inline(lua) fn __map_col_slot_checked(m: any, key: any) -> int = """
+@returns_nonneg @returns_index_below("m.data") @nomangle inline(lua) fn __map_col_slot_checked(m: any, key: any) -> int = """
     local s = m.spine[key]
     if s == nil then error("Map key not found") end
     return s

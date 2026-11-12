@@ -138,6 +138,10 @@ pub enum ContainerKind {
     VecInBounds,
     /// `NativeBuffer<T>` — `{ ptr, len }`; `.ptr` is a 0-based C array.
     NativeBuffer,
+    /// A [`ContainerKind::NativeBuffer`] element access whose index was
+    /// proven to lie in `[0, len)`: the backends index `.ptr` raw. Appears
+    /// only on [`Inst::Index`] and [`Inst::StoreIndex`].
+    NativeBufferInBounds,
     /// `NativeBuffer<E>` where `E` is an FFI-clean value STRUCT (`elem` = its
     /// name). Same `{ ptr, len }` shape; the Lua emitter renders it EXACTLY like
     /// [`ContainerKind::NativeBuffer`] (element access is a cdata ref). Carried
@@ -266,7 +270,9 @@ impl ContainerKind {
     pub fn is_native_buffer(self) -> bool {
         matches!(
             self,
-            ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_)
+            ContainerKind::NativeBuffer
+                | ContainerKind::NativeBufferInBounds
+                | ContainerKind::NativeBufferValue(_)
         )
     }
 }
@@ -680,6 +686,10 @@ pub enum Inst {
     /// every consumer of the checked form consumes this one unchanged. Pure
     /// and never raises.
     VecIndexSlot(Idx<Inst>),
+    /// A NativeBuffer element index proven within `[0, len)`: what the
+    /// stdlib `__nb_checked_index(buf, i)` call yields, without the check.
+    /// Renders as the index itself on every backend. Pure and never raises.
+    NbIndexSlot(Idx<Inst>),
     /// Element count: `Vec` -> `base.len`, `NativeBuffer` -> `base.len`.
     Len {
         base: Idx<Inst>,
@@ -814,7 +824,8 @@ macro_rules! each_value_operand {
             | Inst::IntBitcastUint(value)
             | Inst::VecStrideNilToFalse(value)
             | Inst::VecStrideFalseToNil(value)
-            | Inst::VecIndexSlot(value) => $visit(value),
+            | Inst::VecIndexSlot(value)
+            | Inst::NbIndexSlot(value) => $visit(value),
             Inst::Call { args, .. }
             | Inst::CallMulti { args, .. }
             | Inst::CallBoundMulti { args, .. } => args.$iter().for_each(&mut $visit),

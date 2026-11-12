@@ -312,6 +312,7 @@ fn fmt_inst(
             format!("vec_checked_index v{}, v{}", v(*vec), v(*index))
         }
         Inst::VecIndexSlot(index) => format!("vec_index_slot v{}", v(*index)),
+        Inst::NbIndexSlot(index) => format!("nb_index_slot v{}", v(*index)),
         Inst::FfiNewArray { ctype, count, .. } => {
             format!("ffi_new_array {ctype}[?], v{}", v(*count))
         }

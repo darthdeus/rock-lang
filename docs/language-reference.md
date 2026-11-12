@@ -101,6 +101,11 @@ only into elements of containers it is handed. A C function declared with
 `extern(ffi, ..)` needs neither: it cannot touch a Lua value unless it takes
 a function. The compiler infers the same information for Rock bodies by
 reading them (`bone_core::effects`), so the annotations are ignored there.
+Two more describe an opaque helper's integer result for the bounds-check
+elision: `@returns_index_below("<param>[.field]*")`, the result is below the
+live length of the vector that place holds when the call returns, and
+`@returns_nonneg`. The standard library's column-map slot helpers carry
+them; they are promises of the same kind as the body itself.
 
 ## Macros
 

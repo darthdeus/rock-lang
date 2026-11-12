@@ -170,7 +170,9 @@ impl<'a> Builder<'a> {
             // `for` head.
             ContainerKind::VecColumn => Err(gap("for over a synthetic Vec leaf column")),
             ContainerKind::VecStrideSlot => Err(gap("for over a synthetic Vec strided slot")),
-            ContainerKind::VecInBounds => Err(gap("for over a proven Vec element access")),
+            ContainerKind::VecInBounds | ContainerKind::NativeBufferInBounds => {
+                Err(gap("for over a proven element access"))
+            }
             ContainerKind::NativeBufferLeaf => {
                 Err(gap("for over a synthetic NativeBuffer leaf view"))
             }

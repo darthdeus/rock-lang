@@ -638,3 +638,32 @@ fn a_modulo_without_a_guard_stays() {
     p.run();
     assert!(!p.is_slot(check), "an empty vector makes the modulo NaN");
 }
+
+#[test]
+fn a_native_buffer_access_in_a_counted_loop_is_in_bounds() {
+    let mut p = Probe::new();
+    let (lp, _) = counted_loop(&mut p, |_, _| {});
+    let base = p.load(lp.body, p.xs);
+    let index = p.load(lp.body, p.i);
+    let read = p.emit(
+        lp.body,
+        Inst::Index {
+            base,
+            index,
+            kind: ContainerKind::NativeBuffer,
+        },
+    );
+    let base = p.load(lp.body, p.ys);
+    let index = p.load(lp.body, p.i);
+    let other = p.emit(
+        lp.body,
+        Inst::Index {
+            base,
+            index,
+            kind: ContainerKind::NativeBuffer,
+        },
+    );
+    p.run();
+    assert_eq!(p.kind(read), ContainerKind::NativeBufferInBounds);
+    assert_eq!(p.kind(other), ContainerKind::NativeBuffer);
+}

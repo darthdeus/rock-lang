@@ -181,6 +181,7 @@ fn index_read_is_checked(kind: &ContainerKind) -> bool {
             | ContainerKind::VecColumn
             | ContainerKind::VecStrideSlot
             | ContainerKind::VecInBounds
+            | ContainerKind::NativeBufferInBounds
     )
 }
 

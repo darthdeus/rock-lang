@@ -64,6 +64,8 @@ impl Emitter<'_> {
             // A proven element index: the 1-based column slot, no check. A
             // folded operand is parenthesized by its consumer.
             Inst::VecIndexSlot(index) => self.write_vec_slot(out, *index),
+            // A proven NativeBuffer index is the index itself.
+            Inst::NbIndexSlot(index) => self.write_opnd(out, *index),
             Inst::VecStrideFalseToNil(value) => {
                 out.push('(');
                 self.write_opnd(out, *value);
@@ -419,6 +421,7 @@ impl Emitter<'_> {
                 | ContainerKind::VecValueColumns(_)
                 | ContainerKind::VecValueStrided(_)
                 | ContainerKind::NativeBuffer
+                | ContainerKind::NativeBufferInBounds
                 | ContainerKind::NativeBufferValue(_) => {
                     self.write_opnd(out, *base);
                     out.push_str(".len");
@@ -702,6 +705,13 @@ impl Emitter<'_> {
                 out.push_str(", ");
                 self.write_opnd(out, index);
                 out.push(')');
+            }
+            // The index was proven within `[0, len)`: the C array, raw.
+            ContainerKind::NativeBufferInBounds => {
+                self.write_opnd(out, base);
+                out.push_str(".ptr[");
+                self.write_opnd(out, index);
+                out.push(']');
             }
             // A leaf view is a raw C pointer: index it directly. The index is
             // absolute and the ELEMENT access was bounds-checked once already.

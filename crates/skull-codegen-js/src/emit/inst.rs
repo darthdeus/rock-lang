@@ -130,7 +130,7 @@ impl Emitter<'_> {
             Inst::UintBitcastInt(x) => format!("({} | 0)", self.render_val(*x)?),
             Inst::IntBitcastUint(x) => format!("({} >>> 0)", self.render_val(*x)?),
             // A proven element index: the 0-based column slot, no check.
-            Inst::VecIndexSlot(index) => self.render_val(*index)?,
+            Inst::VecIndexSlot(index) | Inst::NbIndexSlot(index) => self.render_val(*index)?,
             Inst::VecStrideNilToFalse(x) => {
                 let value = self.render_val(*x)?;
                 format!("((value) => value == null ? false : value)({value})")
@@ -365,6 +365,8 @@ impl Emitter<'_> {
                 let (b, i) = (self.render_val(*base)?, self.render_val(*index)?);
                 match kind {
                     ContainerKind::NativeBuffer => format!("__nb_checked_get({b}, {i})"),
+                    // Proven within `[0, len)`: the typed array, raw.
+                    ContainerKind::NativeBufferInBounds => format!("{b}.ptr[{i}]"),
                     // Lowering decomposes every whole-element read into per-leaf
                     // reads (`nb_leaf_element_repr`), so reaching emit means the
                     // element has no C leaf layout to address.
@@ -415,6 +417,7 @@ impl Emitter<'_> {
             }
             Inst::Len { base, kind } => match kind {
                 ContainerKind::NativeBuffer
+                | ContainerKind::NativeBufferInBounds
                 | ContainerKind::NativeBufferValue(_)
                 | ContainerKind::Vec
                 | ContainerKind::VecInBounds

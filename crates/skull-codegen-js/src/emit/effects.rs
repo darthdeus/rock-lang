@@ -24,6 +24,8 @@ impl Emitter<'_> {
                     );
                     let line = match kind {
                         ContainerKind::NativeBuffer => format!("__nb_checked_set({b}, {i}, {v});"),
+                        // Proven within `[0, len)`: the typed array, raw.
+                        ContainerKind::NativeBufferInBounds => format!("{b}.ptr[{i}] = {v};"),
                         // Column storage has no JS emitter arm yet -- reject so
                         // the case lands in the SKIP histogram (the emitter
                         // worklist) instead of emitting a wrong single-slot write.

@@ -348,7 +348,7 @@
   return new Map();
 """
 
-@nomangle inline(js) fn __map_col_slot(m: any, key: any) -> int = """
+@returns_nonneg @returns_index_below("m.data") @nomangle inline(js) fn __map_col_slot(m: any, key: any) -> int = """
   var s = m.spine.get(key);
   if (s !== undefined) return s;
   var fi = m.free_indices;
@@ -365,12 +365,12 @@
   return s;
 """
 
-@nomangle inline(js) fn __map_col_slot_of(m: any, key: any) -> int = """
+@returns_index_below("m.data") @nomangle inline(js) fn __map_col_slot_of(m: any, key: any) -> int = """
   var s = m.spine.get(key);
   return s === undefined ? -1 : s;
 """
 
-@nomangle inline(js) fn __map_col_slot_checked(m: any, key: any) -> int = """
+@returns_nonneg @returns_index_below("m.data") @nomangle inline(js) fn __map_col_slot_checked(m: any, key: any) -> int = """
   var s = m.spine.get(key);
   if (s === undefined) throw new Error("Map key not found");
   return s;

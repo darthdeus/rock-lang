@@ -40,6 +40,7 @@ pub fn always_inlinable(inst: &Inst) -> bool {
         inst,
         Inst::Const(_)
             | Inst::VecIndexSlot(_)
+            | Inst::NbIndexSlot(_)
             | Inst::IntAdd(..)
             | Inst::IntSub(..)
             | Inst::IntMul(..)

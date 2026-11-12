@@ -245,6 +245,34 @@ fn column_call_kept(ss: [Source]) -> float {
     return t
 }
 
+// --- NativeBuffers and column maps.
+
+fn nb_fill(b: NativeBuffer<float>) -> float {
+    for i in 0..b.len { b[i] = (i % 13) as float }
+    return b[0]
+}
+
+fn nb_scale(b: NativeBuffer<float>) -> float {
+    for i in 0..b.len { b[i] = b[i] * 1.0001 }
+    return b[0]
+}
+
+fn nb_sum(b: NativeBuffer<float>) -> float {
+    let t = 0.0
+    for i in 0..b.len { t += b[i] }
+    return t
+}
+
+// A column map looked up by key, as Stone's registries are.
+fn map_lookups(m: Map<int, Source>, n: int) -> float {
+    let t = 0.0
+    for k in 0..n {
+        let s = m.get(k)
+        if s != null { t += s.gain }
+    }
+    return t
+}
+
 fn report(name: string, counts: string, elems: int, jit_s: float, interp_elems: int, interp_s: float, sink: float) {
     let ns = jit_s * 1000000000.0 / (elems as float)
     let interp_ns = interp_s * 1000000000.0 / (interp_elems as float)
@@ -301,4 +329,11 @@ fn main() {
     drive("column_store", 1000, 20000, () => column_store(ss))
     drive("column_ring", 1000, 20000, () => column_ring(ss, 998))
     drive("column_call_kept", 1000, 20000, () => column_call_kept(ss))
+    let nb = native_buffer_float(1000)
+    drive("nb_fill", 1000, 20000, () => nb_fill(nb))
+    drive("nb_scale", 1000, 20000, () => nb_scale(nb))
+    drive("nb_sum", 1000, 20000, () => nb_sum(nb))
+    let registry: Map<int, Source> = map_new()
+    for i in 0..1000 { registry.insert(i, Source { handle: Handle { scene: i % 4, slot: i }, gain: (i % 7) as float, playing: true }) }
+    drive("map_lookups", 1000, 20000, () => map_lookups(registry, 1000))
 }

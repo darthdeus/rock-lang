@@ -694,6 +694,59 @@ vector is read through, or call unresolved bounded `next`s), and
 `Map.remove` (its `table_unset` writes an element, which the pass treats
 as any element). Each is a candidate for a narrower effect, not a kill.
 
+### NativeBuffers and declared result facts (2026-11-12)
+
+A `NativeBuffer` carries the same `len` and takes the same proof: a proven
+element read or write becomes `NativeBufferInBounds` (the C array `.ptr[i]`
+raw, the typed array on JS) and a proven `__nb_checked_index` call, the
+element check a value-struct buffer's leaf reads share, becomes
+`Inst::NbIndexSlot`, the index itself. Nothing new was needed in the
+analysis; the kind and the call joined the accesses it already proves.
+
+Two annotations let an opaque stdlib helper state what its result is, since
+nothing can read its body: `@returns_index_below("<param>[.field]*")` says
+the result is below the live length of the vector that place holds when
+the call returns, and `@returns_nonneg` that it is at least zero. The
+column-map slot helpers carry them (`__map_col_slot` and
+`__map_col_slot_checked` both, `__map_col_slot_of` only the first: it
+returns -1 on a miss, which the caller's `>= 0` guard supplies). A slot is
+below `m.data.len` because `__slot_alloc` takes the next index of `data`
+and `data.len` never shrinks (`__slot_release` only pushes to the free
+list). The pass seeds `lt(result, m.data)` at the call, and the column
+reads that follow a lookup drop their shared check.
+
+`packages/stone`, the same compile, before -> after:
+
+| Check | Before | After |
+| --- | ---: | ---: |
+| `__vec_checked_index` | 98 | 86 |
+| `__nb_checked_index` | 54 | 42 |
+| `__nb_checked_get` / `set` | 62 / 31 | 62 / 31 |
+
+The NativeBuffer element checks that remain index with stride arithmetic
+(`(row * width + col) * 4 + lane`) or a literal into a buffer whose length
+is a parameter; neither is covered by a local fact. The 12 column checks
+the slot helpers removed are the registry lookups; the four that remain
+follow a slot through a field the pass cannot name.
+
+`benchmarks/vec_store.rock` gained four workloads. Apple M4 Max, bundled
+LuaJIT 2.1, 9 interleaved rounds, min / median ns per element with the JIT
+on, then min with the JIT off, checked -> elided:
+
+| Workload | JIT checked | JIT elided | Interpreter | mcode bytes |
+| --- | ---: | ---: | ---: | ---: |
+| nb_fill `b[i] = v` | 1.667 / 1.754 | 1.544 / 2.038 | 54.3 -> 26.8 | 1436 -> 1432 |
+| nb_scale `b[i] = b[i] * k` | 0.540 / 0.567 | 0.395 / 0.485 | 101.9 -> 48.3 | 1692 -> 1432 |
+| nb_sum `t += b[i]` | 0.961 / 1.006 | 0.915 / 1.075 | 55.4 -> 26.9 | 1316 -> 1184 |
+| map_lookups (column map `get` in a loop) | 1.267 / 1.332 | 1.146 / 1.342 | 86.6 -> 62.7 | 1320 -> 1432 |
+
+With the JIT on the NativeBuffer read-modify-write gains 27% at the minimum
+and the others 5-10%; medians in this run were noisier than the earlier
+sections (a background load during the run), so the minimums are the
+figures to read. The interpreter halves its time per element on every
+NativeBuffer loop. The earlier flat and column workloads repeated within
+their previous spread.
+
 ### What would eliminate more
 
 The remaining checks, flat and column alike, fall to the same three causes,
@@ -710,19 +763,16 @@ in order of weight:
    passes an "index proven for parameter k" bit and emits the raw form in
    that specialization. The inliner's plan machinery already keys bodies per
    site, so the bit would ride on it.
-3. **Data-structure invariants.** A map slot is below its data length; a
-   random index drawn in `[0, len)` is in bounds; an arena's `cur_count - 1`
-   is below its storage. These want a fact a stdlib function can return:
-   `@returns_index_below(arg)` on `__map_col_slot_of` and `random_int`
-   would let the pass seed `lt(result, arg)` at the call. Narrow, cheap,
-   and checked nowhere but by review of the stdlib body, like `@pure` on
-   `inline(lua)` today.
+3. **Data-structure invariants.** Done for the map slot helpers
+   (`@returns_index_below`, above). `random_int(lo, hi)` returns `lo` when
+   `hi <= lo`, so its result is below `hi` only under a `lo < hi` guard; a
+   conditional form of the annotation would cover its one Stone site. An
+   arena's `cur_count - 1` is below its storage only by the arena's own
+   invariant, which the same annotation on the arena accessors could state.
 
 Guards (`len - 1` / `xs[0]` without `len > 0`) are source shapes: the index
 is unproven because the program does not check it, and adding the guard in
 Stone is the fix there.
 
-The other checked accesses carry over unchanged: `__nb_checked_*` on
-NativeBuffers (147 Stone sites) are the same proof over `{ptr, len}` and
-would take the same pass with a `NativeBufferInBounds` kind; the 484 nil-key
-store guards need a field-presence fact instead of a bounds fact.
+The 484 nil-key store guards are the remaining runtime check of note; they
+need a field-presence fact instead of a bounds fact.

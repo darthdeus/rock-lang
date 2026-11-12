@@ -1,0 +1,47 @@
+// A column-stored map (`Map<K, V>` for an all-scalar `value` V) looks a key
+// up as a slot into its column storage. The stdlib slot helpers declare
+// that the slot is below the storage's length, so the element check the
+// column reads shared is dropped. The results on a hit, a miss and after
+// removal are unchanged.
+
+nobox value Mote { x: float, y: float, life: int }
+
+fn lookup(m: Map<string, Mote>, k: string) -> float {
+    let v = m.get(k)
+    if v != null { return v.x }
+    return -1.0
+}
+
+@test(output = "1.5 -1 2.5")
+fn a_hit_a_miss_and_an_insert() {
+    let m: Map<string, Mote> = map_new()
+    m.insert("a", Mote { x: 1.5, y: 0.0, life: 1 })
+    let a = lookup(m, "a")
+    let b = lookup(m, "b")
+    m.insert("b", Mote { x: 2.5, y: 0.0, life: 2 })
+    print("{a} {b} {lookup(m, "b")}")
+}
+
+@test(output = "-1 3.5")
+fn a_removed_key_misses_and_a_reused_slot_reads_the_new_value() {
+    let m: Map<string, Mote> = map_new()
+    m.insert("a", Mote { x: 1.5, y: 0.0, life: 1 })
+    m.remove("a")
+    let gone = lookup(m, "a")
+    m.insert("c", Mote { x: 3.5, y: 0.0, life: 3 })
+    print("{gone} {lookup(m, "c")}")
+}
+
+@test(output = "6")
+fn lookups_in_a_loop() {
+    let m: Map<int, Mote> = map_new()
+    for i in 0..4 { m.insert(i, Mote { x: i as float, y: 0.0, life: i }) }
+    let t = 0.0
+    for i in 0..4 {
+        let v = m.get(i)
+        if v != null { t += v.x }
+    }
+    print("{t}")
+}
+
+fn main() {}

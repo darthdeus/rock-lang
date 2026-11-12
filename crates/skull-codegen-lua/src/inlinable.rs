@@ -343,6 +343,7 @@ fn indexed_base(inst: &Inst) -> Option<Idx<Inst>> {
                 | ContainerKind::VecValueColumns(_)
                 | ContainerKind::VecValueStrided(_)
                 | ContainerKind::NativeBuffer
+                | ContainerKind::NativeBufferInBounds
                 | ContainerKind::NativeBufferValue(_),
         } => Some(base),
         _ => None,

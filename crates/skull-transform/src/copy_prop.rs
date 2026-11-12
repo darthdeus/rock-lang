@@ -371,6 +371,7 @@ fn keeps_vec_lengths(inst: &Inst) -> bool {
             ContainerKind::VecColumn
                 | ContainerKind::VecStrideSlot
                 | ContainerKind::VecInBounds
+                | ContainerKind::NativeBufferInBounds
                 | ContainerKind::NativeBufferLeaf
         ),
         // Reads that may raise but change nothing.

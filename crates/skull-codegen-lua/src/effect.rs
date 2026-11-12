@@ -171,6 +171,16 @@ impl Emitter<'_> {
                         self.write_opnd(out, *value);
                         out.push_str(")\n");
                     }
+                    // The index was proven within `[0, len)`: a raw C array write.
+                    ContainerKind::NativeBufferInBounds => {
+                        out.push(' ');
+                        self.write_opnd(out, *base);
+                        out.push_str(".ptr[");
+                        self.write_opnd(out, *index);
+                        out.push_str("] = ");
+                        self.write_opnd(out, *value);
+                        out.push('\n');
+                    }
                     // The index was proven within `[0, len)`: a raw slot write.
                     ContainerKind::VecInBounds => {
                         out.push(' ');
@@ -239,6 +249,7 @@ impl Emitter<'_> {
                     // columns -- more than one `value`, so lowering splits it.
                     ContainerKind::VecInBounds
                     | ContainerKind::NativeBuffer
+                    | ContainerKind::NativeBufferInBounds
                     | ContainerKind::NativeBufferValue(_)
                     | ContainerKind::NativeBufferLeaf
                     | ContainerKind::VecValueColumns(_)

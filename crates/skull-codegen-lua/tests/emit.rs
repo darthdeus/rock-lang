@@ -2500,15 +2500,15 @@ fn vec_index_read_is_direct_with_a_checked_fallback() {
     assert!(lua.contains("._data[1] or __vec_checked_get("), "{lua}");
 }
 
-/// A call in the body may shrink the vector, so the loop's element read keeps
-/// its checked fallback.
+/// A call in the body that may shrink the vector keeps the loop's element
+/// read on its checked fallback.
 #[test]
 fn vec_loop_reads_its_element_directly() {
     let lua = emit_inlined(
-        "fn bump(x: int) -> int { return x + 1 }
+        "fn bump(xs: [int], x: int) -> int { if x < 0 { xs.pop() }; return x + 1 }
         fn sum_vec(xs: [int]) -> int {
             let total = 0
-            for x in xs { total += bump(x) }
+            for x in xs { total += bump(xs, x) }
             return total
         }",
         "sum_vec",
@@ -3027,9 +3027,9 @@ fn a_call_in_the_loop_body_keeps_the_check_even_when_pure() {
         "fill",
     );
     assert!(lua.contains("__vec_checked_set("), "{lua}");
-    // A `@pure` callee the inliner splices leaves no call behind, so the
-    // store is proven; one it cannot splice (self-recursive) stays a call
-    // and keeps the check.
+    // A `@pure` callee is proven harmless by reading its body, not by the
+    // annotation: a `@pure` wrapper around a `@debug_impure` pop keeps the
+    // check, since the effect walk sees the pop.
     let lua = emit_inlined(
         "@pure fn weight(i: int) -> int { return i * 3 }
         fn fill(xs: [int]) {
@@ -3039,9 +3039,10 @@ fn a_call_in_the_loop_body_keeps_the_check_even_when_pure() {
     );
     assert!(!lua.contains("__vec_checked_set("), "{lua}");
     let lua = emit_inlined(
-        "@pure fn depth(i: int) -> int { if i <= 0 { return 0 }; return depth(i - 1) + 1 }
+        "@debug_impure fn debug_pop(xs: [int]) -> int { xs.pop(); return 0 }
+        @pure fn via(xs: [int]) -> int { return debug_pop(xs) }
         fn fill(xs: [int]) {
-            for i in 0..xs.len() { xs[i] = depth(i) }
+            for i in 0..xs.len() { xs[i] = via(xs) }
         }",
         "fill",
     );
@@ -3206,4 +3207,35 @@ fn a_callee_that_provably_leaves_the_vector_alone_keeps_the_proof() {
         "inline(lua) fn raw(i: int) -> int = \"return i\"
         fn fill(xs: [int]) { for i in 0..xs.len() { xs[i] = raw(i) } }"
     ));
+}
+
+/// A NativeBuffer access a loop proves indexes the C array raw; the stdlib
+/// slot helpers' declared result facts drop the column check after a
+/// column-map lookup.
+#[test]
+fn native_buffer_and_column_map_accesses_drop_their_checks() {
+    let lua = emit_inlined(
+        "fn fill(b: NativeBuffer<float>) {
+            for i in 0..b.len { b[i] = b[i] + 1.0 }
+        }",
+        "fill",
+    );
+    assert!(lua.contains(".ptr[c"), "{lua}");
+    assert!(!lua.contains("__nb_checked_"), "{lua}");
+    let lua = emit_inlined(
+        "fn touch(b: NativeBuffer<float>, i: int) -> float { return b[i] }",
+        "touch",
+    );
+    assert!(lua.contains("__nb_checked_get("), "{lua}");
+    let lua = emit_inlined(
+        "nobox value Mote { x: float, y: float }
+        fn lookup(m: Map<string, Mote>, k: string) -> float {
+            let v = m.get(k)
+            if v != null { return v.x }
+            return -1.0
+        }",
+        "lookup",
+    );
+    assert!(lua.contains("__map_col_slot_of("), "{lua}");
+    assert!(!lua.contains("__vec_checked_index("), "{lua}");
 }

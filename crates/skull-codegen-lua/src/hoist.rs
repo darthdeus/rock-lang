@@ -69,7 +69,9 @@ fn const_hoist_uses_are_read_only(func: &MirFunc, cand: Idx<Inst>) -> bool {
                     || matches!(
                         func.insts[*base],
                         Inst::Index {
-                            kind: ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_),
+                            kind: ContainerKind::NativeBuffer
+                                | ContainerKind::NativeBufferInBounds
+                                | ContainerKind::NativeBufferValue(_),
                             ..
                         }
                     )

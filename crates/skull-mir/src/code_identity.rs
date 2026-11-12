@@ -1219,6 +1219,7 @@ impl BodyHasher {
             }
             ContainerKind::VecStrideSlot => self.tag(8),
             ContainerKind::VecInBounds => self.tag(9),
+            ContainerKind::NativeBufferInBounds => self.tag(10),
         }
     }
 
@@ -1436,6 +1437,10 @@ impl BodyHasher {
             }
             Inst::VecIndexSlot(index) => {
                 self.tag(93);
+                self.inst_idx(*index);
+            }
+            Inst::NbIndexSlot(index) => {
+                self.tag(94);
                 self.inst_idx(*index);
             }
             Inst::MakeStruct { ty, fields } => {

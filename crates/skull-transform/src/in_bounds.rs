@@ -3,7 +3,12 @@
 //! `[0, xs.len)` as [`ContainerKind::VecInBounds`], which the backends index
 //! raw, and replaces a proven column check ([`Inst::VecCheckedIndex`], the
 //! one check shared by the leaf reads of a column-stored or strided element)
-//! with the bare slot ([`Inst::VecIndexSlot`]). Results and errors are unchanged: an access is only marked where the
+//! with the bare slot ([`Inst::VecIndexSlot`]). A `NativeBuffer` has the same
+//! `len` and the same proof: a proven element access becomes
+//! [`ContainerKind::NativeBufferInBounds`] and a proven `__nb_checked_index`
+//! call becomes [`Inst::NbIndexSlot`]. A call whose callee declares
+//! `@returns_index_below("<param>.<field>..")` or `@returns_nonneg` seeds the
+//! matching fact about its result. Results and errors are unchanged: an access is only marked where the
 //! check could not have raised.
 //!
 //! Three facts are tracked about a *key*, which is either the value an
@@ -84,14 +89,17 @@ pub fn elide_bounds_checks(ws: Option<&Workspace>, func: &mut MirFunc) -> usize 
             match func.insts[i] {
                 Inst::Lambda { .. } => return 0,
                 Inst::Index {
-                    kind: ContainerKind::Vec,
+                    kind: ContainerKind::Vec | ContainerKind::NativeBuffer,
                     ..
                 }
                 | Inst::StoreIndex {
-                    kind: ContainerKind::Vec,
+                    kind: ContainerKind::Vec | ContainerKind::NativeBuffer,
                     ..
                 }
                 | Inst::VecCheckedIndex { .. } => has_checked = true,
+                Inst::Call { func, .. } if is_stdlib_fn(ws, func, "__nb_checked_index") => {
+                    has_checked = true
+                }
                 _ => {}
             }
         }
@@ -159,20 +167,27 @@ pub fn elide_bounds_checks(ws: Option<&Workspace>, func: &mut MirFunc) -> usize 
         };
         let mut facts = input.clone();
         for &id in &func.blocks[b].insts {
-            match func.insts[id] {
+            match &func.insts[id] {
                 Inst::Index {
                     base,
                     index,
-                    kind: ContainerKind::Vec,
+                    kind: ContainerKind::Vec | ContainerKind::NativeBuffer,
                 }
                 | Inst::StoreIndex {
                     base,
                     index,
-                    kind: ContainerKind::Vec,
+                    kind: ContainerKind::Vec | ContainerKind::NativeBuffer,
                     ..
                 }
                 | Inst::VecCheckedIndex { vec: base, index }
-                    if facts.in_bounds(func, index, base) =>
+                    if facts.in_bounds(func, *index, *base) =>
+                {
+                    proven.push(id)
+                }
+                Inst::Call { func: fref, args }
+                    if is_stdlib_fn(ws, *fref, "__nb_checked_index")
+                        && args.len() == 2
+                        && facts.in_bounds(func, args[1], args[0]) =>
                 {
                     proven.push(id)
                 }
@@ -184,16 +199,32 @@ pub fn elide_bounds_checks(ws: Option<&Workspace>, func: &mut MirFunc) -> usize 
     for &id in &proven {
         match &mut func.insts[id] {
             Inst::Index { kind, .. } | Inst::StoreIndex { kind, .. } => {
-                *kind = ContainerKind::VecInBounds;
+                *kind = match kind {
+                    ContainerKind::Vec => ContainerKind::VecInBounds,
+                    _ => ContainerKind::NativeBufferInBounds,
+                };
             }
             Inst::VecCheckedIndex { index, .. } => {
                 let index = *index;
                 func.insts[id] = Inst::VecIndexSlot(index);
             }
+            Inst::Call { args, .. } => {
+                let index = args[1];
+                func.insts[id] = Inst::NbIndexSlot(index);
+            }
             _ => unreachable!(),
         }
     }
     proven.len()
+}
+
+/// Whether `fref` is the standard library's function `name`.
+fn is_stdlib_fn(ws: Option<&Workspace>, fref: FuncRef, name: &str) -> bool {
+    ws.is_some_and(|ws| {
+        let module = ws.module(fref.module);
+        module.functions[fref.func].name.as_str() == name
+            && bone_core::modules::is_stdlib_module_file(module.file.as_str())
+    })
 }
 
 fn disabled_by_env() -> bool {
@@ -227,6 +258,12 @@ fn relevant_values(func: &MirFunc, rpo: &[Idx<Block>]) -> Vec<bool> {
                 | Inst::StoreIndex { base, index, .. }
                 | Inst::VecCheckedIndex { vec: base, index } => {
                     mark(&[*base, *index], &mut relevant);
+                }
+                // A call's arguments and result may carry the facts its
+                // callee declares, and the NativeBuffer index check is one.
+                Inst::Call { args, .. } => {
+                    mark(&[id], &mut relevant);
+                    mark(args, &mut relevant);
                 }
                 // A length read is tied to its place so a later use of the
                 // value (a modulo, a `len - 1`) can name the vector.
@@ -616,6 +653,49 @@ fn after_direct_call(facts: &mut Facts, ctx: &Ctx<'_>, fref: FuncRef) {
 
 const LEN: &str = "len";
 
+/// The facts a callee declares about its result: `@returns_nonneg`, and
+/// `@returns_index_below("<param>[.field]*")`, which names a vector held by
+/// an argument's place when the call returns. A promise about a body the
+/// compiler cannot read, so it rides on the same review as the body.
+fn seed_declared_result_facts(
+    facts: &mut Facts,
+    func: &MirFunc,
+    ctx: &Ctx<'_>,
+    call: Idx<Inst>,
+    fref: FuncRef,
+    args: &[Idx<Inst>],
+) {
+    let Some(ws) = ctx.ws else {
+        return;
+    };
+    let f = &ws.module(fref.module).functions[fref.func];
+    for anno in &f.annotations {
+        if anno.is_builtin("returns_nonneg") {
+            facts.nonneg.insert(Key::Value(call));
+        }
+        if anno.is_builtin("returns_index_below")
+            && let Some(bone_core::hir::AnnoArg {
+                value: bone_core::hir::AnnoValue::String(path),
+                ..
+            }) = anno.args.first()
+        {
+            let mut parts = path.as_str().split('.');
+            let Some(param) = parts.next() else { continue };
+            let Some(pos) = f.param_decls.iter().position(|p| p.name.as_str() == param) else {
+                continue;
+            };
+            let Some(&arg) = args.get(pos) else { continue };
+            let fields: Vec<Ustr> = parts.map(Ustr::from).collect();
+            for mut key in facts.keys_of(func, arg) {
+                for &field in &fields {
+                    key = Key::Field(Box::new(key), field);
+                }
+                facts.lt.insert((Key::Value(call), key));
+            }
+        }
+    }
+}
+
 /// Advance `facts` across `id`.
 fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
     let inst = &func.insts[id];
@@ -641,14 +721,24 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
         Inst::Index {
             base,
             index,
-            kind: ContainerKind::Vec | ContainerKind::VecInBounds,
+            kind:
+                ContainerKind::Vec
+                | ContainerKind::VecInBounds
+                | ContainerKind::NativeBuffer
+                | ContainerKind::NativeBufferInBounds,
         }
         | Inst::VecCheckedIndex { vec: base, index } => facts.checked_access(func, *base, *index),
         Inst::StoreIndex {
             base, index, kind, ..
         } => {
             facts.forget(|k| matches!(k, Key::Elem(..)));
-            if matches!(kind, ContainerKind::Vec | ContainerKind::VecInBounds) {
+            if matches!(
+                kind,
+                ContainerKind::Vec
+                    | ContainerKind::VecInBounds
+                    | ContainerKind::NativeBuffer
+                    | ContainerKind::NativeBufferInBounds
+            ) {
                 facts.checked_access(func, *base, *index);
             }
         }
@@ -679,7 +769,13 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
             facts.forget_field(*field);
         }
         Inst::ArrayPush { .. } => facts.forget_field(Ustr::from(LEN)),
-        Inst::Call { func: fref, .. } => after_direct_call(facts, ctx, *fref),
+        Inst::Call { func: fref, args } => {
+            after_direct_call(facts, ctx, *fref);
+            if is_stdlib_fn(ctx.ws, *fref, "__nb_checked_index") && args.len() == 2 {
+                facts.checked_access(func, args[0], args[1]);
+            }
+            seed_declared_result_facts(facts, func, ctx, id, *fref, args);
+        }
         Inst::CallMulti {
             dests, func: fref, ..
         } => {
