@@ -2432,11 +2432,21 @@ pub fn declares_face(self: TextFamily, bold: bool = false, italic: bool = false)
 
 // A null family at a public surface is the default font's family. Absence is a
 // rejection, not a silent no-op: a rich call has a family to name.
+// The default family is kept: text drawn every frame without a family
+// otherwise builds one per call. Callers do not mutate a family they are given.
+global DEFAULT_TEXT_FAMILY: TextFamily? = null
+
 pub fn text_family_or_default(family: TextFamily? = null) -> TextFamily {
     if let f = family { return f }
     let d = DEFAULT_FONT
     if d == null { error("rich text: no family given and no DEFAULT_FONT is loaded") }
-    return TextFamily { regular: d.unwrap() }
+    let font = d.unwrap()
+    if let kept = DEFAULT_TEXT_FAMILY {
+        if kept.regular.handle == font.handle { return kept }
+    }
+    let built = TextFamily { regular: font }
+    DEFAULT_TEXT_FAMILY = built
+    return built
 }
 
 pub fn output_font_density() -> float {

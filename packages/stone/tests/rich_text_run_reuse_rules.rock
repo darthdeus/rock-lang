@@ -1,0 +1,36 @@
+// The deferred world overlay and the world measures resolve their text again
+// every frame and reuse the runs of commands that have finished. A reused run
+// must carry nothing over, and must not be one a queued command still holds.
+@test
+fn reused_rich_text_runs_keep_queued_commands_intact() {
+    setup_stone()
+    assert(stone_gpu_host_ensure())
+    let saved = DEFAULT_FONT
+    let font = load_font(project_asset_path("@engine/assets/fonts/DroidSans.ttf"), 24).unwrap()
+    DEFAULT_FONT = font
+    defer { DEFAULT_FONT = saved; unload_font(font) }
+    world_overlay_begin_frame()
+    defer world_overlay_begin_frame()
+
+    world_overlay.rich_text([text_span("first", color: RED)], v(0, 0), 1.0, scale: 2.0)
+    let first = OVERLAY_CMDS[0].rich_runs[0]
+    first.draw_scale = 2.0
+    let measured = measure_world_rich_text([text_span("measured")], 1.0)
+    assert(measured.x > 0.0, "the measure sees the text ({measured.x})")
+    assert_eq(first.text, "first", "a measure leaves a queued command's run alone")
+
+    world_overlay_begin_frame()
+    world_overlay.rich_text([text_span("second")], v(0, 0), 1.0)
+    assert_eq(measure_world_rich_text([text_span("measured")], 1.0) == measured, true,
+        "a measure repeats with reused runs")
+    world_overlay.rich_text([text_span("third"), text_span("fourth", color: RED)], v(0, 0), 1.0)
+    assert_eq(OVERLAY_CMD_LEN, 2, "two commands are queued")
+    let second = OVERLAY_CMDS[0].rich_runs[0]
+    assert_eq(second.text, "second", "the first command holds its own text")
+    assert(second.color == WHITE && second.draw_scale == 1.0 && second.layout == null,
+        "a reused run starts clean")
+    let later = OVERLAY_CMDS[1].rich_runs
+    assert_eq(later.len(), 2, "each span keeps its run")
+    assert(later[0].text == "third" && later[1].text == "fourth" && later[1].color == RED,
+        "the second command holds its own spans")
+}
