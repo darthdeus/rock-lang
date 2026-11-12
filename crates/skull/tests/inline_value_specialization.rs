@@ -60,7 +60,7 @@ fn generic_inline_at_value_type_splices_zero_box() {
 // A generic `@inline` fn calling `native_buffer_alloc<T>` -- the intrinsic the
 // shared (opaque-`T`) body cannot lower. Uses the stdlib `flat_vec_new<T>` /
 // `push`; specialized at `V2`, the ctype resolves and the body emits the
-// `ffi.new("V2[?]", ..)` it could not name generically. `nb_alloc` is a local
+// `__rock_nb_alloc("V2", ..)` it could not name generically. `nb_alloc` is a local
 // generic wrapper exercising the intrinsic directly too.
 const INTRINSIC_INST: &str = r#"
 value V2 { x: float, y: float }
@@ -82,8 +82,8 @@ fn generic_inline_intrinsic_resolves_ctype_at_value_instantiation() {
     // the whole point of P2 for the alloc intrinsic (P1 could only do it at a
     // concrete, non-generic call site).
     assert!(
-        body.contains(r#"ffi.new("V2[?]","#),
-        "specialized intrinsic must emit `ffi.new(\"V2[?]\", ..)`; got:\n{body}"
+        body.contains(r#"__rock_nb_alloc("V2","#),
+        "specialized intrinsic must emit `__rock_nb_alloc(\"V2\", ..)`; got:\n{body}"
     );
     // No dangling call to the shared generic `flat_vec_new` survives.
     assert!(
@@ -109,7 +109,7 @@ fn main() {
 fn non_inline_generic_chain_uses_concrete_native_buffer_instance() {
     let lua = emit_module(TRANSITIVE_CONCRETE_INTRINSIC);
     assert!(
-        lua.contains(r#"ffi.new("TV2[?]"#),
+        lua.contains(r#"__rock_nb_alloc("TV2"#),
         "the transitive concrete instance must own the native-buffer ctype, got:\n{lua}"
     );
 }

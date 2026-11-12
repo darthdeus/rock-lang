@@ -105,7 +105,7 @@ fn bloom_blur_packs_at_its_std140_element_indices() {
 /// `WireView` must reach the EMITTED code as a choice of base, not just as a
 /// value in the plan: a 32-bit block `bool` and an `int` store through the int
 /// view while the float beside them stores through the float view. Each view is
-/// a distinct `ffi.new`, so the two are told apart by which local they index.
+/// a distinct allocation, so the two are told apart by which local they index.
 #[test]
 fn int_and_bool_leaves_store_through_the_other_view() {
     let body = main_body(&emit_module(
@@ -123,12 +123,12 @@ fn main() {
     ));
     let fbuf = body
         .lines()
-        .find(|l| l.contains(r#"ffi.new("float"#))
+        .find(|l| l.contains(r#"__rock_nb_alloc("float"#))
         .and_then(|l| l.split_whitespace().next())
         .expect("the float view's local");
     let ibuf = body
         .lines()
-        .find(|l| l.contains(r#"ffi.new("int"#))
+        .find(|l| l.contains(r#"__rock_nb_alloc("int"#))
         .and_then(|l| l.split_whitespace().next())
         .expect("the int view's local");
     assert_ne!(

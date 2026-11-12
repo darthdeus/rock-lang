@@ -1,0 +1,52 @@
+// A data image copies native buffer storage by its bytes. Storage of 64 KB or
+// more is a pointer (see `__rock_nb_alloc`), which carries neither its length
+// nor an array type, so the image has to take both from the allocation record.
+
+value ImageVert {
+    x: float,
+    id: int,
+}
+
+struct ImageStorageHolder {
+    small: NativeBufferU8,
+    large: NativeBufferU8,
+    verts: NativeBuffer<ImageVert>,
+}
+
+inline(lua) fn image_round_trip(value: ImageStorageHolder) -> ImageStorageHolder = """
+    __stone_install_data_image()
+    local capture = { image_mode = "capture", global = "test", storage = {}, storage_records = {} }
+    local image = __stone_data_image(value, {}, capture)
+    local materialize = { image_mode = "materialize", global = "test", storage = {},
+        image_storage = capture.storage_records }
+    return __stone_data_image(image, {}, materialize)
+"""
+
+// Reads the element struct directly: an image does not carry the buffer's leaf
+// views, so element access through the copy is not what this checks.
+inline(lua) fn image_vert_id(buffer: NativeBuffer<ImageVert>, index: int) -> int = "return buffer.ptr[index].id"
+
+@test
+fn data_image_round_trips_large_storage() {
+    let n = 20000
+    let verts: NativeBuffer<ImageVert> = native_buffer_alloc(n)
+    let holder = ImageStorageHolder { small: native_buffer_u8(16), large: native_buffer_u8(70000), verts }
+    nb_set(holder.small, 15, 7)
+    nb_set(holder.large, 0, 1)
+    nb_set(holder.large, 69999, 42)
+    holder.verts[0] = ImageVert { x: 1.5, id: 3 }
+    holder.verts[n - 1] = ImageVert { x: 2.5, id: 9 }
+
+    let copy = image_round_trip(holder)
+    assert_eq(copy.small.len, 16)
+    assert_eq(nb_get(copy.small, 15), 7)
+    assert_eq(copy.large.len, 70000)
+    assert_eq(nb_get(copy.large, 0), 1)
+    assert_eq(nb_get(copy.large, 69999), 42)
+    assert_eq(copy.verts.len, n)
+    assert_eq(image_vert_id(copy.verts, 0), 3)
+    assert_eq(image_vert_id(copy.verts, n - 1), 9)
+
+    nb_set(copy.large, 69999, 43)
+    assert_eq(nb_get(holder.large, 69999), 42, "the copy owns its storage")
+}

@@ -333,3 +333,92 @@ function __vec_checked_set(vec, i, v)\n\
   if i < 0 or i >= vec.len then error('Vec index out of bounds') end\n\
   vec._data[i + 1] = v\n\
 end";
+
+/// The native buffer allocator and storage lookup every emitted program calls
+/// (`Inst::FfiNewArray`, the stdlib's sized constructors, `deepcopy`).
+pub const NB_ALLOC_PRELUDE: &str = r#"
+-- Native buffer allocation (`native_buffer_alloc<T>` and the sized stdlib
+-- constructors). Below __ROCK_NB_OFFHEAP_MIN bytes a buffer is an `ffi.new`
+-- array on the Lua heap. At or above it the storage comes from calloc and
+-- `ptr` is a `T*` whose finalizer frees it: a large `ffi.new` array is
+-- collector debt in proportion to its size although it holds no references,
+-- and a megabyte allocated while a sweep is active stalls that frame.
+-- docs/luajit-performance.md, "Large native buffers", has the measurements
+-- and what to check when this is suspected of causing a problem.
+--
+-- What off-heap storage gives up, and where each loss is handled:
+--  * A pointer does not know its length, so `__rock_nb_storage_of` answers
+--    "is this buffer storage, and how many bytes" for both forms. Ask it
+--    BEFORE `__rock_c_struct_of`: `ffi.istype("T", ptr)` is true for a `T*`,
+--    so a struct buffer's pointer would otherwise be copied as one struct.
+--    Only the pointer object the allocation returned is known; a re-cast of
+--    the same address is a foreign pointer.
+--  * The collector does not see these bytes, so dropped buffers wait for a
+--    cycle that their own size no longer brings forward. The guard below
+--    forces a collection once __ROCK_NB_OFFHEAP_CYCLE_MAX bytes have been
+--    allocated off-heap within one collector cycle.
+if not _G.__ROCK_NB_OFFHEAP then
+  _G.__ROCK_NB_OFFHEAP = setmetatable({}, { __mode = "k" })
+  _G.__ROCK_NB_OFFHEAP_STATS = { live_bytes = 0, live_count = 0, since_cycle = 0, forced_collections = 0 }
+  pcall(ffi.cdef, "void *calloc(size_t, size_t); void free(void *);")
+  -- Zeroes the per-cycle counter each time the collector finishes a cycle: a
+  -- proxy's __gc runs once per cycle and plants its successor.
+  local function arm()
+    local sentinel = newproxy(true)
+    getmetatable(sentinel).__gc = function()
+      _G.__ROCK_NB_OFFHEAP_STATS.since_cycle = 0
+      arm()
+    end
+  end
+  arm()
+end
+-- ROCK_NB_OFFHEAP_MIN overrides the threshold for a run (bytes; a value such as
+-- 1e18 keeps every buffer on the Lua heap), to tell this mechanism apart from
+-- another cause when diagnosing memory or frame-time behaviour.
+if not _G.__ROCK_NB_OFFHEAP_MIN then
+  _G.__ROCK_NB_OFFHEAP_MIN = tonumber(os.getenv("ROCK_NB_OFFHEAP_MIN") or "") or 65536
+end
+if not _G.__ROCK_NB_OFFHEAP_CYCLE_MAX then _G.__ROCK_NB_OFFHEAP_CYCLE_MAX = 268435456 end
+local __rock_nb_elems = {}
+function __rock_nb_alloc(ctype, n)
+  local e = __rock_nb_elems[ctype]
+  if not e then
+    local array = ffi.typeof(ctype .. "[?]")
+    e = { size = ffi.sizeof(ctype), array = array, ptr = ffi.typeof(ctype .. "*"), key = tostring(array) }
+    __rock_nb_elems[ctype] = e
+  end
+  local bytes = n * e.size
+  if not (bytes >= __ROCK_NB_OFFHEAP_MIN) then return e.array(n) end
+  local stats = __ROCK_NB_OFFHEAP_STATS
+  stats.since_cycle = stats.since_cycle + bytes
+  if stats.since_cycle > __ROCK_NB_OFFHEAP_CYCLE_MAX then
+    stats.since_cycle = 0
+    stats.forced_collections = stats.forced_collections + 1
+    collectgarbage("collect")
+  end
+  local raw = ffi.C.calloc(n, e.size)
+  if raw == nil then error("not enough memory", 2) end
+  local p = ffi.gc(ffi.cast(e.ptr, raw), function(dead)
+    stats.live_bytes = stats.live_bytes - bytes
+    stats.live_count = stats.live_count - 1
+    ffi.C.free(dead)
+  end)
+  stats.live_bytes = stats.live_bytes + bytes
+  stats.live_count = stats.live_count + 1
+  __ROCK_NB_OFFHEAP[p] = { ctype = ctype, elem_size = e.size, bytes = bytes, key = e.key }
+  return p
+end
+-- The compiler's storage description of `x` and its byte length, or nil when
+-- `x` is not native buffer storage.
+function __rock_nb_storage_of(x)
+  local reg = _G.__ROCK_NB_STORAGE
+  local off = __ROCK_NB_OFFHEAP[x]
+  if off then
+    return reg and reg[off.key] or { ctype = off.ctype, elem_size = off.elem_size, views = {} }, off.bytes
+  end
+  local ok, key = pcall(function() return tostring(ffi.typeof(x)) end)
+  local desc = ok and reg and reg[key]
+  if desc then return desc, ffi.sizeof(x) end
+  return nil
+end
+"#;

@@ -1,0 +1,103 @@
+// Storage of 64 KB or more is allocated outside the Lua heap and `ptr` is a
+// pointer instead of an array (`__rock_nb_alloc` in the emitted prelude). The
+// buffer must behave the same; what differs is that a pointer does not know
+// its length and that a pointer to a struct passes `ffi.istype` for the
+// struct, so `deepcopy` has to recognise the storage before it looks for a
+// value struct.
+
+value LargeVert {
+    x: float,
+    y: float,
+    id: int,
+}
+
+struct LargeHolder {
+    verts: NativeBuffer<LargeVert>,
+    bytes: NativeBufferU8,
+}
+
+inline(lua) fn large_collect() = "collectgarbage('collect') collectgarbage('collect')"
+
+fn large_verts(n: int) -> NativeBuffer<LargeVert> {
+    return native_buffer_alloc(n)
+}
+
+@test
+fn only_large_storage_leaves_the_lua_heap() {
+    large_collect()
+    let before = native_buffer_offheap_bytes()
+    let small = native_buffer_u8(65535)
+    assert_eq(native_buffer_offheap_bytes(), before)
+    let large = native_buffer_u8(65536)
+    assert_eq(native_buffer_offheap_bytes(), before + 65536)
+    // Zeroed like an ffi.new array, and writable to its last element.
+    assert_eq(nb_get(large, 0), 0)
+    assert_eq(nb_get(large, 65535), 0)
+    nb_set(large, 65535, 200)
+    nb_set(small, 65534, 100)
+    assert_eq(nb_get(large, 65535), 200)
+    assert_eq(nb_get(small, 65534), 100)
+}
+
+fn large_dropped() -> int {
+    let b = native_buffer_float(100000)
+    nb_set(b, 99999, 1.0)
+    return native_buffer_offheap_bytes()
+}
+
+@test
+fn collected_large_storage_is_freed() {
+    large_collect()
+    let before = native_buffer_offheap_bytes()
+    assert_eq(large_dropped() > before, true)
+    large_collect()
+    assert_eq(native_buffer_offheap_bytes(), before)
+}
+
+@test
+fn large_struct_storage_reads_and_writes_through_its_leaves() {
+    let n = 20000
+    let buf = large_verts(n)
+    buf[0] = LargeVert { x: 1.5, y: 2.5, id: 7 }
+    buf[n - 1] = LargeVert { x: 3.5, y: 4.5, id: 9 }
+    buf[n - 1].id = 11
+    let first = buf[0]
+    assert_eq(first.x, 1.5)
+    assert_eq(first.id, 7)
+    assert_eq(buf[n - 1].y, 4.5)
+    assert_eq(buf[n - 1].id, 11)
+    assert_eq(buf[1].id, 0)
+}
+
+@test
+fn deepcopy_copies_every_element_of_large_storage() {
+    let n = 20000
+    let holder = LargeHolder { verts: large_verts(n), bytes: native_buffer_u8(70000) }
+    holder.verts[0] = LargeVert { x: 1.0, y: 2.0, id: 3 }
+    holder.verts[n - 1] = LargeVert { x: 4.0, y: 5.0, id: 6 }
+    nb_set(holder.bytes, 69999, 42)
+    let copy = deepcopy(holder)
+    assert_eq(copy.verts.len, n)
+    assert_eq(copy.verts[0].id, 3)
+    assert_eq(copy.verts[n - 1].x, 4.0)
+    assert_eq(copy.verts[n - 1].id, 6)
+    assert_eq(nb_get(copy.bytes, 69999), 42)
+    // Independent storage in both directions.
+    copy.verts[n - 1].id = 60
+    nb_set(copy.bytes, 69999, 43)
+    assert_eq(holder.verts[n - 1].id, 6)
+    assert_eq(nb_get(holder.bytes, 69999), 42)
+    holder.verts[0].id = 30
+    assert_eq(copy.verts[0].id, 3)
+}
+
+@test
+fn large_buffers_compare_by_content() {
+    let a = native_buffer_int(20000)
+    let b = native_buffer_int(20000)
+    nb_set(a, 19999, 5)
+    nb_set(b, 19999, 5)
+    assert_eq(a == b, true)
+    nb_set(b, 19999, 6)
+    assert_eq(a == b, false)
+}

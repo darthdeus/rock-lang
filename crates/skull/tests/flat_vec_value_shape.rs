@@ -51,8 +51,8 @@ fn flat_vec_push_read_loop_is_zero_box() {
     );
     // The ffi array is the concrete element ctype (the specialized alloc intrinsic).
     assert!(
-        body.contains(r#"ffi.new("V2[?]","#),
-        "FlatVec storage must be a `ffi.new(\"V2[?]\", ..)` array; got:\n{body}"
+        body.contains(r#"__rock_nb_alloc("V2","#),
+        "FlatVec storage must be a `__rock_nb_alloc(\"V2\", ..)` array; got:\n{body}"
     );
     // No dangling call to a shared generic op survives the specialized splices.
     assert!(

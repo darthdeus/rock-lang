@@ -337,3 +337,108 @@ improvement. In the scoring reproduction, even removing three doubles leaves
 more than the x86 side-head budget because the caller retains a wide value.
 The compiler still needs a way to avoid constructing or loading those leaves
 before an independent guarded call, with evaluation order preserved.
+
+## Large native buffers
+
+This section is about collector cost, not traces.
+
+`native_buffer_alloc<T>`, the sized constructors (`native_buffer_u8` and the
+rest) and `FlatVec` storage all allocate through `__rock_nb_alloc(ctype, n)`
+(`NB_ALLOC_PRELUDE` in `crates/skull-codegen-lua/src/preludes.rs`). Storage
+below 64 KB is an `ffi.new("T[?]", n)` array on the Lua heap. Storage of 64 KB
+or more comes from `calloc`; `ptr` is then a `T*` with an `ffi.gc` finalizer
+that frees it.
+
+### Why
+
+LuaJIT counts every allocated byte as collector debt, including a cdata array
+that holds no references. `lj_gc_step` repays that debt at the next allocation
+check, so a large buffer allocated while a cycle is in its sweep phase makes
+that one step sweep in proportion to the buffer's size. Measured with a
+collector-timing probe in a game with about 300 MB live: 8 to 17 microseconds
+of sweep per requested KB, so a 2 MB allocation in a sweep is a 15 to 35 ms
+frame. About 180 MB of that heap was buffers of 4 KB or more, nearly all
+retained for the session, which the collector still accounted for on every
+cycle.
+
+### Measured effect
+
+Same game, the same build with and without the mechanism
+(`ROCK_NB_OFFHEAP_MIN=1e18` for the control), 1800-frame captures:
+
+- Lua heap 365 to 400 MB down to 230 to 260 MB in the walking scenarios; about
+  110 MB in about 580 buffers is off-heap.
+- The largest single-frame heap growth at an area arrival fell from 2.0 to
+  3.0 MB to 0.7 to 0.9 MB.
+- Mean and median frame time did not change beyond run-to-run variation in
+  five scenarios (four interleaved pairs in one, two in the others).
+- The forced-collection guard described below did not fire in any scenario.
+
+It does not remove collector hitches. What remains is ordinary Lua-heap
+allocation (tables, strings, small cdata) in bursts of one to two megabytes;
+those are fixed where they are allocated.
+
+### What differs for off-heap storage
+
+- `ptr` is a pointer, so nothing about it gives its length: `ffi.sizeof(ptr)`
+  is the pointer size and `tostring(ffi.typeof(ptr))` is not the array type.
+  The descriptor's `len` is the length. Generic code that needs to recognise
+  storage or know its byte size calls `__rock_nb_storage_of(x)`, which returns
+  the compiler's storage description and the byte length for both forms.
+- `ffi.istype("T", ptr)` is true for a `T*`. Code that classifies an unknown
+  cdata must ask `__rock_nb_storage_of` before `__rock_c_struct_of`, or a
+  struct buffer is treated as one struct. `deepcopy` and the engine's data
+  image do; `tests/native_buffers/large.rock` and
+  `packages/stone/tests/data_image_storage_rules.rock` fail if the order is
+  reversed.
+- Only the pointer object the allocation returned is known. A cast of it is a
+  foreign pointer: it does not keep the storage alive and is not recognised as
+  storage. This was already true of casts over an `ffi.new` array.
+- A site that allocates both small and large buffers sees two cdata types
+  (`T[?]` and `T*`) for `ptr`. Indexing either is compiled; a loop that
+  alternates between a small and a large buffer of the same element type takes
+  a side trace for the second type.
+- The collector no longer sees these bytes, so `collectgarbage("count")` and
+  heap figures derived from it under-report. `native_buffer_offheap_bytes()`
+  returns the live off-heap total, and `__ROCK_NB_OFFHEAP_STATS` has
+  `live_bytes`, `live_count`, `since_cycle` and `forced_collections`.
+- A dropped off-heap buffer is freed when the collector finalizes its pointer,
+  and its size no longer brings that cycle forward. The guard: once 256 MB has
+  been allocated off-heap within one collector cycle
+  (`__ROCK_NB_OFFHEAP_CYCLE_MAX`), the next large allocation runs a full
+  `collectgarbage("collect")` first. That is a long pause by design; it is
+  there to bound memory, and a program that reaches it should stop churning
+  large buffers instead.
+
+### If this is suspected of causing a problem
+
+1. Run with `ROCK_NB_OFFHEAP_MIN=1e18`. Every buffer is then an `ffi.new`
+   array as before the change. If the problem remains, the cause is elsewhere.
+   Other values move the threshold (bytes).
+2. Resident memory grows, or there are long pauses: read
+   `__ROCK_NB_OFFHEAP_STATS`. A rising `forced_collections` means some code
+   allocates and drops large buffers continuously; find it and reuse the
+   buffer. A `live_bytes` that keeps rising means buffers are retained, which
+   is the program's own retention and was the same on the Lua heap.
+3. Wrong values or a crash after a copy, snapshot or hot reload: look for code
+   that inspects `ptr` with `ffi.sizeof`, `ffi.typeof` or `ffi.istype` and
+   move it to `__rock_nb_storage_of`.
+4. A crash in native code that holds a buffer address past the call that
+   received it: the address is valid only while the Rock-side buffer is
+   reachable. This was already true, but `free` returns the memory to the
+   allocator immediately, where a collected Lua-heap array was often still
+   readable.
+
+### What to try next
+
+- Threshold. 64 KB was chosen from one program's size distribution (128 MB in
+  682 buffers of 64 KB or more). Moving every buffer off-heap was measured
+  slower (median frame time about 7.0 ms against about 6.4 ms), because each
+  off-heap buffer costs a finalizer and a registry entry and small buffers are
+  short-lived.
+- If the implicit switch turns out to be the wrong contract, replace it with
+  an explicit constructor for long-lived large storage and return
+  `native_buffer_alloc` to `ffi.new` only. The allocator and the storage
+  lookup stay as they are; only the threshold test moves to the caller.
+- For a buffer that only native code reads, keep it on the native side and
+  pass a handle, so no Lua-side storage exists at all.
