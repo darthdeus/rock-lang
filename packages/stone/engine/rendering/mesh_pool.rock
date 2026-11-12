@@ -68,39 +68,53 @@ pub fn acquire_mesh(
         }
     }
 
-    let i = 0
-    while i < MESH_FREE.len() {
-        if MESH_FREE[i].capacity >= capacity {
-            let m = MESH_FREE[i]
-            MESH_FREE.swap_remove(i)
-            // Reconfigure the pooled buffer for this frame's use; the
-            // vbo/capacity stay (that is the point of the pool).
-            let dims = sampled_texture_dims(img)
-            m.texture = img
-            m.tex_w = float(dims.x)
-            m.tex_h = float(dims.y)
-            m.inset_x = ENGINE.texel_bleed_prevention / m.tex_w
-            m.inset_y = ENGINE.texel_bleed_prevention / m.tex_h
-            m.count = 0
-            m.shared_capacity = if shared { capacity } else { -1 }
-            m.z_layer = zl
-            m.depth = depth
-            m.blend = blend
-            m.order = order
-            m.unlit = unlit
-            // Reconfigure, never inherit: a pooled mesh carries the previous
-            // acquire's shader and sampling until overwritten here.
-            m.pipeline = pipeline
-            m.normal = normal
-            m.surface = surface
-            m.auxiliary = null
-            // A scene drain can recycle this mesh again in the same frame.
-            m.block_frame = -1
-            m.sampling = sampling
-            MESH_PENDING.push(m)
-            return m
+    // Prefer the buffer this same draw used last frame: a free mesh still
+    // carries its previous configuration, and its capacity is whatever that
+    // draw grew it to. Otherwise the smallest buffer that fits. Taking the
+    // first that fits handed large buffers to small requests, so a draw that
+    // fills thousands of rects regrew a small one on most frames and the pool
+    // never settled.
+    let fit = -1
+    for i in 0..MESH_FREE.len() {
+        let m = MESH_FREE[i]
+        if m.capacity < capacity { continue }
+        if m.z_layer == zl && m.order == order && m.blend == blend && m.depth == depth
+            && sampled_texture_same(m.texture, img)
+            && pipeline_optional_same(m.pipeline, pipeline) {
+            fit = i
+            break
         }
-        i += 1
+        if fit < 0 || m.capacity < MESH_FREE[fit].capacity { fit = i }
+    }
+    if fit >= 0 {
+        let m = MESH_FREE[fit]
+        MESH_FREE.swap_remove(fit)
+        // Reconfigure the pooled buffer for this frame's use; the
+        // vbo/capacity stay (that is the point of the pool).
+        let dims = sampled_texture_dims(img)
+        m.texture = img
+        m.tex_w = float(dims.x)
+        m.tex_h = float(dims.y)
+        m.inset_x = ENGINE.texel_bleed_prevention / m.tex_w
+        m.inset_y = ENGINE.texel_bleed_prevention / m.tex_h
+        m.count = 0
+        m.shared_capacity = if shared { capacity } else { -1 }
+        m.z_layer = zl
+        m.depth = depth
+        m.blend = blend
+        m.order = order
+        m.unlit = unlit
+        // Reconfigure, never inherit: a pooled mesh carries the previous
+        // acquire's shader and sampling until overwritten here.
+        m.pipeline = pipeline
+        m.normal = normal
+        m.surface = surface
+        m.auxiliary = null
+        // A scene drain can recycle this mesh again in the same frame.
+        m.block_frame = -1
+        m.sampling = sampling
+        MESH_PENDING.push(m)
+        return m
     }
 
     let m = sprite_mesh_new(img, capacity: capacity, z_layer: zl, depth: depth, blend: blend, order: order, unlit: unlit, normal: normal, surface: surface, pipeline: pipeline, sampling: sampling)

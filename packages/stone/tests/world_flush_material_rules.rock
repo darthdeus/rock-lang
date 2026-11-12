@@ -177,6 +177,29 @@ fn acquired_mesh_renders_at_flush_and_recycles_its_buffer() {
     })
 }
 
+// A draw that outgrows its request gets the grown buffer back on the next
+// frame, whatever order the draws acquire in, so it does not regrow one.
+@test
+fn acquired_mesh_returns_to_the_draw_that_grew_it() {
+    world_flush_fixture(() => {
+        let white = sampled_image(WHITE_PIXEL.unwrap())
+        let pos = camera_world_center()
+        let large = acquire_mesh(world, white, capacity: 4, z: 19, depth: DepthMode::Off)
+        for _ in 0..20 { sprite_mesh_add(large, pos, irect(0, 0, 1, 1), v(4.0, 4.0)) }
+        let small = acquire_mesh(world, white, capacity: 4, z: 18, depth: DepthMode::Off)
+        sprite_mesh_add(small, pos, irect(0, 0, 1, 1), v(4.0, 4.0))
+        assert_eq(large.capacity, 32, "twenty rects grow a four-rect buffer to 32")
+        render_batches()
+        clear_batches()
+
+        let small_again = acquire_mesh(world, white, capacity: 4, z: 18, depth: DepthMode::Off)
+        let large_again = acquire_mesh(world, white, capacity: 4, z: 19, depth: DepthMode::Off)
+        assert_eq(small_again.capacity, 4, "the small draw keeps its small buffer")
+        assert_eq(large_again.capacity, 32, "the large draw gets its grown buffer back")
+        recycle_pending_meshes()
+    })
+}
+
 // retain: dirty on creation, refill clears dirty, draw_mesh renders without a
 // refill, invalidate re-marks dirty.
 @test
