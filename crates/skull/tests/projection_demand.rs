@@ -183,6 +183,73 @@ fn main() {{ print(probe(Owner {{ config: Config {{ chosen: 7, choice: Choice::E
 }
 
 #[test]
+fn boxed_vec_projection_reads_selected_fields_in_order_and_snapshots_children() {
+    let fields = (0..20)
+        .map(|i| format!("unused_sibling{i}: int = {i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let lua = emit_module(&format!(
+        r#"
+value Point {{ x: int = 3, y: int = 5 }}
+value Config {{ chosen: int = 7, label: string = "table", child: Point = Point {{}}, {fields} }}
+struct Log {{ events: [int] }}
+fn base(items: [Config], log: Log) -> [Config] {{ log.events.push(1); items }}
+fn index(log: Log) -> int {{ log.events.push(2); 0 }}
+@inline fn whole(items: [Config], i: int) -> Config {{ items[i] }}
+@nomangle fn direct_probe(items: [Config], i: int) -> int {{ items[i].chosen }}
+@nomangle fn whole_probe(items: [Config], i: int) -> int {{ whole(items, i).chosen }}
+@nomangle fn make_probe_items() -> [Config] {{ [Config {{}}] }}
+fn mutate(items: [Config]) -> int {{ items[0].child.y = 99; 1 }}
+fn observe(point: Point, ignored: int) -> int {{ point.y }}
+fn main() {{
+    let items = make_probe_items()
+    let log = Log {{ events: [] }}
+    print(base(items, log)[index(log)].chosen)
+    print(log.events[0]); print(log.events[1]); print(log.events.len())
+    let saved = items[0].child
+    print(observe(items[0].child, mutate(items)))
+    print(saved.y)
+    print(items[0].child.y)
+}}
+"#
+    ));
+    let probe = lua
+        .split("\nfunction direct_probe(")
+        .nth(1)
+        .unwrap()
+        .split("\nend")
+        .next()
+        .unwrap();
+    assert!(
+        !probe.contains(".unused_sibling") && !probe.contains(".label"),
+        "an indexed immediate projection must not expand siblings: {probe}"
+    );
+    assert_eq!(
+        run_luajit(&format!(
+            r#"{lua}
+main()
+local items = make_probe_items()
+for _, f in ipairs({{
+    function() direct_probe(nil, 0) end,
+    function() direct_probe(items, -1) end,
+    function() direct_probe(items, 1) end,
+    function() direct_probe({{_data={{}}, len=1}}, 0) end
+}}) do local ok = pcall(f); print(ok) end
+items._data[1].unused_sibling0 = nil
+setmetatable(items._data[1], {{__index=function(_, key) error("unused " .. key) end}})
+print(direct_probe(items, 0))
+local ok, err = pcall(whole_probe, items, 0)
+print(ok, tostring(err):match("unused unused_sibling0") ~= nil)
+items._data[1].chosen = nil
+local chosen_ok, chosen_err = pcall(direct_probe, items, 0)
+print(chosen_ok, tostring(chosen_err):match("unused chosen") ~= nil)
+"#
+        )),
+        "7\n1\n2\n2\n5\n5\n99\nfalse\nfalse\nfalse\nfalse\n7\nfalse\ttrue\nfalse\ttrue"
+    );
+}
+
+#[test]
 fn enum_projection_does_not_expand_sibling_fields() {
     let _inline = crate::common::InlineOffGuard::on();
     let lua = emit_module(
