@@ -148,6 +148,63 @@ fn main() {
 }
 
 #[test]
+fn immediate_nullable_enum_projection_reads_only_selected_field() {
+    let _inline = crate::common::InlineOffGuard::on();
+    let lua = emit_module(
+        r#"
+enum Count { Zero, Seven }
+value Item { spare: int = 11, count: Count = Count::Seven }
+struct Holder { item: Item?, calls: int = 0 }
+fn next(holder: Holder) -> Holder { holder.calls += 1; holder }
+@nomangle fn nullable_probe(holder: Holder) -> bool { next(holder).item?.count == Count::Seven }
+@nomangle fn snapshot_probe(holder: Holder) -> bool {
+    let saved = holder.item
+    saved?.count == Count::Seven
+}
+fn mutate(holder: Holder) -> bool { holder.item = null; false }
+fn first(a: bool, b: bool) -> bool { a }
+fn main() {
+    let holder = Holder { item: Item {} }
+    print(nullable_probe(holder))
+    let saved = holder.item
+    print(first(nullable_probe(holder), mutate(holder)))
+    print(nullable_probe(holder))
+    print(holder.calls)
+    print(saved?.count == Count::Seven)
+}
+"#,
+    );
+    let probe = crate::common::function_body(&lua, "nullable_probe");
+    assert!(
+        !probe.contains(".spare"),
+        "nullable projection expanded siblings: {probe}"
+    );
+    assert_eq!(
+        run_luajit(&format!(
+            r#"{lua}
+main()
+local events = {{}}
+local item = setmetatable({{}}, {{__index = function(_, key)
+    events[#events + 1] = key
+    if key == 'count' then return 1 end
+    error('sibling read')
+end}})
+local holder = {{item=item, calls=0}}
+print(nullable_probe(holder), holder.calls, table.concat(events, ','))
+local ok, err = pcall(snapshot_probe, holder)
+print(ok, tostring(err):match('sibling read') ~= nil)
+item = setmetatable({{}}, {{__index = function() error('demanded read') end}})
+ok, err = pcall(nullable_probe, {{item=item, calls=0}})
+print(ok, tostring(err):match('demanded read') ~= nil)
+ok = pcall(nullable_probe, nil)
+print(ok)
+"#
+        )),
+        "true\ntrue\nfalse\n3\ntrue\ntrue\t1\tcount\nfalse\ttrue\nfalse\ttrue\nfalse"
+    );
+}
+
+#[test]
 fn reference_owned_value_projection_reads_only_the_selected_field() {
     let _inline = crate::common::InlineOffGuard::on();
     let fields = (0..50)
