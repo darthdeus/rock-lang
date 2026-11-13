@@ -29,3 +29,21 @@ fn hitch_window_tally_resets_once_per_window() {
     assert_eq(hitch_count_for("present"), 1, "lifetime counts are untouched")
     HITCH = saved
 }
+
+// A long frame whose thread used little CPU was waiting on something no
+// phase or system timer covers; one that used its time is the slower phase.
+@test
+fn hitch_frame_off_the_cpu_is_blocked() {
+    assert_eq(hitch_classify(60.0, 2.0, 55.0, 0.0, 0.0, 0, 0, 0, 6.0), "blocked")
+    assert_eq(hitch_classify(60.0, 2.0, 55.0, 0.0, 0.0, 0, 0, 0, 56.0), "render")
+    assert_eq(hitch_classify(60.0, 2.0, 55.0, 0.0, 0.0, 0, 0, 0, -1.0), "render",
+        "no thread clock: the phase stands")
+    assert_eq(hitch_classify(60.0, 2.0, 8.0, 48.0, 0.0, 0, 0, 0, 9.0), "present",
+        "the swap wait is the display, not an unexplained wait")
+    let before = thread_cpu_seconds()
+    if before >= 0.0 {
+        let spin = 0
+        for i in 0..2000000 { spin += i % 7 }
+        assert(thread_cpu_seconds() > before, "the thread clock advances with work ({spin})")
+    }
+}

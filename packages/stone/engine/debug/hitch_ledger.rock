@@ -7,6 +7,11 @@
 // when the game explains it (any cause but `present`) or when it is at or
 // over `HITCH_LOUD_MS` whatever the cause: a present-bound miss under that
 // is the swap waiting on the display and carries no actionable field.
+// Each record also carries the main thread's CPU time for the frame, where
+// the platform has a thread CPU clock. A long frame that used little CPU was
+// waiting, not executing (a driver call, the display server, a lock, or the
+// thread not being scheduled), and is classified `blocked`: no section or
+// system timing can explain it.
 // The section profiler stays off: the second tier is the slowest
 // lifecycle system per frame, timed around the call the systems runner
 // already makes (two clock reads per system).
@@ -43,6 +48,9 @@ pub struct HitchLedger {
     logic_ms: NativeBuffer<float>,
     render_ms: NativeBuffer<float>,
     present_ms: NativeBuffer<float>,
+    // Main-thread CPU time of the frame; negative when the clock is unknown.
+    cpu_ms: NativeBuffer<float>,
+    last_cpu_s: float,
     heap_kb: NativeBuffer<float>,
     heap_delta_kb: NativeBuffer<float>,
     gc: NativeBuffer<float>,
@@ -78,6 +86,7 @@ pub struct HitchLedger {
     win_residency: int,
     win_logic: int,
     win_render: int,
+    win_blocked: int,
     total_hitches: int,
     total_gc: int,
     total_alloc: int,
@@ -87,6 +96,7 @@ pub struct HitchLedger {
     total_residency: int,
     total_logic: int,
     total_render: int,
+    total_blocked: int,
     last_cause: string,
     last_slow_name: string,
     last_logic_system: string,
@@ -117,6 +127,8 @@ fn hitch_ledger_new() -> HitchLedger {
         logic_ms: native_buffer_float(HITCH_RING_FRAMES),
         render_ms: native_buffer_float(HITCH_RING_FRAMES),
         present_ms: native_buffer_float(HITCH_RING_FRAMES),
+        cpu_ms: native_buffer_float(HITCH_RING_FRAMES),
+        last_cpu_s: thread_cpu_seconds(),
         heap_kb: native_buffer_float(HITCH_RING_FRAMES),
         heap_delta_kb: native_buffer_float(HITCH_RING_FRAMES),
         gc: native_buffer_float(HITCH_RING_FRAMES * GC_STEP_FIELDS),
@@ -140,9 +152,9 @@ fn hitch_ledger_new() -> HitchLedger {
         cur_slow_name: "",
         cur_slow_phase: "",
         win_hitches: 0, win_gc: 0, win_alloc: 0, win_jit: 0, win_present: 0,
-        win_upload: 0, win_residency: 0, win_logic: 0, win_render: 0,
+        win_upload: 0, win_residency: 0, win_logic: 0, win_render: 0, win_blocked: 0,
         total_hitches: 0, total_gc: 0, total_alloc: 0, total_jit: 0,
-        total_present: 0, total_upload: 0, total_residency: 0, total_logic: 0, total_render: 0,
+        total_present: 0, total_upload: 0, total_residency: 0, total_logic: 0, total_render: 0, total_blocked: 0,
         last_cause: "",
         last_slow_name: "",
         last_logic_system: "",
@@ -170,16 +182,18 @@ fn hitch_system_end(name: string, phase: string, t0: float) {
 }
 
 // Which record explains the frame. Present and upload waits are outside
-// Lua; a heap drop means a sweep finished inside this frame; a heap burst
-// is allocation; a start or abort burst is the recorder; otherwise the
-// slower CPU phase, named by its slowest system.
+// Lua; time the main thread spent off the CPU beyond the present wait is a
+// wait nothing here measures; a heap drop means a sweep finished inside this
+// frame; a heap burst is allocation; a start or abort burst is the recorder;
+// otherwise the slower CPU phase, named by its slowest system.
 fn hitch_classify(frame_ms: float, logic_ms: float, render_ms: float,
                   present_ms: float, heap_delta_kb: float, starts: int,
-                  aborts: int, upload_us: int) -> string {
+                  aborts: int, upload_us: int, cpu_ms: float = -1.0) -> string {
     let half = frame_ms * 0.5
     if present_ms >= half { return "present" }
     if (RESIDENCY_FRAME_MISS_WAIT_US as float) >= half * 1000.0 { return "residency" }
     if (upload_us as float) >= half * 1000.0 { return "upload" }
+    if cpu_ms >= 0.0 && frame_ms - present_ms - cpu_ms >= half { return "blocked" }
     if GC_STEP_ENABLED {
         if nb_get(GC_STEP_FRAME, 0) + nb_get(GC_STEP_FRAME, 2) >= half { return "gc" }
     } else if heap_delta_kb <= -HITCH_GC_DROP_KB { return "gc" }
@@ -198,6 +212,7 @@ fn hitch_tally(cause: string) {
     else if cause == "present" { HITCH.win_present += 1; HITCH.total_present += 1 }
     else if cause == "residency" { HITCH.win_residency += 1; HITCH.total_residency += 1 }
     else if cause == "upload" { HITCH.win_upload += 1; HITCH.total_upload += 1 }
+    else if cause == "blocked" { HITCH.win_blocked += 1; HITCH.total_blocked += 1 }
     else if cause == "logic" { HITCH.win_logic += 1; HITCH.total_logic += 1 }
     else { HITCH.win_render += 1; HITCH.total_render += 1 }
 }
@@ -259,6 +274,9 @@ fn hitch_frame_record(frame: int, frame_ms: float, t_ms: float, measured: bool) 
     if !HITCH.enabled && !PERF_FRAME_CAPTURE { return }
     gc_step_frame_close()
     let phase = frame_diagnostic_timing()
+    let cpu_s = thread_cpu_seconds()
+    let cpu_ms = if cpu_s < 0.0 || HITCH.last_cpu_s < 0.0 { -1.0 } else { (cpu_s - HITCH.last_cpu_s) * 1000.0 }
+    HITCH.last_cpu_s = cpu_s
     let heap_kb = lua_gc_kb()
     let heap_delta_kb = if HITCH.last_heap_kb < 0.0 { 0.0 } else { heap_kb - HITCH.last_heap_kb }
     HITCH.last_heap_kb = heap_kb
@@ -278,7 +296,7 @@ fn hitch_frame_record(frame: int, frame_ms: float, t_ms: float, measured: bool) 
     let load_us = image_stats.load_us
     let upload_us = image_stats.upload_us
     let decode_wait_us = image_stats.wait_us
-    if measured { perf_record_frame(frame, t_ms, frame_ms, heap_kb, heap_delta_kb, starts, compiles, aborts, flushes, image_stats) }
+    if measured { perf_record_frame(frame, t_ms, frame_ms, heap_kb, heap_delta_kb, starts, compiles, aborts, flushes, image_stats, cpu_ms) }
     let slow_ms = HITCH.cur_slow_ms
     let slow_name = HITCH.cur_slow_name
     let slow_phase = HITCH.cur_slow_phase
@@ -293,6 +311,7 @@ fn hitch_frame_record(frame: int, frame_ms: float, t_ms: float, measured: bool) 
     nb_set(HITCH.logic_ms, slot, phase.logic_ms)
     nb_set(HITCH.render_ms, slot, phase.render_ms)
     nb_set(HITCH.present_ms, slot, phase.present_ms)
+    nb_set(HITCH.cpu_ms, slot, cpu_ms)
     nb_set(HITCH.heap_kb, slot, heap_kb)
     nb_set(HITCH.heap_delta_kb, slot, heap_delta_kb)
     if GC_STEP_ENABLED {
@@ -319,7 +338,7 @@ fn hitch_frame_record(frame: int, frame_ms: float, t_ms: float, measured: bool) 
     }
     HITCH.residency_paths[slot] = residency_paths.join(";")
     let cause = hitch_classify(frame_ms, phase.logic_ms, phase.render_ms,
-        phase.present_ms, heap_delta_kb, starts, aborts, upload_us)
+        phase.present_ms, heap_delta_kb, starts, aborts, upload_us, cpu_ms)
     HITCH.cause[slot] = cause
     HITCH.last_cause = cause
     HITCH.last_slow_name = slow_name
@@ -331,17 +350,18 @@ fn hitch_frame_record(frame: int, frame_ms: float, t_ms: float, measured: bool) 
     let l = format_float(phase.logic_ms, 0, 1)
     let r = format_float(phase.render_ms, 0, 1)
     let p = format_float(phase.present_ms, 0, 1)
+    let c = if cpu_ms >= 0.0 { format_float(cpu_ms, 0, 1) } else { "n/a" }
     let h = format_float(heap_kb / 1024.0, 0, 1)
     let dh = format_float(heap_delta_kb / 1024.0, 0, 2)
     let s = format_float(slow_ms, 0, 1)
-    log_info("HITCH", "frame={frame} ms={ms} cause={cause} logic={l} render={r} present={p} heap={h}MB dheap={dh}MB starts={starts} aborts={aborts} load_us={load_us} upload_us={upload_us} decode_wait_us={decode_wait_us} residency_us={RESIDENCY_FRAME_MISS_WAIT_US} residency_paths={hitch_residency_log_summary(residency_paths)} slowest={slow_phase}:{slow_name} {s}ms")
+    log_info("HITCH", "frame={frame} ms={ms} cause={cause} logic={l} render={r} present={p} cpu={c} heap={h}MB dheap={dh}MB starts={starts} aborts={aborts} load_us={load_us} upload_us={upload_us} decode_wait_us={decode_wait_us} residency_us={RESIDENCY_FRAME_MISS_WAIT_US} residency_paths={hitch_residency_log_summary(residency_paths)} slowest={slow_phase}:{slow_name} {s}ms")
 }
 
 // The window tally by cause, reset on read. Empty when nothing crossed the
 // threshold.
 fn hitch_window_summary() -> string {
     if !HITCH.enabled || HITCH.win_hitches == 0 { return "" }
-    let s = "hitches={HITCH.win_hitches} gc={HITCH.win_gc} alloc={HITCH.win_alloc} jit={HITCH.win_jit} present={HITCH.win_present} upload={HITCH.win_upload} residency={HITCH.win_residency} logic={HITCH.win_logic} render={HITCH.win_render}"
+    let s = "hitches={HITCH.win_hitches} gc={HITCH.win_gc} alloc={HITCH.win_alloc} jit={HITCH.win_jit} present={HITCH.win_present} upload={HITCH.win_upload} residency={HITCH.win_residency} blocked={HITCH.win_blocked} logic={HITCH.win_logic} render={HITCH.win_render}"
     HITCH.win_hitches = 0
     HITCH.win_gc = 0
     HITCH.win_alloc = 0
@@ -351,6 +371,7 @@ fn hitch_window_summary() -> string {
     HITCH.win_upload = 0
     HITCH.win_logic = 0
     HITCH.win_render = 0
+    HITCH.win_blocked = 0
     return s
 }
 
@@ -366,6 +387,7 @@ pub fn hitch_count_for(cause: string) -> int {
     if cause == "upload" { return HITCH.total_upload }
     if cause == "logic" { return HITCH.total_logic }
     if cause == "render" { return HITCH.total_render }
+    if cause == "blocked" { return HITCH.total_blocked }
     return 0
 }
 
@@ -377,7 +399,7 @@ fn hitch_ledger_flush() {
     let n = min(HITCH.count, HITCH_RING_FRAMES)
     let first = if HITCH.count > HITCH_RING_FRAMES { HITCH.count - HITCH_RING_FRAMES } else { 0 }
     let sb = sb_new()
-    sb_push(sb, "frame\tframe_ms\tlogic_ms\trender_ms\tpresent_ms\theap_kb\theap_delta_kb\tstarts\taborts\tupload_us\tresidency_us\tresidency_paths\tslowest_ms\tslowest\tcause\tgc_step_ms\tgc_atomic_ms\tgc_full_ms\tgc_steps\tgc_atomics\tgc_fulls\tgc_max_step_ms\tgc_phase_start\tgc_phase_end\tgc_heap_start_kb\tgc_heap_end_kb\tgc_request_kb\tgc_ms_per_kb\tload_us\tdecode_wait_us\n")
+    sb_push(sb, "frame\tframe_ms\tlogic_ms\trender_ms\tpresent_ms\theap_kb\theap_delta_kb\tstarts\taborts\tupload_us\tresidency_us\tresidency_paths\tslowest_ms\tslowest\tcause\tgc_step_ms\tgc_atomic_ms\tgc_full_ms\tgc_steps\tgc_atomics\tgc_fulls\tgc_max_step_ms\tgc_phase_start\tgc_phase_end\tgc_heap_start_kb\tgc_heap_end_kb\tgc_request_kb\tgc_ms_per_kb\tload_us\tdecode_wait_us\tthread_cpu_ms\n")
     for k in 0..n {
         let i = (first + k) % HITCH_RING_FRAMES
         let row = "{nb_get(HITCH.frame, i)}\t{nb_get(HITCH.frame_ms, i)}\t{nb_get(HITCH.logic_ms, i)}\t{nb_get(HITCH.render_ms, i)}\t{nb_get(HITCH.present_ms, i)}\t{nb_get(HITCH.heap_kb, i)}\t{nb_get(HITCH.heap_delta_kb, i)}\t{nb_get(HITCH.starts, i)}\t{nb_get(HITCH.aborts, i)}\t{nb_get(HITCH.upload_us, i)}\t{nb_get(HITCH.residency_us, i)}\t{HITCH.residency_paths[i]}\t{nb_get(HITCH.slow_ms, i)}\t{HITCH.slow_name[i]}\t{HITCH.cause[i]}"
@@ -387,6 +409,8 @@ fn hitch_ledger_flush() {
             sb_push(sb, if GC_STEP_ENABLED && n >= 0.0 { "\t{n}" } else { "\tnull" })
         }
         sb_push(sb, "\t{nb_get(HITCH.load_us, i)}\t{nb_get(HITCH.decode_wait_us, i)}")
+        let cpu = nb_get(HITCH.cpu_ms, i)
+        sb_push(sb, if cpu >= 0.0 { "\t{cpu}" } else { "\tnull" })
         sb_push(sb, "\n")
     }
     let written = __hitch_write_file(HITCH.dump_path, sb_build(sb))
@@ -394,7 +418,7 @@ fn hitch_ledger_flush() {
         log_error("HITCH", "could not write the hitch ledger to {HITCH.dump_path}")
         return
     }
-    log_info("HITCH", "ledger: {n} rows -> {HITCH.dump_path} (hitches={HITCH.total_hitches} gc={HITCH.total_gc} alloc={HITCH.total_alloc} jit={HITCH.total_jit} present={HITCH.total_present} upload={HITCH.total_upload} residency={HITCH.total_residency} logic={HITCH.total_logic} render={HITCH.total_render})")
+    log_info("HITCH", "ledger: {n} rows -> {HITCH.dump_path} (hitches={HITCH.total_hitches} gc={HITCH.total_gc} alloc={HITCH.total_alloc} jit={HITCH.total_jit} present={HITCH.total_present} upload={HITCH.total_upload} residency={HITCH.total_residency} blocked={HITCH.total_blocked} logic={HITCH.total_logic} render={HITCH.total_render})")
 }
 
 @nomangle inline(lua) fn __hitch_write_file(path: string, text: string) -> bool = """

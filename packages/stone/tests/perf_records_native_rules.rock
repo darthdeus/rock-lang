@@ -13,7 +13,7 @@ fn zero_image_stats() -> ImageLoadStats {
 
 @test
 fn perf_record_row_carries_native_jit_columns() {
-    assert_eq(PERF_RECORD_COLUMNS, 17 + GC_STEP_FIELDS + JIT_NATIVE_COLUMNS + 2,
+    assert_eq(PERF_RECORD_COLUMNS, 17 + GC_STEP_FIELDS + JIT_NATIVE_COLUMNS + 3,
         "native JIT columns widen the frame row")
     assert_eq(JIT_NATIVE_COLUMNS, 18, "native layout matches the ABI column count")
     let saved_count = PERF_RECORDS.count

@@ -121,7 +121,7 @@
 // order mirrors stone-rs jit_health_abi FRAME_DELTA_COLUMNS.
 const JIT_NATIVE_COLUMNS: int = 18
 const PERF_RECORD_TIMING_OFFSET: int = 17 + GC_STEP_FIELDS + JIT_NATIVE_COLUMNS
-const PERF_RECORD_COLUMNS: int = PERF_RECORD_TIMING_OFFSET + 2
+const PERF_RECORD_COLUMNS: int = PERF_RECORD_TIMING_OFFSET + 3
 const PERF_RECORD_CAPACITY: int = 65536
 
 // Frames over this are stalls in every band; `stalls.counts.over_33` and the
@@ -323,7 +323,8 @@ fn perf_measurement_json() -> string {
 }
 
 fn perf_record_frame(frame: int, t_ms: float, ms: float, heap: float, delta: float,
-                     starts: int, compiles: int, aborts: int, flushes: int, images: ImageLoadStats) {
+                     starts: int, compiles: int, aborts: int, flushes: int, images: ImageLoadStats,
+                     thread_cpu_ms: float = -1.0) {
     let i = PERF_RECORDS.count
     assert(i < PERF_RECORD_CAPACITY, "perf frame record capacity exceeded; shorten the run")
     let at = i * PERF_RECORD_COLUMNS
@@ -366,6 +367,7 @@ fn perf_record_frame(frame: int, t_ms: float, ms: float, heap: float, delta: flo
         metric_recent(FRAME_EFFECTIVE_CPU, 0))
     nb_set(PERF_RECORDS.data, at + PERF_RECORD_TIMING_OFFSET + 1,
         metric_recent(FRAME_RENDERED, 0))
+    nb_set(PERF_RECORDS.data, at + PERF_RECORD_TIMING_OFFSET + 2, thread_cpu_ms)
     PERF_RECORDS.names[i] = HITCH.cur_slow_name
     PERF_RECORDS.count += 1
     PERF_RECORDS.seconds += ms / 1000.0
@@ -395,9 +397,11 @@ fn perf_records_json() -> string {
         }
         values.push("{nb_get(PERF_RECORDS.data, i * PERF_RECORD_COLUMNS + PERF_RECORD_TIMING_OFFSET):.6f}")
         values.push("{nb_get(PERF_RECORDS.data, i * PERF_RECORD_COLUMNS + PERF_RECORD_TIMING_OFFSET + 1):.6f}")
+        let thread_cpu_ms = nb_get(PERF_RECORDS.data, i * PERF_RECORD_COLUMNS + PERF_RECORD_TIMING_OFFSET + 2)
+        values.push(if thread_cpu_ms >= 0.0 { "{thread_cpu_ms:.6f}" } else { "null" })
         rows.push("[{values.join(",")}]")
     }
-    return "{{\"columns\":[\"frame\",\"t_ms\",\"frame_ms\",\"logic_ms\",\"render_ms\",\"present_ms\",\"heap_kb\",\"heap_delta_kb\",\"jit_starts\",\"jit_compiles\",\"jit_aborts\",\"jit_flushes\",\"upload_us\",\"residency_us\",\"slowest_system\",\"slowest_ms\",\"gc_step_ms\",\"gc_atomic_ms\",\"gc_full_ms\",\"gc_steps\",\"gc_atomics\",\"gc_fulls\",\"gc_max_step_ms\",\"gc_phase_start\",\"gc_phase_end\",\"gc_heap_start_kb\",\"gc_heap_end_kb\",\"gc_request_kb\",\"gc_ms_per_kb\",\"load_us\",\"decode_wait_us\",\"jitn_root_starts\",\"jitn_side_starts\",\"jitn_root_compiles\",\"jitn_side_compiles\",\"jitn_aborts\",\"jitn_abort_reason0\",\"jitn_abort_count0\",\"jitn_abort_reason1\",\"jitn_abort_count1\",\"jitn_abort_reason2\",\"jitn_abort_count2\",\"jitn_flushes\",\"jitn_mcode_bytes\",\"jitn_live_traces\",\"jitn_arena_occupied_bytes\",\"jitn_code_free_bytes\",\"jitn_coalescing_next\",\"jitn_coalescing_overflow\",\"effective_ms\",\"rendered_ms\"],\"rows\":[{rows.join(",")}]}}"
+    return "{{\"columns\":[\"frame\",\"t_ms\",\"frame_ms\",\"logic_ms\",\"render_ms\",\"present_ms\",\"heap_kb\",\"heap_delta_kb\",\"jit_starts\",\"jit_compiles\",\"jit_aborts\",\"jit_flushes\",\"upload_us\",\"residency_us\",\"slowest_system\",\"slowest_ms\",\"gc_step_ms\",\"gc_atomic_ms\",\"gc_full_ms\",\"gc_steps\",\"gc_atomics\",\"gc_fulls\",\"gc_max_step_ms\",\"gc_phase_start\",\"gc_phase_end\",\"gc_heap_start_kb\",\"gc_heap_end_kb\",\"gc_request_kb\",\"gc_ms_per_kb\",\"load_us\",\"decode_wait_us\",\"jitn_root_starts\",\"jitn_side_starts\",\"jitn_root_compiles\",\"jitn_side_compiles\",\"jitn_aborts\",\"jitn_abort_reason0\",\"jitn_abort_count0\",\"jitn_abort_reason1\",\"jitn_abort_count1\",\"jitn_abort_reason2\",\"jitn_abort_count2\",\"jitn_flushes\",\"jitn_mcode_bytes\",\"jitn_live_traces\",\"jitn_arena_occupied_bytes\",\"jitn_code_free_bytes\",\"jitn_coalescing_next\",\"jitn_coalescing_overflow\",\"effective_ms\",\"rendered_ms\",\"thread_cpu_ms\"],\"rows\":[{rows.join(",")}]}}"
 }
 
 fn perf_stalls_json() -> string {

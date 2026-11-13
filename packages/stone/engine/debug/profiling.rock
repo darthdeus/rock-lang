@@ -377,6 +377,30 @@ pub struct ProfilerData {
 }
 
 pub inline(lua) fn lua_gc_kb() -> float = "return collectgarbage('count')"
+
+// CPU time the calling thread has used, in seconds; negative where there is
+// no thread CPU clock (Windows) or it fails. Wall time minus this over an
+// interval is time the thread spent waiting or descheduled.
+pub inline(lua) fn thread_cpu_seconds() -> float = """
+    local read = rawget(_G, "__stone_thread_cpu")
+    if read == nil then
+        read = false
+        local id = (ffi.os == "Linux" and 3) or (ffi.os == "OSX" and 16) or nil
+        if id and pcall(ffi.cdef, [[
+            struct __stone_timespec { long tv_sec; long tv_nsec; };
+            int __stone_clock_gettime(int, struct __stone_timespec *) __asm__("clock_gettime");
+        ]]) then
+            local ts = ffi.new("struct __stone_timespec")
+            read = function()
+                if ffi.C.__stone_clock_gettime(id, ts) ~= 0 then return -1 end
+                return tonumber(ts.tv_sec) + tonumber(ts.tv_nsec) * 1e-9
+            end
+        end
+        rawset(_G, "__stone_thread_cpu", read)
+    end
+    if not read then return -1 end
+    return read()
+"""
 @early_init
 fn lua_alloc_split_declare() { lua_alloc_split_init() }
 
