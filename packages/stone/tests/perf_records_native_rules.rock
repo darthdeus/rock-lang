@@ -62,3 +62,19 @@ fn perf_record_row_reads_live_native_deltas() {
     PERF_RECORDS.count = saved_count
     PERF_RECORDS.seconds = saved_seconds
 }
+
+// A frame that waited on a miss names each file once and counts the files it
+// does not list.
+@test
+fn perf_residency_wait_row_names_distinct_files() {
+    let saved = PERF_RESIDENCY_WAITS
+    PERF_RESIDENCY_WAITS = vec_new()
+    let paths = ["a/albedo.png", "a/normal.png", "a/albedo.png"]
+    for i in 0..PERF_RESIDENCY_WAIT_PATHS { paths.push("extra/{i}.png") }
+    perf_record_residency_wait(42, 3100, paths)
+    let row = PERF_RESIDENCY_WAITS[0]
+    PERF_RESIDENCY_WAITS = saved
+    assert(row.starts_with("{{\"frame\":42,\"wait_us\":3100,\"path_count\":{PERF_RESIDENCY_WAIT_PATHS + 2},\"paths\":[\"a/albedo.png\",\"a/normal.png\","),
+        "frame, wait and distinct files in order: {row}")
+    assert(!row.contains("extra/{PERF_RESIDENCY_WAIT_PATHS - 2}.png"), "files past the row limit are counted, not listed")
+}
