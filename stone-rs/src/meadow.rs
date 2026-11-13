@@ -3,6 +3,22 @@
 
 use std::slice;
 
+// `f64::floor` is a library call on the baseline x86-64 target, and blade
+// generation takes it about twenty times per candidate.
+#[inline(always)]
+fn floor(x: f64) -> f64 {
+    if !(x.abs() < 4503599627370496.0) {
+        return x;
+    }
+    let whole = x as i64 as f64;
+    if whole > x {
+        whole - 1.0
+    } else if whole == x {
+        x
+    } else {
+        whole
+    }
+}
 fn lerp(a: f64, b: f64, t: f64) -> f64 {
     a + (b - a) * t
 }
@@ -17,8 +33,8 @@ fn lattice(x: i64, y: i64) -> f64 {
     ((b ^ (b >> 16)) >> 21 & 0x3ff) as f64
 }
 fn noise(x: f64, y: f64) -> f64 {
-    let fx = x.floor();
-    let fy = y.floor();
+    let fx = floor(x);
+    let fy = floor(y);
     let ix = fx as i64;
     let iy = fy as i64;
     let tx = x - fx;
@@ -33,7 +49,7 @@ fn noise(x: f64, y: f64) -> f64 {
 }
 fn random(x: f64, y: f64, stream: f64, seed: f64) -> f64 {
     let n = (x * 127.1 + y * 311.7 + stream * 74.7 + seed).sin() * 43758.5453;
-    n - n.floor()
+    n - floor(n)
 }
 fn field(f: &[f64], x: f64, y: f64) -> f64 {
     if f.len() < 9 || !(-0.5..1.5).contains(&x) || !(-0.5..1.5).contains(&y) {
@@ -41,8 +57,8 @@ fn field(f: &[f64], x: f64, y: f64) -> f64 {
     }
     let fx = x - 0.5;
     let fy = y - 0.5;
-    let ix = fx.floor();
-    let iy = fy.floor();
+    let ix = floor(fx);
+    let iy = floor(fy);
     let tx = fx - ix;
     let ty = fy - iy;
     let at = ((iy as i32 + 1) * 3 + ix as i32 + 1) as usize;
@@ -165,6 +181,19 @@ unsafe fn snapshot(ptr: *const u8, len: i32) -> Option<Snapshot> {
         bases: parse_bases(&data[27..])?,
     })
 }
+fn cover_profile(wx: f64, wy: f64, woodland: bool) -> [f64; 3] {
+    let p = profile(wx, wy);
+    if woodland {
+        [0.08 + p[0] * 0.15, 0.14 + p[1] * 0.08, p[2]]
+    } else {
+        p
+    }
+}
+// No position's open-ground density exceeds this, with room for rounding.
+fn cover_density_ceiling(woodland: bool) -> f64 {
+    let open = 0.08 + 0.885;
+    1.000001 * if woodland { 0.08 + open * 0.15 } else { open }
+}
 fn cover(
     s: &Snapshot,
     gx: f64,
@@ -173,7 +202,7 @@ fn cover(
     y: f64,
     wx: f64,
     wy: f64,
-    woodland: bool,
+    p: [f64; 3],
 ) -> [f64; 3] {
     let mut density = 1.0f64;
     let mut height = 1.0f64;
@@ -194,10 +223,6 @@ fn cover(
             density = density.min(lerp(if b[7] != 0.0 { 0.45 } else { 0.12 }, 1.0, weight));
             height = height.min(lerp(if b[7] != 0.0 { 0.30 } else { 0.18 }, 1.0, weight));
         }
-    }
-    let mut p = profile(wx, wy);
-    if woodland {
-        p = [0.08 + p[0] * 0.15, 0.14 + p[1] * 0.08, p[2]];
     }
     let n = edge_noise(wx, wy);
     let edge = smooth(0.35, 0.88, field(&s.fields[..9], x - gx, y - gy) + n);
@@ -270,7 +295,8 @@ pub unsafe extern "C" fn stone_meadow_cover(
     if !(-0.5..1.5).contains(&(x - gx)) || !(-0.5..1.5).contains(&(y - gy)) {
         return -1;
     }
-    output3(out, cover(&s, gx, gy, x, y, wx, wy, woodland != 0))
+    let open = cover_profile(wx, wy, woodland != 0);
+    output3(out, cover(&s, gx, gy, x, y, wx, wy, open))
 }
 #[no_mangle]
 pub unsafe extern "C" fn stone_meadow_distance(input: *const u8, len: i32, x: f64, y: f64) -> f64 {
@@ -322,21 +348,35 @@ pub unsafe extern "C" fn stone_meadow_blades(
     {
         return -1;
     }
+    let ceiling = cover_density_ceiling(p[6] != 0.0);
     let mut count = 0;
     for i in 0..p[7] as i32 {
         let sx = p[0] + p[4] + (i % 8) as f64 / 8.0;
         let sy = p[1] + p[5] + (i / 8) as f64 / 8.0;
         let stream = (i / 64) as f64 * 97.0;
+        // A candidate survives only if its draw is within the density where
+        // it lands. Woodland's ceiling is low, so most are rejected on the
+        // draw alone, before their position is worked out; then edges, wear
+        // and props only thin the open-ground density, which rejects more
+        // before those are sampled.
+        let draw = random(sx, sy, 83.0 + stream, p[8]);
+        if draw > ceiling {
+            continue;
+        }
         let x = p[4] + random(sx, sy, 73.0 + stream, p[8]);
         let y = p[5] + random(sx, sy, 79.0 + stream, p[8]);
-        let profile = cover(&s, p[4], p[5], x, y, p[0] + x, p[1] + y, p[6] != 0.0);
-        if profile[0] <= 0.0 || random(sx, sy, 83.0 + stream, p[8]) > profile[0] {
+        let open = cover_profile(p[0] + x, p[1] + y, p[6] != 0.0);
+        if draw > open[0] * 1.000001 {
+            continue;
+        }
+        let profile = cover(&s, p[4], p[5], x, y, p[0] + x, p[1] + y, open);
+        if profile[0] <= 0.0 || draw > profile[0] {
             continue;
         }
         let variation = random(sx, sy, 71.0 + stream, p[8]);
         let stature = random(sx, sy, 89.0 + stream, p[8]);
-        let cell_x = (x * p[13]).floor() - p[11] * p[14];
-        let cell_y = (y * p[13]).floor() - p[12] * p[14];
+        let cell_x = floor(x * p[13]) - p[11] * p[14];
+        let cell_y = floor(y * p[13]) - p[12] * p[14];
         let growth = Growth {
             blade: [
                 ((x + y) * p[9] + p[2]) as f32,
@@ -474,6 +514,64 @@ mod sort_tests {
             let before = blades.map(|b| b.map(f32::to_bits));
             assert_eq!(stone_meadow_sort(blades.as_mut_ptr().cast(), 2), -1);
             assert_eq!(blades.map(|b| b.map(f32::to_bits)), before);
+        }
+    }
+}
+
+#[cfg(test)]
+mod blade_tests {
+    use super::{cover, cover_density_ceiling, cover_profile, floor, random, Snapshot};
+
+    #[test]
+    fn inlined_floor_matches_the_library_floor_bit_for_bit() {
+        let mut values = vec![
+            0.0,
+            -0.0,
+            0.5,
+            -0.5,
+            1.0,
+            -1.0,
+            -1.0000000000000002,
+            0.9999999999999999,
+            4503599627370495.5,
+            -4503599627370495.5,
+            4503599627370496.0,
+            1e300,
+            -1e300,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ];
+        for i in 0..2000 {
+            values.push((random(i as f64, 3.0, 7.0, 11.0) - 0.5) * 100000.0);
+        }
+        for x in values {
+            assert_eq!(floor(x).to_bits(), x.floor().to_bits(), "floor({x})");
+        }
+    }
+
+    // Blade generation rejects a candidate on the density ceiling, then on
+    // the open-ground density, before it samples edges, wear and props.
+    #[test]
+    fn density_stays_under_the_open_ground_density_and_its_ceiling() {
+        for fields in [[1.0; 27], [5.0; 27], [0.0; 27]] {
+            let mut fields = fields;
+            fields[9..].fill(0.0);
+            let s = Snapshot {
+                fields,
+                bases: Vec::new(),
+            };
+            for i in 0..4000 {
+                let x = 40.0 + random(i as f64, 1.0, 2.0, 3.0);
+                let y = 70.0 + random(i as f64, 4.0, 5.0, 6.0);
+                let (wx, wy) = (x + i as f64 * 0.37, y - i as f64 * 0.11);
+                for woodland in [false, true] {
+                    let open = cover_profile(wx, wy, woodland);
+                    assert!(open[0] * 1.000001 <= cover_density_ceiling(woodland));
+                    let shaped = cover(&s, 40.0, 70.0, x, y, wx, wy, open);
+                    assert!(shaped[0] <= open[0] * 1.000001, "{shaped:?} above {open:?}");
+                }
+            }
         }
     }
 }
