@@ -355,11 +355,16 @@ pub const NB_ALLOC_PRELUDE: &str = r#"
 --    the same address is a foreign pointer.
 --  * The collector does not see these bytes, so dropped buffers wait for a
 --    cycle that their own size no longer brings forward. The guard below
---    forces a collection once __ROCK_NB_OFFHEAP_CYCLE_MAX bytes have been
---    allocated off-heap within one collector cycle.
+--    brings it forward once __ROCK_NB_OFFHEAP_CYCLE_MAX bytes have been
+--    allocated off-heap within one collector cycle: large allocations then
+--    advance the collector in bounded steps until the cycle ends. Allocated
+--    bytes are not dead bytes (a program may simply be keeping what it
+--    allocates), so this stage must stay cheap. Only past
+--    __ROCK_NB_OFFHEAP_CYCLE_HARD, where the steps evidently cannot keep up
+--    with the allocation, does an allocation run a full collection.
 if not _G.__ROCK_NB_OFFHEAP then
   _G.__ROCK_NB_OFFHEAP = setmetatable({}, { __mode = "k" })
-  _G.__ROCK_NB_OFFHEAP_STATS = { live_bytes = 0, live_count = 0, since_cycle = 0, forced_collections = 0 }
+  _G.__ROCK_NB_OFFHEAP_STATS = { live_bytes = 0, live_count = 0, since_cycle = 0, forced_steps = 0, forced_collections = 0, step_clock = 0 }
   pcall(ffi.cdef, "void *calloc(size_t, size_t); void free(void *);")
   -- Zeroes the per-cycle counter each time the collector finishes a cycle: a
   -- proxy's __gc runs once per cycle and plants its successor.
@@ -379,6 +384,11 @@ if not _G.__ROCK_NB_OFFHEAP_MIN then
   _G.__ROCK_NB_OFFHEAP_MIN = tonumber(os.getenv("ROCK_NB_OFFHEAP_MIN") or "") or 16384
 end
 if not _G.__ROCK_NB_OFFHEAP_CYCLE_MAX then _G.__ROCK_NB_OFFHEAP_CYCLE_MAX = 268435456 end
+if not _G.__ROCK_NB_OFFHEAP_CYCLE_HARD then _G.__ROCK_NB_OFFHEAP_CYCLE_HARD = 1073741824 end
+-- The collector work one over-limit allocation may do, and the shortest time
+-- between two such bursts (seconds of os.clock): at most an eighth of the
+-- program's time while the guard is engaged.
+local __rock_nb_step_seconds, __rock_nb_step_interval = 0.0005, 0.004
 local __rock_nb_elems = {}
 function __rock_nb_alloc(ctype, n)
   local e = __rock_nb_elems[ctype]
@@ -392,9 +402,22 @@ function __rock_nb_alloc(ctype, n)
   local stats = __ROCK_NB_OFFHEAP_STATS
   stats.since_cycle = stats.since_cycle + bytes
   if stats.since_cycle > __ROCK_NB_OFFHEAP_CYCLE_MAX then
-    stats.since_cycle = 0
-    stats.forced_collections = stats.forced_collections + 1
-    collectgarbage("collect")
+    if stats.since_cycle > __ROCK_NB_OFFHEAP_CYCLE_HARD then
+      stats.since_cycle = 0
+      stats.forced_collections = stats.forced_collections + 1
+      collectgarbage("collect")
+    else
+      local now = os.clock()
+      if now - stats.step_clock >= __rock_nb_step_interval then
+        stats.forced_steps = stats.forced_steps + 1
+        local deadline = now + __rock_nb_step_seconds
+        -- A finished cycle runs the sentinel, which zeroes since_cycle.
+        repeat
+          local finished = collectgarbage("step", 0)
+        until finished or os.clock() >= deadline
+        stats.step_clock = os.clock()
+      end
+    end
   end
   local raw = ffi.C.calloc(n, e.size)
   if raw == nil then error("not enough memory", 2) end

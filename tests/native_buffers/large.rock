@@ -101,3 +101,35 @@ fn large_buffers_compare_by_content() {
     nb_set(b, 19999, 6)
     assert_eq(a == b, false)
 }
+
+inline(lua) fn large_guard_limits(soft: int, hard: int) = "__ROCK_NB_OFFHEAP_CYCLE_MAX = soft __ROCK_NB_OFFHEAP_CYCLE_HARD = hard"
+inline(lua) fn large_guard_soft() -> int = "return __ROCK_NB_OFFHEAP_CYCLE_MAX"
+inline(lua) fn large_guard_hard() -> int = "return __ROCK_NB_OFFHEAP_CYCLE_HARD"
+inline(lua) fn large_guard_steps() -> int = "return __ROCK_NB_OFFHEAP_STATS.forced_steps"
+inline(lua) fn large_guard_collections() -> int = "return __ROCK_NB_OFFHEAP_STATS.forced_collections"
+
+// Dropped off-heap storage does not bring a collector cycle forward by its
+// size, so the allocator does: bounded collector steps past the soft limit,
+// a full collection past the hard one. A program that keeps dropping large
+// buffers must not accumulate them without bound.
+@test
+fn churned_large_storage_stays_bounded() {
+    large_collect()
+    let soft = large_guard_soft()
+    let hard = large_guard_hard()
+    let steps = large_guard_steps()
+    let collections = large_guard_collections()
+    let before = native_buffer_offheap_bytes()
+    large_guard_limits(1 << 20, 4 << 20)
+    let peak = 0
+    for i in 0..4096 {
+        let dropped = native_buffer_u8(65536)
+        nb_set(dropped, 0, i % 256)
+        peak = max(peak, native_buffer_offheap_bytes() - before)
+    }
+    large_guard_limits(soft, hard)
+    // 256 MB went through; what was live at once is the hard limit plus the
+    // allocation that crossed it.
+    assert(peak <= (4 << 20) + 2 * 65536, "peak {peak}")
+    assert(large_guard_steps() > steps || large_guard_collections() > collections, "the guard never engaged")
+}
