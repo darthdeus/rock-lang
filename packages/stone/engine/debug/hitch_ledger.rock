@@ -296,7 +296,12 @@ fn hitch_frame_record(frame: int, frame_ms: float, t_ms: float, measured: bool) 
     let load_us = image_stats.load_us
     let upload_us = image_stats.upload_us
     let decode_wait_us = image_stats.wait_us
-    if measured { perf_record_frame(frame, t_ms, frame_ms, heap_kb, heap_delta_kb, starts, compiles, aborts, flushes, image_stats, cpu_ms) }
+    if measured {
+        perf_record_frame(frame, t_ms, frame_ms, heap_kb, heap_delta_kb, starts, compiles, aborts, flushes, image_stats, cpu_ms)
+        if RESIDENCY_FRAME_MISS_WAIT_US > 0 {
+            perf_record_residency_wait(frame, RESIDENCY_FRAME_MISS_WAIT_US, RESIDENCY_FRAME_WAIT_PATHS)
+        }
+    }
     let slow_ms = HITCH.cur_slow_ms
     let slow_name = HITCH.cur_slow_name
     let slow_phase = HITCH.cur_slow_phase

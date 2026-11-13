@@ -128,6 +128,26 @@ const PERF_RECORD_CAPACITY: int = 65536
 // stall section export share it.
 const PERF_STALL_MS: float = 33.0
 
+// Frames of the capture that waited on a residency miss, as JSON rows with
+// the files waited on: `frame_records.residency_us` says a frame waited, this
+// says for what. Bounded; a frame that misses hundreds of files (boot) names
+// the first sixteen and counts the rest.
+global PERF_RESIDENCY_WAITS: [string] = vec_new()
+const PERF_RESIDENCY_WAIT_ROWS: int = 256
+const PERF_RESIDENCY_WAIT_PATHS: int = 16
+
+fn perf_record_residency_wait(frame: int, wait_us: int, paths: [string]) {
+    if PERF_RESIDENCY_WAITS.len() >= PERF_RESIDENCY_WAIT_ROWS { return }
+    let seen: Map<string, bool> = map_new()
+    let names: [string] = vec_new()
+    for path in paths {
+        if seen.contains(path) { continue }
+        seen[path] = true
+        if names.len() < PERF_RESIDENCY_WAIT_PATHS { names.push("\"{__perf_json_escape_name(path)}\"") }
+    }
+    PERF_RESIDENCY_WAITS.push("{{\"frame\":{frame},\"wait_us\":{wait_us},\"path_count\":{seen.len()},\"paths\":[{names.join(",")}]}}")
+}
+
 pub struct PerfStallSummary {
     over_17: int, over_33: int, over_34: int, over_50: int,
     excess_17: float, excess_34: float, median_ms: float, worst_ms: float,
