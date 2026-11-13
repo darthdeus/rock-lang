@@ -423,14 +423,22 @@ collection, so the threshold stays as high as the measurements allow.
 - The collector no longer sees these bytes, so `collectgarbage("count")` and
   heap figures derived from it under-report. `native_buffer_offheap_bytes()`
   returns the live off-heap total, and `__ROCK_NB_OFFHEAP_STATS` has
-  `live_bytes`, `live_count`, `since_cycle` and `forced_collections`.
+  `live_bytes`, `live_count`, `since_cycle`, `forced_steps` and
+  `forced_collections`.
 - A dropped off-heap buffer is freed when the collector finalizes its pointer,
-  and its size no longer brings that cycle forward. The guard: once 256 MB has
-  been allocated off-heap within one collector cycle
-  (`__ROCK_NB_OFFHEAP_CYCLE_MAX`), the next large allocation runs a full
-  `collectgarbage("collect")` first. That is a long pause by design; it is
-  there to bound memory, and a program that reaches it should stop churning
-  large buffers instead.
+  and its size no longer brings that cycle forward. The guard does, in two
+  stages. Once 256 MB has been allocated off-heap within one collector cycle
+  (`__ROCK_NB_OFFHEAP_CYCLE_MAX`), a large allocation advances the collector
+  for at most 0.5 ms, and no more often than every 4 ms, until the cycle ends
+  (`forced_steps` counts these). Allocated bytes are not dead bytes: a program
+  that keeps 300 MB of buffers reaches this stage without having anything to
+  free, so the stage has to be cheap. The first version ran a full collection
+  here, and a profiler mode that allocates about 285 MB of history buffers
+  took one frame of 110 to 125 ms for it. Past 1 GB in one cycle
+  (`__ROCK_NB_OFFHEAP_CYCLE_HARD`) the steps are not keeping up with the
+  allocation, and the next large allocation runs a full
+  `collectgarbage("collect")` (`forced_collections`). That is a long pause;
+  a program that reaches it should stop churning large buffers.
 
 ### If this is suspected of causing a problem
 
@@ -440,7 +448,9 @@ collection, so the threshold stays as high as the measurements allow.
 2. Resident memory grows, or there are long pauses: read
    `__ROCK_NB_OFFHEAP_STATS`. A rising `forced_collections` means some code
    allocates and drops large buffers continuously; find it and reuse the
-   buffer. A `live_bytes` that keeps rising means buffers are retained, which
+   buffer. A rising `forced_steps` alone costs at most an eighth of the
+   program's time while a cycle is brought forward; if it rises every cycle
+   the same advice applies. A `live_bytes` that keeps rising means buffers are retained, which
    is the program's own retention and was the same on the Lua heap.
 3. Wrong values or a crash after a copy, snapshot or hot reload: look for code
    that inspects `ptr` with `ffi.sizeof`, `ffi.typeof` or `ffi.istype` and
