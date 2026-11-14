@@ -485,6 +485,7 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         uint8_t stone_reload_image(StoneImageHandle handle, const char* path);
         void stone_flush_image_uploads(void);
         void stone_set_frame_image_upload_budget(int bytes);
+        void stone_set_frame_image_upload_time_budget(int microseconds);
         void stone_begin_image_upload_frame(void);
         int stone_image_uploads_pending(void);
         uint8_t stone_image_require(StoneImageHandle handle);
@@ -1637,6 +1638,7 @@ pub extern(ffi, "stone") fn stone_reload_image(handle: int, path: string) -> boo
 // precede any draw or pixel readback.
 pub extern(ffi, "stone") fn stone_flush_image_uploads()
 pub extern(ffi, "stone") fn stone_set_frame_image_upload_budget(bytes: int)
+pub extern(ffi, "stone") fn stone_set_frame_image_upload_time_budget(microseconds: int)
 // One host frame owns one allowance across all its upload pumps.
 pub extern(ffi, "stone") fn stone_begin_image_upload_frame()
 pub extern(ffi, "stone") fn stone_image_uploads_pending() -> int

@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::c_int;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Required work must be published by the next flush; Deferred work is
 /// published only by a pump, or by a flush once promoted to Required.
@@ -28,6 +29,7 @@ struct Pending {
     /// Requests still Deferred.
     deferred: HashSet<u64>,
     budget: usize,
+    time_budget: Duration,
 }
 
 #[derive(Default)]
@@ -38,6 +40,7 @@ struct Publications {
     // Presentation cost belongs to the current host frame: resetting
     // statistics or changing the configured cap must not refund it.
     frame_uploaded_bytes: usize,
+    frame_upload_time: Duration,
     hold: usize,
 }
 
@@ -53,6 +56,7 @@ fn fatal(message: impl std::fmt::Display) -> ! {
 impl Publications {
     fn begin_frame(&mut self) {
         self.frame_uploaded_bytes = 0;
+        self.frame_upload_time = Duration::ZERO;
     }
 
     fn submit(
@@ -148,6 +152,19 @@ impl Publications {
         exists: impl Fn(u64) -> bool,
         mut publish: impl FnMut(Arc<Decoded>),
     ) -> Result<(), String> {
+        self.select_timed_with(site, exists, |decoded| {
+            let started = Instant::now();
+            publish(decoded);
+            started.elapsed()
+        })
+    }
+
+    fn select_timed_with(
+        &mut self,
+        site: &str,
+        exists: impl Fn(u64) -> bool,
+        mut publish: impl FnMut(Arc<Decoded>) -> Duration,
+    ) -> Result<(), String> {
         self.selection_wait_us = 0;
         if self.hold > 0 {
             return Ok(());
@@ -157,34 +174,38 @@ impl Publications {
             return self.stream(site, budget, &exists, &mut publish);
         }
         self.collect();
-        let selected = if site == "pump" {
-            let mut ready: VecDeque<_> = self
-                .pending
-                .ready
-                .iter()
-                .filter_map(|id| {
-                    self.pending
-                        .requests
-                        .get(id)
-                        .and_then(|r| r.result.borrow().clone())
-                })
-                .collect();
-            crate::image_texture::take_decoded_upload_budget(
-                &mut ready,
-                budget,
-                &mut self.frame_uploaded_bytes,
-            )
-        } else {
-            Vec::new()
-        };
-        for d in &selected {
-            self.retire(d.id);
-        }
         self.pending
             .ready
             .retain(|id| self.pending.requests.contains_key(id));
-        for d in selected {
-            publish(d);
+        if site == "pump" {
+            while let Some(&id) = self.pending.ready.front() {
+                if !self.pending.time_budget.is_zero()
+                    && self.frame_upload_time >= self.pending.time_budget
+                {
+                    break;
+                }
+                let decoded = self
+                    .pending
+                    .requests
+                    .get(&id)
+                    .and_then(|r| r.result.borrow().clone());
+                let Some(decoded) = decoded else {
+                    self.pending.ready.pop_front();
+                    continue;
+                };
+                let bytes = crate::image_texture::decoded_upload_bytes(&decoded);
+                // An indivisible image may exceed either allowance. Always
+                // make progress on the first image of a fresh frame.
+                if self.frame_uploaded_bytes > 0
+                    && self.frame_uploaded_bytes.saturating_add(bytes) > budget
+                {
+                    break;
+                }
+                self.pending.ready.pop_front();
+                self.frame_uploaded_bytes = self.frame_uploaded_bytes.saturating_add(bytes);
+                self.retire(id);
+                self.frame_upload_time += publish(decoded);
+            }
         }
         Ok(())
     }
@@ -197,7 +218,7 @@ impl Publications {
         site: &str,
         _budget: usize,
         _exists: &impl Fn(u64) -> bool,
-        publish: &mut impl FnMut(Arc<Decoded>),
+        publish: &mut impl FnMut(Arc<Decoded>) -> Duration,
     ) -> Result<(), String> {
         self.collect();
         self.publish_ready(site, publish);
@@ -229,7 +250,7 @@ impl Publications {
         Ok(())
     }
 
-    fn publish_ready(&mut self, site: &str, publish: &mut impl FnMut(Arc<Decoded>)) {
+    fn publish_ready(&mut self, site: &str, publish: &mut impl FnMut(Arc<Decoded>) -> Duration) {
         for _ in 0..self.pending.ready.len() {
             let id = self.pending.ready.pop_front().unwrap();
             if site == "flush" && self.pending.deferred.contains(&id) {
@@ -250,7 +271,7 @@ impl Publications {
             self.frame_uploaded_bytes = self
                 .frame_uploaded_bytes
                 .saturating_add(crate::image_texture::decoded_upload_bytes(&d));
-            publish(d);
+            self.frame_upload_time += publish(d);
         }
     }
 }
@@ -291,6 +312,17 @@ pub extern "C" fn stone_begin_image_upload_frame() {
 pub(crate) fn set_budget(bytes: usize) {
     PUBLICATIONS.with(|p| p.borrow_mut().pending.budget = bytes);
 }
+/// Limit background publication wall time across all pumps in a host frame.
+/// Zero disables this limit. Required flushes and explicit loading drains are
+/// unbounded, but consume the remaining background allowance. An individual
+/// upload is indivisible and can overshoot the limit.
+#[no_mangle]
+pub extern "C" fn stone_set_frame_image_upload_time_budget(microseconds: c_int) {
+    PUBLICATIONS.with(|p| {
+        p.borrow_mut().pending.time_budget = Duration::from_micros(microseconds.max(0) as u64)
+    });
+}
+
 pub(crate) fn pending() -> usize {
     PUBLICATIONS.with(|p| p.borrow().pending.requests.len())
 }
@@ -358,6 +390,54 @@ mod tests {
                 .unwrap();
         }
         p
+    }
+
+    #[test]
+    fn time_allowance_is_shared_by_pumps_and_required_flushes() {
+        if in_isolated_child("time_allowance_is_shared_by_pumps_and_required_flushes") {
+            return;
+        }
+        let mut p = Publications::default();
+        p.pending.budget = 100;
+        p.pending.time_budget = Duration::from_millis(2);
+        for id in 1..=4 {
+            p.submit(id, "image", 1, 1, RequestClass::Deferred).unwrap();
+            p.receive(result(id, 4));
+        }
+        let mut published = Vec::new();
+        let mut publish = |d: Arc<Decoded>| {
+            published.push(d.id);
+            Duration::from_millis(3)
+        };
+        p.select_timed_with("pump", |_| true, &mut publish).unwrap();
+        assert!(p.ready(1));
+        assert!(
+            !p.ready(2),
+            "stop after the first image exceeds the time allowance"
+        );
+        p.select_timed_with("pump", |_| true, &mut publish).unwrap();
+        assert!(
+            !p.ready(2),
+            "another pump cannot refund elapsed publication time"
+        );
+        p.require(2);
+        p.select_timed_with("flush", |_| true, &mut publish)
+            .unwrap();
+        assert!(
+            p.ready(2),
+            "Required images still publish after the allowance is spent"
+        );
+        assert!(!p.ready(3));
+        p.select_timed_with("pump", |_| true, &mut publish).unwrap();
+        assert!(!p.ready(3));
+        p.begin_frame();
+        p.select_timed_with("pump", |_| true, &mut publish).unwrap();
+        assert!(p.ready(3));
+        assert!(!p.ready(4));
+        p.pending.budget = 0;
+        p.select_timed_with("pump", |_| true, &mut publish).unwrap();
+        assert!(p.ready(4), "explicit loading drains remain unbounded");
+        assert_eq!(published, [1, 2, 3, 4]);
     }
 
     #[test]

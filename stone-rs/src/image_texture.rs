@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_int, CStr};
 use std::sync::Arc;
 
@@ -30,26 +30,6 @@ thread_local! {
 
 pub(crate) fn decoded_upload_bytes(decoded: &image_decode::Decoded) -> usize {
     decoded.pixels.as_ref().map_or(0, Vec::len)
-}
-
-pub(crate) fn take_decoded_upload_budget(
-    pending: &mut VecDeque<Arc<image_decode::Decoded>>,
-    budget_bytes: usize,
-    used_bytes: &mut usize,
-) -> Vec<Arc<image_decode::Decoded>> {
-    if budget_bytes == 0 || pending.is_empty() {
-        return Vec::new();
-    }
-    let mut selected = Vec::new();
-    while let Some(next) = pending.front() {
-        let bytes = decoded_upload_bytes(next);
-        if *used_bytes > 0 && used_bytes.saturating_add(bytes) > budget_bytes {
-            break;
-        }
-        *used_bytes = used_bytes.saturating_add(bytes);
-        selected.push(pending.pop_front().expect("front existed"));
-    }
-    selected
 }
 
 fn elapsed_us(start: std::time::Instant) -> c_int {
@@ -181,35 +161,6 @@ pub extern "C" fn stone_get_image_profile_stats(out: *mut ImageLoadStats) {
 #[cfg(test)]
 mod image_load_stats_tests {
     use super::*;
-
-    fn decoded(id: u64, bytes: usize) -> Arc<image_decode::Decoded> {
-        Arc::new(image_decode::Decoded {
-            id,
-            pixels: Some(vec![0; bytes]),
-            width: bytes as u32,
-            height: 1,
-            stored: (bytes as u32, 1),
-            format: ImageFormat::Rgba8,
-        })
-    }
-
-    #[test]
-    fn upload_budget_keeps_whole_images_and_always_makes_progress() {
-        let mut pending =
-            std::collections::VecDeque::from([decoded(1, 6), decoded(2, 10), decoded(3, 4)]);
-
-        let first = take_decoded_upload_budget(&mut pending, 9, &mut 0);
-        assert_eq!(first.iter().map(|d| d.id).collect::<Vec<_>>(), [1]);
-        assert_eq!(pending.iter().map(|d| d.id).collect::<Vec<_>>(), [2, 3]);
-
-        let oversized = take_decoded_upload_budget(&mut pending, 9, &mut 0);
-        assert_eq!(oversized.iter().map(|d| d.id).collect::<Vec<_>>(), [2]);
-        assert_eq!(pending.iter().map(|d| d.id).collect::<Vec<_>>(), [3]);
-
-        let last = take_decoded_upload_budget(&mut pending, 9, &mut 0);
-        assert_eq!(last.iter().map(|d| d.id).collect::<Vec<_>>(), [3]);
-        assert!(pending.is_empty());
-    }
 
     #[test]
     fn frame_and_profile_stats_retain_load_upload_and_wait_activity() {
