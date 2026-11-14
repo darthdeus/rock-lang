@@ -404,6 +404,13 @@ fn relevant_values(func: &MirFunc, rpo: &[Idx<Block>]) -> Vec<bool> {
                     mark(&[id, *base], &mut relevant);
                 }
                 Inst::Store { value, .. } => mark(&[*value], &mut relevant),
+                Inst::MakeStruct { fields, .. } => {
+                    for (field, value) in fields {
+                        if field.as_str() == LEN {
+                            mark(&[*value], &mut relevant);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1154,6 +1161,14 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
     }
     let private_push = facts.track_private_vecs(func, ctx, id);
     match inst {
+        Inst::MakeStruct { fields, .. } => {
+            // A fresh descriptor's length equals its initializer snapshot.
+            if let Some((_, len)) = fields.iter().rev().find(|(field, _)| field.as_str() == LEN) {
+                for key in facts.keys_of(func, *len) {
+                    facts.le_len.insert((key, Key::Value(id)));
+                }
+            }
+        }
         Inst::Len { base, .. } => {
             for v in facts.keys_of(func, *base) {
                 facts.le_len.insert((Key::Value(id), v));
@@ -1207,6 +1222,16 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
             }
         }
         Inst::Store { cell, value } => {
+            // Copy bounds owned by the descriptor, not just bounds on its value.
+            let owners = facts.keys_of(func, *value);
+            let capacities: Vec<_> = facts
+                .le_len
+                .iter()
+                .filter(|(bound, owner)| {
+                    owners.contains(owner) && !bound.mentions(&|k| *k == Key::Cell(*cell))
+                })
+                .map(|(bound, _)| bound.clone())
+                .collect();
             let private = facts.private_root(&value_key(func, *value));
             let whole = ctx.affine && facts.whole_value(func, *value);
             let nonneg = facts.nonneg(func, *value);
@@ -1214,6 +1239,9 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
             let lt = facts.lt_of(func, *value);
             facts.forget_cell(*cell);
             let k = Key::Cell(*cell);
+            for bound in capacities {
+                facts.le_len.insert((bound, k.clone()));
+            }
             if let Some(root) = private {
                 facts.private_vecs.insert((k.clone(), root));
             }

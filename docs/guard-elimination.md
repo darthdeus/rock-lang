@@ -1,444 +1,141 @@
-# Guard elimination audit
+# Guard elimination
 
-Audit of compiler revision `1340cf0a`, 2026-11-14. This follows the heap-record
-callback fix and the earlier bounds/effect audit in
-[LuaJIT performance](luajit-performance.md). It examines bounds, field-presence,
-numeric conversion, defaults, enum/type, coroutine and reload checks. It is a
-source/probe audit, not an exhaustive dynamic census of every application.
+This document records the bounds and shift checks the compiler currently
+proves redundant, their soundness boundaries, and the measurements that support
+them. The bounds analysis is in `crates/skull-transform/src/in_bounds.rs`;
+constant shift emission is in `crates/skull-codegen-lua/src/lib.rs`.
 
-The useful question is whether a guard's predicate and lack of observable
-side effects can both be proved. A bound does not prove a table read is inert:
-an absent nullable slot can invoke `__index`, and a heap-record write can invoke
-`__newindex`. The new `Record` MIR operations deliberately preserve that boundary.
+## Implemented proofs
 
-## Measured priorities
+### Bounded constant-stride indices
 
-`benchmarks/guard_proofs.rock` contains small source examples. The Lua runner
-uses valid, fixed inputs and the Python driver compares the emitted program
-with exact, asserted textual removals of selected guards. These removals are
-experiments, **not sound compiler transformations**. In particular, the accessor
-accepts arbitrary indices outside this runner, and the stride function's
-negative rejection tests are not sufficient range proofs for arbitrary Lua
-numbers.
+For an access shaped like `row * stride + lane`, the bounds pass can prove the
+access when it has whole-number certificates, nonnegative `row` and `lane`,
+`row < rows`, `lane < stride`, and `rows * stride <= buffer.len`. The constant
+stride must be positive, and both products and their sum must stay within the
+exact integer range of binary64 (`2^53`). Ordered comparisons on their true
+edges exclude NaN; false edges do not establish these facts. Arithmetic
+snapshots stop a repeated MIR producer from lending an old result new bounds.
 
-Run these commands through the normal job scheduler, reserving an exclusive
-timing slot for the measurement:
+Unknown calls and writes to the buffer length invalidate the relevant facts.
+This is a bounded, local proof for the access shape, not general affine
+arithmetic. An `int` annotation, a negative-value rejection branch, or a bound
+proved in another function is not enough.
+
+### Private Lua vector pushes
+
+For a fresh boxed vector that remains local and private, the pass tracks its
+allocation and aliases through local loads and stores. Appending to that vector
+cannot invoke a foreign table setter. A private push invalidates facts tied to
+current length and element places, while captured upper bounds can survive
+because length only grows. Unsupported escapes revoke the allocation's private
+status.
+
+This exception is Lua-specific: JavaScript arrays can inherit indexed setters.
+The JS path remains conservative. Opaque calls still invalidate ordinary
+memory-bound facts, even when they do not receive the private vector. Vector
+parameters, container contents, and caller-to-callee privacy are not inferred.
+
+### Fresh descriptor lengths
+
+A `MakeStruct` constructor establishes its `len` initializer as a bound on that
+new descriptor. Local assignments copy the relation; reassignment, length
+writes, opaque calls and repeated producers invalidate stale facts. This proves
+fills of fresh NativeBuffers when allocation and loop share the same count.
+The sized primitive constructor wrappers are inline so the pass sees their
+headers. No pointer-ownership or general finite-integer assumption is added.
+Alias, mutation, branch and old-instance loop regressions cover the boundary.
+
+### Literal uint shifts
+
+Lua emission omits the shift-count helper for integer literals in `0..=31` and
+does not capture the unused helper. Dynamic counts remain checked; a `uint`
+type does not prove the upper bound. Right-shift flooring and left-shift uint
+normalization remain in place.
+
+## Soundness boundaries and next gaps
+
+Unknown calls may mutate any reachable length or field, and boxed vector, map,
+or heap-record accesses can invoke Lua metamethods. The analysis drops facts
+where those effects can invalidate a proof. Nullable-field presence is also
+not inferred from a record type: reads and writes may invoke `__index` or
+`__newindex`. Keep these guards unless a plain-table and stable-presence proof
+is available.
+
+The current follow-up gaps are:
+
+- **Recomputed capacity and reuse:** independently evaluated size expressions
+  are not equated. The alpha-mask fills still need this bridge; glyph-cache
+  reuse also needs equality facts across joins and helper-call effects.
+- **Subtraction:** `n > 0` does not prove `n - 1 < n` for infinity or large
+  rounded floating-point values. A rule needs finite exact-integer bounds and
+  live operand snapshots.
+- **Nullable fields:** no local proof establishes whether a heap-record field
+  is present or whether clearing it can call a setter.
+- **Interprocedural privacy and bounds:** a parameter type does not prove the
+  caller supplied a private vector or preserve a capacity relation through a
+  call. No caller-to-callee summary is implemented.
+
+Other guards for conversions, defaults, coroutine state, and native layout or
+reload compatibility remain where dynamic values or external state affect
+behavior.
+
+## Runtime measurements
+
+The measurements below compare compiler-emitted checked code with the new
+compiler output. Each benchmark used LuaJIT with the JIT enabled, alternating
+fresh processes, and matching result sinks. These are microbenchmarks, not
+application results. Ranges and trace behavior show that some medians are
+trace-sensitive.
+
+| Proof | Machine / LuaJIT | Before -> after median | Sample range / caveat |
+| --- | --- | --- | --- |
+| Strided NativeBuffer read | Apple M4 Max / 2.1.1774896198 | 1.1930 -> 0.8062 ns/element | 8 pairs; ranges 1.1815-1.2249 -> 0.7940-0.8180; 0-2 trace aborts |
+| Strided NativeBuffer read | Intel Core i9-14900K, Linux / 2.1.1785763465 | 1.6850 -> 1.2449 ns/element | 8 pairs; ranges 1.6775-1.7217 -> 0.3542-1.2549; 0-3 aborts and a fast outlier |
+| Private vector push and collection | Apple M4 Max / 2.1.1774896198 | 4.1577 -> 3.1629, repeat 4.4662 -> 3.3445 ns/element | 6 pairs per batch; first/repeat ranges before -> after: 2.13-4.27 / 2.19-4.51 -> 3.13-3.43 / 3.32-3.41 |
+| Private vector push and collection | Intel Core i9-14900K, Linux / 2.1.1785763465 | 5.4484 -> 4.6523, repeat 5.2100 -> 4.4473 ns/element | 6 pairs per batch; first/repeat ranges before -> after: 2.15-5.69 / 2.20-5.45 -> 4.37-4.78 / 4.33-4.65 |
+| Constant uint shifts | Apple M4 Max / 2.1.1774896198 | 33.6624 -> 33.6220 ns/iteration | 8 pairs; runtime effectively unchanged; emitted chunk 145372 -> 145188 bytes, final machine code 1696-1788 -> 1572 bytes |
+| Fresh integer/byte buffer fills | Apple M4 Max / 2.1.1774896198 | int 0.4918 -> 0.5011; byte 0.4625 -> 0.4505 ns/element | 8 pairs; int ranges 0.4623-0.5886 -> 0.4606-0.5380; byte 0.4214-0.4670 -> 0.4338-0.4917 |
+| Fresh integer/byte buffer fills | Intel Core i9-14900K, Linux / 2.1.1785763465 | int 0.9049 -> 0.8077; byte 0.4730 -> 0.3418 ns/element | 8 pairs; int ranges 0.8722-1.0725 -> 0.7594-0.9829; byte 0.4664-0.4843 -> 0.3402-0.3460 |
+
+The strided-read ranges are trace-sensitive, especially on x86; they support a
+microbenchmark result, not an application speedup. The private-vector timings
+include allocation and GC, and the faster baseline trace variants make the
+median direction less stable. The shift result supports smaller emitted code,
+not a runtime claim. No whole-program compile-cost conclusion is supported by
+the small standalone compile samples.
+
+The parameterized `fill_and_collect` control retained its checks. Buffer-fill
+measurements include allocation and GC; the byte case includes constructor
+inlining. M4 timing changes are small with overlapping ranges; x86 byte fills
+improved about 28%. Final buffer-fill machine code shrank on both architectures.
+Ten alternating M4 fresh-process compile pairs for this change measured
+`buffer_fill` 16.760 -> 16.550 ms and `vec_store` 17.672 -> 17.765 ms, with
+overlapping ranges. OS caches were not flushed; startup/output are included.
+
+## Reproduction
+
+Compile the same benchmark with each compiler build and keep each emitted Lua
+file for comparison. The runtime harnesses use the output directly:
 
 ```sh
 rock compile benchmarks/guard_proofs.rock --output /tmp/guard-proofs.lua
-# After compilation completes:
-python3 benchmarks/guard_proofs.py /tmp/guard-proofs.lua
+luajit benchmarks/guard_proofs.lua /tmp/guard-proofs.lua proven_stride
+
+rock compile benchmarks/vec_store.rock --output /tmp/vec-store.lua
+luajit -e 'dofile("/tmp/vec-store.lua"); main()'
+
+rock compile benchmarks/uint_shift.rock --output /tmp/uint-shift.lua
+luajit benchmarks/uint_shift.lua /tmp/uint-shift.lua
+
+rock compile benchmarks/buffer_fill.rock --output /tmp/buffer-fill.lua
+luajit benchmarks/buffer_fill.lua /tmp/buffer-fill.lua
 ```
 
-The driver requires `luajit` on PATH, emits raw JSON, checks equal result sinks,
-and reports medians, ranges and trace-abort counts. Exact replacement assertions
-must be reviewed when code generation changes; do not silently weaken them.
-
-Intel Core i9-14900K, Linux, LuaJIT 2.1.1785763465, JIT enabled, six independent
-process pairs with alternating order. Each workload flushes traces, warms for
-200 invocations, then measures. Start load was 1.1 on 30 available logical CPUs.
-The allocation workloads include allocation and GC. Units are ns/element,
-except fixed-buffer which is ns/invocation. These are microbenchmarks, not
-end-to-end application results.
-
-| Probe | Checked median (range) | Unchecked median (range) | Interpretation |
-| --- | --- | --- | --- |
-| Accessor inside counted loop | 0.3537 (0.3535-0.3601) | 0.3537 (0.3535-0.3560) | No measured benefit from call-site specialization here. |
-| Fresh vectors, push to separate output | 3.0258 (3.0022-6.1931) | 5.4465 (5.3400-6.2174) | Trace-sensitive; removal is not automatically faster. |
-| NativeBuffer, four lanes per row | 1.6759 (1.6679-1.6911) | 1.2361 (0.3534-1.2388) | Best candidate, about 26% lower median, but trace-sensitive. |
-| Allocate four-element NativeBuffer, initialize two slots | 155.3454 (154.2807-162.0380) | 175.9320 (174.3970-182.0363) | Allocation dominates; removal worsened this probe. |
-
-Accessor and fresh-vector runs had no trace aborts. Fixed-buffer runs had 47
-in both versions. Stride checked runs had 1-4 and unchecked runs 0-3. The outlier
-and differing trace paths require trace inspection and a second architecture
-before attributing all of the stride difference to per-element comparisons.
-
-A second six-pair run using the checked-in driver reproduced stride medians
-1.6762 -> 1.2372 and accessor medians 0.3536 -> 0.3537. Fixed-buffer was
-155.3864 -> 177.8551. Fresh-vector medians reversed direction, 6.2031 ->
-4.4380, with overlapping ranges 3.0547-6.3582 and 2.7320-6.4085. That reversal
-is why no fresh-vector speed claim is supported by these probes.
-
-## Proof opportunities
-
-### 1. Bounded affine NativeBuffer indices
-
-The current pass (`crates/skull-transform/src/in_bounds.rs`) tracks nonnegative,
-less-than-length and at-most-length relations, but not general affine intervals.
-`buf[row * 4 + lane]` stays checked under a buffer-capacity guard and counted
-row/lane loops. The probe confirms the emitted `__nb_checked_get` remains.
-
-A small exact-integer interval domain could establish:
-
-- `0 <= rows <= 100000`, `buf.len >= rows * 4`;
-- `0 <= row < rows`, `0 <= lane < 4`;
-- therefore `0 <= row * 4 + lane < buf.len` without rounding/overflow.
-
-Require ordered comparisons that exclude NaN and a finite exact-integer domain.
-The probe deliberately uses negative rejection conditions: `not (rows < 0)`
-is not equivalent to `rows >= 0` for NaN. NativeBuffer header/representation
-invariants remain the existing ABI contract. Unknown callbacks must still
-invalidate live header facts. A guard in a different function does not prove
-this access unless its relation is carried by a sound summary.
-
-Start with constant stride and bounded integer induction, not arbitrary symbolic
-algebra. Required regressions: zero/negative rows, insufficient capacity, last
-lane, NaN/infinity/large rounded numbers, mutated length, callback invalidation,
-and both Lua and JS behavior. Measure cold compile cost as well as JIT runtime.
-
-### 2. Fresh private backing-table provenance
-
-`ArrayPush` currently clears facts as an unknown call. A push into a genuinely
-fresh, private plain backing table cannot invoke a foreign metamethod. This
-could preserve bounds of a distinct input vector in collection loops and
-recover some of the previously measured callback-audit regression.
-
-Freshness of the wrapper alone is insufficient: prove the backing allocation,
-all aliases, no escape to a host call/global/container/captured closure, no
-metatable installation, and no callback during element materialization. Growing
-one vector can invalidate its own length relation; it must not accidentally
-preserve facts about an alias of that vector. Prefer a narrowly scoped local
-allocation proof before adding global points-to analysis.
-
-The earlier public `fill_and_collect` measurement motivates this work, but the
-new small probe did not improve on x86. Evaluate the actual regression workload
-on both architectures before landing machinery solely for performance.
-
-### 3. Bounded subtraction and constant allocation lengths
-
-`lt_of` intentionally does not infer `n - 1 < n`: infinity and sufficiently
-large floating-point integers violate that implication. A finite exact-integer
-interval can make `count - 1` safe under `count > 0 && count <= xs.len()`.
-The probe's negative rejection form needs additional NaN handling.
-
-Fresh `native_buffer_int(4)` emits checks on its first stores to indices zero
-and one. Subsequent reads become raw after the checked stores establish facts.
-Seeding constructor length facts could eliminate the first checks. It needs
-allocation identity and invalidation on header writes/escape. The allocation
-probe got slower when checks were removed, so this is a simplicity/code-size
-opportunity pending a better workload, not a demonstrated runtime win.
-
-### 4. Conditional result bounds
-
-`random_int(lo, hi)` returns `lo` when `hi <= lo`; an unconditional
-`returns_index_below(hi)` promise is false. The nonempty sample path is a
-candidate for a conditional result relation, with finite integer inputs and
-arithmetic limits accounted for. Existing `@returns_index_below` annotations
-on map slot helpers are trusted contracts; any new conditional contract needs
-direct positive and negative tests, including invalidation of the referenced
-length. Do not add an annotation merely to silence an emitted check.
-
-### 5. Field-presence and metatable checks
-
-A known nonnil value needs no absent-nil-store guard. For a maybe-nil value,
-a compiler-owned plain table and a stable known-present field could allow a raw
-store. A known-absent nil store can disappear only when it cannot invoke a
-setter. These facts must survive aliases, field mutation and callbacks.
-
-The callback-safe guard is ordered to test metatable presence before reading
-the field. It handles a protected metatable whose public value is `false`.
-Removing it broadly is wrong; using raw stores broadly also caused the measured
-nullable-store rehash regression. A LuaJIT guard in generated source is not by
-itself evidence of runtime cost.
-
-## Other guard families reviewed
-
-| Family | Existing behavior / remaining proof boundary |
-| --- | --- |
-| Default arguments | `lower/mod.rs::fill_param_defaults` and direct-call folding already handle supported constants. Keep omission checks for function values, host calls, explicit nullable defaults and lazy effectful defaults. |
-| Enum/tag dispatch | Constant cases and local scalar replacement already remove many tags. Dynamic `any`, reflected values, foreign records and escaping payloads still need discrimination. |
-| Checked uint conversion | `__rock_checked_u32` validates `[0, 4294967295]` then floors. A proven finite range can remove comparisons; fractional values still require flooring. |
-| Float-to-int conversion | The Lua `float_to_int` function value in `stdlib/unified.rock:1770` checks the host value type, then floors. Direct MIR `FloatToInt` emits `math.floor` without that host type guard; fractional values still require flooring. |
-| Shift count | Literal integer counts in `0..=31` now omit `__rock_u32_shift_count` and its helper capture. Dynamic counts remain checked: a uint type alone does not prove `<= 31`. See the measured follow-up below. |
-| Coroutine status/hooks | `next` distinguishes suspended from terminal after resume, including a real nullable yield. Hooks and terminal/error checks encode behavior. Source absence of hook registration alone does not prove a mutable frame has no hook. |
-| Coroutine `pcall` | Converts step errors to the errored state and performs cleanup. Removal requires a complete no-raise proof, including nested callbacks and defers. |
-| Native layout / reload compatibility | Checks validate foreign data or version changes. Compile-time knowledge of the current body does not establish compatibility with an old live value. |
-| Vector false/nil fallback | `data[i] or checked_get` takes the slow path for false, but a nil-only test is not a general replacement for bounds checking. Preserve nullable-slot callbacks and out-of-range behavior. |
-
-Relevant implementation entry points are `skull-transform/src/in_bounds.rs`,
-`copy_prop.rs`, `sroa.rs`, `skull-mir/src/nilness.rs`,
-`skull-codegen-lua/src/preludes.rs`, `value.rs`, `term.rs`, and
-`skull/src/coroutine_emit.rs` (all under `crates/`), plus `stdlib/unified.rock`.
-Existing regression suites include `opaque_effects`, `default_guard_fold`,
-`nullable_embed_clear`, `coroutine_frame_writes`, and scalarization suites.
-
-## Next implementation order
-
-1. The bounded affine follow-up is implemented below. Broaden it only against
-   a real NativeBuffer consumer; retain the trace-sensitivity caveat.
-2. Local private-vector push effects are implemented below. Parameterized
-   collection still needs an interprocedural proof.
-3. Constant shift-count guards are removed below. Bounded subtraction needs
-   finite-range facts that the surveyed consumers do not establish locally.
-4. Investigate constructor capacity facts against real NativeBuffer consumers;
-   defer call-site and coroutine specialization until measurements warrant them.
-
-The initial audit removed no compiler guards. Its manual benchmark ablation
-must never be used as production output. The implemented follow-up below is
-a separate compiler proof, with narrower applicability than that ablation.
-
-## Implemented follow-up: bounded constant stride
-
-The bounds pass now recognizes `row * stride + lane` with a positive constant
-stride. It proves whole-number operands, nonnegative row/lane, ordered
-`row < rows`, `lane < stride`, and `rows * stride <= buffer.len`, with both
-products and the sum within the exact binary64 integer range. The whole-number
-certificate is separate from finiteness: flooring may produce NaN or infinity,
-which the ordered finite bounds must exclude. A public `int` annotation alone
-is not a certificate.
-
-`guard_stride_proven` in the benchmark explicitly converts a float count with
-`as int` and tests positive comparisons before entering the loops. Its Lua
-inner read is now raw. The original `guard_stride`, with an unvalidated count
-and negative rejection tests, stays checked. No runtime validation or changed
-input behavior is injected into user programs.
-
-The extra analysis activates only in functions with the target access shape.
-It uses finite sets of facts, intersects them at joins, and bounds each upper
-bound search by depth and work. It does not grow intervals one integer per
-solver iteration. Arithmetic snapshot keys invalidate expansion when a MIR
-operand producer executes again. Unknown callbacks and length writes invalidate
-the proof. This implementation intentionally does not add general symbolic
-algebra, interprocedural specialization, or integer assumptions at host entry.
-
-Regression coverage includes the initial failing MIR case; fractional operands;
-NaN-admitting false edges for count and length guards; excessive arithmetic
-ranges; an extra lane; callbacks; length writes; a stale capacity after count
-reassignment; and a lane changed across loop iterations. Lua and JS runtime
-fixtures cover zero, negative, fractional, infinite and NaN counts and short
-buffers. The normal JS fixture retains its helper and checks boundary parity;
-the measured elimination is in the Lua pipeline.
-
-For the actual compiler comparison, emit the same benchmark source with the
-pre-change compiler and the new release compiler, then run each artifact as:
-
-```sh
-luajit benchmarks/guard_proofs.lua emitted.lua proven_stride
-```
-
-The checked-in harness warms for 200 calls, then runs 100000 calls over 4096
-integer elements with LuaJIT enabled. Eight alternating fresh-process pairs on
-Intel Core i9-14900K / Linux / LuaJIT 2.1.1785763465 measured 1.6850 -> 1.2449
-ns/element (about 26% lower median). Sample ranges were 1.6775-1.7217 and
-0.3542-1.2549; sinks matched. Both versions had 0-3 trace aborts across samples.
-The fast outlier remains evidence of trace sensitivity, not a general
-application speedup. This confirms the earlier ablation with actual generated
-output and an explicit sound input domain.
-
-The Stone source survey found no existing loop with this complete local proof.
-The nearest cases are alpha-mask row writes in `packages/stone/engine/ui/mouse.rock`,
-glyph-cache lanes in `packages/stone/engine/rendering/text.rock`, and record
-serialization in `packages/stone/engine/debug/perf_records.rock`. Their capacity
-relations come from allocations, equality/reuse paths or producer invariants;
-the required whole/count bounds are not locally established. Those checks stay.
-No extra guards were added to application code merely to exercise this proof.
-Allocation provenance is the next useful bridge to those consumers.
-
-The same eight-pair run on Apple M4 Max / LuaJIT 2.1.1774896198 measured
-1.1930 -> 0.8062 ns/element (about 32% lower median), with non-overlapping
-ranges 1.1815-1.2249 and 0.7940-0.8180. Sinks matched; both versions had 0-2
-trace aborts per sample. The final compiler's emitted probe was byte-identical
-to the artifact used for both architecture measurements.
-
-Fresh-process compilation on the M4 used ten alternating pairs per standalone
-fixture, the same source/stdlib, separate before/after release compilers and no
-on-disk compiler cache. OS file caches were not flushed. Wall-clock milliseconds
-include process startup and writing emitted output:
-
-| Fixture | Before median (range) | After median (range) |
-| --- | --- | --- |
-| guard_proofs | 15.361 (14.846-81.480) | 15.355 (14.904-84.541) |
-| field_store | 15.511 (15.348-16.849) | 15.742 (15.401-16.415) |
-| vec_loop | 17.888 (17.669-18.505) | 18.024 (17.450-18.704) |
-
-The sample spans overlap and median differences are at most 1.5%. This small
-standalone set does not establish compile-cost neutrality for large programs.
-The Stone module was excluded because it is not a standalone CLI input; no
-successful whole-Stone compile measurement is claimed here.
-
-## Implemented follow-up: private Lua vector pushes
-
-The bounds pass now tracks fresh boxed `MakeVec` allocations and their aliases
-through unborrowed local stores/loads. Each allocation creates both a plain
-header and a plain backing table. Unsupported uses revoke the entire alias
-family: opaque calls receiving it, backing-field exposure, globals, fields,
-container elements, closure environments and borrowed cells. Joins intersect
-facts. Reexecuting an allocation site creates a new value fact without restoring
-an old escaped cell alias. Container contents are not recursively tracked.
-
-A private `ArrayPush` or recognized stdlib `Vec.push`/`vec_push` can only grow
-the numeric length and store an element. It invalidates current length-place
-and element-place facts, but keeps captured upper bounds. The stdlib recognition
-checks the module, receiver type, parameter binding and reviewed inline body;
-a changed body falls back to conservative effects. Publishing a private vector
-as an appended item revokes its provenance, including self-appends. The append
-itself remains callback-free if its receiver was private before that append.
-Returning the finished vector does not invalidate earlier proofs.
-
-This guarantee is **Lua-specific**. A fresh JavaScript array can inherit an
-indexed setter from `Array.prototype`. The pass chain now supplies its emission
-target explicitly; the generic API and JS path keep the conservative behavior.
-A JS inherited-setter fixture and a target-specific MIR test pin that boundary.
-The global memory-effect table is unchanged: opaque calls remain opaque, and
-private provenance is not inferred from a parameter's `[T]` type or annotation.
-
-The original `fill_and_collect(xs, out)` receives its output as a parameter.
-It still retains its bounds check; recovering its earlier regression would
-require a caller/escape proof across the call boundary. The new companion
-`fill_and_collect_private(xs)` allocates its output locally and returns its
-length. Before/after Lua from `benchmarks/vec_store.rock` differs at exactly one
-line: the companion's checked input store becomes a raw store. The parameterized
-control and every other emitted benchmark function are unchanged.
-
-Two independent batches of six alternating fresh-process pairs used identical
-benchmark sources and LuaJIT enabled. All result sinks matched. Units below are
-ns/input element, including output allocation and GC. M4 is Apple M4 Max with
-LuaJIT 2.1.1774896198; x86 is Intel Core i9-14900K / Linux with LuaJIT
-2.1.1785763465.
-
-| Machine / batch | Private before median (range) | Private after median (range) | Parameterized control before -> after median |
-| --- | --- | --- | --- |
-| M4 / first | 4.1577 (2.1345-4.2658) | 3.1629 (3.1308-3.4280) | 3.5693 -> 3.5475 |
-| M4 / repeat | 4.4662 (2.1943-4.5130) | 3.3445 (3.3246-3.4091) | 3.7726 -> 3.7635 |
-| x86 / first | 5.4484 (2.1521-5.6926) | 4.6523 (4.3745-4.7840) | 4.8388 -> 4.8910 |
-| x86 / repeat | 5.2100 (2.2035-5.4510) | 4.4473 (4.3279-4.6455) | 4.5929 -> 4.7178 |
-
-Private-case medians improved about 24-25% on M4 and 15% on x86, but the baseline
-has a faster trace variant around 2.1-2.2 ns/element. The result is trace-sensitive,
-not a guarantee that every run improves. In the first batch, the warmup's M4
-machine-code sizes were 2148-2392 bytes before and 2048-2052 after; x86 was
-2430-2644 before and 2347-2428 after. Warmup recorded no aborts for either case.
-These counters are captured before the timed section, not throughout it.
-
-To reproduce, compile `benchmarks/vec_store.rock` with before/after release
-compilers, then alternate fresh processes running each emitted file with
-`luajit -e 'dofile("vec.lua"); main()'`. Compare the two collection workload
-lines, retaining all samples, controls and trace counters. The new companion
-uses the existing benchmark's warmup, timing and sink checks.
-
-Regression coverage includes local aliases; both push spellings; literal/spread
-append machinery; escapes through calls, globals, records, elements, nested
-constructors and closures; branches/reassignment to foreign vectors; self
-publication; borrowed cells; and escaped old instances across allocation-site
-reexecution. An opaque call without a reference to the allocation does not
-publish it, although that call still invalidates ordinary memory bounds facts.
-
-Private tracking is enabled only for Lua functions containing a fresh vector
-and an eligible append. The final compiler emitted byte-identical Lua to the
-runtime-measured artifact. Fresh-process compilation on M4 used ten alternating
-pairs per fixture, the same source/stdlib and separate release compilers, with
-no on-disk compiler cache. OS file caches were not flushed. Wall-clock
-milliseconds include startup and writing output:
-
-| Fixture | Before median (range) | After median (range) |
-| --- | --- | --- |
-| field_store | 16.158 (15.294-18.663) | 16.253 (15.560-18.127) |
-| vec_loop | 18.472 (17.632-21.185) | 18.552 (18.084-20.159) |
-| vec_store | 17.045 (16.263-90.453) | 17.527 (16.611-398.568) |
-
-Median overhead is below 0.6% for the first two fixtures and 2.8% for
-`vec_store`. Ranges overlap and include large outliers; these small standalone
-samples do not establish compile-cost neutrality or whole-program cost.
-
-
-## Implemented follow-up: constant uint shift counts
-
-The Lua emitter now omits the shift-count helper for MIR integer literals in
-`0..=31`, including its otherwise unused closure capture. It shares one predicate
-between expression emission and helper binding. Dynamic counts retain the check;
-uint alone does not establish the required upper bound. Right shifts retain
-unsigned division/floor behavior and left shifts retain uint normalization.
-The source checker already rejects literal counts outside the range.
-
-The emission regression failed before the change. Coverage checks both shift
-directions and helper binding for counts 0, 1, 16 and 31, then executes those
-counts on values 0, 1, 2147483648 and 4294967295. Existing tests retain dynamic
-out-of-range rejection and single evaluation of effectful operands. Both the
-Lua codegen and compiler test suites pass.
-
-`benchmarks/uint_shift.rock` is a dependent xorshift loop with three constant
-shifts per iteration. Compile it with before/after release compilers, then run
-`luajit benchmarks/uint_shift.lua emitted.lua` in alternating fresh processes.
-The driver warms 200 calls, times 20000 calls of 1000 iterations with LuaJIT on,
-checks a result sink through its output and reports final trace/code sizes.
-Eight pairs on Apple M4 Max / LuaJIT 2.1.1774896198 gave:
-
-| Measure | Before | After |
-| --- | --- | --- |
-| Median ns/iteration (range) | 33.6624 (32.9430-35.4002) | 33.6220 (32.9359-36.3195) |
-| Final trace count | 6-7 | 6 |
-| Final machine-code bytes | 1696-1788 | 1572 |
-| Emitted chunk bytes | 145372 | 145188 |
-
-All sinks matched. Runtime is effectively unchanged in this probe; the result
-supports a code-size simplification, not a runtime speedup. No Stone application
-speedup is claimed: the surveyed texture-slot shifts in
-`packages/stone/engine/debug/watcher.rock` are dynamic signed-int shifts, which
-never used this uint helper. Other relevant uint shifts are compiler fixtures.
-
-Ten alternating fresh-process compile pairs on the same M4 used separate release
-compilers and identical sources/stdlib, without an on-disk compiler cache. OS
-file caches were not flushed; wall times include startup and writing output.
-`uint_shift` medians were 15.528 -> 15.448 ms (ranges 15.118-18.174 and
-15.248-16.791); the `vec_store` control was 16.763 -> 16.757 ms (ranges
-16.390-17.645 and 16.518-17.183). These overlapping small samples do not establish
-whole-program compile-cost neutrality.
-
-## Remaining proof boundaries after the numeric survey
-
-**Subtraction.** `in_bounds.rs` already has a bounded search through ordered
-comparisons and whole-number facts, but activates that machinery only for
-constant-stride affine indices. `lt_of` does not derive strict bounds from
-subtraction. The existing `len - c` handling proves only nonnegativity under
-the appropriate length guard; it cannot establish strictness for infinity or
-large rounded values. Extending it needs finite arithmetic bounds, a valid
-snapshot of the operands, and the existing mutation/callback invalidation.
-
-Actual `len - 1` consumers include `polygon_clip_rect_into` in
-`packages/stone/engine/collisions.rock` and `snapshot_history_redo_target` in
-`packages/stone/engine/snapshot_history.rock`. Their nonempty checks do not
-establish a finite upper bound. `ui_mouse_item` and `ui_focus_item` compare
-`cur_count` with capacity before storing at `cur_count - 1`, but those mutable
-record fields rely on producer invariants outside the local body. A type or
-nonempty condition alone is insufficient. No extra source guards or global
-integer-range assumption were added to make these cases optimize.
-
-If a bounded consumer appears, start with a query-local `n - c` rule for a
-positive integer constant `c`, requiring whole `n`, `c <= n <= 2^53` and a live
-`n <= len` relation to the accessed buffer. Regressions must cover the exact
-upper boundary, insufficient lower bounds, fractional values, NaN/infinity,
-false comparison edges, joins, different buffers, header writes, callbacks and
-reexecuted operand producers. Do not infer those premises from an `int` type.
-
-**NativeBuffer capacity.** The simplest real next probe is
-`ui_alpha_mask_rows` in `packages/stone/engine/ui/mouse.rock`: it allocates
-`native_buffer_u8(mask.width * height)` and immediately fills that many entries.
-`ui_alpha_mask_from_image` has the related two-dimensional fill. The constructor
-length relation is currently missing; proving it must also account for numeric
-validity and mutations of the descriptor or expressions used as loop bounds.
-The `native_buffer_alloc` intrinsic already lowers to `FfiNewArray(count)` and
-a `MakeStruct` with `len = count`, providing a concrete entry point for such a
-proof rather than trusting arbitrary functions by name.
-
-A more demanding consumer is `text_layout_instance_glyph_cache_prepare` in
-`packages/stone/engine/rendering/text.rock`. It allocates or reuses a buffer of
-`glyphs.len * 10`, then writes row slots `i * 10` and `i * 10 + 1 + j`.
-Allocation facts alone will not cover it: the reuse path establishes length
-through equality, both paths join, and a helper call occurs before the writes.
-It needs finite arithmetic bounds plus equality and effect reasoning. Start
-with the alpha-mask fill before adding this larger set of capabilities.
-
-**Nullable fields.** `effect.rs::never_nil` already removes guards for proven
-nonnil values. The remaining concrete clears in `retire_material` in
-`packages/stone/engine/rendering/material.rock` target `pipeline` and
-`cached_batch` on an existing entity record. Neither field's presence is locally
-known. Removing a known-absent clear requires plain-table provenance; removing
-a known-present guard requires stable presence until the store. A first clear
-also destroys presence for subsequent clears. Preserve generic-record
-metatable/getter/setter behavior and the measured protection against repeated
-absent-key rehashes. This survey found no reason to remove those guards broadly.
-
-Interprocedural private-vector specialization remains deferred: local privacy
-is implemented, but the parameterized collection control still lacks a
-caller-to-callee nonescape proof. The next measurement should target constructor
-capacity before introducing cross-function alias summaries.
+Compare `proven_stride` for the affine proof and `fill_and_collect_private`
+with `fill_and_collect` as the parameterized control for private pushes. The
+shift and buffer drivers report result sinks and trace/machine-code sizes.
+Check sinks match in each paired run. When comparing a stdlib change, set
+`ROCK_STDLIB_DIR` to each build's matching sources; the CLI reads stdlib at runtime.
+`benchmarks/guard_proofs.py` performs a manual valid-input-only guard ablation;
+it is not compiler output and cannot establish proof soundness.

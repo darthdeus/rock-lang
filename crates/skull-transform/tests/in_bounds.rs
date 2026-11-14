@@ -962,3 +962,76 @@ fn a_fresh_js_array_does_not_prove_absence_of_inherited_setters() {
     skull_transform::elide_bounds_checks_for_target(None, &mut p.f, bone_core::hir::FnBackend::Js);
     assert_eq!(p.kind(store), ContainerKind::VecNonNull);
 }
+
+#[test]
+fn constructor_length_proofs_obey_alias_and_mutation_boundaries() {
+    for mode in [
+        "direct",
+        "alias",
+        "length_write",
+        "call",
+        "reassign",
+        "count_write",
+    ] {
+        let mut p = Probe::new();
+        let entry = p.f.entry;
+        let body = p.f.new_block();
+        let exit = p.f.new_block();
+        let count = p.load(entry, p.i);
+        let buf = p.emit(
+            entry,
+            Inst::MakeStruct {
+                ty: Some(u("NativeBuffer")),
+                fields: vec![(u("len"), count)],
+            },
+        );
+        p.store(entry, p.xs, buf);
+        if mode == "alias" {
+            let alias = p.load(entry, p.xs);
+            p.store(entry, p.ys, alias);
+        }
+        let zero = p.int(entry, 0);
+        match mode {
+            "length_write" => {
+                p.emit(
+                    entry,
+                    Inst::StoreField {
+                        base: buf,
+                        field: u("len"),
+                        value: zero,
+                    },
+                );
+            }
+            "call" => p.unknown_call(entry),
+            "reassign" => {
+                let other = p.load(entry, p.ys);
+                p.store(entry, p.xs, other);
+            }
+            "count_write" => {
+                let other = p.load(entry, p.ys);
+                p.store(entry, p.i, other);
+            }
+            _ => {}
+        }
+        let current_count = p.load(entry, p.i);
+        let cond = p.emit(entry, Inst::IntLt(zero, current_count));
+        p.f.set_term(
+            entry,
+            Term::Branch {
+                cond,
+                then_bb: body,
+                else_bb: exit,
+            },
+        );
+        let owner = if mode == "alias" { p.ys } else { p.xs };
+        let check = p.check(body, owner, zero);
+        p.f.set_term(body, Term::Return(vec![]));
+        p.f.set_term(exit, Term::Return(vec![]));
+        p.run();
+        assert_eq!(
+            p.is_slot(check),
+            matches!(mode, "direct" | "alias"),
+            "{mode}"
+        );
+    }
+}

@@ -523,11 +523,11 @@ value NativeBufferU32 { ptr: PtrU32, len: int }
 // which `collectgarbage("count")` does not include.
 @nomangle inline(lua) fn native_buffer_offheap_bytes() -> int = "return __ROCK_NB_OFFHEAP_STATS.live_bytes"
 
-fn native_buffer_u8(n: int)  -> NativeBufferU8  { return NativeBufferU8  { ptr: __nb_alloc_u8(n),  len: n } }
-fn native_buffer_i8(n: int)  -> NativeBufferI8  { return NativeBufferI8  { ptr: __nb_alloc_i8(n),  len: n } }
-fn native_buffer_u16(n: int) -> NativeBufferU16 { return NativeBufferU16 { ptr: __nb_alloc_u16(n), len: n } }
-fn native_buffer_i16(n: int) -> NativeBufferI16 { return NativeBufferI16 { ptr: __nb_alloc_i16(n), len: n } }
-fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: __nb_alloc_u32(n), len: n } }
+@inline fn native_buffer_u8(n: int)  -> NativeBufferU8  { return NativeBufferU8  { ptr: __nb_alloc_u8(n),  len: n } }
+@inline fn native_buffer_i8(n: int)  -> NativeBufferI8  { return NativeBufferI8  { ptr: __nb_alloc_i8(n),  len: n } }
+@inline fn native_buffer_u16(n: int) -> NativeBufferU16 { return NativeBufferU16 { ptr: __nb_alloc_u16(n), len: n } }
+@inline fn native_buffer_i16(n: int) -> NativeBufferI16 { return NativeBufferI16 { ptr: __nb_alloc_i16(n), len: n } }
+@inline fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: __nb_alloc_u32(n), len: n } }
 
 // Single-hop accessors per variant. All surface as int (LuaJIT handles
 // the C<->Lua number conversion at the ffi boundary). One nb_get + nb_set
