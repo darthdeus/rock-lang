@@ -142,7 +142,7 @@ fn nonfinite_overlay_flags_inf_nan_and_near_ceiling_texels() {
 value PassSixOut { a: Vec4, b: Vec4, c: Vec4, d: Vec4, e: Vec4, f: Vec4 }
 
 @shader(fragment)
-fn pass_six_frag(vary: OutlineDetectVary) -> PassSixOut {
+fn pass_six_frag(_vary: OutlineDetectVary) -> PassSixOut {
     return PassSixOut {
         a: v(0.125, 0.0, 0.0, 1.0), b: v(0.25, 0.0, 0.0, 1.0), c: v(0.375, 0.0, 0.0, 1.0),
         d: v(0.5, 0.0, 0.0, 1.0), e: v(0.625, 0.0, 0.0, 1.0), f: v(0.75, 0.0, 0.0, 1.0),
@@ -150,7 +150,7 @@ fn pass_six_frag(vary: OutlineDetectVary) -> PassSixOut {
 }
 
 @shader(fragment)
-fn pass_one_frag(tc: Vec2) -> Vec4 {
+fn pass_one_frag(_tc: Vec2) -> Vec4 {
     return v(1.0, 0.0, 0.0, 1.0)
 }
 
@@ -161,7 +161,7 @@ fn pass_draw_buffers_write_attached_targets() {
     pass_rules_fixture(() => {
         let size = 8
         let targets: [Canvas] = []
-        for i in 0..6 { targets.push(pass_rules_flat_canvas(size, 0.0)) }
+        for _i in 0..6 { targets.push(pass_rules_flat_canvas(size, 0.0)) }
         defer { for target in targets { destroy_canvas(target) } }
         for i in 1..6 {
             assert(stone_canvas_attach_color_target(targets[0].handle.0, targets[i].handle.0, i),
@@ -170,13 +170,13 @@ fn pass_draw_buffers_write_attached_targets() {
         assert(run_pass(Pass { pipeline: pipeline(rock_shader(outline_detect_vert, pass_six_frag)), output: targets[0],
             blend: BlendMode::Replace, draw_buffers: 0b111111 }), "the six-output pass draws")
         for i in 0..6 {
-            let (r, g, b, a) = nf_pixel(targets[i], 4, 4)
+            let (r, _, _, _) = nf_pixel(targets[i], 4, 4)
             assert(abs(r - float(i + 1) * 0.125) < 0.01, "attachment {i} holds its own output (r={r:.3})")
         }
         assert(run_pass(Pass { pipeline: pipeline(rock_shader(pass_one_frag)), output: targets[0],
             blend: BlendMode::Replace }), "the single-output pass draws")
-        let (first, g0, b0, a0) = nf_pixel(targets[0], 4, 4)
-        let (second, g1, b1, a1) = nf_pixel(targets[1], 4, 4)
+        let (first, _, _, _) = nf_pixel(targets[0], 4, 4)
+        let (second, _, _, _) = nf_pixel(targets[1], 4, 4)
         assert(abs(first - 1.0) < 0.01, "the output's own texture is rewritten (r={first:.3})")
         assert(abs(second - 0.25) < 0.01, "an attachment outside the mask is left alone (r={second:.3})")
     })
