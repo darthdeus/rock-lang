@@ -62,24 +62,24 @@ normalization remain in place.
 ## Soundness boundaries and next gaps
 
 Unknown calls and callback-capable table accesses invalidate affected facts.
-Heap record types do not prove plain storage or field presence; nullable-field
-guards remain unless those properties are established.
+Heap record types alone prove neither plain storage nor field presence.
 
-- **Record-backed capacity and reuse:** repeated field/global/element reads
-  are not equated. Alpha-mask dimensions cross an opaque allocator and record
-  reads can invoke getters; a changing-width regression retains its check.
-  In `packages/stone/engine/rendering/text.rock`, TextLayout/FlatVec records reach
-  the glyph cache through public APIs, a global cache and debug hooks. They need
-  interprocedural origin and finite-row proofs; TextGlyph value fields are safe.
-  The glyph fetch's existing FFI/global effects already preserve headers.
+- **Record-backed capacity:** alpha-mask dimensions cross an opaque allocator;
+  repeated record reads may invoke getters. In the text renderer, TextLayout
+  and FlatVec escape through public APIs, the global cache and debug hooks.
+  They need interprocedural origin and finite-row proofs. TextGlyph value fields
+  and the glyph fetch's existing FFI/global effects already preserve headers.
+- **Glyph scratch reads:** the native helper already writes nine raw slots.
+  Reload preserves global descriptors: a four-slot buffer survives a new nine-slot
+  initializer and its checked read rejects. Eight paired x86 LuaJIT runs of a
+  native copy plus nine-field read showed no gain from manual check removal:
+  10.815 -> 10.860 ns/call. This valid-input ablation is not safe compiler output.
 - **Subtraction:** `n > 0` does not prove `n - 1 < n` for infinity or large
-  rounded floating-point values. A rule needs finite exact-integer bounds and
-  live operand snapshots.
+  rounded values. A rule needs finite exact-integer bounds and live snapshots.
 - **Nullable fields:** no local proof establishes whether a heap-record field
   is present or whether clearing it can call a setter.
-- **Interprocedural privacy and bounds:** a parameter type does not prove the
-  caller supplied a private vector or preserve a capacity relation through a
-  call. No caller-to-callee summary is implemented.
+- **Interprocedural privacy and bounds:** parameters do not prove caller privacy
+  or capacity relations. No caller-to-callee summary is implemented.
 
 ## Runtime measurements
 
