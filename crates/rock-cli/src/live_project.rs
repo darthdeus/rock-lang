@@ -71,7 +71,14 @@ pub(crate) fn project_sources(dir: &str, include_tests: bool) -> Result<SourceFi
 
 impl LiveProject {
     pub fn init(dir: &str, include_tests: bool) -> Result<Self> {
-        let sources = project_sources(dir, include_tests)?;
+        Self::init_from_sources(dir, include_tests, project_sources(dir, include_tests)?)
+    }
+
+    pub(crate) fn init_from_sources(
+        dir: &str,
+        include_tests: bool,
+        sources: SourceFiles,
+    ) -> Result<Self> {
         let entry_path = entry_path(&sources)?;
         let files = crate::bone_backend::session_files(&sources);
         // bone_session_for_emission resolves [build.vars] at construction, so
