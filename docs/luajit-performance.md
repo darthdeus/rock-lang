@@ -1228,3 +1228,47 @@ proof recovers part of that cost without assuming away nullable slots.
 See [the effect audit](purity.md#opaque-callback-audit-2026-11-14) for the
 remaining foreign-record boundary; this is not a proof about arbitrary
 host objects.
+
+#### Final runtime measurements
+
+The final comparison is `7a0bdc27` -> `c2333989`; the subsequent commits
+through `0b45e543` add tests and documentation only. Both arms use their own
+stdlib. The saved baseline `vec_store` Lua was verified byte-for-byte against
+a fresh emission by the `7a0bdc27` release compiler.
+
+Apple M4 Max, system LuaJIT 2.1.1774896198, JIT enabled, four alternating
+baseline/final pairs in fresh processes. Median ns per element:
+
+| Workload | Before audit | After audit |
+| --- | ---: | ---: |
+| fill | 0.9663 | 0.9741 |
+| increment | 0.3579 | 0.3557 |
+| scale_field | 1.1302 | 1.1409 |
+| set_slots | 0.3629 | 0.3683 |
+| bump_entries | 2.0673 | 1.9915 |
+| fill_and_collect | 2.6205 | 3.6183 |
+| nb_fill | 1.0143 | 1.0149 |
+| nb_scale | 0.2857 | 0.2800 |
+
+`fill_and_collect` is 38% slower. All four baseline samples (2.6028-2.6699)
+are below all four final samples (3.6069-3.6757). It stores into one vector
+and pushes into another; a push can invoke a foreign backing-table callback,
+so bounds facts cannot survive it without a provenance proof. The other
+listed median changes are within 4%; this small run does not establish
+improvements at that scale. The job began after the preceding timing job
+finished, with one-minute system load 5.3 on 14 cores.
+
+End-to-end validation on Intel Core i9-14900K, Linux, bundled LuaJIT 2.1
+with the JIT enabled found no reliable runtime improvement or regression.
+Repeated samples overlapped on a shared machine; native-library sources
+were unchanged but each arm used a separate build. These measurements do
+not establish equivalence or rule out costs in other workloads. Allocation
+requests showed multiple modes on both compiler revisions, so their mixed
+medians do not establish an allocation reduction either. Correctness checks
+and a deterministic screenshot comparison passed.
+
+To reproduce the public vector comparison, compile
+`benchmarks/vec_store.rock` with separate release compiler builds and stdlibs
+at `7a0bdc27` and `c2333989`. Alternate fresh
+`luajit -e 'dofile("vec.lua"); main()'` processes four times per arm on one
+host, retaining all `ns_per_elem` samples and contemporaneous system load.
