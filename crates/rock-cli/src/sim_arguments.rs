@@ -43,7 +43,6 @@ pub(crate) fn arguments(command: clap::Command) -> clap::Command {
         ] },
     ])
         .mut_arg("perf-format", |arg| arg.help("Output format for `rock perf`, `rock sim-report`, or `rock modules audit`: \"pretty\" (default) or \"json\"."))
-        .mut_arg("lib", |arg| arg.help("Load a project as a library context when running a Rock file. Usage: rock run --lib game/ test.rock"))
 }
 
 pub(crate) fn decode(m: &clap::ArgMatches, args: &mut Args) {

@@ -509,6 +509,46 @@ fn plain_parser_rejects_options_of_absent_private_rules_and_runtimes() {
 }
 
 #[test]
+fn run_loads_a_manifest_dependency() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("lib")).unwrap();
+    std::fs::create_dir(root.path().join("app")).unwrap();
+    write(
+        root.path(),
+        "lib/stick.toml",
+        "[package]\nname = \"lib\"\ntype = \"lib\"\n[language]\nmodules = \"v1\"\n",
+    );
+    write(
+        root.path(),
+        "lib/lib.rock",
+        "pub fn answer() -> int { 42 }\n",
+    );
+    write(
+        root.path(),
+        "app/stick.toml",
+        "[package]\nname = \"app\"\ntype = \"bin\"\n[dependencies]\nlib = { path = \"../lib\" }\n",
+    );
+    write(
+        root.path(),
+        "app/main.rock",
+        "fn main() { print(answer()) }\n",
+    );
+    let out = invoke(root.path(), &["run", "app"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "42\n");
+}
+
+#[test]
+fn run_rejects_the_inert_lib_option() {
+    let root = tempfile::tempdir().unwrap();
+    let out = invoke(root.path(), &["run", "--lib", "library", "main.rock"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert_mentions(&out, "unexpected argument '--lib'");
+    let help = invoke(root.path(), &["--help"]);
+    assert!(!text(&help).contains("--lib"), "{}", text(&help));
+}
+
+#[test]
 fn plain_compile_has_no_cross_process_slot_policy() {
     let root = tempfile::tempdir().unwrap();
     write(root.path(), "main.rock", "fn main() {}\n");

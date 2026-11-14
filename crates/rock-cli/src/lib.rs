@@ -146,7 +146,6 @@ pub struct Args {
     pub type_validation: bool,
     pub headless: bool,
     pub test_threads: Option<usize>,
-    pub lib: Option<String>,
     pub clean: bool,
     /// `--channel`: release channel for `[build.vars]` resolution.
     /// None = the project's default_channel.
@@ -291,8 +290,6 @@ impl Args {
             .arg(Arg::new("test-threads").long("test-threads").value_name("NUM")
                 .value_parser(clap::value_parser!(usize))
                 .help("Number of threads to use for running tests (default: number of CPU cores, use 1 for sequential)"))
-            .arg(Arg::new("lib").long("lib")
-                .help("Load a project as a library context when running a Rock file."))
             .arg(Arg::new("clean").long("clean").action(ArgAction::SetTrue)
                 .help("Force a clean build by clearing the cache before compilation"))
             .arg(Arg::new("channel").long("channel").value_name("CHANNEL")
@@ -393,7 +390,6 @@ impl Args {
             type_validation: m.get_flag("type-validation"),
             headless: Default::default(),
             test_threads: m.get_one::<usize>("test-threads").copied(),
-            lib: m.get_one::<String>("lib").cloned(),
             clean: m.get_flag("clean"),
             channel: m.get_one::<String>("channel").cloned(),
             target_os: m.get_one::<String>("target-os").cloned(),
