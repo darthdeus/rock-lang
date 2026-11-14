@@ -162,6 +162,7 @@ impl<'a> Builder<'a> {
         self.cur_span = outer;
         self.cur_expr = outer_expr;
         let v = v?;
+        self.mark_record_base(e, v);
         // A transparent newtype constructor returns its argument's MIR value.
         // Keep the argument constructor's logical type on that shared value.
         let is_newtype_constructor = matches!(
@@ -1322,6 +1323,12 @@ impl<'a> Builder<'a> {
     /// plumbed down from bone. Recurses the whole chain: `a.b[i].c.x = 5` must not
     /// pack at any level.
     pub(crate) fn lower_place_base(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
+        let value = self.lower_place_base_inner(e)?;
+        self.mark_record_base(e, value);
+        Ok(value)
+    }
+
+    fn lower_place_base_inner(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
         let nobox_global_place = self.nobox_global_place(e)?;
         let flat_field = match self.body.expr_arena[e] {
             Expr::FieldAccess { base, field } if self.swizzle_of(base, field).is_none() => {
@@ -1430,6 +1437,16 @@ impl<'a> Builder<'a> {
     }
 
     fn lower_guarded_place_base(
+        &mut self,
+        e: Idx<Expr>,
+        absent_join: Idx<Block>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let value = self.lower_guarded_place_base_inner(e, absent_join)?;
+        self.mark_record_base(e, value);
+        Ok(value)
+    }
+
+    fn lower_guarded_place_base_inner(
         &mut self,
         e: Idx<Expr>,
         absent_join: Idx<Block>,

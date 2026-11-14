@@ -253,8 +253,12 @@ fn compound_assign_to_struct_field() {
         "f",
     );
     assert!(
-        dump.contains("store_field"),
-        "expected a store_field, got:\n{dump}"
+        dump.contains("index.Record") && dump.contains("store_index.Record"),
+        "expected a Record read and write, got:\n{dump}"
+    );
+    assert!(
+        dump.contains("const \"x\""),
+        "Record property access must use the constant field name, got:\n{dump}"
     );
 }
 
@@ -807,8 +811,9 @@ fn struct_field_access() {
 fn f(c0) {
   bb0:
 v0 = load c0
-v1 = field v0.x
-return v1
+v1 = const \"x\"
+v2 = index.Record v0[v1]
+return v2
 }"
     );
 }
@@ -884,7 +889,7 @@ return v2
 }
 
 #[test]
-fn field_assignment_is_store_field() {
+fn field_assignment_uses_record_store_index() {
     assert_eq!(
         mir(
             "struct P { x: int, y: int }\nfn f(p: P) -> int { p.x = 5; p.x }",
@@ -895,10 +900,12 @@ fn f(c0) {
   bb0:
 v0 = load c0
 v1 = const 5
-store_field v0.x, v1
-v2 = load c0
-v3 = field v2.x
-return v3
+v2 = const \"x\"
+store_index.Record v0[v2], v1
+v3 = load c0
+v4 = const \"x\"
+v5 = index.Record v3[v4]
+return v5
 }"
     );
 }

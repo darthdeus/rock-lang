@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use skull_mir::instance::Instance;
 use skull_mir::lower::{ScalarCtx, lower_instance_with_plans};
-use skull_mir::mir::{FuncRef, Inst, MirFunc};
+use skull_mir::mir::{ContainerKind, FuncRef, Inst, Lit, MirFunc};
 use skull_mir::monoty::MonoInterner;
 
 fn lower(source: &str, name: &str) -> MirFunc {
@@ -97,7 +97,17 @@ fn wide_fields() -> String {
 fn fields(body: &MirFunc) -> usize {
     body.insts
         .iter()
-        .filter(|(_, inst)| matches!(inst, Inst::Field { .. }))
+        .filter(|(_, inst)| {
+            matches!(inst, Inst::Field { .. })
+                || matches!(
+                    inst,
+                    Inst::Index {
+                        index,
+                        kind: ContainerKind::Record,
+                        ..
+                    } if matches!(&body.insts[*index], Inst::Const(Lit::Str(_)))
+                )
+        })
         .count()
 }
 

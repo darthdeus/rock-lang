@@ -290,8 +290,8 @@ function mk() {
   let c0;
   c0 = ({__ty: \"P\", x: 1, y: 2});
   let v4 = c0;
-  let v5 = v4.x;
-  return v5;
+  let v6 = v4.x;
+  return v6;
 }
 "
     );

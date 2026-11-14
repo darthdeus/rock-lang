@@ -5,6 +5,56 @@ use super::*;
 use crate::monoty::MonoTy;
 
 impl<'a> Builder<'a> {
+    pub(crate) fn mark_record_base(&mut self, source: Idx<Expr>, value: Idx<Inst>) {
+        // Shader lowering uses native first-class structs, with no host objects.
+        if self.scx.target == bone_core::hir::FnBackend::Any {
+            return;
+        }
+        let may_callback = if let Some(mut ty) = self.concrete_expr_ty(source) {
+            loop {
+                match ty {
+                    MonoTy::Nullable(inner) => ty = inner,
+                    MonoTy::App {
+                        ctor: crate::monoty::MonoCtor::Ref,
+                        params,
+                    } if params.len() == 1 => ty = &params[0],
+                    _ => break,
+                }
+            }
+            match ty {
+                MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Nominal(name),
+                    ..
+                } => self
+                    .ws
+                    .struct_by_name
+                    .get(name)
+                    .is_some_and(|sid| !self.ws.module(sid.module).structs[sid.def].is_value),
+                MonoTy::Any => true,
+                _ => false,
+            }
+        } else {
+            match self.field_base_ty(source) {
+                Some(TypeExpr::App {
+                    ctor: TypeCtor::Nominal(name),
+                    ..
+                }) => self
+                    .ws
+                    .struct_by_name
+                    .get(&name)
+                    .is_some_and(|sid| !self.ws.module(sid.module).structs[sid.def].is_value),
+                None
+                | Some(
+                    TypeExpr::Generic(..) | TypeExpr::Infer(..) | TypeExpr::Builtin(BuiltinTy::Any),
+                ) => true,
+                _ => false,
+            }
+        };
+        if may_callback {
+            self.callback_records.insert(value);
+        }
+    }
+
     pub(crate) fn container_plan_for_type(
         &self,
         ty: &MonoTy,

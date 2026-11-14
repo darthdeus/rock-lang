@@ -185,6 +185,10 @@ pub enum ContainerKind {
     /// primitive pointer yields a number, where indexing a struct-typed pointer
     /// yields a reference cdata. Never a user-facing type.
     NativeBufferLeaf,
+    /// A heap record accessed through a dynamically selected string key.
+    /// The backends use raw `base[index]` property access; records do not
+    /// support sequence length or iteration.
+    Record,
     /// `Map<K,V>` — keyed directly by K, no `+1`.
     Map,
 }
@@ -672,7 +676,7 @@ pub enum Inst {
 
     // --- container reads (0-based IR; emit adds `+1` on sequence access) ---
     /// `base[index]`, shape per `kind`: `Vec` -> `base.data[index+1]`,
-    /// `NativeBuffer` -> `base.ptr[index]`, `Map` -> `base[index]`.
+    /// `NativeBuffer` -> `base.ptr[index]`, `Map` / `Record` -> `base[index]`.
     Index {
         base: Idx<Inst>,
         index: Idx<Inst>,

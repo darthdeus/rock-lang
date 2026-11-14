@@ -214,6 +214,9 @@ impl<'a> Builder<'a> {
             other => other,
         };
         let out = out.map_err(|e| self.located(e));
+        if let Ok(ValueRepr::Scalar(value)) = &out {
+            self.mark_record_base(e, *value);
+        }
         self.cur_span = outer;
         self.cur_expr = outer_expr;
         out

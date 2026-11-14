@@ -264,16 +264,16 @@ behavior. Presence tests folded by cleanup are the dangerous consumer, and
 they read a separate, deliberately narrow tier; see
 [Never-nil analysis](compiler.md#never-nil-analysis) for the rules.
 
-The guard does not consult `getmetatable`. A Rock struct carries no
-metatable (`__ty` tagging only), so the term could only ever fire for a
-table a host handed in through an opaque boundary, and it cost 24% of a
-field clear on a present field and 38% on an absent one in the
-interpreter (33.9 -> 25.8 ns and 27.3 -> 16.8 ns; free on a warm trace
-either way, since the trace folds the metatable load). The consequence is
-narrow and deliberate: a nil write that changes nothing no longer reaches
-such a table's `__newindex`, and the presence test reads the field, so
-`__index` sees it. A write that changes something is a raw store and
-still reaches `__newindex`.
+The earlier version omitted `getmetatable` under a plain-record assumption.
+The subsequent heap-record callback audit restores that test for source
+heap records: a host-supplied metatable can observe even a nil write to an
+absent field. It checks the metatable before field presence, preserving both
+setter callbacks and the absence of getter callbacks during a store. The
+plain-storage variant remains valid for compiler-owned fields and frames.
+The original interpreter comparison (33.9 -> 25.8 ns for a present clear,
+27.3 -> 16.8 ns for an absent clear) measured removing the metatable test;
+it does not justify changing callback semantics, and the warm JIT folded
+the metatable load in that experiment.
 
 Lowering marks cells never-nil from concrete binding types, from the leaf
 types of splatting value parameters (the dotted-key `embed` stores that
@@ -1225,9 +1225,9 @@ They describe emitted code, not executed checks per frame.
 The earlier broad prototype treated every boxed vector slot as callback
 capable and emitted 777 / 110 / 63 vector helpers. The primitive-element
 proof recovers part of that cost without assuming away nullable slots.
-See [the effect audit](purity.md#opaque-callback-audit-2026-11-14) for the
-remaining foreign-record boundary; this is not a proof about arbitrary
-host objects.
+The subsequent [heap-record audit](purity.md#heap-record-callbacks-2026-11-14)
+closes the source heap-field callback boundary. Native/value representations
+and container headers still rely on their ABI invariants.
 
 #### Final runtime measurements
 
@@ -1272,3 +1272,44 @@ To reproduce the public vector comparison, compile
 at `7a0bdc27` and `c2333989`. Alternate fresh
 `luajit -e 'dofile("vec.lua"); main()'` processes four times per arm on one
 host, retaining all `ns_per_elem` samples and contemporaneous system load.
+
+
+### Heap-record callback follow-up (2026-11-14)
+
+The foreign-record fix retains field callbacks, including nil setters, while
+keeping local constructor scalarization and fresh single-use projections.
+The final nil-store guard first checks `getmetatable(base) ~= nil`; a foreign
+record always receives its write and the guard never invokes its getter.
+Native fields and compiler-owned frames retain their plain-storage rules.
+
+An intermediate raw-store version exposed the reason the guard matters:
+on Apple M4 Max, LuaJIT 2.1.1774896198 with the JIT enabled, six alternating
+pairs of `benchmarks/field_store.rock` measured `nullable_passthrough` at
+1.0395 -> 1.8674 ns/element (+80%). All baseline samples (0.9498-1.0553)
+were below all raw-store samples (1.7767-1.9724). That version was not kept.
+
+The final callback-safe version was compared with the pre-record-audit
+compiler (`153d07ec`, compiler-equivalent to `c2333989`) on Intel i9-14900K,
+Linux, system LuaJIT 2.1.1785763465, JIT enabled. Both arms used the same
+benchmark sources and six interleaved fresh-process pairs, reversing order
+on alternating rounds; all result sinks matched. One-minute load at start
+was 4.3 on 30 logical CPUs. Median ns/element:
+
+| Workload | Before heap-record fix | Callback-safe fix |
+| --- | ---: | ---: |
+| nullable_passthrough | 1.0544 | 1.0575 |
+| leaf_capture | 3.1854 | 3.1730 |
+| row_reset | 2.3995 | 2.2558 |
+| coro_points | 4.5427 | 4.5520 |
+| coro_create | 63.8040 | 62.6713 |
+| fill_and_collect | 4.6678 | 4.5446 |
+| scale_field | 0.7683 | 0.7625 |
+| nb_fill | 1.0591 | 1.0595 |
+| nb_scale | 0.3775 | 0.3775 |
+
+The nullable-store sample spans overlap (1.0542-1.0767 before,
+1.0538-1.0786 after); there is no comparable JIT regression in this run.
+No broad speedup is claimed: noisier vector cases included `fill` at
+1.1139 -> 1.2906 with overlapping spans (1.0576-1.1968 and 1.0695-1.6447).
+The earlier collection-loop cost from callback-capable push remains; this
+fix does not prove a vector's backing table private.

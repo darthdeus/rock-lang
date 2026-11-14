@@ -536,10 +536,10 @@ impl Families {
     }
 
     /// Escape analysis. A `Load` of a candidate cell may be used ONLY as a
-    /// `Field`/`StoreField` base of a declared field -- or as the value of an
-    /// accepted alias store within the same family (that store deletes). Map
-    /// each such load to its cell, then scan every operand use: any other
-    /// consumer means the whole struct escapes -> disqualify.
+    /// field projection base -- or as the value of an accepted alias store
+    /// within the same family (that store deletes). Map each such load to its
+    /// cell, then scan every operand use: any other consumer means the whole
+    /// struct escapes -> disqualify.
     fn scan_load_uses(&mut self, func: &MirFunc) -> LoadUses {
         let Families {
             cand,
@@ -575,8 +575,18 @@ impl Families {
                                 .is_some_and(|s| s.contains(f))
                         };
                         let ok = match &func.insts[i] {
-                            Inst::Field { base, field } => *base == op && known(field),
-                            Inst::StoreField { base, field, .. } => *base == op && known(field),
+                            Inst::Field { .. }
+                            | Inst::Index {
+                                kind: ContainerKind::Record,
+                                ..
+                            } => field_read(func, i, op).is_some_and(|(_, field)| known(&field)),
+                            Inst::StoreField { .. }
+                            | Inst::StoreIndex {
+                                kind: ContainerKind::Record,
+                                ..
+                            } => {
+                                field_store(func, i, op).is_some_and(|(_, field, _)| known(&field))
+                            }
                             // An enum positional payload read: `v[index+1]`, named `_<index>`.
                             Inst::TupleIndex { base, index } => {
                                 *base == op && known(&skull_mir::names::indexed("_", "", *index))
@@ -886,12 +896,68 @@ fn rewrite_nil_tests(
     }
 }
 
-/// Rewrite `Field { base: load(cand), field }` in place into `Load(field_cell)`,
-/// and `StoreField { base: load(cand), field, value }` into `Store(field_cell,
-/// value)`. Re-check `is_cand`: `load_cell` is not pruned as cells get
-/// disqualified mid-analysis, so a cell escaping via a non-projection use (e.g.
-/// whole-struct `==`) keeps its aggregate, and its field accesses must stay on
-/// it -- rewriting them without expanding the store gives an uninit cell.
+/// Normalize struct-field operations. Heap records lowered as `Index`/
+/// `StoreIndex` are equivalent only when the index is a constant string.
+fn field_read(func: &MirFunc, i: Idx<Inst>, load: Idx<Inst>) -> Option<(Idx<Inst>, ustr::Ustr)> {
+    let (base, field) = match &func.insts[i] {
+        Inst::Field { base, field } => (*base, *field),
+        Inst::Index {
+            base,
+            index,
+            kind: ContainerKind::Record,
+        } => {
+            let Inst::Const(Lit::Str(field)) = &func.insts[*index] else {
+                return None;
+            };
+            (*base, *field)
+        }
+        _ => return None,
+    };
+    (base == load && uses_once(func, i, load)).then_some((base, field))
+}
+
+/// As above for writes. Requiring exactly one occurrence of the candidate load
+/// as an operand prevents a self-store (`base == value`) from being mistaken
+/// for a base-only projection during escape analysis and rewriting.
+fn field_store(
+    func: &MirFunc,
+    i: Idx<Inst>,
+    load: Idx<Inst>,
+) -> Option<(Idx<Inst>, ustr::Ustr, Idx<Inst>)> {
+    let (base, field, value) = match &func.insts[i] {
+        Inst::StoreField { base, field, value } => (*base, *field, *value),
+        Inst::StoreIndex {
+            base,
+            index,
+            value,
+            kind: ContainerKind::Record,
+        } => {
+            let Inst::Const(Lit::Str(field)) = &func.insts[*index] else {
+                return None;
+            };
+            (*base, *field, *value)
+        }
+        _ => return None,
+    };
+    (base == load && uses_once(func, i, load)).then_some((base, field, value))
+}
+
+fn uses_once(func: &MirFunc, i: Idx<Inst>, value: Idx<Inst>) -> bool {
+    let mut count = 0;
+    func.insts[i].uses_each(&mut |op| {
+        if op == value {
+            count += 1;
+        }
+    });
+    count == 1
+}
+
+/// Rewrite a field read in place into `Load(field_cell)`, and a field write
+/// into `Store(field_cell, value)`. Re-check `is_cand`: `load_cell` is not
+/// pruned as cells get disqualified mid-analysis, so a cell escaping via a
+/// non-projection use (e.g. whole-struct `==`) keeps its aggregate, and its
+/// field accesses must stay on it -- rewriting them without expanding the
+/// store gives an uninit cell.
 /// Only a field the CTOR actually provides has a cell to redirect to. A
 /// nested value member is stored under its dotted LEAF names (`params.x`,
 /// `params.y`), so the immediate `.params` read names no cell, and minting
@@ -909,13 +975,22 @@ fn rewrite_projections(
         .blocks
         .iter()
         .flat_map(|(_, b)| b.insts.iter().copied())
-        .filter_map(|i| match &func.insts[i] {
-            Inst::Field { base, field } => load_cell
-                .get(base)
+        .filter_map(|i| {
+            let base = match &func.insts[i] {
+                Inst::Field { base, .. }
+                | Inst::Index {
+                    base,
+                    kind: ContainerKind::Record,
+                    ..
+                } => *base,
+                _ => return None,
+            };
+            let (_, field) = field_read(func, i, base)?;
+            load_cell
+                .get(&base)
                 .copied()
-                .filter(|&c| fam.is_cand(c) && fam.provides(c, field))
-                .map(|c| (i, c, *field)),
-            _ => None,
+                .filter(|&c| fam.is_cand(c) && fam.provides(c, &field))
+                .map(|c| (i, c, field))
         })
         .collect();
     for (i, c, field) in field_rewrites {
@@ -945,13 +1020,22 @@ fn rewrite_projections(
         .blocks
         .iter()
         .flat_map(|(_, b)| b.insts.iter().copied())
-        .filter_map(|i| match &func.insts[i] {
-            Inst::StoreField { base, field, value } => load_cell
-                .get(base)
+        .filter_map(|i| {
+            let base = match &func.insts[i] {
+                Inst::StoreField { base, .. }
+                | Inst::StoreIndex {
+                    base,
+                    kind: ContainerKind::Record,
+                    ..
+                } => *base,
+                _ => return None,
+            };
+            let (_, field, value) = field_store(func, i, base)?;
+            load_cell
+                .get(&base)
                 .copied()
                 .filter(|&c| fam.is_cand(c))
-                .map(|c| (i, c, *field, *value)),
-            _ => None,
+                .map(|c| (i, c, field, value))
         })
         .collect();
     for (i, c, field, value) in storefield_rewrites {

@@ -271,6 +271,7 @@ impl<'a> Builder<'a> {
             value_copy_stack: Vec::new(),
             borrowed_value_children: HashMap::default(),
             shareable_value_boxes: HashSet::default(),
+            callback_records: HashSet::default(),
             unshareable_value_cells: HashSet::default(),
             shallow_pack: false,
             lending_pack: false,

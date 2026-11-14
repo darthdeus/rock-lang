@@ -443,6 +443,7 @@ impl Emitter<'_> {
                     out.push('#');
                     self.write_opnd(out, *base);
                 }
+                ContainerKind::Record => unreachable!("len of a heap record"),
             },
 
             // Effects don't produce values.
@@ -627,8 +628,8 @@ impl Emitter<'_> {
     /// READ index `base[index]`. NativeBuffer and Vec go through the
     /// debug-mode bounds-checked stdlib helpers (`__nb_checked_get` /
     /// `__vec_checked_get`) — skull runs debug; release stripping is future
-    /// release-mode work. Map indexes raw (miss returns nil; `.get` is the
-    /// checked form).
+    /// release-mode work. Map and Record index raw (miss returns nil; `.get` is
+    /// the checked Map form).
     fn write_index(
         &self,
         out: &mut String,
@@ -722,6 +723,16 @@ impl Emitter<'_> {
                 out.push('[');
                 self.write_opnd(out, index);
                 out.push(']');
+            }
+            ContainerKind::Record => {
+                self.write_opnd(out, base);
+                if let Inst::Const(Lit::Str(field)) = &self.func.insts[index] {
+                    write_field_key(out, field.as_str());
+                } else {
+                    out.push('[');
+                    self.write_opnd(out, index);
+                    out.push(']');
+                }
             }
         }
     }

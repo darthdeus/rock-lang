@@ -708,8 +708,12 @@ impl<'a> Builder<'a> {
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
         // LuaJIT inserts missing hash keys even for nil stores. Re-clearing an
-        // absent embed can therefore rehash the parent on every frame.
-        let skip_clear = if nullable && matches!(self.body.expr_arena[value], Expr::Null) {
+        // absent embed can therefore rehash the parent on every frame. Host
+        // record stores remain observable even when the slot is absent.
+        let skip_clear = if nullable
+            && matches!(self.body.expr_arena[value], Expr::Null)
+            && !self.callback_records.contains(&parent)
+        {
             let present = self.emit_cur(Inst::Field {
                 base: parent,
                 field,

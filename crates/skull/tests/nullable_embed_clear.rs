@@ -52,7 +52,7 @@ fn main() {
 "#;
 
 #[test]
-fn nullable_embed_clear_skips_absent_hash_slots_without_materializing() {
+fn nullable_embed_clear_writes_record_slots_without_materializing() {
     let lua = emit_module(SRC);
     for name in ["clear", "clear_nested", "assign"] {
         let body = function_body(&lua, name);
@@ -61,12 +61,6 @@ fn nullable_embed_clear_skips_absent_hash_slots_without_materializing() {
         } else {
             "resolution"
         };
-        let read = format!("c0.{prefix}");
-        let read_nested = format!("c0[\"{prefix}\"]");
-        assert!(
-            (body.contains(&read) || body.contains(&read_nested)) && body.contains("if "),
-            "{name} must test stored presence before clearing missing hash slots:\n{body}"
-        );
         assert!(
             body.contains(&format!("[\"{prefix}.target.__tag\"] = ")),
             "{body}"
@@ -86,7 +80,7 @@ fn nullable_embed_clear_releases_payload_and_can_be_repeated() {
 }
 
 #[test]
-fn absent_nullable_embed_clear_does_not_insert_hash_keys() {
+fn absent_nullable_embed_clear_preserves_each_record_store() {
     let lua = emit_module(SRC);
     let driver = r#"
 local writes = 0
@@ -98,7 +92,7 @@ for _ = 1, 128 do
     clear(h)
     clear_nested(h)
 end
-assert(writes == 0, 'absent clears inserted ' .. writes .. ' hash keys')
+assert(writes == 128 * 2 * 7, 'missing physical record stores: ' .. writes)
 io.write('ok')
 "#;
     assert_eq!(run_luajit(&format!("{lua}\n{driver}")), "ok");

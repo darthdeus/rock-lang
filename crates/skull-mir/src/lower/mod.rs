@@ -1603,6 +1603,7 @@ fn lower_body(
         value_copy_stack: Vec::new(),
         borrowed_value_children: HashMap::default(),
         shareable_value_boxes: HashSet::default(),
+        callback_records: HashSet::default(),
         unshareable_value_cells: HashSet::default(),
         shallow_pack: false,
         lending_pack: false,
@@ -2207,6 +2208,10 @@ struct Builder<'a> {
     borrowed_value_children: HashMap<Idx<Inst>, std::borrow::Cow<'a, MonoTy>>,
     /// Boxes held only by immutable values; owned storage still copies them.
     shareable_value_boxes: HashSet<Idx<Inst>>,
+    /// Source heap records may be supplied by a host with property callbacks.
+    /// Mark receivers while their source types are available; even generated
+    /// projections of embedded fields must retain that effect in MIR.
+    callback_records: HashSet<Idx<Inst>>,
     /// Shallow local snapshots cannot be lent across a call or return.
     unshareable_value_cells: HashSet<Idx<Cell>>,
     /// A local snapshot may defer child copies until its whole-value escape.
@@ -2317,6 +2322,7 @@ impl<'a> Builder<'a> {
             value_copy_stack: Vec::new(),
             borrowed_value_children: HashMap::default(),
             shareable_value_boxes: HashSet::default(),
+            callback_records: HashSet::default(),
             unshareable_value_cells: HashSet::default(),
             shallow_pack: false,
             lending_pack: false,
@@ -2483,6 +2489,26 @@ impl<'a> Builder<'a> {
     }
 
     fn emit_cur(&mut self, inst: Inst) -> Idx<Inst> {
+        let inst = match inst {
+            Inst::Field { base, field } if self.callback_records.contains(&base) => {
+                let index = self.emit_cur(Inst::Const(Lit::Str(field)));
+                Inst::Index {
+                    base,
+                    index,
+                    kind: ContainerKind::Record,
+                }
+            }
+            Inst::StoreField { base, field, value } if self.callback_records.contains(&base) => {
+                let index = self.emit_cur(Inst::Const(Lit::Str(field)));
+                Inst::StoreIndex {
+                    base,
+                    index,
+                    value,
+                    kind: ContainerKind::Record,
+                }
+            }
+            inst => inst,
+        };
         let is_call = matches!(
             inst,
             Inst::Call { .. }

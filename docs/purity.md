@@ -40,7 +40,7 @@ cannot inspect their target-language behavior.
 | Nullability narrowing, condition effects (`narrowing.rs`, `cond_has_effect`) | A `@pure` call inside the condition after the null check does not drop the narrow; anything else does | Yes, after this audit | Was unsound before: only `Call`, `Not`, `BinOp`, `FieldAccess` and `SafeNav` were inspected, so a call under an index, interpolation, cast, tuple, `match`, `if`, `?.let` or a safe-nav call kept the narrow (fixed; `tests/errors/narrowing_effects.rock.err`). |
 | Whole-local narrowing (`infer_branch`, block guards) | None directly; "a callee cannot reassign a local" | Was unsound for closure-assigned locals | A lambda declared earlier that assigns the local runs at any call. Fixed: such narrows are revoked by the same effects that clear paths (`closure_assigned_locals`, `invalidate_mutable_refinements`); a `@pure` call keeps them. |
 | Inliner gate (`skull-transform/src/inline.rs`, `annotation_gate`) | Eligibility only: `@inline` or `@pure` bodies may be spliced | Yes, independent of purity | A splice forwards each argument *value* once (`forward_param_reads`), keeps every instruction that can raise, and never reorders across a call, so inlining an impure body would still be correct. `@pure` here is a performance policy, not a soundness input. |
-| Bounds-check elision (`skull-transform/src/in_bounds.rs`) | Inferred memory effects; opaque annotations are trusted | Subject to reviewed opaque contracts | Rock bodies are walked transitively, including callbacks reached through indexing and equality. Opaque `@pure`, `@nowrite` and `@writes_elems` bodies supply trusted summaries. Push can invoke a foreign backing table's `__newindex` and is not exempt. |
+| Bounds-check elision (`skull-transform/src/in_bounds.rs`) | Inferred memory effects; opaque annotations are trusted | Subject to reviewed opaque contracts | Rock bodies are walked transitively, including callbacks reached through indexing, heap fields and equality. Opaque `@pure`, `@nowrite` and `@writes_elems` bodies supply trusted summaries. Push can invoke a foreign backing table's `__newindex` and is not exempt. |
 
 Things that are **named** "pure" but do not read the annotation:
 
@@ -130,15 +130,37 @@ cover native element mutation invalidating a previously checked index.
 The direct operation and helper summaries must agree: preserving a check
 inside a helper does not protect its caller from stale memory facts.
 
-### Remaining foreign-record boundary
+### Heap-record callbacks (2026-11-14)
 
-This audit covers raw table intrinsics and indexed containers, not every
-possible host object. Ordinary Rock records have no metatable. A foreign
-record with a missing nullable field and `__index` or `__newindex` can run
-a callback during a field read or write; field effect summaries currently
-account only for the named field. For example, after guarding `xs.len()`,
-assigning `record.value = 1` can invoke a host `__newindex` that shrinks
-`xs`, leaving the following `xs[0]` with a stale proof. This needs an
-explicit foreign-record contract or field-access provenance before the
-compiler can safely preserve the current record optimizations. The table
-and indexed-container fixes do not establish safety for that boundary.
+A heap-record type alone does not prove that its runtime table or object
+has ordinary fields. Host-supplied Lua `__index`/`__newindex`, JavaScript
+getters/setters and proxies can run arbitrary code during field access.
+Reads and writes now invalidate memory facts both directly and through
+inferred helper summaries. Unused reads execute, and repeated reads remain
+separate operations.
+
+Lowering identifies source heap-record receivers while their concrete types
+are available. Their physical field accesses, including embedded leaves,
+use the callback-capable `Record` index kind. This preserves effects through
+inlining, cleanup and emission without assigning those effects to native
+value fields, compiler-owned coroutine frames or shader structs. A generic
+instantiation uses its concrete type, so a native value does not become a
+heap record merely because its source parameter was generic.
+
+Nil writes to a potentially foreign record remain observable. Lua skips a
+nil write only after proving at runtime that the table has no metatable and
+the key is absent. The metatable test precedes the field read, so the guard
+cannot introduce an extra getter. The already-absent embedded-field shortcut
+is restricted to compiler-owned storage. Local records can still be
+scalarized under the existing constructor-family and nonescape proof;
+a fresh constructor used only by one field read can still disappear.
+
+Lua and JavaScript regressions cover direct and helper-mediated callbacks,
+unused reads, repeated getters and guarded vector accesses. Lua additionally
+covers safe navigation, embedded leaves, absent-field clearing and repeated
+nullable payload clearing. Existing value-copy, coroutine and local-record
+scalarization tests protect their distinct semantics.
+
+This is not a promise about arbitrary host replacements for native/value
+representations or container headers. Those representations retain their
+ABI invariants; their internal fields are not general heap-record fields.

@@ -123,19 +123,15 @@ fn has_store_guard(lua: &str) -> bool {
 }
 
 #[test]
-fn absent_field_store_skips_nil_key_insertion_and_preserves_clearing() {
+fn absent_record_field_store_preserves_host_callbacks_and_clearing() {
     common::require_luajit();
     let lua = emit_clean(
         "struct Row { payload: string? = null } fn update(row: Row, value: string?) { row.payload = value }",
         "update",
     );
-    assert!(
-        lua.contains(" ~= nil or ") && lua.contains(".payload ~= nil then"),
-        "{lua}"
-    );
-    // A Rock struct never carries a metatable (`__ty` tagging only), so the
-    // guard does not consult one.
-    assert!(!lua.contains("getmetatable("), "{lua}");
+    assert!(has_store_guard(&lua), "{lua}");
+    // A host record can observe even a nil store to an absent field.
+    assert!(lua.contains("getmetatable("), "{lua}");
     let symbol = lua
         .lines()
         .find_map(|line| line.strip_prefix("function "))
@@ -154,15 +150,16 @@ assert(row.payload == 'live')
 assert(row.payload == nil)
 local hits, reads = 0, 0
 local observed = setmetatable({{}}, {{
+    __metatable = false,
     __newindex = function() hits = hits + 1 end,
     __index = function() reads = reads + 1 end,
 }})
 {symbol}(observed, nil)
 {symbol}(observed, nil)
-assert(hits == 0, 'a nil write that changes nothing is skipped, metatable or not')
-assert(reads == 2, 'the presence test reads the field, so __index sees it')
+assert(hits == 2, 'each nil write must enter __newindex')
+assert(reads == 0, 'a store must not introduce a field read')
 {symbol}(observed, 'live')
-assert(hits == 1, 'a real write is a raw store and reaches __newindex')
+assert(hits == 3, 'a non-nil write must also enter __newindex')
 "#
     );
     luajit_ok(&driver, "");
@@ -236,9 +233,8 @@ fn value_param_leaf_stores_need_no_nil_guard() {
 }
 
 #[test]
-fn nullable_value_param_leaf_stores_keep_the_guard() {
-    // A nullable value parameter's data leaves hold nil while the value is
-    // absent, so its leaf stores keep the nil-write guard.
+fn nullable_value_param_record_leaf_stores_preserve_callbacks() {
+    // Even an absent payload writes through each host-visible record slot.
     let lua = emit_clean(
         "value Rect { x: float, y: float } \
          struct Holder { embed r: Rect? } \
@@ -262,11 +258,8 @@ fn inferred_local_scalar_store_needs_no_nil_guard() {
 }
 
 #[test]
-fn nil_literal_field_store_drops_the_dead_value_test() {
+fn nil_literal_record_store_preserves_callback_without_a_presence_read() {
     common::require_luajit();
-    // A store of literal nil keeps its guard (clearing an absent key must
-    // trigger a rehash), but the
-    // statically-false `nil ~= nil` disjunct is not emitted.
     let lua = emit_clean(
         "struct Row { tag: int? = null } fn update(row: Row) { row.tag = null }",
         "update",
@@ -288,7 +281,7 @@ assert(row.tag == nil)
 local hits = 0
 local observed = setmetatable({{}}, {{ __newindex = function() hits = hits + 1 end }})
 {symbol}(observed)
-assert(hits == 0, 'clearing an already-absent key writes nothing at all')
+assert(hits == 1, 'clearing an absent key must enter __newindex')
 local absent = {{}}
 {symbol}(absent)
 assert(next(absent) == nil)
@@ -3268,7 +3261,7 @@ fn a_callee_that_provably_leaves_the_vector_alone_keeps_the_proof() {
         "fn weigh(xs: [int], i: int) -> int { return xs.len() + i }
         fn fill(xs: [int]) { for i in 0..xs.len() { xs[i] = weigh(xs, i) } }"
     ));
-    assert!(proven(
+    assert!(kept(
         "struct Counter { n: int }
         fn bump(c: Counter) -> int { c.n = c.n + 1; return c.n }
         fn fill(xs: [int], c: Counter) { for i in 0..xs.len() { xs[i] = bump(c) } }"

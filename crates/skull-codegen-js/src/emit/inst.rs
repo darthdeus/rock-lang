@@ -417,6 +417,13 @@ impl Emitter<'_> {
                     ContainerKind::Map => format!(
                         "(function(t, k) {{ return t instanceof Map ? t.get(k) : t[k]; }})({b}, {i})"
                     ),
+                    ContainerKind::Record => {
+                        if let Inst::Const(Lit::Str(field)) = &self.mf.insts[*index] {
+                            js_member(&b, field.as_str())?
+                        } else {
+                            format!("{b}[{i}]")
+                        }
+                    }
                 }
             }
             Inst::Len { base, kind } => match kind {
@@ -441,6 +448,7 @@ impl Emitter<'_> {
                     return Err(err("JS subset: `len` of a NativeBuffer leaf view"));
                 }
                 ContainerKind::Map => format!("{}.size", self.render_val(*base)?),
+                ContainerKind::Record => unreachable!("len of a heap record"),
             },
             // The `native_buffer_alloc<T>` primitive lowers to this MIR node
             // (skull-mir intercepts the call and resolves the element ctype).

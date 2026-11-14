@@ -294,6 +294,46 @@ fn index_may_call_table_metamethod(
     }
 }
 
+fn field_may_call_callback(
+    ws: &Workspace,
+    bi: &crate::workspace::BodyInference,
+    base: Idx<Expr>,
+) -> bool {
+    let Some(&source_ty) = bi.expr_types.get(base) else {
+        return true;
+    };
+    let mut ty = source_ty;
+    loop {
+        match raw_type_expr_at(ws, bi, ty) {
+            TypeExpr::Infer(var, _) => match bi.substitutions.get(var) {
+                Some(next) => ty = next,
+                None => return true,
+            },
+            TypeExpr::Nullable(inner) => ty = ty.with_idx(inner),
+            TypeExpr::App {
+                ctor: TypeCtor::Ref,
+                params,
+            } => {
+                let Some(inner) = params.into_iter().next() else {
+                    return true;
+                };
+                ty = ty.with_idx(inner);
+            }
+            TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                ..
+            } => {
+                return ws
+                    .struct_by_name
+                    .get(&name)
+                    .is_some_and(|sid| !ws.module(sid.module).structs[sid.def].is_value);
+            }
+            TypeExpr::Generic(..) | TypeExpr::Builtin(BuiltinTy::Any) => return true,
+            _ => return false,
+        }
+    }
+}
+
 fn equality_operand_may_call_metamethod(
     ws: &Workspace,
     body: &crate::hir::Body,
@@ -350,6 +390,11 @@ fn body_effect(
             },
             // A table lookup can enter __index. An indexed assignment can
             // enter __newindex, even when its direct store is element-only.
+            Expr::FieldAccess { base, .. } | Expr::SafeNav { base, .. }
+                if field_may_call_callback(ws, bi, *base) =>
+            {
+                effect.join(&MemEffect::all())
+            }
             Expr::Index { base, .. } if index_may_call_table_metamethod(ws, bi, *base) => {
                 effect.join(&MemEffect::all())
             }

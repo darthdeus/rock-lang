@@ -92,11 +92,12 @@ buys nothing and every added member is another chance to delete live code.
 the nil-write guard on a field or frame store when the value cannot be nil.
 A guarded and an unguarded store agree on every value -- the guard only
 skips a store that would be a no-op -- so a wrong answer costs the rehash
-the guard avoids and nothing else. (They differ for a table that reached
-the store through an opaque boundary carrying a metatable: the skipped
-write does not reach its `__newindex`, and the presence test reads the
-field, so `__index` sees it.) That bound is what lets this
-tier read declared types, cell marks and emitted shapes. It must never
+the guard avoids and nothing else. Heap-record guards test
+`getmetatable(base) ~= nil` before reading the field, and always perform the
+store when a metatable is present. Thus they neither suppress `__newindex`
+nor introduce `__index`, even with a protected metatable. Compiler-owned
+fields and frames have a separate plain-storage guarantee. That bound lets
+this tier read declared types, cell marks and emitted shapes. It must never
 decide a branch.
 
 What tier 2 may conclude:

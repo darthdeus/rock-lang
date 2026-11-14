@@ -20,6 +20,24 @@ pub(crate) struct CopyProp {
     pub(crate) exposes_more: bool,
 }
 
+fn field_projection(func: &MirFunc, id: Idx<Inst>) -> Option<(Idx<Inst>, ustr::Ustr)> {
+    match func.insts[id] {
+        Inst::Field { base, field } => Some((base, field)),
+        Inst::Index {
+            base,
+            index,
+            kind: ContainerKind::Record,
+        } => {
+            if let Inst::Const(Lit::Str(field)) = func.insts[index] {
+                Some((base, field))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Build the analysis without applying it. Returns `None` when the walk proves
 /// nothing (the common case for small bodies), so callers skip the remap
 /// entirely. [`cleanup`] folds the remap into DCE's count scan.
@@ -66,8 +84,8 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
     let mut has_fresh_projection = false;
     for (_, b) in func.blocks.iter() {
         for &i in &b.insts {
-            if let Inst::Field { base, .. } = &func.insts[i] {
-                has_fresh_projection |= matches!(func.insts[*base], Inst::MakeStruct { .. });
+            if let Some((base, _)) = field_projection(func, i) {
+                has_fresh_projection |= matches!(func.insts[base], Inst::MakeStruct { .. });
             }
             if let Inst::Store { cell, value } = &func.insts[i] {
                 if matches!(&func.insts[*value], Inst::MakeValueStruct { .. }) {
@@ -230,8 +248,14 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                 // `match` rebuilds (`X_ct(tag,_0).__tag`) folds to the tag leaf, and the
                 // now-dead ctor DCEs. A mutable `MakeStruct` needs the stricter
                 // single-use proof below, since a store could change its field.
-                Inst::Field { base, field } => {
-                    let (base, field) = (*base, *field);
+                Inst::Field { .. }
+                | Inst::Index {
+                    kind: ContainerKind::Record,
+                    ..
+                } => {
+                    let Some((base, field)) = field_projection(func, id) else {
+                        continue;
+                    };
                     let rb = resolve_subst(&subst, base);
                     if checked_native_buffers.contains(&rb)
                         && skull_mir::lower::is_leaf_view_field(field.as_str())
@@ -375,10 +399,14 @@ fn keeps_vec_lengths(inst: &Inst) -> bool {
                 | ContainerKind::NativeBufferLeaf
         ),
         Inst::Index {
-            kind: ContainerKind::Vec | ContainerKind::VecInBounds | ContainerKind::Map,
+            kind:
+                ContainerKind::Vec
+                | ContainerKind::VecInBounds
+                | ContainerKind::Map
+                | ContainerKind::Record,
             ..
         } => false,
-        // A boxed Vec or Map lookup can enter a Lua metamethod.
+        // A boxed Vec, Map, or heap-record lookup can enter a Lua metamethod.
         Inst::Index { .. }
         | Inst::VecCheckedIndex { .. }
         | Inst::Field { .. }

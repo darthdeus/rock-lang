@@ -169,3 +169,105 @@ print('ok')
     ));
     assert_eq!(output.trim(), "ok");
 }
+
+#[test]
+fn foreign_record_callbacks_invalidate_vector_bounds() {
+    let lua = emit_module(
+        r#"
+struct ExternalRecord { value: int? }
+fn read_external(record: ExternalRecord) -> int? { return record.value }
+fn write_external(record: ExternalRecord) { record.value = 1 }
+@nomangle fn repeated_record_read(record: ExternalRecord) -> int {
+    let a = record.value ?? 0
+    let b = record.value ?? 0
+    return a * 10 + b
+}
+@nomangle fn after_record_read(xs: [int], record: ExternalRecord) -> int {
+    if xs.len() <= 0 { return -1 }
+    let value = record.value
+    if value == null { return -2 }
+    return xs[0]
+}
+@nomangle fn after_record_write(xs: [int], record: ExternalRecord) -> int {
+    if xs.len() <= 0 { return -1 }
+    record.value = 1
+    return xs[0]
+}
+@nomangle fn after_record_read_helper(xs: [int], record: ExternalRecord) -> int {
+    if xs.len() <= 0 { return -1 }
+    let value = read_external(record)
+    if value == null { return -2 }
+    return xs[0]
+}
+@nomangle fn after_record_write_helper(xs: [int], record: ExternalRecord) -> int {
+    if xs.len() <= 0 { return -1 }
+    write_external(record)
+    return xs[0]
+}
+@nomangle fn after_unused_record_read(xs: [int], record: ExternalRecord) -> int {
+    if xs.len() <= 0 { return -1 }
+    let unused = record.value
+    return xs[0]
+}
+@nomangle fn after_safe_record_write(xs: [int], record: ExternalRecord?) -> int {
+    if xs.len() <= 0 { return -1 }
+    record?.value = 1
+    return xs[0]
+}
+@nomangle fn after_safe_record_read(xs: [int], record: ExternalRecord?) -> int {
+    if xs.len() <= 0 { return -1 }
+    let value = record?.value
+    if value == null { return -2 }
+    return xs[0]
+}
+value EmbeddedValue { n: int }
+struct ExternalHolder { embed child: EmbeddedValue }
+@nomangle fn after_embedded_read(xs: [int], record: ExternalHolder) -> int {
+    if xs.len() <= 0 { return -1 }
+    let value = record.child.n
+    if value == 0 { return -2 }
+    return xs[0]
+}
+@nomangle fn after_embedded_write(xs: [int], record: ExternalHolder) -> int {
+    if xs.len() <= 0 { return -1 }
+    record.child.n = 1
+    return xs[0]
+}
+"#,
+    );
+    let output = run_luajit(&format!(
+        r#"{lua}
+for _, case in ipairs({{
+    {{after_record_read, '__index'}},
+    {{after_record_write, '__newindex'}},
+    {{after_record_read_helper, '__index'}},
+    {{after_record_write_helper, '__newindex'}},
+    {{after_unused_record_read, '__index'}},
+    {{after_safe_record_read, '__index'}},
+    {{after_safe_record_write, '__newindex'}},
+    {{after_embedded_read, '__index', 'child.n'}},
+    {{after_embedded_write, '__newindex', 'child.n'}},
+}}) do
+    local xs = {{len = 1, _data = {{7}}}}
+    local calls = 0
+    local record = setmetatable({{}}, {{[case[2]] = function(_, key)
+        assert(key == (case[3] or 'value'), key)
+        calls = calls + 1
+        xs.len, xs._data[1] = 0, nil
+        return 1
+    end}})
+    local ok, err = pcall(case[1], xs, record)
+    assert(calls == 1, 'field callback must run exactly once: ' .. calls)
+    assert(not ok and tostring(err):find('Vec index out of bounds', 1, true), tostring(err))
+end
+local reads = 0
+local record = setmetatable({{}}, {{__index = function()
+    reads = reads + 1
+    return reads
+end}})
+assert(repeated_record_read(record) == 12 and reads == 2, 'reads must not be combined')
+print('ok')
+"#
+    ));
+    assert_eq!(output.trim(), "ok");
+}

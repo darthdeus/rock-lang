@@ -69,14 +69,8 @@ impl Emitter<'_> {
                         return;
                     }
                 }
-                // LuaJIT can rehash when assigning nil to an absent key, so a
-                // store that would be a no-op is skipped. A Rock struct never
-                // carries a metatable (`__ty` tagging only), so the skip
-                // consults none: the only table that could have one here came
-                // from a host through an opaque boundary, and a nil write that
-                // changes nothing does not reach its `__newindex`. A real
-                // write is a raw store and still does. Plain operands evaluate
-                // once.
+                // Compiler-owned plain fields cannot invoke host callbacks.
+                // Avoid LuaJIT rehashing an absent key for a no-op nil store.
                 let guard = self.opnd_is_plain(*base)
                     && self.opnd_is_plain(*value)
                     && !self.never_nil(*value);
@@ -148,8 +142,7 @@ impl Emitter<'_> {
                         self.write_opnd(out, *value);
                         out.push('\n');
                     }
-                    // Raw 1-based write into one leaf column; the owning Vec's
-                    // `len` was checked once by `VecCheckedIndex`.
+                    // Raw keyed writes, leaf columns, and already checked slots.
                     ContainerKind::Map
                     | ContainerKind::VecColumn
                     | ContainerKind::VecStrideSlot
@@ -161,6 +154,46 @@ impl Emitter<'_> {
                         out.push_str("] = ");
                         self.write_opnd(out, *value);
                         out.push('\n');
+                    }
+                    ContainerKind::Record => {
+                        let field = match &self.func.insts[*index] {
+                            Inst::Const(Lit::Str(field)) => Some(*field),
+                            _ => None,
+                        };
+                        let guard = field.is_some()
+                            && self.opnd_is_plain(*base)
+                            && self.opnd_is_plain(*value)
+                            && !self.never_nil(*value);
+                        if guard {
+                            out.push_str(" if ");
+                            if !matches!(self.func.insts[*value], Inst::Const(Lit::Nil)) {
+                                self.write_opnd(out, *value);
+                                out.push_str(" ~= nil or ");
+                            }
+                            // Test the metatable before reading the field: a
+                            // getter must not run merely because we store nil.
+                            out.push_str("getmetatable(");
+                            self.write_opnd(out, *base);
+                            out.push_str(") ~= nil or ");
+                            self.write_opnd(out, *base);
+                            write_field_key(out, field.unwrap().as_str());
+                            out.push_str(" ~= nil then\n");
+                        }
+                        out.push(' ');
+                        self.write_opnd(out, *base);
+                        if let Some(field) = field {
+                            write_field_key(out, field.as_str());
+                        } else {
+                            out.push('[');
+                            self.write_opnd(out, *index);
+                            out.push(']');
+                        }
+                        out.push_str(" = ");
+                        self.write_opnd(out, *value);
+                        out.push('\n');
+                        if guard {
+                            out.push_str(" end\n");
+                        }
                     }
                     // One `value` operand cannot carry K leaves; lowering splits
                     // an element write into per-column stores.
@@ -214,7 +247,8 @@ impl Emitter<'_> {
                     | ContainerKind::VecValueStrided(_)
                     | ContainerKind::VecColumn
                     | ContainerKind::VecStrideSlot
-                    | ContainerKind::Map => {
+                    | ContainerKind::Map
+                    | ContainerKind::Record => {
                         unreachable!("ArrayPush only lowers for Vec array literals, got {kind:?}")
                     }
                 }

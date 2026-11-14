@@ -9,8 +9,8 @@
 //! - [`inst_never_nil_with`] only skips the Lua emitter's nil-write guard.
 //!   For plain Rock tables, a wrong answer costs a rehash rather than a
 //!   wrong value, so this tier may use declared types and emitted shapes.
-//!   Host-provided metatables can observe a skipped store; that interop
-//!   contract is documented in docs/compiler.md.
+//!   Heap-record guards preserve host callbacks by testing for a metatable
+//!   before deciding that a nil store is unobservable.
 //!
 //! Neither tier may assume "probably not nil". The second is wider only
 //! because its blast radius is bounded; promoting one of its answers to

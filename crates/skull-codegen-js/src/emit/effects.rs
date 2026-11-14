@@ -66,6 +66,13 @@ impl Emitter<'_> {
                             format!("{b}._data[{i}] = {v};")
                         }
                         ContainerKind::Map => format!("__map_set({b}, {i}, {v});"),
+                        ContainerKind::Record => {
+                            if let Inst::Const(Lit::Str(field)) = &self.mf.insts[*index] {
+                                format!("{} = {v};", js_member(&b, field.as_str())?)
+                            } else {
+                                format!("{b}[{i}] = {v};")
+                            }
+                        }
                     };
                     self.push(&line);
                 }
@@ -161,7 +168,7 @@ impl Emitter<'_> {
                     self.push(&format!("__rock_globals[{}] = {v};", js_string_lit(slot)?));
                 }
                 // An unused index still checks bounds or may enter a host
-                // getter (including a Map or a proxy-backed Vec).
+                // getter (including a Map, heap record, or proxy-backed Vec).
                 Inst::Index { kind, .. }
                     if (matches!(
                         kind,
@@ -170,6 +177,7 @@ impl Emitter<'_> {
                             | ContainerKind::VecNonNull
                             | ContainerKind::VecNonNullInBounds
                             | ContainerKind::Map
+                            | ContainerKind::Record
                     ) || kind.is_native_buffer())
                         && self.use_count[raw(iid) as usize] == 0 =>
                 {

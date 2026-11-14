@@ -44,7 +44,7 @@
 //! facts about that cell; a field store drops facts through that field name,
 //! and a `len` store drops every length fact; a global store drops facts
 //! through that global; an element store drops facts through any element. A
-//! boxed Vec or Map lookup/store can enter a Lua metamethod, so it drops all
+//! boxed Vec, Map, or heap-record lookup/store can enter a Lua metamethod, so it drops all
 //! memory facts. A call drops every length fact and every fact through memory
 //! (a global, a field or an element): the callee may shrink any vector it can
 //! reach or rebind any field. `@pure` is not trusted, since the checker admits
@@ -743,7 +743,11 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
             }
         }
         Inst::Index {
-            kind: ContainerKind::Vec | ContainerKind::VecInBounds | ContainerKind::Map,
+            kind:
+                ContainerKind::Vec
+                | ContainerKind::VecInBounds
+                | ContainerKind::Map
+                | ContainerKind::Record,
             ..
         } => facts.after_unknown_call(),
         Inst::Index {
@@ -761,7 +765,10 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
         } => {
             if matches!(
                 kind,
-                ContainerKind::Vec | ContainerKind::VecInBounds | ContainerKind::Map
+                ContainerKind::Vec
+                    | ContainerKind::VecInBounds
+                    | ContainerKind::Map
+                    | ContainerKind::Record
             ) {
                 facts.after_unknown_call();
             } else {
