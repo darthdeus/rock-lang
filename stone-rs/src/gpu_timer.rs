@@ -22,9 +22,20 @@
 //! for contexts with no timer (macOS) where the alternative is ablation.
 
 use crate::DebugGl;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 const RING: usize = 4;
+
+/// Timed passes awaiting readback. A pass timed while this many are pending
+/// is not timed; its caller simply gets no sample for it.
+const TIMED_PASSES: usize = 16;
+
+/// One timed pass: a timestamp pair and the caller's tag for it.
+struct TimedPass {
+    tag: u32,
+    begin: glow::Query,
+    end: glow::Query,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SlotState {
@@ -143,6 +154,11 @@ pub struct GpuTimer {
     root: PathId,
     aggregate: ScopeAggregator,
     unbalanced_logged: bool,
+    /// Timed passes in submission order, oldest first.
+    timed: VecDeque<TimedPass>,
+    timed_open: Option<glow::Query>,
+    timed_free: Vec<glow::Query>,
+    timed_tag: u32,
 }
 
 fn scope_mode_by_env() -> ScopeMode {
@@ -182,6 +198,10 @@ impl GpuTimer {
             root,
             aggregate,
             unbalanced_logged: false,
+            timed: VecDeque::new(),
+            timed_open: None,
+            timed_free: Vec::new(),
+            timed_tag: 0,
         }
     }
 
@@ -536,6 +556,80 @@ impl GpuTimer {
 
     pub fn reset_stats(&mut self) {
         self.aggregate.reset_stats();
+    }
+
+    fn timed_query(&mut self, gl: &DebugGl) -> Option<glow::Query> {
+        let query = match self.timed_free.pop() {
+            Some(q) => q,
+            None => match unsafe { gl.create_query() } {
+                Ok(q) => q,
+                Err(e) => {
+                    ::log::warn!(target: "STONE", "timed pass skipped: create_query failed: {e}");
+                    return None;
+                }
+            },
+        };
+        unsafe { gl.query_counter(query, glow::TIMESTAMP) };
+        Some(query)
+    }
+
+    /// Open a timed pass. Independent of the frame ring and of
+    /// `STONE_GPU_SCOPES`, so a game can time one pass in normal play. Does
+    /// nothing without timer queries, in finish mode, while another timed
+    /// pass is open, or with `TIMED_PASSES` results unread.
+    pub fn timed_begin(&mut self, gl: &DebugGl) {
+        self.ensure_init(gl);
+        if !self.supported
+            || self.mode == ScopeMode::Finish
+            || self.timed_open.is_some()
+            || self.timed.len() >= TIMED_PASSES
+        {
+            return;
+        }
+        self.timed_open = self.timed_query(gl);
+    }
+
+    /// Close the open timed pass and queue it for readback under `tag`.
+    pub fn timed_end(&mut self, gl: &DebugGl, tag: u32) {
+        let Some(begin) = self.timed_open.take() else {
+            return;
+        };
+        let Some(end) = self.timed_query(gl) else {
+            self.timed_free.push(begin);
+            return;
+        };
+        // As for scopes: unflushed, the end timestamp waits in the driver's
+        // command buffer and bills later CPU time to the pass.
+        unsafe { gl.flush() };
+        self.timed.push_back(TimedPass { tag, begin, end });
+    }
+
+    /// Non-blocking read of the oldest timed pass. Returns its GPU ms
+    /// (`>= 0.0`) and records its tag for `timed_tag`, `-1.0` when none is
+    /// ready, or `-2.0` when passes cannot be timed on this context.
+    pub fn timed_poll_ms(&mut self, gl: &DebugGl) -> f32 {
+        self.ensure_init(gl);
+        if !self.supported || self.mode == ScopeMode::Finish {
+            return -2.0;
+        }
+        let Some(front) = self.timed.front() else {
+            return -1.0;
+        };
+        if unsafe { gl.get_query_parameter_u32(front.end, glow::QUERY_RESULT_AVAILABLE) } == 0 {
+            return -1.0;
+        }
+        let pass = self.timed.pop_front().expect("front checked above");
+        let read = |q: glow::Query| unsafe { gl.get_query_parameter_u64(q, glow::QUERY_RESULT) };
+        let ns = read(pass.end).saturating_sub(read(pass.begin));
+        self.timed_free.push(pass.begin);
+        self.timed_free.push(pass.end);
+        self.timed_tag = pass.tag;
+        ns as f32 / 1_000_000.0
+    }
+
+    /// The tag of the pass `timed_poll_ms` last returned.
+    pub fn timed_tag(&self) -> u32 {
+        self.timed_tag
     }
 
     /// The scope report embedded in the perf JSON under `gpu_scopes`.

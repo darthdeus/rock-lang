@@ -422,6 +422,10 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         void stone_gpu_timer_begin(void);
         void stone_gpu_timer_end(void);
         float stone_gpu_timer_poll_ms(void);
+        void stone_gpu_timed_pass_begin(void);
+        void stone_gpu_timed_pass_end(uint32_t tag);
+        float stone_gpu_timed_pass_poll_ms(void);
+        uint32_t stone_gpu_timed_pass_tag(void);
         uint8_t stone_gpu_scopes_requested(void);
         uint8_t stone_gpu_scopes_finish(void);
         void stone_gpu_scope_begin(const char* name);
@@ -946,6 +950,14 @@ extern(ffi, "stone") fn stone_is_window_hidden() -> bool
 extern(ffi, "stone") fn stone_gpu_timer_begin()
 extern(ffi, "stone") fn stone_gpu_timer_end()
 extern(ffi, "stone") fn stone_gpu_timer_poll_ms() -> float
+extern(ffi, "stone") fn stone_gpu_timed_pass_begin()
+extern(ffi, "stone") fn stone_gpu_timed_pass_end(tag: int)
+// GPU ms of the oldest finished timed pass (`Pass.timed`), in submission
+// order; -1 when none is ready, -2 when this context cannot time passes.
+// Results arrive a few frames after the pass ran.
+pub extern(ffi, "stone") fn stone_gpu_timed_pass_poll_ms() -> float
+// The `Pass.timed` tag of the pass the poll last returned.
+pub extern(ffi, "stone") fn stone_gpu_timed_pass_tag() -> int
 extern(ffi, "stone") fn stone_gpu_scopes_requested() -> bool
 pub extern(ffi, "stone") fn stone_gpu_scopes_finish() -> bool
 extern(ffi, "stone") fn stone_gpu_scope_begin(name: string)

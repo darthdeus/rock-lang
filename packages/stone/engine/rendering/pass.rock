@@ -94,6 +94,12 @@ pub struct Pass {
     // and restores the caller's PRIOR mode afterward (true save/restore
     // via CURRENT_BLEND). Null leaves the currently-bound blend alone.
     blend: BlendMode? = null,
+    // A tag of zero or more times this pass on the GPU in normal play, with
+    // no `STONE_GPU_SCOPES`: `stone_gpu_timed_pass_poll_ms` later returns its
+    // milliseconds and `stone_gpu_timed_pass_tag` this tag. For work a game
+    // paces by its measured cost. One timestamp pair and a flush per timed
+    // pass, so time the few passes that need it, not every pass.
+    timed: int = -1,
 }
 
 // The Pass binder, and the only place a canvas reaches a compiler-assigned
@@ -136,6 +142,7 @@ fn run_pass_scoped(p: Pass, previous_shader: string?, retain_shader: bool) -> bo
         return false
     }
     gpu_pass_scope_begin(p.pipeline.shader_name)
+    if p.timed >= 0 { stone_gpu_timed_pass_begin() }
 
     // Record for the pipeline inspector in execution order (guarded: pure
     // branch when the window is closed, so the pass-loop trace is unchanged).
@@ -173,6 +180,7 @@ fn run_pass_scoped(p: Pass, previous_shader: string?, retain_shader: bool) -> bo
     if has_output {
         set_canvas_handle(previous_canvas)
     }
+    if p.timed >= 0 { stone_gpu_timed_pass_end(p.timed) }
     gpu_scope_end()
     return true
 }
