@@ -213,6 +213,7 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
 struct PackageTestHost<'a> {
     inner: CliCompileHost<'a>,
     test_dir: &'a str,
+    tests: Vec<(skull_mir::mir::FuncRef, skull::SkullTest)>,
 }
 
 impl skull::pipeline::CompileHost for PackageTestHost<'_> {
@@ -263,8 +264,8 @@ impl skull::pipeline::CompileHost for PackageTestHost<'_> {
         entry: bone_semantic::prelude::ModuleId,
         _target: skull::pipeline::EmitTarget,
     ) -> std::result::Result<skull::mir_emit::MirEmit, CompilerError> {
-        let test_fns = collect_package_test_fns(ws, self.test_dir)?;
-        let roots = test_fns.iter().map(|(func, _)| *func).collect::<Vec<_>>();
+        self.tests = collect_package_test_fns(ws, self.test_dir)?;
+        let roots = self.tests.iter().map(|(func, _)| *func).collect::<Vec<_>>();
         skull::mir_emit::FullEmit::package_test(&roots)
             .run(ws, entry)
             .map(|(emit, _cache)| emit)
@@ -1463,6 +1464,7 @@ fn skull_build_package_with_limit(
             accessors: AccessorPlanning::Skip,
         },
         test_dir: dir,
+        tests: Vec::new(),
     };
     let target = skull::pipeline::EmitTarget {
         project_root: None,
@@ -1478,10 +1480,7 @@ fn skull_build_package_with_limit(
         },
     )?;
     let (lua, bridge_end) = (emit.lua, emit.globals_bridge_end);
-    let test_fns = collect_package_test_fns(&ws, dir).map_err(|e| SkullFailure {
-        reason: categorize(&e.message),
-        rendered: render_project_err(&sources, &e),
-    })?;
+    let test_fns = host.tests;
     let files = test_fns
         .iter()
         .map(|(func, _)| ws.modules[func.module.index()].file.as_str().to_owned())
