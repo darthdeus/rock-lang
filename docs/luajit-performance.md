@@ -1017,19 +1017,21 @@ through a function value, a yield, a call the inference left unresolved --
 writes everything, with these exceptions: a C function reached through
 `extern(ffi, ..)` may write native elements (and may mutate any state when
 its library exposes a callback or `any` parameter), an opaque body marked `@pure`, `@nowrite` or
-`@writes_elems` does what it says, the stdlib push writes `len` only, and a
-type constructor or the `enumerate` template runs no user code. The elision
-pass then drops only the facts a call could have touched: a callee that
+`@writes_elems` does what it says, and a type constructor or the
+`enumerate` template runs no user code. The initial push exemption was
+removed in the callback audit below: appending can invoke `__newindex`.
+The elision pass then drops only the facts a call could have touched: a callee that
 writes field `n` drops facts through `n` and keeps the loop's length facts.
 
 Annotating a body is a promise about raw target code that only review can
 check, exactly like writing the body; `@nowrite` says the body stores to no
 table field, element or global the program can reach, including NativeBuffer
 storage (IO, allocation and raising are fine) and `@writes_elems` that it stores only
-into elements of containers it is handed. The stdlib's read-only intrinsics
-(`nb_get`, the NativeBuffer `get`, `__vec_data_get`, `table_get`, the string
-methods, `tostring`, `error`, `print`, `transmute`, allocation) carry one or
-the other; a Rock body ignores them and is walked instead.
+into elements of containers it is handed. NativeBuffer reads, string
+methods, transmute and allocation can carry these promises; a Rock body
+ignores them and is walked instead. Raw table access, generic string
+conversion and printing cannot promise read-only effects when they can
+invoke a Lua callback.
 
 `packages/stone`, the same compile, before -> after the effect table:
 
@@ -1129,25 +1131,21 @@ build. The earlier release measurements above cover different comparisons.
   value. The adversarial runtime cases pin each.
 - **Trusted by review, like the code itself.** An opaque body's `@pure`,
   `@nowrite`, `@writes_elems`, `@returns_index_below` and `@returns_nonneg`;
-  the stdlib push matched by its text; the map slot helpers' `data.len`
-  invariant. A lie in any of these is a silent out-of-bounds access.
+  the map slot helpers' `data.len` invariant. A lie in any of these is a
+  silent out-of-bounds access.
 - **FFI.** Calls invalidate element-value facts because C can write memory
   shared with a NativeBuffer. A library exposing a callback or `any`
   parameter invalidates all memory facts on every call, including a later
   call with no callback argument. Callbacks hidden behind raw Lua or pointer
   casts still require review of that unsafe binding.
-- **Log sink.** `_log_once_impl` and `__rock_log_init` are `@nowrite`, yet
-  the emit path calls `_G.__rock_log_sink`, a function the host installs.
-  Stone's sink forwards to C `stone_log` or `print`, so the promise holds
-  for Stone; a host whose sink runs Rock code that shrinks a vector would
-  break it. Plain `log_*` calls go through `__rock_log` (unannotated) and
-  still kill, so only `log_once` sites rely on this.
+- **Log callbacks.** `_log_once_impl` and `__rock_log_init` can invoke a
+  host-installed sink or level source. Their former `@nowrite` promises
+  were removed; both now invalidate caller facts.
 - **Foreign table metamethods.** A Lua-supplied Map can invoke `__index`
   during `Map.get` or the read in `Map.remove`; the bounds pass treats those
-  calls as unknown. Other raw table intrinsics, including `table_get` and
-  `table_set`, still carry reviewed effect promises. Those promises need a
-  separate audit wherever their receivers can be foreign tables with
-  metamethods.
+  calls as unknown. The subsequent callback audit extends this to raw
+  table intrinsics, tuple access, direct map indexing and nullable boxed
+  vector slots. Helper summaries must propagate those effects too.
 - **Incremental emission.** A chunk depends on the effects of its callees,
   including effects inherited transitively. Body edits must re-emit a
   caller when a callee's effect summary changes, even when the edited
@@ -1159,10 +1157,11 @@ build. The earlier release measurements above cover different comparisons.
   writes go through and the probe could not form such an assignment, so
   this is assumed, not shown.
 - **Interpolation.** `Inst::Format` and `ToString` still kill as unknown
-  calls in the pass, though the runtime renderer runs no user code; the
-  effect table does not describe them. Conservative, costs a few sites.
-- **Unused proven reads** are dropped by cleanup, where a checked read
-  stayed as a statement. Sound: a proven access cannot raise.
+  calls in the pass. Specializing their effects would require matching the
+  actual rendering route and its input representation.
+- **Unused proven reads** are dropped only when the operation cannot invoke
+  a callback. A proven bound alone is insufficient for a nullable boxed
+  vector: its missing slot can invoke `__index`.
 
 ### What would eliminate more
 
@@ -1193,3 +1192,39 @@ Stone is the fix there.
 
 The 484 nil-key store guards are the remaining runtime check of note; they
 need a field-presence fact instead of a bounds fact.
+
+
+### Callback effect audit (2026-11-14)
+
+The bounds optimizer must account for callbacks entered by an apparently
+read-only operation. The audit through `c2333989` removes false effect
+promises on raw table intrinsics, tuple and vector backing access, generic
+string conversion, type-tag lookup and logging callbacks. It also corrects
+the native checked setter's element-write summary. Indexed-container and
+generic equality effects propagate through Rock helpers. Unused indexed
+reads remain observable when a Lua metamethod or JavaScript getter can run.
+
+Lua vectors of concrete non-null primitive scalars have a separate MIR
+kind: their live slots exist, so an in-bounds access cannot enter
+`__index` or `__newindex`. Nullable and unknown elements remain conservative.
+This distinction does not apply to JavaScript, where a Proxy can intercept
+a present slot. Push is conservative because it writes an absent slot;
+recognizing a constructor alone does not prove that its result never escaped.
+
+Compiling the unchanged `packages/stone` source with the release compiler
+and each revision's stdlib gives these textual checked-helper occurrences.
+They describe emitted code, not executed checks per frame.
+
+| Helper | Before audit (`7a0bdc27`) | After audit (`c2333989`) |
+| --- | ---: | ---: |
+| `__vec_checked_get` | 556 | 731 |
+| `__vec_checked_index` | 106 | 110 |
+| `__vec_checked_set` | 55 | 62 |
+| NativeBuffer get / index / set | 62 / 42 / 31 | 62 / 42 / 31 |
+
+The earlier broad prototype treated every boxed vector slot as callback
+capable and emitted 777 / 110 / 63 vector helpers. The primitive-element
+proof recovers part of that cost without assuming away nullable slots.
+See [the effect audit](purity.md#opaque-callback-audit-2026-11-14) for the
+remaining foreign-record boundary; this is not a proof about arbitrary
+host objects.

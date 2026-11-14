@@ -27,9 +27,10 @@ held by the checker for Rock bodies and by review for the stdlib's opaque
 ones. An optimization may rely on it for **type refinements**, where a
 violation degrades to a runtime error with a worse message (`attempt to
 index a nil value`), because that is the same failure class a hand-written
-`?.`-less access gives. An optimization must **not** rely on it where a
-violation would silently compute a wrong value or write past a bound: those
-need a structural proof (a matched body, an SSA fact), not an annotation.
+`?.`-less access gives. Value-level optimizations use inferred effects for Rock bodies instead of
+trusting their `@pure` annotation. Opaque bodies remain a reviewed trust
+boundary: their annotations supply the effect summary because the compiler
+cannot inspect their target-language behavior.
 
 ## The consumers
 
@@ -39,7 +40,7 @@ need a structural proof (a matched body, an SSA fact), not an annotation.
 | Nullability narrowing, condition effects (`narrowing.rs`, `cond_has_effect`) | A `@pure` call inside the condition after the null check does not drop the narrow; anything else does | Yes, after this audit | Was unsound before: only `Call`, `Not`, `BinOp`, `FieldAccess` and `SafeNav` were inspected, so a call under an index, interpolation, cast, tuple, `match`, `if`, `?.let` or a safe-nav call kept the narrow (fixed; `tests/errors/narrowing_effects.rock.err`). |
 | Whole-local narrowing (`infer_branch`, block guards) | None directly; "a callee cannot reassign a local" | Was unsound for closure-assigned locals | A lambda declared earlier that assigns the local runs at any call. Fixed: such narrows are revoked by the same effects that clear paths (`closure_assigned_locals`, `invalidate_mutable_refinements`); a `@pure` call keeps them. |
 | Inliner gate (`skull-transform/src/inline.rs`, `annotation_gate`) | Eligibility only: `@inline` or `@pure` bodies may be spliced | Yes, independent of purity | A splice forwards each argument *value* once (`forward_param_reads`), keeps every instruction that can raise, and never reorders across a call, so inlining an impure body would still be correct. `@pure` here is a performance policy, not a soundness input. |
-| Bounds-check elision (`skull-transform/src/in_bounds.rs`) | Nothing | Yes | Deliberately does not trust `@pure` (a violation would be a silent out-of-bounds write). Only the stdlib push, matched by body text, is exempt from the call kill. |
+| Bounds-check elision (`skull-transform/src/in_bounds.rs`) | Inferred memory effects; opaque annotations are trusted | Subject to reviewed opaque contracts | Rock bodies are walked transitively, including callbacks reached through indexing and equality. Opaque `@pure`, `@nowrite` and `@writes_elems` bodies supply trusted summaries. Push can invoke a foreign backing table's `__newindex` and is not exempt. |
 
 Things that are **named** "pure" but do not read the annotation:
 
@@ -58,8 +59,9 @@ Things that are **named** "pure" but do not read the annotation:
   (treat operator calls as effectful at lowering) changes the emitted shape
   of every `xs[i + 1] += v`, so it is left as a known edge.
 - `copy_prop.rs` `keeps_vec_lengths`, `cleanup.rs` `is_dead_value`,
-  `sinking.rs` `always_inlinable` / `preserve_effect_order`: all treat every
-  call as a barrier. No purity input.
+  `sinking.rs` `always_inlinable` / `preserve_effect_order`: use MIR effects
+  and operation-specific guarantees. A proven bound alone does not make a
+  table access removable: a missing nullable slot can invoke `__index`.
 
 ## Probes
 
@@ -110,3 +112,33 @@ The regression tests: `tests/errors/pure_verification.rock.err` (checker),
 `tests/errors/narrowing_effects.rock.err` (rejected narrows),
 `tests/nullable/refinement_effects.rock` (narrows that must still hold), and
 `tests/iterators/vec_bounds_elision.rock` (elision ignores `@pure`).
+
+## Opaque callback audit (2026-11-14)
+
+A read-only Lua expression can still write through a metamethod. Generic
+raw table reads, writes and tuple access therefore cannot promise
+`@nowrite` or element-only writes. The same applies to `tostring`, `print`
+and runtime type-tag lookup. Host logging level and sink callbacks also
+invalidate caller facts. `__nb_checked_set` writes native elements and is
+annotated accordingly. JavaScript type-tag getters, `ffi_string` conversion
+and `join` on a proxy-backed vector have the same callback risk. Their
+shared effect promises must cover the backend that can run a callback.
+
+The regression suites exercise callbacks that shrink a guarded vector,
+then require the subsequent access to raise its bounds error. They also
+cover native element mutation invalidating a previously checked index.
+The direct operation and helper summaries must agree: preserving a check
+inside a helper does not protect its caller from stale memory facts.
+
+### Remaining foreign-record boundary
+
+This audit covers raw table intrinsics and indexed containers, not every
+possible host object. Ordinary Rock records have no metatable. A foreign
+record with a missing nullable field and `__index` or `__newindex` can run
+a callback during a field read or write; field effect summaries currently
+account only for the named field. For example, after guarding `xs.len()`,
+assigning `record.value = 1` can invoke a host `__newindex` that shrinks
+`xs`, leaving the following `xs[0]` with a stale proof. This needs an
+explicit foreign-record contract or field-access provenance before the
+compiler can safely preserve the current record optimizations. The table
+and indexed-container fixes do not establish safety for that boundary.
