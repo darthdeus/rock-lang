@@ -100,6 +100,13 @@ pub struct Pass {
     // paces by its measured cost. One timestamp pair and a flush per timed
     // pass, so time the few passes that need it, not every pass.
     timed: int = -1,
+    // The colour attachments of `output` this pass writes, as the bitmask
+    // `stone_set_draw_buffer_mask` takes: bit N is attachment N, the shader's
+    // fragment output at location N. Zero writes attachment 0 alone. The
+    // further attachments are canvases the caller attached to `output` with
+    // `stone_canvas_attach_color_target`; the scissor and the clear cover all
+    // of them. Requires an output.
+    draw_buffers: int = 0,
 }
 
 // The Pass binder, and the only place a canvas reaches a compiler-assigned
@@ -162,6 +169,7 @@ fn run_pass_scoped(p: Pass, previous_shader: string?, retain_shader: bool) -> bo
             let r = p.scissor
             stone_set_scissor(true, r.x, r.y, r.w, r.h)
         }
+        if p.draw_buffers != 0 { stone_set_draw_buffer_mask(p.draw_buffers) }
     } else if p.scissor != null {
         log_once("RENDER", "pass `{p.pipeline.shader_name}` carries a scissor rect with no output; ignored, because binding the output is the only place a scissor can be applied and reset")
     }
@@ -178,6 +186,9 @@ fn run_pass_scoped(p: Pass, previous_shader: string?, retain_shader: bool) -> bo
     }
 
     if has_output {
+        // Draw-buffer state belongs to the output's framebuffer, so it is
+        // put back while that is still bound.
+        if p.draw_buffers != 0 { stone_set_draw_buffer_mask(1) }
         set_canvas_handle(previous_canvas)
     }
     if p.timed >= 0 { stone_gpu_timed_pass_end(p.timed) }

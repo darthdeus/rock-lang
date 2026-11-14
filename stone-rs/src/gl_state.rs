@@ -661,6 +661,10 @@ pub extern "C" fn stone_set_gl_viewport(x: c_int, y: c_int, w: c_int, h: c_int) 
     });
 }
 
+/// Colour attachments a canvas FBO can address: the count GL 3.3 guarantees
+/// for both GL_MAX_DRAW_BUFFERS and GL_MAX_COLOR_ATTACHMENTS.
+pub const DRAW_BUFFERS: usize = 8;
+
 /// Set the CURRENTLY-BOUND FBO's draw buffers from an attachment BITMASK: bit
 /// `i` enables COLOR_ATTACHMENT`i`, a clear bit below the highest set one
 /// writes GL_NONE at that slot. draw-buffer state is per-FBO. R6 uses this to
@@ -676,24 +680,17 @@ pub extern "C" fn stone_set_gl_viewport(x: c_int, y: c_int, w: c_int, h: c_int) 
 /// A fragment output whose slot is GL_NONE is discarded, so the shader still
 /// declares every output up to the highest one it writes.
 ///
-/// Attachments above the fifth are not addressable; bits outside [0, 5) are
-/// ignored, and an empty mask falls back to `0b1`.
+/// Bits at or above `DRAW_BUFFERS` are ignored, and an empty mask falls back
+/// to `0b1`.
 #[no_mangle]
 pub extern "C" fn stone_set_draw_buffer_mask(mask: c_int) {
-    const ATTACHMENTS: [u32; 5] = [
-        glow::COLOR_ATTACHMENT0,
-        glow::COLOR_ATTACHMENT1,
-        glow::COLOR_ATTACHMENT2,
-        glow::COLOR_ATTACHMENT3,
-        glow::COLOR_ATTACHMENT4,
-    ];
-    let bits = (mask as u32) & 0b11111;
+    let bits = (mask as u32) & ((1 << DRAW_BUFFERS) - 1);
     let bits = if bits == 0 { 1 } else { bits };
     let len = 32 - bits.leading_zeros();
-    let mut buffers = [glow::NONE; 5];
+    let mut buffers = [glow::NONE; DRAW_BUFFERS];
     for slot in 0..len as usize {
         if bits & (1 << slot) != 0 {
-            buffers[slot] = ATTACHMENTS[slot];
+            buffers[slot] = glow::COLOR_ATTACHMENT0 + slot as u32;
         }
     }
     with_gl(|gl| unsafe {

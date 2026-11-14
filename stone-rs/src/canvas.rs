@@ -1184,7 +1184,7 @@ pub extern "C" fn stone_canvas_attach_color_target(
     id_handle: u64,
     slot: i32,
 ) -> bool {
-    if !(1..=4).contains(&slot) {
+    if !(1..crate::gl_state::DRAW_BUFFERS as i32).contains(&slot) {
         crate::log_once!(
             "CANVAS",
             "stone_canvas_attach_color_target: unsupported slot {slot}"
