@@ -139,3 +139,33 @@ print('ok')
     ));
     assert_eq!(output.trim(), "ok");
 }
+
+#[test]
+fn foreign_equality_helper_invalidates_vector_bounds() {
+    let lua = emit_module(
+        r#"
+fn external_equal(a: any, b: any) -> bool { return a == b }
+@nomangle fn after_equal(xs: [int], a: any, b: any) -> int {
+    if xs.len() <= 0 { return -1 }
+    if external_equal(a, b) { return xs[0] }
+    return -2
+}
+"#,
+    );
+    let output = run_luajit(&format!(
+        r#"{lua}
+local xs = {{len = 1, _data = {{7}}}}
+local calls = 0
+local mt = {{__eq = function()
+    calls = calls + 1
+    xs.len, xs._data[1] = 0, nil
+    return true
+end}}
+local ok, err = pcall(after_equal, xs, setmetatable({{}}, mt), setmetatable({{}}, mt))
+assert(calls == 1, 'equality must invoke the callback once')
+assert(not ok and tostring(err):find('Vec index out of bounds', 1, true), tostring(err))
+print('ok')
+"#
+    ));
+    assert_eq!(output.trim(), "ok");
+}
