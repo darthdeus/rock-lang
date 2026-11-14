@@ -88,18 +88,7 @@ pub fn elide_bounds_checks(ws: Option<&Workspace>, func: &mut MirFunc) -> usize 
         for &i in &func.blocks[b].insts {
             match func.insts[i] {
                 Inst::Lambda { .. } => return 0,
-                Inst::Index {
-                    kind: ContainerKind::Vec | ContainerKind::NativeBuffer,
-                    ..
-                }
-                | Inst::StoreIndex {
-                    kind: ContainerKind::Vec | ContainerKind::NativeBuffer,
-                    ..
-                }
-                | Inst::VecCheckedIndex { .. } => has_checked = true,
-                Inst::Call { func, .. } if is_stdlib_fn(ws, func, "__nb_checked_index") => {
-                    has_checked = true
-                }
+                ref inst if needs_bounds_proof(ws, inst) => has_checked = true,
                 _ => {}
             }
         }
@@ -162,10 +151,19 @@ pub fn elide_bounds_checks(ws: Option<&Workspace>, func: &mut MirFunc) -> usize 
     }
     let mut proven = Vec::new();
     for &b in &rpo {
-        let Some(input) = &ins[raw(b)] else {
+        let Some(last) = func.blocks[b]
+            .insts
+            .iter()
+            .rposition(|&id| needs_bounds_proof(ws, &func.insts[id]))
+        else {
             continue;
         };
-        let mut facts = input.clone();
+        let Some(mut facts) = ins[raw(b)].take() else {
+            continue;
+        };
+        // Solved inputs are independent: replay only as far as this block's
+        // last proof query, then discard its final state.
+        let last = func.blocks[b].insts[last];
         for &id in &func.blocks[b].insts {
             match &func.insts[id] {
                 Inst::Index {
@@ -193,6 +191,9 @@ pub fn elide_bounds_checks(ws: Option<&Workspace>, func: &mut MirFunc) -> usize 
                 }
                 _ => {}
             }
+            if id == last {
+                break;
+            }
             step(&mut facts, func, &ctx, id);
         }
     }
@@ -216,6 +217,22 @@ pub fn elide_bounds_checks(ws: Option<&Workspace>, func: &mut MirFunc) -> usize 
         }
     }
     proven.len()
+}
+
+fn needs_bounds_proof(ws: Option<&Workspace>, inst: &Inst) -> bool {
+    match inst {
+        Inst::Index {
+            kind: ContainerKind::Vec | ContainerKind::NativeBuffer,
+            ..
+        }
+        | Inst::StoreIndex {
+            kind: ContainerKind::Vec | ContainerKind::NativeBuffer,
+            ..
+        }
+        | Inst::VecCheckedIndex { .. } => true,
+        Inst::Call { func, .. } => is_stdlib_fn(ws, *func, "__nb_checked_index"),
+        _ => false,
+    }
 }
 
 /// Whether `fref` is the standard library's function `name`.
