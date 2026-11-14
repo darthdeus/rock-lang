@@ -3246,6 +3246,7 @@ fn main() {}
     fn late_full_publication_failure_keeps_the_last_good_artifact() {
         let mut harness = DefinitionTransitionHarness::boot(V0);
         let old_main = harness.fx.main_text();
+        std::fs::write(&harness.fx.incremental, "last good overlay").expect("retained overlay");
         let blocked_main = harness.fx.dir.path().join("blocked-main");
         std::fs::create_dir(&blocked_main).expect("blocked publication path");
 
@@ -3266,6 +3267,26 @@ fn main() {}
             "failed full publication must roll the compiler Session back with the artifact"
         );
         assert_eq!(harness.last_good_catalog(), vec!["2", "alpha", "beta"]);
+        assert_eq!(harness.fx.overlay_text(), "last good overlay");
+
+        std::fs::remove_file(&harness.fx.incremental).expect("remove overlay");
+        std::fs::create_dir(&harness.fx.incremental).expect("blocked overlay cleanup");
+        let failed = harness.replace_source(V1);
+        assert!(failed.is_err(), "overlay cleanup failure must surface");
+        assert_eq!(
+            harness.fx.main_text(),
+            old_main,
+            "failed overlay cleanup must not replace the last-good main"
+        );
+        assert_eq!(
+            harness
+                .fx
+                .project
+                .source_text(&harness.fx.source)
+                .as_deref(),
+            Some(V0),
+            "failed overlay cleanup must retain the last-good Session"
+        );
     }
 
     #[test]
