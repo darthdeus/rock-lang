@@ -22,13 +22,11 @@ fn single_use_reads_and_calls_render_in_their_consumer() {
     let lua = emit_module(SHAPES);
     // Two host property reads must retain their order; the first is staged.
     assert!(function_body(&lua, "sum").contains(" local r"));
-    for name in ["scaled"] {
-        let body = function_body(&lua, name);
-        assert!(
-            !body.contains(" local r"),
-            "`{name}` gave a single-use read or call a register:\n{body}"
-        );
-    }
+    let body = function_body(&lua, "scaled");
+    assert!(
+        !body.contains(" local r"),
+        "`scaled` gave a single-use read or call a register:\n{body}"
+    );
     assert!(
         function_body(&lua, "scaled").contains("(c0.x)"),
         "{}",
