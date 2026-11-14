@@ -32,6 +32,47 @@ fn stringify_external(value: any) -> string { return tostring(value) }
 "#;
 
 #[test]
+fn host_logging_callbacks_invalidate_vector_bounds() {
+    let lua = emit_module(
+        r#"
+@nomangle fn after_log_level(xs: [int]) -> int {
+    if xs.len() <= 0 { return -1 }
+    let level = log_get_level()
+    if level < 0 { return -2 }
+    return xs[0]
+}
+@nomangle fn after_log_once(xs: [int]) -> int {
+    if xs.len() <= 0 { return -1 }
+    log_once("effects", "message", "effect-test")
+    return xs[0]
+}
+"#,
+    );
+    let output = run_luajit(&format!(
+        r#"{lua}
+for _, case in ipairs({{
+    {{after_log_level, '__rock_log_level_source'}},
+    {{after_log_once, '__rock_log_sink'}},
+}}) do
+    local xs = {{len = 1, _data = {{7}}}}
+    local calls = 0
+    _G[case[2]] = function()
+        calls = calls + 1
+        xs.len, xs._data[1] = 0, nil
+        return 2
+    end
+    local ok, err = pcall(case[1], xs)
+    _G[case[2]] = nil
+    assert(calls == 1, 'logging must invoke the callback once')
+    assert(not ok and tostring(err):find('Vec index out of bounds', 1, true), tostring(err))
+end
+print('ok')
+"#
+    ));
+    assert_eq!(output.trim(), "ok");
+}
+
+#[test]
 fn external_string_conversion_invalidates_vector_bounds() {
     let lua = emit_module(SOURCE);
     let output = run_luajit(&format!(
