@@ -618,7 +618,7 @@ fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: 
     return i
 """
 
-@nowrite @nomangle inline(lua) fn __nb_checked_set(buf: any, i: int, v: any) = """
+@writes_elems @nomangle inline(lua) fn __nb_checked_set(buf: any, i: int, v: any) = """
     if i < 0 or i >= buf.len then
         error("NativeBuffer index out of bounds: index " .. tostring(i) ..
               " is outside [0, " .. tostring(buf.len) .. ")")
@@ -683,11 +683,10 @@ value SceneBuilder {
 // The prelude pre-seeds the type table as empty so lookups are safe during
 // the bootstrap window before those defs run.
 
-// Get the Rock type of a table value from its direct `__ty` tag. Every
-// struct/newtype/Vec carries it (set by __rock_create_struct / vec_new /
-// skull's literal emission); there is no metatable. cdata `value` structs
-// are not tables -- they reflect via __ROCK_TYPE_TABLE + ffi.istype, not here.
-@nowrite @nomangle inline(lua) fn __rock_get_type(obj: any) -> string? = """
+// Compiler-created structs/newtypes/Vecs carry a direct __ty tag. Foreign
+// tables can supply it through __index, which can mutate Rock state.
+// cdata values reflect through __ROCK_TYPE_TABLE and ffi.istype, not here.
+@nomangle inline(lua) fn __rock_get_type(obj: any) -> string? = """
     if type(obj) ~= "table" then
         return nil
     end
@@ -1298,8 +1297,9 @@ inline(lua) fn same_ref<A, B>(@repr(opaque) a: A, @repr(opaque) b: B) -> bool = 
 // functions that transitively call `print` get demoted with a warning
 // (rather than a hard error) so a `print(x)` dropped into a pure
 // helper for debugging doesn't force stripping the annotation.
+// Foreign values can run __tostring callbacks while being printed.
 @debug_impure
-@nowrite @intrinsic extern(lua) fn print(args: ...any)
+@intrinsic extern(lua) fn print(args: ...any)
 
 // Helper to ensure float formatting
 fn print_float(value: float) { print(to_string(value)) }
@@ -1307,8 +1307,8 @@ fn print_float(value: float) { print(to_string(value)) }
 // Error handling
 @nowrite @intrinsic extern(lua) fn error(message: string)
 
-// Note: Lua has built-in tostring(), declare as extern
-@nowrite @intrinsic extern(lua) fn tostring(value: any) -> string
+// A foreign value's __tostring callback can mutate Rock state.
+@intrinsic extern(lua) fn tostring(value: any) -> string
 
 // Method versions of tostring for basic types
 fn to_string(value: int) -> string { return tostring(value) }

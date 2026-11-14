@@ -1,0 +1,100 @@
+use crate::common::{emit_module, run_luajit};
+
+const SOURCE: &str = r#"
+fn stringify_external(value: any) -> string { return tostring(value) }
+
+@nomangle fn after_tostring(xs: [int], value: any) -> int {
+    if xs.len() <= 0 { return -1 }
+    let text = tostring(value)
+    if text == "" { return -2 }
+    return xs[0]
+}
+
+@nomangle fn after_stringify_helper(xs: [int], value: any) -> int {
+    if xs.len() <= 0 { return -1 }
+    let text = stringify_external(value)
+    if text == "" { return -2 }
+    return xs[0]
+}
+
+@nomangle fn after_print(xs: [int], value: any) -> int {
+    if xs.len() <= 0 { return -1 }
+    print(value)
+    return xs[0]
+}
+
+@nomangle fn after_type_tag(xs: [int], value: any) -> int {
+    if xs.len() <= 0 { return -1 }
+    let tag = __rock_get_type(value)
+    if tag == null { return -2 }
+    return xs[0]
+}
+"#;
+
+#[test]
+fn external_string_conversion_invalidates_vector_bounds() {
+    let lua = emit_module(SOURCE);
+    let output = run_luajit(&format!(
+        r#"{lua}
+for _, f in ipairs({{after_tostring, after_stringify_helper, after_print}}) do
+    local xs = {{len = 1, _data = {{7}}}}
+    local calls = 0
+    local value = setmetatable({{}}, {{__tostring = function()
+        calls = calls + 1
+        xs.len, xs._data[1] = 0, nil
+        return 'converted'
+    end}})
+    local ok, err = pcall(f, xs, value)
+    assert(calls == 1, 'string conversion must invoke the callback once')
+    assert(not ok and tostring(err):find('Vec index out of bounds', 1, true), tostring(err))
+end
+print('ok')
+"#
+    ));
+    assert_eq!(output.trim(), "converted\nok");
+}
+
+#[test]
+fn external_type_tag_lookup_invalidates_vector_bounds() {
+    let lua = emit_module(SOURCE);
+    let output = run_luajit(&format!(
+        r#"{lua}
+local xs = {{len = 1, _data = {{7}}}}
+local value = setmetatable({{}}, {{__index = function(_, key)
+    assert(key == '__ty')
+    xs.len, xs._data[1] = 0, nil
+    return 'Foreign'
+end}})
+local ok, err = pcall(after_type_tag, xs, value)
+assert(not ok and tostring(err):find('Vec index out of bounds', 1, true), tostring(err))
+print('ok')
+"#
+    ));
+    assert_eq!(output.trim(), "ok");
+}
+
+#[test]
+fn checked_native_store_invalidates_element_value_facts() {
+    let lua = emit_module(
+        r#"
+@nomangle fn changed_native_index(xs: [int], indices: NativeBuffer<int>) -> int {
+    if indices[0] < 0 || indices[0] >= xs.len() { return -1 }
+    __nb_checked_set(indices, 0, 99)
+    return xs[indices[0]]
+}
+@nomangle fn native_store_case() -> int {
+    let indices = native_buffer_int(1)
+    indices[0] = 1
+    return changed_native_index([11, 22], indices)
+}
+"#,
+    );
+    let output = run_luajit(&format!(
+        r#"{lua}
+local ok, err = pcall(native_store_case)
+assert(not ok and tostring(err):find('Vec index out of bounds', 1, true), tostring(err))
+print('ok')
+"#
+    ));
+    assert_eq!(output.trim(), "ok");
+}

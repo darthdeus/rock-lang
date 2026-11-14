@@ -11,6 +11,7 @@ mod map_empty_snapshots;
 mod map_len_interop;
 mod map_loops;
 mod map_remove_absent;
+mod opaque_effects;
 
 mod cdata_leaf_projection;
 
