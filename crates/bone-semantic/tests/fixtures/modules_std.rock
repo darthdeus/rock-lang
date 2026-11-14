@@ -145,6 +145,7 @@
 // prelude: __map_col_slot_of
 // prelude: __map_col_spine
 // prelude: __map_get_checked
+// prelude: __map_keys_are_strings
 // prelude: __nb_alloc_i16
 // prelude: __nb_alloc_i8
 // prelude: __nb_alloc_u16
@@ -252,6 +253,7 @@
 // prelude: __slot_alloc
 // prelude: __slot_release
 // prelude: __sort_map_keys
+// prelude: __sort_string_map_keys
 // prelude: __unm
 // prelude: __unwrap_failed
 // prelude: __vec_cache_key
