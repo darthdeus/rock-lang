@@ -133,3 +133,43 @@ fn map_mutated_between_loops() {
     ));
     assert_eq!(got, "a|a,b");
 }
+
+#[test]
+fn snapshot_sort_keeps_string_and_numeric_order_on_js() {
+    if !crate::common::require_node() {
+        return;
+    }
+    let ws = ws_with(
+        r#"
+newtype Label(string)
+@nomangle fn main() {
+    let strings: Map<string, int> = map_new()
+    strings["2"] = 2
+    strings["10"] = 10
+    let keys = strings.keys()
+    let values = strings.values()
+    let pairs = strings.to_array()
+    let labels: Map<Label, int> = map_new()
+    labels[Label("2")] = 2
+    labels[Label("10")] = 10
+    let label_keys = labels.keys()
+    let numbers: Map<int, int> = map_new()
+    numbers[2] = 2
+    numbers[10] = 10
+    let number_keys = numbers.keys()
+    print("{keys[0]} {values[0]} {pairs[0].0} {label_keys[0].0} {number_keys[0]}")
+}
+"#,
+    );
+    let mid = crate::common::test_mid(&ws);
+    let emitted = skull_codegen_js::emit::emit_program(&ws, mid).expect("emit snapshot program");
+    let mut js = skull_codegen_js::assemble_prelude(
+        &emitted.program,
+        emitted.has_code_refs(),
+        skull_codegen_js::JS_NODE_HOST,
+        &[],
+    );
+    js.push_str(&emitted.program);
+    js.push_str("\nmain();");
+    assert_eq!(crate::common::run_node(&js).trim(), "10 10 10 10 10");
+}

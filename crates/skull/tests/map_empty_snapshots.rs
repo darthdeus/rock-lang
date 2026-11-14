@@ -3,6 +3,7 @@ use crate::common::{emit_module, run_luajit};
 const SOURCE: &str = r#"
 struct Item { id: int }
 nobox value Column { a: int, b: int, c: int, d: int }
+newtype Label(string)
 
 @nomangle fn empty_boxed_map() -> Map<string, Item> { return map_new() }
 @nomangle fn empty_column_map() -> Map<string, Column> { return map_new() }
@@ -23,6 +24,9 @@ nobox value Column { a: int, b: int, c: int, d: int }
 @nomangle fn column_values(m: Map<string, Column>) -> [Column] { return m.values() }
 @nomangle fn boxed_pairs(m: Map<string, Item>) -> [(string, Item)] { return m.to_array() }
 @nomangle fn column_pairs(m: Map<string, Column>) -> [(string, Column)] { return m.to_array() }
+@nomangle fn label_keys(m: Map<Label, int>) -> [Label] { return m.keys() }
+@nomangle fn number_keys(m: Map<int, int>) -> [int] { return m.keys() }
+@nomangle fn mixed_keys(m: Map<any, int>) -> [any] { return m.keys() }
 
 @nomangle fn sorted_snapshots() {
     let m: Map<string, Item> = map_new()
@@ -163,4 +167,41 @@ fn nonempty_snapshots_stay_sorted_and_survive_map_mutation() {
         run_luajit(&format!("{lua}\nsorted_snapshots()\nprint('ok')")),
         "ok"
     );
+}
+
+#[test]
+fn string_backed_snapshot_keys_use_native_sort_only() {
+    let lua = emit_module(SOURCE);
+    let output = run_luajit(&format!(
+        r#"{lua}
+local sort = table.sort
+local comparators = {{}}
+table.sort = function(keys, compare)
+    comparators[#comparators + 1] = compare or false
+    return sort(keys, compare)
+end
+local boxed, column = empty_boxed_map(), empty_column_map()
+boxed['10'], boxed['2'] = {{ id = 10 }}, {{ id = 2 }}
+column.spine['10'], column.spine['2'] = 1, 2
+column.occupied_count = 2
+local labels, numbers = {{}}, {{}}
+labels['10'], labels['2'] = 10, 2
+numbers[10], numbers[2] = 10, 2
+local mixed = {{ [10] = 10, ['2'] = 2 }}
+local a, b, c = boxed_keys(boxed), column_keys(column), label_keys(labels)
+assert(a._data[1] == '10' and b._data[1] == '10' and c._data[1] == '10')
+sorted_snapshots()
+local d, e = number_keys(numbers), mixed_keys(mixed)
+assert(d._data[1] == 10 and d._data[2] == 2, 'numeric keys keep tostring order')
+assert(e._data[1] == 10 and e._data[2] == '2', 'mixed keys keep tostring order')
+assert(#comparators >= 5)
+for i = 1, #comparators - 2 do
+    assert(comparators[i] == false, 'string-backed maps should use native sort')
+end
+assert(type(comparators[#comparators - 1]) == 'function', 'numeric maps need the comparator')
+assert(type(comparators[#comparators]) == 'function', 'mixed maps need the comparator')
+print('ok')
+"#
+    ));
+    assert_eq!(output, "ok");
 }

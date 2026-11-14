@@ -2763,6 +2763,14 @@ const EPSILON: float = 0.0000001
     table.sort(keys._data, __rock_inspect_key_lt)
 """
 
+@relocates @nomangle inline(lua) fn __sort_string_map_keys<K>(keys: [K]) = """
+    table.sort(keys._data)
+"""
+
+// Lua lowering folds this to the physical key kind in each concrete Map body.
+// Other targets keep the generic comparator.
+@intrinsic @pure inline(lua) fn __map_keys_are_strings<K>(keys: [K]) -> bool = "return false"
+
 @intrinsic @nomangle inline(lua) fn inspect(obj: any, cycle_detect: bool = true, precision: int = -1) -> string = """
     if type(obj) == "cdata" then
         if __rock_nb_storage_of(obj) then return tostring(obj) end
@@ -3186,7 +3194,11 @@ fn Map<K, V>.keys_into(map, result: [K]) -> [K] {
     for (k, v) in map {
         vec_push(result, k)
     }
-    __sort_map_keys(result)
+    if __map_keys_are_strings(result) {
+        __sort_string_map_keys(result)
+    } else {
+        __sort_map_keys(result)
+    }
     return result
 }
 

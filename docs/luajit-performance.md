@@ -502,8 +502,8 @@ output, and in the copy replace only
 `table.sort(keys._data)`. Every map key in this benchmark is a string.
 Run each file with `luajit -e 'dofile("map.lua"); main()'` in seven pairs
 of fresh processes, reversing baseline/candidate order each pair. The existing
-driver flushes and warms each case before timing. This is an emitted-Lua
-experiment, not an implemented compiler optimization or an x86 result.
+driver flushes and warms each case before timing. This was an emitted-Lua
+experiment before compiler implementation or x86 measurement.
 
 | Snapshot, 1,000 entries | Baseline min/median ns/entry | String sort min/median ns/entry |
 | --- | ---: | ---: |
@@ -513,16 +513,41 @@ experiment, not an implemented compiler optimization or an x86 result.
 
 Median reductions were 26-27%; allocation behavior was not changed or measured.
 One hundred randomized string-array comparisons, including zero and high
-bytes, produced identical sorted arrays with both comparators. Implementation
-still needs a type-directed path and regression coverage for other key types,
-string newtypes, empty maps, column maps, and snapshot independence, followed
-by x86 measurements. Existing snapshot regressions are in
+bytes, produced identical sorted arrays with both comparators. Existing
+snapshot regressions are in
 `crates/skull/tests/map_empty_snapshots.rs` and `tests/nobox/map_value.rock`.
 The same baseline runs measured scalar length at 19.030 ns for 8 entries and
 1,302.300 ns for 1,000; column length at 0.436 ns for 1,000 (an invariant read
 the JIT can hoist); and row register/remove with 200 retained entries at
 324.840 ns. These confirm the length cost, not the payoff of a counted-map
 implementation.
+
+The implemented path folds the string-key decision in each concrete Lua
+`Map.keys_into` body. String keys and transparent string newtypes use default
+`table.sort`; other keys retain the `tostring` comparator. `values` and
+`to_array` inherit the sort through `keys`. JS retains its existing comparator.
+Regressions cover numeric and mixed-key ordering, string newtypes, empty maps,
+column maps, and independent snapshots.
+
+For the implementation measurement, compile `benchmarks/map_loop.rock` with
+`rock compile-single benchmarks/map_loop.rock --output map.lua` using release
+compilers before and after the change (baseline `bd40143a`). Run each emitted
+file with `luajit -e 'dofile("map.lua"); main()'` in 15 interleaved pairs of
+fresh processes, reversing order each pair. The benchmark flushes and warms
+each case before timing; the JIT is on for the reported times. The arm64 run
+used an Apple M4 Max and system LuaJIT 2.1.1774896198; the x86 run used an
+Intel i9-14900K and system LuaJIT 2.1.1785763465. The arm64 job began at
+9.5 load on 14 cores while unrelated work was present. Times are ns per entry
+for 1,000-entry snapshots; each cell gives min / median.
+
+| Snapshot | M4 Max baseline | M4 Max string sort | i9-14900K baseline | i9-14900K string sort |
+| --- | ---: | ---: | ---: | ---: |
+| `keys` | 188.904 / 199.423 | 131.203 / 146.525 | 264.619 / 273.183 | 145.991 / 150.947 |
+| `values` | 191.606 / 202.695 | 132.178 / 147.366 | 267.948 / 275.038 | 150.462 / 155.095 |
+| `to_array` | 217.672 / 226.383 | 149.737 / 166.023 | 292.017 / 298.834 | 171.278 / 176.616 |
+
+The sort change does not alter snapshot allocation. The empty snapshot
+allocation and freshness regressions still pass.
 
 Returning a shared cached snapshot would break independence. `keys_into`
 already provides explicit caller-owned reuse, used by Stone's draw list and

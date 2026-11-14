@@ -384,7 +384,7 @@ impl<'a> Builder<'a> {
         self.arith_ty_of(self.expr_ty(e)?)
     }
 
-    fn arith_ty_of_mono(&self, ty: &MonoTy) -> Option<ArithTy> {
+    pub(crate) fn arith_ty_of_mono(&self, ty: &MonoTy) -> Option<ArithTy> {
         let (payload, _) = ty.peel_nullable();
         match payload {
             MonoTy::Int => Some(ArithTy::Int),

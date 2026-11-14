@@ -623,6 +623,26 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        if let Callee::Unresolved { name, .. } = callee
+            && name.as_str() == "__map_keys_are_strings"
+            && self.scx.target() == bone_core::hir::FnBackend::Lua
+            && self.resolves_to_inline_builtin(e, name)
+            && let [keys] = arg_idxs[..]
+        {
+            self.lower_expr(keys)?;
+            let string_keys = self.concrete_expr_ty(keys).is_some_and(|ty| {
+                matches!(
+                    ty,
+                    crate::monoty::MonoTy::App {
+                        ctor: crate::monoty::MonoCtor::Array,
+                        params,
+                    } if params.first().and_then(|key| self.arith_ty_of_mono(key)) == Some(ArithTy::Str)
+                )
+            });
+            return Ok(ValueRepr::Scalar(
+                self.emit_cur(Inst::Const(Lit::Bool(string_keys))),
+            ));
+        }
         // `native_buffer_alloc<T>(n)` intrinsic: allocate a flat ffi array of the
         // concrete element type and wrap it in a `NativeBuffer`. Resolving the
         // ctype here (not in a generic inline(lua) body) is the whole point -- it
