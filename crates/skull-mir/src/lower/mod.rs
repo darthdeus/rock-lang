@@ -2347,6 +2347,9 @@ impl<'a> Builder<'a> {
         projection: Ustr,
     ) -> Idx<Cell> {
         let cell = self.f.new_cell_typed(Some(name), ty);
+        if let Some(concrete) = ty.and_then(|ty| self.concrete_ty_id(ty)) {
+            self.f.cells[cell].never_nil = crate::nilness::monoty_never_nil(self.ws, concrete);
+        }
         self.f.cells[cell].producer = if projection.is_empty() {
             crate::mir::CellProducer::Binding
         } else {
@@ -2722,19 +2725,29 @@ impl<'a> Builder<'a> {
         let cells = match slot {
             RetSlot::Leaves(shape) => {
                 let owner = self.binding_ty(pb).and_then(|ty| self.concrete_ty_id(ty));
-                self.new_flat_enum_cells(pb, name, shape, owner)?
-                    .unwrap_or_else(|| {
+                match self.new_flat_enum_cells(pb, name, shape, owner)? {
+                    Some(cells) => cells,
+                    None => {
+                        // Refuses any nullable nesting, so a `Some` here means
+                        // every slot is a data leaf of the type it names.
+                        let leaf_tys = self.value_shape_leaf_monos(shape);
                         (0..slot.slot_count())
                             .map(|li| {
-                                self.new_binding_cell(
+                                let cell = self.new_binding_cell(
                                     pb,
                                     crate::names::indexed(name.as_str(), "__", li),
                                     None,
                                     crate::names::indexed("", "", li),
-                                )
+                                );
+                                if let Some(ty) = leaf_tys.as_ref().and_then(|tys| tys.get(li)) {
+                                    self.f.cells[cell].never_nil =
+                                        crate::nilness::monoty_never_nil(self.ws, ty);
+                                }
+                                cell
                             })
                             .collect()
-                    })
+                    }
+                }
             }
             RetSlot::Nested(_) | RetSlot::Opaque => (0..slot.slot_count())
                 .map(|li| {

@@ -1018,6 +1018,15 @@ pub struct Cell {
     /// A source parameter has a compiler-generated default-fill store. Closure
     /// ownership treats that store as initialization, not mutation.
     pub default_param: bool,
+    /// Set ONLY at lowering, ONLY where the concrete type of the value this
+    /// cell holds cannot be nil where the cell is read
+    /// ([`crate::nilness::monoty_never_nil`]): a binding whose bone type
+    /// resolves to a concrete non-nullable type, or one ABI slot of a
+    /// splatting value parameter whose leaf type is non-nullable. The Lua
+    /// emitter drops the nil-write guard on a field store of such a cell. Any
+    /// doubt about what a cell holds leaves it unset -- unset only costs the
+    /// guard, while a wrongly-set flag lets a nil store insert an absent key.
+    pub never_nil: bool,
     /// Set ONLY at lowering, on the root cell of a place that a `ref` borrows.
     /// A write through that alias can reach a `value` object in this cell, and
     /// the transforms cannot see it, so the object must stay the one this cell
@@ -1594,6 +1603,7 @@ impl MirFunc {
             ty: None,
             nonnull_value_struct: false,
             default_param: false,
+            never_nil: false,
             borrowed: false,
             native_ty: None,
             native_flat_slot: None,
@@ -1620,6 +1630,7 @@ impl MirFunc {
             ty,
             nonnull_value_struct: false,
             default_param: false,
+            never_nil: false,
             borrowed: false,
             native_ty: None,
             native_flat_slot: None,

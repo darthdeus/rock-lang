@@ -359,15 +359,7 @@ fn assert_round_settled(ws: Option<&Workspace>, func: &MirFunc) {
 /// branched on the result purely for this, and the value oracle read every one as
 /// CORRECT because the ANSWER was right.
 fn fold_never_nil_compares(func: &mut MirFunc) -> bool {
-    let never_nil = |func: &MirFunc, v: Idx<Inst>| {
-        matches!(
-            &func.insts[v],
-            Inst::MakeValueStruct { .. }
-                | Inst::MakeStruct { .. }
-                | Inst::MakeEnum { .. }
-                | Inst::MakeTuple(_)
-        )
-    };
+    let never_nil = skull_mir::nilness::constructed_never_nil;
     let is_nil = |func: &MirFunc, v: Idx<Inst>| matches!(&func.insts[v], Inst::Const(Lit::Nil));
     let literal_against_sentinel =
         |func: &MirFunc, a: Idx<Inst>, b: Idx<Inst>| match (&func.insts[a], &func.insts[b]) {
@@ -527,6 +519,42 @@ fn is_dead_rc(inst: &Inst, i: Idx<Inst>, use_count: &[u32], load_count: &[u32]) 
 mod tests {
     use super::*;
     use crate::test_support::lower;
+
+    /// `let v: float? = some_int_opt` wraps the nullable value in the
+    /// int->float subsumption, which emits its operand unchanged on every
+    /// value backend. The wrapped value is nil whenever the source is, so
+    /// the presence test on it is real and must not fold.
+    #[test]
+    fn a_presence_test_on_a_widened_nullable_does_not_fold() {
+        let mut f = MirFunc::new(ustr::Ustr::from("widened"));
+        let cell = f.new_cell(None);
+        let loaded = f.emit(f.entry, Inst::Load(cell));
+        let widened = f.emit(f.entry, Inst::IntToFloat(loaded));
+        let nil = f.emit(f.entry, Inst::Const(Lit::Nil));
+        let test = f.emit(f.entry, Inst::Eq(widened, nil));
+        f.set_term(f.entry, Term::Return(vec![test]));
+
+        assert!(!fold_never_nil_compares(&mut f), "{f}");
+        assert!(matches!(f.insts[test], Inst::Eq(..)), "{f}");
+    }
+
+    /// The shape this fold exists for still folds: a test against a value
+    /// the body just constructed.
+    #[test]
+    fn a_presence_test_on_a_fresh_tuple_folds() {
+        let mut f = MirFunc::new(ustr::Ustr::from("fresh_tuple"));
+        let one = f.emit(f.entry, Inst::Const(Lit::Int(1)));
+        let made = f.emit(f.entry, Inst::MakeTuple(vec![one]));
+        let nil = f.emit(f.entry, Inst::Const(Lit::Nil));
+        let test = f.emit(f.entry, Inst::Eq(made, nil));
+        f.set_term(f.entry, Term::Return(vec![test]));
+
+        assert!(fold_never_nil_compares(&mut f), "{f}");
+        assert!(
+            matches!(f.insts[test], Inst::Const(Lit::Bool(false))),
+            "{f}"
+        );
+    }
 
     #[test]
     fn cleanup_load_root_keeps_the_written_cell() {

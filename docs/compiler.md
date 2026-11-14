@@ -73,6 +73,63 @@ its incremental tests for the implementation and current boundaries.
 
 For tests and fixture formats, see [Testing compiler changes](testing.md).
 
+## Never-nil analysis
+
+[`skull_mir::nilness`](../crates/skull-mir/src/nilness.rs) answers "can this
+value be nil?". It has two tiers, and the split is by what a wrong answer
+costs, not by how much each can prove.
+
+**Tier 1, `constructed_never_nil`, decides code.** Cleanup folds a presence
+test whose operand is an aggregate this body just constructed, `fold_const_branches`
+turns the branch into a goto, and DCE deletes the dead arm. A wrong answer
+here removes a live branch, so the tier admits one fact only: a constructor
+ran right here (`MakeStruct`, `MakeValueStruct`, `MakeEnum`, `MakeTuple`).
+Widening it to everything that cannot be nil was tried and measured:
+`packages/stone` came out byte-identical, so the reach
+buys nothing and every added member is another chance to delete live code.
+
+**Tier 2, `inst_never_nil_with`, only skips a guard.** The Lua emitter drops
+the nil-write guard on a field or frame store when the value cannot be nil.
+A guarded and an unguarded store agree on every value -- the guard only
+skips a store that would be a no-op -- so a wrong answer costs the rehash
+the guard avoids and nothing else. (They differ for a table that reached
+the store through an opaque boundary carrying a metatable: the skipped
+write does not reach its `__newindex`, and the presence test reads the
+field, so `__index` sees it.) That bound is what lets this
+tier read declared types, cell marks and emitted shapes. It must never
+decide a branch.
+
+What tier 2 may conclude:
+
+- An instruction that *computes* a value -- arithmetic, comparisons,
+  concatenation, `tostring`, formatting, lengths, constructors, `ffi` casts
+  -- yields a number, string, bool, table or cdata, or raises. It never
+  yields nil.
+- `IntToFloat`, `UintToFloat` and `UintToInt` are not such instructions.
+  Int-to-float subsumption is a no-op on both value backends, so they emit
+  their operand unchanged, and the coercion funnel peels nullable when it
+  classifies an operand: `let v: float? = some_int_opt` wraps a value that
+  IS nil when absent. Both tiers peel these conversions and answer for the
+  value underneath. Treating them as "converts to a number" deleted live
+  presence branches; `tests/nullable/numeric_coercion_presence.rock` and
+  `a_presence_test_on_a_widened_nullable_does_not_fold` pin that.
+- A read -- a load, a field, an element, a call result -- promises nothing
+  by itself. Tier 2 adds a declared-type answer for loads and calls; an
+  `extern` that breaks its declared return type costs the rehash, which is
+  why that is allowed here and nowhere else.
+
+Lowering sets [`Cell::never_nil`] where it can prove the cell's concrete
+type cannot be nil: a binding whose type resolves (including body-local
+inference types the emitter cannot resolve on its own), one ABI slot of a
+splatting value parameter whose leaf type is non-nullable, and the cell an
+`if` expression joins into when the whole value lives in one slot. Any
+doubt leaves it unset; unset only costs a guard.
+
+It cannot prove anything about `any`, `()`, `never`, a newtype (which
+carries whatever it wraps), the leaves of a nullable value (nil while
+absent), a flat enum's slots (nil for variants that do not fill them), or a
+compiler temp with no type. Each of those keeps its guard.
+
 ## Lua value ABI
 
 The shared [ABI planner](../crates/skull-mir/src/lower/abi.rs) selects the

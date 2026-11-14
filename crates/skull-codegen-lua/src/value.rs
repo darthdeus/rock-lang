@@ -759,6 +759,38 @@ impl Emitter<'_> {
         self.frame.is_some_and(|frame| frame.fields.contains(&cell))
     }
 
+    /// A single frame-field store. The nil-write guard goes when the value
+    /// cannot be nil; a guarded plain operand reads twice instead of paying a
+    /// `do local v0` evaluation scope; only a guarded non-plain RHS keeps the
+    /// temporary so it evaluates once. A literal nil drops its statically
+    /// false `v ~= nil` disjunct.
+    pub(crate) fn write_single_frame_assignment(
+        &self,
+        out: &mut String,
+        target: &str,
+        value: Idx<Inst>,
+    ) {
+        if self.never_nil(value) {
+            let _ = write!(out, " {target} = ");
+            self.write_opnd(out, value);
+            out.push('\n');
+            return;
+        }
+        if !self.opnd_is_plain(value) {
+            return self.write_frame_assignment(out, &[(target.to_owned(), true)], |out| {
+                self.write_opnd(out, value)
+            });
+        }
+        out.push_str(" if ");
+        if !matches!(self.func.insts[value], Inst::Const(Lit::Nil)) {
+            self.write_opnd(out, value);
+            out.push_str(" ~= nil or ");
+        }
+        let _ = write!(out, "{target} ~= nil then {target} = ");
+        self.write_opnd(out, value);
+        out.push_str(" end\n");
+    }
+
     // Nil writes into absent Lua hash slots can repeatedly rehash a full frame.
     // Only compiler-owned plain frame fields use this path; user stores retain
     // their ordinary assignment and metamethod behavior. Scoped vN temporaries

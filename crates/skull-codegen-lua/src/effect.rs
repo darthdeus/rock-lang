@@ -3,71 +3,26 @@
 use super::*;
 
 impl Emitter<'_> {
-    /// Whether an operand's own instruction can only produce a non-nil value,
-    /// so a store of it needs no nil-write guard.
+    /// Whether an operand can only produce a non-nil value, so a store of it
+    /// needs no nil-write guard. Lowering marks the cells it can prove
+    /// ([`Cell::never_nil`]); this adds what the emitted shape decides and
+    /// what a declared type promises. For plain Rock tables, a wrong
+    /// answer costs the rehash the guard avoids, never a wrong value. Host
+    /// metatables can observe the skipped store; see docs/compiler.md.
     pub(crate) fn never_nil(&self, id: Idx<Inst>) -> bool {
-        match &self.func.insts[id] {
-            Inst::Const(lit) => !matches!(lit, Lit::Nil),
-            Inst::Load(cell) => cell_never_nil(self.ws, self.func.cells[*cell].ty),
-            // A callee declared to return a non-optional scalar returns one; an
-            // extern that breaks its declaration only costs the rehash guard.
+        skull_mir::nilness::inst_never_nil_with(self.func, id, &|leaf| match &self.func.insts[leaf]
+        {
+            Inst::Load(cell) => self.cell_never_nil(*cell),
             Inst::Call { func, .. } => {
                 cell_never_nil(self.ws, crate::func_of(self.ws, *func).return_ty)
             }
-            Inst::IntAdd(..)
-            | Inst::IntSub(..)
-            | Inst::IntMul(..)
-            | Inst::IntDiv(..)
-            | Inst::IntMod(..)
-            | Inst::UintAdd(..)
-            | Inst::UintSub(..)
-            | Inst::UintMul(..)
-            | Inst::UintDiv(..)
-            | Inst::UintMod(..)
-            | Inst::FloatAdd(..)
-            | Inst::FloatSub(..)
-            | Inst::FloatMul(..)
-            | Inst::FloatDiv(..)
-            | Inst::FloatMod(..)
-            | Inst::StringConcat(..)
-            | Inst::ToString(..)
-            | Inst::Format { .. }
-            | Inst::FormatDyn { .. }
-            | Inst::IntLt(..)
-            | Inst::IntLeq(..)
-            | Inst::IntGt(..)
-            | Inst::IntGeq(..)
-            | Inst::UintLt(..)
-            | Inst::UintLeq(..)
-            | Inst::UintGt(..)
-            | Inst::UintGeq(..)
-            | Inst::FloatLt(..)
-            | Inst::FloatLeq(..)
-            | Inst::FloatGt(..)
-            | Inst::FloatGeq(..)
-            | Inst::Eq(..)
-            | Inst::NotEq(..)
-            | Inst::Neg(..)
-            | Inst::Not(..)
-            | Inst::BitNot(..)
-            | Inst::UintBitNot(..)
-            | Inst::BitAnd(..)
-            | Inst::BitOr(..)
-            | Inst::BitXor(..)
-            | Inst::Shl(..)
-            | Inst::Shr(..)
-            | Inst::UintBitAnd(..)
-            | Inst::UintBitOr(..)
-            | Inst::UintBitXor(..)
-            | Inst::UintShl(..)
-            | Inst::UintShr(..)
-            | Inst::Len { .. }
-            | Inst::MakeTuple(..)
-            | Inst::MakeVec(..)
-            | Inst::MakeStruct { .. }
-            | Inst::Lambda { .. } => true,
             _ => false,
-        }
+        })
+    }
+
+    fn cell_never_nil(&self, cell: Idx<Cell>) -> bool {
+        let c = &self.func.cells[cell];
+        c.never_nil || cell_never_nil(self.ws, c.ty)
     }
 
     pub(crate) fn write_effect(&self, out: &mut String, id: Idx<Inst>, inst: &Inst) {
@@ -80,10 +35,7 @@ impl Emitter<'_> {
             Inst::Store { cell, value } => {
                 if self.cell_is_frame_field(*cell) {
                     let target = cellname(self.func, self.frame, self.cell_colors, *cell);
-                    let guard = !self.never_nil(*value);
-                    self.write_frame_assignment(out, &[(target, guard)], |out| {
-                        self.write_opnd(out, *value)
-                    });
+                    self.write_single_frame_assignment(out, &target, *value);
                     return;
                 }
                 // Two cells that share a local make a copy between them a
@@ -113,24 +65,29 @@ impl Emitter<'_> {
                     if matches!(self.func.insts[*base], Inst::Load(cell) if cell == frame.s_cell) {
                         let mut target = cellname(self.func, None, self.cell_colors, frame.s_cell);
                         write_field_key(&mut target, field.as_str());
-                        let guard = !self.never_nil(*value);
-                        self.write_frame_assignment(out, &[(target, guard)], |out| {
-                            self.write_opnd(out, *value)
-                        });
+                        self.write_single_frame_assignment(out, &target, *value);
                         return;
                     }
                 }
-                // LuaJIT can rehash when assigning nil to an absent key.
-                // Metatable writes remain observable; plain operands evaluate once.
+                // LuaJIT can rehash when assigning nil to an absent key, so a
+                // store that would be a no-op is skipped. A Rock struct never
+                // carries a metatable (`__ty` tagging only), so the skip
+                // consults none: the only table that could have one here came
+                // from a host through an opaque boundary, and a nil write that
+                // changes nothing does not reach its `__newindex`. A real
+                // write is a raw store and still does. Plain operands evaluate
+                // once.
                 let guard = self.opnd_is_plain(*base)
                     && self.opnd_is_plain(*value)
                     && !self.never_nil(*value);
                 if guard {
                     out.push_str(" if ");
-                    self.write_opnd(out, *value);
-                    out.push_str(" ~= nil or getmetatable(");
-                    self.write_opnd(out, *base);
-                    out.push_str(") ~= nil or ");
+                    // A store of literal nil skips its statically-false
+                    // `nil ~= nil` disjunct; the field test still decides.
+                    if !matches!(self.func.insts[*value], Inst::Const(Lit::Nil)) {
+                        self.write_opnd(out, *value);
+                        out.push_str(" ~= nil or ");
+                    }
                     self.write_opnd(out, *base);
                     write_field_key(out, field.as_str());
                     out.push_str(" ~= nil then\n");

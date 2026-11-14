@@ -230,6 +230,85 @@ Do not retry these; each was measured.
 - Removing a whole abort class or a downstream guard as a fix: the exit
   moves. Measure totals and per-site rows together.
 
+## Field-store nil-write guards (2026-11-13)
+
+A nil store into an absent table key is expensive, so the Lua emitter
+guards a field store whose value it cannot prove non-nil
+(`if v ~= nil or t.f ~= nil then t.f = v end`).
+
+The mechanism is time, not memory, and measuring only memory makes the
+guard look pointless: a nil store never leaves a node behind, so a table
+whose hash part has no free node rehashes to make room, drops the nil on
+the way, and rehashes again for the next such store — the same work
+forever at no net memory growth. The cost is proportional to the table's
+live entries. Per store on an M1 with the bundled LuaJIT
+(`benchmarks/nil_store_probe.lua`, which reports both columns so this is
+re-checkable per architecture):
+
+| live entries in the table | raw nil store | guarded |
+| --- | ---: | ---: |
+| 3 | 35.8 ns | 1.24 ns |
+| 15 | 195.8 ns | 1.28 ns |
+| 63 | 716.0 ns | 1.91 ns |
+| 127 | 1264.8 ns | 1.79 ns |
+
+A real store into the same absent key costs 1.16 ns and does occupy a
+node. Keep the guard: it is worth its branch by two to three orders of
+magnitude on the path it protects, and it is free on a warm trace.
+
+The guarded and raw stores agree on every value — the guard only skips a
+store that would be a no-op — so
+removing a guard whose value cannot be nil is dead-code removal, and a
+wrong never-nil answer could only reintroduce the rehash, never change
+behavior. Presence tests folded by cleanup are the dangerous consumer, and
+they read a separate, deliberately narrow tier; see
+[Never-nil analysis](compiler.md#never-nil-analysis) for the rules.
+
+The guard does not consult `getmetatable`. A Rock struct carries no
+metatable (`__ty` tagging only), so the term could only ever fire for a
+table a host handed in through an opaque boundary, and it cost 24% of a
+field clear on a present field and 38% on an absent one in the
+interpreter (33.9 -> 25.8 ns and 27.3 -> 16.8 ns; free on a warm trace
+either way, since the trace folds the metatable load). The consequence is
+narrow and deliberate: a nil write that changes nothing no longer reaches
+such a table's `__newindex`, and the presence test reads the field, so
+`__index` sees it. A write that changes something is a raw store and
+still reaches `__newindex`.
+
+Lowering marks cells never-nil from concrete binding types, from the leaf
+types of splatting value parameters (the dotted-key `embed` stores that
+guarded every leaf) and at an `if` expression's join. The emitter drops the
+guard when the value's shape or a declared type says it cannot be nil, and
+drops the statically false `nil ~= nil` disjunct from literal-nil stores. A
+single frame field assigns directly (never-nil) or through a one-line guard
+(plain operand) instead of a `do local v0` scope. Stores that can be nil —
+nullable leaves, presence tags, flat-enum slot clears — keep their guards,
+pinned by test.
+
+On `packages/stone`: 548 -> 437 field-store guards, all 472 frame-store
+`do local` scopes gone (373 become one-line guards), 127,097 -> 125,931
+lines. Every one of those differences is a guard or scope shape: a
+classifier over the full diff of the two emitted programs leaves nothing
+unaccounted for. Cold compile is unchanged (interleaved stone compiles, min/median
+129.9/142.4 -> 130.3/143.9 ms on Apple M1): the never-nil marking is two
+map probes per binding cell.
+
+What this buys, measured (`benchmarks/field_store.rock`, 15 interleaved
+fresh-process rounds, bundled LuaJIT 2.1.1794164915, Apple M1, JIT on):
+**warm trace times are flat**. `leaf_capture` (7 guarded leaf stores per
+call) 16.51 -> 16.43 ns/elem median, `row_reset` 2.59 -> 2.68,
+`coro_points` 3.65 -> 3.66, `nullable_passthrough` control 1.64 -> 1.69 —
+all within round-to-round noise, consistent with the rejected
+unwrap-guard elision: a compiled trace folds `getmetatable` of a known
+table shape and hoists the presence read, so the guard is nearly free
+once hot. The extracted Stone vertex writers were likewise flat (±0.6%).
+The interpreter, which pays every guard, improved where guards vanished:
+`leaf_capture` 68.5 -> 47.6 ns/elem (-30%), `row_reset` 79.5 -> 71.3
+(-10%); interpreter numbers are diagnostic, not the target. The
+change is justified by smaller emitted code and cheaper
+recording/off-trace execution at zero compile-time and runtime cost, not
+by a warm-trace speedup claim.
+
 ## Map loops (2026-11-11)
 
 `Map` walks lower to `MapNext` over a bare table or a column map's spine.
@@ -522,7 +601,7 @@ through a field.
 for byte the baseline.
 The remaining Stone stores are slot writes guarded on one vector and applied
 to a dozen parallel vectors, `if i == xs.len() { push } else { xs[i] = v }`
-free-list writes, and guards with a call between them and the store. 
+free-list writes, and guards with a call between them and the store.
 
 `benchmarks/vec_store.rock` times the shapes above, 1,000 elements per pass,
 with the JIT on and then off; `_kept` workloads are controls the pass must

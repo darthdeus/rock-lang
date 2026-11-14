@@ -1,0 +1,60 @@
+// A nullable int used where a float is expected goes through the int->float
+// subsumption. That conversion is a no-op on both value backends -- it emits
+// its operand unchanged -- so the converted value is still nil when the
+// source is absent, and a presence test on it must survive constant folding.
+//
+// The compiler's never-nil analysis (`skull_mir::nilness`) therefore peels
+// these conversions and answers for the value underneath, instead of
+// treating "converts to a number" as "is a number".
+
+@test(output = "absent")
+fn test_nullable_int_in_a_float_binding_stays_absent() {
+    let a: int? = null
+    let v: float? = a
+    if v == null { print("absent") } else { print("present") }
+}
+
+@test(output = "7")
+fn test_nullable_int_in_a_float_binding_keeps_its_value() {
+    let a: int? = 7
+    let v: float? = a
+    if v == null { print("absent") } else { print("{v.floor()}") }
+}
+
+@inline fn widen(x: int?) -> float? {
+    return x
+}
+
+@test(output = "absent")
+fn test_inlined_widening_callee_stays_absent() {
+    let a: int? = null
+    let v = widen(a)
+    if v == null { print("absent") } else { print("present") }
+}
+
+fn describe(v: float?) -> string {
+    if v == null {
+        return "absent"
+    }
+    return "present"
+}
+
+@test(output = "absent")
+fn test_nullable_int_argument_in_a_float_parameter() {
+    let a: int? = null
+    print(describe(a))
+}
+
+@test(output = "absent")
+fn test_nullable_uint_in_a_float_binding_stays_absent() {
+    let a: uint? = null
+    let v: float? = a
+    if v == null { print("absent") } else { print("present") }
+}
+
+@test(output = "0")
+fn test_coalescing_a_widened_absent_value() {
+    let a: int? = null
+    let v: float? = a
+    print("{(v ?? 0.0).floor()}")
+}

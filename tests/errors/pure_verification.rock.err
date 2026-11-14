@@ -211,4 +211,3 @@ fn bad_safe_nav_let(x: int?) -> int? {
 fn bad_calls_fn_value(f: fn(int) -> int, x: int) -> int {
     return f(x)
 }
-

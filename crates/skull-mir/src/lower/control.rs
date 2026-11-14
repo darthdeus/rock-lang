@@ -477,8 +477,22 @@ impl<'a> Builder<'a> {
         let result_ty = matches!(shape, RetSlot::Opaque)
             .then(|| self.current_expr_unit_storage_ty_id())
             .flatten();
+        // An opaque slot is the whole if-expression's value in one cell, so
+        // the expression's type decides whether that cell can hold nil. A
+        // splatting shape's slots hold leaves, which this type does not
+        // describe (a non-nullable value's leaf can still be a nullable
+        // field), so they stay unmarked.
+        let never_nil = !shape.splats()
+            && self
+                .cur_expr
+                .and_then(|e| self.concrete_expr_ty(e))
+                .is_some_and(|ty| crate::nilness::monoty_never_nil(self.ws, ty));
         let results: Vec<Idx<Cell>> = (0..shape.slot_count())
-            .map(|_| self.f.new_cell_typed(None, result_ty))
+            .map(|_| {
+                let cell = self.f.new_cell_typed(None, result_ty);
+                self.f.cells[cell].never_nil = never_nil;
+                cell
+            })
             .collect();
         let then_bb = self.f.new_block();
         let else_bb = self.f.new_block();

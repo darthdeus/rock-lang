@@ -1,0 +1,246 @@
+// Microbenchmark for field-store nil-write guards and coroutine frame stores.
+//
+//     rock run benchmarks/field_store.rock
+//
+// For an A/B across compiler revisions, compile with each binary and run both
+// artifacts with the same LuaJIT, alternating order across fresh processes:
+//
+//     rock compile-single benchmarks/field_store.rock --output fs.lua
+//     luajit -e 'dofile("fs.lua")'
+//
+// Workloads mirror the emitted shapes the guard reduction targets:
+// `leaf_capture` stores seven non-nullable value leaves into an embedded
+// field (one nil-write guard per leaf before the reduction); `row_init`
+// resets a row of non-nullable fields plus two nullable clears (the clears
+// keep a guard without the statically-false value test); `coro_points`
+// resumes a coroutine whose yielded value and loop state live in frame
+// fields (scoped `do local v0` stores before the reduction); and
+// `nullable_passthrough` stores nullable parameters, where the guard is
+// load-bearing and must not change.
+//
+// Each workload flushes the JIT, attaches a trace listener and runs its loop
+// until hot, so every trace, abort and byte of mcode counted was recorded by
+// that workload. `ns_per_elem` is then measured on the warm trace cache, and
+// `interp_ns_per_elem` with the JIT off.
+
+@nomangle inline(lua) fn bench_clock() -> float = "return os.clock()"
+
+@nomangle inline(lua) fn bench_jit(on: bool) = """
+    local jit = require("jit")
+    if on then jit.on() else jit.off() end
+    jit.flush()
+"""
+
+@nomangle inline(lua) fn bench_reset() = """
+    local jit = require("jit")
+    jit.flush()
+    _G.__bench = { start = 0, stop = 0, abort = 0, reasons = {} }
+    _G.__bench_cb = function(what, tr, fn, pc, otr, oex)
+      local b = _G.__bench
+      if what == "start" then
+        b.start = b.start + 1
+      elseif what == "stop" then
+        b.stop = b.stop + 1
+      elseif what == "abort" then
+        b.abort = b.abort + 1
+        local reason = (require("jit.vmdef").traceerr[otr] or tostring(otr)):gsub("%W+", "_")
+        b.reasons[reason] = (b.reasons[reason] or 0) + 1
+      end
+    end
+    jit.attach(_G.__bench_cb, "trace")
+"""
+
+@nomangle inline(lua) fn bench_counts() -> string = """
+    local jit = require("jit")
+    jit.attach(_G.__bench_cb)
+    local util = require("jit.util")
+    local b = _G.__bench
+    local traces, mc = 0, 0
+    for tr = 1, 32000 do
+      local mcode = util.tracemc(tr)
+      if mcode then
+        traces = traces + 1
+        mc = mc + #mcode
+      end
+    end
+    collectgarbage("collect")
+    local reasons = {}
+    for reason, count in pairs(b.reasons) do
+      reasons[#reasons + 1] = reason .. ":" .. count
+    end
+    table.sort(reasons)
+    return string.format("traces=%d stops=%d aborts=%d mcode_bytes=%d abort_reasons=%s",
+      traces, b.stop, b.abort, mc,
+      #reasons > 0 and table.concat(reasons, ",") or "none")
+"""
+
+// The ui_presence_capture_rect shape: an embedded value field stores one
+// dotted leaf key per parameter. The string leaf keeps the value GC-tier so
+// the leaves live in the parent table rather than one cdata.
+value RectCtx {
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    z: float,
+    ref_h: float,
+    ctx: string,
+}
+
+struct UiState {
+    armed: bool = true,
+    embed last_rect: RectCtx,
+}
+
+fn capture_rect(u: UiState, r: RectCtx) {
+    if u.armed {
+        u.last_rect = r
+    }
+}
+
+fn leaf_capture(u: UiState, n: int) -> float {
+    for i in 0..n {
+        capture_rect(u, RectCtx {
+            x: (i % 13) as float,
+            y: (i % 5) as float,
+            w: 32.0,
+            h: 16.0,
+            z: (i % 3) as float,
+            ref_h: 720.0,
+            ctx: "world",
+        })
+    }
+    return u.last_rect.x
+}
+
+// The mesh_batch_row_init shape: non-nullable resets plus nullable clears.
+struct BatchRow {
+    pixel_snap: bool = false,
+    surface_sampling: int = 0,
+    external_verts: bool = false,
+    vert_count: int = 0,
+    depth: float = 0.0,
+    custom_draw: int? = null,
+    block: int? = null,
+}
+
+fn row_init(row: BatchRow) {
+    row.pixel_snap = false
+    row.surface_sampling = 0
+    row.external_verts = true
+    row.vert_count = 0
+    row.depth = 1.0
+    row.custom_draw = null
+    row.block = null
+}
+
+fn row_reset(rows: [BatchRow]) -> float {
+    for i in 0..rows.len() {
+        row_init(rows[i])
+    }
+    return rows[0].depth
+}
+
+// Frame stores: the yielded value and the loop state survive each yield in
+// coroutine frame fields.
+value Pt {
+    x: float,
+    y: float,
+    tag: int,
+}
+
+co fn emit_points(n: int) -> Coroutine<Pt, int> {
+    let acc = 0
+    for i in 0..n {
+        acc += i % 7
+        yield Pt { x: (i % 13) as float, y: (i % 5) as float, tag: acc }
+    }
+    return acc
+}
+
+// The per-frame pattern: a short-lived coroutine created, driven and
+// dropped. Creation dominates, so this is what frame pre-sizing moves.
+fn coro_create(n: int) -> float {
+    let t = 0.0
+    for i in 0..n {
+        let c = emit_points(2)
+        let p = c.resume()
+        if p != null {
+            t += p.x
+        }
+    }
+    return t
+}
+
+fn coro_points(n: int) -> float {
+    let c = emit_points(n)
+    let t = 0.0
+    while true {
+        let p = c.resume()
+        if p == null {
+            break
+        }
+        t += p.x
+    }
+    return t
+}
+
+// Control: nullable stores keep their guard on both sides of the change.
+struct Slot {
+    a: float? = null,
+    b: float? = null,
+}
+
+fn store_nullable(s: Slot, a: float?, b: float?) {
+    s.a = a
+    s.b = b
+}
+
+fn nullable_passthrough(s: Slot, n: int) -> float {
+    for i in 0..n {
+        if i % 2 == 0 {
+            store_nullable(s, (i % 9) as float, null)
+        } else {
+            store_nullable(s, null, (i % 9) as float)
+        }
+    }
+    return s.a ?? s.b ?? 0.0
+}
+
+fn report(name: string, counts: string, elems: int, jit_s: float, interp_elems: int, interp_s: float, sink: float) {
+    let ns = jit_s * 1000000000.0 / (elems as float)
+    let interp_ns = interp_s * 1000000000.0 / (interp_elems as float)
+    print("workload={name} {counts} ns_per_elem={ns} interp_ns_per_elem={interp_ns} sink={sink}")
+}
+
+// `reps` timed passes of `pass`, each over `n` elements; one twentieth of
+// them again with the JIT off.
+fn drive(name: string, n: int, reps: int, pass: fn() -> float) {
+    bench_reset()
+    let sink = 0.0
+    for r in 0..200 { sink += pass() }
+    let counts = bench_counts()
+    let t0 = bench_clock()
+    for r in 0..reps { sink += pass() }
+    let jit_s = bench_clock() - t0
+    bench_jit(false)
+    let interp_reps = reps ./ 20 + 1
+    let t1 = bench_clock()
+    for r in 0..interp_reps { sink += pass() }
+    let interp_s = bench_clock() - t1
+    bench_jit(true)
+    report(name, counts, n * reps, jit_s, n * interp_reps, interp_s, sink)
+}
+
+fn main() {
+    let u = UiState { last_rect: RectCtx { x: 0.0, y: 0.0, w: 0.0, h: 0.0, z: 0.0, ref_h: 0.0, ctx: "" } }
+    let rows: [BatchRow] = []
+    for i in 0..100 { rows.push(BatchRow {}) }
+    let slot = Slot {}
+
+    drive("leaf_capture", 1000, 20000, () => leaf_capture(u, 1000))
+    drive("row_reset", 100, 100000, () => row_reset(rows))
+    drive("coro_points", 1000, 2000, () => coro_points(1000))
+    drive("coro_create", 500, 4000, () => coro_create(500))
+    drive("nullable_passthrough", 1000, 20000, () => nullable_passthrough(slot, 1000))
+}

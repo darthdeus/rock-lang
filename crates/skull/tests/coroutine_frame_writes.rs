@@ -60,12 +60,18 @@ fn main() {
 }
 "#;
 
+/// The trailing `0` is the `__newindex` count for two `b.value = null`
+/// clears of an already-absent field. A Rock struct carries no metatable,
+/// so the nil-write guard does not consult one: a write that would change
+/// nothing is skipped outright, and a host table that reached this store
+/// through an opaque boundary does not see it. A write that changes
+/// something is a raw store and still reaches `__newindex`.
 #[test]
 fn frame_stores_evaluate_rhs_once_clear_payloads_and_preserve_user_writes() {
     let lua = common::try_emit_module(FRAME_WRITES).expect("frame writes emit");
     assert_eq!(
         common::run_main(&lua),
-        "true\ntrue\ntrue\ntrue\ntrue\ntrue\n4\n2"
+        "true\ntrue\ntrue\ntrue\ntrue\ntrue\n4\n0"
     );
 }
 

@@ -25,6 +25,7 @@ pub mod mangle;
 pub mod mir;
 pub mod monoty;
 pub mod names;
+pub mod nilness;
 pub mod reach;
 pub mod shader_ir;
 pub mod sinking;

@@ -113,6 +113,15 @@ fn emit(src: &str, fn_name: &str) -> String {
     emit_dump(vec![ast], fn_name)
 }
 
+/// Whether a field store in `lua` carries its nil-write guard. The guard is
+/// the only `if .. ~= nil then` line these snippets produce.
+fn has_store_guard(lua: &str) -> bool {
+    lua.lines().any(|l| {
+        let l = l.trim();
+        l.starts_with("if ") && l.ends_with(" ~= nil then")
+    })
+}
+
 #[test]
 fn absent_field_store_skips_nil_key_insertion_and_preserves_clearing() {
     common::require_luajit();
@@ -124,6 +133,9 @@ fn absent_field_store_skips_nil_key_insertion_and_preserves_clearing() {
         lua.contains(" ~= nil or ") && lua.contains(".payload ~= nil then"),
         "{lua}"
     );
+    // A Rock struct never carries a metatable (`__ty` tagging only), so the
+    // guard does not consult one.
+    assert!(!lua.contains("getmetatable("), "{lua}");
     let symbol = lua
         .lines()
         .find_map(|line| line.strip_prefix("function "))
@@ -147,7 +159,10 @@ local observed = setmetatable({{}}, {{
 }})
 {symbol}(observed, nil)
 {symbol}(observed, nil)
-assert(hits == 2 and reads == 0)
+assert(hits == 0, 'a nil write that changes nothing is skipped, metatable or not')
+assert(reads == 2, 'the presence test reads the field, so __index sees it')
+{symbol}(observed, 'live')
+assert(hits == 1, 'a real write is a raw store and reaches __newindex')
 "#
     );
     luajit_ok(&driver, "");
@@ -159,7 +174,7 @@ fn non_nil_constant_field_store_keeps_direct_assignment() {
         "struct Row { count: int = 0 } fn update(row: Row) { row.count = 42 }",
         "update",
     );
-    assert!(!lua.contains("getmetatable("), "{lua}");
+    assert!(!has_store_guard(&lua), "{lua}");
     assert!(lua.contains(".count = (42)"), "{lua}");
 }
 
@@ -170,12 +185,12 @@ fn computed_field_store_keeps_direct_assignment() {
          fn update(acc: Acc, x: float) -> float { let m = acc.mean * 0.5 + x; acc.mean = m; return m }",
         "update",
     );
-    assert!(!lua.contains("getmetatable("), "{lua}");
+    assert!(!has_store_guard(&lua), "{lua}");
     let lua = emit_clean(
         "struct Acc { mean: float = 0.0 } fn update(acc: Acc, x: float) { acc.mean = x }",
         "update",
     );
-    assert!(!lua.contains("getmetatable("), "{lua}");
+    assert!(!has_store_guard(&lua), "{lua}");
 }
 
 #[test]
@@ -187,7 +202,7 @@ fn stored_call_result_of_a_scalar_type_needs_no_nil_guard() {
          fn update(acc: Acc, x: int) { acc.n = weight(x); acc.label = name(x) }",
         "update",
     );
-    assert!(!lua.contains("getmetatable("), "{lua}");
+    assert!(!has_store_guard(&lua), "{lua}");
     let lua = emit_clean(
         "struct Inner { v: int } struct Acc { inner: Inner? = null, xs: Vec<int>? = null } \
          fn make(x: int) -> Inner { if x > 3 { return Inner { v: x } } return Inner { v: 0 } } \
@@ -195,14 +210,91 @@ fn stored_call_result_of_a_scalar_type_needs_no_nil_guard() {
          fn update(acc: Acc, x: int) { acc.inner = make(x); acc.xs = list(x) }",
         "update",
     );
-    assert!(!lua.contains("getmetatable("), "{lua}");
+    assert!(!has_store_guard(&lua), "{lua}");
     let lua = emit_clean(
         "struct Acc { n: int? = null } \
          fn weight(x: int) -> int? { if x > 3 { return x * 2 } return null } \
          fn update(acc: Acc, x: int) { acc.n = weight(x) }",
         "update",
     );
-    assert!(lua.contains("getmetatable("), "{lua}");
+    assert!(has_store_guard(&lua), "{lua}");
+}
+
+#[test]
+fn value_param_leaf_stores_need_no_nil_guard() {
+    // An embedded value field stores one dotted leaf key per ABI-split
+    // parameter cell. The leaves of a non-nullable value shape are
+    // non-nullable scalars, so none of the stores can write nil.
+    let lua = emit_clean(
+        "value Rect { x: float, y: float } \
+         struct Holder { embed r: Rect } \
+         fn update(h: Holder, p: Rect) { h.r = p }",
+        "update",
+    );
+    assert!(!has_store_guard(&lua), "{lua}");
+    assert!(lua.contains("[\"r.x\"] = "), "{lua}");
+}
+
+#[test]
+fn nullable_value_param_leaf_stores_keep_the_guard() {
+    // A nullable value parameter's data leaves hold nil while the value is
+    // absent, so its leaf stores keep the nil-write guard.
+    let lua = emit_clean(
+        "value Rect { x: float, y: float } \
+         struct Holder { embed r: Rect? } \
+         fn update(h: Holder, p: Rect?) { h.r = p }",
+        "update",
+    );
+    assert!(has_store_guard(&lua), "{lua}");
+}
+
+#[test]
+fn inferred_local_scalar_store_needs_no_nil_guard() {
+    // The store reads the cell the `if` joins into, which has no declared
+    // type of its own. Lowering marks it from the if-expression's concrete
+    // type, and `int` cannot be nil.
+    let lua = emit_clean(
+        "struct Acc { count: int = 0 } \
+         fn update(acc: Acc, a: int, b: int) { let n = if a > b { a } else { b }; acc.count = n }",
+        "update",
+    );
+    assert!(!has_store_guard(&lua), "{lua}");
+}
+
+#[test]
+fn nil_literal_field_store_drops_the_dead_value_test() {
+    common::require_luajit();
+    // A store of literal nil keeps its guard (clearing an absent key must
+    // trigger a rehash), but the
+    // statically-false `nil ~= nil` disjunct is not emitted.
+    let lua = emit_clean(
+        "struct Row { tag: int? = null } fn update(row: Row) { row.tag = null }",
+        "update",
+    );
+    assert!(has_store_guard(&lua), "{lua}");
+    assert!(!lua.contains("nil) ~= nil"), "{lua}");
+    let symbol = lua
+        .lines()
+        .find_map(|line| line.strip_prefix("function "))
+        .expect("function definition")
+        .split('(')
+        .next()
+        .unwrap();
+    let driver = format!(
+        r#"{lua}
+local row = {{ tag = 7 }}
+{symbol}(row)
+assert(row.tag == nil)
+local hits = 0
+local observed = setmetatable({{}}, {{ __newindex = function() hits = hits + 1 end }})
+{symbol}(observed)
+assert(hits == 0, 'clearing an already-absent key writes nothing at all')
+local absent = {{}}
+{symbol}(absent)
+assert(next(absent) == nil)
+"#
+    );
+    luajit_ok(&driver, "");
 }
 
 #[test]
@@ -3277,4 +3369,67 @@ fn native_buffer_and_column_map_accesses_drop_their_checks() {
     );
     assert!(lua.contains("__map_col_slot_of("), "{lua}");
     assert!(!lua.contains("__vec_checked_index("), "{lua}");
+}
+
+/// Lower `src`, mark the binding named `field` as a coroutine-frame field
+/// behind a fresh state parameter, and emit. For frame-assignment shapes.
+fn emit_framed_let(src: &str, fn_name: &str, field: &str) -> String {
+    let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut [ast]).expect("semantic_pass");
+    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
+    let fid = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == fn_name)
+        .unwrap()
+        .0;
+    let (mut func, interner) = common::lower_test_ref(&ws, mid, fid).expect("lower");
+    let cell = func
+        .cells
+        .iter()
+        .find(|(_, c)| c.name.is_some_and(|n| n == field))
+        .expect("frame field binding")
+        .0;
+    let state = func.new_cell(Some(ustr::Ustr::from("state")));
+    func.params.insert(0, state);
+    let frame = skull_codegen_lua::FrameCtx {
+        s_cell: state,
+        fields: [cell].into_iter().collect(),
+        slots: [(cell, 0)].into_iter().collect(),
+    };
+    skull_codegen_lua::emit_named_framed(
+        &ws,
+        &CodegenCtx::new(&ws),
+        &interner,
+        fn_name,
+        &func,
+        Some(&frame),
+        None,
+    )
+}
+
+#[test]
+fn frame_store_of_a_never_nil_value_assigns_directly() {
+    let lua = emit_framed_let(
+        "fn step(x: float) -> bool { let acc = true; acc = x > 1.0; return acc }",
+        "step",
+        "acc",
+    );
+    assert!(!lua.contains("do local"), "{lua}");
+    assert!(!lua.contains("~= nil"), "{lua}");
+    assert!(lua.contains(".c0 = "), "{lua}");
+}
+
+#[test]
+fn guarded_frame_store_of_a_plain_value_skips_the_temporary() {
+    // `x` can be nil, so the store keeps its guard; a plain operand needs no
+    // `do local v0` evaluation scope.
+    let lua = emit_framed_let(
+        "fn step(x: int?) -> int? { let acc: int? = 7; acc = x; return acc }",
+        "step",
+        "acc",
+    );
+    assert!(!lua.contains("do local"), "{lua}");
+    assert!(lua.contains("~= nil then"), "{lua}");
 }

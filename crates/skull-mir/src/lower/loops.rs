@@ -1565,7 +1565,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    fn value_shape_leaf_monos(&self, shape: &ValueShape) -> Option<Vec<MonoTy>> {
+    pub(crate) fn value_shape_leaf_monos(&self, shape: &ValueShape) -> Option<Vec<MonoTy>> {
         if shape.nullable {
             return None;
         }
