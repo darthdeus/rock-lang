@@ -396,18 +396,9 @@ pub fn submit_tonemap(
     let active = canvas_active(output)
     let weight = ENGINE.exposure_weight
     let shader = if weight != null { tonemap_split_shader } else { tonemap_shader }
-    let scene_binding = GpuBinding { slot: 0, resource: SampledTexture::Canvas(scene), filter: TextureFilter::Nearest }
-    let bloom_binding = GpuBinding { slot: 1, resource: SampledTexture::Canvas(bloom), filter: TextureFilter::Linear }
-    let bindings = if weight != null {
-        [scene_binding, bloom_binding,
-            GpuBinding { slot: 2, resource: SampledTexture::Canvas(weight), filter: TextureFilter::Linear }]
-    } else { [scene_binding, bloom_binding] }
-    let draw = GpuDraw {
-        shader: shader,
-        bindings: bindings,
-        blend: BlendMode::Replace,
-        color_write: GPU_WRITE_RGBA,
-    }
+    let pass = tonemap_command(shader, scene, bloom, weight, output,
+        GpuRect { x: 0, y: 0, w: active.x, h: active.y })
+    let draw = pass.draws[0]
     if let w = weight {
         gpu_draw_uniform_payload(draw, shader, TonemapSplitU {
             exposure: exposure,
@@ -429,12 +420,46 @@ pub fn submit_tonemap(
             bloom_uv_hi: active_uv_hi(bloom),
         })
     }
-    return submit_pass(GpuPass {
-        target: GpuTarget::Canvas(output),
-        load: GpuLoad::Load,
-        viewport: GpuRect { x: 0, y: 0, w: active.x, h: active.y },
-        draws: [draw],
-    })
+    return submit_pass(pass)
+}
+
+global TONEMAP_COMMAND: GpuPass? = null
+
+// The tonemap's command, kept between frames like the present's: a frame
+// rewrites its target, viewport, shader and sources in place. A command an
+// observer may retain is built fresh and never enters the cache. The split
+// shader samples a third texture, so a change of shape rebuilds.
+fn tonemap_command(shader: string, scene: Canvas, bloom: Canvas, weight: Canvas?,
+                   output: Canvas, viewport: GpuRect) -> GpuPass {
+    let retained = gpu_submission_retains_commands()
+    let count = if weight != null { 3 } else { 2 }
+    let held = if retained { null } else { TONEMAP_COMMAND }
+    let pass = if held != null && held.draws[0].bindings.len() == count {
+        held
+    } else {
+        let bindings = [
+            GpuBinding { slot: 0, resource: SampledTexture::Canvas(scene), filter: TextureFilter::Nearest },
+            GpuBinding { slot: 1, resource: SampledTexture::Canvas(bloom), filter: TextureFilter::Linear },
+        ]
+        if let w = weight {
+            bindings.push(GpuBinding { slot: 2, resource: SampledTexture::Canvas(w), filter: TextureFilter::Linear })
+        }
+        GpuPass {
+            target: GpuTarget::Canvas(output),
+            load: GpuLoad::Load,
+            viewport: viewport,
+            draws: [GpuDraw { shader: shader, bindings: bindings, blend: BlendMode::Replace, color_write: GPU_WRITE_RGBA }],
+        }
+    }
+    if !retained { TONEMAP_COMMAND = pass }
+    pass.target = GpuTarget::Canvas(output)
+    pass.viewport = viewport
+    let draw = pass.draws[0]
+    draw.shader = shader
+    draw.bindings[0].resource = SampledTexture::Canvas(scene)
+    draw.bindings[1].resource = SampledTexture::Canvas(bloom)
+    if let w = weight { draw.bindings[2].resource = SampledTexture::Canvas(w) }
+    return pass
 }
 
 // Render-feature ablation: STONE_FX_OFF=bloom,shadowmap,glow,outline,lights
