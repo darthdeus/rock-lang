@@ -282,16 +282,15 @@ fn index_may_call_table_metamethod(
     let Some(expr) = expr_type(ws, bi, base) else {
         return true;
     };
-    match expr {
+    matches!(
+        expr,
         TypeExpr::App {
             ctor: TypeCtor::Array | TypeCtor::Map,
             ..
-        }
-        | TypeExpr::Builtin(BuiltinTy::Any)
-        | TypeExpr::Generic(..)
-        | TypeExpr::Infer(..) => true,
-        _ => false,
-    }
+        } | TypeExpr::Builtin(BuiltinTy::Any)
+            | TypeExpr::Generic(..)
+            | TypeExpr::Infer(..)
+    )
 }
 
 fn field_may_call_callback(
