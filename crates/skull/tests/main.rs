@@ -8,6 +8,7 @@ mod copy_code_refs;
 mod nested_strided_inspect;
 
 mod map_empty_snapshots;
+mod map_len_interop;
 mod map_loops;
 mod map_remove_absent;
 

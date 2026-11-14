@@ -464,6 +464,30 @@ for a counted fast path, with ordinary counting for exposed maps. Measure
 insert, overwrite, present/absent remove, clear, and mutation-only workloads
 before accepting the extra bookkeeping. No counted representation was added.
 
+`benchmarks/map_count_probe.lua` measures a counter prototype with all writes
+under its control. It checks overwrite, false values, nil-as-delete, absent
+remove, clear, and explicitly demonstrates a stale count after a raw external
+write. `crates/skull/tests/map_len_interop.rs` pins ordinary Map length across
+Lua mutations, aliases, and externally created tables. The prototype therefore
+does not justify replacing ordinary Map with a counted wrapper.
+
+On Intel i9-14900K, system LuaJIT 2.1.1785763465, JIT enabled, nine alternating
+raw/counted pairs in one process, each flushed and warmed before timing:
+
+| Controlled mutation prototype | Raw median ns/iteration | Counted median ns/iteration |
+| --- | ---: | ---: |
+| Insert/remove, length read between them, 200 retained entries | 311.610 | 2.110 |
+| Toggle presence across 64 keys, no length reads | 1.867 | 1.992 |
+| Toggle presence across 64 keys, length read every 16 writes | 31.557 | 2.564 |
+| Clear/refill eight entries | 36.080 | 42.210 |
+
+The mutation-only cases expose a cost even when length is unused. Fixed-key
+and invariant-length cases in the probe can be hoisted or sunk by the JIT;
+they are not general insertion or length costs. A production fast path still
+needs proof of a closed mutation boundary, including host callbacks and
+retained aliases. Adding that analysis solely for local maps is not yet
+justified by a representative Rock workload.
+
 Snapshot sorting has a smaller candidate: `__sort_map_keys` always calls
 `table.sort(keys._data, __rock_inspect_key_lt)`, whose comparator applies
 `tostring` to both keys. For statically string keys, default `table.sort`
