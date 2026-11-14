@@ -1325,6 +1325,39 @@ fn uint_checked_shifts_emit_no_closure() {
 }
 
 #[test]
+fn uint_constant_shift_counts_need_no_helper() {
+    for op in ["<<", ">>"] {
+        for count in [0, 1, 16, 31] {
+            let src = format!("fn shift(value: uint) -> uint {{ value {op} {count} }}");
+            for lua in [emit(&src, "shift"), emit_clean_bound(&src, "shift")] {
+                assert!(!lua.contains("__rock_u32_shift_count"), "{lua}");
+            }
+        }
+    }
+}
+
+#[test]
+fn exec_uint_constant_shifts_preserve_unsigned_results() {
+    let mut src = String::new();
+    let mut driver = String::from("(function() ");
+    for count in [0, 1, 16, 31] {
+        src.push_str(&format!(
+            "fn left{count}(value: uint) -> uint {{ value << {count} }}\n\
+             fn right{count}(value: uint) -> uint {{ value >> {count} }}\n"
+        ));
+        for value in [0_u32, 1, 2147483648, u32::MAX] {
+            driver.push_str(&format!(
+                "assert(left{count}({value}) == {}); assert(right{count}({value}) == {}); ",
+                value << count,
+                value >> count,
+            ));
+        }
+    }
+    driver.push_str("return true end)()");
+    assert_eq!(run(&src, &driver), "true");
+}
+
+#[test]
 fn uint_constant_casts_emit_folded_numbers() {
     for (value, expected) in [("0", "0"), ("4294967295", "4294967295"), ("3.9", "3")] {
         let lua = emit(&format!("fn cast() -> uint {{ {value} as uint }}"), "cast");

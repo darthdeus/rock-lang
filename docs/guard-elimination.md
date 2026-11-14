@@ -149,7 +149,7 @@ itself evidence of runtime cost.
 | Enum/tag dispatch | Constant cases and local scalar replacement already remove many tags. Dynamic `any`, reflected values, foreign records and escaping payloads still need discrimination. |
 | Checked uint conversion | `__rock_checked_u32` validates `[0, 4294967295]` then floors. A proven finite range can remove comparisons; fractional values still require flooring. |
 | Float-to-int conversion | The Lua `float_to_int` function value in `stdlib/unified.rock:1770` checks the host value type, then floors. Direct MIR `FloatToInt` emits `math.floor` without that host type guard; fractional values still require flooring. |
-| Shift count | A constant count alone does not currently remove `__rock_u32_shift_count`; a whole constant shift expression may fold. A uint type alone does not prove `<= 31`; a range fact could remove the runtime check. No measured workload yet. |
+| Shift count | Literal integer counts in `0..=31` now omit `__rock_u32_shift_count` and its helper capture. Dynamic counts remain checked: a uint type alone does not prove `<= 31`. See the measured follow-up below. |
 | Coroutine status/hooks | `next` distinguishes suspended from terminal after resume, including a real nullable yield. Hooks and terminal/error checks encode behavior. Source absence of hook registration alone does not prove a mutable frame has no hook. |
 | Coroutine `pcall` | Converts step errors to the errored state and performs cleanup. Removal requires a complete no-raise proof, including nested callbacks and defers. |
 | Native layout / reload compatibility | Checks validate foreign data or version changes. Compile-time knowledge of the current body does not establish compatibility with an old live value. |
@@ -166,11 +166,12 @@ Existing regression suites include `opaque_effects`, `default_guard_fold`,
 
 1. The bounded affine follow-up is implemented below. Broaden it only against
    a real NativeBuffer consumer; retain the trace-sensitivity caveat.
-2. Recover private-vector push effects against the existing collection workload;
-   retain the callback regression matrix as the safety boundary.
-3. Reuse any resulting small interval domain for subtraction and numeric guards.
-4. Defer call-site specialization, constructor facts and coroutine specialization
-   until a measured workload warrants their additional machinery.
+2. Local private-vector push effects are implemented below. Parameterized
+   collection still needs an interprocedural proof.
+3. Constant shift-count guards are removed below. Bounded subtraction needs
+   finite-range facts that the surveyed consumers do not establish locally.
+4. Investigate constructor capacity facts against real NativeBuffer consumers;
+   defer call-site and coroutine specialization until measurements warrant them.
 
 The initial audit removed no compiler guards. Its manual benchmark ablation
 must never be used as production output. The implemented follow-up below is
@@ -338,3 +339,106 @@ milliseconds include startup and writing output:
 Median overhead is below 0.6% for the first two fixtures and 2.8% for
 `vec_store`. Ranges overlap and include large outliers; these small standalone
 samples do not establish compile-cost neutrality or whole-program cost.
+
+
+## Implemented follow-up: constant uint shift counts
+
+The Lua emitter now omits the shift-count helper for MIR integer literals in
+`0..=31`, including its otherwise unused closure capture. It shares one predicate
+between expression emission and helper binding. Dynamic counts retain the check;
+uint alone does not establish the required upper bound. Right shifts retain
+unsigned division/floor behavior and left shifts retain uint normalization.
+The source checker already rejects literal counts outside the range.
+
+The emission regression failed before the change. Coverage checks both shift
+directions and helper binding for counts 0, 1, 16 and 31, then executes those
+counts on values 0, 1, 2147483648 and 4294967295. Existing tests retain dynamic
+out-of-range rejection and single evaluation of effectful operands. Both the
+Lua codegen and compiler test suites pass.
+
+`benchmarks/uint_shift.rock` is a dependent xorshift loop with three constant
+shifts per iteration. Compile it with before/after release compilers, then run
+`luajit benchmarks/uint_shift.lua emitted.lua` in alternating fresh processes.
+The driver warms 200 calls, times 20000 calls of 1000 iterations with LuaJIT on,
+checks a result sink through its output and reports final trace/code sizes.
+Eight pairs on Apple M4 Max / LuaJIT 2.1.1774896198 gave:
+
+| Measure | Before | After |
+| --- | --- | --- |
+| Median ns/iteration (range) | 33.6624 (32.9430-35.4002) | 33.6220 (32.9359-36.3195) |
+| Final trace count | 6-7 | 6 |
+| Final machine-code bytes | 1696-1788 | 1572 |
+| Emitted chunk bytes | 145372 | 145188 |
+
+All sinks matched. Runtime is effectively unchanged in this probe; the result
+supports a code-size simplification, not a runtime speedup. No Stone application
+speedup is claimed: the surveyed texture-slot shifts in
+`packages/stone/engine/debug/watcher.rock` are dynamic signed-int shifts, which
+never used this uint helper. Other relevant uint shifts are compiler fixtures.
+
+Ten alternating fresh-process compile pairs on the same M4 used separate release
+compilers and identical sources/stdlib, without an on-disk compiler cache. OS
+file caches were not flushed; wall times include startup and writing output.
+`uint_shift` medians were 15.528 -> 15.448 ms (ranges 15.118-18.174 and
+15.248-16.791); the `vec_store` control was 16.763 -> 16.757 ms (ranges
+16.390-17.645 and 16.518-17.183). These overlapping small samples do not establish
+whole-program compile-cost neutrality.
+
+## Remaining proof boundaries after the numeric survey
+
+**Subtraction.** `in_bounds.rs` already has a bounded search through ordered
+comparisons and whole-number facts, but activates that machinery only for
+constant-stride affine indices. `lt_of` does not derive strict bounds from
+subtraction. The existing `len - c` handling proves only nonnegativity under
+the appropriate length guard; it cannot establish strictness for infinity or
+large rounded values. Extending it needs finite arithmetic bounds, a valid
+snapshot of the operands, and the existing mutation/callback invalidation.
+
+Actual `len - 1` consumers include `polygon_clip_rect_into` in
+`packages/stone/engine/collisions.rock` and `snapshot_history_redo_target` in
+`packages/stone/engine/snapshot_history.rock`. Their nonempty checks do not
+establish a finite upper bound. `ui_mouse_item` and `ui_focus_item` compare
+`cur_count` with capacity before storing at `cur_count - 1`, but those mutable
+record fields rely on producer invariants outside the local body. A type or
+nonempty condition alone is insufficient. No extra source guards or global
+integer-range assumption were added to make these cases optimize.
+
+If a bounded consumer appears, start with a query-local `n - c` rule for a
+positive integer constant `c`, requiring whole `n`, `c <= n <= 2^53` and a live
+`n <= len` relation to the accessed buffer. Regressions must cover the exact
+upper boundary, insufficient lower bounds, fractional values, NaN/infinity,
+false comparison edges, joins, different buffers, header writes, callbacks and
+reexecuted operand producers. Do not infer those premises from an `int` type.
+
+**NativeBuffer capacity.** The simplest real next probe is
+`ui_alpha_mask_rows` in `packages/stone/engine/ui/mouse.rock`: it allocates
+`native_buffer_u8(mask.width * height)` and immediately fills that many entries.
+`ui_alpha_mask_from_image` has the related two-dimensional fill. The constructor
+length relation is currently missing; proving it must also account for numeric
+validity and mutations of the descriptor or expressions used as loop bounds.
+The `native_buffer_alloc` intrinsic already lowers to `FfiNewArray(count)` and
+a `MakeStruct` with `len = count`, providing a concrete entry point for such a
+proof rather than trusting arbitrary functions by name.
+
+A more demanding consumer is `text_layout_instance_glyph_cache_prepare` in
+`packages/stone/engine/rendering/text.rock`. It allocates or reuses a buffer of
+`glyphs.len * 10`, then writes row slots `i * 10` and `i * 10 + 1 + j`.
+Allocation facts alone will not cover it: the reuse path establishes length
+through equality, both paths join, and a helper call occurs before the writes.
+It needs finite arithmetic bounds plus equality and effect reasoning. Start
+with the alpha-mask fill before adding this larger set of capabilities.
+
+**Nullable fields.** `effect.rs::never_nil` already removes guards for proven
+nonnil values. The remaining concrete clears in `retire_material` in
+`packages/stone/engine/rendering/material.rock` target `pipeline` and
+`cached_batch` on an existing entity record. Neither field's presence is locally
+known. Removing a known-absent clear requires plain-table provenance; removing
+a known-present guard requires stable presence until the store. A first clear
+also destroys presence for subsequent clears. Preserve generic-record
+metatable/getter/setter behavior and the measured protection against repeated
+absent-key rehashes. This survey found no reason to remove those guards broadly.
+
+Interprocedural private-vector specialization remains deferred: local privacy
+is implemented, but the parameterized collection control still lacks a
+caller-to-callee nonescape proof. The next measurement should target constructor
+capacity before introducing cross-function alias summaries.

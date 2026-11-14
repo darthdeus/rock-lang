@@ -141,6 +141,13 @@ fn checked_u32_constant(func: &MirFunc, x: Idx<Inst>) -> Option<f64> {
     (0.0..=4294967295.0).contains(&value).then(|| value.floor())
 }
 
+fn valid_constant_shift_count(func: &MirFunc, x: Idx<Inst>) -> bool {
+    matches!(
+        func.insts[x],
+        Inst::Const(Lit::Uint(0..=31) | Lit::Int(0..=31))
+    )
+}
+
 #[cfg(test)]
 mod uint_constant_tests {
     use super::*;

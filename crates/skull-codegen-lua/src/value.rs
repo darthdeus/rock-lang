@@ -180,9 +180,9 @@ impl Emitter<'_> {
             Inst::UintShr(a, b) => {
                 out.push_str("math.floor(");
                 self.write_opnd(out, *a);
-                out.push_str(" / (2 ^ __rock_u32_shift_count(");
-                self.write_opnd(out, *b);
-                out.push_str(")))");
+                out.push_str(" / (2 ^ ");
+                self.write_u32_shift_count(out, *b);
+                out.push_str("))");
             }
 
             Inst::Call { func, args } => {
@@ -543,9 +543,19 @@ impl Emitter<'_> {
         out.push_str(f);
         out.push('(');
         self.write_opnd(out, *a);
-        out.push_str(", __rock_u32_shift_count(");
-        self.write_opnd(out, *b);
-        out.push_str(")) % 4294967296");
+        out.push_str(", ");
+        self.write_u32_shift_count(out, *b);
+        out.push_str(") % 4294967296");
+    }
+
+    fn write_u32_shift_count(&self, out: &mut String, count: Idx<Inst>) {
+        if valid_constant_shift_count(self.func, count) {
+            self.write_opnd(out, count);
+        } else {
+            out.push_str("__rock_u32_shift_count(");
+            self.write_opnd(out, count);
+            out.push(')');
+        }
     }
 
     fn write_u32_mul(&self, out: &mut String, a: &Idx<Inst>, b: &Idx<Inst>) {

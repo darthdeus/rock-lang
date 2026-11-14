@@ -119,7 +119,9 @@ pub fn callee_binding_plan(
             {
                 captures.push(skull_mir::names::ustr(CHECKED_U32));
             }
-            Inst::UintShl(..) | Inst::UintShr(..) => {
+            Inst::UintShl(_, count) | Inst::UintShr(_, count)
+                if !valid_constant_shift_count(func, *count) =>
+            {
                 captures.push(skull_mir::names::ustr(U32_SHIFT_COUNT));
             }
             _ => {}
