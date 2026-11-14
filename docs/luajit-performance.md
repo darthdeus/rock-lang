@@ -601,15 +601,13 @@ The other candidates need more targeted evidence:
   Narrowing this needs proof that the receiver has no such metamethod and
   cannot acquire one through an escaped alias. Distinct locals and types do
   not establish that proof.
-- Wide live floats remain an x86 investigation. The live-float benchmark and
-  rejected approaches below already isolate the failure. This arm64 run
-  supplies no evidence for an x86 runtime improvement. Delaying reads must
-  preserve mutation visibility, exceptions, and coroutine frame semantics.
+- Wide live floats were subsequently measured on x86. The retained arithmetic
+  deferral below reduces the measured membership and grid exits. It leaves the
+  scoring caller's wide value in place, and cached still has over-budget exits.
 
-The first bounded experiment to carry into implementation is string-key
-snapshot sorting. Constant-time ordinary length has clear potential but a
-larger interop/representation burden; neither buffer caching nor metadata
-alone resolves it.
+String-key snapshot sorting and wide arithmetic deferral are implemented.
+Constant-time ordinary length has clear potential but a larger interop and
+representation burden; neither buffer caching nor metadata alone resolves it.
 
 ### Reproducing live-float exits
 
@@ -644,12 +642,58 @@ an aggregate saving across arms can hide an increase on one exit. Mutable
 reads, throwing operations and coroutine frame reads must retain their order.
 Constant-only arithmetic does not consume a floating register in the snapshot.
 
-The prototypes were not retained. Reducing an individual snapshot or fixing
+Those prototypes were not retained. Reducing an individual snapshot or fixing
 one repeatedly failing exit did not establish a consistent pooled runtime
 improvement. In the scoring reproduction, even removing three doubles leaves
 more than the x86 side-head budget because the caller retains a wide value.
-The compiler still needs a way to avoid constructing or loading those leaves
-before an independent guarded call, with evaluation order preserved.
+
+### Deferring wide float arithmetic past calls (2026-11-14)
+
+The Lua emitter now delays a wide group of non-throwing `FloatAdd`, `FloatSub`
+and `FloatMul` MIR instructions until just after a scalar call in the same
+block. It does not move field, index, global or cell reads, so a value read
+before a mutating call remains the original snapshot. Existing effect-order
+checks keep a throwing read before the call, and the call is pinned at its MIR
+site so expression folding cannot move it back after the arithmetic. The pass
+applies to ordinary Lua functions, not coroutine step bodies or emission with
+source line directives. It requires at least eight externally used float
+results and a conservative reduction of at least eight live values after
+counting distinct nonconstant inputs that must stay live across the call.
+This avoids trading one result for two inputs. Numeric MIR arithmetic follows
+the compiler's typed-number contract; a host value masquerading as a float
+is outside that contract.
+
+Measured `benchmarks/live_floats.rock` on an Intel i9-14900K with LuaJIT
+2.1.1785763465, JIT on, in nine interleaved fresh-process baseline/candidate
+pairs. Each process warmed 300,000 iterations and timed 1,000,000 iterations
+per workload. Times are ns per iteration of warmed process CPU time:
+
+| workload | baseline min / median | deferred min / median |
+| --- | ---: | ---: |
+| membership | 27.450 / 79.556 | 12.465 / 26.064 |
+| grid | 33.364 / 34.720 | 9.036 / 9.247 |
+| score (unchanged control) | 138.077 / 150.169 | 129.727 / 148.199 |
+| cached | 79.892 / 90.708 | 23.063 / 65.702 |
+
+All four output sinks matched. The parent snapshot's maximum double refs fell
+from 26 to 5 for membership and grid. Their counted coalescing failures fell
+from 0/312/468 (membership, varying between processes) and 156 (grid) to zero.
+Cached still reached 156-312 failures (468 before) and a 25-26-double maximum;
+score retained its 25-30-double maximum and 312-780 counted failures, with no
+consistent runtime change. The minima and medians show substantial run-to-run
+variation in membership and cached, so neither one number alone describes
+their speed. Tests pin the emitted order and outcomes when the call mutates an
+input field, a global or a captured local, when the input comes from another
+call, and when an earlier nullable read or producer call throws.
+
+Cold compilation of `packages/stone` was checked against a compiler with the
+same other changes but without this pass: 15 interleaved fresh-process pairs,
+one thread, no on-disk caches, Apple M4 Max. Median retired instructions rose
+from 4,101,709,453 to 4,107,690,955 (+0.146%); minima were 4,098,525,024
+and 4,105,053,395. Median CPU time was 0.36 s for both, and median wall time
+was 0.33 s for both. Each executable received one untimed invocation before
+the paired rounds to exclude one-time startup. The measured compile cost is
+small relative to the x86 runtime gains in the affected loops.
 
 ## Large native buffers
 
