@@ -7,7 +7,7 @@ use std::slice;
 // generation takes it about twenty times per candidate.
 #[inline(always)]
 fn floor(x: f64) -> f64 {
-    if !(x.abs() < 4503599627370496.0) {
+    if x.abs().partial_cmp(&4503599627370496.0) != Some(std::cmp::Ordering::Less) {
         return x;
     }
     let whole = x as i64 as f64;
