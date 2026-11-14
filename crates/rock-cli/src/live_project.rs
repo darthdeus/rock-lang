@@ -40,6 +40,7 @@ pub(crate) struct LiveRouteTiming {
 
 pub(crate) struct LiveProjectSnapshot {
     comptime_inputs: bone_semantic::inference::ComptimeInputs,
+    aliases: bone_incremental::session::NsAliases,
     sources: SourceFiles,
     entry_path: String,
     previous_contents: Vec<(String, String)>,
@@ -118,6 +119,7 @@ impl LiveProject {
         }
         let snapshot = LiveProjectSnapshot {
             comptime_inputs: self.session.ws.comptime_inputs.clone(),
+            aliases: self.session.aliases.clone(),
             sources: self.sources.clone(),
             entry_path: self.entry_path.clone(),
             previous_contents,
@@ -141,14 +143,19 @@ impl LiveProject {
                 source.borrow_mut().contents = contents;
             }
         }
-        self.session =
-            crate::bone_backend::bone_session(crate::bone_backend::session_files(&self.sources))
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "{}",
-                        crate::skull_backend::render_project_err(&self.sources, &e)
-                    )
-                })?;
+        // Rollback uses the package facts of the last good build: the current
+        // manifest may be the input that made the candidate fail.
+        self.session = bone_incremental::session::Session::new(
+            self.session.warm.clone(),
+            crate::bone_backend::session_files(&self.sources),
+            &snapshot.aliases,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "{}",
+                crate::skull_backend::render_project_err(&self.sources, &e)
+            )
+        })?;
         self.session.ws.comptime_inputs = snapshot.comptime_inputs;
         crate::lint_pass::rollback_build_lints_cached(
             &mut self.lint_cache,
@@ -664,6 +671,56 @@ mod tests {
             project.workspace().comptime_inputs.vars[&ustr::Ustr::from("REV")].value,
             "before"
         );
+    }
+
+    #[test]
+    fn malformed_manifest_keeps_the_last_good_session_and_allows_recovery() {
+        let (dir, main, _a, mut project) = v1_live_project();
+        let manifest = dir.path().join("stick.toml");
+        let valid_manifest = std::fs::read_to_string(&manifest).unwrap();
+        let previous_source = project.source_text(&main).unwrap();
+        std::fs::write(
+            &manifest,
+            format!("unknown_reload_key = true\n{valid_manifest}"),
+        )
+        .unwrap();
+
+        for _ in 0..2 {
+            let error = project
+                .recompile_for_publication(std::slice::from_ref(&manifest))
+                .err()
+                .expect("a malformed manifest must reject the candidate")
+                .to_string();
+            assert!(
+                error.contains("unknown key `unknown_reload_key`"),
+                "{error}"
+            );
+            assert!(!error.contains("rollback failed"), "{error}");
+            assert_eq!(
+                project.source_text(&main).as_deref(),
+                Some(previous_source.as_str())
+            );
+            assert!(diagnostic_messages(&project).is_empty());
+        }
+
+        let error = project
+            .apply_edit(&main, "fn main() { missing() }\n")
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("rollback failed"), "{error}");
+        assert_eq!(
+            project.source_text(&main).as_deref(),
+            Some(previous_source.as_str())
+        );
+        project
+            .apply_edit(&main, "fn main() { print(a::bump(2)) }\n")
+            .expect("the last good package facts must still resolve v1 names");
+
+        std::fs::write(&manifest, valid_manifest).unwrap();
+        assert!(matches!(
+            project.recompile(std::slice::from_ref(&manifest)).unwrap(),
+            LiveUpdate::Full { .. }
+        ));
     }
 
     #[test]
