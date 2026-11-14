@@ -270,7 +270,13 @@ fn emit_named_framed_with_statics_impl(
             }
         }
     }
-    let func = literals.as_ref().unwrap_or(func);
+    let source = literals.as_ref().unwrap_or(func);
+    let scheduled = if frame.is_none() && !ctx.line_directives() {
+        late_float::defer_wide_float_math(source)
+    } else {
+        None
+    };
+    let func = scheduled.as_ref().map(|(func, _)| func).unwrap_or(source);
     let entry = func.entry();
     let params = func.params.as_slice();
     let rpo = reverse_postorder(func, entry);
@@ -381,6 +387,11 @@ fn emit_named_framed_with_statics_impl(
     } else {
         vec![false; func.insts.len()]
     };
+    if let Some((_, pinned_calls)) = &scheduled {
+        for &call in pinned_calls {
+            inlinable[raw(call) as usize] = false;
+        }
+    }
     alias_int_to_float(func, &rpo, &mut inlinable, &repeatable);
     skull_mir::sinking::preserve_effect_order_with(
         func,

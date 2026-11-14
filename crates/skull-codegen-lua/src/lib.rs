@@ -30,6 +30,7 @@ mod hoist;
 mod inlinable;
 mod inline_lua;
 mod inst;
+mod late_float;
 mod line_directives;
 mod names;
 mod preludes;

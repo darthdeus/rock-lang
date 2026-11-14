@@ -17,6 +17,7 @@ mod cdata_leaf_projection;
 mod compile_release;
 
 mod allocation_report;
+mod late_float;
 
 mod nested_box_boundary;
 
