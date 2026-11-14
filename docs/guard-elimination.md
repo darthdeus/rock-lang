@@ -17,10 +17,8 @@ exact integer range of binary64 (`2^53`). Ordered comparisons on their true
 edges exclude NaN; false edges do not establish these facts. Arithmetic
 snapshots stop a repeated MIR producer from lending an old result new bounds.
 
-Unknown calls and writes to the buffer length invalidate the relevant facts.
-This is a bounded, local proof for the access shape, not general affine
-arithmetic. An `int` annotation, a negative-value rejection branch, or a bound
-proved in another function is not enough.
+Calls and length writes invalidate affected facts. An `int` annotation,
+a negative-value rejection branch, or a bound in another function is not enough.
 
 ### Private Lua vector pushes
 
@@ -28,15 +26,14 @@ For a fresh boxed vector that remains local and private, the pass tracks its
 allocation and aliases through local loads and stores. Appending to that vector
 cannot invoke a foreign table setter. A private push invalidates facts tied to
 current length and element places, while captured upper bounds can survive
-because length only grows. Unsupported escapes revoke the allocation's private
-status.
+because length only grows. Unsupported escapes revoke privacy.
 
 This exception is Lua-specific: JavaScript arrays can inherit indexed setters.
 The JS path remains conservative. Opaque calls still invalidate ordinary
 memory-bound facts, even when they do not receive the private vector. Vector
 parameters, container contents, and caller-to-callee privacy are not inferred.
 
-### Fresh descriptor lengths
+### Descriptor capacities
 
 A `MakeStruct` constructor establishes its `len` initializer as a bound on that
 new descriptor. Local assignments copy the relation; reassignment, length
@@ -48,8 +45,10 @@ unborrowed local-cell ties stand for repeated reads; other operands retain their
 value snapshots. Writes and reexecution invalidate dependent products.
 The sized primitive constructor wrappers are inline so the pass sees their
 headers. No pointer-ownership or general finite-integer assumption is added.
-Alias, stale-load, borrowed-cell, mutation, callback and old-instance loop
-regressions cover the boundary.
+True equality (or false inequality) transfers existing live capacity bounds.
+Reuse and allocation branches therefore retain their shared bound at a join;
+all incoming paths must establish it. Stale length snapshots cannot restore a
+bound invalidated by mutation. No general alias is inferred from equality.
 
 ### Literal uint shifts
 
@@ -60,19 +59,16 @@ normalization remain in place.
 
 ## Soundness boundaries and next gaps
 
-Unknown calls may mutate any reachable length or field, and boxed vector, map,
-or heap-record accesses can invoke Lua metamethods. The analysis drops facts
-where those effects can invalidate a proof. Nullable-field presence is also
-not inferred from a record type: reads and writes may invoke `__index` or
-`__newindex`. Keep these guards unless a plain-table and stable-presence proof
-is available.
-
-The current follow-up gaps are:
+Unknown calls and callback-capable table accesses invalidate affected facts.
+Heap record types do not prove plain storage or field presence; nullable-field
+guards remain unless those properties are established.
 
 - **Record-backed capacity and reuse:** repeated field/global/element reads
   are not equated. Alpha-mask dimensions cross an opaque allocator and record
   reads can invoke getters; a changing-width regression retains its check.
-  Glyph-cache reuse also needs equality across joins and helper-call effects.
+  Glyph-cache capacity joins are supported, but its record reads and finite row
+  bounds remain unproved. The glyph fetch writes nine scratch floats; existing
+  callback-free FFI effects preserve headers and the wrapper adds a global write.
 - **Subtraction:** `n > 0` does not prove `n - 1 < n` for infinity or large
   rounded floating-point values. A rule needs finite exact-integer bounds and
   live operand snapshots.
@@ -84,8 +80,8 @@ The current follow-up gaps are:
 
 ## Runtime measurements
 
-The measurements below compare compiler-emitted checked code with the new
-compiler output. Each benchmark used LuaJIT with the JIT enabled, alternating
+x86 LuaJIT decides runtime trade-offs for this work. These measurements compare
+compiler-emitted checked code with the optimized output. Each benchmark used LuaJIT with the JIT enabled, alternating
 fresh processes, and matching result sinks. These are microbenchmarks, not
 application results. Ranges and trace behavior show that some medians are
 trace-sensitive.
@@ -99,21 +95,22 @@ trace-sensitive.
 | Constant uint shifts | Apple M4 Max / 2.1.1774896198 | 33.6624 -> 33.6220 ns/iteration | 8 pairs; runtime effectively unchanged; emitted chunk 145372 -> 145188 bytes, final machine code 1696-1788 -> 1572 bytes |
 | Repeated-product byte fill | Apple M4 Max / 2.1.1774896198 | 0.4114 -> 0.4233; repeat 0.4077 -> 0.4295 ns/element | 8 pairs per batch; repeat ranges 0.3836-0.4372 -> 0.4200-0.4956; 3-5% slower medians |
 | Repeated-product byte fill | Intel Core i9-14900K, Linux / 2.1.1785763465 | 0.4550 -> 0.3321 ns/element | 8-pair repeat; ranges 0.4536-0.4604 -> 0.3306-0.3374; about 27% faster |
+| Capacity join, ten-lane reuse fill | Intel Core i9-14900K, Linux / 2.1.1785763465 | 1.6654 -> 1.1239; repeat 1.3831 -> 0.9250 ns/element | 8 pairs per batch; repeat ranges 1.2955-1.6219 -> 0.8608-1.1158; about 33% faster |
 
 Private-vector timings include allocation and GC; faster baseline trace variants
 limit the median claim. These probes do not establish application speedups or
 whole-program compile cost. Constant shifts demonstrate smaller code only.
 
-The parameterized `fill_and_collect` control retained its checks. Buffer-fill
-measurements include allocation and GC. For repeated products, generated Lua
-changes only the checked store; the captured-count fills are controls. The first
-x86 batch had large control variation; the repeat's byte control was stable
-(0.3418 -> 0.3399 ns/element). M4 regressions persisted despite smaller final
-machine code (376 -> 208 bytes); x86 code shrank from 449-450 to 262-263 bytes.
-This is a platform-dependent microbenchmark trade-off, not a universal speedup.
-Ten alternating M4 fresh-process compile pairs measured `buffer_fill`
-15.701 -> 15.798 ms and `vec_store` 16.723 -> 16.707 ms, with overlapping ranges.
-OS caches were not flushed; startup/output are included.
+The parameterized `fill_and_collect` control retains its checks. Buffer probes
+include allocation and GC. Repeated products change only the checked store;
+M4's slower medians persisted despite smaller machine code (376 -> 208 bytes).
+The capacity-join probe changes one store, preserves its known-effect helper,
+and tests reuse and allocation paths. Allocation-path medians improved 19-44%
+across the two batches, with overlapping ranges. This bounded probe is not a
+measurement of the actual Stone glyph cache. Ten alternating M4 fresh-process
+compile pairs measured `buffer_reuse` 15.743 -> 15.671 ms and `vec_store`
+16.845 -> 16.711 ms, with overlapping ranges. Startup/output are included;
+OS caches were not flushed.
 
 ## Reproduction
 
@@ -132,6 +129,8 @@ luajit benchmarks/uint_shift.lua /tmp/uint-shift.lua
 
 rock compile benchmarks/buffer_fill.rock --output /tmp/buffer-fill.lua
 luajit benchmarks/buffer_fill.lua /tmp/buffer-fill.lua
+rock compile benchmarks/buffer_reuse.rock --output /tmp/buffer-reuse.lua
+luajit benchmarks/buffer_reuse.lua /tmp/buffer-reuse.lua
 ```
 
 Compare `proven_stride` for the affine proof and `fill_and_collect_private`

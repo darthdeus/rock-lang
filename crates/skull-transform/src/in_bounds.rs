@@ -434,7 +434,9 @@ fn relevant_values(func: &MirFunc, rpo: &[Idx<Block>]) -> Vec<bool> {
                 | Inst::IntLt(a, b)
                 | Inst::IntLeq(a, b)
                 | Inst::IntGt(a, b)
-                | Inst::IntGeq(a, b) => mark(&[*a, *b], &mut relevant),
+                | Inst::IntGeq(a, b)
+                | Inst::Eq(a, b)
+                | Inst::NotEq(a, b) => mark(&[*a, *b], &mut relevant),
                 Inst::Not(a) => mark(&[*a], &mut relevant),
                 _ => {}
             }
@@ -985,6 +987,8 @@ fn cond_facts(facts: &mut Facts, func: &MirFunc, cond: Idx<Inst>, truth: bool, a
     }
     match func.insts[cond] {
         Inst::Not(x) => cond_facts(facts, func, x, !truth, affine),
+        Inst::Eq(a, b) if truth => equal_capacity_facts(facts, func, a, b),
+        Inst::NotEq(a, b) if !truth => equal_capacity_facts(facts, func, a, b),
         Inst::IntLt(a, b) | Inst::IntGt(b, a) => {
             if truth {
                 lt_fact(facts, func, a, b);
@@ -1000,6 +1004,17 @@ fn cond_facts(facts: &mut Facts, func: &MirFunc, cond: Idx<Inst>, truth: bool, a
             }
         }
         _ => {}
+    }
+}
+
+fn equal_capacity_facts(facts: &mut Facts, func: &MirFunc, a: Idx<Inst>, b: Idx<Inst>) {
+    for (value, equal) in [(a, b), (b, a)] {
+        let capacities = facts.le_len_of(func, equal);
+        for key in facts.keys_of(func, value) {
+            for owner in &capacities {
+                facts.le_len.insert((key.clone(), owner.clone()));
+            }
+        }
     }
 }
 

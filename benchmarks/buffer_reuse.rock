@@ -1,0 +1,17 @@
+// Capacity joins and ten-lane fills; run with benchmarks/buffer_reuse.lua.
+global reuse_fetches: int = 0
+fn record_fetch() { reuse_fetches += 1 }
+@nomangle fn reuse_rows(old: NativeBuffer<float>, count: float) -> NativeBuffer<float> {
+    let rows = count as int
+    if rows >= 0 && rows <= 100000 {
+        let expected = rows * 10
+        let buf = if old.len == expected { old } else { native_buffer_float(expected) }
+        for row in 0..rows {
+            record_fetch()
+            for lane in 0..10 { buf[row * 10 + lane] = (row + lane) as float }
+        }
+        return buf
+    }
+    return old
+}
+fn main() { print(reuse_rows(native_buffer_float(0), 3).len) }

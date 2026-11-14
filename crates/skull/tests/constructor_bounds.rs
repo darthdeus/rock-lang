@@ -297,3 +297,180 @@ print('ok')
         "ok"
     );
 }
+
+#[test]
+fn reused_or_allocated_buffer_retains_capacity_at_join() {
+    let lua = emit_module(
+        r#"
+@nomangle fn reuse_buffer(old: NativeBuffer<int>, count: int) -> NativeBuffer<int> {
+    let buf = if old.len == count { old } else { native_buffer_int(count) }
+    for i in 0..count { buf[i] = i }
+    return buf
+}
+"#,
+    );
+    let body = function_body(&lua, "reuse_buffer");
+    assert!(!body.contains("__nb_checked"), "{body}");
+    assert_eq!(
+        run_luajit(&format!(
+            r#"{lua}
+for _, size in ipairs({{-1, 0, 3, 7, math.huge, 0/0}}) do
+    local old = {{ptr=ffi.new('int[7]'), len=size}}
+    local buf = reuse_buffer(old, 7)
+    assert(buf.len == 7)
+    assert((buf.ptr == old.ptr) == (size == 7))
+    for i=0,6 do assert(buf.ptr[i] == i) end
+end
+print('ok')
+"#
+        ))
+        .trim(),
+        "ok"
+    );
+}
+
+#[test]
+fn capacity_equality_handles_operand_order_and_negative_spelling() {
+    for selection in [
+        "if count == old.len { old } else { native_buffer_int(count) }",
+        "if old.len != count { native_buffer_int(count) } else { old }",
+        "if !(old.len == count) { native_buffer_int(count) } else { old }",
+    ] {
+        let lua = emit_module(&format!(
+            r#"
+@nomangle fn reuse(old: NativeBuffer<int>, count: int) -> NativeBuffer<int> {{
+    let buf = {selection}
+    for i in 0..count {{ buf[i] = i }}
+    return buf
+}}
+"#
+        ));
+        assert!(
+            !function_body(&lua, "reuse").contains("__nb_checked"),
+            "{selection}"
+        );
+    }
+}
+
+#[test]
+fn unequal_capacities_and_changed_joins_retain_checks() {
+    for (selection, after) in [
+        (
+            "if old.len != count { old } else { native_buffer_int(count) }",
+            "",
+        ),
+        (
+            "if old.len == count { old } else { native_buffer_int(count - 1) }",
+            "",
+        ),
+        (
+            "if old.len == count { old } else { native_buffer_int(count) }",
+            "shrink(buf)",
+        ),
+        (
+            "if old.len == count { old } else { native_buffer_int(count) }",
+            "count += 1",
+        ),
+    ] {
+        let lua = emit_module(&format!(
+            r#"
+inline(lua) fn shrink(buf: NativeBuffer<int>) = "buf.len = 0"
+@nomangle fn changed_reuse(old: NativeBuffer<int>, count: int) -> int {{
+    let buf = {selection}
+    {after}
+    for i in 0..count {{ buf[i] = i }}
+    return 1
+}}
+"#
+        ));
+        assert!(
+            function_body(&lua, "changed_reuse").contains("__nb_checked"),
+            "{selection}; {after}"
+        );
+        assert_eq!(
+            run_luajit(&format!(
+                r#"{lua}
+local old = {{ptr=ffi.new('int[16]'), len=3}}
+local ok, err = pcall(changed_reuse, old, 7)
+assert(not ok and tostring(err):find('out of bounds'))
+print('ok')
+"#
+            ))
+            .trim(),
+            "ok"
+        );
+    }
+}
+
+#[test]
+fn equal_capacity_join_composes_with_stride_and_known_helper_effects() {
+    let lua = emit_module(
+        r#"
+global reuse_fetches: int = 0
+fn record_fetch() { reuse_fetches += 1 }
+@nomangle fn reuse_rows(old: NativeBuffer<float>, count: float) -> NativeBuffer<float> {
+    let rows = count as int
+    if rows >= 0 && rows <= 100000 {
+        let expected = rows * 10
+        let buf = if old.len == expected { old } else { native_buffer_float(expected) }
+        for row in 0..rows {
+            record_fetch()
+            for lane in 0..10 { buf[row * 10 + lane] = (row + lane) as float }
+        }
+        return buf
+    }
+    return old
+}
+"#,
+    );
+    let body = function_body(&lua, "reuse_rows");
+    assert!(!body.contains("__nb_checked"), "{body}");
+    assert_eq!(
+        run_luajit(&format!(
+            r#"{lua}
+for _, size in ipairs({{0, 20, 30}}) do
+    local old = {{ptr=ffi.new('float[30]'), len=size}}
+    local buf = reuse_rows(old, 3)
+    assert(buf.len == 30 and ((buf.ptr == old.ptr) == (size == 30)))
+    for row=0,2 do for lane=0,9 do assert(buf.ptr[row*10+lane] == row+lane) end end
+end
+local old = {{ptr=ffi.new('float[1]'), len=1}}
+for _, count in ipairs({{-1, 100001, math.huge, -math.huge, 0/0}}) do
+    assert(reuse_rows(old, count).ptr == old.ptr)
+end
+print('ok')
+"#
+        ))
+        .trim(),
+        "ok"
+    );
+}
+
+#[test]
+fn equality_to_a_stale_length_does_not_restore_capacity() {
+    let lua = emit_module(
+        r#"
+inline(lua) fn shrink(buf: NativeBuffer<int>) = "buf.len = 0"
+@nomangle fn stale_reuse(old: NativeBuffer<int>, count: int) -> int {
+    let previous = old.len
+    shrink(old)
+    let buf = if previous == count { old } else { native_buffer_int(count) }
+    for i in 0..count { buf[i] = i }
+    return 1
+}
+"#,
+    );
+    assert!(function_body(&lua, "stale_reuse").contains("__nb_checked"));
+    assert_eq!(
+        run_luajit(&format!(
+            r#"{lua}
+local old = {{ptr=ffi.new('int[7]'), len=7}}
+local ok, err = pcall(stale_reuse, old, 7)
+assert(not ok and tostring(err):find('out of bounds'))
+print('ok')
+"#
+        ))
+        .trim(),
+        "ok"
+    );
+}
