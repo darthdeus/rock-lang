@@ -232,3 +232,25 @@ relations come from allocations, equality/reuse paths or producer invariants;
 the required whole/count bounds are not locally established. Those checks stay.
 No extra guards were added to application code merely to exercise this proof.
 Allocation provenance is the next useful bridge to those consumers.
+
+The same eight-pair run on Apple M4 Max / LuaJIT 2.1.1774896198 measured
+1.1930 -> 0.8062 ns/element (about 32% lower median), with non-overlapping
+ranges 1.1815-1.2249 and 0.7940-0.8180. Sinks matched; both versions had 0-2
+trace aborts per sample. The final compiler's emitted probe was byte-identical
+to the artifact used for both architecture measurements.
+
+Fresh-process compilation on the M4 used ten alternating pairs per standalone
+fixture, the same source/stdlib, separate before/after release compilers and no
+on-disk compiler cache. OS file caches were not flushed. Wall-clock milliseconds
+include process startup and writing emitted output:
+
+| Fixture | Before median (range) | After median (range) |
+| --- | --- | --- |
+| guard_proofs | 15.361 (14.846-81.480) | 15.355 (14.904-84.541) |
+| field_store | 15.511 (15.348-16.849) | 15.742 (15.401-16.415) |
+| vec_loop | 17.888 (17.669-18.505) | 18.024 (17.450-18.704) |
+
+The sample spans overlap and median differences are at most 1.5%. This small
+standalone set does not establish compile-cost neutrality for large programs.
+The Stone module was excluded because it is not a standalone CLI input; no
+successful whole-Stone compile measurement is claimed here.
