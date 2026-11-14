@@ -64,6 +64,8 @@
 //! `ROCK_SKULL_BOUNDS_OFF=1` keeps every check, so the output with and without
 //! the pass can be compared; a measurement switch, never a shipped mode.
 
+use std::borrow::Cow;
+
 use rustc_hash::FxHashSet as HashSet;
 
 use bone_core::workspace::Workspace;
@@ -117,9 +119,9 @@ pub fn elide_bounds_checks(ws: Option<&Workspace>, func: &mut MirFunc) -> usize 
                         };
                         let edge = edge_facts(func, out, p, b);
                         merged = Some(match merged {
-                            None => edge,
+                            None => edge.into_owned(),
                             Some(mut m) => {
-                                m.meet(&edge);
+                                m.meet(edge.as_ref());
                                 m
                             }
                         });
@@ -323,9 +325,14 @@ fn relevant_values(func: &MirFunc, rpo: &[Idx<Block>]) -> Vec<bool> {
 
 /// The facts flowing along the edge `from -> to`: the block's out-state
 /// sharpened by its branch condition.
-fn edge_facts(func: &MirFunc, out: &Facts, from: Idx<Block>, to: Idx<Block>) -> Facts {
+fn edge_facts<'a>(
+    func: &MirFunc,
+    out: &'a Facts,
+    from: Idx<Block>,
+    to: Idx<Block>,
+) -> Cow<'a, Facts> {
     match func.blocks[from].term {
-        Term::Yield { .. } => Facts::default(),
+        Term::Yield { .. } => Cow::Owned(Facts::default()),
         Term::Branch {
             cond,
             then_bb,
@@ -333,9 +340,9 @@ fn edge_facts(func: &MirFunc, out: &Facts, from: Idx<Block>, to: Idx<Block>) -> 
         } if then_bb != else_bb => {
             let mut facts = out.clone();
             cond_facts(&mut facts, func, cond, to == then_bb);
-            facts
+            Cow::Owned(facts)
         }
-        _ => out.clone(),
+        _ => Cow::Borrowed(out),
     }
 }
 
