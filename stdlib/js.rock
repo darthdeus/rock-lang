@@ -59,7 +59,7 @@
 
 // There is no FFI pointer on JS at all, so what luajit reconstructs from a
 // `char*` is already a string here; `len` has nothing to bound.
-@nowrite inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
+inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
   return typeof ptr === "string" ? ptr : String(ptr);
 """
 
@@ -85,7 +85,7 @@
 // enums, Vec and coroutine handles all carry it), so this is the same field
 // read spelled twice. `null` is `typeof "object"` in JS, hence the extra guard
 // the Lua body does not need.
-@nowrite @nomangle inline(js) fn __rock_get_type(obj: any) -> string? = """
+@nomangle inline(js) fn __rock_get_type(obj: any) -> string? = """
   if (obj === null || typeof obj !== "object") return null;
   return obj.__ty === undefined ? null : obj.__ty;
 """

@@ -143,3 +143,6 @@ mod value_structs;
 mod vec_columns;
 #[path = "vec_flat_enum_strided.rs"]
 mod vec_flat_enum_strided;
+
+#[path = "opaque_effects.rs"]
+mod opaque_effects;
