@@ -3075,41 +3075,45 @@ pub(crate) fn ms(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1000.0
 }
 
-/// A real semantic body edit: flip the first single ASCII digit inside the body
-/// of `fn <name>` (d -> d-1, '0'->'1'), a genuine 1-char constant change that
-/// re-applying the original text reverts. Returns None if the fn or a body
-/// digit isn't found.
-pub(crate) fn body_digit_flip(text: &str, name: &str) -> Option<String> {
-    let fn_pos = text.find(&format!("fn {name}"))?;
-    let brace = text[fn_pos..].find('{')? + fn_pos;
-
-    // Bound the body by brace-matching so we only touch THIS function's digits.
-    let mut depth = 0i32;
-    let mut end = text.len();
-    for (i, c) in text[brace..].char_indices() {
-        match c {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = brace + i;
-                    break;
+/// Change a numeric literal in the compiler's body span, preserving its type.
+/// Token spans exclude digits in names, comments, strings and the signature.
+pub(crate) fn body_numeric_edit(
+    text: &str,
+    body_range: std::ops::Range<usize>,
+) -> Result<Option<String>> {
+    let body = text
+        .get(body_range.clone())
+        .ok_or_else(|| anyhow::anyhow!("survey body span is outside its source"))?;
+    let tokens = crate::Tokenizer::from_code("survey-body.rock", body)
+        .tokenize()
+        .map_err(|error| anyhow::anyhow!("survey body tokenization failed: {}", error.message))?;
+    for token in tokens {
+        let replacement = match token.kind {
+            crate::TokenKind::Int(value, _) => {
+                if value == 0 {
+                    "1"
+                } else {
+                    "0"
                 }
             }
-            _ => {}
-        }
+            crate::TokenKind::Float(value) => {
+                if value.0 == 0.0 {
+                    "1.0"
+                } else {
+                    "0.0"
+                }
+            }
+            _ => continue,
+        };
+        let (start, end) = token.span.offset_range();
+        let mut edited = text.to_string();
+        edited.replace_range(
+            body_range.start + start..body_range.start + end,
+            replacement,
+        );
+        return Ok(Some(edited));
     }
-
-    let rel = text[brace..end].find(|c: char| c.is_ascii_digit())?;
-    let abs = brace + rel;
-    let d = text.as_bytes()[abs];
-    let flipped = if d == b'0' { b'1' } else { d - 1 };
-
-    let mut out = String::with_capacity(text.len());
-    out.push_str(&text[..abs]);
-    out.push(flipped as char);
-    out.push_str(&text[abs + 1..]);
-    Some(out)
+    Ok(None)
 }
 
 // ---------------------------------------------------------------------------

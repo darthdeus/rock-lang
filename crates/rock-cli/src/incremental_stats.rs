@@ -88,9 +88,9 @@ fn make_signature_edit(orig: &str, f: &FnStat) -> Option<String> {
     Some(out)
 }
 
-fn edit_text(orig: &str, f: &FnStat, kind: EditKind) -> Option<String> {
+fn edit_text(orig: &str, f: &FnStat, kind: EditKind) -> Result<Option<String>> {
     match kind {
-        EditKind::Signature => make_signature_edit(orig, f),
+        EditKind::Signature => Ok(make_signature_edit(orig, f)),
         EditKind::Body | EditKind::Broken => make_edit(orig, f, kind),
     }
 }
@@ -166,7 +166,12 @@ pub(crate) fn incremental_stats(
     let mut results = Vec::new();
     for (f, kind) in candidates(&fns) {
         let orig = read_survey_source(&f.file)?;
-        let Some(edited) = edit_text(&orig, &f, kind) else {
+        let Some(edited) = edit_text(&orig, &f, kind)? else {
+            eprintln!(
+                "skipping {} edit of {}: no editable literal or declaration",
+                kind.label(),
+                f.name
+            );
             continue;
         };
         let source = Path::new(&f.file);

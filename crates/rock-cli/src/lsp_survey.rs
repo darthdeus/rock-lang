@@ -8,7 +8,7 @@
 //!    fn, from `resolved_overload_calls`), and module fan-in (modules depending
 //!    on a symbol, from `Session.dependents`).
 //! 2. Rank targets and generate candidate edits across all three tiers:
-//!    - BODY     (digit flip / whitespace inside a body)        -> `BodyOnly`
+//!    - BODY     (numeric literal change inside a body)         -> `BodyOnly`
 //!    - SIGNATURE (insert a param -> arity change)              -> `Interface`
 //!      (re-infers every dependent module)
 //!    - BROKEN   (unterminated `"` in a body)                   -> parse error
@@ -28,10 +28,73 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::skull_backend::{body_digit_flip, ms};
+use crate::skull_backend::{body_numeric_edit, ms};
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn v1_survey_body_edit_changes_the_executed_result() {
+        use crate::skull_backend::{IncrementalProject, SkullReload};
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("stick.toml"),
+            "[package]\nname = \"survey-edit\"\n[language]\nmodules = \"v1\"\n",
+        )
+        .unwrap();
+        let source = dir.path().join("main.rock");
+        let original = "mod main;\nfn probe(step: int = 9) -> int {\n // 8\n let label = \"7\"\n return 3\n}\nfn no_numeric(step: int = 9) { print(\"7\") }\nfn main() { print(probe()) }\n";
+        std::fs::write(&source, original).unwrap();
+        let sources =
+            crate::live_project::project_sources(dir.path().to_str().unwrap(), false).unwrap();
+        let session =
+            crate::bone_backend::bone_session(crate::bone_backend::session_files(&sources))
+                .unwrap();
+        let marker = format!("{}/", dir.path().file_name().unwrap().to_str().unwrap());
+        let (_, functions) = super::collect_stats(&session, &marker).unwrap();
+        let function = functions
+            .iter()
+            .find(|f| f.name.ends_with("::probe"))
+            .unwrap();
+        let edited = super::make_edit(original, function, super::EditKind::Body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(edited, original.replace("return 3", "return 0"));
+        let no_numeric = functions
+            .iter()
+            .find(|f| f.name.ends_with("::no_numeric"))
+            .unwrap();
+        assert!(
+            super::make_edit(original, no_numeric, super::EditKind::Body)
+                .unwrap()
+                .is_none()
+        );
+
+        let main = dir.path().join("main.lua");
+        let overlay = dir.path().join("incremental.lua");
+        let mut project =
+            IncrementalProject::init(dir.path().to_str().unwrap(), &main, &overlay).unwrap();
+        assert!(matches!(
+            project
+                .apply_edit(&source, &edited, &main, &overlay)
+                .unwrap(),
+            SkullReload::Incremental { .. }
+        ));
+        let program = format!(
+            "function clear_all_systems() end\nfunction __rock_main_wrapper(f) f() end\n{}\n{}\nmain()\n",
+            std::fs::read_to_string(main).unwrap(),
+            std::fs::read_to_string(overlay).unwrap(),
+        );
+        let output = crate::compile_cmd::run_lua_code_with_timeout(
+            &program,
+            Some(test_utils::HANG_BACKSTOP),
+        )
+        .unwrap();
+        assert!(output.success, "{}", output.combined());
+        assert_eq!(output.combined().trim(), "3\n0");
+        assert_eq!(std::fs::read_to_string(source).unwrap(), original);
+    }
+
     #[test]
     fn signature_edit_keeps_the_receiver_first() {
         let orig = "pub fn T.get(pool, key: string) -> int { 1 }\n";
@@ -40,8 +103,8 @@ mod tests {
             name: String::new(),
             line: 1,
             name_off: orig.find("get").unwrap(),
-            span_start: 0,
             span_end: orig.len(),
+            body_range: orig.find('{').unwrap()..orig.rfind('}').unwrap() + 1,
             body_bytes: 0,
             params: 2,
             has_ret: true,
@@ -118,8 +181,8 @@ pub(crate) struct FnStat {
     pub(crate) name: String,
     pub(crate) line: u32,
     pub(crate) name_off: usize,
-    pub(crate) span_start: usize,
     pub(crate) span_end: usize,
+    pub(crate) body_range: std::ops::Range<usize>,
     pub(crate) body_bytes: usize,
     pub(crate) params: usize,
     pub(crate) has_ret: bool,
@@ -251,6 +314,14 @@ pub(crate) fn collect_stats(
                 continue;
             }
             let (s, e) = func.span.offset_range();
+            let Some(body) = module
+                .bodies
+                .get(&bone_semantic::hir::BodyOwner::Function(fid))
+            else {
+                continue;
+            };
+            let Some(root) = body.root else { continue };
+            let (body_start, body_end) = body.expr_spans[root].offset_range();
             let bytes = e.saturating_sub(s);
             body_bytes += bytes;
             fn_count += 1;
@@ -260,8 +331,8 @@ pub(crate) fn collect_stats(
                 name: func.name.as_str().to_string(),
                 line: line_of(&text, name_off),
                 name_off,
-                span_start: s,
                 span_end: e,
+                body_range: body_start..body_end,
                 body_bytes: bytes,
                 params: func.param_decls.len(),
                 has_ret: func.return_ty.is_some(),
@@ -288,21 +359,6 @@ pub(crate) fn collect_stats(
         });
     }
     Ok((mods, fns))
-}
-
-/// BODY edit: flip a digit in the fn body, else insert a space just inside `{`.
-fn make_body_edit(orig: &str, f: &FnStat) -> Option<String> {
-    if let Some(flipped) = body_digit_flip(orig, &f.name) {
-        return Some(flipped);
-    }
-    // Whitespace just inside the body block.
-    let brace = orig.get(f.span_start..f.span_end)?.find('{')? + f.span_start;
-    let nl = orig[brace..].find('\n').map(|n| brace + n).unwrap_or(brace);
-    let mut out = String::with_capacity(orig.len() + 1);
-    out.push_str(&orig[..=nl.min(orig.len() - 1)]);
-    out.push(' ');
-    out.push_str(&orig[nl + 1..]);
-    Some(out)
 }
 
 /// SIGNATURE edit: insert a dummy first param so the arity (interface) changes.
@@ -344,8 +400,7 @@ fn end_of_first_param(orig: &str, start: usize) -> Option<usize> {
 /// `Session::update_file` then fails-fast and reverts to last-good, so this
 /// measures the (cheap) realistic mid-typing parse-error path, NOT a slow one.
 fn make_broken_edit(orig: &str, f: &FnStat) -> Option<String> {
-    let brace = orig.get(f.span_start..f.span_end)?.find('{')? + f.span_start;
-    let at = brace + 1;
+    let at = f.body_range.start + 1;
     let mut out = String::with_capacity(orig.len() + 1);
     out.push_str(&orig[..at]);
     out.push('"');
@@ -353,12 +408,12 @@ fn make_broken_edit(orig: &str, f: &FnStat) -> Option<String> {
     Some(out)
 }
 
-pub(crate) fn make_edit(orig: &str, f: &FnStat, kind: EditKind) -> Option<String> {
-    match kind {
-        EditKind::Body => make_body_edit(orig, f),
+pub(crate) fn make_edit(orig: &str, f: &FnStat, kind: EditKind) -> Result<Option<String>> {
+    Ok(match kind {
+        EditKind::Body => return body_numeric_edit(orig, f.body_range.clone()),
         EditKind::Signature => make_sig_edit(orig, f),
         EditKind::Broken => make_broken_edit(orig, f),
-    }
+    })
 }
 
 pub(crate) fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool) -> Result<()> {
@@ -440,7 +495,12 @@ pub(crate) fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| f.file.clone());
         let orig = read_survey_source(&canon)?;
-        let Some(edited) = make_edit(&orig, f, *kind) else {
+        let Some(edited) = make_edit(&orig, f, *kind)? else {
+            eprintln!(
+                "skipping {} edit of {}: no editable literal or declaration",
+                kind.label(),
+                f.name
+            );
             continue;
         };
 
