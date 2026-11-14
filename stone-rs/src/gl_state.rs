@@ -688,9 +688,9 @@ pub extern "C" fn stone_set_draw_buffer_mask(mask: c_int) {
     let bits = if bits == 0 { 1 } else { bits };
     let len = 32 - bits.leading_zeros();
     let mut buffers = [glow::NONE; DRAW_BUFFERS];
-    for slot in 0..len as usize {
+    for (slot, buffer) in buffers.iter_mut().enumerate().take(len as usize) {
         if bits & (1 << slot) != 0 {
-            buffers[slot] = glow::COLOR_ATTACHMENT0 + slot as u32;
+            *buffer = glow::COLOR_ATTACHMENT0 + slot as u32;
         }
     }
     with_gl(|gl| unsafe {
