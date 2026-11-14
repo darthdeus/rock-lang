@@ -157,6 +157,7 @@ impl<'a> Builder<'a> {
             // protocol -- `VecIter.next` reads `it.vec[it.i]`, which is an
             // `Index` and picks up the column kind on its own.
             ContainerKind::Vec
+            | ContainerKind::VecNonNull
             | ContainerKind::VecValueColumns(_)
             | ContainerKind::VecValueStrided(_) => Err(gap(
                 "for over [T] must route through the iterator protocol (for_iter_protocol missing)",
@@ -170,9 +171,9 @@ impl<'a> Builder<'a> {
             // `for` head.
             ContainerKind::VecColumn => Err(gap("for over a synthetic Vec leaf column")),
             ContainerKind::VecStrideSlot => Err(gap("for over a synthetic Vec strided slot")),
-            ContainerKind::VecInBounds | ContainerKind::NativeBufferInBounds => {
-                Err(gap("for over a proven element access"))
-            }
+            ContainerKind::VecInBounds
+            | ContainerKind::VecNonNullInBounds
+            | ContainerKind::NativeBufferInBounds => Err(gap("for over a proven element access")),
             ContainerKind::NativeBufferLeaf => {
                 Err(gap("for over a synthetic NativeBuffer leaf view"))
             }

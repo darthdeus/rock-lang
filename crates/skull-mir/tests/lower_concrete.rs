@@ -691,10 +691,18 @@ fn f(c0) {
   bb0:
 v0 = load c0
 v1 = const 0
-v2 = index.Vec v0[v1]
+v2 = index.VecNonNull v0[v1]
 return v2
 }"
     );
+}
+
+#[test]
+fn nullable_and_any_vecs_keep_callback_capable_kind() {
+    let nullable = mir("fn f(xs: [int?]) -> int? { xs[0] }", "f");
+    assert!(nullable.contains("index.Vec "), "{nullable}");
+    let dynamic = mir("fn f(xs: [any]) -> any { xs[0] }", "f");
+    assert!(dynamic.contains("index.Vec "), "{dynamic}");
 }
 
 #[test]
@@ -905,10 +913,10 @@ fn f(c0) {
 v0 = load c0
 v1 = const 0
 v2 = const 9
-store_index.Vec v0[v1], v2
+store_index.VecNonNull v0[v1], v2
 v3 = load c0
 v4 = const 0
-v5 = index.Vec v3[v4]
+v5 = index.VecNonNull v3[v4]
 return v5
 }"
     );
@@ -1145,7 +1153,7 @@ fn for_enumerate_binds_index_and_element() {
 fn f(c0) {
   bb0:
 v0 = load c0
-v1 = len.Vec v0
+v1 = len.VecNonNull v0
 v2 = const 0
 store c1, v2
 goto bb1
@@ -1155,7 +1163,7 @@ v4 = int.lt v3, v1
 branch v4 -> bb2, bb4
   bb2:
 v5 = load c1
-v6 = index.Vec v0[v5]
+v6 = index.VecNonNull v0[v5]
 store c2, v6
 goto bb3
   bb3:

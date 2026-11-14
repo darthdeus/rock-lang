@@ -119,7 +119,7 @@ impl Emitter<'_> {
                         self.write_opnd(out, *value);
                         out.push_str(")\n");
                     }
-                    ContainerKind::Vec => {
+                    ContainerKind::Vec | ContainerKind::VecNonNull => {
                         out.push_str(" __vec_checked_set(");
                         self.write_opnd(out, *base);
                         out.push_str(", ");
@@ -139,7 +139,7 @@ impl Emitter<'_> {
                         out.push('\n');
                     }
                     // The index was proven within `[0, len)`: a raw slot write.
-                    ContainerKind::VecInBounds => {
+                    ContainerKind::VecInBounds | ContainerKind::VecNonNullInBounds => {
                         out.push(' ');
                         self.write_opnd(out, *base);
                         out.push_str("._data[");
@@ -195,7 +195,7 @@ impl Emitter<'_> {
                 // `arr` is referenced up to 4x; render it once.
                 let a = self.opnd_str(*arr);
                 match kind {
-                    ContainerKind::Vec => {
+                    ContainerKind::Vec | ContainerKind::VecNonNull => {
                         // increment len BEFORE assign (1-indexed data table).
                         let _ = writeln!(out, " {a}.len = {a}.len + 1");
                         let _ = write!(out, " {a}._data[{a}.len] = ");
@@ -205,6 +205,7 @@ impl Emitter<'_> {
                     // Column push bumps the shared `len` once, then writes K
                     // columns -- more than one `value`, so lowering splits it.
                     ContainerKind::VecInBounds
+                    | ContainerKind::VecNonNullInBounds
                     | ContainerKind::NativeBuffer
                     | ContainerKind::NativeBufferInBounds
                     | ContainerKind::NativeBufferValue(_)

@@ -129,13 +129,21 @@ pub enum Lit {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ContainerKind {
     /// `[T]` — stdlib `{ data = {..1-indexed..}, len = N }`.
+    /// A slot may be absent while logically in bounds (for example `[T?]`),
+    /// so a read or write may enter a backing table metamethod.
     Vec,
+    /// Lua `[T]` with a primitive scalar element that occupies every live slot.
+    /// In-bounds reads and writes cannot reach a backing table metamethod.
+    VecNonNull,
     /// A [`ContainerKind::Vec`] element access whose index was proven to lie
     /// in `[0, len)` at that point (`skull_transform::elide_bounds_checks`),
-    /// so the backends index the backing raw, with no check and no call.
+    /// so the backends omit the explicit bounds helper. A Lua backing table
+    /// metamethod can still run for an absent slot.
     /// Appears only on [`Inst::Index`] and [`Inst::StoreIndex`]; never a
     /// user-facing type and never a `for` head.
     VecInBounds,
+    /// Proven in-bounds access to a `VecNonNull` slot.
+    VecNonNullInBounds,
     /// `NativeBuffer<T>` — `{ ptr, len }`; `.ptr` is a 0-based C array.
     NativeBuffer,
     /// A [`ContainerKind::NativeBuffer`] element access whose index was

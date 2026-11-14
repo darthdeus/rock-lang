@@ -376,9 +376,13 @@ impl Emitter<'_> {
                              emit -- lowering must decompose it into leaf reads"
                         )));
                     }
-                    ContainerKind::Vec => format!("__vec_checked_get({b}, {i})"),
+                    ContainerKind::Vec | ContainerKind::VecNonNull => {
+                        format!("__vec_checked_get({b}, {i})")
+                    }
                     // Proven within `[0, len)`: the 0-based backing, raw.
-                    ContainerKind::VecInBounds => format!("{b}._data[{i}]"),
+                    ContainerKind::VecInBounds | ContainerKind::VecNonNullInBounds => {
+                        format!("{b}._data[{i}]")
+                    }
                     // A whole-element read has no single slot to name: column
                     // storage has no element object. Lowering decomposes every
                     // such read into per-column reads (`column_element_repr`),
@@ -421,6 +425,8 @@ impl Emitter<'_> {
                 | ContainerKind::NativeBufferValue(_)
                 | ContainerKind::Vec
                 | ContainerKind::VecInBounds
+                | ContainerKind::VecNonNull
+                | ContainerKind::VecNonNullInBounds
                 | ContainerKind::VecValueColumns(_)
                 | ContainerKind::VecValueStrided(_) => {
                     format!("{}.len", self.render_val(*base)?)

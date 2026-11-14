@@ -2088,11 +2088,11 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
     return #tbl
 """
 
-@nowrite @intrinsic @native_required @inline inline(lua) fn table_get(tbl: any, index: any) -> any = """
+@intrinsic @native_required @inline inline(lua) fn table_get(tbl: any, index: any) -> any = """
     return tbl[index]
 """
 
-@writes_elems @intrinsic @native_required @inline inline(lua) fn table_set(tbl: any, index: any, value: any) = """
+@intrinsic @native_required @inline inline(lua) fn table_set(tbl: any, index: any, value: any) = """
     tbl[index] = value
 """
 
@@ -2119,7 +2119,7 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
 // representation, so a missing column route fell through to the boxed body.
 // Both callers are Map methods (`remove`, `clear`), and both unset only present
 // keys.
-@writes_elems @intrinsic @relocates @inline inline(lua) fn table_unset<K, V>(tbl: Map<K, V>, index: K) = """
+@intrinsic @relocates @inline inline(lua) fn table_unset<K, V>(tbl: Map<K, V>, index: K) = """
     tbl[index] = nil
 """
 
@@ -2138,9 +2138,9 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
 // creates a bare-name obligation for opaque text to call, and these are reached
 // only through ordinary Rock calls and the column intercept, which match the
 // Rock name rather than the emitted symbol.
-@nowrite @intrinsic @inline inline(lua) fn __vec_data_get<T>(vec: [T], index: int) -> any = "return vec._data[index + 1]"
-@writes_elems @intrinsic @inline inline(lua) fn __vec_data_set<T>(vec: [T], index: int, @repr(opaque) value: T) = "vec._data[index + 1] = value"
-@writes_elems @intrinsic @relocates @inline inline(lua) fn __vec_data_unset<T>(vec: [T], index: int) = "vec._data[index + 1] = nil"
+@intrinsic @inline inline(lua) fn __vec_data_get<T>(vec: [T], index: int) -> any = "return vec._data[index + 1]"
+@intrinsic @inline inline(lua) fn __vec_data_set<T>(vec: [T], index: int, @repr(opaque) value: T) = "vec._data[index + 1] = value"
+@intrinsic @relocates @inline inline(lua) fn __vec_data_unset<T>(vec: [T], index: int) = "vec._data[index + 1] = nil"
 
 // The COLD half of the same boundary. `get`/`set`/`unset` cover every op that
 // reaches storage one element at a time; these are the ops that touch the
@@ -2942,7 +2942,7 @@ inline(lua) fn get_os() -> string = """
 @nowrite @intrinsic @inline inline(lua) fn phantom<T>() -> T = """return nil"""
 @intrinsic inline(lua) fn tuple_first<A, B>(tuple: (A, B)) -> A = """return tuple[1]"""
 @intrinsic inline(lua) fn tuple_second<A, B>(tuple: (A, B)) -> B = """return tuple[2]"""
-@nowrite inline(lua) fn tuple_nth<A>(tuple: any, n: int) -> A = """return tuple[n]"""
+inline(lua) fn tuple_nth<A>(tuple: any, n: int) -> A = """return tuple[n]"""
 
 fn char_to_byte(c: string) -> int { return unit_at(c, 0) }
 

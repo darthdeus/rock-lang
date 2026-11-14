@@ -1201,6 +1201,7 @@ impl BodyHasher {
     fn container(&mut self, kind: ContainerKind) {
         match kind {
             ContainerKind::Vec => self.tag(0),
+            ContainerKind::VecNonNull => self.tag(12),
             ContainerKind::NativeBuffer => self.tag(1),
             ContainerKind::NativeBufferValue(name) => {
                 self.tag(2);
@@ -1219,6 +1220,7 @@ impl BodyHasher {
             }
             ContainerKind::VecStrideSlot => self.tag(8),
             ContainerKind::VecInBounds => self.tag(9),
+            ContainerKind::VecNonNullInBounds => self.tag(13),
             ContainerKind::NativeBufferInBounds => self.tag(10),
         }
     }

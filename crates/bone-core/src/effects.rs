@@ -9,9 +9,8 @@
 //! it makes. Anything whose body cannot be read -- an `inline(lua)`, `extern`
 //! or `operator(lua)` body, a call through a function value, a yield (the
 //! resumer runs), a call the inference left unresolved -- writes everything,
-//! with two reviewed exceptions in the standard library: an opaque body
-//! marked `@pure` and `print` write nothing, and the push bodies write only
-//! the `len` field (they grow a vector, never shrink one). A `for` statement
+//! with reviewed exceptions for opaque bodies marked `@pure` or `@nowrite`.
+//! A `for` statement
 //! joins the protocol functions it desugars to.
 //!
 //! `@pure` is otherwise not consulted: a `@pure` Rock body is simply walked
@@ -21,7 +20,9 @@
 //! (a cycle of bodies that write nothing writes nothing), computed once per
 //! workspace and dropped whenever a module's inference is replaced.
 
-use crate::hir::{BodyOwner, BuiltinTy, Callee, Expr, Function, Statement, TyId, TypeExpr};
+use crate::hir::{
+    BinOp, BodyOwner, BuiltinTy, Callee, Expr, Function, Statement, TyId, TypeCtor, TypeExpr,
+};
 use crate::prelude::*;
 use crate::workspace::{BoundNext, BoundTree, Workspace};
 
@@ -133,17 +134,11 @@ impl EffectTable {
             for (fid, f) in module.functions.iter() {
                 let bi = inference.and_then(|inf| inf.per_fn.get(&BodyOwner::Function(fid)));
                 let body = module.bodies.get(&BodyOwner::Function(fid));
-                fns.push(
-                    match (
-                        opaque_effect(ws, module.id, f, &callback_libraries),
-                        body,
-                        bi,
-                    ) {
-                        (Some(effect), _, _) => (effect, Vec::new()),
-                        (None, Some(body), Some(bi)) => body_effect(ws, body, bi),
-                        _ => (MemEffect::all(), Vec::new()),
-                    },
-                );
+                fns.push(match (opaque_effect(f, &callback_libraries), body, bi) {
+                    (Some(effect), _, _) => (effect, Vec::new()),
+                    (None, Some(body), Some(bi)) => body_effect(ws, body, bi),
+                    _ => (MemEffect::all(), Vec::new()),
+                });
             }
             local.push(fns);
         }
@@ -185,17 +180,9 @@ impl EffectTable {
     }
 }
 
-/// The push bodies, line by line: the one opaque mutation that only grows.
-const PUSH_BODY: [&str; 2] = ["vec.len = vec.len + 1", "vec._data[vec.len] = item"];
-
 /// The effect of a function whose body cannot be walked, or `None` for a
 /// Rock body.
-fn opaque_effect(
-    ws: &Workspace,
-    mid: ModuleId,
-    f: &Function,
-    callback_libraries: &FxHashSet<Ustr>,
-) -> Option<MemEffect> {
+fn opaque_effect(f: &Function, callback_libraries: &FxHashSet<Ustr>) -> Option<MemEffect> {
     if !f.is_extern && f.inline_body.is_none() {
         return None;
     }
@@ -232,21 +219,6 @@ fn opaque_effect(
             ..MemEffect::none()
         });
     }
-    let stdlib = crate::modules::is_stdlib_module_file(ws.module(mid).file.as_str());
-    let push = stdlib
-        && matches!(f.name.as_str(), "push" | "vec_push")
-        && f.inline_body.as_ref().is_some_and(|(_, body)| {
-            body.as_str()
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .eq(PUSH_BODY)
-        });
-    if push {
-        let mut effect = MemEffect::with_field(Ustr::from("len"));
-        effect.lengths = false;
-        return Some(effect);
-    }
     Some(MemEffect::all())
 }
 
@@ -272,6 +244,78 @@ fn is_constructor(ws: &Workspace, name: Ustr) -> bool {
     ws.struct_by_name.contains_key(&bare)
         || ws.enums_by_name.contains_key(&bare)
         || ws.newtypes_by_name.contains_key(&bare)
+}
+
+fn type_expr_at(ws: &Workspace, bi: &crate::workspace::BodyInference, ty: TyId) -> TypeExpr {
+    let mut ty = ty;
+    loop {
+        let current = raw_type_expr_at(ws, bi, ty);
+        if let TypeExpr::Nullable(inner) = current {
+            ty = ty.with_idx(inner);
+        } else {
+            break current;
+        }
+    }
+}
+
+fn raw_type_expr_at(ws: &Workspace, bi: &crate::workspace::BodyInference, ty: TyId) -> TypeExpr {
+    match ty {
+        TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
+        TyId::Local(idx) => bi.ty_arena[idx],
+    }
+}
+
+fn expr_type(
+    ws: &Workspace,
+    bi: &crate::workspace::BodyInference,
+    expr: Idx<Expr>,
+) -> Option<TypeExpr> {
+    let &ty = bi.expr_types.get(expr)?;
+    Some(type_expr_at(ws, bi, ty))
+}
+
+fn index_may_call_table_metamethod(
+    ws: &Workspace,
+    bi: &crate::workspace::BodyInference,
+    base: Idx<Expr>,
+) -> bool {
+    let Some(expr) = expr_type(ws, bi, base) else {
+        return true;
+    };
+    match expr {
+        TypeExpr::App {
+            ctor: TypeCtor::Array | TypeCtor::Map,
+            ..
+        }
+        | TypeExpr::Builtin(BuiltinTy::Any)
+        | TypeExpr::Generic(..)
+        | TypeExpr::Infer(..) => true,
+        _ => false,
+    }
+}
+
+fn equality_operand_may_call_metamethod(
+    ws: &Workspace,
+    body: &crate::hir::Body,
+    bi: &crate::workspace::BodyInference,
+    expr: Idx<Expr>,
+) -> bool {
+    if matches!(body.expr_arena[expr], Expr::Null) {
+        return false;
+    }
+    !matches!(
+        expr_type(ws, bi, expr),
+        Some(TypeExpr::Builtin(
+            BuiltinTy::Unit
+                | BuiltinTy::Int
+                | BuiltinTy::Uint
+                | BuiltinTy::Float
+                | BuiltinTy::F32
+                | BuiltinTy::Bool
+                | BuiltinTy::String
+                | BuiltinTy::Never
+        ))
+    )
 }
 
 fn body_effect(
@@ -304,6 +348,20 @@ fn body_effect(
                 }
                 None => effect.join(&MemEffect::all()),
             },
+            // A table lookup can enter __index. An indexed assignment can
+            // enter __newindex, even when its direct store is element-only.
+            Expr::Index { base, .. } if index_may_call_table_metamethod(ws, bi, *base) => {
+                effect.join(&MemEffect::all())
+            }
+            Expr::BinOp {
+                op: BinOp::Eq | BinOp::NotEq,
+                lhs,
+                rhs,
+            } if equality_operand_may_call_metamethod(ws, body, bi, *lhs)
+                && equality_operand_may_call_metamethod(ws, body, bi, *rhs) =>
+            {
+                effect.join(&MemEffect::all())
+            }
             Expr::Yield(_) | Expr::YieldDelegate(_) => effect.join(&MemEffect::all()),
             _ => {}
         };

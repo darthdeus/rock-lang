@@ -180,7 +180,7 @@ fn index_read_is_checked(kind: &ContainerKind) -> bool {
         ContainerKind::NativeBufferLeaf
             | ContainerKind::VecColumn
             | ContainerKind::VecStrideSlot
-            | ContainerKind::VecInBounds
+            | ContainerKind::VecNonNullInBounds
             | ContainerKind::NativeBufferInBounds
     )
 }

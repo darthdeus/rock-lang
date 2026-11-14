@@ -370,11 +370,15 @@ fn keeps_vec_lengths(inst: &Inst) -> bool {
             kind,
             ContainerKind::VecColumn
                 | ContainerKind::VecStrideSlot
-                | ContainerKind::VecInBounds
+                | ContainerKind::VecNonNullInBounds
                 | ContainerKind::NativeBufferInBounds
                 | ContainerKind::NativeBufferLeaf
         ),
-        // Reads that may raise but change nothing.
+        Inst::Index {
+            kind: ContainerKind::Vec | ContainerKind::VecInBounds | ContainerKind::Map,
+            ..
+        } => false,
+        // A boxed Vec or Map lookup can enter a Lua metamethod.
         Inst::Index { .. }
         | Inst::VecCheckedIndex { .. }
         | Inst::Field { .. }

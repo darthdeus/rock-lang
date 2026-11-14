@@ -68,7 +68,7 @@ impl Probe {
                 base,
                 index,
                 value,
-                kind: ContainerKind::Vec,
+                kind: ContainerKind::VecNonNull,
             },
         )
     }
@@ -82,7 +82,7 @@ impl Probe {
             Inst::Index {
                 base,
                 index,
-                kind: ContainerKind::Vec,
+                kind: ContainerKind::VecNonNull,
             },
         )
     }
@@ -164,7 +164,7 @@ fn a_counted_loop_store_is_in_bounds() {
     let mut p = Probe::new();
     let (_, store) = counted_loop(&mut p, |_, _| {});
     p.run();
-    assert_eq!(p.kind(store), ContainerKind::VecInBounds);
+    assert_eq!(p.kind(store), ContainerKind::VecNonNullInBounds);
 }
 
 #[test]
@@ -172,7 +172,7 @@ fn an_unknown_call_in_the_body_keeps_the_check() {
     let mut p = Probe::new();
     let (_, store) = counted_loop(&mut p, |p, b| p.unknown_call(b));
     p.run();
-    assert_eq!(p.kind(store), ContainerKind::Vec);
+    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
 }
 
 #[test]
@@ -182,11 +182,30 @@ fn a_call_after_the_store_still_reaches_it_around_the_back_edge() {
     p.f.set_term(lp.body, Term::Goto(lp.latch));
     p.unknown_call(lp.latch);
     p.run();
-    assert_eq!(p.kind(store), ContainerKind::Vec);
+    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
 }
 
 #[test]
-fn a_push_in_the_body_only_grows() {
+fn a_literal_push_in_the_body_invalidates_bounds_facts() {
+    let mut p = Probe::new();
+    let (_, store) = counted_loop(&mut p, |p, b| {
+        let arr = p.emit(b, Inst::MakeVec(Vec::new()));
+        let value = p.int(b, 7);
+        p.emit(
+            b,
+            Inst::ArrayPush {
+                arr,
+                value,
+                kind: ContainerKind::VecNonNull,
+            },
+        );
+    });
+    p.run();
+    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
+}
+
+#[test]
+fn a_push_to_an_external_vector_can_run_a_metamethod() {
     let mut p = Probe::new();
     let (_, store) = counted_loop(&mut p, |p, b| {
         let arr = p.load(b, p.ys);
@@ -201,7 +220,7 @@ fn a_push_in_the_body_only_grows() {
         );
     });
     p.run();
-    assert_eq!(p.kind(store), ContainerKind::VecInBounds);
+    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
 }
 
 #[test]
@@ -220,7 +239,7 @@ fn a_length_store_in_the_body_keeps_the_check() {
         );
     });
     p.run();
-    assert_eq!(p.kind(store), ContainerKind::Vec);
+    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
 }
 
 #[test]
@@ -231,7 +250,7 @@ fn rebinding_the_vector_in_the_body_keeps_the_check() {
         p.store(b, p.xs, other);
     });
     p.run();
-    assert_eq!(p.kind(store), ContainerKind::Vec);
+    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
 }
 
 #[test]
@@ -251,7 +270,7 @@ fn a_yield_in_the_body_keeps_the_check() {
     );
     p.f.set_term(resume, Term::Goto(lp.latch));
     p.run();
-    assert_eq!(p.kind(store), ContainerKind::Vec);
+    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
 }
 
 #[test]
@@ -274,7 +293,7 @@ fn an_early_exit_before_the_store_does_not_matter() {
     );
     p.f.set_term(rest, Term::Goto(lp.latch));
     p.run();
-    assert_eq!(p.kind(store), ContainerKind::VecInBounds);
+    assert_eq!(p.kind(store), ContainerKind::VecNonNullInBounds);
 }
 
 #[test]
@@ -283,8 +302,8 @@ fn a_second_vector_in_the_body_keeps_its_check() {
     let (lp, store) = counted_loop(&mut p, |_, _| {});
     let other = p.set(lp.body, p.ys, p.i);
     p.run();
-    assert_eq!(p.kind(store), ContainerKind::VecInBounds);
-    assert_eq!(p.kind(other), ContainerKind::Vec);
+    assert_eq!(p.kind(store), ContainerKind::VecNonNullInBounds);
+    assert_eq!(p.kind(other), ContainerKind::VecNonNull);
 }
 
 #[test]
@@ -298,7 +317,7 @@ fn a_counter_that_may_start_negative_keeps_the_check() {
     let init = p.emit(entry, Inst::IntSub(len, one));
     p.store(entry, p.i, init);
     p.run();
-    assert_eq!(p.kind(store), ContainerKind::Vec);
+    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
 }
 
 /// `if i < 0 { return }; if i >= xs.len { return }; xs[i] = 1`.
@@ -336,8 +355,8 @@ fn a_dominating_guard_proves_the_store() {
     p.f.set_term(body, Term::Return(vec![]));
     p.f.set_term(exit, Term::Return(vec![]));
     p.run();
-    assert_eq!(p.kind(store), ContainerKind::VecInBounds);
-    assert_eq!(p.kind(other), ContainerKind::Vec);
+    assert_eq!(p.kind(store), ContainerKind::VecNonNullInBounds);
+    assert_eq!(p.kind(other), ContainerKind::VecNonNull);
 }
 
 /// `xs[i]` then `xs[i] = ..`: the read checked the slot.
@@ -349,8 +368,44 @@ fn a_checked_read_proves_the_store_after_it() {
     let store = p.set(b, p.xs, p.i);
     p.f.set_term(b, Term::Return(vec![read]));
     p.run();
-    assert_eq!(p.kind(read), ContainerKind::Vec);
-    assert_eq!(p.kind(store), ContainerKind::VecInBounds);
+    assert_eq!(p.kind(read), ContainerKind::VecNonNull);
+    assert_eq!(p.kind(store), ContainerKind::VecNonNullInBounds);
+}
+
+#[test]
+fn a_callback_capable_index_forgets_a_prior_bounds_proof() {
+    for write in [false, true] {
+        let mut p = Probe::new();
+        let b = p.f.entry;
+        let checked = p.get(b, p.xs, p.i);
+        let base = p.load(b, p.ys);
+        let index = p.load(b, p.i);
+        if write {
+            let value = p.int(b, 1);
+            p.emit(
+                b,
+                Inst::StoreIndex {
+                    base,
+                    index,
+                    value,
+                    kind: ContainerKind::Vec,
+                },
+            );
+        } else {
+            p.emit(
+                b,
+                Inst::Index {
+                    base,
+                    index,
+                    kind: ContainerKind::Vec,
+                },
+            );
+        }
+        let store = p.set(b, p.xs, p.i);
+        p.f.set_term(b, Term::Return(vec![checked]));
+        p.run();
+        assert_eq!(p.kind(store), ContainerKind::VecNonNull);
+    }
 }
 
 #[test]
@@ -362,7 +417,7 @@ fn a_call_between_a_read_and_a_store_keeps_the_check() {
     let store = p.set(b, p.xs, p.i);
     p.f.set_term(b, Term::Return(vec![read]));
     p.run();
-    assert_eq!(p.kind(store), ContainerKind::Vec);
+    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
 }
 
 /// `while i < xs.len { xs[i] = 1; ys[i] = 1; i = i + 1 }` re-reads the live
@@ -397,8 +452,8 @@ fn a_while_loop_against_the_live_length_proves_its_vector() {
     p.f.set_term(body, Term::Goto(header));
     p.f.set_term(exit, Term::Return(vec![]));
     p.run();
-    assert_eq!(p.kind(store), ContainerKind::VecInBounds);
-    assert_eq!(p.kind(other), ContainerKind::Vec);
+    assert_eq!(p.kind(store), ContainerKind::VecNonNullInBounds);
+    assert_eq!(p.kind(other), ContainerKind::VecNonNull);
 }
 
 /// `rows[r][c] = ..` after `c < rows[r].len`: the two `rows[r]` reads name
@@ -440,13 +495,13 @@ fn an_element_of_an_element_is_a_place() {
             base: row2,
             index,
             value,
-            kind: ContainerKind::Vec,
+            kind: ContainerKind::VecNonNull,
         },
     );
     p.f.set_term(body, Term::Return(vec![]));
     p.f.set_term(exit, Term::Return(vec![]));
     p.run();
-    assert_eq!(p.kind(store), ContainerKind::VecInBounds);
+    assert_eq!(p.kind(store), ContainerKind::VecNonNullInBounds);
 
     // A store into any container between the two reads may have replaced
     // the row.
@@ -484,13 +539,13 @@ fn an_element_of_an_element_is_a_place() {
             base: row2,
             index,
             value,
-            kind: ContainerKind::Vec,
+            kind: ContainerKind::VecNonNull,
         },
     );
     p.f.set_term(body, Term::Return(vec![]));
     p.f.set_term(exit, Term::Return(vec![]));
     p.run();
-    assert_eq!(p.kind(store), ContainerKind::Vec);
+    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
 }
 
 #[test]
@@ -507,7 +562,7 @@ fn a_body_with_a_lambda_is_left_alone() {
         },
     );
     p.run();
-    assert_eq!(p.kind(store), ContainerKind::Vec);
+    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
 }
 
 // --- Column checks and the shapes Stone indexes with.

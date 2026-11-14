@@ -418,6 +418,8 @@ impl Emitter<'_> {
             Inst::Len { base, kind } => match kind {
                 ContainerKind::Vec
                 | ContainerKind::VecInBounds
+                | ContainerKind::VecNonNull
+                | ContainerKind::VecNonNullInBounds
                 | ContainerKind::VecValueColumns(_)
                 | ContainerKind::VecValueStrided(_)
                 | ContainerKind::NativeBuffer
@@ -641,7 +643,7 @@ impl Emitter<'_> {
             // element. A nil or false slot is either such an element or out of
             // bounds, and the helper tells which. A read whose result is
             // discarded is a bare statement, which only the call can be.
-            ContainerKind::Vec
+            ContainerKind::Vec | ContainerKind::VecNonNull
                 if self.repeatable(base, 2) && self.repeatable(index, 2) && self.has_home(id) =>
             {
                 self.write_opnd(out, base);
@@ -653,7 +655,7 @@ impl Emitter<'_> {
                 self.write_opnd(out, index);
                 out.push(')');
             }
-            ContainerKind::Vec => {
+            ContainerKind::Vec | ContainerKind::VecNonNull => {
                 out.push_str("__vec_checked_get(");
                 self.write_opnd(out, base);
                 out.push_str(", ");
@@ -662,7 +664,7 @@ impl Emitter<'_> {
             }
             // The index was proven within `[0, len)`, so the slot holds the
             // element, nil and false included: no fallback.
-            ContainerKind::VecInBounds => {
+            ContainerKind::VecInBounds | ContainerKind::VecNonNullInBounds => {
                 self.write_opnd(out, base);
                 out.push_str("._data[");
                 self.write_vec_slot(out, index);

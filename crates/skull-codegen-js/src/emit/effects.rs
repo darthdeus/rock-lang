@@ -58,9 +58,13 @@ impl Emitter<'_> {
                                  reached emit -- `{elem}` has no C leaf layout"
                             )));
                         }
-                        ContainerKind::Vec => format!("__vec_checked_set({b}, {i}, {v});"),
+                        ContainerKind::Vec | ContainerKind::VecNonNull => {
+                            format!("__vec_checked_set({b}, {i}, {v});")
+                        }
                         // Proven within `[0, len)`: the 0-based backing, raw.
-                        ContainerKind::VecInBounds => format!("{b}._data[{i}] = {v};"),
+                        ContainerKind::VecInBounds | ContainerKind::VecNonNullInBounds => {
+                            format!("{b}._data[{i}] = {v};")
+                        }
                         ContainerKind::Map => format!("__map_set({b}, {i}, {v});"),
                     };
                     self.push(&line);
@@ -156,14 +160,17 @@ impl Emitter<'_> {
                     let v = self.render_val(*value)?;
                     self.push(&format!("__rock_globals[{}] = {v};", js_string_lit(slot)?));
                 }
-                // A checked Vec/NativeBuffer index whose value is UNUSED: its
-                // bounds check throws on OOB, so it must be emitted as a statement
-                // rather than dropped (luajit keeps the checked read -- dropping
-                // it would silently lose the OOB error, diverging under
-                // `try_call(|| xs[oob])`). Map index is a raw miss-returns-nil VM
-                // op with no side effect, so it stays droppable below.
+                // An unused index still checks bounds or may enter a host
+                // getter (including a Map or a proxy-backed Vec).
                 Inst::Index { kind, .. }
-                    if (matches!(kind, ContainerKind::Vec) || kind.is_native_buffer())
+                    if (matches!(
+                        kind,
+                        ContainerKind::Vec
+                            | ContainerKind::VecInBounds
+                            | ContainerKind::VecNonNull
+                            | ContainerKind::VecNonNullInBounds
+                            | ContainerKind::Map
+                    ) || kind.is_native_buffer())
                         && self.use_count[raw(iid) as usize] == 0 =>
                 {
                     let line = format!("{};", self.render_inst_expr(iid)?);

@@ -44,12 +44,12 @@
 //! facts about that cell; a field store drops facts through that field name,
 //! and a `len` store drops every length fact; a global store drops facts
 //! through that global; an element store drops facts through any element. A
-//! call drops every length fact and every fact through memory (a global, a
-//! field or an element): the callee may shrink any vector it can reach or
-//! rebind any field. Only the stdlib push keeps them, because it only grows
-//! the vector and only writes a slot that was outside it; `@pure` is not
-//! trusted, since the checker admits `@debug_impure` callees and never
-//! verifies an `inline(lua)` or `extern` body. A yield drops everything. An instruction that executes
+//! boxed Vec or Map lookup/store can enter a Lua metamethod, so it drops all
+//! memory facts. A call drops every length fact and every fact through memory
+//! (a global, a field or an element): the callee may shrink any vector it can
+//! reach or rebind any field. `@pure` is not trusted, since the checker admits
+//! `@debug_impure` callees and never verifies an `inline(lua)` or `extern`
+//! body. A yield drops everything. An instruction that executes
 //! again (a loop) drops the facts about its previous value.
 //!
 //! Merging at a join intersects the incoming facts, so a fact that reaches the
@@ -171,12 +171,14 @@ pub fn elide_bounds_checks(ws: Option<&Workspace>, func: &mut MirFunc) -> usize 
                 Inst::Index {
                     base,
                     index,
-                    kind: ContainerKind::Vec | ContainerKind::NativeBuffer,
+                    kind:
+                        ContainerKind::Vec | ContainerKind::VecNonNull | ContainerKind::NativeBuffer,
                 }
                 | Inst::StoreIndex {
                     base,
                     index,
-                    kind: ContainerKind::Vec | ContainerKind::NativeBuffer,
+                    kind:
+                        ContainerKind::Vec | ContainerKind::VecNonNull | ContainerKind::NativeBuffer,
                     ..
                 }
                 | Inst::VecCheckedIndex { vec: base, index }
@@ -204,6 +206,7 @@ pub fn elide_bounds_checks(ws: Option<&Workspace>, func: &mut MirFunc) -> usize 
             Inst::Index { kind, .. } | Inst::StoreIndex { kind, .. } => {
                 *kind = match kind {
                     ContainerKind::Vec => ContainerKind::VecInBounds,
+                    ContainerKind::VecNonNull => ContainerKind::VecNonNullInBounds,
                     _ => ContainerKind::NativeBufferInBounds,
                 };
             }
@@ -224,11 +227,11 @@ pub fn elide_bounds_checks(ws: Option<&Workspace>, func: &mut MirFunc) -> usize 
 fn needs_bounds_proof(ws: Option<&Workspace>, inst: &Inst) -> bool {
     match inst {
         Inst::Index {
-            kind: ContainerKind::Vec | ContainerKind::NativeBuffer,
+            kind: ContainerKind::Vec | ContainerKind::VecNonNull | ContainerKind::NativeBuffer,
             ..
         }
         | Inst::StoreIndex {
-            kind: ContainerKind::Vec | ContainerKind::NativeBuffer,
+            kind: ContainerKind::Vec | ContainerKind::VecNonNull | ContainerKind::NativeBuffer,
             ..
         }
         | Inst::VecCheckedIndex { .. } => true,
@@ -740,11 +743,15 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
             }
         }
         Inst::Index {
+            kind: ContainerKind::Vec | ContainerKind::VecInBounds | ContainerKind::Map,
+            ..
+        } => facts.after_unknown_call(),
+        Inst::Index {
             base,
             index,
             kind:
-                ContainerKind::Vec
-                | ContainerKind::VecInBounds
+                ContainerKind::VecNonNull
+                | ContainerKind::VecNonNullInBounds
                 | ContainerKind::NativeBuffer
                 | ContainerKind::NativeBufferInBounds,
         }
@@ -752,11 +759,18 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
         Inst::StoreIndex {
             base, index, kind, ..
         } => {
-            facts.forget(|k| matches!(k, Key::Elem(..)));
             if matches!(
                 kind,
-                ContainerKind::Vec
-                    | ContainerKind::VecInBounds
+                ContainerKind::Vec | ContainerKind::VecInBounds | ContainerKind::Map
+            ) {
+                facts.after_unknown_call();
+            } else {
+                facts.forget(|k| matches!(k, Key::Elem(..)));
+            }
+            if matches!(
+                kind,
+                ContainerKind::VecNonNull
+                    | ContainerKind::VecNonNullInBounds
                     | ContainerKind::NativeBuffer
                     | ContainerKind::NativeBufferInBounds
             ) {
@@ -789,7 +803,8 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
             }
             facts.forget_field(*field);
         }
-        Inst::ArrayPush { .. } => facts.forget_field(Ustr::from(LEN)),
+        // A push can write an absent slot and enter __newindex.
+        Inst::ArrayPush { .. } => facts.after_unknown_call(),
         Inst::Call { func: fref, args } => {
             after_direct_call(facts, ctx, *fref);
             if is_stdlib_fn(ctx.ws, *fref, "__nb_checked_index") && args.len() == 2 {

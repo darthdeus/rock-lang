@@ -3141,16 +3141,16 @@ fn a_call_in_the_loop_body_keeps_the_check_even_when_pure() {
     assert!(lua.contains("__vec_checked_set("), "{lua}");
 }
 
-/// A push onto a vector only grows it, so the stores a loop proved stay raw.
+/// A foreign vector's backing table can call __newindex when push appends.
 #[test]
-fn a_push_in_the_loop_body_keeps_the_proof() {
+fn a_push_in_the_loop_body_keeps_the_check() {
     let lua = emit_inlined(
         "fn fill(xs: [int], out: [int]) {
             for i in 0..xs.len() { xs[i] = i; if i % 7 == 0 { out.push(i) } }
         }",
         "fill",
     );
-    assert!(!lua.contains("__vec_checked_set("), "{lua}");
+    assert!(lua.contains("__vec_checked_set("), "{lua}");
 }
 
 /// A range guard dominating the store proves it; a second vector of unknown
@@ -3422,6 +3422,266 @@ fn map_get_metatable_can_shrink_a_guarded_vector() {
                 return nil
             end })
             local ok, err = pcall(read_after_get, xs, m)
+            assert(not ok and tostring(err):find("Vec index out of bounds", 1, true), tostring(err))
+            return "ok"
+        end)()"#,
+    );
+    assert_eq!(out, "ok");
+}
+
+#[test]
+fn table_lookups_can_shrink_a_guarded_vector() {
+    let src = r#"
+fn via_table(xs: [int], t: any) -> int {
+    if xs.len() <= 0 { return -1 }
+    let value: int = cast(table_get(t, "missing"))
+    return xs[0] + value
+}
+fn via_tuple(xs: [int], t: any) -> int {
+    if xs.len() <= 0 { return -1 }
+    let value: int = tuple_nth(t, 1)
+    return xs[0] + value
+}
+fn via_vec_data(xs: [int], ys: [int?]) -> int {
+    if xs.len() <= 0 { return -1 }
+    let value: int = cast(__vec_data_get(ys, 0))
+    return xs[0] + value
+}
+"#;
+    let out = run(
+        src,
+        r#"(function()
+            local function check(f, t)
+                local xs = { len = 1, _data = { 7 } }
+                local mt = { __index = function()
+                    xs.len = 0
+                    xs._data[1] = nil
+                    return 1
+                end }
+                local ok, err = pcall(f, xs, t(mt))
+                assert(not ok and tostring(err):find("Vec index out of bounds", 1, true), tostring(err))
+            end
+            check(via_table, function(mt) return setmetatable({}, mt) end)
+            check(via_vec_data, function(mt) return { len = 1, _data = setmetatable({}, mt) } end)
+            return "ok"
+        end)()"#,
+    );
+    assert_eq!(out, "ok");
+    let lua = emit_inlined(src, "via_tuple");
+    assert!(lua.contains("__vec_checked_get("), "{lua}");
+}
+
+#[test]
+fn table_stores_can_shrink_a_guarded_vector() {
+    let src = r#"
+fn via_table_set(xs: [int], t: any) -> int {
+    if xs.len() <= 0 { return -1 }
+    table_set(t, "missing", 1)
+    return xs[0]
+}
+
+fn via_table_unset(xs: [int], t: Map<string, int>) -> int {
+    if xs.len() <= 0 { return -1 }
+    table_unset(t, "missing")
+    return xs[0]
+}
+fn via_vec_set(xs: [int], ys: [int?]) -> int {
+    if xs.len() <= 0 { return -1 }
+    __vec_data_set(ys, 0, 1)
+    return xs[0]
+}
+fn via_vec_unset(xs: [int], ys: [int?]) -> int {
+    if xs.len() <= 0 { return -1 }
+    __vec_data_unset(ys, 0)
+    return xs[0]
+}
+"#;
+    let out = run(
+        src,
+        r#"(function()
+            local function check(f, t)
+                local xs = { len = 1, _data = { 7 } }
+                local mt = { __newindex = function()
+                    xs.len = 0
+                    xs._data[1] = nil
+                end }
+                local ok, err = pcall(f, xs, t(mt))
+                assert(not ok and tostring(err):find("Vec index out of bounds", 1, true), tostring(err))
+            end
+            check(via_table_set, function(mt) return setmetatable({}, mt) end)
+            check(via_table_unset, function(mt) return setmetatable({}, mt) end)
+            check(via_vec_set, function(mt) return { len = 1, _data = setmetatable({}, mt) } end)
+            check(via_vec_unset, function(mt) return { len = 1, _data = setmetatable({}, mt) } end)
+            return "ok"
+        end)()"#,
+    );
+    assert_eq!(out, "ok");
+}
+
+#[test]
+fn map_index_metamethods_can_shrink_a_guarded_vector() {
+    let src = r#"
+fn map_read(m: Map<string, int>) -> int { return m["missing"] }
+fn via_read(xs: [int], m: Map<string, int>) -> int {
+    if xs.len() <= 0 { return -1 }
+    let value = m["missing"]
+    return xs[0] + value
+}
+
+fn via_nested_read(xs: [int], m: Map<string, int>) -> int {
+    if xs.len() <= 0 { return -1 }
+    let value = map_read(m)
+    return xs[0] + value
+}
+fn via_write(xs: [int], m: Map<string, int>) -> int {
+    if xs.len() <= 0 { return -1 }
+    m["missing"] = 1
+    return xs[0]
+}
+fn via_repeated_read(xs: [int], m: Map<string, int>) -> int {
+    if xs.len() <= 0 { return -1 }
+    let first = xs[0]
+    let value = m["missing"]
+    return xs[0] + first + value
+}
+"#;
+    let out = run(
+        src,
+        r#"(function()
+            local function check(f, key)
+                local xs = { len = 1, _data = { 7 } }
+                local mt = { [key] = function()
+                    xs.len = 0
+                    xs._data[1] = nil
+                    return 1
+                end }
+                local m = setmetatable({}, mt)
+                local ok, err = pcall(f, xs, m)
+                assert(not ok and tostring(err):find("Vec index out of bounds", 1, true), tostring(err))
+            end
+            check(via_read, "__index")
+            check(via_nested_read, "__index")
+            check(via_write, "__newindex")
+            check(via_repeated_read, "__index")
+            return "ok"
+        end)()"#,
+    );
+    assert_eq!(out, "ok");
+}
+#[test]
+fn nullable_vec_index_metamethods_can_shrink_a_guarded_vector() {
+    let src = r#"
+fn read_nullable(ys: [int?]) -> int? { return ys[0] }
+fn write_nullable(ys: [int?]) { ys[0] = 1 }
+fn via_read(xs: [int], ys: [int?]) -> int {
+    if xs.len() <= 0 { return -1 }
+    let value = ys[0]
+    if value != null { return -2 }
+    return xs[0]
+}
+fn via_nested_read(xs: [int], ys: [int?]) -> int {
+    if xs.len() <= 0 { return -1 }
+    let value = read_nullable(ys)
+    if value != null { return -2 }
+    return xs[0]
+}
+fn via_write(xs: [int], ys: [int?]) -> int {
+    if xs.len() <= 0 { return -1 }
+    ys[0] = 1
+    return xs[0]
+}
+fn via_nested_write(xs: [int], ys: [int?]) -> int {
+    if xs.len() <= 0 { return -1 }
+    write_nullable(ys)
+    return xs[0]
+}
+fn via_discarded_read(xs: [int], ys: [int?]) -> int {
+    if xs.len() <= 0 || ys.len() <= 0 { return -1 }
+    ys[0]
+    return xs[0]
+}
+"#;
+    let out = run(
+        src,
+        r#"(function()
+            local function check(f, key)
+                local xs = { len = 1, _data = { 7 } }
+                local mt = { [key] = function()
+                    xs.len = 0
+                    xs._data[1] = nil
+                    return nil
+                end }
+                local ys = { len = 1, _data = setmetatable({}, mt) }
+                local ok, err = pcall(f, xs, ys)
+                assert(not ok and tostring(err):find("Vec index out of bounds", 1, true), tostring(err))
+            end
+            check(via_read, "__index")
+            check(via_nested_read, "__index")
+            check(via_write, "__newindex")
+            check(via_nested_write, "__newindex")
+            check(via_discarded_read, "__index")
+            return "ok"
+        end)()"#,
+    );
+    assert_eq!(out, "ok");
+}
+#[test]
+fn foreign_vec_push_can_shrink_a_guarded_vector() {
+    let src = r#"
+fn via_push(xs: [int], ys: [int]) -> int {
+    if xs.len() <= 0 { return -1 }
+    ys.push(1)
+    return xs[0]
+}
+fn via_vec_push(xs: [int], ys: [int]) -> int {
+    if xs.len() <= 0 { return -1 }
+    vec_push(ys, 1)
+    return xs[0]
+}
+"#;
+    let out = run(
+        src,
+        r#"(function()
+            local function check(f)
+                local xs = { len = 1, _data = { 7 } }
+                local ys = { len = 0, _data = setmetatable({}, { __newindex = function()
+                    xs.len = 0
+                    xs._data[1] = nil
+                end }) }
+                local ok, err = pcall(f, xs, ys)
+                assert(not ok and tostring(err):find("Vec index out of bounds", 1, true), tostring(err))
+            end
+            check(via_push)
+            check(via_vec_push)
+            return "ok"
+        end)()"#,
+    );
+    assert_eq!(out, "ok");
+}
+
+#[test]
+fn equality_helper_can_shrink_a_guarded_vector() {
+    let src = r#"
+fn external_equal(a: any, b: any) -> bool { return a == b }
+fn via_helper(xs: [int], a: any, b: any) -> int {
+    if xs.len() <= 0 { return -1 }
+    let equal = external_equal(a, b)
+    if equal { return xs[0] }
+    return -2
+}
+"#;
+    let out = run(
+        src,
+        r#"(function()
+            __op_eq = function(a, b) return a == b end
+            local xs = { len = 1, _data = { 7 } }
+            local mt = { __eq = function()
+                xs.len = 0
+                xs._data[1] = nil
+                return true
+            end }
+            local a, b = setmetatable({}, mt), setmetatable({}, mt)
+            local ok, err = pcall(via_helper, xs, a, b)
             assert(not ok and tostring(err):find("Vec index out of bounds", 1, true), tostring(err))
             return "ok"
         end)()"#,

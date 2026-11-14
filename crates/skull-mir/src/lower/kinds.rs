@@ -181,6 +181,18 @@ impl<'a> Builder<'a> {
         if let Some(elem) = self.vec_strided_elem_of(e)? {
             return Ok(ContainerKind::VecValueStrided(elem));
         }
+        if matches!(self.scx.target, bone_core::hir::FnBackend::Lua)
+            && let Some(MonoTy::App {
+                ctor: crate::monoty::MonoCtor::Array,
+                params,
+            }) = self.concrete_expr_ty(e)
+            && matches!(
+                params.first(),
+                Some(MonoTy::Int | MonoTy::Uint | MonoTy::Float | MonoTy::Bool | MonoTy::String)
+            )
+        {
+            return Ok(ContainerKind::VecNonNull);
+        }
         Ok(ContainerKind::Vec)
     }
 
