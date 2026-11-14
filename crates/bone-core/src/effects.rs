@@ -73,8 +73,7 @@ impl MemEffect {
         self.fields.as_ref().is_none_or(|set| set.contains(&field))
     }
 
-    fn join(&mut self, other: &MemEffect) -> bool {
-        let before = self.clone();
+    fn join(&mut self, other: &MemEffect) {
         self.lengths |= other.lengths;
         self.globals |= other.globals;
         self.elems |= other.elems;
@@ -83,7 +82,6 @@ impl MemEffect {
             (mine, None) => *mine = None,
             (None, Some(_)) => {}
         }
-        *self != before
     }
 
     fn with_field(field: Ustr) -> MemEffect {
@@ -154,6 +152,7 @@ impl EffectTable {
             .iter()
             .map(|fns| fns.iter().map(|(own, _)| own.clone()).collect())
             .collect();
+        let unknown = MemEffect::all();
         loop {
             let mut changed = false;
             for (m, fns) in local.iter().enumerate() {
@@ -166,9 +165,8 @@ impl EffectTable {
                         let callee = table
                             .get(cm.index())
                             .and_then(|fns| fns.get(cf.into_raw().into_u32() as usize))
-                            .cloned()
-                            .unwrap_or_else(MemEffect::all);
-                        joined.join(&callee);
+                            .unwrap_or(&unknown);
+                        joined.join(callee);
                         if joined.is_all() {
                             break;
                         }
@@ -292,11 +290,10 @@ fn body_effect(
                 Callee::Unresolved { name, .. } => match bi.resolved_overload_calls.get(&e) {
                     Some(&target) => {
                         callees.push(target);
-                        false
                     }
                     // A type's constructor and the `enumerate` template
                     // resolve to no function; neither runs user code.
-                    None if is_constructor(ws, *name) || name.as_str() == "enumerate" => false,
+                    None if is_constructor(ws, *name) || name.as_str() == "enumerate" => {}
                     None => effect.join(&MemEffect::all()),
                 },
                 Callee::Local(_) | Callee::Value(_) => effect.join(&MemEffect::all()),
@@ -304,12 +301,11 @@ fn body_effect(
             Expr::SafeNavCall { .. } => match bi.resolved_overload_calls.get(&e) {
                 Some(&target) => {
                     callees.push(target);
-                    false
                 }
                 None => effect.join(&MemEffect::all()),
             },
             Expr::Yield(_) | Expr::YieldDelegate(_) => effect.join(&MemEffect::all()),
-            _ => false,
+            _ => {}
         };
         if effect.is_all() {
             return (effect, Vec::new());
