@@ -1,0 +1,200 @@
+// A flat-enum channel's yield slots are seeded in the frame literal and
+// cleared to nil, so the step only ever writes keys the frame already has
+// (docs/luajit-performance.md). The seeds must be invisible: a frame has to
+// look the same to anything that walks it, at every point in its life, and a
+// coroutine that is never resumed must behave exactly as before.
+
+enum Signal {
+    Idle,
+    Note(string, int),
+}
+
+enum Wide {
+    Empty,
+    Full(string, int, float, string, int, float),
+}
+
+co fn pulse() -> Coroutine<Signal> {
+    yield Signal::Note("a", 1)
+    yield Signal::Idle
+    yield Signal::Note("b", 2)
+}
+
+co fn wide() -> Coroutine<Wide> {
+    yield Wide::Full("x", 1, 2.0, "y", 3, 4.0)
+    yield Wide::Empty
+}
+
+enum Record {
+    Off,
+    On { name: string, level: int },
+}
+
+co fn recorded() -> Coroutine<Record> {
+    yield Record::On { name: "lamp", level: 3 }
+    yield Record::Off
+}
+
+co fn narrow() -> Coroutine<Signal> {
+    yield Signal::Idle
+}
+
+// --- never resumed ---
+
+@test(output = "suspended\nfalse")
+fn a_coroutine_that_is_never_resumed_is_untouched() {
+    let c = pulse()
+    print(c.status())
+    print(c.completed())
+}
+
+// `kill` is a terminal state distinct from completion: status reports
+// `dead` and `completed()` stays false (terminal_states.rock owns that
+// contract; this only checks an unresumed frame reaches it).
+@test(output = "dead\nfalse")
+fn an_unresumed_coroutine_can_be_killed() {
+    let c = pulse()
+    c.kill()
+    print(c.status())
+    print(c.completed())
+}
+
+@test(output = "none")
+fn resuming_a_killed_unresumed_coroutine_yields_nothing() {
+    let c = pulse()
+    c.kill()
+    let ev = c.resume()
+    if ev == null { print("none") } else { print("yielded") }
+}
+
+// --- the seeds are not observable ---
+
+inline(lua) fn yield_slot_keys(c: Coroutine<Signal>) -> string = """
+    local found = {}
+    for k in pairs(c) do
+        if type(k) == "string" and k:sub(1, 3) == "__y" then found[#found + 1] = k end
+    end
+    table.sort(found)
+    return #found == 0 and "none" or table.concat(found, ",")
+"""
+
+inline(js) fn yield_slot_keys(c: Coroutine<Signal>) -> string = """
+    const found = Object.keys(c).filter((k) => k.startsWith("__y")).sort();
+    return found.length === 0 ? "none" : found.join(",");
+"""
+
+@test(output = "none", backends = "lua")
+fn a_fresh_frame_exposes_no_yield_slots() {
+    print(yield_slot_keys(pulse()))
+}
+
+@test(output = "__y0", backends = "lua")
+fn a_cleared_payload_slot_stays_invisible() {
+    // `Idle` carries no payload, so the step clears both payload slots.
+    // Only the live variant tag remains visible, exactly as when the slots
+    // had never been seeded.
+    let c = narrow()
+    let _ = c.resume()
+    print(yield_slot_keys(c))
+}
+
+// --- values survive every width ---
+
+@test(output = "a1\nidle\nb2\ndone")
+fn payload_and_empty_variants_alternate_correctly() {
+    let c = pulse()
+    for i in 0..4 {
+        let ev = c.resume()
+        if ev == null {
+            print("done")
+        } else {
+            match ev {
+                Signal::Note(s, n) => { print("{s}{n}") }
+                Signal::Idle => { print("idle") }
+            }
+        }
+    }
+}
+
+@test(output = "x1-2-y3-4\nempty\ndone")
+fn a_wide_frame_keeps_every_slot() {
+    let c = wide()
+    for i in 0..3 {
+        let ev = c.resume()
+        if ev == null {
+            print("done")
+        } else {
+            match ev {
+                Wide::Full(a, b, cc, d, e, f) => {
+                    print("{a}{b}-{cc.floor()}-{d}{e}-{f.floor()}")
+                }
+                Wide::Empty => { print("empty") }
+            }
+        }
+    }
+}
+
+@test(output = "idle\nnone")
+fn a_narrow_frame_completes() {
+    let c = narrow()
+    let first = c.resume()
+    if first == null {
+        print("none")
+    } else {
+        match first {
+            Signal::Idle => { print("idle") }
+            Signal::Note(_, _) => { print("note") }
+        }
+    }
+    let second = c.resume()
+    if second == null { print("none") } else { print("yielded") }
+}
+
+fn show(ev: Signal?) {
+    if ev == null {
+        print("none")
+    } else {
+        match ev {
+            Signal::Note(s, n) => { print("{s}{n}") }
+            Signal::Idle => { print("idle") }
+        }
+    }
+}
+
+@test(output = "lamp3\noff\ndone")
+fn record_variant_slots_round_trip() {
+    // Record fields take their own yield slots, so the seed count covers
+    // them too.
+    let c = recorded()
+    for i in 0..3 {
+        let ev = c.resume()
+        if ev == null {
+            print("done")
+        } else {
+            match ev {
+                Record::On { name, level } => { print("{name}{level}") }
+                Record::Off => { print("off") }
+            }
+        }
+    }
+}
+
+// --- a frame rebuilt by a host copy still runs ---
+
+inline(lua) fn copy_frame(c: Coroutine<Signal>) -> Coroutine<Signal> = """
+    local copy = {}
+    for k, v in pairs(c) do copy[k] = v end
+    return copy
+"""
+
+@test(output = "a1\nidle\nb2", backends = "lua")
+fn a_pairs_copied_frame_resumes_where_it_left_off() {
+    // A snapshot restore rebuilds a frame by walking it, so the copy has no
+    // seeded slots. The nil-write guards are what keep that frame correct
+    // and cheap; this pins that it still produces the same values.
+    let c = pulse()
+    show(c.resume())
+    let restored = copy_frame(c)
+    show(restored.resume())
+    show(restored.resume())
+}

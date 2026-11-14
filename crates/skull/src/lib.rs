@@ -2970,6 +2970,35 @@ mod tests {
         );
     }
 
+    /// A flat-enum channel writes its yield leaves into reused `s.__y*`
+    /// slots. The constructor's literal seeds those keys with `false` and
+    /// clears them to nil, so every slot has a hash node from birth: a store
+    /// to a present key never grows the table, the frame's shape never moves
+    /// under a trace, and a frame that stays inside one trace can be sunk.
+    /// Short-lived coroutine creation measured 222 -> 108 ns escaping and
+    /// 196 -> 2 ns sinkable for it (docs/luajit-performance.md). The nil
+    /// clears keep the seeds invisible: pairs and snapshots see the same
+    /// frame as before.
+    #[test]
+    fn channel_constructor_seeds_and_clears_yield_slots() {
+        let lua = emit(
+            "enum Ev { Quiet, Hit(float, float), Text(string, int) }
+             co fn pulse() -> Coroutine<Ev> {
+                 yield Ev::Hit(1.0, 2.0)
+                 yield Ev::Text(\"t\", 3)
+                 yield Ev::Quiet
+             }",
+        );
+        assert!(
+            lua.contains("__y0 = false, __y1 = false, __y2 = false"),
+            "expected seeded yield slots in the frame literal, got:\n{lua}"
+        );
+        assert!(
+            lua.contains(".__y0 = nil") && lua.contains(".__y2 = nil"),
+            "expected the seeds cleared to nil, got:\n{lua}"
+        );
+    }
+
     #[test]
     fn coroutine_is_stackless_no_lua_coroutines() {
         // A `co fn` lowers to the C# state-machine model via the CFG->CFG
@@ -2998,6 +3027,9 @@ mod tests {
             !lua.contains("local function __step"),
             "step must be top-level, not a per-instance closure, got:\n{lua}"
         );
+        // A constant-key literal, which LuaJIT builds with one TDUP from a
+        // template table; see the pre-sizing entry in the rejected list of
+        // docs/luajit-performance.md before changing this to assignments.
         assert!(
             lua.contains(r#"{ __ty = "Coroutine", __state = 0, __layout = "#),
             "expected the tagged+stamped frame table, got:\n{lua}"

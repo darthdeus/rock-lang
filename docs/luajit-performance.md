@@ -309,6 +309,78 @@ change is justified by smaller emitted code and cheaper
 recording/off-trace execution at zero compile-time and runtime cost, not
 by a warm-trace speedup claim.
 
+### Coroutine yield slots are seeded in the constructor (2026-11-14)
+
+A coroutine's frame IS the handle, and its constructor builds it from a
+table literal holding what it knows at creation. A flat-enum channel's
+yield slots (`__y*`) were not in it, so the first yield inserted them,
+growing the frame, moving its hash part under any trace that had read it,
+and keeping the frame's shape trace-hostile: LuaJIT cannot sink a table
+allocation whose keys appear after construction.
+
+The constructor now seeds every yield slot in the literal with `false` and
+clears it to nil on the next line. The template is still built once and
+copied with one TDUP; the nil-valued nodes make every later slot write a
+store to a PRESENT key, so yield writes do not grow the frame, and a frame that stays
+inside one trace is sunk outright. The clears keep the seeds invisible —
+a nil-valued node does not appear to `pairs` or snapshots, and no slot is
+readable before the first yield writes it — so nothing observable changes.
+Measured with `benchmarks/coroutine_lifecycle.rock` (15 interleaved
+fresh-process rounds, bundled LuaJIT, M1, JIT on), per coroutine:
+
+| workload | before | after |
+| --- | ---: | ---: |
+| short-lived, handle stays in the trace | 196.1 ns | 2.1 ns |
+| short-lived, handle escapes to a pool | 221.6 ns | 107.7 ns |
+| long-lived, all-quiet yields (ns/resume) | 1.25 | 1.20 |
+| long-lived, mixed yields (ns/resume) | 3.25 | 3.24 |
+
+The interpreter gains about 10% on short-lived creation and is unchanged
+long-lived.
+
+Seeding moves a frame's growth to its birth, so the one case that pays is
+a coroutine created and never resumed, and only when the seeds push the
+literal past a power-of-two hash size. Measured per frame (20,000 live
+instances, bundled LuaJIT, M1):
+
+| frame | before | after |
+| --- | ---: | ---: |
+| 3 slots, never resumed | 269 B | 269 B |
+| 3 slots, resumed | 269 B | 269 B |
+| 7 slots, never resumed | 269 B | 461 B |
+| 7 slots, resumed once | 461 B | 461 B |
+| 7 slots, driven to completion | 462 B | 462 B |
+
+A narrow frame is free (its seeds fit the size the literal already had) and
+any resumed frame is identical, because the unseeded table grows to the
+same size on its first yield. A wide frame that is created and never
+resumed costs 192 B more. Seeding only as many slots as fit under the
+current power-of-two boundary would avoid that, but partial seeding
+reinstates growth for the rest and loses the sinking property, so it is
+not obviously better; it is unmeasured and open.
+
+`tests/coroutines/frame_slot_seeding.rock` pins the observable half: a
+never-resumed coroutine's status, kill and completion; values across 3-,
+7- and record-variant frames; that `pairs` sees no yield slot on a fresh
+frame and only the live variant tag after a cleared yield; and that a
+frame rebuilt by a host `pairs` copy resumes where it left off. That last
+case checks the representation a host can rebuild by walking `pairs`; it
+does not exercise a snapshot implementation or a cross-version reload.
+Compatibility with older frames is inferred from the layout stamp: it is
+computed from frame cells and the channel shape, not the constructor's
+literal, so seeding alone does not change it. The step's nil-write
+guards STAY: removing them instead was measured 80% slower on short-lived
+creation (the absent-key nil stores hit the repeated-rehash path above),
+and a frame rebuilt by a host copy (snapshot restore walks `pairs`, which
+skips nil-valued nodes) has no seeded nodes to rely on.
+
+Rejected on the way: building the whole frame with `table.new(0, n)` plus
+field assignments. A constant-key literal is not a sequence of stores —
+LuaJIT builds a template table at load time and each evaluation is one
+TDUP copy (67.6 ns against 125.0 for `table.new` plus five stores) — so
+that variant made per-frame creation 65% slower and was reverted. Seeding
+through the literal keeps the TDUP and gets the stable shape anyway.
+
 ## Map loops (2026-11-11)
 
 `Map` walks lower to `MapNext` over a bare table or a column map's spine.

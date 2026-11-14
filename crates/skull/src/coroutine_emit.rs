@@ -294,6 +294,26 @@ fn emit_constructor(
             );
         }
         box_fields.push('}');
+        // Seed every yield slot in the literal and clear it to nil, so each
+        // slot has a hash node from birth. The step then only ever writes
+        // PRESENT keys: yield writes do not grow or rehash it under a trace, a
+        // frame that stays inside one trace can be sunk (measured 196 -> 2 ns
+        // per short-lived coroutine; 222 -> 108 ns when the handle escapes),
+        // and a nil store into a full frame cannot hit the repeated-rehash
+        // path (docs/luajit-performance.md). The clears keep the seeds
+        // invisible: a nil-valued node does not appear to pairs or snapshots,
+        // and no slot is readable before the first yield writes it. The
+        // template is copied by one TDUP either way. Resumed frames use
+        // the same memory; a wide frame never resumed can be larger because
+        // growth happens at creation. The step's nil-write guards stay: a frame
+        // rebuilt by a host copy (snapshot restore) has no seeded nodes.
+        let slot_count = 1 + ch.tuple_width + ch.record_fields.len();
+        let mut clears = String::new();
+        for i in 0..slot_count {
+            let slot = skull_mir::lower::yield_slot(i);
+            init.push(format!("{slot} = false"));
+            let _ = write!(clears, " {svar}.{slot} = nil");
+        }
         let advance = plan
             .advance()
             .expect("a channel is what makes `__advance` exist");
@@ -320,6 +340,7 @@ fn emit_constructor(
              end\n\
              function {name}({paramlist})\n\
              \x20 local {svar} = {{ {fields}, __advance = {advance_ref}, __resume = {resume_ref} }}\n\
+             \x20{clears}\n\
              \x20 return {svar}\n\
              end\n",
             paramlist = param_fields.join(", "),
