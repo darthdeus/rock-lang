@@ -128,6 +128,18 @@ pub fn elide_bounds_checks_for_target(
         return 0;
     }
     let (preds, _) = predecessors(func, &rpo);
+    // All-forward edges prove that no definition reexecutes. Other orders keep
+    // invalidation, including acyclic crossedges that this RPO may order back.
+    let may_reexecute = {
+        let mut seen = vec![false; func.blocks.len()];
+        rpo.iter().any(|&b| {
+            let back = preds
+                .get(&b)
+                .is_some_and(|ps| ps.iter().any(|&p| !seen[raw(p)]));
+            seen[raw(b)] = true;
+            back
+        })
+    };
     let pushes: HashSet<_> = if target == FnBackend::Lua && has_make_vec {
         rpo.iter()
             .flat_map(|&b| func.blocks[b].insts.iter().copied())
@@ -141,6 +153,7 @@ pub fn elide_bounds_checks_for_target(
     };
     let ctx = Ctx {
         ws,
+        may_reexecute,
         track_private: target == FnBackend::Lua
             && has_make_vec
             && (has_array_push || !pushes.is_empty()),
@@ -368,6 +381,7 @@ fn disabled_by_env() -> bool {
 
 struct Ctx<'a> {
     ws: Option<&'a Workspace>,
+    may_reexecute: bool,
     /// Values whose place tie is worth keeping: operands of the instructions
     /// that consume or produce facts, and of the arithmetic feeding them.
     relevant: Vec<bool>,
@@ -1155,7 +1169,9 @@ fn seed_declared_result_facts(
 fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
     let inst = &func.insts[id];
     if inst.produces_value() {
-        facts.forget_value(id);
+        if ctx.may_reexecute {
+            facts.forget_value(id);
+        }
         if ctx.relevant[raw(id)]
             && let Some(place) = place_of(func, id)
         {
