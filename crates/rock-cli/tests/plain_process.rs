@@ -1063,3 +1063,43 @@ fn explicit_runner_policy_controls_admission_and_log_context() {
     }
     assert!(run("null").status.success());
 }
+
+/// `rock lsp` typechecks whole projects, so the server process takes the
+/// compiler's THP-off default like `rock compile` does.
+#[cfg(target_os = "linux")]
+#[test]
+fn language_server_takes_the_compiler_thp_default() {
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+
+    let root = tempfile::tempdir().unwrap();
+    let mut server = rock(root.path())
+        .args(["lsp", "serve"])
+        .env_remove("MIMALLOC_ALLOW_THP")
+        .env_remove("mimalloc_allow_thp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start language server");
+    // An answered request proves process setup has finished.
+    let request = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}"#;
+    let mut stdin = server.stdin.take().unwrap();
+    write!(stdin, "Content-Length: {}\r\n\r\n{request}", request.len()).unwrap();
+    stdin.flush().unwrap();
+    let mut first = [0u8; 1];
+    server
+        .stdout
+        .as_mut()
+        .unwrap()
+        .read_exact(&mut first)
+        .expect("initialize response");
+    let status = std::fs::read_to_string(format!("/proc/{}/status", server.id())).unwrap();
+    let _ = server.kill();
+    let _ = server.wait();
+    let thp = status
+        .lines()
+        .find(|line| line.starts_with("THP_enabled:"))
+        .expect("kernel reports THP_enabled");
+    assert_eq!(thp.split_whitespace().nth(1), Some("0"), "{thp}");
+}

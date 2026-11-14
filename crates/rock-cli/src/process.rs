@@ -40,6 +40,12 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
     // Early entries (`rock lsp`) run before the allocator default, the logger
     // and clap: they install their own process state.
     let prepare = || {
+        // `rock lsp` typechecks whole projects, in the server and in its
+        // one-shot reports, so it takes the compiler's THP default.
+        if let Err(error) = rock_host::compiler_thp::enter_compiler_process() {
+            eprintln!("error: cannot start with the compiler THP default: {error}");
+            std::process::exit(1);
+        }
         crate::allocator::keep_freed_pages_for_reuse();
         #[cfg(not(feature = "sequential"))]
         install_compiler_pool(None);
