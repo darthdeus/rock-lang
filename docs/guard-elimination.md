@@ -164,13 +164,71 @@ Existing regression suites include `opaque_effects`, `default_guard_fold`,
 
 ## Next implementation order
 
-1. Prototype bounded affine facts with failing correctness tests first. Inspect
-   the stride traces and measure a real NativeBuffer consumer before landing.
+1. The bounded affine follow-up is implemented below. Broaden it only against
+   a real NativeBuffer consumer; retain the trace-sensitivity caveat.
 2. Recover private-vector push effects against the existing collection workload;
    retain the callback regression matrix as the safety boundary.
 3. Reuse any resulting small interval domain for subtraction and numeric guards.
 4. Defer call-site specialization, constructor facts and coroutine specialization
    until a measured workload warrants their additional machinery.
 
-No compiler guard was removed by this audit. The benchmark ablation must never
-be used as production output or as evidence that the proof already exists.
+The initial audit removed no compiler guards. Its manual benchmark ablation
+must never be used as production output. The implemented follow-up below is
+a separate compiler proof, with narrower applicability than that ablation.
+
+## Implemented follow-up: bounded constant stride
+
+The bounds pass now recognizes `row * stride + lane` with a positive constant
+stride. It proves whole-number operands, nonnegative row/lane, ordered
+`row < rows`, `lane < stride`, and `rows * stride <= buffer.len`, with both
+products and the sum within the exact binary64 integer range. The whole-number
+certificate is separate from finiteness: flooring may produce NaN or infinity,
+which the ordered finite bounds must exclude. A public `int` annotation alone
+is not a certificate.
+
+`guard_stride_proven` in the benchmark explicitly converts a float count with
+`as int` and tests positive comparisons before entering the loops. Its Lua
+inner read is now raw. The original `guard_stride`, with an unvalidated count
+and negative rejection tests, stays checked. No runtime validation or changed
+input behavior is injected into user programs.
+
+The extra analysis activates only in functions with the target access shape.
+It uses finite sets of facts, intersects them at joins, and bounds each upper
+bound search by depth and work. It does not grow intervals one integer per
+solver iteration. Arithmetic snapshot keys invalidate expansion when a MIR
+operand producer executes again. Unknown callbacks and length writes invalidate
+the proof. This implementation intentionally does not add general symbolic
+algebra, interprocedural specialization, or integer assumptions at host entry.
+
+Regression coverage includes the initial failing MIR case; fractional operands;
+NaN-admitting false edges for count and length guards; excessive arithmetic
+ranges; an extra lane; callbacks; length writes; a stale capacity after count
+reassignment; and a lane changed across loop iterations. Lua and JS runtime
+fixtures cover zero, negative, fractional, infinite and NaN counts and short
+buffers. The normal JS fixture retains its helper and checks boundary parity;
+the measured elimination is in the Lua pipeline.
+
+For the actual compiler comparison, emit the same benchmark source with the
+pre-change compiler and the new release compiler, then run each artifact as:
+
+```sh
+luajit benchmarks/guard_proofs.lua emitted.lua proven_stride
+```
+
+The checked-in harness warms for 200 calls, then runs 100000 calls over 4096
+integer elements with LuaJIT enabled. Eight alternating fresh-process pairs on
+Intel Core i9-14900K / Linux / LuaJIT 2.1.1785763465 measured 1.6850 -> 1.2449
+ns/element (about 26% lower median). Sample ranges were 1.6775-1.7217 and
+0.3542-1.2549; sinks matched. Both versions had 0-3 trace aborts across samples.
+The fast outlier remains evidence of trace sensitivity, not a general
+application speedup. This confirms the earlier ablation with actual generated
+output and an explicit sound input domain.
+
+The Stone source survey found no existing loop with this complete local proof.
+The nearest cases are alpha-mask row writes in `packages/stone/engine/ui/mouse.rock`,
+glyph-cache lanes in `packages/stone/engine/rendering/text.rock`, and record
+serialization in `packages/stone/engine/debug/perf_records.rock`. Their capacity
+relations come from allocations, equality/reuse paths or producer invariants;
+the required whole/count bounds are not locally established. Those checks stay.
+No extra guards were added to application code merely to exercise this proof.
+Allocation provenance is the next useful bridge to those consumers.

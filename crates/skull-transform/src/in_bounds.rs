@@ -11,7 +11,7 @@
 //! matching fact about its result. Results and errors are unchanged: an access is only marked where the
 //! check could not have raised.
 //!
-//! Three facts are tracked about a *key*, which is either the value an
+//! Three core facts are tracked about a *key*, which is either the value an
 //! instruction produced or a place (a local cell, a global, a field or an
 //! element of another key):
 //!
@@ -39,6 +39,13 @@
 //! `while i < xs.len` (the header re-reads the length), a dominating guard
 //! `if i >= 0 && i < xs.len`, and a dominating checked access `xs[i]` before
 //! `xs[i] = ..`.
+//!
+//! Constant-stride `row * stride + lane` also uses true-edge ordered
+//! comparisons and whole-number certificates. A bounded query proves both
+//! products and the sum exact in binary64, `row < rows`, `lane < stride`,
+//! and `rows * stride <= len`. False comparison edges do not establish these
+//! facts because they admit NaN. Arithmetic snapshot ties prevent expanding an
+//! old result using operands whose instructions have since executed again.
 //!
 //! Facts die at the writes that could falsify them. A store to a cell drops
 //! facts about that cell; a field store drops facts through that field name,
@@ -102,6 +109,22 @@ pub fn elide_bounds_checks(ws: Option<&Workspace>, func: &mut MirFunc) -> usize 
     let ctx = Ctx {
         ws,
         relevant: relevant_values(func, &rpo),
+        affine: rpo.iter().any(|&b| {
+            func.blocks[b].insts.iter().any(|&id| {
+                let index = match &func.insts[id] {
+                    Inst::Index { index, .. }
+                    | Inst::StoreIndex { index, .. }
+                    | Inst::VecCheckedIndex { index, .. } => Some(*index),
+                    Inst::Call { func: fref, args }
+                        if args.len() == 2 && is_stdlib_fn(ws, *fref, "__nb_checked_index") =>
+                    {
+                        Some(args[1])
+                    }
+                    _ => None,
+                };
+                index.is_some_and(|i| affine_shape(func, i).is_some())
+            })
+        }),
     };
     let n = func.blocks.len();
     let mut ins: Vec<Option<Facts>> = vec![None; n];
@@ -117,7 +140,7 @@ pub fn elide_bounds_checks(ws: Option<&Workspace>, func: &mut MirFunc) -> usize 
                         let Some(out) = &outs[raw(p)] else {
                             continue;
                         };
-                        let edge = edge_facts(func, out, p, b);
+                        let edge = edge_facts(func, out, p, b, ctx.affine);
                         merged = Some(match merged {
                             None => edge.into_owned(),
                             Some(mut m) => {
@@ -264,6 +287,7 @@ struct Ctx<'a> {
     /// Values whose place tie is worth keeping: operands of the instructions
     /// that consume or produce facts, and of the arithmetic feeding them.
     relevant: Vec<bool>,
+    affine: bool,
 }
 
 fn relevant_values(func: &MirFunc, rpo: &[Idx<Block>]) -> Vec<bool> {
@@ -333,6 +357,7 @@ fn edge_facts<'a>(
     out: &'a Facts,
     from: Idx<Block>,
     to: Idx<Block>,
+    affine: bool,
 ) -> Cow<'a, Facts> {
     match func.blocks[from].term {
         Term::Yield { .. } => Cow::Owned(Facts::default()),
@@ -342,7 +367,7 @@ fn edge_facts<'a>(
             else_bb,
         } if then_bb != else_bb => {
             let mut facts = out.clone();
-            cond_facts(&mut facts, func, cond, to == then_bb);
+            cond_facts(&mut facts, func, cond, to == then_bb, affine);
             Cow::Owned(facts)
         }
         _ => Cow::Borrowed(out),
@@ -356,6 +381,8 @@ enum Key {
     /// An integer literal, so two `Const` instructions of one value agree.
     Const(i64),
     Cell(Idx<Cell>),
+    Scale(Box<Key>, i64),
+    Sum(Box<Key>, Box<Key>),
     Global(Ustr),
     Field(Box<Key>, Ustr),
     /// The element `base[index]` of a container.
@@ -366,8 +393,10 @@ impl Key {
     fn mentions(&self, pred: &impl Fn(&Key) -> bool) -> bool {
         pred(self)
             || match self {
-                Key::Field(base, _) => base.mentions(pred),
-                Key::Elem(base, index) => base.mentions(pred) || index.mentions(pred),
+                Key::Field(base, _) | Key::Scale(base, _) => base.mentions(pred),
+                Key::Elem(base, index) | Key::Sum(base, index) => {
+                    base.mentions(pred) || index.mentions(pred)
+                }
                 _ => false,
             }
     }
@@ -404,17 +433,23 @@ fn place_of(func: &MirFunc, id: Idx<Inst>) -> Option<Key> {
 
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 struct Facts {
-    /// `(value, place)`: the value is what the place holds now.
+    /// A value equals a current place or an arithmetic operand snapshot.
     same: HashSet<(Idx<Inst>, Key)>,
     nonneg: HashSet<Key>,
     /// `(k, v)`: the integer at `k` is at most the live length of `v`.
     le_len: HashSet<(Key, Key)>,
     /// `(k, v)`: the integer at `k` is below the live length of `v`.
     lt: HashSet<(Key, Key)>,
+    // Whole-valued when finite; arithmetic may still produce NaN/infinity.
+    whole: HashSet<Key>,
+    // Ordered comparisons, seeded only by true edges (false admits NaN).
+    ordered: HashSet<(Key, Key, bool)>,
 }
 
 impl Facts {
     fn meet(&mut self, other: &Facts) {
+        self.whole.retain(|k| other.whole.contains(k));
+        self.ordered.retain(|k| other.ordered.contains(k));
         self.same.retain(|k| other.same.contains(k));
         self.nonneg.retain(|k| other.nonneg.contains(k));
         self.le_len.retain(|k| other.le_len.contains(k));
@@ -422,7 +457,9 @@ impl Facts {
     }
 
     fn is_empty(&self) -> bool {
-        self.same.is_empty()
+        self.whole.is_empty()
+            && self.ordered.is_empty()
+            && self.same.is_empty()
             && self.nonneg.is_empty()
             && self.le_len.is_empty()
             && self.lt.is_empty()
@@ -433,6 +470,9 @@ impl Facts {
         if self.is_empty() {
             return;
         }
+        self.whole.retain(|k| !k.mentions(&pred));
+        self.ordered
+            .retain(|(a, b, _)| !a.mentions(&pred) && !b.mentions(&pred));
         self.same
             .retain(|(v, p)| !pred(&Key::Value(*v)) && !p.mentions(&pred));
         self.nonneg.retain(|k| !k.mentions(&pred));
@@ -456,6 +496,7 @@ impl Facts {
 
     /// A vector may have shrunk.
     fn forget_lengths(&mut self) {
+        self.ordered.clear();
         self.le_len.clear();
         self.lt.clear();
     }
@@ -496,6 +537,145 @@ impl Facts {
                 .iter()
                 .any(|k| self.nonneg.contains(k)),
         }
+    }
+
+    fn whole_key(&self, key: &Key) -> bool {
+        matches!(key, Key::Const(_)) || self.whole.contains(key)
+    }
+
+    fn whole_value(&self, func: &MirFunc, id: Idx<Inst>) -> bool {
+        self.keys_of(func, id).iter().any(|k| self.whole_key(k))
+    }
+
+    fn ordered_fact(&mut self, func: &MirFunc, a: Idx<Inst>, b: Idx<Inst>, strict: bool) {
+        let lengths = self.le_len_of(func, b);
+        for ka in self.keys_of(func, a) {
+            for kb in self.keys_of(func, b) {
+                self.ordered.insert((ka.clone(), kb, strict));
+            }
+            if matches!(ka, Key::Scale(..)) {
+                for v in &lengths {
+                    self.le_len.insert((ka.clone(), v.clone()));
+                }
+            }
+        }
+    }
+
+    fn aliases(&self, key: &Key) -> Vec<Key> {
+        let mut keys = vec![key.clone()];
+        if let Key::Value(id) = key {
+            keys.extend(
+                self.same
+                    .iter()
+                    .filter(|(v, _)| v == id)
+                    .map(|(_, p)| p.clone()),
+            );
+        }
+        keys
+    }
+
+    // A bounded search through explicit comparisons, not an iteratively growing
+    // interval domain: loops cannot require one solver iteration per integer.
+    fn upper(&self, key: &Key, depth: usize) -> Option<i64> {
+        self.upper_with_budget(key, depth, &mut 64)
+    }
+
+    fn upper_with_budget(&self, key: &Key, depth: usize, budget: &mut usize) -> Option<i64> {
+        if depth == 0 || *budget == 0 {
+            return None;
+        }
+        *budget -= 1;
+        if let Key::Const(n) = key {
+            return ((-EXACT_INT..=EXACT_INT).contains(n)).then_some(*n);
+        }
+        let aliases = self.aliases(key);
+        self.ordered
+            .iter()
+            .filter_map(|(a, b, strict)| {
+                if !aliases.contains(a) {
+                    return None;
+                }
+                let bound = self.upper_with_budget(b, depth - 1, budget)?;
+                Some(bound - i64::from(*strict && self.whole_key(a) && self.whole_key(b)))
+            })
+            .min()
+    }
+
+    fn upper_value(&self, func: &MirFunc, id: Idx<Inst>) -> Option<i64> {
+        self.keys_of(func, id)
+            .iter()
+            .filter_map(|k| self.upper(k, 8))
+            .min()
+    }
+
+    fn known_nonneg(&self, func: &MirFunc, id: Idx<Inst>) -> bool {
+        self.keys_of(func, id)
+            .iter()
+            .any(|k| matches!(k, Key::Const(n) if *n >= 0) || self.nonneg.contains(k))
+    }
+
+    fn affine_in_bounds(&self, func: &MirFunc, index: Idx<Inst>, vec: Idx<Inst>) -> bool {
+        let Some((product, row, stride, lane)) = affine_shape(func, index) else {
+            return false;
+        };
+        // MIR instruction ids can execute again. Only expand arithmetic while
+        // its operand snapshots still describe the value that was computed.
+        if !self.same.contains(&(
+            index,
+            Key::Sum(
+                Box::new(value_key(func, product)),
+                Box::new(value_key(func, lane)),
+            ),
+        )) || !self
+            .same
+            .contains(&(product, Key::Scale(Box::new(value_key(func, row)), stride)))
+        {
+            return false;
+        }
+        if !self.whole_value(func, row)
+            || !self.whole_value(func, lane)
+            || !self.known_nonneg(func, row)
+            || !self.known_nonneg(func, lane)
+        {
+            return false;
+        }
+        let Some(lane_max) = self.upper_value(func, lane) else {
+            return false;
+        };
+        if lane_max < 0 || lane_max >= stride {
+            return false;
+        }
+        let Some(row_max) = self.upper_value(func, row) else {
+            return false;
+        };
+        if row_max < 0
+            || row_max
+                .checked_mul(stride)
+                .and_then(|n| n.checked_add(lane_max))
+                .is_none_or(|n| n > EXACT_INT)
+        {
+            return false;
+        }
+        let rows = self.keys_of(func, row);
+        let vectors = self.keys_of(func, vec);
+        self.le_len.iter().any(|(limit, vector)| {
+            let Key::Scale(count, scale) = limit else {
+                return false;
+            };
+            if *scale != stride || !vectors.contains(vector) || !self.whole_key(count) {
+                return false;
+            }
+            let Some(max) = self.upper(count, 8) else {
+                return false;
+            };
+            let counts = self.aliases(count);
+            max >= 0
+                && max.checked_mul(stride).is_some_and(|n| n <= EXACT_INT)
+                && self
+                    .ordered
+                    .iter()
+                    .any(|(a, b, strict)| *strict && rows.contains(a) && counts.contains(b))
+        })
     }
 
     /// The vectors whose live length bounds the integer `id` from above.
@@ -555,6 +735,9 @@ impl Facts {
     }
 
     fn in_bounds(&self, func: &MirFunc, index: Idx<Inst>, vec: Idx<Inst>) -> bool {
+        if self.affine_in_bounds(func, index, vec) {
+            return true;
+        }
         let below = self.lt_of(func, index);
         if below.is_empty() {
             return false;
@@ -591,9 +774,16 @@ impl Facts {
 }
 
 /// Sharpen `facts` with `cond == truth`.
-fn cond_facts(facts: &mut Facts, func: &MirFunc, cond: Idx<Inst>, truth: bool) {
+fn cond_facts(facts: &mut Facts, func: &MirFunc, cond: Idx<Inst>, truth: bool, affine: bool) {
+    if truth && affine {
+        match func.insts[cond] {
+            Inst::IntLt(a, b) | Inst::IntGt(b, a) => facts.ordered_fact(func, a, b, true),
+            Inst::IntLeq(a, b) | Inst::IntGeq(b, a) => facts.ordered_fact(func, a, b, false),
+            _ => {}
+        }
+    }
     match func.insts[cond] {
-        Inst::Not(x) => cond_facts(facts, func, x, !truth),
+        Inst::Not(x) => cond_facts(facts, func, x, !truth, affine),
         Inst::IntLt(a, b) | Inst::IntGt(b, a) => {
             if truth {
                 lt_fact(facts, func, a, b);
@@ -675,6 +865,31 @@ fn after_direct_call(facts: &mut Facts, ctx: &Ctx<'_>, fref: FuncRef) {
     }
 }
 
+const EXACT_INT: i64 = 1 << 53;
+
+fn affine_shape(func: &MirFunc, id: Idx<Inst>) -> Option<(Idx<Inst>, Idx<Inst>, i64, Idx<Inst>)> {
+    let Inst::IntAdd(product, lane) = func.insts[id] else {
+        return None;
+    };
+    let (row, stride) = constant_scale(func, product)?;
+    Some((product, row, stride, lane))
+}
+
+fn constant_scale(func: &MirFunc, id: Idx<Inst>) -> Option<(Idx<Inst>, i64)> {
+    let Inst::IntMul(a, b) = func.insts[id] else {
+        return None;
+    };
+    for (value, constant) in [(a, b), (b, a)] {
+        if let Inst::Const(Lit::Int(n)) = func.insts[constant]
+            && n > 0
+            && n <= EXACT_INT
+        {
+            return Some((value, n));
+        }
+    }
+    None
+}
+
 const LEN: &str = "len";
 
 /// The facts a callee declares about its result: `@returns_nonneg`, and
@@ -731,6 +946,29 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
             facts.same.insert((id, place));
         }
     }
+    if ctx.affine && inst.produces_value() && ctx.relevant[raw(id)] {
+        let whole = match inst {
+            Inst::FloatToInt(_) => true,
+            Inst::IntAdd(a, b) | Inst::IntSub(a, b) | Inst::IntMul(a, b) => {
+                facts.whole_value(func, *a) && facts.whole_value(func, *b)
+            }
+            _ => facts.whole_value(func, id),
+        };
+        if whole {
+            facts.whole.insert(value_key(func, id));
+        }
+        if let Some((value, scale)) = constant_scale(func, id) {
+            facts
+                .same
+                .insert((id, Key::Scale(Box::new(value_key(func, value)), scale)));
+        }
+        if let Inst::IntAdd(a, b) = inst {
+            facts.same.insert((
+                id,
+                Key::Sum(Box::new(value_key(func, *a)), Box::new(value_key(func, *b))),
+            ));
+        }
+    }
     match inst {
         Inst::Len { base, .. } => {
             for v in facts.keys_of(func, *base) {
@@ -785,11 +1023,20 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
             }
         }
         Inst::Store { cell, value } => {
+            let whole = ctx.affine && facts.whole_value(func, *value);
             let nonneg = facts.nonneg(func, *value);
             let le_len = facts.le_len_of(func, *value);
             let lt = facts.lt_of(func, *value);
             facts.forget_cell(*cell);
             let k = Key::Cell(*cell);
+            if whole {
+                facts.whole.insert(k.clone());
+            }
+            if ctx.affine
+                && let Inst::Const(Lit::Int(n)) = func.insts[*value]
+            {
+                facts.ordered.insert((k.clone(), Key::Const(n), false));
+            }
             if nonneg {
                 facts.nonneg.insert(k.clone());
             }

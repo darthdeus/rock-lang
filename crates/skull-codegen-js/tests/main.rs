@@ -2,6 +2,7 @@
 // instead of one per file. nextest still runs each test in its own
 // process, so isolation is unchanged.
 
+mod affine_bounds;
 mod common;
 
 #[path = "host_supply_keys.rs"]

@@ -38,3 +38,15 @@
     return buf[0] + buf[1]
 }
 fn main() { print(guard_fresh_push(20)) }
+
+@nomangle fn guard_stride_proven(buf: NativeBuffer<int>, count: float) -> int {
+    let rows = count as int
+    if rows >= 0 && rows <= 100000 && buf.len >= rows * 4 {
+        let sum = 0
+        for row in 0..rows {
+            for lane in 0..4 { sum += buf[row * 4 + lane] }
+        }
+        return sum
+    }
+    return -1
+}

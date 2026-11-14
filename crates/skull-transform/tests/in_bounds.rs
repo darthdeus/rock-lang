@@ -736,3 +736,134 @@ fn a_native_buffer_access_in_a_counted_loop_is_in_bounds() {
     assert_eq!(p.kind(read), ContainerKind::NativeBufferInBounds);
     assert_eq!(p.kind(other), ContainerKind::NativeBuffer);
 }
+
+fn affine_probe(case: &str) -> ContainerKind {
+    let mut p = Probe::new();
+    let mut b = p.f.entry;
+    let exit = p.f.new_block();
+    p.f.set_term(exit, Term::Return(vec![]));
+    let base = p.load(b, p.xs);
+    let count = p.load(b, p.ys);
+    let rows = if case == "fractional_count" {
+        count
+    } else {
+        p.emit(b, Inst::FloatToInt(count))
+    };
+    let row_input = p.load(b, p.i);
+    let row = if case == "fractional_row" {
+        row_input
+    } else {
+        p.emit(b, Inst::FloatToInt(row_input))
+    };
+    let lane_input = p.f.new_cell(None);
+    p.f.params.push(lane_input);
+    let lane_input = p.load(b, lane_input);
+    let lane = if case == "fractional_lane" {
+        lane_input
+    } else {
+        p.emit(b, Inst::FloatToInt(lane_input))
+    };
+    let zero = p.int(b, 0);
+    let four = p.int(b, 4);
+    let max = p.int(b, if case == "rounding" { 1 << 53 } else { 100000 });
+    let capacity = p.emit(b, Inst::IntMul(rows, four));
+    let len = p.emit(
+        b,
+        Inst::Field {
+            base,
+            field: u("len"),
+        },
+    );
+    let lane_bound = if case == "extra_lane" {
+        p.int(b, 5)
+    } else {
+        four
+    };
+    for comparison in [
+        Inst::IntGeq(rows, zero),
+        Inst::IntLeq(rows, max),
+        Inst::IntGeq(row, zero),
+        Inst::IntLt(row, rows),
+        Inst::IntGeq(lane, zero),
+        Inst::IntLt(lane, lane_bound),
+        Inst::IntGeq(len, capacity),
+    ] {
+        let comparison =
+            if case == "nan_length_guard" && matches!(comparison, Inst::IntGeq(a, _) if a == len) {
+                Inst::IntLt(len, capacity)
+            } else {
+                comparison
+            };
+        let length_reversed =
+            case == "nan_length_guard" && matches!(comparison, Inst::IntLt(a, _) if a == len);
+        let comparison = if case == "nan_guard" {
+            match comparison {
+                Inst::IntLeq(a, b) => Inst::IntGt(a, b),
+                other => other,
+            }
+        } else {
+            comparison
+        };
+        let reversed =
+            length_reversed || (case == "nan_guard" && matches!(comparison, Inst::IntGt(..)));
+        let cond = p.emit(b, comparison);
+        let next = p.f.new_block();
+        p.f.set_term(
+            b,
+            Term::Branch {
+                cond,
+                then_bb: if reversed { exit } else { next },
+                else_bb: if reversed { next } else { exit },
+            },
+        );
+        b = next;
+    }
+    if case == "callback" {
+        p.unknown_call(b);
+    }
+    if case == "length_write" {
+        p.emit(
+            b,
+            Inst::StoreField {
+                base,
+                field: u("len"),
+                value: zero,
+            },
+        );
+    }
+    let offset = p.emit(b, Inst::IntMul(row, four));
+    let index = p.emit(b, Inst::IntAdd(offset, lane));
+    let access = p.emit(
+        b,
+        Inst::Index {
+            base,
+            index,
+            kind: ContainerKind::NativeBuffer,
+        },
+    );
+    p.f.set_term(b, Term::Return(vec![access]));
+    p.run();
+    p.kind(access)
+}
+
+#[test]
+fn bounded_whole_affine_native_buffer_index() {
+    assert_eq!(affine_probe("valid"), ContainerKind::NativeBufferInBounds);
+}
+
+#[test]
+fn affine_proof_requires_whole_bounded_operands_and_live_length() {
+    for case in [
+        "fractional_count",
+        "fractional_row",
+        "fractional_lane",
+        "rounding",
+        "nan_guard",
+        "nan_length_guard",
+        "extra_lane",
+        "callback",
+        "length_write",
+    ] {
+        assert_eq!(affine_probe(case), ContainerKind::NativeBuffer, "{case}");
+    }
+}
