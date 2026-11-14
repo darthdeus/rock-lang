@@ -146,3 +146,154 @@ print('ok')
         "ok"
     );
 }
+
+#[test]
+fn repeated_product_uses_unchanged_operand_snapshots() {
+    let lua = emit_module(
+        r#"
+@nomangle fn fill_product(width: int, height: int) -> NativeBufferU8 {
+    let buf = native_buffer_u8(width * height)
+    for i in 0..width * height { buf[i] = i % 256 }
+    return buf
+}
+"#,
+    );
+    let body = function_body(&lua, "fill_product");
+    assert!(!body.contains("__nb_checked"), "{body}");
+    assert_eq!(
+        run_luajit(&format!(
+            r#"{lua}
+for _, dims in ipairs({{{{0, 3}}, {{1, 1}}, {{1.5, 2}}, {{7, 11}}, {{64, 64}}}}) do
+    local buf = fill_product(dims[1], dims[2])
+    assert(buf.len == dims[1] * dims[2])
+    for i = 0, buf.len - 1 do assert(buf.ptr[i] == i % 256) end
+end
+print('ok')
+"#
+        ))
+        .trim(),
+        "ok"
+    );
+}
+
+#[test]
+fn repeated_products_do_not_follow_changed_operands() {
+    for setup in ["width += 1", "height += 1", "if width > 0 { width += 1 }"] {
+        let lua = emit_module(&format!(
+            r#"
+@nomangle fn changed_product(width: int, height: int) -> int {{
+    let buf = native_buffer_int(width * height)
+    {setup}
+    for i in 0..width * height {{ buf[i] = i }}
+    return 1
+}}
+"#
+        ));
+        assert!(
+            function_body(&lua, "changed_product").contains("__nb_checked"),
+            "{setup}"
+        );
+        assert_eq!(
+            run_luajit(&format!(
+                r#"{lua}
+local ok, err = pcall(changed_product, 2, 3)
+assert(not ok and tostring(err):find('out of bounds'))
+print('ok')
+"#
+            ))
+            .trim(),
+            "ok"
+        );
+    }
+}
+
+#[test]
+fn repeated_products_do_not_rebind_old_buffers_in_a_loop() {
+    let lua = emit_module(
+        r#"
+@nomangle fn old_product(height: int) -> int {
+    let buf = native_buffer_int(height)
+    for width in 1..3 {
+        let old = buf
+        buf = native_buffer_int(width * height)
+        for i in 0..width * height { old[i] = i }
+    }
+    return 1
+}
+"#,
+    );
+    assert!(function_body(&lua, "old_product").contains("__nb_checked"));
+    assert_eq!(
+        run_luajit(&format!(
+            r#"{lua}
+local ok, err = pcall(old_product, 3)
+assert(not ok and tostring(err):find('out of bounds'))
+print('ok')
+"#
+        ))
+        .trim(),
+        "ok"
+    );
+}
+
+#[test]
+fn repeated_products_drop_bounds_across_callbacks() {
+    let lua = emit_module(
+        r#"
+inline(lua) fn shrink(buf: NativeBuffer<int>) = "buf.len = 0"
+@nomangle fn changed_product(width: int, height: int) -> int {
+    let buf = native_buffer_int(width * height)
+    shrink(buf)
+    for i in 0..width * height { buf[i] = i }
+    return 1
+}
+"#,
+    );
+    assert!(function_body(&lua, "changed_product").contains("__nb_checked"));
+    assert_eq!(
+        run_luajit(&format!(
+            r#"{lua}
+local ok, err = pcall(changed_product, 2, 3)
+assert(not ok and tostring(err):find('out of bounds'))
+print('ok')
+"#
+        ))
+        .trim(),
+        "ok"
+    );
+}
+
+#[test]
+fn repeated_record_reads_keep_callback_bounds_checks() {
+    let lua = emit_module(
+        r#"
+struct Mask { width: int, pixels: NativeBufferU8 }
+@nomangle fn copy_mask(mask: Mask, height: int) -> NativeBufferU8 {
+    let buf = native_buffer_u8(mask.width * height)
+    for i in 0..mask.width * height { buf[i] = mask.pixels[i] }
+    return buf
+}
+"#,
+    );
+    assert!(function_body(&lua, "copy_mask").contains("__nb_checked_set"));
+    assert_eq!(
+        run_luajit(&format!(
+            r#"{lua}
+local reads = 0
+local mask = setmetatable({{pixels = {{ptr=ffi.new('uint8_t[24]'), len=24}}}}, {{
+    __index = function(_, key)
+        assert(key == 'width')
+        reads = reads + 1
+        return reads == 1 and 2 or 3
+    end
+}})
+local ok, err = pcall(copy_mask, mask, 3)
+assert(not ok and tostring(err):find('out of bounds'))
+assert(reads >= 2)
+print('ok')
+"#
+        ))
+        .trim(),
+        "ok"
+    );
+}

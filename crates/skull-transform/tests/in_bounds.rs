@@ -1035,3 +1035,52 @@ fn constructor_length_proofs_obey_alias_and_mutation_boundaries() {
         );
     }
 }
+
+#[test]
+fn repeated_product_keys_require_live_operand_snapshots() {
+    for mode in ["same", "borrowed", "stale_load", "changed"] {
+        let mut p = Probe::new();
+        if mode == "borrowed" {
+            p.f.cells[p.i].borrowed = true;
+        }
+        let entry = p.f.entry;
+        let body = p.f.new_block();
+        let exit = p.f.new_block();
+        let width = p.load(entry, p.i);
+        let height = p.load(entry, p.ys);
+        let one = p.int(entry, 1);
+        if mode == "stale_load" {
+            p.store(entry, p.i, one);
+        }
+        let first = p.emit(entry, Inst::IntMul(width, height));
+        let buf = p.emit(
+            entry,
+            Inst::MakeStruct {
+                ty: Some(u("NativeBuffer")),
+                fields: vec![(u("len"), first)],
+            },
+        );
+        p.store(entry, p.xs, buf);
+        if mode == "changed" {
+            p.store(entry, p.i, one);
+        }
+        let new_width = p.load(entry, p.i);
+        let new_height = p.load(entry, p.ys);
+        let second = p.emit(entry, Inst::IntMul(new_width, new_height));
+        let zero = p.int(entry, 0);
+        let cond = p.emit(entry, Inst::IntLt(zero, second));
+        p.f.set_term(
+            entry,
+            Term::Branch {
+                cond,
+                then_bb: body,
+                else_bb: exit,
+            },
+        );
+        let check = p.check(body, p.xs, zero);
+        p.f.set_term(body, Term::Return(vec![]));
+        p.f.set_term(exit, Term::Return(vec![]));
+        p.run();
+        assert_eq!(p.is_slot(check), mode == "same", "{mode}");
+    }
+}

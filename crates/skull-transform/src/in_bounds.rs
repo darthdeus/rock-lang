@@ -476,6 +476,7 @@ enum Key {
     Cell(Idx<Cell>),
     Scale(Box<Key>, i64),
     Sum(Box<Key>, Box<Key>),
+    Product(Box<Key>, Box<Key>),
     Global(Ustr),
     Field(Box<Key>, Ustr),
     /// The element `base[index]` of a container.
@@ -487,7 +488,7 @@ impl Key {
         pred(self)
             || match self {
                 Key::Field(base, _) | Key::Scale(base, _) => base.mentions(pred),
-                Key::Elem(base, index) | Key::Sum(base, index) => {
+                Key::Elem(base, index) | Key::Sum(base, index) | Key::Product(base, index) => {
                     base.mentions(pred) || index.mentions(pred)
                 }
                 _ => false,
@@ -618,6 +619,16 @@ impl Facts {
                 .map(|(_, p)| p.clone()),
         );
         keys
+    }
+
+    fn product_operand(&self, func: &MirFunc, id: Idx<Inst>) -> Key {
+        if let Inst::Load(cell) = func.insts[id]
+            && !func.cells[cell].borrowed
+            && self.same.contains(&(id, Key::Cell(cell)))
+        {
+            return Key::Cell(cell);
+        }
+        value_key(func, id)
     }
 
     fn nonneg(&self, func: &MirFunc, id: Idx<Inst>) -> bool {
@@ -1135,6 +1146,19 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
         {
             facts.same.insert((id, place));
         }
+    }
+    if ctx.relevant[raw(id)]
+        && let Inst::IntMul(a, b) = inst
+    {
+        // Identical operand snapshots repeat the same floating-point operation.
+        // Do not reassociate products or recursively expand expression trees.
+        facts.same.insert((
+            id,
+            Key::Product(
+                Box::new(facts.product_operand(func, *a)),
+                Box::new(facts.product_operand(func, *b)),
+            ),
+        ));
     }
     if ctx.affine && inst.produces_value() && ctx.relevant[raw(id)] {
         let whole = match inst {

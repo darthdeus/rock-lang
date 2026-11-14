@@ -8,6 +8,7 @@ local n, reps = 4096, 10000
 local workloads = {
     {'ints', function() return fill_ints(n) end},
     {'bytes', function() return fill_bytes(64, 64) end},
+    {'recomputed', function() return fill_bytes_recomputed(64, 64) end},
 }
 for _, workload in ipairs(workloads) do
     jit.flush()

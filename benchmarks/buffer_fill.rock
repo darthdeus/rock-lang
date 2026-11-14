@@ -10,4 +10,9 @@
     for i in 0..count { buf[i] = i % 256 }
     return buf
 }
+@nomangle fn fill_bytes_recomputed(width: int, height: int) -> NativeBufferU8 {
+    let buf = native_buffer_u8(width * height)
+    for i in 0..width * height { buf[i] = i % 256 }
+    return buf
+}
 fn main() { print(fill_ints(4).len) }
