@@ -209,6 +209,143 @@ fn main() {{ run_probe() }}
 
 #[cfg(unix)]
 #[test]
+fn a_cached_stone_launch_preserves_process_and_state_on_the_first_body_edit() {
+    use std::process::{Child, Command, Stdio};
+    struct Watch(Child);
+    impl Drop for Watch {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let fixture = tempfile::tempdir().unwrap();
+    let game = fixture.path().join("game");
+    std::fs::create_dir(&game).unwrap();
+    std::fs::write(game.join("stick.toml"),
+        "[package]\nname = \"cached-watch-probe\"\n[dependencies]\nstone = { package = \"stone\" }\n[build.vars]\nGIT_SHA = \"probe\"\nBUILD_UNIX = \"0\"\nBUILD_DATE = \"test\"\nCHANNEL = { builtin = \"channel\" }\nPLATFORM = { builtin = \"platform\" }\n").unwrap();
+    let source = r#"
+global ticks: int = 0
+fn version() -> int { 17 }
+inline(lua) fn record(ticks: int, version: int) = """
+    local ffi = require("ffi")
+    ffi.cdef("int getpid(void);")
+    local file = assert(io.open(os.getenv("WATCH_HEARTBEAT"), "a"))
+    file:write(tonumber(ffi.C.getpid()), ":", ticks, ":", version, "\n")
+    file:close()
+"""
+@update
+fn advance() {
+    ticks += 1
+    if ticks % 60 == 0 { record(ticks, version()) }
+}
+fn main() {
+    stone_run_game(GameConfig { title: "cached-watch-probe", width: 64, height: 64,
+        vsync: 0 })
+}
+"#;
+    let source_path = game.join("main.rock");
+    std::fs::write(&source_path, source).unwrap();
+    let heartbeat = fixture.path().join("heartbeat");
+    let command = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+        command
+            .current_dir(fixture.path())
+            .env(
+                "ROCK_DIR",
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+            )
+            .env("ROCK_FRAME_COMPILE_CACHE", "1")
+            .env("ROCK_FRAME_COMPILE_CACHE_DIR", fixture.path().join("cache"))
+            .env("ROCK_SKIP_ENGINE_BUILD", "1")
+            .env("WATCH_HEARTBEAT", &heartbeat)
+            .env("STONE_HEADLESS", "1")
+            .env_remove("FRAME_COUNT")
+            .env_remove("STONE_HOT_RELOAD");
+        command
+    };
+    let warm = command()
+        .arg("frame")
+        .arg(&game)
+        .args(["--frames", "1", "--headless", "--output"])
+        .arg(fixture.path().join("warm"))
+        .output()
+        .unwrap();
+    assert!(
+        warm.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&warm.stdout),
+        String::from_utf8_lossy(&warm.stderr)
+    );
+    let log = fixture.path().join("watch.log");
+    let output = std::fs::File::create(&log).unwrap();
+    let mut watch = Watch(
+        command()
+            .arg("stone")
+            .arg(&game)
+            .arg("--quiet")
+            .stdout(Stdio::from(output.try_clone().unwrap()))
+            .stderr(Stdio::from(output))
+            .spawn()
+            .unwrap(),
+    );
+    let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
+    let mut wait = |condition: &dyn Fn() -> bool| {
+        let start = bone_core::prelude::Instant::now();
+        while !condition() {
+            assert!(
+                watch.0.try_wait().unwrap().is_none(),
+                "watch exited: {}",
+                read(&log)
+            );
+            assert!(
+                start.elapsed() < test_utils::HANG_BACKSTOP,
+                "watch stalled: {}",
+                read(&log)
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    };
+    wait(&|| read(&heartbeat).contains(":17\n") && read(&log).contains("Watching for changes"));
+    assert!(read(&log).contains("compile cache hit"), "{}", read(&log));
+    let before = read(&heartbeat).lines().last().unwrap().to_owned();
+    std::fs::write(
+        &source_path,
+        source.replace("-> int { 17 }", "-> int { 29 }"),
+    )
+    .unwrap();
+    wait(&|| read(&heartbeat).contains(":29\n"));
+    let after = read(&heartbeat)
+        .lines()
+        .find(|line| line.ends_with(":29"))
+        .unwrap()
+        .to_owned();
+    let fields = |line: &str| {
+        line.split(':')
+            .map(|n| n.parse::<u64>().unwrap())
+            .collect::<Vec<_>>()
+    };
+    let before = fields(&before);
+    let after = fields(&after);
+    assert_eq!(
+        before[0],
+        after[0],
+        "body edit restarted the process: {}",
+        read(&log)
+    );
+    assert!(
+        after[1] > before[1],
+        "body edit reset live state: {}",
+        read(&heartbeat)
+    );
+    assert!(
+        read(&log).contains("body edit -> incremental.lua"),
+        "{}",
+        read(&log)
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn concurrent_game_runs_keep_their_own_output() {
     use std::process::{Child, Command, Stdio};
     struct Runs(Vec<Child>);
@@ -492,7 +629,7 @@ exit 97
                     .unwrap(),
             );
         }
-        let start = rock_core::clock::Instant::now();
+        let start = bone_core::prelude::Instant::now();
         while !["first", "second"]
             .iter()
             .all(|name| root.path().join(format!("{name}-{cache}.ready")).exists())

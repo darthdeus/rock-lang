@@ -69,13 +69,9 @@ pub trait GameCompiler {
         None
     }
 
-    /// The caller started the game from a cached artifact of this project rather
-    /// than from this compiler's output, so no session exists yet. Until the
-    /// first `compile` builds one, the adopted artifact is what the running
-    /// program is: its identity is the reported fingerprint and its
-    /// `embed_string` inputs are what the watcher must seed. That first compile
-    /// must replace the running program (a full `main.lua` the old process
-    /// never loaded), which the caller serves with a process restart.
+    /// Retain the running cached program's identity and snapshot its sources
+    /// before edits. The first compile reconstructs that baseline, then feeds
+    /// edits through the same safety checks as an uncached session.
     fn adopt_cached_artifact(&mut self, _adopted: AdoptedArtifact) -> Result<()> {
         anyhow::bail!("this backend cannot start a session from a cached artifact")
     }
@@ -93,6 +89,7 @@ pub struct SkullGameCompiler {
     pending_full_write: bool,
     /// The cached artifact the game is running while `stone` is still `None`.
     adopted: Option<AdoptedArtifact>,
+    adopted_sources: Option<SourceFiles>,
 }
 
 impl SkullGameCompiler {
@@ -104,6 +101,7 @@ impl SkullGameCompiler {
             incremental_path,
             pending_full_write: false,
             adopted: None,
+            adopted_sources: None,
         }
     }
 }
@@ -112,19 +110,38 @@ impl GameCompiler for SkullGameCompiler {
     fn compile(&mut self, changed: &HashSet<PathBuf>, force_full: bool) -> Result<CompileOutcome> {
         use crate::skull_backend::{IncrementalProject, SkullReload};
 
-        // First build, or a forced full rebuild (compiler changed): (re)build
-        // the Session + full main.lua from scratch and wipe any overlay.
         if force_full {
             self.stone = None;
+            self.adopted_sources = None;
+        } else if self.stone.is_none() {
+            if let Some(sources) = &self.adopted_sources {
+                match IncrementalProject::init_cached_baseline(&self.dir, sources.clone()) {
+                    Ok(baseline)
+                        if self.adopted.as_ref().is_some_and(|adopted| {
+                            baseline.artifact_fingerprint() == adopted.artifact_fingerprint
+                        }) =>
+                    {
+                        self.stone = Some(baseline);
+                        self.adopted = None;
+                    }
+                    Ok(_) => {
+                        log::info!(target: "STONE", "cached baseline identity changed; rebuilding for a process restart");
+                    }
+                    Err(error) => {
+                        log::warn!(target: "STONE", "cannot reconstruct the cached baseline; rebuilding for a process restart: {error:#}");
+                    }
+                }
+                self.adopted_sources = None;
+            }
         }
         match &mut self.stone {
             None => {
-                let adopted = self.adopted.take();
                 self.stone = Some(IncrementalProject::init(
                     &self.dir,
                     &self.output_path,
                     &self.incremental_path,
                 )?);
+                let adopted = self.adopted.take();
                 self.pending_full_write = false;
                 // A session that only now exists was not what the game booted:
                 // the init just wrote a program the running process never
@@ -133,7 +150,7 @@ impl GameCompiler for SkullGameCompiler {
                     restart_reasons: adopted
                         .is_some()
                         .then(|| {
-                            "the session was built after starting from the compile cache"
+                            "the cached program's incremental baseline could not be reconstructed"
                                 .to_string()
                         })
                         .into_iter()
@@ -242,6 +259,7 @@ impl GameCompiler for SkullGameCompiler {
             self.stone.is_none(),
             "a cached artifact is adopted before any session exists, not over one",
         );
+        self.adopted_sources = Some(crate::live_project::project_sources(&self.dir, false)?);
         self.adopted = Some(adopted);
         Ok(())
     }

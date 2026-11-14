@@ -2004,47 +2004,56 @@ mod session_cache_tests {
     }
 
     #[test]
-    fn a_session_that_adopts_a_cached_artifact_replaces_the_running_program() {
+    fn a_cached_session_applies_its_first_edit_against_the_running_baseline() {
         let (_project_dir, project) = project();
+        let cache = tempfile::tempdir().unwrap();
         let mut first = session(&project);
-        first
-            .compiler
-            .compile(&HashSet::new(), false)
-            .expect("initial compile");
-        let adopted = AdoptedArtifact {
-            artifact_fingerprint: first.compiler.artifact_fingerprint().unwrap(),
-            embedded_inputs: Vec::new(),
-        };
-
-        let mut adopted_session = session(&project);
-        adopted_session
-            .compiler
-            .adopt_cached_artifact(adopted.clone())
-            .unwrap();
-        assert_eq!(
-            adopted_session.compiler.artifact_fingerprint().unwrap(),
-            adopted.artifact_fingerprint,
-            "the running cached program is the identity the session reports",
-        );
+        build(&project, cache.path(), &mut first);
+        let mut adopted = session(&project);
+        build(&project, cache.path(), &mut adopted);
+        let baseline = std::fs::read(&adopted.main).unwrap();
+        let baseline_fingerprint = adopted.compiler.artifact_fingerprint().unwrap();
 
         std::fs::write(project.join("main.rock"), "fn main() { print(3) }\n").unwrap();
-        let outcome = adopted_session
+        let outcome = adopted
             .compiler
             .compile(&HashSet::from([project.join("main.rock")]), false)
-            .expect("the first edit builds the session");
-        assert!(
-            !outcome.restart_reasons.is_empty(),
-            "the session's own program is not what the game booted, so the process restarts onto it",
-        );
-        let (expected, oracle_fingerprint) = oracle_main_lua(&project);
+            .expect("reconstruct the baseline, then apply the first edit");
+        assert!(outcome.restart_reasons.is_empty());
+        assert_eq!(std::fs::read(&adopted.main).unwrap(), baseline);
+        assert!(adopted.main.with_file_name("incremental.lua").exists());
+        let (_, oracle_fingerprint) = oracle_main_lua(&project);
+        assert_ne!(oracle_fingerprint, baseline_fingerprint);
         assert_eq!(
-            adopted_session.compiler.artifact_fingerprint().unwrap(),
+            adopted.compiler.artifact_fingerprint().unwrap(),
             oracle_fingerprint
         );
+    }
+
+    #[test]
+    fn a_changed_cached_baseline_requires_a_restart() {
+        let (_project_dir, project) = project();
+        let mut adopted = session(&project);
+        // A cache-adoption race or changed declared input must not accept a
+        // baseline with a different identity from the running program.
+        adopted
+            .compiler
+            .adopt_cached_artifact(AdoptedArtifact {
+                artifact_fingerprint: "different-running-program".into(),
+                embedded_inputs: Vec::new(),
+            })
+            .unwrap();
+        std::fs::write(project.join("main.rock"), "fn main() { print(3) }\n").unwrap();
+        let outcome = adopted
+            .compiler
+            .compile(&HashSet::from([project.join("main.rock")]), false)
+            .unwrap();
+        assert!(!outcome.restart_reasons.is_empty());
+        let (expected, fingerprint) = oracle_main_lua(&project);
+        assert_eq!(std::fs::read(&adopted.main).unwrap(), expected);
         assert_eq!(
-            std::fs::read(&adopted_session.main).unwrap(),
-            expected,
-            "the restart loads the edited program"
+            adopted.compiler.artifact_fingerprint().unwrap(),
+            fingerprint
         );
     }
 }

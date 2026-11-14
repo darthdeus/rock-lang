@@ -3402,8 +3402,32 @@ impl IncrementalProject {
         select_sims: impl FnOnce(&bone_semantic::inference::Workspace) -> Result<Option<Vec<String>>>,
     ) -> Result<IncrementalProject> {
         let _slot = crate::compile_slots::acquire(dir)?;
-        let renderer_target = skull::mir_emit::RendererTarget::Gl;
         let project = crate::live_project::LiveProject::init(dir, include_tests)?;
+        Self::init_project(
+            dir,
+            Some((main_path, incremental_path)),
+            project,
+            explicit_allocation_report,
+            select_sims,
+        )
+    }
+
+    /// Reconstruct the cached program's baseline without publishing over the
+    /// running program. The caller checks its identity before applying edits.
+    pub(crate) fn init_cached_baseline(dir: &str, sources: SourceFiles) -> Result<Self> {
+        let _slot = crate::compile_slots::acquire(dir)?;
+        let project = crate::live_project::LiveProject::init_from_sources(dir, false, sources)?;
+        Self::init_project(dir, None, project, None, |_| Ok(None))
+    }
+
+    fn init_project(
+        dir: &str,
+        output: Option<(&std::path::Path, &std::path::Path)>,
+        project: crate::live_project::LiveProject,
+        explicit_allocation_report: Option<&std::path::Path>,
+        select_sims: impl FnOnce(&bone_semantic::inference::Workspace) -> Result<Option<Vec<String>>>,
+    ) -> Result<Self> {
+        let renderer_target = skull::mir_emit::RendererTarget::Gl;
         let (lua, cache, artifact_fingerprint, emits_main) = {
             let ws = project.workspace();
             let mid = skull::user_module_id(ws).map_err(no_user_module)?;
@@ -3436,7 +3460,9 @@ impl IncrementalProject {
             (lua, c, artifact_fingerprint, emits_main)
         };
         let preamble = (RuntimeServices::registered().program_preamble)(dir, ProgramKind::Game)?;
-        write_full_main(&preamble, &lua, emits_main, main_path, incremental_path)?;
+        if let Some((main_path, incremental_path)) = output {
+            write_full_main(&preamble, &lua, emits_main, main_path, incremental_path)?;
+        }
         let shape_hashes = skull::type_shape_hashes(project.workspace())
             .map_err(|e| anyhow::anyhow!(e.message))?;
         Ok(IncrementalProject {
