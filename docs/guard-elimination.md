@@ -1,9 +1,8 @@
 # Guard elimination
 
-This document records the bounds and shift checks the compiler currently
-proves redundant, their soundness boundaries, and the measurements that support
-them. The bounds analysis is in `crates/skull-transform/src/in_bounds.rs`;
-constant shift emission is in `crates/skull-codegen-lua/src/lib.rs`.
+Current guard proofs, boundaries and supporting measurements. Bounds analysis
+is in `crates/skull-transform/src/in_bounds.rs`; constant shift emission is in
+`crates/skull-codegen-lua/src/lib.rs`.
 
 ## Implemented proofs
 
@@ -20,18 +19,21 @@ snapshots stop a repeated MIR producer from lending an old result new bounds.
 Calls and length writes invalidate affected facts. An `int` annotation,
 a negative-value rejection branch, or a bound in another function is not enough.
 
-### Private Lua vector pushes
+### Private Lua tables
 
-For a fresh boxed vector that remains local and private, the pass tracks its
-allocation and aliases through local loads and stores. Appending to that vector
-cannot invoke a foreign table setter. A private push invalidates facts tied to
-current length and element places, while captured upper bounds can survive
-because length only grows. Unsupported escapes revoke privacy.
+Local allocation identities cover fresh boxed vectors and `MakeStruct` records.
+Unborrowed local stores/loads preserve aliases; publication revokes the entire
+family. Returning a record after a loop does not invalidate earlier proofs.
 
-This exception is Lua-specific: JavaScript arrays can inherit indexed setters.
-The JS path remains conservative. Opaque calls still invalidate ordinary
-memory-bound facts, even when they do not receive the private vector. Vector
-parameters, container contents, and caller-to-callee privacy are not inferred.
+- A private vector append cannot call a setter. It invalidates current length
+  and element-place facts, while captured upper bounds survive length growth.
+- A private record read cannot call a getter, so it preserves bounds. This
+  covers local records returned after filling a vector, which remain allocated.
+
+These exemptions are Lua-only; JS remains conservative. Opaque calls still
+invalidate memory bounds. Globals, calls, containers and closure captures
+publish a record; an escaped old instance stays escaped when its allocation
+site executes again. Parameters and nested container contents are not inferred.
 
 ### Descriptor capacities
 
@@ -66,9 +68,10 @@ guards remain unless those properties are established.
 - **Record-backed capacity and reuse:** repeated field/global/element reads
   are not equated. Alpha-mask dimensions cross an opaque allocator and record
   reads can invoke getters; a changing-width regression retains its check.
-  Glyph-cache capacity joins are supported, but its record reads and finite row
-  bounds remain unproved. The glyph fetch writes nine scratch floats; existing
-  callback-free FFI effects preserve headers and the wrapper adds a global write.
+  In `packages/stone/engine/rendering/text.rock`, TextLayout/FlatVec records reach
+  the glyph cache through public APIs, a global cache and debug hooks. They need
+  interprocedural origin and finite-row proofs; TextGlyph value fields are safe.
+  The glyph fetch's existing FFI/global effects already preserve headers.
 - **Subtraction:** `n > 0` does not prove `n - 1 < n` for infinity or large
   rounded floating-point values. A rule needs finite exact-integer bounds and
   live operand snapshots.
@@ -88,29 +91,25 @@ trace-sensitive.
 
 | Proof | Machine / LuaJIT | Before -> after median | Sample range / caveat |
 | --- | --- | --- | --- |
-| Strided NativeBuffer read | Apple M4 Max / 2.1.1774896198 | 1.1930 -> 0.8062 ns/element | 8 pairs; ranges 1.1815-1.2249 -> 0.7940-0.8180; 0-2 trace aborts |
 | Strided NativeBuffer read | Intel Core i9-14900K, Linux / 2.1.1785763465 | 1.6850 -> 1.2449 ns/element | 8 pairs; ranges 1.6775-1.7217 -> 0.3542-1.2549; 0-3 aborts and a fast outlier |
-| Private vector push and collection | Apple M4 Max / 2.1.1774896198 | 4.1577 -> 3.1629, repeat 4.4662 -> 3.3445 ns/element | 6 pairs per batch; first/repeat ranges before -> after: 2.13-4.27 / 2.19-4.51 -> 3.13-3.43 / 3.32-3.41 |
 | Private vector push and collection | Intel Core i9-14900K, Linux / 2.1.1785763465 | 5.4484 -> 4.6523, repeat 5.2100 -> 4.4473 ns/element | 6 pairs per batch; first/repeat ranges before -> after: 2.15-5.69 / 2.20-5.45 -> 4.37-4.78 / 4.33-4.65 |
-| Constant uint shifts | Apple M4 Max / 2.1.1774896198 | 33.6624 -> 33.6220 ns/iteration | 8 pairs; runtime effectively unchanged; emitted chunk 145372 -> 145188 bytes, final machine code 1696-1788 -> 1572 bytes |
 | Repeated-product byte fill | Apple M4 Max / 2.1.1774896198 | 0.4114 -> 0.4233; repeat 0.4077 -> 0.4295 ns/element | 8 pairs per batch; repeat ranges 0.3836-0.4372 -> 0.4200-0.4956; 3-5% slower medians |
 | Repeated-product byte fill | Intel Core i9-14900K, Linux / 2.1.1785763465 | 0.4550 -> 0.3321 ns/element | 8-pair repeat; ranges 0.4536-0.4604 -> 0.3306-0.3374; about 27% faster |
 | Capacity join, ten-lane reuse fill | Intel Core i9-14900K, Linux / 2.1.1785763465 | 1.6654 -> 1.1239; repeat 1.3831 -> 0.9250 ns/element | 8 pairs per batch; repeat ranges 1.2955-1.6219 -> 0.8608-1.1158; about 33% faster |
+| Private record read in vector fill | Intel Core i9-14900K, Linux / 2.1.1785763465 | 0.3871 -> 0.2422 ns/element | 8 pairs; ranges 0.3692-0.5700 -> 0.2305-0.3643; foreign control 0.3575 -> 0.3573 |
 
 Private-vector timings include allocation and GC; faster baseline trace variants
 limit the median claim. These probes do not establish application speedups or
 whole-program compile cost. Constant shifts demonstrate smaller code only.
 
-The parameterized `fill_and_collect` control retains its checks. Buffer probes
-include allocation and GC. Repeated products change only the checked store;
-M4's slower medians persisted despite smaller machine code (376 -> 208 bytes).
-The capacity-join probe changes one store, preserves its known-effect helper,
-and tests reuse and allocation paths. Allocation-path medians improved 19-44%
-across the two batches, with overlapping ranges. This bounded probe is not a
-measurement of the actual Stone glyph cache. Ten alternating M4 fresh-process
-compile pairs measured `buffer_reuse` 15.743 -> 15.671 ms and `vec_store`
-16.845 -> 16.711 ms, with overlapping ranges. Startup/output are included;
-OS caches were not flushed.
+The parameterized collection and foreign-record controls retain their checks.
+Buffer probes include allocation and GC; private-record timing includes its
+returned report. The record probe changes one checked store to a raw store.
+The bounded capacity-join probe is not the actual Stone glyph cache; its
+allocation-path gains varied 19-44%. Ten alternating M4 fresh-process compile
+pairs for private records measured `record_read` 20.941 -> 19.234 ms and
+`vec_store` 20.780 -> 20.522 ms, with wide overlapping ranges. Startup/output
+are included, OS caches were not flushed, and no compile speedup is claimed.
 
 ## Reproduction
 
@@ -131,6 +130,8 @@ rock compile benchmarks/buffer_fill.rock --output /tmp/buffer-fill.lua
 luajit benchmarks/buffer_fill.lua /tmp/buffer-fill.lua
 rock compile benchmarks/buffer_reuse.rock --output /tmp/buffer-reuse.lua
 luajit benchmarks/buffer_reuse.lua /tmp/buffer-reuse.lua
+rock compile benchmarks/record_read.rock --output /tmp/record-read.lua
+luajit benchmarks/record_read.lua /tmp/record-read.lua
 ```
 
 Compare `proven_stride` for the affine proof and `fill_and_collect_private`

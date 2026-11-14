@@ -59,12 +59,12 @@
 //! body. A yield drops everything. An instruction that executes
 //! again (a loop) drops the facts about its previous value.
 //!
-//! A fresh Lua boxed Vec also carries a local, must-private allocation identity.
-//! Local copies preserve it; publishing any alias or exposing its backing
-//! revokes the whole family. A private ArrayPush or recognized boxed stdlib
-//! push cannot call a setter, so it invalidates current length/element places
-//! without discarding captured bounds. Opaque calls still discard memory facts
-//! even when they receive no private vector. No container contents are tracked.
+//! Fresh Lua boxed Vecs and records carry local, must-private allocation identities.
+//! Local copies preserve them; publishing any alias revokes its whole family.
+//! Private record reads cannot call a getter. A private ArrayPush or recognized
+//! boxed stdlib push cannot call a setter, so it invalidates current length and
+//! element places without discarding captured bounds. Opaque calls still drop
+//! memory facts. Container contents are not tracked; backing exposure escapes.
 //!
 //! Merging at a join intersects the incoming facts, so a fact that reaches the
 //! loop header around the back edge must have survived the whole body: a body
@@ -113,11 +113,18 @@ pub fn elide_bounds_checks_for_target(
     let mut has_checked = false;
     let mut has_make_vec = false;
     let mut has_array_push = false;
+    let mut has_make_struct = false;
+    let mut has_record_read = false;
     for &b in &rpo {
         for &i in &func.blocks[b].insts {
             match func.insts[i] {
                 Inst::Lambda { .. } => return 0,
                 Inst::MakeVec(_) => has_make_vec = true,
+                Inst::MakeStruct { .. } => has_make_struct = true,
+                Inst::Index {
+                    kind: ContainerKind::Record,
+                    ..
+                } => has_record_read = true,
                 Inst::ArrayPush { .. } => has_array_push = true,
                 ref inst if needs_bounds_proof(ws, inst) => has_checked = true,
                 _ => {}
@@ -155,8 +162,8 @@ pub fn elide_bounds_checks_for_target(
         ws,
         may_reexecute,
         track_private: target == FnBackend::Lua
-            && has_make_vec
-            && (has_array_push || !pushes.is_empty()),
+            && ((has_make_vec && (has_array_push || !pushes.is_empty()))
+                || (has_make_struct && has_record_read)),
         relevant: relevant_values(func, &rpo),
         pushes,
         affine: rpo.iter().any(|&b| {
@@ -554,15 +561,16 @@ struct Facts {
     whole: HashSet<Key>,
     // Ordered comparisons, seeded only by true edges (false admits NaN).
     ordered: HashSet<(Key, Key, bool)>,
-    // A local reference to a fresh boxed Vec whose header/backing never escaped.
+    // A local reference to a fresh Lua table whose allocation never escaped.
     // Allocation sites identify alias families; reexecution may conservatively
     // join several private instances of one site into the same family.
-    private_vecs: HashSet<(Key, Idx<Inst>)>,
+    private_tables: HashSet<(Key, Idx<Inst>)>,
 }
 
 impl Facts {
     fn meet(&mut self, other: &Facts) {
-        self.private_vecs.retain(|k| other.private_vecs.contains(k));
+        self.private_tables
+            .retain(|k| other.private_tables.contains(k));
         self.whole.retain(|k| other.whole.contains(k));
         self.ordered.retain(|k| other.ordered.contains(k));
         self.same.retain(|k| other.same.contains(k));
@@ -572,7 +580,7 @@ impl Facts {
     }
 
     fn is_empty(&self) -> bool {
-        self.private_vecs.is_empty()
+        self.private_tables.is_empty()
             && self.whole.is_empty()
             && self.ordered.is_empty()
             && self.same.is_empty()
@@ -586,7 +594,7 @@ impl Facts {
         if self.is_empty() {
             return;
         }
-        self.private_vecs.retain(|(k, _)| !k.mentions(&pred));
+        self.private_tables.retain(|(k, _)| !k.mentions(&pred));
         self.whole.retain(|k| !k.mentions(&pred));
         self.ordered
             .retain(|(a, b, _)| !a.mentions(&pred) && !b.mentions(&pred));
@@ -667,21 +675,26 @@ impl Facts {
     }
 
     fn private_root(&self, key: &Key) -> Option<Idx<Inst>> {
-        self.private_vecs
+        self.private_tables
             .iter()
             .find_map(|(k, root)| (k == key).then_some(*root))
     }
 
-    fn track_private_vecs(&mut self, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) -> bool {
+    fn track_private_tables(
+        &mut self,
+        func: &MirFunc,
+        ctx: &Ctx<'_>,
+        id: Idx<Inst>,
+    ) -> (bool, bool) {
         if !ctx.track_private {
-            return false;
+            return (false, false);
         }
         let inst = &func.insts[id];
-        if self.private_vecs.is_empty() {
-            if matches!(inst, Inst::MakeVec(_)) {
-                self.private_vecs.insert((Key::Value(id), id));
+        if self.private_tables.is_empty() {
+            if matches!(inst, Inst::MakeVec(_) | Inst::MakeStruct { .. }) {
+                self.private_tables.insert((Key::Value(id), id));
             }
-            return false;
+            return (false, false);
         }
         let push = match inst {
             Inst::ArrayPush {
@@ -692,7 +705,23 @@ impl Facts {
             Inst::Call { args, .. } if ctx.pushes.contains(&id) => Some(args[0]),
             _ => None,
         };
-        let safe_push = push.is_some_and(|arr| self.private_root(&value_key(func, arr)).is_some());
+        let safe_push = push.is_some_and(|arr| {
+            self.private_root(&value_key(func, arr))
+                .is_some_and(|root| matches!(func.insts[root], Inst::MakeVec(_)))
+        });
+        let record = match inst {
+            Inst::Index {
+                base,
+                kind: ContainerKind::Record,
+                ..
+            } if self
+                .private_root(&value_key(func, *base))
+                .is_some_and(|root| matches!(func.insts[root], Inst::MakeStruct { .. })) =>
+            {
+                Some(*base)
+            }
+            _ => None,
+        };
         let allowed = match inst {
             Inst::Store { cell, value } if !func.cells[*cell].borrowed => Some(*value),
             Inst::Field { base, field } if field.as_str() == LEN => Some(*base),
@@ -715,7 +744,7 @@ impl Facts {
                     | ContainerKind::VecNonNullInBounds,
                 ..
             } => Some(*base),
-            _ => push,
+            _ => record.or(push),
         };
         // A receiver also used as the stored item escapes conservatively.
         // Inspect operand occurrences, not just membership in an allow-list.
@@ -733,20 +762,20 @@ impl Facts {
                 escaped.insert(root);
             }
         });
-        self.private_vecs
+        self.private_tables
             .retain(|(_, root)| !escaped.contains(root));
         match inst {
-            Inst::MakeVec(_) => {
-                self.private_vecs.insert((Key::Value(id), id));
+            Inst::MakeVec(_) | Inst::MakeStruct { .. } => {
+                self.private_tables.insert((Key::Value(id), id));
             }
             Inst::Load(cell) => {
                 if let Some(root) = self.private_root(&Key::Cell(*cell)) {
-                    self.private_vecs.insert((Key::Value(id), root));
+                    self.private_tables.insert((Key::Value(id), root));
                 }
             }
             _ => {}
         }
-        safe_push
+        (safe_push, record.is_some())
     }
 
     fn after_private_push(&mut self) {
@@ -1214,7 +1243,7 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
             ));
         }
     }
-    let private_push = facts.track_private_vecs(func, ctx, id);
+    let (private_push, private_record_read) = facts.track_private_tables(func, ctx, id);
     match inst {
         Inst::MakeStruct { fields, .. } => {
             // A fresh descriptor's length equals its initializer snapshot.
@@ -1234,6 +1263,10 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
                 facts.le_len.insert((Key::Value(id), v));
             }
         }
+        Inst::Index {
+            kind: ContainerKind::Record,
+            ..
+        } if private_record_read => {}
         Inst::Index {
             kind:
                 ContainerKind::Vec
@@ -1298,7 +1331,7 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
                 facts.le_len.insert((bound, k.clone()));
             }
             if let Some(root) = private {
-                facts.private_vecs.insert((k.clone(), root));
+                facts.private_tables.insert((k.clone(), root));
             }
             if whole {
                 facts.whole.insert(k.clone());

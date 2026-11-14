@@ -1,0 +1,12 @@
+// Private-record read proof; run with benchmarks/record_read.lua.
+struct FillReport { offset: int }
+@nomangle fn fill_report(xs: [int], offset: int) -> FillReport {
+    let report = FillReport { offset }
+    for i in 0..xs.len() { xs[i] = i + report.offset }
+    return report
+}
+@nomangle fn fill_foreign_report(xs: [int], report: FillReport) -> FillReport {
+    for i in 0..xs.len() { xs[i] = i + report.offset }
+    return report
+}
+fn main() { print(fill_report([0, 0], 7).offset) }

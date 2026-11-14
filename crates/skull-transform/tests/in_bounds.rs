@@ -1084,3 +1084,51 @@ fn repeated_product_keys_require_live_operand_snapshots() {
         assert_eq!(p.is_slot(check), mode == "same", "{mode}");
     }
 }
+
+#[test]
+fn only_private_lua_record_reads_preserve_bounds() {
+    for mode in ["lua", "alias", "borrowed", "js"] {
+        let mut p = Probe::new();
+        let entry = p.f.entry;
+        let seven = p.int(entry, 7);
+        let record = p.emit(
+            entry,
+            Inst::MakeStruct {
+                ty: Some(u("Report")),
+                fields: vec![(u("offset"), seven)],
+            },
+        );
+        if mode == "borrowed" {
+            p.f.cells[p.i].borrowed = true;
+        }
+        p.store(entry, p.i, record);
+        let body = p.nonempty_guard();
+        let base = if mode == "alias" {
+            p.load(body, p.i)
+        } else {
+            record
+        };
+        let field = p.emit(body, Inst::Const(Lit::Str(u("offset"))));
+        p.emit(
+            body,
+            Inst::Index {
+                base,
+                index: field,
+                kind: ContainerKind::Record,
+            },
+        );
+        let zero = p.int(body, 0);
+        let check = p.check(body, p.xs, zero);
+        p.f.set_term(body, Term::Return(vec![]));
+        skull_transform::elide_bounds_checks_for_target(
+            None,
+            &mut p.f,
+            if mode == "js" {
+                bone_core::hir::FnBackend::Js
+            } else {
+                bone_core::hir::FnBackend::Lua
+            },
+        );
+        assert_eq!(p.is_slot(check), matches!(mode, "lua" | "alias"), "{mode}");
+    }
+}
