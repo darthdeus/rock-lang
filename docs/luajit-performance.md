@@ -555,6 +555,18 @@ JSON streaming. Further reuse should have explicit scratch ownership and
 tests for nesting, aliases, stale tails, and retained references. Caching
 sorted keys across calls has the same unobserved-mutation problem as length.
 
+An emitted-Lua prototype let `values()` overwrite its private sorted key
+buffer with the corresponding values and return that buffer. On an Intel
+i9-14900K with system LuaJIT 2.1.1785763465 and the JIT on, nine interleaved
+pairs for 1,000 entries changed median runtime from 155.684 to 153.020
+ns/entry. A GC-stopped, JIT-on allocation probe measured 16,874.32 versus
+8,446.24 bytes per snapshot. The result would remain fresh
+and independent, but the generic `values()` body also instantiates for column
+and strided outputs. A helper returning `[V]`, or a cast from `any`, crosses
+the compiler's opaque-body representation boundary for column results even
+when the guard would fold false. This prototype was not landed; a later change
+needs a representation-aware return path and direct regression coverage.
+
 The other candidates need more targeted evidence:
 
 - Coroutine enum yields already have an unboxed frame-slot channel. Inspection
