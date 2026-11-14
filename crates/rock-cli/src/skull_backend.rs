@@ -3172,8 +3172,32 @@ pub fn write_full_main(
 ) -> Result<usize> {
     let main = skull_game_main(preamble, emit_lua, emits_main);
     let bytes = main.iter().map(|part| part.len()).sum();
-    rock_host::project::write_atomic_streamed(main_path, |file| write_program_parts(file, &main))?;
-    wipe_overlay(incremental_path)?;
+    let previous_overlay = match fs_err::read(incremental_path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let mut overlay_removed = false;
+    // Remove the overlay before the atomic main replacement: a cleanup failure
+    // must not publish a new main beside stale overlay state. Keep its bytes so
+    // a failed replacement can restore the last-good pair.
+    if let Err(error) = rock_host::project::write_atomic_streamed(main_path, |file| {
+        write_program_parts(file, &main)?;
+        wipe_overlay(incremental_path).map_err(std::io::Error::other)?;
+        overlay_removed = true;
+        Ok(())
+    }) {
+        if overlay_removed
+            && let Some(previous_overlay) = previous_overlay
+            && let Err(restore) =
+                rock_host::project::write_atomic(incremental_path, previous_overlay)
+        {
+            return Err(anyhow::anyhow!(
+                "skull: overlay rollback failed after main publication error: {restore}; original error: {error}"
+            ));
+        }
+        return Err(error.into());
+    }
     Ok(bytes)
 }
 
