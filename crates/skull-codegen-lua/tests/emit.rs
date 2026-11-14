@@ -3328,6 +3328,108 @@ fn lookup(xs: [int], indices: NativeBuffer<int>) -> int {{
 }
 
 #[test]
+fn map_remove_keeps_the_check_on_a_vector_element_index() {
+    let lua = emit_inlined(
+        "fn lookup(xs: [int], indices: [int], m: Map<string, int>, key: string) -> int {
+            if indices[0] < 0 || indices[0] >= xs.len() { return 0 }
+            m.remove(key)
+            return xs[indices[0]]
+        }",
+        "lookup",
+    );
+    assert_eq!(lua.matches("__vec_checked_get(").count(), 3, "{lua}");
+}
+
+#[test]
+fn map_remove_invalidates_a_bound_read_from_the_map() {
+    let lua = emit_inlined(
+        "fn lookup(xs: [int], m: Map<string, int>, key: string) -> int {
+            if m[key] < 0 || m[key] >= xs.len() { return 0 }
+            m.remove(key)
+            return xs[m[key]]
+        }",
+        "lookup",
+    );
+    assert!(lua.contains("__vec_checked_get("), "{lua}");
+}
+
+#[test]
+fn map_remove_can_mutate_a_vector_index_through_lua_metatable() {
+    let src = "
+fn held(xs: [int], indices: [int], m: Map<string, [int]>) -> int {
+    if indices[0] < 0 || indices[0] >= xs.len() { return -1 }
+    m.remove(\"held\")
+    return xs[indices[0]]
+}
+
+fn removed(xs: [int], m: Map<string, int>) -> int {
+    if m[\"key\"] < 0 || m[\"key\"] >= xs.len() { return -1 }
+    m.remove(\"key\")
+    return xs[m[\"key\"]]
+}
+fn shrunk(xs: [int], m: Map<string, int>) -> int {
+    if xs.len() <= 0 { return -1 }
+    m.remove(\"missing\")
+    return xs[0]
+}";
+    assert_eq!(
+        run(
+            src,
+            r#"(function()
+                local xs = { len = 2, _data = { 11, 22 } }
+                local indices = { len = 1, _data = { 1 } }
+                local m = { held = indices }
+                assert(held(xs, indices, m) == 22 and m.held == nil)
+                local ok, err = pcall(removed, xs, { key = 1 })
+                assert(not ok and tostring(err):find("attempt to compare nil", 1, true), tostring(err))
+                local changed = { len = 1, _data = { 1 } }
+                local foreign = setmetatable({}, { __index = function()
+                    changed._data[1] = 99
+                    return nil
+                end })
+                ok, err = pcall(held, xs, changed, foreign)
+                assert(not ok and tostring(err):find("Vec index out of bounds", 1, true), tostring(err))
+                local target = { len = 1, _data = { 7 } }
+                local shrinking = setmetatable({}, { __index = function()
+                    target.len = 0
+                    target._data[1] = nil
+                    return nil
+                end })
+                ok, err = pcall(shrunk, target, shrinking)
+                assert(not ok and tostring(err):find("Vec index out of bounds", 1, true), tostring(err))
+                return "ok"
+            end)()"#,
+        ),
+        "ok"
+    );
+}
+
+#[test]
+fn map_get_metatable_can_shrink_a_guarded_vector() {
+    let src = "fn read_after_get(xs: [int], m: Map<string, int>) -> int {
+        if xs.len() <= 0 { return -1 }
+        let old = m.get(\"missing\")
+        if old != null { return old }
+        return xs[0]
+    }";
+    let out = run(
+        src,
+        r#"(function()
+            local xs = { len = 1, _data = { 7 } }
+            local m = setmetatable({}, { __index = function()
+                xs.len = 0
+                xs._data[1] = nil
+                return nil
+            end })
+            local ok, err = pcall(read_after_get, xs, m)
+            assert(not ok and tostring(err):find("Vec index out of bounds", 1, true), tostring(err))
+            return "ok"
+        end)()"#,
+    );
+    assert_eq!(out, "ok");
+}
+
+#[test]
 fn a_registered_ffi_callback_can_run_through_another_binding() {
     let lua = emit_inlined(
         r#"

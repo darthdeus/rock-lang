@@ -555,14 +555,15 @@ The other candidates need more targeted evidence:
   table per resume; the test allows 0.25 bytes per coroutine per update. These
   steady-state figures do not measure creation or terminal transitions. No
   compiler change to the boxed wrapper is warranted by these workloads.
-- `Map.remove` has an element-write effect, not an all-memory effect.
-  `after_direct_call` in `skull-transform/src/in_bounds.rs` forgets facts
-  mentioning any `Key::Elem`; direct local-vector length facts can survive.
-  The opportunity is specifically proofs involving vectors or indices loaded
-  through container elements. Receiver-sensitive effects need an alias proof;
-  different local names are insufficient. Start with unrelated-container and
-  aliased-container regression pairs, then measure retained checks and JIT
-  runtime before widening the effect representation.
+- `Map.remove` once had only an element-write effect, so
+  `after_direct_call` forgot every `Key::Elem` but kept direct length facts.
+  A typed Map can arrive from Lua with an `__index` metamethod. A missing-key
+  `remove` invokes it, and it can rewrite a vector element or shrink a vector.
+  Keeping either fact miscompiles the guarded access. `Map.get` therefore has
+  no `@nowrite` promise, and its transitive effect makes `Map.remove` unknown.
+  Narrowing this needs proof that the receiver has no such metamethod and
+  cannot acquire one through an escaped alias. Distinct locals and types do
+  not establish that proof.
 - Wide live floats remain an x86 investigation. The live-float benchmark and
   rejected approaches below already isolate the failure. This arm64 run
   supplies no evidence for an x86 runtime improvement. Delaying reads must
@@ -968,8 +969,8 @@ What still blocks a loop with a call: the logging functions (their sink is
 a function value), `Arena.get` and the arena intrinsics, Stone's own
 `stone::data` and `append_vertex` bodies (they write fields the loop's
 vector is read through, or call unresolved bounded `next`s), and
-`Map.remove` (its `table_unset` writes an element, which the pass treats
-as any element). Each is a candidate for a narrower effect, not a kill.
+`Map.remove` (a foreign Map can run a metamethod). The latter needs a
+receiver provenance proof before its effect can be narrowed.
 
 ### NativeBuffers and declared result facts (2026-11-12)
 
@@ -1060,6 +1061,12 @@ build. The earlier release measurements above cover different comparisons.
   for Stone; a host whose sink runs Rock code that shrinks a vector would
   break it. Plain `log_*` calls go through `__rock_log` (unannotated) and
   still kill, so only `log_once` sites rely on this.
+- **Foreign table metamethods.** A Lua-supplied Map can invoke `__index`
+  during `Map.get` or the read in `Map.remove`; the bounds pass treats those
+  calls as unknown. Other raw table intrinsics, including `table_get` and
+  `table_set`, still carry reviewed effect promises. Those promises need a
+  separate audit wherever their receivers can be foreign tables with
+  metamethods.
 - **Incremental emission.** A chunk depends on the effects of its callees,
   including effects inherited transitively. Body edits must re-emit a
   caller when a callee's effect summary changes, even when the edited
@@ -1083,8 +1090,8 @@ in order of weight:
 
 1. **Calls inside loops**: done above (the inferred effect table). The
    remaining gap to the 327 ceiling is the callees listed there, each
-   wanting a narrower effect: per-field writes already exist, a per-element
-   write of a *named* container would free `Map.remove`, and a sink that is
+   wanting a narrower effect: per-field writes already exist, a proof that a
+   Map receiver has no metamethod would free `Map.remove`, and a sink that is
    a function value is unknowable without a declared effect on the sink.
 2. **Accessors called with a proven index.** `@inline` on the small
    accessors moves the access to the caller, where the loop fact holds. A

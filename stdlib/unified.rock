@@ -3005,7 +3005,8 @@ fn Map<K, V>.insert(map, key: K, value: V) {
 
 // Not `@nomangle`: reached through ordinary Rock calls and the column
 // intercept, both of which match the Rock name rather than the emitted symbol.
-@nowrite @intrinsic @inline inline(lua) fn Map<K, V>.get(map, key: K) -> V? = """
+// A foreign Map can have an __index metamethod that mutates Rock state.
+@intrinsic @inline inline(lua) fn Map<K, V>.get(map, key: K) -> V? = """
     return map[key]
 """
 
