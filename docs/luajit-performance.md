@@ -1313,3 +1313,8 @@ No broad speedup is claimed: noisier vector cases included `fill` at
 1.1139 -> 1.2906 with overlapping spans (1.0576-1.1968 and 1.0695-1.6447).
 The earlier collection-loop cost from callback-capable push remains; this
 fix does not prove a vector's backing table private.
+
+The follow-up [guard elimination audit](guard-elimination.md) records proof
+requirements across guard families and paired JIT ablations. Bounded affine
+NativeBuffer indexing is the strongest new measured candidate; removing more
+checks did not consistently improve the other probes.
