@@ -2733,6 +2733,35 @@ pub extern "C" fn stone_gpu_timer_poll_ms() -> f32 {
     with_gl(|gl| GPU_TIMER.with(|t| t.borrow_mut().poll_ms(gl))).unwrap_or(-2.0)
 }
 
+/// Open a timed pass: one GPU timestamp pair around the GL work up to
+/// `stone_gpu_timed_pass_end`, available in normal play. No-op when timer
+/// queries are unsupported, another timed pass is open, or too many results
+/// are unread.
+#[no_mangle]
+pub extern "C" fn stone_gpu_timed_pass_begin() {
+    with_gl(|gl| GPU_TIMER.with(|t| t.borrow_mut().timed_begin(gl)));
+}
+
+/// Close the open timed pass and queue it for readback under `tag`.
+#[no_mangle]
+pub extern "C" fn stone_gpu_timed_pass_end(tag: u32) {
+    with_gl(|gl| GPU_TIMER.with(|t| t.borrow_mut().timed_end(gl, tag)));
+}
+
+/// Non-blocking read of the oldest timed pass, in submission order. Returns
+/// its GPU ms (>= 0), `-1` if none is ready, or `-2` if passes cannot be
+/// timed (macOS / no GL context / `STONE_GPU_SCOPES=finish`).
+#[no_mangle]
+pub extern "C" fn stone_gpu_timed_pass_poll_ms() -> f32 {
+    with_gl(|gl| GPU_TIMER.with(|t| t.borrow_mut().timed_poll_ms(gl))).unwrap_or(-2.0)
+}
+
+/// The tag of the pass `stone_gpu_timed_pass_poll_ms` last returned.
+#[no_mangle]
+pub extern "C" fn stone_gpu_timed_pass_tag() -> u32 {
+    GPU_TIMER.with(|t| t.borrow().timed_tag())
+}
+
 /// Whether this process records named GPU scopes (`STONE_GPU_SCOPES=1`). The
 /// Rock wrappers read it once so a disabled scope costs no FFI call.
 #[no_mangle]
