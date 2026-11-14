@@ -109,6 +109,14 @@ impl Probe {
     fn run(&mut self) {
         elide_bounds_checks(None, &mut self.f);
     }
+
+    fn run_lua(&mut self) {
+        skull_transform::elide_bounds_checks_for_target(
+            None,
+            &mut self.f,
+            bone_core::hir::FnBackend::Lua,
+        );
+    }
 }
 
 /// `for i in 0..xs.len() { <body(B)>; xs[i] = 1; <after(B)> }` with the
@@ -186,7 +194,7 @@ fn a_call_after_the_store_still_reaches_it_around_the_back_edge() {
 }
 
 #[test]
-fn a_literal_push_in_the_body_invalidates_bounds_facts() {
+fn a_fresh_literal_push_in_the_body_preserves_bounds_facts() {
     let mut p = Probe::new();
     let (_, store) = counted_loop(&mut p, |p, b| {
         let arr = p.emit(b, Inst::MakeVec(Vec::new()));
@@ -200,8 +208,8 @@ fn a_literal_push_in_the_body_invalidates_bounds_facts() {
             },
         );
     });
-    p.run();
-    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
+    p.run_lua();
+    assert_eq!(p.kind(store), ContainerKind::VecNonNullInBounds);
 }
 
 #[test]
@@ -866,4 +874,91 @@ fn affine_proof_requires_whole_bounded_operands_and_live_length() {
     ] {
         assert_eq!(affine_probe(case), ContainerKind::NativeBuffer, "{case}");
     }
+}
+
+#[test]
+fn a_literal_array_push_preserves_unrelated_bounds() {
+    let mut p = Probe::new();
+    let arr = p.emit(p.f.entry, Inst::MakeVec(vec![]));
+    let (_, store) = counted_loop(&mut p, |p, b| {
+        let value = p.int(b, 7);
+        p.emit(
+            b,
+            Inst::ArrayPush {
+                arr,
+                value,
+                kind: ContainerKind::Vec,
+            },
+        );
+    });
+    p.run_lua();
+    assert_eq!(p.kind(store), ContainerKind::VecNonNullInBounds);
+}
+
+#[test]
+fn exposing_a_literal_backing_revokes_private_push() {
+    let mut p = Probe::new();
+    let arr = p.emit(p.f.entry, Inst::MakeVec(vec![]));
+    p.emit(
+        p.f.entry,
+        Inst::Field {
+            base: arr,
+            field: u("_data"),
+        },
+    );
+    let (_, store) = counted_loop(&mut p, |p, b| {
+        let value = p.int(b, 7);
+        p.emit(
+            b,
+            Inst::ArrayPush {
+                arr,
+                value,
+                kind: ContainerKind::Vec,
+            },
+        );
+    });
+    p.run_lua();
+    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
+}
+
+#[test]
+fn a_borrowed_cell_does_not_keep_private_vector_provenance() {
+    let mut p = Probe::new();
+    let cell = p.f.new_cell(None);
+    p.f.cells[cell].borrowed = true;
+    let arr = p.emit(p.f.entry, Inst::MakeVec(vec![]));
+    p.store(p.f.entry, cell, arr);
+    let (_, store) = counted_loop(&mut p, |p, b| {
+        let value = p.int(b, 7);
+        // The original direct alias must be revoked too, not just the cell.
+        p.emit(
+            b,
+            Inst::ArrayPush {
+                arr,
+                value,
+                kind: ContainerKind::Vec,
+            },
+        );
+    });
+    p.run_lua();
+    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
+}
+
+#[test]
+fn a_fresh_js_array_does_not_prove_absence_of_inherited_setters() {
+    let mut p = Probe::new();
+    let arr = p.emit(p.f.entry, Inst::MakeVec(vec![]));
+    let (_, store) = counted_loop(&mut p, |p, b| {
+        let value = p.int(b, 7);
+        p.emit(
+            b,
+            Inst::ArrayPush {
+                arr,
+                value,
+                kind: ContainerKind::Vec,
+            },
+        );
+    });
+    skull_transform::elide_bounds_checks_for_target(None, &mut p.f, bone_core::hir::FnBackend::Js);
+    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
 }

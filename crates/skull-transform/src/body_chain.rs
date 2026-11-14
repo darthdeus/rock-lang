@@ -48,6 +48,8 @@ pub enum CountedLoops {
 }
 
 pub struct ChainOptions<'a> {
+    /// Runtime allocation guarantees used by bounds analysis.
+    pub target: bone_core::hir::FnBackend,
     /// Sees every synthetic name closure conversion mints.
     pub reserve: &'a dyn Fn(&str),
     pub counted_loops: CountedLoops,
@@ -57,7 +59,9 @@ pub struct ChainOptions<'a> {
 }
 
 impl ChainOptions<'_> {
+    /// Standalone Lua bodies without a name-reservation callback.
     pub const PLAIN: ChainOptions<'static> = ChainOptions {
+        target: bone_core::hir::FnBackend::Lua,
         reserve: &|_| {},
         counted_loops: CountedLoops::Root,
         inline_hoisted: false,
@@ -161,11 +165,11 @@ fn convert(
     if opts.counted_loops != CountedLoops::Skip {
         obs.begin(BodyPass::CountedLoop, mf);
         crate::recover_counted_loops(ws, mf);
-        crate::elide_bounds_checks(Some(ws), mf);
+        crate::elide_bounds_checks_for_target(Some(ws), mf, opts.target);
         if opts.counted_loops == CountedLoops::RootAndNested {
             for nf in &mut mf.nested_fns {
                 crate::recover_counted_loops(ws, nf);
-                crate::elide_bounds_checks(Some(ws), nf);
+                crate::elide_bounds_checks_for_target(Some(ws), nf, opts.target);
             }
         }
         obs.end(BodyPass::CountedLoop, mf);

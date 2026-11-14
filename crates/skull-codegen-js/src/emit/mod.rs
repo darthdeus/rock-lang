@@ -74,6 +74,7 @@ fn raw<T>(idx: Idx<T>) -> u32 {
 /// has no render-time nested pass to do it later, and never inlines into them.
 const JS_CHAIN: skull_transform::body_chain::ChainOptions<'static> =
     skull_transform::body_chain::ChainOptions {
+        target: bone_core::hir::FnBackend::Js,
         reserve: &|_| {},
         counted_loops: skull_transform::body_chain::CountedLoops::RootAndNested,
         inline_hoisted: false,

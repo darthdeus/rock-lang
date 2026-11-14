@@ -59,6 +59,13 @@
 //! body. A yield drops everything. An instruction that executes
 //! again (a loop) drops the facts about its previous value.
 //!
+//! A fresh Lua boxed Vec also carries a local, must-private allocation identity.
+//! Local copies preserve it; publishing any alias or exposing its backing
+//! revokes the whole family. A private ArrayPush or recognized boxed stdlib
+//! push cannot call a setter, so it invalidates current length/element places
+//! without discarding captured bounds. Opaque calls still discard memory facts
+//! even when they receive no private vector. No container contents are tracked.
+//!
 //! Merging at a join intersects the incoming facts, so a fact that reaches the
 //! loop header around the back edge must have survived the whole body: a body
 //! that pops, clears or calls into unknown code keeps its checks. Early exits
@@ -75,6 +82,7 @@ use std::borrow::Cow;
 
 use rustc_hash::FxHashSet as HashSet;
 
+use bone_core::hir::FnBackend;
 use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::cfg::{predecessors, reverse_postorder};
@@ -88,15 +96,29 @@ fn raw<T>(i: Idx<T>) -> usize {
 /// Mark every provably in-bounds `[T]` element access in `func`. Returns how
 /// many accesses were marked.
 pub fn elide_bounds_checks(ws: Option<&Workspace>, func: &mut MirFunc) -> usize {
+    elide_bounds_checks_for_target(ws, func, FnBackend::Any)
+}
+
+/// Add only allocation guarantees of the actual emission target. In particular,
+/// fresh JS arrays can inherit setters; fresh Lua tables have no metatable.
+pub fn elide_bounds_checks_for_target(
+    ws: Option<&Workspace>,
+    func: &mut MirFunc,
+    target: FnBackend,
+) -> usize {
     if disabled_by_env() {
         return 0;
     }
     let rpo = reverse_postorder(func, func.entry);
     let mut has_checked = false;
+    let mut has_make_vec = false;
+    let mut has_array_push = false;
     for &b in &rpo {
         for &i in &func.blocks[b].insts {
             match func.insts[i] {
                 Inst::Lambda { .. } => return 0,
+                Inst::MakeVec(_) => has_make_vec = true,
+                Inst::ArrayPush { .. } => has_array_push = true,
                 ref inst if needs_bounds_proof(ws, inst) => has_checked = true,
                 _ => {}
             }
@@ -106,9 +128,24 @@ pub fn elide_bounds_checks(ws: Option<&Workspace>, func: &mut MirFunc) -> usize 
         return 0;
     }
     let (preds, _) = predecessors(func, &rpo);
+    let pushes: HashSet<_> = if target == FnBackend::Lua && has_make_vec {
+        rpo.iter()
+            .flat_map(|&b| func.blocks[b].insts.iter().copied())
+            .filter(|&id| match &func.insts[id] {
+                Inst::Call { func: fref, args } => args.len() == 2 && is_boxed_vec_push(ws, *fref),
+                _ => false,
+            })
+            .collect()
+    } else {
+        HashSet::default()
+    };
     let ctx = Ctx {
         ws,
+        track_private: target == FnBackend::Lua
+            && has_make_vec
+            && (has_array_push || !pushes.is_empty()),
         relevant: relevant_values(func, &rpo),
+        pushes,
         affine: rpo.iter().any(|&b| {
             func.blocks[b].insts.iter().any(|&id| {
                 let index = match &func.insts[id] {
@@ -272,6 +309,53 @@ fn is_stdlib_fn(ws: Option<&Workspace>, fref: FuncRef, name: &str) -> bool {
     })
 }
 
+// These two stdlib bodies only grow `len` and store into `_data`. The
+// receiver's representation and privacy must still be proved at each call.
+fn is_boxed_vec_push(ws: Option<&Workspace>, fref: FuncRef) -> bool {
+    use bone_core::hir::{FnBackend, TyId, TypeCtor, TypeExpr};
+    let Some(ws) = ws else {
+        return false;
+    };
+    let module = ws.module(fref.module);
+    let f = &module.functions[fref.func];
+    if !bone_core::modules::is_stdlib_module_file(module.file.as_str())
+        || !matches!(f.name.as_str(), "push" | "vec_push")
+    {
+        return false;
+    }
+    let Some((FnBackend::Lua, body)) = f.inline_body else {
+        return false;
+    };
+    // Fail closed if the intrinsic gains callbacks or other effects later.
+    if !body
+        .as_str()
+        .split_whitespace()
+        .eq("vec.len = vec.len + 1 vec._data[vec.len] = item".split_whitespace())
+    {
+        return false;
+    }
+    let [receiver, item] = f.param_decls.as_slice() else {
+        return false;
+    };
+    if receiver.name.as_str() != "vec"
+        || item.name.as_str() != "item"
+        || f.is_coroutine
+        || f.is_variadic
+    {
+        return false;
+    }
+    let TyId::Static(mid, ty) = receiver.ty else {
+        return false;
+    };
+    matches!(
+        ws.module(mid).ty_arena[ty],
+        TypeExpr::App {
+            ctor: TypeCtor::Array,
+            ..
+        }
+    )
+}
+
 fn disabled_by_env() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OFF.get_or_init(|| {
@@ -288,6 +372,8 @@ struct Ctx<'a> {
     /// that consume or produce facts, and of the arithmetic feeding them.
     relevant: Vec<bool>,
     affine: bool,
+    pushes: HashSet<Idx<Inst>>,
+    track_private: bool,
 }
 
 fn relevant_values(func: &MirFunc, rpo: &[Idx<Block>]) -> Vec<bool> {
@@ -444,10 +530,15 @@ struct Facts {
     whole: HashSet<Key>,
     // Ordered comparisons, seeded only by true edges (false admits NaN).
     ordered: HashSet<(Key, Key, bool)>,
+    // A local reference to a fresh boxed Vec whose header/backing never escaped.
+    // Allocation sites identify alias families; reexecution may conservatively
+    // join several private instances of one site into the same family.
+    private_vecs: HashSet<(Key, Idx<Inst>)>,
 }
 
 impl Facts {
     fn meet(&mut self, other: &Facts) {
+        self.private_vecs.retain(|k| other.private_vecs.contains(k));
         self.whole.retain(|k| other.whole.contains(k));
         self.ordered.retain(|k| other.ordered.contains(k));
         self.same.retain(|k| other.same.contains(k));
@@ -457,7 +548,8 @@ impl Facts {
     }
 
     fn is_empty(&self) -> bool {
-        self.whole.is_empty()
+        self.private_vecs.is_empty()
+            && self.whole.is_empty()
             && self.ordered.is_empty()
             && self.same.is_empty()
             && self.nonneg.is_empty()
@@ -470,6 +562,7 @@ impl Facts {
         if self.is_empty() {
             return;
         }
+        self.private_vecs.retain(|(k, _)| !k.mentions(&pred));
         self.whole.retain(|k| !k.mentions(&pred));
         self.ordered
             .retain(|(a, b, _)| !a.mentions(&pred) && !b.mentions(&pred));
@@ -537,6 +630,96 @@ impl Facts {
                 .iter()
                 .any(|k| self.nonneg.contains(k)),
         }
+    }
+
+    fn private_root(&self, key: &Key) -> Option<Idx<Inst>> {
+        self.private_vecs
+            .iter()
+            .find_map(|(k, root)| (k == key).then_some(*root))
+    }
+
+    fn track_private_vecs(&mut self, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) -> bool {
+        if !ctx.track_private {
+            return false;
+        }
+        let inst = &func.insts[id];
+        if self.private_vecs.is_empty() {
+            if matches!(inst, Inst::MakeVec(_)) {
+                self.private_vecs.insert((Key::Value(id), id));
+            }
+            return false;
+        }
+        let push = match inst {
+            Inst::ArrayPush {
+                arr,
+                kind: ContainerKind::Vec | ContainerKind::VecNonNull,
+                ..
+            } => Some(*arr),
+            Inst::Call { args, .. } if ctx.pushes.contains(&id) => Some(args[0]),
+            _ => None,
+        };
+        let safe_push = push.is_some_and(|arr| self.private_root(&value_key(func, arr)).is_some());
+        let allowed = match inst {
+            Inst::Store { cell, value } if !func.cells[*cell].borrowed => Some(*value),
+            Inst::Field { base, field } if field.as_str() == LEN => Some(*base),
+            Inst::Len { base, .. } | Inst::VecCheckedIndex { vec: base, .. } => Some(*base),
+            Inst::Index {
+                base,
+                kind:
+                    ContainerKind::Vec
+                    | ContainerKind::VecNonNull
+                    | ContainerKind::VecInBounds
+                    | ContainerKind::VecNonNullInBounds,
+                ..
+            }
+            | Inst::StoreIndex {
+                base,
+                kind:
+                    ContainerKind::Vec
+                    | ContainerKind::VecNonNull
+                    | ContainerKind::VecInBounds
+                    | ContainerKind::VecNonNullInBounds,
+                ..
+            } => Some(*base),
+            _ => push,
+        };
+        // A receiver also used as the stored item escapes conservatively.
+        // Inspect operand occurrences, not just membership in an allow-list.
+        let mut allowed_uses = 0;
+        inst.uses_each(&mut |op| {
+            if Some(op) == allowed {
+                allowed_uses += 1;
+            }
+        });
+        let mut escaped = HashSet::default();
+        inst.uses_each(&mut |op| {
+            if (Some(op) != allowed || allowed_uses != 1)
+                && let Some(root) = self.private_root(&value_key(func, op))
+            {
+                escaped.insert(root);
+            }
+        });
+        self.private_vecs
+            .retain(|(_, root)| !escaped.contains(root));
+        match inst {
+            Inst::MakeVec(_) => {
+                self.private_vecs.insert((Key::Value(id), id));
+            }
+            Inst::Load(cell) => {
+                if let Some(root) = self.private_root(&Key::Cell(*cell)) {
+                    self.private_vecs.insert((Key::Value(id), root));
+                }
+            }
+            _ => {}
+        }
+        safe_push
+    }
+
+    fn after_private_push(&mut self) {
+        // The numeric length only grows, so captured upper bounds remain true.
+        // Current length reads and element-derived facts no longer name memory.
+        self.forget_field(Ustr::from(LEN));
+        self.forget(|k| matches!(k, Key::Elem(..)));
     }
 
     fn whole_key(&self, key: &Key) -> bool {
@@ -969,6 +1152,7 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
             ));
         }
     }
+    let private_push = facts.track_private_vecs(func, ctx, id);
     match inst {
         Inst::Len { base, .. } => {
             for v in facts.keys_of(func, *base) {
@@ -1023,12 +1207,16 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
             }
         }
         Inst::Store { cell, value } => {
+            let private = facts.private_root(&value_key(func, *value));
             let whole = ctx.affine && facts.whole_value(func, *value);
             let nonneg = facts.nonneg(func, *value);
             let le_len = facts.le_len_of(func, *value);
             let lt = facts.lt_of(func, *value);
             facts.forget_cell(*cell);
             let k = Key::Cell(*cell);
+            if let Some(root) = private {
+                facts.private_vecs.insert((k.clone(), root));
+            }
             if whole {
                 facts.whole.insert(k.clone());
             }
@@ -1057,10 +1245,20 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
             }
             facts.forget_field(*field);
         }
-        // A push can write an absent slot and enter __newindex.
-        Inst::ArrayPush { .. } => facts.after_unknown_call(),
+        // A foreign backing can enter __newindex while appending an absent slot.
+        Inst::ArrayPush { .. } => {
+            if private_push {
+                facts.after_private_push();
+            } else {
+                facts.after_unknown_call();
+            }
+        }
         Inst::Call { func: fref, args } => {
-            after_direct_call(facts, ctx, *fref);
+            if private_push {
+                facts.after_private_push();
+            } else {
+                after_direct_call(facts, ctx, *fref);
+            }
             if is_stdlib_fn(ctx.ws, *fref, "__nb_checked_index") && args.len() == 2 {
                 facts.checked_access(func, args[0], args[1]);
             }

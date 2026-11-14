@@ -4,6 +4,7 @@
 
 mod affine_bounds;
 mod common;
+mod private_vectors;
 
 mod copy_code_refs;
 mod nested_strided_inspect;

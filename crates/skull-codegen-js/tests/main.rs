@@ -4,6 +4,7 @@
 
 mod affine_bounds;
 mod common;
+mod private_vectors;
 
 #[path = "host_supply_keys.rs"]
 mod host_supply_keys;

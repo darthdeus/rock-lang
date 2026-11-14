@@ -136,9 +136,19 @@ fn fill_pure_call(xs: [int]) -> float {
     return xs[0] as float
 }
 
-// A push onto another vector only grows it, so the store stays covered.
+// A caller-supplied output can invoke a setter while pushing; keep checks.
 fn fill_and_collect(xs: [int], out: [int]) -> float {
     out.clear()
+    for i in 0..xs.len() {
+        xs[i] = i
+        if i % 7 == 0 { out.push(i) }
+    }
+    return out.len() as float
+}
+
+// The output and its backing table stay private throughout the loop.
+fn fill_and_collect_private(xs: [int]) -> float {
+    let out: [int] = []
     for i in 0..xs.len() {
         xs[i] = i
         if i % 7 == 0 { out.push(i) }
@@ -315,6 +325,7 @@ fn main() {
     drive("clear_pair", 1000, 20000, () => clear_pair(xs, ys))
     drive("fill_pure_call", 1000, 20000, () => fill_pure_call(xs))
     drive("fill_and_collect", 1000, 20000, () => fill_and_collect(xs, out))
+    drive("fill_and_collect_private", 1000, 20000, () => fill_and_collect_private(xs))
     drive("fill_rows", 1000, 20000, () => fill_rows(rows))
     drive("copy_into", 1000, 20000, () => copy_into(xs, ys))
     drive("fill_call_kept", 1000, 20000, () => fill_call_kept(xs))

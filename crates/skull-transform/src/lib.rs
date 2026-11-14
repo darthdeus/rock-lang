@@ -37,7 +37,7 @@ pub use coroutine_prepare::{
 pub(crate) use detached::{erase_detached_lambdas, lower_detached_region};
 pub use forl::recover_counted_loops;
 pub use frame::{materialize_frame, materialize_frame_cells};
-pub use in_bounds::elide_bounds_checks;
+pub use in_bounds::{elide_bounds_checks, elide_bounds_checks_for_target};
 pub use inline::{
     InlineCache, InlineCandidateProfile, InlineCandidateTable, InlineCandidateTableStats,
     InlineCandidateWarm, InlineOffGuard, InlineScanStats, SpliceRecord, fn_has_bounds,

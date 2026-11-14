@@ -254,3 +254,87 @@ The sample spans overlap and median differences are at most 1.5%. This small
 standalone set does not establish compile-cost neutrality for large programs.
 The Stone module was excluded because it is not a standalone CLI input; no
 successful whole-Stone compile measurement is claimed here.
+
+## Implemented follow-up: private Lua vector pushes
+
+The bounds pass now tracks fresh boxed `MakeVec` allocations and their aliases
+through unborrowed local stores/loads. Each allocation creates both a plain
+header and a plain backing table. Unsupported uses revoke the entire alias
+family: opaque calls receiving it, backing-field exposure, globals, fields,
+container elements, closure environments and borrowed cells. Joins intersect
+facts. Reexecuting an allocation site creates a new value fact without restoring
+an old escaped cell alias. Container contents are not recursively tracked.
+
+A private `ArrayPush` or recognized stdlib `Vec.push`/`vec_push` can only grow
+the numeric length and store an element. It invalidates current length-place
+and element-place facts, but keeps captured upper bounds. The stdlib recognition
+checks the module, receiver type, parameter binding and reviewed inline body;
+a changed body falls back to conservative effects. Publishing a private vector
+as an appended item revokes its provenance, including self-appends. The append
+itself remains callback-free if its receiver was private before that append.
+Returning the finished vector does not invalidate earlier proofs.
+
+This guarantee is **Lua-specific**. A fresh JavaScript array can inherit an
+indexed setter from `Array.prototype`. The pass chain now supplies its emission
+target explicitly; the generic API and JS path keep the conservative behavior.
+A JS inherited-setter fixture and a target-specific MIR test pin that boundary.
+The global memory-effect table is unchanged: opaque calls remain opaque, and
+private provenance is not inferred from a parameter's `[T]` type or annotation.
+
+The original `fill_and_collect(xs, out)` receives its output as a parameter.
+It still retains its bounds check; recovering its earlier regression would
+require a caller/escape proof across the call boundary. The new companion
+`fill_and_collect_private(xs)` allocates its output locally and returns its
+length. Before/after Lua from `benchmarks/vec_store.rock` differs at exactly one
+line: the companion's checked input store becomes a raw store. The parameterized
+control and every other emitted benchmark function are unchanged.
+
+Two independent batches of six alternating fresh-process pairs used identical
+benchmark sources and LuaJIT enabled. All result sinks matched. Units below are
+ns/input element, including output allocation and GC. M4 is Apple M4 Max with
+LuaJIT 2.1.1774896198; x86 is Intel Core i9-14900K / Linux with LuaJIT
+2.1.1785763465.
+
+| Machine / batch | Private before median (range) | Private after median (range) | Parameterized control before -> after median |
+| --- | --- | --- | --- |
+| M4 / first | 4.1577 (2.1345-4.2658) | 3.1629 (3.1308-3.4280) | 3.5693 -> 3.5475 |
+| M4 / repeat | 4.4662 (2.1943-4.5130) | 3.3445 (3.3246-3.4091) | 3.7726 -> 3.7635 |
+| x86 / first | 5.4484 (2.1521-5.6926) | 4.6523 (4.3745-4.7840) | 4.8388 -> 4.8910 |
+| x86 / repeat | 5.2100 (2.2035-5.4510) | 4.4473 (4.3279-4.6455) | 4.5929 -> 4.7178 |
+
+Private-case medians improved about 24-25% on M4 and 15% on x86, but the baseline
+has a faster trace variant around 2.1-2.2 ns/element. The result is trace-sensitive,
+not a guarantee that every run improves. In the first batch, the warmup's M4
+machine-code sizes were 2148-2392 bytes before and 2048-2052 after; x86 was
+2430-2644 before and 2347-2428 after. Warmup recorded no aborts for either case.
+These counters are captured before the timed section, not throughout it.
+
+To reproduce, compile `benchmarks/vec_store.rock` with before/after release
+compilers, then alternate fresh processes running each emitted file with
+`luajit -e 'dofile("vec.lua"); main()'`. Compare the two collection workload
+lines, retaining all samples, controls and trace counters. The new companion
+uses the existing benchmark's warmup, timing and sink checks.
+
+Regression coverage includes local aliases; both push spellings; literal/spread
+append machinery; escapes through calls, globals, records, elements, nested
+constructors and closures; branches/reassignment to foreign vectors; self
+publication; borrowed cells; and escaped old instances across allocation-site
+reexecution. An opaque call without a reference to the allocation does not
+publish it, although that call still invalidates ordinary memory bounds facts.
+
+Private tracking is enabled only for Lua functions containing a fresh vector
+and an eligible append. The final compiler emitted byte-identical Lua to the
+runtime-measured artifact. Fresh-process compilation on M4 used ten alternating
+pairs per fixture, the same source/stdlib and separate release compilers, with
+no on-disk compiler cache. OS file caches were not flushed. Wall-clock
+milliseconds include startup and writing output:
+
+| Fixture | Before median (range) | After median (range) |
+| --- | --- | --- |
+| field_store | 16.158 (15.294-18.663) | 16.253 (15.560-18.127) |
+| vec_loop | 18.472 (17.632-21.185) | 18.552 (18.084-20.159) |
+| vec_store | 17.045 (16.263-90.453) | 17.527 (16.611-398.568) |
+
+Median overhead is below 0.6% for the first two fixtures and 2.8% for
+`vec_store`. Ranges overlap and include large outliers; these small standalone
+samples do not establish compile-cost neutrality or whole-program cost.

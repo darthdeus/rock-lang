@@ -379,6 +379,7 @@ pub(super) fn emit_body_chunk_with_mutation(
         plans: &concrete.plans,
     };
     let opts = skull_transform::body_chain::ChainOptions {
+        target: bone_core::hir::FnBackend::Lua,
         reserve: &|name| {
             cg.mint_synthetic(name.to_string());
         },
@@ -521,7 +522,11 @@ pub(crate) fn emit_nested_fns(
         let counted_before = nf.blocks.len();
         let tl = Instant::now();
         skull_transform::recover_counted_loops(ws, nf);
-        skull_transform::elide_bounds_checks(Some(ws), nf);
+        skull_transform::elide_bounds_checks_for_target(
+            Some(ws),
+            nf,
+            bone_core::hir::FnBackend::Lua,
+        );
         times.counted_loop += tl.elapsed();
         times.counted_loop_work |= nf.blocks.len() > counted_before;
         collect_callee_frefs(nf, deps);
@@ -589,6 +594,7 @@ pub(super) fn convert_unit_body(
     times: &mut PhaseTimes,
 ) -> Result<(), CompilerError> {
     let opts = skull_transform::body_chain::ChainOptions {
+        target: bone_core::hir::FnBackend::Lua,
         reserve: &|name| {
             cg.mint_synthetic(name.to_string());
         },
