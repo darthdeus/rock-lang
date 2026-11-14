@@ -534,14 +534,27 @@ The other candidates need more targeted evidence:
 
 - Coroutine enum yields already have an unboxed frame-slot channel. Inspection
   of emitted `benchmarks/coroutine_lifecycle.rock` found all six resume sites
-  using `__advance`, including the pooled-handle case. The emitted generic
-  `__resume` wrapper still constructs a result table, but its presence alone
-  is not evidence of execution or an allocation surviving JIT sinking. Add a
-  helper/scheduler workload that actually reaches it before optimizing it.
-  A separate probe routing an enum-yield coroutine through
-  `fn resume_one<Y, R>(c: Coroutine<Y, R, ()>) -> Y? { return c.resume() }`
-  also emitted `__advance` at its consumer: a generic helper alone does not
-  establish type erasure or boxing.
+  using `__advance`, including the pooled-handle case. A follow-up emission
+  check of Stone's generic `task_poll_step<R>` also found `__advance` and
+  `__y*` reads at its `resume(pc.coroutine)` call, with no `.__resume` call.
+  `crates/skull/tests/instance_graph.rs` now pins the same property for a
+  generic resume helper, generic task wrapper, iterator `next`, and `await`
+  delegation of a mixed enum. All four consumers emit `.__advance`; none emits
+  `.__resume`. The generated `__resume` functions are still needed for Lua
+  interop and for yield types without a flat-enum channel. For such types,
+  the wrapper returns the yielded scalar or cdata directly. The mixed-enum
+  wrapper would build a table if called, but this survey found no reachable
+  boxed mixed-enum consumer in the typed Rock paths it checked.
+
+  A JIT-on allocation check in `packages/stone-core/tests/poller_alloc_rules.rock`
+  drives 64 long-lived `Wait::Frame` coroutines through the actual poller for
+  200 warmup updates and 2,000 measured updates, with GC stopped after a full
+  collection. Five fresh runs measured 0.0104-0.0237 bytes per coroutine per
+  update for `run` and 0.0035 for `run_into` (Apple M4 Max, LuaJIT 2.1, JIT on).
+  The residual is fixed measurement or JIT activity, far below one result
+  table per resume; the test allows 0.25 bytes per coroutine per update. These
+  steady-state figures do not measure creation or terminal transitions. No
+  compiler change to the boxed wrapper is warranted by these workloads.
 - `Map.remove` has an element-write effect, not an all-memory effect.
   `after_direct_call` in `skull-transform/src/in_bounds.rs` forgets facts
   mentioning any `Key::Elem`; direct local-vector length facts can survive.

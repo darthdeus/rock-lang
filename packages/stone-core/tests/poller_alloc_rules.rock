@@ -31,6 +31,26 @@ fn poller_idle_bytes_per_coroutine(poller: CoroutinePoller, count: int) -> float
     return (after - before) * 1024.0 / ((updates * count) as float)
 }
 
+// JIT-on accounting catches allocations that survive trace sinking in the
+// scheduler's generic Task<R> resume path.
+fn poller_idle_jit_bytes_per_coroutine(poller: CoroutinePoller, count: int) -> float {
+    let updates = 2000
+    poller_jit_on()
+    for _ in 0..200 {
+        task_clock_advance(poller.clock, 0.016)
+        coroutine_poller_update(poller)
+    }
+    poller_gc_freeze()
+    let before = poller_gc_kb()
+    for _ in 0..updates {
+        task_clock_advance(poller.clock, 0.016)
+        coroutine_poller_update(poller)
+    }
+    let after = poller_gc_kb()
+    poller_gc_thaw()
+    return (after - before) * 1024.0 / ((updates * count) as float)
+}
+
 @test
 fn poller_update_with_run_coroutines_allocates_nothing() {
     let poller = CoroutinePoller { clock: task_clock_new() }
@@ -41,6 +61,8 @@ fn poller_update_with_run_coroutines_allocates_nothing() {
     assert_eq(poller.entry_count, count)
     let bytes = poller_idle_bytes_per_coroutine(poller, count)
     assert(bytes < 1.0, "idle run() coroutine allocates {bytes} bytes per poller update")
+    let jit_bytes = poller_idle_jit_bytes_per_coroutine(poller, count)
+    assert(jit_bytes < 0.25, "JIT-on idle run() coroutine allocates {jit_bytes} bytes per poller update")
     assert_eq(poller.entry_count, count, "idle coroutines stay registered")
 }
 
@@ -60,4 +82,6 @@ fn poller_update_with_entity_slot_coroutines_allocates_nothing() {
     assert_eq(poller.entry_count, count)
     let bytes = poller_idle_bytes_per_coroutine(poller, count)
     assert(bytes < 1.0, "idle run_into() coroutine allocates {bytes} bytes per poller update")
+    let jit_bytes = poller_idle_jit_bytes_per_coroutine(poller, count)
+    assert(jit_bytes < 0.25, "JIT-on idle run_into() coroutine allocates {jit_bytes} bytes per poller update")
 }

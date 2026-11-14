@@ -1,7 +1,7 @@
 //! Stage 0d properties for the shadow instance graph
 //!.
 
-use crate::common::{body_id, fn_name, ws_with_stdlib};
+use crate::common::{body_id, emit_full_of, fn_name, ws_with_stdlib};
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::{self, EdgeKind};
 use ustr::Ustr;
@@ -10,6 +10,40 @@ fn graph_of(src: &str) -> (Workspace, instance_graph::InstanceGraph) {
     let ws = ws_with_stdlib(src);
     let g = crate::common::graph_of(&ws);
     (ws, g)
+}
+
+#[test]
+fn concrete_enum_coroutine_consumers_use_the_frame_channel() {
+    let ws = ws_with_stdlib(
+        r#"
+enum Ev { Quiet, Hit(float, float), Text(string, int) }
+struct Task<R> { coroutine: Coroutine<Ev, R> }
+co fn source() -> Coroutine<Ev> {
+    yield Ev::Quiet
+    yield Ev::Hit(3.0, 4.0)
+}
+fn resume_one<Y, R>(c: Coroutine<Y, R, ()>) -> Y? { return c.resume() }
+fn poll<R>(t: Task<R>) -> Ev? { return resume_one(t.coroutine) }
+co fn delegate(c: Coroutine<Ev>) -> Coroutine<Ev> { await c }
+fn main() {
+    let t = Task { coroutine: source() }
+    let a = poll(t)
+    let b = resume_one(delegate(source()))
+    let c = source()
+    let d = next(c)
+    print("{a} {b} {d}")
+}
+"#,
+    );
+    let (emitted, _) = emit_full_of(&ws, "enum coroutine consumers");
+    assert!(
+        emitted.lua.matches(".__advance").count() >= 4,
+        "generic resume, task poll, iterator next, and await must use the channel"
+    );
+    assert!(
+        !emitted.lua.contains(".__resume"),
+        "a concrete enum consumer reached the boxed wrapper"
+    );
 }
 
 #[test]
