@@ -162,10 +162,13 @@ fn dir_report(dir: &str, diag_fn: DiagFn) -> Result<serde_json::Value> {
         }
     }
 
+    // Hole diagnostics reparse each file, so the per-file queries run on the pool.
+    use bone_core::prelude::*;
+    let per_file: Vec<Vec<lsp_types::Diagnostic>> =
+        files.par_iter().map(|f| diag_fn(&bone, f)).collect();
     let mut file_reports = Vec::new();
     let mut total = 0usize;
-    for f in &files {
-        let diags = diag_fn(&bone, f);
+    for (f, diags) in files.iter().zip(per_file) {
         if diags.is_empty() {
             continue;
         }
