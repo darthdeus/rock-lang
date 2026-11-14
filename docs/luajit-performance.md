@@ -1314,6 +1314,21 @@ No broad speedup is claimed: noisier vector cases included `fill` at
 The earlier collection-loop cost from callback-capable push remains; this
 fix does not prove a vector's backing table private.
 
+On Apple M4 Max with LuaJIT 2.1.1774896198 and the JIT enabled, six paired
+fresh-process runs compared the pre-record-audit and callback-safe versions.
+Median ns/element and full sample spans for selected field workloads:
+
+| Workload | Before fix | Callback-safe fix |
+| --- | ---: | ---: |
+| nullable_passthrough | 1.0431 (0.9845-1.0473) | 1.0293 (0.9982-1.0805) |
+| leaf_capture | 2.7908 (2.6355-2.8441) | 2.7881 (2.6429-2.8527) |
+| row_reset | 1.6110 (1.5620-1.6456) | 1.6204 (1.5397-1.6634) |
+| coro_points | 2.2240 (2.0735-2.3715) | 2.2660 (2.1425-2.3180) |
+
+All displayed spans overlap. In particular, the final guarded nullable store
+does not reproduce the intermediate raw-store regression; this small run
+does not establish a broader speedup.
+
 The follow-up [guard elimination audit](guard-elimination.md) records proof
 requirements across guard families and paired JIT ablations. Bounded affine
 NativeBuffer indexing is the strongest new measured candidate; removing more

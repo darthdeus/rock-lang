@@ -148,7 +148,8 @@ itself evidence of runtime cost.
 | Default arguments | `lower/mod.rs::fill_param_defaults` and direct-call folding already handle supported constants. Keep omission checks for function values, host calls, explicit nullable defaults and lazy effectful defaults. |
 | Enum/tag dispatch | Constant cases and local scalar replacement already remove many tags. Dynamic `any`, reflected values, foreign records and escaping payloads still need discrimination. |
 | Checked uint conversion | `__rock_checked_u32` validates `[0, 4294967295]` then floors. A proven finite range can remove comparisons; fractional values still require flooring. |
-| Shift count | Constants can fold; a uint type alone does not prove `<= 31`. A range fact could remove the runtime check. No measured workload yet. |
+| Float-to-int conversion | The Lua `float_to_int` function value in `stdlib/unified.rock:1770` checks the host value type, then floors. Direct MIR `FloatToInt` emits `math.floor` without that host type guard; fractional values still require flooring. |
+| Shift count | A constant count alone does not currently remove `__rock_u32_shift_count`; a whole constant shift expression may fold. A uint type alone does not prove `<= 31`; a range fact could remove the runtime check. No measured workload yet. |
 | Coroutine status/hooks | `next` distinguishes suspended from terminal after resume, including a real nullable yield. Hooks and terminal/error checks encode behavior. Source absence of hook registration alone does not prove a mutable frame has no hook. |
 | Coroutine `pcall` | Converts step errors to the errored state and performs cleanup. Removal requires a complete no-raise proof, including nested callbacks and defers. |
 | Native layout / reload compatibility | Checks validate foreign data or version changes. Compile-time knowledge of the current body does not establish compatibility with an old live value. |
