@@ -200,13 +200,17 @@ def summarize_incremental(report):
             bytes_max=max(e["overlay_bytes"] for e in edits),
         )
 
+    routes = {name: {reload: kind(name, reload) for reload in sorted({e["reload"] for e in edits})}
+              for name, edits in by_kind.items()}
     return dict(
         init_ms=report["init_ms"],
         main_bytes=report["main_bytes"],
         body=kind("body", "incremental"),
         signature=kind("signature", "full"),
-        errors=[dict(name=e["name"], kind=e["kind"], error=e["error"])
-                for e in report["edits"] if e.get("error")],
+        routes=routes,
+        errors=[dict(name=e["name"], kind=e["kind"],
+                     error=e.get("error") or "no samples")
+                for e in report["edits"] if e.get("error") or not e["samples_ms"]],
     )
 
 
@@ -278,6 +282,28 @@ def measure_corpus(rock, repo, corpus_dir, args, env):
         corpus["lsp"] = summarize_lsp(report) if report else None
         if err:
             corpus["lsp_error"] = err
+    missing = []
+    if "cold" in args.only:
+        missing.extend(key for key in ("cold_compile", "cold_check") if not corpus.get(key))
+    if "budget" in args.only and not corpus.get("budget"):
+        missing.append("budget")
+    if "phases" in args.only:
+        stats = corpus.get("backend_stats") or {}
+        if not stats.get("bone_ok") or not stats.get("skull_ok"):
+            missing.append("backend_stats")
+    if "incremental" in args.only:
+        inc = corpus.get("incremental") or {}
+        routes = inc.get("routes", {})
+        missing.extend(f"incremental {kind}" for kind in ("body", "signature")
+                       if not routes.get(kind))
+        if inc.get("errors"):
+            missing.append("incremental errors")
+    if "lsp" in args.only and not args.skip_lsp:
+        lsp = corpus.get("lsp") or {}
+        missing.extend(f"lsp {kind}" for kind in ("body", "signature", "broken")
+                       if not lsp.get(kind))
+    if missing:
+        corpus["incomplete"] = missing
     return corpus
 
 
@@ -335,9 +361,17 @@ def print_summary(row, previous):
             parts.append(text)
         print(f"{row['short']} {name}: " + ", ".join(parts))
         for key in ("cold_compile_error", "cold_check_error", "backend_stats_error",
-                    "incremental_error", "lsp_error"):
+                    "incremental_error", "lsp_error", "budget_error", "incomplete"):
             if corpus.get(key):
                 print(f"  {key}: {corpus[key]}", file=sys.stderr)
+        inc = corpus.get("incremental") or {}
+        for kind, routes in inc.get("routes", {}).items():
+            for route, result in routes.items():
+                if (kind, route) not in (("body", "incremental"), ("signature", "full")):
+                    print(f"  incremental {kind}/{route}: {result['edits']} edits, "
+                          f"{result['mean_ms']:.1f}ms mean", file=sys.stderr)
+        for error in inc.get("errors", []):
+            print(f"  incremental {error['kind']} {error['name']}: {error['error']}", file=sys.stderr)
 
 
 def main():
@@ -419,7 +453,7 @@ def main():
     row["machine"]["load_after"] = os.getloadavg()[0]
     row["elapsed_s"] = time.time() - started
     row["status"] = "ok" if all(
-        c.get("cold_compile") or "cold" not in args.only
+        not c.get("incomplete")
         for c in row["corpora"].values()) else "partial"
 
     print_summary(row, previous_row(args.history, rev["sha"]))
