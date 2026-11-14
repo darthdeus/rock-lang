@@ -449,6 +449,93 @@ column key-walk min/median from 1.405/1.447 to 1.206/1.225 ns/entry on arm64
 Other direct walks were effectively unchanged in this ablation. Keep the
 simpler key-only lowering for its measured arm64 gain and smaller emitted work.
 
+### Follow-up opportunity investigation (2026-11-14)
+
+At `62355a8e`, ordinary maps still count entries and column maps read
+`occupied_count`. Constant-time ordinary length is a representation and
+interop problem, not just an extra increment: `map_new` returns a bare Lua
+table, `table_set` and opaque Lua can write it, and callers can supply tables
+created outside `map_new` (for example `perf_phase_index_new` in Stone).
+A count stored in the map would pollute iteration and collide with keys;
+a side table would avoid those problems but still miss external mutations.
+`__newindex` cannot observe overwrites or deletion of existing entries.
+Retaining bare-table interop therefore needs a proven closed set of mutations
+for a counted fast path, with ordinary counting for exposed maps. Measure
+insert, overwrite, present/absent remove, clear, and mutation-only workloads
+before accepting the extra bookkeeping. No counted representation was added.
+
+Snapshot sorting has a smaller candidate: `__sort_map_keys` always calls
+`table.sort(keys._data, __rock_inspect_key_lt)`, whose comparator applies
+`tostring` to both keys. For statically string keys, default `table.sort`
+preserves that comparison without the callback. This must not be applied to
+numeric keys: their existing order is string order, not numeric order.
+
+Measured with the release compiler at that revision, Apple M4 Max (arm64),
+system LuaJIT 2.1.1774896198, JIT enabled. Compile
+`benchmarks/map_loop.rock` with `compile-single --output map.lua`, copy its
+output, and in the copy replace only
+`table.sort(keys._data, __rock_inspect_key_lt)` with
+`table.sort(keys._data)`. Every map key in this benchmark is a string.
+Run each file with `luajit -e 'dofile("map.lua"); main()'` in seven pairs
+of fresh processes, reversing baseline/candidate order each pair. The existing
+driver flushes and warms each case before timing. This is an emitted-Lua
+experiment, not an implemented compiler optimization or an x86 result.
+
+| Snapshot, 1,000 entries | Baseline min/median ns/entry | String sort min/median ns/entry |
+| --- | ---: | ---: |
+| `keys` | 186.176 / 199.180 | 127.057 / 144.481 |
+| `values` | 189.987 / 199.144 | 133.332 / 148.009 |
+| `to_array` | 215.452 / 226.132 | 149.897 / 164.695 |
+
+Median reductions were 26-27%; allocation behavior was not changed or measured.
+One hundred randomized string-array comparisons, including zero and high
+bytes, produced identical sorted arrays with both comparators. Implementation
+still needs a type-directed path and regression coverage for other key types,
+string newtypes, empty maps, column maps, and snapshot independence, followed
+by x86 measurements. Existing snapshot regressions are in
+`crates/skull/tests/map_empty_snapshots.rs` and `tests/nobox/map_value.rock`.
+The same baseline runs measured scalar length at 19.030 ns for 8 entries and
+1,302.300 ns for 1,000; column length at 0.436 ns for 1,000 (an invariant read
+the JIT can hoist); and row register/remove with 200 retained entries at
+324.840 ns. These confirm the length cost, not the payoff of a counted-map
+implementation.
+
+Returning a shared cached snapshot would break independence. `keys_into`
+already provides explicit caller-owned reuse, used by Stone's draw list and
+JSON streaming. Further reuse should have explicit scratch ownership and
+tests for nesting, aliases, stale tails, and retained references. Caching
+sorted keys across calls has the same unobserved-mutation problem as length.
+
+The other candidates need more targeted evidence:
+
+- Coroutine enum yields already have an unboxed frame-slot channel. Inspection
+  of emitted `benchmarks/coroutine_lifecycle.rock` found all six resume sites
+  using `__advance`, including the pooled-handle case. The emitted generic
+  `__resume` wrapper still constructs a result table, but its presence alone
+  is not evidence of execution or an allocation surviving JIT sinking. Add a
+  helper/scheduler workload that actually reaches it before optimizing it.
+  A separate probe routing an enum-yield coroutine through
+  `fn resume_one<Y, R>(c: Coroutine<Y, R, ()>) -> Y? { return c.resume() }`
+  also emitted `__advance` at its consumer: a generic helper alone does not
+  establish type erasure or boxing.
+- `Map.remove` has an element-write effect, not an all-memory effect.
+  `after_direct_call` in `skull-transform/src/in_bounds.rs` forgets facts
+  mentioning any `Key::Elem`; direct local-vector length facts can survive.
+  The opportunity is specifically proofs involving vectors or indices loaded
+  through container elements. Receiver-sensitive effects need an alias proof;
+  different local names are insufficient. Start with unrelated-container and
+  aliased-container regression pairs, then measure retained checks and JIT
+  runtime before widening the effect representation.
+- Wide live floats remain an x86 investigation. The live-float benchmark and
+  rejected approaches below already isolate the failure. This arm64 run
+  supplies no evidence for an x86 runtime improvement. Delaying reads must
+  preserve mutation visibility, exceptions, and coroutine frame semantics.
+
+The first bounded experiment to carry into implementation is string-key
+snapshot sorting. Constant-time ordinary length has clear potential but a
+larger interop/representation burden; neither buffer caching nor metadata
+alone resolves it.
+
 ### Reproducing live-float exits
 
 Run `rock run benchmarks/live_floats.rock` with the JIT on, on x86-64. The
