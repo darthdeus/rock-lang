@@ -24,6 +24,7 @@ Usage: perf/run.py [--bin PATH | --no-build] [--repo DIR] [--runs N]
 """
 import argparse
 import json
+import math
 import os
 import platform
 import shutil
@@ -93,22 +94,67 @@ def run_json(rock, args, env, cwd, timeout=1800):
         return None, f"not JSON: {error}"
 
 
+def summarize_hyperfine(report):
+    version = report.get("schema_version", 1)
+    if version not in (1, 2):
+        raise ValueError(f"unsupported Hyperfine schema version {version!r}")
+    results = report["results"]
+    if len(results) != 1:
+        raise ValueError("expected one Hyperfine result")
+    result = results[0]
+
+    def milliseconds(value):
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"invalid Hyperfine time {value!r}")
+        return value * 1000
+
+    def seconds(metric):
+        if metric["unit"] != "second":
+            raise ValueError(f"unsupported Hyperfine time unit {metric['unit']!r}")
+        return metric
+
+    if version == 2:
+        measurements = result["measurements"]
+        wall = seconds(result["summary"]["time_wall_clock"])
+        if wall["count"] != len(measurements):
+            raise ValueError("Hyperfine wall-time count disagrees with measurements")
+        codes = [m["exit_code"] for m in measurements]
+        times = [seconds(m["time_wall_clock"])["value"] for m in measurements]
+        user = seconds(result["summary"]["time_user"])["mean"]
+        system = seconds(result["summary"]["time_system"])["mean"]
+    else:
+        # Hyperfine 1's unversioned schema defines all times in seconds.
+        wall = result
+        times, codes = result["times"], result["exit_codes"]
+        user, system = result["user"], result["system"]
+    if not times or len(codes) != len(times):
+        raise ValueError("missing Hyperfine measurements or exit codes")
+    if any(type(code) is not int or code != 0 for code in codes):
+        raise ValueError(f"Hyperfine measured unsuccessful exit codes: {codes}")
+    for value in times:
+        milliseconds(value)
+    stats = {f"{key}_ms": milliseconds(wall[key]) for key in ("mean", "median", "min", "max")}
+    stddev = wall["stddev"]
+    return dict(**stats, stddev_ms=milliseconds(stddev) if stddev is not None else None,
+                user_ms=milliseconds(user), system_ms=milliseconds(system), runs=len(times))
+
+
 def hyperfine(command, runs, warmup, env, cwd):
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as out:
+    with tempfile.NamedTemporaryFile(prefix="rock-perf-hyperfine-", suffix=".json", delete=False) as out:
         export = out.name
     try:
         proc = subprocess.run(["hyperfine", "-N", "--warmup", str(warmup), "--runs", str(runs),
                                "--export-json", export, command],
                               cwd=cwd, env=env, text=True, capture_output=True, timeout=3600)
         if proc.returncode:
-            return None, (proc.stderr or proc.stdout).strip().splitlines()[-1:]
-        result = json.load(open(export))["results"][0]
-        return dict(mean_ms=result["mean"] * 1000, stddev_ms=(result["stddev"] or 0) * 1000,
-                    median_ms=result["median"] * 1000, min_ms=result["min"] * 1000,
-                    max_ms=result["max"] * 1000, user_ms=result["user"] * 1000,
-                    system_ms=result["system"] * 1000, runs=len(result["times"])), None
-    finally:
-        os.unlink(export)
+            tail = " | ".join((proc.stderr or proc.stdout).strip().splitlines()[-3:])
+            raise ValueError(f"Hyperfine exit {proc.returncode}: {tail}")
+        with open(export) as source:
+            result = summarize_hyperfine(json.load(source))
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError, AttributeError) as error:
+        return None, f"{error}; Hyperfine export retained at {export}"
+    os.unlink(export)
+    return result, None
 
 
 def phase_table(mapping, keys):
