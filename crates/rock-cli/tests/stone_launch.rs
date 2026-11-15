@@ -708,8 +708,15 @@ fn sim_commands_run_and_report_an_external_stone_project() {
 @sim
 co fn portable_sim() -> Coroutine<Wait> {
     assert_error_logs(["[PROBE] intentional"], () => { log_error("PROBE", "intentional") })
+    // A declared record may arrive after the declaration, frames later.
+    sim_expect_error_log("[PROBE] asynchronous")
+    await frame(1)
+    log_error("PROBE", "asynchronous")
     // Production code logs and continues; the sim still fails.
-    if os_getenv("SIM_PROBE_FAIL") == "1" { log_error("PROBE", "recovered failure") }
+    if os_getenv("SIM_PROBE_FAIL") == "1" {
+        log_error("PROBE", "recovered failure")
+        sim_expect_error_log("[PROBE] never logged")
+    }
     sim_expect(true, "portable sim sentinel")
     stop_sim()
 }
@@ -772,6 +779,15 @@ co fn portable_sim() -> Coroutine<Wait> {
         assert_eq!(
             text.contains("logged error: [PROBE] recovered failure"),
             fail,
+            "{text}"
+        );
+        assert_eq!(
+            text.contains("expected error log was not logged: [PROBE] never logged"),
+            fail,
+            "{text}"
+        );
+        assert!(
+            !text.contains("logged error: [PROBE] asynchronous"),
             "{text}"
         );
         let history = fixture.path().join(if fail { "failed" } else { "passed" });

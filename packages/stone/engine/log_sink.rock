@@ -63,3 +63,13 @@ inline(lua) fn logged_error_count() -> int = """
 """
 
 inline(lua) fn logged_error_record(index: int) -> string = "return _G.__rock_logged_errors[index + 1]"
+
+// Remove the first collected record equal to `record`; false when none is.
+inline(lua) fn take_logged_error(record: string) -> bool = """
+    local records = _G.__rock_logged_errors
+    if not records then return false end
+    for i = 1, #records do
+        if records[i] == record then table.remove(records, i); return true end
+    end
+    return false
+"""
