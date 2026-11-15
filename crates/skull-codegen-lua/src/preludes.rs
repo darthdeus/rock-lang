@@ -409,8 +409,10 @@ function __rock_nb_alloc(ctype, n)
     e = { size = ffi.sizeof(ctype), array = array, ptr = ffi.typeof(ctype .. "*"), key = tostring(array) }
     __rock_nb_elems[ctype] = e
   end
+  -- Keep the byte count out of the small-to-large exit snapshot: one extra
+  -- inherited float can exhaust x86 side-trace register coalescing.
+  if not (n * e.size >= __ROCK_NB_OFFHEAP_MIN) then return e.array(n) end
   local bytes = n * e.size
-  if not (bytes >= __ROCK_NB_OFFHEAP_MIN) then return e.array(n) end
   local stats = __ROCK_NB_OFFHEAP_STATS
   stats.since_cycle = stats.since_cycle + bytes
   if stats.since_cycle > __ROCK_NB_OFFHEAP_CYCLE_MAX then

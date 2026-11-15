@@ -92,39 +92,44 @@ buffers finalize; unused cache values can then be collected. Ordinary weak
 buffer metadata cannot replace these captures: LuaJIT clears those keys
 before running cdata finalizers.
 
-Direct JIT regressions pass on x86 and arm64: the small-allocation loop has
-zero bytecode-NYI aborts, and repeated large allocations go from 13 to zero.
-Tests also verify retained buffers, partial frees of shared-size allocations
-(including different element types), zero live bytes after finalization, and
-collection of unused callbacks. A cold cache miss still creates a closure.
+The byte-count local is declared after the storage-size guard. The guard
+checks the same product, but that temporary no longer occupies an exit
+snapshot slot. Actual mesh trace dumps contain 17 distinct numeric values
+in the baseline threshold snapshot and 16 afterward. LuaJIT's x86 side-trace
+entry must shuffle inherited values through 16 XMM registers; removing one
+value resolves this witness without changing the allocation threshold.
+
+Direct regressions cover small/large allocation tracing, buffer lifetime,
+callback collection, and a storage transition with 15 live float parameters.
+The latter fails with five coalescing aborts before the change and zero
+afterward on bundled x86 LuaJIT, while checking all stored float values.
+Higher-pressure synthetic cases with 16 or more live float parameters can
+still fail: this is a reduced lifetime, not a general solution to LuaJIT register pressure.
 
 Mesh comparison: identical emitted fixture with only `NB_ALLOC_PRELUDE`
-replaced, baseline `acd0f843` versus the weak-value cache. Six alternating
-baseline/candidate pairs per metric, 108 processes, same native library and
-runtime as above. Each iteration writes 9300 quads. Hashes and per-process
-samples are in `results.json`.
+replaced, baseline `0e9a94b8` versus the delayed byte-count local. Six
+alternating baseline/candidate pairs per metric, 108 processes, same native
+library and runtime as above. Each iteration writes 9300 quads. Hashes and
+per-process samples are in `results.json`.
 
 | Arm | Median us before/after | p95 us before/after | Gross Lua bytes before/after | Measured aborts before/after |
 | --- | ---: | ---: | ---: | ---: |
-| Growth | 948.98 / 805.04 | 2953.59 / 2650.63 | 2097363 / 2056026 | 2-4 / 0-2 |
-| Early | 917.06 / 691.14 | 3161.13 / 2416.64 | 2097383 / 2055945 | 2-6 / 0-4 |
-| Reserved | 1110.37 / 987.65 | 1538.05 / 1263.97 | 225796 / 205423 | 9-10 / 0-1 |
+| Growth | 685.94 / 686.19 | 2385.69 / 2332.76 | 2055921 / 2055985 | 0-2 / 0-3 |
+| Early | 680.78 / 682.63 | 2385.44 / 2283.92 | 2055982 / 2056043 | 0-2 / 0-4 |
+| Reserved | 988.62 / 997.88 | 1350.31 / 1345.65 | 205462 / 205872 | 0 / 0-1 |
 
-All 108 processes passed position/count checks. Lower process medians appear
-in five of six paired growth/reserved runs and all six early-growth runs.
-These are JIT-on synthetic mesh-fill measurements, not application frame
-speedups. Per-process ranges include scheduling/GC variation.
-
-The candidate records no `FNEW` aborts in these captures. Growth still sees
-coalescing failures during warmup: three of six processes record five each,
-at the off-heap size-guard exit and its continuation into the caller loop.
-None records coalescing during measurement. Early growth and reserved
-controls record none in either phase. Recording interruptions, short traces
-and return-to-lower-frame aborts remain; see the per-arm reasons in JSON.
+Steady-state timing and allocation are effectively unchanged; no speedup is
+claimed. The improvement is warmup tracing: baseline growth records five
+coalescing aborts in two of six processes, versus zero in all six candidate
+processes. The optional-corner comparison adds 108 processes: baseline growth
+records five coalescing aborts in three of six trace runs, versus zero in all
+candidate runs. Early/reserved controls have none. Neither arm records
+coalescing during measurement. All 216 processes pass content checks.
+Recording interruptions, short traces and return-to-lower-frame aborts remain.
 
 The reserved control starts directly with an off-heap buffer at the default
 16384-byte threshold; growth creates intermediate Lua-managed arrays. Its
 lower Lua allocation count is not an equivalent reduction in total native
-bytes. Capacity and GC-pressure guards remain necessary. #264 now concerns
-the off-heap transition's warmup side trace; the finalizer cache does not
-establish that arbitrary growth callers are free of coalescing failures.
+bytes. Capacity and GC-pressure guards remain necessary. #264's current
+public normal/corner witnesses pass, while higher-pressure caller shapes
+still require investigation; arbitrary growth callers are not proven safe.

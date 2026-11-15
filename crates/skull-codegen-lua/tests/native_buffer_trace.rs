@@ -134,3 +134,45 @@ assert(__ROCK_NB_OFFHEAP_STATS.live_count == 0)
 assert(next(callbacks) == nil, 'unused finalizers must be collectible')
 "#);
 }
+
+#[test]
+fn storage_transition_records_with_fifteen_live_float_values() {
+    run(r#"
+assert(jit.status())
+local primed = {}
+for i = 0, 127 do primed[i] = __rock_nb_alloc('double', 32 + i * 32) end
+local function build(n, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14)
+  local b = __rock_nb_alloc('double', n)
+  b[0], b[1], b[2], b[3], b[4] = a0, a1, a2, a3, a4
+  b[5], b[6], b[7], b[8], b[9] = a5, a6, a7, a8, a9
+  b[10], b[11], b[12], b[13], b[14] = a10, a11, a12, a13, a14
+  return b
+end
+local coalescing, stops = 0, 0
+local vm = require('jit.vmdef')
+local function trace(what, tr, fn, pc, err)
+  if what == 'abort' and vm.traceerr[err] == 'NYI: register coalescing too complex' then
+    coalescing = coalescing + 1
+  elseif what == 'stop' then
+    stops = stops + 1
+  end
+end
+jit.attach(trace, 'trace')
+local keep = {}
+for i = 1, 3000 do
+  local n = 32 + (i % 128) * 32
+  local b = build(n, i * 0.15625, i * 0.28125, i * 0.40625, i * 0.53125,
+    i * 0.65625, i * 0.78125, i * 0.90625, i * 1.03125, i * 1.15625,
+    i * 1.28125, i * 1.40625, i * 1.53125, i * 1.65625, i * 1.78125, i * 1.90625)
+  assert(b[0] == i * 0.15625)
+  keep[i % 8] = b
+end
+jit.attach(trace)
+for slot = 0, 7 do
+  local i = 3000 - (3000 - slot) % 8
+  for j = 0, 14 do assert(keep[slot][j] == i * ((j + 1) * 0.125 + 0.03125)) end
+end
+assert(coalescing == 0, 'storage transition coalescing aborts: ' .. coalescing)
+assert(stops > 0, 'storage transition did not record')
+"#);
+}
