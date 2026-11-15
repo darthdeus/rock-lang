@@ -200,8 +200,8 @@ impl ControllerManager {
         let Some(state) = self.controllers.get(&instance_id) else {
             return;
         };
-        for index in 0..PAD_BUTTON_COUNT {
-            if !state.buttons[index] {
+        for (index, &down) in state.buttons.iter().enumerate() {
+            if !down {
                 continue;
             }
             let Some(button) = button_from_index(index) else {
@@ -217,8 +217,7 @@ impl ControllerManager {
                 sync: true,
             });
         }
-        for index in 0..PAD_AXIS_COUNT {
-            let value = state.axes[index];
+        for (index, &value) in state.axes.iter().enumerate() {
             if value == 0 {
                 continue;
             }
