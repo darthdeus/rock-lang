@@ -204,13 +204,17 @@ pub struct ActionLayerPolicy {
 
 impl ActionLayerPolicy {
     pub fn load(path: &Path) -> Result<Option<Self>> {
+        // Bare Wasm uses editor buffers and embedded stdlib, with no disk manifests.
+        if cfg!(all(target_family = "wasm", target_os = "unknown")) {
+            return Ok(None);
+        }
         // An unsaved editor file can have an empty parent, meaning the current directory.
         let path = if path.as_os_str().is_empty() {
             Path::new(".")
         } else {
             path
         };
-        // A host without a current directory (wasm) has nothing above the path it was given.
+        // A host without a current directory has nothing above the path it was given.
         let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
         let dir = if path.is_file() {
             path.parent().unwrap_or(Path::new("."))
