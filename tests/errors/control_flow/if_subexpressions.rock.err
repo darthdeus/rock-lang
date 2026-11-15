@@ -2,6 +2,7 @@
 //! Tags: control-flow, if-expressions, restrictions
 
 //=== TEST CASE: continue_in_multi_assign_rhs_ControlFlowInSubexpression ===
+//! expect: control flow (return/break/continue) is not allowed in an `if` used as a tuple element of a destructuring assignment
 fn test() {
     for i in 0..10 {
         let (x, y) = (1, if i > 5 { continue } else { i })
@@ -9,6 +10,7 @@ fn test() {
 }
 
 //=== TEST CASE: break_in_multi_assign_rhs_ControlFlowInSubexpression ===
+//! expect: control flow (return/break/continue) is not allowed in an `if` used as a tuple element of a destructuring assignment
 fn test() {
     for i in 0..10 {
         let (x, y) = (1, if i > 5 { break } else { i })
@@ -16,11 +18,13 @@ fn test() {
 }
 
 //=== TEST CASE: return_in_multi_assign_rhs_ControlFlowInSubexpression ===
+//! expect: control flow (return/break/continue) is not allowed in an `if` used as a tuple element of a destructuring assignment
 fn test() {
     let (x, y) = (1, if true { return } else { 42 })
 }
 
 //=== TEST CASE: if_without_else_with_continue_MissingElseBranch ===
+//! expect: `if` without a final `else` cannot be used as a value
 fn test() {
     for i in 0..10 {
         let x = if i > 5 { continue }
@@ -28,6 +32,7 @@ fn test() {
 }
 
 //=== TEST CASE: if_without_else_with_break_MissingElseBranch ===
+//! expect: `if` without a final `else` cannot be used as a value
 fn test() {
     for i in 0..10 {
         let x = if i > 5 { break }
@@ -35,16 +40,19 @@ fn test() {
 }
 
 //=== TEST CASE: if_without_else_with_return_MissingElseBranch ===
+//! expect: `if` without a final `else` cannot be used as a value
 fn test() {
     let x = if true { return }
 }
 
 //=== TEST CASE: continue_not_in_loop_InvalidContinue ===
+//! expect: `break`/`continue` is only valid inside a loop body
 fn test() {
     if true { continue } else { 42 }
 }
 
 //=== TEST CASE: break_not_in_loop_InvalidBreak ===
+//! expect: `break`/`continue` is only valid inside a loop body
 fn test() {
     if true { break } else { 42 }
 }
