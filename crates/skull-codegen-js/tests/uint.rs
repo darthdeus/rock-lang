@@ -104,8 +104,24 @@ fn uint_incdec_wraps() {
 
 #[test]
 fn uint_dynamic_shift_checks_the_runtime_count() {
-    let src = "fn root(value: uint, count: uint) -> uint { value << count }";
-    eval(src, "root(1, 31)", "2147483648");
+    assert!(
+        crate::common::require_node(),
+        "shift checks must execute Node"
+    );
+    for (op, value, high) in [("<<", 1_u32, 2147483648_u32), (">>", u32::MAX, 1)] {
+        let src = format!("fn root(value: uint, count: uint) -> uint {{ value {op} count }}");
+        eval(&src, &format!("root({value}, 0)"), &value.to_string());
+        eval(&src, &format!("root({value}, 31)"), &high.to_string());
+        for count in [32_u32, 33, u32::MAX] {
+            // Zero must still reject even though the result would otherwise be zero.
+            for value in [0, value] {
+                let call = format!(
+                    "(() => {{ try {{ root({value}, {count}); }} catch (error) {{ return error.message; }} throw new Error('invalid shift accepted'); }})()"
+                );
+                eval(&src, &call, "uint shift count out of range");
+            }
+        }
+    }
 }
 
 #[test]

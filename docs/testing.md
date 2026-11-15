@@ -203,6 +203,10 @@ substring. These cases test compiler rejection, not runtime failure. They run
 through the shared front end and default lowering/error-lint checks; use the
 default backend command above. Their summary appears separately as `Error tests`
 after the runtime-test summary, which can show `0/0` for an error-only file.
+The error runner scans the selected file's parent directory, so a file directly
+under `tests/errors` runs that whole error corpus. For isolated mutation checks,
+copy the fixture into its own temporary directory; see
+`perf/evidence/check_operator_rejections.py` for a runnable example.
 
 ## Compiler tests and checking the checks
 

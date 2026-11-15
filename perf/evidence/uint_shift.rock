@@ -1,4 +1,4 @@
-// A discrepancy probe, not a decision about the intended shift semantics.
+// Contract probe: uint literal shift counts are checked rather than masked.
 fn main() {
     let value: uint = 1
     print(value << 32)

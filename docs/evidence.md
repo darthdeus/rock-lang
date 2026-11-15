@@ -57,7 +57,7 @@ certification. The machine-readable ledger is the rerunnable subset.
 | Guide fences match files, runnable examples match expected output, shaders compile | [guide checks](../crates/rock-cli/tests/guide.rs) | Three tests passed; no claim that examples cover every semantic rule |
 | CLI MIR verification is opt-in, including `rock test`; its printer scope guard is on by default for tests | [gate and its test](../crates/rock-cli/src/process.rs), [verifier default](../crates/skull-mir/src/verify.rs) | Gate test passed; clarified the architecture guide's ambiguous wording |
 | Five tested value shapes share representation decisions across body/call/return/publisher | [plan test](../crates/skull-mir/tests/abi_plan.rs), [implementation](../crates/skull-mir/src/lower/abi.rs) | Focused test passed; not a claim about every type/backend |
-| Unqualified shift masking in the reference disagrees with `uint` literal shift rejection | [reference](language-reference.md#operators-and-references), [inference](../crates/bone-inference/src/expr.rs), [reproducer](../perf/evidence/uint_shift.rock) | Open semantic/documentation discrepancy; intended rule not decided by this audit |
+| Unqualified shift masking in the reference disagreed with `uint` literal shift rejection | [reference](language-reference.md#operators-and-references), [inference](../crates/bone-inference/src/expr.rs), [reproducer](../perf/evidence/uint_shift.rock) | Initially unresolved; corrected in the numeric operator cleanup below using the original fixture |
 | Numeric examples pass without exposing that discrepancy | [numeric edges](../tests/operators/numeric_edges.rock) | 11 passed on LuaJIT and 11 on JS; out-of-range masking examples use `int` |
 | 395 of 514 rejection cases lack a nonempty expected diagnostic | [runner](../crates/rock-cli/src/error_test.rs), inventory case list | Review queue: unrelated rejection can satisfy these cases; not 395 proven compiler bugs |
 | Plain Cargo commands exclude ten workspace members, not only the GLSL runner | [workspace manifest](../Cargo.toml), inventory workspace table | Corrected stale testing documentation |
@@ -65,6 +65,20 @@ certification. The machine-readable ledger is the rerunnable subset.
 The reference corpus also passed 25 LuaJIT cases in
 [refs.rock](../tests/values/refs.rock). That is observed execution, not a full
 audit of reference lifetime/aliasing rules.
+
+## First completed cleanup: numeric operators
+
+The [operator audit](numeric-operators-decisions.md) resolves the shift
+discrepancy from the original `uint` fixture and the later guard-elimination
+contract. The reference now distinguishes `int` masking from checked `uint`
+counts. Compiler behavior is unchanged.
+
+All 18 unsupported-operator cases now pin their symbol-specific diagnostic:
+the current unpinned count is **377 of 514**, down from 395. The 514-case
+inventory includes six existing TODO cases; the executed error suite reports
+508 passed and six TODOs. The evidence checker now has seven records, including
+both backends' dynamic shift checks and deliberate mutations of this error
+family. Wrong diagnostics and valid replacement programs each fail all 18 cases.
 
 ## Useful measurements
 
@@ -84,14 +98,12 @@ until their behavioral purposes are understood.
 
 ## Next actions and open questions
 
-1. Resolve the intended `int`/`uint` shift distinction; pin invalid dynamic
-   counts as well as literal counts. The JS test named
-   `uint_dynamic_shift_checks_the_runtime_count` currently exercises only 31.
-2. Review and pin diagnostic expectations for one coherent error-test family,
-   verifying that a wrong diagnostic and a now-valid program both fail the check.
-3. Take one semantic concern through documentation, implementation mapping,
-   test-strength review and simplification. Choose it from actual discrepancies
-   and concentrated code, not file length alone.
+1. Audit one reference/aliasing concern through its documented rule, admission
+   checks and runtime behavior; choose a specific boundary before editing.
+2. Strengthen that concern's rejection tests with diagnostic assertions and
+   valid-program controls, using the operator family as the worked example.
+3. Simplify implementation only where that audit identifies duplicated rules
+   or unnecessary machinery; retain the original regression evidence.
 
 Open: which concern should be the first substantial cleanup; which documented
 behaviors are deliberate language commitments versus implementation accidents;

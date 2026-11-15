@@ -12,81 +12,97 @@
 // case would hide every symbol after the one that fired.
 
 //=== TEST CASE: eq_Generic ===
+//! expect: operator `==` is not overloadable
 value V { a: int }
 operator ==(x: V, y: V) -> bool { return true }
 fn main() {}
 
 //=== TEST CASE: ne_Generic ===
+//! expect: operator `!=` is not overloadable
 value V { a: int }
 operator !=(x: V, y: V) -> bool { return true }
 fn main() {}
 
 //=== TEST CASE: lt_Generic ===
+//! expect: operator `<` is not overloadable
 value V { a: int }
 operator <(x: V, y: V) -> bool { return true }
 fn main() {}
 
 //=== TEST CASE: le_Generic ===
+//! expect: operator `<=` is not overloadable
 value V { a: int }
 operator <=(x: V, y: V) -> bool { return true }
 fn main() {}
 
 //=== TEST CASE: gt_Generic ===
+//! expect: operator `>` is not overloadable
 value V { a: int }
 operator >(x: V, y: V) -> bool { return true }
 fn main() {}
 
 //=== TEST CASE: ge_Generic ===
+//! expect: operator `>=` is not overloadable
 value V { a: int }
 operator >=(x: V, y: V) -> bool { return true }
 fn main() {}
 
 //=== TEST CASE: and_Generic ===
+//! expect: operator `&&` is not overloadable
 value V { a: int }
 operator &&(x: V, y: V) -> bool { return true }
 fn main() {}
 
 //=== TEST CASE: or_Generic ===
+//! expect: operator `||` is not overloadable
 value V { a: int }
 operator ||(x: V, y: V) -> bool { return true }
 fn main() {}
 
 //=== TEST CASE: not_Generic ===
+//! expect: operator `!` is not overloadable
 value V { a: int }
 operator !(x: V, y: V) -> bool { return true }
 fn main() {}
 
 //=== TEST CASE: bitnot_Generic ===
+//! expect: operator `~` is not overloadable
 value V { a: int }
 operator ~(x: V) -> V { return x }
 fn main() {}
 
 //=== TEST CASE: bitand_Generic ===
+//! expect: operator `&` is not overloadable
 value V { a: int }
 operator &(x: V, y: V) -> V { return x }
 fn main() {}
 
 //=== TEST CASE: bitor_Generic ===
+//! expect: operator `|` is not overloadable
 value V { a: int }
 operator |(x: V, y: V) -> V { return x }
 fn main() {}
 
 //=== TEST CASE: bitxor_Generic ===
+//! expect: operator `^` is not overloadable
 value V { a: int }
 operator ^(x: V, y: V) -> V { return x }
 fn main() {}
 
 //=== TEST CASE: shl_Generic ===
+//! expect: operator `<<` is not overloadable
 value V { a: int }
 operator <<(x: V, y: V) -> V { return x }
 fn main() {}
 
 //=== TEST CASE: shr_Generic ===
+//! expect: operator `>>` is not overloadable
 value V { a: int }
 operator >>(x: V, y: V) -> V { return x }
 fn main() {}
 
 //=== TEST CASE: index_Generic ===
+//! expect: operator `[]` is not overloadable
 value V { a: int }
 operator [](x: V, i: int) -> int { return 1 }
 fn main() {}
@@ -97,11 +113,13 @@ fn main() {}
 // different hat.
 
 //=== TEST CASE: plain_fn_spelling_Generic ===
+//! expect: operator `==` is not overloadable
 value V { a: int }
 fn __op_eq(x: V, y: V) -> bool { return true }
 fn main() {}
 
 //=== TEST CASE: inline_backend_spelling_Generic ===
+//! expect: operator `==` is not overloadable
 value V { a: int }
 @pure @inline operator(lua) ==(x: V, y: V) -> bool = "return true"
 fn main() {}

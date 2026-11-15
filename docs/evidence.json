@@ -47,15 +47,42 @@
     ]
   },
   {
-    "id": "uint-shift-discrepancy",
-    "statement": "The unqualified documented shift-masking rule disagrees with the compiler: a literal uint shift count of 32 is rejected.",
-    "kind": "open discrepancy",
-    "limit": "Reproduces current rejection only. Whether documentation or implementation should change remains a semantic decision.",
+    "id": "uint-shift-literal-rejection",
+    "statement": "The established uint shift rule rejects a literal count of 32; the reference now distinguishes it from int masking.",
+    "kind": "intended rule",
+    "limit": "This probe checks literal rejection; dynamic checks are covered separately. The initial discrepancy was resolved from the original uint fixture and guard-elimination contract.",
     "sources": [
-      {"path": "docs/language-reference.md", "anchor": "a shift count uses its low 5 bits"},
+      {"path": "docs/language-reference.md", "anchor": "Shifts require a count in `0..=31`"},
       {"path": "crates/bone-inference/src/expr.rs", "anchor": "uint shift count must be in the range 0..=31"},
       {"path": "perf/evidence/uint_shift.rock", "anchor": "print(value << 32)"}
     ],
     "checks": [{"command": ["cargo", "run", "--quiet", "--locked", "-p", "rock-cli", "--bin", "rock", "--", "check", "perf/evidence/uint_shift.rock"], "exit": 1, "output": "uint shift count must be in the range 0\\.\\.=31, found 32"}]
+  },
+  {
+    "id": "uint-shift-runtime-checks",
+    "statement": "Both backends reject out-of-range dynamic uint shift counts in both directions and accept the boundary counts.",
+    "kind": "intended rule",
+    "limit": "Bounded execution cases, not proof across all lowering or optimization paths. Lua test also covers conversion ranges and single evaluation.",
+    "sources": [
+      {"path": "crates/skull-codegen-js/tests/uint.rs", "anchor": "fn uint_dynamic_shift_checks_the_runtime_count()"},
+      {"path": "crates/skull-codegen-lua/tests/emit.rs", "anchor": "fn exec_uint_checks_preserve_ranges_and_single_evaluation()"}
+    ],
+    "checks": [
+      {"command": ["cargo", "test", "--locked", "-p", "skull-codegen-js", "--test", "js_tests", "uint::uint_dynamic_shift_checks_the_runtime_count"], "exit": 0, "output": "test result: ok\\. 1 passed; 0 failed;"},
+      {"command": ["cargo", "test", "--locked", "-p", "skull-codegen-lua", "--test", "emit", "exec_uint_checks_preserve_ranges_and_single_evaluation"], "exit": 0, "output": "test result: ok\\. 1 passed; 0 failed;"}
+    ]
+  },
+  {
+    "id": "operator-rejection-reasons",
+    "statement": "All 18 unsupported-operator declarations are rejected for the stated symbol-specific reason, and their assertions detect wrong diagnostics and valid replacement programs.",
+    "kind": "test strength",
+    "limit": "One rejection family only; no claim about the remaining unpinned cases.",
+    "sources": [
+      {"path": "tests/errors/non_overloadable_operator_def.rock.err", "anchor": "//! expect: operator `==` is not overloadable"},
+      {"path": "crates/bone-core/src/hir.rs", "anchor": "pub const OPERATOR_FNS:"}
+    ],
+    "checks": [
+      {"command": ["python3", "perf/evidence/check_operator_rejections.py"], "exit": 0, "output": "original: 18 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 18 failed; 0 todo\\nvalid-programs: 0 passed; 18 failed; 0 todo"}
+    ]
   }
 ]

@@ -30,9 +30,18 @@ keep declarations aligned with dispatch.
 Numbers follow LuaJIT on every backend. `./` floors and `%` is
 `a - floor(a / b) * b`, so the remainder takes the divisor's sign. Dividing by
 zero is not an error: it yields `inf`, `-inf` or `nan`, for `uint` too.
-Bitwise operators work on signed 32-bit words: an operand wraps modulo 2^32
-and a shift count uses its low 5 bits. `>>` is a logical shift. An operand of
-magnitude 2^51 or more gives a backend-specific result. Whether
+For `int`, bitwise operators work on signed 32-bit words: an operand wraps
+modulo 2^32 and a shift count uses its low 5 bits. `>>` is a logical shift.
+An `int` bitwise operand of magnitude 2^51 or more gives a backend-specific
+result. This 32-bit behavior does not describe ordinary `int` arithmetic.
+
+For `uint`, `+`, `-`, `*` and bitwise results wrap as unsigned 32-bit values.
+Shifts require a count in `0..=31`: invalid literal counts are rejected during
+checking, and invalid dynamic counts fail at runtime. The counts do not wrap.
+See the [numeric operator audit](numeric-operators-decisions.md) for the
+implementation map and executable checks.
+
+Whether
 arithmetic such as `0.0 * -1.0` yields `-0` depends on LuaJIT's platform, so
 do not rely on it. See [numeric edge tests](../tests/operators/numeric_edges.rock).
 
