@@ -978,7 +978,7 @@ deco init on_reload {
     if _G.HOT_RELOAD then return end
     local ok, err = pcall(main_fn)
     if not ok then
-        if type(err) == "string" and err:find("interrupted!") then
+        if type(err) == "string" and (err == "interrupted!" or err:match("^.+:%d+: interrupted!$")) then
             os.exit(0)
         else
             error(err, 0)
