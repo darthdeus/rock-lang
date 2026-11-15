@@ -16,6 +16,8 @@ struct NonNull2 { p: Pt }
 struct Nullable1 { p: Pt? }
 struct Nullable2 { p: Pt? }
 
+fn nullable_identity(a: Nullable1) -> Nullable1 { return a }
+
 // CONTROL -- correct behavior, not a sentinel. A whole-value read of a
 // non-nullable value field copies, so the write through `b` leaves `a` alone.
 @test(output = "b=99 a=1")
@@ -31,7 +33,7 @@ fn non_nullable_value_field_read_copies() {
 @test(output = "b=99 a=1")
 fn nullable_value_field_read_copies() {
     let a = Nullable1 { p: Pt { x: 1, y: 2 } }
-    let b = Nullable2 { p: a.p }
+    let b = Nullable2 { p: nullable_identity(a).p }
     if b.p != null && a.p != null {
         b.p.x = 99
         print("b={b.p.x} a={a.p.x}")

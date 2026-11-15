@@ -254,7 +254,7 @@ impl<'a> Builder<'a> {
 
     /// Whether `e` denotes a mutable PLACE -- storage a later write can reach
     /// through, so a whole-value read out of it must copy. A value local/param is
-    /// NOT one, nor is a call result; without that exclusion every
+    /// NOT one, nor is a value-call result; without that exclusion every
     /// uniform-struct field read would rebuild its value. A field write on a
     /// value binding is a borrow of it ([`Self::binding_ref_borrowed`]), which
     /// keeps its box from being lent.
@@ -264,7 +264,8 @@ impl<'a> Builder<'a> {
     /// storage. This decides whether a later write can reach a value being READ,
     /// so it stops at the first container/global (`vlocal.buf[i]` is shared
     /// storage even though the chain starts at a value binding) where bone walks
-    /// to the root. They must AGREE that a temporary is neither.
+    /// to the root. A reference-returning call can expose shared storage;
+    /// only value-call results are fresh temporaries.
     pub(crate) fn is_mutable_place(&self, e: Idx<Expr>) -> Result<bool, CompilerError> {
         match &self.body.expr_arena[e] {
             Expr::Global(_) | Expr::Index { .. } => Ok(true),
@@ -274,6 +275,7 @@ impl<'a> Builder<'a> {
             // A reference-struct binding aliases shared storage; a value binding
             // is a copy of its own.
             Expr::Var(b) => Ok(!self.binding_is_nonnull_value_struct(*b)),
+            Expr::Call { .. } | Expr::SafeNavCall { .. } => Ok(!self.expr_is_value_struct(e)),
             _ => Ok(false),
         }
     }
