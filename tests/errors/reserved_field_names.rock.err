@@ -10,6 +10,7 @@
 //! Tags: structs, value-structs, reserved-names
 
 //=== TEST CASE: struct_field_fn_Generic ===
+//! expect: Reserved field name `__fn` in struct `Sneaky`: `__fn`, `__ty`, and `__variant` are runtime marker keys
 struct Sneaky {
     __fn: int,
 }
@@ -20,6 +21,7 @@ fn main() {
 }
 
 //=== TEST CASE: struct_field_ty_Generic ===
+//! expect: Reserved field name `__ty` in struct `Tagged`: `__fn`, `__ty`, and `__variant` are runtime marker keys
 struct Tagged {
     __ty: string,
 }
@@ -30,6 +32,7 @@ fn main() {
 }
 
 //=== TEST CASE: struct_field_variant_Generic ===
+//! expect: Reserved field name `__variant` in struct `Var`: `__fn`, `__ty`, and `__variant` are runtime marker keys
 struct Var {
     __variant: int,
 }
@@ -40,6 +43,7 @@ fn main() {
 }
 
 //=== TEST CASE: value_struct_field_fn_Generic ===
+//! expect: Reserved field name `__fn` in struct `VSneaky`: `__fn`, `__ty`, and `__variant` are runtime marker keys
 value VSneaky {
     __fn: int,
 }
@@ -50,6 +54,7 @@ fn main() {
 }
 
 //=== TEST CASE: value_struct_field_ty_Generic ===
+//! expect: Reserved field name `__ty` in struct `VTagged`: `__fn`, `__ty`, and `__variant` are runtime marker keys
 value VTagged {
     __ty: int,
 }
@@ -60,6 +65,7 @@ fn main() {
 }
 
 //=== TEST CASE: value_struct_field_variant_Generic ===
+//! expect: Reserved field name `__variant` in struct `VVar`: `__fn`, `__ty`, and `__variant` are runtime marker keys
 value VVar {
     __variant: int,
 }
@@ -70,6 +76,7 @@ fn main() {
 }
 
 //=== TEST CASE: enum_record_variant_field_variant_Generic ===
+//! expect: Reserved field name `__variant` in variant `A` of enum `E`: `__fn`, `__ty`, and `__variant` are runtime marker keys
 enum E {
     A { __variant: int },
 }
@@ -80,11 +87,23 @@ fn main() {
 }
 
 //=== TEST CASE: enum_record_variant_field_fn_Generic ===
+//! expect: Reserved field name `__fn` in variant `B` of enum `F`: `__fn`, `__ty`, and `__variant` are runtime marker keys
 enum F {
     B { __fn: int },
 }
 
 fn main() {
     let f = F::B { __fn: 1 }
+    print("ok")
+}
+
+//=== TEST CASE: enum_record_variant_field_ty_Generic ===
+//! expect: Reserved field name `__ty` in variant `C` of enum `G`: `__fn`, `__ty`, and `__variant` are runtime marker keys
+enum G {
+    C { __ty: int },
+}
+
+fn main() {
+    let g = G::C { __ty: 1 }
     print("ok")
 }
