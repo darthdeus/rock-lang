@@ -85,7 +85,7 @@ use rustc_hash::FxHashSet as HashSet;
 use bone_core::hir::FnBackend;
 use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
-use skull_mir::cfg::{predecessors, reverse_postorder};
+use skull_mir::cfg::{predecessors, reverse_postorder, successors};
 use skull_mir::mir::*;
 use ustr::Ustr;
 
@@ -186,10 +186,16 @@ pub fn elide_bounds_checks_for_target(
     let n = func.blocks.len();
     let mut ins: Vec<Option<Facts>> = vec![None; n];
     let mut outs: Vec<Option<Facts>> = vec![None; n];
+    let mut dirty = vec![true; n];
     ins[raw(func.entry)] = Some(Facts::default());
     loop {
         let mut changed = false;
         for &b in &rpo {
+            // Clear before transfer so a changed self-edge output schedules
+            // another visit. Unchanged predecessor outputs need no new merge.
+            if !std::mem::replace(&mut dirty[raw(b)], false) {
+                continue;
+            }
             if b != func.entry {
                 let mut merged: Option<Facts> = None;
                 if let Some(ps) = preds.get(&b) {
@@ -225,6 +231,7 @@ pub fn elide_bounds_checks_for_target(
             if outs[raw(b)].as_ref() != Some(&facts) {
                 changed = true;
                 outs[raw(b)] = Some(facts);
+                successors(&func.blocks[b].term, |s| dirty[raw(s)] = true);
             }
         }
         if !changed {

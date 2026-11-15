@@ -185,12 +185,15 @@ fn an_unknown_call_in_the_body_keeps_the_check() {
 
 #[test]
 fn a_call_after_the_store_still_reaches_it_around_the_back_edge() {
-    let mut p = Probe::new();
-    let (lp, store) = counted_loop(&mut p, |_, _| {});
-    p.f.set_term(lp.body, Term::Goto(lp.latch));
-    p.unknown_call(lp.latch);
-    p.run();
-    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
+    for self_edge in [false, true] {
+        let mut p = Probe::new();
+        let (lp, store) = counted_loop(&mut p, |_, _| {});
+        let back = if self_edge { lp.body } else { lp.latch };
+        p.f.set_term(lp.body, Term::Goto(back));
+        p.unknown_call(back);
+        p.run();
+        assert_eq!(p.kind(store), ContainerKind::VecNonNull);
+    }
 }
 
 #[test]
