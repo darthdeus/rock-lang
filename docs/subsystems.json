@@ -32,7 +32,7 @@
       "tests": ["crates/bone-semantic/tests", "crates/bone-lints/tests", "tests/errors"],
       "commands": ["cargo test --locked -p bone-semantic -p bone-lints"],
       "unknown": "bone-inference disables its own library test harness; semantic fixtures exercise it. Selected purity/reference checks do not cover all language rules.",
-      "docs": ["docs/language-contract.md", "docs/purity.md", "docs/checked-cast-decisions.md", "docs/null-refinement-decisions.md", "docs/reference-suspension-decisions.md", "docs/compiler-admission-decisions.md"]
+      "docs": ["docs/language-contract.md", "docs/purity.md", "docs/checked-cast-decisions.md", "docs/null-refinement-decisions.md", "docs/embed-projection-rejections.md", "docs/reserved-field-rejections.md", "docs/reference-suspension-decisions.md", "docs/compiler-admission-decisions.md"]
     },
     {
       "id": "incremental",
@@ -76,7 +76,7 @@
       "tests": ["crates/skull-mir/tests", "crates/skull-transform/tests"],
       "commands": ["cargo test --locked -p skull-mir -p skull-transform"],
       "unknown": "ABI checks cover selected shapes. Transform interactions and all target-specific options are not exhaustively checked.",
-      "docs": ["docs/compiler.md", "docs/guard-elimination.md", "docs/coroutines.md"]
+      "docs": ["docs/compiler.md", "docs/guard-elimination.md", "docs/coroutines.md", "docs/map-key-rejections.md"]
     },
     {
       "id": "driver",

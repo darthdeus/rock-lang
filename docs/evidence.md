@@ -181,8 +181,27 @@ recognition and its effect exemption now use the selected stdlib declaration.
 Five semantic sections, four pinned rejection cases and five runtime controls
 distinguish declaration identity, effects and local function-value shadowing.
 The full nullable corpus passes 415 tests on each backend. The rejection
-inventory is now **350 unpinned of 524 cases**; the full error scan reports
+inventory at that stage was **350 unpinned of 524 cases**; the full error scan reports
 518 passed and six existing TODOs.
+
+## Embedded fields, map keys and reserved names
+
+| Family | Pinned rejection cases | Accepted controls |
+|---|---|---|
+| [Embedded projections](embed-projection-rejections.md) | 10 existing cases | 39 Lua cases; 35 JS cases and four Lua-only cases; two new selector-admission controls |
+| [Map keys](map-key-rejections.md) | 9 existing cases | 10 newtype-key and 46 scalar/enum cases on each backend |
+| [Reserved runtime fields](reserved-field-rejections.md) | 8 existing cases plus the missing enum `__ty` case | One nearby-name test covering structs, value structs and enum records on each backend |
+
+Wrong diagnostic and valid-program mutations fail every rejection assertion in
+these families. This strengthens 27 existing cases and adds one pinned case;
+the inventory is **323 unpinned of 525 cases**. The full error scan passes 519
+cases with six existing TODOs. No production compiler code changed.
+
+The audit corrected stale map-key and embed-layout comments. It also keeps the
+limits explicit: the embed runtime suite contains an inverted reflection
+sentinel that passes because a known defect remains, and the Map key checker
+has source-scan and newtype-recursion limits. Green corpus counts do not erase
+those limitations or establish exhaustive enforcement.
 
 ## Useful measurements
 
@@ -210,8 +229,8 @@ audited by this work.
 
 The breadth survey also found a stale LSP fixture warning: the parser already
 rejects unknown expectation lines. Its existing malformed-block regression
-passes; the documentation now matches that behavior. The ledger contains 21
-bounded records, not 21 comprehensively verified subsystems.
+passes; the documentation now matches that behavior. The ledger contains 24
+bounded records, not 24 comprehensively verified subsystems.
 
 Extend the evidence ledger alongside concrete repairs. Its checks establish
 bounded claims, not a percentage of language coverage or a launch certificate.

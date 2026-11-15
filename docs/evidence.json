@@ -641,5 +641,29 @@
         "output": "8/8 @tests passed \\(0 failed, 0 skipped, 0 not for js\\)"
       }
     ]
+  },
+  {
+    "id": "embed-projection-rejection-reasons",
+    "statement": "Ten embedded-field rejection cases identify whole-value extraction or readable-selector violations; selected legal projections and selector admissions execute on both backends.",
+    "kind": "test strength",
+    "limit": "Not exhaustive projection enforcement or runtime selector writes. The positive suite retains an inverted flat-enum reflection sentinel; passing it reproduces that known defect. Four cases are Lua-only.",
+    "sources": [{"path": "tests/errors/embed_projection_only.rock.err", "anchor": "//! expect:"}, {"path": "crates/bone-inference/src/embed.rs", "anchor": "fn legal_positions("}, {"path": "crates/bone-inference/src/expr.rs", "anchor": "a readable selector would hand out the whole value"}, {"path": "docs/embed-projection-rejections.md", "anchor": "Limits:"}],
+    "checks": [{"command": ["python3", "perf/evidence/check_operator_rejections.py", "--fixture", "tests/errors/embed_projection_only.rock.err", "--cases", "10"], "exit": 0, "output": "original: 10 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 10 failed; 0 todo\\nvalid-programs: 0 passed; 10 failed; 0 todo"}, {"command": ["cargo", "run", "--quiet", "--locked", "-p", "rock-cli", "--bin", "rock", "--", "test", "tests/values/embed.rock"], "exit": 0, "output": "39/39 @tests passed \\(0 failed\\)"}, {"command": ["cargo", "run", "--quiet", "--locked", "-p", "rock-cli", "--bin", "rock", "--", "test", "tests/values/embed.rock", "--backend", "js"], "exit": 0, "output": "35/35 @tests passed \\(0 failed, 0 skipped, 4 not for js\\)"}]
+  },
+  {
+    "id": "map-key-rejection-reasons",
+    "statement": "Nine selected aggregate/payload Map key cases pin the intended representation reason, while selected scalar, enum and scalar-backed newtype keys execute on LuaJIT and JS.",
+    "kind": "test strength",
+    "limit": "The source scan and recursion-depth limit do not establish enforcement in every context or deep newtype chain. Not all key types are covered.",
+    "sources": [{"path": "tests/errors/map_value_struct_key.rock.err", "anchor": "//! expect:"}, {"path": "crates/skull-mir/src/lower/mod.rs", "anchor": "fn map_key_rejection_reason("}, {"path": "docs/map-key-rejections.md", "anchor": "Limits:"}],
+    "checks": [{"command": ["python3", "perf/evidence/check_operator_rejections.py", "--fixture", "tests/errors/map_value_struct_key.rock.err", "--cases", "9"], "exit": 0, "output": "original: 9 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 9 failed; 0 todo\\nvalid-programs: 0 passed; 9 failed; 0 todo"}, {"command": ["cargo", "run", "--quiet", "--locked", "-p", "rock-cli", "--bin", "rock", "--", "test", "tests/newtypes/map_keys.rock"], "exit": 0, "output": "10/10 @tests passed \\(0 failed\\)"}, {"command": ["cargo", "run", "--quiet", "--locked", "-p", "rock-cli", "--bin", "rock", "--", "test", "tests/newtypes/map_keys.rock", "--backend", "js"], "exit": 0, "output": "10/10 @tests passed \\(0 failed, 0 skipped, 0 not for js\\)"}, {"command": ["cargo", "run", "--quiet", "--locked", "-p", "rock-cli", "--bin", "rock", "--", "test", "tests/maps/basics.rock", "tests/patterns/enum_eq.rock"], "exit": 0, "output": "46/46 @tests passed \\(0 failed\\)"}, {"command": ["cargo", "run", "--quiet", "--locked", "-p", "rock-cli", "--bin", "rock", "--", "test", "tests/maps/basics.rock", "tests/patterns/enum_eq.rock", "--backend", "js"], "exit": 0, "output": "46/46 @tests passed \\(0 failed, 0 skipped, 0 not for js\\)"}]
+  },
+  {
+    "id": "reserved-field-rejection-reasons",
+    "statement": "All three runtime marker field names reject in structs, value structs and enum records; selected neighboring names remain legal on LuaJIT and JS.",
+    "kind": "test strength",
+    "limit": "Nine declaration cases and one accepted-name test. This does not establish all runtime reflection behavior or apply to unnamed tuple payloads.",
+    "sources": [{"path": "tests/errors/reserved_field_names.rock.err", "anchor": "//! expect:"}, {"path": "crates/bone-lower/src/lib.rs", "anchor": "fn is_reserved_runtime_field("}, {"path": "docs/reserved-field-rejections.md", "anchor": "The intended boundary"}],
+    "checks": [{"command": ["python3", "perf/evidence/check_operator_rejections.py", "--fixture", "tests/errors/reserved_field_names.rock.err", "--cases", "9"], "exit": 0, "output": "original: 9 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 9 failed; 0 todo\\nvalid-programs: 0 passed; 9 failed; 0 todo"}, {"command": ["cargo", "run", "--quiet", "--locked", "-p", "rock-cli", "--bin", "rock", "--", "test", "tests/types/reserved_field_names_allowed.rock"], "exit": 0, "output": "1/1 @tests passed \\(0 failed\\)"}, {"command": ["cargo", "run", "--quiet", "--locked", "-p", "rock-cli", "--bin", "rock", "--", "test", "tests/types/reserved_field_names_allowed.rock", "--backend", "js"], "exit": 0, "output": "1/1 @tests passed \\(0 failed, 0 skipped, 0 not for js\\)"}]
   }
 ]
