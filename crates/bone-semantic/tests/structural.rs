@@ -1596,7 +1596,7 @@ fn returned_frame_reference_must_propagate_a_valid_origin() {
 
 fn arena_borrow_errors(body: &str) -> Vec<String> {
     let mut modules = rock_stdlib::stdlib_files()
-        .into_iter()
+        .iter()
         .map(|f| parse_rock_with_file(f.contents, &rock_stdlib::stdlib_file_id(f.name)).unwrap())
         .collect::<Vec<_>>();
     let src = format!(
