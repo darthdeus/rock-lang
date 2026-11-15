@@ -257,8 +257,28 @@ invalid parameter annotations and downstream uses of invalid constructors.
 
 All 12 cases detect wrong-diagnostic and valid-program mutations. Five new
 accepted controls and two existing runtime files pass 37 tests on each backend,
-with no JS skips. The inventory is **269 unpinned of 527 cases**; the full error
-scan passes 521 with six existing TODOs. No production compiler code changed.
+with no JS skips. The inventory at that stage was **269 unpinned of 527 cases**;
+the full error scan passed 521 with six existing TODOs. No production compiler
+code changed.
+
+## Generic defaults and method declarations
+
+The [declaration audit](declaration-rejections.md) pins 14 existing cases:
+seven generic-default restrictions and seven method declaration restrictions.
+All already rejected for the intended reason. The method fixture now separates
+parser restrictions from unknown receiver type resolution and distinguishes a
+second dotted receiver segment from module-qualified syntax. The compact
+contract and reference also drop their stale blanket coroutine-bound-call
+rejection claim, matching the earlier coroutine audit.
+
+Wrong-diagnostic and valid-program mutations fail all 14 assertions. The two
+runtime files pass 18 tests on each backend, including a new explicit-array
+argument control; JS reports no skips. The inventory is **255 unpinned of 527
+cases**; the full error scan passes 521 with six existing TODOs. No production
+compiler code changed. The audit also reproduced a follow-up discrepancy:
+`uint` and `f64` defaults are classified by the semantic prepass but rejected
+by the authoritative validator. The audit records this without adopting the
+rejection as the intended rule.
 
 ## Useful measurements
 
@@ -286,8 +306,8 @@ audited by this work.
 
 The breadth survey also found a stale LSP fixture warning: the parser already
 rejects unknown expectation lines. Its existing malformed-block regression
-passes; the documentation now matches that behavior. The ledger contains 30
-bounded records, not 30 comprehensively verified subsystems.
+passes; the documentation now matches that behavior. The ledger contains 31
+bounded records, not 31 comprehensively verified subsystems.
 
 Extend the evidence ledger alongside concrete repairs. Its checks establish
 bounded claims, not a percentage of language coverage or a launch certificate.

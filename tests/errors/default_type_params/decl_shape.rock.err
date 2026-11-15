@@ -2,6 +2,7 @@
 //! Tags: generics,defaults
 
 //=== TEST CASE: non_trailing_default_Generic ===
+//! expect: type parameter `B` without a default follows defaulted `A`; defaults must be trailing
 struct Bad<A = int, B> {
     a: A,
     b: B,
@@ -11,6 +12,7 @@ fn main() {
 }
 
 //=== TEST CASE: fn_generic_default_Generic ===
+//! expect: default type params are not supported on fn generics
 fn f<T = int>(x: T) -> T {
     x
 }
@@ -20,6 +22,7 @@ fn main() {
 }
 
 //=== TEST CASE: sibling_ref_default_Generic ===
+//! expect: default for type parameter `U` may not reference sibling type parameter `T`
 struct S<T, U = T> {
     a: T,
     b: U,
@@ -29,6 +32,7 @@ fn main() {
 }
 
 //=== TEST CASE: unsupported_shape_default_Generic ===
+//! expect: unsupported default for type parameter `U` on a struct: only builtin types and bare type names are supported
 struct S<T, U = [int]> {
     a: T,
     b: U,
@@ -38,6 +42,7 @@ fn main() {
 }
 
 //=== TEST CASE: unknown_name_default_Generic ===
+//! expect: Unknown type name Nope
 struct S<T, U = Nope> {
     a: T,
     b: U,

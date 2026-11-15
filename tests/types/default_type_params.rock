@@ -76,3 +76,13 @@ fn test_nullable_of_defaulted_app() {
     let p: Pair<string>? = null
     print(p?.a ?? "fallback")
 }
+
+// The default-shape restriction does not restrict explicit type arguments.
+fn identity_without_default<T>(value: T) -> T { value }
+
+@test(output = "3")
+fn test_explicit_array_argument_and_inferred_fn_generic() {
+    let p: Pair<string, [int]> = Pair { a: "x", b: [1, 2, 3] }
+    let values = identity_without_default(p.b)
+    print(values.len)
+}

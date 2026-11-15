@@ -1,7 +1,8 @@
-//! Error: D-form method syntax parse errors
+//! Error: D-form method declaration restrictions and receiver type resolution
 //! Tags: methods, dform, parser
 
 //=== TEST CASE: annotated_receiver_Generic ===
+//! expect: the receiver takes its type from the path; write it without a type annotation
 // The receiver takes its type from the path; annotating it is rejected.
 struct Mob { hp: int }
 fn Mob.take_damage(m: Mob, amount: int) -> int {
@@ -10,6 +11,7 @@ fn Mob.take_damage(m: Mob, amount: int) -> int {
 fn main() {}
 
 //=== TEST CASE: no_receiver_param_Generic ===
+//! expect: the method form requires a receiver parameter
 // The method form requires a receiver parameter.
 struct Mob { hp: int }
 fn Mob.foo() -> int {
@@ -18,6 +20,7 @@ fn Mob.foo() -> int {
 fn main() {}
 
 //=== TEST CASE: macro_dform_Generic ===
+//! expect: the method form `Type.name` is for functions, not macros
 // D-form is for functions, not macros.
 macro Mob.m() {
     5
@@ -25,12 +28,14 @@ macro Mob.m() {
 fn main() {}
 
 //=== TEST CASE: extern_dform_Generic ===
+//! expect: extern functions are foreign symbols and cannot declare a receiver path
 // Extern fns are foreign symbols; they cannot declare a receiver path.
 struct Mob { hp: int }
 extern(lua) fn Mob.x(m: Mob) -> int
 fn main() {}
 
 //=== TEST CASE: dup_generic_Generic ===
+//! expect: generic `A` is declared in both the receiver path and the method generics
 // A generic declared in both the receiver path and the method list.
 struct Pair<A, B> { a: A, b: B }
 fn Pair<A, B>.dup<A>(p) -> A {
@@ -39,7 +44,9 @@ fn Pair<A, B>.dup<A>(p) -> A {
 fn main() {}
 
 //=== TEST CASE: nested_path_Generic ===
-// The receiver path may have only one segment.
+//! expect: the receiver path may have only one segment (`Type.name`)
+// A second dot-separated receiver segment is rejected; this is not a
+// check of module-qualified `lib::Type.method` syntax.
 struct Mob { hp: int }
 fn Mob.Sub.foo(m) -> int {
     return 0
@@ -47,6 +54,7 @@ fn Mob.Sub.foo(m) -> int {
 fn main() {}
 
 //=== TEST CASE: unknown_receiver_type_Unknown ===
+//! expect: Unknown type name Ghost
 // Not a parse error -- desugars, then bone rejects the unknown param type.
 fn Ghost.haunt(g) -> int {
     return 0

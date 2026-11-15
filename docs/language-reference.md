@@ -209,7 +209,11 @@ iterator-bounded function when its `iter` method supplies the iterator.
 The same holds for a lambda's result where the callee expects an iterator,
 so `[1, 2].flat_map(n => [n, n])` iterates each returned Vec; a named fn
 returning a Vec goes through a lambda (`n => pair(n)`).
-Iterator-bounded calls in coroutine bodies are currently rejected.
+The tested `iter().filter(...).collect()` chain also runs inside a coroutine
+body; see the [coroutine audit](coroutine-rejections.md). The old blanket
+rejection claim came from a fixture with an invalid coroutine signature, not
+from a rejection of its iterator chain. Other residual or recursive bounded
+calls are outside that audit.
 
 ## Compile-time inputs
 

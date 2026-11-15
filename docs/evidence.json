@@ -495,7 +495,7 @@
           "tests/types/default_type_params.rock"
         ],
         "exit": 0,
-        "output": "8/8 @tests passed \\(0 failed\\)"
+        "output": "9/9 @tests passed \\(0 failed\\)"
       },
       {
         "command": [
@@ -1035,6 +1035,106 @@
       ],
       "exit": 0,
       "output": "37/37 @tests passed \\(0 failed, 0 skipped, 0 not for js\\)"
+    }
+  ]
+},
+{
+  "id": "declaration-rejection-reasons",
+  "statement": "Fourteen generic-default and method-declaration cases assert their intended reasons; nearby accepted forms execute on LuaJIT and JS, including explicit array type arguments despite unsupported array-shaped defaults.",
+  "kind": "test strength",
+  "limit": "Selected declarations only, not all default shapes, module-qualified receivers or parser recovery paths. Unknown receiver types reject in lowering rather than parsing.",
+  "sources": [
+    {
+      "path": "docs/declaration-rejections.md",
+      "anchor": "Fourteen existing cases"
+    },
+    {
+      "path": "crates/bone-lower/src/lib.rs",
+      "anchor": "fn validate_generic_defaults("
+    },
+    {
+      "path": "crates/skull-parser/src/parser.rs",
+      "anchor": "the receiver takes its type from the path; write it without a type annotation"
+    },
+    {
+      "path": "tests/types/default_type_params.rock",
+      "anchor": "fn test_explicit_array_argument_and_inferred_fn_generic()"
+    }
+  ],
+  "checks": [
+    {
+      "command": [
+        "python3",
+        "perf/evidence/check_operator_rejections.py",
+        "--fixture",
+        "tests/errors/default_type_params/arity.rock.err",
+        "--cases",
+        "2"
+      ],
+      "exit": 0,
+      "output": "original: 2 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 2 failed; 0 todo\\nvalid-programs: 0 passed; 2 failed; 0 todo"
+    },
+    {
+      "command": [
+        "python3",
+        "perf/evidence/check_operator_rejections.py",
+        "--fixture",
+        "tests/errors/default_type_params/decl_shape.rock.err",
+        "--cases",
+        "5"
+      ],
+      "exit": 0,
+      "output": "original: 5 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 5 failed; 0 todo\\nvalid-programs: 0 passed; 5 failed; 0 todo"
+    },
+    {
+      "command": [
+        "python3",
+        "perf/evidence/check_operator_rejections.py",
+        "--fixture",
+        "tests/errors/methods/method_syntax.rock.err",
+        "--cases",
+        "7"
+      ],
+      "exit": 0,
+      "output": "original: 7 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 7 failed; 0 todo\\nvalid-programs: 0 passed; 7 failed; 0 todo"
+    },
+    {
+      "command": [
+        "cargo",
+        "run",
+        "--quiet",
+        "--locked",
+        "-p",
+        "rock-cli",
+        "--bin",
+        "rock",
+        "--",
+        "test",
+        "tests/types/default_type_params.rock",
+        "tests/functions/method_syntax.rock"
+      ],
+      "exit": 0,
+      "output": "18/18 @tests passed \\(0 failed\\)"
+    },
+    {
+      "command": [
+        "cargo",
+        "run",
+        "--quiet",
+        "--locked",
+        "-p",
+        "rock-cli",
+        "--bin",
+        "rock",
+        "--",
+        "test",
+        "tests/types/default_type_params.rock",
+        "tests/functions/method_syntax.rock",
+        "--backend",
+        "js"
+      ],
+      "exit": 0,
+      "output": "18/18 @tests passed \\(0 failed, 0 skipped, 0 not for js\\)"
     }
   ]
 }

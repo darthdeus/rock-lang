@@ -32,7 +32,7 @@
       "tests": ["crates/bone-semantic/tests", "crates/bone-lints/tests", "tests/errors"],
       "commands": ["cargo test --locked -p bone-semantic -p bone-lints"],
       "unknown": "bone-inference disables its own library test harness; semantic fixtures exercise it. Selected purity/reference checks do not cover all language rules.",
-      "docs": ["docs/language-contract.md", "docs/purity.md", "docs/checked-cast-decisions.md", "docs/null-refinement-decisions.md", "docs/embed-projection-rejections.md", "docs/reserved-field-rejections.md", "docs/reference-suspension-decisions.md", "docs/coroutine-rejections.md", "docs/hoisted-capture-rejections.md", "docs/generic-overload-rejections.md", "docs/compiler-admission-decisions.md"]
+      "docs": ["docs/language-contract.md", "docs/purity.md", "docs/checked-cast-decisions.md", "docs/null-refinement-decisions.md", "docs/embed-projection-rejections.md", "docs/reserved-field-rejections.md", "docs/reference-suspension-decisions.md", "docs/coroutine-rejections.md", "docs/hoisted-capture-rejections.md", "docs/generic-overload-rejections.md", "docs/declaration-rejections.md", "docs/compiler-admission-decisions.md"]
     },
     {
       "id": "incremental",

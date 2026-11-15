@@ -61,10 +61,12 @@ and [evidence ledger](evidence.json) for wider coverage.
   `next(I) -> (bool, E)` conformance. A multi-value `next` can drive a direct
   `for` without satisfying that bound. See the source-linked
   [bound audit and controls](iterator-bound-rejections.md).
-- **Documented restriction, not audited here:** calls with an iterator bound
-  in coroutine bodies are documented as rejected. See [iterator rules](language-reference.md#iterators) and the
-  [rejection fixture](../tests/errors/iterators/bounded_call_in_nested_body.rock.err).
-  That fixture does not yet pin the rejection diagnostic.
+- **Bounded observation:** the formerly claimed coroutine-body bound-call
+  rejection instead failed on an invalid coroutine result annotation. With a
+  corrected signature and resume call, the tested iterator chain runs on LuaJIT
+  and JS. See the [coroutine audit](coroutine-rejections.md) and
+  [runtime control](../tests/coroutines/coroutine_bound_calls.rock). This does not
+  establish acceptance of all residual or recursive bounded calls.
 
 ## Coroutines and suspension
 
@@ -124,7 +126,7 @@ on LuaJIT. Counts are actual tests, not successful zero-test filters:
 | `cargo run --quiet --locked -p rock-cli --bin rock -- test tests/values/refs.rock` | 25/25 passed |
 | `cargo run --quiet --locked -p rock-cli --bin rock -- test tests/values/semantics_decision_points.rock` | 8/8 passed |
 | `cargo run --quiet --locked -p rock-cli --bin rock -- test tests/nullable/path_refinement_soundness.rock` | 41/41 passed |
-| `cargo run --quiet --locked -p rock-cli --bin rock -- test tests/types/default_type_params.rock` | 8/8 passed |
+| `cargo run --quiet --locked -p rock-cli --bin rock -- test tests/types/default_type_params.rock` | 9/9 passed |
 | `cargo run --quiet --locked -p rock-cli --bin rock -- test tests/coroutines/nullable_generics.rock` | 13/13 passed |
 | `cargo test --locked -p bone-semantic --test fixtures check_rock::reference_suspension.rock -- --exact` | 1 fixture-file test passed (12 sections) |
 | `cargo run --quiet --locked -p rock-cli --bin rock -- test perf/evidence/reference_construction.rock` | 1/1 passed; reproduces the unresolved behavior |
