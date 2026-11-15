@@ -1,5 +1,11 @@
 # Compiler performance tracking
 
+For source size, test locations, diagnostic-expectation gaps and a small
+rerunnable claim ledger, see [evidence-driven cleanup](../docs/evidence.md).
+`python3 perf/inventory.py` writes the local inventory to
+`target/inventory/index.html`; `python3 perf/check_evidence.py` reruns its
+bounded evidence checks. Neither is a compiler quality score.
+
 Scripts that measure the compiler on the public corpora and chart the results
 over commits. Three questions: how long is a cold build, how long is an
 incremental rebuild after an edit, and how fast does the language server

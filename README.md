@@ -115,6 +115,8 @@ the check explicitly disables the systemd user scope inside the container.
 
 The [compiler structure guide](docs/compiler.md) maps the implementation and
 its shared lowering and incremental-emission boundaries.
+The [evidence baseline](docs/evidence.md) records checked claims, discrepancies
+and commands for measuring source and test organization.
 
 Use `cargo run --quiet --bin rock -- test file.rock` to rebuild and test with
 this checkout. See [Testing compiler changes](docs/testing.md) for runtime cases,

@@ -56,8 +56,10 @@ function by its declared name therefore needs that function to retain its name.
 A structural verifier ([`verify.rs`](../crates/skull-mir/src/verify.rs))
 checks each body between passes, and lowering audits the concrete plans it
 is handed. These checks only ever fail on a compiler bug, so a `rock` process
-skips them; debug-build tests run them. `ROCK_MIR_CHECKS=1` turns them on, and
-the corpus and Stone gates set it; `ROCK_MIR_CHECKS=0` turns them off. The
+skips them; Rust crate tests with debug assertions use the enabled default.
+The CLI overrides that default, including for `rock test`.
+`ROCK_MIR_CHECKS=1` turns them on, and the corpus and Stone gates set it;
+`ROCK_MIR_CHECKS=0` turns them off. The
 printer's scope guard, which is nearly free, also runs by default in `rock test`.
 
 HIR may simplify an expression while its source span still contains the original

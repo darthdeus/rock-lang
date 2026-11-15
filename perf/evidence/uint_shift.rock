@@ -1,0 +1,5 @@
+// A discrepancy probe, not a decision about the intended shift semantics.
+fn main() {
+    let value: uint = 1
+    print(value << 32)
+}

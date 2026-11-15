@@ -206,8 +206,11 @@ after the runtime-test summary, which can show `0/0` for an error-only file.
 
 ## Compiler tests and checking the checks
 
-From the repository root, plain `cargo test` selects the compiler-focused default
-workspace members. This default suite needs LuaJIT and Node, but not SDL2:
+From the repository root, plain `cargo test` selects the explicit
+`workspace.default-members` in [Cargo.toml](../Cargo.toml). Native runtime,
+host/support crates and the manual LSP conformance tool are not all included.
+Run `python3 perf/inventory.py` for the exact default/excluded member lists.
+This default suite needs LuaJIT and Node, but not SDL2:
 
 ```sh
 cargo test --locked --no-fail-fast

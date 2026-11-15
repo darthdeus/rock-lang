@@ -1,0 +1,61 @@
+[
+  {
+    "id": "guide-examples",
+    "statement": "The guide's Rock fences match example files; runnable examples produce their expected output and shader examples compile.",
+    "kind": "observed behavior",
+    "limit": "Does not establish semantic completeness or execute the generated shaders.",
+    "sources": [
+      {"path": "docs/guide.md", "anchor": "Every example in this guide"},
+      {"path": "crates/rock-cli/tests/guide.rs", "anchor": "fn guide_fences_match_example_files_byte_for_byte"}
+    ],
+    "checks": [{"command": ["cargo", "test", "--locked", "-p", "rock-cli", "--test", "rock_cli_tests", "guide::"], "exit": 0, "output": "test result: ok\\. 3 passed; 0 failed;"}]
+  },
+  {
+    "id": "mir-cli-gate",
+    "statement": "Without an explicit setting, the ordinary CLI disables the MIR verifier; rock test enables only the printer scope guard. Explicit ROCK_MIR_CHECKS=1 enables both.",
+    "kind": "architecture behavior",
+    "limit": "The unit test checks gate selection, not that every pass calls the verifier.",
+    "sources": [
+      {"path": "crates/rock-cli/src/process.rs", "anchor": "fn mir_checks("},
+      {"path": "crates/skull-mir/src/verify.rs", "anchor": "pub fn checks_enabled()"}
+    ],
+    "checks": [{"command": ["cargo", "test", "--locked", "-p", "rock-cli", "--lib", "rock_test_keeps_only_the_scope_guard_unless_asked"], "exit": 0, "output": "test result: ok\\. 1 passed; 0 failed;"}]
+  },
+  {
+    "id": "shared-representation-plan",
+    "statement": "The tested scalar, nested, tuple, nullable and boxed value cases use a consistent representation plan across body, call, return and publisher consumers.",
+    "kind": "architecture behavior",
+    "limit": "A bounded fixture set; does not prove identical ABIs across backends or consistency for all types.",
+    "sources": [
+      {"path": "crates/skull-mir/src/lower/abi.rs", "anchor": "BackendFnAbiPlan"},
+      {"path": "crates/skull-mir/tests/abi_plan.rs", "anchor": "fn one_owned_representation_reaches_body_call_return_and_publisher"}
+    ],
+    "checks": [{"command": ["cargo", "test", "--locked", "-p", "skull-mir", "--test", "skull_mir_tests", "one_owned_representation_reaches_body_call_return_and_publisher"], "exit": 0, "output": "test result: ok\\. 1 passed; 0 failed;"}]
+  },
+  {
+    "id": "numeric-examples",
+    "statement": "The numeric-edge corpus agrees with its expected answers on LuaJIT and JS, including int shift masking.",
+    "kind": "observed behavior",
+    "limit": "These 11 examples do not test out-of-range uint shifts; backend agreement alone is not correctness.",
+    "sources": [
+      {"path": "tests/operators/numeric_edges.rock", "anchor": "fn shift_counts_mask_to_five_bits()"},
+      {"path": "docs/language-reference.md", "anchor": "a shift count uses its low 5 bits"}
+    ],
+    "checks": [
+      {"command": ["cargo", "run", "--quiet", "--locked", "-p", "rock-cli", "--bin", "rock", "--", "test", "tests/operators/numeric_edges.rock"], "exit": 0, "output": "11/11 @tests passed \\(0 failed\\)"},
+      {"command": ["cargo", "run", "--quiet", "--locked", "-p", "rock-cli", "--bin", "rock", "--", "test", "tests/operators/numeric_edges.rock", "--backend", "js"], "exit": 0, "output": "11/11 @tests passed \\(0 failed, 0 skipped, 0 not for js\\)"}
+    ]
+  },
+  {
+    "id": "uint-shift-discrepancy",
+    "statement": "The unqualified documented shift-masking rule disagrees with the compiler: a literal uint shift count of 32 is rejected.",
+    "kind": "open discrepancy",
+    "limit": "Reproduces current rejection only. Whether documentation or implementation should change remains a semantic decision.",
+    "sources": [
+      {"path": "docs/language-reference.md", "anchor": "a shift count uses its low 5 bits"},
+      {"path": "crates/bone-inference/src/expr.rs", "anchor": "uint shift count must be in the range 0..=31"},
+      {"path": "perf/evidence/uint_shift.rock", "anchor": "print(value << 32)"}
+    ],
+    "checks": [{"command": ["cargo", "run", "--quiet", "--locked", "-p", "rock-cli", "--bin", "rock", "--", "check", "perf/evidence/uint_shift.rock"], "exit": 1, "output": "uint shift count must be in the range 0\\.\\.=31, found 32"}]
+  }
+]
