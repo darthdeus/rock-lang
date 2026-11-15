@@ -183,21 +183,33 @@ impl StoneHarness {
         std::fs::write(&full, content).expect("write_file");
     }
 
-    /// Block until at least `n_after` reload events have been observed,
-    /// or the timeout elapses. `n_after` is the total reload-event count
-    /// to wait for, not a delta.
+    /// Wait for `n_total` successful reloads, failing on any compile error.
+    /// Tests expecting errors use `await_settled_after` and inspect `error_log`.
     pub fn await_reload_count(&self, n_total: usize, timeout: Duration) -> Vec<ReloadEvent> {
         let deadline = Instant::now() + timeout;
         loop {
+            if let Some(error) = self.error_log().first() {
+                panic!(
+                    "await_reload_count: compile failed while waiting for {n_total} reloads: {error:?}\n{}",
+                    self.failure_context(),
+                );
+            }
             let snapshot = self.reload_log();
             if snapshot.len() >= n_total {
                 return snapshot;
             }
+            if let Some(status) = self.child_exit() {
+                panic!(
+                    "await_reload_count: child exited ({status}) while waiting for {n_total} reloads\n{}",
+                    self.failure_context(),
+                );
+            }
             if Instant::now() >= deadline {
                 panic!(
-                    "await_reload_count: timed out waiting for {} reloads, observed {}",
+                    "await_reload_count: timed out waiting for {} reloads, observed {}\n{}",
                     n_total,
                     snapshot.len(),
+                    self.failure_context(),
                 );
             }
             std::thread::sleep(Duration::from_millis(20));
