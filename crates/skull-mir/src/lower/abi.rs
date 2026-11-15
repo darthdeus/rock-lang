@@ -1359,12 +1359,12 @@ impl RepArena {
     }
 
     pub(crate) fn ret_slot(&self, id: RepId) -> RetSlot {
-        match self.get(id).layout().clone() {
+        match self.get(id).layout() {
             RepLayout::Opaque | RepLayout::Foreign { .. } => RetSlot::Opaque,
-            RepLayout::Leaves(shape) => RetSlot::Leaves(shape),
+            RepLayout::Leaves(shape) => RetSlot::Leaves(shape.clone()),
             RepLayout::Tuple { slots, nullable } => RetSlot::Nested(TupleRetShape {
-                slots: slots.into_iter().map(|slot| self.ret_slot(slot)).collect(),
-                nullable,
+                slots: slots.iter().map(|&slot| self.ret_slot(slot)).collect(),
+                nullable: *nullable,
             }),
         }
     }
@@ -1377,10 +1377,10 @@ impl RepArena {
     }
 
     pub(crate) fn tuple_shape(&self, id: RepId) -> Option<TupleRetShape> {
-        match self.get(id).layout().clone() {
+        match self.get(id).layout() {
             RepLayout::Tuple { slots, nullable } => Some(TupleRetShape {
-                slots: slots.into_iter().map(|slot| self.ret_slot(slot)).collect(),
-                nullable,
+                slots: slots.iter().map(|&slot| self.ret_slot(slot)).collect(),
+                nullable: *nullable,
             }),
             _ => None,
         }
