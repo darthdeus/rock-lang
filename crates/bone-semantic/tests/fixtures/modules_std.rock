@@ -179,6 +179,7 @@
 // prelude: __op_sub
 // prelude: __range
 // prelude: __range_uint
+// prelude: __rock_assert_error_logs
 // prelude: __rock_c_struct_of
 // prelude: __rock_clear_hot_reload_callbacks
 // prelude: __rock_col_capacity
@@ -293,6 +294,7 @@
 // prelude: arena_slot_live
 // prelude: assert
 // prelude: assert_eq_simple
+// prelude: assert_error_logs
 // prelude: assert_false
 // prelude: assert_ne_simple
 // prelude: assert_not_null
