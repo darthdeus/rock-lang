@@ -206,8 +206,8 @@ after the runtime-test summary, which can show `0/0` for an error-only file.
 
 ## Compiler tests and checking the checks
 
-From the repository root, plain `cargo test` selects every workspace member except
-`stone-glsl-runner`. This default suite needs LuaJIT and Node, but not SDL2:
+From the repository root, plain `cargo test` selects the compiler-focused default
+workspace members. This default suite needs LuaJIT and Node, but not SDL2:
 
 ```sh
 cargo test --locked --no-fail-fast
@@ -217,7 +217,9 @@ Plain `cargo build` uses the same selection. The optional GPU runner can be buil
 explicitly with `cargo build --locked -p stone-glsl-runner`.
 
 For the full Rust workspace (including the runner), install SDL2 development libraries and `pkg-config`
-(the shader runner uses them to discover SDL2), plus LuaJIT and Node on `PATH`:
+(the shader runner uses them to discover SDL2), plus LuaJIT and Node on `PATH`.
+The native tests also require `cargo-nextest`; see the [README](../README.md) for
+Linux native dependencies:
 
 ```sh
 # macOS (Homebrew)
@@ -225,7 +227,9 @@ brew install sdl2 pkg-config
 # Debian/Ubuntu
 sudo apt-get install libsdl2-dev pkg-config
 
-cargo test --locked --workspace --no-fail-fast
+cargo test --locked --workspace --exclude stone-rs --exclude stone-gl --exclude stone-capture --exclude stone-imgui-abi
+python3 scripts/test_native.py
+cargo test --locked -p stone-rs -p stone-gl -p stone-capture -p stone-imgui-abi --doc
 ```
 
 Run the Rust suites for every crate changed, for example:
