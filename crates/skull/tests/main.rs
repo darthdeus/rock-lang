@@ -4,6 +4,7 @@
 
 mod affine_bounds;
 mod common;
+mod compiler_admission;
 mod constructor_bounds;
 mod private_records;
 mod private_vectors;

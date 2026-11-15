@@ -51,6 +51,9 @@ pub enum ClosureGate {
 }
 
 /// Lower and type-check `modules`.
+/// Recovered trees and recorded body errors remain available to tooling.
+/// [`check_modules`] applies the syntax and macro admission gates, and
+/// [`compile_modules`] also refuses recorded body errors before emission.
 pub fn semantic_pass(
     modules: &mut ModuleSet,
     aliases: &NsAliases,

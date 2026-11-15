@@ -1,0 +1,69 @@
+//! Error: frame refs cannot remain usable across coroutine suspension
+//! Tags: refs,coroutines
+
+//=== TEST CASE: parameter_used_after_yield_Generic ===
+//! expect: frame borrow is used after a coroutine suspension
+struct Player { hp: int }
+co fn tick(player: ref Player) -> Coroutine<int> {
+    yield 1
+    player.hp = 2
+}
+fn main() {}
+
+//=== TEST CASE: local_ref_used_after_yield_Generic ===
+//! expect: frame borrow is used after a coroutine suspension
+value Cell { hp: int }
+co fn tick() -> Coroutine<int> {
+    let cell = Cell { hp: 1 }
+    let borrowed: ref Cell = cell
+    yield 1
+    borrowed.hp = 2
+}
+fn main() {}
+
+//=== TEST CASE: alias_used_after_yield_Generic ===
+//! expect: frame borrow is used after a coroutine suspension
+value Cell { hp: int }
+co fn tick() -> Coroutine<int> {
+    let cell = Cell { hp: 1 }
+    let borrowed: ref Cell = cell
+    let alias = borrowed
+    yield 1
+    alias.hp = 2
+}
+fn main() {}
+
+//=== TEST CASE: conditional_yield_reaches_ref_use_Generic ===
+//! expect: frame borrow is used after a coroutine suspension
+value Cell { hp: int }
+co fn tick(pause: bool) -> Coroutine<int> {
+    let cell = Cell { hp: 1 }
+    let borrowed: ref Cell = cell
+    if pause { yield 1 }
+    borrowed.hp = 2
+}
+fn main() {}
+
+//=== TEST CASE: loop_backedge_reaches_ref_use_Generic ===
+//! expect: frame borrow is used after a coroutine suspension
+value Cell { hp: int }
+co fn tick() -> Coroutine<int> {
+    let cell = Cell { hp: 1 }
+    let borrowed: ref Cell = cell
+    while true {
+        borrowed.hp = 2
+        yield 1
+    }
+}
+fn main() {}
+
+//=== TEST CASE: defer_uses_ref_after_yield_Generic ===
+//! expect: frame borrow is used after a coroutine suspension
+value Cell { hp: int }
+co fn tick() -> Coroutine<int> {
+    let cell = Cell { hp: 1 }
+    let borrowed: ref Cell = cell
+    defer { borrowed.hp = 2 }
+    yield 1
+}
+fn main() {}

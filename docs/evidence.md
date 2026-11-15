@@ -80,6 +80,32 @@ inventory includes six existing TODO cases; the executed error suite reports
 both backends' dynamic shift checks and deliberate mutations of this error
 family. Wrong diagnostics and valid replacement programs each fail all 18 cases.
 
+## Reference suspension and compiler admission
+
+The [reference audit](reference-suspension-decisions.md) adds 12 semantic
+fixture sections, six diagnostic-pinned rejection cases and four runtime
+controls on LuaJIT and JS. A disabled suspension policy was detected and
+restored. Wrong diagnostic and valid-program controls fail all six rejection
+assertions. The static rejection inventory is now 520 cases, with 377 unpinned;
+the six new cases did not weaken existing assertions.
+
+The same audit reproduced an open construction-time discrepancy: an explicit
+ref can survive between coroutine creation and first resume, whereas implicit
+identity parameters are rejected at construction. The executable record
+`reference-construction-discrepancy` preserves the observation without adopting
+it as the intended lifetime rule.
+
+The [admission audit](compiler-admission-decisions.md) adds nine compiler-entry
+tests. Bypassing the initial syntax, expanded-syntax or macro gates makes their
+targeted checks fail. Valid controls reach real Lua emission. One existing
+editor-query test checks partial recovery in-process, not editor transport.
+These gates serve different stages; the audit found no justified consolidation.
+
+All twelve evidence records are runnable through the shared checker. The
+remaining read-only audits identified an unused graph map, a disabled lint unit
+test, and a possible direct-call rollback gap during failed hot reload. The last
+is a hypothesis requiring a reproducer, not an established compiler defect.
+
 ## Useful measurements
 
 | Measure | Use | Interpretation boundary |
@@ -98,12 +124,13 @@ until their behavioral purposes are understood.
 
 ## Next actions and open questions
 
-1. Audit one reference/aliasing concern through its documented rule, admission
-   checks and runtime behavior; choose a specific boundary before editing.
-2. Strengthen that concern's rejection tests with diagnostic assertions and
-   valid-program controls, using the operator family as the worked example.
-3. Simplify implementation only where that audit identifies duplicated rules
-   or unnecessary machinery; retain the original regression evidence.
+1. Verify and remove the write-only `coroutine_rejections` map while preserving
+   published graph rejections and their position index; enable the existing
+   lint unit test omitted by its crate manifest.
+2. Reproduce the suspected hot-reload rollback gap: retain a direct caller as
+   well as a CodeRef, fail a late initializer, and check both still run old code.
+3. Settle the explicit-ref construction-time boundary before changing that
+   language rule; the current accepted behavior is recorded as a discrepancy.
 
 Open: which concern should be the first substantial cleanup; which documented
 behaviors are deliberate language commitments versus implementation accidents;

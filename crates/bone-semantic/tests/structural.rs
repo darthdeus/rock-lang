@@ -1375,8 +1375,6 @@ fn f(v: [int]) -> int { return v[0] }",
         "struct Player { hp: int }\nfn read(player: ref Player) -> int { player.hp }\nfn main() -> int { read(Player { hp: 1 }) }",
         // a persistent closure environment cannot contain a ref
         "struct Player { hp: int }\nfn bad(player: ref Player) -> () -> int { return () => player.hp }",
-        // a coroutine frame cannot retain a ref across yield
-        "struct Player { hp: int }\nco fn bad(player: ref Player) -> Coroutine<int> { yield 1  player.hp = 1 }",
     ];
     for src in cases {
         assert!(bone_rejects(src), "must be rejected: {src}");
@@ -1492,8 +1490,6 @@ fn main(player: ref Player) {
     from_player.x = from_global.x
 }
 "#,
-        // last use before yield does not put the ref in the coroutine frame
-        "struct Player { hp: int }\nco fn fine(player: ref Player) -> Coroutine<int> { player.hp = 1  yield 1 }",
         // last use before yield does not retain the identity borrow
         "struct Player { hp: int }\nfn make_player() -> Player { return Player { hp: 1 } }\nco fn fine() -> Coroutine<int> { let player = make_player()  player.hp = 2  yield 1 }",
     ];

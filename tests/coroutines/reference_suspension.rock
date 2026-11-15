@@ -1,0 +1,81 @@
+// Persist copied values and handles across suspension, and resolve a fresh
+// reference in each resume segment.
+
+value SuspensionCell { hp: int }
+struct SuspensionPlayer { hp: int }
+
+co fn copied_value_survives() -> Coroutine<int> {
+    let cell = SuspensionCell { hp: 1 }
+    let borrowed: ref SuspensionCell = cell
+    borrowed.hp = 7
+    let snapshot = borrowed.hp
+    yield snapshot
+    yield snapshot
+}
+
+@test
+fn value_copied_from_ref_survives_suspension() {
+    let task = copied_value_survives()
+    assert_eq(task.resume() ?? -1, 7)
+    assert_eq(task.resume() ?? -1, 7)
+    assert_eq(task.resume(), null)
+}
+
+co fn fresh_ref_each_iteration() -> Coroutine<int> {
+    let cell = SuspensionCell { hp: 1 }
+    for i in 0..3 {
+        let borrowed: ref SuspensionCell = cell
+        borrowed.hp += 1
+        yield borrowed.hp
+    }
+}
+
+@test
+fn fresh_ref_writes_through_each_resume() {
+    let task = fresh_ref_each_iteration()
+    assert_eq(task.resume() ?? -1, 2)
+    assert_eq(task.resume() ?? -1, 3)
+    assert_eq(task.resume() ?? -1, 4)
+    assert_eq(task.resume(), null)
+}
+
+co fn resolve_each_resume(entity: Entity<SuspensionPlayer>) -> Coroutine<int> {
+    let before = entity.borrow().unwrap()
+    before.hp = 7
+    yield before.hp
+    let after = entity.borrow().unwrap()
+    yield after.hp
+}
+
+@test
+fn fresh_entity_borrow_observes_mutation_between_resumes() {
+    let players: Arena<SuspensionPlayer> = arena_new()
+    let entity = players.insert(SuspensionPlayer { hp: 1 })
+    let task = resolve_each_resume(entity)
+    assert_eq(task.resume() ?? -1, 7)
+    let player = entity.borrow().unwrap()
+    player.hp = 19
+    assert_eq(task.resume() ?? -1, 19)
+    assert_eq(task.resume(), null)
+}
+
+co fn resolve_if_present(entity: Entity<SuspensionPlayer>) -> Coroutine<int> {
+    let before = entity.borrow().unwrap()
+    yield before.hp
+    if let after = entity.borrow() {
+        yield after.hp
+    } else {
+        yield -1
+    }
+}
+
+@test
+fn fresh_entity_borrow_observes_removal_between_resumes() {
+    let players: Arena<SuspensionPlayer> = arena_new()
+    let entity = players.insert(SuspensionPlayer { hp: 5 })
+    let task = resolve_if_present(entity)
+    assert_eq(task.resume() ?? -1, 5)
+    entity.remove()
+    assert_eq(task.resume() ?? -2, -1)
+    assert_eq(task.resume(), null)
+}

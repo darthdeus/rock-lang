@@ -84,5 +84,70 @@
     "checks": [
       {"command": ["python3", "perf/evidence/check_operator_rejections.py"], "exit": 0, "output": "original: 18 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 18 failed; 0 todo\\nvalid-programs: 0 passed; 18 failed; 0 todo"}
     ]
+  },
+  {
+    "id": "reference-suspension-boundary",
+    "statement": "The selected explicit-reference uses across yield are rejected for the frame-borrow reason; last uses before yield and fresh acquisition are admitted.",
+    "kind": "intended rule",
+    "limit": "Twelve fixture sections plus six CLI cases, not a complete lifetime proof. Construction before first resume is a separate open discrepancy.",
+    "sources": [
+      {"path": "crates/bone-semantic/tests/fixtures/reference_suspension.rock", "anchor": "//- parameter_used_after_yield"},
+      {"path": "crates/bone-inference/src/lib.rs", "anchor": "RefSuspensionPolicy"}
+    ],
+    "checks": [
+      {"command": ["cargo", "test", "--locked", "-p", "bone-semantic", "--test", "fixtures", "check_rock::reference_suspension.rock", "--", "--exact"], "exit": 0, "output": "test result: ok\\. 1 passed; 0 failed;"},
+      {"command": ["python3", "perf/evidence/check_operator_rejections.py", "--fixture", "tests/errors/reference_suspension.rock.err", "--cases", "6"], "exit": 0, "output": "original: 6 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 6 failed; 0 todo\\nvalid-programs: 0 passed; 6 failed; 0 todo"}
+    ]
+  },
+  {
+    "id": "reference-suspension-runtime",
+    "statement": "Copied scalar values survive suspension, and freshly acquired references observe mutation or removal between resumes.",
+    "kind": "observed behavior",
+    "limit": "Four execution cases on each backend; no claim that every borrow shape or lifetime is safe.",
+    "sources": [
+      {"path": "tests/coroutines/reference_suspension.rock", "anchor": "fn fresh_entity_borrow_observes_removal_between_resumes()"}
+    ],
+    "checks": [
+      {"command": ["cargo", "run", "--quiet", "--locked", "-p", "rock-cli", "--bin", "rock", "--", "test", "tests/coroutines/reference_suspension.rock"], "exit": 0, "output": "4/4 @tests passed \\(0 failed\\)"},
+      {"command": ["cargo", "run", "--quiet", "--locked", "-p", "rock-cli", "--bin", "rock", "--", "test", "tests/coroutines/reference_suspension.rock", "--backend", "js"], "exit": 0, "output": "4/4 @tests passed \\(0 failed, 0 skipped, 0 not for js\\)"}
+    ]
+  },
+  {
+    "id": "reference-construction-discrepancy",
+    "statement": "A coroutine can retain an explicit ref parameter between construction and first resume, despite construction-time rejection of implicit identity parameters.",
+    "kind": "open discrepancy",
+    "limit": "The probe establishes this LuaJIT behavior only. The intended construction-time lifetime rule remains unresolved; passing is reproduction, not a safety certification.",
+    "sources": [
+      {"path": "perf/evidence/reference_construction.rock", "anchor": "fn deferred_read()"},
+      {"path": "docs/reference-suspension-decisions.md", "anchor": "## Open questions"}
+    ],
+    "checks": [
+      {"command": ["cargo", "run", "--quiet", "--locked", "-p", "rock-cli", "--bin", "rock", "--", "test", "perf/evidence/reference_construction.rock"], "exit": 0, "output": "1/1 @tests passed \\(0 failed\\)"}
+    ]
+  },
+  {
+    "id": "compiler-admission-gates",
+    "statement": "The shared compiler entry points reject selected recovered source errors, expansion errors and macro conflicts before emission; valid controls reach real Lua emission.",
+    "kind": "architecture behavior",
+    "limit": "Nine selected tests with stage and host-callback checks. Valid emitted code is not executed by this suite; incremental and all other recovery forms are outside this claim.",
+    "sources": [
+      {"path": "crates/skull/src/pipeline.rs", "anchor": "pub fn check_modules("},
+      {"path": "crates/skull/tests/compiler_admission.rs", "anchor": "fn repaired_source_and_valid_macros_reach_real_emission()"}
+    ],
+    "checks": [
+      {"command": ["cargo", "test", "--locked", "-p", "skull", "--test", "skull_tests", "compiler_admission::"], "exit": 0, "output": "test result: ok\\. 9 passed; 0 failed;"}
+    ]
+  },
+  {
+    "id": "editor-partial-recovery",
+    "statement": "The selected in-process editor query returns partial inlay hints for recovered source.",
+    "kind": "observed behavior",
+    "limit": "One API test; no claim about editor-client transport or other query kinds.",
+    "sources": [
+      {"path": "crates/bone-query/tests/cw7_backend_failure_reporting.rs", "anchor": "fn recoverable_syntax_keeps_partial_hints_without_fallback_warnings"}
+    ],
+    "checks": [
+      {"command": ["cargo", "test", "--locked", "-p", "bone-query", "recoverable_syntax_keeps_partial_hints_without_fallback_warnings"], "exit": 0, "output": "test result: ok\\. 1 passed; 0 failed;"}
+    ]
   }
 ]

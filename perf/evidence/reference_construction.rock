@@ -1,0 +1,12 @@
+// Observed deferred-construction behavior, not a settled lifetime contract.
+value Cell { hp: int }
+co fn read(cell: ref Cell) -> Coroutine<int> { yield cell.hp }
+
+@test
+fn deferred_read() {
+    let cell = Cell { hp: 1 }
+    let borrowed: ref Cell = cell
+    let task = read(borrowed)
+    cell.hp = 19
+    assert_eq(task.resume() ?? -1, 19)
+}
