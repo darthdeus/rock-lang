@@ -12,7 +12,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("artifacts", type=Path)
 parser.add_argument("--runtime", type=Path, required=True, help="gamelibs platform directory")
 parser.add_argument("--stone-lib", type=Path, required=True)
-parser.add_argument("--case", choices=("scene", "mesh"), default="scene")
+parser.add_argument("--case", choices=("scene", "mesh", "segment"), default="scene")
 parser.add_argument("--corners", action="store_true", help="mesh optional corner-lane stress")
 parser.add_argument("--independent-corners", action="store_true", help="mesh distinct per-corner values")
 parser.add_argument("--rounds", type=int, default=6)
@@ -47,7 +47,7 @@ for metric in ("time", "alloc", "trace"):
                                     env=env, text=True, capture_output=True, timeout=120)
             log = f"{metric}-{pair}-{arm}.log"
             (outdir / log).write_text(result.stdout + result.stderr)
-            if result.returncode or f"{args.case.upper() if args.case == 'mesh' else 'PIXEL'}_OK" not in result.stdout:
+            if result.returncode or f"{'PIXEL' if args.case == 'scene' else args.case.upper()}_OK" not in result.stdout:
                 raise RuntimeError(f"Failed {log}: {result.stdout}\n{result.stderr}")
             lines = [line.split() for line in result.stdout.splitlines() if line.startswith("AUDIT ")]
             if len(lines) != 1 or lines[0][1:3] != [args.case, metric]:

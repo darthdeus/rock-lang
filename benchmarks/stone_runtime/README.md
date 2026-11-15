@@ -23,6 +23,8 @@ python3 benchmarks/stone_runtime/measure.py /tmp/stone-runtime \
   --case mesh --independent-corners --outdir /tmp/stone-runtime/mesh
 ```
 
+Use `--case segment` for the ribbon writer (the same three capacity arms).
+
 Use `--independent-corners` for distinct computations in all 16 optional
 corner lanes. `--corners` reuses existing position/tint values instead; omitting
 both options uses scalar defaults. Use the repository's job scheduler where required.
@@ -138,3 +140,30 @@ mode records coalescing during measurement; other trace interruptions and
 return-to-lower-frame aborts remain. #264 stays open for unreserved callers:
 the public API supplies the measured early-growth path without adding new
 compiler transformations or weakening capacity/GC-pressure checks.
+
+## Ribbon segment growth
+
+`--case segment` builds adjacent ribbon segments with matching shared
+cross-sections and independently varying positions, UVs, colors and depth.
+It uses the same 100 meshes, 93 segments, 30 warmup and 120 measured iterations,
+three capacity strategies and six alternating rounds as the quad probe.
+After measurement, all 13 fields of all 55800 vertices are checked, including
+copied prefixes and shared cross-sections. All 54 processes passed; deliberate
+colorize corruption failed the validator.
+
+On the same x86 CPU/runtime above, source `13f7320a` with compiler/native
+`d2b2f964` reproduced five warmup coalescing aborts in every ordinary-growth
+trace run. Early reservation and initial reservation had none. No arm had
+measured coalescing; other trace interruptions remained with early reservation.
+
+| Arm | Median us (process range) | p95 us | Gross Lua bytes/iteration |
+| --- | ---: | ---: | ---: |
+| Ordinary growth | 1901.16 (927.78-2426.33) | 6105.91 | 2055828 |
+| reserve_quads before arguments | 977.86 (846.49-1580.42) | 3635.47 | 2055963 |
+| Initially capacity 128 | 1081.89 (1069.65-1131.49) | 1648.57 | 205832 |
+
+Host contention and overlapping ranges prevent a timing speedup claim.
+The existing reservation API avoids this writer's growth coalescing witness;
+no further production change is justified by these results. This is a public
+SpriteMesh writer probe, not an end-to-end measurement of Stone's Trail path,
+which uses a separate RenderBatch reservation wrapper.

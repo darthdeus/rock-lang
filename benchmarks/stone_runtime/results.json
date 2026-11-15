@@ -337,5 +337,211 @@
         "abort_reasons": []
       }
     }
+  },
+  "segment_pressure": {
+    "build": {
+      "revision": "13f7320ac43d407a17109e664efb752cae88853e",
+      "compiler_sha256": "c2e1f776d67a9811b4f35e349b78d5db69211c25f796825db95cd05c737bfaf7",
+      "outputs": {
+        "retained": "40a5569337039b9ca2b1f77585c7e01dbb83802fa4488a443d72aaa3c9fc167a",
+        "fresh": "d812896f4ba8aad76da4b85100ebc518fcdf33dd09a865938aee026bca2d1158"
+      }
+    },
+    "native_sha256": "9880b2d3c38da64ad904ec93b26cd3e57638e3941516b83331beec53fa711395",
+    "case": "segment",
+    "frames": 120,
+    "warmup": 30,
+    "engine_revision": "13f7320ac43d407a17109e664efb752cae88853e",
+    "compiler_revision": "d2b2f96400f61a6a1c9ca427313f82118e6f5d9d",
+    "native_revision": "d2b2f96400f61a6a1c9ca427313f82118e6f5d9d",
+    "processes": 54,
+    "validation": "All 13 fields of all 55800 vertices checked after observers stop in every process; deliberately corrupted colorize rejected.",
+    "arms": {
+      "growth": {
+        "time_median_us": [
+          2426.33,
+          1967.4235,
+          927.7775,
+          2079.7735,
+          1834.895,
+          949.61
+        ],
+        "time_p95_us": [
+          9379.419,
+          6479.659,
+          3739.855,
+          8376.816,
+          5732.169,
+          3426.431
+        ],
+        "gross_lua_bytes_per_iteration": [
+          2066741.333,
+          2055825.867,
+          2055833.333,
+          2055774.267,
+          2055772.067,
+          2055829.767
+        ],
+        "warmup_aborts": [
+          5,
+          9,
+          9,
+          9,
+          9,
+          9
+        ],
+        "measured_aborts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "warmup_coalescing_aborts": [
+          5,
+          5,
+          5,
+          5,
+          5,
+          5
+        ],
+        "measured_coalescing_aborts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "abort_reasons": [
+          "ABORT 4 warmup:NYI: return to lower frame detail=nil",
+          "ABORT 5 warmup:NYI: register coalescing too complex detail=nil"
+        ]
+      },
+      "early": {
+        "time_median_us": [
+          948.9505,
+          848.287,
+          1580.4165,
+          1037.081,
+          846.491,
+          1006.7785
+        ],
+        "time_p95_us": [
+          3730.936,
+          3219.778,
+          4314.174,
+          3540.0,
+          2785.338,
+          4999.661
+        ],
+        "gross_lua_bytes_per_iteration": [
+          2055969.067,
+          2055964.233,
+          2055951.033,
+          2055980.7,
+          2055958.033,
+          2055962.0
+        ],
+        "warmup_aborts": [
+          4,
+          4,
+          4,
+          3,
+          4,
+          4
+        ],
+        "measured_aborts": [
+          0,
+          0,
+          0,
+          1,
+          0,
+          0
+        ],
+        "warmup_coalescing_aborts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "measured_coalescing_aborts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "abort_reasons": [
+          "ABORT 1 measure:error thrown or hook called during recording detail=nil",
+          "ABORT 1 warmup:error thrown or hook called during recording detail=nil",
+          "ABORT 2 warmup:leaving loop in root trace detail=nil",
+          "ABORT 4 warmup:NYI: return to lower frame detail=nil"
+        ]
+      },
+      "reserved": {
+        "time_median_us": [
+          1131.4945,
+          1069.649,
+          1082.1345,
+          1081.652,
+          1079.809,
+          1102.2835
+        ],
+        "time_p95_us": [
+          2230.85,
+          1400.138,
+          1993.185,
+          1294.256,
+          1398.096,
+          1897.003
+        ],
+        "gross_lua_bytes_per_iteration": [
+          205906.467,
+          205851.467,
+          205831.967,
+          205012.767,
+          205832.767,
+          205831.967
+        ],
+        "warmup_aborts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "measured_aborts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "warmup_coalescing_aborts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "measured_coalescing_aborts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "abort_reasons": []
+      }
+    }
   }
 }

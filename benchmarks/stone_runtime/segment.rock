@@ -1,0 +1,80 @@
+// Adjacent segments share a cross-section; each lane has its own computation.
+fn audit_segment_left(q: int) -> Vec2 {
+    return v(float(q), float(q % 13) / 16.0)
+}
+
+fn audit_segment_right(q: int) -> Vec2 {
+    return v(float(q) + 0.5, float(q % 17) / 16.0 + 2.0)
+}
+
+fn audit_segment_left_uv(q: int) -> Vec2 {
+    return v(float(q % 19) / 32.0, float(q % 23) / 32.0)
+}
+
+fn audit_segment_right_uv(q: int) -> Vec2 {
+    return v(float(q % 29) / 32.0, float(q % 31) / 32.0)
+}
+
+fn audit_segment_color(q: int) -> Color {
+    return Color { r: float(q % 37) / 64.0, g: float(q % 41) / 64.0,
+        b: float(q % 43) / 64.0, a: float(q % 47) / 64.0 }
+}
+
+fn audit_segment_depth(q: int) -> float { return float(q % 53) / 64.0 }
+
+fn segment_audit() {
+    let arm = os_getenv("AUDIT_ARM") ?? "growth"
+    assert(arm == "growth" || arm == "early" || arm == "reserved")
+    let capacity = if arm == "reserved" { 128 } else { 8 }
+    let early = arm == "early"
+    audit_measure("segment", get_env_int("AUDIT_FRAMES", 120), (frame) => {
+        let sink = 0.0
+        for index in 0..100 {
+            let mesh = SpriteMesh {
+                vbo: native_buffer_vertex(capacity * 6), capacity, count: 0,
+                texture: sampled_image(Image(0)), tex_w: 32.0, tex_h: 16.0,
+                inset_x: 0.0, inset_y: 0.0, z_layer: 0,
+                depth: DepthMode::Off, blend: BlendMode::Alpha,
+            }
+            for i in 0..93 {
+                if early { reserve_quads(mesh, 1) }
+                let q = index * 93 + i + frame % 7
+                sprite_mesh_add_segment(mesh,
+                    audit_segment_left(q), audit_segment_left_uv(q),
+                    audit_segment_right(q), audit_segment_right_uv(q), audit_segment_color(q),
+                    audit_segment_left(q + 1), audit_segment_left_uv(q + 1),
+                    audit_segment_right(q + 1), audit_segment_right_uv(q + 1), audit_segment_color(q + 1),
+                    audit_segment_depth(q), audit_segment_depth(q + 1))
+            }
+            assert(mesh.count == 558 && mesh.capacity == 128)
+            let last = mesh.vbo[92 * 6].pos.x as float
+            assert(last == float(index * 93 + 92 + frame % 7))
+            sink += last
+            if frame == 0 { audit_check_segment_mesh(mesh, index) }
+        }
+        assert(sink == 469550.0 + float(frame % 7) * 100.0)
+    })
+    print("SEGMENT_OK")
+}
+
+fn audit_check_segment_mesh(mesh: SpriteMesh, index: int) {
+    for i in 0..93 {
+        for j in 0..6 {
+            // a_left, a_right, b_right, b_left, a_left, b_right.
+            let next = j == 2 || j == 3 || j == 5
+            let right = j == 1 || j == 2 || j == 5
+            let q = index * 93 + i + if next { 1 } else { 0 }
+            let pos = if right { audit_segment_right(q) } else { audit_segment_left(q) }
+            let uv = if right { audit_segment_right_uv(q) } else { audit_segment_left_uv(q) }
+            let color = audit_segment_color(q)
+            let actual = mesh.vbo[i * 6 + j]
+            assert(actual.pos.x as float == pos.x && actual.pos.y as float == pos.y)
+            assert(actual.uv.x as float == uv.x && actual.uv.y as float == uv.y)
+            assert(actual.color.x as float == color.r && actual.color.y as float == color.g)
+            assert(actual.color.z as float == color.b && actual.color.w as float == color.a)
+            assert(actual.pivot_y as float == audit_segment_depth(q))
+            assert(actual.entity_id == 0.0 && actual.colorize == 0.0)
+            assert(actual.section.x == 0.0 && actual.section.y == 0.0)
+        }
+    }
+}
