@@ -484,11 +484,12 @@ impl<'a> BodyCtx<'a> {
                 }
             }
             Expr::Call { .. } | Expr::SafeNavCall { .. } => {
-                if self
-                    .ty(e)
-                    .is_some_and(|ty| ref_target(self.ws, self.bi, ty).is_some())
-                {
-                    if let Some(callee) = self.resolved(e) {
+                if let Some(target) = self.ty(e).and_then(|ty| ref_target(self.ws, self.bi, ty)) {
+                    // A generic summary may discover Arena<T> before T is
+                    // instantiated. Reference-struct rows keep stable identity.
+                    if !is_reference_struct(self.ws, self.bi, target)
+                        && let Some(callee) = self.resolved(e)
+                    {
                         let generics = self
                             .bi
                             .call_generic_bindings
@@ -506,7 +507,7 @@ impl<'a> BodyCtx<'a> {
                         if let Some(element) = self
                             .ty(arg)
                             .and_then(|ty| arena_element(self.ws, Some(self.bi), ty))
-                            && !matches!(strip_ref(self.ws, Some(self.bi), element), Some((_, TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })) if self.ws.struct_by_name.get(&name).is_some_and(|sid| !self.ws.module(sid.module).structs[sid.def].is_value))
+                            && !is_reference_struct(self.ws, self.bi, element)
                         {
                             out.push(Root {
                                 key: format!("Arena<{}>", self.key(element)),
@@ -528,6 +529,10 @@ impl<'a> BodyCtx<'a> {
             _ => {}
         }
     }
+}
+
+fn is_reference_struct(ws: &Workspace, bi: &BodyInference, ty: TyId) -> bool {
+    matches!(strip_ref(ws, Some(bi), ty), Some((_, TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })) if ws.struct_by_name.get(&name).is_some_and(|sid| !ws.module(sid.module).structs[sid.def].is_value))
 }
 
 fn ref_target(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<TyId> {
