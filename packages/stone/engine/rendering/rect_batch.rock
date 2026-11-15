@@ -851,22 +851,23 @@ pub @preflight("__sprite_mesh_prepare_append", "__sprite_mesh_add_quad_tail") fn
     corner_u: Vec4? = null,
     corner_v: Vec4? = null,
 ) {
-    let mesh = m
-    if mesh.count >= mesh.capacity * RECT_BATCH_VERTS_PER_RECT {
-        __grow_sprite_mesh_buf(mesh)
+    // Keep the ordinary path inline: forwarding to the tail pushed its
+    // LuaJIT loop trace past the tested arm64 constant-slot budget.
+    if m.count >= m.capacity * RECT_BATCH_VERTS_PER_RECT {
+        __grow_sprite_mesh_buf(m)
     }
-    let u1 = (float(src.x) + mesh.inset_x) / mesh.tex_w
-    let v1 = (float(src.y) + mesh.inset_y) / mesh.tex_h
-    let u2 = (float(src.x + src.w) - mesh.inset_x) / mesh.tex_w
-    let v2 = (float(src.y + src.h) - mesh.inset_y) / mesh.tex_h
+    let u1 = (float(src.x) + m.inset_x) / m.tex_w
+    let v1 = (float(src.y) + m.inset_y) / m.tex_h
+    let u2 = (float(src.x + src.w) - m.inset_x) / m.tex_w
+    let v2 = (float(src.y + src.h) - m.inset_y) / m.tex_h
 
-    let vi = mesh.count
-    __sprite_mesh_push_quad4(mesh.vbo, vi,
+    let vi = m.count
+    __sprite_mesh_push_quad4(m.vbo, vi,
         tl.x, tl.y, tr.x, tr.y, br.x, br.y, bl.x, bl.y,
         u1, u2, v1, v2, tint.r, tint.g, tint.b, tint.a, py, colorize,
         corner_alpha, corner_colorize, corner_u, corner_v)
 
-    mesh.count = mesh.count + RECT_BATCH_VERTS_PER_RECT
+    m.count = m.count + RECT_BATCH_VERTS_PER_RECT
 }
 
 fn __sprite_mesh_add_quad_tail(
