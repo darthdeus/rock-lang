@@ -1525,6 +1525,118 @@ fn fixing_an_always_emitted_call_clears_its_root_hole() {
     case.assert_matches_fresh("always-emitted hole cleared");
 }
 
+#[test]
+fn root_hole_refresh_retains_other_owners_and_counts_backend_siblings_once() {
+    let main = r#"
+const A: int = takes(gen_id)
+const B: int = takes(gen_id)
+const C: int = takes(other_id)
+fn zz_start() { let n = gen_id(7) }
+"#;
+    let lib = r#"
+@nomangle fn gen_id<T>(x: T) -> T { return x }
+@nomangle inline(js) fn gen_id<T>(x: T) -> T = "return x;"
+fn mon_id(x: int) -> int { return x }
+fn takes(f: fn(int) -> int) -> int { return f(1) }
+fn other_id<T>(x: T) -> T { return x }
+"#;
+    let mut case = Case::new(main, lib);
+    let gen_hole = &case.graph.uninstantiated_roots["gen_id"];
+    assert_eq!(gen_hole.always_emitted_sites.len(), 2);
+    assert_eq!(gen_hole.instances, 1);
+    assert!(gen_hole.generic_root);
+    assert_eq!(case.graph.uninstantiated_roots.len(), 4);
+    assert_eq!(
+        case.ws().functions_by_name[&ustr::Ustr::from("gen_id")].len(),
+        2,
+        "the fixture must contain two backend siblings"
+    );
+    let initial = case.graph.run_stats;
+    assert_eq!(initial.root_hole_names_examined, 8);
+    assert_eq!(initial.root_hole_rows_examined, 3);
+    assert_eq!(initial.root_hole_decls_examined, 9);
+
+    // Equal-length edits isolate refresh from span relocation.
+    let one_fixed = main.replace(
+        "const A: int = takes(gen_id)",
+        "const A: int = takes(mon_id)",
+    );
+    let both_fixed = one_fixed.replace(
+        "const B: int = takes(gen_id)",
+        "const B: int = takes(mon_id)",
+    );
+    for (source, remaining) in [(one_fixed, 1), (both_fixed, 0)] {
+        let res = case.session.update_file(MAIN, &source).expect("update");
+        assert_eq!(res.tier, UpdateTier::BodyOnly);
+        assert!(!res.reinferred.is_empty());
+        let edits = res.body_update.edit.into_iter().collect::<Vec<_>>();
+        let stats = case.graph.update_bodies_with_root_delta(
+            case.session.workspace(),
+            &[],
+            &[],
+            &res.reinferred,
+            &edits,
+        );
+        let gen_hole = &case.graph.uninstantiated_roots["gen_id"];
+        assert_eq!(gen_hole.always_emitted_sites.len(), remaining);
+        assert!(gen_hole.generic_root);
+        assert_eq!(gen_hole.instances, 1);
+        assert_eq!(case.graph.uninstantiated_roots.len(), 4);
+        assert_eq!(
+            case.graph.uninstantiated_roots["other_id_T"]
+                .always_emitted_sites
+                .len(),
+            1
+        );
+        assert_eq!(stats.census.root_hole_names_examined, 2);
+        assert_eq!(stats.census.root_hole_rows_examined, remaining + 1);
+        assert_eq!(stats.census.root_hole_decls_examined, remaining + 2);
+        case.assert_matches_fresh("root-hole owner removed");
+    }
+}
+
+#[test]
+fn mangled_root_holes_count_concrete_instances() {
+    let main = "const C: int = takes(gen_id)\nfn zz_start() { let n = gen_id(7) }\n";
+    let lib = format!("{FNVALUE_LIB}\ninline(js) fn gen_id<T>(x: T) -> T = \"return x;\"\n");
+    let mut case = Case::new(main, &lib);
+    assert_eq!(
+        case.graph
+            .instances
+            .iter()
+            .filter(|instance| case.identity(instance).starts_with("gen_id_T#"))
+            .count(),
+        1,
+        "the fixture must reach a concrete generic instance"
+    );
+    assert_eq!(case.graph.uninstantiated_roots["gen_id_T"].instances, 1);
+    let two_instances = main.replace(
+        "let n = gen_id(7)",
+        "let n = gen_id(7)\nlet s = gen_id(\"s\")",
+    );
+    for (source, expected) in [(two_instances.as_str(), 2), (main, 1)] {
+        let res = case.session.update_file(MAIN, source).expect("update");
+        assert_eq!(res.tier, UpdateTier::BodyOnly);
+        assert!(!res.reinferred.is_empty());
+        let edits = res.body_update.edit.into_iter().collect::<Vec<_>>();
+        let stats = case.graph.update_bodies_with_root_delta(
+            case.session.workspace(),
+            &[],
+            &[],
+            &res.reinferred,
+            &edits,
+        );
+        assert_eq!(
+            case.graph.uninstantiated_roots["gen_id_T"].instances,
+            expected
+        );
+        assert_eq!(stats.census.root_hole_names_examined, 2);
+        assert_eq!(stats.census.root_hole_rows_examined, 1);
+        assert_eq!(stats.census.root_hole_decls_examined, 1);
+        case.assert_matches_fresh("mangled root-hole instance count changed");
+    }
+}
+
 /// A body with NO recorded facts that gains one.
 ///
 /// The two invalidation causes come apart here: an empty contribution quotes no
