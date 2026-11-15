@@ -84,40 +84,47 @@ The retained scene-return command removes about 1537 bytes per iteration
 this does not establish a frame-time speedup. Both arms still encounter
 loop-shape/trace-length aborts; the cache does not make the renderer abort-free.
 
-The current allocator extracts finalizer creation into a helper. Its
-per-allocation closure still captures the same stats table and byte count,
-but small returns no longer close upvalues (unrecordable `UCLO`). A direct
-small-allocation regression records successfully: 11 NYI aborts before,
-zero after, on both x86 and arm64. Large allocations still encounter `FNEW`.
+The allocator creates finalizer closures outside its hot return path and
+reuses them by payload byte count through a weak-value cache. The closure
+captures only the stable stats table and byte count, never a buffer pointer.
+LuaJIT's internal FFI finalizer table keeps the callback alive until its
+buffers finalize; unused cache values can then be collected. Ordinary weak
+buffer metadata cannot replace these captures: LuaJIT clears those keys
+before running cdata finalizers.
+
+Direct JIT regressions pass on x86 and arm64: the small-allocation loop has
+zero bytecode-NYI aborts, and repeated large allocations go from 13 to zero.
+Tests also verify retained buffers, partial frees of shared-size allocations
+(including different element types), zero live bytes after finalization, and
+collection of unused callbacks. A cold cache miss still creates a closure.
 
 Mesh comparison: identical emitted fixture with only `NB_ALLOC_PRELUDE`
-replaced, baseline `cd61ec3f` versus the extracted finalizer factory. Six
-alternating baseline/candidate pairs per metric, 108 processes, same native
-library/runtime as above. Each iteration writes 9300 quads. Hashes and
-per-process samples are in `results.json`.
+replaced, baseline `acd0f843` versus the weak-value cache. Six alternating
+baseline/candidate pairs per metric, 108 processes, same native library and
+runtime as above. Each iteration writes 9300 quads. Hashes and per-process
+samples are in `results.json`.
 
 | Arm | Median us before/after | p95 us before/after | Gross Lua bytes before/after | Measured aborts before/after |
 | --- | ---: | ---: | ---: | ---: |
-| Growth | 1091.93 / 940.65 | 3390.29 / 3066.46 | 2106967 / 2097473 | 9-11 / 2-5 |
-| Early | 1103.83 / 877.09 | 3286.28 / 2783.44 | 2106916 / 2097386 | 10-15 / 4-7 |
-| Reserved | 1087.02 / 1112.19 | 1598.70 / 1531.78 | 225795 / 225795 | 7 / 9 |
+| Growth | 948.98 / 805.04 | 2953.59 / 2650.63 | 2097363 / 2056026 | 2-4 / 0-2 |
+| Early | 917.06 / 691.14 | 3161.13 / 2416.64 | 2097383 / 2055945 | 2-6 / 0-4 |
+| Reserved | 1110.37 / 987.65 | 1538.05 / 1263.97 | 225796 / 205423 | 9-10 / 0-1 |
 
-All 108 processes passed position/count checks. Host contention produces
-wide timing ranges, so these medians are observations, not a reliable
-application-speedup claim. In particular, reserved-buffer trace aborts
-increase; the change does not make large allocation traceable.
+All 108 processes passed position/count checks. Lower process medians appear
+in five of six paired growth/reserved runs and all six early-growth runs.
+These are JIT-on synthetic mesh-fill measurements, not application frame
+speedups. Per-process ranges include scheduling/GC variation.
 
-Removing the earlier UCLO obstruction exposes a coalescing failure during
-growth warmup. Twelve separate site-instrumented processes each record one
-`NYI: register coalescing too complex` at the first off-heap instruction
-following the size-threshold guard in `__rock_nb_alloc` (parent exit 1).
-None records it during the measured interval. This is a public witness for
-#264's failure class, not the old repeated-abort frequency. Trace sites now
-include phase and reason so they can be attributed independently.
+The candidate records no `FNEW` aborts in these captures. Growth still sees
+coalescing failures during warmup: three of six processes record five each,
+at the off-heap size-guard exit and its continuation into the caller loop.
+None records coalescing during measurement. Early growth and reserved
+controls record none in either phase. Recording interruptions, short traces
+and return-to-lower-frame aborts remain; see the per-arm reasons in JSON.
 
 The reserved control starts directly with an off-heap buffer at the default
 16384-byte threshold; growth creates intermediate Lua-managed arrays. Its
 lower Lua allocation count is not an equivalent reduction in total native
-bytes. Capacity and GC-pressure guards remain necessary. The remaining
-investigation is the off-heap transition and finalizer `FNEW`, preserving
-ownership and collection safety.
+bytes. Capacity and GC-pressure guards remain necessary. #264 now concerns
+the off-heap transition's warmup side trace; the finalizer cache does not
+establish that arbitrary growth callers are free of coalescing failures.

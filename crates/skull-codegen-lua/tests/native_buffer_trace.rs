@@ -69,3 +69,68 @@ collectgarbage('collect')
 assert(stats.live_count == 0 and stats.live_bytes == 0)
 "#);
 }
+
+#[test]
+fn repeated_large_allocations_record_without_creating_finalizer_closures() {
+    run(r#"
+assert(jit.status())
+local vm = require('jit.vmdef')
+local aborts, stops = 0, 0
+local function trace(what, tr, fn, pc, err)
+  if what == 'abort' and vm.traceerr[err]:find('NYI: bytecode', 1, true) then
+    aborts = aborts + 1
+  elseif what == 'stop' then
+    stops = stops + 1
+  end
+end
+local buffers = {__rock_nb_alloc('uint8_t', 16384)}
+jit.attach(trace, 'trace')
+for i = 2, 1000 do
+  local buffer = __rock_nb_alloc('uint8_t', 16384)
+  buffer[16383] = i % 251
+  buffers[i] = buffer
+end
+jit.attach(trace)
+for i = 2, 1000 do assert(buffers[i][16383] == i % 251) end
+assert(aborts == 0, 'large allocation NYI aborts: ' .. aborts)
+assert(stops > 0, 'large allocation loop did not record')
+assert(__ROCK_NB_OFFHEAP_STATS.live_bytes == 16384000)
+buffers = nil
+collectgarbage('collect')
+collectgarbage('collect')
+assert(__ROCK_NB_OFFHEAP_STATS.live_bytes == 0)
+assert(__ROCK_NB_OFFHEAP_STATS.live_count == 0)
+"#);
+}
+
+#[test]
+fn finalizer_reuse_does_not_keep_buffers_or_unused_callbacks_alive() {
+    run(r#"
+local callbacks = setmetatable({}, {__mode = 'v'})
+local original_gc, registrations = ffi.gc, 0
+ffi.gc = function(pointer, callback)
+  registrations = registrations + 1
+  callbacks[registrations] = callback
+  return original_gc(pointer, callback)
+end
+local buffers = {}
+buffers[1] = __rock_nb_alloc('uint8_t', 16384)
+buffers[2] = __rock_nb_alloc('uint8_t', 16384)
+buffers[3] = __rock_nb_alloc('int32_t', 4096)
+ffi.gc = original_gc
+buffers[1] = nil
+collectgarbage('collect')
+collectgarbage('collect')
+assert(__ROCK_NB_OFFHEAP_STATS.live_bytes == 32768)
+assert(callbacks[2] ~= nil and callbacks[3] ~= nil)
+buffers[2][16383] = 17
+assert(buffers[2][16383] == 17)
+buffers[3][4095] = 123456
+assert(buffers[3][4095] == 123456)
+buffers = nil
+for i = 1, 4 do collectgarbage('collect') end
+assert(__ROCK_NB_OFFHEAP_STATS.live_bytes == 0)
+assert(__ROCK_NB_OFFHEAP_STATS.live_count == 0)
+assert(next(callbacks) == nil, 'unused finalizers must be collectible')
+"#);
+}

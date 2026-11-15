@@ -109,8 +109,9 @@ distinct refs per class is.
   non-constant key. String-keyed maps are immune.
 - Keep closures out of frames that return early on a hot path: an early
   `return` above a closure compiles to UCLO, which is unrecordable. NativeBuffer
-  finalizers are created in a separate helper for this reason; large-buffer
-  closure creation still encounters FNEW.
+  finalizers are created in a separate helper for this reason and reused by
+  byte count through a weak-value cache. Registered buffers keep their callback
+  alive; unused sizes can expire. Cold misses still create a closure.
 - `crec_call` records a `bool` C return only with a Lua frame above it in
   the trace. `-> bool` externs declare `uint8_t` and the emitter compares
   `~= 0`.
