@@ -183,3 +183,78 @@ fn render_batch_growth_rejects_parked_storage() {
     assert(single_failure != null, "single overflow rejects a parked batch")
     assert_eq(batch.capacity, 0, "parked storage remains detached")
 }
+
+@nomangle inline(lua) fn __sprite_mesh_growth_same_storage(a: NativeBuffer<Vertex>, b: NativeBuffer<Vertex>) -> bool = "return a.ptr == b.ptr"
+
+@test
+fn sprite_mesh_reserve_quads_keeps_exact_fits_and_empty_requests() {
+    let mesh = sprite_mesh_growth_test_mesh()
+    let storage = mesh.vbo
+    let meter = __sprite_mesh_growth_copy_meter(() => {
+        mesh.reserve_quads(0)
+        mesh.reserve_quads(1)
+    })
+    assert_eq(mesh.count, 0)
+    assert_eq(mesh.capacity, 1)
+    assert_eq(__sprite_mesh_growth_meter_calls(meter), 0)
+    assert(__sprite_mesh_growth_same_storage(mesh.vbo, storage))
+}
+
+@test
+fn sprite_mesh_reserve_quads_bulk_copies_once_and_keeps_live_vertices() {
+    for additional in [1, 2, 9, 65, 1025] {
+        let mesh = sprite_mesh_growth_test_mesh()
+        sprite_mesh_add(mesh, v(8.0, 12.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+        let before = __sprite_mesh_growth_prefix(mesh.vbo, mesh.count)
+        let meter = __sprite_mesh_growth_copy_meter(() => { reserve_quads(mesh, additional) })
+        assert(mesh.capacity >= 1 + additional && mesh.capacity < (1 + additional) * 2)
+        assert_eq(mesh.vbo.len, mesh.capacity * RECT_BATCH_VERTS_PER_RECT)
+        assert_eq(mesh.count, 6)
+        assert_eq(__sprite_mesh_growth_meter_calls(meter), 1)
+        assert_eq(__sprite_mesh_growth_meter_bytes(meter), __sprite_mesh_growth_string_len(before))
+        assert_eq(__sprite_mesh_growth_prefix(mesh.vbo, mesh.count), before)
+        let storage = mesh.vbo
+        sprite_mesh_add(mesh, v(15.0, 22.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+        assert_eq(mesh.count, 12)
+        assert(__sprite_mesh_growth_same_storage(mesh.vbo, storage))
+        assert_eq(__sprite_mesh_growth_prefix(mesh.vbo, 6), before)
+    }
+}
+
+@test
+fn sprite_mesh_reserve_quads_can_start_empty_storage() {
+    let mesh = sprite_mesh_growth_test_mesh()
+    mesh.vbo = native_buffer_vertex(0)
+    mesh.capacity = 0
+    reserve_quads(mesh, 0)
+    assert_eq(mesh.capacity, 0)
+    reserve_quads(mesh, 1)
+    assert_eq(mesh.capacity, 1)
+    assert_eq(mesh.count, 0)
+    assert_eq(mesh.vbo.len, 6)
+    let storage = mesh.vbo
+    sprite_mesh_add(mesh, v(8.0, 12.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+    assert_eq(mesh.count, 6)
+    assert(__sprite_mesh_growth_same_storage(mesh.vbo, storage))
+}
+
+@test
+fn retained_mesh_reserve_quads_preserves_contents_and_gpu_upload() {
+    assert(stone_gpu_host_ensure())
+    let rm = RetainedMesh { mesh: sprite_mesh_growth_test_mesh(), dirty: false }
+    sprite_mesh_add(rm.mesh, v(8.0, 12.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+    let before = __sprite_mesh_growth_prefix(rm.mesh.vbo, rm.mesh.count)
+    retained_mesh_prepare(rm)
+    defer retained_mesh_gpu_release(rm)
+    let gpu = rm.gpu_mesh
+    assert(gpu != null)
+    rm.reserve_quads(17)
+    assert_eq(rm.mesh.count, 6)
+    assert(rm.mesh.capacity >= 18)
+    assert(rm.gpu_mesh == gpu && !rm.dirty)
+    assert_eq(__sprite_mesh_growth_prefix(rm.mesh.vbo, rm.mesh.count), before)
+    rm.add(v(15.0, 22.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+    assert_eq(rm.mesh.count, 12)
+    assert(rm.gpu_mesh == null)
+    assert_eq(__sprite_mesh_growth_prefix(rm.mesh.vbo, 6), before)
+}

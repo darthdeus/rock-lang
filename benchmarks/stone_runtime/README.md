@@ -20,11 +20,12 @@ python3 benchmarks/stone_runtime/measure.py /tmp/stone-runtime \
 python3 benchmarks/stone_runtime/measure.py /tmp/stone-runtime \
   --runtime "$(python3 scripts/gamelibs.py path --plat linux-x86_64)" \
   --stone-lib target/debug/libstone_rs.so \
-  --case mesh --outdir /tmp/stone-runtime/mesh
+  --case mesh --independent-corners --outdir /tmp/stone-runtime/mesh
 ```
 
-Repeat mesh with `--corners` and a separate output directory for optional
-corner-lane pressure. Use the repository's job scheduler where required.
+Use `--independent-corners` for distinct computations in all 16 optional
+corner lanes. `--corners` reuses existing position/tint values instead; omitting
+both options uses scalar defaults. Use the repository's job scheduler where required.
 The GL workload needs a working desktop/headless graphics provider;
 `STONE_HEADLESS=1` hides the owned window, it does not emulate a GPU.
 
@@ -54,17 +55,19 @@ this is a synthetic renderer iteration, not a complete application frame.
 
 Mesh: 30 warmup and 120 measured iterations, each creating 100 meshes and
 writing 93 quads per mesh (9300 quads). `growth` starts at capacity 8 and
-uses the production growth guard. `early` calls the same production growth
-helper before computing quad values. `reserved` starts at capacity 128.
-All arms check final count/capacity and position content. Optional corner
-lanes are a separate stress case, not the original reported witness.
+uses the production growth guard. `early` calls the public
+`reserve_quads(mesh, 1)` before computing quad values. `reserved` starts at capacity 128.
+All arms check count/capacity and positions. After timing, counters and trace
+hooks stop, frame zero runs again. With independent corners it verifies all
+13 fields of every emitted vertex, including copied prefixes and duplicate
+triangle vertices. Deliberately corrupting colorize makes this oracle fail.
 The early arm still allocates/copies the same buffers; the reserved arm
 avoids intermediate buffers entirely, so its difference cannot be attributed
 solely to trace aborts.
 
 ## Current evidence
 
-Measured 2026-11-15 at engine/compiler `8213867e`, Linux x86_64,
+Scene measured 2026-11-15 at engine/compiler `8213867e`, Linux x86_64,
 Intel Core i9-14900K, NVIDIA RTX 4090, bundled gamelibs v0.6.18 and
 LuaJIT 2.1.1794164915. The native library was built from the same revision with the normal dev
 profile (opt-level 1); the compiler used the release profile.
@@ -84,52 +87,54 @@ The retained scene-return command removes about 1537 bytes per iteration
 this does not establish a frame-time speedup. Both arms still encounter
 loop-shape/trace-length aborts; the cache does not make the renderer abort-free.
 
-The allocator creates finalizer closures outside its hot return path and
-reuses them by payload byte count through a weak-value cache. The closure
-captures only the stable stats table and byte count, never a buffer pointer.
-LuaJIT's internal FFI finalizer table keeps the callback alive until its
-buffers finalize; unused cache values can then be collected. Ordinary weak
-buffer metadata cannot replace these captures: LuaJIT clears those keys
-before running cdata finalizers.
+The allocator keeps finalizer captures outside hot returns, weakly caches
+callbacks by byte count, and declares its byte-count local after the size
+guard. These resolve the reduced/default-input witnesses; they cannot keep
+arbitrary caller float values out of a growth exit.
 
-The byte-count local is declared after the storage-size guard. The guard
-checks the same product, but that temporary no longer occupies an exit
-snapshot slot. Actual mesh trace dumps contain 17 distinct numeric values
-in the baseline threshold snapshot and 16 afterward. LuaJIT's x86 side-trace
-entry must shuffle inherited values through 16 XMM registers; removing one
-value resolves this witness without changing the allocation threshold.
+## Independent corner values and public reservation
 
-Direct regressions cover small/large allocation tracing, buffer lifetime,
-callback collection, and a storage transition with 15 live float parameters.
-The latter fails with five coalescing aborts before the change and zero
-afterward on bundled x86 LuaJIT, while checking all stored float values.
-Higher-pressure synthetic cases with 16 or more live float parameters can
-still fail: this is a reduced lifetime, not a general solution to LuaJIT register pressure.
+The current mesh fixture computes all 16 optional alpha/colorize/U/V fields
+with distinct integer remainders and exactly representable binary fractions.
+The source calls `sprite_mesh_add_quad` normally. The independent values
+reproduce five warmup coalescing aborts in each ordinary-growth trace run.
+Explicitly inlining the writer did not remove those aborts in a bounded probe.
 
-Mesh comparison: identical emitted fixture with only `NB_ALLOC_PRELUDE`
-replaced, baseline `0e9a94b8` versus the delayed byte-count local. Six
-alternating baseline/candidate pairs per metric, 108 processes, same native
-library and runtime as above. Each iteration writes 9300 quads. Hashes and
-per-process samples are in `results.json`.
+`reserve_quads` is available for both SpriteMesh and RetainedMesh. It reserves
+**additional** quads without changing the live vertex count. Exact fits are
+no-ops; bulk requests choose a geometric capacity and allocate/copy once.
+An empty buffer can start at capacity one. Retained GPU contents stay valid
+because reservation does not alter vertices; a later append still invalidates
+the upload as usual. Call it before constructing float-heavy arguments:
 
-| Arm | Median us before/after | p95 us before/after | Gross Lua bytes before/after | Measured aborts before/after |
+```rock
+mesh.reserve_quads(1)
+// Compute positions, tint and optional corner values, then append the quad.
+```
+
+When the complete append count is known, reserve that count once before the
+loop. The normal append guards remain necessary for callers that do not reserve.
+
+Measured source/compiler `d2b2f964` plus the reservation API overlay recorded
+in JSON, with the same x86 hardware/runtime as above and a native library
+built at `d2b2f964`. Six alternating process rounds per metric, 30 warmup and
+120 measured iterations of 9300 quads, 54 processes total:
+
+| Arm | Median us | p95 us | Gross Lua bytes/iteration | Warmup coalescing aborts |
 | --- | ---: | ---: | ---: | ---: |
-| Growth | 685.94 / 686.19 | 2385.69 / 2332.76 | 2055921 / 2055985 | 0-2 / 0-3 |
-| Early | 680.78 / 682.63 | 2385.44 / 2283.92 | 2055982 / 2056043 | 0-2 / 0-4 |
-| Reserved | 988.62 / 997.88 | 1350.31 / 1345.65 | 205462 / 205872 | 0 / 0-1 |
+| Ordinary growth | 911.25 | 2688.05 | 2055823 | 5 in each run |
+| reserve_quads before arguments | 797.94 | 2535.41 | 2056018 | 0 |
+| Initially capacity 128 | 1040.79 | 1323.19 | 205832 | 0 |
 
-Steady-state timing and allocation are effectively unchanged; no speedup is
-claimed. The improvement is warmup tracing: baseline growth records five
-coalescing aborts in two of six processes, versus zero in all six candidate
-processes. The optional-corner comparison adds 108 processes: baseline growth
-records five coalescing aborts in three of six trace runs, versus zero in all
-candidate runs. Early/reserved controls have none. Neither arm records
-coalescing during measurement. All 216 processes pass content checks.
-Recording interruptions, short traces and return-to-lower-frame aborts remain.
+Per-process growth medians are 893.83-951.49 us; early reservation medians
+are 764.54-821.83 us. This is a JIT-on synthetic fill result, not an
+application-frame claim. Early reservation follows the same four doublings
+and copy volumes as ordinary growth. Initial capacity 128 skips intermediate
+Lua-managed arrays, so its allocation count is a different workload and does
+not measure equivalent savings in total native bytes.
 
-The reserved control starts directly with an off-heap buffer at the default
-16384-byte threshold; growth creates intermediate Lua-managed arrays. Its
-lower Lua allocation count is not an equivalent reduction in total native
-bytes. Capacity and GC-pressure guards remain necessary. #264's current
-public normal/corner witnesses pass, while higher-pressure caller shapes
-still require investigation; arbitrary growth callers are not proven safe.
+All 54 final processes pass the complete independent-corner oracle. Neither
+mode records coalescing during measurement; other trace interruptions and
+return-to-lower-frame aborts remain. #264 stays open for unreserved callers:
+the public API supplies the measured early-growth path without adding new
+compiler transformations or weakening capacity/GC-pressure checks.

@@ -14,6 +14,7 @@ parser.add_argument("--runtime", type=Path, required=True, help="gamelibs platfo
 parser.add_argument("--stone-lib", type=Path, required=True)
 parser.add_argument("--case", choices=("scene", "mesh"), default="scene")
 parser.add_argument("--corners", action="store_true", help="mesh optional corner-lane stress")
+parser.add_argument("--independent-corners", action="store_true", help="mesh distinct per-corner values")
 parser.add_argument("--rounds", type=int, default=6)
 parser.add_argument("--frames", type=int)
 parser.add_argument("--warmup", type=int)
@@ -28,6 +29,7 @@ env.update(ROCK_STONE_LIB=str(args.stone_lib.resolve()), STONE_HEADLESS="1",
            LUA_PATH=f"{runtime}/share/luajit-2.1/?.lua;{runtime}/share/lua/5.1/?.lua;;",
            LUA_CPATH=f"{runtime}/lib/lua/5.1/?.so;;", ROCK_TEST_SEED="42",
            AUDIT_CASE=args.case, AUDIT_CORNERS="1" if args.corners else "0",
+           AUDIT_INDEPENDENT_CORNERS="1" if args.independent_corners else "0",
            AUDIT_FRAMES=str(args.frames or (2400 if args.case == "scene" else 120)),
            AUDIT_WARMUP=str(args.warmup or (600 if args.case == "scene" else 30)))
 env["LD_LIBRARY_PATH"] = ":".join(filter(None, [str(args.stone_lib.resolve().parent),
@@ -58,7 +60,7 @@ for metric in ("time", "alloc", "trace"):
                 vm=next(line for line in result.stdout.splitlines() if line.startswith("VM ")),
                 graphics=[line for line in result.stderr.splitlines() if 'renderer=' in line]))
             print(args.case, metric, pair, arm, record[4:], flush=True)
-            metadata = dict(case=args.case, corners=args.corners, frames=int(env["AUDIT_FRAMES"]), warmup=int(env["AUDIT_WARMUP"]),
+            metadata = dict(case=args.case, corners=args.corners, independent_corners=args.independent_corners, frames=int(env["AUDIT_FRAMES"]), warmup=int(env["AUDIT_WARMUP"]),
                 native_sha256=native_sha256,
                 build=json.loads((artifacts / "build.json").read_text()), samples=rows)
             (outdir / "results.json").write_text(json.dumps(metadata, indent=2) + "\n")

@@ -54,6 +54,8 @@ const AUDIT_PIPELINE: Pipeline = pipeline(rock_shader(audit_half_frag))
         name, metric, frames, median, p95, bytes / frames, warm_aborts, measured_aborts))
     for reason, count in pairs(reasons) do io.write('ABORT ', count, ' ', reason, '\n') end
     for site, count in pairs(sites) do io.write('SITE ', count, ' ', site, '\n') end
+    -- Frame zero runs untimed validation after counters and observers stop.
+    body(0)
 """
 
 fn scene_audit() {

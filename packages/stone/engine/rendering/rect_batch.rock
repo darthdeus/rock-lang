@@ -228,6 +228,18 @@ pub fn rect_batch_set_target(
     m.capacity = new_cap
 }
 
+// Reserve additional quads before computing float-heavy append arguments.
+// Pick the final geometric capacity first so a bulk request copies only once.
+pub fn reserve_quads(m: SpriteMesh, n: int) {
+    let requested = m.count + n * RECT_BATCH_VERTS_PER_RECT
+    if requested <= m.capacity * RECT_BATCH_VERTS_PER_RECT { return }
+    let new_cap = max(m.capacity, 1)
+    while new_cap * RECT_BATCH_VERTS_PER_RECT < requested { new_cap *= 2 }
+    let target = native_buffer_vertex(new_cap * RECT_BATCH_VERTS_PER_RECT)
+    m.vbo = __copy_vertex_buffer_prefix(m.vbo, target, m.count)
+    m.capacity = new_cap
+}
+
 @nomangle fn __grow_rect_batch_buf(b: RectBatch) {
     let new_cap = b.capacity * 2
     let target = native_buffer_vertex(new_cap * RECT_BATCH_VERTS_PER_RECT)

@@ -128,540 +128,213 @@
       }
     }
   },
-  "allocator_comparison": {
-    "method": "Identical emitted mesh fixture; replace only NB_ALLOC_PRELUDE literal. Alternate baseline/candidate across six pairs, separate time/allocation/trace processes, 30 warmup and 120 measured iterations.",
-    "baseline_ref": "0e9a94b8",
-    "candidate": "declare byte count after storage threshold guard",
-    "variants": {
-      "baseline": {
-        "build": {
-          "engine_revision": "8213867e",
-          "baseline_prelude_ref": "0e9a94b8",
-          "prelude": "baseline",
-          "prelude_sha256": "4599bd6e0727ceba009b1181202a9999057648eef8924de2d53169833658cf2a",
-          "lua_sha256": "cdba6e705d1c9537447e6e0f03cec8f53c61e8586a792027692c0c1a08a98526"
-        },
-        "arms": {
-          "growth": {
-            "time_median_us": [
-              1119.8515,
-              683.425,
-              658.942,
-              688.464,
-              689.7175,
-              677.4535
-            ],
-            "time_p95_us": [
-              3313.614,
-              2430.064,
-              2341.317,
-              2756.475,
-              2245.743,
-              2300.75
-            ],
-            "gross_lua_bytes_per_iteration": [
-              2055895.367,
-              2055880.433,
-              2066796.433,
-              2055935.833,
-              2055906.3,
-              2056043.967
-            ],
-            "warmup_aborts": [
-              5,
-              4,
-              5,
-              6,
-              9,
-              5
-            ],
-            "measured_aborts": [
-              2,
-              0,
-              2,
-              0,
-              0,
-              2
-            ],
-            "warmup_coalescing_aborts": [
-              0,
-              0,
-              0,
-              5,
-              5,
-              0
-            ],
-            "measured_coalescing_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ],
-            "abort_reasons": [
-              "measure:error thrown or hook called during recording detail=nil",
-              "measure:trace too short detail=nil",
-              "warmup:NYI: register coalescing too complex detail=nil",
-              "warmup:NYI: return to lower frame detail=nil",
-              "warmup:error thrown or hook called during recording detail=nil"
-            ]
-          },
-          "early": {
-            "time_median_us": [
-              729.71,
-              676.6445,
-              680.358,
-              681.2055,
-              700.191,
-              648.3455
-            ],
-            "time_p95_us": [
-              2507.37,
-              2493.349,
-              2289.608,
-              2225.79,
-              2413.649,
-              2357.229
-            ],
-            "gross_lua_bytes_per_iteration": [
-              2055978.067,
-              2055986.467,
-              2055857.7,
-              2055942.267,
-              2055989.0,
-              2055992.6
-            ],
-            "warmup_aborts": [
-              4,
-              4,
-              4,
-              5,
-              6,
-              4
-            ],
-            "measured_aborts": [
-              0,
-              0,
-              2,
-              0,
-              2,
-              0
-            ],
-            "warmup_coalescing_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ],
-            "measured_coalescing_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ],
-            "abort_reasons": [
-              "measure:error thrown or hook called during recording detail=nil",
-              "measure:trace too short detail=nil",
-              "warmup:NYI: return to lower frame detail=nil",
-              "warmup:error thrown or hook called during recording detail=nil",
-              "warmup:trace too short detail=nil"
-            ]
-          },
-          "reserved": {
-            "time_median_us": [
-              999.2025,
-              974.665,
-              953.4665,
-              978.032,
-              1015.6795,
-              1011.07
-            ],
-            "time_p95_us": [
-              1348.982,
-              1358.644,
-              1242.763,
-              1316.131,
-              1439.217,
-              1351.637
-            ],
-            "gross_lua_bytes_per_iteration": [
-              205905.433,
-              205012.5,
-              205831.7,
-              205091.433,
-              205013.133,
-              205831.7
-            ],
-            "warmup_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ],
-            "measured_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ],
-            "warmup_coalescing_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ],
-            "measured_coalescing_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ],
-            "abort_reasons": []
-          }
-        }
+  "mesh_pressure": {
+    "engine_revision": "d2b2f964",
+    "build": {
+      "revision": "d2b2f96400f61a6a1c9ca427313f82118e6f5d9d",
+      "compiler_sha256": "c2e1f776d67a9811b4f35e349b78d5db69211c25f796825db95cd05c737bfaf7",
+      "outputs": {
+        "retained": "95386ed0a73323df59fed12678186b1dfbb64e511adb6ea185a62744e7bbc7df",
+        "fresh": "f58c5cd329d248df09daafe39add20b7a75376283b4e57849e551773a74db1ee"
       },
-      "candidate": {
-        "build": {
-          "engine_revision": "8213867e",
-          "baseline_prelude_ref": "0e9a94b8",
-          "prelude": "candidate",
-          "prelude_sha256": "694da601792ed4ab89cb4c2d07c80214673314f9d76445ae5eef138d43c347d7",
-          "lua_sha256": "b41ce562ed6d92a73e63df6214d65b6ae742e582830be520b412861469026883"
-        },
-        "arms": {
-          "growth": {
-            "time_median_us": [
-              683.623,
-              705.492,
-              664.477,
-              681.8845,
-              695.4785,
-              688.76
-            ],
-            "time_p95_us": [
-              2477.977,
-              2251.863,
-              2318.934,
-              2398.882,
-              2281.649,
-              2346.591
-            ],
-            "gross_lua_bytes_per_iteration": [
-              2056032.367,
-              2055900.3,
-              2055937.2,
-              2055897.033,
-              2056155.233,
-              2056065.767
-            ],
-            "warmup_aborts": [
-              4,
-              6,
-              4,
-              4,
-              5,
-              4
-            ],
-            "measured_aborts": [
-              0,
-              1,
-              3,
-              0,
-              0,
-              0
-            ],
-            "warmup_coalescing_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ],
-            "measured_coalescing_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ],
-            "abort_reasons": [
-              "measure:trace too short detail=nil",
-              "warmup:NYI: bytecode %s detail=51",
-              "warmup:NYI: return to lower frame detail=nil",
-              "warmup:error thrown or hook called during recording detail=nil"
-            ]
-          },
-          "early": {
-            "time_median_us": [
-              676.531,
-              659.671,
-              692.2555,
-              671.7645,
-              688.7355,
-              717.078
-            ],
-            "time_p95_us": [
-              2230.341,
-              2210.731,
-              2301.961,
-              2265.873,
-              2372.502,
-              2593.819
-            ],
-            "gross_lua_bytes_per_iteration": [
-              2056049.4,
-              2056051.1,
-              2055987.467,
-              2056094.2,
-              2056036.933,
-              2055960.933
-            ],
-            "warmup_aborts": [
-              5,
-              4,
-              6,
-              6,
-              4,
-              4
-            ],
-            "measured_aborts": [
-              0,
-              2,
-              4,
-              4,
-              0,
-              0
-            ],
-            "warmup_coalescing_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ],
-            "measured_coalescing_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ],
-            "abort_reasons": [
-              "measure:error thrown or hook called during recording detail=nil",
-              "measure:trace too short detail=nil",
-              "warmup:NYI: bytecode %s detail=51",
-              "warmup:NYI: return to lower frame detail=nil",
-              "warmup:error thrown or hook called during recording detail=nil",
-              "warmup:leaving loop in root trace detail=nil",
-              "warmup:trace too short detail=nil"
-            ]
-          },
-          "reserved": {
-            "time_median_us": [
-              971.468,
-              1003.686,
-              1032.2695,
-              980.031,
-              992.077,
-              1010.3425
-            ],
-            "time_p95_us": [
-              1413.554,
-              1406.808,
-              1342.139,
-              1227.728,
-              1289.73,
-              1349.159
-            ],
-            "gross_lua_bytes_per_iteration": [
-              205831.7,
-              205910.633,
-              205911.167,
-              205013.3,
-              206650.9,
-              205833.133
-            ],
-            "warmup_aborts": [
-              0,
-              0,
-              1,
-              0,
-              0,
-              0
-            ],
-            "measured_aborts": [
-              0,
-              0,
-              1,
-              0,
-              0,
-              0
-            ],
-            "warmup_coalescing_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ],
-            "measured_coalescing_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ],
-            "abort_reasons": [
-              "measure:error thrown or hook called during recording detail=nil",
-              "warmup:leaving loop in root trace detail=nil"
-            ]
-          }
-        }
+      "engine_overlay": {
+        "packages/stone/engine/rendering/rect_batch.rock": "fe5032befb430d586a654939852750af9f577998ddf114dc5b81e7e9adb68c18",
+        "packages/stone/engine/rendering/mesh_pool.rock": "579ed8752aa1c9af6b9afae10028ffbee96cd4ea22f800f3437b33827a1d7773"
       }
     },
-    "guard_snapshot_distinct_numeric_values": {
-      "baseline": 17,
-      "candidate": 16
-    },
-    "direct_fifteen_float_regression_coalescing_aborts": {
-      "baseline": 5,
-      "candidate": 0
-    },
-    "corner_validation": {
-      "processes": 108,
-      "content_checks": "all passed",
-      "variants": {
-        "baseline": {
-          "growth": {
-            "warmup_coalescing_aborts": [
-              5,
-              0,
-              0,
-              5,
-              5,
-              0
-            ],
-            "measured_coalescing_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ]
-          },
-          "early": {
-            "warmup_coalescing_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ],
-            "measured_coalescing_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ]
-          },
-          "reserved": {
-            "warmup_coalescing_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ],
-            "measured_coalescing_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ]
-          }
-        },
-        "candidate": {
-          "growth": {
-            "warmup_coalescing_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ],
-            "measured_coalescing_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ]
-          },
-          "early": {
-            "warmup_coalescing_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ],
-            "measured_coalescing_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ]
-          },
-          "reserved": {
-            "warmup_coalescing_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ],
-            "measured_coalescing_aborts": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ]
-          }
-        }
+    "native_sha256": "9880b2d3c38da64ad904ec93b26cd3e57638e3941516b83331beec53fa711395",
+    "case": "independent corner values",
+    "frames": 120,
+    "warmup": 30,
+    "processes": 54,
+    "validation": "All 13 fields of all 55800 vertices in frame zero checked after timing, allocation counting and trace hooks stop; deliberate colorize corruption rejected.",
+    "arms": {
+      "growth": {
+        "time_median_us": [
+          893.825,
+          951.4885,
+          906.797,
+          915.6955,
+          902.3105,
+          924.8405
+        ],
+        "time_p95_us": [
+          2515.227,
+          3188.564,
+          2694.696,
+          2792.481,
+          2681.411,
+          2627.352
+        ],
+        "gross_lua_bytes_per_iteration": [
+          2056401.467,
+          2055797.667,
+          2055798.2,
+          2055852.833,
+          2055783.6,
+          2055848.6
+        ],
+        "warmup_aborts": [
+          9,
+          9,
+          9,
+          9,
+          6,
+          10
+        ],
+        "measured_aborts": [
+          0,
+          0,
+          0,
+          0,
+          1,
+          0
+        ],
+        "warmup_coalescing_aborts": [
+          5,
+          5,
+          5,
+          5,
+          5,
+          5
+        ],
+        "measured_coalescing_aborts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "abort_reasons": [
+          "measure:error thrown or hook called during recording detail=nil",
+          "warmup:NYI: register coalescing too complex detail=nil",
+          "warmup:NYI: return to lower frame detail=nil",
+          "warmup:leaving loop in root trace detail=nil",
+          "warmup:trace too short detail=nil"
+        ]
+      },
+      "early": {
+        "time_median_us": [
+          797.758,
+          821.826,
+          798.1235,
+          764.5425,
+          780.6945,
+          820.8875
+        ],
+        "time_p95_us": [
+          2573.349,
+          2661.823,
+          2497.479,
+          2243.574,
+          2339.738,
+          2682.288
+        ],
+        "gross_lua_bytes_per_iteration": [
+          2056025.467,
+          2056019.233,
+          2055999.567,
+          2056016.367,
+          2056023.8,
+          2056007.267
+        ],
+        "warmup_aborts": [
+          4,
+          4,
+          6,
+          4,
+          4,
+          4
+        ],
+        "measured_aborts": [
+          0,
+          0,
+          2,
+          0,
+          0,
+          0
+        ],
+        "warmup_coalescing_aborts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "measured_coalescing_aborts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "abort_reasons": [
+          "measure:error thrown or hook called during recording detail=nil",
+          "warmup:NYI: return to lower frame detail=nil",
+          "warmup:error thrown or hook called during recording detail=nil"
+        ]
+      },
+      "reserved": {
+        "time_median_us": [
+          1071.232,
+          1056.073,
+          1033.4625,
+          1001.6235,
+          1048.11,
+          1018.203
+        ],
+        "time_p95_us": [
+          1347.402,
+          1289.815,
+          1358.354,
+          1277.982,
+          1326.702,
+          1319.68
+        ],
+        "gross_lua_bytes_per_iteration": [
+          205831.767,
+          205832.567,
+          205831.767,
+          205013.367,
+          205012.567,
+          205831.767
+        ],
+        "warmup_aborts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "measured_aborts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "warmup_coalescing_aborts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "measured_coalescing_aborts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "abort_reasons": []
       }
     }
   }

@@ -201,6 +201,11 @@ pub fn refill_begin(rm: RetainedMesh) {
     rm.dirty = false
 }
 
+pub fn reserve_quads(rm: RetainedMesh, n: int) {
+    // Capacity alone does not invalidate the uploaded vertex contents.
+    reserve_quads(rm.mesh, n)
+}
+
 pub fn add(rm: RetainedMesh, pos: Vec2, src: IRect, dest_size: Vec2, pivot: Vec2 = PIVOT_CENTER) {
     retained_mesh_gpu_release(rm)
     sprite_mesh_add(rm.mesh, pos, src, dest_size, pivot)
