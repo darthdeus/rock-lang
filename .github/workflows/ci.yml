@@ -68,9 +68,23 @@ jobs:
           cargo run --locked -p rock-cli --bin rock -- test packages/stone-core
           cargo run --locked -p rock-cli --bin rock -- test packages/stone
       - name: Test language corpus
+        id: lua_corpus
         env:
           ROCK_MIR_CHECKS: "1"
-        run: cargo run --locked -p rock-cli --bin rock -- test tests/
+        run: |
+          export ROCK_CI_REAL_LUAJIT="$(python3 scripts/gamelibs.py path)/bin/luajit"
+          export ROCK_CI_CAPTURE_DIR="$RUNNER_TEMP/large-storage-capture"
+          mkdir -p "$ROCK_CI_CAPTURE_DIR"
+          "$ROCK_CI_REAL_LUAJIT" -v > "$ROCK_CI_CAPTURE_DIR/vm-version.txt" 2>&1
+          export ROCK_LUAJIT="$GITHUB_WORKSPACE/scripts/ci_capture_luajit.sh"
+          cargo run --locked -p rock-cli --bin rock -- test tests/
+      - name: Upload large storage failure evidence
+        if: failure() && steps.lua_corpus.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: large-storage-failure
+          path: ${{ runner.temp }}/large-storage-capture
+          if-no-files-found: ignore
       - name: Test language corpus on the JS backend
         # A test the JS backend cannot compile is skipped, not failed. Cap the
         # skip count so new skips need an explicit bump; lower it as the
