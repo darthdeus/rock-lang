@@ -135,18 +135,7 @@ pub fn elide_bounds_checks_for_target(
         return 0;
     }
     let (preds, _) = predecessors(func, &rpo);
-    // All-forward edges prove that no definition reexecutes. Other orders keep
-    // invalidation, including acyclic crossedges that this RPO may order back.
-    let may_reexecute = {
-        let mut seen = vec![false; func.blocks.len()];
-        rpo.iter().any(|&b| {
-            let back = preds
-                .get(&b)
-                .is_some_and(|ps| ps.iter().any(|&p| !seen[raw(p)]));
-            seen[raw(b)] = true;
-            back
-        })
-    };
+    let reexecuting = reexecuting_blocks(func, &rpo);
     let pushes: HashSet<_> = if target == FnBackend::Lua && has_make_vec {
         rpo.iter()
             .flat_map(|&b| func.blocks[b].insts.iter().copied())
@@ -160,7 +149,6 @@ pub fn elide_bounds_checks_for_target(
     };
     let ctx = Ctx {
         ws,
-        may_reexecute,
         track_private: target == FnBackend::Lua
             && ((has_make_vec && (has_array_push || !pushes.is_empty()))
                 || (has_make_struct && has_record_read)),
@@ -226,7 +214,7 @@ pub fn elide_bounds_checks_for_target(
             };
             let mut facts = input.clone();
             for &id in &func.blocks[b].insts {
-                step(&mut facts, func, &ctx, id);
+                step(&mut facts, func, &ctx, id, reexecuting[raw(b)]);
             }
             if outs[raw(b)].as_ref() != Some(&facts) {
                 changed = true;
@@ -285,7 +273,7 @@ pub fn elide_bounds_checks_for_target(
             if id == last {
                 break;
             }
-            step(&mut facts, func, &ctx, id);
+            step(&mut facts, func, &ctx, id, reexecuting[raw(b)]);
         }
     }
     for &id in &proven {
@@ -393,9 +381,29 @@ fn disabled_by_env() -> bool {
     })
 }
 
+/// Cover every backward-edge interval in RPO. Every cyclic block lies in one:
+/// its cycle must cross its rank backwards. Acyclic crossedges can also cover
+/// blocks, so an unmarked block cannot execute twice.
+fn reexecuting_blocks(func: &MirFunc, rpo: &[Idx<Block>]) -> Vec<bool> {
+    let mut order = vec![usize::MAX; func.blocks.len()];
+    for (at, &b) in rpo.iter().enumerate() {
+        order[raw(b)] = at;
+    }
+    let mut reexecuting = vec![false; func.blocks.len()];
+    let mut first = usize::MAX;
+    for (at, &b) in rpo.iter().enumerate().rev() {
+        successors(&func.blocks[b].term, |s| {
+            if order[raw(s)] <= at {
+                first = first.min(order[raw(s)]);
+            }
+        });
+        reexecuting[raw(b)] = first <= at;
+    }
+    reexecuting
+}
+
 struct Ctx<'a> {
     ws: Option<&'a Workspace>,
-    may_reexecute: bool,
     /// Values whose place tie is worth keeping: operands of the instructions
     /// that consume or produce facts, and of the arithmetic feeding them.
     relevant: Vec<bool>,
@@ -1202,10 +1210,10 @@ fn seed_declared_result_facts(
 }
 
 /// Advance `facts` across `id`.
-fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
+fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>, may_reexecute: bool) {
     let inst = &func.insts[id];
     if inst.produces_value() {
-        if ctx.may_reexecute {
+        if may_reexecute {
             facts.forget_value(id);
         }
         if ctx.relevant[raw(id)]
@@ -1413,5 +1421,104 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>) {
             facts.forget_cell(*val_cell);
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn graph(edges: &[&[usize]]) -> MirFunc {
+        let mut func = MirFunc::new(Ustr::from("cycles"));
+        let mut blocks = vec![func.entry];
+        for _ in 1..edges.len() {
+            blocks.push(func.new_block());
+        }
+        let cond = func.emit(func.entry, Inst::Const(Lit::Int(0)));
+        for (at, next) in edges.iter().enumerate() {
+            let term = match *next {
+                [] => Term::Return(vec![]),
+                [to] => Term::Goto(blocks[*to]),
+                [then_bb, else_bb] => Term::Branch {
+                    cond,
+                    then_bb: blocks[*then_bb],
+                    else_bb: blocks[*else_bb],
+                },
+                [first, rest @ ..] => Term::Switch {
+                    discr: cond,
+                    default: blocks[*first],
+                    cases: rest
+                        .iter()
+                        .enumerate()
+                        .map(|(case, &to)| (Lit::Int(case as i64), blocks[to]))
+                        .collect(),
+                },
+            };
+            func.set_term(blocks[at], term);
+        }
+        func
+    }
+
+    fn mask(edges: &[&[usize]]) -> Vec<bool> {
+        let func = graph(edges);
+        let rpo = reverse_postorder(&func, func.entry);
+        reexecuting_blocks(&func, &rpo)
+    }
+
+    #[test]
+    fn reexecution_skips_acyclic_prefixes_and_suffixes() {
+        assert_eq!(mask(&[&[1], &[1, 2], &[]]), [false, true, false]);
+        assert_eq!(
+            mask(&[&[1], &[1, 2], &[3], &[3, 4], &[]]),
+            [false, true, false, true, false]
+        );
+    }
+
+    #[test]
+    fn reexecution_keeps_nested_and_irreducible_cycles() {
+        assert_eq!(
+            mask(&[&[1], &[2, 4], &[2, 3], &[1], &[]]),
+            [false, true, true, true, false]
+        );
+        assert_eq!(
+            mask(&[&[1, 2], &[2], &[1, 3], &[]]),
+            [false, true, true, false]
+        );
+    }
+
+    #[test]
+    fn reexecution_conservatively_keeps_backward_crossedges() {
+        assert_eq!(mask(&[&[1, 2], &[], &[1]]), [false, true, true]);
+        assert_eq!(mask(&[&[1, 2], &[], &[]]), [false, false, false]);
+    }
+
+    #[test]
+    fn reexecution_keeps_every_cycle_in_small_graphs() {
+        const N: usize = 4;
+        for bits in 0..1u32 << (N * N) {
+            let edges: Vec<Vec<usize>> = (0..N)
+                .map(|from| {
+                    (0..N)
+                        .filter(|to| bits & (1 << (from * N + to)) != 0)
+                        .collect()
+                })
+                .collect();
+            let refs: Vec<&[usize]> = edges.iter().map(Vec::as_slice).collect();
+            let func = graph(&refs);
+            let rpo = reverse_postorder(&func, func.entry);
+            let mask = reexecuting_blocks(&func, &rpo);
+            for &b in &rpo {
+                let start = raw(b);
+                let mut seen = [false; N];
+                let mut todo = edges[start].clone();
+                while let Some(next) = todo.pop() {
+                    if std::mem::replace(&mut seen[next], true) {
+                        continue;
+                    }
+                    todo.extend_from_slice(&edges[next]);
+                }
+                assert!(!seen[start] || mask[start], "graph {bits}, block {start}");
+            }
+        }
     }
 }
