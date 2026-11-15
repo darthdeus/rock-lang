@@ -275,6 +275,34 @@ fn plain_compiler_process_without_private_runtime() {
 }
 
 #[test]
+fn plain_main_errors_containing_interrupt_text_remain_failures() {
+    let root = tempfile::tempdir().unwrap();
+    write(
+        root.path(),
+        "stick.toml",
+        "[package]\nname = \"main-errors\"\n",
+    );
+    for message in [
+        "ordinary main failure",
+        "operation interrupted! database write failed",
+        "database operation interrupted!",
+    ] {
+        write(
+            root.path(),
+            "main.rock",
+            format!("fn main() {{ error(\"{message}\") }}\n"),
+        );
+        let out = invoke(root.path(), &["run", "."]);
+        assert!(
+            !out.status.success(),
+            "main error exited successfully: {message:?}: {}",
+            text(&out)
+        );
+        assert_mentions(&out, message);
+    }
+}
+
+#[test]
 fn library_resolves_game_services_without_private_registration() {
     use rock_cli::registry::{ProgramKind, RuntimeServices};
     use rock_cli::runtime_process::RuntimeProcess;
