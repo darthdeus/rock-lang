@@ -97,7 +97,10 @@ fn present_submission_refusal_is_observable_and_retryable() {
             refusal = reason
             ui_submission_probe_refusal(kind, reason)
         }
-        let failure = world_fixture_raised(() => { present_composite(GpuTarget::Canvas(out)) }, world_fixture_traceback)
+        let failure: string? = null
+        assert_error_logs(["[RENDER] submission NOT EXECUTED: viewport 0x16 has no pixels"], () => {
+            failure = world_fixture_raised(() => { present_composite(GpuTarget::Canvas(out)) }, world_fixture_traceback)
+        })
         assert(failure != null, "a refused final composite must raise")
         assert(failure.unwrap().contains("present_composite"), "the error names the failing operation: {failure.unwrap()}")
         assert(refusal != "" && failure.unwrap().contains(refusal), "the error carries the actual admission reason")

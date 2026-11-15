@@ -46,8 +46,13 @@ fn outline_canvas_draws_a_ring_outside_the_silhouette() {
         let scale = 32.0
         let off = float(size) / (2.0 * scale)
         // Strays outside a bracket are ignored and leave nothing for the next one.
-        outline_silhouette_sprite(white, v(0, 0), dest_size: v(2, 2))
-        outline_canvas_end()
+        assert_error_logs([
+            "[OUTLINE] outline_silhouette_sprite called outside an outline_canvas_begin/end bracket -- ignored",
+            "[OUTLINE] outline_canvas_end called without a matching outline_canvas_begin -- ignored",
+        ], () => {
+            outline_silhouette_sprite(white, v(0, 0), dest_size: v(2, 2))
+            outline_canvas_end()
+        })
         outline_canvas_begin(canvas, OUTLINE_CANVAS_STYLE, v(off, off), scale)
         outline_silhouette_sprite(white, v(0, 0), dest_size: v(2, 2))
         outline_canvas_end()
@@ -108,7 +113,9 @@ fn outline_canvas_bracket_never_spans_a_frame() {
         outline_canvas_begin(target, OUTLINE_CANVAS_STYLE, v(1, 1), 32.0)
         frame_seq += 1
         set_canvas(current)
-        outline_canvas_end()
+        assert_error_logs(["[OUTLINE] outline canvas bracket crossed a frame boundary -- discarded without restoring its saved canvas"], () => {
+            outline_canvas_end()
+        })
         assert_eq(CURRENT_CANVAS_HANDLE, current.handle.0,
             "a stale end leaves the current frame's binding intact")
 

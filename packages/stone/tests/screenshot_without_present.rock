@@ -6,7 +6,9 @@ fn a_screenshot_request_with_no_present_fails_instead_of_returning_pixels() {
     let completed = SCREENSHOT_COMPLETED_COUNT
     take_screenshot(path, -1, (_path, ok) => { completions.push(ok) })
     assert_eq(completions.len(), 0, "a request is answered only by a present")
-    screenshot_fail_pending("no presented frame before shutdown")
+    assert_error_logs(["[STONE] Failed to save screenshot to {path}: no presented frame before shutdown"], () => {
+        screenshot_fail_pending("no presented frame before shutdown")
+    })
     assert_eq(completions.len(), 1, "an unanswered request is failed, not dropped")
     assert(!completions[0], "the unanswered request reports failure")
     assert_eq(SCREENSHOT_CAPTURE_FAILURES, failures + 1, "the failure is counted")

@@ -318,8 +318,13 @@ fn sound_bank_normalized_gain_reaches_immediate_and_pending_playback() {
     let missing_normalization = "{{\"version\":2,\"normalizations\":{{}},\"events\":["
         + "{{\"id\":\"fixture.missing_normalization\",\"bus\":\"sfx\",\"steps\":["
         + "{{\"layers\":[{{\"sources\":[\"" + path + "\"]}}]}}]}}]}}"
-    assert(sound_bank_decode(missing_normalization, "missing normalization fixture") == null,
-        "a loaded source without a normalization rejects the candidate bank")
+    assert_error_logs([
+        "[SOUND] sound bank event fixture.missing_normalization has no valid normalization for {path}",
+        "[SOUND] sound bank missing normalization fixture rejected: event fixture.missing_normalization step 0 has an invalid layer",
+    ], () => {
+        assert(sound_bank_decode(missing_normalization, "missing normalization fixture") == null,
+            "a loaded source without a normalization rejects the candidate bank")
+    })
     let refs_after_rejection = 0
     if let shared = SOUND_RESIDENCY_SHARED_SOURCES.get(shared_key) {
         refs_after_rejection = shared.references
@@ -470,7 +475,9 @@ fn sound_residency_unload_covers_success_backend_zero_and_stale() {
     })
     assert(stale == null,
         "a repeated unload of a stale handle stays silent (got: {stale ?? "<none>"})")
-    stub = load_sound_asset("/nonexistent/missing-fixture.wav")
+    assert_error_logs(["[AUDIO] audio asset failed to load; its sounds are silent\n/nonexistent/missing-fixture.wav (asset_path: /nonexistent/missing-fixture.wav)"], () => {
+        stub = load_sound_asset("/nonexistent/missing-fixture.wav")
+    })
     let missing = stub.unwrap()
     assert(missing.data().unwrap().backend_id == 0,
         "a missing asset loads as a backend-zero stub")

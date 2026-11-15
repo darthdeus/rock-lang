@@ -83,7 +83,9 @@ fn residency_decode_failure_draws_placeholder_counts_and_logs() {
         let fails_before = stone_image_decode_failed_count()
         let image = acquire_image_asset(bad, watch: false)
         assert(image.0 != 0, "a header-valid corrupt file mints a handle")
-        residency_flush_required()
+        assert_error_logs(["[RESIDENCY] decode failed {bad}"], () => {
+            residency_flush_required()
+        })
         assert(image_load_decode_failed(image), "the failed decode marks its handle")
         assert_eq(residency_state(bad), ResidencyState::Loading,
             "a failed decode never reads Resident")
@@ -102,9 +104,6 @@ fn residency_decode_failure_draws_placeholder_counts_and_logs() {
         assert_eq(stone_image_read_texel(image.0, 1, 1),
             RESIDENCY_DECODE_PLACEHOLDER_BRIGHT,
             "the placeholder repeats in 2x2 cells")
-        let errors = stone_log_records_text(0, stone_log_record_total(0))
-        assert(errors.contains("RESIDENCY") && errors.contains(bad),
-            "the shared logger names the failed path under RESIDENCY")
         let control = acquire_image_asset(good, watch: false)
         residency_flush_required()
         assert(!image_load_decode_failed(control), "the intact twin is not marked")
@@ -158,7 +157,9 @@ fn residency_decode_failure_fixture_restores_after_failure() {
         residency_owner_test_isolated(() => {
             let image = acquire_image_asset(paths[1], watch: false)
             assert(image.0 != 0)
-            residency_flush_required()
+            assert_error_logs(["[RESIDENCY] decode failed {paths[1]}"], () => {
+                residency_flush_required()
+            })
             assert(image_load_decode_failed(image))
             error("intentional {origin} failure")
         }, () => {
