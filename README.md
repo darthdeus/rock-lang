@@ -97,7 +97,7 @@ cargo run -p rock-cli --bin rock -- stone demos/testbed
 `bash scripts/release.sh` builds a host archive containing Rock, Stone, LuaJIT,
 native libraries, the GLSL test runner and named packages. Extract it and run `bin/rock stone demos/testbed`.
 Linux source builds need SDL2, ALSA and XTest development packages. Native window
-tests use `python3 scripts/test_native.py`; on Linux they also need Xvfb, i3 and clang.
+tests use `python3 scripts/test_native.py` and require `cargo-nextest`; on Linux they also need Xvfb, i3 and clang.
 
 The manual **Installed Linux runtime** workflow tests the extracted archive in a
 networkless Debian container without source or build tools. To run it locally:
