@@ -79,23 +79,13 @@ impl<'a> Builder<'a> {
             })
     }
 
-    /// Select the representation of the operation that produced `value`.
-    ///
-    /// Most expressions can be planned from their concrete type. Storage
-    /// intercepts and identity casts are the exceptions: their body type can
-    /// still be an opaque generic even though the operation has already
-    /// selected a concrete element plan. Re-planning those expressions from
-    /// the generic spelling would throw away the plan the producer just used.
+    /// Plan ordinary expressions from their concrete type and presence carrier.
     pub(crate) fn lowered_expr_representation(
         &self,
         e: Idx<Expr>,
         ty: &MonoTy,
         value: &ValueRepr,
     ) -> Result<RepId, CompilerError> {
-        if let Some(representation) = self.operation_representation(e)? {
-            return Ok(representation);
-        }
-
         let has_presence = matches!(
             value,
             ValueRepr::Group {
@@ -172,86 +162,6 @@ impl<'a> Builder<'a> {
         };
         let representation = self.lowered_expr_representation(e, &ty, &value)?;
         Ok(ValueBundle::new(representation, value))
-    }
-
-    fn operation_representation(&self, e: Idx<Expr>) -> Result<Option<RepId>, CompilerError> {
-        match self.body.expr_arena[e] {
-            Expr::Index { base, .. } => {
-                if let Some(elem) = self.vec_column_elem_of(base)? {
-                    return Ok(Some(elem.representation()));
-                }
-                if let Some(elem) = self.vec_strided_elem_of(base)? {
-                    return Ok(Some(elem.representation()));
-                }
-                if let Some(elem) = self.map_column_value_of(base)? {
-                    return Ok(Some(elem.representation()));
-                }
-                for family in [ContainerFamily::NativeBuffer, ContainerFamily::FlatVec] {
-                    if let Some(plan) = self.container_plan_for(base, family)? {
-                        if plan.element_shape(self.scx.rep_arena()).is_some() {
-                            return Ok(Some(plan.element_rep()));
-                        }
-                    }
-                }
-                Ok(None)
-            }
-            Expr::Call { callee, args, .. } => {
-                let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-                if let Callee::Unresolved { name, .. } = &callee {
-                    if name.as_str() == "cast" && arg_idxs.len() == 1 {
-                        if let Some(representation) = self.operation_representation(arg_idxs[0])? {
-                            return Ok(Some(representation));
-                        }
-                    }
-                    if name.as_str() == "__vec_data_get" {
-                        if let Some(&recv) = arg_idxs.first()
-                            && let Some(elem) = self.vec_column_elem_of(recv)?
-                        {
-                            return Ok(Some(elem.representation()));
-                        }
-                        if let Some(&recv) = arg_idxs.first()
-                            && let Some(elem) = self.vec_strided_elem_of(recv)?
-                        {
-                            return Ok(Some(elem.representation()));
-                        }
-                    }
-                    if matches!(name.as_str(), "get" | "map_get") {
-                        if let Some(&recv) = arg_idxs.first()
-                            && let Some(elem) = self.map_column_value_of(recv)?
-                        {
-                            return Ok(Some(elem.representation()));
-                        }
-                    }
-                    if self.fn_field_of_call(e).is_none()
-                        && self.resolve_funcref(e, *name).is_ok()
-                        && let Some(owner) = self.concrete_callee_for_site(e)?
-                    {
-                        let abi = self.callee_abi_plan_for_instance(&owner)?;
-                        return Ok(abi.representation().result());
-                    }
-                }
-                match callee {
-                    Callee::Local(binding) => {
-                        if let Some(nested) = self.nested_fn_globals.get(&raw(binding)) {
-                            return Ok(nested.representation.result());
-                        }
-                        let Some(ty) = self.binding_ty(binding) else {
-                            return Ok(None);
-                        };
-                        Ok(self.fn_value_rep_plan(ty)?.and_then(|plan| plan.result()))
-                    }
-                    Callee::Value(value) => {
-                        let Some(ty) = self.inf.and_then(|inf| inf.expr_types.get(value)).copied()
-                        else {
-                            return Ok(None);
-                        };
-                        Ok(self.fn_value_rep_plan(ty)?.and_then(|plan| plan.result()))
-                    }
-                    Callee::Unresolved { .. } => Ok(None),
-                }
-            }
-            _ => Ok(None),
-        }
     }
 
     pub(crate) fn concrete_rep_tuple(

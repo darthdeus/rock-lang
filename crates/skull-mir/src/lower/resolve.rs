@@ -193,9 +193,7 @@ impl<'a> Builder<'a> {
         let outer_expr = self.cur_expr.replace(e);
         let out = match self.flat_ref_read(e) {
             Ok(Some(read)) => Ok(read),
-            Ok(None) => self
-                .lower_expr_repr_inner(e)
-                .and_then(|value| self.value_bundle_for_expr(e, value)),
+            Ok(None) => self.lower_expr_repr_inner(e),
             Err(err) => Err(err),
         };
         let out = out.map_err(|e| self.located(e));
@@ -204,36 +202,49 @@ impl<'a> Builder<'a> {
         out
     }
 
-    fn lower_expr_repr_inner(&mut self, e: Idx<Expr>) -> Result<ValueRepr, CompilerError> {
+    fn lower_expr_repr_inner(&mut self, e: Idx<Expr>) -> Result<ValueBundle, CompilerError> {
         let outer = self.cur_span.replace(self.body.expr_spans[e]);
         let outer_expr = self.cur_expr.replace(e);
-        let lowered = match self.body.expr_arena[e] {
-            Expr::Var(binding)
-                if self
-                    .preflight_reads
-                    .iter()
-                    .rev()
-                    .any(|reads| reads.contains_key(&raw(binding))) =>
-            {
-                Ok(ValueRepr::Scalar(
-                    *self
+        let lowered = match self.flat_ref_read(e) {
+            Ok(Some(read)) => Ok(read),
+            Ok(None) => match self.body.expr_arena[e] {
+                Expr::Var(binding)
+                    if self
                         .preflight_reads
                         .iter()
                         .rev()
-                        .find_map(|reads| reads.get(&raw(binding)))
-                        .unwrap(),
-                ))
-            }
-            _ => self.lower_expr_repr_unscoped(e),
+                        .any(|reads| reads.contains_key(&raw(binding))) =>
+                {
+                    let value = ValueRepr::Scalar(
+                        *self
+                            .preflight_reads
+                            .iter()
+                            .rev()
+                            .find_map(|reads| reads.get(&raw(binding)))
+                            .unwrap(),
+                    );
+                    self.value_bundle_for_expr(e, value)
+                }
+                Expr::Call { callee, args, .. } => self.lower_call_repr(e, callee, args),
+                Expr::Index { base, index } => self.lower_index_repr(e, base, index),
+                _ => self
+                    .lower_expr_repr_unscoped(e)
+                    .and_then(|value| self.value_bundle_for_expr(e, value)),
+            },
+            Err(err) => Err(err),
         };
-        let out = match lowered {
-            Ok(ValueRepr::Scalar(v)) if self.f32_round_exprs.contains(&e) => {
-                Ok(ValueRepr::Scalar(self.emit_cur(Inst::FloatToF32(v))))
+        let out = lowered.map(|bundle| match bundle.value() {
+            ValueRepr::Scalar(v) if self.f32_round_exprs.contains(&e) => {
+                let representation = bundle.representation();
+                let value = self.emit_cur(Inst::FloatToF32(*v));
+                ValueBundle::new(representation, ValueRepr::Scalar(value))
             }
-            other => other,
-        };
+            _ => bundle,
+        });
         let out = out.map_err(|e| self.located(e));
-        if let Ok(ValueRepr::Scalar(value)) = &out {
+        if let Ok(bundle) = &out
+            && let ValueRepr::Scalar(value) = bundle.value()
+        {
             self.mark_record_base(e, *value);
         }
         self.cur_span = outer;
@@ -488,10 +499,83 @@ impl<'a> Builder<'a> {
         Ok(repr)
     }
 
-    fn lower_expr_repr_unscoped(&mut self, e: Idx<Expr>) -> Result<ValueRepr, CompilerError> {
-        if let Some(read) = self.flat_ref_read(e)? {
-            return Ok(read.into_value());
+    fn lower_index_repr(
+        &mut self,
+        e: Idx<Expr>,
+        base: Idx<Expr>,
+        index: Idx<Expr>,
+    ) -> Result<ValueBundle, CompilerError> {
+        let (b, kind) = self.lower_index_base(base)?;
+        let i = self.lower_expr(index)?;
+        match kind {
+            ContainerKind::VecValueColumns(elem) => return self.column_element_repr(b, i, elem),
+            ContainerKind::VecValueStrided(elem) => return self.strided_element_repr(b, i, elem),
+            _ => {}
         }
+        if let Some(elem) = self.map_column_value_of(base)? {
+            return self.map_column_index_repr(b, i, elem);
+        }
+        let name = if self.scx.values_first_class {
+            None
+        } else {
+            self.value_struct_of(e).or(self.nullable_place_value_of(e)?)
+        };
+        if name.is_some()
+            && let ContainerKind::NativeBufferValue(elem) = kind
+            && self.is_leaf_addressed(elem)?
+        {
+            return self.nb_leaf_element_repr(b, i, elem);
+        }
+        let representation = if matches!(kind, ContainerKind::NativeBufferValue(_)) {
+            let family = if self.expr_is_flat_vec(base) {
+                ContainerFamily::FlatVec
+            } else {
+                ContainerFamily::NativeBuffer
+            };
+            self.container_plan_for(base, family)?
+                .filter(|plan| plan.element_shape(self.scx.rep_arena()).is_some())
+                .map(|plan| plan.element_rep())
+        } else {
+            None
+        };
+        let value = if let Some(name) = name {
+            let slot = self.emit_cur(Inst::Index {
+                base: b,
+                index: i,
+                kind,
+            });
+            if self.value_struct_of(e).is_none() {
+                ValueRepr::Scalar(self.nullable_boxed_value_copy(
+                    slot,
+                    name,
+                    self.concrete_expr_ty(e),
+                )?)
+            } else {
+                self.boxed_value_copy_repr(slot, name, self.concrete_expr_ty(e))?
+            }
+        } else {
+            let slot = self.emit_cur(Inst::Index {
+                base: b,
+                index: i,
+                kind,
+            });
+            match self.expr_tuple_shape(e)?.filter(TupleRetShape::splats) {
+                Some(shape) => {
+                    let slots: Vec<Idx<Inst>> = (0..shape.slot_count())
+                        .map(|index| self.emit_cur(Inst::TupleIndex { base: slot, index }))
+                        .collect();
+                    self.tuple_from_slots(&shape, &slots, &mut 0)
+                }
+                None => ValueRepr::Scalar(slot),
+            }
+        };
+        match representation {
+            Some(representation) => Ok(ValueBundle::new(representation, value)),
+            None => self.value_bundle_for_expr(e, value),
+        }
+    }
+
+    fn lower_expr_repr_unscoped(&mut self, e: Idx<Expr>) -> Result<ValueRepr, CompilerError> {
         // Probed ahead of the match rather than in a guard: the wire-shape oracle
         // is fallible, and a guard cannot propagate.
         if let Expr::BinOp {
@@ -572,7 +656,7 @@ impl<'a> Builder<'a> {
             Expr::Tuple(elems) if expr_tuple_shape.as_ref().is_some_and(TupleRetShape::splats) => {
                 let parts = elems
                     .into_iter()
-                    .map(|el| self.lower_expr_repr_inner(el))
+                    .map(|el| self.lower_expr_repr_inner(el).map(ValueBundle::into_value))
                     .collect::<Result<_, CompilerError>>()?;
                 Ok(ValueRepr::Tuple {
                     parts,
@@ -582,7 +666,7 @@ impl<'a> Builder<'a> {
             // Project splatting tuples directly; boxed value slots use the same
             // snapshot path as fields and array elements. Newtype `.0` is identity.
             Expr::TupleIndex { tuple, index } if !self.expr_is_newtype(tuple) => {
-                let r = self.lower_expr_repr_inner(tuple)?;
+                let r = self.lower_expr_repr_inner(tuple)?.into_value();
                 let projected = if let ValueRepr::Tuple { parts, .. } = r {
                     parts
                         .into_iter()
@@ -668,7 +752,7 @@ impl<'a> Builder<'a> {
                 // components into a fresh VecN Group (len 1: the bare scalar) --
                 // scalarized end to end, so a swizzle never boxes by itself.
                 if let Some(idxs) = self.swizzle_of(base, field) {
-                    let br = self.lower_expr_repr_inner(base)?;
+                    let br = self.lower_expr_repr_inner(base)?.into_value();
                     if let ValueRepr::Group { parts, .. } = &br {
                         let sel: Vec<ValueRepr> = idxs.iter().map(|&i| parts[i].clone()).collect();
                         return Ok(swizzle_group(sel));
@@ -711,7 +795,7 @@ impl<'a> Builder<'a> {
                     // Group rather than packing a table just to read dotted keys
                     // back out of it. A reference parent is never a Group, so
                     // this changes nothing for the `embed` case proper.
-                    let br = self.lower_expr_repr_inner(base)?;
+                    let br = self.lower_expr_repr_inner(base)?.into_value();
                     if let ValueRepr::Group { name, parts, .. } = &br {
                         if let Some(i) = self.field_index(*name, field) {
                             return self.snapshot_projected_value(e, parts[i].clone());
@@ -736,7 +820,7 @@ impl<'a> Builder<'a> {
                     // A value parent can still be UNBOXED (a param, a local):
                     // project the path off its Group rather than pack a box
                     // just to read a dotted key back out of it.
-                    let mut repr = self.lower_expr_repr_inner(pbase)?;
+                    let mut repr = self.lower_expr_repr_inner(pbase)?.into_value();
                     // A boxed GC-table parent keys an inline child's enum and
                     // struct fields by their leaves too, so a whole-field read
                     // is split back into the Group rather than read off one key.
@@ -791,7 +875,7 @@ impl<'a> Builder<'a> {
                         field: key,
                     })));
                 }
-                let mut br = self.lower_expr_repr_inner(base)?;
+                let mut br = self.lower_expr_repr_inner(base)?.into_value();
                 // A leaf-table BOX has no declared-field keys -- a nested child
                 // lives at dotted leaves and its own name holds only presence,
                 // so `Field { base, "pos" }` would hand the consumer a bool.
@@ -922,81 +1006,6 @@ impl<'a> Builder<'a> {
                 let cells = self.lower_flat_value(&shape, e)?;
                 Ok(self.flat_cells_to_repr(&shape, cells))
             }
-            Expr::Call { callee, args, .. } => self.lower_call_repr(e, callee, args),
-            // A COLUMN element read routes on the container, ahead of the
-            // element-type guard below: column storage has no element slot at
-            // all, and inside a body specialized at `T = E?` the element type is
-            // an unsubstituted generic that no type predicate can classify.
-            Expr::Index { base, index } if self.vec_column_elem_of(base)?.is_some() => {
-                let elem = self.vec_column_elem_of(base)?.expect("guard matched");
-                let (b, _) = self.lower_index_base(base)?;
-                let i = self.lower_expr(index)?;
-                self.column_element_repr(b, i, elem)
-                    .map(ValueBundle::into_value)
-            }
-            Expr::Index { base, index } if self.vec_strided_elem_of(base)?.is_some() => {
-                let elem = self.vec_strided_elem_of(base)?.expect("guard matched");
-                let (b, _) = self.lower_index_base(base)?;
-                let i = self.lower_expr(index)?;
-                self.strided_element_repr(b, i, elem)
-                    .map(ValueBundle::into_value)
-            }
-            // A value-struct ELEMENT read (`buf[i]`/`fv[i]`/`v[i]`) as an unboxed
-            // Group of leaf reads off the checked slot: a leaf projection reads the
-            // part live, while `pack` (a whole-value use -- let-bind, arg, return,
-            // store) rebuilds a fresh value instead of aliasing the array slot.
-            // A `V?` element takes the same shape, gated on presence at the copy.
-            Expr::Index { base, index }
-                if !self.scx.values_first_class
-                    && (self.value_struct_of(e).is_some() || nullable_place_value.is_some()) =>
-            {
-                let nullable = self.value_struct_of(e).is_none();
-                let name = self
-                    .value_struct_of(e)
-                    .or(nullable_place_value)
-                    .expect("guard matched");
-                let (b, kind) = self.lower_index_base(base)?;
-                let i = self.lower_expr(index)?;
-                // Column storage: there is no element slot to read leaves off --
-                // each leaf lives in its own array, so the Group is built from K
-                // direct column reads. Bounds are checked ONCE for the element.
-                if let ContainerKind::VecValueColumns(elem) = kind {
-                    return self
-                        .column_element_repr(b, i, elem)
-                        .map(ValueBundle::into_value);
-                }
-                if let ContainerKind::VecValueStrided(elem) = kind {
-                    return self
-                        .strided_element_repr(b, i, elem)
-                        .map(ValueBundle::into_value);
-                }
-                // A column-stored Map reaches its leaves the same way, one
-                // indirection out: the spine resolves the key to a slot, and the
-                // slot indexes `data`'s columns.
-                if let Some(elem) = self.map_column_value_of(base)? {
-                    return self.map_column_index_repr(b, i, elem);
-                }
-                // Leaf addressing: no slot reference, no nested ctor -- each
-                // leaf comes straight from its typed view.
-                if let ContainerKind::NativeBufferValue(elem) = kind {
-                    if self.is_leaf_addressed(elem)? {
-                        return self.nb_leaf_element_repr(b, i, elem);
-                    }
-                }
-                let slot = self.emit_cur(Inst::Index {
-                    base: b,
-                    index: i,
-                    kind,
-                });
-                if nullable {
-                    return Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(
-                        slot,
-                        name,
-                        self.concrete_expr_ty(e),
-                    )?));
-                }
-                self.boxed_value_copy_repr(slot, name, self.concrete_expr_ty(e))
-            }
             Expr::BinOp {
                 op: BinOp::NullCoalesce,
                 lhs,
@@ -1123,7 +1132,7 @@ impl<'a> Builder<'a> {
             ..lhs_shape.clone()
         };
 
-        let lhs_repr = self.lower_expr_repr_inner(lhs)?;
+        let lhs_repr = self.lower_expr_repr_inner(lhs)?.into_value();
         let lhs_slots = self.tuple_repr_to_slots(lhs_repr, &lhs_shape)?;
         let (present, lhs_values) = lhs_slots
             .split_first()
@@ -1176,7 +1185,7 @@ impl<'a> Builder<'a> {
         // at most one base of this struct's type.
         let base = bases.into_iter().next();
         let base_repr: Option<ValueRepr> = match base {
-            Some(b) => Some(self.lower_expr_repr_inner(b)?),
+            Some(b) => Some(self.lower_expr_repr_inner(b)?.into_value()),
             None => None,
         };
         let base_boxed: Option<Idx<Inst>> = match &base_repr {
@@ -1202,7 +1211,7 @@ impl<'a> Builder<'a> {
                 }
                 Some(r) => r.clone(),
                 None => {
-                    let r = self.lower_expr_repr_inner(lf.value)?;
+                    let r = self.lower_expr_repr_inner(lf.value)?.into_value();
                     by_value.insert(key, r.clone());
                     r
                 }

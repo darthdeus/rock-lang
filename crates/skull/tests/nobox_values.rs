@@ -2103,3 +2103,20 @@ fn an_enum_in_a_nobox_field_of_a_boxed_gc_tier_local_reads_by_leaf() {
         "`look` boxed its local to read a field:\n{body}"
     );
 }
+
+#[test]
+fn a_user_cast_keeps_its_result_representation_after_a_column_read() {
+    let source = r#"
+nobox value Source { x: int, y: int }
+nobox value Result { total: int }
+
+fn cast(value: Source) -> Result { return Result { total: value.x + value.y } }
+fn consume(value: Result) -> int { return value.total }
+
+fn main() {
+    let values: [Source] = [Source { x: 7, y: 11 }]
+    print(consume(cast(values[0])))
+}
+"#;
+    assert_eq!(compile_and_run(source), "18");
+}

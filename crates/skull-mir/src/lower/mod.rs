@@ -1670,7 +1670,7 @@ pub fn lower_definition_factory(
     let mut b = Builder::generated(ws, scx, scx, concrete_plan, concrete_plans, body, None, f);
     let callee = b.emit_cur(Inst::Load(parameter));
     let result = b.indirect_call_by_plan(abi.representation().clone(), callee, &[])?;
-    let result = b.pack(result)?;
+    let result = b.pack(result.into_value())?;
     b.f.set_term(b.cur, Term::Return(vec![result]));
     Ok(b.f)
 }

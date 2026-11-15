@@ -816,10 +816,10 @@ impl<'a> Builder<'a> {
         args: IdxRange<Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
         let r = self.lower_call_repr(e, callee, args)?;
-        self.pack_maybe_absent(r)
+        self.pack_maybe_absent(r.into_value())
     }
 
-    /// Lower a call to a [`ValueRepr`]. A scalar-ABI value-returning direct call
+    /// Lower a call with its producer-owned representation. A scalar-ABI direct call
     /// yields an unboxed `Group` (so a consuming ABI boundary splats it without a
     /// round-trip through cdata); everything else is a `Scalar`.
     pub(crate) fn lower_call_repr(
@@ -827,7 +827,7 @@ impl<'a> Builder<'a> {
         e: Idx<Expr>,
         callee: Callee,
         args: IdxRange<Expr>,
-    ) -> Result<ValueRepr, CompilerError> {
+    ) -> Result<ValueBundle, CompilerError> {
         let trusted = match callee {
             Callee::Unresolved { name, .. } => self
                 .resolve_funcref(e, name)
@@ -844,27 +844,40 @@ impl<'a> Builder<'a> {
         self.finish_call_repr(e, r, trusted)
     }
 
+    fn call_result_bundle(
+        &self,
+        plan: &FunctionRepPlan,
+        value: ValueRepr,
+    ) -> Result<ValueBundle, CompilerError> {
+        let representation = match plan.result() {
+            Some(result) => result,
+            None => self.concrete_rep_id(&MonoTy::Unit, RepUse::Value, false, false)?,
+        };
+        Ok(ValueBundle::new(representation, value))
+    }
+
     fn finish_call_repr(
         &mut self,
         e: Idx<Expr>,
-        r: ValueRepr,
+        bundle: ValueBundle,
         trusted: bool,
-    ) -> Result<ValueRepr, CompilerError> {
+    ) -> Result<ValueBundle, CompilerError> {
+        let r = bundle.value();
         // Iterator protocols use phantom()'s nil even at a non-null value type.
-        if matches!(&r, ValueRepr::Scalar(v) if matches!(self.f.insts[*v], Inst::Const(Lit::Nil))) {
-            return Ok(r);
+        if matches!(r, ValueRepr::Scalar(v) if matches!(self.f.insts[*v], Inst::Const(Lit::Nil))) {
+            return Ok(bundle);
         }
         if !self.scx.values_first_class {
-            let ty = self.call_result_owner_ty(e, &r)?;
+            let ty = self.call_result_owner_ty(e, r)?;
             if let Some(ty) = ty {
                 // An opaque return can forward storage borrowed from a foreign
                 // body. Snapshot it at the consuming boundary, where projections
                 // can use leaves without first reconstructing its box.
                 let share = trusted && !matches!(r, ValueRepr::Scalar(_));
-                self.mark_boundary_value_repr(&r, &ty, share)?;
+                self.mark_boundary_value_repr(r, &ty, share)?;
             }
         }
-        Ok(r)
+        Ok(bundle)
     }
 
     /// Storage reads carry the receiver's element type even though the inline
@@ -917,7 +930,7 @@ impl<'a> Builder<'a> {
         e: Idx<Expr>,
         callee: Callee,
         args: IdxRange<Expr>,
-    ) -> Result<ValueRepr, CompilerError> {
+    ) -> Result<ValueBundle, CompilerError> {
         let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
         if matches!(
             self.scx.target(),
@@ -926,7 +939,8 @@ impl<'a> Builder<'a> {
             if let Callee::Unresolved { name, .. } = callee {
                 if name.as_str() == "field_get" {
                     if let Some(repr) = self.lower_nullable_field_get(e, name, &arg_idxs)? {
-                        return Ok(repr);
+                        let value = repr;
+                        return self.value_bundle_for_expr(e, value);
                     }
                 }
             }
@@ -995,7 +1009,8 @@ impl<'a> Builder<'a> {
         if let Some((arg, _)) = self.dispatch().tostring_route(e) {
             return self
                 .with_site_expr(arg, |s| s.stringify_structural(arg))
-                .map(ValueRepr::Scalar);
+                .map(ValueRepr::Scalar)
+                .and_then(|value| self.value_bundle_for_expr(e, value));
         }
         // `cast<T>(v)` is identity at runtime (`return value`), so a `nobox`
         // RESULT threads the argument's repr instead of packing it for the boxed
@@ -1013,7 +1028,7 @@ impl<'a> Builder<'a> {
             if name.as_str() == "cast" && self.nobox_value_name(e).is_some() {
                 if let [inner] = arg_idxs[..] {
                     if self.resolves_to_inline_builtin(e, name) {
-                        return self.lower_expr_repr(inner).map(ValueBundle::into_value);
+                        return self.lower_expr_repr(inner);
                     }
                 }
             }
@@ -1043,7 +1058,8 @@ impl<'a> Builder<'a> {
                             if super::shape::lua_value_is_immutable(self.ws, &ty) {
                                 let vec = self.lower_expr(value)?;
                                 self.lower_expr(storage)?;
-                                return self.clone_strided_data(vec, elem);
+                                let value = self.clone_strided_data(vec, elem)?;
+                                return self.value_bundle_for_expr(e, value);
                             }
                         }
                         if let Some(elem) = self.vec_column_elem_of(value)? {
@@ -1056,7 +1072,8 @@ impl<'a> Builder<'a> {
                             if super::shape::lua_value_is_immutable(self.ws, &ty) {
                                 let vec = self.lower_expr(value)?;
                                 self.lower_expr(storage)?;
-                                return self.clone_column_data(vec, elem);
+                                let value = self.clone_column_data(vec, elem)?;
+                                return self.value_bundle_for_expr(e, value);
                             }
                         }
                     }
@@ -1069,7 +1086,7 @@ impl<'a> Builder<'a> {
                     {
                         let copy = self.lower_expr_repr(value)?;
                         self.lower_expr(storage)?;
-                        return Ok(copy.into_value());
+                        return Ok(copy);
                     }
                 }
             }
@@ -1086,9 +1103,10 @@ impl<'a> Builder<'a> {
                 .and_then(|ty| ty.nominal())
                 .ok_or_else(|| self.gap_here("json record requires a concrete nominal type"))?;
             self.lower_expr_repr(arg)?;
-            return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Str(
+            let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Str(
                 crate::mangle::type_symbol(self.ws, ty),
-            )))));
+            ))));
+            return self.value_bundle_for_expr(e, value);
         }
         // Scalar arithmetic: rock desugars `+ - * / %` to `__op_*` calls; turn
         // them back into native typed ops when both operands are scalars.
@@ -1101,7 +1119,7 @@ impl<'a> Builder<'a> {
             ) {
                 if let [a, b] = arg_idxs[..] {
                     if let (Some(lt), Some(rt)) = (self.arith_ty(a), self.arith_ty(b)) {
-                        return Ok(ValueRepr::Scalar(self.lower_native_arith(n, lt, rt, a, b)?));
+                        return self.lower_native_arith(n, lt, rt, a, b);
                     }
                 }
             }
@@ -1122,9 +1140,8 @@ impl<'a> Builder<'a> {
                     } if params.first().and_then(|key| self.arith_ty_of_mono(key)) == Some(ArithTy::Str)
                 )
             });
-            return Ok(ValueRepr::Scalar(
-                self.emit_cur(Inst::Const(Lit::Bool(string_keys))),
-            ));
+            let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Bool(string_keys))));
+            return self.value_bundle_for_expr(e, value);
         }
         // `native_buffer_alloc<T>(n)` intrinsic: allocate a flat ffi array of the
         // concrete element type and wrap it in a `NativeBuffer`. Resolving the
@@ -1157,7 +1174,8 @@ impl<'a> Builder<'a> {
                     ty: Some(crate::names::ustr("NativeBuffer")),
                     fields,
                 });
-                return Ok(ValueRepr::Scalar(nb));
+                let value = ValueRepr::Scalar(nb);
+                return self.value_bundle_for_expr(e, value);
             }
         }
         // `xs.len()` / `vec_len(xs)` on a `[T]` is the stdlib's read of the
@@ -1171,10 +1189,11 @@ impl<'a> Builder<'a> {
             && self.calls_stdlib_vec_fn(e, name, recv)
         {
             let base = self.lower_expr(recv)?;
-            return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Field {
+            let value = ValueRepr::Scalar(self.emit_cur(Inst::Field {
                 base,
                 field: crate::names::ustr("len"),
-            })));
+            }));
+            return self.value_bundle_for_expr(e, value);
         }
         // `xs.push(v)` / `vec_push(xs, v)` onto a COLUMN-stored Vec. The stdlib
         // push bodies write one element into a single `_data` backing, which
@@ -1185,14 +1204,16 @@ impl<'a> Builder<'a> {
             if matches!(name.as_str(), "push" | "vec_push") {
                 if let [recv, item] = arg_idxs[..] {
                     if let Some(elem) = self.vec_strided_elem_of(recv)? {
-                        return self.strided_push(recv, item, elem);
+                        let value = self.strided_push(recv, item, elem)?;
+                        return self.value_bundle_for_expr(e, value);
                     }
                     if let Some(elem) = self.vec_column_elem_of(recv)? {
-                        return self.column_push(recv, item, elem);
+                        let value = self.column_push(recv, item, elem)?;
+                        return self.value_bundle_for_expr(e, value);
                     }
                 }
             }
-            if let Some(r) = self.strided_data_primitive(name.as_str(), &arg_idxs)? {
+            if let Some(r) = self.strided_data_primitive(e, name.as_str(), &arg_idxs)? {
                 return Ok(r);
             }
             // The three raw-backing primitives ARE the representation boundary.
@@ -1207,7 +1228,7 @@ impl<'a> Builder<'a> {
             // body stands, while the snapshot specialized at `T = Vec2` sees the
             // concrete element and lowers to column operations. Static, per
             // instantiation -- never a runtime test for whether `_data` exists.
-            if let Some(r) = self.column_data_primitive(name.as_str(), &arg_idxs)? {
+            if let Some(r) = self.column_data_primitive(e, name.as_str(), &arg_idxs)? {
                 return Ok(r);
             }
             // `vec_new()` is the fourth boundary primitive, and the odd one out:
@@ -1218,21 +1239,25 @@ impl<'a> Builder<'a> {
             if name.as_str() == "__vec_data_alloc" && arg_idxs.len() == 1 {
                 if let Some(elem) = self.vec_strided_elem_of(e)? {
                     let capacity = self.lower_expr(arg_idxs[0])?;
-                    return Ok(ValueRepr::Scalar(self.empty_strided_vec(elem, capacity)?));
+                    let value = ValueRepr::Scalar(self.empty_strided_vec(elem, capacity)?);
+                    return self.value_bundle_for_expr(e, value);
                 }
                 if let Some(elem) = self.vec_column_elem_of(e)? {
                     let capacity = self.lower_expr(arg_idxs[0])?;
-                    return Ok(ValueRepr::Scalar(self.empty_column_vec(elem, capacity)?));
+                    let value = ValueRepr::Scalar(self.empty_column_vec(elem, capacity)?);
+                    return self.value_bundle_for_expr(e, value);
                 }
             }
             if name.as_str() == "vec_new" && arg_idxs.is_empty() {
                 if let Some(elem) = self.vec_strided_elem_of(e)? {
                     let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
-                    return Ok(ValueRepr::Scalar(self.empty_strided_vec(elem, capacity)?));
+                    let value = ValueRepr::Scalar(self.empty_strided_vec(elem, capacity)?);
+                    return self.value_bundle_for_expr(e, value);
                 }
                 if let Some(elem) = self.vec_column_elem_of(e)? {
                     let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
-                    return Ok(ValueRepr::Scalar(self.empty_column_vec(elem, capacity)?));
+                    let value = ValueRepr::Scalar(self.empty_column_vec(elem, capacity)?);
+                    return self.value_bundle_for_expr(e, value);
                 }
             }
             // The Map surface. `get`/`table_unset` are the storage boundary the
@@ -1242,30 +1267,29 @@ impl<'a> Builder<'a> {
             // intercepted despite having working generic bodies: the generic
             // `clear` unsets while iterating the very table it walks, and `len`
             // counts a spine it can read in O(1).
-            if let Some(r) = self.map_column_primitive(name.as_str(), &arg_idxs)? {
+            if let Some(r) = self.map_column_primitive(e, name.as_str(), &arg_idxs)? {
                 return Ok(r);
             }
             // `map_new()` is the Map's `vec_new`: its value type comes from the
             // CALL's own type, so it cannot be read off an argument.
             if name.as_str() == "map_new" && arg_idxs.is_empty() {
                 if let Some(elem) = self.map_column_value_of(e)? {
-                    return Ok(ValueRepr::Scalar(self.empty_column_map(elem)?));
+                    let value = ValueRepr::Scalar(self.empty_column_map(elem)?);
+                    return self.value_bundle_for_expr(e, value);
                 }
             }
             if name.as_str() == "__rock_vec_from_lua_array" {
                 if let ([raw, len], Some(elem)) = (&arg_idxs[..], self.vec_strided_elem_of(e)?) {
                     let raw = self.lower_expr(*raw)?;
                     let len = self.lower_expr(*len)?;
-                    return Ok(ValueRepr::Scalar(
-                        self.strided_vec_from_raw_array(raw, len, elem)?,
-                    ));
+                    let value = ValueRepr::Scalar(self.strided_vec_from_raw_array(raw, len, elem)?);
+                    return self.value_bundle_for_expr(e, value);
                 }
                 if let ([raw, len], Some(elem)) = (&arg_idxs[..], self.vec_column_elem_of(e)?) {
                     let raw = self.lower_expr(*raw)?;
                     let len = self.lower_expr(*len)?;
-                    return Ok(ValueRepr::Scalar(
-                        self.column_vec_from_raw_array(raw, len, elem)?,
-                    ));
+                    let value = ValueRepr::Scalar(self.column_vec_from_raw_array(raw, len, elem)?);
+                    return self.value_bundle_for_expr(e, value);
                 }
             }
         }
@@ -1296,7 +1320,8 @@ impl<'a> Builder<'a> {
                         }
                         let lambda = self.lower_expr(arg)?;
                         self.emit_cur(Inst::CoroHook { kind, lambda });
-                        return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
+                        let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)));
+                        return self.value_bundle_for_expr(e, value);
                     }
                 }
             }
@@ -1323,7 +1348,8 @@ impl<'a> Builder<'a> {
                         callee: advance,
                         args: cargs,
                     });
-                    return Ok(self.resume_frame_read_channel(recv, &channel));
+                    let value = self.resume_frame_read_channel(recv, &channel);
+                    return self.value_bundle_for_expr(e, value);
                 }
             }
         }
@@ -1336,7 +1362,8 @@ impl<'a> Builder<'a> {
                 let [arg] = arg_idxs[..] else {
                     return Err(gap("bound `iter` call with non-unary args"));
                 };
-                return Ok(ValueRepr::Scalar(self.lower_expr(arg)?));
+                let value = ValueRepr::Scalar(self.lower_expr(arg)?);
+                return self.value_bundle_for_expr(e, value);
             }
             if let Some(&gidx) = inf.bound_calls.get(&e) {
                 let [arg] = arg_idxs[..] else {
@@ -1364,7 +1391,8 @@ impl<'a> Builder<'a> {
                     .iter()
                     .map(|c| self.emit_cur(Inst::Load(*c)))
                     .collect();
-                return Ok(self.tuple_result(&shape, &loads));
+                let value = self.tuple_result(&shape, &loads);
+                return self.value_bundle_for_expr(e, value);
             }
         }
         // A spread arg fills param slots by field name, so it takes the
@@ -1399,7 +1427,10 @@ impl<'a> Builder<'a> {
             // single argument value, no call.
             Callee::Unresolved { name, .. } if self.ws.newtypes_by_name.contains_key(&name) => {
                 match arg_idxs.as_slice() {
-                    [inner] => Ok(ValueRepr::Scalar(self.lower_expr(*inner)?)),
+                    [inner] => {
+                        let value = ValueRepr::Scalar(self.lower_expr(*inner)?);
+                        self.value_bundle_for_expr(e, value)
+                    }
                     _ => Err(gap(format!("newtype ctor `{name}` with non-unary args"))),
                 }
             }
@@ -1411,24 +1442,35 @@ impl<'a> Builder<'a> {
                 // by its literal pairs list -- recognized through the intrinsic
                 // registry off the resolved FuncRef, so no user fn is hijacked by
                 // name and the common non-intrinsic call pays only one field read.
-                Ok(func) => match self.fn_expand_kind(func) {
-                    Some(ExpandKind::SceneTypeKey) => {
-                        self.expand_scene_type_key(e, func, &arg_idxs)
-                    }
-                    Some(ExpandKind::StructPairs) => self.expand_struct_pairs(e, func, &arg_idxs),
-                    Some(ExpandKind::Materialize) => self.expand_materialize(&arg_idxs),
-                    Some(ExpandKind::ShaderPipeline) => self.expand_shader_pipeline(e, &arg_idxs),
-                    Some(ExpandKind::VertexLayout) => self.expand_vertex_layout(e, func, &arg_idxs),
-                    Some(ExpandKind::UniformBlock) => self.expand_uniform_block(e, func, &arg_idxs),
-                    Some(ExpandKind::UniformValues) => {
-                        self.expand_uniform_values(e, func, &arg_idxs)
-                    }
-                    Some(ExpandKind::BuildVar | ExpandKind::EmbedString) => {
-                        let kind = self.fn_expand_kind(func).unwrap();
-                        self.expand_comptime_input(e, &arg_idxs, kind)
-                    }
-                    None => self.lower_direct_call_repr(e, func, &arg_idxs, any_named),
-                },
+                Ok(func) => {
+                    let value = match self.fn_expand_kind(func) {
+                        Some(ExpandKind::SceneTypeKey) => {
+                            self.expand_scene_type_key(e, func, &arg_idxs)
+                        }
+                        Some(ExpandKind::StructPairs) => {
+                            self.expand_struct_pairs(e, func, &arg_idxs)
+                        }
+                        Some(ExpandKind::Materialize) => self.expand_materialize(&arg_idxs),
+                        Some(ExpandKind::ShaderPipeline) => {
+                            self.expand_shader_pipeline(e, &arg_idxs)
+                        }
+                        Some(ExpandKind::VertexLayout) => {
+                            self.expand_vertex_layout(e, func, &arg_idxs)
+                        }
+                        Some(ExpandKind::UniformBlock) => {
+                            self.expand_uniform_block(e, func, &arg_idxs)
+                        }
+                        Some(ExpandKind::UniformValues) => {
+                            self.expand_uniform_values(e, func, &arg_idxs)
+                        }
+                        Some(ExpandKind::BuildVar | ExpandKind::EmbedString) => {
+                            let kind = self.fn_expand_kind(func).unwrap();
+                            self.expand_comptime_input(e, &arg_idxs, kind)
+                        }
+                        None => return self.lower_direct_call_repr(e, func, &arg_idxs, any_named),
+                    }?;
+                    self.value_bundle_for_expr(e, value)
+                }
                 Err(gap_err) => {
                     // `g(args)` where `g` is a fn-typed module global.
                     if !any_named && self.is_fn_global(name) {
@@ -1454,7 +1496,8 @@ impl<'a> Builder<'a> {
                             .collect::<Result<_, _>>()?;
                         let g = self.emit_cur(Inst::Global(name));
                         let v = self.emit_call_value(e, g, arg_vals)?;
-                        return Ok(ValueRepr::Scalar(v));
+                        let value = ValueRepr::Scalar(v);
+                        return self.value_bundle_for_expr(e, value);
                     }
                     Err(gap_err)
                 }
@@ -1483,7 +1526,7 @@ impl<'a> Builder<'a> {
                     let Some(shape) = abi.result_shape(self.scx.rep_arena()) else {
                         let v = self.emit_call_value(e, g, arg_vals)?;
                         self.f.call_rep_plans.insert(v, abi.representation.clone());
-                        return Ok(ValueRepr::Scalar(v));
+                        return self.call_result_bundle(&abi.representation, ValueRepr::Scalar(v));
                     };
                     let dests: Vec<Idx<Cell>> = (0..shape.leaf_count())
                         .map(|_| self.f.new_cell(None))
@@ -1501,7 +1544,8 @@ impl<'a> Builder<'a> {
                         .map(|c| self.emit_cur(Inst::Load(*c)))
                         .collect();
                     let mut idx = 0;
-                    return Ok(self.rebuild_from_leaves(shape, &leaves, &mut idx));
+                    let value = self.rebuild_from_leaves(shape, &leaves, &mut idx);
+                    return self.call_result_bundle(&abi.representation, value);
                 }
                 let callee_v = match self.value_binds.get(&raw(b)) {
                     Some(&value) => value,
@@ -1526,7 +1570,10 @@ impl<'a> Builder<'a> {
                     .map(|&a| self.lower_expr(a))
                     .collect::<Result<_, _>>()?;
                 let v = self.emit_call_value(e, callee_v, arg_vals)?;
-                Ok(ValueRepr::Scalar(v))
+                {
+                    let value = ValueRepr::Scalar(v);
+                    self.value_bundle_for_expr(e, value)
+                }
             }
             // A fn-typed expression result: lower it, call through it.
             Callee::Value(ve) => {
@@ -1547,7 +1594,10 @@ impl<'a> Builder<'a> {
                     .map(|&a| self.lower_expr(a))
                     .collect::<Result<_, _>>()?;
                 let v = self.emit_call_value(e, callee_v, arg_vals)?;
-                Ok(ValueRepr::Scalar(v))
+                {
+                    let value = ValueRepr::Scalar(v);
+                    self.value_bundle_for_expr(e, value)
+                }
             }
         }
     }
@@ -1709,7 +1759,7 @@ impl<'a> Builder<'a> {
         func: FuncRef,
         arg_idxs: &[Idx<Expr>],
         any_named: bool,
-    ) -> Result<ValueRepr, CompilerError> {
+    ) -> Result<ValueBundle, CompilerError> {
         // A value-instantiated `@inline` generic call takes the specialized scalar
         // ABI: value args splat, the return arrives as leaves, and the emitted call
         // is tagged so the inliner splices the matching specialized snapshot. Empty
@@ -1731,36 +1781,37 @@ impl<'a> Builder<'a> {
         // specialized body still differs (e.g. a `native_buffer_alloc<T>` ctype
         // resolves) though the param/return ABI is unchanged.
         let dc = self.plan_direct_call(e)?;
-        let callee = &self.ws.module(func.module).functions[func.func];
-        // Resolve phantom before tuple flattening can project from its nil placeholder.
-        if arg_idxs.is_empty()
-            && callee
-                .inline_body
-                .is_some_and(|(_, body)| body.trim() == "return nil")
-        {
-            return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
-        }
-        let declared_ret_tuple = dc.plan.ret_tuple();
-        if let Some(shape) = &declared_ret_tuple {
-            self.reject_nobox_opaque_tuple_return(e, func, shape)?;
-        } else {
-            self.reject_nobox_opaque_value_return(e, func, &dc.callee_inst)?;
-        }
-        let lua_opaque = self.call_scx.target() == bone_core::hir::FnBackend::Lua
-            && callee.inline_body.is_some()
-            && !callee.generics.is_empty()
-            && !callee
-                .annotations
-                .iter()
-                .any(|a| a.is_builtin("scalar_abi"));
-        let ret_tuple = (!lua_opaque).then_some(declared_ret_tuple).flatten();
-        // A flat-stored element passed to a `ref` parameter, or a `ref` result
-        // addressing one, takes the flat-variant ABI (`flat_ref`). Only a
-        // direct call's own site has a flat plan.
-        if matches!(self.cur_op, crate::site::SiteOp::DirectCall)
-            && let Some(plan) = self.flat_call_plan(e)?
-        {
-            return match self
+        let value = (|| -> Result<ValueRepr, CompilerError> {
+            let callee = &self.ws.module(func.module).functions[func.func];
+            // Resolve phantom before tuple flattening can project from its nil placeholder.
+            if arg_idxs.is_empty()
+                && callee
+                    .inline_body
+                    .is_some_and(|(_, body)| body.trim() == "return nil")
+            {
+                return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
+            }
+            let declared_ret_tuple = dc.plan.ret_tuple();
+            if let Some(shape) = &declared_ret_tuple {
+                self.reject_nobox_opaque_tuple_return(e, func, shape)?;
+            } else {
+                self.reject_nobox_opaque_value_return(e, func, &dc.callee_inst)?;
+            }
+            let lua_opaque = self.call_scx.target() == bone_core::hir::FnBackend::Lua
+                && callee.inline_body.is_some()
+                && !callee.generics.is_empty()
+                && !callee
+                    .annotations
+                    .iter()
+                    .any(|a| a.is_builtin("scalar_abi"));
+            let ret_tuple = (!lua_opaque).then_some(declared_ret_tuple).flatten();
+            // A flat-stored element passed to a `ref` parameter, or a `ref` result
+            // addressing one, takes the flat-variant ABI (`flat_ref`). Only a
+            // direct call's own site has a flat plan.
+            if matches!(self.cur_op, crate::site::SiteOp::DirectCall)
+                && let Some(plan) = self.flat_call_plan(e)?
+            {
+                return match self
                 .lower_flat_call(e, func, arg_idxs, any_named, &dc, &plan, ret_tuple)?
             {
                 FlatCallOut::Value(value) => Ok(value),
@@ -1771,54 +1822,57 @@ impl<'a> Builder<'a> {
                         .to_string(),
                 )),
             };
-        }
-        if !dc.plan.uses_scalar_abi() {
+            }
+            if !dc.plan.uses_scalar_abi() {
+                let (args, tail) =
+                    self.direct_call_args(e, func, arg_idxs, any_named, &dc, true)?;
+                if let Some(tail) = tail {
+                    return self.emit_preflight_tail(e, tail, args);
+                }
+                // Above the tuple early return: the exemption is a property of the
+                // CALLEE, so making it arity-dependent would be a guarantee hole the
+                // day a `@gpu_only` intrinsic returns a tuple.
+                self.authorize_gpu_boundary_boxes(&func, &args);
+                if let Some(shape) = &ret_tuple {
+                    return self.emit_tuple_call_tree(e, func, args, shape, &dc);
+                }
+                let call = self.emit_cur(Inst::Call { func, args });
+                self.record_call(call, func, &dc)?;
+                return Ok(ValueRepr::Scalar(call));
+            }
             let (args, tail) = self.direct_call_args(e, func, arg_idxs, any_named, &dc, true)?;
             if let Some(tail) = tail {
                 return self.emit_preflight_tail(e, tail, args);
             }
-            // Above the tuple early return: the exemption is a property of the
-            // CALLEE, so making it arity-dependent would be a guarantee hole the
-            // day a `@gpu_only` intrinsic returns a tuple.
-            self.authorize_gpu_boundary_boxes(&func, &args);
-            if let Some(shape) = &ret_tuple {
-                return self.emit_tuple_call_tree(e, func, args, shape, &dc);
-            }
-            let call = self.emit_cur(Inst::Call { func, args });
-            self.record_call(call, func, &dc)?;
-            return Ok(ValueRepr::Scalar(call));
-        }
-        let (args, tail) = self.direct_call_args(e, func, arg_idxs, any_named, &dc, true)?;
-        if let Some(tail) = tail {
-            return self.emit_preflight_tail(e, tail, args);
-        }
-        let ret_shape = dc.plan.ret_shape();
-        match ret_shape {
-            Some(shape) => {
-                let n = shape.leaf_count();
-                let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
-                let call = self.emit_cur(Inst::CallMulti {
-                    dests: dests.clone(),
-                    func,
-                    args,
-                });
-                self.record_call(call, func, &dc)?;
-                let leaves: Vec<Idx<Inst>> = dests
-                    .iter()
-                    .map(|c| self.emit_cur(Inst::Load(*c)))
-                    .collect();
-                let mut idx = 0;
-                Ok(self.rebuild_from_leaves(shape, &leaves, &mut idx))
-            }
-            None => match &ret_tuple {
-                Some(shape) => Ok(self.emit_tuple_call_tree(e, func, args, shape, &dc)?),
-                None => {
-                    let call = self.emit_cur(Inst::Call { func, args });
+            let ret_shape = dc.plan.ret_shape();
+            match ret_shape {
+                Some(shape) => {
+                    let n = shape.leaf_count();
+                    let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
+                    let call = self.emit_cur(Inst::CallMulti {
+                        dests: dests.clone(),
+                        func,
+                        args,
+                    });
                     self.record_call(call, func, &dc)?;
-                    Ok(ValueRepr::Scalar(call))
+                    let leaves: Vec<Idx<Inst>> = dests
+                        .iter()
+                        .map(|c| self.emit_cur(Inst::Load(*c)))
+                        .collect();
+                    let mut idx = 0;
+                    Ok(self.rebuild_from_leaves(shape, &leaves, &mut idx))
                 }
-            },
-        }
+                None => match &ret_tuple {
+                    Some(shape) => Ok(self.emit_tuple_call_tree(e, func, args, shape, &dc)?),
+                    None => {
+                        let call = self.emit_cur(Inst::Call { func, args });
+                        self.record_call(call, func, &dc)?;
+                        Ok(ValueRepr::Scalar(call))
+                    }
+                },
+            }
+        })()?;
+        self.call_result_bundle(dc.plan.representation(), value)
     }
 
     /// The argument list of a direct call under `dc`'s ABI: boxed, or splatted
@@ -2032,7 +2086,7 @@ impl<'a> Builder<'a> {
         plan: FunctionRepPlan,
         callee: Idx<Inst>,
         arg_idxs: &[Idx<Expr>],
-    ) -> Result<ValueRepr, CompilerError> {
+    ) -> Result<ValueBundle, CompilerError> {
         let arena = self.scx.rep_arena();
         let mut argv = Vec::new();
         for (i, &a) in arg_idxs.iter().enumerate() {
@@ -2049,7 +2103,7 @@ impl<'a> Builder<'a> {
         let Some(result) = plan.result() else {
             let call = self.emit_cur(Inst::CallValue { callee, args: argv });
             self.f.call_rep_plans.insert(call, plan.clone());
-            return Ok(ValueRepr::Scalar(call));
+            return self.call_result_bundle(&plan, ValueRepr::Scalar(call));
         };
         if let Some(shape) = arena.tuple_shape(result) {
             let dests: Vec<Idx<Cell>> = (0..shape.slot_count())
@@ -2065,12 +2119,12 @@ impl<'a> Builder<'a> {
                 .iter()
                 .map(|c| self.emit_cur(Inst::Load(*c)))
                 .collect();
-            return Ok(self.tuple_result(&shape, &loads));
+            return Ok(ValueBundle::new(result, self.tuple_result(&shape, &loads)));
         }
         let Some(shape) = arena.value_shape(result) else {
             let call = self.emit_cur(Inst::CallValue { callee, args: argv });
             self.f.call_rep_plans.insert(call, plan.clone());
-            return Ok(ValueRepr::Scalar(call));
+            return Ok(ValueBundle::new(result, ValueRepr::Scalar(call)));
         };
         let dests: Vec<Idx<Cell>> = (0..shape.leaf_count())
             .map(|_| self.f.new_cell(None))
@@ -2086,7 +2140,10 @@ impl<'a> Builder<'a> {
             .map(|c| self.emit_cur(Inst::Load(*c)))
             .collect();
         let mut idx = 0;
-        Ok(self.rebuild_from_leaves(shape, &leaves, &mut idx))
+        Ok(ValueBundle::new(
+            result,
+            self.rebuild_from_leaves(shape, &leaves, &mut idx),
+        ))
     }
 
     /// An indirect call `callee(args)`. If the call's result type is a tuple, the
@@ -2153,7 +2210,7 @@ impl<'a> Builder<'a> {
         func: FuncRef,
         recv: Idx<Inst>,
         arg_idxs: &[Idx<Expr>],
-    ) -> Result<ValueRepr, CompilerError> {
+    ) -> Result<ValueBundle, CompilerError> {
         let trusted = self.ws.module(func.module).functions[func.func]
             .inline_body
             .is_none();
@@ -2168,84 +2225,87 @@ impl<'a> Builder<'a> {
         func: FuncRef,
         recv: Idx<Inst>,
         arg_idxs: &[Idx<Expr>],
-    ) -> Result<ValueRepr, CompilerError> {
+    ) -> Result<ValueBundle, CompilerError> {
         let dc = self.plan_direct_call(e)?;
-        self.reject_flat_return_outside_direct_call(e, &dc.callee_inst)?;
-        if !dc.plan.uses_scalar_abi() {
-            let mut argv = vec![recv];
-            for &a in arg_idxs {
-                argv.push(self.lower_expr(a)?);
-            }
-            // A tuple-returning method splats N values, handed on UNPACKED: the
-            // per-slot join stores them slot-wise, so packing here would box a
-            // `nobox` element the wire just kept unboxed. A method whose own
-            // return is `(..)?` carries its presence tag in the repr, and the
-            // join forwards that tag rather than minting `true` -- `a?.m()` is
-            // absent when either link is.
-            return Ok(match dc.plan.ret_tuple() {
-                Some(shape) => self.emit_tuple_call_tree(e, func, argv, &shape, &dc)?,
-                None => {
-                    let call = self.emit_cur(Inst::Call { func, args: argv });
-                    self.record_call(call, func, &dc)?;
-                    ValueRepr::Scalar(call)
+        let value = (|| -> Result<ValueRepr, CompilerError> {
+            self.reject_flat_return_outside_direct_call(e, &dc.callee_inst)?;
+            if !dc.plan.uses_scalar_abi() {
+                let mut argv = vec![recv];
+                for &a in arg_idxs {
+                    argv.push(self.lower_expr(a)?);
                 }
-            });
-        };
-        let param_shapes = dc.plan.argument_shapes();
-        let mut argv = Vec::new();
-        // The RECEIVER arrives already lowered, so it cannot go through
-        // `arg_values_for_slot`; a tuple receiver has no UFCS spelling, so
-        // `Leaves` is the only splatting slot reachable here.
-        let receiver_slot = required_wire_slot(
-            &param_shapes,
-            0,
-            false,
-            "UFCS receiver",
-            |slot| slot.clone(),
-            |message| self.gap_here(message),
-        )?;
-        match receiver_slot {
-            RetSlot::Leaves(shape) => {
-                let leaves = self.cdata_leaves(recv, &shape)?;
-                argv.extend(leaves);
-            }
-            _ => argv.push(recv),
-        }
-        for (i, &a) in arg_idxs.iter().enumerate() {
-            let slot = required_wire_slot(
+                // A tuple-returning method splats N values, handed on UNPACKED: the
+                // per-slot join stores them slot-wise, so packing here would box a
+                // `nobox` element the wire just kept unboxed. A method whose own
+                // return is `(..)?` carries its presence tag in the repr, and the
+                // join forwards that tag rather than minting `true` -- `a?.m()` is
+                // absent when either link is.
+                return Ok(match dc.plan.ret_tuple() {
+                    Some(shape) => self.emit_tuple_call_tree(e, func, argv, &shape, &dc)?,
+                    None => {
+                        let call = self.emit_cur(Inst::Call { func, args: argv });
+                        self.record_call(call, func, &dc)?;
+                        ValueRepr::Scalar(call)
+                    }
+                });
+            };
+            let param_shapes = dc.plan.argument_shapes();
+            let mut argv = Vec::new();
+            // The RECEIVER arrives already lowered, so it cannot go through
+            // `arg_values_for_slot`; a tuple receiver has no UFCS spelling, so
+            // `Leaves` is the only splatting slot reachable here.
+            let receiver_slot = required_wire_slot(
                 &param_shapes,
-                i + 1,
-                self.ws.module(func.module).functions[func.func].is_variadic,
-                "UFCS call",
+                0,
+                false,
+                "UFCS receiver",
                 |slot| slot.clone(),
                 |message| self.gap_here(message),
             )?;
-            argv.extend(self.arg_values_for_slot(&slot, a)?);
-        }
-        let argv = dc.plan.transport_arguments(argv)?;
-        match dc.plan.ret_shape() {
-            Some(shape) => {
-                let n = shape.leaf_count();
-                let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
-                let call = self.emit_cur(Inst::CallMulti {
-                    dests: dests.clone(),
-                    func,
-                    args: argv,
-                });
-                self.record_call(call, func, &dc)?;
-                let leaves: Vec<Idx<Inst>> = dests
-                    .iter()
-                    .map(|c| self.emit_cur(Inst::Load(*c)))
-                    .collect();
-                let mut idx = 0;
-                Ok(self.rebuild_from_leaves(shape, &leaves, &mut idx))
+            match receiver_slot {
+                RetSlot::Leaves(shape) => {
+                    let leaves = self.cdata_leaves(recv, &shape)?;
+                    argv.extend(leaves);
+                }
+                _ => argv.push(recv),
             }
-            None => {
-                let call = self.emit_cur(Inst::Call { func, args: argv });
-                self.record_call(call, func, &dc)?;
-                Ok(ValueRepr::Scalar(call))
+            for (i, &a) in arg_idxs.iter().enumerate() {
+                let slot = required_wire_slot(
+                    &param_shapes,
+                    i + 1,
+                    self.ws.module(func.module).functions[func.func].is_variadic,
+                    "UFCS call",
+                    |slot| slot.clone(),
+                    |message| self.gap_here(message),
+                )?;
+                argv.extend(self.arg_values_for_slot(&slot, a)?);
             }
-        }
+            let argv = dc.plan.transport_arguments(argv)?;
+            match dc.plan.ret_shape() {
+                Some(shape) => {
+                    let n = shape.leaf_count();
+                    let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
+                    let call = self.emit_cur(Inst::CallMulti {
+                        dests: dests.clone(),
+                        func,
+                        args: argv,
+                    });
+                    self.record_call(call, func, &dc)?;
+                    let leaves: Vec<Idx<Inst>> = dests
+                        .iter()
+                        .map(|c| self.emit_cur(Inst::Load(*c)))
+                        .collect();
+                    let mut idx = 0;
+                    Ok(self.rebuild_from_leaves(shape, &leaves, &mut idx))
+                }
+                None => {
+                    let call = self.emit_cur(Inst::Call { func, args: argv });
+                    self.record_call(call, func, &dc)?;
+                    Ok(ValueRepr::Scalar(call))
+                }
+            }
+        })()?;
+        self.call_result_bundle(dc.plan.representation(), value)
     }
 
     /// Build the flat scalar-ABI argument list for a scalar-ABI callee: a value
@@ -4223,9 +4283,9 @@ impl<'a> Builder<'a> {
             ContainerKind::VecValueStrided(elem) => self
                 .strided_element_repr(arr, index, elem)
                 .map(ValueBundle::into_value),
-            ContainerKind::NativeBufferValue(elem) if self.is_leaf_addressed(elem)? => {
-                self.nb_leaf_element_repr(arr, index, elem)
-            }
+            ContainerKind::NativeBufferValue(elem) if self.is_leaf_addressed(elem)? => self
+                .nb_leaf_element_repr(arr, index, elem)
+                .map(ValueBundle::into_value),
             _ => Ok(ValueRepr::Scalar(self.emit_cur(Inst::Index {
                 base: arr,
                 index,

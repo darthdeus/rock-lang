@@ -332,9 +332,10 @@ impl<'a> Builder<'a> {
 
     pub(crate) fn strided_data_primitive(
         &mut self,
+        e: Idx<Expr>,
         name: &str,
         arg_idxs: &[Idx<Expr>],
-    ) -> Result<Option<ValueRepr>, CompilerError> {
+    ) -> Result<Option<ValueBundle>, CompilerError> {
         match (name, arg_idxs) {
             ("__vec_data_get", [recv, index]) => {
                 let Some(elem) = self.vec_strided_elem_of(*recv)? else {
@@ -342,9 +343,7 @@ impl<'a> Builder<'a> {
                 };
                 let vec = self.lower_expr(*recv)?;
                 let index = self.lower_expr(*index)?;
-                Ok(Some(
-                    self.strided_element_repr(vec, index, elem)?.into_value(),
-                ))
+                Ok(Some(self.strided_element_repr(vec, index, elem)?))
             }
             ("__vec_data_set", [recv, index, value]) => {
                 let Some(elem) = self.vec_strided_elem_of(*recv)? else {
@@ -353,9 +352,8 @@ impl<'a> Builder<'a> {
                 let vec = self.lower_expr(*recv)?;
                 let index = self.lower_expr(*index)?;
                 self.strided_element_store(vec, index, *value, elem)?;
-                Ok(Some(ValueRepr::Scalar(
-                    self.emit_cur(Inst::Const(Lit::Nil)),
-                )))
+                let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)));
+                Ok(Some(self.value_bundle_for_expr(e, value)?))
             }
             ("__vec_data_unset", [recv, index]) => {
                 let Some(elem) = self.vec_strided_elem_of(*recv)? else {
@@ -366,9 +364,8 @@ impl<'a> Builder<'a> {
                 // reference; stale scalars past `len` are never read.
                 let raw = self.strided_stores_raw(elem);
                 if raw && !self.column_contains_references(elem) {
-                    return Ok(Some(ValueRepr::Scalar(
-                        self.emit_cur(Inst::Const(Lit::Nil)),
-                    )));
+                    let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)));
+                    return Ok(Some(self.value_bundle_for_expr(e, value)?));
                 }
                 let vec = self.lower_expr(*recv)?;
                 let index = self.lower_expr(*index)?;
@@ -379,9 +376,8 @@ impl<'a> Builder<'a> {
                     .map(|_| self.emit_cur(Inst::Const(vacated.clone())))
                     .collect();
                 self.strided_store_leaves_at(vec, row, leaves, stride, elem);
-                Ok(Some(ValueRepr::Scalar(
-                    self.emit_cur(Inst::Const(Lit::Nil)),
-                )))
+                let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)));
+                Ok(Some(self.value_bundle_for_expr(e, value)?))
             }
             ("__vec_data_capacity", [recv]) => {
                 let Some(elem) = self.vec_strided_elem_of(*recv)? else {
@@ -409,10 +405,10 @@ impl<'a> Builder<'a> {
                     });
                     self.call_spine("table_len", vec![data])?
                 };
-                Ok(Some(ValueRepr::Scalar(self.call_spine(
-                    "__rock_stride_capacity",
-                    vec![reserved, physical, width],
-                )?)))
+                let value = ValueRepr::Scalar(
+                    self.call_spine("__rock_stride_capacity", vec![reserved, physical, width])?,
+                );
+                Ok(Some(self.value_bundle_for_expr(e, value)?))
             }
             ("__vec_data_insert", [recv, index, value]) => {
                 let Some(elem) = self.vec_strided_elem_of(*recv)? else {
@@ -438,16 +434,16 @@ impl<'a> Builder<'a> {
                 let one = self.emit_cur(Inst::Const(Lit::Int(1)));
                 let row = self.emit_cur(Inst::IntSub(index, one));
                 self.strided_store_leaves_at(vec, row, leaves, stride, elem);
-                Ok(Some(ValueRepr::Scalar(
-                    self.emit_cur(Inst::Const(Lit::Nil)),
-                )))
+                let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)));
+                Ok(Some(self.value_bundle_for_expr(e, value)?))
             }
             ("__vec_data_clone", [recv]) => {
                 let Some(elem) = self.vec_strided_elem_of(*recv)? else {
                     return Ok(None);
                 };
                 let vec = self.lower_expr(*recv)?;
-                self.clone_strided_data(vec, elem).map(Some)
+                let value = self.clone_strided_data(vec, elem)?;
+                Ok(Some(self.value_bundle_for_expr(e, value)?))
             }
             ("__vec_data_sort", [recv, key_fn]) => {
                 let Some(elem) = self.vec_strided_elem_of(*recv)? else {
@@ -464,9 +460,8 @@ impl<'a> Builder<'a> {
                 } else {
                     "__rock_stride_sort"
                 };
-                Ok(Some(ValueRepr::Scalar(
-                    self.call_spine(helper, vec![vec, key, width])?,
-                )))
+                let value = ValueRepr::Scalar(self.call_spine(helper, vec![vec, key, width])?);
+                Ok(Some(self.value_bundle_for_expr(e, value)?))
             }
             ("__rock_vec_to_lua_array", [recv]) => {
                 let Some(elem) = self.vec_strided_elem_of(*recv)? else {
@@ -483,9 +478,9 @@ impl<'a> Builder<'a> {
                     ));
                 }
                 let vec = self.lower_expr(*recv)?;
-                Ok(Some(ValueRepr::Scalar(
-                    self.call_spine("__rock_vec_strided_elements", vec![vec])?,
-                )))
+                let value =
+                    ValueRepr::Scalar(self.call_spine("__rock_vec_strided_elements", vec![vec])?);
+                Ok(Some(self.value_bundle_for_expr(e, value)?))
             }
             _ => Ok(None),
         }
@@ -775,7 +770,7 @@ impl<'a> Builder<'a> {
         buf: Idx<Inst>,
         index: Idx<Inst>,
         elem: Ustr,
-    ) -> Result<ValueRepr, CompilerError> {
+    ) -> Result<ValueBundle, CompilerError> {
         let container = self.native_buffer_plan(elem)?;
         let shape = container
             .element_shape(self.scx.rep_arena())
@@ -803,7 +798,10 @@ impl<'a> Builder<'a> {
             })
             .collect();
         let mut idx = 0;
-        Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
+        Ok(ValueBundle::new(
+            container.element_rep(),
+            self.rebuild_from_leaves(&shape, &leaves, &mut idx),
+        ))
     }
 
     /// `buf[i] = v` into a leaf-addressed NativeBuffer: bounds-check once, then
@@ -1074,9 +1072,10 @@ impl<'a> Builder<'a> {
     /// a boxed element, in which case the stdlib `inline(lua)` body stands.
     pub(crate) fn column_data_primitive(
         &mut self,
+        e: Idx<Expr>,
         name: &str,
         arg_idxs: &[Idx<Expr>],
-    ) -> Result<Option<ValueRepr>, CompilerError> {
+    ) -> Result<Option<ValueBundle>, CompilerError> {
         match (name, arg_idxs) {
             ("__vec_data_get", [recv, index]) => {
                 let Some(elem) = self.vec_column_elem_of(*recv)? else {
@@ -1084,7 +1083,7 @@ impl<'a> Builder<'a> {
                 };
                 let vec = self.lower_expr(*recv)?;
                 let i = self.lower_expr(*index)?;
-                Ok(Some(self.column_element_repr(vec, i, elem)?.into_value()))
+                Ok(Some(self.column_element_repr(vec, i, elem)?))
             }
             ("__vec_data_set", [recv, index, value]) => {
                 let Some(elem) = self.vec_column_elem_of(*recv)? else {
@@ -1093,9 +1092,8 @@ impl<'a> Builder<'a> {
                 let vec = self.lower_expr(*recv)?;
                 let i = self.lower_expr(*index)?;
                 self.column_element_store(vec, i, *value, elem)?;
-                Ok(Some(ValueRepr::Scalar(
-                    self.emit_cur(Inst::Const(Lit::Nil)),
-                )))
+                let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)));
+                Ok(Some(self.value_bundle_for_expr(e, value)?))
             }
             ("__vec_data_unset", [recv, index]) => {
                 let Some(elem) = self.vec_column_elem_of(*recv)? else {
@@ -1106,9 +1104,8 @@ impl<'a> Builder<'a> {
                     let index = self.lower_expr(*index)?;
                     self.column_unset(vec, index, elem)?;
                 }
-                Ok(Some(ValueRepr::Scalar(
-                    self.emit_cur(Inst::Const(Lit::Nil)),
-                )))
+                let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)));
+                Ok(Some(self.value_bundle_for_expr(e, value)?))
             }
             ("__vec_data_capacity", [recv]) => {
                 let Some(elem) = self.vec_column_elem_of(*recv)? else {
@@ -1142,10 +1139,10 @@ impl<'a> Builder<'a> {
                         }),
                     }
                 };
-                Ok(Some(ValueRepr::Scalar(self.call_spine(
-                    "__rock_col_capacity",
-                    vec![reserved, physical],
-                )?)))
+                let value = ValueRepr::Scalar(
+                    self.call_spine("__rock_col_capacity", vec![reserved, physical])?,
+                );
+                Ok(Some(self.value_bundle_for_expr(e, value)?))
             }
             // Shift every column at the same slot, so they stay in lockstep. The
             // element is consumed as LEAVES, so the inserted value never boxes.
@@ -1176,9 +1173,8 @@ impl<'a> Builder<'a> {
                     });
                     self.call_spine("__rock_col_insert", vec![col, i, len, leaf])?;
                 }
-                Ok(Some(ValueRepr::Scalar(
-                    self.emit_cur(Inst::Const(Lit::Nil)),
-                )))
+                let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)));
+                Ok(Some(self.value_bundle_for_expr(e, value)?))
             }
             // A fresh column table whose columns are copies -- the clone must not
             // share a column with the original, or a later push would be seen by
@@ -1188,7 +1184,8 @@ impl<'a> Builder<'a> {
                     return Ok(None);
                 };
                 let vec = self.lower_expr(*recv)?;
-                self.clone_column_data(vec, elem).map(Some)
+                let value = self.clone_column_data(vec, elem)?;
+                Ok(Some(self.value_bundle_for_expr(e, value)?))
             }
             // The two ops that need the LOGICAL elements, not the physical
             // columns: a sort key is a function of the whole element, and
@@ -1210,9 +1207,9 @@ impl<'a> Builder<'a> {
                 let vec = self.lower_expr(*recv)?;
                 let k = self.lower_expr(*key_fn)?;
                 if !elem.is_nobox() {
-                    return Ok(Some(ValueRepr::Scalar(
-                        self.call_spine("__rock_col_sort", vec![vec, k])?,
-                    )));
+                    let value =
+                        ValueRepr::Scalar(self.call_spine("__rock_col_sort", vec![vec, k])?);
+                    return Ok(Some(self.value_bundle_for_expr(e, value)?));
                 }
                 let shape = self.column_shape(elem)?;
                 // The key fn's ABI at a nullable element leads with presence, so
@@ -1223,10 +1220,10 @@ impl<'a> Builder<'a> {
                     .map(|p| self.emit_cur(Inst::Const(Lit::Str(p))))
                     .collect();
                 let paths = self.emit_cur(Inst::MakeTuple(paths));
-                Ok(Some(ValueRepr::Scalar(self.call_spine(
-                    "__rock_col_sort_leaves",
-                    vec![vec, k, paths],
-                )?)))
+                let value = ValueRepr::Scalar(
+                    self.call_spine("__rock_col_sort_leaves", vec![vec, k, paths])?,
+                );
+                Ok(Some(self.value_bundle_for_expr(e, value)?))
             }
             ("__rock_vec_to_lua_array", [recv]) => {
                 let Some(elem) = self.vec_column_elem_of(*recv)? else {
@@ -1243,9 +1240,9 @@ impl<'a> Builder<'a> {
                     ));
                 }
                 let vec = self.lower_expr(*recv)?;
-                Ok(Some(ValueRepr::Scalar(
-                    self.call_spine("__rock_vec_column_elements", vec![vec])?,
-                )))
+                let value =
+                    ValueRepr::Scalar(self.call_spine("__rock_vec_column_elements", vec![vec])?);
+                Ok(Some(self.value_bundle_for_expr(e, value)?))
             }
             _ => Ok(None),
         }
@@ -1331,9 +1328,10 @@ impl<'a> Builder<'a> {
     /// instantiation, never a runtime test for whether a spine exists.
     pub(crate) fn map_column_primitive(
         &mut self,
+        e: Idx<Expr>,
         name: &str,
         arg_idxs: &[Idx<Expr>],
-    ) -> Result<Option<ValueRepr>, CompilerError> {
+    ) -> Result<Option<ValueBundle>, CompilerError> {
         match (name, arg_idxs) {
             ("get", [recv, key]) => {
                 let Some(elem) = self.map_column_value_of(*recv)? else {
@@ -1350,18 +1348,16 @@ impl<'a> Builder<'a> {
                 let m = self.lower_expr(*recv)?;
                 let k = self.lower_expr(*key)?;
                 self.map_column_free(m, k, elem)?;
-                Ok(Some(ValueRepr::Scalar(
-                    self.emit_cur(Inst::Const(Lit::Nil)),
-                )))
+                let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)));
+                Ok(Some(self.value_bundle_for_expr(e, value)?))
             }
             ("len" | "map_len", [recv]) => {
                 let Some(_) = self.map_column_value_of(*recv)? else {
                     return Ok(None);
                 };
                 let m = self.lower_expr(*recv)?;
-                Ok(Some(ValueRepr::Scalar(
-                    self.call_spine("__map_col_len", vec![m])?,
-                )))
+                let value = ValueRepr::Scalar(self.call_spine("__map_col_len", vec![m])?);
+                Ok(Some(self.value_bundle_for_expr(e, value)?))
             }
             ("contains", [recv, key]) => {
                 let Some(_) = self.map_column_value_of(*recv)? else {
@@ -1369,9 +1365,8 @@ impl<'a> Builder<'a> {
                 };
                 let m = self.lower_expr(*recv)?;
                 let k = self.lower_expr(*key)?;
-                Ok(Some(ValueRepr::Scalar(
-                    self.call_spine("__map_col_contains", vec![m, k])?,
-                )))
+                let value = ValueRepr::Scalar(self.call_spine("__map_col_contains", vec![m, k])?);
+                Ok(Some(self.value_bundle_for_expr(e, value)?))
             }
             ("clear", [recv]) => {
                 let Some(elem) = self.map_column_value_of(*recv)? else {
@@ -1383,9 +1378,8 @@ impl<'a> Builder<'a> {
                     self.column_release_all(data, elem)?;
                 }
                 self.call_spine("__map_col_clear", vec![m])?;
-                Ok(Some(ValueRepr::Scalar(
-                    self.emit_cur(Inst::Const(Lit::Nil)),
-                )))
+                let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)));
+                Ok(Some(self.value_bundle_for_expr(e, value)?))
             }
             _ => Ok(None),
         }
@@ -1953,10 +1947,10 @@ impl<'a> Builder<'a> {
         m: Idx<Inst>,
         key: Idx<Inst>,
         elem: ColumnElem,
-    ) -> Result<ValueRepr, CompilerError> {
+    ) -> Result<ValueBundle, CompilerError> {
         let slot = self.call_spine("__map_col_slot_checked", vec![m, key])?;
         let data = self.map_col_data(m);
-        Ok(self.column_element_repr(data, slot, elem)?.into_value())
+        self.column_element_repr(data, slot, elem)
     }
 
     /// `m.get(k)` on a column-stored Map: a `V?` whose presence is the SPINE.
@@ -1979,7 +1973,7 @@ impl<'a> Builder<'a> {
         m: Idx<Inst>,
         key: Idx<Inst>,
         elem: ColumnElem,
-    ) -> Result<ValueRepr, CompilerError> {
+    ) -> Result<ValueBundle, CompilerError> {
         let shape = self.column_shape(elem)?;
         let unboxed = elem.is_nobox();
         let slot = self.call_spine("__map_col_slot_of", vec![m, key])?;
@@ -2029,18 +2023,22 @@ impl<'a> Builder<'a> {
             .map(|c| self.emit_cur(Inst::Load(*c)))
             .collect();
         if !unboxed {
-            return Ok(ValueRepr::Scalar(loaded[0]));
+            return Ok(ValueBundle::new(
+                elem.representation(),
+                ValueRepr::Scalar(loaded[0]),
+            ));
         }
         let mut idx = 0;
         let inner = self.rebuild_from_leaves(&shape, &loaded, &mut idx);
-        Ok(match inner {
+        let value = match inner {
             ValueRepr::Group { name, parts, .. } => ValueRepr::Group {
                 name,
                 parts,
                 present: Some(present),
             },
             other => other,
-        })
+        };
+        Ok(ValueBundle::new(elem.representation(), value))
     }
 
     /// [`Self::column_element_store`] from an already-lowered repr, for a caller

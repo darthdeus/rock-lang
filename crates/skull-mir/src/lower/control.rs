@@ -11,7 +11,7 @@ impl<'a> Builder<'a> {
         rt: ArithTy,
         a: Idx<Expr>,
         b: Idx<Expr>,
-    ) -> Result<Idx<Inst>, CompilerError> {
+    ) -> Result<ValueBundle, CompilerError> {
         let lv = self.lower_expr(a)?;
         let rv = self.lower_expr(b)?;
         // Promote an int operand exactly when `arith_inst` picks a Float* variant
@@ -24,7 +24,11 @@ impl<'a> Builder<'a> {
         let lv = self.coerce_numeric_to_float(lv, lt, to_float);
         let rv = self.coerce_numeric_to_float(rv, rt, to_float);
         let inst = arith_inst(op, lt, rt, lv, rv)?;
-        Ok(self.emit_cur(inst))
+        // Desugared compound assignments can omit the call's inferred type;
+        // this producer has already selected a single scalar result.
+        let representation = self.concrete_rep_id(&MonoTy::Any, RepUse::Value, false, false)?;
+        let value = ValueRepr::Scalar(self.emit_cur(inst));
+        Ok(ValueBundle::new(representation, value))
     }
 
     fn lower_leafwise_value_eq(

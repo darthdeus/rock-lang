@@ -448,7 +448,7 @@ impl<'a> Builder<'a> {
             Expr::Not(x, _) => match self.overload_target(e) {
                 Some(func) => {
                     let value = self.lower_direct_call_repr(e, func, &[x], false)?;
-                    self.pack_maybe_absent(value)
+                    self.pack_maybe_absent(value.into_value())
                 }
                 None => {
                     let v = self.lower_condition(x)?;
@@ -458,7 +458,7 @@ impl<'a> Builder<'a> {
             Expr::BitNot(x) => match self.overload_target(e) {
                 Some(func) => {
                     let value = self.lower_direct_call_repr(e, func, &[x], false)?;
-                    self.pack_maybe_absent(value)
+                    self.pack_maybe_absent(value.into_value())
                 }
                 None => {
                     let v = self.lower_expr(x)?;
@@ -472,7 +472,7 @@ impl<'a> Builder<'a> {
             Expr::UnaryMinus(x, _) => match self.overload_target(e) {
                 Some(func) => {
                     let value = self.lower_direct_call_repr(e, func, &[x], false)?;
-                    self.pack_maybe_absent(value)
+                    self.pack_maybe_absent(value.into_value())
                 }
                 None => {
                     let v = self.lower_expr(x)?;
@@ -2203,7 +2203,7 @@ impl<'a> Builder<'a> {
             None => {
                 let func = overload.expect("non-scalar compound-assign resolved an overload");
                 let value = self.ufcs_call_repr(e, func, cur, &[rhs])?;
-                self.pack_maybe_absent(value)
+                self.pack_maybe_absent(value.into_value())
             }
         }
     }
@@ -2355,7 +2355,7 @@ impl<'a> Builder<'a> {
         args: IdxRange<Expr>,
         recv: Idx<Inst>,
     ) -> Result<ValueBundle, CompilerError> {
-        let value = if let Some(field) = self.fn_field_of_call(e) {
+        if let Some(field) = self.fn_field_of_call(e) {
             // `recv?.field(args)` on a fn-typed FIELD: nil-guarded indirect call
             // `(recv.field)(args)` — the field IS the callee, no receiver arg.
             let fieldv = self.emit_cur(Inst::Field { base: recv, field });
@@ -2370,7 +2370,7 @@ impl<'a> Builder<'a> {
             let abi = self
                 .fn_value_rep_plan(field_ty)?
                 .ok_or_else(|| self.gap_here("fn-field call has no concrete function ABI plan"))?;
-            self.indirect_call_by_plan(abi, fieldv, &call_args)?
+            self.indirect_call_by_plan(abi, fieldv, &call_args)
         } else {
             // `recv?.method(args)` UFCS: `method(recv, args)`, recv as arg 0.
             // The whole call -- both ABIs, the delivery key, the bound tree, the
@@ -2379,9 +2379,8 @@ impl<'a> Builder<'a> {
             // here from the DECLARATION's plan.
             let func = self.resolve_funcref(e, method)?;
             let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-            self.ufcs_call_repr(e, func, recv, &arg_idxs)?
-        };
-        self.value_bundle_for_expr(e, value)
+            self.ufcs_call_repr(e, func, recv, &arg_idxs)
+        }
     }
 
     /// [`Self::lower_safe_nav_call`] joining PER SLOT.

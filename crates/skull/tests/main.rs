@@ -159,6 +159,7 @@ mod optional_value_wire;
 mod plain_struct_scalarize;
 mod preflight;
 mod preflight_semantics;
+mod producer_bundles;
 mod program_roots;
 mod removed_global_markers;
 mod reserved_namespace;
