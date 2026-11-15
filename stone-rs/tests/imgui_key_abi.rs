@@ -3,6 +3,9 @@
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::mem::{size_of, transmute_copy};
 
+#[path = "support/stone_cdylib.rs"]
+mod stone_cdylib;
+
 unsafe fn required_symbol<T: Copy>(handle: *mut c_void, name: &CStr) -> T {
     let symbol = libc::dlsym(handle, name.as_ptr());
     assert!(!symbol.is_null(), "missing exported symbol {:?}", name);
@@ -12,16 +15,7 @@ unsafe fn required_symbol<T: Copy>(handle: *mut c_void, name: &CStr) -> T {
 
 #[test]
 fn imgui_tool_key_symbols_export_the_current_c_abi() {
-    let artifact_name = if cfg!(target_os = "macos") {
-        "libstone_rs.dylib"
-    } else {
-        "libstone_rs.so"
-    };
-    let artifact = std::env::current_exe()
-        .expect("locate test executable")
-        .parent()
-        .expect("test executable directory")
-        .join(artifact_name);
+    let artifact = stone_cdylib::artifact();
     let artifact = CString::new(artifact.to_str().expect("UTF-8 artifact path"))
         .expect("artifact path contains no NUL");
     let handle = unsafe { libc::dlopen(artifact.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
