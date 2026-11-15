@@ -1,20 +1,20 @@
 //! Error: nested `fn` v1 rejects.
 //!        v1 restrictions: no capture of enclosing params/locals, no generics,
-//!        no annotations, decl-before-use (no forward/mutual recursion). The
-//!        `_<Kind>` suffixes are finalized against the real error kinds once
-//!        the lowering/typecheck lands.
+//!        no annotations, decl-before-use (no forward/mutual recursion).
 //! Tags: nested_fn, rejects
 
 //=== TEST CASE: nested_fn_reads_enclosing_param_Generic ===
+//! expect: nested function may not read enclosing local `threshold`
 // A hoisted nested fn lives at module scope -- the enclosing param does not
 // exist there. Reading it is a compile error.
 fn outer(threshold: int) -> int {
     fn keep(x: int) -> bool { x > threshold }
-    return [1, 5, 9].filter(keep).len()
+    return if keep(5) { 1 } else { 0 }
 }
 fn main() { let _ = outer(3) }
 
 //=== TEST CASE: nested_fn_reads_enclosing_local_Generic ===
+//! expect: nested function may not read enclosing local `bonus`
 // Same rule for an enclosing local.
 fn outer() -> int {
     let bonus = 10
@@ -24,6 +24,7 @@ fn outer() -> int {
 fn main() { let _ = outer() }
 
 //=== TEST CASE: nested_fn_with_generics_Generic ===
+//! expect: nested functions cannot be generic
 // v1: no generics on nested fns.
 fn outer() -> int {
     fn id<T>(x: T) -> T { x }
@@ -32,6 +33,7 @@ fn outer() -> int {
 fn main() { let _ = outer() }
 
 //=== TEST CASE: nested_fn_with_annotation_Generic ===
+//! expect: nested functions cannot have annotations
 // v1: no annotations on nested fns.
 fn outer() -> int {
     @pure
@@ -41,6 +43,7 @@ fn outer() -> int {
 fn main() { let _ = outer() }
 
 //=== TEST CASE: nested_fn_forward_reference_Generic ===
+//! expect: Function `later` doesn't exist
 // v1 decl-before-use: calling a nested fn before its declaration does not
 // resolve (there is no like-named top-level fn).
 fn outer() -> int {
@@ -51,6 +54,7 @@ fn outer() -> int {
 fn main() { let _ = outer() }
 
 //=== TEST CASE: nested_fn_out_of_scope_Generic ===
+//! expect: Function `helper` doesn't exist
 // A nested fn is block-scoped (privacy is a property): calling it outside the
 // block it is declared in does not resolve.
 fn outer() -> int {
@@ -63,6 +67,7 @@ fn outer() -> int {
 fn main() { let _ = outer() }
 
 //=== TEST CASE: nested_fn_mutual_recursion_Generic ===
+//! expect: Function `is_odd` doesn't exist
 // v1 decl-before-use forbids mutual recursion: `is_even` calls `is_odd` before
 // it is declared.
 fn parity(n: int) -> bool {
@@ -73,8 +78,8 @@ fn parity(n: int) -> bool {
 fn main() { let _ = parity(4) }
 
 //=== TEST CASE: nested_fn_reads_enclosing_param_in_format_spec_Generic ===
+//! expect: nested function may not read enclosing local `digits`
 // A read in an interpolation's dynamic precision is a read like any other.
-//! expect: nested function may not read enclosing local
 fn outer(digits: int) -> string {
     fn show(x: float) -> string { "{x:.{digits}f}" }
     return show(1.5)

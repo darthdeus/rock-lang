@@ -2,8 +2,8 @@
 // private top-level function, callable by name and passable as a zero-alloc
 // value.
 //
-// STATUS: GREEN target for the feature. v1 semantics: no capture of enclosing
-// params/locals, decl-before-use (self-recursion ok, no forward/mutual
+// Current restrictions: no capture of enclosing params/locals,
+// decl-before-use (self-recursion ok, no forward/mutual
 // recursion), no generics, no annotations. A nested fn body MAY call in-scope
 // sibling nested fns and read/write in-scope `static`s + module globals.
 

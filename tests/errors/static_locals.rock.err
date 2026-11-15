@@ -1,31 +1,28 @@
 //! Error: `static` local rejects.
-//!        Each case pins an intended compile error. Once the rejects land,
-//!        remove the TODO and finalize each `_<Kind>` suffix (a substring of
-//!        the real error's Debug kind).
+//!        Diagnostics distinguish declaration restrictions, captures and name lookup.
 //! Tags: static, rejects
 
 //=== TEST CASE: static_in_pure_fn_writes_globals_Generic ===
-// A `static` declaration writes its cell + done-flag (both globals), so any
-// `static` inside a `@pure` fn is rejected with no new rule.
+//! expect: `@pure` function declares a `static` (writes module state)
+// The declaration itself writes module state; no extra assignment is needed.
 @pure
 fn p() -> int {
     static n = 0
-    n = n + 1
     return n
 }
 fn main() { let _ = p() }
 
 //=== TEST CASE: static_in_co_fn_hard_reject_Generic ===
-// HARD REJECT: a coroutine yields/resumes interleaved; a shared scratch cell
-// across yields silently corrupts. Syntactic reject.
+//! expect: `static` is not allowed in a `co fn`
+// Inference rejects the declaration in a coroutine even without a later use.
 co fn gen() -> Coroutine<int> {
     static scratch = 0
-    scratch = scratch + 1
-    yield scratch
+    yield 1
 }
 fn main() { let c = gen()  let _ = c.resume() }
 
 //=== TEST CASE: static_init_reads_param_Generic ===
+//! expect: static initializer may not read local `count`
 // The initializer runs once, not per call -- a param read would silently
 // snapshot the first reaching call's value. Rejected.
 fn draw(count: int) -> int {
@@ -35,6 +32,7 @@ fn draw(count: int) -> int {
 fn main() { let _ = draw(10) }
 
 //=== TEST CASE: static_init_reads_local_Generic ===
+//! expect: static initializer may not read local `base`
 // Same rule for an enclosing local.
 fn f() -> int {
     let base = 7
@@ -44,6 +42,7 @@ fn f() -> int {
 fn main() { let _ = f() }
 
 //=== TEST CASE: static_init_reads_sibling_static_Generic ===
+//! expect: static initializer may not read local `a`
 // A static initializer may not read another static (init-order hazard).
 fn f() -> int {
     static a = 1
@@ -53,6 +52,7 @@ fn f() -> int {
 fn main() { let _ = f() }
 
 //=== TEST CASE: static_init_reads_local_shadowing_global_Generic ===
+//! expect: static initializer may not read local `base`
 // Must ERROR on the local read, NOT silently bind the like-named global. This
 // is why enforcement is resolve-then-reject, not module-scope re-resolution.
 global base: int = 100
@@ -64,8 +64,9 @@ fn f() -> int {
 fn main() { let _ = f() }
 
 //=== TEST CASE: static_mangled_cell_name_unresolvable_from_source_Generic ===
-// The generated `__static_*` cell must not be resolvable from Rock source
-// (privacy is a property, not a convention).
+//! expect: Undefined global `__static_f_n`
+// This generated-looking name is absent from source scope. It is not the
+// current emitted cell spelling, so this alone does not prove cell privacy.
 fn f() -> int {
     static n = 0
     return __static_f_n

@@ -1,11 +1,5 @@
 // `static` local behavior: private per-declaration storage that persists across
 // calls, initialized on first reach.
-//
-// STATUS: these are the GREEN target for the feature. They exercise the
-// runtime semantics (one cell across calls, per-site distinct cells, per-fn
-// distinct cells, one cell across loop iterations, first-reach init, sibling
-// blocks distinct) and pass once the bone lowering/typecheck + skull codegen
-// land. Parser support is in place; see the plan doc for the remaining split.
 
 // --- One cell across calls ---
 

@@ -821,5 +821,95 @@
       "output": "28/28 @tests passed \\(0 failed, 0 skipped, 0 not for js\\)"
     }
   ]
+},
+{
+  "id": "hoisted-capture-rejection-reasons",
+  "statement": "Seven static-local and eight nested-function cases pin rejection reasons, with unrelated errors removed from three fixtures; nearby accepted scope and initialization controls execute on LuaJIT and JS.",
+  "kind": "test strength",
+  "limit": "Selected capture and declaration boundaries only. The generated-looking undefined-name case does not prove generated cell privacy; parser recovery still adds an error to the nested generic case.",
+  "sources": [
+    {
+      "path": "docs/hoisted-capture-rejections.md",
+      "anchor": "Fourteen previously accepted any rejection"
+    },
+    {
+      "path": "crates/bone-inference/src/purity.rs",
+      "anchor": "pub(crate) fn reject_captured_binding("
+    },
+    {
+      "path": "crates/bone-lower/src/lib.rs",
+      "anchor": "StatementKind::NestedFn(f)"
+    },
+    {
+      "path": "tests/functions/hoisted_capture_controls.rock",
+      "anchor": "fn static_initializer_can_bind_its_own_locals()"
+    }
+  ],
+  "checks": [
+    {
+      "command": [
+        "python3",
+        "perf/evidence/check_operator_rejections.py",
+        "--fixture",
+        "tests/errors/static_locals.rock.err",
+        "--cases",
+        "7"
+      ],
+      "exit": 0,
+      "output": "original: 7 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 7 failed; 0 todo\\nvalid-programs: 0 passed; 7 failed; 0 todo"
+    },
+    {
+      "command": [
+        "python3",
+        "perf/evidence/check_operator_rejections.py",
+        "--fixture",
+        "tests/errors/nested_fns.rock.err",
+        "--cases",
+        "8"
+      ],
+      "exit": 0,
+      "output": "original: 8 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 8 failed; 0 todo\\nvalid-programs: 0 passed; 8 failed; 0 todo"
+    },
+    {
+      "command": [
+        "cargo",
+        "run",
+        "--quiet",
+        "--locked",
+        "-p",
+        "rock-cli",
+        "--bin",
+        "rock",
+        "--",
+        "test",
+        "tests/functions/static_locals.rock",
+        "tests/functions/nested_fns.rock",
+        "tests/functions/hoisted_capture_controls.rock"
+      ],
+      "exit": 0,
+      "output": "19/19 @tests passed \\(0 failed\\)"
+    },
+    {
+      "command": [
+        "cargo",
+        "run",
+        "--quiet",
+        "--locked",
+        "-p",
+        "rock-cli",
+        "--bin",
+        "rock",
+        "--",
+        "test",
+        "tests/functions/static_locals.rock",
+        "tests/functions/nested_fns.rock",
+        "tests/functions/hoisted_capture_controls.rock",
+        "--backend",
+        "js"
+      ],
+      "exit": 0,
+      "output": "19/19 @tests passed \\(0 failed, 0 skipped, 0 not for js\\)"
+    }
+  ]
 }
 ]

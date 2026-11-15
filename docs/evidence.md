@@ -233,6 +233,21 @@ nearby runtime files pass 28 tests on each backend, with no JS skips. The
 inventory at that stage was **291 unpinned of 525 cases**; the full error scan passes 519 with
 six existing TODOs. No production compiler code changed.
 
+## Static locals and nested functions
+
+The [hoisted-capture audit](hoisted-capture-rejections.md) checks seven static
+and eight nested-function rejections, adding 14 missing diagnostic assertions.
+Three fixtures lost unrelated rejection causes: mutation after a pure static,
+uses of a rejected coroutine static and `len` on an iterator after an invalid
+nested capture. The generated-looking-name fixture now explicitly limits its
+claim; it does not establish privacy of the current emitted cell name.
+
+Wrong-diagnostic and valid-program controls fail all 15 rejection assertions.
+The runtime corpus, including four new accepted controls, passes 19 tests on
+each backend without JS skips. The inventory is **277 unpinned of 525 cases**;
+the full error scan passes 519 with six existing TODOs. No production compiler
+code changed.
+
 ## Useful measurements
 
 | Measure | Use | Interpretation boundary |
@@ -259,8 +274,8 @@ audited by this work.
 
 The breadth survey also found a stale LSP fixture warning: the parser already
 rejects unknown expectation lines. Its existing malformed-block regression
-passes; the documentation now matches that behavior. The ledger contains 28
-bounded records, not 28 comprehensively verified subsystems.
+passes; the documentation now matches that behavior. The ledger contains 29
+bounded records, not 29 comprehensively verified subsystems.
 
 Extend the evidence ledger alongside concrete repairs. Its checks establish
 bounded claims, not a percentage of language coverage or a launch certificate.
