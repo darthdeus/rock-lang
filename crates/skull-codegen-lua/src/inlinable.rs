@@ -404,16 +404,6 @@ pub(crate) fn keep_reads_ordered(
                 continue;
             }
             let end = eval[k].min(insts.len());
-            // A call may write a mutable global, so it must not move past a
-            // read of one.
-            if matches!(func.insts[id], Inst::Call { .. } | Inst::CallValue { .. })
-                && insts[pos + 1..end]
-                    .iter()
-                    .any(|&at| matches!(func.insts[at], Inst::Global(_)))
-            {
-                inlinable[k] = false;
-                continue;
-            }
             let Inst::Load(cell) = func.insts[id] else {
                 // A push writes the container's length before it evaluates
                 // the pushed value, so no memory read may be deferred into it.
