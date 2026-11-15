@@ -64,19 +64,6 @@ pub(crate) fn fn_has_anno(f: &Function, name: &str) -> bool {
     f.annotations.iter().any(|a| a.is_builtin(name))
 }
 
-/// Verify a `@pure` function body: push an error at each construct that is not
-/// referentially transparent -- a global read, an assignment / inc-dec, or a
-/// call to a callee that is itself neither `@pure` nor `@debug_impure`.
-/// Permissive on everything else (value-struct literals, field reads,
-/// operators) so a genuinely-pure body passes. This is the genuine-side-effect
-/// subset of rock-optimizations/src/purity.rs; rock's conservative "accepted
-/// limitations" (heap struct/array literal, match-bind, ...) are deliberately
-/// NOT flagged.
-/// A `static` initializer runs ONCE, not per call, so it may not read an
-/// enclosing param/local or a sibling static -- that would silently snapshot
-/// the first reaching call's values. A `Var` whose declaration span is
-/// contained in the initializer (a lambda param, an inner `let`) is local to
-/// the init and allowed; one declared outside is the forbidden capture.
 /// Which hoisted construct is being checked -- they forbid different capture
 /// sets. A static INITIALIZER runs once so it may read nothing declared outside
 /// itself (params, locals, and sibling statics all snapshot the first reaching

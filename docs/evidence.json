@@ -162,5 +162,19 @@
     "checks": [
       {"command": ["cargo", "test", "--locked", "-p", "bone-lints"], "exit": 0, "output": "test allow_lines_tests::matches_str_lines_on_allow_lines \\.\\.\\. ok"}
     ]
+  },
+  {
+    "id": "purity-rejection-reasons",
+    "statement": "All 20 purity rejection cases identify the intended violation, and their assertions detect wrong diagnostics and valid replacement programs.",
+    "kind": "test strength",
+    "limit": "Selected rejection rules only. This does not prove opaque annotations truthful or make local mutations legal. The annotation-removal acceptance control was also run during the audit.",
+    "sources": [
+      {"path": "tests/errors/pure_verification.rock.err", "anchor": "//! expect: performs an assignment (mutation)"},
+      {"path": "crates/bone-inference/src/purity.rs", "anchor": "fn verify_pure_expr("},
+      {"path": "docs/purity.md", "anchor": "## Rejection assertion audit"}
+    ],
+    "checks": [
+      {"command": ["python3", "perf/evidence/check_operator_rejections.py", "--fixture", "tests/errors/pure_verification.rock.err", "--cases", "20"], "exit": 0, "output": "original: 20 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 20 failed; 0 todo\\nvalid-programs: 0 passed; 20 failed; 0 todo"}
+    ]
   }
 ]

@@ -2,6 +2,7 @@
 //! Tags: pure, verification
 
 //=== TEST CASE: pure_reads_global_Generic ===
+//! expect: reads global `COUNTER`
 // Reads a mutable global — not a param or local. Verification errors
 // at the specific Ident site.
 global COUNTER: int = 0
@@ -12,6 +13,7 @@ fn bad_reads_global() -> int {
 }
 
 //=== TEST CASE: pure_writes_global_Generic ===
+//! expect: performs an assignment (mutation)
 // Assigns to a mutable global — a mutation side effect.
 global COUNTER2: int = 0
 
@@ -22,6 +24,7 @@ fn bad_writes_global() -> int {
 }
 
 //=== TEST CASE: pure_increments_global_Generic ===
+//! expect: performs an assignment (mutation)
 // Compound/increment is a mutation.
 global COUNTER3: int = 0
 
@@ -32,6 +35,7 @@ fn bad_increments_global() -> int {
 }
 
 //=== TEST CASE: pure_calls_non_pure_Generic ===
+//! expect: calls `bump_tick` which is not provably pure
 // Calls a function whose body is not provably pure.
 global TICK: int = 0
 
@@ -46,6 +50,7 @@ fn bad_calls_impure() -> int {
 }
 
 //=== TEST CASE: pure_mutates_param_field_Generic ===
+//! expect: performs an assignment (mutation)
 // Mutation through a parameter. Field assignment is a side effect
 // observable via the arg at the call site.
 struct Point { x: int, y: int }
@@ -57,6 +62,7 @@ fn bad_mutates_param(p: Point) -> int {
 }
 
 //=== TEST CASE: pure_heap_struct_literal_Generic ===
+//! expect: constructs a heap struct literal
 // Constructs a heap struct (non-value) whose identity is observable.
 struct NotAValue { n: int }
 
@@ -66,6 +72,7 @@ fn bad_heap_struct() -> NotAValue {
 }
 
 //=== TEST CASE: pure_array_literal_Generic ===
+//! expect: builds an array literal
 // Array literal allocates a heap table.
 @pure
 fn bad_array_literal() -> [int] {
@@ -73,25 +80,28 @@ fn bad_array_literal() -> [int] {
 }
 
 //=== TEST CASE: pure_lambda_Generic ===
-// Lambda captures enclosing scope.
+//! expect: creates a lambda
+// Lambda construction is rejected even when it captures nothing.
 @pure
 fn bad_lambda() -> (int) -> int {
     return x => x + 1
 }
 
 //=== TEST CASE: pure_while_loop_with_mutation_Generic ===
-// While loop whose body writes a global.
-global C: int = 0
+//! expect: performs an assignment (mutation)
+// Only the loop-body write violates purity; the condition reads no global.
+struct LoopPoint { x: int }
 
 @pure
-fn bad_while() -> int {
-    while C < 10 {
-        C = C + 1
+fn bad_while(p: LoopPoint, keep_going: bool) -> int {
+    while keep_going {
+        p.x = 5
     }
-    return C
+    return 0
 }
 
 //=== TEST CASE: pure_collection_index_Generic ===
+//! expect: indexes a collection
 // Index read from a collection — could read mutable state.
 @pure
 fn bad_index(v: Vec<int>) -> int {
@@ -99,6 +109,7 @@ fn bad_index(v: Vec<int>) -> int {
 }
 
 //=== TEST CASE: pure_and_debug_impure_conflict_Generic ===
+//! expect: `@pure` and `@debug_impure` on the same function are contradictory
 // `@pure` (no side effects) and `@debug_impure` (debug-only side
 // effect) on the same function is a contradiction. Rejected at the
 // annotation-registration site in type_declaration_pass, before
@@ -110,6 +121,7 @@ fn bad_both() -> int {
 }
 
 //=== TEST CASE: pure_calls_unannotated_pure_Generic ===
+//! expect: calls `double_it` which is not provably pure
 // Calls a function that is genuinely pure but NOT annotated `@pure`. Under
 // the annotation-contract model (matching bone), a `@pure` body may only
 // call callees that are themselves annotated `@pure` -- being pure by
@@ -123,6 +135,7 @@ fn bad_calls_unannotated_pure() -> int {
 }
 
 //=== TEST CASE: pure_reads_global_via_method_Generic ===
+//! expect: reads global `GLO`
 // Reading a mutable global in METHOD-RECEIVER position (`G.m()`) is a global
 // read, exactly like a bare `G`. The receiver sits in the call's `func` (a UFCS
 // `recv.method()` desugars to `method(recv)`), which the purity walker must
@@ -133,6 +146,7 @@ global GLO: int = 0
 @pure fn bad_reads_global_via_method() -> int { return GLO.double_val() }
 
 //=== TEST CASE: pure_mutates_own_local_int_Generic ===
+//! expect: performs an assignment (mutation)
 // PINNED CURRENT BEHAVIOR, believed OVER-RESTRICTIVE. `@pure` rejects EVERY
 // assignment form syntactically, without asking WHAT is mutated. This body is
 // referentially transparent -- `x` is a function-local that never escapes, so
@@ -148,6 +162,7 @@ fn pure_mutates_own_local() -> int {
 }
 
 //=== TEST CASE: pure_local_value_field_write_Generic ===
+//! expect: performs an assignment (mutation)
 // The user-reported shape (a shader helper): a `@pure` fn building a Vec2-like
 // value in a local and adjusting one component. The write itself is legal
 // (tests/values/value_local_field_write.rock); only this syntactic purity

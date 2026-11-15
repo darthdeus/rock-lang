@@ -113,6 +113,28 @@ The regression tests: `tests/errors/pure_verification.rock.err` (checker),
 `tests/nullable/refinement_effects.rock` (narrows that must still hold), and
 `tests/iterators/vec_bounds_elision.rock` (elision ignores `@pure`).
 
+## Rejection assertion audit (2026-11-15)
+
+All 20 cases in `pure_verification.rock.err` now pin their intended diagnostic;
+15 previously accepted any rejection. The loop case now writes a parameter
+field without reading a global in its condition or return, so those unrelated
+reads cannot satisfy the intended loop-body check. Assignment cases pin the
+assignment diagnostic even when walking the target also reports a global read.
+Simple-target `+=` lowers to `Assign` here, so it uses that diagnostic rather
+than the separate `CompoundAssign` message.
+
+The existing conservative rules for assignments to local scalars and value
+fields remain unchanged. Making those cases legal would be a language change,
+not a diagnostic cleanup. An obsolete source comment claiming heap and array
+literal restrictions were not enforced was removed.
+
+Run `python3 perf/evidence/check_operator_rejections.py --fixture
+tests/errors/pure_verification.rock.err --cases 20` on one command line. The
+original cases pass; deliberately wrong diagnostics and valid replacement
+programs each fail all 20 assertions. A separate control removing `@pure` from
+the original programs admitted all 20, confirming the annotation is the
+rejection boundary rather than an unrelated type or syntax problem.
+
 ## Opaque callback audit (2026-11-14)
 
 A read-only Lua expression can still write through a metamethod. Generic
