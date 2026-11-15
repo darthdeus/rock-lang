@@ -40,14 +40,13 @@ fn snapshot_history_failed_publication_saves_document_and_preserves_ids() {
         let publication = snapshot_history_publish(state, path, level, document, checkpoint: true)
         assert(!publication.done && !file_exists(level),
             "publication returns before writing the document")
-        while !snapshot_history_publication_poll(publication, true) {}
+        assert_error_logs(["[SNAPSHOT] history publication failed: {path}"], () => {
+            while !snapshot_history_publication_poll(publication, true) {}
+        })
         assert_eq(file_read(level) ?? "", document,
             "failed history publication still saves the production current document")
         assert(publication.history_failed && publication.failed && publication.failures > 0,
             "history failure is reported to the editor status consumer")
-        let errors = stone_log_records_text(0, stone_log_record_total(0))
-        assert(errors.contains("SNAPSHOT") && errors.contains(path),
-            "shared logger reports the failed history path")
         assert(remove_dir(path))
         let retry = snapshot_history_publish(state, path, checkpoint: true)
         while !snapshot_history_publication_poll(retry, true) {}
@@ -78,7 +77,12 @@ fn snapshot_history_clean_retries_failed_checkpoint_before_append() {
     assert(snapshot_history_save(state, path, checkpoint: true), "original history exists")
     assert(create_directory(path + ".compact.tmp"), "checkpoint failure fixture created")
     snapshot_history_clean(state, original + " ")
-    assert(!snapshot_history_save(state, path, checkpoint: true), "replacement checkpoint fails")
+    assert_error_logs([
+        "[SNAPSHOT] history publication failed: {path}",
+        "[SNAPSHOT] failed to remove incomplete checkpoint: {path}.compact.tmp",
+    ], () => {
+        assert(!snapshot_history_save(state, path, checkpoint: true), "replacement checkpoint fails")
+    })
     assert(remove_dir(path + ".compact.tmp"), "checkpoint can be retried")
     assert(snapshot_history_commit(state, original + "  ", "new edit"), "new edit follows replacement root")
     assert(snapshot_history_save(state, path), "publication retries the replacement checkpoint")

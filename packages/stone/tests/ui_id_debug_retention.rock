@@ -123,7 +123,9 @@ fn ui_id_debug_detector_reports_enabled_rules() {
     let mouse_id = ui_id("debug_rules", "mouse")
     ui_mouse_item(mouse_id, rect)
     ui_mouse_item(mouse_id, rect)
-    ui_mouse_begin_frame()
+    assert_error_logs(["[ui] ui id collision: 'debug_rules/mouse' registered more than once this frame (mouse list) -- scope/label must be unique"], () => {
+        ui_mouse_begin_frame()
+    })
     assert_eq(UI_ID_DEBUG.dupes, dupes + 1,
         "ui_id_collision: repeated mouse registration is reported")
     assert_eq(UI_ID_DEBUG.last_dupe_name, "debug_rules/mouse",
@@ -132,12 +134,17 @@ fn ui_id_debug_detector_reports_enabled_rules() {
     let focus_id = ui_id("debug_rules", "focus")
     ui_focus_item(focus_id, rect, "debug_rules")
     ui_focus_item(focus_id, rect, "debug_rules")
-    ui_focus_begin_frame()
+    assert_error_logs(["[ui] ui id collision: 'debug_rules/focus' registered more than once this frame (focus list) -- scope/label must be unique"], () => {
+        ui_focus_begin_frame()
+    })
     assert_eq(UI_ID_DEBUG.dupes, dupes + 2,
         "ui_id_collision: repeated focus registration is reported")
 
     let h1 = ui_id("scope", "oB1oTRA35oD")
-    let h2 = ui_id("scope", "qs3G8fno658w")
+    let h2 = 0
+    assert_error_logs(["[ui] ui_id hash collision: 'scope/oB1oTRA35oD' and 'scope/qs3G8fno658w' both hash to 1296646497 -- rename one"], () => {
+        h2 = ui_id("scope", "qs3G8fno658w")
+    })
     assert_eq(h1, h2, "ui_id_collision: the production hash returns the colliding id")
     assert_eq(UI_ID_DEBUG.hash_collisions, hash_collisions + 1,
         "ui_id_collision: distinct strings with one id are reported")
