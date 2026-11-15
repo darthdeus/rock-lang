@@ -1,6 +1,6 @@
 # Iterator bound rejection evidence
 
-The seven cases in [iterator_bound_violations.rock.err](../tests/errors/iterators/iterator_bound_violations.rock.err) now assert the intended diagnostic, rather than accepting any compiler error. The original seven diagnostics match their stated causes; no wrong-error case needed isolation. This audit does not cover the separate `bounded_call_in_nested_body` coroutine fixture.
+The seven cases in [iterator_bound_violations.rock.err](../tests/errors/iterators/iterator_bound_violations.rock.err) now assert the intended diagnostic, rather than accepting any compiler error. The original seven diagnostics match their stated causes; no wrong-error case needed isolation. The subsequent [coroutine audit](coroutine-rejections.md) found that the separate `bounded_call_in_nested_body` fixture rejected an invalid coroutine signature; its corrected bounded chain executes on both backends.
 
 - [Lowering](../crates/bone-lower/src/lib.rs) (`lower_generic_bounds`, `reject_generic_bounds`) accepts only `Iterator<E>` on function generics, with one type argument; an unknown bound and a bound on a struct reject.
 - [Inference](../crates/bone-inference/src/iter.rs) (`check_iterator_bounds`, `bound_next_elem`) checks structural `next(C) -> (bool, E)` conformance at calls, including matching the element type. A missing `next`, mismatched element, and multi-value `next` each have distinct rejection reasons. A multi-value iterator can still drive a `for` directly.

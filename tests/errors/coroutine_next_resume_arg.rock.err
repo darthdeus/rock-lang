@@ -6,6 +6,7 @@
 //! Tags: coroutines, generators, iterator, resume
 
 //=== TEST CASE: resume_taking_coroutine_not_iterable_Rejected ===
+//! expect: type `Coroutine<int, (), int>` is not iterable
 co fn echo() -> Coroutine<int, (), int> {
     let x = yield 1
     yield x

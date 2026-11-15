@@ -689,5 +689,137 @@
     "limit": "Does not cover the separate coroutine-body restriction, every iterator shape or all generic instantiations.",
     "sources": [{"path": "tests/errors/iterators/iterator_bound_violations.rock.err", "anchor": "//! expect:"}, {"path": "crates/bone-inference/src/iter.rs", "anchor": "pub(crate) fn check_iterator_bounds("}, {"path": "docs/iterator-bound-rejections.md", "anchor": "separate"}],
     "checks": [{"command": ["python3", "perf/evidence/check_operator_rejections.py", "--fixture", "tests/errors/iterators/iterator_bound_violations.rock.err", "--cases", "7"], "exit": 0, "output": "original: 7 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 7 failed; 0 todo\\nvalid-programs: 0 passed; 7 failed; 0 todo"}, {"command": ["cargo", "run", "--quiet", "--locked", "-p", "rock-cli", "--bin", "rock", "--", "test", "tests/iterators/combinators.rock", "tests/iterators/userland.rock", "tests/iterators/bounded_forwarding.rock"], "exit": 0, "output": "58/58 @tests passed \\(0 failed\\)"}, {"command": ["cargo", "run", "--quiet", "--locked", "-p", "rock-cli", "--bin", "rock", "--", "test", "tests/iterators/combinators.rock", "tests/iterators/userland.rock", "tests/iterators/bounded_forwarding.rock", "--backend", "js"], "exit": 0, "output": "58/58 @tests passed \\(0 failed, 0 skipped, 0 not for js\\)"}]
-  }
+  },
+{
+  "id": "coroutine-rejection-reasons",
+  "statement": "Ten coroutine rejection cases assert their actual intended reasons; a formerly misattributed bounded-chain rejection is retained as an invalid-signature check and its corrected program executes on LuaJIT and JS.",
+  "kind": "test strength",
+  "limit": "Selected boundaries only, not general coroutine safety or residual bounded-call coverage. The removed yield-star syntax diagnostic still has a misleading prefix.",
+  "sources": [
+    {
+      "path": "docs/coroutine-rejections.md",
+      "anchor": "Ten existing cases"
+    },
+    {
+      "path": "crates/bone-inference/src/expr.rs",
+      "anchor": "Expected a Coroutine type, got {}"
+    },
+    {
+      "path": "crates/skull-mir/src/lower/mod.rs",
+      "anchor": "fn reject_nonunit_coroutine_falloff"
+    },
+    {
+      "path": "tests/coroutines/coroutine_bound_calls.rock",
+      "anchor": "fn bounded_chain_in_coroutine()"
+    }
+  ],
+  "checks": [
+    {
+      "command": [
+        "python3",
+        "perf/evidence/check_operator_rejections.py",
+        "--fixture",
+        "tests/errors/coroutine_falloff_nonunit.rock.err",
+        "--cases",
+        "4"
+      ],
+      "exit": 0,
+      "output": "original: 4 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 4 failed; 0 todo\\nvalid-programs: 0 passed; 4 failed; 0 todo"
+    },
+    {
+      "command": [
+        "python3",
+        "perf/evidence/check_operator_rejections.py",
+        "--fixture",
+        "tests/errors/yield_in_plain_lambda.rock.err",
+        "--cases",
+        "3"
+      ],
+      "exit": 0,
+      "output": "original: 3 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 3 failed; 0 todo\\nvalid-programs: 0 passed; 3 failed; 0 todo"
+    },
+    {
+      "command": [
+        "python3",
+        "perf/evidence/check_operator_rejections.py",
+        "--fixture",
+        "tests/errors/coroutine_next_resume_arg.rock.err",
+        "--cases",
+        "1"
+      ],
+      "exit": 0,
+      "output": "original: 1 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 1 failed; 0 todo\\nvalid-programs: 0 passed; 1 failed; 0 todo"
+    },
+    {
+      "command": [
+        "python3",
+        "perf/evidence/check_operator_rejections.py",
+        "--fixture",
+        "tests/errors/yield_star_removed.rock.err",
+        "--cases",
+        "1"
+      ],
+      "exit": 0,
+      "output": "original: 1 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 1 failed; 0 todo\\nvalid-programs: 0 passed; 1 failed; 0 todo"
+    },
+    {
+      "command": [
+        "python3",
+        "perf/evidence/check_operator_rejections.py",
+        "--fixture",
+        "tests/errors/coroutine_result_type.rock.err",
+        "--cases",
+        "1"
+      ],
+      "exit": 0,
+      "output": "original: 1 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 1 failed; 0 todo\\nvalid-programs: 0 passed; 1 failed; 0 todo"
+    },
+    {
+      "command": [
+        "cargo",
+        "run",
+        "--quiet",
+        "--locked",
+        "-p",
+        "rock-cli",
+        "--bin",
+        "rock",
+        "--",
+        "test",
+        "tests/coroutines/coroutine_bound_calls.rock",
+        "tests/coroutines/generic_result_falloff.rock",
+        "tests/coroutines/closure_captures.rock",
+        "tests/coroutines/generator_iter.rock",
+        "tests/coroutines/resume_with_value.rock",
+        "tests/coroutines/await.rock"
+      ],
+      "exit": 0,
+      "output": "28/28 @tests passed \\(0 failed\\)"
+    },
+    {
+      "command": [
+        "cargo",
+        "run",
+        "--quiet",
+        "--locked",
+        "-p",
+        "rock-cli",
+        "--bin",
+        "rock",
+        "--",
+        "test",
+        "tests/coroutines/coroutine_bound_calls.rock",
+        "tests/coroutines/generic_result_falloff.rock",
+        "tests/coroutines/closure_captures.rock",
+        "tests/coroutines/generator_iter.rock",
+        "tests/coroutines/resume_with_value.rock",
+        "tests/coroutines/await.rock",
+        "--backend",
+        "js"
+      ],
+      "exit": 0,
+      "output": "28/28 @tests passed \\(0 failed, 0 skipped, 0 not for js\\)"
+    }
+  ]
+}
 ]

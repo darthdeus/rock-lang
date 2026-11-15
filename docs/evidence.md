@@ -213,11 +213,25 @@ those limitations or establish exhaustive enforcement.
 
 All 22 original inputs already rejected for their intended reasons. Each now
 asserts that reason, and wrong-diagnostic and generic-valid mutations fail all
-22 assertions. The inventory is **301 unpinned of 525 cases**; the full error
-scan remains 519 passed with six existing TODOs. No production compiler code
-changed. The separate coroutine/iterator restriction remains unaudited, opaque
-annotations remain author promises, and the control-flow audit records scalar
+22 assertions. The inventory at that stage was **301 unpinned of 525 cases**;
+the full error scan remained 519 passed with six existing TODOs. No production
+compiler code changed. The separate coroutine/iterator fixture was unaudited
+at that stage. Opaque annotations remain author promises, and the control-flow
+audit records scalar
 `break`/`continue` branch typing as an adjacent behavior needing review.
+
+## Coroutine rejection boundaries
+
+The [coroutine audit](coroutine-rejections.md) pins ten existing rejections:
+four result fall-through cases, three lambda yields, resume-argument iteration,
+removed delegation syntax and an invalid result annotation. The last case had
+claimed to test a residual bounded-call restriction but rejected its invalid
+`co fn` signature first. Its corrected iterator chain now has a runtime control.
+
+Wrong-diagnostic and valid-program mutations fail all ten assertions. Six
+nearby runtime files pass 28 tests on each backend, with no JS skips. The
+inventory at that stage was **291 unpinned of 525 cases**; the full error scan passes 519 with
+six existing TODOs. No production compiler code changed.
 
 ## Useful measurements
 
@@ -245,8 +259,8 @@ audited by this work.
 
 The breadth survey also found a stale LSP fixture warning: the parser already
 rejects unknown expectation lines. Its existing malformed-block regression
-passes; the documentation now matches that behavior. The ledger contains 27
-bounded records, not 27 comprehensively verified subsystems.
+passes; the documentation now matches that behavior. The ledger contains 28
+bounded records, not 28 comprehensively verified subsystems.
 
 Extend the evidence ledger alongside concrete repairs. Its checks establish
 bounded claims, not a percentage of language coverage or a launch certificate.

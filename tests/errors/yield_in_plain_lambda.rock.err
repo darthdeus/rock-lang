@@ -11,6 +11,7 @@
 //! Tags: coroutines, lambdas
 
 //=== TEST CASE: yield_with_value_in_lambda_Generic ===
+//! expect: yield is only allowed in a coroutine (co fn)
 co fn gen() -> Coroutine<int> {
     let f = () => yield 5
     f()
@@ -21,6 +22,7 @@ fn main() {
 }
 
 //=== TEST CASE: bare_yield_in_lambda_Generic ===
+//! expect: yield is only allowed in a coroutine (co fn)
 co fn gen() -> Coroutine<int> {
     let f = () => yield
     f()
@@ -32,6 +34,7 @@ fn main() {
 }
 
 //=== TEST CASE: yield_in_lambda_passed_to_map_Generic ===
+//! expect: yield is only allowed in a coroutine (co fn)
 co fn gen() -> Coroutine<int> {
     let xs: [int] = [1, 2, 3]
     let _ys = xs.map(x => yield x)

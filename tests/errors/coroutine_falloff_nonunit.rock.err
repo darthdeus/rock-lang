@@ -14,6 +14,7 @@
 //! Tags: skull, coroutine, emit-time, fall-off
 
 //=== TEST CASE: falloff_int_result ===
+//! expect: can fall off the end of its body, but its coroutine result type is not `()`
 co fn gen() -> Coroutine<int, string> {
     yield 1
 }
@@ -23,6 +24,7 @@ fn main() {
 }
 
 //=== TEST CASE: falloff_after_conditional_return ===
+//! expect: can fall off the end of its body, but its coroutine result type is not `()`
 // One arm returns, the other falls through to the end -- the fall-off is
 // reachable, so it still rejects.
 co fn maybe(flag: bool) -> Coroutine<int, int> {
@@ -37,6 +39,7 @@ fn main() {
 }
 
 //=== TEST CASE: falloff_generic_result_at_int ===
+//! expect: can fall off the end of its body, but its coroutine result type is not `()`
 co fn gen<R>(x: R) -> Coroutine<int, R> {
     yield 1
 }
@@ -46,6 +49,7 @@ fn main() {
 }
 
 //=== TEST CASE: falloff_generic_result_through_generic_caller ===
+//! expect: can fall off the end of its body, but its coroutine result type is not `()`
 co fn gen<R>(x: R) -> Coroutine<int, R> {
     yield 1
 }

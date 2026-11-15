@@ -1,0 +1,15 @@
+//! Error: a co fn result annotation must be a Coroutine type.
+//! This formerly claimed to reject the bounded call, but the invalid annotation
+//! rejects first. The corrected chain runs in coroutine_bound_calls.rock.
+//! Tags: coroutines, result-type
+
+//=== TEST CASE: co_fn_requires_coroutine_result_Generic ===
+//! expect: Expected a Coroutine type, got int
+co fn worker(xs: [int]) -> int {
+    let evens = xs.iter().filter(x => x % 2 == 0).collect()
+    return evens.len
+}
+fn main() {
+    let n = worker([1, 2, 3, 4])
+    print("n={n}")
+}
