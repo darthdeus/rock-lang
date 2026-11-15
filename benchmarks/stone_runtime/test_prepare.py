@@ -68,6 +68,53 @@ class PrepareTest(unittest.TestCase):
                              ["baseline", "candidate", "candidate", "baseline"])
             self.assertEqual(result["candidate_build"]["revision"], "candidate")
 
+    def test_coalescing_gate_checks_candidate_only_in_paired_runs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / "runtime/bin"
+            runtime.mkdir(parents=True)
+            luajit = runtime / "luajit"
+            luajit.write_text("""#!/bin/sh
+case "$1" in
+  */baseline/*) kind=baseline ;;
+  *) kind=candidate ;;
+esac
+echo MESH_OK
+echo VM test
+echo "AUDIT mesh $AUDIT_METRIC 1 1 2 3 0 0"
+if [ "$AUDIT_METRIC" = trace ]; then
+  if [ "$kind" = baseline ]; then
+    echo 'ABORT 1 warmup:NYI: register coalescing too complex detail=0'
+  elif [ -f "$(dirname "$1")/abort" ]; then
+    echo 'ABORT 1 measure:NYI: register coalescing too complex detail=0'
+  else
+    echo 'SITE 1 warmup:NYI: register coalescing too complex detail=0'
+  fi
+fi
+""")
+            luajit.chmod(0o755)
+            native = root / "native.so"
+            native.write_text("native")
+            for name in ("baseline", "candidate"):
+                artifacts = root / name
+                artifacts.mkdir()
+                (artifacts / "retained.lua").write_text(name)
+                (artifacts / "build.json").write_text(json.dumps({"revision": name}))
+            command = ["python3", str(Path(__file__).with_name("measure.py")), str(root / "baseline"),
+                       "--compare", str(root / "candidate"), "--arm", "growth", "--case", "mesh",
+                       "--runtime", str(runtime.parent), "--stone-lib", str(native), "--rounds", "1",
+                       "--outdir", str(root / "out"), "--require-no-coalescing"]
+            success = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(success.returncode, 0, success.stderr)
+            (root / "candidate/abort").touch()
+            failure = subprocess.run(command, capture_output=True, text=True)
+            self.assertNotEqual(failure.returncode, 0)
+            self.assertIn("register coalescing too complex", failure.stderr)
+            single = [arg for arg in command if arg not in ("--compare", str(root / "candidate"))]
+            failure = subprocess.run(single, capture_output=True, text=True)
+            self.assertNotEqual(failure.returncode, 0)
+            self.assertIn("register coalescing too complex", failure.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

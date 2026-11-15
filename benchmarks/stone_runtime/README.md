@@ -55,7 +55,10 @@ candidate. Check that benchmark input hashes match and record compiler and
 native-library provenance. Fewer aborts alone does not prove more work ran
 in compiled code: inspect LuaJIT VM-state sampling in separate profiling
 runs as well as abort sites, allocation counts, timings, and the vertex oracle.
-Profiling must not be enabled during timing runs.
+Profiling must not be enabled during timing runs. Add
+`--require-no-coalescing` to fail when a trace process reports a warmup or
+measurement coalescing abort. In paired runs the gate applies to the candidate;
+in single-build runs it applies to all selected arms.
 
 `measure.py` alternates process order over six rounds and records compiler,
 Lua output and native-library hashes, LuaJIT identity, per-process medians
