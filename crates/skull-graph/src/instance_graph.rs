@@ -859,7 +859,6 @@ pub struct InstanceGraph {
     recursion_by_subject: BTreeMap<Instance, BTreeSet<Instance>>,
     recursion_by_decl: BTreeMap<DeclKey, BTreeSet<Instance>>,
     recursion_positions: BTreeMap<Instance, usize>,
-    coroutine_rejections: BTreeMap<Instance, Rejection>,
     coroutine_positions: BTreeMap<Instance, usize>,
     /// Names with no concrete instance covering the obligation that put them
     /// here, BY CAUSE. See [`RootHole`]: one set carrying several different
@@ -1860,7 +1859,6 @@ impl InstanceGraph {
             recursion_by_subject: BTreeMap::new(),
             recursion_by_decl: BTreeMap::new(),
             recursion_positions: BTreeMap::new(),
-            coroutine_rejections: BTreeMap::new(),
             coroutine_positions: BTreeMap::new(),
             uninstantiated_roots: BTreeMap::new(),
             root_hole_sites: BTreeMap::new(),
@@ -3208,7 +3206,6 @@ impl InstanceGraph {
     }
 
     fn remove_coroutine_rejection(&mut self, at: &Instance) {
-        self.coroutine_rejections.remove(at);
         if let Some(position) = self.coroutine_positions.remove(at) {
             self.remove_graph_rejection_position(position);
         }
@@ -3218,9 +3215,8 @@ impl InstanceGraph {
         let at = rejection.at.clone();
         self.remove_coroutine_rejection(&at);
         let position = self.graph_rejections.len();
-        self.graph_rejections.push(rejection.clone());
-        self.coroutine_positions.insert(at.clone(), position);
-        self.coroutine_rejections.insert(at, rejection);
+        self.graph_rejections.push(rejection);
+        self.coroutine_positions.insert(at, position);
     }
 
     fn clear_graph_postpass_rejections(&mut self) {
@@ -3229,7 +3225,6 @@ impl InstanceGraph {
         self.recursion_by_subject.clear();
         self.recursion_by_decl.clear();
         self.recursion_positions.clear();
-        self.coroutine_rejections.clear();
         self.coroutine_positions.clear();
     }
 
