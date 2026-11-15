@@ -63,6 +63,20 @@ fn path_prefixes((root, fields): Narrow) -> Vec<Narrow> {
         .collect()
 }
 
+/// Only the stdlib predicate promises that false means its argument is non-null.
+/// An unresolved call or a user overload with the same name promises nothing.
+fn is_stdlib_null_predicate(gamma: &Gamma, e: Idx<Expr>) -> bool {
+    gamma
+        .out
+        .resolved_overload_calls
+        .get(&e)
+        .is_some_and(|&(mid, fid)| {
+            let module = gamma.workspace.module(mid);
+            bone_core::modules::is_stdlib_module_file(module.file.as_str())
+                && module.functions[fid].name.as_str() == "is_null"
+        })
+}
+
 /// `@pure`-aware effect check over a CONDITION expression: true if evaluating
 /// it could mutate a path -- a call to a callee that is not `@pure` (named,
 /// safe-nav or through a function value), a yield, or an assignment anywhere
@@ -90,9 +104,9 @@ fn cond_has_effect(gamma: &Gamma, c: BodyCtx, e: Idx<Expr>) -> bool {
     };
     match c.body.expr_arena[e] {
         Expr::Call {
-            callee: Callee::Unresolved { name, .. },
+            callee: Callee::Unresolved { .. },
             ..
-        } if !callee_pure(e) && name.as_str() != "is_null" => true,
+        } if !callee_pure(e) && !is_stdlib_null_predicate(gamma, e) => true,
         Expr::SafeNavCall { .. } if !callee_pure(e) => true,
         // A function value's body is opaque.
         Expr::Call {
@@ -177,7 +191,7 @@ pub(crate) fn detect_null_narrow(
     c: BodyCtx,
     cond: Idx<Expr>,
 ) -> (Vec<Narrow>, Vec<Narrow>) {
-    let (mut then_set, mut else_set) = detect_null_narrow_inner(c, cond);
+    let (mut then_set, mut else_set) = detect_null_narrow_inner(gamma, c, cond);
     if cond_has_effect(gamma, c, cond) {
         then_set.retain(|(root, fields)| !root.is_global() && fields.is_empty());
         else_set.retain(|(root, fields)| !root.is_global() && fields.is_empty());
@@ -185,10 +199,14 @@ pub(crate) fn detect_null_narrow(
     (then_set, else_set)
 }
 
-fn detect_null_narrow_inner(c: BodyCtx, cond: Idx<Expr>) -> (Vec<Narrow>, Vec<Narrow>) {
+fn detect_null_narrow_inner(
+    gamma: &Gamma,
+    c: BodyCtx,
+    cond: Idx<Expr>,
+) -> (Vec<Narrow>, Vec<Narrow>) {
     match c.body.expr_arena[cond] {
         Expr::Not(inner, _) => {
-            let (t, e) = detect_null_narrow_inner(c, inner);
+            let (t, e) = detect_null_narrow_inner(gamma, c, inner);
             (e, t)
         }
 
@@ -197,31 +215,28 @@ fn detect_null_narrow_inner(c: BodyCtx, cond: Idx<Expr>) -> (Vec<Narrow>, Vec<Na
             lhs,
             rhs,
         } => {
-            let (_, mut le) = detect_null_narrow_inner(c, lhs);
-            let (_, re) = detect_null_narrow_inner(c, rhs);
+            let (_, mut le) = detect_null_narrow_inner(gamma, c, lhs);
+            let (_, re) = detect_null_narrow_inner(gamma, c, rhs);
 
             le.extend(re);
 
             (vec![], le)
         }
 
-        // TODO: disgusting is_null check
-        Expr::Call {
-            callee: Callee::Unresolved { name, .. },
-            args,
-            ..
-        } if name.as_str() == "is_null" && args.len() == 1 => match path_key(c, args.start()) {
-            Some(p) => (vec![], path_prefixes(p)),
-            None => (vec![], vec![]),
-        },
+        Expr::Call { args, .. } if is_stdlib_null_predicate(gamma, cond) && args.len() == 1 => {
+            match path_key(c, args.start()) {
+                Some(p) => (vec![], path_prefixes(p)),
+                None => (vec![], vec![]),
+            }
+        }
 
         Expr::BinOp {
             op: hir::BinOp::And,
             lhs,
             rhs,
         } => {
-            let (mut lt, _) = detect_null_narrow_inner(c, lhs);
-            let (rt, _) = detect_null_narrow_inner(c, rhs);
+            let (mut lt, _) = detect_null_narrow_inner(gamma, c, lhs);
+            let (rt, _) = detect_null_narrow_inner(gamma, c, rhs);
 
             lt.extend(rt);
 

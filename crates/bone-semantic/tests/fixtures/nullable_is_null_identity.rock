@@ -1,0 +1,52 @@
+//! A nullable predicate is the selected stdlib declaration, not a name.
+
+//- user_predicate_does_not_narrow
+fn is_null(_value: int?) -> bool { false }
+fn f(x: int?) {
+    if !is_null(x) {
+        let result = x
+          //^ int?
+    }
+}
+
+//- pure_user_predicate_does_not_narrow
+@pure fn is_null(_value: int?) -> bool { false }
+fn f(x: int?) {
+    if !is_null(x) {
+        let result = x
+          //^ int?
+    }
+}
+
+//- user_predicate_can_invalidate_a_path
+struct State { value: int? }
+global state: State = State { value: 1 }
+fn is_null(_value: int) -> bool { state.value = null; true }
+fn f() {
+    if state.value != null && is_null(0) {
+        let result = state.value
+          //^ int?
+    }
+}
+
+//- local_function_value_does_not_narrow
+fn f(x: int?) {
+    let is_null = (_value: int?) => false
+    if !is_null(x) {
+        let result = x
+          //^ int?
+    }
+}
+
+// Purity still preserves an independently established non-null path, without
+// making the user function a nullable predicate.
+//- pure_user_call_preserves_an_independent_path
+struct State { value: int? }
+global state: State = State { value: 1 }
+@pure fn is_null(_value: int) -> bool { false }
+fn f() {
+    if state.value != null && !is_null(0) {
+        let result = state.value
+          //^ int
+    }
+}
