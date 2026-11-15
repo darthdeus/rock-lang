@@ -1,0 +1,21 @@
+nobox value Hit { f0: float, f1: float, f2: float, f3: float, f4: float, f5: float, f6: float }
+value Landing { a: Hit, b: Hit, c: Hit, d: Hit, e: Hit, f: Hit, g: Hit, environment: [float]? = null }
+value Receipt { landing: Landing? = null, sequence: int }
+
+@nomangle fn make(seed: float, sequence: int) -> Receipt {
+    let hit = Hit { f0: seed, f1: seed + 1.0, f2: seed + 2.0, f3: seed + 3.0, f4: seed + 4.0, f5: seed + 5.0, f6: seed + 6.0 }
+    return Receipt { sequence: sequence, landing: Landing { a: hit, b: hit, c: hit, d: hit, e: hit, f: hit, g: hit } }
+}
+@nomangle fn select_local(flag: bool, left: Receipt, right: Receipt) -> Receipt {
+    let row = if flag { left } else { right }
+    return row
+}
+@nomangle fn select_direct(flag: bool, left: Receipt, right: Receipt) -> Receipt {
+    return if flag { left } else { right }
+}
+@nomangle fn changed(input: Receipt) -> Receipt {
+    let row = input
+    row.sequence = 999
+    return row
+}
+fn main() { let _ = select_local(true, make(1.0, 1), make(2.0, 2)); let _ = select_direct(false, make(1.0, 1), make(2.0, 2)); let _ = changed(make(1.0, 1)) }
