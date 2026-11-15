@@ -9,6 +9,7 @@ use crate::Result;
 use crate::lint_pass;
 use bone_core::prelude::Ustr;
 use rock_core::SourceFiles;
+use rock_host::stick::{PackageType, StickConfig};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -34,7 +35,7 @@ pub(crate) fn do_lint_union(lib: &str, consumers_root: Option<&str>) -> Result<(
             .map_err(|e| anyhow::anyhow!("lint --union: cannot resolve `{d}`: {e}"))?,
         None => lib_root.parent().unwrap_or(&lib_root).to_path_buf(),
     };
-    let candidates = bin_projects_under(&search_root);
+    let candidates = bin_projects_under(&search_root)?;
 
     let mut consumers: Vec<PathBuf> = Vec::new();
     let mut skipped: Vec<(PathBuf, String)> = Vec::new();
@@ -152,24 +153,30 @@ fn unreached_in(
 /// Every `bin` package under `root`, skipping build/VCS directories and
 /// registered exclusions. A selected root is always scanned. Package sources
 /// are not searched for nested packages.
-pub fn bin_projects_under(root: &Path) -> Vec<PathBuf> {
+pub fn bin_projects_under(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
+    let mut seen = HashSet::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        if dir.join("stick.toml").exists() {
-            if rock_host::stick::StickConfig::is_bin_at(&dir) {
+        // Directory links can revisit an ancestor or another consumer path.
+        if !seen.insert(fs_err::canonicalize(&dir)?) {
+            continue;
+        }
+        let manifest = dir.join("stick.toml");
+        if let Some(config) = StickConfig::from_path_optional(&manifest).map_err(|error| {
+            anyhow::anyhow!(
+                "lint --union: cannot load `{}`: {error:#}",
+                manifest.display()
+            )
+        })? {
+            if config.package.package_type.unwrap_or(PackageType::Bin) == PackageType::Bin {
                 out.push(dir);
             }
             continue;
         }
-        let Ok(entries) = fs_err::read_dir(&dir) else {
-            continue;
-        };
-        for e in entries.flatten() {
-            let p = e.path();
-            if !p.is_dir() {
-                continue;
-            }
+        for entry in fs_err::read_dir(&dir)? {
+            let entry = entry?;
+            let p = entry.path();
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if name.starts_with('.') || matches!(name, "target" | "node_modules" | "tmp") {
                 continue;
@@ -177,9 +184,23 @@ pub fn bin_projects_under(root: &Path) -> Vec<PathBuf> {
             if (crate::registry::registered().scan_excluded)(&p) {
                 continue;
             }
+            let file_type = entry.file_type()?;
+            let is_dir = if file_type.is_symlink() {
+                match fs_err::metadata(&p) {
+                    Ok(metadata) => metadata.is_dir(),
+                    // A dangling link contains no consumer to include.
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(error) => return Err(error.into()),
+                }
+            } else {
+                file_type.is_dir()
+            };
+            if !is_dir {
+                continue;
+            }
             stack.push(p);
         }
     }
     out.sort();
-    out
+    Ok(out)
 }
