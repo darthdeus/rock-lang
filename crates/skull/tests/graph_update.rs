@@ -1596,6 +1596,97 @@ fn other_id<T>(x: T) -> T { return x }
 }
 
 #[test]
+fn root_hole_spans_follow_insertions_and_deletions() {
+    let original = "const A: int = takes(gen_id)\n\
+                    const B: int = takes(gen_id)\n\
+                    const C: int = takes(other_id) + takes(gen_id)\n\
+                    fn zz_start() {}\n";
+    let longer = original.replace(
+        "const A: int = takes(gen_id)",
+        "const A: int = takes(mono_id)",
+    );
+    let multiline = original.replacen("takes(gen_id)", "takes(\n  mono_id\n)", 1);
+    let lib = format!(
+        "{FNVALUE_LIB}\nfn other_id<T>(x: T) -> T {{ return x }}\n\
+         fn unmoved_id<T>(x: T) -> T {{ return x }}\n\
+         const D: int = takes(unmoved_id)\n"
+    );
+    let mut differences = Vec::new();
+    for (label, before, after, declaration_rows) in [
+        ("insert byte", original, longer.as_str(), 3),
+        ("delete byte", longer.as_str(), original, 4),
+        ("insert lines", original, multiline.as_str(), 3),
+        ("delete lines", multiline.as_str(), original, 4),
+    ] {
+        let mut case = Case::new(before, &lib);
+        assert_eq!(case.graph.uninstantiated_roots.len(), 5);
+        assert_eq!(
+            case.graph.uninstantiated_roots["other_id_T"]
+                .always_emitted_sites
+                .len(),
+            1
+        );
+        let old_other_span =
+            case.graph.uninstantiated_roots["other_id_T"].always_emitted_sites[0].span;
+        let retained: Vec<_> = case
+            .graph
+            .contributions
+            .iter()
+            .filter(|(_, contribution)| {
+                contribution.always_emitted_holes.iter().any(|hole| {
+                    hole.failure.span.file.as_str() == MAIN
+                        && hole.failure.span.offset_range().0 >= before.find("const B").unwrap()
+                })
+            })
+            .map(|(owner, _)| owner.clone())
+            .collect();
+        assert_eq!(retained.len(), 2, "{label}: both later owners must exist");
+        let res = case.session.update_file(MAIN, after).expect("update");
+        assert_eq!(res.tier, UpdateTier::BodyOnly);
+        assert!(!res.reinferred.is_empty());
+        let edits = res.body_update.edit.into_iter().collect::<Vec<_>>();
+        assert_eq!(edits.len(), 1);
+        assert_ne!(edits[0].byte_delta, 0);
+        let stats = case.graph.update_bodies_with_root_delta(
+            case.session.workspace(),
+            &[],
+            &[],
+            &res.reinferred,
+            &edits,
+        );
+        assert_eq!(stats.census.root_hole_names_examined, 4, "{label}");
+        assert_eq!(stats.census.root_hole_rows_examined, 4, "{label}");
+        assert_eq!(
+            stats.census.root_hole_decls_examined, declaration_rows,
+            "{label}"
+        );
+        for owner in retained {
+            assert!(
+                !stats.revisited_owners.contains(&owner),
+                "{label}: {owner:?}"
+            );
+            assert!(
+                !stats.retracted_owners.contains(&owner),
+                "{label}: {owner:?}"
+            );
+        }
+        let new_other_span =
+            case.graph.uninstantiated_roots["other_id_T"].always_emitted_sites[0].span;
+        let mut expected_span = old_other_span;
+        assert!(edits[0].shift_span(&mut expected_span));
+        if new_other_span.offset_range() != expected_span.offset_range()
+            || new_other_span.line_range() != expected_span.line_range()
+        {
+            differences.push(format!("{label}: retained failure span was not relocated"));
+        }
+        let fresh = graph_of(case.ws());
+        let diff = canonical(case.ws(), &case.graph).diff(&canonical(case.ws(), &fresh));
+        differences.extend(diff.into_iter().map(|line| format!("{label}: {line}")));
+    }
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
+}
+
+#[test]
 fn mangled_root_holes_count_concrete_instances() {
     let main = "const C: int = takes(gen_id)\nfn zz_start() { let n = gen_id(7) }\n";
     let lib = format!("{FNVALUE_LIB}\ninline(js) fn gen_id<T>(x: T) -> T = \"return x;\"\n");

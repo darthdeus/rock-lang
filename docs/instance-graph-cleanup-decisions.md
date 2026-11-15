@@ -81,7 +81,7 @@ cargo test -p skull --test skull_tests instance_graph::
 cargo test -p skull
 ```
 
-Final validation passed five `skull-graph` tests, 109 skull unit tests and 1297
+Count-repair validation passed five `skull-graph` tests, 109 skull unit tests and 1297
 skull integration tests, with one existing ignored integration test. Deliberately
 replacing canonical declaration deduplication with a vector made the
 owner/backend test fail with four reported instances against one expected.
@@ -91,16 +91,44 @@ restored before the final full-suite pass. Formatting used the installed
 Cargo 1.99.1 formatter through `cargo fmt --all`; this environment has no rustup
 toolchain selector.
 
-## Open questions
+## Span relocation repair
 
-Coordinate relocation has a separate existing gap. In the owner-retention test,
-replace the equal-length `mon_id` name throughout that test with `mono_id` and
-run its exact filter. The first edit remains body-only, but the canonical
-fresh comparison reports surviving `gen_id` and `other_id_T` failure spans one
-byte behind their fresh positions. Contribution spans move while the retained
-root-hole row copies remain stale. The committed test uses equal-length edits
-to isolate owner retention and count refresh. Span-copy relocation needs its own
-repair and regression.
+The subsequent `root_hole_spans_follow_insertions_and_deletions` regression
+reproduced stale failure positions after inserting or deleting a byte and after
+inserting or deleting two lines. In each case a later same-name hole and a
+different-name hole retained their contributions while their public failure
+spans kept the old coordinates. The canonical fresh-build comparison detected
+every mismatch. The test also retains an unaffected hole in another file and
+multiple failures with different names in one owner.
+
+`root_hole_sites` now stores owner-local row indices into the contribution's
+`always_emitted_holes`, removing its cloned failure records. Relocation moves
+the contribution spans once and dirties names whose spans moved. The existing
+name-scoped refresh republishes their failures from those authoritative rows.
+Owner replacement removes the old row indices before installing replacements,
+and owner removal removes its indexed rows.
+
+Coordinate passes skip edits whose byte and line deltas are both zero.
+`shift_span` otherwise returns true for eligible spans even when neither
+coordinate changes, which unnecessarily dirtied later holes and widened the
+existing equal-length fixture's census from two examined names to four.
+
+The test checks both offset and line relocation and full canonical equality.
+Neither retained owner is rewalked or retracted. Each update examines four
+names across the two refresh passes, against five hole names in the graph.
+It examines four failure rows, including any retracted row, and three
+declaration rows after insertion or four after deletion. The other file's hole
+stays outside the refreshed names. These are deterministic fixture work counts.
+
+Run the regression with
+
+```sh
+cargo test -p skull --test skull_tests graph_update::root_hole_spans_follow_insertions_and_deletions -- --exact
+```
+
+Final `cargo test -p skull-graph -p skull --quiet` validation passed five graph
+tests, 109 skull unit tests and 1298 skull integration tests, with one existing
+ignored integration test. Formatting and whitespace checks also passed.
 
 No cold-compile or runtime timing claim is made. Concurrent compiler work would
 make wall-time comparisons unsuitable for measuring this small change.

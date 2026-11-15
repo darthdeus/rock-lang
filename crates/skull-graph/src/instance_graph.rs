@@ -867,7 +867,8 @@ pub struct InstanceGraph {
     /// here, BY CAUSE. See [`RootHole`]: one set carrying several different
     /// facts could only ever be read as the weakest of them.
     pub uninstantiated_roots: BTreeMap<String, RootHole>,
-    root_hole_sites: BTreeMap<String, BTreeMap<Owner, Vec<AlwaysEmittedHole>>>,
+    /// Row indices into each owner's authoritative `always_emitted_holes`.
+    root_hole_sites: BTreeMap<String, BTreeMap<Owner, Vec<usize>>>,
     root_hole_dirty_names: BTreeSet<String>,
     /// Generic emission roots the narrowing in [`generic_root_obligation`] ruled
     /// out, keyed by the reason. Recorded, not dropped: the population a check
@@ -3007,14 +3008,14 @@ impl InstanceGraph {
     }
 
     fn record_root_holes(&mut self, owner: &Owner, c: &Contribution) {
-        for hole in &c.always_emitted_holes {
+        for (row, hole) in c.always_emitted_holes.iter().enumerate() {
             self.root_hole_dirty_names.insert(hole.name.clone());
             self.root_hole_sites
                 .entry(hole.name.clone())
                 .or_default()
                 .entry(owner.clone())
                 .or_default()
-                .push(hole.clone());
+                .push(row);
         }
     }
 
@@ -3619,10 +3620,12 @@ impl InstanceGraph {
                 .root_hole_sites
                 .get(name)
                 .into_iter()
-                .flat_map(|owners| owners.values())
-                .flat_map(|rows| {
+                .flat_map(|owners| owners.iter())
+                .flat_map(|(owner, rows)| {
+                    let contribution = &self.contributions[owner];
                     census.rows_examined += rows.len();
-                    rows.iter().map(|hole| hole.failure.clone())
+                    rows.iter()
+                        .map(|&row| contribution.always_emitted_holes[row].failure.clone())
                 })
                 .collect();
             let generic_root = self
@@ -3655,6 +3658,7 @@ impl InstanceGraph {
             hole.instances = Self::root_hole_instance_count(
                 ws,
                 &self.index,
+                &self.contributions,
                 self.root_hole_sites.get(name),
                 name,
                 &mut census,
@@ -3670,6 +3674,7 @@ impl InstanceGraph {
             hole.instances = Self::root_hole_instance_count(
                 ws,
                 &self.index,
+                &self.contributions,
                 self.root_hole_sites.get(name),
                 name,
                 &mut census,
@@ -3681,7 +3686,8 @@ impl InstanceGraph {
     fn root_hole_instance_count(
         ws: &Workspace,
         index: &Indices,
-        sites: Option<&BTreeMap<Owner, Vec<AlwaysEmittedHole>>>,
+        contributions: &BTreeMap<Owner, Box<Contribution>>,
+        sites: Option<&BTreeMap<Owner, Vec<usize>>>,
         name: &str,
         census: &mut RootHoleCensus,
     ) -> usize {
@@ -3699,16 +3705,13 @@ impl InstanceGraph {
                 decls.insert(DeclKey(skull_mir::lower::canonical_variant(ws, fref)));
             }
         }
-        for hole in sites
-            .into_iter()
-            .flat_map(|owners| owners.values())
-            .flatten()
-        {
-            census.decls_examined += 1;
-            decls.insert(DeclKey(skull_mir::lower::canonical_variant(
-                ws,
-                hole.callee,
-            )));
+        for (owner, rows) in sites.into_iter().flat_map(|owners| owners.iter()) {
+            let contribution = &contributions[owner];
+            for &row in rows {
+                census.decls_examined += 1;
+                let callee = contribution.always_emitted_holes[row].callee;
+                decls.insert(DeclKey(skull_mir::lower::canonical_variant(ws, callee)));
+            }
         }
         decls
             .iter()
@@ -3919,7 +3922,10 @@ impl InstanceGraph {
     }
 
     fn shift_contribution_spans(&mut self, edits: &[TextEditDelta]) {
-        for edit in edits {
+        for edit in edits
+            .iter()
+            .filter(|edit| edit.byte_delta != 0 || edit.line_delta != 0)
+        {
             let owners: Vec<Owner> = self
                 .index
                 .span_owners
@@ -3948,7 +3954,9 @@ impl InstanceGraph {
                     edit.shift_span(&mut rejection.span);
                 }
                 for hole in &mut contribution.always_emitted_holes {
-                    edit.shift_span(&mut hole.failure.span);
+                    if edit.shift_span(&mut hole.failure.span) {
+                        self.root_hole_dirty_names.insert(hole.name.clone());
+                    }
                 }
             }
         }
