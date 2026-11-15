@@ -4186,7 +4186,7 @@ pub const UNUSED_FN: &str = "unused_fn";
 /// Top-level user functions unreachable from any root. A whole-workspace
 /// reachability closure: seed the roots, follow call/reference edges, report
 /// what's left. Roots are functions that are reachable from outside the HIR
-/// call graph: `extern` / `@nomangle` (called by original name from FFI or
+/// call graph: `@nomangle` (called by original name from FFI or
 /// `inline(lua)`), `main`, and anything bearing a decorator (engine
 /// entry-points `@init`/`@update`/`@draw`/..., `@test`/`@sim`, and custom
 /// decorators whose machinery invokes the target). Bias is deliberately
@@ -4295,9 +4295,11 @@ fn unused_fns_walk(
 
 /// A function is a reachability root iff it can be entered from outside the
 /// in-project call graph. See `unused_fns` for the rationale on each arm.
+/// No `extern(..)` form is a root: each declares a foreign symbol Rock calls.
+/// An `extern(ffi)` wrapper reached only by bare name from `inline(lua)` text
+/// is therefore reported; the lint does not read backend source.
 fn is_root(f: &Function) -> bool {
-    f.is_extern
-        || f.json_field_for.is_some()
+    f.json_field_for.is_some()
         || declared_name(f.name.as_str()) == "main"
         || f.annotations
             .iter()
