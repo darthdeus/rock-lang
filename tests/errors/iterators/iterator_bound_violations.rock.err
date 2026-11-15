@@ -5,6 +5,7 @@
 //! Tags: iterators, generics, bounds
 
 //=== TEST CASE: non_iterator_arg_fails_bound_Generic ===
+//! expect: `int` does not satisfy `Iterator<T>`: no `next(int) -> (bool, E)` function in scope
 struct Wrap<I> { inner: I }
 fn wrap_it<I: Iterator<T>, T>(x: I) -> Wrap<I> {
     return Wrap { inner: x }
@@ -16,6 +17,7 @@ fn main() {
 }
 
 //=== TEST CASE: unknown_bound_name_rejects_Generic ===
+//! expect: unknown bound on `I`: the only supported bound is `Iterator<T>`
 fn take_foo<I: Frobnicator<T>, T>(x: I) -> int {
     return 0
 }
@@ -24,12 +26,14 @@ fn main() {
 }
 
 //=== TEST CASE: bound_on_struct_decl_rejects_Generic ===
+//! expect: generic bounds are not allowed on a struct; bounds only apply to fn generic parameters
 struct Holder<I: Iterator<T>, T> { it: I }
 fn main() {
     let _ = 1
 }
 
 //=== TEST CASE: elem_type_mismatch_rejects_Generic ===
+//! expect: `VecIter<string>` satisfies `Iterator<string>`, but the bound requires `Iterator<int>`
 fn sum_ints<I: Iterator<int>>(it: I) -> int {
     let total = 0
     for x in it { total += x }
@@ -42,6 +46,7 @@ fn main() {
 }
 
 //=== TEST CASE: multi_value_iterator_cannot_be_wrapped_Generic ===
+//! expect: `MultiIter` does not satisfy `Iterator<..>`: its `next` returns `(bool, int, int)`; a bound requires exactly `(bool, E)`
 struct Multi { n: int }
 struct MultiIter { cur: int, n: int }
 fn iter(m: Multi) -> MultiIter { return MultiIter { cur: 0, n: m.n } }
@@ -62,6 +67,7 @@ fn main() {
 }
 
 //=== TEST CASE: bounded_fn_as_value_rejects_Generic ===
+//! expect: `sum_it` has `Iterator` bounds and cannot be used as a value; call it directly
 fn sum_it<I: Iterator<int>>(it: I) -> int {
     let total = 0
     for x in it { total += x }
@@ -74,6 +80,7 @@ fn main() {
 }
 
 //=== TEST CASE: unbounded_generic_not_iterable_Generic ===
+//! expect: `I` is a generic type with no `Iterator` bound, so it cannot be iterated; declare it `I: Iterator<T>`
 fn each<I>(it: I) {
     for x in it {
         let _ = x
