@@ -2,7 +2,7 @@
 
 This CPU-only probe isolates a conditional value return with a local binding
 (issue #43). The selected `Receipt` contains an optional wide `Landing`; the
-inputs differ and the flag alternates. The direct-return form is a control.
+inputs differ and the flag alternates. Both `if` and `match` forms are measured; the direct-return `if` is a control.
 Results escape into a 256-entry ring. Before and after the loop, the driver
 checks every field, both selections and a Rock value update that must preserve
 previous results and inputs. It does not model an application workload.
@@ -11,8 +11,18 @@ previous results and inputs. It does not model an application workload.
 python3 benchmarks/call_boundaries/measure.py BASELINE_ROCK CANDIDATE_ROCK > results.json
 ```
 
-The compilers must be executable files. The script compiles the same source
-with each, records SHA-256 hashes for source, driver, compilers and outputs,
+To compile on one machine and measure on another, prepare a new directory,
+transfer it and this runner to the measurement host, then run:
+
+```sh
+python3 benchmarks/call_boundaries/measure.py --prepare-only artifacts BASELINE_ROCK CANDIDATE_ROCK
+# Transfer artifacts/ and measure.py to the measurement host.
+python3 measure.py --artifacts artifacts > results.json
+```
+
+The bundle includes the fixture, driver, emitted Lua and build.json; the runner
+verifies their recorded hashes before measuring. The compilers must be executable files. The script compiles the same source
+with each, records SHA-256 hashes for source, driver, compilers and outputs (using compiler file names, not paths),
 and records the LuaJIT version. Use `--luajit PATH` to select LuaJIT and
 `--pairs N` to override the default six alternating pairs. Run on the same
 otherwise quiet machine; retain the JSON and machine details when reporting.

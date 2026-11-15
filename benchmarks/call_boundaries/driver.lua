@@ -1,9 +1,9 @@
 dofile(arg[1])
 local mode, metric = arg[2], arg[3]
-assert(mode == 'local' or mode == 'direct')
+assert(mode == 'local' or mode == 'match' or mode == 'direct')
 assert(metric == 'time' or metric == 'heap' or metric == 'trace')
 assert(jit.status(), 'JIT must be enabled')
-local select_row = mode == 'local' and select_local or select_direct
+local select_row = ({['local'] = select_local, match = select_match, direct = select_direct})[mode]
 local left, right = make(10, 101), make(30, 202)
 local function check(row, seed, sequence)
     assert(row.sequence == sequence and row.landing ~= nil)

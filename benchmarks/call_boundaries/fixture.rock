@@ -10,6 +10,10 @@ value Receipt { landing: Landing? = null, sequence: int }
     let row = if flag { left } else { right }
     return row
 }
+@nomangle fn select_match(flag: bool, left: Receipt, right: Receipt) -> Receipt {
+    let row = match flag { true => left, false => right }
+    return row
+}
 @nomangle fn select_direct(flag: bool, left: Receipt, right: Receipt) -> Receipt {
     return if flag { left } else { right }
 }
@@ -18,4 +22,4 @@ value Receipt { landing: Landing? = null, sequence: int }
     row.sequence = 999
     return row
 }
-fn main() { let _ = select_local(true, make(1.0, 1), make(2.0, 2)); let _ = select_direct(false, make(1.0, 1), make(2.0, 2)); let _ = changed(make(1.0, 1)) }
+fn main() { let _ = select_local(true, make(1.0, 1), make(2.0, 2)); let _ = select_match(true, make(1.0, 1), make(2.0, 2)); let _ = select_direct(false, make(1.0, 1), make(2.0, 2)); let _ = changed(make(1.0, 1)) }
