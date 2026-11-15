@@ -332,6 +332,7 @@ mod canvas;
 mod clipboard;
 #[cfg(target_os = "macos")]
 mod display_pacer;
+mod frame_timing;
 mod gl_state;
 mod glyph_raster;
 mod gpu_timer;
@@ -1361,7 +1362,11 @@ pub extern "C" fn stone_teardown() -> bool {
     image_texture::unload_all();
     gl_state::forget_samplers();
     mesh::clear_all();
-    GPU_TIMER.with(|timer| *timer.borrow_mut() = gpu_timer::GpuTimer::new());
+    GPU_TIMER.with(|timer| {
+        timer.borrow().record_pending();
+        *timer.borrow_mut() = gpu_timer::GpuTimer::new();
+    });
+    frame_timing::finish();
     release_native_window();
     INITIALIZED.store(false, Ordering::SeqCst);
     QUIT_REQUESTED.store(false, Ordering::SeqCst);
@@ -2346,6 +2351,7 @@ pub extern "C" fn stone_test_push_key_event(token: *const c_char, down: bool) ->
 #[no_mangle]
 pub extern "C" fn stone_swap_window(_window: *mut StoneWindow) {
     let completed = GL_SWAP_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
+    frame_timing::event("presentation_begin", completed);
     // RenderDoc frame auto-trigger; one branch when STONE_RENDERDOC is unset.
     crate::renderdoc::on_swap(completed);
     WINDOW.with(|w| {
@@ -2353,8 +2359,11 @@ pub extern "C" fn stone_swap_window(_window: *mut StoneWindow) {
             if !window.runtime_hidden && window.pending_show.is_none() {
                 canvas::present_headless_screen(&window.window);
             }
+            frame_timing::event("pace_begin", completed);
             pace_swap(&window.window);
+            frame_timing::event("swap_begin", completed);
             window.window.gl_swap_window();
+            frame_timing::event("swap_end", completed);
 
             // Re-check borders once after the first present: on X11
             // _NET_FRAME_EXTENTS can read 0 until the window is mapped
@@ -2716,6 +2725,7 @@ pub extern "C" fn stone_shader_error_count() -> u32 {
 /// GL context, or if timer queries are unsupported on this platform.
 #[no_mangle]
 pub extern "C" fn stone_gpu_timer_begin() {
+    frame_timing::event("frame_begin", stone_gl_swap_count() + 1);
     with_gl(|gl| GPU_TIMER.with(|t| t.borrow_mut().begin(gl)));
 }
 
@@ -2723,6 +2733,7 @@ pub extern "C" fn stone_gpu_timer_begin() {
 #[no_mangle]
 pub extern "C" fn stone_gpu_timer_end() {
     with_gl(|gl| GPU_TIMER.with(|t| t.borrow_mut().end(gl)));
+    frame_timing::event("frame_end", stone_gl_swap_count() + 1);
 }
 
 /// Non-blocking read of the oldest ready GPU timer result. Returns elapsed GPU
