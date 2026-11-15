@@ -164,16 +164,10 @@ fn assemble_overlay(
     )?;
     out.push_str(&code_slot_stage);
     let d_code_slot_stage = t_code_slot_stage.elapsed();
-    // Reset `static` cells whose initializer MEANING changed since the last full
-    // build (`type@init_hash` key differs from the baseline). A static is
-    // name-keyed and lazy, so redefining its fn above leaves the warmed cell +
-    // set done-flag intact -- the redefined fn would re-read the stale value.
-    // Re-run the initializer transition so the next reach re-inits with the
-    // edited initializer; an unchanged key is skipped (an unrelated body edit
-    // preserves the live cell). Only the changed fns' statics are considered --
-    // a static's key can't change without its enclosing fn being re-lowered into
-    // `changed_since_full`. The resets run in the publication step, so an
-    // overlay that fails to load leaves every static as it was.
+    // Carry each changed body's current static keys in every cumulative overlay.
+    // Only the runtime knows which earlier overlays loaded successfully, and its
+    // prepare helper preserves a cell whose applied initializer key is unchanged.
+    // These transitions run after fallible top-level initialization.
     let t_static_resets = Instant::now();
     let mut static_resets = String::new();
     let mut seen_static: FxHashSet<Ustr> = FxHashSet::default();
@@ -185,30 +179,21 @@ fn assemble_overlay(
             if !seen_static.insert(sc.cell) {
                 continue;
             }
-            let changed = cache
-                .static_key_baseline
-                .get(&sc.cell)
-                .is_none_or(|base| base.key != static_cell_key(sc));
-            if changed {
-                let (value_slot, done_slot) = skull_mir::global_storage::static_cell_storage_keys(
-                    ws,
-                    cache.scx.interner(),
-                    sc,
-                )
-                .map_err(CompilerError::new_no_location)?;
-                let _ = writeln!(
-                    static_resets,
-                    "__rock_static_prepare({value_slot:?}, {done_slot:?}, {:?})",
-                    static_cell_key(sc),
-                );
-            }
+            let (value_slot, done_slot) =
+                skull_mir::global_storage::static_cell_storage_keys(ws, cache.scx.interner(), sc)
+                    .map_err(CompilerError::new_no_location)?;
+            let _ = writeln!(
+                static_resets,
+                "__rock_static_prepare({value_slot:?}, {done_slot:?}, {:?})",
+                static_cell_key(sc),
+            );
         }
     }
-    // A static an edit removed is in the baseline but in no current chunk (a
+    // A static an edit removed is in the emitted inventory but no current chunk (a
     // generic's static can sit in several callers' chunks, so absence from the
     // edited body alone does not remove it). Its cells are dropped so they stop
     // holding their last value.
-    if !cache.static_key_baseline.is_empty() {
+    if !cache.static_cells_since_full.is_empty() {
         let current: FxHashSet<Ustr> = cache
             .chunks
             .values()
@@ -216,7 +201,7 @@ fn assemble_overlay(
             .flat_map(|chunk| chunk.statics.iter().map(|sc| sc.cell))
             .collect();
         let mut dropped: Vec<&StaticBaseline> = cache
-            .static_key_baseline
+            .static_cells_since_full
             .iter()
             .filter(|(cell, _)| !current.contains(*cell))
             .map(|(_, base)| base)
@@ -627,15 +612,9 @@ pub fn emit_overlay_with_span_edits(
     if concrete_stats_requested() {
         emit.concrete_stats = cache.concrete.snapshot_build_stats();
     }
-    // Advance the static baseline to the keys now in effect. A reset line fires on
-    // the reload that dofiles the overlay carrying it, so once THIS overlay resets a
-    // cell (or leaves it unchanged), a LATER overlay must not reset it again -- else
-    // an unrelated follow-up edit would re-run the initializer and wipe accumulated
-    // state. Bring each changed fn's cells up to their current key so the next
-    // overlay only resets cells whose key changes AGAIN. A cell this overlay
-    // dropped leaves the baseline, so a later overlay does not drop it again.
-    // A specialization first built by this overlay joins the baseline here.
-    cache.advance_static_baseline(ws)?;
+    // Emission records candidate storage, without acknowledging runtime loading.
+    // Keep removed identities so a failed removal can be retried by a later overlay.
+    cache.retain_static_cells(ws)?;
     let t_asm = t3.elapsed();
     // A body edit that mints a newly-colliding synthetic name is not safe to
     // deliver as an overlay.

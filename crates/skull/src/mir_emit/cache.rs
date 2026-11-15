@@ -118,14 +118,11 @@ pub struct SkullEmitCache {
     /// guard preserves the live value, and their value edits stay interface-tier).
     /// Reset to empty by `emit_full`.
     pub(super) changed_consts_since_full: FxHashSet<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)>,
-    /// Baseline `static` cells from the last full build, keyed by cell name.
-    /// `assemble_overlay` compares each changed fn's current cell key
-    /// (`type@init_hash`) against this and emits `__rock_static_prepare` for any
-    /// cell whose key changed, so an initializer edit re-inits on the next
-    /// reach; an unchanged key is left alone (an unrelated body edit preserves
-    /// the live value). A baseline cell no current chunk holds was removed and
-    /// is dropped. Rebuilt by `emit_full`.
-    pub(super) static_key_baseline: FxHashMap<Ustr, StaticBaseline>,
+    /// Storage identities of every static emitted since the full build. Keep
+    /// removed cells until the next full build so cumulative overlays can retry
+    /// their drops after a failed or skipped load. Runtime initializer keys
+    /// decide whether a prepare call resets a live cell.
+    pub(super) static_cells_since_full: FxHashMap<Ustr, StaticBaseline>,
     pub(super) roots: RootCache,
     pub(super) shader_registrations: ShaderRegistrations,
     pub(super) shader_view: crate::shader_artifact::ShaderArtifactView,
@@ -250,7 +247,7 @@ pub(super) struct BodyEditRollback {
     changed_since_full: FxHashSet<Instance>,
     changed_consts_since_full: FxHashSet<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)>,
     effect_snapshot: EffectSnapshot,
-    static_key_baseline: FxHashMap<Ustr, StaticBaseline>,
+    static_cells_since_full: FxHashMap<Ustr, StaticBaseline>,
     emitted: FxHashSet<Instance>,
     code_artifact: std::sync::Arc<skull_mir::code_identity::CodeArtifact>,
     lifecycle_plan: Option<std::sync::Arc<skull_mir::lifecycle::LifecyclePlan>>,
@@ -358,7 +355,7 @@ impl SkullEmitCache {
             changed_since_full: self.changed_since_full.clone(),
             changed_consts_since_full: self.changed_consts_since_full.clone(),
             effect_snapshot: self.effect_snapshot.clone(),
-            static_key_baseline: self.static_key_baseline.clone(),
+            static_cells_since_full: self.static_cells_since_full.clone(),
             emitted: self.emitted.clone(),
             code_artifact: self.code_artifact.clone(),
             lifecycle_plan: self.lifecycle_plan.clone(),
@@ -385,7 +382,7 @@ impl SkullEmitCache {
             changed_since_full,
             changed_consts_since_full,
             effect_snapshot,
-            static_key_baseline,
+            static_cells_since_full,
             emitted,
             code_artifact,
             lifecycle_plan,
@@ -420,7 +417,7 @@ impl SkullEmitCache {
         self.changed_since_full = changed_since_full;
         self.changed_consts_since_full = changed_consts_since_full;
         self.effect_snapshot = effect_snapshot;
-        self.static_key_baseline = static_key_baseline;
+        self.static_cells_since_full = static_cells_since_full;
         self.emitted = emitted;
         self.code_artifact = code_artifact;
         self.lifecycle_plan = lifecycle_plan;
@@ -704,36 +701,26 @@ impl SkullEmitCache {
             .any(|instance| shader_decls.contains(&instance.func))
     }
 
-    /// Take the specialized chunks an assembly BUILT into the cache, with their
-    /// reverse-dependency edges, so the next build reuses them and an edit to any
-    /// declaration they depend on -- their own included -- invalidates them.
-    /// Bring the static baseline up to the current chunks: a changed body's cells
-    /// take their current key, a cell not yet baselined joins, and a cell no chunk
-    /// holds any more leaves.
-    pub(super) fn advance_static_baseline(&mut self, ws: &Workspace) -> Result<(), CompilerError> {
-        let mut advanced: Vec<(Ustr, StaticBaseline)> = Vec::new();
-        let mut current: FxHashSet<Ustr> = FxHashSet::default();
-        for (body, chunk) in &self.chunks {
-            let Ok(chunk) = chunk else { continue };
-            let changed = self.changed_since_full.contains(body);
+    /// Remember candidate storage identities, independently of runtime acceptance.
+    pub(super) fn retain_static_cells(&mut self, ws: &Workspace) -> Result<(), CompilerError> {
+        for chunk in self.chunks.values().flatten() {
             for sc in &chunk.statics {
-                current.insert(sc.cell);
-                if !changed && self.static_key_baseline.contains_key(&sc.cell) {
-                    continue;
+                if let std::collections::hash_map::Entry::Vacant(entry) =
+                    self.static_cells_since_full.entry(sc.cell)
+                {
+                    entry.insert(
+                        StaticBaseline::of(ws, self.scx.interner(), sc)
+                            .map_err(CompilerError::new_no_location)?,
+                    );
                 }
-                advanced.push((
-                    sc.cell,
-                    StaticBaseline::of(ws, self.scx.interner(), sc)
-                        .map_err(CompilerError::new_no_location)?,
-                ));
             }
         }
-        self.static_key_baseline.extend(advanced);
-        self.static_key_baseline
-            .retain(|cell, _| current.contains(cell));
         Ok(())
     }
 
+    /// Take the specialized chunks an assembly BUILT into the cache, with their
+    /// reverse-dependency edges, so the next build reuses them and an edit to any
+    /// declaration they depend on -- their own included -- invalidates them.
     pub(super) fn absorb_spec_chunks(&mut self, built: Vec<(Instance, Chunk)>) -> usize {
         let mut dependency_edges = 0;
         for (body, chunk) in built {

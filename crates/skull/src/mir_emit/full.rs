@@ -961,7 +961,7 @@ fn index_dependents(
 impl SkullEmitCache {
     /// Keep what a retained build's later incremental and overlay builds start
     /// from: the emitted set, the artifact identity, the absorbed
-    /// specializations and the static baseline.
+    /// specializations and the static storage inventory.
     fn retain_full_build(
         &mut self,
         ws: &Workspace,
@@ -988,17 +988,13 @@ impl SkullEmitCache {
         self.unit_comptime_reads = unit_reads;
         dependency_edges += self.absorb_spec_chunks(built_specs);
         self.refresh_effect_snapshot(ws);
-        // Baseline every `static` cell's reload key so the overlay can detect an
-        // initializer edit (changed key) vs an unrelated body edit (unchanged key),
-        // and its storage keys so the overlay can drop a static an edit removed.
-        // After the specializations are absorbed: a generic's static lives in its
-        // specialization's chunk.
-        self.advance_static_baseline(ws)?;
+        // Include specialized statics after their chunks have been absorbed.
+        self.retain_static_cells(ws)?;
         emit.compile_counts.chunks = self.chunks.len();
         emit.compile_counts.dependency_edges = Some(dependency_edges);
         emit.release_stats.retained_dependency_edges =
             self.dependents.values().map(|keys| keys.len()).sum();
-        emit.release_stats.retained_static_keys = self.static_key_baseline.len();
+        emit.release_stats.retained_static_keys = self.static_cells_since_full.len();
         Ok(())
     }
 }
@@ -1194,7 +1190,7 @@ pub(super) fn emit_full_build(
         dependents,
         effect_snapshot: FxHashMap::default(),
         changed_consts_since_full: FxHashSet::default(),
-        static_key_baseline: FxHashMap::default(),
+        static_cells_since_full: FxHashMap::default(),
         roots: RootCache {
             project_root: project_root.map(str::to_string),
             interface_roots,

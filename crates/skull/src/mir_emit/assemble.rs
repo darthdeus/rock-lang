@@ -1016,7 +1016,7 @@ pub(super) fn assemble(
 ) -> Result<(MirEmit, FxHashSet<Instance>, UnitComptimeReads), CompilerError> {
     let mut release_stats = CompileReleaseStats {
         retained_dependency_edges: cache.dependents.values().map(|keys| keys.len()).sum(),
-        retained_static_keys: cache.static_key_baseline.len(),
+        retained_static_keys: cache.static_cells_since_full.len(),
         ..CompileReleaseStats::default()
     };
     let mut compile_counts = CompileCounts {

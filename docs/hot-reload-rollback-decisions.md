@@ -57,15 +57,15 @@ publication, and their failures retain the published candidate.
 - The strengthened retained-caller regression failed before the fix. Its
   CodeRef still ran old code, while its retained direct caller reached the new
   function and raised on an unavailable candidate constant.
-- `cargo test -p rock-cli --lib failed_overlay -- --nocapture` passes two
+- `cargo test -p rock-cli --lib failed_overlay -- --nocapture` passes four
   tests. They cover retained callers and CodeRefs, integer and false constants,
   no-box constant leaves, removal of a newly emitted generic specialization,
-  and a successful cumulative retry after failure.
+  a successful cumulative retry after failure, and static reset/removal retries.
 - Disabling the wrapper fails both tests. Omitting constant targets from the
   journal fails the no-CodeRef test. Both mutations were restored, and the
   restored focused tests pass.
-- `cargo test -p skull` passed 109 unit and 1296 integration tests, with one
-  existing ignored test. `cargo test -p rock-cli` passed 429 library, three
+- `cargo test -p skull` passed 109 unit and 1298 integration tests, with one
+  existing ignored test. `cargo test -p rock-cli` passed 431 library, three
   binary, 126 integration and seven Stone-launch tests, with four ignored
   library tests. The child-lifetime subprocess test also passed.
 - On the repaired no-CodeRef fixture, the emitted overlay grows from 688 to
@@ -76,37 +76,66 @@ publication, and their failures retain the published candidate.
   batch averages were 0.153 and 0.716 microseconds. This small fixture measures
   reload execution, with no steady-state performance claim.
 
-## Reproduced follow-up and open questions
+## Static reset retries
 
-A separate static-retry defect remains. Start with this program and warm its
-static by calling `observe()` after loading the full artifact.
+The previous emitter treated a generated overlay as accepted. It advanced the
+compiler's static initializer baseline immediately, so a later initializer
+failure could prevent the reset from running while making the next cumulative
+overlay omit that reset. The permanent
+`failed_overlay_static_initializer_retry_preserves_successive_live_state`
+regression reproduced this before the fix. Its repaired overlay kept counting
+from the old initializer, producing `5` where `101` was expected.
 
-```rock
-fn value() -> int {
-    static cell = 1
-    cell
-}
-const LATE: int = 0
-fn explode() -> int { error("late overlay failure") return 0 }
-@nomangle fn observe() { print(value()) }
-fn main() { observe() print(LATE) }
-```
+Runtime `__rock_static_init_keys` now supplies the applied initializer truth.
+Every cumulative overlay carries preparation for current statics in its changed
+bodies. `__rock_static_prepare` compares each requested key to the runtime key
+and clears the warmed value only when they differ. Repeated successful loads
+therefore preserve accumulated state, while a repaired load retries a
+previously unexecuted reset. Reverting to an earlier initializer is also an
+ordinary runtime key transition.
 
-Emit an overlay changing `static cell = 1` to `static cell = 2` and `LATE`'s
-initializer to `explode()`. Load it under a protected call and observe its
-failure. Repair only `LATE` back to `0`, then emit and load the cumulative
-overlay using the same compiler cache. `observe()` still prints `1`. A fresh
-build of the repaired program prints `2`.
+The compiler retains storage identities of emitted statics until the next full
+build. Its `static_cells_since_full` inventory records candidate storage and
+supplies drop requests for identities absent from current chunks. It retains
+removed entries because a removal overlay can also fail or be skipped. Dropping
+absent storage is idempotent. The permanent
+`failed_overlay_static_removal_retry_drops_cells_and_can_reintroduce_them`
+regression reproduced the previous omission of a retried drop, and now checks
+removal, reintroduction and repeated successful application.
 
-A temporary `static_retry_discrepancy_probe` in the existing runtime-test module
-ran through `cargo test -p rock-cli --lib static_retry_discrepancy_probe --
---nocapture`. Its one discrepancy assertion passed and its temporary source was
-removed. It also checked that the failed overlay contains
-`__rock_static_prepare`, while the repaired overlay omits it. The compiler's
-`advance_static_baseline` records the edited initializer at emission time,
-before the failed load reaches its reset. The repaired overlay then treats the
-initializer as already current. This change leaves that reset-baseline issue
-for a separate repair.
+The tests also count generated transitions. In the one-static initializer
+fixture, each of the failed, repaired, unrelated and reverted cumulative
+overlays carries one prepare and zero drops. Previously the repaired and
+unrelated overlays omitted that prepare. In the removal fixture, the failed
+and repaired overlays each carry zero prepares and one drop. Reintroduction
+carries one prepare and zero drops. Repeated application of those requests is
+covered by the runtime assertions. These are statement counts for the fixtures,
+with no speed claim.
+
+Both tests failed before the fix and pass afterward. The initializer test also
+checks that failed loading preserves the old warmed counter, repaired loading
+resets it once, and subsequent reloads and unrelated edits preserve live state.
+The existing successful static reload regressions remain part of the crate
+suite.
+
+Static storage remains one value/done pair keyed by the owning logical callable,
+binding name and declaration ordinal. Its identity is independent of the
+initializer and type. Prepare requests use the current type and initializer
+hash, so a type transition clears the previous value in that same pair. Existing
+CodeArtifact compatibility and mutable-global layout gates still decide
+whether an edit may use the overlay path. The shared `StaticBaseline` record is
+also consumed by JS, which still uses its initializer-key field. Lua reuses its
+storage-slot fields and makes no acceptance decision from that recorded key.
+
+No host acknowledgment API is needed for these static transitions. Their
+acceptance state resides in the runtime table updated by the publication tail.
+The retained compiler inventory and emitted prepare/drop statements can grow
+with statics encountered between full builds. Preparation adds work during
+reload execution. Static reads and calls keep their existing emitted code.
+The publication-tail assumptions and external-effect limits above still apply.
+This repair concerns Lua overlays.
+
+## Open questions
 
 Stronger isolation during initialization and rollback of external effects
 would require an explicit host and language contract.

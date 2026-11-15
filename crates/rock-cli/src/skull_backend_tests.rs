@@ -1378,13 +1378,9 @@ mod overlay_runtime_tests {
         );
     }
 
-    /// Accumulation across TWO overlays (the analog of the const "edit A then B"
-    /// oracle, point 2 in this module's doc). A reset line fires only on the reload
-    /// that dofiles the overlay carrying it, so it must appear ONLY in the overlay
-    /// of the reload where the init key changed -- NOT in later overlays, or an
-    /// unrelated follow-up edit would re-reset and wipe accumulated static state.
-    /// Requires advancing the per-cell baseline as overlays apply; a baseline only
-    /// rebuilt on full builds would re-emit the reset here and lose the accumulation.
+    /// Cumulative overlays repeat static preparation. The runtime compares the
+    /// applied initializer key, so a successful initializer edit resets once and
+    /// the unrelated follow-up preserves the accumulated counter.
     #[test]
     fn static_init_edit_then_unrelated_edit_preserves_reinit_overlay() {
         // `probe` accumulates into a static counter each call; DO_RESET (unused
@@ -1417,10 +1413,10 @@ mod overlay_runtime_tests {
 
     /// The §A narrowing on the overlay path: an UNRELATED edit in a fn that owns a
     /// static must NOT reset the static -- the overlay reconsiders the fn's cells
-    /// (it's in `changed_since_full`) but the key is unchanged, so the warm value
-    /// is preserved. Mirror of `static_hot_reload.rs::static_preserved_when_unrelated_body_edited`
-    /// but through the overlay. Without the key check (reset every changed fn's
-    /// statics) this would wrongly re-init the static and diverge.
+    /// (it's in `changed_since_full`) but the runtime key is unchanged, so the warm
+    /// value is preserved. Mirror of
+    /// `static_hot_reload.rs::static_preserved_when_unrelated_body_edited` through
+    /// the overlay. An unconditional runtime reset would lose the warmed value.
     #[test]
     fn static_preserved_under_unrelated_overlay_edit() {
         // `DO_SET` distinguishes PRESERVE (n still 99) from RESET (n re-inits 42).
@@ -1863,6 +1859,109 @@ main()
             &[&driver],
             "20\nfalse\n10 11\n23\ntrue\n12 11",
             "failed overlay rollback and repaired retry without CodeRefs",
+        );
+    }
+
+    const STATIC_RETRY_FIXTURE: &str = "@nomangle fn probe() -> int { static cell = 1\n cell = cell + 1\n cell }\n\
+                  const LATE: int = 0\n\
+                  fn explode() -> int { error(\"late overlay failure\") return 0 }\n\
+                  fn main() { print(probe()) print(LATE) }\n";
+
+    fn static_transition_counts(overlay: &str) -> (usize, usize) {
+        let prepares = overlay
+            .lines()
+            .filter(|line| line.starts_with("__rock_static_prepare("))
+            .count();
+        let drops = overlay
+            .lines()
+            .filter(|line| line.starts_with("__rock_static_drop("))
+            .count();
+        (prepares, drops)
+    }
+
+    #[test]
+    fn failed_overlay_static_initializer_retry_preserves_successive_live_state() {
+        let v0 = STATIC_RETRY_FIXTURE;
+        let changed = v0.replace("static cell = 1", "static cell = 100");
+        let failing = changed.replace("const LATE: int = 0", "const LATE: int = explode()");
+        let mut live = Live::boot(v0);
+        let failed = live.overlay(&failing);
+        let repaired = live.overlay(&changed);
+        let unrelated =
+            live.overlay(&changed.replace("cell = cell + 1", "let unused = 0\n cell = cell + 1"));
+        let reverted = live.overlay(v0);
+        for overlay in [&failed, &repaired, &unrelated, &reverted] {
+            assert_eq!(static_transition_counts(overlay), (1, 0));
+        }
+        let driver = format!(
+            r#"
+print(probe())
+print(probe())
+local ok, err = pcall(function()
+{failed}
+end)
+assert(not ok and tostring(err):find("late overlay failure", 1, true), tostring(err))
+print(probe())
+{repaired}
+print(probe())
+print(probe())
+{repaired}
+print(probe())
+{unrelated}
+print(probe())
+{reverted}
+print(probe())
+"#
+        );
+        assert_run(
+            &live.baseline,
+            &[&driver],
+            "2\n3\n4\n101\n102\n103\n104\n2",
+            "a failed initializer edit must retry its reset and preserve later accumulated state",
+        );
+    }
+
+    #[test]
+    fn failed_overlay_static_removal_retry_drops_cells_and_can_reintroduce_them() {
+        let v0 = STATIC_RETRY_FIXTURE;
+        let removed = v0.replace("static cell = 1\n cell = cell + 1\n cell", "9");
+        let failing = removed.replace("const LATE: int = 0", "const LATE: int = explode()");
+        let mut live = Live::boot(v0);
+        let failed = live.overlay(&failing);
+        let repaired = live.overlay(&removed);
+        let reintroduced = live.overlay(v0);
+        assert_eq!(static_transition_counts(&failed), (0, 1));
+        assert_eq!(static_transition_counts(&repaired), (0, 1));
+        assert_eq!(static_transition_counts(&reintroduced), (1, 0));
+        let driver = format!(
+            r#"
+local function static_cells()
+  local count = 0
+  for key in pairs(__rock_globals) do
+    if type(key) == "string" and key:find("::cell#", 1, true) then count = count + 1 end
+  end
+  return count
+end
+assert(probe() == 2 and static_cells() == 2, "the baseline static must be warm")
+local ok, err = pcall(function()
+{failed}
+end)
+assert(not ok and tostring(err):find("late overlay failure", 1, true), tostring(err))
+assert(probe() == 3 and static_cells() == 2, "failed removal changed the warmed static")
+{repaired}
+assert(probe() == 9 and static_cells() == 0, "retry failed to drop the removed static")
+{reintroduced}
+assert(probe() == 2 and probe() == 3, "reintroduced static did not initialize once")
+{reintroduced}
+assert(probe() == 4, "reloading the reintroduced static reset live state")
+print("STATIC_REMOVAL_RETRY")
+"#
+        );
+        assert_run(
+            &live.baseline,
+            &[&driver],
+            "STATIC_REMOVAL_RETRY",
+            "static removal must survive failed emission and reintroduction",
         );
     }
 
