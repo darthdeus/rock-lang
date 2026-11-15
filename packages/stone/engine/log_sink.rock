@@ -38,3 +38,28 @@ const __rock_log_sink_installed: bool = __rock_install_log_sink()
 @shutdown fn __log_suppression_summary_at_exit() {
     log_suppression_summary()
 }
+
+// A bounded run (a sim, or a frame- or time-capped run) fails on error records
+// once it completes, as `rock test` fails a test. Production code logs and
+// continues; the check keeps those errors from passing a run. The wrapper keeps
+// the installed sink, so records still print, and `assert_error_logs` removes
+// the records it verifies. Native records that bypass the Rock sink are not
+// observed.
+inline(lua) fn collect_logged_errors() = """
+    local records = {}
+    _G.__rock_logged_errors = records
+    local sink = _G.__rock_log_sink
+    _G.__rock_log_sink = function(level, category, msg, wall_clock)
+        if level == 0 then
+            records[#records + 1] = category and #category > 0 and ("[" .. category .. "] " .. msg) or msg
+        end
+        sink(level, category, msg, wall_clock)
+    end
+"""
+
+inline(lua) fn logged_error_count() -> int = """
+    local records = _G.__rock_logged_errors
+    return records and #records or 0
+"""
+
+inline(lua) fn logged_error_record(index: int) -> string = "return _G.__rock_logged_errors[index + 1]"

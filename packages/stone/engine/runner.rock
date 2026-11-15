@@ -439,10 +439,15 @@ fn runner_bounded_run() -> bool {
     return os_getenv("PERF_MODE") == "1" || sim_mode_active() || get_env_int("FRAME_COUNT", -1) > 0
 }
 
-fn fail_bounded_stone_run() {
-    if get_env_int("FRAME_COUNT", -1) > 0 ||
+// A bounded run that reports failure through its exit status or sim verdict.
+fn runner_checked_run() -> bool {
+    return get_env_int("FRAME_COUNT", -1) > 0 ||
         get_env_float("PERF_SECONDS", -1.0) > 0.0 ||
-        sim_mode_active() {
+        sim_mode_active()
+}
+
+fn fail_bounded_stone_run() {
+    if runner_checked_run() {
         os_exit(3)
     }
 }
@@ -467,6 +472,7 @@ fn env_flag_override(name: string, fallback: bool) -> bool {
 """
 
 pub @intrinsic fn stone_run_game(config: GameConfig) {
+    if runner_checked_run() { collect_logged_errors() }
     let _ = font_coverage_oversampling_require(
         config.font_coverage_oversampling)
     setup_stone()
@@ -938,6 +944,15 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
         if bounded {
             os_exit(3)
         }
+    }
+
+    // A sim reports these in its verdict (`runner_sim_advance`).
+    let logged_errors = logged_error_count()
+    if bounded && logged_errors > 0 {
+        let records = ""
+        for i in 0..logged_errors { records = records + "\n  " + logged_error_record(i) }
+        log_error("RUN", "{logged_errors} error record(s) logged during the bounded run:{records}")
+        os_exit(3)
     }
 }
 

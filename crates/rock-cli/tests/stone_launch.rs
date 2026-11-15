@@ -459,7 +459,9 @@ fn bounded_commands_run_an_external_stone_project() {
         r#"
 @init
 fn probe_init() {
-    if os_getenv("BOUNDED_FAIL") == "1" { error("bounded runtime sentinel") }
+    if os_getenv("BOUNDED_FAIL") == "throw" { error("bounded runtime sentinel") }
+    // Production code logs and continues; the bounded run still fails.
+    if os_getenv("BOUNDED_FAIL") == "log" { log_error("PROBE", "bounded runtime sentinel") }
 }
 fn main() {
     stone_run_game(GameConfig { title: "bounded-probe", width: 64, height: 64,
@@ -469,7 +471,8 @@ fn main() {
     )
     .unwrap();
     let screenshot = fixture.path().join("frame.png");
-    let run = |command: &str, fail: bool| {
+    let run = |command: &str, failure: Option<&str>| {
+        let fail = failure.is_some();
         let output = fixture.path().join(format!("{command}-{fail}"));
         let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_rock"));
         cmd.args([command, game.to_str().unwrap(), "--frames", "3", "--output"])
@@ -481,7 +484,7 @@ fn main() {
             )
             .env("STONE_SCREENSHOT_PATH", &screenshot)
             .env("ROCK_FRAME_TIMEOUT_SECS", "120")
-            .env("BOUNDED_FAIL", if fail { "1" } else { "0" })
+            .env("BOUNDED_FAIL", failure.unwrap_or("none"))
             .env_remove("STONE_HOT_RELOAD")
             .env_remove("FRAME_COUNT");
         if command == "perf" {
@@ -509,6 +512,12 @@ fn main() {
                 diagnostic.contains("bounded runtime sentinel"),
                 "{diagnostic}"
             );
+            // Reported at the end: the run continued past the logged error.
+            assert_eq!(
+                diagnostic.contains("error record(s) logged during the bounded run"),
+                failure == Some("log"),
+                "{diagnostic}"
+            );
         } else if command == "perf" {
             let summary: serde_json::Value = serde_json::from_slice(&result.stdout)
                 .unwrap_or_else(|error| panic!("{error}: {diagnostic}"));
@@ -517,14 +526,14 @@ fn main() {
             assert!(output.join("perf-summary.json").is_file());
         }
     };
-    run("frame", false);
+    run("frame", None);
     assert_eq!(
         &std::fs::read(&screenshot).unwrap()[..8],
         b"\x89PNG\r\n\x1a\n"
     );
-    run("perf", false);
-    run("frame", true);
-    run("perf", true);
+    run("perf", None);
+    run("frame", Some("log"));
+    run("perf", Some("throw"));
 }
 
 #[cfg(unix)]
@@ -698,7 +707,10 @@ fn sim_commands_run_and_report_an_external_stone_project() {
         r#"
 @sim
 co fn portable_sim() -> Coroutine<Wait> {
-    sim_expect(os_getenv("SIM_PROBE_FAIL") != "1", "portable sim sentinel")
+    assert_error_logs(["[PROBE] intentional"], () => { log_error("PROBE", "intentional") })
+    // Production code logs and continues; the sim still fails.
+    if os_getenv("SIM_PROBE_FAIL") == "1" { log_error("PROBE", "recovered failure") }
+    sim_expect(true, "portable sim sentinel")
     stop_sim()
 }
 "#,
@@ -757,6 +769,11 @@ co fn portable_sim() -> Coroutine<Wait> {
         let (run, text) = invoke(&["sim", project, "portable_sim", "--jobs", "1"], fail);
         assert_eq!(run.status.success(), !fail, "{text}");
         assert!(text.contains("portable sim sentinel"), "{text}");
+        assert_eq!(
+            text.contains("logged error: [PROBE] recovered failure"),
+            fail,
+            "{text}"
+        );
         let history = fixture.path().join(if fail { "failed" } else { "passed" });
         let run_dir = std::fs::read_dir(history)
             .unwrap()
