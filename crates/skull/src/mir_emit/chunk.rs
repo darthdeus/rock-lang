@@ -253,7 +253,7 @@ impl DefinitionScopes {
 
 /// The global a top-level definition assigns, in either emitted shape.
 /// Definition splitting consumes this inventory.
-fn definition_global(line: &str) -> Option<&str> {
+pub(super) fn definition_global(line: &str) -> Option<&str> {
     let body = skull_codegen_lua::emitted_body_name(line)?;
     if line.starts_with("function ") {
         return Some(body);

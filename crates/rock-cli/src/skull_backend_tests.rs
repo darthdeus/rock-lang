@@ -1748,23 +1748,38 @@ mod overlay_runtime_tests {
     /// Slot publication belongs to the OUTER successful overlay boundary. A
     /// later top-level initializer failure must leave an already-stored value
     /// on v0, even though the overlay has staged the edited callback body.
+    /// The mutually recursive edge keeps the direct call as a global lookup.
     #[test]
-    fn failed_overlay_after_late_top_level_work_keeps_retained_code_ref_old() {
+    fn failed_overlay_after_late_top_level_work_keeps_direct_calls_and_code_refs_old() {
         let v0 = format!(
             "const LATE: int = 0\nfn explode() -> int {{ error(\"late overlay failure\") return 0 }}\n{}",
-            sim_fixture(1).replace("TICK_OUT = 1", "TICK_OUT = 1 + LATE")
+            format!(
+                "{}\n@nomangle fn direct_frame() {{ tick() }}\n",
+                sim_fixture(1)
+            )
+            .replace(
+                "TICK_OUT = 1",
+                "TICK_OUT = 1 + LATE\nif TICK_OUT < 0 { direct_frame() }"
+            )
         );
         let v1 = format!(
             "const LATE: int = explode()\nfn explode() -> int {{ error(\"late overlay failure\") return 0 }}\n{}",
-            sim_fixture(2).replace("TICK_OUT = 2", "TICK_OUT = 2 + LATE")
+            format!(
+                "{}\n@nomangle fn direct_frame() {{ tick() }}\n",
+                sim_fixture(2)
+            )
+            .replace(
+                "TICK_OUT = 2",
+                "TICK_OUT = 2 + LATE\nif TICK_OUT < 0 { direct_frame() }"
+            )
         );
         let mut live = Live::boot(&v0);
 
         let overlay = live.overlay(&v1);
-        let late_line = overlay
-            .lines()
-            .position(|line| line.trim_start().starts_with("LATE ="))
-            .expect("v1 overlay must execute the changed top-level initializer");
+        assert!(
+            overlay.lines().any(|line| line.starts_with("LATE =")),
+            "v1 overlay must execute the changed top-level initializer"
+        );
         assert!(
             overlay.contains("__rock_code_slot_stage")
                 && overlay.contains("__rock_code_slot_publish"),
@@ -1772,23 +1787,82 @@ mod overlay_runtime_tests {
             overlay
         );
 
-        let mut failing = String::new();
-        for (index, line) in overlay.lines().enumerate() {
-            if index == late_line {
-                failing.push_str("error('late overlay failure')\n");
-            }
-            failing.push_str(line);
-            failing.push('\n');
-        }
         let script = format!(
-            "{}\n{}\nlocal ok, err = xpcall(function()\n{}end, debug.traceback)\nif not ok then __rock_code_slot_abort() end\nprint(ok)\nprint(_G.__rock_code_slot_pending == nil)\nrun_frame()\nprint(TICK_OUT)",
-            live.baseline, SYS_STUB, failing
+            "{}\n{}\nlocal retained_direct = direct_frame\nlocal ok, err = xpcall(function()\n{}end, debug.traceback)\nassert(not ok and tostring(err):find(\"late overlay failure\", 1, true), tostring(err))\nif not ok then __rock_code_slot_abort() end\nprint(ok)\nprint(_G.__rock_code_slot_pending == nil)\nrun_frame()\nprint(TICK_OUT)\nretained_direct()\nprint(TICK_OUT)\nassert(direct_frame == retained_direct, \"direct caller identity changed\")",
+            live.baseline, SYS_STUB, overlay
         );
 
         assert_stdout(
             exec_lua(&script),
-            "false\ntrue\n1",
-            "a failed overlay must report failure and keep the retained v0 CodeRef",
+            "false\ntrue\n1\n1",
+            "a failed overlay must keep the retained v0 CodeRef and direct caller",
+        );
+    }
+
+    /// A failed initializer restores compiler-owned constants and newly emitted
+    /// specializations even when the program has no escaping function values.
+    #[test]
+    fn failed_overlay_without_code_refs_restores_globals_and_can_retry() {
+        let v0 = r#"
+nobox value Pair { x: int, y: int }
+global EFFECTS: int = 0
+@nomangle fn effects() -> int { EFFECTS }
+fn identity<T>(value: T) -> T { value }
+fn number() -> int { 10 }
+fn boolean() -> bool { false }
+fn explode() -> int { EFFECTS = EFFECTS + 1 error("late overlay failure") return 0 }
+const EARLY: int = number()
+const FLAG: bool = boolean()
+const PAIR: Pair = Pair { x: number(), y: number() + 1 }
+const LATE: int = number()
+@nomangle fn direct() -> int { EARLY + LATE }
+fn main() { print(direct()) print(FLAG) print("{PAIR.x} {PAIR.y}") }
+"#;
+        let v1 = v0
+            .replace(
+                "const EARLY: int = number()",
+                "const EARLY: int = number() + 1",
+            )
+            .replace(
+                "const FLAG: bool = boolean()",
+                "const FLAG: bool = !boolean()",
+            )
+            .replace("x: number(),", "x: number() + 2,")
+            .replace("const LATE: int = number()", "const LATE: int = explode()")
+            .replace("{ EARLY + LATE }", "{ identity(EARLY + LATE) }");
+        let mut live = Live::boot(v0);
+        let failed = live.overlay(&v1);
+        assert!(!live.baseline.contains("__rock_code_slot_begin()"));
+        assert!(!failed.contains("__rock_code_slot_stage("));
+        assert!(!live.baseline.contains("function identity_T_spec_p_int("));
+        assert!(
+            failed.contains("function identity_T_spec_p_int("),
+            "{failed}"
+        );
+        let repaired = live.overlay(&v1.replace("= explode()", "= number() + 2"));
+        let driver = format!(
+            r#"
+local retained = direct
+local early, flag, late = EARLY, FLAG, LATE
+local ok, err = pcall(function()
+{failed}
+end)
+assert(not ok and tostring(err):find("late overlay failure", 1, true), tostring(err))
+assert(EARLY == early and FLAG == flag and LATE == late, "constants changed after failure")
+assert(effects() == 1, "initializer side effect was unexpectedly rolled back")
+assert(identity_T_spec_p_int == nil, "a failed overlay leaked a new specialization")
+assert(direct == retained and retained() == 20, "direct caller changed after failure")
+main()
+{repaired}
+assert(direct() == 23 and retained() == 23, "retry did not publish current callees")
+main()
+"#
+        );
+        assert_run(
+            &live.baseline,
+            &[&driver],
+            "20\nfalse\n10 11\n23\ntrue\n12 11",
+            "failed overlay rollback and repaired retry without CodeRefs",
         );
     }
 

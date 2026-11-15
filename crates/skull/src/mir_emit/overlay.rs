@@ -63,6 +63,34 @@ fn overlay_callee_bindings(
     (bindings, bodies)
 }
 
+/// Save exactly the compiler globals this overlay can replace. Definitions keep
+/// their ordinary global environment, so this adds work only while reloading.
+fn transactional_overlay(lua: &str, mut globals: BTreeSet<String>) -> String {
+    globals.extend(lua.lines().filter_map(definition_global).map(str::to_owned));
+    let mut out = String::from("do\nlocal __rock_overlay_old = {}\n");
+    // Partition the name constants across protos, as with definition scopes.
+    let names: Vec<_> = globals.into_iter().collect();
+    for names in names.chunks(4_096) {
+        out.push_str("do\n(function()\n");
+        for name in names {
+            let name = skull_codegen_lua::lua_string(name);
+            let _ = writeln!(out, "__rock_overlay_old[{name}] = {{ rawget(_G, {name}) }}");
+        }
+        out.push_str("end)()\nend\n");
+    }
+    out.push_str("local __rock_overlay_ok, __rock_overlay_error = xpcall(function()\n");
+    out.push_str(lua);
+    out.push_str(
+        "end, debug.traceback)\n\
+         if not __rock_overlay_ok then\n\
+         if _G.__rock_code_slot_abort then __rock_code_slot_abort() end\n\
+         for name, old in pairs(__rock_overlay_old) do rawset(_G, name, old[1]) end\n\
+         error(__rock_overlay_error, 0)\n\
+         end\nend\n",
+    );
+    out
+}
+
 /// Assemble the incremental OVERLAY (`incremental.lua`): the cached chunks of the
 /// functions changed since the last full build, then slot publication for their
 /// current CodeRefs. Registries retain those logical values across the overlay.
@@ -92,6 +120,7 @@ fn assemble_overlay(
     let d_clone_artifact = t_clone_artifact.elapsed();
     out.push_str("do\nlocal __rock_state_cell = __rock_globals\n");
     let mut unit_reads = UnitComptimeReads::default();
+    let mut overwritten_globals = BTreeSet::new();
 
     // Redefine the changed functions, deterministic order for a stable diff.
     let t_definitions = Instant::now();
@@ -111,7 +140,14 @@ fn assemble_overlay(
     let runtime_refs = definitions.runtime_refs();
     out.push_str(&definitions.definitions_lua());
     let (mut bindings, rebound_bodies) = overlay_callee_bindings(ws, cache, &order);
+    overwritten_globals.extend(bindings.iter().map(|binding| binding.name.clone()));
     out.push_str(&callee_binding_pass_lua(&mut bindings));
+    overwritten_globals.extend(
+        runtime_refs
+            .iter()
+            .filter(|name| crate::is_enum_names_global(name))
+            .map(ToString::to_string),
+    );
     out.push_str(&crate::enum_names_defs(ws, &runtime_refs));
     let mut published_bodies = order.clone();
     published_bodies.extend(rebound_bodies);
@@ -264,6 +300,11 @@ fn assemble_overlay(
             .iter()
             .filter(|a| !cache.cg.is_unread_constant(a.name))
         {
+            overwritten_globals.extend(
+                global_init_target(ws, &cache.scx, &cache.cg, &ws.module(a.mid).globals[a.gid])?
+                    .split(", ")
+                    .map(str::to_owned),
+            );
             let line = {
                 let unit =
                     emit_global_unit(ws, &cache.scx, &cache.cg, &cache.concrete, a.mid, a.gid);
@@ -302,6 +343,7 @@ fn assemble_overlay(
             });
         }
         out = definitions.finish();
+        overwritten_globals.extend(unit_refs.iter().map(ToString::to_string));
         out.push_str(&crate::enum_names_defs(ws, &unit_refs));
 
         out.push_str(&sort_global_init_lines(inits, &FxHashMap::default())?.concat());
@@ -396,6 +438,7 @@ fn assemble_overlay(
         &crate::value_ctor_defs(&cache.value_ctors, &ctor_calls.into_iter().collect()),
     );
     out.push_str("end\n");
+    out = transactional_overlay(&out, overwritten_globals);
     if cache.cg.line_directives() {
         out = skull_codegen_lua::resolve_line_directive_resets(&out, "=[overlay]");
     }
