@@ -673,6 +673,58 @@ struct ArtifactIndex {
     root_decls: BTreeSet<DeclKey>,
 }
 
+#[derive(Default)]
+struct ArtifactSiteRows<'g> {
+    site_count: usize,
+    outgoing: FxHashMap<Site, Instance>,
+    callees: Vec<(&'g Instance, bool)>,
+}
+
+impl<'g> ArtifactSiteRows<'g> {
+    fn new(sites: &'g BTreeMap<Site, instance_graph::SiteRecord>) -> Self {
+        let mut outgoing = FxHashMap::default();
+        let mut callees: FxHashMap<&Instance, bool> = FxHashMap::default();
+        for (site, record) in sites {
+            let SiteOutcome::Resolved(callee) = &record.outcome else {
+                continue;
+            };
+            outgoing.insert(site.clone(), callee.clone());
+            *callees.entry(callee).or_insert(false) |= site.op == skull_mir::site::SiteOp::FnValue;
+        }
+        Self {
+            site_count: sites.len(),
+            outgoing,
+            callees: callees.into_iter().collect(),
+        }
+    }
+}
+
+impl ArtifactIndex {
+    // The owner's old rows must be retracted before installing its replacement.
+    fn install_site_rows(&mut self, owner: &Instance, rows: ArtifactSiteRows<'_>) {
+        self.site_counts.insert(owner.clone(), rows.site_count);
+        if !rows.outgoing.is_empty() {
+            self.outgoing.insert(owner.clone(), rows.outgoing);
+        }
+        for (callee, fn_value) in rows.callees {
+            self.incoming
+                .entry(callee.clone())
+                .or_default()
+                .insert(owner.clone());
+            if fn_value {
+                self.fn_values_by_caller
+                    .entry(owner.clone())
+                    .or_default()
+                    .insert(callee.clone());
+                self.fn_value_users
+                    .entry(callee.clone())
+                    .or_default()
+                    .insert(owner.clone());
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ArtifactUpdateStats {
     pub revisited: usize,
@@ -760,57 +812,18 @@ impl ArtifactView {
         // reverse rows, which join owners, are filled from them in owner order.
         // A callee is listed once per owner with whether any site of that
         // owner takes it as a value.
-        let owner_rows: Vec<(
-            &Instance,
-            usize,
-            FxHashMap<Site, Instance>,
-            Vec<(&Instance, bool)>,
-        )> = {
+        let owner_rows: Vec<(&Instance, ArtifactSiteRows<'_>)> = {
             use bone_core::prelude::*;
             let owners: Vec<_> = g.call_sites().collect();
             owners
                 .into_par_iter()
-                .map(|(owner, sites)| {
-                    let mut outgoing: FxHashMap<Site, Instance> = FxHashMap::default();
-                    let mut callees: FxHashMap<&Instance, bool> = FxHashMap::default();
-                    for (site, record) in sites {
-                        let SiteOutcome::Resolved(callee) = &record.outcome else {
-                            continue;
-                        };
-                        outgoing.insert(site.clone(), callee.clone());
-                        *callees.entry(callee).or_insert(false) |=
-                            site.op == skull_mir::site::SiteOp::FnValue;
-                    }
-                    (owner, sites.len(), outgoing, callees.into_iter().collect())
-                })
+                .map(|(owner, sites)| (owner, ArtifactSiteRows::new(sites)))
                 .collect()
         };
         let index = &mut self.index;
-        for (owner, site_count, outgoing, callees) in owner_rows {
-            UPDATE_INDEX_SITE_ROWS.with(|count| count.set(count.get() + site_count as u64));
-            index.site_counts.insert(owner.clone(), site_count);
-            if !outgoing.is_empty() {
-                index.outgoing.insert(owner.clone(), outgoing);
-            }
-            for (callee, fn_value) in callees {
-                index
-                    .incoming
-                    .entry(callee.clone())
-                    .or_default()
-                    .insert(owner.clone());
-                if fn_value {
-                    index
-                        .fn_values_by_caller
-                        .entry(owner.clone())
-                        .or_default()
-                        .insert(callee.clone());
-                    index
-                        .fn_value_users
-                        .entry(callee.clone())
-                        .or_default()
-                        .insert(owner.clone());
-                }
-            }
+        for (owner, rows) in owner_rows {
+            UPDATE_INDEX_SITE_ROWS.with(|count| count.set(count.get() + rows.site_count as u64));
+            index.install_site_rows(owner, rows);
         }
         for (i, symbol) in &self.symbols {
             index
@@ -1027,36 +1040,9 @@ impl ArtifactView {
                 i.clone(),
                 realize_decl(ws, i.func, &g.erased_entries, &target, &req.mappings),
             );
-            let sites = g.sites_of(i).cloned().unwrap_or_default();
-            self.index.site_counts.insert(i.clone(), sites.len());
-            for (site, record) in &sites {
-                local_index_rows_examined += 1;
-                let SiteOutcome::Resolved(callee) = &record.outcome else {
-                    continue;
-                };
-                self.index
-                    .outgoing
-                    .entry(i.clone())
-                    .or_default()
-                    .insert(site.clone(), callee.clone());
-                self.index
-                    .incoming
-                    .entry(callee.clone())
-                    .or_default()
-                    .insert(i.clone());
-                if site.op == skull_mir::site::SiteOp::FnValue {
-                    self.index
-                        .fn_values_by_caller
-                        .entry(i.clone())
-                        .or_default()
-                        .insert(callee.clone());
-                    self.index
-                        .fn_value_users
-                        .entry(callee.clone())
-                        .or_default()
-                        .insert(i.clone());
-                }
-            }
+            let rows = g.sites_of(i).map(ArtifactSiteRows::new).unwrap_or_default();
+            local_index_rows_examined += rows.site_count;
+            self.index.install_site_rows(i, rows);
         }
 
         let mut root_entries_examined = 0;
