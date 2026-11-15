@@ -628,10 +628,10 @@ impl NestedFn {
             .collect()
     }
 
-    pub(crate) fn result_shape(&self, arena: &RepArena) -> Option<ValueShape> {
+    pub(crate) fn result_shape<'a>(&self, arena: &'a RepArena) -> Option<&'a ValueShape> {
         self.representation
             .result()
-            .and_then(|id| arena.value_shape(id).cloned())
+            .and_then(|id| arena.value_shape(id))
     }
 }
 
@@ -2461,9 +2461,9 @@ impl<'a> Builder<'a> {
             .ok_or_else(|| self.gap_here(format!("parameter {index} has no representation plan")))
     }
 
-    fn result_shape(&self) -> Option<ValueShape> {
+    fn result_shape(&self) -> Option<&'a ValueShape> {
         self.ret_rep
-            .and_then(|id| self.scx.rep_arena().value_shape(id).cloned())
+            .and_then(|id| self.scx.rep_arena().value_shape(id))
     }
 
     fn result_tuple(&self) -> Option<TupleRetShape> {
@@ -3401,13 +3401,13 @@ impl<'a> Builder<'a> {
                 .value_shape(r.representation())
                 .is_none()
             {
-                return self.opaque_boundary_leaves(&r, &shape, "return boundary");
+                return self.opaque_boundary_leaves(&r, shape, "return boundary");
             }
             let r = ValueBundle::new(
                 r.representation(),
                 self.owned_value_children(r.into_value())?,
             );
-            return self.repr_to_leaves_bundle_after_presence(&r, &shape);
+            return self.repr_to_leaves_bundle_after_presence(&r, shape);
         }
         if let Some(shape) = self.result_tuple() {
             if shape.nullable {

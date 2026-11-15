@@ -1501,7 +1501,7 @@ impl<'a> Builder<'a> {
                         .map(|c| self.emit_cur(Inst::Load(*c)))
                         .collect();
                     let mut idx = 0;
-                    return Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx));
+                    return Ok(self.rebuild_from_leaves(shape, &leaves, &mut idx));
                 }
                 let callee_v = match self.value_binds.get(&raw(b)) {
                     Some(&value) => value,
@@ -1808,7 +1808,7 @@ impl<'a> Builder<'a> {
                     .map(|c| self.emit_cur(Inst::Load(*c)))
                     .collect();
                 let mut idx = 0;
-                Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
+                Ok(self.rebuild_from_leaves(shape, &leaves, &mut idx))
             }
             None => match &ret_tuple {
                 Some(shape) => Ok(self.emit_tuple_call_tree(e, func, args, shape, &dc)?),
@@ -2238,7 +2238,7 @@ impl<'a> Builder<'a> {
                     .map(|c| self.emit_cur(Inst::Load(*c)))
                     .collect();
                 let mut idx = 0;
-                Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
+                Ok(self.rebuild_from_leaves(shape, &leaves, &mut idx))
             }
             None => {
                 let call = self.emit_cur(Inst::Call { func, args: argv });

@@ -755,7 +755,7 @@ impl<'a> Builder<'a> {
                 .map(|c| self.emit_cur(Inst::Load(*c)))
                 .collect();
             return Ok(FlatCallOut::Value(
-                self.rebuild_from_leaves(&shape, &leaves, &mut 0),
+                self.rebuild_from_leaves(shape, &leaves, &mut 0),
             ));
         }
         if let Some(shape) = &ret_tuple {

@@ -2820,10 +2820,10 @@ impl BackendFnAbiPlan {
     /// The per-declared-param wire slots, or `None` under the boxed ABI --
     /// distinct from [`Self::param_shapes`], which flattens the distinction
     /// away for the lowering path that treats both as "no splatting".
-    pub(super) fn ret_shape(&self) -> Option<ValueShape> {
+    pub(super) fn ret_shape(&self) -> Option<&ValueShape> {
         self.representation
             .result()
-            .and_then(|id| self.arena.value_shape(id).cloned())
+            .and_then(|id| self.arena.value_shape(id))
     }
 
     /// The declared return's tuple shape under this body's substitution.
