@@ -683,13 +683,89 @@ fn plain_scan_assigns_no_archive_semantics() {
     let mut expected = projects.to_vec();
     expected.sort();
     assert_eq!(
-        rock_cli::lint_union::bin_projects_under(root.path()),
+        rock_cli::lint_union::bin_projects_under(root.path()).unwrap(),
         expected
     );
     assert_eq!(
-        rock_cli::lint_union::bin_projects_under(&projects[1]),
+        rock_cli::lint_union::bin_projects_under(&projects[1]).unwrap(),
         vec![projects[1].clone()]
     );
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(".", root.path().join("cycle")).unwrap();
+        assert_eq!(
+            rock_cli::lint_union::bin_projects_under(root.path()).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn lint_union_reports_consumer_discovery_failures() {
+    let root = tempfile::tempdir().unwrap();
+    for name in ["library", "app", "candidate"] {
+        std::fs::create_dir(root.path().join(name)).unwrap();
+    }
+    write(
+        root.path(),
+        "library/stick.toml",
+        "[package]\nname = \"library\"\ntype = \"lib\"\n",
+    );
+    write(
+        root.path(),
+        "library/lib.rock",
+        "fn answer() -> int { 42 }\n",
+    );
+    write(
+        root.path(),
+        "app/stick.toml",
+        "[package]\nname = \"app\"\n[dependencies]\nlibrary = { path = \"../library\" }\n",
+    );
+    write(
+        root.path(),
+        "app/main.rock",
+        "fn main() { print(answer()) }\n",
+    );
+    let args = ["lint", "--union", "library", "--consumers", "."];
+    let valid = invoke(root.path(), &args);
+    assert!(valid.status.success(), "{}", text(&valid));
+
+    let manifest = root.path().join("candidate/stick.toml");
+    std::fs::write(&manifest, "invalid manifest = = =").unwrap();
+    let invalid = invoke(root.path(), &args);
+    assert!(!invalid.status.success(), "{}", text(&invalid));
+    assert_mentions(&invalid, "candidate/stick.toml");
+    assert_mentions(&invalid, "parse stick.toml");
+
+    std::fs::remove_file(&manifest).unwrap();
+    let not_directory = invoke(
+        root.path(),
+        &["lint", "--union", "library", "--consumers", "app/main.rock"],
+    );
+    assert!(!not_directory.status.success(), "{}", text(&not_directory));
+    assert_mentions(&not_directory, "app/main.rock");
+    assert_mentions(&not_directory, "directory");
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("stick.toml", &manifest).unwrap();
+        let unreadable = invoke(root.path(), &args);
+        assert!(!unreadable.status.success(), "{}", text(&unreadable));
+        assert_mentions(&unreadable, "candidate/stick.toml");
+        std::fs::remove_file(&manifest).unwrap();
+
+        std::os::unix::fs::symlink("loop", root.path().join("loop")).unwrap();
+        let unreadable = invoke(root.path(), &args);
+        assert!(!unreadable.status.success(), "{}", text(&unreadable));
+        assert_mentions(&unreadable, "loop");
+        std::fs::remove_file(root.path().join("loop")).unwrap();
+        std::os::unix::fs::symlink("missing", root.path().join("dangling")).unwrap();
+        for name in [".hidden", "target", "tmp", "node_modules"] {
+            std::os::unix::fs::symlink(name, root.path().join(name)).unwrap();
+        }
+        let absent = invoke(root.path(), &args);
+        assert!(absent.status.success(), "{}", text(&absent));
+    }
 }
 
 fn nested_programs(depth: usize) -> [(String, String); 2] {
