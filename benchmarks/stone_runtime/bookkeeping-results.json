@@ -1,0 +1,507 @@
+{
+  "description": "Issue 232 paired x86 JIT-on renderer bookkeeping probes; timings are microseconds per workload iteration, not application frames.",
+  "date": "2026-11-15",
+  "hardware": "Intel Core i9-14900K, NVIDIA RTX 4090, Linux x86_64",
+  "runtime": "gamelibs v0.6.18; LuaJIT 2.1.1794164915",
+  "compiler_revision": "dba982c3",
+  "native_revision": "d2b2f964",
+  "native_profile": "dev opt-level 1",
+  "native_sha256": "9880b2d3c38da64ad904ec93b26cd3e57638e3941516b83331beec53fa711395",
+  "baseline_build": {
+    "revision": "7e14babe12d166c239f31a07dba0f8cbc2b276ee",
+    "benchmark_sources": {
+      "bookkeeping.rock": "ebd5fc03826ff923cad9e1ae82085a90d44635d460c80558061ecc3d2a279a6b",
+      "imports.rock": "33c8b5b8cdb75f40a482fbcc3ed1c6ebf6b98a97f9c2e92fd99e3dff82d23de6",
+      "main.rock": "85b8d66f7241d667a8eb14a2e466f0b3dd62a6dba08a6c8ad9286af69d5c9f9a",
+      "mesh.rock": "03ad29847bf8ce2b9aae23fad2f634eeac948e665322d3018514884513f9de8d",
+      "segment.rock": "995708d3ef42790b4666bf66e409ab1c0e2554832a105b610419ace88d006fc8",
+      "stick.toml": "e0c85c4ffe35acc89302cea4c8b6d32784ee5d25374778a82b784d0e033413c4"
+    },
+    "compiler_sha256": "6fb98442f49d8528a0442c7a07512713c763328b37af73aa47cb3aa8e979b8d2",
+    "outputs": {
+      "retained": "70d20ef40b382941a12547ca6119dc26f18af3053c8a1cff78154eab35785f0f",
+      "fresh": "a698e559da19d595be8b221eb9756a8b8335b8bf91f384a7859e75a75a6c5733"
+    }
+  },
+  "candidate_build": {
+    "revision": "612b9853e20e0465e4b383c5eb289964ea862941",
+    "benchmark_sources": {
+      "bookkeeping.rock": "ebd5fc03826ff923cad9e1ae82085a90d44635d460c80558061ecc3d2a279a6b",
+      "imports.rock": "33c8b5b8cdb75f40a482fbcc3ed1c6ebf6b98a97f9c2e92fd99e3dff82d23de6",
+      "main.rock": "85b8d66f7241d667a8eb14a2e466f0b3dd62a6dba08a6c8ad9286af69d5c9f9a",
+      "mesh.rock": "03ad29847bf8ce2b9aae23fad2f634eeac948e665322d3018514884513f9de8d",
+      "segment.rock": "995708d3ef42790b4666bf66e409ab1c0e2554832a105b610419ace88d006fc8",
+      "stick.toml": "e0c85c4ffe35acc89302cea4c8b6d32784ee5d25374778a82b784d0e033413c4"
+    },
+    "compiler_sha256": "6fb98442f49d8528a0442c7a07512713c763328b37af73aa47cb3aa8e979b8d2",
+    "outputs": {
+      "retained": "08f861f30532763cbbe405cebf7a7952291c166f0162b2e737c26fc11cd0a4a6",
+      "fresh": "df6d869d911e3a7a9054d12f1d2b2651602ce6ba3b63269fe7fc8e8e7a2dc7dc"
+    }
+  },
+  "cases": {
+    "shader": {
+      "frames": 2400,
+      "warmup": 600,
+      "variants": {
+        "baseline": {
+          "median_us": [
+            3.331,
+            3.1695,
+            3.382,
+            3.395,
+            3.166,
+            3.251
+          ],
+          "p95_us": [
+            3.444,
+            3.211,
+            3.521,
+            3.445,
+            3.22,
+            3.292
+          ],
+          "gross_lua_bytes_per_iteration": [
+            0.902,
+            0.838,
+            0.838,
+            0.753,
+            0.838,
+            1.265
+          ],
+          "warmup_aborts": [
+            0,
+            0,
+            0,
+            0,
+            2,
+            2
+          ],
+          "measured_aborts": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "candidate": {
+          "median_us": [
+            3.248,
+            3.138,
+            3.129,
+            3.072,
+            3.078,
+            3.081
+          ],
+          "p95_us": [
+            3.288,
+            3.221,
+            3.268,
+            3.12,
+            3.116,
+            3.146
+          ],
+          "gross_lua_bytes_per_iteration": [
+            0.838,
+            0.838,
+            0.753,
+            0.902,
+            0.838,
+            0.753
+          ],
+          "warmup_aborts": [
+            2,
+            0,
+            1,
+            0,
+            1,
+            2
+          ],
+          "measured_aborts": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    "parametric": {
+      "frames": 1200,
+      "warmup": 600,
+      "variants": {
+        "baseline": {
+          "median_us": [
+            193.245,
+            184.0835,
+            187.6705,
+            199.51,
+            186.992,
+            180.924
+          ],
+          "p95_us": [
+            198.054,
+            191.723,
+            299.926,
+            207.921,
+            193.028,
+            186.996
+          ],
+          "gross_lua_bytes_per_iteration": [
+            18.105,
+            21.732,
+            14.057,
+            14.057,
+            18.515,
+            20.025
+          ],
+          "warmup_aborts": [
+            67,
+            66,
+            67,
+            71,
+            77,
+            69
+          ],
+          "measured_aborts": [
+            13,
+            10,
+            11,
+            12,
+            9,
+            12
+          ]
+        },
+        "candidate": {
+          "median_us": [
+            129.811,
+            114.02,
+            112.014,
+            117.5935,
+            115.9255,
+            125.4215
+          ],
+          "p95_us": [
+            133.549,
+            119.659,
+            116.994,
+            123.226,
+            128.96,
+            133.909
+          ],
+          "gross_lua_bytes_per_iteration": [
+            22.342,
+            21.022,
+            20.955,
+            18.738,
+            18.802,
+            23.472
+          ],
+          "warmup_aborts": [
+            67,
+            64,
+            63,
+            66,
+            75,
+            60
+          ],
+          "measured_aborts": [
+            11,
+            11,
+            12,
+            11,
+            10,
+            11
+          ]
+        }
+      }
+    },
+    "bookkeeping": {
+      "frames": 1200,
+      "warmup": 600,
+      "variants": {
+        "baseline": {
+          "median_us": [
+            72.4145,
+            73.5005,
+            72.429,
+            72.4335,
+            76.8245,
+            74.273
+          ],
+          "p95_us": [
+            76.223,
+            83.626,
+            111.85,
+            78.467,
+            117.923,
+            76.528
+          ],
+          "gross_lua_bytes_per_iteration": [
+            117.007,
+            113.633,
+            117.723,
+            114.163,
+            117.443,
+            118.737
+          ],
+          "warmup_aborts": [
+            14,
+            11,
+            11,
+            11,
+            7,
+            10
+          ],
+          "measured_aborts": [
+            5,
+            6,
+            4,
+            6,
+            4,
+            3
+          ]
+        },
+        "candidate": {
+          "median_us": [
+            73.469,
+            74.7535,
+            76.2885,
+            73.031,
+            77.862,
+            71.832
+          ],
+          "p95_us": [
+            75.492,
+            78.982,
+            83.204,
+            76.669,
+            85.06,
+            74.108
+          ],
+          "gross_lua_bytes_per_iteration": [
+            107.06,
+            106.857,
+            120.343,
+            119.167,
+            117.103,
+            122.39
+          ],
+          "warmup_aborts": [
+            17,
+            14,
+            17,
+            13,
+            15,
+            19
+          ],
+          "measured_aborts": [
+            4,
+            6,
+            5,
+            9,
+            6,
+            4
+          ]
+        }
+      }
+    },
+    "scene": {
+      "frames": 1200,
+      "warmup": 600,
+      "variants": {
+        "baseline": {
+          "median_us": [
+            57.0775,
+            57.4085,
+            57.1455,
+            56.8525,
+            57.1075,
+            56.359
+          ],
+          "p95_us": [
+            77.458,
+            225.496,
+            200.758,
+            73.708,
+            206.747,
+            80.245
+          ],
+          "gross_lua_bytes_per_iteration": [
+            1016.983,
+            1016.667,
+            1016.827,
+            1016.507,
+            1024.863,
+            1016.647
+          ],
+          "warmup_aborts": [
+            51,
+            48,
+            48,
+            71,
+            48,
+            60
+          ],
+          "measured_aborts": [
+            16,
+            18,
+            18,
+            16,
+            16,
+            16
+          ]
+        },
+        "candidate": {
+          "median_us": [
+            57.499,
+            56.585,
+            57.0425,
+            56.3905,
+            56.2465,
+            56.9245
+          ],
+          "p95_us": [
+            72.755,
+            66.277,
+            206.949,
+            78.12,
+            175.475,
+            89.952
+          ],
+          "gross_lua_bytes_per_iteration": [
+            1017.007,
+            1115.137,
+            1016.567,
+            1016.747,
+            1017.753,
+            1016.747
+          ],
+          "warmup_aborts": [
+            56,
+            57,
+            51,
+            46,
+            58,
+            62
+          ],
+          "measured_aborts": [
+            22,
+            20,
+            14,
+            18,
+            15,
+            15
+          ]
+        }
+      }
+    }
+  },
+  "parametric_vm_profile": {
+    "frames": 6000,
+    "warmup": 600,
+    "interval_ms": 1,
+    "samples": [
+      {
+        "round": 0,
+        "variant": "baseline",
+        "states": {
+          "compiled": 581,
+          "interpreter": 413,
+          "C": 129,
+          "GC": 0,
+          "compiler": 3
+        },
+        "log": "0-baseline.log"
+      },
+      {
+        "round": 0,
+        "variant": "candidate",
+        "states": {
+          "compiled": 304,
+          "interpreter": 238,
+          "C": 137,
+          "GC": 0,
+          "compiler": 1
+        },
+        "log": "0-candidate.log"
+      },
+      {
+        "round": 1,
+        "variant": "candidate",
+        "states": {
+          "compiled": 299,
+          "interpreter": 244,
+          "C": 139,
+          "GC": 0,
+          "compiler": 0
+        },
+        "log": "1-candidate.log"
+      },
+      {
+        "round": 1,
+        "variant": "baseline",
+        "states": {
+          "compiled": 534,
+          "interpreter": 441,
+          "C": 144,
+          "GC": 0,
+          "compiler": 1
+        },
+        "log": "1-baseline.log"
+      },
+      {
+        "round": 2,
+        "variant": "baseline",
+        "states": {
+          "compiled": 540,
+          "interpreter": 416,
+          "C": 132,
+          "GC": 0,
+          "compiler": 1
+        },
+        "log": "2-baseline.log"
+      },
+      {
+        "round": 2,
+        "variant": "candidate",
+        "states": {
+          "compiled": 324,
+          "interpreter": 240,
+          "C": 137,
+          "GC": 0,
+          "compiler": 0
+        },
+        "log": "2-candidate.log"
+      },
+      {
+        "round": 3,
+        "variant": "candidate",
+        "states": {
+          "compiled": 305,
+          "interpreter": 256,
+          "C": 130,
+          "GC": 0,
+          "compiler": 1
+        },
+        "log": "3-candidate.log"
+      },
+      {
+        "round": 3,
+        "variant": "baseline",
+        "states": {
+          "compiled": 531,
+          "interpreter": 439,
+          "C": 152,
+          "GC": 0,
+          "compiler": 1
+        },
+        "log": "3-baseline.log"
+      }
+    ]
+  }
+}

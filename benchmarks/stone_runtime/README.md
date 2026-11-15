@@ -179,3 +179,48 @@ python3 benchmarks/stone_runtime/profile_vm.py /tmp/runtime-baseline /tmp/runtim
 
 Use `--case segment` for the second sampling workload. `results.json` retains
 per-process timing, allocation, trace and sample counts plus build hashes.
+
+## Renderer bookkeeping (#232)
+
+The ordinary world/UI batch paths already use texture-handle candidate caches.
+The remaining parametric UI path now builds its cursor key only when the base
+batch fills. Shader admission combines private artifact generation/fingerprint
+metadata into one lookup and checks program membership without reconstructing
+its value. Public semantic mutations still invalidate admission; compatible
+reloads restore the new registry without recompiling the program. Texture-slot
+marking retains its existing representation and lifetime rules.
+
+Source `7e14babe` versus `612b9853`, both compiled with the release compiler at
+`dba982c3`, native library at `d2b2f964` (dev opt-level 1). Same x86 hardware and
+LuaJIT as above, JIT and normal GC enabled. Six alternating pairs per metric,
+600 warmup iterations, 2400 measured shader iterations and 1200 for each other
+case. Timing, allocation and trace capture run separately.
+
+| Workload | Baseline median us (range) | Candidate median us (range) |
+| --- | ---: | ---: |
+| 320 parametric UI quads, including overflow | 187.33 (180.92-199.51) | 116.76 (112.01-129.81) |
+| 120 shader selections and texture-slot audits | 3.291 (3.166-3.395) | 3.105 (3.072-3.248) |
+| 504 mixed world/UI batch lookups | 72.97 (72.41-76.82) | 74.11 (71.83-77.86) |
+| Rendered scene-return control | 57.09 (56.36-57.41) | 56.75 (56.25-57.50) |
+
+Parametric fill is about 38% faster in this workload; the small shader probe
+improves about 6%. The controls overlap; no application-frame speedup is
+established. Gross Lua allocation is essentially unchanged: parametric
+18.31 -> 20.99 B/iteration, shader 0.838 -> 0.838, mixed 117.23 -> 118.13,
+scene 1016.75 -> 1016.88. Trace interruptions remain. All 144 processes pass
+their batch/parameter/slot/pixel checks. The regression suite additionally
+checks all parameter lanes and vertex ordering across 520 quads and frame reset.
+
+Eight separate parametric VM-profile processes (6000 iterations, 1 ms sampling)
+also pass. Compiled/interpreter/C sample shares are 49.0/38.3/12.5% before and
+44.7/35.5/19.7% after. Both versions retain substantial interpreter activity;
+this change removes key work rather than making the entire path traceable.
+Sampling changes recording and is not timing evidence.
+
+`bookkeeping-results.json` holds per-process measurements and source/binary
+hashes. Reproduce with `measure.py --case parametric --arm retained --compare`
+using the two prepared revisions; `shader`, `bookkeeping`, and `scene` select
+the controls. Use `profile_vm.py --case parametric --frames 6000 --warmup 600`
+for separate coverage sampling. A redundant texture-mark write-skipping
+candidate was not retained: its comparison encountered contention and did not
+establish a gain.

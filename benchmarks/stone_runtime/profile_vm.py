@@ -13,7 +13,7 @@ p.add_argument('candidate', type=Path, help='candidate artifact directory')
 p.add_argument('--runtime', type=Path, required=True)
 p.add_argument('--stone-lib', type=Path, required=True)
 p.add_argument('--outdir', type=Path, required=True)
-p.add_argument('--case', choices=('mesh', 'segment'), default='mesh')
+p.add_argument('--case', choices=('mesh', 'segment', 'bookkeeping', 'parametric', 'shader'), default='mesh')
 p.add_argument('--frames', type=int, default=2000)
 p.add_argument('--warmup', type=int, default=30)
 p.add_argument('--rounds', type=int, default=4)
@@ -30,7 +30,7 @@ env.update(ROCK_STONE_LIB=str(args.stone_lib.resolve()), STONE_HEADLESS='1',
            LUA_CPATH=f'{runtime}/lib/lua/5.1/?.so;;', ROCK_TEST_SEED='42',
            AUDIT_CASE=args.case, AUDIT_CORNERS='0', AUDIT_INDEPENDENT_CORNERS='1',
            AUDIT_FRAMES=str(args.frames), AUDIT_WARMUP=str(args.warmup),
-           AUDIT_METRIC='time', AUDIT_ARM='growth')
+           AUDIT_METRIC='time', AUDIT_ARM='growth' if args.case in ('mesh', 'segment') else 'retained')
 env['LD_LIBRARY_PATH'] = ':'.join(filter(None, [str(args.stone_lib.resolve().parent),
     str(runtime / 'lib'), env.get('LD_LIBRARY_PATH'), env.get('NIX_LD_LIBRARY_PATH')]))
 start = '    for i = 1, frames do\n        local start = stone.stone_get_time()'
