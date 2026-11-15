@@ -956,6 +956,11 @@ mod tests {
         symlink(inner.join("lib.rock"), root.join("linked.rock")).expect("link into dependency");
         symlink(root.join("library.rock"), root.join("same.rock")).expect("link within package");
         symlink(root.join("sub"), root.join("linked_dir")).expect("symlinked directory");
+        symlink("absent.rock", root.join("dangling.rock")).expect("dangling source link");
+        symlink("loop.txt", root.join("loop.txt")).expect("non-source loop");
+        fs::write(tmp.path().join("outside.rock"), "fn outside() {}\n").unwrap();
+        symlink(tmp.path().join("outside.rock"), root.join("outside.rock"))
+            .expect("link outside package");
 
         let graph = PackageGraph::build(&alias).expect("graph through symlink");
         let real = fs::canonicalize(&root).expect("canonical root");
@@ -977,6 +982,16 @@ mod tests {
             .collect();
         assert_eq!(canonical, resolved);
         assert_eq!(canonical[2], real.join("library.rock"));
+
+        let bad_source = real.join("loop.rock");
+        symlink("loop.rock", &bad_source).expect("source loop");
+        let error = graph
+            .selected_canonical_rock_files(graph.root(), &alias)
+            .expect_err("source metadata failure must surface");
+        assert!(
+            format!("{error:#}").contains(bad_source.to_str().unwrap()),
+            "{error:#}"
+        );
     }
 
     #[test]

@@ -397,18 +397,27 @@ pub fn walk_rock_files(source_dir: impl AsRef<Path>) -> Result<Vec<WalkedRockFil
         };
         let path = entry.path();
 
+        if path.extension().is_none_or(|ext| ext != "rock") {
+            continue;
+        }
         // The walk already knows each entry's type; only a symlink needs the
         // stat that tells whether it leads to a file.
         let file_type = entry.file_type();
-        if file_type.is_file() || (file_type.is_symlink() && path.is_file()) {
-            if let Some(ext) = path.extension() {
-                if ext == "rock" && !path.to_string_lossy().ends_with("~") {
-                    files.push(WalkedRockFile {
-                        path: path.to_string_lossy().to_string(),
-                        symlink: file_type.is_symlink(),
-                    });
-                }
+        let is_file = if file_type.is_symlink() {
+            match fs_err::metadata(path) {
+                Ok(metadata) => metadata.is_file(),
+                // A dangling link has no source to include.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => return Err(error.into()),
             }
+        } else {
+            file_type.is_file()
+        };
+        if is_file {
+            files.push(WalkedRockFile {
+                path: path.to_string_lossy().to_string(),
+                symlink: file_type.is_symlink(),
+            });
         }
     }
 
