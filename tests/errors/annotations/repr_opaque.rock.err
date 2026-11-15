@@ -8,12 +8,14 @@
 //! Tags: annotations, registry, param, boundary-contracts
 
 //=== TEST CASE: repr_opaque_on_a_regular_rock_fn_Generic ===
+//! expect: `@repr(opaque)` applies to a parameter of an `inline(..)` or `extern` boundary
 // The fn has a Rock body, so there is no opaque boundary to contract about.
 fn plain(@repr(opaque) v: int) -> int { v }
 
 fn main() { print("{plain(1)}") }
 
 //=== TEST CASE: repr_opaque_at_fn_item_position_Generic ===
+//! expect: annotation `@repr` is not allowed on a fn
 // It is a PARAMETER contract; on the item it names nothing.
 @repr(opaque) @nomangle inline(lua) fn item_level(v: any) -> int = """
     return 1
@@ -22,6 +24,7 @@ fn main() { print("{plain(1)}") }
 fn main() { print("{item_level(1)}") }
 
 //=== TEST CASE: repr_opaque_on_a_struct_field_Generic ===
+//! expect: annotation `@repr` is not allowed on a struct field
 // Struct fields have their own representation annotations (`@flat`); this is
 // not one of them.
 struct Holder { @repr(opaque) a: int }
@@ -29,6 +32,7 @@ struct Holder { @repr(opaque) a: int }
 fn main() { print("{Holder { a: 1 }.a}") }
 
 //=== TEST CASE: repr_with_no_argument_Generic ===
+//! expect: `@repr` takes exactly one bare kind identifier: @repr(opaque)
 // `@repr` names WHICH contract; bare, it names none.
 @nomangle inline(lua) fn no_arg(@repr v: any) -> int = """
     return 1
@@ -37,6 +41,7 @@ fn main() { print("{Holder { a: 1 }.a}") }
 fn main() { print("{no_arg(1)}") }
 
 //=== TEST CASE: repr_with_an_unknown_kind_Generic ===
+//! expect: unknown `@repr` kind `boxed` -- the only kind is `opaque`
 // `opaque` is the only kind. An unrecognized one must reject rather than be
 // read as "some contract".
 @nomangle inline(lua) fn bad_kind(@repr(boxed) v: any) -> int = """
@@ -46,6 +51,7 @@ fn main() { print("{no_arg(1)}") }
 fn main() { print("{bad_kind(1)}") }
 
 //=== TEST CASE: repr_with_a_non_ident_argument_Generic ===
+//! expect: `@repr` takes exactly one bare kind identifier: @repr(opaque)
 // The kind is an identifier, not a string.
 @nomangle inline(lua) fn str_kind(@repr("opaque") v: any) -> int = """
     return 1
@@ -54,6 +60,7 @@ fn main() { print("{bad_kind(1)}") }
 fn main() { print("{str_kind(1)}") }
 
 //=== TEST CASE: repr_with_extra_arguments_Generic ===
+//! expect: `@repr` takes exactly one bare kind identifier: @repr(opaque)
 // Exactly one argument.
 @nomangle inline(lua) fn extra(@repr(opaque, opaque) v: any) -> int = """
     return 1
