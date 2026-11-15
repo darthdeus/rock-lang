@@ -191,7 +191,7 @@ fn allocation_report_writer_is_explicit_and_writes_the_compiler_report() {
     let path = dir.path().join("allocation-report.txt");
     let report = skull::allocation_report::AllocationReport::default();
 
-    super::write_allocation_report(Some(path.as_os_str()), &report).expect("write report");
+    super::write_allocation_report(Some(&path), &report).expect("write report");
 
     let text = std::fs::read_to_string(path).expect("read report");
     assert!(text.contains("emitted allocation-capable Lua report: 0 bodies, 0 direct sites"));
