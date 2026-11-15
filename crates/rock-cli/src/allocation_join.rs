@@ -682,6 +682,32 @@ pub(crate) fn render_joined_report_with_jit(
     Ok(out)
 }
 
+/// `rock allocation-join`: joins a saved manifest and activation capture, for
+/// captures made outside `rock sim --allocation-sites`.
+pub(crate) fn run(files: &[String]) -> Result<()> {
+    let [manifest, activation, rest @ ..] = files else {
+        anyhow::bail!(
+            "usage: rock allocation-join <manifest> <activation> [all|update|draw|coroutine|outside] [generated-lua] [jit-allocation-trace]"
+        );
+    };
+    if rest.len() > 3 {
+        anyhow::bail!("rock allocation-join takes at most five arguments");
+    }
+    let read = |path: Option<&String>| path.map(fs_err::read_to_string).transpose();
+    let report = render_joined_report_with_jit(
+        &fs_err::read_to_string(manifest)?,
+        &fs_err::read_to_string(activation)?,
+        rest.first().map(String::as_str),
+        read(rest.get(1))?.as_deref(),
+        read(rest.get(2))?.as_deref(),
+    )?;
+    let mut stdout = std::io::stdout().lock();
+    match std::io::Write::write_all(&mut stdout, report.as_bytes()) {
+        Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => Err(error.into()),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{render_joined_report, render_joined_report_with_jit};

@@ -1336,3 +1336,66 @@ fn language_server_takes_the_compiler_thp_default() {
         .expect("kernel reports THP_enabled");
     assert_eq!(thp.split_whitespace().nth(1), Some("0"), "{thp}");
 }
+
+/// A capture saved by an activated compile and a separate run joins offline,
+/// validated against the exact generated Lua.
+#[test]
+fn allocation_join_reads_a_saved_activation_capture() {
+    let root = tempfile::tempdir().unwrap();
+    write(
+        root.path(),
+        "stick.toml",
+        "[package]\nname = \"alloc-join\"\n",
+    );
+    write(
+        root.path(),
+        "main.rock",
+        r#"inline(lua) fn activation_begin() = "__rock_allocation_activation_begin()"
+inline(lua) fn activation_dump() = "__rock_allocation_activation_dump(1)"
+
+fn main() {
+    activation_begin()
+    let items = []
+    for i in 0..3 {
+        items.push("item {i}")
+    }
+    activation_dump()
+    print(items.len)
+}
+"#,
+    );
+    let activation = root.path().join("capture.tsv");
+    let compiled = rock(root.path())
+        .args(["compile", ".", "--output", "main.lua"])
+        .env("SKULL_ALLOCATION_ACTIVATION", &activation)
+        .output()
+        .unwrap();
+    assert!(compiled.status.success(), "compile: {}", text(&compiled));
+    let ran = Command::new(rock_engine_host::runtime::luajit_path())
+        .arg("main.lua")
+        .current_dir(root.path())
+        .env("SKULL_ALLOCATION_ACTIVATION", &activation)
+        .output()
+        .unwrap();
+    assert!(ran.status.success(), "run: {}", text(&ran));
+
+    let joined = invoke(
+        root.path(),
+        &[
+            "allocation-join",
+            "capture.manifest.txt",
+            "capture.tsv",
+            "all",
+            "main.lua",
+        ],
+    );
+    assert!(joined.status.success(), "join: {}", text(&joined));
+    let report = String::from_utf8_lossy(&joined.stdout);
+    assert!(report.starts_with("rock.allocation-join.v12\n"), "{report}");
+    assert!(
+        report
+            .lines()
+            .any(|row| row.starts_with("0.0000\t3\t") && row.contains("\tstring-concat\t")),
+        "the pushed concat ran three times: {report}"
+    );
+}

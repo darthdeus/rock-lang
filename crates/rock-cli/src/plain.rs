@@ -197,6 +197,10 @@ pub static COMMANDS: &[&CliCommand] = &[
         }),
     },
     &CliCommand {
+        name: "allocation-join",
+        route: Route::Direct(|cx| crate::allocation_join::run(&cx.args.files)),
+    },
+    &CliCommand {
         name: "lsp-survey",
         route: Route::Direct(|cx| {
             let path = cx.get_path_or_current()?;
