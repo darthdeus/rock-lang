@@ -108,7 +108,9 @@ pub fn always_inlinable(inst: &Inst) -> bool {
 }
 
 fn is_barrier(inst: &Inst) -> bool {
-    !inst.produces_value() || may_throw(inst)
+    // A projection may enter a host callback that writes globals. Keep it
+    // before a later global snapshot, just as an explicit call must stay.
+    !inst.produces_value() || may_throw(inst) || matches!(inst, Inst::Global(_))
 }
 
 /// Restrict an existing same-block folding mask to preserve observable order.

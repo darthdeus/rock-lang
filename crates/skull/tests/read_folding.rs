@@ -4,7 +4,7 @@
 //! every read ordered against the writes it could observe. A call whose result
 //! nothing reads is a bare call statement.
 
-use crate::common::{compile_and_run, emit_module, function_body};
+use crate::common::{compile_and_run, emit_module, function_body, run_luajit};
 
 const SHAPES: &str = r#"
 struct P { x: int, y: int }
@@ -107,6 +107,30 @@ fn main() {
 
 #[test]
 fn folded_calls_stay_ordered_against_global_reads_and_empty_branches() {
+    let src = r#"
+global marks: int = 1
+struct Row { value: int }
+@nomangle fn bump() -> int { marks = 2; return 7 }
+@nomangle fn probe(row: Row) -> int { marks = 1; return row.value + marks }
+@nomangle fn via_map(values: Map<string, int>) -> int { marks = 1; return values["value"] + marks }
+@nomangle fn via_vec(values: [int?]) -> (int?, int) { marks = 1; return (values[0], marks) }
+@nomangle fn control() -> int { marks = 1; return bump() + marks }
+fn main() {}
+"#;
+    let lua = emit_module(src);
+    assert_eq!(
+        run_luajit(&format!(
+            r#"{lua}
+local row = setmetatable({{}}, {{ __index = function() return bump() end }})
+local values = setmetatable({{}}, {{ __index = function() return bump() end }})
+local xs = {{ len = 1, _data = values }}
+local value, snapshot = via_vec(xs)
+print(probe(row), via_map(values), value + snapshot, control())
+"#
+        )),
+        "9\t9\t9\t9"
+    );
+
     let src = r#"
 global marks: int = 0
 fn bump(n: int) -> int { marks += 1; return n }
