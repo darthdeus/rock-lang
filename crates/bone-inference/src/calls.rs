@@ -600,6 +600,11 @@ pub(crate) fn select_overload_with_generics(
                     }
                 }
             }
+            let home_hint = if hidden_fit || bound_fail.is_some() {
+                None
+            } else {
+                home_module_hint(c, gamma, recv_ty, args, arg_ty, generic_args, name, span)
+            };
             let overloads = candidates
                 .iter()
                 .map(|&(mid, fid)| format!("  {}", render_candidate_sig(gamma, mid, fid)))
@@ -617,13 +622,115 @@ pub(crate) fn select_overload_with_generics(
                             be.message
                         ),
                         None => format!(
-                            "No overload for `{name}` with argument types ({args_msg})\navailable overloads:\n{overloads}"
+                            "No overload for `{name}` with argument types ({args_msg})\navailable overloads:\n{overloads}{}",
+                            home_hint.unwrap_or_default()
                         ),
                     }
                 },
             )))
         }
     }
+}
+
+/// A `help:` line for a call no overload in scope fits, when the module that
+/// declares the first argument's nominal type has an accessible function of
+/// the same name that would fit. Importing a type does not import its
+/// functions, so this is the common near-miss after `use m::Type;`.
+fn home_module_hint(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    recv_ty: Option<TyId>,
+    args: &[Idx<Expr>],
+    arg_ty: &FxHashMap<Idx<Expr>, TyId>,
+    generic_args: IdxRange<TypeExpr>,
+    name: Ustr,
+    span: Span,
+) -> Option<String> {
+    let ws = gamma.workspace;
+    let first = recv_ty.or_else(|| args.first().map(|a| arg_ty[a]))?;
+    let first = resolve(gamma, first, span);
+    let TypeExpr::App {
+        ctor: TypeCtor::Nominal(type_key),
+        ..
+    } = *gamma.get(first)
+    else {
+        return None;
+    };
+    let meta = ws.defs.get(&type_key)?;
+    let owner = ws.ns.package(meta.package)?;
+    let bare = name.as_str().rsplit("::").next().unwrap_or(name.as_str());
+    // `__`-prefixed names are operator dispatch families (`a + b` ->
+    // `__op_add`); their import is `use m::operator(+)`, not this spelling.
+    if bare.starts_with("__") {
+        return None;
+    }
+    let key = bone_core::modules::def_key(&owner.self_name, &meta.module, bare);
+    let site = gamma.access_site();
+    let from_pkg = site.package?;
+    // The path the call site writes: relative below its own module, rooted at
+    // the package (or the dependency alias naming it) otherwise.
+    let mut path: Vec<&str> = if from_pkg == meta.package {
+        match meta.module.strip_prefix(site.module_path) {
+            Some(rest) => rest.iter().map(|s| s.as_str()).collect(),
+            None => std::iter::once(owner.self_name.as_str())
+                .chain(meta.module.iter().map(|s| s.as_str()))
+                .collect(),
+        }
+    } else {
+        let root = ws
+            .ns
+            .package(from_pkg)
+            .and_then(|pkg| pkg.aliases.iter().find(|(_, id)| **id == meta.package))
+            .map_or(owner.self_name, |(alias, _)| *alias);
+        std::iter::once(root.as_str())
+            .chain(meta.module.iter().map(|s| s.as_str()))
+            .collect()
+    };
+    if path.is_empty() {
+        // Declared in the caller's own module: already in scope.
+        return None;
+    }
+    path.push(bare);
+    let path = path.join("::");
+    let admitted: SmallVec<[(ModuleId, Idx<Function>); 2]> = ws
+        .functions_by_name
+        .get(&key)?
+        .iter()
+        .copied()
+        .filter(|&(mid, fid)| ws.callable_member_admits(key, mid, fid, site))
+        .collect();
+    let mut bound_fail = None;
+    let fits = admitted.iter().any(|&(mid, fid)| {
+        score_candidate_with_generics(
+            c,
+            gamma,
+            mid,
+            fid,
+            recv_ty,
+            args,
+            arg_ty,
+            generic_args,
+            span,
+            &mut bound_fail,
+        )
+        .is_some()
+    });
+    if !fits {
+        return None;
+    }
+    let receiver = match (recv_ty, args.first().map(|&a| &c.body.expr_arena[a])) {
+        (None, Some(Expr::Var(b))) => c.body.binding_arena[*b].name.as_str(),
+        _ => "...",
+    };
+    let rest = if (recv_ty.is_none() && args.len() > 1) || (recv_ty.is_some() && !args.is_empty()) {
+        ", ..."
+    } else {
+        ""
+    };
+    Some(format!(
+        "\nhelp: `{path}` takes `{}` but is not imported here; add `use {path};` or call `{path}({receiver}{rest})`",
+        ws.render(Some(&gamma.out), first)
+    ))
 }
 
 pub(crate) fn check_positional_args(

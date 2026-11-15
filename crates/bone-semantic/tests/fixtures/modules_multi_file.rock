@@ -1200,3 +1200,24 @@ fn run(a: Api) -> int {
             //^ int
     m
 }
+
+//- a_no_fit_call_names_the_fitting_function_in_the_receiver_types_module @fail=help: `store::len` takes `app::store::Store` but is not imported here; add `use store::len;` or call `store::len(s)`
+//-- app.rock @pkg=app,1 @v1
+use store::Store;
+
+// Importing the type does not import its functions, so the call is rejected;
+// the diagnostic points at the fitting `len` beside `Store`.
+fn run(s: Store) -> int {
+    s.len()
+}
+
+//-- app_store.rock @pkg=app,1 @v1
+pub mod store;
+
+pub struct Store {
+    pub items: Vec<int>,
+}
+
+pub fn len(self: Store) -> int {
+    self.items.len()
+}
