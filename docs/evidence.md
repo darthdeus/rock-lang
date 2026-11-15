@@ -12,6 +12,7 @@ Run from the repository root:
 ```sh
 python3 perf/inventory.py
 python3 perf/check_evidence.py
+python3 perf/overview.py
 python3 -m unittest discover -s perf -p 'test_*.py'
 ```
 
@@ -24,6 +25,12 @@ separately). Newly added files enter the inventory once tracked by Git.
 The source extensions are explicit in `perf/inventory.py`; this is not a count
 of every repository file. Known upstream-derived crates and prebuilt Stone
 bindings are separated; origin classification is not a generated-code detector.
+
+For breadth, start with `target/inventory/overview.html`: the searchable
+[subsystem map](subsystems.md) combines measured size, reviewed responsibility
+and test locations, bounded checks, explicit unknowns and a short parallel-work
+queue. Its 21 groups cover the tracked source; they are work boundaries rather
+than a complete language-feature taxonomy.
 
 ## What counts as evidence
 
@@ -131,15 +138,19 @@ ordinary callers could reach already-replaced functions. A reload-local journal
 now restores emitted global bindings and aborts pending slot publication. Two
 runtime regressions cover failure, restoration of constants and definitions,
 and a successful retry. Initializer side effects remain outside this contract.
-The audit also reproduced a separate static-reset retry discrepancy; it remains
-open and is documented with its edit/load sequence.
+The audit also reproduced and repaired static-reset and removal retries.
+Cumulative overlays now retain transition requests, and runtime initializer
+keys decide whether they have already applied. Two additional regressions check
+failed retries, successful repeated loads and preservation of accumulated state.
 
 The [graph cleanup](instance-graph-cleanup-decisions.md) shares the repeated
 root-hole calculations while retaining full-refresh and local-refresh scopes.
 It also fixes concrete-instance counts for mangled generic functions by retaining
 the failed call's declaration identity. Tests compare incremental results to
 fresh builds and check bounded work counters. These are work measurements, not
-a wall-clock speedup claim. A separate source-span shift discrepancy remains open.
+a wall-clock speedup claim. The follow-up span repair indexes authoritative
+contribution rows instead of cloning them; four byte/line insertion/deletion
+variants now agree with fresh builds without rewalking retained owners.
 
 All 20 [purity rejection cases](purity.md#rejection-assertion-audit-2026-11-15)
 now pin intended diagnostics; 15 previously accepted any rejection. The loop
@@ -167,12 +178,15 @@ until their behavioral purposes are understood.
 
 ## Next actions and open questions
 
-1. Repair static-reset retention across a failed overlay and cumulative retry,
-   using the reproduced sequence in the rollback decision document.
-2. Repair stale root-hole source spans after length-changing edits, retaining
-   the fresh-build comparison from the graph audit.
-3. Settle the explicit-ref construction-time boundary before changing that
-   language rule; the accepted behavior remains recorded as a discrepancy.
+Use the ranked queue in [subsystems.json](subsystems.json), rendered in the
+overview. It separates the reference-lifetime decision from bounded JS reload
+and null-refinement audits, with file ownership and acceptance checks. Neither
+audit is yet a confirmed defect.
+
+The breadth survey also found a stale LSP fixture warning: the parser already
+rejects unknown expectation lines. Its existing malformed-block regression
+passes; the documentation now matches that behavior. The ledger contains 18
+bounded records, not 18 comprehensively verified subsystems.
 
 Extend the evidence ledger alongside concrete repairs. Its checks establish
 bounded claims, not a percentage of language coverage or a launch certificate.

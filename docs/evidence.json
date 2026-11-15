@@ -179,9 +179,9 @@
   },
   {
     "id": "failed-overlay-binding-rollback",
-    "statement": "The tested failed Lua overlays restore replaced compiler global bindings, preserve retained callers and CodeRefs, and permit a repaired constant-initializer retry.",
+    "statement": "The tested failed Lua overlays restore replaced compiler global bindings, preserve retained callers and CodeRefs, and retain static reset/removal transitions for cumulative retries.",
     "kind": "observed behavior",
-    "limit": "Binding rollback only: initializer side effects and shader-driver effects survive. Static-reset retention on a cumulative retry remains a separate known discrepancy. Publication assumes intact runtime helpers and compiler-owned plain tables.",
+    "limit": "Binding rollback only: initializer side effects and shader-driver effects survive. Runtime keys make repeated static preparation idempotent. Publication assumes intact runtime helpers and compiler-owned plain tables; JS overlays are separate.",
     "sources": [
       {
         "path": "crates/skull/src/mir_emit/overlay.rs",
@@ -208,7 +208,7 @@
           "failed_overlay"
         ],
         "exit": 0,
-        "output": "test result: ok\\. 2 passed; 0 failed;"
+        "output": "test result: ok\\. 4 passed; 0 failed;"
       }
     ]
   },
@@ -252,6 +252,71 @@
           "--test",
           "skull_tests",
           "graph_update::mangled_root_holes_count_concrete_instances"
+        ],
+        "exit": 0,
+        "output": "test result: ok\\. 1 passed; 0 failed;"
+      }
+    ]
+  },
+  {
+    "id": "root-hole-span-relocation",
+    "statement": "Root-hole diagnostic spans match fresh builds after the tested byte and line insertions and deletions, including retained owners.",
+    "kind": "observed behavior",
+    "limit": "Four selected edit variants with bounded work counters; not a general proof of incremental relocation.",
+    "sources": [
+      {
+        "path": "crates/skull/tests/graph_update.rs",
+        "anchor": "fn root_hole_spans_follow_insertions_and_deletions()"
+      },
+      {
+        "path": "crates/skull-graph/src/instance_graph.rs",
+        "anchor": "Row indices into each owner's authoritative"
+      }
+    ],
+    "checks": [
+      {
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "skull",
+          "--test",
+          "skull_tests",
+          "graph_update::root_hole_spans_follow_insertions_and_deletions",
+          "--",
+          "--exact"
+        ],
+        "exit": 0,
+        "output": "test result: ok\\. 1 passed; 0 failed;"
+      }
+    ]
+  },
+  {
+    "id": "lsp-malformed-expectation-rejection",
+    "statement": "The selected malformed LSP fixture shapes fail parsing with a fixture-named error, including unrecognized expectation lines.",
+    "kind": "test execution",
+    "limit": "The existing regression covers selected malformed shapes. It does not prove every accepted assertion detects the intended server defect.",
+    "sources": [
+      {
+        "path": "crates/rock-cli/src/lsp_test.rs",
+        "anchor": "fn every_malformed_block_is_a_parse_error_naming_the_fixture()"
+      },
+      {
+        "path": "docs/testing.md",
+        "anchor": "rejects unrecognized nonempty expectation lines"
+      }
+    ],
+    "checks": [
+      {
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "rock-cli",
+          "--lib",
+          "every_malformed_block_is_a_parse_error_naming_the_fixture"
         ],
         "exit": 0,
         "output": "test result: ok\\. 1 passed; 0 failed;"

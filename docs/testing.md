@@ -148,7 +148,7 @@ The `tests/` corpus is grouped into one directory per language topic:
 `types/`, `iterators/`, `functions/`, `operators/`, `arenas/`, `patterns/`,
 `structs/`, `vectors/`, `maps/`, `shadowing/`, `newtypes/`,
 `native_buffers/`, `json/`, `coroutines/`, `library/` (standard library
-helpers), `annotations/`, `syntax/` and `smoke/` (whole-program checks), plus
+helpers), `annotations/`, `modules/`, `syntax/` and `smoke/` (whole-program checks), plus
 the optimizer and feature directories `inline/`, `scalarize/`, `macros/`,
 `intrinsics/` and `comment_placement/`. `tests/errors/` and `tests/lsp/` hold
 the expected-error and LSP suites, `tests/fixtures/` holds data files, and
@@ -317,7 +317,10 @@ cargo test --locked -p rock-lsp
 
 Check the fixture's reported test count and assert the response content, not
 just that the request succeeded. The parser accepts only specific expectation
-forms for each operation and can silently skip unrecognized lines; make a valid
+forms for each operation and rejects unrecognized nonempty expectation lines.
+Malformed headers, unsupported reply types and missing delimiters also fail
+parsing. These boundaries have regressions in `lsp_test::runner_tests`; they do not
+prove every accepted expectation checks the intended behavior. Make a valid
 expectation fail temporarily to verify that it is actually checked. The fixture parser and validators are in
 [`lsp_test.rs`](../crates/rock-cli/src/lsp_test.rs).
 
