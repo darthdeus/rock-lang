@@ -2252,7 +2252,7 @@ fn skull_emit_project_with_inputs(
     let sources = match crate::unified_compile::discover_sources(&spec) {
         Ok(s) => s,
         Err(e) => {
-            log::error!(target: "SKULL", "cannot load project {}: {}", dir, e);
+            log::error!(target: "SKULL", "cannot load project {}: {:#}", dir, e);
             crate::invocation_log::exit(1);
         }
     };

@@ -1007,7 +1007,10 @@ impl StickConfig {
     /// runtime validation and surface as a confusing later failure
     /// (silent-errors audit, 2026-05-02).
     pub fn from_path_optional(path: &Path) -> Result<Option<Self>> {
-        if !path.exists() {
+        if !path
+            .try_exists()
+            .with_context(|| format!("Failed to inspect stick.toml at {}", path.display()))?
+        {
             return Ok(None);
         }
         Self::from_path(path).map(Some)
@@ -1155,8 +1158,7 @@ impl StickConfig {
 
         loop {
             let stick_path = current.join("stick.toml");
-            if stick_path.exists() {
-                let config = Self::from_path(&stick_path)?;
+            if let Some(config) = Self::from_path_optional(&stick_path)? {
                 return Ok(Some((stick_path, config)));
             }
 
@@ -1972,6 +1974,24 @@ mod tests {
             msg.contains("parse stick.toml") || msg.contains("stick.toml"),
             "error mentions stick.toml: {msg}"
         );
+
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink("stick.toml", &path).unwrap();
+            let error = StickConfig::from_path_optional(&path)
+                .expect_err("manifest metadata failure must not mean absence");
+            assert!(
+                format!("{error:#}").contains(path.to_str().unwrap()),
+                "{error:#}"
+            );
+            let error = StickConfig::find_from_dir(dir.path())
+                .expect_err("manifest discovery must surface metadata failure");
+            assert!(
+                format!("{error:#}").contains(path.to_str().unwrap()),
+                "{error:#}"
+            );
+        }
     }
 }
 
