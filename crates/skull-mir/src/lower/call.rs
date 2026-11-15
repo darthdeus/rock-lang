@@ -4,6 +4,34 @@
 use super::*;
 use bone_core::hir_walk::HirChild;
 
+enum CallArgMode<'s, 'a> {
+    Boxed(
+        &'s crate::instance::Instance,
+        &'s crate::concrete::ConcreteSignature,
+    ),
+    Scalar {
+        shapes: &'s [RetSlot],
+        types: &'s [Option<std::borrow::Cow<'a, crate::monoty::MonoTy>>],
+    },
+}
+
+enum CallArgValue {
+    Boxed(Idx<Inst>),
+    Scalar(Vec<Idx<Inst>>),
+}
+
+impl CallArgValue {
+    fn receiver_mut(&mut self) -> Option<&mut Idx<Inst>> {
+        match self {
+            Self::Boxed(value) => Some(value),
+            Self::Scalar(values) => match values.as_mut_slice() {
+                [value] => Some(value),
+                _ => None,
+            },
+        }
+    }
+}
+
 fn preflight_scalar_type(ws: &Workspace, inf: &BodyInference, e: Idx<Expr>) -> bool {
     inf.expr_types.get(e).is_some_and(|ty| {
         matches!(
@@ -585,7 +613,7 @@ impl<'a> Builder<'a> {
             .rep_arena()
             .value_shape(id)
             .ok_or_else(|| self.gap_here("flattened field_get result has no leaf shape"))?;
-        let args = self.reorder_named_args(e, args, func, Some(&inst))?;
+        let args = self.boxed_slotted_call_args(e, args, func, &inst)?;
         let [owner, selector] = args.as_slice() else {
             return Err(self.gap_here("field_get requires an owner and selector"));
         };
@@ -1517,10 +1545,12 @@ impl<'a> Builder<'a> {
                     let arg_vals = self.slotted_call_args(
                         e,
                         &abi.param_names,
-                        &param_shapes,
                         &arg_idxs,
                         &[],
-                        &[],
+                        CallArgMode::Scalar {
+                            shapes: &param_shapes,
+                            types: &[],
+                        },
                         None,
                     )?;
                     let Some(shape) = abi.result_shape(self.scx.rep_arena()) else {
@@ -1987,13 +2017,11 @@ impl<'a> Builder<'a> {
             let opaque = vec![RetSlot::Opaque; callee.param_decls.len()];
             self.scalar_call_args(e, func, arg_idxs, any_named, &opaque, &[], preflight)?
         } else if any_named {
-            if let Some(plan) = preflight {
+            if preflight.is_some() {
                 let opaque = vec![RetSlot::Opaque; callee.param_decls.len()];
-                let names: Vec<_> = callee.param_decls.iter().map(|p| p.name).collect();
-                let defaults = self.call_param_defaults(func);
-                self.slotted_call_args(e, &names, &opaque, arg_idxs, &defaults, &[], Some(plan))?
+                self.scalar_call_args(e, func, arg_idxs, true, &opaque, &[], preflight)?
             } else {
-                self.reorder_named_args(e, arg_idxs, func, Some(&dc.callee_inst))?
+                self.boxed_slotted_call_args(e, arg_idxs, func, &dc.callee_inst)?
             }
         } else {
             let signature = self.direct_call_signature(dc)?;
@@ -2357,10 +2385,12 @@ impl<'a> Builder<'a> {
         self.slotted_call_args(
             e,
             &param_names,
-            param_shapes,
             arg_idxs,
             &defaults,
-            param_tys,
+            CallArgMode::Scalar {
+                shapes: param_shapes,
+                types: param_tys,
+            },
             preflight,
         )
     }
@@ -2383,55 +2413,82 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Build a call's argument list by placing each argument into its PARAM SLOT
-    /// (source order) and then splatting/nil-filling per slot: a named arg lands
-    /// in the slot of that name, a struct spread `..op` by field name, everything
-    /// else positionally. This is the one slot-placement rule, shared by every
-    /// calling convention that has param names -- a convention with its own
-    /// positional-only arg loop silently miscompiles `f(b: 2, a: 1)`.
-    /// `param_shapes` shorter than `param_names` (or all-`Opaque`) is the boxed ABI.
-    /// `defaults` is [`Self::call_param_defaults`] of the callee, or empty when the
-    /// callee is not a declaration the emitter can read (a nested fn value).
-    pub(crate) fn slotted_call_args(
+    fn boxed_slotted_call_args(
+        &mut self,
+        e: Idx<Expr>,
+        arg_idxs: &[Idx<Expr>],
+        func: FuncRef,
+        inst: &crate::instance::Instance,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let names: Vec<_> = self.ws.module(func.module).functions[func.func]
+            .param_decls
+            .iter()
+            .map(|p| p.name)
+            .collect();
+        let defaults = self.call_param_defaults(func);
+        let signature = self.concrete_callee_signature(e, inst)?;
+        self.slotted_call_args(
+            e,
+            &names,
+            arg_idxs,
+            &defaults,
+            CallArgMode::Boxed(inst, &signature),
+            None,
+        )
+    }
+
+    /// Evaluate in source order, place by parameter name or next positional
+    /// index, then fill holes and trailing caller-supplied defaults. The ABI
+    /// controls argument lowering and wire width, not placement or defaults.
+    fn slotted_call_args(
         &mut self,
         e: Idx<Expr>,
         param_names: &[Ustr],
-        param_shapes: &[RetSlot],
         arg_idxs: &[Idx<Expr>],
         defaults: &[Option<CallParamDefault>],
-        param_tys: &[Option<std::borrow::Cow<'a, crate::monoty::MonoTy>>],
+        mode: CallArgMode<'_, 'a>,
         preflight: Option<&PreflightPlan>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        let mut slots: Vec<Option<Vec<Idx<Inst>>>> = vec![None; param_names.len()];
+        let mut slots: Vec<Option<CallArgValue>> = (0..param_names.len()).map(|_| None).collect();
         let mut next_pos = 0usize;
         for (source_index, &a) in arg_idxs.iter().enumerate() {
-            // Struct spread `..op`: decompose into per-field reprs (a struct-
-            // literal operand is elided) and place each into its param slot.
             if self.body.spread_args.contains(&a) {
-                for (fname, r) in self.spread_field_bundles(a)? {
+                for (fname, bundle) in self.spread_field_bundles(a)? {
                     let pidx = param_names
                         .iter()
                         .position(|p| *p == fname)
                         .ok_or_else(|| {
                             gap(format!("spread field `{fname}` matches no parameter"))
                         })?;
-                    let representation = r.representation();
-                    let owned = self.snapshot_opaque_value(r.into_value())?;
-                    let bundle = ValueBundle::new(representation, owned);
-                    let slot = param_shapes.get(pidx).cloned().unwrap_or(RetSlot::Opaque);
-                    slots[pidx] = Some(self.snapshot_argument_slot(bundle, &slot)?);
+                    slots[pidx] = Some(match mode {
+                        CallArgMode::Boxed(..) => {
+                            CallArgValue::Boxed(self.pack(bundle.into_value())?)
+                        }
+                        CallArgMode::Scalar { shapes, .. } => {
+                            let representation = bundle.representation();
+                            let owned = self.snapshot_opaque_value(bundle.into_value())?;
+                            let bundle = ValueBundle::new(representation, owned);
+                            let slot = shapes.get(pidx).cloned().unwrap_or(RetSlot::Opaque);
+                            CallArgValue::Scalar(self.snapshot_argument_slot(bundle, &slot)?)
+                        }
+                    });
                 }
                 continue;
             }
             let is_ref = self.is_ref_call_arg(e, a);
-            let r = if is_ref {
-                let place = self.lower_ref_borrow(a)?;
-                self.value_bundle_for_expr(a, ValueRepr::Scalar(place))?
-            } else {
-                let r = self.lower_expr_repr(a)?;
-                let representation = r.representation();
-                let owned = self.snapshot_opaque_value(r.into_value())?;
-                ValueBundle::new(representation, owned)
+            // Scalar arguments own their leaves before a later argument can
+            // mutate storage; boxed lowering needs the destination type first.
+            let scalar = match mode {
+                CallArgMode::Boxed(..) => None,
+                CallArgMode::Scalar { .. } => Some(if is_ref {
+                    let place = self.lower_ref_borrow(a)?;
+                    self.value_bundle_for_expr(a, ValueRepr::Scalar(place))?
+                } else {
+                    let r = self.lower_expr_repr(a)?;
+                    let representation = r.representation();
+                    let owned = self.snapshot_opaque_value(r.into_value())?;
+                    ValueBundle::new(representation, owned)
+                }),
             };
             let pidx = match self.body.arg_names.get(&a) {
                 Some(nm) => param_names
@@ -2450,49 +2507,67 @@ impl<'a> Builder<'a> {
                     slots.len()
                 )));
             }
-            let slot = param_shapes.get(pidx).cloned().unwrap_or(RetSlot::Opaque);
-            // Freeze this argument before evaluating the next one, including
-            // nullable child fields whose wire is wider than their storage.
-            slots[pidx] = Some(if is_ref {
-                self.repr_to_slot_values_bundle(&r, &slot)?
-            } else {
-                let values = self.snapshot_argument_slot(r, &slot)?;
-                self.coerced_scalar_arg(values, a, &slot, param_tys.get(pidx))
-            });
+            let mut value = match mode {
+                CallArgMode::Boxed(inst, signature) => {
+                    let t = self
+                        .concrete_param_ty_of(signature, inst, pidx)?
+                        .ok_or_else(|| {
+                            self.gap_here("concrete call has no callee parameter type")
+                        })?;
+                    CallArgValue::Boxed(if is_ref {
+                        self.lower_ref_borrow(a)?
+                    } else {
+                        let v = self.lower_expr_with_expected(a, Some(t.as_ref()))?;
+                        self.coerced_mono(v, a, t.as_ref())
+                    })
+                }
+                CallArgMode::Scalar { shapes, types } => {
+                    let bundle = scalar.expect("scalar argument");
+                    let slot = shapes.get(pidx).cloned().unwrap_or(RetSlot::Opaque);
+                    CallArgValue::Scalar(if is_ref {
+                        self.repr_to_slot_values_bundle(&bundle, &slot)?
+                    } else {
+                        let values = self.snapshot_argument_slot(bundle, &slot)?;
+                        self.coerced_scalar_arg(values, a, &slot, types.get(pidx))
+                    })
+                }
+            };
             if source_index == 0
                 && let Some(plan) = preflight
-                && let Some(values) = &slots[pidx]
-                && let [receiver] = values.as_slice()
+                && let Some(receiver) = value.receiver_mut()
             {
-                slots[pidx] = Some(vec![self.emit_preflight(e, plan, *receiver)?]);
+                *receiver = self.emit_preflight(e, plan, *receiver)?;
             }
+            slots[pidx] = Some(value);
         }
         let hi = slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1);
-        // A trailing param with a caller-supplied default is passed explicitly too.
         let hi = defaults
             .iter()
             .take(slots.len())
             .rposition(|d| d.is_some())
             .map_or(hi, |i| hi.max(i + 1));
-        let mut out = Vec::new();
-        for i in 0..hi {
-            let slot = required_wire_slot(
-                param_shapes,
-                i,
-                false,
-                "slotted call",
-                |slot| slot.clone(),
-                |message| self.gap_here(message),
-            )?;
-            match slots[i].clone() {
-                Some(values) => out.extend(values),
+        let mut out = Vec::with_capacity(hi);
+        for (i, value) in slots.into_iter().take(hi).enumerate() {
+            let slot = match mode {
+                CallArgMode::Boxed(..) => RetSlot::Opaque,
+                CallArgMode::Scalar { shapes, .. } => required_wire_slot(
+                    shapes,
+                    i,
+                    false,
+                    "slotted call",
+                    |slot| slot.clone(),
+                    |message| self.gap_here(message),
+                )?,
+            };
+            match value {
+                Some(CallArgValue::Boxed(value)) => out.push(value),
+                Some(CallArgValue::Scalar(values)) => out.extend(values),
                 None if defaults.get(i).is_some_and(Option::is_some) => {
                     let default = defaults[i].as_ref().expect("checked above");
                     out.extend(self.emit_param_default(default, &slot)?);
                 }
-                // Otherwise an omitted param arrives as one nil PER WIRE VALUE,
-                // so the callee's default-fill sees a nil in every leaf it binds.
                 None => {
+                    // Omitted values need nil in every wire for default-fill.
                     for _ in 0..slot.slot_count() {
                         out.push(self.emit_cur(Inst::Const(Lit::Nil)));
                     }

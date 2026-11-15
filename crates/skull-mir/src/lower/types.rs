@@ -269,20 +269,6 @@ impl<'a> Builder<'a> {
         self.dispatch().is_nullable_ty(ty)
     }
 
-    /// The boxed-ABI view of [`Self::spread_field_bundles`]. Field extraction has
-    /// one representation-aware implementation; only the final packing differs.
-    pub(crate) fn spread_field_insts(
-        &mut self,
-        op: Idx<Expr>,
-    ) -> Result<Vec<(Ustr, Idx<Inst>)>, CompilerError> {
-        let bundles = self.spread_field_bundles(op)?;
-        let mut out = Vec::with_capacity(bundles.len());
-        for (field, bundle) in bundles {
-            out.push((field, self.pack(bundle.into_value())?));
-        }
-        Ok(out)
-    }
-
     /// Extract a spread into field bundles. Every field gets the child plan from
     /// the declaring struct before a caller places it into a parameter slot.
     pub(crate) fn spread_field_bundles(

@@ -24,6 +24,7 @@ mod compile_release;
 mod allocation_report;
 mod late_float;
 
+mod named_call_args;
 mod nested_box_boundary;
 
 mod arena_column_oracle;
