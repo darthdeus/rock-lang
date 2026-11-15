@@ -159,6 +159,29 @@ fn logged_errors_fail_tests_without_interrupting_them() {
             fn warning_control() {{ log_warn("PROBE", "warning") }}
             @test(output = "[PROBE] expected")
             fn expected_error_control() {{ log_once("PROBE", "expected") }}
+            @test
+            fn scoped_error_control() {{
+                let message = "dynamic " + tostring(7)
+                assert_error_logs(["[HIDDEN] " + message], () => {{
+                    log_error("HIDDEN", message)
+                }})
+            }}
+            @test
+            fn scoped_extra_error() {{
+                assert_error_logs(["[PROBE] expected"], () => {{
+                    log_error("PROBE", "expected")
+                    log_error("HIDDEN", "extra scoped error")
+                }})
+            }}
+            @test
+            fn scoped_missing_error() {{
+                assert_error_logs(["[PROBE] missing"], () => {{ }})
+            }}
+            @test
+            fn error_outside_scope() {{
+                assert_error_logs(["[PROBE] expected"], () => {{ log_error("PROBE", "expected") }})
+                log_error("HIDDEN", "outside scope")
+            }}
             @test(output = "[PROBE] expected")
             fn unexpected_error() {{
                 log_error("PROBE", "expected")
@@ -178,7 +201,10 @@ fn logged_errors_fail_tests_without_interrupting_them() {
         assert_mentions(&out, "[PROBE] logged failure");
         assert_mentions(&out, "unexpected_error: error:");
         assert_mentions(&out, "[HIDDEN] unexpected failure");
-        assert_mentions(&out, "2/4 @tests passed (2 failed)");
+        assert_mentions(&out, "scoped_extra_error: error:");
+        assert_mentions(&out, "scoped_missing_error: error:");
+        assert_mentions(&out, "error_outside_scope: error:");
+        assert_mentions(&out, "3/8 @tests passed (5 failed)");
         assert_eq!(
             std::fs::read_to_string(root.path().join("continued")).unwrap(),
             "yes"
