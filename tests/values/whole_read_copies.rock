@@ -19,6 +19,8 @@ fn mk_owner(seed: int) -> Owner {
     return Owner { p: Pt { x: seed, y: seed }, h: GcH { xs: [seed], n: seed } }
 }
 
+fn owner_identity(o: Owner) -> Owner { return o }
+
 fn mk_pt(seed: int) -> Pt { return Pt { x: seed, y: seed } }
 fn mk_gc(seed: int) -> GcH { return GcH { xs: [seed], n: seed } }
 
@@ -30,7 +32,9 @@ global G_GC: GcH = mk_gc(1)
 fn test_field_read_copies_ffi_clean() {
     let o = mk_owner(1)
     let copy = o.p
+    let stored = Owner { p: owner_identity(o).p, h: o.h }
     o.p.x = 99
+    assert_eq(stored.p.x, 1)
     print("{copy.x} {o.p.x}")
 }
 
@@ -38,7 +42,9 @@ fn test_field_read_copies_ffi_clean() {
 fn test_field_read_copies_gc() {
     let o = mk_owner(1)
     let copy = o.h
+    let stored = Owner { p: o.p, h: owner_identity(o).h }
     o.h.n = 99
+    assert_eq(stored.h.n, 1)
     print("{copy.n} {o.h.n}")
 }
 
