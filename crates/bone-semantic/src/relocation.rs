@@ -16,10 +16,11 @@
 //! (their first parameter changes structure) plus Map index assignment and a
 //! Vec `len` write.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use bone_core::hir_walk::HirChild;
 use bone_core::modules::is_stdlib_module_file;
-use bone_core::suspension::{SuspensionPolicy, uses_after_suspension};
+use bone_core::suspension::{SuspensionPolicy, uses_after_suspension, uses_after_suspension_in};
 use bone_core::workspace::BodyInference;
 
 use crate::hir::{
@@ -144,10 +145,17 @@ struct BodyCtx<'a> {
     ref_values: FxHashMap<Idx<BindingInfo>, Vec<Idx<Expr>>>,
     arena_remove: Option<Span>,
     root_cache: std::cell::RefCell<FxHashMap<Idx<BindingInfo>, Vec<Root>>>,
+    return_origins: &'a ReturnOrigins,
 }
 
 impl<'a> BodyCtx<'a> {
-    fn new(ws: &'a Workspace, function: &Function, body: &'a Body, bi: &'a BodyInference) -> Self {
+    fn new(
+        ws: &'a Workspace,
+        function: &Function,
+        body: &'a Body,
+        bi: &'a BodyInference,
+        return_origins: &'a ReturnOrigins,
+    ) -> Self {
         let generics = function
             .generics
             .iter()
@@ -171,6 +179,7 @@ impl<'a> BodyCtx<'a> {
             fresh_locals: FxHashSet::default(),
             ref_values: FxHashMap::default(),
             root_cache: Default::default(),
+            return_origins,
             arena_remove: (function.name.as_str() == "remove"
                 && is_stdlib_module_file(function.span.file.as_str())
                 && function
@@ -479,6 +488,20 @@ impl<'a> BodyCtx<'a> {
                     .ty(e)
                     .is_some_and(|ty| ref_target(self.ws, self.bi, ty).is_some())
                 {
+                    if let Some(callee) = self.resolved(e) {
+                        let generics = self
+                            .bi
+                            .call_generic_bindings
+                            .get(&e)
+                            .map(|types| types.iter().map(|&ty| self.key(ty)).collect::<Vec<_>>())
+                            .unwrap_or_default();
+                        for key in self.return_origins.roots(self.ws, callee) {
+                            out.push(Root {
+                                key: substitute(&key, &generics),
+                                local: None,
+                            });
+                        }
+                    }
                     for arg in self.call_args(e).unwrap_or_default() {
                         if let Some(element) = self
                             .ty(arg)
@@ -792,6 +815,69 @@ impl Relevance {
     }
 }
 
+/// Completed return-origin queries share the existing root walker and type keys.
+/// A recursive query can return discovered origins, but none of its active
+/// callers may cache a partial answer from the cycle.
+#[derive(Default)]
+struct ReturnOrigins {
+    completed: RefCell<FxHashMap<FnKey, Vec<String>>>,
+    active: RefCell<FxHashMap<FnKey, bool>>,
+}
+
+impl ReturnOrigins {
+    fn roots(&self, ws: &Workspace, key: FnKey) -> Vec<String> {
+        if let Some(roots) = self.completed.borrow().get(&key) {
+            return roots.clone();
+        }
+        if self.active.borrow().contains_key(&key) {
+            for cacheable in self.active.borrow_mut().values_mut() {
+                *cacheable = false;
+            }
+            return Vec::new();
+        }
+        self.active.borrow_mut().insert(key, true);
+        let mut roots = Vec::new();
+        if let Some((function, body, bi)) = inferred_body(ws, key) {
+            let ctx = BodyCtx::new(ws, function, body, bi, self);
+            if let Some(root) = body.root {
+                ctx.element_roots(root, &mut roots);
+                body.walk_descendants(HirChild::Expr(root), &mut |child| {
+                    match child {
+                        HirChild::Expr(e) => match body.expr_arena[e] {
+                            Expr::Lambda { .. } => return false,
+                            Expr::Return(Some(value)) => ctx.element_roots(value, &mut roots),
+                            _ => {}
+                        },
+                        HirChild::Statement(s) => match body.statement_arena[s] {
+                            Statement::Fn { .. } => return false,
+                            Statement::Return(Some(value)) => ctx.element_roots(value, &mut roots),
+                            _ => {}
+                        },
+                        HirChild::Pattern(_) => {}
+                    }
+                    true
+                });
+            }
+        }
+        let roots: Vec<_> = roots
+            .into_iter()
+            .map(|root| root.key)
+            .filter(|key| key.starts_with("Arena<"))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if self
+            .active
+            .borrow_mut()
+            .remove(&key)
+            .expect("active return query")
+        {
+            self.completed.borrow_mut().insert(key, roots.clone());
+        }
+        roots
+    }
+}
+
 /// Summaries are computed on demand: only for the callees, transitively, of
 /// bodies that pass an element reference somewhere.
 struct Program<'a> {
@@ -800,6 +886,7 @@ struct Program<'a> {
     sites: Vec<FnKey>,
     facts: FxHashMap<FnKey, FnFacts>,
     summaries: FxHashMap<FnKey, Effect>,
+    return_origins: ReturnOrigins,
 }
 
 fn inferred_body(ws: &Workspace, key: FnKey) -> Option<(&Function, &Body, &BodyInference)> {
@@ -822,6 +909,7 @@ impl<'a> Program<'a> {
             sites: Vec::new(),
             facts: FxHashMap::default(),
             summaries: FxHashMap::default(),
+            return_origins: ReturnOrigins::default(),
         };
         // Few bodies pass a reference argument; finding them visits every
         // function, so the search runs per module in parallel.
@@ -849,7 +937,7 @@ impl<'a> Program<'a> {
             let Some((function, body, bi)) = inferred_body(ws, key) else {
                 continue;
             };
-            let ctx = BodyCtx::new(ws, function, body, bi);
+            let ctx = BodyCtx::new(ws, function, body, bi, &program.return_origins);
             let mut roots = Vec::new();
             for &arg in bi.ref_call_args.values().flatten() {
                 ctx.element_roots(arg, &mut roots);
@@ -875,7 +963,7 @@ impl<'a> Program<'a> {
             let Some((function, body, bi)) = inferred_body(ws, key) else {
                 continue;
             };
-            let facts = BodyCtx::new(ws, function, body, bi).facts();
+            let facts = BodyCtx::new(ws, function, body, bi, &program.return_origins).facts();
             pending.extend(facts.calls.iter().filter_map(|(_, site)| match site {
                 CallSite::Known(edge) => Some(edge.callee),
                 CallSite::Unknown => None,
@@ -955,7 +1043,7 @@ impl<'a> Program<'a> {
         else {
             return Vec::new();
         };
-        let ctx = BodyCtx::new(self.ws, function, body, bi);
+        let ctx = BodyCtx::new(self.ws, function, body, bi, &self.return_origins);
         let effects: FxHashMap<Idx<Expr>, Effect> = facts
             .calls
             .iter()
@@ -987,7 +1075,27 @@ impl<'a> Program<'a> {
                 active_values,
                 effects: &effects,
             };
-            for at in uses_after_suspension(body, &policy) {
+            let mut crossings = uses_after_suspension(body, &policy);
+            for expr in body.expr_arena.values() {
+                if let Expr::Lambda {
+                    params,
+                    body: nested,
+                } = *expr
+                {
+                    crossings.extend(uses_after_suspension_in(body, nested, params, &policy));
+                }
+            }
+            for statement in body.statement_arena.values() {
+                if let Statement::Fn {
+                    params,
+                    body: nested,
+                    ..
+                } = *statement
+                {
+                    crossings.extend(uses_after_suspension_in(body, nested, params, &policy));
+                }
+            }
+            for at in crossings {
                 errors.push(CompilerError::new_with_label(
                     body.expr_spans[at],
                     format!("{ARENA_REJECTION}; borrow again after the call"),

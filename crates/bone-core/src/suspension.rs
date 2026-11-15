@@ -1,6 +1,4 @@
-use crate::hir::{
-    BinOp, BindingInfo, BindingKind, Callee, Expr, InterpPart, Pattern, Statement, VariantArgs,
-};
+use crate::hir::{BinOp, BindingInfo, Callee, Expr, InterpPart, Pattern, Statement, VariantArgs};
 use crate::prelude::*;
 
 pub trait SuspensionPolicy {
@@ -34,9 +32,20 @@ fn suspension_crossings(body: &Body, policy: &impl SuspensionPolicy) -> Vec<Idx<
         return Vec::new();
     }
 
+    uses_after_suspension_in(body, root, body.param_bindings, policy)
+}
+
+/// Check one function region with fresh flow. Nested function expressions and
+/// declarations stay execution boundaries; callers check their regions separately.
+pub fn uses_after_suspension_in(
+    body: &Body,
+    root: Idx<Expr>,
+    params: impl IntoIterator<Item = Idx<BindingInfo>>,
+    policy: &impl SuspensionPolicy,
+) -> Vec<Idx<Expr>> {
     let mut flow = Flow::default();
-    for (binding, info) in body.binding_arena.iter() {
-        if info.kind == BindingKind::Param && policy.binding_holds_frame_data(binding, None) {
+    for binding in params {
+        if policy.binding_holds_frame_data(binding, None) {
             flow.live.insert(binding);
         }
     }

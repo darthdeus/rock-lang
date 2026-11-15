@@ -1632,6 +1632,61 @@ fn arena_value_borrows_reject_detected_invalidation() {
 }
 
 #[test]
+fn arena_value_borrow_checks_follow_hidden_returns_and_nested_bodies() {
+    let mut missed = Vec::new();
+    for (label, body) in [
+        (
+            "hidden global return",
+            "global HELD: Entity<BorrowCell> = CELLS.insert(BorrowCell { n: 0 })\nfn hidden() -> ref BorrowCell { return CELLS.borrow(HELD).unwrap() }\nfn probe() { let r: ref BorrowCell = hidden(); CELLS.remove(HELD); r.n = 1 }",
+        ),
+        (
+            "lambda body",
+            "fn probe(h: Entity<BorrowCell>) { let f = () => { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); invalidate(h); r.n = 1 }; f() }",
+        ),
+        (
+            "local function body",
+            "fn probe(h: Entity<BorrowCell>) { fn nested(k: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(k).unwrap(); invalidate(k); r.n = 1 } nested(h) }",
+        ),
+        (
+            "early hidden return",
+            "global HELD: Entity<BorrowCell> = CELLS.insert(BorrowCell { n: 0 })\nfn hidden(flag: bool) -> ref BorrowCell { if flag { return CELLS.borrow(HELD).unwrap() }; CELLS.borrow(HELD).unwrap() }\nfn probe() { let r: ref BorrowCell = hidden(true); CELLS.remove(HELD); r.n = 1 }",
+        ),
+        (
+            "invoked closure",
+            "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); let f = () => invalidate(h); f(); r.n = 1 }",
+        ),
+        (
+            "invoked local function",
+            "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); fn nested(k: Entity<BorrowCell>) { invalidate(k) } nested(h); r.n = 1 }",
+        ),
+    ] {
+        let errors = arena_borrow_errors(body);
+        if !errors.iter().any(|e| e.contains("Arena value borrow")) {
+            missed.push((label, errors));
+        }
+    }
+    assert!(missed.is_empty(), "missed Arena invalidation: {missed:?}");
+}
+
+#[test]
+fn arena_return_origins_follow_generics_and_both_recursive_entry_points() {
+    let recursive = "global HELD: Entity<BorrowCell> = CELLS.insert(BorrowCell { n: 0 })\n\
+        fn one(n: int) -> ref BorrowCell { if n == 0 { return CELLS.borrow(HELD).unwrap() }; two(n - 1) }\n\
+        fn two(n: int) -> ref BorrowCell { one(n) }\n\
+        fn forward<T>(r: ref T) -> ref T { r }";
+    for origin in ["one(1)", "two(1)", "forward(one(1))"] {
+        let body = format!(
+            "{recursive}\nfn probe() {{ let r: ref BorrowCell = {origin}; CELLS.remove(HELD); r.n = 1 }}"
+        );
+        let errors = arena_borrow_errors(&body);
+        assert!(
+            errors.iter().any(|e| e.contains("Arena value borrow")),
+            "{origin}: {errors:?}"
+        );
+    }
+}
+
+#[test]
 fn arena_borrow_checks_preserve_separate_storage_and_fresh_reborrows() {
     for body in [
         "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); r.n = 1 }",
@@ -1642,6 +1697,14 @@ fn arena_borrow_checks_preserve_separate_storage_and_fresh_reborrows() {
         "fn probe(h: Entity<BorrowRow>) { let r: ref BorrowCell = ROWS.borrow(h).unwrap().cell; ROWS.remove(h); r.n = 1 }",
         "fn probe() { let cell = BorrowCell { n: 0 }; let r: ref BorrowCell = cell; opaque(); r.n = 1 }",
         "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); let cell = BorrowCell { n: 0 }; r = cell; CELLS.remove(h); r.n = 1 }",
+        "fn stable(owner: ref BorrowRow) -> ref BorrowCell { return owner.cell }\nfn probe() { let owner = BorrowRow { cell: BorrowCell { n: 0 } }; let r: ref BorrowCell = stable(owner); opaque(); r.n = 1 }",
+        "global HELD: Entity<BorrowRow> = ROWS.insert(BorrowRow { cell: BorrowCell { n: 0 } })\nfn stable() -> ref BorrowCell { return ROWS.borrow(HELD).unwrap().cell }\nfn probe() { let r: ref BorrowCell = stable(); ROWS.remove(HELD); opaque(); r.n = 1 }",
+        "global HELD: Entity<BorrowCell> = CELLS.insert(BorrowCell { n: 0 })\nfn stable(owner: ref BorrowRow) -> ref BorrowCell { fn unused() -> int { return CELLS.borrow(HELD).unwrap().n } return owner.cell }\nfn probe() { let owner = BorrowRow { cell: BorrowCell { n: 0 } }; let r: ref BorrowCell = stable(owner); opaque(); r.n = 1 }",
+        "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); let f = () => invalidate(h); r.n = 1 }",
+        "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); fn nested(k: Entity<BorrowCell>) { invalidate(k) } r.n = 1 }",
+        "fn probe(h: Entity<BorrowCell>) { invalidate(h); let f = () => { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); r.n = 1 }; f() }",
+        "fn probe(h: Entity<BorrowCell>) { invalidate(h); fn nested(k: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(k).unwrap(); r.n = 1 } nested(h) }",
+        "fn one(n: int, r: ref BorrowCell) -> ref BorrowCell { if n == 0 { return r }; two(n - 1, r) }\nfn two(n: int, r: ref BorrowCell) -> ref BorrowCell { one(n, r) }\nfn forward<T>(r: ref T) -> ref T { r }\nfn probe() { let cell = BorrowCell { n: 0 }; let a: ref BorrowCell = forward(one(1, cell)); let b: ref BorrowCell = two(1, cell); opaque(); a.n = 1; b.n = 1 }",
         r#"
 value OuterA { cell: BorrowCell }
 value OuterB { cell: BorrowCell }
