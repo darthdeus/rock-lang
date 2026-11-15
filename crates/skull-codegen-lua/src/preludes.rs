@@ -355,27 +355,34 @@ pub const NB_ALLOC_PRELUDE: &str = r#"
 --    the same address is a foreign pointer.
 --  * The collector does not see these bytes, so dropped buffers wait for a
 --    cycle that their own size no longer brings forward. The guard below
---    brings it forward once __ROCK_NB_OFFHEAP_CYCLE_MAX bytes have been
---    allocated off-heap within one collector cycle: large allocations then
---    advance the collector in bounded steps until the cycle ends. Allocated
+--    brings it forward once __ROCK_NB_OFFHEAP_CYCLE_MAX bytes of allocation
+--    debt accumulate: large allocations then advance it in bounded steps.
+--    Recent cycles stay charged until their finalizers have drained. Allocated
 --    bytes are not dead bytes (a program may simply be keeping what it
 --    allocates), so this stage must stay cheap. Only past
 --    __ROCK_NB_OFFHEAP_CYCLE_HARD, where the steps evidently cannot keep up
 --    with the allocation, does an allocation run a full collection.
 if not _G.__ROCK_NB_OFFHEAP then
   _G.__ROCK_NB_OFFHEAP = setmetatable({}, { __mode = "k" })
-  _G.__ROCK_NB_OFFHEAP_STATS = { live_bytes = 0, live_count = 0, since_cycle = 0, forced_steps = 0, forced_collections = 0, step_clock = 0 }
+  _G.__ROCK_NB_OFFHEAP_STATS = {
+    live_bytes = 0, live_count = 0, since_cycle = 0, allocated_bytes = 0, credited_bytes = 0,
+    forced_steps = 0, forced_collections = 0, step_clock = 0
+  }
   pcall(ffi.cdef, "void *calloc(size_t, size_t); void free(void *);")
-  -- Zeroes the per-cycle counter each time the collector finishes a cycle: a
-  -- proxy's __gc runs once per cycle and plants its successor.
-  local function arm()
+  -- A sentinel runs before pending cdata finalizers. Buffers born after
+  -- marking also survive that cycle. Credit only allocations from two
+  -- sentinel boundaries ago, after a complete intervening cycle has drained.
+  local function arm(previous_mark)
+    local mark = _G.__ROCK_NB_OFFHEAP_STATS.allocated_bytes
     local sentinel = newproxy(true)
     getmetatable(sentinel).__gc = function()
-      _G.__ROCK_NB_OFFHEAP_STATS.since_cycle = 0
-      arm()
+      local stats = _G.__ROCK_NB_OFFHEAP_STATS
+      stats.credited_bytes = math.max(stats.credited_bytes, previous_mark)
+      stats.since_cycle = stats.allocated_bytes - stats.credited_bytes
+      arm(mark)
     end
   end
-  arm()
+  arm(0)
 end
 -- ROCK_NB_OFFHEAP_MIN overrides the threshold for a run (bytes; a value such as
 -- 1e18 keeps every buffer on the Lua heap), to tell this mechanism apart from
@@ -414,18 +421,20 @@ function __rock_nb_alloc(ctype, n)
   if not (n * e.size >= __ROCK_NB_OFFHEAP_MIN) then return e.array(n) end
   local bytes = n * e.size
   local stats = __ROCK_NB_OFFHEAP_STATS
-  stats.since_cycle = stats.since_cycle + bytes
+  stats.since_cycle = stats.allocated_bytes - stats.credited_bytes + bytes
   if stats.since_cycle > __ROCK_NB_OFFHEAP_CYCLE_MAX then
     if stats.since_cycle > __ROCK_NB_OFFHEAP_CYCLE_HARD then
-      stats.since_cycle = 0
+      local before = stats.allocated_bytes
       stats.forced_collections = stats.forced_collections + 1
       collectgarbage("collect")
+      -- Other finalizers can allocate during collection. Their buffers, and
+      -- the incoming allocation, must remain charged after this credit.
+      stats.credited_bytes = math.max(stats.credited_bytes, before)
     else
       local now = os.clock()
       if now - stats.step_clock >= __rock_nb_step_interval then
         stats.forced_steps = stats.forced_steps + 1
         local deadline = now + __rock_nb_step_seconds
-        -- A finished cycle runs the sentinel, which zeroes since_cycle.
         repeat
           local finished = collectgarbage("step", 0)
         until finished or os.clock() >= deadline
@@ -441,6 +450,8 @@ function __rock_nb_alloc(ctype, n)
     __rock_nb_finalizers[bytes] = finalize
   end
   local p = ffi.gc(ffi.cast(e.ptr, raw), finalize)
+  stats.allocated_bytes = stats.allocated_bytes + bytes
+  stats.since_cycle = stats.allocated_bytes - stats.credited_bytes
   stats.live_bytes = stats.live_bytes + bytes
   stats.live_count = stats.live_count + 1
   __ROCK_NB_OFFHEAP[p] = { ctype = ctype, elem_size = e.size, bytes = bytes, key = e.key }

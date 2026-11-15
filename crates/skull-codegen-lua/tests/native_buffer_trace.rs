@@ -71,6 +71,67 @@ assert(stats.live_count == 0 and stats.live_bytes == 0)
 }
 
 #[test]
+fn finalizer_allocations_keep_their_debt_until_their_collection_finishes() {
+    run(r#"
+local hard, chunk = 4 * 1024 * 1024, 65536
+-- Isolate the hard backstop from the timed soft steps.
+__ROCK_NB_OFFHEAP_CYCLE_MAX = hard
+__ROCK_NB_OFFHEAP_CYCLE_HARD = hard
+collectgarbage('collect')
+collectgarbage('collect')
+local stats = __ROCK_NB_OFFHEAP_STATS
+local peak, callbacks = 0, 0
+local function churn(n)
+  for i = 1, n do
+    local p = __rock_nb_alloc('uint8_t', chunk)
+    p[0] = i
+    peak = math.max(peak, stats.live_bytes)
+  end
+end
+local older = newproxy(true)
+getmetatable(older).__gc = function()
+  callbacks = callbacks + 1
+  churn(64)
+end
+do
+  local newer = newproxy(true)
+  getmetatable(newer).__gc = function()
+    callbacks = callbacks + 1
+    churn(48)
+  end
+end
+-- These allocations survive the first collection. The successor sentinel
+-- can run before both their finalizers and the older allocating finalizer.
+collectgarbage('collect')
+older = nil
+collectgarbage('collect')
+assert(callbacks == 2, callbacks)
+assert(peak <= hard + 2 * chunk, 'peak ' .. peak)
+
+for i = 1, 4 do collectgarbage('collect') end
+-- Make the next collection come from the hard backstop, not automatic GC.
+collectgarbage('stop')
+local keep = {}
+for i = 1, 64 do keep[i] = __rock_nb_alloc('uint8_t', chunk) end
+peak = 0
+local trigger = newproxy(true)
+getmetatable(trigger).__gc = function()
+  callbacks = callbacks + 1
+  churn(48)
+end
+keep = nil
+trigger = nil
+-- Crossing the hard limit must not credit the old buffers before collection:
+-- an allocating finalizer can run before their frees and need the backstop.
+local incoming = __rock_nb_alloc('uint8_t', chunk)
+assert(callbacks == 3, callbacks)
+assert(peak <= hard + 2 * chunk, 'full collection peak ' .. peak)
+assert(incoming[0] == 0)
+collectgarbage('restart')
+"#);
+}
+
+#[test]
 fn repeated_large_allocations_record_without_creating_finalizer_closures() {
     run(r#"
 assert(jit.status())

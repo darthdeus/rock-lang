@@ -785,21 +785,26 @@ collection, so the threshold stays as high as the measurements allow.
 - The collector no longer sees these bytes, so `collectgarbage("count")` and
   heap figures derived from it under-report. `native_buffer_offheap_bytes()`
   returns the live off-heap total, and `__ROCK_NB_OFFHEAP_STATS` has
-  `live_bytes`, `live_count`, `since_cycle`, `forced_steps` and
-  `forced_collections`.
+  `live_bytes`, `live_count`, `since_cycle` (allocation debt), `allocated_bytes`,
+  `credited_bytes`, `forced_steps` and `forced_collections`.
 - A dropped off-heap buffer is freed when the collector finalizes its pointer,
   and its size no longer brings that cycle forward. The guard does, in two
-  stages. Once 256 MB has been allocated off-heap within one collector cycle
+  stages. Once 256 MB of off-heap allocation debt accumulates
   (`__ROCK_NB_OFFHEAP_CYCLE_MAX`), a large allocation advances the collector
-  for at most 0.5 ms, and no more often than every 4 ms, until the cycle ends
-  (`forced_steps` counts these). Allocated bytes are not dead bytes: a program
+  for at most 0.5 ms, and no more often than every 4 ms
+  (`forced_steps` counts these). A sentinel credits allocations from two
+  sentinel boundaries earlier: its own callback can precede pending buffer
+  finalizers, and allocations made after marking survive that cycle. Allocated
+  bytes are not dead bytes: a program
   that keeps 300 MB of buffers reaches this stage without having anything to
   free, so the stage has to be cheap. The first version ran a full collection
   here, and a profiler mode that allocates about 285 MB of history buffers
-  took one frame of 110 to 125 ms for it. Past 1 GB in one cycle
+  took one frame of 110 to 125 ms for it. Past 1 GB of debt
   (`__ROCK_NB_OFFHEAP_CYCLE_HARD`) the steps are not keeping up with the
   allocation, and the next large allocation runs a full
-  `collectgarbage("collect")` (`forced_collections`). That is a long pause;
+  `collectgarbage("collect")` (`forced_collections`), crediting only allocations
+  made before that call. Buffers allocated by finalizers during it stay charged.
+  That is a long pause;
   a program that reaches it should stop churning large buffers.
 
 ### If this is suspected of causing a problem
