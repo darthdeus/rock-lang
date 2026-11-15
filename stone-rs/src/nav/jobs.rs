@@ -1,4 +1,5 @@
 use super::*;
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::Instant;
@@ -73,7 +74,75 @@ impl QueryJob {
         self.cancelled.store(true, Ordering::Release);
     }
 }
-fn solve(graph: &NavGraph, mut plan: NavPlan, cancelled: &AtomicBool) -> QueryResult {
+thread_local! {
+    static QUERY_SCRATCH: RefCell<NavQuery> = RefCell::new(NavQuery::default());
+}
+
+fn reset_worker_query(query: &mut NavQuery) {
+    let mut previous = std::mem::take(query);
+    // Keep storage, not cached answers: worker assignment must not change the
+    // work charged to a request. Stamps invalidate retained search entries.
+    query.stamp = previous.stamp;
+    query.tile_stamp_id = previous.tile_stamp_id;
+    macro_rules! retain {
+        ($($field:ident),* $(,)?) => {
+            $(query.$field = std::mem::take(&mut previous.$field);)*
+        };
+    }
+    retain!(
+        area_rank,
+        area_rank_stamp,
+        start_node,
+        start_cost,
+        goal_node,
+        node_g,
+        node_stamp,
+        node_parent,
+        node_closed,
+        node_link,
+        goal_cost,
+        goal_stamp,
+        comp_mark,
+        cand_v,
+        cand_g,
+        cand_link,
+        pad_x,
+        pad_y,
+        pad_h,
+        pad_h_stamp,
+        cert_dist,
+        cert_stamp,
+        cert_parent,
+        cert_link,
+        cert_closed,
+        tile_dist,
+        tile_stamp,
+        tile_parent,
+        open_cost,
+        open_tile,
+        open_slot,
+    );
+    query.heap = std::mem::take(&mut previous.heap);
+    query.heap.count = 0;
+    query.areas.nodes = std::mem::take(&mut previous.areas.nodes);
+    query.areas.index = std::mem::take(&mut previous.areas.index);
+    query.areas.cluster_epoch = std::mem::take(&mut previous.areas.cluster_epoch);
+    query.areas.cluster_epoch.0.fill(-1);
+}
+
+fn solve(graph: &NavGraph, plan: NavPlan, cancelled: &AtomicBool) -> QueryResult {
+    QUERY_SCRATCH.with(|scratch| {
+        let mut query = scratch.borrow_mut();
+        solve_with_scratch(graph, plan, cancelled, &mut query)
+    })
+}
+
+fn solve_with_scratch(
+    graph: &NavGraph,
+    mut plan: NavPlan,
+    cancelled: &AtomicBool,
+    query: &mut NavQuery,
+) -> QueryResult {
     let started = Instant::now();
     let slot = plan.slot;
     if cancelled.load(Ordering::Acquire) {
@@ -87,18 +156,18 @@ fn solve(graph: &NavGraph, mut plan: NavPlan, cancelled: &AtomicBool) -> QueryRe
             worker_thread: std::thread::current().id(),
         };
     }
+    reset_worker_query(query);
     plan.slot = 0;
     plan.queue_prev = -1;
     plan.queue_next = -1;
-    let mut query = NavQuery::default();
-    nav_query_size(graph, &mut query);
+    nav_query_size(graph, query);
     query.head = 0;
     query.tail = 0;
     query.areas.work = Some(NavWorkCounters::default());
     query.plans.push(plan);
     let mut work = 0;
     while !cancelled.load(Ordering::Acquire) {
-        let done = nav_graph_advance(graph, &mut query, 4096);
+        let done = nav_graph_advance(graph, query, 4096);
         work += query.advance_spent;
         if done {
             break;

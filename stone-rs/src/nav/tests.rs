@@ -218,6 +218,73 @@ fn native_query_results_are_off_thread_and_wait_for_publication() {
 }
 
 #[test]
+fn reused_worker_scratch_preserves_routes_and_charged_work_across_graphs() {
+    use std::sync::Arc;
+    let graph = |gap| {
+        let mut blocked = vec![false; (SPACE_SIZE * SPACE_SIZE) as usize];
+        for y in 0..SPACE_SIZE {
+            if y != gap {
+                blocked[(y * SPACE_SIZE + 15) as usize] = true;
+            }
+        }
+        Arc::new(nav_test_graph(
+            &[NavTestSpace {
+                space: SpaceId { value: 1 },
+                blocked: blocked.into(),
+                ..NavTestSpace::default()
+            }],
+            &[],
+            8,
+        ))
+    };
+    let graphs = [graph(7), graph(25)];
+    assert_eq!(graphs[0].epoch, graphs[1].epoch);
+    let reused = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    for &(which, x, y) in &[(0, 30, 30), (0, 31, 29), (1, 30, 30), (0, 30, 30)] {
+        let graph = &graphs[which];
+        let mut query = NavQuery::default();
+        nav_query_follow_size(graph, &mut query);
+        let id = nav_request(
+            graph,
+            &mut query,
+            Place {
+                space: SpaceId { value: 1 },
+                grid: iv(1, 1),
+            },
+            NavRegion {
+                space: SpaceId { value: 1 },
+                rect: IRect { x, y, w: 1, h: 1 },
+            },
+            0,
+            42,
+        );
+        let plan = query.plans[id.slot].clone();
+        let fresh = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let expected = fresh
+            .install(|| QueryJob::submit(Arc::clone(graph), plan.clone()))
+            .take(true)
+            .unwrap()
+            .unwrap();
+        let actual = reused
+            .install(|| QueryJob::submit(Arc::clone(graph), plan))
+            .take(true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(actual.plan.state, expected.plan.state);
+        assert_eq!(actual.plan.cost, expected.plan.cost);
+        assert_eq!(actual.plan.route.0, expected.plan.route.0);
+        assert_eq!(actual.work, expected.work);
+        assert_eq!(actual.cert_link_visits, expected.cert_link_visits);
+    }
+}
+
+#[test]
 fn native_publication_waits_for_each_queued_deadline_in_fifo_order() {
     use super::ffi::{
         stone_nav_create, stone_nav_edit, stone_nav_get, stone_nav_plan, stone_nav_request,
