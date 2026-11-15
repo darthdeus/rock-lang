@@ -1649,7 +1649,11 @@ impl<'a> Builder<'a> {
                     ));
                 }
                 let expected = self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty));
-                let v = self.lower_expr_with_expected(value, expected)?;
+                let v = if self.binding_is_ref(b) {
+                    self.lower_ref_borrow(value)?
+                } else {
+                    self.lower_expr_with_expected(value, expected)?
+                };
                 let v = self.coerced_to_binding(v, value, b);
                 // An owned binding stays owned: a box it did not build is copied.
                 let v = match self.value_struct_of(value) {

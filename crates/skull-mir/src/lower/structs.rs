@@ -393,10 +393,10 @@ impl<'a> Builder<'a> {
     }
 
     /// Whether some `ref` borrow in this body (a `ref` argument or a `ref`
-    /// local, lambdas included) is rooted at binding `b`, or a field write
-    /// reaches `b` through value projections only (`b.p.x = v`). Either write
-    /// lands in `b`'s box, so that box is never lent to an argument slot, and
-    /// a parameter's lent box is copied before the body can borrow it.
+    /// local initializer or reassignment, lambdas included) is rooted at binding
+    /// `b`, or a field write reaches `b` through value projections only
+    /// (`b.p.x = v`). Either write lands in `b`'s box, so that box is never lent
+    /// to an argument slot. A parameter's lent box is copied before borrowing.
     pub(crate) fn binding_ref_borrowed(&self, b: Idx<BindingInfo>) -> bool {
         self.ref_borrowed_binds
             .get_or_init(|| {
@@ -440,7 +440,12 @@ impl<'a> Builder<'a> {
                         }
                     }
                 };
-                let field_writes = self.body.expr_arena.iter().filter_map(|(_, e)| match e {
+                let writes = self.body.expr_arena.iter().filter_map(|(_, e)| match e {
+                    Expr::Assign { target, value }
+                        if matches!(self.body.expr_arena[*target], Expr::Var(b) if self.binding_is_ref(b)) =>
+                    {
+                        root(*value)
+                    }
                     Expr::Assign { target, .. }
                     | Expr::CompoundAssign { target, .. }
                     | Expr::IncDec { target, .. } => field_write_root(*target),
@@ -448,7 +453,7 @@ impl<'a> Builder<'a> {
                 });
                 args.chain(ref_lets)
                     .filter_map(root)
-                    .chain(field_writes)
+                    .chain(writes)
                     .collect()
             })
             .contains(&raw(b))
