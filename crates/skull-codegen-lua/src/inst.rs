@@ -140,6 +140,8 @@ impl Emitter<'_> {
         // local copy of it: the body writes no register of the caller, and
         // its result register is assigned by the last statement only.
         let names = lua_names_of(body.as_str());
+        let splice_start = out.len();
+        let first_site = self.allocation.map_or(0, |a| a.sites.borrow().len());
         let mut locals = String::new();
         let mut stand_ins = Vec::new();
         for (i, (p, a)) in callee.param_decls.iter().zip(args.iter()).enumerate() {
@@ -188,6 +190,17 @@ impl Emitter<'_> {
         render_spliced_inline_lua(out, &body, shape, (!bare).then_some(lv.as_str()));
         if block {
             out.push_str(" end\n");
+        }
+        // Operands were rendered into scratch strings, so their allocation
+        // sites recorded scratch offsets. An instrumented site is found by its
+        // ID; an uninstrumented one gets the splice's first line.
+        if let Some(allocation) = self.allocation {
+            for site in &mut allocation.sites.borrow_mut()[first_site..] {
+                let id = format!("\"{:016x}\"", site.id);
+                site.lua_byte_offset = out[splice_start..]
+                    .find(&id)
+                    .map_or(splice_start, |at| splice_start + at);
+            }
         }
         true
     }
