@@ -194,7 +194,7 @@ inventory at that stage was **350 unpinned of 524 cases**; the full error scan r
 
 Wrong diagnostic and valid-program mutations fail every rejection assertion in
 these families. This strengthens 27 existing cases and adds one pinned case;
-the inventory is **323 unpinned of 525 cases**. The full error scan passes 519
+the inventory at that stage was **323 unpinned of 525 cases**. The full error scan passes 519
 cases with six existing TODOs. No production compiler code changed.
 
 The audit corrected stale map-key and embed-layout comments. It also keeps the
@@ -202,6 +202,22 @@ limits explicit: the embed runtime suite contains an inverted reflection
 sentinel that passes because a known defect remains, and the Map key checker
 has source-scan and newtype-recursion limits. Green corpus counts do not erase
 those limitations or establish exhaustive enforcement.
+
+## Control flow, opaque representation and iterator bounds
+
+| Family | Existing cases strengthened | Nearby accepted controls |
+|---|---|---|
+| [Control flow](control-flow-rejections.md) | 8: tuple elements, final `else`, loop context | Eight new statement/value boundary tests on Lua and JS |
+| [Opaque representation](repr-opaque-rejections.md) | 7: annotation placement, body and argument forms | 11 Rust boundary checks and five runtime push controls on each backend |
+| [Iterator bounds](iterator-bound-rejections.md) | 7: bound declaration, conformance and use | 58 runtime cases on each backend, including direct multi-value iteration |
+
+All 22 original inputs already rejected for their intended reasons. Each now
+asserts that reason, and wrong-diagnostic and generic-valid mutations fail all
+22 assertions. The inventory is **301 unpinned of 525 cases**; the full error
+scan remains 519 passed with six existing TODOs. No production compiler code
+changed. The separate coroutine/iterator restriction remains unaudited, opaque
+annotations remain author promises, and the control-flow audit records scalar
+`break`/`continue` branch typing as an adjacent behavior needing review.
 
 ## Useful measurements
 
@@ -229,8 +245,8 @@ audited by this work.
 
 The breadth survey also found a stale LSP fixture warning: the parser already
 rejects unknown expectation lines. Its existing malformed-block regression
-passes; the documentation now matches that behavior. The ledger contains 24
-bounded records, not 24 comprehensively verified subsystems.
+passes; the documentation now matches that behavior. The ledger contains 27
+bounded records, not 27 comprehensively verified subsystems.
 
 Extend the evidence ledger alongside concrete repairs. Its checks establish
 bounded claims, not a percentage of language coverage or a launch certificate.

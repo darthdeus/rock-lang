@@ -57,9 +57,12 @@ and [evidence ledger](evidence.json) for wider coverage.
   ([source](../crates/bone-inference/src/lib.rs)); the
   [instance graph](../crates/skull-graph/src/instance_graph.rs) tracks concrete
   function instances. These are implementation pointers, not an ABI promise.
-- **Documented restriction, not audited here:** `I: Iterator<T>` supplies an
-  iterator bound, but calls with that bound in coroutine bodies are documented
-  as rejected. See [iterator rules](language-reference.md#iterators) and the
+- **Established selected bound checks:** `I: Iterator<E>` requires structural
+  `next(I) -> (bool, E)` conformance. A multi-value `next` can drive a direct
+  `for` without satisfying that bound. See the source-linked
+  [bound audit and controls](iterator-bound-rejections.md).
+- **Documented restriction, not audited here:** calls with an iterator bound
+  in coroutine bodies are documented as rejected. See [iterator rules](language-reference.md#iterators) and the
   [rejection fixture](../tests/errors/iterators/bounded_call_in_nested_body.rock.err).
   That fixture does not yet pin the rejection diagnostic.
 
