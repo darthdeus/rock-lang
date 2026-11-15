@@ -206,12 +206,24 @@ pub fn reserve_quads(rm: RetainedMesh, n: int) {
     reserve_quads(rm.mesh, n)
 }
 
-pub fn add(rm: RetainedMesh, pos: Vec2, src: IRect, dest_size: Vec2, pivot: Vec2 = PIVOT_CENTER) {
+// One release and one growth check for both ordinary and early append calls.
+// Passing the prepared SpriteMesh to the tail also keeps the single rm.mesh
+// read and the GPU state seen by allocator callbacks in their original order.
+// Each wrapper obeys add(rm, args) == tail(prepare(rm), args).
+fn __retained_mesh_prepare_append(rm: RetainedMesh) -> SpriteMesh {
     retained_mesh_gpu_release(rm)
-    sprite_mesh_add(rm.mesh, pos, src, dest_size, pivot)
+    return __sprite_mesh_prepare_append(rm.mesh)
 }
 
-pub fn add_quad(
+pub @preflight("__retained_mesh_prepare_append", "__retained_mesh_add_tail") fn add(rm: RetainedMesh, pos: Vec2, src: IRect, dest_size: Vec2, pivot: Vec2 = PIVOT_CENTER) {
+    __retained_mesh_add_tail(__retained_mesh_prepare_append(rm), pos, src, dest_size, pivot)
+}
+
+fn __retained_mesh_add_tail(mesh: SpriteMesh, pos: Vec2, src: IRect, dest_size: Vec2, pivot: Vec2) {
+    __sprite_mesh_add_tail(mesh, pos, src, dest_size, pivot, null, WHITE)
+}
+
+pub @preflight("__retained_mesh_prepare_append", "__retained_mesh_add_quad_tail") fn add_quad(
     rm: RetainedMesh,
     tl: Vec2,
     tr: Vec2,
@@ -226,8 +238,17 @@ pub fn add_quad(
     corner_u: Vec4? = null,
     corner_v: Vec4? = null
 ) {
-    retained_mesh_gpu_release(rm)
-    sprite_mesh_add_quad(rm.mesh, tl, tr, br, bl, src, py, tint, colorize, corner_alpha, corner_colorize, corner_u, corner_v)
+    __retained_mesh_add_quad_tail(__retained_mesh_prepare_append(rm), tl, tr, br, bl, src,
+        py, tint, colorize, corner_alpha, corner_colorize, corner_u, corner_v)
+}
+
+fn __retained_mesh_add_quad_tail(
+    mesh: SpriteMesh, tl: Vec2, tr: Vec2, br: Vec2, bl: Vec2, src: IRect,
+    py: float, tint: Color, colorize: float,
+    corner_alpha: Vec4?, corner_colorize: Vec4?, corner_u: Vec4?, corner_v: Vec4?,
+) {
+    __sprite_mesh_add_quad_tail(mesh, tl, tr, br, bl, src, py, tint, colorize,
+        corner_alpha, corner_colorize, corner_u, corner_v)
 }
 
 // Prepare GPU storage without registering retained contents for a draw.

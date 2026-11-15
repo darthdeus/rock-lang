@@ -228,6 +228,16 @@ pub fn rect_batch_set_target(
     m.capacity = new_cap
 }
 
+// Both the ordinary append and a compiler-approved early call use this exact
+// growth step once. The tail writers never repeat it after callbacks run.
+// For each append below: append(m, args) == tail(prepare(m), args).
+fn __sprite_mesh_prepare_append(m: SpriteMesh) -> SpriteMesh {
+    if m.count >= m.capacity * RECT_BATCH_VERTS_PER_RECT {
+        __grow_sprite_mesh_buf(m)
+    }
+    return m
+}
+
 // Reserve additional quads before computing float-heavy append arguments.
 // Pick the final geometric capacity first so a bulk request copies only once.
 pub fn reserve_quads(m: SpriteMesh, n: int) {
@@ -732,16 +742,23 @@ fn __sprite_mesh_push_segment(
 // cross-section axis choice). Raw UVs -- no atlas rect, no texel inset: a
 // trail texture is a standalone image, and insetting would break the seam
 // where the scroll axis wraps.
-pub fn sprite_mesh_add_segment(
+pub @preflight("__sprite_mesh_prepare_append", "__sprite_mesh_add_segment_tail") fn sprite_mesh_add_segment(
     m: SpriteMesh,
     a_left: Vec2, a_left_uv: Vec2, a_right: Vec2, a_right_uv: Vec2, a_color: Color,
     b_left: Vec2, b_left_uv: Vec2, b_right: Vec2, b_right_uv: Vec2, b_color: Color,
     a_py: float = 0.0, b_py: float = 0.0,
 ) {
-    if m.count >= m.capacity * RECT_BATCH_VERTS_PER_RECT {
-        __grow_sprite_mesh_buf(m)
-    }
+    __sprite_mesh_add_segment_tail(__sprite_mesh_prepare_append(m),
+        a_left, a_left_uv, a_right, a_right_uv, a_color,
+        b_left, b_left_uv, b_right, b_right_uv, b_color, a_py, b_py)
+}
 
+fn __sprite_mesh_add_segment_tail(
+    m: SpriteMesh,
+    a_left: Vec2, a_left_uv: Vec2, a_right: Vec2, a_right_uv: Vec2, a_color: Color,
+    b_left: Vec2, b_left_uv: Vec2, b_right: Vec2, b_right_uv: Vec2, b_color: Color,
+    a_py: float, b_py: float,
+) {
     __sprite_mesh_push_segment(
         m.vbo, m.count,
         a_left.x, a_left.y, a_left_uv.x, a_left_uv.y,
@@ -765,7 +782,7 @@ pub fn sprite_mesh_add_segment(
 // batches get correct per-tile occlusion for free. sprite_mesh_add_quad
 // keeps an explicit `py` param -- an arbitrary quad has no single
 // anchor (flat-panel walls share one tile-anchor y across 3 quads).
-pub fn sprite_mesh_add(
+pub @preflight("__sprite_mesh_prepare_append", "__sprite_mesh_add_tail") fn sprite_mesh_add(
     m: SpriteMesh,
     pos: Vec2,
     src: IRect,
@@ -774,10 +791,13 @@ pub fn sprite_mesh_add(
     py: float? = null,
     tint: Color = WHITE,
 ) {
-    if m.count >= m.capacity * RECT_BATCH_VERTS_PER_RECT {
-        __grow_sprite_mesh_buf(m)
-    }
+    __sprite_mesh_add_tail(__sprite_mesh_prepare_append(m), pos, src, dest_size, pivot, py, tint)
+}
 
+fn __sprite_mesh_add_tail(
+    m: SpriteMesh, pos: Vec2, src: IRect, dest_size: Vec2,
+    pivot: Vec2, py: float?, tint: Color,
+) {
     // Geometric center from anchor pos + pivot (matches add_sprite_vertices).
     let hw = dest_size.x / 2.0
     let hh = dest_size.y / 2.0
@@ -819,7 +839,7 @@ pub fn sprite_mesh_add(
 // Optional corner lanes use the same TL, TR, BR, BL order. Alpha multiplies
 // tint.a; colorize replaces the scalar; U/V replace normalized atlas UVs
 // independently, without texel inset (custom shaders may use them as data).
-pub fn sprite_mesh_add_quad(
+pub @preflight("__sprite_mesh_prepare_append", "__sprite_mesh_add_quad_tail") fn sprite_mesh_add_quad(
     m: SpriteMesh,
     tl: Vec2, tr: Vec2, br: Vec2, bl: Vec2,
     src: IRect,
@@ -831,10 +851,29 @@ pub fn sprite_mesh_add_quad(
     corner_u: Vec4? = null,
     corner_v: Vec4? = null,
 ) {
-    if m.count >= m.capacity * RECT_BATCH_VERTS_PER_RECT {
-        __grow_sprite_mesh_buf(m)
+    let mesh = m
+    if mesh.count >= mesh.capacity * RECT_BATCH_VERTS_PER_RECT {
+        __grow_sprite_mesh_buf(mesh)
     }
+    let u1 = (float(src.x) + mesh.inset_x) / mesh.tex_w
+    let v1 = (float(src.y) + mesh.inset_y) / mesh.tex_h
+    let u2 = (float(src.x + src.w) - mesh.inset_x) / mesh.tex_w
+    let v2 = (float(src.y + src.h) - mesh.inset_y) / mesh.tex_h
 
+    let vi = mesh.count
+    __sprite_mesh_push_quad4(mesh.vbo, vi,
+        tl.x, tl.y, tr.x, tr.y, br.x, br.y, bl.x, bl.y,
+        u1, u2, v1, v2, tint.r, tint.g, tint.b, tint.a, py, colorize,
+        corner_alpha, corner_colorize, corner_u, corner_v)
+
+    mesh.count = mesh.count + RECT_BATCH_VERTS_PER_RECT
+}
+
+fn __sprite_mesh_add_quad_tail(
+    m: SpriteMesh, tl: Vec2, tr: Vec2, br: Vec2, bl: Vec2,
+    src: IRect, py: float, tint: Color, colorize: float,
+    corner_alpha: Vec4?, corner_colorize: Vec4?, corner_u: Vec4?, corner_v: Vec4?,
+) {
     let u1 = (float(src.x) + m.inset_x) / m.tex_w
     let v1 = (float(src.y) + m.inset_y) / m.tex_h
     let u2 = (float(src.x + src.w) - m.inset_x) / m.tex_w

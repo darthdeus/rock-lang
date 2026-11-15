@@ -18,6 +18,70 @@ use stone::*
 
 @nomangle inline(lua) fn __sprite_mesh_growth_copy_is(copy: any) -> bool = "return ffi.copy == copy"
 
+@nomangle inline(lua) fn __sprite_mesh_growth_force_alloc_failure(body: fn() -> ()) -> bool = """
+    local saved = __rock_nb_alloc
+    __rock_nb_alloc = function(ctype, n, ...)
+        if ctype == "Vertex" and n == 12 then error("forced mesh growth failure") end
+        return saved(ctype, n, ...)
+    end
+    local result = world_fixture_call(body, debug.traceback)
+    __rock_nb_alloc = saved
+    return not result.ok and string.find(result.value, "forced mesh growth failure", 1, true) ~= nil
+"""
+
+@nomangle inline(lua) fn __sprite_mesh_growth_mutate_during_alloc(mesh: SpriteMesh, body: fn() -> ()) -> bool = """
+    local saved = __rock_nb_alloc
+    __rock_nb_alloc = function(ctype, n, ...)
+        if ctype == "Vertex" and n == 12 then mesh.count = 12 end
+        return saved(ctype, n, ...)
+    end
+    local result = world_fixture_call(body, debug.traceback)
+    __rock_nb_alloc = saved
+    return not result.ok and string.find(result.value, "NativeBuffer vertex span out of bounds", 1, true) ~= nil
+"""
+
+@nomangle inline(lua) fn __sprite_mesh_growth_callback_during_alloc(
+    body: fn() -> (), callback: fn() -> (),
+) -> bool = """
+    local saved = __rock_nb_alloc
+    local calls = 0
+    __rock_nb_alloc = function(ctype, n, ...)
+        if ctype == "Vertex" and n == 12 then
+            calls = calls + 1
+            callback()
+        end
+        return saved(ctype, n, ...)
+    end
+    local result = world_fixture_call(body, debug.traceback)
+    __rock_nb_alloc = saved
+    if not result.ok then error(result.value, 0) end
+    return calls == 1
+"""
+
+@nomangle inline(lua) fn __sprite_mesh_growth_getter_meter() -> any = "return { count = 0, capacity = 0, mesh = 0 }"
+
+@nomangle inline(lua) fn __sprite_mesh_growth_proxy(mesh: SpriteMesh, meter: any) -> SpriteMesh = """
+    return setmetatable({}, {
+        __index = function(_, key)
+            if key == "count" or key == "capacity" then meter[key] = meter[key] + 1 end
+            return mesh[key]
+        end,
+        __newindex = function(_, key, value) mesh[key] = value end,
+    })
+"""
+
+@nomangle inline(lua) fn __retained_mesh_growth_proxy(rm: RetainedMesh, meter: any) -> RetainedMesh = """
+    return setmetatable({}, {
+        __index = function(_, key)
+            if key == "mesh" then meter.mesh = meter.mesh + 1 end
+            return rm[key]
+        end,
+        __newindex = function(_, key, value) rm[key] = value end,
+    })
+"""
+
+@nomangle inline(lua) fn __sprite_mesh_growth_getter_count(meter: any, key: string) -> int = "return meter[key]"
+
 @nomangle inline(lua) fn __sprite_mesh_growth_meter_calls(meter: any) -> int = "return meter.calls"
 
 @nomangle inline(lua) fn __sprite_mesh_growth_meter_bytes(meter: any) -> int = "return meter.bytes"
@@ -55,6 +119,141 @@ fn sprite_mesh_growth_append_kind(mesh: SpriteMesh, kind: int) {
             v(1.0, 2.0), v(0.0, 0.0), v(3.0, 4.0), v(1.0, 0.0), WHITE,
             v(5.0, 6.0), v(0.0, 1.0), v(7.0, 8.0), v(1.0, 1.0), WHITE)
     }
+}
+
+fn sprite_mesh_growth_observe_capacity(mesh: SpriteMesh) -> Vec2 {
+    assert_eq(mesh.capacity, 1, "argument evaluation precedes ordinary append growth")
+    return v(1.0, 2.0)
+}
+
+@test
+fn sprite_mesh_effectful_argument_keeps_evaluation_order() {
+    let mesh = sprite_mesh_growth_test_mesh()
+    sprite_mesh_growth_append_kind(mesh, 0)
+    sprite_mesh_add_quad(mesh, sprite_mesh_growth_observe_capacity(mesh),
+        v(3.0, 4.0), v(5.0, 6.0), v(7.0, 8.0), ir(0, 0, 8, 8))
+    assert_eq(mesh.capacity, 2)
+    assert_eq(mesh.count, 12)
+}
+
+@test
+fn sprite_mesh_argument_reading_capacity_keeps_evaluation_order() {
+    let mesh = sprite_mesh_growth_test_mesh()
+    sprite_mesh_growth_append_kind(mesh, 0)
+    sprite_mesh_add_quad(mesh, v(float(mesh.capacity), 2.0),
+        v(3.0, 4.0), v(5.0, 6.0), v(7.0, 8.0), ir(0, 0, 8, 8))
+    assert_eq(mesh.capacity, 2)
+    assert_eq(mesh.vbo[6].pos.x as float, 1.0)
+}
+
+@test
+fn retained_mesh_argument_reading_capacity_keeps_evaluation_order() {
+    let rm = RetainedMesh { mesh: sprite_mesh_growth_test_mesh() }
+    rm.add(v(8.0, 12.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+    rm.add_quad(v(float(rm.mesh.capacity), 2.0),
+        v(3.0, 4.0), v(5.0, 6.0), v(7.0, 8.0), ir(0, 0, 8, 8))
+    assert_eq(rm.mesh.capacity, 2)
+    assert_eq(rm.mesh.vbo[6].pos.x as float, 1.0)
+}
+
+@test
+fn retained_mesh_growth_failure_releases_upload_before_allocation() {
+    assert(stone_gpu_host_ensure())
+    let rm = RetainedMesh { mesh: sprite_mesh_growth_test_mesh() }
+    rm.add(v(8.0, 12.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+    retained_mesh_prepare(rm)
+    assert(rm.gpu_mesh != null)
+    let failed = __sprite_mesh_growth_force_alloc_failure(() => {
+        rm.add_quad(v(1.0, 2.0), v(3.0, 4.0),
+            v(5.0, 6.0), v(7.0, 8.0), ir(0, 0, 8, 8))
+    })
+    assert(failed)
+    assert(rm.gpu_mesh == null)
+    assert_eq(rm.mesh.count, 6)
+    assert_eq(rm.mesh.capacity, 1)
+}
+
+@test
+fn retained_mesh_growth_callback_keeps_reinstalled_gpu_upload() {
+    assert(stone_gpu_host_ensure())
+    let rm = RetainedMesh { mesh: sprite_mesh_growth_test_mesh() }
+    rm.add(v(8.0, 12.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+    retained_mesh_prepare(rm)
+    assert(rm.gpu_mesh != null)
+    let hit = __sprite_mesh_growth_callback_during_alloc(
+        () => {
+            rm.add_quad(v(1.0, 2.0), v(3.0, 4.0), v(5.0, 6.0), v(7.0, 8.0),
+                ir(0, 0, 8, 8), 0.0,
+                Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, 0.0,
+                null, null, null, null)
+        },
+        () => { retained_mesh_prepare(rm) },
+    )
+    assert(hit)
+    assert(rm.gpu_mesh != null, "append does not release a callback's later upload")
+    assert_eq(rm.mesh.count, 12)
+    retained_mesh_gpu_release(rm)
+}
+
+@test
+fn sprite_mesh_preflight_skips_metatable_getters() {
+    let mesh = sprite_mesh_growth_test_mesh()
+    sprite_mesh_growth_append_kind(mesh, 0)
+    let meter = __sprite_mesh_growth_getter_meter()
+    let proxy = __sprite_mesh_growth_proxy(mesh, meter)
+    sprite_mesh_add_quad(proxy, v(1.0, 2.0), v(3.0, 4.0),
+        v(5.0, 6.0), v(7.0, 8.0), ir(0, 0, 8, 8))
+    assert_eq(__sprite_mesh_growth_getter_count(meter, "count"), 4)
+    assert_eq(__sprite_mesh_growth_getter_count(meter, "capacity"), 2)
+    assert_eq(mesh.count, 12)
+    assert_eq(mesh.capacity, 2)
+}
+
+@test
+fn retained_mesh_preflight_skips_metatable_getters() {
+    let rm = RetainedMesh { mesh: sprite_mesh_growth_test_mesh() }
+    rm.add(v(8.0, 12.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+    let meter = __sprite_mesh_growth_getter_meter()
+    let proxy = __retained_mesh_growth_proxy(rm, meter)
+    proxy.add_quad(v(1.0, 2.0), v(3.0, 4.0),
+        v(5.0, 6.0), v(7.0, 8.0), ir(0, 0, 8, 8))
+    assert_eq(__sprite_mesh_growth_getter_count(meter, "mesh"), 1)
+    assert_eq(rm.mesh.count, 12)
+    assert_eq(rm.mesh.capacity, 2)
+}
+
+@test
+fn sprite_mesh_invalid_full_count_keeps_the_writer_error() {
+    let mesh = sprite_mesh_growth_test_mesh()
+    mesh.vbo = native_buffer_vertex(12)
+    mesh.count = 12
+    let failure = world_fixture_raised(() => {
+        sprite_mesh_add_quad(mesh, v(1.0, 2.0), v(3.0, 4.0),
+            v(5.0, 6.0), v(7.0, 8.0), ir(0, 0, 8, 8))
+    })
+    assert(failure != null, "the writer rejects a span beyond grown storage")
+    assert_eq(mesh.capacity, 2)
+    assert_eq(mesh.count, 12)
+}
+
+fn sprite_mesh_growth_callback_append(mesh: SpriteMesh) {
+    sprite_mesh_add_quad(mesh, v(1.0, 2.0), v(3.0, 4.0),
+        v(5.0, 6.0), v(7.0, 8.0), ir(0, 0, 8, 8), 0.0,
+        Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, 0.0,
+        null, null, null, null)
+}
+
+@test
+fn sprite_mesh_growth_callback_keeps_single_growth_and_span_error() {
+    let mesh = sprite_mesh_growth_test_mesh()
+    mesh.vbo = native_buffer_vertex(12)
+    mesh.count = 6
+    let failed = __sprite_mesh_growth_mutate_during_alloc(mesh, () => {
+        sprite_mesh_growth_callback_append(mesh)
+    })
+    assert(failed, "one growth leaves the callback's overfull count to the writer span check")
+    assert_eq(mesh.capacity, 2)
+    assert_eq(mesh.count, 12)
 }
 
 @test
