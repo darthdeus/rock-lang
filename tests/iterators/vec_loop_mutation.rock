@@ -5,10 +5,15 @@
 // and a turn whose slot is gone raises the out-of-bounds error. A vector the
 // body swaps in is not walked; the loop keeps the one it started on.
 
-@intrinsic @nomangle inline(lua) fn loop_error(f: fn()) -> string = """
+@nomangle inline(lua) fn loop_error(f: fn()) -> string = """
     local ok, err = pcall(f)
     if ok then return "ok" end
     return (tostring(err):gsub("^.-: ", ""))
+"""
+
+@nomangle inline(js) fn loop_error(f: fn()) -> string = """
+    try { __rock_call(f); return "ok"; }
+    catch (e) { return (e instanceof Error) ? e.message : String(e); }
 """
 
 struct Bag { items: [int] }
