@@ -12,11 +12,13 @@ parser = argparse.ArgumentParser()
 parser.add_argument("lua", type=Path)
 parser.add_argument("--luajit", default="luajit")
 parser.add_argument("--rounds", type=int, default=6)
+parser.add_argument("--changes", nargs="+", choices=("stable", "changing", "every_frame"),
+                    default=("stable", "changing", "every_frame"))
 args = parser.parse_args()
 driver = Path(__file__).with_name("driver.lua")
 rows = []
 for inputs in (1, 7, 10):
-    for changes in ("stable", "changing"):
+    for changes in args.changes:
         for metric in ("time", "heap"):
             for pair in range(args.rounds):
                 order = ("fresh", "retained") if pair % 2 == 0 else ("retained", "fresh")

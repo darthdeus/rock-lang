@@ -109,6 +109,42 @@ pub struct Pass {
     draw_buffers: int = 0,
 }
 
+// Queues and the pipeline inspector retain Pass records. Return the old record
+// on a match; copy on change so an earlier submission keeps its input snapshot.
+// Assign the result back to the retained pass. Other payloads remain shared.
+pub fn Pass.with_canvas_input(p, slot: int, canvas: Canvas, sampling: TextureFilter) -> Pass {
+    let current = p.slot_inputs[slot]
+    if current.1 == sampling && sampled_texture_matches_canvas(current.0, canvas) { return p }
+    let inputs = p.slot_inputs.clone()
+    inputs[slot] = (SampledTexture::Canvas(canvas), sampling)
+    return Pass { ..p, slot_inputs: inputs }
+}
+
+pub fn Pass.with_image_input(p, slot: int, image: Image, sampling: TextureFilter) -> Pass {
+    let current = p.slot_inputs[slot]
+    if current.1 == sampling {
+        match current.0 {
+            SampledTexture::Image(actual) => { if actual.0 == image.0 { return p } }
+            SampledTexture::Canvas(_) => {}
+        }
+    }
+    let inputs = p.slot_inputs.clone()
+    inputs[slot] = (SampledTexture::Image(image), sampling)
+    return Pass { ..p, slot_inputs: inputs }
+}
+
+pub fn Pass.with_output(p, output: Canvas?) -> Pass {
+    if output == null {
+        if p.output == null { return p }
+    } else {
+        if let previous = p.output {
+            if previous.handle.0 == output.handle.0
+                && previous.width == output.width && previous.height == output.height { return p }
+        }
+    }
+    return Pass { ..p, output }
+}
+
 // The Pass binder, and the only place a canvas reaches a compiler-assigned
 // slot. Sets no sampler uniform by name: `bind_texture_slots` pointed
 // each one at its slot once at link time, which is why a group needs no per-draw
@@ -410,6 +446,27 @@ fn drop_queued_passes_on_target_rebuild() {
 // the passes it must add or remove (fog is one pass per visible space).
 pub global SCENE_PASSES_RUN_LAST: int = 0
 
+global SCENE_RETURN_PASS: Pass? = null
+
+// Rebuild after code edits even when the preserved canvas handles still match.
+@nomangle
+@on_reload
+fn reset_scene_return_pass() {
+    SCENE_RETURN_PASS = null
+}
+
+fn scene_return_pass(source: Canvas, output: Canvas) -> Pass {
+    let p = SCENE_RETURN_PASS ?? Pass {
+        pipeline: BLIT_PIPELINE,
+        slot_inputs: [(sampled_canvas(source), TextureFilter::Nearest)],
+        output: output,
+        blend: BlendMode::Replace,
+    }
+    p = p.with_canvas_input(0, source, TextureFilter::Nearest).with_output(output)
+    SCENE_RETURN_PASS = p
+    return p
+}
+
 pub fn run_scene_passes() {
     SCENE_PASSES_RUN_LAST = 0
     if SCENE_PASSES.len() == 0 { return }
@@ -449,13 +506,7 @@ pub fn run_scene_passes() {
     }
 
     if current.handle.0 != screen_canvas.handle.0 {
-        run_pass(Pass {
-            pipeline: BLIT_PIPELINE,
-            slot_inputs: [(sampled_canvas(current), TextureFilter::Nearest)],
-            output: screen_canvas,
-            clear: null,
-            blend: BlendMode::Replace,
-        })
+        run_pass(scene_return_pass(current, screen_canvas))
     }
 
     SCENE_PASSES.clear()

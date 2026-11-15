@@ -1,14 +1,16 @@
 -- Timing uses ordinary GC. A separate short run measures uncollected heap growth.
 dofile(arg[1])
 local mode, inputs = arg[2], assert(tonumber(arg[3]))
-local metric, changing = arg[4], arg[5] == 'changing'
+local metric, changes = arg[4], arg[5]
 assert(mode == 'fresh' or mode == 'retained')
 assert(metric == 'time' or metric == 'heap')
+assert(changes == 'stable' or changes == 'changing' or changes == 'every_frame')
 assert(jit.status(), 'JIT must be enabled')
 local submit = mode == 'fresh' and pass_fresh or pass_retained
 local fixture = pass_fixture(inputs)
 local function frame(i)
-    local texture = changing and (math.floor((i - 1) / 60) % 2 + 1) or 1
+    local period = changes == 'every_frame' and 1 or 60
+    local texture = changes ~= 'stable' and (math.floor((i - 1) / period) % 2 + 1) or 1
     submit(fixture, inputs, texture)
     local sink = pass_consume(fixture)
     local expected = 12 * (100 + inputs * texture + inputs * (inputs - 1) / 2)
@@ -29,4 +31,4 @@ if metric == 'heap' then collectgarbage('restart') end
 assert(jit.status())
 local value = metric == 'time' and elapsed * 1e9 / (12 * reps) or growth / (12 * reps)
 print(string.format('%s %d %s %s %.6f %.0f', mode, inputs,
-    metric, changing and 'changing' or 'stable', value, sink))
+    metric, changes, value, sink))

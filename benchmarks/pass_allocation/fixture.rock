@@ -1,5 +1,5 @@
 // Appended to declarations extracted by prepare.py from current Stone sources.
-struct Fixture { queue: [Pass], held: [Pass], texture: int }
+struct Fixture { queue: [Pass], held: [Pass] }
 
 @inline fn input(texture: int, offset: int) -> (SampledTexture, TextureFilter) {
     return (SampledTexture::Canvas(Canvas {
@@ -29,7 +29,7 @@ fn make_pass(inputs: int, texture: int) -> Pass {
 @nomangle fn pass_fixture(inputs: int) -> Fixture {
     let held: [Pass] = []
     for i in 0..12 { held.push(make_pass(inputs, 1)) }
-    return Fixture { queue: [], held, texture: 1 }
+    return Fixture { queue: [], held }
 }
 
 @nomangle fn pass_fresh(f: Fixture, inputs: int, texture: int) {
@@ -37,15 +37,16 @@ fn make_pass(inputs: int, texture: int) -> Pass {
 }
 
 @nomangle fn pass_retained(f: Fixture, inputs: int, texture: int) {
-    for p in f.held {
-        if texture != f.texture {
-            for i in 0..inputs {
-                p.slot_inputs[i] = input(texture, i)
-            }
+    for index in 0..f.held.len() {
+        let p = f.held[index]
+        for slot in 0..inputs {
+            p = p.with_canvas_input(slot, Canvas {
+                handle: CanvasId(texture + slot), width: 64.0, height: 64.0,
+            }, TextureFilter::Nearest)
         }
+        f.held[index] = p
         f.queue.push(p)
     }
-    f.texture = texture
 }
 
 @nomangle fn pass_consume(f: Fixture) -> int {

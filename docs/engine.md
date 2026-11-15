@@ -6,6 +6,34 @@ the rationale that the code cannot show. A new owner of any of these takes
 its live callers in the same change and deletes the superseded state; do not
 add a compatibility flag beside the mechanism it replaces.
 
+## Retained passes
+
+Keep a `Pass` between frames and assign the results of `with_canvas_input`,
+`with_image_input` and `with_output` back to it before queueing. Input helpers
+replace an existing slot; they do not change the shader's slot count. Matching
+inputs return the same record. A changed input copies the input list and Pass;
+a changed output copies the Pass. Canvas matches include handle and dimensions.
+
+For a retained pass already configured with one input slot:
+
+```rock
+pass = pass.with_canvas_input(0, source, TextureFilter::Nearest).with_output(target)
+queue_scene_pass(pass)
+```
+
+Queues and the pipeline inspector retain Pass records. These helpers leave
+previous submissions unchanged, including when the same retained variable is
+updated and queued again before execution. Direct writes to the record or its
+lists still mutate shared state. Other fields are shallow-shared: in particular,
+array-payload buffers intentionally remain live until execution. This is not a
+deep snapshot of uniform or array data.
+
+Use these helpers for stable or occasionally changing bindings. Replacing many
+slots copies the list once per changed slot; constructing one fresh Pass can be
+cheaper when most bindings change every frame. The scene-return blit uses this
+retention path and clears its cache on hot reload. `benchmarks/pass_allocation/`
+measures both regimes on x86 LuaJIT.
+
 ## Render spaces and resolution
 
 `resolve_frame_view` (`packages/stone/engine/systems/frame_view.rock`) owns
