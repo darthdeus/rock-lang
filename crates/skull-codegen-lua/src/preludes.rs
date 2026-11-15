@@ -390,6 +390,15 @@ if not _G.__ROCK_NB_OFFHEAP_CYCLE_HARD then _G.__ROCK_NB_OFFHEAP_CYCLE_HARD = 10
 -- program's time while the guard is engaged.
 local __rock_nb_step_seconds, __rock_nb_step_interval = 0.0005, 0.004
 local __rock_nb_elems = {}
+-- Keep captured locals out of the allocator so its small-buffer return does
+-- not emit UCLO, which LuaJIT cannot record.
+local function __rock_nb_finalizer(stats, bytes)
+  return function(dead)
+    stats.live_bytes = stats.live_bytes - bytes
+    stats.live_count = stats.live_count - 1
+    ffi.C.free(dead)
+  end
+end
 function __rock_nb_alloc(ctype, n)
   local e = __rock_nb_elems[ctype]
   if not e then
@@ -421,11 +430,7 @@ function __rock_nb_alloc(ctype, n)
   end
   local raw = ffi.C.calloc(n, e.size)
   if raw == nil then error("not enough memory", 2) end
-  local p = ffi.gc(ffi.cast(e.ptr, raw), function(dead)
-    stats.live_bytes = stats.live_bytes - bytes
-    stats.live_count = stats.live_count - 1
-    ffi.C.free(dead)
-  end)
+  local p = ffi.gc(ffi.cast(e.ptr, raw), __rock_nb_finalizer(stats, bytes))
   stats.live_bytes = stats.live_bytes + bytes
   stats.live_count = stats.live_count + 1
   __ROCK_NB_OFFHEAP[p] = { ctype = ctype, elem_size = e.size, bytes = bytes, key = e.key }

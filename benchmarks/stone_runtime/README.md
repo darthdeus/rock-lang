@@ -84,32 +84,40 @@ The retained scene-return command removes about 1537 bytes per iteration
 this does not establish a frame-time speedup. Both arms still encounter
 loop-shape/trace-length aborts; the cache does not make the renderer abort-free.
 
-Mesh results per 9300-quad iteration:
+The current allocator extracts finalizer creation into a helper. Its
+per-allocation closure still captures the same stats table and byte count,
+but small returns no longer close upvalues (unrecordable `UCLO`). A direct
+small-allocation regression records successfully: 11 NYI aborts before,
+zero after, on both x86 and arm64. Large allocations still encounter `FNEW`.
 
-| Case/arm | Median us | p95 us | Gross Lua bytes | Measured aborts |
+Mesh comparison: identical emitted fixture with only `NB_ALLOC_PRELUDE`
+replaced, baseline `cd61ec3f` versus the extracted finalizer factory. Six
+alternating baseline/candidate pairs per metric, 108 processes, same native
+library/runtime as above. Each iteration writes 9300 quads. Hashes and
+per-process samples are in `results.json`.
+
+| Arm | Median us before/after | p95 us before/after | Gross Lua bytes before/after | Measured aborts before/after |
 | --- | ---: | ---: | ---: | ---: |
-| Normal/growth | 2725.05 | 11307.49 | 2106866 | 9 |
-| Normal/early | 2141.23 | 10045.77 | 2106967 | 11-12 |
-| Normal/reserved | 1312.13 | 3505.34 | 225795 | 6-7 |
-| Corners/growth | 1503.75 | 5400.25 | 2106863 | 9-11 |
-| Corners/early | 1364.47 | 4787.10 | 2106967 | 11-15 |
-| Corners/reserved | 1073.48 | 2213.94 | 225795 | 7 |
+| Growth | 1091.93 / 940.65 | 3390.29 / 3066.46 | 2106967 / 2097473 | 9-11 / 2-5 |
+| Early | 1103.83 / 877.09 | 3286.28 / 2783.44 | 2106916 / 2097386 | 10-15 / 4-7 |
+| Reserved | 1087.02 / 1112.19 | 1598.70 / 1531.78 | 225795 / 225795 | 7 / 9 |
 
-Neither mesh case reproduces `NYI: register coalescing too complex`, in
-warmup or measurement. Moving growth earlier does not remove current aborts.
-The recurring NYI sites are `UCLO` and `FNEW` in `__rock_nb_alloc`: the return
-from its small FFI-array branch and construction of the off-heap finalizer
-closure. Some runs also hit blacklisting or recording interruption.
+All 108 processes passed position/count checks. Host contention produces
+wide timing ranges, so these medians are observations, not a reliable
+application-speedup claim. In particular, reserved-buffer trace aborts
+increase; the change does not make large allocation traceable.
 
-The default 16384-byte off-heap threshold makes the reserved control a
-materially different allocation workload: it starts directly with a large
-buffer while growth allocates several intermediate small buffers. The large
-Lua-allocation reduction is not a reduction in total native bytes of the
-same magnitude. Host contention and GC produce wide timing ranges (stored
-in the JSON); do not attribute the timing difference to a coalescing fix.
+Removing the earlier UCLO obstruction exposes a coalescing failure during
+growth warmup. Twelve separate site-instrumented processes each record one
+`NYI: register coalescing too complex` at the first off-heap instruction
+following the size-threshold guard in `__rock_nb_alloc` (parent exit 1).
+None records it during the measured interval. This is a public witness for
+#264's failure class, not the old repeated-abort frequency. Trace sites now
+include phase and reason so they can be attributed independently.
 
-All 144 final processes passed their content checks. #264 remains open:
-these bounded public cases do not prove the historical witness impossible.
-The next concrete investigation is NativeBuffer allocation/finalizer trace
-behavior, with ownership and collection safety preserved; adding a reserve
-API or removing capacity guards is not justified by these results alone.
+The reserved control starts directly with an off-heap buffer at the default
+16384-byte threshold; growth creates intermediate Lua-managed arrays. Its
+lower Lua allocation count is not an equivalent reduction in total native
+bytes. Capacity and GC-pressure guards remain necessary. The remaining
+investigation is the off-heap transition and finalizer `FNEW`, preserving
+ownership and collection safety.

@@ -26,7 +26,7 @@ const AUDIT_PIPELINE: Pipeline = pipeline(rock_shader(audit_half_frag))
         local location = util.funcinfo(fn, pc).loc or '?'
         local key = phase .. ':' .. reason
         reasons[key] = (reasons[key] or 0) + 1
-        local site = location .. ' ' .. (starts[tr] or '?')
+        local site = phase .. ':' .. reason .. ' at=' .. location .. ' ' .. (starts[tr] or '?')
         sites[site] = (sites[site] or 0) + 1
     end
     if metric == 'trace' then jit.attach(trace, 'trace') end
