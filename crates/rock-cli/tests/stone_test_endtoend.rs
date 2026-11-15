@@ -19,6 +19,52 @@ const QUIESCENT: Duration = Duration::from_millis(400);
 // host's compiler and watcher processes to run, with nextest as the outer cap.
 const SETTLE_TIMEOUT: Duration = test_utils::HANG_BACKSTOP;
 
+#[test]
+fn empty_initial_sources_ignore_output_and_compile_a_later_file() {
+    let h = StoneHarness::spawn(&[(".stone-test-out/old.rock", "invalid source")]);
+    assert_eq!(h.event_count(), 0);
+    std::fs::remove_file(h.root().join(".stone-test-out/old.rock")).unwrap();
+    h.write_file("game.rock", "fn value() -> int { return 1 }\n");
+    let log = h.await_reload_count(1, SETTLE_TIMEOUT);
+    assert_eq!(log.last().expect("first compile").decision, "restart");
+}
+
+#[test]
+#[cfg(unix)]
+fn inaccessible_initial_source_fails_before_ready() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+
+    let root = tempfile::tempdir().expect("project directory");
+    let sources = root.path().join("sources");
+    std::fs::create_dir(&sources).unwrap();
+    let source = sources.join("game.rock");
+    std::fs::write(&source, "fn value() -> int { return 1 }\n").unwrap();
+    let permissions = std::fs::metadata(&sources).unwrap().permissions();
+    // A readable directory without search permission passes watcher setup,
+    // but inspecting its source entries fails. Privileged users bypass this.
+    std::fs::set_permissions(&sources, std::fs::Permissions::from_mode(0o444)).unwrap();
+    if std::fs::metadata(&source).is_ok() {
+        std::fs::set_permissions(&sources, permissions).unwrap();
+        return;
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .arg("stone-test")
+        .arg(root.path())
+        .env("ROCK_INVOCATION_LOG", "off")
+        .stdin(Stdio::null())
+        .output();
+    std::fs::set_permissions(&sources, permissions).unwrap();
+    let output = output.expect("stone-test output");
+    assert!(!output.status.success(), "inaccessible seed must fail");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("\"ready\""), "{stdout}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("inspect initial source path"), "{stderr}");
+    assert!(stderr.contains(source.to_str().unwrap()), "{stderr}");
+    assert!(stderr.contains("Permission denied"), "{stderr}");
+}
+
 // `run_lua_code` kills the script after 1.8 s of wall time.
 fn run_lua(script: &str) -> anyhow::Result<LuaRun> {
     run_lua_code_with_timeout(script, Some(test_utils::HANG_BACKSTOP))
