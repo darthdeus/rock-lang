@@ -322,6 +322,9 @@ and `@inline` scalarization.
   checked access of the same slot, with nothing in between that could shrink
   or rebind the vector. Results and errors never change; see
   `docs/luajit-performance.md` for what it covers and what it leaves.
+  Value invalidation runs only in blocks covered by backward-edge intervals
+  in reverse postorder. Every cyclic block lies in such an interval; uncovered
+  blocks cannot execute twice. Crossedges may conservatively retain scans.
 - Bounds require exactly `(bool, E)`. Multi-value iterators drive a `for` but
   cannot be wrapped by a combinator, so `enumerate` and `zip` are chain
   terminals. Bounded fns have no runtime identity: always force-inlined,
