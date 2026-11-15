@@ -222,7 +222,7 @@ pub fn rect_batch_set_target(
 // `capacity` counts rects; the buffer holds RECT_BATCH_VERTS_PER_RECT each.
 // Preserve emitted vertices before the caller appends the next rectangle.
 @nomangle fn __grow_sprite_mesh_buf(m: SpriteMesh) {
-    let new_cap = m.capacity * 2
+    let new_cap = max(m.capacity * 2, 1)
     let target = native_buffer_vertex(new_cap * RECT_BATCH_VERTS_PER_RECT)
     m.vbo = __copy_vertex_buffer_prefix(m.vbo, target, m.count)
     m.capacity = new_cap

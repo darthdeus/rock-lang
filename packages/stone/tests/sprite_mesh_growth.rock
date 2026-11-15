@@ -44,6 +44,38 @@ fn sprite_mesh_growth_test_mesh() -> SpriteMesh {
     }
 }
 
+fn sprite_mesh_growth_append_kind(mesh: SpriteMesh, kind: int) {
+    if kind == 0 {
+        sprite_mesh_add(mesh, v(8.0, 12.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+    } else if kind == 1 {
+        sprite_mesh_add_quad(mesh, v(1.0, 2.0), v(3.0, 4.0),
+            v(5.0, 6.0), v(7.0, 8.0), ir(0, 0, 8, 8))
+    } else {
+        sprite_mesh_add_segment(mesh,
+            v(1.0, 2.0), v(0.0, 0.0), v(3.0, 4.0), v(1.0, 0.0), WHITE,
+            v(5.0, 6.0), v(0.0, 1.0), v(7.0, 8.0), v(1.0, 1.0), WHITE)
+    }
+}
+
+@test
+fn sprite_mesh_growth_from_zero_matches_preallocated_vertices() {
+    for kind in 0..3 {
+        let mesh = sprite_mesh_growth_test_mesh()
+        mesh.vbo = native_buffer_vertex(0)
+        mesh.capacity = 0
+        let reference = sprite_mesh_growth_test_mesh()
+        for count in 1..4 {
+            sprite_mesh_growth_append_kind(mesh, kind)
+            sprite_mesh_growth_append_kind(reference, kind)
+            assert_eq(mesh.count, count * RECT_BATCH_VERTS_PER_RECT)
+            assert_eq(mesh.capacity, reference.capacity)
+            assert_eq(mesh.vbo.len, mesh.capacity * RECT_BATCH_VERTS_PER_RECT)
+            assert_eq(__sprite_mesh_growth_prefix(mesh.vbo, mesh.count),
+                __sprite_mesh_growth_prefix(reference.vbo, reference.count))
+        }
+    }
+}
+
 @test
 fn sprite_mesh_growth_bulk_copies_the_emitted_vertex_prefix() {
     let mesh = sprite_mesh_growth_test_mesh()
