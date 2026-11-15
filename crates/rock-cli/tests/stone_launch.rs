@@ -682,6 +682,11 @@ exit 97
 #[test]
 fn sim_commands_run_and_report_an_external_stone_project() {
     let fixture = tempfile::tempdir().unwrap();
+    // Parallel builds can replace the CLI, but receipts need a stable compiler image.
+    let rock = fixture
+        .path()
+        .join(format!("rock{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(env!("CARGO_BIN_EXE_rock"), &rock).unwrap();
     let game = fixture.path().join("game");
     std::fs::create_dir_all(game.join("tests/sims")).unwrap();
     std::fs::write(game.join("stick.toml"),
@@ -709,7 +714,7 @@ co fn portable_sim() -> Coroutine<Wait> {
     )
     .unwrap();
     let invoke = |args: &[&str], fail: bool| {
-        let output = std::process::Command::new(env!("CARGO_BIN_EXE_rock"))
+        let output = std::process::Command::new(&rock)
             .args(args)
             .current_dir(fixture.path())
             .env(
