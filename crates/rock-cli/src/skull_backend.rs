@@ -558,10 +558,15 @@ for n, t in ipairs(__skull_run) do
   io.write = function(...)
     for i = 1, select('#', ...) do buf[#buf + 1] = tostring((select(i, ...))) end
   end
-  -- `assert_error_logs` (stdlib) removes the records it verifies.
+  -- The stdlib's view of this test's error records; `assert_error_logs`
+  -- removes the records it verifies. A test process has no native logger
+  -- unless a test loads one, so the records the Rock sink sees are the list.
   local errors = {}
   local previous_errors = _G.__rock_logged_errors
-  _G.__rock_logged_errors = errors
+  _G.__rock_logged_errors = {
+    records = function() return errors, 0 end,
+    truncate = function(count) for i = #errors, count + 1, -1 do errors[i] = nil end end,
+  }
   local sink = _G.__rock_log_sink
   _G.__rock_log_sink = function(level, category, msg, wall_clock)
     local line = category and #category > 0 and ("[" .. category .. "] " .. msg) or msg

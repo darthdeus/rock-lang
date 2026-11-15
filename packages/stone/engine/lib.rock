@@ -475,6 +475,10 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         int stone_log_dedup_count(void);
         int stone_log_record_total(int level);
         const char* stone_log_records_text(int level, int max_rows);
+        void stone_log_collect_errors(void);
+        const char* stone_log_collected_errors(size_t* len);
+        int stone_log_take_collected_error(const uint8_t* record, size_t len);
+        void stone_log_truncate_collected_errors(int len);
         int64_t stone_image_read_texel(StoneImageHandle handle, int x, int y);
         int stone_image_wrap_state(StoneImageHandle handle);
         int stone_image_gl_wrap_state(StoneImageHandle handle);

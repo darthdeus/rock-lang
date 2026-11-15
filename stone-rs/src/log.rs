@@ -74,9 +74,59 @@ pub extern "C" fn stone_log_records_text(
     })
 }
 
+/// Start collecting error records for a checked run, emptying the list.
+#[no_mangle]
+pub extern "C" fn stone_log_collect_errors() {
+    rock_log::collect_errors();
+}
+
+/// Collected error records, then a final line with the overflow count, as
+/// `record<NUL>...<NUL>overflow`. A record may span lines, so NUL separates.
+/// Returns the byte length; the text is valid until the next call on this
+/// thread.
+#[no_mangle]
+pub extern "C" fn stone_log_collected_errors(len: *mut usize) -> *const std::os::raw::c_char {
+    let mut out = String::new();
+    for record in rock_log::collected_errors() {
+        out.push_str(&record.replace('\0', " "));
+        out.push('\0');
+    }
+    out.push_str(&rock_log::collected_error_overflow().to_string());
+    if !len.is_null() {
+        unsafe { *len = out.len() };
+    }
+    COLLECTED_ERRORS_REPLY.with(|reply| {
+        let mut reply = reply.borrow_mut();
+        *reply = out.into_bytes();
+        reply.as_ptr() as *const std::os::raw::c_char
+    })
+}
+
+/// Remove the first collected record equal to `record` (`len` bytes); 0 when
+/// none is.
+#[no_mangle]
+pub extern "C" fn stone_log_take_collected_error(
+    record: *const u8,
+    len: usize,
+) -> std::os::raw::c_int {
+    if record.is_null() {
+        return 0;
+    }
+    let record = unsafe { std::slice::from_raw_parts(record, len) };
+    rock_log::take_collected_error(&String::from_utf8_lossy(record)) as std::os::raw::c_int
+}
+
+/// Drop every collected record after the first `len`.
+#[no_mangle]
+pub extern "C" fn stone_log_truncate_collected_errors(len: std::os::raw::c_int) {
+    rock_log::truncate_collected_errors(len.max(0) as usize);
+}
+
 thread_local! {
     static LOG_RECORDS_REPLY: std::cell::RefCell<Option<std::ffi::CString>> =
         const { std::cell::RefCell::new(None) };
+    static COLLECTED_ERRORS_REPLY: std::cell::RefCell<Vec<u8>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Emit at most once per call site, through the one logger.

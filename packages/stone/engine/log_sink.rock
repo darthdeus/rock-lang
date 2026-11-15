@@ -41,35 +41,56 @@ const __rock_log_sink_installed: bool = __rock_install_log_sink()
 
 // A bounded run (a sim, or a frame- or time-capped run) fails on error records
 // once it completes, as `rock test` fails a test. Production code logs and
-// continues; the check keeps those errors from passing a run. The wrapper keeps
-// the installed sink, so records still print, and `assert_error_logs` removes
-// the records it verifies. Native records that bypass the Rock sink are not
-// observed.
+// continues; the check keeps those errors from passing a run. The one logger
+// (rock-log) collects every error record of the process, Rust and Rock alike,
+// as "[CAT] msg"; `_G.__rock_logged_errors` is the stdlib's view of that list,
+// and `assert_error_logs` removes the records it verifies.
 inline(lua) fn collect_logged_errors() = """
-    local records = {}
-    _G.__rock_logged_errors = records
-    local sink = _G.__rock_log_sink
-    _G.__rock_log_sink = function(level, category, msg, wall_clock)
-        if level == 0 then
-            records[#records + 1] = category and #category > 0 and ("[" .. category .. "] " .. msg) or msg
-        end
-        sink(level, category, msg, wall_clock)
-    end
+    stone.stone_log_collect_errors()
+    local len = ffi.new("size_t[1]")
+    _G.__rock_logged_errors = {
+        -- The records in emission order, then how many the cap dropped.
+        records = function()
+            local text = ffi.string(stone.stone_log_collected_errors(len), len[0])
+            local records, start = {}, 1
+            while true do
+                local stop = text:find("\0", start, true)
+                if not stop then return records, tonumber(text:sub(start)) end
+                records[#records + 1] = text:sub(start, stop - 1)
+                start = stop + 1
+            end
+        end,
+        take = function(record) return stone.stone_log_take_collected_error(record, #record) ~= 0 end,
+        truncate = function(count) stone.stone_log_truncate_collected_errors(count) end,
+    }
 """
 
-inline(lua) fn logged_error_count() -> int = """
-    local records = _G.__rock_logged_errors
-    return records and #records or 0
+inline(lua) fn logged_error_records_lua() -> any = """
+    local log = _G.__rock_logged_errors
+    return log and log.records() or {}
 """
 
-inline(lua) fn logged_error_record(index: int) -> string = "return _G.__rock_logged_errors[index + 1]"
+// Collected error records, or none when this run does not check them.
+fn logged_error_records() -> [string] {
+    let records = logged_error_records_lua()
+    return __rock_vec_from_lua_array(records, table_len(records))
+}
+
+// Error records the logger dropped past its cap; a run with any fails.
+inline(lua) fn logged_error_overflow() -> int = """
+    local log = _G.__rock_logged_errors
+    if not log then return 0 end
+    local _, overflow = log.records()
+    return overflow
+"""
 
 // Remove the first collected record equal to `record`; false when none is.
 inline(lua) fn take_logged_error(record: string) -> bool = """
-    local records = _G.__rock_logged_errors
-    if not records then return false end
-    for i = 1, #records do
-        if records[i] == record then table.remove(records, i); return true end
-    end
-    return false
+    local log = _G.__rock_logged_errors
+    return log ~= nil and log.take(record)
+"""
+
+inline(lua) fn clear_logged_errors() = """
+    local log = _G.__rock_logged_errors
+    if log then log.truncate(0) end
 """
