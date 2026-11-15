@@ -389,6 +389,7 @@ fn runner_sim_advance(frame: int) -> bool {
     if cleanup_error != "" {
         sim_expect(false, "sim cleanup failed: {cleanup_error}")
     }
+    sim_check_expected_error_logs()
     for i in 0..logged_error_count() {
         sim_emit("{{\"op\":\"error\",\"message\":\"logged error: "
             + sim_json_escape(logged_error_record(i)) + "\"}}")
@@ -865,6 +866,33 @@ fn sim_emit_fail(message: string, actual: string, expected: string, site: string
 }
 macro sim_expect(cond: expr, message: expr) {
     _sim_expect_impl(cond, message, __SITE__)
+}
+
+// Declare one "[CATEGORY] message" error record the entry expects to be logged
+// at any point from boot to its end, including records that arrive frames after
+// the step that caused them. `assert_error_logs` scopes a record to the body
+// that emits it synchronously; this covers boot-time and asynchronous records.
+// At the entry's end each declaration consumes one equal record; a declaration
+// with no record fails the entry, and records left over fail it as usual.
+value SimExpectedErrorLog { record: string, site: string }
+global SIM_EXPECTED_ERROR_LOGS: [SimExpectedErrorLog] = vec_new()
+
+pub fn _sim_expect_error_log_impl(record: string, site: string) {
+    SIM_EXPECTED_ERROR_LOGS.push(SimExpectedErrorLog { record: record, site: site })
+}
+macro sim_expect_error_log(record: expr) {
+    _sim_expect_error_log_impl(record, __SITE__)
+}
+
+fn sim_check_expected_error_logs() {
+    for expected in SIM_EXPECTED_ERROR_LOGS {
+        if take_logged_error(expected.record) {
+            sim_emit_ok("expected error log: " + expected.record, expected.site)
+        } else {
+            _sim_expect_impl(false, "expected error log was not logged: " + expected.record, expected.site)
+        }
+    }
+    SIM_EXPECTED_ERROR_LOGS = vec_new()
 }
 
 // Equality assertions that report both sides on failure. Per-primitive
