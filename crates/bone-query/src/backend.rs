@@ -1287,10 +1287,13 @@ impl BoneWorkspace {
     /// Only the bone LINT findings for a single file (warnings) -- `unused_var`,
     /// plus `unused_fn` for a `bin` project. The lint-only counterpart to
     /// `diagnostics_for`, for the `rock lsp lint` command; excludes typecheck
-    /// errors and holes.
+    /// errors and holes, but reports inputs that could not be loaded.
     pub fn lint_diagnostics(&self, path: &str) -> Vec<Diagnostic> {
         let path_c = self.canon(path);
         let path = path_c.as_str();
+        if let Some(diagnostic) = self.source_load_diagnostic(path) {
+            return vec![diagnostic];
+        }
         let Some(proj) = self.project(path) else {
             return Vec::new();
         };

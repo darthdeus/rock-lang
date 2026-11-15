@@ -333,6 +333,11 @@ fn source_load_failure_recovers(broken_manifest: bool) {
         reports_cause(&diags),
         "CLI diagnostics must identify the broken source/manifest: {diags:?}"
     );
+    let lints = bone.lint_diagnostics(&main);
+    assert!(
+        reports_cause(&lints),
+        "lint diagnostics must identify inputs that could not be checked: {lints:?}"
+    );
     for _ in 0..2 {
         let per = bone.update(&main, src.to_string());
         let diags = &per
@@ -373,6 +378,10 @@ fn source_load_failure_recovers(broken_manifest: bool) {
         !reports_cause(&bone.diagnostics_for(&main)),
         "CLI load error cleared after repair"
     );
+    assert!(
+        !reports_cause(&bone.lint_diagnostics(&main)),
+        "lint load error cleared after repair"
+    );
 }
 
 #[test]
@@ -401,6 +410,11 @@ fn malformed_project_manifest_reports_source_discovery_error() {
                 && d.message.contains("stick.toml")
         }),
         "discovery must report the manifest cause: {per:?}"
+    );
+    let lints = bone.lint_diagnostics(file);
+    assert!(
+        lints.iter().any(|d| d.message.contains("stick.toml")),
+        "lint diagnostics must report the manifest cause: {lints:?}"
     );
 }
 
