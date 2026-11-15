@@ -1,0 +1,45 @@
+// The same production grow helper, placed before constructing live quad values.
+inline(lua) fn audit_early_grow(mesh: SpriteMesh) = "__grow_sprite_mesh_buf(mesh)"
+
+fn mesh_audit() {
+    let arm = os_getenv("AUDIT_ARM") ?? "growth"
+    assert(arm == "growth" || arm == "early" || arm == "reserved")
+    let capacity = if arm == "reserved" { 128 } else { 8 }
+    let early = arm == "early"
+    let corners = os_getenv("AUDIT_CORNERS") == "1"
+    audit_measure("mesh", get_env_int("AUDIT_FRAMES", 120), (frame) => {
+        let sink = 0.0
+        for index in 0..100 {
+            let mesh = SpriteMesh {
+                vbo: native_buffer_vertex(capacity * 6), capacity, count: 0,
+                texture: sampled_image(Image(0)), tex_w: 32.0, tex_h: 16.0,
+                inset_x: 0.0, inset_y: 0.0, z_layer: 0,
+                depth: DepthMode::Off, blend: BlendMode::Alpha,
+            }
+            for i in 0..93 {
+                if early && mesh.count >= mesh.capacity * 6 { audit_early_grow(mesh) }
+                let x = float(index * 93 + i + frame % 7)
+                let y = x * 0.25
+                let red = float(i % 3) * 0.125 + 0.25
+                let green = float(i % 5) * 0.125
+                let blue = float(i % 7) * 0.125
+                let alpha = float(i % 2) * 0.25 + 0.5
+                sprite_mesh_add_quad(mesh, v(x, y), v(x + 2.0, y + 1.0),
+                    v(x + 3.0, y - 2.0), v(x - 1.0, y - 4.0), ir(8, 4, 16, 8),
+                    py: y + 7.0, tint: Color { r: red, g: green, b: blue, a: alpha },
+                    colorize: red + green,
+                    corner_alpha: if corners { Vec4 { x: red, y: green, z: blue, w: alpha } } else { null },
+                    corner_colorize: if corners { Vec4 { x: green, y: blue, z: alpha, w: red } } else { null },
+                    corner_u: if corners { Vec4 { x: x, y: y, z: red, w: green } } else { null },
+                    corner_v: if corners { Vec4 { x: blue, y: alpha, z: x, w: y } } else { null })
+            }
+            assert(mesh.count == 558 && mesh.capacity == 128)
+            let expected = float(index * 93 + 92 + frame % 7)
+            let last = mesh.vbo[92 * 6].pos.x as float
+            assert(last == expected)
+            sink += last
+        }
+        assert(sink == 469550.0 + float(frame % 7) * 100.0)
+    })
+    print("MESH_OK")
+}

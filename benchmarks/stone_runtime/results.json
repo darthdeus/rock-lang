@@ -1,0 +1,433 @@
+{
+  "date": "2026-11-15",
+  "cpu": "Intel Core i9-14900K",
+  "gpu": "NVIDIA RTX 4090",
+  "native_profile": "dev (opt-level 1)",
+  "compiler_profile": "release",
+  "gamelibs": "v0.6.18",
+  "vm": "VM LuaJIT 2.1.1794164915 x64 Linux",
+  "host_contention": true,
+  "build": {
+    "revision": "8213867e06644f25fbfe9b640819aadf5764e50f",
+    "compiler_sha256": "28cf3c649e27be1db058bd5d3dec6d87337b7b92621866ba0fcd5a981d783ff4",
+    "outputs": {
+      "retained": "84b064ea198742b1f1a5d7587a885e65abbe7c3afde55f23f1163bc7922da3d7",
+      "fresh": "dc8d30881cda9aaac9c2a0b151668a0b94bb32fb5991a998ab45b04535671b04"
+    }
+  },
+  "native_sha256": "b46796e34f94331ee62a5894d4e3cc271a76281f11d7575140a51d83b90c5e97",
+  "cases": {
+    "scene": {
+      "frames": 2400,
+      "warmup": 600,
+      "arms": {
+        "fresh": {
+          "time_median_us": [
+            150.13,
+            95.3485,
+            97.6495,
+            86.932,
+            105.812,
+            93.9675
+          ],
+          "time_p95_us": [
+            372.308,
+            185.942,
+            251.587,
+            243.033,
+            437.035,
+            324.634
+          ],
+          "gross_lua_bytes_per_iteration": [
+            2556.512,
+            2552.812,
+            2553.847,
+            2552.303,
+            2556.675,
+            2553.507
+          ],
+          "warmup_aborts": [
+            75,
+            65,
+            70,
+            57,
+            55,
+            63
+          ],
+          "measured_aborts": [
+            31,
+            32,
+            31,
+            23,
+            25,
+            25
+          ],
+          "abort_reasons": [
+            "measure:inner loop in root trace detail=nil",
+            "measure:leaving loop in root trace detail=nil",
+            "measure:trace too long detail=nil",
+            "warmup:inner loop in root trace detail=nil",
+            "warmup:leaving loop in root trace detail=nil",
+            "warmup:symbol not in cache detail=nil",
+            "warmup:trace too long detail=nil"
+          ]
+        },
+        "retained": {
+          "time_median_us": [
+            143.223,
+            97.863,
+            93.7835,
+            97.006,
+            144.255,
+            93.2305
+          ],
+          "time_p95_us": [
+            279.259,
+            406.519,
+            248.704,
+            483.112,
+            292.127,
+            281.227
+          ],
+          "gross_lua_bytes_per_iteration": [
+            1016.403,
+            1016.413,
+            1016.353,
+            1018.753,
+            1016.463,
+            1018.307
+          ],
+          "warmup_aborts": [
+            59,
+            54,
+            66,
+            47,
+            63,
+            55
+          ],
+          "measured_aborts": [
+            23,
+            23,
+            22,
+            20,
+            24,
+            25
+          ],
+          "abort_reasons": [
+            "measure:inner loop in root trace detail=nil",
+            "measure:leaving loop in root trace detail=nil",
+            "measure:trace too long detail=nil",
+            "warmup:NYI: bytecode %s detail=50",
+            "warmup:inner loop in root trace detail=nil",
+            "warmup:leaving loop in root trace detail=nil",
+            "warmup:loop unroll limit reached detail=nil",
+            "warmup:symbol not in cache detail=nil",
+            "warmup:trace too long detail=nil"
+          ]
+        }
+      }
+    },
+    "mesh": {
+      "frames": 120,
+      "warmup": 30,
+      "arms": {
+        "growth": {
+          "time_median_us": [
+            2468.076,
+            1622.72,
+            2982.0285,
+            1751.757,
+            3065.156,
+            4437.357
+          ],
+          "time_p95_us": [
+            10770.976,
+            8512.218,
+            11844.013,
+            9924.935,
+            12152.372,
+            25186.777
+          ],
+          "gross_lua_bytes_per_iteration": [
+            2106865.733,
+            2106864.933,
+            2106966.533,
+            2106865.733,
+            2106760.933,
+            2106966.533
+          ],
+          "warmup_aborts": [
+            31,
+            30,
+            29,
+            30,
+            29,
+            29
+          ],
+          "measured_aborts": [
+            9,
+            9,
+            9,
+            9,
+            9,
+            9
+          ],
+          "abort_reasons": [
+            "measure:NYI: bytecode %s detail=50",
+            "measure:NYI: bytecode %s detail=51",
+            "warmup:NYI: bytecode %s detail=50",
+            "warmup:NYI: bytecode %s detail=51"
+          ]
+        },
+        "early": {
+          "time_median_us": [
+            2543.574,
+            2654.4535,
+            1525.4765,
+            1738.887,
+            3503.61,
+            1298.934
+          ],
+          "time_p95_us": [
+            10597.436,
+            9767.3,
+            8455.169,
+            10324.243,
+            14505.058,
+            5839.671
+          ],
+          "gross_lua_bytes_per_iteration": [
+            2106965.733,
+            2106864.933,
+            2106967.333,
+            2107169.733,
+            2106864.133,
+            2106967.333
+          ],
+          "warmup_aborts": [
+            38,
+            36,
+            39,
+            40,
+            38,
+            38
+          ],
+          "measured_aborts": [
+            11,
+            12,
+            12,
+            12,
+            12,
+            11
+          ],
+          "abort_reasons": [
+            "measure:NYI: bytecode %s detail=50",
+            "measure:NYI: bytecode %s detail=51",
+            "warmup:NYI: bytecode %s detail=50",
+            "warmup:NYI: bytecode %s detail=51",
+            "warmup:error thrown or hook called during recording detail=50"
+          ]
+        },
+        "reserved": {
+          "time_median_us": [
+            1298.939,
+            1325.3175,
+            1288.1235,
+            1625.8565,
+            1260.4975,
+            2220.8705
+          ],
+          "time_p95_us": [
+            2862.42,
+            2722.753,
+            4194.874,
+            4148.269,
+            2564.646,
+            8347.677
+          ],
+          "gross_lua_bytes_per_iteration": [
+            225795.533,
+            225794.733,
+            225794.733,
+            225794.733,
+            225795.533,
+            225815.333
+          ],
+          "warmup_aborts": [
+            15,
+            15,
+            15,
+            15,
+            17,
+            16
+          ],
+          "measured_aborts": [
+            6,
+            7,
+            7,
+            7,
+            7,
+            7
+          ],
+          "abort_reasons": [
+            "measure:NYI: bytecode %s detail=51",
+            "measure:leaving loop in root trace detail=nil",
+            "warmup:NYI: bytecode %s detail=51"
+          ]
+        }
+      }
+    },
+    "mesh_corners": {
+      "frames": 120,
+      "warmup": 30,
+      "arms": {
+        "growth": {
+          "time_median_us": [
+            1100.7685,
+            1830.903,
+            2167.64,
+            1176.5875,
+            2033.6705,
+            1122.1525
+          ],
+          "time_p95_us": [
+            3711.821,
+            6902.175,
+            8864.082,
+            3881.772,
+            7729.571,
+            3898.321
+          ],
+          "gross_lua_bytes_per_iteration": [
+            2106761.733,
+            2106864.133,
+            2106864.133,
+            2106965.733,
+            2106762.533,
+            2106862.533
+          ],
+          "warmup_aborts": [
+            30,
+            29,
+            29,
+            30,
+            27,
+            28
+          ],
+          "measured_aborts": [
+            9,
+            9,
+            9,
+            9,
+            10,
+            11
+          ],
+          "abort_reasons": [
+            "measure:NYI: bytecode %s detail=50",
+            "measure:NYI: bytecode %s detail=51",
+            "measure:blacklisted detail=nil",
+            "warmup:NYI: bytecode %s detail=50",
+            "warmup:NYI: bytecode %s detail=51"
+          ]
+        },
+        "early": {
+          "time_median_us": [
+            1946.4765,
+            1164.8755,
+            1184.096,
+            1856.525,
+            1534.3045,
+            1194.626
+          ],
+          "time_p95_us": [
+            7551.244,
+            3993.313,
+            4618.886,
+            4955.32,
+            5006.178,
+            4242.1
+          ],
+          "gross_lua_bytes_per_iteration": [
+            2106760.933,
+            2106968.933,
+            2106966.533,
+            2106864.933,
+            2106967.333,
+            2107069.733
+          ],
+          "warmup_aborts": [
+            37,
+            39,
+            33,
+            38,
+            38,
+            39
+          ],
+          "measured_aborts": [
+            11,
+            11,
+            15,
+            12,
+            11,
+            11
+          ],
+          "abort_reasons": [
+            "measure:NYI: bytecode %s detail=50",
+            "measure:NYI: bytecode %s detail=51",
+            "measure:error thrown or hook called during recording detail=50",
+            "warmup:NYI: bytecode %s detail=50",
+            "warmup:NYI: bytecode %s detail=51",
+            "warmup:error thrown or hook called during recording detail=50"
+          ]
+        },
+        "reserved": {
+          "time_median_us": [
+            999.699,
+            1195.5115,
+            1194.4115,
+            647.4285,
+            860.077,
+            1147.2545
+          ],
+          "time_p95_us": [
+            2660.961,
+            2177.641,
+            2054.142,
+            2250.244,
+            2545.084,
+            1665.705
+          ],
+          "gross_lua_bytes_per_iteration": [
+            225794.733,
+            225794.733,
+            225794.733,
+            225813.067,
+            225795.533,
+            225794.733
+          ],
+          "warmup_aborts": [
+            16,
+            16,
+            17,
+            15,
+            17,
+            16
+          ],
+          "measured_aborts": [
+            7,
+            7,
+            7,
+            7,
+            7,
+            7
+          ],
+          "abort_reasons": [
+            "measure:NYI: bytecode %s detail=51",
+            "measure:leaving loop in root trace detail=nil",
+            "warmup:NYI: bytecode %s detail=51"
+          ]
+        }
+      }
+    }
+  }
+}
