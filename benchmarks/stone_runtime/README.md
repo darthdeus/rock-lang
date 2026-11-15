@@ -23,7 +23,11 @@ python3 benchmarks/stone_runtime/measure.py /tmp/stone-runtime \
   --case mesh --independent-corners --outdir /tmp/stone-runtime/mesh
 ```
 
-Use `--case segment` for the ribbon writer (the same three capacity arms).
+Use `--case segment` for the ribbon writer (the same three capacity arms). Use `--case bookkeeping`, `--case shader`, or
+`--case parametric` with `--arm retained` for the renderer bookkeeping probes.
+These use the same separate timing, allocation, and trace processes and can be
+compared across revisions with `--compare`.
+
 
 Use `--independent-corners` for distinct computations in all 16 optional
 corner lanes. `--corners` reuses existing position/tint values instead; omitting
@@ -89,6 +93,16 @@ triangle vertices. Deliberately corrupting colorize makes this oracle fail.
 The early arm still allocates/copies the same buffers; the reserved arm
 avoids intermediate buffers entirely, so its difference cannot be attributed
 solely to trace aborts.
+
+Bookkeeping: 120 iterations each of world and UI batch resolution with two
+textures, four layers, repeated plain/shared state and twelve nonshared
+occurrences per pool. Each synthetic frame clears the pools and advances the
+render frame; a sink checks the resolved layers. Shader: 120 alternating
+lookups of two live registered shader interfaces followed by per-draw sampler
+marks and audits, checking the declared slot counts and missing-slot result.
+Parametric: 320 calls to `UiRect.parametric_sprite` with one state key, including
+the first 256-quad batch and a 64-quad overflow batch. The oracle checks batch and vertex counts plus untimed parameter values. These cases measure bookkeeping and
+queue construction, not GPU submission or complete application frames.
 
 ## Current evidence
 

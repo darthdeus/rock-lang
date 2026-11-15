@@ -686,12 +686,12 @@ pub fn UiRect.parametric_sprite(
         blend: BlendMode::Alpha,
         pipeline: pipeline,
     }
-    let base_key = batch_key_of(image, render.z_layer, render.blend,
-        render.pixel_snap, render.depth, render.order, null, render.pipeline,
-        false, resolve_sampling(image, render.sampling),
-        shared_pipeline: true, text_batch: render.text_batch)
     let batch = ensure_ui_batch(image, render, shared_pipeline: true)
     if !parametric_batch_has_room(batch) {
+        let base_key = batch_key_of(image, render.z_layer, render.blend,
+            render.pixel_snap, render.depth, render.order, null, render.pipeline,
+            false, resolve_sampling(image, render.sampling),
+            shared_pipeline: true, text_batch: render.text_batch)
         let slot = parametric_batch_slot(base_key)
         while !parametric_batch_has_room(batch) {
             batch = ensure_ui_batch(image, render, shared_pipeline: true,

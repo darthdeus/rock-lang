@@ -1,0 +1,110 @@
+fn ui_parametric_batch_with(body: fn(SampledTexture, Pipeline) -> ()) {
+    let saved_pool = UI_RENDER_BATCHES
+    let saved_scope = CURRENT_UI_POOL
+    let saved_fast = UI_BATCH_FAST
+    let saved_cursor = PARAMETRIC_BATCH_CURSOR
+    let saved_frame = RENDER_FRAME
+    let saved_view = PRESENTED_VIEW
+    let saved_group = UI_DRAW_GROUP
+    let saved_keys = BATCH_KEY_BUILDS
+    let saved_ui_keys = UI_BATCH_KEY_BUILDS
+    let saved_births = POOL_BIRTHS
+    UI_RENDER_BATCHES = render_batch_pool_new()
+    CURRENT_UI_POOL = render_batch_scope(UI_RENDER_BATCHES)
+    UI_BATCH_FAST = map_new()
+    PARAMETRIC_BATCH_CURSOR = map_new()
+    PRESENTED_VIEW = null
+    UI_DRAW_GROUP = 0
+    defer {
+        UI_RENDER_BATCHES.clear()
+        UI_RENDER_BATCHES = saved_pool
+        CURRENT_UI_POOL = saved_scope
+        UI_BATCH_FAST = saved_fast
+        PARAMETRIC_BATCH_CURSOR = saved_cursor
+        RENDER_FRAME = saved_frame
+        PRESENTED_VIEW = saved_view
+        UI_DRAW_GROUP = saved_group
+        BATCH_KEY_BUILDS = saved_keys
+        UI_BATCH_KEY_BUILDS = saved_ui_keys
+        POOL_BIRTHS = saved_births
+    }
+    let image = sampled_canvas(Canvas { handle: CanvasId(123), width: 16.0, height: 8.0 })
+    body(image, parametric_quad_pipeline("ui_parametric_batch_test"))
+}
+
+fn ui_parametric_batch_emit(image: SampledTexture, pipe: Pipeline, n: int) -> RenderBatch {
+    let f = n as float
+    let rect = UiRect { x: f, y: 3.0, w: 4.0, h: 2.0, z: 7, ctx: UI_CTX_COMPOSITE }
+    return rect.parametric_sprite(image, irect(0, 0, 16, 8), pipe,
+        f, f + 1.0, f + 2.0, f + 3.0,
+        f + 4.0, f + 5.0, f + 6.0, f + 7.0,
+        f + 8.0, f + 9.0, f + 10.0, f + 11.0,
+        order: 2)
+}
+
+fn ui_parametric_batch_check(batch: RenderBatch, start: int, count: int) {
+    assert_eq(batch.parametric_count, count)
+    assert_eq(batch.count, count * 6)
+    assert_eq(batch.parametric_frame, RENDER_FRAME)
+    for i in 0..count {
+        let f = (start + i) as float
+        for component in 0..4 {
+            assert_eq(batch.parametric_0.unwrap()[i * 4 + component], f + component as float)
+            assert_eq(batch.parametric_1.unwrap()[i * 4 + component], f + (4 + component) as float)
+            assert_eq(batch.parametric_2.unwrap()[i * 4 + component], f + (8 + component) as float)
+        }
+        for vertex in 0..6 {
+            assert_eq(batch.verts[i * 6 + vertex].colorize, i as float,
+                "every corner addresses its batch-local parameter row")
+        }
+        assert_eq(batch.verts[i * 6].pos.x, f, "quad order matches parameter order")
+        assert_eq(batch.verts[i * 6].pos.y, 3.0)
+        assert_eq(batch.verts[i * 6 + 2].pos.x, f + 4.0)
+        assert_eq(batch.verts[i * 6 + 2].pos.y, 5.0)
+    }
+}
+
+@test
+fn ui_parametric_sprite_warm_batch_avoids_key_builds() {
+    ui_parametric_batch_with((image, pipe) => {
+        let batch = ui_parametric_batch_emit(image, pipe, 0)
+        let before = BATCH_KEY_BUILDS
+        for i in 1..256 { let _ = ui_parametric_batch_emit(image, pipe, i) }
+        assert_eq(BATCH_KEY_BUILDS, before,
+            "a warm batch below capacity needs no string key")
+        assert_eq(UI_RENDER_BATCHES.len(), 1)
+        assert_eq(PARAMETRIC_BATCH_CURSOR.len(), 0)
+        ui_parametric_batch_check(batch, 0, 256)
+    })
+}
+
+@test
+fn ui_parametric_sprite_overflow_keeps_keys_data_and_frame_cursor() {
+    ui_parametric_batch_with((image, pipe) => {
+        let base = batch_key_of(image, 7, BlendMode::Alpha, false, DepthMode::Off,
+            2, null, pipe, false, TextureFilter::Nearest, shared_pipeline: true)
+        for i in 0..520 { let _ = ui_parametric_batch_emit(image, pipe, i) }
+        assert_eq(UI_RENDER_BATCHES.sorted_keys_into([]), [base, "{base}|q#0", "{base}|q#1"],
+            "overflow preserves the base key and ordered slot suffixes")
+        let first = UI_RENDER_BATCHES.get(base).unwrap()
+        let second = UI_RENDER_BATCHES.get("{base}|q#0").unwrap()
+        let third = UI_RENDER_BATCHES.get("{base}|q#1").unwrap()
+        ui_parametric_batch_check(first, 0, 256)
+        ui_parametric_batch_check(second, 256, 256)
+        ui_parametric_batch_check(third, 512, 8)
+        assert_eq(PARAMETRIC_BATCH_CURSOR.get(base).unwrap().slot, 1)
+        discard_pool_batches(UI_RENDER_BATCHES)
+        UI_BATCH_FAST.clear()
+        RENDER_FRAME += 1
+        let births = POOL_BIRTHS
+        for i in 0..320 { let _ = ui_parametric_batch_emit(image, pipe, i + 1000) }
+        assert_eq(POOL_BIRTHS, births, "the next frame reuses its overflow rows")
+        assert_eq(UI_RENDER_BATCHES.len(), 3)
+        ui_parametric_batch_check(first, 1000, 256)
+        ui_parametric_batch_check(second, 1256, 64)
+        assert_eq(third.count, 0, "the unused overflow tail stays empty")
+        assert_eq(PARAMETRIC_BATCH_CURSOR.get(base).unwrap().frame, RENDER_FRAME)
+        assert_eq(PARAMETRIC_BATCH_CURSOR.get(base).unwrap().slot, 0,
+            "the next frame starts with the first overflow slot")
+    })
+}

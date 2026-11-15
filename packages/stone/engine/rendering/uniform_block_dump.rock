@@ -232,12 +232,12 @@ fn uniform_block_dump_finish() {
     if let c = OUTPUT_HDR_CANVAS { targets["output_hdr"] = json_int(c.handle.0) }
     record["targets"] = json_object(targets)
     let shaders: [JsonValue] = []
-    for (name, generation) in GL_SHADER_ARTIFACT_GENERATIONS {
+    for (name, artifact) in GL_SHADER_ARTIFACTS {
         let shader: Map<string, JsonValue> = map_new()
         shader["name"] = json_str(name)
         shader["handle"] = json_int(get_shader_handle(name))
-        shader["generation"] = json_int(generation)
-        shader["fingerprint"] = json_int(GL_SHADER_ARTIFACT_FINGERPRINTS.get(name) ?? 0)
+        shader["generation"] = json_int(artifact.generation)
+        shader["fingerprint"] = json_int(artifact.fingerprint)
         shaders.push(json_object(shader))
     }
     record["shaders"] = json_array(shaders)

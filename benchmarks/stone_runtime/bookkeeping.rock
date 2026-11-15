@@ -1,0 +1,98 @@
+// Real batch lookups and shader metadata/slot accounting without GPU submission.
+fn bookkeeping_audit() {
+    assert(stone_gpu_host_ensure())
+    let view = resolve_frame_view(v(320, 180), iv(320, 180),
+        Camera2D { visible_world_width: 20.0 }, RenderConfig {}).unwrap()
+    with_scene_render_scope(view, () => {
+        let image = sampled_image(WHITE_PIXEL.unwrap())
+        let canvas = sampled_canvas(screen_canvas)
+        audit_measure("bookkeeping", get_env_int("AUDIT_FRAMES", 120), (frame) => {
+            clear_batches()
+            clear_ui_batches()
+            RENDER_FRAME += 1
+            let sink = 0
+            for i in 0..120 {
+                let texture = if i % 2 == 0 { image } else { canvas }
+                let z = i % 4
+                let b = ensure_world_sprite_batch(texture, z, BlendMode::Alpha, false,
+                    DepthMode::Off, order: i % 3)
+                sink += b.z_layer
+                let s = ensure_world_sprite_batch(texture, z, BlendMode::Alpha, false,
+                    DepthMode::Off, pipeline: AUDIT_PIPELINE, shared_pipeline: true)
+                sink += s.z_layer
+                let u = ensure_ui_batch(texture, RenderProps { z_layer: z, depth: DepthMode::Off,
+                    pipeline: AUDIT_PIPELINE }, shared_pipeline: true)
+                sink += u.z_layer
+                let plain = ensure_ui_batch(texture, RenderProps { z_layer: z, depth: DepthMode::Off })
+                sink += plain.z_layer
+                if i % 10 == 0 {
+                    let occurrence = ensure_world_sprite_batch(texture, z, BlendMode::Alpha, false,
+                        DepthMode::Off, pipeline: AUDIT_PIPELINE)
+                    let ui_occurrence = ensure_ui_batch(texture, RenderProps { z_layer: z,
+                        depth: DepthMode::Off, pipeline: AUDIT_PIPELINE })
+                    sink += occurrence.z_layer + ui_occurrence.z_layer
+                }
+
+            }
+            assert(sink == 744)
+        })
+        print("BOOKKEEPING_OK")
+    })
+}
+
+fn parametric_audit() {
+    assert(stone_gpu_host_ensure())
+    let view = resolve_frame_view(v(320, 180), iv(320, 180),
+        Camera2D { visible_world_width: 20.0 }, RenderConfig {}).unwrap()
+    with_scene_render_scope(view, () => {
+        let image = sampled_image(WHITE_PIXEL.unwrap())
+        let pipe = parametric_quad_pipeline(AUDIT_PIPELINE.shader_name)
+        let rect = ui_rect(1.0, 2.0, 8.0, 8.0)
+        audit_measure("parametric", get_env_int("AUDIT_FRAMES", 120), (frame) => {
+            clear_ui_batches()
+            RENDER_FRAME += 1
+            let sink = 0
+            for i in 0..320 {
+                let batch = rect.parametric_sprite(image, irect(0, 0, 1, 1), pipe,
+                    float(i), 2.0, 3.0, 4.0,
+                    5.0, 6.0, 7.0, 8.0,
+                    9.0, 10.0, 11.0, 12.0)
+                let expected = i % 256 + 1
+                assert(batch.parametric_count == expected)
+                assert(batch.count == expected * 6)
+                if frame == 0 {
+                    assert(batch.parametric_0.unwrap()[(expected - 1) * 4] == float(i))
+                }
+                sink += batch.parametric_count
+            }
+            assert(sink == 34976)
+        })
+        print("PARAMETRIC_OK")
+    })
+}
+
+fn shader_bookkeeping_audit() {
+    assert(stone_gpu_host_ensure())
+    let view = resolve_frame_view(v(320, 180), iv(320, 180),
+        Camera2D { visible_world_width: 20.0 }, RenderConfig {}).unwrap()
+    with_scene_render_scope(view, () => {
+        let shader = AUDIT_PIPELINE.shader_name
+        let other = BLIT_PIPELINE.shader_name
+        assert(selected_shader_interface(shader) != null)
+        assert(selected_shader_interface(other) != null)
+        assert(shader_texture_slot_count(shader) == 1)
+        assert(shader_texture_slot_count(other) == 1)
+        audit_measure("shader", get_env_int("AUDIT_FRAMES", 120), (frame) => {
+            let sink = 0
+            for i in 0..120 {
+                let name = if i % 2 == 0 { shader } else { other }
+                let interface = selected_shader_interface(name).unwrap()
+                sink += interface.texture_slots.len()
+                mark_texture_slot_filled(name, 0)
+                assert(audit_texture_slots_for_draw(name) == 0)
+            }
+            assert(sink == 120)
+        })
+        print("SHADER_OK")
+    })
+}

@@ -101,8 +101,11 @@ pub value SemanticShaderGeneration {
 
 global NEXT_SEMANTIC_SHADER_GENERATION: int = 0
 pub global GL_SHADER_SEMANTICS: Map<string, SemanticShaderGeneration> = map_new()
-global GL_SHADER_ARTIFACT_GENERATIONS: Map<string, int> = map_new()
-global GL_SHADER_ARTIFACT_FINGERPRINTS: Map<string, int> = map_new()
+struct ShaderArtifactGeneration {
+    generation: int,
+    fingerprint: int,
+}
+global GL_SHADER_ARTIFACTS: Map<string, ShaderArtifactGeneration> = map_new()
 
 fn semantic_line(lines: [string], at: int, tag: string, min_fields: int) -> [string]? {
     if at < 0 || at >= lines.len { return null }
@@ -349,18 +352,18 @@ fn next_semantic_shader_generation() -> int {
 fn publish_gl_shader_semantic(key: string, interface: SemanticShaderInterface) {
     let generation = next_semantic_shader_generation()
     GL_SHADER_SEMANTICS.insert(key, SemanticShaderGeneration { interface: interface, generation: generation })
-    GL_SHADER_ARTIFACT_GENERATIONS.insert(key, generation)
-    GL_SHADER_ARTIFACT_FINGERPRINTS.insert(key, interface.fingerprint)
+    GL_SHADER_ARTIFACTS.insert(key, ShaderArtifactGeneration {
+        generation: generation, fingerprint: interface.fingerprint,
+    })
 }
 
 pub fn selected_shader_interface(shader_name: string) -> SemanticShaderInterface? {
     let semantic = GL_SHADER_SEMANTICS.get(shader_name)
-    if WATCHER.shaders.get(shader_name) == null { return null }
-    let artifact_generation = GL_SHADER_ARTIFACT_GENERATIONS.get(shader_name) ?? return null
-    let artifact_fingerprint = GL_SHADER_ARTIFACT_FINGERPRINTS.get(shader_name) ?? return null
+    if !WATCHER.shaders.contains(shader_name) { return null }
+    let artifact = GL_SHADER_ARTIFACTS.get(shader_name) ?? return null
     if semantic == null { return null }
     let entry = semantic
-    if entry.generation != artifact_generation || entry.interface.fingerprint != artifact_fingerprint { return null }
+    if entry.generation != artifact.generation || entry.interface.fingerprint != artifact.fingerprint { return null }
     return entry.interface
 }
 
@@ -505,7 +508,13 @@ pub @nomangle fn __rock_shader_register(key: string, src: string, texture_slots:
     if let prev = REGISTERED_SHADER_HASHES.get(key) {
         let p = prev
         // unchanged source AND layout -> no-op
-        if p.src_hash == h.src_hash && p.block_fingerprint == h.block_fingerprint && p.fullscreen_vertex == h.fullscreen_vertex && p.semantic_fingerprint == h.semantic_fingerprint { return }
+        if p.src_hash == h.src_hash && p.block_fingerprint == h.block_fingerprint && p.fullscreen_vertex == h.fullscreen_vertex && p.semantic_fingerprint == h.semantic_fingerprint {
+            // Reload can preserve the registration before this registry existed.
+            if WATCHER.shaders.contains(key) && !GL_SHADER_ARTIFACTS.contains(key) {
+                publish_gl_shader_semantic(key, semantic)
+            }
+            return
+        }
     }
     if !__stone_gl_ready() {
         // pre-GL cold start; @init drains
@@ -540,7 +549,10 @@ pub @nomangle fn __rock_shader_register(key: string, src: string, texture_slots:
     if let prev = REGISTERED_SHADER_HASHES.get(key) {
         let p = prev
         if p.src_hash == h.src_hash && p.block_fingerprint == h.block_fingerprint && p.fullscreen_vertex == h.fullscreen_vertex && p.semantic_fingerprint == h.semantic_fingerprint
-            && WATCHER.shaders.get(key) != null { return true }
+            && WATCHER.shaders.contains(key) {
+            if !GL_SHADER_ARTIFACTS.contains(key) { publish_gl_shader_semantic(key, semantic) }
+            return true
+        }
     }
     // `stone_register_native_shaders` has already compiled, bound, and
     // driver-validated the native program's blocks before this hook runs.
