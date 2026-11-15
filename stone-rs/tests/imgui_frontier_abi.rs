@@ -2,21 +2,16 @@
 
 use std::process::Command;
 
+#[path = "support/stone_cdylib.rs"]
+mod stone_cdylib;
+
 fn compile(source: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let c = dir.path().join("frontier.c");
     let binary = dir.path().join("frontier");
     std::fs::write(&c, source).unwrap();
-    let lib = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let artifact = lib.join(if cfg!(target_os = "macos") {
-        "libstone_rs.dylib"
-    } else {
-        "libstone_rs.so"
-    });
+    let artifact = stone_cdylib::artifact();
+    let lib = artifact.parent().unwrap();
     let include = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("include");
     let gamelibs = gamelibs::host_dir().join("include");
     let output = Command::new("clang")
@@ -26,7 +21,7 @@ fn compile(source: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         .arg("-I")
         .arg(gamelibs)
         .arg("-L")
-        .arg(&lib)
+        .arg(lib)
         .arg(format!("-Wl,-rpath,{}", lib.display()))
         // Cargo's LD_LIBRARY_PATH can contain an older top-level cdylib.
         .arg(c)

@@ -1,4 +1,8 @@
 #[cfg(target_os = "linux")]
+#[path = "support/stone_cdylib.rs"]
+mod stone_cdylib;
+
+#[cfg(target_os = "linux")]
 #[test]
 fn native_host_links_stone_without_a_lua_runtime() {
     let loader: unsafe extern "C" fn(*mut stone_rs::LuaState) -> std::ffi::c_int =
@@ -13,11 +17,7 @@ fn subprocess_liveness_has_a_canonical_byte_abi() {
     use std::process::Command;
 
     let luajit = gamelibs::host_dir().join("bin/luajit");
-    let stone = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("libstone_rs.so");
+    let stone = stone_cdylib::artifact();
     let script = r#"
 local ffi = require("ffi")
 ffi.cdef[[uint8_t stone_proc_alive(int handle);]]
@@ -44,22 +44,12 @@ fn bundled_luajit_enters_the_stone_allocator_callback() {
     use std::process::Command;
 
     let luajit = gamelibs::host_dir().join("bin/luajit");
-    let stone = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("libstone_rs.so");
+    let stone = stone_cdylib::artifact();
     assert!(
         luajit.is_file(),
         "bundled LuaJIT is missing: {}",
         luajit.display()
     );
-    assert!(
-        stone.is_file(),
-        "fresh Stone cdylib is missing: {}",
-        stone.display()
-    );
-
     let script = r#"
 local ffi = require("ffi")
 ffi.cdef[[

@@ -1,14 +1,14 @@
 //! Require native health from the pinned host; optionally check a stock runtime.
 #[cfg(target_os = "linux")]
+#[path = "support/stone_cdylib.rs"]
+mod stone_cdylib;
+
+#[cfg(target_os = "linux")]
 #[test]
 fn loaded_luajit_reports_its_native_health_capability() {
     use std::process::Command;
     let released = gamelibs::host_dir().join("bin/luajit");
-    let stone = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("libstone_rs.so");
+    let stone = stone_cdylib::artifact();
     let script = r#"
 local ffi = require('ffi')
 ffi.cdef[[int stone_lua_jit_health_sample(void); const char *stone_lua_jit_health_json(void); int stone_lua_alloc_split_available(void); int stone_lua_alloc_counter_begin(void); int stone_lua_jit_health_frame_delta(float *out, size_t len);]]
