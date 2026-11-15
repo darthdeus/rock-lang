@@ -563,10 +563,34 @@ for n, t in ipairs(__skull_run) do
     if level == 0 then errors[#errors + 1] = line end
     if sink then sink(level, category, msg, wall_clock) else print(line) end
   end
+  local verified = {}
+  local previous_assert_errors = _G.__rock_test_assert_error_logs
+  _G.__rock_test_assert_error_logs = function(expected, body)
+    local first = #errors + 1
+    local ok, value = pcall(body)
+    if not ok then error(value, 0) end
+    local actual = {}
+    for i = first, #errors do actual[#actual + 1] = errors[i] end
+    local matches = #actual == #expected
+    for i, message in ipairs(actual) do
+      if message ~= expected[i] then matches = false end
+    end
+    if not matches then
+      error("error log mismatch: expected <" .. table.concat(expected, "\n") ..
+        "> got <" .. table.concat(actual, "\n") .. ">", 0)
+    end
+    for i = first, #errors do verified[i] = true end
+  end
   local start = __skull_now()
   local ok, ret = pcall(t.f)
   local ms = __skull_now() - start
   _G.__rock_log_sink = sink
+  _G.__rock_test_assert_error_logs = previous_assert_errors
+  local unverified = {}
+  for i, message in ipairs(errors) do
+    if not verified[i] then unverified[#unverified + 1] = message end
+  end
+  errors = unverified
   print = rp
   io.write = rw
   local got = table.concat(buf, ""):gsub("%s+$", "")

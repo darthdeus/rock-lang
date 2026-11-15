@@ -1354,6 +1354,17 @@ fn assert(condition: bool) {
     if !condition { error("Assertion failed") }
 }
 
+// Verify exactly the error records emitted by this body, without suppressing
+// the installed logger. Available inside `rock test` only.
+fn assert_error_logs(expected: [string], body: fn() -> ()) {
+    __rock_assert_error_logs(__rock_vec_to_lua_array(expected), body)
+}
+
+inline(lua) fn __rock_assert_error_logs(expected: any, body: fn() -> ()) = """
+    local check = assert(_G.__rock_test_assert_error_logs, "assert_error_logs requires rock test")
+    check(expected, body)
+"""
+
 // Assert equality/inequality, inline-expanded at the call site so
 // failures surface with the caller's span instead of a stdlib frame.
 // Args are let-bound once each to preserve fn-call semantics for
