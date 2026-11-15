@@ -125,6 +125,69 @@ fn plain_named_action_layer_lints_report_no_policy() {
 }
 
 #[test]
+fn logged_errors_fail_tests_without_interrupting_them() {
+    let root = tempfile::tempdir().unwrap();
+    for installed_sink in [false, true] {
+        let install = if installed_sink {
+            r#"inline(lua) fn install_sink() -> bool = """
+                _G.__rock_log_sink = function(level, category, message)
+                    if category ~= "HIDDEN" then print("[" .. category .. "] " .. message) end
+                end
+                return true
+            """
+            const sink_installed: bool = install_sink()
+            "#
+        } else {
+            ""
+        };
+        write(
+            root.path(),
+            "logs.rock",
+            format!(
+                r#"{install}
+            inline(lua) fn mark_continued() = """
+                local f = assert(io.open("continued", "w"))
+                f:write("yes")
+                f:close()
+            """
+            @test
+            fn logs_error() {{
+                log_error("PROBE", "logged failure")
+                mark_continued()
+            }}
+            @test(output = "[PROBE] warning")
+            fn warning_control() {{ log_warn("PROBE", "warning") }}
+            @test(output = "[PROBE] expected")
+            fn expected_error_control() {{ log_once("PROBE", "expected") }}
+            @test(output = "[PROBE] expected")
+            fn unexpected_error() {{
+                log_error("PROBE", "expected")
+                log_error("HIDDEN", "unexpected failure")
+            }}
+        "#
+            ),
+        );
+        let out = rock(root.path())
+            .args(["test", "logs.rock"])
+            .env("ROCK_TEST_SHARDS", "1")
+            .env_remove("ROCK_TEST_VERBOSE")
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "logged error passed: {}", text(&out));
+        assert_mentions(&out, "logs_error: error:");
+        assert_mentions(&out, "[PROBE] logged failure");
+        assert_mentions(&out, "unexpected_error: error:");
+        assert_mentions(&out, "[HIDDEN] unexpected failure");
+        assert_mentions(&out, "2/4 @tests passed (2 failed)");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("continued")).unwrap(),
+            "yes"
+        );
+        std::fs::remove_file(root.path().join("continued")).unwrap();
+    }
+}
+
+#[test]
 fn plain_compiler_process_without_private_runtime() {
     let root = tempfile::tempdir().unwrap();
     let source =

@@ -556,15 +556,34 @@ for n, t in ipairs(__skull_run) do
   io.write = function(...)
     for i = 1, select('#', ...) do buf[#buf + 1] = tostring((select(i, ...))) end
   end
+  local errors = {}
+  local sink = _G.__rock_log_sink
+  _G.__rock_log_sink = function(level, category, msg, wall_clock)
+    local line = category and #category > 0 and ("[" .. category .. "] " .. msg) or msg
+    if level == 0 then errors[#errors + 1] = line end
+    if sink then sink(level, category, msg, wall_clock) else print(line) end
+  end
   local start = __skull_now()
   local ok, ret = pcall(t.f)
   local ms = __skull_now() - start
+  _G.__rock_log_sink = sink
   print = rp
   io.write = rw
   local got = table.concat(buf, ""):gsub("%s+$", "")
+  -- An exact output assertion can verify intentional logger failures. Every
+  -- error must appear as a complete record, in order, not just any one error.
+  local expected_errors = t.out ~= nil and got == t.out
+  local pos = 1
+  for _, message in ipairs(errors) do
+    local _, last = string.find("\n" .. got .. "\n", "\n" .. message .. "\n", pos, true)
+    if not last then expected_errors = false; break end
+    pos = last
+  end
   local result = "fail"
   if not ok then
     io.write("\n__SKULL__\tFAIL\t", t.name, ": error: ", __esc(tostring(ret)), "\n")
+  elseif #errors > 0 and not expected_errors then
+    io.write("\n__SKULL__\tFAIL\t", t.name, ": error: logged error(s): ", __esc(table.concat(errors, "\n")), "\n")
   elseif t.out ~= nil and got ~= t.out then
     io.write("\n__SKULL__\tFAIL\t", t.name, ": output mismatch: expected <", __esc(t.out), "> got <", __esc(got), ">\n")
   elseif t.val then
@@ -2905,8 +2924,8 @@ pub(crate) fn skull_test(
                 *reason_counts
                     .entry("@test execution failed".to_string())
                     .or_insert(0) += 1;
-                if verbose {
-                    details.push((label, fails.join("\n")));
+                for failure in fails {
+                    println!("  {failure}");
                 }
             }
             Ok(Err(SkullFailure { reason, rendered })) => {
@@ -2958,7 +2977,7 @@ pub(crate) fn skull_test(
         for (file, rendered) in &details {
             println!("\n--- {} ---\n{}", file, rendered);
         }
-    } else if failed > 0 || emit_ok > exec_pass {
+    } else if failed > 0 {
         println!(
             "\n{}",
             "(re-run with ROCK_TEST_VERBOSE=1 for full per-file errors)".dimmed()
