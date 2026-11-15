@@ -24,8 +24,12 @@ use std::time::Duration;
 /// whether the caller appends the entry call. Not recovered from the text: the
 /// emitted spelling of a definition is the emitter's business.
 fn skull_emit(file: &str, src: &str) -> std::result::Result<(String, bool), Vec<CompilerError>> {
-    let (lua, _, emits_main) = skull_emit_full(file, src).map_err(EmitFullErr::into_errs)?;
-    Ok((lua, emits_main))
+    let (emit, _) = skull_emit_full(file, src).map_err(EmitFullErr::into_errs)?;
+    if let Err(e) = write_allocation_report(None, &emit.allocation_report) {
+        log::error!(target: "SKULL", "cannot write allocation report for {}: {:#}", file, e);
+        crate::invocation_log::exit(1);
+    }
+    Ok((emit.lua, emit.emits_main))
 }
 
 /// A [`skull_emit_full`] failure. `Discovery` (a malformed `@test` annotation on
@@ -273,12 +277,12 @@ impl skull::pipeline::CompileHost for PackageTestHost<'_> {
 }
 
 /// Emit the workspace and also discover the user module's `@test` functions
-/// (for execution). Returns `(lua, tests, emits_main)`. `file` is stamped as
-/// the source-file id so spans (and `__SITE__`) carry the real path.
+/// (for execution). `file` is stamped as the source-file id so spans (and
+/// `__SITE__`) carry the real path.
 fn skull_emit_full(
     file: &str,
     src: &str,
-) -> std::result::Result<(String, Vec<skull::SkullTest>, bool), EmitFullErr> {
+) -> std::result::Result<(skull::mir_emit::MirEmit, Vec<skull::SkullTest>), EmitFullErr> {
     let (sources, lint_root) = crate::lint_pass::single_file_scope(file, src);
     let mut host = CliCompileHost {
         sources: &sources,
@@ -300,10 +304,8 @@ fn skull_emit_full(
     )
     .map_err(|failure| EmitFullErr::Compile(failure.errors))?;
     crate::compile_budget::emission(&emit);
-    let emits_main = emit.emits_main;
-    let lua = emit.lua;
     let tests = skull::module_tests(&ws, user_mid).map_err(EmitFullErr::Discovery)?;
-    Ok((lua, tests, emits_main))
+    Ok((emit, tests))
 }
 
 /// Per-phase wall-clock for one skull run over a single source. `parse` and
@@ -790,7 +792,7 @@ fn skull_build(
     })?;
     // bone type-check + skull emit. Errors here are bone's (most files) or a
     // skull codegen gap; both carry a `CompilerError`.
-    let (lua, tests, _emits_main) = match skull_emit_full(file, src) {
+    let (emit, tests) = match skull_emit_full(file, src) {
         Ok(v) => v,
         Err(EmitFullErr::Compile(errs)) => {
             // A file whose `@test`s ALL expect failure is supposed to fail to
@@ -836,7 +838,7 @@ fn skull_build(
     .map_err(SkullFailure::from)?;
     let lua = TestProgram {
         preamble: host.preamble,
-        lua,
+        lua: emit.lua,
         setup: host.setup,
     };
     let files = vec![file.to_owned(); tests.len()];
@@ -2367,10 +2369,7 @@ fn skull_emit_project_with_inputs(
         log::error!(target: "SKULL", "cannot write body costs to {}: {:#}", path.display(), e);
         crate::invocation_log::exit(1);
     }
-    let allocation_report_path = allocation_report_path_from_env();
-    if let Err(e) =
-        write_allocation_report(allocation_report_path.as_deref(), &emit.allocation_report)
-    {
+    if let Err(e) = write_allocation_report(None, &emit.allocation_report) {
         log::error!(target: "SKULL", "cannot write allocation report for {}: {:#}", dir, e);
         crate::invocation_log::exit(1);
     }
@@ -2408,25 +2407,31 @@ fn skull_emit_project_with_inputs(
     Ok((lua, emits_main))
 }
 
+/// Writes the emitted-site manifest to `explicit`, else to the path the
+/// environment names: `SKULL_ALLOCATION_REPORT`, or the
+/// `SKULL_ALLOCATION_ACTIVATION` capture with a `.manifest.txt` extension.
+/// Every compile that emits instrumented sites calls this.
 fn write_allocation_report(
-    path: Option<&std::ffi::OsStr>,
+    explicit: Option<&std::path::Path>,
     report: &skull::allocation_report::AllocationReport,
 ) -> Result<()> {
-    let Some(path) = path else { return Ok(()) };
-    if path.is_empty() {
+    let path = match explicit {
+        Some(path) => path.into(),
+        None => match std::env::var_os("SKULL_ALLOCATION_REPORT") {
+            Some(path) => std::path::PathBuf::from(path),
+            None => {
+                let Some(activation) = std::env::var_os("SKULL_ALLOCATION_ACTIVATION") else {
+                    return Ok(());
+                };
+                std::path::Path::new(&activation).with_extension("manifest.txt")
+            }
+        },
+    };
+    if path.as_os_str().is_empty() {
         anyhow::bail!("SKULL_ALLOCATION_REPORT must name an output file");
     }
-    let path = std::path::Path::new(path);
-    rock_host::project::write_atomic(path, report.render_text())
+    rock_host::project::write_atomic(&path, report.render_text())
         .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))
-}
-
-fn allocation_report_path_from_env() -> Option<std::ffi::OsString> {
-    std::env::var_os("SKULL_ALLOCATION_REPORT").or_else(|| {
-        let mut path = std::path::PathBuf::from(std::env::var_os("SKULL_ALLOCATION_ACTIVATION")?);
-        path.set_extension("manifest.txt");
-        Some(path.into_os_string())
-    })
 }
 
 /// Emitted Lua with compiler-owned metadata, passed unchanged to the runtime host.
@@ -3515,13 +3520,7 @@ impl IncrementalProject {
                     .run(ws, mid)
             }
             .map_err(|e| anyhow::anyhow!("{}", render_project_err(project.sources(), &e)))?;
-            let allocation_report_path = allocation_report_path_from_env();
-            write_allocation_report(
-                explicit_allocation_report
-                    .map(std::path::Path::as_os_str)
-                    .or(allocation_report_path.as_deref()),
-                &emit.allocation_report,
-            )?;
+            write_allocation_report(explicit_allocation_report, &emit.allocation_report)?;
             let artifact_fingerprint = emit.artifact_fingerprint.clone().ok_or_else(|| {
                 anyhow::anyhow!("compiler did not publish an Artifact fingerprint")
             })?;

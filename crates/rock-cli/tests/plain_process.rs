@@ -1398,4 +1398,35 @@ fn main() {
             .any(|row| row.starts_with("0.0000\t3\t") && row.contains("\tstring-concat\t")),
         "the pushed concat ran three times: {report}"
     );
+
+    // A single source file writes the same manifest from `run` and `compile`.
+    let single = root.path().join("single");
+    std::fs::create_dir(&single).unwrap();
+    std::fs::copy(root.path().join("main.rock"), single.join("main.rock")).unwrap();
+    let ran = rock(&single)
+        .args(["run", "main.rock"])
+        .env("SKULL_ALLOCATION_ACTIVATION", single.join("run.tsv"))
+        .output()
+        .unwrap();
+    assert!(ran.status.success(), "single-file run: {}", text(&ran));
+    let joined = invoke(&single, &["allocation-join", "run.manifest.txt", "run.tsv"]);
+    assert!(
+        joined.status.success(),
+        "single-file join: {}",
+        text(&joined)
+    );
+    let compiled = rock(&single)
+        .args(["compile", "main.rock", "--output", "main.lua"])
+        .env("SKULL_ALLOCATION_ACTIVATION", single.join("compile.tsv"))
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "single-file compile: {}",
+        text(&compiled)
+    );
+    assert_eq!(
+        std::fs::read_to_string(single.join("compile.manifest.txt")).unwrap(),
+        std::fs::read_to_string(single.join("run.manifest.txt")).unwrap()
+    );
 }
