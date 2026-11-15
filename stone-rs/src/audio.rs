@@ -880,9 +880,9 @@ impl BusSource {
         self.advance_duck();
         let fader = self.applied_gain * self.duck_env;
         let mut loudest = 0.0f32;
-        for i in 0..active {
-            self.frame[i] *= fader;
-            loudest = loudest.max(self.frame[i].abs());
+        for sample in &mut self.frame[..active] {
+            *sample *= fader;
+            loudest = loudest.max(sample.abs());
         }
 
         // Rise instantly, fall at a fixed rate: a meter that fell as slowly as

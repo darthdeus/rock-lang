@@ -1224,10 +1224,7 @@ pub extern "C" fn stone_resize_font(font_id: c_uint, pixel_size: c_int) -> bool 
         Some(r) => r,
         None => return false,
     };
-    if !apply_raster(idx, pixel_size, raster) {
-        return false;
-    }
-    true
+    apply_raster(idx, pixel_size, raster)
 }
 
 // Run a closure with the pipeline + a specific font entry. No-op if
