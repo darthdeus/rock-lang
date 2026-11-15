@@ -899,20 +899,7 @@ fn rewrite_nil_tests(
 /// Normalize struct-field operations. Heap records lowered as `Index`/
 /// `StoreIndex` are equivalent only when the index is a constant string.
 fn field_read(func: &MirFunc, i: Idx<Inst>, load: Idx<Inst>) -> Option<(Idx<Inst>, ustr::Ustr)> {
-    let (base, field) = match &func.insts[i] {
-        Inst::Field { base, field } => (*base, *field),
-        Inst::Index {
-            base,
-            index,
-            kind: ContainerKind::Record,
-        } => {
-            let Inst::Const(Lit::Str(field)) = &func.insts[*index] else {
-                return None;
-            };
-            (*base, *field)
-        }
-        _ => return None,
-    };
+    let (base, field) = func.field_projection(i)?;
     (base == load && uses_once(func, i, load)).then_some((base, field))
 }
 

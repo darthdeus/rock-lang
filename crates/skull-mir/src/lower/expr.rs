@@ -1075,23 +1075,11 @@ impl<'a> Builder<'a> {
         self.check_ref_holder(e)?;
         let place = self.lower_place_base(e)?;
         let mut cur = place;
-        loop {
-            match &self.f.insts[cur] {
-                Inst::Field { base, .. } => cur = *base,
-                // Heap-record field projections keep callback indexing semantics,
-                // but borrowing them still aliases the root's stored value.
-                Inst::Index {
-                    base,
-                    index,
-                    kind: ContainerKind::Record,
-                } if matches!(self.f.insts[*index], Inst::Const(Lit::Str(_))) => cur = *base,
-                Inst::Load(cell) => {
-                    let cell = *cell;
-                    self.f.mark_borrowed(cell);
-                    break;
-                }
-                _ => break,
-            }
+        while let Some((base, _)) = self.f.field_projection(cur) {
+            cur = base;
+        }
+        if let Inst::Load(cell) = self.f.insts[cur] {
+            self.f.mark_borrowed(cell);
         }
         Ok(place)
     }
