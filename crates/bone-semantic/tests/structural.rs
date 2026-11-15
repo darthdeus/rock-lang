@@ -1594,6 +1594,59 @@ fn returned_frame_reference_must_propagate_a_valid_origin() {
     );
 }
 
+fn arena_borrow_errors(body: &str) -> Vec<String> {
+    let mut modules = rock_stdlib::stdlib_files()
+        .into_iter()
+        .map(|f| parse_rock_with_file(f.contents, &rock_stdlib::stdlib_file_id(f.name)).unwrap())
+        .collect::<Vec<_>>();
+    let src = format!(
+        "value BorrowCell {{ n: int }}\nstruct BorrowRow {{ cell: BorrowCell }}\n\
+         global CELLS: Arena<BorrowCell> = arena_new()\n\
+         global ROWS: Arena<BorrowRow> = arena_new()\n\
+         fn invalidate(h: Entity<BorrowCell>) {{ CELLS.remove(h) }}\n\
+         fn consume(r: ref BorrowCell, h: Entity<BorrowCell>) {{ invalidate(h); r.n = 1 }}\n\
+         fn later(r: ref BorrowCell, ignored: BorrowCell?) {{ r.n = 1 }}\n\
+         extern(lua) fn opaque()\n{body}"
+    );
+    modules.push(parse_rock_with_file(&src, "borrow.rock").unwrap());
+    module_error_messages(&semantic_pass(&mut modules).expect("valid Arena borrow fixture"))
+}
+
+#[test]
+fn arena_value_borrows_reject_detected_invalidation() {
+    for body in [
+        "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); CELLS.remove(h); r.n = 1 }",
+        "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); invalidate(h); r.n = 1 }",
+        "fn probe(h: Entity<BorrowCell>) { consume(CELLS.borrow(h).unwrap(), h) }",
+        "fn probe(h: Entity<BorrowCell>) { later(CELLS.borrow(h).unwrap(), CELLS.remove(h)) }",
+        "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); let alias: ref BorrowCell = r; invalidate(h); alias.n = 1 }",
+        "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); r = CELLS.borrow(h).unwrap(); invalidate(h); r.n = 1 }",
+        "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); opaque(); r.n = 1 }",
+    ] {
+        let errors = arena_borrow_errors(body);
+        assert!(
+            errors.iter().any(|e| e.contains("Arena value borrow")),
+            "{body}: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn arena_borrow_checks_preserve_separate_storage_and_fresh_reborrows() {
+    for body in [
+        "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); r.n = 1 }",
+        "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); CELLS.insert(BorrowCell { n: 2 }); r.n = 1 }",
+        "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); CELLS.clear(); r.n = 1 }",
+        "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); CELLS.remove(h); let fresh = CELLS.insert(BorrowCell { n: 2 }); r = CELLS.borrow(fresh).unwrap(); r.n = 1 }",
+        "fn probe(h: Entity<BorrowRow>) { let r: ref BorrowRow = ROWS.borrow(h).unwrap(); ROWS.remove(h); r.cell.n = 1 }",
+        "fn probe(h: Entity<BorrowRow>) { let r: ref BorrowCell = ROWS.borrow(h).unwrap().cell; ROWS.remove(h); r.n = 1 }",
+        "fn probe() { let cell = BorrowCell { n: 0 }; let r: ref BorrowCell = cell; opaque(); r.n = 1 }",
+    ] {
+        let errors = arena_borrow_errors(body);
+        assert!(errors.is_empty(), "{body}: {errors:?}");
+    }
+}
+
 #[test]
 fn ref_cannot_cross_opaque_or_persistent_boundaries() {
     for (label, src) in [

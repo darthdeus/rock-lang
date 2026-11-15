@@ -6,6 +6,16 @@ use crate::prelude::*;
 pub trait SuspensionPolicy {
     fn binding_holds_frame_data(&self, binding: Idx<BindingInfo>, value: Option<Idx<Expr>>)
     -> bool;
+
+    /// Collection invalidation can reuse the structured flow walk without
+    /// crossing bindings whose storage the operation cannot affect.
+    fn is_barrier(&self, body: &Body, at: Idx<Expr>) -> bool {
+        matches!(body.expr_arena[at], Expr::Yield(_) | Expr::YieldDelegate(_))
+    }
+
+    fn crosses_binding(&self, _binding: Idx<BindingInfo>, _at: Idx<Expr>) -> bool {
+        true
+    }
 }
 
 pub fn uses_after_suspension(body: &Body, policy: &impl SuspensionPolicy) -> Vec<Idx<Expr>> {
@@ -19,7 +29,7 @@ fn suspension_crossings(body: &Body, policy: &impl SuspensionPolicy) -> Vec<Idx<
     if !body
         .expr_arena
         .iter()
-        .any(|(_, e)| matches!(e, Expr::Yield(_) | Expr::YieldDelegate(_)))
+        .any(|(at, _)| policy.is_barrier(body, at))
     {
         return Vec::new();
     }
@@ -54,14 +64,22 @@ struct Flow {
 impl Flow {
     /// A suspension becomes the last one on this path for every binding it
     /// holds, live or already crossed.
-    fn suspend(&mut self, at: Idx<Expr>) {
-        for suspensions in self.crossed.values_mut() {
+    fn suspend(&mut self, at: Idx<Expr>, crosses: impl Fn(Idx<BindingInfo>) -> bool) {
+        for (&binding, suspensions) in &mut self.crossed {
+            if !crosses(binding) {
+                continue;
+            }
             suspensions.clear();
             suspensions.insert(at);
         }
-        for binding in self.live.drain() {
-            self.crossed.insert(binding, FxHashSet::from_iter([at]));
-        }
+        let crossed = &mut self.crossed;
+        self.live.retain(|&binding| {
+            if !crosses(binding) {
+                return true;
+            }
+            crossed.insert(binding, FxHashSet::from_iter([at]));
+            false
+        });
     }
 
     fn merge(&mut self, other: Flow) {
@@ -243,11 +261,9 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                 if let Some(value) = value {
                     self.expr(value, flow);
                 }
-                flow.suspend(expr);
             }
             Expr::YieldDelegate(value) => {
                 self.expr(value, flow);
-                flow.suspend(expr);
             }
             Expr::Lambda { .. } => {}
             Expr::Block { statements, tail } => {
@@ -436,6 +452,9 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
             | Expr::String(_)
             | Expr::Global(_)
             | Expr::SiblingRef(_) => {}
+        }
+        if self.policy.is_barrier(self.body, expr) {
+            flow.suspend(expr, |binding| self.policy.crosses_binding(binding, expr));
         }
     }
 
