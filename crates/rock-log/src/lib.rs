@@ -279,6 +279,9 @@ fn emit(level: log::Level, target: &str, args: &std::fmt::Arguments, wall_clock:
             .unwrap()
             .record(target, &args.to_string(), elapsed_secs());
     }
+    if level == log::Level::Error {
+        collect_error(target, args);
+    }
     let line = format_line(elapsed_secs(), level, target, args, wall_clock);
     if let Some(file) = FILE_SINK.get() {
         let mut file = file.lock().unwrap();
@@ -446,6 +449,79 @@ pub fn records_evicted(level: log::Level) -> u64 {
 /// Distinct records at `level`, most recently seen first.
 pub fn records(level: log::Level) -> Vec<LogRecord> {
     record_table(level).map_or_else(Vec::new, |t| t.lock().unwrap().rows())
+}
+
+// ---- collected error records: what a checked run fails on ----
+
+/// Error records a checked run (a sim, a bounded frame run) keeps until it
+/// verifies them. Past it records are dropped and counted, and the run fails.
+pub const COLLECTED_ERROR_CAP: usize = 256;
+
+#[derive(Default)]
+struct CollectedErrors {
+    records: Vec<String>,
+    overflow: u64,
+}
+
+/// `None` until a checked run enables collection.
+static COLLECTED_ERRORS: Mutex<Option<CollectedErrors>> = Mutex::new(None);
+
+fn collect_error(target: &str, args: &std::fmt::Arguments) {
+    let mut collected = COLLECTED_ERRORS.lock().unwrap();
+    let Some(collected) = collected.as_mut() else {
+        return;
+    };
+    if collected.records.len() >= COLLECTED_ERROR_CAP {
+        collected.overflow += 1;
+    } else {
+        collected.records.push(fmt_body(target, args));
+    }
+}
+
+/// Start (or restart, emptied) collecting error records as `[CAT] msg`, the
+/// emitted line without its stamp, Rust and Rock records alike.
+pub fn collect_errors() {
+    *COLLECTED_ERRORS.lock().unwrap() = Some(CollectedErrors::default());
+}
+
+/// The collected records in emission order; empty when collection is off.
+pub fn collected_errors() -> Vec<String> {
+    COLLECTED_ERRORS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map_or_else(Vec::new, |c| c.records.clone())
+}
+
+/// Records dropped past [`COLLECTED_ERROR_CAP`].
+pub fn collected_error_overflow() -> u64 {
+    COLLECTED_ERRORS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map_or(0, |c| c.overflow)
+}
+
+/// Remove the first collected record equal to `record`; false when none is.
+pub fn take_collected_error(record: &str) -> bool {
+    let mut collected = COLLECTED_ERRORS.lock().unwrap();
+    let Some(records) = collected.as_mut().map(|c| &mut c.records) else {
+        return false;
+    };
+    match records.iter().position(|r| r == record) {
+        Some(index) => {
+            records.remove(index);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Drop every collected record after the first `len`.
+pub fn truncate_collected_errors(len: usize) {
+    if let Some(collected) = COLLECTED_ERRORS.lock().unwrap().as_mut() {
+        collected.records.truncate(len);
+    }
 }
 
 // ---- log_once / log_throttled filter state (the one dedup/throttle) ----
@@ -649,6 +725,8 @@ mod tests {
 
     #[test]
     fn logged_errors_and_warnings_reach_their_own_records() {
+        // Held so its error record does not land in the collection test's list.
+        let _level = hold_level();
         init();
         let warnings_before = records_total(log::Level::Warn);
         log::error!(target: "RLTEST_ERRORS", "error table witness {}", 7);
@@ -670,6 +748,29 @@ mod tests {
             records(log::Level::Info).is_empty(),
             "only errors and warnings are kept"
         );
+    }
+
+    #[test]
+    fn checked_runs_collect_error_records_up_to_the_cap() {
+        let _level = hold_level();
+        init();
+        collect_errors();
+        log::warn!(target: "COLLECT", "not an error");
+        log::error!(target: "COLLECT", "first");
+        log::error!(target: "COLLECT", "second");
+        assert_eq!(collected_errors(), ["[COLLECT] first", "[COLLECT] second"]);
+        assert!(take_collected_error("[COLLECT] second"));
+        assert!(!take_collected_error("[COLLECT] second"));
+        for i in 0..COLLECTED_ERROR_CAP {
+            log::error!(target: "COLLECT", "filler {i}");
+        }
+        assert_eq!(collected_errors().len(), COLLECTED_ERROR_CAP);
+        assert_eq!(collected_error_overflow(), 1);
+        truncate_collected_errors(1);
+        assert_eq!(collected_errors(), ["[COLLECT] first"]);
+        collect_errors();
+        assert!(collected_errors().is_empty());
+        assert_eq!(collected_error_overflow(), 0);
     }
 
     #[test]
