@@ -400,16 +400,15 @@ impl<'a> BodyCtx<'a> {
         let mut seen = FxHashSet::default();
         let start = out.len();
         self.element_roots_inner(e, out, &mut seen);
-        // Every visited alias can conservatively inherit this union. Caching
-        // the completed traversal also handles cycles without partial answers.
-        let roots = out[start..].to_vec();
-        let mut cache = self.root_cache.borrow_mut();
-        for at in seen {
-            if let Expr::Var(binding) = self.body.expr_arena[at]
-                && self.ref_values.contains_key(&binding)
-            {
-                cache.entry(binding).or_insert_with(|| roots.clone());
-            }
+        // Cache only the completed query: sibling inputs of a conditional
+        // alias can point into independent Arenas and must not inherit its union.
+        if let Expr::Var(binding) = self.body.expr_arena[e]
+            && self.ref_values.contains_key(&binding)
+        {
+            self.root_cache
+                .borrow_mut()
+                .entry(binding)
+                .or_insert_with(|| out[start..].to_vec());
         }
     }
 
@@ -539,6 +538,7 @@ fn arena_element(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Option
 
 struct ArenaCrossings<'a> {
     roots: FxHashMap<Idx<BindingInfo>, Vec<Root>>,
+    active_values: FxHashSet<Idx<Expr>>,
     effects: &'a FxHashMap<Idx<Expr>, Effect>,
 }
 
@@ -546,9 +546,10 @@ impl SuspensionPolicy for ArenaCrossings<'_> {
     fn binding_holds_frame_data(
         &self,
         binding: Idx<BindingInfo>,
-        _value: Option<Idx<Expr>>,
+        value: Option<Idx<Expr>>,
     ) -> bool {
         self.roots.contains_key(&binding)
+            && value.is_none_or(|value| self.active_values.contains(&value))
     }
     fn is_barrier(&self, _body: &Body, at: Idx<Expr>) -> bool {
         self.effects.contains_key(&at)
@@ -962,10 +963,18 @@ impl<'a> Program<'a> {
             .collect();
         let mut errors = Vec::new();
         let mut borrowed = FxHashMap::default();
+        let mut active_values = FxHashSet::default();
         for (&binding, values) in &ctx.ref_values {
             let mut roots = Vec::new();
             for &value in values {
+                let start = roots.len();
                 ctx.element_roots(value, &mut roots);
+                if roots[start..]
+                    .iter()
+                    .any(|root| root.key.starts_with("Arena<"))
+                {
+                    active_values.insert(value);
+                }
             }
             roots.retain(|root| root.key.starts_with("Arena<"));
             if !roots.is_empty() {
@@ -975,6 +984,7 @@ impl<'a> Program<'a> {
         if !borrowed.is_empty() {
             let policy = ArenaCrossings {
                 roots: borrowed,
+                active_values,
                 effects: &effects,
             };
             for at in uses_after_suspension(body, &policy) {
