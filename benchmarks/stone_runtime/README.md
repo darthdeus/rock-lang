@@ -112,81 +112,56 @@ The retained scene-return command removes about 1537 bytes per iteration
 this does not establish a frame-time speedup. Both arms still encounter
 loop-shape/trace-length aborts; the cache does not make the renderer abort-free.
 
-The allocator keeps finalizer captures outside hot returns, weakly caches
-callbacks by byte count, and declares its byte-count local after the size
-guard. These resolve the reduced/default-input witnesses; they cannot keep
-arbitrary caller float values out of a growth exit.
+## Automatic mesh growth preparation
 
-## Independent corner values and public reservation
+Ordinary SpriteMesh and RetainedMesh append calls now prepare capacity before
+eligible argument construction automatically. The compiler snapshots primitive
+inputs, checks the argument expressions and called helpers, runs preparation
+once, then calls the writer tail. No caller reservation is needed for the
+independent-corner and ribbon workloads. Unsafe or unsupported calls, including
+omitted defaults and already-built value arguments, keep ordinary evaluation.
+See `docs/guard-elimination.md` for the trusted prepare/tail contract and proof
+boundaries. Capacity, span and GC-pressure checks remain.
 
-The current mesh fixture computes all 16 optional alpha/colorize/U/V fields
-with distinct integer remainders and exactly representable binary fractions.
-The source calls `sprite_mesh_add_quad` normally. The independent values
-reproduce five warmup coalescing aborts in each ordinary-growth trace run.
-Explicitly inlining the writer did not remove those aborts in a bounded probe.
+`reserve_quads` remains useful when a complete batch size is known: it reserves
+additional quads with one allocation/copy. The `early` and `reserved` benchmark
+controls remain available. They are not required by the automatic `growth` arm.
 
-`reserve_quads` is available for both SpriteMesh and RetainedMesh. It reserves
-**additional** quads without changing the live vertex count. Exact fits are
-no-ops; bulk requests choose a geometric capacity and allocate/copy once.
-An empty buffer can start at capacity one. Retained GPU contents stay valid
-because reservation does not alter vertices; a later append still invalidates
-the upload as usual. Call it before constructing float-heavy arguments:
+Final x86 comparison uses source `98e9602b` versus `dba982c3`, both compiled with
+the release compiler from `dba982c3`, and the native library from `d2b2f964`.
+Hardware/runtime are the same as above. Six alternating baseline/candidate pairs
+per metric, separate timing/allocation/trace processes, 30 warmup and 120
+measured iterations of 9300 primitives per process:
 
-```rock
-mesh.reserve_quads(1)
-// Compute positions, tint and optional corner values, then append the quad.
+| Workload / version | Median us (process range) | p95 us | Gross Lua bytes/iteration | Warmup coalescing |
+| --- | ---: | ---: | ---: | ---: |
+| Independent quad / baseline | 871.06 (853.00-877.67) | 2573.34 | 2055856 | 5 in every run |
+| Independent quad / automatic | 748.82 (735.24-911.61) | 2561.64 | 2056032 | 0 |
+| Ribbon / baseline | 847.29 (821.02-2598.02) | 2634.74 | 2055827 | 5 in every run |
+| Ribbon / automatic | 765.66 (733.23-794.44) | 2464.53 | 2055927 | 0 |
+
+Neither version records measured coalescing; other trace interruptions remain.
+Host contention produced outliers, visible in the process ranges. These are
+synthetic fill results, not complete application-frame speedups.
+Allocation volumes are essentially unchanged. All 72 comparison processes pass
+the untimed full vertex oracle, including copied prefixes. A separate x86 run
+also passes the existing ordinary quad trace constant budget without increasing
+its limit.
+
+Separate VM-state sampling uses four alternating pairs per workload, 2000
+measured iterations and a 1 ms interval. Candidate compiled-code samples are
+82.1% for quads and 82.0% for ribbons; interpreter samples are 0.17% and 0.16%
+(baseline 1.42% and 1.20%). This rules out an interpreter fallback as the source
+of fewer aborts. Sampling can alter recording; these are coverage diagnostics,
+not timing measurements or estimates of GC savings. All 16 sampling processes
+also pass the full vertex oracle.
+
+```sh
+python3 benchmarks/stone_runtime/profile_vm.py /tmp/runtime-baseline /tmp/runtime-candidate \
+  --runtime "$(python3 scripts/gamelibs.py path --plat linux-x86_64)" \
+  --stone-lib target/debug/libstone_rs.so --case mesh \
+  --outdir /tmp/runtime-comparison/mesh-profile
 ```
 
-When the complete append count is known, reserve that count once before the
-loop. The normal append guards remain necessary for callers that do not reserve.
-
-Measured source/compiler `d2b2f964` plus the reservation API overlay recorded
-in JSON, with the same x86 hardware/runtime as above and a native library
-built at `d2b2f964`. Six alternating process rounds per metric, 30 warmup and
-120 measured iterations of 9300 quads, 54 processes total:
-
-| Arm | Median us | p95 us | Gross Lua bytes/iteration | Warmup coalescing aborts |
-| --- | ---: | ---: | ---: | ---: |
-| Ordinary growth | 911.25 | 2688.05 | 2055823 | 5 in each run |
-| reserve_quads before arguments | 797.94 | 2535.41 | 2056018 | 0 |
-| Initially capacity 128 | 1040.79 | 1323.19 | 205832 | 0 |
-
-Per-process growth medians are 893.83-951.49 us; early reservation medians
-are 764.54-821.83 us. This is a JIT-on synthetic fill result, not an
-application-frame claim. Early reservation follows the same four doublings
-and copy volumes as ordinary growth. Initial capacity 128 skips intermediate
-Lua-managed arrays, so its allocation count is a different workload and does
-not measure equivalent savings in total native bytes.
-
-All 54 final processes pass the complete independent-corner oracle. Neither
-mode records coalescing during measurement; other trace interruptions and
-return-to-lower-frame aborts remain. #264 stays open for unreserved callers:
-the public API supplies the measured early-growth path without adding new
-compiler transformations or weakening capacity/GC-pressure checks.
-
-## Ribbon segment growth
-
-`--case segment` builds adjacent ribbon segments with matching shared
-cross-sections and independently varying positions, UVs, colors and depth.
-It uses the same 100 meshes, 93 segments, 30 warmup and 120 measured iterations,
-three capacity strategies and six alternating rounds as the quad probe.
-After measurement, all 13 fields of all 55800 vertices are checked, including
-copied prefixes and shared cross-sections. All 54 processes passed; deliberate
-colorize corruption failed the validator.
-
-On the same x86 CPU/runtime above, source `13f7320a` with compiler/native
-`d2b2f964` reproduced five warmup coalescing aborts in every ordinary-growth
-trace run. Early reservation and initial reservation had none. No arm had
-measured coalescing; other trace interruptions remained with early reservation.
-
-| Arm | Median us (process range) | p95 us | Gross Lua bytes/iteration |
-| --- | ---: | ---: | ---: |
-| Ordinary growth | 1901.16 (927.78-2426.33) | 6105.91 | 2055828 |
-| reserve_quads before arguments | 977.86 (846.49-1580.42) | 3635.47 | 2055963 |
-| Initially capacity 128 | 1081.89 (1069.65-1131.49) | 1648.57 | 205832 |
-
-Host contention and overlapping ranges prevent a timing speedup claim.
-The existing reservation API avoids this writer's growth coalescing witness;
-no further production change is justified by these results. This is a public
-SpriteMesh writer probe, not an end-to-end measurement of Stone's Trail path,
-which uses a separate RenderBatch reservation wrapper.
+Use `--case segment` for the second sampling workload. `results.json` retains
+per-process timing, allocation, trace and sample counts plus build hashes.

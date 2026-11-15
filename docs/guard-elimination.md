@@ -59,6 +59,28 @@ does not capture the unused helper. Dynamic counts remain checked; a `uint`
 type does not prove the upper bound. Right-shift flooring and left-shift uint
 normalization remain in place.
 
+### Capacity preparation before value arguments
+
+Lua direct calls can use `@preflight("prepare", "tail")` to prepare a
+reference-struct receiver before constructing eligible value arguments. This
+is a trusted callee contract: after receiving its evaluated arguments, the
+original function must be equivalent to `tail(prepare(receiver), arguments)`,
+including error and resource-release ordering. Preparation returns the
+reference used by the tail. Each runs once; the compiler does not repeat the
+original prefix or infer this contract from `@pure`.
+
+The compiler snapshots primitive inputs before preparation and checks the
+argument expressions and their called helpers for supported effect-free
+operations. Calls that do not satisfy the proof retain their original order.
+Heap reads, observable calls, mutation and unsupported argument delivery are
+not grounds for moving preparation. Already-computed live values are not
+automatically moved out of earlier statements.
+
+Stone uses this contract to prepare mesh capacity before wide quad and ribbon
+arguments are constructed. Allocation remains on demand, with the same sizes,
+copying and GC policy. Fallback calls execute the original preparation after
+argument evaluation; no capacity or vertex-span check is removed.
+
 ## Soundness boundaries and next gaps
 
 Unknown calls and callback-capable table accesses invalidate affected facts.

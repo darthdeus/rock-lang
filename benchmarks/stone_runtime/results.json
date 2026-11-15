@@ -128,419 +128,545 @@
       }
     }
   },
-  "mesh_pressure": {
-    "engine_revision": "d2b2f964",
-    "build": {
-      "revision": "d2b2f96400f61a6a1c9ca427313f82118e6f5d9d",
-      "compiler_sha256": "c2e1f776d67a9811b4f35e349b78d5db69211c25f796825db95cd05c737bfaf7",
-      "outputs": {
-        "retained": "95386ed0a73323df59fed12678186b1dfbb64e511adb6ea185a62744e7bbc7df",
-        "fresh": "f58c5cd329d248df09daafe39add20b7a75376283b4e57849e551773a74db1ee"
-      },
-      "engine_overlay": {
-        "packages/stone/engine/rendering/rect_batch.rock": "fe5032befb430d586a654939852750af9f577998ddf114dc5b81e7e9adb68c18",
-        "packages/stone/engine/rendering/mesh_pool.rock": "579ed8752aa1c9af6b9afae10028ffbee96cd4ea22f800f3437b33827a1d7773"
-      }
-    },
-    "native_sha256": "9880b2d3c38da64ad904ec93b26cd3e57638e3941516b83331beec53fa711395",
-    "case": "independent corner values",
-    "frames": 120,
-    "warmup": 30,
-    "processes": 54,
-    "validation": "All 13 fields of all 55800 vertices in frame zero checked after timing, allocation counting and trace hooks stop; deliberate colorize corruption rejected.",
-    "arms": {
-      "growth": {
-        "time_median_us": [
-          893.825,
-          951.4885,
-          906.797,
-          915.6955,
-          902.3105,
-          924.8405
-        ],
-        "time_p95_us": [
-          2515.227,
-          3188.564,
-          2694.696,
-          2792.481,
-          2681.411,
-          2627.352
-        ],
-        "gross_lua_bytes_per_iteration": [
-          2056401.467,
-          2055797.667,
-          2055798.2,
-          2055852.833,
-          2055783.6,
-          2055848.6
-        ],
-        "warmup_aborts": [
-          9,
-          9,
-          9,
-          9,
-          6,
-          10
-        ],
-        "measured_aborts": [
-          0,
-          0,
-          0,
-          0,
-          1,
-          0
-        ],
-        "warmup_coalescing_aborts": [
-          5,
-          5,
-          5,
-          5,
-          5,
-          5
-        ],
-        "measured_coalescing_aborts": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
-        ],
-        "abort_reasons": [
-          "measure:error thrown or hook called during recording detail=nil",
-          "warmup:NYI: register coalescing too complex detail=nil",
-          "warmup:NYI: return to lower frame detail=nil",
-          "warmup:leaving loop in root trace detail=nil",
-          "warmup:trace too short detail=nil"
-        ]
-      },
-      "early": {
-        "time_median_us": [
-          797.758,
-          821.826,
-          798.1235,
-          764.5425,
-          780.6945,
-          820.8875
-        ],
-        "time_p95_us": [
-          2573.349,
-          2661.823,
-          2497.479,
-          2243.574,
-          2339.738,
-          2682.288
-        ],
-        "gross_lua_bytes_per_iteration": [
-          2056025.467,
-          2056019.233,
-          2055999.567,
-          2056016.367,
-          2056023.8,
-          2056007.267
-        ],
-        "warmup_aborts": [
-          4,
-          4,
-          6,
-          4,
-          4,
-          4
-        ],
-        "measured_aborts": [
-          0,
-          0,
-          2,
-          0,
-          0,
-          0
-        ],
-        "warmup_coalescing_aborts": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
-        ],
-        "measured_coalescing_aborts": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
-        ],
-        "abort_reasons": [
-          "measure:error thrown or hook called during recording detail=nil",
-          "warmup:NYI: return to lower frame detail=nil",
-          "warmup:error thrown or hook called during recording detail=nil"
-        ]
-      },
-      "reserved": {
-        "time_median_us": [
-          1071.232,
-          1056.073,
-          1033.4625,
-          1001.6235,
-          1048.11,
-          1018.203
-        ],
-        "time_p95_us": [
-          1347.402,
-          1289.815,
-          1358.354,
-          1277.982,
-          1326.702,
-          1319.68
-        ],
-        "gross_lua_bytes_per_iteration": [
-          205831.767,
-          205832.567,
-          205831.767,
-          205013.367,
-          205012.567,
-          205831.767
-        ],
-        "warmup_aborts": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
-        ],
-        "measured_aborts": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
-        ],
-        "warmup_coalescing_aborts": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
-        ],
-        "measured_coalescing_aborts": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
-        ],
-        "abort_reasons": []
-      }
-    }
-  },
-  "segment_pressure": {
-    "build": {
-      "revision": "13f7320ac43d407a17109e664efb752cae88853e",
-      "compiler_sha256": "c2e1f776d67a9811b4f35e349b78d5db69211c25f796825db95cd05c737bfaf7",
-      "outputs": {
-        "retained": "40a5569337039b9ca2b1f77585c7e01dbb83802fa4488a443d72aaa3c9fc167a",
-        "fresh": "d812896f4ba8aad76da4b85100ebc518fcdf33dd09a865938aee026bca2d1158"
-      }
-    },
-    "native_sha256": "9880b2d3c38da64ad904ec93b26cd3e57638e3941516b83331beec53fa711395",
-    "case": "segment",
-    "frames": 120,
-    "warmup": 30,
-    "engine_revision": "13f7320ac43d407a17109e664efb752cae88853e",
-    "compiler_revision": "d2b2f96400f61a6a1c9ca427313f82118e6f5d9d",
+  "automatic_growth": {
+    "compiler_revision": "dba982c33b4dd040be289d81caf9c5a3fb353e90",
     "native_revision": "d2b2f96400f61a6a1c9ca427313f82118e6f5d9d",
-    "processes": 54,
-    "validation": "All 13 fields of all 55800 vertices checked after observers stop in every process; deliberately corrupted colorize rejected.",
-    "arms": {
-      "growth": {
-        "time_median_us": [
-          2426.33,
-          1967.4235,
-          927.7775,
-          2079.7735,
-          1834.895,
-          949.61
-        ],
-        "time_p95_us": [
-          9379.419,
-          6479.659,
-          3739.855,
-          8376.816,
-          5732.169,
-          3426.431
-        ],
-        "gross_lua_bytes_per_iteration": [
-          2066741.333,
-          2055825.867,
-          2055833.333,
-          2055774.267,
-          2055772.067,
-          2055829.767
-        ],
-        "warmup_aborts": [
-          5,
-          9,
-          9,
-          9,
-          9,
-          9
-        ],
-        "measured_aborts": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
-        ],
-        "warmup_coalescing_aborts": [
-          5,
-          5,
-          5,
-          5,
-          5,
-          5
-        ],
-        "measured_coalescing_aborts": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
-        ],
-        "abort_reasons": [
-          "ABORT 4 warmup:NYI: return to lower frame detail=nil",
-          "ABORT 5 warmup:NYI: register coalescing too complex detail=nil"
-        ]
+    "validation": "72 alternating comparison processes and 16 separate VM-state sampling processes pass frame-zero checks of all 13 fields of all 55800 vertices; measured iterations retain count/capacity/position checks. Ordinary quad trace constant budget passes on x86 and arm64.",
+    "cases": {
+      "mesh": {
+        "build": {
+          "revision": "98e9602b687ec2e61111cebe6bc4e27539b6c181",
+          "benchmark_sources": {
+            "imports.rock": "33c8b5b8cdb75f40a482fbcc3ed1c6ebf6b98a97f9c2e92fd99e3dff82d23de6",
+            "main.rock": "19926e84336c61267b25a9b03eafee37c513855a339fe05bb9b46f1d184952d5",
+            "mesh.rock": "03ad29847bf8ce2b9aae23fad2f634eeac948e665322d3018514884513f9de8d",
+            "segment.rock": "995708d3ef42790b4666bf66e409ab1c0e2554832a105b610419ace88d006fc8",
+            "stick.toml": "e0c85c4ffe35acc89302cea4c8b6d32784ee5d25374778a82b784d0e033413c4"
+          },
+          "compiler_sha256": "6fb98442f49d8528a0442c7a07512713c763328b37af73aa47cb3aa8e979b8d2",
+          "outputs": {
+            "retained": "e74bccbdc18a9667335c6b11d5d5c58b5fd6a1221a79992597fc350ab4e0f941",
+            "fresh": "29103f3d3d30bbc6bf7a12acf9eaa3f8883ed5b5d90b014396fc00179e738e22"
+          }
+        },
+        "candidate_build": {
+          "revision": "dba982c33b4dd040be289d81caf9c5a3fb353e90",
+          "benchmark_sources": {
+            "imports.rock": "33c8b5b8cdb75f40a482fbcc3ed1c6ebf6b98a97f9c2e92fd99e3dff82d23de6",
+            "main.rock": "19926e84336c61267b25a9b03eafee37c513855a339fe05bb9b46f1d184952d5",
+            "mesh.rock": "03ad29847bf8ce2b9aae23fad2f634eeac948e665322d3018514884513f9de8d",
+            "segment.rock": "995708d3ef42790b4666bf66e409ab1c0e2554832a105b610419ace88d006fc8",
+            "stick.toml": "e0c85c4ffe35acc89302cea4c8b6d32784ee5d25374778a82b784d0e033413c4"
+          },
+          "compiler_sha256": "6fb98442f49d8528a0442c7a07512713c763328b37af73aa47cb3aa8e979b8d2",
+          "outputs": {
+            "retained": "9e1b7ed7243ca318ce44c0113d582b5a522ab62664386cb7bab23892649b48ef",
+            "fresh": "475a32301d000092828deebdade129b64aad9f9b2ae7a8a57bb84de2d2f99634"
+          }
+        },
+        "native_sha256": "9880b2d3c38da64ad904ec93b26cd3e57638e3941516b83331beec53fa711395",
+        "frames": 120,
+        "warmup": 30,
+        "processes": 36,
+        "variants": {
+          "baseline": {
+            "time_median_us": [
+              867.37,
+              874.747,
+              852.996,
+              859.8955,
+              875.146,
+              877.6735
+            ],
+            "time_p95_us": [
+              2669.332,
+              2643.282,
+              2405.351,
+              2477.0,
+              2689.526,
+              2503.406
+            ],
+            "gross_lua_bytes_per_iteration": [
+              2055850.767,
+              2055804.233,
+              2055797.133,
+              2055881.733,
+              2055860.633,
+              2055890.067
+            ],
+            "warmup_aborts": [
+              9,
+              9,
+              9,
+              9,
+              9,
+              9
+            ],
+            "measured_aborts": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "warmup_coalescing_aborts": [
+              5,
+              5,
+              5,
+              5,
+              5,
+              5
+            ],
+            "measured_coalescing_aborts": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "abort_reasons": [
+              "ABORT 4 warmup:NYI: return to lower frame detail=nil",
+              "ABORT 5 warmup:NYI: register coalescing too complex detail=nil"
+            ]
+          },
+          "candidate": {
+            "time_median_us": [
+              911.614,
+              749.3115,
+              771.327,
+              748.3235,
+              735.236,
+              737.2135
+            ],
+            "time_p95_us": [
+              2632.328,
+              2557.355,
+              2482.348,
+              2565.931,
+              2387.519,
+              2735.274
+            ],
+            "gross_lua_bytes_per_iteration": [
+              2056081.867,
+              2055977.833,
+              2056101.033,
+              2056007.1,
+              2056055.967,
+              2055882.133
+            ],
+            "warmup_aborts": [
+              1,
+              4,
+              4,
+              4,
+              5,
+              5
+            ],
+            "measured_aborts": [
+              1,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "warmup_coalescing_aborts": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "measured_coalescing_aborts": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "abort_reasons": [
+              "ABORT 1 measure:error thrown or hook called during recording detail=nil",
+              "ABORT 1 warmup:NYI: bytecode %s detail=51",
+              "ABORT 1 warmup:leaving loop in root trace detail=nil",
+              "ABORT 4 warmup:NYI: return to lower frame detail=nil"
+            ]
+          }
+        },
+        "vm_sampling": {
+          "frames": 2000,
+          "warmup": 30,
+          "interval_ms": 1,
+          "samples": [
+            {
+              "round": 0,
+              "variant": "baseline",
+              "states": {
+                "compiled": 1567,
+                "interpreter": 40,
+                "C": 7,
+                "GC": 651,
+                "compiler": 209
+              },
+              "log": "0-baseline.log"
+            },
+            {
+              "round": 0,
+              "variant": "candidate",
+              "states": {
+                "compiled": 1790,
+                "interpreter": 7,
+                "C": 16,
+                "GC": 377,
+                "compiler": 5
+              },
+              "log": "0-candidate.log"
+            },
+            {
+              "round": 1,
+              "variant": "candidate",
+              "states": {
+                "compiled": 1794,
+                "interpreter": 4,
+                "C": 11,
+                "GC": 387,
+                "compiler": 3
+              },
+              "log": "1-candidate.log"
+            },
+            {
+              "round": 1,
+              "variant": "baseline",
+              "states": {
+                "compiled": 1553,
+                "interpreter": 39,
+                "C": 15,
+                "GC": 619,
+                "compiler": 211
+              },
+              "log": "1-baseline.log"
+            },
+            {
+              "round": 2,
+              "variant": "baseline",
+              "states": {
+                "compiled": 1599,
+                "interpreter": 31,
+                "C": 10,
+                "GC": 563,
+                "compiler": 187
+              },
+              "log": "2-baseline.log"
+            },
+            {
+              "round": 2,
+              "variant": "candidate",
+              "states": {
+                "compiled": 1800,
+                "interpreter": 2,
+                "C": 7,
+                "GC": 368,
+                "compiler": 1
+              },
+              "log": "2-candidate.log"
+            },
+            {
+              "round": 3,
+              "variant": "candidate",
+              "states": {
+                "compiled": 1838,
+                "interpreter": 2,
+                "C": 10,
+                "GC": 368,
+                "compiler": 5
+              },
+              "log": "3-candidate.log"
+            },
+            {
+              "round": 3,
+              "variant": "baseline",
+              "states": {
+                "compiled": 1649,
+                "interpreter": 30,
+                "C": 10,
+                "GC": 685,
+                "compiler": 212
+              },
+              "log": "3-baseline.log"
+            }
+          ]
+        }
       },
-      "early": {
-        "time_median_us": [
-          948.9505,
-          848.287,
-          1580.4165,
-          1037.081,
-          846.491,
-          1006.7785
-        ],
-        "time_p95_us": [
-          3730.936,
-          3219.778,
-          4314.174,
-          3540.0,
-          2785.338,
-          4999.661
-        ],
-        "gross_lua_bytes_per_iteration": [
-          2055969.067,
-          2055964.233,
-          2055951.033,
-          2055980.7,
-          2055958.033,
-          2055962.0
-        ],
-        "warmup_aborts": [
-          4,
-          4,
-          4,
-          3,
-          4,
-          4
-        ],
-        "measured_aborts": [
-          0,
-          0,
-          0,
-          1,
-          0,
-          0
-        ],
-        "warmup_coalescing_aborts": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
-        ],
-        "measured_coalescing_aborts": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
-        ],
-        "abort_reasons": [
-          "ABORT 1 measure:error thrown or hook called during recording detail=nil",
-          "ABORT 1 warmup:error thrown or hook called during recording detail=nil",
-          "ABORT 2 warmup:leaving loop in root trace detail=nil",
-          "ABORT 4 warmup:NYI: return to lower frame detail=nil"
-        ]
-      },
-      "reserved": {
-        "time_median_us": [
-          1131.4945,
-          1069.649,
-          1082.1345,
-          1081.652,
-          1079.809,
-          1102.2835
-        ],
-        "time_p95_us": [
-          2230.85,
-          1400.138,
-          1993.185,
-          1294.256,
-          1398.096,
-          1897.003
-        ],
-        "gross_lua_bytes_per_iteration": [
-          205906.467,
-          205851.467,
-          205831.967,
-          205012.767,
-          205832.767,
-          205831.967
-        ],
-        "warmup_aborts": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
-        ],
-        "measured_aborts": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
-        ],
-        "warmup_coalescing_aborts": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
-        ],
-        "measured_coalescing_aborts": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
-        ],
-        "abort_reasons": []
+      "segment": {
+        "build": {
+          "revision": "98e9602b687ec2e61111cebe6bc4e27539b6c181",
+          "benchmark_sources": {
+            "imports.rock": "33c8b5b8cdb75f40a482fbcc3ed1c6ebf6b98a97f9c2e92fd99e3dff82d23de6",
+            "main.rock": "19926e84336c61267b25a9b03eafee37c513855a339fe05bb9b46f1d184952d5",
+            "mesh.rock": "03ad29847bf8ce2b9aae23fad2f634eeac948e665322d3018514884513f9de8d",
+            "segment.rock": "995708d3ef42790b4666bf66e409ab1c0e2554832a105b610419ace88d006fc8",
+            "stick.toml": "e0c85c4ffe35acc89302cea4c8b6d32784ee5d25374778a82b784d0e033413c4"
+          },
+          "compiler_sha256": "6fb98442f49d8528a0442c7a07512713c763328b37af73aa47cb3aa8e979b8d2",
+          "outputs": {
+            "retained": "e74bccbdc18a9667335c6b11d5d5c58b5fd6a1221a79992597fc350ab4e0f941",
+            "fresh": "29103f3d3d30bbc6bf7a12acf9eaa3f8883ed5b5d90b014396fc00179e738e22"
+          }
+        },
+        "candidate_build": {
+          "revision": "dba982c33b4dd040be289d81caf9c5a3fb353e90",
+          "benchmark_sources": {
+            "imports.rock": "33c8b5b8cdb75f40a482fbcc3ed1c6ebf6b98a97f9c2e92fd99e3dff82d23de6",
+            "main.rock": "19926e84336c61267b25a9b03eafee37c513855a339fe05bb9b46f1d184952d5",
+            "mesh.rock": "03ad29847bf8ce2b9aae23fad2f634eeac948e665322d3018514884513f9de8d",
+            "segment.rock": "995708d3ef42790b4666bf66e409ab1c0e2554832a105b610419ace88d006fc8",
+            "stick.toml": "e0c85c4ffe35acc89302cea4c8b6d32784ee5d25374778a82b784d0e033413c4"
+          },
+          "compiler_sha256": "6fb98442f49d8528a0442c7a07512713c763328b37af73aa47cb3aa8e979b8d2",
+          "outputs": {
+            "retained": "9e1b7ed7243ca318ce44c0113d582b5a522ab62664386cb7bab23892649b48ef",
+            "fresh": "475a32301d000092828deebdade129b64aad9f9b2ae7a8a57bb84de2d2f99634"
+          }
+        },
+        "native_sha256": "9880b2d3c38da64ad904ec93b26cd3e57638e3941516b83331beec53fa711395",
+        "frames": 120,
+        "warmup": 30,
+        "processes": 36,
+        "variants": {
+          "baseline": {
+            "time_median_us": [
+              821.0215,
+              866.652,
+              849.3365,
+              845.2485,
+              2598.02,
+              839.517
+            ],
+            "time_p95_us": [
+              2572.553,
+              2781.324,
+              2647.826,
+              2621.662,
+              4487.017,
+              2545.766
+            ],
+            "gross_lua_bytes_per_iteration": [
+              2055830.667,
+              2055827.5,
+              2055825.867,
+              2055769.467,
+              2055815.133,
+              2055934.633
+            ],
+            "warmup_aborts": [
+              9,
+              9,
+              9,
+              9,
+              9,
+              9
+            ],
+            "measured_aborts": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "warmup_coalescing_aborts": [
+              5,
+              5,
+              5,
+              5,
+              5,
+              5
+            ],
+            "measured_coalescing_aborts": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "abort_reasons": [
+              "ABORT 4 warmup:NYI: return to lower frame detail=nil",
+              "ABORT 5 warmup:NYI: register coalescing too complex detail=nil"
+            ]
+          },
+          "candidate": {
+            "time_median_us": [
+              794.4435,
+              733.2265,
+              784.598,
+              766.295,
+              737.3885,
+              765.016
+            ],
+            "time_p95_us": [
+              2483.155,
+              2292.81,
+              2699.717,
+              2555.104,
+              2430.839,
+              2445.907
+            ],
+            "gross_lua_bytes_per_iteration": [
+              2055926.0,
+              2055928.167,
+              2055952.933,
+              2056132.333,
+              2055852.533,
+              2055819.0
+            ],
+            "warmup_aborts": [
+              6,
+              1,
+              4,
+              5,
+              6,
+              4
+            ],
+            "measured_aborts": [
+              0,
+              2,
+              0,
+              0,
+              0,
+              0
+            ],
+            "warmup_coalescing_aborts": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "measured_coalescing_aborts": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "abort_reasons": [
+              "ABORT 1 warmup:leaving loop in root trace detail=nil",
+              "ABORT 1 warmup:trace too short detail=nil",
+              "ABORT 2 measure:trace too short detail=nil",
+              "ABORT 2 warmup:error thrown or hook called during recording detail=nil",
+              "ABORT 4 warmup:NYI: return to lower frame detail=nil"
+            ]
+          }
+        },
+        "vm_sampling": {
+          "frames": 2000,
+          "warmup": 30,
+          "interval_ms": 1,
+          "samples": [
+            {
+              "round": 0,
+              "variant": "baseline",
+              "states": {
+                "compiled": 1563,
+                "interpreter": 28,
+                "C": 15,
+                "GC": 586,
+                "compiler": 160
+              },
+              "log": "0-baseline.log"
+            },
+            {
+              "round": 0,
+              "variant": "candidate",
+              "states": {
+                "compiled": 1790,
+                "interpreter": 4,
+                "C": 14,
+                "GC": 369,
+                "compiler": 4
+              },
+              "log": "0-candidate.log"
+            },
+            {
+              "round": 1,
+              "variant": "candidate",
+              "states": {
+                "compiled": 1905,
+                "interpreter": 4,
+                "C": 14,
+                "GC": 374,
+                "compiler": 3
+              },
+              "log": "1-candidate.log"
+            },
+            {
+              "round": 1,
+              "variant": "baseline",
+              "states": {
+                "compiled": 1692,
+                "interpreter": 33,
+                "C": 15,
+                "GC": 661,
+                "compiler": 142
+              },
+              "log": "1-baseline.log"
+            },
+            {
+              "round": 2,
+              "variant": "baseline",
+              "states": {
+                "compiled": 1666,
+                "interpreter": 29,
+                "C": 18,
+                "GC": 636,
+                "compiler": 180
+              },
+              "log": "2-baseline.log"
+            },
+            {
+              "round": 2,
+              "variant": "candidate",
+              "states": {
+                "compiled": 1939,
+                "interpreter": 1,
+                "C": 15,
+                "GC": 418,
+                "compiler": 4
+              },
+              "log": "2-candidate.log"
+            },
+            {
+              "round": 3,
+              "variant": "candidate",
+              "states": {
+                "compiled": 1848,
+                "interpreter": 6,
+                "C": 14,
+                "GC": 397,
+                "compiler": 1
+              },
+              "log": "3-candidate.log"
+            },
+            {
+              "round": 3,
+              "variant": "baseline",
+              "states": {
+                "compiled": 1685,
+                "interpreter": 31,
+                "C": 11,
+                "GC": 756,
+                "compiler": 150
+              },
+              "log": "3-baseline.log"
+            }
+          ]
+        }
       }
     }
   }
