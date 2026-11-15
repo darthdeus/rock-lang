@@ -42,7 +42,8 @@ def _assemble(source: Path, built: Path, native: Path, output: Path) -> None:
     shutil.copytree(native / 'licenses', output / 'licenses/gamelibs')
     for name in ('LICENSE-MIT', 'LICENSE-APACHE', 'README.md'):
         shutil.copy2(source / name, output / name)
-    shutil.copytree(source / 'demos/testbed', output / 'demos/testbed')
+    for demo in ('testbed', 'match3'):
+        shutil.copytree(source / 'demos' / demo, output / 'demos' / demo)
     if system == 'Darwin':
         binaries = list((output / 'lib').glob('*.dylib')) + list((output / 'bin').iterdir())
         for binary in binaries:

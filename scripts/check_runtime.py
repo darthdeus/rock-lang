@@ -163,6 +163,17 @@ def check(archive, output):
         # Emitted Lua is private to its compiling user; evidence must be readable by the host uploader.
         shutil.copyfile(work / 'frames/main.lua', output / 'testbed.lua')
         assert screenshot.read_bytes().startswith(b'\x89PNG\r\n\x1a\n'), 'missing render'
+
+        run('match3-core', ['test', install / 'packages/match3-core'])
+        for name in ('boot_idle', 'animated_swap'):
+            run(f'match3-{name}', ['sim', install / 'demos/match3', name],
+                expected=f'{name}: PASS (', display=True)
+        screenshot = output / 'match3.png'
+        run('match3-frame', ['frame', install / 'demos/match3', '--frames', '60',
+                            '--output', work / 'match3-frames'], display=True,
+            extra_env={'STONE_HEADLESS': '1', 'STONE_SCREENSHOT_PATH': str(screenshot)})
+        shutil.copyfile(work / 'match3-frames/main.lua', output / 'match3.lua')
+        assert screenshot.read_bytes().startswith(b'\x89PNG\r\n\x1a\n'), 'missing Match3 render'
         (output / 'result.json').write_text(json.dumps(dict(passed=results,
             renderer='Mesa software rendering', network='none', source_available=False), indent=2) + '\n')
 
