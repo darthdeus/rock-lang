@@ -31,11 +31,31 @@ both options uses scalar defaults. Use the repository's job scheduler where requ
 The GL workload needs a working desktop/headless graphics provider;
 `STONE_HEADLESS=1` hides the owned window, it does not emulate a GPU.
 
-`prepare.py` archives tracked packages and stdlib from HEAD, copies this
-benchmark, then compiles two isolated arms with the specified compiler.
-The fresh arm changes only `scene_return_pass` back to constructing a Pass.
-Uncommitted engine/compiler edits are excluded. Build the compiler at HEAD;
-its SHA is recorded but the script cannot establish its source provenance.
+`prepare.py` archives tracked packages and stdlib from HEAD (or from the
+commit supplied with `--source-revision`), copies this benchmark, then compiles
+two isolated arms with the specified compiler. The fresh arm changes only
+`scene_return_pass` back to constructing a Pass. `build.json` records the
+resolved source commit, hashes of the copied benchmark inputs, compiler and
+outputs. Uncommitted engine edits are excluded. The compiler hash does not
+establish its source provenance; record that separately.
+
+To compare committed engine candidates in alternating processes, prepare each
+revision with the same benchmark inputs, then select one workload arm:
+
+```sh
+python3 benchmarks/stone_runtime/prepare.py /tmp/stone-baseline --source-revision BASELINE --compiler /path/to/rock
+python3 benchmarks/stone_runtime/prepare.py /tmp/stone-candidate --source-revision CANDIDATE --compiler /path/to/rock
+python3 benchmarks/stone_runtime/measure.py /tmp/stone-baseline \
+  --compare /tmp/stone-candidate --arm growth --case mesh --independent-corners \
+  --runtime /path/to/gamelibs --stone-lib /path/to/libstone_rs.so --outdir /tmp/stone-paired
+```
+
+The results include both build records and label each sample baseline or
+candidate. Check that benchmark input hashes match and record compiler and
+native-library provenance. Fewer aborts alone does not prove more work ran
+in compiled code: inspect LuaJIT VM-state sampling in separate profiling
+runs as well as abort sites, allocation counts, timings, and the vertex oracle.
+Profiling must not be enabled during timing runs.
 
 `measure.py` alternates process order over six rounds and records compiler,
 Lua output and native-library hashes, LuaJIT identity, per-process medians
