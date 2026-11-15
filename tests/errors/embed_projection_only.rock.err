@@ -6,6 +6,7 @@
 //! Tags: embed, projection-only, scalarization
 
 //=== TEST CASE: embed_whole_value_binding_Generic ===
+//! expect: `p` is an `embed` field: it has no independently storable value
 // THE headline case: illegal even where flattening would physically be a no-op.
 struct Pt { x: int, y: int }
 struct Holder { embed p: Pt, tag: int }
@@ -17,6 +18,7 @@ fn main() {
 }
 
 //=== TEST CASE: embed_whole_value_return_Generic ===
+//! expect: `p` is an `embed` field: it has no independently storable value
 struct Pt { x: int, y: int }
 struct Holder { embed p: Pt, tag: int }
 
@@ -30,6 +32,7 @@ fn main() {
 }
 
 //=== TEST CASE: embed_closure_capture_Generic ===
+//! expect: `p` is an `embed` field: it has no independently storable value
 struct Pt { x: int, y: int }
 struct Holder { embed p: Pt, tag: int }
 
@@ -40,6 +43,7 @@ fn main() {
 }
 
 //=== TEST CASE: embed_collection_element_Generic ===
+//! expect: `p` is an `embed` field: it has no independently storable value
 struct Pt { x: int, y: int }
 struct Holder { embed p: Pt, tag: int }
 
@@ -50,6 +54,7 @@ fn main() {
 }
 
 //=== TEST CASE: embed_any_boundary_Generic ===
+//! expect: `p` is an `embed` field: it has no independently storable value
 struct Pt { x: int, y: int }
 struct Holder { embed p: Pt, tag: int }
 
@@ -60,6 +65,7 @@ fn main() {
 }
 
 //=== TEST CASE: embed_non_scalar_abi_callee_Generic ===
+//! expect: `p` is an `embed` field: it has no independently storable value
 // A `@nomangle` / `extern` / inline callee receives a BOX, so it is not a
 // scalar-ABI consumer even though the syntax looks like the legal call form.
 struct Pt { x: int, y: int }
@@ -75,6 +81,7 @@ fn main() {
 }
 
 //=== TEST CASE: embed_readable_field_ref_Generic ===
+//! expect: a readable selector would hand out the whole value
 // The extraction hole `WriteFieldRef` closed: `.p` may satisfy a write-only
 // selector, but a readable one hands out the whole value.
 struct Pt { x: int, y: int }
@@ -87,6 +94,7 @@ fn main() {
 }
 
 //=== TEST CASE: embed_full_field_ref_Generic ===
+//! expect: a readable selector would hand out the whole value
 struct Pt { x: int, y: int }
 struct Holder { embed p: Pt, tag: int }
 
@@ -97,6 +105,7 @@ fn main() {
 }
 
 //=== TEST CASE: embed_nullable_let_binding_Generic ===
+//! expect: `p` is an `embed` field: it has no independently storable value
 // Presence is a leaf, so presence ops are projections -- but `?.let` binds the
 // whole value.
 struct Pt { x: int, y: int }
@@ -109,6 +118,7 @@ fn main() {
 }
 
 //=== TEST CASE: embed_nullable_coalesce_Generic ===
+//! expect: `p` is an `embed` field: it has no independently storable value
 struct Pt { x: int, y: int }
 struct Holder { embed p: Pt?, tag: int }
 

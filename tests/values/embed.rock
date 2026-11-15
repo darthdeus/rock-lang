@@ -8,8 +8,8 @@
 // leaf-wise. The rejection matrix is tests/errors/embed_projection_only.rock.err
 // and tests/errors/embed_site_legality.rock.err.
 //
-// Storage is NOT flattened yet (that is skull's half): an embed field is
-// physically an ordinary field today, so these pin SEMANTICS, not layout.
+// This first section checks projection semantics. Later sections exercise
+// physical layout and reflection, including an explicitly inverted sentinel.
 
 struct Pt { x: int, y: int }
 struct Holder { embed p: Pt, tag: int }
@@ -118,6 +118,14 @@ fn test_write_field_ref_admits_non_embed_field() {
     print("{h.tag}")
 }
 
+// This checks selector admission itself; whole-field storage is covered above.
+fn accept_embed_write_selector(f: WriteFieldRef<Holder, Pt>) -> int { return 1 }
+
+@test(output = "1")
+fn test_write_field_ref_admits_embed_field() {
+    print("{accept_embed_write_selector(.p)}")
+}
+
 // A `value` field embeds into either parent kind. On a value-struct PARENT
 // (already contiguous) `embed` is a no-op guarantee -- it asserts the layout.
 value V2 { x: float, y: float }
@@ -207,6 +215,15 @@ struct PlainHolder { p: Pt, tag: int }
 fn test_inspect_plain_struct_field_control() {
     let h = PlainHolder { p: Pt { x: 1, y: 2 }, tag: 3 }
     print("{inspect(h)}")
+}
+
+// Readable selectors remain legal for a plain child field.
+fn accept_plain_read_selector(f: ReadFieldRef<PlainHolder, Pt>) -> int { return 1 }
+fn accept_plain_full_selector(f: FieldRef<PlainHolder, Pt>) -> int { return 2 }
+
+@test(output = "1 2")
+fn test_plain_child_readable_selector_controls() {
+    print("{accept_plain_read_selector(.p)} {accept_plain_full_selector(.p)}")
 }
 
 // SENTINEL -- a flattened enum FIELD still does not reconstruct logically.
