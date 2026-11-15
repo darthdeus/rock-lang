@@ -74,9 +74,9 @@ contract. The reference now distinguishes `int` masking from checked `uint`
 counts. Compiler behavior is unchanged.
 
 All 18 unsupported-operator cases now pin their symbol-specific diagnostic:
-the current unpinned count is **377 of 514**, down from 395. The 514-case
+the unpinned count at that stage was **377 of 514**, down from 395. The 514-case
 inventory includes six existing TODO cases; the executed error suite reports
-508 passed and six TODOs. The evidence checker now has seven records, including
+508 passed and six TODOs. The evidence checker then had seven records, including
 both backends' dynamic shift checks and deliberate mutations of this error
 family. Wrong diagnostics and valid replacement programs each fail all 18 cases.
 
@@ -101,7 +101,7 @@ targeted checks fail. Valid controls reach real Lua emission. One existing
 editor-query test checks partial recovery in-process, not editor transport.
 These gates serve different stages; the audit found no justified consolidation.
 
-All thirteen evidence records are runnable through the shared checker.
+Those thirteen evidence records are runnable through the shared checker.
 
 ## Small production and test-discovery repairs
 
@@ -123,10 +123,31 @@ Combined validation passed 120 bone-lints tests, five skull-graph tests, and
 also permits empty selections, like ordinary filtered Cargo runs; the evidence
 checker already requires explicit nonzero counts. No harness policy was changed.
 
-The incremental audit identified a possible direct-call rollback gap during a
-failed hot reload: staged CodeRef slots may roll back while earlier global
-function assignments survive a later initializer failure. This is a source-audit
-hypothesis requiring a reproducer, not an established compiler defect.
+## Failed overlays, graph counts and purity assertions
+
+The [hot-reload audit](hot-reload-rollback-decisions.md) reproduced the direct-call
+rollback gap: after a late initializer failed, retained CodeRefs stayed old but
+ordinary callers could reach already-replaced functions. A reload-local journal
+now restores emitted global bindings and aborts pending slot publication. Two
+runtime regressions cover failure, restoration of constants and definitions,
+and a successful retry. Initializer side effects remain outside this contract.
+The audit also reproduced a separate static-reset retry discrepancy; it remains
+open and is documented with its edit/load sequence.
+
+The [graph cleanup](instance-graph-cleanup-decisions.md) shares the repeated
+root-hole calculations while retaining full-refresh and local-refresh scopes.
+It also fixes concrete-instance counts for mangled generic functions by retaining
+the failed call's declaration identity. Tests compare incremental results to
+fresh builds and check bounded work counters. These are work measurements, not
+a wall-clock speedup claim. A separate source-span shift discrepancy remains open.
+
+All 20 [purity rejection cases](purity.md#rejection-assertion-audit-2026-11-15)
+now pin intended diagnostics; 15 previously accepted any rejection. The loop
+fixture isolates its mutation from unrelated global reads. Wrong diagnostics
+and valid replacement programs each fail all 20 assertions; removing `@pure`
+admits all 20 original programs. The current inventory is **362 unpinned of 520
+rejection cases**, down from 395 of the original 514. These are assertion gaps,
+not a count of known compiler defects.
 
 ## Useful measurements
 
@@ -146,14 +167,12 @@ until their behavioral purposes are understood.
 
 ## Next actions and open questions
 
-1. Reproduce the suspected hot-reload rollback gap: retain a direct caller as
-   well as a CodeRef, fail a late initializer, and check both still run old code.
-2. Settle the explicit-ref construction-time boundary before changing that
-   language rule; the current accepted behavior is recorded as a discrepancy.
-3. Investigate the repeated root-hole inner calculations in full and local graph
-   refreshes; preserve their different scopes and measure before restructuring.
+1. Repair static-reset retention across a failed overlay and cumulative retry,
+   using the reproduced sequence in the rollback decision document.
+2. Repair stale root-hole source spans after length-changing edits, retaining
+   the fresh-build comparison from the graph audit.
+3. Settle the explicit-ref construction-time boundary before changing that
+   language rule; the accepted behavior remains recorded as a discrepancy.
 
-Open: which concern should be the first substantial cleanup; which documented
-behaviors are deliberate language commitments versus implementation accidents;
-which feature boundaries make cross-subsystem test mapping useful. Expand the
-ledger as these are answered, not by mechanically summarizing every function.
+Extend the evidence ledger alongside concrete repairs. Its checks establish
+bounded claims, not a percentage of language coverage or a launch certificate.
