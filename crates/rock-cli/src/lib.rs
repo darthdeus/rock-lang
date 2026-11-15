@@ -487,15 +487,12 @@ pub fn test_corpus_dir() -> std::path::PathBuf {
 pub mod overlay_test_support;
 
 mod asset_selection;
-pub(crate) mod compile_cache;
 mod compiler_watch;
 pub(crate) mod frame_commands;
-pub(crate) mod frame_compile_cache;
 pub(crate) mod frame_runtime;
 pub(crate) mod game_compile;
 pub mod game_runtime;
 pub mod headless_scope;
-mod host_paths;
 mod log_record;
 pub mod package;
 pub(crate) mod stone_runtime;

@@ -3466,24 +3466,16 @@ impl IncrementalProject {
         let project = crate::live_project::LiveProject::init(dir, include_tests)?;
         Self::init_project(
             dir,
-            Some((main_path, incremental_path)),
+            (main_path, incremental_path),
             project,
             explicit_allocation_report,
             select_sims,
         )
     }
 
-    /// Reconstruct the cached program's baseline without publishing over the
-    /// running program. The caller checks its identity before applying edits.
-    pub(crate) fn init_cached_baseline(dir: &str, sources: SourceFiles) -> Result<Self> {
-        let _slot = crate::compile_slots::acquire(dir)?;
-        let project = crate::live_project::LiveProject::init_from_sources(dir, false, sources)?;
-        Self::init_project(dir, None, project, None, |_| Ok(None))
-    }
-
     fn init_project(
         dir: &str,
-        output: Option<(&std::path::Path, &std::path::Path)>,
+        (main_path, incremental_path): (&std::path::Path, &std::path::Path),
         project: crate::live_project::LiveProject,
         explicit_allocation_report: Option<&std::path::Path>,
         select_sims: impl FnOnce(&bone_semantic::inference::Workspace) -> Result<Option<Vec<String>>>,
@@ -3515,9 +3507,7 @@ impl IncrementalProject {
             (lua, c, artifact_fingerprint, emits_main)
         };
         let preamble = (RuntimeServices::registered().program_preamble)(dir, ProgramKind::Game)?;
-        if let Some((main_path, incremental_path)) = output {
-            write_full_main(&preamble, &lua, emits_main, main_path, incremental_path)?;
-        }
+        write_full_main(&preamble, &lua, emits_main, main_path, incremental_path)?;
         let shape_hashes = skull::type_shape_hashes(project.workspace())
             .map_err(|e| anyhow::anyhow!(e.message))?;
         Ok(IncrementalProject {

@@ -575,8 +575,6 @@ fn child_sim_selection() -> Result<Vec<String>> {
     }
 }
 
-#[path = "sim_compile_cache.rs"]
-mod sim_compile_cache;
 mod worker_admission;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -714,7 +712,6 @@ fn current_receipt_source_inputs(project: &Path) -> Result<Vec<SimReceiptInput>>
 
 /// The receipt context and discovered inputs of a project as it is now: what
 /// a receipt must match before a run may load it.
-#[derive(Clone)]
 struct CurrentReceiptState {
     context: serde_json::Value,
     inputs: Vec<SimReceiptInput>,
@@ -875,7 +872,6 @@ fn publish_sim_receipt(
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
     source_files: &HashMap<String, String>,
     inputs: &[SimReceiptInput],
-    cache_identity: &serde_json::Value,
     selection: &[String],
 ) -> Result<()> {
     std::fs::create_dir_all(root)
@@ -895,7 +891,6 @@ fn publish_sim_receipt(
     let manifest = serde_json::json!({
         "schema_version": SIM_COMPILE_RECEIPT_VERSION,
         "context": sim_receipt_context(project)?,
-        "cache_identity": cache_identity,
         "selection": selection,
         "main_sha256": sha256_bytes(&main_bytes),
         "inputs": receipt_inputs_json(inputs),
@@ -921,7 +916,6 @@ fn load_sim_receipt(
     receipt_dir: &Path,
     project: &Path,
     output: &Path,
-    current: Option<&CurrentReceiptState>,
 ) -> Result<(
     Vec<String>,
     HashMap<String, Vec<(String, String)>>,
@@ -944,14 +938,7 @@ fn load_sim_receipt(
     let expected_context = manifest
         .get("context")
         .ok_or_else(|| anyhow!("sim compile receipt has no context"))?;
-    let computed;
-    let current = match current {
-        Some(current) => current,
-        None => {
-            computed = CurrentReceiptState::of(project)?;
-            &computed
-        }
-    };
+    let current = CurrentReceiptState::of(project)?;
     if expected_context != &current.context {
         return Err(anyhow!(
             "sim compile receipt context changed; prepare a new receipt for this test lane"
@@ -963,7 +950,7 @@ fn load_sim_receipt(
             .get("inputs")
             .ok_or_else(|| anyhow!("sim compile receipt has no inputs"))?,
     )?;
-    let mut current_inputs = current.inputs.clone();
+    let mut current_inputs = current.inputs;
     for expected in expected_inputs
         .iter()
         .filter(|input| input.kind == "embedded")
@@ -1052,7 +1039,7 @@ fn prepare_sims(
     })?;
     let receipt_dir = sim_receipt_project_dir(&root, &project_path);
     if receipt_dir.is_dir() {
-        return consume_sim_receipt(&receipt_dir, &project_path, &output_path, None);
+        return consume_sim_receipt(&receipt_dir, &project_path, &output_path);
     }
     if std::env::var_os(SIM_COMPILE_RECEIPT_PREPARE_ENV).as_deref()
         != Some(std::ffi::OsStr::new("1"))
@@ -1072,12 +1059,6 @@ fn prepare_sims(
             &selection,
         )?;
     let inputs = receipt_inputs_from_stone(&project_path, &stone)?;
-    let cache_identity = sim_compile_cache::identity(
-        &project_path,
-        backend,
-        stone.comptime_inputs(),
-        &rock_host::process_management::current_executable_image()?,
-    )?;
     let receipt_selection = if selection_is_full {
         Vec::new()
     } else {
@@ -1099,7 +1080,6 @@ fn prepare_sims(
                 &env_by_wire,
                 &source_files,
                 &inputs,
-                &cache_identity,
                 &receipt_selection,
             )
         },
@@ -1116,7 +1096,6 @@ fn consume_sim_receipt(
     receipt_dir: &Path,
     project_path: &Path,
     output_path: &Path,
-    current: Option<&CurrentReceiptState>,
 ) -> Result<PreparedSims> {
     timed_sim_compile_phase(
         "compile_sims",
@@ -1130,7 +1109,7 @@ fn consume_sim_receipt(
         "receipt_materialize",
         project_path,
         Some(output_path),
-        || load_sim_receipt(receipt_dir, project_path, output_path, current),
+        || load_sim_receipt(receipt_dir, project_path, output_path),
     )?;
     Ok(PreparedSims {
         wire_names,
@@ -1148,9 +1127,7 @@ fn consume_sim_receipt(
 /// entry still compiles its live session in-process, as it does under any
 /// receipt.
 ///
-/// The receipt goes through the cross-run compile cache (`sim_compile_cache`)
-/// unless `ROCK_SIM_COMPILE_CACHE=0`, which compiles into a one-run receipt.
-/// An explicit receipt lane (`ROCK_SIM_COMPILE_RECEIPT_DIR`) keeps its own
+/// Each run compiles into a one-run receipt. An explicit receipt lane (`ROCK_SIM_COMPILE_RECEIPT_DIR`) keeps its own
 /// rules. The compile child is `rock_exe`: the CLI passes itself, a test
 /// harness the `rock` binary it was built beside.
 fn prepare_sims_out_of_process(
@@ -1165,22 +1142,10 @@ fn prepare_sims_out_of_process(
     if std::env::var_os(SIM_COMPILE_RECEIPT_DIR_ENV).is_some_and(|value| !value.is_empty()) {
         return prepare_sims(backend, project_path, output_path);
     }
-    // Above the cache branch, so a cache-hit run still sweeps: the stale
-    // roots it removes are from cache-bypassed runs, not from the cache.
     sweep_stale_sim_receipt_roots(Path::new("tmp"));
     let project_path = project_path
         .canonicalize()
         .with_context(|| format!("canonicalize sim project {}", project_path.display()))?;
-    if let Some(cache) = sim_compile_cache::root(rock_exe)? {
-        return sim_compile_cache::prepare(
-            backend,
-            &project_path,
-            &output_path,
-            &cache,
-            rock_exe,
-            selection,
-        );
-    }
     fs_err::create_dir_all("tmp").context("creating tmp/ for the sim compile receipt")?;
     // Pid-keyed so the next run can tell a concurrent live compile (pid
     // alive: keep) from a killed runner's leftover (pid dead: sweep).
@@ -1194,7 +1159,6 @@ fn prepare_sims_out_of_process(
         &sim_receipt_project_dir(root.path(), &project_path),
         &project_path,
         &output_path,
-        None,
     )
 }
 

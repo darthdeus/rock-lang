@@ -21,8 +21,9 @@ use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub(crate) const ADMISSION_ENV: &str = "ROCK_COMPILE_ADMISSION";
-pub use rock_host::process_management::{SPAWN_PHASE_FILE_ENV, report_spawn_phase};
+#[cfg(not(test))]
+const ADMISSION_ENV: &str = "ROCK_COMPILE_ADMISSION";
+pub use rock_host::process_management::report_spawn_phase;
 
 #[cfg(test)]
 const AUTHOR_SLOT: &str = "priority-0";

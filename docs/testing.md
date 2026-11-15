@@ -371,19 +371,16 @@ after update and before draw on every frame the runner would draw, including
 on-demand frames that skip their draw; a demand draw inside update prepares
 first and the frame does not prepare again.
 
-### Scoped compile and the compile cache
+### Scoped compile
 
 `rock sim` compiles in a child that publishes a receipt and exits, so the
-runner stays small beside its children, and keeps compile receipts across
-runs (`crates/rock-cli/src/sim_compile_cache.rs`). A named run that misses the
-cache emits only its selected sims plus main, global roots and generated
-glue; discovery and typechecking still include every file. Literal sim names
-in reached bodies add roots transitively; dynamic access to the sim registry
-outside its dispatcher is refused with an explicit whole-suite alternative.
-Package tests (`rock test <project>`) do not compile the sim files. Volatile
-build vars stay out of the cache key by their contract that they may vary
-without changing an artifact's identity; a project whose clock vars are not
-declared `volatile = true` compiles on every run and says why.
+runner stays small beside its children. Every run compiles from cold; there
+is no cross-run compile cache. A named run emits only its selected sims plus
+main, global roots and generated glue; discovery and typechecking still
+include every file. Literal sim names in reached bodies add roots
+transitively; dynamic access to the sim registry outside its dispatcher is
+refused with an explicit whole-suite alternative. Package tests
+(`rock test <project>`) do not compile the sim files.
 
 ### Run records
 

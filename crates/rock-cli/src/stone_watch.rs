@@ -301,49 +301,6 @@ fn reseed_comptime_watch(
     comptime_watch.replace_with_hashes(hashed);
 }
 
-/// Produce a `rock stone` session's first program and return the identity the
-/// game process reports for it. When the shared artifact cache has one for the
-/// current content key, the session starts from that Lua and compiles nothing;
-/// otherwise it compiles and publishes the result for the next session.
-fn initial_session_build(
-    cache_root: Option<&std::path::Path>,
-    backend: crate::Backend,
-    path: &str,
-    output_path: &std::path::Path,
-    compiler: &mut dyn crate::game_runtime::GameCompiler,
-) -> Result<String> {
-    use crate::frame_compile_cache::{SessionStart, session_start, store_session_artifact};
-    let pending = match session_start(cache_root, backend, path, output_path)? {
-        SessionStart::Hit(cached) => {
-            let fingerprint = cached.artifact_fingerprint.clone();
-            compiler.adopt_cached_artifact(cached)?;
-            return Ok(fingerprint);
-        }
-        SessionStart::Miss(pending) => Some(pending),
-        SessionStart::Off => None,
-    };
-    compiler.compile(&std::collections::HashSet::new(), false)?;
-    let fingerprint = compiler.artifact_fingerprint()?;
-    if let (Some(root), Some(pending)) = (cache_root, pending) {
-        let embedded = compiler
-            .comptime_watch_files_with_hashes()
-            .into_iter()
-            .map(|(path, _)| path)
-            .collect::<Vec<_>>();
-        if let Err(error) = store_session_artifact(
-            root,
-            &pending,
-            output_path,
-            &fingerprint,
-            compiler.comptime_inputs(),
-            &embedded,
-        ) {
-            log::warn!(target: "STONE", "cannot store this session's compile for the next launch: {error:#}");
-        }
-    }
-    Ok(fingerprint)
-}
-
 fn wait_for_reload_resume(control: &std::path::Path) -> Result<()> {
     let acknowledged = control.with_extension("held");
     let mut announced: Option<Vec<u8>> = None;
@@ -401,10 +358,10 @@ pub(crate) fn do_stone_watch(
     // (builds, process, restart) is shared. The runtime owns the changed-path
     // accumulator the watcher feeds it.
     //
-    // The compiler gets the canonical project root, which is also what the
-    // artifact cache keys on: a compile stamps its `embed_root` from the dir it
-    // was handed, so a relative dir would key the session's own artifact
-    // differently from the `rock frame` compile of the same sources.
+    // The compiler gets the canonical project root: a compile stamps its
+    // `embed_root` from the dir it was handed, so a relative dir would give
+    // the session's artifact a different identity from the `rock frame`
+    // compile of the same sources.
     let compiler_dir = PathBuf::from(path)
         .canonicalize()
         .map_err(|error| anyhow::anyhow!("canonicalize the project root {path}: {error}"))?;
@@ -433,13 +390,6 @@ pub(crate) fn do_stone_watch(
 
     // Do initial compilation.
     // If it fails, we'll continue watching and start the game when compilation succeeds
-    let cache_root = match crate::frame_compile_cache::cache_root() {
-        Ok(root) => root,
-        Err(error) => {
-            log::warn!(target: "STONE", "compile cache disabled: {error:#}");
-            None
-        }
-    };
     let report_initial_failure = |error: &dyn std::fmt::Display| {
         let error_message = format!("Initial compilation failed: {}", error);
         log::error!(target: "STONE", "{}", error_message);
@@ -460,13 +410,10 @@ pub(crate) fn do_stone_watch(
                         report_initial_failure(&e);
                         None
                     }
-                    Ok(_) => match initial_session_build(
-                        cache_root.as_deref(),
-                        backend,
-                        &compiler_dir,
-                        &output_path,
-                        compiler.as_mut(),
-                    ) {
+                    Ok(_) => match compiler
+                        .compile(&std::collections::HashSet::new(), false)
+                        .and_then(|_| compiler.artifact_fingerprint())
+                    {
                         Ok(build_id) => {
                             reseed_comptime_watch(
                                 compiler.as_ref(),
@@ -1789,272 +1736,6 @@ mod watch_reload_tests {
         );
         let output = run_lua(&script).unwrap();
         assert_eq!(output.stdout.trim(), "8", "{}", output.combined());
-    }
-}
-
-#[cfg(test)]
-mod session_cache_tests {
-    use super::initial_session_build;
-    use crate::Backend;
-    use crate::game_runtime::{AdoptedArtifact, CompileOutcome, GameCompiler, SkullGameCompiler};
-    use std::cell::Cell;
-    use std::collections::HashSet;
-    use std::path::{Path, PathBuf};
-
-    /// The compiler `initial_session_build` drives, counting the compiles it is
-    /// asked for: a cache hit means this stays at zero.
-    struct CountingCompiler {
-        inner: SkullGameCompiler,
-        compiles: Cell<usize>,
-    }
-
-    impl GameCompiler for CountingCompiler {
-        fn compile(
-            &mut self,
-            changed: &HashSet<PathBuf>,
-            force_full: bool,
-        ) -> anyhow::Result<CompileOutcome> {
-            self.compiles.set(self.compiles.get() + 1);
-            self.inner.compile(changed, force_full)
-        }
-
-        fn canonicalize_for_restart(&mut self) -> anyhow::Result<()> {
-            self.inner.canonicalize_for_restart()
-        }
-
-        fn comptime_watch_files_with_hashes(&self) -> Vec<(PathBuf, u64)> {
-            self.inner.comptime_watch_files_with_hashes()
-        }
-
-        fn package_roots(&self) -> Option<&[(u32, PathBuf)]> {
-            self.inner.package_roots()
-        }
-
-        fn artifact_fingerprint(&self) -> anyhow::Result<String> {
-            self.inner.artifact_fingerprint()
-        }
-
-        fn comptime_inputs(&self) -> Option<&bone_semantic::inference::ComptimeInputs> {
-            self.inner.comptime_inputs()
-        }
-
-        fn adopt_cached_artifact(&mut self, adopted: AdoptedArtifact) -> anyhow::Result<()> {
-            self.inner.adopt_cached_artifact(adopted)
-        }
-    }
-
-    struct Session {
-        _dir: tempfile::TempDir,
-        /// The private per-session output dir `do_stone_watch` compiles into.
-        main: PathBuf,
-        compiler: CountingCompiler,
-    }
-
-    fn session(project: &Path) -> Session {
-        let dir = tempfile::tempdir().unwrap();
-        let main = dir.path().join("main.lua");
-        let compiler = CountingCompiler {
-            inner: SkullGameCompiler::new(
-                project.to_str().unwrap(),
-                main.clone(),
-                main.with_file_name("incremental.lua"),
-            ),
-            compiles: Cell::new(0),
-        };
-        Session {
-            _dir: dir,
-            main,
-            compiler,
-        }
-    }
-
-    fn project() -> (tempfile::TempDir, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("stick.toml"),
-            "[package]\nname = \"session-cache-fixture\"\n",
-        )
-        .unwrap();
-        std::fs::write(dir.path().join("main.rock"), "fn main() { print(1) }\n").unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        (dir, root)
-    }
-
-    fn build(project: &Path, cache: &Path, session: &mut Session) -> String {
-        initial_session_build(
-            Some(cache),
-            Backend::Skull,
-            &project.to_string_lossy(),
-            &session.main,
-            &mut session.compiler,
-        )
-        .expect("the session's first program")
-    }
-
-    /// The Lua a from-scratch compile emits now, independent of any cache.
-    fn oracle_main_lua(project: &Path) -> (Vec<u8>, String) {
-        let dir = tempfile::tempdir().unwrap();
-        let artifact = crate::game_compile::compile_game(
-            Backend::Skull,
-            &project.to_string_lossy(),
-            dir.path(),
-        )
-        .unwrap();
-        (
-            std::fs::read(dir.path().join(rock_host::project::MAIN_LUA_FILENAME)).unwrap(),
-            artifact.artifact_fingerprint,
-        )
-    }
-
-    #[test]
-    fn a_second_session_on_unchanged_sources_starts_from_the_cached_compile() {
-        let (_project_dir, project) = project();
-        let cache = tempfile::tempdir().unwrap();
-        let mut first = session(&project);
-        let first_fingerprint = build(&project, cache.path(), &mut first);
-        assert_eq!(
-            first.compiler.compiles.get(),
-            1,
-            "the first session compiles"
-        );
-
-        let mut second = session(&project);
-        let second_fingerprint = build(&project, cache.path(), &mut second);
-        assert_eq!(
-            second.compiler.compiles.get(),
-            0,
-            "a second session on unchanged sources must not run the initial compile",
-        );
-        assert_eq!(second_fingerprint, first_fingerprint);
-        let (expected, oracle_fingerprint) = oracle_main_lua(&project);
-        assert_eq!(
-            second_fingerprint, oracle_fingerprint,
-            "the cached identity is the compiler's current one"
-        );
-        assert_eq!(
-            std::fs::read(&second.main).unwrap(),
-            expected,
-            "the session runs the compiler's current Lua"
-        );
-        assert!(
-            !second.main.with_file_name("incremental.lua").exists(),
-            "a session starting from a full artifact never boots beside a stale overlay",
-        );
-    }
-
-    #[test]
-    fn an_edited_source_misses_the_session_cache() {
-        let (_project_dir, project) = project();
-        let cache = tempfile::tempdir().unwrap();
-        let mut first = session(&project);
-        let first_fingerprint = build(&project, cache.path(), &mut first);
-
-        std::fs::write(project.join("main.rock"), "fn main() { print(2) }\n").unwrap();
-        let mut edited = session(&project);
-        let edited_fingerprint = build(&project, cache.path(), &mut edited);
-        assert_eq!(
-            edited.compiler.compiles.get(),
-            1,
-            "an edited source must compile"
-        );
-        assert_ne!(edited_fingerprint, first_fingerprint);
-        let (expected, oracle_fingerprint) = oracle_main_lua(&project);
-        assert_eq!(edited_fingerprint, oracle_fingerprint);
-        assert_eq!(
-            std::fs::read(&edited.main).unwrap(),
-            expected,
-            "the session runs the edited program"
-        );
-    }
-
-    #[test]
-    fn a_disabled_cache_compiles_and_does_not_store() {
-        let (_project_dir, project) = project();
-        let cache = tempfile::tempdir().unwrap();
-        let mut first = session(&project);
-        initial_session_build(
-            None,
-            Backend::Skull,
-            &project.to_string_lossy(),
-            &first.main,
-            &mut first.compiler,
-        )
-        .expect("a session with the cache off still compiles");
-        assert_eq!(first.compiler.compiles.get(), 1);
-        assert_eq!(
-            std::fs::read_dir(cache.path()).unwrap().count(),
-            0,
-            "a disabled cache stores nothing"
-        );
-
-        let mut second = session(&project);
-        initial_session_build(
-            None,
-            Backend::Skull,
-            &project.to_string_lossy(),
-            &second.main,
-            &mut second.compiler,
-        )
-        .expect("a session with the cache off still compiles");
-        assert_eq!(
-            second.compiler.compiles.get(),
-            1,
-            "the cache is off, so nothing is served back"
-        );
-    }
-
-    #[test]
-    fn a_cached_session_applies_its_first_edit_against_the_running_baseline() {
-        let (_project_dir, project) = project();
-        let cache = tempfile::tempdir().unwrap();
-        let mut first = session(&project);
-        build(&project, cache.path(), &mut first);
-        let mut adopted = session(&project);
-        build(&project, cache.path(), &mut adopted);
-        let baseline = std::fs::read(&adopted.main).unwrap();
-        let baseline_fingerprint = adopted.compiler.artifact_fingerprint().unwrap();
-
-        std::fs::write(project.join("main.rock"), "fn main() { print(3) }\n").unwrap();
-        let outcome = adopted
-            .compiler
-            .compile(&HashSet::from([project.join("main.rock")]), false)
-            .expect("reconstruct the baseline, then apply the first edit");
-        assert!(outcome.restart_reasons.is_empty());
-        assert_eq!(std::fs::read(&adopted.main).unwrap(), baseline);
-        assert!(adopted.main.with_file_name("incremental.lua").exists());
-        let (_, oracle_fingerprint) = oracle_main_lua(&project);
-        assert_ne!(oracle_fingerprint, baseline_fingerprint);
-        assert_eq!(
-            adopted.compiler.artifact_fingerprint().unwrap(),
-            oracle_fingerprint
-        );
-    }
-
-    #[test]
-    fn a_changed_cached_baseline_requires_a_restart() {
-        let (_project_dir, project) = project();
-        let mut adopted = session(&project);
-        // A cache-adoption race or changed declared input must not accept a
-        // baseline with a different identity from the running program.
-        adopted
-            .compiler
-            .adopt_cached_artifact(AdoptedArtifact {
-                artifact_fingerprint: "different-running-program".into(),
-                embedded_inputs: Vec::new(),
-            })
-            .unwrap();
-        std::fs::write(project.join("main.rock"), "fn main() { print(3) }\n").unwrap();
-        let outcome = adopted
-            .compiler
-            .compile(&HashSet::from([project.join("main.rock")]), false)
-            .unwrap();
-        assert!(!outcome.restart_reasons.is_empty());
-        let (expected, fingerprint) = oracle_main_lua(&project);
-        assert_eq!(std::fs::read(&adopted.main).unwrap(), expected);
-        assert_eq!(
-            adopted.compiler.artifact_fingerprint().unwrap(),
-            fingerprint
-        );
     }
 }
 

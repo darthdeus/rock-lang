@@ -1,13 +1,9 @@
 use crate::{Backend, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// What a from-scratch compile published beside its `main.lua`.
 pub(crate) struct GameArtifact {
     pub artifact_fingerprint: String,
-    /// Comptime file inputs (`embed_string`) baked into the program.
-    pub embedded_files: Vec<PathBuf>,
-    /// The `[build.vars]` selection the compile stamped, when the backend reports it.
-    pub comptime_inputs: Option<bone_semantic::inference::ComptimeInputs>,
 }
 
 pub(crate) fn compile_game(
@@ -36,13 +32,6 @@ fn compile_with(
     })?;
     let artifact = GameArtifact {
         artifact_fingerprint: compiler.artifact_fingerprint()?,
-        // The manifest re-hashes the bytes itself (sha256); only the paths travel here.
-        embedded_files: compiler
-            .comptime_watch_files_with_hashes()
-            .into_iter()
-            .map(|(path, _)| path)
-            .collect(),
-        comptime_inputs: compiler.comptime_inputs().cloned(),
     };
     crate::allocator::drop_and_release_in_background(compiler);
     Ok(artifact)
@@ -53,6 +42,7 @@ mod tests {
     use super::*;
     use crate::game_runtime::{CompileOutcome, GameCompiler};
     use std::collections::HashSet;
+    use std::path::PathBuf;
     use std::sync::mpsc;
     use std::time::Duration;
 

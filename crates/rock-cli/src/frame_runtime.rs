@@ -26,27 +26,43 @@ pub(crate) fn compile_frame_invocation(
     backend: Backend,
     path: &str,
     output: &str,
-    frames: usize,
 ) -> Result<(tempfile::TempDir, CompiledGame)> {
     std::fs::create_dir_all(output)?;
     let invocation = tempfile::Builder::new()
         .prefix("frame-run-")
         .tempdir_in(output)?;
-    let compiled = crate::frame_compile_cache::compile_game_for_frame(
+    let project = std::path::Path::new(path)
+        .canonicalize()
+        .map_err(|error| anyhow::anyhow!("canonicalize game {path}: {error}"))?;
+    let compiled = compile_game_for_run(
         backend,
-        path,
+        &project.to_string_lossy(),
         &invocation.path().to_string_lossy(),
-        frames,
     )?;
     // Profiling tools inspect this diagnostic copy after the run. Execution uses
     // only the private file, so another invocation can safely replace this copy.
     rock_host::timed("diagnostic copy", || {
-        crate::frame_compile_cache::materialize(
+        diagnostic_copy(
             &compiled.lua_file,
             &PathBuf::from(output).join(rock_host::project::MAIN_LUA_FILENAME),
         )
     })?;
     Ok((invocation, compiled))
+}
+
+/// Install `source` as `destination` and wipe the overlay beside it, as a full
+/// compile does.
+fn diagnostic_copy(source: &std::path::Path, destination: &std::path::Path) -> Result<()> {
+    use anyhow::Context;
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    rock_host::project::write_atomic_streamed(destination, |file| {
+        std::io::copy(&mut std::fs::File::open(source)?, file)?;
+        Ok(())
+    })
+    .with_context(|| format!("copy frame artifact to {}", destination.display()))?;
+    crate::skull_backend::wipe_overlay(&destination.with_file_name("incremental.lua"))
 }
 
 /// Runs `compile` with what a run compile needs: project resolution and the

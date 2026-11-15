@@ -209,7 +209,7 @@ fn main() {{ run_probe() }}
 
 #[cfg(unix)]
 #[test]
-fn a_cached_stone_launch_preserves_process_and_state_on_the_first_body_edit() {
+fn a_stone_launch_preserves_process_and_state_on_the_first_body_edit() {
     use std::process::{Child, Command, Stdio};
     struct Watch(Child);
     impl Drop for Watch {
@@ -222,7 +222,7 @@ fn a_cached_stone_launch_preserves_process_and_state_on_the_first_body_edit() {
     let game = fixture.path().join("game");
     std::fs::create_dir(&game).unwrap();
     std::fs::write(game.join("stick.toml"),
-        "[package]\nname = \"cached-watch-probe\"\n[dependencies]\nstone = { package = \"stone\" }\n[build.vars]\nGIT_SHA = \"probe\"\nBUILD_UNIX = \"0\"\nBUILD_DATE = \"test\"\nCHANNEL = { builtin = \"channel\" }\nPLATFORM = { builtin = \"platform\" }\n").unwrap();
+        "[package]\nname = \"watch-probe\"\n[dependencies]\nstone = { package = \"stone\" }\n[build.vars]\nGIT_SHA = \"probe\"\nBUILD_UNIX = \"0\"\nBUILD_DATE = \"test\"\nCHANNEL = { builtin = \"channel\" }\nPLATFORM = { builtin = \"platform\" }\n").unwrap();
     let source = r#"
 global ticks: int = 0
 fn version() -> int { 17 }
@@ -239,7 +239,7 @@ fn advance() {
     if ticks % 60 == 0 { record(ticks, version()) }
 }
 fn main() {
-    stone_run_game(GameConfig { title: "cached-watch-probe", width: 64, height: 64,
+    stone_run_game(GameConfig { title: "watch-probe", width: 64, height: 64,
         vsync: 0 })
 }
 "#;
@@ -254,8 +254,6 @@ fn main() {
                 "ROCK_DIR",
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
             )
-            .env("ROCK_FRAME_COMPILE_CACHE", "1")
-            .env("ROCK_FRAME_COMPILE_CACHE_DIR", fixture.path().join("cache"))
             .env("ROCK_SKIP_ENGINE_BUILD", "1")
             .env("WATCH_HEARTBEAT", &heartbeat)
             .env("STONE_HEADLESS", "1")
@@ -263,19 +261,6 @@ fn main() {
             .env_remove("STONE_HOT_RELOAD");
         command
     };
-    let warm = command()
-        .arg("frame")
-        .arg(&game)
-        .args(["--frames", "1", "--headless", "--output"])
-        .arg(fixture.path().join("warm"))
-        .output()
-        .unwrap();
-    assert!(
-        warm.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&warm.stdout),
-        String::from_utf8_lossy(&warm.stderr)
-    );
     let log = fixture.path().join("watch.log");
     let output = std::fs::File::create(&log).unwrap();
     let mut watch = Watch(
@@ -306,7 +291,6 @@ fn main() {
         }
     };
     wait(&|| read(&heartbeat).contains(":17\n") && read(&log).contains("Watching for changes"));
-    assert!(read(&log).contains("compile cache hit"), "{}", read(&log));
     let before = read(&heartbeat).lines().last().unwrap().to_owned();
     std::fs::write(
         &source_path,
@@ -569,123 +553,88 @@ exit 97
     )
     .unwrap();
     std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
-    for cache in ["0", "1"] {
-        let output = root.path().join(format!("output-{cache}"));
-        std::fs::create_dir(&output).unwrap();
-        std::fs::write(output.join("main.lua"), "unrelated output").unwrap();
-        let release = root.path().join(format!("release-{cache}"));
-        let mut runs = Runs(Vec::new(), release.clone());
-        for name in ["first", "second"] {
-            let project = root.path().join(format!("{name}-{cache}"));
-            std::fs::create_dir(&project).unwrap();
-            std::fs::write(
-                project.join("stick.toml"),
-                format!("[package]\nname = \"{name}\"\n"),
-            )
-            .unwrap();
-            std::fs::write(
-                project.join("main.rock"),
-                format!("fn main() {{ print(\"PROGRAM_{name}\") }}\n"),
-            )
-            .unwrap();
-            if cache == "1" {
-                let warm = Command::new(env!("CARGO_BIN_EXE_rock"))
-                    .arg("frame")
-                    .arg(&project)
-                    .arg("--output")
-                    .arg(&output)
-                    .args(["--frames", "1", "--headless"])
-                    .current_dir(root.path())
-                    .env("ROCK_SKIP_ENGINE_BUILD", "1")
-                    .env("ROCK_FRAME_COMPILE_CACHE", cache)
-                    .env("ROCK_FRAME_COMPILE_CACHE_DIR", root.path().join("cache"))
-                    .output()
-                    .unwrap();
-                assert!(
-                    warm.status.success(),
-                    "{}",
-                    String::from_utf8_lossy(&warm.stderr)
-                );
-            }
-            std::fs::write(output.join("incremental.lua"), "stale overlay").unwrap();
-            let log =
-                std::fs::File::create(root.path().join(format!("{name}-{cache}.log"))).unwrap();
-            runs.0.push(
-                Command::new(env!("CARGO_BIN_EXE_rock"))
-                    .arg("frame")
-                    .arg(&project)
-                    .arg("--output")
-                    .arg(&output)
-                    .args(["--frames", "1", "--headless"])
-                    .current_dir(root.path())
-                    .env("ROCK_SKIP_ENGINE_BUILD", "1")
-                    .env("ROCK_FRAME_COMPILE_CACHE", cache)
-                    .env("ROCK_FRAME_COMPILE_CACHE_DIR", root.path().join("cache"))
-                    .env("REAL_LUAJIT", rock_engine_host::runtime::luajit_path())
-                    .env("ROCK_LUAJIT", &wrapper)
-                    .env(
-                        "LAUNCH_PATH",
-                        root.path().join(format!("{name}-{cache}.path")),
-                    )
-                    .env(
-                        "LAUNCH_READY",
-                        root.path().join(format!("{name}-{cache}.ready")),
-                    )
-                    .env("LAUNCH_RELEASE", &release)
-                    .stdout(Stdio::from(log.try_clone().unwrap()))
-                    .stderr(Stdio::from(log))
-                    .spawn()
-                    .unwrap(),
-            );
-        }
-        let start = bone_core::prelude::Instant::now();
-        while !["first", "second"]
-            .iter()
-            .all(|name| root.path().join(format!("{name}-{cache}.ready")).exists())
-        {
-            for (index, child) in runs.0.iter_mut().enumerate() {
-                assert!(
-                    child.try_wait().unwrap().is_none(),
-                    "{}",
-                    std::fs::read_to_string(
-                        root.path()
-                            .join(format!("{}-{cache}.log", ["first", "second"][index]))
-                    )
-                    .unwrap()
-                );
-            }
-            assert!(
-                start.elapsed() < test_utils::HANG_BACKSTOP,
-                "launch barrier timed out"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        std::fs::write(&release, "").unwrap();
-        for (index, child) in runs.0.iter_mut().enumerate() {
-            let name = ["first", "second"][index];
-            assert!(child.wait().unwrap().success());
-            let log =
-                std::fs::read_to_string(root.path().join(format!("{name}-{cache}.log"))).unwrap();
-            assert!(log.contains(&format!("PROGRAM_{name}")), "{log}");
-            if cache == "1" {
-                assert!(log.contains("frame compile cache hit"), "{log}");
-            }
-            let lua =
-                std::fs::read_to_string(root.path().join(format!("{name}-{cache}.path"))).unwrap();
-            assert!(
-                !Path::new(&lua).exists(),
-                "invocation output was not reclaimed"
-            );
-        }
-        let diagnostic = Command::new(rock_engine_host::runtime::luajit_path())
-            .arg(output.join("main.lua"))
-            .output()
-            .unwrap();
-        assert!(diagnostic.status.success());
-        let stdout = String::from_utf8_lossy(&diagnostic.stdout);
-        assert!(stdout.contains("PROGRAM_first") || stdout.contains("PROGRAM_second"));
-        assert_eq!(std::fs::read_dir(&output).unwrap().count(), 1);
+    let output = root.path().join("output");
+    std::fs::create_dir(&output).unwrap();
+    std::fs::write(output.join("main.lua"), "unrelated output").unwrap();
+    let release = root.path().join("release");
+    let mut runs = Runs(Vec::new(), release.clone());
+    for name in ["first", "second"] {
+        let project = root.path().join(name);
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(
+            project.join("stick.toml"),
+            format!("[package]\nname = \"{name}\"\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("main.rock"),
+            format!("fn main() {{ print(\"PROGRAM_{name}\") }}\n"),
+        )
+        .unwrap();
+        std::fs::write(output.join("incremental.lua"), "stale overlay").unwrap();
+        let log = std::fs::File::create(root.path().join(format!("{name}.log"))).unwrap();
+        runs.0.push(
+            Command::new(env!("CARGO_BIN_EXE_rock"))
+                .arg("frame")
+                .arg(&project)
+                .arg("--output")
+                .arg(&output)
+                .args(["--frames", "1", "--headless"])
+                .current_dir(root.path())
+                .env("ROCK_SKIP_ENGINE_BUILD", "1")
+                .env("REAL_LUAJIT", rock_engine_host::runtime::luajit_path())
+                .env("ROCK_LUAJIT", &wrapper)
+                .env("LAUNCH_PATH", root.path().join(format!("{name}.path")))
+                .env("LAUNCH_READY", root.path().join(format!("{name}.ready")))
+                .env("LAUNCH_RELEASE", &release)
+                .stdout(Stdio::from(log.try_clone().unwrap()))
+                .stderr(Stdio::from(log))
+                .spawn()
+                .unwrap(),
+        );
     }
+    let start = bone_core::prelude::Instant::now();
+    while !["first", "second"]
+        .iter()
+        .all(|name| root.path().join(format!("{name}.ready")).exists())
+    {
+        for (index, child) in runs.0.iter_mut().enumerate() {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "{}",
+                std::fs::read_to_string(
+                    root.path()
+                        .join(format!("{}.log", ["first", "second"][index]))
+                )
+                .unwrap()
+            );
+        }
+        assert!(
+            start.elapsed() < test_utils::HANG_BACKSTOP,
+            "launch barrier timed out"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::fs::write(&release, "").unwrap();
+    for (index, child) in runs.0.iter_mut().enumerate() {
+        let name = ["first", "second"][index];
+        assert!(child.wait().unwrap().success());
+        let log = std::fs::read_to_string(root.path().join(format!("{name}.log"))).unwrap();
+        assert!(log.contains(&format!("PROGRAM_{name}")), "{log}");
+        let lua = std::fs::read_to_string(root.path().join(format!("{name}.path"))).unwrap();
+        assert!(
+            !Path::new(&lua).exists(),
+            "invocation output was not reclaimed"
+        );
+    }
+    let diagnostic = Command::new(rock_engine_host::runtime::luajit_path())
+        .arg(output.join("main.lua"))
+        .output()
+        .unwrap();
+    assert!(diagnostic.status.success());
+    let stdout = String::from_utf8_lossy(&diagnostic.stdout);
+    assert!(stdout.contains("PROGRAM_first") || stdout.contains("PROGRAM_second"));
+    assert_eq!(std::fs::read_dir(&output).unwrap().count(), 1);
 }
 
 #[test]

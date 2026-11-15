@@ -524,8 +524,8 @@ pub(crate) fn prefetch_compiler_identity(inputs: &ComptimeInputs) {
     });
 }
 
-/// Content identity of the running compiler image, shared by source inputs
-/// and hosts' pre-compile cache keys. Never substitutes a checkout revision.
+/// Content identity of the running compiler image, used by source
+/// fingerprints. Never substitutes a checkout revision.
 pub(crate) fn compiler_identity() -> Result<String> {
     static IDENTITY: OnceLock<Result<String, String>> = OnceLock::new();
     IDENTITY
@@ -546,21 +546,6 @@ pub(crate) fn compiler_identity() -> Result<String> {
         })
         .clone()
         .map_err(anyhow::Error::msg)
-}
-
-/// Content identity of a compiler image at `image`, using the same
-/// definition as [`compiler_identity`]. Hosts keying a compiler binary they
-/// spawn (rather than the running one) must use this, not a plain file hash,
-/// so both routes name the same compiler identically.
-pub(crate) fn compiler_image_identity(image: &Path) -> Result<String> {
-    let mut file = std::fs::File::open(image)?;
-    let before = file.metadata()?;
-    let identity = remembered_image_identity(image, &mut file, &before)?;
-    let after = file.metadata()?;
-    if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
-        anyhow::bail!("compiler image changed while hashing");
-    }
-    Ok(identity)
 }
 
 /// The identity of `image`, read from the per-user memo when the file's
@@ -1262,20 +1247,6 @@ mod source_fingerprint_tests {
                 .unwrap();
             let package_file_key = Ustr::from(package_file.to_str().unwrap());
             let revision = resolved.vars[&Ustr::from("REV")].value.clone();
-            let rock_exe = std::env::current_exe().unwrap();
-            let cache_digest = || {
-                crate::compile_cache::compile_cache_identity(
-                    &project_root,
-                    crate::Backend::Skull,
-                    &inputs,
-                    &rock_exe,
-                )
-                .unwrap()["source_fingerprint_support_sha256"]
-                    .as_str()
-                    .unwrap()
-                    .to_owned()
-            };
-            let initial_cache_digest = cache_digest();
             assert_eq!(
                 resolved.source_fingerprint_files.get(&package_file_key),
                 Some(&skull_mir::mir::comptime_value_hash(decode)),
@@ -1287,17 +1258,17 @@ mod source_fingerprint_tests {
                 "fn decode() -> int { 100 }",
             )
             .unwrap();
+            let decoyed = resolve_checked_inputs(&ws, inputs.clone(), read_checked_source).unwrap();
             assert_eq!(
-                initial_cache_digest,
-                cache_digest(),
-                "project-local decoys must not participate in a package support digest"
+                revision,
+                decoyed.vars[&Ustr::from("REV")].value,
+                "project-local decoys must not participate in a package fingerprint"
             );
 
             let changed_decode = "fn decode() -> int { 8 }";
             std::fs::write(&package_file, changed_decode).unwrap();
             let changed = resolve_checked_inputs(&ws, inputs.clone(), read_checked_source).unwrap();
             assert_ne!(revision, changed.vars[&Ustr::from("REV")].value);
-            assert_ne!(initial_cache_digest, cache_digest());
             assert_eq!(
                 changed.source_fingerprint_files.get(&package_file_key),
                 Some(&skull_mir::mir::comptime_value_hash(changed_decode)),
@@ -1312,17 +1283,6 @@ mod source_fingerprint_tests {
                     .to_string()
                     .contains("packages/package-probe/decoder.rock"),
                 "{missing:#}"
-            );
-            let missing_cache = crate::compile_cache::compile_cache_identity(
-                &project_root,
-                crate::Backend::Skull,
-                &inputs,
-                &rock_exe,
-            )
-            .expect_err("a project decoy must not satisfy a missing package support file");
-            assert!(
-                format!("{missing_cache:#}").contains("decoder.rock"),
-                "{missing_cache:#}"
             );
             return;
         }

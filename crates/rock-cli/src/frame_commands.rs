@@ -29,9 +29,7 @@ pub(crate) fn do_perf(
 
     rock_host::process_management::report_spawn_phase("compile");
     crate::package::check_project_assets(Path::new(path))?;
-    // Perf runs of one tree (tools/perf-check runs several processes) share
-    // one compile through the frame compile cache.
-    let (_invocation, compiled) = compile_frame_invocation(backend, path, &output, frames)?;
+    let (_invocation, compiled) = compile_frame_invocation(backend, path, &output)?;
     let lua_file = &compiled.lua_file;
     rock_host::process_management::report_spawn_phase("runtime-prepare");
 
@@ -318,7 +316,7 @@ pub(crate) fn do_one_frame(
     use crate::common::ProcessManager;
 
     rock_host::process_management::report_spawn_phase("compile");
-    let (_invocation, compiled) = compile_frame_invocation(backend, path, &output, frames)?;
+    let (_invocation, compiled) = compile_frame_invocation(backend, path, &output)?;
     let lua_file = &compiled.lua_file;
     rock_host::process_management::report_spawn_phase("runtime-prepare");
 
@@ -654,7 +652,7 @@ mod tests {
     use super::*;
     #[test]
     fn a_failed_perf_run_forwards_the_whole_runtime_error() {
-        let stderr = "[   0.1s INFO ] [FRAME] frame compile cache miss\n\
+        let stderr = "[   0.1s INFO ] [ASSETS] release asset assets does not exist, skipping\n\
             luajit: PERF_GC_STEPS requires tools/luajit-gc-probe.py runtime\n\
             stack traceback:\n\
             \t[C]: in function 'error'\n";
