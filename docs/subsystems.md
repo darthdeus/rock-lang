@@ -6,6 +6,10 @@ ownership paths, entrypoint anchors and bounded cleanup queue is
 [subsystems.json](subsystems.json). The detailed per-file inventory remains
 available through `python3 perf/inventory.py`.
 
+For the language-facing view, start with the
+[compact contract](language-contract.md): selected rules for values/references,
+nullability, generics and coroutines, with implementation and test links.
+
 The map distinguishes three kinds of knowledge:
 
 - Measured: tracked source lines, textual test markers, rejection assertions

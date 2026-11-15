@@ -156,9 +156,33 @@ All 20 [purity rejection cases](purity.md#rejection-assertion-audit-2026-11-15)
 now pin intended diagnostics; 15 previously accepted any rejection. The loop
 fixture isolates its mutation from unrelated global reads. Wrong diagnostics
 and valid replacement programs each fail all 20 assertions; removing `@pure`
-admits all 20 original programs. The current inventory is **362 unpinned of 520
+admits all 20 original programs. The inventory at that stage was **362 unpinned of 520
 rejection cases**, down from 395 of the original 514. These are assertion gaps,
 not a count of known compiler defects.
+
+## Selected language contracts, casts and null predicates
+
+The [compact language contract](language-contract.md) indexes selected value,
+reference, nullable, generic and coroutine rules with source and test links.
+It distinguishes established rules from bounded observations and gives concrete
+alternatives for the unresolved reference-at-construction boundary without
+silently choosing a language change. Five selected LuaJIT runtime files are
+now part of the rerunnable ledger; they do not certify every statement or
+backend in the document.
+
+The [checked-cast audit](checked-cast-decisions.md) pins all 12 rejection reasons
+and removes downstream calls through two already-invalid lambdas. The 22 nearby
+accepted conversion/ascription cases pass on LuaJIT and JS. Wrong-diagnostic
+and generic-valid mutations fail all 12 rejection assertions.
+
+The [null-predicate audit](null-refinement-decisions.md) reproduced three invalid
+program shapes admitted because `is_null` was recognized by name. Both predicate
+recognition and its effect exemption now use the selected stdlib declaration.
+Five semantic sections, four pinned rejection cases and five runtime controls
+distinguish declaration identity, effects and local function-value shadowing.
+The full nullable corpus passes 415 tests on each backend. The rejection
+inventory is now **350 unpinned of 524 cases**; the full error scan reports
+518 passed and six existing TODOs.
 
 ## Useful measurements
 
@@ -179,14 +203,15 @@ until their behavioral purposes are understood.
 ## Next actions and open questions
 
 Use the ranked queue in [subsystems.json](subsystems.json), rendered in the
-overview. It separates the reference-lifetime decision from bounded JS reload
-and null-refinement audits, with file ownership and acceptance checks. Neither
-audit is yet a confirmed defect.
+overview. It separates the unresolved reference-lifetime decision from a
+deferred JS reload audit and records the completed null-refinement correction,
+with file ownership and acceptance checks. JS reload parity has not been
+audited by this work.
 
 The breadth survey also found a stale LSP fixture warning: the parser already
 rejects unknown expectation lines. Its existing malformed-block regression
-passes; the documentation now matches that behavior. The ledger contains 18
-bounded records, not 18 comprehensively verified subsystems.
+passes; the documentation now matches that behavior. The ledger contains 21
+bounded records, not 21 comprehensively verified subsystems.
 
 Extend the evidence ledger alongside concrete repairs. Its checks establish
 bounded claims, not a percentage of language coverage or a launch certificate.

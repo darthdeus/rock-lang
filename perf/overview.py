@@ -87,6 +87,7 @@ def build(root, destination):
              f'<p>Revision <code>{revision}</code>; working tree {"dirty" if dirty else "clean"}. Review date {esc(catalog["reviewed"])}. <a href="overview.json">Measured map JSON</a>.</p>',
              '<p><b>Measured:</b> tracked source size and declared Cargo edges. <b>Reviewed:</b> responsibility and entrypoint summaries from a bounded source read. <b>Checked:</b> only the linked executable claims, at their recorded revision. Everything else remains unverified; this map is not a coverage score.</p>',
              '<p>Core flow: source &rarr; syntax &rarr; lowered modules &rarr; inference &rarr; semantic queries &rarr; instance graph &rarr; MIR &rarr; backend output. Incremental updates reuse stages; CLI, editor and browser choose different entrypoints. The groups below are work boundaries, not independent layers.</p>',
+             '<p>Language-facing view: ' + link('docs/language-contract.md', 'compact language contract') + ' &mdash; selected rules, examples, checks and unresolved decisions.</p>',
              '<h2 id="size">Where the code is</h2><p>Project source only; upstream-derived code and prebuilt bindings are excluded. Physical lines include blanks and comments. Test-file lines do not include inline Rust tests. Markers are textual occurrences, not executed tests or feature coverage. Cross-cutting test corpora have their own row, so totals are not counted twice.</p>']
     names = {u["id"]: u["name"] for u in units}
     total = sum(v["lines"] for v in measured.values())

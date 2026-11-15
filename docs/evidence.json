@@ -322,5 +322,324 @@
         "output": "test result: ok\\. 1 passed; 0 failed;"
       }
     ]
+  },
+  {
+    "id": "checked-cast-boundaries",
+    "statement": "The 12 selected checked-as rejection cases pin their intended diagnostics, and 22 nearby accepted conversion/ascription controls execute on LuaJIT and JS.",
+    "kind": "test strength",
+    "limit": "Wrong-diagnostic and generic-valid mutations test rejection sensitivity. Nearby controls test selected valid forms, not every assignment-compatible pair or runtime conversion range.",
+    "sources": [
+      {
+        "path": "crates/bone-inference/src/expr.rs",
+        "anchor": "pub(crate) fn check_cast("
+      },
+      {
+        "path": "tests/errors/checked_cast.rock.err",
+        "anchor": "//! expect: cannot convert `int` to `_` with `as`"
+      },
+      {
+        "path": "tests/types/checked_ascription.rock",
+        "anchor": "fn test_cast_operand_types_itself_array()"
+      },
+      {
+        "path": "docs/checked-cast-decisions.md",
+        "anchor": "## Open questions"
+      }
+    ],
+    "checks": [
+      {
+        "command": [
+          "python3",
+          "perf/evidence/check_operator_rejections.py",
+          "--fixture",
+          "tests/errors/checked_cast.rock.err",
+          "--cases",
+          "12"
+        ],
+        "exit": 0,
+        "output": "original: 12 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 12 failed; 0 todo\\nvalid-programs: 0 passed; 12 failed; 0 todo"
+      },
+      {
+        "command": [
+          "cargo",
+          "run",
+          "--quiet",
+          "--locked",
+          "-p",
+          "rock-cli",
+          "--bin",
+          "rock",
+          "--",
+          "test",
+          "tests/types/checked_ascription.rock"
+        ],
+        "exit": 0,
+        "output": "22/22 @tests passed \\(0 failed\\)"
+      },
+      {
+        "command": [
+          "cargo",
+          "run",
+          "--quiet",
+          "--locked",
+          "-p",
+          "rock-cli",
+          "--bin",
+          "rock",
+          "--",
+          "test",
+          "tests/types/checked_ascription.rock",
+          "--backend",
+          "js"
+        ],
+        "exit": 0,
+        "output": "22/22 @tests passed \\(0 failed, 0 skipped, 0 not for js\\)"
+      }
+    ]
+  },
+  {
+    "id": "selected-language-contract-examples",
+    "statement": "Selected reference, value-copy, nullable-path, default-generic and nullable-coroutine examples execute with their expected answers on LuaJIT.",
+    "kind": "observed behavior",
+    "limit": "These examples support the compact contract index but do not verify every statement in it, all types, all execution paths or other backends. The construction-time lifetime choice remains unresolved.",
+    "sources": [
+      {
+        "path": "docs/language-contract.md",
+        "anchor": "## Bounded checks"
+      },
+      {
+        "path": "tests/values/refs.rock",
+        "anchor": "@test"
+      },
+      {
+        "path": "tests/values/semantics_decision_points.rock",
+        "anchor": "fn c3_reference_leaf_is_shared_and_write_aliases()"
+      },
+      {
+        "path": "tests/types/default_type_params.rock",
+        "anchor": "@test"
+      },
+      {
+        "path": "tests/nullable/path_refinement_soundness.rock",
+        "anchor": "@test"
+      },
+      {
+        "path": "tests/coroutines/nullable_generics.rock",
+        "anchor": "@test"
+      }
+    ],
+    "checks": [
+      {
+        "command": [
+          "cargo",
+          "run",
+          "--quiet",
+          "--locked",
+          "-p",
+          "rock-cli",
+          "--bin",
+          "rock",
+          "--",
+          "test",
+          "tests/values/refs.rock"
+        ],
+        "exit": 0,
+        "output": "25/25 @tests passed \\(0 failed\\)"
+      },
+      {
+        "command": [
+          "cargo",
+          "run",
+          "--quiet",
+          "--locked",
+          "-p",
+          "rock-cli",
+          "--bin",
+          "rock",
+          "--",
+          "test",
+          "tests/values/semantics_decision_points.rock"
+        ],
+        "exit": 0,
+        "output": "8/8 @tests passed \\(0 failed\\)"
+      },
+      {
+        "command": [
+          "cargo",
+          "run",
+          "--quiet",
+          "--locked",
+          "-p",
+          "rock-cli",
+          "--bin",
+          "rock",
+          "--",
+          "test",
+          "tests/nullable/path_refinement_soundness.rock"
+        ],
+        "exit": 0,
+        "output": "41/41 @tests passed \\(0 failed\\)"
+      },
+      {
+        "command": [
+          "cargo",
+          "run",
+          "--quiet",
+          "--locked",
+          "-p",
+          "rock-cli",
+          "--bin",
+          "rock",
+          "--",
+          "test",
+          "tests/types/default_type_params.rock"
+        ],
+        "exit": 0,
+        "output": "8/8 @tests passed \\(0 failed\\)"
+      },
+      {
+        "command": [
+          "cargo",
+          "run",
+          "--quiet",
+          "--locked",
+          "-p",
+          "rock-cli",
+          "--bin",
+          "rock",
+          "--",
+          "test",
+          "tests/coroutines/nullable_generics.rock"
+        ],
+        "exit": 0,
+        "output": "13/13 @tests passed \\(0 failed\\)"
+      }
+    ]
+  },
+  {
+    "id": "resolved-null-predicate",
+    "statement": "Only the selected stdlib is_null declaration receives null-predicate treatment; selected user declarations with that spelling retain their own effects and do not establish non-nullness.",
+    "kind": "intended rule",
+    "limit": "Selected ordinary, pure, effectful and local-function-value cases. This is not a proof of all refinement or overload-resolution behavior; unknown selections are treated conservatively.",
+    "sources": [
+      {
+        "path": "crates/bone-inference/src/narrowing.rs",
+        "anchor": "fn is_stdlib_null_predicate("
+      },
+      {
+        "path": "crates/bone-semantic/tests/fixtures/nullable_is_null_identity.rock",
+        "anchor": "//- pure_user_predicate_does_not_narrow"
+      },
+      {
+        "path": "tests/nullable/is_null_identity.rock",
+        "anchor": "fn stdlib_ufcs_call_narrows()"
+      },
+      {
+        "path": "docs/null-refinement-decisions.md",
+        "anchor": "is_null"
+      }
+    ],
+    "checks": [
+      {
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "bone-semantic",
+          "--test",
+          "fixtures",
+          "check_rock::nullable_is_null_identity.rock",
+          "--",
+          "--exact"
+        ],
+        "exit": 0,
+        "output": "test result: ok\\. 1 passed; 0 failed;"
+      },
+      {
+        "command": [
+          "python3",
+          "perf/evidence/check_operator_rejections.py",
+          "--fixture",
+          "tests/errors/null_predicate_identity.rock.err",
+          "--cases",
+          "4"
+        ],
+        "exit": 0,
+        "output": "original: 4 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 4 failed; 0 todo\\nvalid-programs: 0 passed; 4 failed; 0 todo"
+      },
+      {
+        "command": [
+          "cargo",
+          "run",
+          "--quiet",
+          "--locked",
+          "-p",
+          "rock-cli",
+          "--bin",
+          "rock",
+          "--",
+          "test",
+          "tests/nullable/is_null_identity.rock"
+        ],
+        "exit": 0,
+        "output": "5/5 @tests passed \\(0 failed\\)"
+      },
+      {
+        "command": [
+          "cargo",
+          "run",
+          "--quiet",
+          "--locked",
+          "-p",
+          "rock-cli",
+          "--bin",
+          "rock",
+          "--",
+          "test",
+          "tests/nullable/is_null_identity.rock",
+          "--backend",
+          "js"
+        ],
+        "exit": 0,
+        "output": "5/5 @tests passed \\(0 failed, 0 skipped, 0 not for js\\)"
+      },
+      {
+        "command": [
+          "cargo",
+          "run",
+          "--quiet",
+          "--locked",
+          "-p",
+          "rock-cli",
+          "--bin",
+          "rock",
+          "--",
+          "test",
+          "tests/nullable/refinement_effects.rock"
+        ],
+        "exit": 0,
+        "output": "8/8 @tests passed \\(0 failed\\)"
+      },
+      {
+        "command": [
+          "cargo",
+          "run",
+          "--quiet",
+          "--locked",
+          "-p",
+          "rock-cli",
+          "--bin",
+          "rock",
+          "--",
+          "test",
+          "tests/nullable/refinement_effects.rock",
+          "--backend",
+          "js"
+        ],
+        "exit": 0,
+        "output": "8/8 @tests passed \\(0 failed, 0 skipped, 0 not for js\\)"
+      }
+    ]
   }
 ]

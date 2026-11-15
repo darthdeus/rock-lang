@@ -32,7 +32,7 @@
       "tests": ["crates/bone-semantic/tests", "crates/bone-lints/tests", "tests/errors"],
       "commands": ["cargo test --locked -p bone-semantic -p bone-lints"],
       "unknown": "bone-inference disables its own library test harness; semantic fixtures exercise it. Selected purity/reference checks do not cover all language rules.",
-      "docs": ["docs/purity.md", "docs/language-reference.md", "docs/reference-suspension-decisions.md", "docs/compiler-admission-decisions.md"]
+      "docs": ["docs/language-contract.md", "docs/purity.md", "docs/checked-cast-decisions.md", "docs/null-refinement-decisions.md", "docs/reference-suspension-decisions.md", "docs/compiler-admission-decisions.md"]
     },
     {
       "id": "incremental",
@@ -251,12 +251,12 @@
       "acceptance": "Run late-failure then retry, successful repeated reload and static removal cases; document parity or reproduce a discrepancy before fixing."
     },
     {
-      "status": "3 \u00b7 bounded audit",
-      "title": "Clarify name-based null-refinement recognition",
-      "reason": "Inference source marks is_null spelling recognition as a TODO; intended resolution behavior needs checking before replacing it.",
-      "paths": ["crates/bone-inference/src/narrowing.rs", "tests/nullable/refinement.rock"],
-      "conflicts": "Own narrowing/effect code; avoid concurrent inference/reference policy edits.",
-      "acceptance": "Source-linked rule and valid/invalid shadowing or overload controls; preserve current refinement fixtures unless a documented defect is reproduced."
+      "status": "Completed: selected null predicate",
+      "title": "Identify the selected null predicate rather than its spelling",
+      "reason": "The audit reproduced unsound refinement and missed effects for user functions named is_null; resolved declaration identity now gates both exemptions.",
+      "paths": ["docs/null-refinement-decisions.md", "crates/bone-inference/src/narrowing.rs", "tests/nullable/is_null_identity.rock"],
+      "conflicts": "Completed in this batch; no further inference work assigned.",
+      "acceptance": "Three invalid same-name cases now reject; the function-value control stays rejected, and builtin refinements plus valid user calls pass on Lua and JS."
     }
   ]
 }
