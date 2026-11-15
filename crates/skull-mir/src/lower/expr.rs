@@ -146,6 +146,20 @@ impl<'a> Builder<'a> {
         // that produced it -- which is the key `ConcreteBody` is built on.
         let outer_expr = self.cur_expr.replace(e);
         let v = match self.body.expr_arena[e] {
+            Expr::Var(binding)
+                if self
+                    .preflight_reads
+                    .iter()
+                    .rev()
+                    .any(|reads| reads.contains_key(&raw(binding))) =>
+            {
+                Ok(*self
+                    .preflight_reads
+                    .iter()
+                    .rev()
+                    .find_map(|reads| reads.get(&raw(binding)))
+                    .unwrap())
+            }
             Expr::Array(elems)
                 if expected
                     .is_some_and(|ty| ContainerPlan::matches_type(ContainerFamily::Vec, ty)) =>

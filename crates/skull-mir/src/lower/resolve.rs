@@ -207,7 +207,26 @@ impl<'a> Builder<'a> {
     fn lower_expr_repr_inner(&mut self, e: Idx<Expr>) -> Result<ValueRepr, CompilerError> {
         let outer = self.cur_span.replace(self.body.expr_spans[e]);
         let outer_expr = self.cur_expr.replace(e);
-        let out = match self.lower_expr_repr_unscoped(e) {
+        let lowered = match self.body.expr_arena[e] {
+            Expr::Var(binding)
+                if self
+                    .preflight_reads
+                    .iter()
+                    .rev()
+                    .any(|reads| reads.contains_key(&raw(binding))) =>
+            {
+                Ok(ValueRepr::Scalar(
+                    *self
+                        .preflight_reads
+                        .iter()
+                        .rev()
+                        .find_map(|reads| reads.get(&raw(binding)))
+                        .unwrap(),
+                ))
+            }
+            _ => self.lower_expr_repr_unscoped(e),
+        };
+        let out = match lowered {
             Ok(ValueRepr::Scalar(v)) if self.f32_round_exprs.contains(&e) => {
                 Ok(ValueRepr::Scalar(self.emit_cur(Inst::FloatToF32(v))))
             }

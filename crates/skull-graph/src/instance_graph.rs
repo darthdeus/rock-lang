@@ -5076,6 +5076,52 @@ fn walk_body_edges(
         ) {
             resolved_calls.insert(e, to);
         }
+        let function = &ws.module(m).functions[f];
+        if let Some(annotation) = function
+            .annotations
+            .iter()
+            .find(|a| a.is_builtin("preflight"))
+        {
+            // MIR may move preparation before argument construction and call
+            // the prepared tail. Both need concrete delivery plans, including
+            // when their only caller is synthesized by that transformation.
+            for (argument, site_name) in annotation.args.iter().zip(["preflight", "preflight_tail"])
+            {
+                let bone_core::hir::AnnoValue::String(helper_name) = argument.value else {
+                    continue;
+                };
+                let matches: Vec<_> = ws
+                    .module(m)
+                    .functions
+                    .iter()
+                    .filter(|(_, candidate)| {
+                        candidate.name.as_str().rsplit("::").next() == Some(helper_name.as_str())
+                    })
+                    .map(|(id, _)| id)
+                    .collect();
+                if let [helper_id] = matches.as_slice() {
+                    record_call(
+                        w,
+                        ws,
+                        inf,
+                        from,
+                        subst,
+                        FuncRef {
+                            module: m,
+                            func: *helper_id,
+                        },
+                        None,
+                        EdgeKind::CompilerGenerated,
+                        span,
+                        Site {
+                            domain: domain.clone(),
+                            expr: e,
+                            op: SiteOp::Synthesized(site_name),
+                        },
+                    );
+                }
+            }
+        }
     }
 
     if let Some(body) = body {

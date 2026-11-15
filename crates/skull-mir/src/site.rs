@@ -48,8 +48,8 @@ pub enum SiteOp {
     /// from [`Self::ForNext`] because a `for` over a bounded call has both, at
     /// the same expression and with the same paths.
     BoundNext(Box<[usize]>),
-    /// A call lowering synthesizes, named EXACTLY -- see
-    /// `skull::instance_graph::COMPILER_GENERATED_TRIGGERS`.
+    /// A call lowering synthesizes, named EXACTLY. The graph records each
+    /// synthesis, including annotation-driven preflight calls.
     Synthesized(&'static str),
     /// A call synthesized on a CONDITIONAL arm of a construct that names no
     /// callee at all: an interpolation hole's render, a format spec's helpers,

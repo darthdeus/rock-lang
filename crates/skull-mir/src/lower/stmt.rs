@@ -268,6 +268,7 @@ impl<'a> Builder<'a> {
             ref_borrowed_binds: std::cell::OnceCell::new(),
             body_facts: std::cell::OnceCell::new(),
             value_binds: HashMap::default(),
+            preflight_reads: Vec::new(),
             value_copy_stack: Vec::new(),
             borrowed_value_children: HashMap::default(),
             shareable_value_boxes: HashSet::default(),

@@ -1600,6 +1600,7 @@ fn lower_body(
         ref_borrowed_binds: std::cell::OnceCell::new(),
         body_facts: std::cell::OnceCell::new(),
         value_binds: HashMap::default(),
+        preflight_reads: Vec::new(),
         value_copy_stack: Vec::new(),
         borrowed_value_children: HashMap::default(),
         shareable_value_boxes: HashSet::default(),
@@ -2200,6 +2201,8 @@ struct Builder<'a> {
     /// `let` bindings held as their value instead of a cell
     /// ([`Self::bind_let_value`]).
     value_binds: HashMap<u32, Idx<Inst>>,
+    /// Scalar argument reads frozen before an annotated preflight call.
+    preflight_reads: Vec<HashMap<u32, Idx<Inst>>>,
     /// Value types whose copy is being emitted, outermost first: a recursive
     /// `V?` child cannot be unrolled into its own copy ([`Self::enter_value_copy`]).
     value_copy_stack: Vec<Ustr>,
@@ -2319,6 +2322,7 @@ impl<'a> Builder<'a> {
             ref_borrowed_binds: std::cell::OnceCell::new(),
             body_facts: std::cell::OnceCell::new(),
             value_binds: HashMap::default(),
+            preflight_reads: Vec::new(),
             value_copy_stack: Vec::new(),
             borrowed_value_children: HashMap::default(),
             shareable_value_boxes: HashSet::default(),

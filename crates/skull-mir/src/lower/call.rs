@@ -2,6 +2,210 @@
 //! call trees, and the pack/leaf plumbing that decides whether a value crosses
 //! a call boundary as leaves or as a box.
 use super::*;
+use bone_core::hir_walk::HirChild;
+
+fn preflight_scalar_type(ws: &Workspace, inf: &BodyInference, e: Idx<Expr>) -> bool {
+    inf.expr_types.get(e).is_some_and(|ty| {
+        matches!(
+            ws.render(Some(inf), *ty).as_str(),
+            "int" | "uint" | "float" | "f32" | "bool"
+        )
+    })
+}
+
+fn preflight_numeric_type(ws: &Workspace, inf: &BodyInference, e: Idx<Expr>) -> bool {
+    inf.expr_types.get(e).is_some_and(|ty| {
+        matches!(
+            ws.render(Some(inf), *ty).as_str(),
+            "int" | "uint" | "float" | "f32"
+        )
+    })
+}
+
+fn preflight_safe_node(
+    ws: &Workspace,
+    body: &Body,
+    inf: &BodyInference,
+    node: HirChild,
+    visiting: &mut HashSet<FuncRef>,
+    helper_body: bool,
+) -> bool {
+    if let HirChild::Expr(e) = node
+        && (inf.implicit_iter_args.contains_key(&e) || inf.ref_call_args.contains_key(&e))
+    {
+        return false;
+    }
+    let safe = match node {
+        HirChild::Expr(e) => match body.expr_arena[e] {
+            Expr::Unit | Expr::Null | Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) => true,
+            Expr::Var(b) => {
+                (matches!(
+                    body.binding_arena[b].kind,
+                    bone_core::hir::BindingKind::Param
+                ) || !helper_body
+                    && matches!(body.binding_arena[b].kind, bone_core::hir::BindingKind::Let))
+                    && preflight_scalar_type(ws, inf, e)
+            }
+            Expr::Not(..) => {
+                preflight_scalar_type(ws, inf, e)
+                    && inf.resolved_overload_calls.get(&e).is_none_or(|(mid, _)| {
+                        bone_core::modules::is_stdlib_module_file(ws.module(*mid).file.as_str())
+                    })
+            }
+            Expr::UnaryMinus(..) => {
+                preflight_numeric_type(ws, inf, e)
+                    && inf.resolved_overload_calls.get(&e).is_none_or(|(mid, _)| {
+                        bone_core::modules::is_stdlib_module_file(ws.module(*mid).file.as_str())
+                    })
+            }
+            Expr::As { value, target, .. } => {
+                preflight_numeric_type(ws, inf, value)
+                    && matches!(ws.render(Some(inf), target).as_str(), "float" | "f32")
+            }
+            Expr::BinOp { op, lhs, rhs } => {
+                matches!(op, BinOp::And | BinOp::Or)
+                    || (matches!(
+                        op,
+                        BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Leq | BinOp::Gt | BinOp::Geq
+                    ) && preflight_scalar_type(ws, inf, lhs)
+                        && preflight_scalar_type(ws, inf, rhs)
+                        && inf.resolved_overload_calls.get(&e).is_none_or(|(mid, _)| {
+                            bone_core::modules::is_stdlib_module_file(ws.module(*mid).file.as_str())
+                        }))
+            }
+            Expr::If { .. } | Expr::Block { .. } => true,
+            Expr::Return(_) => helper_body,
+            Expr::StructLiteral {
+                name,
+                bases,
+                fields,
+            } => {
+                bases.is_empty()
+                    && ws.struct_by_name.get(&name).is_some_and(|id| {
+                        let definition = &ws.module(id.module).structs[id.def];
+                        definition.is_value
+                            && definition.is_nobox
+                            && fields.len() == definition.fields.len()
+                    })
+            }
+            Expr::Call {
+                callee: Callee::Unresolved { name, .. },
+                args,
+                ..
+            } => {
+                let arg_list: Vec<_> = args.into_iter().collect();
+                let builtin_operator =
+                    inf.resolved_overload_calls.get(&e).is_none_or(|(mid, _)| {
+                        bone_core::modules::is_stdlib_module_file(ws.module(*mid).file.as_str())
+                    });
+                if builtin_operator && matches!(name.as_str(), "__op_add" | "__op_sub" | "__op_mul")
+                {
+                    arg_list.len() == 2
+                        && arg_list.iter().all(|&a| preflight_numeric_type(ws, inf, a))
+                } else if builtin_operator
+                    && matches!(name.as_str(), "__op_div" | "__op_mod" | "__op_idiv")
+                {
+                    arg_list.len() == 2
+                        && arg_list.iter().all(|&a| preflight_numeric_type(ws, inf, a))
+                        && match body.expr_arena[arg_list[1]] {
+                            Expr::Int(n) => n != 0,
+                            Expr::Float(n) => n.0 != 0.0,
+                            _ => false,
+                        }
+                } else {
+                    let resolved = inf.resolved_overload_calls.get(&e).copied().or_else(|| {
+                        let list = ws.functions_by_name.get(&name)?;
+                        (list.len() == 1).then(|| list[0])
+                    });
+                    let Some((mid, fid)) = resolved else {
+                        return false;
+                    };
+                    let f = &ws.module(mid).functions[fid];
+                    if f.name.as_str() == "float"
+                        && f.inline_body
+                            .is_some_and(|(_, source)| source.trim() == "return value")
+                        && bone_core::modules::is_stdlib_module_file(ws.module(mid).file.as_str())
+                    {
+                        arg_list.len() == 1 && preflight_numeric_type(ws, inf, arg_list[0])
+                    } else if f.is_extern
+                        || f.inline_body.is_some()
+                        || f.is_coroutine
+                        || !f.generics.is_empty()
+                        || arg_list.len() != f.param_decls.len()
+                    {
+                        false
+                    } else {
+                        let target = FuncRef {
+                            module: mid,
+                            func: fid,
+                        };
+                        if !visiting.insert(target) {
+                            return false;
+                        }
+                        let safe_body = ws
+                            .module(mid)
+                            .bodies
+                            .get(&bone_core::hir::BodyOwner::Function(fid))
+                            .zip(ws.inference(mid).and_then(|i| {
+                                i.per_fn.get(&bone_core::hir::BodyOwner::Function(fid))
+                            }))
+                            .and_then(|(body, inf)| {
+                                body.root.map(|root| {
+                                    preflight_safe_node(
+                                        ws,
+                                        body,
+                                        inf,
+                                        HirChild::Expr(root),
+                                        visiting,
+                                        true,
+                                    )
+                                })
+                            })
+                            .unwrap_or(false);
+                        visiting.remove(&target);
+                        safe_body
+                    }
+                }
+            }
+            _ => false,
+        },
+        HirChild::Statement(s) => matches!(
+            body.statement_arena[s],
+            Statement::Return(_) | Statement::Expr(_)
+        ),
+        HirChild::Pattern(_) => false,
+    };
+    safe && body
+        .try_for_each_child(node, |child| {
+            preflight_safe_node(ws, body, inf, child, visiting, helper_body)
+                .then_some(())
+                .ok_or(())
+        })
+        .is_ok()
+}
+
+pub(crate) struct PreflightPlan {
+    helper: FuncRef,
+    tail: FuncRef,
+    reads: Vec<Idx<Expr>>,
+}
+
+fn preflight_collect_reads(
+    body: &Body,
+    node: HirChild,
+    seen: &mut HashSet<u32>,
+    out: &mut Vec<Idx<Expr>>,
+) {
+    if let HirChild::Expr(e) = node
+        && let Expr::Var(binding) = body.expr_arena[e]
+        && seen.insert(raw(binding))
+    {
+        out.push(e);
+    }
+    body.for_each_child(node, |child| {
+        preflight_collect_reads(body, child, seen, out)
+    });
+}
 
 /// Everything a direct call to a statically-known callee carries besides its
 /// operands: the bound-conformance tree, the concrete delivery instance, the
@@ -29,6 +233,285 @@ pub(crate) struct DirectCall<'a> {
 }
 
 impl<'a> Builder<'a> {
+    fn preflight_plan(
+        &self,
+        e: Idx<Expr>,
+        func: FuncRef,
+        arg_idxs: &[Idx<Expr>],
+        dc: &DirectCall<'a>,
+    ) -> Result<Option<PreflightPlan>, CompilerError> {
+        if self.call_scx.target() != bone_core::hir::FnBackend::Lua {
+            return Ok(None);
+        }
+        let callee = &self.ws.module(func.module).functions[func.func];
+        let Some(annotation) = callee
+            .annotations
+            .iter()
+            .find(|a| a.is_builtin("preflight"))
+        else {
+            return Ok(None);
+        };
+        let Some(receiver_param) = callee.param_decls.first() else {
+            return Err(self.gap_here("@preflight requires a receiver parameter"));
+        };
+        let bone_core::hir::AnnoValue::String(helper_name) = annotation.args[0].value else {
+            return Err(self.gap_here("malformed @preflight helper name"));
+        };
+        let bone_core::hir::AnnoValue::String(tail_name) = annotation.args[1].value else {
+            return Err(self.gap_here("malformed @preflight tail name"));
+        };
+        let candidates: Vec<_> = self
+            .ws
+            .module(func.module)
+            .functions
+            .iter()
+            .filter(|(_, function)| {
+                function.name.as_str().rsplit("::").next() == Some(helper_name.as_str())
+            })
+            .map(|(id, _)| (func.module, id))
+            .collect();
+        let [(module, helper_id)] = candidates.as_slice() else {
+            return Err(self.gap_here(format!(
+                "@preflight helper `{helper_name}` must name one function in the callee module"
+            )));
+        };
+        let helper = &self.ws.module(*module).functions[*helper_id];
+        let tails: Vec<_> = self
+            .ws
+            .module(func.module)
+            .functions
+            .iter()
+            .filter(|(_, function)| {
+                function.name.as_str().rsplit("::").next() == Some(tail_name.as_str())
+            })
+            .map(|(id, _)| id)
+            .collect();
+        let [tail_id] = tails.as_slice() else {
+            return Err(self.gap_here(format!(
+                "@preflight tail `{tail_name}` must name one function in the callee module"
+            )));
+        };
+        let tail = &self.ws.module(func.module).functions[*tail_id];
+        let helper_receiver_is_ref = match helper.param_decls.first().map(|p| p.ty) {
+            Some(TyId::Static(mid, idx)) => matches!(
+                self.ws.module(mid).ty_arena[idx],
+                TypeExpr::App {
+                    ctor: TypeCtor::Ref,
+                    ..
+                }
+            ),
+            _ => false,
+        };
+        if helper.is_extern
+            || helper.inline_body.is_some()
+            || helper.is_coroutine
+            || !helper.generics.is_empty()
+            || helper.param_decls.len() != 1
+            || helper.num_required != 1
+            || helper_receiver_is_ref
+            || self.ws.render(None, helper.param_decls[0].ty)
+                != self.ws.render(None, receiver_param.ty)
+            || helper.return_ty.is_none()
+        {
+            return Err(self.gap_here(format!("@preflight helper `{helper_name}` must be Rock-bodied, unary, non-generic, take the same receiver type, and return a context")));
+        }
+        let context_ty = helper.return_ty.expect("checked above");
+        let context_is_boxed_struct = match context_ty {
+            TyId::Static(mid, idx) => match self.ws.module(mid).ty_arena[idx] {
+                TypeExpr::App {
+                    ctor: TypeCtor::Nominal(name),
+                    params,
+                } if params.is_empty() => self
+                    .ws
+                    .struct_by_name
+                    .get(&name)
+                    .is_some_and(|id| !self.ws.module(id.module).structs[id.def].is_value),
+                _ => false,
+            },
+            TyId::Local(_) => false,
+        };
+        if !context_is_boxed_struct
+            || tail.is_extern
+            || tail.inline_body.is_some()
+            || tail.is_coroutine
+            || !tail.generics.is_empty()
+            || tail.param_decls.len() != callee.param_decls.len()
+            || self.ws.render(None, tail.param_decls[0].ty) != self.ws.render(None, context_ty)
+            || tail.param_decls[1..]
+                .iter()
+                .zip(&callee.param_decls[1..])
+                .any(|(a, b)| self.ws.render(None, a.ty) != self.ws.render(None, b.ty))
+            || tail.return_ty.map(|ty| self.ws.render(None, ty))
+                != callee.return_ty.map(|ty| self.ws.render(None, ty))
+        {
+            return Err(self.gap_here(format!("@preflight tail `{tail_name}` must be Rock-bodied, non-generic, take the context followed by the original arguments, and return the original type")));
+        }
+        // The receiver must be the first source argument. A named receiver
+        // written after another argument cannot be moved without changing that
+        // argument's evaluation order.
+        if arg_idxs.len() != callee.param_decls.len()
+            || arg_idxs.len() < 2
+            || arg_idxs
+                .iter()
+                .any(|arg| self.body.spread_args.contains(arg) || self.is_ref_call_arg(e, *arg))
+        {
+            return Ok(None);
+        }
+        let mut next_pos = 0;
+        let mut filled = HashSet::default();
+        for (source_index, &arg) in arg_idxs.iter().enumerate() {
+            let slot = if let Some(name) = self.body.arg_names.get(&arg) {
+                let Some(slot) = callee.param_decls.iter().position(|p| p.name == *name) else {
+                    return Ok(None);
+                };
+                slot
+            } else {
+                let slot = next_pos;
+                next_pos += 1;
+                slot
+            };
+            if source_index == 0 && slot != 0 || !filled.insert(slot) {
+                return Ok(None);
+            }
+        }
+        if filled.len() != callee.param_decls.len() {
+            return Ok(None);
+        }
+        let boxed_receiver = match self.concrete_expr_ty(arg_idxs[0]) {
+            Some(MonoTy::App {
+                ctor: MonoCtor::Nominal(name),
+                params,
+            }) if params.is_empty() => self
+                .ws
+                .struct_by_name
+                .get(name)
+                .is_some_and(|id| !self.ws.module(id.module).structs[id.def].is_value),
+            _ => false,
+        };
+        if !boxed_receiver {
+            return Err(self
+                .gap_here("@preflight requires a non-value struct receiver with boxed call ABI"));
+        }
+        if callee.return_ty.is_some_and(|ty| {
+            !matches!(
+                self.ws.render(None, ty).as_str(),
+                "()" | "int" | "uint" | "float" | "f32" | "bool" | "string"
+            )
+        }) {
+            return Ok(None);
+        }
+        let tail_ref = FuncRef {
+            module: func.module,
+            func: *tail_id,
+        };
+        let tail_instance = self
+            .concrete_callee_for_site_op(e, crate::site::SiteOp::Synthesized("preflight_tail"))?
+            .ok_or_else(|| self.gap_here("@preflight tail has no concrete call site"))?;
+        if tail_instance.func != tail_ref {
+            return Err(self.gap_here("@preflight concrete tail differs from annotation"));
+        }
+        let tail_abi = self.callee_abi_plan_for_instance(&tail_instance)?;
+        let shapes = dc.plan.argument_shapes();
+        let tail_shapes = tail_abi.argument_shapes();
+        if tail_abi.uses_scalar_abi() != dc.plan.uses_scalar_abi()
+            || shapes != tail_shapes
+            || tail_abi.ret_shape() != dc.plan.ret_shape()
+            || tail_abi.ret_tuple() != dc.plan.ret_tuple()
+        {
+            return Ok(None);
+        }
+        let Some(inf) = self.inf else {
+            return Ok(None);
+        };
+        let mut visiting = HashSet::default();
+        if !arg_idxs[1..].iter().all(|&arg| {
+            preflight_safe_node(
+                self.ws,
+                self.body,
+                inf,
+                HirChild::Expr(arg),
+                &mut visiting,
+                false,
+            )
+        }) {
+            return Ok(None);
+        }
+        let mut seen = HashSet::default();
+        let mut reads = Vec::new();
+        for &arg in &arg_idxs[1..] {
+            preflight_collect_reads(self.body, HirChild::Expr(arg), &mut seen, &mut reads);
+        }
+        Ok(Some(PreflightPlan {
+            helper: FuncRef {
+                module: *module,
+                func: *helper_id,
+            },
+            tail: tail_ref,
+            reads,
+        }))
+    }
+
+    fn emit_preflight(
+        &mut self,
+        e: Idx<Expr>,
+        plan: &PreflightPlan,
+        receiver: Idx<Inst>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let mut reads = HashMap::default();
+        for &e in &plan.reads {
+            let Expr::Var(binding) = self.body.expr_arena[e] else {
+                unreachable!()
+            };
+            reads.insert(raw(binding), self.lower_expr(e)?);
+        }
+        self.preflight_reads
+            .last_mut()
+            .expect("direct-call scope")
+            .extend(reads);
+        let op = crate::site::SiteOp::Synthesized("preflight");
+        let instance = self
+            .concrete_callee_for_site_op(e, op.clone())?
+            .ok_or_else(|| self.gap_here("@preflight helper has no concrete call site"))?;
+        if instance.func != plan.helper {
+            return Err(self.gap_here("@preflight concrete helper differs from annotation"));
+        }
+        let old_op = std::mem::replace(&mut self.cur_op, op);
+        let call = self.emit_cur(Inst::Call {
+            func: plan.helper,
+            args: vec![receiver],
+        });
+        self.cur_op = old_op;
+        let abi = self.callee_abi_plan_for_instance(&instance)?;
+        if abi.representation().return_lanes() != 1 || abi.ret_shape().is_some() {
+            return Err(self.gap_here("@preflight prepare must return one boxed context"));
+        }
+        self.f.call_abi_plans.insert(call, abi);
+        self.f.callee_instances.insert(call, instance);
+        Ok(call)
+    }
+
+    fn emit_preflight_tail(
+        &mut self,
+        e: Idx<Expr>,
+        tail: FuncRef,
+        args: Vec<Idx<Inst>>,
+    ) -> Result<ValueRepr, CompilerError> {
+        let op = crate::site::SiteOp::Synthesized("preflight_tail");
+        let instance = self
+            .concrete_callee_for_site_op(e, op.clone())?
+            .ok_or_else(|| self.gap_here("@preflight tail has no concrete call site"))?;
+        if instance.func != tail {
+            return Err(self.gap_here("@preflight concrete tail differs from annotation"));
+        }
+        let old_op = std::mem::replace(&mut self.cur_op, op);
+        let call = self.emit_cur(Inst::Call { func: tail, args });
+        self.cur_op = old_op;
+        let abi = self.callee_abi_plan_for_instance(&instance)?;
+        self.f.call_abi_plans.insert(call, abi);
+        self.f.callee_instances.insert(call, instance);
+        Ok(ValueRepr::Scalar(call))
+    }
+
     /// Whether the call at `e` passes a plain `[T]` receiver to the stdlib's
     /// own Rock-bodied `name`. A user function may share the name.
     fn calls_stdlib_vec_fn(&self, e: Idx<Expr>, name: Ustr, recv: Idx<Expr>) -> bool {
@@ -995,6 +1478,7 @@ impl<'a> Builder<'a> {
                         &arg_idxs,
                         &[],
                         &[],
+                        None,
                     )?;
                     let Some(shape) = abi.result_shape(self.scx.rep_arena()) else {
                         let v = self.emit_call_value(e, g, arg_vals)?;
@@ -1289,7 +1773,10 @@ impl<'a> Builder<'a> {
             };
         }
         if !dc.plan.uses_scalar_abi() {
-            let args = self.direct_call_args(e, func, arg_idxs, any_named, &dc)?;
+            let (args, tail) = self.direct_call_args(e, func, arg_idxs, any_named, &dc, true)?;
+            if let Some(tail) = tail {
+                return self.emit_preflight_tail(e, tail, args);
+            }
             // Above the tuple early return: the exemption is a property of the
             // CALLEE, so making it arity-dependent would be a guarantee hole the
             // day a `@gpu_only` intrinsic returns a tuple.
@@ -1301,7 +1788,10 @@ impl<'a> Builder<'a> {
             self.record_call(call, func, &dc)?;
             return Ok(ValueRepr::Scalar(call));
         }
-        let args = self.direct_call_args(e, func, arg_idxs, any_named, &dc)?;
+        let (args, tail) = self.direct_call_args(e, func, arg_idxs, any_named, &dc, true)?;
+        if let Some(tail) = tail {
+            return self.emit_preflight_tail(e, tail, args);
+        }
         let ret_shape = dc.plan.ret_shape();
         match ret_shape {
             Some(shape) => {
@@ -1340,6 +1830,33 @@ impl<'a> Builder<'a> {
         arg_idxs: &[Idx<Expr>],
         any_named: bool,
         dc: &DirectCall<'a>,
+        allow_preflight: bool,
+    ) -> Result<(Vec<Idx<Inst>>, Option<FuncRef>), CompilerError> {
+        let preflight = if allow_preflight {
+            self.preflight_plan(e, func, arg_idxs, dc)?
+        } else {
+            None
+        };
+        let Some(preflight) = preflight else {
+            return self
+                .direct_call_args_inner(e, func, arg_idxs, any_named, dc, None)
+                .map(|args| (args, None));
+        };
+        self.preflight_reads.push(HashMap::default());
+        let result =
+            self.direct_call_args_inner(e, func, arg_idxs, any_named, dc, Some(&preflight));
+        self.preflight_reads.pop();
+        result.map(|args| (args, Some(preflight.tail)))
+    }
+
+    fn direct_call_args_inner(
+        &mut self,
+        e: Idx<Expr>,
+        func: FuncRef,
+        arg_idxs: &[Idx<Expr>],
+        any_named: bool,
+        dc: &DirectCall<'a>,
+        preflight: Option<&PreflightPlan>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         if dc.plan.uses_scalar_abi() {
             // A boxed argument the callee does not read is still rejected, so
@@ -1378,8 +1895,29 @@ impl<'a> Builder<'a> {
                     })
                 })
                 .collect();
-            let args =
-                self.scalar_call_args(e, func, arg_idxs, any_named, &param_shapes, &param_tys)?;
+            let args = self.scalar_call_args(
+                e,
+                func,
+                arg_idxs,
+                any_named,
+                &param_shapes,
+                &param_tys,
+                preflight,
+            )?;
+            if let Some(preflight) = preflight {
+                let tail_instance = self
+                    .concrete_callee_for_site_op(
+                        e,
+                        crate::site::SiteOp::Synthesized("preflight_tail"),
+                    )?
+                    .ok_or_else(|| self.gap_here("@preflight tail has no concrete call site"))?;
+                if tail_instance.func != preflight.tail {
+                    return Err(self.gap_here("@preflight concrete tail differs from annotation"));
+                }
+                return self
+                    .callee_abi_plan_for_instance(&tail_instance)?
+                    .transport_arguments(args);
+            }
             return dc.plan.transport_arguments(args);
         }
         let callee = &self.ws.module(func.module).functions[func.func];
@@ -1393,31 +1931,39 @@ impl<'a> Builder<'a> {
             .any(|&id| matches!(dc.plan.rep_plan(id).layout(), RepLayout::Tuple { .. }));
         Ok(if has_tuple_storage {
             let opaque = vec![RetSlot::Opaque; callee.param_decls.len()];
-            self.scalar_call_args(e, func, arg_idxs, any_named, &opaque, &[])?
+            self.scalar_call_args(e, func, arg_idxs, any_named, &opaque, &[], preflight)?
         } else if any_named {
-            self.reorder_named_args(e, arg_idxs, func, Some(&dc.callee_inst))?
+            if let Some(plan) = preflight {
+                let opaque = vec![RetSlot::Opaque; callee.param_decls.len()];
+                let names: Vec<_> = callee.param_decls.iter().map(|p| p.name).collect();
+                let defaults = self.call_param_defaults(func);
+                self.slotted_call_args(e, &names, &opaque, arg_idxs, &defaults, &[], Some(plan))?
+            } else {
+                self.reorder_named_args(e, arg_idxs, func, Some(&dc.callee_inst))?
+            }
         } else {
             let signature = self.direct_call_signature(dc)?;
-            let mut args: Vec<Idx<Inst>> = arg_idxs
-                .iter()
-                .enumerate()
-                .map(|(i, &a)| {
-                    let t = self
-                        .concrete_param_ty_of(signature, &dc.callee_inst, i)?
-                        .ok_or_else(|| {
-                            self.gap_here("concrete call has no callee parameter type")
-                        })?;
-                    if self.is_ref_call_arg(e, a) {
-                        self.lower_ref_borrow(a)
-                    } else {
-                        let lend = callee.inline_body.is_none() && !callee.is_extern;
-                        let v = self.with_value_lending(lend, |s| {
-                            s.lower_expr_with_expected(a, Some(t.as_ref()))
-                        })?;
-                        Ok(self.coerced_mono(v, a, t.as_ref()))
-                    }
-                })
-                .collect::<Result<_, CompilerError>>()?;
+            let mut args: Vec<Idx<Inst>> = Vec::with_capacity(arg_idxs.len());
+            for (i, &a) in arg_idxs.iter().enumerate() {
+                let t = self
+                    .concrete_param_ty_of(signature, &dc.callee_inst, i)?
+                    .ok_or_else(|| self.gap_here("concrete call has no callee parameter type"))?;
+                let mut value = if self.is_ref_call_arg(e, a) {
+                    self.lower_ref_borrow(a)
+                } else {
+                    let lend = callee.inline_body.is_none() && !callee.is_extern;
+                    let v = self.with_value_lending(lend, |s| {
+                        s.lower_expr_with_expected(a, Some(t.as_ref()))
+                    })?;
+                    Ok(self.coerced_mono(v, a, t.as_ref()))
+                }?;
+                if i == 0
+                    && let Some(plan) = preflight
+                {
+                    value = self.emit_preflight(e, plan, value)?;
+                }
+                args.push(value);
+            }
             args.extend(self.trailing_default_args(func, arg_idxs.len(), None)?);
             args
         })
@@ -1714,6 +2260,7 @@ impl<'a> Builder<'a> {
         any_named: bool,
         param_shapes: &[RetSlot],
         param_tys: &[Option<std::borrow::Cow<'a, crate::monoty::MonoTy>>],
+        preflight: Option<&PreflightPlan>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         if !any_named {
             let mut out = Vec::new();
@@ -1729,7 +2276,14 @@ impl<'a> Builder<'a> {
                 let callee = &self.ws.module(func.module).functions[func.func];
                 let lend = callee.inline_body.is_none() && !callee.is_extern;
                 let values = self.arg_values_for_call_slot(e, &slot, a, lend)?;
-                out.extend(self.coerced_scalar_arg(values, a, &slot, param_tys.get(i)));
+                let mut values = self.coerced_scalar_arg(values, a, &slot, param_tys.get(i));
+                if i == 0
+                    && let Some(plan) = preflight
+                    && let [receiver] = values.as_slice()
+                {
+                    values = vec![self.emit_preflight(e, plan, *receiver)?];
+                }
+                out.extend(values);
             }
             out.extend(self.trailing_default_args(func, arg_idxs.len(), Some(param_shapes))?);
             return Ok(out);
@@ -1747,6 +2301,7 @@ impl<'a> Builder<'a> {
             arg_idxs,
             &defaults,
             param_tys,
+            preflight,
         )
     }
 
@@ -1785,10 +2340,11 @@ impl<'a> Builder<'a> {
         arg_idxs: &[Idx<Expr>],
         defaults: &[Option<CallParamDefault>],
         param_tys: &[Option<std::borrow::Cow<'a, crate::monoty::MonoTy>>],
+        preflight: Option<&PreflightPlan>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let mut slots: Vec<Option<Vec<Idx<Inst>>>> = vec![None; param_names.len()];
         let mut next_pos = 0usize;
-        for &a in arg_idxs {
+        for (source_index, &a) in arg_idxs.iter().enumerate() {
             // Struct spread `..op`: decompose into per-field reprs (a struct-
             // literal operand is elided) and place each into its param slot.
             if self.body.spread_args.contains(&a) {
@@ -1843,6 +2399,13 @@ impl<'a> Builder<'a> {
                 let values = self.snapshot_argument_slot(r, &slot)?;
                 self.coerced_scalar_arg(values, a, &slot, param_tys.get(pidx))
             });
+            if source_index == 0
+                && let Some(plan) = preflight
+                && let Some(values) = &slots[pidx]
+                && let [receiver] = values.as_slice()
+            {
+                slots[pidx] = Some(vec![self.emit_preflight(e, plan, *receiver)?]);
+            }
         }
         let hi = slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1);
         // A trailing param with a caller-supplied default is passed explicitly too.

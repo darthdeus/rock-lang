@@ -120,6 +120,24 @@ fn validate_one(
             }
             Ok(())
         }
+        // The author asserts callee(receiver, args) is equivalent to
+        // tail(prepare(receiver), args). Lowering proves only that arguments
+        // can safely be constructed after prepare.
+        "preflight" => {
+            at(anno, pos, AnnoPos::FnItem)?;
+            if anno.args.len() != 2
+                || anno.args.iter().any(|arg| {
+                    arg.name.is_some()
+                        || !matches!(&arg.value, AnnoValue::String(name) if !name.is_empty())
+                })
+            {
+                comp_error!(
+                    anno.span,
+                    "`@preflight` requires prepare and tail function name strings"
+                );
+            }
+            Ok(())
+        }
         "nomangle" => {
             match pos {
                 AnnoPos::FnItem | AnnoPos::StructItem => {}

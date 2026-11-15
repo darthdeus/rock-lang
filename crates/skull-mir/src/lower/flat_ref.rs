@@ -690,9 +690,9 @@ impl<'a> Builder<'a> {
             expected: plan.args.clone(),
             slots: Vec::new(),
         });
-        let args = self.direct_call_args(e, func, arg_idxs, any_named, dc);
+        let args = self.direct_call_args(e, func, arg_idxs, any_named, dc, false);
         let capture = self.flat_arg_captures.pop().expect("pushed above");
-        let args = args?;
+        let (args, _) = args?;
         if capture.slots.len() != plan.args.len() {
             return Err(self.gap_here("a flat `ref` argument did not reach its `ref` parameter"));
         }

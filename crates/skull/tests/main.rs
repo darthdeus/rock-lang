@@ -157,6 +157,8 @@ mod nullable_value_in_tuple_sentinel;
 mod nullable_value_join_sroa;
 mod optional_value_wire;
 mod plain_struct_scalarize;
+mod preflight;
+mod preflight_semantics;
 mod program_roots;
 mod removed_global_markers;
 mod reserved_namespace;
