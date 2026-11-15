@@ -22,7 +22,7 @@ fn large_verts(n: int) -> NativeBuffer<LargeVert> {
     return native_buffer_alloc(n)
 }
 
-@test
+@test(backends = "lua")
 fn only_large_storage_leaves_the_lua_heap() {
     large_collect()
     let before = native_buffer_offheap_bytes()
@@ -45,7 +45,7 @@ fn large_dropped() -> int {
     return native_buffer_offheap_bytes()
 }
 
-@test
+@test(backends = "lua")
 fn collected_large_storage_is_freed() {
     large_collect()
     let before = native_buffer_offheap_bytes()
@@ -112,7 +112,7 @@ inline(lua) fn large_guard_collections() -> int = "return __ROCK_NB_OFFHEAP_STAT
 // size, so the allocator does: bounded collector steps past the soft limit,
 // a full collection past the hard one. A program that keeps dropping large
 // buffers must not accumulate them without bound.
-@test
+@test(backends = "lua")
 fn churned_large_storage_stays_bounded() {
     large_collect()
     let soft = large_guard_soft()
