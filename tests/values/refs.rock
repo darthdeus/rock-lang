@@ -111,6 +111,34 @@ fn ref_local_write_reaches_scalarized_owner() {
 }
 
 @test
+fn ref_local_rebinding_borrows_each_new_place() {
+    let first = RaGraph {}
+    let second = RaGraph {}
+    let q: ref RaQuery = first.query
+    q.head = 1
+    let before = second.query
+    q = second.query
+    q.head = 2
+    assert_eq(first.query.head, 1)
+    assert_eq(second.query.head, 2)
+    assert_eq(before.head, -1)
+
+    let local = RaQuery { head: 3 }
+    let snapshot = local
+    q = local
+    q.head = 4
+    assert_eq(local.head, 4)
+    assert_eq(snapshot.head, 3)
+    assert_eq(second.query.head, 2)
+
+    let original: ref RaQuery = first.query
+    q = original
+    q.head = 5
+    assert_eq(first.query.head, 5)
+    assert_eq(local.head, 4)
+}
+
+@test
 fn ref_local_runtime_write_reaches_scalarized_owner() {
     let g = RaGraph {}
     let q: ref RaQuery = g.query
