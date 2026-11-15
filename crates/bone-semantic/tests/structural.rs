@@ -1641,6 +1641,20 @@ fn arena_borrow_checks_preserve_separate_storage_and_fresh_reborrows() {
         "fn probe(h: Entity<BorrowRow>) { let r: ref BorrowRow = ROWS.borrow(h).unwrap(); ROWS.remove(h); r.cell.n = 1 }",
         "fn probe(h: Entity<BorrowRow>) { let r: ref BorrowCell = ROWS.borrow(h).unwrap().cell; ROWS.remove(h); r.n = 1 }",
         "fn probe() { let cell = BorrowCell { n: 0 }; let r: ref BorrowCell = cell; opaque(); r.n = 1 }",
+        "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); let cell = BorrowCell { n: 0 }; r = cell; CELLS.remove(h); r.n = 1 }",
+        r#"
+value OuterA { cell: BorrowCell }
+value OuterB { cell: BorrowCell }
+global AA: Arena<OuterA> = arena_new()
+global BB: Arena<OuterB> = arena_new()
+fn remove_a_then_use(r: ref BorrowCell, h: Entity<OuterA>) { AA.remove(h); r.n = 1 }
+fn probe(ha: Entity<OuterA>, hb: Entity<OuterB>, flag: bool) {
+    let a: ref BorrowCell = AA.borrow(ha).unwrap().cell
+    let b: ref BorrowCell = BB.borrow(hb).unwrap().cell
+    let unused: ref BorrowCell = if flag { a } else { b }
+    remove_a_then_use(b, ha)
+}
+"#,
     ] {
         let errors = arena_borrow_errors(body);
         assert!(errors.is_empty(), "{body}: {errors:?}");
