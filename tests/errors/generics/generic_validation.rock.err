@@ -2,6 +2,7 @@
 //! Tags: generics, validation
 
 //=== TEST CASE: struct_missing_type_args_Generic ===
+//! expect: Generic type `GenericStruct` requires 1 type argument(s)
 struct GenericStruct<T> {
     value: T
 }
@@ -12,6 +13,7 @@ fn main() {
 }
 
 //=== TEST CASE: enum_missing_type_args_Generic ===
+//! expect: Generic type `GenericEnum` requires 1 type argument(s)
 enum GenericEnum<T> {
     Some(T),
     None
@@ -23,20 +25,23 @@ fn main() {
 }
 
 //=== TEST CASE: entity_missing_type_args_Generic ===
+//! expect: Generic type `Entity` requires 1 type argument(s)
 fn main() {
     let e: Entity = entity_new(arena_new(), 0, 0)
     print("test")
 }
 
 //=== TEST CASE: arena_missing_type_args_Generic ===
+//! expect: Generic type `Arena` requires 1 type argument(s)
 fn main() {
     let a: Arena = arena_new()
     print("test")
 }
 
 //=== TEST CASE: function_param_missing_type_args_Generic ===
+//! expect: Generic type `Entity` requires 1 type argument(s)
 fn buggy_entity_equals(a: Entity, b: Entity) -> bool {
-    return a._index == b._index && a._generation == b._generation
+    return true
 }
 
 fn main() {

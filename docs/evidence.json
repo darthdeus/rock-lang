@@ -911,5 +911,131 @@
       "output": "19/19 @tests passed \\(0 failed, 0 skipped, 0 not for js\\)"
     }
   ]
+},
+{
+  "id": "generic-overload-rejection-reasons",
+  "statement": "Twelve selected generic and overload cases pin missing type arguments, invariant mismatches, ambiguous or unmatched calls, and invalid newtype patterns; nearby accepted controls execute on LuaJIT and JS.",
+  "kind": "test strength",
+  "limit": "Selected cases only, not all variance or overload rules. The ambiguity assertion does not check the full candidate list; commented runtime-file error examples are not executed.",
+  "sources": [
+    {
+      "path": "docs/generic-overload-rejections.md",
+      "anchor": "This audit checks 12 cases"
+    },
+    {
+      "path": "crates/bone-lower/src/lib.rs",
+      "anchor": "fn lower_resolved_type_name("
+    },
+    {
+      "path": "crates/bone-inference/src/calls.rs",
+      "anchor": "pub(crate) fn select_overload_with_generics("
+    },
+    {
+      "path": "tests/types/generic_rejection_controls.rock",
+      "anchor": "fn incomparable_candidates_with_only_one_match()"
+    }
+  ],
+  "checks": [
+    {
+      "command": [
+        "python3",
+        "perf/evidence/check_operator_rejections.py",
+        "--fixture",
+        "tests/errors/generics/generic_validation.rock.err",
+        "--cases",
+        "5"
+      ],
+      "exit": 0,
+      "output": "original: 5 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 5 failed; 0 todo\\nvalid-programs: 0 passed; 5 failed; 0 todo"
+    },
+    {
+      "command": [
+        "python3",
+        "perf/evidence/check_operator_rejections.py",
+        "--fixture",
+        "tests/errors/generics/variance.rock.err",
+        "--cases",
+        "2"
+      ],
+      "exit": 0,
+      "output": "original: 2 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 2 failed; 0 todo\\nvalid-programs: 0 passed; 2 failed; 0 todo"
+    },
+    {
+      "command": [
+        "python3",
+        "perf/evidence/check_operator_rejections.py",
+        "--fixture",
+        "tests/errors/ambiguous_overload_incomparable.rock.err",
+        "--cases",
+        "1"
+      ],
+      "exit": 0,
+      "output": "original: 1 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 1 failed; 0 todo\\nvalid-programs: 0 passed; 1 failed; 0 todo"
+    },
+    {
+      "command": [
+        "python3",
+        "perf/evidence/check_operator_rejections.py",
+        "--fixture",
+        "tests/errors/overload_no_match.rock.err",
+        "--cases",
+        "2"
+      ],
+      "exit": 0,
+      "output": "original: 2 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 2 failed; 0 todo\\nvalid-programs: 0 passed; 2 failed; 0 todo"
+    },
+    {
+      "command": [
+        "python3",
+        "perf/evidence/check_operator_rejections.py",
+        "--fixture",
+        "tests/errors/newtypes/generic_unification.rock.err",
+        "--cases",
+        "2"
+      ],
+      "exit": 0,
+      "output": "original: 2 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 2 failed; 0 todo\\nvalid-programs: 0 passed; 2 failed; 0 todo"
+    },
+    {
+      "command": [
+        "cargo",
+        "run",
+        "--quiet",
+        "--locked",
+        "-p",
+        "rock-cli",
+        "--bin",
+        "rock",
+        "--",
+        "test",
+        "tests/types/generic_rejection_controls.rock",
+        "tests/types/generic_type_validation_positive.rock",
+        "tests/functions/overloads.rock"
+      ],
+      "exit": 0,
+      "output": "37/37 @tests passed \\(0 failed\\)"
+    },
+    {
+      "command": [
+        "cargo",
+        "run",
+        "--quiet",
+        "--locked",
+        "-p",
+        "rock-cli",
+        "--bin",
+        "rock",
+        "--",
+        "test",
+        "tests/types/generic_rejection_controls.rock",
+        "tests/types/generic_type_validation_positive.rock",
+        "tests/functions/overloads.rock",
+        "--backend",
+        "js"
+      ],
+      "exit": 0,
+      "output": "37/37 @tests passed \\(0 failed, 0 skipped, 0 not for js\\)"
+    }
+  ]
 }
 ]

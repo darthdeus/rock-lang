@@ -1,0 +1,14 @@
+//! Error: an overload set must have a candidate matching argument types and arity.
+//! Tags: overloads, arguments
+
+//=== TEST CASE: no_matching_argument_types_Generic ===
+//! expect: No overload for `choose` with argument types (bool)
+fn choose(x: int) -> int { x }
+fn choose(x: string) -> int { len(x) }
+fn main() { let _ = choose(true) }
+
+//=== TEST CASE: no_matching_argument_count_Generic ===
+//! expect: No overload for `choose` with argument types (int, int)
+fn choose(x: int) -> int { x }
+fn choose(x: string) -> int { len(x) }
+fn main() { let _ = choose(1, 2) }

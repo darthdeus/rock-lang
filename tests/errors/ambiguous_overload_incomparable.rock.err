@@ -10,6 +10,7 @@
 // and the error lists both tied signatures.
 
 //=== TEST CASE: incomparable_generic_slots_tie_Generic ===
+//! expect: Ambiguous overload for `two` with argument types (int, int)
 fn two<T>(a: T, b: int) -> string { return "left" }
 fn two<T>(a: int, b: T) -> string { return "right" }
 

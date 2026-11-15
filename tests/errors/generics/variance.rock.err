@@ -2,6 +2,7 @@
 //! Tags: generics, variance, soundness
 
 //=== TEST CASE: entity_invariance_MismatchedType ===
+//! expect: type mismatch: expected `float`, found `int`
 fn main() {
     let arena: Arena<int> = arena_new()
     let int_entity: Entity<int> = entity_new(arena, 1, 0)
@@ -11,6 +12,7 @@ fn main() {
 }
 
 //=== TEST CASE: custom_struct_invariance_MismatchedType ===
+//! expect: type mismatch: expected `float`, found `int`
 struct Container<T> {
     item: T
 }

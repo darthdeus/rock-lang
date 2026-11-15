@@ -244,9 +244,21 @@ claim; it does not establish privacy of the current emitted cell name.
 
 Wrong-diagnostic and valid-program controls fail all 15 rejection assertions.
 The runtime corpus, including four new accepted controls, passes 19 tests on
-each backend without JS skips. The inventory is **277 unpinned of 525 cases**;
-the full error scan passes 519 with six existing TODOs. No production compiler
-code changed.
+each backend without JS skips. The inventory at that stage was **277 unpinned
+of 525 cases**; the full error scan passed 519 with six existing TODOs. No
+production compiler code changed.
+
+## Generic arguments and overload selection
+
+The [generic/overload audit](generic-overload-rejections.md) adds eight missing
+assertions and two new no-match overload cases, and rechecks two existing
+newtype-pattern rejections. It removes a stale Entity field access hidden by
+invalid parameter annotations and downstream uses of invalid constructors.
+
+All 12 cases detect wrong-diagnostic and valid-program mutations. Five new
+accepted controls and two existing runtime files pass 37 tests on each backend,
+with no JS skips. The inventory is **269 unpinned of 527 cases**; the full error
+scan passes 521 with six existing TODOs. No production compiler code changed.
 
 ## Useful measurements
 
@@ -274,8 +286,8 @@ audited by this work.
 
 The breadth survey also found a stale LSP fixture warning: the parser already
 rejects unknown expectation lines. Its existing malformed-block regression
-passes; the documentation now matches that behavior. The ledger contains 29
-bounded records, not 29 comprehensively verified subsystems.
+passes; the documentation now matches that behavior. The ledger contains 30
+bounded records, not 30 comprehensively verified subsystems.
 
 Extend the evidence ledger alongside concrete repairs. Its checks establish
 bounded claims, not a percentage of language coverage or a launch certificate.

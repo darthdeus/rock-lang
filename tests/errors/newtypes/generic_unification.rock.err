@@ -13,7 +13,6 @@ fn main() {
     let m: Map<int, string> = map_new()
     m[1] = "x"
     let d = Diag(m)
-    print(d.0[1])
 }
 
 //=== TEST CASE: non_app_arg_for_app_pattern_TypeMismatch ===
@@ -23,5 +22,4 @@ newtype Wrap<T>(Entity<T>)
 
 fn main() {
     let w = Wrap(42)
-    print(w)
 }
