@@ -161,6 +161,18 @@ The [wide-value ABI tests](../crates/skull/tests/wide_value_abi.rs) cover call
 kinds and boxed value semantics. Representation changes must preserve value
 copies and field layout, including uniform packing and nested no-box fields.
 
+Immutable call/return boundaries may reuse existing boxed value children.
+An immutable local initialized by `if` or `match` can retain that ownership
+when every result arm selects a proven immutable binding, including nested
+selections and empty block wrappers. Conditions and guards keep their evaluation
+order. Mutable sources, ref borrows, storage reads, foreign results and
+statement-bearing branches retain their snapshot requirements. Nullable local
+initializers are outside this selection proof. The
+[boundary tests](../crates/skull/tests/nested_box_boundary.rs) check constructor
+counts, retained identity and mutation isolation; the
+[runtime probe](../benchmarks/call_boundaries/README.md) measures the local
+selection and direct-return control with LuaJIT enabled.
+
 ## Opaque body boundaries
 
 An `inline(lua)` or `inline(js)` body is target code the compiler cannot
