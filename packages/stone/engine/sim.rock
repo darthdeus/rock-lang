@@ -389,6 +389,10 @@ fn runner_sim_advance(frame: int) -> bool {
     if cleanup_error != "" {
         sim_expect(false, "sim cleanup failed: {cleanup_error}")
     }
+    for i in 0..logged_error_count() {
+        sim_emit("{{\"op\":\"error\",\"message\":\"logged error: "
+            + sim_json_escape(logged_error_record(i)) + "\"}}")
+    }
     sim_teardown_procs()
     sim_emit("{{\"op\":\"entry_end\",\"name\":\"" + SIM_NAME
         + "\",\"frame_count\":" + to_string(frame_count)

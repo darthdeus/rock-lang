@@ -1355,14 +1355,29 @@ fn assert(condition: bool) {
 }
 
 // Verify exactly the error records emitted by this body, without suppressing
-// the installed logger. Available inside `rock test` only.
+// the installed logger. A harness that fails its run on logged errors (`rock
+// test`, `rock sim`, a bounded `rock frame`) collects the "[CATEGORY] message"
+// records in `_G.__rock_logged_errors`; verified records leave that list.
 fn assert_error_logs(expected: [string], body: fn() -> ()) {
     __rock_assert_error_logs(__rock_vec_to_lua_array(expected), body)
 }
 
 inline(lua) fn __rock_assert_error_logs(expected: any, body: fn() -> ()) = """
-    local check = assert(_G.__rock_test_assert_error_logs, "assert_error_logs requires rock test")
-    check(expected, body)
+    local records = assert(_G.__rock_logged_errors,
+        "assert_error_logs requires rock test, rock sim or a bounded rock frame")
+    local first = #records + 1
+    body()
+    local actual = {}
+    for i = first, #records do actual[#actual + 1] = records[i] end
+    local matches = #actual == #expected
+    for i, message in ipairs(actual) do
+        if message ~= expected[i] then matches = false end
+    end
+    if not matches then
+        error("error log mismatch: expected <" .. table.concat(expected, "\n") ..
+            "> got <" .. table.concat(actual, "\n") .. ">", 0)
+    end
+    for i = #records, first, -1 do records[i] = nil end
 """
 
 // Assert equality/inequality, inline-expanded at the call site so
