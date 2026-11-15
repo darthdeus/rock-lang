@@ -41,8 +41,8 @@ fn inaccessible_initial_source_fails_before_ready() {
     let source = sources.join("game.rock");
     std::fs::write(&source, "fn value() -> int { return 1 }\n").unwrap();
     let permissions = std::fs::metadata(&sources).unwrap().permissions();
-    // A readable directory without search permission passes watcher setup,
-    // but inspecting its source entries fails. Privileged users bypass this.
+    // Watcher setup or the initial scan must reject unreadable source entries.
+    // Privileged users bypass directory permissions.
     std::fs::set_permissions(&sources, std::fs::Permissions::from_mode(0o444)).unwrap();
     if std::fs::metadata(&source).is_ok() {
         std::fs::set_permissions(&sources, permissions).unwrap();
@@ -60,7 +60,10 @@ fn inaccessible_initial_source_fails_before_ready() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(!stdout.contains("\"ready\""), "{stdout}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("inspect initial source path"), "{stderr}");
+    assert!(
+        stderr.contains("inspect initial source path") || stderr.contains("watch "),
+        "{stderr}"
+    );
     assert!(stderr.contains(source.to_str().unwrap()), "{stderr}");
     assert!(stderr.contains("Permission denied"), "{stderr}");
 }
