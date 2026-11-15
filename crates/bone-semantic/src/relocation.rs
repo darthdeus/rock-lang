@@ -19,6 +19,7 @@
 use std::collections::BTreeMap;
 
 use bone_core::modules::is_stdlib_module_file;
+use bone_core::suspension::{SuspensionPolicy, uses_after_suspension};
 use bone_core::workspace::BodyInference;
 
 use crate::hir::{
@@ -34,6 +35,7 @@ pub(crate) const RELOCATES_ANNOTATION: &str = "relocates";
 /// Every rejection starts with this, so a session can replace the previous
 /// run's rejections wholesale.
 const REJECTION_PREFIX: &str = "cannot pass a reference into a relocatable Vec or Map element";
+const ARENA_REJECTION: &str = "Arena value borrow may be used after invalidation";
 
 const ANNOTATION_MESSAGE: &str = "`@relocates` is reserved for the standard Vec and Map primitives";
 
@@ -115,6 +117,7 @@ struct Edge {
 }
 
 /// The collection an element reference points into.
+#[derive(Clone)]
 struct Root {
     key: String,
     local: Option<Idx<BindingInfo>>,
@@ -138,6 +141,9 @@ struct BodyCtx<'a> {
     generics: Vec<VarId>,
     params: FxHashMap<Idx<BindingInfo>, u16>,
     fresh_locals: FxHashSet<Idx<BindingInfo>>,
+    ref_values: FxHashMap<Idx<BindingInfo>, Vec<Idx<Expr>>>,
+    arena_remove: Option<Span>,
+    root_cache: std::cell::RefCell<FxHashMap<Idx<BindingInfo>, Vec<Root>>>,
 }
 
 impl<'a> BodyCtx<'a> {
@@ -163,17 +169,34 @@ impl<'a> BodyCtx<'a> {
             generics,
             params,
             fresh_locals: FxHashSet::default(),
+            ref_values: FxHashMap::default(),
+            root_cache: Default::default(),
+            arena_remove: (function.name.as_str() == "remove"
+                && is_stdlib_module_file(function.span.file.as_str())
+                && function
+                    .param_decls
+                    .first()
+                    .is_some_and(|p| arena_element(ws, None, p.ty).is_some()))
+            .then_some(function.span),
         };
         ctx.fresh_locals = ctx.collect_fresh_locals();
         ctx
     }
 
     /// `let` bindings whose every value is a new collection.
-    fn collect_fresh_locals(&self) -> FxHashSet<Idx<BindingInfo>> {
+    fn collect_fresh_locals(&mut self) -> FxHashSet<Idx<BindingInfo>> {
         let mut fresh = FxHashSet::default();
         let mut stale = FxHashSet::default();
         for (_, statement) in self.body.statement_arena.iter() {
             if let Statement::Let { name, value } = *statement {
+                if self
+                    .bi
+                    .binding_types
+                    .get(name)
+                    .is_some_and(|&ty| ref_target(self.ws, self.bi, ty).is_some())
+                {
+                    self.ref_values.entry(name).or_default().push(value);
+                }
                 if self.body.binding_arena[name].kind == BindingKind::Let
                     && self.is_new_collection(value)
                 {
@@ -186,9 +209,18 @@ impl<'a> BodyCtx<'a> {
         for (_, expr) in self.body.expr_arena.iter() {
             if let Expr::Assign { target, value } = *expr
                 && let Expr::Var(binding) = self.body.expr_arena[target]
-                && !self.is_new_collection(value)
             {
-                stale.insert(binding);
+                if !self.is_new_collection(value) {
+                    stale.insert(binding);
+                }
+                if self
+                    .bi
+                    .binding_types
+                    .get(binding)
+                    .is_some_and(|&ty| ref_target(self.ws, self.bi, ty).is_some())
+                {
+                    self.ref_values.entry(binding).or_default().push(value);
+                }
             }
         }
         fresh.retain(|b| !stale.contains(b));
@@ -227,6 +259,9 @@ impl<'a> BodyCtx<'a> {
 
     /// The element-type key of a Vec or Map expression.
     fn element_key(&self, e: Idx<Expr>) -> Option<String> {
+        if let Some(element) = arena_element(self.ws, Some(self.bi), self.ty(e)?) {
+            return Some(format!("Arena<{}>", self.key(element)));
+        }
         let element = collection_element(self.ws, Some(self.bi), self.ty(e)?)?;
         Some(self.key(element))
     }
@@ -293,6 +328,9 @@ impl<'a> BodyCtx<'a> {
 
     fn facts(&self) -> FnFacts {
         let mut direct = Effect::default();
+        if let Some(at) = self.arena_remove {
+            direct.params.insert(0, at);
+        }
         let mut calls = Vec::new();
         for (id, expr) in self.body.expr_arena.iter() {
             match expr {
@@ -357,33 +395,66 @@ impl<'a> BodyCtx<'a> {
     }
 
     /// The collections an argument points into an element of, with their
-    /// element keys. Retained element references are rejected by inference,
-    /// so only a place expression or a ref-returning call can carry one.
+    /// element keys. Arena value references may also be retained in bindings.
     fn element_roots(&self, e: Idx<Expr>, out: &mut Vec<Root>) {
-        match &self.body.expr_arena[e] {
-            Expr::FieldAccess { base, .. } | Expr::SafeNav { base, .. } => {
-                self.element_roots(*base, out)
+        let mut seen = FxHashSet::default();
+        let start = out.len();
+        self.element_roots_inner(e, out, &mut seen);
+        // Every visited alias can conservatively inherit this union. Caching
+        // the completed traversal also handles cycles without partial answers.
+        let roots = out[start..].to_vec();
+        let mut cache = self.root_cache.borrow_mut();
+        for at in seen {
+            if let Expr::Var(binding) = self.body.expr_arena[at]
+                && self.ref_values.contains_key(&binding)
+            {
+                cache.entry(binding).or_insert_with(|| roots.clone());
             }
-            Expr::TupleIndex { tuple, .. } => self.element_roots(*tuple, out),
-            Expr::As { value, .. } => self.element_roots(*value, out),
+        }
+    }
+
+    fn element_roots_inner(
+        &self,
+        e: Idx<Expr>,
+        out: &mut Vec<Root>,
+        seen: &mut FxHashSet<Idx<Expr>>,
+    ) {
+        if !seen.insert(e) {
+            return;
+        }
+        match &self.body.expr_arena[e] {
+            Expr::Var(binding) => {
+                if let Some(roots) = self.root_cache.borrow().get(binding) {
+                    out.extend(roots.iter().cloned());
+                    return;
+                }
+                for &value in self.ref_values.get(binding).into_iter().flatten() {
+                    self.element_roots_inner(value, out, seen);
+                }
+            }
+            Expr::FieldAccess { base, .. } | Expr::SafeNav { base, .. } => {
+                self.element_roots_inner(*base, out, seen)
+            }
+            Expr::TupleIndex { tuple, .. } => self.element_roots_inner(*tuple, out, seen),
+            Expr::As { value, .. } => self.element_roots_inner(*value, out, seen),
             Expr::Index { base, .. } => match self.element_key(*base) {
                 Some(key) => out.push(Root {
                     key,
                     local: self.arg(*base).fresh,
                 }),
-                None => self.element_roots(*base, out),
+                None => self.element_roots_inner(*base, out, seen),
             },
             Expr::BinOp {
                 op: BinOp::NullCoalesce,
                 lhs,
                 rhs,
             } => {
-                self.element_roots(*lhs, out);
-                self.element_roots(*rhs, out);
+                self.element_roots_inner(*lhs, out, seen);
+                self.element_roots_inner(*rhs, out, seen);
             }
             Expr::Block {
                 tail: Some(tail), ..
-            } => self.element_roots(*tail, out),
+            } => self.element_roots_inner(*tail, out, seen),
             Expr::If {
                 then_branch,
                 else_branch,
@@ -394,23 +465,103 @@ impl<'a> BodyCtx<'a> {
                 else_branch,
                 ..
             } => {
-                self.element_roots(*then_branch, out);
+                self.element_roots_inner(*then_branch, out, seen);
                 if let Some(else_branch) = else_branch {
-                    self.element_roots(*else_branch, out);
+                    self.element_roots_inner(*else_branch, out, seen);
                 }
             }
             Expr::Match { arms, .. } => {
                 for arm in *arms {
-                    self.element_roots(self.body.match_arm_arena[arm].body, out);
+                    self.element_roots_inner(self.body.match_arm_arena[arm].body, out, seen);
                 }
             }
             Expr::Call { .. } | Expr::SafeNavCall { .. } => {
+                if self
+                    .ty(e)
+                    .is_some_and(|ty| ref_target(self.ws, self.bi, ty).is_some())
+                {
+                    for arg in self.call_args(e).unwrap_or_default() {
+                        if let Some(element) = self
+                            .ty(arg)
+                            .and_then(|ty| arena_element(self.ws, Some(self.bi), ty))
+                            && !matches!(strip_ref(self.ws, Some(self.bi), element), Some((_, TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })) if self.ws.struct_by_name.get(&name).is_some_and(|sid| !self.ws.module(sid.module).structs[sid.def].is_value))
+                        {
+                            out.push(Root {
+                                key: format!("Arena<{}>", self.key(element)),
+                                local: None,
+                            });
+                        }
+                        if self
+                            .ty(arg)
+                            .is_some_and(|ty| ref_target(self.ws, self.bi, ty).is_some())
+                        {
+                            self.element_roots_inner(arg, out, seen);
+                        }
+                    }
+                }
                 for &arg in self.bi.ref_call_args.get(&e).into_iter().flatten() {
-                    self.element_roots(arg, out);
+                    self.element_roots_inner(arg, out, seen);
                 }
             }
             _ => {}
         }
+    }
+}
+
+fn ref_target(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<TyId> {
+    match resolve(ws, Some(bi), ty)? {
+        (base, TypeExpr::Nullable(inner)) => ref_target(ws, bi, base.with_idx(inner)),
+        (
+            base,
+            TypeExpr::App {
+                ctor: TypeCtor::Ref,
+                params,
+            },
+        ) => params.into_iter().next().map(|p| base.with_idx(p)),
+        _ => None,
+    }
+}
+
+fn arena_element(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Option<TyId> {
+    match strip_ref(ws, bi, ty)? {
+        (
+            base,
+            TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                params,
+            },
+        ) if bone_core::modules::is_intrinsic_key_in(name, &["Arena", "Entity"]) => {
+            params.into_iter().next().map(|p| base.with_idx(p))
+        }
+        _ => None,
+    }
+}
+
+struct ArenaCrossings<'a> {
+    roots: FxHashMap<Idx<BindingInfo>, Vec<Root>>,
+    effects: &'a FxHashMap<Idx<Expr>, Effect>,
+}
+
+impl SuspensionPolicy for ArenaCrossings<'_> {
+    fn binding_holds_frame_data(
+        &self,
+        binding: Idx<BindingInfo>,
+        _value: Option<Idx<Expr>>,
+    ) -> bool {
+        self.roots.contains_key(&binding)
+    }
+    fn is_barrier(&self, _body: &Body, at: Idx<Expr>) -> bool {
+        self.effects.contains_key(&at)
+    }
+    fn crosses_binding(&self, binding: Idx<BindingInfo>, at: Idx<Expr>) -> bool {
+        let effect = &self.effects[&at];
+        effect.unknown.is_some()
+            || self.roots[&binding].iter().any(|root| {
+                effect
+                    .elements
+                    .keys()
+                    .any(|key| keys_may_alias(&root.key, key))
+            })
     }
 }
 
@@ -682,8 +833,13 @@ impl<'a> Program<'a> {
                     .iter()
                     .map(|(fid, _)| (module.id, fid))
                     .filter(|&key| {
-                        inferred_body(ws, key)
-                            .is_some_and(|(_, _, bi)| !bi.ref_call_args.is_empty())
+                        inferred_body(ws, key).is_some_and(|(_, _, bi)| {
+                            !bi.ref_call_args.is_empty()
+                                || bi
+                                    .binding_types
+                                    .iter()
+                                    .any(|(_, &ty)| ref_target(ws, bi, ty).is_some())
+                        })
                     })
                     .collect()
             })
@@ -696,6 +852,11 @@ impl<'a> Program<'a> {
             let mut roots = Vec::new();
             for &arg in bi.ref_call_args.values().flatten() {
                 ctx.element_roots(arg, &mut roots);
+            }
+            for values in ctx.ref_values.values() {
+                for &value in values {
+                    ctx.element_roots(value, &mut roots);
+                }
             }
             if roots.is_empty() {
                 continue;
@@ -800,6 +961,29 @@ impl<'a> Program<'a> {
             .map(|(call, site)| (*call, self.call_effect(body, *call, site)))
             .collect();
         let mut errors = Vec::new();
+        let mut borrowed = FxHashMap::default();
+        for (&binding, values) in &ctx.ref_values {
+            let mut roots = Vec::new();
+            for &value in values {
+                ctx.element_roots(value, &mut roots);
+            }
+            roots.retain(|root| root.key.starts_with("Arena<"));
+            if !roots.is_empty() {
+                borrowed.insert(binding, roots);
+            }
+        }
+        if !borrowed.is_empty() {
+            let policy = ArenaCrossings {
+                roots: borrowed,
+                effects: &effects,
+            };
+            for at in uses_after_suspension(body, &policy) {
+                errors.push(CompilerError::new_with_label(
+                    body.expr_spans[at],
+                    format!("{ARENA_REJECTION}; borrow again after the call"),
+                ));
+            }
+        }
         for (call, _) in &facts.calls {
             let Some(ref_args) = bi.ref_call_args.get(call) else {
                 continue;
@@ -876,13 +1060,18 @@ fn rejection(
 ) -> Option<CompilerError> {
     let at = ctx.body.expr_spans[ref_arg];
     let callee = callee_name(ctx, call);
-    let remedy = "copy the element out and write it back after the call, or keep data that is referenced across calls in an Arena";
+    let remedy = if roots.iter().any(|root| root.key.starts_with("Arena<")) {
+        "borrow again after the invalidating call, or copy the value and write it back after the call"
+    } else {
+        "copy the element out and write it back after the call, or keep data that is referenced across calls in an Arena"
+    };
     if let Some(witness) = effect.unknown {
         return Some(
             CompilerError::new_with_label(
                 at,
                 format!(
-                    "{REJECTION_PREFIX} to `{callee}`: the call runs a closure or foreign function whose effect on the collection is unknown; {remedy}"
+                    "{} to `{callee}`: the call runs a closure or foreign function whose effect on the collection is unknown; {remedy}",
+                    if roots.iter().any(|r| r.key.starts_with("Arena<")) { ARENA_REJECTION } else { REJECTION_PREFIX }
                 ),
             )
             .with_label(witness, "the call may run unknown code here".to_string()),
@@ -903,7 +1092,8 @@ fn rejection(
             CompilerError::new_with_label(
                 at,
                 format!(
-                    "{REJECTION_PREFIX} to `{callee}`: the call may grow, shrink, reorder or rehash a collection of `{key}` while the reference is live; {remedy}"
+                    "{} to `{callee}`: the call may invalidate a collection of `{key}` while the reference is live; {remedy}",
+                    if root.key.starts_with("Arena<") { ARENA_REJECTION } else { REJECTION_PREFIX }
                 ),
             )
             .with_label(witness, format!("a collection of `{key}` may change structure here")),
@@ -938,7 +1128,9 @@ pub fn check_relocation(ws: &mut Workspace) {
     for inference in ws.inferences.iter_mut().flatten() {
         inference.errors.retain(|_, errors| {
             errors.retain(|e| {
-                !e.message.starts_with(REJECTION_PREFIX) && e.message != ANNOTATION_MESSAGE
+                !e.message.starts_with(REJECTION_PREFIX)
+                    && !e.message.starts_with(ARENA_REJECTION)
+                    && e.message != ANNOTATION_MESSAGE
             });
             !errors.is_empty()
         });
