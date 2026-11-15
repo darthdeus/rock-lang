@@ -52,3 +52,23 @@ struct Foo { y: string }
 fn main() {
     print("Testing cross-module duplicate struct detection")
 }
+
+//=== TEST CASE: function_and_global_across_modules_DuplicateSymbol ===
+//! expect: global `foo` has the same name as a function
+//--- FILE: a.rock ---
+fn foo() -> int { 1 }
+//--- FILE: b.rock ---
+global foo: int = 2
+
+fn main() {
+    print("{foo}")
+}
+
+//=== TEST CASE: function_and_global_same_module_DuplicateSymbol ===
+//! expect: global `foo` has the same name as a function
+fn foo() -> int { 1 }
+global foo: int = 2
+
+fn main() {
+    print("{foo()}")
+}

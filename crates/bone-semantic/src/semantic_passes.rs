@@ -506,6 +506,15 @@ pub fn lower_modules_seeded(
                         format!("duplicate global `{}` across modules", g.name),
                     ));
                 }
+                // Bare-name lookup prefers the function, which would leave the
+                // global unreachable. Registration keys are module-qualified
+                // under modules v1, so only legacy flat names collide here.
+                if ws.functions_by_name.contains_key(&g.name) {
+                    dup_errs.push(CompilerError::new_with_label(
+                        g.span,
+                        format!("global `{}` has the same name as a function", g.name),
+                    ));
+                }
                 if g.is_const {
                     ws.const_globals.insert(g.name);
                 }
