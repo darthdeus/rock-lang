@@ -311,10 +311,12 @@ fn retained() {
 #[test]
 fn allocation_activation_wraps_the_same_manifest_site_and_installs_its_runtime() {
     let _activation = AllocationActivationGuard::on();
+    // The concat is an operand of the spliced inline(lua) `vec_push`, which
+    // renders its operands before placing them in the body.
     let emit = emit_mir(
         r#"
-fn render(a: int) -> string {
-    return "value={a}"
+fn render(items: [string], a: int) {
+    items.push("value={a}")
 }
 "#,
     );
