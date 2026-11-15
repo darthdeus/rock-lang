@@ -467,6 +467,30 @@ impl<'a> Builder<'a> {
                 .is_some_and(|cell| !self.unshareable_value_cells.contains(cell))
     }
 
+    /// Only existing immutable bindings may cross a local selection without
+    /// snapshots. Calls and storage projections retain their ownership checks.
+    pub(crate) fn conditional_value_is_shareable(&self, e: Idx<Expr>) -> bool {
+        match self.body.expr_arena[e] {
+            Expr::Var(b) => self.binding_value_is_shareable(b),
+            Expr::Block {
+                statements,
+                tail: Some(tail),
+            } if statements.is_empty() => self.conditional_value_is_shareable(tail),
+            Expr::If {
+                then_branch,
+                else_branch: Some(else_branch),
+                ..
+            } => {
+                self.conditional_value_is_shareable(then_branch)
+                    && self.conditional_value_is_shareable(else_branch)
+            }
+            Expr::Match { arms, .. } if !arms.is_empty() => arms.into_iter().all(|arm| {
+                self.conditional_value_is_shareable(self.body.match_arm_arena[arm].body)
+            }),
+            _ => false,
+        }
+    }
+
     /// Whether binding `b`'s bone type is a NON-nullable value struct -- the one
     /// license for SROA to rematerialize an escaping load of its cell (item 8).
     /// Only a bare value-struct `App` qualifies; unsolved inference / non-value

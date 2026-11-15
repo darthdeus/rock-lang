@@ -512,7 +512,8 @@ impl<'a> Builder<'a> {
                                     let lend = !self.binding_ref_borrowed(name);
                                     self.with_value_lending(lend, |s| {
                                         let source_lend = lend
-                                            && matches!(s.body.expr_arena[value], Expr::Var(_));
+                                            && (matches!(s.body.expr_arena[value], Expr::Var(_))
+                                                || s.conditional_value_is_shareable(value));
                                         let r = s
                                             .with_value_lending(source_lend, |s| {
                                                 s.lower_expr_repr(value)

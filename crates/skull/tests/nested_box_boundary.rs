@@ -182,6 +182,14 @@ enum Event { Cast(Receipt), Other }
 }
 @nomangle fn retain(receipt: Receipt) -> Event { return Event::Cast(receipt) }
 @nomangle fn relay(receipt: Receipt) -> Receipt { return receipt }
+@nomangle fn select_receipt(first: Receipt, second: Receipt, flag: bool) -> Receipt {
+    let selected = if flag { first } else { second }
+    return selected
+}
+@nomangle fn match_receipt(first: Receipt, second: Receipt, flag: bool) -> Receipt {
+    let selected = match flag { true => first, false => second }
+    return selected
+}
 value HandleRow { handle: Entity<int>?, sequence: int }
 @nomangle fn relay_handle(row: HandleRow) -> HandleRow { return row }
 @nomangle fn relay_token(token: Entity<int>) -> Entity<int> { return token }
@@ -238,6 +246,38 @@ print(tables, cdata, rawequal(receipt.landing, result.landing))
 "#
         ),
         "0\t0\ttrue"
+    );
+}
+
+#[test]
+fn returning_an_immutable_conditional_local_keeps_its_boxed_child() {
+    assert_eq!(
+        allocation_probe(
+            r#"
+local second = make(7)
+tables, cdata = 0, 0
+local first_result = select_receipt(receipt, second, true)
+local second_result = select_receipt(receipt, second, false)
+print(tables, cdata, rawequal(receipt.landing, first_result.landing), rawequal(second.landing, second_result.landing))
+"#
+        ),
+        "0\t0\ttrue\ttrue"
+    );
+}
+
+#[test]
+fn returning_an_immutable_match_local_keeps_its_boxed_child() {
+    assert_eq!(
+        allocation_probe(
+            r#"
+local second = make(7)
+tables, cdata = 0, 0
+local first_result = match_receipt(receipt, second, true)
+local second_result = match_receipt(receipt, second, false)
+print(tables, cdata, rawequal(receipt.landing, first_result.landing), rawequal(second.landing, second_result.landing))
+"#
+        ),
+        "0\t0\ttrue\ttrue"
     );
 }
 
@@ -368,6 +408,104 @@ inline(lua) fn foreign_receipt(owner: Owner) -> Receipt = """return owner.receip
     );
     let lua = emit_module(&source);
     assert_eq!(run_luajit(&format!("{lua}\nprobe_semantics()\n")), "ok");
+}
+
+#[test]
+fn conditional_locals_keep_snapshots_and_evaluation_order() {
+    let source = format!(
+        r#"{SOURCE}
+struct SelectionOwner {{ receipt: Receipt }}
+struct SelectionState {{ effects: int = 0, flag: bool }}
+fn selected_signal(receipt: Receipt) -> float {{ return receipt.landing.unwrap().a.f0 }}
+fn selected_change(receipt: ref Receipt) {{
+    if receipt.landing != null {{ receipt.landing.a.f0 = 99.0 }}
+}}
+fn selected_flag(state: SelectionState) -> bool {{
+    state.effects = state.effects * 10 + 1
+    return state.flag
+}}
+fn selected_guard(state: SelectionState) -> bool {{
+    state.effects = state.effects * 10 + 2
+    return true
+}}
+@nomangle fn conditional_effect(first: Receipt, second: Receipt, state: SelectionState) -> Receipt {{
+    let selected = if selected_flag(state) {{ first }} else {{ second }}
+    return selected
+}}
+@nomangle fn match_effect(first: Receipt, second: Receipt, state: SelectionState) -> Receipt {{
+    let selected = match selected_flag(state) {{
+        true if selected_guard(state) => first,
+        _ => second
+    }}
+    return selected
+}}
+fn conditional_ref(first: Receipt, second: Receipt, flag: bool) -> Receipt {{
+    let selected = if flag {{ first }} else {{ second }}
+    selected_change(selected)
+    return selected
+}}
+fn match_ref(first: Receipt, second: Receipt, flag: bool) -> Receipt {{
+    let selected = match flag {{ true => first, false => second }}
+    selected_change(selected)
+    return selected
+}}
+@nomangle fn conditional_source(first: Receipt, second: Receipt, flag: bool) -> Receipt {{
+    let selected = if flag {{ first }} else {{ second }}
+    selected_change(first)
+    selected_change(second)
+    return selected
+}}
+@nomangle fn match_source(first: Receipt, second: Receipt, flag: bool) -> Receipt {{
+    let selected = match flag {{ true => first, false => second }}
+    selected_change(first)
+    selected_change(second)
+    return selected
+}}
+fn conditional_storage(first: SelectionOwner, second: SelectionOwner, flag: bool) -> Receipt {{
+    let selected = if flag {{ first.receipt }} else {{ second.receipt }}
+    return selected
+}}
+inline(lua) fn selected_foreign(owner: SelectionOwner) -> Receipt = "return owner.receipt"
+fn match_foreign(first: SelectionOwner, second: SelectionOwner, flag: bool) -> Receipt {{
+    let selected = match flag {{ true => selected_foreign(first), false => selected_foreign(second) }}
+    return selected
+}}
+@nomangle fn probe_selection_semantics() {{
+    let first = make(42.0)
+    let second = make(7.0)
+    let yes = SelectionState {{ flag: true }}
+    let no = SelectionState {{ flag: false }}
+    assert_eq(selected_signal(conditional_effect(first, second, yes)), 42.0)
+    assert_eq(selected_signal(conditional_effect(first, second, no)), 7.0)
+    assert_eq(yes.effects, 1)
+    assert_eq(no.effects, 1)
+    assert_eq(selected_signal(match_effect(first, second, yes)), 42.0)
+    assert_eq(selected_signal(match_effect(first, second, no)), 7.0)
+    assert_eq(yes.effects, 112)
+    assert_eq(no.effects, 11)
+    assert_eq(selected_signal(conditional_ref(first, second, true)), 99.0)
+    assert_eq(selected_signal(match_ref(first, second, false)), 99.0)
+    assert_eq(selected_signal(conditional_source(first, second, true)), 42.0)
+    assert_eq(selected_signal(match_source(first, second, false)), 7.0)
+    assert_eq(selected_signal(first), 42.0)
+    assert_eq(selected_signal(second), 7.0)
+    let first_owner = SelectionOwner {{ receipt: first }}
+    let second_owner = SelectionOwner {{ receipt: second }}
+    let storage = conditional_storage(first_owner, second_owner, true)
+    let foreign = match_foreign(first_owner, second_owner, false)
+    selected_change(first_owner.receipt)
+    selected_change(second_owner.receipt)
+    assert_eq(selected_signal(storage), 42.0)
+    assert_eq(selected_signal(foreign), 7.0)
+    print("ok")
+}}
+"#
+    );
+    let lua = emit_module(&source);
+    assert_eq!(
+        run_luajit(&format!("{lua}\nprobe_selection_semantics()\n")),
+        "ok"
+    );
 }
 
 fn assert_allocation_free_compare(source: &str, predicate: &str) {
