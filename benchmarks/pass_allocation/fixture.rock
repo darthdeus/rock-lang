@@ -1,0 +1,78 @@
+// Appended to declarations extracted by prepare.py from current Stone sources.
+struct Fixture { queue: [Pass], held: [Pass], texture: int }
+
+@inline fn input(texture: int, offset: int) -> (SampledTexture, TextureFilter) {
+    return (SampledTexture::Canvas(Canvas {
+        handle: CanvasId(texture + offset), width: 64.0, height: 64.0,
+    }), TextureFilter::Nearest)
+}
+
+fn make_pass(inputs: int, texture: int) -> Pass {
+    let slots = if inputs == 1 {
+        [input(texture, 0)]
+    } else if inputs == 7 {
+        [input(texture, 0), input(texture, 1), input(texture, 2),
+         input(texture, 3), input(texture, 4), input(texture, 5), input(texture, 6)]
+    } else {
+        assert_eq(inputs, 10)
+        [input(texture, 0), input(texture, 1), input(texture, 2),
+         input(texture, 3), input(texture, 4), input(texture, 5), input(texture, 6),
+         input(texture, 7), input(texture, 8), input(texture, 9)]
+    }
+    return Pass {
+        pipeline: Pipeline { shader_name: "allocation_probe" },
+        slot_inputs: slots,
+        output: Canvas { handle: CanvasId(100), width: 64.0, height: 64.0 },
+    }
+}
+
+@nomangle fn pass_fixture(inputs: int) -> Fixture {
+    let held: [Pass] = []
+    for i in 0..12 { held.push(make_pass(inputs, 1)) }
+    return Fixture { queue: [], held, texture: 1 }
+}
+
+@nomangle fn pass_fresh(f: Fixture, inputs: int, texture: int) {
+    for i in 0..12 { f.queue.push(make_pass(inputs, texture)) }
+}
+
+@nomangle fn pass_retained(f: Fixture, inputs: int, texture: int) {
+    for p in f.held {
+        if texture != f.texture {
+            for i in 0..inputs {
+                p.slot_inputs[i] = input(texture, i)
+            }
+        }
+        f.queue.push(p)
+    }
+    f.texture = texture
+}
+
+@nomangle fn pass_consume(f: Fixture) -> int {
+    let total = 0
+    for p in f.queue {
+        assert(p.pipeline.shader_name == "allocation_probe")
+        assert(p.array_payload.len() == 0)
+        total += p.output.unwrap().handle.0
+        for si in p.slot_inputs {
+            assert(si.1 == TextureFilter::Nearest)
+            match si.0 {
+                SampledTexture::Canvas(c) => { total += c.handle.0 }
+                SampledTexture::Image(_) => { error("unexpected image") }
+            }
+        }
+    }
+    f.queue.clear()
+    return total
+}
+
+fn main() {
+    let f = pass_fixture(7)
+    pass_fresh(f, 7, 1)
+    assert_eq(pass_consume(f), 1536)
+    pass_retained(f, 7, 2)
+    assert_eq(pass_consume(f), 1620)
+    pass_retained(f, 7, 2)
+    assert_eq(pass_consume(f), 1620)
+    print("ok")
+}
