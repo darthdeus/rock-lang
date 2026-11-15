@@ -1526,6 +1526,23 @@ pub const DEFER_CALL: &str = "__rock_defer_call";
 pub const CORO_KILL: &str = "__rock_coroutine_kill";
 
 impl MirFunc {
+    /// Decode a field-read location, without establishing purity or ownership.
+    /// This does not authorize removing the original instruction's callback effects.
+    pub fn field_projection(&self, id: Idx<Inst>) -> Option<(Idx<Inst>, Ustr)> {
+        match self.insts[id] {
+            Inst::Field { base, field } => Some((base, field)),
+            Inst::Index {
+                base,
+                index,
+                kind: ContainerKind::Record,
+            } => match self.insts[index] {
+                Inst::Const(Lit::Str(field)) => Some((base, field)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Whether any of `blocks` registers an ordinary-fn `defer` cleanup, i.e.
     /// whether this body must run under the unwind trampoline. Read off the
     /// final MIR, so an inlined callee's registrations protect its caller.
