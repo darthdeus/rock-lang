@@ -101,10 +101,32 @@ targeted checks fail. Valid controls reach real Lua emission. One existing
 editor-query test checks partial recovery in-process, not editor transport.
 These gates serve different stages; the audit found no justified consolidation.
 
-All twelve evidence records are runnable through the shared checker. The
-remaining read-only audits identified an unused graph map, a disabled lint unit
-test, and a possible direct-call rollback gap during failed hot reload. The last
-is a hypothesis requiring a reproducer, not an established compiler defect.
+All thirteen evidence records are runnable through the shared checker.
+
+## Small production and test-discovery repairs
+
+Removed the write-only `coroutine_rejections` map from
+[`instance_graph.rs`](../crates/skull-graph/src/instance_graph.rs). Its only uses
+were initialization, insert, remove and clear. `graph_rejections` retains the
+published diagnostics and `coroutine_positions` retains incremental removal
+positions. The deletion also eliminates two clones during installation. No
+performance measurement or speedup is claimed.
+
+Enabled the existing `allow_lines_tests::matches_str_lines_on_allow_lines` test
+in the ordinary [`bone-lints`](../crates/bone-lints/Cargo.toml) suite. Before
+the fix, an unfiltered crate run executed only 119 integration tests; afterward
+it also executes the one unit test. A filtered Cargo invocation ran that unit
+test even before the fix, so a filtered pass alone would not verify this repair.
+
+Combined validation passed 120 bone-lints tests, five skull-graph tests, and
+1404 skull tests with one existing ignored test. The semantic fixture harness
+also permits empty selections, like ordinary filtered Cargo runs; the evidence
+checker already requires explicit nonzero counts. No harness policy was changed.
+
+The incremental audit identified a possible direct-call rollback gap during a
+failed hot reload: staged CodeRef slots may roll back while earlier global
+function assignments survive a later initializer failure. This is a source-audit
+hypothesis requiring a reproducer, not an established compiler defect.
 
 ## Useful measurements
 
@@ -124,13 +146,12 @@ until their behavioral purposes are understood.
 
 ## Next actions and open questions
 
-1. Verify and remove the write-only `coroutine_rejections` map while preserving
-   published graph rejections and their position index; enable the existing
-   lint unit test omitted by its crate manifest.
-2. Reproduce the suspected hot-reload rollback gap: retain a direct caller as
+1. Reproduce the suspected hot-reload rollback gap: retain a direct caller as
    well as a CodeRef, fail a late initializer, and check both still run old code.
-3. Settle the explicit-ref construction-time boundary before changing that
+2. Settle the explicit-ref construction-time boundary before changing that
    language rule; the current accepted behavior is recorded as a discrepancy.
+3. Investigate the repeated root-hole inner calculations in full and local graph
+   refreshes; preserve their different scopes and measure before restructuring.
 
 Open: which concern should be the first substantial cleanup; which documented
 behaviors are deliberate language commitments versus implementation accidents;

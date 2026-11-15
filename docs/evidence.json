@@ -149,5 +149,18 @@
     "checks": [
       {"command": ["cargo", "test", "--locked", "-p", "bone-query", "recoverable_syntax_keeps_partial_hints_without_fallback_warnings"], "exit": 0, "output": "test result: ok\\. 1 passed; 0 failed;"}
     ]
+  },
+  {
+    "id": "lint-unit-test-registration",
+    "statement": "The ordinary bone-lints crate test run executes the existing allow-lines unit test as well as integration tests.",
+    "kind": "test execution",
+    "limit": "One known registration regression, not a repository-wide proof of test discovery. A filtered Cargo command previously ran this unit test even while the unfiltered crate suite omitted it.",
+    "sources": [
+      {"path": "crates/bone-lints/Cargo.toml", "anchor": "[lib]"},
+      {"path": "crates/bone-lints/src/lib.rs", "anchor": "fn matches_str_lines_on_allow_lines()"}
+    ],
+    "checks": [
+      {"command": ["cargo", "test", "--locked", "-p", "bone-lints"], "exit": 0, "output": "test allow_lines_tests::matches_str_lines_on_allow_lines \\.\\.\\. ok"}
+    ]
   }
 ]

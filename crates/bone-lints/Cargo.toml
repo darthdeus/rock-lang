@@ -8,9 +8,8 @@ description = "Lint catalog, HIR analysis and incremental lint cache"
 license.workspace = true
 repository.workspace = true
 
-# No unit tests or doctests in src/; skip the empty test harness.
+# Unit tests in src/ run with the ordinary crate suite; no doctests are defined.
 [lib]
-test = false
 doctest = false
 
 [dependencies]
