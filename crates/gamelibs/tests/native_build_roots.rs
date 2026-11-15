@@ -96,25 +96,12 @@ fn native_build_script_finds_relocated_gamelibs_root() {
         "runner did not use the relocated gamelibs library directory {}:\n{log}",
         expected_lib.display()
     );
-    let build_output = fs::read_dir(target.join("debug/build"))
-        .unwrap()
-        .map(|entry| entry.expect("Cargo build directory entry"))
-        .find(|entry| {
-            // Cargo gives the executable and run-output directories the same prefix.
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("relocated-native-probe-")
-                && entry.path().join("output").is_file()
-        })
-        .map(|entry| fs::read_to_string(entry.path().join("output")).unwrap())
-        .expect("Cargo build-script output");
     assert!(
-        build_output.contains(&format!(
+        log.contains(&format!(
             "cargo:rerun-if-changed={}",
             project.join("Cargo.toml").display()
         )),
-        "runner did not invalidate cached paths when its manifest moves:\n{build_output}"
+        "runner did not invalidate cached paths when its manifest moves:\n{log}"
     );
     // Removing an immutable installation must invalidate cached build-script output.
     fs::remove_dir_all(relocated_root.join("cache/gamelibs-linux-x86_64")).unwrap();
