@@ -36,20 +36,15 @@ fn mat4_rotate_z_quarter() {
 }
 
 @test
-fn mat4_compose_translate() {
-    let a = mat4_translate(v(1.0, 2.0, 3.0))
-    let b = mat4_translate(v(10.0, 20.0, 30.0))
-    let c = a * b
+fn mat4_compose() {
+    let c = mat4_translate(v(1.0, 2.0, 3.0)) * mat4_translate(v(10.0, 20.0, 30.0))
     let p = c.transform_point(v(0.0, 0.0, 0.0))
     assert(p.x == 11.0 && p.y == 22.0 && p.z == 33.0)
-}
 
-@test
-fn mat4_compose_translate_scale() {
     // T * S applies S first, then T
     let m = mat4_translate(v(5.0, 5.0, 5.0)) * mat4_scale(v(2.0, 2.0, 2.0))
-    let p = m.transform_point(v(1.0, 1.0, 1.0))
-    assert(p.x == 7.0 && p.y == 7.0 && p.z == 7.0)
+    let q = m.transform_point(v(1.0, 1.0, 1.0))
+    assert(q.x == 7.0 && q.y == 7.0 && q.z == 7.0)
 }
 
 @test

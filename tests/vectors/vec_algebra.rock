@@ -16,49 +16,29 @@ fn vec2_stdlib_arithmetic() {
 }
 
 @test
-fn vec3_vec4_construct_in_stdlib() {
+fn vec3_algebra() {
     let c = Vec3 { x: 1.0, y: 2.0, z: 3.0 }
-    let d = Vec4 { x: 1.0, y: 2.0, z: 3.0, w: 4.0 }
-
     assert(c.z == 3.0)
+    let d = Vec4 { x: 1.0, y: 2.0, z: 3.0, w: 4.0 }
     assert(d.w == 4.0)
-}
 
-@test
-fn vec3_componentwise_mul() {
-    let a = Vec3 { x: 2.0, y: 3.0, z: 4.0 }
-    let b = Vec3 { x: 5.0, y: 6.0, z: 7.0 }
-    let c = a * b
-    assert(c.x == 10.0)
-    assert(c.y == 18.0)
-    assert(c.z == 28.0)
-}
+    let p = Vec3 { x: 2.0, y: 3.0, z: 4.0 }
+    let q = Vec3 { x: 5.0, y: 6.0, z: 7.0 }
+    let m = p * q
+    assert(m.x == 10.0 && m.y == 18.0 && m.z == 28.0)
 
-@test
-fn vec3_add_scalar() {
-    let a = Vec3 { x: 1.0, y: 2.0, z: 3.0 }
-    let c = a + 10.0
-    assert(c.x == 11.0)
-    assert(c.y == 12.0)
-    assert(c.z == 13.0)
-}
+    let s = c + 10.0
+    assert(s.x == 11.0 && s.y == 12.0 && s.z == 13.0)
 
-@test
-fn vec3_neg() {
-    let a = Vec3 { x: 1.0, y: -2.0, z: 3.0 }
-    let n = a.neg()
-    assert(n.x == -1.0)
-    assert(n.y == 2.0)
-    assert(n.z == -3.0)
-}
+    let mixed = Vec3 { x: 1.0, y: -2.0, z: 3.0 }
+    let n = mixed.neg()
+    assert(n.x == -1.0 && n.y == 2.0 && n.z == -3.0)
 
-@test
-fn vec3_abs_sign() {
     let a = Vec3 { x: -3.0, y: 2.0, z: 5.0 }
     let ab = a.abs()
     assert(ab.x == 3.0 && ab.y == 2.0 && ab.z == 5.0)
-    let s = a.sign()
-    assert(s.x == -1.0 && s.z == 1.0)
+    let sg = a.sign()
+    assert(sg.x == -1.0 && sg.z == 1.0)
 }
 
 @test
@@ -84,13 +64,9 @@ fn vec4_ctor_and_ops() {
 
     let cw = a * b
     assert(cw.x == 5.0 && cw.w == 32.0)
-}
 
-@test
-fn vec4_add_scalar() {
-    let a = v(1.0, 2.0, 3.0, 4.0)
-    let c = a + 1.0
-    assert(c.x == 2.0 && c.w == 5.0)
+    let plus = a + 1.0
+    assert(plus.x == 2.0 && plus.w == 5.0)
 }
 
 @test

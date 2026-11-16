@@ -24,9 +24,9 @@
 
 struct Item { id: int, p: Vec2 }
 
-// Leaf 0 distinct and ordered opposite to leaf 1, so a leaf-0-only compare and a
-// full lexicographic compare give DIFFERENT answers. No ties, so sort stability
-// (JS stable, luajit's table.sort not) cannot explain the result either way.
+// Leaf 0 distinct and ordered opposite to leaf 1: the multi-leaf key does order
+// by leaf 0. No ties, so sort stability (JS stable, luajit's table.sort not)
+// cannot explain the result.
 @test(output = "order=3,2,1")
 fn sort_by_multi_leaf_key_uses_leaf_zero() {
     let xs = [

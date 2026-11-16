@@ -8,56 +8,42 @@ fn test_ring_new_empty() {
 @test
 fn test_ring_fill_under_cap() {
     let rb: RingBuffer<int> = ring_new(4)
-    rb.push(1)
-    rb.push(2)
-    rb.push(3)
+    rb.push(10)
+    rb.push(20)
+    rb.push(30)
     assert_eq(rb.len(), 3, "len tracks pushes under cap")
 
     let out = rb.iter().collect()
     assert_eq(out.len, 3, "iter yields all elements")
-    assert_eq(out[0], 1, "iter is oldest-first")
-    assert_eq(out[1], 2, "insertion order kept")
-    assert_eq(out[2], 3, "newest last")
-}
+    assert_eq(out[0], 10, "iter is oldest-first")
+    assert_eq(out[1], 20, "insertion order kept")
+    assert_eq(out[2], 30, "newest last")
 
-@test
-fn test_ring_wraps_overwriting_oldest() {
-    let rb: RingBuffer<int> = ring_new(3)
-    rb.push(1)
-    rb.push(2)
-    rb.push(3)
-    rb.push(4)
-    rb.push(5)
-    assert_eq(rb.len(), 3, "len caps at capacity")
-
-    let out = rb.iter().collect()
-    assert_eq(out[0], 3, "oldest survivor first")
-    assert_eq(out[1], 4, "wrap keeps order")
-    assert_eq(out[2], 5, "newest last after wrap")
-}
-
-@test
-fn test_ring_ago_newest_first() {
-    let rb: RingBuffer<int> = ring_new(4)
-    rb.push(10)
-    rb.push(20)
-    rb.push(30)
     assert_eq(rb.ago(0), 30, "ago(0) is newest")
     assert_eq(rb.ago(1), 20, "ago(1) is one back")
     assert_eq(rb.ago(2), 10, "ago(len-1) is oldest")
 }
 
 @test
-fn test_ring_ago_after_wrap() {
+fn test_ring_wraps_overwriting_oldest() {
     let rb: RingBuffer<int> = ring_new(3)
-    rb.push(1)
-    rb.push(2)
-    rb.push(3)
-    rb.push(4)
-    rb.push(5)
+    for x in 1..6 { rb.push(x) }
+    assert_eq(rb.len(), 3, "len caps at capacity")
+
+    let out = rb.iter().collect()
+    assert_eq(out[0], 3, "oldest survivor first")
+    assert_eq(out[1], 4, "wrap keeps order")
+    assert_eq(out[2], 5, "newest last after wrap")
+
     assert_eq(rb.ago(0), 5, "ago(0) newest after wrap")
     assert_eq(rb.ago(1), 4, "ago(1) after wrap")
     assert_eq(rb.ago(2), 3, "ago(len-1) oldest after wrap")
+
+    let sum = 0
+    for x in rb {
+        sum += x
+    }
+    assert_eq(sum, 12, "for iterates oldest-to-newest survivors")
 }
 
 @test
@@ -74,21 +60,6 @@ fn test_ring_clear_and_reuse() {
     assert_eq(rb.ago(0), 8, "newest after reuse")
     let out = rb.iter().collect()
     assert_eq(out[0], 7, "order intact after reuse")
-}
-
-@test
-fn test_ring_for_loop() {
-    let rb: RingBuffer<int> = ring_new(3)
-    rb.push(2)
-    rb.push(4)
-    rb.push(6)
-    rb.push(8)
-
-    let sum = 0
-    for x in rb {
-        sum += x
-    }
-    assert_eq(sum, 18, "for iterates oldest-to-newest survivors")
 }
 
 @test
