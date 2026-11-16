@@ -565,25 +565,12 @@ pub(crate) fn try_emit_js_program_project_cached(
         } else {
             sources
         };
-    let (mut modules, entry_file) = match crate::skull_backend::skull_assemble_project(&sources) {
-        Ok(v) => v,
-        Err(errs) => {
-            return Err(anyhow::anyhow!(
-                "{}",
-                crate::skull_backend::render_project_errs(&sources, &errs)
-            ));
-        }
-    };
-    let mut ws = match crate::bone_backend::check_modules(&mut modules) {
-        Ok(ws) => ws,
-        Err(errs) => {
-            return Err(anyhow::anyhow!(
-                "{}",
-                crate::skull_backend::render_project_errs(&sources, &errs)
-            ));
-        }
-    };
-    drop(modules);
+    let (mut ws, entry_file) = crate::skull_backend::check_project(&sources).map_err(|errs| {
+        anyhow::anyhow!(
+            "{}",
+            crate::skull_backend::render_project_errs(&sources, &errs)
+        )
+    })?;
     crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir))?;
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
     let (prog, cache) = match skull_codegen_js::emit::emit_program_cached(&ws, user_mid) {

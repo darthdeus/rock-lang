@@ -716,19 +716,14 @@ pub(crate) fn validate_workspace(dir: &str) -> Result<bone_semantic::inference::
 fn validate_sources(
     sources: rock_core::SourceFiles,
 ) -> Result<bone_semantic::inference::Workspace> {
-    let (mut modules, _entry) =
-        crate::skull_backend::skull_assemble_project(&sources).map_err(|errs| {
+    crate::skull_backend::check_project(&sources)
+        .map(|(ws, _entry)| ws)
+        .map_err(|errs| {
             anyhow::anyhow!(
                 "{}",
                 crate::skull_backend::render_project_errs(&sources, &errs)
             )
-        })?;
-    crate::bone_backend::check_modules(&mut modules).map_err(|errs| {
-        anyhow::anyhow!(
-            "{}",
-            crate::skull_backend::render_project_errs(&sources, &errs)
-        )
-    })
+        })
 }
 
 /// Split a single-file `#ifdef VERTEX` / `#ifdef PIXEL` shader into the two

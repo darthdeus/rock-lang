@@ -458,6 +458,18 @@ pub(crate) fn skull_assemble_project(
     Ok((modules, entry_file))
 }
 
+/// [`skull_assemble_project`] then bone type-check; returns the workspace and
+/// the entry-module file path.
+pub(crate) fn check_project(
+    sources: &SourceFiles,
+) -> std::result::Result<(bone_semantic::inference::Workspace, ustr::Ustr), Vec<CompilerError>> {
+    let (mut modules, entry_file) = skull_assemble_project(sources)?;
+    Ok((
+        crate::bone_backend::check_modules(&mut modules)?,
+        entry_file,
+    ))
+}
+
 /// A Lua harness appended after the emitted module: it runs each `@test` fn with
 /// its `print` AND `io.write` captured (both restored before the markers are
 /// written), and writes one `__SKULL__<TAB>PASS|FAIL<TAB>detail` line and one

@@ -55,12 +55,8 @@ pub(crate) fn do_lint(
         let sources = crate::unified_compile::discover_sources(
             &crate::unified_compile::SourceSpec::Directory(PathBuf::from(path)),
         )?;
-        let mut modules = match crate::skull_backend::skull_assemble_project(&sources) {
-            Ok((modules, _entry)) => modules,
-            Err(errs) => return Err(reject(&sources, &errs)),
-        };
-        let ws = match crate::bone_backend::check_modules(&mut modules) {
-            Ok(ws) => ws,
+        let ws = match crate::skull_backend::check_project(&sources) {
+            Ok((ws, _entry)) => ws,
             Err(errs) => return Err(reject(&sources, &errs)),
         };
         (ws, sources, PathBuf::from(path))

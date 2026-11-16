@@ -83,11 +83,8 @@ pub(crate) fn check_package(dir: &str, build_vars: bool) -> Result<UnitCheck, Un
         reason: "cannot load project".to_string(),
         rendered: e.to_string(),
     })?;
-    let (mut modules, _entry) = crate::skull_backend::skull_assemble_project(&sources)
+    let (mut ws, _entry) = crate::skull_backend::check_project(&sources)
         .map_err(|errs| UnitFailure::compile(&sources, &errs))?;
-    let mut ws = crate::bone_backend::check_modules(&mut modules)
-        .map_err(|errs| UnitFailure::compile(&sources, &errs))?;
-    drop(modules);
     if build_vars {
         resolve_build_vars(&mut ws, dir)?;
     }
