@@ -1,6 +1,6 @@
-//! `rock modules audit` and `rock modules migrate` print package roots and
-//! files relative to the working directory, so their reports are the same on
-//! every machine. The temporary root is reached through a symlink on some
+//! `rock modules audit` and `rock modules migrate` print package roots,
+//! files and diagnostics relative to the working directory, so their reports
+//! are the same on every machine. The temporary root is reached through a symlink on some
 //! hosts (`/var` -> `/private/var`), which a plain prefix strip misses.
 use std::path::Path;
 use std::process::{Command, Output};
@@ -68,7 +68,7 @@ fn module_reports_print_paths_relative_to_the_working_directory() {
         ),
         (
             &["modules", "migrate", "lib", "--check", "--consumer", "app"],
-            "first at app/main.rock:2)",
+            "app/main.rock:2:13",
         ),
     ] {
         let out = text(&invoke(root.path(), args));

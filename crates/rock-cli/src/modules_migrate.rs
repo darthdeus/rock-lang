@@ -1695,7 +1695,13 @@ fn apply(plan: &Plan) -> std::result::Result<Vec<Verification>, String> {
 // --- rendering -------------------------------------------------------------------
 
 fn render(sources: &SourceFiles, errs: &[CompilerError]) -> String {
-    crate::skull_backend::render_project_errs(sources, errs)
+    let rendered = crate::skull_backend::render_project_errs(sources, errs);
+    // Diagnostics name files by their canonical ids; the rest of the report
+    // already prints paths relative to the working directory.
+    match std::env::current_dir().and_then(|cwd| cwd.canonicalize()) {
+        Ok(cwd) => rendered.replace(&format!("{}/", cwd.display()), ""),
+        Err(_) => rendered,
+    }
 }
 
 fn render_one(sources: &SourceFiles, e: &CompilerError) -> String {
