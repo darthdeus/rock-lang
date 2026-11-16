@@ -21,7 +21,7 @@ use bone_semantic::prelude::Span;
 use skull::instance_graph::{
     self, Agreed, AlwaysEmittedFailure, AlwaysEmittedOutcome, Boundary, BoundaryClass, DeclKey,
     EdgeKind, Instance, InstanceBoundNext, InstanceBoundTree, InstanceGraph, Owner, Rejection,
-    RejectionKind, Site, SiteDomain, SiteOp, SiteOutcome, SiteRecord, Unresolved,
+    RejectionKind, RootHole, Site, SiteDomain, SiteOp, SiteOutcome, SiteRecord, Unresolved,
 };
 use skull_mir::monoty::{MonoSubst, MonoTy};
 use ustr::Ustr;
@@ -201,6 +201,30 @@ fn arm(
 
 fn noop(_: &mut InstanceGraph) {}
 
+/// An arm whose two sides install the same base record, one side altered
+/// first, so the pair differs in exactly the altered field.
+fn variant<T: 'static>(
+    name: &'static str,
+    section: &'static str,
+    base: fn(&InstanceGraph) -> T,
+    alter: fn(&InstanceGraph, &mut T),
+    install: fn(&mut InstanceGraph, T),
+) -> Arm {
+    arm(
+        name,
+        section,
+        move |g| {
+            let r = base(g);
+            install(g, r)
+        },
+        move |g| {
+            let mut r = base(g);
+            alter(g, &mut r);
+            install(g, r)
+        },
+    )
+}
+
 /// The first contribution that owns an edge. The oracle's arms mutate the
 /// PRIMARY RECORD, which is where the row lives -- there is no flat copy to
 /// perturb instead, and perturbing one would prove nothing about the other.
@@ -327,6 +351,10 @@ fn set_substs(g: &mut InstanceGraph, i: Instance, agreed: MonoSubst, other: Opti
         rec.total += 1;
     }
     g.index.subst.insert(i, rec);
+}
+
+fn leaf() -> InstanceBoundTree {
+    InstanceBoundTree::default()
 }
 
 fn tree(callee: Instance, sub: InstanceBoundTree) -> InstanceBoundTree {
@@ -515,586 +543,320 @@ fn arms() -> Vec<Arm> {
     }
 
     // --- unresolved: every field ---
-    v.push(arm(
-        "unresolved.from",
-        "unresolved",
-        |g| {
-            let u = synthetic_unresolved(g);
-            any_owner(g).unresolved.push(u);
-        },
-        |g| {
-            let mut u = synthetic_unresolved(g);
-            u.from = inst(g, 1);
-            any_owner(g).unresolved.push(u);
-        },
-    ));
-    v.push(arm(
-        "unresolved.callee",
-        "unresolved",
-        |g| {
-            let u = synthetic_unresolved(g);
-            any_owner(g).unresolved.push(u);
-        },
-        |g| {
-            let mut u = synthetic_unresolved(g);
-            u.callee = inst(g, 1).func;
-            any_owner(g).unresolved.push(u);
-        },
-    ));
-    v.push(arm(
-        "unresolved.reason",
-        "unresolved",
-        |g| {
-            let u = synthetic_unresolved(g);
-            any_owner(g).unresolved.push(u);
-        },
-        |g| {
-            let mut u = synthetic_unresolved(g);
-            u.reason = "synthetic-b";
-            any_owner(g).unresolved.push(u);
-        },
-    ));
-    v.push(arm(
-        "unresolved.span",
-        "unresolved",
-        |g| {
-            let u = synthetic_unresolved(g);
-            any_owner(g).unresolved.push(u);
-        },
-        |g| {
-            let mut u = synthetic_unresolved(g);
-            u.span = shifted(u.span);
-            any_owner(g).unresolved.push(u);
-        },
-    ));
+    let push_unresolved: fn(&mut InstanceGraph, Unresolved) =
+        |g, u| any_owner(g).unresolved.push(u);
+    for (name, alter) in [
+        (
+            "unresolved.from",
+            (|g, u| u.from = inst(g, 1)) as fn(&InstanceGraph, &mut Unresolved),
+        ),
+        ("unresolved.callee", |g, u| u.callee = inst(g, 1).func),
+        ("unresolved.reason", |_, u| u.reason = "synthetic-b"),
+        ("unresolved.span", |_, u| u.span = shifted(u.span)),
+    ] {
+        v.push(variant(
+            name,
+            "unresolved",
+            synthetic_unresolved,
+            alter,
+            push_unresolved,
+        ));
+    }
 
     // --- rejections: every field ---
-    v.push(arm(
-        "rejections.kind",
-        "rejections",
-        |g| {
-            let r = synthetic_rejection(g);
-            any_owner(g).rejections.push(r);
-        },
-        |g| {
-            let mut r = synthetic_rejection(g);
-            r.kind = RejectionKind::UnconstrainedTypeVar;
-            any_owner(g).rejections.push(r);
-        },
-    ));
-    v.push(arm(
-        "rejections.at",
-        "rejections",
-        |g| {
-            let r = synthetic_rejection(g);
-            any_owner(g).rejections.push(r);
-        },
-        |g| {
-            let mut r = synthetic_rejection(g);
-            r.at = inst(g, 1);
-            any_owner(g).rejections.push(r);
-        },
-    ));
-    v.push(arm(
-        "rejections.message",
-        "rejections",
-        |g| {
-            let r = synthetic_rejection(g);
-            any_owner(g).rejections.push(r);
-        },
-        |g| {
-            let mut r = synthetic_rejection(g);
-            r.message = "synthetic-b".to_string();
-            any_owner(g).rejections.push(r);
-        },
-    ));
-    v.push(arm(
-        "rejections.span",
-        "rejections",
-        |g| {
-            let r = synthetic_rejection(g);
-            any_owner(g).rejections.push(r);
-        },
-        |g| {
-            let mut r = synthetic_rejection(g);
-            r.span = shifted(r.span);
-            any_owner(g).rejections.push(r);
-        },
-    ));
+    let push_rejection: fn(&mut InstanceGraph, Rejection) = |g, r| any_owner(g).rejections.push(r);
+    for (name, alter) in [
+        (
+            "rejections.kind",
+            (|_, r| r.kind = RejectionKind::UnconstrainedTypeVar)
+                as fn(&InstanceGraph, &mut Rejection),
+        ),
+        ("rejections.at", |g, r| r.at = inst(g, 1)),
+        ("rejections.message", |_, r| {
+            r.message = "synthetic-b".into()
+        }),
+        ("rejections.span", |_, r| r.span = shifted(r.span)),
+    ] {
+        v.push(variant(
+            name,
+            "rejections",
+            synthetic_rejection,
+            alter,
+            push_rejection,
+        ));
+    }
 
     // --- call_sites: the whole Site identity, the outcome and the span ---
-    v.push(arm(
-        "call_sites.site_domain",
-        "call_sites",
-        |g| {
-            let r = resolved_site(g, 0);
-            put_site(g, a_site(), r);
-        },
-        |g| {
-            let r = resolved_site(g, 0);
-            let mut s = a_site();
-            s.domain = defaults_domain(vec![MonoTy::Never]);
-            put_site(g, s, r);
-        },
-    ));
-    v.push(arm(
-        "call_sites.site_domain_args",
-        "call_sites",
-        |g| {
-            let r = resolved_site(g, 0);
-            let mut s = a_site();
-            s.domain = defaults_domain(vec![MonoTy::Never]);
-            put_site(g, s, r);
-        },
-        |g| {
-            let r = resolved_site(g, 0);
-            let mut s = a_site();
-            s.domain = defaults_domain(vec![MonoTy::Unit]);
-            put_site(g, s, r);
-        },
-    ));
-    v.push(arm(
-        "call_sites.site_expr",
-        "call_sites",
-        |g| {
-            let r = resolved_site(g, 0);
-            put_site(g, a_site(), r);
-        },
-        |g| {
-            let r = resolved_site(g, 0);
-            let mut s = a_site();
-            s.expr = expr_idx(1);
-            put_site(g, s, r);
-        },
-    ));
-    v.push(arm(
-        "call_sites.site_op",
-        "call_sites",
-        |g| {
-            let r = resolved_site(g, 0);
-            let mut s = a_site();
-            s.op = SiteOp::BoundNext(vec![0].into());
-            put_site(g, s, r);
-        },
-        |g| {
-            let r = resolved_site(g, 0);
-            let mut s = a_site();
-            s.op = SiteOp::BoundNext(vec![1].into());
-            put_site(g, s, r);
-        },
-    ));
-    v.push(arm(
-        "call_sites.outcome_target",
-        "call_sites",
-        |g| {
-            let r = resolved_site(g, 0);
-            put_site(g, a_site(), r);
-        },
-        |g| {
-            let r = resolved_site(g, 1);
-            put_site(g, a_site(), r);
-        },
-    ));
-    v.push(arm(
-        "call_sites.outcome_failure",
-        "call_sites",
-        |g| {
-            let span = real_span(g);
-            put_site(
-                g,
-                a_site(),
-                SiteRecord {
-                    outcome: SiteOutcome::Failed("synthetic-a"),
-                    span,
-                },
-            );
-        },
-        |g| {
-            let span = real_span(g);
-            put_site(
-                g,
-                a_site(),
-                SiteRecord {
-                    outcome: SiteOutcome::Failed("synthetic-b"),
-                    span,
-                },
-            );
-        },
-    ));
-    v.push(arm(
-        "call_sites.span",
-        "call_sites",
-        |g| {
-            let r = resolved_site(g, 0);
-            put_site(g, a_site(), r);
-        },
-        |g| {
-            let mut r = resolved_site(g, 0);
-            r.span = shifted(r.span);
-            put_site(g, a_site(), r);
-        },
-    ));
+    type SiteArm = fn(&InstanceGraph) -> (Site, SiteRecord);
+    let plain: SiteArm = |g| (a_site(), resolved_site(g, 0));
+    let in_defaults: SiteArm = |g| {
+        let mut s = a_site();
+        s.domain = defaults_domain(vec![MonoTy::Never]);
+        (s, resolved_site(g, 0))
+    };
+    let bound_next: SiteArm = |g| {
+        let mut s = a_site();
+        s.op = SiteOp::BoundNext(vec![0].into());
+        (s, resolved_site(g, 0))
+    };
+    let failed: SiteArm = |g| {
+        let record = SiteRecord {
+            outcome: SiteOutcome::Failed("synthetic-a"),
+            span: real_span(g),
+        };
+        (a_site(), record)
+    };
+    for (name, base, alter) in [
+        (
+            "call_sites.site_domain",
+            plain,
+            (|_, (s, _)| s.domain = defaults_domain(vec![MonoTy::Never]))
+                as fn(&InstanceGraph, &mut (Site, SiteRecord)),
+        ),
+        ("call_sites.site_domain_args", in_defaults, |_, (s, _)| {
+            s.domain = defaults_domain(vec![MonoTy::Unit])
+        }),
+        ("call_sites.site_expr", plain, |_, (s, _)| {
+            s.expr = expr_idx(1)
+        }),
+        ("call_sites.site_op", bound_next, |_, (s, _)| {
+            s.op = SiteOp::BoundNext(vec![1].into())
+        }),
+        ("call_sites.outcome_target", plain, |g, (_, r)| {
+            *r = resolved_site(g, 1)
+        }),
+        ("call_sites.outcome_failure", failed, |_, (_, r)| {
+            r.outcome = SiteOutcome::Failed("synthetic-b")
+        }),
+        ("call_sites.span", plain, |_, (_, r)| {
+            r.span = shifted(r.span)
+        }),
+    ] {
+        v.push(variant(name, "call_sites", base, alter, |g, (s, r)| {
+            put_site(g, s, r)
+        }));
+    }
 
-    // --- duplicate_sites ---
-    v.push(arm(
-        "duplicate_sites.instance",
-        "duplicate_sites",
-        // Which instance a duplicate belongs to is the OWNER of the record, so
-        // the two arms put the same site on two different owners.
-        |g| {
-            let owner = Owner::Instance(inst(g, 0));
-            g.contributions
-                .get_mut(&owner)
-                .expect("owner")
-                .duplicate_sites
-                .push(a_site());
-        },
-        |g| {
-            let owner = Owner::Instance(inst(g, 1));
-            g.contributions
-                .get_mut(&owner)
-                .expect("owner")
-                .duplicate_sites
-                .push(a_site());
-        },
-    ));
-    v.push(arm(
-        "duplicate_sites.site",
-        "duplicate_sites",
-        |g| {
-            let owner = Owner::Instance(inst(g, 0));
-            g.contributions
-                .get_mut(&owner)
-                .expect("owner")
-                .duplicate_sites
-                .push(a_site());
-        },
-        |g| {
-            let owner = Owner::Instance(inst(g, 0));
-            let mut s = a_site();
-            s.op = SiteOp::FnValue;
-            g.contributions
-                .get_mut(&owner)
-                .expect("owner")
-                .duplicate_sites
-                .push(s);
-        },
-    ));
+    // --- duplicate_sites: which instance a duplicate belongs to is the OWNER
+    // of the record, so `instance` puts the same site on two owners ---
+    for (name, alter) in [
+        (
+            "duplicate_sites.instance",
+            (|_, (n, _)| *n = 1) as fn(&InstanceGraph, &mut (usize, Site)),
+        ),
+        ("duplicate_sites.site", |_, (_, s)| s.op = SiteOp::FnValue),
+    ] {
+        v.push(variant(
+            name,
+            "duplicate_sites",
+            |_| (0, a_site()),
+            alter,
+            |g, (n, s)| {
+                let owner = Owner::Instance(inst(g, n));
+                g.contributions
+                    .get_mut(&owner)
+                    .expect("owner")
+                    .duplicate_sites
+                    .push(s);
+            },
+        ));
+    }
 
-    // --- bound trees, including the RECURSIVE payload ---
-    v.push(arm(
-        "bound_trees.callee",
-        "bound_trees",
-        |g| {
-            let (i, t) = (inst(g, 0), tree(inst(g, 0), InstanceBoundTree::default()));
-            set_trees(g, i, t, None);
-        },
-        |g| {
-            let (i, t) = (inst(g, 0), tree(inst(g, 1), InstanceBoundTree::default()));
-            set_trees(g, i, t, None);
-        },
-    ));
-    v.push(arm(
-        "bound_trees.nested_callee",
-        "bound_trees",
-        |g| {
-            let t = tree(inst(g, 0), tree(inst(g, 0), InstanceBoundTree::default()));
-            let i = inst(g, 0);
-            set_trees(g, i, t, None);
-        },
-        |g| {
-            let t = tree(inst(g, 0), tree(inst(g, 1), InstanceBoundTree::default()));
-            let i = inst(g, 0);
-            set_trees(g, i, t, None);
-        },
-    ));
-    v.push(arm(
-        "bound_trees.witness_index",
-        "bound_trees",
-        |g| {
-            let t = tree(inst(g, 0), InstanceBoundTree::default());
-            let i = inst(g, 0);
-            set_trees(g, i, t, None);
-        },
-        |g| {
-            let mut t = InstanceBoundTree::default();
-            t.next.insert(
-                3,
-                InstanceBoundNext {
-                    callee: inst(g, 0),
-                    sub: InstanceBoundTree::default(),
-                },
-            );
-            let i = inst(g, 0);
-            set_trees(g, i, t, None);
-        },
-    ));
+    // --- bound trees, including the RECURSIVE payload, and disagreements,
+    // which carry two complete payloads each ---
+    type Trees = (Instance, InstanceBoundTree, Option<InstanceBoundTree>);
+    let one: fn(&InstanceGraph) -> Trees = |g| (inst(g, 0), tree(inst(g, 0), leaf()), None);
+    let nested: fn(&InstanceGraph) -> Trees = |g| {
+        let t = tree(inst(g, 0), tree(inst(g, 0), leaf()));
+        (inst(g, 0), t, None)
+    };
+    let disputed: fn(&InstanceGraph) -> Trees =
+        |g| (inst(g, 0), tree(inst(g, 0), leaf()), Some(leaf()));
+    let disputed_nested: fn(&InstanceGraph) -> Trees = |g| {
+        let t = tree(inst(g, 0), tree(inst(g, 0), leaf()));
+        (inst(g, 0), t, Some(leaf()))
+    };
+    let disputed_by_nested: fn(&InstanceGraph) -> Trees = |g| {
+        let o = tree(inst(g, 1), tree(inst(g, 0), leaf()));
+        (inst(g, 0), tree(inst(g, 0), leaf()), Some(o))
+    };
+    for (name, section, base, alter) in [
+        (
+            "bound_trees.callee",
+            "bound_trees",
+            one,
+            (|g, (_, t, _)| *t = tree(inst(g, 1), leaf())) as fn(&InstanceGraph, &mut Trees),
+        ),
+        (
+            "bound_trees.nested_callee",
+            "bound_trees",
+            nested,
+            |g, (_, t, _)| *t = tree(inst(g, 0), tree(inst(g, 1), leaf())),
+        ),
+        (
+            "bound_trees.witness_index",
+            "bound_trees",
+            one,
+            |g, (_, t, _)| {
+                t.next.clear();
+                t.next.insert(
+                    3,
+                    InstanceBoundNext {
+                        callee: inst(g, 0),
+                        sub: leaf(),
+                    },
+                );
+            },
+        ),
+        (
+            "bound_tree_disagreements.instance",
+            "bound_tree_disagreements",
+            disputed,
+            |g, (i, _, _)| *i = inst(g, 1),
+        ),
+        (
+            "bound_tree_disagreements.recorded",
+            "bound_tree_disagreements",
+            disputed_nested,
+            |g, (_, t, _)| *t = tree(inst(g, 0), tree(inst(g, 1), leaf())),
+        ),
+        (
+            "bound_tree_disagreements.incoming",
+            "bound_tree_disagreements",
+            disputed_by_nested,
+            |g, (_, _, o)| *o = Some(tree(inst(g, 1), tree(inst(g, 1), leaf()))),
+        ),
+    ] {
+        v.push(variant(name, section, base, alter, |g, (i, t, o)| {
+            set_trees(g, i, t, o)
+        }));
+    }
 
     // --- substitutions: the BINDING, not only the key ---
-    v.push(arm(
-        "substitutions.value",
-        "substitutions",
-        |g| {
-            let (i, s) = (inst(g, 0), subst_with(g, MonoTy::Never));
-            set_substs(g, i, s, None);
-        },
-        |g| {
-            let (i, s) = (inst(g, 0), subst_with(g, MonoTy::Unit));
-            set_substs(g, i, s, None);
-        },
-    ));
-
-    // --- disagreements carry two complete payloads each ---
-    v.push(arm(
-        "subst_disagreements.instance",
-        "subst_disagreements",
-        |g| {
-            let (i, a, b) = (
-                inst(g, 0),
-                subst_with(g, MonoTy::Never),
-                subst_with(g, MonoTy::Unit),
-            );
-            set_substs(g, i, a, Some(b));
-        },
-        |g| {
-            let (i, a, b) = (
-                inst(g, 1),
-                subst_with(g, MonoTy::Never),
-                subst_with(g, MonoTy::Unit),
-            );
-            set_substs(g, i, a, Some(b));
-        },
-    ));
-    v.push(arm(
-        "subst_disagreements.kept",
-        "subst_disagreements",
-        |g| {
-            let (i, a, b) = (
-                inst(g, 0),
-                subst_with(g, MonoTy::Never),
-                subst_with(g, MonoTy::Unit),
-            );
-            set_substs(g, i, a, Some(b));
-        },
-        |g| {
-            let (i, a, b) = (
-                inst(g, 0),
-                subst_with(g, MonoTy::Unit),
-                subst_with(g, MonoTy::Never),
-            );
-            set_substs(g, i, a, Some(b));
-        },
-    ));
-    v.push(arm(
-        "bound_tree_disagreements.instance",
-        "bound_tree_disagreements",
-        |g| {
-            let (i, a) = (inst(g, 0), tree(inst(g, 0), InstanceBoundTree::default()));
-            set_trees(g, i, a, Some(InstanceBoundTree::default()));
-        },
-        |g| {
-            let (i, a) = (inst(g, 1), tree(inst(g, 0), InstanceBoundTree::default()));
-            set_trees(g, i, a, Some(InstanceBoundTree::default()));
-        },
-    ));
-    v.push(arm(
-        "bound_tree_disagreements.recorded",
-        "bound_tree_disagreements",
-        |g| {
-            let (i, a) = (
-                inst(g, 0),
-                tree(inst(g, 0), tree(inst(g, 0), InstanceBoundTree::default())),
-            );
-            set_trees(g, i, a, Some(InstanceBoundTree::default()));
-        },
-        |g| {
-            let (i, a) = (
-                inst(g, 0),
-                tree(inst(g, 0), tree(inst(g, 1), InstanceBoundTree::default())),
-            );
-            set_trees(g, i, a, Some(InstanceBoundTree::default()));
-        },
-    ));
-    v.push(arm(
-        "bound_tree_disagreements.incoming",
-        "bound_tree_disagreements",
-        |g| {
-            let (i, a, b) = (
-                inst(g, 0),
-                tree(inst(g, 0), InstanceBoundTree::default()),
-                tree(inst(g, 1), tree(inst(g, 0), InstanceBoundTree::default())),
-            );
-            set_trees(g, i, a, Some(b));
-        },
-        |g| {
-            let (i, a, b) = (
-                inst(g, 0),
-                tree(inst(g, 0), InstanceBoundTree::default()),
-                tree(inst(g, 1), tree(inst(g, 1), InstanceBoundTree::default())),
-            );
-            set_trees(g, i, a, Some(b));
-        },
-    ));
+    type Substs = (Instance, MonoSubst, Option<MonoSubst>);
+    let agreed: fn(&InstanceGraph) -> Substs = |g| (inst(g, 0), subst_with(g, MonoTy::Never), None);
+    let split: fn(&InstanceGraph) -> Substs = |g| {
+        let other = subst_with(g, MonoTy::Unit);
+        (inst(g, 0), subst_with(g, MonoTy::Never), Some(other))
+    };
+    for (name, section, base, alter) in [
+        (
+            "substitutions.value",
+            "substitutions",
+            agreed,
+            (|g, (_, s, _)| *s = subst_with(g, MonoTy::Unit)) as fn(&InstanceGraph, &mut Substs),
+        ),
+        (
+            "subst_disagreements.instance",
+            "subst_disagreements",
+            split,
+            |g, (i, _, _)| *i = inst(g, 1),
+        ),
+        (
+            "subst_disagreements.kept",
+            "subst_disagreements",
+            split,
+            |g, (_, s, o)| {
+                *s = subst_with(g, MonoTy::Unit);
+                *o = Some(subst_with(g, MonoTy::Never));
+            },
+        ),
+    ] {
+        v.push(variant(name, section, base, alter, |g, (i, s, o)| {
+            set_substs(g, i, s, o)
+        }));
+    }
 
     // --- uninstantiated_roots: the hole's cause AND every failure it carries ---
-    v.push(arm(
-        "uninstantiated_roots.generic_root",
-        "uninstantiated_roots",
-        |g| {
-            g.uninstantiated_roots
-                .entry(HOLE.to_string())
-                .or_default()
-                .generic_root = false;
-        },
-        |g| {
-            g.uninstantiated_roots
-                .entry(HOLE.to_string())
-                .or_default()
-                .generic_root = true;
-        },
-    ));
-    v.push(arm(
-        "uninstantiated_roots.instances",
-        "uninstantiated_roots",
-        |g| {
-            g.uninstantiated_roots
-                .entry(HOLE.to_string())
-                .or_default()
-                .instances = 1;
-        },
-        |g| {
-            g.uninstantiated_roots
-                .entry(HOLE.to_string())
-                .or_default()
-                .instances = 2;
-        },
-    ));
-    v.push(arm(
-        "uninstantiated_roots.failure_outcome",
-        "uninstantiated_roots",
-        |g| {
-            let span = real_span(g);
-            g.uninstantiated_roots
-                .entry(HOLE.to_string())
-                .or_default()
-                .always_emitted_sites
-                .push(AlwaysEmittedFailure {
-                    outcome: AlwaysEmittedOutcome::Unresolved("synthetic"),
-                    span,
-                });
-        },
-        |g| {
-            let span = real_span(g);
-            g.uninstantiated_roots
-                .entry(HOLE.to_string())
-                .or_default()
-                .always_emitted_sites
-                .push(AlwaysEmittedFailure {
-                    outcome: AlwaysEmittedOutcome::Rejection(RejectionKind::GenericFnValue),
-                    span,
-                });
-        },
-    ));
-    v.push(arm(
-        "uninstantiated_roots.failure_span",
-        "uninstantiated_roots",
-        |g| {
-            let span = real_span(g);
-            g.uninstantiated_roots
-                .entry(HOLE.to_string())
-                .or_default()
-                .always_emitted_sites
-                .push(AlwaysEmittedFailure {
-                    outcome: AlwaysEmittedOutcome::Unresolved("synthetic"),
-                    span,
-                });
-        },
-        |g| {
-            let span = shifted(real_span(g));
-            g.uninstantiated_roots
-                .entry(HOLE.to_string())
-                .or_default()
-                .always_emitted_sites
-                .push(AlwaysEmittedFailure {
-                    outcome: AlwaysEmittedOutcome::Unresolved("synthetic"),
-                    span,
-                });
-        },
-    ));
+    let failing: fn(&InstanceGraph) -> RootHole = |g| RootHole {
+        always_emitted_sites: vec![AlwaysEmittedFailure {
+            outcome: AlwaysEmittedOutcome::Unresolved("synthetic"),
+            span: real_span(g),
+        }],
+        ..RootHole::default()
+    };
+    for (name, base, alter) in [
+        (
+            "uninstantiated_roots.generic_root",
+            (|_| RootHole::default()) as fn(&InstanceGraph) -> RootHole,
+            (|_, h| h.generic_root = true) as fn(&InstanceGraph, &mut RootHole),
+        ),
+        (
+            "uninstantiated_roots.instances",
+            |_| RootHole {
+                instances: 1,
+                ..RootHole::default()
+            },
+            |_, h| h.instances = 2,
+        ),
+        ("uninstantiated_roots.failure_outcome", failing, |_, h| {
+            h.always_emitted_sites[0].outcome =
+                AlwaysEmittedOutcome::Rejection(RejectionKind::GenericFnValue)
+        }),
+        ("uninstantiated_roots.failure_span", failing, |_, h| {
+            h.always_emitted_sites[0].span = shifted(h.always_emitted_sites[0].span)
+        }),
+    ] {
+        v.push(variant(
+            name,
+            "uninstantiated_roots",
+            base,
+            alter,
+            |g, h| {
+                g.uninstantiated_roots.insert(HOLE.to_string(), h);
+            },
+        ));
+    }
 
     // --- the remaining per-declaration records ---
-    v.push(arm(
-        "boundaries.class",
-        "boundaries",
-        |g| {
-            g.boundaries.insert(
-                "synthetic".to_string(),
-                Boundary {
-                    class: BoundaryClass::Extern,
-                    symbol: "synthetic".to_string(),
-                },
-            );
-        },
-        |g| {
-            g.boundaries.insert(
-                "synthetic".to_string(),
-                Boundary {
-                    class: BoundaryClass::Intrinsic,
-                    symbol: "synthetic".to_string(),
-                },
-            );
-        },
-    ));
-    v.push(arm(
-        "boundaries.symbol",
-        "boundaries",
-        |g| {
-            g.boundaries.insert(
-                "synthetic".to_string(),
-                Boundary {
-                    class: BoundaryClass::Extern,
-                    symbol: "sym-a".to_string(),
-                },
-            );
-        },
-        |g| {
-            g.boundaries.insert(
-                "synthetic".to_string(),
-                Boundary {
-                    class: BoundaryClass::Extern,
-                    symbol: "sym-b".to_string(),
-                },
-            );
-        },
-    ));
-    v.push(arm(
-        "inline_body_deps.entries",
-        "inline_body_deps",
-        |g| {
-            let k = *g.inline_body_deps.keys().next().expect("an inline dep");
-            g.inline_body_deps
-                .insert(k, BTreeSet::from(["__map_col_len"]));
-        },
-        |g| {
-            let k = *g.inline_body_deps.keys().next().expect("an inline dep");
-            g.inline_body_deps
-                .insert(k, BTreeSet::from(["__map_col_free"]));
-        },
-    ));
-    v.push(arm(
-        "inline_body_deps.declaration",
-        "inline_body_deps",
-        |g| {
-            let k = DeclKey(inst(g, 0).func);
-            g.inline_body_deps
-                .insert(k, BTreeSet::from(["__map_col_len"]));
-        },
-        |g| {
-            let k = DeclKey(inst(g, 1).func);
-            g.inline_body_deps
-                .insert(k, BTreeSet::from(["__map_col_len"]));
-        },
-    ));
+    for (name, alter) in [
+        (
+            "boundaries.class",
+            (|_, b| b.class = BoundaryClass::Intrinsic) as fn(&InstanceGraph, &mut Boundary),
+        ),
+        ("boundaries.symbol", |_, b| b.symbol = "sym-b".to_string()),
+    ] {
+        v.push(variant(
+            name,
+            "boundaries",
+            |_| Boundary {
+                class: BoundaryClass::Extern,
+                symbol: "sym-a".to_string(),
+            },
+            alter,
+            |g, b| {
+                g.boundaries.insert("synthetic".to_string(), b);
+            },
+        ));
+    }
+    type Deps = (DeclKey, BTreeSet<&'static str>);
+    let first_dep: fn(&InstanceGraph) -> Deps = |g| {
+        let k = *g.inline_body_deps.keys().next().expect("an inline dep");
+        (k, BTreeSet::from(["__map_col_len"]))
+    };
+    let first_decl: fn(&InstanceGraph) -> Deps =
+        |g| (DeclKey(inst(g, 0).func), BTreeSet::from(["__map_col_len"]));
+    for (name, base, alter) in [
+        (
+            "inline_body_deps.entries",
+            first_dep,
+            (|_, (_, set)| *set = BTreeSet::from(["__map_col_free"]))
+                as fn(&InstanceGraph, &mut Deps),
+        ),
+        ("inline_body_deps.declaration", first_decl, |g, (k, _)| {
+            *k = DeclKey(inst(g, 1).func)
+        }),
+    ] {
+        v.push(variant(
+            name,
+            "inline_body_deps",
+            base,
+            alter,
+            |g, (k, set)| {
+                g.inline_body_deps.insert(k, set);
+            },
+        ));
+    }
     v.push(arm(
         "excused_generic_roots.reason",
         "excused_generic_roots",
@@ -1114,7 +876,6 @@ fn arms() -> Vec<Arm> {
 
     v
 }
-
 /// Span perturbations, one field each. A span rendered through `{:?}` prints
 /// its FILE alone (`rock_core::source_code`), so a section carrying its span
 /// that way passes a presence check and loses every position -- which is what

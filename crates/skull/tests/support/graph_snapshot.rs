@@ -85,25 +85,17 @@ impl CanonicalGraph {
 /// canonical spellings. Not [`InstanceGraph::symbol`], which renders pretty
 /// type syntax and is explicitly not injective.
 pub fn instance_key(ws: &Workspace, g: &InstanceGraph, i: &Instance) -> String {
-    let f = &ws.module(i.func.module).functions[i.func.func];
-    let mut out = mangle_fn(ws, f);
-    // The raw indices disambiguate two declarations that mangle alike; they are
-    // deterministic for one source, which is all a build-to-build comparison
-    // needs.
-    out.push_str(&format!(
-        "#{}.{}",
-        i.func.module.raw(),
-        i.func.func.into_raw().into_u32()
-    ));
+    let mut out = decl_key(ws, i.func);
     if !i.args.is_empty() {
         let args: Vec<String> = i.args.iter().map(|a| g.interner().canonical(*a)).collect();
-        out.push('<');
-        out.push_str(&args.join(","));
-        out.push('>');
+        out.push_str(&format!("<{}>", args.join(",")));
     }
     out
 }
 
+/// The mangled declaration plus its raw indices, which disambiguate two
+/// declarations that mangle alike; they are deterministic for one source,
+/// which is all a build-to-build comparison needs.
 fn decl_key(ws: &Workspace, d: skull_mir::mir::FuncRef) -> String {
     let f = &ws.module(d.module).functions[d.func];
     format!(
