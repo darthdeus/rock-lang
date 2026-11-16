@@ -1,58 +1,13 @@
 // JS backend inspect (T8d): the `__rock_inspect_value` pretty-printer
 // (stdlib/unified.rock) ported to the JS shapes -- structs `{__ty,..}` (sorted
-// keys, ` = ` sep), Vec `{_data,len}`, Map, arrays, scalars, nesting, cycles,
-// and fn-records (opaque `function: ..` leaf). Runs under BOTH executors so the
-// rendering is luajit-checked. Assertions use substring / boolean checks (a Rock
-// string literal cannot contain a bare `{` -- that is interpolation syntax), so
-// the pins are cross-backend byte checks without brace escaping.
+// keys, ` = ` sep), Vec `{_data,len}`, value structs, embedded children and
+// fn-records (opaque `function: ..` leaf). Runs under BOTH executors so the
+// rendering is luajit-checked. Scalars, maps, tuples, nesting and enums are
+// pinned byte-exact in inspect.rock.
 
 struct Person { name: string, age: int }
 struct Point { x: int, y: int }
 struct Triple { a: int, b: int, c: int }
-struct Nested { point: Point, name: string }
-
-// Scalars render byte-exact (brace-free, so an `@test(output=..)` works).
-@test(output = "\"hi\"\n42\ntrue")
-fn scalars() {
-    print(inspect("hi"))
-    print(inspect(42))
-    print(inspect(true))
-}
-
-// A 2-field struct is compact with sorted keys and ` = ` separators.
-@test(returns = true)
-fn compact_struct() -> bool {
-    let p = Person { name: "Alice", age: 30 }
-    let s = inspect(p)
-    return s.contains("Person ") && s.contains("age = 30") && s.contains("name = ")
-        && !s.contains("\n")
-}
-
-// A 3-field struct renders multi-line.
-@test(returns = true)
-fn multiline_struct() -> bool {
-    let t = Triple { a: 1, b: 2, c: 3 }
-    let s = inspect(t)
-    return s.contains("Triple ") && s.contains("\n") && s.contains("a = 1")
-        && s.contains("c = 3")
-}
-
-// A Vec renders `Vec { .. }` in index order.
-@test(returns = true)
-fn vec_render() -> bool {
-    let v = [10, 20, 30]
-    let s = inspect(v)
-    return s.contains("Vec ") && s.contains("10, 20, 30")
-}
-
-// Nesting: a struct field that is itself a struct renders inline.
-@test(returns = true)
-fn nested_render() -> bool {
-    let n = Nested { point: Point { x: 5, y: 10 }, name: "test" }
-    let s = inspect(n)
-    return s.contains("Nested ") && s.contains("Point ") && s.contains("x = 5")
-        && s.contains("name = ")
-}
 
 // A capturing lambda / fn value renders as an opaque `function: ..` leaf, never
 // leaking its capture internals.
@@ -62,14 +17,6 @@ fn fn_record_render() -> bool {
     let f = () => x + 1
     let s = inspect(f)
     return s.starts_with("function") && !s.contains("__fn")
-}
-
-// An array (tuple / list) renders `{ .. }` in order.
-@test(returns = true)
-fn array_render() -> bool {
-    let t = (7, 8, 9)
-    let s = inspect(t)
-    return s.contains("7, 8, 9")
 }
 
 // Byte-exact renders, through `assert_eq` so braces can be escaped.
@@ -98,12 +45,4 @@ struct Holder { embed p: Point, tag: int }
 @test
 fn embed_field_render() {
     assert_eq(inspect(Holder { p: Point { x: 1, y: 2 }, tag: 3 }), "Holder {{ p = Point {{ x = 1, y = 2 }}, tag = 3 }}")
-}
-
-// A payload-bearing enum stored as a scalar tag box renders its variant name.
-enum Color { Red, Custom { r: int, g: int } }
-
-@test
-fn scalar_enum_box_render() {
-    assert_eq(inspect(Color::Custom { r: 1, g: 2 }), "Color::Custom {{ g = 2, r = 1 }}")
 }

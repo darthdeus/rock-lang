@@ -2,7 +2,7 @@
 // Width and precision positions accept either a decimal literal or a
 // `{expr}` sub-expression. Expressions must evaluate to `int`.
 //
-// Test plan — one test per distinct code path:
+// Test plan: every distinct code path is asserted:
 //   - Basic shapes: dyn width only, dyn precision only, both dynamic
 //   - Mixed static/dynamic (both orderings)
 //   - Alignment / fill paths (fast vs slow padding)
@@ -17,68 +17,31 @@
 //   - Real-world: label padding with runtime-computed column
 
 // ---------------------------------------------------------------------
-// Basic shapes
+// Basic shapes, and mixed static / dynamic in both orderings
 // ---------------------------------------------------------------------
 
 @test
-fn test_dyn_width_string() {
+fn test_dyn_width_and_precision_shapes() {
     let s = "hi"
-    let w = 5
-    assert_eq("[{s:{w}}]", "[   hi]")
-}
-
-@test
-fn test_dyn_width_int() {
     let n = 42
-    let w = 6
-    assert_eq("[{n:{w}}]", "[    42]")
-}
-
-@test
-fn test_dyn_width_float() {
     let x = 3.14
-    let w = 10
-    assert_eq("[{x:{w}f}]", "[  3.140000]")
-}
-
-@test
-fn test_dyn_precision_float() {
-    let x = 3.14159
+    let pi = 3.14159
+    let w5 = 5
+    let w = 6
     let p = 3
-    assert_eq("[{x:.{p}f}]", "[3.142]")
-}
-
-@test
-fn test_dyn_precision_string_truncate() {
-    let s = "abcdef"
-    let p = 3
-    assert_eq("[{s:.{p}}]", "[abc]")
-}
-
-@test
-fn test_dyn_width_and_precision_float() {
-    let x = 3.14159
-    let w = 10
-    let p = 2
-    assert_eq("[{x:{w}.{p}f}]", "[      3.14]")
-}
-
-// ---------------------------------------------------------------------
-// Mixed static / dynamic — ensure neither ordering breaks
-// ---------------------------------------------------------------------
-
-@test
-fn test_dyn_width_static_precision() {
-    let x = 3.14159
-    let w = 12
-    assert_eq("[{x:{w}.3f}]", "[       3.142]")
-}
-
-@test
-fn test_static_width_dyn_precision() {
-    let x = 3.14159
-    let p = 4
-    assert_eq("[{x:10.{p}f}]", "[    3.1416]")
+    let wide = 10
+    assert_eq("[{s:{w5}}]", "[   hi]")
+    assert_eq("[{n:{w}}]", "[    42]")
+    assert_eq("[{x:{wide}f}]", "[  3.140000]")
+    assert_eq("[{pi:.{p}f}]", "[3.142]")
+    let letters = "abcdef"
+    assert_eq("[{letters:.{p}}]", "[abc]")
+    let two = 2
+    assert_eq("[{pi:{wide}.{two}f}]", "[      3.14]")
+    let twelve = 12
+    assert_eq("[{pi:{twelve}.3f}]", "[       3.142]")
+    let four = 4
+    assert_eq("[{pi:10.{four}f}]", "[    3.1416]")
 }
 
 // ---------------------------------------------------------------------
@@ -88,82 +51,41 @@ fn test_static_width_dyn_precision() {
 // ---------------------------------------------------------------------
 
 @test
-fn test_dyn_width_left_align() {
+fn test_dyn_width_alignment_and_fill() {
     let s = "hi"
     let w = 6
     assert_eq("[{s:<{w}}]", "[hi    ]")
-}
-
-@test
-fn test_dyn_width_center_align() {
-    let s = "hi"
-    let w = 6
     assert_eq("[{s:^{w}}]", "[  hi  ]")
-}
-
-@test
-fn test_dyn_width_custom_fill() {
-    let s = "42"
-    let w = 6
-    assert_eq("[{s:*^{w}}]", "[**42**]")
+    let digits = "42"
+    assert_eq("[{digits:*^{w}}]", "[**42**]")
 }
 
 // ---------------------------------------------------------------------
 // Every numeric format type × dynamic width — each hits a separate
-// branch in apply_format_specifier.
+// branch in apply_format_specifier -- and dynamic precision on each
+// non-integer numeric type.
 // ---------------------------------------------------------------------
 
 @test
-fn test_dyn_width_hex() {
+fn test_dyn_spec_numeric_types() {
+    let w = 6
+    let narrow = 4
     let n = 255
-    let w = 6
     assert_eq("[{n:{w}x}]", "[    ff]")
-}
-
-@test
-fn test_dyn_width_octal() {
-    let n = 8
-    let w = 4
-    assert_eq("[{n:{w}o}]", "[  10]")
-}
-
-@test
-fn test_dyn_width_binary() {
-    let n = 5
-    let w = 6
-    assert_eq("[{n:{w}b}]", "[   101]")
-}
-
-@test
-fn test_dyn_width_char() {
+    let eight = 8
+    assert_eq("[{eight:{narrow}o}]", "[  10]")
+    let five = 5
+    assert_eq("[{five:{w}b}]", "[   101]")
     let code = 65
-    let w = 4
-    assert_eq("[{code:{w}c}]", "[   A]")
-}
-
-// ---------------------------------------------------------------------
-// Dynamic precision on each non-integer numeric type
-// ---------------------------------------------------------------------
-
-@test
-fn test_dyn_precision_exponential() {
-    let x = 12345.678
+    assert_eq("[{code:{narrow}c}]", "[   A]")
     let p = 2
-    assert_eq("[{x:.{p}e}]", "[1.23e+04]")
-}
-
-@test
-fn test_dyn_precision_general() {
-    let x = 0.000123
-    let p = 2
-    assert_eq("[{x:.{p}g}]", "[0.00012]")
-}
-
-@test
-fn test_dyn_precision_percent() {
-    let x = 0.5
-    let p = 1
-    assert_eq("[{x:.{p}%}]", "[50.0%]")
+    let e = 12345.678
+    assert_eq("[{e:.{p}e}]", "[1.23e+04]")
+    let g = 0.000123
+    assert_eq("[{g:.{p}g}]", "[0.00012]")
+    let half = 0.5
+    let one = 1
+    assert_eq("[{half:.{one}%}]", "[50.0%]")
 }
 
 // ---------------------------------------------------------------------
@@ -171,21 +93,23 @@ fn test_dyn_precision_percent() {
 // (scalarize, inline, bidirectional).
 // ---------------------------------------------------------------------
 
+fn get_two() -> int {
+    return 2
+}
+
+global NAME_COL: int = 12
+
 @test
-fn test_dyn_width_arithmetic() {
+fn test_dyn_spec_expression_shapes() {
     let s = "hi"
     let base = 3
     assert_eq("[{s:{base + 2}}]", "[   hi]")
-}
-
-@test
-fn test_dyn_precision_function_call() {
-    let x = 3.14159
-    assert_eq("[{x:.{get_two()}f}]", "[3.14]")
-}
-
-fn get_two() -> int {
-    return 2
+    let pi = 3.14159
+    assert_eq("[{pi:.{get_two()}f}]", "[3.14]")
+    let x = 3.14
+    let narrow = true
+    assert_eq("[{x:.{if narrow { 2 } else { 5 }}f}]", "[3.14]")
+    assert_eq("[{s:<{NAME_COL}}]", "[hi          ]")
 }
 
 @test
@@ -200,43 +124,20 @@ fn test_dyn_width_struct_field_scalarized() {
 
 struct Cfg { w: int, p: int }
 
-@test
-fn test_dyn_precision_if_expression() {
-    let x = 3.14
-    let narrow = true
-    assert_eq("[{x:.{if narrow { 2 } else { 5 }}f}]", "[3.14]")
-}
-
-global NAME_COL: int = 12
-
-@test
-fn test_dyn_width_global() {
-    let label = "hi"
-    assert_eq("[{label:<{NAME_COL}}]", "[hi          ]")
-}
-
 // ---------------------------------------------------------------------
 // Edges
 // ---------------------------------------------------------------------
 
 @test
-fn test_dyn_width_zero_no_pad() {
+fn test_dyn_spec_edges() {
     let s = "hi"
     assert_eq("[{s:{0}}]", "[hi]")
-}
-
-@test
-fn test_dyn_precision_zero_rounds() {
     let x = 9.7
     assert_eq("[{x:.{0}f}]", "[10]")
-}
-
-@test
-fn test_dyn_width_smaller_than_content() {
     // Width is a minimum — content longer than width passes through.
-    let s = "hello world"
+    let long = "hello world"
     let w = 3
-    assert_eq("[{s:{w}}]", "[hello world]")
+    assert_eq("[{long:{w}}]", "[hello world]")
 }
 
 // ---------------------------------------------------------------------
@@ -244,17 +145,13 @@ fn test_dyn_width_smaller_than_content() {
 // ---------------------------------------------------------------------
 
 @test
-fn test_dyn_width_with_sign_flag() {
+fn test_dyn_width_with_sign_and_grouping() {
     let n = 5
     let w = 4
     assert_eq("[{n: {w}d}]", "[   5]")
-}
-
-@test
-fn test_dyn_width_with_grouping() {
-    let n = 1000000
-    let w = 12
-    assert_eq("[{n:{w},d}]", "[   1,000,000]")
+    let million = 1000000
+    let wide = 12
+    assert_eq("[{million:{wide},d}]", "[   1,000,000]")
 }
 
 @test

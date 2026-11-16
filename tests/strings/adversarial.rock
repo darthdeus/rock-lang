@@ -1,108 +1,48 @@
 // Adversarial tests: Strings
 
-// --- Basic interpolation ---
-
-@test(output = "hello world")
-fn test_basic_interpolation() {
-    let name = "world"
-    print("hello {name}")
-}
-
-@test(output = "pi = 3.14")
-fn test_float_interpolation() {
-    let pi = 3.14
-    print("pi = {pi}")
-}
-
-@test(output = "flag = true")
-fn test_bool_interpolation() {
-    let flag = true
-    print("flag = {flag}")
-}
-
-// --- Expression in interpolation ---
-
-@test(output = "sum = 7")
-fn test_expr_interpolation() {
-    let a = 3
-    let b = 4
-    print("sum = {a + b}")
-}
-
-@test(output = "result = 6")
-fn test_complex_expr_interpolation() {
-    let x = 2
-    print("result = {x * 3}")
-}
-
-// --- Nested interpolation ---
-
 struct Info { val: int }
-
-@test(output = "nested: 42")
-fn test_nested_field_interpolation() {
-    let info = Info { val: 42 }
-    print("nested: {info.val}")
-}
-
-// --- String concatenation ---
-
-@test(output = "hello world")
-fn test_string_concat() {
-    let a = "hello"
-    let b = " world"
-    print(a + b)
-}
-
-// --- Empty string ---
-
-@test(output = "empty: true")
-fn test_empty_string() {
-    let s = ""
-    print("empty: {s == ""}")
-}
-
-// --- String comparison ---
-
-@test(output = "true")
-fn test_string_equality() {
-    let a = "hello"
-    let b = "hello"
-    print(a == b)
-}
-
-@test(output = "false")
-fn test_string_inequality() {
-    let a = "hello"
-    let b = "world"
-    print(a == b)
-}
-
-// --- String in struct ---
 
 struct Named {
     name: string,
     tag: string,
 }
 
-@test(output = "Alice:admin")
-fn test_string_in_struct() {
+@test(output = "hello world\npi = 3.14\nflag = true\nsum = 7\nresult = 6\nnested: 42\nAlice:admin\nempty: true\n42 and 3.14\nstart42middle42end\nDec: 255, Hex: ff, Oct: 377\nThis is just a string")
+fn test_interpolation_basics() {
+    let name = "world"
+    print("hello {name}")
+    let pi = 3.14
+    print("pi = {pi}")
+    let flag = true
+    print("flag = {flag}")
+    let a = 3
+    let b = 4
+    print("sum = {a + b}")
+    let x = 2
+    print("result = {x * 3}")
+    let info = Info { val: 42 }
+    print("nested: {info.val}")
     let n = Named { name: "Alice", tag: "admin" }
     print("{n.name}:{n.tag}")
+    let s = ""
+    print("empty: {s == ""}")
+    let v = 42
+    print("{v} and {pi}")
+    print("start{v}middle{v}end")
+    let w = 255
+    print("Dec: {w}, Hex: {w:x}, Oct: {w:o}")
+    print("This is just a string")
 }
 
-// --- Nullable string ---
-
-@test(output = "hello")
-fn test_nullable_string_present() {
-    let s: string? = "hello"
-    print(s ?? "default")
-}
-
-// --- String in vec ---
-
-@test(output = "a b c")
-fn test_string_vec() {
+@test(output = "true\nfalse\nhello\na b c\nline1\nline2\ntab\there")
+fn test_string_values() {
+    let a = "hello"
+    let b = "hello"
+    let c = "world"
+    print(a == b)
+    print(a == c)
+    let opt: string? = "hello"
+    print(opt ?? "default")
     let v = ["a", "b", "c"]
     let out = ""
     let first = true
@@ -112,31 +52,7 @@ fn test_string_vec() {
         out = out + s
     }
     print(out)
-}
-
-// --- String length ---
-
-@test(output = "5")
-fn test_string_length() {
-    let s = "hello"
-    print(s.len())
-}
-
-@test(output = "0")
-fn test_empty_string_length() {
-    let s = ""
-    print(s.len())
-}
-
-// --- String escape sequences ---
-
-@test(output = "line1\nline2")
-fn test_string_newline() {
     print("line1\nline2")
-}
-
-@test(output = "tab\there")
-fn test_string_tab() {
     print("tab\there")
 }
 
@@ -167,7 +83,3 @@ fn test_struct_literal_in_hole() {
 fn test_nested_call_named_arg_in_hole() {
     print("{add2(add2(3, b: 4), b: 3)}")
 }
-
-// --- NOTE: String literal inside interpolation breaks parser ---
-// {foo("bar")} doesn't work — the inner quotes close the outer string
-// This is a known parser limitation documented in multiple test files

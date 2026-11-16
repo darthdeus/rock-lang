@@ -9,33 +9,12 @@
 // item #1's `{{`/`}}` re-escape for semantic equivalence.
 
 @test
-fn test_raw_skips_interpolation() {
-    let s = r"{x}"
-    assert_eq(s, "{{x}}")
-}
-
-@test
-fn test_raw_skips_format_spec() {
-    let s = r"{x:02d}"
-    assert_eq(s, "{{x:02d}}")
-}
-
-@test
-fn test_raw_preserves_backslash_n() {
-    let s = r"\n"
-    assert_eq(s, "\\n")  // literal two chars, not a newline
-}
-
-@test
-fn test_raw_preserves_backslashes() {
-    let s = r"C:\path\to\file"
-    assert_eq(s, "C:\\path\\to\\file")
-}
-
-@test
-fn test_raw_empty() {
-    let s = r""
-    assert_eq(s, "")
+fn test_raw_skips_interpolation_and_escapes() {
+    assert_eq(r"{x}", "{{x}}")
+    assert_eq(r"{x:02d}", "{{x:02d}}")
+    assert_eq(r"\n", "\\n")  // literal two chars, not a newline
+    assert_eq(r"C:\path\to\file", "C:\\path\\to\\file")
+    assert_eq(r"", "")
 }
 
 @test

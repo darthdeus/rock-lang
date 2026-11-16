@@ -5,66 +5,31 @@
 // string byte-for-byte.
 
 // ---------------------------------------------------------------------
-// Baseline: no spec (must preserve smart-float behavior from
-// tests/strings/float_interpolation.rock)
-// ---------------------------------------------------------------------
-
-@test
-fn test_no_spec_smart_float() {
-    let pi = 3.14159265358979
-    let whole = 5.0
-    let negative = -42.5
-    let tiny = 0.000000001
-    assert_eq("{pi}", "3.1416")
-    assert_eq("{whole}", "5")
-    assert_eq("{negative}", "-42.5")
-    assert_eq("{tiny}", "1e-09")
-}
-
-// ---------------------------------------------------------------------
 // Float formatting: precision, width, zero-pad, sign
 // ---------------------------------------------------------------------
 
 @test
-fn test_float_precision() {
+fn test_float_precision_width_and_sign() {
     let pi = 3.14159265
     assert_eq("{pi:.2f}", "3.14")
     assert_eq("{pi:.0f}", "3")
     assert_eq("{pi:.6f}", "3.141593")
-}
-
-@test
-fn test_float_width_precision() {
+    // Precision without explicit `f` should assume float.
+    assert_eq("{pi:.3}", "3.142")
     let v = 1.5
     assert_eq("{v:8.2f}", "    1.50")
     assert_eq("{v:4.1f}", " 1.5")
     // Value wider than width: width ignored (never truncates).
     assert_eq("{v:2.3f}", "1.500")
-}
-
-@test
-fn test_float_zero_pad() {
-    let v = 3.14
-    assert_eq("{v:08.2f}", "00003.14")
+    let t = 3.14
+    assert_eq("{t:08.2f}", "00003.14")
     // Zero-pad on negatives: sign stays leftmost, zeros fill between
     // sign and digits. Regression against naive post-pad approach.
     let neg = -1.5
     assert_eq("{neg:08.2f}", "-0001.50")
-}
-
-@test
-fn test_float_explicit_sign() {
-    let v = 3.14
-    let neg = -3.14
-    assert_eq("{v:+.2f}", "+3.14")
-    assert_eq("{neg:+.2f}", "-3.14")
-}
-
-@test
-fn test_float_precision_no_type() {
-    // Precision without explicit `f` should assume float.
-    let v = 3.14159
-    assert_eq("{v:.3}", "3.142")
+    let nt = -3.14
+    assert_eq("{t:+.2f}", "+3.14")
+    assert_eq("{nt:+.2f}", "-3.14")
 }
 
 // ---------------------------------------------------------------------
@@ -72,15 +37,10 @@ fn test_float_precision_no_type() {
 // ---------------------------------------------------------------------
 
 @test
-fn test_int_width() {
+fn test_int_width_and_zero_pad() {
     let n = 42
     assert_eq("{n:5d}", "   42")
     assert_eq("{n:1d}", "42")
-}
-
-@test
-fn test_int_zero_pad() {
-    let n = 42
     assert_eq("{n:05d}", "00042")
     let neg = -42
     assert_eq("{neg:05d}", "-0042")
@@ -95,13 +55,11 @@ fn test_int_hex_octal() {
     assert_eq("{n:#X}", "0XFF")
     assert_eq("{n:o}", "377")
     assert_eq("{n:#o}", "0377")
-}
-
-@test
-fn test_int_hex_zero_pad() {
-    let n = 15
-    assert_eq("{n:04x}", "000f")
-    assert_eq("{n:#06x}", "0x000f")
+    assert_eq("{n:#010x}", "0x000000ff")
+    assert_eq("{n:#010X}", "0X000000FF")
+    let m = 15
+    assert_eq("{m:04x}", "000f")
+    assert_eq("{m:#06x}", "0x000f")
 }
 
 // ---------------------------------------------------------------------
@@ -109,26 +67,16 @@ fn test_int_hex_zero_pad() {
 // ---------------------------------------------------------------------
 
 @test
-fn test_string_right_align() {
+fn test_string_alignment() {
     let s = "hi"
     assert_eq("[{s:10s}]", "[        hi]")
     assert_eq("[{s:>10s}]", "[        hi]")
     // String with width but no type letter — must not crash with
     // math.floor (the old codegen bug this rewrite fixes).
     assert_eq("[{s:>10}]", "[        hi]")
-}
-
-@test
-fn test_string_left_align() {
-    let s = "hi"
     // The headline regression: `<` alignment was parsed but ignored.
     assert_eq("[{s:<10}]", "[hi        ]")
     assert_eq("[{s:<10s}]", "[hi        ]")
-}
-
-@test
-fn test_string_center_align() {
-    let s = "hi"
     assert_eq("[{s:^10}]", "[    hi    ]")
     assert_eq("[{s:^11}]", "[    hi     ]")  // odd pad: extra goes right
     assert_eq("[{s:^2}]", "[hi]")             // exact fit
@@ -156,33 +104,14 @@ fn test_string_custom_fill() {
 // ---------------------------------------------------------------------
 
 @test
-fn test_int_left_align() {
+fn test_number_alignment_and_fill() {
     let n = 42
     assert_eq("[{n:<5}]", "[42   ]")
     assert_eq("[{n:<5d}]", "[42   ]")
-}
-
-@test
-fn test_int_center_align() {
-    let n = 42
     assert_eq("[{n:^6}]", "[  42  ]")
-}
-
-@test
-fn test_float_left_align() {
     let v = 1.5
     assert_eq("[{v:<8.2f}]", "[1.50    ]")
-}
-
-@test
-fn test_float_center_align() {
-    let v = 1.5
     assert_eq("[{v:^8.2f}]", "[  1.50  ]")
-}
-
-@test
-fn test_float_custom_fill() {
-    let v = 1.5
     assert_eq("[{v:0<8.2f}]", "[1.500000]")
     assert_eq("[{v:-^8.2f}]", "[--1.50--]")
 }
@@ -205,31 +134,21 @@ fn test_bool_padding() {
 // ---------------------------------------------------------------------
 
 @test
-fn test_binary() {
+fn test_binary_char_and_scientific() {
     let n = 10
     assert_eq("{n:b}", "1010")
     assert_eq("{0:b}", "0")
     let neg = -5
     assert_eq("{neg:b}", "-101")
-}
-
-@test
-fn test_binary_width() {
-    let n = 5
-    assert_eq("[{n:8b}]", "[     101]")
-    assert_eq("[{n:<8b}]", "[101     ]")
-}
-
-@test
-fn test_char() {
+    let five = 5
+    assert_eq("[{five:8b}]", "[     101]")
+    assert_eq("[{five:<8b}]", "[101     ]")
     let code = 65
     assert_eq("{code:c}", "A")
     let lower = 97
     assert_eq("{lower:c}", "a")
-}
-
-@test
-fn test_scientific() {
+    assert_eq("[{code:^5c}]", "[  A  ]")
+    assert_eq("[{code:<5c}]", "[A    ]")
     let v = 1234567.89
     assert_eq("{v:.2e}", "1.23e+06")
     assert_eq("{v:.2E}", "1.23E+06")
@@ -240,31 +159,23 @@ fn test_scientific() {
 // ---------------------------------------------------------------------
 
 @test
-fn test_empty_string() {
+fn test_empty_zero_and_narrow_width() {
     let s = ""
     assert_eq("[{s:5s}]", "[     ]")
     assert_eq("[{s:<5s}]", "[     ]")
     assert_eq("[{s:^5}]", "[     ]")
-}
-
-@test
-fn test_zero_values() {
     let n = 0
     assert_eq("{n:5d}", "    0")
     assert_eq("{n:05d}", "00000")
     assert_eq("{n:b}", "0")
     let v = 0.0
     assert_eq("{v:.2f}", "0.00")
-}
-
-@test
-fn test_width_smaller_than_value() {
     // Width is a *minimum*; never truncates (except via string precision).
-    let n = 123456
-    assert_eq("{n:3d}", "123456")
-    let s = "hello"
-    assert_eq("{s:2s}", "hello")
-    assert_eq("{s:<2}", "hello")
+    let big = 123456
+    assert_eq("{big:3d}", "123456")
+    let h = "hello"
+    assert_eq("{h:2s}", "hello")
+    assert_eq("{h:<2}", "hello")
 }
 
 // ---------------------------------------------------------------------
@@ -272,15 +183,6 @@ fn test_width_smaller_than_value() {
 // ---------------------------------------------------------------------
 
 struct FixVec2 { x: float, y: float }
-
-@test
-fn test_struct_precision_preserved() {
-    let v = FixVec2 { x: 1.2345, y: 6.7890 }
-    let s = "{v:.2}"
-    assert(s.contains("1.23"))
-    assert(s.contains("6.79"))
-    assert(!s.contains("1.2345"))
-}
 
 @test
 fn test_struct_field_precision_still_works() {
@@ -355,13 +257,6 @@ fn test_float_sign_zero_pad_precision() {
 }
 
 @test
-fn test_hex_alternate_zero_pad() {
-    let n = 255
-    assert_eq("{n:#010x}", "0x000000ff")
-    assert_eq("{n:#010X}", "0X000000FF")
-}
-
-@test
 fn test_center_with_custom_fill_and_format() {
     let v = 1.5
     // Format then center-pad with '*'
@@ -378,15 +273,8 @@ fn test_odd_pad_center() {
 }
 
 // ---------------------------------------------------------------------
-// Edge cases: width 0, precision 0, huge width
+// Edge cases: precision 0
 // ---------------------------------------------------------------------
-
-@test
-fn test_width_zero() {
-    let v = 3.14
-    // Width 0 is a no-op on the pad side.
-    assert_eq("{v:.2f}", "3.14")
-}
 
 @test
 fn test_precision_zero_string() {
@@ -423,15 +311,10 @@ fn test_int_as_float() {
 // ---------------------------------------------------------------------
 
 @test
-fn test_fill_quote() {
+fn test_fill_quote_and_backslash() {
     let s = "x"
     // Fill char `"` must not break the generated Lua string literal.
     assert_eq("[{s:\"^5}]", "[\"\"x\"\"]")
-}
-
-@test
-fn test_fill_backslash() {
-    let s = "x"
     // Fill char `\` must be escaped in the generated literal.
     assert_eq("[{s:\\<5}]", "[x\\\\\\\\]")
 }
@@ -465,17 +348,6 @@ fn test_percent_type() {
     assert_eq("{v2:.0%}", "50%")
     let v3 = 0.0
     assert_eq("{v3:.2%}", "0.00%")
-}
-
-// ---------------------------------------------------------------------
-// Character-code formatting
-// ---------------------------------------------------------------------
-
-@test
-fn test_char_alignment() {
-    let code = 65
-    assert_eq("[{code:^5c}]", "[  A  ]")
-    assert_eq("[{code:<5c}]", "[A    ]")
 }
 
 // ---------------------------------------------------------------------

@@ -181,7 +181,7 @@ enum BlendMode {
     Multiply,
 }
 
-@test(output = "BlendMode::Normal\nBlendMode::Additive\nBlendMode::Multiply")
+@test(output = "BlendMode::Normal\nBlendMode::Additive\nBlendMode::Multiply\nmode=BlendMode::Additive")
 fn test_interp_each_variant() {
     // A bare `{Enum::Variant}` parses `::Variant` as a format spec, so bind first.
     let n = BlendMode::Normal
@@ -190,31 +190,21 @@ fn test_interp_each_variant() {
     print("{n}")
     print("{a}")
     print("{m}")
+    print("mode={a}")
 }
 
-@test(output = "mode=BlendMode::Additive")
-fn test_interp_through_local() {
-    let m = BlendMode::Additive
-    print("mode={m}")
-}
-
-@test(output = "add")
-fn test_match_int_compare() {
+@test(output = "add eq ne")
+fn test_match_and_eq_are_int_compares() {
     let m = BlendMode::Additive
     let s = match m {
         BlendMode::Normal => "norm",
         BlendMode::Additive => "add",
         BlendMode::Multiply => "mul",
     }
-    print(s)
-}
-
-@test(output = "eq ne")
-fn test_eq_is_int_compare() {
     let a = BlendMode::Multiply
     let b = BlendMode::Multiply
     let c = BlendMode::Normal
     let eq = if a == b { "eq" } else { "ne" }
     let ne = if a == c { "eq" } else { "ne" }
-    print("{eq} {ne}")
+    print("{s} {eq} {ne}")
 }

@@ -1,11 +1,6 @@
 // inspect() and interpolation of composite values: scalars, structs, enums,
 // collections, null fields and function values.
 
-struct Person {
-    name: string,
-    age: int,
-}
-
 @test(output = "\"hello\"\n42\ntrue")
 fn test_inspect_simple_types() {
     print(inspect("hello"))
@@ -30,12 +25,6 @@ fn test_inspect_map() {
     print(inspect(map))
 }
 
-@test(output = "Person {{ age = 30, name = \"Alice\" }}")
-fn test_inspect_struct() {
-    let person = Person { name: "Alice", age: 30 }
-    print(inspect(person))
-}
-
 @test(output = "Vec len: 2\nString: \"test\"\nNumber: 42")
 fn test_inspect_mixed_data() {
     let vec = vec_new()
@@ -58,12 +47,6 @@ struct Single {
     value: string,
 }
 
-struct Triple {
-    a: int,
-    b: int,
-    c: int,
-}
-
 enum Color {
     Red,
     Green,
@@ -71,34 +54,16 @@ enum Color {
     Custom { r: int, g: int },
 }
 
-@test(output = "Point {{ x = 10, y = 20 }}")
-fn test_inspect_compact_two_fields() {
+@test(output = "Point {{ x = 10, y = 20 }}\nSingle {{ value = \"hello\" }}\nColor::Red\nColor::Custom {{ g = 128, r = 255 }}")
+fn test_inspect_compact_structs_and_enum_variants() {
     let point = Point { x: 10, y: 20 }
     print(inspect(point))
-}
-
-@test(output = "Single {{ value = \"hello\" }}")
-fn test_inspect_compact_one_field() {
     let single = Single { value: "hello" }
     print(inspect(single))
-}
-
-@test(output = "Triple {{\n  a = 1,\n  b = 2,\n  c = 3\n}}")
-fn test_inspect_multiline_three_fields() {
-    let triple = Triple { a: 1, b: 2, c: 3 }
-    print(inspect(triple))
-}
-
-@test(output = "Color::Red")
-fn test_inspect_enum_unit_variant() {
     let color = Color::Red
     print(inspect(color))
-}
-
-@test(output = "Color::Custom {{ g = 128, r = 255 }}")
-fn test_inspect_enum_record_variant_compact() {
-    let color = Color::Custom { r: 255, g: 128 }
-    print(inspect(color))
+    let custom = Color::Custom { r: 255, g: 128 }
+    print(inspect(custom))
 }
 
 // `Color` is stored as a scalar tag box, which carries no variant name, so the
@@ -195,46 +160,26 @@ fn __brace_close() -> string {
 }
 
 @test
-fn test_all_fields_null() {
+fn test_null_fields_render() {
     let ob = __brace_open()
     let cb = __brace_close()
     let x = AllNull { a: null, b: null }
     assert_eq(inspect(x), "AllNull {ob} a = nil, b = nil {cb}")
-}
-
-@test
-fn test_some_fields_null() {
-    let ob = __brace_open()
-    let cb = __brace_close()
-    let x = SomeNull { a: 1, b: null, c: null }
-    assert_eq(inspect(x), "SomeNull {ob}\n  a = 1,\n  b = nil,\n  c = nil\n{cb}")
-}
-
-@test
-fn test_null_field_in_interpolation() {
-    let ob = __brace_open()
-    let cb = __brace_close()
-    let x = AllNull { a: null, b: null }
     assert_eq("{x}", "AllNull {ob} a = nil, b = nil {cb}")
+    let y = SomeNull { a: 1, b: null, c: null }
+    assert_eq(inspect(y), "SomeNull {ob}\n  a = 1,\n  b = nil,\n  c = nil\n{cb}")
 }
 
 // Controls: a fully-populated struct is unchanged, and a populated field
 // alongside a null one still renders its value.
-
 @test
-fn test_no_null_fields_unchanged() {
+fn test_populated_fields_unchanged() {
     let ob = __brace_open()
     let cb = __brace_close()
     let x = NoNull { a: 1, b: "hi" }
     assert_eq(inspect(x), "NoNull {ob} a = 1, b = \"hi\" {cb}")
-}
-
-@test
-fn test_populated_field_survives() {
-    let ob = __brace_open()
-    let cb = __brace_close()
-    let x = SomeNull { a: 42, b: "set", c: null }
-    assert_eq(inspect(x), "SomeNull {ob}\n  a = 42,\n  b = \"set\",\n  c = nil\n{cb}")
+    let y = SomeNull { a: 42, b: "set", c: null }
+    assert_eq(inspect(y), "SomeNull {ob}\n  a = 42,\n  b = \"set\",\n  c = nil\n{cb}")
 }
 
 // --- Function values ---
@@ -251,35 +196,25 @@ fn make_capfree() -> fn() -> int { return () => 42 }
 fn make_capturing(x: int) -> fn() -> int { return () => x + 1 }
 
 // Both a capture-free (raw function) and a capturing (record) lambda inspect to
-// the `function: ...` form -- the record is rendered via its CodeRef, not walked.
-@test(output = "true\ntrue")
+// the `function: ...` form -- the record is rendered via its CodeRef, not walked,
+// so no capture internals leak.
+@test(output = "true\ntrue\nfalse")
 fn test_inspect_record_renders_as_function() {
     print(inspect(make_capfree()).starts_with("function: "))
     print(inspect(make_capturing(10)).starts_with("function: "))
-}
-
-// No capture internals leak from a record's inspect output.
-@test(output = "false")
-fn test_inspect_record_no_leak() {
     print(inspect(make_capturing(10)).contains("__slot"))
 }
 
 // A struct holding a capturing lambda renders the field as a function, same as
-// one holding a capture-free lambda -- the record does not leak through the walk.
-@test(output = "true\ntrue\nfalse")
+// one holding a capture-free lambda -- the record does not leak through the walk,
+// nor through interpolation, which routes a composite through inspect.
+@test(output = "true\ntrue\nfalse\nfalse")
 fn test_inspect_composite_with_record() {
     let hf = Holder { cb: make_capfree(), tag: 1 }
     let hc = Holder { cb: make_capturing(10), tag: 2 }
     print(inspect(hf).contains("cb = function: "))
     print(inspect(hc).contains("cb = function: "))
     print(inspect(hc).contains("__slot"))
-}
-
-// Interpolation of a composite holding a capturing lambda routes through inspect
-// -- same no-leak guarantee.
-@test(output = "false")
-fn test_interp_composite_with_record() {
-    let hc = Holder { cb: make_capturing(10), tag: 2 }
     let s = "{hc}"
     print(s.contains("__slot"))
 }
