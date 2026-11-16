@@ -20,11 +20,7 @@ fn with_stdlib(src: &str, file: &str) -> skull_parser::stdlib::ModuleSet {
 fn semantic_pass(
     modules: &mut skull_parser::stdlib::ModuleSet,
 ) -> Result<Workspace, skull_parser::CompilerError> {
-    skull::pipeline::semantic_pass(
-        modules,
-        &Default::default(),
-        skull::pipeline::ClosureGate::Enforce,
-    )
+    skull::pipeline::semantic_pass(modules, &Default::default())
 }
 
 /// Panic if bone recorded any type/lowering/interface error. `semantic_pass`

@@ -160,8 +160,7 @@ impl RuntimeServices {
 
 pub type Handler = fn(&CommandContext) -> Result<()>;
 
-/// A build's optional fix flag, help and implementation; the public imports
-/// fixer does not depend on any host recipe.
+/// A build's optional `rock fix` flag, help and implementation.
 pub struct FixHandler {
     pub flag: &'static str,
     pub help: &'static str,

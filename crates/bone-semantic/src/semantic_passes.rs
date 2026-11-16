@@ -955,40 +955,18 @@ fn is_type_publicly_accessible(
     false
 }
 
-/// One type an exported definition's interface names: the exporter,
-/// the nominal it requires, why, and whether that nominal supports the
-/// exporter's public audience.
-#[derive(Clone, Debug)]
-pub struct ClosureRequirement {
-    /// The exported definition's key.
-    pub exporter: Ustr,
+/// One type an exported definition's interface names: the nominal it
+/// requires, why, and whether that nominal supports the exporter's public
+/// audience.
+struct ClosureRequirement {
     /// The nominal type's key.
-    pub required: Ustr,
+    required: Ustr,
     /// `public function`, `generic bound`, `field type of exported record`,
     /// `payload of exported enum`, `payload of exported newtype`, or
     /// `type of exported global`.
-    pub reason: &'static str,
-    pub span: Span,
-    pub satisfied: bool,
-}
-
-/// Every nominal named by the interface of a publicly exported definition,
-/// in `ws.defs` order, satisfied or not. The one closure
-/// computation: the API-closure gate rejects the first unsatisfied entry, and
-/// `rock modules audit` / `migrate` read the whole list with its reasons.
-pub fn api_closure_requirements(ws: &Workspace) -> Vec<ClosureRequirement> {
-    if ws.ns.packages.is_empty() {
-        return Vec::new();
-    }
-    let reachability = export_reachability(ws);
-    // Each definition's requirements depend on the workspace alone; the
-    // definitions are visited side by side and reported in map order.
-    let per_def: Vec<Vec<ClosureRequirement>> = ws
-        .defs
-        .par_iter()
-        .map(|(def_key, meta)| api_closure_requirements_of(ws, &reachability, def_key, meta))
-        .collect();
-    per_def.into_iter().flatten().collect()
+    reason: &'static str,
+    span: Span,
+    satisfied: bool,
 }
 
 type ExportReachability =
@@ -1043,7 +1021,6 @@ fn api_closure_requirements_of(
         let mut need = |ty: TyId, span: Span, reason: &'static str| {
             collect_type_closure(ws, ty, &mut |required| {
                 out.push(ClosureRequirement {
-                    exporter: *def_key,
                     required,
                     reason,
                     span,
@@ -1211,9 +1188,7 @@ pub fn semantic_pass_with_aliases(
 }
 
 /// The semantic pass over `modules` without the public-API closure gate, for
-/// a caller that applies it (the compile pipeline) or reads
-/// [`api_closure_requirements`] itself (the migrate planner grows an export
-/// set until the closure is satisfied).
+/// a caller that applies it itself (the compile pipeline).
 ///
 /// When the shared prefix of `modules` is the process stdlib and no user
 /// module can change it, the pass starts from the stdlib checked once per

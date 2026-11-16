@@ -42,7 +42,7 @@ pub(crate) fn arguments(command: clap::Command) -> clap::Command {
                 .help("For `rock sim`: list every `@sim` wire name in the project, one per line, then exit."),
         ] },
     ])
-        .mut_arg("perf-format", |arg| arg.help("Output format for `rock perf`, `rock sim-report`, or `rock modules audit`: \"pretty\" (default) or \"json\"."))
+        .mut_arg("perf-format", |arg| arg.help("Output format for `rock perf` or `rock sim-report`: \"pretty\" (default) or \"json\"."))
 }
 
 pub(crate) fn decode(m: &clap::ArgMatches, args: &mut Args) {

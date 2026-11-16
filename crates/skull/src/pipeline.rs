@@ -42,14 +42,6 @@ pub fn syntax_errors<'a>(modules: impl IntoIterator<Item = &'a Ast>) -> Vec<Comp
         .collect()
 }
 
-/// Whether the semantic pass enforces the API closure itself or leaves the
-/// requirements to a caller that reads them (the module migration tools).
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ClosureGate {
-    Enforce,
-    LeaveToCaller,
-}
-
 /// Lower and type-check `modules`.
 /// Recovered trees and recorded body errors remain available to tooling.
 /// [`check_modules`] applies the syntax and macro admission gates, and
@@ -57,18 +49,15 @@ pub enum ClosureGate {
 pub fn semantic_pass(
     modules: &mut ModuleSet,
     aliases: &NsAliases,
-    gate: ClosureGate,
 ) -> Result<Workspace, CompilerError> {
     let ws = bone_semantic::semantic_passes::semantic_pass_without_closure_gate(modules, aliases)?;
-    apply_closure_gate(ws, gate)
+    apply_closure_gate(ws)
 }
 
-fn apply_closure_gate(mut ws: Workspace, gate: ClosureGate) -> Result<Workspace, CompilerError> {
-    if gate == ClosureGate::Enforce {
-        let timer = bone_core::prelude::Instant::now();
-        bone_semantic::semantic_passes::pass_validate_api_closure(&ws)?;
-        ws.log_time("api closure", timer);
-    }
+fn apply_closure_gate(mut ws: Workspace) -> Result<Workspace, CompilerError> {
+    let timer = bone_core::prelude::Instant::now();
+    bone_semantic::semantic_passes::pass_validate_api_closure(&ws)?;
+    ws.log_time("api closure", timer);
     Ok(ws)
 }
 
@@ -79,7 +68,6 @@ fn apply_closure_gate(mut ws: Workspace, gate: ClosureGate) -> Result<Workspace,
 /// "lowered and checked", not "no type errors".
 pub fn check_modules(
     modules: &mut ModuleSet,
-    gate: ClosureGate,
     aliases: impl FnOnce(&ModuleSet) -> Result<NsAliases, CompilerError>,
 ) -> Result<(Workspace, Vec<CompilerError>), Vec<CompilerError>> {
     let gates_timer = bone_core::prelude::Instant::now();
@@ -106,7 +94,7 @@ pub fn check_modules(
     let ws = match ws {
         Err(bone_semantic::semantic_passes::PassFailure::Gate(errors)) => return Err(errors),
         Err(bone_semantic::semantic_passes::PassFailure::Pass(error)) => Err(error),
-        Ok(ws) => apply_closure_gate(ws, gate),
+        Ok(ws) => apply_closure_gate(ws),
     };
     // Expansion recovers: a macro that must not expand records the reason on
     // `recovery_errors` and leaves the call in place. That reason explains
@@ -312,9 +300,8 @@ pub fn compile_modules(
     target: EmitTarget<'_>,
     host: &mut dyn CompileHost,
 ) -> Result<Compiled, CompileFailure> {
-    let (mut ws, body_errors) =
-        check_modules(&mut modules, ClosureGate::Enforce, |m| host.aliases(m))
-            .map_err(|errors| CompileFailure::at(Stage::Check, errors))?;
+    let (mut ws, body_errors) = check_modules(&mut modules, |m| host.aliases(m))
+        .map_err(|errors| CompileFailure::at(Stage::Check, errors))?;
     if !body_errors.is_empty() {
         return Err(CompileFailure::at(Stage::Check, body_errors));
     }

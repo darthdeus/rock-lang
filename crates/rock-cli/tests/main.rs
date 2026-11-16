@@ -3,14 +3,12 @@
 mod backend_stats_summary;
 mod broken_stdlib;
 mod compile_budget;
-mod fix_imports;
 mod gpu_process;
 mod guide;
 mod host_api;
 mod lsp_code_action;
 mod lua_body_limits;
 mod metric_add_window;
-mod modules_display_paths;
 mod no_stdlib;
 mod package_relative_output;
 mod package_test_program_shape;

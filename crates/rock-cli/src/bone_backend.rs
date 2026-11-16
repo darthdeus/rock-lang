@@ -15,7 +15,6 @@ use bone_core::prelude::Instant;
 use rock_core::CompilerError;
 use rock_core::SourceFiles;
 use rock_core::source_file_from_path_and_contents;
-use skull::pipeline::ClosureGate;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
@@ -119,35 +118,12 @@ pub(crate) fn aliases_for_modules<'a>(
 pub fn check_modules(
     modules: &mut skull_parser::stdlib::ModuleSet,
 ) -> std::result::Result<bone_semantic::inference::Workspace, Vec<CompilerError>> {
-    let (ws, errs) = check_modules_gated(modules, ClosureGate::Enforce)?;
+    let (ws, errs) =
+        skull::pipeline::check_modules(modules, |modules| aliases_for_modules(modules.iter()))?;
     if !errs.is_empty() {
         return Err(errs);
     }
     Ok(ws)
-}
-
-/// [`check_modules`] for the modules tools, which must read a workspace whose
-/// bodies have errors (the migrate planner compares resolution site by site
-/// and repairs what changed) and which read the public-API type closure themselves
-/// (`api_closure_requirements`). Every other gate is the same; the body
-/// errors come back beside the workspace instead of replacing it.
-pub(crate) fn check_modules_for_tools(
-    modules: &mut skull_parser::stdlib::ModuleSet,
-) -> std::result::Result<
-    (bone_semantic::inference::Workspace, Vec<CompilerError>),
-    Vec<CompilerError>,
-> {
-    check_modules_gated(modules, ClosureGate::LeaveToCaller)
-}
-
-fn check_modules_gated(
-    modules: &mut skull_parser::stdlib::ModuleSet,
-    gate: ClosureGate,
-) -> std::result::Result<
-    (bone_semantic::inference::Workspace, Vec<CompilerError>),
-    Vec<CompilerError>,
-> {
-    skull::pipeline::check_modules(modules, gate, |modules| aliases_for_modules(modules.iter()))
 }
 
 /// [`check_modules`] over the stdlib + `user`: the common "I just parsed user
@@ -765,7 +741,7 @@ pub fn semantic_pass_with_aliases(
     modules: &mut skull_parser::stdlib::ModuleSet,
     aliases: &bone_core::modules::NsAliases,
 ) -> std::result::Result<bone_semantic::inference::Workspace, CompilerError> {
-    skull::pipeline::semantic_pass(modules, aliases, ClosureGate::Enforce)
+    skull::pipeline::semantic_pass(modules, aliases)
 }
 
 #[cfg(test)]

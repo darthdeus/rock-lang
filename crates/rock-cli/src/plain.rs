@@ -243,95 +243,22 @@ pub static COMMANDS: &[&CliCommand] = &[
         }),
     },
     &CliCommand {
-        name: "modules",
-        route: Route::Direct(|cx| {
-            let usage = "usage: rock modules audit <project> [--closed] [--format pretty|json]\n       rock modules migrate <package> --check|--apply [--consumer <dir>]... [--format pretty|json]";
-            let format = match cx.args.perf_format.as_str() {
-                "pretty" => rock_cli::ModulesFormat::Pretty,
-                "json" => rock_cli::ModulesFormat::Json,
-                other => {
-                    anyhow::bail!("rock modules: unknown --format `{other}` (pretty|json)\n{usage}")
-                }
-            };
-            let code = match cx.args.files.as_slice() {
-                [sub, project] if sub == "audit" => rock_cli::modules_audit_run(
-                    std::path::Path::new(project),
-                    cx.args.closed,
-                    format,
-                )?,
-                [sub, package] if sub == "migrate" => {
-                    let mode = if cx.args.apply {
-                        rock_cli::ModulesMode::Apply
-                    } else {
-                        rock_cli::ModulesMode::Check
-                    };
-                    let consumers: Vec<std::path::PathBuf> = cx
-                        .args
-                        .consumer
-                        .iter()
-                        .map(std::path::PathBuf::from)
-                        .collect();
-                    rock_cli::modules_migrate_run(
-                        std::path::Path::new(package),
-                        &consumers,
-                        mode,
-                        format,
-                    )?
-                }
-                [sub, ..] if sub != "audit" && sub != "migrate" => {
-                    anyhow::bail!(
-                        "rock modules: unknown subcommand `{sub}`; `audit` and `migrate` exist\n{usage}"
-                    )
-                }
-                _ => anyhow::bail!("{usage}"),
-            };
-            if code != 0 {
-                rock_cli::invocation_log::exit(code);
-            }
-            Ok(())
-        }),
-    },
-    &CliCommand {
         name: "fix",
         route: Route::Direct(|cx| {
-            let mut usage =
-                "usage: rock fix --imports <package|file> [--check|--apply] [--format pretty|json]"
-                    .to_string();
-            let mut choices = vec!["`--imports`".to_string()];
-            for fix in registry::registered().fixes {
-                usage.push_str("\n       ");
-                usage.push_str(fix.usage);
-                choices.push(format!("`--{}`", fix.flag));
-            }
+            let fixes = registry::registered().fixes;
             if let Some(fix) = cx.args.fix {
                 return (fix.run)(cx);
             }
-            if !cx.args.imports {
-                anyhow::bail!(
-                    "rock fix: name the fix to run ({})\n{usage}",
-                    choices.join(" or ")
-                );
+            if fixes.is_empty() {
+                anyhow::bail!("rock fix: this build registers no fixes");
             }
-            let format = match cx.args.perf_format.as_str() {
-                "pretty" => rock_cli::ModulesFormat::Pretty,
-                "json" => rock_cli::ModulesFormat::Json,
-                other => {
-                    anyhow::bail!("rock fix: unknown --format `{other}` (pretty|json)\n{usage}")
-                }
-            };
-            let [target] = cx.args.files.as_slice() else {
-                anyhow::bail!("{usage}")
-            };
-            let mode = if cx.args.apply {
-                rock_cli::ModulesMode::Apply
-            } else {
-                rock_cli::ModulesMode::Check
-            };
-            let code = rock_cli::modules_fix_run(std::path::Path::new(target), mode, format)?;
-            if code != 0 {
-                rock_cli::invocation_log::exit(code);
-            }
-            Ok(())
+            let choices: Vec<String> = fixes.iter().map(|f| format!("`--{}`", f.flag)).collect();
+            let usage: Vec<&str> = fixes.iter().map(|f| f.usage).collect();
+            anyhow::bail!(
+                "rock fix: name the fix to run ({})\nusage: {}",
+                choices.join(" or "),
+                usage.join("\n       ")
+            )
         }),
     },
 ];

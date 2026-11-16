@@ -65,10 +65,6 @@ pub mod skull_backend;
 mod test;
 pub(crate) mod test_protocol;
 pub(crate) use test::TestFilter;
-pub(crate) mod modules_analysis;
-mod modules_audit;
-mod modules_fix;
-mod modules_migrate;
 pub mod plain;
 mod process;
 pub mod registry;
@@ -77,11 +73,6 @@ pub mod unified_compile;
 pub mod watch;
 pub(crate) use lint_cmd::do_lint;
 pub(crate) use lsp_survey::lsp_survey;
-pub(crate) use modules_audit::Format as ModulesFormat;
-pub(crate) use modules_audit::run as modules_audit_run;
-pub(crate) use modules_fix::run as modules_fix_run;
-pub(crate) use modules_migrate::Mode as ModulesMode;
-pub(crate) use modules_migrate::run as modules_migrate_run;
 pub use process::{compiler_process, main_with};
 
 pub use common::*;
@@ -217,17 +208,6 @@ pub struct Args {
     /// `rock lint --union <lib>`: judge a library's reachability against every
     /// consumer in the repo at once, reporting only what none of them reach.
     pub union: bool,
-    /// `rock modules audit --closed`: fail unless the selected root and every
-    /// package it reaches, other than the compiler-owned std, is modules-v1.
-    pub closed: bool,
-    /// `rock modules migrate --apply`: write the planned edits (the default,
-    /// and `--check`, only plan).
-    pub apply: bool,
-    /// `rock modules migrate --consumer <dir>` (repeatable): the consumer set
-    /// whose references decide the package's exports.
-    pub consumer: Vec<String>,
-    /// `rock fix --imports`: add missing `use` items.
-    pub imports: bool,
     /// Optional host-supplied recipe selected under `rock fix`.
     pub fix: Option<&'static registry::FixHandler>,
     /// Where `--union` looks for consumers. Defaults to the lib's parent, which
@@ -284,7 +264,7 @@ impl Args {
                 .help("Disable timing output (Phase Timing, IO Breakdown)"))
             .arg(Arg::new("perf-format").long("format").default_value("pretty")
                 .value_parser(["pretty", "json"])
-                .help("Output format for reports and module tools: \"pretty\" (default) or \"json\"."))
+                .help("Output format for reports: \"pretty\" (default) or \"json\"."))
             .arg(Arg::new("type-validation").long("type-validation").action(ArgAction::SetTrue)
                 .help("Enable type validation warnings for unresolved types after inference"))
             .arg(Arg::new("test-threads").long("test-threads").value_name("NUM")
@@ -324,14 +304,6 @@ impl Args {
                 .help("For `rock lint --lints=method_syntax`: comma-separated type names to drop from the sweep (--ignore-types=Color,Vec2). A name that is no type in the project is reported."))
             .arg(Arg::new("union").long("union").action(ArgAction::SetTrue)
                 .help("For `rock lint <lib>`: judge a library's reachability against every consumer in the repo at once, reporting only functions that NONE of them reach. The only sound way to run unused_fn on a lib."))
-            .arg(Arg::new("closed").long("closed").action(ArgAction::SetTrue)
-                .help("For `rock modules audit`: exit non-zero if the root or any package it reaches (other than the compiler-owned std) is legacy."))
-            .arg(Arg::new("apply").long("apply").action(ArgAction::SetTrue).conflicts_with("check")
-                .help("For `rock modules migrate`: write the planned edits after verifying them (without it, or with --check, only the plan is printed)."))
-            .arg(Arg::new("consumer").long("consumer").value_name("DIR").action(ArgAction::Append)
-                .help("For `rock modules migrate`: a consumer package whose references decide what becomes `pub` (repeatable)."))
-            .arg(Arg::new("imports").long("imports").action(ArgAction::SetTrue)
-                .help("For `rock fix`: add the `use` items a modules-v1 fragment's unresolved names need, when one accessible candidate exists (plans by default; --apply writes)."))
             .args(registry::registered().fixes.iter().map(|fix|
                 Arg::new(fix.flag).long(fix.flag).action(ArgAction::SetTrue).help(fix.help)
             ))
@@ -427,13 +399,6 @@ impl Args {
             only_types: m.get_one::<String>("only-types").cloned(),
             ignore_types: m.get_one::<String>("ignore-types").cloned(),
             union: m.get_flag("union"),
-            closed: m.get_flag("closed"),
-            apply: m.get_flag("apply"),
-            consumer: m
-                .get_many::<String>("consumer")
-                .map(|v| v.cloned().collect())
-                .unwrap_or_default(),
-            imports: m.get_flag("imports"),
             fix: registry::registered()
                 .fixes
                 .iter()

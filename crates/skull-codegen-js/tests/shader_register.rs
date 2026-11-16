@@ -115,12 +115,7 @@ fn qualified_register_workspace(registrations: &[&str]) -> bone_core::workspace:
         users.push(module);
     }
     let mut modules = skull::pipeline::with_stdlib(users).expect("stdlib");
-    let ws = skull::pipeline::semantic_pass(
-        &mut modules,
-        &Default::default(),
-        skull::pipeline::ClosureGate::Enforce,
-    )
-    .expect("workspace");
+    let ws = skull::pipeline::semantic_pass(&mut modules, &Default::default()).expect("workspace");
     let errors: Vec<_> = ws
         .inferences
         .iter()

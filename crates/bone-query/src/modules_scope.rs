@@ -331,21 +331,16 @@ pub(crate) fn path_members(
 }
 
 /// An accessible definition no tier of `frag` binds, with the `use` path
-/// that names it from `frag`. `package` owns it.
+/// that names it from `frag`.
 pub struct ImportCandidate {
     pub name: Ustr,
     pub key: Ustr,
-    pub package: u32,
-    /// The module holding it, as a `use` path prefix (empty at a package
-    /// root reached relatively).
-    pub module_path: Vec<Ustr>,
-    pub from_root: bool,
     pub path: String,
 }
 
 /// Definitions `frag` could name through a new `use` (completion may
-/// suggest out-of-scope public symbols with an import edit; `rock fix
-/// --imports`), for names `admit` accepts. Only a name no
+/// suggest out-of-scope public symbols with an import edit), for names
+/// `admit` accepts. Only a name no
 /// tier binds qualifies -- an explicit import of a bound name would rebind
 /// every use of it -- and only a definition of this package or of a declared
 /// dependency, through a path the resolver resolves from `frag` to that very
@@ -363,7 +358,7 @@ pub fn import_candidates(
                 .get_or_insert_with(|| tier_names(ws, frag).into_iter().collect())
                 .contains(&name)
     };
-    let mut offer = |name: Ustr, key: Ustr, package: u32, from_root: bool, segments: Vec<Ustr>| {
+    let mut offer = |name: Ustr, key: Ustr, from_root: bool, segments: Vec<Ustr>| {
         let path = UsePathRef {
             from_root,
             segments,
@@ -377,13 +372,9 @@ pub fn import_candidates(
             .map(|s| s.as_str())
             .collect::<Vec<_>>()
             .join("::");
-        let module_path = path.segments[..path.segments.len() - 1].to_vec();
         out.push(ImportCandidate {
             name,
             key,
-            package,
-            module_path,
-            from_root,
             path: if from_root {
                 format!("::{spelled}")
             } else {
@@ -403,7 +394,7 @@ pub fn import_candidates(
         let Some((from_root, segments)) = import_path(ws, frag, meta) else {
             continue;
         };
-        offer(meta.name, *key, meta.package, from_root, segments);
+        offer(meta.name, *key, from_root, segments);
     }
     out.sort_by(|a, b| {
         a.name
