@@ -1,12 +1,6 @@
-// Adversarial tests: @inline + scalarize integration
-//
-// The marquee case. An @inline fn returns a struct literal; the call
-// site binds it to a local that never escapes. After the inline pass
-// expands the body into the caller, the struct literal is call-site
-// local, and scalarization fires.
-//
-// Runtime behavior must be identical whether neither pass runs, only
-// @inline runs, or both run.
+// @inline + scalarize: an @inline fn returning a struct literal bound to a
+// non-escaping local becomes call-site local after inlining, so it
+// scalarizes. Runtime behavior must not depend on which passes run.
 
 struct FixVec2 {
     x: float,
@@ -28,7 +22,6 @@ fn ivec(x: int, y: int) -> IVec2 {
     return IVec2 { x: x, y: y }
 }
 
-// V0 single-expression body. V1 will allow the natural two-let form.
 @inline
 fn tile_center(gx: int, gy: int) -> FixVec2 {
     return FixVec2 {
@@ -62,7 +55,6 @@ fn test_composed_inline_with_local_math() {
 
 @test(output = "20 30")
 fn test_inline_in_hot_loop_shape() {
-    // Micro-analogue of the floors_walls loop.
     let xs = 0
     let ys = 0
     for i in 0..5 {

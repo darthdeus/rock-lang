@@ -1,9 +1,5 @@
-// Adversarial tests: struct scalarization — conditional binding blocks scalarization
-//
-// V1 requires the local be bound from a direct struct literal. If the
-// binding is the result of a conditional expression, function call, or
-// match arm, scalarization must NOT fire (phi-merging is out of scope
-// for V1). Runtime correctness is what we verify here.
+// A local bound from a conditional, coalesce, call or match arm rather than a
+// direct struct literal must not scalarize; these check runtime results.
 
 struct IVec2 {
     x: int,

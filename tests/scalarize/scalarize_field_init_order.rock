@@ -1,18 +1,6 @@
-// Adversarial tests: struct scalarization — field-init evaluation
-//
-// Rock evaluates named-field initializers at some well-defined ordering
-// that is an implementation detail of the current codegen (currently
-// FxHashMap iteration order in `generate_struct_lit_expr`). Scalarization
-// must preserve WHATEVER the current semantics are — same observable
-// order, same count of evaluations (exactly once each), same final
-// values bound to the fields.
-//
-// Rather than asserting a specific source-vs-declaration order (which
-// is NOT documented as stable behavior), we verify the two invariants
-// that genuinely matter for correctness:
-//
-//   (a) Each field initializer executes exactly once.
-//   (b) The final value of each field matches its initializer's result.
+// Scalarizing a struct literal must evaluate each field initializer exactly
+// once and bind each field to its initializer's result. Initializer order
+// is not asserted.
 
 struct IRect {
     x: int,

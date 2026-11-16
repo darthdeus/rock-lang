@@ -1,9 +1,5 @@
-// Adversarial tests: struct scalarization — non-firing when struct escapes
-//
-// Each test is behavioral: the struct escapes (returned, passed,
-// captured, stored, mutated, compared), so scalarization must NOT
-// fire. Shape/emission is checked by Rust shape tests. Here we only
-// verify runtime correctness.
+// A struct that escapes (returned, passed, captured, stored, mutated,
+// compared) must not scalarize; these check runtime results.
 
 struct FixVec2 {
     x: float,

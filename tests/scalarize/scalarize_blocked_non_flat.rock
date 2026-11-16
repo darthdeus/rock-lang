@@ -1,8 +1,5 @@
-// Adversarial tests: struct scalarization — non-flat structs don't scalarize
-//
-// V1 only handles structs whose fields are all primitives
-// (int / float / bool). A struct with a nested struct, tuple, array,
-// Vec, Map, Arena, `any`, or function-typed field must NOT scalarize.
+// A struct with a non-primitive field must not scalarize; reads through the
+// nested field still work.
 
 struct FixVec2 {
     x: float,
@@ -30,7 +27,7 @@ fn test_nested_struct_does_not_scalarize_outer() {
         pos: FixVec2 { x: 3.0, y: 4.0 },
         rot: 90.0,
     }
-    // Outer Transform has a FixVec2 field — not flat. Must not scalarize t.
+    // Outer Transform has a FixVec2 field -- not flat. Must not scalarize t.
     // Reading through the nested field still works.
     print("{t.pos.x as int} {t.pos.y as int} {t.rot as int}")
 }

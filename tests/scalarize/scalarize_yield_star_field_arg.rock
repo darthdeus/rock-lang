@@ -1,16 +1,7 @@
-// REPRO (currently failing): a value-typed LOCAL inside a `co fn` body,
-// whose field is passed as an argument to a `await`-delegated `co fn`,
-// is not scalarized in the delegated call -- ScalarizePass.rewrite_expr
-// has no YieldDelegate arm, so `p.x` survives un-rewritten and the
-// generated step fn references a nonexistent local `p`. The coroutine
-// dies (index nil), swallowed by the driver pcall.
-//
-// Must be a value LOCAL inside the co fn body (scalarized by the shared
-// ScalarizePass), NOT a value param (handled separately by the
-// coroutine's own param-scalarization, which is not buggy).
-//
-//
-// Control (locals) passes; repro (field args) fails until the fix lands.
+// Regression: a value-typed local in a co fn whose fields are passed straight
+// into an `await`-delegated co fn call was not rewritten by scalarization, so
+// the step fn referenced a missing local and the coroutine died silently.
+// Value params take a separate path; the locals form is the control.
 
 value V2 {
     x: int,

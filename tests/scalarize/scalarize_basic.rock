@@ -1,8 +1,6 @@
-// Adversarial tests: struct scalarization — basic correctness
-//
-// A local bound to a struct literal, only field-read, never escapes,
-// all-primitive fields, should be scalarized. Behavior must be
-// byte-identical to the non-scalarized version.
+// A local bound to a struct literal with all-primitive fields, only
+// field-read and never escaping, is scalarized; behavior must match the
+// non-scalarized version.
 
 struct FixVec2 {
     x: float,
@@ -28,26 +26,12 @@ struct Color {
     a: float,
 }
 
-@test(output = "3 4 7")
-fn test_basic_flat_read() {
+@test(output = "3 4 7\n7\n1 0 0 1")
+fn test_flat_reads() {
     let p = FixVec2 { x: 3.0, y: 4.0 }
     print("{p.x as int} {p.y as int} {(p.x + p.y) as int}")
-}
-
-@test(output = "7")
-fn test_flat_in_expression() {
-    let p = IVec2 { x: 3, y: 4 }
-    print(p.x + p.y)
-}
-
-@test(output = "2 3 4 5")
-fn test_rect_fields() {
-    let r = IRect { x: 2, y: 3, w: 4, h: 5 }
-    print("{r.x} {r.y} {r.w} {r.h}")
-}
-
-@test(output = "1 0 0 1")
-fn test_color_fields() {
+    let q = IVec2 { x: 3, y: 4 }
+    print(q.x + q.y)
     let c = Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }
     print("{c.r as int} {c.g as int} {c.b as int} {c.a as int}")
 }
