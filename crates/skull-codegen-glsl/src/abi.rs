@@ -338,43 +338,6 @@ pub(crate) fn validate_abi(
         }
     }
 
-    // --- attribute locations: a bijection on names AND on locations. Two
-    // attributes at one location is a silent aliasing that a name bijection
-    // alone accepts.
-    let attrs: Vec<Ustr> = iface
-        .vertex_inputs
-        .iter()
-        .flat_map(|i| i.attrs.iter().map(|(name, _)| *name))
-        .collect();
-    if attrs.len() != abi.attribute_locations.len() {
-        return Err(err(
-            span,
-            format!(
-                "internal: the interface declares {} vertex attribute(s) and the GLSL ABI plan \
-             assigns {} location(s)",
-                attrs.len(),
-                abi.attribute_locations.len()
-            ),
-        ));
-    }
-    let mut occupied: HashMap<u32, Ustr> = HashMap::default();
-    for name in &attrs {
-        let Some((_, loc)) = abi.attribute_locations.iter().find(|(an, _)| an == name) else {
-            return Err(err(
-                span,
-                format!("internal: vertex attribute `{name}` has no location in the GLSL ABI plan"),
-            ));
-        };
-        if let Some(other) = occupied.insert(*loc, *name) {
-            return Err(err(
-                span,
-                format!(
-                    "internal: vertex attributes `{other}` and `{name}` both occupy location {loc}"
-                ),
-            ));
-        }
-    }
-
     // --- texture units: the same bijection the stage join needs, checked once
     // for the program so an unused stage cannot leave it unasked.
     let group = iface.sampler_names();
@@ -531,9 +494,8 @@ pub(crate) struct ProgramAbi<'a> {
     /// Anchors a projection failure, so a lookup miss is a spanned rejection
     /// rather than a panic.
     span: Span,
-    /// The vertex attribute declarations, resolved once. Only the vertex stage
-    /// renders them, and the name/location join they need is exactly what
-    /// validation just established.
+    /// The vertex attribute declarations, resolved and checked once. Only the
+    /// vertex stage renders them.
     pub(crate) attributes: Vec<(Ustr, GlslTy, u32)>,
 }
 
@@ -631,15 +593,17 @@ fn project_stage_abi<'a>(
 /// Every vertex attribute's emitted declaration: its name and neutral kind from
 /// the INTERFACE, its location from the target's ABI plan.
 ///
-/// Rejects a missing location rather than skipping the attribute. A dropped
-/// `in` declaration is a driver error with no compiler diagnostic, which is the
-/// one outcome this path may not produce.
+/// The join is a bijection on names AND on locations. A dropped `in`
+/// declaration is a driver error with no compiler diagnostic, and two
+/// attributes at one location is a silent aliasing that a name bijection
+/// alone accepts.
 fn attribute_declarations(
     iface: &ShaderInterfacePlan,
     abi: &ShaderAbiPlan,
     span: Span,
 ) -> Result<Vec<(Ustr, GlslTy, u32)>, CompilerError> {
     let mut out = Vec::new();
+    let mut occupied: HashMap<u32, Ustr> = HashMap::default();
     for (n, k) in iface.vertex_inputs.iter().flat_map(|i| i.attrs.iter()) {
         let Some((_, loc)) = abi.attribute_locations.iter().find(|(an, _)| an == n) else {
             return Err(err(
@@ -650,7 +614,26 @@ fn attribute_declarations(
                 ),
             ));
         };
+        if let Some(other) = occupied.insert(*loc, *n) {
+            return Err(err(
+                span,
+                format!(
+                    "internal: vertex attributes `{other}` and `{n}` both occupy location {loc}"
+                ),
+            ));
+        }
         out.push((*n, attr_glsl_ty(*k), *loc));
+    }
+    if out.len() != abi.attribute_locations.len() {
+        return Err(err(
+            span,
+            format!(
+                "internal: the interface declares {} vertex attribute(s) and the GLSL ABI plan \
+             assigns {} location(s)",
+                out.len(),
+                abi.attribute_locations.len()
+            ),
+        ));
     }
     Ok(out)
 }

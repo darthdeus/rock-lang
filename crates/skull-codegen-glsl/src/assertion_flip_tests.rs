@@ -359,12 +359,14 @@ fn overlapping_attribute_locations_reject() {
         abi.attribute_locations,
         vec![(Ustr::from("a"), 0), (Ustr::from("b"), 1)]
     );
-    validate_abi(&iface, &abi, Span::default()).expect("distinct locations must validate");
+    ProgramAbi::of(&iface, &abi, &[IrStage::Vertex], Span::default())
+        .expect("distinct locations must validate");
 
     let mut overlap = abi.clone();
     overlap.attribute_locations = vec![(Ustr::from("a"), 0), (Ustr::from("b"), 0)];
-    let msg = validate_abi(&iface, &overlap, Span::default())
-        .expect_err("overlapping locations must reject")
+    let msg = ProgramAbi::of(&iface, &overlap, &[IrStage::Vertex], Span::default())
+        .err()
+        .expect("overlapping locations must reject")
         .message;
     assert!(msg.contains("both occupy location"), "{msg}");
 }
