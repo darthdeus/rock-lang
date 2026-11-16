@@ -456,7 +456,6 @@ fn emit_body(
         &inlinable,
         &alias,
         loops,
-        true,
         frame,
         &cell_colors,
         &pinned,

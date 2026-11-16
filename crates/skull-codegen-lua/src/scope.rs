@@ -19,7 +19,6 @@ pub(crate) fn render_scope(
     inlinable: &[bool],
     alias: &[Option<Idx<Cell>>],
     loops: HashMap<Idx<Block>, ForLoop>,
-    is_top: bool,
     frame: Option<&FrameCtx>,
     cell_colors: &[u32],
     pinned: &[bool],
@@ -61,13 +60,8 @@ pub(crate) fn render_scope(
     } = va;
     // Only cells this region actually references get a local (a hoisted lambda
     // body is a full-arena clone; declaring the dead enclosing/sibling cells would
-    // blow LuaJIT's 200-local cap on a large co-fn step). Computed once per top
-    // scope; inline (non-`is_top`) renders declare nothing, so they skip it.
-    let referenced = if is_top {
-        referenced_cells_in_region(func, rpo, tail_forwards, suppressed)
-    } else {
-        vec![false; func.cells.len()]
-    };
+    // blow LuaJIT's 200-local cap on a large co-fn step).
+    let referenced = referenced_cells_in_region(func, rpo, tail_forwards, suppressed);
     let mut param_cells = vec![false; func.cells.len()];
     for &c in params {
         param_cells[raw(c) as usize] = true;
@@ -79,8 +73,7 @@ pub(crate) fn render_scope(
     // name instead: a store the pass never intended, which under the `_G` state
     // bridge costs a `__newindex` metamethod dispatch on every execution.
     let cell_has_local = |cid: Idx<Cell>| -> bool {
-        param_cells[raw(cid) as usize]
-            || (is_top && !is_frame(&cid) && referenced[raw(cid) as usize])
+        param_cells[raw(cid) as usize] || (!is_frame(&cid) && referenced[raw(cid) as usize])
     };
     // Where each declared local dies, for the `<local> = nil` kills that keep
     // dead slots out of LuaJIT exit snapshots (see `regalloc::nil_kills`). A
@@ -177,7 +170,7 @@ pub(crate) fn render_scope(
     // unwind trampoline, which runs the cleanups still registered when an
     // error escapes and re-raises it. The flag is consumed by that re-entry,
     // so a recursive or nested call is protected again.
-    if is_top && func.registers_defer_cleanup(rpo) {
+    if func.registers_defer_cleanup(rpo) {
         assert!(
             frame.is_none(),
             "coroutine step `{lua_name}` registers an unwind defer"
@@ -231,38 +224,36 @@ pub(crate) fn render_scope(
         out.push('r');
         push_uint(out, c);
     }
-    if is_top {
-        // Declare each cell LOCAL exactly once. Colored cells collapse onto their
-        // shared `c<color>` (deduped, and excluding any color already named by a
-        // param); any remaining uncolored cells declare per raw id.
-        let param_colors: HashSet<u32> = params
-            .iter()
-            .map(|c| cell_colors[raw(*c) as usize])
-            .filter(|&col| col != u32::MAX)
-            .collect();
-        let mut seen_color: HashSet<u32> = HashSet::default();
-        for (cid, _) in func.cells.iter() {
-            if param_cells[raw(cid) as usize] || !cell_has_local(cid) {
-                continue;
-            }
-            let (decl, col) = match cell_colors[raw(cid) as usize] {
-                u32::MAX => (true, None), // uncolored -> c<raw>
-                col if !param_colors.contains(&col) => (seen_color.insert(col), Some(col)),
-                _ => (false, None), // color already a param's
-            };
-            if !decl {
-                continue;
-            }
-            if any {
-                out.push_str(", ");
-            }
-            any = true;
-            top_locals += 1;
-            out.push('c');
-            match col {
-                Some(col) => push_uint(out, col),
-                None => push_uint(out, func.emit_cell_id(cid)),
-            }
+    // Declare each cell LOCAL exactly once. Colored cells collapse onto their
+    // shared `c<color>` (deduped, and excluding any color already named by a
+    // param); any remaining uncolored cells declare per raw id.
+    let param_colors: HashSet<u32> = params
+        .iter()
+        .map(|c| cell_colors[raw(*c) as usize])
+        .filter(|&col| col != u32::MAX)
+        .collect();
+    let mut seen_color: HashSet<u32> = HashSet::default();
+    for (cid, _) in func.cells.iter() {
+        if param_cells[raw(cid) as usize] || !cell_has_local(cid) {
+            continue;
+        }
+        let (decl, col) = match cell_colors[raw(cid) as usize] {
+            u32::MAX => (true, None), // uncolored -> c<raw>
+            col if !param_colors.contains(&col) => (seen_color.insert(col), Some(col)),
+            _ => (false, None), // color already a param's
+        };
+        if !decl {
+            continue;
+        }
+        if any {
+            out.push_str(", ");
+        }
+        any = true;
+        top_locals += 1;
+        out.push('c');
+        match col {
+            Some(col) => push_uint(out, col),
+            None => push_uint(out, func.emit_cell_id(cid)),
         }
     }
     if any {
