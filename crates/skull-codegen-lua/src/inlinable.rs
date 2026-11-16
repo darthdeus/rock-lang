@@ -374,19 +374,14 @@ pub(crate) fn keep_reads_ordered(
     scope: &[Idx<Block>],
     inlinable: &mut [bool],
     newly: &[bool],
+    uses: &ScopeUses,
 ) {
     let ni = func.insts.len();
     // Position in its block of the statement that finally evaluates a value.
     let mut eval = vec![0usize; ni];
-    let mut user = vec![u32::MAX; ni];
+    let user = &uses.user;
     for &b in scope {
         let insts = &func.blocks[b].insts;
-        for &id in insts {
-            func.insts[id].uses_each(&mut |u| user[raw(u) as usize] = raw(id));
-        }
-        func.blocks[b]
-            .term
-            .uses_each(&mut |u| user[raw(u) as usize] = u32::MAX);
         for (pos, &id) in insts.iter().enumerate().rev() {
             let k = raw(id) as usize;
             eval[k] = if inlinable[k] {

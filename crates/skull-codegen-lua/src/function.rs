@@ -342,7 +342,7 @@ fn emit_body(
         &mut inlinable,
         same_base_projections(func),
     );
-    keep_reads_ordered(func, &rpo, &mut inlinable, &folded_reads);
+    keep_reads_ordered(func, &rpo, &mut inlinable, &folded_reads, &uses);
     bound_fold_levels(func, &rpo, &mut inlinable, &folded_reads);
     let loops = recognize_for_loops(func, &rpo, frame);
     let reads = regalloc::Reads::new(func, &rpo, &inlinable);
