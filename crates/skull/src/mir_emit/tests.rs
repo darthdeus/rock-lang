@@ -252,7 +252,6 @@ mod missing_owner_tests {
     use super::*;
     use bone_semantic::inference::Workspace;
     use skull_mir::mir::FuncRef;
-    use skull_mir::monoty::MonoTy;
     use skull_parser::CompilerError;
     use ustr::Ustr;
 
@@ -531,7 +530,7 @@ fn main() {
 
     #[test]
     fn candidate_repair_reads_the_concrete_publisher_index() {
-        let (_, cache, _) = emit_with_mutation(BodyMutation::None).expect("intact emission");
+        let (cache, _) = emit_intact();
         let canonical = cache.concrete.candidate_keys_by_func();
         let population: usize = canonical.values().map(|entries| entries.len()).sum();
         assert!(
@@ -622,50 +621,11 @@ fn main() {
             .expect("function")
     }
 
-    fn concrete_symbol(ws: &Workspace, cache: &SkullEmitCache, fref: FuncRef) -> String {
-        Instance::intern(cache.graph.interner(), fref, vec![MonoTy::Int])
-            .symbol(ws, cache.scx.interner())
-    }
-
-    fn assert_residual_definition_and_call(
-        ws: &Workspace,
-        cache: &SkullEmitCache,
-        emit: &MirEmit,
-        callee: FuncRef,
-    ) {
-        let symbol = concrete_symbol(ws, cache, callee);
-        // Definition headers in whichever callee shape the build emits: the
-        // bound shape spells one `__rock_mk_<symbol> = function(`, and names the
-        // symbol again as a factory parameter, which is a binding and not a
-        // call.
-        let factory = skull_codegen_lua::CALLEE_FACTORY_PREFIX;
-        assert!(
-            emit.lua.contains(&format!("function {symbol}("))
-                || emit.lua.contains(&format!("{factory}{symbol} = function(")),
-            "the concrete residual definition is missing: {symbol}\n{}",
-            emit.lua
-        );
-        assert!(
-            emit.lua.lines().any(|line| {
-                !line.starts_with("function ")
-                    && !line.starts_with(factory)
-                    && line.contains(&format!("{symbol}("))
-            }),
-            "the residual call does not name the concrete definition: {symbol}\n{}",
-            emit.lua
-        );
-    }
-
-    fn emit_with_mutation(
-        mutation: BodyMutation,
-    ) -> Result<(Workspace, SkullEmitCache, MirEmit), CompilerError> {
+    fn emit_intact() -> (SkullEmitCache, MirEmit) {
         let ws = workspace();
         let mid = ws.source_modules().next().expect("test module").id;
-        let (emit, cache) = FullEmit::program()
-            .mutation(mutation)
-            .with_attribution()
-            .run(&ws, mid)?;
-        Ok((ws, cache, emit))
+        let (emit, cache) = emit_full(&ws, mid).expect("intact emission");
+        (cache, emit)
     }
 
     /// These tests read the attribution census, which a build must ask for.
@@ -676,42 +636,105 @@ fn main() {
         FullEmit::program().with_attribution().run(ws, mid)
     }
 
-    fn assert_rejection_or_residual(
-        result: Result<(Workspace, SkullEmitCache, MirEmit), CompilerError>,
-        callee: FuncRef,
-    ) {
-        match result {
-            Err(err) => assert!(
-                err.message
-                    .contains("no concrete owner agreeing with its delivery instance"),
-                "owner loss must be an explicit rejection, not an unrelated emission gap: {err:?}"
-            ),
-            Ok((ws, cache, emit)) => {
-                assert_residual_definition_and_call(&ws, &cache, &emit, callee)
+    /// Poison every plan of `body` the predicate accepts, then lower the
+    /// program again from `cache` and return the first rejection.
+    fn reemit_with_poisoned_plans(
+        ws: &Workspace,
+        cache: &mut SkullEmitCache,
+        body: FuncRef,
+        mut poison: impl FnMut(&Instance, &mut skull_mir::concrete::ConcreteBodyPlan) -> bool,
+    ) -> CompilerError {
+        let mut matched = 0;
+        for (instance, plan) in std::sync::Arc::make_mut(&mut cache.concrete.plans).iter_mut() {
+            if instance.func == body && poison(instance, std::sync::Arc::make_mut(plan)) {
+                matched += 1;
             }
         }
+        assert!(matched > 0, "no plan of {body:?} took the poison");
+        // A retained cache holds every specialized chunk; drop them so the
+        // queue lowers each one again.
+        cache.chunks.retain(|instance, _| instance.args.is_empty());
+        let mut inline_cache = worker_inline_cache(None);
+        let bodies: Vec<FuncRef> = cache.chunks.keys().map(|instance| instance.func).collect();
+        for fref in bodies {
+            let f = &ws.module(fref.module).functions[fref.func];
+            if let Err(err) = emit_body_chunk(
+                ws,
+                &cache.cg,
+                &cache.scx,
+                &cache.concrete,
+                fref,
+                f,
+                &mut inline_cache,
+            ) {
+                return err;
+            }
+        }
+        let (_, errs) = view_driven_specialized_chunks(ws, &cache.cg, &cache.scx, cache, &[]);
+        if let Some((_, err)) = errs.into_iter().next() {
+            return err;
+        }
+        panic!("lowering accepted the poisoned plans of {body:?}")
     }
 
     #[test]
-    fn missing_generic_callee_owner_rejects_or_emits_concrete_residual() {
+    fn a_specialized_call_without_an_agreeing_owner_rejects() {
         let ws = workspace();
+        let mid = ws.source_modules().next().expect("test module").id;
         let caller = ref_for(&ws, "top");
         let callee = ref_for(&ws, "wrap");
-        assert_rejection_or_residual(
-            emit_with_mutation(BodyMutation::RemoveCalleeOwner { caller, callee }),
-            callee,
-        );
-    }
-
-    #[test]
-    fn incomplete_generic_callee_owner_key_rejects_or_emits_concrete_residual() {
-        let ws = workspace();
-        let caller = ref_for(&ws, "top");
-        let callee = ref_for(&ws, "wrap");
-        assert_rejection_or_residual(
-            emit_with_mutation(BodyMutation::ClearCalleeOwnerKey { caller, callee }),
-            callee,
-        );
+        let (_, cache) = emit_full(&ws, mid).expect("intact emission");
+        let plan = cache
+            .concrete
+            .plans
+            .get(&Instance::base(caller))
+            .expect("caller plan");
+        let lowered = skull_mir::lower::lower_instance_with_plans(
+            &ws,
+            &cache.scx,
+            plan,
+            &cache.concrete.plans,
+        )
+        .expect("lower");
+        let call = lowered
+            .callee_instances
+            .iter()
+            .find(|(call, owner)| {
+                owner.func == callee
+                    && !owner.args.is_empty()
+                    && lowered.spec_bindings.contains_key(call)
+            })
+            .map(|(call, _)| *call)
+            .expect("a specialized call to `wrap`");
+        skull_mir::reach::spec_bound_calls(&ws, &lowered, &mut Vec::new())
+            .expect("the intact call has an agreeing owner");
+        let removed = |mf: &mut skull_mir::mir::MirFunc| {
+            mf.callee_instances.remove(&call);
+        };
+        let cleared = |mf: &mut skull_mir::mir::MirFunc| {
+            mf.callee_instances
+                .get_mut(&call)
+                .expect("owner")
+                .args
+                .clear();
+        };
+        for (label, poison) in [
+            (
+                "removed owner",
+                &removed as &dyn Fn(&mut skull_mir::mir::MirFunc),
+            ),
+            ("owner without its key", &cleared),
+        ] {
+            let mut mf = lowered.clone();
+            poison(&mut mf);
+            let err =
+                skull_mir::reach::spec_bound_calls(&ws, &mf, &mut Vec::new()).expect_err(label);
+            assert!(
+                err.message
+                    .contains("no concrete owner agreeing with its delivery instance"),
+                "{label}: {err:?}"
+            );
+        }
     }
 
     #[test]
@@ -720,13 +743,14 @@ fn main() {
         let ws = bounded_workspace();
         let mid = module_id(&ws, "<bound-plan-test>");
         let body = ref_for(&ws, "total");
-        let err = match FullEmit::program()
-            .mutation(BodyMutation::ClearBoundPlan { body })
-            .run(&ws, mid)
-        {
-            Ok(_) => panic!("emission ignored the poisoned concrete bound plan"),
-            Err(err) => err,
-        };
+        let (_, mut cache) = emit_full(&ws, mid).expect("intact emission");
+        let err = reemit_with_poisoned_plans(&ws, &mut cache, body, |instance, plan| {
+            if instance.args.is_empty() || plan.bound_tree.is_empty() {
+                return false;
+            }
+            plan.bound_tree = Default::default();
+            true
+        });
         assert!(
             err.message
                 .contains("concrete callee bound plan is empty for its site"),
@@ -739,19 +763,18 @@ fn main() {
         let ws = coroutine_workspace();
         let mid = module_id(&ws, "<coroutine-plan-test>");
         let body = ref_for(&ws, "worker");
-        let (intact, intact_cache) = emit_full(&ws, mid).expect("intact emission");
-        let symbol = Instance::base(body).symbol(&ws, intact_cache.scx.interner());
+        let (intact, mut cache) = emit_full(&ws, mid).expect("intact emission");
+        let symbol = Instance::base(body).symbol(&ws, cache.scx.interner());
         assert!(
             intact.lua.contains(&format!("function {symbol}__advance(")),
             "the intact coroutine fixture must exercise the concrete yield channel"
         );
-        let err = match FullEmit::program()
-            .mutation(BodyMutation::ClearCoroutineResultPlan { body })
-            .run(&ws, mid)
-        {
-            Ok(_) => panic!("emission ignored the poisoned coroutine result plan"),
-            Err(err) => err,
-        };
+        let err = reemit_with_poisoned_plans(&ws, &mut cache, body, |_, plan| {
+            std::sync::Arc::make_mut(&mut plan.signature)
+                .result
+                .take()
+                .is_some()
+        });
         assert!(
             err.message
                 .contains("concrete callee signature disagrees with its body plan"),
@@ -765,16 +788,27 @@ fn main() {
         let ws = bounded_workspace();
         let mid = module_id(&ws, "<bound-plan-test>");
         let body = ref_for(&ws, "total");
-        let err = match FullEmit::program()
-            .mutation(BodyMutation::ClearIteratorWitnessInstance { body })
-            .run(&ws, mid)
-        {
-            Ok(_) => panic!("emission ignored the missing concrete iterator witness instance"),
-            Err(err) => err,
-        };
+        let (_, mut cache) = emit_full(&ws, mid).expect("intact emission");
+        let err = reemit_with_poisoned_plans(&ws, &mut cache, body, |_, plan| {
+            let witness = plan
+                .bound_tree
+                .next
+                .values_mut()
+                .find_map(|next| match next {
+                    skull_mir::bound::ResolvedBoundNext::Concrete { instance, .. }
+                        if !instance.args.is_empty() =>
+                    {
+                        Some(instance)
+                    }
+                    _ => None,
+                });
+            witness.map(|instance| instance.args.clear()).is_some()
+        });
+        // The ABI memo is warm from the intact build, so the owner-side lookup
+        // can be the one that misses first.
         assert!(
-            err.message
-                .contains("concrete ABI plan is missing for callee `next`"),
+            err.message.contains("concrete ABI plan is missing for")
+                && err.message.contains("`next`"),
             "the missing iterator bound plan must fail at its production consumer, got: {err:?}"
         );
     }
@@ -962,7 +996,7 @@ fn main() { let result = first() }
 
     #[test]
     fn full_emission_reports_pre_assembly_setup_work() {
-        let (_, _, emit) = emit_with_mutation(BodyMutation::None).expect("intact emission");
+        let (_, emit) = emit_intact();
         let setup = emit
             .phases
             .iter()
@@ -995,7 +1029,7 @@ fn main() { let result = first() }
     #[test]
     fn body_attribution_reports_nonzero_work_and_distribution() {
         let _inline = InlineOn::on();
-        let (_, _, emit) = emit_with_mutation(BodyMutation::None).expect("intact emission");
+        let (_, emit) = emit_intact();
         let attribution = &emit.attribution;
         assert!(
             attribution.bodies_examined > 0,

@@ -258,16 +258,11 @@ fn expand_selected_sim_roots(
 
 /// Concrete lowering plans for every retained instance; a plan that cannot be
 /// built rejects the compile.
-#[cfg_attr(not(test), allow(unused_variables))]
 fn build_concrete_plans(
     ws: &Workspace,
     graph: &crate::instance_graph::InstanceGraph,
-    mutation: BodyMutation,
 ) -> Result<crate::concrete_body::ConcreteBodies, CompilerError> {
-    #[cfg_attr(not(test), allow(unused_mut))]
-    let mut concrete = crate::concrete_body::build_for_lowering(ws, graph);
-    #[cfg(test)]
-    mutate_concrete_plans(&mut concrete, mutation);
+    let concrete = crate::concrete_body::build_for_lowering(ws, graph);
     if let Some((instance, reason)) = concrete.first_plan_failure() {
         let f = &ws.module(instance.func.module).functions[instance.func.func];
         return Err(CompilerError::new_with_label(
@@ -305,91 +300,6 @@ fn build_concrete_plans(
         ));
     }
     Ok(concrete)
-}
-
-#[cfg(test)]
-fn mutate_concrete_plans(
-    concrete: &mut crate::concrete_body::ConcreteBodies,
-    mutation: BodyMutation,
-) {
-    if let BodyMutation::ClearBoundPlan { body } = mutation {
-        let mut matched = 0;
-        for (instance, plan) in std::sync::Arc::get_mut(&mut concrete.plans)
-            .expect("concrete plans are unshared before the setup join")
-            .iter_mut()
-        {
-            if instance.func != body || instance.args.is_empty() {
-                continue;
-            }
-            assert!(
-                !plan.bound_tree.is_empty(),
-                "bound-plan mutation found a specialized body with no witness tree"
-            );
-            let plan = std::sync::Arc::make_mut(plan);
-            plan.bound_tree = Default::default();
-            matched += 1;
-        }
-        assert!(
-            matched > 0,
-            "bound-plan mutation found no specialized instance for {body:?}; plans={:?}",
-            concrete
-                .plans
-                .keys()
-                .map(|instance| (instance.func, instance.args.len()))
-                .collect::<Vec<_>>()
-        );
-    }
-    if let BodyMutation::ClearCoroutineResultPlan { body } = mutation {
-        let mut matched = 0;
-        for (instance, plan) in std::sync::Arc::get_mut(&mut concrete.plans)
-            .expect("concrete plans are unshared before the setup join")
-            .iter_mut()
-        {
-            if instance.func == body {
-                assert!(
-                    plan.signature.result.is_some(),
-                    "coroutine-plan mutation found a body with no concrete result witness"
-                );
-                let plan = std::sync::Arc::make_mut(plan);
-                std::sync::Arc::make_mut(&mut plan.signature).result = None;
-                matched += 1;
-            }
-        }
-        assert!(
-            matched > 0,
-            "coroutine-plan mutation found no concrete instance for {body:?}"
-        );
-    }
-    if let BodyMutation::ClearIteratorWitnessInstance { body } = mutation {
-        let mut matched = 0;
-        for (instance, plan) in std::sync::Arc::get_mut(&mut concrete.plans)
-            .expect("concrete plans are unshared before the setup join")
-            .iter_mut()
-        {
-            if instance.func != body {
-                continue;
-            }
-            let witness = std::sync::Arc::make_mut(plan)
-                .bound_tree
-                .next
-                .values_mut()
-                .find_map(|next| match next {
-                    skull_mir::bound::ResolvedBoundNext::Concrete { instance, .. }
-                        if !instance.args.is_empty() =>
-                    {
-                        Some(instance)
-                    }
-                    _ => None,
-                })
-                .expect("iterator-plan mutation found no concrete witness instance");
-            witness.args.clear();
-            matched += 1;
-        }
-        assert!(
-            matched > 0,
-            "iterator-plan mutation found no concrete instance for {body:?}"
-        );
-    }
 }
 
 /// The scalar context lowering will use and the codegen context over it,
@@ -653,7 +563,6 @@ fn emit_full_chunks<'a>(
     mut queue: SpecQueue<'a>,
     concrete: &crate::concrete_body::ConcreteBodies,
     lua_view: &crate::artifact::ArtifactView,
-    mutation: BodyMutation,
     attribution: bool,
     setup_phases: &mut SetupPhases,
 ) -> Result<
@@ -712,16 +621,8 @@ fn emit_full_chunks<'a>(
                 match job {
                     FanOutJob::Body(at, self_ref, f) => {
                         let started = attribution.then(thread_cpu_time);
-                        let mut chunk = emit_body_chunk_with_mutation(
-                            ws,
-                            cg,
-                            scx,
-                            concrete,
-                            self_ref,
-                            f,
-                            inline_cache,
-                            mutation,
-                        );
+                        let mut chunk =
+                            emit_body_chunk(ws, cg, scx, concrete, self_ref, f, inline_cache);
                         if let Ok(chunk) = &mut chunk {
                             chunk.finish(started);
                         }
@@ -815,7 +716,6 @@ pub(super) fn emit_full_build(
         project_root,
         renderer_target,
         shapes,
-        mutation,
         fingerprint,
         attribution,
     } = options;
@@ -868,7 +768,7 @@ pub(super) fn emit_full_build(
         run_setup_lanes(
             ws,
             &graph,
-            || build_concrete_plans(ws, &graph, mutation),
+            || build_concrete_plans(ws, &graph),
             &roots.emission_roots,
             early,
         )
@@ -915,7 +815,6 @@ pub(super) fn emit_full_build(
                 spec_queue,
                 &concrete,
                 &lua_view,
-                mutation,
                 attribution,
                 &mut setup_phases,
             )

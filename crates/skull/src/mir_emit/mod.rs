@@ -199,7 +199,6 @@ pub struct FullEmit<'a> {
     project_root: Option<&'a str>,
     renderer_target: RendererTarget,
     shapes: ShapeOverrides,
-    mutation: BodyMutation,
     fingerprint: bool,
     attribution: bool,
 }
@@ -211,7 +210,6 @@ impl<'a> FullEmit<'a> {
             project_root: None,
             renderer_target: RendererTarget::Gl,
             shapes: ShapeOverrides::default(),
-            mutation: BodyMutation::None,
             fingerprint: true,
             attribution: false,
         }
@@ -274,12 +272,6 @@ impl<'a> FullEmit<'a> {
     /// one process.
     pub fn shapes(mut self, shapes: ShapeOverrides) -> Self {
         self.shapes = shapes;
-        self
-    }
-
-    #[cfg(test)]
-    fn mutation(mut self, mutation: BodyMutation) -> Self {
-        self.mutation = mutation;
         self
     }
 

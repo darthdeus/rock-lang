@@ -2,33 +2,6 @@
 
 use super::*;
 
-#[derive(Clone, Copy)]
-pub(super) enum BodyMutation {
-    None,
-    #[cfg(test)]
-    RemoveCalleeOwner {
-        caller: FuncRef,
-        callee: FuncRef,
-    },
-    #[cfg(test)]
-    ClearCalleeOwnerKey {
-        caller: FuncRef,
-        callee: FuncRef,
-    },
-    #[cfg(test)]
-    ClearBoundPlan {
-        body: FuncRef,
-    },
-    #[cfg(test)]
-    ClearCoroutineResultPlan {
-        body: FuncRef,
-    },
-    #[cfg(test)]
-    ClearIteratorWitnessInstance {
-        body: FuncRef,
-    },
-}
-
 /// The statically-resolved callees referenced by a (post-inline) MIR function —
 /// the callees still CALLED after inlining (their bodies could flip eligibility
 /// on a future edit). Unioned with the driver's spliced set to form the chunk's
@@ -204,28 +177,6 @@ pub(super) fn emit_body_chunk(
     f: &bone_semantic::hir::Function,
     inline_cache: &mut skull_transform::InlineCache,
 ) -> Result<Chunk, CompilerError> {
-    emit_body_chunk_with_mutation(
-        ws,
-        cg,
-        scx,
-        concrete,
-        self_ref,
-        f,
-        inline_cache,
-        BodyMutation::None,
-    )
-}
-
-pub(super) fn emit_body_chunk_with_mutation(
-    ws: &Workspace,
-    cg: &CodegenCtx,
-    scx: &skull_mir::lower::ScalarCtx,
-    concrete: &crate::concrete_body::ConcreteBodies,
-    self_ref: FuncRef,
-    f: &bone_semantic::hir::Function,
-    inline_cache: &mut skull_transform::InlineCache,
-    mutation: BodyMutation,
-) -> Result<Chunk, CompilerError> {
     let plan = concrete.plan_for(&shared(self_ref)).ok_or_else(|| {
         CompilerError::new_with_label(f.name_span, format!("no concrete plan for `{}`", f.name))
     })?;
@@ -241,51 +192,6 @@ pub(super) fn emit_body_chunk_with_mutation(
         self_ref,
         inline_cache,
     )?;
-    match mutation {
-        BodyMutation::None => {}
-        #[cfg(test)]
-        BodyMutation::RemoveCalleeOwner { caller, callee }
-        | BodyMutation::ClearCalleeOwnerKey { caller, callee }
-            if caller == self_ref =>
-        {
-            let (call, owner) = mf
-                .callee_instances
-                .iter()
-                .find(|(_, owner)| owner.func == callee)
-                .map(|(call, owner)| (*call, owner.clone()))
-                .expect("the mutation fixture must lower a concrete generic call");
-            assert!(
-                !owner.args.is_empty(),
-                "the mutation fixture must have a complete concrete owner"
-            );
-            assert!(
-                mf.spec_bindings.contains_key(&call),
-                "the mutation must retain the specialized delivery record"
-            );
-            assert!(
-                mf.call_abi_plans.contains_key(&call),
-                "the mutation must retain the lowered ABI record"
-            );
-            match mutation {
-                BodyMutation::RemoveCalleeOwner { .. } => {
-                    mf.callee_instances.remove(&call);
-                }
-                BodyMutation::ClearCalleeOwnerKey { .. } => {
-                    mf.callee_instances
-                        .get_mut(&call)
-                        .expect("owner disappeared before key mutation")
-                        .args
-                        .clear();
-                }
-                BodyMutation::None => unreachable!(),
-                BodyMutation::ClearBoundPlan { .. } => unreachable!(),
-                BodyMutation::ClearCoroutineResultPlan { .. } => unreachable!(),
-                BodyMutation::ClearIteratorWitnessInstance { .. } => unreachable!(),
-            }
-        }
-        #[cfg(test)]
-        _ => {}
-    }
     let owner = BodyOwner::Function(self_ref.func);
     let ctx = skull_mir::bound::concrete_body_ctx(
         ws,
