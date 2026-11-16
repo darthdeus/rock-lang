@@ -1890,20 +1890,7 @@ fn produce_instances(
 ///
 /// The tables intern into the graph's arena: a second arena would hand out ids
 /// that mean nothing beside `Instance::args`.
-/// Process-lifetime count of [`build`] invocations. A normal full emission
-/// builds the table exactly ONCE and shares it (the shader view and the JS
-/// session consume `ConcreteBodies::plans` by handle); a second build inside
-/// one emission is the duplicate-work regression this counter exists to gate.
-pub fn build_invocations() -> u64 {
-    BUILD_INVOCATIONS.with(std::cell::Cell::get)
-}
-
-thread_local! {
-    static BUILD_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
 pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
-    BUILD_INVOCATIONS.with(|count| count.set(count.get() + 1));
     let t_build = bone_core::prelude::Instant::now();
     let intern_before = g.interner().stats();
     let timing_enabled = log::log_enabled!(log::Level::Debug);

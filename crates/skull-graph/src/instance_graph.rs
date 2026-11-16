@@ -838,14 +838,6 @@ pub struct InstanceGraph {
     pub index: Indices,
 }
 
-thread_local! {
-    static BUILD_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-pub fn build_invocations() -> u64 {
-    BUILD_INVOCATIONS.with(std::cell::Cell::get)
-}
-
 /// Every compiler-owned runtime entry that a synthesized call or an opaque
 /// body may name under its bare name. An entry need not serve every target:
 /// `Builder::stdlib_funcref` rejects a call on a target the stdlib does not
@@ -1258,7 +1250,6 @@ pub fn build_in(
     perturb: bool,
     interner: std::sync::Arc<MonoInterner>,
 ) -> InstanceGraph {
-    BUILD_INVOCATIONS.with(|count| count.set(count.get() + 1));
     let t_build = bone_core::prelude::Instant::now();
     let intern_before = interner.stats();
     let mut g = InstanceGraph::empty_in(interner);

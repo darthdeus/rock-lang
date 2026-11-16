@@ -47,14 +47,6 @@ use crate::instance_graph::{
 use crate::target_projection::{supports, CpuTargetSpec, TargetSpec};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-thread_local! {
-    static REALIZE_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-pub fn realize_invocations() -> u64 {
-    REALIZE_INVOCATIONS.with(std::cell::Cell::get)
-}
-
 /// Where an artifact's realization of a callee comes from, when the
 /// declaration's own body is not it.
 ///
@@ -1979,7 +1971,6 @@ fn has_rock_body(ws: &Workspace, decl: FuncRef) -> bool {
 /// therefore no mismatch to detect -- backend-sibling selection lives in
 /// [`realize_decl`], which is reached from here and from nowhere else.
 pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> ArtifactView {
-    REALIZE_INVOCATIONS.with(|count| count.set(count.get() + 1));
     // Shader packaging is absent from this value by construction. Platform
     // capabilities remain available for host boundary admission.
     let target = req.spec.cpu();

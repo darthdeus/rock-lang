@@ -171,12 +171,8 @@ pub struct SkullEmitCache {
 /// global atomics. The route records only work it already performs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IncrementalRepairStats {
-    pub full_graph_rebuilds: usize,
-    pub full_artifact_view_realizations: usize,
     pub root_functions_examined: usize,
-    pub shader_delta_requests: usize,
     pub chunks_rebuilt: usize,
-    pub artifact_realize_invocations: usize,
     pub graph_update_ns: u64,
     pub concrete_update_ns: u64,
     pub artifact_update_ns: u64,
@@ -509,7 +505,6 @@ impl SkullEmitCache {
         ws: &Workspace,
         reinferred: &[(ModuleId, BodyOwner)],
     ) -> Result<bool, CompilerError> {
-        self.repair_stats.shader_delta_requests = reinferred.len();
         let affected = reinferred.iter().any(|&(mid, owner)| {
             self.shader_registrations.callsites.contains(&(mid, owner))
                 || matches!(
@@ -867,11 +862,7 @@ impl SkullEmitCache {
             }
         }
         let mut fingerprint_identities = FxHashSet::default();
-        let shader_delta_requests = cache.repair_stats.shader_delta_requests;
-        cache.repair_stats = IncrementalRepairStats {
-            shader_delta_requests,
-            ..IncrementalRepairStats::default()
-        };
+        cache.repair_stats = IncrementalRepairStats::default();
         // Fold each re-inferred body's value-reference contribution into the cached
         // ScalarCtx. A name whose taken-by-ref membership flips changes scalar-ABI
         // eligibility, so the named fn(s) -- and, via the deps scan below, every
@@ -901,7 +892,6 @@ impl SkullEmitCache {
         // Rebuilding the graph instead of updating it is what the arc measured and
         // rejected: 15-33 ms release against a sub-millisecond edit.
         let t_graph = Instant::now();
-        let graph_builds_before = crate::instance_graph::build_invocations();
         let previous_shader_roots = cache.roots.shader_roots.clone();
         let current_shader_roots = cache.shader_registrations.roots.clone();
         let shader_roots_changed = previous_shader_roots != current_shader_roots;
@@ -972,8 +962,6 @@ impl SkullEmitCache {
             edits,
         );
         cache.repair_stats.graph_update_ns = t_graph.elapsed().as_nanos() as u64;
-        cache.repair_stats.full_graph_rebuilds =
-            crate::instance_graph::build_invocations().saturating_sub(graph_builds_before) as usize;
         let t_concrete = Instant::now();
         let concrete_update = cache.concrete.update_local(
             ws,
@@ -993,7 +981,6 @@ impl SkullEmitCache {
         // The retained view owns the predecessor/successor indexes needed to
         // update reachability without realizing the full graph again.
         let t_artifact = Instant::now();
-        let artifact_realize_before = crate::artifact::realize_invocations();
         cache.lua_view.update_local_with_root_delta(
             ws,
             &cache.graph,
@@ -1010,10 +997,6 @@ impl SkullEmitCache {
             &root_added,
             &root_removed,
         );
-        cache.repair_stats.artifact_realize_invocations =
-            crate::artifact::realize_invocations().saturating_sub(artifact_realize_before) as usize;
-        cache.repair_stats.full_artifact_view_realizations =
-            cache.repair_stats.artifact_realize_invocations;
         cache.repair_stats.artifact_update_ns = t_artifact.elapsed().as_nanos() as u64;
 
         let scx = &cache.scx;
