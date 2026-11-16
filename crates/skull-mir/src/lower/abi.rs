@@ -1676,19 +1676,13 @@ impl RepArena {
                 if first_class && !tuple_spelled {
                     Ok(self.intern(target, RepUse::Parameter, RepLayout::Opaque))
                 } else {
-                    self.plan(
+                    self.plan_position(
                         ws,
                         target,
                         param,
                         RepUse::Parameter,
-                        &RepUseFacts {
-                            tuple_spelled,
-                            span: None,
-                        },
-                        RepGuarantees {
-                            nobox: nobox_only,
-                            allow_opaque: true,
-                        },
+                        tuple_spelled,
+                        nobox_only,
                     )
                 }
             })
@@ -1698,19 +1692,13 @@ impl RepArena {
         } else if first_class && !matches!(ret.peel_nullable().0, crate::monoty::MonoTy::Tuple(_)) {
             Some(self.intern(target, RepUse::Return, RepLayout::Opaque))
         } else {
-            Some(self.plan(
+            Some(self.plan_position(
                 ws,
                 target,
                 ret,
                 RepUse::Return,
-                &RepUseFacts {
-                    tuple_spelled: matches!(ret.peel_nullable().0, crate::monoty::MonoTy::Tuple(_)),
-                    span: None,
-                },
-                RepGuarantees {
-                    nobox: nobox_only,
-                    allow_opaque: true,
-                },
+                matches!(ret.peel_nullable().0, crate::monoty::MonoTy::Tuple(_)),
+                nobox_only,
             )?)
         };
         self.apply_lane_budget(target, &mut params, &mut result);
@@ -1727,6 +1715,28 @@ impl RepArena {
         })
     }
 
+    /// [`Self::plan`] for one signature position that may fall back to an
+    /// opaque slot.
+    fn plan_position(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        ty: &crate::monoty::MonoTy,
+        use_context: RepUse,
+        tuple_spelled: bool,
+        nobox: bool,
+    ) -> Result<RepId, RepError> {
+        let facts = RepUseFacts {
+            tuple_spelled,
+            span: None,
+        };
+        let guarantees = RepGuarantees {
+            nobox,
+            allow_opaque: true,
+        };
+        self.plan(ws, target, ty, use_context, &facts, guarantees)
+    }
+
     fn function_from_declaration(
         &self,
         ws: &Workspace,
@@ -1738,35 +1748,12 @@ impl RepArena {
         let mut params: Vec<RepId> = Vec::with_capacity(f.param_decls.len());
         for param in &f.param_decls {
             let ty = declared_mono_type(ws, param.ty, subst)?;
-            let id = match (mode, ty) {
-                (Some(mode), Some(ty)) => self.plan(
-                    ws,
-                    target,
-                    &ty,
-                    RepUse::Parameter,
-                    &RepUseFacts {
-                        tuple_spelled: declared_tuple_spelled(ws, param.ty),
-                        span: None,
-                    },
-                    RepGuarantees {
-                        nobox: mode.nobox_only_for(&ty),
-                        allow_opaque: true,
-                    },
-                )?,
-                (None, Some(ty)) if declared_tuple_spelled(ws, param.ty) => self.plan(
-                    ws,
-                    target,
-                    &ty,
-                    RepUse::Parameter,
-                    &RepUseFacts {
-                        tuple_spelled: true,
-                        span: None,
-                    },
-                    RepGuarantees {
-                        nobox: false,
-                        allow_opaque: true,
-                    },
-                )?,
+            let tuple_spelled = declared_tuple_spelled(ws, param.ty);
+            let id = match ty {
+                Some(ty) if mode.is_some() || tuple_spelled => {
+                    let nobox = mode.is_some_and(|mode| mode.nobox_only_for(&ty));
+                    self.plan_position(ws, target, &ty, RepUse::Parameter, tuple_spelled, nobox)?
+                }
                 _ => self.intern(target, RepUse::Parameter, RepLayout::Opaque),
             };
             params.push(id);
@@ -1786,19 +1773,13 @@ impl RepArena {
                 let id = if let Some(ty) = ty {
                     let is_tuple = matches!(ty, crate::monoty::MonoTy::Tuple(_));
                     if let Some(mode) = mode {
-                        self.plan(
+                        self.plan_position(
                             ws,
                             target,
                             &ty,
                             RepUse::Return,
-                            &RepUseFacts {
-                                tuple_spelled: tuple_spelled || is_tuple,
-                                span: None,
-                            },
-                            RepGuarantees {
-                                nobox: mode.nobox_only_for(&ty),
-                                allow_opaque: true,
-                            },
+                            tuple_spelled || is_tuple,
+                            mode.nobox_only_for(&ty),
                         )?
                     } else if is_tuple {
                         self.plan(
@@ -1862,58 +1843,21 @@ impl RepArena {
         param_tuple_spelled: &[bool],
         mode: Option<AbiMode>,
     ) -> FunctionRepPlan {
-        let mut params: Vec<RepId> = if let Some(mode) = mode {
-            params
-                .iter()
-                .enumerate()
-                .map(|(index, ty)| {
-                    let tuple_spelled = *param_tuple_spelled
-                        .get(index)
-                        .expect("concrete signature is missing parameter ABI provenance");
-                    self.plan(
-                        ws,
-                        target,
-                        ty,
-                        RepUse::Parameter,
-                        &RepUseFacts {
-                            tuple_spelled,
-                            span: None,
-                        },
-                        RepGuarantees {
-                            nobox: mode.nobox_only_for(ty),
-                            allow_opaque: true,
-                        },
-                    )
+        let mut params: Vec<RepId> = params
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| {
+                let tuple_spelled = *param_tuple_spelled
+                    .get(index)
+                    .expect("concrete signature is missing parameter ABI provenance");
+                if mode.is_none() && !tuple_spelled {
+                    return self.intern(target, RepUse::Parameter, RepLayout::Opaque);
+                }
+                let nobox = mode.is_some_and(|mode| mode.nobox_only_for(ty));
+                self.plan_position(ws, target, ty, RepUse::Parameter, tuple_spelled, nobox)
                     .expect("concrete ABI planner must accept a validated parameter")
-                })
-                .collect()
-        } else {
-            params
-                .iter()
-                .zip(param_tuple_spelled)
-                .map(|(ty, &tuple_spelled)| {
-                    if tuple_spelled {
-                        self.plan(
-                            ws,
-                            target,
-                            ty,
-                            RepUse::Parameter,
-                            &RepUseFacts {
-                                tuple_spelled: true,
-                                span: None,
-                            },
-                            RepGuarantees {
-                                nobox: false,
-                                allow_opaque: true,
-                            },
-                        )
-                        .expect("concrete ABI planner must accept a validated tuple parameter")
-                    } else {
-                        self.intern(target, RepUse::Parameter, RepLayout::Opaque)
-                    }
-                })
-                .collect()
-        };
+            })
+            .collect();
         let mut result = result_ty.map(|ty| {
             let tuple_spelled = match ty {
                 crate::monoty::MonoTy::Tuple(_) => true,
@@ -1923,19 +1867,13 @@ impl RepArena {
                 _ => false,
             };
             if mode.is_some() || tuple_spelled {
-                self.plan(
+                self.plan_position(
                     ws,
                     target,
                     ty,
                     RepUse::Return,
-                    &RepUseFacts {
-                        tuple_spelled,
-                        span: None,
-                    },
-                    RepGuarantees {
-                        nobox: mode.is_some_and(|mode| mode.nobox_only_for(ty)),
-                        allow_opaque: true,
-                    },
+                    tuple_spelled,
+                    mode.is_some_and(|mode| mode.nobox_only_for(ty)),
                 )
                 .expect("concrete ABI planner must accept a validated result")
             } else {
