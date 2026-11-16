@@ -467,7 +467,6 @@ pub struct ArtifactCensus {
     pub shared_instances: usize,
     pub excluded: usize,
     pub excluded_by_cause: BTreeMap<&'static str, usize>,
-    pub realized_by_kind: BTreeMap<&'static str, usize>,
     /// Call sites traversed by the reachability walk -- the denominator for
     /// `severed`. Zero sites walked and zero severed calls are the same number.
     pub sites_walked: usize,
@@ -479,7 +478,6 @@ pub struct ArtifactCensus {
     pub inline_deps_examined: usize,
     pub inline_deps_unresolved: usize,
     pub inline_deps_boundary: usize,
-    pub inline_deps_rock: usize,
     /// Foreign bodies the artifact emits, and how many of them publish more
     /// than one result lane -- the population plan S 13b's publisher contract
     /// governs, and the widest wire the artifact's scratch bank must cover.
@@ -1699,11 +1697,6 @@ impl ArtifactView {
                 .iter()
                 .filter(|d| matches!(d.callee, RealizedCallee::Boundary(_)))
                 .count(),
-            inline_deps_rock: self
-                .inline_deps
-                .iter()
-                .filter(|d| matches!(d.callee, RealizedCallee::Rock(_)))
-                .count(),
             foreign_bodies: self.publisher_lanes.len(),
             multi_lane_publishers: self.publisher_lanes.values().filter(|n| **n > 1).count(),
             widest_result_lanes: self.publisher_lanes.values().copied().max().unwrap_or(0),
@@ -1716,9 +1709,6 @@ impl ArtifactView {
         };
         for e in &self.excluded {
             *c.excluded_by_cause.entry(e.cause.label()).or_insert(0) += 1;
-        }
-        for r in self.realization.values() {
-            *c.realized_by_kind.entry(r.kind.label()).or_insert(0) += 1;
         }
         for s in &self.severed {
             *c.severed_by_cause.entry(s.cause.label()).or_insert(0) += 1;
