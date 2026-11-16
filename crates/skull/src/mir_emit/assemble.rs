@@ -715,7 +715,7 @@ fn place_function<'c>(
     //
     // A generic declaration has no definition of its own. Its bodies are
     // its instances, placed by `order_specialized_callees`.
-    if fn_has_bounds(f) || is_generic(f) {
+    if f.has_iterator_bounds() || is_generic(f) {
         return Placement::None;
     }
     let chunk = match cache.chunks.get(&shared(self_ref)) {

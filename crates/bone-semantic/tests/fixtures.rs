@@ -11,9 +11,12 @@ fn check_rock(file_name: &str, contents: &str) -> Result {
     let modules = file_name.starts_with("modules_");
     let check = |src: &str| {
         if modules {
-            crate::test_support::check_types_embedded_with_stdlib(
+            crate::test_support::check_types_embedded_with_cached_stdlib(
                 &crate::test_support::parse_embedded_files(src),
                 stdlib_sources(),
+                skull_parser::stdlib::cached()
+                    .as_ref()
+                    .expect("stdlib parses"),
             )
         } else {
             crate::test_support::check_types(src)
@@ -113,13 +116,10 @@ fn check_std_fixture(contents: &str) -> Result {
         "prelude inventory must be strictly sorted"
     );
 
-    let mut std_modules = stdlib_sources()
-        .iter()
-        .map(|(file, source)| {
-            skull_parser::parse_module_clean(source, bone_core::prelude::ustr(file))
-                .map_err(|e| format!("{file}: {e}"))
-        })
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let cached_stdlib = skull_parser::stdlib::cached()
+        .as_ref()
+        .expect("stdlib parses");
+    let mut std_modules = cached_stdlib.to_vec();
     let std_ws = bone_semantic::semantic_passes::semantic_pass(&mut std_modules)
         .map_err(|e| format!("stdlib semantic pass failed: {e}"))?;
     let std_package = std_ws
@@ -150,8 +150,12 @@ fn check_std_fixture(contents: &str) -> Result {
         !user_files.is_empty(),
         "v1_default_prelude has no embedded file"
     );
-    crate::test_support::check_types_embedded_with_stdlib(&user_files, stdlib_sources())
-        .map_err(|e| format!("v1 default prelude failed: {e}"))
+    crate::test_support::check_types_embedded_with_cached_stdlib(
+        &user_files,
+        stdlib_sources(),
+        cached_stdlib,
+    )
+    .map_err(|e| format!("v1 default prelude failed: {e}"))
 }
 
 fn main() -> std::process::ExitCode {

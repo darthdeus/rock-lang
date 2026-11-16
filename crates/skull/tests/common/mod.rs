@@ -246,6 +246,7 @@ pub fn try_emit_module_enforcing_identity_storage(
     let modules = with_stdlib(src, "<test>");
     let ws = bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(
         &mut modules.into_vec(),
+        &bone_core::modules::NsAliases::default(),
     )
     .expect("semantic_pass");
     assert_no_bone_errors(&ws);

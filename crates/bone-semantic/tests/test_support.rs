@@ -42,9 +42,11 @@ pub fn check_types(src: &str) -> Result<(), String> {
         return Err(stage("parse_rock", e.clone()));
     }
 
-    let ws =
-        bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(&mut [module])
-            .map_err(|e| stage("semantic_pass", e))?;
+    let ws = bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(
+        &mut [module],
+        &bone_core::modules::NsAliases::default(),
+    )
+    .map_err(|e| stage("semantic_pass", e))?;
 
     if let Some(e) = first_error(&ws) {
         return Err(stage("type-check", e.clone()));
@@ -232,6 +234,20 @@ pub fn check_types_packages_with_stdlib(
     files: &[PackageFixture<'_>],
     stdlib_sources: &[(&str, &str)],
 ) -> Result<(), String> {
+    check_types_packages_with_cached_stdlib(files, stdlib_sources, &[])
+}
+
+fn check_types_packages_with_cached_stdlib(
+    files: &[PackageFixture<'_>],
+    stdlib_sources: &[(&str, &str)],
+    cached_stdlib: &[skull_parser::Ast],
+) -> Result<(), String> {
+    if !cached_stdlib.is_empty() {
+        assert_eq!(cached_stdlib.len(), stdlib_sources.len());
+        for (module, (file, _)) in cached_stdlib.iter().zip(stdlib_sources) {
+            assert_eq!(module.file, ustr(file));
+        }
+    }
     let mut all = Vec::with_capacity(stdlib_sources.len() + files.len());
     all.extend(stdlib_sources.iter().map(|(file, src)| PackageFixture {
         file,
@@ -245,19 +261,24 @@ pub fn check_types_packages_with_stdlib(
         dialect: file.dialect,
         src: file.src,
     }));
-    check_types_packages_inner(&all, files)
+    check_types_packages_inner(&all, files, cached_stdlib)
 }
 
 fn check_types_packages_inner(
     all_files: &[PackageFixture<'_>],
     checked_files: &[PackageFixture<'_>],
+    cached_stdlib: &[skull_parser::Ast],
 ) -> Result<(), String> {
     let mut srcs: Vec<(&str, &str)> = Vec::new();
     let mut modules = Vec::new();
-    for f in all_files {
+    for (i, f) in all_files.iter().enumerate() {
         srcs.push((f.file, f.src));
-        let mut module = parse_module_with_dialect(f.src, ustr(f.file), f.dialect)
-            .map_err(|e| render_err(&srcs, &e))?;
+        let mut module = if let Some(module) = cached_stdlib.get(i) {
+            module.clone()
+        } else {
+            parse_module_with_dialect(f.src, ustr(f.file), f.dialect)
+                .map_err(|e| render_err(&srcs, &e))?
+        };
         if let Some(e) = module.recovery_errors.first() {
             return Err(render_err(&srcs, &e.clone()));
         }
@@ -296,7 +317,7 @@ fn check_types_packages_inner(
         aliases.packages.push(entry);
     }
 
-    let ws = bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage_with_aliases(
+    let ws = bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(
         &mut modules,
         &aliases,
     )
@@ -348,6 +369,14 @@ pub fn check_types_embedded_with_stdlib(
     files: &[EmbeddedFile<'_>],
     stdlib_sources: &[(&str, &str)],
 ) -> Result<(), String> {
+    check_types_embedded_with_cached_stdlib(files, stdlib_sources, &[])
+}
+
+pub fn check_types_embedded_with_cached_stdlib(
+    files: &[EmbeddedFile<'_>],
+    stdlib_sources: &[(&str, &str)],
+    cached_stdlib: &[skull_parser::Ast],
+) -> Result<(), String> {
     let fixtures: Vec<PackageFixture<'_>> = files
         .iter()
         .map(|f| PackageFixture {
@@ -361,5 +390,5 @@ pub fn check_types_embedded_with_stdlib(
             src: f.src,
         })
         .collect();
-    check_types_packages_with_stdlib(&fixtures, stdlib_sources)
+    check_types_packages_with_cached_stdlib(&fixtures, stdlib_sources, cached_stdlib)
 }

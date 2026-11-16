@@ -20,7 +20,10 @@ fn parse_rock(src: &str) -> Result<skull_parser::Ast, CompilerError> {
 /// (no stdlib).
 fn check(src: &str) -> Result<Workspace, CompilerError> {
     let mut module = [parse_rock(src)?];
-    bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(&mut module)
+    bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(
+        &mut module,
+        &NsAliases::default(),
+    )
 }
 
 fn stdlib_modules() -> Vec<skull_parser::Ast> {

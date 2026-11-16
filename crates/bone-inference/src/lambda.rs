@@ -1,17 +1,10 @@
 use super::*;
 
 fn reject_ref_captures(c: BodyCtx, gamma: &Gamma, lambda_span: Span) -> Result<(), CompilerError> {
-    let contains = |outer: Span, inner: Span| {
-        outer.file == inner.file
-            && outer.offset_range().0 <= inner.offset_range().0
-            && inner.offset_range().1 <= outer.offset_range().1
-    };
-
     for (expr, node) in c.body.expr_arena.iter() {
         let Expr::Var(binding) = node else { continue };
         let use_span = c.body.expr_spans[expr];
-        if !contains(lambda_span, use_span) || contains(lambda_span, c.body.binding_spans[*binding])
-        {
+        if !lambda_span.contains(use_span) || lambda_span.contains(c.body.binding_spans[*binding]) {
             continue;
         }
         let ty = gamma

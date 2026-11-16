@@ -621,7 +621,7 @@ pub(super) fn emit_pass_nested_fns(
 /// placeholder bound-calls from the tree that specialization demand carries, so
 /// there is no declaration-keyed chunk to cache.
 pub fn is_cached_body(f: &bone_semantic::hir::Function) -> bool {
-    !f.is_extern && f.inline_body.is_none() && !fn_has_bounds(f) && !is_generic(f)
+    !f.is_extern && f.inline_body.is_none() && !f.has_iterator_bounds() && !is_generic(f)
 }
 
 /// Whether THIS EMITTED BODY is a cached [`Chunk`] -- the same question
@@ -654,11 +654,6 @@ pub(crate) fn is_cached_emitted_body(f: &bone_semantic::hir::Function, body: &In
 /// instantiates emits nothing.
 pub fn is_generic(f: &bone_semantic::hir::Function) -> bool {
     !f.generics.is_empty()
-}
-
-/// Whether the fn declares any `Iterator` bound on its generics.
-pub(super) fn fn_has_bounds(f: &bone_semantic::hir::Function) -> bool {
-    f.generic_bounds.iter().any(Option::is_some)
 }
 
 /// Emit one top-level Lua function per distinct `(callee, instantiation)` a body

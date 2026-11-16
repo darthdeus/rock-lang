@@ -140,7 +140,7 @@ pub fn callee_binding_plan(
         if skull_mir::mangle::is_exempt(decl) || decl.inline_body.is_some() {
             continue;
         }
-        if decl.generic_bounds.iter().any(Option::is_some) {
+        if decl.has_iterator_bounds() {
             continue;
         }
         if !decl.generics.is_empty() && !func.spec_bindings.contains_key(&id) {

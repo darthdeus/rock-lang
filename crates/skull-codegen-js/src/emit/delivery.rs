@@ -177,7 +177,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
         // an `Iterator`-bounded body's placeholders are what make it unemittable
         // on its own, and the demand that reached here is what resolves them.
         let tree = plan.bound_tree.clone();
-        if f.generic_bounds.iter().any(Option::is_some) && tree.is_empty() {
+        if f.has_iterator_bounds() && tree.is_empty() {
             self.st.reject(
                 &name,
                 CompilerError::new_with_label(

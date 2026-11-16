@@ -1230,15 +1230,6 @@ pub fn semantic_pass_after_gate(
 /// fixture harness.
 pub fn semantic_pass_enforcing_identity_storage(
     rock_modules: &mut [Ast],
-) -> Result<Workspace, CompilerError> {
-    semantic_pass_enforcing_identity_storage_with_aliases(
-        rock_modules,
-        &bone_core::modules::NsAliases::default(),
-    )
-}
-
-pub fn semantic_pass_enforcing_identity_storage_with_aliases(
-    rock_modules: &mut [Ast],
     aliases: &bone_core::modules::NsAliases,
 ) -> Result<Workspace, CompilerError> {
     let ws = Workspace {

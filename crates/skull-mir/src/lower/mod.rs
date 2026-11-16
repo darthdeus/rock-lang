@@ -1426,7 +1426,7 @@ pub fn validate_concrete_bound_plan(
     func: &bone_core::hir::Function,
     plan: &ConcreteBodyPlan,
 ) -> Result<(), CompilerError> {
-    if func.generic_bounds.iter().any(Option::is_some) && plan.bound_tree.is_empty() {
+    if func.has_iterator_bounds() && plan.bound_tree.is_empty() {
         return Err(CompilerError::new_with_label(
             func.name_span,
             "concrete callee bound plan is empty for its site".to_string(),
