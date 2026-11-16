@@ -43,8 +43,9 @@ impl Shape {
     /// `None` when the body cannot be structured (an irreducible CFG, a
     /// `yield`, or a counted loop whose natural loop is not its recognized
     /// region); the caller prints it flat.
-    /// Only the blocks in `rpo` (those reachable from the entry) are read: a
-    /// hoisted lambda's arena holds every block of its enclosing function.
+    /// Only the blocks in `rpo` (those reachable from the entry) affect
+    /// placement: a hoisted lambda's arena holds every block of its enclosing
+    /// function.
     pub(crate) fn analyze(
         func: &MirFunc,
         entry: Idx<Block>,
@@ -55,6 +56,12 @@ impl Shape {
     ) -> Option<Shape> {
         let n = func.blocks.len();
         let forward = thread_forwarders(func, rpo, counted, forwarder);
+        if rpo
+            .iter()
+            .any(|&b| matches!(func.blocks[b].term, Term::Yield { .. }))
+        {
+            return None;
+        }
         // An unreachable block's edges are listed unthreaded; `place` never
         // reads them.
         let mut succ = Succ {
@@ -63,9 +70,6 @@ impl Shape {
         };
         succ.offsets.push(0);
         for (_, blk) in func.blocks.iter() {
-            if matches!(blk.term, Term::Yield { .. }) {
-                return None;
-            }
             successors(&blk.term, |s| succ.targets.push(forward[bx(s)]));
             succ.offsets.push(succ.targets.len() as u32);
         }
@@ -596,4 +600,55 @@ pub(crate) fn emit_body(em: &mut Emitter<'_>, shape: &Shape, entry: Idx<Block>, 
         escapes: Vec::new(),
     };
     walk.tree(entry, Follow::End);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ustr::Ustr;
+
+    #[test]
+    fn unreachable_yield_does_not_reject_structuring() {
+        let mut func = MirFunc::new(Ustr::from("f"));
+        let entry = func.entry();
+        let then_bb = func.new_block();
+        let else_bb = func.new_block();
+        let join = func.new_block();
+        let dead_yield = func.new_block();
+        let dead_resume = func.new_block();
+        let cond = func.insts.alloc(Inst::Const(Lit::Bool(true)));
+        func.set_term(
+            entry,
+            Term::Branch {
+                cond,
+                then_bb,
+                else_bb,
+            },
+        );
+        func.set_term(then_bb, Term::Goto(join));
+        func.set_term(else_bb, Term::Goto(join));
+        func.set_term(join, Term::Return(vec![]));
+        func.set_term(
+            dead_yield,
+            Term::Yield {
+                values: vec![],
+                resume: dead_resume,
+            },
+        );
+        func.set_term(dead_resume, Term::Return(vec![]));
+
+        let rpo = reverse_postorder(&func, entry);
+        assert_eq!(rpo.len(), 4);
+        assert!(
+            Shape::analyze(
+                &func,
+                entry,
+                &rpo,
+                &HashMap::default(),
+                |_| false,
+                |_| false
+            )
+            .is_some()
+        );
+    }
 }
