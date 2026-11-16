@@ -70,17 +70,6 @@ fn decorator_metadata_used_bindings(
         .collect()
 }
 
-fn unused_vars_in_module(module: &Module, variants: &FxHashSet<Ustr>) -> Vec<UnusedVar> {
-    module
-        .bodies
-        .iter()
-        .flat_map(|(owner, body)| {
-            let metadata_used = decorator_metadata_used_bindings(module, *owner, body);
-            unused_vars_in_body_with_metadata(body, variants, &metadata_used)
-        })
-        .collect()
-}
-
 /// Bindings the lint reports on:
 /// - every `Let`-kind binding -- `let`, destructuring `let`, `for`-loop vars,
 ///   and match-arm / if-let pattern binds. A payload-less enum-variant arm
@@ -2715,19 +2704,11 @@ fn flat_findings_with(
         return Vec::new();
     }
     let module = ws.module(mid);
-    let mut out: Vec<Finding> = Vec::new();
-    if sel.enabled(UNUSED_VAR) {
-        let found = unused_vars_in_module(module, variants);
-        out.extend(found.iter().map(Finding::of));
-    }
-    if sel.enabled(UNUSED_PURE_EXPR) {
-        let found: Vec<_> = module
-            .bodies
-            .values()
-            .flat_map(unused_pure_exprs_in_body)
-            .collect();
-        out.extend(found.iter().map(Finding::of));
-    }
+    let mut out: Vec<Finding> = module
+        .bodies
+        .iter()
+        .flat_map(|(owner, body)| flat_body_findings(module, *owner, body, variants, sel))
+        .collect();
     if sel.enabled(METHOD_SYNTAX) {
         let found = method_syntax_in_module(ws, module, types, src);
         out.extend(found.iter().map(Finding::of));
@@ -2760,36 +2741,11 @@ fn inference_findings_with(
         return Vec::new();
     }
     let module = ws.module(mid);
-    let inf = ws.inference(mid);
-    let bi = |owner: &BodyOwner| inf.and_then(|i| i.per_fn.get(owner));
-    let mut out: Vec<Finding> = Vec::new();
-    if sel.enabled(TRANSMUTE_OF_NULLABLE) {
-        let found: Vec<_> = module
-            .bodies
-            .iter()
-            .flat_map(|(owner, body)| transmute_of_nullable_in_body(ws, bi(owner), body))
-            .collect();
-        out.extend(found.iter().map(Finding::of));
-    }
-    if sel.enabled(TASK_NULL_ABANDON) {
-        let found: Vec<_> = module
-            .bodies
-            .iter()
-            .flat_map(|(owner, body)| task_null_abandon_in_body(ws, bi(owner), body))
-            .collect();
-        out.extend(found.iter().map(Finding::of));
-    }
-    if sel.enabled(ROW_ESCAPE) {
-        let found: Vec<_> = module
-            .bodies
-            .iter()
-            .flat_map(|(owner, body)| {
-                row_escapes_in_body(ws, bi(owner), body, tail_sink(module, owner))
-            })
-            .collect();
-        out.extend(found.iter().map(Finding::of));
-    }
-    out
+    module
+        .bodies
+        .iter()
+        .flat_map(|(owner, body)| inference_body_findings(ws, module, *owner, body, sel))
+        .collect()
 }
 
 pub fn workspace_findings_by_file_with(
