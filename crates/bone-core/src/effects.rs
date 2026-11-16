@@ -229,9 +229,6 @@ fn is_fn_typed(ws: &Workspace, ty: TyId) -> bool {
     }
 }
 
-/// A Rock body's own writes and the callees it reaches. Lambda bodies are
-/// walked with the rest: a lambda that writes makes its creator write,
-/// which is conservative.
 /// A struct, enum or newtype name used as a call: a constructor.
 fn is_constructor(ws: &Workspace, name: Ustr) -> bool {
     let bare = name.as_str().rsplit("::").next().unwrap_or_default();
@@ -352,6 +349,9 @@ fn equality_operand_may_call_metamethod(
     )
 }
 
+/// A Rock body's own writes and the callees it reaches. Lambda bodies are
+/// walked with the rest: a lambda that writes makes its creator write,
+/// which is conservative.
 fn body_effect(
     ws: &Workspace,
     body: &crate::hir::Body,
