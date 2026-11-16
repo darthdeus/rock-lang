@@ -23,7 +23,7 @@ use skull::instance_graph::{
     EdgeKind, Instance, InstanceBoundNext, InstanceBoundTree, InstanceGraph, Owner, Rejection,
     RejectionKind, Site, SiteDomain, SiteOp, SiteOutcome, SiteRecord, Unresolved,
 };
-use skull_mir::monoty::{MonoSubst, MonoTy, MonoTyReason};
+use skull_mir::monoty::{MonoSubst, MonoTy};
 use ustr::Ustr;
 
 /// One fixture, chosen so that every section the graph can populate from a
@@ -111,15 +111,12 @@ fn discovery_order_does_not_change_the_canonical_form() {
 ///   means two operations collapsed onto one.
 /// - `subst_disagreements` / `bound_tree_disagreements`: a specialized body's
 ///   shape must be a function of its instance.
-/// - `storage_failures`: a receiver with no concrete type inside an
-///   INSTANTIATED body is an incomplete substitution.
 /// - `unresolved`: every remaining producer needs a binding record inference did
 ///   not write; `instance_graph.rs`'s own arms reach them by removing one from a
 ///   `Workspace`, which is a perturbation rather than a program.
 const INVARIANT_EMPTY: &[&str] = &[
     "bound_tree_disagreements",
     "duplicate_sites",
-    "storage_failures",
     "subst_disagreements",
     "unresolved",
 ];
@@ -137,13 +134,11 @@ const SECTIONS: &[&str] = &[
     "depth_capped",
     "duplicate_sites",
     "edges",
-    "erased_entries",
     "excused_generic_roots",
     "expanded",
     "inline_body_deps",
     "instances",
     "rejections",
-    "storage_failures",
     "subst_disagreements",
     "substitutions",
     "uninstantiated_roots",
@@ -412,20 +407,6 @@ fn arms() -> Vec<Arm> {
         |g| {
             let victim = g.coroutine_helpers.iter().next().expect("a helper").clone();
             g.coroutine_helpers.remove(&victim);
-        },
-    ));
-    v.push(arm(
-        "erased_entries.presence",
-        "erased_entries",
-        noop,
-        |g| {
-            let victim = g
-                .erased_entries
-                .iter()
-                .next()
-                .expect("an erased entry")
-                .clone();
-            g.erased_entries.remove(&victim);
         },
     ));
     v.push(arm(
@@ -1130,12 +1111,6 @@ fn arms() -> Vec<Arm> {
                 .insert("syn".to_string());
         },
     ));
-    v.push(arm(
-        "storage_failures.reason",
-        "storage_failures",
-        |g| any_owner(g).storage_failures.push(MonoTyReason::NoNode),
-        |g| any_owner(g).storage_failures.push(MonoTyReason::DepthLimit),
-    ));
 
     v
 }
@@ -1234,8 +1209,6 @@ fn counters_and_arena_growth_are_not_semantic() {
     let (_, mut g) = build(false);
     g.sites_attempted += 1234;
     g.recursion_starts += 99;
-    g.synthesized_examined += 5;
-    g.synthesized_approximated += 5;
     g.always_emitted_seeds += 3;
     // The agreement counters are DERIVED from the reach index now, so moving
     // them means moving the index -- an extra reach of an instance the graph

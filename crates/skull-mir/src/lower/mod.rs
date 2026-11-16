@@ -209,6 +209,7 @@ pub use resolve::{
 };
 mod stmt;
 mod storage;
+pub use storage::SYNTHESIZED_ENTRIES;
 mod structs;
 mod types;
 

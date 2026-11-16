@@ -1036,10 +1036,9 @@ impl ArtifactView {
                 self.index.realizable.remove(i);
                 continue;
             }
-            self.index.realizable.insert(
-                i.clone(),
-                realize_decl(ws, i.func, &g.erased_entries, &target, &req.mappings),
-            );
+            self.index
+                .realizable
+                .insert(i.clone(), realize_decl(ws, i.func, &target, &req.mappings));
             let rows = g.sites_of(i).map(ArtifactSiteRows::new).unwrap_or_default();
             local_index_rows_examined += rows.site_count;
             self.index.install_site_rows(i, rows);
@@ -1945,7 +1944,6 @@ impl ArtifactView {
 fn realize_decl(
     ws: &Workspace,
     rep: FuncRef,
-    erased: &BTreeSet<String>,
     target: &CpuTargetSpec,
     mappings: &ArtifactMappings<'_>,
 ) -> Result<Realized, Unrealizable> {
@@ -2014,7 +2012,7 @@ fn realize_decl(
     };
     selected.and_then(|decl| {
         let f = &ws.module(decl.module).functions[decl.func];
-        realize_body(ws, decl, f, erased, target, mappings).map(|kind| Realized { decl, kind })
+        realize_body(ws, decl, f, target, mappings).map(|kind| Realized { decl, kind })
     })
 }
 
@@ -2025,14 +2023,13 @@ fn realize_body(
     ws: &Workspace,
     decl: FuncRef,
     f: &Function,
-    erased: &BTreeSet<String>,
     target: &CpuTargetSpec,
     mappings: &ArtifactMappings<'_>,
 ) -> Result<Realization, Unrealizable> {
     // An erased runtime entry is an IDENTITY, not a body kind: S 1.4's contract
     // is that the entry exists under its bare name for every target skull
     // emits, so it is classified before anything reads a body slot.
-    if erased.contains(f.name.as_str()) {
+    if crate::instance_graph::is_erased_runtime_entry(f) {
         return class_or_reject(target, BoundaryClass::ErasedRuntimeEntry);
     }
     if f.is_extern {
@@ -2115,7 +2112,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     for i in &g.instances {
         let realized = *by_decl
             .entry(i.func)
-            .or_insert_with(|| realize_decl(ws, i.func, &g.erased_entries, &target, &req.mappings));
+            .or_insert_with(|| realize_decl(ws, i.func, &target, &req.mappings));
         realizable.insert(i.clone(), realized);
     }
 

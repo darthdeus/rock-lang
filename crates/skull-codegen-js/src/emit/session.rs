@@ -86,7 +86,26 @@ fn js_root_plan(
             refs.push(shader_root);
         }
     }
+    push_synthesized_entry_roots(ws, &mut refs, &mut seen);
     Ok(JsRootPlan { named, refs })
+}
+
+/// Graph roots only: a synthesized call resolves to the entry's base instance,
+/// and the worklist emits a definition only for a call that survives lowering.
+pub(super) fn push_synthesized_entry_roots(
+    ws: &Workspace,
+    refs: &mut Vec<FuncRef>,
+    seen: &mut HashSet<FuncRef>,
+) {
+    for entry in skull_graph::instance_graph::synthesized_entry_roots(ws) {
+        let name = ws.module(entry.module).functions[entry.func].name;
+        let serves_js =
+            skull_mir::lower::backend_variant(ws, name, entry, bone_core::hir::FnBackend::Js)
+                .is_ok();
+        if serves_js && seen.insert(entry) {
+            refs.push(entry);
+        }
+    }
 }
 
 pub(super) fn shader_root_refs(ws: &Workspace) -> Result<Vec<FuncRef>, CompilerError> {
@@ -96,31 +115,16 @@ pub(super) fn shader_root_refs(ws: &Workspace) -> Result<Vec<FuncRef>, CompilerE
         .collect())
 }
 
+/// Graph roots only: the worklist emits an opaque body's `@nomangle` targets
+/// once it emits the body that names them.
 pub(super) fn extend_root_plan_from_inline_view(
-    ws: &Workspace,
     plan: &mut JsRootPlan,
     view: &ArtifactView,
 ) -> bool {
-    extend_root_plan_from_opaque_targets(
-        ws,
-        plan,
-        view.opaque_boundary_roots.values().flatten().copied(),
-    )
-}
-
-fn extend_root_plan_from_opaque_targets(
-    ws: &Workspace,
-    plan: &mut JsRootPlan,
-    targets: impl IntoIterator<Item = FuncRef>,
-) -> bool {
     let mut seen: HashSet<FuncRef> = plan.refs.iter().copied().collect();
     let mut added = false;
-    for target in targets {
+    for &target in view.opaque_boundary_roots.values().flatten() {
         if seen.insert(target) {
-            let name = ws.module(target.module).functions[target.func]
-                .name
-                .to_string();
-            plan.named.push((target, name));
             plan.refs.push(target);
             added = true;
         }
@@ -309,7 +313,7 @@ fn build_program_session(
     let mut root_plan = js_root_plan(ws, extra_roots)?;
     loop {
         let session = new_js_session(ws, scx, &root_plan.refs);
-        if extend_root_plan_from_inline_view(ws, &mut root_plan, &session.view) {
+        if extend_root_plan_from_inline_view(&mut root_plan, &session.view) {
             continue;
         }
         let build = assemble_program_core(ws, scx, &root_plan.named, &session)?;

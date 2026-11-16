@@ -1870,9 +1870,8 @@ impl<'a> Builder<'a> {
                     value: v,
                 });
             }
-            // `target` IS the `Expr::Index` node, and that is the expression
-            // the graph walk keys this arm's synthesized obligations on
-            // (`INDEX_TRIGGERED`). The place expression is never lowered as a
+            // `target` IS the `Expr::Index` node, the site of this arm's
+            // synthesized calls. The place expression is never lowered as a
             // value, so nothing else installs it: in statement position the
             // cursor is absent entirely and in value position it names the
             // enclosing assignment.

@@ -44,8 +44,9 @@ use skull_mir::monoty::{MonoCtor, MonoInterner, MonoSubst, MonoTy, MonoTyId, Mon
 use ustr::Ustr;
 
 use crate::instance_graph::{
-    boundary_class_for, function_body, is_spanless, BoundaryClass, FunctionBody, Instance,
-    InstanceGraph, Owner, Site, SiteDomain, SiteOp, SiteOutcome, TextEditDelta,
+    boundary_class_for, function_body, is_spanless, stdlib_entry_representative, BoundaryClass,
+    FunctionBody, Instance, InstanceGraph, Owner, Site, SiteDomain, SiteOp, SiteOutcome,
+    TextEditDelta,
 };
 use crate::target_projection::CpuTargetSpec;
 
@@ -113,6 +114,24 @@ impl Callee {
             Self::Rock(i) | Self::Boundary(i, _) => i,
         }
     }
+}
+
+/// What a call synthesized by lowering to the runtime entry `name` calls: the
+/// entry's base instance, which every build roots. `None` when `name` is not a
+/// synthesized entry or the graph does not hold it.
+pub fn synthesized_callee(ws: &Workspace, g: &InstanceGraph, name: &str) -> Option<Callee> {
+    if !skull_mir::lower::SYNTHESIZED_ENTRIES.contains(&name) {
+        return None;
+    }
+    let instance = Instance::base(stdlib_entry_representative(ws, name)?);
+    if !g.instances.contains(&instance) {
+        return None;
+    }
+    let function = &ws.module(instance.func.module).functions[instance.func.func];
+    Some(match boundary_class_for(function) {
+        Some(class) => Callee::Boundary(instance, class),
+        None => Callee::Rock(instance),
+    })
 }
 
 /// Which iterator operation an [`Site`] in `iterator_ops` is.
@@ -2438,7 +2457,7 @@ fn concrete_plan_from_sites(
                 }
                 SiteOutcome::Resolved(target) => {
                     let function = &ws.module(target.func.module).functions[target.func.func];
-                    let class = boundary_class_for(function, &g.erased_entries);
+                    let class = boundary_class_for(function);
                     let boundary = class.is_some();
                     if let Some(body) = diagnostic.as_deref_mut() {
                         let callee = match class {

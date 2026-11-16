@@ -257,10 +257,6 @@ pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
     );
     put("depth_capped", g.depth_capped().map(&key).collect());
     put(
-        "storage_failures",
-        g.storage_failures().map(|r| format!("{r:?}")).collect(),
-    );
-    put(
         "boundaries",
         g.boundaries
             .iter()
@@ -274,7 +270,6 @@ pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
             .map(|c| format!("{} {} {}", c.owner_identity, c.suffix, c.symbol_today))
             .collect(),
     );
-    put("erased_entries", g.erased_entries.iter().cloned().collect());
     put(
         "inline_body_deps",
         g.inline_body_deps

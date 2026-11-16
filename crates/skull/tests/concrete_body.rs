@@ -1642,11 +1642,6 @@ fn main() { let a = body([1, 2]) }
         body.callees().all(|(site, _)| site.expr != header),
         "the template-lowered `for` header has a callee entry after all"
     );
-    assert_eq!(
-        g.storage_failures().count(),
-        0,
-        "a synthesized receiver had no concrete type"
-    );
     assert_eq!(bodies.free_types.len(), 0);
 }
 
@@ -1680,6 +1675,7 @@ fn main() {
     let m: Map<string, P> = map_new()
     m["a"] = P { x: 1.0, y: 2.0 }
     let r = m["a"]
+    print("{r.x}")
 }
 "#;
 
@@ -2019,7 +2015,7 @@ fn every_recorded_operation_becomes_one_entry_a_hole_or_a_rejection() {
             let f = &ws.module(inst.func.module).functions[inst.func.func];
             assert_eq!(
                 Some(*class),
-                instance_graph::boundary_class_for(f, &g.erased_entries),
+                instance_graph::boundary_class_for(f),
                 "wrong boundary class at {:?}",
                 site.op
             );
@@ -2738,102 +2734,6 @@ fn iterator_operations_resolve_to_concrete_witnesses() {
         at_expr.len() > 1,
         "the nested witness has no sibling at its own expression, so keying by \
          expression alone would not have lost anything: {at_expr:?}"
-    );
-}
-
-/// A synthesized column-Map entry names ONE runtime name per site, chosen by the
-/// index's position and the stored value -- not the set of three the arm could
-/// have emitted.
-#[test]
-fn a_column_map_index_names_the_entry_its_arm_emits() {
-    let (ws, g, bodies) = bodies_of(
-        r#"
-value P { x: float, y: float }
-fn main() {
-    let m: Map<string, P> = map_new()
-    m["w"] = P { x: 1.0, y: 2.0 }
-    let r = m["r"]
-    let n: P? = null
-    m["n"] = n
-}
-"#,
-    );
-    let main = bodies
-        .bodies
-        .keys()
-        .find(|i| g.identity(&ws, i).starts_with("main@"))
-        .expect("no `main`");
-    let mut names: Vec<&str> = bodies.bodies[main]
-        .synthesized_calls
-        .keys()
-        .filter_map(|s| match s.op {
-            SiteOp::Synthesized(n) => Some(n),
-            _ => None,
-        })
-        .collect();
-    names.sort();
-    // The constructor spine, write, read, and nullable write -- one name each,
-    // except the nullable write, whose arm genuinely emits both a slot and a
-    // free.
-    assert_eq!(
-        names,
-        vec![
-            "__map_col_free",
-            "__map_col_new_spine",
-            "__map_col_slot",
-            "__map_col_slot",
-            "__map_col_slot_checked",
-        ],
-        "the synthesized names are not the ones the four arms emit"
-    );
-    assert_eq!(
-        g.synthesized_approximated, 0,
-        "a Map index site could not decide its entry"
-    );
-}
-
-/// `__vec_data_sort`'s two arms split on the ELEMENT, so a site names one.
-#[test]
-fn a_column_vec_sort_names_one_of_its_two_arms() {
-    // Read off the SITES, not the table: the stdlib's `sort` synthesizes a call
-    // to a generic runtime entry with no binding record, so the site is a hole.
-    // Which NAME the arm chose is the subject here, and the site carries it
-    // either way -- that is the point of keying the operation.
-    let sorted = |src: &str| -> Vec<&'static str> {
-        let (_, g, _) = bodies_of(src);
-        let mut v: Vec<&'static str> = g
-            .call_sites()
-            .flat_map(|(_, sites)| sites.keys())
-            .filter_map(|s| match s.op {
-                SiteOp::Synthesized(n @ ("__rock_col_sort" | "__rock_col_sort_leaves")) => Some(n),
-                _ => None,
-            })
-            .collect();
-        v.sort();
-        v.dedup();
-        v
-    };
-    let boxed = sorted(
-        r#"
-value P { x: float, y: float }
-fn main() { let ps: [P] = []; ps.sort(_.x) }
-"#,
-    );
-    let leaves = sorted(
-        r#"
-nobox value Q { x: float, y: float }
-fn main() { let qs: [Q] = []; qs.sort(_.x) }
-"#,
-    );
-    assert_eq!(
-        boxed,
-        vec!["__rock_col_sort"],
-        "a boxed element took the leaf arm"
-    );
-    assert_eq!(
-        leaves,
-        vec!["__rock_col_sort_leaves"],
-        "a `nobox` element did not take the leaf arm"
     );
 }
 

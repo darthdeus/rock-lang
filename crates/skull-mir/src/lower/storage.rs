@@ -6,6 +6,37 @@
 //! builds and reads the layout that module describes.
 use super::*;
 
+/// Every stdlib entry [`Builder::call_spine`] may call. Builds root them
+/// instead of predicting which sites lowering will synthesize, so a call
+/// resolves by name wherever lowering decides to emit it.
+pub const SYNTHESIZED_ENTRIES: &[&str] = &[
+    "__arena_store_or_empty",
+    "__descriptor_with",
+    "__map_col_clear",
+    "__map_col_contains",
+    "__map_col_free",
+    "__map_col_len",
+    "__map_col_new_spine",
+    "__map_col_slot",
+    "__map_col_slot_checked",
+    "__map_col_slot_of",
+    "__nb_checked_index",
+    "__rock_col_capacity",
+    "__rock_col_copy",
+    "__rock_col_insert",
+    "__rock_col_sort",
+    "__rock_col_sort_leaves",
+    "__rock_stride_capacity",
+    "__rock_stride_copy",
+    "__rock_stride_insert",
+    "__rock_stride_reserve",
+    "__rock_stride_sort",
+    "__rock_stride_sort_leaves",
+    "__rock_vec_column_elements",
+    "__rock_vec_strided_elements",
+    "table_len",
+];
+
 impl<'a> Builder<'a> {
     pub(crate) fn clone_column_data(
         &mut self,
@@ -1823,6 +1854,10 @@ impl<'a> Builder<'a> {
         name: &'static str,
         args: Vec<Idx<Inst>>,
     ) -> Result<Idx<Inst>, CompilerError> {
+        debug_assert!(
+            SYNTHESIZED_ENTRIES.contains(&name),
+            "`{name}` is missing from SYNTHESIZED_ENTRIES"
+        );
         let func = self.stdlib_funcref(name)?;
         Ok(
             self.with_site_op(crate::site::SiteOp::Synthesized(name), |b| {

@@ -186,18 +186,12 @@ fn the_operational_censuses_are_sums_of_the_primary_records() {
     assert!(g.sites_attempted > 0, "the fixture attempted no sites");
     assert_eq!(g.sites_attempted, sum(|c| c.sites_attempted));
     assert_eq!(g.always_emitted_seeds, sum(|c| c.always_emitted_seeds));
-    assert_eq!(g.synthesized_examined, sum(|c| c.synthesized_examined));
-    assert_eq!(
-        g.synthesized_approximated,
-        sum(|c| c.synthesized_approximated)
-    );
     assert_eq!(census.body_exprs_scanned, sum(|c| c.body_exprs_scanned));
     assert_eq!(
         census.resolved_overload_rows,
         sum(|c| c.resolved_overload_rows)
     );
     assert_eq!(census.fn_value_rows, sum(|c| c.fn_value_rows));
-    assert_eq!(census.generated_rows, sum(|c| c.generated_rows));
     assert_eq!(census.dispatched_rows, sum(|c| c.dispatched_rows));
     assert_eq!(census.implicit_iter_rows, sum(|c| c.implicit_iter_rows));
     assert_eq!(census.bound_tree_rows, sum(|c| c.bound_tree_rows));
@@ -287,10 +281,6 @@ fn the_operational_censuses_are_sums_of_the_primary_records() {
         "a fresh build maintained the update-only predecessor index: {census:?}"
     );
     assert!(
-        census.index_erased_updates >= census.index_erased_unique,
-        "erased-entry unique count exceeds its update denominator: {census:?}"
-    );
-    assert!(
         census.duplicate_pending_suppressed > 0,
         "the fixture must expose duplicate pending owners before deduplication"
     );
@@ -326,7 +316,6 @@ fn the_operational_censuses_are_sums_of_the_primary_records() {
         census.index_maintenance_ns,
         census.index_subst_ns
             + census.index_trees_ns
-            + census.index_erased_ns
             + census.index_always_emitted_ns
             + census.index_preds_ns
             + census.index_decls_ns
@@ -348,11 +337,6 @@ fn the_graph_population_gate_reaches_every_contribution_family() {
     assert!(c.bound_tree_rows > 0, "no bound-tree rows: {c:?}");
     assert!(c.iterator_rows > 0, "no iterator rows: {c:?}");
     assert!(c.fn_value_rows > 0, "no function-value rows: {c:?}");
-    assert!(c.generated_rows > 0, "no synthesized/generated rows: {c:?}");
-    assert!(
-        c.contribution_synthesized_examined > 0,
-        "no synthesized-call census: {c:?}"
-    );
     assert!(
         c.contribution_rejections > 0,
         "no rejection population: {c:?}"

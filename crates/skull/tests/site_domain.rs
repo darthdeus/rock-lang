@@ -590,3 +590,53 @@ fn both_iter_witness_forms_state_the_instance_they_target() {
         assert!(c.accounts(), "accounting identity broken for {form}: {c:?}");
     }
 }
+
+/// Every helper call lowering synthesizes joins, including the Lua-only ones:
+/// the strided append's capacity reserve and the counted arena walk's store
+/// lookup. Each fixture must actually examine its synthesized call, or the
+/// zero says nothing.
+#[test]
+fn every_synthesized_helper_call_joins() {
+    for (helper, src) in [
+        (
+            "__rock_stride_reserve",
+            "nobox value S { a: int, b: int, c: int, d: int, e: int }\n\
+             fn main() {\n\
+                 let xs: [S] = []\n\
+                 xs.push(S { a: 1, b: 2, c: 3, d: 4, e: 5 })\n\
+                 print(\"{xs[0].c}\")\n\
+             }",
+        ),
+        (
+            "__arena_store_or_empty",
+            "struct Row { x: int }\n\
+             fn main() {\n\
+                 let a: Arena<Row> = arena_new()\n\
+                 a.insert(Row { x: 2 })\n\
+                 let sum = 0\n\
+                 for (i, (e, row)) in enumerate(a) { sum += i + row.x }\n\
+                 print(\"{sum}\")\n\
+             }",
+        ),
+    ] {
+        let lua = crate::common::emit_module(src);
+        let call = format!("{helper}(");
+        assert!(
+            lua.lines()
+                .any(|line| line.contains(&call) && !line.contains("function ")),
+            "the fixture does not call `{helper}`:\n{lua}"
+        );
+        let c = census_of(src);
+        assert_eq!(
+            c.unjoined_total(),
+            0,
+            "a call in the `{helper}` fixture does not join: {:?}",
+            c.examples
+        );
+        assert!(
+            c.joined_by_op.get("synthesized").copied().unwrap_or(0) > 0,
+            "the `{helper}` fixture joined no synthesized call: {c:?}"
+        );
+        assert!(c.accounts(), "accounting identity broken: {c:?}");
+    }
+}

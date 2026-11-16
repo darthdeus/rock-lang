@@ -303,13 +303,14 @@ pub fn emit_with_closure(
             refs.push(shader_root);
         }
     }
+    push_synthesized_entry_roots(ws, &mut refs, &mut ref_set);
     let mut root_plan = JsRootPlan {
         named: roots.to_vec(),
         refs,
     };
     let session = loop {
         let session = new_js_session(ws, &scx, &root_plan.refs);
-        if !extend_root_plan_from_inline_view(ws, &mut root_plan, &session.view) {
+        if !extend_root_plan_from_inline_view(&mut root_plan, &session.view) {
             break session;
         }
     };

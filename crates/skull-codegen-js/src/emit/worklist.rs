@@ -46,16 +46,9 @@ pub(super) struct WorklistState<'a> {
     pub(super) rejections: Vec<(String, CompilerError)>,
     pub(super) artifact_decls: HashMap<Instance, FuncRef>,
     pub(super) fn_value_targets: HashSet<Instance>,
-}
-
-pub(super) fn add_inline_js_body(
-    bodies: &mut Vec<JsInlineBody>,
-    instance: Instance,
-    decl: FuncRef,
-) {
-    if bodies.iter().all(|body| body.instance != instance) {
-        bodies.push(JsInlineBody { instance, decl });
-    }
+    /// The bare `@nomangle` declarations each `inline(js)` body names. They are
+    /// emitted only once the body that names them is.
+    opaque_targets: BTreeMap<skull_graph::instance_graph::DeclKey, rustc_hash::FxHashSet<FuncRef>>,
 }
 
 fn opaque_js_global_names(ws: &Workspace, body: &JsInlineBody) -> Vec<ustr::Ustr> {
@@ -114,33 +107,6 @@ impl<'a> WorklistState<'a> {
             .bound_tree_disagreements()
             .map(|finding| finding.instance)
             .collect();
-        let mut queue = Vec::new();
-        let mut seen = HashSet::new();
-        let mut inline_js = Vec::new();
-        for &(requested, _) in roots {
-            let key = names.base_instance(ws, requested).ok_or_else(|| {
-                err(format!(
-                    "JS: root `{}` has no base InstanceGraph instance",
-                    ws.module(requested.module).functions[requested.func].name
-                ))
-            })?;
-            let fr = view
-                .realization
-                .get(&key)
-                .map_or(requested, |realized| realized.decl);
-            let f = &ws.module(fr.module).functions[fr.func];
-            if matches!(f.inline_body, Some((bone_core::hir::FnBackend::Js, _))) {
-                if seen.insert(fr) {
-                    add_inline_js_body(&mut inline_js, key, fr);
-                }
-            } else if !(f.is_extern && f.backend == bone_core::hir::FnBackend::Js) {
-                if seen.insert(fr) {
-                    queue.push(fr);
-                }
-            } else {
-                seen.insert(fr);
-            }
-        }
         let artifact_decls = view
             .realization
             .iter()
@@ -154,7 +120,7 @@ impl<'a> WorklistState<'a> {
             const_globals: build_const_global_names(ws, scx),
             ..GlobalCtx::default()
         };
-        Ok(WorklistState {
+        let mut st = WorklistState {
             concrete,
             always,
             standalone_specs: Vec::new(),
@@ -163,11 +129,11 @@ impl<'a> WorklistState<'a> {
             bound_tree_disagreements,
             cache: skull_transform::InlineCache::default(),
             names,
-            queue,
-            seen,
+            queue: Vec::new(),
+            seen: HashSet::new(),
             lowered: Vec::new(),
             spec_lowered: Vec::new(),
-            inline_js,
+            inline_js: Vec::new(),
             state_index: build_state_index(ws),
             nobox_leaf_globals: build_nobox_leaf_globals(ws, scx)?,
             deco_globals: if program_mode {
@@ -183,7 +149,59 @@ impl<'a> WorklistState<'a> {
             rejections: Vec::new(),
             artifact_decls,
             fn_value_targets: view.fn_value_targets.iter().cloned().collect(),
-        })
+            opaque_targets: view.opaque_boundary_roots.clone(),
+        };
+        for &(requested, _) in roots {
+            st.queue_root(ws, requested)?;
+        }
+        Ok(st)
+    }
+
+    /// Queue `requested` for emission as an entry: a body with no MIR call
+    /// site naming it, so the view's base instance is what it delivers.
+    fn queue_root(&mut self, ws: &Workspace, requested: FuncRef) -> Result<(), CompilerError> {
+        let key = self.names.base_instance(ws, requested).ok_or_else(|| {
+            err(format!(
+                "JS: root `{}` has no base InstanceGraph instance",
+                ws.module(requested.module).functions[requested.func].name
+            ))
+        })?;
+        let fr = self.artifact_decls.get(&key).copied().unwrap_or(requested);
+        let f = &ws.module(fr.module).functions[fr.func];
+        if matches!(f.inline_body, Some((bone_core::hir::FnBackend::Js, _))) {
+            if self.seen.insert(fr) {
+                self.add_inline_js_body(ws, key, fr)?;
+            }
+        } else if !(f.is_extern && f.backend == bone_core::hir::FnBackend::Js) {
+            if self.seen.insert(fr) {
+                self.queue.push(fr);
+            }
+        } else {
+            self.seen.insert(fr);
+        }
+        Ok(())
+    }
+
+    pub(super) fn add_inline_js_body(
+        &mut self,
+        ws: &Workspace,
+        instance: Instance,
+        decl: FuncRef,
+    ) -> Result<(), CompilerError> {
+        if self.inline_js.iter().any(|body| body.instance == instance) {
+            return Ok(());
+        }
+        self.inline_js.push(JsInlineBody { instance, decl });
+        let mut targets: Vec<FuncRef> = self
+            .opaque_targets
+            .get(&skull_graph::instance_graph::DeclKey(decl))
+            .map(|targets| targets.iter().copied().collect())
+            .unwrap_or_default();
+        targets.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
+        for target in targets {
+            self.queue_root(ws, target)?;
+        }
+        Ok(())
     }
 
     /// Record a definition that cannot be emitted and keep going. The definition

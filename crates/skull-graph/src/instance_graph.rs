@@ -24,8 +24,9 @@
 //! Stage 3's cutover attaches it to. Nothing here is fatal yet.
 //!
 //! **Where the graph is still incomplete**, stated so a reader does not mistake
-//! the histogram for the whole graph: `CompilerGenerated` OVER-approximates, and
-//! a coroutine's `__defer`/`__on_*` helpers exist only after the MIR transform so
+//! the histogram for the whole graph: a call lowering synthesizes to a named
+//! runtime entry has no edge (every build roots those entries instead), and a
+//! coroutine's `__defer`/`__on_*` helpers exist only after the MIR transform so
 //! nothing here can count them. Every edge recorded is real;
 //! [`InstanceGraph::uninstantiated_roots`] records the generic roots no
 //! instantiation reached.
@@ -41,7 +42,7 @@ use bone_core::prelude::{BoundNext, IterWitness, ModuleId, Span, TyId};
 use bone_core::workspace::{BodyInference, Workspace};
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap, FxHashSet};
-use skull_mir::lower::{ContainerFamily, ContainerPlan, RepArena};
+use skull_mir::lower::RepArena;
 use skull_mir::mangle::mangle_fn;
 use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoInterner, MonoSubst, MonoTyId, MonoTyReason};
@@ -88,10 +89,8 @@ pub enum EdgeKind {
     /// site's conformance tree (`bound_call_trees`). Distinct from
     /// [`Self::IteratorNext`], which is the `for` desugar's witness.
     BoundNextWitness,
-    /// A call no source expression contains: lowering synthesizes it and
-    /// resolves the callee by LITERAL NAME through `Builder::stdlib_funcref` /
-    /// `call_spine`. Over-approximated --
-    /// see [`COMPILER_GENERATED_TRIGGERS`].
+    /// A call no source expression names: a conditional dispatch arm
+    /// (interpolation, `==`) or an `@preflight` helper.
     CompilerGenerated,
 }
 
@@ -389,8 +388,6 @@ pub struct Contribution {
     pub duplicate_sites: Vec<Site>,
     pub unresolved: Vec<Unresolved>,
     pub rejections: Vec<Rejection>,
-    pub storage_failures: Vec<MonoTyReason>,
-    pub erased_entries: BTreeSet<String>,
     pub always_emitted_targets: BTreeSet<Instance>,
     /// Always-emitted call sites that could not instantiate, by callee name.
     pub always_emitted_holes: Vec<AlwaysEmittedHole>,
@@ -416,15 +413,12 @@ pub struct Contribution {
     pub body_exprs_scanned: usize,
     pub resolved_overload_rows: usize,
     pub fn_value_rows: usize,
-    pub generated_rows: usize,
     pub dispatched_rows: usize,
     pub implicit_iter_rows: usize,
     pub bound_tree_rows: usize,
     pub bound_call_rows: usize,
     pub iterator_rows: usize,
     pub always_emitted_seeds: usize,
-    pub synthesized_examined: usize,
-    pub synthesized_approximated: usize,
     pub(crate) timing: ExpandTiming,
 }
 
@@ -432,12 +426,9 @@ impl Contribution {
     fn add_counters(&mut self, c: &Contribution) {
         self.sites_attempted += c.sites_attempted;
         self.always_emitted_seeds += c.always_emitted_seeds;
-        self.synthesized_examined += c.synthesized_examined;
-        self.synthesized_approximated += c.synthesized_approximated;
         self.body_exprs_scanned += c.body_exprs_scanned;
         self.resolved_overload_rows += c.resolved_overload_rows;
         self.fn_value_rows += c.fn_value_rows;
-        self.generated_rows += c.generated_rows;
         self.dispatched_rows += c.dispatched_rows;
         self.implicit_iter_rows += c.implicit_iter_rows;
         self.bound_tree_rows += c.bound_tree_rows;
@@ -668,10 +659,6 @@ pub struct Indices {
     pub subst: FxHashMap<Instance, Agreed<MonoSubst>>,
     /// Instance -> who supplied its conformance witnesses and what they said.
     pub trees: BTreeMap<Instance, Agreed<InstanceBoundTree>>,
-    /// Runtime entry name -> the owners whose walk named it. Membership is a
-    /// non-empty owner set, never a count, so removing the last namer removes
-    /// the entry and a stale one cannot survive as a positive number.
-    pub erased: BTreeMap<String, BTreeSet<Owner>>,
     /// Instance -> the always-emitted bodies that root it.
     pub always_emitted: BTreeMap<Instance, BTreeSet<Owner>>,
     /// Declaration -> how many LIVE instances it has.
@@ -880,10 +867,6 @@ pub struct InstanceGraph {
     /// Helper symbols owned by coroutine instances.
     pub coroutine_helpers: BTreeSet<CoroutineHelper>,
     coroutine_helpers_by_owner: BTreeMap<String, BTreeSet<CoroutineHelper>>,
-    /// Which of the 15 literal-name `stdlib_funcref` entries the walk actually
-    /// reached. A name absent here is one
-    /// the corpus never triggers, not one that does not exist.
-    pub erased_entries: BTreeSet<String>,
     /// Runtime entries an opaque `inline(lua)` body calls: the owning
     /// DECLARATION -> the entries its text names. Emission must emit these even
     /// though no Rock call site reaches them.
@@ -895,19 +878,10 @@ pub struct InstanceGraph {
     /// is a per-artifact decision (`crate::artifact`), because the serving
     /// declaration differs by target.
     pub inline_body_deps: BTreeMap<DeclKey, BTreeSet<&'static str>>,
-    inline_erased_users: BTreeMap<String, BTreeSet<DeclKey>>,
     /// Bare `@nomangle` declarations named by retained `inline(js)` bodies.
     /// The graph records the opaque-boundary root obligation; a target view
     /// filters it to the declarations it actually realizes.
     pub inline_body_nomangle_roots: BTreeMap<DeclKey, FxHashSet<FuncRef>>,
-    /// Storage-condition queries the walk ran, the denominator for the
-    /// synthesized-call population. Without it a zero synthesized-edge count
-    /// cannot be told apart from a walk that asked nothing.
-    pub synthesized_examined: usize,
-    /// Synthesized sites whose exact entry could NOT be decided, so more than
-    /// one name was kept. The residual over-approximation, as a number rather
-    /// than a paragraph.
-    pub synthesized_approximated: usize,
     /// Instances that lost an incoming edge since the last [`Self::derive`].
     ///
     /// The prune candidates, and the reason an update does not have to walk
@@ -946,122 +920,6 @@ pub struct InstanceGraph {
     pub always_emitted_seeds: usize,
 }
 
-/// The storage condition a synthesized-call arm is gated on in
-/// `crates/skull-mir/src/lower/storage.rs`. Every arm there opens with
-/// `let Some(..) = self.<oracle>(recv) else { return Ok(None) }`, so the trigger
-/// name alone never decides whether the call is emitted.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum StorageCond {
-    /// The receiver's `[E]` element is column-stored.
-    VecColumn,
-    /// The receiver's `[E]` element is stored in one dense strided backing.
-    VecStrided,
-    /// The receiver's `Map<K, V>` value is column-stored.
-    MapColumn,
-    /// No storage condition: the debug-mode `NativeBuffer` bounds check fires on
-    /// the receiver type alone.
-    Always,
-}
-
-/// Calls lowering SYNTHESIZES, keyed by the source operation that triggers them:
-/// `(trigger name, storage condition, the `stdlib_funcref`/`call_spine` names
-/// the arm emits WHEN THAT CONDITION HOLDS)`. Read off
-/// `crates/skull-mir/src/lower/storage.rs`.
-///
-/// The condition uses the same `skull_mir::lower::ContainerPlan` as lowering.
-/// The names are the column-path ones only -- a non-column
-/// receiver takes a different route entirely, so `table_len` (the boxed
-/// `__vec_data_capacity` path) is not an edge this arm produces.
-///
-/// A trigger with more than one name here is one whose arm SELECTS between
-/// them; the selection is made per site, not kept as a set. `__vec_data_sort`
-/// splits on the element ([`sort_entry`]) and a Map index on the index's
-/// position and stored value ([`map_index_entries`]), so the names below are the
-/// alternatives a trigger can produce, never the ones a site does.
-///
-/// Calls made from inside an `inline(lua)` body are invisible here by design --
-/// the body is opaque (`BoundaryClass::InlineBody`). `__rock_vec_column_elements`
-/// is the corpus's example: emission calls it once per project, from the Lua
-/// text of the reflection walker, not from any lowering arm.
-pub const COMPILER_GENERATED_TRIGGERS: &[(&str, StorageCond, &[&str])] = &[
-    (
-        "__vec_data_capacity",
-        StorageCond::VecColumn,
-        &["__rock_col_capacity"],
-    ),
-    (
-        "__vec_data_insert",
-        StorageCond::VecColumn,
-        &["__rock_col_insert"],
-    ),
-    (
-        "__vec_data_clone",
-        StorageCond::VecColumn,
-        &["__rock_col_copy"],
-    ),
-    ("clone_into", StorageCond::VecColumn, &["__rock_col_copy"]),
-    (
-        "__vec_data_sort",
-        StorageCond::VecColumn,
-        &["__rock_col_sort", "__rock_col_sort_leaves"],
-    ),
-    (
-        "__rock_vec_to_lua_array",
-        StorageCond::VecColumn,
-        &["__rock_vec_column_elements"],
-    ),
-    (
-        "__vec_data_capacity",
-        StorageCond::VecStrided,
-        &["table_len", "__rock_stride_capacity"],
-    ),
-    (
-        "__vec_data_insert",
-        StorageCond::VecStrided,
-        &["__rock_stride_insert"],
-    ),
-    (
-        "__vec_data_clone",
-        StorageCond::VecStrided,
-        &["__rock_stride_copy"],
-    ),
-    (
-        "clone_into",
-        StorageCond::VecStrided,
-        &["__rock_stride_copy"],
-    ),
-    (
-        "__vec_data_sort",
-        StorageCond::VecStrided,
-        &["__rock_stride_sort", "__rock_stride_sort_leaves"],
-    ),
-    (
-        "__rock_vec_to_lua_array",
-        StorageCond::VecStrided,
-        &["__rock_vec_strided_elements"],
-    ),
-    ("map_new", StorageCond::MapColumn, &["__map_col_new_spine"]),
-    ("table_unset", StorageCond::MapColumn, &["__map_col_free"]),
-    ("len", StorageCond::MapColumn, &["__map_col_len"]),
-    ("map_len", StorageCond::MapColumn, &["__map_col_len"]),
-    ("contains", StorageCond::MapColumn, &["__map_col_contains"]),
-    ("clear", StorageCond::MapColumn, &["__map_col_clear"]),
-    ("get", StorageCond::MapColumn, &["__map_col_slot_of"]),
-];
-
-/// The synthesized entries reached from an INDEX rather than from a named call:
-/// `m[k]` / `m[k] = v` on a column Map (`column_index_place`,
-/// `map_column_store`, `map_column_index_repr`) and the debug-mode
-/// `NativeBuffer` bounds check (`nb_checked_index`).
-pub const INDEX_TRIGGERED: &[(&str, StorageCond, &[&str])] = &[
-    (
-        "Map",
-        StorageCond::MapColumn,
-        &["__map_col_slot", "__map_col_slot_checked", "__map_col_free"],
-    ),
-    ("NativeBuffer", StorageCond::Always, &["__nb_checked_index"]),
-];
-
 thread_local! {
     static BUILD_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
@@ -1080,10 +938,12 @@ impl InstanceGraph {
     }
 }
 
-/// Every runtime entry a synthesized call or an opaque body can name. Kept as ONE list so the inline-body
-/// scan and the synthesized-call table cannot drift about what the catalogue is.
+/// Every compiler-owned runtime entry that a synthesized call or an opaque
+/// body may name under its bare name. An entry need not serve every target:
+/// `Builder::stdlib_funcref` rejects a call on a target the stdlib does not
+/// serve.
 pub const ERASED_RUNTIME_ENTRIES: &[&str] = &[
-    DESCRIPTOR_WITH,
+    "__descriptor_with",
     "__map_col_clear",
     "__map_col_contains",
     "__map_col_free",
@@ -1102,13 +962,20 @@ pub const ERASED_RUNTIME_ENTRIES: &[&str] = &[
     "__rock_stride_capacity",
     "__rock_stride_copy",
     "__rock_stride_insert",
+    "__rock_stride_reserve",
     "__rock_stride_sort",
     "__rock_stride_sort_leaves",
     "__rock_strided_column_view",
     "__rock_vec_column_elements",
     "__rock_vec_strided_elements",
-    "table_len",
 ];
+
+/// Whether `f` is an erased runtime entry. Classified by name: a call to one is
+/// synthesized wherever lowering decides, so the entry has the same identity
+/// in every program.
+pub fn is_erased_runtime_entry(f: &Function) -> bool {
+    ERASED_RUNTIME_ENTRIES.contains(&f.name.as_str())
+}
 
 /// Why a generic emission root carries no uncovered bare-name obligation, or
 /// `None` when it does.
@@ -1261,14 +1128,12 @@ impl InstanceGraph {
     pub fn closure(&self, ws: &Workspace) -> Closure {
         // `expanded` records bodies the walk entered. A boundary has no Rock
         // body to enter; every other unexpanded instance is a closure hole.
-        let erased = &self.erased_entries;
         let unexpanded: BTreeSet<String> = self
             .instances
             .iter()
             .filter(|i| !self.is_expanded(i))
             .filter(|i| {
-                boundary_class_for(&ws.module(i.func.module).functions[i.func.func], erased)
-                    .is_none()
+                boundary_class_for(&ws.module(i.func.module).functions[i.func.func]).is_none()
             })
             .map(|i| self.identity(ws, i))
             .collect();
@@ -1692,7 +1557,7 @@ pub fn build_in(
              stranded-skipped {}; phases admissibility {:.3}ms, body-prep {:.3}ms, \
              signature/type {:.3}ms, call-resolution {:.3}ms, witness/bound {:.3}ms, \
              body-walk {:.3}ms, struct-default-walk {:.3}ms, uninstall {:.3}ms, \
-             index-maintenance {:.3}ms [subst {:.3}, trees {:.3}, erased {:.3}, \
+             index-maintenance {:.3}ms [subst {:.3}, trees {:.3}, \
              always {:.3}, preds {:.3}, decls {:.3}, commit {:.3}]",
             stats.first_owner_visits,
             stats.first_owner_ns as f64 / 1_000_000.0,
@@ -1715,7 +1580,6 @@ pub fn build_in(
             stats.index_maintenance_ns as f64 / 1_000_000.0,
             stats.index_subst_ns as f64 / 1_000_000.0,
             stats.index_trees_ns as f64 / 1_000_000.0,
-            stats.index_erased_ns as f64 / 1_000_000.0,
             stats.index_always_emitted_ns as f64 / 1_000_000.0,
             stats.index_preds_ns as f64 / 1_000_000.0,
             stats.index_decls_ns as f64 / 1_000_000.0,
@@ -1723,12 +1587,11 @@ pub fn build_in(
         );
         log::debug!(
             "graph body-fact census: expression rows {}, overload rows {}, fn-value rows {}, \
-             generated rows {}, dispatched rows {}, implicit-iter rows {}, bound-tree rows {}, \
+             dispatched rows {}, implicit-iter rows {}, bound-tree rows {}, \
              bound-call rows {}, iterator rows {}",
             stats.body_exprs_scanned,
             stats.resolved_overload_rows,
             stats.fn_value_rows,
-            stats.generated_rows,
             stats.dispatched_rows,
             stats.implicit_iter_rows,
             stats.bound_tree_rows,
@@ -1760,21 +1623,19 @@ pub fn build_in(
         );
         log::debug!(
             "graph contribution/index census: reached {}, bound trees {}, edges {}, sites {}, \
-             struct-default domains {}, rejections {}, synthesized examined {}, failures {}, \
-             always targets {}; unique index keys subst/trees/erased/always/preds/decls \
-             {}/{}/{}/{}/{}/{}; phases uninstall/index/derive/post-pass {:.3}/{:.3}/{:.3}/{:.3}ms",
+             struct-default domains {}, rejections {}, failures {}, \
+             always targets {}; unique index keys subst/trees/always/preds/decls \
+             {}/{}/{}/{}/{}; phases uninstall/index/derive/post-pass {:.3}/{:.3}/{:.3}/{:.3}ms",
             stats.contribution_reached,
             stats.contribution_bound_trees,
             stats.contribution_edges,
             stats.contribution_sites,
             stats.contribution_struct_default_domains,
             stats.contribution_rejections,
-            stats.contribution_synthesized_examined,
             stats.contribution_failures,
             stats.contribution_always_emitted_targets,
             stats.index_subst_unique,
             stats.index_trees_unique,
-            stats.index_erased_unique,
             stats.index_always_emitted_unique,
             stats.index_preds_unique,
             stats.index_decls_unique,
@@ -1880,12 +1741,8 @@ impl InstanceGraph {
             boundaries: BTreeMap::new(),
             coroutine_helpers: BTreeSet::new(),
             coroutine_helpers_by_owner: BTreeMap::new(),
-            erased_entries: BTreeSet::new(),
             inline_body_deps: BTreeMap::new(),
-            inline_erased_users: BTreeMap::new(),
             inline_body_nomangle_roots: BTreeMap::new(),
-            synthesized_examined: 0,
-            synthesized_approximated: 0,
             always_emitted_seeds: 0,
             sites_attempted: 0,
             recursion_starts: 0,
@@ -2195,10 +2052,8 @@ impl InstanceGraph {
                             stats.contribution_struct_default_domains +=
                                 c.struct_default_domains.len();
                             stats.contribution_rejections += c.rejections.len();
-                            stats.contribution_synthesized_examined += c.synthesized_examined;
                             stats.contribution_failures += c.rejections.len()
                                 + c.unresolved.len()
-                                + c.storage_failures.len()
                                 + c.always_emitted_holes.len();
                             stats.contribution_always_emitted_targets +=
                                 c.always_emitted_targets.len();
@@ -2210,14 +2065,12 @@ impl InstanceGraph {
                         stats.index_maintenance_ns += install_timing.index.total_ns();
                         stats.index_subst_ns += install_timing.index.subst_ns;
                         stats.index_trees_ns += install_timing.index.trees_ns;
-                        stats.index_erased_ns += install_timing.index.erased_ns;
                         stats.index_always_emitted_ns += install_timing.index.always_emitted_ns;
                         stats.index_preds_ns += install_timing.index.preds_ns;
                         stats.index_decls_ns += install_timing.index.decls_ns;
                         stats.index_commit_ns += install_timing.index.commit_ns;
                         stats.index_subst_updates += install_timing.index.subst_updates;
                         stats.index_trees_updates += install_timing.index.trees_updates;
-                        stats.index_erased_updates += install_timing.index.erased_updates;
                         stats.index_always_emitted_updates +=
                             install_timing.index.always_emitted_updates;
                         stats.index_preds_updates += install_timing.index.preds_updates;
@@ -2317,7 +2170,6 @@ impl InstanceGraph {
             stats.expansion_ns_max = expansion_times.iter().copied().max().unwrap_or(0);
             stats.index_subst_unique = self.index.subst.len();
             stats.index_trees_unique = self.index.trees.len();
-            stats.index_erased_unique = self.index.erased.len();
             stats.index_always_emitted_unique = self.index.always_emitted.len();
             stats.index_preds_unique = self.index.preds.len();
             stats.index_decls_unique = self.index.decls.len();
@@ -2444,7 +2296,6 @@ impl InstanceGraph {
         stats.first_owner_visits += installed.len();
         stats.index_subst_updates += index.subst_updates;
         stats.index_trees_updates += index.trees_updates;
-        stats.index_erased_updates += index.erased_updates;
         stats.index_always_emitted_updates += index.always_emitted_updates;
         stats.index_decls_updates += self.install_fresh(installed, shards);
         // A walk that read no tree is not in `walked_with`; it read the
@@ -2509,7 +2360,6 @@ impl InstanceGraph {
                 share.reached_rows += c.reached.len();
                 share.counts.add_counters(&c);
                 if !(c.bound_trees.is_empty()
-                    && c.erased_entries.is_empty()
                     && c.always_emitted_targets.is_empty()
                     && c.always_emitted_holes.is_empty())
                 {
@@ -2986,16 +2836,6 @@ impl InstanceGraph {
         }
         index.trees_ns = elapsed_ns(lane_start);
         let lane_start = timing_enabled.then(Instant::now);
-        for name in &c.erased_entries {
-            index.erased_updates += 1;
-            self.index
-                .erased
-                .entry(name.clone())
-                .or_default()
-                .insert(owner.clone());
-        }
-        index.erased_ns = elapsed_ns(lane_start);
-        let lane_start = timing_enabled.then(Instant::now);
         for to in &c.always_emitted_targets {
             index.always_emitted_updates += 1;
             self.index
@@ -3075,14 +2915,6 @@ impl InstanceGraph {
                 }
             }
         }
-        for name in &old.erased_entries {
-            if let Some(set) = self.index.erased.get_mut(name) {
-                set.remove(owner);
-                if set.is_empty() {
-                    self.index.erased.remove(name);
-                }
-            }
-        }
         for to in &old.always_emitted_targets {
             if let Some(set) = self.index.always_emitted.get_mut(to) {
                 set.remove(owner);
@@ -3138,8 +2970,6 @@ impl InstanceGraph {
     fn add_contribution_counters(&mut self, c: &Contribution) {
         self.sites_attempted += c.sites_attempted;
         self.always_emitted_seeds += c.always_emitted_seeds;
-        self.synthesized_examined += c.synthesized_examined;
-        self.synthesized_approximated += c.synthesized_approximated;
     }
 
     fn subtract_contribution_counters(&mut self, c: &Contribution) {
@@ -3147,12 +2977,6 @@ impl InstanceGraph {
         self.always_emitted_seeds = self
             .always_emitted_seeds
             .saturating_sub(c.always_emitted_seeds);
-        self.synthesized_examined = self
-            .synthesized_examined
-            .saturating_sub(c.synthesized_examined);
-        self.synthesized_approximated = self
-            .synthesized_approximated
-            .saturating_sub(c.synthesized_approximated);
     }
 
     fn remove_graph_rejection_position(&mut self, position: usize) {
@@ -3462,7 +3286,6 @@ impl InstanceGraph {
         };
         self.record_inline_body_dep_rows(inline_deps);
         self.inline_body_nomangle_roots.extend(nomangle_roots);
-        self.run_stats.erased_catalogue_entries_examined += self.refresh_erased_entries();
         self.recursion_starts = recursion_starts;
         self.run_stats.recursion_findings_derived += recursion_findings.len();
         for finding in recursion_findings {
@@ -3528,7 +3351,6 @@ impl InstanceGraph {
         let active_decl_vec: Vec<DeclKey> = active_decls.iter().cloned().collect();
         record_inline_body_deps(self, ws, &active_decl_vec);
         record_inline_body_nomangle_roots(self, ws, active_decl_vec.iter().map(|decl| decl.0));
-        self.run_stats.erased_catalogue_entries_examined += self.refresh_erased_entries();
         classify_boundaries(self, ws, &active_decl_vec);
         self.refresh_coroutine_rejections(ws, touched_instances.iter().cloned());
         let dirty_root_hole_names = std::mem::take(&mut self.root_hole_dirty_names);
@@ -4065,13 +3887,6 @@ impl InstanceGraph {
             .flat_map(|c| c.unresolved.iter())
     }
 
-    /// Every storage query that could not decide, by reason.
-    pub fn storage_failures(&self) -> impl Iterator<Item = &MonoTyReason> {
-        self.contributions
-            .values()
-            .flat_map(|c| c.storage_failures.iter())
-    }
-
     /// Sites recorded twice for one instance. The OWNER is the instance, so the
     /// pair comes from the map key rather than from a copy stored in the row.
     pub fn duplicate_sites(&self) -> impl Iterator<Item = (&Instance, &Site)> {
@@ -4287,50 +4102,17 @@ impl InstanceGraph {
         ordinary.into_iter().chain(graph)
     }
 
-    /// The erased catalogue: the entries the WALK named plus the ones opaque
-    /// inline bodies name. Bounded by `ERASED_RUNTIME_ENTRIES` (15 names), so
-    /// it is rebuilt from its two indices rather than maintained -- one writer
-    /// for a set this small beats two that have to agree.
     fn record_inline_body_dep_rows(&mut self, rows: Vec<(DeclKey, &'static str)>) {
         for (member, name) in rows {
-            let inserted = self
-                .inline_body_deps
+            self.inline_body_deps
                 .entry(member)
                 .or_default()
                 .insert(name);
-            if inserted {
-                self.inline_erased_users
-                    .entry(name.to_string())
-                    .or_default()
-                    .insert(member);
-            }
         }
-    }
-
-    fn refresh_erased_entries(&mut self) -> usize {
-        self.erased_entries = self
-            .index
-            .erased
-            .keys()
-            .cloned()
-            .chain(self.inline_erased_users.keys().cloned())
-            .collect();
-        self.erased_entries.len()
     }
 
     fn remove_inline_body_deps(&mut self, decl: &DeclKey) {
-        let Some(entries) = self.inline_body_deps.remove(decl) else {
-            return;
-        };
-        for entry in entries {
-            let Some(users) = self.inline_erased_users.get_mut(entry) else {
-                continue;
-            };
-            users.remove(decl);
-            if users.is_empty() {
-                self.inline_erased_users.remove(entry);
-            }
-        }
+        self.inline_body_deps.remove(decl);
     }
 
     /// **What an edit stranded**, searched over the affected region only.
@@ -4755,14 +4537,12 @@ enum VisitKind {
 struct IndexMaintenanceTiming {
     subst_ns: u64,
     trees_ns: u64,
-    erased_ns: u64,
     always_emitted_ns: u64,
     preds_ns: u64,
     decls_ns: u64,
     commit_ns: u64,
     subst_updates: usize,
     trees_updates: usize,
-    erased_updates: usize,
     always_emitted_updates: usize,
     preds_updates: usize,
     decls_updates: usize,
@@ -4772,7 +4552,6 @@ impl IndexMaintenanceTiming {
     fn total_ns(&self) -> u64 {
         self.subst_ns
             + self.trees_ns
-            + self.erased_ns
             + self.always_emitted_ns
             + self.preds_ns
             + self.decls_ns
@@ -4836,7 +4615,6 @@ pub struct RunStats {
     pub contribution_sites: usize,
     pub contribution_struct_default_domains: usize,
     pub contribution_rejections: usize,
-    pub contribution_synthesized_examined: usize,
     pub contribution_failures: usize,
     pub contribution_always_emitted_targets: usize,
     pub admissibility_ns: u64,
@@ -4850,20 +4628,17 @@ pub struct RunStats {
     pub index_maintenance_ns: u64,
     pub index_subst_ns: u64,
     pub index_trees_ns: u64,
-    pub index_erased_ns: u64,
     pub index_always_emitted_ns: u64,
     pub index_preds_ns: u64,
     pub index_decls_ns: u64,
     pub index_commit_ns: u64,
     pub index_subst_updates: usize,
     pub index_trees_updates: usize,
-    pub index_erased_updates: usize,
     pub index_always_emitted_updates: usize,
     pub index_preds_updates: usize,
     pub index_decls_updates: usize,
     pub index_subst_unique: usize,
     pub index_trees_unique: usize,
-    pub index_erased_unique: usize,
     pub index_always_emitted_unique: usize,
     pub index_preds_unique: usize,
     pub index_decls_unique: usize,
@@ -4872,7 +4647,6 @@ pub struct RunStats {
     pub body_exprs_scanned: usize,
     pub resolved_overload_rows: usize,
     pub fn_value_rows: usize,
-    pub generated_rows: usize,
     pub dispatched_rows: usize,
     pub implicit_iter_rows: usize,
     pub bound_tree_rows: usize,
@@ -4890,7 +4664,6 @@ pub struct RunStats {
     /// Root instances checked while admitting missing root contributions.
     /// Body-only updates pass explicit additions and keep this at zero.
     pub root_instances_checked: usize,
-    pub erased_catalogue_entries_examined: usize,
     pub recursion_seed_subjects: usize,
     pub recursion_findings_retracted: usize,
     pub recursion_findings_derived: usize,
@@ -4908,7 +4681,6 @@ impl RunStats {
         self.body_exprs_scanned += c.body_exprs_scanned;
         self.resolved_overload_rows += c.resolved_overload_rows;
         self.fn_value_rows += c.fn_value_rows;
-        self.generated_rows += c.generated_rows;
         self.dispatched_rows += c.dispatched_rows;
         self.implicit_iter_rows += c.implicit_iter_rows;
         self.bound_tree_rows += c.bound_tree_rows;
@@ -5197,88 +4969,22 @@ fn walk_body_edges(
             }
         }
 
-        let mut failures: Vec<(Idx<bone_core::hir::Expr>, MonoTyReason)> = Vec::new();
-        let conversion_start = w.timer();
-        let sites = compiler_generated_sites(
-            ws,
-            inf,
-            body,
-            subst,
-            &w.scratch.rep_arena,
-            &mut w.out.synthesized_examined,
-            &mut failures,
-            &mut w.out.synthesized_approximated,
-        );
-        w.out.generated_rows += sites.len();
-        add_elapsed(
-            &mut w.out.timing.signature_type_conversion_ns,
-            conversion_start,
-        );
-        for (e, reason) in failures {
-            w.out.storage_failures.push(reason.clone());
-            let Some(from) = from else { continue };
-            let span = body
-                .expr_spans
-                .get(e)
-                .copied()
-                .unwrap_or_else(Span::unknown);
-            let kind = match reason {
-                MonoTyReason::UnresolvedInfer(_) | MonoTyReason::UnboundGeneric(_) => {
-                    RejectionKind::UnconstrainedTypeVar
-                }
-                _ => RejectionKind::ConcreteTypeUnavailable,
-            };
-            w.push_rejection(Rejection {
-                kind,
-                at: from.clone(),
-                span,
-                message: format!(
-                    "a synthesized-call receiver has no concrete type in an instantiated body \
-                     ({}), so its storage cannot be decided",
-                    reason.bucket()
-                ),
-            });
-        }
-        // The two families are resolved through the same lookup and recorded as
-        // the same edge kind. They differ in ONE way and it is deliberate: a
-        // named runtime entry joins `erased_entries` (it exists only because
-        // lowering names it), while a conditional dispatch arm calls an
-        // ORDINARY stdlib declaration whose own boundary class already answers
-        // for it -- filing `inspect` as an erased runtime entry would relabel a
-        // real `inline(lua)` body.
+        // Calls lowering synthesizes to named runtime entries are not modelled
+        // per site: every build roots those entries. A conditional dispatch
+        // arm calls an ORDINARY stdlib declaration, so it is recorded here.
         let dispatched_sites = dispatched_sites(ws, inf, body, subst, &w.scratch.rep_arena, domain);
         w.out.dispatched_rows += dispatched_sites.len();
-        let dispatched = dispatched_sites
+        for (site, name) in dispatched_sites
             .into_iter()
-            .map(|(site, name)| (site, name, false));
-        let generated = sites
-            .into_iter()
-            .map(|GeneratedSite { expr, name }| {
-                (
-                    Site {
-                        domain: domain.clone(),
-                        expr,
-                        op: SiteOp::Synthesized(name),
-                    },
-                    name,
-                    true,
-                )
-            })
-            .chain(dispatched)
-            .filter(|(site, _, _)| reached(site.expr));
-        for (site, name, erased) in generated {
+            .filter(|(site, _)| reached(site.expr))
+        {
             let e = site.expr;
             let span = body
                 .expr_spans
                 .get(e)
                 .copied()
                 .unwrap_or_else(Span::unknown);
-            let resolved = if erased {
-                stdlib_entry_representative(ws, name)
-            } else {
-                skull_mir::lower::dispatched_callee_decl(ws, name)
-            };
-            match resolved {
+            match skull_mir::lower::dispatched_callee_decl(ws, name) {
                 Some(callee) => {
                     record_call(
                         w,
@@ -5292,9 +4998,6 @@ fn walk_body_edges(
                         span,
                         site,
                     );
-                    if erased {
-                        w.out.erased_entries.insert(name.to_string());
-                    }
                 }
                 None => {
                     w.record_site(
@@ -6530,317 +6233,11 @@ fn fn_value_sites(
     out
 }
 
-/// One synthesized-call site, resolved against its instance.
-struct GeneratedSite {
-    expr: Idx<bone_core::hir::Expr>,
-    name: &'static str,
-}
-
-/// The verdict on one storage-condition query, kept as three outcomes rather
-/// than a bool. A bool made every conversion failure read as "boxed", which is
-/// only the right answer for ONE of them.
-enum CondVerdict {
-    /// The column element the receiver stores, when there is one.
-    /// [`StorageCond::Always`] holds without naming an element.
-    Holds(Option<skull_mir::mir::ColumnElem>),
-    /// The receiver is not column-stored -- an ordinary negative.
-    DoesNot,
-    /// The receiver's type could not be made concrete. In an INSTANTIATED body
-    /// this is an invariant violation, not a storage answer.
-    Failed(MonoTyReason),
-}
-
-/// Which `__vec_data_sort` arm a site emits (`skull-mir/src/lower/storage.rs`,
-/// the column and strided `("__vec_data_sort", ..)` arms): a `nobox` element
-/// applies the key to the LEAVES, everything else to the materialized element.
-/// A strided `nobox` struct row is those leaves; a strided enum row is not.
-/// The copy-on-write entry a descriptor field write synthesizes.
-pub(crate) const DESCRIPTOR_WITH: &str = "__descriptor_with";
-
-/// Whether `base` holds a stdlib descriptor (`Ptr`, `NativeBuffer`, ...)
-/// under this instance's substitution. A type that does not convert counts
-/// as one: an extra site costs an unused entry, a missing one a hole.
-fn descriptor_typed(
-    ws: &Workspace,
-    inf: &BodyInference,
-    subst: &MonoSubst,
-    base: Idx<bone_core::hir::Expr>,
-) -> bool {
-    let Some(ty) = inf.expr_types.get(base) else {
-        return true;
-    };
-    let Ok(mut mono) = skull_mir::monoty::convert(ws, inf, *ty, subst) else {
-        return true;
-    };
-    use skull_mir::monoty::{MonoCtor, MonoTy};
-    loop {
-        mono = match mono {
-            MonoTy::Nullable(inner) => *inner,
-            MonoTy::App {
-                ctor: MonoCtor::Ref,
-                mut params,
-            } if params.len() == 1 => params.remove(0),
-            MonoTy::App {
-                ctor: MonoCtor::Nominal(name),
-                ..
-            } => return bone_core::modules::is_descriptor_key(name),
-            _ => return false,
-        };
-    }
-}
-
-fn sort_entry(
-    ws: &bone_core::workspace::Workspace,
-    cond: StorageCond,
-    elem: &skull_mir::mir::ColumnElem,
-) -> &'static str {
-    match cond {
-        StorageCond::VecStrided
-            if elem.is_nobox() && ws.struct_by_name.contains_key(&elem.name) =>
-        {
-            "__rock_stride_sort_leaves"
-        }
-        StorageCond::VecStrided => "__rock_stride_sort",
-        _ if elem.is_nobox() => "__rock_col_sort_leaves",
-        _ => "__rock_col_sort",
-    }
-}
-
-/// Which runtime entries an INDEX on a column-stored `Map` emits.
-///
-/// Three arms in `storage.rs`, and the HIR says which one is taken:
-/// `m[k] = v` is `map_column_store` (`__map_col_slot`, plus `__map_col_free`
-/// on the absent arm when the stored value can be null); every other position
-/// -- an rvalue read, or the place base of `m[k].f = v` -- resolves the key
-/// through `__map_col_slot_checked`.
-///
-/// `nullable` is `None` when the stored value's type did not convert. Both
-/// names are kept then and the site is counted as approximated: dropping
-/// `__map_col_free` would drop a symbol emission requires, which is the
-/// direction that breaks a build.
-fn map_index_entries(store: Option<Option<bool>>) -> (Vec<&'static str>, bool) {
-    match store {
-        None => (vec!["__map_col_slot_checked"], false),
-        Some(Some(true)) => (vec!["__map_col_slot", "__map_col_free"], false),
-        Some(Some(false)) => (vec!["__map_col_slot"], false),
-        Some(None) => (vec!["__map_col_slot", "__map_col_free"], true),
-    }
-}
-
-/// Source operations whose lowering can SYNTHESIZE a `stdlib_funcref` /
-/// `call_spine` call, paired with each name it can synthesize. Over-approximates
-/// -- see [`COMPILER_GENERATED_TRIGGERS`].
-fn compiler_generated_sites(
-    ws: &Workspace,
-    inf: &BodyInference,
-    body: &bone_core::hir::Body,
-    subst: &MonoSubst,
-    rep_arena: &RepArena,
-    examined: &mut usize,
-    failures: &mut Vec<(Idx<bone_core::hir::Expr>, MonoTyReason)>,
-    approximated: &mut usize,
-) -> Vec<GeneratedSite> {
-    use bone_core::hir::{Callee, Expr as E};
-    // The receiver's CONCRETE type under this instance's substitution, which is
-    // what the storage condition is asked about.
-    let verdict = |recv: Idx<bone_core::hir::Expr>, cond: StorageCond| -> CondVerdict {
-        if cond == StorageCond::Always {
-            return CondVerdict::Holds(None);
-        }
-        let Some(ty) = inf.expr_types.get(recv) else {
-            return CondVerdict::Failed(MonoTyReason::NoNode);
-        };
-        let mono = match skull_mir::monoty::convert(ws, inf, *ty, subst) {
-            Ok(m) => m,
-            Err(r) => return CondVerdict::Failed(r),
-        };
-        let plan = match cond {
-            // `Any`, stated rather than defaulted: this graph selects no
-            // target sibling. The physical target projection happens later;
-            // only the logical container plan is needed for the edge census.
-            StorageCond::VecColumn => {
-                if !ContainerPlan::matches_type(ContainerFamily::Vec, &mono) {
-                    return CondVerdict::DoesNot;
-                }
-                ContainerPlan::for_type(
-                    ws,
-                    bone_core::hir::FnBackend::Any,
-                    rep_arena,
-                    ContainerFamily::Vec,
-                    &mono,
-                )
-            }
-            StorageCond::VecStrided => {
-                if !ContainerPlan::matches_type(ContainerFamily::Vec, &mono) {
-                    return CondVerdict::DoesNot;
-                }
-                ContainerPlan::for_type(
-                    ws,
-                    bone_core::hir::FnBackend::Any,
-                    rep_arena,
-                    ContainerFamily::Vec,
-                    &mono,
-                )
-            }
-            StorageCond::MapColumn => {
-                if !ContainerPlan::matches_type(ContainerFamily::Map, &mono) {
-                    return CondVerdict::DoesNot;
-                }
-                ContainerPlan::for_type(
-                    ws,
-                    bone_core::hir::FnBackend::Any,
-                    rep_arena,
-                    ContainerFamily::Map,
-                    &mono,
-                )
-            }
-            StorageCond::Always => return CondVerdict::Holds(None),
-        };
-        let elem = match plan {
-            Ok(plan) if cond == StorageCond::VecStrided => plan.strided_elem(rep_arena),
-            Ok(plan) => plan.column_elem(rep_arena),
-            Err(_) => return CondVerdict::Failed(MonoTyReason::NoNode),
-        };
-        match elem {
-            Some(elem) => CondVerdict::Holds(Some(elem)),
-            None => CondVerdict::DoesNot,
-        }
-    };
-    // EVERY failure is reported, including `UnboundGeneric`. The walk only ever
-    // enters instantiated bodies -- a shared generic root goes to
-    // `uninstantiated_roots` and is never worklisted -- so an unbound declared
-    // generic here means the substitution is incomplete, not that the element is
-    // legitimately opaque. Reading any of them as "boxed" would let a zero edge
-    // count mean "the sites were discarded".
-    let mut settle = |recv, cond, e: Idx<bone_core::hir::Expr>| -> Option<Option<_>> {
-        *examined += 1;
-        match verdict(recv, cond) {
-            CondVerdict::Holds(elem) => Some(elem),
-            CondVerdict::DoesNot => None,
-            CondVerdict::Failed(r) => {
-                failures.push((e, r));
-                None
-            }
-        }
-    };
-    // `m[k] = v` is the one index position that lowers through
-    // `map_column_store`; the value expression is what decides whether the
-    // absent arm (`__map_col_free`) exists at all.
-    let mut stored_through: FxHashMap<Idx<bone_core::hir::Expr>, Idx<bone_core::hir::Expr>> =
-        FxHashMap::default();
-    for (_, expr) in body.expr_arena.iter() {
-        if let E::Assign { target, value } = expr {
-            stored_through.insert(*target, *value);
-        }
-    }
-    // Whether the stored value can be null. `None` means its type did not
-    // convert, which keeps both arms -- see [`map_index_entries`].
-    let stored_nullable = |value: Idx<bone_core::hir::Expr>| -> Option<bool> {
-        let ty = inf.expr_types.get(value)?;
-        let mono = skull_mir::monoty::convert(ws, inf, *ty, subst).ok()?;
-        Some(mono.peel_nullable().1)
-    };
-
-    let mut out: Vec<GeneratedSite> = Vec::new();
-    for (e, expr) in body.expr_arena.iter() {
-        match expr {
-            E::Call {
-                callee: Callee::Unresolved { name, .. },
-                args,
-                ..
-            } => {
-                for (trigger, cond, names) in COMPILER_GENERATED_TRIGGERS
-                    .iter()
-                    .filter(|(trigger, _, _)| *trigger == name.as_str())
-                {
-                    if *trigger == "map_new" {
-                        if args.clone().next().is_some() {
-                            continue;
-                        }
-                        let Some(_) = settle(e, *cond, e) else {
-                            continue;
-                        };
-                        out.extend(names.iter().map(|name| GeneratedSite { expr: e, name }));
-                        continue;
-                    }
-                    // The receiver is the UFCS first argument; an arm with no
-                    // receiver cannot be a specialized storage form.
-                    let Some(recv) = args.clone().next() else {
-                        continue;
-                    };
-                    let Some(elem) = settle(recv, *cond, e) else {
-                        continue;
-                    };
-                    if *trigger == "__vec_data_sort" {
-                        let Some(elem) = elem else { continue };
-                        out.push(GeneratedSite {
-                            expr: e,
-                            name: sort_entry(ws, *cond, &elem),
-                        });
-                        continue;
-                    }
-                    out.extend(names.iter().map(|name| GeneratedSite { expr: e, name }));
-                }
-            }
-            // The index forms have no callee name to key on: the receiver's
-            // CONSTRUCTOR is the trigger. Rendering is confined to index exprs,
-            // which are a small minority of any body.
-            E::Index { base, .. } => {
-                let Some(ty) = inf.expr_types.get(*base) else {
-                    continue;
-                };
-                // A `TyId::Local` renders only against ITS body's inference --
-                // `None` panics rather than degrading, which is how this was
-                // caught immediately.
-                let r = ws.render(Some(inf), *ty);
-                let Some((ctor, cond, names)) = INDEX_TRIGGERED
-                    .iter()
-                    .find(|(ctor, _, _)| r.starts_with(*ctor))
-                else {
-                    continue;
-                };
-                if settle(*base, *cond, e).is_none() {
-                    continue;
-                }
-                if *ctor == "Map" {
-                    let (names, approx) =
-                        map_index_entries(stored_through.get(&e).map(|v| stored_nullable(*v)));
-                    *approximated += usize::from(approx);
-                    out.extend(
-                        names
-                            .into_iter()
-                            .map(|n| GeneratedSite { expr: e, name: n }),
-                    );
-                    continue;
-                }
-                out.extend(names.iter().map(|n| GeneratedSite { expr: e, name: n }));
-            }
-            // `d.f = v` on a stdlib descriptor copies it on write
-            // (`descriptor_field_store`); the call's site is the target.
-            E::Assign { target, .. } => {
-                let E::FieldAccess { base, .. } = body.expr_arena[*target] else {
-                    continue;
-                };
-                if descriptor_typed(ws, inf, subst, base) {
-                    out.push(GeneratedSite {
-                        expr: *target,
-                        name: DESCRIPTOR_WITH,
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-    out.sort_by_key(|s| (s.expr, s.name));
-    out
-}
-
 /// Every callee obligation a CONDITIONALLY-synthesized call carries in this
 /// body, under this instance's substitution.
 ///
 /// The two constructs -- an interpolation hole and `==`/`!=` -- name no callee,
-/// so [`COMPILER_GENERATED_TRIGGERS`]' name key cannot reach them. Neither does
-/// this function decide anything: it asks `skull_mir::lower::dispatch`, the
+/// so this function decides nothing itself: it asks `skull_mir::lower::dispatch`, the
 /// same plan lowering RENDERS, so the walk cannot be weaker than the pass.
 fn dispatched_sites(
     ws: &Workspace,
@@ -6958,6 +6355,18 @@ pub fn stdlib_entry_representative(ws: &Workspace, name: &str) -> Option<FuncRef
     reps.all(|r| r == first).then_some(first)
 }
 
+/// The representative of every entry lowering may synthesize a call to
+/// ([`skull_mir::lower::SYNTHESIZED_ENTRIES`]). JS roots these in its graph;
+/// Lua already roots every `@nomangle` one, and renders the rest as templates
+/// at the call. A synthesized call resolves to the entry's base instance by
+/// name, whatever storage decision made lowering emit it.
+pub fn synthesized_entry_roots(ws: &Workspace) -> Vec<FuncRef> {
+    skull_mir::lower::SYNTHESIZED_ENTRIES
+        .iter()
+        .filter_map(|name| stdlib_entry_representative(ws, name))
+        .collect()
+}
+
 /// Whether a declaration with backend `decl` can be emitted for `target`.
 /// THE compatibility test -- the walk, the boundary pass and every artifact
 /// view ask this one, so "does this declaration serve me" cannot be answered
@@ -6977,19 +6386,17 @@ pub fn serves(decl: bone_core::hir::FnBackend, target: bone_core::hir::FnBackend
 /// walk enters. The ONE classifier: [`classify_boundaries`] and
 /// [`InstanceGraph::closure`] both ask it, so "is this a boundary" cannot be
 /// answered two ways.
-pub fn boundary_class_for(f: &Function, erased: &BTreeSet<String>) -> Option<BoundaryClass> {
-    if erased.contains(f.name.as_str()) {
+pub fn boundary_class_for(f: &Function) -> Option<BoundaryClass> {
+    if is_erased_runtime_entry(f) {
         return Some(BoundaryClass::ErasedRuntimeEntry);
     }
     declared_boundary(f)
 }
 
-/// The part of the classification that reads only the DECLARATION. The walk uses
-/// this rather than [`boundary_class_of`] because `erased_entries` is still
-/// being discovered while it runs, and expansion must not depend on the order
-/// two instances were reached in. It is a SUBSET of the full classification, so
-/// nothing the walk calls expandable can later be excused as a boundary and
-/// nothing the walk skips can become un-excused.
+/// The classification without the erased-runtime-entry identity. It is a
+/// SUBSET of the full classification, so nothing the walk calls expandable can
+/// later be excused as a boundary and nothing the walk skips can become
+/// un-excused.
 ///
 /// **`@intrinsic` is not unconditionally foreign.** Emit resolution is
 /// `backend mapping > portable Rock fallback > spanned reject`
@@ -7035,8 +6442,8 @@ fn record_inline_body_deps(g: &mut InstanceGraph, ws: &Workspace, decls: &[DeclK
 /// Each erased runtime entry an inline body of `decls` names, with the
 /// declaration whose body names it.
 fn inline_body_dep_rows(ws: &Workspace, decls: &[DeclKey]) -> Vec<(DeclKey, &'static str)> {
-    // METADATA ONLY so far: each sibling's dependency is recorded and joins
-    // `erased_entries`, but it is not yet resolved to a `BoundaryId` or an
+    // METADATA ONLY so far: each sibling's dependency is recorded, but it is
+    // not yet resolved to a `BoundaryId` or an
     // instance the way a call edge is. That resolution belongs to the artifact
     // view, which is what decides the emitted spelling and the retention set;
     // recording it here without a target would be a second, weaker reachability
@@ -7158,12 +6565,11 @@ fn classify_boundaries(g: &mut InstanceGraph, ws: &Workspace, decls: &[DeclKey])
     // are named, since a mangled name is a formatted string.
     let found: Vec<Boundary> = {
         use bone_core::prelude::*;
-        let erased = &g.erased_entries;
         decls
             .par_iter()
             .filter_map(|decl| {
                 let f = &ws.module(decl.0.module).functions[decl.0.func];
-                let class = boundary_class_for(f, erased)?;
+                let class = boundary_class_for(f)?;
                 Some(Boundary {
                     class,
                     symbol: mangle_fn(ws, f),

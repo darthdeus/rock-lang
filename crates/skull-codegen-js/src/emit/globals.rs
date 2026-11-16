@@ -308,7 +308,7 @@ pub(super) fn schedule_residual_calls(
         }
         if matches!(cf.inline_body, Some((bone_core::hir::FnBackend::Js, _))) {
             st.seen.insert(selected);
-            add_inline_js_body(&mut st.inline_js, instance.clone(), selected);
+            st.add_inline_js_body(ws, instance.clone(), selected)?;
             continue;
         }
         if cf.is_extern && cf.backend == bone_core::hir::FnBackend::Js {
@@ -419,7 +419,7 @@ fn register_fn_values_from_view(
         }
         if matches!(f.inline_body, Some((bone_core::hir::FnBackend::Js, _))) {
             st.seen.insert(selected);
-            add_inline_js_body(&mut st.inline_js, instance.clone(), selected);
+            st.add_inline_js_body(ws, instance.clone(), selected)?;
         } else if f.inline_body.is_some() || f.is_extern {
             return Err(err(format!(
                 "JS subset: function value `{}` is not a mapped JS intrinsic",

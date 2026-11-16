@@ -3,7 +3,7 @@
 //!
 //! An interpolation hole and `==`/`!=` synthesize a call on SOME of their arms
 //! and none on the others. The arm is a type decision and the source expression
-//! names no callee, so `COMPILER_GENERATED_TRIGGERS`' name key cannot reach it.
+//! names no callee, so the walk asks the same dispatch plan lowering renders.
 //!
 //! Every test here asserts BOTH sides of one conditional: the arm that emits
 //! and joins, and the nearest arm that must emit no obligation at all. A test

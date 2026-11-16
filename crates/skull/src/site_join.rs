@@ -1042,7 +1042,16 @@ fn classify(
         .map(|(site, callee)| (site.clone(), callee))
         .collect();
 
-    let Some(callee) = resolved.get(&cs.site) else {
+    let synthesized = match cs.site.op {
+        skull_mir::site::SiteOp::Synthesized(name) => {
+            crate::concrete_body::synthesized_callee(ws, g, name)
+        }
+        _ => None,
+    };
+    let Some(callee) = synthesized
+        .as_ref()
+        .or_else(|| resolved.get(&cs.site).copied())
+    else {
         let note = if detail {
             let mut same_expr: Vec<String> = resolved
                 .keys()

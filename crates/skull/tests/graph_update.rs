@@ -1125,12 +1125,10 @@ fn a_sequential_edit_chain_agrees_with_a_fresh_build_at_every_step() {
 
 /// A v1 whose INFERENCE is missing a record, and the intact v2 beside it.
 ///
-/// Two of the four stale-state producers cannot be reached from a valid program
-/// at all: `unresolved` needs a generic call with no binding record, and
-/// `storage_failures` needs a receiver with no concrete type inside an
-/// INSTANTIATED body -- both are compiler state disagreeing with itself.
-/// `instance_graph.rs`'s own arms reach them the same way, by removing the
-/// record from a `Workspace` rather than by corrupting the source, and the
+/// One of the stale-state producers cannot be reached from a valid program at
+/// all: `unresolved` needs a generic call with no binding record, which is
+/// compiler state disagreeing with itself. `instance_graph.rs`'s own arms
+/// reach it the same way, by removing the record from a `Workspace` rather than by corrupting the source, and the
 /// "fix" is then the intact workspace. The graph is built against v1 and
 /// updated against v2, which is exactly the shape a body edit has: the
 /// declarations are identical, one body's facts changed.
@@ -1247,58 +1245,6 @@ fn resolving_a_call_removes_its_stale_unresolved_record() {
         "the resolved call reached no instance"
     );
     p.assert_matches_fresh(&g, "unresolved cleared");
-}
-
-const MAP_LIB: &str = r#"
-fn probe(m: Map<string, int>) -> int { return m.len() }
-"#;
-
-/// 5. A type conversion that could not decide, and then can.
-#[test]
-fn a_resolvable_conversion_removes_its_stale_storage_failure() {
-    let p = Perturbed::new(
-        "fn zz_start() { let m: Map<string, int> = map_new()\n print(\"{probe(m)}\") }\n",
-        MAP_LIB,
-        "probe",
-        |body, inf| {
-            // The RECEIVER of a synthesized-call trigger is what the storage
-            // condition is asked about (`len` on a `Map` can lower to
-            // `__map_col_len`). With no recorded type the query cannot decide,
-            // which is `MonoTyReason::NoNode` -- exactly one entry, so the
-            // denominator is 1.
-            use bone_semantic::hir::{Callee, Expr as E};
-            let mut n = 0;
-            for (_, expr) in body.expr_arena.iter() {
-                let E::Call {
-                    callee: Callee::Unresolved { name, .. },
-                    args,
-                    ..
-                } = expr
-                else {
-                    continue;
-                };
-                if name.as_str() != "len" {
-                    continue;
-                }
-                let recv = args.clone().next().expect("a UFCS receiver");
-                n += usize::from(inf.expr_types.remove(recv).is_some());
-            }
-            n
-        },
-    );
-    let before = graph_of(&p.v1);
-    assert!(
-        before.storage_failures().next().is_some(),
-        "the fixture recorded no storage failure"
-    );
-
-    let (g, _stats) = p.update();
-    assert!(
-        g.storage_failures().next().is_none(),
-        "a storage failure survived the conversion resolving: {:?}",
-        g.storage_failures().collect::<Vec<_>>()
-    );
-    p.assert_matches_fresh(&g, "storage failure cleared");
 }
 
 // ---------------------------------------------------------------------------

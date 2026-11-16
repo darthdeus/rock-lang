@@ -103,9 +103,7 @@ impl<'a> Builder<'a> {
                 return self.lower_for_vec(&vars, iter, body, false);
             }
             // Lua keeps its counted arena walk; native rows and JS use the
-            // recorded iterator. The walk's synthesized `__arena_store_or_empty`
-            // call has no instance-graph site, which only JS checks strictly.
-            // Adding that site would let JS take the walk too.
+            // recorded iterator.
             if !self.scx.row_value_containers && self.scx.target() == bone_core::hir::FnBackend::Lua
             {
                 if let Some(collection) = enumerated_collection.filter(|&c| self.iter_is_arena(c)) {
@@ -595,7 +593,9 @@ impl<'a> Builder<'a> {
             base: arena,
             field: crate::names::ustr("_arena_id"),
         });
-        let store = self.call_spine("__arena_store_or_empty", vec![scene_id, arena_id])?;
+        let store = self.with_site_expr(iter, |b| {
+            b.call_spine("__arena_store_or_empty", vec![scene_id, arena_id])
+        })?;
         let occupied = self.emit_cur(Inst::Field {
             base: store,
             field: crate::names::ustr("occupied"),

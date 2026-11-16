@@ -840,21 +840,11 @@ fn main() {
 "#,
     );
     // Every site that carries the unbound variable is rejected, not only the one
-    // that introduced it: `len` is called on the `[T]` it returned, and the
-    // synthesized-call scan cannot decide that receiver's STORAGE either -- an
-    // unresolved receiver must be reported, never read as "boxed".
+    // that introduced it: `len` is called on the `[T]` it returned.
     let r = rejections_of(&ws, &g, instance_graph::RejectionKind::UnconstrainedTypeVar);
-    assert_eq!(
-        r.len(),
-        3,
-        "expected `make`, `len` and the storage query, got {r:?}"
-    );
+    assert_eq!(r.len(), 2, "expected `make` and `len`, got {r:?}");
     assert!(r.iter().any(|s| s.contains("make")), "{r:?}");
     assert!(r.iter().any(|s| s.contains("len_arr_T")), "{r:?}");
-    assert!(
-        r.iter().any(|s| s.contains("storage cannot be decided")),
-        "{r:?}"
-    );
 }
 
 /// CONTROL: a type variable constrained anywhere in the body -- not at the call
@@ -1380,169 +1370,6 @@ fn main() {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 2: synthesized column-intercept calls are gated on the SAME storage
-// oracle lowering uses (`skull_mir::lower::ContainerPlan`), not on the trigger
-// name alone.
-// ---------------------------------------------------------------------------
-
-fn generated_edges(ws: &Workspace, g: &instance_graph::InstanceGraph) -> Vec<String> {
-    let mut v: Vec<String> = g
-        .edges()
-        .filter(|e| e.kind == EdgeKind::CompilerGenerated)
-        .map(|e| {
-            ws.module(e.to.func.module).functions[e.to.func.func]
-                .name
-                .to_string()
-        })
-        .collect();
-    v.sort();
-    v.dedup();
-    v
-}
-
-/// A COLUMN-stored element takes the intercept: `[P]` over an all-scalar value
-/// struct stores as flat columns, so `sort`/`clone`/`insert` route through the
-/// column helpers.
-#[test]
-fn a_column_element_produces_the_synthesized_intercept() {
-    let (ws, g) = graph_of(
-        r#"
-value P { x: float, y: float }
-fn main() {
-    let xs: [P] = [P { x: 1.0, y: 2.0 }]
-    xs.push(P { x: 3.0, y: 4.0 })
-    let c = xs.clone()
-    xs.sort(_.x)
-}
-"#,
-    );
-    let names = generated_edges(&ws, &g);
-    assert!(
-        names.iter().any(|n| n.starts_with("__rock_col_")),
-        "a column-stored `[P]` produced no column intercept: {names:?}"
-    );
-}
-
-/// CONTROL, and the one that matters: a BOXED element must produce NONE of
-/// them. The trigger names are identical -- `sort`, `clone`, `push` on a `[int]`
-/// -- so a table keyed on the name alone reports edges emission never makes,
-/// which is exactly the over-approximation this replaced.
-#[test]
-fn a_boxed_element_produces_no_synthesized_intercept() {
-    let (ws, g) = graph_of(
-        r#"
-fn main() {
-    let xs: [int] = [1, 2, 3]
-    xs.push(4)
-    let c = xs.clone()
-    xs.sort(_ + 0)
-}
-"#,
-    );
-    let names = generated_edges(&ws, &g);
-    assert!(
-        !names
-            .iter()
-            .any(|n| n.starts_with("__rock_col_") || n.starts_with("__map_col_")),
-        "a boxed `[int]` produced column intercepts: {names:?}"
-    );
-}
-
-/// The Map sibling of the pair above: a column-stored VALUE takes the intercept,
-/// a boxed one does not.
-#[test]
-fn map_column_intercepts_follow_the_value_type() {
-    let (ws, col) = graph_of(
-        r#"
-value P { x: float, y: float }
-fn main() {
-    let m: Map<string, P> = map_new()
-    m["a"] = P { x: 1.0, y: 2.0 }
-    let n = m.len()
-}
-"#,
-    );
-    let (ws2, boxed) = graph_of(
-        r#"
-fn main() {
-    let m: Map<string, string> = map_new()
-    m["a"] = "b"
-    let n = m.len()
-}
-"#,
-    );
-    assert!(
-        generated_edges(&ws, &col)
-            .iter()
-            .any(|n| n.starts_with("__map_col_")),
-        "a column-stored Map value produced no intercept: {:?}",
-        generated_edges(&ws, &col)
-    );
-    assert!(
-        !generated_edges(&ws2, &boxed)
-            .iter()
-            .any(|n| n.starts_with("__map_col_")),
-        "a boxed Map value produced column intercepts: {:?}",
-        generated_edges(&ws2, &boxed)
-    );
-}
-
-/// The intercept resolves through the INSTANCE's substitution. The trigger is
-/// not at the user's call site at all -- `xs.clone()` calls the stdlib's
-/// generic `clone`, whose body holds the `__vec_data_clone` trigger -- so the
-/// SAME body and the SAME site must intercept at `[P]` and not at `[int]`.
-/// Keying on the trigger name cannot express that difference.
-#[test]
-fn the_storage_condition_follows_the_instantiation() {
-    let src = r#"
-value P { x: float, y: float }
-fn dup<T>(xs: [T]) -> [T] { return xs.clone() }
-fn main() {
-    let a: [P] = [P { x: 1.0, y: 2.0 }]
-    let b: [int] = [1, 2, 3]
-    dup(a)
-    dup(b)
-}
-"#;
-    let (ws, g) = graph_of(src);
-    // Both instantiations exist, so the fixture really does put one body under
-    // two substitutions.
-    let dups: Vec<String> = g
-        .instances
-        .iter()
-        .filter(|i| fn_name(&ws, i.func) == "dup")
-        .map(|i| g.symbol(&ws, i))
-        .collect();
-    assert_eq!(dups.len(), 2, "expected `dup<P>` and `dup<int>`: {dups:?}");
-
-    // Every column intercept comes from an instance instantiated at `P`. None
-    // comes from the `int` one, which is the discriminant.
-    let sources: Vec<String> = g
-        .edges()
-        .filter(|e| {
-            e.kind == EdgeKind::CompilerGenerated
-                && ws.module(e.to.func.module).functions[e.to.func.func]
-                    .name
-                    .as_str()
-                    .starts_with("__rock_col_")
-        })
-        .map(|e| g.symbol(&ws, &e.from))
-        .collect();
-    assert!(
-        !sources.is_empty(),
-        "no column intercept at all: the fixture proves nothing"
-    );
-    assert!(
-        sources.iter().all(|s| s.contains("P")),
-        "a column intercept came from a non-`P` instantiation: {sources:?}"
-    );
-    assert!(
-        !sources.iter().any(|s| s.contains("<int>")),
-        "the `int` instantiation gained an intercept it never emits: {sources:?}"
-    );
-}
-
-// ---------------------------------------------------------------------------
 // Stage 2: `@intrinsic` is not unconditionally a boundary.
 // ---------------------------------------------------------------------------
 
@@ -1691,11 +1518,8 @@ fn main() {
     let both: Vec<String> = g
         .expanded()
         .filter(|i| {
-            instance_graph::boundary_class_for(
-                &ws.module(i.func.module).functions[i.func.func],
-                &g.erased_entries,
-            )
-            .is_some()
+            instance_graph::boundary_class_for(&ws.module(i.func.module).functions[i.func.func])
+                .is_some()
         })
         .map(|i| g.identity(&ws, i))
         .collect();
@@ -1704,25 +1528,6 @@ fn main() {
         "instances counted as BOTH expanded and boundary: {both:?}"
     );
     assert!(c.expanded > 0 && c.expanded < c.instances);
-}
-
-/// Every name a synthesized-call table can produce belongs to the ONE
-/// catalogue. Two lists that must agree will eventually not; this makes the
-/// disagreement a test failure rather than a symbol emission never emits.
-#[test]
-fn synthesized_targets_belong_to_the_runtime_catalogue() {
-    let catalogue = instance_graph::ERASED_RUNTIME_ENTRIES;
-    let mut missing: Vec<&str> = Vec::new();
-    for (_, _, names) in instance_graph::COMPILER_GENERATED_TRIGGERS {
-        missing.extend(names.iter().filter(|n| !catalogue.contains(n)));
-    }
-    for (_, _, names) in instance_graph::INDEX_TRIGGERED {
-        missing.extend(names.iter().filter(|n| !catalogue.contains(n)));
-    }
-    assert!(
-        missing.is_empty(),
-        "synthesized targets outside the catalogue: {missing:?}"
-    );
 }
 
 /// A generic emission root can have concrete instances from other call sites
@@ -1994,6 +1799,7 @@ fn main() {
     mp["a"] = P { x: 1.0, y: 2.0 }
     let n = mp.len()
     let h = Hold { v: 1 }
+    print("{1.5}")
 }
 "#,
     );
@@ -2066,15 +1872,10 @@ fn main() { opaque_caller(1) }
             .any(|d| d.contains("opaque_caller") && d.contains("__rock_vec_column_elements")),
         "an opaque body's runtime dependency was not recorded: {deps:?}"
     );
-    assert!(
-        g.erased_entries.contains("__rock_vec_column_elements"),
-        "the dependency did not reach the erased-entry set emission draws from"
-    );
     // CONTROL: the scan does not simply report the whole catalogue.
     assert!(
-        !g.erased_entries.contains("__map_col_slot_checked"),
-        "the dependency scan reported an entry the body never names: {:?}",
-        g.erased_entries
+        !deps.iter().any(|d| d.contains("__map_col_slot_checked")),
+        "the dependency scan reported an entry the body never names: {deps:?}"
     );
 }
 
@@ -2457,88 +2258,6 @@ fn drop_bound_next_generic_records(ws: &mut Workspace, fn_name: &str) -> usize {
 
 /// The positive fixture for the `Unresolved` axis of the span census.
 ///
-/// The corpus records ZERO unresolved sites, so without this the census's
-/// "0 spanless" for that axis is zero over zero and an `Unresolved` recorder
-/// switched to `Span::unknown` would go unnoticed.
-///
-/// The population is a compiler-generated entry the walk cannot resolve to ONE
-/// declaration. `stdlib_entry_representative` demands that every declaration of
-/// the name canonicalize to one backend-variant group; a second `__map_col_len`
-/// with a different signature is a genuine overload, so the group is not one and
-/// the entry is refused -- the same residual ambiguity `Builder::stdlib_funcref`
-/// refuses. Chosen because it is a permanent property of the lookup rather than
-/// a live gap: closing anything cannot silently make this fixture resolve.
-///
-/// This covers the `compiler-generated-entry-unresolved` write in
-/// `walk_body_edges`. The other three recorders each push their OWN
-/// `Unresolved` and are covered one fixture apiece:
-/// `a_call_with_no_binding_record_is_unresolved_with_a_span`,
-/// `a_witness_with_no_generic_record_is_unresolved_with_a_span`,
-/// `a_bound_next_with_no_generic_record_is_unresolved_with_a_span`. Mutating
-/// any one recorder's span reddens only its own fixture -- measured.
-#[test]
-fn an_unresolved_call_site_keeps_its_span() {
-    let program = |extra: &str| {
-        format!(
-            r#"
-{extra}
-value P {{ x: float, y: float }}
-fn main() {{
-    let m: Map<string, P> = map_new()
-    m["a"] = P {{ x: 1.0, y: 2.0 }}
-    let n = m.len()
-}}
-"#
-        )
-    };
-    let ws = ws_with_stdlib(&program(
-        r#"inline(lua) fn __map_col_len(n: int) -> int = "return n""#,
-    ));
-    let roots = skull::mir_emit::emission_roots(&ws, None);
-    let g = instance_graph::build(&ws, roots.clone(), false);
-    // The EXACT denominator and reason, not merely non-empty: a fixture that
-    // silently drops to a different site still satisfies "non-zero" while
-    // covering less than it claims. `m.len()` is the one site naming the
-    // ambiguous entry; the store names `__map_col_slot`, which is unaffected.
-    let reasons: Vec<&str> = g.unresolved().map(|u| u.reason).collect();
-    assert_eq!(
-        reasons,
-        vec!["compiler-generated-entry-unresolved"; 1],
-        "the unresolved population changed shape"
-    );
-    let spanless: Vec<&str> = g
-        .unresolved()
-        .filter(|u| instance_graph::is_spanless(&u.span))
-        .map(|u| u.reason)
-        .collect();
-    assert!(
-        spanless.is_empty(),
-        "unresolved call sites with no source span: {spanless:?}"
-    );
-    let census = g.span_census();
-    assert_eq!(
-        census
-            .unresolved
-            .values()
-            .map(|c| c.examined)
-            .sum::<usize>(),
-        g.unresolved().count(),
-        "the census did not examine every unresolved site"
-    );
-
-    // CONTROL: the same program WITHOUT the ambiguating declaration resolves
-    // every entry, so the population is a property of the ambiguity and not of
-    // the fixture being malformed.
-    let clean_ws = ws_with_stdlib(&program(""));
-    let clean_roots = skull::mir_emit::emission_roots(&clean_ws, None);
-    let clean = instance_graph::build(&clean_ws, clean_roots, false);
-    assert!(
-        clean.unresolved().next().is_none(),
-        "the shared walk should resolve every synthesized entry: {:?}",
-        clean.unresolved().map(|u| u.reason).collect::<Vec<_>>()
-    );
-}
-
 /// **The recursion pass may not search from an instance whose declaration has
 /// exactly one instance graph-wide.**
 ///
