@@ -2,50 +2,14 @@
 //! its initializer (parenthesized when the initializer isn't atomic) and delete
 //! the `let`. Offered on the binding or any of its uses.
 
-use bone_query::BoneWorkspace;
-use lsp_types::{Position, TextEdit};
-
-const PATH: &str = "/tmp/rock_inline_local.rock";
-
-/// Byte offset of an LSP position (ASCII test sources: char == byte).
-fn pos_to_off(src: &str, p: Position) -> usize {
-    let mut off = 0;
-    for (i, line) in src.split_inclusive('\n').enumerate() {
-        if i as u32 == p.line {
-            return off + p.character as usize;
-        }
-        off += line.len();
-    }
-    off + p.character as usize
-}
-
-/// Apply inline_local's edits (descending, so earlier offsets stay valid).
-fn apply(src: &str, edits: Vec<TextEdit>) -> String {
-    let mut spans: Vec<(usize, usize, String)> = edits
-        .into_iter()
-        .map(|e| {
-            (
-                pos_to_off(src, e.range.start),
-                pos_to_off(src, e.range.end),
-                e.new_text,
-            )
-        })
-        .collect();
-    spans.sort_by_key(|x| std::cmp::Reverse(x.0));
-    let mut s = src.to_string();
-    for (start, end, text) in spans {
-        s.replace_range(start..end, &text);
-    }
-    s
-}
+use crate::fixture::{PATH, apply_edits, workspace};
+use lsp_types::Position;
 
 fn inlined(src: &str, pos: Position) -> String {
-    let mut bone = BoneWorkspace::new();
-    bone.update(PATH, src.to_string());
-    let il = bone
+    let il = workspace(src)
         .inline_local(PATH, pos)
         .expect("inline should be offered");
-    apply(src, il.edits)
+    apply_edits(src, il.edits)
 }
 
 #[test]
@@ -107,40 +71,50 @@ fn inlines_at_every_use() {
     }
 }
 
-fn offered(src: &str, pos: Position) -> bool {
-    let mut bone = BoneWorkspace::new();
-    bone.update(PATH, src.to_string());
-    bone.inline_local(PATH, pos).is_some()
-}
-
 /// Inlining copies the initializer into every use, so an initializer with
 /// side effects would run once per use (or per iteration, or per closure
-/// call) instead of once.
+/// call) instead of once, or not at all without a use.
 #[test]
-fn not_offered_for_an_impure_initializer_used_twice() {
-    let call =
-        "fn f(v: int) -> int {\n    let y = g(v)\n    return y + y\n}\nfn g(a: int) -> int { a }\n";
-    assert!(!offered(call, Position::new(1, 8)), "call");
-    let method = "fn f() -> int {\n    let y = (1 - 2).abs()\n    return y + y\n}\n";
-    assert!(!offered(method, Position::new(1, 8)), "method call");
-    let index = "fn f(xs: [int]) -> int {\n    let y = xs[0]\n    return y + y\n}\n";
-    assert!(!offered(index, Position::new(1, 8)), "indexing");
-    let alloc = "fn f() -> int {\n    let y = [1, 2]\n    return y.len() + y.len()\n}\n";
-    assert!(!offered(alloc, Position::new(1, 8)), "allocation");
-}
-
-#[test]
-fn not_offered_for_an_impure_initializer_with_no_use() {
-    let src = "fn f(v: int) {\n    let y = g(v)\n}\nfn g(a: int) -> int { a }\n";
-    assert!(!offered(src, Position::new(1, 8)));
-}
-
-#[test]
-fn not_offered_for_an_impure_initializer_used_once_in_a_loop_or_closure() {
-    let looped = "fn f(v: int) {\n    let y = g(v)\n    for i in 0..3 {\n        print(y + i)\n    }\n}\nfn g(a: int) -> int { a }\n";
-    assert!(!offered(looped, Position::new(1, 8)), "for body");
-    let whiled = "fn f(v: int) {\n    let y = g(v)\n    while v > 0 {\n        print(y)\n    }\n}\nfn g(a: int) -> int { a }\n";
-    assert!(!offered(whiled, Position::new(1, 8)), "while body");
-    let closure = "fn f(v: int) -> int {\n    let y = g(v)\n    let h = () => y\n    return h()\n}\nfn g(a: int) -> int { a }\n";
-    assert!(!offered(closure, Position::new(1, 8)), "closure");
+fn not_offered_for_an_impure_initializer_that_would_run_a_different_number_of_times() {
+    // (case, source with the binding at 1:8)
+    let cases = [
+        (
+            "call used twice",
+            "fn f(v: int) -> int {\n    let y = g(v)\n    return y + y\n}\nfn g(a: int) -> int { a }\n",
+        ),
+        (
+            "method call used twice",
+            "fn f() -> int {\n    let y = (1 - 2).abs()\n    return y + y\n}\n",
+        ),
+        (
+            "indexing used twice",
+            "fn f(xs: [int]) -> int {\n    let y = xs[0]\n    return y + y\n}\n",
+        ),
+        (
+            "allocation used twice",
+            "fn f() -> int {\n    let y = [1, 2]\n    return y.len() + y.len()\n}\n",
+        ),
+        (
+            "no use",
+            "fn f(v: int) {\n    let y = g(v)\n}\nfn g(a: int) -> int { a }\n",
+        ),
+        (
+            "once in a for body",
+            "fn f(v: int) {\n    let y = g(v)\n    for i in 0..3 {\n        print(y + i)\n    }\n}\nfn g(a: int) -> int { a }\n",
+        ),
+        (
+            "once in a while body",
+            "fn f(v: int) {\n    let y = g(v)\n    while v > 0 {\n        print(y)\n    }\n}\nfn g(a: int) -> int { a }\n",
+        ),
+        (
+            "once in a closure",
+            "fn f(v: int) -> int {\n    let y = g(v)\n    let h = () => y\n    return h()\n}\nfn g(a: int) -> int { a }\n",
+        ),
+    ];
+    for (case, src) in cases {
+        let offered = workspace(src)
+            .inline_local(PATH, Position::new(1, 8))
+            .is_some();
+        assert!(!offered, "{case}");
+    }
 }
