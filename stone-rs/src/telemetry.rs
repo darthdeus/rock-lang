@@ -1894,7 +1894,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::process::{Command, Stdio};
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     static UNIQ: AtomicU32 = AtomicU32::new(0);
 
@@ -1985,18 +1985,77 @@ mod tests {
         String::from_utf8(request).unwrap()
     }
 
+    /// A local ingest. `respond` gets each request with its 1-based number and
+    /// returns the status to answer with; it may block or signal the test first.
+    /// Serves until `stop`, which returns every request answered.
+    struct Ingest {
+        address: std::net::SocketAddr,
+        stop: Arc<AtomicBool>,
+        server: std::thread::JoinHandle<Vec<String>>,
+    }
+
+    impl Ingest {
+        fn start(mut respond: impl FnMut(usize, &str) -> &'static str + Send + 'static) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let server_stop = Arc::clone(&stop);
+            let server = std::thread::spawn(move || {
+                let mut requests = Vec::new();
+                while !server_stop.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let request = read_full_http_request(&mut stream);
+                            if request.is_empty() {
+                                continue;
+                            }
+                            let status = respond(requests.len() + 1, &request);
+                            let _ =
+                                write!(stream, "HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n");
+                            requests.push(request);
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(error) => panic!("test server failed: {error}"),
+                    }
+                }
+                requests
+            });
+            Self {
+                address,
+                stop,
+                server,
+            }
+        }
+
+        fn endpoint(&self) -> String {
+            format!("http://{}/v1/events", self.address)
+        }
+
+        fn stop(self) -> Vec<String> {
+            self.stop.store(true, Ordering::SeqCst);
+            self.server.join().unwrap()
+        }
+    }
+
+    fn transport(ingest: &Ingest, token: &str) -> TelemetryTransport {
+        let identity = identity();
+        TelemetryTransport {
+            endpoint: ingest.endpoint(),
+            token: token.into(),
+            game: identity.game,
+            channel: identity.channel,
+        }
+    }
+
     /// The body of a request `read_full_http_request` returned.
     fn http_body(request: &str) -> &str {
         request
             .split_once("\r\n\r\n")
             .map(|(_, body)| body)
             .unwrap_or("")
-    }
-
-    /// The body alone, which is all a server that counts or replays rows
-    /// inspects. Empty means the peer never sent a request.
-    fn read_http_request(stream: &mut TcpStream) -> String {
-        http_body(&read_full_http_request(stream)).to_string()
     }
 
     fn test_upload_timing() -> UploadTiming {
@@ -2563,9 +2622,6 @@ mod tests {
         let root_lock = TelemetryRootLock::acquire(&root).unwrap().unwrap();
         let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
         spool.record_stat("revoke-me", 1).unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        listener.set_nonblocking(true).unwrap();
         let child_gate = root.join("publish-revocation");
         let revocation = revocation_path(&root);
         let child = Command::new(std::env::current_exe().unwrap())
@@ -2578,59 +2634,28 @@ mod tests {
             .spawn()
             .unwrap();
         let (published_tx, published_rx) = mpsc::channel();
-        let stop_server = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let server_stop = Arc::clone(&stop_server);
-        let requests = Arc::new(AtomicU32::new(0));
-        let server_requests = Arc::clone(&requests);
-        let server = std::thread::spawn(move || {
-            while !server_stop.load(Ordering::SeqCst) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        if read_http_request(&mut stream).is_empty() {
-                            continue;
-                        }
-                        let request = server_requests.fetch_add(1, Ordering::SeqCst) + 1;
-                        if request == 1 {
-                            fs::write(&child_gate, b"publish").unwrap();
-                            let deadline = Instant::now() + Duration::from_secs(10);
-                            while !revocation.exists() {
-                                assert!(
-                                    Instant::now() < deadline,
-                                    "child did not publish revocation"
-                                );
-                                std::thread::sleep(Duration::from_millis(2));
-                            }
-                            published_tx.send(request).unwrap();
-                        }
-                        write!(
-                            stream,
-                            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n"
-                        )
-                        .unwrap();
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(2));
-                    }
-                    Err(error) => panic!("test server failed: {error}"),
+        let ingest = Ingest::start(move |request, _| {
+            if request == 1 {
+                fs::write(&child_gate, b"publish").unwrap();
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !revocation.exists() {
+                    assert!(
+                        Instant::now() < deadline,
+                        "child did not publish revocation"
+                    );
+                    std::thread::sleep(Duration::from_millis(2));
                 }
+                published_tx.send(request).unwrap();
             }
+            "503 Service Unavailable"
         });
         let mut timing = test_upload_timing();
         // Keep the first request in flight until the child publishes withdrawal.
         // Otherwise timed-out retries can sit in the server's accept backlog and
         // be mistaken for requests sent after withdrawal.
         timing.request_timeout = Duration::from_secs(30);
-        let worker = UploadWorker::start_with_timing(
-            &root,
-            TelemetryTransport {
-                endpoint: format!("http://{address}/v1/events"),
-                token: "secret".into(),
-                game: "mag".into(),
-                channel: "steam".into(),
-            },
-            timing,
-        )
-        .unwrap();
+        let worker =
+            UploadWorker::start_with_timing(&root, transport(&ingest, "secret"), timing).unwrap();
         let events_path = spool.events_path.clone();
         let io_lock = Arc::clone(&spool.io_lock);
         let append_worker = AppendWorker::start(spool, worker.waker());
@@ -2649,9 +2674,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         client.finish(StopMode::Drain);
-        stop_server.store(true, Ordering::SeqCst);
-        server.join().unwrap();
-        let requests_after_withdrawal = requests.load(Ordering::SeqCst);
+        let requests_after_withdrawal = ingest.stop().len();
 
         assert!(
             child.status.success(),
@@ -3145,50 +3168,28 @@ mod tests {
             .unwrap()
             .record_stat("retry-me", 1)
             .unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let server = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_millis(800);
-            let mut requests = 0;
-            while requests < 2 && Instant::now() < deadline {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        if read_http_request(&mut stream).is_empty() {
-                            continue;
-                        }
-                        requests += 1;
-                        let status = if requests == 1 {
-                            "503 Service Unavailable"
-                        } else {
-                            "204 No Content"
-                        };
-                        write!(stream, "HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n").unwrap();
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(error) => panic!("test server failed: {error}"),
-                }
+        let (request_tx, request_rx) = mpsc::channel();
+        let ingest = Ingest::start(move |request, _| {
+            request_tx.send(()).unwrap();
+            if request == 1 {
+                "503 Service Unavailable"
+            } else {
+                "204 No Content"
             }
-            requests
         });
         let worker = UploadWorker::start_with_timing(
             &root,
-            TelemetryTransport {
-                endpoint: format!("http://{address}/v1/events"),
-                token: "secret".into(),
-                game: "mag".into(),
-                channel: "steam".into(),
-            },
+            transport(&ingest, "secret"),
             test_upload_timing(),
         )
         .unwrap();
 
-        let requests = server.join().unwrap();
+        for _ in 0..2 {
+            request_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        }
         worker.finish(StopMode::Drain);
 
-        assert_eq!(requests, 2);
+        assert_eq!(ingest.stop().len(), 2);
         assert!(!root.join("reports/stats/steam/events.jsonl").exists());
         assert!(!root.join("reports/stats/steam/cursor.log").exists());
         std::fs::remove_dir_all(root).unwrap();
@@ -3227,41 +3228,17 @@ mod tests {
     #[test]
     fn live_events_wait_for_one_flush_window() {
         let root = fresh_root();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        listener.set_nonblocking(true).unwrap();
         let (uploaded_tx, uploaded_rx) = mpsc::channel();
-        let server = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(2);
-            loop {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let body = read_http_request(&mut stream);
-                        if body.is_empty() {
-                            continue;
-                        }
-                        write!(
-                            stream,
-                            "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
-                        )
-                        .unwrap();
-                        uploaded_tx.send(body).unwrap();
-                        return;
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        assert!(Instant::now() < deadline, "flush window never expired");
-                        std::thread::sleep(Duration::from_millis(2));
-                    }
-                    Err(error) => panic!("test server failed: {error}"),
-                }
-            }
+        let ingest = Ingest::start(move |_, request| {
+            uploaded_tx.send(http_body(request).to_string()).unwrap();
+            "204 No Content"
         });
         let mut timing = test_upload_timing();
         timing.flush_window = Duration::from_millis(500);
         let mut client = TelemetryClient::open_with_timing(
             &root,
             identity(),
-            &format!("http://{address}/v1/events"),
+            &ingest.endpoint(),
             "secret",
             false,
             timing,
@@ -3275,7 +3252,7 @@ mod tests {
         client.record_stat("second", 2).unwrap();
         let body = uploaded_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         client.finish(StopMode::Drain);
-        server.join().unwrap();
+        ingest.stop();
 
         assert_eq!(batch_names(&body), ["first", "second"]);
         std::fs::remove_dir_all(root).unwrap();
@@ -3288,42 +3265,21 @@ mod tests {
             .unwrap()
             .record_stat("from-last-run", 1)
             .unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
         let (uploaded_tx, uploaded_rx) = mpsc::channel();
-        let server = std::thread::spawn(move || loop {
-            let (mut stream, _) = listener.accept().unwrap();
-            let body = read_http_request(&mut stream);
-            if body.is_empty() {
-                continue;
-            }
-            write!(
-                stream,
-                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
-            )
-            .unwrap();
-            uploaded_tx.send(body).unwrap();
-            return;
+        let ingest = Ingest::start(move |_, request| {
+            uploaded_tx.send(http_body(request).to_string()).unwrap();
+            "204 No Content"
         });
         let mut timing = test_upload_timing();
         timing.flush_window = Duration::from_secs(5);
-        let worker = UploadWorker::start_with_timing(
-            &root,
-            TelemetryTransport {
-                endpoint: format!("http://{address}/v1/events"),
-                token: "secret".into(),
-                game: "mag".into(),
-                channel: "steam".into(),
-            },
-            timing,
-        )
-        .unwrap();
+        let worker =
+            UploadWorker::start_with_timing(&root, transport(&ingest, "secret"), timing).unwrap();
 
         let body = uploaded_rx
             .recv_timeout(Duration::from_millis(300))
             .unwrap();
         worker.finish(StopMode::Drain);
-        server.join().unwrap();
+        ingest.stop();
 
         assert_eq!(batch_names(&body), ["from-last-run"]);
         std::fs::remove_dir_all(root).unwrap();
@@ -3332,41 +3288,17 @@ mod tests {
     #[test]
     fn a_full_request_body_flushes_before_the_time_window() {
         let root = fresh_root();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        listener.set_nonblocking(true).unwrap();
         let (uploaded_tx, uploaded_rx) = mpsc::channel();
-        let stop_server = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let server_stop = Arc::clone(&stop_server);
-        let server = std::thread::spawn(move || {
-            while !server_stop.load(Ordering::SeqCst) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let body = read_http_request(&mut stream);
-                        if body.is_empty() {
-                            continue;
-                        }
-                        write!(
-                            stream,
-                            "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
-                        )
-                        .unwrap();
-                        uploaded_tx.send(body).unwrap();
-                        return;
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(2));
-                    }
-                    Err(error) => panic!("test server failed: {error}"),
-                }
-            }
+        let ingest = Ingest::start(move |_, request| {
+            let _ = uploaded_tx.send(http_body(request).to_string());
+            "204 No Content"
         });
         let mut timing = test_upload_timing();
         timing.flush_window = Duration::from_secs(3600);
         let mut client = TelemetryClient::open_with_timing(
             &root,
             identity(),
-            &format!("http://{address}/v1/events"),
+            &ingest.endpoint(),
             "secret",
             false,
             timing,
@@ -3383,8 +3315,7 @@ mod tests {
         client.flush().unwrap();
         let uploaded = uploaded_rx.recv_timeout(Duration::from_secs(10));
         client.finish(StopMode::Discard);
-        stop_server.store(true, Ordering::SeqCst);
-        server.join().unwrap();
+        ingest.stop();
         let body = uploaded.expect("durable full body never flushed");
 
         assert!(body.len() <= MAX_BODY_BYTES);
@@ -3395,41 +3326,13 @@ mod tests {
     #[test]
     fn shutdown_flushes_a_live_partial_batch() {
         let root = fresh_root();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let stop_server = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let server_stop = Arc::clone(&stop_server);
-        let server = std::thread::spawn(move || {
-            let mut received = None;
-            while received.is_none() && !server_stop.load(Ordering::SeqCst) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let body = read_http_request(&mut stream);
-                        if body.is_empty() {
-                            continue;
-                        }
-                        write!(
-                            stream,
-                            "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
-                        )
-                        .unwrap();
-                        received = Some(body);
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(2));
-                    }
-                    Err(error) => panic!("test server failed: {error}"),
-                }
-            }
-            received
-        });
+        let ingest = Ingest::start(|_, _| "204 No Content");
         let mut timing = test_upload_timing();
         timing.flush_window = Duration::from_secs(30);
         let mut client = TelemetryClient::open_with_timing(
             &root,
             identity(),
-            &format!("http://{address}/v1/events"),
+            &ingest.endpoint(),
             "secret",
             false,
             timing,
@@ -3438,13 +3341,14 @@ mod tests {
 
         client.record_stat("before-close", 1).unwrap();
         client.finish(StopMode::Drain);
-        stop_server.store(true, Ordering::SeqCst);
-        let body = server
-            .join()
-            .unwrap()
-            .expect("shutdown skipped the partial batch");
+        let requests = ingest.stop();
+        let body = http_body(
+            requests
+                .first()
+                .expect("shutdown skipped the partial batch"),
+        );
 
-        assert_eq!(batch_names(&body), ["before-close"]);
+        assert_eq!(batch_names(body), ["before-close"]);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3482,7 +3386,7 @@ mod tests {
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     assert!(
-                        read_http_request(&mut stream).is_empty(),
+                        read_full_http_request(&mut stream).is_empty(),
                         "revoked rows were uploaded during the flush window"
                     );
                 }
@@ -3499,49 +3403,31 @@ mod tests {
         let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
         spool.record_stat("row-0", 1).unwrap();
         let expected = grow_log_past_one_batch(&spool.events_path);
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let server = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_millis(800);
-            let mut bodies = Vec::new();
-            while bodies.len() < 2 && Instant::now() < deadline {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let body = read_http_request(&mut stream);
-                        if body.is_empty() {
-                            continue;
-                        }
-                        bodies.push(body);
-                        let status = if bodies.len() == 1 {
-                            "400 Bad Request"
-                        } else {
-                            "204 No Content"
-                        };
-                        write!(stream, "HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n").unwrap();
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(2));
-                    }
-                    Err(error) => panic!("test server failed: {error}"),
-                }
+        let (request_tx, request_rx) = mpsc::channel();
+        let ingest = Ingest::start(move |request, _| {
+            request_tx.send(()).unwrap();
+            if request == 1 {
+                "400 Bad Request"
+            } else {
+                "204 No Content"
             }
-            bodies
         });
         let worker = UploadWorker::start_with_timing(
             &root,
-            TelemetryTransport {
-                endpoint: format!("http://{address}/v1/events"),
-                token: "secret".into(),
-                game: "mag".into(),
-                channel: "steam".into(),
-            },
+            transport(&ingest, "secret"),
             test_upload_timing(),
         )
         .unwrap();
 
-        let bodies = server.join().unwrap();
+        for _ in 0..2 {
+            request_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        }
         worker.finish(StopMode::Drain);
+        let bodies: Vec<String> = ingest
+            .stop()
+            .iter()
+            .map(|request| http_body(request).to_string())
+            .collect();
 
         assert_eq!(bodies.len(), 2);
         let first = batch_names(&bodies[0]);
@@ -3567,46 +3453,14 @@ mod tests {
             .unwrap()
             .record_stat("keep-for-a-new-build", 1)
             .unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        listener.set_nonblocking(true).unwrap();
         let (first_tx, first_rx) = mpsc::channel();
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let server_stop = Arc::clone(&stop);
-        let server = std::thread::spawn(move || {
-            let mut requests = 0;
-            while !server_stop.load(Ordering::SeqCst) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        if read_http_request(&mut stream).is_empty() {
-                            continue;
-                        }
-                        requests += 1;
-                        write!(
-                            stream,
-                            "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n"
-                        )
-                        .unwrap();
-                        if requests == 1 {
-                            first_tx.send(()).unwrap();
-                        }
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(2));
-                    }
-                    Err(error) => panic!("test server failed: {error}"),
-                }
-            }
-            requests
+        let ingest = Ingest::start(move |_, _| {
+            let _ = first_tx.send(());
+            "401 Unauthorized"
         });
         let worker = UploadWorker::start_with_timing(
             &root,
-            TelemetryTransport {
-                endpoint: format!("http://{address}/v1/events"),
-                token: "wrong".into(),
-                game: "mag".into(),
-                channel: "steam".into(),
-            },
+            transport(&ingest, "wrong"),
             test_upload_timing(),
         )
         .unwrap();
@@ -3620,10 +3474,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         worker.finish(StopMode::Discard);
-        stop.store(true, Ordering::SeqCst);
-        let requests = server.join().unwrap();
 
-        assert_eq!(requests, 1);
+        assert_eq!(ingest.stop().len(), 1);
         assert!(!root.join("reports/stats").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -3635,48 +3487,18 @@ mod tests {
             .unwrap()
             .record_stat("keep-for-a-new-build", 1)
             .unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        listener.set_nonblocking(true).unwrap();
         let (received_tx, received_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let server_stop = Arc::clone(&stop);
-        let server = std::thread::spawn(move || {
-            let mut requests = 0;
-            while !server_stop.load(Ordering::SeqCst) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        if read_http_request(&mut stream).is_empty() {
-                            continue;
-                        }
-                        requests += 1;
-                        if requests == 1 {
-                            received_tx.send(()).unwrap();
-                            release_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-                        }
-                        write!(
-                            stream,
-                            "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n"
-                        )
-                        .unwrap();
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(2));
-                    }
-                    Err(error) => panic!("test server failed: {error}"),
-                }
+        let ingest = Ingest::start(move |request, _| {
+            if request == 1 {
+                received_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(1)).unwrap();
             }
-            requests
+            "401 Unauthorized"
         });
         let worker = UploadWorker::start_with_timing(
             &root,
-            TelemetryTransport {
-                endpoint: format!("http://{address}/v1/events"),
-                token: "wrong".into(),
-                game: "mag".into(),
-                channel: "steam".into(),
-            },
+            transport(&ingest, "wrong"),
             test_upload_timing(),
         )
         .unwrap();
@@ -3685,10 +3507,8 @@ mod tests {
         let finisher = std::thread::spawn(move || worker.finish(StopMode::Drain));
         release_tx.send(()).unwrap();
         finisher.join().unwrap();
-        stop.store(true, Ordering::SeqCst);
-        let requests = server.join().unwrap();
 
-        assert_eq!(requests, 1);
+        assert_eq!(ingest.stop().len(), 1);
         assert!(root.join("reports/stats/steam/events.jsonl").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -3784,53 +3604,17 @@ mod tests {
             .unwrap()
             .record_stat("revoke-during-backoff", 1)
             .unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        listener.set_nonblocking(true).unwrap();
         let (failed_tx, failed_rx) = mpsc::channel();
-        let stop_server = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let server_stop = Arc::clone(&stop_server);
-        let server = std::thread::spawn(move || {
-            let mut requests = 0;
-            while !server_stop.load(Ordering::SeqCst) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        if read_http_request(&mut stream).is_empty() {
-                            continue;
-                        }
-                        requests += 1;
-                        write!(
-                            stream,
-                            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n"
-                        )
-                        .unwrap();
-                        if requests == 1 {
-                            failed_tx.send(()).unwrap();
-                        }
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(2));
-                    }
-                    Err(error) => panic!("test server failed: {error}"),
-                }
-            }
-            requests
+        let ingest = Ingest::start(move |_, _| {
+            let _ = failed_tx.send(());
+            "503 Service Unavailable"
         });
         let mut timing = test_upload_timing();
         timing.retry_initial = Duration::from_secs(5);
         timing.retry_max = Duration::from_secs(5);
         timing.revocation_poll = Duration::from_millis(10);
-        let worker = UploadWorker::start_with_timing(
-            &root,
-            TelemetryTransport {
-                endpoint: format!("http://{address}/v1/events"),
-                token: "secret".into(),
-                game: "mag".into(),
-                channel: "steam".into(),
-            },
-            timing,
-        )
-        .unwrap();
+        let worker =
+            UploadWorker::start_with_timing(&root, transport(&ingest, "secret"), timing).unwrap();
 
         failed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         publish_revocation(&root).unwrap();
@@ -3840,11 +3624,13 @@ mod tests {
         }
         let stats_remain = root.join("reports/stats").exists();
         worker.finish(StopMode::Discard);
-        stop_server.store(true, Ordering::SeqCst);
-        let requests = server.join().unwrap();
 
         assert!(!stats_remain, "retry sleep hid the withdrawal marker");
-        assert_eq!(requests, 1, "revocation polling bypassed retry backoff");
+        assert_eq!(
+            ingest.stop().len(),
+            1,
+            "revocation polling bypassed retry backoff"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3855,61 +3641,23 @@ mod tests {
             .unwrap()
             .record_stat("discard-me", 1)
             .unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
         let (failed_tx, failed_rx) = mpsc::channel();
-        let stop_server = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let server_stop = Arc::clone(&stop_server);
-        let server = std::thread::spawn(move || {
-            listener.set_nonblocking(true).unwrap();
-            let mut requests = 0;
-            while !server_stop.load(Ordering::SeqCst) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        if read_http_request(&mut stream).is_empty() {
-                            continue;
-                        }
-                        requests += 1;
-                        write!(
-                            stream,
-                            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n"
-                        )
-                        .unwrap();
-                        if requests == 1 {
-                            failed_tx.send(()).unwrap();
-                        }
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(error) => panic!("test server failed: {error}"),
-                }
-            }
-            requests
+        let ingest = Ingest::start(move |_, _| {
+            let _ = failed_tx.send(());
+            "503 Service Unavailable"
         });
         let mut timing = test_upload_timing();
         timing.retry_initial = Duration::from_secs(5);
         timing.retry_max = Duration::from_secs(5);
-        let worker = UploadWorker::start_with_timing(
-            &root,
-            TelemetryTransport {
-                endpoint: format!("http://{address}/v1/events"),
-                token: "secret".into(),
-                game: "mag".into(),
-                channel: "steam".into(),
-            },
-            timing,
-        )
-        .unwrap();
+        let worker =
+            UploadWorker::start_with_timing(&root, transport(&ingest, "secret"), timing).unwrap();
 
         // A bounded wait on the condition, not a latency assertion: the bound
         // only fires when the worker never attempts, however loaded the host.
         failed_rx.recv_timeout(Duration::from_secs(30)).unwrap();
         worker.finish(StopMode::Discard);
-        stop_server.store(true, Ordering::SeqCst);
-        let requests = server.join().unwrap();
 
-        assert_eq!(requests, 1);
+        assert_eq!(ingest.stop().len(), 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3920,33 +3668,9 @@ mod tests {
         for seq in 0..30 {
             spool.record_stat(&format!("row-{seq}"), seq).unwrap();
         }
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let stop_server = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let server_stop = std::sync::Arc::clone(&stop_server);
-        let requests = std::sync::Arc::new(AtomicU32::new(0));
-        let server_requests = std::sync::Arc::clone(&requests);
-        let server = std::thread::spawn(move || {
-            while !server_stop.load(Ordering::SeqCst) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        if read_http_request(&mut stream).is_empty() {
-                            continue;
-                        }
-                        server_requests.fetch_add(1, Ordering::SeqCst);
-                        std::thread::sleep(Duration::from_millis(250));
-                        let _ = write!(
-                            stream,
-                            "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
-                        );
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(2));
-                    }
-                    Err(error) => panic!("test server failed: {error}"),
-                }
-            }
+        let ingest = Ingest::start(|_, _| {
+            std::thread::sleep(Duration::from_millis(250));
+            "204 No Content"
         });
         // Drive the production shutdown drain on this thread. Routing it
         // through the spawned upload worker races the worker's first
@@ -3955,12 +3679,7 @@ mod tests {
         // production misbehaving. The through-worker Finish wiring stays
         // covered by `shutdown_flushes_a_live_partial_batch`.
         let drain = TelemetryDrain::open(&root, "steam").unwrap();
-        let transport = TelemetryTransport {
-            endpoint: format!("http://{address}/v1/events"),
-            token: "secret".into(),
-            game: "mag".into(),
-            channel: "steam".into(),
-        };
+        let transport = transport(&ingest, "secret");
 
         let started = Instant::now();
         finish_upload(
@@ -3973,10 +3692,8 @@ mod tests {
             false,
         );
         let elapsed = started.elapsed();
-        stop_server.store(true, Ordering::SeqCst);
-        server.join().unwrap();
 
-        let sent = requests.load(Ordering::SeqCst);
+        let sent = ingest.stop().len();
         assert!(sent > 0, "shutdown did not attempt any pending row");
         assert!(sent < 30, "shutdown drained the unbounded backlog");
         assert!(
@@ -3995,33 +3712,10 @@ mod tests {
         let root = fresh_root();
         let client_root = root.join("client");
         fs::create_dir_all(&client_root).unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let stop_server = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let server_stop = std::sync::Arc::clone(&stop_server);
-        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let server_captured = std::sync::Arc::clone(&captured);
-        let server = std::thread::spawn(move || {
-            while !server_stop.load(Ordering::SeqCst) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let request = read_full_http_request(&mut stream);
-                        if request.is_empty() {
-                            continue;
-                        }
-                        server_captured.lock().unwrap().push(request);
-                        let _ = write!(
-                            stream,
-                            "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
-                        );
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(2));
-                    }
-                    Err(error) => panic!("test server failed: {error}"),
-                }
-            }
+        let (posted_tx, posted_rx) = mpsc::channel();
+        let ingest = Ingest::start(move |_, _| {
+            let _ = posted_tx.send(());
+            "204 No Content"
         });
 
         let mut dev_identity = identity();
@@ -4031,7 +3725,7 @@ mod tests {
         let mut client = TelemetryClient::open_with_timing(
             &client_root,
             dev_identity,
-            &format!("http://{address}/v1/events"),
+            &ingest.endpoint(),
             "development-secret",
             false,
             timing,
@@ -4045,15 +3739,10 @@ mod tests {
             )
             .unwrap();
         let queued = client.events_path.clone();
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while captured.lock().unwrap().is_empty() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let _ = posted_rx.recv_timeout(Duration::from_secs(30));
         client.finish(StopMode::Drain);
-        stop_server.store(true, Ordering::SeqCst);
-        server.join().unwrap();
 
-        let posted = captured.lock().unwrap().clone();
+        let posted = ingest.stop();
         assert_eq!(posted.len(), 1, "one spool row is one posted batch");
         let request = &posted[0];
         assert!(request.starts_with("POST /v1/events HTTP/1.1\r\n"));
@@ -4317,62 +4006,17 @@ mod tests {
             "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
         );
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || loop {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            let mut buf = [0_u8; 4096];
-            let header_end = loop {
-                let read = stream.read(&mut buf).unwrap();
-                if read == 0 {
-                    break None;
-                }
-                request.extend_from_slice(&buf[..read]);
-                if let Some(index) = request.windows(4).position(|w| w == b"\r\n\r\n") {
-                    break Some(index + 4);
-                }
-            };
-            let Some(header_end) = header_end else {
-                continue;
-            };
-            let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
-            let content_length = headers
-                .lines()
-                .find_map(|line| {
-                    line.to_ascii_lowercase()
-                        .strip_prefix("content-length: ")
-                        .and_then(|value| value.parse::<usize>().ok())
-                })
-                .unwrap();
-            while request.len() < header_end + content_length {
-                let read = stream.read(&mut buf).unwrap();
-                if read == 0 {
-                    break;
-                }
-                request.extend_from_slice(&buf[..read]);
-            }
-            stream
-                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
-                .unwrap();
-            return String::from_utf8(request).unwrap();
-        });
+        let ingest = Ingest::start(|_, _| "204 No Content");
 
         let body = r#"{"v":1,"kind":"stat"}"#;
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(2)))
             .build();
         let agent: ureq::Agent = config.into();
-        let result = TelemetryTransport {
-            endpoint: format!("http://{address}/v1/events"),
-            token: "secret".into(),
-            game: "mag".into(),
-            channel: "steam".into(),
-        }
-        .send(&agent, body);
+        let result = transport(&ingest, "secret").send(&agent, body);
         assert!(matches!(result, UploadDisposition::Accepted));
 
-        let request = server.join().unwrap();
+        let request = ingest.stop().remove(0);
         let expected = hmac_sha256_hex("secret", body);
         assert!(request.starts_with("POST /v1/events HTTP/1.1\r\n"));
         assert!(request
