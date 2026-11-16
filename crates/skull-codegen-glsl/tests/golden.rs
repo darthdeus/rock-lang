@@ -22,6 +22,12 @@ static STDLIB_NOBOX_VEC2: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .collect()
 });
 
+/// `src` emitted as a function library from `root` is exactly `expected`.
+fn golden(src: &str, root: &str, expected: &str) {
+    let glsl = emit(src, &[root]).expect("emit");
+    assert_eq!(glsl.trim(), expected);
+}
+
 #[test]
 fn function_library_preserves_no_version_contract() {
     let glsl = emit(
@@ -59,18 +65,16 @@ fn function_library_requires_concrete_body_plans() {
     );
 }
 
-#[test]
-fn scalar_remap() {
-    let src = r#"
-        @pure fn remap(value: float, min1: float, max1: float, min2: float, max2: float) -> float {
-            return min2 + (value - min1) * (max2 - min2) / (max1 - min1)
-        }
-    "#;
-    let glsl = emit(src, &["remap"]).expect("emit");
-    assert_eq!(
-        glsl.trim(),
+cases! { golden:
+    scalar_remap(
+        r#"
+            @pure fn remap(value: float, min1: float, max1: float, min2: float, max2: float) -> float {
+                return min2 + (value - min1) * (max2 - min2) / (max1 - min1)
+            }
+        "#,
+        "remap",
         "float remap_float_float_float_float_float(float value, float min1, float max1, float min2, float max2) {\n  \
-         return (min2 + (((value - min1) * (max2 - min2)) / (max1 - min1)));\n}"
+         return (min2 + (((value - min1) * (max2 - min2)) / (max1 - min1)));\n}",
     );
 }
 
@@ -472,21 +476,18 @@ fn counted_loop_invariant_bound_folds() {
 
 // --- relooper: structured control flow ---------
 
-/// Milestone 2: the `pick` shape that `reject_if_branch_sentinel` pinned now
-/// emits an if/else (both arms diverge; ipdom collapses to the virtual exit).
-#[test]
-fn if_branch_pick() {
-    let src =
-        r#"@pure fn pick(a: float, b: float) -> float { if a > b { return a } else { return b } }"#;
-    let glsl = emit(src, &["pick"]).expect("emit");
-    assert_eq!(
-        glsl.trim(),
+cases! { golden:
+    /// Milestone 2: the `pick` shape that `reject_if_branch_sentinel` pinned now
+    /// emits an if/else (both arms diverge; ipdom collapses to the virtual exit).
+    if_branch_pick(
+        r#"@pure fn pick(a: float, b: float) -> float { if a > b { return a } else { return b } }"#,
+        "pick",
         "float pick_float_float(float a, float b) {\n  \
          if ((a > b)) {\n    \
            return a;\n  \
          } else {\n    \
            return b;\n  \
-         }\n}"
+         }\n}",
     );
 }
 
@@ -519,32 +520,26 @@ fn vec2_normalize_body() {
     );
 }
 
-/// Statement `if` with no else: the empty else block is suppressed.
-#[test]
-fn statement_if_no_else() {
-    let src = r#"fn f(x: float) -> float { let r = x if x > 0.0 { r = x * 2.0 } return r }"#;
-    let glsl = emit(src, &["f"]).expect("emit");
-    assert_eq!(
-        glsl.trim(),
+cases! { golden:
+    /// Statement `if` with no else: the empty else block is suppressed.
+    statement_if_no_else(
+        r#"fn f(x: float) -> float { let r = x if x > 0.0 { r = x * 2.0 } return r }"#,
+        "f",
         "float f_float(float x) {\n  \
          float r;\n  \
          r = x;\n  \
          if ((x > 0.0)) {\n    \
            r = (x * 2.0);\n  \
          }\n  \
-         return r;\n}"
+         return r;\n}",
     );
-}
 
-/// if / else-if ladder (the grass `mask_red` shape): nested full diamonds.
-#[test]
-fn if_else_if_ladder() {
-    let src = r#"@pure fn mask(x: float) -> float {
-        if x < 0.0 { return 0.0 } else if x < 1.0 { return x } else { return 1.0 }
-    }"#;
-    let glsl = emit(src, &["mask"]).expect("emit");
-    assert_eq!(
-        glsl.trim(),
+    /// if / else-if ladder (the grass `mask_red` shape): nested full diamonds.
+    if_else_if_ladder(
+        r#"@pure fn mask(x: float) -> float {
+            if x < 0.0 { return 0.0 } else if x < 1.0 { return x } else { return 1.0 }
+        }"#,
+        "mask",
         "float mask_float(float x) {\n  \
          if ((x < 0.0)) {\n    \
            return 0.0;\n  \
@@ -554,86 +549,66 @@ fn if_else_if_ladder() {
            } else {\n      \
              return 1.0;\n    \
            }\n  \
-         }\n}"
+         }\n}",
     );
-}
 
-/// Expression-position `if` into a cell folds to a ternary: both arms single-store the single-use
-/// result cell -> `(cond ? a : b)` at the use.
-#[test]
-fn expression_if_into_cell() {
-    let src = r#"fn f(x: float) -> float { let r = if x > 0.0 { x } else { 0.0 - x } return r }"#;
-    let glsl = emit(src, &["f"]).expect("emit");
-    assert_eq!(
-        glsl.trim(),
+    /// Expression-position `if` into a cell folds to a ternary: both arms single-store the single-use
+    /// result cell -> `(cond ? a : b)` at the use.
+    expression_if_into_cell(
+        r#"fn f(x: float) -> float { let r = if x > 0.0 { x } else { 0.0 - x } return r }"#,
+        "f",
         "float f_float(float x) {\n  \
          float r;\n  \
          r = ((x > 0.0) ? x : (0.0 - x));\n  \
-         return r;\n}"
+         return r;\n}",
     );
-}
 
-/// A ternary over an int-typed if-expr keeps the outer `float(...)` coercion
-/// (both arms unify to int; the `let r: float` subsumption wraps the whole
-/// ternary, exactly as the diamond's `r = float(t1)` store did).
-#[test]
-fn ternary_int_result_outer_coercion() {
-    let src = r#"fn f(x: float) -> float { let r: float = if x > 0.0 { 1 } else { 2 } return r }"#;
-    let glsl = emit(src, &["f"]).expect("emit");
-    assert_eq!(
-        glsl.trim(),
+    /// A ternary over an int-typed if-expr keeps the outer `float(...)` coercion
+    /// (both arms unify to int; the `let r: float` subsumption wraps the whole
+    /// ternary, exactly as the diamond's `r = float(t1)` store did).
+    ternary_int_result_outer_coercion(
+        r#"fn f(x: float) -> float { let r: float = if x > 0.0 { 1 } else { 2 } return r }"#,
+        "f",
         "float f_float(float x) {\n  \
          float r;\n  \
          r = float(((x > 0.0) ? 1 : 2));\n  \
-         return r;\n}"
+         return r;\n}",
     );
-}
 
-/// `&&` in a nested if: the short-circuit diamond folds back to infix `&&`.
-#[test]
-fn and_in_nested_if() {
-    let src = r#"@pure fn f(x: float, y: float) -> float { if x > 0.0 && y > 0.0 { return 1.0 } return 0.0 }"#;
-    let glsl = emit(src, &["f"]).expect("emit");
-    assert_eq!(
-        glsl.trim(),
+    /// `&&` in a nested if: the short-circuit diamond folds back to infix `&&`.
+    and_in_nested_if(
+        r#"@pure fn f(x: float, y: float) -> float { if x > 0.0 && y > 0.0 { return 1.0 } return 0.0 }"#,
+        "f",
         "float f_float_float(float x, float y) {\n  \
          if (((x > 0.0) && (y > 0.0))) {\n    \
            return 1.0;\n  \
          }\n  \
-         return 0.0;\n}"
+         return 0.0;\n}",
     );
-}
 
-/// `||` in a nested if: folds back to infix `||`.
-#[test]
-fn or_in_nested_if() {
-    let src = r#"@pure fn f(x: float, y: float) -> float { if x > 0.0 || y > 0.0 { return 1.0 } return 0.0 }"#;
-    let glsl = emit(src, &["f"]).expect("emit");
-    assert_eq!(
-        glsl.trim(),
+    /// `||` in a nested if: folds back to infix `||`.
+    or_in_nested_if(
+        r#"@pure fn f(x: float, y: float) -> float { if x > 0.0 || y > 0.0 { return 1.0 } return 0.0 }"#,
+        "f",
         "float f_float_float(float x, float y) {\n  \
          if (((x > 0.0) || (y > 0.0))) {\n    \
            return 1.0;\n  \
          }\n  \
-         return 0.0;\n}"
+         return 0.0;\n}",
     );
-}
 
-/// Early `return` inside an `if` inside a counted `for`: the empty-else rule
-/// keeps the return unnested; the counted-for shape survives the early exit.
-#[test]
-fn early_return_in_counted_for() {
-    let src = r#"fn f(n: int) -> int {
-        let acc = 0
-        for i in 0..n {
-            if i > 5 { return acc }
-            acc = acc + i
-        }
-        return acc
-    }"#;
-    let glsl = emit(src, &["f"]).expect("emit");
-    assert_eq!(
-        glsl.trim(),
+    /// Early `return` inside an `if` inside a counted `for`: the empty-else rule
+    /// keeps the return unnested; the counted-for shape survives the early exit.
+    early_return_in_counted_for(
+        r#"fn f(n: int) -> int {
+            let acc = 0
+            for i in 0..n {
+                if i > 5 { return acc }
+                acc = acc + i
+            }
+            return acc
+        }"#,
+        "f",
         "int f_int(int n) {\n  \
          int acc;\n  \
          int i;\n  \
@@ -647,26 +622,22 @@ fn early_return_in_counted_for() {
            }\n    \
            acc = (acc + i);\n  \
          }\n  \
-         return acc;\n}"
+         return acc;\n}",
     );
-}
 
-/// `while` with a compound `&&` condition: the header is a multi-block region
-/// (a diamond computing the bool), emitted via `while (true) { <cond>; if (!c) break; <body> }`.
-#[test]
-fn while_compound_condition() {
-    let src = r#"fn f(x: float) -> float {
-        let acc = 0.0
-        let i = 0
-        while i < 10 && acc < 100.0 {
-            acc = acc + x
-            i = i + 1
-        }
-        return acc
-    }"#;
-    let glsl = emit(src, &["f"]).expect("emit");
-    assert_eq!(
-        glsl.trim(),
+    /// `while` with a compound `&&` condition: the header is a multi-block region
+    /// (a diamond computing the bool), emitted via `while (true) { <cond>; if (!c) break; <body> }`.
+    while_compound_condition(
+        r#"fn f(x: float) -> float {
+            let acc = 0.0
+            let i = 0
+            while i < 10 && acc < 100.0 {
+                acc = acc + x
+                i = i + 1
+            }
+            return acc
+        }"#,
+        "f",
         "float f_float(float x) {\n  \
          float acc;\n  \
          int i;\n  \
@@ -677,25 +648,21 @@ fn while_compound_condition() {
            acc = (acc + x);\n    \
            i = (i + 1);\n  \
          }\n  \
-         return acc;\n}"
+         return acc;\n}",
     );
-}
 
-/// break + continue in a counted `for` (continue -> the for-header increment).
-#[test]
-fn break_continue_in_counted_for() {
-    let src = r#"fn f(n: int) -> int {
-        let acc = 0
-        for i in 0..n {
-            if i > 5 { break }
-            if i == 2 { continue }
-            acc = acc + i
-        }
-        return acc
-    }"#;
-    let glsl = emit(src, &["f"]).expect("emit");
-    assert_eq!(
-        glsl.trim(),
+    /// break + continue in a counted `for` (continue -> the for-header increment).
+    break_continue_in_counted_for(
+        r#"fn f(n: int) -> int {
+            let acc = 0
+            for i in 0..n {
+                if i > 5 { break }
+                if i == 2 { continue }
+                acc = acc + i
+            }
+            return acc
+        }"#,
+        "f",
         "int f_int(int n) {\n  \
          int acc;\n  \
          int i;\n  \
@@ -712,27 +679,23 @@ fn break_continue_in_counted_for() {
            }\n    \
            acc = (acc + i);\n  \
          }\n  \
-         return acc;\n}"
+         return acc;\n}",
     );
-}
 
-/// break + continue in a general `while`.
-#[test]
-fn break_continue_in_while() {
-    let src = r#"fn f(n: int) -> int {
-        let acc = 0
-        let i = 0
-        while i < n {
-            i = i + 1
-            if i > 5 { break }
-            if i == 2 { continue }
-            acc = acc + i
-        }
-        return acc
-    }"#;
-    let glsl = emit(src, &["f"]).expect("emit");
-    assert_eq!(
-        glsl.trim(),
+    /// break + continue in a general `while`.
+    break_continue_in_while(
+        r#"fn f(n: int) -> int {
+            let acc = 0
+            let i = 0
+            while i < n {
+                i = i + 1
+                if i > 5 { break }
+                if i == 2 { continue }
+                acc = acc + i
+            }
+            return acc
+        }"#,
+        "f",
         "int f_int(int n) {\n  \
          int acc;\n  \
          int i;\n  \
@@ -749,25 +712,21 @@ fn break_continue_in_while() {
            }\n    \
            acc = (acc + i);\n  \
          }\n  \
-         return acc;\n}"
+         return acc;\n}",
     );
-}
 
-/// Nested loop + if (the grass wind-loop shape).
-#[test]
-fn nested_loop_with_if() {
-    let src = r#"fn f(n: int) -> int {
-        let acc = 0
-        for y in 0..n {
-            for x in 0..n {
-                if x == y { acc = acc + 1 }
+    /// Nested loop + if (the grass wind-loop shape).
+    nested_loop_with_if(
+        r#"fn f(n: int) -> int {
+            let acc = 0
+            for y in 0..n {
+                for x in 0..n {
+                    if x == y { acc = acc + 1 }
+                }
             }
-        }
-        return acc
-    }"#;
-    let glsl = emit(src, &["f"]).expect("emit");
-    assert_eq!(
-        glsl.trim(),
+            return acc
+        }"#,
+        "f",
         "int f_int(int n) {\n  \
          int acc;\n  \
          int y;\n  \
@@ -786,23 +745,19 @@ fn nested_loop_with_if() {
              }\n    \
            }\n  \
          }\n  \
-         return acc;\n}"
+         return acc;\n}",
     );
-}
 
-/// Const loop bound folds into the for-header: `t = 4; for (; i < t;...)` -> `for (;
-/// i < 4; ...)`, dropping the single-use bound temp + its declaration. A const
-/// is loop-invariant, so re-reading it each iteration is identical.
-#[test]
-fn const_loop_bound_fold() {
-    let src = r#"fn f() -> int {
-        let acc = 0
-        for i in 0..4 { acc = acc + i }
-        return acc
-    }"#;
-    let glsl = emit(src, &["f"]).expect("emit");
-    assert_eq!(
-        glsl.trim(),
+    /// Const loop bound folds into the for-header: `t = 4; for (; i < t;...)` -> `for (;
+    /// i < 4; ...)`, dropping the single-use bound temp + its declaration. A const
+    /// is loop-invariant, so re-reading it each iteration is identical.
+    const_loop_bound_fold(
+        r#"fn f() -> int {
+            let acc = 0
+            for i in 0..4 { acc = acc + i }
+            return acc
+        }"#,
+        "f",
         "int f_0() {\n  \
          int acc;\n  \
          int i;\n  \
@@ -811,7 +766,7 @@ fn const_loop_bound_fold() {
          for (; i < 4; i = i + 1) {\n    \
            acc = (acc + i);\n  \
          }\n  \
-         return acc;\n}"
+         return acc;\n}",
     );
 }
 
@@ -833,16 +788,14 @@ fn param_loop_bound_not_folded() {
     assert_has(&glsl, "for (; i < t3; i = i + 1) {");
 }
 
-/// Milestone finding: `match` lowers to `Branch` chains (NOT `Term::Switch`),
-/// so a tier-0 int `match` is accepted and emitted as an if / else-if ladder.
-#[test]
-fn match_int_ladder() {
-    let src = r#"@pure fn f(n: int) -> int {
-        match n { 1 => { return 10 } 2 => { return 20 } _ => { return 0 } }
-    }"#;
-    let glsl = emit(src, &["f"]).expect("emit");
-    assert_eq!(
-        glsl.trim(),
+cases! { golden:
+    /// Milestone finding: `match` lowers to `Branch` chains (NOT `Term::Switch`),
+    /// so a tier-0 int `match` is accepted and emitted as an if / else-if ladder.
+    match_int_ladder(
+        r#"@pure fn f(n: int) -> int {
+            match n { 1 => { return 10 } 2 => { return 20 } _ => { return 0 } }
+        }"#,
+        "f",
         "int f_int(int n) {\n  \
          if ((n == 1)) {\n    \
            return 10;\n  \
@@ -852,7 +805,7 @@ fn match_int_ladder() {
            } else {\n      \
              return 0;\n    \
            }\n  \
-         }\n}"
+         }\n}",
     );
 }
 
@@ -929,28 +882,26 @@ fn two_store_diamond_still_folds() {
     );
 }
 
-/// Nested general `while` loops with an inner `break` (the inner loop's exit
-/// aliases the outer loop's back-edge region -- pins the `loop_binding` gate
-/// that keeps a manual `while i < n { .. i = i + 1 }` off the range-for path).
-#[test]
-fn nested_while_loops() {
-    let src = r#"fn f(n: int) -> int {
-        let acc = 0
-        let i = 0
-        while i < n {
-            let j = 0
-            while j < i {
-                if j == 3 { break }
-                acc = acc + 1
-                j = j + 1
+cases! { golden:
+    /// Nested general `while` loops with an inner `break` (the inner loop's exit
+    /// aliases the outer loop's back-edge region -- pins the `loop_binding` gate
+    /// that keeps a manual `while i < n { .. i = i + 1 }` off the range-for path).
+    nested_while_loops(
+        r#"fn f(n: int) -> int {
+            let acc = 0
+            let i = 0
+            while i < n {
+                let j = 0
+                while j < i {
+                    if j == 3 { break }
+                    acc = acc + 1
+                    j = j + 1
+                }
+                i = i + 1
             }
-            i = i + 1
-        }
-        return acc
-    }"#;
-    let glsl = emit(src, &["f"]).expect("emit");
-    assert_eq!(
-        glsl.trim(),
+            return acc
+        }"#,
+        "f",
         "int f_int(int n) {\n  \
          int acc;\n  \
          int i;\n  \
@@ -970,30 +921,26 @@ fn nested_while_loops() {
            }\n    \
            i = (i + 1);\n  \
          }\n  \
-         return acc;\n}"
+         return acc;\n}",
     );
-}
 
-/// Int literals in float contexts render as float literals: GLSL ES has no
-/// implicit int->float conversion, and desktop drivers vary on the corner.
-/// Int contexts (the match ladder's `n == 1`, counted-for bounds) keep ints.
-#[test]
-fn int_literal_float_contexts() {
-    let src = r#"
-        fn root(x: float) -> float {
-            let y = 0.5
-            if x > 0 {
-                y = x + 1
+    /// Int literals in float contexts render as float literals: GLSL ES has no
+    /// implicit int->float conversion, and desktop drivers vary on the corner.
+    /// Int contexts (the match ladder's `n == 1`, counted-for bounds) keep ints.
+    int_literal_float_contexts(
+        r#"
+            fn root(x: float) -> float {
+                let y = 0.5
+                if x > 0 {
+                    y = x + 1
+                }
+                if x == 3 {
+                    y = sin(2)
+                }
+                return 0
             }
-            if x == 3 {
-                y = sin(2)
-            }
-            return 0
-        }
-    "#;
-    let glsl = emit(src, &["root"]).expect("emit");
-    assert_eq!(
-        glsl.trim(),
+        "#,
+        "root",
         "float root_float(float x) {\n  \
          float y;\n  \
          y = 0.5;\n  \
@@ -1003,7 +950,7 @@ fn int_literal_float_contexts() {
          if ((x == 3.0)) {\n    \
            y = sin(2.0);\n  \
          }\n  \
-         return 0.0;\n}"
+         return 0.0;\n}",
     );
 }
 
@@ -1032,30 +979,24 @@ fn int_arg_at_float_param() {
     assert_has(&glsl, "return takes_float_float(float(i));");
 }
 
-/// An int (non-literal) mixed into float arithmetic gets a `float(...)` wrap.
-#[test]
-fn int_in_mixed_arithmetic() {
-    let src = r#"@pure fn f(x: float, i: int) -> float { return x + i }"#;
-    let glsl = emit(src, &["f"]).expect("emit");
-    assert_eq!(
-        glsl.trim(),
-        "float f_float_int(float x, int i) {\n  return (x + float(i));\n}"
+cases! { golden:
+    /// An int (non-literal) mixed into float arithmetic gets a `float(...)` wrap.
+    int_in_mixed_arithmetic(
+        r#"@pure fn f(x: float, i: int) -> float { return x + i }"#,
+        "f",
+        "float f_float_int(float x, int i) {\n  return (x + float(i));\n}",
     );
-}
 
-/// Cell typing: a `let y: float = 0` binding declares `float y;` (from the
-/// binding's declared type via Cell.ty) and stores `0.0` -- NOT `int y; y = 0`
-/// (the first-store inference corner this replaces).
-#[test]
-fn let_float_annotation_cell_typing() {
-    let src = r#"fn f() -> float { let y: float = 0  return y }"#;
-    let glsl = emit(src, &["f"]).expect("emit");
-    assert_eq!(
-        glsl.trim(),
+    /// Cell typing: a `let y: float = 0` binding declares `float y;` (from the
+    /// binding's declared type via Cell.ty) and stores `0.0` -- NOT `int y; y = 0`
+    /// (the first-store inference corner this replaces).
+    let_float_annotation_cell_typing(
+        r#"fn f() -> float { let y: float = 0  return y }"#,
+        "f",
         "float f_0() {\n  \
          float y;\n  \
          y = 0.0;\n  \
-         return y;\n}"
+         return y;\n}",
     );
 }
 
@@ -1382,26 +1323,24 @@ fn conditionally_reassigned_sample() {
     );
 }
 
-/// A field write on a value local or parameter replaces the whole value
-/// (#107). GLSL renders a value at its use, so a postfix result read before
-/// the write is held in its own variable.
-#[test]
-fn value_local_and_param_field_writes_replace_the_whole_value() {
-    let src = r#"
-        fn nudge(p: Vec2, d: float) -> float {
-            let q = p
-            q.y += d
-            p.x *= 2.0
-            let old = q.x++
-            return old + q.x + q.y + p.x + p.y
-        }
-    "#;
-    let glsl = emit(src, &["nudge"]).expect("emit");
-    assert_eq!(
-        glsl.trim(),
+cases! { golden:
+    /// A field write on a value local or parameter replaces the whole value
+    /// (#107). GLSL renders a value at its use, so a postfix result read before
+    /// the write is held in its own variable.
+    value_local_and_param_field_writes_replace_the_whole_value(
+        r#"
+            fn nudge(p: Vec2, d: float) -> float {
+                let q = p
+                q.y += d
+                p.x *= 2.0
+                let old = q.x++
+                return old + q.x + q.y + p.x + p.y
+            }
+        "#,
+        "nudge",
         "float nudge_Vec2_float(vec2 p, float d) {\n  vec2 q;\n  float t3;\n  float old;\n  \
          q = p;\n  q = vec2(q.x, (q.y + d));\n  p = vec2((p.x * 2.0), p.y);\n  t3 = q.x;\n  \
          q = vec2((q.x + 1.0), q.y);\n  old = t3;\n  \
-         return ((((old + q.x) + q.y) + p.x) + p.y);\n}"
+         return ((((old + q.x) + q.y) + p.x) + p.y);\n}",
     );
 }
