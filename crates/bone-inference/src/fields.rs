@@ -182,7 +182,7 @@ pub(crate) fn struct_field_ty(
                 format!(
                     "cannot access field `{}` on non-struct type {}",
                     field,
-                    gamma.workspace.render(Some(&gamma.out), base_ty)
+                    gamma.render(base_ty)
                 ),
             )));
         }
@@ -499,7 +499,7 @@ pub(crate) fn tuple_or_newtype_index_ty(
         _ => comp_error!(
             span,
             "cannot index a non-tuple type {}",
-            gamma.workspace.render(Some(&gamma.out), tuple_ty),
+            gamma.render(tuple_ty),
         ),
     };
 

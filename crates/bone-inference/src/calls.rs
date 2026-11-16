@@ -502,19 +502,13 @@ pub(crate) fn select_overload_with_generics(
                 span,
                 format!(
                     "Ambiguous overload for `{name}` with argument types ({})\ntied candidates (equally-ranked matches):\n{tied}",
-                    arg_tys_msg
-                        .iter()
-                        .map(|t| gamma.workspace.render(Some(&gamma.out), *t))
-                        .join(", ")
+                    arg_tys_msg.iter().map(|t| gamma.render(*t)).join(", ")
                 ),
             )))
         }
 
         _ => {
-            let args_msg = arg_tys_msg
-                .iter()
-                .map(|t| gamma.workspace.render(Some(&gamma.out), *t))
-                .join(", ");
+            let args_msg = arg_tys_msg.iter().map(|t| gamma.render(*t)).join(", ");
             let hidden_fit = hidden.iter().any(|&(mid, fid)| {
                 matches!(
                     score_candidate_with_generics(
@@ -717,7 +711,7 @@ fn home_module_hint(
     };
     Some(format!(
         "\nhelp: `{path}` takes `{}` but is not imported here; add `use {path};` or call `{path}({receiver}{rest})`",
-        ws.render(Some(&gamma.out), first)
+        gamma.render(first)
     ))
 }
 
@@ -1053,7 +1047,7 @@ pub(crate) fn spread_struct_fields(
         _ => comp_error!(
             span,
             "cannot spread `{}` into call arguments: expected a nominal struct",
-            gamma.workspace.render(Some(&gamma.out), r)
+            gamma.render(r)
         ),
     }
 }
@@ -1225,7 +1219,7 @@ pub(crate) fn spread_constituents(
         _ => comp_error!(
             span,
             "Cannot spread type {}, expected a tuple, array, or nominal struct",
-            gamma.workspace.render(Some(&gamma.out), r)
+            gamma.render(r)
         ),
     }
 }
@@ -1320,8 +1314,8 @@ pub(crate) fn resolve_named_call_with_generics(
         if let Ok(fty) = struct_field_ty(gamma, recv_ty, name, span) {
             let fty = resolve(gamma, fty, span);
             if !matches!(gamma.get(fty), TypeExpr::Function { .. }) {
-                let recv_str = gamma.workspace.render(Some(&gamma.out), recv_ty);
-                let fty_str = gamma.workspace.render(Some(&gamma.out), fty);
+                let recv_str = gamma.render(recv_ty);
+                let fty_str = gamma.render(fty);
                 return Err(CompilerError::new_with_label(
                     span,
                     format!(
@@ -1364,7 +1358,7 @@ fn unary_operator_error(
     let operand = operand
         .map(|t| {
             let t = resolve(gamma, t, span);
-            gamma.workspace.render(Some(&gamma.out), t)
+            gamma.render(t)
         })
         .unwrap_or_else(|| "<no operand>".to_string());
     CompilerError::new_with_label(
@@ -1924,7 +1918,7 @@ fn reject_iterable_fn_value_result(
     let iterable = implicit_iter_target(c, gamma, ret, span).is_some();
     gamma.out.rollback_to(snap);
     if iterable {
-        let rendered = gamma.workspace.render(Some(&gamma.out), ret);
+        let rendered = gamma.render(ret);
         comp_error!(
             c.body.expr_spans[arg],
             "this callback returns `{}`, not an iterator; only a lambda's result is coerced -- pass `x => f(x)` or return `.iter()`",
@@ -1973,15 +1967,12 @@ pub(crate) fn call_fn_value(
         _ => comp_error!(
             span,
             "Attempted to call a non-function type {}",
-            gamma.workspace.render(Some(&gamma.out), fn_ty)
+            gamma.render(fn_ty)
         ),
     };
 
     let param_tys: Vec<TyId> = params.into_iter().map(|p| fn_ty.with_idx(p)).collect();
-    let what = format!(
-        "call to value of type {}",
-        gamma.workspace.render(Some(&gamma.out), fn_ty)
-    );
+    let what = format!("call to value of type {}", gamma.render(fn_ty));
     check_args(c, gamma, &param_tys, args, param_tys.len(), span, &what)?;
 
     // A fn-value callee is opaque -- we can't prove it doesn't mutate state, so

@@ -529,7 +529,7 @@ pub(crate) fn infer_expr_used(
                     expr_span,
                     "`{}` needs a numeric target, but this has type `{}`",
                     op,
-                    gamma.workspace.render(Some(&gamma.out), inner_ty),
+                    gamma.render(inner_ty),
                 );
             }
             inner_ty
@@ -639,7 +639,7 @@ pub(crate) fn infer_expr_used(
                         comp_error!(
                             expr_span,
                             "cannot index into type {}",
-                            gamma.workspace.render(Some(&gamma.out), base_ty)
+                            gamma.render(base_ty)
                         )
                     };
 
@@ -649,7 +649,7 @@ pub(crate) fn infer_expr_used(
                 _ => comp_error!(
                     expr_span,
                     "cannot index into type {}",
-                    gamma.workspace.render(Some(&gamma.out), base_ty)
+                    gamma.render(base_ty)
                 ),
             }
         }
@@ -793,7 +793,7 @@ pub(crate) fn infer_expr_used(
                 };
                 if let Some(ty) = non_null_ty {
                     if redundant_optional_on(gamma, ty, expr_span) {
-                        let rendered = gamma.workspace.render(Some(&gamma.out), ty);
+                        let rendered = gamma.render(ty);
                         comp_error!(
                             expr_span,
                             "Cannot compare non-nullable type '{}' with null",
@@ -922,7 +922,7 @@ pub(crate) fn infer_expr_used(
                     comp_error!(
                         expr_span,
                         "ordering operators require numeric operands, got {}",
-                        gamma.workspace.render(Some(&gamma.out), resolved)
+                        gamma.render(resolved)
                     );
                 }
 
@@ -2324,7 +2324,7 @@ pub(crate) fn check_expr(
         // origin is unknown or coincides with the mismatch site itself.
         if let Some(origin) = gamma.span_of(expected).or_else(|| gamma.span_of(exp_r)) {
             if origin != span && !origin.is_empty() {
-                let exp_str = gamma.workspace.render(Some(&gamma.out), exp_r);
+                let exp_str = gamma.render(exp_r);
                 return Err(
                     coerce_err.with_label(origin, format!("expected `{exp_str}` because of this"))
                 );
@@ -2610,10 +2610,6 @@ pub(crate) fn coroutine_yrn(
             }
         }
 
-        _ => comp_error!(
-            span,
-            "Expected a Coroutine type, got {}",
-            gamma.workspace.render(Some(&gamma.out), r)
-        ),
+        _ => comp_error!(span, "Expected a Coroutine type, got {}", gamma.render(r)),
     }
 }

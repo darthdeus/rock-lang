@@ -108,7 +108,7 @@ pub(crate) fn check_pattern(
                 _ => comp_error!(
                     span,
                     "Expected a nominal type in pattern, got {}",
-                    gamma.workspace.render(Some(&gamma.out), expected)
+                    gamma.render(expected)
                 ),
             };
 
@@ -336,11 +336,7 @@ pub(crate) fn destructure_pattern(
                     Ok(())
                 }
 
-                _ => comp_error!(
-                    span,
-                    "expected tuple type, got {}",
-                    gamma.workspace.render(Some(&gamma.out), resolved)
-                ),
+                _ => comp_error!(span, "expected tuple type, got {}", gamma.render(resolved)),
             }
         }
     }

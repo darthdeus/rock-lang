@@ -403,8 +403,8 @@ impl<'a> Gamma<'a> {
             let old_ty = resolve(self, old_ty, span);
 
             if !types_equal(self, ty, old_ty) {
-                let old_str = self.workspace.render(Some(&self.out), old_ty);
-                let new_str = self.workspace.render(Some(&self.out), ty);
+                let old_str = self.render(old_ty);
+                let new_str = self.render(ty);
 
                 let mut err = CompilerError::new_with_label(
                     span,
@@ -444,8 +444,8 @@ impl<'a> Gamma<'a> {
             let old_ty = resolve(self, old_ty, span);
 
             if !types_equal(self, ty, old_ty) {
-                let old_str = self.workspace.render(Some(&self.out), old_ty);
-                let new_str = self.workspace.render(Some(&self.out), ty);
+                let old_str = self.render(old_ty);
+                let new_str = self.render(ty);
 
                 let mut err = CompilerError::new_with_label(
                     span,
@@ -619,7 +619,7 @@ pub fn check_function(
             let body_ty = infer_expr(c, &mut gamma, body)?;
             let body_ty = resolve(&mut gamma, body_ty, f.span);
             if coerce(&mut gamma, body_ty, ret_ty, f.span).is_err() {
-                let ret_render = gamma.workspace.render(Some(&gamma.out), ret_ty);
+                let ret_render = gamma.render(ret_ty);
                 gamma.body_errors.push(CompilerError::new_with_label(
                     f.name_span,
                     format!(

@@ -202,8 +202,8 @@ pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), Comp
                     gamma,
                     span,
                     "type mismatch: expected `{}`, found `{}`{detail}",
-                    gamma.workspace.render(Some(&gamma.out), b),
-                    gamma.workspace.render(Some(&gamma.out), a)
+                    gamma.render(b),
+                    gamma.render(a)
                 )
             }
 
@@ -212,8 +212,8 @@ pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), Comp
                     gamma,
                     span,
                     "Failed to unify {} and {}, generics of different length",
-                    gamma.workspace.render(Some(&gamma.out), a),
-                    gamma.workspace.render(Some(&gamma.out), b)
+                    gamma.render(a),
+                    gamma.render(b)
                 )
             }
 
@@ -235,8 +235,8 @@ pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), Comp
                     gamma,
                     span,
                     "Failed to unify {} and {}, tuples of different length",
-                    gamma.workspace.render(Some(&gamma.out), a),
-                    gamma.workspace.render(Some(&gamma.out), b)
+                    gamma.render(a),
+                    gamma.render(b)
                 )
             }
 
@@ -272,8 +272,8 @@ pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), Comp
                     gamma,
                     span,
                     "Failed to unify {} and {}, functions with different arity",
-                    gamma.workspace.render(Some(&gamma.out), a),
-                    gamma.workspace.render(Some(&gamma.out), b)
+                    gamma.render(a),
+                    gamma.render(b)
                 )
             }
 
@@ -294,8 +294,8 @@ pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), Comp
                 gamma,
                 span,
                 "type mismatch: expected `{}`, found `{}`",
-                gamma.workspace.render(Some(&gamma.out), b),
-                gamma.workspace.render(Some(&gamma.out), a)
+                gamma.render(b),
+                gamma.render(a)
             )
         }
     }
@@ -547,7 +547,7 @@ fn bind_var_checked(
             gamma,
             span,
             "cannot infer a type: it would contain itself (`{}`)",
-            gamma.workspace.render(Some(&gamma.out), ty)
+            gamma.render(ty)
         );
     }
     gamma.out.bind_var(var, ty);
@@ -940,7 +940,7 @@ pub fn coerce_to_interface(
                 span,
                 format!(
                     "type {} does not have required field `{}` of interface `{}`",
-                    gamma.workspace.render(Some(&gamma.out), from),
+                    gamma.render(from),
                     fname,
                     iname
                 ),
