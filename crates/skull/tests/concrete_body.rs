@@ -1679,155 +1679,11 @@ fn main() {
 }
 "#;
 
+/// Workers finish in whatever order the scheduler hands them, so the published
+/// tables must not depend on it: a build on one worker and builds on several
+/// agree on every plan, failure and its rendered order.
 #[test]
-fn concrete_result_order_gate_exercises_the_reversed_merge_population() {
-    let ws = ws_with_stdlib(RICH);
-    let roots = skull::mir_emit::emission_roots(&ws, None);
-    let canonical_graph = instance_graph::build(&ws, roots.clone(), false);
-    let (_, canonical_order) = concrete_body::build_with_result_order(
-        &ws,
-        &canonical_graph,
-        concrete_body::BuildResultOrder::Canonical,
-    );
-    // Both order arms must use one interner: raw type IDs are arena-local.
-    let reverse_graph = &canonical_graph;
-    let (_, reverse_order) = concrete_body::build_with_result_order(
-        &ws,
-        reverse_graph,
-        concrete_body::BuildResultOrder::Reverse,
-    );
-    assert!(
-        canonical_order.len() > 1,
-        "fixture exposed only one concrete result"
-    );
-    let mut expected = canonical_order.clone();
-    expected.reverse();
-    assert_eq!(
-        reverse_order, expected,
-        "the test did not force opposite result order"
-    );
-}
-
-#[test]
-#[cfg(not(feature = "sequential"))]
-fn concrete_reverse_completion_gate_exercises_parallel_publication() {
-    let ws = ws_with_stdlib(RICH);
-    let graph = graph_of(&ws);
-    let (mut scheduled, merge_order, trace) =
-        concrete_body::build_with_reverse_completion(&ws, &graph);
-    scheduled.refresh_flat_views();
-
-    assert!(
-        merge_order.len() > 1,
-        "fixture exposed only one concrete result"
-    );
-    assert!(
-        trace.worker_count > 1,
-        "dedicated test pool used only one worker"
-    );
-    let canonical_ready = merge_order
-        .iter()
-        .filter(|instance| scheduled.bodies.contains_key(*instance))
-        .cloned()
-        .collect::<Vec<_>>();
-    assert!(
-        canonical_ready.len() > 1,
-        "fixture exposed only one ready result"
-    );
-    assert!(
-        trace.completion_order.len() > 1,
-        "scheduler recorded fewer than two results"
-    );
-    let first = canonical_ready
-        .iter()
-        .position(|instance| instance == &trace.completion_order[0])
-        .expect("first completion was not a ready result");
-    let second = canonical_ready
-        .iter()
-        .position(|instance| instance == &trace.completion_order[1])
-        .expect("second completion was not a ready result");
-    assert!(
-        first > second,
-        "scheduler did not force an opposite completion order: {first} then {second}"
-    );
-
-    let census = scheduled.census();
-    assert!(
-        scheduled.generic_bodies > 0,
-        "fixture published no generic body"
-    );
-    assert!(
-        scheduled.build_stats.type_nodes_examined > 0,
-        "fixture published no type nodes"
-    );
-    assert!(
-        scheduled.signature_derivations > 0,
-        "fixture derived no signatures"
-    );
-    assert!(
-        scheduled.signature_requests > scheduled.signature_derivations,
-        "fixture did not exercise signature reuse: {}/{}",
-        scheduled.signature_requests,
-        scheduled.signature_derivations
-    );
-    assert!(
-        scheduled.build_stats.plan_successes > 0,
-        "fixture published no ordinary plans"
-    );
-    assert!(
-        census.direct_calls > 0,
-        "fixture published no direct-call rows"
-    );
-    assert!(
-        census.fn_values > 0,
-        "fixture published no function-value rows"
-    );
-    assert!(
-        census.iterator_ops.values().sum::<usize>() > 0,
-        "fixture published no iterator rows"
-    );
-    assert!(
-        census.synthesized_calls > 0,
-        "fixture published no synthesized-call rows"
-    );
-    assert!(
-        !scheduled.always_plans.is_empty(),
-        "fixture published no always-emitted plans"
-    );
-}
-
-#[cfg(feature = "sequential")]
-#[test]
-fn concrete_sequential_route_uses_one_worker_without_parallel_handshake() {
-    let ws = ws_with_stdlib(RICH);
-    let graph = graph_of(&ws);
-    let (mut scheduled, trace) = concrete_body::build_with_default_trace(&ws, &graph);
-    scheduled.refresh_flat_views();
-
-    assert!(
-        scheduled.plans.len() > 1,
-        "fixture exposed too few ordinary plans"
-    );
-    assert!(
-        !scheduled.always_plans.is_empty(),
-        "fixture exposed no always-emitted plans"
-    );
-    assert_eq!(
-        trace.worker_count, 1,
-        "sequential ordinary production used multiple workers"
-    );
-    assert_eq!(
-        trace.always_worker_count, 1,
-        "sequential always-emitted production used multiple workers"
-    );
-    assert_eq!(
-        trace.scheduler_entries, 0,
-        "sequential production entered the parallel scheduler handshake"
-    );
-}
-
-#[test]
-fn concrete_result_order_merge_keeps_plan_and_failure_identity_canonical() {
+fn concrete_tables_are_identical_across_worker_counts() {
     let src = r#"
 fn keep<T>(x: T) -> T {
     return x
@@ -1848,82 +1704,73 @@ fn main() {
     print("{a}{b}")
 }
 "#;
-    let ws = ws_with_stdlib(src);
-    let roots = skull::mir_emit::emission_roots(&ws, None);
-    let canonical_graph = instance_graph::build(&ws, roots.clone(), false);
-    let (mut canonical, canonical_order) = concrete_body::build_with_result_order(
-        &ws,
-        &canonical_graph,
-        concrete_body::BuildResultOrder::Canonical,
-    );
-    // Both order arms must use one interner: raw type IDs are arena-local.
-    let reverse_graph = &canonical_graph;
-    let (mut reverse, reverse_order) = concrete_body::build_with_result_order(
-        &ws,
-        reverse_graph,
-        concrete_body::BuildResultOrder::Reverse,
-    );
-    canonical.refresh_flat_views();
-    reverse.refresh_flat_views();
-    assert!(canonical_order.len() > 1, "fixture exposed only one result");
-    assert!(
-        canonical.free_types.len() > 1,
-        "fixture exposed no cross-result failure population: {:?}",
-        canonical.render_free_types(&ws, &canonical_graph)
-    );
-    let expected_free = canonical_order
-        .iter()
-        .flat_map(|instance| {
-            canonical
-                .free_types
-                .iter()
-                .filter(move |(owner, _)| owner == instance)
-                .map(|(owner, failure)| {
-                    format!(
-                        "{} {} {} at {}:{}",
-                        canonical_graph.identity(&ws, owner),
-                        failure.slot.kind(),
-                        failure.reason.bucket(),
-                        failure.span.file,
-                        failure.span.line_range().0 + 1
-                    )
-                })
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        canonical.render_free_types(&ws, &canonical_graph),
-        expected_free
-    );
-    let mut canonical_stats = canonical.build_stats;
-    let mut reverse_stats = reverse.build_stats;
-    canonical_stats.signature_ns = 0;
-    reverse_stats.signature_ns = 0;
-    canonical_stats.type_nodes_ns = 0;
-    reverse_stats.type_nodes_ns = 0;
-    canonical_stats.struct_fields_ns = 0;
-    reverse_stats.struct_fields_ns = 0;
-    canonical_stats.foreign_domains_ns = 0;
-    reverse_stats.foreign_domains_ns = 0;
-    assert_eq!(canonical_stats, reverse_stats);
-    assert_eq!(*canonical.plans, *reverse.plans);
-    assert_eq!(canonical.always_plans, reverse.always_plans);
-    assert_eq!(canonical.free_types.len(), reverse.free_types.len());
-    assert_eq!(canonical.callee_holes.len(), reverse.callee_holes.len());
-    assert_eq!(canonical.plan_failures, reverse.plan_failures);
-    assert_eq!(
-        canonical.render_free_types(&ws, &canonical_graph),
-        reverse.render_free_types(&ws, reverse_graph)
-    );
-    assert_eq!(reverse.render_free_types(&ws, reverse_graph), expected_free);
-    assert_eq!(
-        canonical.render_callee_holes(&ws, &canonical_graph),
-        reverse.render_callee_holes(&ws, reverse_graph)
-    );
-    assert_eq!(
-        canonical_order,
-        reverse_order.into_iter().rev().collect::<Vec<_>>(),
-        "the reverse arm did not expose the opposite incoming order"
-    );
+    for src in [src, RICH] {
+        let ws = ws_with_stdlib(src);
+        // One graph for every build: raw type IDs are arena-local.
+        let graph = graph_of(&ws);
+        let build_with = |threads| {
+            let mut bodies = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("test pool")
+                .install(|| concrete_body::build(&ws, &graph));
+            bodies.refresh_flat_views();
+            bodies
+        };
+        let serial = build_with(1);
+        assert!(serial.plans.len() > 1, "fixture exposed too few plans");
+        assert!(
+            !serial.always_plans.is_empty(),
+            "fixture exposed no always-emitted plans"
+        );
+        let expected_free = graph
+            .expanded()
+            .flat_map(|instance| {
+                serial
+                    .free_types
+                    .iter()
+                    .filter(move |(owner, _)| owner == instance)
+                    .map(|(owner, failure)| {
+                        format!(
+                            "{} {} {} at {}:{}",
+                            graph.identity(&ws, owner),
+                            failure.slot.kind(),
+                            failure.reason.bucket(),
+                            failure.span.file,
+                            failure.span.line_range().0 + 1
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(serial.render_free_types(&ws, &graph), expected_free);
+        let timeless = |bodies: &ConcreteBodies| {
+            let mut stats = bodies.build_stats;
+            stats.signature_ns = 0;
+            stats.type_nodes_ns = 0;
+            stats.struct_fields_ns = 0;
+            stats.foreign_domains_ns = 0;
+            stats
+        };
+        for threads in [2, 8] {
+            let parallel = build_with(threads);
+            assert_eq!(timeless(&serial), timeless(&parallel), "{threads} workers");
+            assert_eq!(*serial.plans, *parallel.plans, "{threads} workers");
+            assert_eq!(serial.always_plans, parallel.always_plans);
+            assert_eq!(serial.plan_failures, parallel.plan_failures);
+            assert_eq!(
+                format!("{:?}", serial.census()),
+                format!("{:?}", parallel.census())
+            );
+            assert_eq!(
+                serial.render_free_types(&ws, &graph),
+                parallel.render_free_types(&ws, &graph)
+            );
+            assert_eq!(
+                serial.render_callee_holes(&ws, &graph),
+                parallel.render_callee_holes(&ws, &graph)
+            );
+        }
+    }
 }
 
 /// Every recorded site is accounted for EXACTLY once, and the accounting is

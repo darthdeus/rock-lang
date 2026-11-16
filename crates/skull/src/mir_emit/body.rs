@@ -27,8 +27,6 @@ pub(super) enum BodyMutation {
     ClearIteratorWitnessInstance {
         body: FuncRef,
     },
-    #[cfg(test)]
-    ConcreteResultOrder(skull_graph::concrete_body::BuildResultOrder),
     #[cfg(all(test, not(feature = "sequential")))]
     SetupLaneSchedule(SetupLaneSchedule),
 }
@@ -285,7 +283,6 @@ pub(super) fn emit_body_chunk_with_mutation(
                 BodyMutation::ClearBoundPlan { .. } => unreachable!(),
                 BodyMutation::ClearCoroutineResultPlan { .. } => unreachable!(),
                 BodyMutation::ClearIteratorWitnessInstance { .. } => unreachable!(),
-                BodyMutation::ConcreteResultOrder(_) => unreachable!(),
                 #[cfg(all(test, not(feature = "sequential")))]
                 BodyMutation::SetupLaneSchedule(_) => unreachable!(),
             }

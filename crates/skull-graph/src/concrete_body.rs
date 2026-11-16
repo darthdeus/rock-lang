@@ -2112,15 +2112,6 @@ enum PreparedInstanceResult {
     Ready(PreparedInstance),
 }
 
-impl PreparedInstanceResult {
-    fn instance(&self) -> &Instance {
-        match self {
-            Self::Gap(gap) => &gap.instance,
-            Self::Ready(prepared) => &prepared.instance,
-        }
-    }
-}
-
 fn prepare_instance(
     ws: &Workspace,
     g: &InstanceGraph,
@@ -2888,37 +2879,7 @@ fn produce_always(
     }
 }
 
-/// Which threads ran a fanout. Off unless a traced test entry point asks, so
-/// the production fanout takes no shared lock per item.
-struct WorkerCensus {
-    workers: Option<std::sync::Mutex<std::collections::HashSet<std::thread::ThreadId>>>,
-}
-
-impl WorkerCensus {
-    fn new(tracking: bool) -> Self {
-        Self {
-            workers: tracking.then(Default::default),
-        }
-    }
-
-    #[inline]
-    fn record(&self) {
-        if let Some(workers) = &self.workers {
-            workers
-                .lock()
-                .expect("worker census poisoned")
-                .insert(std::thread::current().id());
-        }
-    }
-
-    fn worker_count(&self) -> usize {
-        self.workers.as_ref().map_or(0, |workers| {
-            workers.lock().expect("worker census poisoned").len()
-        })
-    }
-}
-
-fn concrete_map<T, U, F>(items: Vec<T>, census: &WorkerCensus, f: F) -> Vec<U>
+fn concrete_map<T, U, F>(items: Vec<T>, f: F) -> Vec<U>
 where
     T: Send,
     U: Send,
@@ -2926,119 +2887,7 @@ where
 {
     use bone_core::prelude::*;
 
-    items
-        .into_par_iter()
-        .map(|item| {
-            census.record();
-            f(item)
-        })
-        .collect()
-}
-
-#[cfg(not(feature = "sequential"))]
-struct CompletionScheduler {
-    ranks: BTreeMap<Instance, usize>,
-    state: std::sync::Mutex<CompletionState>,
-    ready: std::sync::Condvar,
-}
-
-#[cfg(not(feature = "sequential"))]
-struct CompletionState {
-    arrived: Vec<Instance>,
-    selected: Vec<Instance>,
-    next: usize,
-    completion_order: Vec<Instance>,
-    workers: std::collections::HashSet<std::thread::ThreadId>,
-    scheduler_entries: usize,
-}
-
-#[cfg(not(feature = "sequential"))]
-impl CompletionScheduler {
-    fn new(ready: &[PreparedInstance]) -> Self {
-        let ranks = ready
-            .iter()
-            .enumerate()
-            .map(|(rank, prepared)| (prepared.instance.clone(), rank))
-            .collect();
-        Self {
-            ranks,
-            state: std::sync::Mutex::new(CompletionState {
-                arrived: Vec::new(),
-                selected: Vec::new(),
-                next: 0,
-                completion_order: Vec::new(),
-                workers: std::collections::HashSet::new(),
-                scheduler_entries: 0,
-            }),
-            ready: std::sync::Condvar::new(),
-        }
-    }
-
-    fn enter(&self, instance: &Instance) {
-        let mut state = self.state.lock().expect("completion scheduler poisoned");
-        state.scheduler_entries += 1;
-        state.workers.insert(std::thread::current().id());
-        if state.selected.is_empty() && !state.arrived.iter().any(|arrived| arrived == instance) {
-            state.arrived.push(instance.clone());
-            if state.arrived.len() == 2 {
-                state.arrived.sort_by_key(|arrived| self.ranks[arrived]);
-                state.arrived.reverse();
-                state.selected = state.arrived.clone();
-                self.ready.notify_all();
-            }
-        }
-        loop {
-            if state.selected.len() < 2 {
-                state = self
-                    .ready
-                    .wait(state)
-                    .expect("completion scheduler poisoned");
-                continue;
-            }
-            if let Some(position) = state
-                .selected
-                .iter()
-                .position(|selected| selected == instance)
-            {
-                if state.next == position {
-                    return;
-                }
-            } else if state.next == state.selected.len() {
-                return;
-            }
-            state = self
-                .ready
-                .wait(state)
-                .expect("completion scheduler poisoned");
-        }
-    }
-
-    fn finish(&self, instance: Instance) {
-        let mut state = self.state.lock().expect("completion scheduler poisoned");
-        state.completion_order.push(instance.clone());
-        if let Some(position) = state
-            .selected
-            .iter()
-            .position(|selected| selected == &instance)
-        {
-            assert_eq!(
-                state.next, position,
-                "completion scheduler observed a selected result out of order"
-            );
-            state.next += 1;
-            self.ready.notify_all();
-        }
-    }
-
-    fn trace(&self) -> BuildTrace {
-        let state = self.state.lock().expect("completion scheduler poisoned");
-        BuildTrace {
-            completion_order: state.completion_order.clone(),
-            worker_count: state.workers.len(),
-            always_worker_count: 0,
-            scheduler_entries: state.scheduler_entries,
-        }
-    }
+    items.into_par_iter().map(f).collect()
 }
 
 /// The prepared rows are consumed where they lie: a 16k-row table of large
@@ -3051,77 +2900,20 @@ fn produce_instances(
     signatures: &PublishedSignatures,
     domains: &PublishedDomains,
     timing_enabled: bool,
-    census: &WorkerCensus,
-    schedule: BuildSchedule,
     retain_callee_maps: bool,
-) -> (Vec<InstanceResult>, Option<BuildTrace>) {
-    #[cfg(not(feature = "sequential"))]
-    use rayon::prelude::*;
-
-    match schedule {
-        BuildSchedule::Default => {
-            let results = concrete_map(prepared, census, |prepared| match prepared {
-                PreparedInstanceResult::Gap(gap) => InstanceResult::Gap(gap),
-                PreparedInstanceResult::Ready(instance) => InstanceResult::Built(produce_instance(
-                    ws,
-                    g,
-                    instance,
-                    signatures,
-                    domains,
-                    timing_enabled,
-                    retain_callee_maps,
-                )),
-            });
-            (
-                results,
-                Some(BuildTrace {
-                    completion_order: Vec::new(),
-                    worker_count: census.worker_count(),
-                    always_worker_count: 0,
-                    scheduler_entries: 0,
-                }),
-            )
-        }
-        #[cfg(not(feature = "sequential"))]
-        BuildSchedule::ReverseCompletion => {
-            let mut results = Vec::new();
-            let mut ready = Vec::new();
-            for prepared in prepared {
-                match prepared {
-                    PreparedInstanceResult::Gap(gap) => results.push(InstanceResult::Gap(gap)),
-                    PreparedInstanceResult::Ready(instance) => ready.push(instance),
-                }
-            }
-            let scheduler = std::sync::Arc::new(CompletionScheduler::new(&ready));
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(2)
-                .build()
-                .expect("reverse-completion test pool");
-            let built: Vec<InstanceResult> = pool.install(|| {
-                ready
-                    .into_par_iter()
-                    .map(|instance| {
-                        let key = instance.instance.clone();
-                        census.record();
-                        scheduler.enter(&key);
-                        let result = produce_instance(
-                            ws,
-                            g,
-                            instance,
-                            signatures,
-                            domains,
-                            timing_enabled,
-                            retain_callee_maps,
-                        );
-                        scheduler.finish(key);
-                        InstanceResult::Built(result)
-                    })
-                    .collect()
-            });
-            results.extend(built);
-            (results, Some(scheduler.trace()))
-        }
-    }
+) -> Vec<InstanceResult> {
+    concrete_map(prepared, |prepared| match prepared {
+        PreparedInstanceResult::Gap(gap) => InstanceResult::Gap(gap),
+        PreparedInstanceResult::Ready(instance) => InstanceResult::Built(produce_instance(
+            ws,
+            g,
+            instance,
+            signatures,
+            domains,
+            timing_enabled,
+            retain_callee_maps,
+        )),
+    })
 }
 
 /// Build a [`ConcreteBody`] for every instance the walk expanded.
@@ -3142,131 +2934,21 @@ thread_local! {
 }
 
 pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
-    build_impl(
-        ws,
-        g,
-        BuildResultOrder::Canonical,
-        BuildSchedule::Default,
-        false,
-        true,
-    )
-    .bodies
+    build_impl(ws, g, true)
 }
 
 /// Build the plans and compact callee census used by lowering without
 /// retaining the diagnostic per-site callee maps on each body. Use [`build`]
 /// for site-join audits; owner-local updates preserve this lighter mode.
 pub fn build_for_lowering(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
-    build_impl(
-        ws,
-        g,
-        BuildResultOrder::Canonical,
-        BuildSchedule::Default,
-        false,
-        false,
-    )
-    .bodies
+    build_impl(ws, g, false)
 }
 
 pub fn concrete_default_invocations() -> u64 {
     CONCRETE_DEFAULT_INVOCATIONS.with(std::cell::Cell::get)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BuildResultOrder {
-    Canonical,
-    Reverse,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BuildSchedule {
-    Default,
-    #[cfg(not(feature = "sequential"))]
-    ReverseCompletion,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BuildTrace {
-    pub completion_order: Vec<Instance>,
-    pub worker_count: usize,
-    pub always_worker_count: usize,
-    pub scheduler_entries: usize,
-}
-
-struct BuildRun {
-    bodies: ConcreteBodies,
-    merge_order: Vec<Instance>,
-    trace: Option<BuildTrace>,
-}
-
-pub fn build_with_result_order(
-    ws: &Workspace,
-    g: &InstanceGraph,
-    order: BuildResultOrder,
-) -> (ConcreteBodies, Vec<Instance>) {
-    let run = build_impl(ws, g, order, BuildSchedule::Default, true, true);
-    (run.bodies, run.merge_order)
-}
-
-/// Default-schedule build that also returns the worker trace. The sequential
-/// build's test uses it to prove both fanouts stayed on one worker.
-#[cfg(feature = "sequential")]
-pub fn build_with_default_trace(ws: &Workspace, g: &InstanceGraph) -> (ConcreteBodies, BuildTrace) {
-    let run = build_impl(
-        ws,
-        g,
-        BuildResultOrder::Canonical,
-        BuildSchedule::Default,
-        true,
-        true,
-    );
-    (
-        run.bodies,
-        run.trace
-            .expect("default concrete run did not produce a trace"),
-    )
-}
-
-#[cfg(not(feature = "sequential"))]
-pub fn build_with_reverse_completion(
-    ws: &Workspace,
-    g: &InstanceGraph,
-) -> (ConcreteBodies, Vec<Instance>, BuildTrace) {
-    let run = build_impl(
-        ws,
-        g,
-        BuildResultOrder::Canonical,
-        BuildSchedule::ReverseCompletion,
-        true,
-        true,
-    );
-    (
-        run.bodies,
-        run.merge_order,
-        run.trace
-            .expect("reverse-completion test run did not produce a trace"),
-    )
-}
-
-fn build_impl(
-    ws: &Workspace,
-    g: &InstanceGraph,
-    order: BuildResultOrder,
-    schedule: BuildSchedule,
-    traced: bool,
-    retain_callee_maps: bool,
-) -> BuildRun {
-    build_published_impl(ws, g, order, schedule, traced, retain_callee_maps)
-}
-
-fn build_published_impl(
-    ws: &Workspace,
-    g: &InstanceGraph,
-    order: BuildResultOrder,
-    schedule: BuildSchedule,
-    traced: bool,
-    retain_callee_maps: bool,
-) -> BuildRun {
+fn build_impl(ws: &Workspace, g: &InstanceGraph, retain_callee_maps: bool) -> ConcreteBodies {
     BUILD_INVOCATIONS.with(|count| count.set(count.get() + 1));
     let t_build = bone_core::prelude::Instant::now();
     let intern_before = g.interner().stats();
@@ -3295,7 +2977,7 @@ fn build_published_impl(
         .collect::<Vec<_>>();
     // What is published reads the graph and nothing a preparation produces,
     // so it is derived beside the preparations.
-    let (publication, (mut prepared, always_inputs)) = bone_core::prelude::join_in_place(
+    let (publication, (prepared, always_inputs)) = bone_core::prelude::join_in_place(
         || publish(ws, g, timing_enabled),
         || {
             use bone_core::prelude::*;
@@ -3323,31 +3005,17 @@ fn build_published_impl(
     } = publication;
 
     let t_partition = bone_core::prelude::Instant::now();
-    if matches!(order, BuildResultOrder::Reverse) {
-        prepared.reverse();
-    }
-    let merge_order = if traced {
-        prepared
-            .iter()
-            .map(|result| result.instance().clone())
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
     let signatures = std::sync::Arc::new(signatures);
     let published_domains = std::sync::Arc::new(published_domains);
     let partition_time = t_partition.elapsed();
-    let ordinary_census = WorkerCensus::new(traced);
     let t_ordinary_parallel = bone_core::prelude::Instant::now();
-    let (mut results, completion_trace) = produce_instances(
+    let mut results = produce_instances(
         ws,
         g,
         prepared,
         signatures.as_ref(),
         published_domains.as_ref(),
         timing_enabled,
-        &ordinary_census,
-        schedule,
         retain_callee_maps,
     );
     let ordinary_parallel_time = t_ordinary_parallel.elapsed();
@@ -3463,8 +3131,7 @@ fn build_published_impl(
     let ordinary_merge_time = t_ordinary_merge.elapsed();
 
     let t_always_parallel = bone_core::prelude::Instant::now();
-    let always_census = WorkerCensus::new(traced);
-    let mut always_results = concrete_map(always_inputs, &always_census, |prepared| {
+    let mut always_results = concrete_map(always_inputs, |prepared| {
         produce_always(
             ws,
             g,
@@ -3499,10 +3166,6 @@ fn build_published_impl(
         }
     }
     let always_merge_time = t_always_merge.elapsed();
-    let completion_trace = completion_trace.map(|mut trace| {
-        trace.always_worker_count = always_census.worker_count();
-        trace
-    });
     out.plans = std::sync::Arc::new(plans);
     out.signature_derivations = signature_derivations;
     out.signature_slots_cloned = 0;
@@ -3605,9 +3268,5 @@ fn build_published_impl(
             owner_fact_insert_time,
         );
     }
-    BuildRun {
-        bodies: out,
-        merge_order,
-        trace: completion_trace,
-    }
+    out
 }

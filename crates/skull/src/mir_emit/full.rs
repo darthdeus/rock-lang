@@ -349,19 +349,8 @@ fn build_concrete_plans(
     graph: &crate::instance_graph::InstanceGraph,
     mutation: BodyMutation,
 ) -> Result<crate::concrete_body::ConcreteBodies, CompilerError> {
-    #[allow(unused_mut)]
-    let mut concrete = {
-        #[cfg(test)]
-        if let BodyMutation::ConcreteResultOrder(order) = mutation {
-            crate::concrete_body::build_with_result_order(ws, graph, order).0
-        } else {
-            crate::concrete_body::build_for_lowering(ws, graph)
-        }
-        #[cfg(not(test))]
-        {
-            crate::concrete_body::build_for_lowering(ws, graph)
-        }
-    };
+    #[cfg_attr(not(test), allow(unused_mut))]
+    let mut concrete = crate::concrete_body::build_for_lowering(ws, graph);
     #[cfg(test)]
     mutate_concrete_plans(&mut concrete, mutation);
     if let Some((instance, reason)) = concrete.first_plan_failure() {

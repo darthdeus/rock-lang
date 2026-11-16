@@ -939,24 +939,25 @@ fn main() { let result = first() }
     }
 
     #[test]
-    fn concrete_result_order_preserves_emitted_lua_bytes() {
+    fn emitted_lua_is_identical_across_worker_counts() {
         let _inline = InlineOn::on();
         let ws = workspace();
         let mid = ws.source_modules().next().expect("test module").id;
-        let (canonical, _) = FullEmit::program()
-            .mutation(BodyMutation::ConcreteResultOrder(
-                skull_graph::concrete_body::BuildResultOrder::Canonical,
-            ))
-            .run(&ws, mid)
-            .expect("canonical emission");
-        let (reverse, _) = FullEmit::program()
-            .mutation(BodyMutation::ConcreteResultOrder(
-                skull_graph::concrete_body::BuildResultOrder::Reverse,
-            ))
-            .run(&ws, mid)
-            .expect("reverse emission");
-        assert!(!canonical.lua.is_empty(), "fixture emitted no Lua artifact");
-        assert_eq!(canonical.lua, reverse.lua);
+        let emit_with = |threads| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("test pool")
+                .install(|| FullEmit::program().run(&ws, mid))
+                .expect("emission")
+                .0
+                .lua
+        };
+        let serial = emit_with(1);
+        assert!(!serial.is_empty(), "fixture emitted no Lua artifact");
+        for threads in [2, 8] {
+            assert_eq!(serial, emit_with(threads), "{threads} workers");
+        }
     }
 
     #[test]
