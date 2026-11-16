@@ -10,9 +10,8 @@
 //! Every arm here asserts its own population. A bridge that answered nothing,
 //! or a shape table that was empty, would otherwise read as a pass.
 
-use crate::common::ws_of;
+use crate::common::{decl, ws_of};
 use skull_mir::instance::Instance;
-use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoCtor, MonoInterner, MonoTy};
 use ustr::Ustr;
 
@@ -27,24 +26,6 @@ fn main() {
     print("{ident(1)} {plain(2)}")
 }
 "#;
-
-fn decl(ws: &bone_core::workspace::Workspace, name: &str) -> FuncRef {
-    let mid = *ws
-        .module_ids
-        .get(&Ustr::from("<test>"))
-        .expect("test module");
-    let fid = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == name)
-        .map(|(fid, _)| fid)
-        .unwrap_or_else(|| panic!("no fn `{name}`"));
-    FuncRef {
-        module: mid,
-        func: fid,
-    }
-}
 
 fn v2() -> MonoTy {
     MonoTy::App {

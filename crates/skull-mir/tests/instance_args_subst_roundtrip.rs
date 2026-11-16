@@ -15,10 +15,9 @@
 //! `instance_identity.rs` is the other half: that going through the ARENA loses
 //! nothing either.
 
-use crate::common::ws_of;
+use crate::common::{decl, ws_of};
 use skull_mir::instance::Instance;
 use skull_mir::lower::{spec_key_from_subst, spec_subst_from_key};
-use skull_mir::mir::FuncRef;
 use skull_mir::monoty::MonoInterner;
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use ustr::Ustr;
@@ -33,24 +32,6 @@ fn main() {
     print("{ident(1)}")
 }
 "#;
-
-fn decl(ws: &bone_core::workspace::Workspace, name: &str) -> FuncRef {
-    let mid = *ws
-        .module_ids
-        .get(&Ustr::from("<test>"))
-        .expect("test module");
-    let fid = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == name)
-        .map(|(fid, _)| fid)
-        .unwrap_or_else(|| panic!("no fn `{name}`"));
-    FuncRef {
-        module: mid,
-        func: fid,
-    }
-}
 
 /// Every key shape a body identity can take, including the ones the two
 /// directions could plausibly disagree on: a tuple (the stale reason `abi.rs`

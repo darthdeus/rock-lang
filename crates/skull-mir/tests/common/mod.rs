@@ -1,5 +1,11 @@
 //! Workspace builders shared by this harness's tests.
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
+
+use skull_mir::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcreteSignature};
+use skull_mir::instance::Instance;
+use skull_mir::lower::{ScalarCtx, lower_instance_with_plans};
+use skull_mir::mir::{FuncRef, MirFunc};
+use skull_mir::monoty::MonoInterner;
 
 use ustr::Ustr;
 
@@ -27,4 +33,48 @@ pub fn checked_ws_of(src: &str) -> bone_core::workspace::Workspace {
     let errs = skull_mir::verdict::body_errors(&ws);
     assert!(errs.is_empty(), "fixture must type-check: {errs:?}");
     ws
+}
+
+pub fn decl(ws: &bone_core::workspace::Workspace, name: &str) -> FuncRef {
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
+    let fid = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == name)
+        .map(|(fid, _)| fid)
+        .unwrap_or_else(|| panic!("no fn `{name}`"));
+    FuncRef {
+        module: mid,
+        func: fid,
+    }
+}
+
+pub fn lower(source: &str, name: &str) -> MirFunc {
+    let ast = skull_parser::parse_module_clean(source, ustr::Ustr::from("<test>")).expect("parse");
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut [ast]).expect("semantic pass");
+    let root = decl(&ws, name);
+    let interner = Arc::new(MonoInterner::new());
+    let graph =
+        skull_graph::instance_graph::build_in(&ws, vec![root], false, Arc::clone(&interner));
+    let concrete = skull_graph::concrete_body::build(&ws, &graph);
+    let scx = ScalarCtx::new(&ws).sharing(interner);
+    let plan = &concrete.plans[&Instance::base(root)];
+    lower_instance_with_plans(&ws, &scx, plan, &concrete.plans).expect("lower")
+}
+
+pub fn signature_plan(instance: Instance, signature: ConcreteSignature) -> ConcreteBodyPlan {
+    ConcreteBodyPlan {
+        owner: ConcreteOwner::Function(instance.clone()),
+        code_identity: Some(skull_mir::code_identity::CodeIdentity::Named(instance)),
+        types: Default::default(),
+        foreign_domains: Default::default(),
+        signature: Arc::new(signature),
+        callees: Default::default(),
+        failed_sites: Default::default(),
+        bound_tree: Default::default(),
+    }
 }

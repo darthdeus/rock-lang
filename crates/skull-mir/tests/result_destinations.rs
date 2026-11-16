@@ -1,37 +1,9 @@
 //! Return destinations preserve the ordinary ABI while avoiding transient
 //! expression cells and aggregates before cleanup has a chance to erase them.
-use std::sync::Arc;
-
-use skull_mir::instance::Instance;
-use skull_mir::lower::{ScalarCtx, lower_instance_with_plans};
-use skull_mir::mir::{FuncRef, Inst, MirFunc, Term};
-use skull_mir::monoty::MonoInterner;
+use skull_mir::mir::{Inst, MirFunc, Term};
 
 fn lower(src: &str) -> MirFunc {
-    let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut [ast]).expect("semantic pass");
-    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
-    let (fid, _) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == "pick")
-        .unwrap();
-    let root = FuncRef {
-        module: mid,
-        func: fid,
-    };
-    let interner = Arc::new(MonoInterner::new());
-    let graph = skull_graph::instance_graph::build_in(&ws, vec![root], false, interner.clone());
-    let concrete = skull_graph::concrete_body::build(&ws, &graph);
-    let scx = ScalarCtx::new(&ws).sharing(interner);
-    lower_instance_with_plans(
-        &ws,
-        &scx,
-        &concrete.plans[&Instance::base(root)],
-        &concrete.plans,
-    )
-    .expect("lower")
+    crate::common::lower(src, "pick")
 }
 
 #[test]

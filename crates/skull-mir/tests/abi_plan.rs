@@ -2,10 +2,10 @@
 //! Expected physical layouts stay explicit so internally consistent but
 //! incorrect representation choices still fail.
 
-use crate::common::checked_ws_of;
+use crate::common::{checked_ws_of, signature_plan};
 use std::sync::Arc;
 
-use skull_mir::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcreteSignature, ConcreteTypeTables};
+use skull_mir::concrete::ConcreteSignature;
 use skull_mir::instance::Instance;
 use skull_mir::lower::{
     BackendFnAbiPlan, BoundaryClass, ContainerFamily, ContainerPlan, ContainerStorage, EnumLayout,
@@ -154,22 +154,14 @@ fn main() {
     let scx = ScalarCtx::new(&ws);
     let sink = func_ref(&ws, "sink");
     let v2 = scx.interner().intern(nominal("V2"));
-    let plan = ConcreteBodyPlan {
-        owner: ConcreteOwner::Function(Instance::base(sink)),
-        code_identity: Some(skull_mir::code_identity::CodeIdentity::Named(
-            Instance::base(sink),
-        )),
-        types: ConcreteTypeTables::default(),
-        foreign_domains: Default::default(),
-        signature: std::sync::Arc::new(ConcreteSignature {
+    let plan = signature_plan(
+        Instance::base(sink),
+        ConcreteSignature {
             params: vec![v2],
             param_tuple_spelled: vec![false],
             result: Some(v2),
-        }),
-        callees: Default::default(),
-        failed_sites: Default::default(),
-        bound_tree: Default::default(),
-    };
+        },
+    );
     let abi = BackendFnAbiPlan::for_concrete_plan(&ws, &scx, &plan);
     assert_eq!(
         abi.param_leaf_widths(),
@@ -203,20 +195,14 @@ fn main() { print("{generic_tuple_take((V2 { x: 1.0, y: 2.0 }, 3.0)).0.x}") }
             params: Vec::new(),
         }])],
     );
-    let plan = ConcreteBodyPlan {
-        owner: ConcreteOwner::Function(take_instance.clone()),
-        code_identity: Some(skull_mir::code_identity::CodeIdentity::Named(take_instance)),
-        types: ConcreteTypeTables::default(),
-        foreign_domains: Default::default(),
-        signature: std::sync::Arc::new(ConcreteSignature {
+    let plan = signature_plan(
+        take_instance,
+        ConcreteSignature {
             params: vec![tuple],
             param_tuple_spelled: vec![false],
             result: Some(tuple),
-        }),
-        callees: Default::default(),
-        failed_sites: Default::default(),
-        bound_tree: Default::default(),
-    };
+        },
+    );
     let abi = BackendFnAbiPlan::for_concrete_plan(&ws, &scx, &plan);
     assert_eq!(
         abi.param_leaf_widths(),
@@ -230,22 +216,14 @@ fn main() { print("{generic_tuple_take((V2 { x: 1.0, y: 2.0 }, 3.0)).0.x}") }
     );
 
     let written = func_ref(&ws, "written_tuple");
-    let written_plan = ConcreteBodyPlan {
-        owner: ConcreteOwner::Function(Instance::base(written)),
-        code_identity: Some(skull_mir::code_identity::CodeIdentity::Named(
-            Instance::base(written),
-        )),
-        types: ConcreteTypeTables::default(),
-        foreign_domains: Default::default(),
-        signature: std::sync::Arc::new(ConcreteSignature {
+    let written_plan = signature_plan(
+        Instance::base(written),
+        ConcreteSignature {
             params: vec![tuple],
             param_tuple_spelled: vec![true],
             result: Some(tuple),
-        }),
-        callees: Default::default(),
-        failed_sites: Default::default(),
-        bound_tree: Default::default(),
-    };
+        },
+    );
     let written_abi = BackendFnAbiPlan::for_concrete_plan(&ws, &scx, &written_plan);
     assert_eq!(written_abi.param_leaf_widths(), Some(vec![3]));
 }

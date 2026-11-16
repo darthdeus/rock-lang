@@ -1,33 +1,5 @@
-use std::sync::Arc;
-
-use skull_mir::instance::Instance;
-use skull_mir::lower::{ScalarCtx, lower_instance_with_plans};
-use skull_mir::mir::{ContainerKind, FuncRef, Inst, Lit, MirFunc};
-use skull_mir::monoty::MonoInterner;
-
-fn lower(source: &str, name: &str) -> MirFunc {
-    let ast = skull_parser::parse_module_clean(source, ustr::Ustr::from("<test>")).expect("parse");
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut [ast]).expect("semantic pass");
-    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
-    let fid = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == name)
-        .expect("function")
-        .0;
-    let root = FuncRef {
-        module: mid,
-        func: fid,
-    };
-    let interner = Arc::new(MonoInterner::new());
-    let graph =
-        skull_graph::instance_graph::build_in(&ws, vec![root], false, Arc::clone(&interner));
-    let concrete = skull_graph::concrete_body::build(&ws, &graph);
-    let scx = ScalarCtx::new(&ws).sharing(interner);
-    let plan = &concrete.plans[&Instance::base(root)];
-    lower_instance_with_plans(&ws, &scx, plan, &concrete.plans).expect("lower")
-}
+use crate::common::lower;
+use skull_mir::mir::{ContainerKind, Inst, Lit, MirFunc};
 
 fn loads(body: &MirFunc) -> usize {
     body.insts
