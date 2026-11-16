@@ -76,6 +76,7 @@ mod generic_coroutine_column_param;
 mod hole_runtime_error;
 mod incremental_emit;
 mod lua_definition_scopes;
+mod lua_driver_execution;
 mod mixed_enum_boxing;
 mod nomangle_type_symbol;
 mod opaque_declared_type_reach;
