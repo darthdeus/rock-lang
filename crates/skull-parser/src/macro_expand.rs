@@ -1530,7 +1530,8 @@ mod tests {
     /// The incremental invariant: cooking ONE module against a registry built
     /// from the whole (un-expanded) workspace yields the same module that the
     /// batch `expand_macros` produces -- including a macro DEFINED in another
-    /// file. This is what lets a body edit re-cook just the edited file.
+    /// file. This is what lets a body edit re-cook just the edited file, and
+    /// re-cooking an already-expanded module is a no-op.
     #[test]
     fn expand_one_against_registry_matches_batch() {
         let defs = "macro twice(x: expr) { x + x }";
@@ -1554,6 +1555,10 @@ mod tests {
             ExprKind::BinOp { left, right, .. }
                 if matches!(user_only.exprs[*left].kind, ExprKind::Int(21, _))
                 && matches!(user_only.exprs[*right].kind, ExprKind::Int(21, _)))));
+
+        let once = user_only.clone();
+        expand_one(&mut user_only, &reg);
+        assert_same_ast(&user_only, &once);
     }
 
     fn expand_with_key_macro(user: &str) -> Ast {
@@ -1621,9 +1626,6 @@ mod tests {
         );
     }
 
-    /// Re-cooking an already-expanded module is a no-op (defs gone, no call to a
-    /// registered macro remains) -- the idempotency the incremental cache relies
-    /// on when a body edit re-cooks a file.
     #[test]
     fn macro_reach_names_every_lookup_expansion_can_make() {
         let ast = parse(
@@ -1781,21 +1783,5 @@ mod tests {
             .filter(|&&e| matches!(&ast.exprs[e].kind, ExprKind::Ident(id) if is_hygiene_name(&id.name)))
             .count();
         assert_eq!(renamed, 1, "only the body's `x` reference is renamed");
-    }
-
-    #[test]
-    fn expand_one_is_idempotent() {
-        let user = "fn f() -> int { twice(21) }";
-        let unexpanded = vec![
-            parse("macro twice(x: expr) { x + x }", "defs.rock"),
-            parse(user, "user.rock"),
-        ];
-        let reg = collect_registry(&unexpanded);
-
-        let mut m = parse(user, "user.rock");
-        expand_one(&mut m, &reg);
-        let once = m.clone();
-        expand_one(&mut m, &reg);
-        assert_same_ast(&m, &once);
     }
 }

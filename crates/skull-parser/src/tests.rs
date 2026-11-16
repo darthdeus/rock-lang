@@ -171,6 +171,18 @@ fn malformed_source_is_rejected_with_its_diagnostic() {
         (V1, "use a::b as _;", "as _"),
         (V1, "use geo::operator(+) as _;", "as _"),
         (V1, "private(set) fn f() {}", "fields"),
+        (Legacy, "fn f<T: >() {}", ""),
+        (Legacy, "fn f<T = >() {}", ""),
+        (
+            Legacy,
+            "fn f() { let v = \"{1:999999999999999999999999999999999999}\" }",
+            "overflow",
+        ),
+        (
+            Legacy,
+            "fn f() { let v = \"{1:.999999999999999999999999999999999999}\" }",
+            "overflow",
+        ),
     ] {
         let errors = errors(src, dialect);
         assert!(
@@ -634,6 +646,15 @@ fn operators_preserve_precedence_and_left_associativity() {
     assert!(matches!(ast.exprs[right].kind, ExprKind::Int(4, _)));
     let (_, product) = binary(&ast, left, TokenKind::Plus);
     binary(&ast, product, TokenKind::Mul);
+    for (_, expr) in ast.exprs.iter() {
+        if let ExprKind::BinOp { op, op_span, .. } = &expr.kind {
+            let (start, end) = op_span.offset_range();
+            assert_eq!(
+                &"fn f() { let result = 1 + 2 * 3 - 4 }"[start..end],
+                op.to_code()
+            );
+        }
+    }
     let (ast, id) = expression("a < b && c > d", Dialect::Legacy);
     let (left, right) = binary(&ast, id, TokenKind::And);
     binary(&ast, left, TokenKind::LessThan);
