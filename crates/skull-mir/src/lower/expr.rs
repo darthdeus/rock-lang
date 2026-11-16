@@ -2106,20 +2106,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// [`Self::lower_safe_nav_call`] joining PER SLOT.
-    pub(crate) fn safe_nav_call_repr(
-        &mut self,
-        e: Idx<Expr>,
-        receiver: Idx<Expr>,
-        method: Ustr,
-        args: IdxRange<Expr>,
-        shape: RetSlot,
-    ) -> Result<ValueRepr, CompilerError> {
-        self.safe_nav_repr(receiver, shape, move |s, recv| {
-            s.safe_nav_call_value_repr(e, method, args, recv)
-        })
-    }
-
     fn pack_safe_nav_call_value(
         &mut self,
         e: Idx<Expr>,

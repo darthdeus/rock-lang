@@ -2348,11 +2348,7 @@ impl EnumFlatShape {
 }
 
 /// `Some(shape)` iff `name` is a mixed/boxed enum eligible for field flattening.
-fn build_flat_enum_shape(ws: &Workspace, name: Ustr) -> Option<EnumFlatShape> {
-    build_flat_enum_shape_inner(ws, name, &mut Vec::new())
-}
-
-fn build_flat_enum_shape_inner(
+fn build_flat_enum_shape(
     ws: &Workspace,
     name: Ustr,
     visiting: &mut Vec<Ustr>,
@@ -2451,7 +2447,7 @@ impl EnumPlan {
             EnumLayout::PayloadFree
         } else if let Some(shape) = build_enum_cdata_shape(ws, name) {
             EnumLayout::Cdata(shape)
-        } else if let Some(shape) = build_flat_enum_shape(ws, name) {
+        } else if let Some(shape) = build_flat_enum_shape(ws, name, &mut Vec::new()) {
             EnumLayout::Flat(shape)
         } else {
             EnumLayout::Boxed
@@ -2504,7 +2500,7 @@ fn flat_payload_shape(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ustr>) -> Opt
         }
         return sig_shape_of_nominal(ws, n);
     }
-    build_flat_enum_shape_inner(ws, n, visiting).map(|shape| shape.value_shape())
+    build_flat_enum_shape(ws, n, visiting).map(|shape| shape.value_shape())
 }
 
 /// Whether `ty` mentions any enum in `goals`, through value fields, enum

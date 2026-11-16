@@ -423,7 +423,9 @@ impl<'a> Builder<'a> {
                         if let Some((shape, leaves)) =
                             threaded_leaves.as_ref().filter(|(shape, _)| {
                                 self.binding_stays_unwritten(name)
-                                    && !self.is_flat_enum_shape(shape)
+                                    // A flat enum binding keeps its compiler-owned cells.
+                                    && !EnumPlan::for_name(self.ws, shape.name)
+                                        .is_some_and(|plan| plan.flat().is_some())
                             })
                         {
                             self.f.value_lets += leaves.len();

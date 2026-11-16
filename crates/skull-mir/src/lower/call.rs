@@ -3278,14 +3278,6 @@ impl<'a> Builder<'a> {
     /// shape.nullable` arm exactly -- presence is `v ~= nil` as leaf 0, then
     /// the child's own leaves, nils on the absent arm -- because the two must
     /// agree leaf-for-leaf or `rebuild_from_leaves` indexes past the end.
-    fn nullable_child_leaves(
-        &mut self,
-        fv: Idx<Inst>,
-        sub: &ValueShape,
-    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        self.nullable_child_leaf_range(fv, sub, 0..sub.leaf_count())
-    }
-
     fn nullable_child_leaf_range(
         &mut self,
         fv: Idx<Inst>,
@@ -3932,7 +3924,7 @@ impl<'a> Builder<'a> {
                 ValueRepr::Scalar(fv)
             }
             FieldShape::Nested(sub) if sub.nullable => {
-                let leaves = self.nullable_child_leaves(fv, sub)?;
+                let leaves = self.nullable_child_leaf_range(fv, sub, 0..sub.leaf_count())?;
                 let copy = self.rebuild_from_leaves(sub, &leaves, &mut 0);
                 let sub_ty = self.nested_owner_ty(shape.name, owner_ty, *fname, sub.name)?;
                 self.mark_borrowed_value_children(sub, &copy, sub_ty.as_deref())?;

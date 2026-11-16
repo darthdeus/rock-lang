@@ -634,7 +634,10 @@ impl<'a> Builder<'a> {
                 args,
                 ..
             } => match self.repr_join_slot(e)? {
-                Some(shape) => self.safe_nav_call_repr(e, receiver, method, args, shape),
+                // [`Self::lower_safe_nav_call`] joining PER SLOT.
+                Some(shape) => self.safe_nav_repr(receiver, shape, move |s, recv| {
+                    s.safe_nav_call_value_repr(e, method, args, recv)
+                }),
                 None => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
             },
             Expr::SafeNavLet {
