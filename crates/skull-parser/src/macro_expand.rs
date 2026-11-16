@@ -485,10 +485,9 @@ fn expand_item_macro(
     reg: &Registry,
 ) -> Option<Vec<Item>> {
     let argc = args.len();
-    // Index of the matching overload (one with item bodies, satisfiable arity).
     let cands = reg.get(&name.name)?;
-    let idx = cands.iter().position(|d| item_arity_matches(d, argc))?;
-    if has_body_statements(&cands[idx]) {
+    let tmpl = cands.iter().find(|d| item_arity_matches(d, argc))?;
+    if has_body_statements(tmpl) {
         ast.recovery_errors.push(CompilerError::new_with_label(
             name.span,
             format!(
@@ -506,39 +505,27 @@ fn expand_item_macro(
     let mut expr_subs: UstrMap<Idx<ExprData>> = UstrMap::default();
     // Same by-label-then-by-position binding as the expr path; item macros take
     // no variadic, so only the slots matter.
-    let bound = bind_macro_args(&cands[idx].params, args).ok()?;
-    // Snapshot the per-param (fragment, name) + the arg/default source so the
-    // graft (needs &tmpl + &mut ast) doesn't overlap the &reg borrow.
-    let plan: Vec<(Ustr, Option<Frag>, Option<Idx<ExprData>>)> = cands[idx]
-        .params
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (p.name, p.fragment, bound.slots[i]))
-        .collect();
-    for (i, (pname, frag, arg_slot)) in plan.iter().enumerate() {
-        let arg = if let Some(a) = *arg_slot {
-            a
-        } else {
-            // Fill from the template default (grafted into the caller arena).
-            let d = cands[idx].params[i].default?;
-            graft_expr(&cands[idx].tmpl, ast, d)
+    let bound = bind_macro_args(&tmpl.params, args).ok()?;
+    for (p, slot) in tmpl.params.iter().zip(bound.slots) {
+        let arg = match slot {
+            Some(arg) => arg,
+            None => graft_expr(&tmpl.tmpl, ast, p.default?),
         };
-        match frag {
+        match p.fragment {
             Some(Frag::Ident) | Some(Frag::Ty) => {
                 let te = expr_to_type_expr(ast, arg)?;
-                ty_subs.insert(*pname, te);
-                if *frag == Some(Frag::Ident) {
-                    expr_subs.insert(*pname, arg);
+                ty_subs.insert(p.name, te);
+                if p.fragment == Some(Frag::Ident) {
+                    expr_subs.insert(p.name, arg);
                 }
             }
             _ => {
-                expr_subs.insert(*pname, arg);
+                expr_subs.insert(p.name, arg);
             }
         }
     }
 
     // Graft the template items into the caller, substituting the args.
-    let tmpl = &cands[idx];
     let fragments = Fragments {
         exprs: expr_subs,
         types: ty_subs,
@@ -1378,17 +1365,6 @@ fn stmt_blocks(ast: &Ast, s: Idx<StatementData>) -> BlockEdges {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Macro-parameter reference index (read-side twin of substitution)
-// ---------------------------------------------------------------------------
-//
-// Substitution REWRITES param-name occurrences in a grafted clone at
-// invocation (which also stamps the call-site span); this COLLECTS
-// them in the *definition*, with their source spans, at parse time -- the data
-// IDE references/rename for a macro parameter needs. The two walks visit the
-// same node shapes but one is `&mut Ast` (rewrite) and one is `&Ast` (read), so
-// the borrow checker keeps them separate. Keep them in sync.
-
 /// Per parameter, its declaration span + every use span in the macro template.
 pub(crate) fn index_macro_param_refs(
     ast: &Ast,
@@ -1512,59 +1488,30 @@ fn refs_in_type(ast: &Ast, t: Idx<TypeExprData>, names: &UstrSet, occ: &mut Vec<
 
 fn refs_in_block(ast: &Ast, b: Idx<BlockData>, names: &UstrSet, occ: &mut Vec<(Ustr, Span)>) {
     for &st in &ast.blocks[b].statements {
-        match &ast.stmts[st].kind {
-            StatementKind::Let(l) => {
-                if let Some(t) = l.ty {
-                    refs_in_type(ast, t, names, occ);
-                }
-                if let Some(v) = l.value {
-                    refs_in_expr(ast, v, names, occ);
-                }
+        if let StatementKind::Let(l) = &ast.stmts[st].kind {
+            if let Some(t) = l.ty {
+                refs_in_type(ast, t, names, occ);
             }
-            StatementKind::Expression(e) => refs_in_expr(ast, *e, names, occ),
-            StatementKind::Return { value: Some(e), .. } => refs_in_expr(ast, *e, names, occ),
-            _ => {}
+        }
+        for e in stmt_exprs(ast, st) {
+            refs_in_expr(ast, e, names, occ);
+        }
+        for b in stmt_blocks(ast, st) {
+            refs_in_block(ast, b, names, occ);
         }
     }
 }
 
 fn refs_in_expr(ast: &Ast, e: Idx<ExprData>, names: &UstrSet, occ: &mut Vec<(Ustr, Span)>) {
     match &ast.exprs[e].kind {
-        ExprKind::Ident(id) => note(id, names, occ),
-        ExprKind::FieldAccess(base, _) => refs_in_expr(ast, *base, names, occ),
-        ExprKind::BinOp { left, right, .. } => {
-            refs_in_expr(ast, *left, names, occ);
-            refs_in_expr(ast, *right, names, occ);
-        }
-        ExprKind::FunctionCall { func, args, .. } => {
-            refs_in_expr(ast, *func, names, occ);
-            for a in args {
-                refs_in_expr(ast, a.value, names, occ);
-            }
-        }
-        ExprKind::StructLiteral {
-            name,
-            bases,
-            fields,
-        } => {
-            note(name, names, occ);
-            for b in bases {
-                refs_in_expr(ast, *b, names, occ);
-            }
-            for (_, v) in fields {
-                refs_in_expr(ast, *v, names, occ);
-            }
-        }
-        ExprKind::ArrayLiteral(es) | ExprKind::Tuple(es) => {
-            for x in es {
-                refs_in_expr(ast, *x, names, occ);
-            }
-        }
-        ExprKind::Paren(x) | ExprKind::UnaryMinus(x) | ExprKind::Not(x) => {
-            refs_in_expr(ast, *x, names, occ)
-        }
-        ExprKind::Block(b) => refs_in_block(ast, *b, names, occ),
+        ExprKind::Ident(id) | ExprKind::StructLiteral { name: id, .. } => note(id, names, occ),
         _ => {}
+    }
+    for child in child_exprs(ast, e) {
+        refs_in_expr(ast, child, names, occ);
+    }
+    for b in child_blocks(ast, e) {
+        refs_in_block(ast, b, names, occ);
     }
 }
 
@@ -1576,6 +1523,28 @@ mod tests {
 
     fn parse(src: &str, file: &str) -> Ast {
         parse_module(src, Ustr::from(file)).expect("parse failed")
+    }
+
+    #[test]
+    fn macro_parameter_references_follow_expression_and_statement_children() {
+        let src = r#"macro m(arg: expr) {
+            if arg { arg } else { !arg }
+            for value in arg { consume(arg) }
+            while arg { consume(arg) }
+            defer { consume(arg) }
+            let callback = () => arg
+            match arg { _ => arg }
+            consume(arg[0], "{arg}")
+        }"#;
+        let ast = parse(src, "refs.rock");
+        let refs = &ast.macro_param_refs[0];
+        let mut actual: Vec<_> = refs.spans.iter().map(|s| s.offset_range()).collect();
+        actual.sort_unstable();
+        let expected: Vec<_> = src
+            .match_indices("arg")
+            .map(|(start, name)| (start, start + name.len()))
+            .collect();
+        assert_eq!(actual, expected);
     }
 
     /// The incremental invariant: cooking ONE module against a registry built
