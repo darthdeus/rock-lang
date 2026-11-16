@@ -29,7 +29,7 @@ struct ErrorTestCase {
 enum ErrorTestResult {
     Pass,
     Fail(String),
-    Todo(String),
+    Todo,
 }
 
 impl ErrorTest {
@@ -66,7 +66,7 @@ fn parse_error_test_cases(content: &str) -> Result<Vec<ErrorTestCase>> {
 
             // Parse the expected error from the test case name. The `{params}`
             // suffix is validated but not checked against the diagnostic.
-            let (case_name, expected_error_kind, _params) = parse_test_case_name(case_header)?;
+            let (case_name, expected_error_kind) = parse_test_case_name(case_header)?;
 
             // Collect the input code until we find the next test case or end of file
             i += 1;
@@ -75,12 +75,7 @@ fn parse_error_test_cases(content: &str) -> Result<Vec<ErrorTestCase>> {
             while i < lines.len() {
                 let current_line = lines[i];
 
-                // Stop if we hit the next test case
-                if current_line.trim().starts_with("//=== TEST CASE:") {
-                    break;
-                }
-
-                // Stop if we hit a comment that looks like another delimiter
+                // The next case header, or any other `//===` delimiter.
                 if current_line.trim().starts_with("//===") {
                     break;
                 }
@@ -123,36 +118,24 @@ fn parse_error_test_cases(content: &str) -> Result<Vec<ErrorTestCase>> {
     Ok(test_cases)
 }
 
-fn parse_test_case_name(case_header: &str) -> Result<(String, String, Option<String>)> {
-    // Parse: "simple_undefined_UndefinedSymbol{name=\"undefined_function\"}"
-    // Returns: ("simple_undefined", "UndefinedSymbol", Some("name=\"undefined_function\""))
-
-    if let Some(underscore_pos) = case_header.rfind('_') {
-        let case_name = case_header[..underscore_pos].to_string();
-        let error_part = &case_header[underscore_pos + 1..];
-
-        // Check if there are parameters in braces
-        if let Some(brace_pos) = error_part.find('{') {
-            let error_kind = error_part[..brace_pos].to_string();
-            let params_part = &error_part[brace_pos + 1..];
-
-            // Remove trailing '}'
-            let params = if params_part.ends_with('}') {
-                Some(params_part[..params_part.len() - 1].to_string())
-            } else {
-                return Err(anyhow!(
-                    "Invalid parameter format in test case: {}",
-                    case_header
-                ));
-            };
-
-            Ok((case_name, error_kind, params))
-        } else {
-            Ok((case_name, error_part.to_string(), None))
+/// Split `simple_undefined_UndefinedSymbol{name="undefined_function"}` into
+/// the case name and the expected kind. A `{params}` suffix must be closed but
+/// is otherwise ignored.
+fn parse_test_case_name(case_header: &str) -> Result<(String, String)> {
+    let (case_name, error_part) = case_header
+        .rsplit_once('_')
+        .ok_or_else(|| anyhow!("Invalid test case name format: {}", case_header))?;
+    let error_kind = match error_part.split_once('{') {
+        Some((kind, params)) if params.ends_with('}') => kind,
+        Some(_) => {
+            return Err(anyhow!(
+                "Invalid parameter format in test case: {}",
+                case_header
+            ));
         }
-    } else {
-        Err(anyhow!("Invalid test case name format: {}", case_header))
-    }
+        None => error_part,
+    };
+    Ok((case_name.to_string(), error_kind.to_string()))
 }
 
 /// Split a test-case body into one or more (path, contents) pairs.
@@ -311,14 +294,39 @@ fn lint_rejects(
     .map(|f| error_text(std::slice::from_ref(&f.error)))
 }
 
+/// bone, then skull emission, then an Error-severity lint: any of the three
+/// may be the rejecting stage.
+fn run_case(tc: &ErrorTestCase) -> ErrorTestResult {
+    let rejection = match bone_check_case(&tc.files) {
+        Err(msg) => Some(msg),
+        Ok(ws) => skull_emit_rejects(&ws, &tc.files).or_else(|| lint_rejects(&ws, &tc.files)),
+    };
+    let Some(msg) = rejection else {
+        return ErrorTestResult::Fail(format!(
+            "expected bone or skull-emit to reject ({}), but both accepted",
+            tc.expected_error_kind
+        ));
+    };
+    match tc
+        .expected_reasons
+        .iter()
+        .find(|w| !msg.contains(w.as_str()))
+    {
+        // Rejected, but the rule that fired is not the rule the case claims
+        // to pin.
+        Some(missing) => ErrorTestResult::Fail(format!(
+            "rejected, but not for the expected reason `{missing}`; got: {}",
+            msg.replace('\n', " | ")
+        )),
+        None => ErrorTestResult::Pass,
+    }
+}
+
 /// Run the error-test suite through bone's front end (the skull/bone `test`
 /// path). `backend` is informational -- bone is the shared front end, so both
 /// verify rejection identically. The error-KIND suffix is rock-specific (bone
 /// diagnostics mostly carry no kind), so this asserts REJECTION only.
 pub(crate) fn run_error_suite(path: &Path, verbose: bool) -> Result<(usize, usize, usize, usize)> {
-    if !has_error_tests(path) {
-        return Ok((0, 0, 0, 0));
-    }
     let Some(dir) = find_error_test_dir(path) else {
         return Ok((0, 0, 0, 0));
     };
@@ -331,21 +339,35 @@ pub(crate) fn run_error_suite(path: &Path, verbose: bool) -> Result<(usize, usiz
     let (mut total, mut passed, mut failed, mut todos) = (0usize, 0usize, 0usize, 0usize);
     let mut failures: Vec<(PathBuf, String)> = Vec::new();
 
+    // Fixture files in walk order; a file that does not parse is a failure.
+    let mut fixtures: Vec<(PathBuf, Result<ErrorTest>)> = Vec::new();
     for entry in WalkDir::new(&dir)
         .follow_links(true)
         .into_iter()
         .filter_map(|e| e.ok())
     {
         let p = entry.path();
-        let is_err_file = p.is_file()
-            && p.file_name()
-                .and_then(|s| s.to_str())
-                .is_some_and(|n| n.ends_with(".rock.err"));
-        if !is_err_file {
-            continue;
+        if is_error_test_file(p) {
+            fixtures.push((p.to_owned(), ErrorTest::from_file(p)));
         }
+    }
+    let cases: Vec<(&ErrorTestCase, bool)> = fixtures
+        .iter()
+        .filter_map(|(_, test)| test.as_ref().ok())
+        .flat_map(|test| test.test_cases.iter().map(|tc| (tc, test.is_todo)))
+        .collect();
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let mut results = crate::parallel_runner::map_in_order(&cases, threads, |(tc, is_todo)| {
+        if *is_todo {
+            ErrorTestResult::Todo
+        } else {
+            run_case(tc)
+        }
+    })
+    .into_iter();
 
-        let error_test = match ErrorTest::from_file(p) {
+    for (p, error_test) in &fixtures {
+        let error_test = match error_test {
             Ok(t) => t,
             Err(e) => {
                 failures.push((p.to_owned(), format!("Failed to parse test file: {}", e)));
@@ -353,44 +375,9 @@ pub(crate) fn run_error_suite(path: &Path, verbose: bool) -> Result<(usize, usiz
                 continue;
             }
         };
-
         for tc in &error_test.test_cases {
             total += 1;
-            let result = if error_test.is_todo {
-                ErrorTestResult::Todo("TODO".to_string())
-            } else {
-                // bone, then skull emission, then an Error-severity lint: any
-                // of the three may be the rejecting stage.
-                let rejection = match bone_check_case(&tc.files) {
-                    Err(msg) => Some(msg),
-                    Ok(ws) => {
-                        skull_emit_rejects(&ws, &tc.files).or_else(|| lint_rejects(&ws, &tc.files))
-                    }
-                };
-                match rejection {
-                    Some(msg) => {
-                        match tc
-                            .expected_reasons
-                            .iter()
-                            .find(|w| !msg.contains(w.as_str()))
-                        {
-                            // Rejected, but the rule that fired is not the rule
-                            // the case claims to pin.
-                            Some(missing) => ErrorTestResult::Fail(format!(
-                                "rejected, but not for the expected reason `{missing}`; got: {}",
-                                msg.replace('\n', " | ")
-                            )),
-                            None => ErrorTestResult::Pass,
-                        }
-                    }
-                    None => ErrorTestResult::Fail(format!(
-                        "expected bone or skull-emit to reject ({}), but both accepted",
-                        tc.expected_error_kind
-                    )),
-                }
-            };
-
-            match result {
+            match results.next().expect("one result per case") {
                 ErrorTestResult::Pass => {
                     passed += 1;
                     if verbose {
@@ -402,10 +389,10 @@ pub(crate) fn run_error_suite(path: &Path, verbose: bool) -> Result<(usize, usiz
                     failures.push((p.to_owned(), format!("{}: {}", tc.name, msg)));
                     println!("{} ... {}", tc.name, "FAILED".red());
                 }
-                ErrorTestResult::Todo(msg) => {
+                ErrorTestResult::Todo => {
                     todos += 1;
                     if verbose {
-                        println!("{} ... {} ({})", tc.name, "TODO".yellow(), msg);
+                        println!("{} ... {} (TODO)", tc.name, "TODO".yellow());
                     }
                 }
             }
@@ -438,64 +425,43 @@ pub(crate) fn run_error_suite(path: &Path, verbose: bool) -> Result<(usize, usiz
     Ok((total, passed, failed, todos))
 }
 
-/// Check if a path contains error tests
-pub(crate) fn has_error_tests(path: &Path) -> bool {
-    if !path.exists() {
-        return false;
-    }
-
-    // Check if this is the errors test directory or contains it
-    if path.ends_with("errors") || path.join("errors").exists() {
-        return true;
-    }
-
-    // Check for any error test files
-    if path.is_file() {
-        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        return name.ends_with(".rock.err");
-    }
-
-    // For directories, check if they contain error test files
-    if path.is_dir() {
-        for entry in fs::read_dir(path)
-            .unwrap_or_else(|_| panic!("Failed to read directory: {:?}", path))
-            .flatten()
-        {
-            if has_error_tests(&entry.path()) {
-                return true;
-            }
-        }
-    }
-
-    false
+fn is_error_test_file(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|n| n.ends_with(".rock.err"))
 }
 
-/// Find the error test directory from a given path
-pub(crate) fn find_error_test_dir(path: &Path) -> Option<PathBuf> {
+fn contains_error_tests(dir: &Path) -> bool {
+    WalkDir::new(dir)
+        .into_iter()
+        .flatten()
+        .any(|e| is_error_test_file(e.path()))
+}
+
+/// The `.rock.err` directory `path` selects: an `errors` directory, the
+/// `errors` directory of a fixture or fixture subdirectory inside it, a
+/// directory's `errors` subdirectory, or a fixture's own directory.
+fn find_error_test_dir(path: &Path) -> Option<PathBuf> {
     if path.ends_with("errors") && path.is_dir() {
         return Some(path.to_path_buf());
     }
-
-    // If path is tests/errors/something, return tests/errors
-    if let Some(parent) = path.parent() {
-        if parent.ends_with("errors") && parent.is_dir() {
-            return Some(parent.to_path_buf());
-        }
+    if let Some(parent) = path
+        .parent()
+        .filter(|p| p.ends_with("errors") && p.is_dir())
+    {
+        let selects_fixtures = is_error_test_file(path)
+            || path.join("errors").exists()
+            || (path.is_dir() && contains_error_tests(path));
+        return selects_fixtures.then(|| parent.to_path_buf());
     }
-
-    // If path is tests/, check for tests/errors
     let errors_subdir = path.join("errors");
-    if errors_subdir.exists() && errors_subdir.is_dir() {
+    if errors_subdir.is_dir() {
         return Some(errors_subdir);
     }
-
-    // If this is an error test file, use its parent directory
-    if path.is_file() {
-        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if name.ends_with(".rock.err") {
-            return path.parent().map(|p| p.to_path_buf());
-        }
+    if is_error_test_file(path) {
+        return path.parent().map(|p| p.to_path_buf());
     }
-
     None
 }
