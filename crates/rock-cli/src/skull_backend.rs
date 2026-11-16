@@ -3071,9 +3071,6 @@ pub(crate) fn skull_test(
     Ok(())
 }
 
-// luajit run + stdout-normalization helpers, shared by the hot-reload gates below.
-
-/// Per-test execution outcome (clean stdout vs errored), as the gates read it.
 #[cfg(test)]
 #[path = "skull_backend_tests.rs"]
 mod tests;

@@ -245,20 +245,6 @@ fn require_expected_survey_update<T, E: std::fmt::Display>(
     }
 }
 
-/// Short `dir/file.rock` form for the tables.
-fn short(file: &str) -> String {
-    let p = Path::new(file);
-    let name = p.file_name().and_then(|s| s.to_str()).unwrap_or(file);
-    match p
-        .parent()
-        .and_then(|d| d.file_name())
-        .and_then(|s| s.to_str())
-    {
-        Some(dir) => format!("{dir}/{name}"),
-        None => name.to_string(),
-    }
-}
-
 /// Collect per-module + per-function stats for the PROJECT files (deps/stdlib
 /// excluded) from a warm Session's workspace.
 pub(crate) fn collect_stats(
@@ -641,7 +627,7 @@ pub(crate) fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool
     for m in mods.iter().take(8) {
         eprintln!(
             "    {:<28} {:>6} B  {:>3} fns  {:>3} items  fan-in {:>3}",
-            short(&m.file),
+            crate::bone_backend::short_path(&m.file),
             m.body_bytes,
             m.fns,
             m.items,
@@ -652,7 +638,7 @@ pub(crate) fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool
     for f in by_body.iter().take(8) {
         eprintln!(
             "    {:<22} {:<24} {:>6} B",
-            format!("{}:{}", short(&f.file), f.line),
+            format!("{}:{}", crate::bone_backend::short_path(&f.file), f.line),
             f.name,
             f.body_bytes
         );
@@ -661,7 +647,7 @@ pub(crate) fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool
     for f in by_calls.iter().filter(|f| f.call_fan_in > 0).take(8) {
         eprintln!(
             "    {:<22} {:<24} {:>4} calls  {:>3} dep-mods",
-            format!("{}:{}", short(&f.file), f.line),
+            format!("{}:{}", crate::bone_backend::short_path(&f.file), f.line),
             f.name,
             f.call_fan_in,
             f.mod_fan_in
@@ -681,7 +667,7 @@ pub(crate) fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool
         };
         eprintln!(
             "    {:<26} {:<22} {:<10} {:<9} {:>7.3} {:>7.3}  [{:.2}/{:.2}/{:.2}/{:.2}/{:.2} r{} d{}]",
-            format!("{}:{}", short(&r.file), r.line),
+            format!("{}:{}", crate::bone_backend::short_path(&r.file), r.line),
             r.name,
             r.kind.label(),
             tier_tag,
@@ -700,7 +686,7 @@ pub(crate) fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool
         eprintln!(
             "\n  slowest: {} edit in {} `{}` -- {:.3} ms mean ({:.3} ms max), tier {}",
             worst.kind.label(),
-            short(&worst.file),
+            crate::bone_backend::short_path(&worst.file),
             worst.name,
             worst.edit_mean,
             worst.edit_max,
