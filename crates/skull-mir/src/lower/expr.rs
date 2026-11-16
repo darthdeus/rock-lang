@@ -861,52 +861,19 @@ impl<'a> Builder<'a> {
                 // Keep the evaluated receiver across representation selection.
                 // A boxed fallback must not lower the source expression again.
                 let recv = self.lower_scalar_safe_nav_receiver(e, base, field)?;
-                let cond = match &recv {
-                    SafeNavRecv::Unboxed { present, .. } => *present,
-                    _ => self.safe_nav_absent_cond(&recv),
-                };
-                let result = self
-                    .f
-                    .new_cell_typed(None, self.current_expr_storage_ty_id());
-                let nil_bb = self.f.new_block();
-                let val_bb = self.f.new_block();
-                let join = self.f.new_block();
-                let term = match &recv {
-                    SafeNavRecv::Unboxed { .. } => Term::Branch {
-                        cond,
-                        then_bb: val_bb,
-                        else_bb: nil_bb,
-                    },
-                    _ => Term::Branch {
-                        cond,
-                        then_bb: nil_bb,
-                        else_bb: val_bb,
-                    },
-                };
-                self.f.set_term(self.cur, term);
-
-                self.cur = nil_bb;
-                let n = self.emit_cur(Inst::Const(Lit::Nil));
-                self.store_and_join(result, n, join);
-
-                self.cur = val_bb;
-                let fv = match &recv {
+                self.safe_nav_scalar(recv, true, |s, recv| match &recv {
                     SafeNavRecv::Unboxed {
                         repr: ValueRepr::Group { name, parts, .. },
                         ..
-                    } if self.field_index(*name, field).is_some() => {
-                        let index = self.field_index(*name, field).expect("known value field");
-                        self.pack(parts[index].clone())?
+                    } if s.field_index(*name, field).is_some() => {
+                        let index = s.field_index(*name, field).expect("known value field");
+                        s.pack(parts[index].clone())
                     }
                     _ => {
-                        let bv = self.safe_nav_present_value(recv)?;
-                        self.safe_nav_field_value(e, base, bv, field)?
+                        let bv = s.safe_nav_present_value(recv)?;
+                        s.safe_nav_field_value(e, base, bv, field)
                     }
-                };
-                self.store_and_join(result, fv, join);
-
-                self.cur = join;
-                Ok(self.emit_cur(Inst::Load(result)))
+                })
             }
 
             Expr::Match { scrutinee, arms } => self.lower_match(scrutinee, arms),
@@ -2378,19 +2345,45 @@ impl<'a> Builder<'a> {
         args: IdxRange<Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
         let recv = self.lower_safe_nav_receiver(receiver)?;
-        let is_nil = self.safe_nav_absent_cond(&recv);
+        self.safe_nav_scalar(recv, false, |s, recv| {
+            let recv_v = s.safe_nav_present_value(recv)?;
+            s.pack_safe_nav_call_value(e, method, args, recv_v)
+        })
+    }
+
+    /// The one-cell join of a `?.` form whose present arm yields one value.
+    /// `test_presence` branches on an unboxed receiver's presence tag itself
+    /// rather than on its negation.
+    fn safe_nav_scalar(
+        &mut self,
+        recv: SafeNavRecv,
+        test_presence: bool,
+        value_arm: impl FnOnce(&mut Self, SafeNavRecv) -> Result<Idx<Inst>, CompilerError>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let presence = match &recv {
+            SafeNavRecv::Unboxed { present, .. } if test_presence => Some(*present),
+            _ => None,
+        };
+        let cond = match presence {
+            Some(present) => present,
+            None => self.safe_nav_absent_cond(&recv),
+        };
         let result = self
             .f
             .new_cell_typed(None, self.current_expr_storage_ty_id());
         let nil_bb = self.f.new_block();
-        let call_bb = self.f.new_block();
+        let val_bb = self.f.new_block();
         let join = self.f.new_block();
+        let (then_bb, else_bb) = match presence {
+            Some(_) => (val_bb, nil_bb),
+            None => (nil_bb, val_bb),
+        };
         self.f.set_term(
             self.cur,
             Term::Branch {
-                cond: is_nil,
-                then_bb: nil_bb,
-                else_bb: call_bb,
+                cond,
+                then_bb,
+                else_bb,
             },
         );
 
@@ -2398,10 +2391,9 @@ impl<'a> Builder<'a> {
         let n = self.emit_cur(Inst::Const(Lit::Nil));
         self.store_and_join(result, n, join);
 
-        self.cur = call_bb;
-        let recv_v = self.safe_nav_present_value(recv)?;
-        let cv = self.pack_safe_nav_call_value(e, method, args, recv_v)?;
-        self.store_and_join(result, cv, join);
+        self.cur = val_bb;
+        let v = value_arm(self, recv)?;
+        self.store_and_join(result, v, join);
 
         self.cur = join;
         Ok(self.emit_cur(Inst::Load(result)))
@@ -2579,44 +2571,21 @@ impl<'a> Builder<'a> {
         body: Idx<Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
         let recv = self.lower_safe_nav_receiver(receiver)?;
-        let is_nil = self.safe_nav_absent_cond(&recv);
-        let result = self
-            .f
-            .new_cell_typed(None, self.current_expr_storage_ty_id());
-        let nil_bb = self.f.new_block();
-        let let_bb = self.f.new_block();
-        let join = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: is_nil,
-                then_bb: nil_bb,
-                else_bb: let_bb,
-            },
-        );
-
-        self.cur = nil_bb;
-        let n = self.emit_cur(Inst::Const(Lit::Nil));
-        self.store_and_join(result, n, join);
-
-        self.cur = let_bb;
-        let recv_v = self.safe_nav_present_value(recv)?;
-        let cell = self.new_binding_cell(
-            binding,
-            self.body.binding_arena[binding].name,
-            self.binding_ty(binding),
-            crate::names::ustr(""),
-        );
-        self.emit_cur(Inst::Store {
-            cell,
-            value: recv_v,
-        });
-        self.binds.insert(raw(binding), cell);
-        let bv = self.lower_expr(body)?;
-        self.store_and_join(result, bv, join);
-
-        self.cur = join;
-        Ok(self.emit_cur(Inst::Load(result)))
+        self.safe_nav_scalar(recv, false, |s, recv| {
+            let recv_v = s.safe_nav_present_value(recv)?;
+            let cell = s.new_binding_cell(
+                binding,
+                s.body.binding_arena[binding].name,
+                s.binding_ty(binding),
+                crate::names::ustr(""),
+            );
+            s.emit_cur(Inst::Store {
+                cell,
+                value: recv_v,
+            });
+            s.binds.insert(raw(binding), cell);
+            s.lower_expr(body)
+        })
     }
 
     /// A `[T]` literal whose element stores as columns lowers every element to
