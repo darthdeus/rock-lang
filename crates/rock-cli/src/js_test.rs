@@ -48,87 +48,24 @@ struct JsUnitRun {
 /// under node (a backend bug, not a test failure).
 type JsUnitOutcome = std::result::Result<JsUnitRun, UnitFailure>;
 
-/// Whole-run tallies.
-pub struct JsSuiteSummary {
-    pub files: usize,
-    pub tests_passed: usize,
-    pub tests_failed: usize,
-    pub tests_skipped: usize,
-    /// Tests `@test(backends = ...)` limits to other backends: never emitted,
-    /// never run, and not skips (the CI skip cap measures only JS gaps).
-    pub tests_other_backend: usize,
-    pub unit_failures: usize,
-    /// Skip reasons bucketed by exact message, count desc.
-    pub skip_reasons: Vec<(String, usize)>,
-}
-
 /// `rock test --backend js` entry: run, print per-file lines + the end-of-run
 /// summary and skip histogram, exit non-zero on any FAIL or unit failure.
 pub fn js_test(paths: &[String]) -> Result<()> {
     let start = Instant::now();
-    let summary = js_test_run(paths, true)?;
-    println!(
-        "\njs backend: {}/{} @tests passed ({} failed, {} skipped, {} not for js) across {} files ({:.2}s)",
-        summary.tests_passed.to_string().green(),
-        summary.tests_passed + summary.tests_failed + summary.tests_skipped,
-        if summary.tests_failed == 0 {
-            summary.tests_failed.to_string().green()
-        } else {
-            summary.tests_failed.to_string().red()
-        },
-        summary.tests_skipped.to_string().yellow(),
-        summary.tests_other_backend,
-        summary.files,
-        start.elapsed().as_secs_f64(),
-    );
-    if summary.unit_failures > 0 {
-        println!(
-            "  {} unit(s) failed to build/run (see FAILED lines above)",
-            summary.unit_failures.to_string().red()
-        );
-    }
-    if !summary.skip_reasons.is_empty() {
-        println!(
-            "\n{}",
-            "=== skip reasons (js) -- the emitter work list ===".bold()
-        );
-        let shown = summary.skip_reasons.len().min(50);
-        for (reason, count) in summary.skip_reasons.iter().take(shown) {
-            println!("  {:>5}  {}", count.to_string().yellow(), reason);
-        }
-        if summary.skip_reasons.len() > shown {
-            println!(
-                "  {:>5}  ({} more distinct reasons)",
-                "...",
-                summary.skip_reasons.len() - shown
-            );
-        }
-    }
-    if summary.tests_failed > 0 || summary.unit_failures > 0 {
-        crate::invocation_log::exit(1);
-    }
-    Ok(())
-}
-
-/// Run the suite; optionally print per-file lines as units complete.
-pub fn js_test_run(paths: &[String], print: bool) -> Result<JsSuiteSummary> {
     let (files, package_dirs) = crate::skull_backend::collect_test_units(paths)?;
-
-    let mut summary = JsSuiteSummary {
-        files: 0,
-        tests_passed: 0,
-        tests_failed: 0,
-        tests_skipped: 0,
-        tests_other_backend: 0,
-        unit_failures: 0,
-        skip_reasons: Vec::new(),
-    };
-    let mut all_skip_reasons: Vec<String> = Vec::new();
-
     let outcomes = crate::test_unit::build_units(&files, &package_dirs, js_build_unit);
 
+    let mut tests_passed = 0;
+    let mut tests_failed = 0;
+    let mut tests_skipped = 0;
+    // Tests `@test(backends = ...)` limits to other backends: never emitted,
+    // never run, and not skips (the CI skip cap measures only JS gaps).
+    let mut tests_other_backend = 0;
+    let mut unit_failures = 0;
+    let mut all_skip_reasons: Vec<String> = Vec::new();
+    let file_count = outcomes.len();
+
     for (label, outcome) in outcomes {
-        summary.files += 1;
         match outcome {
             Ok(Ok(JsUnitRun {
                 passed,
@@ -136,14 +73,14 @@ pub fn js_test_run(paths: &[String], print: bool) -> Result<JsSuiteSummary> {
                 skips,
                 other_backend,
             })) => {
-                summary.tests_passed += passed;
-                summary.tests_failed += fails.len();
-                summary.tests_skipped += skips.len();
-                summary.tests_other_backend += other_backend;
+                tests_passed += passed;
+                tests_failed += fails.len();
+                tests_skipped += skips.len();
+                tests_other_backend += other_backend;
                 for (_, reasons) in &skips {
                     all_skip_reasons.extend(reasons.iter().cloned());
                 }
-                if print && (passed + fails.len() + skips.len() + other_backend > 0) {
+                if passed + fails.len() + skips.len() + other_backend > 0 {
                     let status = if fails.is_empty() {
                         "ok".green()
                     } else {
@@ -174,22 +111,59 @@ pub fn js_test_run(paths: &[String], print: bool) -> Result<JsSuiteSummary> {
                 }
             }
             Ok(Err(failure)) => {
-                summary.unit_failures += 1;
-                if print {
-                    failure.print(&label);
-                }
+                unit_failures += 1;
+                failure.print(&label);
             }
             Err(panic) => {
-                summary.unit_failures += 1;
-                if print {
-                    crate::test_unit::print_unit_panic(&label, &*panic);
-                }
+                unit_failures += 1;
+                crate::test_unit::print_unit_panic(&label, &*panic);
             }
         }
     }
 
-    summary.skip_reasons = reason_histogram(all_skip_reasons.iter().map(|s| s.as_str()));
-    Ok(summary)
+    println!(
+        "\njs backend: {}/{} @tests passed ({} failed, {} skipped, {} not for js) across {} files ({:.2}s)",
+        tests_passed.to_string().green(),
+        tests_passed + tests_failed + tests_skipped,
+        if tests_failed == 0 {
+            tests_failed.to_string().green()
+        } else {
+            tests_failed.to_string().red()
+        },
+        tests_skipped.to_string().yellow(),
+        tests_other_backend,
+        file_count,
+        start.elapsed().as_secs_f64(),
+    );
+    if unit_failures > 0 {
+        println!(
+            "  {} unit(s) failed to build/run (see FAILED lines above)",
+            unit_failures.to_string().red()
+        );
+    }
+    // Bucketed by exact message, count desc: the emitter work list.
+    let skip_reasons = reason_histogram(all_skip_reasons.iter().map(|s| s.as_str()));
+    if !skip_reasons.is_empty() {
+        println!(
+            "\n{}",
+            "=== skip reasons (js) -- the emitter work list ===".bold()
+        );
+        let shown = skip_reasons.len().min(50);
+        for (reason, count) in skip_reasons.iter().take(shown) {
+            println!("  {:>5}  {}", count.to_string().yellow(), reason);
+        }
+        if skip_reasons.len() > shown {
+            println!(
+                "  {:>5}  ({} more distinct reasons)",
+                "...",
+                skip_reasons.len() - shown
+            );
+        }
+    }
+    if tests_failed > 0 || unit_failures > 0 {
+        crate::invocation_log::exit(1);
+    }
+    Ok(())
 }
 
 /// One test unit (a file, or a package built as ONE workspace with its tests),
