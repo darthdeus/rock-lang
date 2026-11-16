@@ -57,6 +57,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
+use skull_mir::cfg::successors;
 use skull_mir::mir::*;
 
 /// Rewrite every tagged, matching desugared-iterator loop in `func` into the
@@ -150,26 +151,6 @@ fn chase(func: &MirFunc, mut b: Idx<Block>, hops: &mut Vec<Idx<Block>>) -> Idx<B
         }
     }
     b
-}
-
-fn targets(term: &Term, mut f: impl FnMut(Idx<Block>)) {
-    match term {
-        Term::Goto(t) => f(*t),
-        Term::Branch {
-            then_bb, else_bb, ..
-        } => {
-            f(*then_bb);
-            f(*else_bb);
-        }
-        Term::Switch { cases, default, .. } => {
-            for (_, b) in cases {
-                f(*b);
-            }
-            f(*default);
-        }
-        Term::Yield { resume, .. } => f(*resume),
-        Term::Return(_) | Term::Unreachable => {}
-    }
 }
 
 fn retarget(term: &mut Term, from: Idx<Block>, to: Idx<Block>) {
@@ -700,7 +681,7 @@ fn try_match(
     let mut pre = Vec::new();
     for (bid, blk) in func.blocks.iter() {
         let mut hits = false;
-        targets(&blk.term, |s| {
+        successors(&blk.term, |s| {
             if s == h {
                 hits = true;
             }
@@ -725,7 +706,7 @@ fn try_match(
     // crossing the head/test. (Includes Y, D, J, the arm chains, and BODY.)
     let mut preds: HashMap<Idx<Block>, Vec<Idx<Block>>> = HashMap::default();
     for (bid, blk) in func.blocks.iter() {
-        targets(&blk.term, |s| preds.entry(s).or_default().push(bid));
+        successors(&blk.term, |s| preds.entry(s).or_default().push(bid));
     }
     let mut region: HashSet<Idx<Block>> = back.iter().copied().collect();
     let mut stack: Vec<Idx<Block>> = back.clone();
