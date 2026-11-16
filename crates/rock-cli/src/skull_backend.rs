@@ -929,7 +929,14 @@ fn run_emitted_tests(
         })?;
         if run.timed_out || !run.output.status.success() {
             return Err(SkullFailure {
-                reason: "test program failed during module load".to_string(),
+                reason: format!(
+                    "test program failed during module load: {}",
+                    if run.timed_out {
+                        format!("timed out after {}s", limit.as_secs_f64())
+                    } else {
+                        stderr_excerpt(&run.output.stderr)
+                    }
+                ),
                 rendered: if run.timed_out {
                     format!(
                         "loading emitted program: timed out after {}s",

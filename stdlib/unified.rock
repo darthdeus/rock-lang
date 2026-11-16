@@ -984,6 +984,11 @@ deco init on_reload {
             error(err, 0)
         end
     end
+    local errors = _G.__rock_logged_errors
+    if errors and errors.finish then
+        collectgarbage("collect")
+        errors.finish()
+    end
 """
 
 // The first `n` elements of two NativeBuffers compared as bytes. Serves
