@@ -154,7 +154,6 @@ fn capability_set_stays_identical() {
             "signatureHelpProvider",
             "textDocumentSync",
             "typeDefinitionProvider",
-            "workspace",
             "workspaceSymbolProvider",
         ],
         "capability keys: {keys:?}"
@@ -192,10 +191,6 @@ fn capability_set_stays_identical() {
     assert!(
         caps["semanticTokensProvider"].is_object(),
         "semantic tokens stay advertised"
-    );
-    assert_eq!(
-        caps["workspace"]["workspaceFolders"],
-        json!({ "supported": true, "changeNotifications": true })
     );
 }
 

@@ -242,9 +242,6 @@ pub fn server_capabilities() -> serde_json::Value {
         // undeclared); completions only bear the command while
         // ROCK_LSP_RECORD records, so this is inert the rest of the time.
         "executeCommandProvider": { "commands": [completion_record::ACCEPT_COMMAND] },
-        "workspace": {
-            "workspaceFolders": { "supported": true, "changeNotifications": true },
-        },
         "semanticTokensProvider": {
             // Delta: on a re-request the client sends the previous result_id
             // and gets just the changed token span instead of the whole array.
