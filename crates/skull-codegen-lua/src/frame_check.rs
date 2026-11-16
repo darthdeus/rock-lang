@@ -99,9 +99,6 @@ pub(crate) fn check_frame_limits(
     ctx.reject(lua_name.to_string(), frame_limit_error(ws, func, &overflow));
 }
 
-/// The spanned diagnostic for a [`frame_limits::FrameOverflow`]: which Rock
-/// function, which LuaJIT limit, the emitter's count, and the wide values that
-/// are live across the statement that reaches it.
 /// Reject a body too long for LuaJIT to load, now that its text is final.
 pub(crate) fn check_body_limits(
     ctx: &CodegenCtx,
@@ -136,6 +133,9 @@ pub(crate) fn check_body_limits(
     ctx.reject(lua_name.to_string(), err);
 }
 
+/// The spanned diagnostic for a [`frame_limits::FrameOverflow`]: which Rock
+/// function, which LuaJIT limit, the emitter's count, and the wide values that
+/// are live across the statement that reaches it.
 fn frame_limit_error(
     ws: &Workspace,
     func: &MirFunc,

@@ -10,13 +10,10 @@
 //!
 //! The printer NEVER dispatches on an operand's type: the IR is already typed
 //! (`IntAdd` vs `FloatAdd` vs `StringConcat`), so `bone` is consulted ONLY to
-//! resolve a `Call`'s [`FuncRef`] to its mangled name (D8/P3). A JS backend can't
-//! use `goto`; it'll reloop the same MIR (Phase 8).
+//! resolve a `Call`'s [`FuncRef`] to its mangled name (D8/P3).
 //!
-//! Naming: a value-producing inst `Idx<Inst>` renders as `v<raw>`, a cell as
-//! `c<raw>`, a block as `bb<raw>` — raw arena indices, so no renumbering pass and
-//! references are a direct index format. (Regalloc to fit luajit's 200-local cap
-//! is a later refinement.)
+//! Naming: register allocation colors values as `r<N>` (uncolored ones fall
+//! back to `v<raw>`), cells as `c<N>`, and blocks print as `bb<raw>` labels.
 
 mod binding;
 mod block;
