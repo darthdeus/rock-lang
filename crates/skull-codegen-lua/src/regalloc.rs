@@ -1858,11 +1858,9 @@ pub(crate) fn nil_kills<'a>(
 
     // The slots each emitted statement defines and then reads, per entry of
     // `locals`: the liveness pass and the backward kill walk both read them.
-    let mut slots: Vec<u32> = Vec::with_capacity(locals.bits.len());
-    let mut marks: Vec<(u32, u32)> = Vec::with_capacity(locals.marks.len());
-    if quiet.is_none() {
-        // The statements are the ones `locals` flattened, so each of its bits
-        // names the slot directly.
+    // When only the folded values are quiet, the statements are the ones
+    // `locals` flattened, so each of its bits names the slot directly.
+    let slot_of = quiet.is_none().then(|| {
         let cell_base = locals.v_words * 64;
         let mut slot_of = vec![u32::MAX; cell_base + locals.cells.len()];
         for (i, &v) in locals.values.iter().enumerate() {
@@ -1873,82 +1871,74 @@ pub(crate) fn nil_kills<'a>(
                 slot_of[cell_base + i] = cell_slot[raw(*c)];
             }
         }
-        let named = |bits: &[u32], slots: &mut Vec<u32>| {
-            slots.extend(
-                bits.iter()
-                    .map(|&k| slot_of[k as usize])
-                    .filter(|&s| s != u32::MAX),
-            )
-        };
-        let mut e = 0;
-        for &b in scope {
-            for &id in &func.blocks[b].insts {
-                let start = slots.len() as u32;
-                let mut mid = start;
-                // A folded statement defines no slot: its entry holds only
-                // the cell writes the colorer needs.
-                if !inline[raw(id)] {
-                    named(locals.defs(e), &mut slots);
-                    mid = slots.len() as u32;
-                    named(locals.uses(e), &mut slots);
-                }
-                marks.push((start, mid));
-                e += 1;
+        slot_of
+    });
+    let named = |slot_of: &[u32], bits: &[u32], slots: &mut Vec<u32>| {
+        slots.extend(
+            bits.iter()
+                .map(|&k| slot_of[k as usize])
+                .filter(|&s| s != u32::MAX),
+        )
+    };
+    let value_slot = |v: Idx<Inst>| -> Option<u32> {
+        let c = value_colors[raw(v)];
+        (c != u32::MAX).then_some(c)
+    };
+    let leaf_slots = |leaves: &[u32], slots: &mut Vec<u32>| {
+        Reads::values(func, inline, leaves, |v| slots.extend(value_slot(v)));
+        Reads::cells(func, inline, alias, leaves, |c| {
+            if cell_slot[raw(c)] != u32::MAX {
+                slots.push(cell_slot[raw(c)]);
             }
-            let start = slots.len() as u32;
-            marks.push((start, start));
-            named(locals.uses(e), &mut slots);
+        });
+    };
+    let mut slots: Vec<u32> = Vec::with_capacity(locals.bits.len());
+    let mut marks: Vec<(u32, u32)> = Vec::with_capacity(locals.marks.len());
+    let mut use_set = BitRows::new(n, s_count);
+    let mut def_set = BitRows::new(n, s_count);
+    let mut e = 0;
+    for (bi, &b) in scope.iter().enumerate() {
+        let (use_row, def_row) = (use_set.row_mut(bi), def_set.row_mut(bi));
+        for &id in &func.blocks[b].insts {
+            let start = slots.len();
+            let mut mid = start;
+            // A folded statement defines no slot: its entry in `locals` holds
+            // only the cell writes the colorer needs.
+            if !inline[raw(id)] {
+                if let Some(slot_of) = &slot_of {
+                    named(slot_of, locals.defs(e), &mut slots);
+                    mid = slots.len();
+                    named(slot_of, locals.uses(e), &mut slots);
+                } else {
+                    if func.insts[id].produces_value() {
+                        slots.extend(value_slot(id));
+                    }
+                    emitted_cell_defs(func, alias, id, &mut |c| {
+                        if cell_slot[raw(c)] != u32::MAX {
+                            slots.push(cell_slot[raw(c)]);
+                        }
+                    });
+                    mid = slots.len();
+                    leaf_slots(reads.stmt(id), &mut slots);
+                }
+            }
+            marks.push((start as u32, mid as u32));
+            note_statement(use_row, def_row, &slots[mid..], &slots[start..mid]);
             e += 1;
         }
-    } else {
-        let value_slot = |v: Idx<Inst>| -> Option<u32> {
-            let c = value_colors[raw(v)];
-            (c != u32::MAX).then_some(c)
-        };
-        let leaf_slots = |leaves: &[u32], slots: &mut Vec<u32>| {
-            Reads::values(func, inline, leaves, |v| slots.extend(value_slot(v)));
-            Reads::cells(func, inline, alias, leaves, |c| {
-                if cell_slot[raw(c)] != u32::MAX {
-                    slots.push(cell_slot[raw(c)]);
-                }
-            });
-        };
-        for &b in scope {
-            for &id in &func.blocks[b].insts {
-                let start = slots.len() as u32;
-                if inline[raw(id)] {
-                    marks.push((start, start));
-                    continue;
-                }
-                if func.insts[id].produces_value() {
-                    slots.extend(value_slot(id));
-                }
-                emitted_cell_defs(func, alias, id, &mut |c| {
-                    if cell_slot[raw(c)] != u32::MAX {
-                        slots.push(cell_slot[raw(c)]);
-                    }
-                });
-                marks.push((start, slots.len() as u32));
-                leaf_slots(reads.stmt(id), &mut slots);
-            }
-            let start = slots.len() as u32;
-            marks.push((start, start));
-            leaf_slots(reads.term(b), &mut slots);
+        let start = slots.len();
+        marks.push((start as u32, start as u32));
+        match &slot_of {
+            Some(slot_of) => named(slot_of, locals.uses(e), &mut slots),
+            None => leaf_slots(reads.term(b), &mut slots),
         }
+        note_statement(use_row, def_row, &slots[start..], &[]);
+        e += 1;
     }
     marks.push((slots.len() as u32, slots.len() as u32));
     let defs_at = |e: usize| &slots[marks[e].0 as usize..marks[e].1 as usize];
     let uses_at = |e: usize| &slots[marks[e].1 as usize..marks[e + 1].0 as usize];
     let first = &locals.first;
-
-    let mut use_set = BitRows::new(n, s_count);
-    let mut def_set = BitRows::new(n, s_count);
-    for bi in 0..n {
-        let (use_row, def_row) = (use_set.row_mut(bi), def_set.row_mut(bi));
-        for e in first[bi] as usize..first[bi + 1] as usize {
-            note_statement(use_row, def_row, uses_at(e), defs_at(e));
-        }
-    }
     let live_in = flow.live_in(&use_set, &def_set);
 
     let mut kills = NilKills {
