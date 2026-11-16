@@ -734,56 +734,15 @@ pub(crate) fn try_emit_js_program_project_cached(
     Ok((prog, cache, ws))
 }
 
-/// Node-specific glue for the RNG prelude (`JS_RNG_RUNTIME`) and
-/// `env_var`: `process.env` is node-only, so it lives in the DRIVER, not a
-/// prelude const. Seeding
-/// mirrors Lua's per-process rule (`crates/skull/src/lib.rs`): one seed after the
-/// preludes -- `ROCK_TEST_SEED` when set+finite else `Date.now()`; a test needing
-/// determinism calls `random_seed()` itself. `__rock_env_var` maps an unset var
-/// to Rock null (`undefined -> null`), matching `os.getenv`.
-const NODE_RNG_ENV_GLUE: &str = r#"
-function __rock_env_var(n) { var v = process.env[n]; return v === undefined ? null : v; }
-(function() {
-  var s = Number(process.env.ROCK_TEST_SEED);
-  var base = Number.isFinite(s) ? s : Date.now();
-  __rock_rng_seed(base);
-  __rock_presentation_rng_seed(base + 10007);
-})();
-"#;
-
-/// Assemble the streaming run program: the same runtime prelude set/order as the
-/// test harness (`build_node_program`), a scoped `var __G = {}`, a DIRECT
-/// `print`/`put` (unbuffered `process.stdout.write`, no `__buf`/`__SKULL__`
-/// protocol), the whole emitted program, then `<main>();` when the entry defines
-/// one. A bare call matches luajit's single-file path.
+/// The streaming run program: the shipped prelude over node's host (direct,
+/// unbuffered writes), the whole emitted program, then `<main>();` when the
+/// entry defines one. A bare call matches luajit's single-file path.
 fn build_run_program(emitted: &skull_codegen_js::emit::JsProgram) -> String {
-    let mut p = String::from(skull_codegen_js::JS_NB_CHECK_SHIMS);
-    p.push_str(skull_codegen_js::JS_VEC_CHECK_SHIMS);
-    p.push_str(skull_codegen_js::JS_TABLE_PRIM);
-    p.push_str(skull_codegen_js::JS_MAP_ITER_RUNTIME);
-    p.push_str(skull_codegen_js::JS_STRUCTURAL_EQ);
-    p.push_str(skull_codegen_js::JS_ENUM_RUNTIME);
-    append_call_runtime(&mut p, &emitted.program, &emitted.code_artifact);
-    p.push_str(skull_codegen_js::JS_GLOBALS_RUNTIME);
-    p.push_str(skull_codegen_js::JS_CORO_RUNTIME);
-    p.push_str(skull_codegen_js::JS_DEFER_RUNTIME);
-    p.push_str(skull_codegen_js::JS_STRING_RUNTIME);
-    p.push_str(skull_codegen_js::JS_INSPECT_RUNTIME);
-    p.push_str(skull_codegen_js::JS_DEEPCOPY_RUNTIME);
-    p.push_str(skull_codegen_js::JS_LOG_RUNTIME);
-    p.push_str(skull_codegen_js::JS_RNG_RUNTIME);
-    p.push_str(NODE_RNG_ENV_GLUE);
-    p.push_str(skull_codegen_js::JS_NODE_HOST);
-    p.push_str(
-        r#"
-var __G = {};
-function print() {
-  var p = [];
-  for (var i = 0; i < arguments.length; i++) p.push(lua_tostring(arguments[i]));
-  process.stdout.write(p.join("\t") + "\n");
-}
-function put(s) { process.stdout.write(s); }
-"#,
+    let mut p = skull_codegen_js::assemble_prelude(
+        &emitted.program,
+        emitted.has_code_refs(),
+        skull_codegen_js::JS_NODE_HOST,
+        &[],
     );
     p.push_str(&emitted.program);
     if let Some(main) = &emitted.main_js_name {
@@ -823,9 +782,8 @@ fn is_decorator_populated_reject(msg: &str) -> bool {
     msg.contains("is populated by decorator application")
 }
 
-/// Assemble the per-file node program: shim + string-runtime preamble, a
-/// buffer-capturing `print` (Lua-parity: args `lua_tostring`-joined by TAB, one
-/// trailing newline per call), the shared emitted defs (per-test isolated
+/// Assemble the per-file node program: the shipped prelude over a host that
+/// captures writes into `__buf`, the shared emitted defs (per-test isolated
 /// closures concatenated, or one whole-file program when decorator applications
 /// must run at load), then the harness running each test with its buffer reset
 /// and comparing the captured stdout (trimmed) against the `output=` expectation
@@ -835,41 +793,7 @@ fn build_node_program(
     tests: &[(String, String, Option<String>, bool)],
     has_code_refs: bool,
 ) -> String {
-    let mut p = String::from(skull_codegen_js::JS_NB_CHECK_SHIMS);
-    p.push_str(skull_codegen_js::JS_VEC_CHECK_SHIMS);
-    p.push_str(skull_codegen_js::JS_TABLE_PRIM);
-    p.push_str(skull_codegen_js::JS_MAP_ITER_RUNTIME);
-    p.push_str(skull_codegen_js::JS_STRUCTURAL_EQ);
-    p.push_str(skull_codegen_js::JS_ENUM_RUNTIME);
-    append_call_runtime_with_flag(&mut p, shared_defs, has_code_refs);
-    p.push_str(skull_codegen_js::JS_GLOBALS_RUNTIME);
-    p.push_str(skull_codegen_js::JS_CORO_RUNTIME);
-    p.push_str(skull_codegen_js::JS_DEFER_RUNTIME);
-    p.push_str(skull_codegen_js::JS_STRING_RUNTIME);
-    p.push_str(skull_codegen_js::JS_INSPECT_RUNTIME);
-    p.push_str(skull_codegen_js::JS_DEEPCOPY_RUNTIME);
-    p.push_str(skull_codegen_js::JS_LOG_RUNTIME);
-    p.push_str(skull_codegen_js::JS_RNG_RUNTIME);
-    p.push_str(NODE_RNG_ENV_GLUE);
-    p.push_str(
-        r#"
-var __G = {};
-var __buf = [];
-function print() {
-  var p = [];
-  for (var i = 0; i < arguments.length; i++) p.push(lua_tostring(arguments[i]));
-  __buf.push(p.join("\t") + "\n");
-}
-// `put` = the test-local `io.write` idiom: append raw, no separators/newline.
-function put(s) { __buf.push(s); }
-// Runtime diagnostics (`write_err`) stay out of the compared output.
-var __rock_host = {
-  write: put,
-  write_err: function(s) { process.stderr.write(s); },
-  env_var: function(n) { var v = process.env[n]; return v === undefined ? null : v; }
-};
-"#,
-    );
+    let mut p = skull_codegen_js::assemble_prelude(shared_defs, has_code_refs, NODE_TEST_HOST, &[]);
     p.push_str(shared_defs);
     p.push_str("var __tests = [\n");
     for (name, js_name, out, is_value) in tests {
@@ -916,24 +840,16 @@ for (var i = 0; i < __tests.length; i++) {
     p
 }
 
-pub(crate) fn append_call_runtime(
-    program: &mut String,
-    emitted: &str,
-    artifact: &skull_mir::code_identity::CodeArtifact,
-) {
-    let has_code_refs = artifact.entries.values().any(|entry| entry.escaping);
-    append_call_runtime_with_flag(program, emitted, has_code_refs);
-}
-
-fn append_call_runtime_with_flag(program: &mut String, emitted: &str, has_code_refs: bool) {
-    let needs_call =
-        has_code_refs || emitted.contains("__rock_call(") || emitted.contains("__try_call(");
-    if has_code_refs {
-        program.push_str(skull_codegen_js::JS_CALL_HELPER);
-    } else if needs_call {
-        program.push_str(skull_codegen_js::JS_FOREIGN_CALL_HELPER);
-    }
-}
+/// Node's host with `write` captured per test. Runtime diagnostics
+/// (`write_err`) stay out of the compared output.
+const NODE_TEST_HOST: &str = r#"
+var __buf = [];
+var __rock_host = {
+  write: function(s) { __buf.push(s); },
+  write_err: function(s) { process.stderr.write(s); },
+  env_var: function(n) { var v = process.env[n]; return v === undefined ? null : v; }
+};
+"#;
 
 /// Keep emitted-JS dumps in error reports manageable.
 fn truncate_js(s: &str) -> String {
