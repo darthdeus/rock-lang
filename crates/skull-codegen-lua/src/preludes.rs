@@ -320,20 +320,6 @@ function __rock_allocation_activation_dump(frames)
 end
 "#;
 
-/// Lua shims for the checked Vec indexing helpers codegen emits
-/// (`__vec_checked_get`/`__vec_checked_set`). In real builds the stdlib
-/// provides them (`stdlib/unified.rock`); stdlib-free test harnesses prepend
-/// this so emitted chunks stay self-contained.
-pub const VEC_CHECK_SHIMS: &str = "\
-function __vec_checked_get(vec, i)\n\
-  if i < 0 or i >= vec.len then error('Vec index out of bounds') end\n\
-  return vec._data[i + 1]\n\
-end\n\
-function __vec_checked_set(vec, i, v)\n\
-  if i < 0 or i >= vec.len then error('Vec index out of bounds') end\n\
-  vec._data[i + 1] = v\n\
-end";
-
 /// The native buffer allocator and storage lookup every emitted program calls
 /// (`Inst::FfiNewArray`, the stdlib's sized constructors, `deepcopy`).
 pub const NB_ALLOC_PRELUDE: &str = r#"

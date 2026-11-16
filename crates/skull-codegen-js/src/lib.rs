@@ -414,8 +414,7 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
 /// JS bodies for the debug-mode bounds-checked NativeBuffer access the
 /// emitter's `Index`/`StoreIndex` lowering calls (`__nb_checked_get` /
 /// `__nb_checked_set`) -- the JS analog of the stdlib inline(lua) helpers
-/// (`stdlib/unified.rock`) that back the same calls on luajit, and of
-/// `skull_codegen_lua::VEC_CHECK_SHIMS` in shape. Prepend to any emitted JS
+/// (`stdlib/unified.rock`) that back the same calls on luajit. Prepend to any emitted JS
 /// program that indexes a buffer. The NaN-into-integer-buffer rejection is the
 /// pinned store-edge debug check; it is unconditional here -- the JS harness has no release mode.
 pub const JS_NB_CHECK_SHIMS: &str = "\
