@@ -1,5 +1,5 @@
 use ordered_float::OrderedFloat;
-use rock_tokenizer::{TokenKind, Tokenizer};
+use rock_tokenizer::{TokenKind, TokenKind as K, Tokenizer};
 
 fn kinds(src: &str) -> Vec<TokenKind> {
     Tokenizer::from_code("t.rock", src)
@@ -20,240 +20,132 @@ fn toks(src: &str) -> Vec<rock_tokenizer::Token> {
         .unwrap_or_else(|e| panic!("lex {:?} failed: {:?}", src, e.message))
 }
 
+/// Every fixed-text kind prints as its text, and lexing that text yields the
+/// kind back unless the lexer spells it another way.
 #[test]
-fn pin_tokenkind_to_code_table() {
-    let cases: Vec<(TokenKind, &str)> = vec![
-        (TokenKind::Fn, "fn"),
-        (TokenKind::Operator, "operator"),
-        (TokenKind::Table, "table"),
-        (TokenKind::Type, "type"),
-        (TokenKind::As, "as"),
-        (TokenKind::Yield, "yield"),
-        (TokenKind::Await, "await"),
-        (TokenKind::Let, "let"),
-        (TokenKind::Return, "return"),
-        (TokenKind::Defer, "defer"),
-        (TokenKind::Struct, "struct"),
-        (TokenKind::Newtype, "newtype"),
-        (TokenKind::If, "if"),
-        (TokenKind::Else, "else"),
-        (TokenKind::For, "for"),
-        (TokenKind::Loop, "loop"),
-        (TokenKind::In, "in"),
-        (TokenKind::While, "while"),
-        (TokenKind::Break, "break"),
-        (TokenKind::Continue, "continue"),
-        (TokenKind::Null, "null"),
-        (TokenKind::Enum, "enum"),
-        (TokenKind::Match, "match"),
-        (TokenKind::Extern, "extern"),
-        (TokenKind::Global, "global"),
-        (TokenKind::Const, "const"),
-        (TokenKind::Deco, "deco"),
-        (TokenKind::Macro, "macro"),
-        (TokenKind::DirectiveIf, "#if"),
-        (TokenKind::DirectiveElseIf, "#elseif"),
-        (TokenKind::DirectiveElse, "#else"),
-        (TokenKind::DirectiveEnd, "#end"),
-        (TokenKind::Arrow, "->"),
-        (TokenKind::FatArrow, "=>"),
-        (TokenKind::Assign, "="),
-        (TokenKind::AddAssign, "+="),
-        (TokenKind::SubAssign, "-="),
-        (TokenKind::MulAssign, "*="),
-        (TokenKind::DivAssign, "/="),
-        (TokenKind::And, "and"),
-        (TokenKind::Or, "or"),
-        (TokenKind::Equals, "=="),
-        (TokenKind::NotEquals, "!="),
-        (TokenKind::OpenParen, "("),
-        (TokenKind::CloseParen, ")"),
-        (TokenKind::OpenSquare, "["),
-        (TokenKind::CloseSquare, "]"),
-        (TokenKind::OpenCurly, "{"),
-        (TokenKind::CloseCurly, "}"),
-        (TokenKind::LessThan, "<"),
-        (TokenKind::LessThanEqual, "<="),
-        (TokenKind::GreaterThan, ">"),
-        (TokenKind::GreaterThanEqual, ">="),
-        (TokenKind::Semicolon, ";"),
-        (TokenKind::Comma, ","),
-        (TokenKind::Colon, ":"),
-        (TokenKind::DoubleColon, "::"),
-        (TokenKind::Dot, "."),
-        (TokenKind::DoubleDot, ".."),
-        (TokenKind::TripleDot, "..."),
-        (TokenKind::At, "@"),
-        (TokenKind::Bang, "!"),
-        (TokenKind::True, "true"),
-        (TokenKind::False, "false"),
-        (TokenKind::Plus, "+"),
-        (TokenKind::PlusPlus, "++"),
-        (TokenKind::Minus, "-"),
-        (TokenKind::MinusMinus, "--"),
-        (TokenKind::Mul, "*"),
-        (TokenKind::Div, "/"),
-        (TokenKind::IntDiv, "./"),
-        (TokenKind::Mod, "%"),
-        (TokenKind::BitAnd, "&"),
-        (TokenKind::BitOr, "|"),
-        (TokenKind::BitXor, "^"),
-        (TokenKind::BitNot, "~"),
-        (TokenKind::LeftShift, "<<"),
-        (TokenKind::RightShift, ">>"),
-        (TokenKind::SingleQuote, "'"),
-        (TokenKind::DoubleQuote, "\""),
-        (TokenKind::QuestionMark, "?"),
-        (TokenKind::QuestionDot, "?."),
-        (TokenKind::DoubleQuestionMark, "??"),
-        (TokenKind::TripleQuestionMark, "???"),
-        (TokenKind::Dollar, "$"),
-        (TokenKind::Newline, "\n"),
-        (TokenKind::EOF, "EOF"),
+fn pin_fixed_kinds_print_and_lex_as_their_text() {
+    let unlexed = [
+        K::And,
+        K::Or,
+        K::SingleQuote,
+        K::DoubleQuote,
+        K::Newline,
+        K::EOF,
     ];
-    for (kind, text) in &cases {
-        assert_eq!(kind.to_code(), text.to_string(), "to_code for {:?}", kind);
-        assert_eq!(
-            format!("{}", kind),
-            text.to_string(),
-            "Display for {:?}",
-            kind
-        );
-    }
-    assert_eq!(
-        TokenKind::Comment(" hi".into()).to_code(),
-        "// hi".to_string()
-    );
-    assert_eq!(TokenKind::Ident("foo".into()).to_code(), "foo".to_string());
-    assert_eq!(
-        TokenKind::Int(255, "0xFF".into()).to_code(),
-        "0xFF".to_string()
-    );
-    assert_eq!(
-        TokenKind::Float(OrderedFloat(0.4)).to_code(),
-        "0.4".to_string()
-    );
-    assert_eq!(
-        TokenKind::String("hello".into()).to_code(),
-        "hello".to_string()
-    );
-    assert_eq!(
-        TokenKind::RawString("raw".into()).to_code(),
-        "raw".to_string()
-    );
-}
-
-#[test]
-fn pin_lex_roundtrip_where_it_applies() {
-    let roundtrip: Vec<(&str, TokenKind)> = vec![
-        ("fn", TokenKind::Fn),
-        ("operator", TokenKind::Operator),
-        ("table", TokenKind::Table),
-        ("type", TokenKind::Type),
-        ("as", TokenKind::As),
-        ("yield", TokenKind::Yield),
-        ("await", TokenKind::Await),
-        ("let", TokenKind::Let),
-        ("return", TokenKind::Return),
-        ("defer", TokenKind::Defer),
-        ("struct", TokenKind::Struct),
-        ("newtype", TokenKind::Newtype),
-        ("if", TokenKind::If),
-        ("else", TokenKind::Else),
-        ("for", TokenKind::For),
-        ("loop", TokenKind::Loop),
-        ("in", TokenKind::In),
-        ("while", TokenKind::While),
-        ("break", TokenKind::Break),
-        ("continue", TokenKind::Continue),
-        ("null", TokenKind::Null),
-        ("enum", TokenKind::Enum),
-        ("match", TokenKind::Match),
-        ("extern", TokenKind::Extern),
-        ("global", TokenKind::Global),
-        ("const", TokenKind::Const),
-        ("deco", TokenKind::Deco),
-        ("macro", TokenKind::Macro),
-        ("#if", TokenKind::DirectiveIf),
-        ("#elseif", TokenKind::DirectiveElseIf),
-        ("#else", TokenKind::DirectiveElse),
-        ("#end", TokenKind::DirectiveEnd),
-        ("->", TokenKind::Arrow),
-        ("=>", TokenKind::FatArrow),
-        ("=", TokenKind::Assign),
-        ("+=", TokenKind::AddAssign),
-        ("-=", TokenKind::SubAssign),
-        ("*=", TokenKind::MulAssign),
-        ("/=", TokenKind::DivAssign),
-        ("==", TokenKind::Equals),
-        ("!=", TokenKind::NotEquals),
-        ("(", TokenKind::OpenParen),
-        (")", TokenKind::CloseParen),
-        ("[", TokenKind::OpenSquare),
-        ("]", TokenKind::CloseSquare),
-        ("{", TokenKind::OpenCurly),
-        ("}", TokenKind::CloseCurly),
-        ("<", TokenKind::LessThan),
-        ("<=", TokenKind::LessThanEqual),
-        (">", TokenKind::GreaterThan),
-        (">=", TokenKind::GreaterThanEqual),
-        (";", TokenKind::Semicolon),
-        (",", TokenKind::Comma),
-        (":", TokenKind::Colon),
-        ("::", TokenKind::DoubleColon),
-        (".", TokenKind::Dot),
-        ("..", TokenKind::DoubleDot),
-        ("...", TokenKind::TripleDot),
-        ("@", TokenKind::At),
-        ("!", TokenKind::Bang),
-        ("true", TokenKind::True),
-        ("false", TokenKind::False),
-        ("+", TokenKind::Plus),
-        ("++", TokenKind::PlusPlus),
-        ("-", TokenKind::Minus),
-        ("--", TokenKind::MinusMinus),
-        ("*", TokenKind::Mul),
-        ("/", TokenKind::Div),
-        ("./", TokenKind::IntDiv),
-        ("%", TokenKind::Mod),
-        ("&", TokenKind::BitAnd),
-        ("|", TokenKind::BitOr),
-        ("^", TokenKind::BitXor),
-        ("~", TokenKind::BitNot),
-        ("<<", TokenKind::LeftShift),
-        (">>", TokenKind::RightShift),
-        ("?", TokenKind::QuestionMark),
-        ("?.", TokenKind::QuestionDot),
-        ("??", TokenKind::DoubleQuestionMark),
-        ("???", TokenKind::TripleQuestionMark),
-        ("$", TokenKind::Dollar),
-        ("foo", TokenKind::Ident("foo".into())),
-        ("_foo", TokenKind::Ident("_foo".into())),
-        ("foo_bar", TokenKind::Ident("foo_bar".into())),
+    let cases = [
+        (K::Fn, "fn"),
+        (K::Operator, "operator"),
+        (K::Table, "table"),
+        (K::Type, "type"),
+        (K::As, "as"),
+        (K::Yield, "yield"),
+        (K::Await, "await"),
+        (K::Let, "let"),
+        (K::Return, "return"),
+        (K::Defer, "defer"),
+        (K::Struct, "struct"),
+        (K::Newtype, "newtype"),
+        (K::If, "if"),
+        (K::Else, "else"),
+        (K::For, "for"),
+        (K::Loop, "loop"),
+        (K::In, "in"),
+        (K::While, "while"),
+        (K::Break, "break"),
+        (K::Continue, "continue"),
+        (K::Null, "null"),
+        (K::Enum, "enum"),
+        (K::Match, "match"),
+        (K::Extern, "extern"),
+        (K::Global, "global"),
+        (K::Const, "const"),
+        (K::Deco, "deco"),
+        (K::Macro, "macro"),
+        (K::DirectiveIf, "#if"),
+        (K::DirectiveElseIf, "#elseif"),
+        (K::DirectiveElse, "#else"),
+        (K::DirectiveEnd, "#end"),
+        (K::Arrow, "->"),
+        (K::FatArrow, "=>"),
+        (K::Assign, "="),
+        (K::AddAssign, "+="),
+        (K::SubAssign, "-="),
+        (K::MulAssign, "*="),
+        (K::DivAssign, "/="),
+        (K::And, "and"),
+        (K::Or, "or"),
+        (K::Equals, "=="),
+        (K::NotEquals, "!="),
+        (K::OpenParen, "("),
+        (K::CloseParen, ")"),
+        (K::OpenSquare, "["),
+        (K::CloseSquare, "]"),
+        (K::OpenCurly, "{"),
+        (K::CloseCurly, "}"),
+        (K::LessThan, "<"),
+        (K::LessThanEqual, "<="),
+        (K::GreaterThan, ">"),
+        (K::GreaterThanEqual, ">="),
+        (K::Semicolon, ";"),
+        (K::Comma, ","),
+        (K::Colon, ":"),
+        (K::DoubleColon, "::"),
+        (K::Dot, "."),
+        (K::DoubleDot, ".."),
+        (K::TripleDot, "..."),
+        (K::At, "@"),
+        (K::Bang, "!"),
+        (K::True, "true"),
+        (K::False, "false"),
+        (K::Plus, "+"),
+        (K::PlusPlus, "++"),
+        (K::Minus, "-"),
+        (K::MinusMinus, "--"),
+        (K::Mul, "*"),
+        (K::Div, "/"),
+        (K::IntDiv, "./"),
+        (K::Mod, "%"),
+        (K::BitAnd, "&"),
+        (K::BitOr, "|"),
+        (K::BitXor, "^"),
+        (K::BitNot, "~"),
+        (K::LeftShift, "<<"),
+        (K::RightShift, ">>"),
+        (K::SingleQuote, "'"),
+        (K::DoubleQuote, "\""),
+        (K::QuestionMark, "?"),
+        (K::QuestionDot, "?."),
+        (K::DoubleQuestionMark, "??"),
+        (K::TripleQuestionMark, "???"),
+        (K::Dollar, "$"),
+        (K::Newline, "\n"),
+        (K::EOF, "EOF"),
     ];
-    for (src, expected) in &roundtrip {
-        assert_eq!(&kinds(src), &vec![*expected], "roundtrip {:?}", src);
-        assert_eq!(expected.to_code(), src.to_string(), "to_code {:?}", src);
+    for (kind, text) in cases {
+        assert_eq!(kind.to_code(), text, "to_code for {kind:?}");
+        assert_eq!(kind.to_string(), text, "Display for {kind:?}");
+        if !unlexed.contains(&kind) {
+            assert_eq!(kinds(text), [kind], "lex {text:?}");
+        }
     }
-    assert_eq!(kinds("&&"), vec![TokenKind::And]);
-    assert_eq!(kinds("||"), vec![TokenKind::Or]);
-    assert_eq!(TokenKind::And.to_code(), "and".to_string());
-    assert_eq!(TokenKind::Or.to_code(), "or".to_string());
-    assert_eq!(kinds("and"), vec![TokenKind::Ident("__rock_and".into())]);
-    assert_eq!(kinds("or"), vec![TokenKind::Ident("__rock_or".into())]);
-    assert_eq!(kinds("do"), vec![TokenKind::Ident("__rock_do".into())]);
-    assert_eq!(kinds("nil"), vec![TokenKind::Ident("__rock_nil".into())]);
-    assert_eq!(kinds("// hi"), vec![TokenKind::Comment(" hi".into())]);
-    assert_eq!(
-        TokenKind::Comment(" hi".into()).to_code(),
-        "// hi".to_string()
-    );
+    assert_eq!(TokenKind::Comment(" hi".into()).to_code(), "// hi");
+    assert_eq!(TokenKind::Ident("foo".into()).to_code(), "foo");
+    assert_eq!(TokenKind::Int(255, "0xFF".into()).to_code(), "0xFF");
+    assert_eq!(TokenKind::Int(5, "0b101".into()).to_code(), "0b101");
+    assert_eq!(TokenKind::Float(OrderedFloat(0.4)).to_code(), "0.4");
+    assert_eq!(TokenKind::String("hello".into()).to_code(), "hello");
+    assert_eq!(TokenKind::RawString("raw".into()).to_code(), "raw");
+    for ident in ["foo", "_foo", "foo_bar", "EOF"] {
+        assert_eq!(kinds(ident), [TokenKind::Ident(ident.into())]);
+    }
+    assert_eq!(kinds("&&"), [TokenKind::And]);
+    assert_eq!(kinds("||"), [TokenKind::Or]);
+    assert_eq!(kinds("and"), [TokenKind::Ident("__rock_and".into())]);
+    assert_eq!(kinds("or"), [TokenKind::Ident("__rock_or".into())]);
+    assert_eq!(kinds("do"), [TokenKind::Ident("__rock_do".into())]);
+    assert_eq!(kinds("nil"), [TokenKind::Ident("__rock_nil".into())]);
     assert!(kinds_err("'").contains("unterminated"));
     assert!(kinds_err("\"").contains("unterminated"));
-    assert_eq!(TokenKind::SingleQuote.to_code(), "'".to_string());
-    assert_eq!(TokenKind::DoubleQuote.to_code(), "\"".to_string());
-    assert_eq!(TokenKind::EOF.to_code(), "EOF".to_string());
-    assert_eq!(kinds("EOF"), vec![TokenKind::Ident("EOF".into())]);
 }
 
 #[test]
@@ -386,14 +278,6 @@ fn pin_numbers_hex_binary_underscores() {
     assert_eq!(kinds("0x0"), vec![TokenKind::Int(0, "0x0".into())]);
     assert_eq!(kinds("-0b101"), vec![TokenKind::Int(-5, "-0b101".into())]);
     assert_eq!(kinds("-0xFF"), vec![TokenKind::Int(-255, "-0xFF".into())]);
-    assert_eq!(
-        TokenKind::Int(255, "0xFF".into()).to_code(),
-        "0xFF".to_string()
-    );
-    assert_eq!(
-        TokenKind::Int(5, "0b101".into()).to_code(),
-        "0b101".to_string()
-    );
 }
 
 #[test]
@@ -465,7 +349,6 @@ fn pin_minus_and_dot_context() {
         kinds("- 5"),
         vec![TokenKind::Minus, TokenKind::Int(5, "5".into())]
     );
-    assert_eq!(kinds(".35"), vec![TokenKind::Float(OrderedFloat(0.35))]);
     assert_eq!(
         kinds("restitution: .35"),
         vec![
@@ -492,7 +375,6 @@ fn pin_minus_and_dot_context() {
             TokenKind::Float(OrderedFloat(0.5)),
         ]
     );
-    assert_eq!(kinds("-.5"), vec![TokenKind::Float(OrderedFloat(-0.5))]);
     assert_eq!(
         kinds("w.0"),
         vec![
@@ -562,55 +444,6 @@ fn pin_minus_and_dot_context() {
 #[test]
 fn pin_every_operator_and_multi_char_operator() {
     let cases: Vec<(&str, Vec<TokenKind>)> = vec![
-        ("(", vec![TokenKind::OpenParen]),
-        (")", vec![TokenKind::CloseParen]),
-        ("[", vec![TokenKind::OpenSquare]),
-        ("]", vec![TokenKind::CloseSquare]),
-        ("{", vec![TokenKind::OpenCurly]),
-        ("}", vec![TokenKind::CloseCurly]),
-        ("->", vec![TokenKind::Arrow]),
-        ("=>", vec![TokenKind::FatArrow]),
-        ("=", vec![TokenKind::Assign]),
-        ("+=", vec![TokenKind::AddAssign]),
-        ("-=", vec![TokenKind::SubAssign]),
-        ("*=", vec![TokenKind::MulAssign]),
-        ("/=", vec![TokenKind::DivAssign]),
-        ("==", vec![TokenKind::Equals]),
-        ("!=", vec![TokenKind::NotEquals]),
-        ("<", vec![TokenKind::LessThan]),
-        ("<=", vec![TokenKind::LessThanEqual]),
-        ("<<", vec![TokenKind::LeftShift]),
-        (">", vec![TokenKind::GreaterThan]),
-        (">=", vec![TokenKind::GreaterThanEqual]),
-        (">>", vec![TokenKind::RightShift]),
-        (";", vec![TokenKind::Semicolon]),
-        (",", vec![TokenKind::Comma]),
-        (":", vec![TokenKind::Colon]),
-        ("::", vec![TokenKind::DoubleColon]),
-        (".", vec![TokenKind::Dot]),
-        ("..", vec![TokenKind::DoubleDot]),
-        ("...", vec![TokenKind::TripleDot]),
-        ("./", vec![TokenKind::IntDiv]),
-        ("@", vec![TokenKind::At]),
-        ("$", vec![TokenKind::Dollar]),
-        ("!", vec![TokenKind::Bang]),
-        ("+", vec![TokenKind::Plus]),
-        ("++", vec![TokenKind::PlusPlus]),
-        ("-", vec![TokenKind::Minus]),
-        ("--", vec![TokenKind::MinusMinus]),
-        ("*", vec![TokenKind::Mul]),
-        ("/", vec![TokenKind::Div]),
-        ("%", vec![TokenKind::Mod]),
-        ("&", vec![TokenKind::BitAnd]),
-        ("&&", vec![TokenKind::And]),
-        ("|", vec![TokenKind::BitOr]),
-        ("||", vec![TokenKind::Or]),
-        ("^", vec![TokenKind::BitXor]),
-        ("~", vec![TokenKind::BitNot]),
-        ("?", vec![TokenKind::QuestionMark]),
-        ("?.", vec![TokenKind::QuestionDot]),
-        ("??", vec![TokenKind::DoubleQuestionMark]),
-        ("???", vec![TokenKind::TripleQuestionMark]),
         ("....", vec![TokenKind::TripleDot, TokenKind::Dot]),
         (".....", vec![TokenKind::TripleDot, TokenKind::DoubleDot]),
         ("......", vec![TokenKind::TripleDot, TokenKind::TripleDot]),
@@ -771,10 +604,6 @@ fn pin_comments_and_directives() {
     assert!(kinds_err("/* a *").contains("unterminated block comment"));
     assert_eq!(kinds("#"), vec![TokenKind::Comment("".into())]);
     assert_eq!(kinds("# foo"), vec![TokenKind::Comment(" foo".into())]);
-    assert_eq!(kinds("#if"), vec![TokenKind::DirectiveIf]);
-    assert_eq!(kinds("#elseif"), vec![TokenKind::DirectiveElseIf]);
-    assert_eq!(kinds("#else"), vec![TokenKind::DirectiveElse]);
-    assert_eq!(kinds("#end"), vec![TokenKind::DirectiveEnd]);
     assert_eq!(
         kinds("#if x"),
         vec![TokenKind::DirectiveIf, TokenKind::Ident("x".into())]
@@ -785,7 +614,6 @@ fn pin_comments_and_directives() {
     );
     assert_eq!(kinds("#endif"), vec![TokenKind::Comment("endif".into())]);
     assert_eq!(kinds("#ELSE"), vec![TokenKind::Comment("ELSE".into())]);
-    assert_eq!(kinds("/"), vec![TokenKind::Div]);
     let t = toks("fn // hi\n if");
     assert_eq!(t.len(), 3);
     assert_eq!(t[0].kind, TokenKind::Fn);
