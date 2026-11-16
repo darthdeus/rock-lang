@@ -811,6 +811,31 @@ fn int_literal_and_return() {
 }
 
 #[test]
+fn repeated_nil_is_written_at_each_use_without_a_register() {
+    common::require_luajit();
+    let lua = emit_clean(
+        "struct Pair { a: int?, b: int? } fn absent(flag: bool) -> Pair { let value: int? = null; if flag { return Pair { a: value, b: value } } return Pair { a: value, b: null } }",
+        "absent",
+    );
+    assert!(
+        !lua.lines()
+            .any(|line| line.trim_start().starts_with("local r")),
+        "nil needs no register even with readers in different blocks:\n{lua}"
+    );
+    let symbol = lua
+        .lines()
+        .find_map(|line| line.strip_prefix("function "))
+        .unwrap()
+        .split('(')
+        .next()
+        .unwrap();
+    let driver = format!(
+        "{lua}\nfor i = 1, 10000 do local p = {symbol}(i % 2 == 0); assert(p.a == nil and p.b == nil) end"
+    );
+    luajit_ok(&driver, &lua);
+}
+
+#[test]
 fn zero_argument_call_preserves_value_without_a_bare_global() {
     let src = "fn five() -> int { 5 } fn answer() -> int { five() }";
     let lua = format!("{}{}", emit(src, "five"), emit(src, "answer"));

@@ -188,9 +188,11 @@ pub(crate) fn compute_inlinable(
                 Inst::Load(cell)
                     if immutable_params[raw(*cell) as usize] || received[raw(*cell) as usize]
             );
-            repeatable[k] = parameter_load;
+            let nil = matches!(func.insts[id], Inst::Const(Lit::Nil));
+            repeatable[k] = parameter_load || nil;
             // A store base other than a plain local keeps its own register.
             if parameter_load
+                || nil
                 || (uses.count[k] == 1
                     && def_block[k] != NONE
                     && def_block[k] == uses.block[k]
