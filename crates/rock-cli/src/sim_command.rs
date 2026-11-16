@@ -73,26 +73,12 @@ pub(crate) fn handle_sim(cx: &crate::CommandContext) -> Result<()> {
         crate::run_sim::do_list_sims(project)
     } else if cx.args.files.is_empty() {
         anyhow::bail!("sim needs a project: rock sim <project> [name]");
-    } else if cx.args.files.len() == 1 {
-        // No name: run the whole suite.
-        let project = &cx.args.files[0];
-        crate::run_sim::do_run_all_sims(
-            project,
-            cx.args.quiet,
-            cx.args.update_snapshots,
-            cx.args.jobs,
-            cx.args.jobs_force,
-            cx.args.full_asset_jobs,
-        )
     } else {
-        // files[0] = project, files[1..] = one or more sim names. One name
-        // streams full detail; several run concise (per-sim verdict +
-        // final tally). Each name may itself be a `a,b` multi-start chain.
-        let project = &cx.args.files[0];
-        let names = cx.args.files[1..].to_vec();
-        crate::run_sim::do_run_named_sims(
-            project,
-            &names,
+        // files[0] = project, files[1..] = sim names (none: the whole suite).
+        // Each name may itself be a `a,b` multi-start chain.
+        crate::run_sim::do_run_sims(
+            &cx.args.files[0],
+            &cx.args.files[1..],
             cx.args.quiet,
             cx.args.update_snapshots,
             cx.args.jobs,

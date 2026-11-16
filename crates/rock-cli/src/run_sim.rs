@@ -1963,13 +1963,14 @@ fn verdict_word(summary: &SimSummary) -> &'static str {
     }
 }
 
-/// Run a specific list of named sims (the `rock sim <project> a b c` form).
-/// A single name delegates to `do_run_sim_opts_with_request` and streams full per-expect
-/// detail. Multiple names run concise: no live log, just each sim's verdict
-/// (with its failing assertions) plus a final tally. Compiles once; each
-/// named entry gets its own tempdir. Returns Err (non-zero exit) if any
-/// named entry failed.
-pub(crate) fn do_run_named_sims(
+/// Run the whole suite (`rock sim <project>`, `names` empty) or the named
+/// sims (`rock sim <project> a b c`). A single name delegates to
+/// `do_run_sim_opts_with_request` and streams full per-expect detail. Otherwise
+/// the project compiles once, each entry runs in its own child with its own
+/// `$OUT`, and a final tally follows. A serial suite streams live; named runs
+/// and concurrent suites print each record whole. Returns Err (non-zero exit)
+/// if any entry failed.
+pub(crate) fn do_run_sims(
     project: &str,
     names: &[String],
     quiet: bool,
@@ -1978,8 +1979,7 @@ pub(crate) fn do_run_named_sims(
     jobs_force: bool,
     full_asset_jobs: Option<usize>,
 ) -> Result<()> {
-    // One name: identical to the classic single-run path (full detail). There
-    // is nothing to overlap, so `--jobs` does not apply.
+    // One name: there is nothing to overlap, so `--jobs` does not apply.
     if names.len() == 1 {
         if jobs.is_some_and(|j| j > 1) {
             resolve_jobs(jobs, Some(1), update_snapshots, jobs_force)?;
@@ -1987,8 +1987,13 @@ pub(crate) fn do_run_named_sims(
         return do_run_sim_opts_with_request(project, &names[0], quiet, update_snapshots, jobs);
     }
 
-    let recorder = SimRunRecorder::begin(project, &names.join(" "), quiet, jobs);
-    let result = do_run_named_sims_recorded(
+    let selection = if names.is_empty() {
+        "<all>".to_string()
+    } else {
+        names.join(" ")
+    };
+    let recorder = SimRunRecorder::begin(project, &selection, quiet, jobs);
+    let result = do_run_sims_recorded(
         project,
         names,
         quiet,
@@ -2003,7 +2008,7 @@ pub(crate) fn do_run_named_sims(
     result
 }
 
-fn do_run_named_sims_recorded(
+fn do_run_sims_recorded(
     project: &str,
     names: &[String],
     quiet: bool,
@@ -2013,6 +2018,7 @@ fn do_run_named_sims_recorded(
     full_asset_jobs: Option<usize>,
     recorder: &SimRunRecorder,
 ) -> Result<()> {
+    let suite = names.is_empty();
     let project_path = recorder.phase("resolve_project", || {
         rock_engine_host::project::resolve_project_dir(project)
     })?;
@@ -2035,22 +2041,31 @@ fn do_run_named_sims_recorded(
     let env_by_wire = prepared.env_by_wire;
     let source_files = prepared.source_files;
     let sim_sources = resolve_sim_sources(&project_path, &source_files)?;
-    let names = &resolve_sim_specs(&wire_names, names)?;
+    let specs = if suite {
+        wire_names.clone()
+    } else {
+        resolve_sim_specs(&wire_names, names)?
+    };
     emit_bytecode_image(Path::new(&output));
-    let entry_ids = recorder.plan_entries(names);
-    // Records print whole once every sim is done, so a run of several says
-    // where to follow it live.
-    if names.len() > 1 && !quiet {
+    if specs.is_empty() {
+        return Err(anyhow!("no @sim coroutines found in project `{project}`"));
+    }
+    let entry_ids = recorder.plan_entries(&specs);
+    // Records print whole once every sim is done, so a named run says where
+    // to follow it live.
+    if !suite && !quiet {
         if let Some(events) = recorder.events_path() {
             println!(
                 "[sim] {} sims: records print when all are done; live entry_start/entry_end in {}",
-                names.len(),
+                specs.len(),
                 events.display()
             );
         }
     }
 
-    let effective_jobs = resolve_pool_jobs(jobs, Some(names.len()), update_snapshots, jobs_force)?;
+    // Explicit requests narrow to their entries (see `resolve_jobs`).
+    let lanes = (!suite).then_some(specs.len());
+    let effective_jobs = resolve_pool_jobs(jobs, lanes, update_snapshots, jobs_force)?;
     let requested_full_asset_jobs = full_asset_jobs;
     let full_asset_jobs = resolve_full_asset_jobs(full_asset_jobs, effective_jobs);
     recorder.configure(
@@ -2063,33 +2078,57 @@ fn do_run_named_sims_recorded(
         update_snapshots,
         &source_files,
     );
+    let selected = specs.len();
+    // The suite skips manual sims; naming one runs it.
+    let mut routine_specs = Vec::new();
+    let mut routine_ids = Vec::new();
+    for (name, id) in specs.into_iter().zip(entry_ids) {
+        if suite && manual_sim(env_by_wire.get(&name).map_or(&[][..], |v| v))? {
+            record_excluded_entry(Some(recorder), Some(id));
+            SimSummary {
+                excluded: Some("manual; run by name".to_string()),
+                saw_stop: true,
+                ..SimSummary::default()
+            }
+            .print(&name, false);
+        } else {
+            routine_specs.push(name);
+            routine_ids.push(id);
+        }
+    }
+    let manual_excluded = selected - routine_specs.len();
     let mut reload_lane = reload_lane_session(
         &project_path,
-        any_reload_lane_selected(names, &env_by_wire),
+        any_reload_lane_selected(&routine_specs, &env_by_wire),
         Path::new(&output),
         prepared.stone,
         quiet,
     )?;
-    // Buffered, not silenced: the per-expect stream is suppressed (it would
-    // interleave), but each record carries its diagnostics and sited failures.
+    // Concurrent children cannot stream: their progress lines would
+    // interleave. Buffered, not silenced: each record carries its diagnostics
+    // and sited failures.
     let results = run_fresh_entries(FreshRun {
         output: &output,
         env_by_wire: &env_by_wire,
-        specs: names,
+        specs: &routine_specs,
         source_files: &sim_sources,
         quiet,
-        streaming: false,
+        streaming: suite && effective_jobs == 1 && !quiet,
         update_snapshots,
         jobs: effective_jobs,
         full_asset_jobs,
         reload_lane: reload_lane.as_mut(),
         recorder,
-        entry_ids: &entry_ids,
+        entry_ids: &routine_ids,
     })?;
     let (passed, excluded, failed) = tally_entries(&results);
-    let executed = names.len() - excluded;
+    let excluded = excluded + manual_excluded;
+
+    // Result output, NOT logging: the verdict is this command's answer,
+    // consumed by the user / CI.
+    let executed = selected - excluded;
     let excl_suffix = if excluded > 0 {
-        format!(" (selected {}, {excluded} excluded)", names.len())
+        format!(" (selected {selected}, {excluded} excluded)")
     } else {
         String::new()
     };
@@ -2098,11 +2137,15 @@ fn do_run_named_sims_recorded(
     } else {
         format!(" -- FAILED: {}", failed.join(", "))
     };
-    // Result output, NOT logging: the multi-run verdict, consumed by you/CI.
-    println!("[sim] {passed}/{executed} sims passed{excl_suffix}{suffix}");
+    let (scope, what) = if suite {
+        (format!(" {project} suite:"), "sims")
+    } else {
+        (String::new(), "named sims")
+    };
+    println!("[sim]{scope} {passed}/{executed} sims passed{excl_suffix}{suffix}");
     if !failed.is_empty() {
         return Err(anyhow!(
-            "{} of {} named sims failed in `{project}`",
+            "{} of {} {what} failed in `{project}`",
             failed.len(),
             executed
         ));
@@ -2529,150 +2572,6 @@ where
     collected
         .into_inner()
         .expect("no lane panicked while holding the results lock")
-}
-
-pub(crate) fn do_run_all_sims(
-    project: &str,
-    quiet: bool,
-    update_snapshots: bool,
-    jobs: Option<usize>,
-    jobs_force: bool,
-    full_asset_jobs: Option<usize>,
-) -> Result<()> {
-    let recorder = SimRunRecorder::begin(project, "<all>", quiet, jobs);
-    let result = do_run_all_sims_recorded(
-        project,
-        quiet,
-        update_snapshots,
-        jobs,
-        jobs_force,
-        full_asset_jobs,
-        &recorder,
-    );
-    let error = result.as_ref().err().map(ToString::to_string);
-    recorder.finish(result.is_ok(), error.as_deref());
-    result
-}
-
-fn do_run_all_sims_recorded(
-    project: &str,
-    quiet: bool,
-    update_snapshots: bool,
-    jobs: Option<usize>,
-    jobs_force: bool,
-    full_asset_jobs: Option<usize>,
-    recorder: &SimRunRecorder,
-) -> Result<()> {
-    let project_path = recorder.phase("resolve_project", || {
-        rock_engine_host::project::resolve_project_dir(project)
-    })?;
-    let project = project_path.to_string_lossy().into_owned();
-    recorder.phase("build_engine", || {
-        rock_engine_host::engine_build::build_engine_libs(&project)
-    })?;
-
-    let out_dir = sim_output_dir()?;
-    let output = out_dir.path().to_string_lossy().into_owned();
-    let prepared = recorder.phase("compile_and_discover", || {
-        prepare_sims_out_of_process(
-            project_path.clone(),
-            PathBuf::from(&output),
-            &rock_host::process_management::current_executable_image()?,
-            &[],
-        )
-    })?;
-    let wire_names = prepared.wire_names;
-    let env_by_wire = prepared.env_by_wire;
-    let source_files = prepared.source_files;
-    let sim_sources = resolve_sim_sources(&project_path, &source_files)?;
-    emit_bytecode_image(Path::new(&output));
-    if wire_names.is_empty() {
-        return Err(anyhow!("no @sim coroutines found in project `{project}`"));
-    }
-
-    let entry_ids = recorder.plan_entries(&wire_names);
-    let effective_jobs = resolve_pool_jobs(jobs, None, update_snapshots, jobs_force)?;
-    let requested_full_asset_jobs = full_asset_jobs;
-    let full_asset_jobs = resolve_full_asset_jobs(full_asset_jobs, effective_jobs);
-    recorder.configure(
-        &project_path,
-        &wire_names,
-        jobs,
-        effective_jobs,
-        requested_full_asset_jobs,
-        full_asset_jobs,
-        update_snapshots,
-        &source_files,
-    );
-    let selected = wire_names.len();
-    let mut routine_names = Vec::new();
-    let mut routine_ids = Vec::new();
-    for (name, id) in wire_names.into_iter().zip(entry_ids) {
-        if manual_sim(env_by_wire.get(&name).map_or(&[][..], |v| v))? {
-            record_excluded_entry(Some(recorder), Some(id));
-            SimSummary {
-                excluded: Some("manual; run by name".to_string()),
-                saw_stop: true,
-                ..SimSummary::default()
-            }
-            .print(&name, false);
-        } else {
-            routine_names.push(name);
-            routine_ids.push(id);
-        }
-    }
-    let wire_names = routine_names;
-    let entry_ids = routine_ids;
-    let manual_excluded = selected - wire_names.len();
-    let mut reload_lane = reload_lane_session(
-        &project_path,
-        any_reload_lane_selected(&wire_names, &env_by_wire),
-        Path::new(&output),
-        prepared.stone,
-        quiet,
-    )?;
-    // Concurrent children cannot stream: their progress lines would
-    // interleave. Serial runs keep the live stream.
-    let results = run_fresh_entries(FreshRun {
-        output: &output,
-        env_by_wire: &env_by_wire,
-        specs: &wire_names,
-        source_files: &sim_sources,
-        quiet,
-        streaming: effective_jobs == 1 && !quiet,
-        update_snapshots,
-        jobs: effective_jobs,
-        full_asset_jobs,
-        reload_lane: reload_lane.as_mut(),
-        recorder,
-        entry_ids: &entry_ids,
-    })?;
-    let (passed, excluded, failed) = tally_entries(&results);
-    let excluded = excluded + manual_excluded;
-
-    // Result output, NOT logging: the suite verdict is this command's
-    // answer, consumed by the user / CI.
-    let executed = selected - excluded;
-    let excl_suffix = if excluded > 0 {
-        format!(" (selected {selected}, {excluded} excluded)")
-    } else {
-        String::new()
-    };
-    let suffix = if failed.is_empty() {
-        String::new()
-    } else {
-        format!(" -- FAILED: {}", failed.join(", "))
-    };
-    println!("[sim] {project} suite: {passed}/{executed} sims passed{excl_suffix}{suffix}");
-
-    if !failed.is_empty() {
-        return Err(anyhow!(
-            "{} of {} sims failed in `{project}`",
-            failed.len(),
-            executed
-        ));
-    }
-    Ok(())
 }
 
 const DEFAULT_SIM_ALLOCATION_WARMUP_FRAMES: usize = 2;
