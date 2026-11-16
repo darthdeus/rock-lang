@@ -8,15 +8,10 @@ fn Mob.take_damage(m, amount: int) -> int {
     return m.hp - amount
 }
 
-@test(output = "7")
-fn test_dform_dot_call() {
+@test(output = "7\n7")
+fn test_dform_dot_and_bare_call() {
     let m = Mob { hp: 10 }
     print(m.take_damage(3))
-}
-
-@test(output = "7")
-fn test_dform_bare_call() {
-    let m = Mob { hp: 10 }
     print(take_damage(m, 3))
 }
 

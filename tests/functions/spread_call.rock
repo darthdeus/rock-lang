@@ -98,16 +98,12 @@ struct Pair<T> { a: T, b: T }
 fn sum2(a: int, b: int) -> int { a + b }
 fn cat2(a: string, b: string) -> string { "{a}{b}" }
 
-@test(output = "3")
-fn test_spread_generic_int() {
+@test(output = "3\nxy")
+fn test_spread_generic_instantiations() {
     let p = Pair { a: 1, b: 2 }
     print(sum2(..p))
-}
-
-@test(output = "xy")
-fn test_spread_generic_string() {
-    let p = Pair { a: "x", b: "y" }
-    print(cat2(..p))
+    let q = Pair { a: "x", b: "y" }
+    print(cat2(..q))
 }
 
 // Call-site spread selecting among overloads. The spread
@@ -120,16 +116,12 @@ struct StrPair { a: string, b: string }
 fn combine2(a: int, b: int) -> string { "int:{a + b}" }
 fn combine2(a: string, b: string) -> string { "str:{a}{b}" }
 
-@test(output = "int:3")
-fn test_spread_selects_int_overload() {
+@test(output = "int:3\nstr:xy")
+fn test_spread_selects_overload() {
     let p = IntPair { a: 1, b: 2 }
     print(combine2(..p))
-}
-
-@test(output = "str:xy")
-fn test_spread_selects_str_overload() {
-    let p = StrPair { a: "x", b: "y" }
-    print(combine2(..p))
+    let q = StrPair { a: "x", b: "y" }
+    print(combine2(..q))
 }
 
 // A spread of a struct literal is never materialized: its field
@@ -145,17 +137,13 @@ fn tick(tag: string, val: int) -> int {
 
 fn use2(a: int, b: int) -> string { "{a},{b}" }
 
-@test(output = "10,20 order=ab")
+// Fields written out of declared order still evaluate in SOURCE order.
+@test(output = "10,20 order=ab\n10,20 order=ba")
 fn test_spread_literal_eval_order() {
     ORDER = ""
     let r = use2(..AB { a: tick("a", 10), b: tick("b", 20) })
     print("{r} order={ORDER}")
-}
-
-// Fields written out of declared order still evaluate in SOURCE order.
-@test(output = "10,20 order=ba")
-fn test_spread_literal_source_order() {
     ORDER = ""
-    let r = use2(..AB { b: tick("b", 20), a: tick("a", 10) })
-    print("{r} order={ORDER}")
+    let s = use2(..AB { b: tick("b", 20), a: tick("a", 10) })
+    print("{s} order={ORDER}")
 }

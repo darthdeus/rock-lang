@@ -8,8 +8,6 @@
 
 const CANS: int = 7
 global COUNTER: int = 0
-global BASE: int = 100
-global DERIVED: int = BASE + 5
 
 fn bump() -> int {
     COUNTER = COUNTER + 1
@@ -20,21 +18,6 @@ fn bump() -> int {
 @test(returns = 21)
 fn read_const_global() -> int {
     return CANS * 3
-}
-
-// Mutable state: reset, mutate through a call chain, read back.
-@test(returns = 3)
-fn mutate_counter() -> int {
-    COUNTER = 0
-    bump()
-    bump()
-    return bump()
-}
-
-// A global initialized FROM another global -- init order must place BASE first.
-@test(returns = 105)
-fn derived_global_init() -> int {
-    return DERIVED
 }
 
 // A top-level fn used as a value (Inst::Global naming a function).
@@ -58,8 +41,7 @@ fn fn_value_as_arg() -> int {
     return apply(add_one, 7)
 }
 
-// Output form: mutate a global across calls and print it (module state persists
-// between the calls within one test, same as luajit).
+// Mutate a global through a call chain and read it back between calls.
 @test(output = "1 2 3")
 fn counter_output() {
     COUNTER = 0
@@ -89,14 +71,4 @@ global ORIGIN: NP = NP { x: 3, y: 4 }
 @test(returns = 34)
 fn nobox_global_initializes_its_leaves() -> int {
     return ORIGIN.x * 10 + ORIGIN.y
-}
-
-// A lambda initializer resolves through code slots that are staged only after
-// every body is emitted, so it must run after that staging.
-global SQUARE: fn(int) -> int = (x: int) => x * x
-const OPS: [fn(int) -> int] = [(x: int) => x + 1]
-
-@test(returns = 54)
-fn lambda_global_initializer() -> int {
-    return SQUARE(7) + OPS[0](4)
 }

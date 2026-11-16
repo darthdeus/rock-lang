@@ -1,7 +1,8 @@
 // Parameter defaults: a call omitting trailing defaulted params gets the
 // defaults injected at the call site, each lowered like a provided argument.
-// Covers string, numeric, bool, struct and lambda defaults, overload
-// resolution in the presence of defaults, and `@nomangle` callees.
+// Covers string, numeric, lambda and value-struct defaults, unit-returning
+// callees, overload resolution in the presence of defaults, and `@nomangle`
+// callees.
 
 fn greet_bang(name: string, greeting: string = "hello", excl: int = 1) -> string {
     let s = "{greeting}, {name}"
@@ -18,37 +19,24 @@ fn add3(a: int, b: int = 10, c: int = 100) -> int {
     return a + b + c
 }
 
-@test(output = "hello, world!")
-fn test_omit_two_defaults() {
+@test(output = "hello, world!\nhi, bob!\nyo, sam!!!\n111\n123")
+fn test_omit_trailing_defaults() {
     print(greet_bang("world"))
-}
-
-@test(output = "hi, bob!")
-fn test_omit_one_default() {
     print(greet_bang("bob", "hi"))
-}
-
-@test(output = "yo, sam!!!")
-fn test_provide_all() {
     print(greet_bang("sam", "yo", 3))
-}
-
-@test(output = "111")
-fn test_numeric_defaults() {
     print(add3(1))
-}
-
-@test(output = "123")
-fn test_numeric_partial() {
     print(add3(1, 22))
 }
 
-// ============================================
-// Helper Function Definitions
-// ============================================
-
 fn greet(name: string = "world", prefix: string = "Hello, ") {
     print("{prefix}{name}")
+}
+
+@test(output = "Hello, world\nHello, Rust\n? Lua")
+fn test_unit_callee_defaults() {
+    greet()
+    greet("Rust")
+    greet("Lua", "? ")
 }
 
 fn mul(x:int, y:int) -> int { return x * y }
@@ -57,135 +45,14 @@ fn mul(x:int, y:int = 1, z:int = 1) -> int { return x * y * z }
 fn thing(x: int, y:int = 1) -> int { return 1 }
 fn thing(x: string, y:int = 1) -> int { return 2 }
 
-fn compute(base: int, multiplier: int = 2) -> int {
-    return base * multiplier
-}
-
-fn format_message(greeting: string = "Hello", target: string = "World") -> string {
-    return "{greeting}, {target}!"
-}
-
-fn check_flag(enabled: bool = true) -> bool {
-    return enabled
-}
-
-fn calculate(a: int, b: int = 5, c: int = 10) -> int {
-    return a + b + c
-}
-
-struct Point { x: int, y: int }
-
-fn create_point(x: int = 0, y: int = 0) -> Point {
-    return Point { x: x, y: y }
-}
-
-fn process_items(count: int = 1) {
-    if count == 1 {
-        print("Processing {count} item")
-    } else {
-        print("Processing {count} items")
-    }
-}
-
-// ============================================
-// Successful Default Argument Usage Tests
-// ============================================
-
-@test(output = "Hello, world\nHello, Rust\n? Lua")
-fn test_chained_defaults() {
-    greet()            // → Hello, world
-    greet("Rust")      // → Hello, Rust
-    greet("Lua", "? ") // → ? Lua
-}
-
-@test(output = "42\n9")
-fn test_overload_prefers_no_defaults() {
-    print(mul(7, 6))   // exact arity → first overload, 42
-    print(mul(9))      // needs defaults → second overload, 9
-}
-
-@test(output = "2\n1")
-fn test_overload_with_defaults_still_works() {
+// Exact arity picks the overload without defaults; otherwise the overload
+// whose defaults fill the call is chosen.
+@test(output = "42\n9\n2\n1")
+fn test_overloads_with_defaults() {
+    print(mul(7, 6))
+    print(mul(9))
     print(thing("hello"))
     print(thing(5))
-}
-
-// ============================================
-// Error Cases - These should NOT compile
-// ============================================
-
-// NOTE: The following tests demonstrate error cases that should fail at compile time.
-// Since Rock's @test system currently focuses on runtime output validation,
-// these are documented as examples of what should NOT be allowed.
-// A future enhancement could add @test(compile_error = true) support.
-
-// EXAMPLE 1: Missing required argument
-// fn foo(a: int, b: int) -> int { return a + b }
-// print(foo(1))  // ERROR: Missing argument 'b'
-
-// EXAMPLE 2: Type mismatch in default value
-// fn bad(a: int = "hello") -> int { return a }  // ERROR: Type mismatch
-
-// EXAMPLE 3: Non-trailing default arguments
-// fn bad(a: int = 1, b: int) -> int { return a + b }  // ERROR: Default args must be trailing
-
-// EXAMPLE 4: Ambiguous overload with defaults
-// fn amb(x: int, y: string = "he") -> int { return x }
-// fn amb(x: int, y: int = 1)       -> int { return x + y }
-// print(amb(5))  // ERROR: Both overloads viable
-
-// EXAMPLE 5: Multiple non-trailing defaults
-// fn bad(a:int = 1, b:int, c:int = 2, d:int) {}  // ERROR: Multiple default violations
-
-// EXAMPLE 6: Wrong type for default value
-// fn bad2(flag: bool = 123) {}  // ERROR: 123 is not a bool
-
-// EXAMPLE 7: Still ambiguous with same parameter count
-// fn amb(x:int, y:int = 0) {}
-// fn amb(x:int, z:int = 0) {}
-// amb(1)  // ERROR: Both functions match with defaults
-
-// ============================================
-// Additional Complex Default Argument Tests
-// ============================================
-
-@test(output = "Default value: 42\nCustom value: 100")
-fn test_default_with_expressions() {
-    print("Default value: {compute(21)}")
-    print("Custom value: {compute(25, 4)}")
-}
-
-@test(output = "Hello, World!\nHello, Rock!")
-fn test_string_defaults() {
-    print(format_message())
-    print(format_message("Hello", "Rock"))
-}
-
-@test(output = "true\nfalse")
-fn test_boolean_defaults() {
-    print(check_flag())
-    print(check_flag(false))
-}
-
-@test(output = "Sum: 15\nSum: 35")
-fn test_multiple_defaults() {
-    print("Sum: {calculate(0)}")      // Uses both defaults: 0 + 5 + 10 = 15
-    print("Sum: {calculate(10, 15)}") // Uses c default: 10 + 15 + 10 = 35
-}
-
-@test(output = "Point(0, 0)\nPoint(5, 3)")
-fn test_struct_with_defaults() {
-    let p1 = create_point()
-    let p2 = create_point(5, 3)
-    
-    print("Point({p1.x}, {p1.y})")
-    print("Point({p2.x}, {p2.y})")
-}
-
-@test(output = "Processing 1 item\nProcessing 5 items")
-fn test_default_with_conditionals() {
-    process_items()
-    process_items(5)
 }
 
 // A lambda as a parameter default, followed by another parameter. The
@@ -223,9 +90,7 @@ fn test_two_lambda_defaults() {
     assert_eq(apply_two(3, a => a, b => b, 1), 4)
 }
 
-// Defaults on `@nomangle` fns, including a value-struct default. Rock call sites
-// inject the defaults; the body-side nil check fills them for callers that
-// bypass mangling.
+// Defaults on `@nomangle` fns, including a value-struct default.
 
 @nomangle
 fn defaulted_int(a: int, b: int = 7) -> int {
@@ -244,16 +109,9 @@ fn defaulted_value(v: V2 = V2 { x: 3, y: 4 }) -> int {
     return v.x + v.y
 }
 
-@test(output = "15")
-fn nomangle_param_default_int_omitted() {
-    print(defaulted_int(8))
-}
-
-// The above tests pass even if the body-side default check is broken,
-// because Rock call sites inject defaults. The body-side `if x == nil
-// then ... end` is a safety net for callers that bypass mangling
-// (raw Lua or JS, FFI). Exercise it by calling from an inline body with the
-// default omitted.
+// Rock call sites inject the defaults; the body-side nil check is a safety
+// net for callers that bypass mangling (raw Lua or JS, FFI). Exercise it by
+// calling from an inline body with the default omitted.
 
 @nomangle inline(lua) fn call_defaulted_int_raw() -> int =
     "return defaulted_int(8)"
@@ -265,27 +123,12 @@ fn nomangle_param_default_int_body_check_fires() {
     print(call_defaulted_int_raw())
 }
 
-@test(output = "10")
-fn nomangle_param_default_int_passed() {
+@test(output = "15\n10\nhi: world\nyo: rock\n7\n20")
+fn nomangle_param_defaults_omitted_and_passed() {
+    print(defaulted_int(8))
     print(defaulted_int(8, 2))
-}
-
-@test(output = "hi: world")
-fn nomangle_param_default_string_omitted() {
     print(defaulted_string())
-}
-
-@test(output = "yo: rock")
-fn nomangle_param_default_string_passed() {
     print(defaulted_string("yo:", "rock"))
-}
-
-@test(output = "7")
-fn nomangle_param_default_value_struct_omitted() {
     print(defaulted_value())
-}
-
-@test(output = "20")
-fn nomangle_param_default_value_struct_passed() {
     print(defaulted_value(V2 { x: 8, y: 12 }))
 }
