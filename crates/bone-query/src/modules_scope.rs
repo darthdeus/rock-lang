@@ -331,8 +331,7 @@ pub(crate) fn path_members(
 }
 
 /// An accessible definition no tier of `frag` binds, with the `use` path
-/// that names it from `frag`. `package` owns it: with the key it identifies
-/// the definition, since a legacy provider's key is a bare name.
+/// that names it from `frag`. `package` owns it.
 pub struct ImportCandidate {
     pub name: Ustr,
     pub key: Ustr,
@@ -348,9 +347,8 @@ pub struct ImportCandidate {
 /// suggest out-of-scope public symbols with an import edit; `rock fix
 /// --imports`), for names `admit` accepts. Only a name no
 /// tier binds qualifies -- an explicit import of a bound name would rebind
-/// every use of it -- and only a definition of this package, of a declared
-/// dependency, or in the view of an `allow_legacy` dependency,
-/// through a path the resolver resolves from `frag` to that very
+/// every use of it -- and only a definition of this package or of a declared
+/// dependency, through a path the resolver resolves from `frag` to that very
 /// definition, which is also the access check. Sorted by name, then path.
 pub fn import_candidates(
     ws: &Workspace,
@@ -407,28 +405,6 @@ pub fn import_candidates(
         };
         offer(meta.name, *key, meta.package, from_root, segments);
     }
-    // A legacy provider's view: its root owns bare legacy keys with no
-    // `DefMeta`, reached through the fragment package's alias for it.
-    for (target, alias) in dependency_aliases(ws, frag) {
-        let Some(root) = ws
-            .ns
-            .package(target)
-            .filter(|p| !p.legacy_files.is_empty())
-            .and_then(|p| p.node(Ustr::from("")))
-        else {
-            continue;
-        };
-        let owned = root
-            .owned_types
-            .iter()
-            .chain(root.owned_globals.iter())
-            .chain(root.owned_callables.iter());
-        for (&name, &key) in owned {
-            if unbound(name) {
-                offer(name, key, target, false, vec![alias, name]);
-            }
-        }
-    }
     out.sort_by(|a, b| {
         a.name
             .as_str()
@@ -436,22 +412,6 @@ pub fn import_candidates(
             .then(a.path.cmp(&b.path))
     });
     out
-}
-
-/// Each package the fragment's package names as a dependency, with the
-/// alphabetically first alias it uses for it.
-fn dependency_aliases(ws: &Workspace, frag: &FragmentScope) -> Vec<(u32, Ustr)> {
-    let Some(pkg) = ws.ns.package(frag.package) else {
-        return Vec::new();
-    };
-    let mut by_target: std::collections::BTreeMap<u32, Ustr> = std::collections::BTreeMap::new();
-    for (&alias, &target) in &pkg.aliases {
-        let slot = by_target.entry(target).or_insert(alias);
-        if alias.as_str() < slot.as_str() {
-            *slot = alias;
-        }
-    }
-    by_target.into_iter().collect()
 }
 
 /// The text and offset of a new `use <path>;` in a v1 fragment, placed to

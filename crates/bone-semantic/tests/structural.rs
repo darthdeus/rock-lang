@@ -55,7 +55,7 @@ fn legacy_only_workspace_keeps_modules_v1_namespace_empty() {
 }
 
 #[test]
-fn mixed_workspace_rejects_package_less_legacy_use_at_the_use_span() {
+fn mixed_workspace_rejects_legacy_use_at_the_use_span() {
     use bone_core::modules::{NsAliases, PackageAliases};
     use skull_parser::{Dialect, parse_module_with_dialect};
 
@@ -84,11 +84,11 @@ fn mixed_workspace_rejects_package_less_legacy_use_at_the_use_span() {
         }],
     };
     let err = semantic_pass_with_aliases(&mut [provider, legacy], &aliases)
-        .expect_err("a package-less legacy use must be rejected");
+        .expect_err("a legacy use must be rejected");
 
     assert_eq!(
         err.message,
-        "legacy item-level `use` needs an owning package to resolve its path"
+        "item-level `use` requires modules v1 (`[language] modules = \"v1\"`)"
     );
     let label = err.labels.first().expect("the rejected use is labeled");
     assert_eq!(label.span.file, Ustr::from("legacy.rock"));

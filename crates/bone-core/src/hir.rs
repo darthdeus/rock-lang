@@ -210,10 +210,9 @@ pub struct Body {
     /// resolved in bone-inference, codegen'd in skull-mir. Never also in
     /// `arg_names`.
     pub spread_args: FxHashSet<Idx<Expr>>,
-    /// In a v1 fragment, an `Expr::Global` naming a legacy callable reached
-    /// through the std view or a legacy provider's view, taken as a value:
-    /// the view's package (`FamilyMember::owner`), since the bare key is
-    /// shared by every legacy file defining the name.
+    /// In a v1 fragment, an `Expr::Global` naming a std callable taken as a
+    /// value: the std package (`FamilyMember::owner`), since the bare key is
+    /// shared with every legacy file defining the name.
     pub value_owners: FxHashMap<Idx<Expr>, crate::modules::PackageId>,
 
     // Owner's body expression:
@@ -928,11 +927,10 @@ pub enum Callee {
 }
 
 /// One member of a v1 call family: the overloads registered under `key`.
-/// A legacy definition's key is its bare name, shared by every legacy file
-/// that defines the name and by the standard library, so a member a v1
-/// fragment reached through the std view or a legacy provider's view names
-/// that view's package in `owner`, and only the overloads its own files
-/// define belong to the member. `None` for a v1 DefKey, which
+/// A standard-library definition's key is its bare name, shared with every
+/// legacy file that defines the name, so a member a v1 fragment reached
+/// through the std view names the std package in `owner`, and only the
+/// stdlib's overloads belong to the member. `None` for a v1 DefKey, which
 /// only its definition carries.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FamilyMember {
@@ -944,10 +942,9 @@ pub struct FamilyMember {
 /// The lookup tier that contributed a family member (tiers 2-5).
 /// A v1 callee family spans every tier from the first one that binds the
 /// name; fit ranks the whole family and the tier breaks only an exact
-/// best-fit tie, nearer tier first. A legacy family is one flat tier.
+/// best-fit tie, nearer tier first.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FamilyTier {
-    Legacy,
     Own,
     Imports,
     Globs,
@@ -966,9 +963,8 @@ pub enum CallFamily {
         key: Ustr,
         owner: Option<crate::modules::PackageId>,
     },
-    /// A bare name whose overload family spans several definitions, in either
-    /// dialect: legacy callables merged with projected or imported v1 ones, or a
-    /// v1 family spanning the lookup tiers. Lowering decides the member keys and
+    /// A bare name whose overload family spans several definitions: a v1
+    /// family spanning the lookup tiers. Lowering decides the member keys and
     /// records them under `name` in `Module::call_families` of the module lowered
     /// from `file`; `Expr` is `Copy`, so the family carries only that address. A
     /// v1 unary operator no tier binds is a family with no members: a scalar

@@ -1,6 +1,6 @@
 use bone_core::modules::{
-    DefKind, FragmentScope, LegacyImports, LegacyProjection, NsNode, NsPackage, NsVisibility,
-    STD_PACKAGE_ID, STD_PACKAGE_NAME, UsePathRef, is_stdlib_module_file,
+    FragmentScope, NsNode, NsPackage, NsVisibility, STD_PACKAGE_ID, STD_PACKAGE_NAME, UsePathRef,
+    is_stdlib_module_file,
 };
 use skull_parser::stdlib::ModuleSet;
 use skull_parser::{Ast, Item, ItemKind};
@@ -72,9 +72,6 @@ fn map_key(scope: Option<&FragmentScope>, path: &[ustr::Ustr], name: ustr::Ustr)
 /// What one module declares that lowering reads workspace-wide before any
 /// body lowers.
 struct ModuleNominalFacts {
-    /// A legacy module's owned names: a legacy lookup that could also reach
-    /// a projected v1 name is decided from them.
-    legacy_owned: Option<Vec<(ustr::Ustr, DefKind)>>,
     /// Each nominal type's key and facts, in declaration order.
     types: Vec<(ustr::Ustr, NominalFacts)>,
     has_nobox: bool,
@@ -82,10 +79,7 @@ struct ModuleNominalFacts {
 }
 
 fn module_nominal_facts(scope: Option<&FragmentScope>, rock_mod: &Ast) -> ModuleNominalFacts {
-    let legacy_owned =
-        (rock_mod.dialect == skull_parser::Dialect::Legacy).then(|| legacy_owned_names(rock_mod));
     let mut facts = ModuleNominalFacts {
-        legacy_owned,
         types: Vec::new(),
         has_nobox: false,
         decorators: Vec::new(),
@@ -228,9 +222,6 @@ pub fn lower_modules_seeded(
         .collect::<Vec<_>>();
     for (module, facts) in modules.iter().zip(facts) {
         let mid = module.id;
-        if let Some(names) = facts.legacy_owned {
-            ws.ns.legacy_owned.replace_file(module.file, names);
-        }
         for (key, facts) in facts.types {
             // Whether this module may write `key`'s facts: a vacant slot, or one
             // this same module owns (its own re-lower refreshing them).
@@ -1358,14 +1349,12 @@ fn semantic_pass_into_after_gate(
     Ok(ws)
 }
 
-/// Legacy compilation units keep their flat grammar. Item-level `use` is
-/// handled as an additive compatibility import; module headers and inline
-/// `mod` blocks still need modules-v1 resolution. Both the legacy-only fast
-/// path and the mixed-workspace contribution path feed this one rule set so
-/// they cannot drift in either rejection or span selection.
+/// Legacy compilation units keep their flat grammar: module headers, inline
+/// `mod` blocks and item-level `use` are modules-v1 grammar. Both the
+/// legacy-only fast path and the mixed-workspace contribution path feed this
+/// one rule set so they cannot drift in either rejection or span selection.
 fn reject_legacy_unscoped_items(
     header_span: Option<Span>,
-    has_package: bool,
     inline_module_span: Option<Span>,
     use_span: Option<Span>,
 ) -> Result<(), CompilerError> {
@@ -1381,13 +1370,11 @@ fn reject_legacy_unscoped_items(
             "inline `mod` blocks require module resolution (not yet implemented)".to_string(),
         ));
     }
-    if !has_package {
-        if let Some(span) = use_span {
-            return Err(CompilerError::new_with_label(
-                span,
-                "legacy item-level `use` needs an owning package to resolve its path".to_string(),
-            ));
-        }
+    if let Some(span) = use_span {
+        return Err(CompilerError::new_with_label(
+            span,
+            "item-level `use` requires modules v1 (`[language] modules = \"v1\"`)".to_string(),
+        ));
     }
     Ok(())
 }
@@ -1403,7 +1390,6 @@ fn reject_legacy_unscoped_ast_items(rock_module: &Ast) -> Result<(), CompilerErr
     });
     reject_legacy_unscoped_items(
         rock_module.module_header.as_ref().map(|header| header.span),
-        rock_module.package.is_some(),
         inline_module_span,
         use_span,
     )
@@ -1585,9 +1571,8 @@ impl NamespaceInput {
 }
 
 /// [`build_namespaces`] from each file's [`FragmentContribution`], in module
-/// order. It writes `ws.ns.packages`, `ws.defs`, `ws.fragment_scopes`,
-/// `ws.legacy_projections` and `ws.legacy_imports`, which must start empty,
-/// and leaves `ws.ns.legacy_owned` (lowering fills it) alone.
+/// order. It writes `ws.ns.packages`, `ws.defs` and `ws.fragment_scopes`,
+/// which must start empty.
 pub fn assemble_namespaces(
     ws: &mut Workspace,
     contributions: &[&FragmentContribution],
@@ -1631,7 +1616,6 @@ pub fn assemble_namespaces(
             });
             reject_legacy_unscoped_items(
                 contribution.header.as_ref().map(|header| header.span),
-                contribution.package.is_some(),
                 inline_module_span,
                 use_span,
             )?;
@@ -1736,70 +1720,7 @@ pub fn assemble_namespaces(
 
         ws.fragment_scopes.insert(file, scope);
     }
-    register_legacy_views(ws, contributions);
-    validate_v1_use_targets(ws, contributions)?;
-    build_legacy_compatibility(ws, contributions)?;
-    Ok(())
-}
-
-/// The namespace view of each legacy package a v1 package depends on (spec
-/// 3.2, V1 -> Legacy): a root node holding the declarations the provider's
-/// own files define, under their bare legacy keys. Legacy declarations are
-/// public and record no `DefMeta`, so a v1 viewer admits them as it admits
-/// the stdlib, and the legacy projection (public v1 definitions only) never
-/// re-exports them. A name a provider's body only uses -- a game's, a
-/// sibling's, the stdlib's -- is not its declaration and is not in the view.
-/// Legacy packages no v1 package depends on get no view, so a legacy-only
-/// build assembles the tree it always did. The view records the provider's
-/// files: a legacy key is shared by every legacy file defining the name, and
-/// a v1 call through the view reaches only the provider's own overloads.
-fn register_legacy_views(ws: &mut Workspace, contributions: &[&FragmentContribution]) {
-    let packages_in = |dialect: skull_parser::Dialect| -> FxHashSet<u32> {
-        contributions
-            .iter()
-            .filter(|c| c.dialect == dialect && !is_stdlib_module_file(c.file.as_str()))
-            .filter_map(|c| c.package.as_ref().map(|tag| tag.id))
-            .collect()
-    };
-    let v1 = packages_in(skull_parser::Dialect::V1);
-    let legacy = packages_in(skull_parser::Dialect::Legacy);
-    let viewed: FxHashSet<u32> = v1
-        .iter()
-        .filter_map(|id| ws.ns.package(*id))
-        .flat_map(|pkg| pkg.aliases.values().copied())
-        .filter(|target| legacy.contains(target) && !v1.contains(target))
-        .collect();
-    for contribution in contributions {
-        let Some(tag) = contribution.package.as_ref() else {
-            continue;
-        };
-        if contribution.dialect != skull_parser::Dialect::Legacy || !viewed.contains(&tag.id) {
-            continue;
-        }
-        let pkg = ws.ns.packages.entry(tag.id).or_insert_with(|| NsPackage {
-            id: tag.id,
-            self_name: ustr::Ustr::from(&tag.self_name),
-            ..Default::default()
-        });
-        pkg.legacy_files.insert(contribution.file);
-        let root = pkg.nodes.entry(ustr("")).or_insert_with(|| NsNode {
-            path_key: ustr(""),
-            vis: Some(NsVisibility::Pub),
-            ..Default::default()
-        });
-        for item in &contribution.items {
-            let ScopeItem::Def { name, kind, .. } = item else {
-                continue;
-            };
-            let table = match *kind {
-                "type" => &mut root.owned_types,
-                "global" => &mut root.owned_globals,
-                "callable" => &mut root.owned_callables,
-                _ => &mut root.owned_decorators,
-            };
-            table.insert(*name, *name);
-        }
-    }
+    validate_v1_use_targets(ws, contributions)
 }
 
 /// Every `use` target in a v1 fragment resolves where it is declared, once
@@ -1936,204 +1857,6 @@ fn register_stdlib_items(
             .or_insert_with(|| ustr(name));
     }
     Ok(())
-}
-
-/// Build the legacy compatibility views after every v1 fragment has supplied
-/// its namespace facts. A package-scoped legacy file sees the transitive v1
-/// packages reached through its manifest aliases; a package-less mixed test
-/// file sees the v1 packages explicitly present in that compilation unit.
-/// The result is stored per source file so lowering never scans `ws.defs` for
-/// each unresolved name.
-fn build_legacy_compatibility(
-    ws: &mut Workspace,
-    contributions: &[&FragmentContribution],
-) -> Result<(), CompilerError> {
-    let v1_packages: FxHashSet<u32> = contributions
-        .iter()
-        .filter(|contribution| {
-            contribution.dialect == skull_parser::Dialect::V1
-                && !is_stdlib_module_file(contribution.file.as_str())
-        })
-        .filter_map(|contribution| contribution.package.as_ref().map(|tag| tag.id))
-        .collect();
-
-    for contribution in contributions {
-        if contribution.dialect != skull_parser::Dialect::Legacy
-            || is_stdlib_module_file(contribution.file.as_str())
-        {
-            continue;
-        }
-
-        let package = contribution.package.as_ref().map(|tag| tag.id);
-        let participating = legacy_participating_packages(ws, package, &v1_packages);
-        let mut projection = LegacyProjection::default();
-        for package in participating {
-            project_public_module(ws, package, &[], &mut projection)?;
-        }
-        ws.legacy_projections.insert(contribution.file, projection);
-
-        let imports = build_legacy_imports(ws, contribution)?;
-        if !imports.is_empty() {
-            ws.legacy_imports.insert(contribution.file, imports);
-        }
-    }
-    Ok(())
-}
-
-fn legacy_participating_packages(
-    ws: &Workspace,
-    owner: Option<u32>,
-    v1_packages: &FxHashSet<u32>,
-) -> Vec<u32> {
-    let Some(owner) = owner else {
-        let mut packages: Vec<_> = v1_packages.iter().copied().collect();
-        packages.sort_unstable();
-        return packages;
-    };
-
-    let mut seen = FxHashSet::default();
-    let mut pending = vec![owner];
-    while let Some(package) = pending.pop() {
-        if !seen.insert(package) {
-            continue;
-        }
-        if let Some(node) = ws.ns.package(package) {
-            pending.extend(node.aliases.values().copied());
-        }
-    }
-    let mut packages: Vec<_> = seen
-        .into_iter()
-        .filter(|package| v1_packages.contains(package))
-        .collect();
-    packages.sort_unstable();
-    packages
-}
-
-/// Add every name one module offers to any consumer -- its `pub`
-/// definitions and what its `pub` export bindings reach -- into the
-/// projection, through the resolver's one member lookup.
-fn project_public_module(
-    ws: &Workspace,
-    package: u32,
-    path: &[ustr::Ustr],
-    projection: &mut LegacyProjection,
-) -> Result<(), CompilerError> {
-    use bone_lower::resolve::{Viewer, module_member_names, module_members};
-    if ws.ns.package(package).is_none() {
-        return Err(CompilerError::new_no_location(format!(
-            "legacy projection references unknown package {package}"
-        )));
-    }
-    let viewers = [Viewer::Public];
-    let names = module_member_names(ws, &viewers, package, path).map_err(|message| {
-        CompilerError::new_no_location(format!(
-            "legacy projection cannot resolve a public glob export: {message}"
-        ))
-    })?;
-    for name in names {
-        let members = module_members(ws, &viewers, package, path, name).map_err(|message| {
-            CompilerError::new_no_location(format!(
-                "legacy projection cannot resolve public export `{name}`: {message}"
-            ))
-        })?;
-        // The public viewer admits only v1 definitions, so no hit here is a
-        // view member with an owner.
-        for hit in members.found {
-            if let Some(kind) = projection_kind(hit.kind) {
-                projection.insert(name, hit.key, kind);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn projection_kind(kind: bone_lower::resolve::ResolvedKind) -> Option<DefKind> {
-    match kind {
-        bone_lower::resolve::ResolvedKind::Type => Some(DefKind::Type),
-        bone_lower::resolve::ResolvedKind::Global => Some(DefKind::Global),
-        bone_lower::resolve::ResolvedKind::Callable => Some(DefKind::Callable),
-        bone_lower::resolve::ResolvedKind::Decorator => Some(DefKind::Decorator),
-        bone_lower::resolve::ResolvedKind::Module | bone_lower::resolve::ResolvedKind::Binding => {
-            None
-        }
-    }
-}
-
-fn build_legacy_imports(
-    ws: &Workspace,
-    contribution: &FragmentContribution,
-) -> Result<LegacyImports, CompilerError> {
-    let mut uses = Vec::new();
-    for item in &contribution.items {
-        if let ScopeItem::Use(decl) = item {
-            collect_use_leaves(&decl.tree, &[], false, &mut uses);
-        }
-    }
-    if uses.is_empty() {
-        return Ok(LegacyImports::default());
-    }
-
-    let Some(tag) = contribution.package.as_ref() else {
-        return Err(CompilerError::new_no_location(
-            "legacy item-level `use` needs an owning package to resolve its path",
-        ));
-    };
-    let site = FragmentScope {
-        package: tag.id,
-        package_name: ustr::Ustr::from(&tag.self_name),
-        module_path: Vec::new(),
-        ..Default::default()
-    };
-    let mut imports = LegacyImports::default();
-    for (local, path, is_glob) in uses {
-        if is_glob {
-            let (target_package, target_path) = bone_lower::resolve::resolve_path_to_module(
-                ws, &site, &path,
-            )
-            .map_err(|message| {
-                CompilerError::new_with_label(
-                    contribution
-                        .header
-                        .as_ref()
-                        .map(|h| h.span)
-                        .unwrap_or_else(Span::unknown),
-                    format!("legacy `use` glob could not be resolved: {message}"),
-                )
-            })?;
-            let mut view = LegacyProjection::default();
-            project_public_module(ws, target_package, &target_path, &mut view)?;
-            for (name, entries) in view.by_name {
-                for entry in entries {
-                    imports.globs.insert(name, entry.key, entry.kind);
-                }
-            }
-        } else {
-            let resolved =
-                bone_lower::resolve::resolve_path(ws, &site, &path).map_err(|message| {
-                    CompilerError::new_no_location(format!(
-                        "legacy `use` could not be resolved: {message}"
-                    ))
-                })?;
-            let Some(kind) = projection_kind(resolved.kind) else {
-                return Err(CompilerError::new_no_location(format!(
-                    "legacy `use` name `{local}` resolves to a module"
-                )));
-            };
-            imports.named.insert(local, resolved.key, kind);
-            let exported_as = *path
-                .segments
-                .last()
-                .expect("a named use has a last segment");
-            if exported_as != local {
-                imports
-                    .renamed
-                    .entry(exported_as)
-                    .or_default()
-                    .push(resolved.key);
-            }
-        }
-    }
-    Ok(imports)
 }
 
 fn collect_use_leaves(
@@ -2500,26 +2223,6 @@ fn share_export(
             format!("duplicate export binding `{}`", local),
         ));
     }
-}
-
-/// The bare item names a legacy file defines and their kinds, as recorded in
-/// `ws.ns.legacy_owned`. The incremental session compares them across an edit.
-pub fn legacy_owned_names(rock_mod: &Ast) -> Vec<(ustr::Ustr, DefKind)> {
-    rock_mod
-        .items
-        .iter()
-        .filter_map(|item| {
-            owned_name_and_kind(&item.kind).map(|(name, kind)| {
-                let kind = match kind {
-                    "type" => DefKind::Type,
-                    "global" => DefKind::Global,
-                    "callable" => DefKind::Callable,
-                    _ => DefKind::Decorator,
-                };
-                (name, kind)
-            })
-        })
-        .collect()
 }
 
 fn owned_name_and_kind(item: &ItemKind) -> Option<(ustr::Ustr, &'static str)> {

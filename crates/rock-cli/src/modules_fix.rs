@@ -10,7 +10,7 @@
 //! explicit import, or a module glob when the fragment already globs a
 //! sibling module; several are listed with their origins; a definition
 //! behind an undeclared dependency or a narrower visibility is reported.
-//! Nothing adds a dependency, `allow_legacy`, or visibility.
+//! Nothing adds a dependency or visibility.
 //!
 //! Lowering reports every unresolved bare name of the signatures, bodies and
 //! global initializers in one pass, so one check finds every name to import
@@ -495,8 +495,8 @@ fn globs_a_sibling(ws: &Workspace, frag: &FragmentScope, c: &ImportCandidate) ->
 }
 
 /// Why each definition named `name` that `frag` cannot import is out of
-/// reach: a narrower visibility, a package that is not a declared
-/// dependency, or a legacy package with no `allow_legacy` view.
+/// reach: a narrower visibility or a package that is not a declared
+/// dependency.
 fn unavailable(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Vec<String> {
     let aliases: HashMap<PackageId, Ustr> = ws
         .ns
@@ -531,22 +531,6 @@ fn unavailable(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Vec<String> 
             Ok(_) => "is accessible but not offered as an import".to_string(),
         };
         out.push(format!("`{key}`: {reason}"));
-    }
-    for file in ws.ns.legacy_owned.files_defining(name) {
-        if bone_core::modules::is_stdlib_module_file(file.as_str()) {
-            continue;
-        }
-        let viewed = aliases.keys().any(|p| {
-            ws.ns
-                .package(*p)
-                .is_some_and(|pkg| pkg.legacy_files.contains(&file))
-        });
-        if !viewed {
-            out.push(format!(
-                "a legacy definition in {}: its package is not an `allow_legacy` dependency of `{own}`",
-                short_path(&file)
-            ));
-        }
     }
     out.sort();
     out
@@ -871,7 +855,7 @@ fn render_pretty(
     if !p.unavailable.is_empty() {
         let _ = writeln!(
             s,
-            "\nunavailable [exact]: never added (a dependency, `allow_legacy` or visibility is the author's)"
+            "\nunavailable [exact]: never added (a dependency or visibility is the author's)"
         );
         for l in &p.unavailable {
             let _ = writeln!(s, "  {}:", at(&l.site));

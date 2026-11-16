@@ -348,148 +348,6 @@ impl UsePathRef {
 /// resolution uses the graph's dependency names rather than guessing.
 pub use rock_core::package_aliases::{NsAliases, PackageAliases};
 
-/// One v1 definition made visible to a legacy compilation unit. The key stays
-/// canonical so calls and type lookups retain the definition site's identity.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LegacyProjectionEntry {
-    pub key: Ustr,
-    pub kind: DefKind,
-}
-
-/// The compatibility view built once for one legacy source file. A name can
-/// have several entries when participating v1 packages export distinct
-/// definitions with the same spelling; identical DefKeys are collapsed.
-#[derive(Clone, Debug, Default)]
-pub struct LegacyProjection {
-    pub by_name: FxHashMap<Ustr, Vec<LegacyProjectionEntry>>,
-}
-
-impl LegacyProjection {
-    pub fn insert(&mut self, name: Ustr, key: Ustr, kind: DefKind) {
-        let entries = self.by_name.entry(name).or_default();
-        if entries.iter().any(|entry| entry.key == key) {
-            return;
-        }
-        entries.push(LegacyProjectionEntry { key, kind });
-        entries.sort_by_key(|entry| entry.key.as_str().to_string());
-    }
-}
-
-/// A legacy file's item-level `use` declarations. A named import
-/// binds its local name explicitly, which replaces every other candidate for
-/// that name in the file; a glob import stands where the root projection
-/// would. `renamed` records what an import binds under a name other than
-/// the one it was exported as (`use p::x as y` is keyed `x`): that
-/// definition leaves the file's bare `x`.
-#[derive(Clone, Debug, Default)]
-pub struct LegacyImports {
-    pub named: LegacyProjection,
-    pub globs: LegacyProjection,
-    pub renamed: FxHashMap<Ustr, Vec<Ustr>>,
-}
-
-impl LegacyImports {
-    pub fn is_empty(&self) -> bool {
-        self.named.by_name.is_empty() && self.globs.by_name.is_empty()
-    }
-
-    /// Whether any import of this file can bear on the bare name `name`.
-    pub fn mentions(&self, name: Ustr) -> bool {
-        self.named.by_name.contains_key(&name)
-            || self.globs.by_name.contains_key(&name)
-            || self.renamed.contains_key(&name)
-    }
-}
-
-/// What a bare name in a legacy source file names. The one
-/// decision behind every legacy lookup: lowering reads it to resolve a name
-/// and to record a merged overload family's members. Its inputs -- the
-/// per-file views and the legacy owned-name facts -- exist before any body
-/// lowers.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LegacyName {
-    /// Nothing but (possibly) the legacy definition: the bare key.
-    Bare,
-    /// v1 definitions reached through the file's imports or projection, with
-    /// no legacy definition in the way. More than one entry is ambiguous.
-    Projected(Vec<LegacyProjectionEntry>),
-    /// Callables under one name forming one overload family, exactly as
-    /// legacy overloading merges them: every member key. The legacy bare key
-    /// comes first when the legacy definitions take part; the v1 keys follow
-    /// sorted.
-    Family(Vec<Ustr>),
-    /// A legacy definition and a v1 definition that cannot merge (not both
-    /// callable): ambiguous at use.
-    Collision {
-        owners: Vec<Ustr>,
-        foreign: Vec<Ustr>,
-    },
-}
-
-pub fn legacy_name(ws: &crate::workspace::Workspace, file: Ustr, name: Ustr) -> LegacyName {
-    // The compiler-owned stdlib is lowered in the same workspace as user
-    // packages, but its legacy bodies must not see user declarations.
-    if is_stdlib_module_file(file.as_str()) {
-        return LegacyName::Bare;
-    }
-    let imports = ws.legacy_imports.get(&file);
-    // An explicit named import wins in its file (explicit
-    // compatibility imports shadow the root projection, and they are how a
-    // legacy file resolves a collision). Named imports of several callables
-    // compose into one family of those imports alone.
-    if let Some(entries) = imports.and_then(|i| i.named.by_name.get(&name)) {
-        if entries.len() > 1 && entries.iter().all(|e| e.kind == DefKind::Callable) {
-            return LegacyName::Family(entries.iter().map(|e| e.key).collect());
-        }
-        return LegacyName::Projected(entries.clone());
-    }
-    let Some(entries) = imports
-        .and_then(|i| i.globs.by_name.get(&name))
-        .or_else(|| {
-            ws.legacy_projections
-                .get(&file)
-                .and_then(|view| view.by_name.get(&name))
-        })
-    else {
-        return LegacyName::Bare;
-    };
-    let renamed = imports.and_then(|i| i.renamed.get(&name));
-    let entries: Vec<LegacyProjectionEntry> = entries
-        .iter()
-        .filter(|entry| !renamed.is_some_and(|keys| keys.contains(&entry.key)))
-        .cloned()
-        .collect();
-    if entries.is_empty() {
-        return LegacyName::Bare;
-    }
-    // A v1 re-export of a legacy definition keeps the bare key: it is the
-    // legacy definition itself, not a second candidate.
-    let foreign: Vec<Ustr> = entries
-        .iter()
-        .filter(|e| e.key != name)
-        .map(|e| e.key)
-        .collect();
-    let foreign_callable = entries
-        .iter()
-        .all(|e| e.key == name || e.kind == DefKind::Callable);
-    let owners = ws.ns.legacy_owned.files_defining(name);
-    // Legacy overloading merges every same-named callable, so several
-    // projected v1 callables are one family even with no legacy member.
-    if owners.is_empty() {
-        if foreign.len() > 1 && foreign_callable {
-            return LegacyName::Family(foreign);
-        }
-        return LegacyName::Projected(entries);
-    }
-    if foreign.is_empty() {
-        return LegacyName::Projected(entries);
-    }
-    if ws.ns.legacy_owned.all_callable(name) && foreign_callable {
-        return LegacyName::Family(std::iter::once(name).chain(foreign).collect());
-    }
-    LegacyName::Collision { owners, foreign }
-}
-
 /// One namespace fact a lowering read (scope epochs). A module's
 /// lowering records every probe its lookups made, hit or miss, so an edit to
 /// the namespace tree re-lowers exactly the modules that read a changed fact.
@@ -507,9 +365,6 @@ pub enum ScopeProbe {
     /// Module `node` of `package` entered as a path segment: its presence and
     /// its declared visibility.
     Node { package: PackageId, node: Ustr },
-    /// A legacy file's lookup of the bare `name` (`legacy_name`): the file's
-    /// compatibility views and the legacy-owned facts for that name.
-    Legacy { name: Ustr },
 }
 
 /// Per-package scope facts the resolver needs, built by the semantic pass
@@ -517,87 +372,6 @@ pub enum ScopeProbe {
 #[derive(Clone, Debug, Default)]
 pub struct NsTree {
     pub packages: FxHashMap<PackageId, NsPackage>,
-    /// Bare names defined by the legacy files of this compilation unit
-    /// (stdlib included), recorded before any body lowers.
-    pub legacy_owned: LegacyOwnedNames,
-}
-
-/// Which legacy files define each bare item name, and as what. Lowering
-/// replaces a file's entry before it lowers any body, in a fresh build and in
-/// an incremental re-lower alike, so a legacy lookup never depends on which
-/// maps have filled so far.
-#[derive(Clone, Debug, Default)]
-pub struct LegacyOwnedNames {
-    by_file: FxHashMap<Ustr, Vec<(Ustr, DefKind)>>,
-    by_name: FxHashMap<Ustr, Vec<(Ustr, DefKind)>>,
-}
-
-impl LegacyOwnedNames {
-    pub fn replace_file(&mut self, file: Ustr, mut names: Vec<(Ustr, DefKind)>) {
-        names.sort_unstable_by(|a, b| {
-            a.0.as_str()
-                .cmp(b.0.as_str())
-                .then(kind_rank(a.1).cmp(&kind_rank(b.1)))
-        });
-        names.dedup();
-        if let Some(old) = self.by_file.remove(&file) {
-            for (name, _) in old {
-                if let Some(files) = self.by_name.get_mut(&name) {
-                    files.retain(|(f, _)| *f != file);
-                    if files.is_empty() {
-                        self.by_name.remove(&name);
-                    }
-                }
-            }
-        }
-        for &(name, kind) in &names {
-            let files = self.by_name.entry(name).or_default();
-            files.push((file, kind));
-            files.sort_unstable_by(|a, b| {
-                a.0.as_str()
-                    .cmp(b.0.as_str())
-                    .then(kind_rank(a.1).cmp(&kind_rank(b.1)))
-            });
-        }
-        if !names.is_empty() {
-            self.by_file.insert(file, names);
-        }
-    }
-
-    /// The names `file` defines with their kinds, sorted.
-    pub fn names_defined_by(&self, file: Ustr) -> &[(Ustr, DefKind)] {
-        self.by_file.get(&file).map(Vec::as_slice).unwrap_or(&[])
-    }
-
-    /// The legacy files defining `name`, sorted.
-    pub fn files_defining(&self, name: Ustr) -> Vec<Ustr> {
-        let mut files: Vec<Ustr> = self
-            .by_name
-            .get(&name)
-            .into_iter()
-            .flatten()
-            .map(|(file, _)| *file)
-            .collect();
-        files.dedup();
-        files
-    }
-
-    /// Whether every legacy definition of `name` is a function.
-    pub(crate) fn all_callable(&self, name: Ustr) -> bool {
-        self.by_name
-            .get(&name)
-            .is_some_and(|defs| defs.iter().all(|(_, kind)| *kind == DefKind::Callable))
-    }
-}
-
-fn kind_rank(kind: DefKind) -> u8 {
-    match kind {
-        DefKind::Type => 0,
-        DefKind::Global => 1,
-        DefKind::Callable => 2,
-        DefKind::Decorator => 3,
-        DefKind::Module => 4,
-    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -607,10 +381,6 @@ pub struct NsPackage {
     pub nodes: FxHashMap<Ustr, NsNode>,
     /// Dependency aliases: alias -> target package id.
     pub aliases: FxHashMap<Ustr, PackageId>,
-    /// For the view of a legacy provider: the provider's own
-    /// files, whose definitions are the only members of its view's callable
-    /// families. Empty for a v1 package.
-    pub legacy_files: FxHashSet<Ustr>,
 }
 
 impl NsPackage {
@@ -644,14 +414,10 @@ impl NsTree {
     }
 
     /// Whether a function lowered from `file` belongs to a family member
-    /// owned by `owner` ([`crate::hir::FamilyMember`]): a stdlib file for the
-    /// std view, one of the provider's own files for a legacy view.
+    /// owned by `owner` ([`crate::hir::FamilyMember`]): only the std view
+    /// owns bare-keyed members, and it owns the stdlib files.
     pub fn owns_file(&self, owner: PackageId, file: Ustr) -> bool {
-        if owner == STD_PACKAGE_ID {
-            return is_stdlib_module_file(file.as_str());
-        }
-        self.package(owner)
-            .is_some_and(|pkg| pkg.legacy_files.contains(&file))
+        owner == STD_PACKAGE_ID && is_stdlib_module_file(file.as_str())
     }
 
     /// Look up one member of the compiler-owned default export view.

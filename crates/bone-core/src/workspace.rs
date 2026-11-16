@@ -97,13 +97,6 @@ pub struct Workspace {
     /// Canonical definition metadata keyed by DefKey. Legacy
     /// definitions keep their bare-name keys and gain no entry.
     pub defs: FxHashMap<Ustr, crate::modules::DefMeta>,
-    /// Per-legacy-file compatibility views over the public root exports of
-    /// participating v1 packages. Built once by the semantic pass; lowering
-    /// only reads the finished view.
-    pub legacy_projections: FxHashMap<Ustr, crate::modules::LegacyProjection>,
-    /// Contextual item-level `use` bindings in legacy files. These are
-    /// additive and do not change legacy `x :: T` ascription parsing.
-    pub legacy_imports: FxHashMap<Ustr, crate::modules::LegacyImports>,
 
     /// Resolved compile-time inputs, set by the host before emission. Declared
     /// source fingerprints refresh on edits. bone itself never reads them
@@ -236,8 +229,6 @@ impl Workspace {
             ns: Default::default(),
             fragment_scopes: Default::default(),
             defs: Default::default(),
-            legacy_projections: Default::default(),
-            legacy_imports: Default::default(),
             identity_storage_enforce_unpackaged: false,
             skip_session_facts: false,
         };

@@ -467,52 +467,6 @@ fn a_qualified_variant_lands_on_the_variant_and_its_enum() {
     assert!(covered.contains("Kind"), "landed on {covered:?}");
 }
 
-/// A legacy package depending on the v1 package `geo`: the legacy file calls
-/// `area` through the compatibility projection.
-fn legacy_consumer() -> (tempfile::TempDir, String, &'static str) {
-    let dir = tempfile::tempdir().unwrap();
-    let geo = dir.path().join("geo");
-    let app = dir.path().join("app");
-    std::fs::create_dir_all(&geo).unwrap();
-    std::fs::create_dir_all(&app).unwrap();
-    std::fs::write(
-        geo.join("stick.toml"),
-        "[package]\nname = \"geo\"\nversion = \"0.1.0\"\ntype = \"lib\"\n\n[language]\nmodules = \"v1\"\n",
-    )
-    .unwrap();
-    std::fs::write(
-        geo.join("lib.rock"),
-        "pub fn area(w: int) -> int {\n    w * w\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        app.join("stick.toml"),
-        "[package]\nname = \"app\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n[dependencies]\ngeo = { path = \"../geo\" }\n",
-    )
-    .unwrap();
-    let main_text = "fn main() {\n    print(\"{area(2)}\")\n}\n";
-    std::fs::write(app.join("main.rock"), main_text).unwrap();
-    let main = bone_query::canonicalize_lenient(&app.join("main.rock").to_string_lossy());
-    (dir, main, main_text)
-}
-
-#[test]
-fn a_legacy_call_of_a_projected_name_lands_on_the_v1_definition() {
-    let (_dir, main, text) = legacy_consumer();
-    let mut bone = BoneWorkspace::new();
-    let diags = bone.update(&main, text.to_string());
-    assert_eq!(errors_in(&diags, &main), Vec::<String>::new());
-    let loc = bone
-        .definition(&main, pos_of(text, "area", 0, 1))
-        .expect("a projected call resolves");
-    let (path, covered) = located_text(&loc);
-    assert!(
-        std::path::Path::new(&path).ends_with("geo/lib.rock"),
-        "landed in {path}"
-    );
-    assert!(covered.contains("area"), "landed on {covered:?}");
-}
-
 /// A body edit keeps the other bodies' and the signatures' recorded
 /// segments, shifted with the text under them.
 #[test]
@@ -1209,49 +1163,6 @@ fn an_import_edit_goes_in_sorted_position_among_the_uses() {
     assert_eq!(edits[0].new_text, "use shapes::inner::depth;\n");
     // Before `use shapes::perimeter;`, the first `use` that sorts after it.
     assert_eq!(edits[0].range.start, Position::new(3, 0));
-}
-
-/// A definition in the view of an `allow_legacy` dependency is an
-/// import candidate like a v1 dependency's.
-#[test]
-fn an_allow_legacy_providers_definition_is_offered_with_an_import() {
-    let dir = tempfile::tempdir().unwrap();
-    let lib = dir.path().join("x_lib");
-    let app = dir.path().join("app");
-    std::fs::create_dir_all(&lib).unwrap();
-    std::fs::create_dir_all(&app).unwrap();
-    std::fs::write(
-        lib.join("stick.toml"),
-        "[package]\nname = \"x_lib\"\nversion = \"0.1.0\"\ntype = \"lib\"\n",
-    )
-    .unwrap();
-    std::fs::write(
-        lib.join("lib.rock"),
-        "fn wander(n: int) -> int {\n    n\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        app.join("stick.toml"),
-        "[package]\nname = \"app\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n\n\
-         [dependencies]\nx_lib = { path = \"../x_lib\", allow_legacy = true }\n",
-    )
-    .unwrap();
-    let text = "fn main() {\n    let q = wand\n}\n";
-    std::fs::write(app.join("main.rock"), text).unwrap();
-    let main = bone_query::canonicalize_lenient(&app.join("main.rock").to_string_lossy());
-    let mut bone = BoneWorkspace::new();
-    bone.update(&main, text.to_string());
-    let items = bone.completion(&main, pos_of(text, "let q = wand", 0, "let q = wand".len()));
-    let wander = items
-        .iter()
-        .find(|c| c.label == "wander")
-        .unwrap_or_else(|| panic!("`wander` is offered: {:?}", labels(&items)));
-    let edits = wander
-        .additional_text_edits
-        .as_ref()
-        .expect("it carries its import");
-    assert_eq!(edits[0].new_text, "use x_lib::wander;\n");
-    assert_eq!(edits[0].range.start, Position::new(0, 0));
 }
 
 #[test]

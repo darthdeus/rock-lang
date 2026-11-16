@@ -48,20 +48,6 @@ fn use_it() -> int {
     dup(1)
 }
 
-//- a_merged_family_of_different_names_is_not_a_backend_group @fail=Ambiguous overload for `bump` with argument types (int)
-//-- provider.rock @pkg=provider,1 @v1
-pub fn bump(n: int) -> int {
-    n
-}
-
-//-- defs.rock @pkg=game,2
-inline(lua) fn bump(n: int) -> int = """return n"""
-
-//-- main.rock @pkg=game,2
-fn use_it() -> int {
-    bump(1)
-}
-
 //- the_collapse_sees_only_accessible_members
 //-- lib.rock @pkg=lib,1 @v1
 fn ping(n: int) -> int {

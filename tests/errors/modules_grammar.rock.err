@@ -8,7 +8,7 @@
 //! Tags: modules
 
 //=== TEST CASE: use_in_legacy_compilation_unit_rejects ===
-//! expect: legacy item-level `use` needs an owning package to resolve its path
+//! expect: item-level `use` requires modules v1
 use stone::engine::State;
 
 fn main() {

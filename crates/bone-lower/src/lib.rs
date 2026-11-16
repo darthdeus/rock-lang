@@ -192,16 +192,6 @@ impl LowerCtx<'_, '_> {
         }
     }
 
-    /// A legacy file's bare-name lookup reads `legacy_name(file, name)`.
-    fn probe_legacy(&self, name: Ustr) {
-        if self.workspace.skip_session_facts {
-            return;
-        }
-        self.scope_probes
-            .borrow_mut()
-            .push(bone_core::modules::ScopeProbe::Legacy { name });
-    }
-
     /// Record that `val` covers source bytes `start..stop`, for editor
     /// queries ([`Body::node_index`]); nothing in a one-shot pass.
     fn node_interval(&self, body: &mut Body, start: usize, stop: usize, val: hir::NodeRef) {
@@ -403,8 +393,7 @@ impl LowerCtx<'_, '_> {
 
     /// The enum the base of a qualified variant (`E::V`, `E::V(..)`,
     /// `E::V { .. }`, and their patterns) names, by the key the workspace
-    /// maps use: the base resolves like any bare name, so a legacy file
-    /// reaches a projected v1 enum by its DefKey. `None` when the
+    /// maps use: the base resolves like any bare name. `None` when the
     /// base names no enum.
     fn variant_enum_key(&self, base: Ustr, span: Span) -> Result<Option<Ustr>, CompilerError> {
         let key = self.resolve_bare_key(base, span)?;
@@ -474,10 +463,7 @@ impl LowerCtx<'_, '_> {
             Some(frag) => self.probed_cached(&self.resolutions.bare, name, || {
                 resolve::resolve_bare(self.workspace, Some(frag), name)
             }),
-            None => {
-                self.probe_legacy(name);
-                resolve::resolve_legacy_bare(self.workspace, self.module.file, name)
-            }
+            None => Ok(resolve::plain(name)),
         }
         .map_err(|msg| CompilerError::new_with_label(span, msg))
     }
@@ -493,15 +479,11 @@ impl LowerCtx<'_, '_> {
         name: Ustr,
         span: Span,
     ) -> Result<(Ustr, hir::CallFamily), CompilerError> {
-        let file = self.module.file;
         let resolved = match self.v1_scope() {
             Some(frag) => self.probed_cached(&self.resolutions.callee, name, || {
                 resolve::resolve_v1_callee(self.workspace, frag, name)
             }),
-            None => {
-                self.probe_legacy(name);
-                resolve::resolve_legacy_callee(self.workspace, file, name)
-            }
+            None => Ok(resolve::CalleeFamily::Single(resolve::plain(name))),
         }
         .map_err(|msg| CompilerError::new_with_label(span, msg))?;
         Ok(self.record_family(name, resolved))
@@ -536,15 +518,11 @@ impl LowerCtx<'_, '_> {
         name: Ustr,
         span: Span,
     ) -> Result<(Ustr, hir::CallFamily), CompilerError> {
-        let file = self.module.file;
         let resolved = match self.v1_scope() {
             Some(frag) => self.probed_cached(&self.resolutions.optional, name, || {
                 resolve::resolve_v1_unary(self.workspace, frag, name)
             }),
-            None => {
-                self.probe_legacy(name);
-                resolve::resolve_legacy_callee(self.workspace, file, name).map(Some)
-            }
+            None => Ok(Some(resolve::CalleeFamily::Single(resolve::plain(name)))),
         }
         .map_err(|msg| CompilerError::new_with_label(span, msg))?;
         let resolved = resolved.unwrap_or(resolve::CalleeFamily::Merged {
@@ -559,15 +537,11 @@ impl LowerCtx<'_, '_> {
         }
         let families = ["iter", "next"].map(|name| {
             let name = Ustr::from(name);
-            let file = self.module.file;
             let resolved = match self.v1_scope() {
                 Some(frag) => self.probed_cached(&self.resolutions.optional, name, || {
                     resolve::resolve_v1_unary(self.workspace, frag, name)
                 }),
-                None => {
-                    self.probe_legacy(name);
-                    resolve::resolve_legacy_callee(self.workspace, file, name).map(Some)
-                }
+                None => Ok(Some(resolve::CalleeFamily::Single(resolve::plain(name)))),
             };
             resolved.map(|family| {
                 self.record_family(
@@ -4252,8 +4226,8 @@ pub fn lower_annotations(ast: &Ast, anns: &[skull_parser::Annotation]) -> Vec<hi
         .collect()
 }
 
-/// Lower annotation syntax and resolve v1 decorator names: through the
-/// current fragment, or through a legacy file's compatibility views.
+/// Lower annotation syntax and resolve v1 decorator names through the
+/// current fragment.
 /// Compiler-owned metadata intentionally stays unresolved so its raw spelling
 /// remains the source of builtin behavior.
 pub fn lower_annotations_with_ctx(
@@ -4270,7 +4244,7 @@ pub fn lower_annotations_with_ctx(
                 .probed(|| resolve::decorator_binding(ctx.workspace, frag, anno.name.name))
                 .map_err(|message| CompilerError::new_with_label(anno.span, message))?
                 .map(|resolved| resolved.key),
-            None => legacy_projected_decorator(ctx, anno.name.name),
+            None => None,
         };
         if let Some(key) = resolved {
             let is_decorator = ctx
@@ -4312,44 +4286,6 @@ pub fn lower_annotations_with_ctx(
         anno.resolved_ident_list = Some(resolved);
     }
     Ok(lowered)
-}
-
-/// The v1 decorator a legacy file's annotation `name` reaches through its
-/// compatibility views (`legacy_name`). Only decorators compete for an
-/// annotation spelling, so a same-named legacy or projected fn (the stdlib's
-/// `update`) does not make it ambiguous. A legacy decorator of that name, or
-/// several v1 ones, keep the bare spelling.
-fn legacy_projected_decorator(ctx: &LowerCtx, name: Ustr) -> Option<Ustr> {
-    use bone_core::modules::{DefKind, LegacyName, legacy_name};
-    ctx.probe_legacy(name);
-    let ws = ctx.workspace;
-    let keys: Vec<Ustr> = match legacy_name(ws, ctx.module.file, name) {
-        LegacyName::Bare => return None,
-        LegacyName::Projected(entries) => entries.into_iter().map(|e| e.key).collect(),
-        LegacyName::Family(keys) => keys,
-        LegacyName::Collision { owners, foreign } => {
-            let legacy_decorator = owners.iter().any(|file| {
-                ws.ns
-                    .legacy_owned
-                    .names_defined_by(*file)
-                    .iter()
-                    .any(|(n, k)| *n == name && *k == DefKind::Decorator)
-            });
-            if legacy_decorator {
-                return None;
-            }
-            foreign
-        }
-    };
-    let mut decorators = keys.into_iter().filter(|key| {
-        ws.defs
-            .get(key)
-            .is_some_and(|meta| meta.kind == DefKind::Decorator)
-    });
-    match (decorators.next(), decorators.next()) {
-        (Some(key), None) => Some(key),
-        _ => None,
-    }
 }
 
 fn classify_anno_value(a: &Ast, e: Idx<ExprData>) -> hir::AnnoValue {

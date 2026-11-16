@@ -1,9 +1,7 @@
 //! Modules-v1 name resolution.
 //!
 //! The one lookup authority over the namespace tree in `Workspace.ns`.
-//! Legacy files have no fragment scope: their bare names go through
-//! `resolve_legacy_bare`, which keeps the bare key unless a compatibility
-//! view names a v1 definition.
+//! Legacy files have no fragment scope: a bare name is its own key.
 //!
 //! Tier policy for a BARE name in a v1 fragment:
 //!   1. lexical locals — handled by `lookup_in_scope` before this runs;
@@ -22,8 +20,8 @@
 
 use bone_core::hir::{FamilyMember, FamilyTier, unary_operator_entry};
 use bone_core::modules::{
-    DefKind, FragmentScope, LegacyName, NsPackage, NsVisibility, PackageId, STD_PACKAGE_ID,
-    ScopeProbe, UsePathRef, legacy_name,
+    DefKind, FragmentScope, NsPackage, NsVisibility, PackageId, STD_PACKAGE_ID, ScopeProbe,
+    UsePathRef,
 };
 use bone_core::workspace::Workspace;
 use ustr::Ustr;
@@ -124,10 +122,9 @@ pub enum ResolvedKind {
 
 /// A resolution result, or one definition a lookup found: the canonical key
 /// every workspace map is keyed by, its kind, and for a callable of the std
-/// view or a legacy provider's view, the view's package
-/// ([`FamilyMember::owner`]). A legacy key is the bare name every legacy file
-/// defining it shares, so the key alone does not say whose overloads a v1
-/// fragment reached; two views offering one bare name are two definitions.
+/// view, the std package ([`FamilyMember::owner`]). A std key is a bare name
+/// that a legacy file of the unit may also define, so the key alone does not
+/// say whose overloads a v1 fragment reached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Resolved {
     pub key: Ustr,
@@ -160,8 +157,7 @@ fn hit_display(ws: &Workspace, hit: &Resolved) -> String {
 }
 
 /// The owner of a callable found in module node `pkg_id`: a definition with
-/// no `DefMeta` there is the std view's or a legacy provider's, keyed by its
-/// bare legacy name.
+/// no `DefMeta` there is the std view's, keyed by its bare name.
 fn view_owner(
     ws: &Workspace,
     pkg_id: PackageId,
@@ -179,43 +175,10 @@ enum Landing {
     Module(u32, Vec<Ustr>),
 }
 
-/// Resolve a bare name in a legacy source file. Legacy names keep
-/// their bare keys; a name reached through the file's compatibility imports
-/// or its root projection resolves to the v1 definition's canonical key.
-/// When a legacy file of the compilation unit also defines the name, the
-/// reference is ambiguous: neither side wins. A merged callable family
-/// (`LegacyName::Family`) is one only as a CALLEE (`resolve_legacy_callee`);
-/// anywhere else it names several definitions at once and is ambiguous too.
-/// Every input exists before any body lowers, so a fresh build and an
-/// incremental re-lower decide alike.
-pub(crate) fn resolve_legacy_bare(
-    ws: &Workspace,
-    file: Ustr,
-    name: Ustr,
-) -> Result<Resolved, String> {
-    match legacy_name(ws, file, name) {
-        LegacyName::Bare => Ok(plain(name)),
-        LegacyName::Projected(entries) => projected(name, &entries),
-        LegacyName::Family(keys) => {
-            // The legacy definitions take part exactly when the bare key is
-            // a member; named imports compose without them.
-            if keys.contains(&name) {
-                let owners = ws.ns.legacy_owned.files_defining(name);
-                let foreign: Vec<Ustr> = keys.into_iter().filter(|k| *k != name).collect();
-                Err(legacy_collision(name, &owners, &foreign))
-            } else {
-                Err(legacy_candidates(name, &keys))
-            }
-        }
-        LegacyName::Collision { owners, foreign } => Err(legacy_collision(name, &owners, &foreign)),
-    }
-}
-
 /// A bare name in callee position (direct call, UFCS, safe-nav call or an
 /// operator), in either dialect: a single definition, or one overload family
 /// spanning several definitions, among which overload resolution picks by
-/// argument types. Legacy merges legacy callables with projected or imported
-/// v1 ones; v1 spans the lookup tiers.
+/// argument types: in v1 a family spans the lookup tiers.
 #[derive(Debug, Clone)]
 pub enum CalleeFamily {
     Single(Resolved),
@@ -223,70 +186,6 @@ pub enum CalleeFamily {
     Merged {
         members: Vec<FamilyMember>,
     },
-}
-
-pub(crate) fn resolve_legacy_callee(
-    ws: &Workspace,
-    file: Ustr,
-    name: Ustr,
-) -> Result<CalleeFamily, String> {
-    match legacy_name(ws, file, name) {
-        LegacyName::Family(keys) => Ok(CalleeFamily::Merged {
-            members: keys
-                .into_iter()
-                .map(|key| FamilyMember {
-                    key,
-                    owner: None,
-                    tier: FamilyTier::Legacy,
-                })
-                .collect(),
-        }),
-        LegacyName::Bare => Ok(CalleeFamily::Single(plain(name))),
-        LegacyName::Projected(entries) => projected(name, &entries).map(CalleeFamily::Single),
-        LegacyName::Collision { owners, foreign } => Err(legacy_collision(name, &owners, &foreign)),
-    }
-}
-
-fn projected(
-    name: Ustr,
-    entries: &[bone_core::modules::LegacyProjectionEntry],
-) -> Result<Resolved, String> {
-    if let [entry] = entries {
-        return Ok(Resolved {
-            key: entry.key,
-            kind: resolved_kind(entry.kind),
-            owner: None,
-        });
-    }
-    Err(legacy_candidates(
-        name,
-        &entries.iter().map(|e| e.key).collect::<Vec<_>>(),
-    ))
-}
-
-fn legacy_candidates(name: Ustr, keys: &[Ustr]) -> String {
-    let candidates = keys
-        .iter()
-        .map(|k| k.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("ambiguous legacy reference to `{name}`: candidates {candidates}")
-}
-
-fn legacy_collision(name: Ustr, owners: &[Ustr], foreign: &[Ustr]) -> String {
-    let owners = owners
-        .iter()
-        .map(|f| f.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let foreign = foreign
-        .iter()
-        .map(|k| k.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "ambiguous legacy reference to `{name}`: legacy definition in {owners} and v1 definition {foreign}"
-    )
 }
 
 fn resolved_kind(kind: bone_core::modules::DefKind) -> ResolvedKind {
@@ -727,9 +626,6 @@ fn glob_candidates(
 pub enum Viewer<'a> {
     /// A v1 fragment (or an exporting module standing in for one).
     Fragment(&'a FragmentScope),
-    /// Any consumer at all: the legacy compatibility projection, which sees
-    /// only `pub` v1 definitions.
-    Public,
 }
 
 impl Viewer<'_> {
@@ -740,18 +636,13 @@ impl Viewer<'_> {
         owner_pkg: u32,
         owner_path: &[Ustr],
     ) -> bool {
-        match self {
-            Viewer::Fragment(frag) => {
-                ws.ns
-                    .can_access(vis, owner_pkg, owner_path, frag.package, &frag.module_path)
-            }
-            Viewer::Public => *vis == NsVisibility::Pub,
-        }
+        let Viewer::Fragment(frag) = self;
+        ws.ns
+            .can_access(vis, owner_pkg, owner_path, frag.package, &frag.module_path)
     }
 
     /// A key with no recorded metadata is the stdlib or an intrinsic: public
-    /// to a fragment, and never part of the legacy projection, which carries
-    /// only v1 definitions.
+    /// to a fragment.
     fn admits_key(&self, ws: &Workspace, key: Ustr) -> bool {
         match ws.defs.get(&key) {
             Some(meta) if meta.kind == DefKind::Callable => ws
@@ -763,7 +654,7 @@ impl Viewer<'_> {
                 })
                 .unwrap_or_else(|| self.admits(ws, &meta.vis, meta.package, &meta.module)),
             Some(meta) => self.admits(ws, &meta.vis, meta.package, &meta.module),
-            None => matches!(self, Viewer::Fragment(_)),
+            None => true,
         }
     }
 }
@@ -1349,7 +1240,7 @@ pub(crate) enum MemberTarget {
     /// A global or constant: the DefKey.
     Global(Ustr),
     /// A callable family: the key the family is registered under and the
-    /// view that owns a legacy key ([`Resolved::owner`]). A std family has no
+    /// view that owns a bare key ([`Resolved::owner`]). A std family has no
     /// `DefMeta`, so the kind has to come from the member lookup rather than
     /// `ws.defs`.
     Callable { key: Ustr, owner: Option<PackageId> },
@@ -1884,7 +1775,7 @@ fn last_of(segments: &[Ustr]) -> Ustr {
     segments[segments.len() - 1]
 }
 
-fn plain(name: Ustr) -> Resolved {
+pub(crate) fn plain(name: Ustr) -> Resolved {
     Resolved {
         key: name,
         kind: ResolvedKind::Binding,

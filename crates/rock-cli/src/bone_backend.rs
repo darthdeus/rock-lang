@@ -182,10 +182,8 @@ pub(crate) fn bone_session(
 /// [`aliases_for_modules`] for a session's file list, which is not parsed yet.
 /// A set with no v1 file uses the empty table, exactly as the batch path does.
 ///
-/// Every file with a package is carried, not just the v1 ones: the manifest the
-/// graph is built from is found through the ROOT package's file (graph id 0),
-/// and in a mixed build -- a legacy game consuming a v1 library, which is the
-/// whole point of the compatibility projection -- the root is the legacy side.
+/// Every file with a package is carried: the manifest the graph is built from
+/// is found through the ROOT package's file (graph id 0).
 pub(crate) fn aliases_for_session(
     files: &[bone_incremental::session::SessionFile],
 ) -> std::result::Result<bone_core::modules::NsAliases, CompilerError> {

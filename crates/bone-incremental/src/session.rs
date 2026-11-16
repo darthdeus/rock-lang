@@ -43,9 +43,8 @@ pub struct BodyUpdate {
 ///   recompile of the bodies only
 /// - Interface: a "public API" of an item changed, all of its users/callers need to be invalidated
 ///   and recompiled as well
-/// - Scope: the namespace tree's inputs changed (a `mod` header, a `use`, a v1 definition's name,
-///   kind or visibility, or a legacy definition a compatibility view also names). The tree is
-///   re-assembled, and the edited file plus every file whose lowering read a changed fact re-lower,
+/// - Scope: the namespace tree's inputs changed (a `mod` header, a `use`, or a v1 definition's
+///   name, kind or visibility). The tree is re-assembled, and the edited file plus every file whose lowering read a changed fact re-lower,
 ///   then the interface cascade runs (scope epochs)
 /// - FullUser: a full recompile of every user file
 ///
@@ -82,14 +81,13 @@ impl Default for UpdateResult {
 /// The namespace facts one edit changed, in the terms a lowering records
 /// them ([`ScopeProbe`]): a module's member of one name, every member of a
 /// module (its presence or its glob export bindings changed), a module entered
-/// as a path segment (its presence or visibility), and a legacy bare name.
-/// Plus the files whose own fragment scope changed.
+/// as a path segment (its presence or visibility). Plus the files whose own
+/// fragment scope changed.
 #[derive(Clone, Debug, Default)]
 struct ScopeDelta {
     members: FxHashSet<(u32, Ustr, Ustr)>,
     all_members: FxHashSet<(u32, Ustr)>,
     nodes: FxHashSet<(u32, Ustr)>,
-    legacy: FxHashSet<Ustr>,
     fragments: FxHashSet<Ustr>,
 }
 
@@ -98,7 +96,6 @@ impl ScopeDelta {
         self.members.is_empty()
             && self.all_members.is_empty()
             && self.nodes.is_empty()
-            && self.legacy.is_empty()
             && self.fragments.is_empty()
     }
 
@@ -113,12 +110,11 @@ impl ScopeDelta {
                     || self.all_members.contains(&(package, node))
             }
             ScopeProbe::Node { package, node } => self.nodes.contains(&(package, node)),
-            ScopeProbe::Legacy { name } => self.legacy.contains(&name),
         }
     }
 
-    /// Diff two assembled trees (`old` and `new` hold `ns.packages`, `defs`,
-    /// `fragment_scopes`, `legacy_projections` and `legacy_imports`).
+    /// Diff two assembled trees (`old` and `new` hold `ns.packages`, `defs`
+    /// and `fragment_scopes`).
     fn between(old: &Workspace, new: &Workspace) -> Self {
         let mut delta = ScopeDelta::default();
 
@@ -196,45 +192,6 @@ impl ScopeDelta {
             }
         }
 
-        let files: FxHashSet<Ustr> = old
-            .legacy_projections
-            .keys()
-            .chain(new.legacy_projections.keys())
-            .chain(old.legacy_imports.keys())
-            .chain(new.legacy_imports.keys())
-            .copied()
-            .collect();
-        let empty_projection = bone_core::modules::LegacyProjection::default();
-        let empty_imports = bone_core::modules::LegacyImports::default();
-        for file in files {
-            let (old_view, new_view) = (
-                old.legacy_projections
-                    .get(&file)
-                    .unwrap_or(&empty_projection),
-                new.legacy_projections
-                    .get(&file)
-                    .unwrap_or(&empty_projection),
-            );
-            let (old_imports, new_imports) = (
-                old.legacy_imports.get(&file).unwrap_or(&empty_imports),
-                new.legacy_imports.get(&file).unwrap_or(&empty_imports),
-            );
-            delta
-                .legacy
-                .extend(changed_keys(&old_view.by_name, &new_view.by_name));
-            delta.legacy.extend(changed_keys(
-                &old_imports.named.by_name,
-                &new_imports.named.by_name,
-            ));
-            delta.legacy.extend(changed_keys(
-                &old_imports.globs.by_name,
-                &new_imports.globs.by_name,
-            ));
-            delta
-                .legacy
-                .extend(changed_keys(&old_imports.renamed, &new_imports.renamed));
-        }
-
         let scoped: FxHashSet<Ustr> = old
             .fragment_scopes
             .keys()
@@ -279,8 +236,7 @@ const MAX_KEPT_ARENA_GROWTH: usize = 16;
 
 /// Whether the warm modules can be lowered and inferred once, alone, and
 /// reused by every build. Warm ASTs are immutable for the session's lifetime
-/// and a stdlib file consults no user SCOPE (`legacy_name` answers `Bare` for
-/// it, and it has no fragment scope). But warm and legacy user files share
+/// and a stdlib file consults no user SCOPE (it has no fragment scope). But warm and legacy user files share
 /// the bare-name maps a lowering and an inference read -- types and their
 /// generic arity, globals, overload families, decorators, macros -- so a
 /// user definition under a warm name changes a fresh build (a user
@@ -1113,20 +1069,12 @@ impl Session {
         let only_functions =
             tracked && only_functions_changed(&self.files[path].item_prints, &new_prints);
 
-        // An edit that changes what the namespace tree, the fragment scopes
-        // or the legacy projections are built from takes the scope path:
-        // `UserFile::scope_hash`, a legacy definition whose name a legacy
-        // compatibility view also names (a legacy lookup of that name reads
-        // the legacy-owned facts), or a legacy definition of a provider a v1
-        // package sees through its namespace view.
+        // An edit that changes what the namespace tree or the fragment scopes
+        // are built from (`UserFile::scope_hash`) takes the scope path.
         let scope_changed = self
             .files
             .get(path)
-            .is_some_and(|old| old.scope_hash != new_scope)
-            || (dialect == Dialect::Legacy
-                && tracked
-                && (self.changes_a_projected_collision(path, &module)
-                    || self.changes_a_legacy_view(path, package.as_ref(), &module)));
+            .is_some_and(|old| old.scope_hash != new_scope);
 
         let diff = (tracked && !module.items.is_empty() && !scope_changed)
             .then(|| classify(&self.files[path].item_prints, &new_prints));
@@ -1252,86 +1200,6 @@ impl Session {
             };
         }
         Ok(result)
-    }
-
-    /// Whether a legacy file's edit adds or removes a definition -- or
-    /// changes its kind -- whose bare name some legacy compatibility view also
-    /// names. Legacy resolution of that name is decided when a caller LOWERS
-    /// (ambiguous, a merged callable family, or the v1 definition alone), so
-    /// the callers that looked it up have to re-lower: the scope path.
-    fn changes_a_projected_collision(&self, path: &str, module: &Ast) -> bool {
-        !self
-            .projected_legacy_owned_changes(ustr(path), module)
-            .is_empty()
-    }
-
-    /// Whether a legacy file's edit adds, removes or re-kinds a definition of
-    /// a provider some v1 package depends on: its namespace view
-    /// holds what the provider's files define, and v1 lookups through it are
-    /// decided at lowering.
-    fn changes_a_legacy_view(
-        &self,
-        path: &str,
-        package: Option<&PackageTag>,
-        module: &Ast,
-    ) -> bool {
-        let Some(tag) = package else { return false };
-        let viewed = self
-            .ws
-            .ns
-            .package(tag.id)
-            .is_some_and(|pkg| pkg.node(ustr("")).is_some());
-        if !viewed {
-            return false;
-        }
-        let old: FxHashSet<(Ustr, bone_core::modules::DefKind)> = self
-            .ws
-            .ns
-            .legacy_owned
-            .names_defined_by(ustr(path))
-            .iter()
-            .copied()
-            .collect();
-        let new: FxHashSet<(Ustr, bone_core::modules::DefKind)> =
-            bone_semantic::semantic_passes::legacy_owned_names(module)
-                .into_iter()
-                .collect();
-        old != new
-    }
-
-    /// The bare names the legacy file `file` starts or stops defining (or
-    /// re-kinds) by becoming `module` that some legacy compatibility view
-    /// also names.
-    fn projected_legacy_owned_changes(&self, file: Ustr, module: &Ast) -> FxHashSet<Ustr> {
-        if self.ws.legacy_projections.is_empty() && self.ws.legacy_imports.is_empty() {
-            return FxHashSet::default();
-        }
-        let old: FxHashSet<(Ustr, bone_core::modules::DefKind)> = self
-            .ws
-            .ns
-            .legacy_owned
-            .names_defined_by(file)
-            .iter()
-            .copied()
-            .collect();
-        let new: FxHashSet<(Ustr, bone_core::modules::DefKind)> =
-            bone_semantic::semantic_passes::legacy_owned_names(module)
-                .into_iter()
-                .collect();
-        old.symmetric_difference(&new)
-            .map(|(name, _)| *name)
-            .filter(|name| {
-                self.ws
-                    .legacy_projections
-                    .values()
-                    .any(|view| view.by_name.contains_key(name))
-                    || self
-                        .ws
-                        .legacy_imports
-                        .values()
-                        .any(|imports| imports.mentions(*name))
-            })
-            .collect()
     }
 
     /// Whether `module` defines a top-level function under a name some macro
@@ -1480,18 +1348,11 @@ impl Session {
             &self.aliases,
         )?;
 
-        let mut delta = ScopeDelta::between(&self.ws, &next);
-        if module.dialect == Dialect::Legacy {
-            delta
-                .legacy
-                .extend(self.projected_legacy_owned_changes(module.file, &module));
-        }
+        let delta = ScopeDelta::between(&self.ws, &next);
 
         self.ws.ns.packages = next.ns.packages;
         self.ws.defs = next.defs;
         self.ws.fragment_scopes = next.fragment_scopes;
-        self.ws.legacy_projections = next.legacy_projections;
-        self.ws.legacy_imports = next.legacy_imports;
 
         self.rebuild_interface(module, changed, delta, UpdateTier::Scope, false)
     }
@@ -1658,9 +1519,6 @@ impl Session {
         // these must re-infer. Re-INFERRED-only modules don't propagate: their
         // interface is unchanged, so their exported definitions are stable.
         let mut reinfer_names: FxHashSet<Ustr> = changed.clone();
-        // A legacy name whose lookup outcome may have moved: a body reading it
-        // at inference (a merged family's members) re-infers.
-        reinfer_names.extend(delta.legacy.iter().copied());
         for &m in &f_mids {
             let module = self.ws.module(m);
             if narrow {

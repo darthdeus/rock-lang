@@ -161,119 +161,6 @@ fn a_signature_edit_that_exports_a_private_type_is_refused() {
     assert!(err.message.contains(expected), "{}", err.message);
 }
 
-/// A legacy `bump(int)` and the projected v1 `bump(int)` have the same
-/// signature: one merged family, and overload selection ties at the call,
-/// naming both origins -- what two same-signature legacy definitions do.
-const TIED_BUMP: &str = "Ambiguous overload for `bump` with argument types (int)\n\
-     tied candidates (equally-ranked matches):\n  \
-     bump(n: int) -> int (legacy definition in legacy_def.rock)\n  \
-     livev1::a::bump(n: int) -> int (v1 definition livev1::a::bump)";
-
-/// A legacy file defines `bump(int)` and a v1 package projects
-/// `bump(int, int)` to legacy files: one overload family, so both
-/// arities resolve, and the verdict is the same in a fresh session and after a
-/// body-only edit of the caller. Legacy resolution once checked
-/// `ws.functions_by_name`, which is empty while a fresh build lowers bodies
-/// and populated during an incremental re-lower, so the two disagreed.
-#[test]
-fn a_legacy_and_projected_family_merges_after_a_body_edit() {
-    let a = "mod a;\n\npub fn bump(n: int, m: int) -> int {\n    n\n}\n";
-    let root = "pub use a::bump;\n";
-    let def = "fn bump(n: int) -> int {\n    n\n}\n";
-    let edit = "fn use_it() -> int {\n    bump(2, 3)\n}\n";
-    let files = vec![
-        v1("a.rock", a),
-        v1("root.rock", root),
-        SessionFile::legacy("legacy_def.rock", def),
-        SessionFile::legacy("legacy_use.rock", "fn use_it() -> int {\n    bump(1)\n}\n"),
-    ];
-    let (tier, diags) = edit_with_diagnostics(files, "legacy_use.rock", edit);
-    assert_eq!(tier, UpdateTier::BodyOnly);
-    assert!(diags.is_empty(), "{diags:?}");
-}
-
-/// The same family changed by an edit to the legacy DEFINER rather than the
-/// caller. Whether a legacy name is a merged family is decided when the
-/// caller LOWERS, so the caller has to re-lower and re-infer: adding a
-/// same-signature `bump` must report the tie, and removing it must clear it,
-/// exactly as a fresh session does.
-#[test]
-fn a_legacy_definer_edit_that_changes_a_collision_relowers_its_callers() {
-    let a = "mod a;\n\npub fn bump(n: int) -> int {\n    n\n}\n";
-    let without = "fn other(n: int) -> int {\n    n\n}\n";
-    let with = "fn other(n: int) -> int {\n    n\n}\n\nfn bump(n: int) -> int {\n    n\n}\n";
-    let files = |def: &str| {
-        vec![
-            v1("a.rock", a),
-            v1("root.rock", "pub use a::bump;\n"),
-            SessionFile::legacy("legacy_def.rock", def),
-            SessionFile::legacy("legacy_use.rock", "fn use_it() -> int {\n    bump(1)\n}\n"),
-        ]
-    };
-
-    let (_, diags) = edit_with_diagnostics(files(without), "legacy_def.rock", with);
-    assert!(diags.iter().any(|d| d.contains(TIED_BUMP)), "{diags:?}");
-
-    let (_, diags) = edit_with_diagnostics(files(with), "legacy_def.rock", without);
-    assert!(diags.is_empty(), "{diags:?}");
-}
-
-/// A legacy definer that keeps the name but changes its KIND: a global
-/// `bump` collides with the projected callable (ambiguous), a function `bump`
-/// merges with it. The name set is unchanged, so only the kind tells the
-/// session the callers must re-lower.
-#[test]
-fn a_legacy_definer_kind_edit_relowers_its_callers() {
-    let a = "mod a;\n\npub fn bump(n: int) -> int {\n    n\n}\n";
-    let global = "global bump: string = \"g\"\n";
-    let function = "fn bump(n: string) -> string {\n    n\n}\n";
-    let files = |def: &str| {
-        vec![
-            v1("a.rock", a),
-            v1("root.rock", "pub use a::bump;\n"),
-            SessionFile::legacy("legacy_def.rock", def),
-            SessionFile::legacy("legacy_use.rock", "fn use_it() -> int {\n    bump(1)\n}\n"),
-        ]
-    };
-
-    let (_, diags) = edit_with_diagnostics(files(global), "legacy_def.rock", function);
-    assert!(diags.is_empty(), "{diags:?}");
-
-    let (_, diags) = edit_with_diagnostics(files(function), "legacy_def.rock", global);
-    assert!(
-        diags
-            .iter()
-            .any(|d| d.contains("ambiguous legacy reference to `bump`")),
-        "{diags:?}"
-    );
-}
-
-/// A signature edit of the v1 member stays on the interface path, and the
-/// legacy caller of the merged family depends on that member's DefKey as well
-/// as on the bare name: narrowing `bump(int, int)` to `bump(int)` makes the
-/// caller's `bump(1)` tie, and widening it back clears the tie.
-#[test]
-fn a_v1_member_signature_edit_reinfers_a_merged_family_caller() {
-    let wide = "mod a;\n\npub fn bump(n: int, m: int) -> int {\n    n\n}\n";
-    let narrow = "mod a;\n\npub fn bump(n: int) -> int {\n    n\n}\n";
-    let files = |a: &str| {
-        vec![
-            v1("a.rock", a),
-            v1("root.rock", "pub use a::bump;\n"),
-            SessionFile::legacy("legacy_def.rock", "fn bump(n: int) -> int {\n    n\n}\n"),
-            SessionFile::legacy("legacy_use.rock", "fn use_it() -> int {\n    bump(1)\n}\n"),
-        ]
-    };
-
-    let (tier, diags) = edit_with_diagnostics(files(wide), "a.rock", narrow);
-    assert_eq!(tier, UpdateTier::Interface);
-    assert!(diags.iter().any(|d| d.contains(TIED_BUMP)), "{diags:?}");
-
-    let (tier, diags) = edit_with_diagnostics(files(narrow), "a.rock", wide);
-    assert_eq!(tier, UpdateTier::Interface);
-    assert!(diags.is_empty(), "{diags:?}");
-}
-
 /// A glob opens only the members accessible from the importer,
 /// so adding a private definition to a globbed module changes no other
 /// module's resolution: `c` still reaches `a::width` through its glob.
@@ -330,130 +217,6 @@ const PICK_INT: &str = "pub fn pick(n: int) -> int {\n    n\n}\n";
 const PICK_STRING: &str = "pub fn pick(s: string) -> string {\n    s\n}\n";
 const PICK_USE: &str = "fn use_it() -> int {\n    let s = pick(\"v1\")\n    pick(1)\n}\n";
 
-/// Two v1 packages each project `pick` to a package-less legacy file that
-/// defines no `pick`: one overload family, as legacy overloading
-/// merges them. Narrowing one member to the other's signature ties the call,
-/// naming both origins; widening it back clears the tie. Both edits stay on
-/// the interface path and agree with a fresh session.
-#[test]
-fn projected_callables_with_no_legacy_owner_merge_across_a_member_edit() {
-    const TIED_PICK: &str = "Ambiguous overload for `pick` with argument types (string)\n\
-         tied candidates (equally-ranked matches):\n  \
-         lib_a::pick(s: string) -> string (v1 definition lib_a::pick)\n  \
-         lib_b::pick(s: string) -> string (v1 definition lib_b::pick)";
-    let files = |b: &str| {
-        vec![
-            v1_in(1, "lib_a", "a.rock", PICK_STRING),
-            v1_in(2, "lib_b", "b.rock", b),
-            SessionFile::legacy("legacy_use.rock", PICK_USE),
-        ]
-    };
-
-    let (tier, diags) = edit_with_diagnostics(files(PICK_INT), "b.rock", PICK_STRING);
-    assert_eq!(tier, UpdateTier::Interface);
-    assert!(diags.iter().any(|d| d.contains(TIED_PICK)), "{diags:?}");
-
-    let (tier, diags) = edit_with_diagnostics(files(PICK_STRING), "b.rock", PICK_INT);
-    assert_eq!(tier, UpdateTier::Interface);
-    assert!(diags.is_empty(), "{diags:?}");
-}
-
-/// A second package's `pick` appearing turns the single projected definition
-/// into a family; removing it turns the family back. Each is a namespace
-/// edit (scope path: the caller looked `pick` up, so it re-lowers), and the
-/// caller's verdict matches a fresh session either way.
-#[test]
-fn a_second_projected_callable_added_or_removed_relowers_its_callers() {
-    let other = "pub fn other() -> int {\n    1\n}\n";
-    let files = |b: &str| {
-        vec![
-            v1_in(1, "lib_a", "a.rock", PICK_INT),
-            v1_in(2, "lib_b", "b.rock", b),
-            SessionFile::legacy("legacy_use.rock", PICK_USE),
-        ]
-    };
-
-    let (tier, diags) = edit_with_diagnostics(files(other), "b.rock", PICK_STRING);
-    assert_eq!(tier, UpdateTier::Scope);
-    assert!(diags.is_empty(), "{diags:?}");
-
-    let (tier, diags) = edit_with_diagnostics(files(PICK_STRING), "b.rock", other);
-    assert_eq!(tier, UpdateTier::Scope);
-    assert!(
-        diags.iter().any(|d| d.contains("type mismatch")),
-        "{diags:?}"
-    );
-}
-
-/// A legacy definer adding a `pick` to a family that had no legacy member,
-/// and removing it again. The family stays a family, but its member set
-/// changes, so the caller re-lowers and re-infers: a same-signature legacy
-/// `pick(int)` ties with `lib_a::pick`.
-#[test]
-fn a_legacy_member_added_to_an_ownerless_family_relowers_its_callers() {
-    let without = "fn other(n: int) -> int {\n    n\n}\n";
-    let with = "fn other(n: int) -> int {\n    n\n}\n\nfn pick(n: int) -> int {\n    n\n}\n";
-    let files = |def: &str| {
-        vec![
-            v1_in(1, "lib_a", "a.rock", PICK_INT),
-            v1_in(2, "lib_b", "b.rock", PICK_STRING),
-            SessionFile::legacy("legacy_def.rock", def),
-            SessionFile::legacy("legacy_use.rock", PICK_USE),
-        ]
-    };
-
-    let (_, diags) = edit_with_diagnostics(files(without), "legacy_def.rock", with);
-    assert!(
-        diags.iter().any(
-            |d| d.contains("Ambiguous overload for `pick` with argument types (int)")
-                && d.contains("(legacy definition in legacy_def.rock)")
-                && d.contains("(v1 definition lib_a::pick)")
-        ),
-        "{diags:?}"
-    );
-
-    let (_, diags) = edit_with_diagnostics(files(with), "legacy_def.rock", without);
-    assert!(diags.is_empty(), "{diags:?}");
-}
-
-/// Legacy operator syntax reaches a projected v1 `operator +`, through `+` and
-/// `+=` alike, after a body edit of the caller; and a legacy definer adding a
-/// same-signature `operator +` ties both, as a fresh session does.
-#[test]
-fn legacy_operator_syntax_merges_a_projected_operator_across_edits() {
-    let geo =
-        "pub struct Pt {\n    pub x: int,\n}\n\npub operator +(a: Pt, b: Pt) -> Pt {\n    a\n}\n";
-    let caller = "fn use_it() -> int {\n    let p = Pt { x: 1 } + Pt { x: 2 }\n    p.x\n}\n";
-    let edit = "fn use_it() -> int {\n    let p = Pt { x: 1 }\n    p += Pt { x: 2 }\n    p.x\n}\n";
-    let without = "fn other(n: int) -> int {\n    n\n}\n";
-    let with =
-        "fn other(n: int) -> int {\n    n\n}\n\noperator +(a: Pt, b: Pt) -> Pt {\n    b\n}\n";
-    let files = |def: &str, use_text: &str| {
-        vec![
-            v1_in(1, "geo", "geo.rock", geo),
-            SessionFile::legacy("legacy_def.rock", def),
-            SessionFile::legacy("legacy_use.rock", use_text),
-        ]
-    };
-
-    let (tier, diags) = edit_with_diagnostics(files(without, caller), "legacy_use.rock", edit);
-    assert_eq!(tier, UpdateTier::BodyOnly);
-    assert!(diags.is_empty(), "{diags:?}");
-
-    let (_, diags) = edit_with_diagnostics(files(without, edit), "legacy_def.rock", with);
-    assert!(
-        diags
-            .iter()
-            .any(|d| d.contains("Ambiguous overload for `__op_add`")
-                && d.contains("(legacy definition in legacy_def.rock)")
-                && d.contains("(v1 definition geo::__op_add)")),
-        "{diags:?}"
-    );
-
-    let (_, diags) = edit_with_diagnostics(files(with, edit), "legacy_def.rock", without);
-    assert!(diags.is_empty(), "{diags:?}");
-}
-
 /// Every package of `files` names every other by its self name.
 fn aliases_of(files: &[SessionFile]) -> NsAliases {
     let mut packages: Vec<(u32, String)> = files
@@ -497,41 +260,33 @@ const IMPORT_A: &str = "use lib_a::pick;\n\n";
 const IMPORT_BOTH: &str = "use lib_a::pick;\nuse lib_b::pick;\n\n";
 
 /// Explicit imports of two different callables under one name compose into
-/// one family, in a v1 and in a legacy file alike. Adding the
+/// one family. Adding the
 /// second import composes it (a `use` edit: scope path); removing it
 /// splits the family again, and `pick("v1")` no longer has a member. Each
 /// edit agrees with a fresh session.
 #[test]
 fn a_second_explicit_import_composes_and_removing_it_splits_the_family() {
-    for dialect in [Dialect::V1, Dialect::Legacy] {
-        let files = |imports: &str| {
-            vec![
-                v1_in(1, "lib_a", "a.rock", PICK_INT),
-                v1_in(2, "lib_b", "b.rock", PICK_STRING),
-                in_package(
-                    dialect,
-                    3,
-                    "game",
-                    "use.rock",
-                    &format!("{imports}{PICK_USE}"),
-                ),
-            ]
-        };
-        let aliases = aliases_of(&files(""));
-        let both = format!("{IMPORT_BOTH}{PICK_USE}");
-        let one = format!("{IMPORT_A}{PICK_USE}");
+    let files = |imports: &str| {
+        vec![
+            v1_in(1, "lib_a", "a.rock", PICK_INT),
+            v1_in(2, "lib_b", "b.rock", PICK_STRING),
+            v1_in(3, "game", "use.rock", &format!("{imports}{PICK_USE}")),
+        ]
+    };
+    let aliases = aliases_of(&files(""));
+    let both = format!("{IMPORT_BOTH}{PICK_USE}");
+    let one = format!("{IMPORT_A}{PICK_USE}");
 
-        let (tier, diags) = edit_with_aliases(files(IMPORT_A), "use.rock", &both, &aliases);
-        assert_eq!(tier, UpdateTier::Scope, "{dialect:?}");
-        assert!(diags.is_empty(), "{dialect:?}: {diags:?}");
+    let (tier, diags) = edit_with_aliases(files(IMPORT_A), "use.rock", &both, &aliases);
+    assert_eq!(tier, UpdateTier::Scope);
+    assert!(diags.is_empty(), "{diags:?}");
 
-        let (tier, diags) = edit_with_aliases(files(IMPORT_BOTH), "use.rock", &one, &aliases);
-        assert_eq!(tier, UpdateTier::Scope, "{dialect:?}");
-        assert!(
-            diags.iter().any(|d| d.contains("type mismatch")),
-            "{dialect:?}: {diags:?}"
-        );
-    }
+    let (tier, diags) = edit_with_aliases(files(IMPORT_BOTH), "use.rock", &one, &aliases);
+    assert_eq!(tier, UpdateTier::Scope);
+    assert!(
+        diags.iter().any(|d| d.contains("type mismatch")),
+        "{diags:?}"
+    );
 }
 
 /// A member of a composed import family narrowed to the other member's
@@ -543,33 +298,22 @@ fn a_member_signature_edit_ties_a_composed_import_family() {
          tied candidates (equally-ranked matches):\n  \
          lib_a::pick(s: string) -> string (v1 definition lib_a::pick)\n  \
          lib_b::pick(s: string) -> string (v1 definition lib_b::pick)";
-    for dialect in [Dialect::V1, Dialect::Legacy] {
-        let files = |b: &str| {
-            vec![
-                v1_in(1, "lib_a", "a.rock", PICK_STRING),
-                v1_in(2, "lib_b", "b.rock", b),
-                in_package(
-                    dialect,
-                    3,
-                    "game",
-                    "use.rock",
-                    &format!("{IMPORT_BOTH}{PICK_USE}"),
-                ),
-            ]
-        };
-        let aliases = aliases_of(&files(PICK_INT));
+    let files = |b: &str| {
+        vec![
+            v1_in(1, "lib_a", "a.rock", PICK_STRING),
+            v1_in(2, "lib_b", "b.rock", b),
+            v1_in(3, "game", "use.rock", &format!("{IMPORT_BOTH}{PICK_USE}")),
+        ]
+    };
+    let aliases = aliases_of(&files(PICK_INT));
 
-        let (tier, diags) = edit_with_aliases(files(PICK_INT), "b.rock", PICK_STRING, &aliases);
-        assert_eq!(tier, UpdateTier::Interface, "{dialect:?}");
-        assert!(
-            diags.iter().any(|d| d.contains(TIED_PICK)),
-            "{dialect:?}: {diags:?}"
-        );
+    let (tier, diags) = edit_with_aliases(files(PICK_INT), "b.rock", PICK_STRING, &aliases);
+    assert_eq!(tier, UpdateTier::Interface);
+    assert!(diags.iter().any(|d| d.contains(TIED_PICK)), "{diags:?}");
 
-        let (tier, diags) = edit_with_aliases(files(PICK_STRING), "b.rock", PICK_INT, &aliases);
-        assert_eq!(tier, UpdateTier::Interface, "{dialect:?}");
-        assert!(diags.is_empty(), "{dialect:?}: {diags:?}");
-    }
+    let (tier, diags) = edit_with_aliases(files(PICK_STRING), "b.rock", PICK_INT, &aliases);
+    assert_eq!(tier, UpdateTier::Interface);
+    assert!(diags.is_empty(), "{diags:?}");
 }
 
 const GLOB_A: &str = "use lib_a::*;\n\n";
@@ -852,42 +596,9 @@ fn a_dependency_module_alias_added_or_removed_takes_the_scope_path() {
     );
 }
 
-/// A v1 package reaches a legacy dependency through the view of what the
-/// provider's own files define, so a legacy definer edit that
-/// adds or removes a name is a namespace edit: the scope path re-lowers the
-/// v1 users that looked the name up, as a fresh session decides.
+/// A legacy package's definer edits keep the legacy routing.
 #[test]
-fn a_legacy_definition_added_or_removed_relowers_its_v1_users() {
-    let without = "fn other() -> int {\n    1\n}\n";
-    let with = "fn other() -> int {\n    1\n}\n\nfn pick(n: int) -> int {\n    n\n}\n";
-    let by_path = "fn use_it() -> int {\n    x_lib::pick(1)\n}\n";
-    let by_glob = "use x_lib::*;\n\nfn use_it() -> int {\n    pick(1)\n}\n";
-    for user in [by_path, by_glob] {
-        let files = |lib: &str| {
-            vec![
-                in_package(Dialect::Legacy, 1, "x_lib", "xlib.rock", lib),
-                v1_in(2, "app", "use.rock", user),
-            ]
-        };
-        let aliases = aliases_of(&files(without));
-
-        let (tier, diags) = edit_with_aliases(files(without), "xlib.rock", with, &aliases);
-        assert_eq!(tier, UpdateTier::Scope, "{user}");
-        assert!(diags.is_empty(), "{user}: {diags:?}");
-
-        let (tier, diags) = edit_with_aliases(files(with), "xlib.rock", without, &aliases);
-        assert_eq!(tier, UpdateTier::Scope, "{user}");
-        assert!(
-            diags.iter().any(|d| d.contains("did not resolve")),
-            "{user}: {diags:?}"
-        );
-    }
-}
-
-/// A legacy provider with no v1 dependent has no view, so its definer edits
-/// keep the legacy routing.
-#[test]
-fn a_legacy_definition_added_with_no_v1_dependent_stays_on_the_interface_path() {
+fn a_legacy_definition_added_in_a_legacy_package_stays_on_the_interface_path() {
     let without = "fn other() -> int {\n    1\n}\n";
     let with = "fn other() -> int {\n    1\n}\n\nfn pick(n: int) -> int {\n    n\n}\n";
     let user = "fn use_it() -> int {\n    other()\n}\n";

@@ -556,8 +556,8 @@ fn a_refused_build_is_a_comparable_outcome() {
 
 /// The full rebuild re-lowers and re-infers the user files only. The warm
 /// stdlib is immutable for the session's lifetime and consults no user scope
-/// (`legacy_name` answers `Bare` for a stdlib file, and a stdlib file has no
-/// fragment scope), so its lowered and inferred state is reused.
+/// (a stdlib file has no fragment scope), so its lowered and inferred state
+/// is reused.
 #[test]
 fn the_full_rebuild_reinfers_no_warm_body() {
     let mut h = V1Harness::new(vec![v1("a.rock", A_BUMP), v1("d.rock", UNRELATED)]);
@@ -891,45 +891,6 @@ fn gate_g_visibility_narrowed_on_a_path_used_item() {
     assert_eq!(
         h.functions_per_file(&r.relowered),
         per_file(&[("a.rock", 1)])
-    );
-}
-
-/// Gate (h): a legacy definer adds a callable the v1 package also projects to
-/// legacy files, so a legacy caller's bare `bump` becomes one merged overload
-/// family (`CallFamily::Merged`), decided at lowering. The two members
-/// have the same signature, so the call is an overload tie at inference.
-///
-/// legacy_def (edited, 2 bodies) and legacy_use (its bare `bump` read the
-/// projection alone; it must re-lower into the merged family) -- 3; the v1
-/// files, legacy_far and the warm stdlib 0. Per-body: the new `bump` plus
-/// `use_it`'s re-lower.
-#[test]
-fn gate_h_legacy_definer_edit_collides_with_a_projected_name() {
-    let without = "fn other(n: int) -> int {\n    n\n}\n";
-    let with = "fn other(n: int) -> int {\n    n\n}\n\nfn bump(n: int) -> int {\n    n\n}\n";
-    let mut h = V1Harness::new(vec![
-        v1(
-            "a.rock",
-            "mod a;\n\npub fn bump(n: int) -> int {\n    n\n}\n",
-        ),
-        v1("root.rock", "pub use a::bump;\n"),
-        legacy("legacy_def.rock", without),
-        legacy("legacy_use.rock", "fn use_it() -> int {\n    bump(1)\n}\n"),
-        legacy(
-            "legacy_far.rock",
-            "fn far() -> int {\n    2\n}\n\nfn farther() -> int {\n    3\n}\n",
-        ),
-    ]);
-    assert_eq!(h.call_keys("legacy_use.rock"), vec![(key("a::bump"), None)]);
-
-    let r = h.edit("legacy_def.rock", with).expect("accepted");
-    h.assert_diagnostic("Ambiguous overload for `bump` with argument types (int)");
-    assert_eq!(r.tier, UpdateTier::Scope);
-    assert_eq!(h.reinferred_body_count(), 3);
-    assert_eq!(h.relowered_body_count(), 3);
-    assert_eq!(
-        h.functions_per_file(&r.relowered),
-        per_file(&[("legacy_def.rock", 2), ("legacy_use.rock", 1)])
     );
 }
 
@@ -1304,84 +1265,6 @@ fn a_type_flavor_change_relowers_a_variant_path_user() {
     h.assert_no_diagnostics();
 }
 
-/// A legacy file's projection gains a name: the root re-exports another v1
-/// function, and a legacy caller of that name that did not resolve does.
-#[test]
-fn a_projected_name_added_resolves_a_legacy_caller() {
-    let a = "mod a;\n\npub fn bump(n: int) -> int {\n    n\n}\n\npub fn twice(n: int) -> int {\n    n\n}\n";
-    let root0 = "pub use a::bump;\n";
-    let root1 = "pub use a::bump;\npub use a::twice;\n";
-    let mut h = V1Harness::new(vec![
-        v1("a.rock", a),
-        v1("root.rock", root0),
-        legacy("legacy_use.rock", "fn use_it() -> int {\n    twice(1)\n}\n"),
-        legacy("legacy_far.rock", "fn far() -> int {\n    2\n}\n"),
-    ]);
-    assert!(!h.diagnostics().is_empty());
-
-    let r = h.edit("root.rock", root1).expect("accepted");
-    assert_eq!(r.tier, UpdateTier::Scope);
-    h.assert_no_diagnostics();
-    assert_eq!(
-        h.call_keys("legacy_use.rock"),
-        vec![(key("a::twice"), None)]
-    );
-    assert_eq!(h.relowered_body_count(), 1, "legacy_use's use_it alone");
-}
-
-/// A merged legacy family (`CallFamily::Merged`) whose member set grows: the
-/// legacy caller's callee spelling is the same before and after, but its
-/// recorded member keys (`Module::call_families`) are not, so the caller
-/// must still be found through its legacy probe and re-lowered.
-#[test]
-fn a_merged_legacy_family_gains_a_member() {
-    let a = "mod a;\n\npub fn bump(n: int, m: int) -> int {\n    n\n}\n";
-    let b = "mod b;\n\npub fn bump(n: int) -> int {\n    n\n}\n";
-    let root0 = "pub use a::*;\n";
-    let root1 = "pub use a::*;\npub use b::*;\n";
-    let mut h = V1Harness::new(vec![
-        v1("a.rock", a),
-        v1("b.rock", b),
-        v1("root.rock", root0),
-        legacy(
-            "legacy_def.rock",
-            "fn bump(s: string) -> string {\n    s\n}\n",
-        ),
-        legacy("legacy_use.rock", "fn use_it() -> int {\n    bump(1)\n}\n"),
-    ]);
-    assert!(
-        !h.diagnostics().is_empty(),
-        "no member of the family takes one int"
-    );
-
-    let r = h.edit("root.rock", root1).expect("accepted");
-    assert_eq!(r.tier, UpdateTier::Scope);
-    h.assert_no_diagnostics();
-}
-
-/// A legacy definer drops the collision again: the legacy caller leaves the
-/// merged family for the projection alone.
-#[test]
-fn a_legacy_definer_removes_a_colliding_name() {
-    let without = "fn other(n: int) -> int {\n    n\n}\n";
-    let with = "fn other(n: int) -> int {\n    n\n}\n\nfn bump(n: int) -> int {\n    n\n}\n";
-    let mut h = V1Harness::new(vec![
-        v1(
-            "a.rock",
-            "mod a;\n\npub fn bump(n: int) -> int {\n    n\n}\n",
-        ),
-        v1("root.rock", "pub use a::bump;\n"),
-        legacy("legacy_def.rock", with),
-        legacy("legacy_use.rock", "fn use_it() -> int {\n    bump(1)\n}\n"),
-    ]);
-    assert!(!h.diagnostics().is_empty());
-
-    let r = h.edit("legacy_def.rock", without).expect("accepted");
-    assert_eq!(r.tier, UpdateTier::Scope);
-    h.assert_no_diagnostics();
-    assert_eq!(h.call_keys("legacy_use.rock"), vec![(key("a::bump"), None)]);
-}
-
 /// A type removed from a module: a body that named it by path re-lowers into
 /// its error, and adding the type back clears it. A SIGNATURE naming it by
 /// path refuses the whole build instead, in a session as in a fresh build.
@@ -1696,75 +1579,6 @@ fn a_module_reexport_added_and_repointed_moves_a_path_through_it() {
         h.functions_per_file(&r.relowered),
         per_file(&[("facade.rock", 1), ("user.rock", 1)])
     );
-}
-
-// ---------------------------------------------------------------------------
-// A v1 package over a legacy provider (V1 -> Legacy): the view of
-// what the provider's own files define.
-// ---------------------------------------------------------------------------
-
-fn in_package(dialect: Dialect, id: u32, name: &str, path: &str, text: &str) -> SessionFile {
-    SessionFile {
-        path: path.into(),
-        text: text.into(),
-        dialect,
-        package: Some(PackageTag {
-            id,
-            self_name: name.into(),
-            identity_storage: Default::default(),
-            root: String::new(),
-        }),
-        global_policy: GlobalPolicy::Any,
-    }
-}
-
-/// `app` (2) depends on the legacy `x_lib` (1).
-fn app_over_x_lib() -> NsAliases {
-    NsAliases {
-        packages: vec![
-            bone_core::modules::PackageAliases {
-                id: 1,
-                self_name: "x_lib".into(),
-                aliases: vec![],
-            },
-            bone_core::modules::PackageAliases {
-                id: 2,
-                self_name: "app".into(),
-                aliases: vec![("x_lib".into(), 1)],
-            },
-        ],
-    }
-}
-
-/// A legacy definer adds the name a v1 glob user was missing, then a second
-/// overload the user's call selects, then drops the name again: each step
-/// resolves and selects what a fresh build does.
-#[test]
-fn a_legacy_providers_family_grows_and_shrinks_under_a_v1_glob_user() {
-    let none = "fn other() -> int {\n    1\n}\n";
-    let int_only = "fn other() -> int {\n    1\n}\n\nfn mix(a: int) -> int {\n    a\n}\n";
-    let both = "fn other() -> int {\n    1\n}\n\nfn mix(a: int) -> int {\n    a\n}\n\nfn mix(a: string) -> string {\n    a\n}\n";
-    let user = "use x_lib::*;\n\nfn use_it() -> string {\n    mix(\"s\")\n}\n";
-    let mut h = V1Harness::with_aliases(
-        vec![
-            in_package(Dialect::Legacy, 1, "x_lib", "xlib.rock", none),
-            in_package(Dialect::V1, 2, "app", "use.rock", user),
-        ],
-        app_over_x_lib(),
-    );
-    h.assert_diagnostic("did not resolve");
-
-    let r = h.edit("xlib.rock", int_only).expect("accepted");
-    assert_eq!(r.tier, UpdateTier::Scope);
-    assert_eq!(h.call_keys("use.rock"), vec![("mix".to_string(), None)]);
-    h.assert_diagnostic("type mismatch");
-
-    h.edit("xlib.rock", both).expect("accepted");
-    h.assert_no_diagnostics();
-
-    let r = h.edit("xlib.rock", none).expect("accepted");
-    assert_eq!(r.tier, UpdateTier::Scope);
-    h.assert_diagnostic("did not resolve");
 }
 
 #[test]
