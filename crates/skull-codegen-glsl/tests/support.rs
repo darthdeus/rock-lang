@@ -9,30 +9,10 @@ use skull_codegen_glsl::{GlslProfile, ShaderEmission};
 use skull_mir::lower::ScalarCtx;
 use skull_parser::Ast;
 use skull_parser::CompilerError;
-use std::sync::LazyLock;
-use ustr::Ustr;
 
-pub static STDLIB: LazyLock<Vec<Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn workspace_with(stdlib: &[Ast], src: &str) -> (Workspace, ModuleId) {
-    let mut modules = stdlib.to_vec();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    (ws, mid)
-}
-
-pub fn workspace(src: &str) -> (Workspace, ModuleId) {
-    workspace_with(&STDLIB, src)
-}
+#[path = "workspace.rs"]
+mod fixture_workspace;
+pub use fixture_workspace::{stdlib, workspace, workspace_with};
 
 /// `semantic_pass` returns Ok with per-body errors recorded in `ws.errors`; the
 /// CLI reports those and refuses to emit.
@@ -81,7 +61,7 @@ pub fn emit_library_with(stdlib: &[Ast], src: &str, roots: &[&str]) -> Result<St
 }
 
 pub fn emit_library(src: &str, roots: &[&str]) -> Result<String, String> {
-    emit_library_with(&STDLIB, src, roots)
+    emit_library_with(stdlib(), src, roots)
 }
 
 /// The registered-program view for `vert` (if any) and `frag`, realized by the

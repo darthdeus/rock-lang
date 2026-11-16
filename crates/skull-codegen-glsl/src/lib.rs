@@ -59,6 +59,9 @@ mod assertion_flip_tests;
 mod classify;
 mod emit_fn;
 mod entry;
+#[cfg(test)]
+#[path = "../tests/workspace.rs"]
+mod fixture_workspace;
 mod fn_analysis;
 mod fn_render;
 mod intrinsics;

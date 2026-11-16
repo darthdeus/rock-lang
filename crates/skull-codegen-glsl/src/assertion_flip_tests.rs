@@ -1,20 +1,7 @@
 use super::*;
+use crate::fixture_workspace::workspace;
 use skull_graph::shader::ShaderProgram;
 use ustr::Ustr;
-
-fn build_ws(src: &str) -> (Workspace, ModuleId) {
-    let mut modules: Vec<skull_parser::Ast> = rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module(f.contents, id).expect("stdlib parse")
-        })
-        .collect();
-    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("mid");
-    (ws, mid)
-}
 
 fn lower_test_instance(
     ws: &Workspace,
@@ -72,7 +59,7 @@ fn concrete_signature_tier0_check_rejects_a_non_tier0_plan_type() {
 /// strip the `IntToFloat` to simulate a missed sink.
 #[test]
 fn missed_sink_is_a_hard_emit_error() {
-    let (ws, mid) = build_ws("@pure fn f(i: int) -> float { return i }");
+    let (ws, mid) = workspace("@pure fn f(i: int) -> float { return i }");
     let fref = resolve_root(&ws, mid, "f").expect("root");
     let (scx, mut mf, plan) = lower_test_instance(&ws, fref);
 
@@ -115,7 +102,7 @@ fn missed_sink_is_a_hard_emit_error() {
 /// Without this the rejection and "GLSL stopped emitting calls" look alike.
 #[test]
 fn a_nongeneric_callee_needs_no_recorded_instantiation() {
-    let (ws, mid) = build_ws(
+    let (ws, mid) = workspace(
         "@pure fn doubled(x: float) -> float { return x * 2.0 }\n             @pure fn caller(x: float) -> float { return doubled(x) }",
     );
     let fref = resolve_root(&ws, mid, "caller").expect("root");
@@ -456,7 +443,7 @@ fn duplicate_expected_bindings_reject() {
 #[test]
 fn a_fragment_stage_with_no_declared_output_rejects() {
     use skull_mir::shader_ir::FragmentOutput;
-    let (ws, mid) = build_ws(
+    let (ws, mid) = workspace(
         "value Vary { position: Vec4, uv: Vec2 }\n\
          value QuadVert { pos: Vec2, texcoord: Vec2 }\n\
          @shader(vertex)\n\
@@ -525,7 +512,7 @@ fn a_fragment_stage_with_no_declared_output_rejects() {
 #[test]
 fn a_generic_callee_with_a_wrong_arity_key_rejects() {
     use skull_mir::monoty::MonoTy;
-    let (ws, mid) = build_ws(
+    let (ws, mid) = workspace(
         "@pure fn pick<A, B>(a: A, b: B) -> A { return a }\n\
          @pure fn caller(x: float) -> float { return pick(x, 1) }",
     );
@@ -569,7 +556,7 @@ fn a_generic_callee_with_a_wrong_arity_key_rejects() {
 
 #[test]
 fn production_shader_body_consumes_the_concrete_result_plan() {
-    let (ws, mid) = build_ws(
+    let (ws, mid) = workspace(
         "fn passthrough<T>(x: T) -> T { return x }\n\
          fn caller(x: float) -> float { return passthrough(x) }",
     );
@@ -599,7 +586,7 @@ fn production_shader_body_consumes_the_concrete_result_plan() {
 
 #[test]
 fn production_shader_calls_use_concrete_signature_and_instance_records() {
-    let (ws, mid) = build_ws(
+    let (ws, mid) = workspace(
         "fn passthrough<T>(x: T) -> T { return x }\n\
          fn caller(x: float) -> float { return passthrough(x) }",
     );
