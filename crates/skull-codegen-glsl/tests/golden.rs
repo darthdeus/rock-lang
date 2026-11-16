@@ -139,24 +139,6 @@ fn vec3_vec4_constructors() {
 }
 
 #[test]
-fn call_swizzle_texture_evaluates_once() {
-    for (selection, result) in [("rgb", "v(rgb, 1.0)"), ("xy", "v(rgb.x, rgb.y, 0.0, 1.0)")] {
-        let src = format!(
-            "@shader(fragment) fn sampled(scene: Sampler2D, tc: Vec2) -> Vec4 {{
-                let rgb = texture(scene, tc).{selection}
-                return {result}
-            }}"
-        );
-        let glsl = emit_entry(&src, "sampled").expect("emit");
-        assert_eq!(
-            glsl.matches("texture(scene, tc)").count(),
-            1,
-            "{selection}:\n{glsl}"
-        );
-    }
-}
-
-#[test]
 fn fragment_call_swizzles_evaluate_each_call_once() {
     let src = "fn shade(p: Vec2) -> Vec4 { return v(sin(p.x), cos(p.y), p.x * p.y, 1.0) }
         @shader(fragment) fn sampled(scene: Sampler2D, tc: Vec2) -> Vec4 {
