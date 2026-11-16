@@ -63,6 +63,21 @@ fn test_vec_new_with_capacity_then_push() {
     print(a[0].x)
 }
 
+@test(output = "true\n4\ntrue")
+fn test_capacity_covers_len() {
+    let a: [V2] = []
+    a.push(V2 { x: 1.0, y: 2.0 })
+    a.push(V2 { x: 3.0, y: 4.0 })
+    a.push(V2 { x: 5.0, y: 6.0 })
+    print(a.capacity() >= a.len())
+    let b: [V2] = vec_new_with_capacity(4)
+    print(b.capacity())
+    for i in 0..6 {
+        b.push(V2 { x: 1.0, y: 1.0 })
+    }
+    print(b.capacity() >= b.len())
+}
+
 @test(output = "2\n2\n1\n9\ntrue", backends = "lua")
 fn test_clone_copies_every_column() {
     let a: [V2] = [V2 { x: 1.0, y: 2.0 }, V2 { x: 3.0, y: 4.0 }]

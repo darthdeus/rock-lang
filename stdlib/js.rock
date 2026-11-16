@@ -106,6 +106,8 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
 
 @intrinsic @pure inline(js) fn __map_keys_are_strings<K>(keys: [K]) -> bool = "return false;"
 
+@intrinsic @inline inline(js) fn table_len(tbl: any) -> int = "return __table_len(tbl);"
+
 // Column-storage boundary primitives.
 // Their luajit siblings are in `unified.rock`; each is the same operation over a
 // 0-based JS array instead of a 1-based Lua table.

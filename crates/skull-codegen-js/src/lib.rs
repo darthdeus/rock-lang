@@ -173,7 +173,6 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
         2,
         Emission::Template("__table_unset($1, $2)"),
     ),
-    ("table_len", 1, Emission::Template("__table_len($1)")),
     // Vec backing indices are 0-based on JS, including shifted Lua indices.
     ("__vec_data_get", 2, Emission::Template("$1._data[$2]")),
     ("__vec_data_set", 3, Emission::Template("$1._data[$2] = $3")),
