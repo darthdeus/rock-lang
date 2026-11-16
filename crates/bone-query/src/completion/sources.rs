@@ -1690,6 +1690,16 @@ fn build_member_items(
         // spuriously trip the length tiebreak (empty-prefix browse stays
         // alphabetical). Tunable; eyeball with `rock lsp completion <pos> --repl`.
         let field_boost = if prefix.is_empty() { 0 } else { 25 };
+        // The type-relevance rung: a `bool` member in a bool context
+        // (`if`/`while <chain>`), a member of the expected param type in a
+        // call-arg slot.
+        let type_rank = |is_bool: bool, type_match: bool| {
+            u8::from(if bool_ctx {
+                !is_bool
+            } else {
+                arg_ctx && !type_match
+            })
+        };
         let field_items =
             fields
                 .into_iter()
@@ -1700,13 +1710,15 @@ fn build_member_items(
                     }
                     (prefix.is_empty() || admit(name.as_bytes(), prefix.as_bytes())).then(|| {
                         CompletionItem {
-                            sort_text: Some(if bool_ctx {
-                                member_bool_sort_text(&name, pfx, ty == "bool", 0, field_boost)
-                            } else if arg_ctx {
-                                member_arg_sort_text(&name, pfx, tmatch, 0, 1, field_boost)
-                            } else {
-                                arg_sort_text(0, 0, &name, pfx, 1, 0, field_boost)
-                            }),
+                            sort_text: Some(arg_sort_text(
+                                type_rank(ty == "bool", tmatch),
+                                0,
+                                &name,
+                                pfx,
+                                1,
+                                0,
+                                field_boost,
+                            )),
                             label: format!("{name}: {ty}"),
                             kind: Some(CompletionItemKind::FIELD),
                             detail: Some(ty),
@@ -1756,13 +1768,15 @@ fn build_member_items(
                         // SCORE lean (MEMBER_FIELD_BOOST); methods take no bonus, so a
                         // better-matching method still outranks a field. (In non-member
                         // position fns are still down-ranked, by `kind`.)
-                        sort_text: Some(if bool_ctx {
-                            member_bool_sort_text(&m.name, pfx, false, 0, 0)
-                        } else if arg_ctx {
-                            member_arg_sort_text(&m.name, pfx, rmatch, 0, 1, 0)
-                        } else {
-                            arg_sort_text(0, 0, &m.name, pfx, 1, 0, 0)
-                        }),
+                        sort_text: Some(arg_sort_text(
+                            type_rank(false, rmatch),
+                            0,
+                            &m.name,
+                            pfx,
+                            1,
+                            0,
+                            0,
+                        )),
                         label: m.name.clone(),
                         label_details: fn_or_type_label_details(
                             SymCat::Function,
@@ -1796,13 +1810,8 @@ fn build_member_items(
                         Some(InsertTextFormat::SNIPPET),
                     )
                 };
-                let sort_text = if bool_ctx {
-                    member_bool_sort_text(name.as_str(), pfx, false, 0, 0)
-                } else if arg_ctx {
-                    member_arg_sort_text(name.as_str(), pfx, false, 0, 1, 0)
-                } else {
-                    arg_sort_text(0, 0, name.as_str(), pfx, 1, 0, 0)
-                };
+                let sort_text =
+                    arg_sort_text(type_rank(false, false), 0, name.as_str(), pfx, 1, 0, 0);
                 let signature = crate::query::render_fn_signature(ws, name, fdef);
                 items.push(CompletionItem {
                     sort_text: Some(sort_text),
@@ -1906,14 +1915,8 @@ fn build_member_items(
                     };
                     // Reach paths are type-matches by construction (paths TO the
                     // expected type) -- prio 0, same format as the direct items.
-                    let sort_text = member_arg_sort_text(
-                        &p.suffix,
-                        pfx,
-                        true,
-                        u8::from(p.is_method),
-                        p.dist,
-                        0,
-                    );
+                    let sort_text =
+                        arg_sort_text(0, 0, &p.suffix, pfx, p.dist, u8::from(p.is_method), 0);
                     items.push(CompletionItem {
                         label,
                         kind: Some(kind),

@@ -288,18 +288,7 @@ pub(crate) fn arg_sort_text(
 /// declaration order is the browse order, so it breaks ties instead of the
 /// alphabetical name suffix.
 pub(crate) fn closed_set_sort_text(name: &str, prefix: &[u8], tier: u8, decl_idx: usize) -> String {
-    let score = fuzzy_score(name.as_bytes(), prefix);
-    let (exact, band) = match_band_exact(name, prefix, prefix);
-    RankKey {
-        exact,
-        type_rank: tier,
-        band,
-        dist: decl_idx.min(99) as u16,
-        fine: RankKey::fine(score),
-        len: RankKey::len_key(score, name.len()),
-        ..Default::default()
-    }
-    .encode(name)
+    arg_sort_text(tier, 0, name, prefix, decl_idx.min(99) as u16, 0, 0)
 }
 
 /// The `RankKey` behind `arg_sort_text` -- the reach source emits it as a
@@ -422,60 +411,4 @@ pub(crate) fn ci_cmp(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
         }
     }
     a.len().cmp(&b.len())
-}
-
-/// Member sort_text used ONLY in a bool context (`if`/`while <chain>`), where no
-/// reach-path items coexist. A `bool` member rides the type-relevance rung
-/// (rank 0), everything else 1 -- the bool-context analogue of an expected
-/// type. Banded like every other path: a prefix-tier match outranks a
-/// boundary-richer higher-scoring one.
-pub(crate) fn member_bool_sort_text(
-    name: &str,
-    pfx: &[u8],
-    is_bool: bool,
-    method: u8,
-    score_bonus: i32,
-) -> String {
-    let score = fuzzy_score(name.as_bytes(), pfx) + score_bonus;
-    let (exact, band) = match_band_exact(name, pfx, pfx);
-    let key = RankKey {
-        exact,
-        type_rank: u8::from(!is_bool),
-        band,
-        dist: 1,
-        method,
-        fine: RankKey::fine(score),
-        len: RankKey::len_key(score, name.len()),
-        ..Default::default()
-    };
-    key.encode(name)
-}
-
-/// Member sort_text used ONLY in a call-arg position (`callee(.., recv.<prefix>)`
-/// with a known expected param type). A member whose type MATCHES the expected
-/// param takes type-relevance rank 0 and DOMINATES (mirrors the global path,
-/// where a value of the expected type outranks a better-prefix candidate of the
-/// wrong type). The prefix filter still removes wrong-prefix candidates first,
-/// so this only reorders genuine matches.
-pub(crate) fn member_arg_sort_text(
-    name: &str,
-    pfx: &[u8],
-    type_match: bool,
-    method: u8,
-    dist: u16,
-    score_bonus: i32,
-) -> String {
-    let score = fuzzy_score(name.as_bytes(), pfx) + score_bonus;
-    let (exact, band) = match_band_exact(name, pfx, pfx);
-    let key = RankKey {
-        exact,
-        type_rank: u8::from(!type_match),
-        band,
-        dist,
-        method,
-        fine: RankKey::fine(score),
-        len: RankKey::len_key(score, name.len()),
-        ..Default::default()
-    };
-    key.encode(name)
 }
