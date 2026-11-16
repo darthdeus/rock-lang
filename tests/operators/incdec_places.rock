@@ -1,0 +1,116 @@
+// `++` and `--` on every assignable place: each reads the place once, writes
+// the bumped value back, and yields the old value (postfix) or the new one
+// (prefix).
+
+nobox value IdSpot { x: int, y: float }
+struct IdBox { n: int, f: float }
+value IdHolder { a: int, b: float }
+
+global ID_COUNT: int = 10
+global ID_SPOT: IdSpot = IdSpot { x: 1, y: 0.5 }
+global ID_INDEX_CALLS: int = 0
+
+fn id_index(i: int) -> int {
+    ID_INDEX_CALLS += 1
+    return i
+}
+
+fn id_tick() -> int {
+    static n = 0
+    n++
+    return ++n
+}
+
+fn id_tick_down() -> int {
+    static n = 100
+    let old = n--
+    return old * 1000 + n
+}
+
+@test
+fn id_static_locals_keep_the_bumped_value() {
+    assert_eq(id_tick(), 2, "first call")
+    assert_eq(id_tick(), 4, "second call sees both bumps")
+    assert_eq(id_tick_down(), 100099, "postfix yields old, stores new")
+    assert_eq(id_tick_down(), 99098, "next call starts from the stored value")
+}
+
+@test
+fn id_globals_take_the_bump() {
+    let before = ID_COUNT
+    let post = ID_COUNT++
+    let pre = ++ID_COUNT
+    let down = ID_COUNT--
+    assert_eq(post, before, "postfix yields the old global")
+    assert_eq(pre, before + 2, "prefix yields the new global")
+    assert_eq(down, before + 2, "postfix decrement yields the old global")
+    assert_eq(ID_COUNT, before + 1, "global holds every bump")
+}
+
+@test
+fn id_nobox_global_leaves_take_the_bump() {
+    let x0 = ID_SPOT.x
+    let y0 = ID_SPOT.y
+    let post = ID_SPOT.x++
+    let pre = --ID_SPOT.y
+    assert_eq(post, x0, "postfix yields the old leaf")
+    assert_eq(pre, y0 - 1.0, "prefix yields the new leaf")
+    assert_eq(ID_SPOT.x, x0 + 1, "leaf holds the bump")
+    assert_eq(ID_SPOT.y, y0 - 1.0, "float leaf holds the decrement")
+}
+
+@test
+fn id_indexed_places_take_the_bump() {
+    let xs = [1, 2, 3]
+    let post = xs[1]++
+    let pre = --xs[2]
+    let fs = [1.5, 2.5]
+    fs[0]--
+    let m: Map<string, int> = map_new()
+    m["k"] = 7
+    let mpost = m["k"]++
+    let calls = ID_INDEX_CALLS
+    let once = xs[id_index(0)]++
+    assert_eq(post, 2, "postfix yields the old element")
+    assert_eq(pre, 2, "prefix yields the new element")
+    assert_eq(once, 1, "postfix through a computed index yields the old element")
+    assert_eq(ID_INDEX_CALLS, calls + 1, "the index is evaluated once")
+    assert_eq(xs[0] * 100 + xs[1] * 10 + xs[2], 232, "only the bumped elements change")
+    assert_eq(fs[0], 0.5, "float element decremented")
+    assert_eq(fs[1], 2.5, "neighbour unchanged")
+    assert_eq(mpost, 7, "map postfix yields the old value")
+    assert_eq(m["k"], 8, "map value holds the bump")
+}
+
+@test
+fn id_fields_take_the_bump() {
+    let b = IdBox { n: 5, f: 1.0 }
+    let post = b.n--
+    b.f--
+    let h = IdHolder { a: 1, b: 2.0 }
+    let pre = ++h.a
+    h.b--
+    assert_eq(post, 5, "postfix yields the old field")
+    assert_eq(b.n, 4, "field holds the decrement")
+    assert_eq(b.f, 0.0, "float field decremented")
+    assert_eq(pre, 2, "prefix yields the new value field")
+    assert_eq(h.a, 2, "value field holds the bump")
+    assert_eq(h.b, 1.0, "float value field decremented")
+}
+
+// A value local is replaced whole by a field write on GLSL, where it has no
+// storage a field store could name; the result encodes every leaf.
+@test(returns = 1)
+fn id_vector_leaves_take_the_bump() -> int {
+    let p = v(1.5, 2.0)
+    p.x++
+    p.y *= 1.5
+    let old = p.x--
+    let q = Vec3 { x: 1.0, y: 2.0, z: 3.0 }
+    q.z = 5.0
+    let pre = ++q.y
+    if old == 2.5 && p.x == 1.5 && p.y == 3.0 && pre == 3.0 && q.x == 1.0 && q.z == 5.0 {
+        return 1
+    }
+    return 0
+}
