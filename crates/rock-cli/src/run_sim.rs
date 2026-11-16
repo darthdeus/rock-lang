@@ -2600,9 +2600,10 @@ fn census_status(summary: &SimSummary) -> &'static str {
 }
 
 fn census_failure_messages(summary: &SimSummary) -> Vec<String> {
-    let mut messages: Vec<String> = summary
+    summary
         .errors
         .iter()
+        .chain(&summary.expects_fail)
         .map(|m| {
             if m.site.is_empty() {
                 m.message.clone()
@@ -2610,15 +2611,7 @@ fn census_failure_messages(summary: &SimSummary) -> Vec<String> {
                 format!("{}: {}", m.site, m.message)
             }
         })
-        .collect();
-    messages.extend(summary.expects_fail.iter().map(|m| {
-        if m.site.is_empty() {
-            m.message.clone()
-        } else {
-            format!("{}: {}", m.site, m.message)
-        }
-    }));
-    messages
+        .collect()
 }
 
 fn allocation_census_record(
@@ -2627,31 +2620,21 @@ fn allocation_census_record(
 ) -> (serde_json::Value, Option<(f64, f64)>) {
     let census = summary.allocation_census.as_ref();
     let measured_frames = census.map_or(0, |c| c.measured_frames);
-    let measured_frames_f = measured_frames as f64;
+    let per_frame = |total: f64| {
+        if measured_frames > 0 {
+            total / measured_frames as f64
+        } else {
+            0.0
+        }
+    };
     let measured_gross_kb = census.map_or(0.0, |c| c.measured_gross_kb);
     let measured_allocator_calls = census.map_or(0, |c| c.measured_allocator_calls);
     let measured_allocation_calls = census.map_or(0, |c| c.measured_allocation_calls);
     let measured_reallocation_calls = census.map_or(0, |c| c.measured_reallocation_calls);
-    let gross_kb_per_frame = if measured_frames > 0 {
-        measured_gross_kb / measured_frames_f
-    } else {
-        0.0
-    };
-    let allocator_calls_per_frame = if measured_frames > 0 {
-        measured_allocator_calls as f64 / measured_frames_f
-    } else {
-        0.0
-    };
-    let allocation_calls_per_frame = if measured_frames > 0 {
-        measured_allocation_calls as f64 / measured_frames_f
-    } else {
-        0.0
-    };
-    let reallocation_calls_per_frame = if measured_frames > 0 {
-        measured_reallocation_calls as f64 / measured_frames_f
-    } else {
-        0.0
-    };
+    let gross_kb_per_frame = per_frame(measured_gross_kb);
+    let allocator_calls_per_frame = per_frame(measured_allocator_calls as f64);
+    let allocation_calls_per_frame = per_frame(measured_allocation_calls as f64);
+    let reallocation_calls_per_frame = per_frame(measured_reallocation_calls as f64);
     let record = serde_json::json!({
         "sim_name": name,
         "process_id": summary.process_id,
@@ -2823,34 +2806,12 @@ pub(crate) fn do_run_allocation_census(
             }
             Some(Err(error)) => {
                 failed.push(format!("{name} (process failure)"));
-                records.push(serde_json::json!({
-                    "sim_name": name,
-                    "process_id": serde_json::Value::Null,
-                    "build_sha": serde_json::Value::Null,
-                    "status": "process failure",
-                    "sim_verdict": "FAIL",
-                    "failure_messages": [error.to_string()],
-                    "stop_sim_reached": false,
-                    "rendering_enabled": serde_json::Value::Null,
-                    "rendering_skipped": serde_json::Value::Null,
-                    "measurement_complete": false,
-                    "warmup_frames_requested": DEFAULT_SIM_ALLOCATION_WARMUP_FRAMES,
-                    "warmup_frames": 0,
-                    "frame_count": 0,
-                    "measured_frames": 0,
-                    "initialization_gross_kb": 0.0,
-                    "outside_frame_gross_kb": 0.0,
-                    "warmup_gross_kb": 0.0,
-                    "measured_gross_kb": 0.0,
-                    "total_gross_kb": 0.0,
-                    "gross_kb_per_frame": 0.0,
-                    "measured_allocator_calls": 0,
-                    "measured_allocation_calls": 0,
-                    "measured_reallocation_calls": 0,
-                    "allocator_calls_per_frame": 0.0,
-                    "allocation_calls_per_frame": 0.0,
-                    "reallocation_calls_per_frame": 0.0,
-                }));
+                let (mut record, _) = allocation_census_record(name, &SimSummary::default());
+                record["status"] = "process failure".into();
+                record["failure_messages"] = serde_json::json!([error.to_string()]);
+                record["measurement_complete"] = false.into();
+                record["warmup_frames_requested"] = DEFAULT_SIM_ALLOCATION_WARMUP_FRAMES.into();
+                records.push(record);
             }
             None => {
                 return Err(anyhow!("sim `{name}` was never scheduled"));
