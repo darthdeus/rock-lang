@@ -1894,9 +1894,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::process::{Command, Stdio};
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-
-    static UNIQ: AtomicU32 = AtomicU32::new(0);
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     // `AppendWorker::report_failure` warns through a process-global 10 s
     // `log_throttled!` site, so every test that can emit through it serializes
@@ -1919,21 +1917,8 @@ mod tests {
             .sum()
     }
 
-    fn fresh_root() -> std::path::PathBuf {
-        let n = UNIQ.fetch_add(1, Ordering::SeqCst);
-        // Pid plus a per-process counter collide when two suites share /tmp
-        // without sharing a pid namespace; then both flock the same root
-        // lock. The random tail keeps every root unique across processes.
-        let tag = Uuid::new_v4().simple().to_string();
-        let root = std::env::temp_dir().join(format!(
-            "stone_telemetry_test_{}_{}_{}",
-            std::process::id(),
-            n,
-            &tag[..16]
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        root
+    fn fresh_root() -> crate::test_support::TestRoot {
+        crate::test_support::fresh_root("stone_telemetry_test_")
     }
 
     fn identity() -> TelemetryIdentity {

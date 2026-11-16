@@ -294,11 +294,8 @@ pub(crate) fn retire(id: u64) {
 pub(crate) fn publish(site: &str, publish: impl FnMut(Arc<Decoded>)) {
     PUBLICATIONS
         .with(|p| {
-            p.borrow_mut().select_with(
-                site,
-                |id| crate::image_texture::IMAGES.with(|images| images.borrow().contains_key(&id)),
-                publish,
-            )
+            p.borrow_mut()
+                .select_with(site, crate::image_texture::image_exists, publish)
         })
         .unwrap_or_else(|e| fatal(e))
 }
@@ -394,7 +391,10 @@ mod tests {
 
     #[test]
     fn time_allowance_is_shared_by_pumps_and_required_flushes() {
-        if in_isolated_child("time_allowance_is_shared_by_pumps_and_required_flushes") {
+        if crate::test_support::in_isolated_child(
+            "image_publication::tests::time_allowance_is_shared_by_pumps_and_required_flushes",
+            "STONE_IMAGE_PUBLICATION_TEST_CHILD",
+        ) {
             return;
         }
         let mut p = Publications::default();
@@ -442,8 +442,9 @@ mod tests {
 
     #[test]
     fn load_collects_without_publishing_and_preserves_live_readiness_for_flush() {
-        if in_isolated_child(
-            "load_collects_without_publishing_and_preserves_live_readiness_for_flush",
+        if crate::test_support::in_isolated_child(
+            "image_publication::tests::load_collects_without_publishing_and_preserves_live_readiness_for_flush",
+            "STONE_IMAGE_PUBLICATION_TEST_CHILD",
         ) {
             return;
         }
@@ -487,7 +488,10 @@ mod tests {
     /// and with the same journal batch as a drain-then-publish flush.
     #[test]
     fn flush_publishes_each_completion_before_receiving_the_next() {
-        if in_isolated_child("flush_publishes_each_completion_before_receiving_the_next") {
+        if crate::test_support::in_isolated_child(
+            "image_publication::tests::flush_publishes_each_completion_before_receiving_the_next",
+            "STONE_IMAGE_PUBLICATION_TEST_CHILD",
+        ) {
             return;
         }
         let mut p = requests();
@@ -563,36 +567,6 @@ mod tests {
         PUBLICATIONS.with(|p| *p.borrow_mut() = Publications::default());
     }
 
-    /// Fixtures that feed the process-wide decode queue run alone in a child
-    /// process, since other fixtures drain that queue. Returns true in the
-    /// parent once the child has passed; the child returns false and runs.
-    fn in_isolated_child(name: &str) -> bool {
-        const CHILD: &str = "STONE_IMAGE_PUBLICATION_TEST_CHILD";
-        if std::env::var_os(CHILD).is_some() {
-            return false;
-        }
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                &format!("image_publication::tests::{name}"),
-                "--exact",
-                "--nocapture",
-            ])
-            .env(CHILD, "1")
-            .output()
-            .expect("run isolated publication fixture");
-        assert!(
-            String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
-            "the child must select {name}"
-        );
-        assert!(
-            output.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        true
-    }
-
     fn classed(classes: &[RequestClass]) -> Publications {
         let mut p = Publications::default();
         p.pending.budget = 10;
@@ -623,8 +597,9 @@ mod tests {
 
     #[test]
     fn flush_returns_once_required_work_is_published_and_leaves_deferred_work_pending() {
-        if in_isolated_child(
-            "flush_returns_once_required_work_is_published_and_leaves_deferred_work_pending",
+        if crate::test_support::in_isolated_child(
+            "image_publication::tests::flush_returns_once_required_work_is_published_and_leaves_deferred_work_pending",
+            "STONE_IMAGE_PUBLICATION_TEST_CHILD",
         ) {
             return;
         }
@@ -666,7 +641,10 @@ mod tests {
 
     #[test]
     fn flush_leaves_received_deferred_results_for_the_budgeted_pump() {
-        if in_isolated_child("flush_leaves_received_deferred_results_for_the_budgeted_pump") {
+        if crate::test_support::in_isolated_child(
+            "image_publication::tests::flush_leaves_received_deferred_results_for_the_budgeted_pump",
+            "STONE_IMAGE_PUBLICATION_TEST_CHILD",
+        ) {
             return;
         }
         let mut p = classed(&[
@@ -728,7 +706,10 @@ mod tests {
 
     #[test]
     fn blocking_pump_drains_both_request_classes_in_readiness_order() {
-        if in_isolated_child("blocking_pump_drains_both_request_classes_in_readiness_order") {
+        if crate::test_support::in_isolated_child(
+            "image_publication::tests::blocking_pump_drains_both_request_classes_in_readiness_order",
+            "STONE_IMAGE_PUBLICATION_TEST_CHILD",
+        ) {
             return;
         }
         let mut p = classed(&[
@@ -755,7 +736,10 @@ mod tests {
 
     #[test]
     fn require_turns_a_deferred_request_into_a_flush_wait() {
-        if in_isolated_child("require_turns_a_deferred_request_into_a_flush_wait") {
+        if crate::test_support::in_isolated_child(
+            "image_publication::tests::require_turns_a_deferred_request_into_a_flush_wait",
+            "STONE_IMAGE_PUBLICATION_TEST_CHILD",
+        ) {
             return;
         }
         let mut p = classed(&[RequestClass::Deferred, RequestClass::Deferred]);
@@ -785,7 +769,10 @@ mod tests {
 
     #[test]
     fn pumps_share_one_frame_budget_with_progress_for_an_oversized_image() {
-        if in_isolated_child("pumps_share_one_frame_budget_with_progress_for_an_oversized_image") {
+        if crate::test_support::in_isolated_child(
+            "image_publication::tests::pumps_share_one_frame_budget_with_progress_for_an_oversized_image",
+            "STONE_IMAGE_PUBLICATION_TEST_CHILD",
+        ) {
             return;
         }
         let mut p = classed(&[
@@ -849,7 +836,10 @@ mod tests {
 
     #[test]
     fn destroying_a_handle_retires_its_request_so_no_flush_waits_for_it() {
-        if in_isolated_child("destroying_a_handle_retires_its_request_so_no_flush_waits_for_it") {
+        if crate::test_support::in_isolated_child(
+            "image_publication::tests::destroying_a_handle_retires_its_request_so_no_flush_waits_for_it",
+            "STONE_IMAGE_PUBLICATION_TEST_CHILD",
+        ) {
             return;
         }
         PUBLICATIONS

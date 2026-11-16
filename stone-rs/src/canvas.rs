@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::ffi::{c_char, c_float, c_int, CStr};
 
 use crate::handles::Class;
-use crate::{track_canvas_switch, with_gl, WINDOW};
+use crate::{track_canvas_switch, with_gl, with_window};
 
 struct Canvas {
     fbo: glow::Framebuffer,
@@ -57,6 +57,14 @@ thread_local! {
     // The framebuffer that presents to the window: 0 (None) on a visible
     // window, the owned `HeadlessScreen` after a headless boot.
     static DEFAULT_FBO: RefCell<Option<glow::Framebuffer>> = const { RefCell::new(None) };
+}
+
+fn with_canvas<T>(handle: u64, f: impl FnOnce(&Canvas) -> T) -> Option<T> {
+    CANVASES.with(|canvases| canvases.borrow().get(&handle).map(f))
+}
+
+fn with_canvas_mut<T>(handle: u64, f: impl FnOnce(&mut Canvas) -> T) -> Option<T> {
+    CANVASES.with(|canvases| canvases.borrow_mut().get_mut(&handle).map(f))
 }
 
 pub(crate) fn set_default_framebuffer(fbo: Option<glow::Framebuffer>) {
@@ -303,11 +311,9 @@ pub extern "C" fn stone_gl_viewport() -> *const c_char {
 /// effect at the next bind of that canvas.
 #[no_mangle]
 pub extern "C" fn stone_set_canvas_active(handle: u64, w: c_int, h: c_int) {
-    CANVASES.with(|canvases| {
-        if let Some(canvas) = canvases.borrow_mut().get_mut(&handle) {
-            canvas.active_w = w.clamp(1, canvas.width);
-            canvas.active_h = h.clamp(1, canvas.height);
-        }
+    with_canvas_mut(handle, |canvas| {
+        canvas.active_w = w.clamp(1, canvas.width);
+        canvas.active_h = h.clamp(1, canvas.height);
     });
 }
 
@@ -359,61 +365,57 @@ pub extern "C" fn stone_set_canvas(handle: u64) {
 
         // Restore viewport: the full drawable, or the letterbox present
         // rect while one is active.
-        WINDOW.with(|w| {
-            if let Some(window) = w.borrow().as_ref() {
-                let (dw, dh) = window.window.drawable_size();
-                let (lw, lh) = window.window.size();
-                let pv = PRESENT_VIEWPORT.with(|p| *p.borrow());
-                with_gl(|gl| unsafe {
-                    // Every frame binds the screen before drawing to it, so this
-                    // is where a resize since the last frame reaches it.
-                    if let Err(e) = headless_screen_follow(gl, dw as i32, dh as i32) {
-                        crate::log_once!("CANVAS", "{e}");
-                    }
-                    if let Some((x, y, w, h)) = pv {
-                        // Logical window top-left -> GL bottom-origin
-                        // drawable px (hidpi scale between the two).
-                        let sx = dw as f32 / lw as f32;
-                        let sy = dh as f32 / lh as f32;
-                        let gw = (w as f32 * sx).round() as i32;
-                        let gh = (h as f32 * sy).round() as i32;
-                        let gx = (x as f32 * sx).round() as i32;
-                        let gy = dh as i32 - (y as f32 * sy).round() as i32 - gh;
-                        gl.viewport(gx, gy, gw, gh);
-                    } else {
-                        gl.viewport(0, 0, dw as i32, dh as i32);
-                    }
-                });
-                CURRENT_TARGET_SIZE.with(|c| *c.borrow_mut() = (lw as f32, lh as f32));
-            }
+        with_window(|window| {
+            let (dw, dh) = window.window.drawable_size();
+            let (lw, lh) = window.window.size();
+            let pv = PRESENT_VIEWPORT.with(|p| *p.borrow());
+            with_gl(|gl| unsafe {
+                // Every frame binds the screen before drawing to it, so this
+                // is where a resize since the last frame reaches it.
+                if let Err(e) = headless_screen_follow(gl, dw as i32, dh as i32) {
+                    crate::log_once!("CANVAS", "{e}");
+                }
+                if let Some((x, y, w, h)) = pv {
+                    // Logical window top-left -> GL bottom-origin
+                    // drawable px (hidpi scale between the two).
+                    let sx = dw as f32 / lw as f32;
+                    let sy = dh as f32 / lh as f32;
+                    let gw = (w as f32 * sx).round() as i32;
+                    let gh = (h as f32 * sy).round() as i32;
+                    let gx = (x as f32 * sx).round() as i32;
+                    let gy = dh as i32 - (y as f32 * sy).round() as i32 - gh;
+                    gl.viewport(gx, gy, gw, gh);
+                } else {
+                    gl.viewport(0, 0, dw as i32, dh as i32);
+                }
+            });
+            CURRENT_TARGET_SIZE.with(|c| *c.borrow_mut() = (lw as f32, lh as f32));
         });
         track_canvas_switch();
         return;
     }
 
-    CANVASES.with(|canvases| {
-        if let Some(canvas) = canvases.borrow_mut().get_mut(&handle) {
-            // Binding as the draw target is the last point before any draw,
-            // clear or blit can touch this canvas, so it is where "no longer
-            // provably blank" is recorded (`bound_as_target`).
-            canvas.bound_as_target = true;
-            with_gl(|gl| unsafe {
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(canvas.fbo));
-                gl.viewport(0, 0, canvas.active_w, canvas.active_h);
-                // glClear ignores the viewport but respects the scissor, so
-                // the scissor is what keeps a clear (and any overdraw) off the
-                // inactive margin.
-                if canvas.active_w < canvas.width || canvas.active_h < canvas.height {
-                    gl.enable(glow::SCISSOR_TEST);
-                    gl.scissor(0, 0, canvas.active_w, canvas.active_h);
-                } else {
-                    gl.disable(glow::SCISSOR_TEST);
-                }
-            });
-            CURRENT_FBO.with(|c| *c.borrow_mut() = Some(canvas.fbo));
-            CURRENT_TARGET_SIZE
-                .with(|c| *c.borrow_mut() = (canvas.active_w as f32, canvas.active_h as f32));
-        }
+    with_canvas_mut(handle, |canvas| {
+        // Binding as the draw target is the last point before any draw,
+        // clear or blit can touch this canvas, so it is where "no longer
+        // provably blank" is recorded (`bound_as_target`).
+        canvas.bound_as_target = true;
+        with_gl(|gl| unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(canvas.fbo));
+            gl.viewport(0, 0, canvas.active_w, canvas.active_h);
+            // glClear ignores the viewport but respects the scissor, so
+            // the scissor is what keeps a clear (and any overdraw) off the
+            // inactive margin.
+            if canvas.active_w < canvas.width || canvas.active_h < canvas.height {
+                gl.enable(glow::SCISSOR_TEST);
+                gl.scissor(0, 0, canvas.active_w, canvas.active_h);
+            } else {
+                gl.disable(glow::SCISSOR_TEST);
+            }
+        });
+        CURRENT_FBO.with(|c| *c.borrow_mut() = Some(canvas.fbo));
+        CURRENT_TARGET_SIZE
+            .with(|c| *c.borrow_mut() = (canvas.active_w as f32, canvas.active_h as f32));
     });
 
     track_canvas_switch();
@@ -690,7 +692,7 @@ pub extern "C" fn stone_clear_canvas_int(draw_buffer: c_int, value: c_int) {
 /// liveness answer rather than reading it as "safe".
 #[no_mangle]
 pub extern "C" fn stone_canvas_bound_as_target(handle: u64) -> bool {
-    CANVASES.with(|c| c.borrow().get(&handle).is_some_and(|c| c.bound_as_target))
+    with_canvas(handle, |c| c.bound_as_target).unwrap_or(false)
 }
 
 /// Whether this canvas's ACTIVE RECT is the one creation established.
@@ -702,18 +704,14 @@ pub extern "C" fn stone_canvas_bound_as_target(handle: u64) -> bool {
 /// so unlike the pixels this needs no snapshot.
 #[no_mangle]
 pub extern "C" fn stone_canvas_active_is_creation(handle: u64) -> bool {
-    CANVASES.with(|c| {
-        c.borrow()
-            .get(&handle)
-            .is_some_and(|c| c.active_w == c.width && c.active_h == c.height)
-    })
+    with_canvas(handle, |c| c.active_w == c.width && c.active_h == c.height).unwrap_or(false)
 }
 
 /// The canvas's active width, or -1 for an unknown handle. The fixture's
 /// oracle; the engine reads the field directly.
 #[no_mangle]
 pub extern "C" fn stone_canvas_active_w(handle: u64) -> c_int {
-    CANVASES.with(|c| c.borrow().get(&handle).map_or(-1, |c| c.active_w))
+    with_canvas(handle, |c| c.active_w).unwrap_or(-1)
 }
 
 /// The canvas's active height, or -1 for an unknown handle. Both axes are
@@ -721,7 +719,7 @@ pub extern "C" fn stone_canvas_active_w(handle: u64) -> c_int {
 /// restore that put one back would be invisible to a reader of the other.
 #[no_mangle]
 pub extern "C" fn stone_canvas_active_h(handle: u64) -> c_int {
-    CANVASES.with(|c| c.borrow().get(&handle).map_or(-1, |c| c.active_h))
+    with_canvas(handle, |c| c.active_h).unwrap_or(-1)
 }
 
 /// The canvas's ALLOCATED width, or -1 for an unknown handle.
@@ -732,7 +730,7 @@ pub extern "C" fn stone_canvas_active_h(handle: u64) -> c_int {
 /// nothing in the handle sets to say so. This is the reader that can tell.
 #[no_mangle]
 pub extern "C" fn stone_canvas_capacity_w(handle: u64) -> c_int {
-    CANVASES.with(|c| c.borrow().get(&handle).map_or(-1, |c| c.width))
+    with_canvas(handle, |c| c.width).unwrap_or(-1)
 }
 
 /// The canvas's allocated height, or -1 for an unknown handle. Both axes, for
@@ -740,7 +738,7 @@ pub extern "C" fn stone_canvas_capacity_w(handle: u64) -> c_int {
 /// be invisible to a reader of the other.
 #[no_mangle]
 pub extern "C" fn stone_canvas_capacity_h(handle: u64) -> c_int {
-    CANVASES.with(|c| c.borrow().get(&handle).map_or(-1, |c| c.height))
+    with_canvas(handle, |c| c.height).unwrap_or(-1)
 }
 
 /// Live canvas handles (`native_ledger`).
@@ -778,10 +776,8 @@ pub extern "C" fn stone_canvas_report(handle: u64, width: *mut c_int, height: *m
     }
     // Directly, not through `lookup_canvas`: `CanvasInfo` does not carry the
     // requested format code, which is what distinguishes 16F from 32F.
-    let found = CANVASES.with(|c| {
-        c.borrow()
-            .get(&handle)
-            .map(|canvas| (canvas.width, canvas.height, canvas.format))
+    let found = with_canvas(handle, |canvas| {
+        (canvas.width, canvas.height, canvas.format)
     });
     let Some((w, h, format)) = found else {
         return -1;
@@ -823,11 +819,9 @@ pub extern "C" fn stone_canvas_reset_contents(handle: u64) -> bool {
     // moved. Its exposed window is narrow but real -- `set_scene_active_rects`
     // re-establishes it on the successor's first `frame_core_resolve_view` --
     // so what crosses is every sim statement before that frame.
-    CANVASES.with(|canvases| {
-        if let Some(c) = canvases.borrow_mut().get_mut(&handle) {
-            c.active_w = c.width;
-            c.active_h = c.height;
-        }
+    with_canvas_mut(handle, |c| {
+        c.active_w = c.width;
+        c.active_h = c.height;
     });
     with_gl(|gl| unsafe {
         let previous = CURRENT_FBO.with(|c| *c.borrow());
@@ -898,17 +892,15 @@ pub extern "C" fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) 
         );
         return false;
     }
-    let Some((fbo, texture, depth_texture, format, old_w, old_h)) = CANVASES.with(|canvases| {
-        canvases.borrow().get(&handle).map(|c| {
-            (
-                c.fbo,
-                c.texture,
-                c.depth_texture,
-                c.format,
-                c.width,
-                c.height,
-            )
-        })
+    let Some((fbo, texture, depth_texture, format, old_w, old_h)) = with_canvas(handle, |c| {
+        (
+            c.fbo,
+            c.texture,
+            c.depth_texture,
+            c.format,
+            c.width,
+            c.height,
+        )
     }) else {
         crate::log_once!(
             "CANVAS",
@@ -960,18 +952,16 @@ pub extern "C" fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) 
         return false;
     }
 
-    CANVASES.with(|canvases| {
-        if let Some(c) = canvases.borrow_mut().get_mut(&handle) {
-            c.width = width;
-            c.height = height;
-            // The active rectangle is expressed inside the capacity, so a new
-            // capacity has no old rectangle to keep: leaving a narrowed one
-            // would confine every later draw to a sub-rect of a surface that
-            // just changed shape. Callers re-declare it (`set_scene_active_rects`)
-            // exactly as they do after a create.
-            c.active_w = width;
-            c.active_h = height;
-        }
+    with_canvas_mut(handle, |c| {
+        c.width = width;
+        c.height = height;
+        // The active rectangle is expressed inside the capacity, so a new
+        // capacity has no old rectangle to keep: leaving a narrowed one
+        // would confine every later draw to a sub-rect of a surface that
+        // just changed shape. Callers re-declare it (`set_scene_active_rects`)
+        // exactly as they do after a create.
+        c.active_w = width;
+        c.active_h = height;
     });
     true
 }
@@ -1055,7 +1045,7 @@ pub extern "C" fn stone_bind_canvas_texture_to_unit(handle: u64, unit: c_int) ->
         return false;
     }
 
-    let tex = CANVASES.with(|canvases| canvases.borrow().get(&handle).map(|c| c.texture.0.get()));
+    let tex = with_canvas(handle, |c| c.texture.0.get());
     match tex {
         Some(t) => crate::shader::stone_bind_texture_to_unit(t, unit) != 0,
         None => false,
@@ -1066,7 +1056,7 @@ pub(crate) fn canvas_texture_id(handle: u64) -> Option<u32> {
     if handle == 0 {
         return None;
     }
-    CANVASES.with(|canvases| canvases.borrow().get(&handle).map(|c| c.texture.0.get()))
+    with_canvas(handle, |c| c.texture.0.get())
 }
 
 /// The depth sibling. False when the canvas has no depth attachment, so a
@@ -1078,13 +1068,7 @@ pub extern "C" fn stone_bind_canvas_depth_to_unit(handle: u64, unit: c_int) -> b
         return false;
     }
 
-    let tex = CANVASES.with(|canvases| {
-        canvases
-            .borrow()
-            .get(&handle)
-            .and_then(|c| c.depth_texture)
-            .map(|t| t.0.get())
-    });
+    let tex = with_canvas(handle, |c| c.depth_texture.map(|t| t.0.get())).flatten();
     match tex {
         Some(t) => crate::shader::stone_bind_texture_to_unit(t, unit) != 0,
         None => false,
@@ -1099,7 +1083,7 @@ pub extern "C" fn stone_canvas_exists(handle: u64) -> bool {
     if handle == 0 {
         return false;
     }
-    CANVASES.with(|canvases| canvases.borrow().contains_key(&handle))
+    with_canvas(handle, |_| ()).is_some()
 }
 
 /// Whether a canvas has a depth attachment. Asked directly because the caller's
@@ -1111,13 +1095,7 @@ pub extern "C" fn stone_canvas_has_depth(handle: u64) -> bool {
         return false;
     }
 
-    CANVASES.with(|canvases| {
-        canvases
-            .borrow()
-            .get(&handle)
-            .map(|c| c.depth_texture.is_some())
-            .unwrap_or(false)
-    })
+    with_canvas(handle, |c| c.depth_texture.is_some()).unwrap_or(false)
 }
 
 /// The colour attachment's GL name. NOT for the rendering path, which binds
@@ -1129,13 +1107,7 @@ pub extern "C" fn stone_get_canvas_texture(handle: u64) -> u32 {
         return 0;
     }
 
-    CANVASES.with(|canvases| {
-        canvases
-            .borrow()
-            .get(&handle)
-            .map(|c| c.texture.0.get())
-            .unwrap_or(0)
-    })
+    with_canvas(handle, |c| c.texture.0.get()).unwrap_or(0)
 }
 
 /// The DEPTH attachment's GL name, or 0. Same standing as the accessor above:
@@ -1149,14 +1121,9 @@ pub extern "C" fn stone_get_canvas_depth_texture(handle: u64) -> u32 {
         return 0;
     }
 
-    CANVASES.with(|canvases| {
-        canvases
-            .borrow()
-            .get(&handle)
-            .and_then(|c| c.depth_texture)
-            .map(|t| t.0.get())
-            .unwrap_or(0)
-    })
+    with_canvas(handle, |c| c.depth_texture.map(|t| t.0.get()))
+        .flatten()
+        .unwrap_or(0)
 }
 
 /// MRT: attach the `id`-canvas's color texture as COLOR_ATTACHMENT1 of the
@@ -1364,13 +1331,7 @@ pub extern "C" fn stone_read_depth_pixel(handle: u64, x: c_int, y: c_int) -> c_f
         return 1.0;
     }
 
-    CANVASES.with(|canvases| {
-        let canvases = canvases.borrow();
-        let canvas = match canvases.get(&handle) {
-            Some(c) => c,
-            None => return 1.0,
-        };
-
+    with_canvas(handle, |canvas| {
         if canvas.depth_texture.is_none() {
             return 1.0;
         }
@@ -1401,6 +1362,7 @@ pub extern "C" fn stone_read_depth_pixel(handle: u64, x: c_int, y: c_int) -> c_f
         })
         .unwrap_or(1.0)
     })
+    .unwrap_or(1.0)
 }
 
 /// Read the entire color buffer of an RGBA8 canvas into a caller-supplied
@@ -1728,7 +1690,7 @@ pub unsafe extern "C" fn stone_canvas_upload_rgba32f(
     if pixels.is_null() || count <= 0 {
         return false;
     }
-    let valid = CANVASES.with(|c| c.borrow().get(&handle).is_some_and(|c| c.format == 2));
+    let valid = with_canvas(handle, |c| c.format == 2).unwrap_or(false);
     if !valid {
         return false;
     }
@@ -1762,11 +1724,7 @@ pub unsafe extern "C" fn stone_canvas_upload_rgba32f(
     })
     .is_some();
     if uploaded {
-        CANVASES.with(|c| {
-            if let Some(canvas) = c.borrow_mut().get_mut(&handle) {
-                canvas.bound_as_target = true;
-            }
-        });
+        with_canvas_mut(handle, |canvas| canvas.bound_as_target = true);
     }
     uploaded
 }
@@ -1904,18 +1862,16 @@ pub(crate) struct CanvasInfo {
 /// Returns None if the handle is unknown. Used by pixel_readback for async
 /// single-pixel reads.
 pub(crate) fn lookup_canvas(handle: u64) -> Option<CanvasInfo> {
-    CANVASES.with(|cvs| {
-        cvs.borrow().get(&handle).map(|c| CanvasInfo {
-            fbo: c.fbo,
-            texture: c.texture,
-            width: c.width,
-            height: c.height,
-            active_w: c.active_w,
-            active_h: c.active_h,
-            has_depth: c.depth_texture.is_some(),
-            float_format: is_float_format(c.format),
-            int_format: is_int_format(c.format),
-        })
+    with_canvas(handle, |c| CanvasInfo {
+        fbo: c.fbo,
+        texture: c.texture,
+        width: c.width,
+        height: c.height,
+        active_w: c.active_w,
+        active_h: c.active_h,
+        has_depth: c.depth_texture.is_some(),
+        float_format: is_float_format(c.format),
+        int_format: is_int_format(c.format),
     })
 }
 
@@ -1949,5 +1905,5 @@ pub(crate) fn capture_texture_owner(texture: u32) -> serde_json::Value {
 }
 
 pub(crate) fn capture_depth_texture(handle: u64) -> Option<glow::Texture> {
-    CANVASES.with(|c| c.borrow().get(&handle).and_then(|c| c.depth_texture))
+    with_canvas(handle, |c| c.depth_texture).flatten()
 }

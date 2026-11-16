@@ -3,8 +3,11 @@
 
 use glow::HasContext;
 use serial_test::serial;
-use std::ffi::{c_char, CString, OsString};
-use stone_rs::{stone_gpu_host_acquire, stone_init, stone_teardown};
+use std::ffi::c_char;
+
+#[path = "support/host.rs"]
+mod host;
+use host::with_host;
 
 extern "C" {
     fn stone_create_shader_from_combined(src: *const c_char) -> u64;
@@ -16,45 +19,6 @@ const COMBINED_BAD_VERTEX: &str = "#version 330 core\n#ifdef VERTEX\nvoid main()
 const COMBINED_BAD_FRAGMENT: &str = "#version 330 core\n#ifdef VERTEX\nlayout(location = 0) in vec2 p;\nvoid main() { gl_Position = vec4(p, 0.0, 1.0); }\n#endif\n#ifdef PIXEL\nvoid main() { not valid glsl }\n#endif\n";
 // Declares `uv` with a different type than the vertex output: both stages compile, linking fails.
 const COMBINED_UNLINKABLE: &str = "#version 330 core\n#ifdef VERTEX\nlayout(location = 0) in vec2 p;\nout vec2 uv;\nvoid main() { uv = p; gl_Position = vec4(p, 0.0, 1.0); }\n#endif\n#ifdef PIXEL\nin vec3 uv;\nout vec4 c;\nvoid main() { c = vec4(uv, 1.0); }\n#endif\n";
-
-struct HostFixture {
-    headless: Option<OsString>,
-}
-
-impl Drop for HostFixture {
-    fn drop(&mut self) {
-        let teardown = stone_teardown();
-        match &self.headless {
-            Some(value) => std::env::set_var("STONE_HEADLESS", value),
-            None => std::env::remove_var("STONE_HEADLESS"),
-        }
-        if !teardown {
-            log::error!("shader fixture native cleanup failed");
-            if !std::thread::panicking() {
-                panic!("shader fixture native cleanup failed");
-            }
-        }
-    }
-}
-
-fn with_host(body: impl FnOnce(&glow::Context)) {
-    let fixture = HostFixture {
-        headless: std::env::var_os("STONE_HEADLESS"),
-    };
-    std::env::set_var("STONE_HEADLESS", "1");
-    assert!(stone_init());
-    assert!(
-        !stone_gpu_host_acquire().is_null(),
-        "a real GL context is required"
-    );
-    let gl = unsafe {
-        glow::Context::from_loader_function(|name| {
-            sdl2::sys::SDL_GL_GetProcAddress(CString::new(name).unwrap().as_ptr()).cast()
-        })
-    };
-    body(&gl);
-    drop(fixture);
-}
 
 /// Live (shader, program) objects in the context. Names are allocated from 1 in a fresh
 /// context, so probing a bounded range sees every object the test can create.

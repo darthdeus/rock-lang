@@ -171,11 +171,7 @@ thread_local! {
 /// next call on this thread; do not free.
 #[no_mangle]
 pub extern "C" fn stone_system_report() -> *const c_char {
-    let (displays, window_display) = crate::WINDOW.with(|w| {
-        let w = w.borrow();
-        let Some(window) = w.as_ref() else {
-            return (Vec::new(), None);
-        };
+    let (displays, window_display) = crate::with_window(|window| {
         let video = &window._video;
         let n = video.num_video_displays().unwrap_or(0);
         let mut lines = Vec::new();
@@ -194,7 +190,8 @@ pub extern "C" fn stone_system_report() -> *const c_char {
             });
         }
         (lines, window.window.display_index().ok())
-    });
+    })
+    .unwrap_or_default();
     let driver = unsafe {
         let p = sdl2::sys::SDL_GetCurrentVideoDriver();
         if p.is_null() {

@@ -80,32 +80,6 @@ thread_local! {
     static BLOCK_PROGRAMS: RefCell<HashMap<glow::Program, u64>> = RefCell::new(HashMap::new());
 }
 
-/// Test-only injection: drop the `uploaded` stamp so every block looks unfilled,
-/// which is what a real missing call site produces. Mirrors
-/// `STONE_SHADER_FORCE_FAIL` -- the point is to drive the REAL reporting path
-/// rather than hand-fake a count, so `uniform_block_gate.rs` can assert that a
-/// bounded run actually exits nonzero.
-///
-/// Read once from `STONE_UNIFORM_BLOCK_FORCE_UNFILLED`.
-fn force_unfilled_blocks() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("STONE_UNIFORM_BLOCK_FORCE_UNFILLED").as_deref() == Ok("1"))
-}
-
-/// Test-only injection: refuse to bind the block with this NAME. Scoped by name
-/// rather than by a call counter so one sim fixture can fail its own block while
-/// every other shader in the process registers normally -- a global counter
-/// would break the whole frame and the test would prove nothing about cleanup.
-///
-/// The point is to reach the partial-failure path for real: a candidate that
-/// binds its engine block, allocates that buffer, and only then fails. Sibling
-/// of `STONE_UNIFORM_BLOCK_FORCE_UNFILLED`.
-fn fail_bind_for_block() -> Option<&'static str> {
-    static NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    NAME.get_or_init(|| std::env::var("STONE_UNIFORM_BLOCK_FAIL_NAME").ok())
-        .as_deref()
-}
-
 /// Registered blocks across every program. The leak oracle: a rejected
 /// candidate that had already bound a block must leave this where it found it.
 #[no_mangle]
@@ -490,14 +464,6 @@ pub extern "C" fn stone_shader_bind_uniform_block(
         return false;
     };
 
-    if fail_bind_for_block() == Some(name.as_str()) {
-        ::log::error!(
-            target: "SHADER",
-            "bind_uniform_block: refusing `{name}` (STONE_UNIFORM_BLOCK_FAIL_NAME)"
-        );
-        return false;
-    }
-
     with_gl(|gl| unsafe {
         let Some(index) = gl.get_uniform_block_index(program, &name) else {
             ::log::error!(
@@ -643,7 +609,7 @@ pub extern "C" fn stone_shader_upload_uniform_block(
         if ok && crate::ui_submission_probe::enabled() {
             crate::ui_submission_probe::block_uploaded(handle, fingerprint, bytes);
         }
-        block.uploaded |= ok && !force_unfilled_blocks();
+        block.uploaded |= ok;
         ok
     })
 }

@@ -9,6 +9,7 @@ use crate::glyph_raster::{
     self, Face, FaceSet, FontUnitMetrics, GlyphUnitMetrics, RasterFont, Synth,
 };
 use crate::handles::Class;
+use crate::image_texture::with_image_mut;
 use crate::{track_text_draw_call, with_gl, SHADERS};
 use crate::{LoadedImage, IMAGES};
 
@@ -869,11 +870,9 @@ fn apply_raster(idx: usize, pixel_size: i32, raster: RasterizedAtlas) -> bool {
                 instance.height = raster.atlas_height as i32;
                 instance.pixel_size = pixel_size;
                 if let Some(image) = instance.image {
-                    IMAGES.with(|images| {
-                        if let Some(loaded) = images.borrow_mut().get_mut(&image) {
-                            loaded.width = raster.atlas_width;
-                            loaded.height = raster.atlas_height;
-                        }
+                    with_image_mut(image, |loaded| {
+                        loaded.width = raster.atlas_width;
+                        loaded.height = raster.atlas_height;
                     });
                 }
             }
@@ -882,11 +881,9 @@ fn apply_raster(idx: usize, pixel_size: i32, raster: RasterizedAtlas) -> bool {
 
     let cached_img = FONT_ATLAS_IMAGES.with(|imgs| imgs.borrow().get(idx).copied().flatten());
     if let Some(img_id) = cached_img {
-        IMAGES.with(|images| {
-            if let Some(li) = images.borrow_mut().get_mut(&img_id) {
-                li.width = raster.atlas_width;
-                li.height = raster.atlas_height;
-            }
+        with_image_mut(img_id, |li| {
+            li.width = raster.atlas_width;
+            li.height = raster.atlas_height;
         });
     }
 
@@ -981,11 +978,9 @@ fn commit_instance_rasters(
                 instance.height = height as i32;
                 instance.face_revision = face_revision;
                 if let Some(image) = instance.image {
-                    IMAGES.with(|images| {
-                        if let Some(loaded) = images.borrow_mut().get_mut(&image) {
-                            loaded.width = width;
-                            loaded.height = height;
-                        }
+                    with_image_mut(image, |loaded| {
+                        loaded.width = width;
+                        loaded.height = height;
                     });
                 }
             }

@@ -313,6 +313,18 @@ thread_local! {
     static FAILED_DECODE_COUNT: RefCell<u64> = const { RefCell::new(0) };
 }
 
+pub(crate) fn with_image<T>(handle: u64, f: impl FnOnce(&LoadedImage) -> T) -> Option<T> {
+    IMAGES.with(|images| images.borrow().get(&handle).map(f))
+}
+
+pub(crate) fn with_image_mut<T>(handle: u64, f: impl FnOnce(&mut LoadedImage) -> T) -> Option<T> {
+    IMAGES.with(|images| images.borrow_mut().get_mut(&handle).map(f))
+}
+
+pub(crate) fn image_exists(handle: u64) -> bool {
+    with_image(handle, |_| ()).is_some()
+}
+
 pub(crate) fn register_mipmapped_image(handle: u64) {
     MIPMAPPED_IMAGES.with(|m| {
         m.borrow_mut().insert(handle);
@@ -333,8 +345,7 @@ pub(crate) fn image_decode_failed(handle: u64) -> bool {
 /// Mark a live handle's decode failed, once. A result for an unloaded handle
 /// is a dropped unload race, not a failure.
 fn mark_decode_failed(id: u64) {
-    let live = IMAGES.with(|images| images.borrow().contains_key(&id));
-    if !live {
+    if !image_exists(id) {
         return;
     }
     let fresh = FAILED_DECODE.with(|f| f.borrow_mut().insert(id));
@@ -355,9 +366,7 @@ const DECODE_FAILED_DARK: [u8; 4] = [25, 0, 25, 255];
 /// through the handle -- present and future -- samples the placeholder; the
 /// logical size is untouched, so sheet frames and UVs keep working.
 fn upload_decode_placeholder(id: u64) {
-    let Some((w, h, format)) =
-        IMAGES.with(|i| i.borrow().get(&id).map(|i| (i.width, i.height, i.format)))
-    else {
+    let Some((w, h, format)) = with_image(id, |i| (i.width, i.height, i.format)) else {
         return;
     };
     let (sw, sh) = stored_size(id, (w, h));
@@ -1126,11 +1135,9 @@ fn upload_decoded(decoded: impl IntoIterator<Item = Arc<image_decode::Decoded>>)
         };
         // The handle can be gone if the image was unloaded while its decode was
         // in flight; the result is simply dropped.
-        let Some((w, h, format)) = IMAGES.with(|i| {
-            i.borrow()
-                .get(&d.id)
-                .map(|image| (image.width, image.height, image.format))
-        }) else {
+        let Some((w, h, format)) =
+            with_image(d.id, |image| (image.width, image.height, image.format))
+        else {
             continue;
         };
         if format != d.format {
@@ -1220,7 +1227,7 @@ fn publish_image_pixels(
 /// False for an unknown handle.
 #[no_mangle]
 pub extern "C" fn stone_image_is_stub(handle: u64) -> bool {
-    IMAGES.with(|images| images.borrow().get(&handle).is_some_and(|image| image.stub))
+    with_image(handle, |image| image.stub).unwrap_or(false)
 }
 
 /// What GL actually holds for `handle`: one texel for a stub, otherwise the
@@ -1233,12 +1240,7 @@ pub extern "C" fn stone_image_is_stub(handle: u64) -> bool {
 /// happened at all.
 #[no_mangle]
 pub extern "C" fn stone_image_storage_size(handle: u64, width: *mut c_int, height: *mut c_int) {
-    let stored = IMAGES.with(|images| {
-        images
-            .borrow()
-            .get(&handle)
-            .map(|img| stored_size(handle, (img.width, img.height)))
-    });
+    let stored = with_image(handle, |img| stored_size(handle, (img.width, img.height)));
     let (w, h) = stored.unwrap_or((0, 0));
     unsafe {
         if !width.is_null() {
@@ -1283,16 +1285,12 @@ pub extern "C" fn stone_probe_image_size(
 
 #[no_mangle]
 pub extern "C" fn stone_get_image_size(handle: u64, width: *mut c_int, height: *mut c_int) {
-    IMAGES.with(|images| {
-        if let Some(img) = images.borrow().get(&handle) {
-            unsafe {
-                if !width.is_null() {
-                    *width = img.width as c_int;
-                }
-                if !height.is_null() {
-                    *height = img.height as c_int;
-                }
-            }
+    with_image(handle, |img| unsafe {
+        if !width.is_null() {
+            *width = img.width as c_int;
+        }
+        if !height.is_null() {
+            *height = img.height as c_int;
         }
     });
 }
@@ -1302,16 +1300,12 @@ pub extern "C" fn stone_get_image_size(handle: u64, width: *mut c_int, height: *
 /// for standalone images -- an atlas region cannot repeat.
 #[no_mangle]
 pub extern "C" fn stone_image_set_wrap(handle: u64, repeat: bool) -> bool {
-    let texture = IMAGES.with(|images| images.borrow().get(&handle).map(|img| img.texture));
+    let texture = with_image(handle, |img| img.texture);
     let Some(texture) = texture else {
         crate::log_once!("IMAGE", "stone_image_set_wrap: invalid handle {}", handle);
         return false;
     };
-    IMAGES.with(|images| {
-        if let Some(img) = images.borrow_mut().get_mut(&handle) {
-            img.repeat = repeat;
-        }
-    });
+    with_image_mut(handle, |img| img.repeat = repeat);
     with_gl(|gl| unsafe {
         gl.bind_texture(glow::TEXTURE_2D, Some(texture));
         let mode = if repeat {
@@ -1352,7 +1346,7 @@ pub(crate) fn image_write_target_stored(
     stored: (u32, u32),
     data: &[u8],
 ) -> Option<(glow::Texture, bool)> {
-    let current = IMAGES.with(|images| images.borrow().get(&handle).map(|img| img.texture))?;
+    let current = with_image(handle, |img| img.texture)?;
     // A writer's own upload can be a `tex_sub_image_2d` wider than the storage
     // the cap left, which GL refuses and drops. So a write that does not match
     // what GL holds is completed here, at the size this one names, and the
@@ -1376,17 +1370,15 @@ fn define_image_storage(
     stored: (u32, u32),
     data: &[u8],
 ) -> Option<glow::Texture> {
-    let format = IMAGES.with(|images| images.borrow().get(&handle).map(|img| img.format))?;
+    let format = with_image(handle, |img| img.format)?;
     with_gl(|gl| unsafe {
         tex_image_for_format(gl, texture, stored.0, stored.1, format, Some(data));
     })?;
-    IMAGES.with(|images| {
-        if let Some(img) = images.borrow_mut().get_mut(&handle) {
-            img.width = logical.0;
-            img.height = logical.1;
-            // Real pixels landed, so an image loaded headers-only stops being one.
-            img.stub = false;
-        }
+    with_image_mut(handle, |img| {
+        img.width = logical.0;
+        img.height = logical.1;
+        // Real pixels landed, so an image loaded headers-only stops being one.
+        img.stub = false;
     });
     record_storage(handle, logical, stored);
     Some(texture)
@@ -1400,12 +1392,8 @@ fn define_image_storage(
 /// unknown or the coordinate is outside it.
 #[no_mangle]
 pub extern "C" fn stone_image_read_texel(handle: u64, x: c_int, y: c_int) -> i64 {
-    let Some((texture, logical)) = IMAGES.with(|images| {
-        images
-            .borrow()
-            .get(&handle)
-            .map(|img| (img.texture, (img.width, img.height)))
-    }) else {
+    let Some((texture, logical)) = with_image(handle, |img| (img.texture, (img.width, img.height)))
+    else {
         return -1;
     };
     // `glGetTexImage` writes the whole level, so the buffer and the stride come
@@ -1441,10 +1429,7 @@ pub extern "C" fn stone_image_read_texel(handle: u64, x: c_int, y: c_int) -> i64
 /// repeat, 0 clamp, -1 no such handle.
 #[no_mangle]
 pub extern "C" fn stone_image_wrap_state(handle: u64) -> c_int {
-    IMAGES.with(|images| match images.borrow().get(&handle) {
-        Some(img) => c_int::from(img.repeat),
-        None => -1,
-    })
+    with_image(handle, |img| c_int::from(img.repeat)).unwrap_or(-1)
 }
 
 #[no_mangle]
@@ -1452,7 +1437,7 @@ pub extern "C" fn stone_image_exists(handle: u64) -> bool {
     if handle == 0 {
         return false;
     }
-    IMAGES.with(|images| images.borrow().contains_key(&handle))
+    image_exists(handle)
 }
 
 /// Whether the handle's deferred decode failed to produce pixels. False for
@@ -1475,8 +1460,7 @@ pub extern "C" fn stone_image_decode_failed_count() -> u64 {
 /// state the CPU-side reading cannot see.
 #[no_mangle]
 pub extern "C" fn stone_image_gl_wrap_state(handle: u64) -> c_int {
-    let Some(texture) = IMAGES.with(|images| images.borrow().get(&handle).map(|i| i.texture))
-    else {
+    let Some(texture) = with_image(handle, |i| i.texture) else {
         return -1;
     };
     with_gl(|gl| unsafe {
@@ -1545,9 +1529,7 @@ pub(crate) fn sample_image_texture(handle: u64) -> Option<u32> {
     if !crate::image_publication::stone_image_ready(handle) && !image_decode_failed(handle) {
         return None;
     }
-    IMAGES.with(|images| {
-        let borrowed = images.borrow();
-        let img = borrowed.get(&handle)?;
+    with_image(handle, |img| {
         // Asking for the GL name is what a draw does just before binding, so a
         // stub reaching here is a draw sampling white. That is the contract
         // under `STONE_ASSET_STUB`, not a fault, so it is a debug line: a sim
@@ -1565,7 +1547,7 @@ pub(crate) fn sample_image_texture(handle: u64) -> Option<u32> {
                 "image {} is headers-only (STONE_ASSET_STUB=1); sampling it reads white",
                 stub_path(handle).unwrap_or_else(|| format!("handle {handle}")));
         }
-        Some(img.texture.0.get())
+        img.texture.0.get()
     })
 }
 
@@ -1631,8 +1613,7 @@ pub extern "C" fn stone_reload_image(handle: u64, path: *const c_char) -> bool {
     // A hot reload is an asset load like any other, so it stores at the cap --
     // and honours the exactness this handle declared when it was first loaded,
     // which is why that declaration outlives the call that made it.
-    let Some(format) = IMAGES.with(|images| images.borrow().get(&handle).map(|img| img.format))
-    else {
+    let Some(format) = with_image(handle, |img| img.format) else {
         return false;
     };
     let exact = exact_texels(handle) || format != ImageFormat::Rgba8;
@@ -1809,23 +1790,12 @@ pub(crate) fn live_texture_bytes() -> u64 {
 /// an unknown handle.
 #[no_mangle]
 pub extern "C" fn stone_get_image_byte_len(handle: u64) -> u64 {
-    IMAGES.with(|images| {
-        images
-            .borrow()
-            .get(&handle)
-            .map(|img| image_byte_len(handle, img))
-            .unwrap_or(0)
-    })
+    with_image(handle, |img| image_byte_len(handle, img)).unwrap_or(0)
 }
 
 #[no_mangle]
 pub extern "C" fn stone_get_image_format(handle: u64) -> c_int {
-    IMAGES.with(|images| {
-        images
-            .borrow()
-            .get(&handle)
-            .map_or(-1, |image| image.format.report_code())
-    })
+    with_image(handle, |image| image.format.report_code()).unwrap_or(-1)
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -1914,7 +1884,7 @@ mod relight_rg8_gl_tests {
     }
 
     fn read_rg(handle: u64, width: u32, height: u32) -> (i32, Vec<u8>) {
-        let texture = IMAGES.with(|images| images.borrow().get(&handle).unwrap().texture);
+        let texture = with_image(handle, |image| image.texture).unwrap();
         with_gl(|gl| unsafe {
             let old_binding = gl.get_parameter_i32(glow::TEXTURE_BINDING_2D);
             let old_pack_buffer = gl.get_parameter_i32(glow::PIXEL_PACK_BUFFER_BINDING);
@@ -1951,7 +1921,7 @@ mod relight_rg8_gl_tests {
     }
 
     fn read_rgba(handle: u64, width: u32, height: u32) -> Vec<u8> {
-        let texture = IMAGES.with(|images| images.borrow().get(&handle).unwrap().texture);
+        let texture = with_image(handle, |image| image.texture).unwrap();
         with_gl(|gl| unsafe {
             let old_binding = gl.get_parameter_i32(glow::TEXTURE_BINDING_2D);
             let old_pack_buffer = gl.get_parameter_i32(glow::PIXEL_PACK_BUFFER_BINDING);
@@ -2342,7 +2312,7 @@ mod relight_rg8_gl_tests {
     }
 
     fn driver_levels(handle: u64) -> Vec<(u32, u32, u32)> {
-        let texture = IMAGES.with(|i| i.borrow().get(&handle).unwrap().texture);
+        let texture = with_image(handle, |image| image.texture).unwrap();
         with_gl(|gl| unsafe {
             let old = gl.get_parameter_i32(glow::TEXTURE_BINDING_2D);
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));

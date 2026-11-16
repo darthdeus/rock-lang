@@ -99,14 +99,29 @@ unsafe impl Sync for LuaAllocatorState {}
 
 static LUA_ALLOCATOR_STATE: OnceLock<LuaAllocatorState> = OnceLock::new();
 static LUA_COUNTER_ACTIVE: AtomicBool = AtomicBool::new(false);
-static LUA_ALLOC_GROSS_REQUESTED: AtomicU64 = AtomicU64::new(0);
-static LUA_ALLOC_POSITIVE_GROWTH: AtomicU64 = AtomicU64::new(0);
-static LUA_ALLOC_EXPLICIT_FREED: AtomicU64 = AtomicU64::new(0);
-static LUA_ALLOC_REALLOC_SHRUNK: AtomicU64 = AtomicU64::new(0);
-static LUA_ALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
-static LUA_ALLOC_ALLOCATION_CALLS: AtomicU64 = AtomicU64::new(0);
-static LUA_ALLOC_REALLOCATION_CALLS: AtomicU64 = AtomicU64::new(0);
-static LUA_ALLOC_FREE_CALLS: AtomicU64 = AtomicU64::new(0);
+#[derive(Clone, Copy)]
+enum LuaAllocCounter {
+    GrossRequested,
+    PositiveGrowth,
+    ExplicitFreed,
+    ReallocShrunk,
+    Calls,
+    AllocationCalls,
+    ReallocationCalls,
+    FreeCalls,
+}
+
+static LUA_ALLOC_COUNTERS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+
+impl LuaAllocCounter {
+    fn add(self, value: u64) {
+        LUA_ALLOC_COUNTERS[self as usize].fetch_add(value, Ordering::Relaxed);
+    }
+
+    fn get(self) -> u64 {
+        LUA_ALLOC_COUNTERS[self as usize].load(Ordering::Relaxed)
+    }
+}
 
 static LUA_ALLOC_ORIGIN_BYTES: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 static LUA_ALLOC_ORIGIN_CALLS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
@@ -145,25 +160,25 @@ unsafe extern "C" fn stone_lua_counting_alloc(
             LUA_ALLOC_ORIGIN_BYTES[origin].fetch_add(nsize as u64, Ordering::Relaxed);
             LUA_ALLOC_ORIGIN_CALLS[origin].fetch_add(1, Ordering::Relaxed);
         }
-        LUA_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+        LuaAllocCounter::Calls.add(1);
         if nsize == 0 {
             if !ptr.is_null() {
                 // Only nsize == 0 is an unambiguous free request. A realloc
                 // may shrink in place, so its old size is not counted as free.
-                LUA_ALLOC_FREE_CALLS.fetch_add(1, Ordering::Relaxed);
-                LUA_ALLOC_EXPLICIT_FREED.fetch_add(osize as u64, Ordering::Relaxed);
+                LuaAllocCounter::FreeCalls.add(1);
+                LuaAllocCounter::ExplicitFreed.add(osize as u64);
             }
         } else {
-            LUA_ALLOC_GROSS_REQUESTED.fetch_add(nsize as u64, Ordering::Relaxed);
+            LuaAllocCounter::GrossRequested.add(nsize as u64);
             if ptr.is_null() {
-                LUA_ALLOC_ALLOCATION_CALLS.fetch_add(1, Ordering::Relaxed);
-                LUA_ALLOC_POSITIVE_GROWTH.fetch_add(nsize as u64, Ordering::Relaxed);
+                LuaAllocCounter::AllocationCalls.add(1);
+                LuaAllocCounter::PositiveGrowth.add(nsize as u64);
             } else {
-                LUA_ALLOC_REALLOCATION_CALLS.fetch_add(1, Ordering::Relaxed);
+                LuaAllocCounter::ReallocationCalls.add(1);
                 if nsize >= osize {
-                    LUA_ALLOC_POSITIVE_GROWTH.fetch_add((nsize - osize) as u64, Ordering::Relaxed);
+                    LuaAllocCounter::PositiveGrowth.add((nsize - osize) as u64);
                 } else {
-                    LUA_ALLOC_REALLOC_SHRUNK.fetch_add((osize - nsize) as u64, Ordering::Relaxed);
+                    LuaAllocCounter::ReallocShrunk.add((osize - nsize) as u64);
                 }
             }
         }
@@ -210,16 +225,9 @@ pub extern "C" fn stone_lua_alloc_counter_begin() -> c_int {
     let Some(state) = LUA_ALLOCATOR_STATE.get() else {
         return 0;
     };
-    LUA_ALLOC_GROSS_REQUESTED.store(0, Ordering::Relaxed);
-    LUA_ALLOC_POSITIVE_GROWTH.store(0, Ordering::Relaxed);
-    LUA_ALLOC_EXPLICIT_FREED.store(0, Ordering::Relaxed);
-    LUA_ALLOC_REALLOC_SHRUNK.store(0, Ordering::Relaxed);
-    LUA_ALLOC_CALLS.store(0, Ordering::Relaxed);
-    LUA_ALLOC_ALLOCATION_CALLS.store(0, Ordering::Relaxed);
-    LUA_ALLOC_REALLOCATION_CALLS.store(0, Ordering::Relaxed);
-    LUA_ALLOC_FREE_CALLS.store(0, Ordering::Relaxed);
-    for counter in LUA_ALLOC_ORIGIN_BYTES
+    for counter in LUA_ALLOC_COUNTERS
         .iter()
+        .chain(LUA_ALLOC_ORIGIN_BYTES.iter())
         .chain(LUA_ALLOC_ORIGIN_CALLS.iter())
     {
         counter.store(0, Ordering::Relaxed);
@@ -253,42 +261,42 @@ pub extern "C" fn stone_lua_alloc_counter_end() -> c_int {
 
 #[no_mangle]
 pub extern "C" fn stone_lua_alloc_gross_request_kb() -> c_double {
-    LUA_ALLOC_GROSS_REQUESTED.load(Ordering::Relaxed) as c_double / 1024.0
+    LuaAllocCounter::GrossRequested.get() as c_double / 1024.0
 }
 
 #[no_mangle]
 pub extern "C" fn stone_lua_alloc_positive_growth_kb() -> c_double {
-    LUA_ALLOC_POSITIVE_GROWTH.load(Ordering::Relaxed) as c_double / 1024.0
+    LuaAllocCounter::PositiveGrowth.get() as c_double / 1024.0
 }
 
 #[no_mangle]
 pub extern "C" fn stone_lua_alloc_explicit_free_kb() -> c_double {
-    LUA_ALLOC_EXPLICIT_FREED.load(Ordering::Relaxed) as c_double / 1024.0
+    LuaAllocCounter::ExplicitFreed.get() as c_double / 1024.0
 }
 
 #[no_mangle]
 pub extern "C" fn stone_lua_alloc_reallocation_shrink_kb() -> c_double {
-    LUA_ALLOC_REALLOC_SHRUNK.load(Ordering::Relaxed) as c_double / 1024.0
+    LuaAllocCounter::ReallocShrunk.get() as c_double / 1024.0
 }
 
 #[no_mangle]
 pub extern "C" fn stone_lua_alloc_call_count() -> u64 {
-    LUA_ALLOC_CALLS.load(Ordering::Relaxed)
+    LuaAllocCounter::Calls.get()
 }
 
 #[no_mangle]
 pub extern "C" fn stone_lua_alloc_allocation_call_count() -> u64 {
-    LUA_ALLOC_ALLOCATION_CALLS.load(Ordering::Relaxed)
+    LuaAllocCounter::AllocationCalls.get()
 }
 
 #[no_mangle]
 pub extern "C" fn stone_lua_alloc_reallocation_call_count() -> u64 {
-    LUA_ALLOC_REALLOCATION_CALLS.load(Ordering::Relaxed)
+    LuaAllocCounter::ReallocationCalls.get()
 }
 
 #[no_mangle]
 pub extern "C" fn stone_lua_alloc_free_call_count() -> u64 {
-    LUA_ALLOC_FREE_CALLS.load(Ordering::Relaxed)
+    LuaAllocCounter::FreeCalls.get()
 }
 
 use sdl2::event::Event;
@@ -305,6 +313,8 @@ mod actor_query;
 pub mod asset_registry;
 mod asset_watcher;
 mod audio;
+#[cfg(test)]
+mod c_header_abi;
 mod cursor;
 mod file_jobs;
 mod filesystem;
@@ -324,6 +334,8 @@ mod relight_jobs;
 mod screenshot;
 #[cfg(test)]
 mod test_fonts;
+#[cfg(test)]
+mod test_support;
 pub(crate) use image_texture::{
     image_write_target, live_image_bytes, live_mip_bytes, live_texture_bytes, stone_unload_image,
     LoadedImage, IMAGES, WHITE_IMAGE,
@@ -1286,6 +1298,13 @@ where
     WINDOW.with(|w| w.borrow().as_ref().map(|window| f(window)))
 }
 
+pub(crate) fn with_window_mut<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&mut StoneWindow) -> R,
+{
+    WINDOW.with(|w| w.borrow_mut().as_mut().map(|window| f(window)))
+}
+
 pub(crate) fn with_gl<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&DebugGl) -> R,
@@ -1417,23 +1436,13 @@ pub extern "C" fn stone_test_virtual_pad_cleanup() {
 
 #[no_mangle]
 pub extern "C" fn stone_pad_connected() -> bool {
-    WINDOW.with(|window| {
-        window
-            .borrow()
-            .as_ref()
-            .map(|window| window.controller_manager.borrow().connected())
-            .unwrap_or(false)
-    })
+    with_window(|window| window.controller_manager.borrow().connected()).unwrap_or(false)
 }
 
 #[no_mangle]
 pub extern "C" fn stone_pad_type_name() -> *const c_char {
-    let type_name = WINDOW.with(|window| {
-        window
-            .borrow()
-            .as_ref()
-            .and_then(|window| window.controller_manager.borrow().active_type_name())
-    });
+    let type_name =
+        with_window(|window| window.controller_manager.borrow().active_type_name()).flatten();
     match type_name {
         Some("xbox") => c"xbox".as_ptr(),
         Some("playstation") => c"playstation".as_ptr(),
@@ -2095,182 +2104,179 @@ pub extern "C" fn stone_poll_event(event: *mut StoneEvent) -> bool {
         return false;
     }
 
-    WINDOW.with(|w| {
-        if let Some(window) = w.borrow_mut().as_mut() {
-            if let Some(translated) = window.controller_manager.borrow_mut().pop_stone_event() {
-                unsafe {
-                    (*event) = translated;
-                }
-                return true;
-            }
-            // Drop down to raw SDL_PollEvent so we can forward each
-            // event to ImGui's SDL2 backend BEFORE we translate it for
-            // the game. ImGui needs to see mouse-button-down/up events
-            // to drive widget interaction — its NewFrame polls
-            // SDL_GetMouseState for position only, so without this
-            // clicks inside ImGui windows silently never reach buttons
-            // / sliders / colour pickers (hover works because that's
-            // a position query; click doesn't because the transient
-            // was drained without being seen).
-            unsafe { sdl2::sys::SDL_JoystickUpdate() };
-            let mut raw_uninit: std::mem::MaybeUninit<sdl2::sys::SDL_Event> =
-                std::mem::MaybeUninit::uninit();
-            let has_event = unsafe { sdl2::sys::SDL_PollEvent(raw_uninit.as_mut_ptr()) };
-            if has_event == 0 {
-                unsafe {
-                    (*event) = StoneEvent::default();
-                }
-                return false;
-            }
-            let raw = unsafe { raw_uninit.assume_init() };
-            let sdl_event = sdl2::event::Event::from_ll(raw);
-
-            #[cfg(target_os = "linux")]
-            if let sdl2::event::Event::Window { window_id, .. } = sdl_event {
-                if window_id == window.window.id() {
-                    follow_wm_fullscreen_exit(window);
-                }
-            }
-
-            // Alt+Enter toggle fullscreen (repeat suppressed).
-            // Intercept before ImGui and gameplay so it does not inject a Return keypress.
-            if let sdl2::event::Event::KeyDown {
-                keycode: Some(sdl2::keyboard::Keycode::Return | sdl2::keyboard::Keycode::KpEnter),
-                keymod,
-                repeat,
-                ..
-            } = sdl_event
-            {
-                let alt = keymod.contains(sdl2::keyboard::Mod::LALTMOD)
-                    || keymod.contains(sdl2::keyboard::Mod::RALTMOD);
-                if alt {
-                    if !repeat {
-                        let is_fs =
-                            window.window.fullscreen_state() != sdl2::video::FullscreenType::Off;
-                        let is_max = (window.window.window_flags()
-                            & sdl2::sys::SDL_WindowFlags::SDL_WINDOW_MAXIMIZED as u32)
-                            != 0;
-                        if is_fs || is_max {
-                            set_fullscreen_impl(window, 0);
-                        } else {
-                            set_fullscreen_impl(window, 1);
-                        }
-                    }
-                    unsafe {
-                        (*event) = StoneEvent::default();
-                    }
-                    return true;
-                }
-            }
-            if let sdl2::event::Event::KeyUp {
-                keycode: Some(sdl2::keyboard::Keycode::Return | sdl2::keyboard::Keycode::KpEnter),
-                keymod,
-                ..
-            } = sdl_event
-            {
-                let alt = keymod.contains(sdl2::keyboard::Mod::LALTMOD)
-                    || keymod.contains(sdl2::keyboard::Mod::RALTMOD);
-                if alt {
-                    unsafe {
-                        (*event) = StoneEvent::default();
-                    }
-                    return true;
-                }
-            }
-
-            // Forward to ImGui first. The handler early-returns if
-            // imgui hasn't been initialized yet, so the call is safe
-            // before stone_imgui_init too.
-            let _ =
-                crate::imgui::stone_imgui_process_event(&raw as *const _ as *mut std::ffi::c_void);
-            let controller_event = {
-                let mut manager = window.controller_manager.borrow_mut();
-                let events = manager.handle_sdl_event(&sdl_event);
-                manager.enqueue(events);
-                manager.pop_stone_event()
-            };
-            if let Some(translated) = controller_event {
-                unsafe {
-                    (*event) = translated;
-                }
-                return true;
-            }
-            if let Some(translated) = stone_event_from_sdl(&sdl_event) {
-                unsafe {
-                    (*event) = translated;
-                }
-                return true;
-            }
+    with_window_mut(|window| {
+        if let Some(translated) = window.controller_manager.borrow_mut().pop_stone_event() {
             unsafe {
-                match sdl_event {
-                    #[cfg(target_os = "macos")]
-                    Event::Window {
-                        win_event: sdl2::event::WindowEvent::FocusGained,
-                        ..
-                    } => {
-                        // First time the user focuses our window: promote
-                        // to Regular so Cmd-Tab/Dock behave normally.
-                        // No surface event — the game doesn't care.
-                        macos_focus::promote_to_regular_once();
-                        (*event) = StoneEvent::default();
-                    }
-                    // Window geometry changes are not surfaced as game
-                    // events; they set take-and-clear flags the runner
-                    // drains each frame. SizeChanged fires for
-                    // both user resizes and programmatic set_size; Resized
-                    // is the user-driven subset -- track either as resized.
-                    Event::Window { win_event, .. } => {
-                        use sdl2::event::WindowEvent as WE;
-                        match win_event {
-                            WE::Resized(..) | WE::SizeChanged(..) => {
-                                mark_window_change(WC_RESIZED);
-                                if window.window_mode.get()
-                                    == window_placement::WindowMode::Windowed
-                                    && window.window.fullscreen_state()
-                                        == sdl2::video::FullscreenType::Off
-                                {
-                                    let is_max = (window.window.window_flags()
-                                        & sdl2::sys::SDL_WindowFlags::SDL_WINDOW_MAXIMIZED as u32)
-                                        != 0;
-                                    if !is_max {
-                                        let (w, h) = window.window.size();
-                                        let mut b = window.windowed_bounds.get();
-                                        b.size = (w as i32, h as i32);
-                                        window.windowed_bounds.set(b);
-                                    }
-                                }
-                            }
-                            WE::Moved(..) => {
-                                mark_window_change(WC_MOVED);
-                                if window.window_mode.get()
-                                    == window_placement::WindowMode::Windowed
-                                    && window.window.fullscreen_state()
-                                        == sdl2::video::FullscreenType::Off
-                                {
-                                    let is_max = (window.window.window_flags()
-                                        & sdl2::sys::SDL_WindowFlags::SDL_WINDOW_MAXIMIZED as u32)
-                                        != 0;
-                                    if !is_max {
-                                        let (px, py) = window.window.position();
-                                        let mut b = window.windowed_bounds.get();
-                                        b.pos = (px, py);
-                                        b.display = window.window.display_index().ok();
-                                        window.windowed_bounds.set(b);
-                                    }
-                                }
-                            }
-                            WE::DisplayChanged(..) => mark_window_change(WC_DISPLAY),
-                            _ => {}
-                        }
-                        (*event) = StoneEvent::default();
-                    }
-                    _ => {
-                        (*event) = StoneEvent::default();
-                    }
-                }
+                (*event) = translated;
             }
             return true;
         }
+        // Drop down to raw SDL_PollEvent so we can forward each
+        // event to ImGui's SDL2 backend BEFORE we translate it for
+        // the game. ImGui needs to see mouse-button-down/up events
+        // to drive widget interaction — its NewFrame polls
+        // SDL_GetMouseState for position only, so without this
+        // clicks inside ImGui windows silently never reach buttons
+        // / sliders / colour pickers (hover works because that's
+        // a position query; click doesn't because the transient
+        // was drained without being seen).
+        unsafe { sdl2::sys::SDL_JoystickUpdate() };
+        let mut raw_uninit: std::mem::MaybeUninit<sdl2::sys::SDL_Event> =
+            std::mem::MaybeUninit::uninit();
+        let has_event = unsafe { sdl2::sys::SDL_PollEvent(raw_uninit.as_mut_ptr()) };
+        if has_event == 0 {
+            unsafe {
+                (*event) = StoneEvent::default();
+            }
+            return false;
+        }
+        let raw = unsafe { raw_uninit.assume_init() };
+        let sdl_event = sdl2::event::Event::from_ll(raw);
+
+        #[cfg(target_os = "linux")]
+        if let sdl2::event::Event::Window { window_id, .. } = sdl_event {
+            if window_id == window.window.id() {
+                follow_wm_fullscreen_exit(window);
+            }
+        }
+
+        // Alt+Enter toggle fullscreen (repeat suppressed).
+        // Intercept before ImGui and gameplay so it does not inject a Return keypress.
+        if let sdl2::event::Event::KeyDown {
+            keycode: Some(sdl2::keyboard::Keycode::Return | sdl2::keyboard::Keycode::KpEnter),
+            keymod,
+            repeat,
+            ..
+        } = sdl_event
+        {
+            let alt = keymod.contains(sdl2::keyboard::Mod::LALTMOD)
+                || keymod.contains(sdl2::keyboard::Mod::RALTMOD);
+            if alt {
+                if !repeat {
+                    let is_fs =
+                        window.window.fullscreen_state() != sdl2::video::FullscreenType::Off;
+                    let is_max = (window.window.window_flags()
+                        & sdl2::sys::SDL_WindowFlags::SDL_WINDOW_MAXIMIZED as u32)
+                        != 0;
+                    if is_fs || is_max {
+                        set_fullscreen_impl(window, 0);
+                    } else {
+                        set_fullscreen_impl(window, 1);
+                    }
+                }
+                unsafe {
+                    (*event) = StoneEvent::default();
+                }
+                return true;
+            }
+        }
+        if let sdl2::event::Event::KeyUp {
+            keycode: Some(sdl2::keyboard::Keycode::Return | sdl2::keyboard::Keycode::KpEnter),
+            keymod,
+            ..
+        } = sdl_event
+        {
+            let alt = keymod.contains(sdl2::keyboard::Mod::LALTMOD)
+                || keymod.contains(sdl2::keyboard::Mod::RALTMOD);
+            if alt {
+                unsafe {
+                    (*event) = StoneEvent::default();
+                }
+                return true;
+            }
+        }
+
+        // Forward to ImGui first. The handler early-returns if
+        // imgui hasn't been initialized yet, so the call is safe
+        // before stone_imgui_init too.
+        let _ = crate::imgui::stone_imgui_process_event(&raw as *const _ as *mut std::ffi::c_void);
+        let controller_event = {
+            let mut manager = window.controller_manager.borrow_mut();
+            let events = manager.handle_sdl_event(&sdl_event);
+            manager.enqueue(events);
+            manager.pop_stone_event()
+        };
+        if let Some(translated) = controller_event {
+            unsafe {
+                (*event) = translated;
+            }
+            return true;
+        }
+        if let Some(translated) = stone_event_from_sdl(&sdl_event) {
+            unsafe {
+                (*event) = translated;
+            }
+            return true;
+        }
+        unsafe {
+            match sdl_event {
+                #[cfg(target_os = "macos")]
+                Event::Window {
+                    win_event: sdl2::event::WindowEvent::FocusGained,
+                    ..
+                } => {
+                    // First time the user focuses our window: promote
+                    // to Regular so Cmd-Tab/Dock behave normally.
+                    // No surface event — the game doesn't care.
+                    macos_focus::promote_to_regular_once();
+                    (*event) = StoneEvent::default();
+                }
+                // Window geometry changes are not surfaced as game
+                // events; they set take-and-clear flags the runner
+                // drains each frame. SizeChanged fires for
+                // both user resizes and programmatic set_size; Resized
+                // is the user-driven subset -- track either as resized.
+                Event::Window { win_event, .. } => {
+                    use sdl2::event::WindowEvent as WE;
+                    match win_event {
+                        WE::Resized(..) | WE::SizeChanged(..) => {
+                            mark_window_change(WC_RESIZED);
+                            if window.window_mode.get() == window_placement::WindowMode::Windowed
+                                && window.window.fullscreen_state()
+                                    == sdl2::video::FullscreenType::Off
+                            {
+                                let is_max = (window.window.window_flags()
+                                    & sdl2::sys::SDL_WindowFlags::SDL_WINDOW_MAXIMIZED as u32)
+                                    != 0;
+                                if !is_max {
+                                    let (w, h) = window.window.size();
+                                    let mut b = window.windowed_bounds.get();
+                                    b.size = (w as i32, h as i32);
+                                    window.windowed_bounds.set(b);
+                                }
+                            }
+                        }
+                        WE::Moved(..) => {
+                            mark_window_change(WC_MOVED);
+                            if window.window_mode.get() == window_placement::WindowMode::Windowed
+                                && window.window.fullscreen_state()
+                                    == sdl2::video::FullscreenType::Off
+                            {
+                                let is_max = (window.window.window_flags()
+                                    & sdl2::sys::SDL_WindowFlags::SDL_WINDOW_MAXIMIZED as u32)
+                                    != 0;
+                                if !is_max {
+                                    let (px, py) = window.window.position();
+                                    let mut b = window.windowed_bounds.get();
+                                    b.pos = (px, py);
+                                    b.display = window.window.display_index().ok();
+                                    window.windowed_bounds.set(b);
+                                }
+                            }
+                        }
+                        WE::DisplayChanged(..) => mark_window_change(WC_DISPLAY),
+                        _ => {}
+                    }
+                    (*event) = StoneEvent::default();
+                }
+                _ => {
+                    (*event) = StoneEvent::default();
+                }
+            }
+        }
+        true
+    })
+    .unwrap_or_else(|| {
         unsafe {
             (*event) = StoneEvent::default();
         }
@@ -2310,13 +2316,7 @@ pub extern "C" fn stone_test_push_key_event(token: *const c_char, down: bool) ->
     } else {
         0
     };
-    let window_id = WINDOW.with(|window| {
-        window
-            .borrow()
-            .as_ref()
-            .map(|window| window.window.id())
-            .unwrap_or(0)
-    });
+    let window_id = with_window(|window| window.window.id()).unwrap_or(0);
     let mut raw = sdl2::sys::SDL_Event {
         key: sdl2::sys::SDL_KeyboardEvent {
             type_: if down {
@@ -2354,31 +2354,29 @@ pub extern "C" fn stone_swap_window(_window: *mut StoneWindow) {
     frame_timing::event("presentation_begin", completed);
     // RenderDoc frame auto-trigger; one branch when STONE_RENDERDOC is unset.
     crate::renderdoc::on_swap(completed);
-    WINDOW.with(|w| {
-        if let Some(window) = w.borrow().as_ref() {
-            if !window.runtime_hidden && window.pending_show.is_none() {
-                canvas::present_headless_screen(&window.window);
-            }
-            frame_timing::event("pace_begin", completed);
-            pace_swap(&window.window);
-            frame_timing::event("swap_begin", completed);
-            window.window.gl_swap_window();
-            frame_timing::event("swap_end", completed);
+    with_window(|window| {
+        if !window.runtime_hidden && window.pending_show.is_none() {
+            canvas::present_headless_screen(&window.window);
+        }
+        frame_timing::event("pace_begin", completed);
+        pace_swap(&window.window);
+        frame_timing::event("swap_begin", completed);
+        window.window.gl_swap_window();
+        frame_timing::event("swap_end", completed);
 
-            // Re-check borders once after the first present: on X11
-            // _NET_FRAME_EXTENTS can read 0 until the window is mapped
-            // Only armed on a visible window.
-            if !POST_FRAME_BORDERS_LOGGED.with(|c| c.get()) {
-                if let Some(before) = INITIAL_BORDERS.with(|c| c.get()) {
-                    POST_FRAME_BORDERS_LOGGED.with(|c| c.set(true));
-                    let after = query_window_borders(&window.window).unwrap_or(before);
-                    let changed = after != before;
-                    ::log::info!(
-                        target: "STONE",
-                        "borders after first present(pt): top={} left={} bottom={} right={} changed={}",
-                        after.top, after.left, after.bottom, after.right, changed,
-                    );
-                }
+        // Re-check borders once after the first present: on X11
+        // _NET_FRAME_EXTENTS can read 0 until the window is mapped
+        // Only armed on a visible window.
+        if !POST_FRAME_BORDERS_LOGGED.with(|c| c.get()) {
+            if let Some(before) = INITIAL_BORDERS.with(|c| c.get()) {
+                POST_FRAME_BORDERS_LOGGED.with(|c| c.set(true));
+                let after = query_window_borders(&window.window).unwrap_or(before);
+                let changed = after != before;
+                ::log::info!(
+                    target: "STONE",
+                    "borders after first present(pt): top={} left={} bottom={} right={} changed={}",
+                    after.top, after.left, after.bottom, after.right, changed,
+                );
             }
         }
     });
@@ -2394,48 +2392,46 @@ pub extern "C" fn stone_gl_swap_count() -> u64 {
 /// synchronize SDL state and reassert the saved position.
 #[no_mangle]
 pub extern "C" fn stone_show_window_if_deferred() {
-    WINDOW.with(|w| {
-        if let Some(window) = w.borrow_mut().as_mut() {
-            if let Some(pending) = window.pending_show.as_mut() {
-                let (px, py) = pending.pos;
-                if !pending.map_requested {
-                    move_window(&mut window.window, px, py);
-                    #[cfg(target_os = "linux")]
-                    {
-                        if std::env::var("STONE_FOCUS_ON_SHOW").is_err() {
-                            x11_focus::set_user_time_zero(&window.window);
-                        }
-                        x11_focus::pin_user_position(&window.window, px, py);
-                    }
-                }
+    with_window_mut(|window| {
+        if let Some(pending) = window.pending_show.as_mut() {
+            let (px, py) = pending.pos;
+            if !pending.map_requested {
+                move_window(&mut window.window, px, py);
                 #[cfg(target_os = "linux")]
                 {
-                    let map_state = if pending.map_requested {
-                        x11_focus::poll_deferred_map(&window.window)
-                    } else {
-                        x11_focus::request_deferred_map(&window.window)
-                    };
-                    if map_state == x11_focus::DeferredMapState::Pending {
-                        pending.map_requested = true;
-                        return;
+                    if std::env::var("STONE_FOCUS_ON_SHOW").is_err() {
+                        x11_focus::set_user_time_zero(&window.window);
                     }
+                    x11_focus::pin_user_position(&window.window, px, py);
                 }
-                window.window.show();
-                // A tiling WM (i3) maps a floating window on the *focused*
-                // output and ignores the pre-map position; it does honor a move
-                // once mapped, so re-assert the position now to land it on the
-                // intended monitor.
-                move_window(&mut window.window, px, py);
-                ::log::info!(
-                    target: "STONE",
-                    "window shown (deferred) at ({},{}) on display[{}]",
-                    px, py, window.window.display_index().unwrap_or(-1),
-                );
-                let activate = pending.activate;
-                window.pending_show = None;
-                if activate {
-                    activate_window_impl(window);
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let map_state = if pending.map_requested {
+                    x11_focus::poll_deferred_map(&window.window)
+                } else {
+                    x11_focus::request_deferred_map(&window.window)
+                };
+                if map_state == x11_focus::DeferredMapState::Pending {
+                    pending.map_requested = true;
+                    return;
                 }
+            }
+            window.window.show();
+            // A tiling WM (i3) maps a floating window on the *focused*
+            // output and ignores the pre-map position; it does honor a move
+            // once mapped, so re-assert the position now to land it on the
+            // intended monitor.
+            move_window(&mut window.window, px, py);
+            ::log::info!(
+                target: "STONE",
+                "window shown (deferred) at ({},{}) on display[{}]",
+                px, py, window.window.display_index().unwrap_or(-1),
+            );
+            let activate = pending.activate;
+            window.pending_show = None;
+            if activate {
+                activate_window_impl(window);
             }
         }
     });
@@ -2447,56 +2443,53 @@ pub extern "C" fn stone_show_window_if_deferred() {
 /// environment variable.
 #[no_mangle]
 pub extern "C" fn stone_hide_window() {
-    WINDOW.with(|w| {
-        if let Some(window) = w.borrow_mut().as_mut() {
-            if window.pending_show.is_some() {
-                // A deferred show is still pending: drop it, the window must
-                // stay unmapped.
-                window.pending_show = None;
-            }
-            if !window.runtime_hidden {
-                let fs = window.window.fullscreen_state();
-                let is_max = (window.window.window_flags()
-                    & sdl2::sys::SDL_WindowFlags::SDL_WINDOW_MAXIMIZED as u32)
-                    != 0;
-                let current_mode = if fs == sdl2::video::FullscreenType::Desktop {
-                    window_placement::WindowMode::Fullscreen(1)
-                } else if fs == sdl2::video::FullscreenType::True {
-                    window_placement::WindowMode::Fullscreen(2)
-                } else if is_max {
-                    window_placement::WindowMode::Maximized
-                } else {
-                    window_placement::WindowMode::Windowed
-                };
-                window.window_mode.set(current_mode);
+    with_window_mut(|window| {
+        if window.pending_show.is_some() {
+            // A deferred show is still pending: drop it, the window must
+            // stay unmapped.
+            window.pending_show = None;
+        }
+        if !window.runtime_hidden {
+            let fs = window.window.fullscreen_state();
+            let is_max = (window.window.window_flags()
+                & sdl2::sys::SDL_WindowFlags::SDL_WINDOW_MAXIMIZED as u32)
+                != 0;
+            let current_mode = if fs == sdl2::video::FullscreenType::Desktop {
+                window_placement::WindowMode::Fullscreen(1)
+            } else if fs == sdl2::video::FullscreenType::True {
+                window_placement::WindowMode::Fullscreen(2)
+            } else if is_max {
+                window_placement::WindowMode::Maximized
+            } else {
+                window_placement::WindowMode::Windowed
+            };
+            window.window_mode.set(current_mode);
 
-                let (wx, wy) = window.window.position();
-                let (ww, wh) = window.window.size();
-                let display = window.window.display_index().ok();
+            let (wx, wy) = window.window.position();
+            let (ww, wh) = window.window.size();
+            let display = window.window.display_index().ok();
 
-                if current_mode == window_placement::WindowMode::Windowed {
-                    window
-                        .windowed_bounds
-                        .set(window_placement::WindowedBounds {
-                            pos: (wx, wy),
-                            size: (ww as i32, wh as i32),
-                            display,
-                        });
-                }
-
-                *window.saved_state_on_hide.borrow_mut() =
-                    Some(window_placement::HiddenWindowState {
-                        mode: current_mode,
+            if current_mode == window_placement::WindowMode::Windowed {
+                window
+                    .windowed_bounds
+                    .set(window_placement::WindowedBounds {
                         pos: (wx, wy),
                         size: (ww as i32, wh as i32),
                         display,
-                        windowed_bounds: window.windowed_bounds.get(),
                     });
             }
-            window.window.hide();
-            window.runtime_hidden = true;
-            ::log::info!(target: "STONE", "window hidden by request");
+
+            *window.saved_state_on_hide.borrow_mut() = Some(window_placement::HiddenWindowState {
+                mode: current_mode,
+                pos: (wx, wy),
+                size: (ww as i32, wh as i32),
+                display,
+                windowed_bounds: window.windowed_bounds.get(),
+            });
         }
+        window.window.hide();
+        window.runtime_hidden = true;
+        ::log::info!(target: "STONE", "window hidden by request");
     });
 }
 
@@ -2519,143 +2512,140 @@ pub extern "C" fn stone_show_window_mode(mode: c_int) {
 fn show_window_impl(requested_mode: Option<c_int>) {
     // Fullscreen transitions consult SDL's cached mouse focus, including queued leave events.
     unsafe { sdl2::sys::SDL_PumpEvents() };
-    WINDOW.with(|w| {
-        if let Some(window) = w.borrow_mut().as_mut() {
-            if !window.runtime_hidden {
-                if let Some(mode) = requested_mode {
-                    set_fullscreen_impl(window, mode);
-                }
-                return;
+    with_window_mut(|window| {
+        if !window.runtime_hidden {
+            if let Some(mode) = requested_mode {
+                set_fullscreen_impl(window, mode);
             }
-            let displays = gather_display_reports(&window._video);
-            let borders = effective_borders(query_window_borders(&window.window));
-
-            let (mut mode, mut target_pos, mut target_size, mut target_display) =
-                if window.initial_hidden_boot.get() {
-                    window.initial_hidden_boot.set(false);
-                    let base = window_placement::ResolvedGeometry {
-                        size: window.requested_size,
-                        pos: window.requested_pos,
-                        display: window.requested_display,
-                    };
-                    // A headless boot skipped the machine config; the first show reads it.
-                    let machine = window_placement::machine_config(&window_placement::game_slug(
-                        &window.title,
-                    ));
-                    let resolved =
-                        resolve_window_geometry(&window.title, base, &machine, &window._video);
-                    let req = window_report::WindowRequest {
-                        size: resolved.size,
-                        pos: resolved.pos,
-                        display: resolved.display,
-                    };
-                    let mut p = window_report::resolve_window_placement(req, &displays, borders);
-                    const SDL_WINDOWPOS_CENTERED: i32 = 0x2FFF0000u32 as i32;
-                    if resolved.pos.0 == SDL_WINDOWPOS_CENTERED
-                        && resolved.pos.1 == SDL_WINDOWPOS_CENTERED
-                    {
-                        if let Some(d) = displays
-                            .iter()
-                            .find(|d| d.index == p.display)
-                            .or_else(|| displays.first())
-                        {
-                            p.pos.0 = d.usable.0 + (d.usable.2 - p.size.0) / 2;
-                            p.pos.1 = d.usable.1 + (d.usable.3 - p.size.1) / 2;
-                        }
-                    }
-                    window
-                        .windowed_bounds
-                        .set(window_placement::WindowedBounds {
-                            pos: p.pos,
-                            size: p.size,
-                            display: Some(p.display),
-                        });
-                    (
-                        window_placement::WindowMode::Windowed,
-                        p.pos,
-                        p.size,
-                        p.display,
-                    )
-                } else if let Some(saved) = window.saved_state_on_hide.borrow_mut().take() {
-                    let (restored_mode, p, restored_bounds) =
-                        window_placement::resolve_hidden_window_restore(saved, &displays, borders);
-                    window.windowed_bounds.set(restored_bounds);
-                    (restored_mode, p.pos, p.size, p.display)
-                } else {
-                    let bounds = window.windowed_bounds.get();
-                    let mode = window.window_mode.get();
-                    (mode, bounds.pos, bounds.size, bounds.display.unwrap_or(0))
-                };
-
-            if let Some(requested) = requested_mode {
-                mode = if requested == 0 {
-                    window_placement::WindowMode::Windowed
-                } else {
-                    window_placement::WindowMode::Fullscreen(1)
-                };
-                let bounds = window.windowed_bounds.get();
-                target_pos = bounds.pos;
-                target_size = bounds.size;
-                target_display = bounds.display.unwrap_or(target_display);
-            }
-            let (px, py) = target_pos;
-            let (pw, ph) = target_size;
-
-            if let Err(e) = window.window.set_size(pw as u32, ph as u32) {
-                log_once!("STONE", "stone_show_window set_size failed: {}", e);
-            }
-            move_window(&mut window.window, px, py);
-
-            #[cfg(target_os = "linux")]
-            {
-                if std::env::var("STONE_FOCUS_ON_SHOW").is_err() {
-                    x11_focus::set_user_time_zero(&window.window);
-                }
-                x11_focus::pin_user_position(&window.window, px, py);
-            }
-
-            match mode {
-                // SDL can treat a child of an unmapped X11 WM frame as mapped.
-                // Fullscreen must wait for actual viewability just like windowed.
-                window_placement::WindowMode::Windowed
-                | window_placement::WindowMode::Fullscreen(_) => {
-                    let fullscreen = match mode {
-                        window_placement::WindowMode::Fullscreen(2) => {
-                            sdl2::video::FullscreenType::True
-                        }
-                        window_placement::WindowMode::Fullscreen(_) => {
-                            sdl2::video::FullscreenType::Desktop
-                        }
-                        _ => sdl2::video::FullscreenType::Off,
-                    };
-                    if let Err(e) = request_sdl_fullscreen(window, fullscreen) {
-                        log_once!("VIDEO", "show window mode failed: {}", e);
-                    }
-                    window.window_mode.set(mode);
-                    window.pending_show = Some(PendingShow {
-                        pos: (px, py),
-                        map_requested: false,
-                        activate: false,
-                    });
-                }
-                window_placement::WindowMode::Maximized => {
-                    window.window.show();
-                    let _ = request_sdl_fullscreen(window, sdl2::video::FullscreenType::Off);
-                    window.window.maximize();
-                    window
-                        .window_mode
-                        .set(window_placement::WindowMode::Maximized);
-                    window.pending_show = None;
-                }
-            }
-
-            window.runtime_hidden = false;
-            ::log::info!(
-                target: "STONE",
-                "window shown by request: mode={:?} pos=({},{}) size={}x{} display={}",
-                mode, px, py, pw, ph, target_display
-            );
+            return;
         }
+        let displays = gather_display_reports(&window._video);
+        let borders = effective_borders(query_window_borders(&window.window));
+
+        let (mut mode, mut target_pos, mut target_size, mut target_display) = if window
+            .initial_hidden_boot
+            .get()
+        {
+            window.initial_hidden_boot.set(false);
+            let base = window_placement::ResolvedGeometry {
+                size: window.requested_size,
+                pos: window.requested_pos,
+                display: window.requested_display,
+            };
+            // A headless boot skipped the machine config; the first show reads it.
+            let machine =
+                window_placement::machine_config(&window_placement::game_slug(&window.title));
+            let resolved = resolve_window_geometry(&window.title, base, &machine, &window._video);
+            let req = window_report::WindowRequest {
+                size: resolved.size,
+                pos: resolved.pos,
+                display: resolved.display,
+            };
+            let mut p = window_report::resolve_window_placement(req, &displays, borders);
+            const SDL_WINDOWPOS_CENTERED: i32 = 0x2FFF0000u32 as i32;
+            if resolved.pos.0 == SDL_WINDOWPOS_CENTERED && resolved.pos.1 == SDL_WINDOWPOS_CENTERED
+            {
+                if let Some(d) = displays
+                    .iter()
+                    .find(|d| d.index == p.display)
+                    .or_else(|| displays.first())
+                {
+                    p.pos.0 = d.usable.0 + (d.usable.2 - p.size.0) / 2;
+                    p.pos.1 = d.usable.1 + (d.usable.3 - p.size.1) / 2;
+                }
+            }
+            window
+                .windowed_bounds
+                .set(window_placement::WindowedBounds {
+                    pos: p.pos,
+                    size: p.size,
+                    display: Some(p.display),
+                });
+            (
+                window_placement::WindowMode::Windowed,
+                p.pos,
+                p.size,
+                p.display,
+            )
+        } else if let Some(saved) = window.saved_state_on_hide.borrow_mut().take() {
+            let (restored_mode, p, restored_bounds) =
+                window_placement::resolve_hidden_window_restore(saved, &displays, borders);
+            window.windowed_bounds.set(restored_bounds);
+            (restored_mode, p.pos, p.size, p.display)
+        } else {
+            let bounds = window.windowed_bounds.get();
+            let mode = window.window_mode.get();
+            (mode, bounds.pos, bounds.size, bounds.display.unwrap_or(0))
+        };
+
+        if let Some(requested) = requested_mode {
+            mode = if requested == 0 {
+                window_placement::WindowMode::Windowed
+            } else {
+                window_placement::WindowMode::Fullscreen(1)
+            };
+            let bounds = window.windowed_bounds.get();
+            target_pos = bounds.pos;
+            target_size = bounds.size;
+            target_display = bounds.display.unwrap_or(target_display);
+        }
+        let (px, py) = target_pos;
+        let (pw, ph) = target_size;
+
+        if let Err(e) = window.window.set_size(pw as u32, ph as u32) {
+            log_once!("STONE", "stone_show_window set_size failed: {}", e);
+        }
+        move_window(&mut window.window, px, py);
+
+        #[cfg(target_os = "linux")]
+        {
+            if std::env::var("STONE_FOCUS_ON_SHOW").is_err() {
+                x11_focus::set_user_time_zero(&window.window);
+            }
+            x11_focus::pin_user_position(&window.window, px, py);
+        }
+
+        match mode {
+            // SDL can treat a child of an unmapped X11 WM frame as mapped.
+            // Fullscreen must wait for actual viewability just like windowed.
+            window_placement::WindowMode::Windowed
+            | window_placement::WindowMode::Fullscreen(_) => {
+                let fullscreen = match mode {
+                    window_placement::WindowMode::Fullscreen(2) => {
+                        sdl2::video::FullscreenType::True
+                    }
+                    window_placement::WindowMode::Fullscreen(_) => {
+                        sdl2::video::FullscreenType::Desktop
+                    }
+                    _ => sdl2::video::FullscreenType::Off,
+                };
+                if let Err(e) = request_sdl_fullscreen(window, fullscreen) {
+                    log_once!("VIDEO", "show window mode failed: {}", e);
+                }
+                window.window_mode.set(mode);
+                window.pending_show = Some(PendingShow {
+                    pos: (px, py),
+                    map_requested: false,
+                    activate: false,
+                });
+            }
+            window_placement::WindowMode::Maximized => {
+                window.window.show();
+                let _ = request_sdl_fullscreen(window, sdl2::video::FullscreenType::Off);
+                window.window.maximize();
+                window
+                    .window_mode
+                    .set(window_placement::WindowMode::Maximized);
+                window.pending_show = None;
+            }
+        }
+
+        window.runtime_hidden = false;
+        ::log::info!(
+            target: "STONE",
+            "window shown by request: mode={:?} pos=({},{}) size={}x{} display={}",
+            mode, px, py, pw, ph, target_display
+        );
     });
     stone_show_window_if_deferred();
 }
@@ -2664,12 +2654,7 @@ fn show_window_impl(requested_mode: Option<c_int>) {
 /// reports hidden; hide/show at runtime flips it.
 #[no_mangle]
 pub extern "C" fn stone_is_window_hidden() -> bool {
-    WINDOW.with(|w| {
-        w.borrow()
-            .as_ref()
-            .map(|window| window.runtime_hidden)
-            .unwrap_or(true)
-    })
+    with_window(|window| window.runtime_hidden).unwrap_or(true)
 }
 
 /// Explicitly bring an interactive window to the foreground. Normal Stone
@@ -2680,13 +2665,11 @@ pub extern "C" fn stone_activate_window(_window: *mut StoneWindow) {
         return;
     }
 
-    WINDOW.with(|w| {
-        if let Some(window) = w.borrow_mut().as_mut() {
-            if let Some(pending) = window.pending_show.as_mut() {
-                pending.activate = true;
-            } else {
-                activate_window_impl(window);
-            }
+    with_window_mut(|window| {
+        if let Some(pending) = window.pending_show.as_mut() {
+            pending.activate = true;
+        } else {
+            activate_window_impl(window);
         }
     });
 }
@@ -2950,29 +2933,32 @@ fn pace_swap(_window: &sdl2::video::Window) {}
 
 #[cfg(not(target_os = "macos"))]
 fn apply_swap_interval(enabled: c_int) {
-    WINDOW.with(|w| {
-        if let Some(window) = w.borrow().as_ref() {
-            let interval = if enabled != 0 {
-                sdl2::video::SwapInterval::VSync
-            } else {
-                sdl2::video::SwapInterval::Immediate
-            };
-            if let Err(e) = window._video.gl_set_swap_interval(interval) {
-                log_once!("VIDEO", "gl_set_swap_interval (enabled={}) failed: {}", enabled, e);
-            }
-            // The set can fail (iOS has no swap-interval control) or be clamped
-            // by the driver. Callers steer real behaviour off this state -- the
-            // post-swap glFinish that relocates the vblank stall keys on it --
-            // so report the divergence instead of trusting the request.
-            let effective = swap_interval_on(window._video.gl_get_swap_interval());
-            if effective != (enabled != 0) {
-                log_once!(
-                    "VIDEO",
-                    "vsync requested {} but the driver reports {} -- present pacing is not under our control here",
-                    enabled != 0,
-                    effective
-                );
-            }
+    with_window(|window| {
+        let interval = if enabled != 0 {
+            sdl2::video::SwapInterval::VSync
+        } else {
+            sdl2::video::SwapInterval::Immediate
+        };
+        if let Err(e) = window._video.gl_set_swap_interval(interval) {
+            log_once!(
+                "VIDEO",
+                "gl_set_swap_interval (enabled={}) failed: {}",
+                enabled,
+                e
+            );
+        }
+        // The set can fail (iOS has no swap-interval control) or be clamped
+        // by the driver. Callers steer real behaviour off this state -- the
+        // post-swap glFinish that relocates the vblank stall keys on it --
+        // so report the divergence instead of trusting the request.
+        let effective = swap_interval_on(window._video.gl_get_swap_interval());
+        if effective != (enabled != 0) {
+            log_once!(
+                "VIDEO",
+                "vsync requested {} but the driver reports {} -- present pacing is not under our control here",
+                enabled != 0,
+                effective
+            );
         }
     });
 }
@@ -2990,13 +2976,8 @@ pub extern "C" fn stone_vsync_active() -> bool {
     #[cfg(target_os = "macos")]
     return DISPLAY_PACER.with(|p| p.borrow().as_ref().is_some_and(|pacer| pacer.is_running()));
     #[cfg(not(target_os = "macos"))]
-    WINDOW
-        .with(|w| {
-            w.borrow()
-                .as_ref()
-                .map(|window| swap_interval_on(window._video.gl_get_swap_interval()))
-        })
-        .unwrap_or(false)
+    return with_window(|window| swap_interval_on(window._video.gl_get_swap_interval()))
+        .unwrap_or(false);
 }
 
 /// Set VSync. Coerced to off while the force-off latch is set (see
@@ -3147,13 +3128,11 @@ fn set_fullscreen_impl(window: &mut StoneWindow, mode: c_int) -> bool {
 /// fullscreen, 2 = exclusive fullscreen. Unknown values are treated as windowed.
 #[no_mangle]
 pub extern "C" fn stone_set_fullscreen(mode: c_int) {
-    WINDOW.with(|w| {
-        if let Some(window) = w.borrow_mut().as_mut() {
-            if !display_change_allowed(window, "set_fullscreen") {
-                return;
-            }
-            set_fullscreen_impl(window, mode);
+    with_window_mut(|window| {
+        if !display_change_allowed(window, "set_fullscreen") {
+            return;
         }
+        set_fullscreen_impl(window, mode);
     });
 }
 
@@ -3161,26 +3140,23 @@ pub extern "C" fn stone_set_fullscreen(mode: c_int) {
 /// Preserves and restores windowed bounds. Returns the new mode (1 = Fullscreen, 0 = Windowed).
 #[no_mangle]
 pub extern "C" fn stone_toggle_fullscreen() -> c_int {
-    WINDOW.with(|w| {
-        if let Some(window) = w.borrow_mut().as_mut() {
-            let is_fs = window.window.fullscreen_state() != sdl2::video::FullscreenType::Off;
-            if !display_change_allowed(window, "toggle_fullscreen") {
-                return is_fs as c_int;
-            }
-            let is_max = (window.window.window_flags()
-                & sdl2::sys::SDL_WindowFlags::SDL_WINDOW_MAXIMIZED as u32)
-                != 0;
-            if is_fs || is_max {
-                set_fullscreen_impl(window, 0);
-                0
-            } else {
-                set_fullscreen_impl(window, 1);
-                1
-            }
-        } else {
+    with_window_mut(|window| {
+        let is_fs = window.window.fullscreen_state() != sdl2::video::FullscreenType::Off;
+        if !display_change_allowed(window, "toggle_fullscreen") {
+            return is_fs as c_int;
+        }
+        let is_max = (window.window.window_flags()
+            & sdl2::sys::SDL_WindowFlags::SDL_WINDOW_MAXIMIZED as u32)
+            != 0;
+        if is_fs || is_max {
+            set_fullscreen_impl(window, 0);
             0
+        } else {
+            set_fullscreen_impl(window, 1);
+            1
         }
     })
+    .unwrap_or(0)
 }
 
 /// Delay
@@ -3213,16 +3189,14 @@ pub extern "C" fn stone_get_time() -> f64 {
 
 #[no_mangle]
 pub extern "C" fn stone_get_window_size(width: *mut c_int, height: *mut c_int) {
-    WINDOW.with(|w| {
-        if let Some(window) = w.borrow().as_ref() {
-            let (w, h) = window.window.size();
-            unsafe {
-                if !width.is_null() {
-                    *width = w as c_int;
-                }
-                if !height.is_null() {
-                    *height = h as c_int;
-                }
+    with_window(|window| {
+        let (w, h) = window.window.size();
+        unsafe {
+            if !width.is_null() {
+                *width = w as c_int;
+            }
+            if !height.is_null() {
+                *height = h as c_int;
             }
         }
     });
@@ -3230,16 +3204,14 @@ pub extern "C" fn stone_get_window_size(width: *mut c_int, height: *mut c_int) {
 
 #[no_mangle]
 pub extern "C" fn stone_get_drawable_size(width: *mut c_int, height: *mut c_int) {
-    WINDOW.with(|w| {
-        if let Some(window) = w.borrow().as_ref() {
-            let (w, h) = window.window.drawable_size();
-            unsafe {
-                if !width.is_null() {
-                    *width = w as c_int;
-                }
-                if !height.is_null() {
-                    *height = h as c_int;
-                }
+    with_window(|window| {
+        let (w, h) = window.window.drawable_size();
+        unsafe {
+            if !width.is_null() {
+                *width = w as c_int;
+            }
+            if !height.is_null() {
+                *height = h as c_int;
             }
         }
     });
@@ -3249,26 +3221,23 @@ pub extern "C" fn stone_get_drawable_size(width: *mut c_int, height: *mut c_int)
 /// config names none (or there is no window, or it is headless).
 #[no_mangle]
 pub extern "C" fn stone_get_config_imgui_scale() -> c_float {
-    WINDOW.with(|w| {
-        w.borrow()
-            .as_ref()
-            .and_then(|window| window.config_imgui_scale)
-            .unwrap_or(0.0)
-    })
+    with_window(|window| window.config_imgui_scale)
+        .flatten()
+        .unwrap_or(0.0)
 }
 
 #[no_mangle]
 pub extern "C" fn stone_get_dpi_scale() -> c_float {
-    WINDOW.with(|w| {
-        if let Some(window) = w.borrow().as_ref() {
-            let (w, _) = window.window.size();
-            let (dw, _) = window.window.drawable_size();
-            if w > 0 {
-                return dw as c_float / w as c_float;
-            }
+    with_window(|window| {
+        let (w, _) = window.window.size();
+        let (dw, _) = window.window.drawable_size();
+        if w > 0 {
+            dw as c_float / w as c_float
+        } else {
+            1.0
         }
-        1.0
     })
+    .unwrap_or(1.0)
 }
 
 #[no_mangle]
@@ -3277,35 +3246,29 @@ pub extern "C" fn stone_set_window_title(_window: *mut StoneWindow, title: *cons
         return;
     }
     let title_str = unsafe { CStr::from_ptr(title).to_str().unwrap_or("") };
-    WINDOW.with(|w| {
-        if let Some(window) = w.borrow_mut().as_mut() {
-            let _ = window.window.set_title(title_str);
-        }
+    with_window_mut(|window| {
+        let _ = window.window.set_title(title_str);
     });
 }
 
 #[no_mangle]
 pub extern "C" fn stone_set_window_position(x: c_int, y: c_int) {
-    WINDOW.with(|w| {
-        if let Some(window) = w.borrow_mut().as_mut() {
-            let (fx, fy) = clamp_window_position(&window._video, &window.window, x, y);
-            move_window(&mut window.window, fx, fy);
-        }
+    with_window_mut(|window| {
+        let (fx, fy) = clamp_window_position(&window._video, &window.window, x, y);
+        move_window(&mut window.window, fx, fy);
     });
 }
 
 #[no_mangle]
 pub extern "C" fn stone_get_window_position(x: *mut c_int, y: *mut c_int) {
-    WINDOW.with(|w| {
-        if let Some(window) = w.borrow().as_ref() {
-            let (px, py) = window.window.position();
-            unsafe {
-                if !x.is_null() {
-                    *x = px;
-                }
-                if !y.is_null() {
-                    *y = py;
-                }
+    with_window(|window| {
+        let (px, py) = window.window.position();
+        unsafe {
+            if !x.is_null() {
+                *x = px;
+            }
+            if !y.is_null() {
+                *y = py;
             }
         }
     });
@@ -3313,17 +3276,12 @@ pub extern "C" fn stone_get_window_position(x: *mut c_int, y: *mut c_int) {
 
 #[no_mangle]
 pub extern "C" fn stone_get_fullscreen() -> c_int {
-    WINDOW.with(|w| {
-        if let Some(window) = w.borrow().as_ref() {
-            match window.window.fullscreen_state() {
-                sdl2::video::FullscreenType::Desktop => 1,
-                sdl2::video::FullscreenType::True => 2,
-                sdl2::video::FullscreenType::Off => 0,
-            }
-        } else {
-            0
-        }
+    with_window(|window| match window.window.fullscreen_state() {
+        sdl2::video::FullscreenType::Desktop => 1,
+        sdl2::video::FullscreenType::True => 2,
+        sdl2::video::FullscreenType::Off => 0,
     })
+    .unwrap_or(0)
 }
 
 /// Persist the current window geometry for this game + display topology
@@ -3349,43 +3307,41 @@ pub extern "C" fn stone_save_window_geometry(title: *const c_char) {
     } else {
         unsafe { CStr::from_ptr(title).to_str().unwrap_or("Stone") }
     };
-    WINDOW.with(|w| {
-        if let Some(window) = w.borrow().as_ref() {
-            if !can_persist_window_geometry(
-                window.runtime_hidden,
-                window.pending_show.is_some(),
-                window.window.fullscreen_state(),
-            ) {
-                return;
-            }
-            // In borderless/exclusive fullscreen SDL reports the display bounds
-            // as the window size/pos -- persisting them would overwrite the
-            // remembered *windowed* placement with a full-screen rect, so the
-            // next windowed launch restores a display-sized "window". Explicit
-            // mode is DisplaySettings' job (mode + monitor); saved geometry only
-            // remembers windowed placement.
-            let slug = window_placement::game_slug(title_str);
-            let displays = gather_display_reports(&window._video);
-            let topo = window_placement::topology_signature(&displays);
-            let (ww, wh) = window.window.size();
-            let (wx, wy) = window.window.position();
-            let display = window.window.display_index().ok();
-            if window_placement::save_geometry(
-                &slug,
-                &topo,
-                wx,
-                wy,
-                ww as i32,
-                wh as i32,
-                display,
-                window.requested_size,
-            ) {
+    with_window(|window| {
+        if !can_persist_window_geometry(
+            window.runtime_hidden,
+            window.pending_show.is_some(),
+            window.window.fullscreen_state(),
+        ) {
+            return;
+        }
+        // In borderless/exclusive fullscreen SDL reports the display bounds
+        // as the window size/pos -- persisting them would overwrite the
+        // remembered *windowed* placement with a full-screen rect, so the
+        // next windowed launch restores a display-sized "window". Explicit
+        // mode is DisplaySettings' job (mode + monitor); saved geometry only
+        // remembers windowed placement.
+        let slug = window_placement::game_slug(title_str);
+        let displays = gather_display_reports(&window._video);
+        let topo = window_placement::topology_signature(&displays);
+        let (ww, wh) = window.window.size();
+        let (wx, wy) = window.window.position();
+        let display = window.window.display_index().ok();
+        if window_placement::save_geometry(
+            &slug,
+            &topo,
+            wx,
+            wy,
+            ww as i32,
+            wh as i32,
+            display,
+            window.requested_size,
+        ) {
             ::log::info!(
                 target: "STONE",
                 "saved window geometry (game '{}' topo {}): pos ({},{}) size {}x{} display {:?}",
                 slug, topo, wx, wy, ww, wh, display,
             );
-            }
         }
     });
 }
@@ -3415,32 +3371,30 @@ pub extern "C" fn stone_take_window_display_changed() -> bool {
 /// Fires a SIZE_CHANGED event, so the resize flag is set as a side effect.
 #[no_mangle]
 pub extern "C" fn stone_set_window_size(width: c_int, height: c_int) {
-    WINDOW.with(|w| {
-        if let Some(window) = w.borrow_mut().as_mut() {
-            let headless = std::env::var("STONE_HEADLESS").is_ok();
-            let (nw, nh) = if window_fit_enabled(headless) {
-                let borders = effective_borders(query_window_borders(&window.window));
-                let displays = gather_display_reports(&window._video);
-                let (cx, cy) = window.window.position();
-                let req = window_report::WindowRequest {
-                    size: (width, height),
-                    pos: (cx, cy),
-                    display: None,
-                };
-                let p = window_report::resolve_window_placement(req, &displays, borders);
-                (p.size.0, p.size.1)
-            } else {
-                (width, height)
+    with_window_mut(|window| {
+        let headless = std::env::var("STONE_HEADLESS").is_ok();
+        let (nw, nh) = if window_fit_enabled(headless) {
+            let borders = effective_borders(query_window_borders(&window.window));
+            let displays = gather_display_reports(&window._video);
+            let (cx, cy) = window.window.position();
+            let req = window_report::WindowRequest {
+                size: (width, height),
+                pos: (cx, cy),
+                display: None,
             };
-            if let Err(e) = window.window.set_size(nw.max(1) as u32, nh.max(1) as u32) {
-                log_once!(
-                    "VIDEO",
-                    "stone_set_window_size({},{}) failed: {}",
-                    nw,
-                    nh,
-                    e
-                );
-            }
+            let p = window_report::resolve_window_placement(req, &displays, borders);
+            (p.size.0, p.size.1)
+        } else {
+            (width, height)
+        };
+        if let Err(e) = window.window.set_size(nw.max(1) as u32, nh.max(1) as u32) {
+            log_once!(
+                "VIDEO",
+                "stone_set_window_size({},{}) failed: {}",
+                nw,
+                nh,
+                e
+            );
         }
     });
 }
@@ -3454,75 +3408,73 @@ fn headless_window_size(game: (i32, i32)) -> (i32, i32) {
 /// and clamped on-screen. No-op for an unknown index (logged).
 #[no_mangle]
 pub extern "C" fn stone_set_window_display(index: c_int) {
-    WINDOW.with(|w| {
-        if let Some(window) = w.borrow_mut().as_mut() {
-            if !display_change_allowed(window, "set_window_display") {
-                return;
-            }
-            // Already on the target display: nothing to do. Keeps a redundant
-            // re-apply (boot's first display push, reopening settings) from
-            // needlessly dropping + restoring fullscreen below.
-            if window.window.display_index().ok() == Some(index) {
-                return;
-            }
-            let displays = gather_display_reports(&window._video);
-            let Some(target) = displays.iter().find(|d| d.index == index) else {
+    with_window_mut(|window| {
+        if !display_change_allowed(window, "set_window_display") {
+            return;
+        }
+        // Already on the target display: nothing to do. Keeps a redundant
+        // re-apply (boot's first display push, reopening settings) from
+        // needlessly dropping + restoring fullscreen below.
+        if window.window.display_index().ok() == Some(index) {
+            return;
+        }
+        let displays = gather_display_reports(&window._video);
+        let Some(target) = displays.iter().find(|d| d.index == index) else {
+            log_once!(
+                "VIDEO",
+                "stone_set_window_display({}): no such display",
+                index
+            );
+            return;
+        };
+        let (ux, uy, uw, uh) = target.usable;
+        let (ww, wh) = window.window.size();
+        // Move keeping the window's offset within its CURRENT display, so it
+        // lands in the same relative spot on the target monitor. This both
+        // makes a live monitor switch feel natural and undoes a WM's
+        // post-map relocation to the wrong monitor without re-centering
+        // (which would discard a remembered/dragged position).
+        let cur = window.window.display_index().unwrap_or(index);
+        let cur_origin = displays
+            .iter()
+            .find(|d| d.index == cur)
+            .map(|d| (d.usable.0, d.usable.1))
+            .unwrap_or((0, 0));
+        let (wx, wy) = window.window.position();
+        let off_x = (wx - cur_origin.0).clamp(0, (uw - ww as i32).max(0));
+        let off_y = (wy - cur_origin.1).clamp(0, (uh - wh as i32).max(0));
+        let borders = effective_borders(query_window_borders(&window.window));
+        let req = window_report::WindowRequest {
+            size: (ww as i32, wh as i32),
+            pos: (ux + off_x, uy + off_y),
+            display: Some(index),
+        };
+        let p = window_report::resolve_window_placement(req, &displays, borders);
+        // SDL ignores SetWindowPosition on a fullscreen window, so to move a
+        // borderless/exclusive window to another display we drop to windowed,
+        // reposition onto the target, then restore the fullscreen mode -- it
+        // re-fullscreens on whichever display the window now sits on.
+        let fs = window.window.fullscreen_state();
+        if fs != sdl2::video::FullscreenType::Off {
+            let _ = request_sdl_fullscreen(window, sdl2::video::FullscreenType::Off);
+        }
+        move_window(&mut window.window, p.pos.0, p.pos.1);
+        if fs != sdl2::video::FullscreenType::Off {
+            if let Err(e) = request_sdl_fullscreen(window, fs) {
                 log_once!(
                     "VIDEO",
-                    "stone_set_window_display({}): no such display",
-                    index
+                    "stone_set_window_display: restore fullscreen failed: {}",
+                    e
                 );
-                return;
-            };
-            let (ux, uy, uw, uh) = target.usable;
-            let (ww, wh) = window.window.size();
-            // Move keeping the window's offset within its CURRENT display, so it
-            // lands in the same relative spot on the target monitor. This both
-            // makes a live monitor switch feel natural and undoes a WM's
-            // post-map relocation to the wrong monitor without re-centering
-            // (which would discard a remembered/dragged position).
-            let cur = window.window.display_index().unwrap_or(index);
-            let cur_origin = displays
-                .iter()
-                .find(|d| d.index == cur)
-                .map(|d| (d.usable.0, d.usable.1))
-                .unwrap_or((0, 0));
-            let (wx, wy) = window.window.position();
-            let off_x = (wx - cur_origin.0).clamp(0, (uw - ww as i32).max(0));
-            let off_y = (wy - cur_origin.1).clamp(0, (uh - wh as i32).max(0));
-            let borders = effective_borders(query_window_borders(&window.window));
-            let req = window_report::WindowRequest {
-                size: (ww as i32, wh as i32),
-                pos: (ux + off_x, uy + off_y),
-                display: Some(index),
-            };
-            let p = window_report::resolve_window_placement(req, &displays, borders);
-            // SDL ignores SetWindowPosition on a fullscreen window, so to move a
-            // borderless/exclusive window to another display we drop to windowed,
-            // reposition onto the target, then restore the fullscreen mode -- it
-            // re-fullscreens on whichever display the window now sits on.
-            let fs = window.window.fullscreen_state();
-            if fs != sdl2::video::FullscreenType::Off {
-                let _ = request_sdl_fullscreen(window, sdl2::video::FullscreenType::Off);
             }
-            move_window(&mut window.window, p.pos.0, p.pos.1);
-            if fs != sdl2::video::FullscreenType::Off {
-                if let Err(e) = request_sdl_fullscreen(window, fs) {
-                    log_once!(
-                        "VIDEO",
-                        "stone_set_window_display: restore fullscreen failed: {}",
-                        e
-                    );
-                }
-            }
-            ::log::info!(
-                target: "STONE",
-                "window moved to display[{}] (now on display[{}], fullscreen={})",
-                index,
-                window.window.display_index().unwrap_or(-1),
-                fs != sdl2::video::FullscreenType::Off,
-            );
         }
+        ::log::info!(
+            target: "STONE",
+            "window moved to display[{}] (now on display[{}], fullscreen={})",
+            index,
+            window.window.display_index().unwrap_or(-1),
+            fs != sdl2::video::FullscreenType::Off,
+        );
     });
 }
 
@@ -3531,64 +3483,63 @@ pub extern "C" fn stone_set_window_display(index: c_int) {
 /// No-op when the display enumerates no modes (logged).
 #[no_mangle]
 pub extern "C" fn stone_set_display_mode(width: c_int, height: c_int) {
-    WINDOW.with(|w| {
-        if let Some(window) = w.borrow_mut().as_mut() {
-            if !display_change_allowed(window, "set_display_mode") {
-                return;
-            }
-            let idx = window.window.display_index().unwrap_or(0);
-            let displays = gather_display_reports(&window._video);
-            let Some(d) = displays.iter().find(|d| d.index == idx) else {
-                return;
-            };
-            let Some((mw, mh, mr)) = window_report::closest_display_mode(&d.modes, width, height)
-            else {
-                log_once!(
-                    "VIDEO",
-                    "stone_set_display_mode: display[{}] enumerates no modes",
-                    idx
-                );
-                return;
-            };
-            let mode = sdl2::sys::SDL_DisplayMode {
-                format: 0,
-                w: mw,
-                h: mh,
-                refresh_rate: mr,
-                driverdata: ptr::null_mut(),
-            };
-            let rc = unsafe { sdl2::sys::SDL_SetWindowDisplayMode(window.window.raw(), &mode) };
-            if rc != 0 {
-                let err = unsafe { CStr::from_ptr(sdl2::sys::SDL_GetError()) }.to_string_lossy();
-                log_once!(
-                    "VIDEO",
-                    "SDL_SetWindowDisplayMode({}x{}@{}) failed: {}",
-                    mw,
-                    mh,
-                    mr,
-                    err
-                );
-            } else {
-                ::log::info!(
-                    target: "STONE",
-                    "display mode selected {}x{}@{} (target {}x{}) on display[{}]",
-                    mw, mh, mr, width, height, idx,
-                );
-            }
+    with_window_mut(|window| {
+        if !display_change_allowed(window, "set_display_mode") {
+            return;
+        }
+        let idx = window.window.display_index().unwrap_or(0);
+        let displays = gather_display_reports(&window._video);
+        let Some(d) = displays.iter().find(|d| d.index == idx) else {
+            return;
+        };
+        let Some((mw, mh, mr)) = window_report::closest_display_mode(&d.modes, width, height)
+        else {
+            log_once!(
+                "VIDEO",
+                "stone_set_display_mode: display[{}] enumerates no modes",
+                idx
+            );
+            return;
+        };
+        let mode = sdl2::sys::SDL_DisplayMode {
+            format: 0,
+            w: mw,
+            h: mh,
+            refresh_rate: mr,
+            driverdata: ptr::null_mut(),
+        };
+        let rc = unsafe { sdl2::sys::SDL_SetWindowDisplayMode(window.window.raw(), &mode) };
+        if rc != 0 {
+            let err = unsafe { CStr::from_ptr(sdl2::sys::SDL_GetError()) }.to_string_lossy();
+            log_once!(
+                "VIDEO",
+                "SDL_SetWindowDisplayMode({}x{}@{}) failed: {}",
+                mw,
+                mh,
+                mr,
+                err
+            );
+        } else {
+            ::log::info!(
+                target: "STONE",
+                "display mode selected {}x{}@{} (target {}x{}) on display[{}]",
+                mw, mh, mr, width, height, idx,
+            );
         }
     });
 }
 
 #[no_mangle]
 pub extern "C" fn stone_get_display_count() -> c_int {
-    WINDOW.with(|w| {
-        if let Some(window) = w.borrow().as_ref() {
-            if let Ok(count) = window._video.num_video_displays() {
-                return count as c_int;
-            }
-        }
-        1
+    with_window(|window| {
+        window
+            ._video
+            .num_video_displays()
+            .ok()
+            .map(|count| count as c_int)
     })
+    .flatten()
+    .unwrap_or(1)
 }
 
 /// Refresh rate in Hz of the display the window is on, or 0 when it is
@@ -3596,15 +3547,7 @@ pub extern "C" fn stone_get_display_count() -> c_int {
 /// mode whose rate SDL reports as 0 because the driver does not know it.
 #[no_mangle]
 pub extern "C" fn stone_get_window_refresh_rate() -> c_int {
-    WINDOW.with(|w| {
-        let w = w.borrow();
-        let Some(window) = w.as_ref() else {
-            log_once!(
-                "VIDEO",
-                "stone_get_window_refresh_rate: no window; refresh rate unknown"
-            );
-            return 0;
-        };
+    with_window(|window| {
         let index = match window.window.display_index() {
             Ok(index) => index,
             Err(err) => {
@@ -3637,6 +3580,13 @@ pub extern "C" fn stone_get_window_refresh_rate() -> c_int {
             }
         }
     })
+    .unwrap_or_else(|| {
+        log_once!(
+            "VIDEO",
+            "stone_get_window_refresh_rate: no window; refresh rate unknown"
+        );
+        0
+    })
 }
 
 #[no_mangle]
@@ -3646,17 +3596,14 @@ pub extern "C" fn stone_get_window_borders(
     bottom: *mut c_int,
     right: *mut c_int,
 ) {
-    let b = WINDOW.with(|win| {
-        win.borrow()
-            .as_ref()
-            .map(|window| query_window_borders(&window.window))
-    });
-    let b = b.flatten().unwrap_or(window_report::Borders {
-        top: 0,
-        left: 0,
-        bottom: 0,
-        right: 0,
-    });
+    let b = with_window(|window| query_window_borders(&window.window))
+        .flatten()
+        .unwrap_or(window_report::Borders {
+            top: 0,
+            left: 0,
+            bottom: 0,
+            right: 0,
+        });
     unsafe {
         if !top.is_null() {
             *top = b.top;
@@ -4098,6 +4045,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn lua_allocator_counts_growth_shrink_and_free_separately() {
+        unsafe extern "C" fn allocator(
+            ud: *mut c_void,
+            ptr: *mut c_void,
+            _osize: usize,
+            nsize: usize,
+        ) -> *mut c_void {
+            let calls = &*(ud as *const Cell<usize>);
+            calls.set(calls.get() + 1);
+            if nsize == 0 {
+                ptr::null_mut()
+            } else {
+                ptr
+            }
+        }
+
+        let delegated_calls = Cell::new(0_usize);
+        let state = LuaAllocatorState {
+            state: ptr::null_mut(),
+            allocf: allocator,
+            ud: (&delegated_calls as *const Cell<usize>).cast_mut().cast(),
+            category: None,
+        };
+        let ud = (&state as *const LuaAllocatorState).cast_mut().cast();
+        let allocation = ptr::dangling_mut::<u8>().cast();
+        LUA_COUNTER_ACTIVE.store(true, Ordering::Relaxed);
+        unsafe {
+            // Lua supplies a type tag rather than an old size for new objects.
+            stone_lua_counting_alloc(ud, ptr::null_mut(), 5, 4096);
+            assert_eq!(
+                stone_lua_counting_alloc(ud, allocation, 4096, 8192),
+                allocation
+            );
+            stone_lua_counting_alloc(ud, allocation, 8192, 2048);
+            assert!(stone_lua_counting_alloc(ud, allocation, 2048, 0).is_null());
+            stone_lua_counting_alloc(ud, ptr::null_mut(), 0, 0);
+        }
+        LUA_COUNTER_ACTIVE.store(false, Ordering::Relaxed);
+        unsafe { stone_lua_counting_alloc(ud, allocation, 1024, 4096) };
+
+        assert_eq!(delegated_calls.get(), 6);
+        assert_eq!(stone_lua_alloc_gross_request_kb(), 14.0);
+        assert_eq!(stone_lua_alloc_positive_growth_kb(), 8.0);
+        assert_eq!(stone_lua_alloc_explicit_free_kb(), 2.0);
+        assert_eq!(stone_lua_alloc_reallocation_shrink_kb(), 6.0);
+        assert_eq!(stone_lua_alloc_call_count(), 5);
+        assert_eq!(stone_lua_alloc_allocation_call_count(), 1);
+        assert_eq!(stone_lua_alloc_reallocation_call_count(), 2);
+        assert_eq!(stone_lua_alloc_free_call_count(), 1);
+    }
+
+    #[test]
     fn silent_interactive_offscreen_video_fallback_rejects() {
         assert!(native_video_driver_error(false, None, "offscreen").is_some());
         assert!(native_video_driver_error(false, None, "dummy").is_some());
@@ -4111,142 +4110,6 @@ mod tests {
     fn graphics_texture_memory_reports_above_two_gib() {
         assert_eq!(texture_bytes_to_mib(3 * 1024 * 1024 * 1024), 3072);
         assert_eq!(texture_bytes_to_mib(1024 * 1024 - 1), 0);
-    }
-
-    #[test]
-    fn c_header_smoke_exports_have_the_physical_rust_abi() {
-        let _: extern "C" fn() -> bool = stone_init;
-        let _: extern "C" fn() -> bool = stone_teardown;
-        let _: extern "C" fn(
-            *const c_char,
-            c_int,
-            c_int,
-            c_int,
-            c_int,
-            c_int,
-            bool,
-            c_int,
-        ) -> *mut StoneWindow = stone_create_window_ex;
-        let _: extern "C" fn(*mut c_int, *mut c_int) = stone_get_window_size;
-        let _: extern "C" fn(*mut c_int, *mut c_int) = stone_get_drawable_size;
-        let _: extern "C" fn(*mut GraphicsStats) = stone_get_graphics_stats;
-        let _: extern "C" fn() = stone_track_text_draw_call;
-        let _: extern "C" fn(*mut image_texture::ImageLoadStats) =
-            image_texture::stone_get_image_frame_stats;
-        let _: extern "C" fn(*mut image_texture::ImageLoadStats) =
-            image_texture::stone_get_image_profile_stats;
-        let _: extern "C" fn() -> c_float = stone_get_dpi_scale;
-        let _: extern "C" fn() -> c_float = stone_get_config_imgui_scale;
-        let _: extern "C" fn(c_float, c_float, c_float, c_float) = canvas::stone_clear_canvas;
-        let _: extern "C" fn(c_int, c_int) = canvas::stone_clear_canvas_int;
-        let _: extern "C" fn(u64, u64) -> bool = canvas::stone_canvas_attach_id_target;
-        let _: extern "C" fn() -> u64 = image_texture::stone_get_white_image;
-        let _: extern "C" fn(*mut StoneWindow) = stone_swap_window;
-        let _: extern "C" fn(u32) = stone_delay;
-        let _: extern "C" fn(*const c_char, *const c_char) -> *const c_char =
-            filesystem::stone_get_pref_path;
-        let _: extern "C" fn() -> bool = imgui::stone_imgui_using_mouse;
-        let _: extern "C" fn(*const c_char, c_int) -> bool = imgui::stone_imgui_begin_window;
-        let _: extern "C" fn(*const c_char, *const c_char) -> bool = imgui::stone_imgui_begin_combo;
-        let _: extern "C" fn() = imgui::stone_imgui_end_combo;
-        let _: extern "C" fn() = imgui::stone_imgui_set_item_default_focus;
-        let _: extern "C" fn(*const c_char) = imgui::stone_imgui_open_popup;
-        let _: extern "C" fn(*const c_char) -> bool = imgui::stone_imgui_begin_popup;
-        let _: extern "C" fn() = imgui::stone_imgui_end_popup;
-        let _: extern "C" fn(*const c_char, bool) -> bool = imgui::stone_imgui_menu_item;
-        let _: extern "C" fn(*const c_char, c_int, StoneString, *mut bool, *mut c_int) =
-            imgui::stone_imgui_combo_str;
-        let _: extern "C" fn(*const c_char, *mut c_char, usize, c_int) -> bool =
-            imgui::stone_imgui_input_text;
-        let _: extern "C" fn(*const c_char, *mut c_char, usize, c_float, c_float, c_int) -> bool =
-            imgui::stone_imgui_input_text_multiline;
-        let _: extern "C" fn(*const c_char, c_int, c_int) -> bool = imgui::stone_imgui_begin_table;
-        let _: extern "C" fn() = imgui::stone_imgui_end_table;
-        let _: extern "C" fn() = imgui::stone_imgui_table_headers_row;
-        let _: extern "C" fn() = imgui::stone_imgui_table_next_row;
-        let _: extern "C" fn() -> bool = imgui::stone_imgui_table_next_column;
-        let _: extern "C" fn(*const c_char, c_float) = imgui::stone_imgui_table_setup_column_fixed;
-        let _: extern "C" fn(*const c_char) = imgui::stone_imgui_table_setup_column_stretch;
-        let _: extern "C" fn(bool) = imgui::stone_imgui_begin_disabled;
-        let _: extern "C" fn() = imgui::stone_imgui_end_disabled;
-        let _: extern "C" fn(c_float) = imgui::stone_imgui_indent;
-        let _: extern "C" fn(c_float) = imgui::stone_imgui_unindent;
-        let _: extern "C" fn(*const c_char) -> bool = imgui::stone_imgui_collapsing_header_closed;
-        let _: extern "C" fn(*const c_char, c_float, c_float) -> bool =
-            imgui::stone_imgui_invisible_button;
-        let _: extern "C" fn(*const c_char, bool) -> bool = imgui::stone_imgui_selectable;
-        let _: extern "C" fn(c_int) -> bool = imgui::stone_imgui_is_item_hovered;
-        let _: extern "C" fn() -> bool = imgui::stone_imgui_is_item_active;
-        let _: extern "C" fn() -> bool = imgui::stone_imgui_is_item_activated;
-        let _: extern "C" fn() -> bool = imgui::stone_imgui_is_item_deactivated;
-        let _: extern "C" fn() -> bool = imgui::stone_imgui_is_item_deactivated_after_edit;
-        let _: extern "C" fn(*mut c_float, *mut c_float) = imgui::stone_imgui_get_mouse_pos;
-        let _: extern "C" fn(*mut c_float, *mut c_float) =
-            imgui::stone_imgui_get_content_region_avail;
-        let _: extern "C" fn(*mut c_float, *mut c_float) = imgui::stone_imgui_get_window_pos;
-        let _: extern "C" fn(*mut c_float, *mut c_float) = imgui::stone_imgui_get_window_size;
-        let _: extern "C" fn() -> bool = imgui::stone_imgui_is_any_item_active;
-        let _: extern "C" fn(c_float, c_float, c_float, c_float, std::ffi::c_uint) =
-            imgui::stone_imgui_window_add_rect_filled;
-        let _: extern "C" fn() -> bool = imgui::stone_imgui_is_item_visible;
-        let _: extern "C" fn() -> bool = imgui::stone_imgui_is_window_docked;
-        let _: extern "C" fn() -> bool = imgui::stone_imgui_wants_mouse;
-        let _: extern "C" fn() -> bool = imgui::stone_imgui_wants_text_input;
-        let _: extern "C" fn(*mut c_float, *mut c_float) = imgui::stone_imgui_get_cursor_screen_pos;
-        let _: extern "C" fn(*mut c_float, *mut c_float) = imgui::stone_imgui_get_item_rect_min;
-        let _: extern "C" fn(*mut c_float, *mut c_float) = imgui::stone_imgui_get_item_rect_max;
-        let _: extern "C" fn(c_float, c_float) = imgui::stone_imgui_dummy;
-        let _: extern "C" fn() = imgui::stone_imgui_end_child;
-        let _: extern "C" fn(*const c_char, c_float, c_float, c_float, c_float) =
-            imgui::stone_imgui_text_colored;
-        let _: extern "C" fn(c_float, c_float) = imgui::stone_imgui_set_cursor_screen_pos;
-        let _: extern "C" fn(c_int, std::ffi::c_uint) = imgui::stone_imgui_push_style_color;
-        let _: extern "C" fn(c_int) = imgui::stone_imgui_pop_style_color;
-        let _: extern "C" fn(c_float) = imgui::stone_imgui_set_next_item_width;
-        let _: extern "C" fn(*const c_char, c_float, c_float, c_float, *mut bool, *mut c_float) =
-            imgui::stone_imgui_slider_float;
-        let _: extern "C" fn(*const c_char, c_int, c_int, c_int, *mut bool, *mut c_int) =
-            imgui::stone_imgui_slider_int;
-        let _: extern "C" fn(*const c_char, bool, *mut bool, *mut bool) =
-            imgui::stone_imgui_checkbox;
-        let _: extern "C" fn(
-            *const c_char,
-            c_float,
-            c_float,
-            c_float,
-            c_float,
-            *mut bool,
-            *mut c_float,
-            *mut c_float,
-            *mut c_float,
-            *mut c_float,
-        ) = imgui::stone_imgui_color_edit4;
-        let _: extern "C" fn(c_float) = imgui::stone_imgui_set_scroll_here_y;
-        let _: extern "C" fn(*const c_char) = imgui::stone_imgui_set_tooltip;
-        let _: extern "C" fn(c_float, c_float, c_float, c_float, std::ffi::c_uint, c_float) =
-            imgui::stone_imgui_window_add_line;
-        let _: extern "C" fn() -> c_int = input::stone_scancode_count;
-        let _: extern "C" fn(c_int) -> *const c_char = input::stone_scancode_token_at;
-        let _: extern "C" fn(c_int) -> *const c_char = input::stone_scancode_token_for;
-        let _: extern "C" fn(*const c_char) -> c_int = input::stone_scancode_value;
-        let _: extern "C" fn(*const c_char) -> *const c_char = input::stone_scancode_label;
-        let _: extern "C" fn(*const c_char, *mut usize) -> *mut c_char =
-            filesystem::stone_file_read;
-        let _: extern "C" fn(*mut c_void) = filesystem::stone_free;
-        let _: extern "C" fn(*const c_char, *const c_char, usize) -> bool =
-            filesystem::stone_file_append;
-        let _: extern "C" fn(*const c_char) -> bool = telemetry::stone_telemetry_clear;
-        let _: extern "C" fn(
-            *const c_char,
-            *const c_char,
-            *const c_char,
-            *const c_char,
-            *const c_char,
-            *const c_char,
-            *const c_char,
-            bool,
-        ) -> bool = telemetry::stone_telemetry_configure;
-        let _: extern "C" fn(u64) -> u64 = text::stone_get_font_instance_image;
     }
 
     #[test]

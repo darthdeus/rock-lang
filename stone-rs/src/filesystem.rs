@@ -621,13 +621,8 @@ mod xfer_tests {
 
     static UNIQ: AtomicU32 = AtomicU32::new(0);
 
-    fn fresh_root() -> std::path::PathBuf {
-        let n = UNIQ.fetch_add(1, Ordering::SeqCst);
-        let p =
-            std::env::temp_dir().join(format!("stone_fsxfer_test_{}_{}", std::process::id(), n));
-        let _ = fs::remove_dir_all(&p);
-        fs::create_dir_all(&p).unwrap();
-        p
+    fn fresh_root() -> crate::test_support::TestRoot {
+        crate::test_support::fresh_root("stone_fsxfer_test_")
     }
 
     fn cs(p: &Path) -> CString {

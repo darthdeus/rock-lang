@@ -372,12 +372,8 @@ mod resolve_tests {
         );
     }
 
-    fn fresh_root() -> PathBuf {
-        let n = UNIQ.fetch_add(1, Ordering::SeqCst);
-        let p = std::env::temp_dir().join(format!("stone_modtest_{}_{}", std::process::id(), n));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
-        p
+    fn fresh_root() -> crate::test_support::TestRoot {
+        crate::test_support::fresh_root("stone_modtest_")
     }
 
     #[test]

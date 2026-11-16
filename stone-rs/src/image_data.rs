@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::ffi::{c_char, c_float, c_int, CStr};
 
 use crate::handles::Class;
+use crate::image_texture::with_image;
 use crate::{with_gl, LoadedImage, IMAGES};
 
 struct ImageData {
@@ -483,20 +484,7 @@ pub extern "C" fn stone_image_update_from_data(image_handle: u64, data_handle: u
             }
         };
 
-        let result = IMAGES.with(|images| {
-            let images_borrow = images.borrow();
-            let img = match images_borrow.get(&image_handle) {
-                Some(i) => i,
-                None => {
-                    crate::log_once!(
-                        "IMAGE",
-                        "stone_image_update_from_data: invalid image handle {}",
-                        image_handle
-                    );
-                    return None;
-                }
-            };
-
+        let result = with_image(image_handle, |img| {
             if img.width != img_data.width || img.height != img_data.height {
                 crate::log_once!(
                     "IMAGE",
@@ -511,8 +499,17 @@ pub extern "C" fn stone_image_update_from_data(image_handle: u64, data_handle: u
 
             Some((img.width, img.height, img.format))
         });
-        let Some((width, height, format)) = result else {
-            return false;
+        let (width, height, format) = match result {
+            Some(Some(image)) => image,
+            Some(None) => return false,
+            None => {
+                crate::log_once!(
+                    "IMAGE",
+                    "stone_image_update_from_data: invalid image handle {}",
+                    image_handle
+                );
+                return false;
+            }
         };
         let Some(pixels) = format.pack_rgba8(&img_data.data) else {
             crate::log_once!(

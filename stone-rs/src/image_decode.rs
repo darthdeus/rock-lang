@@ -613,7 +613,10 @@ mod queue_tests {
 
     #[test]
     fn drain_returns_every_submitted_job_with_serial_stored_pixels() {
-        if in_isolated_child("drain_returns_every_submitted_job_with_serial_stored_pixels") {
+        if crate::test_support::in_isolated_child(
+            "image_decode::queue_tests::drain_returns_every_submitted_job_with_serial_stored_pixels",
+            "STONE_IMAGE_DECODE_TEST_CHILD",
+        ) {
             return;
         }
         let dir = tempfile::Builder::new()
@@ -721,29 +724,5 @@ mod queue_tests {
             "missing or changed assets still return one failed completion per admitted handle"
         );
         assert_eq!(outstanding_count(), 0);
-    }
-
-    fn in_isolated_child(name: &str) -> bool {
-        const CHILD: &str = "STONE_IMAGE_DECODE_TEST_CHILD";
-        if std::env::var_os(CHILD).is_some() {
-            return false;
-        }
-        let test = format!("image_decode::queue_tests::{name}");
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([test.as_str(), "--exact", "--nocapture"])
-            .env(CHILD, "1")
-            .output()
-            .expect("run isolated decode fixture");
-        assert!(
-            String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
-            "the child must select {name}"
-        );
-        assert!(
-            output.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        true
     }
 }
