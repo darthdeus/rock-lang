@@ -278,11 +278,7 @@ impl<'a> Builder<'a> {
         // The appended row is the old length, counted from 0.
         self.strided_store_leaves_at(vec, len, leaves, stride, elem);
         let next = self.int_plus_one(len);
-        self.emit_cur(Inst::StoreField {
-            base: vec,
-            field: crate::names::ustr("len"),
-            value: next,
-        });
+        self.write_field(vec, crate::names::ustr("len"), next);
         Ok(())
     }
 
@@ -1374,11 +1370,7 @@ impl<'a> Builder<'a> {
         // `__vec_checked_index`, whose two implementations differ by the same
         // one; this is the write side of that single decision.
         let slot = if self.column_base_is_one() { next } else { len };
-        self.emit_cur(Inst::StoreField {
-            base: vec,
-            field: crate::names::ustr("len"),
-            value: next,
-        });
+        self.write_field(vec, crate::names::ustr("len"), next);
         self.store_column_leaves(vec, slot, paths, leaves);
         Ok(())
     }

@@ -233,11 +233,7 @@ impl<'a> Builder<'a> {
             )));
         }
         for (k, v) in keys.into_iter().zip(leaves) {
-            self.emit_cur(Inst::StoreField {
-                base: parent,
-                field: crate::names::ustr(&k),
-                value: v,
-            });
+            self.write_field(parent, crate::names::ustr(&k), v);
         }
         Ok(())
     }
@@ -694,11 +690,7 @@ impl<'a> Builder<'a> {
         };
         let leaves = self.embed_value_leaves(nullable, cname, value)?;
         for (key, v) in Self::embed_field_slots(field, leaves) {
-            self.emit_cur(Inst::StoreField {
-                base: parent,
-                field: key,
-                value: v,
-            });
+            self.write_field(parent, key, v);
         }
         if let Some(join) = skip_clear {
             self.f.set_term(self.cur, Term::Goto(join));

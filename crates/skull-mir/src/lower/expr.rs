@@ -1454,11 +1454,7 @@ impl<'a> Builder<'a> {
         self.cur_expr = outer_expr;
         let fresh = fresh?;
         match owner {
-            Owner::Field(b, key) => self.emit_cur(Inst::StoreField {
-                base: b,
-                field: key,
-                value: fresh,
-            }),
+            Owner::Field(b, key) => self.write_field(b, key, fresh),
             Owner::Global(name) => self.emit_cur(Inst::StoreGlobal { name, value: fresh }),
         };
         Ok(())
@@ -1663,11 +1659,7 @@ impl<'a> Builder<'a> {
                             .collect(),
                         leaves,
                     )? {
-                        self.emit_cur(Inst::StoreField {
-                            base: b,
-                            field: slot,
-                            value,
-                        });
+                        self.write_field(b, slot, value);
                     }
                     return Ok(());
                 }
@@ -1683,11 +1675,7 @@ impl<'a> Builder<'a> {
                 if let Some((cname, nullable)) = spliced_embed {
                     let leaves = self.embed_value_leaves(nullable, cname, value)?;
                     for (slot, v) in Self::embed_field_slots(key, leaves) {
-                        self.emit_cur(Inst::StoreField {
-                            base: b,
-                            field: slot,
-                            value: v,
-                        });
+                        self.write_field(b, slot, v);
                     }
                     return Ok(());
                 }
@@ -1735,22 +1723,14 @@ impl<'a> Builder<'a> {
                             for seg in walk {
                                 at = self.read_field(at, *seg);
                             }
-                            self.emit_cur(Inst::StoreField {
-                                base: at,
-                                field: *last,
-                                value: leaf,
-                            });
+                            self.write_field(at, *last, leaf);
                         }
                         return Ok(());
                     }
                 }
                 let expected = self.concrete_expr_ty(target);
                 let v = self.lower_expr_with_expected(value, expected)?;
-                self.emit_cur(Inst::StoreField {
-                    base: b,
-                    field: key,
-                    value: v,
-                });
+                self.write_field(b, key, v);
             }
             // `target` IS the `Expr::Index` node, the site of this arm's
             // synthesized calls. The place expression is never lowered as a
@@ -1818,11 +1798,7 @@ impl<'a> Builder<'a> {
                 self.branch_on_nil(recv, join, store_bb);
                 self.cur = store_bb;
                 let v = self.lower_expr(value)?;
-                self.emit_cur(Inst::StoreField {
-                    base: recv,
-                    field,
-                    value: v,
-                });
+                self.write_field(recv, field, v);
                 self.f.set_term(self.cur, Term::Goto(join));
                 self.cur = join;
             }
@@ -1910,11 +1886,7 @@ impl<'a> Builder<'a> {
                 self.cur = store_bb;
                 let cur = self.read_field(recv, field);
                 let new_v = combine(self, cur)?;
-                self.emit_cur(Inst::StoreField {
-                    base: recv,
-                    field,
-                    value: new_v,
-                });
+                self.write_field(recv, field, new_v);
                 self.f.set_term(self.cur, Term::Goto(join));
                 self.cur = join;
             }
@@ -2093,11 +2065,7 @@ impl<'a> Builder<'a> {
                 let b = self.lower_place_base(pbase)?;
                 let old = self.read_field(b, key);
                 let new = update(self, old)?;
-                self.emit_cur(Inst::StoreField {
-                    base: b,
-                    field: key,
-                    value: new,
-                });
+                self.write_field(b, key, new);
                 Ok(pick(old, new))
             }
             Expr::Index { base, index } => {

@@ -509,24 +509,12 @@ impl<'a> Builder<'a> {
     /// Emit the per-slot stores for a flattened enum field assignment
     /// `parent.{prefix} = <cells>` (tag + every positional + every named slot).
     pub(crate) fn store_flat_cells(&mut self, parent: Idx<Inst>, prefix: Ustr, cells: FlatCells) {
-        self.emit_cur(Inst::StoreField {
-            base: parent,
-            field: flat_tag_slot(prefix),
-            value: cells.tag,
-        });
+        self.write_field(parent, flat_tag_slot(prefix), cells.tag);
         for (i, p) in cells.positional.into_iter().enumerate() {
-            self.emit_cur(Inst::StoreField {
-                base: parent,
-                field: flat_payload_slot(prefix, i),
-                value: p,
-            });
+            self.write_field(parent, flat_payload_slot(prefix, i), p);
         }
         for (rf, v) in cells.named {
-            self.emit_cur(Inst::StoreField {
-                base: parent,
-                field: flat_named_slot(prefix, rf),
-                value: v,
-            });
+            self.write_field(parent, flat_named_slot(prefix, rf), v);
         }
     }
 

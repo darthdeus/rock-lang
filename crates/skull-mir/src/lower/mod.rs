@@ -2511,6 +2511,10 @@ impl<'a> Builder<'a> {
         self.emit_cur(Inst::Field { base, field })
     }
 
+    fn write_field(&mut self, base: Idx<Inst>, field: Ustr, value: Idx<Inst>) -> Idx<Inst> {
+        self.emit_cur(Inst::StoreField { base, field, value })
+    }
+
     fn store_cell(&mut self, cell: Idx<Cell>, value: Idx<Inst>) -> Idx<Inst> {
         self.emit_cur(Inst::Store { cell, value })
     }
