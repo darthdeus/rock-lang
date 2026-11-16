@@ -101,16 +101,12 @@ pub(crate) fn do_perf(
 
     // Asset loading is startup, not part of the budget for executing frames
     // and dumping the summary. The override bounds each phase independently.
-    let timeout_override = frame_watchdog().override_secs;
-    let startup_timeout = timeout_override
-        .map(Duration::from_secs)
-        .unwrap_or(Duration::from_secs(120));
-    let timeout_duration = if let Some(secs) = timeout_override {
-        Duration::from_secs(secs)
-    } else {
+    let timeout_override = frame_timeout_override();
+    let startup_timeout = timeout_override.unwrap_or(Duration::from_secs(120));
+    let timeout_duration = timeout_override.unwrap_or_else(|| {
         let wall_budget = seconds.unwrap_or(120.0).max(15.0) + 15.0;
         Duration::from_secs_f64(wall_budget.max(30.0))
-    };
+    });
 
     rock_host::process_management::report_spawn_phase("execution");
     let launch_start = bone_core::prelude::Instant::now();
@@ -277,28 +273,11 @@ pub(crate) fn do_perf(
 /// frames often enough to show it is alive. The old total budget grew with the
 /// requested frame count and killed legitimate slow runs. The explicit env
 /// override remains the escape hatch for unusually slow startup or frames.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FrameWatchdogConfig {
-    startup: Duration,
-    inactivity: Duration,
-    override_secs: Option<u64>,
-}
-
-fn frame_watchdog_config(override_secs: Option<u64>) -> FrameWatchdogConfig {
-    let duration = override_secs.map(Duration::from_secs);
-    FrameWatchdogConfig {
-        startup: duration.unwrap_or(Duration::from_secs(5)),
-        inactivity: duration.unwrap_or(Duration::from_secs(5)),
-        override_secs,
-    }
-}
-
-fn frame_watchdog() -> FrameWatchdogConfig {
-    frame_watchdog_config(
-        std::env::var("ROCK_FRAME_TIMEOUT_SECS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok()),
-    )
+fn frame_timeout_override() -> Option<Duration> {
+    std::env::var("ROCK_FRAME_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
 }
 
 /// Run the game for a specified number of frames and take a screenshot
@@ -310,7 +289,6 @@ pub(crate) fn do_one_frame(
     path: &str,
     output: String,
     frames: usize,
-    _headless: bool,
     app_args: &[String],
 ) -> Result<()> {
     use crate::common::ProcessManager;
@@ -344,11 +322,11 @@ pub(crate) fn do_one_frame(
     rock_host::process_management::report_spawn_phase("execution");
     let mut child = crate::headless_scope::spawn_bound_child(&mut cmd, lua_file.parent().unwrap())?;
 
-    let watchdog = frame_watchdog();
+    let watchdog = frame_timeout_override().unwrap_or(Duration::from_secs(5));
     let process_result = ProcessManager::wait_with_progress_watchdog(
         &mut child,
-        watchdog.startup,
-        watchdog.inactivity,
+        watchdog,
+        watchdog,
         parse_frame_progress,
         true,
         true,
@@ -357,16 +335,10 @@ pub(crate) fn do_one_frame(
     // A watchdog timeout means the run did NOT complete -- treat it as a failure
     // (nonzero exit), not a warning-and-exit-0. Exiting 0 on timeout is precisely
     // how a load-starved run once masqueraded as a clean-but-empty log
-    let timeout_secs = if process_result.timeout_phase == Some(crate::common::TimeoutPhase::Startup)
-    {
-        watchdog.startup.as_secs()
-    } else {
-        watchdog.inactivity.as_secs()
-    };
     frame_exit_result_with_progress(
         process_result.timed_out,
         &process_result.output.status,
-        timeout_secs,
+        watchdog.as_secs(),
         Some(frames),
         process_result.progress.as_ref(),
         process_result.progress_stopped,
@@ -383,25 +355,7 @@ pub(crate) fn do_one_frame(
 
 /// Classify a finished `rock frame` run: Ok only on a clean zero-exit. A
 /// watchdog timeout or a nonzero child exit is an error, so the CLI exits
-/// nonzero (test-games / callers actually fail). Split out to be unit-testable
-/// without spawning a real hang.
-#[cfg(test)]
-fn frame_exit_result(
-    timed_out: bool,
-    status: &std::process::ExitStatus,
-    timeout_secs: u64,
-) -> Result<()> {
-    frame_exit_result_with_progress(
-        timed_out,
-        status,
-        timeout_secs,
-        None,
-        None,
-        false,
-        Some(crate::common::TimeoutPhase::TotalBudget),
-    )
-}
-
+/// nonzero (test-games / callers actually fail).
 fn frame_exit_result_with_progress(
     timed_out: bool,
     status: &std::process::ExitStatus,
@@ -471,7 +425,6 @@ pub(crate) fn handle_frame(cx: &CommandContext) -> Result<()> {
         &file,
         output,
         cx.args.frames,
-        cx.args.headless,
         &cx.args.app_args,
     )
 }
@@ -687,18 +640,24 @@ mod tests {
     #[test]
     fn timed_out_frame_run_is_an_error() {
         use std::os::unix::process::ExitStatusExt;
-        let ok = std::process::ExitStatus::from_raw(0);
-        let failed = std::process::ExitStatus::from_raw(3 << 8); // exit code 3
+        let result = |timed_out, status| {
+            frame_exit_result_with_progress(
+                timed_out,
+                &std::process::ExitStatus::from_raw(status),
+                3,
+                None,
+                None,
+                false,
+                Some(crate::common::TimeoutPhase::TotalBudget),
+            )
+        };
+        assert!(result(false, 0).is_ok(), "clean zero-exit is Ok");
         assert!(
-            frame_exit_result(false, &ok, 3).is_ok(),
-            "clean zero-exit is Ok"
-        );
-        assert!(
-            frame_exit_result(true, &ok, 3).is_err(),
+            result(true, 0).is_err(),
             "a timeout must be an error even if the killed status looks like success"
         );
         assert!(
-            frame_exit_result(false, &failed, 3).is_err(),
+            result(false, 3 << 8).is_err(),
             "a nonzero child exit must propagate"
         );
     }
@@ -745,21 +704,5 @@ mod tests {
             inactivity.contains("renderer=gl, completed/requested=1/240"),
             "{inactivity}"
         );
-    }
-
-    /// The frame watchdog bounds startup and inactivity independently of the
-    /// requested frame count. A legitimate slow run can therefore outlive its
-    /// old total budget, while a child that stops reporting still fails.
-    #[test]
-    fn frame_watchdog_preserves_progress_and_override_contracts() {
-        let default = frame_watchdog_config(None);
-        assert_eq!(default.startup, Duration::from_secs(5));
-        assert_eq!(default.inactivity, Duration::from_secs(5));
-        assert_eq!(default.override_secs, None);
-
-        let override_config = frame_watchdog_config(Some(60));
-        assert_eq!(override_config.startup, Duration::from_secs(60));
-        assert_eq!(override_config.inactivity, Duration::from_secs(60));
-        assert_eq!(override_config.override_secs, Some(60));
     }
 }
