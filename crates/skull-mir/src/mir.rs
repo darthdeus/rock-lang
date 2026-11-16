@@ -136,7 +136,7 @@ pub enum ContainerKind {
     /// In-bounds reads and writes cannot reach a backing table metamethod.
     VecNonNull,
     /// A [`ContainerKind::Vec`] element access whose index was proven to lie
-    /// in `[0, len)` at that point (`skull_transform::elide_bounds_checks`),
+    /// in `[0, len)` at that point (`skull_transform::elide_bounds_checks_for_target`),
     /// so the backends omit the explicit bounds helper. A Lua backing table
     /// metamethod can still run for an absent slot.
     /// Appears only on [`Inst::Index`] and [`Inst::StoreIndex`]; never a
@@ -692,7 +692,7 @@ pub enum Inst {
         index: Idx<Inst>,
     },
     /// The backing slot of a 0-based element index that was proven within
-    /// `[0, len)` (`skull_transform::elide_bounds_checks`): what
+    /// `[0, len)` (`skull_transform::elide_bounds_checks_for_target`): what
     /// [`Inst::VecCheckedIndex`] yields, without the check. Each backend
     /// renders its own column base (`index + 1` on Lua, `index` on JS), so
     /// every consumer of the checked form consumes this one unchanged. Pure

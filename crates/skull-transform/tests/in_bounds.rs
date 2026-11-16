@@ -1,9 +1,10 @@
-//! `elide_bounds_checks` marks a `[T]` element access `VecInBounds` only when
+//! `elide_bounds_checks_for_target` marks a `[T]` element access `VecInBounds` only when
 //! its index is provably within `[0, len)` on every path, and keeps the check
 //! wherever the body could have shrunk or rebound the vector in between.
+use bone_core::hir::FnBackend;
 use comfy_la_arena::Idx;
 use skull_mir::mir::{Block, Cell, ContainerKind, Inst, Lit, MirFunc, Term};
-use skull_transform::elide_bounds_checks;
+use skull_transform::elide_bounds_checks_for_target;
 use ustr::Ustr;
 
 fn u(s: &str) -> Ustr {
@@ -106,16 +107,13 @@ impl Probe {
         }
     }
 
+    /// The JS target, which adds no allocation guarantee of its own.
     fn run(&mut self) {
-        elide_bounds_checks(None, &mut self.f);
+        elide_bounds_checks_for_target(None, &mut self.f, FnBackend::Js);
     }
 
     fn run_lua(&mut self) {
-        skull_transform::elide_bounds_checks_for_target(
-            None,
-            &mut self.f,
-            bone_core::hir::FnBackend::Lua,
-        );
+        elide_bounds_checks_for_target(None, &mut self.f, FnBackend::Lua);
     }
 }
 

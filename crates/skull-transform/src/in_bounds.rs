@@ -93,14 +93,10 @@ fn raw<T>(i: Idx<T>) -> usize {
     i.into_raw().into_u32() as usize
 }
 
-/// Mark every provably in-bounds `[T]` element access in `func`. Returns how
-/// many accesses were marked.
-pub fn elide_bounds_checks(ws: Option<&Workspace>, func: &mut MirFunc) -> usize {
-    elide_bounds_checks_for_target(ws, func, FnBackend::Any)
-}
-
-/// Add only allocation guarantees of the actual emission target. In particular,
-/// fresh JS arrays can inherit setters; fresh Lua tables have no metatable.
+/// Mark every provably in-bounds `[T]` element access in `func`, returning how
+/// many accesses were marked. Adds only allocation guarantees of the actual
+/// emission target. In particular, fresh JS arrays can inherit setters; fresh
+/// Lua tables have no metatable.
 pub fn elide_bounds_checks_for_target(
     ws: Option<&Workspace>,
     func: &mut MirFunc,
