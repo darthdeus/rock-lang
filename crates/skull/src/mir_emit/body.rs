@@ -606,21 +606,6 @@ pub(super) fn convert_unit_body(
     skull_transform::body_chain::convert_body(ws, mf, name, &opts, &mut stats).map_err(|e| e.error)
 }
 
-/// The `static` cells of a hoisted-lambda tree and the declarations its flat
-/// variants copy, for the callers that emit it through
-/// [`emit_pass_nested_fns`] and so do not fold them along the way.
-fn collect_nested_facts(
-    nested: &[MirFunc],
-    statics: &mut Vec<skull_mir::mir::StaticCell>,
-    deps: &mut FxHashSet<FuncRef>,
-) {
-    for nf in nested {
-        statics.extend(nf.statics.iter().cloned());
-        deps.extend(nf.flat_variant_source);
-        collect_nested_facts(&nf.nested_fns, statics, deps);
-    }
-}
-
 /// Emit the hoisted bodies (`convert_closures` appends one `MirFunc` per live
 /// lambda, nested ones included; a named nested fn holds its own) as sibling
 /// top-level fns appended to `out`. Unlike [`emit_nested_fns`] this folds no
@@ -927,15 +912,15 @@ pub(super) fn emit_spec_chunk(
     let mut literal_globals = skull_mir::reach::global_ref_names(&mf);
     let mut nested_abi_deps = FxHashMap::default();
     collect_abi_dependencies(&mf, &mut nested_abi_deps);
-    let mut nested = std::mem::take(&mut mf.nested_fns);
-    collect_nested_facts(&nested, &mut statics, &mut deps);
-    emit_pass_nested_fns(
+    emit_nested_fns(
         ws,
         cg,
         scx,
-        &mut nested,
-        &statics,
-        Some(&mut allocation_bodies),
+        &mut mf.nested_fns,
+        &mf.statics,
+        &mut deps,
+        &mut statics,
+        &mut allocation_bodies,
         &mut lua,
         &mut times,
     )?;

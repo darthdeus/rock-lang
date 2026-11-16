@@ -256,6 +256,31 @@ fn column_vec_iterated_inside_a_nested_fn() {
     );
 }
 
+/// An indexed loop over a column-stored Vec inside a lambda of a SPECIALIZED
+/// body proves its index in range, as the same loop in an ordinary body's
+/// lambda does, so the read carries no per-iteration bounds check.
+#[test]
+fn indexed_column_loop_in_a_specialized_lambda_elides_its_bounds_check() {
+    let src = r#"
+value V2 { x: float, y: float }
+
+fn go<T>(_tag: T) -> float {
+    let xs: [V2] = [V2 { x: 1.0, y: 2.0 }, V2 { x: 3.0, y: 4.0 }]
+    let f = () => { let a = 0.0; for i in 0..xs.len { a = a + xs[i].x }; return a }
+    return f()
+}
+
+fn main() { print("{go(1)}") }
+"#;
+    let lua = crate::common::try_emit_module(src).expect("must emit");
+    let body = crate::common::body_of_synthetic(&lua, "__lambda");
+    assert!(
+        body.contains(".x)[(c") && !body.contains("__vec_checked_index"),
+        "lambda body must read the column with a proven index:\n{body}"
+    );
+    assert_eq!(crate::common::run_main(&lua), "4");
+}
+
 const VEC_IN_CO_FN: &str = r#"
 value V2 { x: float, y: float }
 
