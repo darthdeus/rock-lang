@@ -20,8 +20,7 @@
 //
 // NOT a return-bank defect: the three JS sort comparators invoke the key twice in
 // one statement, which cannot corrupt anything because none of them READS the
-// bank (gated by `skull-codegen-js/tests/ret_bank_no_hand_readers.rs`). Both
-// backends agree here, which is what rules the ABI out.
+// bank. Both backends agree here, which is what rules the ABI out.
 
 struct Item { id: int, p: Vec2 }
 

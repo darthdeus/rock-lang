@@ -10,6 +10,8 @@
 //!
 //! Both now read one oracle, `skull_mir::monoty::too_deep_to_instantiate`, so a
 //! future change to the bound cannot reach one backend and miss the other.
+//! functions/generic_self_recursion.rock checks that same-instance recursion
+//! still runs on both.
 
 use crate::common::ws_with;
 
@@ -32,20 +34,6 @@ fn main() {
 }
 "#;
 
-/// Recursion whose type arguments do NOT change. The control that keeps the
-/// rejection a statement about GROWTH rather than about recursion -- and the
-/// arm that would catch a bound so tight it refused ordinary generic recursion.
-const SAME_INSTANCE_RECURSION: &str = r#"
-fn countdown<T>(x: T, n: int) -> int {
-    if n <= 0 { return 0 }
-    return 1 + countdown(x, n - 1)
-}
-
-fn main() {
-    print("{countdown(1, 5)}")
-}
-"#;
-
 #[test]
 fn changing_instance_recursion_rejects_on_js() {
     let err = emit_res(POLYMORPHIC_RECURSION, "main")
@@ -55,11 +43,4 @@ fn changing_instance_recursion_rejects_on_js() {
         "the rejection must name its cause, so it is distinguishable from any \
          other JS-subset refusal: {err}"
     );
-}
-
-#[test]
-fn same_instance_recursion_still_emits_on_js() {
-    if let Err(e) = emit_res(SAME_INSTANCE_RECURSION, "main") {
-        panic!("recursion whose type arguments do not change must still emit on JS: {e}");
-    }
 }
