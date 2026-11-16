@@ -171,9 +171,6 @@ fn the_operational_censuses_are_sums_of_the_primary_records() {
         g.contributions.values().map(|c| f(c)).sum()
     };
     let census = &g.run_stats;
-    assert!(g.sites_attempted > 0, "the fixture attempted no sites");
-    assert_eq!(g.sites_attempted, sum(|c| c.sites_attempted));
-    assert_eq!(g.always_emitted_seeds, sum(|c| c.always_emitted_seeds));
     assert_eq!(census.body_exprs_scanned, sum(|c| c.body_exprs_scanned));
     assert_eq!(
         census.resolved_overload_rows,

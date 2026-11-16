@@ -107,10 +107,6 @@ pub struct ConcreteBuildStats {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConcreteUpdateStats {
-    pub before: usize,
-    pub derived: usize,
-    pub reused: usize,
-    pub retracted: usize,
     pub candidate_keys_added: BTreeSet<Instance>,
     pub candidate_keys_removed: BTreeSet<Instance>,
 }
@@ -160,10 +156,6 @@ impl ConcreteBodies {
         if Arc::strong_count(&self.plans) > 1 {
             self.plans = Arc::new((*self.plans).clone());
         }
-    }
-
-    pub fn candidate_index_derived(&self) -> bool {
-        self.candidate_index.get().is_some()
     }
 
     pub fn candidate_keys(&self) -> &BTreeSet<Instance> {
@@ -234,25 +226,17 @@ impl ConcreteBodies {
         removed: &BTreeSet<Instance>,
         revisited_owners: &BTreeSet<Owner>,
     ) -> ConcreteUpdateStats {
-        let before = self.instance_stats.len() + self.always_stats.len();
         let mut instance_subjects = revisited.clone();
         instance_subjects.extend(removed.iter().cloned());
-        let mut retracted = 0;
         let mut candidate_keys_added = BTreeSet::new();
         let mut candidate_keys_removed = BTreeSet::new();
         for instance in &instance_subjects {
-            if self.instance_stats.contains_key(instance) || self.plans.get(instance).is_some() {
-                retracted += 1;
-            }
-            let (removed_candidates, _scans) = self.remove_instance(instance);
-            candidate_keys_removed.extend(removed_candidates);
+            candidate_keys_removed.extend(self.remove_instance(instance));
         }
         let mut targets = revisited.clone();
         targets.extend(removed.iter().cloned());
         targets.retain(|instance| g.instances.contains(instance));
-        let (results, publication_stats) = build_instance_delta(ws, g, &targets);
-        let _local_publication_stats = publication_stats;
-        let mut derived = results.len();
+        let (results, _) = build_instance_delta(ws, g, &targets);
         for result in results {
             match result {
                 InstanceResult::Skipped(gap) => {
@@ -290,9 +274,7 @@ impl ConcreteBodies {
             always_subjects.push((*module, *body_owner, owner));
         }
         for (_, _, owner) in &always_subjects {
-            if self.always_stats.remove(owner).is_some() {
-                retracted += 1;
-            }
+            self.always_stats.remove(owner);
             self.always_plan_failure_index.remove(owner);
             self.always_plans.remove(owner);
         }
@@ -325,7 +307,6 @@ impl ConcreteBodies {
                 &mut publication_stats,
                 log::log_enabled!(log::Level::Debug),
             );
-            let _local_publication_stats = publication_stats;
             let mut results: Vec<_> = always_inputs
                 .into_iter()
                 .map(|prepared| {
@@ -358,19 +339,14 @@ impl ConcreteBodies {
                     self.always_stats.insert(owner, stats);
                 }
             }
-            derived += always_subjects.len();
         }
         ConcreteUpdateStats {
-            derived,
-            retracted,
-            reused: before.saturating_sub(retracted),
-            before,
             candidate_keys_added,
             candidate_keys_removed,
         }
     }
 
-    fn remove_instance(&mut self, instance: &Instance) -> (BTreeSet<Instance>, usize) {
+    fn remove_instance(&mut self, instance: &Instance) -> BTreeSet<Instance> {
         let mut removed = BTreeSet::new();
         self.derived_candidate_index();
         if let Some(candidates) = self.owner_candidates.remove(instance) {
@@ -401,7 +377,7 @@ impl ConcreteBodies {
         Arc::get_mut(&mut self.plans)
             .expect("local concrete update lost its unique plan store")
             .remove(instance);
-        (removed, 0)
+        removed
     }
 
     fn install_candidate_refs_owned(

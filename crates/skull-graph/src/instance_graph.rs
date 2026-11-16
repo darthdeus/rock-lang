@@ -351,7 +351,6 @@ pub struct Contribution {
     pub expanded: bool,
     /// The expansion was cut by [`MAX_INSTANTIATION_DEPTH`].
     pub depth_capped: bool,
-    pub sites_attempted: usize,
     pub body_exprs_scanned: usize,
     pub resolved_overload_rows: usize,
     pub fn_value_rows: usize,
@@ -360,14 +359,11 @@ pub struct Contribution {
     pub bound_tree_rows: usize,
     pub bound_call_rows: usize,
     pub iterator_rows: usize,
-    pub always_emitted_seeds: usize,
     pub(crate) timing: ExpandTiming,
 }
 
 impl Contribution {
     fn add_counters(&mut self, c: &Contribution) {
-        self.sites_attempted += c.sites_attempted;
-        self.always_emitted_seeds += c.always_emitted_seeds;
         self.body_exprs_scanned += c.body_exprs_scanned;
         self.resolved_overload_rows += c.resolved_overload_rows;
         self.fn_value_rows += c.fn_value_rows;
@@ -492,7 +488,6 @@ impl Walk<'_> {
         outcome: SiteOutcome,
         span: Span,
     ) {
-        self.out.sites_attempted += 1;
         self.saw(span);
         if from.is_none() {
             let prev = self
@@ -774,7 +769,6 @@ pub struct InstanceGraph {
     /// callers without a second graph walk.
     pub run_stats: RunStats,
     last_run_owners: BTreeSet<Owner>,
-    last_run_retracted: BTreeSet<Owner>,
     /// Instances an always-emitted owner rooted before or after this run's
     /// re-walk. Its owner is not an instance, so without these the instances
     /// whose root status or fn-value status moved would not be revisited.
@@ -842,24 +836,6 @@ pub struct InstanceGraph {
     /// through the accessors, which are the one place the agreed answer is
     /// decided.
     pub index: Indices,
-    /// Every site the walk ATTEMPTED, including the ones with no `from`
-    /// instance to record against. The denominator for `call_sites`.
-    pub sites_attempted: usize,
-    /// Instances [`detect_changing_instance_recursion`] actually searched FROM.
-    ///
-    /// Published for the same reason `sites_attempted` is: the pass is a
-    /// whole-graph search whose cost is invisible from its own output, which is
-    /// EMPTY on every program without polymorphic recursion -- so a
-    /// rejection-output test passes whether the search is bounded or
-    /// exhaustive. This is an OPERATIONAL counter, describing work performed
-    /// rather than the graph produced, so it belongs in a census assertion and
-    /// never in a comparison of two graphs.
-    pub recursion_starts: usize,
-    /// Callees seeded from an ALWAYS-EMITTED body (a decorator definition or a
-    /// global initializer) rather than from a function root. Production treats
-    /// their call edges as reachability roots (`mir_emit::reachable_fns`'s
-    /// `extra_roots`/`extra_root_names`).
-    pub always_emitted_seeds: usize,
 }
 
 thread_local! {
@@ -1492,7 +1468,6 @@ impl InstanceGraph {
             instances: BTreeSet::new(),
             run_stats: RunStats::default(),
             last_run_owners: BTreeSet::new(),
-            last_run_retracted: BTreeSet::new(),
             last_run_always_targets: BTreeSet::new(),
             delta_added: BTreeSet::new(),
             delta_removed: BTreeSet::new(),
@@ -1512,9 +1487,6 @@ impl InstanceGraph {
             coroutine_helpers_by_owner: BTreeMap::new(),
             inline_body_deps: BTreeMap::new(),
             inline_body_nomangle_roots: BTreeMap::new(),
-            always_emitted_seeds: 0,
-            sites_attempted: 0,
-            recursion_starts: 0,
         }
     }
 
@@ -1600,7 +1572,6 @@ impl InstanceGraph {
         let mut stats = RunStats::default();
         if track_incremental_state {
             self.last_run_owners.clear();
-            self.last_run_retracted.clear();
             self.last_run_always_targets.clear();
         }
         let mono_before = self.interner.stats();
@@ -1619,7 +1590,6 @@ impl InstanceGraph {
             && pending.iter().all(|owner| owner.instance().is_none());
         if include_missing_roots {
             for i in self.root_instances.clone() {
-                stats.root_instances_checked += 1;
                 if !self.contributions.contains_key(&Owner::Instance(i.clone())) {
                     pending.push(Owner::Instance(i));
                 }
@@ -1830,7 +1800,6 @@ impl InstanceGraph {
                         let (demanded, install_timing) =
                             self.install(owner, c, timing_enabled, track_incremental_state);
                         stats.uninstall_ns += install_timing.uninstall_ns;
-                        stats.root_hole_rows_examined += install_timing.root_hole_rows_retracted;
                         stats.index_maintenance_ns += install_timing.index.total_ns();
                         stats.index_subst_ns += install_timing.index.subst_ns;
                         stats.index_trees_ns += install_timing.index.trees_ns;
@@ -2049,7 +2018,6 @@ impl InstanceGraph {
                 disagreed |= share.disagreed;
                 stats.owner_visits += share.installed.len();
                 stats.add_body_rows(&share.counts);
-                self.add_contribution_counters(&share.counts);
                 index.subst_updates += share.reached_rows;
                 for &at in &share.owned {
                     let (owner, c) = &share.installed[at];
@@ -2460,19 +2428,8 @@ impl InstanceGraph {
             self.last_run_always_targets
                 .extend(c.always_emitted_targets.iter().cloned());
         }
-        let root_hole_rows_retracted = if replaced {
-            let rows = self
-                .contributions
-                .get(&owner)
-                .map(|c| c.always_emitted_holes.len())
-                .unwrap_or(0);
+        if replaced {
             self.uninstall(&owner);
-            rows
-        } else {
-            0
-        };
-        if track_incremental_state && replaced {
-            self.last_run_retracted.insert(owner.clone());
         }
         let uninstall_ns = elapsed_ns(uninstall_start);
         let mut index = IndexMaintenanceTiming::default();
@@ -2544,7 +2501,6 @@ impl InstanceGraph {
             self.lost.remove(to);
         }
         self.record_root_holes(&owner, &c);
-        self.add_contribution_counters(&c);
         // `expand` folded repeated callees and ordered the rows by instance.
         // The owner itself is not demanded: `install` uninstalled it first,
         // so a body that reaches ITSELF -- any recursive function -- would
@@ -2575,7 +2531,6 @@ impl InstanceGraph {
             demanded,
             InstallTiming {
                 uninstall_ns,
-                root_hole_rows_retracted,
                 index,
             },
         )
@@ -2643,7 +2598,6 @@ impl InstanceGraph {
             .contributions
             .remove(owner)
             .expect("presence was checked above");
-        self.subtract_contribution_counters(&old);
         for hole in &old.always_emitted_holes {
             self.root_hole_dirty_names.insert(hole.name.clone());
             if let Some(owners) = self.root_hole_sites.get_mut(&hole.name) {
@@ -2734,18 +2688,6 @@ impl InstanceGraph {
                 }
             }
         }
-    }
-
-    fn add_contribution_counters(&mut self, c: &Contribution) {
-        self.sites_attempted += c.sites_attempted;
-        self.always_emitted_seeds += c.always_emitted_seeds;
-    }
-
-    fn subtract_contribution_counters(&mut self, c: &Contribution) {
-        self.sites_attempted = self.sites_attempted.saturating_sub(c.sites_attempted);
-        self.always_emitted_seeds = self
-            .always_emitted_seeds
-            .saturating_sub(c.always_emitted_seeds);
     }
 
     fn remove_graph_rejection_position(&mut self, position: usize) {
@@ -2902,10 +2844,9 @@ impl InstanceGraph {
         ws: &Workspace,
         root_added: &[FuncRef],
         root_removed: &[FuncRef],
-    ) -> usize {
+    ) {
         let added = canonical_roots(ws, root_added.to_vec(), false);
         let removed = canonical_roots(ws, root_removed.to_vec(), false);
-        let mut reason_buckets_examined = 0;
         for root in removed {
             if added.contains(&root) {
                 continue;
@@ -2930,10 +2871,8 @@ impl InstanceGraph {
                     hole.generic_root = false;
                 }
                 for roots in self.excused_generic_roots.values_mut() {
-                    reason_buckets_examined += 1;
                     roots.remove(&name);
                 }
-                reason_buckets_examined += self.excused_generic_roots.len();
                 self.excused_generic_roots
                     .retain(|_, roots| !roots.is_empty());
             }
@@ -2959,7 +2898,6 @@ impl InstanceGraph {
                     .generic_root = true;
             }
         }
-        reason_buckets_examined
     }
 
     fn reseed_roots_for_update(&mut self, ws: &Workspace, roots: Vec<FuncRef>) {
@@ -2988,7 +2926,7 @@ impl InstanceGraph {
         self.excused_generic_roots = previous_excused_roots;
     }
 
-    fn refresh_root_hole_sites(&mut self) -> RootHoleCensus {
+    fn refresh_root_hole_sites(&mut self) {
         let mut names: BTreeSet<String> = self.uninstantiated_roots.keys().cloned().collect();
         names.extend(self.root_hole_sites.keys().cloned());
         self.refresh_root_hole_sites_for_names(&names)
@@ -3028,19 +2966,15 @@ impl InstanceGraph {
             .cloned()
             .collect();
         self.clear_graph_postpass_rejections();
-        let root_holes = self.refresh_root_hole_sites();
-        self.run_stats.root_hole_names_examined += root_holes.names_examined;
-        self.run_stats.root_hole_rows_examined += root_holes.rows_examined;
-        let root_holes = self.refresh_root_hole_instances(ws);
-        self.run_stats.root_hole_names_examined += root_holes.names_examined;
-        self.run_stats.root_hole_decls_examined += root_holes.decls_examined;
+        self.refresh_root_hole_sites();
+        self.refresh_root_hole_instances(ws);
         self.root_hole_dirty_names.clear();
 
         self.run_stats.derive_ns = derive_start.elapsed().as_nanos() as u64;
         let post_pass_start = Instant::now();
         // The three read only the workspace and the installed records, so
         // they run beside each other; what they found is recorded in order.
-        let (inline_deps, (nomangle_roots, (recursion_starts, recursion_findings))) = {
+        let (inline_deps, (nomangle_roots, recursion_findings)) = {
             use bone_core::prelude::par_join;
             let graph = &*self;
             par_join(
@@ -3055,8 +2989,6 @@ impl InstanceGraph {
         };
         self.record_inline_body_dep_rows(inline_deps);
         self.inline_body_nomangle_roots.extend(nomangle_roots);
-        self.recursion_starts = recursion_starts;
-        self.run_stats.recursion_findings_derived += recursion_findings.len();
         for finding in recursion_findings {
             self.install_recursion_finding(finding);
         }
@@ -3123,12 +3055,8 @@ impl InstanceGraph {
         classify_boundaries(self, ws, &active_decl_vec);
         self.refresh_coroutine_rejections(ws, touched_instances.iter().cloned());
         let dirty_root_hole_names = std::mem::take(&mut self.root_hole_dirty_names);
-        let root_holes = self.refresh_root_hole_sites_for_names(&dirty_root_hole_names);
-        self.run_stats.root_hole_names_examined += root_holes.names_examined;
-        self.run_stats.root_hole_rows_examined += root_holes.rows_examined;
-        let root_holes = self.refresh_root_hole_instances_local(ws, &dirty_root_hole_names);
-        self.run_stats.root_hole_names_examined += root_holes.names_examined;
-        self.run_stats.root_hole_decls_examined += root_holes.decls_examined;
+        self.refresh_root_hole_sites_for_names(&dirty_root_hole_names);
+        self.refresh_root_hole_instances_local(ws, &dirty_root_hole_names);
 
         let mut previous_recursion_starts =
             self.retract_recursion_findings(&touched_instances, &touched_decls);
@@ -3140,7 +3068,7 @@ impl InstanceGraph {
             .iter()
             .map(|start| DeclKey(start.func))
             .collect();
-        let (starts, findings) =
+        let findings =
             loop {
                 let mut recursion_seeds = touched_instances.clone();
                 recursion_seeds.extend(previous_recursion_starts.iter().cloned());
@@ -3155,16 +3083,14 @@ impl InstanceGraph {
                     },
                 ));
                 recursion_seeds = self.recursion_seed_closure(recursion_seeds);
-                self.run_stats.recursion_seed_subjects = recursion_seeds.len();
-                let (starts, findings) =
-                    detect_changing_instance_recursion_local(self, ws, &recursion_seeds);
+                let findings = detect_changing_instance_recursion_local(self, ws, &recursion_seeds);
                 let displaced: BTreeSet<DeclKey> = findings
                     .iter()
                     .map(|finding| DeclKey(finding.rejection.at.func))
                     .filter(|decl| !recursion_decls.contains(decl))
                     .collect();
                 if displaced.is_empty() {
-                    break (starts, findings);
+                    break findings;
                 }
                 for decl in displaced {
                     let retained: Vec<Instance> = self
@@ -3181,9 +3107,6 @@ impl InstanceGraph {
                     recursion_decls.insert(decl);
                 }
             };
-        self.run_stats.recursion_findings_retracted += previous_recursion_starts.len();
-        self.recursion_starts = starts;
-        self.run_stats.recursion_findings_derived += findings.len();
         for finding in findings {
             self.install_recursion_finding(finding);
         }
@@ -3194,19 +3117,11 @@ impl InstanceGraph {
             region: prune.region,
             seeds: prune.seeds,
             boundary_predecessor_edges_examined: prune.boundary_predecessor_edges_examined,
-            support_component_nodes_examined: prune.support_component_nodes_examined,
-            support_component_edges_examined: prune.support_component_edges_examined,
-            reverse_instances_examined: prune.reverse_instances_examined,
-            reverse_predecessor_edges_examined: prune.reverse_predecessor_edges_examined,
-            prune_search_population: prune.prune_search_population,
-            broad_scans: prune.broad_scans,
         }
     }
 
-    fn refresh_root_hole_sites_for_names(&mut self, names: &BTreeSet<String>) -> RootHoleCensus {
-        let mut census = RootHoleCensus::default();
+    fn refresh_root_hole_sites_for_names(&mut self, names: &BTreeSet<String>) {
         for name in names {
-            census.names_examined += 1;
             let failures: Vec<AlwaysEmittedFailure> = self
                 .root_hole_sites
                 .get(name)
@@ -3214,7 +3129,6 @@ impl InstanceGraph {
                 .flat_map(|owners| owners.iter())
                 .flat_map(|(owner, rows)| {
                     let contribution = &self.contributions[owner];
-                    census.rows_examined += rows.len();
                     rows.iter()
                         .map(|&row| contribution.always_emitted_holes[row].failure.clone())
                 })
@@ -3232,46 +3146,33 @@ impl InstanceGraph {
                     .always_emitted_sites = failures;
             }
         }
-        census
     }
 
-    fn refresh_root_hole_instances_local(
-        &mut self,
-        ws: &Workspace,
-        names: &BTreeSet<String>,
-    ) -> RootHoleCensus {
-        let mut census = RootHoleCensus::default();
+    fn refresh_root_hole_instances_local(&mut self, ws: &Workspace, names: &BTreeSet<String>) {
         for name in names {
             let Some(hole) = self.uninstantiated_roots.get_mut(name) else {
                 continue;
             };
-            census.names_examined += 1;
             hole.instances = Self::root_hole_instance_count(
                 ws,
                 &self.index,
                 &self.contributions,
                 self.root_hole_sites.get(name),
                 name,
-                &mut census,
             );
         }
-        census
     }
 
-    fn refresh_root_hole_instances(&mut self, ws: &Workspace) -> RootHoleCensus {
-        let mut census = RootHoleCensus::default();
+    fn refresh_root_hole_instances(&mut self, ws: &Workspace) {
         for (name, hole) in &mut self.uninstantiated_roots {
-            census.names_examined += 1;
             hole.instances = Self::root_hole_instance_count(
                 ws,
                 &self.index,
                 &self.contributions,
                 self.root_hole_sites.get(name),
                 name,
-                &mut census,
             );
         }
-        census
     }
 
     fn root_hole_instance_count(
@@ -3280,12 +3181,10 @@ impl InstanceGraph {
         contributions: &BTreeMap<Owner, Box<Contribution>>,
         sites: Option<&BTreeMap<Owner, Vec<usize>>>,
         name: &str,
-        census: &mut RootHoleCensus,
     ) -> usize {
         let mut decls = BTreeSet::new();
         if let Some(functions) = ws.functions_by_name.get(&ustr::Ustr::from(name)) {
             for (module, func) in functions {
-                census.decls_examined += 1;
                 if mangle_fn(ws, &ws.module(*module).functions[*func]) != name {
                     continue;
                 }
@@ -3299,7 +3198,6 @@ impl InstanceGraph {
         for (owner, rows) in sites.into_iter().flat_map(|owners| owners.iter()) {
             let contribution = &contributions[owner];
             for &row in rows {
-                census.decls_examined += 1;
                 let callee = contribution.always_emitted_holes[row].callee;
                 decls.insert(DeclKey(skull_mir::lower::canonical_variant(ws, callee)));
             }
@@ -3384,12 +3282,8 @@ impl InstanceGraph {
                 })
             })
             .collect();
-        let reason_buckets_examined = self.apply_root_delta(ws, root_added, root_removed);
-        let mut update = self.update_bodies_after_roots(ws, changed, edits, pending_roots);
-        self.run_stats.root_hole_reason_buckets_examined += reason_buckets_examined;
-        update.census.root_hole_reason_buckets_examined =
-            self.run_stats.root_hole_reason_buckets_examined;
-        update
+        self.apply_root_delta(ws, root_added, root_removed);
+        self.update_bodies_after_roots(ws, changed, edits, pending_roots)
     }
 
     /// How many updates this graph has applied since its build.
@@ -3490,25 +3384,13 @@ impl InstanceGraph {
             suspect_region: prune.region,
             prune_seeds: prune.seeds,
             boundary_predecessor_edges_examined: prune.boundary_predecessor_edges_examined,
-            support_component_nodes_examined: prune.support_component_nodes_examined,
-            support_component_edges_examined: prune.support_component_edges_examined,
             newly_reached: added.len(),
             added,
             removed,
             owners: self.contributions.len(),
             instances: self.instances.len(),
-            settle_rounds: run.settle_rounds,
             revisited,
-            revisited_owners: revisited_owners.clone(),
-            retracted_owners: self.last_run_retracted.clone(),
-            broad_scans: prune.broad_scans,
-            reverse_instances_examined: prune.reverse_instances_examined,
-            reverse_predecessor_edges_examined: prune.reverse_predecessor_edges_examined,
-            prune_search_population: prune.prune_search_population,
-            recursion_findings_retracted: self.run_stats.recursion_findings_retracted,
-            recursion_findings_derived: self.run_stats.recursion_findings_derived,
-            recursion_seed_subjects: self.run_stats.recursion_seed_subjects,
-            census: self.run_stats,
+            revisited_owners,
         }
     }
 
@@ -3919,8 +3801,6 @@ impl InstanceGraph {
         let mut boundary_predecessor_edges_examined = 0;
         let mut support_component_cache: BTreeMap<Instance, (bool, usize)> = BTreeMap::new();
         let mut support_components: Vec<BTreeSet<Instance>> = Vec::new();
-        let mut support_component_nodes_examined = 0;
-        let mut support_component_edges_examined = 0;
         let predecessor_blockers = |target: &Instance,
                                     region: &BTreeSet<Instance>,
                                     examined: &mut usize|
@@ -3939,9 +3819,7 @@ impl InstanceGraph {
             |target: &Instance,
              region: &BTreeSet<Instance>,
              cache: &mut BTreeMap<Instance, (bool, usize)>,
-             components: &mut Vec<BTreeSet<Instance>>,
-             nodes_examined: &mut usize,
-             edges_examined: &mut usize| {
+             components: &mut Vec<BTreeSet<Instance>>| {
                 if region.contains(target) {
                     return (false, usize::MAX);
                 }
@@ -3959,7 +3837,6 @@ impl InstanceGraph {
                     if !discovered.insert(i.clone()) {
                         continue;
                     }
-                    *nodes_examined += 1;
                     if self.root_instances.contains(&i)
                         || self.index.always_emitted.contains_key(&i)
                     {
@@ -3968,7 +3845,6 @@ impl InstanceGraph {
                     let Some(preds) = self.index.preds.get(&i) else {
                         continue;
                     };
-                    *edges_examined += preds.len();
                     for pred in preds {
                         if pred == &i || region.contains(pred) {
                             continue;
@@ -4121,8 +3997,6 @@ impl InstanceGraph {
                             &region,
                             &mut support_component_cache,
                             &mut support_components,
-                            &mut support_component_nodes_examined,
-                            &mut support_component_edges_examined,
                         );
                         if !supported {
                             unsupported_component_ids.insert(component_id);
@@ -4217,8 +4091,6 @@ impl InstanceGraph {
             return Prune {
                 seeds,
                 boundary_predecessor_edges_examined,
-                support_component_nodes_examined,
-                support_component_edges_examined,
                 ..Prune::default()
             };
         }
@@ -4239,15 +4111,6 @@ impl InstanceGraph {
             region: region.len(),
             seeds,
             boundary_predecessor_edges_examined,
-            support_component_nodes_examined,
-            support_component_edges_examined,
-            reverse_instances_examined: 0,
-            reverse_predecessor_edges_examined: 0,
-            prune_search_population: region.len()
-                + boundary_predecessor_edges_examined
-                + support_component_nodes_examined
-                + support_component_edges_examined,
-            broad_scans: 0,
         }
     }
 
@@ -4329,15 +4192,7 @@ impl IndexMaintenanceTiming {
 #[derive(Default)]
 struct InstallTiming {
     uninstall_ns: u64,
-    root_hole_rows_retracted: usize,
     index: IndexMaintenanceTiming,
-}
-
-#[derive(Default)]
-struct RootHoleCensus {
-    names_examined: usize,
-    rows_examined: usize,
-    decls_examined: usize,
 }
 
 /// What one [`InstanceGraph::run`] actually walked. Operational, and the check
@@ -4419,21 +4274,6 @@ pub struct RunStats {
     pub bound_tree_rows: usize,
     pub bound_call_rows: usize,
     pub iterator_rows: usize,
-    /// The retained root-hole catalogue is bounded by the names that actually
-    /// produced a root obligation; these fields make that post-pass visible.
-    pub root_hole_names_examined: usize,
-    pub root_hole_rows_examined: usize,
-    pub root_hole_decls_examined: usize,
-    /// The fixed reason-bucket catalogue scanned while retracting a generic
-    /// root obligation. This is bounded by the classifier's static reasons,
-    /// not by the number of workspace roots.
-    pub root_hole_reason_buckets_examined: usize,
-    /// Root instances checked while admitting missing root contributions.
-    /// Body-only updates pass explicit additions and keep this at zero.
-    pub root_instances_checked: usize,
-    pub recursion_seed_subjects: usize,
-    pub recursion_findings_retracted: usize,
-    pub recursion_findings_derived: usize,
     /// How many times the conformance fixpoint had to walk owners again.
     ///
     /// Published because a guard with no population reads as load-bearing when
@@ -4461,9 +4301,6 @@ impl RunStats {
 /// The region is carried out beside the answer because it is the only thing
 /// that distinguishes an affected-region search from a whole-graph one: both
 /// return the same pruned set, and canonical equality is green either way.
-/// Reverse-query counters remain in the result so a boundary walk cannot hide
-/// outside the structural denominator. They are local to each query rather
-/// than shared mutation.
 #[derive(Default)]
 struct Prune {
     pruned: BTreeSet<Instance>,
@@ -4474,17 +4311,6 @@ struct Prune {
     seeds: BTreeSet<Instance>,
     /// Predecessor edges examined while classifying local boundary blockers.
     boundary_predecessor_edges_examined: usize,
-    /// Support-component instances examined while resolving tentative boundaries.
-    support_component_nodes_examined: usize,
-    /// Predecessor edges examined while resolving tentative support components.
-    support_component_edges_examined: usize,
-    /// Instances examined by removed reverse reachability queries.
-    reverse_instances_examined: usize,
-    /// Predecessor edges examined by removed reverse reachability queries.
-    reverse_predecessor_edges_examined: usize,
-    /// Forward instances plus local boundary/support work and any reverse-query work.
-    prune_search_population: usize,
-    broad_scans: usize,
 }
 
 /// What one [`InstanceGraph::update_bodies`] did, as a structural census.
@@ -4505,25 +4331,11 @@ pub struct UpdateStats {
     pub pruned: usize,
     /// **Instances the strand search VISITED**, i.e. the size of the suspect
     /// region -- the forward closure of everything that lost an in-edge.
-    ///
-    /// The forward instance population only. `prune_search_population` adds
-    /// local boundary-edge and reverse-query populations before the locality
-    /// gates consume it.
     pub suspect_region: usize,
     /// The initial instances whose incoming edges changed.
     pub prune_seeds: BTreeSet<Instance>,
     /// Predecessor edges examined while classifying local boundary blockers.
     pub boundary_predecessor_edges_examined: usize,
-    /// Support-component instances examined while resolving tentative boundaries.
-    pub support_component_nodes_examined: usize,
-    /// Predecessor edges examined while resolving tentative support components.
-    pub support_component_edges_examined: usize,
-    /// Instances examined by removed reverse reachability queries.
-    pub reverse_instances_examined: usize,
-    /// Predecessor edges examined by removed reverse reachability queries.
-    pub reverse_predecessor_edges_examined: usize,
-    /// Forward instances plus local boundary/support work and any reverse-query work.
-    pub prune_search_population: usize,
     /// Instances the graph did not have before.
     pub newly_reached: usize,
     /// **The instances this update ADDED**, as the set rather than the count.
@@ -4538,23 +4350,11 @@ pub struct UpdateStats {
     pub removed: BTreeSet<Instance>,
     pub owners: usize,
     pub instances: usize,
-    /// See [`RunStats::settle_rounds`].
-    pub settle_rounds: usize,
     /// Live instances whose owner records were revisited or newly installed.
     pub revisited: BTreeSet<Instance>,
     /// Owner contributions replaced by this update, including globals and
     /// decorators that have no instance key.
     pub revisited_owners: BTreeSet<Owner>,
-    /// Revisited owners that had a prior contribution to retract.
-    pub retracted_owners: BTreeSet<Owner>,
-    /// Whole-graph diagnostic vectors touched by a local post-pass.
-    pub broad_scans: usize,
-    pub recursion_findings_retracted: usize,
-    pub recursion_findings_derived: usize,
-    pub recursion_seed_subjects: usize,
-    /// The same denominator and phase census retained on the graph after the
-    /// update, so callers do not need to infer a full rebuild from `expanded`.
-    pub census: RunStats,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4718,7 +4518,6 @@ fn walk_body_edges(
                     ),
                 });
             } else {
-                w.out.always_emitted_seeds += 1;
                 w.record_always_emitted_hole(
                     mangle_fn(ws, cf),
                     callee,
@@ -4928,9 +4727,7 @@ fn record_call_impl(
     span: Span,
     site: Site,
 ) -> Option<Instance> {
-    if from.is_none() {
-        w.out.always_emitted_seeds += 1;
-    }
+    if from.is_none() {}
     let cf = &ws.module(callee.module).functions[callee.func];
     let conversion_start = w.timer();
     let instantiated = w.with_interner(|a| {
@@ -5032,10 +4829,7 @@ fn record_call_impl(
 /// seed region affected by the edit.
 /// The whole-graph search: how many instances it started from, and what it
 /// found.
-fn detect_changing_instance_recursion(
-    g: &InstanceGraph,
-    ws: &Workspace,
-) -> (usize, Vec<RecursionFinding>) {
+fn detect_changing_instance_recursion(g: &InstanceGraph, ws: &Workspace) -> Vec<RecursionFinding> {
     // Instance-level adjacency, carrying each edge's span so a rejection can
     // name the call that changed the arguments.
     // Adjacency by REFERENCE into the contributions. Looking a successor's
@@ -5081,7 +4875,7 @@ fn detect_changing_instance_recursion_local(
     g: &InstanceGraph,
     ws: &Workspace,
     seeds: &BTreeSet<Instance>,
-) -> (usize, Vec<RecursionFinding>) {
+) -> Vec<RecursionFinding> {
     // The local path probes only its reverse-reachable seed region; constructing
     // a whole-graph adjacency table here would make a small edit global work.
     let successors = |node: &Instance| {
@@ -5101,7 +4895,7 @@ fn search_changing_instance_recursion<'a>(
     ws: &Workspace,
     mut order: Vec<&'a Instance>,
     successors: impl Fn(&Instance) -> &'a [Edge] + Sync,
-) -> (usize, Vec<RecursionFinding>) {
+) -> Vec<RecursionFinding> {
     order.retain(|i| g.index.decls.get(&i.func).is_some_and(|n| *n > 1));
     // Each start's search reads only the graph, so they run in parallel. A
     // program without polymorphic recursion -- the normal case -- is then
@@ -5126,12 +4920,11 @@ fn search_changing_instance_recursion<'a>(
         })
     };
     if !any_finding {
-        return (order.len(), Vec::new());
+        return Vec::new();
     }
     order.sort_by_cached_key(|instance| g.diagnostic_key(instance));
     let mut found = Vec::new();
     let mut already = BTreeSet::new();
-    let mut starts = 0;
     // Membership is unordered; traversal order comes only from the sorted
     // starts and the edge stack. Reuse scratch across starts without copying
     // instances that will be discarded when a search finds no error.
@@ -5143,7 +4936,6 @@ fn search_changing_instance_recursion<'a>(
         if already.contains(&key) {
             continue;
         }
-        starts += 1;
         seen.clear();
         subjects.clear();
         queue.clear();
@@ -5177,7 +4969,7 @@ fn search_changing_instance_recursion<'a>(
             }
         }
     }
-    (starts, found)
+    found
 }
 
 /// A synthesized `iter` witness: the `for` head's or a coerced argument's.
@@ -5199,9 +4991,7 @@ fn record_witness(
     site: Site,
 ) {
     let started = w.timer();
-    if from.is_none() {
-        w.out.always_emitted_seeds += 1;
-    }
+    if from.is_none() {}
     let rep = FuncRef {
         module: witness.func.0,
         func: witness.func.1,
@@ -5533,9 +5323,7 @@ fn record_bound_next(
     let resolved = &ws.module(rep.module).functions[rep.func];
     let callee = rep;
     let cf = &ws.module(callee.module).functions[callee.func];
-    if from.is_none() {
-        w.out.always_emitted_seeds += 1;
-    }
+    if from.is_none() {}
     let conversion_start = w.timer();
     let instantiated =
         w.with_interner(|a| instantiate_witness(a, ws, inf, resolved, cf, next_generics, subst));
@@ -6475,11 +6263,9 @@ mod recursion_search_tests {
             );
         }
         let seeds = instances.iter().cloned().collect();
-        let (fresh_starts, fresh) = detect_changing_instance_recursion(&graph, &ws);
+        let fresh = detect_changing_instance_recursion(&graph, &ws);
         assert_eq!(fresh.len(), 1);
-        let (starts, local) = detect_changing_instance_recursion_local(&graph, &ws, &seeds);
-        assert_eq!(starts, fresh_starts);
-        assert_eq!(starts, 2);
+        let local = detect_changing_instance_recursion_local(&graph, &ws, &seeds);
         assert_eq!(
             local.len(),
             1,

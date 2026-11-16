@@ -15,9 +15,9 @@
 //! - The arena's CONTENTS. It is monotonic by design and is not a function of
 //!   the live graph: an entry whose last instance was pruned stays interned,
 //!   which is exactly what keeps ids stable across edits.
-//! - The OPERATIONAL counters -- `sites_attempted`, `subst_comparisons`,
-//!   `bound_tree_comparisons`, `subst_compared`, `recursion_starts`,
-//!   `synthesized_*`, `always_emitted_seeds`. They describe work PERFORMED, not
+//! - The OPERATIONAL counters -- `subst_comparisons`,
+//!   `bound_tree_comparisons`, `subst_compared`, `synthesized_*`. They
+//!   describe work PERFORMED, not
 //!   the graph produced, and an updater that reaches the right graph by a
 //!   different route legitimately differs on all of them. Assert those as their
 //!   own census, never through this.

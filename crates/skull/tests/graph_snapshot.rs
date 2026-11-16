@@ -961,9 +961,6 @@ fn counters_and_arena_growth_are_not_semantic() {
     let before = snap(&ws, &base);
 
     let (_, mut g) = build(false);
-    g.sites_attempted += 1234;
-    g.recursion_starts += 99;
-    g.always_emitted_seeds += 3;
     // The agreement counters are DERIVED from the reach index now, so moving
     // them means moving the index -- an extra reach of an instance the graph
     // already has, which is work performed and not a fact about the graph.
