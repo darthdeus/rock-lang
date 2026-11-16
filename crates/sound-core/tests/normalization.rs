@@ -2,30 +2,21 @@ use sound_core::{AssetMapResolver, compile_project, parse_project, serialize_run
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
 };
 
-static NEXT: AtomicU64 = AtomicU64::new(0);
-struct Fixture(PathBuf);
+/// A scratch directory whose `wav` writes a one-second 1 kHz tone into it.
+struct Fixture(tempfile::TempDir);
 impl Fixture {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "rock-loudness-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
+        Self(tempfile::tempdir().unwrap())
+    }
+    fn path(&self) -> &Path {
+        self.0.path()
     }
     fn wav(&self, name: &str, amplitude: f32) -> PathBuf {
-        let path = self.0.join(name);
+        let path = self.path().join(name);
         write_tone(&path, amplitude);
         path
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 fn write_tone(path: &Path, amplitude: f32) {
@@ -145,7 +136,7 @@ fn played_peak_warning_does_not_reduce_source_or_layer_gains() {
     );
     let bank: serde_json::Value =
         serde_json::from_slice(&serialize_runtime_bank(&compiled).unwrap()).unwrap();
-    let cache = sound_core::MeasurementCache::new(f.0.join("cache"));
+    let cache = sound_core::MeasurementCache::new(f.path().join("cache"));
     for (key, amplitude) in [("assets/a.wav", 0.9), ("assets/b.wav", 0.09)] {
         let rendered = f.wav("rendered.wav", (amplitude * gain(&bank, key)) as f32);
         let measured = cache.measure(&rendered, 1.0).unwrap();
@@ -162,17 +153,17 @@ fn played_peak_warning_does_not_reduce_source_or_layer_gains() {
     for layer in bank["events"][0]["steps"][0]["layers"].as_array().unwrap() {
         assert!((layer["volume"].as_f64().unwrap() - sound_core::db_gain(-8.0)).abs() < 1e-6);
     }
-    let project_path = f.0.join("project.json");
-    std::fs::create_dir(f.0.join("assets")).unwrap();
+    let project_path = f.path().join("project.json");
+    std::fs::create_dir(f.path().join("assets")).unwrap();
     for (key, path) in &paths {
-        std::fs::copy(path, f.0.join(key)).unwrap();
+        std::fs::copy(path, f.path().join(key)).unwrap();
     }
     std::fs::write(&project_path, value.to_string()).unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_sound-loudness"))
         .args([
             "report",
             project_path.to_str().unwrap(),
-            f.0.to_str().unwrap(),
+            f.path().to_str().unwrap(),
         ])
         .output()
         .unwrap();
@@ -192,7 +183,7 @@ fn played_peak_warning_does_not_reduce_source_or_layer_gains() {
         .args([
             "compile",
             project_path.to_str().unwrap(),
-            f.0.to_str().unwrap(),
+            f.path().to_str().unwrap(),
         ])
         .output()
         .unwrap();
@@ -208,7 +199,7 @@ fn played_peak_warning_does_not_reduce_source_or_layer_gains() {
 fn played_mix_cache_tracks_content_gain_speed_and_offset() {
     let f = Fixture::new();
     let path = f.wav("mix.wav", 0.1);
-    let cache_root = f.0.join("cache");
+    let cache_root = f.path().join("cache");
     let cache = sound_core::MeasurementCache::new(cache_root.clone());
     let mut layers = [sound_core::RenderLayer {
         path: path.clone(),
@@ -245,7 +236,7 @@ fn played_mix_cache_tracks_content_gain_speed_and_offset() {
 fn cache_reuses_content_and_invalidates_when_content_changes() {
     let f = Fixture::new();
     let path = f.wav("changing.wav", 0.1);
-    let cache_root = f.0.join("cache");
+    let cache_root = f.path().join("cache");
     let cache = sound_core::MeasurementCache::new(cache_root.clone());
     let first = cache.measure(&path, 1.0).unwrap();
     let entries = || {
