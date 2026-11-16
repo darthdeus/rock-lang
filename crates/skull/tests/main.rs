@@ -194,6 +194,7 @@ mod overlay_function_values;
 
 mod optional_receiver_once;
 
+mod covered_field_reads;
 mod fresh_struct_projection;
 
 mod leaf_table_projection;

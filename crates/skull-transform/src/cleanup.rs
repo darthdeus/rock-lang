@@ -110,7 +110,16 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) -> bool {
     }
     let mut exposes = false;
     let mut removed_store_cells: Vec<usize> = Vec::new();
-    while let Some(i) = work.pop() {
+    let mut swept_projections = false;
+    loop {
+        let Some(i) = work.pop() else {
+            if swept_projections {
+                break;
+            }
+            swept_projections = true;
+            drop_repeated_projections(func, &use_count, &mut dead, &mut work);
+            continue;
+        };
         if let Inst::Store { cell, .. } = &func.insts[i] {
             removed_store_cells.push(raw(*cell) as usize);
         }
@@ -147,6 +156,72 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) -> bool {
 
     drop_flagged(func, &dead);
     exposes || removed_store_cells.iter().any(|&c| load_count[c] > 0)
+}
+
+/// What a projection reads from: a value, or a local cell, whose separate
+/// loads read one value while nothing in between writes the cell.
+#[derive(Clone, Copy, PartialEq)]
+enum ProjectionBase {
+    Value(Idx<Inst>),
+    Cell(Idx<Cell>),
+}
+
+/// Drop an unused projection when another projection of the same operand stays
+/// in its run: the stretch of a block with no effect or other possible error
+/// between them. They all fail together, on a bad operand with one message, so
+/// one of them raises it. A run with none used keeps its first. Copying a
+/// `value` out reads every field; this drops the reads its user never makes.
+fn drop_repeated_projections(
+    func: &MirFunc,
+    use_count: &[u32],
+    dead: &mut [bool],
+    work: &mut Vec<Idx<Inst>>,
+) {
+    let mut unused: Vec<Idx<Inst>> = Vec::new();
+    for (_, b) in func.blocks.iter() {
+        let mut run: Option<ProjectionBase> = None;
+        let mut used = false;
+        for &id in &b.insts {
+            if dead[raw(id) as usize] {
+                continue;
+            }
+            let inst = &func.insts[id];
+            let base = match inst {
+                Inst::TupleIndex { base, .. } => Some(*base),
+                _ => func.field_projection(id).map(|(base, _)| base),
+            };
+            let Some(base) = base else {
+                if !inst.produces_value() || skull_mir::sinking::may_throw(inst) {
+                    end_run(used, &mut unused, dead, work);
+                    (run, used) = (None, false);
+                }
+                continue;
+            };
+            let base = match func.insts[base] {
+                Inst::Load(cell) => ProjectionBase::Cell(cell),
+                _ => ProjectionBase::Value(base),
+            };
+            if run != Some(base) {
+                end_run(used, &mut unused, dead, work);
+                (run, used) = (Some(base), false);
+            }
+            if use_count[raw(id) as usize] == 0 {
+                unused.push(id);
+            } else {
+                used = true;
+            }
+        }
+        end_run(used, &mut unused, dead, work);
+    }
+}
+
+fn end_run(used: bool, unused: &mut Vec<Idx<Inst>>, dead: &mut [bool], work: &mut Vec<Idx<Inst>>) {
+    let kept = usize::from(!used).min(unused.len());
+    for &id in &unused[kept..] {
+        dead[raw(id) as usize] = true;
+        work.push(id);
+    }
+    unused.clear();
 }
 
 /// Remove every instruction whose `dead` flag is set from its block.
@@ -648,6 +723,89 @@ mod tests {
         f.set_term(after_raise, Term::Return(vec![fallback]));
         cleanup(&mut f).unwrap();
         assert!(!f.blocks[f.entry].insts.contains(&fallback), "{f}");
+    }
+
+    /// `unused = p.a; <between>; return p.b` after cleanup: whether the
+    /// unused read survived.
+    fn unused_read_survives(between: impl FnOnce(&mut MirFunc, Idx<Inst>)) -> bool {
+        let mut f = MirFunc::new(ustr::Ustr::from("covered"));
+        let cell = f.new_cell(None);
+        let p = f.emit(f.entry, Inst::Load(cell));
+        let field = |name: &str| Inst::Field {
+            base: p,
+            field: ustr::Ustr::from(name),
+        };
+        let unused = f.emit(f.entry, field("a"));
+        between(&mut f, p);
+        let read = f.emit(f.entry, field("b"));
+        f.set_term(f.entry, Term::Return(vec![read]));
+        cleanup(&mut f).unwrap();
+        f.blocks[f.entry].insts.contains(&unused)
+    }
+
+    #[test]
+    fn an_unused_read_goes_when_a_later_read_of_its_base_raises_first() {
+        assert!(!unused_read_survives(|_, _| {}));
+        assert!(!unused_read_survives(|f, p| {
+            f.emit(f.entry, Inst::MakeTuple(vec![p]));
+        }));
+    }
+
+    #[test]
+    fn a_run_of_unused_reads_keeps_its_first() {
+        let mut f = MirFunc::new(ustr::Ustr::from("all_unused"));
+        let cell = f.new_cell(None);
+        let p = f.emit(f.entry, Inst::Load(cell));
+        let reads: Vec<_> = ["a", "b", "c"]
+            .into_iter()
+            .map(|name| {
+                f.emit(
+                    f.entry,
+                    Inst::Field {
+                        base: p,
+                        field: ustr::Ustr::from(name),
+                    },
+                )
+            })
+            .collect();
+        f.set_term(f.entry, Term::Return(Vec::new()));
+        cleanup(&mut f).unwrap();
+        let kept: Vec<bool> = reads
+            .iter()
+            .map(|r| f.blocks[f.entry].insts.contains(r))
+            .collect();
+        assert_eq!(kept, [true, false, false], "{f}");
+    }
+
+    #[test]
+    fn an_unused_read_stays_before_an_effect_or_another_error() {
+        assert!(unused_read_survives(|f, p| {
+            f.emit(
+                f.entry,
+                Inst::StoreGlobal {
+                    name: ustr::Ustr::from("g"),
+                    value: p,
+                },
+            );
+        }));
+        assert!(unused_read_survives(|f, _| {
+            let other = f.new_cell(None);
+            let q = f.emit(f.entry, Inst::Load(other));
+            let read = f.emit(
+                f.entry,
+                Inst::Field {
+                    base: q,
+                    field: ustr::Ustr::from("c"),
+                },
+            );
+            f.emit(
+                f.entry,
+                Inst::StoreGlobal {
+                    name: ustr::Ustr::from("g"),
+                    value: read,
+                },
+            );
+        }));
     }
 
     #[test]

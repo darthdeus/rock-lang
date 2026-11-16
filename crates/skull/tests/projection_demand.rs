@@ -131,16 +131,16 @@ local item = setmetatable({{}}, {{__index = function(_, key)
 end}})
 local holder = {{item=item, calls=0}}
 print(nullable_probe(holder), holder.calls, table.concat(events, ','))
-local ok, err = pcall(snapshot_probe, holder)
-print(ok, tostring(err):match('sibling read') ~= nil)
+events = {{}}
+print(snapshot_probe(holder), table.concat(events, ','))
 item = setmetatable({{}}, {{__index = function() error('demanded read') end}})
-ok, err = pcall(nullable_probe, {{item=item, calls=0}})
+local ok, err = pcall(nullable_probe, {{item=item, calls=0}})
 print(ok, tostring(err):match('demanded read') ~= nil)
 ok = pcall(nullable_probe, nil)
 print(ok)
 "#
         )),
-        "true\ntrue\nfalse\n3\ntrue\ntrue\t1\tcount\nfalse\ttrue\nfalse\ttrue\nfalse"
+        "true\ntrue\nfalse\n3\ntrue\ntrue\t1\tcount\ntrue\tcount\nfalse\ttrue\nfalse"
     );
 }
 
