@@ -1,9 +1,5 @@
 use crate::common::{emit_module, function_body, mangled_name, run_luajit};
 
-fn body<'a>(lua: &'a str, name: &str) -> &'a str {
-    function_body(lua, name)
-}
-
 #[test]
 fn direct_tail_calls_preserve_results_and_effect_order() {
     let lua = emit_module(
@@ -42,16 +38,16 @@ fn main() {
     );
     for name in ["forward_unit", "forward_scalar"] {
         assert!(
-            body(&lua, name)
+            function_body(&lua, name)
                 .lines()
                 .any(|line| { line.trim_start().starts_with("do return ") && line.contains('(') }),
             "{name} retains an unnecessary caller frame:\n{}",
-            body(&lua, name)
+            function_body(&lua, name)
         );
     }
     for name in ["discard_scalar", "work_after_call", "inspect_result"] {
         assert!(
-            !body(&lua, name).lines().any(|line| {
+            !function_body(&lua, name).lines().any(|line| {
                 line.trim_start().starts_with("do return ")
                     && (line.contains("write_") || line.contains("value_"))
             }),

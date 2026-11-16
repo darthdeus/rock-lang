@@ -9,7 +9,7 @@
 //! by-value loop-binding snapshot (body reads its own env field, never via `s`).
 //! The exact per-iteration/param VALUES are pinned on luajit by
 //! tests/closures/capture_semantics_cofn.rock; here we pin the emit SHAPE.
-use crate::common::{emit_module, function_body, mangled_name};
+use crate::common::{emit_module, function_body, function_params, mangled_name};
 
 /// Scan for `needle` followed by one-or-more ASCII digits followed by `tail`
 /// (e.g. `= c` + digits + `.c` pins a frame-field read `= c<S>.c<slot>` without
@@ -30,20 +30,6 @@ fn contains_digit_bridge(hay: &str, needle: &str, tail: &str) -> bool {
 /// The parameter names of `function <name>(...)` in the emitted Lua (post-pass a
 /// hoisted body's first param is its colored env cell, then the lambda's own
 /// params).
-fn fn_params(lua: &str, name: &str) -> Vec<String> {
-    let head = format!("function {name}(");
-    let p = lua
-        .find(&head)
-        .unwrap_or_else(|| panic!("no `function {name}(` in:\n{lua}"));
-    let after = &lua[p + head.len()..];
-    let close = after.find(')').expect("param list closes");
-    after[..close]
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
 fn state_capture_field(step: &str, state_param: &str) -> Option<String> {
     let start = step.find("setmetatable({")? + "setmetatable({".len();
     let record = &step[start..];
@@ -82,10 +68,10 @@ fn param_lambda_hoists_as_record_under_frame() {
     let step = function_body(&lua, &step_name);
     // `s` is the step's first param cell. Its environment field keeps the
     // stable emit-cell key, while the field value is the colored param name.
-    let s = fn_params(&lua, &step_name).swap_remove(0);
-    let state_field = state_capture_field(step, &s);
+    let s = function_params(&lua, &step_name)[0];
+    let state_field = state_capture_field(step, s);
     // the co-fn lambda hoists to a sibling top-level fn taking (env, <param>).
-    let lp = fn_params(&lua, &format!("{w}__step__lambda0"));
+    let lp = function_params(&lua, &format!("{w}__step__lambda0"));
     assert_eq!(lp.len(), 2, "the hoisted lambda must take (env, n):\n{lua}");
     assert!(
         step.contains("__slot = __rock_code_slot_ref(") && state_field.is_some(),
@@ -106,8 +92,8 @@ fn frame_capture_composes_env_then_frame() {
     let lua = emit_module(PARAM_CAPTURE);
     let w = mangled_name(&lua, "worker");
     let step = function_body(&lua, &format!("{w}__step"));
-    let s = fn_params(&lua, &format!("{w}__step")).swap_remove(0);
-    let state_field = state_capture_field(step, &s)
+    let s = function_params(&lua, &format!("{w}__step"))[0];
+    let state_field = state_capture_field(step, s)
         .unwrap_or_else(|| panic!("the step must capture its state param `{s}`:\n{step}"));
     let body = function_body(&lua, &format!("{w}__step__lambda0"));
     assert!(

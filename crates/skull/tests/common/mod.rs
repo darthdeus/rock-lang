@@ -331,6 +331,18 @@ pub fn global_slots(lua: &str, identity: &str) -> Vec<u32> {
         .collect()
 }
 
+/// The parameter names of `name`'s emitted definition.
+pub fn function_params<'a>(lua: &'a str, name: &str) -> Vec<&'a str> {
+    let body = function_body(lua, name);
+    let open = body.find('(').expect("a parameter list");
+    let close = body[open..].find(')').expect("a closed parameter list") + open;
+    let inner = body[open + 1..close].trim();
+    if inner.is_empty() {
+        return Vec::new();
+    }
+    inner.split(',').map(str::trim).collect()
+}
+
 /// The body of the emitted definition named (or prefixed by) `name`. `name` is
 /// the rock identifier; the emitted definition is mangled
 /// (`hot_int_int_int`), so the prefix is resolved against the

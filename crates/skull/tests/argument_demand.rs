@@ -206,21 +206,6 @@ fn demand_direction_result(event: DirectionEvent) -> DirectionResult? {
     );
 }
 
-fn lua_param_count(lua: &str, name: &str) -> usize {
-    let header = crate::common::function_body(lua, name)
-        .lines()
-        .next()
-        .unwrap();
-    let params = header
-        .rsplit('(')
-        .next()
-        .unwrap()
-        .split(')')
-        .next()
-        .unwrap();
-    params.split(',').filter(|p| !p.trim().is_empty()).count()
-}
-
 #[test]
 fn unused_parameters_are_not_passed_and_their_arguments_still_run() {
     let _inline = crate::common::InlineOffGuard::on();
@@ -237,7 +222,7 @@ fn skip_middle(a: int, unused: int, b: string) -> string { return "{a}{b}" }
         .unwrap()
         .0
         .lua;
-    assert_eq!(lua_param_count(&lua, "skip_middle"), 2);
+    assert_eq!(crate::common::function_params(&lua, "skip_middle").len(), 2);
     let program = format!("{lua}\nprint(probe(), observed())\n");
     assert_eq!(run_luajit(&program), "4x\t1");
 }
@@ -258,7 +243,7 @@ fn skip_middle(a: int, unused: int, b: int) -> int { return a + b }
         .unwrap()
         .0
         .lua;
-    assert_eq!(lua_param_count(&lua, "skip_middle"), 3);
+    assert_eq!(crate::common::function_params(&lua, "skip_middle").len(), 3);
     assert_eq!(run_luajit(&format!("{lua}\nprint(probe())\n")), "44");
 }
 
@@ -276,7 +261,7 @@ fn reader(p: Pair, unused: int) -> fn() -> int { return () => p.a }
         .unwrap()
         .0
         .lua;
-    assert_eq!(lua_param_count(&lua, "reader"), 2);
+    assert_eq!(crate::common::function_params(&lua, "reader").len(), 2);
     assert_eq!(run_luajit(&format!("{lua}\nprint(probe())\n")), "5");
 }
 
@@ -293,7 +278,7 @@ fn pick(a: int, b: int) -> int { return a }
     let mid = skull::user_module_id(&ws1).unwrap();
     let (full1, mut cache) = emit_full(&ws1, mid).unwrap();
     let (_, mut overlay_cache) = emit_full(&ws1, mid).unwrap();
-    assert_eq!(lua_param_count(&full1.lua, "pick"), 1);
+    assert_eq!(crate::common::function_params(&full1.lua, "pick").len(), 1);
     let ws2 = ws_with_stdlib(&after);
     let edited = [body_id(&ws2, "pick")];
     let incremental = skull::mir_emit::emit_incremental(&ws2, &mut cache, &edited).unwrap();

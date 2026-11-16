@@ -1,12 +1,4 @@
-use crate::common;
-
-fn function_body<'a>(lua: &'a str, name: &str) -> &'a str {
-    let body = lua
-        .split(&format!("function {name}("))
-        .nth(1)
-        .expect("function");
-    &body[..body.find("\nend\n").expect("function end")]
-}
+use crate::common::{self, function_body};
 
 /// `rN = rM` lines: a register copied unchanged from another. (`rN = cM` is
 /// also how a mutable cell is read, so it is not a copy here.)

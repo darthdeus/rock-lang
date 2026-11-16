@@ -45,7 +45,7 @@ fn uniform_values_expands_to_canonical_leaves() {
     );
 
     let lua = emit_module(CANONICAL_VALUES);
-    let body = main_body(&lua);
+    let body = function_body(&lua, "main");
     assert!(
         !body.contains("uniform_values("),
         "the compiler-owned call survived:\n{body}"
@@ -84,14 +84,11 @@ fn main() {
 /// The emitted body of `main`, which is where the expansion lands. The
 /// intrinsic's own dead Lua definition is still emitted (nothing calls it), so
 /// module-wide substring checks would match it and prove nothing.
-fn main_body(lua: &str) -> String {
-    function_body(lua, "main").to_string()
-}
-
 /// The store indices are the std140 offsets divided by four, as literals.
 #[test]
 fn bloom_blur_packs_at_its_std140_element_indices() {
-    let body = main_body(&emit_module(BLOOM));
+    let lua = emit_module(BLOOM);
+    let body = function_body(&lua, "main");
     for idx in ["[(0)] = ", "[(2)] = ", "[(3)] = ", "[(4)] = "] {
         assert!(body.contains(idx), "missing store {idx} in:\n{body}");
     }
@@ -108,7 +105,7 @@ fn bloom_blur_packs_at_its_std140_element_indices() {
 /// a distinct allocation, so the two are told apart by which local they index.
 #[test]
 fn int_and_bool_leaves_store_through_the_other_view() {
-    let body = main_body(&emit_module(
+    let lua = emit_module(
         r#"
 value Flags { scale: float, on: bool, count: int }
 
@@ -120,7 +117,8 @@ fn main() {
 }
 
 "#,
-    ));
+    );
+    let body = function_body(&lua, "main");
     let fbuf = body
         .lines()
         .find(|l| l.contains(r#"__rock_nb_alloc("float"#))
@@ -169,7 +167,8 @@ fn main() {
 /// expansion, and which allocates per pack).
 #[test]
 fn the_pack_is_stores_not_a_call_and_never_boxes() {
-    let body = main_body(&emit_module(BLOOM));
+    let lua = emit_module(BLOOM);
+    let body = function_body(&lua, "main");
     assert!(
         !body.contains("pack_uniform_block"),
         "a call to the intrinsic survived rather than expanding:\n{body}"
@@ -218,19 +217,10 @@ fn main() {
 }
 "#;
 
-fn fn_body<'a>(lua: &'a str, name: &str) -> &'a str {
-    let at = lua
-        .find(&format!("\nfunction {name}"))
-        .unwrap_or_else(|| panic!("{name} is emitted"));
-    let rest = &lua[at + 1..];
-    let end = rest.find("\nend").expect("function has an end");
-    &rest[..end]
-}
-
 #[test]
 fn a_global_block_packs_one_leaf_at_a_time() {
     let lua = emit_module(GLOBAL_SOURCE);
-    let body = fn_body(&lua, "pack_global");
+    let body = function_body(&lua, "pack_global");
     let decl = body
         .lines()
         .find(|l| l.trim_start().starts_with("local "))
