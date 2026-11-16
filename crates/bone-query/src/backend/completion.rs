@@ -237,10 +237,8 @@ fn member_access(
         .arg_call
         .as_ref()
         .map(|(callee, idx, _)| (callee.clone(), *idx as usize));
-    // PRIMARY: resolve the receiver's type via inference (`type_at`).
-    // Handles generic-substituted fields, tuple/newtype projections, and
-    // call/index receivers the structural name-walk can't express. `None`
-    // means the receiver isn't a members-bearing type (`scale(x)` -> int).
+    // The receiver expression's inferred type. `None` means it isn't a
+    // members-bearing type (`scale(x)` -> int).
     let by_recv = member_completions_by_receiver(
         session,
         rq.path,
@@ -255,10 +253,8 @@ fn member_access(
     );
     let resolved = by_recv.is_some();
     let mut items = by_recv.unwrap_or_default();
-    // FALLBACK: a pure-ident receiver whose type inference can't see -- the
-    // enclosing call is to an unknown fn (`newHelper(thing.|`), or a parse
-    // error dropped the statement. The name-walk resolves the receiver by
-    // binding lookup, no inference needed.
+    // A name receiver inference left untyped -- the enclosing call is to an
+    // unknown fn (`newHelper(thing.|`) -- is typed from its head binding.
     if items.is_empty() {
         if let Some(segments) = cx.member.as_ref() {
             items = member_completions(

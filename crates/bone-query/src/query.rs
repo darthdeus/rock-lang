@@ -4,6 +4,8 @@ use bone_semantic::inference;
 use bone_semantic::{hir::NodeRef, prelude::*};
 use skull_parser::Ast;
 
+use crate::types;
+
 pub fn definition_at(
     ws: &Workspace,
     mid: ModuleId,
@@ -112,10 +114,7 @@ pub fn definition_at(
             hir::Expr::FieldAccess { base, field } => {
                 let bi = inf.per_fn.get(&owner)?;
                 let base_ty = *bi.expr_types.get(*base)?;
-                // struct_app_args resolves through `bi.ty_arena` for inferred
-                // (Local) types -- struct_name_of_ty's `lowered_tys` is only the
-                // annotation arena and would index out of bounds here.
-                let (sname, _) = struct_app_args(ws, bi, base_ty)?;
+                let sname = types::nominal_name(ws, Some(bi), base_ty)?;
                 struct_field_span(ws, sname, *field)
             }
 
@@ -172,8 +171,9 @@ pub(crate) fn type_definition_at(
 /// `Nullable` wrapper (`Mob?` -> `Mob`), then resolve the named type's
 /// declaration.
 fn type_def_target_ty(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<Span> {
-    match deref_ty(ws, Some(bi), ty)? {
-        hir::TypeExpr::Nullable(inner) => type_def_target_ty(ws, bi, ty.with_idx(*inner)),
+    let (ty, te) = ws.resolve_ty(Some(bi), ty)?;
+    match te {
+        hir::TypeExpr::Nullable(inner) => type_def_target_ty(ws, bi, ty.with_idx(inner)),
         // `Coroutine<Y, R, N>` is a compiler builtin with no source declaration.
         // Jump to the YIELD type `Y`'s declaration -- the meaningful navigable
         // type a coroutine value carries. `None` when `Y` is itself a builtin /
@@ -181,11 +181,11 @@ fn type_def_target_ty(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<Sp
         hir::TypeExpr::App {
             ctor: hir::TypeCtor::Nominal(name),
             params,
-        } if is_intrinsic_key(*name, "Coroutine") => {
+        } if is_intrinsic_key(name, "Coroutine") => {
             let yield_ty = params.into_iter().next()?;
             type_def_target_ty(ws, bi, ty.with_idx(yield_ty))
         }
-        te => type_def_target(ws, te),
+        te => type_def_target(ws, &te),
     }
 }
 
@@ -472,7 +472,7 @@ pub fn hover_at(
                         let mut ty = *bi.expr_types.get(e)?;
                         // A variable in place position (an assign target) is
                         // typed `()`; show its binding's real type instead.
-                        if ty_is_unit(ws, Some(bi), ty) {
+                        if types::is_unit(ws, Some(bi), ty) {
                             if let Some(bt) = var_binding_ty_at(ws, mid, inf, offset) {
                                 ty = bt;
                             }
@@ -758,19 +758,7 @@ fn record_literal_enum(
     if struct_def_by_name(ws, name).is_some() {
         return None;
     }
-    let inferred = bi
-        .and_then(|bi| {
-            bi.expr_types
-                .get(expr)
-                .and_then(|ty| deref_ty(ws, Some(bi), *ty))
-        })
-        .and_then(|ty| match ty {
-            hir::TypeExpr::App {
-                ctor: hir::TypeCtor::Nominal(en),
-                ..
-            } => Some(*en),
-            _ => None,
-        });
+    let inferred = bi.and_then(|bi| types::nominal_name(ws, Some(bi), *bi.expr_types.get(expr)?));
     let edef = enum_def_for_variant(ws, inferred, name)?;
     let variant = edef.variants.iter().find(|v| v.name == name)?;
     matches!(variant.payload, hir::VariantPayload::Record(_)).then_some(edef.name)
@@ -789,13 +777,15 @@ fn variant_def_span(ws: &Workspace, enum_name: Option<Ustr>, variant: Ustr) -> O
 /// struct shows its full definition, an enum its variants; anything else
 /// (generics, builtins, nullable) falls back to `Type: <rendered>`.
 fn render_type_hover(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> String {
-    if let Some(hir::TypeExpr::App {
-        ctor: hir::TypeCtor::Nominal(name),
-        params,
-    }) = deref_ty(ws, bi, ty)
+    if let Some((
+        _,
+        hir::TypeExpr::App {
+            ctor: hir::TypeCtor::Nominal(name),
+            params,
+        },
+    )) = ws.resolve_ty(bi, ty)
     {
         if params.is_empty() {
-            let name = *name;
             if let Some(def) = render_struct_def(ws, name) {
                 return def;
             }
@@ -811,13 +801,15 @@ fn render_type_hover(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> St
 /// (`struct Foo` / `enum Bar`); generic instances and builtins fall through to
 /// the workspace renderer (`Box<int>`, `int`, `string?`, `[int]`).
 fn render_hover_type(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> String {
-    if let Some(hir::TypeExpr::App {
-        ctor: hir::TypeCtor::Nominal(name),
-        params,
-    }) = deref_ty(ws, bi, ty)
+    if let Some((
+        _,
+        hir::TypeExpr::App {
+            ctor: hir::TypeCtor::Nominal(name),
+            params,
+        },
+    )) = ws.resolve_ty(bi, ty)
     {
         if params.is_empty() {
-            let name = *name;
             if ws
                 .modules
                 .iter()
@@ -1761,8 +1753,7 @@ fn struct_field_at(
             }
             let bi = inf.per_fn.get(&owner)?;
             let base_ty = *bi.expr_types.get(*base)?;
-            let (sname, _) = struct_app_args(ws, bi, base_ty)?;
-            Some((sname, *field))
+            Some((types::nominal_name(ws, Some(bi), base_ty)?, *field))
         }
         _ => None,
     }
@@ -1816,16 +1807,16 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                         }
                     }
                     // `recv.field` where recv is a `sname` (type-checked).
-                    // `recv?.field` resolves identically -- `struct_app_args`
-                    // unwraps the base's nullable.
+                    // `recv?.field` resolves identically: the base's nullable
+                    // is peeled.
                     hir::Expr::FieldAccess { base, field: fname }
                     | hir::Expr::SafeNav { base, field: fname }
                         if *fname == field =>
                     {
                         let resolves = bi
                             .zip(bi.and_then(|bi| bi.expr_types.get(*base).copied()))
-                            .and_then(|(bi, t)| struct_app_args(ws, bi, t))
-                            .is_some_and(|(n, _)| n == sname);
+                            .and_then(|(bi, t)| types::nominal_name(ws, Some(bi), t))
+                            .is_some_and(|n| n == sname);
                         if resolves {
                             if let Some(sp) = body.expr_spans.get(e) {
                                 let end = sp.offset_range().1;
@@ -1843,14 +1834,8 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                                 bi.expr_types
                                     .get(e)
                                     .copied()
-                                    .and_then(|t| struct_app_args(ws, bi, t))
-                                    .and_then(|(ctor, args)| {
-                                        is_field_ref_former(ctor)
-                                            .then(|| args.into_iter().next())
-                                            .flatten()
-                                    })
-                                    .and_then(|t0| struct_app_args(ws, bi, t0))
-                                    .is_some_and(|(sn, _)| sn == sname)
+                                    .and_then(|t| field_ref_struct(ws, bi, t))
+                                    .is_some_and(|sn| sn == sname)
                             }),
                         };
                         if of_struct {
@@ -3109,74 +3094,6 @@ pub(crate) fn locals_in_scope(
 // member completion: `receiver.<field>` -> the receiver's struct fields
 // ---------------------------------------------------------------------------
 
-/// Fields (name + rendered type) of the struct that the dotted receiver path
-/// resolves to. `segments` is the receiver before the cursor's `.`
-/// (`["line", "start"]` for `line.start.<cursor>`). Resolution is **structural**
-/// -- declared param/let/global types, struct-literal initializers, and
-/// struct-def field chains -- so it works without inference, which is exactly
-/// the state completion fires in (the trigger `.` breaks the body). Empty if the
-/// path doesn't resolve to a struct.
-pub(crate) fn struct_fields_for_path(
-    ws: &Workspace,
-    mid: ModuleId,
-    offset: usize,
-    segments: &[String],
-) -> Vec<(String, String, Option<TyId>)> {
-    // Inference-first for a single-binding receiver: if its recovered inferred
-    // type is a generic struct App, render fields with the inferred type args
-    // substituted (`p: Pair<int, string>` -> `first: int`, not `first: A`).
-    // Falls through to structural resolution when there's no usable inference.
-    if let [head] = segments {
-        if let Some(fields) = inferred_struct_fields(ws, mid, offset, head) {
-            return fields;
-        }
-    }
-
-    let Some((head, rest)) = segments.split_first() else {
-        return Vec::new();
-    };
-    let Some((mut cur, rest)) = resolve_receiver_head(ws, mid, offset, head, rest) else {
-        return Vec::new();
-    };
-
-    for seg in rest {
-        let Some(next) = field_hop_struct(ws, cur, seg) else {
-            return Vec::new();
-        };
-        cur = next;
-    }
-
-    match struct_def_by_name(ws, cur) {
-        Some(sdef) => sdef
-            .fields
-            .iter()
-            .map(|f| (f.name.to_string(), ws.render(None, f.ty), Some(f.ty)))
-            .collect(),
-        None => Vec::new(),
-    }
-}
-
-/// Fields of a single-binding receiver via its INFERRED type, substituting the
-/// struct's generic params with the inferred App args -- so `p: Pair<int,
-/// string>` yields `first: int` / `second: string`, not the declared `A` / `B`.
-/// Returns `None` (caller falls back to structural) when the binding has no
-/// recovered inference or its type isn't a struct.
-fn inferred_struct_fields(
-    ws: &Workspace,
-    mid: ModuleId,
-    offset: usize,
-    head: &str,
-) -> Option<Vec<(String, String, Option<TyId>)>> {
-    let module = ws.modules.get(mid.index())?;
-    let owner = module.body_at(offset)?;
-    let body = module.bodies.get(&owner)?;
-    let bi = ws.inference(mid)?.per_fn.get(&owner)?;
-
-    let b_idx = find_binding_by_name(body, head, offset)?;
-    let recv_ty = *bi.binding_types.get(b_idx)?;
-    struct_fields_of_ty(ws, mid, offset, TyRef::new(Some(bi), recv_ty)).map(|(fields, _)| fields)
-}
-
 /// Fields (name, rendered type, TyId) + struct name of the struct `recv`
 /// denotes, typed by inference for that instance (`Box<Mob>` yields
 /// `items: [Mob]`) in a scratch Gamma over the body at `offset`. A field's
@@ -3213,7 +3130,7 @@ fn struct_fields_of_ty(
     if typed.is_some() {
         return typed;
     }
-    let sname = struct_name_of_ty(ws, None, recv.ty)?;
+    let sname = types::member_owner_name(ws, recv.body, recv.ty)?;
     let sdef = struct_def_by_name(ws, sname)?;
     let fields = sdef
         .fields
@@ -3245,171 +3162,135 @@ fn query_gamma_for<'a>(
     crate::backend::query_gamma(ws, mid, inf, offset)
 }
 
-/// Fields + struct name of a member RECEIVER expression whose type the
-/// structural name-walk can't encode -- a call (`x.find_spell().|`), index, etc.
-/// `recv_end` is the receiver expr's end offset; `type_at` at `recv_end-1`
-/// yields its inferred TyId, which `struct_fields_of_ty` turns into members.
-/// The trailing bool says whether the receiver takes the `Iterator`-bounded
-/// combinators.
-pub(crate) fn struct_members_of_receiver_expr(
+/// What member completion offers on a receiver of some type.
+pub(crate) struct Members<'a> {
+    /// Fields: name, rendered type, and the type id when it is valid in the
+    /// caller's arena.
+    pub fields: Vec<(String, String, Option<TyId>)>,
+    /// The nominal its UFCS functions take first (`Vec` for `[T]`).
+    pub owner: Ustr,
+    pub vec_elem: Option<TyRef<'a>>,
+    /// The struct a one-argument wrapper carries (`Entity<Glyph>` -> `Glyph`).
+    pub sole_arg: Option<Ustr>,
+    /// Whether the receiver takes the `Iterator`-bounded combinators.
+    pub is_iter: bool,
+}
+
+/// Members of the receiver expression ending at `recv_end`, typed by inference.
+pub(crate) fn members_of_receiver_expr(
     ws: &Workspace,
     mid: ModuleId,
     recv_end: usize,
-) -> Option<(
-    Vec<(String, String, Option<TyId>)>,
-    Ustr,
-    Option<TyRef<'_>>,
-    Option<Ustr>,
-    bool,
-)> {
+) -> Option<Members<'_>> {
     let inf = ws.inference(mid)?;
     let at = recv_end.checked_sub(1)?;
     let ta = bone_semantic::query::type_at(ws, mid, inf, at)?;
-    let (fields, sname) = struct_fields_of_ty(ws, mid, at, TyRef::new(ta.body, ta.ty))?;
-    let vec_elem = array_elem_ty(ws, ta.body, ta.ty).map(|e| TyRef::new(ta.body, e));
-    let sole_arg = sole_type_arg_struct(ws, ta.body, ta.ty);
-    let is_iter = receiver_is_iterator(ws, mid, inf, at, TyRef::new(ta.body, ta.ty));
-    Some((fields, sname, vec_elem, sole_arg, is_iter))
+    members_of_ty(ws, mid, at, TyRef::new(ta.body, ta.ty))
 }
 
-/// ELEMENT type of a Vec receiver (`POS_HIST: [Vec2]` -> `Vec2`), for
-/// element-aware UFCS filtering on the name-walk FALLBACK. Resolves the
-/// single-binding / global head (the common Vec receiver); `None` for a
-/// multi-segment receiver, so its UFCS filtering degrades to name-only there.
-/// Only reached when `type_at` couldn't resolve the receiver (unknown callee /
-/// broken parse); the primary path computes `vec_elem` from the inferred type
-/// (`struct_members_of_receiver_expr`), so element filtering is exact for every
-/// receiver shape outside the fallback.
-pub(crate) fn receiver_vec_elem<'a>(
+/// Members of a dotted name receiver (`a.b.c`), typed from its head binding's
+/// inferred or declared type, or a global's. This serves receivers inference
+/// left untyped, such as an argument of an unknown call (`foo(a.b.|`).
+pub(crate) fn members_of_name_path<'a>(
     ws: &'a Workspace,
     mid: ModuleId,
     offset: usize,
     segments: &[String],
-) -> Option<TyRef<'a>> {
-    let [head] = segments else { return None };
-    let module = ws.modules.get(mid.index())?;
-    // Binding (param / local / inferred): its resolved type lives in the
-    // inference arena, so it pairs with that body.
-    if let Some(owner) = module.body_at(offset) {
-        if let (Some(body), Some(bi)) = (
-            module.bodies.get(&owner),
-            ws.inference(mid).and_then(|i| i.per_fn.get(&owner)),
-        ) {
-            if let Some(b_idx) = find_binding_by_name(body, head, offset) {
-                if let Some(&ty) = bi.binding_types.get(b_idx) {
-                    if let Some(elem) = array_elem_ty(ws, Some(bi), ty) {
-                        return Some(TyRef::new(Some(bi), elem));
-                    }
-                }
-            }
-        }
+) -> Option<Members<'a>> {
+    let (head, rest) = segments.split_first()?;
+    let mut recv = binding_or_global_ty(ws, mid, offset, head)?;
+    for seg in rest {
+        recv = member_ty(ws, recv, seg)?;
     }
-    // Global (may be declared in another module; its type is `Static`).
-    let name = Ustr::from(head.as_str());
-    let gty = module
-        .global_by_name
-        .get(&name)
-        .map(|g| module.globals[*g].ty)
-        .or_else(|| {
-            ws.modules
-                .iter()
-                .find_map(|m| m.global_by_name.get(&name).map(|g| m.globals[*g].ty))
-        })?;
-    let elem = array_elem_ty(ws, None, gty)?;
-    Some(TyRef::of_static(elem))
+    members_of_ty(ws, mid, offset, recv)
 }
 
-/// `(struct name, inferred type args)` if `ty` is a nominal-struct `App`
-/// (peeling a `Nullable`). Args are `TyId`s in the same arena as `ty`.
+fn members_of_ty<'a>(
+    ws: &'a Workspace,
+    mid: ModuleId,
+    offset: usize,
+    recv: TyRef<'a>,
+) -> Option<Members<'a>> {
+    let (fields, owner) = match struct_fields_of_ty(ws, mid, offset, recv) {
+        Some(typed) => typed,
+        None => (
+            Vec::new(),
+            types::member_owner_name(ws, recv.body, recv.ty)?,
+        ),
+    };
+    let is_iter = ws
+        .inference(mid)
+        .is_some_and(|inf| receiver_is_iterator(ws, mid, inf, offset, recv));
+    Some(Members {
+        fields,
+        owner,
+        vec_elem: types::array_elem(ws, recv.body, recv.ty).map(|e| TyRef::new(recv.body, e)),
+        sole_arg: types::sole_arg_name(ws, recv.body, recv.ty),
+        is_iter,
+    })
+}
+
+/// The type of the binding named `head` in scope at `offset` -- inferred, else
+/// declared (an annotated `let` whose initializer failed) -- or of the global
+/// `head`.
+fn binding_or_global_ty<'a>(
+    ws: &'a Workspace,
+    mid: ModuleId,
+    offset: usize,
+    head: &str,
+) -> Option<TyRef<'a>> {
+    let module = ws.modules.get(mid.index())?;
+    let local = module.body_at(offset).and_then(|owner| {
+        let body = module.bodies.get(&owner)?;
+        let b = find_binding_by_name(body, head, offset)?;
+        let bi = ws.inference(mid).and_then(|i| i.per_fn.get(&owner));
+        let inferred = bi.and_then(|bi| bi.binding_types.get(b).copied());
+        // A `let` annotation is `Local` to the body's lowered types, which seed
+        // its inference arena.
+        let ty = inferred.or(body.binding_arena[b].declared_ty)?;
+        Some(TyRef::new(bi, ty))
+    });
+    local.or_else(|| {
+        let ty = *ws.globals_by_name.get(&Ustr::from(head))?;
+        Some(TyRef::of_static(ty))
+    })
+}
+
+/// The type of `recv.seg`: a struct field, a tuple element, or a newtype's
+/// wrapped `.0`.
+fn member_ty<'a>(ws: &Workspace, recv: TyRef<'a>, seg: &str) -> Option<TyRef<'a>> {
+    match types::peel_nullable(ws, recv.body, recv.ty)? {
+        (id, hir::TypeExpr::Tuple { elements }) => {
+            let elem = elements.into_iter().nth(seg.parse().ok()?)?;
+            Some(TyRef::new(recv.body, id.with_idx(elem)))
+        }
+        (
+            _,
+            hir::TypeExpr::App {
+                ctor: hir::TypeCtor::Nominal(name),
+                ..
+            },
+        ) => {
+            if let Some(nt) = newtype_def_by_name(ws, name) {
+                return (seg == "0").then(|| TyRef::of_static(nt.wrapped));
+            }
+            let sdef = struct_def_by_name(ws, name)?;
+            let field = sdef.fields.iter().find(|f| f.name.as_str() == seg)?;
+            Some(TyRef::of_static(field.ty))
+        }
+        _ => None,
+    }
+}
+
 /// If `ty` is `FieldRef<Struct, V>`, the `Struct` name -- the struct a `.field`
 /// ref in that slot indexes. `None` for any other type (a plain sibling ref, or
 /// a `FieldRef` whose first arg isn't a nominal struct).
 fn field_ref_struct(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<Ustr> {
-    let (ctor, args) = struct_app_args(ws, bi, ty)?;
+    let (ctor, mut args) = types::nominal_args(ws, Some(bi), ty)?;
     if !is_field_ref_former(ctor) {
         return None;
     }
-    let (sname, _) = struct_app_args(ws, bi, *args.first()?)?;
-    Some(sname)
-}
-
-fn struct_app_args(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<(Ustr, Vec<TyId>)> {
-    match deref_ty(ws, Some(bi), ty)? {
-        hir::TypeExpr::App {
-            ctor: hir::TypeCtor::Nominal(name),
-            params,
-        } => {
-            let name = *name;
-            let args = params.into_iter().map(|idx| ty.with_idx(idx)).collect();
-            Some((name, args))
-        }
-        hir::TypeExpr::Nullable(inner) => struct_app_args(ws, bi, ty.with_idx(*inner)),
-        _ => None,
-    }
-}
-
-/// The struct name of a single-type-argument nominal's SOLE argument
-/// (`Entity<Glyph>` -> "Glyph"), peeling a `Nullable`. `None` for a non-nominal,
-/// a multi-arg nominal, or an argument that isn't a nominal struct. Feeds
-/// FieldRef method completion on wrapper-receiver overloads (`e.run_into(.co)`),
-/// where the FieldRef owner `T` binds through the receiver's `Entity<T>`.
-fn sole_type_arg_struct(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Option<Ustr> {
-    match deref_ty(ws, bi, ty)? {
-        hir::TypeExpr::App {
-            ctor: hir::TypeCtor::Nominal(_),
-            params,
-        } if params.len() == 1 => {
-            let arg = ty.with_idx(params.into_iter().next()?);
-            match deref_ty(ws, bi, arg)? {
-                hir::TypeExpr::App {
-                    ctor: hir::TypeCtor::Nominal(n),
-                    ..
-                } => Some(*n),
-                _ => None,
-            }
-        }
-        hir::TypeExpr::Nullable(inner) => sole_type_arg_struct(ws, bi, ty.with_idx(*inner)),
-        _ => None,
-    }
-}
-
-/// The sole-type-arg struct of a name-path receiver (`e` : `Entity<Glyph>` ->
-/// "Glyph"), for the structural-walk completion path. Single-segment head only
-/// (the common wrapper receiver: a param/local/global binding); a multi-segment
-/// receiver degrades to `None`, same as `receiver_vec_elem`.
-pub(crate) fn receiver_sole_arg_struct(
-    ws: &Workspace,
-    mid: ModuleId,
-    offset: usize,
-    segments: &[String],
-) -> Option<Ustr> {
-    let [head] = segments else { return None };
-    let (ty, bi) = receiver_head_ty(ws, mid, offset, head)?;
-    sole_type_arg_struct(ws, bi, ty)
-}
-
-/// Resolve a `TyId` to its `TypeExpr`: module arena for `Static`, the body
-/// inference's arena for `Local` (where inferred types live).
-fn deref_ty<'a>(
-    ws: &'a Workspace,
-    bi: Option<&'a BodyInference>,
-    ty: TyId,
-) -> Option<&'a hir::TypeExpr> {
-    match ty {
-        TyId::Static(m, idx) => Some(&ws.modules.get(m.index())?.ty_arena[idx]),
-        TyId::Local(idx) => Some(&bi?.ty_arena[idx]),
-    }
-}
-
-/// True if `ty` is the unit type `()`. A variable in place position (an assign
-/// target) is typed `()` by inference, so the completion type-anchor and hover
-/// recover the real type from the binding when they see it -- see
-/// `var_binding_ty_at`.
-pub(crate) fn ty_is_unit(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> bool {
-    matches!(
-        deref_ty(ws, bi, ty),
-        Some(hir::TypeExpr::Builtin(hir::BuiltinTy::Unit))
-    )
+    types::nominal_name(ws, Some(bi), args.next()?)
 }
 
 /// The declared type of a place variable at `offset`, read from its binding. A
@@ -3468,75 +3349,6 @@ pub(crate) fn binding_ty_by_name(
     bi.binding_types.get(b).copied()
 }
 
-/// The element `TyId` of a `[T]` (bone's `Array` ctor), in the same arena as
-/// `ty` (peeling `Nullable`). `None` when `ty` isn't a Vec. Used to render the
-/// element for element-aware Vec UFCS filtering.
-fn array_elem_ty(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Option<TyId> {
-    match deref_ty(ws, bi, ty)? {
-        hir::TypeExpr::App {
-            ctor: hir::TypeCtor::Array,
-            params,
-        } => Some(ty.with_idx(params.into_iter().next()?)),
-        hir::TypeExpr::Nullable(inner) => array_elem_ty(ws, bi, ty.with_idx(*inner)),
-        _ => None,
-    }
-}
-
-/// The struct name a receiver-head identifier resolves to: a local/param's
-/// declared type, a `let`'s struct-literal initializer, a `for` loop variable's
-/// element type, or a global's type.
-fn receiver_head_struct(ws: &Workspace, mid: ModuleId, offset: usize, head: &str) -> Option<Ustr> {
-    let module = ws.modules.get(mid.index())?;
-    if let Some(owner) = module.body_at(offset) {
-        if let Some(body) = module.bodies.get(&owner) {
-            if let Some(b_idx) = find_binding_by_name(body, head, offset) {
-                let binding = &body.binding_arena[b_idx];
-                if let Some(ty) = binding.declared_ty {
-                    // A `let`'s annotation lowers into `body.lowered_tys`
-                    // (`TyId::Local`); a param's into the module arena (`Static`).
-                    return struct_name_of_ty(ws, Some(body), ty);
-                }
-                if let Some(name) = let_init_struct_name(body, b_idx) {
-                    return Some(name);
-                }
-                if let Some(name) = for_loop_var_struct(ws, body, b_idx) {
-                    return Some(name);
-                }
-                if let Some(ty) = match_pattern_binding_ty(ws, body, b_idx) {
-                    return struct_name_of_ty(ws, Some(body), ty);
-                }
-                // Inferred local (`let c = mk()` -- call init, no annotation):
-                // its type lives only in inference, so recover the nominal name
-                // from `binding_types`. `nominal_name_of_ty` (not the struct-only
-                // `struct_fields_of_ty`) so a newtype head resolves too.
-                if let Some(bi) = ws.inference(mid).and_then(|i| i.per_fn.get(&owner)) {
-                    if let Some(&ty) = bi.binding_types.get(b_idx) {
-                        if let Some(sname) = nominal_name_of_ty(ws, Some(bi), ty) {
-                            return Some(sname);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Globals share ONE namespace across files, so a global receiver may be
-    // declared in another module (`global player: Player` in player.rock, used
-    // in sfx.rock). Search the whole workspace, not just the cursor's module --
-    // checking the current module first preserves shadowing if a name collides.
-    let name = Ustr::from(head);
-    if let Some(g) = module.global_by_name.get(&name) {
-        return struct_name_of_ty(ws, None, module.globals[*g].ty);
-    }
-    for m in ws.modules.iter() {
-        if let Some(g) = m.global_by_name.get(&name) {
-            return struct_name_of_ty(ws, None, m.globals[*g].ty);
-        }
-    }
-
-    None
-}
-
 /// The in-scope binding named `head`: a param, or the most recent `let` whose
 /// declaration ends before `offset`.
 fn find_binding_by_name(body: &Body, head: &str, offset: usize) -> Option<Idx<hir::BindingInfo>> {
@@ -3566,136 +3378,6 @@ fn find_binding_by_name(body: &Body, head: &str, offset: usize) -> Option<Idx<hi
     best.map(|(_, idx)| idx)
 }
 
-/// If `b_idx` is bound by `let x = StructName { .. }`, the struct name.
-fn let_init_struct_name(body: &Body, b_idx: Idx<hir::BindingInfo>) -> Option<Ustr> {
-    for (_, stmt) in body.statement_arena.iter() {
-        if let hir::Statement::Let { name, value } = stmt {
-            if *name == b_idx {
-                if let hir::Expr::StructLiteral { name: sname, .. } = &body.expr_arena[*value] {
-                    return Some(*sname);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// If `b_idx` is a `for <var> in <iter>` loop variable, the struct that the
-/// iterable's element type names. Resolves the iterable's element structurally
-/// (a `Vec<T>`/`[T]` binding) -- no inference.
-fn for_loop_var_struct(ws: &Workspace, body: &Body, b_idx: Idx<hir::BindingInfo>) -> Option<Ustr> {
-    for (_, stmt) in body.statement_arena.iter() {
-        if let hir::Statement::For { vars, iter, .. } = stmt {
-            if pattern_binds(vars, b_idx) {
-                return iter_element_struct(ws, body, *iter);
-            }
-        }
-    }
-    None
-}
-
-fn pattern_binds(pat: &hir::BindingPattern, b_idx: Idx<hir::BindingInfo>) -> bool {
-    match pat {
-        hir::BindingPattern::Leaf(b) => *b == b_idx,
-        hir::BindingPattern::Tuple(ps) => ps.iter().any(|p| pattern_binds(p, b_idx)),
-    }
-}
-
-/// Struct named by the element type of an iterable expression. Today handles a
-/// variable whose declared type is an array (`[T]`); other iterables fall back
-/// to None.
-fn iter_element_struct(ws: &Workspace, body: &Body, iter: Idx<hir::Expr>) -> Option<Ustr> {
-    let hir::Expr::Var(b) = &body.expr_arena[iter] else {
-        return None;
-    };
-    let ty = body.binding_arena[*b].declared_ty?;
-    let (te, m) = match ty {
-        TyId::Static(m, idx) => (&ws.modules.get(m.index())?.ty_arena[idx], Some(m)),
-        TyId::Local(idx) => (&body.lowered_tys[idx], None),
-    };
-    let hir::TypeExpr::App {
-        ctor: hir::TypeCtor::Array,
-        params,
-    } = te
-    else {
-        return None;
-    };
-    let elem_idx = params.start();
-    let elem_ty = match m {
-        Some(m) => TyId::Static(m, elem_idx),
-        None => TyId::Local(elem_idx),
-    };
-    struct_name_of_ty(ws, Some(body), elem_ty)
-}
-
-/// If `b_idx` is bound by a `match` arm pattern (`Opt::Some(p)` / record
-/// destructure), the type the variant's payload gives it. Structural -- reads
-/// the enum def's `VariantPayload`, no inference.
-fn match_pattern_binding_ty(
-    ws: &Workspace,
-    body: &Body,
-    b_idx: Idx<hir::BindingInfo>,
-) -> Option<TyId> {
-    for (_, arm) in body.match_arm_arena.iter() {
-        if let Some(ty) = pattern_binding_ty(ws, body, arm.pattern, b_idx) {
-            return Some(ty);
-        }
-    }
-    None
-}
-
-fn pattern_binding_ty(
-    ws: &Workspace,
-    body: &Body,
-    pat: Idx<hir::Pattern>,
-    b_idx: Idx<hir::BindingInfo>,
-) -> Option<TyId> {
-    match &body.pattern_arena[pat] {
-        hir::Pattern::EnumVariant {
-            enum_name,
-            variant,
-            sub,
-            ..
-        } => {
-            for (i, sp) in (*sub).into_iter().enumerate() {
-                if matches!(&body.pattern_arena[sp], hir::Pattern::Bind(b) if *b == b_idx) {
-                    return variant_tuple_field_ty(ws, *enum_name, *variant, i);
-                }
-                if let Some(t) = pattern_binding_ty(ws, body, sp, b_idx) {
-                    return Some(t);
-                }
-            }
-            None
-        }
-        hir::Pattern::Record {
-            enum_name,
-            name,
-            fields,
-            ..
-        } => {
-            for rf in (*fields).into_iter() {
-                let rpf = &body.record_pat_field_arena[rf];
-                if matches!(&body.pattern_arena[rpf.pat], hir::Pattern::Bind(b) if *b == b_idx) {
-                    return variant_record_field_ty(ws, *enum_name, *name, rpf.name);
-                }
-                if let Some(t) = pattern_binding_ty(ws, body, rpf.pat, b_idx) {
-                    return Some(t);
-                }
-            }
-            None
-        }
-        hir::Pattern::Tuple { elements } => (*elements)
-            .into_iter()
-            .find_map(|e| pattern_binding_ty(ws, body, e, b_idx)),
-        hir::Pattern::Or { alternatives } => (*alternatives)
-            .into_iter()
-            .find_map(|a| pattern_binding_ty(ws, body, a, b_idx)),
-        _ => None,
-    }
-}
-
-/// Enum definition for `variant`, by `enum_name` if given, else the first enum
-/// across all modules that declares a variant of that name.
 /// Hover for an enum-variant pattern (`MobKind::Skeleton`) read from the raw
 /// parser AST. bone's HIR `Pattern::EnumVariant` carries no span, but the parser
 /// keeps the variant- and enum-name `Ident` spans -- so the facade resolves the
@@ -3882,6 +3564,8 @@ fn pat_variant_def(ws: &Workspace, pat: &skull_parser::Pattern, offset: usize) -
     }
 }
 
+/// Enum definition for `variant`, by `enum_name` if given, else the first enum
+/// across all modules that declares a variant of that name.
 fn enum_def_for_variant(
     ws: &Workspace,
     enum_name: Option<Ustr>,
@@ -3903,21 +3587,6 @@ fn enum_def_for_variant(
     None
 }
 
-/// Type of a tuple-variant payload slot (`Opt::Some(Point)` -> slot 0 = Point).
-fn variant_tuple_field_ty(
-    ws: &Workspace,
-    enum_name: Option<Ustr>,
-    variant: Ustr,
-    pos: usize,
-) -> Option<TyId> {
-    let edef = enum_def_for_variant(ws, enum_name, variant)?;
-    let v = edef.variants.iter().find(|v| v.name == variant)?;
-    match &v.payload {
-        hir::VariantPayload::Tuple(tys) => tys.get(pos).copied(),
-        _ => None,
-    }
-}
-
 /// Type of a named field in a record-variant payload.
 fn variant_record_field_ty(
     ws: &Workspace,
@@ -3931,38 +3600,6 @@ fn variant_record_field_ty(
     match &v.payload {
         hir::VariantPayload::Record(fields) => {
             fields.iter().find(|f| f.name == field).map(|f| f.ty)
-        }
-        _ => None,
-    }
-}
-
-/// Peel a type down to its nominal struct name (through `Nullable`). `body` is
-/// needed for `TyId::Local` (a `let`'s annotation lives in `body.lowered_tys`);
-/// module-static types (params, fields, globals) pass `None`.
-fn struct_name_of_ty(ws: &Workspace, body: Option<&Body>, ty: TyId) -> Option<Ustr> {
-    let te = match ty {
-        TyId::Static(m, idx) => &ws.modules.get(m.index())?.ty_arena[idx],
-        TyId::Local(idx) => &body?.lowered_tys[idx],
-    };
-    match te {
-        hir::TypeExpr::App {
-            ctor: hir::TypeCtor::Nominal(name),
-            ..
-        } => Some(*name),
-        // `[T]` is bone's `Array` ctor, type-checked as the stdlib `Vec` struct
-        // (bone's `struct_field_ty` maps it to `*VEC`); so `xs.len` and the Vec
-        // UFCS fns (whose p0 is `[T]` -> resolves here to "Vec") complete.
-        hir::TypeExpr::App {
-            ctor: hir::TypeCtor::Array,
-            ..
-        } => Some(Ustr::from("Vec")),
-        // `inner` indexes the same arena as `ty`, so keep its TyId variant.
-        hir::TypeExpr::Nullable(inner) => {
-            let inner_ty = match ty {
-                TyId::Static(m, _) => TyId::Static(m, *inner),
-                TyId::Local(_) => TyId::Local(*inner),
-            };
-            struct_name_of_ty(ws, body, inner_ty)
         }
         _ => None,
     }
@@ -4013,171 +3650,11 @@ pub(crate) fn enum_variants_with_shape(
     Vec::new()
 }
 
-/// Record fields (name + rendered type) of an enum record variant
-/// (`Effect::Bandage { duration, heal_amount }`). Drives enum-record-literal
-/// field completion.
-/// The struct the receiver `segments` resolves to (e.g. `v.inner` -> the struct
-/// of `inner`), by the structural chain. None when it can't be resolved or isn't
-/// a struct. Drives UFCS method completion (generic type args are irrelevant to
-/// method lookup, so the inference-substitution path isn't needed here).
-pub(crate) fn struct_name_for_path(
-    ws: &Workspace,
-    mid: ModuleId,
-    offset: usize,
-    segments: &[String],
-) -> Option<Ustr> {
-    // Inference-first for a single-binding receiver, mirroring
-    // `struct_fields_for_path`: a local with no declared type (inferred from a
-    // call / method chain, `m = e.get().unwrap()`) resolves via its inferred
-    // type. Without this, fields surfaced (they have their own inference-first
-    // path) but UFCS methods did not.
-    if let [head] = segments {
-        if let Some(name) = inferred_struct_name(ws, mid, offset, head) {
-            return Some(name);
-        }
-    }
-    let (head, rest) = segments.split_first()?;
-    let (mut cur, rest) = resolve_receiver_head(ws, mid, offset, head, rest)?;
-    for seg in rest {
-        cur = field_hop_struct(ws, cur, seg)?;
-    }
-    Some(cur)
-}
-
-/// The receiver chain's starting struct name + the segments still to walk. A
-/// nominal head (struct/newtype) resolves directly. A TUPLE head has no name, so
-/// resolve its leading `.N` against the declared element type (a tuple isn't
-/// nominal, but its elements are), consuming that segment.
-fn resolve_receiver_head<'a>(
-    ws: &Workspace,
-    mid: ModuleId,
-    offset: usize,
-    head: &str,
-    rest: &'a [String],
-) -> Option<(Ustr, &'a [String])> {
-    if let Some(name) = receiver_head_struct(ws, mid, offset, head) {
-        return Some((name, rest));
-    }
-    let (seg0, rest2) = rest.split_first()?;
-    let (ty, bi) = receiver_head_ty(ws, mid, offset, head)?;
-    Some((tuple_elem_struct(ws, bi, ty, seg0)?, rest2))
-}
-
-/// The type of a receiver-head binding (param / annotated `let` -> declared;
-/// otherwise the inferred `binding_types`) or a global, plus the inference body
-/// its TyId indexes into (`None` for `Static` declared/global types). Feeds the
-/// tuple-head resolver, which the nominal-name paths above don't cover.
-fn receiver_head_ty<'a>(
-    ws: &'a Workspace,
-    mid: ModuleId,
-    offset: usize,
-    head: &str,
-) -> Option<(TyId, Option<&'a BodyInference>)> {
-    let module = ws.modules.get(mid.index())?;
-    if let Some(owner) = module.body_at(offset) {
-        if let Some(body) = module.bodies.get(&owner) {
-            if let Some(b_idx) = find_binding_by_name(body, head, offset) {
-                // A param's declared type is a module-static TyId (deref with no
-                // body); a `let` annotation lowers to `Local`, which the inferred
-                // path below resolves against the inference arena instead.
-                if let Some(ty @ TyId::Static(..)) = body.binding_arena[b_idx].declared_ty {
-                    return Some((ty, None));
-                }
-                if let Some(bi) = ws.inference(mid).and_then(|i| i.per_fn.get(&owner)) {
-                    if let Some(&ty) = bi.binding_types.get(b_idx) {
-                        return Some((ty, Some(bi)));
-                    }
-                }
-            }
-        }
-    }
-    let name = Ustr::from(head);
-    let gty = module
-        .global_by_name
-        .get(&name)
-        .map(|g| module.globals[*g].ty)
-        .or_else(|| {
-            ws.modules
-                .iter()
-                .find_map(|m| m.global_by_name.get(&name).map(|g| m.globals[*g].ty))
-        })?;
-    Some((gty, None))
-}
-
-/// Struct name of a tuple's `.N` element (`(Corpse, int).0` -> Corpse). `bi` is
-/// the arena the tuple's TyId indexes (`None` for a `Static` declared/global
-/// type). `None` when `ty` isn't a tuple, `seg` isn't a valid index, or the
-/// element isn't nominal.
-fn tuple_elem_struct(
-    ws: &Workspace,
-    bi: Option<&BodyInference>,
-    ty: TyId,
-    seg: &str,
-) -> Option<Ustr> {
-    // A non-numeric member name is a normal non-match for a tuple projection.
-    let n: usize = seg.parse().ok()?;
-    match deref_ty(ws, bi, ty)? {
-        hir::TypeExpr::Tuple { elements } => {
-            nominal_name_of_ty(ws, bi, ty.with_idx(elements.into_iter().nth(n)?))
-        }
-        hir::TypeExpr::Nullable(inner) => tuple_elem_struct(ws, bi, ty.with_idx(*inner), seg),
-        _ => None,
-    }
-}
-
-/// Nominal name a `TyId` denotes (struct / newtype / `Vec` for `[T]`), derefed
-/// through `bi`'s arena. The inference-aware sibling of `struct_name_of_ty`
-/// (which derefs through a `Body` instead).
-fn nominal_name_of_ty(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Option<Ustr> {
-    match deref_ty(ws, bi, ty)? {
-        hir::TypeExpr::App {
-            ctor: hir::TypeCtor::Nominal(name),
-            ..
-        } => Some(*name),
-        hir::TypeExpr::App {
-            ctor: hir::TypeCtor::Array,
-            ..
-        } => Some(Ustr::from("Vec")),
-        hir::TypeExpr::Nullable(inner) => nominal_name_of_ty(ws, bi, ty.with_idx(*inner)),
-        _ => None,
-    }
-}
-
-/// One structural field hop `cur.seg` -> the next type's nominal name, for the
-/// name-walk fallback. A named field on a struct; a numeric `.N` peels a newtype
-/// to its wrapped type (`w.0` on `newtype Wrap(Corpse)` -> Corpse). None when the
-/// hop doesn't resolve structurally (caller falls back to no completion).
-fn field_hop_struct(ws: &Workspace, cur: Ustr, seg: &str) -> Option<Ustr> {
-    if let Some(nt) = newtype_def_by_name(ws, cur) {
-        // A single-wrapped newtype exposes its inner value as `.0`.
-        return (seg == "0")
-            .then_some(())
-            .and_then(|_| struct_name_of_ty(ws, None, nt.wrapped));
-    }
-    let sdef = struct_def_by_name(ws, cur)?;
-    let field = sdef.fields.iter().find(|f| f.name.as_str() == seg)?;
-    struct_name_of_ty(ws, None, field.ty)
-}
-
 /// Look up a newtype definition by name across all modules.
 fn newtype_def_by_name(ws: &Workspace, name: Ustr) -> Option<&NewtypeDef> {
     ws.modules
         .iter()
         .find_map(|m| m.newtypes_by_name.get(&name).map(|i| &m.newtypes[*i]))
-}
-
-/// The struct NAME of a single-binding receiver via its recovered INFERRED type
-/// (the name half of [`inferred_struct_fields`]) -- resolves a local with no
-/// declared type (`m = make_mob()` / `e.get().unwrap()`).
-fn inferred_struct_name(ws: &Workspace, mid: ModuleId, offset: usize, head: &str) -> Option<Ustr> {
-    let module = ws.modules.get(mid.index())?;
-    let owner = module.body_at(offset)?;
-    let body = module.bodies.get(&owner)?;
-    let bi = ws.inference(mid)?.per_fn.get(&owner)?;
-    let b_idx = find_binding_by_name(body, head, offset)?;
-    let recv_ty = *bi.binding_types.get(b_idx)?;
-    let (sname, _args) = struct_app_args(ws, bi, recv_ty)?;
-    Some(sname)
 }
 
 /// A UFCS method offered on a receiver: name, rendered signature, and whether
@@ -4236,7 +3713,7 @@ pub(crate) fn ufcs_methods_in_scope(
                 continue;
             }
             if let Some(p0) = f.param_decls.first() {
-                let nominal_match = struct_name_of_ty(ws, None, p0.ty) == Some(name);
+                let nominal_match = types::member_owner_name(ws, None, p0.ty) == Some(name);
                 if nominal_match {
                     if let Some(want) = recv_elem {
                         if !vec_param_elem_matches(ws, p0.ty, want) {
@@ -4278,32 +3755,6 @@ fn receiver_is_iterator(
     inference::iterator_elem(&mut gamma, recv.ty, span).is_some()
 }
 
-/// [`receiver_is_iterator`] for a receiver known only by its struct name (the
-/// structural fallback): some instance of the struct.
-pub(crate) fn named_receiver_is_iterator(
-    ws: &Workspace,
-    mid: ModuleId,
-    offset: usize,
-    name: Ustr,
-) -> bool {
-    let Some(sdef) = struct_def_by_name(ws, name) else {
-        return false;
-    };
-    let Some(inf) = ws.inference(mid) else {
-        return false;
-    };
-    let Some((mut gamma, span)) = crate::backend::query_gamma(ws, mid, inf, offset) else {
-        return false;
-    };
-    let Ok(args) =
-        gamma.trial(|g| inference::instantiate_params(g, &sdef.generics, &sdef.generics, span))
-    else {
-        return false;
-    };
-    let recv = gamma.nominal_app(name, &args, span);
-    inference::iterator_elem(&mut gamma, recv, span).is_some()
-}
-
 /// Whether fn `f`'s first param is an `Iterator`-bounded generic (`it: I` with
 /// `<I: Iterator<..>>`) -- the combinator shape that's UFCS-callable on any
 /// iterator receiver.
@@ -4311,13 +3762,12 @@ fn fn_first_param_is_iter_bound(ws: &Workspace, f: &hir::Function) -> bool {
     let Some(p0) = f.param_decls.first() else {
         return false;
     };
-    let Some(hir::TypeExpr::Generic(pv, _)) = deref_ty(ws, None, p0.ty) else {
+    let hir::TypeExpr::Generic(pv, _) = types::ty_of(ws, None, p0.ty) else {
         return false;
     };
-    let pv = *pv;
     f.generics.iter().zip(&f.generic_bounds).any(|(g, bound)| {
         bound.is_some()
-            && matches!(deref_ty(ws, None, *g), Some(hir::TypeExpr::Generic(gv, _)) if *gv == pv)
+            && matches!(types::ty_of(ws, None, *g), hir::TypeExpr::Generic(gv, _) if gv == pv)
     })
 }
 
@@ -4325,9 +3775,9 @@ fn fn_first_param_is_iter_bound(ws: &Workspace, f: &hir::Function) -> bool {
 /// receiver with element `want`: `E'` generic (matches any element) or `E'`
 /// equivalent to `want`. `p0_ty` is `Static` (param types are).
 fn vec_param_elem_matches(ws: &Workspace, p0_ty: TyId, want: TyRef<'_>) -> bool {
-    match array_elem_ty(ws, None, p0_ty) {
+    match types::array_elem(ws, None, p0_ty) {
         Some(elem) => {
-            matches!(deref_ty(ws, None, elem), Some(hir::TypeExpr::Generic(..)))
+            matches!(types::ty_of(ws, None, elem), hir::TypeExpr::Generic(..))
                 || ws.types_equivalent(TyRef::of_static(elem), want)
         }
         None => false,
@@ -4346,10 +3796,10 @@ pub(crate) fn struct_field_names_at(
     let Some(ta) = bone_semantic::query::type_at(ws, mid, inf, offset) else {
         return Vec::new();
     };
-    let Some(bi) = ta.body else {
-        return Vec::new();
-    };
-    let Some((name, _)) = struct_app_args(ws, bi, ta.ty) else {
+    let Some(name) = ta
+        .body
+        .and_then(|bi| types::nominal_name(ws, Some(bi), ta.ty))
+    else {
         return Vec::new();
     };
     match struct_def_by_name(ws, name) {
@@ -4396,6 +3846,9 @@ pub(crate) fn struct_field_fn_return_ty(ws: &Workspace, name: &str, field: &str)
     }
 }
 
+/// Record fields (name + rendered type) of an enum record variant
+/// (`Effect::Bandage { duration, heal_amount }`). Drives enum-record-literal
+/// field completion.
 pub(crate) fn variant_record_fields(
     ws: &Workspace,
     enum_name: &str,
@@ -4480,9 +3933,8 @@ fn match_missing_variants<'a>(
         return None;
     };
 
-    // Scrutinee's enum (struct_app_args returns the nominal name for any App).
     let scrut_ty = *bi.expr_types.get(*scrutinee)?;
-    let (enum_name, _) = struct_app_args(ws, bi, scrut_ty)?;
+    let enum_name = types::nominal_name(ws, Some(bi), scrut_ty)?;
     let edef = enum_def_by_name(ws, enum_name)?;
 
     // Covered variants. A GUARDED arm may not fire, so it covers nothing (rock
@@ -5987,7 +5439,7 @@ pub fn signature_help(
             // are kept -- they can still accept the receiver.
             let recv_nominal = inf.and_then(|inf| inf.per_fn.get(&owner)).and_then(|bi| {
                 let first = args.clone().next()?;
-                nominal_name_of_ty(ws, Some(bi), *bi.expr_types.get(first)?)
+                types::member_owner_name(ws, Some(bi), *bi.expr_types.get(first)?)
             });
             let sigs = functions_named(ws, *name, sources, recv_nominal, frag);
             (!sigs.is_empty()).then_some((sigs, call_span))
@@ -6046,7 +5498,7 @@ fn functions_named(
                 if let Some(recv) = recv_nominal {
                     let p0 = ws.modules[fmid.index()].functions[*fid].param_decls.first();
                     let keep = p0
-                        .and_then(|p| nominal_name_of_ty(ws, None, p.ty))
+                        .and_then(|p| types::member_owner_name(ws, None, p.ty))
                         .map_or(true, |pn| pn == recv);
                     if keep {
                         matched.push(entry.clone());

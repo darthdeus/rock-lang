@@ -131,7 +131,7 @@ impl ReachabilityIndex {
                 let Some(p0) = f.param_decls.first() else {
                     continue;
                 };
-                let Some(recv) = struct_name_of_ty(ws, p0.ty) else {
+                let Some(recv) = crate::types::nominal_name(ws, None, p0.ty) else {
                     continue;
                 };
                 let Some(ret) = f.return_ty else { continue };
@@ -573,27 +573,8 @@ pub(crate) fn fields_admitted(ws: &Workspace, frag: &FragmentScope, fields: &[Fi
 /// (scalars like `int`). Canonicalizing is what lets traversal follow a `next:
 /// Node?` or `movable: Movable` field edge to the struct keyed by its bare name.
 fn type_key(ws: &Workspace, ty: TyId) -> Ustr {
-    struct_name_of_ty(ws, ty).unwrap_or_else(|| Ustr::from(ws.render(None, ty).as_str()))
-}
-
-/// The bare nominal name of a static type, peeling a nullable wrapper. Mirrors
-/// `query::struct_name_of_ty` but for the static (signature) arena only -- field
-/// and parameter types are always static, so no body is threaded.
-fn struct_name_of_ty(ws: &Workspace, ty: TyId) -> Option<Ustr> {
-    let TyId::Static(m, idx) = ty else {
-        return None;
-    };
-    let te = &ws.modules.get(m.index())?.ty_arena[idx];
-    match te {
-        bone_semantic::hir::TypeExpr::App {
-            ctor: bone_semantic::hir::TypeCtor::Nominal(name),
-            ..
-        } => Some(*name),
-        bone_semantic::hir::TypeExpr::Nullable(inner) => {
-            struct_name_of_ty(ws, TyId::Static(m, *inner))
-        }
-        _ => None,
-    }
+    crate::types::nominal_name(ws, None, ty)
+        .unwrap_or_else(|| Ustr::from(ws.render(None, ty).as_str()))
 }
 
 #[cfg(test)]

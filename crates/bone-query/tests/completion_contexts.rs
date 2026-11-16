@@ -2693,3 +2693,18 @@ fn member_receiver_resolves_in_broken_statements() {
         assert!(l.iter().any(|x| x == "name: string"), "{what}: {l:?}");
     }
 }
+
+#[test]
+fn call_receiver_of_enum_or_newtype_offers_ufcs_methods() {
+    // A non-struct nominal returned by a call takes UFCS methods like a named
+    // receiver of the same type does.
+    let src = "enum Dir { N, S }\n\
+               newtype Meters(float)\n\
+               fn flip(d: Dir) -> Dir { return d }\n\
+               fn halve(m: Meters) -> Meters { return m }\n\
+               fn dir() -> Dir { return Dir::N }\n\
+               fn dist() -> Meters { return Meters(1.0) }\n\
+               fn r() {\n  let a = dir().fl\n  let b = dist().ha\n}\n";
+    assert_insert(&item(src, 7, 18, "flip"), "flip()");
+    assert_insert(&item(src, 8, 19, "halve"), "halve()");
+}

@@ -18,6 +18,7 @@ mod backend;
 mod completion;
 mod cursor_context;
 mod rank_key;
+mod types;
 pub use backend::*;
 pub use completion::match_policy::{MatchPolicy, match_policy, set_match_policy};
 pub use rank_key::explain_sort_text;

@@ -16,12 +16,13 @@ use bone_semantic::prelude::{
 use ustr::Ustr;
 
 use crate::backend::{
-    ExpectedArg, analyze_variant, bind_generic, expected_for_anchor, nominal_base,
-    preceding_arg_starts, ty_of, user_module_for_path,
+    ExpectedArg, analyze_variant, bind_generic, expected_for_anchor, preceding_arg_starts,
+    user_module_for_path,
 };
 use crate::completion::match_policy::admit;
 use crate::query::{SymCat, clean_match};
 use crate::rank_key::RankKey;
+use crate::types::{self, ty_of};
 
 use super::classify::{SlotAnchor, balance_delimiters, completion_munges, in_pattern_position};
 use super::rank::*;
@@ -191,7 +192,7 @@ fn sibling_owner_bind(
             continue;
         };
         if let Some(bound) = bind_generic(ws, gname, None, pty, at.body, at.ty) {
-            if let Some(sn) = nominal_base(ws, at.body, bound) {
+            if let Some(sn) = types::nominal_name(ws, at.body, bound) {
                 return Some(sn);
             }
         }
@@ -224,8 +225,8 @@ pub(crate) fn field_ref_arg_completions(
     let (recv_struct, recv_elem) = recv_end
         .and_then(|e| {
             let mid = user_module_for_path(ws, path)?;
-            let (_, sname, _, sole, _) = crate::query::struct_members_of_receiver_expr(ws, mid, e)?;
-            Some((Some(sname), sole))
+            let m = crate::query::members_of_receiver_expr(ws, mid, e)?;
+            Some((Some(m.owner), m.sole_arg))
         })
         .unwrap_or((None, None));
     let recv_offset = usize::from(recv_end.is_some());
@@ -1383,7 +1384,13 @@ pub(crate) fn pattern_scrutinee_enum(
             let mid = user_module_for_path(ws, path)?;
             let inf = ws.inference(mid)?;
             let at = bone_semantic::query::type_at(ws, mid, inf, anchor)?;
-            let name = nominal_base(ws, at.body, at.ty)?;
+            let bone_semantic::hir::TypeExpr::App {
+                ctor: bone_semantic::hir::TypeCtor::Nominal(name),
+                ..
+            } = ty_of(ws, at.body, at.ty)
+            else {
+                return None;
+            };
             (!crate::query::enum_variants_with_shape(ws, name.as_str()).is_empty())
                 .then(|| name.to_string())
         });
@@ -1405,12 +1412,9 @@ pub(crate) fn open_paren_follows(src: &str, offset: usize) -> bool {
         == Some(&b'(')
 }
 
-/// Struct-field completions for `receiver.<field>`. The live body is broken by
-/// the trigger `.`, so this munges in a synthetic identifier (rust-analyzer's
-/// technique) to get a parseable file, then resolves the receiver's struct
-/// **structurally** (no inference required). Field labels are `name: type`.
-/// Each munge is analyzed as a speculative Session variant (one incremental
-/// update + restore), not a from-scratch project pass.
+/// Member completions for a dotted name receiver, typed from its head binding
+/// ([`crate::query::members_of_name_path`]) in each completion munge's
+/// speculative Session variant.
 pub(crate) fn member_completions(
     session: &mut Session,
     path: &str,
@@ -1471,8 +1475,7 @@ pub(crate) fn member_ty_match(
 /// Member completion for `recv.<cursor>`, any receiver shape. Its type comes
 /// from inference: `recv_end` is the receiver expr's end offset (BEFORE the
 /// cursor, so stable across the completion munges), and
-/// `struct_members_of_receiver_expr` reads its TyId via `type_at`. Fields +
-/// struct name then feed the shared builder.
+/// `members_of_receiver_expr` reads its TyId via `type_at`.
 ///
 /// `None` means the receiver did NOT resolve to a members-bearing type (a
 /// non-struct like `scale(x)` -> int) -- the caller may fall through to general
@@ -1497,17 +1500,12 @@ pub(crate) fn member_completions_by_receiver(
     for munged in completion_munges(src, offset) {
         let attempt = analyze_variant(session, path, &munged, |ws| {
             let mid = user_module_for_path(ws, path)?;
-            let (fields, recv_struct, vec_elem, recv_elem, recv_is_iter) =
-                crate::query::struct_members_of_receiver_expr(ws, mid, recv_end)?;
+            let members = crate::query::members_of_receiver_expr(ws, mid, recv_end)?;
             Some(build_member_items(
                 ws,
                 mid,
                 offset,
-                fields,
-                Some(recv_struct),
-                vec_elem,
-                recv_elem,
-                recv_is_iter,
+                members,
                 prefix,
                 arg_slot.clone(),
                 anchor,
@@ -1547,24 +1545,14 @@ pub(crate) fn member_completion_items(
     let Some(mid) = user_module_for_path(ws, path) else {
         return Vec::new();
     };
-    // Name-path receiver (`recv.field.field`): resolve struct + fields
-    // structurally (no inference). A call/index receiver is resolved from its
-    // INFERRED type instead -- see `member_completion_items_by_receiver`.
-    let fields = crate::query::struct_fields_for_path(ws, mid, offset, segments);
-    let recv_struct = crate::query::struct_name_for_path(ws, mid, offset, segments);
-    let vec_elem = crate::query::receiver_vec_elem(ws, mid, offset, segments);
-    let recv_elem = crate::query::receiver_sole_arg_struct(ws, mid, offset, segments);
-    let recv_is_iter = recv_struct
-        .is_some_and(|name| crate::query::named_receiver_is_iterator(ws, mid, offset, name));
+    let Some(members) = crate::query::members_of_name_path(ws, mid, offset, segments) else {
+        return Vec::new();
+    };
     build_member_items(
         ws,
         mid,
         offset,
-        fields,
-        recv_struct,
-        vec_elem,
-        recv_elem,
-        recv_is_iter,
+        members,
         prefix,
         arg_slot,
         anchor,
@@ -1702,24 +1690,15 @@ fn field_ref_methods<'a>(
     out
 }
 
-/// Shared item-builder for both receiver-resolution strategies (structural
-/// name-walk and inferred receiver type): UFCS methods, type-directed
+/// Shared item-builder for both receiver-resolution strategies (receiver
+/// expression and name path): UFCS methods, type-directed
 /// field/method ordering, Entity `get` boost, arg-position transitive reach.
 #[allow(clippy::too_many_arguments)]
 fn build_member_items(
     ws: &Workspace,
     mid: ModuleId,
     offset: usize,
-    fields: Vec<(String, String, Option<TyId>)>,
-    recv_struct: Option<Ustr>,
-    // Receiver's element type for a Vec (`[Vec2]` -> `Vec2`); filters UFCS
-    // methods to those whose element matches. None for nominal receivers.
-    vec_elem: Option<TyRef<'_>>,
-    // Receiver's sole type-arg struct (`Entity<Glyph>` -> "Glyph"); the FieldRef
-    // owner `T` binds through it on wrapper-receiver overloads (`e.run_into(.co)`).
-    recv_elem: Option<Ustr>,
-    // The receiver takes the `Iterator`-bounded combinators.
-    recv_is_iter: bool,
+    members: crate::query::Members<'_>,
     prefix: &str,
     arg_slot: Option<(String, usize)>,
     anchor: Option<SlotAnchor>,
@@ -1729,6 +1708,17 @@ fn build_member_items(
     // accepting doesn't double the parens (`recv.le|()` -> `recv.len()`).
     paren_follows: bool,
 ) -> Vec<CompletionItem> {
+    let crate::query::Members {
+        fields,
+        owner,
+        // A Vec receiver's element filters UFCS methods to matching elements.
+        vec_elem,
+        // The FieldRef owner `T` binds through it on wrapper-receiver
+        // overloads (`e.run_into(.co)`).
+        sole_arg: recv_elem,
+        is_iter: recv_is_iter,
+    } = members;
+    let recv_struct = Some(owner);
     {
         let frag = crate::modules_scope::fragment(ws, ws.module(mid).file);
         // UFCS methods: functions whose first param is the receiver's struct,

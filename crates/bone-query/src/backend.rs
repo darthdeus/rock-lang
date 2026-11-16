@@ -2971,7 +2971,7 @@ fn semantic_classifications(
     // at its declaration, like a binding decl.
     for (_, g) in module.globals.iter() {
         let mods = global_mod(g.is_const)
-            | if ty_is_nullable(ws, None, g.ty) {
+            | if crate::types::is_nullable(ws, None, g.ty) {
                 MOD_NULLABLE
             } else {
                 0
@@ -2994,7 +2994,7 @@ fn semantic_classifications(
         for (b, info) in body.binding_arena.iter() {
             if let Some(sp) = body.binding_spans.get(b) {
                 let mods = match bi.and_then(|bi| bi.binding_types.get(b)) {
-                    Some(&ty) if ty_is_nullable(ws, bi, ty) => MOD_NULLABLE,
+                    Some(&ty) if crate::types::is_nullable(ws, bi, ty) => MOD_NULLABLE,
                     _ => 0,
                 };
                 map.insert(sp.offset_range().0, (binding_tt(info.kind), mods));
@@ -3011,10 +3011,12 @@ fn semantic_classifications(
                         let tt = binding_tt(body.binding_arena[*b].kind);
                         let decl_nullable = bi
                             .and_then(|bi| bi.binding_types.get(*b))
-                            .is_some_and(|&ty| ty_is_nullable(ws, bi, ty));
+                            .is_some_and(|&ty| crate::types::is_nullable(ws, bi, ty));
                         let mods = if decl_nullable {
                             match bi.and_then(|bi| bi.expr_types.get(e)) {
-                                Some(&use_ty) if ty_is_nullable(ws, bi, use_ty) => MOD_NULLABLE,
+                                Some(&use_ty) if crate::types::is_nullable(ws, bi, use_ty) => {
+                                    MOD_NULLABLE
+                                }
                                 Some(_) => MOD_REFINED,
                                 None => MOD_NULLABLE,
                             }
@@ -3042,9 +3044,11 @@ fn semantic_classifications(
                         (body.expr_spans.get(e), global_tys.get(name))
                     {
                         let mods = global_mod(is_const)
-                            | if ty_is_nullable(ws, bi, decl_ty) {
+                            | if crate::types::is_nullable(ws, bi, decl_ty) {
                                 match bi.and_then(|bi| bi.expr_types.get(e)) {
-                                    Some(&use_ty) if ty_is_nullable(ws, bi, use_ty) => MOD_NULLABLE,
+                                    Some(&use_ty) if crate::types::is_nullable(ws, bi, use_ty) => {
+                                        MOD_NULLABLE
+                                    }
                                     Some(_) => MOD_REFINED,
                                     None => MOD_NULLABLE,
                                 }
@@ -3125,34 +3129,6 @@ struct SemanticClassifications {
     by_offset: HashMap<usize, (u32, u32)>,
     /// `{expr}` hole EXPR spans (no braces), sorted by start offset.
     interp_holes: Vec<Span>,
-}
-
-/// Whether `ty` resolves to a `T?` nullable, following inference-var
-/// substitutions (mirrors `Workspace::render`'s resolution). `body` is the
-/// `BodyInference` that owns Local types and substitutions; without it, Local
-/// types and unsubstituted inference vars read as non-nullable.
-fn ty_is_nullable(
-    ws: &Workspace,
-    body: Option<&bone_semantic::prelude::BodyInference>,
-    ty: bone_semantic::prelude::TyId,
-) -> bool {
-    use bone_semantic::hir::TypeExpr;
-    use bone_semantic::prelude::TyId;
-    let te = match ty {
-        TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
-        TyId::Local(idx) => match body {
-            Some(b) => b.ty_arena[idx],
-            None => return false,
-        },
-    };
-    match te {
-        TypeExpr::Nullable(_) => true,
-        TypeExpr::Infer(var_id, _) => match body.and_then(|b| b.substitutions.get(var_id)) {
-            Some(sub) => ty_is_nullable(ws, body, sub),
-            None => false,
-        },
-        _ => false,
-    }
 }
 
 /// Workspace-wide identifier categories for semantic tokens: every struct /
@@ -3788,48 +3764,6 @@ pub(crate) fn preceding_arg_starts(src: &str, offset: usize) -> Vec<usize> {
     starts
 }
 
-/// Fetch a `TypeExpr` for a `TyId` from the right arena, following `Infer`
-/// substitutions so a solved inference var reads as its concrete type.
-pub(crate) fn ty_of(
-    ws: &Workspace,
-    body: Option<&BodyInference>,
-    ty: TyId,
-) -> bone_semantic::hir::TypeExpr {
-    use bone_semantic::hir::{BuiltinTy, TypeExpr};
-    let te = match ty {
-        TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
-        TyId::Local(idx) => match body {
-            Some(b) => b.ty_arena[idx],
-            None => return TypeExpr::Builtin(BuiltinTy::Error),
-        },
-    };
-    if let TypeExpr::Infer(var, _) = te {
-        if let Some(sub) = body.and_then(|b| b.substitutions.get(var)) {
-            return ty_of(ws, body, sub);
-        }
-    }
-    te
-}
-
-/// Resolve `ty` through `Infer` substitutions to its canonical `TyId`, whose
-/// child indices are valid via `with_idx`.
-pub(crate) fn resolved_tyid(ws: &Workspace, body: Option<&BodyInference>, ty: TyId) -> TyId {
-    use bone_semantic::hir::TypeExpr;
-    let te = match ty {
-        TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
-        TyId::Local(idx) => match body {
-            Some(b) => b.ty_arena[idx],
-            None => return ty,
-        },
-    };
-    if let TypeExpr::Infer(var, _) = te {
-        if let Some(sub) = body.and_then(|b| b.substitutions.get(var)) {
-            return resolved_tyid(ws, body, sub);
-        }
-    }
-    ty
-}
-
 /// Walk `param` (a callee param type carrying generics) against `arg` (an
 /// inferred concrete type) in parallel; return the `arg` subtree bound to the
 /// generic named `target`. Recurses through App and Nullable.
@@ -3842,12 +3776,12 @@ pub(crate) fn bind_generic(
     arg: TyId,
 ) -> Option<TyId> {
     use bone_semantic::hir::TypeExpr;
-    let param = resolved_tyid(ws, p_body, param);
-    let arg = resolved_tyid(ws, a_body, arg);
-    match ty_of(ws, p_body, param) {
+    let (param, p_te) = ws.resolve_ty(p_body, param)?;
+    let (arg, a_te) = ws.resolve_ty(a_body, arg)?;
+    match p_te {
         TypeExpr::Generic(_, name) if name == target => Some(arg),
         TypeExpr::App { params: pp, .. } => {
-            if let TypeExpr::App { params: ap, .. } = ty_of(ws, a_body, arg) {
+            if let TypeExpr::App { params: ap, .. } = a_te {
                 if pp.len() == ap.len() {
                     return pp.into_iter().zip(ap).find_map(|(pi, ai)| {
                         bind_generic(
@@ -3863,7 +3797,7 @@ pub(crate) fn bind_generic(
             }
             None
         }
-        TypeExpr::Nullable(pi) => match ty_of(ws, a_body, arg) {
+        TypeExpr::Nullable(pi) => match a_te {
             TypeExpr::Nullable(ai) => bind_generic(
                 ws,
                 target,
@@ -3874,18 +3808,6 @@ pub(crate) fn bind_generic(
             ),
             _ => None,
         },
-        _ => None,
-    }
-}
-
-/// The base nominal (struct) name of `ty`, if it is a `Nominal` App.
-pub(crate) fn nominal_base(ws: &Workspace, body: Option<&BodyInference>, ty: TyId) -> Option<Ustr> {
-    use bone_semantic::hir::{TypeCtor, TypeExpr};
-    match ty_of(ws, body, ty) {
-        TypeExpr::App {
-            ctor: TypeCtor::Nominal(name),
-            ..
-        } => Some(name),
         _ => None,
     }
 }
@@ -5037,7 +4959,9 @@ mod tests {
         ]);
         let elem_of = |name: &str| {
             let p0 = first_param(&ws, name);
-            let bone_semantic::hir::TypeExpr::App { mut params, .. } = ty_of(&ws, None, p0) else {
+            let bone_semantic::hir::TypeExpr::App { mut params, .. } =
+                crate::types::ty_of(&ws, None, p0)
+            else {
                 panic!("`{name}` takes a Vec");
             };
             TyRef::of_static(p0.with_idx(params.next().unwrap()))
