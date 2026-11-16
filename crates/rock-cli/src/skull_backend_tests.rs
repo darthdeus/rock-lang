@@ -3924,13 +3924,11 @@ mod force_full_tests {
     #[test]
     fn overlay_delivers_a_graph_added_fn_the_edit_makes_reachable() {
         // A LIBRARY fn, since the project's own modules are always roots. `split`
-        // is not inlined and pulls `find`/`substring`/`len` with it, so this also
-        // covers the multi-hop case rather than just the first edge.
+        // is not inlined, so the overlay must deliver its body.
         let v1 = "fn main() { print(\"start\") }\n";
         let v2 = "fn main() { print(\"{split(\\\"a,b\\\", \\\",\\\").len}\") }\n";
         // Only `split` itself: its own callees are inlined into it, so they are
-        // legitimately absent from the composed program. The transitive case is
-        // covered by the driver's own tests (rock-lang/crates/skull-mir/tests/reach_driver.rs).
+        // legitimately absent from the composed program.
         let needed = ["function split_string_string("];
 
         let mut fx = ProjectFixture::boot(v1);
