@@ -163,7 +163,7 @@ impl<'a> Builder<'a> {
             ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_) => {
                 self.lower_for_array(vars, iter, body)
             }
-            ContainerKind::Map => self.lower_for_map(&vars, iter, body),
+            ContainerKind::Map => self.lower_for_map(None, &vars, iter, body),
             ContainerKind::Record => unreachable!("for over a heap record"),
             // Synthetic: a leaf column and a leaf VIEW are both minted during
             // element lowering and are never user types, so neither can be a
@@ -804,9 +804,12 @@ impl<'a> Builder<'a> {
     }
 
     /// `for (k, v) in m` / `for kv in m`: Lua stateless `next` iteration. The key
-    /// cell is the cursor; a nil key after `MapNext` ends the loop.
+    /// cell is the cursor; a nil key after `MapNext` ends the loop. Under
+    /// `enumerate(m)`, `counter` binds a 0-based index stepped in the latch, so
+    /// `continue` still steps it.
     pub(crate) fn lower_for_map(
         &mut self,
+        counter: Option<Idx<BindingInfo>>,
         vars: &BindingPattern,
         iter: Idx<Expr>,
         body: Idx<Expr>,
@@ -832,9 +835,32 @@ impl<'a> Builder<'a> {
             cell: key_cell,
             value: nil,
         });
+        let i_cell = match counter {
+            Some(ib) => {
+                let i_cell = self.new_binding_cell(
+                    ib,
+                    self.body.binding_arena[ib].name,
+                    self.binding_ty(ib),
+                    crate::names::ustr(""),
+                );
+                self.binds.insert(raw(ib), i_cell);
+                self.f.mark_loop_binding(i_cell);
+                let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
+                self.emit_cur(Inst::Store {
+                    cell: i_cell,
+                    value: zero,
+                });
+                Some(i_cell)
+            }
+            None => None,
+        };
 
         let header = self.f.new_block();
         let body_bb = self.f.new_block();
+        let latch = match i_cell {
+            Some(_) => self.f.new_block(),
+            None => header,
+        };
         let exit = self.f.new_block();
         self.f.set_term(self.cur, Term::Goto(header));
 
@@ -871,93 +897,24 @@ impl<'a> Builder<'a> {
             None => None,
         };
         self.bind_map_entry(vars, key_cell, val_cell, vv)?;
-        self.loop_targets.push((header, exit, self.defers.len())); // continue -> header (re-runs next)
-        self.lower_stmt_expr(body)?;
-        self.loop_targets.pop();
-        if self.is_open() {
-            self.f.set_term(self.cur, Term::Goto(header));
-        }
-
-        self.cur = exit;
-        Ok(())
-    }
-
-    /// `for (i, (k, v)) in enumerate(m)`: Lua stateless `next` iteration (like
-    /// `lower_for_map`) with a 0-based counter cell bound to `i`, incremented in
-    /// the latch so `continue` still steps it. `xpat` binds the `(k, v)` entry.
-    pub(crate) fn lower_for_map_enumerate(
-        &mut self,
-        ib: Idx<BindingInfo>,
-        xpat: &BindingPattern,
-        iter: Idx<Expr>,
-        body: Idx<Expr>,
-    ) -> Result<(), CompilerError> {
-        let m = self.lower_expr(iter)?;
-        let key_cell = self.f.new_cell(None);
-        let val_cell = self.f.new_cell(None);
-        self.f.mark_loop_binding(key_cell);
-        self.f.mark_loop_binding(val_cell);
-        let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        self.emit_cur(Inst::Store {
-            cell: key_cell,
-            value: nil,
-        });
-        let i_cell = self.new_binding_cell(
-            ib,
-            self.body.binding_arena[ib].name,
-            self.binding_ty(ib),
-            crate::names::ustr(""),
-        );
-        self.binds.insert(raw(ib), i_cell);
-        self.f.mark_loop_binding(i_cell);
-        let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
-        self.emit_cur(Inst::Store {
-            cell: i_cell,
-            value: zero,
-        });
-
-        let header = self.f.new_block();
-        let body_bb = self.f.new_block();
-        let latch = self.f.new_block();
-        let exit = self.f.new_block();
-        self.f.set_term(self.cur, Term::Goto(header));
-
-        self.cur = header;
-        self.emit_cur(Inst::MapNext {
-            key_cell,
-            val_cell,
-            table: m,
-        });
-        let k = self.emit_cur(Inst::Load(key_cell));
-        let nil2 = self.emit_cur(Inst::Const(Lit::Nil));
-        let done = self.emit_cur(Inst::Eq(k, nil2));
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: done,
-                then_bb: exit,
-                else_bb: body_bb,
-            },
-        );
-
-        self.cur = body_bb;
-        self.bind_map_entry(xpat, key_cell, val_cell, None)?;
-        self.loop_targets.push((latch, exit, self.defers.len())); // continue -> latch (steps counter)
+        self.loop_targets.push((latch, exit, self.defers.len()));
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
         if self.is_open() {
             self.f.set_term(self.cur, Term::Goto(latch));
         }
 
-        self.cur = latch;
-        let i2 = self.emit_cur(Inst::Load(i_cell));
-        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
-        let inc = self.emit_cur(Inst::IntAdd(i2, one));
-        self.emit_cur(Inst::Store {
-            cell: i_cell,
-            value: inc,
-        });
-        self.f.set_term(self.cur, Term::Goto(header));
+        if let Some(i_cell) = i_cell {
+            self.cur = latch;
+            let i2 = self.emit_cur(Inst::Load(i_cell));
+            let one = self.emit_cur(Inst::Const(Lit::Int(1)));
+            let inc = self.emit_cur(Inst::IntAdd(i2, one));
+            self.emit_cur(Inst::Store {
+                cell: i_cell,
+                value: inc,
+            });
+            self.f.set_term(self.cur, Term::Goto(header));
+        }
 
         self.cur = exit;
         Ok(())
@@ -1104,7 +1061,7 @@ impl<'a> Builder<'a> {
         if !self.expr_is_flat_vec(coll) && self.coll_kind(coll)? == ContainerKind::Map {
             let (ib, xpat) =
                 split.ok_or_else(|| gap("enumerate over Map with a single binding"))?;
-            return self.lower_for_map_enumerate(ib, &xpat, coll, body);
+            return self.lower_for_map(Some(ib), &xpat, coll, body);
         }
         let (kind, arr_v, len_v) = self.lower_counted_storage(coll)?;
         // The counter cell is named after the index var in split mode; an internal
