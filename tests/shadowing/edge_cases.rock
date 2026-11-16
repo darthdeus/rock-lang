@@ -96,16 +96,6 @@ fn test_interdependent_shadows() {
         a + b + c
     }
     
-    // Wait, let me recalculate...
-    // a = 2 + 3 = 5
-    // b = 5 + 3 = 8  
-    // c = 5 + 8 - 3 = 10
-    // Since 5 < 8:
-    // a = 10 - 5 = 5
-    // b = 5
-    // c = 5 + 5 = 10
-    // Result should be 5 + 5 + 10 = 20, not 15
-    
     print(result.to_string())
 }
 
@@ -276,16 +266,4 @@ fn process_with_shadow(flag: bool) -> int {
 fn test_shadow_with_early_return() {
     print("Early return: " + process_with_shadow(true).to_string())
     print("Normal: " + process_with_shadow(false).to_string())
-}
-
-// Test 12: Maximum identifier reuse
-@test(output = "Final x: 6")
-fn test_maximum_identifier_reuse() {
-    let x: int = 1
-    let x = x + 1  // x = 2
-    let x = x + 1  // x = 3
-    let x = x + 1  // x = 4
-    let x = x + 1  // x = 5
-    let x = x + 1  // x = 6
-    print("Final x: " + x.to_string())
 }

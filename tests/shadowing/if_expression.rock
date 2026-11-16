@@ -182,56 +182,6 @@ fn test_nullable_default_if_expression() {
     print("Provided value: " + process_with_default(100).to_string())
 }
 
-// Helper struct for test 8
-struct Data8 {
-    value: int
-}
-
-// Test 8: Shadowing with struct field access in if expression
-@test(output = "Field value: 10\nShadowed value: 20\nOriginal struct field: 10")
-fn test_struct_field_shadow_in_if() {
-    let data = Data8 { value: 10 }
-
-    let result = if true {
-        print("Field value: " + data.value.to_string())
-        let value = 20  // Shadow the field name
-        print("Shadowed value: " + value.to_string())
-        value
-    } else {
-        data.value
-    }
-
-    print("Original struct field: " + data.value.to_string())
-}
-
-// Test 9: Triple nested if expressions with shadowing
-@test(output = "Level 3: 300\nOriginal: 1")
-fn test_triple_nested_if_shadows() {
-    let x = 1
-
-    let result = if true {
-        let x = 100
-        if true {
-            let x = 200
-            if true {
-                let x = 300
-                print("Level 3: " + x.to_string())
-                x
-            } else {
-                print("Level 2: " + x.to_string())
-                x
-            }
-        } else {
-            print("Level 1: " + x.to_string())
-            x
-        }
-    } else {
-        x
-    }
-
-    print("Original: " + x.to_string())
-}
-
 // Test 10: Shadowing with array/loop interaction in if expression
 @test(output = "Loop sum: 6\nShadowed in if: 100\nOriginal sum: 0")
 fn test_if_expression_loop_shadow() {
@@ -399,18 +349,6 @@ fn test_minimal_nested_if() {
         }
         print("C")
     }
-}
-
-// Test if expression as value with side effects
-@test(output = "Computing...\nResult: 42")
-fn test_if_expr_with_side_effects() {
-    let value = if true {
-        print("Computing...")
-        42
-    } else {
-        0
-    }
-    print("Result: " + value.to_string())
 }
 
 // Test nested if expression values

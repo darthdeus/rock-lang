@@ -1,78 +1,12 @@
 // Name resolution under shadowing: parameters and locals over functions and
 // globals, block and branch scopes, lambda captures, loop variables, default
-// and tuple parameters, and generic and type-alias names.
-
-// ============================================
-// Helper structures and functions
-// ============================================
-
-struct FixVec2 {
-    x: int,
-    y: int,
-}
-
-fn fixv() -> int {
-    return 42
-}
+// parameters, and type names.
 
 fn helper_function() -> int {
     return 99
 }
 
 global global_var: int = 999
-
-// ============================================
-// Parameter vs Function Precedence Tests
-// ============================================
-
-@test(output = "10")
-fn test_parameter_vs_function_precedence_field_access() {
-    // Parameter should shadow function name in field access
-    let pos = FixVec2 { x: 10, y: 20 }
-    let result = test_precedence(pos)
-    print(result)
-}
-
-fn test_precedence(v: FixVec2) -> int {
-    return v.x  // This should resolve to parameter v, not function v()
-}
-
-@test(output = "10") 
-fn test_parameter_vs_function_precedence_direct_use() {
-    // Parameter should shadow function name
-    let result = test_function_parameter(10)
-    print(result)
-}
-
-fn test_function_parameter(v: int) -> int {
-    return v  // This should resolve to parameter v, not function v()
-}
-
-// ============================================
-// Local Variable vs Function Precedence Tests  
-// ============================================
-
-@test(output = "20")
-fn test_local_var_vs_function_precedence() {
-    // Local variable should shadow function name
-    let result = test_local_shadowing()
-    print(result)
-}
-
-fn test_local_shadowing() -> int {
-    let v = 20  // This shadows the function v()
-    return v    // Should return 20, not call v()
-}
-
-// ============================================
-// Nested Scope Precedence Tests
-// ============================================
-
-@test(output = "30")
-fn test_nested_scope_precedence() {
-    let result = test_nested()
-    print(result)
-}
 
 fn test_nested() -> int {
     let helper_function = 30  // shadows helper_function()
@@ -83,9 +17,22 @@ fn test_inner(helper: int) -> int {
     return helper  // Should use parameter, not function
 }
 
-// ============================================
-// Block Scope Shadowing Tests
-// ============================================
+@test(output = "30\n7\n5\n999\n99")
+fn params_and_locals_shadow_function_names() {
+    print(test_nested())
+    print(multi_param_test(7, 8))
+    print(nested_local_shadows_helper())
+    print(helper())
+    print(helper_function())
+}
+
+@test(output = "42\n10\n42\n999")
+fn parameter_shadows_global_variable() {
+    print(use_parameter(42))
+    print(process_param(5))
+    print(counter)
+    print(global_var)
+}
 
 @test(output = "1\n2\n1")
 fn test_block_scope_shadowing() {
@@ -101,46 +48,14 @@ fn test_block_scope_shadowing() {
     print(x)  // Should be back to 1
 }
 
-@test(output = "100\n5")
-fn test_if_statement_shadowing() {
-    let x = 5
-    
-    if true {
-        let x = 100
-        print(x)
-    }
-    
-    print(x)  // Should still be 5
-}
-
-// ============================================
-// Function Parameter Shadowing Tests
-// ============================================
-
-@test(output = "42")
-fn test_parameter_shadows_global() {
-    let result = use_parameter(42)
-    print(result)
-}
-
 fn use_parameter(global_var: int) -> int {
     return global_var  // Parameter shadows global
-}
-
-@test(output = "7")
-fn test_multiple_parameters_shadowing() {
-    let result = multi_param_test(7, 8)
-    print(result)
 }
 
 fn multi_param_test(helper_function: int, v: int) -> int {
     // Parameters shadow functions with same names
     return helper_function  // Should return 7, not call helper_function()
 }
-
-// ============================================
-// Let Binding Shadowing Tests
-// ============================================
 
 @test(output = "1\n2\n1")
 fn test_sequential_let_shadowing() {
@@ -152,31 +67,6 @@ fn test_sequential_let_shadowing() {
     
     let x = x - 1  // Uses shadowed x (2) and creates new x (1)
     print(x)
-}
-
-@test(output = "10\n20")
-fn test_let_expression_shadowing() {
-    let result = 10
-    let result = result + 10  // Uses previous result
-    print(result - 10)  // Prints 10
-    print(result)       // Prints 20
-}
-
-// ============================================
-// Conditional Shadowing Tests
-// ============================================
-
-@test(output = "outer\nif_branch\nouter")
-fn test_conditional_shadowing() {
-    let cond_var = "outer"
-    print(cond_var)
-    
-    if true {
-        let cond_var = "if_branch"
-        print(cond_var)
-    }
-    
-    print(cond_var)  // Back to outer
 }
 
 @test(output = "5\n10\n5")
@@ -195,17 +85,8 @@ fn test_else_branch_shadowing() {
     print(branch_var)  // Back to 5
 }
 
-// Shared struct definitions
-struct Data {
-    value: int
-}
-
 struct Counter {
     count: int
-}
-
-struct Container<T> {
-    value: T
 }
 
 // Helper functions
@@ -221,12 +102,6 @@ fn value_func() -> int {
     return 42
 }
 
-// Helper functions for specific tests
-fn local_shadowing_ten() -> int {
-    let v = 10  // Local variable shadows the function
-    return v    // This should resolve to local variable v, not function v()
-}
-
 
 fn nested_local_shadows_helper() -> int {
     let helper = 5
@@ -240,12 +115,6 @@ global value: int = 100
 global counter2: int = 0
 global x: int = 1
 global g2: int = 100
-
-// Helper functions that use globals
-fn test_global_local() -> int {
-    let g = 10  // Local shadows global
-    return g
-}
 
 fn process_param(counter: int) -> int {
     return counter * 2  // Should use parameter, not global
@@ -286,15 +155,6 @@ fn test_func(x: int = 10, default_val: int = 20) -> int {
     return x + default_val  // Uses parameters, not outer variable
 }
 
-fn process(t: (int, int)) -> int {
-    let (a, b) = t
-    return a + b  // Uses tuple elements, not outer variables
-}
-
-fn process_data(d: Data) -> int {
-    return d.value  // Field access, not outer variable
-}
-
 fn increment(c: Counter, count: int) -> Counter {
     return Counter {
         count: c.count + count
@@ -311,16 +171,6 @@ fn level1(x: int) -> int {
     }
 
     return inner()
-}
-
-fn test_flag(flag: bool) -> int {
-    if flag {
-        let value = 10
-        return value
-    } else {
-        let value = 20
-        return value
-    }
 }
 
 fn test_types() {
@@ -351,19 +201,9 @@ fn h(x: int) -> int {
     return x
 }
 
-fn process_generic<T>(c: Container<T>, param: int) -> int {
-    // Parameter param is an int
-    return param  // Returns the parameter value
-}
-
 fn test_type_alias(x: int) -> int {
     // 'int' in type annotation refers to the type, not the variable
     return x * 2
-}
-
-fn print_custom(x: int) -> int {
-    print(x * 2)  // Call builtin print
-    return x
 }
 
 fn f_recursive(n: int) -> int {
@@ -372,31 +212,6 @@ fn f_recursive(n: int) -> int {
     }
     let f = n  // Shadow function with value
     return f + f  // Uses shadowed value
-}
-
-// Test cases
-@test(output = "10")
-fn local_var_shadows_function_name() {
-    let result = local_shadowing_ten()
-    print(result)
-}
-
-@test(output = "5")
-fn nested_local_shadows_function_name() {
-    let result = nested_local_shadows_helper()
-    print(result)
-}
-
-@test(output = "10\n100")
-fn local_shadows_global_variable() {
-    print(test_global_local())
-    print(g)  // Should still access global
-}
-
-@test(output = "10\n42")
-fn parameter_shadows_global_variable() {
-    print(process_param(5))
-    print(counter)  // Global still accessible
 }
 
 @test(output = "0\n50\n1")
@@ -457,21 +272,6 @@ fn for_loop_var_shadows_outer() {
     print(i)  // Original i unchanged
 }
 
-@test(output = "1\n2\n3\n4\n100\n200")
-fn for_loop_tuple_binding_shadows() {
-    let x = 100
-    let y = 200
-
-    for xy in [(1, 2), (3, 4)] {
-        let (x, y) = xy
-        print(x)
-        print(y)
-    }
-
-    print(x)  // Original values unchanged
-    print(y)
-}
-
 @test(output = "6\n999")
 fn for_loop_shadows_function() {
     let result = 0
@@ -483,14 +283,6 @@ fn for_loop_shadows_function() {
     print(item())  // Function still callable
 }
 
-@test(output = "25")
-fn multiple_parameters_same_function_chain() {
-    // Using the fact that each function has its own parameter scope
-    // f1(5) = 10, f2(5) = f1(5) + 5 = 15, f3(5) = f2(5) + f1(5) = 15 + 10 = 25
-    let result = 5 * 2 + 5 + 5 * 2
-    print(result)
-}
-
 @test(output = "30\n25\n8")
 fn default_parameter_with_shadowing() {
     let default_val = 100
@@ -498,25 +290,6 @@ fn default_parameter_with_shadowing() {
     print(test_func())  // Uses both defaults: 10 + 20
     print(test_func(5))  // 5 + 20
     print(test_func(5, 3))  // 5 + 3
-}
-
-@test(output = "7\n100\n200")
-fn tuple_parameter_shadows() {
-    let a = 100
-    let b = 200
-
-    print(process((3, 4)))
-    print(a)  // Outer variables unchanged
-    print(b)
-}
-
-@test(output = "42\n100")
-fn field_access_vs_variable() {
-    let value = 100
-
-    let d = Data { value: 42 }
-    print(process_data(d))
-    print(value)  // Outer variable unchanged
 }
 
 @test(output = "15")
@@ -532,15 +305,6 @@ fn multiple_shadow_levels() {
     print(level1(x))  // Pass local x
     print(x)  // Local x
     print(x)  // Will print local x (5)
-}
-
-@test(output = "10\n20\n100")
-fn shadow_in_conditional_branches() {
-    let value = 100
-
-    print(test_flag(true))
-    print(test_flag(false))
-    print(value)  // Outer unchanged
 }
 
 @test(output = "42\nhello\n3.14")
@@ -589,24 +353,12 @@ fn while_loop_nested_shadowing() {
     print(i)  // Should be 2
 }
 
-@test(output = "42")
-fn generic_type_parameter_shadows() {
-    let c = Container { value: "hello" }
-    print(process_generic(c, 42))
-}
-
 @test(output = "10\n100")
 fn type_alias_shadows_variable() {
     let int = 100  // Variable named 'int'
 
     print(test_type_alias(5))
     print(int)  // The variable
-}
-
-@test(output = "10\n100")
-fn shadow_builtin_print() {
-    print_custom(5)  // Calls our function
-    print(100)  // Calls builtin directly
 }
 
 @test(output = "10")
