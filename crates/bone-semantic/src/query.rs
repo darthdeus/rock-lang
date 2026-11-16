@@ -20,12 +20,10 @@ pub fn type_at<'a>(
 ) -> Option<TypeAt<'a>> {
     let module = ws.modules.get(mid.index())?;
 
-    let mut best: Option<(BodyOwner, &Body, &Interval<usize, NodeRef>)> = None;
+    let mut best: Option<&Interval<usize, NodeRef>> = None;
 
     for item in module.item_index().find(offset, offset + 1) {
-        let owner = item.val;
-
-        let Some(body) = module.bodies.get(&owner) else {
+        let Some(body) = module.bodies.get(&item.val) else {
             continue;
         };
 
@@ -34,16 +32,13 @@ pub fn type_at<'a>(
             .find(offset, offset + 1)
             .min_by_key(|x| x.stop - x.start)
         {
-            if best
-                .as_ref()
-                .map_or(true, |(_, _, b)| iv.stop - iv.start < b.stop - b.start)
-            {
-                best = Some((owner, body, iv));
+            if best.is_none_or(|b| iv.stop - iv.start < b.stop - b.start) {
+                best = Some(iv);
             }
         }
     }
 
-    let (_, _, interval) = best?;
+    let interval = best?;
 
     let interval_span = Span::new(module.file, (0, 0), (0, 0), (interval.start, interval.stop));
 
@@ -54,30 +49,9 @@ pub fn type_at<'a>(
             body: None,
         }),
 
-        hir::NodeRef::Expr(idx) => {
-            let owner = module.body_at(offset)?;
-            let bi = inf.per_fn.get(&owner)?;
-            let body = module.bodies.get(&owner)?;
-
-            debug_assert!(
-                bi.body_generation == body.generation,
-                "stale inference for {owner:?}: body relowered (gen {}) since inference (gen {})",
-                body.generation,
-                bi.body_generation
-            );
-
-            let ty = *bi.expr_types.get(idx)?;
-            let span = *body.expr_spans.get(idx)?;
-
-            Some(TypeAt {
-                ty,
-                span,
-                body: Some(bi),
-            })
-        }
-
         hir::NodeRef::Statement(_) => todo!(),
-        hir::NodeRef::Binding(idx) => {
+
+        hir::NodeRef::Expr(_) | hir::NodeRef::Binding(_) => {
             let owner = module.body_at(offset)?;
             let bi = inf.per_fn.get(&owner)?;
             let body = module.bodies.get(&owner)?;
@@ -89,8 +63,13 @@ pub fn type_at<'a>(
                 bi.body_generation
             );
 
-            let ty = *bi.binding_types.get(idx)?;
-            let span = *body.binding_spans.get(idx)?;
+            let (ty, span) = match interval.val {
+                hir::NodeRef::Expr(idx) => (*bi.expr_types.get(idx)?, *body.expr_spans.get(idx)?),
+                hir::NodeRef::Binding(idx) => {
+                    (*bi.binding_types.get(idx)?, *body.binding_spans.get(idx)?)
+                }
+                _ => unreachable!(),
+            };
 
             Some(TypeAt {
                 ty,
