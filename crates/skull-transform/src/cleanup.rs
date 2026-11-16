@@ -1,5 +1,4 @@
 use crate::copy_prop::{CopyProp, copy_propagate_analysis, resolve_subst};
-use crate::native_buffer::scalarize_native_buffer_stores;
 use crate::sroa::scalarize_struct_cells_once;
 use crate::visit::raw;
 use bone_core::prelude::CompilerError;
@@ -286,7 +285,6 @@ pub(crate) fn cleanup_in(ws: Option<&Workspace>, func: &mut MirFunc) -> Result<(
     if has_unreached_code(func) {
         clear_unreachable_blocks(func);
     }
-    scalarize_native_buffer_stores(func);
     // SROA and copy-prop/DCE INTERLEAVE to a fixpoint: peeling a cursor struct
     // leaves its (now-dead) ctor behind, and that ctor's operand uses pin the
     // NEXT nesting level's cell as escaping (iterator combinator chains nest

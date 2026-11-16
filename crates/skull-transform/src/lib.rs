@@ -16,7 +16,6 @@ mod in_bounds;
 mod inline;
 mod load_store_census;
 mod mem2reg;
-mod native_buffer;
 mod nobox;
 pub mod scope;
 mod sroa;
