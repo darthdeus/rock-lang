@@ -239,17 +239,17 @@ fn member_access(
         .map(|(callee, idx, _)| (callee.clone(), *idx as usize));
     // The receiver expression's inferred type. `None` means it isn't a
     // members-bearing type (`scale(x)` -> int).
-    let by_recv = member_completions_by_receiver(
+    let by_recv = member_completions(
         session,
         rq.path,
         rq.src,
         rq.offset,
-        recv_end,
         &rq.prefix,
         arg_slot.clone(),
         cx.anchor,
         reach,
         cx.bool_chain,
+        |ws, mid| crate::query::members_of_receiver_expr(ws, mid, recv_end),
     );
     let resolved = by_recv.is_some();
     let mut items = by_recv.unwrap_or_default();
@@ -262,13 +262,14 @@ fn member_access(
                 rq.path,
                 rq.src,
                 rq.offset,
-                segments,
                 &rq.prefix,
                 arg_slot,
                 cx.anchor,
                 reach,
                 cx.bool_chain,
-            );
+                |ws, mid| crate::query::members_of_name_path(ws, mid, rq.offset, segments),
+            )
+            .unwrap_or_default();
         }
     }
     // This is member access: `recv.` never completes to a bare global (Rock

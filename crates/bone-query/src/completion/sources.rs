@@ -1389,47 +1389,6 @@ pub(crate) fn open_paren_follows(src: &str, offset: usize) -> bool {
         == Some(&b'(')
 }
 
-/// Member completions for a dotted name receiver, typed from its head binding
-/// ([`crate::query::members_of_name_path`]) in each completion munge's
-/// speculative Session variant.
-pub(crate) fn member_completions(
-    session: &mut Session,
-    path: &str,
-    src: &str,
-    offset: usize,
-    segments: &[String],
-    prefix: &str,
-    arg_slot: Option<(String, usize)>,
-    anchor: Option<SlotAnchor>,
-    reach: Option<&crate::reachability::ReachabilityIndex>,
-    bool_ctx: bool,
-) -> Vec<CompletionItem> {
-    let paren_follows = open_paren_follows(src, offset);
-    for munged in completion_munges(src, offset) {
-        let attempt = analyze_variant(session, path, &munged, |ws| {
-            member_completion_items(
-                ws,
-                path,
-                offset,
-                segments,
-                prefix,
-                arg_slot.clone(),
-                anchor,
-                reach,
-                bool_ctx,
-                paren_follows,
-            )
-        });
-        if let Some(items) = attempt {
-            if !items.is_empty() {
-                return items;
-            }
-        }
-    }
-    Vec::new()
-}
-
-/// One munge attempt's member items, resolved against the variant workspace.
 /// Whether a member of type `ty_id` (rendered `ty_render`) type-directs into
 /// the expected arg slot. Bone's `coerce` on the TyId when present (so an `int`
 /// field boosts in an `int?`/`float`/`any` slot); rendered-string equality when
@@ -1449,39 +1408,39 @@ pub(crate) fn member_ty_match(
     }
 }
 
-/// Member completion for `recv.<cursor>`, any receiver shape. Its type comes
-/// from inference: `recv_end` is the receiver expr's end offset (BEFORE the
-/// cursor, so stable across the completion munges), and
-/// `members_of_receiver_expr` reads its TyId via `type_at`.
+/// Member completion for `recv.<cursor>`, with the receiver's members
+/// resolved by `members` in each completion munge's speculative Session
+/// variant (a receiver expr typed by inference, or a dotted name typed from
+/// its head binding).
 ///
 /// `None` means the receiver did NOT resolve to a members-bearing type (a
 /// non-struct like `scale(x)` -> int) -- the caller may fall through to general
 /// completion. `Some(items)` means it DID resolve; `items` may be empty when the
 /// prefix matched no member, and the caller must then SUPPRESS general
 /// completion (offering globals after `recv.` would be invalid UFCS suggestions).
-pub(crate) fn member_completions_by_receiver(
+pub(crate) fn member_completions(
     session: &mut Session,
     path: &str,
     src: &str,
     offset: usize,
-    recv_end: usize,
     prefix: &str,
     arg_slot: Option<(String, usize)>,
     anchor: Option<SlotAnchor>,
     reach: Option<&crate::reachability::ReachabilityIndex>,
     bool_ctx: bool,
+    members: impl Fn(&Workspace, ModuleId) -> Option<crate::query::Members<'_>>,
 ) -> Option<Vec<CompletionItem>> {
     let paren_follows = open_paren_follows(src, offset);
     let mut resolved_empty = false;
     for munged in completion_munges(src, offset) {
         let attempt = analyze_variant(session, path, &munged, |ws| {
+            // The CURRENT file's module (where the receiver/offset live).
             let mid = user_module_for_path(ws, path)?;
-            let members = crate::query::members_of_receiver_expr(ws, mid, recv_end)?;
             Some(build_member_items(
                 ws,
                 mid,
                 offset,
-                members,
+                members(ws, mid)?,
                 prefix,
                 arg_slot.clone(),
                 anchor,
@@ -1501,40 +1460,6 @@ pub(crate) fn member_completions_by_receiver(
         }
     }
     resolved_empty.then(Vec::new)
-}
-
-pub(crate) fn member_completion_items(
-    ws: &Workspace,
-    path: &str,
-    offset: usize,
-    segments: &[String],
-    prefix: &str,
-    arg_slot: Option<(String, usize)>,
-    anchor: Option<SlotAnchor>,
-    reach: Option<&crate::reachability::ReachabilityIndex>,
-    bool_ctx: bool,
-    paren_follows: bool,
-) -> Vec<CompletionItem> {
-    // The CURRENT file's module (where the receiver/offset live) -- not just
-    // "first non-builtin", which is wrong now that the whole project loads.
-    let Some(mid) = user_module_for_path(ws, path) else {
-        return Vec::new();
-    };
-    let Some(members) = crate::query::members_of_name_path(ws, mid, offset, segments) else {
-        return Vec::new();
-    };
-    build_member_items(
-        ws,
-        mid,
-        offset,
-        members,
-        prefix,
-        arg_slot,
-        anchor,
-        reach,
-        bool_ctx,
-        paren_follows,
-    )
 }
 
 /// If UFCS fn `f` has a `FieldRef<owner, V>` param and the owner struct has >=1
