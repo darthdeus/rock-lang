@@ -288,18 +288,7 @@ pub(crate) fn resolve_for_iter_protocol(
     let next_callee = gamma.workspace.module(next_fn.0).functions[next_fn.1].clone();
     let mut sub = BoundTree::default();
     if next_callee.generic_bounds.iter().any(Option::is_some) {
-        let mut done = FxHashSet::default();
-        check_iterator_bounds(
-            c,
-            gamma,
-            &next_callee,
-            &next_subs,
-            &mut sub,
-            &mut done,
-            true,
-            0,
-            span,
-        )?;
+        check_iterator_bounds(c, gamma, &next_callee, &next_subs, &mut sub, true, 0, span)?;
     }
 
     gamma.out.for_iter_protocol.insert(
@@ -324,8 +313,8 @@ pub(crate) fn resolve_for_iter_protocol(
 /// own substitution. An instantiation that is the enclosing fn's bounded
 /// generic records a `CallerGeneric` leaf (bound propagation).
 ///
-/// `done` tracks generics already resolved: the call-site loop retries after
-/// each argument unification so a later lambda argument sees `E` already
+/// The tree records generics already resolved: the call-site loop retries
+/// after each argument unification so a later lambda argument sees `E` already
 /// bound. `finalize` errors on bounds still unresolvable.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_iterator_bounds(
@@ -334,7 +323,6 @@ pub(crate) fn check_iterator_bounds(
     function: &Function,
     subs: &FxHashMap<VarId, TyId>,
     tree: &mut BoundTree,
-    done: &mut FxHashSet<usize>,
     finalize: bool,
     depth: usize,
     span: Span,
@@ -348,7 +336,7 @@ pub(crate) fn check_iterator_bounds(
 
     for (idx, b) in function.generic_bounds.iter().enumerate() {
         let Some(elem_decl) = *b else { continue };
-        if done.contains(&idx) {
+        if tree.next.contains_key(&idx) {
             continue;
         }
 
@@ -393,7 +381,6 @@ pub(crate) fn check_iterator_bounds(
                     );
                 }
                 tree.next.insert(idx, BoundNext::CallerGeneric(caller_idx));
-                done.insert(idx);
             }
 
             _ => {
@@ -428,14 +415,12 @@ pub(crate) fn check_iterator_bounds(
                 let next_callee = gamma.workspace.module(next_fn.0).functions[next_fn.1].clone();
                 let mut sub = BoundTree::default();
                 if next_callee.generic_bounds.iter().any(Option::is_some) {
-                    let mut sub_done = FxHashSet::default();
                     check_iterator_bounds(
                         c,
                         gamma,
                         &next_callee,
                         &next_subs,
                         &mut sub,
-                        &mut sub_done,
                         true,
                         depth + 1,
                         span,
@@ -449,7 +434,6 @@ pub(crate) fn check_iterator_bounds(
                         next_generics: next_subs,
                     },
                 );
-                done.insert(idx);
             }
         }
     }

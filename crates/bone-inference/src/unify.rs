@@ -172,29 +172,6 @@ pub(crate) fn substitute(
             } else {
                 Ok(ty)
             }
-
-            // let mut subbed = Vec::with_capacity(elements.len());
-            // let mut changed = false;
-            //
-            // for child in elements {
-            //     let child_ty = ty.with_idx(child);
-            //     let s = substitute(gamma, child_ty, subs, span)?;
-            //     changed |= s != child_ty;
-            //
-            //     subbed.push(s);
-            // }
-            //
-            // if !changed {
-            //     return Ok(ty);
-            // }
-            //
-            // let nodes = subbed
-            //     .into_iter()
-            //     .map(|x| gamma.get(x))
-            //     .copied()
-            //     .collect_vec();
-            //
-            // let new_elements = alloc_contiguous(&mut gamma.out.ty_arena, nodes);
         }
 
         TypeExpr::Function { params, ret } => {
@@ -210,7 +187,6 @@ pub(crate) fn substitute(
                     None => reify_range(gamma, ty, params, span),
                 };
 
-                // let params = new_params.unwrap_or(params);
                 let ret_idx = reify(gamma, sub_ret, span);
 
                 let idx = gamma.out.ty_arena.alloc(TypeExpr::Function {
@@ -544,28 +520,6 @@ pub(crate) fn peel_nullable(gamma: &mut Gamma, ty: TyId, span: Span) -> TyId {
     }
 }
 
-// If `cond` is a null check on a variable, return the binding and whether we narrow on
-// `then` or `else` (x != null -> then, x == null -> else)
-// fn detect_null_narrow(module: &Module, cond: Idx<Expr>) -> Option<(Idx<BindingInfo>, bool)> {
-//     let Expr::BinOp { op, lhs, rhs } = c.body.expr_arena[cond] else {
-//         return None;
-//     };
-//
-//     let narrow_in_then = match op {
-//         hir::BinOp::NotEq => true,
-//         hir::BinOp::Eq => false,
-//         _ => return None,
-//     };
-//
-//     let binding = match (c.body.expr_arena[lhs], c.body.expr_arena[rhs]) {
-//         (Expr::Var(b), Expr::Null) => b,
-//         (Expr::Null, Expr::Var(b)) => b,
-//         _ => return None,
-//     };
-//
-//     Some((binding, narrow_in_then))
-// }
-
 pub(crate) fn types_equal(gamma: &Gamma, a: TyId, b: TyId) -> bool {
     if a == b {
         return true;
@@ -575,7 +529,6 @@ pub(crate) fn types_equal(gamma: &Gamma, a: TyId, b: TyId) -> bool {
         (TypeExpr::Builtin(x), TypeExpr::Builtin(y)) => x == y,
         (TypeExpr::Generic(x, _), TypeExpr::Generic(y, _)) => x == y,
         (TypeExpr::Infer(x, _), TypeExpr::Infer(y, _)) => x == y,
-        // (TypeExpr::Named(x), TypeExpr::Named(y)) => x == y,
         (TypeExpr::Nullable(ia), TypeExpr::Nullable(ib)) => {
             types_equal(gamma, a.with_idx(*ia), b.with_idx(*ib))
         }

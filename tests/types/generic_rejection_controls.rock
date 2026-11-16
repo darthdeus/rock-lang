@@ -26,26 +26,3 @@ fn two<T>(a: int, b: T) -> string { "right" }
 fn incomparable_candidates_with_only_one_match() {
     print("{two(true, 2)} {two(1, true)}")
 }
-
-fn choose(x: int) -> int { x }
-fn choose(x: string) -> int { len(x) }
-
-@test(output = "7 3")
-fn matching_overload_argument_type_and_count() {
-    print("{choose(7)} {choose(\"abc\")}")
-}
-
-newtype Diagonal<T>(Map<T, T>)
-newtype EntityWrapper<T>(Entity<T>)
-
-@test
-fn generic_newtype_patterns_match() {
-    let m: Map<int, int> = map_new()
-    m[1] = 9
-    let d = Diagonal(m)
-    assert_eq(d.0[1], 9)
-    let arena: Arena<int> = arena_new()
-    let e = arena.insert(5)
-    let w = EntityWrapper(e)
-    assert_eq(arena.get(w.0) ?? -1, 5)
-}

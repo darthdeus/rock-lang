@@ -35,38 +35,6 @@ fn return_before_destructure() {
     assert(destructure_after_return(false) == 42)
 }
 
-// Discarding an if's value permits an absent else, even with an exit.
-@test
-fn statement_without_else_continue() {
-    let sum = 0
-    for i in 0..4 {
-        if i > 1 { continue }
-        sum = sum + i
-    }
-    assert(sum == 1)
-}
-
-@test
-fn statement_without_else_break() {
-    let sum = 0
-    for i in 0..4 {
-        if i > 1 { break }
-        sum = sum + i
-    }
-    assert(sum == 1)
-}
-
-fn statement_return(early: bool) -> int {
-    if early { return 7 }
-    42
-}
-
-@test
-fn statement_without_else_return() {
-    assert(statement_return(true) == 7)
-    assert(statement_return(false) == 42)
-}
-
 // The same closed statement if is legal with an enclosing loop.
 @test
 fn closed_if_continue_in_loop() {

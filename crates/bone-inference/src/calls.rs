@@ -457,7 +457,7 @@ pub(crate) fn select_overload_with_generics(
     let mut bound_fail: Option<CompilerError> = None;
 
     for &(mid, fid) in candidates {
-        if let Some(cost) = score_candidate_with_generics(
+        match score_candidate_with_generics(
             c,
             gamma,
             mid,
@@ -467,9 +467,8 @@ pub(crate) fn select_overload_with_generics(
             arg_ty,
             generic_args,
             span,
-            &mut bound_fail,
         ) {
-            match best_cost {
+            Some(Ok(cost)) => match best_cost {
                 None => {
                     best_cost = Some(cost);
                     best_set.clear();
@@ -484,7 +483,9 @@ pub(crate) fn select_overload_with_generics(
                     best_set.push((mid, fid));
                 }
                 _ => {}
-            }
+            },
+            Some(Err(error)) if bound_fail.is_none() => bound_fail = Some(error),
+            _ => {}
         }
     }
 
@@ -527,21 +528,21 @@ pub(crate) fn select_overload_with_generics(
                 .iter()
                 .map(|t| gamma.workspace.render(Some(&gamma.out), *t))
                 .join(", ");
-            let mut hidden_bound_fail = None;
             let hidden_fit = hidden.iter().any(|&(mid, fid)| {
-                score_candidate_with_generics(
-                    c,
-                    gamma,
-                    mid,
-                    fid,
-                    recv_ty,
-                    args,
-                    arg_ty,
-                    generic_args,
-                    span,
-                    &mut hidden_bound_fail,
+                matches!(
+                    score_candidate_with_generics(
+                        c,
+                        gamma,
+                        mid,
+                        fid,
+                        recv_ty,
+                        args,
+                        arg_ty,
+                        generic_args,
+                        span,
+                    ),
+                    Some(Ok(_))
                 )
-                .is_some()
             });
             if !hidden_fit && bound_fail.is_none() && recv_ty.is_none() && generic_args.is_empty() {
                 if let Some((symbol, true)) = bone_core::hir::operator_entry(name.as_str()) {
@@ -699,21 +700,21 @@ fn home_module_hint(
         .copied()
         .filter(|&(mid, fid)| ws.callable_member_admits(key, mid, fid, site))
         .collect();
-    let mut bound_fail = None;
     let fits = admitted.iter().any(|&(mid, fid)| {
-        score_candidate_with_generics(
-            c,
-            gamma,
-            mid,
-            fid,
-            recv_ty,
-            args,
-            arg_ty,
-            generic_args,
-            span,
-            &mut bound_fail,
+        matches!(
+            score_candidate_with_generics(
+                c,
+                gamma,
+                mid,
+                fid,
+                recv_ty,
+                args,
+                arg_ty,
+                generic_args,
+                span,
+            ),
+            Some(Ok(_))
         )
-        .is_some()
     });
     if !fits {
         return None;
@@ -743,24 +744,6 @@ pub(crate) fn check_positional_args(
     span: Span,
     what: &str,
 ) -> Result<(), CompilerError> {
-    // if args.len() != declared.len() {
-    //     comp_error!(
-    //         span,
-    //         "Expected {} arguments in {}, but got {}",
-    //         declared.len(),
-    //         what,
-    //         args.len()
-    //     );
-    // }
-    //
-    // for (arg, dty) in args.zip(declared.iter()) {
-    //     let aspan = c.body.expr_spans[arg];
-    //     let pty = substitute(gamma, *dty, subs, span)?;
-    //     let aty = infer_expr(c, gamma, arg)?;
-    //
-    //     coerce(gamma, aty, pty, aspan)?;
-    // }
-
     let params: Vec<TyId> = declared
         .iter()
         .map(|d| substitute(gamma, *d, subs, span))
@@ -840,8 +823,7 @@ pub(crate) fn score_candidate_with_generics(
     arg_ty: &FxHashMap<Idx<Expr>, TyId>,
     generic_args: IdxRange<TypeExpr>,
     span: Span,
-    bound_fail: &mut Option<CompilerError>,
-) -> Option<usize> {
+) -> Option<Result<usize, CompilerError>> {
     // Scoring only reads the candidate's fit: every type it builds (fresh
     // generics, substituted params, unification results) is garbage once the
     // trail is rolled back, so drop them instead of keeping them in the
@@ -858,7 +840,6 @@ pub(crate) fn score_candidate_with_generics(
         arg_ty,
         generic_args,
         span,
-        bound_fail,
     );
     if args.iter().any(|arg| c.body.spread_args.contains(arg)) {
         gamma.out.rollback_to(snap);
@@ -878,8 +859,7 @@ fn fit_candidate(
     arg_ty: &FxHashMap<Idx<Expr>, TyId>,
     generic_args: IdxRange<TypeExpr>,
     span: Span,
-    bound_fail: &mut Option<CompilerError>,
-) -> Option<usize> {
+) -> Option<Result<usize, CompilerError>> {
     let f = &gamma.workspace.module(mid).functions[fid];
 
     let mut declared: SmallVec<[TyId; 8]> = SmallVec::with_capacity(c.body.param_bindings.len());
@@ -898,12 +878,6 @@ fn fit_candidate(
     if offset > declared.len() {
         return None;
     }
-
-    // if arg_tys.len() < f.num_required || arg_tys.len() > declared.len() {
-    //     gamma.out.substitutions = outer;
-    //
-    //     return None;
-    // }
 
     let mut total = 0usize;
 
@@ -970,49 +944,16 @@ fn fit_candidate(
     let f = &gamma.workspace.module(mid).functions[fid];
     if f.generic_bounds.iter().any(Option::is_some) {
         let mut tree = BoundTree::default();
-        let mut done = FxHashSet::default();
-        let mut berr: Option<CompilerError> = None;
-        let conforms = gamma.trial(|g| {
-            match check_iterator_bounds(c, g, f, &subs, &mut tree, &mut done, false, 0, span) {
-                Ok(()) => true,
-                Err(e) => {
-                    berr = Some(e);
-                    false
-                }
-            }
-        });
-        if !conforms {
-            // Keep the FIRST bound failure for the all-rejected diagnostic.
-            if bound_fail.is_none() {
-                *bound_fail = berr;
-            }
-            return None;
+        if let Err(error) =
+            gamma.trial(|g| check_iterator_bounds(c, g, f, &subs, &mut tree, false, 0, span))
+        {
+            return Some(Err(error));
         }
         // A bounded `it: I` is a bare generic hole, so `param_genericity` already
         // ranked it below any concrete overload -- no separate bounds cost here.
     }
 
-    // for (dty, &aty) in declared.iter().zip(arg_tys) {
-    //     let pty = match substitute(gamma, *dty, &subs, span) {
-    //         Ok(t) => t,
-    //         Err(_) => {
-    //             gamma.out.substitutions = outer;
-    //             return None;
-    //         }
-    //     };
-    //
-    //     match fit_cost(gamma, aty, pty, span) {
-    //         Some(c) => total += c,
-    //         None => {
-    //             gamma.out.substitutions = outer;
-    //             return None;
-    //         }
-    //     }
-    // }
-    //
-    // total += declared.len() - arg_tys.len();
-
-    Some(total)
+    Some(Ok(total))
 }
 
 fn instantiate_call_generics(
@@ -1616,13 +1557,6 @@ pub(crate) fn resolve_named_call_inner(
         return Err(CompilerError::new_with_label(span, message));
     }
 
-    // let (callee_mid, callee_fn) = resolve_callee(gamma, name).ok_or_else(|| {
-    //     CompilerError::new_with_label(
-    //         span,
-    //         format!("Function `{}` doens't exist", name),
-    //     )
-    // })?;
-
     let mut preinferred: FxHashMap<Idx<Expr>, TyId> = FxHashMap::default();
 
     // A hidden member may be the one the arguments match, so only a family
@@ -1789,7 +1723,6 @@ pub(crate) fn commit_selected_call(
     // generic, and a LATER lambda arg (`map(it, x => ..)`) must see it bound.
     let has_bounds = function.generic_bounds.iter().any(Option::is_some);
     let mut bound_tree = BoundTree::default();
-    let mut bounds_done: FxHashSet<usize> = FxHashSet::default();
 
     let mut param_tys = Vec::with_capacity(c.body.param_bindings.len());
     let mut param_names = Vec::with_capacity(c.body.param_bindings.len());
@@ -1798,18 +1731,6 @@ pub(crate) fn commit_selected_call(
         param_tys.push(param.ty);
         param_names.push(param.name);
     }
-
-    // let what = format!("function `{}`", name);
-    // check_positional_args(
-    //     module,
-    //     gamma,
-    //     &param_tys,
-    //     args,
-    //     function.num_required,
-    //     &subs,
-    //     span,
-    //     &what,
-    // )?;
 
     let offset = if let Some(r) = recv_override {
         if param_tys.is_empty() {
@@ -1880,17 +1801,7 @@ pub(crate) fn commit_selected_call(
     for (fill, param_index) in pairs {
         let pty_decl = param_tys[param_index];
         if has_bounds {
-            check_iterator_bounds(
-                c,
-                gamma,
-                function,
-                &subs,
-                &mut bound_tree,
-                &mut bounds_done,
-                false,
-                0,
-                span,
-            )?;
+            check_iterator_bounds(c, gamma, function, &subs, &mut bound_tree, false, 0, span)?;
         }
         let pty = substitute(gamma, pty_decl, &subs, span)?;
         if frame_ref_target(gamma, pty).is_some()
@@ -1964,17 +1875,7 @@ pub(crate) fn commit_selected_call(
     }
 
     if has_bounds {
-        check_iterator_bounds(
-            c,
-            gamma,
-            function,
-            &subs,
-            &mut bound_tree,
-            &mut bounds_done,
-            true,
-            0,
-            span,
-        )?;
+        check_iterator_bounds(c, gamma, function, &subs, &mut bound_tree, true, 0, span)?;
         gamma.out.bound_call_trees.insert(call_expr, bound_tree);
     }
 

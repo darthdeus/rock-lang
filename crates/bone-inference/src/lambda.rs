@@ -77,9 +77,6 @@ pub(crate) fn infer_lambda(
         param_tys.push(ty)
     }
 
-    // let body_ty = infer_expr(c, gamma, body)?;
-    // let body_ty = resolve(gamma, body_ty, expr_span);
-
     let ret_var = gamma.fresh_callsite_var(*Q_R, expr_span);
     let iter_result = gamma.iter_result_lambda == Some(body);
     if iter_result {
