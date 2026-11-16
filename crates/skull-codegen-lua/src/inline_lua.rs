@@ -235,131 +235,138 @@ fn lua_names(body: &str) -> Vec<(usize, usize)> {
     names
 }
 
-/// The identifiers and keywords a Lua body spells.
-pub(crate) fn lua_names_of(body: &str) -> Vec<&str> {
-    lua_names(body)
-        .into_iter()
-        .map(|(s, e)| &body[s..e])
-        .collect()
+pub(crate) struct InlineLuaBody<'a> {
+    text: &'a str,
+    names: Vec<(usize, usize)>,
 }
 
-/// The occurrences of `name` in `body` that refer to a variable: not a field
-/// after `.` or `:` (a `..` concatenation still reads it).
-fn variable_refs<'a>(
-    body: &'a str,
-    names: &'a [(usize, usize)],
-    name: &'a str,
-) -> impl Iterator<Item = (usize, usize)> + 'a {
-    names.iter().copied().filter(move |&(s, e)| {
-        let before = body[..s].trim_end();
-        &body[s..e] == name
-            && !(before.ends_with(':') || before.ends_with('.') && !before.ends_with(".."))
-    })
-}
+impl<'a> InlineLuaBody<'a> {
+    pub(crate) fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            names: lua_names(text),
+        }
+    }
 
-/// True if `body` only reads parameter `name`: it never assigns, declares or
-/// captures it, so a plain local of the caller can stand in for it.
-pub(crate) fn reads_param_only(body: &str, name: &str) -> bool {
-    let names = lua_names(body);
-    let keyword = |w: &str| names.iter().any(|&(s, e)| &body[s..e] == w);
-    if keyword("function") || keyword("goto") {
-        return false;
+    pub(crate) fn contains_name(&self, name: &str) -> bool {
+        self.names.iter().any(|&(s, e)| &self.text[s..e] == name)
     }
-    variable_refs(body, &names, name).all(|(s, e)| {
-        let before = body[..s].trim_end();
-        let after = body[e..].trim_start();
-        let assigned = after.starts_with('=') && !after.starts_with("==");
-        // `p, q = ...` assigns `p` too; a comma inside a call or constructor
-        // does not, so only a statement that opens with a name list counts.
-        let line = &before[before.rfind('\n').map_or(0, |at| at + 1)..];
-        let listed = after.starts_with(',')
-            && !line.contains(['(', '{', '='])
-            && !line.trim_start().starts_with("return");
-        let declared = ["local", "for"].iter().any(|kw| {
-            before
-                .strip_suffix(kw)
-                .is_some_and(|rest| !rest.ends_with(|c: char| c.is_alphanumeric() || c == '_'))
-        }) || line.trim_start().starts_with("for ");
-        !(assigned || listed || declared)
-    })
-}
 
-/// `body` with each variable reference to a parameter in `subs` replaced by
-/// its stand-in. A stand-in is a name or a parenthesized expression, so it
-/// keeps its meaning in any operand position.
-pub(crate) fn substitute_params(body: &str, subs: &[(&str, &str)]) -> String {
-    let names = lua_names(body);
-    let mut refs: Vec<(usize, usize, &str)> = subs
-        .iter()
-        .flat_map(|&(name, to)| variable_refs(body, &names, name).map(move |(s, e)| (s, e, to)))
-        .collect();
-    refs.sort_unstable_by_key(|r| r.0);
-    let mut out = String::with_capacity(body.len());
-    let mut at = 0;
-    for (s, e, to) in refs {
-        out.push_str(&body[at..s]);
-        out.push_str(to);
-        at = e;
-    }
-    out.push_str(&body[at..]);
-    out
-}
-
-/// How many times `body` reads parameter `name`, or `None` if a loop may
-/// read it more than once per splice.
-pub(crate) fn param_reads(body: &str, name: &str) -> Option<usize> {
-    let names = lua_names(body);
-    if names
-        .iter()
-        .any(|&(s, e)| matches!(&body[s..e], "for" | "while" | "repeat"))
-    {
-        return None;
-    }
-    Some(variable_refs(body, &names, name).count())
-}
-
-/// True if `body` reads parameter `name` once, in its first statement, with
-/// no call returned, branch taken or assignment made before that read: an
-/// expression passed for it reads the same memory there as before the body.
-pub(crate) fn reads_first(body: &str, name: &str) -> bool {
-    let names = lua_names(body);
-    if names.iter().any(|&(s, e)| {
-        matches!(
-            &body[s..e],
-            "for" | "while" | "repeat" | "function" | "goto"
-        )
-    }) {
-        return false;
-    }
-    let mut refs = variable_refs(body, &names, name);
-    let (Some((at, _)), None) = (refs.next(), refs.next()) else {
-        return false;
-    };
-    let start = body.len() - body.trim_start().len();
-    if body[start..at].contains(['\n', ')', ';']) {
-        return false;
-    }
-    names
-        .iter()
-        .filter(|&&(s, _)| start <= s && s < at)
-        .all(|&(s, e)| {
-            matches!(&body[s..e], "return" | "local" | "if" | "not") || !is_keyword(&body[s..e])
+    /// The occurrences of `name` in `body` that refer to a variable: not a field
+    /// after `.` or `:` (a `..` concatenation still reads it).
+    fn variable_refs<'b>(&'b self, name: &'b str) -> impl Iterator<Item = (usize, usize)> + 'b {
+        let body = self.text;
+        self.names.iter().copied().filter(move |&(s, e)| {
+            let before = body[..s].trim_end();
+            &body[s..e] == name
+                && !(before.ends_with(':') || before.ends_with('.') && !before.ends_with(".."))
         })
-}
+    }
 
-/// True if a reference to `name` begins a statement, where a parenthesized
-/// stand-in would read as a call of the previous line.
-pub(crate) fn opens_statement(body: &str, name: &str) -> bool {
-    let names = lua_names(body);
-    variable_refs(body, &names, name).any(|(s, _)| {
-        let before = body[..s].trim_end_matches([' ', '\t']);
-        let word = &before[before
-            .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .map_or(0, |at| at + 1)..];
-        before.is_empty()
-            || before.ends_with(['\n', ';'])
-            || matches!(word, "then" | "do" | "else" | "end" | "repeat")
-    })
+    /// True if `body` only reads parameter `name`: it never assigns, declares or
+    /// captures it, so a plain local of the caller can stand in for it.
+    pub(crate) fn reads_param_only(&self, name: &str) -> bool {
+        let body = self.text;
+        if self.contains_name("function") || self.contains_name("goto") {
+            return false;
+        }
+        self.variable_refs(name).all(|(s, e)| {
+            let before = body[..s].trim_end();
+            let after = body[e..].trim_start();
+            let assigned = after.starts_with('=') && !after.starts_with("==");
+            // `p, q = ...` assigns `p` too; a comma inside a call or constructor
+            // does not, so only a statement that opens with a name list counts.
+            let line = &before[before.rfind('\n').map_or(0, |at| at + 1)..];
+            let listed = after.starts_with(',')
+                && !line.contains(['(', '{', '='])
+                && !line.trim_start().starts_with("return");
+            let declared = ["local", "for"].iter().any(|kw| {
+                before
+                    .strip_suffix(kw)
+                    .is_some_and(|rest| !rest.ends_with(|c: char| c.is_alphanumeric() || c == '_'))
+            }) || line.trim_start().starts_with("for ");
+            !(assigned || listed || declared)
+        })
+    }
+
+    /// `body` with each variable reference to a parameter in `subs` replaced by
+    /// its stand-in. A stand-in is a name or a parenthesized expression, so it
+    /// keeps its meaning in any operand position.
+    pub(crate) fn substitute_params(&self, subs: &[(&str, &str)]) -> String {
+        let body = self.text;
+        let mut refs: Vec<(usize, usize, &str)> = subs
+            .iter()
+            .flat_map(|&(name, to)| self.variable_refs(name).map(move |(s, e)| (s, e, to)))
+            .collect();
+        refs.sort_unstable_by_key(|r| r.0);
+        let mut out = String::with_capacity(body.len());
+        let mut at = 0;
+        for (s, e, to) in refs {
+            out.push_str(&body[at..s]);
+            out.push_str(to);
+            at = e;
+        }
+        out.push_str(&body[at..]);
+        out
+    }
+
+    /// How many times `body` reads parameter `name`, or `None` if a loop may
+    /// read it more than once per splice.
+    pub(crate) fn param_reads(&self, name: &str) -> Option<usize> {
+        let body = self.text;
+        if self
+            .names
+            .iter()
+            .any(|&(s, e)| matches!(&body[s..e], "for" | "while" | "repeat"))
+        {
+            return None;
+        }
+        Some(self.variable_refs(name).count())
+    }
+
+    /// True if `body` reads parameter `name` once, in its first statement, with
+    /// no call returned, branch taken or assignment made before that read: an
+    /// expression passed for it reads the same memory there as before the body.
+    pub(crate) fn reads_first(&self, name: &str) -> bool {
+        let body = self.text;
+        if self.names.iter().any(|&(s, e)| {
+            matches!(
+                &body[s..e],
+                "for" | "while" | "repeat" | "function" | "goto"
+            )
+        }) {
+            return false;
+        }
+        let mut refs = self.variable_refs(name);
+        let (Some((at, _)), None) = (refs.next(), refs.next()) else {
+            return false;
+        };
+        let start = body.len() - body.trim_start().len();
+        if body[start..at].contains(['\n', ')', ';']) {
+            return false;
+        }
+        self.names
+            .iter()
+            .filter(|&&(s, _)| start <= s && s < at)
+            .all(|&(s, e)| {
+                matches!(&body[s..e], "return" | "local" | "if" | "not") || !is_keyword(&body[s..e])
+            })
+    }
+
+    /// True if a reference to `name` begins a statement, where a parenthesized
+    /// stand-in would read as a call of the previous line.
+    pub(crate) fn opens_statement(&self, name: &str) -> bool {
+        let body = self.text;
+        self.variable_refs(name).any(|(s, _)| {
+            let before = body[..s].trim_end_matches([' ', '\t']);
+            let word = &before[before
+                .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .map_or(0, |at| at + 1)..];
+            before.is_empty()
+                || before.ends_with(['\n', ';'])
+                || matches!(word, "then" | "do" | "else" | "end" | "repeat")
+        })
+    }
 }
 
 fn is_keyword(word: &str) -> bool {

@@ -139,7 +139,7 @@ impl Emitter<'_> {
         // A parameter the body only reads takes a plain operand in place of a
         // local copy of it: the body writes no register of the caller, and
         // its result register is assigned by the last statement only.
-        let names = lua_names_of(body.as_str());
+        let analyzed = InlineLuaBody::new(body.as_str());
         let splice_start = out.len();
         let first_site = self.allocation.map_or(0, |a| a.sites.borrow().len());
         let mut locals = String::new();
@@ -158,16 +158,18 @@ impl Emitter<'_> {
             let movable = || {
                 self.opnd_is_plain(*a)
                     || self.folds_pure(*a)
-                        && param_reads(body.as_str(), p.name.as_str()).is_some_and(|n| n <= 1)
+                        && analyzed
+                            .param_reads(p.name.as_str())
+                            .is_some_and(|n| n <= 1)
                     || self.folds_no_call(*a)
-                        && reads_first(body.as_str(), p.name.as_str())
+                        && analyzed.reads_first(p.name.as_str())
                         && args[i + 1..].iter().all(|&later| self.folds_no_call(later))
             };
             if standalone
-                && !(operand.starts_with('(') && opens_statement(body.as_str(), p.name.as_str()))
-                && !names.contains(&operand.as_str())
+                && !(operand.starts_with('(') && analyzed.opens_statement(p.name.as_str()))
+                && !analyzed.contains_name(&operand)
                 && movable()
-                && reads_param_only(body.as_str(), p.name.as_str())
+                && analyzed.reads_param_only(p.name.as_str())
             {
                 stand_ins.push((p.name.as_str(), operand));
             } else {
@@ -175,7 +177,7 @@ impl Emitter<'_> {
             }
         }
         let subs: Vec<(&str, &str)> = stand_ins.iter().map(|(p, o)| (*p, o.as_str())).collect();
-        let body = substitute_params(body.as_str(), &subs);
+        let body = analyzed.substitute_params(&subs);
         // A discarded call result runs as a bare call; any other discarded
         // result still needs a local to evaluate it into.
         let result = result_expr(&body, shape);
