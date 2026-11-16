@@ -928,16 +928,6 @@ pub fn build_invocations() -> u64 {
     BUILD_INVOCATIONS.with(std::cell::Cell::get)
 }
 
-impl InstanceGraph {
-    pub fn incremental_state_population(&self) -> (usize, usize, usize) {
-        (
-            self.delta_added.len(),
-            self.delta_removed.len(),
-            self.last_run_owners.len(),
-        )
-    }
-}
-
 /// Every compiler-owned runtime entry that a synthesized call or an opaque
 /// body may name under its bare name. An entry need not serve every target:
 /// `Builder::stdlib_funcref` rejects a call on a target the stdlib does not
@@ -1180,142 +1170,6 @@ impl InstanceGraph {
         v.dedup();
         v
     }
-
-    /// Instances with no recorded substitution. Must be empty: a non-generic
-    /// instance's substitution is EMPTY, not absent, and a `ConcreteBody`
-    /// cannot be built for a body whose substitution the walk never kept.
-    pub fn instances_without_substitution(&self, ws: &Workspace) -> BTreeSet<String> {
-        self.instances
-            .iter()
-            .filter(|i| self.substitution(i).is_none())
-            .map(|i| self.identity(ws, i))
-            .collect()
-    }
-
-    /// Which recorded facts could produce a located error and which could not
-    /// (plan S 2: "retain each edge's source span, for good errors at unresolved
-    /// boundaries").
-    ///
-    /// Reported with its denominator per kind. A spanless COUNT alone cannot be
-    /// told apart from a kind the walk never produced, and the fallback that
-    /// makes an edge spanless -- `expr_spans` missing the key, or no body at all
-    /// -- is silent by construction.
-    pub fn span_census(&self) -> SpanCensus {
-        let mut c = SpanCensus::default();
-        for e in self.edges() {
-            let k = c.edges.entry(e.kind.name()).or_default();
-            k.examined += 1;
-            k.spanless += usize::from(is_spanless(&e.span));
-        }
-        for r in self.rejections() {
-            let k = c.rejections.entry(r.kind.name()).or_default();
-            k.examined += 1;
-            k.spanless += usize::from(is_spanless(&r.span));
-        }
-        for u in self.unresolved() {
-            let k = c.unresolved.entry(u.reason).or_default();
-            k.examined += 1;
-            k.spanless += usize::from(is_spanless(&u.span));
-        }
-        // An always-emitted failure is the same diagnostic as an `Unresolved`
-        // or a `Rejection` with no `from` instance to hang it on, so it is
-        // measured on the same axis and keyed by which of the two it is.
-        // Leaving it out was how a whole population of facts stayed spanless
-        // while the census reported full coverage.
-        for hole in self.uninstantiated_roots.values() {
-            for site in &hole.always_emitted_sites {
-                let k = c.always_emitted.entry(site.outcome.label()).or_default();
-                k.examined += 1;
-                k.spanless += usize::from(is_spanless(&site.span));
-            }
-        }
-        c
-    }
-
-    /// Recursive strongly-connected components over the instance graph, split
-    /// by whether the recursion PRESERVES its instance arguments.
-    ///
-    /// Same-instance recursion is ordinary and finite. Changing-instance
-    /// recursion is the unbounded case the plan proposes to reject; it shows up
-    /// here as a depth cap rather than as a cycle, because the walk never
-    /// returns to the same instance.
-    pub fn recursion_census(&self, ws: &Workspace) -> RecursionCensus {
-        // Adjacency over instances.
-        let mut succ: FxHashMap<&Instance, Vec<&Instance>> = FxHashMap::default();
-        for e in self.edges() {
-            succ.entry(&e.from).or_default().push(&e.to);
-        }
-        let mut direct = BTreeSet::new();
-        let mut mutual = BTreeSet::new();
-
-        // Direct: an instance that calls itself.
-        for (from, tos) in &succ {
-            if tos.contains(from) {
-                direct.insert(self.identity(ws, from));
-            }
-        }
-        // Mutual: any cycle of length > 1, found by an iterative DFS with a
-        // path stack. Bounded by the instance count, which is small.
-        let mut color: FxHashMap<&Instance, u8> = FxHashMap::default();
-        let mut path: Vec<&Instance> = Vec::new();
-        let mut order: Vec<&Instance> = self.instances.iter().collect();
-        order.sort();
-        for start in order {
-            if color.get(start).copied().unwrap_or(0) != 0 {
-                continue;
-            }
-            dfs(
-                start,
-                &succ,
-                &mut color,
-                &mut path,
-                &mut |cycle: &[&Instance]| {
-                    if cycle.len() > 1 {
-                        for n in cycle {
-                            mutual.insert(self.identity(ws, n));
-                        }
-                    }
-                },
-            );
-        }
-        // A symbol in both is reported as direct only -- the stronger fact.
-        for d in &direct {
-            mutual.remove(d);
-        }
-        RecursionCensus {
-            direct_same_instance: direct,
-            mutual_same_instance: mutual,
-            changing_instance: self
-                .rejections()
-                .filter(|r| r.kind == RejectionKind::ChangingInstanceRecursion)
-                .map(|r| self.identity(ws, &r.at))
-                .collect(),
-        }
-    }
-}
-
-fn dfs<'a>(
-    node: &'a Instance,
-    succ: &FxHashMap<&'a Instance, Vec<&'a Instance>>,
-    color: &mut FxHashMap<&'a Instance, u8>,
-    path: &mut Vec<&'a Instance>,
-    on_cycle: &mut impl FnMut(&[&'a Instance]),
-) {
-    color.insert(node, 1);
-    path.push(node);
-    for &next in succ.get(node).map(|v| v.as_slice()).unwrap_or(&[]) {
-        match color.get(next).copied().unwrap_or(0) {
-            0 => dfs(next, succ, color, path, on_cycle),
-            1 => {
-                if let Some(at) = path.iter().position(|p| *p == next) {
-                    on_cycle(&path[at..]);
-                }
-            }
-            _ => {}
-        }
-    }
-    path.pop();
-    color.insert(node, 2);
 }
 
 /// What the instance graph does not yet close over. Every field is a NAMED set,
@@ -1450,38 +1304,11 @@ pub struct SubstDisagreement {
     pub discarded: MonoSubst,
 }
 
-/// A spanless population and the population it was measured over.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct SpanCoverage {
-    pub examined: usize,
-    pub spanless: usize,
-}
-
-/// Span coverage of everything the graph records that a Stage-3 diagnostic would
-/// have to point at.
-#[derive(Debug, Default)]
-pub struct SpanCensus {
-    pub edges: BTreeMap<&'static str, SpanCoverage>,
-    pub rejections: BTreeMap<&'static str, SpanCoverage>,
-    pub unresolved: BTreeMap<&'static str, SpanCoverage>,
-    /// Failed calls from always-emitted bodies. Same diagnostic obligation as
-    /// [`Self::unresolved`]; they differ only in having no `from` instance.
-    pub always_emitted: BTreeMap<&'static str, SpanCoverage>,
-}
-
 /// A span the walk could not fill in. `Span::unknown` is the only way one is
 /// produced here, and its file sentinel is what distinguishes it -- a real span
 /// with a zero line range is line 1 of a real file.
 pub fn is_spanless(span: &Span) -> bool {
     span.file.as_str() == "<unknown>"
-}
-
-#[derive(Debug, Default)]
-pub struct RecursionCensus {
-    pub direct_same_instance: BTreeSet<String>,
-    pub mutual_same_instance: BTreeSet<String>,
-    /// Instances a [`RejectionKind::ChangingInstanceRecursion`] names.
-    pub changing_instance: BTreeSet<String>,
 }
 
 /// Build the ONE shared instance graph for `ws`.
@@ -6692,94 +6519,6 @@ pub fn manifest_digest(ws: &Workspace, g: &InstanceGraph) -> u64 {
     h
 }
 
-/// Coverage of concrete generic call identities by the instance graph.
-#[derive(Default, Debug)]
-pub struct CallIdentityCensus {
-    /// Complete generic call identities recovered from typed bindings.
-    pub calls: usize,
-    /// ...of which the instance graph contains a matching instance.
-    pub matched_instances: usize,
-    /// ...of which it does NOT, and whose CALLER the instance graph did reach.
-    /// Each of these is a failure, not a difference.
-    pub missing: Vec<String>,
-    /// ...of which it does not, but whose caller the instance graph never
-    /// reached either. This is a reachability difference, not a missing
-    /// instance.
-    pub unreached_callers: usize,
-    /// Call sites whose identity could not be stated from compiler state.
-    pub unresolved_sites: usize,
-    /// Graph instances with no counterpart in the direct-call census.
-    pub graph_only: usize,
-}
-
-/// Both sides encode with `MonoTy::canonical`, so a pretty-printing ambiguity
-/// cannot match two different types to each other.
-fn slots_match(slots: &[String], instance: &[String]) -> bool {
-    slots == instance
-}
-
-pub fn reconcile_call_identities(ws: &Workspace, g: &InstanceGraph) -> CallIdentityCensus {
-    let (calls, unresolved_sites) = skull_mir::spec_census::concrete_calls(ws);
-
-    // Graph instances grouped by function, as canonical argument lists.
-    let mut by_func: FxHashMap<(u32, u32), Vec<Vec<String>>> = FxHashMap::default();
-    for i in &g.instances {
-        by_func
-            .entry((i.func.module.raw(), i.func.func.into_raw().into_u32()))
-            .or_default()
-            .push(i.args.iter().map(|a| g.interner.canonical(*a)).collect());
-    }
-
-    let mut r = CallIdentityCensus {
-        calls: calls.len(),
-        unresolved_sites,
-        ..Default::default()
-    };
-    let mut matched_instances: std::collections::HashSet<(u32, u32, Vec<String>)> =
-        Default::default();
-    for t in &calls {
-        let k = (t.func.module.raw(), t.func.func.into_raw().into_u32());
-        let hit = by_func
-            .get(&k)
-            .map(|args| args.iter().find(|a| slots_match(&t.slots, a)))
-            .unwrap_or(None);
-        match hit {
-            Some(a) => {
-                r.matched_instances += 1;
-                matched_instances.insert((k.0, k.1, a.clone()));
-            }
-            None => {
-                let ck = (t.caller.module.raw(), t.caller.func.into_raw().into_u32());
-                if !by_func.contains_key(&ck) {
-                    r.unreached_callers += 1;
-                    continue;
-                }
-                let f = &ws.module(t.func.module).functions[t.func.func];
-                let caller = &ws.module(t.caller.module).functions[t.caller.func];
-                let slots: Vec<&str> = t.slots.iter().map(String::as_str).collect();
-                r.missing.push(format!(
-                    "{}<{}> (called from `{}`)",
-                    f.name,
-                    slots.join(", "),
-                    caller.name
-                ));
-            }
-        }
-    }
-    r.missing.sort();
-    r.missing.dedup();
-    r.graph_only = g
-        .instances
-        .iter()
-        .filter(|i| {
-            let k = (i.func.module.raw(), i.func.func.into_raw().into_u32());
-            let args: Vec<String> = i.args.iter().map(|a| g.interner.canonical(*a)).collect();
-            !matched_instances.contains(&(k.0, k.1, args))
-        })
-        .count();
-    r
-}
-
 #[cfg(test)]
 mod recursion_search_tests {
     use super::*;
@@ -6852,6 +6591,54 @@ mod recursion_search_tests {
         assert_eq!(
             fresh.subjects,
             BTreeSet::from([instances[1].clone(), instances[2].clone()])
+        );
+    }
+}
+
+#[cfg(test)]
+mod fresh_graph_tests {
+    use super::*;
+
+    #[test]
+    fn fresh_graph_does_not_seed_incremental_delta_state() {
+        let mut modules = vec![skull_parser::parse_module_clean(
+            "fn helper() -> int { return 1 }\nfn main() { helper() }",
+            ustr::Ustr::from("<fresh-test>"),
+        )
+        .expect("parse")];
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let main = ws
+            .modules
+            .iter()
+            .find_map(|module| {
+                module.functions.iter().find_map(|(id, f)| {
+                    (f.name.as_str() == "main").then_some(FuncRef {
+                        module: module.id,
+                        func: id,
+                    })
+                })
+            })
+            .expect("main declaration");
+        let graph = build(&ws, vec![main], false);
+        assert!(graph.instances.len() > 1, "fixture reached no callee");
+        assert!(
+            graph.delta_added.is_empty()
+                && graph.delta_removed.is_empty()
+                && graph.last_run_owners.is_empty(),
+            "fresh construction retained update-only owner or instance deltas"
+        );
+        // The reverse indexes only an update reads (predecessors, instances per
+        // declaration, owners per file) are derived when the first update asks
+        // for them, not maintained during the build nothing reads them in.
+        assert!(
+            graph.index.preds.is_empty()
+                && graph.index.decl_instances.is_empty()
+                && graph.index.span_owners.is_empty(),
+            "fresh construction maintained update-only indexes"
+        );
+        assert!(
+            graph.index.subst.values().all(|a| a.owners.is_empty()),
+            "fresh construction kept the per-substitution owner sets only updates read"
         );
     }
 }

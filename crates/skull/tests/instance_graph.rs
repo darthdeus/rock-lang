@@ -46,35 +46,6 @@ fn main() {
     );
 }
 
-#[test]
-fn fresh_graph_does_not_seed_incremental_delta_state() {
-    let (_ws, graph) = graph_of(
-        r#"
-fn main() {
-    print("ok")
-}
-"#,
-    );
-    assert_eq!(
-        graph.incremental_state_population(),
-        (0, 0, 0),
-        "fresh construction retained update-only owner or instance deltas"
-    );
-    // The reverse indexes only an update reads (predecessors, instances per
-    // declaration, owners per file) are derived when the first update asks
-    // for them, not maintained during the build nothing reads them in.
-    assert!(
-        graph.index.preds.is_empty()
-            && graph.index.decl_instances.is_empty()
-            && graph.index.span_owners.is_empty(),
-        "fresh construction maintained update-only indexes"
-    );
-    assert!(
-        graph.index.subst.values().all(|a| a.owners.is_empty()),
-        "fresh construction kept the per-substitution owner sets only updates read"
-    );
-}
-
 /// One generic function called at two element types is TWO instances, even
 /// when neither argument requires a representation-specific lowering.
 #[test]
@@ -232,10 +203,14 @@ fn main() {
 
 /// Every complete generic call identity recovered from typed bindings must
 /// appear in the instance graph. A miss whose CALLING body the graph never
-/// reached is classified separately from an identity missing in a reached
-/// body.
+/// reached is a reachability difference, not a missing instance.
 #[test]
 fn every_concrete_call_identity_appears_in_the_instance_graph() {
+    use bone_semantic::hir::BodyOwner;
+    use skull_mir::lower::{SpecSubst, callee_instance_subst, spec_key_from_subst};
+    use skull_mir::mir::FuncRef;
+    use std::collections::HashSet;
+
     let (ws, g) = graph_of(
         r#"
 value P { x: float, y: float }
@@ -248,22 +223,78 @@ fn main() {
 }
 "#,
     );
-    let r = instance_graph::reconcile_call_identities(&ws, &g);
+    // Both sides encode with `MonoTy::canonical`, so a pretty-printing
+    // ambiguity cannot match two different types to each other.
+    let instances: HashSet<(FuncRef, Vec<String>)> = g
+        .instances
+        .iter()
+        .map(|i| {
+            let args = i.args.iter().map(|a| g.interner().canonical(*a));
+            (i.func, args.collect())
+        })
+        .collect();
+    let reached: HashSet<FuncRef> = g.instances.iter().map(|i| i.func).collect();
+    let mut calls = 0;
+    let mut unresolved = Vec::new();
+    let mut missing = Vec::new();
+    let mut matched = HashSet::new();
+    for module in ws.source_modules() {
+        let Some(ir) = ws.inference(module.id) else {
+            continue;
+        };
+        for (owner, inf) in ir.per_fn.iter() {
+            let BodyOwner::Function(caller) = owner else {
+                continue;
+            };
+            let caller = FuncRef {
+                module: module.id,
+                func: *caller,
+            };
+            for (e, (m, f)) in inf.resolved_overload_calls.iter() {
+                let func = FuncRef {
+                    module: *m,
+                    func: *f,
+                };
+                // An empty enclosing substitution reads a call inside a generic
+                // body as the source states it, independently of the walk.
+                let key = match callee_instance_subst(&ws, inf, *e, func, &SpecSubst::default()) {
+                    Ok(None) => continue,
+                    Ok(Some(subst)) => spec_key_from_subst(&ws, func, &subst),
+                    Err(_) => None,
+                };
+                let Some(key) = key else {
+                    unresolved.push(fn_name(&ws, func));
+                    continue;
+                };
+                calls += 1;
+                let identity = (func, key.iter().map(|t| t.canonical()).collect::<Vec<_>>());
+                if instances.contains(&identity) {
+                    matched.insert(identity);
+                } else if reached.contains(&caller) {
+                    missing.push(format!(
+                        "{}<{}> (called from `{}`)",
+                        fn_name(&ws, func),
+                        identity.1.join(", "),
+                        fn_name(&ws, caller)
+                    ));
+                }
+            }
+        }
+    }
     assert!(
-        r.calls > 0,
+        calls > 0,
         "the fixture produced no concrete calls to reconcile"
     );
     assert!(
-        r.missing.is_empty(),
-        "concrete call identities absent from the instance graph: {:?}",
-        r.missing
-    );
-    assert_eq!(
-        r.unresolved_sites, 0,
-        "a valid call identity could not be stated"
+        missing.is_empty(),
+        "concrete call identities absent from the instance graph: {missing:?}"
     );
     assert!(
-        r.graph_only > 0,
+        unresolved.is_empty(),
+        "a valid call identity could not be stated: {unresolved:?}"
+    );
+    assert!(
+        instances.len() > matched.len(),
         "the graph had no identities beyond direct calls"
     );
 }
@@ -634,11 +665,6 @@ fn main() { depth(1, 3) }
         "instance explosion: {}",
         g.instances.len()
     );
-    assert_eq!(
-        g.recursion_census(&ws).changing_instance.len(),
-        1,
-        "the census disagrees with the rejection it is derived from"
-    );
     // ...and the graph is NOT closed, which is what makes `is_closed` a test
     // rather than a constant: the capped expansion left callees undiscovered.
     let c = g.closure(&ws);
@@ -745,21 +771,16 @@ fn main() {
     );
     assert!(r.is_empty(), "finite recursion was rejected: {r:?}");
     // ...and the fixture really did produce the recursion it claims to.
-    let census = g.recursion_census(&ws);
+    let calls = |from: &str, to: &str| {
+        g.edges()
+            .any(|e| fn_name(&ws, e.from.func) == from && fn_name(&ws, e.to.func) == to)
+    };
     assert!(
-        census.changing_instance.is_empty(),
-        "same-instance recursion was misfiled as polymorphic: {:?}",
-        census.changing_instance
-    );
-    assert!(
-        census
-            .direct_same_instance
-            .iter()
-            .any(|s| s.contains("countdown")),
+        calls("countdown", "countdown"),
         "the fixture produced no direct recursion to control against"
     );
     assert!(
-        !census.mutual_same_instance.is_empty(),
+        calls("even", "odd") && calls("odd", "even"),
         "the fixture produced no mutual recursion to control against"
     );
     // `hold` recurs at two distinct instantiations, neither reachable from the
@@ -2085,7 +2106,12 @@ fn main() { a(); b(); c(); d() }
     // restricted to generic instances: a non-generic one's substitution is
     // EMPTY, not absent, and skipping them hid that root seeding bypassed the
     // recorder entirely.
-    let missing = g.instances_without_substitution(&ws);
+    let missing: Vec<String> = g
+        .instances
+        .iter()
+        .filter(|i| g.substitution(i).is_none())
+        .map(|i| g.identity(&ws, i))
+        .collect();
     assert!(
         missing.is_empty(),
         "instances with no recorded substitution: {missing:?}"

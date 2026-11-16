@@ -4772,44 +4772,6 @@ pub fn string_char_literal_out_of_range(ws: &Workspace, mid: ModuleId) -> Option
 #[cfg(test)]
 mod tests;
 
-/// Support for `crate::spec_census`: expose concrete generic call identities
-/// without giving the diagnostic census its own type conversion.
-pub(crate) mod shape_census_support {
-    use super::shape::{SpecSubst, callee_instance_subst, spec_key_from_subst};
-    use crate::mir::FuncRef;
-    use crate::monoty::MonoTy;
-    use bone_core::workspace::{BodyInference, Workspace};
-
-    /// Every complete generic call identity in this body, plus the count of
-    /// compiler-state sites that could not state one.
-    pub(crate) fn concrete_calls_in_body(
-        ws: &Workspace,
-        inf: &BodyInference,
-    ) -> (Vec<(FuncRef, Vec<MonoTy>)>, usize) {
-        // caller is supplied by the census; this returns callee-side data only.
-        let empty = SpecSubst::default();
-        let mut out = Vec::new();
-        let mut rejected = 0usize;
-        let mut calls: Vec<_> = inf.resolved_overload_calls.iter().collect();
-        calls.sort_by_key(|(e, _)| **e);
-        for (e, (m, f)) in calls {
-            let func = FuncRef {
-                module: *m,
-                func: *f,
-            };
-            match callee_instance_subst(ws, inf, *e, func, &empty) {
-                Ok(Some(subst)) => match spec_key_from_subst(ws, func, &subst) {
-                    Some(key) => out.push((func, key)),
-                    None => rejected += 1,
-                },
-                Ok(None) => {}
-                Err(_) => rejected += 1,
-            }
-        }
-        (out, rejected)
-    }
-}
-
 /// One leaf of a scalarized binding ([`Builder::group_binds`]): its cell, or
 /// its value when the binding is never written ([`Builder::binding_stays_unwritten`]).
 #[derive(Clone, Copy)]
