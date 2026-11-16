@@ -150,6 +150,29 @@ fn marker() -> int {
   //^ int
 }
 
+// A borrow whose last use precedes the suspension is not retained by it.
+//- identity_borrow_finished_before_yield
+struct Mob { hp: int }
+fn make() -> Mob { return Mob { hp: 1 } }
+co fn tick() -> Coroutine<int> {
+    let mob = make()
+    mob.hp = 2
+    yield 1
+}
+fn marker() -> int {
+    5
+  //^ int
+}
+
+// An explicit `ref` to an identity is the borrow an identity parameter takes.
+//- explicit_ref_fills_identity_param
+struct Mob { hp: int }
+fn damage(mob: Mob) { mob.hp = 1 }
+fn f(mob: ref Mob) {
+    damage(mob)
+         //^ ref Mob
+}
+
 // A closure passed to a parameter the callee only calls cannot outlive the
 // borrow it captures.
 //- nonescaping_closure_captures_identity

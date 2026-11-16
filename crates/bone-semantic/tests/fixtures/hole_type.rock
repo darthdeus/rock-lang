@@ -24,3 +24,18 @@ fn f(value: int) -> int {
       //^ int
     x
 }
+
+// Holes are local-annotation only: a declaration's type is part of the
+// module interface and cannot wait for a body to fill it.
+//- hole_in_return_type @fail=a type hole is only allowed in a local annotation
+fn mk() -> fn(int) -> _ { return x => x }
+fn main() { let y = mk()(4) }
+
+//- hole_in_param_type @fail=a type hole is only allowed in a local annotation
+fn apply(f: fn(?) -> int) -> int { return f(1) }
+
+//- hole_in_field_type @fail=a type hole is only allowed in a local annotation
+struct S { f: fn(int) -> _ }
+
+//- hole_in_global_type @fail=a type hole is only allowed in a local annotation
+global G: fn(int) -> ? = x => x
