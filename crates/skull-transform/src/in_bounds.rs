@@ -541,12 +541,59 @@ struct Body<'a> {
 #[derive(Clone, Copy)]
 struct Interned {
     data: KeyData,
-    /// The union of [`value_bit`] over every value the key mentions.
-    values: u64,
+    /// Covers every key this one mentions, itself included.
+    mentions: Mentions,
 }
 
-fn value_bit(id: Idx<Inst>) -> u64 {
-    1 << (raw(id) % 64)
+/// A summary of the keys a key mentions: values and cells hashed into 64
+/// bits, and which of the place kinds appear. Two summaries that do not meet
+/// prove that no key of one is a key of the other.
+#[derive(Clone, Copy, Default)]
+struct Mentions {
+    values: u64,
+    cells: u64,
+    kinds: u8,
+}
+
+const GLOBAL: u8 = 1;
+const FIELD: u8 = 2;
+const ELEM: u8 = 4;
+
+impl Mentions {
+    fn value(id: Idx<Inst>) -> Self {
+        Mentions {
+            values: 1 << (raw(id) % 64),
+            ..Mentions::default()
+        }
+    }
+
+    fn cell(c: Idx<Cell>) -> Self {
+        Mentions {
+            cells: 1 << (raw(c) % 64),
+            ..Mentions::default()
+        }
+    }
+
+    fn kinds(kinds: u8) -> Self {
+        Mentions {
+            kinds,
+            ..Mentions::default()
+        }
+    }
+
+    fn union(self, other: Mentions) -> Self {
+        Mentions {
+            values: self.values | other.values,
+            cells: self.cells | other.cells,
+            kinds: self.kinds | other.kinds,
+        }
+    }
+
+    fn meets(self, other: Mentions) -> bool {
+        self.values & other.values != 0
+            || self.cells & other.cells != 0
+            || self.kinds & other.kinds != 0
+    }
 }
 
 impl Deref for Body<'_> {
@@ -561,11 +608,11 @@ impl<'a> Body<'a> {
     fn new(func: &'a MirFunc) -> Self {
         let values = func.insts.iter().map(|(id, _)| Interned {
             data: KeyData::Value(id),
-            values: value_bit(id),
+            mentions: Mentions::value(id),
         });
         let cells = func.cells.iter().map(|(c, _)| Interned {
             data: KeyData::Cell(c),
-            values: 0,
+            mentions: Mentions::cell(c),
         });
         Body {
             func,
@@ -580,15 +627,16 @@ impl<'a> Body<'a> {
             KeyData::Cell(c) => Key((self.func.insts.len() + raw(c)) as u32),
             _ => *self.ids.borrow_mut().entry(data).or_insert_with(|| {
                 let mut keys = self.keys.borrow_mut();
-                let of = |k: Key| keys[k.0 as usize].values;
-                let values = match data {
-                    KeyData::Field(base, _) | KeyData::Scale(base, _) => of(base),
-                    KeyData::Elem(a, b) | KeyData::Sum(a, b) | KeyData::Product(a, b) => {
-                        of(a) | of(b)
-                    }
-                    _ => 0,
+                let of = |k: Key| keys[k.0 as usize].mentions;
+                let mentions = match data {
+                    KeyData::Global(_) => Mentions::kinds(GLOBAL),
+                    KeyData::Field(base, _) => of(base).union(Mentions::kinds(FIELD)),
+                    KeyData::Elem(a, b) => of(a).union(of(b)).union(Mentions::kinds(ELEM)),
+                    KeyData::Scale(base, _) => of(base),
+                    KeyData::Sum(a, b) | KeyData::Product(a, b) => of(a).union(of(b)),
+                    _ => Mentions::default(),
                 };
-                keys.push(Interned { data, values });
+                keys.push(Interned { data, mentions });
                 Key((keys.len() - 1) as u32)
             }),
         }
@@ -690,12 +738,13 @@ impl Facts {
     }
 
     /// Drop every fact and tie whose keys mention a key `pred` accepts.
-    fn forget(&mut self, func: &Body<'_>, pred: impl Fn(KeyData) -> bool) {
+    /// `mask` meets the summary of every key `pred` accepts.
+    fn forget(&mut self, func: &Body<'_>, mask: Mentions, pred: impl Fn(KeyData) -> bool) {
         if self.is_empty() {
             return;
         }
         let keys = func.keys.borrow();
-        let m = |k: &Key| mentions(&keys, *k, &pred);
+        let m = |k: &Key| keys[k.0 as usize].mentions.meets(mask) && mentions(&keys, *k, &pred);
         self.private_tables.retain(|(k, _)| !m(k));
         self.whole.retain(|k| !m(k));
         self.ordered.retain(|(a, b, _)| !m(a) && !m(b));
@@ -707,17 +756,17 @@ impl Facts {
     }
 
     fn forget_cell(&mut self, func: &Body<'_>, cell: Idx<Cell>) {
-        self.forget(func, |k| k == KeyData::Cell(cell));
+        self.forget(func, Mentions::cell(cell), |k| k == KeyData::Cell(cell));
     }
 
     /// Runs at every value an instruction in a loop produces, and almost
     /// never finds a fact to drop: rule the value out by the keys' summaries
     /// before rebuilding every set.
     fn forget_value(&mut self, func: &Body<'_>, id: Idx<Inst>) {
-        let bit = value_bit(id);
+        let mask = Mentions::value(id);
         let found = {
             let keys = func.keys.borrow();
-            let has = |k: &Key| keys[k.0 as usize].values & bit != 0;
+            let has = |k: &Key| keys[k.0 as usize].mentions.meets(mask);
             self.same.iter().any(|(v, p)| *v == id || has(p))
                 || self.private_tables.iter().any(|(k, _)| has(k))
                 || self.whole.iter().any(has)
@@ -727,12 +776,22 @@ impl Facts {
                 || self.lt.iter().any(|(k, v)| has(k) || has(v))
         };
         if found {
-            self.forget(func, |k| k == KeyData::Value(id));
+            self.forget(func, mask, |k| k == KeyData::Value(id));
         }
     }
 
     fn forget_field(&mut self, func: &Body<'_>, field: Ustr) {
-        self.forget(func, |k| matches!(k, KeyData::Field(_, f) if f == field));
+        self.forget(
+            func,
+            Mentions::kinds(FIELD),
+            |k| matches!(k, KeyData::Field(_, f) if f == field),
+        );
+    }
+
+    fn forget_elems(&mut self, func: &Body<'_>) {
+        self.forget(func, Mentions::kinds(ELEM), |k| {
+            matches!(k, KeyData::Elem(..))
+        });
     }
 
     /// A vector may have shrunk.
@@ -746,7 +805,7 @@ impl Facts {
     /// element may hold something else.
     fn after_unknown_call(&mut self, func: &Body<'_>) {
         self.forget_lengths();
-        self.forget(func, through_memory);
+        self.forget(func, Mentions::kinds(GLOBAL | FIELD | ELEM), through_memory);
     }
 
     /// The value `id` and every place known to hold it.
@@ -898,7 +957,7 @@ impl Facts {
         // The numeric length only grows, so captured upper bounds remain true.
         // Current length reads and element-derived facts no longer name memory.
         self.forget_field(func, Ustr::from(LEN));
-        self.forget(func, |k| matches!(k, KeyData::Elem(..)));
+        self.forget_elems(func);
     }
 
     fn whole_key(&self, func: &Body<'_>, key: &Key) -> bool {
@@ -1227,13 +1286,17 @@ fn after_direct_call(facts: &mut Facts, func: &Body<'_>, ctx: &Ctx<'_>, fref: Fu
         facts.forget_lengths();
     }
     if effect.globals {
-        facts.forget(func, |k| matches!(k, KeyData::Global(_)));
+        facts.forget(func, Mentions::kinds(GLOBAL), |k| {
+            matches!(k, KeyData::Global(_))
+        });
     }
     if effect.elems {
-        facts.forget(func, |k| matches!(k, KeyData::Elem(..)));
+        facts.forget_elems(func);
     }
     match &effect.fields {
-        None => facts.forget(func, |k| matches!(k, KeyData::Field(..))),
+        None => facts.forget(func, Mentions::kinds(FIELD), |k| {
+            matches!(k, KeyData::Field(..))
+        }),
         Some(fields) => {
             for &field in fields {
                 facts.forget_field(func, field);
@@ -1410,7 +1473,7 @@ fn step(facts: &mut Facts, func: &Body<'_>, ctx: &Ctx<'_>, id: Idx<Inst>, may_re
             ) {
                 facts.after_unknown_call(func);
             } else {
-                facts.forget(func, |k| matches!(k, KeyData::Elem(..)));
+                facts.forget_elems(func);
             }
             if matches!(
                 kind,
@@ -1469,7 +1532,9 @@ fn step(facts: &mut Facts, func: &Body<'_>, ctx: &Ctx<'_>, id: Idx<Inst>, may_re
                 facts.same.insert((*value, k));
             }
         }
-        Inst::StoreGlobal { name, .. } => facts.forget(func, |k| k == KeyData::Global(*name)),
+        Inst::StoreGlobal { name, .. } => facts.forget(func, Mentions::kinds(GLOBAL), |k| {
+            k == KeyData::Global(*name)
+        }),
         Inst::StoreField { field, .. } => {
             if field.as_str() == LEN {
                 facts.forget_lengths();
