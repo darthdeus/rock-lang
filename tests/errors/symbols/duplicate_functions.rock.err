@@ -1,0 +1,83 @@
+//! Error: two definitions that no call can tell apart
+//! Tags: symbols, duplicates, overloads, macros
+//!
+//! Overloads must differ in their parameter types. A second definition with
+//! the same name and parameter types is rejected at the definition, even when
+//! nothing calls it.
+
+//=== TEST CASE: same_signature_uncalled_DuplicateSymbol ===
+//! expect: duplicate definition of `t()`: already defined at test.rock:1
+@test(output = "1") fn t() { print(1) }
+@test(output = "2") fn t() { print(2) }
+
+//=== TEST CASE: return_type_and_param_names_do_not_distinguish_DuplicateSymbol ===
+//! expect: duplicate definition of `f(int)`: already defined at test.rock:1
+fn f(x: int) -> int { x }
+fn f(y: int) -> float { 1.0 }
+
+fn main() {}
+
+//=== TEST CASE: receiver_form_is_the_same_function_DuplicateSymbol ===
+//! expect: duplicate definition of `g(P)`: already defined at test.rock:2
+struct P { x: int }
+fn P.g(p) -> int { 1 }
+fn g(p: P) -> int { 2 }
+
+fn main() {}
+
+//=== TEST CASE: same_generic_signature_DuplicateSymbol ===
+//! expect: duplicate definition of `id(T)`: already defined at test.rock:1
+fn id<T>(x: T) -> T { x }
+fn id<T>(x: T) -> T { x }
+
+fn main() {}
+
+//=== TEST CASE: same_signature_across_files_DuplicateSymbol ===
+//! expect: duplicate definition of `helper(string)`: already defined at a.rock:1
+//--- FILE: a.rock ---
+fn helper(s: string) -> int { 1 }
+//--- FILE: b.rock ---
+fn helper(s: string) -> int { 2 }
+
+fn main() {}
+
+//=== TEST CASE: same_arity_macros_DuplicateSymbol ===
+//! expect: duplicate definition of macro `dbl` taking 1 argument: already defined at test.rock:1
+macro dbl(x: expr) -> int { x + x }
+macro dbl(y: expr) -> int { y * 3 }
+
+fn main() {
+    print(dbl(2))
+}
+
+//=== TEST CASE: overlapping_macro_arity_DuplicateSymbol ===
+//! expect: duplicate definition of macro `pick` taking 1 argument: already defined at test.rock:1
+macro pick(x: expr, y: expr = 0) -> int { x + y }
+macro pick(x: expr) -> int { x }
+
+fn main() {
+    print(pick(2))
+}
+
+//=== TEST CASE: struct_and_enum_same_name_DuplicateSymbol ===
+//! expect: duplicate type definition: `Shape`
+struct Shape { x: int }
+enum Shape { Circle }
+
+fn main() {}
+
+//=== TEST CASE: enum_and_newtype_same_name_DuplicateSymbol ===
+//! expect: duplicate type definition: `Id`
+enum Id { A }
+newtype Id(int)
+
+fn main() {}
+
+//=== TEST CASE: struct_and_newtype_across_files_DuplicateSymbol ===
+//! expect: duplicate newtype `Meters` across modules
+//--- FILE: a.rock ---
+struct Meters { v: float }
+//--- FILE: b.rock ---
+newtype Meters(float)
+
+fn main() {}

@@ -99,6 +99,39 @@ fn an_item_visibility_edit_rebuilds_the_tree() {
     );
 }
 
+/// Two files of one module share its overload families, so a second file
+/// defining `bump` with the same parameter types duplicates it.
+#[test]
+fn a_same_signature_definition_in_another_file_of_the_module_is_a_duplicate() {
+    let other = |body: &str| v1("a2.rock", &format!("mod a;\n\n{body}"));
+    let files = |body: &str| {
+        let mut files = package();
+        files.push(other(body));
+        files
+    };
+    let duplicate = "fn bump(m: int) -> float {\n    1.0\n}\n";
+    let overload = "fn bump(m: float) -> float {\n    m\n}\n";
+
+    let (_, diags) = edit_with_diagnostics(
+        files(overload),
+        "a2.rock",
+        &format!("mod a;\n\n{duplicate}"),
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("duplicate definition of `bump(int)`: already defined at a.rock:3")),
+        "{diags:?}"
+    );
+
+    let (_, diags) = edit_with_diagnostics(
+        files(duplicate),
+        "a2.rock",
+        &format!("mod a;\n\n{overload}"),
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
 #[test]
 fn an_added_definition_rebuilds_the_tree() {
     let edit = format!("{A}\npub fn twice(n: int) -> int {{\n    n\n}}\n");

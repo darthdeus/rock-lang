@@ -164,6 +164,30 @@ fn duplicate_struct_across_modules_surfaces_in_lsp() {
     );
 }
 
+#[test]
+fn duplicate_function_across_files_surfaces_once_in_lsp() {
+    let project = Project::new(&[
+        MANIFEST,
+        (
+            "a.rock",
+            "fn helper(n: int) -> int { n }\nfn main() -> int { 0 }\n",
+        ),
+        ("b.rock", "fn helper(m: int) -> int { 1 }\n"),
+    ]);
+    let b = project.path("b.rock");
+    let dup = |d: &&Diagnostic| d.message.contains("duplicate definition of `helper(int)`");
+    let (mut bone, per_file) = project.open("a.rock");
+    let found: Vec<_> = per_file.iter().flat_map(|(_, d)| d).filter(dup).collect();
+    assert_eq!(found.len(), 1, "{per_file:?}");
+    assert_eq!(bone.diagnostics_for(&b).iter().filter(dup).count(), 1);
+
+    let per_file = bone.update(&b, "fn helper(m: float) -> int { 1 }\n".into());
+    assert!(
+        !per_file.iter().flat_map(|(_, d)| d).any(|d| dup(&d)),
+        "{per_file:?}"
+    );
+}
+
 fn source_load_failure_recovers(broken_manifest: bool) {
     let manifest = "[package]\nname = \"dep\"\ntype = \"lib\"\n";
     let dependency = "struct Dependency { value: int }\n";
