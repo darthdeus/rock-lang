@@ -151,8 +151,29 @@ fn valid_constant_shift_count(func: &MirFunc, x: Idx<Inst>) -> bool {
 }
 
 #[cfg(test)]
-mod uint_constant_tests {
+mod constant_tests {
     use super::*;
+
+    #[test]
+    fn nonfinite_float_literals_preserve_their_values() {
+        for (value, check) in [
+            (f64::INFINITY, "value == 1 / 0"),
+            (f64::NEG_INFINITY, "value == -1 / 0"),
+            (f64::NAN, "value ~= value"),
+        ] {
+            let mut literal = String::new();
+            write_lit(&mut literal, &Lit::Float(value));
+            let output = std::process::Command::new("luajit")
+                .args(["-e", &format!("local value = {literal}; assert({check})")])
+                .output()
+                .expect("spawn luajit");
+            assert!(
+                output.status.success(),
+                "{literal}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
 
     #[test]
     fn uint_constant_folding_keeps_invalid_values_checked() {
@@ -1034,6 +1055,14 @@ fn write_lit(out: &mut String, l: &Lit) {
         }
         Lit::Uint(i) => {
             let _ = write!(out, "{i}");
+        }
+        Lit::Float(x) if x.is_nan() => out.push_str("(0 / 0)"),
+        Lit::Float(x) if x.is_infinite() => {
+            out.push_str(if x.is_sign_negative() {
+                "(-1 / 0)"
+            } else {
+                "(1 / 0)"
+            });
         }
         Lit::Float(x) => {
             let _ = write!(out, "{x:?}");
