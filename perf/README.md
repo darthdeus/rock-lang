@@ -45,6 +45,25 @@ percentage change from the previous row in the same file, so the loop while
 working on a change is: edit, `cargo build --release -p rock-cli --bin rock`,
 `perf/run.py --quick --no-build`, read the deltas.
 
+## Comparing two compilers
+
+Compile speed is guarded by measurement, not by counting internal work in
+tests. Before landing a change that could slow compiles, build the base and
+the candidate and run `perf/compare.py base/rock cand/rock`. It times cold
+compiles of `packages/stone`, `demos/match3` and `demos/testbed` and a
+`rock test tests/` run, interleaving the two binaries, and prints each
+workload's median wall time, peak RSS and the median cand/base ratio of
+paired runs with a distribution-free 95% confidence interval (`noise` when
+it includes 1.00). On a loaded machine every interval is wide; measure on a
+quiet one. `--runs 20` narrows the range, `--only stone,tests` picks workloads,
+`--phases` adds each compile's budget top level. With one binary it prints
+the timings alone; run it with the same binary twice to see the machine's
+noise floor.
+
+```sh
+perf/compare.py base/rock target/release/rock --only stone --phases
+```
+
 ## The time budget
 
 `ROCK_COMPILE_STATS=<file>` makes `rock compile` append one JSON record with a

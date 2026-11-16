@@ -88,3 +88,11 @@ in the update. Run records are written to `.sim-runs/` or `ROCK_SIM_LOG_DIR`;
 Hot-reload sims opt in with `@sim_env("STONE_HOT_RELOAD", "1")` and use
 `reload_edit(file, find, replace)` to apply a unique source-text match through
 the incremental pipeline. The runner restores touched files afterward.
+
+## Compile speed
+
+Compile-speed regressions are caught by measurement, not by tests that count
+the compiler's internal work. `perf/compare.py base/rock cand/rock` times
+cold compiles of the Stone package, the demos and the test corpus with both
+binaries interleaved and prints each workload's cand/base ratio with its
+noise; see [`perf/README.md`](../perf/README.md#comparing-two-compilers).
