@@ -14,7 +14,7 @@
 //! 2.4 diagnostic, because the receiver's declared `[T]` names a layout the
 //! column element does not have. It cannot silently reach `_data`.
 
-use crate::common::run_main;
+use crate::common::{emit_module, function_body, run_main};
 const COLUMN_RECEIVER: &str = r#"
 value PushCell { a: int, b: int }
 
@@ -51,30 +51,18 @@ fn main() {
 }
 "#;
 
-fn emit(src: &str) -> String {
-    crate::common::try_emit_module(src).expect("must emit")
-}
-
-/// `main`'s emitted body. Whole-module matching is not an oracle here: the
-/// `vec_push` DEFINITION is always emitted and contains every string this test
-/// looks for, so a module-wide match answers yes for any program.
-fn main_body(lua: &str) -> String {
-    let start = lua.find("\nfunction main()").expect("main is emitted");
-    let rest = &lua[start + 1..];
-    let end = rest.find("\nend").expect("main is terminated");
-    rest[..end].to_string()
-}
-
 /// Whether the boxed body reached this call site. `vec_push` is `@inline`, so
 /// it is SPLICED rather than called -- there is no call to look for, and the
 /// observable is the boxed layout the splice writes.
 fn reaches_boxed_body(lua: &str) -> bool {
-    main_body(lua).contains("._data")
+    // `main`'s body: the always-emitted `vec_push` definition contains `._data`
+    // too, so a module-wide match would answer yes for any program.
+    function_body(lua, "main").contains("._data")
 }
 
 #[test]
 fn a_column_receiver_never_reaches_the_boxed_body() {
-    let lua = emit(COLUMN_RECEIVER);
+    let lua = emit_module(COLUMN_RECEIVER);
     assert!(
         !reaches_boxed_body(&lua),
         "a column push must emit per-leaf stores and never the `_data` splice"
@@ -85,7 +73,7 @@ fn a_column_receiver_never_reaches_the_boxed_body() {
 /// Without this the assertion above is unfalsifiable.
 #[test]
 fn a_boxed_receiver_does_reach_the_boxed_body() {
-    let lua = emit(BOXED_RECEIVER);
+    let lua = emit_module(BOXED_RECEIVER);
     assert!(
         reaches_boxed_body(&lua),
         "a boxed push is exactly the case the boxed body serves"
@@ -95,7 +83,7 @@ fn a_boxed_receiver_does_reach_the_boxed_body() {
 
 #[test]
 fn a_column_payload_reaches_the_boxed_body_and_is_correct() {
-    let lua = emit(COLUMN_PAYLOAD);
+    let lua = emit_module(COLUMN_PAYLOAD);
     assert!(
         reaches_boxed_body(&lua),
         "the OUTER vec is boxed, so its push is the ordinary `_data` splice"
@@ -113,7 +101,7 @@ fn a_column_payload_reaches_the_boxed_body_and_is_correct() {
 /// test is about.
 #[test]
 fn the_boxed_body_has_exactly_one_definition() {
-    let lua = emit(BOXED_RECEIVER);
+    let lua = emit_module(BOXED_RECEIVER);
     let defs: Vec<&str> = lua
         .match_indices("function vec_push")
         .filter_map(|(i, _)| lua[i..].lines().next())

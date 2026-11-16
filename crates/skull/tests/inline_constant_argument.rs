@@ -1,6 +1,6 @@
 //! A constant argument reaches the reads of an inlined branching callee, so the
 //! callee's test on it folds and only the taken arm is emitted.
-use crate::common::{compile_and_run, emit_module, function_body};
+use crate::common::{emit_module, function_body, run_main};
 
 const SRC: &str = r#"
 fn side(x: int) -> int { return x * 7 + 1 }
@@ -23,5 +23,5 @@ fn inlined_branch_on_constant_argument_folds() {
         !body.contains("if "),
         "the arm a constant `false` never takes must fold away; got:\n{body}"
     );
-    assert_eq!(compile_and_run(SRC).trim(), "7");
+    assert_eq!(run_main(&lua).trim(), "7");
 }

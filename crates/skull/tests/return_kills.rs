@@ -3,7 +3,7 @@
 //! drops every slot a return does not read. A kill before a return that still
 //! calls something stays, since the frame lives through that call.
 
-use crate::common::{compile_and_run, emit_module, function_body};
+use crate::common::{emit_module, function_body, run_main};
 
 const SRC: &str = r#"
 inline(lua) fn pick(a: int, b: int) -> int = "if a > b then return a end\nreturn b"
@@ -41,5 +41,5 @@ fn a_kill_before_a_call_free_return_is_dropped() {
     let body = function_body(&lua, "joined");
     assert!(!body.contains(" = nil\n else"), "{body}");
     assert!(!body.contains(" = nil\n end"), "{body}");
-    assert_eq!(compile_and_run(SRC), "8 12 2 3");
+    assert_eq!(run_main(&lua), "8 12 2 3");
 }

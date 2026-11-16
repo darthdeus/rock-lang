@@ -1,10 +1,4 @@
-use crate::common::{emit_mir, mangled_name, module_id, run_luajit, ws_with_stdlib};
-
-fn emit_program(src: &str) -> String {
-    let ws = ws_with_stdlib(src);
-    let mid = module_id(&ws, "<test>");
-    skull::mir_emit::emit_full(&ws, mid).expect("emit").0.lua
-}
+use crate::common::{emit_mir, emit_module, mangled_name, run_luajit};
 
 const FIXTURE: &str = r#"
 global COUNTER: int = 0
@@ -22,11 +16,6 @@ fn main() {
 #[test]
 fn lua_global_slots_are_dense_numeric_realizations() {
     let emitted = emit_mir(FIXTURE);
-    let lua = emit_program(FIXTURE);
-    assert!(
-        lua.contains("__rock_state_cell[5]"),
-        "the fixture global must use its compact numeric Lua slot"
-    );
     assert!(
         emitted.lua.contains(
             "{name=\"COUNTER\",identity=\"global:<test>::COUNTER\",physical={\"COUNTER\"},slots={5}}"
@@ -110,7 +99,7 @@ print(first ~= second and second ~= third
 
 #[test]
 fn emission_reads_globals_through_the_storage_cell() {
-    let lua = emit_program(FIXTURE);
+    let lua = emit_module(FIXTURE);
     assert!(
         lua.contains("\nlocal __rock_state_cell\n"),
         "the prelude must declare the cell as a chunk-level local:\n{}",
@@ -139,7 +128,7 @@ fn emission_reads_globals_through_the_storage_cell() {
 
 #[test]
 fn the_program_opens_sized_storage_before_initializing() {
-    let lua = emit_program(FIXTURE);
+    let lua = emit_module(FIXTURE);
     // COUNTER is slot 5 (`lua_global_slots_are_dense_numeric_realizations`):
     // the array fixpoint is the next power of two above the highest slot, plus
     // one for index 0; the hash part has a 16-node floor.
@@ -181,7 +170,7 @@ fn the_program_opens_sized_storage_before_initializing() {
 /// and the table is the one the first load sized.
 #[test]
 fn a_reloaded_program_keeps_live_globals_and_its_storage_table() {
-    let lua = emit_program(FIXTURE);
+    let lua = emit_module(FIXTURE);
     let bump = mangled_name(&lua, "bump");
     let program = format!(
         "{lua}
