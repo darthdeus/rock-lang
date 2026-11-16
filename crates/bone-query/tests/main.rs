@@ -35,6 +35,8 @@ mod hover;
 mod incremental_stale_diagnostic;
 #[path = "inline_local.rs"]
 mod inline_local;
+#[path = "inline_local_macro_spans.rs"]
+mod inline_local_macro_spans;
 #[path = "interface_relower_staleness.rs"]
 mod interface_relower_staleness;
 #[path = "interp_hole_spans.rs"]

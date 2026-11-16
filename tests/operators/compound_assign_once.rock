@@ -172,3 +172,33 @@ fn test_effectful_value_runs_once() {
     v[at(0)] -= 0
     print("{CALLS} {v[0]}")
 }
+
+struct OpIndex { value: int }
+struct OpRow { values: [int] }
+global OP_TRACE: int = 0
+
+fn __unm(value: OpIndex) -> int {
+    OP_TRACE = OP_TRACE * 10 + 1
+    return value.value
+}
+
+fn __op_add(a: OpIndex, b: OpIndex) -> int {
+    OP_TRACE = OP_TRACE * 10 + 2
+    return a.value + b.value
+}
+
+fn op_rhs() -> int {
+    OP_TRACE = OP_TRACE * 10 + 3
+    return 3
+}
+
+@test(output = "1323 26")
+fn test_overloaded_place_operators_run_once_before_rhs() {
+    OP_TRACE = 0
+    let rows = [OpRow { values: [10, 20] }]
+    let one = OpIndex { value: 1 }
+    let zero = OpIndex { value: 0 }
+    rows[0].values[-one] += op_rhs()
+    rows[0].values[one + zero] += op_rhs()
+    print("{OP_TRACE} {rows[0].values[1]}")
+}

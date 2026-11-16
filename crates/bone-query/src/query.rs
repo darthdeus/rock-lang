@@ -3873,10 +3873,13 @@ pub struct InlineLocalSites {
 /// Also None when the initializer is not pure and inlining would change how
 /// often it runs: no use, several uses, or a use inside a loop, closure,
 /// nested function or `defer` that does not also hold the `let`.
+/// Effectful operators also prevent inlining a single use, which could move
+/// their effects past another expression.
 pub fn inline_local(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<InlineLocalSites> {
     let module = ws.modules.get(mid.index())?;
     let owner = module.body_at(offset)?;
     let body = module.bodies.get(&owner)?;
+    let bi = ws.inference(mid)?.per_fn.get(&owner)?;
     let b = binding_at(body, offset)?;
 
     // The binding must come from a plain `let x = init` (not a param, `for` var,
@@ -3887,18 +3890,28 @@ pub fn inline_local(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Inli
     })?;
     let let_span = *body.statement_spans.get(let_idx)?;
     let init_span = *body.expr_spans.get(value)?;
+    // Inline-local edits one document; macro defaults can retain another file's spans.
+    if let_span.file != module.file || init_span.file != module.file {
+        return None;
+    }
     let parenthesize = init_needs_parens(&body.expr_arena[value]);
 
     let mut uses = Vec::new();
     for (e, expr) in body.expr_arena.iter() {
         if matches!(expr, hir::Expr::Var(x) if *x == b) {
             if let Some(s) = body.expr_spans.get(e) {
+                if s.file != module.file {
+                    return None;
+                }
                 uses.push(*s);
             }
         }
     }
 
-    if !init_is_pure(body, value)
+    if !init_operators_are_pure(ws, bi, body, value) {
+        return None;
+    }
+    if !init_is_pure(ws, bi, body, value)
         && (uses.len() != 1 || uses_rerun_outside_let(body, let_span, &uses))
     {
         return None;
@@ -3916,7 +3929,7 @@ pub fn inline_local(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Inli
 /// Whether evaluating `e` more than once, or not at all, is unobservable:
 /// literals, names, field access and arithmetic over pure operands. Calls,
 /// method calls, indexing and anything that allocates are not.
-fn init_is_pure(body: &hir::Body, e: Idx<hir::Expr>) -> bool {
+fn init_is_pure(ws: &Workspace, bi: &BodyInference, body: &hir::Body, e: Idx<hir::Expr>) -> bool {
     match &body.expr_arena[e] {
         hir::Expr::Unit
         | hir::Expr::Null
@@ -3930,21 +3943,91 @@ fn init_is_pure(body: &hir::Body, e: Idx<hir::Expr>) -> bool {
         hir::Expr::FieldAccess { base, .. }
         | hir::Expr::SafeNav { base, .. }
         | hir::Expr::TupleIndex { tuple: base, .. }
-        | hir::Expr::UnaryMinus(base, _)
-        | hir::Expr::Not(base, _)
-        | hir::Expr::BitNot(base) => init_is_pure(body, *base),
-        hir::Expr::BinOp { lhs, rhs, .. } => init_is_pure(body, *lhs) && init_is_pure(body, *rhs),
+        | hir::Expr::BitNot(base) => init_is_pure(ws, bi, body, *base),
+        hir::Expr::UnaryMinus(base, _) | hir::Expr::Not(base, _) => {
+            init_operator_is_pure(ws, bi, body, e) == Some(true)
+                && init_is_pure(ws, bi, body, *base)
+        }
+        hir::Expr::BinOp { lhs, rhs, .. } => {
+            init_is_pure(ws, bi, body, *lhs) && init_is_pure(ws, bi, body, *rhs)
+        }
         // Binary arithmetic lowers to a call of its `__op_*` operator function.
-        hir::Expr::Call {
-            callee: hir::Callee::Unresolved { name, .. },
-            args,
-            ..
-        } => {
-            let op = name.as_str().rsplit("::").next().unwrap_or_default();
-            op.starts_with("__op_") && args.clone().all(|arg| init_is_pure(body, arg))
+        hir::Expr::Call { args, .. } => {
+            let mut args = *args;
+            init_operator_is_pure(ws, bi, body, e) == Some(true)
+                && args.all(|arg| init_is_pure(ws, bi, body, arg))
         }
         _ => false,
     }
+}
+
+fn init_operator_is_pure(
+    ws: &Workspace,
+    bi: &BodyInference,
+    body: &hir::Body,
+    e: Idx<hir::Expr>,
+) -> Option<bool> {
+    match &body.expr_arena[e] {
+        hir::Expr::UnaryMinus(..) | hir::Expr::Not(..)
+            if !bi.resolved_overload_calls.contains_key(&e) =>
+        {
+            return Some(
+                bi.expr_types
+                    .get(e)
+                    .and_then(|&ty| ws.resolve_ty(Some(bi), ty))
+                    .is_some_and(|(_, ty)| match ty {
+                        hir::TypeExpr::Builtin(
+                            hir::BuiltinTy::Int | hir::BuiltinTy::Float | hir::BuiltinTy::Bool,
+                        ) => true,
+                        hir::TypeExpr::App {
+                            ctor: hir::TypeCtor::Nominal(name),
+                            ..
+                        } => ws.newtypes_by_name.contains_key(&name),
+                        _ => false,
+                    }),
+            );
+        }
+        hir::Expr::UnaryMinus(..) | hir::Expr::Not(..) => {}
+        hir::Expr::Call {
+            callee: hir::Callee::Unresolved { name, .. },
+            ..
+        } => {
+            let name = name.as_str().rsplit("::").next().unwrap_or_default();
+            if hir::operator_entry(name).is_none() && hir::unary_operator_entry(name).is_none() {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+    Some(
+        bi.resolved_overload_calls
+            .get(&e)
+            .is_some_and(|&(mid, fid)| {
+                ws.module(mid).functions[fid]
+                    .annotations
+                    .iter()
+                    .any(|a| a.is_builtin("pure"))
+                    && ws.effects().of(mid, fid).is_none()
+            }),
+    )
+}
+
+fn init_operators_are_pure(
+    ws: &Workspace,
+    bi: &BodyInference,
+    body: &hir::Body,
+    e: Idx<hir::Expr>,
+) -> bool {
+    use bone_core::hir_walk::HirChild;
+
+    let mut pure = init_operator_is_pure(ws, bi, body, e) != Some(false);
+    body.walk_descendants(HirChild::Expr(e), &mut |node| {
+        if let HirChild::Expr(e) = node {
+            pure &= init_operator_is_pure(ws, bi, body, e) != Some(false);
+        }
+        pure
+    });
+    pure
 }
 
 /// Whether any use sits in a region that can run a different number of times

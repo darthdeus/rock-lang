@@ -2,7 +2,7 @@
 //! its initializer (parenthesized when the initializer isn't atomic) and delete
 //! the `let`. Offered on the binding or any of its uses.
 
-use crate::fixture::{PATH, apply_edits, workspace};
+use crate::fixture::{PATH, apply_edits, pos, workspace};
 use lsp_types::Position;
 
 fn inlined(src: &str, pos: Position) -> String {
@@ -117,4 +117,97 @@ fn not_offered_for_an_impure_initializer_that_would_run_a_different_number_of_ti
             .is_some();
         assert!(!offered, "{case}");
     }
+}
+
+#[test]
+fn user_defined_operators_are_not_treated_as_pure_initializers() {
+    let binary = r#"struct N { value: int }
+global CALLS: int = 0
+fn __op_add(a: N, b: N) -> int { CALLS = CALLS + 1; return a.value + b.value }
+fn f(a: N, b: N) -> int {
+    let y = a + b
+    return y + y
+}
+"#;
+    let unary = r#"struct N { value: int }
+global CALLS: int = 0
+fn __unm(a: N) -> int { CALLS = CALLS + 1; return a.value }
+fn f(a: N) -> int {
+    let y = -a
+    return y + y
+}
+"#;
+
+    for (label, src) in [("binary", binary), ("unary", unary)] {
+        let offered = workspace(src)
+            .inline_local(PATH, pos(src, "let y", 4))
+            .is_some();
+        assert!(!offered, "{label} user-defined operator initializer");
+    }
+}
+
+#[test]
+fn ordinary_arithmetic_over_integer_variables_remains_inlineable() {
+    let src = r#"fn f(a: int, b: int) -> int {
+    let y = a + b
+    return y + y
+}
+"#;
+    assert!(
+        workspace(src)
+            .inline_local(PATH, pos(src, "let y", 4))
+            .is_some()
+    );
+}
+
+#[test]
+fn native_newtype_negation_remains_inlineable() {
+    let src = r#"newtype Score(int)
+fn f(a: Score) -> Score {
+    let y = -a
+    print(y)
+    return y
+}
+"#;
+    assert!(
+        workspace(src)
+            .inline_local(PATH, pos(src, "let y", 4))
+            .is_some()
+    );
+}
+
+#[test]
+fn does_not_move_a_user_operator_across_an_intervening_effect() {
+    let src = r#"struct N { value: int }
+global TRACE: int = 0
+fn __op_add(a: N, b: N) -> int { TRACE = TRACE * 10 + 1; return a.value + b.value }
+fn effect() { TRACE = TRACE * 10 + 2 }
+fn f(a: N, b: N) -> int {
+    let y = a + b
+    effect()
+    return y
+}
+"#;
+    let offered = workspace(src)
+        .inline_local(PATH, pos(src, "let y", 4))
+        .is_some();
+    assert!(!offered, "inlining would reverse the operator/effect order");
+}
+
+#[test]
+fn pure_operator_annotation_does_not_hide_debug_effects() {
+    let src = r#"struct N { value: int }
+global CALLS: int = 0
+@debug_impure fn count() { CALLS = CALLS + 1 }
+@pure fn __op_add(a: N, b: N) -> int { count(); return a.value + b.value }
+fn f(a: N, b: N) -> int {
+    let y = a + b
+    return y + y
+}
+"#;
+    assert!(
+        workspace(src)
+            .inline_local(PATH, pos(src, "let y", 4))
+            .is_none()
+    );
 }

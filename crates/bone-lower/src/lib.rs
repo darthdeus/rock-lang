@@ -4291,21 +4291,18 @@ fn expr_is_literal(a: &Ast, e: &Idx<ExprData>) -> bool {
     )
 }
 
-/// Whether evaluating `e` twice is indistinguishable from evaluating it once:
-/// names, literals, field and index reads, and operators over such operands.
-/// Both evaluations of a compound place happen before its right-hand side,
-/// so nothing can change in between.
+/// Whether evaluating `e` twice is indistinguishable from evaluating it once.
+/// The AST has no operand types yet, so overloadable operators may call user code.
 fn expr_is_pure(a: &Ast, e: &Idx<ExprData>) -> bool {
     use skull_parser::ExprKind;
 
     match &a.e(e).kind {
         ExprKind::Ident(_) | ExprKind::QualifiedIdent { .. } | ExprKind::Path { .. } => true,
         _ if expr_is_literal(a, e) => true,
-        ExprKind::Paren(o)
-        | ExprKind::FieldAccess(o, _)
-        | ExprKind::Not(o)
-        | ExprKind::BitNot(o)
-        | ExprKind::UnaryMinus(o) => expr_is_pure(a, o),
+        ExprKind::Paren(o) | ExprKind::FieldAccess(o, _) | ExprKind::BitNot(o) => {
+            expr_is_pure(a, o)
+        }
+        ExprKind::Not(_) | ExprKind::UnaryMinus(_) => false,
         ExprKind::Index(o, i) => expr_is_pure(a, o) && expr_is_pure(a, i),
         ExprKind::BinOp {
             left, op, right, ..
@@ -4317,7 +4314,8 @@ fn expr_is_pure(a: &Ast, e: &Idx<ExprData>) -> bool {
                     | TokenKind::SubAssign
                     | TokenKind::MulAssign
                     | TokenKind::DivAssign
-            ) && expr_is_pure(a, left)
+            ) && op.overloadable_binop_fn().is_none()
+                && expr_is_pure(a, left)
                 && expr_is_pure(a, right)
         }
         _ => false,
