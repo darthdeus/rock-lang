@@ -535,6 +535,13 @@ impl Workspace {
         !mid.is_builtin() && !warm.contains(&mid)
     }
 
+    /// Whether `name` is a nominal identity type: a `struct`, not a `value`.
+    pub fn is_identity_struct(&self, name: Ustr) -> bool {
+        self.struct_by_name
+            .get(&name)
+            .is_some_and(|sid| !self.module(sid.module).structs[sid.def].is_value)
+    }
+
     /// The type behind `ty`, following solved inference variables, with the id
     /// whose arena its child indices point into (`id.with_idx(child)`). `None`
     /// for a `Local` type without its body.

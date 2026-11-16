@@ -532,7 +532,10 @@ impl<'a> BodyCtx<'a> {
 }
 
 fn is_reference_struct(ws: &Workspace, bi: &BodyInference, ty: TyId) -> bool {
-    matches!(strip_ref(ws, Some(bi), ty), Some((_, TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })) if ws.struct_by_name.get(&name).is_some_and(|sid| !ws.module(sid.module).structs[sid.def].is_value))
+    matches!(
+        strip_ref(ws, Some(bi), ty),
+        Some((_, TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })) if ws.is_identity_struct(name)
+    )
 }
 
 fn ref_target(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<TyId> {

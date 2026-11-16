@@ -37,13 +37,6 @@ pub struct IdentityStorageViolation {
     pub via: IdentityStorageVia,
 }
 
-/// Whether `name` is a nominal identity type: a `struct`, not a `value`.
-pub(crate) fn is_identity_struct(ws: &Workspace, name: Ustr) -> bool {
-    ws.struct_by_name
-        .get(&name)
-        .is_some_and(|sid| !ws.module(sid.module).structs[sid.def].is_value)
-}
-
 pub(crate) fn is_identity_storage_field(field: &StructFieldDef) -> bool {
     field
         .annotations
@@ -384,7 +377,7 @@ fn visit<V: IdentityTypes>(
             )
         }),
         IdentityNode::Nominal(name, params) => {
-            if top == Top::Stored && is_identity_struct(ws, name) {
+            if top == Top::Stored && ws.is_identity_struct(name) {
                 return Some(IdentityStorageViolation {
                     identity: name,
                     via,

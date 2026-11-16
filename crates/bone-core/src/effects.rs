@@ -314,10 +314,7 @@ fn field_may_call_callback(
                 ctor: TypeCtor::Nominal(name),
                 ..
             } => {
-                return ws
-                    .struct_by_name
-                    .get(&name)
-                    .is_some_and(|sid| !ws.module(sid.module).structs[sid.def].is_value);
+                return ws.is_identity_struct(name);
             }
             TypeExpr::Generic(..) | TypeExpr::Builtin(BuiltinTy::Any) => return true,
             _ => return false,
