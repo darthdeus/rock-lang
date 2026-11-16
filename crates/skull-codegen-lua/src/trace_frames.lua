@@ -367,8 +367,18 @@ local function scan_calls(entry)
   return calls
 end
 
+local metadata = io.read("*l")
+if metadata == nil then fail("cannot read trace contributor metadata from stdin") end
+local metadata_chunk, metadata_error = loadstring(metadata, "=(trace_frames_contributors)")
+if not metadata_chunk then
+  fail("cannot parse trace contributor metadata: " .. tostring(metadata_error))
+end
+local contributors = metadata_chunk()
+if type(contributors) ~= "table" then fail("invalid trace contributor metadata") end
+
 local source = io.read("*a")
 if source == nil then fail("cannot read emitted Lua from stdin") end
+
 local headers
 source, headers = strip_directives(source)
 local chunk, err = loadstring(source, "=@stdin")
@@ -404,29 +414,112 @@ local function walk(proto, parent)
 end
 
 walk(chunk, nil)
-local output = { "VM\t" .. tostring(frame_links()) }
-
+local links = frame_links()
+if links ~= 1 and links ~= 2 then fail("invalid LuaJIT frame probe output") end
 for _, entry in ipairs(prototypes) do
-  output[#output + 1] = table.concat({
-    "F",
-    tostring(entry.id),
-    entry.name,
-    tostring(entry.info.stackslots or 0),
-    tostring(entry.info.params or 0),
-    tostring(entry.info.linedefined or 0),
-  }, "\t")
+  entry.calls = scan_calls(entry)
 end
 
+local names = {}
 for _, entry in ipairs(prototypes) do
-  for _, call in ipairs(scan_calls(entry)) do
-    output[#output + 1] = table.concat({
-      "C",
-      tostring(entry.id),
-      tostring(call.pc),
-      call.op,
-      tostring(call.a),
-      call.target,
-    }, "\t")
+  if names[entry.name] == nil then
+    names[entry.name] = entry.id
+  else
+    names[entry.name] = false
+  end
+end
+
+local INDIRECT, RECURSIVE, TAIL = 1, 2, 4
+local memo, visiting = {}, {}
+local function chain(id)
+  if memo[id] then return memo[id] end
+  local frame = prototypes[id + 1]
+  local result = { peak = frame.info.stackslots or 0, path = { id }, unknown = 0 }
+  visiting[id] = true
+  for _, call in ipairs(frame.calls) do
+    local target = names[call.target]
+    if call.op == "CALLT" or call.op == "CALLMT" then
+      result.unknown = bit.bor(result.unknown, TAIL)
+    elseif not target then
+      result.unknown = bit.bor(result.unknown, INDIRECT)
+    elseif visiting[target] then
+      result.unknown = bit.bor(result.unknown, RECURSIVE)
+    else
+      local child = chain(target)
+      result.unknown = bit.bor(result.unknown, child.unknown)
+      local peak = call.a + links + child.peak
+      if peak > result.peak then
+        result.peak = peak
+        result.path = { id }
+        for _, member in ipairs(child.path) do
+          result.path[#result.path + 1] = member
+        end
+      end
+    end
+  end
+  visiting[id] = nil
+  memo[id] = result
+  return result
+end
+
+local output = {
+  "LuaJIT emitted-call frame report: frame-links=" .. tostring(links) .. "; LJ_MAX_JSLOTS=250",
+  "Parsed final emitted Lua without execution. Known non-tail paths estimate selected inlining path pressure; branches, loop trace entry, recursion, indirect/external targets and tail calls can make the full chain unknown. A warning predicts a slot cliff on that path, not a guaranteed abort: an independently compiled callee can link. Register coalescing is a separate constraint.",
+}
+
+local function add_contributors(name, label)
+  for _, line in ipairs(contributors[name] or {}) do
+    output[#output + 1] = label .. line
+  end
+end
+
+for _, frame in ipairs(prototypes) do
+  local estimate = chain(frame.id)
+  local peak = links + estimate.peak
+  local path_names = {}
+  for _, id in ipairs(estimate.path) do
+    path_names[#path_names + 1] = prototypes[id + 1].name
+  end
+  local path = table.concat(path_names, " -> ")
+  output[#output + 1] = string.format(
+    "function %s: frame=%d params=%d lua-line=%d known-chain-peak=%d path=%s",
+    frame.name, frame.info.stackslots or 0, frame.info.params or 0,
+    frame.info.linedefined or 0, peak, path
+  )
+
+  for _, flag in ipairs({
+    { INDIRECT, "indirect/external" },
+    { RECURSIVE, "recursion" },
+    { TAIL, "tail call" },
+  }) do
+    if bit.band(estimate.unknown, flag[1]) ~= 0 then
+      output[#output + 1] = "  " .. flag[2] .. ": unknown"
+    end
+  end
+
+  for _, call in ipairs(frame.calls) do
+    local target = names[call.target]
+    local slots = target ~= nil and target ~= false
+      and tostring(prototypes[target + 1].info.stackslots or 0) or "unknown"
+    output[#output + 1] = string.format(
+      "  pc=%d %s A=%d + frame-links=%d -> %s frame=%s",
+      call.pc, call.op, call.a, links, call.target, slots
+    )
+  end
+
+  add_contributors(frame.name, "  wide value: ")
+
+  if peak >= 250 then
+    output[#output + 1] = string.format(
+      "  warning: %s reaches %d slots on this non-tail path; LuaJIT requires fewer than LJ_MAX_JSLOTS=250",
+      path, peak
+    )
+    for index, id in ipairs(estimate.path) do
+      if index > 1 then
+        local name = prototypes[id + 1].name
+        add_contributors(name, "    " .. name .. ": ")
+      end
+    end
   end
 end
 

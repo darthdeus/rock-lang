@@ -1159,6 +1159,9 @@ fn write_lua_string(out: &mut String, s: &str) {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            c if c.is_ascii_control() => {
+                let _ = write!(out, "\\{:03}", c as u32);
+            }
             _ => out.push(c),
         }
     }
