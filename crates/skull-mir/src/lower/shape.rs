@@ -1499,11 +1499,7 @@ pub(crate) fn struct_expand_variants(
     Ok(out)
 }
 
-pub(crate) fn sig_shape_of_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape> {
-    value_shape_of_nominal(ws, n)
-}
-
-/// [`sig_shape_of_nominal`] for a NULLABLE nominal: a presence leaf, then the
+/// [`value_shape_of_nominal`] for a NULLABLE nominal: a presence leaf, then the
 /// payload leaves.
 ///
 /// Both cdata-tier and GC-tier value structs carry leaves until a boxed sink.
@@ -1699,7 +1695,7 @@ pub(crate) fn mono_nobox_value_shape(ws: &Workspace, ty: &MonoTy) -> Option<Valu
         if nullable {
             sig_shape_of_nullable_nominal(ws, *name)
         } else {
-            sig_shape_of_nominal(ws, *name)
+            value_shape_of_nominal(ws, *name)
         }
     })?
 }
@@ -2498,7 +2494,7 @@ fn flat_payload_shape(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ustr>) -> Opt
         if reaches_enum_in(ws, ty, visiting, &mut HashSet::default()) {
             return None;
         }
-        return sig_shape_of_nominal(ws, n);
+        return value_shape_of_nominal(ws, n);
     }
     build_flat_enum_shape(ws, n, visiting).map(|shape| shape.value_shape())
 }
