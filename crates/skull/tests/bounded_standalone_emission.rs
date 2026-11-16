@@ -17,8 +17,8 @@ use skull_mir::monoty::{MonoCtor, MonoTy};
 use ustr::Ustr;
 
 use crate::common::{
-    InlineOffGuard, bound_callee_name, definitions_matching, fn_name, function_body, scalar_ctx,
-    ws_with_stdlib,
+    InlineOffGuard, body_calls, bound_callee_name, definitions_matching, fn_name, function_body,
+    scalar_ctx, ws_with_stdlib,
 };
 
 /// A user fn taking an `Iterator`-bounded generic, called at one concrete
@@ -108,14 +108,6 @@ fn specialization<'a>(lua: &'a str, prefix: &str, what: &str) -> &'a str {
         .collect();
     assert_eq!(found.len(), 1, "expected one standalone {what} in:\n{lua}");
     found[0]
-}
-
-fn body_calls(body: &str, callee: &str) -> bool {
-    body.match_indices(callee).any(|(at, _)| {
-        let before = body[..at].chars().next_back();
-        let after = body[at + callee.len()..].chars().next();
-        after == Some('(') && before.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
-    })
 }
 
 /// Three separate things, because each alone is satisfied by a broken build.

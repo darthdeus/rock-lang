@@ -698,6 +698,30 @@ pub fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
     mf
 }
 
+/// Whether `body` calls `symbol`: the name followed by `(`, not as the tail
+/// of a longer identifier.
+pub fn body_calls(body: &str, symbol: &str) -> bool {
+    body.match_indices(symbol).any(|(at, _)| {
+        let before = body[..at].chars().next_back();
+        let after = body[at + symbol.len()..].chars().next();
+        after == Some('(') && before.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
+    })
+}
+
+/// The definition symbols the body of `caller` actually CALLS, restricted to
+/// derivations of `callee`. Read from the caller's emitted body, so a
+/// definition that exists but is never reached does not satisfy it.
+pub fn callees_named_in(lua: &str, caller: &str, callee: &str) -> Vec<String> {
+    let body = function_body(lua, caller);
+    let mut out: Vec<String> = definitions_of(lua, callee)
+        .into_iter()
+        .filter(|global| body_calls(body, &bound_callee_name(lua, caller, global)))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// [`definition_names`] as owned strings.
 pub fn definition_symbols(lua: &str) -> Vec<String> {
     definition_names(lua)

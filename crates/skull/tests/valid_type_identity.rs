@@ -11,20 +11,7 @@
 //! `instance_owned_emission` discipline) rather than a bare name, because a
 //! callee's own definition line contains its symbol.
 
-use crate::common::{bound_callee_name, definitions_of, emit_module, function_body};
-
-/// The definition symbols `caller`'s body actually CALLS, restricted to
-/// derivations of `callee`.
-fn callees_named_in(lua: &str, caller: &str, callee: &str) -> Vec<String> {
-    let body = function_body(lua, caller);
-    let mut out: Vec<String> = definitions_of(lua, callee)
-        .into_iter()
-        .filter(|s| body.contains(&format!("{}(", bound_callee_name(lua, caller, s))))
-        .collect();
-    out.sort();
-    out.dedup();
-    out
-}
+use crate::common::{callees_named_in, definitions_of, emit_module};
 
 /// Plan S 2a's collision, realized.
 ///

@@ -10,94 +10,40 @@
 //! spellings are read out of the caller's body via `function_body`.
 
 use crate::common::{
-    self, bound_callee_name, definition_names, definition_symbols, definitions_of, emit_module,
-    function_body, ws_with_stdlib,
+    self, body_calls, callees_named_in, definition_names, definition_symbols, definitions_of,
+    emit_module, function_body, ws_with_stdlib,
 };
 
-fn body_calls(body: &str, symbol: &str) -> bool {
-    body.match_indices(symbol).any(|(at, _)| {
-        let before = body[..at].chars().next_back();
-        let after = body[at + symbol.len()..].chars().next();
-        after == Some('(') && before.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
-    })
-}
-
-/// The definition symbols the body of `caller` actually CALLS, restricted to
-/// derivations of `callee`. Read from the caller's emitted body, so a
-/// definition that exists but is never reached does not satisfy it.
-fn callees_named_in(lua: &str, caller: &str, callee: &str) -> Vec<String> {
-    let body = function_body(lua, caller);
-    let mut out: Vec<String> = definitions_of(lua, callee)
-        .into_iter()
-        .filter(|global| {
-            let local = bound_callee_name(lua, caller, global);
-            body_calls(body, &local)
-        })
-        .collect();
-    out.sort();
-    out.dedup();
-    out
-}
-
-/// Two instances of one generic whose concrete ABI widths DIFFER: `T = int` is
-/// one boxed slot, `T = Vec2` is two scalar lanes. Each needs its own
-/// definition, and each call site must name its own.
-#[test]
-fn two_abi_widths_emit_two_definitions_each_called_by_name() {
-    let lua = emit_module(
-        r#"
-fn identity<T>(x: T) -> T { return x }
-
-fn main() {
-    let a = identity(7)
-    let v = identity(Vec2 { x: 3, y: 5 })
-    print("{a} {v.x}")
-}
-"#,
-    );
-    let defs = definitions_of(&lua, "identity");
-    assert_eq!(defs.len(), 2, "one definition per instance, got {defs:?}");
-    let called = callees_named_in(&lua, "main", "identity");
-    assert_eq!(
-        called.len(),
-        2,
-        "each call names its own instance, got {called:?} of {defs:?}"
-    );
-}
-
-/// The same generic at two concrete types with the SAME ABI width. Identity is
-/// the INSTANCE, not the wire: `T = int` and `T = string` are two concrete
-/// bodies whatever they splat to, so nothing about equal widths lets one
-/// definition serve both.
+/// Two instances of one generic each need their own definition, and each call
+/// site must name its own.
 ///
-/// This is the case declaration ownership got wrong, and it is why width is not
-/// the discriminant -- its sibling above already passed on differing widths.
+/// - Differing ABI widths: `T = int` is one boxed slot, `T = Vec2` is two
+///   scalar lanes.
+/// - The same width: identity is the INSTANCE, not the wire. `T = int` and
+///   `T = string` are two concrete bodies whatever they splat to. This is the
+///   case declaration ownership got wrong, and why width is not the
+///   discriminant.
 #[test]
-fn two_same_abi_width_instances_emit_two_definitions() {
-    let lua = emit_module(
-        r#"
-fn identity<T>(x: T) -> T { return x }
-
-fn main() {
-    let a = identity(7)
-    let b = identity("hi")
-    print("{a} {b}")
-}
-"#,
-    );
-    let defs = definitions_of(&lua, "identity");
-    assert_eq!(defs.len(), 2, "one definition per instance, got {defs:?}");
-    assert!(
-        !defs.contains(&"identity_T".to_string()),
-        "no body is mangled on the DECLARED signature -- there is no shared \
-         generic snapshot to be one, got {defs:?}"
-    );
-    let called = callees_named_in(&lua, "main", "identity");
-    assert_eq!(
-        called.len(),
-        2,
-        "each call names its own instance, got {called:?} of {defs:?}"
-    );
+fn two_instances_emit_two_definitions_each_called_by_name() {
+    for second in ["Vec2 { x: 3, y: 5 }", "\"hi\""] {
+        let lua = emit_module(&format!(
+            "fn identity<T>(x: T) -> T {{ return x }}\n\
+             fn main() {{\n    let a = identity(7)\n    let b = identity({second})\n    print(\"{{a}} {{b}}\")\n}}\n"
+        ));
+        let defs = definitions_of(&lua, "identity");
+        assert_eq!(defs.len(), 2, "one definition per instance, got {defs:?}");
+        assert!(
+            !defs.contains(&"identity_T".to_string()),
+            "no body is mangled on the DECLARED signature -- there is no shared \
+             generic snapshot to be one, got {defs:?}"
+        );
+        let called = callees_named_in(&lua, "main", "identity");
+        assert_eq!(
+            called.len(),
+            2,
+            "each call names its own instance, got {called:?} of {defs:?}"
+        );
+    }
 }
 
 /// ADMISSION CONTROL for both cases above. A non-generic declaration has one
