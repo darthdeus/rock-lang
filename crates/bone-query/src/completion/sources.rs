@@ -38,23 +38,12 @@ pub(crate) fn callee_param_names_in_scope(
 ) -> Vec<(Ustr, String)> {
     let name = Ustr::from(callee);
     let mut out: Vec<(Ustr, String)> = Vec::new();
-    for m in ws.modules.iter() {
-        let Some(fns) = m.functions_by_name.get(&name) else {
-            continue;
-        };
-        for (fmid, fid) in fns {
-            if frag.is_some_and(|frag| {
-                !crate::modules_scope::callable_member_admitted(ws, frag, name, *fmid, *fid)
-            }) {
+    for (_, _, f) in crate::modules_scope::admitted_overloads(ws, frag, name) {
+        for p in &f.param_decls {
+            if out.iter().any(|(n, _)| *n == p.name) {
                 continue;
             }
-            let f = &ws.modules[fmid.index()].functions[*fid];
-            for p in &f.param_decls {
-                if out.iter().any(|(n, _)| *n == p.name) {
-                    continue;
-                }
-                out.push((p.name, ws.render(None, p.ty)));
-            }
+            out.push((p.name, ws.render(None, p.ty)));
         }
     }
     out
@@ -1087,15 +1076,7 @@ pub(crate) fn fn_is_coroutine_in_scope(
     frag: Option<&bone_core::modules::FragmentScope>,
 ) -> bool {
     let n = Ustr::from(name);
-    ws.modules.iter().any(|m| {
-        m.functions_by_name.get(&n).is_some_and(|fns| {
-            fns.iter().any(|(fmid, fid)| {
-                !frag.is_some_and(|frag| {
-                    !crate::modules_scope::callable_member_admitted(ws, frag, n, *fmid, *fid)
-                }) && ws.modules[fmid.index()].functions[*fid].is_coroutine
-            })
-        })
-    })
+    crate::modules_scope::admitted_overloads(ws, frag, n).any(|(_, _, f)| f.is_coroutine)
 }
 
 fn arg_admitted(

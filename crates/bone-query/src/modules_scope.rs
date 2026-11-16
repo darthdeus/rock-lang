@@ -32,6 +32,30 @@ pub(crate) fn callable_member_admitted(
     )
 }
 
+/// Every overload of `name` listed in each module's index, in module order,
+/// that `frag` admits (all of them for a legacy file).
+pub(crate) fn admitted_overloads<'w>(
+    ws: &'w Workspace,
+    frag: Option<&'w FragmentScope>,
+    name: Ustr,
+) -> impl Iterator<
+    Item = (
+        ModuleId,
+        Idx<bone_semantic::hir::Function>,
+        &'w bone_semantic::hir::Function,
+    ),
+> + 'w {
+    ws.modules
+        .iter()
+        .filter_map(move |m| m.functions_by_name.get(&name))
+        .flatten()
+        .copied()
+        .filter(move |&(mid, fid)| {
+            frag.is_none_or(|frag| callable_member_admitted(ws, frag, name, mid, fid))
+        })
+        .map(|(mid, fid)| (mid, fid, &ws.modules[mid.index()].functions[fid]))
+}
+
 /// Every name some tier of `frag` offers, bound cleanly or not:
 /// the module's own members, the fragment's named imports (by their local
 /// names), its glob imports' members, and the std prelude. Sorted.

@@ -3388,29 +3388,18 @@ pub(crate) fn callee_slot_is_field_of_in_scope(
     let name = Ustr::from(callee);
     let mut any = false;
     let mut found = false;
-    for m in ws.modules.iter() {
-        let Some(fns) = m.functions_by_name.get(&name) else {
+    for (_, _, f) in crate::modules_scope::admitted_overloads(ws, frag, name) {
+        let Some(p) = f.param_decls.get(arg_index) else {
             continue;
         };
-        for (fmid, fid) in fns {
-            if frag.is_some_and(|frag| {
-                !crate::modules_scope::callable_member_admitted(ws, frag, name, *fmid, *fid)
-            }) {
-                continue;
-            }
-            let f = &ws.modules[fmid.index()].functions[*fid];
-            let Some(p) = f.param_decls.get(arg_index) else {
-                continue;
-            };
-            any = true;
-            let te = match p.ty {
-                TyId::Static(pmid, idx) => ws.module(pmid).ty_arena[idx],
-                TyId::Local(_) => continue,
-            };
-            if matches!(te, TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if is_field_ref_former(n))
-            {
-                found = true;
-            }
+        any = true;
+        let te = match p.ty {
+            TyId::Static(pmid, idx) => ws.module(pmid).ty_arena[idx],
+            TyId::Local(_) => continue,
+        };
+        if matches!(te, TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if is_field_ref_former(n))
+        {
+            found = true;
         }
     }
     any.then_some(found)
@@ -3508,41 +3497,30 @@ impl<'a> ExpectedArg<'a> {
         let frag = crate::modules_scope::fragment(ws, ws.module(mid).file);
         let mut slots = Vec::new();
         let mut rendered: Vec<String> = Vec::new();
-        for m in ws.modules.iter() {
-            let Some(fns) = m.functions_by_name.get(&name) else {
+        for (_, _, f) in crate::modules_scope::admitted_overloads(ws, frag, name) {
+            if f.param_decls.len() <= arg_idx {
+                continue;
+            }
+            let params: Vec<TyId> = f.param_decls.iter().map(|p| p.ty).collect();
+            // Speculative overload instantiation may reject a candidate; try the next overload.
+            let Ok(inst) =
+                gamma.trial(|g| inference::instantiate_params(g, &f.generics, &params, span))
+            else {
                 continue;
             };
-            for (fmid, fid) in fns {
-                if frag.is_some_and(|frag| {
-                    !crate::modules_scope::callable_member_admitted(ws, frag, name, *fmid, *fid)
-                }) {
+            if let Some(rt) = recv {
+                let cp = gamma.out.checkpoint();
+                let ok = gamma.trial(|g| inference::coerce(g, rt, inst[0], span).is_ok());
+                if !ok {
+                    gamma.out.rollback_to(cp);
                     continue;
                 }
-                let f = &ws.modules[fmid.index()].functions[*fid];
-                if f.param_decls.len() <= arg_idx {
-                    continue;
-                }
-                let params: Vec<TyId> = f.param_decls.iter().map(|p| p.ty).collect();
-                // Speculative overload instantiation may reject a candidate; try the next overload.
-                let Ok(inst) =
-                    gamma.trial(|g| inference::instantiate_params(g, &f.generics, &params, span))
-                else {
-                    continue;
-                };
-                if let Some(rt) = recv {
-                    let cp = gamma.out.checkpoint();
-                    let ok = gamma.trial(|g| inference::coerce(g, rt, inst[0], span).is_ok());
-                    if !ok {
-                        gamma.out.rollback_to(cp);
-                        continue;
-                    }
-                    // Bindings deliberately kept -- see the struct doc.
-                }
-                slots.push(inst[arg_idx]);
-                let r = ws.render(None, params[arg_idx]);
-                if !rendered.contains(&r) {
-                    rendered.push(r);
-                }
+                // Bindings deliberately kept -- see the struct doc.
+            }
+            slots.push(inst[arg_idx]);
+            let r = ws.render(None, params[arg_idx]);
+            if !rendered.contains(&r) {
+                rendered.push(r);
             }
         }
         (!slots.is_empty()).then(|| ExpectedArg {
@@ -3613,45 +3591,34 @@ impl<'a> ExpectedArg<'a> {
         let span = self.span;
         let slots = self.slots.clone();
         let frag = crate::modules_scope::fragment(ws, ws.module(self.gamma.current_module_id).file);
-        for m in ws.modules.iter() {
-            let Some(fns) = m.functions_by_name.get(&n) else {
-                continue;
-            };
-            for (fmid, fid) in fns {
-                if frag.is_some_and(|frag| {
-                    !crate::modules_scope::callable_member_admitted(ws, frag, n, *fmid, *fid)
-                }) {
-                    continue;
-                }
-                let f = &ws.modules[fmid.index()].functions[*fid];
-                let Some(ret) = f.return_ty else { continue };
-                if let Some(&b) = self.ret_memo.get(&ret) {
-                    if b {
-                        return true;
-                    }
-                    continue;
-                }
-                let cp = self.gamma.out.checkpoint();
-                let inst = self
-                    .gamma
-                    .trial(|g| inference::instantiate_params(g, &f.generics, &[ret], span));
-                let hit = match inst {
-                    Ok(inst) => slots.iter().any(|&slot| {
-                        let cp2 = self.gamma.out.checkpoint();
-                        let ok = self
-                            .gamma
-                            .trial(|g| inference::coerce(g, inst[0], slot, span).is_ok());
-                        self.gamma.out.rollback_to(cp2);
-                        ok
-                    }),
-                    // A rejected speculative instantiation is a type non-match, not a query failure.
-                    Err(_) => false,
-                };
-                self.gamma.out.rollback_to(cp);
-                self.ret_memo.insert(ret, hit);
-                if hit {
+        for (_, _, f) in crate::modules_scope::admitted_overloads(ws, frag, n) {
+            let Some(ret) = f.return_ty else { continue };
+            if let Some(&b) = self.ret_memo.get(&ret) {
+                if b {
                     return true;
                 }
+                continue;
+            }
+            let cp = self.gamma.out.checkpoint();
+            let inst = self
+                .gamma
+                .trial(|g| inference::instantiate_params(g, &f.generics, &[ret], span));
+            let hit = match inst {
+                Ok(inst) => slots.iter().any(|&slot| {
+                    let cp2 = self.gamma.out.checkpoint();
+                    let ok = self
+                        .gamma
+                        .trial(|g| inference::coerce(g, inst[0], slot, span).is_ok());
+                    self.gamma.out.rollback_to(cp2);
+                    ok
+                }),
+                // A rejected speculative instantiation is a type non-match, not a query failure.
+                Err(_) => false,
+            };
+            self.gamma.out.rollback_to(cp);
+            self.ret_memo.insert(ret, hit);
+            if hit {
+                return true;
             }
         }
         false
@@ -3684,23 +3651,12 @@ pub(crate) fn fn_unique_return_ty_in_scope(
 ) -> Option<TyId> {
     let n = Ustr::from(name);
     let mut ret: Option<TyId> = None;
-    for m in ws.modules.iter() {
-        let Some(fns) = m.functions_by_name.get(&n) else {
-            continue;
-        };
-        for (fmid, fid) in fns {
-            if frag.is_some_and(|frag| {
-                !crate::modules_scope::callable_member_admitted(ws, frag, n, *fmid, *fid)
-            }) {
-                continue;
-            }
-            let f = &ws.modules[fmid.index()].functions[*fid];
-            let t = f.return_ty?;
-            match ret {
-                None => ret = Some(t),
-                Some(prev) if ws.types_equivalent(TyRef::of_static(prev), TyRef::of_static(t)) => {}
-                Some(_) => return None, // overloads disagree -> can't decide
-            }
+    for (_, _, f) in crate::modules_scope::admitted_overloads(ws, frag, n) {
+        let t = f.return_ty?;
+        match ret {
+            None => ret = Some(t),
+            Some(prev) if ws.types_equivalent(TyRef::of_static(prev), TyRef::of_static(t)) => {}
+            Some(_) => return None, // overloads disagree -> can't decide
         }
     }
     ret

@@ -604,16 +604,10 @@ fn render_call_overloads_hover(
     frag: Option<&bone_core::modules::FragmentScope>,
     sources: Option<&SourceMap>,
 ) -> Option<String> {
-    let mut all: Vec<(ModuleId, Idx<Function>)> = Vec::new();
-    for m in ws.modules.iter() {
-        if let Some(fns) = m.functions_by_name.get(&name) {
-            all.extend(fns.iter().copied().filter(|&(fmid, fid)| {
-                frag.is_none_or(|frag| {
-                    crate::modules_scope::callable_member_admitted(ws, frag, name, fmid, fid)
-                })
-            }));
-        }
-    }
+    let all: Vec<(ModuleId, Idx<Function>)> =
+        crate::modules_scope::admitted_overloads(ws, frag, name)
+            .map(|(fmid, fid, _)| (fmid, fid))
+            .collect();
     if all.is_empty() {
         return None;
     }
@@ -5344,27 +5338,19 @@ fn functions_named(
 ) -> Vec<SignatureEntry> {
     let mut all = Vec::new();
     let mut matched = Vec::new();
-    for m in ws.modules.iter() {
-        if let Some(fns) = m.functions_by_name.get(&name) {
-            for (fmid, fid) in fns {
-                if frag.is_some_and(|frag| {
-                    !crate::modules_scope::callable_member_admitted(ws, frag, name, *fmid, *fid)
-                }) {
-                    continue;
-                }
-                let entry = fn_sig_entry(ws, *fmid, *fid, sources);
-                if let Some(recv) = recv_nominal {
-                    let p0 = ws.modules[fmid.index()].functions[*fid].param_decls.first();
-                    let keep = p0
-                        .and_then(|p| types::member_owner_name(ws, None, p.ty))
-                        .map_or(true, |pn| pn == recv);
-                    if keep {
-                        matched.push(entry.clone());
-                    }
-                }
-                all.push(entry);
+    for (fmid, fid, f) in crate::modules_scope::admitted_overloads(ws, frag, name) {
+        let entry = fn_sig_entry(ws, fmid, fid, sources);
+        if let Some(recv) = recv_nominal {
+            let keep = f
+                .param_decls
+                .first()
+                .and_then(|p| types::member_owner_name(ws, None, p.ty))
+                .map_or(true, |pn| pn == recv);
+            if keep {
+                matched.push(entry.clone());
             }
         }
+        all.push(entry);
     }
     if recv_nominal.is_some() && !matched.is_empty() {
         matched
