@@ -124,6 +124,13 @@ pub struct ResolutionCache {
     optional: std::cell::RefCell<FxHashMap<Ustr, Result<Option<resolve::CalleeFamily>, String>>>,
 }
 
+fn use_path_ref(path: &skull_parser::Path) -> bone_core::modules::UsePathRef {
+    bone_core::modules::UsePathRef {
+        from_root: path.from_root,
+        segments: path.segments.iter().map(|i| i.name).collect(),
+    }
+}
+
 #[derive(Debug)]
 pub struct LowerCtx<'w, 'm> {
     pub workspace: &'w Workspace,
@@ -432,10 +439,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         path: &skull_parser::Path,
     ) -> Option<(Ustr, Option<bone_core::modules::PackageId>)> {
         let frag = self.v1_scope()?;
-        let use_path = bone_core::modules::UsePathRef {
-            from_root: path.from_root,
-            segments: path.segments.iter().map(|i| i.name).collect(),
-        };
+        let use_path = use_path_ref(path);
         match self.probed(|| resolve::resolve_member_path(self.workspace, frag, &use_path)) {
             Ok(resolve::MemberTarget::Callable { key, owner }) => Some((key, owner)),
             Ok(resolve::MemberTarget::Global(key))
@@ -463,10 +467,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
     /// `None` for a legacy fragment or a path that names anything else.
     fn v1_path_variant(&self, path: &skull_parser::Path) -> Option<(Ustr, Ustr)> {
         let frag = self.v1_scope()?;
-        let use_path = bone_core::modules::UsePathRef {
-            from_root: path.from_root,
-            segments: path.segments.iter().map(|i| i.name).collect(),
-        };
+        let use_path = use_path_ref(path);
         match self.probed(|| resolve::resolve_member_path(self.workspace, frag, &use_path)) {
             Ok(resolve::MemberTarget::EnumVariant { enum_key, variant }) => {
                 Some((enum_key, variant))
@@ -982,10 +983,7 @@ pub(crate) fn lower_type_expr_in(
                     ),
                 ));
             };
-            let use_path = bone_core::modules::UsePathRef {
-                from_root: path.from_root,
-                segments: path.segments.iter().map(|i| i.name).collect(),
-            };
+            let use_path = use_path_ref(path);
             let resolved =
                 match ctx.probed(|| resolve::resolve_path(ctx.workspace, frag, &use_path)) {
                     Ok(r) => r,
@@ -1017,34 +1015,14 @@ pub(crate) fn lower_type_expr_in(
             alloc_ty(ctx, body, pos, hir::TypeExpr::Tuple { elements })
         }
 
-        TypeExprKind::Array(orig_te) => {
-            let te = lower_type_expr_helper(ctx, a, body, pos, a.te(orig_te))?;
-
-            let arr = alloc_tys_contiguous(ctx, body, pos, [te]);
-
-            alloc_ty(
-                ctx,
-                body,
-                pos,
-                hir::TypeExpr::App {
-                    ctor: hir::TypeCtor::Array,
-                    params: arr,
-                },
-            )
-        }
-
-        TypeExprKind::Ref(inner) => {
+        TypeExprKind::Array(inner) | TypeExprKind::Ref(inner) => {
+            let ctor = match te.kind {
+                TypeExprKind::Array(_) => TypeCtor::Array,
+                _ => TypeCtor::Ref,
+            };
             let inner = lower_type_expr_helper(ctx, a, body, pos, a.te(inner))?;
             let params = alloc_tys_contiguous(ctx, body, pos, [inner]);
-            alloc_ty(
-                ctx,
-                body,
-                pos,
-                TypeExpr::App {
-                    ctor: TypeCtor::Ref,
-                    params,
-                },
-            )
+            alloc_ty(ctx, body, pos, TypeExpr::App { ctor, params })
         }
 
         TypeExprKind::App { ctor, args } => 'app: {
@@ -1985,10 +1963,7 @@ pub(crate) fn lower_expr_value(
                     "qualified paths are modules-v1 grammar; this file is legacy".to_string(),
                 ));
             };
-            let use_path = bone_core::modules::UsePathRef {
-                from_root: path.from_root,
-                segments: path.segments.iter().map(|i| i.name).collect(),
-            };
+            let use_path = use_path_ref(path);
             let target =
                 ctx.probed(|| resolve::resolve_member_path(ctx.workspace, frag, &use_path));
             if let Ok(t) = &target {
@@ -2027,10 +2002,7 @@ pub(crate) fn lower_expr_value(
                         .to_string(),
                 ));
             };
-            let use_path = bone_core::modules::UsePathRef {
-                from_root: path.from_root,
-                segments: path.segments.iter().map(|i| i.name).collect(),
-            };
+            let use_path = use_path_ref(path);
             let target =
                 match ctx.probed(|| resolve::resolve_member_path(ctx.workspace, frag, &use_path)) {
                     Ok(t) => t,
@@ -2453,10 +2425,7 @@ fn value_owner(
                 .owner
         }
         ExprKind::Path { path, .. } => {
-            let use_path = bone_core::modules::UsePathRef {
-                from_root: path.from_root,
-                segments: path.segments.iter().map(|i| i.name).collect(),
-            };
+            let use_path = use_path_ref(path);
             match ctx.probed(|| resolve::resolve_member_path(ctx.workspace, frag, &use_path)) {
                 Ok(resolve::MemberTarget::Callable { owner, .. }) => owner,
                 _ => None,
@@ -3641,10 +3610,7 @@ fn lower_pattern_value(
                 "qualified patterns are modules-v1 grammar; this file is legacy".to_string(),
             ));
         };
-        let use_path = bone_core::modules::UsePathRef {
-            from_root: path.from_root,
-            segments: path.segments.iter().map(|i| i.name).collect(),
-        };
+        let use_path = use_path_ref(path);
         let (enum_key, variant) =
             match ctx.probed(|| resolve::resolve_variant_pattern(ctx.workspace, frag, &use_path)) {
                 Ok(target) => target,
@@ -3687,10 +3653,7 @@ fn lower_pattern_value(
                 "qualified patterns are modules-v1 grammar; this file is legacy".to_string(),
             ));
         };
-        let use_path = bone_core::modules::UsePathRef {
-            from_root: path.from_root,
-            segments: path.segments.iter().map(|i| i.name).collect(),
-        };
+        let use_path = use_path_ref(path);
         let (enum_key, variant) =
             match ctx.probed(|| resolve::resolve_variant_pattern(ctx.workspace, frag, &use_path)) {
                 Ok(target) => target,
