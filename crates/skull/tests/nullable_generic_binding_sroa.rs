@@ -16,7 +16,7 @@
 //!
 //! The binding predicate uses the concrete nullable fact before SROA is allowed
 //! to rematerialize an escaping load. An absent row therefore stays absent, and
-//! the same test covers both the direct index and iterator paths.
+//! `tests/nullable/generic_binding_sroa.rock` covers the direct index and iterator paths.
 //!
 //! MARKED and UNMARKED are legitimately two mechanisms here, not one to unify:
 //! marked splits leaves at LOWERING (`nobox_shape_of_ty`, re-applying the `?`),
@@ -27,7 +27,7 @@ use crate::common::compile_and_run;
 
 /// THE PROPERTY THE FIX ENDANGERED. `nonnull_value_struct` exists to LICENSE
 /// SROA; narrowing it could switch non-nullable values back to boxed emission
-/// and every assertion above would still pass. So assert on the EMITTED code:
+/// and the corpus absent-row cases would still pass. So assert on the EMITTED code:
 /// a non-nullable value read through a generic `let` must still scalarize to
 /// direct column reads, with no `_ct` rebuild anywhere in the body.
 #[test]
