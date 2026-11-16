@@ -322,18 +322,13 @@ pub(crate) fn infer_statement(
 
             let nt = &gamma.workspace.module(ntm).newtypes[def];
 
-            let mut subs = FxHashMap::default();
-            if let TypeExpr::App {
-                ctor: TypeCtor::Nominal(_),
-                params,
-            } = *gamma.get(resolved)
-            {
-                for (g, arg) in nt.generics.iter().zip(params) {
-                    if let TypeExpr::Generic(var_id, _) = gamma.get(*g) {
-                        subs.insert(*var_id, resolved.with_idx(arg));
-                    }
-                }
-            }
+            let subs = match *gamma.get(resolved) {
+                TypeExpr::App {
+                    ctor: TypeCtor::Nominal(_),
+                    params,
+                } => generic_arg_subs(gamma, &nt.generics, resolved, params),
+                _ => FxHashMap::default(),
+            };
 
             let wt = substitute(gamma, nt.wrapped, &subs, span)?;
             gamma.assign_named_type(*var, wt)?;

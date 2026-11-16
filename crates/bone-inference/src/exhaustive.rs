@@ -174,12 +174,7 @@ impl Checker<'_, '_, '_> {
             } => {
                 if let Some(eid) = resolve_enum(self.gamma, name) {
                     let def = &self.gamma.workspace.module(eid.module).enums[eid.def];
-                    let mut subs = FxHashMap::default();
-                    for (g, arg) in def.generics.iter().zip(params) {
-                        if let TypeExpr::Generic(var_id, _) = self.gamma.get(*g) {
-                            subs.insert(*var_id, ty.with_idx(arg));
-                        }
-                    }
+                    let subs = generic_arg_subs(self.gamma, &def.generics, ty, params);
                     let mut variants = Vec::with_capacity(def.variants.len());
                     for v in &def.variants {
                         let (tys, field_names) = match &v.payload {
@@ -212,7 +207,7 @@ impl Checker<'_, '_, '_> {
                     }
                 } else if let Some(sid) = resolve_struct(self.gamma, name) {
                     let def = &self.gamma.workspace.module(sid.module).structs[sid.def];
-                    let subs = struct_arg_subs(self.gamma, &def, ty, params);
+                    let subs = generic_arg_subs(self.gamma, &def.generics, ty, params);
                     let mut fields = Vec::with_capacity(def.fields.len());
                     for f in &def.fields {
                         match substitute(self.gamma, f.ty, &subs, span) {

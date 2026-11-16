@@ -1043,7 +1043,7 @@ pub(crate) fn spread_struct_fields(
             })?;
 
             let def = &gamma.workspace.module(sid.module).structs[sid.def];
-            let subs = struct_arg_subs(gamma, &def, r, params);
+            let subs = generic_arg_subs(gamma, &def.generics, r, params);
             def.fields
                 .iter()
                 .map(|f| Ok((f.name, substitute(gamma, f.ty, &subs, span)?)))
@@ -1215,7 +1215,7 @@ pub(crate) fn spread_constituents(
 
             let def = &gamma.workspace.module(sid.module).structs[sid.def];
             // mirror struct_field_ty; empty for generics
-            let subs = struct_arg_subs(gamma, &def, r, params);
+            let subs = generic_arg_subs(gamma, &def.generics, r, params);
             def.fields
                 .iter()
                 .map(|f| substitute(gamma, f.ty, &subs, span))

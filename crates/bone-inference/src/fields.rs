@@ -5,15 +5,17 @@ pub(crate) fn resolve_struct(gamma: &Gamma, name: Ustr) -> Option<StructId> {
     gamma.workspace.struct_by_name.get(&name).copied()
 }
 
-pub(crate) fn struct_arg_subs(
+/// A nominal declaration's generic parameters bound to the arguments of
+/// `app_ty`, the application `Name<params>`.
+pub(crate) fn generic_arg_subs(
     gamma: &Gamma,
-    def: &StructDef,
+    generics: &[TyId],
     app_ty: TyId,
     params: IdxRange<TypeExpr>,
 ) -> FxHashMap<VarId, TyId> {
     let mut subs = FxHashMap::default();
 
-    for (g, arg) in def.generics.iter().zip(params) {
+    for (g, arg) in generics.iter().zip(params) {
         if let TypeExpr::Generic(var_id, _) = gamma.get(*g) {
             subs.insert(*var_id, app_ty.with_idx(arg));
         }
@@ -191,7 +193,7 @@ pub(crate) fn struct_field_ty(
     })?;
 
     let def = &gamma.workspace.module(sid.module).structs[sid.def];
-    let subs = struct_arg_subs(gamma, def, base_ty, params);
+    let subs = generic_arg_subs(gamma, &def.generics, base_ty, params);
     let field_ty = def.fields.iter().find(|f| f.name == field).map(|f| f.ty);
 
     let Some(field_ty) = field_ty else {
@@ -240,7 +242,7 @@ pub fn struct_fields_of(
     let ws = gamma.workspace;
     let sid = resolve_struct(gamma, name)?;
     let def = &ws.module(sid.module).structs[sid.def];
-    let subs = struct_arg_subs(gamma, def, base_ty, params);
+    let subs = generic_arg_subs(gamma, &def.generics, base_ty, params);
     let fields = def
         .fields
         .iter()
@@ -464,13 +466,7 @@ pub(crate) fn tuple_or_newtype_index_ty(
             let NewtypeId { module: ntm, def } = resolve_newtype(gamma, name).unwrap();
             let nt = &gamma.workspace.module(ntm).newtypes[def];
 
-            let mut subs = FxHashMap::default();
-
-            for (g, arg) in nt.generics.iter().zip(params) {
-                if let TypeExpr::Generic(var_id, _) = gamma.get(*g) {
-                    subs.insert(*var_id, tuple_ty.with_idx(arg));
-                }
-            }
+            let subs = generic_arg_subs(gamma, &nt.generics, tuple_ty, params);
 
             if index != 0 {
                 comp_error!(

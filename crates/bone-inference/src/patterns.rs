@@ -120,12 +120,7 @@ pub(crate) fn check_pattern(
 
             let def = &gamma.workspace.module(eid.module).enums[eid.def];
 
-            let mut subs = FxHashMap::default();
-            for (g, arg) in def.generics.iter().zip(params) {
-                if let TypeExpr::Generic(var_id, _) = gamma.get(*g) {
-                    subs.insert(*var_id, expected.with_idx(arg));
-                }
-            }
+            let subs = generic_arg_subs(gamma, &def.generics, expected, params);
 
             let vdef = def
                 .variants
@@ -194,12 +189,7 @@ pub(crate) fn check_pattern(
                 if let Some(eid) = resolve_enum(gamma, ename) {
                     let def = &gamma.workspace.module(eid.module).enums[eid.def];
 
-                    let mut subs = FxHashMap::default();
-                    for (g, arg) in def.generics.iter().zip(params) {
-                        if let TypeExpr::Generic(var_id, _) = gamma.get(*g) {
-                            subs.insert(*var_id, expected.with_idx(arg));
-                        }
-                    }
+                    let subs = generic_arg_subs(gamma, &def.generics, expected, params);
 
                     let vname = name.ok_or_else(|| {
                         CompilerError::new_with_label(
