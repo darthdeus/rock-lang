@@ -1557,16 +1557,13 @@ impl IncrementalLintCache {
         stats: &mut LintCacheStats,
     ) {
         let mut locations = extra_locations.clone();
-        let mut affected_files: FxHashSet<Ustr> = affected
-            .iter()
-            .filter_map(|&(mid, _)| ws.modules.iter().find(|module| module.id == mid))
-            .map(|module| module.file)
-            .filter(|file| sources.contains_key(file))
-            .collect();
+        let mut affected_files: FxHashSet<Ustr> = FxHashSet::default();
+        let mut dead = Vec::new();
         for &(mid, fid) in affected {
             let Some(module) = ws.modules.iter().find(|module| module.id == mid) else {
                 continue;
             };
+            affected_files.insert(module.file);
             let Some((_, function)) = module
                 .functions
                 .iter()
@@ -1575,16 +1572,19 @@ impl IncrementalLintCache {
                 continue;
             };
             locations.insert((module.file, function.name_span.offset_range().0));
-            if sources.contains_key(&module.file) {
-                affected_files.insert(module.file);
+            if !warm.contains(&mid)
+                && !self.dependency.reachable.contains(&(mid, fid))
+                && !function.is_synthetic
+            {
+                let raw = Finding::of(&UnusedFn {
+                    name: function.name,
+                    span: function.name_span,
+                });
+                dead.push((module.file, raw));
             }
         }
-        affected_files.extend(
-            locations
-                .iter()
-                .map(|(file, _)| *file)
-                .filter(|file| sources.contains_key(file)),
-        );
+        affected_files.extend(locations.iter().map(|(file, _)| *file));
+        affected_files.retain(|file| sources.contains_key(file));
         for file in &affected_files {
             for findings in self.global_rows(*file) {
                 findings.retain(|finding| {
@@ -1593,50 +1593,9 @@ impl IncrementalLintCache {
                 });
             }
         }
-
-        let mut derived_raw: FxHashMap<Ustr, Vec<Finding>> = FxHashMap::default();
-        let mut derived: FxHashMap<Ustr, Vec<Finding>> = FxHashMap::default();
-        for &(mid, fid) in affected {
-            if warm.contains(&mid) {
-                continue;
-            }
-            let Some(module) = ws.modules.iter().find(|module| module.id == mid) else {
-                continue;
-            };
-            let Some((_, function)) = module
-                .functions
-                .iter()
-                .find(|(candidate, _)| *candidate == fid)
-            else {
-                continue;
-            };
-            if self.dependency.reachable.contains(&(mid, fid)) || function.is_synthetic {
-                continue;
-            }
-            if !sources.contains_key(&module.file) {
-                continue;
-            }
-            let raw = Finding::of(&UnusedFn {
-                name: function.name,
-                span: function.name_span,
-            });
-            let kept = self.filter_cached_suppressions(module.file, vec![raw.clone()], stats);
-            derived_raw
-                .entry(module.file)
-                .or_default()
-                .push(raw.clone());
-            derived.entry(module.file).or_default().extend(kept);
-        }
-        for file in affected_files {
-            for (rows, derived) in [
-                (&mut self.global_raw, &mut derived_raw),
-                (&mut self.global, &mut derived),
-            ] {
-                let mut merged = derived.remove(&file).unwrap_or_default();
-                merged.extend(rows.remove(&file).unwrap_or_default());
-                if !merged.is_empty() {
-                    rows.insert(file, merged);
-                }
+        for (file, raw) in dead {
+            if sources.contains_key(&file) {
+                self.push_global(file, raw, stats);
             }
         }
     }
