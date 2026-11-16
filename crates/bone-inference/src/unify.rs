@@ -1,63 +1,24 @@
 use super::*;
 
 pub(crate) fn contains_frame_ref(gamma: &Gamma, ty: TyId) -> bool {
-    fn visit(gamma: &Gamma, ty: TyId, seen: &mut FxHashSet<TyId>) -> bool {
-        if !seen.insert(ty) {
-            return false;
-        }
-        match *gamma.get(ty) {
-            TypeExpr::App {
-                ctor: TypeCtor::Ref,
-                ..
-            } => true,
-            TypeExpr::Infer(var, _) => gamma
-                .out
-                .substitutions
-                .get(var)
-                .is_some_and(|next| visit(gamma, next, seen)),
-            TypeExpr::Nullable(inner) => visit(gamma, ty.with_idx(inner), seen),
-            TypeExpr::App { params, .. } => {
-                let mut params = params;
-                params.any(|p| visit(gamma, ty.with_idx(p), seen))
-            }
-            TypeExpr::Function { params, ret } => {
-                let mut params = params;
-                params.any(|p| visit(gamma, ty.with_idx(p), seen))
-                    || visit(gamma, ty.with_idx(ret), seen)
-            }
-            TypeExpr::Tuple { elements } => {
-                let mut elements = elements;
-                elements.any(|p| visit(gamma, ty.with_idx(p), seen))
-            }
-            TypeExpr::Builtin(_) | TypeExpr::Generic(..) => false,
-        }
-    }
-
-    visit(gamma, ty, &mut FxHashSet::default())
+    gamma.workspace.type_contains_ref(Some(&gamma.out), ty)
 }
 
 pub(crate) fn is_identity_struct_type(gamma: &Gamma, ty: TyId) -> bool {
-    fn visit(gamma: &Gamma, ty: TyId, seen: &mut FxHashSet<TyId>) -> bool {
-        if !seen.insert(ty) {
-            return false;
-        }
-        match *gamma.get(ty) {
-            TypeExpr::Infer(var, _) => gamma
-                .out
-                .substitutions
-                .get(var)
-                .is_some_and(|next| visit(gamma, next, seen)),
-            TypeExpr::Nullable(inner) => visit(gamma, ty.with_idx(inner), seen),
-            TypeExpr::App {
-                ctor: TypeCtor::Nominal(name),
-                ..
-            } => resolve_struct(gamma, name)
-                .is_some_and(|sid| !gamma.workspace.module(sid.module).structs[sid.def].is_value),
-            _ => false,
-        }
+    match *gamma.get(ty) {
+        TypeExpr::Infer(var, _) => gamma
+            .out
+            .substitutions
+            .get(var)
+            .is_some_and(|next| is_identity_struct_type(gamma, next)),
+        TypeExpr::Nullable(inner) => is_identity_struct_type(gamma, ty.with_idx(inner)),
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        } => resolve_struct(gamma, name)
+            .is_some_and(|sid| !gamma.workspace.module(sid.module).structs[sid.def].is_value),
+        _ => false,
     }
-
-    visit(gamma, ty, &mut FxHashSet::default())
 }
 
 pub(crate) fn frame_ref_target(gamma: &Gamma, ty: TyId) -> Option<TyId> {
@@ -84,38 +45,23 @@ pub(crate) fn frame_ref_target(gamma: &Gamma, ty: TyId) -> Option<TyId> {
 }
 
 pub(crate) fn persistent_type_contains_frame_ref(gamma: &Gamma, ty: TyId) -> bool {
-    fn visit(gamma: &Gamma, ty: TyId, seen: &mut FxHashSet<TyId>) -> bool {
-        if !seen.insert(ty) {
-            return false;
-        }
-        match *gamma.get(ty) {
-            TypeExpr::Infer(var, _) => gamma
-                .out
-                .substitutions
-                .get(var)
-                .is_some_and(|next| visit(gamma, next, seen)),
-            TypeExpr::Nullable(inner) => visit(gamma, ty.with_idx(inner), seen),
-            TypeExpr::Tuple { elements } => elements
-                .into_iter()
-                .any(|part| visit(gamma, ty.with_idx(part), seen)),
-            TypeExpr::App {
-                ctor: TypeCtor::Ref,
-                ..
-            } => false,
-            TypeExpr::App { params, .. } => params
-                .into_iter()
-                .any(|part| contains_frame_ref(gamma, ty.with_idx(part))),
-            TypeExpr::Function { params, ret } => {
-                contains_frame_ref(gamma, ty.with_idx(ret))
-                    || params
-                        .into_iter()
-                        .any(|part| contains_frame_ref(gamma, ty.with_idx(part)))
-            }
-            TypeExpr::Builtin(_) | TypeExpr::Generic(..) => false,
-        }
+    match *gamma.get(ty) {
+        TypeExpr::Infer(var, _) => gamma
+            .out
+            .substitutions
+            .get(var)
+            .is_some_and(|next| persistent_type_contains_frame_ref(gamma, next)),
+        TypeExpr::Nullable(inner) => persistent_type_contains_frame_ref(gamma, ty.with_idx(inner)),
+        TypeExpr::Tuple { elements } => elements
+            .into_iter()
+            .any(|part| persistent_type_contains_frame_ref(gamma, ty.with_idx(part))),
+        TypeExpr::App {
+            ctor: TypeCtor::Ref,
+            ..
+        } => false,
+        TypeExpr::App { .. } | TypeExpr::Function { .. } => contains_frame_ref(gamma, ty),
+        TypeExpr::Builtin(_) | TypeExpr::Generic(..) => false,
     }
-
-    visit(gamma, ty, &mut FxHashSet::default())
 }
 
 pub(crate) fn substitute(
@@ -582,30 +528,11 @@ pub(crate) fn types_equal(gamma: &Gamma, a: TyId, b: TyId) -> bool {
 /// bound variables. Binding `var` to such a type would make it infinite
 /// (`a := a?`), and every later walk of it would recurse forever.
 fn occurs_in(gamma: &Gamma, var: VarId, ty: TyId) -> bool {
-    match *gamma.get(ty) {
-        TypeExpr::Infer(v, _) => {
-            v == var
-                || gamma
-                    .out
-                    .substitutions
-                    .get(v)
-                    .is_some_and(|next| occurs_in(gamma, var, next))
-        }
-        TypeExpr::Builtin(_) | TypeExpr::Generic(..) => false,
-        TypeExpr::Nullable(inner) => occurs_in(gamma, var, ty.with_idx(inner)),
-        TypeExpr::App { params, .. } => params
-            .into_iter()
-            .any(|p| occurs_in(gamma, var, ty.with_idx(p))),
-        TypeExpr::Tuple { elements } => elements
-            .into_iter()
-            .any(|e| occurs_in(gamma, var, ty.with_idx(e))),
-        TypeExpr::Function { params, ret } => {
-            occurs_in(gamma, var, ty.with_idx(ret))
-                || params
-                    .into_iter()
-                    .any(|p| occurs_in(gamma, var, ty.with_idx(p)))
-        }
-    }
+    gamma.workspace.type_any(
+        Some(&gamma.out),
+        ty,
+        &mut |node| matches!(node, TypeExpr::Infer(v, _) if v == var),
+    )
 }
 
 /// Bind `var := ty`, rejecting a binding that would make the type infinite.
@@ -631,31 +558,9 @@ fn bind_var_checked(
 /// Pure: reads the substitution store without writing to it, so a caller can ask
 /// whether a type stands on its own before deciding to admit it.
 pub(crate) fn has_unbound_infer(gamma: &Gamma, ty: TyId) -> bool {
-    match *gamma.get(ty) {
-        TypeExpr::Infer(v, _) => match gamma.out.substitutions.get(v) {
-            Some(next) => has_unbound_infer(gamma, next),
-            None => true,
-        },
-
-        TypeExpr::Builtin(_) | TypeExpr::Generic(..) => false,
-
-        TypeExpr::Nullable(inner) => has_unbound_infer(gamma, ty.with_idx(inner)),
-
-        TypeExpr::App { params, .. } => params
-            .into_iter()
-            .any(|p| has_unbound_infer(gamma, ty.with_idx(p))),
-
-        TypeExpr::Tuple { elements } => elements
-            .into_iter()
-            .any(|e| has_unbound_infer(gamma, ty.with_idx(e))),
-
-        TypeExpr::Function { params, ret } => {
-            has_unbound_infer(gamma, ty.with_idx(ret))
-                || params
-                    .into_iter()
-                    .any(|p| has_unbound_infer(gamma, ty.with_idx(p)))
-        }
-    }
+    gamma.workspace.type_any(Some(&gamma.out), ty, &mut |node| {
+        matches!(node, TypeExpr::Infer(v, _) if gamma.out.substitutions.get(v).is_none())
+    })
 }
 
 pub fn coerce(gamma: &mut Gamma, from: TyId, to: TyId, span: Span) -> Result<(), CompilerError> {

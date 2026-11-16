@@ -519,35 +519,6 @@ pub fn lower_modules_seeded(
     Ok(ids)
 }
 
-fn static_type_contains_ref(ws: &Workspace, ty: TyId) -> bool {
-    fn visit(ws: &Workspace, ty: TyId, seen: &mut FxHashSet<TyId>) -> bool {
-        if !seen.insert(ty) {
-            return false;
-        }
-        match ty {
-            TyId::Local(_) => false,
-            TyId::Static(mid, idx) => match ws.module(mid).ty_arena[idx] {
-                TypeExpr::App {
-                    ctor: TypeCtor::Ref,
-                    ..
-                } => true,
-                TypeExpr::Nullable(inner) => visit(ws, ty.with_idx(inner), seen),
-                TypeExpr::App { mut params, .. } => params.any(|p| visit(ws, ty.with_idx(p), seen)),
-                TypeExpr::Function { mut params, ret } => {
-                    params.any(|p| visit(ws, ty.with_idx(p), seen))
-                        || visit(ws, ty.with_idx(ret), seen)
-                }
-                TypeExpr::Tuple { mut elements } => {
-                    elements.any(|p| visit(ws, ty.with_idx(p), seen))
-                }
-                TypeExpr::Builtin(_) | TypeExpr::Generic(..) | TypeExpr::Infer(..) => false,
-            },
-        }
-    }
-
-    visit(ws, ty, &mut FxHashSet::default())
-}
-
 fn check_frame_ref_storage(ws: &mut Workspace, fresh: &[ModuleId]) {
     let per_module: Vec<Vec<(ModuleId, CompilerError)>> = fresh
         .par_iter()
@@ -556,7 +527,7 @@ fn check_frame_ref_storage(ws: &mut Workspace, fresh: &[ModuleId]) {
             let mut errs = Vec::new();
             for (_, def) in module.structs.iter() {
                 for field in &def.fields {
-                    if static_type_contains_ref(ws, field.ty) {
+                    if ws.type_contains_ref(None, field.ty) {
                         errs.push((
                             module.id,
                             CompilerError::new_with_label(
@@ -575,7 +546,7 @@ fn check_frame_ref_storage(ws: &mut Workspace, fresh: &[ModuleId]) {
                     match &variant.payload {
                         VariantPayload::Unit => {}
                         VariantPayload::Tuple(types) => {
-                            if types.iter().any(|ty| static_type_contains_ref(ws, *ty)) {
+                            if types.iter().any(|ty| ws.type_contains_ref(None, *ty)) {
                                 errs.push((
                                     module.id,
                                     CompilerError::new_with_label(
@@ -590,7 +561,7 @@ fn check_frame_ref_storage(ws: &mut Workspace, fresh: &[ModuleId]) {
                         }
                         VariantPayload::Record(fields) => {
                             for field in fields {
-                                if static_type_contains_ref(ws, field.ty) {
+                                if ws.type_contains_ref(None, field.ty) {
                                     errs.push((
                                         module.id,
                                         CompilerError::new_with_label(
@@ -608,7 +579,7 @@ fn check_frame_ref_storage(ws: &mut Workspace, fresh: &[ModuleId]) {
                 }
             }
             for (_, def) in module.newtypes.iter() {
-                if static_type_contains_ref(ws, def.wrapped) {
+                if ws.type_contains_ref(None, def.wrapped) {
                     errs.push((
                         module.id,
                         CompilerError::new_with_label(
@@ -619,7 +590,7 @@ fn check_frame_ref_storage(ws: &mut Workspace, fresh: &[ModuleId]) {
                 }
             }
             for (_, global) in module.globals.iter() {
-                if static_type_contains_ref(ws, global.ty) {
+                if ws.type_contains_ref(None, global.ty) {
                     errs.push((
                         module.id,
                         CompilerError::new_with_label(
@@ -639,10 +610,10 @@ fn check_frame_ref_storage(ws: &mut Workspace, fresh: &[ModuleId]) {
                 let carries_ref = function
                     .param_decls
                     .iter()
-                    .any(|param| static_type_contains_ref(ws, param.ty))
+                    .any(|param| ws.type_contains_ref(None, param.ty))
                     || function
                         .return_ty
-                        .is_some_and(|ty| static_type_contains_ref(ws, ty));
+                        .is_some_and(|ty| ws.type_contains_ref(None, ty));
                 if carries_ref {
                     errs.push((
                         module.id,
@@ -1096,41 +1067,16 @@ fn api_closure_requirements_of(
 
 /// Every nominal constructor inside `ty`, outermost first.
 fn collect_type_closure(ws: &Workspace, ty: TyId, found: &mut impl FnMut(Ustr)) {
-    if let TyId::Static(m, idx) = ty {
-        collect_type_expr_closure(ws, m, ws.module(m).ty_arena[idx], found);
-    }
-}
-
-fn collect_type_expr_closure(
-    ws: &Workspace,
-    mid: ModuleId,
-    te: TypeExpr,
-    found: &mut impl FnMut(Ustr),
-) {
-    let arena = &ws.module(mid).ty_arena;
-    match te {
-        TypeExpr::App { ctor, params } => {
-            if let TypeCtor::Nominal(name) = ctor {
-                found(name);
-            }
-            for p in params {
-                collect_type_expr_closure(ws, mid, arena[p], found);
-            }
+    ws.type_any(None, ty, &mut |node| {
+        if let TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        } = node
+        {
+            found(name);
         }
-        TypeExpr::Nullable(inner) => collect_type_expr_closure(ws, mid, arena[inner], found),
-        TypeExpr::Function { params, ret } => {
-            for p in params {
-                collect_type_expr_closure(ws, mid, arena[p], found);
-            }
-            collect_type_expr_closure(ws, mid, arena[ret], found);
-        }
-        TypeExpr::Tuple { elements } => {
-            for e in elements {
-                collect_type_expr_closure(ws, mid, arena[e], found);
-            }
-        }
-        TypeExpr::Builtin(_) | TypeExpr::Generic(..) | TypeExpr::Infer(..) => {}
-    }
+        false
+    });
 }
 
 /// Public-API type-closure gate: reject the first type a public interface names that does

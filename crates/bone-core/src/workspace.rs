@@ -555,6 +555,57 @@ impl Workspace {
         }
     }
 
+    /// Whether `hit` holds for some node of `ty`'s tree, visiting a solved
+    /// inference variable and then its solution. A `Local` type without its
+    /// body has no nodes.
+    pub fn type_any(
+        &self,
+        body: Option<&BodyInference>,
+        ty: TyId,
+        hit: &mut impl FnMut(TypeExpr) -> bool,
+    ) -> bool {
+        let expr = match ty {
+            TyId::Static(mid, idx) => self.module(mid).ty_arena[idx],
+            TyId::Local(idx) => match body {
+                Some(b) => b.ty_arena[idx],
+                None => return false,
+            },
+        };
+        if hit(expr) {
+            return true;
+        }
+        let any = |children: IdxRange<TypeExpr>, hit: &mut _| {
+            children
+                .into_iter()
+                .any(|child| self.type_any(body, ty.with_idx(child), hit))
+        };
+        match expr {
+            TypeExpr::Infer(var, _) => body
+                .and_then(|b| b.substitutions.get(var))
+                .is_some_and(|next| self.type_any(body, next, hit)),
+            TypeExpr::Builtin(_) | TypeExpr::Generic(..) => false,
+            TypeExpr::Nullable(inner) => self.type_any(body, ty.with_idx(inner), hit),
+            TypeExpr::App { params, .. } => any(params, hit),
+            TypeExpr::Tuple { elements } => any(elements, hit),
+            TypeExpr::Function { params, ret } => {
+                any(params, hit) || self.type_any(body, ty.with_idx(ret), hit)
+            }
+        }
+    }
+
+    /// Whether `ty` holds a frame reference anywhere in its tree.
+    pub fn type_contains_ref(&self, body: Option<&BodyInference>, ty: TyId) -> bool {
+        self.type_any(body, ty, &mut |node| {
+            matches!(
+                node,
+                TypeExpr::App {
+                    ctor: TypeCtor::Ref,
+                    ..
+                }
+            )
+        })
+    }
+
     pub fn render(&self, body: Option<&BodyInference>, ty: TyId) -> String {
         let te = match ty {
             TyId::Static(mid, idx) => self.module(mid).ty_arena[idx],

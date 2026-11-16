@@ -1739,36 +1739,6 @@ fn resolved_call_is_frame_source(gamma: &Gamma, e: Idx<Expr>) -> bool {
         .any(|annotation| annotation.name.name.as_str() == "frame_ref_source")
 }
 
-fn static_type_contains_ref(ws: &Workspace, ty: TyId) -> bool {
-    fn visit(ws: &Workspace, ty: TyId, seen: &mut FxHashSet<TyId>) -> bool {
-        if !seen.insert(ty) {
-            return false;
-        }
-        match ty {
-            TyId::Local(_) => false,
-            TyId::Static(mid, idx) => match ws.module(mid).ty_arena[idx] {
-                TypeExpr::App {
-                    ctor: TypeCtor::Ref,
-                    ..
-                } => true,
-                TypeExpr::Nullable(inner) => visit(ws, ty.with_idx(inner), seen),
-                TypeExpr::App { mut params, .. } => {
-                    params.any(|part| visit(ws, ty.with_idx(part), seen))
-                }
-                TypeExpr::Function { mut params, ret } => {
-                    params.any(|part| visit(ws, ty.with_idx(part), seen))
-                        || visit(ws, ty.with_idx(ret), seen)
-                }
-                TypeExpr::Tuple { mut elements } => {
-                    elements.any(|part| visit(ws, ty.with_idx(part), seen))
-                }
-                TypeExpr::Builtin(_) | TypeExpr::Generic(..) | TypeExpr::Infer(..) => false,
-            },
-        }
-    }
-    visit(ws, ty, &mut FxHashSet::default())
-}
-
 fn call_ref_provenance(c: BodyCtx, gamma: &mut Gamma, e: Idx<Expr>) -> RefProvenance {
     if resolved_call_is_frame_source(gamma, e) {
         return RefProvenance::Stable;
@@ -1781,7 +1751,7 @@ fn call_ref_provenance(c: BodyCtx, gamma: &mut Gamma, e: Idx<Expr>) -> RefProven
         let has_ref_input = gamma.workspace.module(mid).functions[fid]
             .param_decls
             .iter()
-            .any(|param| static_type_contains_ref(gamma.workspace, param.ty));
+            .any(|param| gamma.workspace.type_contains_ref(None, param.ty));
         return if has_ref_input {
             RefProvenance::Unknown
         } else {

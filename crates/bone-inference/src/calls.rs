@@ -148,24 +148,15 @@ fn keep_nearest_tier(
 }
 
 /// True if `ty` contains an unbound generic hole (an `Infer`/`Generic` node)
-/// anywhere in its structure -- resolved so already-bound vars read through.
-fn ty_has_generic_hole(gamma: &mut Gamma, ty: TyId, span: Span) -> bool {
-    let r = resolve(gamma, ty, span);
-    let node = *gamma.get(r);
-    match node {
-        TypeExpr::Infer(..) | TypeExpr::Generic(..) => true,
-        TypeExpr::Nullable(inner) => ty_has_generic_hole(gamma, r.with_idx(inner), span),
-        TypeExpr::App { params, .. } | TypeExpr::Tuple { elements: params } => params
-            .into_iter()
-            .any(|c| ty_has_generic_hole(gamma, r.with_idx(c), span)),
-        TypeExpr::Function { params, ret } => {
-            ty_has_generic_hole(gamma, r.with_idx(ret), span)
-                || params
-                    .into_iter()
-                    .any(|c| ty_has_generic_hole(gamma, r.with_idx(c), span))
-        }
-        TypeExpr::Builtin(_) => false,
-    }
+/// anywhere in its structure -- already-bound vars read through.
+fn ty_has_generic_hole(gamma: &Gamma, ty: TyId) -> bool {
+    gamma
+        .workspace
+        .type_any(Some(&gamma.out), ty, &mut |node| match node {
+            TypeExpr::Infer(var, _) => gamma.out.substitutions.get(var).is_none(),
+            TypeExpr::Generic(..) => true,
+            _ => false,
+        })
 }
 
 /// Genericity penalty of a param, measured BEFORE unification binds its vars: a
@@ -180,11 +171,7 @@ fn param_genericity(gamma: &mut Gamma, param: TyId, span: Span) -> usize {
     if matches!(*gamma.get(p), TypeExpr::Infer(..) | TypeExpr::Generic(..)) {
         return 2;
     }
-    if ty_has_generic_hole(gamma, p, span) {
-        1
-    } else {
-        0
-    }
+    if ty_has_generic_hole(gamma, p) { 1 } else { 0 }
 }
 
 pub(crate) fn fit_cost(gamma: &mut Gamma, arg: TyId, param: TyId, span: Span) -> Option<usize> {
