@@ -418,6 +418,103 @@ struct CachedFileFindings {
     active_inference_ranks: BTreeSet<usize>,
 }
 
+impl CachedFileFindings {
+    fn new(source: &str, stats: &mut LintCacheStats) -> Self {
+        Self {
+            suppression_fingerprint: suppression_fingerprint(source),
+            suppressions: suppression_entries_for_cache(source, stats),
+            ..Default::default()
+        }
+    }
+
+    /// Rank `module`'s bodies in declaration order, give each a raw row, and
+    /// derive every filtered row.
+    fn index_bodies(&mut self, module: &Module, stats: &mut LintCacheStats) {
+        self.owner_order = module.bodies.keys().copied().collect();
+        self.owner_rank = self
+            .owner_order
+            .iter()
+            .enumerate()
+            .map(|(rank, &owner)| (owner, rank))
+            .collect();
+        for &owner in &self.owner_order {
+            self.flat_raw.entry(owner).or_default();
+            self.inference_raw.entry(owner).or_default();
+        }
+        self.refilter(stats);
+    }
+
+    fn refilter(&mut self, stats: &mut LintCacheStats) {
+        let suppressions = &self.suppressions;
+        let mut filter = |raw: &FxHashMap<BodyOwner, Vec<Finding>>| {
+            raw.iter()
+                .map(|(&owner, raw)| {
+                    let kept = filter_suppressed_findings_with_entries_timed(
+                        raw.clone(),
+                        suppressions,
+                        stats,
+                    );
+                    (owner, kept)
+                })
+                .collect()
+        };
+        self.flat = filter(&self.flat_raw);
+        self.inference = filter(&self.inference_raw);
+        self.other = filter_suppressed_findings_with_entries_timed(
+            self.other_raw.clone(),
+            suppressions,
+            stats,
+        );
+        let active = |rows: &FxHashMap<BodyOwner, Vec<Finding>>| {
+            rows.iter()
+                .filter(|(_, findings)| !findings.is_empty())
+                .filter_map(|(owner, _)| self.owner_rank.get(owner).copied())
+                .collect()
+        };
+        self.active_flat_ranks = active(&self.flat);
+        self.active_inference_ranks = active(&self.inference);
+    }
+
+    fn install_body(
+        &mut self,
+        owner: BodyOwner,
+        raw: Vec<Finding>,
+        inference: bool,
+        stats: &mut LintCacheStats,
+    ) {
+        let kept =
+            filter_suppressed_findings_with_entries_timed(raw.clone(), &self.suppressions, stats);
+        let rank = match self.owner_rank.get(&owner) {
+            Some(&rank) => rank,
+            None => {
+                self.owner_rank.insert(owner, self.owner_order.len());
+                self.owner_order.push(owner);
+                self.owner_order.len() - 1
+            }
+        };
+        let (raw_rows, rows, active) = if inference {
+            (
+                &mut self.inference_raw,
+                &mut self.inference,
+                &mut self.active_inference_ranks,
+            )
+        } else {
+            (
+                &mut self.flat_raw,
+                &mut self.flat,
+                &mut self.active_flat_ranks,
+            )
+        };
+        if kept.is_empty() {
+            active.remove(&rank);
+        } else {
+            active.insert(rank);
+        }
+        raw_rows.insert(owner, raw);
+        rows.insert(owner, kept);
+    }
+}
+
 #[derive(Clone, Debug)]
 struct LintCacheTransaction {
     change: LintCacheUpdate,
@@ -1525,21 +1622,6 @@ impl IncrementalLintCache {
         }
     }
 
-    fn refresh_active_owner_ranks(cached: &mut CachedFileFindings) {
-        cached.active_flat_ranks = cached
-            .flat
-            .iter()
-            .filter(|(_, findings)| !findings.is_empty())
-            .filter_map(|(owner, _)| cached.owner_rank.get(owner).copied())
-            .collect();
-        cached.active_inference_ranks = cached
-            .inference
-            .iter()
-            .filter(|(_, findings)| !findings.is_empty())
-            .filter_map(|(owner, _)| cached.owner_rank.get(owner).copied())
-            .collect();
-    }
-
     fn replace_unused_findings(
         &mut self,
         ws: &Workspace,
@@ -1664,34 +1746,7 @@ impl IncrementalLintCache {
                 continue;
             };
             cached.suppressions = suppression_entries_for_cache(source, stats);
-            let flat_raw = cached.flat_raw.clone();
-            for (owner, raw) in flat_raw {
-                cached.flat.insert(
-                    owner,
-                    filter_suppressed_findings_with_entries_timed(
-                        raw.clone(),
-                        &cached.suppressions,
-                        stats,
-                    ),
-                );
-            }
-            let inference_raw = cached.inference_raw.clone();
-            for (owner, raw) in inference_raw {
-                cached.inference.insert(
-                    owner,
-                    filter_suppressed_findings_with_entries_timed(
-                        raw.clone(),
-                        &cached.suppressions,
-                        stats,
-                    ),
-                );
-            }
-            cached.other = filter_suppressed_findings_with_entries_timed(
-                cached.other_raw.clone(),
-                &cached.suppressions,
-                stats,
-            );
-            Self::refresh_active_owner_ranks(cached);
+            cached.refilter(stats);
             cached.suppression_fingerprint = suppression_fingerprint(source);
             if let Some(raw) = self.global_raw.get(&file) {
                 self.global.insert(
@@ -2147,14 +2202,12 @@ impl IncrementalLintCache {
                 change.changed_files.contains(&file) && !reseeded_files.contains(&file)
             }));
         }
-        let flat_target_owners = flat_targets.clone();
-        let inference_target_owners = inference_targets.clone();
 
         let mut dirty_output_files = change.changed_files.clone();
         dirty_output_files.extend(
-            flat_target_owners
+            flat_targets
                 .iter()
-                .chain(inference_target_owners.iter())
+                .chain(inference_targets.iter())
                 .map(|(mid, _)| ws.module(*mid).file),
         );
         dirty_output_files.extend(affected_unused.iter().map(|(mid, _)| ws.module(*mid).file));
@@ -2177,100 +2230,27 @@ impl IncrementalLintCache {
         dirty_output_files.extend(suppression_changed_files.iter().copied());
 
         let total_flat_bodies: usize = self.files.values().map(|file| file.flat.len()).sum();
-        for (mid, owner) in flat_targets {
-            let file = ws.module(mid).file;
-            if !self.report_files.contains(&file) {
-                continue;
-            }
-            let Some(body) = ws.module(mid).bodies.get(&owner) else {
-                continue;
-            };
-            let mut raw = Vec::new();
-            if sel.enabled(UNUSED_VAR) {
-                let metadata_used = decorator_metadata_used_bindings(ws.module(mid), owner, body);
-                raw.extend(
-                    unused_vars_in_body_with_metadata(body, &variants, &metadata_used)
-                        .into_iter()
-                        .map(|f| Finding::of(&f)),
-                );
-            }
-            if sel.enabled(UNUSED_PURE_EXPR) {
-                raw.extend(
-                    unused_pure_exprs_in_body(body)
-                        .into_iter()
-                        .map(|f| Finding::of(&f)),
-                );
-            }
-            stats.flat_body_requests += 1;
-            let filtered = {
-                let suppressions = &self.files.entry(file).or_default().suppressions;
-                filter_suppressed_findings_with_entries_timed(raw.clone(), suppressions, &mut stats)
-            };
-            let cached = self.files.entry(file).or_default();
-            if !cached.owner_order.contains(&owner) {
-                cached.owner_rank.insert(owner, cached.owner_order.len());
-                cached.owner_order.push(owner);
-            }
-            cached.flat_raw.insert(owner, raw);
-            cached.flat.insert(owner, filtered);
-            let rank = cached.owner_rank[&owner];
-            if cached.flat[&owner].is_empty() {
-                cached.active_flat_ranks.remove(&rank);
-            } else {
-                cached.active_flat_ranks.insert(rank);
-            }
-        }
-        for (mid, owner) in inference_targets {
-            let file = ws.module(mid).file;
-            if !self.report_files.contains(&file) {
-                continue;
-            }
+        let body_rows = flat_targets.iter().map(|&target| (target, false));
+        let body_rows = body_rows.chain(inference_targets.iter().map(|&target| (target, true)));
+        for ((mid, owner), inference) in body_rows {
             let module = ws.module(mid);
+            if !self.report_files.contains(&module.file) {
+                continue;
+            }
             let Some(body) = module.bodies.get(&owner) else {
                 continue;
             };
-            let inf = ws.inference(mid);
-            let bi = inf.and_then(|i| i.per_fn.get(&owner));
-            let mut raw = Vec::new();
-            if sel.enabled(TRANSMUTE_OF_NULLABLE) {
-                raw.extend(
-                    transmute_of_nullable_in_body(ws, bi, body)
-                        .into_iter()
-                        .map(|f| Finding::of(&f)),
-                );
-            }
-            if sel.enabled(TASK_NULL_ABANDON) {
-                raw.extend(
-                    task_null_abandon_in_body(ws, bi, body)
-                        .into_iter()
-                        .map(|f| Finding::of(&f)),
-                );
-            }
-            if sel.enabled(ROW_ESCAPE) {
-                raw.extend(
-                    row_escapes_in_body(ws, bi, body, tail_sink(module, &owner))
-                        .into_iter()
-                        .map(|f| Finding::of(&f)),
-                );
-            }
-            stats.inference_body_requests += 1;
-            let filtered = {
-                let suppressions = &self.files.entry(file).or_default().suppressions;
-                filter_suppressed_findings_with_entries_timed(raw.clone(), suppressions, &mut stats)
-            };
-            let cached = self.files.entry(file).or_default();
-            if !cached.owner_order.contains(&owner) {
-                cached.owner_rank.insert(owner, cached.owner_order.len());
-                cached.owner_order.push(owner);
-            }
-            cached.inference_raw.insert(owner, raw);
-            cached.inference.insert(owner, filtered);
-            let rank = cached.owner_rank[&owner];
-            if cached.inference[&owner].is_empty() {
-                cached.active_inference_ranks.remove(&rank);
+            let raw = if inference {
+                stats.inference_body_requests += 1;
+                inference_body_findings(ws, module, owner, body, sel)
             } else {
-                cached.active_inference_ranks.insert(rank);
-            }
+                stats.flat_body_requests += 1;
+                flat_body_findings(module, owner, body, &variants, sel)
+            };
+            self.files
+                .entry(module.file)
+                .or_default()
+                .install_body(owner, raw, inference, &mut stats);
         }
         if let Some(started) = local_started {
             let suppression = stats
@@ -2286,55 +2266,31 @@ impl IncrementalLintCache {
                 }
             }
         }
-        stats.flat_bodies_reused += total_flat_bodies.saturating_sub(flat_target_owners.len());
+        stats.flat_bodies_reused += total_flat_bodies.saturating_sub(flat_targets.len());
 
         for edit in &change.edits {
             self.dependency.shift_declarations(edit);
             let Some(cached) = self.files.get_mut(&edit.file) else {
                 continue;
             };
-            for (owner, findings) in &mut cached.flat {
-                if !flat_target_owners.contains(&(
-                    ws.modules
-                        .iter()
-                        .find(|m| m.file == edit.file)
-                        .map_or(ModuleId::builtin(), |m| m.id),
-                    *owner,
-                )) {
-                    stats.span_shifts += shift_findings(findings, edit);
-                }
-            }
-            for (owner, findings) in &mut cached.flat_raw {
-                if !flat_target_owners.contains(&(
-                    ws.modules
-                        .iter()
-                        .find(|m| m.file == edit.file)
-                        .map_or(ModuleId::builtin(), |m| m.id),
-                    *owner,
-                )) {
-                    shift_findings(findings, edit);
-                }
-            }
-            for (owner, findings) in &mut cached.inference {
-                if !inference_target_owners.contains(&(
-                    ws.modules
-                        .iter()
-                        .find(|m| m.file == edit.file)
-                        .map_or(ModuleId::builtin(), |m| m.id),
-                    *owner,
-                )) {
-                    stats.span_shifts += shift_findings(findings, edit);
-                }
-            }
-            for (owner, findings) in &mut cached.inference_raw {
-                if !inference_target_owners.contains(&(
-                    ws.modules
-                        .iter()
-                        .find(|m| m.file == edit.file)
-                        .map_or(ModuleId::builtin(), |m| m.id),
-                    *owner,
-                )) {
-                    shift_findings(findings, edit);
+            let mid = ws
+                .modules
+                .iter()
+                .find(|m| m.file == edit.file)
+                .map_or(ModuleId::builtin(), |m| m.id);
+            for (rows, targets, counted) in [
+                (&mut cached.flat, &flat_targets, true),
+                (&mut cached.flat_raw, &flat_targets, false),
+                (&mut cached.inference, &inference_targets, true),
+                (&mut cached.inference_raw, &inference_targets, false),
+            ] {
+                for (owner, findings) in rows.iter_mut() {
+                    if !targets.contains(&(mid, *owner)) {
+                        let shifted = shift_findings(findings, edit);
+                        if counted {
+                            stats.span_shifts += shifted;
+                        }
+                    }
                 }
             }
             shift_findings(&mut cached.other_raw, edit);
@@ -2474,11 +2430,7 @@ impl IncrementalLintCache {
         stats: &mut LintCacheStats,
     ) {
         self.files.remove(&file);
-        let mut cached = CachedFileFindings {
-            suppression_fingerprint: suppression_fingerprint(source),
-            suppressions: suppression_entries_for_cache(source, stats),
-            ..Default::default()
-        };
+        let mut cached = CachedFileFindings::new(source, stats);
         if let Some(module) = ws.user_modules(warm).find(|module| module.file == file) {
             debug_assert!(
                 !sel.enabled(METHOD_SYNTAX),
@@ -2504,39 +2456,7 @@ impl IncrementalLintCache {
                     None => cached.other_raw.push(finding),
                 }
             }
-            cached.owner_order = module.bodies.keys().copied().collect();
-            cached.owner_rank = cached
-                .owner_order
-                .iter()
-                .enumerate()
-                .map(|(rank, &owner)| (owner, rank))
-                .collect();
-            for owner in module.bodies.keys().copied() {
-                let flat = cached.flat_raw.entry(owner).or_default().clone();
-                let inference = cached.inference_raw.entry(owner).or_default().clone();
-                cached.flat.insert(
-                    owner,
-                    filter_suppressed_findings_with_entries_timed(
-                        flat,
-                        &cached.suppressions,
-                        stats,
-                    ),
-                );
-                cached.inference.insert(
-                    owner,
-                    filter_suppressed_findings_with_entries_timed(
-                        inference,
-                        &cached.suppressions,
-                        stats,
-                    ),
-                );
-            }
-            cached.other = filter_suppressed_findings_with_entries_timed(
-                cached.other_raw.clone(),
-                &cached.suppressions,
-                stats,
-            );
-            Self::refresh_active_owner_ranks(&mut cached);
+            cached.index_bodies(module, stats);
             stats.flat_body_requests += module.bodies.len();
             stats.inference_body_requests += module.bodies.len();
         }
@@ -2597,14 +2517,8 @@ impl IncrementalLintCache {
         stats.sibling_groups_requested += self.dependency.sibling_groups.len();
         stats.sibling_groups_revisited += self.dependency.sibling_groups.len();
         for (&file, source) in sources {
-            self.files.insert(
-                file,
-                CachedFileFindings {
-                    suppression_fingerprint: suppression_fingerprint(source),
-                    suppressions: suppression_entries_for_cache(source, stats),
-                    ..Default::default()
-                },
-            );
+            self.files
+                .insert(file, CachedFileFindings::new(source, stats));
         }
         for finding in &raw_findings {
             if is_global_lint(finding.lint) {
@@ -2641,46 +2555,10 @@ impl IncrementalLintCache {
             if !sources.contains_key(&module.file) {
                 continue;
             }
-            let cached = self.files.entry(module.file).or_default();
-            cached.owner_order = module.bodies.keys().copied().collect();
-            cached.owner_rank = cached
-                .owner_order
-                .iter()
-                .enumerate()
-                .map(|(rank, &owner)| (owner, rank))
-                .collect();
-            for owner in module.bodies.keys().copied() {
-                cached.flat_raw.entry(owner).or_default();
-                cached.inference_raw.entry(owner).or_default();
-                let flat = cached.flat_raw.get(&owner).cloned().unwrap_or_default();
-                let inference = cached
-                    .inference_raw
-                    .get(&owner)
-                    .cloned()
-                    .unwrap_or_default();
-                cached.flat.insert(
-                    owner,
-                    filter_suppressed_findings_with_entries_timed(
-                        flat,
-                        &cached.suppressions,
-                        stats,
-                    ),
-                );
-                cached.inference.insert(
-                    owner,
-                    filter_suppressed_findings_with_entries_timed(
-                        inference,
-                        &cached.suppressions,
-                        stats,
-                    ),
-                );
-            }
-            cached.other = filter_suppressed_findings_with_entries_timed(
-                cached.other_raw.clone(),
-                &cached.suppressions,
-                stats,
-            );
-            Self::refresh_active_owner_ranks(cached);
+            self.files
+                .entry(module.file)
+                .or_default()
+                .index_bodies(module, stats);
         }
         for (&file, raw) in &self.global_raw {
             let Some(source) = sources.get(&file).copied() else {
@@ -2936,6 +2814,49 @@ fn missing_policy_advice(module: &Module, sel: &LintOptions) -> Vec<Finding> {
 /// `variants` and `types` are whole-workspace scans, so a caller linting EVERY
 /// module computes them once instead of once per file. `types` is only read by
 /// the opt-in `method_syntax` lint, so the default tier passes an empty set.
+fn flat_body_findings(
+    module: &Module,
+    owner: BodyOwner,
+    body: &Body,
+    variants: &FxHashSet<Ustr>,
+    sel: &LintOptions,
+) -> Vec<Finding> {
+    let mut out = Vec::new();
+    if sel.enabled(UNUSED_VAR) {
+        let metadata_used = decorator_metadata_used_bindings(module, owner, body);
+        let found = unused_vars_in_body_with_metadata(body, variants, &metadata_used);
+        out.extend(found.iter().map(Finding::of));
+    }
+    if sel.enabled(UNUSED_PURE_EXPR) {
+        out.extend(unused_pure_exprs_in_body(body).iter().map(Finding::of));
+    }
+    out
+}
+
+fn inference_body_findings(
+    ws: &Workspace,
+    module: &Module,
+    owner: BodyOwner,
+    body: &Body,
+    sel: &LintOptions,
+) -> Vec<Finding> {
+    let bi = ws.inference(module.id).and_then(|i| i.per_fn.get(&owner));
+    let mut out = Vec::new();
+    if sel.enabled(TRANSMUTE_OF_NULLABLE) {
+        let found = transmute_of_nullable_in_body(ws, bi, body);
+        out.extend(found.iter().map(Finding::of));
+    }
+    if sel.enabled(TASK_NULL_ABANDON) {
+        let found = task_null_abandon_in_body(ws, bi, body);
+        out.extend(found.iter().map(Finding::of));
+    }
+    if sel.enabled(ROW_ESCAPE) {
+        let found = row_escapes_in_body(ws, bi, body, tail_sink(module, &owner));
+        out.extend(found.iter().map(Finding::of));
+    }
+    out
+}
+
 fn flat_findings_with(
     ws: &Workspace,
     variants: &FxHashSet<Ustr>,
