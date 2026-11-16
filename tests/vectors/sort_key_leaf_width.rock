@@ -245,3 +245,8 @@ fn wide_sort_preserves_every_row_across_heap_boundaries() {
         }
     }
 }
+
+@test
+fn direct_key_intrinsic_keeps_the_ordinary_callback_abi() {
+    assert(__sort_key_lt(p => p, V2 { x: 1.0, y: 1.0 }, V2 { x: 1.0, y: 3.0 }))
+}

@@ -7,6 +7,14 @@ use crate::lower::shape::mono_value_shape;
 use crate::monoty::MonoTy;
 
 impl<'a> Builder<'a> {
+    fn uses_sort_key_leaf_abi(&self) -> bool {
+        self.site_owner.as_ref().is_some_and(|owner| {
+            let module = self.ws.module(owner.func.module);
+            module.functions[owner.func.func].name.as_str() == "__vec_sort_by_key_leaves"
+                && bone_core::modules::is_stdlib_module_file(module.file.as_str())
+        })
+    }
+
     fn is_stdlib_sort(&self, func: FuncRef) -> bool {
         let module = self.ws.module(func.module);
         let decl = &module.functions[func.func];
@@ -76,11 +84,15 @@ impl<'a> Builder<'a> {
         Ok(Some(values.into_iter().flatten().collect()))
     }
 
-    fn sort_key_plan(&self, key_fn: Idx<Expr>) -> Result<FunctionRepPlan, CompilerError> {
+    fn sort_key_plan(
+        &self,
+        key_fn: Idx<Expr>,
+        leaves: bool,
+    ) -> Result<FunctionRepPlan, CompilerError> {
         let ty = self
             .concrete_expr_ty(key_fn)
             .ok_or_else(|| self.gap_here("sort key function has no concrete type"))?;
-        if self.scx.values_first_class {
+        if self.scx.values_first_class || !leaves {
             BackendFnAbiPlan::for_function_value(self.ws, self.call_scx, ty)
         } else {
             BackendFnAbiPlan::for_function_value_with_mode(self.ws, self.call_scx, ty, false)
@@ -89,7 +101,7 @@ impl<'a> Builder<'a> {
     }
 
     fn lower_sort_key(&mut self, key: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
-        let plan = self.sort_key_plan(key)?;
+        let plan = self.sort_key_plan(key, true)?;
         if let Expr::Lambda { params, body } = self.body.expr_arena[key] {
             return self.lower_lambda_with_plan(key, params, body, plan);
         }
@@ -247,18 +259,14 @@ impl<'a> Builder<'a> {
             Ok(leaves) => leaves,
             // Generic stdlib bodies lower independently of their callers. The
             // sort boundary rejects this key at the user's call instead.
-            Err(_)
-                if bone_core::modules::is_stdlib_module_file(
-                    self.body.expr_spans[e].file.as_str(),
-                ) =>
-            {
+            Err(_) if self.uses_sort_key_leaf_abi() => {
                 return Ok(ValueRepr::Scalar(
                     self.emit_cur(Inst::Const(Lit::Bool(false))),
                 ));
             }
             Err(error) => return Err(error),
         };
-        let plan = self.sort_key_plan(*key_fn)?;
+        let plan = self.sort_key_plan(*key_fn, self.uses_sort_key_leaf_abi())?;
         let callee = self.lower_expr(*key_fn)?;
         let lhs = self.sort_key_leaves(&plan, callee, *a, &ty)?;
         let rhs = self.sort_key_leaves(&plan, callee, *b, &ty)?;
