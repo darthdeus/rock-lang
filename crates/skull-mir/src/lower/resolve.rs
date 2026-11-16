@@ -450,7 +450,7 @@ impl<'a> Builder<'a> {
             } else {
                 let (base, field, _) = reference_field.expect("reference-owned projection");
                 let base = self.lower_expr(base)?;
-                self.emit_cur(Inst::Field { base, field })
+                self.read_field(base, field)
             };
             if let Some(index) = enum_field {
                 let inline = self.gc_table_inline_layout(shape.name)?;
@@ -775,10 +775,7 @@ impl<'a> Builder<'a> {
                 }
                 if self.scx.values_first_class {
                     let parent = self.lower_expr(base)?;
-                    return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Field {
-                        base: parent,
-                        field,
-                    })));
+                    return Ok(ValueRepr::Scalar(self.read_field(parent, field)));
                 }
                 // An embedded field read as a WHOLE value re-materializes from
                 // its leaves. Projection-only keeps every such read transient
@@ -811,10 +808,7 @@ impl<'a> Builder<'a> {
                     self.physical_field_layout(base, field)?;
                 if native_leaf {
                     let parent = self.lower_place_base(pbase)?;
-                    return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Field {
-                        base: parent,
-                        field: key,
-                    })));
+                    return Ok(ValueRepr::Scalar(self.read_field(parent, key)));
                 }
                 if key != field {
                     // A value parent can still be UNBOXED (a param, a local):
@@ -855,12 +849,7 @@ impl<'a> Builder<'a> {
                     if let Some(shape) = projected_shape {
                         let leaves = super::shape::leaf_names(&shape, key.as_str(), ".")
                             .into_iter()
-                            .map(|key| {
-                                self.emit_cur(Inst::Field {
-                                    base: parent,
-                                    field: crate::names::ustr(&key),
-                                })
-                            })
+                            .map(|key| self.read_field(parent, crate::names::ustr(&key)))
                             .collect::<Vec<_>>();
                         return Ok(self.rebuild_from_leaves(&shape, &leaves, &mut 0));
                     }
@@ -870,10 +859,7 @@ impl<'a> Builder<'a> {
                         let nullable = self.embed_read_is_nullable(base, field)?;
                         return self.load_embed_repr(parent, key, name, nullable);
                     }
-                    return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Field {
-                        base: parent,
-                        field: key,
-                    })));
+                    return Ok(ValueRepr::Scalar(self.read_field(parent, key)));
                 }
                 let mut br = self.lower_expr_repr_inner(base)?.into_value();
                 // A leaf-table BOX has no declared-field keys -- a nested child
@@ -899,7 +885,7 @@ impl<'a> Builder<'a> {
                 // same as any primitive field. A VALUE-struct field is a whole-value
                 // read out of a mutable place, so it copies.
                 let basev = self.pack(br)?;
-                let fv = self.emit_cur(Inst::Field { base: basev, field });
+                let fv = self.read_field(basev, field);
                 // A `nobox` field splits to leaves whatever the base is: the box
                 // is the guarantee's violation, not just a copy that would sink.
                 // It also carries presence STATICALLY -- a Group widening to `T?`
@@ -1376,10 +1362,7 @@ impl<'a> Builder<'a> {
         }
 
         let slot = self.f.new_cell(None);
-        let resume0 = self.emit_cur(Inst::Field {
-            base: sub,
-            field: crate::names::ustr("__resume"),
-        });
+        let resume0 = self.read_field(sub, crate::names::ustr("__resume"));
         let primed = self.emit_cur(Inst::CallValue {
             callee: resume0,
             args: vec![sub],
@@ -1409,10 +1392,7 @@ impl<'a> Builder<'a> {
         );
         self.cur = resume_bb;
         let arg = self.emit_cur(Inst::Load(rac));
-        let resume1 = self.emit_cur(Inst::Field {
-            base: sub,
-            field: crate::names::ustr("__resume"),
-        });
+        let resume1 = self.read_field(sub, crate::names::ustr("__resume"));
         let v2 = self.emit_cur(Inst::CallValue {
             callee: resume1,
             args: vec![sub, arg],
@@ -1437,10 +1417,7 @@ impl<'a> Builder<'a> {
     ) -> Result<Idx<Inst>, CompilerError> {
         let clear = self.emit_cur(Inst::Const(Lit::Nil));
         self.emit_cur(Inst::CoroSetInner(clear));
-        let inner_err = self.emit_cur(Inst::Field {
-            base: sub,
-            field: crate::names::ustr("__error"),
-        });
+        let inner_err = self.read_field(sub, crate::names::ustr("__error"));
         let nil2 = self.emit_cur(Inst::Const(Lit::Nil));
         let has_err = self.emit_cur(Inst::NotEq(inner_err, nil2));
         let raise = self.f.new_block();
@@ -1456,10 +1433,7 @@ impl<'a> Builder<'a> {
         });
         self.f.set_term(self.cur, Term::Goto(cont));
         self.cur = cont;
-        Ok(self.emit_cur(Inst::Field {
-            base: sub,
-            field: crate::names::ustr("__return"),
-        }))
+        Ok(self.read_field(sub, crate::names::ustr("__return")))
     }
 
     /// `await sub` where `sub` yields a flat enum: drive the inner via its
@@ -1476,10 +1450,7 @@ impl<'a> Builder<'a> {
         let n = shape.leaf_count();
         let frame = sub;
         // Prime the inner (advance once).
-        let adv0 = self.emit_cur(Inst::Field {
-            base: sub,
-            field: crate::names::ustr("__advance"),
-        });
+        let adv0 = self.read_field(sub, crate::names::ustr("__advance"));
         self.emit_cur(Inst::CallValue {
             callee: adv0,
             args: vec![sub],
@@ -1492,10 +1463,7 @@ impl<'a> Builder<'a> {
 
         // header: loop while the inner is still producing (`__state >= 0`).
         self.cur = header;
-        let state = self.emit_cur(Inst::Field {
-            base: frame,
-            field: crate::names::ustr("__state"),
-        });
+        let state = self.read_field(frame, crate::names::ustr("__state"));
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
         let done = self.emit_cur(Inst::IntLt(state, zero));
         self.branch_to(done, exit, body);
@@ -1503,12 +1471,7 @@ impl<'a> Builder<'a> {
         // body: re-yield the inner's current leaves, then advance it with our arg.
         self.cur = body;
         let values: Vec<Idx<Inst>> = (0..n)
-            .map(|i| {
-                self.emit_cur(Inst::Field {
-                    base: frame,
-                    field: yield_slot(i),
-                })
-            })
+            .map(|i| self.read_field(frame, yield_slot(i)))
             .collect();
         let resume_bb = self.f.new_block();
         self.f.set_term(
@@ -1520,10 +1483,7 @@ impl<'a> Builder<'a> {
         );
         self.cur = resume_bb;
         let arg = self.emit_cur(Inst::Load(rac));
-        let adv1 = self.emit_cur(Inst::Field {
-            base: sub,
-            field: crate::names::ustr("__advance"),
-        });
+        let adv1 = self.read_field(sub, crate::names::ustr("__advance"));
         self.emit_cur(Inst::CallValue {
             callee: adv1,
             args: vec![sub, arg],

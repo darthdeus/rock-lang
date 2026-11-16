@@ -515,7 +515,7 @@ impl<'a> Builder<'a> {
             other => {
                 let v = self.pack(other)?;
                 Ok(wanted
-                    .map(|w| ValueRepr::Scalar(self.emit_cur(Inst::Field { base: v, field: w })))
+                    .map(|w| ValueRepr::Scalar(self.read_field(v, w)))
                     .collect())
             }
         }

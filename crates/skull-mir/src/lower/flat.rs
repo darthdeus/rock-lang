@@ -292,10 +292,7 @@ impl<'a> Builder<'a> {
         value_shape: &ValueShape,
     ) -> ValueRepr {
         let frame = cobj;
-        let state = self.emit_cur(Inst::Field {
-            base: frame,
-            field: crate::names::ustr("__state"),
-        });
+        let state = self.read_field(frame, crate::names::ustr("__state"));
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
         let done = self.emit_cur(Inst::IntLt(state, zero));
         let cells = self.fresh_cells(n);
@@ -313,10 +310,7 @@ impl<'a> Builder<'a> {
         // Live: spread the reused frame slots into the leaf cells.
         self.cur = live_bb;
         for (i, c) in cells.iter().enumerate() {
-            let v = self.emit_cur(Inst::Field {
-                base: frame,
-                field: yield_slot(i),
-            });
+            let v = self.read_field(frame, yield_slot(i));
             self.store_cell(*c, v);
         }
         self.f.set_term(self.cur, Term::Goto(join));
@@ -374,10 +368,7 @@ impl<'a> Builder<'a> {
         bv: Idx<Inst>,
         shape: &EnumFlatShape,
     ) -> FlatCells {
-        let tag = self.emit_cur(Inst::Field {
-            base: bv,
-            field: crate::names::ustr("__variant"),
-        });
+        let tag = self.read_field(bv, crate::names::ustr("__variant"));
         let positional = (0..shape.tuple_width())
             .map(|i| self.emit_cur(Inst::TupleIndex { base: bv, index: i }))
             .collect();
@@ -385,15 +376,7 @@ impl<'a> Builder<'a> {
             .record_fields
             .clone()
             .into_iter()
-            .map(|rf| {
-                (
-                    rf,
-                    self.emit_cur(Inst::Field {
-                        base: bv,
-                        field: rf,
-                    }),
-                )
-            })
+            .map(|rf| (rf, self.read_field(bv, rf)))
             .collect();
         FlatCells {
             tag,
@@ -409,31 +392,15 @@ impl<'a> Builder<'a> {
         prefix: Ustr,
         shape: &EnumFlatShape,
     ) -> FlatCells {
-        let tag = self.emit_cur(Inst::Field {
-            base: parent,
-            field: flat_tag_slot(prefix),
-        });
+        let tag = self.read_field(parent, flat_tag_slot(prefix));
         let positional = (0..shape.tuple_width())
-            .map(|i| {
-                self.emit_cur(Inst::Field {
-                    base: parent,
-                    field: flat_payload_slot(prefix, i),
-                })
-            })
+            .map(|i| self.read_field(parent, flat_payload_slot(prefix, i)))
             .collect();
         let named = shape
             .record_fields
             .clone()
             .into_iter()
-            .map(|rf| {
-                (
-                    rf,
-                    self.emit_cur(Inst::Field {
-                        base: parent,
-                        field: flat_named_slot(prefix, rf),
-                    }),
-                )
-            })
+            .map(|rf| (rf, self.read_field(parent, flat_named_slot(prefix, rf))))
             .collect();
         FlatCells {
             tag,

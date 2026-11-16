@@ -1053,10 +1053,7 @@ impl<'a> Builder<'a> {
     ) -> Result<Idx<Inst>, CompilerError> {
         match storage {
             FlatStorage::Columns => {
-                let col = self.emit_cur(Inst::Field {
-                    base: vec,
-                    field: path,
-                });
+                let col = self.read_field(vec, path);
                 Ok(self.emit_cur(Inst::Index {
                     base: col,
                     index: slot,
@@ -1090,10 +1087,7 @@ impl<'a> Builder<'a> {
     ) -> Result<(), CompilerError> {
         match storage {
             FlatStorage::Columns => {
-                let col = self.emit_cur(Inst::Field {
-                    base: vec,
-                    field: path,
-                });
+                let col = self.read_field(vec, path);
                 self.emit_cur(Inst::StoreIndex {
                     base: col,
                     index: slot,
@@ -1136,10 +1130,7 @@ impl<'a> Builder<'a> {
                     elem.name
                 ))
             })?;
-        let data = self.emit_cur(Inst::Field {
-            base: vec,
-            field: crate::names::ustr("_data"),
-        });
+        let data = self.read_field(vec, crate::names::ustr("_data"));
         let at = self.strided_slot_index(slot, shape.leaf_count(), offset);
         Ok((at, data))
     }

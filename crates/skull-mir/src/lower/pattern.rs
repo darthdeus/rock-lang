@@ -634,10 +634,9 @@ impl<'a> Builder<'a> {
     fn scrut_slot(&mut self, scrut: &Scrut, slot: usize) -> Idx<Inst> {
         match scrut {
             Scrut::Cells { positional, .. } => positional[slot],
-            Scrut::Flat { parent, prefix, .. } => self.emit_cur(Inst::Field {
-                base: *parent,
-                field: flat_payload_slot(*prefix, slot),
-            }),
+            Scrut::Flat { parent, prefix, .. } => {
+                self.read_field(*parent, flat_payload_slot(*prefix, slot))
+            }
             Scrut::Val(v) => self.emit_cur(Inst::TupleIndex {
                 base: *v,
                 index: slot,
@@ -658,14 +657,10 @@ impl<'a> Builder<'a> {
     pub(crate) fn scrut_payload(&mut self, scrut: &Scrut, i: usize, cdata: bool) -> Idx<Inst> {
         match scrut {
             Scrut::Cells { positional, .. } => positional[i],
-            Scrut::Flat { parent, prefix, .. } => self.emit_cur(Inst::Field {
-                base: *parent,
-                field: flat_payload_slot(*prefix, i),
-            }),
-            Scrut::Val(v) if cdata => self.emit_cur(Inst::Field {
-                base: *v,
-                field: crate::names::indexed("_", "", i),
-            }),
+            Scrut::Flat { parent, prefix, .. } => {
+                self.read_field(*parent, flat_payload_slot(*prefix, i))
+            }
+            Scrut::Val(v) if cdata => self.read_field(*v, crate::names::indexed("_", "", i)),
             Scrut::Val(v) => self.emit_cur(Inst::TupleIndex { base: *v, index: i }),
             Scrut::Tuple(_) => {
                 let value = self.scrut_value(scrut);
@@ -697,21 +692,20 @@ impl<'a> Builder<'a> {
                         shape.name
                     ))
                 }),
-            Scrut::Flat { parent, prefix, .. } => Ok(self.emit_cur(Inst::Field {
-                base: *parent,
-                field: flat_named_slot(*prefix, field),
-            })),
+            Scrut::Flat { parent, prefix, .. } => {
+                Ok(self.read_field(*parent, flat_named_slot(*prefix, field)))
+            }
             Scrut::Val(v) => {
                 let f = if cdata {
                     slot_name(field.as_str())
                 } else {
                     field
                 };
-                Ok(self.emit_cur(Inst::Field { base: *v, field: f }))
+                Ok(self.read_field(*v, f))
             }
             Scrut::Tuple(_) => {
                 let value = self.scrut_value(scrut);
-                Ok(self.emit_cur(Inst::Field { base: value, field }))
+                Ok(self.read_field(value, field))
             }
         }
     }
@@ -728,10 +722,9 @@ impl<'a> Builder<'a> {
         fail: Idx<Block>,
     ) {
         let flat_tag = match scrut {
-            Scrut::Flat { parent, prefix, .. } => Some(self.emit_cur(Inst::Field {
-                base: *parent,
-                field: flat_tag_slot(*prefix),
-            })),
+            Scrut::Flat { parent, prefix, .. } => {
+                Some(self.read_field(*parent, flat_tag_slot(*prefix)))
+            }
             Scrut::Cells { tag, .. } => Some(*tag),
             Scrut::Val(_) | Scrut::Tuple(_) => None,
         };
@@ -752,19 +745,13 @@ impl<'a> Builder<'a> {
             .and_then(|en| EnumPlan::for_name(self.ws, en).and_then(|plan| plan.cdata().cloned()))
             .and_then(|s| s.tag_of(variant))
         {
-            let tag = self.emit_cur(Inst::Field {
-                base: val,
-                field: crate::names::ustr("__tag"),
-            });
+            let tag = self.read_field(val, crate::names::ustr("__tag"));
             let want = self.emit_cur(Inst::Const(Lit::Int(ord)));
             let cond = self.emit_cur(Inst::Eq(tag, want));
             self.branch_or_fail(cond, fail);
             return;
         }
-        let tag = self.emit_cur(Inst::Field {
-            base: val,
-            field: crate::names::ustr("__variant"),
-        });
+        let tag = self.read_field(val, crate::names::ustr("__variant"));
         let want = self.emit_cur(Inst::Const(Lit::Str(variant)));
         let cond = self.emit_cur(Inst::Eq(tag, want));
         self.branch_or_fail(cond, fail);

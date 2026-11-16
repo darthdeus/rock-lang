@@ -304,27 +304,18 @@ impl<'a> Builder<'a> {
             let field_plan = self.struct_field_plan(cname, f, false)?;
             if let Some((inner, nullable)) = field_plan.embed() {
                 if nullable {
-                    let v = self.emit_cur(Inst::Field {
-                        base: parent,
-                        field: key,
-                    });
+                    let v = self.read_field(parent, key);
                     out.push((crate::names::ustr(relkey.as_str()), v));
                 }
                 self.collect_embed_slots(parent, key, &format!("{relkey}."), inner, out)?;
             } else if let Some(shape) = field_plan.flat_shape() {
                 for slot in flat_slot_names(f, &shape) {
                     let src = crate::names::ustr(&format!("{prefix}.{slot}"));
-                    let v = self.emit_cur(Inst::Field {
-                        base: parent,
-                        field: src,
-                    });
+                    let v = self.read_field(parent, src);
                     out.push((crate::names::ustr(&format!("{rel}{slot}")), v));
                 }
             } else {
-                let v = self.emit_cur(Inst::Field {
-                    base: parent,
-                    field: key,
-                });
+                let v = self.read_field(parent, key);
                 out.push((crate::names::ustr(relkey.as_str()), v));
             }
         }
@@ -355,12 +346,7 @@ impl<'a> Builder<'a> {
     ) -> ValueRepr {
         let leaves = super::shape::leaf_names(shape, prefix.as_str(), ".")
             .into_iter()
-            .map(|key| {
-                self.emit_cur(Inst::Field {
-                    base: parent,
-                    field: crate::names::ustr(&key),
-                })
-            })
+            .map(|key| self.read_field(parent, crate::names::ustr(&key)))
             .collect::<Vec<_>>();
         self.rebuild_from_leaves(shape, &leaves, &mut 0)
     }
@@ -383,10 +369,7 @@ impl<'a> Builder<'a> {
         };
         let mut repr = self.embed_group(parent, prefix, &shape);
         if nullable {
-            let present = self.emit_cur(Inst::Field {
-                base: parent,
-                field: prefix,
-            });
+            let present = self.read_field(parent, prefix);
             if let ValueRepr::Group { present: slot, .. } = &mut repr {
                 *slot = Some(present);
             }
@@ -622,19 +605,13 @@ impl<'a> Builder<'a> {
             {
                 if let Some(shape) = self.struct_field_plan(cname, f, false)?.flat_shape() {
                     for slot in flat_slot_names(f, &shape) {
-                        let v = self.emit_cur(Inst::Field {
-                            base: value,
-                            field: slot,
-                        });
+                        let v = self.read_field(value, slot);
                         out.push((slot, v));
                     }
                     continue;
                 }
             }
-            let part = self.emit_cur(Inst::Field {
-                base: value,
-                field: f,
-            });
+            let part = self.read_field(value, f);
             match self.struct_field_plan(cname, f, true)?.inline_child() {
                 Some(inner) => out.extend(prefixed(f, self.embed_leaf_reads(inner, part)?)),
                 None => out.push((f, part)),
@@ -705,10 +682,7 @@ impl<'a> Builder<'a> {
             && matches!(self.body.expr_arena[value], Expr::Null)
             && !self.callback_records.contains(&parent)
         {
-            let present = self.emit_cur(Inst::Field {
-                base: parent,
-                field,
-            });
+            let present = self.read_field(parent, field);
             // False presence still needs normalization for boxed embed readers.
             let clear = self.f.new_block();
             let join = self.f.new_block();
@@ -741,10 +715,7 @@ impl<'a> Builder<'a> {
         field: Ustr,
         cname: Ustr,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let present = self.emit_cur(Inst::Field {
-            base: parent,
-            field,
-        });
+        let present = self.read_field(parent, field);
         let result = self.f.new_cell(None);
         let nil_bb = self.f.new_block();
         let val_bb = self.f.new_block();

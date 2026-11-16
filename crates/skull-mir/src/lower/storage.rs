@@ -50,24 +50,15 @@ impl<'a> Builder<'a> {
         // dotted leaf path, so the emitted table is the same shape
         // `MakeVecColumns` writes for a literal.
         let mut fields = Vec::with_capacity(paths.len() + 2);
-        let len = self.emit_cur(Inst::Field {
-            base: vec,
-            field: crate::names::ustr("len"),
-        });
+        let len = self.read_field(vec, crate::names::ustr("len"));
         for path in paths {
-            let col = self.emit_cur(Inst::Field {
-                base: vec,
-                field: path,
-            });
+            let col = self.read_field(vec, path);
             let copied = self.call_spine("__rock_col_copy", vec![col, len])?;
             fields.push((path, copied));
         }
         fields.push((crate::names::ustr("len"), len));
         let old_header = self.column_header(vec);
-        let capacity = self.emit_cur(Inst::Field {
-            base: old_header,
-            field: crate::names::ustr("cap"),
-        });
+        let capacity = self.read_field(old_header, crate::names::ustr("cap"));
         let header = self.make_column_header(elem, capacity);
         fields.push((crate::names::ustr(VEC_COLUMN_HEADER_FIELD), header));
         Ok(ValueRepr::Scalar(self.emit_cur(Inst::MakeStruct {
@@ -82,21 +73,12 @@ impl<'a> Builder<'a> {
         elem: ColumnElem,
     ) -> Result<ValueRepr, CompilerError> {
         let stride = self.column_shape(elem)?.leaf_count();
-        let data = self.emit_cur(Inst::Field {
-            base: vec,
-            field: crate::names::ustr("_data"),
-        });
-        let len = self.emit_cur(Inst::Field {
-            base: vec,
-            field: crate::names::ustr("len"),
-        });
+        let data = self.read_field(vec, crate::names::ustr("_data"));
+        let len = self.read_field(vec, crate::names::ustr("len"));
         let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
         let copied = self.call_spine("__rock_stride_copy", vec![data, len, width])?;
         let old_header = self.column_header(vec);
-        let capacity = self.emit_cur(Inst::Field {
-            base: old_header,
-            field: crate::names::ustr("cap"),
-        });
+        let capacity = self.read_field(old_header, crate::names::ustr("cap"));
         let header = self.make_strided_header(elem, stride, capacity);
         Ok(ValueRepr::Scalar(self.emit_cur(Inst::MakeStruct {
             ty: Some(crate::names::ustr("Vec")),
@@ -134,10 +116,7 @@ impl<'a> Builder<'a> {
         let stride = shape.leaf_count();
         let raw = self.strided_stores_raw(elem);
         let slot = self.checked_column_index(vec, index);
-        let data = self.emit_cur(Inst::Field {
-            base: vec,
-            field: crate::names::ustr("_data"),
-        });
+        let data = self.read_field(vec, crate::names::ustr("_data"));
         range
             .map(|offset| {
                 let at = self.strided_slot_index(slot, stride, offset);
@@ -195,10 +174,7 @@ impl<'a> Builder<'a> {
         elem: ColumnElem,
     ) {
         let raw = self.strided_stores_raw(elem);
-        let data = self.emit_cur(Inst::Field {
-            base: vec,
-            field: crate::names::ustr("_data"),
-        });
+        let data = self.read_field(vec, crate::names::ustr("_data"));
         let compact = stride <= 12;
         let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
         let base = self.emit_cur(Inst::IntMul(row, width));
@@ -295,10 +271,7 @@ impl<'a> Builder<'a> {
         let shape = self.column_shape(elem)?;
         let stride = shape.leaf_count();
         let leaves = self.element_storage_leaves(bundle, &shape, stride, elem, "strided append")?;
-        let len = self.emit_cur(Inst::Field {
-            base: vec,
-            field: crate::names::ustr("len"),
-        });
+        let len = self.read_field(vec, crate::names::ustr("len"));
         if self.scx.target() == bone_core::hir::FnBackend::Lua {
             self.call_spine("__rock_stride_reserve", vec![vec, len])?;
         }
@@ -401,23 +374,14 @@ impl<'a> Builder<'a> {
                 let stride = self.column_shape(elem)?.leaf_count();
                 let vec = self.lower_expr(*recv)?;
                 let header = self.column_header(vec);
-                let reserved = self.emit_cur(Inst::Field {
-                    base: header,
-                    field: crate::names::ustr("cap"),
-                });
+                let reserved = self.read_field(header, crate::names::ustr("cap"));
                 let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
                 // A raw row may hold nil, so `#_data` is only some border.
                 let physical = if self.strided_stores_raw(elem) {
-                    let len = self.emit_cur(Inst::Field {
-                        base: vec,
-                        field: crate::names::ustr("len"),
-                    });
+                    let len = self.read_field(vec, crate::names::ustr("len"));
                     self.emit_cur(Inst::IntMul(len, width))
                 } else {
-                    let data = self.emit_cur(Inst::Field {
-                        base: vec,
-                        field: crate::names::ustr("_data"),
-                    });
+                    let data = self.read_field(vec, crate::names::ustr("_data"));
                     self.call_spine("table_len", vec![data])?
                 };
                 let value = ValueRepr::Scalar(
@@ -435,14 +399,8 @@ impl<'a> Builder<'a> {
                 let index = self.lower_expr(*index)?;
                 let bundle = self.lower_expr_repr(*value)?;
                 let leaves = self.repr_to_storage_leaves(&bundle, &shape, "strided insert")?;
-                let data = self.emit_cur(Inst::Field {
-                    base: vec,
-                    field: crate::names::ustr("_data"),
-                });
-                let len = self.emit_cur(Inst::Field {
-                    base: vec,
-                    field: crate::names::ustr("len"),
-                });
+                let data = self.read_field(vec, crate::names::ustr("_data"));
+                let len = self.read_field(vec, crate::names::ustr("len"));
                 let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
                 self.call_spine("__rock_stride_insert", vec![data, index, len, width])?;
                 // `index` is the Lua-style (1-based) position on both backends.
@@ -865,7 +823,7 @@ impl<'a> Builder<'a> {
         if let Some(v) = cache.get(&field) {
             return *v;
         }
-        let v = self.emit_cur(Inst::Field { base: buf, field });
+        let v = self.read_field(buf, field);
         cache.insert(field, v);
         v
     }
@@ -911,10 +869,7 @@ impl<'a> Builder<'a> {
         let leaves: Vec<Idx<Inst>> = column_leaf_paths(&shape)
             .into_iter()
             .map(|path| {
-                let col = self.emit_cur(Inst::Field {
-                    base: vec,
-                    field: path,
-                });
+                let col = self.read_field(vec, path);
                 self.emit_cur(Inst::Index {
                     base: col,
                     index: slot,
@@ -984,10 +939,7 @@ impl<'a> Builder<'a> {
         let slot = self.checked_column_index(vec, index);
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
         for path in column_leaf_paths(&shape) {
-            let col = self.emit_cur(Inst::Field {
-                base: vec,
-                field: path,
-            });
+            let col = self.read_field(vec, path);
             self.emit_cur(Inst::StoreIndex {
                 base: col,
                 index: slot,
@@ -1029,10 +981,7 @@ impl<'a> Builder<'a> {
         if !self.column_contains_references(elem) {
             return Ok(());
         }
-        let len = self.emit_cur(Inst::Field {
-            base: vec,
-            field: crate::names::ustr("len"),
-        });
+        let len = self.read_field(vec, crate::names::ustr("len"));
         let cell = self.f.new_cell(None);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
         self.store_cell(cell, zero);
@@ -1100,29 +1049,17 @@ impl<'a> Builder<'a> {
                 let shape = self.column_shape(elem)?;
                 let vec = self.lower_expr(*recv)?;
                 let header = self.column_header(vec);
-                let reserved = self.emit_cur(Inst::Field {
-                    base: header,
-                    field: crate::names::ustr("cap"),
-                });
+                let reserved = self.read_field(header, crate::names::ustr("cap"));
                 // Reference leaves can be nil even when the element is present.
                 let physical = if self.column_contains_references(elem) {
-                    self.emit_cur(Inst::Field {
-                        base: vec,
-                        field: crate::names::ustr("len"),
-                    })
+                    self.read_field(vec, crate::names::ustr("len"))
                 } else {
                     match column_leaf_paths(&shape).first() {
                         Some(path) => {
-                            let col = self.emit_cur(Inst::Field {
-                                base: vec,
-                                field: *path,
-                            });
+                            let col = self.read_field(vec, *path);
                             self.call_spine("table_len", vec![col])?
                         }
-                        None => self.emit_cur(Inst::Field {
-                            base: vec,
-                            field: crate::names::ustr("len"),
-                        }),
+                        None => self.read_field(vec, crate::names::ustr("len")),
                     }
                 };
                 let value = ValueRepr::Scalar(
@@ -1148,15 +1085,9 @@ impl<'a> Builder<'a> {
                         elem.name
                     )));
                 }
-                let len = self.emit_cur(Inst::Field {
-                    base: vec,
-                    field: crate::names::ustr("len"),
-                });
+                let len = self.read_field(vec, crate::names::ustr("len"));
                 for (path, leaf) in paths.into_iter().zip(leaves) {
-                    let col = self.emit_cur(Inst::Field {
-                        base: vec,
-                        field: path,
-                    });
+                    let col = self.read_field(vec, path);
                     self.call_spine("__rock_col_insert", vec![col, i, len, leaf])?;
                 }
                 let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)));
@@ -1248,10 +1179,7 @@ impl<'a> Builder<'a> {
     }
 
     pub(crate) fn column_header(&mut self, vec: Idx<Inst>) -> Idx<Inst> {
-        self.emit_cur(Inst::Field {
-            base: vec,
-            field: crate::names::ustr(VEC_COLUMN_HEADER_FIELD),
-        })
+        self.read_field(vec, crate::names::ustr(VEC_COLUMN_HEADER_FIELD))
     }
 
     pub(crate) fn empty_column_vec(
@@ -1438,10 +1366,7 @@ impl<'a> Builder<'a> {
             self.element_storage_leaves(bundle, &shape, paths.len(), elem, "column append")?;
         // `len` is shared by every column, so it advances ONCE. Bumping per
         // column would desync them.
-        let len = self.emit_cur(Inst::Field {
-            base: vec,
-            field: crate::names::ustr("len"),
-        });
+        let len = self.read_field(vec, crate::names::ustr("len"));
         let next = self.int_plus_one(len);
         // A column indexes the way its backend's `_data` does -- 1-based on
         // luajit, 0-based on JS -- so the appended slot is the NEW length on one
@@ -1654,10 +1579,7 @@ impl<'a> Builder<'a> {
                 ))
             })?;
         let raw = self.strided_stores_raw(elem);
-        let data = self.emit_cur(Inst::Field {
-            base: vec,
-            field: crate::names::ustr("_data"),
-        });
+        let data = self.read_field(vec, crate::names::ustr("_data"));
         for (offset, v) in offsets.into_iter().zip(leaves) {
             let v = if raw {
                 v
@@ -1712,10 +1634,7 @@ impl<'a> Builder<'a> {
             }
         };
         for (path, leaf) in paths.into_iter().zip(leaves) {
-            let col = self.emit_cur(Inst::Field {
-                base: vec,
-                field: path,
-            });
+            let col = self.read_field(vec, path);
             self.emit_cur(Inst::StoreIndex {
                 base: col,
                 index: slot,
@@ -1984,10 +1903,7 @@ impl<'a> Builder<'a> {
         leaves: Vec<Idx<Inst>>,
     ) {
         for (path, leaf) in paths.into_iter().zip(leaves) {
-            let col = self.emit_cur(Inst::Field {
-                base: vec,
-                field: path,
-            });
+            let col = self.read_field(vec, path);
             self.emit_cur(Inst::StoreIndex {
                 base: col,
                 index: slot,

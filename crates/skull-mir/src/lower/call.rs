@@ -1202,10 +1202,7 @@ impl<'a> Builder<'a> {
             && self.calls_stdlib_vec_fn(e, name, recv)
         {
             let base = self.lower_expr(recv)?;
-            let value = ValueRepr::Scalar(self.emit_cur(Inst::Field {
-                base,
-                field: crate::names::ustr("len"),
-            }));
+            let value = ValueRepr::Scalar(self.read_field(base, crate::names::ustr("len")));
             return self.value_bundle_for_expr(e, value);
         }
         // `xs.push(v)` / `vec_push(xs, v)` onto a COLUMN-stored Vec. The stdlib
@@ -1349,10 +1346,7 @@ impl<'a> Builder<'a> {
             if name.as_str() == "resume" && !arg_idxs.is_empty() {
                 if let Some(channel) = self.concrete_coroutine_channel(arg_idxs[0])? {
                     let recv = self.lower_expr(arg_idxs[0])?;
-                    let advance = self.emit_cur(Inst::Field {
-                        base: recv,
-                        field: crate::names::ustr("__advance"),
-                    });
+                    let advance = self.read_field(recv, crate::names::ustr("__advance"));
                     let mut cargs: Vec<Idx<Inst>> = vec![recv];
                     if let Some(&a) = arg_idxs.get(1) {
                         cargs.push(self.lower_expr(a)?);
@@ -1413,10 +1407,7 @@ impl<'a> Builder<'a> {
                 return Err(self.gap_here("fn-field call has no receiver"));
             };
             let receiver = self.lower_expr(receiver_arg)?;
-            let fieldv = self.emit_cur(Inst::Field {
-                base: receiver,
-                field,
-            });
+            let fieldv = self.read_field(receiver, field);
             let field_ty = self
                 .inf
                 .and_then(|inf| inf.fn_field_call_types.get(&e))
@@ -3283,10 +3274,7 @@ impl<'a> Builder<'a> {
                         cur = *inst;
                         continue;
                     }
-                    cur = self.emit_cur(Inst::Field {
-                        base: cur,
-                        field: path[depth - 1],
-                    });
+                    cur = self.read_field(cur, path[depth - 1]);
                     if depth < path.len() {
                         loaded.push((prefix.to_vec(), cur));
                     }
@@ -3308,12 +3296,7 @@ impl<'a> Builder<'a> {
                 .into_iter()
                 .skip(range.start)
                 .take(range.len())
-                .map(|path| {
-                    self.emit_cur(Inst::Field {
-                        base: v,
-                        field: path,
-                    })
-                })
+                .map(|path| self.read_field(v, path))
                 .collect());
         }
         // A GC-table box keys an inline child's leaves by dotted path: the
@@ -3344,17 +3327,11 @@ impl<'a> Builder<'a> {
                     .skip(child_range.start)
                     .take(child_range.len())
                 {
-                    out.push(self.emit_cur(Inst::Field {
-                        base: v,
-                        field: key,
-                    }));
+                    out.push(self.read_field(v, key));
                 }
                 continue;
             }
-            let fv = self.emit_cur(Inst::Field {
-                base: v,
-                field: *fname,
-            });
+            let fv = self.read_field(v, *fname);
             match fs {
                 FieldShape::Prim => out.push(fv),
                 FieldShape::Nested(sub) if sub.nullable => {
@@ -4006,22 +3983,14 @@ impl<'a> Builder<'a> {
             let leaves: Vec<Idx<Inst>> = field
                 .keys()
                 .into_iter()
-                .map(|(key, _)| {
-                    self.emit_cur(Inst::Field {
-                        base: v,
-                        field: key,
-                    })
-                })
+                .map(|(key, _)| self.read_field(v, key))
                 .collect();
             return Ok(match fs {
                 FieldShape::Prim => ValueRepr::Scalar(leaves[0]),
                 FieldShape::Nested(sub) => self.rebuild_from_leaves(sub, &leaves, &mut 0),
             });
         }
-        let fv = self.emit_cur(Inst::Field {
-            base: v,
-            field: *fname,
-        });
+        let fv = self.read_field(v, *fname);
         Ok(match fs {
             FieldShape::Prim => {
                 if let Some(ty) = self.opaque_value_child(shape.name, owner_ty, *fname)? {

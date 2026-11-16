@@ -1177,11 +1177,11 @@ impl<'a> Builder<'a> {
         let mut levels = vec![self.emit_cur(Inst::Load(cell))];
         for &(_, field) in &path[..path.len() - 1] {
             let base = *levels.last().expect("root level");
-            levels.push(self.emit_cur(Inst::Field { base, field }));
+            levels.push(self.read_field(base, field));
         }
         let (_, last) = path[path.len() - 1];
         let base = *levels.last().expect("root level");
-        let old = self.emit_cur(Inst::Field { base, field: last });
+        let old = self.read_field(base, last);
         let new = update(self, old)?;
         let mut value = new;
         for (&(name, field), &base) in path.iter().zip(&levels).rev() {
@@ -1192,7 +1192,7 @@ impl<'a> Builder<'a> {
                     ValueRepr::Scalar(if f == field {
                         value
                     } else {
-                        self.emit_cur(Inst::Field { base, field: f })
+                        self.read_field(base, f)
                     })
                 })
                 .collect();
@@ -1332,10 +1332,7 @@ impl<'a> Builder<'a> {
             {
                 let (pbase, key) = self.physical_field(base, field)?;
                 let b = self.lower_place_base(pbase)?;
-                Ok(self.emit_cur(Inst::Field {
-                    base: b,
-                    field: key,
-                }))
+                Ok(self.read_field(b, key))
             }
             // A call returning a VALUE is not storage: the rvalue lowering packs a
             // fresh box, so the store lands on a temporary and emits
@@ -1399,7 +1396,7 @@ impl<'a> Builder<'a> {
                 let present = self.f.new_block();
                 self.branch_on_nil(recv, absent_join, present);
                 self.cur = present;
-                Ok(self.emit_cur(Inst::Field { base: recv, field }))
+                Ok(self.read_field(recv, field))
             }
             Expr::FieldAccess { base, field }
                 if self.swizzle_of(base, field).is_none()
@@ -1409,7 +1406,7 @@ impl<'a> Builder<'a> {
             {
                 let (pbase, key) = self.physical_field(base, field)?;
                 let base = self.lower_guarded_place_base(pbase, absent_join)?;
-                Ok(self.emit_cur(Inst::Field { base, field: key }))
+                Ok(self.read_field(base, key))
             }
             _ => self.lower_place_base(e),
         }
@@ -1445,10 +1442,7 @@ impl<'a> Builder<'a> {
             }
         };
         let old = match owner {
-            Owner::Field(b, key) => self.emit_cur(Inst::Field {
-                base: b,
-                field: key,
-            }),
+            Owner::Field(b, key) => self.read_field(b, key),
             Owner::Global(name) => self.emit_cur(Inst::Global(name)),
         };
         let key = self.emit_cur(Inst::Const(Lit::Str(field)));
@@ -1732,20 +1726,14 @@ impl<'a> Builder<'a> {
                                 leaves.len()
                             )));
                         }
-                        let child = self.emit_cur(Inst::Field {
-                            base: b,
-                            field: key,
-                        });
+                        let child = self.read_field(b, key);
                         for (path, leaf) in paths.into_iter().zip(leaves) {
                             let (last, walk) = path.split_last().ok_or_else(|| {
                                 self.gap_here(format!("`{cname}` has an empty leaf path"))
                             })?;
                             let mut at = child;
                             for seg in walk {
-                                at = self.emit_cur(Inst::Field {
-                                    base: at,
-                                    field: *seg,
-                                });
+                                at = self.read_field(at, *seg);
                             }
                             self.emit_cur(Inst::StoreField {
                                 base: at,
@@ -1920,7 +1908,7 @@ impl<'a> Builder<'a> {
                 let store_bb = self.f.new_block();
                 self.branch_on_nil(recv, join, store_bb);
                 self.cur = store_bb;
-                let cur = self.emit_cur(Inst::Field { base: recv, field });
+                let cur = self.read_field(recv, field);
                 let new_v = combine(self, cur)?;
                 self.emit_cur(Inst::StoreField {
                     base: recv,
@@ -2103,10 +2091,7 @@ impl<'a> Builder<'a> {
                 }
                 let (pbase, key) = self.physical_field(base, field)?;
                 let b = self.lower_place_base(pbase)?;
-                let old = self.emit_cur(Inst::Field {
-                    base: b,
-                    field: key,
-                });
+                let old = self.read_field(b, key);
                 let new = update(self, old)?;
                 self.emit_cur(Inst::StoreField {
                     base: b,
@@ -2150,7 +2135,7 @@ impl<'a> Builder<'a> {
         if let Some(field) = self.fn_field_of_call(e) {
             // `recv?.field(args)` on a fn-typed FIELD: nil-guarded indirect call
             // `(recv.field)(args)` — the field IS the callee, no receiver arg.
-            let fieldv = self.emit_cur(Inst::Field { base: recv, field });
+            let fieldv = self.read_field(recv, field);
             let call_args: Vec<Idx<Expr>> = args.into_iter().collect();
             let field_ty = self
                 .inf
@@ -2237,10 +2222,7 @@ impl<'a> Builder<'a> {
         {
             let (owner, slot) = self.physical_field(owner, slot)?;
             let owner = self.lower_expr(owner)?;
-            let value = self.emit_cur(Inst::Field {
-                base: owner,
-                field: slot,
-            });
+            let value = self.read_field(owner, slot);
             return Ok(SafeNavRecv::Boxed(value));
         }
         self.lower_safe_nav_receiver(base)
@@ -2423,7 +2405,7 @@ impl<'a> Builder<'a> {
                 // `o?.p` reads a value field whole out of a mutable place, so
                 // it copies exactly as `o.p` does.
                 None => {
-                    let fv = self.emit_cur(Inst::Field { base: bv, field });
+                    let fv = self.read_field(bv, field);
                     let copy_name = match self.value_struct_name_of(e) {
                         Some(name) if self.is_mutable_place(base)? => Some(name),
                         _ => None,
@@ -2508,10 +2490,7 @@ impl<'a> Builder<'a> {
                 // A nullable child carries presence in the field's own undotted
                 // key; the Group takes it rather than gating the read, so an
                 // absent child's leaves are nil and consumers branch on presence.
-                let present = s.emit_cur(Inst::Field {
-                    base: parent,
-                    field: key,
-                });
+                let present = s.read_field(parent, key);
                 if let ValueRepr::Group { present: p, .. } = &mut g {
                     *p = Some(present);
                 }
@@ -2793,7 +2772,7 @@ impl<'a> Builder<'a> {
                         .struct_field_names(*name)
                         .ok_or_else(|| gap("spread of a non-struct nominal type"))?;
                     for field in fields {
-                        let value = self.emit_cur(Inst::Field { base: v, field });
+                        let value = self.read_field(v, field);
                         let fty = self.struct_field_mono_ty(*name, field, Some(inner))?;
                         let value = self.copied_value_repr(&fty, value)?;
                         self.append_spread_value(arr, value, dest)?;

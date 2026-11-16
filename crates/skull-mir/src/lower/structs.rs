@@ -118,17 +118,11 @@ impl<'a> Builder<'a> {
                             Some(bi) => {
                                 for k in self.embed_leaf_paths(cname)? {
                                     let key = crate::names::ustr(&format!("{fname}.{k}"));
-                                    let v = self.emit_cur(Inst::Field {
-                                        base: bi,
-                                        field: key,
-                                    });
+                                    let v = self.read_field(bi, key);
                                     fs.push((key, v));
                                 }
                                 if nullable {
-                                    let p = self.emit_cur(Inst::Field {
-                                        base: bi,
-                                        field: fname,
-                                    });
+                                    let p = self.read_field(bi, fname);
                                     fs.push((fname, p));
                                 }
                             }
@@ -156,10 +150,7 @@ impl<'a> Builder<'a> {
                         let v = match base_inst {
                             // The base keeps its own value fields.
                             Some(bi) => {
-                                let v = self.emit_cur(Inst::Field {
-                                    base: bi,
-                                    field: fname,
-                                });
+                                let v = self.read_field(bi, fname);
                                 match self.concrete_struct_field_ty(e, fname) {
                                     Some(ty) => self.copied_value_box(ty, v)?,
                                     None => v,
@@ -1150,10 +1141,7 @@ impl<'a> Builder<'a> {
             GlobalUniformSource::Boxed { boxed, paths } => {
                 let mut v = *boxed;
                 for field in &paths[i] {
-                    v = self.emit_cur(Inst::Field {
-                        base: v,
-                        field: *field,
-                    });
+                    v = self.read_field(v, *field);
                 }
                 v
             }
@@ -1436,12 +1424,7 @@ impl<'a> Builder<'a> {
         let comps = ["x", "y", "z", "w"];
         let parts: Vec<ValueRepr> = idxs
             .iter()
-            .map(|&i| {
-                ValueRepr::Scalar(self.emit_cur(Inst::Field {
-                    base: bv,
-                    field: crate::names::ustr(comps[i]),
-                }))
-            })
+            .map(|&i| ValueRepr::Scalar(self.read_field(bv, crate::names::ustr(comps[i]))))
             .collect();
         swizzle_group(parts)
     }

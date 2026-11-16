@@ -505,10 +505,7 @@ impl<'a> Builder<'a> {
         Ok(match (base_repr, base_boxed) {
             // The base keeps its own value fields.
             (Some(_), Some(bi)) => {
-                let v = self.emit_cur(Inst::Field {
-                    base: bi,
-                    field: fname,
-                });
+                let v = self.read_field(bi, fname);
                 let ty = self.struct_field_mono_ty(name, fname, origin)?;
                 self.copied_value_repr(&ty, v)?
             }

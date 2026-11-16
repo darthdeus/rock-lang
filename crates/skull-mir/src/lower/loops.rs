@@ -556,33 +556,15 @@ impl<'a> Builder<'a> {
         // to an empty store, which the `i < n` header exits immediately.
         // This counted template consumes the collection, not its inferred iter(arg) wrapper.
         let arena = self.lower_iterable_collection(iter)?;
-        let scene_id = self.emit_cur(Inst::Field {
-            base: arena,
-            field: crate::names::ustr("_scene_id"),
-        });
-        let arena_id = self.emit_cur(Inst::Field {
-            base: arena,
-            field: crate::names::ustr("_arena_id"),
-        });
+        let scene_id = self.read_field(arena, crate::names::ustr("_scene_id"));
+        let arena_id = self.read_field(arena, crate::names::ustr("_arena_id"));
         let store = self.with_site_expr(iter, |b| {
             b.call_spine("__arena_store_or_empty", vec![scene_id, arena_id])
         })?;
-        let occupied = self.emit_cur(Inst::Field {
-            base: store,
-            field: crate::names::ustr("occupied"),
-        });
-        let generations = entity_used.then(|| {
-            self.emit_cur(Inst::Field {
-                base: store,
-                field: crate::names::ustr("generations"),
-            })
-        });
-        let data = data_used.then(|| {
-            self.emit_cur(Inst::Field {
-                base: store,
-                field: crate::names::ustr("data"),
-            })
-        });
+        let occupied = self.read_field(store, crate::names::ustr("occupied"));
+        let generations =
+            entity_used.then(|| self.read_field(store, crate::names::ustr("generations")));
+        let data = data_used.then(|| self.read_field(store, crate::names::ustr("data")));
         let occupied_kind = self.boxed_vec_kind(Some(&MonoTy::Bool));
         let n = self.emit_cur(Inst::Len {
             base: occupied,
@@ -768,10 +750,7 @@ impl<'a> Builder<'a> {
         let col = self.map_column_value_of(iter)?;
         let m = self.lower_expr(iter)?;
         let table = match col {
-            Some(_) => self.emit_cur(Inst::Field {
-                base: m,
-                field: crate::names::ustr("spine"),
-            }),
+            Some(_) => self.read_field(m, crate::names::ustr("spine")),
             None => m,
         };
         let key_cell = self.f.new_cell(None);
@@ -1099,14 +1078,8 @@ impl<'a> Builder<'a> {
         if self.expr_is_flat_vec(coll) {
             let kind = self.nb_kind(coll)?;
             let fv = self.lower_expr(coll)?;
-            let buf = self.emit_cur(Inst::Field {
-                base: fv,
-                field: crate::names::ustr("buf"),
-            });
-            let len = self.emit_cur(Inst::Field {
-                base: fv,
-                field: crate::names::ustr("len"),
-            });
+            let buf = self.read_field(fv, crate::names::ustr("buf"));
+            let len = self.read_field(fv, crate::names::ustr("len"));
             return Ok((kind, buf, len));
         }
         let kind = self.coll_kind(coll)?;

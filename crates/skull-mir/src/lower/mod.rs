@@ -2507,6 +2507,10 @@ impl<'a> Builder<'a> {
         cond
     }
 
+    fn read_field(&mut self, base: Idx<Inst>, field: Ustr) -> Idx<Inst> {
+        self.emit_cur(Inst::Field { base, field })
+    }
+
     fn store_cell(&mut self, cell: Idx<Cell>, value: Idx<Inst>) -> Idx<Inst> {
         self.emit_cur(Inst::Store { cell, value })
     }
