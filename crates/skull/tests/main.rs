@@ -8,6 +8,7 @@ mod compiler_admission;
 mod constructor_bounds;
 mod private_records;
 mod private_vectors;
+mod sort_key;
 mod support;
 
 mod copy_code_refs;

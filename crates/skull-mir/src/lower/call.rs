@@ -1867,6 +1867,9 @@ impl<'a> Builder<'a> {
                 })
                 .collect();
         }
+        if let Some(args) = self.sort_call_args(e, func, arg_idxs)? {
+            return dc.plan.transport_arguments(args);
+        }
         if dc.plan.uses_scalar_abi() {
             // A boxed argument the callee does not read is still rejected, so
             // the diagnostic does not depend on the callee's body.
@@ -2156,6 +2159,10 @@ impl<'a> Builder<'a> {
     ) -> Result<ValueBundle, CompilerError> {
         let dc = self.plan_direct_call(e)?;
         let value = (|| -> Result<ValueRepr, CompilerError> {
+            if let Some(args) = self.sort_ufcs_args(e, func, recv, arg_idxs)? {
+                let args = dc.plan.transport_arguments(args)?;
+                return self.emit_direct_call(e, func, args, None, None, &dc);
+            }
             self.reject_flat_return_outside_direct_call(e, &dc.callee_inst)?;
             if !dc.plan.uses_scalar_abi() {
                 let mut argv = vec![recv];

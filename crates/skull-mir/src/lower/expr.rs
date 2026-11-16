@@ -273,6 +273,148 @@ impl<'a> Builder<'a> {
         Ok(v)
     }
 
+    pub(crate) fn lower_lambda_with_plan(
+        &mut self,
+        e: Idx<Expr>,
+        params: IdxRange<BindingInfo>,
+        body: Idx<Expr>,
+        lam_plan: FunctionRepPlan,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let outer_span = self.cur_span.replace(self.body.expr_spans[e]);
+        let outer_expr = self.cur_expr.replace(e);
+        let result = (|| -> Result<Idx<Inst>, CompilerError> {
+            // A `nobox` param arrives as leaves, so the lambda binds a Group
+            // over N cells instead of one -- the same shape a scalar-ABI fn
+            // gives its params. The lambda and call site read the same
+            // function-value representation plan.
+            // Param shapes come from the param BINDINGS, which is where a
+            // lambda's param types actually land -- its own `fn(..) -> ..`
+            // node can still hold unresolved vars at this point, while the
+            // bindings carry what inference unified them WITH, i.e. the same
+            // types the call site reads off the fn type.
+            let param_slots: Vec<RetSlot> = params
+                .into_iter()
+                .enumerate()
+                .map(|(i, _)| {
+                    let id = lam_plan.params().get(i).ok_or_else(|| {
+                        self.gap_here(format!("lambda ABI has no parameter slot {i}"))
+                    })?;
+                    Ok(self.scx.rep_arena().ret_slot(*id))
+                })
+                .collect::<Result<_, CompilerError>>()?;
+            // A lambda's params land in the SAME cell namespace as the
+            // enclosing body's, so it collects its own list off `f.params`
+            // rather than owning it -- but the binding rule itself is
+            // `bind_param_slot`, shared with the other two definition forms.
+            let before = self.f.params.len();
+            for (i, pb) in params.into_iter().enumerate() {
+                let pname = self.body.binding_arena[pb].name;
+                let slot = param_slots.get(i).cloned().ok_or_else(|| {
+                    self.gap_here(format!("lambda ABI has no collected parameter slot {i}"))
+                })?;
+                self.bind_param_slot(pb, pname, &slot)?;
+            }
+            let param_cells: Vec<Idx<Cell>> = self.f.params.split_off(before);
+            let entry = self.f.new_block();
+            let saved = self.cur;
+            self.cur = entry;
+            let lambda_params: Vec<Idx<BindingInfo>> = params.into_iter().collect();
+            self.copy_ref_borrowed_params(&lambda_params)?;
+            // The lambda body returns via the LAMBDA's ABI, not the enclosing
+            // fn's: a bone-desugared `() => e` body is a block with a `return e`
+            // statement, so the return machinery (`return_leaves`) must see the
+            // lambda's own return shape. A tuple-returning lambda splats N values
+            // so an indirect call site can capture them (multi-return ABI); the
+            // enclosing value-struct result never applies (a lambda is
+            // called through a boxed fn-value). Save/restore around the body.
+            let saved_ret_rep = self.ret_rep.take();
+            let saved_flat_ret = self.flat_ret.take();
+            // Isolate the defer state, like `lower_nested_fn`. A lambda body
+            // is its OWN fn scope: bone desugars `() => e` to a block with
+            // `return e`, so the body's return runs `run_all_defers` -- which
+            // must see only the lambda's own pending defers, never the
+            // enclosing fn's. Leaving the stack shared spliced every pending
+            // enclosing defer into the lambda body (it then ran on every call)
+            // and, when the defer body was what created the lambda, recursed
+            // forever (run_all_defers re-splices the still-pending defer ->
+            // re-lowers the lambda). `in_defer_body` resets to false: the
+            // lambda body is not the defer body's code (a `yield`/`await`
+            // there is already rejected by bone as yield-in-plain-lambda, so
+            // the reset unmasks no diagnostic -- it just makes the flag honest).
+            let saved_defers = std::mem::take(&mut self.defers);
+            let saved_in_defer = std::mem::replace(&mut self.in_defer_body, false);
+            // A lambda body is emitted as its own hoisted fn, so its
+            // defers unwind on error wherever the lambda was created,
+            // including inside a co fn.
+            let saved_mode = std::mem::replace(
+                &mut self.defer_mode,
+                super::stmt::DeferMode::for_body(false, self.call_scx.target),
+            );
+            // Box value args (see field docs). A lambda body IS spliced into
+            // now -- `convert_closures` splits it out and the inliner runs
+            // over the standalone body -- but that happens after lowering, so
+            // this decision cannot see the specialized callee it would need.
+            self.ret_rep = lam_plan.result();
+            let leaves = if self.ret_rep.is_none() {
+                self.lower_stmt_expr(body)?;
+                Vec::new()
+            } else if self.result_shape().is_some() {
+                let r = self.lower_expr_repr(body)?;
+                if self.is_open() {
+                    self.repr_to_leaves_bundle(&r)?
+                } else {
+                    Vec::new()
+                }
+            } else {
+                match self.result_tuple() {
+                    // A splatting tuple return needs the body as a repr, so a
+                    // `nobox` element reaches the wire as leaves.
+                    Some(shape) if shape.splats() => {
+                        let r = self.lower_expr_repr(body)?;
+                        if self.is_open() {
+                            self.tuple_repr_to_slots(r.into_value(), &shape)?
+                        } else {
+                            Vec::new()
+                        }
+                    }
+                    Some(shape) => {
+                        let v = self.lower_expr(body)?;
+                        if self.is_open() {
+                            self.tuple_return_operands(v, shape.slots.len())
+                        } else {
+                            Vec::new()
+                        }
+                    }
+                    None => vec![self.lower_expr(body)?],
+                }
+            };
+            if self.is_open() {
+                self.f.set_term(self.cur, Term::Return(leaves));
+            }
+            self.defers = saved_defers;
+            self.in_defer_body = saved_in_defer;
+            self.defer_mode = saved_mode;
+            self.ret_rep = saved_ret_rep;
+            self.flat_ret = saved_flat_ret;
+            self.cur = saved;
+            let id = self.emit_cur(Inst::Lambda {
+                params: param_cells,
+                entry,
+            });
+            self.f
+                .lambda_abi_fingerprints
+                .insert(id, lam_plan.logical_fingerprint(self.scx.rep_arena()));
+            self.f
+                .lambda_abi_representations
+                .insert(id, lam_plan.clone());
+            Ok(id)
+        })()
+        .map_err(|error| self.located(error));
+        self.cur_span = outer_span;
+        self.cur_expr = outer_expr;
+        result
+    }
+
     fn lower_expr_inner(
         &mut self,
         e: Idx<Expr>,
@@ -658,10 +800,6 @@ impl<'a> Builder<'a> {
             // Captured outer vars are the enclosing cells (Lua upvalues); the
             // closure's params are fresh cells (its Lua arg list).
             Expr::Lambda { params, body } => {
-                // A `nobox` param arrives as leaves, so the lambda binds a Group
-                // over N cells instead of one -- the same shape a scalar-ABI fn
-                // gives its params. The lambda and call site read the same
-                // function-value representation plan.
                 let lam_ty = self
                     .inf
                     .and_then(|inf| inf.expr_types.get(e))
@@ -670,127 +808,7 @@ impl<'a> Builder<'a> {
                 let lam_plan = self
                     .fn_value_rep_plan(lam_ty)?
                     .ok_or_else(|| gap("lambda does not have a function representation"))?;
-                // Param shapes come from the param BINDINGS, which is where a
-                // lambda's param types actually land -- its own `fn(..) -> ..`
-                // node can still hold unresolved vars at this point, while the
-                // bindings carry what inference unified them WITH, i.e. the same
-                // types the call site reads off the fn type.
-                let param_slots: Vec<RetSlot> = params
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, _)| {
-                        let id = lam_plan.params().get(i).ok_or_else(|| {
-                            self.gap_here(format!("lambda ABI has no parameter slot {i}"))
-                        })?;
-                        Ok(self.scx.rep_arena().ret_slot(*id))
-                    })
-                    .collect::<Result<_, CompilerError>>()?;
-                // A lambda's params land in the SAME cell namespace as the
-                // enclosing body's, so it collects its own list off `f.params`
-                // rather than owning it -- but the binding rule itself is
-                // `bind_param_slot`, shared with the other two definition forms.
-                let before = self.f.params.len();
-                for (i, pb) in params.into_iter().enumerate() {
-                    let pname = self.body.binding_arena[pb].name;
-                    let slot = param_slots.get(i).cloned().ok_or_else(|| {
-                        self.gap_here(format!("lambda ABI has no collected parameter slot {i}"))
-                    })?;
-                    self.bind_param_slot(pb, pname, &slot)?;
-                }
-                let param_cells: Vec<Idx<Cell>> = self.f.params.split_off(before);
-                let entry = self.f.new_block();
-                let saved = self.cur;
-                self.cur = entry;
-                let lambda_params: Vec<Idx<BindingInfo>> = params.into_iter().collect();
-                self.copy_ref_borrowed_params(&lambda_params)?;
-                // The lambda body returns via the LAMBDA's ABI, not the enclosing
-                // fn's: a bone-desugared `() => e` body is a block with a `return e`
-                // statement, so the return machinery (`return_leaves`) must see the
-                // lambda's own return shape. A tuple-returning lambda splats N values
-                // so an indirect call site can capture them (multi-return ABI); the
-                // enclosing value-struct result never applies (a lambda is
-                // called through a boxed fn-value). Save/restore around the body.
-                let saved_ret_rep = self.ret_rep.take();
-                let saved_flat_ret = self.flat_ret.take();
-                // Isolate the defer state, like `lower_nested_fn`. A lambda body
-                // is its OWN fn scope: bone desugars `() => e` to a block with
-                // `return e`, so the body's return runs `run_all_defers` -- which
-                // must see only the lambda's own pending defers, never the
-                // enclosing fn's. Leaving the stack shared spliced every pending
-                // enclosing defer into the lambda body (it then ran on every call)
-                // and, when the defer body was what created the lambda, recursed
-                // forever (run_all_defers re-splices the still-pending defer ->
-                // re-lowers the lambda). `in_defer_body` resets to false: the
-                // lambda body is not the defer body's code (a `yield`/`await`
-                // there is already rejected by bone as yield-in-plain-lambda, so
-                // the reset unmasks no diagnostic -- it just makes the flag honest).
-                let saved_defers = std::mem::take(&mut self.defers);
-                let saved_in_defer = std::mem::replace(&mut self.in_defer_body, false);
-                // A lambda body is emitted as its own hoisted fn, so its
-                // defers unwind on error wherever the lambda was created,
-                // including inside a co fn.
-                let saved_mode = std::mem::replace(
-                    &mut self.defer_mode,
-                    super::stmt::DeferMode::for_body(false, self.call_scx.target),
-                );
-                // Box value args (see field docs). A lambda body IS spliced into
-                // now -- `convert_closures` splits it out and the inliner runs
-                // over the standalone body -- but that happens after lowering, so
-                // this decision cannot see the specialized callee it would need.
-                self.ret_rep = lam_plan.result();
-                let leaves = if self.ret_rep.is_none() {
-                    self.lower_stmt_expr(body)?;
-                    Vec::new()
-                } else if self.result_shape().is_some() {
-                    let r = self.lower_expr_repr(body)?;
-                    if self.is_open() {
-                        self.repr_to_leaves_bundle(&r)?
-                    } else {
-                        Vec::new()
-                    }
-                } else {
-                    match self.result_tuple() {
-                        // A splatting tuple return needs the body as a repr, so a
-                        // `nobox` element reaches the wire as leaves.
-                        Some(shape) if shape.splats() => {
-                            let r = self.lower_expr_repr(body)?;
-                            if self.is_open() {
-                                self.tuple_repr_to_slots(r.into_value(), &shape)?
-                            } else {
-                                Vec::new()
-                            }
-                        }
-                        Some(shape) => {
-                            let v = self.lower_expr(body)?;
-                            if self.is_open() {
-                                self.tuple_return_operands(v, shape.slots.len())
-                            } else {
-                                Vec::new()
-                            }
-                        }
-                        None => vec![self.lower_expr(body)?],
-                    }
-                };
-                if self.is_open() {
-                    self.f.set_term(self.cur, Term::Return(leaves));
-                }
-                self.defers = saved_defers;
-                self.in_defer_body = saved_in_defer;
-                self.defer_mode = saved_mode;
-                self.ret_rep = saved_ret_rep;
-                self.flat_ret = saved_flat_ret;
-                self.cur = saved;
-                let id = self.emit_cur(Inst::Lambda {
-                    params: param_cells,
-                    entry,
-                });
-                self.f
-                    .lambda_abi_fingerprints
-                    .insert(id, lam_plan.logical_fingerprint(self.scx.rep_arena()));
-                self.f
-                    .lambda_abi_representations
-                    .insert(id, lam_plan.clone());
-                Ok(id)
+                self.lower_lambda_with_plan(e, params, body, lam_plan)
             }
 
             Expr::As {

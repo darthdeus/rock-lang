@@ -7,6 +7,174 @@ use crate::lower::shape::mono_value_shape;
 use crate::monoty::MonoTy;
 
 impl<'a> Builder<'a> {
+    fn is_stdlib_sort(&self, func: FuncRef) -> bool {
+        let module = self.ws.module(func.module);
+        let decl = &module.functions[func.func];
+        decl.name.as_str() == "sort"
+            && bone_core::modules::is_stdlib_module_file(module.file.as_str())
+            && decl.param_decls.len() == 2
+    }
+
+    pub(crate) fn sort_ufcs_args(
+        &mut self,
+        e: Idx<Expr>,
+        func: FuncRef,
+        recv: Idx<Inst>,
+        args: &[Idx<Expr>],
+    ) -> Result<Option<Vec<Idx<Inst>>>, CompilerError> {
+        let [key] = args else { return Ok(None) };
+        if !self.is_stdlib_sort(func) || !self.sort_key_is_structured(*key)? {
+            return Ok(None);
+        }
+        self.validate_sort_key(e, &self.sort_key_ty(*key)?)?;
+        Ok(Some(vec![recv, self.lower_sort_key(*key)?]))
+    }
+
+    /// Only the stdlib sort consumes this private callback ABI. Other uses of
+    /// the same function value keep their ordinary calling convention.
+    pub(crate) fn sort_call_args(
+        &mut self,
+        e: Idx<Expr>,
+        func: FuncRef,
+        args: &[Idx<Expr>],
+    ) -> Result<Option<Vec<Idx<Inst>>>, CompilerError> {
+        if !self.is_stdlib_sort(func) || args.len() != 2 {
+            return Ok(None);
+        }
+        let decl = &self.ws.module(func.module).functions[func.func];
+        let mut positions = [0, 1];
+        for (i, arg) in args.iter().enumerate() {
+            if let Some(name) = self.body.arg_names.get(arg) {
+                let Some(pos) = decl.param_decls.iter().position(|p| p.name == *name) else {
+                    return Ok(None);
+                };
+                positions[i] = pos;
+            }
+        }
+        let recv = args[positions.iter().position(|p| *p == 0).unwrap_or(0)];
+        let key = args[positions.iter().position(|p| *p == 1).unwrap_or(1)];
+        if !matches!(
+            self.concrete_expr_ty(recv),
+            Some(MonoTy::App {
+                ctor: MonoCtor::Array,
+                ..
+            })
+        ) || !self.sort_key_is_structured(key)?
+        {
+            return Ok(None);
+        }
+        let ty = self.sort_key_ty(key)?;
+        self.validate_sort_key(e, &ty)?;
+        let mut values = vec![None; 2];
+        for (arg, pos) in args.iter().zip(positions) {
+            values[pos] = Some(if pos == 1 {
+                self.lower_sort_key(*arg)?
+            } else {
+                self.lower_expr(*arg)?
+            });
+        }
+        Ok(Some(values.into_iter().flatten().collect()))
+    }
+
+    fn sort_key_plan(&self, key_fn: Idx<Expr>) -> Result<FunctionRepPlan, CompilerError> {
+        let ty = self
+            .concrete_expr_ty(key_fn)
+            .ok_or_else(|| self.gap_here("sort key function has no concrete type"))?;
+        if self.scx.values_first_class {
+            BackendFnAbiPlan::for_function_value(self.ws, self.call_scx, ty)
+        } else {
+            BackendFnAbiPlan::for_function_value_with_mode(self.ws, self.call_scx, ty, false)
+        }
+        .map_err(|error| self.rep_error(error))
+    }
+
+    fn lower_sort_key(&mut self, key: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
+        let plan = self.sort_key_plan(key)?;
+        if let Expr::Lambda { params, body } = self.body.expr_arena[key] {
+            return self.lower_lambda_with_plan(key, params, body, plan);
+        }
+        let callee = self.lower_expr(key)?;
+        let ty = self
+            .concrete_expr_ty(key)
+            .ok_or_else(|| self.gap_here("sort key function has no concrete type"))?;
+        let original = self
+            .fn_value_rep_plan_for_mono(ty)?
+            .ok_or_else(|| self.gap_here("sort key function has no ABI"))?;
+        if original == plan {
+            return Ok(callee);
+        }
+        // An existing function value may also be called elsewhere. Adapt its
+        // fixed ABI at the sort boundary rather than changing those calls.
+        let capture = self.fresh_cells(1)[0];
+        self.store_cell(capture, callee);
+        let saved = self.cur;
+        let entry = self.f.new_block();
+        self.cur = entry;
+        let callee = self.emit_cur(Inst::Load(capture));
+        let arena = self.scx.rep_arena();
+        let mut params = Vec::new();
+        let mut argv = Vec::new();
+        for (&source, &dest) in plan.params().iter().zip(original.params()) {
+            let source = arena.ret_slot(source);
+            let cells = self.fresh_cells(source.slot_count());
+            let loads = self.load_cells(&cells);
+            params.extend(cells);
+            let value = self.slot_repr(&source, &loads, &mut 0);
+            argv.extend(self.sort_slot_values(value, &arena.ret_slot(dest))?);
+        }
+        let result = original
+            .result()
+            .ok_or_else(|| self.gap_here("sort key has no result"))?;
+        let slot = arena.ret_slot(result);
+        let value = if slot.splats() {
+            let cells = self.fresh_cells(slot.slot_count());
+            let (call, loads) = self.call_value_multi(cells, callee, argv);
+            self.f.call_rep_plans.insert(call, original);
+            self.slot_repr(&slot, &loads, &mut 0)
+        } else {
+            let call = self.emit_cur(Inst::CallValue { callee, args: argv });
+            self.f.call_rep_plans.insert(call, original);
+            ValueRepr::Scalar(call)
+        };
+        let result = plan
+            .result()
+            .ok_or_else(|| self.gap_here("sort key has no result"))?;
+        let leaves = self.sort_slot_values(value, &arena.ret_slot(result))?;
+        self.f.set_term(self.cur, Term::Return(leaves));
+        self.cur = saved;
+        let lambda = self.emit_cur(Inst::Lambda { params, entry });
+        self.f
+            .lambda_abi_fingerprints
+            .insert(lambda, plan.logical_fingerprint(arena));
+        self.f.lambda_abi_representations.insert(lambda, plan);
+        Ok(lambda)
+    }
+
+    fn sort_slot_values(
+        &mut self,
+        value: ValueRepr,
+        slot: &RetSlot,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        match slot {
+            RetSlot::Opaque => Ok(vec![self.pack(value)?]),
+            RetSlot::Leaves(shape) => self.repr_to_leaves_shape(&value, shape),
+            RetSlot::Nested(shape) => self.tuple_repr_to_slots(value, shape),
+        }
+    }
+
+    fn validate_sort_key(&self, e: Idx<Expr>, ty: &MonoTy) -> Result<Vec<MonoTy>, CompilerError> {
+        self.sort_key_leaf_tys(ty).map_err(|reason| {
+            CompilerError::new_with_label(
+                self.body.expr_spans[e],
+                format!(
+                    "cannot sort by a key of type `{}`: {reason}; a key compares its \
+                     int, uint, float and string leaves in order",
+                    ty.render()
+                ),
+            )
+        })
+    }
+
     /// The key type `K` of a `fn(T) -> K` argument.
     fn sort_key_ty(&self, key_fn: Idx<Expr>) -> Result<MonoTy, CompilerError> {
         match self.concrete_expr_ty(key_fn) {
@@ -75,23 +243,22 @@ impl<'a> Builder<'a> {
             return Err(gap("`__sort_key_lt` expects three arguments"));
         };
         let ty = self.sort_key_ty(*key_fn)?;
-        let leaf_tys = self.sort_key_leaf_tys(&ty).map_err(|reason| {
-            CompilerError::new_with_label(
-                self.body.expr_spans[e],
-                format!(
-                    "cannot sort by a key of type `{}`: {reason}; a key compares its \
-                     int, uint, float and string leaves in order",
-                    ty.render()
-                ),
-            )
-        })?;
-        let fn_ty = *self
-            .inf
-            .and_then(|inf| inf.expr_types.get(*key_fn))
-            .ok_or_else(|| self.gap_here("sort key function has no type"))?;
-        let plan = self
-            .fn_value_rep_plan(fn_ty)?
-            .ok_or_else(|| self.gap_here("sort key function has no function ABI plan"))?;
+        let leaf_tys = match self.validate_sort_key(e, &ty) {
+            Ok(leaves) => leaves,
+            // Generic stdlib bodies lower independently of their callers. The
+            // sort boundary rejects this key at the user's call instead.
+            Err(_)
+                if bone_core::modules::is_stdlib_module_file(
+                    self.body.expr_spans[e].file.as_str(),
+                ) =>
+            {
+                return Ok(ValueRepr::Scalar(
+                    self.emit_cur(Inst::Const(Lit::Bool(false))),
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        let plan = self.sort_key_plan(*key_fn)?;
         let callee = self.lower_expr(*key_fn)?;
         let lhs = self.sort_key_leaves(&plan, callee, *a, &ty)?;
         let rhs = self.sort_key_leaves(&plan, callee, *b, &ty)?;
