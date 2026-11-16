@@ -26,7 +26,6 @@ fn assert_mentions(out: &Output, needle: &str) {
 fn plain_lsp_serve_answers_initialize_over_stdio() {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::process::Stdio;
-    use std::time::Duration;
     let root = tempfile::tempdir().unwrap();
     let child = rock(root.path())
         .args(["lsp", "serve"])
@@ -75,7 +74,7 @@ fn plain_lsp_serve_answers_initialize_over_stdio() {
         let _ = done.send(body);
     });
     let body = response
-        .recv_timeout(Duration::from_secs(30))
+        .recv_timeout(test_utils::HANG_BACKSTOP)
         .expect("server answered initialize")
         .expect("framed response");
     assert!(body.contains("\"id\":1"), "{body}");
@@ -496,7 +495,7 @@ fn plain_watch_resolves_project_outside_workspace() {
             .unwrap();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let stop = StopOnDrop(&mut child);
-            let deadline = Instant::now() + Duration::from_secs(20);
+            let deadline = Instant::now() + test_utils::HANG_BACKSTOP;
             loop {
                 let logs = std::fs::read_to_string(&log).unwrap();
                 if output.is_file() && logs.contains("watching . for changes") {
@@ -933,10 +932,10 @@ fn relocate(from: &str, exe: &Path) {
 
 /// Starts the relocated binary, retrying while the copy fallback's write fd is
 /// still held by a sibling test's forked child (see `relocate`). A retry spans
-/// one fork-to-exec hop; the deadline keeps a genuine failure reportable.
+/// one fork-to-exec hop; the shared hang backstop keeps a persistent race reportable.
 fn start_relocated(exe: &Path, root: &Path, args: &[&str]) -> Output {
     use bone_core::prelude::{Duration, Instant};
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + test_utils::HANG_BACKSTOP;
     loop {
         let started = Command::new(exe)
             .current_dir(root)

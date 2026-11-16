@@ -175,7 +175,7 @@ mod tests {
         let compiled = beside(
             move || {
                 compile_started
-                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .recv_timeout(test_utils::HANG_BACKSTOP)
                     .map_err(|_| anyhow::anyhow!("the compile waited for the preparation"))
             },
             || {

@@ -116,7 +116,7 @@ mod tests {
     fn output_larger_than_a_pipe_buffer_is_read_while_node_runs() {
         let run = super::run_node_code_with_timeout(
             "process.stdout.write('x'.repeat(1 << 20));",
-            std::time::Duration::from_secs(20),
+            test_utils::HANG_BACKSTOP,
         )
         .expect("node finishes once its output is drained");
         assert_eq!(run.stdout.len(), 1 << 20);
