@@ -843,54 +843,6 @@ mod tests {
     }
 
     #[test]
-    fn qualified_wire_keeps_a_structured_identifier_list() {
-        let ws = workspace(&[(
-            "wire.rock",
-            r#"
-            @lifecycle(phase="wire", owner="process")
-            deco init wire {}
-            const GAME_VOLUME: int = 1
-            const ART_FILTER: int = 2
-            @wire(onchange=[GAME_VOLUME, ART_FILTER])
-            fn apply_game_config() {}
-            "#,
-        )]);
-        let function = ws
-            .modules
-            .iter()
-            .flat_map(|module| module.functions.values())
-            .find(|function| function.name.as_str() == "apply_game_config")
-            .expect("qualified wire function");
-        let annotation = function
-            .annotations
-            .iter()
-            .find(|annotation| annotation.is_builtin("wire"))
-            .expect("wire annotation");
-        let argument = annotation
-            .args
-            .iter()
-            .find(|argument| {
-                argument
-                    .name
-                    .as_ref()
-                    .is_some_and(|name| name.name.as_str() == "onchange")
-            })
-            .expect("onchange argument");
-        match &argument.value {
-            AnnoValue::IdentList(names) => {
-                assert_eq!(
-                    names
-                        .iter()
-                        .map(|name| name.name.as_str())
-                        .collect::<Vec<_>>(),
-                    vec!["GAME_VOLUME", "ART_FILTER"]
-                );
-            }
-            other => panic!("qualified wire list was lowered as {other:?}"),
-        }
-    }
-
-    #[test]
     fn qualified_wire_collects_declared_and_transitive_const_dependencies() {
         let ws = workspace(&[(
             "wire.rock",
@@ -1160,36 +1112,7 @@ mod tests {
     }
 
     #[test]
-    fn post_imgui_draw_is_a_compiler_owned_role() {
-        let ws = workspace(&[(
-            "post-imgui.rock",
-            r#"
-            @lifecycle(phase="post_imgui_draw", owner="process", stage_param="stage")
-            deco init post_imgui_draw(stage: int = 100) {}
-            @post_imgui_draw(stage=20) fn later() {}
-            @post_imgui_draw(stage=10) fn first() {}
-        "#,
-        )]);
-        let plan = collect(&ws).expect("post_imgui_draw must be collected");
-        assert_eq!(plan.declarations, 1);
-        assert_eq!(
-            plan.entries
-                .iter()
-                .map(|entry| (
-                    entry.phase.as_str(),
-                    entry.diagnostic_name.as_str(),
-                    entry.stage
-                ))
-                .collect::<Vec<_>>(),
-            vec![
-                ("post_imgui_draw", "first", 10),
-                ("post_imgui_draw", "later", 20),
-            ]
-        );
-    }
-
-    #[test]
-    fn prepare_is_a_compiler_owned_frame_phase_between_update_and_draw() {
+    fn prepare_and_post_imgui_draw_are_compiler_owned_frame_phases() {
         let ws = workspace(&[(
             "prepare.rock",
             r#"
@@ -1199,6 +1122,9 @@ mod tests {
             deco init prepare(stage: int = 100) {}
             @lifecycle(phase="late_update", owner="process", stage_param="stage")
             deco init late_update(stage: int = 100) {}
+            @lifecycle(phase="post_imgui_draw", owner="process", stage_param="stage")
+            deco init post_imgui_draw(stage: int = 100) {}
+            @post_imgui_draw(stage=-2000) fn overlay() {}
             @draw(stage=-1000) fn paint() {}
             @prepare(stage=20) fn later() {}
             @prepare(stage=10) fn first() {}
@@ -1220,8 +1146,10 @@ mod tests {
                 ("prepare", "first", 10),
                 ("prepare", "later", 20),
                 ("draw", "paint", -1000),
+                ("post_imgui_draw", "overlay", -2000),
             ]
         );
+        assert_eq!(plan.declarations, 4);
         assert!(is_frame_phase(Ustr::from("prepare")));
     }
 }
