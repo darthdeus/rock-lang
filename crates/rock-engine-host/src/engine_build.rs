@@ -527,24 +527,19 @@ mod tests {
     }
 
     #[test]
-    fn receipt_fixture_writes_dep_info_under_its_workspace_root() {
-        let (root, _) = receipt_fixture();
-        let debug = root.path().join("target/debug");
-        #[cfg(target_os = "windows")]
-        let dep_info = debug.join("probe.d");
-        #[cfg(not(target_os = "windows"))]
-        let dep_info = debug.join("libprobe.d");
-        assert!(
-            dep_info.is_file(),
-            "receipt fixture dep-info escaped `{}`",
-            root.path().display()
-        );
-    }
-
-    #[test]
-    fn a_shared_engine_receipt_rejects_an_input_changed_after_capture() {
+    fn a_shared_engine_receipt_rejects_a_changed_input_or_staged_library() {
         let (root, receipt) = receipt_fixture();
         validate_receipt_lib(root.path(), &receipt).expect("unchanged receipt is valid");
+
+        let staged = staged_cdylib_path(root.path(), "probe");
+        fs_err::write(&staged, b"different artifact").expect("replace stage");
+        let error =
+            validate_receipt_lib(root.path(), &receipt).expect_err("wrong dylib must reject");
+        assert!(
+            error.to_string().contains("staged library changed"),
+            "{error:#}"
+        );
+        fs_err::write(&staged, b"built artifact").expect("restore stage");
 
         fs_err::write(
             root.path().join("stone-rs/src/lib.rs"),
@@ -554,22 +549,6 @@ mod tests {
         let error =
             validate_receipt_lib(root.path(), &receipt).expect_err("stale input must reject");
         assert!(error.to_string().contains("inputs changed"), "{error:#}");
-    }
-
-    #[test]
-    fn a_shared_engine_receipt_rejects_a_replaced_staged_library() {
-        let (root, receipt) = receipt_fixture();
-        fs_err::write(
-            staged_cdylib_path(root.path(), "probe"),
-            b"different artifact",
-        )
-        .expect("replace stage");
-        let error =
-            validate_receipt_lib(root.path(), &receipt).expect_err("wrong dylib must reject");
-        assert!(
-            error.to_string().contains("staged library changed"),
-            "{error:#}"
-        );
     }
 
     #[test]

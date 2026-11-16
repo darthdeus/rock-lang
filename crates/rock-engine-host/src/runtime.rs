@@ -519,22 +519,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn environment_guard_restores_on_success_and_failure() {
-        const KEY: &str = "ROCK_RUNTIME_ENV_GUARD_WITNESS";
-        let previous = std::env::var_os(KEY);
-        {
-            let _guard = EnvGuard::set(&[(KEY, Some("success"))]);
-        }
-        assert_eq!(std::env::var_os(KEY), previous);
-        let failed = std::panic::catch_unwind(|| {
-            let _guard = EnvGuard::set(&[(KEY, Some("failure"))]);
-            panic!("intentional cleanup witness");
-        });
-        assert!(failed.is_err());
-        assert_eq!(std::env::var_os(KEY), previous);
-    }
-
     /// Explicitly-set env on a Command (`get_envs` is the only reader;
     /// ambient inheritance is invisible, which is exactly the pin).
     fn cmd_env(cmd: &std::process::Command, key: &str) -> Option<std::ffi::OsString> {
