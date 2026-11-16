@@ -778,7 +778,7 @@ impl<'a> Builder<'a> {
     pub(crate) fn concrete_coroutine_channel(
         &self,
         receiver: Idx<Expr>,
-    ) -> Result<Option<crate::lower::YieldChannel>, CompilerError> {
+    ) -> Result<Option<EnumFlatShape>, CompilerError> {
         let body_plan = self.concrete_plan;
         let site = crate::site::Site {
             domain: self.cur_domain.clone(),

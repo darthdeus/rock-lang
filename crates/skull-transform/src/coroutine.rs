@@ -469,7 +469,7 @@ fn values_live_at_resume_blocks(
 /// Transform a lowered `co fn` into its `__step` state machine + frame info.
 pub fn transform_coroutine(
     func: &MirFunc,
-    channel: Option<&skull_mir::lower::YieldChannel>,
+    channel: Option<&skull_mir::lower::EnumFlatShape>,
     has_return_value: bool,
 ) -> CoroLowered {
     transform_coroutine_with_nonescaping_lambdas(
@@ -486,7 +486,7 @@ pub fn transform_coroutine(
 /// conservative frame pin for backends without that proof.
 pub fn transform_coroutine_with_nonescaping_lambdas(
     func: &MirFunc,
-    channel: Option<&skull_mir::lower::YieldChannel>,
+    channel: Option<&skull_mir::lower::EnumFlatShape>,
     has_return_value: bool,
     nonescaping_lambdas: &HashSet<Idx<Inst>>,
 ) -> CoroLowered {
@@ -830,8 +830,8 @@ pub fn transform_coroutine_with_nonescaping_lambdas(
         }
         match channel {
             Some(ch) => {
-                let _ = write!(canon, "ch:{}:{}", ch.enum_name, ch.tuple_width);
-                for rf in &ch.record_fields {
+                let _ = write!(canon, "ch:{}:{}", ch.name(), ch.tuple_width());
+                for rf in ch.record_fields() {
                     let _ = write!(canon, ":{rf}");
                 }
             }

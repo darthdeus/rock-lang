@@ -12,7 +12,7 @@
 
 use bone_core::workspace::Workspace;
 
-use super::{YieldChannel, coroutine_yield_channel_mono};
+use super::{EnumFlatShape, coroutine_yield_channel_mono};
 use crate::concrete::{ConcreteBodyPlan, ConcreteSignature};
 use crate::monoty::{MonoCtor, MonoInterner, MonoTy, MonoTyReason};
 
@@ -25,7 +25,7 @@ pub struct CoroutinePlan {
     pub result: Option<MonoTy>,
     /// `Some` -> the step writes yield leaves into reused `s.__y*` frame slots
     /// and the boxed `__resume` rebuilds a variant box from them.
-    pub channel: Option<YieldChannel>,
+    pub channel: Option<EnumFlatShape>,
 }
 
 impl CoroutinePlan {
@@ -58,7 +58,7 @@ impl CoroutinePlan {
         })
     }
 
-    pub(crate) fn channel_for_concrete_type(ws: &Workspace, ty: &MonoTy) -> Option<YieldChannel> {
+    pub(crate) fn channel_for_concrete_type(ws: &Workspace, ty: &MonoTy) -> Option<EnumFlatShape> {
         coroutine_yield_channel_mono(ws, ty)
     }
 

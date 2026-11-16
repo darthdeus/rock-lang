@@ -173,12 +173,12 @@ fn emit_js_constructor(
         let mut box_fields = format!(
             "{{ __variant: s.{tag}, __ty: {ty}",
             tag = skull_mir::lower::yield_slot(0),
-            ty = js_string_lit(ch.enum_name.as_str())?,
+            ty = js_string_lit(ch.name().as_str())?,
         );
         // 0-based positional keys: JS `TupleIndex` reads `base[i]` (no +1 like Lua's
         // array keys), so a boxed-enum consumer of a yielded channel value projects
         // the payload correctly. Matches `MakeEnum`'s native 0-based keys.
-        for i in 0..ch.tuple_width {
+        for i in 0..ch.tuple_width() {
             let _ = write!(
                 box_fields,
                 ", \"{}\": s.{}",
@@ -186,11 +186,11 @@ fn emit_js_constructor(
                 skull_mir::lower::yield_slot(1 + i)
             );
         }
-        for (j, rf) in ch.record_fields.iter().enumerate() {
+        for (j, rf) in ch.record_fields().iter().enumerate() {
             let _ = write!(
                 box_fields,
                 ", {rf}: s.{}",
-                skull_mir::lower::yield_slot(1 + ch.tuple_width + j)
+                skull_mir::lower::yield_slot(1 + ch.tuple_width() + j)
             );
         }
         box_fields.push_str(" }");

@@ -279,18 +279,17 @@ fn emit_constructor(
         let mut box_fields = format!(
             "{{__variant = s.{tag}, __ty = {ty}",
             tag = skull_mir::lower::yield_slot(0),
-            ty = skull_codegen_lua::lua_string(
-                skull_mir::mangle::symbol_of_key(ch.enum_name).as_str()
-            ),
+            ty =
+                skull_codegen_lua::lua_string(skull_mir::mangle::symbol_of_key(ch.name()).as_str()),
         );
-        for i in 0..ch.tuple_width {
+        for i in 0..ch.tuple_width() {
             let _ = write!(box_fields, ", s.{}", skull_mir::lower::yield_slot(1 + i));
         }
-        for (j, rf) in ch.record_fields.iter().enumerate() {
+        for (j, rf) in ch.record_fields().iter().enumerate() {
             let _ = write!(
                 box_fields,
                 ", {rf} = s.{}",
-                skull_mir::lower::yield_slot(1 + ch.tuple_width + j)
+                skull_mir::lower::yield_slot(1 + ch.tuple_width() + j)
             );
         }
         box_fields.push('}');
@@ -307,7 +306,7 @@ fn emit_constructor(
         // the same memory; a wide frame never resumed can be larger because
         // growth happens at creation. The step's nil-write guards stay: a frame
         // rebuilt by a host copy (snapshot restore) has no seeded nodes.
-        let slot_count = 1 + ch.tuple_width + ch.record_fields.len();
+        let slot_count = ch.leaf_count();
         let mut clears = String::new();
         for i in 0..slot_count {
             let slot = skull_mir::lower::yield_slot(i);

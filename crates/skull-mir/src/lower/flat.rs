@@ -279,7 +279,7 @@ impl<'a> Builder<'a> {
     pub(crate) fn resume_frame_read_channel(
         &mut self,
         cobj: Idx<Inst>,
-        channel: &YieldChannel,
+        channel: &EnumFlatShape,
     ) -> ValueRepr {
         let value_shape = channel.value_shape();
         self.resume_frame_read_with_shape(cobj, channel.leaf_count(), &value_shape)

@@ -2277,6 +2277,10 @@ impl FlatSlot {
 }
 
 impl EnumFlatShape {
+    pub fn name(&self) -> Ustr {
+        self.name
+    }
+
     /// Named physical columns shared by this enum's record variants.
     pub fn record_fields(&self) -> &[Ustr] {
         &self.record_fields
@@ -2314,7 +2318,7 @@ impl EnumFlatShape {
 
     /// The number of scalar leaves this enum threads as across a call: the
     /// discriminant + every positional slot + every record slot.
-    pub(crate) fn leaf_count(&self) -> usize {
+    pub fn leaf_count(&self) -> usize {
         1 + self.tuple_width() + self.record_fields.len()
     }
 
@@ -2624,46 +2628,12 @@ fn equality_payload_is_leafwise(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ust
     }
 }
 
-/// The frame-slot yield channel of a `co fn` whose declared return type is
-/// `Coroutine<Y, ...>` and `Y` is a flat (boxed) enum. `Some` -> the coroutine
-/// yields a flat enum: the transform writes its leaves into reused `s.__y*` frame
-/// slots (0 alloc) and the concrete consumer reads them threaded, while the
-/// generic/boxed `resume()` rebuilds a `{__variant}` box from those slots (the
-/// info here is exactly what that rebuild needs). `None` -> `Y` is a scalar /
-/// non-flat type: `resume()` returns the single value, no frame-slot channel.
-pub struct YieldChannel {
-    pub enum_name: Ustr,
-    pub tuple_width: usize,
-    pub record_fields: Vec<Ustr>,
-}
-
-impl YieldChannel {
-    /// Total scalar leaves: discriminant + positional slots + record slots. These
-    /// are the `s.__y0 .. s.__y{leaf_count-1}` frame slots.
-    pub fn leaf_count(&self) -> usize {
-        1 + self.tuple_width + self.record_fields.len()
-    }
-
-    pub(crate) fn value_shape(&self) -> ValueShape {
-        let mut fields = vec![(crate::names::ustr("__tag"), FieldShape::Prim)];
-        for i in 0..self.tuple_width {
-            fields.push((crate::names::indexed("_", "", i), FieldShape::Prim));
-        }
-        for field in &self.record_fields {
-            fields.push((*field, FieldShape::Prim));
-        }
-        ValueShape {
-            name: self.enum_name,
-            fields,
-            nullable: false,
-        }
-    }
-}
-
-/// The same channel oracle for a fully concrete logical coroutine type. The
-/// declaration-shaped variant is retained for source-only analysis; emitted
-/// coroutine bodies use this concrete form.
-pub(crate) fn coroutine_yield_channel_mono(ws: &Workspace, ty: &MonoTy) -> Option<YieldChannel> {
+/// The frame-slot yield channel of a concrete `Coroutine<Y, ...>` whose `Y` is a
+/// flat (boxed) enum: the transform writes `Y`'s leaves into reused `s.__y*`
+/// frame slots (0 alloc) and the concrete consumer reads them threaded, while
+/// the generic/boxed `resume()` rebuilds a `{__variant}` box from those slots.
+/// `None` -> `resume()` returns the single value, no frame-slot channel.
+pub(crate) fn coroutine_yield_channel_mono(ws: &Workspace, ty: &MonoTy) -> Option<EnumFlatShape> {
     let (ty, nullable) = ty.peel_nullable();
     if nullable {
         return None;
@@ -2685,12 +2655,7 @@ pub(crate) fn coroutine_yield_channel_mono(ws: &Workspace, ty: &MonoTy) -> Optio
     else {
         return None;
     };
-    let shape = EnumPlan::for_name(ws, *yield_name).and_then(|plan| plan.flat().cloned())?;
-    Some(YieldChannel {
-        enum_name: shape.name,
-        tuple_width: shape.tuple_width(),
-        record_fields: shape.record_fields,
-    })
+    EnumPlan::for_name(ws, *yield_name).and_then(|plan| plan.flat().cloned())
 }
 
 /// The reused frame slot name for the `i`th yield leaf: `__y{i}` (tag at 0, then
