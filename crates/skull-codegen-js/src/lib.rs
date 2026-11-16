@@ -1987,10 +1987,8 @@ impl skull_mir::intrinsics::BackendRealization for JsBackendRealization {
     }
 }
 
-/// Fill `$1..$n` in an expression template with `args` -- the call-site render
-/// primitive a real JS codegen would use (the same shape GLSL uses). Kept here
-/// so the `Emission::Template` contract is exercised end to end by a test.
-pub fn fill_template(template: &str, args: &[&str]) -> String {
+/// Fill `$1..$n` in an expression template with `args`.
+pub(crate) fn fill_template(template: &str, args: &[&str]) -> String {
     let mut s = template.to_string();
     for (i, a) in args.iter().enumerate() {
         s = s.replace(&format!("${}", i + 1), a);
