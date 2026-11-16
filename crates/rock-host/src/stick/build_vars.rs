@@ -82,9 +82,7 @@ pub fn resolve_build_vars(
         }
         return Ok(ResolvedBuildVars {
             channel: "dev".to_string(),
-            vars: HashMap::new(),
-            volatile_vars: std::collections::HashSet::new(),
-            source_fingerprints: HashMap::new(),
+            ..ResolvedBuildVars::default()
         });
     };
     cfg.validate_build()?;
@@ -167,7 +165,7 @@ pub fn resolve_build_vars(
                 });
                 continue;
             }
-            resolve_builtin(builtin, &channel, target_os, project_dir)?
+            resolve_builtin(builtin, &channel, target_os)?
         } else if let Some(cmd) = var.cmd.as_ref() {
             let channel = channel.as_str();
             commands.push(PendingCommand {
@@ -252,12 +250,9 @@ fn validate_target_os(target: &str) -> Result<&str> {
     }
 }
 
-fn resolve_builtin(
-    name: &str,
-    channel: &str,
-    target_os: Option<&str>,
-    project_dir: &Path,
-) -> Result<String> {
+/// `source_revision` runs a command, so the caller schedules it with the
+/// `cmd` vars instead.
+fn resolve_builtin(name: &str, channel: &str, target_os: Option<&str>) -> Result<String> {
     match name {
         "channel" => Ok(channel.to_string()),
         // An explicit target is the artifact truth (a Linux host packaging a
@@ -271,7 +266,6 @@ fn resolve_builtin(
                 other => other.to_string(),
             }
         }),
-        "source_revision" => resolve_source_revision(project_dir, channel),
         other => anyhow::bail!("unknown [build.vars] builtin {other:?}"),
     }
 }
