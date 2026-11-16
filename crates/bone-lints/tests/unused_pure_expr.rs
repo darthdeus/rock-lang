@@ -1,24 +1,19 @@
-//! unused-pure-expr lint over bone HIR. Harness mirrors unused_var.rs:
-//! `semantic_pass(&mut [parse(src)])` -> `Workspace`.
+//! unused-pure-expr lint over bone HIR, run through `lint_workspace`.
 
-use bone_lints::{UnusedPureExpr, filter_suppressed, unused_pure_exprs};
-use bone_semantic::prelude::*;
+use crate::support::lint_only;
+use bone_lints::Finding;
 
-fn parse(src: &str) -> skull_parser::Ast {
-    skull_parser::parse_module_clean(src, Ustr::from("<unused_pure_expr>")).expect("parse")
-}
-
-fn findings(src: &str) -> Vec<UnusedPureExpr> {
-    let ws = semantic_pass(&mut [parse(src)]).expect("clean program typechecks");
-    unused_pure_exprs(&ws)
+/// What `lint_workspace` reports, after `// rock: allow` suppression.
+fn findings(src: &str) -> Vec<Finding> {
+    lint_only(&[("<unused_pure_expr>", src)], "unused_pure_expr")
 }
 
 fn count(src: &str) -> usize {
     findings(src).len()
 }
 
-fn count_after_suppression(src: &str) -> usize {
-    filter_suppressed(findings(src), src).len()
+fn is_comparison(finding: &Finding) -> bool {
+    finding.error.message.contains("comparison")
 }
 
 #[test]
@@ -27,7 +22,7 @@ fn flags_a_comparison_statement() {
     let src = "fn f() -> int {\n    let x = 1\n    x == 1\n    x\n}";
     let fs = findings(src);
     assert_eq!(fs.len(), 1, "one discarded comparison, got {:?}", fs.len());
-    assert!(fs[0].is_comparison, "the `==` root is a comparison");
+    assert!(is_comparison(&fs[0]), "the `==` root is a comparison");
 }
 
 #[test]
@@ -45,7 +40,7 @@ fn flags_the_canonical_enum_comparison_bug() {
         "the enum comparison is flagged, got {:?}",
         fs.len()
     );
-    assert!(fs[0].is_comparison);
+    assert!(is_comparison(&fs[0]));
 }
 
 #[test]
@@ -126,7 +121,7 @@ fn flags_bare_variable_read() {
     let src = "fn f() -> int {\n    let x = 1\n    x\n    3\n}";
     let fs = findings(src);
     assert_eq!(fs.len(), 1, "bare `x` read is a discarded pure expr");
-    assert!(!fs[0].is_comparison, "a var read is not a comparison");
+    assert!(!is_comparison(&fs[0]), "a var read is not a comparison");
 }
 
 #[test]
@@ -135,7 +130,7 @@ fn flags_logical_binop() {
     let fs = findings(src);
     assert_eq!(fs.len(), 1, "`&&` root is a discarded pure expr");
     assert!(
-        !fs[0].is_comparison,
+        !is_comparison(&fs[0]),
         "a logical `&&` root is generic, not a comparison"
     );
 }
@@ -143,28 +138,24 @@ fn flags_logical_binop() {
 #[test]
 fn allow_comment_above_suppresses() {
     let src = "fn f() -> int {\n    let x = 1\n    // rock: allow(unused_pure_expr)\n    x == 1\n    x\n}";
-    assert_eq!(count(src), 1, "raw finding still exists");
-    assert_eq!(count_after_suppression(src), 0, "comment above silences it");
+    assert_eq!(
+        count(&src.replace("// rock: allow(unused_pure_expr)", "")),
+        1,
+        "the finding exists without the comment"
+    );
+    assert_eq!(count(src), 0, "comment above silences it");
 }
 
 #[test]
 fn trailing_allow_comment_suppresses() {
     let src =
         "fn f() -> int {\n    let x = 1\n    x == 1 // rock: allow(unused_pure_expr)\n    x\n}";
-    assert_eq!(
-        count_after_suppression(src),
-        0,
-        "trailing comment silences it"
-    );
+    assert_eq!(count(src), 0, "trailing comment silences it");
 }
 
 #[test]
 fn allow_of_a_different_lint_does_not_suppress() {
     let src =
         "fn f() -> int {\n    let x = 1\n    // rock: allow(unused_var)\n    x == 1\n    x\n}";
-    assert_eq!(
-        count_after_suppression(src),
-        1,
-        "wrong lint name -> still warns"
-    );
+    assert_eq!(count(src), 1, "wrong lint name -> still warns");
 }

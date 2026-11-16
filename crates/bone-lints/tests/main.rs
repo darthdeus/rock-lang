@@ -6,7 +6,6 @@ mod action_layer_raw_input;
 mod action_policy;
 mod backend_sibling_mismatch;
 mod catalog;
-mod census;
 mod incremental_cache;
 mod method_syntax;
 mod modules_v1_names;

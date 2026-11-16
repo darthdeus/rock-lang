@@ -3,7 +3,7 @@
 //! segment, or they go silent (or noisy) the moment a package converts.
 
 use crate::support;
-use bone_lints::{ACTION_CALLERS, LintOptions, lint_workspace, task_null_abandon, unused_fns};
+use bone_lints::{ACTION_CALLERS, LintOptions, UNUSED_FN, lint_workspace, task_null_abandon};
 use bone_semantic::prelude::*;
 
 fn ws_v1(src: &str) -> Workspace {
@@ -41,8 +41,12 @@ fn main() { SLOT = Task { id: 1 }; abandon() }
 
 #[test]
 fn v1_main_is_a_reachability_root() {
-    let ws = ws_v1("fn main() { used() }\nfn used() {}\nfn dead() {}");
-    let mut names: Vec<String> = unused_fns(&ws).iter().map(|f| f.name.to_string()).collect();
+    let src = "fn main() { used() }\nfn used() {}\nfn dead() {}";
+    let ws = ws_v1(src);
+    let sources: FxHashMap<Ustr, &str> = [(Ustr::from("main.rock"), src)].into_iter().collect();
+    let options = LintOptions::only([UNUSED_FN.to_owned()]);
+    let findings = lint_workspace(&ws, &FxHashSet::default(), true, &sources, &options);
+    let mut names: Vec<String> = findings.iter().map(support::quoted).collect();
     names.sort();
     assert_eq!(
         names,

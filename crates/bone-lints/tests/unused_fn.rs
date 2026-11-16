@@ -1,20 +1,14 @@
-//! unused-fn reachability lint over bone HIR. Same harness as unused_var:
-//! `semantic_pass(&mut [parse(src)])` -> `Workspace` (with inference).
+//! unused-fn reachability lint over bone HIR, run through `lint_workspace`
+//! as a bin package.
 
-use bone_lints::{UnusedFn, filter_suppressed, unused_fns};
-use bone_semantic::prelude::*;
+use crate::support::{lint_only, quoted};
 
-fn parse(src: &str) -> skull_parser::Ast {
-    skull_parser::parse_module_clean(src, Ustr::from("<unused_fn>")).expect("parse")
-}
-
-fn findings(src: &str) -> Vec<UnusedFn> {
-    let ws = semantic_pass(&mut [parse(src)]).expect("clean program typechecks");
-    unused_fns(&ws)
-}
-
+/// The dead names `lint_workspace` reports, after `// rock: allow` suppression.
 fn names(src: &str) -> Vec<String> {
-    let mut ns: Vec<String> = findings(src).iter().map(|f| f.name.to_string()).collect();
+    let mut ns: Vec<String> = lint_only(&[("<unused_fn>", src)], bone_lints::UNUSED_FN)
+        .iter()
+        .map(quoted)
+        .collect();
     ns.sort();
     ns
 }
@@ -110,15 +104,11 @@ fn extern_declarations_are_not_roots() {
 fn allow_comment_above_suppresses() {
     let src = "fn main() {}\n// rock: allow(unused_fn)\nfn dead() {}";
     assert_eq!(
-        names(src),
+        names(&src.replace("// rock: allow(unused_fn)", "")),
         vec!["dead".to_string()],
-        "raw finding still exists"
+        "the finding exists without the comment"
     );
-    let ws = semantic_pass(&mut [parse(src)]).expect("typechecks");
-    assert!(
-        filter_suppressed(unused_fns(&ws), src).is_empty(),
-        "comment above silences the dead fn"
-    );
+    assert!(names(src).is_empty(), "comment above silences the dead fn");
 }
 
 #[test]

@@ -1,5 +1,36 @@
+use bone_lints::{ActionLayerPolicy, Finding, LintOptions, lint_workspace};
+use bone_semantic::prelude::*;
+
+/// What `lint_workspace` reports for `lint` alone over `files` (name, source),
+/// linted as a bin package with no warm module.
+pub fn lint_only(files: &[(&str, &str)], lint: &str) -> Vec<Finding> {
+    let mut asts: Vec<skull_parser::Ast> = files
+        .iter()
+        .map(|(name, src)| skull_parser::parse_module_clean(src, Ustr::from(*name)).expect("parse"))
+        .collect();
+    let ws = semantic_pass(&mut asts).expect("clean program typechecks");
+    let sources: FxHashMap<Ustr, &str> = files
+        .iter()
+        .map(|(name, src)| (Ustr::from(*name), *src))
+        .collect();
+    lint_workspace(
+        &ws,
+        &FxHashSet::default(),
+        true,
+        &sources,
+        &LintOptions::only([lint.to_owned()]),
+    )
+}
+
+/// The first backtick-quoted name in a finding's message.
+pub fn quoted(finding: &Finding) -> String {
+    let msg = &finding.error.message;
+    let start = msg.find('`').expect("a quoted name") + 1;
+    let len = msg[start..].find('`').expect("a closing backtick");
+    msg[start..start + len].to_owned()
+}
+
 // Legacy project policy for the existing action-layer fixtures.
-use bone_lints::ActionLayerPolicy;
 pub const RAW_INPUT_CLASSES: &[&str] = &[
     "editor_tool_debug",
     "deliberate_pointer",

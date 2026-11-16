@@ -5,12 +5,17 @@
 //! `semantic_pass`. `Arena`/`Entity`/`Scene` are declared locally with the same
 //! shapes `stdlib/unified.rock` gives them; the lint never looks at the stdlib.
 
-use bone_lints::{EscapeClass, EscapeKind, LintFinding, RowEscape, filter_suppressed, row_escapes};
+use crate::support::lint_only;
+use bone_lints::{EscapeClass, EscapeKind, Finding};
 use bone_semantic::prelude::*;
 use rock_core::errors::CompilerErrorLevel;
 
 fn parse(src: &str) -> skull_parser::Ast {
     skull_parser::parse_module_clean(src, Ustr::from("<row_escape>")).expect("parse")
+}
+
+fn lint(src: &str) -> Vec<Finding> {
+    lint_only(&[("<row_escape>", src)], bone_lints::ROW_ESCAPE)
 }
 
 const PRELUDE: &str = r#"
@@ -43,14 +48,35 @@ fn some_entity() -> Entity<Mob> {
 }
 "#;
 
-fn findings(body: &str) -> Vec<RowEscape> {
-    let src = format!("{PRELUDE}\n{body}\n");
-    let ws = semantic_pass(&mut [parse(&src)]).expect("clean program typechecks");
-    row_escapes(&ws)
+fn findings(body: &str) -> Vec<Finding> {
+    lint(&format!("{PRELUDE}\n{body}\n"))
+}
+
+/// The kind a message names: `(store_global)` and the like, or "returned"
+/// for the propagation message, which names no kind.
+fn kind_of(finding: &Finding) -> EscapeKind {
+    use EscapeKind::*;
+    let msg = &finding.error.message;
+    if msg.contains("is returned here") {
+        return Return;
+    }
+    [
+        StoreGlobal,
+        StoreStatic,
+        StoreField,
+        StoreCollection,
+        ClosureCapture,
+        AnyErasure,
+        AcrossYield,
+        FfiArg,
+    ]
+    .into_iter()
+    .find(|k| msg.contains(&format!("({})", k.as_str())))
+    .unwrap_or_else(|| panic!("no escape kind in {msg:?}"))
 }
 
 fn kinds(body: &str) -> Vec<EscapeKind> {
-    let mut ks: Vec<EscapeKind> = findings(body).iter().map(|f| f.kind).collect();
+    let mut ks: Vec<EscapeKind> = findings(body).iter().map(kind_of).collect();
     ks.sort();
     ks
 }
@@ -63,8 +89,7 @@ fn kinds(body: &str) -> Vec<EscapeKind> {
 // exactly the shape most at risk of a spurious hit.
 #[test]
 fn prelude_alone_is_clean() {
-    let ws = semantic_pass(&mut [parse(PRELUDE)]).expect("prelude typechecks");
-    let fs = row_escapes(&ws);
+    let fs = lint(PRELUDE);
     assert!(fs.is_empty(), "prelude must contribute no findings: {fs:?}");
 }
 
@@ -180,12 +205,12 @@ fn returning_a_row_is_propagation_not_a_hazard() {
     // reported only because it is where an INTRAPROCEDURAL check stops.
     let fs = findings("fn accessor(e: Entity<Mob>) -> Mob? {\n    return e.get()\n}");
     assert_eq!(fs.len(), 1, "{fs:?}");
-    assert_eq!(fs[0].kind, EscapeKind::Return);
-    assert_eq!(fs[0].kind.class(), EscapeClass::Propagation);
+    assert_eq!(kind_of(&fs[0]), EscapeKind::Return);
+    assert_eq!(kind_of(&fs[0]).class(), EscapeClass::Propagation);
     assert!(
-        fs[0].to_diagnostic().message.contains("caller"),
+        fs[0].error.message.contains("caller"),
         "the diagnostic must point at the callers, not accuse the accessor: {}",
-        fs[0].to_diagnostic().message
+        fs[0].error.message
     );
 }
 
@@ -267,14 +292,14 @@ fn finding_reports_at_advice_level() {
     // A census must be runnable over a tree with escapes without failing it.
     let fs = findings("fn leak(e: Entity<Mob>) -> Mob? {\n    return e.get()\n}");
     assert_eq!(fs.len(), 1, "expected the one return finding: {fs:?}");
-    assert_eq!(fs[0].to_diagnostic().level, CompilerErrorLevel::Advice);
+    assert_eq!(fs[0].level(), CompilerErrorLevel::Advice);
 }
 
 #[test]
 fn diagnostic_names_the_row_type_and_the_kind() {
     let fs = findings("fn leak(e: Entity<Mob>) -> Mob? {\n    return e.get()\n}");
     assert_eq!(fs.len(), 1, "{fs:?}");
-    let msg = fs[0].to_diagnostic().message;
+    let msg = &fs[0].error.message;
     assert!(msg.contains("Mob"), "names the row type: {msg}");
     assert!(msg.contains("return"), "names the escape kind: {msg}");
 }
@@ -284,12 +309,11 @@ fn allow_comment_above_suppresses() {
     let body =
         "fn leak(e: Entity<Mob>) -> Mob? {\n    // rock: allow(row_escape)\n    return e.get()\n}";
     assert_eq!(
-        kinds(body),
+        kinds(&body.replace("// rock: allow(row_escape)", "")),
         vec![EscapeKind::Return],
-        "raw finding still exists"
+        "the finding exists without the comment"
     );
-    let src = format!("{PRELUDE}\n{body}\n");
-    let kept = filter_suppressed(findings(body), &src);
+    let kept = findings(body);
     assert!(kept.is_empty(), "allow comment above silences it: {kept:?}");
 }
 

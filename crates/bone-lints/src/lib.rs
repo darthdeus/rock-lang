@@ -304,52 +304,6 @@ impl Finding {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct LintFamilyCensus {
-    pub requests: usize,
-    pub files_examined: usize,
-    pub modules_examined: usize,
-    pub bodies_examined: usize,
-    pub findings_derived: usize,
-    pub findings_reused: usize,
-    pub findings_suppressed: usize,
-    pub elapsed_ns: u128,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct LintCensus {
-    pub full_workspace_passes: usize,
-    pub flat: LintFamilyCensus,
-    pub inference: LintFamilyCensus,
-    pub suppression: LintFamilyCensus,
-    pub unused_fn: LintFamilyCensus,
-    pub backend_sibling: LintFamilyCensus,
-    pub action_caller: LintFamilyCensus,
-}
-
-impl LintCensus {
-    pub fn merge(&mut self, other: &Self) {
-        self.full_workspace_passes += other.full_workspace_passes;
-        for (dst, src) in [
-            (&mut self.flat, &other.flat),
-            (&mut self.inference, &other.inference),
-            (&mut self.suppression, &other.suppression),
-            (&mut self.unused_fn, &other.unused_fn),
-            (&mut self.backend_sibling, &other.backend_sibling),
-            (&mut self.action_caller, &other.action_caller),
-        ] {
-            dst.requests += src.requests;
-            dst.files_examined += src.files_examined;
-            dst.modules_examined += src.modules_examined;
-            dst.bodies_examined += src.bodies_examined;
-            dst.findings_derived += src.findings_derived;
-            dst.findings_reused += src.findings_reused;
-            dst.findings_suppressed += src.findings_suppressed;
-            dst.elapsed_ns += src.elapsed_ns;
-        }
-    }
-}
-
 /// The coordinate delta produced by the same body edit that updates semantic
 /// spans. A cache never guesses from the new text: it consumes this metadata.
 pub use bone_core::text_edit::TextEditDelta;
@@ -451,7 +405,6 @@ pub struct LintCacheStats {
     pub suppression_files_refiltered: usize,
     pub full_lint_workspace_passes: usize,
     pub full_cache_reconstructions: usize,
-    pub fresh_cached_finding_comparisons: usize,
     pub reuse_totals_reads: usize,
     pub output_refresh_requests: usize,
     pub output_files_refreshed: usize,
@@ -499,7 +452,6 @@ impl LintCacheStats {
         self.suppression_files_refiltered += other.suppression_files_refiltered;
         self.full_lint_workspace_passes += other.full_lint_workspace_passes;
         self.full_cache_reconstructions += other.full_cache_reconstructions;
-        self.fresh_cached_finding_comparisons += other.fresh_cached_finding_comparisons;
         self.reuse_totals_reads += other.reuse_totals_reads;
         self.output_refresh_requests += other.output_refresh_requests;
         self.output_files_refreshed += other.output_files_refreshed;
@@ -1517,31 +1469,6 @@ pub struct IncrementalLintCache {
 }
 
 impl IncrementalLintCache {
-    pub fn compare_fresh_findings(
-        &self,
-        ws: &Workspace,
-        warm: &FxHashSet<ModuleId>,
-        is_bin: bool,
-        sources: &FxHashMap<Ustr, &str>,
-        sel: &LintOptions,
-        cached: &[Finding],
-        stats: &mut LintCacheStats,
-    ) -> bool {
-        let fresh = lint_workspace(ws, warm, is_bin, sources, sel);
-        stats.fresh_cached_finding_comparisons += 1;
-        let mut fresh_keys = fresh
-            .iter()
-            .map(|finding| format!("{finding:?}"))
-            .collect::<Vec<_>>();
-        let mut cached_keys = cached
-            .iter()
-            .map(|finding| format!("{finding:?}"))
-            .collect::<Vec<_>>();
-        fresh_keys.sort();
-        cached_keys.sort();
-        fresh_keys == cached_keys
-    }
-
     pub fn begin_body_transaction(&mut self, change: &LintCacheUpdate) {
         debug_assert!(
             !change.full && !change.relowered,
@@ -2743,11 +2670,8 @@ impl IncrementalLintCache {
                 source,
                 sel,
                 &FxHashSet::default(),
-                None,
             );
-            raw.extend(inference_findings_with(
-                ws, warm, module.id, source, sel, None,
-            ));
+            raw.extend(inference_findings_with(ws, warm, module.id, source, sel));
             for finding in raw {
                 match finding_owner(module, &finding) {
                     Some(owner) if is_inference_lint(finding.lint) => {
@@ -3190,44 +3114,6 @@ fn shift_findings(findings: &mut [Finding], edit: &TextEditDelta) -> usize {
     shifted
 }
 
-#[derive(Copy, Clone)]
-enum CensusFamily {
-    Flat,
-    Inference,
-    UnusedFn,
-    BackendSibling,
-    ActionCaller,
-}
-
-fn family_mut(census: &mut LintCensus, family: CensusFamily) -> &mut LintFamilyCensus {
-    match family {
-        CensusFamily::Flat => &mut census.flat,
-        CensusFamily::Inference => &mut census.inference,
-        CensusFamily::UnusedFn => &mut census.unused_fn,
-        CensusFamily::BackendSibling => &mut census.backend_sibling,
-        CensusFamily::ActionCaller => &mut census.action_caller,
-    }
-}
-
-fn record_family(
-    census: Option<&mut LintCensus>,
-    family: CensusFamily,
-    elapsed: std::time::Duration,
-    files: usize,
-    modules: usize,
-    bodies: usize,
-    findings: usize,
-) {
-    let Some(census) = census else { return };
-    let family = family_mut(census, family);
-    family.requests += 1;
-    family.files_examined += files;
-    family.modules_examined += modules;
-    family.bodies_examined += bodies;
-    family.findings_derived += findings;
-    family.elapsed_ns += elapsed.as_nanos();
-}
-
 /// The lints that read only a body's HIR -- no inference, no other file. A
 /// file's findings change only when that file's own text changes, which is what
 /// lets the LSP cache them per file across unrelated edits.
@@ -3235,27 +3121,8 @@ fn record_family(
 /// `src` is the file's text, for `// rock: allow(...)` suppression. A warm
 /// (stdlib) module lints to nothing: it is a read-only reference to the author,
 /// and every stdlib helper would false-flag.
-pub fn flat_findings(
-    ws: &Workspace,
-    warm: &FxHashSet<ModuleId>,
-    mid: ModuleId,
-    src: &str,
-) -> Vec<Finding> {
-    let census = None;
-    flat_findings_with(
-        ws,
-        &enum_variant_names(ws, warm),
-        warm,
-        mid,
-        src,
-        &LintOptions::default(),
-        &FxHashSet::default(),
-        census,
-    )
-}
-
-/// [`flat_findings`] with the workspace-wide scans supplied. The variant scan
-/// and the nominal-type scan are whole-workspace, so a caller linting EVERY
+///
+/// `variants` and `types` are whole-workspace scans, so a caller linting EVERY
 /// module computes them once instead of once per file. `types` is only read by
 /// the opt-in `method_syntax` lint, so the default tier passes an empty set.
 fn flat_findings_with(
@@ -3266,7 +3133,6 @@ fn flat_findings_with(
     src: &str,
     sel: &LintOptions,
     types: &FxHashSet<Ustr>,
-    mut census: Option<&mut LintCensus>,
 ) -> Vec<Finding> {
     if warm.contains(&mid) {
         return Vec::new();
@@ -3295,11 +3161,7 @@ fn flat_findings_with(
 
     if sel.enabled(UNUSED_VAR) {
         let found = unused_vars_in_module(module, variants);
-        out.extend(
-            filter_suppressed_census(found, src, census.as_deref_mut())
-                .iter()
-                .map(Finding::of),
-        );
+        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
     }
     if sel.enabled(UNUSED_PURE_EXPR) {
         let found: Vec<_> = module
@@ -3307,39 +3169,23 @@ fn flat_findings_with(
             .values()
             .flat_map(unused_pure_exprs_in_body)
             .collect();
-        out.extend(
-            filter_suppressed_census(found, src, census.as_deref_mut())
-                .iter()
-                .map(Finding::of),
-        );
+        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
     }
     if sel.enabled(METHOD_SYNTAX) {
         let found = method_syntax_in_module(ws, module, types, src);
-        out.extend(
-            filter_suppressed_census(found, src, census.as_deref_mut())
-                .iter()
-                .map(Finding::of),
-        );
+        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
     }
     if sel.enabled(RAW_INPUT_MIGRATION)
         && let Some(policy) = sel.action_policy.as_deref()
     {
         let found = raw_input_sites_in_module(module, policy);
-        out.extend(
-            filter_suppressed_census(found, src, census.as_deref_mut())
-                .iter()
-                .map(Finding::of),
-        );
+        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
     }
     if sel.enabled(RAW_INPUT_CLASSIFICATION)
         && let Some(policy) = sel.action_policy.as_deref()
     {
         let found = unclassified_raw_input_sites_in_module(module, src, policy);
-        out.extend(
-            filter_suppressed_census(found, src, census)
-                .iter()
-                .map(Finding::of),
-        );
+        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
     }
     out
 }
@@ -3347,22 +3193,12 @@ fn flat_findings_with(
 /// The lints that read the module's INFERENCE. A dependency edit can re-infer
 /// this module and change its findings without its own text changing, so a
 /// caching surface must invalidate these on re-inference, not on text.
-pub fn inference_findings(
-    ws: &Workspace,
-    warm: &FxHashSet<ModuleId>,
-    mid: ModuleId,
-    src: &str,
-) -> Vec<Finding> {
-    inference_findings_with(ws, warm, mid, src, &LintOptions::default(), None)
-}
-
 fn inference_findings_with(
     ws: &Workspace,
     warm: &FxHashSet<ModuleId>,
     mid: ModuleId,
     src: &str,
     sel: &LintOptions,
-    mut census: Option<&mut LintCensus>,
 ) -> Vec<Finding> {
     if warm.contains(&mid) {
         return Vec::new();
@@ -3377,11 +3213,7 @@ fn inference_findings_with(
             .iter()
             .flat_map(|(owner, body)| transmute_of_nullable_in_body(ws, bi(owner), body))
             .collect();
-        out.extend(
-            filter_suppressed_census(found, src, census.as_deref_mut())
-                .iter()
-                .map(Finding::of),
-        );
+        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
     }
     if sel.enabled(TASK_NULL_ABANDON) {
         let found: Vec<_> = module
@@ -3389,11 +3221,7 @@ fn inference_findings_with(
             .iter()
             .flat_map(|(owner, body)| task_null_abandon_in_body(ws, bi(owner), body))
             .collect();
-        out.extend(
-            filter_suppressed_census(found, src, census.as_deref_mut())
-                .iter()
-                .map(Finding::of),
-        );
+        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
     }
     if sel.enabled(ROW_ESCAPE) {
         let found: Vec<_> = module
@@ -3403,11 +3231,7 @@ fn inference_findings_with(
                 row_escapes_in_body(ws, bi(owner), body, tail_sink(module, owner))
             })
             .collect();
-        out.extend(
-            filter_suppressed_census(found, src, census)
-                .iter()
-                .map(Finding::of),
-        );
+        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
     }
     out
 }
@@ -3418,107 +3242,45 @@ pub fn workspace_findings_by_file_with(
     is_bin: bool,
     sel: &LintOptions,
 ) -> FxHashMap<Ustr, Vec<Finding>> {
-    workspace_findings_by_file_census(ws, warm, is_bin, sel, None, None)
+    workspace_findings_by_file(ws, warm, is_bin, sel, None)
 }
 
-fn workspace_findings_by_file_census(
+fn workspace_findings_by_file(
     ws: &Workspace,
     warm: &FxHashSet<ModuleId>,
     is_bin: bool,
     sel: &LintOptions,
     edges: Option<&UserBodyEdges>,
-    mut census: Option<&mut LintCensus>,
 ) -> FxHashMap<Ustr, Vec<Finding>> {
     let mut out: FxHashMap<Ustr, Vec<Finding>> = FxHashMap::default();
     if is_bin && sel.enabled(UNUSED_FN) {
-        let t = bone_core::prelude::Instant::now();
         let findings = match edges {
             Some(edges) => unused_fns_from_edges(ws, warm, edges),
             None => unused_fns_by_file(ws, warm),
         };
-        let derived = findings.values().map(Vec::len).sum();
-        record_family(
-            census.as_deref_mut(),
-            CensusFamily::UnusedFn,
-            t.elapsed(),
-            findings.len(),
-            ws.user_modules(warm).count(),
-            ws.user_modules(warm)
-                .flat_map(|m| m.bodies.values())
-                .count(),
-            derived,
-        );
         for (file, findings) in findings {
             out.entry(file)
                 .or_default()
                 .extend(findings.iter().map(Finding::of));
         }
     }
-    if !sel.enabled(BACKEND_SIBLING_MISMATCH) {
-        if sel.enabled(ACTION_CALLERS)
-            && let Some(policy) = sel.action_policy.as_deref()
-        {
-            let t = bone_core::prelude::Instant::now();
-            let findings = action_caller_gaps(ws, warm, policy);
-            record_family(
-                census.as_deref_mut(),
-                CensusFamily::ActionCaller,
-                t.elapsed(),
-                0,
-                ws.user_modules(warm).count(),
-                ws.user_modules(warm)
-                    .flat_map(|m| m.bodies.values())
-                    .count(),
-                findings.len(),
-            );
-            for finding in findings {
-                out.entry(finding.file)
-                    .or_default()
-                    .push(Finding::of(&finding));
+    if sel.enabled(BACKEND_SIBLING_MISMATCH) {
+        // Warm modules are SCANNED (half of every backend sibling set is stdlib) but
+        // not reported on, like every other lint's treatment of stdlib files.
+        let warm_files: FxHashSet<Ustr> = warm.iter().map(|&mid| ws.module(mid).file).collect();
+        for (file, findings) in backend_sibling_mismatches_by_file(ws) {
+            if warm_files.contains(&file) {
+                continue;
             }
+            out.entry(file)
+                .or_default()
+                .extend(findings.iter().map(Finding::of));
         }
-        return out;
-    }
-    // Warm modules are SCANNED (half of every backend sibling set is stdlib) but
-    // not reported on, like every other lint's treatment of stdlib files.
-    let warm_files: FxHashSet<Ustr> = warm.iter().map(|&mid| ws.module(mid).file).collect();
-    let t = bone_core::prelude::Instant::now();
-    let sibling_findings = backend_sibling_mismatches_by_file(ws);
-    let derived = sibling_findings.values().map(Vec::len).sum();
-    record_family(
-        census.as_deref_mut(),
-        CensusFamily::BackendSibling,
-        t.elapsed(),
-        sibling_findings.len(),
-        ws.user_modules(warm).count(),
-        0,
-        derived,
-    );
-    for (file, findings) in sibling_findings {
-        if warm_files.contains(&file) {
-            continue;
-        }
-        out.entry(file)
-            .or_default()
-            .extend(findings.iter().map(Finding::of));
     }
     if sel.enabled(ACTION_CALLERS)
         && let Some(policy) = sel.action_policy.as_deref()
     {
-        let t = bone_core::prelude::Instant::now();
-        let findings = action_caller_gaps(ws, warm, policy);
-        record_family(
-            census,
-            CensusFamily::ActionCaller,
-            t.elapsed(),
-            0,
-            ws.user_modules(warm).count(),
-            ws.user_modules(warm)
-                .flat_map(|m| m.bodies.values())
-                .count(),
-            findings.len(),
-        );
-        for finding in findings {
+        for finding in action_caller_gaps(ws, warm, policy) {
             out.entry(finding.file)
                 .or_default()
                 .push(Finding::of(&finding));
@@ -3548,7 +3310,7 @@ pub fn lint_workspace(
     sources: &FxHashMap<Ustr, &str>,
     sel: &LintOptions,
 ) -> Vec<Finding> {
-    lint_workspace_inner(ws, warm, is_bin, sources, sel, true, None, None)
+    lint_workspace_inner(ws, warm, is_bin, sources, sel, true, None)
 }
 
 /// Global findings stay unsuppressed; `edges` are the user body edges the
@@ -3561,28 +3323,7 @@ fn lint_workspace_unsuppressed(
     sel: &LintOptions,
     edges: &UserBodyEdges,
 ) -> Vec<Finding> {
-    lint_workspace_inner(ws, warm, is_bin, sources, sel, false, Some(edges), None)
-}
-
-pub fn lint_workspace_with_census(
-    ws: &Workspace,
-    warm: &FxHashSet<ModuleId>,
-    is_bin: bool,
-    sources: &FxHashMap<Ustr, &str>,
-    sel: &LintOptions,
-) -> (Vec<Finding>, LintCensus) {
-    let mut census = LintCensus::default();
-    let findings = lint_workspace_inner(
-        ws,
-        warm,
-        is_bin,
-        sources,
-        sel,
-        true,
-        None,
-        Some(&mut census),
-    );
-    (findings, census)
+    lint_workspace_inner(ws, warm, is_bin, sources, sel, false, Some(edges))
 }
 
 fn lint_workspace_inner(
@@ -3593,13 +3334,8 @@ fn lint_workspace_inner(
     sel: &LintOptions,
     suppress: bool,
     edges: Option<&UserBodyEdges>,
-    mut census: Option<&mut LintCensus>,
 ) -> Vec<Finding> {
-    if let Some(census) = census.as_deref_mut() {
-        census.full_workspace_passes += 1;
-    }
-    let mut by_file =
-        workspace_findings_by_file_census(ws, warm, is_bin, sel, edges, census.as_deref_mut());
+    let mut by_file = workspace_findings_by_file(ws, warm, is_bin, sel, edges);
     let variants = enum_variant_names(ws, warm);
     let types = if sel.enabled(METHOD_SYNTAX) {
         let mut names = nominal_type_names(ws, warm);
@@ -3617,72 +3353,31 @@ fn lint_workspace_inner(
         };
         per_module.push((module, src, by_file.remove(&module.file)));
     }
-    let lint_module = |module: &Module,
-                       src: &str,
-                       workspace_findings: Option<Vec<Finding>>,
-                       mut census: Option<&mut LintCensus>| {
-        let t_flat = bone_core::prelude::Instant::now();
-        let mut out = flat_findings_with(
-            ws,
-            &variants,
-            warm,
-            module.id,
-            src,
-            sel,
-            &types,
-            census.as_deref_mut(),
-        );
-        record_family(
-            census.as_deref_mut(),
-            CensusFamily::Flat,
-            t_flat.elapsed(),
-            1,
-            1,
-            module.bodies.len(),
-            out.len(),
-        );
-
-        let t_inference = bone_core::prelude::Instant::now();
-        let inference =
-            inference_findings_with(ws, warm, module.id, src, sel, census.as_deref_mut());
-        record_family(
-            census.as_deref_mut(),
-            CensusFamily::Inference,
-            t_inference.elapsed(),
-            1,
-            1,
-            module.bodies.len(),
-            inference.len(),
-        );
-        out.extend(inference);
-        if let Some(findings) = workspace_findings {
-            if suppress {
-                out.extend(filter_suppressed_findings_census(findings, src, census));
-            } else {
-                out.extend(findings);
+    per_module
+        .into_par_iter()
+        .map(|(module, src, workspace_findings)| {
+            let mut out = flat_findings_with(ws, &variants, warm, module.id, src, sel, &types);
+            out.extend(inference_findings_with(ws, warm, module.id, src, sel));
+            if let Some(findings) = workspace_findings {
+                if suppress {
+                    out.extend(filter_suppressed_findings(findings, src));
+                } else {
+                    out.extend(findings);
+                }
             }
-        }
-        out
-    };
-    // The modules are independent; a census (a measurement, never a build)
-    // accumulates across them and keeps the serial walk.
-    let per_module: Vec<Vec<Finding>> = match census {
-        Some(census) => per_module
-            .into_iter()
-            .map(|(module, src, findings)| lint_module(module, src, findings, Some(census)))
-            .collect(),
-        None => per_module
-            .into_par_iter()
-            .map(|(module, src, findings)| lint_module(module, src, findings, None))
-            .collect(),
-    };
-    per_module.into_iter().flatten().collect()
+            out
+        })
+        .flatten()
+        .collect()
 }
 
 /// [`filter_suppressed`] for already-rendered [`Finding`]s, matching each one's
 /// own lint name. Same rule: the finding's line or the line above it.
 pub fn filter_suppressed_findings(findings: Vec<Finding>, source: &str) -> Vec<Finding> {
-    filter_suppressed_findings_census(findings, source, None)
+    if findings.is_empty() {
+        return findings;
+    }
+    filter_suppressed_findings_with_entries(findings, &suppression_entries(source))
 }
 
 fn filter_suppressed_findings_timed(
@@ -3758,29 +3453,6 @@ fn filter_suppressed_findings_with_entries(
                 && !(f.line > 0 && allow.contains(&(f.line - 1, f.lint)))
         })
         .collect()
-}
-
-fn filter_suppressed_findings_census(
-    findings: Vec<Finding>,
-    source: &str,
-    census: Option<&mut LintCensus>,
-) -> Vec<Finding> {
-    let raw = findings.len();
-    let started = bone_core::prelude::Instant::now();
-    let filtered = if findings.is_empty() {
-        findings
-    } else {
-        filter_suppressed_findings_with_entries(findings, &suppression_entries(source))
-    };
-    if let Some(census) = census {
-        let family = &mut census.suppression;
-        family.requests += 1;
-        family.files_examined += 1;
-        family.findings_derived += raw;
-        family.findings_suppressed += raw - filtered.len();
-        family.elapsed_ns += started.elapsed().as_nanos();
-    }
-    filtered
 }
 
 fn filter_workspace_findings(
@@ -3869,48 +3541,27 @@ impl LintFinding for BackendSiblingMismatch {
 /// finding's own line or the line directly above it. `source` is the full text
 /// of the file the findings belong to.
 pub fn filter_suppressed<F: LintFinding>(findings: Vec<F>, source: &str) -> Vec<F> {
-    filter_suppressed_census(findings, source, None)
-}
-
-fn filter_suppressed_census<F: LintFinding>(
-    findings: Vec<F>,
-    source: &str,
-    census: Option<&mut LintCensus>,
-) -> Vec<F> {
-    let raw = findings.len();
-    let started = bone_core::prelude::Instant::now();
     // Most families find nothing in most files; the scan would only build an
     // allow set nothing reads.
-    let allow: FxHashSet<usize> = if findings.is_empty() {
-        FxHashSet::default()
-    } else {
-        source
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| parse_allow_comment(line, F::LINT))
-            .map(|(n, _)| n)
-            .collect()
-    };
-    let filtered = if allow.is_empty() {
-        findings
-    } else {
-        findings
-            .into_iter()
-            .filter(|f| {
-                let line = f.line();
-                !allow.contains(&line) && !(line > 0 && allow.contains(&(line - 1)))
-            })
-            .collect()
-    };
-    if let Some(census) = census {
-        let family = &mut census.suppression;
-        family.requests += 1;
-        family.files_examined += 1;
-        family.findings_derived += raw;
-        family.findings_suppressed += raw - filtered.len();
-        family.elapsed_ns += started.elapsed().as_nanos();
+    if findings.is_empty() {
+        return findings;
     }
-    filtered
+    let allow: FxHashSet<usize> = source
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| parse_allow_comment(line, F::LINT))
+        .map(|(n, _)| n)
+        .collect();
+    if allow.is_empty() {
+        return findings;
+    }
+    findings
+        .into_iter()
+        .filter(|f| {
+            let line = f.line();
+            !allow.contains(&line) && !(line > 0 && allow.contains(&(line - 1)))
+        })
+        .collect()
 }
 
 /// True iff `line` bears a `// rock: allow(<lint_name>)` magic comment
@@ -4051,15 +3702,8 @@ fn backend_name(b: FnBackend) -> Option<&'static str> {
 /// Whole-workspace and decl-level: no inference, no bodies, no call graph.
 /// Stdlib decls participate (half of every backend sibling set lives there);
 /// findings are attributed to the file of the offending decl.
-pub fn backend_sibling_mismatches(ws: &Workspace) -> Vec<BackendSiblingMismatch> {
-    backend_sibling_mismatches_by_file(ws)
-        .into_values()
-        .flatten()
-        .collect()
-}
-
-/// Same as [`backend_sibling_mismatches`], grouped by the source file of the
-/// decl each finding sits on. The LSP publishes per file; a file with no
+///
+/// Grouped by the source file of the decl each finding sits on; a file with no
 /// findings is absent.
 pub(crate) fn backend_sibling_mismatches_by_file(
     ws: &Workspace,
@@ -4195,16 +3839,9 @@ pub const UNUSED_FN: &str = "unused_fn";
 ///
 /// The lint is only meaningful closed-world: a library's public API has no
 /// in-project caller yet isn't dead. Callers gate it to `bin` packages.
-pub fn unused_fns(ws: &Workspace) -> Vec<UnusedFn> {
-    unused_fns_by_file(ws, &FxHashSet::default())
-        .into_values()
-        .flatten()
-        .collect()
-}
-
-/// Same as [`unused_fns`], but grouped by the source file each dead function
-/// lives in (`Module.file`). The LSP publishes per file, so it distributes the
-/// whole-project result this way; a file with no dead functions is absent.
+///
+/// Grouped by the source file each dead function lives in; a file with no dead
+/// functions is absent.
 pub(crate) fn unused_fns_by_file(
     ws: &Workspace,
     warm: &FxHashSet<ModuleId>,
@@ -4414,17 +4051,6 @@ fn user_fn_names(
     map
 }
 
-/// Unused-var findings across every non-stdlib body in the workspace. A
-/// convenience for tests and whole-workspace CLI runs; the LSP path lints a
-/// single file's bodies instead.
-pub fn unused_vars(ws: &Workspace) -> Vec<UnusedVar> {
-    let warm = FxHashSet::default();
-    let variants = enum_variant_names(ws, &warm);
-    ws.user_modules(&warm)
-        .flat_map(|module| unused_vars_in_module(module, &variants))
-        .collect()
-}
-
 /// An `unused-pure-expr` finding: a statement-position expression whose result
 /// is discarded and whose evaluation is side-effect-free. `is_comparison`
 /// tailors the message toward the canonical `==`-for-`=` typo.
@@ -4550,17 +4176,6 @@ fn variant_args_pure(body: &Body, args: &bone_core::hir::VariantArgs) -> bool {
             .into_iter()
             .all(|f| is_pure(body, body.struct_lit_field_arena[f].value)),
     }
-}
-
-/// Unused-pure-expr findings across every non-stdlib body in the workspace. A
-/// convenience for tests and whole-workspace CLI runs; the LSP path lints a
-/// single file's bodies instead.
-pub fn unused_pure_exprs(ws: &Workspace) -> Vec<UnusedPureExpr> {
-    let warm = FxHashSet::default();
-    ws.user_modules(&warm)
-        .flat_map(|m| m.bodies.values())
-        .flat_map(unused_pure_exprs_in_body)
-        .collect()
 }
 
 /// A `transmute_of_nullable` finding: a `cast`/`transmute` call that strips a
@@ -5272,20 +4887,6 @@ fn tail_sink(module: &Module, owner: &BodyOwner) -> Option<EscapeKind> {
         // aggregate it belongs to.
         _ => Some(EscapeKind::StoreField),
     }
-}
-
-/// `row_escape` findings across every non-stdlib body in the workspace.
-pub fn row_escapes(ws: &Workspace) -> Vec<RowEscape> {
-    let warm = FxHashSet::default();
-    let mut out = Vec::new();
-    for module in ws.user_modules(&warm) {
-        let inf = ws.inference(module.id);
-        for (owner, body) in module.bodies.iter() {
-            let bi = inf.and_then(|i| i.per_fn.get(owner));
-            out.extend(row_escapes_in_body(ws, bi, body, tail_sink(module, owner)));
-        }
-    }
-    out
 }
 
 pub(crate) fn nominal_type_names(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> FxHashSet<Ustr> {

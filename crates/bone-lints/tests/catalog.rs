@@ -138,26 +138,3 @@ fn warm_modules_are_not_reported_on() {
     sources.insert(Ustr::from(FILE), src);
     assert!(lint_workspace(&ws, &warm, true, &sources, &Default::default()).is_empty());
 }
-
-#[test]
-fn per_class_entry_points_skip_a_warm_module() {
-    // The LSP calls the cost classes directly for ONE file (the user opened a
-    // stdlib file), bypassing `lint_workspace`'s user-module filter, so each
-    // class carries its own warm guard.
-    let src = "fn main() {\n    let unread = 5\n}";
-    let ws = semantic_pass(&mut [parse(src)]).expect("typechecks");
-    let mid = ws
-        .modules
-        .iter()
-        .map(|m| m.id)
-        .find(|&id| !id.is_builtin())
-        .expect("one user module");
-    assert_eq!(
-        bone_lints::flat_findings(&ws, &FxHashSet::default(), mid, src).len(),
-        1,
-        "cold: the unused local is reported"
-    );
-    let warm: FxHashSet<ModuleId> = std::iter::once(mid).collect();
-    assert!(bone_lints::flat_findings(&ws, &warm, mid, src).is_empty());
-    assert!(bone_lints::inference_findings(&ws, &warm, mid, src).is_empty());
-}

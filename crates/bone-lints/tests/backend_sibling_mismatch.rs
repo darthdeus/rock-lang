@@ -1,51 +1,33 @@
-//! backend-sibling-mismatch lint over bone HIR. Same harness as unused_fn:
-//! `semantic_pass(&mut [parse(src)])` -> `Workspace`.
+//! backend-sibling-mismatch lint over bone HIR, run through `lint_workspace`.
 
-use bone_lints::{BackendSiblingIssue, BackendSiblingMismatch, backend_sibling_mismatches};
-use bone_semantic::prelude::*;
+use crate::support::lint_only;
+use bone_lints::Finding;
 
-fn parse_named(src: &str, name: &str) -> skull_parser::Ast {
-    skull_parser::parse_module_clean(src, Ustr::from(name)).expect("parse")
-}
-
-fn findings(srcs: &[&str]) -> Vec<BackendSiblingMismatch> {
-    let mut asts: Vec<skull_parser::Ast> = srcs
+/// Each source is its own module, `<sib0>`, `<sib1>`, ...
+fn findings(srcs: &[&str]) -> Vec<Finding> {
+    let names: Vec<String> = (0..srcs.len()).map(|i| format!("<sib{i}>")).collect();
+    let files: Vec<(&str, &str)> = names
         .iter()
-        .enumerate()
-        .map(|(i, s)| parse_named(s, &format!("<sib{i}>")))
+        .zip(srcs)
+        .map(|(name, src)| (name.as_str(), *src))
         .collect();
-    let ws = semantic_pass(&mut asts).expect("clean program typechecks");
-    let mut out = backend_sibling_mismatches(&ws);
-    out.sort_by(|a, b| {
-        (a.name, &a.signature, a.backend, &a.issue).cmp(&(
-            b.name,
-            &b.signature,
-            b.backend,
-            &b.issue,
-        ))
-    });
-    out
+    lint_only(&files, bone_lints::BACKEND_SIBLING_MISMATCH)
 }
 
+/// The backtick-quoted words (a repeat dropped) of each message, space-joined and sorted:
+/// `probe(int) lua js` for a lua decl missing on js, `probe(int) lua int` for a
+/// return differing from the lua sibling's `int`.
 fn summary(srcs: &[&str]) -> Vec<String> {
-    findings(srcs)
+    let mut out: Vec<String> = findings(srcs)
         .iter()
-        .map(|f| match &f.issue {
-            BackendSiblingIssue::MissingOn { backend } => {
-                format!(
-                    "{}{} on {} missing on {backend}",
-                    f.name, f.signature, f.backend
-                )
-            }
-            BackendSiblingIssue::ReturnDiffers {
-                other_backend,
-                other_ret,
-            } => format!(
-                "{}{} on {} returns differ vs {other_backend} ({other_ret})",
-                f.name, f.signature, f.backend
-            ),
+        .map(|f| {
+            let mut words: Vec<&str> = f.error.message.split('`').skip(1).step_by(2).collect();
+            words.dedup();
+            words.join(" ")
         })
-        .collect()
+        .collect();
+    out.sort();
+    out
 }
 
 #[test]
@@ -57,10 +39,7 @@ fn flags_a_sibling_pair_whose_param_types_drifted() {
                inline(js) fn probe(x: float) -> int = \"return x;\"";
     assert_eq!(
         summary(&[src]),
-        vec![
-            "probe(float) on js missing on lua".to_string(),
-            "probe(int) on lua missing on js".to_string(),
-        ]
+        ["probe(float) js lua", "probe(int) lua js"]
     );
 }
 
@@ -103,9 +82,9 @@ fn flags_an_arity_drift_across_files() {
     let js = "inline(js) fn make_window(title: string) -> int = \"return 1;\"";
     assert_eq!(
         summary(&[lua, js]),
-        vec![
-            "make_window(string) on js missing on lua".to_string(),
-            "make_window(string, bool) on lua missing on js".to_string(),
+        [
+            "make_window(string) js lua",
+            "make_window(string, bool) lua js"
         ]
     );
 }
@@ -120,10 +99,7 @@ fn return_type_drift_is_flagged() {
                inline(js) fn probe(x: int) -> float = \"return x;\"";
     assert_eq!(
         summary(&[src]),
-        vec![
-            "probe(int) on js returns differ vs lua (int)".to_string(),
-            "probe(int) on lua returns differ vs js (float)".to_string(),
-        ]
+        ["probe(int) js float", "probe(int) lua int"]
     );
 }
 
@@ -132,19 +108,20 @@ fn the_finding_points_at_the_unmatched_decl() {
     let lua = "inline(lua) fn make_window(title: string, full: bool) -> int = \"return 1\"";
     let js = "\n\ninline(js) fn make_window(title: string) -> int = \"return 1;\"";
     let fs = findings(&[lua, js]);
-    // `line_range` is 0-based, the unit `filter_suppressed` matches against.
-    let js_side = fs
-        .iter()
-        .find(|f| f.backend == "js")
-        .expect("js-side finding");
-    assert_eq!(
-        js_side.span.line_range().0,
-        2,
-        "reports on the js decl's own line"
-    );
-    let lua_side = fs
-        .iter()
-        .find(|f| f.backend == "lua")
-        .expect("lua-side finding");
-    assert_eq!(lua_side.span.line_range().0, 0);
+    // `line` is 0-based, the unit suppression matches against.
+    let declared_for = |backend: &str| {
+        fs.iter()
+            .find(|f| {
+                f.error
+                    .message
+                    .contains(&format!("declared for `{backend}`"))
+            })
+            .unwrap_or_else(|| panic!("{backend}-side finding: {fs:?}"))
+    };
+    let js_side = declared_for("js");
+    assert_eq!(js_side.file().as_str(), "<sib1>");
+    assert_eq!(js_side.line, 2, "reports on the js decl's own line");
+    let lua_side = declared_for("lua");
+    assert_eq!(lua_side.file().as_str(), "<sib0>");
+    assert_eq!(lua_side.line, 0);
 }

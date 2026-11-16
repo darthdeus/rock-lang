@@ -1,29 +1,13 @@
-//! unused-var lint over bone HIR. Harness mirrors bone-incremental's
-//! error_recovery tests: `semantic_pass(&mut [parse(src)])` -> `Workspace`.
+//! unused-var lint over bone HIR, run through `lint_workspace`.
 
-use bone_lints::{UnusedVar, filter_suppressed, unused_vars};
-use bone_semantic::prelude::*;
+use crate::support::{lint_only, quoted};
 
-fn parse(src: &str) -> skull_parser::Ast {
-    skull_parser::parse_module_clean(src, Ustr::from("<unused_var>")).expect("parse")
-}
-
-fn findings(src: &str) -> Vec<UnusedVar> {
-    let ws = semantic_pass(&mut [parse(src)]).expect("clean program typechecks");
-    unused_vars(&ws)
-}
-
-fn names_after_suppression(src: &str) -> Vec<String> {
-    let mut ns: Vec<String> = filter_suppressed(findings(src), src)
-        .iter()
-        .map(|f| f.name.to_string())
-        .collect();
-    ns.sort();
-    ns
-}
-
+/// The unused names `lint_workspace` reports, after `// rock: allow` suppression.
 fn names(src: &str) -> Vec<String> {
-    let mut ns: Vec<String> = findings(src).iter().map(|f| f.name.to_string()).collect();
+    let mut ns: Vec<String> = lint_only(&[("<unused_var>", src)], bone_lints::UNUSED_VAR)
+        .iter()
+        .map(quoted)
+        .collect();
     ns.sort();
     ns
 }
@@ -129,30 +113,24 @@ deco init update(stage: int = 100) {}
 fn allow_comment_above_suppresses() {
     let src = "fn f() -> int {\n    // rock: allow(unused_var)\n    let x = 5\n    3\n}";
     assert_eq!(
-        names(src),
+        names(&src.replace("// rock: allow(unused_var)", "")),
         vec!["x".to_string()],
-        "raw finding still exists"
+        "the finding exists without the comment"
     );
-    assert!(
-        names_after_suppression(src).is_empty(),
-        "comment above silences it"
-    );
+    assert!(names(src).is_empty(), "comment above silences it");
 }
 
 #[test]
 fn trailing_allow_comment_suppresses() {
     let src = "fn f() -> int {\n    let x = 5 // rock: allow(unused_var)\n    3\n}";
-    assert!(
-        names_after_suppression(src).is_empty(),
-        "trailing comment silences it"
-    );
+    assert!(names(src).is_empty(), "trailing comment silences it");
 }
 
 #[test]
 fn allow_of_a_different_lint_does_not_suppress() {
     let src = "fn f() -> int {\n    // rock: allow(pure)\n    let x = 5\n    3\n}";
     assert_eq!(
-        names_after_suppression(src),
+        names(src),
         vec!["x".to_string()],
         "wrong lint name -> still warns"
     );

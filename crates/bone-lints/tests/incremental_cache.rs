@@ -269,7 +269,7 @@ fn cached_findings_match_fresh_after_body_edit_and_span_shift() {
         }],
     );
     let new_sources = sources(new);
-    let (cached, mut stats) = cache.update(
+    let (cached, stats) = cache.update(
         &new_ws,
         &FxHashSet::default(),
         true,
@@ -286,16 +286,12 @@ fn cached_findings_match_fresh_after_body_edit_and_span_shift() {
     );
 
     assert_eq!(shapes(&cached), shapes(&fresh));
-    assert!(cache.compare_fresh_findings(
-        &new_ws,
-        &FxHashSet::default(),
-        true,
-        &new_sources,
-        &LintOptions::default(),
-        &cached,
-        &mut stats,
-    ));
-    assert_eq!(stats.fresh_cached_finding_comparisons, 1);
+    let debug = |findings: &[bone_lints::Finding]| {
+        let mut keys: Vec<String> = findings.iter().map(|f| format!("{f:?}")).collect();
+        keys.sort();
+        keys
+    };
+    assert_eq!(debug(&cached), debug(&fresh));
     assert!(stats.body_updates > 0);
     assert_eq!(stats.full_rebuilds, 0);
     assert_eq!(stats.full_lint_workspace_passes, 0);
