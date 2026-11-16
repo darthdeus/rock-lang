@@ -2441,6 +2441,22 @@ fn cmp_by_offset(a: &Finding, b: &Finding) -> std::cmp::Ordering {
         .cmp(&finding_offset(b))
         .then_with(|| a.lint.cmp(b.lint))
         .then_with(|| a.error.message.cmp(&b.error.message))
+        .then_with(|| {
+            fn label_key(label: &rock_core::errors::CompilerLabel) -> impl Ord + '_ {
+                (
+                    label.span.file.as_str(),
+                    label.span.offset_range(),
+                    label.span.line_range(),
+                    label.span.col_range(),
+                    label.message.as_str(),
+                )
+            }
+            a.error
+                .labels
+                .iter()
+                .map(label_key)
+                .cmp(b.error.labels.iter().map(label_key))
+        })
 }
 
 fn finding_owner(module: &Module, finding: &Finding) -> Option<BodyOwner> {

@@ -745,6 +745,50 @@ fn suppression_removal_after_a_suppressed_rebuild_restores_the_finding() {
 }
 
 #[test]
+fn tied_findings_are_ordered_by_label_spans_in_full_and_cached_lints() {
+    let src = "fn main() { let value = 1\n let value = 2\n }\n";
+    let parts = [(FILE, src)];
+    let sources = sources_many(&parts);
+    let options = LintOptions::default();
+    for ends in [[19, 18], [18, 19]] {
+        let mut ws = workspace_many(&parts);
+        let (mid, owner) = function_owner(&ws, "main");
+        let body = ws.module_mut(mid).bodies.get_mut(&owner).expect("body");
+        // Simulate findings with the same primary position and message but
+        // different extents, in either derivation order.
+        for ((_, binding), end) in body.binding_arena.iter_mut().zip(ends) {
+            binding.span = Span::new(Ustr::from(FILE), (0, 0), (15, end), (15, end));
+        }
+        let mut cache = IncrementalLintCache::default();
+        let (rebuilt, _) = run_update(
+            &mut cache,
+            &ws,
+            &sources,
+            &options,
+            &LintCacheUpdate::full(),
+        );
+        let (updated, stats) = run_update(
+            &mut cache,
+            &ws,
+            &sources,
+            &options,
+            &LintCacheUpdate::body_only([Ustr::from(FILE)], [(mid, owner)], None),
+        );
+        assert_eq!(stats.full_rebuilds, 0);
+        for findings in [lint_fresh(&ws, &sources, &options), rebuilt, updated] {
+            assert_eq!(findings.len(), 2, "{findings:#?}");
+            assert_eq!(findings[0].lint, findings[1].lint);
+            assert_eq!(findings[0].error.message, findings[1].error.message);
+            let spans: Vec<_> = findings
+                .iter()
+                .map(|finding| finding.error.labels[0].span.offset_range())
+                .collect();
+            assert_eq!(spans, [(15, 18), (15, 19)]);
+        }
+    }
+}
+
+#[test]
 fn cached_and_fresh_findings_share_one_order_after_a_body_update() {
     let src = "fn first(a: int) {\n    a == 1\n    let first_unused = 1\n}\nfn second(b: int) {\n    b == 2\n    let second_unused = 2\n}\nfn main() { first(1); second(2) }\n";
     let mut cache = seed(src);
