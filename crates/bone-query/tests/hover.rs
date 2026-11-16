@@ -6,26 +6,16 @@
 //!  - Tokens: keywords and punctuation resolve to the enclosing construct;
 //!    whitespace resolves to nothing. See hover token resolution contract.
 
+use crate::fixture::{PATH, hover_markup, pos, workspace};
 use bone_query::BoneWorkspace;
-use lsp_types::{HoverContents, Position};
+use lsp_types::Position;
 
-const PATH: &str = "/tmp/rock_hover.rock";
-
-// == Brace hover: every braced-block form resolves at both `{` and `}` ========
-
-fn pos_of(src: &str, needle: &str) -> Position {
-    let idx = src.find(needle).expect("needle") + needle.len() - 1;
-    let before = &src[..idx];
-    let line = before.matches('\n').count() as u32;
-    let col = (idx - before.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32;
-    Position::new(line, col)
+fn last_char(src: &str, needle: &str) -> Position {
+    pos(src, needle, needle.len() - 1)
 }
 
 fn hover_at(bone: &BoneWorkspace, pos: Position) -> String {
-    match bone.hover(PATH, pos).map(|h| h.contents) {
-        Some(HoverContents::Markup(m)) => m.value,
-        _ => String::new(),
-    }
+    hover_markup(bone, PATH, pos).unwrap_or_default()
 }
 
 #[test]
@@ -83,10 +73,9 @@ fn brace_hover_resolves_the_block_in_every_braced_form() {
     let mut fails = Vec::new();
     for (name, src, open, close) in cases {
         let full = format!("{pre}{src}");
-        let mut bone = BoneWorkspace::new();
-        bone.update(PATH, full.to_string());
-        let o = hover_at(&bone, pos_of(&full, open));
-        let c = hover_at(&bone, pos_of(&full, close));
+        let bone = workspace(&full);
+        let o = hover_at(&bone, last_char(&full, open));
+        let c = hover_at(&bone, last_char(&full, close));
         if !o.contains("MarkerS") || !c.contains("MarkerS") || o != c {
             fails.push(format!("  [{name}] open={o:?} close={c:?}"));
         }
@@ -97,8 +86,6 @@ fn brace_hover_resolves_the_block_in_every_braced_form() {
         fails.join("\n")
     );
 }
-
-// == Token hover: keywords/punct resolve to their construct; whitespace to none
 
 const SRC: &str = "\
 enum Dir { North, South }
@@ -114,218 +101,97 @@ fn pick(d: Dir) -> int {
 }
 ";
 
-fn fresh() -> BoneWorkspace {
-    let mut bone = BoneWorkspace::new();
-    bone.update(PATH, SRC.to_string());
-    bone
-}
-
-/// Hover text at (0-based line, 1-based-ish char computed from a substring).
-fn at(bone: &BoneWorkspace, line: u32, ch: u32) -> Option<String> {
-    bone.hover(PATH, Position::new(line, ch))
-        .map(|h| match h.contents {
-            HoverContents::Markup(m) => m.value,
-            other => panic!("expected markup hover, got {other:?}"),
-        })
-}
-
-/// Char index (0-based) of `sub` on `line` (0-based), + `nth` char into it.
-fn col(line: usize, sub: &str, into: usize) -> u32 {
-    let l = SRC.lines().nth(line).unwrap();
-    (l.find(sub)
-        .unwrap_or_else(|| panic!("{sub:?} not on line {line}: {l:?}"))
-        + into) as u32
-}
-
+/// Keywords and punctuation hover their construct; whitespace hovers nothing.
 #[test]
-fn match_keyword_and_punct_hover_the_match_value() {
-    let b = fresh();
-    // `match` keyword (line 5) and the `=>` (line 6) both hover the match's
-    // value type (() here -- statement position discards the value).
-    let kw = at(&b, 5, col(5, "match", 1)).expect("match kw hovers");
-    assert!(kw.contains("Type:"), "match kw -> value type: {kw:?}");
-    let arrow = at(&b, 6, col(6, "=>", 0)).expect("`=>` hovers");
-    assert!(arrow.contains("Type:"), "`=>` -> match value: {arrow:?}");
-}
-
-#[test]
-fn double_colon_in_pattern_hovers_the_enum() {
-    let b = fresh();
-    // The `::` between `Dir` and `North` (line 6).
-    let c = SRC.lines().nth(6).unwrap().find("::").unwrap() as u32;
-    let h = at(&b, 6, c).expect("`::` hovers");
-    assert!(h.contains("enum Dir"), "`::` -> enum: {h:?}");
-}
-
-#[test]
-fn struct_literal_colon_hovers_the_field() {
-    let b = fresh();
-    // The `:` in `x: 3` (line 3) -> the field, same as hovering `x`.
-    let colon = SRC.lines().nth(3).unwrap().find(": 3").unwrap() as u32;
-    let h = at(&b, 3, colon).expect("field `:` hovers");
-    assert!(
-        h.contains("x: int (field of FixVec2)"),
-        "`:` -> field: {h:?}"
-    );
-}
-
-#[test]
-fn fn_signature_tokens_hover_the_signature() {
-    let b = fresh();
-    // `fn` keyword, an opening param paren, and the `->` arrow (line 2).
-    for (sub, into) in [("fn", 0), ("(", 0), ("->", 0)] {
-        let h = at(&b, 2, col(2, sub, into)).unwrap_or_else(|| panic!("{sub} hovers"));
-        assert!(h.contains("fn pick("), "`{sub}` -> signature: {h:?}");
+fn token_hover_resolves_the_enclosing_construct() {
+    // The match is a statement, so its value type is `()`. The signature hover
+    // ends at the body brace, so body keywords must not show it.
+    // (line, token on that line, offset into it, must contain, must not contain)
+    let cases: &[(usize, &str, usize, &str, &str)] = &[
+        (5, "match", 1, "Type:", "fn pick("),
+        (6, "=>", 0, "Type:", "fn pick("),
+        (6, "::", 0, "enum Dir", "fn pick("),
+        (3, ": 3", 0, "x: int (field of FixVec2)", "fn pick("),
+        (2, "fn", 0, "fn pick(", "match"),
+        (2, "(", 0, "fn pick(", "match"),
+        (2, "->", 0, "fn pick(", "match"),
+        (9, "return", 0, "Type: int", "fn pick("),
+        (4, "if", 0, "Type: int", "fn pick("),
+        (4, "else", 0, "Type: int", "fn pick("),
+    ];
+    let bone = workspace(SRC);
+    for (line, token, into, wanted, unwanted) in cases {
+        let text = SRC.lines().nth(*line).unwrap();
+        let col = text.find(token).unwrap() + into;
+        let p = Position::new(*line as u32, col as u32);
+        let h = hover_markup(&bone, PATH, p).unwrap_or_else(|| panic!("`{token}`: no hover"));
+        assert!(h.contains(wanted), "`{token}`: {h:?}");
+        assert!(!h.contains(unwanted), "`{token}`: {h:?}");
+    }
+    // Whitespace, and a `let` keyword (which must not leak the signature).
+    for p in [
+        Position::new(5, 0),
+        Position::new(6, 0),
+        Position::new(3, 4),
+    ] {
+        assert_eq!(hover_markup(&bone, PATH, p), None, "at {p:?}");
     }
 }
 
 #[test]
-fn return_keyword_hovers_the_returned_value() {
-    let b = fresh();
-    let h = at(&b, 9, col(9, "return", 0)).expect("return kw hovers");
-    assert!(h.contains("Type: int"), "return -> value type: {h:?}");
-}
-
-#[test]
-fn if_else_hover_the_if_value() {
-    let b = fresh();
-    let if_h = at(&b, 4, col(4, "if", 0)).expect("if hovers");
-    assert!(if_h.contains("Type: int"), "if -> value: {if_h:?}");
-    let else_h = at(&b, 4, col(4, "else", 0)).expect("else hovers");
-    assert!(else_h.contains("Type: int"), "else -> value: {else_h:?}");
-}
-
-#[test]
-fn body_keywords_do_not_leak_the_fn_signature() {
-    // Regression: the fn-signature hover is bounded to the signature region
-    // (before the body brace), so `let`/`match`/`return` keywords inside the
-    // body never resolve to the enclosing fn's signature.
-    let b = fresh();
-    for (line, kw) in [(3u32, "let"), (5, "match"), (9, "return")] {
-        if let Some(h) = at(&b, line, col(line as usize, kw, 0)) {
-            assert!(
-                !h.contains("fn pick("),
-                "`{kw}` leaked the fn signature: {h:?}"
-            );
+fn hover_cases() {
+    let overloads = "struct A {}\nstruct B {}\nstruct C {}\nfn foo(a: A) -> int { 1 }\nfn foo(b: B) -> int { 2 }\n";
+    let resolved = format!("{overloads}fn main() {{\n  let x = A {{}}\n  let r = foo(x)\n}}\n");
+    let unresolved = format!("{overloads}fn main() {{\n  let c = C {{}}\n  let r = foo(c)\n}}\n");
+    // (case, source, needle, offset into it, must contain, must not contain)
+    let cases: &[(&str, &str, &str, usize, &[&str], &[&str])] = &[
+        (
+            "resolved overloaded call lists every overload",
+            &resolved,
+            "= foo",
+            4,
+            &["fn foo(a: A) -> int", "fn foo(b: B) -> int"],
+            &[],
+        ),
+        // With no resolution, the name still shows what shapes exist.
+        (
+            "unresolvable overloaded call lists every overload",
+            &unresolved,
+            "= foo",
+            4,
+            &["fn foo(a: A) -> int", "fn foo(b: B) -> int"],
+            &[],
+        ),
+        // Inference types an assign target `()`; hover shows the binding.
+        (
+            "assign target",
+            "struct Widget { id: int }\nfn f(acc: Widget, other: Widget) {\nacc = other\n}\n",
+            "acc = other",
+            1,
+            &["Widget"],
+            &["()"],
+        ),
+        (
+            "field ref names the field, not the FieldRef wrapper",
+            "struct Mob { health: int, attack_co: int? }\nfn kill_co<T>(o: T, f: FieldRef<T, int?>) {}\nfn r(mob: Mob) {\n    kill_co(mob, .attack_co)\n}\n",
+            ".attack_co",
+            9,
+            &["attack_co", "field of Mob"],
+            &["FieldRef"],
+        ),
+    ];
+    for (case, src, needle, into, wanted, unwanted) in cases {
+        let h = hover_at(&workspace(src), pos(src, needle, *into));
+        for w in *wanted {
+            assert!(h.contains(w), "{case}: missing {w:?} in {h:?}");
+        }
+        for u in *unwanted {
+            assert!(!h.contains(u), "{case}: unexpected {u:?} in {h:?}");
         }
     }
-}
-
-// == Overload hover: hovering a call's fn name lists every overload ===========
-
-/// Hover text at the first occurrence of `needle`'s last char.
-fn hover_on(bone: &BoneWorkspace, src: &str, needle: &str) -> String {
-    hover_at(bone, pos_of(src, needle))
-}
-
-#[test]
-fn hover_on_resolved_overloaded_call_lists_all_overloads_selected_first() {
-    // Two overloads; the call resolves to `foo(a: A)`. Hovering the callee name
-    // shows BOTH signatures, with the resolved one first.
-    let src = "struct A {}\nstruct B {}\n\
-               fn foo(a: A) -> int { 1 }\n\
-               fn foo(b: B) -> int { 2 }\n\
-               fn main() {\n  let x = A {}\n  let r = foo(x)\n}\n";
-    let mut bone = BoneWorkspace::new();
-    bone.update(PATH, src.to_string());
-    let h = hover_on(&bone, src, "= foo");
+    let h = hover_at(&workspace(&resolved), pos(&resolved, "= foo", 4));
     assert!(
-        h.contains("fn foo(a: A) -> int"),
-        "missing overload 1: {h:?}"
-    );
-    assert!(
-        h.contains("fn foo(b: B) -> int"),
-        "missing overload 2: {h:?}"
-    );
-    let i1 = h.find("fn foo(a: A)").unwrap();
-    let i2 = h.find("fn foo(b: B)").unwrap();
-    assert!(
-        i1 < i2,
-        "resolved overload `foo(a: A)` should come first: {h:?}"
-    );
-}
-
-#[test]
-fn hover_on_unresolvable_overloaded_call_still_lists_overloads() {
-    // The call `foo(c)` matches NO overload (wrong arg type), so bone records no
-    // resolution -- but hovering the name must still surface every overload so
-    // the user can see what shapes exist.
-    let src = "struct A {}\nstruct B {}\nstruct C {}\n\
-               fn foo(a: A) -> int { 1 }\n\
-               fn foo(b: B) -> int { 2 }\n\
-               fn main() {\n  let c = C {}\n  let r = foo(c)\n}\n";
-    let mut bone = BoneWorkspace::new();
-    bone.update(PATH, src.to_string());
-    let h = hover_on(&bone, src, "= foo");
-    assert!(
-        h.contains("fn foo(a: A) -> int"),
-        "missing overload 1: {h:?}"
-    );
-    assert!(
-        h.contains("fn foo(b: B) -> int"),
-        "missing overload 2: {h:?}"
-    );
-}
-
-#[test]
-fn whitespace_hovers_nothing() {
-    let b = fresh();
-    // Leading indentation of the `match` line (col 0) and a blank column.
-    assert!(at(&b, 5, 0).is_none(), "leading whitespace -> no hover");
-    assert!(at(&b, 6, 0).is_none(), "blank inside match -> no hover");
-}
-
-#[test]
-fn assign_target_ident_hovers_its_binding_type_not_unit() {
-    // A variable in place position (an assign target) is typed `()` by
-    // inference; hover must show the binding's real type. Regression: the LHS
-    // of `acc = other` hovered `Type: ()` instead of `Type: struct Widget`.
-    // Field-access targets (`h.w = ..`) never had this -- they're typed exprs.
-    let src = "struct Widget { id: int }\n\
-               fn f(acc: Widget, other: Widget) {\n\
-               acc = other\n\
-               }\n";
-    let mut bone = BoneWorkspace::new();
-    bone.update(PATH, src.to_string());
-    let off = src.find("acc = other").expect("assignment") + 1; // on the target `acc`
-    let before = &src[..off];
-    let pos = Position::new(
-        before.matches('\n').count() as u32,
-        (off - before.rfind('\n').map_or(0, |i| i + 1)) as u32,
-    );
-    let h = hover_at(&bone, pos);
-    assert!(
-        h.contains("Widget"),
-        "assign-target hover should show Widget, got: {h:?}"
-    );
-    assert!(
-        !h.contains("()"),
-        "assign-target hover must not be unit: {h:?}"
-    );
-}
-
-#[test]
-fn field_ref_hovers_the_referenced_field_not_the_fieldref_wrapper() {
-    // Hovering `.attack_co` in a `FieldRef<Mob, int?>` slot must show the field
-    // it refers to (`attack_co: int? (field of Mob)`), not the raw
-    // `FieldRef<Mob, int?>` wrapper type.
-    let src = "struct Mob { health: int, attack_co: int? }\n\
-               fn kill_co<T>(o: T, f: FieldRef<T, int?>) {}\n\
-               fn r(mob: Mob) {\n    kill_co(mob, .attack_co)\n}\n";
-    let mut bone = BoneWorkspace::new();
-    bone.update(PATH, src.to_string());
-    let pos = pos_of(src, ".attack_co"); // cursor on the field-ref name (last char `o`)
-    let h = hover_at(&bone, pos);
-    assert!(
-        h.contains("attack_co"),
-        "field-ref hover should name the field: {h:?}"
-    );
-    assert!(
-        h.contains("field of Mob"),
-        "field-ref hover should show the owning struct: {h:?}"
-    );
-    assert!(
-        !h.contains("FieldRef"),
-        "field-ref hover must not show the FieldRef wrapper: {h:?}"
+        h.find("fn foo(a: A)") < h.find("fn foo(b: B)"),
+        "the resolved overload comes first: {h:?}"
     );
 }
