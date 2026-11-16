@@ -71,12 +71,48 @@ pub fn try_format_with_dialect(
         out.pop();
     }
     out.push('\n');
+    // The printer places comments by position and can miss one; never hand
+    // back output that lost or duplicated a comment.
+    let (before, after) = (comments(input, file)?, comments(&out, file)?);
+    if before != after {
+        let lost: Vec<&String> = before.iter().filter(|c| !after.contains(c)).collect();
+        return Err(format!(
+            "formatting would not keep every comment (lost {lost:?}); file left unformatted"
+        ));
+    }
+    Ok(out)
+}
+
+/// The comments of `src` as `//`/`/* */` source text, trimmed and sorted.
+fn comments(src: &str, file: Ustr) -> Result<Vec<String>, String> {
+    let tokens = rock_tokenizer::Tokenizer::new(src, file)
+        .tokenize()
+        .map_err(|e| format!("{e:?}"))?;
+    let mut out: Vec<String> = tokens
+        .iter()
+        .filter_map(|t| match t.kind {
+            rock_tokenizer::TokenKind::Comment(_) => {
+                let (lo, hi) = t.span.offset_range();
+                Some(src[lo..hi].trim().to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    out.sort_unstable();
     Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{FormatConfig, try_format};
+    use super::{FormatConfig, format_code, try_format};
+
+    #[test]
+    fn a_comment_the_printer_would_drop_fails_the_format() {
+        let source = "fn f() {\n    let v = (\n        a,\n        // c\n        b\n    )\n}\n";
+        let err = try_format(source, &FormatConfig::default()).expect_err("comment dropped");
+        assert!(err.contains("// c"), "{err}");
+        assert_eq!(format_code(source), source);
+    }
 
     #[test]
     fn trailing_block_lambda_keeps_call_layout_after_expansion() {

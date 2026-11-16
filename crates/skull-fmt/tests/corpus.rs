@@ -4,15 +4,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub(crate) struct Case {
-    pub(crate) file: String,
-    pub(crate) name: String,
-    pub(crate) input: String,
+struct Case {
+    file: String,
+    name: String,
+    input: String,
     expected: String,
 }
 
 /// Every case in the corpus, in file order.
-pub(crate) fn cases() -> Vec<Case> {
+fn cases() -> Vec<Case> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fmt");
     let mut files = Vec::new();
     collect(&dir, &mut files);
@@ -114,7 +114,17 @@ fn corpus_cases_format_to_their_expected_output() {
             failures.push(format!("{id}: parses is {parses}"));
             continue;
         }
-        let got = skull_fmt::format_code(&c.input);
+        let got = if parses {
+            match skull_fmt::try_format(&c.input, &skull_fmt::FormatConfig::default()) {
+                Ok(got) => got,
+                Err(e) => {
+                    failures.push(format!("{id}: {e}"));
+                    continue;
+                }
+            }
+        } else {
+            skull_fmt::format_code(&c.input)
+        };
         if got.trim_end() != c.expected.trim_end() {
             failures.push(format!(
                 "{id}\nINPUT:\n{}\nEXPECTED:\n{}\nGOT:\n{got}",

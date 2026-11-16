@@ -1,46 +1,10 @@
-//! Formatting must keep every comment: over the repository's Rock sources and
-//! the formatter corpus, the multiset of comments in the output equals the one
-//! in the input. Comment placement is covered by the corpus; this catches the
-//! silent deletion a fixed expected output only pins down for known shapes.
+//! Formatting must keep every comment. `try_format` refuses output whose
+//! comments differ from the input's, so a source that parses but does not
+//! format is a comment the printer lost.
 
 use rock_core::source_code::Dialect;
-use rock_tokenizer::{TokenKind, Tokenizer};
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-
-fn comments(src: &str) -> BTreeMap<String, usize> {
-    let tokens = Tokenizer::new(src, "<comments>".into())
-        .tokenize()
-        .expect("tokenizing a source that formatted must succeed");
-    let mut out = BTreeMap::new();
-    for token in tokens {
-        if let TokenKind::Comment(text) = token.kind {
-            *out.entry(text.as_str().trim().to_string()).or_insert(0) += 1;
-        }
-    }
-    out
-}
-
-/// What the output lost and gained relative to the input, or `None` when the
-/// two hold the same comments.
-fn comment_diff(input: &str, output: &str) -> Option<String> {
-    let (before, after) = (comments(input), comments(output));
-    if before == after {
-        return None;
-    }
-    let lost = before
-        .iter()
-        .filter(|(text, n)| after.get(*text).unwrap_or(&0) < n)
-        .map(|(text, _)| text.as_str())
-        .collect::<Vec<_>>();
-    let gained = after
-        .iter()
-        .filter(|(text, n)| before.get(*text).unwrap_or(&0) < n)
-        .map(|(text, _)| text.as_str())
-        .collect::<Vec<_>>();
-    Some(format!("lost {lost:?}, gained {gained:?}"))
-}
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir)
@@ -56,22 +20,28 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn format_any_dialect(src: &str) -> Option<String> {
+/// The formatted source, or the error from the dialect that parses it;
+/// `None` when it parses in neither.
+fn format_any_dialect(src: &str) -> Option<Result<String, String>> {
     let cfg = skull_fmt::FormatConfig::default();
-    skull_fmt::try_format_with_dialect(src, &cfg, Dialect::Legacy)
-        .or_else(|_| skull_fmt::try_format_with_dialect(src, &cfg, Dialect::V1))
-        .ok()
+    [Dialect::Legacy, Dialect::V1]
+        .into_iter()
+        .find_map(|dialect| {
+            skull_parser::parse_module_clean_with_dialect(src, "<src>".into(), dialect)
+                .ok()
+                .map(|_| skull_fmt::try_format_with_dialect(src, &cfg, dialect))
+        })
 }
 
 #[track_caller]
 fn assert_keeps_comments(src: &str) {
-    let formatted = format_any_dialect(src).unwrap_or_else(|| panic!("must format:\n{src}"));
-    if let Some(diff) = comment_diff(src, &formatted) {
-        panic!("{diff}\ninput:\n{src}\noutput:\n{formatted}");
-    }
+    let formatted = match format_any_dialect(src) {
+        Some(Ok(formatted)) => formatted,
+        other => panic!("must format: {other:?}\n{src}"),
+    };
     assert_eq!(
-        format_any_dialect(&formatted).as_deref(),
-        Some(formatted.as_str()),
+        format_any_dialect(&formatted),
+        Some(Ok(formatted.clone())),
         "not a fixed point"
     );
 }
@@ -124,28 +94,13 @@ fn repository_sources_keep_every_comment() {
     for file in &files {
         let src = fs::read_to_string(file).expect("read a Rock source");
         // Negative fixtures do not parse; the formatter leaves those alone.
-        let Some(formatted) = format_any_dialect(&src) else {
-            continue;
-        };
-        checked += 1;
-        if let Some(diff) = comment_diff(&src, &formatted) {
-            failures.push(format!("{}: {diff}", file.display()));
+        match format_any_dialect(&src) {
+            None => continue,
+            Some(Ok(_)) => {}
+            Some(Err(e)) => failures.push(format!("{}: {e}", file.display())),
         }
+        checked += 1;
     }
     assert!(checked > 100, "only {checked} sources formatted");
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
-}
-
-#[test]
-fn formatter_corpus_keeps_every_comment() {
-    let mut failures = Vec::new();
-    for case in crate::corpus::cases() {
-        let Some(formatted) = format_any_dialect(&case.input) else {
-            continue;
-        };
-        if let Some(diff) = comment_diff(&case.input, &formatted) {
-            failures.push(format!("{} :: {}: {diff}", case.file, case.name));
-        }
-    }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
