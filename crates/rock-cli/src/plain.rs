@@ -255,34 +255,6 @@ pub static SHADER: CliCommand = CliCommand {
     }),
 };
 
-pub(crate) static BONE: BackendSpec = BackendSpec {
-    backend: Backend::Bone,
-    name: "bone",
-    tagline: "bone is a typechecker with no codegen/runtime",
-    omitted: None,
-    operations: &[
-        // skull subsumes bone for tests (it type-checks through the same
-        // front end, then runs), so both backends share skull_test.
-        (Operation::Test, |cx| {
-            let files = cx.get_test_files()?;
-            let filter = cx.test_filter()?;
-            rock_cli::skull_backend::skull_test(&files, filter.as_ref(), cx.args.test_threads)
-        }),
-        (Operation::Compile, bone_compile),
-        (Operation::CompileSingle, bone_compile),
-        (Operation::TestCompile, bone_compile),
-        (Operation::Run, |cx| {
-            let file = cx.get_required_file("run")?;
-            rock_cli::bone_backend::bone_check_single(file, "run", cx.args.iters)
-        }),
-        (Operation::Watch, |cx| {
-            let path = cx.get_project_dir_or_current()?;
-            rock_cli::bone_backend::bone_watch(&path)
-        }),
-    ],
-    filter_rejection: None,
-};
-
 pub(crate) static SKULL: BackendSpec = BackendSpec {
     backend: Backend::Skull,
     name: "skull",
@@ -336,7 +308,7 @@ pub static JS: BackendSpec = BackendSpec {
         })
     },
     operations: &[(Operation::Test, js_test), (Operation::Run, js_run)],
-    filter_rejection: Some("`rock test` filtering is supported only by the skull/bone test runner"),
+    filter_rejection: Some("`rock test` filtering is supported only by the skull test runner"),
 };
 
 pub static GLSL: BackendSpec = BackendSpec {
@@ -348,10 +320,10 @@ pub static GLSL: BackendSpec = BackendSpec {
         let files = cx.get_test_files()?;
         rock_cli::glsl_test::glsl_test(&files, cx.args.skip_gpu)
     })],
-    filter_rejection: Some("`rock test` filtering is supported only by the skull/bone test runner"),
+    filter_rejection: Some("`rock test` filtering is supported only by the skull test runner"),
 };
 
-pub static BACKENDS: &[BackendSpec] = &[BONE, SKULL, JS, GLSL];
+pub static BACKENDS: &[BackendSpec] = &[SKULL, JS, GLSL];
 
 fn bone_compile(cx: &CommandContext) -> Result<()> {
     let file = cx.get_required_file("compile")?;

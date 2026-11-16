@@ -1,7 +1,7 @@
 //! skull backend integration for `rock-cli` (`--backend skull`, the default).
 //!
 //! skull is the code generator over `bone`'s HIR (see the `skull` crate).
-//! Where `--backend bone` stops at type-checking, `--backend skull` emits Lua
+//! Where `rock check` stops at type-checking, `--backend skull` emits Lua
 //! from bone's HIR and, for `test`/`run`, executes it with LuaJIT.
 
 use crate::Result;
@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 /// Parse `src`, type-check it through bone WITH the stdlib injected (so
-/// operators/`print`/`assert` resolve, exactly like `--backend bone`), then emit
+/// operators/`print`/`assert` resolve, exactly like `rock check`), then emit
 /// Lua for the user module via skull. The stdlib module isn't emitted — its
 /// symbols are referenced by name (resolved at runtime by a real stdlib
 /// prelude, or simply not called under the load-only validity gate).

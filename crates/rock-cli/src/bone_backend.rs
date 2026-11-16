@@ -1,6 +1,5 @@
-//! The type-checking front end shared by every command: `rock check`, the
-//! `--backend bone` commands (type-check only), and the parse, session and
-//! diagnostic helpers the skull backend builds on.
+//! The type-checking front end shared by every command: `rock check` and the
+//! parse, session and diagnostic helpers the skull backend builds on.
 
 use crate::Result;
 use bone_core::prelude::Instant;
@@ -401,7 +400,7 @@ pub(crate) fn categorize(msg: &str) -> String {
     }
 }
 
-/// `rock check`, and `compile`/`run --backend bone`: type-check only. Exits 0
+/// `rock check`: type-check only. Exits 0
 /// silently when the source type-checks; otherwise prints every diagnostic and
 /// exits 1. A directory is checked as one workspace (the only way cross-file
 /// references resolve); a bare file goes through the single-source pipeline.
@@ -604,80 +603,6 @@ pub(crate) fn sync_session(
         }
     }
     sync
-}
-
-/// `rock watch --backend bone` — live whole-project typecheck loop backed by
-/// an incremental `bone_semantic::Session`: the stdlib is lowered + inferred once at
-/// startup and never again; each change re-checks the user modules through
-/// `Session::update_file` (content hashes make untouched files free). Every
-/// event re-discovers sources and diffs against the session's tracked set, so
-/// file adds/deletes need no per-event path bookkeeping. A type error is
-/// rendered and the loop keeps running, unlike the one-shot commands which
-/// exit 1; a failed update (parse/macro/lowering error) keeps serving the
-/// previous good workspace.
-pub(crate) fn bone_watch(path: &str) -> Result<()> {
-    // None until a Session::new succeeds: an unparseable file at startup is
-    // rendered and retried on the next change, matching the old batch loop's
-    // keep-running behavior.
-    let mut session: Option<bone_incremental::session::Session> = None;
-
-    let check = |label: &str, session: &mut Option<bone_incremental::session::Session>| {
-        let source_spec = crate::common::path_to_source_spec(path);
-        let sources = match crate::unified_compile::discover_sources(&source_spec) {
-            Ok(s) => s,
-            Err(e) => {
-                log::error!(target: "WATCH", "bone: source discovery failed: {e}");
-                return;
-            }
-        };
-        let files = session_files(&sources);
-
-        let t = Instant::now();
-        let sync = match session {
-            None => match bone_session(files) {
-                Ok(s) => {
-                    *session = Some(s);
-                    SessionSync::default()
-                }
-                Err(e) => {
-                    eprintln!("{}", e.render(&sources));
-                    log::error!(target: "WATCH",
-                        "bone {label}: session init failed in {:.1}ms",
-                        t.elapsed().as_secs_f64() * 1000.0);
-                    return;
-                }
-            },
-            Some(s) => sync_session(s, &files, &sources),
-        };
-        let (reinferred, update_failed) = (sync.reinferred.len(), sync.failed);
-        let ms = t.elapsed().as_secs_f64() * 1000.0;
-
-        let Some(s) = session else { return };
-        let errs = s.diagnostics();
-        if update_failed {
-            log::error!(target: "WATCH",
-                "bone {label}: update failed in {ms:.1}ms - serving last good state");
-        } else if errs.is_empty() {
-            log::info!(target: "WATCH",
-                "bone {label}: {} files type-check in {ms:.1}ms ({reinferred} bodies re-inferred)",
-                sources.files.len());
-        } else {
-            for e in &errs {
-                eprintln!("{}", e.render(&sources));
-            }
-            log::error!(target: "WATCH",
-                "bone {label}: {} body error(s) in {ms:.1}ms ({reinferred} bodies re-inferred)",
-                errs.len());
-        }
-    };
-
-    check("initial", &mut session);
-
-    crate::run_compile_watch_loop(
-        vec![std::path::PathBuf::from(path)],
-        &format!("bone: watching {path} for changes"),
-        |_event| check("recheck", &mut session),
-    )
 }
 
 /// Log the mean per-stage timing of `agg`, summed over `iters` runs, on the

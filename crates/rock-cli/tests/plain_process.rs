@@ -350,11 +350,26 @@ fn library_resolves_game_services_without_private_registration() {
 #[test]
 fn retired_backend_is_rejected_before_source_discovery() {
     let root = tempfile::tempdir().unwrap();
-    assert!(rock_cli::BackendSpec::named("c").is_none());
-    for command in ["compile", "test", "run"] {
-        let out = invoke(root.path(), &[command, "missing.rock", "--backend", "c"]);
-        assert!(!out.status.success());
-        assert_mentions(&out, "invalid value");
+    for backend in ["c", "bone"] {
+        assert!(rock_cli::BackendSpec::named(backend).is_none());
+        for command in ["compile", "test", "run", "watch"] {
+            let out = invoke(
+                root.path(),
+                &[command, "missing.rock", "--backend", backend],
+            );
+            assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+            assert_mentions(&out, "invalid value");
+        }
+        let out = rock(root.path())
+            .args(["run", "missing.rock"])
+            .env("ROCK_BACKEND", backend)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+        assert_mentions(
+            &out,
+            &format!("invalid value '{backend}' for 'ROCK_BACKEND'"),
+        );
     }
     assert!(!root.path().join("tmp").exists());
 }
@@ -415,7 +430,7 @@ fn plain_identity_storage_follows_the_manifest_declaration() {
         );
     };
     let commands: [&[&str]; 3] = [
-        &["check", ".", "--backend", "bone"],
+        &["check", "."],
         &["check", ".", "--backend", "skull"],
         &["lsp", "diagnostics", "."],
     ];

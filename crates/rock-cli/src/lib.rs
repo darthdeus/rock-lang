@@ -89,7 +89,6 @@ pub(crate) use watch::*;
 /// keys on the variant.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Backend {
-    Bone,
     Skull,
     Js,
     Glsl,
@@ -159,8 +158,7 @@ pub struct Args {
     pub lua_line_directives: bool,
 
     /// Resolved compiler backend for this invocation (default `skull`; see
-    /// `from_matches`). `skull` is bone type-check + skull codegen; `bone` is
-    /// type-check only. Override with `--backend` or `ROCK_BACKEND=bone|skull`.
+    /// `from_matches`). Override with `--backend` or `ROCK_BACKEND`.
     pub backend: Backend,
 
     /// Build lint pass: `--no-lints` drops the `Warning`/`Advice` tiers from a
@@ -338,7 +336,7 @@ impl Args {
             consumers: m.get_one::<String>("consumers").cloned(),
             // Backend selection. An explicit `--backend` flag wins; otherwise an
             // explicit `ROCK_BACKEND` env var; otherwise the implicit default is
-            // `skull`. An explicit `--backend skull`/`bone` on a command that
+            // `skull`. An explicit `--backend` on a command that
             // backend can't serve still rejects (the capability gate's
             // diagnostic). The backend-agnostic kept commands (fmt, completions,
             // host commands) are dispatched before the backend switch, so the
