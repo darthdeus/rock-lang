@@ -633,11 +633,7 @@ impl Jobs {
             limits,
             WorkerControl {
                 gate: Some(gate),
-                publication_gate: None,
-                publish_sync_failure: None,
-                completion_gate: None,
-                directory_syncs: None,
-                directory_sync_failure: None,
+                ..WorkerControl::default()
             },
         )
     }
@@ -647,12 +643,8 @@ impl Jobs {
         Self::new_with_control(
             limits,
             WorkerControl {
-                gate: None,
                 publication_gate: Some(gate),
-                publish_sync_failure: None,
-                completion_gate: None,
-                directory_syncs: None,
-                directory_sync_failure: None,
+                ..WorkerControl::default()
             },
         )
     }
@@ -662,12 +654,8 @@ impl Jobs {
         Self::new_with_control(
             limits,
             WorkerControl {
-                gate: None,
-                publication_gate: None,
                 publish_sync_failure: Some(failure),
-                completion_gate: None,
-                directory_syncs: None,
-                directory_sync_failure: None,
+                ..WorkerControl::default()
             },
         )
     }
