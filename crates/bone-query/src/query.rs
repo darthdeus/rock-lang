@@ -3951,10 +3951,6 @@ fn init_is_pure(body: &hir::Body, e: Idx<hir::Expr>) -> bool {
 /// than the `let` itself: a loop body, a closure, a nested function or a
 /// `defer`. A region that also holds the `let` re-runs the initializer too.
 fn uses_rerun_outside_let(body: &hir::Body, let_span: Span, uses: &[Span]) -> bool {
-    let contains = |outer: Span, inner: Span| {
-        outer.offset_range().0 <= inner.offset_range().0
-            && inner.offset_range().1 <= outer.offset_range().1
-    };
     let mut regions: Vec<Span> = Vec::new();
     for (i, statement) in body.statement_arena.iter() {
         match statement {
@@ -3979,8 +3975,39 @@ fn uses_rerun_outside_let(body: &hir::Body, let_span: Span, uses: &[Span]) -> bo
         }
     }
     regions.iter().any(|&region| {
-        !contains(region, let_span) && uses.iter().any(|&use_span| contains(region, use_span))
+        !region.contains(let_span) && uses.iter().any(|&use_span| region.contains(use_span))
     })
+}
+
+#[cfg(test)]
+mod rerun_region_tests {
+    use super::*;
+
+    #[test]
+    fn rerun_regions_only_contain_spans_from_their_own_file() {
+        let span = |file: &str, start, end| {
+            Span::new(Ustr::from(file), (0, 0), (start, end), (start, end))
+        };
+        let mut body = hir::Body::default();
+        let unit = body.expr_arena.alloc(hir::Expr::Unit);
+        body.alloc_statement(hir::Statement::Defer(unit), span("region.rock", 10, 30));
+
+        assert!(!uses_rerun_outside_let(
+            &body,
+            span("binding.rock", 0, 5),
+            &[span("binding.rock", 20, 21)],
+        ));
+        assert!(uses_rerun_outside_let(
+            &body,
+            span("binding.rock", 15, 16),
+            &[span("region.rock", 20, 21)],
+        ));
+        assert!(!uses_rerun_outside_let(
+            &body,
+            span("region.rock", 15, 16),
+            &[span("region.rock", 20, 21)],
+        ));
+    }
 }
 
 /// Whether an initializer expression must be wrapped in `(..)` when spliced into
