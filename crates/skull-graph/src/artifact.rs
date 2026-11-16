@@ -629,9 +629,8 @@ struct ArtifactIndex {
     outgoing: FxHashMap<Instance, FxHashMap<Site, Instance>>,
     incoming: FxHashMap<Instance, FxHashSet<Instance>>,
     site_counts: FxHashMap<Instance, usize>,
-    fn_value_users: FxHashMap<Instance, FxHashSet<Instance>>,
     /// Realizable instances an always-emitted body takes as a value. They have
-    /// no caller instance, so `fn_value_users` cannot hold them.
+    /// no caller instance whose sites record them.
     always_fn_values: FxHashSet<Instance>,
     severed_by_caller: FxHashMap<Instance, Vec<Severed>>,
     exclusions: FxHashMap<Instance, Exclusion>,
@@ -649,61 +648,40 @@ struct ArtifactIndex {
 struct ArtifactSiteRows<'g> {
     site_count: usize,
     outgoing: FxHashMap<Site, Instance>,
-    callees: Vec<(&'g Instance, bool)>,
+    callees: FxHashSet<&'g Instance>,
 }
 
 impl<'g> ArtifactSiteRows<'g> {
     fn new(sites: &'g BTreeMap<Site, instance_graph::SiteRecord>) -> Self {
         let mut outgoing = FxHashMap::default();
-        let mut callees: FxHashMap<&Instance, bool> = FxHashMap::default();
+        let mut callees = FxHashSet::default();
         for (site, record) in sites {
             let SiteOutcome::Resolved(callee) = &record.outcome else {
                 continue;
             };
             outgoing.insert(site.clone(), callee.clone());
-            *callees.entry(callee).or_insert(false) |= site.op == skull_mir::site::SiteOp::FnValue;
+            callees.insert(callee);
         }
         Self {
             site_count: sites.len(),
             outgoing,
-            callees: callees.into_iter().collect(),
+            callees,
         }
     }
 }
 
 impl ArtifactIndex {
-    fn remove_fn_value_user(
-        users: &mut FxHashMap<Instance, FxHashSet<Instance>>,
-        owner: &Instance,
-        callee: &Instance,
-    ) -> bool {
-        let empty = users.get_mut(callee).is_some_and(|users| {
-            users.remove(owner);
-            users.is_empty()
-        });
-        if empty {
-            users.remove(callee);
-        }
-        empty
-    }
-
     // The owner's old rows must be retracted before installing its replacement.
     fn install_site_rows(&mut self, owner: &Instance, rows: ArtifactSiteRows<'_>) {
         self.site_counts.insert(owner.clone(), rows.site_count);
         if !rows.outgoing.is_empty() {
             self.outgoing.insert(owner.clone(), rows.outgoing);
         }
-        for (callee, fn_value) in rows.callees {
+        for callee in rows.callees {
             self.incoming
                 .entry(callee.clone())
                 .or_default()
                 .insert(owner.clone());
-            if fn_value {
-                self.fn_value_users
-                    .entry(callee.clone())
-                    .or_default()
-                    .insert(owner.clone());
-            }
         }
     }
 }
@@ -778,8 +756,7 @@ impl ArtifactView {
         self.index.update_rows = true;
         // Each owner's row is its own; the rows are built in parallel and the
         // reverse rows, which join owners, are filled from them in owner order.
-        // A callee is listed once per owner with whether any site of that
-        // owner takes it as a value.
+        // A callee is listed once per owner.
         let owner_rows: Vec<(&Instance, ArtifactSiteRows<'_>)> = {
             use bone_core::prelude::*;
             let owners: Vec<_> = g.call_sites().collect();
@@ -956,20 +933,11 @@ impl ArtifactView {
         // old rows remain in `old_outgoing` for the local dirty-region walk.
         for i in &subjects {
             if let Some(edges) = self.index.outgoing.remove(i) {
-                for (site, callee) in &edges {
+                for callee in edges.values() {
                     if let Some(preds) = self.index.incoming.get_mut(callee) {
                         preds.remove(i);
                         if preds.is_empty() {
                             self.index.incoming.remove(callee);
-                        }
-                    }
-                    if site.op == skull_mir::site::SiteOp::FnValue {
-                        if ArtifactIndex::remove_fn_value_user(
-                            &mut self.index.fn_value_users,
-                            i,
-                            callee,
-                        ) {
-                            self.fn_value_targets.remove(callee);
                         }
                     }
                 }
@@ -1216,22 +1184,9 @@ impl ArtifactView {
         }
         self.publisher_lanes.remove(i);
         self.missing_substitutions.remove(i);
-        if !self.index.fn_value_users.contains_key(i) {
-            self.fn_value_targets.remove(i);
-        }
-        if let Some(edges) = self.index.outgoing.get(i) {
-            for (site, callee) in edges {
-                if site.op == skull_mir::site::SiteOp::FnValue
-                    && ArtifactIndex::remove_fn_value_user(
-                        &mut self.index.fn_value_users,
-                        i,
-                        callee,
-                    )
-                {
-                    self.fn_value_targets.remove(callee);
-                }
-            }
-        }
+        // The dirty region includes every caller of this target; their output
+        // is installed again only after all dirty targets have been retracted.
+        self.fn_value_targets.remove(i);
     }
 
     fn install_instance_output(

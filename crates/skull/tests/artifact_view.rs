@@ -2205,3 +2205,92 @@ fn main() {{
         );
     }
 }
+
+#[test]
+fn successive_fn_value_updates_match_fresh_views_and_bindings() {
+    let workspace = |source: &str| {
+        crate::common::ws_with_stdlib_module(
+            r#"
+@pure @inline
+inline(lua) fn inc(x: int) -> int = "return x + 1"
+@pure @inline
+inline(lua) fn dec(x: int) -> int = "return x - 1"
+"#,
+            source,
+        )
+    };
+    for initializer in [false, true] {
+        let source = |keep: &str, caller: &str, dependency: &str, argument: usize| {
+            format!(
+                r#"
+fn dependency() -> int {{ {dependency} }}
+fn keep() -> int {{ let f = {keep}; return f(dependency()) }}
+fn caller() -> int {{ let f = {caller}; let g = {caller}; return f({argument}) + g(2) }}
+{}
+fn main() {{ print("{{keep()}} {{caller()}} {{inc(0)}} {{dec(0)}}") }}
+"#,
+                if initializer {
+                    "global F: fn(int) -> int = inc"
+                } else {
+                    ""
+                }
+            )
+        };
+        let ws = workspace(&source("inc", "inc", "return 0", 1));
+        let roots = skull::mir_emit::emission_roots(&ws, None);
+        let request_roots = main_roots(&ws, &roots);
+        let mut graph = instance_graph::build(&ws, roots, false);
+        let request = ArtifactRequest::new(LUAJIT_DESKTOP, &request_roots);
+        let mut local = artifact::realize(&ws, &graph, &request);
+        assert_eq!(fn_value_target_names(&ws, &local), ["inc"]);
+        let mid = module_id(&ws, "<test>");
+        let (_, mut cache) = skull::mir_emit::emit_full(&ws, mid).expect("initial emit");
+        for (keep, caller, dependency, argument, changed) in [
+            ("inc", "inc", "return dec(0)", 1, "dependency"),
+            ("inc", "dec", "return dec(0)", 1, "caller"),
+            ("dec", "dec", "return dec(0)", 1, "keep"),
+            ("dec", "dec", "return dec(0)", 3, "caller"),
+            ("dec", "dec", "return dec(0)", 4, "caller"),
+            ("dec", "inc", "return dec(0)", 1, "caller"),
+            ("inc", "inc", "return dec(0)", 1, "keep"),
+            ("inc", "inc", "return 1", 1, "dependency"),
+        ] {
+            let ws = workspace(&source(keep, caller, dependency, argument));
+            let edited = [user_body(&ws, changed)];
+            local.prepare_update(&graph);
+            let update = graph.update_bodies_with_root_delta(&ws, &[], &[], &edited, &[]);
+            local.update_local(
+                &ws,
+                &graph,
+                &request,
+                &update.revisited,
+                &update.added,
+                &update.removed,
+            );
+            let fresh_graph =
+                instance_graph::build(&ws, skull::mir_emit::emission_roots(&ws, None), false);
+            let fresh = artifact::realize(&ws, &fresh_graph, &request);
+            let expected = if initializer || keep == "inc" || caller == "inc" {
+                if keep == "dec" || caller == "dec" {
+                    vec!["dec", "inc"]
+                } else {
+                    vec!["inc"]
+                }
+            } else {
+                vec!["dec"]
+            };
+            assert_eq!(fn_value_target_names(&ws, &fresh), expected);
+            let incremental = skull::mir_emit::emit_incremental(&ws, &mut cache, &edited)
+                .expect("incremental emit");
+            let (fresh_emit, _) = skull::mir_emit::emit_full(&ws, mid).expect("fresh emit");
+            assert_eq!(
+                incremental.lua, fresh_emit.lua,
+                "initializer={initializer}, changed={changed}"
+            );
+            assert_eq!(
+                local.fn_value_targets, fresh.fn_value_targets,
+                "initializer={initializer}, changed={changed}, keep={keep}, caller={caller}, argument={argument}"
+            );
+        }
+    }
+}
