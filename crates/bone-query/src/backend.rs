@@ -4383,7 +4383,6 @@ fn hole_diagnostics_for(proj: &BoneProject, path: &str) -> Option<Vec<Diagnostic
                     .then(|| lsp_types::NumberOrString::String("unfilled_expression_hole".into())),
                 source: Some("bone".to_string()),
                 message,
-                ..Default::default()
             }
         })
         .collect();
