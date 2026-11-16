@@ -1,10 +1,42 @@
 use super::*;
 
+/// The native buffers whose elements read as `int`.
+const INT_BUFFERS: &[&str] = &[
+    "NativeBufferU8",
+    "NativeBufferI8",
+    "NativeBufferU16",
+    "NativeBufferI16",
+    "NativeBufferU32",
+    "NativeBufferI32",
+];
+
+/// The element both indexing and a `for` head read from a buffer nominal:
+/// `T` for `NativeBuffer<T>` / `FlatVec<T>`, `int` for the typed buffers.
+pub(crate) fn buffer_elem(gamma: &Gamma, ty: TyId) -> Option<TyId> {
+    let TypeExpr::App {
+        ctor: TypeCtor::Nominal(name),
+        params,
+    } = *gamma.get(ty)
+    else {
+        return None;
+    };
+    if bone_core::modules::is_intrinsic_key_in(name, &["NativeBuffer", "FlatVec"]) {
+        params.into_iter().next().map(|p| ty.with_idx(p))
+    } else if bone_core::modules::is_intrinsic_key_in(name, INT_BUFFERS) {
+        Some(gamma.workspace.builtins.int())
+    } else {
+        None
+    }
+}
+
 pub(crate) fn for_elem_ty(
     gamma: &mut Gamma,
     iter_ty: TyId,
     span: Span,
 ) -> Result<TyId, CompilerError> {
+    if let Some(elem) = buffer_elem(gamma, iter_ty) {
+        return Ok(resolve(gamma, elem, span));
+    }
     Ok(match *gamma.get(iter_ty) {
         // [T]
         TypeExpr::App {
@@ -17,36 +49,6 @@ pub(crate) fn for_elem_ty(
                 "array type must have one parameter"
             )?;
             resolve(gamma, iter_ty.with_idx(elem), span)
-        }
-
-        TypeExpr::App {
-            ctor: TypeCtor::Nominal(name),
-            params,
-        } if bone_core::modules::is_intrinsic_key_in(name, &["NativeBuffer", "FlatVec"]) => {
-            let elem = or_fail!(
-                params.into_iter().next(),
-                span,
-                "array type must have one parameter"
-            )?;
-            resolve(gamma, iter_ty.with_idx(elem), span)
-        }
-
-        TypeExpr::App {
-            ctor: TypeCtor::Nominal(name),
-            ..
-        } if bone_core::modules::is_intrinsic_key_in(
-            name,
-            &[
-                "NativeBufferU8",
-                "NativeBufferI8",
-                "NativeBufferU16",
-                "NativeBufferI16",
-                "NativeBufferU32",
-                "NativeBufferI32",
-            ],
-        ) =>
-        {
-            gamma.workspace.builtins.int()
         }
 
         TypeExpr::App {
@@ -174,18 +176,10 @@ pub(crate) fn builtin_enumerable(gamma: &Gamma, ty: TyId) -> bool {
         TypeExpr::App {
             ctor: TypeCtor::Nominal(n),
             ..
-        } => bone_core::modules::is_intrinsic_key_in(
-            n,
-            &[
-                "NativeBuffer",
-                "NativeBufferU8",
-                "NativeBufferI8",
-                "NativeBufferU16",
-                "NativeBufferI16",
-                "NativeBufferU32",
-                "NativeBufferI32",
-            ],
-        ),
+        } => {
+            bone_core::modules::is_intrinsic_key(n, "NativeBuffer")
+                || bone_core::modules::is_intrinsic_key_in(n, INT_BUFFERS)
+        }
         _ => false,
     }
 }

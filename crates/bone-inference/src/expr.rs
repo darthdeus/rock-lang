@@ -630,8 +630,8 @@ pub(crate) fn infer_expr_used(
                 }
 
                 TypeExpr::App {
-                    ctor: TypeCtor::Nominal(name),
-                    params,
+                    ctor: TypeCtor::Nominal(_),
+                    ..
                 } => {
                     unify(
                         gamma,
@@ -640,31 +640,7 @@ pub(crate) fn infer_expr_used(
                         c.body.expr_spans[index],
                     )?;
 
-                    let elem = if bone_core::modules::is_intrinsic_key_in(
-                        name,
-                        &["NativeBuffer", "FlatVec"],
-                    ) {
-                        let p = params.into_iter().next().ok_or_else(|| {
-                            CompilerError::new_with_label(
-                                expr_span,
-                                "NativeBuffer type must have one parameter".to_string(),
-                            )
-                        })?;
-
-                        base_ty.with_idx(p)
-                    } else if bone_core::modules::is_intrinsic_key_in(
-                        name,
-                        &[
-                            "NativeBufferU8",
-                            "NativeBufferI8",
-                            "NativeBufferU16",
-                            "NativeBufferU32",
-                            "NativeBufferI16",
-                            "NativeBufferI32",
-                        ],
-                    ) {
-                        gamma.workspace.builtins.int()
-                    } else {
+                    let Some(elem) = buffer_elem(gamma, base_ty) else {
                         comp_error!(
                             expr_span,
                             "cannot index into type {}",
