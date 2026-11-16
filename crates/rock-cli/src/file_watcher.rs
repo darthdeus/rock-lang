@@ -278,7 +278,7 @@ impl FileWatcher {
     }
 
     /// Canonical watcher preset for Rock source trees, shared by
-    /// `rock engine`, `rock watch`, and `rock test --watch`. Single
+    /// `rock engine` and `rock watch`. Single
     /// source of truth for the settings these used to each hand-roll
     /// (and drift on): 100ms debounce to batch rapid editor saves,
     /// metadata events allowed so `touch` retriggers, `.rock`

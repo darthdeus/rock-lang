@@ -1128,7 +1128,6 @@ fn public_frame_and_perf_options_preserve_their_units_and_defaults() {
         "rock",
         "test",
         "main.rock",
-        "--watch",
         "--iters",
         "2",
         "--warmup",
@@ -1140,11 +1139,26 @@ fn public_frame_and_perf_options_preserve_their_units_and_defaults() {
         "--format",
         "json",
     ]);
-    assert!(test.watch);
     assert_eq!(test.iters, 2);
     assert_eq!(test.warmup, 0);
     assert_eq!(test.target_os.as_deref(), Some("web"));
     assert_eq!(test.perf_format, "json");
+}
+
+#[test]
+fn flags_that_change_nothing_are_rejected() {
+    for flag in [
+        "--type-validation",
+        "--clean",
+        "--watch",
+        "--no-timeout",
+        "--package",
+    ] {
+        let parsed = rock_cli::Args::command().try_get_matches_from(["rock", "test", flag]);
+        assert!(parsed.is_err(), "{flag} is accepted");
+    }
+    let parsed = rock_cli::Args::command().try_get_matches_from(["rock", "run", "--timeout", "5"]);
+    assert!(parsed.is_err(), "--timeout is accepted");
 }
 
 #[test]

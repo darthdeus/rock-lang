@@ -135,10 +135,8 @@ pub struct Args {
     pub top: usize,
     pub sim_log_dir: Option<String>,
     pub sim_entry: Option<String>,
-    pub type_validation: bool,
     pub headless: bool,
     pub test_threads: Option<usize>,
-    pub clean: bool,
     /// `--channel`: release channel for `[build.vars]` resolution.
     /// None = the project's default_channel.
     pub channel: Option<String>,
@@ -147,8 +145,6 @@ pub struct Args {
     pub target_os: Option<String>,
     /// `--var NAME=VALUE` overrides, raw; parsed/validated at resolution.
     pub build_var_overrides: Vec<String>,
-    pub timeout: u64,
-    pub no_timeout: bool,
     pub update_snapshots: bool,
     pub jobs: Option<usize>,
     pub jobs_force: bool,
@@ -169,12 +165,6 @@ pub struct Args {
     pub agent_access: bool,
     pub level: Option<String>,
     pub daemon_sock: Option<String>,
-
-    /// For `rock test`: re-run tests on every `.rock` file change in
-    /// the given paths. Watches the same paths passed to `rock test`
-    /// (defaults to `tests/`). Compilation/test failures don't abort
-    /// the loop; Ctrl-C to exit.
-    pub watch: bool,
     pub port: u16,
 
     pub single_file: bool,
@@ -212,10 +202,6 @@ pub struct Args {
     /// is right when the lib sits beside its consumers (`libs/example/`); a nested lib
     /// (`libs/example-core`) needs the repo root passed explicitly.
     pub consumers: Option<String>,
-
-    /// Accepted for compatibility and not read: `rock test` always
-    /// auto-detects a surrounding stick.toml package.
-    pub package: bool,
 }
 
 impl Args {
@@ -263,13 +249,9 @@ impl Args {
             .arg(Arg::new("perf-format").long("format").default_value("pretty")
                 .value_parser(["pretty", "json"])
                 .help("Output format for reports: \"pretty\" (default) or \"json\"."))
-            .arg(Arg::new("type-validation").long("type-validation").action(ArgAction::SetTrue)
-                .help("Enable type validation warnings for unresolved types after inference"))
             .arg(Arg::new("test-threads").long("test-threads").value_name("NUM")
                 .value_parser(clap::value_parser!(usize))
                 .help("Number of threads to use for running tests (default: number of CPU cores, use 1 for sequential)"))
-            .arg(Arg::new("clean").long("clean").action(ArgAction::SetTrue)
-                .help("Force a clean build by clearing the cache before compilation"))
             .arg(Arg::new("channel").long("channel").value_name("CHANNEL")
                 .help("Release channel for [build.vars] resolution (must be declared in the project's [build] channels)"))
             .arg(Arg::new("var").long("var").value_name("NAME=VALUE")
@@ -279,15 +261,6 @@ impl Args {
                 .help("Artifact target for the `platform` builtin (linux, osx, windows). Cross-builds package on one OS for another; defaults to the host."))
             .arg(Arg::new("lua-line-directives").long("lua-line-directives").action(ArgAction::SetTrue)
                 .help("Number emitted Lua with Rock file:line through LuaJIT line directives, so errors, tracebacks and jit.util report Rock source. Needs a LuaJIT 2.1 from commit c41d727d (2026-10-20) or later. A development option: rejected with a --channel other than dev. Same as ROCK_SKULL_LINE_DIRECTIVES=1."))
-            .arg(Arg::new("timeout").long("timeout").default_value("60")
-                .value_parser(clap::value_parser!(u64))
-                .help("Timeout for run command in seconds (default: 60)"))
-            .arg(Arg::new("no-timeout").long("no-timeout").action(ArgAction::SetTrue)
-                .help("Disable timeout for run command (allow infinite execution)"))
-            .arg(Arg::new("watch").long("watch").action(ArgAction::SetTrue)
-                .help("For `rock test`: re-run tests on source changes."))
-            .arg(Arg::new("package").long("package").action(ArgAction::SetTrue)
-                .help("For `rock test`: compile the surrounding stick.toml package (and its deps) so @test files can call sibling-file symbols. Package detection is automatic, so the flag has no effect."))
             .arg(Arg::new("no-lints").long("no-lints").action(ArgAction::SetTrue)
                 .help("Drop lint warnings/advice from build output. Error-severity lints still run and still fail the build."))
             .arg(Arg::new("lint-summary").long("lint-summary").action(ArgAction::SetTrue)
@@ -352,18 +325,14 @@ impl Args {
             top: Default::default(),
             sim_log_dir: Default::default(),
             sim_entry: Default::default(),
-            type_validation: m.get_flag("type-validation"),
             headless: Default::default(),
             test_threads: m.get_one::<usize>("test-threads").copied(),
-            clean: m.get_flag("clean"),
             channel: m.get_one::<String>("channel").cloned(),
             target_os: m.get_one::<String>("target-os").cloned(),
             build_var_overrides: m
                 .get_many::<String>("var")
                 .map(|vals| vals.cloned().collect())
                 .unwrap_or_default(),
-            timeout: *m.get_one::<u64>("timeout").unwrap(),
-            no_timeout: m.get_flag("no-timeout"),
             update_snapshots: Default::default(),
             jobs: Default::default(),
             jobs_force: Default::default(),
@@ -380,11 +349,9 @@ impl Args {
             agent_access: Default::default(),
             level: Default::default(),
             daemon_sock: Default::default(),
-            watch: m.get_flag("watch"),
             port: Default::default(),
             single_file: Default::default(),
             itch: Default::default(),
-            package: m.get_flag("package"),
             no_lints: m.get_flag("no-lints"),
             lint_summary: m.get_flag("lint-summary"),
             lints: m.get_one::<String>("lints").cloned(),

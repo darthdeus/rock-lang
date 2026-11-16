@@ -12,7 +12,7 @@ pub(crate) fn arguments(command: clap::Command) -> clap::Command {
                 .value_name("DIR")
                 .help("For `rock sim`: instrument compiler-known allocation sites in isolated sims and write frame-aware joined reports to DIR."),
         ] },
-        registry::ArgumentGroup { before: "type-validation", arguments: vec![
+        registry::ArgumentGroup { before: "test-threads", arguments: vec![
             Arg::new("top").long("top").default_value("20")
                 .value_parser(clap::value_parser!(usize))
                 .help("For `rock sim-report`: rank this many slow observations (default 20)."),
@@ -21,7 +21,7 @@ pub(crate) fn arguments(command: clap::Command) -> clap::Command {
             Arg::new("sim-entry").long("sim-entry")
                 .help("For `rock sim-report`: compare one named sim's entry envelope across every retained run instead of reporting one run."),
         ] },
-        registry::ArgumentGroup { before: "no-timeout", arguments: vec![
+        registry::ArgumentGroup { before: "no-lints", arguments: vec![
             Arg::new("update-snapshots").long("update-snapshots").action(ArgAction::SetTrue)
                 .help("For `rock sim`: rewrite snapshot baselines instead of diffing."),
             Arg::new("jobs").long("jobs").short('j').value_name("N")
@@ -34,7 +34,7 @@ pub(crate) fn arguments(command: clap::Command) -> clap::Command {
                 .value_parser(clap::value_parser!(usize))
                 .help("For `rock sim`: allow at most R of the concurrent children to hold full-size assets (STONE_ASSET_STUB=0 with STONE_IMAGE_MAX_SIDE=0, 2-4 GB of GPU memory each); the remaining slots up to --jobs run the other entries. Default 2. Bounded by --jobs."),
         ] },
-        registry::ArgumentGroup { before: "watch", arguments: vec![
+        registry::ArgumentGroup { before: "no-lints", arguments: vec![
             Arg::new("plan").long("plan").action(ArgAction::SetTrue)
                 .conflicts_with_all(["list", "allocation-census", "allocation-sites", "update-snapshots"])
                 .help("For `rock sim`: compile/discover and print the selected entries and resolved job count as JSON, without spawning sims. Honors named selections and --jobs."),
