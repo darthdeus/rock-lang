@@ -25,7 +25,6 @@ members = [
     "crates/bone-lower",
     "crates/bone-semantic",
     "crates/la-arena",
-    "crates/lsp-serde-test",
     "crates/lsp-server-manual",
     "crates/lsp-types-manual",
     "crates/rock-core",
@@ -43,9 +42,8 @@ members = [
     "stone-rs",
 ]
 
-# Keep plain cargo build/test usable without the optional SDL2 runner, and
-# skip the manual lsp-serde-test conformance tool, which pulls in upstream
-# lsp-types and lsp-server. --workspace still includes every member.
+# Keep plain cargo build/test usable without the optional SDL2 runner and the
+# engine crates. --workspace still includes every member.
 default-members = [
     "crates/rock-cli",
     "crates/skull",
@@ -140,7 +138,6 @@ tracing = { version = "0.1", default-features = false, features = ["std"] }
 ustr = "1.0.0"
 clap = { version = "4.5.20", default-features = false, features = ["std", "help", "usage", "error-context"] }
 log = "0.4.22"
-rand = "0.9.3"
 rayon = "1.10"
 serde = { version = "1.0.219", default-features = false, features = ["std"] }
 serde_json = "1.0"
