@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 use atomic_refcell::AtomicRefCell;
 use rock_core::{FileContents, SourceFile, SourceFiles};
 
-use crate::preprocessor::{PreprocessorContext, preprocess};
+use crate::preprocessor::{PreprocessedSource, PreprocessorContext, preprocess};
 
 /// Preprocessor-dependent SourceFiles constructors (can't be in rock-core since
 /// they depend on the preprocessor).
@@ -26,7 +26,12 @@ pub trait SourceFilesExt {
 
 impl SourceFilesExt for SourceFiles {
     fn from_dir_preprocessed<P: AsRef<Path>>(source_dir: P) -> Result<SourceFiles> {
-        source_files_from_dir_impl(source_dir, true)
+        // The walk starts at a canonical directory, so its paths are canonical.
+        let paths: Vec<PathBuf> = crate::project::find_rock_files_at_path(source_dir)?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        Self::from_canonical_paths(&paths, true)
     }
 
     fn from_single_path_preprocessed<P: AsRef<Path>>(path: P) -> Result<SourceFiles> {
@@ -91,32 +96,6 @@ pub fn production_only(
     Ok(sources.retaining(&keep))
 }
 
-fn source_files_from_dir_impl<P: AsRef<Path>>(
-    source_dir: P,
-    preprocess: bool,
-) -> Result<SourceFiles> {
-    let paths = crate::project::find_rock_files_at_path(source_dir)?;
-
-    // Each file does read_to_string + preprocess. Paths are already canonical
-    // (find_rock_files_at_path canonicalizes the base dir).
-    let load = |path: &String| source_file_from_canonical_path(Path::new(path), preprocess);
-    let loaded: Result<Vec<_>> = {
-        use rayon::prelude::*;
-        paths.par_iter().map(load).collect()
-    };
-
-    let files = loaded?
-        .into_iter()
-        .map(|x| Arc::new(AtomicRefCell::new(x)))
-        .collect();
-
-    Ok(SourceFiles {
-        files,
-        package_roots: Vec::new(),
-        ns_aliases: None,
-    })
-}
-
 /// Scan a file's leading `//!` directives for `modules: v1`. Standalone
 /// test/script sources declare their dialect explicitly; package files take
 /// theirs from the manifest via the package graph. Only the first
@@ -141,52 +120,29 @@ pub fn parse_modules_directive(contents: &str) -> Result<rock_core::source_code:
     Ok(rock_core::source_code::Dialect::Legacy)
 }
 
-// Helper function to process content and extract directives.
 // The preprocessor always runs (to extract is_script/is_test/used_packages
 // flags), but `apply` controls whether its output replaces the raw contents.
 // Callers that format or display source pass `apply: false`; callers that
 // compile pass `apply: true`.
-fn preprocess_content(
-    contents: &str,
-    apply: bool,
-) -> Result<(String, bool, bool, bool, Vec<String>)> {
-    let context = PreprocessorContext::new("lua");
-    let preprocessed = preprocess(contents, &context)?;
-
-    let final_contents = if apply {
-        preprocessed.content
-    } else {
-        contents.to_string()
-    };
-
-    Ok((
-        final_contents,
-        preprocessed.is_script,
-        preprocessed.is_test,
-        preprocessed.is_test_util,
-        preprocessed.used_packages,
-    ))
+fn preprocess_content(contents: &str, apply: bool) -> Result<PreprocessedSource> {
+    let mut preprocessed = preprocess(contents, &PreprocessorContext::new("lua"))?;
+    if !apply {
+        preprocessed.content = contents.to_string();
+    }
+    Ok(preprocessed)
 }
 
-// Helper function to create a SourceFile with all required fields
-fn create_source_file(
-    file: FileContents,
-    contents: String,
-    is_script: bool,
-    is_test: bool,
-    is_test_util: bool,
-    used_packages: Vec<String>,
-) -> Result<SourceFile> {
+fn create_source_file(file: FileContents, source: PreprocessedSource) -> Result<SourceFile> {
     // A `//! modules: v1` directive opts a standalone source into v1. Package
     // loaders overwrite this with the manifest/graph fact afterwards.
-    let dialect = parse_modules_directive(&contents)?;
+    let dialect = parse_modules_directive(&source.content)?;
     Ok(SourceFile {
         file,
-        contents,
-        is_script,
-        is_test,
-        is_test_util,
-        used_packages,
+        contents: source.content,
+        is_script: source.is_script,
+        is_test: source.is_test,
+        is_test_util: source.is_test_util,
+        used_packages: source.used_packages,
         package: None,
         dialect,
         global_policy: rock_core::source_code::GlobalPolicy::Any,
@@ -240,8 +196,7 @@ fn source_file_from_canonical_path(path: &Path, preprocess: bool) -> Result<Sour
     let raw_contents = fs_err::read_to_string(path)
         .with_context(|| format!("Failed to read '{}'", path.display()))?;
 
-    let (contents, is_script, is_test, is_test_util, used_packages) =
-        preprocess_content(&raw_contents, preprocess)?;
+    let source = preprocess_content(&raw_contents, preprocess)?;
 
     let utf8_path = path
         .to_str()
@@ -254,41 +209,22 @@ fn source_file_from_canonical_path(path: &Path, preprocess: bool) -> Result<Sour
         filename: filename.to_string_lossy().to_string(),
     };
 
-    create_source_file(
-        file,
-        contents,
-        is_script,
-        is_test,
-        is_test_util,
-        used_packages,
-    )
+    create_source_file(file, source)
 }
 
 pub fn source_file_from_code(id_path: String, contents: String) -> SourceFile {
-    // See source_file_from_path_and_contents above for the rationale.
-    let (processed_contents, is_script, is_test, is_test_util, used_packages) =
-        match preprocess_content(&contents, false) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("rock: preprocessor error for `{id_path}`: {e:#}");
-                (contents.clone(), false, false, false, vec![])
-            }
-        };
-
-    let file = FileContents::Code {
-        id_path: id_path.clone(),
-        contents,
-    };
-
-    create_source_file(
-        file,
-        processed_contents,
-        is_script,
-        is_test,
-        is_test_util,
-        used_packages,
-    )
-    .unwrap_or_else(|e| panic!("rock: {e:#}"))
+    let source = preprocess_content(&contents, false).unwrap_or_else(|e| {
+        eprintln!("rock: preprocessor error for `{id_path}`: {e:#}");
+        PreprocessedSource {
+            content: contents.clone(),
+            is_script: false,
+            is_test: false,
+            is_test_util: false,
+            used_packages: vec![],
+        }
+    });
+    let file = FileContents::Code { id_path, contents };
+    create_source_file(file, source).unwrap_or_else(|e| panic!("rock: {e:#}"))
 }
 
 #[cfg(test)]

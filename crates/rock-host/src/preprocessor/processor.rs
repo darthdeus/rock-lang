@@ -71,18 +71,6 @@ pub(crate) fn preprocess(input: &str, context: &PreprocessorContext) -> Result<P
     let mut parser = PreprocessorParser::new();
     let constructs = parser.parse_directives(input)?;
 
-    if constructs.is_empty() && !is_script && !is_test && !is_test_util && used_packages.is_empty()
-    {
-        // No preprocessing needed (shouldn't happen after fast check, but keep for safety)
-        return Ok(PreprocessedSource {
-            content: input.to_string(),
-            is_script: false,
-            is_test: false,
-            is_test_util: false,
-            used_packages: vec![],
-        });
-    }
-
     // Process the source
     let mut output = String::new();
     let mut last_pos = 0;
