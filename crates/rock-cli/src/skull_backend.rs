@@ -646,7 +646,6 @@ do
       for i, message in ipairs(errors) do records[i] = message end
       return records, 0
     end,
-    truncate = function(count) for i = #errors, count + 1, -1 do errors[i] = nil end end,
     take = function(record)
       for i, message in ipairs(errors) do
         if message == record then table.remove(errors, i); return true end
@@ -654,6 +653,8 @@ do
       return false
     end,
   }
+  initial.scope_records = initial.records
+  initial.scope_take = initial.take
   _G.__rock_logged_errors = initial
   _G.__rock_test_check_errors = function()
     local records, overflow = _G.__rock_logged_errors.records()
