@@ -251,16 +251,20 @@ impl Emitter<'_> {
             // which is sound ONLY because a leaf is a temp or an
             // `always_inlinable` pure expression -- that set excludes every Call,
             // so no leaf can run user code or clobber the bank.
-            _ => {
-                let parts: Result<Vec<String>, CompilerError> =
-                    vs.iter().map(|&v| self.render_val(v)).collect();
-                let parts = parts?;
-                for (i, p) in parts.iter().enumerate().skip(1) {
-                    self.push(&format!("{} = {p};", ret_slot(i)));
-                }
-                self.push(&format!("return {};", parts[0]));
-            }
+            _ => self.emit_multi_return(vs)?,
         }
+        Ok(())
+    }
+
+    fn emit_multi_return(&mut self, vs: &[Idx<Inst>]) -> Result<(), CompilerError> {
+        let parts = vs
+            .iter()
+            .map(|&v| self.render_val(v))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (i, p) in parts.iter().enumerate().skip(1) {
+            self.push(&format!("{} = {p};", ret_slot(i)));
+        }
+        self.push(&format!("return {};", parts[0]));
         Ok(())
     }
 
@@ -317,21 +321,12 @@ impl Emitter<'_> {
                     self.push(&format!("return {s};"));
                 }
                 // Scalarized value-struct / tuple return: leaf 0 in the return
-                // value, leaves 1..N in the scratch bank, mirroring the
-                // structured `emit_return` -- the two printers MUST agree, or a
-                // body that falls back to the trampoline silently changes
-                // calling convention. Only the ordinary-body fallback opts in; a
+                // value, leaves 1..N in the scratch bank, shared with the
+                // structured `emit_return` so a body that falls back to the
+                // trampoline keeps its calling convention. Only the ordinary-body fallback opts in; a
                 // coroutine step's return channels through the step protocol, so
                 // it keeps the reject.
-                _ if self.pack_multi_return => {
-                    let parts: Result<Vec<String>, CompilerError> =
-                        vs.iter().map(|&v| self.render_val(v)).collect();
-                    let parts = parts?;
-                    for (i, p) in parts.iter().enumerate().skip(1) {
-                        self.push(&format!("{} = {p};", ret_slot(i)));
-                    }
-                    self.push(&format!("return {};", parts[0]));
-                }
+                _ if self.pack_multi_return => self.emit_multi_return(&vs)?,
                 _ => return Err(err("JS subset: multi-value coroutine return")),
             },
             Term::Unreachable => self.emit_unreachable(),
