@@ -21,13 +21,5 @@ fn nb_js_checked_set_rejects_nan_into_int_buffer() {
          __nb_checked_set(fb, 0, NaN);\n\
          console.log(thrown && (fb.ptr[0] !== fb.ptr[0]));"
     );
-    let path = crate::common::write_temp("js", &prog);
-    let out = crate::common::run_file("node", &path);
-    let _ = std::fs::remove_file(&path);
-    assert!(
-        out.status.success(),
-        "node failed:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "true");
+    assert_eq!(crate::common::run_node(&prog).trim(), "true");
 }

@@ -166,6 +166,10 @@ fn test_tostring_matches_luajit_g14() {
     assert_eq(tostring(same_float(1.7976931348623157e308)), "1.7976931348623e+308")
     assert_eq(tostring(same_float(123456789.125)), "123456789.125")
     assert_eq(tostring(same_float(1234567890123456.0)), "1.2345678901235e+15")
+    assert_eq(tostring(same_float(123456789012345.0)), "1.2345678901234e+14")
+    assert_eq(tostring(same_float(1e20)), "1e+20")
+    assert_eq(tostring(same_float(1e-300)), "1e-300")
+    assert_eq(tostring(same_float(1234567.0)), "1234567")
 }
 
 @test

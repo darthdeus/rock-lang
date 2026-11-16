@@ -60,8 +60,6 @@ mod nb_leaf_layout_premise;
 mod no_inline_function;
 #[path = "nomangle_roots.rs"]
 mod nomangle_roots;
-#[path = "number_format.rs"]
-mod number_format;
 #[path = "session_arena.rs"]
 mod session_arena;
 

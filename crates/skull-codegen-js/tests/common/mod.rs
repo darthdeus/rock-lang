@@ -52,10 +52,7 @@ pub fn node() -> std::process::Command {
     tool("node")
 }
 
-/// Same scrub, for a tool named by a variable rather than a literal.
-/// `nb_differential` and `number_format` run one fixture through BOTH `node`
-/// and `luajit` and compare the printed tokens, so they reach a spawn this way
-/// and a literal-matching sweep misses them.
+/// A command for `name` with the same colour scrub as [`node`].
 pub fn tool(name: &str) -> std::process::Command {
     let mut cmd = std::process::Command::new(name);
     cmd.env_remove("FORCE_COLOR").env("NO_COLOR", "1");
@@ -66,17 +63,14 @@ pub fn tool(name: &str) -> std::process::Command {
 /// not on PATH. CI has node, so a missing binary there must not read as a pass.
 pub const SKIP_NODE_ENV: &str = "ROCK_SKIP_NODE_TESTS";
 
-fn tool_runs(name: &str, version_arg: &str) -> bool {
-    tool(name)
-        .arg(version_arg)
-        .output()
-        .is_ok_and(|o| o.status.success())
-}
-
 /// True when `node` runs. When it does not, panics unless [`SKIP_NODE_ENV`] is
 /// set, in which case it logs the skip and returns false.
 pub fn require_node() -> bool {
-    if tool_runs("node", "--version") {
+    if node()
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+    {
         return true;
     }
     assert!(
@@ -87,16 +81,6 @@ pub fn require_node() -> bool {
     false
 }
 
-/// [`require_node`] for the differentials that also run `luajit`, which the
-/// rest of the workspace's tests require unconditionally.
-pub fn require_node_and_luajit() -> bool {
-    if !require_node() {
-        return false;
-    }
-    assert!(tool_runs("luajit", "-v"), "`luajit` is not on PATH");
-    true
-}
-
 /// Run `program` under `node -e` and return its stdout. Panics, showing the
 /// program and stderr, when node exits non-zero.
 pub fn run_node(program: &str) -> String {
@@ -104,39 +88,6 @@ pub fn run_node(program: &str) -> String {
     assert!(
         out.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-/// Write `contents` to a temp file unique to this call, for a tool that runs a
-/// file rather than a `-e` argument.
-pub fn write_temp(ext: &str, contents: &str) -> std::path::PathBuf {
-    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("skull_js_test_{}_{n}.{ext}", std::process::id()));
-    std::fs::write(&path, contents).expect("write temp program");
-    path
-}
-
-/// Run the file at `path` under `name`, panicking only when it cannot spawn.
-pub fn run_file(name: &str, path: &std::path::Path) -> std::process::Output {
-    tool(name)
-        .arg(path)
-        .output()
-        .unwrap_or_else(|e| panic!("spawn {name}: {e}"))
-}
-
-/// Run `prog` from a temp file under `name` and return its stdout. Panics, with
-/// both streams, when the tool exits non-zero.
-pub fn run_program(name: &str, ext: &str, prog: &str) -> String {
-    let path = write_temp(ext, prog);
-    let out = run_file(name, &path);
-    let _ = std::fs::remove_file(&path);
-    assert!(
-        out.status.success(),
-        "{name} exited non-zero.\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8_lossy(&out.stdout).into_owned()
