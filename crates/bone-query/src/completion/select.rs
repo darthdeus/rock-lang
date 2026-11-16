@@ -567,7 +567,6 @@ pub(crate) fn completion_kind(k: SymCat) -> CompletionItemKind {
         SymCat::Newtype => CompletionItemKind::CLASS,
         SymCat::Global => CompletionItemKind::VARIABLE,
         SymCat::Local | SymCat::Param => CompletionItemKind::VARIABLE,
-        SymCat::Field => CompletionItemKind::FIELD,
         SymCat::Keyword => CompletionItemKind::KEYWORD,
     }
 }

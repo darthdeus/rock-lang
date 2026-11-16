@@ -4414,7 +4414,7 @@ pub(crate) fn user_module_for_path(ws: &Workspace, path: &str) -> Option<ModuleI
 }
 
 /// Single-letter extended-ctags kind for a top-level declaration, or None for
-/// categories that aren't file-level symbols (locals, params, fields, enum
+/// categories that aren't file-level symbols (locals, params, enum
 /// variants, keywords) and so don't belong in a tags file.
 fn ctags_kind(k: SymCat) -> Option<char> {
     match k {
@@ -4424,7 +4424,7 @@ fn ctags_kind(k: SymCat) -> Option<char> {
         SymCat::Enum => Some('e'),
         SymCat::Newtype => Some('t'),
         SymCat::Global => Some('v'),
-        SymCat::Variant | SymCat::Local | SymCat::Param | SymCat::Field | SymCat::Keyword => None,
+        SymCat::Variant | SymCat::Local | SymCat::Param | SymCat::Keyword => None,
     }
 }
 
@@ -4446,7 +4446,6 @@ fn symbol_kind(k: SymCat) -> SymbolKind {
         SymCat::Newtype => SymbolKind::CLASS,
         SymCat::Global => SymbolKind::VARIABLE,
         SymCat::Local | SymCat::Param => SymbolKind::VARIABLE,
-        SymCat::Field => SymbolKind::FIELD,
         SymCat::Keyword => SymbolKind::KEY,
     }
 }

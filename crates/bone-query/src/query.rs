@@ -4402,7 +4402,6 @@ pub enum SymCat {
     Global,
     Local,
     Param,
-    Field,
     Keyword,
 }
 
