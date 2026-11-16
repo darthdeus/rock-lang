@@ -241,7 +241,24 @@ fn variant_field_span(
 /// the binding; the node dispatch resolves it). `None` if `offset` isn't on a
 /// record-pattern field name.
 fn pattern_field_def(ws: &Workspace, body: &Body, offset: usize) -> Option<Span> {
-    for pat in body.pattern_arena.values() {
+    let (enum_name, name, field) = record_pat_field_at(body, offset)?;
+    if enum_name.is_none() {
+        if let Some(sp) = name.and_then(|n| struct_field_span(ws, n, field.name)) {
+            return Some(sp);
+        }
+    }
+    variant_field_span(ws, enum_name, name?, field.name)
+}
+
+/// The record-pattern field name under `offset` with its pattern's enum
+/// qualifier and head name. Shorthand `{ field }` is excluded: the name token
+/// *is* the binding, so the node dispatch resolves it -- only an explicit
+/// `field: bind` (name distinct from its binding) is a field-name reference.
+fn record_pat_field_at(
+    body: &Body,
+    offset: usize,
+) -> Option<(Option<Ustr>, Option<Ustr>, &hir::RecordPatField)> {
+    body.pattern_arena.values().find_map(|pat| {
         let hir::Pattern::Record {
             enum_name,
             name,
@@ -249,31 +266,21 @@ fn pattern_field_def(ws: &Workspace, body: &Body, offset: usize) -> Option<Span>
             ..
         } = pat
         else {
-            continue;
+            return None;
         };
-        for fidx in *fields {
-            let f = &body.record_pat_field_arena[fidx];
-            let (s, e) = f.name_span.offset_range();
-            if s <= offset && offset < e {
-                if let hir::Pattern::Bind(b) = &body.pattern_arena[f.pat] {
-                    if body
-                        .binding_spans
-                        .get(*b)
-                        .is_some_and(|bs| bs.offset_range() == f.name_span.offset_range())
-                    {
-                        return None; // shorthand -> node dispatch resolves the binding
-                    }
-                }
-                if enum_name.is_none() {
-                    if let Some(sp) = name.and_then(|n| struct_field_span(ws, n, f.name)) {
-                        return Some(sp);
-                    }
-                }
-                return variant_field_span(ws, *enum_name, (*name)?, f.name);
-            }
-        }
-    }
-    None
+        let f = fields
+            .into_iter()
+            .map(|fidx| &body.record_pat_field_arena[fidx])
+            .find(|f| span_contains(&f.name_span, offset))?;
+        let shorthand = match &body.pattern_arena[f.pat] {
+            hir::Pattern::Bind(b) => body
+                .binding_spans
+                .get(*b)
+                .is_some_and(|bs| bs.offset_range() == f.name_span.offset_range()),
+            _ => false,
+        };
+        (!shorthand).then_some((*enum_name, *name, f))
+    })
 }
 
 /// Stdlib landmark for a builtin type name with no nominal declaration.
@@ -825,40 +832,19 @@ fn render_hover_type(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> St
 /// Owner)`; the variant name -> `Type: enum E`. `None` when `offset` isn't on
 /// any record-pattern name.
 fn hover_record_pat(ws: &Workspace, body: &Body, offset: usize) -> Option<(String, Span)> {
+    if let Some((enum_name, name, f)) = record_pat_field_at(body, offset) {
+        return render_record_field(ws, enum_name, name, f.name).map(|t| (t, f.name_span));
+    }
     for pat in body.pattern_arena.values() {
         let hir::Pattern::Record {
             enum_name,
             name,
             name_span,
-            fields,
             ..
         } = pat
         else {
             continue;
         };
-
-        // A field name -> `field: T (field of Owner)`. Shorthand `{ field }`
-        // is excluded: the name token *is* the binding, so it hovers as a value
-        // (`Type: T`) via the node dispatch -- only an explicit `field: bind`
-        // (name distinct from its binding) is a field-name reference.
-        for fidx in *fields {
-            let f = &body.record_pat_field_arena[fidx];
-            let (s, e) = f.name_span.offset_range();
-            if s <= offset && offset < e {
-                if let hir::Pattern::Bind(b) = &body.pattern_arena[f.pat] {
-                    if body
-                        .binding_spans
-                        .get(*b)
-                        .is_some_and(|bs| bs.offset_range() == f.name_span.offset_range())
-                    {
-                        return None; // shorthand -> node dispatch renders the binding
-                    }
-                }
-                return render_record_field(ws, *enum_name, *name, f.name)
-                    .map(|t| (t, f.name_span));
-            }
-        }
-
         // The pattern head name: an enum variant (`E::B`) -> the enum type; a
         // struct head (`Point { .. }`) -> the struct definition.
         if let (Some(nspan), Some(var)) = (name_span, name) {
