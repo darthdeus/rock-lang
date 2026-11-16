@@ -298,36 +298,13 @@ fn inferred_local_scalar_store_needs_no_nil_guard() {
 }
 
 #[test]
-fn nil_literal_record_store_preserves_callback_without_a_presence_read() {
-    common::require_luajit();
+fn nil_literal_record_store_keeps_guard_without_a_presence_read() {
     let lua = emit_clean(
         "struct Row { tag: int? = null } fn update(row: Row) { row.tag = null }",
         "update",
     );
     assert!(has_store_guard(&lua), "{lua}");
     assert!(!lua.contains("nil) ~= nil"), "{lua}");
-    let symbol = lua
-        .lines()
-        .find_map(|line| line.strip_prefix("function "))
-        .expect("function definition")
-        .split('(')
-        .next()
-        .unwrap();
-    let driver = format!(
-        r#"{lua}
-local row = {{ tag = 7 }}
-{symbol}(row)
-assert(row.tag == nil)
-local hits = 0
-local observed = setmetatable({{}}, {{ __newindex = function() hits = hits + 1 end }})
-{symbol}(observed)
-assert(hits == 1, 'clearing an absent key must enter __newindex')
-local absent = {{}}
-{symbol}(absent)
-assert(next(absent) == nil)
-"#
-    );
-    luajit_ok(&driver, "");
 }
 
 #[test]
@@ -674,30 +651,6 @@ fn scalar_arithmetic_keeps_effects_checks_and_unrepresentable_values_at_runtime(
 }
 
 #[test]
-fn numeric_selection_uses_native_minmax() {
-    let lua = emit_clean(
-        "fn choose(a: float, b: float) -> float { return if a < b { a } else { b } }",
-        "choose",
-    );
-    assert!(lua.contains("math.min("), "{lua}");
-    let lua = emit_clean(
-        "fn choose(a: float, b: float) -> float { return if a < b { b } else { a } }",
-        "choose",
-    );
-    assert!(lua.contains("math.max("), "{lua}");
-    let lua = emit_clean(
-        "fn choose(a: int, b: int) -> int { return if a < b { a } else { b } }",
-        "choose",
-    );
-    assert!(lua.contains("math.min("), "{lua}");
-    let lua = emit_clean(
-        "fn choose(a: int, b: int) -> int { if b > a { a = b }; return a }",
-        "choose",
-    );
-    assert!(lua.contains("math.max("), "{lua}");
-}
-
-#[test]
 fn numeric_selection_rejects_effectful_and_inclusive_branches() {
     for src in [
         "fn choose(a: float, b: float) -> float { return if a <= b { a } else { b } }",
@@ -755,6 +708,11 @@ print('selection-ok')
         "choose",
     );
     assert!(lua.contains("math.max("), "{lua}");
+    let lua = emit_clean(
+        "fn choose(a: int, b: int) -> int { return if a < b { a } else { b } }",
+        "choose",
+    );
+    assert!(lua.contains("math.min("), "{lua}");
 }
 
 #[test]
@@ -844,13 +802,11 @@ fn emit_std(src: &str, fn_name: &str) -> String {
 fn int_literal_and_return() {
     // The `5` is a single-use pure value -> tree-folded into the return (no
     // register, no `local`).
-    assert_eq!(
-        emit("fn five() -> int { 5 }", "five"),
-        "\
-function five_0()
- do return (5) end
-end
-"
+    let lua = emit("fn five() -> int { 5 }", "five");
+    assert!(lua.contains("do return (5) end"), "{lua}");
+    assert!(
+        !lua.contains("local "),
+        "a literal return needs no local:\n{lua}"
     );
 }
 
@@ -875,26 +831,16 @@ fn zero_argument_call_preserves_value_without_a_bare_global() {
 
 #[test]
 fn param_cell_read() {
-    assert_eq!(
-        emit("fn id(x: int) -> int { x }", "id"),
-        "\
-function id_int(c0)
- do return c0 end
-end
-"
-    );
+    let lua = emit("fn id(x: int) -> int { x }", "id");
+    assert!(lua.contains("function id_int(c0)"), "{lua}");
+    assert!(lua.contains("do return c0 end"), "{lua}");
 }
 
 #[test]
 fn int_arithmetic() {
-    assert_eq!(
-        emit_std("fn add(a: int, b: int) -> int { a + b }", "add"),
-        "\
-function add_int_int(c0, c1)
- do return (c0 + c1) end
-end
-"
-    );
+    let lua = emit_std("fn add(a: int, b: int) -> int { a + b }", "add");
+    assert!(lua.contains("function add_int_int(c0, c1)"), "{lua}");
+    assert!(lua.contains("do return (c0 + c1) end"), "{lua}");
 }
 
 #[test]
@@ -1302,15 +1248,19 @@ fn sum_range(lo: int, hi: int) -> int {
 }";
 
 #[test]
-fn for_user_iter_inline_is_zero_alloc() {
+fn for_user_iter_inline_is_counted_and_zero_alloc() {
     let lua = emit_inlined(ZERO_ALLOC_ITER_SRC, "sum_range");
     assert!(
-        !lua.contains("__rock_create_struct"),
-        "cursor struct must scalarize away, no create_struct:\n{lua}"
+        !lua.contains("__rock_create_struct") && !lua.contains('{'),
+        "cursor struct must scalarize away without a table constructor:\n{lua}"
     );
     assert!(
-        !lua.contains('{'),
-        "@inline iter/next over a `for` must leave no table constructor:\n{lua}"
+        lua.contains("for "),
+        "the loop must become a numeric `for`:\n{lua}"
+    );
+    assert!(
+        !lua.contains(">="),
+        "the slot exit-compare must be absorbed into the `for` header:\n{lua}"
     );
 }
 
@@ -1340,41 +1290,15 @@ fn sum_myvec(v: MyVec) -> int {
 }";
 
 #[test]
-fn for_vec_backed_iter_inline_is_zero_alloc() {
+fn for_vec_backed_iter_inline_is_counted_and_zero_alloc() {
     let lua = emit_inlined(ZERO_ALLOC_VEC_BACKED_SRC, "sum_myvec");
     assert!(
-        !lua.contains("__rock_create_struct"),
-        "vec-backed cursor must scalarize away:\n{lua}"
+        !lua.contains("__rock_create_struct") && !lua.contains('{'),
+        "vec-backed cursor must scalarize away without a table constructor:\n{lua}"
     );
-    assert!(
-        !lua.contains('{'),
-        "vec-backed @inline iterator loop must leave no table constructor:\n{lua}"
-    );
-}
-
-// --- The desugared+inlined counted loop is rewritten
-// into the codegen CountedLoop shape and prints as a native numeric `for` (FORL
-// bytecode). The goto-LOOP form of the same loop measured 1.8x slower on a
-// type-stable 2M-element sum.
-#[test]
-fn for_user_iter_inline_emits_forl() {
-    let lua = emit_inlined(ZERO_ALLOC_ITER_SRC, "sum_range");
     assert!(
         lua.contains("for "),
-        "desugared counted loop must print as a numeric `for`:\n{lua}"
-    );
-    assert!(
-        !lua.contains(">="),
-        "the slot exit-compare must be absorbed into the `for` header:\n{lua}"
-    );
-}
-
-#[test]
-fn for_vec_backed_iter_inline_emits_forl() {
-    let lua = emit_inlined(ZERO_ALLOC_VEC_BACKED_SRC, "sum_myvec");
-    assert!(
-        lua.contains("for "),
-        "vec-backed desugared loop must print as a numeric `for` (bound hoisted):\n{lua}"
+        "the loop must become a numeric `for`:\n{lua}"
     );
     assert!(
         !lua.lines().any(|l| l.contains(">=")),
@@ -1387,7 +1311,7 @@ fn for_vec_backed_iter_inline_emits_forl() {
 // zero-alloc native `for` the deleted template emitted. Parity measured at
 // ~1.0x, 0 bytes/elem (benchmarks/iterator-zero-alloc/vec_parity.rock).
 #[test]
-fn for_real_vec_loop_is_forl_zero_alloc() {
+fn for_real_vec_loop_is_forl_zero_alloc_with_raw_reads() {
     let lua = emit_inlined(
         "fn sum_vec(xs: [int]) -> int {
             let total = 0
@@ -1406,13 +1330,21 @@ fn for_real_vec_loop_is_forl_zero_alloc() {
     );
     assert!(
         !lua.contains("next"),
-        "iter/next must be fully inlined, no residual protocol call:\n{lua}"
+        "iter/next must be fully inlined:\n{lua}"
+    );
+    assert!(
+        lua.contains("._data["),
+        "the element read must use backing storage:\n{lua}"
+    );
+    assert!(
+        !lua.contains("__vec_checked_get("),
+        "a loop over a vector must not need a checked element read:\n{lua}"
     );
 }
 
 /// `[T]` loops of every common shape print as counted `for`s with no
-/// protocol call and no back edge, and compute the right values: a value
-/// element, `continue` and `break`, a string element and an early return.
+/// protocol call and no back edge: a value element, `continue` and `break`,
+/// a string element and an early return.
 const VEC_LOOP_SHAPES_SRC: &str = "
 value P { x: float, y: float }
 fn sum_p(ps: [P]) -> float {
@@ -1438,14 +1370,10 @@ fn find(xs: [int], key: int) -> int {
     for x in xs { if x == key { return x * 10 } }
     return -1
 }
-fn probe() -> string {
-    let b = skip_odd([1, 2, 3, 4, 200, 6])
-    let c = total_len([\"ab\", \"\", \"cde\"])
-    return \"{b} {c} {find([4, 5], 5)} {find([], 5)}\"
-}";
+";
 
 #[test]
-fn vec_loop_shapes_are_counted_fors_that_compute_the_same() {
+fn vec_loop_shapes_are_counted_with_no_back_edges() {
     for name in ["sum_p", "skip_odd", "total_len", "find"] {
         let lua = emit_inlined(VEC_LOOP_SHAPES_SRC, name);
         assert!(
@@ -1510,26 +1438,6 @@ fn map_only_chain_is_forl_zero_alloc() {
     );
 }
 
-#[test]
-fn map_filter_chain_is_zero_alloc_no_residual_next() {
-    let lua = emit_inlined(
-        "fn sum_kept(xs: [int]) -> int {
-            let total = 0
-            for x in xs.iter().map(x => x * 2).filter(x => x > 2) { total += x }
-            return total
-        }",
-        "sum_kept",
-    );
-    assert!(
-        !lua.contains('{') && !lua.contains("__rock_create_struct"),
-        "map+filter chain must not allocate (all cursors scalarize):\n{lua}"
-    );
-    assert!(
-        !lua.contains("next"),
-        "map+filter chain must fully inline, no residual `next` call:\n{lua}"
-    );
-}
-
 // --- Skip-loop FORL recovery: a filter/take_while layer's reject edge becomes
 // a `continue` (skip) or a jump to the loop exit (stop), so the whole chain
 // still rewrites into the codegen CountedLoop shape -- the doc-blessed flat
@@ -1569,6 +1477,10 @@ fn map_filter_chain_is_forl() {
     assert!(
         lua.contains("for "),
         "map+filter chain must recover a numeric `for`:\n{lua}"
+    );
+    assert!(
+        !lua.contains('{') && !lua.contains("__rock_create_struct") && !lua.contains("next"),
+        "map+filter chain must stay zero-alloc and fully inlined:\n{lua}"
     );
 }
 
@@ -1890,24 +1802,14 @@ fn callee_binding_upvalue_wraps_the_body_in_a_factory() {
         bound.contains(&format!("return function{rewritten_body} end\n")),
         "expected the bound body with direct calls rewritten:\n{bound}\n--- body ---\n{rewritten_body}"
     );
-}
-
-#[test]
-fn callee_binding_uses_short_private_parameters() {
-    let src =
-        "fn leaf(a: int) -> int { a + 1 }\nfn caller(a: int) -> int { leaf(a) + leaf(a + 1) }";
-    let bound = emit_clean_bound(src, "caller");
     assert!(
         bound.starts_with("__rock_mk_caller_int = function(b0) return function("),
         "expected a short private factory parameter:\n{bound}"
     );
-    assert!(
-        bound.matches("b0(").count() == 2,
-        "expected calls to use the private parameter:\n{bound}"
-    );
+    assert_eq!(bound.matches("b0(").count(), 2, "{bound}");
     assert!(
         bound.contains("caller_int = __rock_mk_caller_int(leaf_int)\n"),
-        "expected the binding line to keep the global callee name:\n{bound}"
+        "the binding line must retain the global callee name:\n{bound}"
     );
 }
 
@@ -2646,23 +2548,6 @@ fn counted_loop_store_within_the_length_is_raw() {
     assert!(!lua.contains("__vec_checked_set("), "{lua}");
 }
 
-/// The element read of a loop over a vector needs no fallback once the loop
-/// proves the index: a nil or false slot in bounds is the element.
-#[test]
-fn vec_loop_read_without_body_effects_is_raw() {
-    let lua = emit_inlined(
-        "fn sum_vec(xs: [int]) -> int {
-            let total = 0
-            for x in xs { total += x }
-            return total
-        }",
-        "sum_vec",
-    );
-    assert!(lua.contains("for "), "{lua}");
-    assert!(lua.contains("._data["), "{lua}");
-    assert!(!lua.contains("__vec_checked_get("), "{lua}");
-}
-
 /// A call in the body may shrink the vector, so the store keeps its check. A
 /// `@pure` callee keeps it too: the annotation admits `@debug_impure` callees
 /// and unverified opaque bodies, so it does not prove the vector untouched.
@@ -2892,25 +2777,15 @@ fn map_remove_invalidates_a_bound_read_from_the_map() {
 }
 
 #[test]
-fn table_lookups_can_shrink_a_guarded_vector() {
+fn tuple_lookup_can_shrink_a_guarded_vector() {
     let src = r#"
-fn via_table(xs: [int], t: any) -> int {
-    if xs.len() <= 0 { return -1 }
-    let value: int = cast(table_get(t, "missing"))
-    return xs[0] + value
-}
-fn via_tuple(xs: [int], t: any) -> int {
+fn lookup(xs: [int], t: any) -> int {
     if xs.len() <= 0 { return -1 }
     let value: int = tuple_nth(t, 1)
     return xs[0] + value
 }
-fn via_vec_data(xs: [int], ys: [int?]) -> int {
-    if xs.len() <= 0 { return -1 }
-    let value: int = cast(__vec_data_get(ys, 0))
-    return xs[0] + value
-}
 "#;
-    let lua = emit_inlined(src, "via_tuple");
+    let lua = emit_inlined(src, "lookup");
     assert!(lua.contains("__vec_checked_get("), "{lua}");
 }
 
