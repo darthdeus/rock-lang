@@ -44,7 +44,7 @@ pub fn complete_in(path: &str, marked: &str) -> Vec<CompletionItem> {
 /// before the cursor.
 #[track_caller]
 pub fn assert_invariants(marked: &str, items: &[CompletionItem]) {
-    let head = marked[..marked.find(CURSOR).expect("cursor")].as_bytes();
+    let head = &marked.as_bytes()[..marked.find(CURSOR).expect("cursor")];
     let start = head
         .iter()
         .rposition(|b| !(b.is_ascii_alphanumeric() || *b == b'_'))

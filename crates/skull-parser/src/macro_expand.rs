@@ -1723,8 +1723,7 @@ mod tests {
             let outermost = ast
                 .exprs
                 .iter()
-                .filter(|(_, d)| matches!(d.kind, ExprKind::FunctionCall { .. }))
-                .last();
+                .rfind(|(_, d)| matches!(d.kind, ExprKind::FunctionCall { .. }));
             outermost.unwrap().1.span
         };
         let (ast, es, bs) = expanded_nodes(defs, user);

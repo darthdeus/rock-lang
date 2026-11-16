@@ -4718,7 +4718,6 @@ fn record_call_impl(
     span: Span,
     site: Site,
 ) -> Option<Instance> {
-    if from.is_none() {}
     let cf = &ws.module(callee.module).functions[callee.func];
     let conversion_start = w.timer();
     let instantiated = w.with_interner(|a| {
@@ -4982,7 +4981,6 @@ fn record_witness(
     site: Site,
 ) {
     let started = w.timer();
-    if from.is_none() {}
     let rep = FuncRef {
         module: witness.func.0,
         func: witness.func.1,
@@ -5314,7 +5312,6 @@ fn record_bound_next(
     let resolved = &ws.module(rep.module).functions[rep.func];
     let callee = rep;
     let cf = &ws.module(callee.module).functions[callee.func];
-    if from.is_none() {}
     let conversion_start = w.timer();
     let instantiated =
         w.with_interner(|a| instantiate_witness(a, ws, inf, resolved, cf, next_generics, subst));

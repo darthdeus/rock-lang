@@ -5,6 +5,7 @@ use std::process::Command;
 #[path = "support/stone_cdylib.rs"]
 mod stone_cdylib;
 
+#[cfg(target_os = "linux")]
 #[path = "support/private_display.rs"]
 mod private_display;
 

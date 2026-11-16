@@ -341,9 +341,9 @@ pub(super) fn all_roots_with_census(
     ws: &Workspace,
     project_root: Option<&str>,
     shader_roots: &[FuncRef],
-    mut census: Option<&mut RootEnumerationCensus>,
+    census: Option<&mut RootEnumerationCensus>,
 ) -> Vec<FuncRef> {
-    let mut roots = emission_roots_with_census(ws, project_root, census.as_deref_mut());
+    let mut roots = emission_roots_with_census(ws, project_root, census);
     let mut seen: FxHashSet<FuncRef> = roots.iter().copied().collect();
     let mut glue: Vec<FuncRef> = sim_glue_roots(ws);
     glue.extend(shader_roots.iter().copied());
