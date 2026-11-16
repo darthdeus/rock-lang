@@ -31,20 +31,6 @@ fn mutable_global_accesses_use_the_global_storage() {
     );
 }
 
-fn run_node(program: &str) -> String {
-    let output = crate::common::node()
-        .arg("-e")
-        .arg(program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        output.status.success(),
-        "node failed:\n{program}\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
-}
-
 #[test]
 fn opaque_js_global_reads_and_writes_go_through_the_bridge() {
     if !crate::common::require_node() {
@@ -74,7 +60,7 @@ fn main() {
         "{main}(); {main}(); let key = __rock_global_entry(\"GRID\").slots[0]; \
          console.log(__rock_globals[key]._data[0] + ':' + __G.GRID._data[0]);"
     ));
-    assert_eq!(run_node(&program), "3:3");
+    assert_eq!(crate::common::run_node(&program).trim(), "3:3");
 }
 
 #[test]
@@ -96,11 +82,12 @@ __G.FLAT_y = 4;
 console.log(__rock_globals["global:<test>::FLAT::leaf0"] + ":" + (__G.FLAT_x + __G.FLAT_y));
 "#;
     assert_eq!(
-        run_node(&format!(
+        crate::common::run_node(&format!(
             "{}\n{}",
             skull_codegen_js::JS_GLOBALS_RUNTIME,
             program
-        )),
+        ))
+        .trim(),
         "3:7"
     );
 }

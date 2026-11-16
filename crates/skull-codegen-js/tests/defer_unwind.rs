@@ -1,7 +1,8 @@
 //! Ordinary-fn `defer` unwinding on JS: a body that registers a defer catches
 //! whatever escapes it and unwinds the cleanups still registered above the
 //! depth it was entered at. A body without `defer` carries none of that.
-use crate::common::{node, ws_with};
+//! control_flow/defer_on_error.rock runs the unwinding on both backends.
+use crate::common::ws_with;
 
 const FIXTURE: &str = r#"
 @nomangle inline(js) fn raised(f: fn()) -> bool = """
@@ -74,25 +75,4 @@ fn fn_without_defer_has_no_unwind_machinery() {
         !body.contains("__rock_defer") && !body.contains("try {"),
         "a fn without defer must not pay for the unwind:\n{body}"
     );
-}
-
-#[test]
-fn defer_runs_on_normal_exit_and_on_error() {
-    let prog = program();
-    let mut js = skull_codegen_js::assemble_prelude(
-        &prog.program,
-        prog.has_code_refs(),
-        skull_codegen_js::JS_NODE_HOST,
-        &[],
-    );
-    js.push_str(&prog.program);
-    let main = prog.main_js_name.as_deref().expect("program has a main");
-    js.push_str(&format!("\n{main}();\n"));
-    let output = node().arg("-e").arg(js).output().expect("run node");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "g\ng\n3 true\n");
 }
