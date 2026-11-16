@@ -510,7 +510,7 @@ impl<'a> Builder<'a> {
         let vec = self.empty_strided_vec(elem, len)?;
         let cell = self.f.new_cell(None);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
-        self.emit_cur(Inst::Store { cell, value: zero });
+        self.store_cell(cell, zero);
         let header = self.f.new_block();
         let body = self.f.new_block();
         let exit = self.f.new_block();
@@ -542,7 +542,7 @@ impl<'a> Builder<'a> {
         };
         self.strided_append_bundle(vec, &bundle, elem)?;
         let next = self.int_plus_one(i);
-        self.emit_cur(Inst::Store { cell, value: next });
+        self.store_cell(cell, next);
         self.f.set_term(self.cur, Term::Goto(header));
         self.cur = exit;
         Ok(vec)
@@ -1035,7 +1035,7 @@ impl<'a> Builder<'a> {
         });
         let cell = self.f.new_cell(None);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
-        self.emit_cur(Inst::Store { cell, value: zero });
+        self.store_cell(cell, zero);
         let head = self.f.new_block();
         let body = self.f.new_block();
         let exit = self.f.new_block();
@@ -1047,7 +1047,7 @@ impl<'a> Builder<'a> {
         self.cur = body;
         self.column_unset(vec, i, elem)?;
         let next = self.int_plus_one(i);
-        self.emit_cur(Inst::Store { cell, value: next });
+        self.store_cell(cell, next);
         self.f.set_term(self.cur, Term::Goto(head));
         self.cur = exit;
         Ok(())
@@ -1380,10 +1380,7 @@ impl<'a> Builder<'a> {
         let vec = self.empty_column_vec(elem, len)?;
         let i_cell = self.f.new_cell(None);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
-        self.emit_cur(Inst::Store {
-            cell: i_cell,
-            value: zero,
-        });
+        self.store_cell(i_cell, zero);
 
         let header = self.f.new_block();
         let body = self.f.new_block();
@@ -1407,10 +1404,7 @@ impl<'a> Builder<'a> {
         let bundle = ValueBundle::new(elem.representation(), ValueRepr::Scalar(value));
         self.column_append_bundle(vec, &bundle, elem)?;
         let next = self.emit_cur(Inst::IntAdd(i_now, one));
-        self.emit_cur(Inst::Store {
-            cell: i_cell,
-            value: next,
-        });
+        self.store_cell(i_cell, next);
         self.f.set_term(self.cur, Term::Goto(header));
 
         self.cur = exit;
@@ -1933,16 +1927,13 @@ impl<'a> Builder<'a> {
             vec![self.pack(found.into_value())?]
         };
         for (cell, value) in cells.iter().zip(stored) {
-            self.emit_cur(Inst::Store { cell: *cell, value });
+            self.store_cell(*cell, value);
         }
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = miss;
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
         for cell in &cells {
-            self.emit_cur(Inst::Store {
-                cell: *cell,
-                value: nil,
-            });
+            self.store_cell(*cell, nil);
         }
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = join;

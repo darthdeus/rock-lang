@@ -581,7 +581,7 @@ impl<'a> Builder<'a> {
         self.cur = absent_bb;
         for &c in &cells {
             let n = self.emit_cur(Inst::Const(Lit::Nil));
-            self.emit_cur(Inst::Store { cell: c, value: n });
+            self.store_cell(c, n);
         }
         if self.is_open() {
             self.f.set_term(self.cur, Term::Goto(join));
@@ -589,7 +589,7 @@ impl<'a> Builder<'a> {
 
         self.cur = present_bb;
         for (&c, (_, lv)) in cells.iter().zip(self.embed_leaf_reads(cname, v)?) {
-            self.emit_cur(Inst::Store { cell: c, value: lv });
+            self.store_cell(c, lv);
         }
         if self.is_open() {
             self.f.set_term(self.cur, Term::Goto(join));

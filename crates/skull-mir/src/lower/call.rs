@@ -2635,18 +2635,12 @@ impl<'a> Builder<'a> {
 
         self.cur = absent_bb;
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        self.emit_cur(Inst::Store {
-            cell: result,
-            value: nil,
-        });
+        self.store_cell(result, nil);
         self.f.set_term(self.cur, Term::Goto(join));
 
         self.cur = present_bb;
         let tuple = self.emit_cur(Inst::MakeTuple(slots));
-        self.emit_cur(Inst::Store {
-            cell: result,
-            value: tuple,
-        });
+        self.store_cell(result, tuple);
         self.f.set_term(self.cur, Term::Goto(join));
 
         self.cur = join;
@@ -2728,10 +2722,7 @@ impl<'a> Builder<'a> {
 
         self.cur = absent_bb;
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        self.emit_cur(Inst::Store {
-            cell: result,
-            value: nil,
-        });
+        self.store_cell(result, nil);
         self.f.set_term(self.cur, Term::Goto(join));
 
         self.cur = present_bb;
@@ -2739,10 +2730,7 @@ impl<'a> Builder<'a> {
         // same tier dispatch: a leaf-table or flat-enum payload has no
         // declared-field ctor to take.
         let boxed = self.pack_boxed(value, kind)?;
-        self.emit_cur(Inst::Store {
-            cell: result,
-            value: boxed,
-        });
+        self.store_cell(result, boxed);
         self.f.set_term(self.cur, Term::Goto(join));
 
         self.cur = join;
@@ -2964,7 +2952,7 @@ impl<'a> Builder<'a> {
                 self.cur = nil_bb;
                 for cell in &cells {
                     let value = self.emit_cur(Inst::Const(Lit::Nil));
-                    self.emit_cur(Inst::Store { cell: *cell, value });
+                    self.store_cell(*cell, value);
                 }
                 self.f.set_term(self.cur, Term::Goto(join));
 
@@ -2973,7 +2961,7 @@ impl<'a> Builder<'a> {
                 inner.nullable = false;
                 let leaves = self.cdata_leaves(*v, &inner)?;
                 for (cell, value) in cells.iter().zip(leaves) {
-                    self.emit_cur(Inst::Store { cell: *cell, value });
+                    self.store_cell(*cell, value);
                 }
                 self.f.set_term(self.cur, Term::Goto(join));
 
@@ -3241,7 +3229,7 @@ impl<'a> Builder<'a> {
             self.cur = nil_bb;
             for c in &cells {
                 let z = self.emit_cur(Inst::Const(Lit::Nil));
-                self.emit_cur(Inst::Store { cell: *c, value: z });
+                self.store_cell(*c, z);
             }
             self.f.set_term(self.cur, Term::Goto(join));
             self.cur = val_bb;
@@ -3251,10 +3239,7 @@ impl<'a> Builder<'a> {
                 .chain(fc.named.into_iter().map(|(_, c)| c))
                 .collect();
             for (c, lv) in cells.iter().zip(leaves) {
-                self.emit_cur(Inst::Store {
-                    cell: *c,
-                    value: lv,
-                });
+                self.store_cell(*c, lv);
             }
             self.f.set_term(self.cur, Term::Goto(join));
             self.cur = join;
@@ -3437,7 +3422,7 @@ impl<'a> Builder<'a> {
         self.cur = nil_bb;
         for c in &cells {
             let z = self.emit_cur(Inst::Const(Lit::Nil));
-            self.emit_cur(Inst::Store { cell: *c, value: z });
+            self.store_cell(*c, z);
         }
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = value_bb;
@@ -3445,10 +3430,7 @@ impl<'a> Builder<'a> {
         inner.nullable = false;
         let leaves = read(self, fv, &inner)?;
         for (c, lv) in cells.iter().zip(leaves) {
-            self.emit_cur(Inst::Store {
-                cell: *c,
-                value: lv,
-            });
+            self.store_cell(*c, lv);
         }
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = join;

@@ -263,10 +263,7 @@ impl<'a> Builder<'a> {
             None => self.lower_expr(iter_expr)?,
         };
         let it_cell = self.f.new_cell(Some(crate::names::ustr("__it")));
-        self.emit_cur(Inst::Store {
-            cell: it_cell,
-            value: it_val,
-        });
+        self.store_cell(it_cell, it_val);
         let owned_flag = self.own_loop_coroutine(iter_expr, it_cell);
 
         // next returns `(bool, E)` / `(bool, A, B, ...)`. The shape is read under
@@ -402,10 +399,7 @@ impl<'a> Builder<'a> {
         self.cur = exit;
         if let Some(flag) = owned_flag {
             let off = self.emit_cur(Inst::Const(Lit::Bool(false)));
-            self.emit_cur(Inst::Store {
-                cell: flag,
-                value: off,
-            });
+            self.store_cell(flag, off);
         }
         Ok(())
     }
@@ -429,10 +423,7 @@ impl<'a> Builder<'a> {
         }
         let flag = self.f.new_cell(Some(crate::names::ustr("__defer")));
         let on = self.emit_cur(Inst::Const(Lit::Bool(true)));
-        self.emit_cur(Inst::Store {
-            cell: flag,
-            value: on,
-        });
+        self.store_cell(flag, on);
         let saved_cur = self.cur;
         let entry = self.f.new_block();
         let b_kill = self.f.new_block();
@@ -442,10 +433,7 @@ impl<'a> Builder<'a> {
         self.branch_to(fv, b_kill, b_done);
         self.cur = b_kill;
         let off = self.emit_cur(Inst::Const(Lit::Bool(false)));
-        self.emit_cur(Inst::Store {
-            cell: flag,
-            value: off,
-        });
+        self.store_cell(flag, off);
         let it = self.emit_cur(Inst::Load(it_cell));
         let kill = self.emit_cur(Inst::Global(crate::names::ustr(crate::mir::CORO_KILL)));
         self.emit_cur(Inst::CallValue {
@@ -603,14 +591,11 @@ impl<'a> Builder<'a> {
         let i_cell = self.f.new_cell(None);
         self.f.mark_loop_binding(i_cell);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
-        self.emit_cur(Inst::Store {
-            cell: i_cell,
-            value: zero,
-        });
+        self.store_cell(i_cell, zero);
         let enum_cell = enum_var.map(|_| {
             let c = self.f.new_cell(None);
             let z = self.emit_cur(Inst::Const(Lit::Int(0)));
-            self.emit_cur(Inst::Store { cell: c, value: z });
+            self.store_cell(c, z);
             c
         });
 
@@ -746,15 +731,9 @@ impl<'a> Builder<'a> {
                 crate::names::ustr(""),
             );
             self.binds.insert(raw(ev), bind_cell);
-            self.emit_cur(Inst::Store {
-                cell: bind_cell,
-                value: cur,
-            });
+            self.store_cell(bind_cell, cur);
             let inc = self.int_plus_one(cur);
-            self.emit_cur(Inst::Store {
-                cell: ec,
-                value: inc,
-            });
+            self.store_cell(ec, inc);
         }
         self.loop_targets.push((latch, exit, self.defers.len()));
         self.lower_stmt_expr(body)?;
@@ -800,10 +779,7 @@ impl<'a> Builder<'a> {
         self.f.mark_loop_binding(key_cell);
         self.f.mark_loop_binding(val_cell);
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        self.emit_cur(Inst::Store {
-            cell: key_cell,
-            value: nil,
-        });
+        self.store_cell(key_cell, nil);
         let i_cell = match counter {
             Some(ib) => {
                 let i_cell = self.new_binding_cell(
@@ -815,10 +791,7 @@ impl<'a> Builder<'a> {
                 self.binds.insert(raw(ib), i_cell);
                 self.f.mark_loop_binding(i_cell);
                 let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
-                self.emit_cur(Inst::Store {
-                    cell: i_cell,
-                    value: zero,
-                });
+                self.store_cell(i_cell, zero);
                 Some(i_cell)
             }
             None => None,
@@ -1035,10 +1008,7 @@ impl<'a> Builder<'a> {
         };
         self.f.mark_loop_binding(i_cell);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
-        self.emit_cur(Inst::Store {
-            cell: i_cell,
-            value: zero,
-        });
+        self.store_cell(i_cell, zero);
 
         let header = self.f.new_block();
         let body_bb = self.f.new_block();
@@ -1158,10 +1128,7 @@ impl<'a> Builder<'a> {
         let i_cell = self.f.new_cell(None);
         self.f.mark_loop_binding(i_cell);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
-        self.emit_cur(Inst::Store {
-            cell: i_cell,
-            value: zero,
-        });
+        self.store_cell(i_cell, zero);
 
         let header = self.f.new_block();
         let body_bb = self.f.new_block();
@@ -1288,7 +1255,7 @@ impl<'a> Builder<'a> {
                 if self.binding_is_nonnull_value_struct(*b) {
                     self.f.mark_nonnull_value_struct(cell);
                 }
-                self.emit_cur(Inst::Store { cell, value });
+                self.store_cell(cell, value);
                 self.binds.insert(raw(*b), cell);
             }
             BindingPattern::Tuple(subs) => {
@@ -1420,7 +1387,7 @@ impl<'a> Builder<'a> {
                 )));
             }
             for (cell, &value) in cells.iter().zip(leaves) {
-                self.emit_cur(Inst::Store { cell: *cell, value });
+                self.store_cell(*cell, value);
             }
             let cells = cells.into_iter().map(GroupLeaf::Cell).collect();
             self.group_binds.insert(raw(b), (cells, shape));
@@ -1449,7 +1416,7 @@ impl<'a> Builder<'a> {
                     crate::names::ustr(li.to_string().as_str()),
                 );
                 self.f.cells[c].native_ty = leaf_tys.as_ref().and_then(|tys| tys.get(li).copied());
-                self.emit_cur(Inst::Store { cell: c, value });
+                self.store_cell(c, value);
                 GroupLeaf::Cell(c)
             })
             .collect();
@@ -1504,7 +1471,7 @@ impl<'a> Builder<'a> {
                     crate::names::ustr(si.to_string().as_str()),
                 );
                 self.f.cells[c].producer = crate::mir::CellProducer::TupleSlot;
-                self.emit_cur(Inst::Store { cell: c, value });
+                self.store_cell(c, value);
                 c
             })
             .collect();

@@ -1384,10 +1384,7 @@ impl<'a> Builder<'a> {
             callee: resume0,
             args: vec![sub],
         });
-        self.emit_cur(Inst::Store {
-            cell: slot,
-            value: primed,
-        });
+        self.store_cell(slot, primed);
 
         let header = self.f.new_block();
         let body = self.f.new_block();
@@ -1420,10 +1417,7 @@ impl<'a> Builder<'a> {
             callee: resume1,
             args: vec![sub, arg],
         });
-        self.emit_cur(Inst::Store {
-            cell: slot,
-            value: v2,
-        });
+        self.store_cell(slot, v2);
         self.f.set_term(self.cur, Term::Goto(header));
 
         // exit: clear the active inner, re-raise the inner's error if any, then

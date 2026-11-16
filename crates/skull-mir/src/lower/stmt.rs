@@ -460,7 +460,7 @@ impl<'a> Builder<'a> {
                                 )));
                             }
                             for (cell, value) in cells.iter().copied().zip(leaves) {
-                                self.emit_cur(Inst::Store { cell, value });
+                                self.store_cell(cell, value);
                             }
                             let cells = cells.into_iter().map(GroupLeaf::Cell).collect();
                             self.group_binds.insert(raw(name), (cells, shape));
@@ -538,7 +538,7 @@ impl<'a> Builder<'a> {
                             if matches!(self.f.insts[v], Inst::MakeValueStruct { .. }) {
                                 self.owned_value_binds.insert(raw(name));
                             }
-                            self.emit_cur(Inst::Store { cell, value: v });
+                            self.store_cell(cell, v);
                             self.binds.insert(raw(name), cell);
                         }
                     }
@@ -560,10 +560,7 @@ impl<'a> Builder<'a> {
                         DeferMode::CoFlag => {
                             let flag = self.f.new_cell(Some(crate::names::ustr("__defer")));
                             let on = self.emit_cur(Inst::Const(Lit::Bool(true)));
-                            self.emit_cur(Inst::Store {
-                                cell: flag,
-                                value: on,
-                            });
+                            self.store_cell(flag, on);
                             let entry = self.lower_detached_defer(body, Some(flag))?;
                             self.f.coro_defers.push((flag, entry));
                             PendingDefer::CoFlag(flag)
@@ -602,7 +599,7 @@ impl<'a> Builder<'a> {
                         self.binding_ty(var),
                         crate::names::ustr(""),
                     );
-                    self.emit_cur(Inst::Store { cell, value: v });
+                    self.store_cell(cell, v);
                     self.binds.insert(raw(var), cell);
                 }
                 Statement::Static { name, value } => {
@@ -704,10 +701,7 @@ impl<'a> Builder<'a> {
                 self.branch_to(fv, b_body, b_done);
                 self.cur = b_body;
                 let off = self.emit_cur(Inst::Const(Lit::Bool(false)));
-                self.emit_cur(Inst::Store {
-                    cell: f,
-                    value: off,
-                });
+                self.store_cell(f, off);
                 self.lower_defer_body(body)?;
                 self.f.set_term(self.cur, Term::Goto(b_done));
                 self.cur = b_done;
@@ -810,10 +804,7 @@ impl<'a> Builder<'a> {
             self.branch_to(fv, b_body, b_done);
             self.cur = b_body;
             let off = self.emit_cur(Inst::Const(Lit::Bool(false)));
-            self.emit_cur(Inst::Store {
-                cell: flag,
-                value: off,
-            });
+            self.store_cell(flag, off);
         }
         self.lower_defer_body(body)?;
         self.f.set_term(self.cur, Term::Goto(b_done));

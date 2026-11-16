@@ -158,7 +158,7 @@ impl<'a> Builder<'a> {
                 }
                 let cell =
                     self.new_binding_cell(b, name, self.binding_ty(b), crate::names::ustr(""));
-                self.emit_cur(Inst::Store { cell, value: val });
+                self.store_cell(cell, val);
                 self.binds.insert(raw(b), cell);
                 Ok(())
             }
@@ -1218,16 +1218,10 @@ impl<'a> Builder<'a> {
         self.binds.insert(raw(var_b), i_cell);
         self.f.mark_loop_binding(i_cell);
         let lo_v = self.lower_expr(low)?;
-        self.emit_cur(Inst::Store {
-            cell: i_cell,
-            value: lo_v,
-        });
+        self.store_cell(i_cell, lo_v);
         let hi_v = self.lower_expr(high)?;
         let hi_cell = self.f.new_cell(None);
-        self.emit_cur(Inst::Store {
-            cell: hi_cell,
-            value: hi_v,
-        });
+        self.store_cell(hi_cell, hi_v);
 
         let header = self.f.new_block();
         let body_bb = self.f.new_block();
@@ -1267,10 +1261,7 @@ impl<'a> Builder<'a> {
         } else {
             self.emit_cur(Inst::IntAdd(i_v2, one))
         };
-        self.emit_cur(Inst::Store {
-            cell: i_cell,
-            value: inc,
-        });
+        self.store_cell(i_cell, inc);
         self.f.set_term(self.cur, Term::Goto(header));
 
         self.cur = exit;

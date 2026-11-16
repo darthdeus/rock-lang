@@ -994,14 +994,8 @@ impl<'a> Builder<'a> {
             None,
             crate::names::ustr("slot"),
         );
-        self.emit_cur(Inst::Store {
-            cell: vec,
-            value: val.vec,
-        });
-        self.emit_cur(Inst::Store {
-            cell: slot,
-            value: val.slot,
-        });
+        self.store_cell(vec, val.vec);
+        self.store_cell(slot, val.slot);
         self.flat_ref_binds.insert(raw(name), key);
         self.flat_ref_cells.insert(raw(name), (vec, slot));
         Ok(true)

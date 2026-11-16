@@ -609,10 +609,7 @@ impl<'a> Builder<'a> {
     /// to `join` (the fall-through merge). A diverged arm leaves it untouched.
     pub(crate) fn store_and_join(&mut self, result: Idx<Cell>, value: Idx<Inst>, join: Idx<Block>) {
         if self.is_open() {
-            self.emit_cur(Inst::Store {
-                cell: result,
-                value,
-            });
+            self.store_cell(result, value);
             self.f.set_term(self.cur, Term::Goto(join));
         }
     }
@@ -659,7 +656,7 @@ impl<'a> Builder<'a> {
             )));
         }
         for (&cell, &value) in results.iter().zip(slots) {
-            self.emit_cur(Inst::Store { cell, value });
+            self.store_cell(cell, value);
         }
         self.f.set_term(self.cur, Term::Goto(join));
         Ok(())

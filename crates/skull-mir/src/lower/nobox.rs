@@ -773,18 +773,12 @@ impl<'a> Builder<'a> {
             self.cur = next;
         }
         let yes = self.emit_cur(Inst::Const(Lit::Bool(true)));
-        self.emit_cur(Inst::Store {
-            cell: result,
-            value: yes,
-        });
+        self.store_cell(result, yes);
         self.f.set_term(self.cur, Term::Goto(join));
 
         self.cur = fail;
         let no = self.emit_cur(Inst::Const(Lit::Bool(false)));
-        self.emit_cur(Inst::Store {
-            cell: result,
-            value: no,
-        });
+        self.store_cell(result, no);
         self.f.set_term(self.cur, Term::Goto(join));
 
         self.cur = join;

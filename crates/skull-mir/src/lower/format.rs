@@ -417,7 +417,7 @@ impl<'a> Builder<'a> {
         }
         let ty = self.scx.interner().intern(ty.clone());
         let cell = self.f.new_cell_native_typed(None, None, Some(ty));
-        self.emit_cur(Inst::Store { cell, value: v });
+        self.store_cell(cell, v);
         self.emit_cur(Inst::Load(cell))
     }
 

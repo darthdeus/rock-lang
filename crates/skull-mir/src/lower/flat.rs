@@ -307,7 +307,7 @@ impl<'a> Builder<'a> {
         self.cur = done_bb;
         for c in &cells {
             let z = self.emit_cur(Inst::Const(Lit::Nil));
-            self.emit_cur(Inst::Store { cell: *c, value: z });
+            self.store_cell(*c, z);
         }
         self.f.set_term(self.cur, Term::Goto(join));
         // Live: spread the reused frame slots into the leaf cells.
@@ -317,7 +317,7 @@ impl<'a> Builder<'a> {
                 base: frame,
                 field: yield_slot(i),
             });
-            self.emit_cur(Inst::Store { cell: *c, value: v });
+            self.store_cell(*c, v);
         }
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = join;
@@ -467,10 +467,7 @@ impl<'a> Builder<'a> {
         self.branch_on_nil(tag, nil_bb, box_bb);
         self.cur = nil_bb;
         let absent = self.emit_cur(Inst::Const(Lit::Nil));
-        self.emit_cur(Inst::Store {
-            cell: result,
-            value: absent,
-        });
+        self.store_cell(result, absent);
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = box_bb;
         let eid = self.ws.enums_by_name[&shape.name];
@@ -489,10 +486,7 @@ impl<'a> Builder<'a> {
             self.cur = unit_bb;
             let global = crate::mangle::enum_singleton_global(self.ws, shape.name, variant);
             let singleton = self.emit_cur(Inst::Global(global));
-            self.emit_cur(Inst::Store {
-                cell: result,
-                value: singleton,
-            });
+            self.store_cell(result, singleton);
             self.f.set_term(self.cur, Term::Goto(join));
             self.cur = next_bb;
         }
@@ -502,10 +496,7 @@ impl<'a> Builder<'a> {
             positional: cells.positional,
             named: cells.named,
         });
-        self.emit_cur(Inst::Store {
-            cell: result,
-            value: boxed,
-        });
+        self.store_cell(result, boxed);
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = join;
         self.emit_cur(Inst::Load(result))

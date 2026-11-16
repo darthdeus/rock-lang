@@ -2507,6 +2507,10 @@ impl<'a> Builder<'a> {
         cond
     }
 
+    fn store_cell(&mut self, cell: Idx<Cell>, value: Idx<Inst>) -> Idx<Inst> {
+        self.emit_cur(Inst::Store { cell, value })
+    }
+
     fn branch_to(&mut self, cond: Idx<Inst>, then_bb: Idx<Block>, else_bb: Idx<Block>) {
         self.f.set_term(
             self.cur,
@@ -2544,7 +2548,7 @@ impl<'a> Builder<'a> {
     fn increment_cell(&mut self, cell: Idx<Cell>) {
         let value = self.emit_cur(Inst::Load(cell));
         let value = self.int_plus_one(value);
-        self.emit_cur(Inst::Store { cell, value });
+        self.store_cell(cell, value);
     }
 
     /// A direct multi-return call into `dests`, and each dest loaded back.
@@ -2796,7 +2800,7 @@ impl<'a> Builder<'a> {
                     self.binding_ty(pb),
                     crate::names::ustr(""),
                 );
-                self.emit_cur(Inst::Store { cell, value });
+                self.store_cell(cell, value);
                 self.binds.insert(raw(pb), cell);
                 self.owned_value_binds.insert(raw(pb));
                 continue;
@@ -2806,7 +2810,7 @@ impl<'a> Builder<'a> {
             };
             let v = self.emit_cur(Inst::Load(cell));
             let copy = self.copied_value_box(ty, v)?;
-            self.emit_cur(Inst::Store { cell, value: copy });
+            self.store_cell(cell, copy);
         }
         Ok(())
     }
@@ -3226,7 +3230,7 @@ impl<'a> Builder<'a> {
                 let leaves = self.repr_to_storage_leaves(&r, &shape, "struct default")?;
                 self.f.param_default_values.insert(i, leaves.clone());
                 for (c, v) in cells.iter().zip(leaves) {
-                    self.emit_cur(Inst::Store { cell: *c, value: v });
+                    self.store_cell(*c, v);
                 }
                 if self.is_open() {
                     self.f.set_term(self.cur, Term::Goto(join));
@@ -3256,7 +3260,7 @@ impl<'a> Builder<'a> {
             let expected = self.binding_ty(pb).and_then(|ty| self.concrete_ty_id(ty));
             let dv = self.lower_expr_with_expected(*def, expected)?;
             self.f.param_default_values.insert(i, vec![dv]);
-            self.emit_cur(Inst::Store { cell, value: dv });
+            self.store_cell(cell, dv);
             self.f.set_term(self.cur, Term::Goto(join));
             self.cur = join;
         }

@@ -1117,7 +1117,7 @@ impl<'a> Builder<'a> {
                     .is_some_and(|name| self.is_value_struct(name)) =>
             {
                 let copy = self.copied_value_box(ty, leaf)?;
-                self.emit_cur(Inst::Store { cell, value: copy });
+                self.store_cell(cell, copy);
                 // Through a reload, so copy propagation sees the cell written
                 // in place and does not fold reads to the copy's operands.
                 Ok(self.emit_cur(Inst::Load(cell)))
@@ -1206,13 +1206,10 @@ impl<'a> Builder<'a> {
         // but used after it would see the new field. Snapshot it in a cell.
         let snapshot = result.map(|old_wanted| {
             let snap = self.f.new_cell(None);
-            self.emit_cur(Inst::Store {
-                cell: snap,
-                value: if old_wanted { old } else { new },
-            });
+            self.store_cell(snap, if old_wanted { old } else { new });
             snap
         });
-        self.emit_cur(Inst::Store { cell, value });
+        self.store_cell(cell, value);
         Ok(snapshot.map(|snap| self.emit_cur(Inst::Load(snap))))
     }
 
@@ -1235,10 +1232,7 @@ impl<'a> Builder<'a> {
             }
         };
         for (leaf, value) in cells.iter().zip(leaves) {
-            self.emit_cur(Inst::Store {
-                cell: leaf.cell(),
-                value,
-            });
+            self.store_cell(leaf.cell(), value);
         }
         Ok(())
     }
@@ -1502,10 +1496,7 @@ impl<'a> Builder<'a> {
                 let leaves =
                     self.repr_to_storage_leaves(&r, &shape, "scalarized local assignment")?;
                 for (c, lv) in cells.iter().zip(leaves) {
-                    self.emit_cur(Inst::Store {
-                        cell: c.cell(),
-                        value: lv,
-                    });
+                    self.store_cell(c.cell(), lv);
                 }
             }
             // The tuple twin: a name bound to a splatting tuple's WIRE updates its
@@ -1516,10 +1507,7 @@ impl<'a> Builder<'a> {
                 let owned = self.owned_value_children(r.into_value())?;
                 let slots = self.tuple_repr_to_slots(owned, &shape)?;
                 for (c, sv) in cells.iter().zip(slots) {
-                    self.emit_cur(Inst::Store {
-                        cell: *c,
-                        value: sv,
-                    });
+                    self.store_cell(*c, sv);
                 }
             }
             Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
@@ -1549,14 +1537,8 @@ impl<'a> Builder<'a> {
                     .flat_ref_cells
                     .get(&raw(b))
                     .ok_or_else(|| self.gap_here("flat `ref` binding has no cells"))?;
-                self.emit_cur(Inst::Store {
-                    cell: vec,
-                    value: val.vec,
-                });
-                self.emit_cur(Inst::Store {
-                    cell: slot,
-                    value: val.slot,
-                });
+                self.store_cell(vec, val.vec);
+                self.store_cell(slot, val.slot);
             }
             Expr::Var(b) => {
                 let cell = *self
@@ -1593,7 +1575,7 @@ impl<'a> Builder<'a> {
                     }
                     _ => v,
                 };
-                self.emit_cur(Inst::Store { cell, value: v });
+                self.store_cell(cell, v);
             }
             Expr::FieldAccess { .. }
                 if let Some((cell, path)) = self.first_class_field_place(target) =>
@@ -1928,7 +1910,7 @@ impl<'a> Builder<'a> {
                 let cell = cells[0].cell();
                 let cur = self.emit_cur(Inst::Load(cell));
                 let new_v = combine(self, cur)?;
-                self.emit_cur(Inst::Store { cell, value: new_v });
+                self.store_cell(cell, new_v);
                 self.f.set_term(self.cur, Term::Goto(join));
                 self.cur = join;
             }
@@ -2067,7 +2049,7 @@ impl<'a> Builder<'a> {
                     .ok_or_else(|| gap("read-modify-write of an unbound variable"))?;
                 let old = self.emit_cur(Inst::Load(cell));
                 let new = update(self, old)?;
-                self.emit_cur(Inst::Store { cell, value: new });
+                self.store_cell(cell, new);
                 Ok(pick(old, new))
             }
             _ if nobox_global_place.is_some() && result.is_none() => {
@@ -2101,7 +2083,7 @@ impl<'a> Builder<'a> {
                 let cell = cells[0].cell();
                 let old = self.emit_cur(Inst::Load(cell));
                 let new = update(self, old)?;
-                self.emit_cur(Inst::Store { cell, value: new });
+                self.store_cell(cell, new);
                 Ok(pick(old, new))
             }
             Expr::FieldAccess { base, field } => {
@@ -2480,7 +2462,7 @@ impl<'a> Builder<'a> {
                 s.binding_ty(binding),
                 crate::names::ustr(""),
             );
-            s.emit_cur(Inst::Store { cell, value: recv });
+            s.store_cell(cell, recv);
             s.binds.insert(raw(binding), cell);
             s.lower_expr_repr(body)
         })
@@ -2555,10 +2537,7 @@ impl<'a> Builder<'a> {
                 s.binding_ty(binding),
                 crate::names::ustr(""),
             );
-            s.emit_cur(Inst::Store {
-                cell,
-                value: recv_v,
-            });
+            s.store_cell(cell, recv_v);
             s.binds.insert(raw(binding), cell);
             s.lower_expr(body)
         })
@@ -2845,10 +2824,7 @@ impl<'a> Builder<'a> {
         });
         let i_cell = self.f.new_cell(None);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
-        self.emit_cur(Inst::Store {
-            cell: i_cell,
-            value: zero,
-        });
+        self.store_cell(i_cell, zero);
 
         let header = self.f.new_block();
         let body = self.f.new_block();
