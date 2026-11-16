@@ -149,9 +149,6 @@ pub struct Args {
     pub jobs: Option<usize>,
     pub jobs_force: bool,
     pub full_asset_jobs: Option<usize>,
-    pub isolated: bool,
-    pub workers: bool,
-    pub multi_order: bool,
 
     pub list: bool,
     pub sim_plan: bool,
@@ -161,14 +158,6 @@ pub struct Args {
     pub jv: bool,
     /// `--lua-line-directives`: sugar for `ROCK_SKULL_LINE_DIRECTIVES=1`.
     pub lua_line_directives: bool,
-    pub agent_headless: bool,
-    pub agent_access: bool,
-    pub level: Option<String>,
-    pub daemon_sock: Option<String>,
-    pub port: u16,
-
-    pub single_file: bool,
-    pub itch: bool,
 
     /// Resolved compiler backend for this invocation (default `skull`; see
     /// `from_matches`). `skull` is bone type-check + skull codegen; `bone` is
@@ -337,21 +326,11 @@ impl Args {
             jobs: Default::default(),
             jobs_force: Default::default(),
             full_asset_jobs: Default::default(),
-            isolated: Default::default(),
-            workers: Default::default(),
-            multi_order: Default::default(),
             list: Default::default(),
             sim_plan: Default::default(),
             app_args: many_str("app_args"),
             jv: Default::default(),
             lua_line_directives: m.get_flag("lua-line-directives"),
-            agent_headless: Default::default(),
-            agent_access: Default::default(),
-            level: Default::default(),
-            daemon_sock: Default::default(),
-            port: Default::default(),
-            single_file: Default::default(),
-            itch: Default::default(),
             no_lints: m.get_flag("no-lints"),
             lint_summary: m.get_flag("lint-summary"),
             lints: m.get_one::<String>("lints").cloned(),
