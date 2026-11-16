@@ -455,22 +455,15 @@ pub(crate) fn select_overload_with_generics(
             generic_args,
             span,
         ) {
-            Some(Ok(cost)) => match best_cost {
-                None => {
+            Some(Ok(cost)) => {
+                if best_cost.is_none_or(|bc| cost < bc) {
                     best_cost = Some(cost);
                     best_set.clear();
+                }
+                if best_cost == Some(cost) {
                     best_set.push((mid, fid));
                 }
-                Some(bc) if cost < bc => {
-                    best_cost = Some(cost);
-                    best_set.clear();
-                    best_set.push((mid, fid));
-                }
-                Some(bc) if cost == bc => {
-                    best_set.push((mid, fid));
-                }
-                _ => {}
-            },
+            }
             Some(Err(error)) if bound_fail.is_none() => bound_fail = Some(error),
             _ => {}
         }

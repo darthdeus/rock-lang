@@ -158,11 +158,8 @@ pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), Comp
     match (gamma.get(a), gamma.get(b)) {
         (TypeExpr::Builtin(x), TypeExpr::Builtin(y)) if x == y => {}
 
-        (TypeExpr::Builtin(BuiltinTy::Never), _) => {}
-        (_, TypeExpr::Builtin(BuiltinTy::Never)) => {}
-
-        (TypeExpr::Builtin(BuiltinTy::Error), _) => {}
-        (_, TypeExpr::Builtin(BuiltinTy::Error)) => {}
+        (TypeExpr::Builtin(BuiltinTy::Never | BuiltinTy::Error), _)
+        | (_, TypeExpr::Builtin(BuiltinTy::Never | BuiltinTy::Error)) => {}
 
         (TypeExpr::Generic(x, _), TypeExpr::Generic(y, _)) if x == y => {}
         // (TypeExpr::Named(x), TypeExpr::Named(y)) if x == y => {}

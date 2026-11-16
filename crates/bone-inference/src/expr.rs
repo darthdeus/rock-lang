@@ -1143,7 +1143,7 @@ pub(crate) fn infer_expr_used(
             // unwritten field. Multiple bases of the same type would all supply
             // every field (rule 5 collision), so only one is allowed.
             let has_base = !bases.is_empty();
-            if bases.into_iter().count() > 1 {
+            if bases.len() > 1 {
                 comp_error!(
                     expr_span,
                     "a functional-update literal takes at most one `..base`"
