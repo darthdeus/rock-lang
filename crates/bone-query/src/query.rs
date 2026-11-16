@@ -2042,40 +2042,35 @@ fn enum_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Ustr> {
 
     let owner = module.body_at(offset)?;
     let body = module.bodies.get(&owner)?;
+    enum_qualifiers(body)
+        .find(|(_, sp)| span_contains(sp, offset))
+        .map(|(name, _)| name)
+}
 
-    for (_, expr) in body.expr_arena.iter() {
-        if let hir::Expr::EnumVariant {
+/// Every `Enum::` qualifier in `body`: variant expressions, then patterns.
+fn enum_qualifiers(body: &Body) -> impl Iterator<Item = (Ustr, &Span)> {
+    let exprs = body.expr_arena.values().filter_map(|expr| match expr {
+        hir::Expr::EnumVariant {
             enum_name,
             enum_name_span,
             ..
-        } = expr
-        {
-            if span_contains(&body.name_spans[*enum_name_span], offset) {
-                return Some(*enum_name);
-            }
+        } => Some((*enum_name, &body.name_spans[*enum_name_span])),
+        _ => None,
+    });
+    let pats = body.pattern_arena.values().filter_map(|pat| match pat {
+        hir::Pattern::EnumVariant {
+            enum_name: Some(en),
+            enum_name_span: Some(sp),
+            ..
         }
-    }
-
-    for pat in body.pattern_arena.values() {
-        let (enum_name, enum_name_span) = match pat {
-            hir::Pattern::EnumVariant {
-                enum_name: Some(en),
-                enum_name_span: Some(sp),
-                ..
-            } => (*en, sp),
-            hir::Pattern::Record {
-                enum_name: Some(en),
-                enum_name_span: Some(sp),
-                ..
-            } => (*en, sp),
-            _ => continue,
-        };
-        if span_contains(enum_name_span, offset) {
-            return Some(enum_name);
-        }
-    }
-
-    None
+        | hir::Pattern::Record {
+            enum_name: Some(en),
+            enum_name_span: Some(sp),
+            ..
+        } => Some((*en, sp)),
+        _ => None,
+    });
+    exprs.chain(pats)
 }
 
 /// Every reference to enum `name` across all modules: the declaration name,
@@ -2092,34 +2087,7 @@ fn enum_references(ws: &Workspace, name: Ustr) -> Vec<Span> {
         }
         for body in m.bodies.values() {
             for_each_nominal_annotation(ws, m.file, body, name, &mut push);
-
-            for (_, expr) in body.expr_arena.iter() {
-                if let hir::Expr::EnumVariant {
-                    enum_name,
-                    enum_name_span,
-                    ..
-                } = expr
-                {
-                    if *enum_name == name {
-                        push(&body.name_spans[*enum_name_span]);
-                    }
-                }
-            }
-
-            for pat in body.pattern_arena.values() {
-                let sp = match pat {
-                    hir::Pattern::EnumVariant {
-                        enum_name: Some(en),
-                        enum_name_span: Some(sp),
-                        ..
-                    } if *en == name => sp,
-                    hir::Pattern::Record {
-                        enum_name: Some(en),
-                        enum_name_span: Some(sp),
-                        ..
-                    } if *en == name => sp,
-                    _ => continue,
-                };
+            for (_, sp) in enum_qualifiers(body).filter(|(en, _)| *en == name) {
                 push(sp);
             }
         }
