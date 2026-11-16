@@ -30,21 +30,3 @@ fn f() -> int {
       //^ int
     5
 }
-
-// out-of-bounds index on a 2-tuple must error
-//- tuple_index_oob @fail
-fn f() -> int {
-    let t = (1, true)
-    let x = t.2
-      //^ int
-    5
-}
-
-// indexing a non-tuple must error
-//- tuple_index_non_tuple @fail
-fn f() -> int {
-    let y = 5
-    let x = y.0
-      //^ int
-    5
-}

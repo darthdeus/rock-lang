@@ -19,11 +19,3 @@ fn f(p: Point) -> int {
       //^ int
     r
 }
-
-//- assign_type_mismatch @fail
-fn f() -> int {
-    let x = 5
-      //^ int
-    x = true
-    x
-}

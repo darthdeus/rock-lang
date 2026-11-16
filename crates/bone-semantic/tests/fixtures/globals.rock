@@ -17,11 +17,3 @@ fn f() -> float {
     RATIO
   //^ float
 }
-
-// the value must match the annotation.
-//- global_value_mismatch @fail
-global BAD: int = "hi"
-fn f() -> int {
-    5
-  //^ int
-}

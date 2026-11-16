@@ -19,9 +19,3 @@ fn f(v: [int]) -> any {
       //^ any
     d
 }
-
-//- vec_unknown_field_fail @fail
-struct Vec<T> { _data: any, len: int }
-fn f(v: [int]) -> int {
-    v.nope
-}

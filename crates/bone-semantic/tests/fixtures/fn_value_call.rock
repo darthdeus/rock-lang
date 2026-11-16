@@ -23,15 +23,3 @@ fn run(f: fn(int) -> int) -> int {
       //^ int
     r
 }
-
-// calling a non-function local is an error
-//- call_non_fn_fail @fail
-fn f(x: int) -> int {
-    x(5)
-}
-
-// wrong arity calling a fn value
-//- call_fn_wrong_arity_fail @fail
-fn apply<T, U>(f: fn(T) -> U, x: T) -> U {
-    f(x, x)
-}

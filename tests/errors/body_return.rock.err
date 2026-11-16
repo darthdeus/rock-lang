@@ -1,0 +1,5 @@
+//=== TEST CASE: body_return_mismatch_Generic ===
+// The body's tail must match the declared return type.
+//! expect: type mismatch: expected `int`, found `string`
+fn f() -> int { "hi" }
+

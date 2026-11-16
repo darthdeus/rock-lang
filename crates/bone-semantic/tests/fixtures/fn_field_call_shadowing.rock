@@ -43,13 +43,6 @@ fn g() -> string {
     r
 }
 
-//- free_syntax_does_not_see_field @fail
-struct S { f: fn() -> int }
-fn g() -> int {
-    let s = S { f: () => 42 }
-    f(s)
-}
-
 // Safe-nav calls `x?.f()` are method syntax on the nullable-peeled
 // receiver and follow the SAME priority as `x.f()`: fn-typed field first,
 // UFCS free fns as the fallback; the result is nullable-wrapped.

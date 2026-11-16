@@ -26,32 +26,6 @@ fn main() {
     poll(f)
 }
 
-// field that doesn't exist on the struct -> rejected
-//- concrete_v_missing_field_fail @fail
-struct Mob { health: int, attack_co: int? }
-fn poll(f: FieldRef<Mob, int?>) {}
-fn main() {
-    poll(.nope)
-}
-
-// INVARIANCE: a non-null `int` field cannot satisfy `FieldRef<Mob, int?>`
-// (you couldn't write null through it). Exact match required.
-//- concrete_v_widen_write_fail @fail
-struct Mob { health: int, attack_co: int? }
-fn poll(f: FieldRef<Mob, int?>) {}
-fn main() {
-    poll(.health)
-}
-
-// INVARIANCE other direction: a nullable field cannot satisfy
-// `FieldRef<Mob, int>` (a read yields int?, not int).
-//- concrete_v_narrow_read_fail @fail
-struct Mob { health: int, attack_co: int? }
-fn take(f: FieldRef<Mob, int>) {}
-fn main() {
-    take(.attack_co)
-}
-
 // ---------------------------------------------------------------------------
 // B. free V: V is inferred FROM the field -- the field_get/field_set intrinsic
 //    shape. This is the key inference premise for the stdlib intrinsics.
@@ -88,18 +62,6 @@ fn main() {
     let e: Entity<Mob> = Entity { _index: 0 }
       //^ Entity<Mob>
     poll_slot(e, .attack_co)
-}
-
-// ---------------------------------------------------------------------------
-// D. a bare `.field` with no expected FieldRef type is an error (same as a
-//    SiblingFieldRef outside a struct default).
-// ---------------------------------------------------------------------------
-
-//- bare_field_no_context_fail @fail
-struct Mob { health: int, attack_co: int? }
-fn main() {
-    let x = .attack_co
-    x
 }
 
 // ---------------------------------------------------------------------------
@@ -141,35 +103,6 @@ fn main() {
     let ok = 1
       //^ int
     ok
-}
-
-// ---------------------------------------------------------------------------
-// G. wrong field on the container's T -- T is solved from the Entity<T> arg,
-//    and the named field doesn't exist on that struct.
-// ---------------------------------------------------------------------------
-
-//- generic_container_wrong_field_fail @fail
-struct Mob { health: int, attack_co: int? }
-struct Rock { mass: int }
-struct Entity<T> { _index: int }
-fn poll_slot<T>(e: Entity<T>, f: FieldRef<T, int?>) {}
-fn main() {
-    let e: Entity<Rock> = Entity { _index: 0 }
-    poll_slot(e, .attack_co)
-}
-
-// ---------------------------------------------------------------------------
-// H. A writable ref into a value struct would write to a temporary copy.
-//    The WRITABLE former refuses. The read-only ReadFieldRef
-//    former accepts, which is what field_get takes.
-// ---------------------------------------------------------------------------
-
-//- value_struct_writable_field_fail @fail
-value FixVec2 { x: float, y: float }
-fn take(f: FieldRef<FixVec2, float>) {}
-fn main() {
-    let f: FieldRef<FixVec2, float> = .x
-    take(f)
 }
 
 //- value_struct_readfieldref_ok
@@ -222,40 +155,6 @@ fn main() {
     stop(e, .attack_co)
 }
 
-//- write_field_ref_missing_field_fail @fail
-struct Mob { health: int, attack_co: int? }
-fn take(f: WriteFieldRef<Mob, int?>) {}
-fn main() {
-    take(.nope)
-}
-
-// INVARIANT in V, like `FieldRef`. Write-only contravariance would be sound but
-// has no consumer; invariance is the conservative choice and relaxing it later
-// is source-compatible.
-//- write_field_ref_widen_fail @fail
-struct Mob { health: int, attack_co: int? }
-fn take(f: WriteFieldRef<Mob, int?>) {}
-fn main() {
-    take(.health)
-}
-
-// The write capability refuses a `value` struct T, same rule as `FieldRef`:
-// the object travels by copy, so the write would land on a temporary.
-//- write_field_ref_value_struct_fail @fail
-value FixVec2 { x: float, y: float }
-fn take(f: WriteFieldRef<FixVec2, float>) {}
-fn main() {
-    take(.x)
-}
-
-// Arity guard: the former takes exactly <Struct, FieldType>.
-//- write_field_ref_arity_fail @fail
-struct Mob { health: int, attack_co: int? }
-fn take(f: WriteFieldRef<Mob>) {}
-fn main() {
-    take(.attack_co)
-}
-
 // TOP coerces down: a `FieldRef` satisfies a `WriteFieldRef` slot.
 //- field_ref_coerces_to_write_ok
 struct Mob { health: int, attack_co: int? }
@@ -263,33 +162,5 @@ fn take(f: WriteFieldRef<Mob, int?>) {}
 fn main() {
     let f: FieldRef<Mob, int?> = .attack_co
       //^ FieldRef<Mob, int?>
-    take(f)
-}
-
-// ... and NOT back up: a write-only selector is not a full field ref.
-//- write_field_ref_no_coerce_to_field_ref_fail @fail
-struct Mob { health: int, attack_co: int? }
-fn take(f: FieldRef<Mob, int?>) {}
-fn main() {
-    let f: WriteFieldRef<Mob, int?> = .attack_co
-    take(f)
-}
-
-// THE EXTRACTION HOLE this former exists to close: a write-only selector must
-// not reach a readable one, or an embedded field's whole value could be read out.
-//- write_field_ref_no_coerce_to_read_fail @fail
-struct Mob { health: int, attack_co: int? }
-fn take(f: ReadFieldRef<Mob, int?>) {}
-fn main() {
-    let f: WriteFieldRef<Mob, int?> = .attack_co
-    take(f)
-}
-
-// The other diagonal of the diamond: read-only does not grant write.
-//- read_field_ref_no_coerce_to_write_fail @fail
-struct Mob { health: int, attack_co: int? }
-fn take(f: WriteFieldRef<Mob, int?>) {}
-fn main() {
-    let f: ReadFieldRef<Mob, int?> = .attack_co
     take(f)
 }

@@ -25,11 +25,3 @@ fn f() -> bool {
       //^ bool
     b
 }
-
-// negating a non-bool must fail
-//- not_int_fail @fail
-fn f() -> bool {
-    let b = !5
-      //^ bool
-    b
-}

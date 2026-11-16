@@ -18,10 +18,3 @@ fn f(buf: NativeBuffer<V2>) -> int {
       //^ V2
     5
 }
-
-// Non-int index is rejected.
-//- nb_index_must_be_int @fail
-fn f(buf: NativeBuffer<float>) -> int {
-    let x = buf["nope"]
-    5
-}

@@ -1,0 +1,12 @@
+//! Assignment: `x = v`, `p.field = v`. Plain `=` only for now (compound `+=`
+//! needs operator resolution; index assignment needs `Index`). Result is unit;
+//! the value must unify with the target's type.
+
+//=== TEST CASE: assign_type_mismatch_Generic ===
+//! expect: type mismatch: expected `int`, found `bool`
+fn f() -> int {
+    let x = 5
+    x = true
+    x
+}
+

@@ -59,20 +59,3 @@ fn g() -> int {
     let n = r.n
     n
 }
-
-// `_` inside an explicit lambda body is rejected (the lambda already has its
-// own param `y`; `_` has no enclosing expression to lift).
-//- placeholder_in_explicit_lambda @fail
-fn pred(f: (int) -> bool) -> bool { return f(3) }
-fn g() -> bool {
-    return pred(y => _ > y)
-}
-
-// `_` inside a block expression is rejected (a block is a value context, not a
-// liftable expression). Write `apply(_.x)` or an explicit lambda instead.
-//- placeholder_in_block_expr @fail
-struct P { x: int }
-fn apply(f: (P) -> int) -> int { return f(P { x: 5 }) }
-fn g() -> int {
-    return apply({ _.x })
-}

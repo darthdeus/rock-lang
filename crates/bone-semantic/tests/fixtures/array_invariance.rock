@@ -12,15 +12,6 @@
 //! than passing on a "no annotations" harness error. Keep caret characters out of
 //! this prose; the annotation extractor scans every comment line for them.
 
-// CUT: int-to-float array widening is rejected.
-//- array_int_to_float_rejected @fail
-fn g() -> int {
-    let xs: [int] = [1, 2, 3]
-    let ys: [float] = xs
-      //^ [float]
-    5
-}
-
 // KEEP: element-wise coercion in a CHECK-mode array literal is a different
 // mechanism (each element coerces to the expected element type) and must keep
 // working even though arrays are invariant.

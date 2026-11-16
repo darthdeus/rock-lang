@@ -1,0 +1,26 @@
+//! Nullable types: `T?`. A dedicated `TypeExpr::Nullable { inner }` wrapper
+//! (NOT a flag, NOT `App(Nullable)`). Slices, simplest first:
+//!   1. annotation lowering + render (`let x: int? = ...` -> `int?`)
+//!   2. widening: a non-null value unifies into a nullable slot (`int` -> `int?`)
+//!   3. `null` literal + widening into any nullable; rejected by a non-null slot
+//!   4. `??` null-coalesce unwraps the nullable to its inner type
+//!   5. narrowing: `if x != null { x }` sees `x` as the inner (non-null) type
+//! Marker sits on the binding / expression whose type is under test.
+
+//=== TEST CASE: nullable_null_to_int_Generic ===
+// `null` must NOT satisfy a non-nullable slot.
+//! expect: type mismatch: expected `int`, found `null?`
+fn f() -> int {
+    let x: int = null
+    5
+}
+
+//=== TEST CASE: null_coalesce_type_mismatch_Generic ===
+// default's type must match the inner type.
+//! expect: type mismatch: expected `string`, found `int`
+fn f() -> int {
+    let x: int? = null
+    let y = x ?? "hi"
+    5
+}
+

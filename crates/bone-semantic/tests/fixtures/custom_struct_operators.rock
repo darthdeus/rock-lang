@@ -58,14 +58,3 @@ fn f() -> bool {
       //^ bool
     r
 }
-
-// Ordering on a non-numeric newtype is rejected: the inner type (`string`) is
-// not orderable. (rock: "Ordering comparisons are only supported for numeric
-// types".)
-//- newtype_string_ordering_rejected @fail
-newtype Name(string)
-fn f() -> bool {
-    let a = Name("a")
-    let b = Name("b")
-    a < b
-}

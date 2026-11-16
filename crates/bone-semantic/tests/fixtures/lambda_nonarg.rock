@@ -34,13 +34,3 @@ fn f() -> int {
       //^ fn(?R) -> ?R
     5
 }
-
-// applying the same binding at two incompatible types is a unify error
-// (the param is one monomorphic var, not let-polymorphic)
-//- lambda_param_monomorphic_fail @fail
-fn f() -> int {
-    let g = x => x
-    let a = g(3)
-    let b = g("hi")
-    5
-}

@@ -1,0 +1,27 @@
+//! A `match` over an enum must handle every variant or carry an unguarded
+//! catch-all arm. A guarded arm covers nothing, since its guard may fail.
+
+//=== TEST CASE: non_exhaustive_empty_Generic ===
+// Empty match over a non-empty enum -> rejected.
+//! expect: Non-exhaustive match expression. Missing patterns: A, B
+enum E { A, B }
+fn f(e: E) -> int {
+    match e {
+    }
+    let r = 0
+    r
+}
+
+//=== TEST CASE: non_exhaustive_guarded_Generic ===
+// A guarded arm doesn't cover its variant -> A still missing -> rejected.
+//! expect: Non-exhaustive match expression. Missing patterns: A
+enum E { A, B }
+fn f(e: E, hot: bool) -> int {
+    match e {
+        E::A if hot => {}
+        E::B => {}
+    }
+    let r = 0
+    r
+}
+

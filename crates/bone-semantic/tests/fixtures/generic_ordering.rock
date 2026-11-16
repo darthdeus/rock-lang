@@ -31,14 +31,3 @@ fn f(a: int, b: int) -> bool {
       //^ bool
     r
 }
-
-// concrete non-numeric ordering stays rejected
-//- string_ordering_fail @fail
-fn f() -> bool {
-    "a" < "b"
-}
-
-//- bool_ordering_fail @fail
-fn f() -> bool {
-    true < false
-}

@@ -15,12 +15,6 @@ fn carrier() -> int {
     x
 }
 
-// yield value type must match the coroutine's yield type Y.
-//- co_fn_yield_type_mismatch @fail
-co fn bad() -> Coroutine<string> {
-    yield 42
-}
-
 // `await inner()` delegates: inner must be a Coroutine whose yield type Y'
 // flows into the outer Y. The delegate expression's value is the inner's R.
 //- yield_star
@@ -36,13 +30,4 @@ fn carrier() -> int {
     let x = 5
       //^ int
     x
-}
-
-// await over a coroutine whose yield type mismatches the outer is rejected.
-//- yield_star_type_mismatch @fail
-co fn inner_str() -> Coroutine<string> {
-    yield "a"
-}
-co fn outer_int() -> Coroutine<int> {
-    await inner_str()
 }

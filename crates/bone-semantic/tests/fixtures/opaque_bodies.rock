@@ -13,15 +13,6 @@ fn f() -> int {
     r
 }
 
-// the declared signature is still enforced at the call site.
-//- inline_lua_arg_typechecked @fail
-inline(lua) fn myadd(x: int, y: int) -> int = "return x + y"
-fn f() -> int {
-    let r = myadd(1, true)
-      //^ int
-    r
-}
-
 // a unit-returning inline(lua) fn (no `-> T`) is callable as a statement.
 //- inline_lua_unit
 inline(lua) fn log_it(msg: string) = "print(msg)"

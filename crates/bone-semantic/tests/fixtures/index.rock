@@ -35,29 +35,3 @@ fn f(m: Map<string, int>) -> int {
       //^ int
     5
 }
-
-// a non-int index into an array must fail
-//- index_array_bad_index @fail
-fn f() -> int {
-    let xs = [1, 2, 3]
-    let x = xs[true]
-      //^ int
-    5
-}
-
-// a wrong key type into a map must fail
-//- index_map_bad_key @fail
-fn f(m: Map<string, int>) -> int {
-    let v = m[5]
-      //^ int
-    5
-}
-
-// indexing a non-indexable type must fail
-//- index_non_indexable @fail
-fn f() -> int {
-    let y = 5
-    let x = y[0]
-      //^ int
-    5
-}

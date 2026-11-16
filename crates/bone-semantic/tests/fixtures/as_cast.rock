@@ -17,14 +17,3 @@ fn f() -> int {
       //^ int
     5
 }
-
-// `as` cannot reinterpret `any` as a nominal type: that asserts a type without
-// static proof, a runtime nominal check, or backend representation validation.
-// `cast<T>` is the explicit escape hatch for erased storage and FFI recovery.
-//- as_to_nominal @fail
-struct Point { x: int, y: int }
-fn f(a: any) -> int {
-    let p = a as Point
-      //^ Point
-    5
-}

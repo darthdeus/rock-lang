@@ -5,6 +5,7 @@
 //! Tags: patterns, enums, match, exhaustiveness
 
 //=== TEST CASE: unqualified_variant_arm_does_not_catch_all ===
+//! expect: Non-exhaustive match expression. Missing patterns: B
 enum Choice { A, B }
 
 fn f(c: Choice) -> int {

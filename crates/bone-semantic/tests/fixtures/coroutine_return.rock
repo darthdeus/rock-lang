@@ -11,9 +11,3 @@ fn carrier() -> int {
       //^ int
     x
 }
-
-// return value not matching R is rejected.
-//- coroutine_return_r_mismatch @fail
-co fn g() -> Coroutine<int, string> {
-    return 42
-}

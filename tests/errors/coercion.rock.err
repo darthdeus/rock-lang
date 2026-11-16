@@ -1,0 +1,22 @@
+//! int -> float widening (directional: int <: float, never the reverse). Applies
+//! at value->expected sites -- let annotation, call arg -> param, return value,
+//! assignment. Comparisons stay strict (comparison.rock). Operator-overload
+//! selection that also needs widening lives in numeric_operators.rock.
+
+//=== TEST CASE: float_to_int_param_fail_Generic ===
+// float -> int stays rejected everywhere
+//! expect: type mismatch: expected `int`, found `float`
+fn g(y: int) -> int { y }
+fn f() -> int { g(1.5) }
+
+//=== TEST CASE: float_to_int_let_fail_Generic ===
+//! expect: type mismatch: expected `int`, found `float`
+fn f() -> int {
+    let x: int = 1.5
+    x
+}
+
+//=== TEST CASE: float_return_as_int_fail_Generic ===
+//! expect: type mismatch: expected `int`, found `float`
+fn f() -> int { 1.5 }
+

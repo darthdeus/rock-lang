@@ -1,0 +1,59 @@
+//! Structs, slice A: definitions + named-type resolution. A `struct` item
+//! registers a named type; its name resolves in type position (params, fields,
+//! returns). Field bodies can forward-reference structs declared later, so
+//! registration is two-pass (collect names, then lower field types).
+//! Literals (slice B) and field access (slice C) come next.
+
+//=== TEST CASE: unknown_type_still_errors_Generic ===
+// a genuinely unknown type name is still rejected.
+//! expect: Unknown type name Nope
+fn f(p: Nope) -> int {
+    5
+}
+
+//=== TEST CASE: struct_literal_wrong_field_type_Generic ===
+// a field value with the wrong type is rejected.
+//! expect: type mismatch: expected `int`, found `bool`
+struct Point { x: int, y: int }
+fn f() -> int {
+    let p = Point { x: 1, y: true }
+    5
+}
+
+//=== TEST CASE: struct_literal_missing_field_Generic ===
+// a missing field is rejected.
+//! expect: Missing field `y` in struct `Point` literal
+struct Point { x: int, y: int }
+fn f() -> int {
+    let p = Point { x: 1 }
+    5
+}
+
+//=== TEST CASE: struct_literal_unknown_field_Generic ===
+// an unknown field is rejected.
+//! expect: struct `Point` has no field named `z`
+struct Point { x: int, y: int }
+fn f() -> int {
+    let p = Point { x: 1, y: 2, z: 3 }
+    5
+}
+
+//=== TEST CASE: struct_unknown_field_access_Generic ===
+// accessing a field the struct doesn't have is rejected.
+//! expect: struct `Point` has no field `z`
+struct Point { x: int, y: int }
+fn f() -> int {
+    let p = Point { x: 1, y: 2 }
+    let a = p.z
+    5
+}
+
+//=== TEST CASE: field_access_on_non_struct_Generic ===
+// accessing a field on a non-struct is rejected.
+//! expect: cannot access field `x` on non-struct type int
+fn f() -> int {
+    let n = 5
+    let a = n.x
+    5
+}
+

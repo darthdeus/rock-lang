@@ -91,19 +91,6 @@ fn f(row: Row) {
     }
 }
 
-//- access_after_alias_mutation @fail=cannot access field
-value Place { x: int }
-struct Row { goal: Place? }
-fn clear(row: Row) { row.goal = null }
-fn f(row: Row) -> int {
-    let alias = row
-    if row.goal != null {
-        clear(alias)
-        return row.goal.x
-    }
-    0
-}
-
 //- field_survives_selected_pure_method
 value Place { x: int }
 struct Row { goal: Place? }

@@ -1,0 +1,18 @@
+//! Intra-`||` refinement: the RHS of `||` runs only when the LHS is false, so it
+//! sees the LHS's ELSE narrowings. Dual of the `&&` RHS seeing the LHS's THEN
+//! narrowings (nullable_path_refinement `refine_and_chain`). This is what lets
+//! `if c == null || !c.in_reach()` type-check -- the guard-combine of two
+//! `if c == null { .. }` / `if !c.in_reach() { .. }` early returns.
+//!
+//! DIVERGENCE from rock: rock does not narrow across `||` operands at all. bone implements the intended dual-of-`&&`
+//! rule; the guard-combine is the motivating case.
+
+//=== TEST CASE: refine_or_rhs_neq_no_narrow_Generic ===
+// SOUNDNESS: `x != null` false in the RHS => `x` IS null there, so no narrowing.
+// The RHS `x.v` must stay a compile error (plain `.field` on a nullable).
+//! expect: cannot access field `v` on non-struct type S?
+struct S { v: int }
+fn f(x: S?) -> bool {
+    return x != null || x.v > 0
+}
+

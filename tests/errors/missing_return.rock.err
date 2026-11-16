@@ -1,0 +1,24 @@
+//=== TEST CASE: missing_return_let_only_Generic ===
+//! expect: function `f` must return `int`, but its body has no return value
+fn f() -> int {
+    let x = 5
+}
+
+//=== TEST CASE: return_unit_mismatch_Generic ===
+// bare `return` (returns unit) in an int function must be rejected.
+//! expect: type mismatch: expected `int`, found `()`
+fn f() -> int {
+    let z = 1
+    return
+}
+
+//=== TEST CASE: bare_return_value_position_rejected_Generic ===
+// a bare `return` in VALUE position is still a unit return -- the position does
+// not change that it returns nothing where an int is declared. Must be rejected
+// (bone is intentionally stricter than rock here: rock accepts this).
+//! expect: type mismatch: expected `int`, found `()`
+fn f() -> int {
+    let x: int = return
+    x
+}
+

@@ -1,0 +1,8 @@
+//=== TEST CASE: array_literal_heterogeneous_Generic ===
+// Array literal elements unify: int and bool do not.
+//! expect: type mismatch: expected `bool`, found `int`
+fn f() -> int {
+    let xs = [1, true]
+    5
+}
+

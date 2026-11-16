@@ -2,6 +2,7 @@
 //! Tags: newtypes, destructuring, patterns
 
 //=== TEST CASE: arity_mismatch_too_many_Generic ===
+//! expect: expected CloseParen, got Comma
 newtype UserId(int)
 
 fn main() {

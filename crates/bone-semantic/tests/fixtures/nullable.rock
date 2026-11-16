@@ -37,14 +37,6 @@ fn f() -> int {
     5
 }
 
-// `null` must NOT satisfy a non-nullable slot.
-//- nullable_null_to_int @fail
-fn f() -> int {
-    let x: int = null
-      //^ int
-    5
-}
-
 // --- slice 4: `??` null-coalesce -------------------------------------------
 
 // `x ?? 0` unwraps `int?` to `int`.
@@ -52,15 +44,6 @@ fn f() -> int {
 fn f() -> int {
     let x: int? = null
     let y = x ?? 0
-      //^ int
-    5
-}
-
-// default's type must match the inner type.
-//- null_coalesce_type_mismatch @fail
-fn f() -> int {
-    let x: int? = null
-    let y = x ?? "hi"
       //^ int
     5
 }

@@ -2,13 +2,29 @@
 //! Tags: annotations, removed-contract
 
 //=== TEST CASE: removed_host_resource_on_type ===
+//! expect: `@host_resource` was removed; delete it
 @host_resource(voice)
 newtype VoiceG(int)   // ERROR: `@host_resource` was removed; delete it
 
 fn main() { print("{VoiceG(0).0}") }
 
 //=== TEST CASE: removed_host_resource_on_function ===
+//! expect: `@host_resource` was removed; delete it
 @host_resource
 fn play_f() -> int { return 1 }   // ERROR: `@host_resource` was removed; delete it
 
 fn main() { print("{play_f()}") }
+
+//=== TEST CASE: removed_host_resource_on_struct ===
+//! expect: `@host_resource` was removed; delete it
+@host_resource
+struct Resource { id: int }
+
+fn main() { print("{Resource { id: 1 }.id}") }
+
+//=== TEST CASE: removed_host_resource_on_enum ===
+//! expect: `@host_resource` was removed; delete it
+@host_resource(voice)
+enum ResourceState { Ready }
+
+fn main() { print("ready") }

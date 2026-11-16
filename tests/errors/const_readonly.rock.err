@@ -1,0 +1,12 @@
+//! `const` globals are read-only: a const re-initializes from its literal on
+//! every hot reload, so rebinding it in code would be silently clobbered.
+
+//=== TEST CASE: assign_to_const_Generic ===
+//! expect: cannot assign to const `FOO`; consts are read-only
+const FOO: int = 5
+fn f() -> int {
+    let r = FOO
+    FOO = 6
+    return r
+}
+

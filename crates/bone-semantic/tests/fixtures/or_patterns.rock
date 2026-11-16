@@ -60,19 +60,3 @@ fn run(a: Faction, b: Faction) -> string {
       //^ string
     r
 }
-
-// Bindings in alternatives are rejected (rock's explicit v1 limitation).
-//- or_binding_rejected @fail
-enum E { A(int), B(int) }
-fn f(e: E) -> int {
-    match e { A(x) | B(x) => x }
-}
-
-// Mixed-type literal alternatives are rejected: a `string` literal cannot
-// coerce to the `int` scrutinee. (rock CURRENTLY accepts this -- a latent bug
-// where literal-pattern arms are not checked against the scrutinee type; bone
-// is correctly stricter. Flip only if rock's literal-pattern check is fixed.)
-//- or_mixed_literal_rejected @fail
-fn f(n: int) -> string {
-    match n { 1 | "two" => "x", _ => "y" }
-}

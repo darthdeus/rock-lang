@@ -37,11 +37,3 @@ fn f(m: Mid?) -> bool {
       //^ bool
     return ok
 }
-
-// SOUNDNESS: `x != null` false in the RHS => `x` IS null there, so no narrowing.
-// The RHS `x.v` must stay a compile error (plain `.field` on a nullable).
-//- refine_or_rhs_neq_no_narrow @fail
-struct S { v: int }
-fn f(x: S?) -> bool {
-    return x != null || x.v > 0
-}

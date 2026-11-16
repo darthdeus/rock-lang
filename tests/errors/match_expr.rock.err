@@ -1,0 +1,17 @@
+//! `match` (enum E3). Scoped first cut: wildcard `_`, ident binding, and enum
+//! variant patterns (unit + tuple payload binding). All arm bodies unify to the
+//! result type; payload sub-patterns bind to the (substituted) variant fields.
+//! Deferred: tuple/record/range patterns, guards, exhaustiveness.
+
+//=== TEST CASE: match_arm_mismatch_Generic ===
+// arms whose bodies disagree are rejected.
+//! expect: type mismatch: expected `int`, found `string`
+enum Color { Red, Green, Blue }
+fn f(c: Color) -> int {
+    let r = match c {
+        Color::Red => 1,
+        _ => "no",
+    }
+    r
+}
+

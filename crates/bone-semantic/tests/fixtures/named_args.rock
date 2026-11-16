@@ -19,10 +19,3 @@ fn f() -> int {
       //^ int
     r
 }
-
-// Unknown param name is rejected.
-//- named_args_unknown_rejected @fail
-fn g(a: int) -> int { a }
-fn f() -> int {
-    g(nope: 1)
-}

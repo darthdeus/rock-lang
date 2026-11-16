@@ -21,12 +21,6 @@ fn f(a: int?) -> int {
     5
 }
 
-// Ordering a nullable is still rejected.
-//- nullable_ordering_rejected @fail
-fn f(a: int?) -> bool {
-    a < 1
-}
-
 //- if_nullable_else_lub
 fn f(cond: bool) {
     let x = if cond { 7 } else { null }

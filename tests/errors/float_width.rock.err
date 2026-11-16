@@ -1,0 +1,26 @@
+//! `f64` is `float`; `f32` is narrow field storage whose reads and writes
+//! are `float`, so calls and assignments need no casts. (Arithmetic needs the
+//! stdlib operators; `tests/values/float_width.rock` covers it.)
+
+//=== TEST CASE: f32_local_Generic ===
+//! expect: legal only as a struct field type
+fn main() {
+    let x: f32 = 0.5
+}
+
+//=== TEST CASE: f32_param_Generic ===
+//! expect: legal only as a struct field type
+fn half(x: f32) -> float {
+    return x
+}
+
+//=== TEST CASE: f32_generic_arg_Generic ===
+//! expect: legal only as a struct field type
+fn main() {
+    let xs: [f32] = []
+}
+
+//=== TEST CASE: f32_enum_payload_Generic ===
+//! expect: legal only as a struct field type
+enum Shape { Circle(f32) }
+

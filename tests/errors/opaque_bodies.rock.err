@@ -1,0 +1,14 @@
+//! Opaque function bodies: `inline(lua)` / extern functions have no Rock body to
+//! infer. bone registers the signature (params + return type) and skips body
+//! inference, so callers resolve and typecheck against the declared signature.
+//! This is a prerequisite for loading the stdlib (almost all of it is inline lua).
+
+//=== TEST CASE: inline_lua_arg_typechecked_Generic ===
+// the declared signature is still enforced at the call site.
+//! expect: type mismatch: expected `int`, found `bool`
+inline(lua) fn myadd(x: int, y: int) -> int = "return x + y"
+fn f() -> int {
+    let r = myadd(1, true)
+    r
+}
+

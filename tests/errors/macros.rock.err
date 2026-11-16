@@ -1,0 +1,22 @@
+//! Expr-position macro expansion. A `macro f(p: expr) { body }` is expanded
+//! away BEFORE type-checking: each call `f(arg)` is replaced by the macro body
+//! with `p` substituted by `arg`. Macro DEFINITIONS are then dropped -- they
+//! are not typed entities (their `expr`/`ident` params are meta-types, not real
+//! types; lowering a macro def as a regular fn is exactly what choked stdlib
+//! loading on "Unknown type name ident/expr"). Overload selection is by arity;
+//! trailing params with defaults widen the matchable arity range.
+//!
+//! Bodies here stay self-contained (comparisons / blocks / lets only) so they
+//! typecheck without stdlib. Real stdlib macros (assert_eq, log_*) reference
+//! `error`/`tostring`/`+` and are covered by every compile that loads the stdlib.
+
+//=== TEST CASE: macro_arity_mismatch_Generic ===
+// Calling a macro with no matching arity must fail.
+//! expect: Function `one` doesn't exist
+macro one(a: expr) {
+    a > 0
+}
+fn f(n: int) -> bool {
+    one(n, n)
+}
+

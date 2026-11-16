@@ -1,0 +1,8 @@
+//=== TEST CASE: free_syntax_does_not_see_field_Generic ===
+//! expect: Function `f` doesn't exist
+struct S { f: fn() -> int }
+fn g() -> int {
+    let s = S { f: () => 42 }
+    f(s)
+}
+

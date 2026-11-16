@@ -106,12 +106,3 @@ fn f(n: int) -> bool {
       //^ bool
     r
 }
-
-// Calling a macro with no matching arity must fail.
-//- macro_arity_mismatch @fail
-macro one(a: expr) {
-    a > 0
-}
-fn f(n: int) -> bool {
-    one(n, n)
-}

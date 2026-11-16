@@ -21,13 +21,3 @@ fn f() -> int {
       //^ int
     r
 }
-
-// the receiver is type-checked against the first parameter.
-//- ufcs_receiver_mismatch @fail
-fn takes_int(x: int) -> int { x }
-fn f() -> int {
-    let b = true
-    let r = b.takes_int()
-      //^ int
-    r
-}

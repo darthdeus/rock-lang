@@ -102,13 +102,3 @@ fn f() -> int {
       //^ int
     x
 }
-
-// marker is satisfiable today (annotation is taken verbatim); once the value
-// is unified against the annotation, check_module rejects this before the
-// marker is ever checked.
-//- let_annotation_mismatch @fail
-fn f() -> int {
-    let x: bool = 5
-      //^ bool
-    x
-}

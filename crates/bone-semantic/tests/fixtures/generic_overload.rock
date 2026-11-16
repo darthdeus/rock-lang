@@ -45,19 +45,3 @@ fn f<K, V>(m: Dict<K, V>, k: K) -> V? {
       //^ V?
     r
 }
-
-//- no_overload_fail @fail
-struct Lst<T> { len: int }
-struct Set<T> { len: int }
-inline(lua) fn get<T>(v: Lst<T>, i: int) -> T = "return 0"
-fn f<T>(s: Set<T>) -> T {
-    get(s, 0)
-}
-
-//- ambiguous_fail @fail
-struct Box<T> { v: int }
-inline(lua) fn pick<T>(x: Box<T>) -> int = "return 0"
-inline(lua) fn pick<U>(x: Box<U>) -> int = "return 1"
-fn f<T>(b: Box<T>) -> int {
-    pick(b)
-}

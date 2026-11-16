@@ -19,11 +19,3 @@ fn f() -> int {
       //^ int
     h
 }
-
-// A non-defaulted field is still required.
-//- non_default_field_required @fail
-struct Slime { kind: int, health: int = 100 }
-fn f() -> int {
-    let s = Slime { health: 5 }
-    0
-}

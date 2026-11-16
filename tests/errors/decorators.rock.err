@@ -1,0 +1,13 @@
+//! `deco init name(params) { body }` definitions are lowered and their bodies
+//! ARE type-checked, with the magic `target` bound to the `__DecoTarget` struct
+//! (fields name/params/func) and the decorator params in scope. `@deco`
+//! annotations on functions are accepted; the function type-checks normally.
+
+//=== TEST CASE: deco_body_type_error_Generic ===
+// The body IS type-checked: assigning the string `target.name` to an `int`
+// local is a type error.
+//! expect: type mismatch: expected `int`, found `string`
+deco init bad {
+    let n: int = target.name
+}
+

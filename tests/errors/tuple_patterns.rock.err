@@ -1,0 +1,19 @@
+//! Tuple patterns `(a, b)` in match arms. The scrutinee must be a tuple type;
+//! each element pattern is checked against the corresponding element type.
+//! Unlike or-patterns, tuple patterns DO bind variables. Verified vs rock
+//! (tests/patterns/literal_range_tuple.rock).
+
+//=== TEST CASE: tuple_on_non_tuple_rejected_Generic ===
+// A tuple pattern against a non-tuple scrutinee is rejected.
+//! expect: expected a tuple type in pattern, got int
+fn f(n: int) -> int {
+    match n { (a, b) => a, _ => 0 }
+}
+
+//=== TEST CASE: tuple_arity_mismatch_rejected_Generic ===
+// Element-count mismatch is rejected.
+//! expect: tuple pattern expected 2 elements, but got 3
+fn f(p: (int, int)) -> int {
+    match p { (a, b, c) => a, _ => 0 }
+}
+

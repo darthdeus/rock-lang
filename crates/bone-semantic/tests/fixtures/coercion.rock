@@ -42,17 +42,3 @@ fn f() -> float {
     x
   //^ float
 }
-
-// float -> int stays rejected everywhere
-//- float_to_int_param_fail @fail
-fn g(y: int) -> int { y }
-fn f() -> int { g(1.5) }
-
-//- float_to_int_let_fail @fail
-fn f() -> int {
-    let x: int = 1.5
-    x
-}
-
-//- float_return_as_int_fail @fail
-fn f() -> int { 1.5 }

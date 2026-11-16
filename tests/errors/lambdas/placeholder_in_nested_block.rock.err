@@ -3,6 +3,7 @@
 //! Tags: lambdas, placeholders
 
 //=== TEST CASE: placeholder_in_explicit_lambda_let_init_Generic ===
+//! expect: `_` placeholder cannot appear inside an explicit lambda or block expression
 // `_` inside the Let init of an explicit lambda's block. The walker
 // historically only visited Expression+Return stmts, so the inner `_`
 // silently desugared to its own lambda and the explicit-lambda guard
@@ -13,6 +14,7 @@ fn main() {
 }
 
 //=== TEST CASE: placeholder_in_explicit_lambda_for_body_Generic ===
+//! expect: `_` placeholder cannot appear inside an explicit lambda or block expression
 // Same shape, but the `_` is inside a For-stmt body within the explicit
 // lambda. Walker now visits For too.
 fn main() {
@@ -25,6 +27,7 @@ fn main() {
 }
 
 //=== TEST CASE: placeholder_in_explicit_lambda_while_body_Generic ===
+//! expect: `_` placeholder cannot appear inside an explicit lambda or block expression
 // `_` inside a While-stmt body of an explicit lambda. Walker visits While.
 fn main() {
     let xs = [1, 2, 3]

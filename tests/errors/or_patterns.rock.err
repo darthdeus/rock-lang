@@ -1,0 +1,23 @@
+//! Or-patterns `A | B | C` at the top of a match arm. Each alternative is
+//! checked against the scrutinee type; the arm body type is the match result.
+//! v1: alternatives may NOT bind variables (rock rejects with an explicit
+//! error). Verified vs rock (tests/patterns/or_patterns.rock).
+
+//=== TEST CASE: or_binding_rejected_Generic ===
+// Bindings in alternatives are rejected (rock's explicit v1 limitation).
+//! expect: or-patterns cannot bind variables, use `_` for payload
+enum E { A(int), B(int) }
+fn f(e: E) -> int {
+    match e { A(x) | B(x) => x }
+}
+
+//=== TEST CASE: or_mixed_literal_rejected_Generic ===
+// Mixed-type literal alternatives are rejected: a `string` literal cannot
+// coerce to the `int` scrutinee. (rock CURRENTLY accepts this -- a latent bug
+// where literal-pattern arms are not checked against the scrutinee type; bone
+// is correctly stricter. Flip only if rock's literal-pattern check is fixed.)
+//! expect: type mismatch: expected `int`, found `string`
+fn f(n: int) -> string {
+    match n { 1 | "two" => "x", _ => "y" }
+}
+

@@ -9,16 +9,6 @@
 //! the bad default were accepted, so a wrong-acceptance surfaces as "@fail
 //! but passed" (RED) instead of a "no annotations" harness error.
 
-//- param_default_type_mismatch @fail
-fn f(x: int = "oops") -> int {
-    return x
-}
-fn use_f() -> int {
-    let r = f()
-      //^ int
-    return r
-}
-
 //- param_default_overloaded_call
 struct V2 { x: float, y: float }
 fn mk() -> V2 {
@@ -44,16 +34,6 @@ fn use_scale() -> float {
     let s = scale()
       //^ float
     return s
-}
-
-// Params are NOT in scope inside defaults (rock: "defaults are injected at
-// the call site and other params are not in scope"), so a default referencing
-// a sibling param is rejected...
-//- param_default_refs_param @fail
-fn f2(a: int = 1, b: int = a) -> int {
-    let r = b
-      //^ int
-    return r
 }
 
 // ...and a param named after a global fn does NOT shadow it in its own
@@ -126,29 +106,6 @@ fn use_seeded2() -> int {
     let b = seeded2()
       //^ int
     return seeded2(7)
-}
-
-// A foreign function's default must be a literal: its Lua wrapper and Rock
-// call sites can only supply a literal, so `h: H = H { v: 3 }` would arrive
-// as nil when omitted.
-//- param_default_inline_lua_non_literal_rejected @fail=default of `h` on a foreign function must be a literal
-struct H { v: int }
-inline(lua) fn lua_h(h: H = H { v: 3 }) -> int = "return h.v"
-fn use_lua_h() -> int {
-    let r = lua_h()
-      //^ int
-    return r
-}
-
-//- param_default_extern_ffi_non_literal_rejected @fail=default of `n` on a foreign function must be a literal
-fn base() -> int {
-    return 4
-}
-extern(ffi, "c") fn ffi_n(n: int = base()) -> int
-fn use_ffi_n() -> int {
-    let r = ffi_n()
-      //^ int
-    return r
 }
 
 //- param_default_foreign_literal_accepted

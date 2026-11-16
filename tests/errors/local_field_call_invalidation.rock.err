@@ -1,0 +1,14 @@
+//=== TEST CASE: access_after_alias_mutation_Generic ===
+//! expect: cannot access field
+value Place { x: int }
+struct Row { goal: Place? }
+fn clear(row: Row) { row.goal = null }
+fn f(row: Row) -> int {
+    let alias = row
+    if row.goal != null {
+        clear(alias)
+        return row.goal.x
+    }
+    0
+}
+

@@ -35,15 +35,3 @@ fn f(p: (int, int, int)) -> int {
       //^ int
     r
 }
-
-// A tuple pattern against a non-tuple scrutinee is rejected.
-//- tuple_on_non_tuple_rejected @fail
-fn f(n: int) -> int {
-    match n { (a, b) => a, _ => 0 }
-}
-
-// Element-count mismatch is rejected.
-//- tuple_arity_mismatch_rejected @fail
-fn f(p: (int, int)) -> int {
-    match p { (a, b, c) => a, _ => 0 }
-}

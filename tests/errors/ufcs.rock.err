@@ -1,0 +1,14 @@
+//! UFCS method-call syntax: `x.foo(a)` desugars to `foo(x, a)` (receiver becomes
+//! the first argument). Parses as a FunctionCall whose callee is a FieldAccess;
+//! lowering prepends the receiver and routes through normal call resolution.
+
+//=== TEST CASE: ufcs_receiver_mismatch_Generic ===
+// the receiver is type-checked against the first parameter.
+//! expect: type mismatch: expected `int`, found `bool`
+fn takes_int(x: int) -> int { x }
+fn f() -> int {
+    let b = true
+    let r = b.takes_int()
+    r
+}
+

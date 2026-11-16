@@ -4,6 +4,7 @@
 //! Tags: newtypes, declarations
 
 //=== TEST CASE: multi_field_newtype_def_rejected ===
+//! expect: a newtype wraps exactly one type
 newtype Bad(int, string)
 
 fn main() {

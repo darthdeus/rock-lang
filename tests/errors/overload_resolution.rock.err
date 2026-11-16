@@ -1,0 +1,19 @@
+//! Overload resolution: among same-named candidates, pick the one whose params
+//! best fit the argument types. Exact beats int->float widen beats T->any; no
+//! viable candidate or an equal-best tie is an error. Numeric int/float cases
+//! live in numeric_operators.rock.
+
+//=== TEST CASE: no_viable_fail_Generic ===
+// No candidate accepts the argument types.
+//! expect: No overload for `pick` with argument types (string)
+fn pick(x: int) -> int { x }
+fn pick(x: bool) -> bool { x }
+fn f() -> int { pick("hi") }
+
+//=== TEST CASE: ambiguous_fail_Generic ===
+// Two candidates fit equally well -> ambiguous.
+//! expect: Ambiguous overload for `amb` with argument types (int, int)
+fn amb(x: any, y: int) -> int { 0 }
+fn amb(x: int, y: any) -> int { 1 }
+fn f() -> int { amb(2, 3) }
+

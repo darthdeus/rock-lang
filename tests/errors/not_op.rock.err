@@ -1,0 +1,12 @@
+//! Logical negation: `!e`. Operand must be `bool`; result is `bool`.
+//! Needs `Expr::Not` HIR + lowering (`ExprKind::Not`) + inference
+//! (unify operand with bool, yield bool).
+
+//=== TEST CASE: not_int_fail_Generic ===
+// negating a non-bool must fail
+//! expect: operator `!` is not defined for `int`
+fn f() -> bool {
+    let b = !5
+    b
+}
+

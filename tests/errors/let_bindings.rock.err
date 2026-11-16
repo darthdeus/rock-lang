@@ -1,0 +1,8 @@
+//=== TEST CASE: let_annotation_mismatch_Generic ===
+// The initializer must match the annotation.
+//! expect: type mismatch: expected `bool`, found `int`
+fn f() -> int {
+    let x: bool = 5
+    x
+}
+

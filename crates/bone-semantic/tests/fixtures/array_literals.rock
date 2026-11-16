@@ -29,13 +29,3 @@ fn f() -> int {
       //^ [[int]]
     5
 }
-
-// heterogeneous elements must fail: unifying the element types rejects int vs bool.
-// (marker is what it WOULD render as if elements were wrongly not unified, so this
-//  also catches "just took the first element's type")
-//- array_literal_heterogeneous @fail
-fn f() -> int {
-    let xs = [1, true]
-      //^ [int]
-    5
-}

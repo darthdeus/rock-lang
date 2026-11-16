@@ -30,12 +30,3 @@ fn f(o: Outer?) -> int {
       //^ int?
     5
 }
-
-// a missing field still errors through safe-nav
-//- safe_nav_missing_field @fail
-struct Point { x: int, y: int }
-fn f(p: Point?) -> int {
-    let v = p?.z
-      //^ int?
-    5
-}

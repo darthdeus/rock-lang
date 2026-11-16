@@ -1,0 +1,16 @@
+//! Cast expressions: `e as T`. `as` is a checked explicit conversion -- the
+//! operand's inferred type must reach `T` through the closed conversion
+//! relation (`int`/`float` either way, or ordinary assignment compatibility).
+//! The result type is `T`.
+
+//=== TEST CASE: as_to_nominal_Generic ===
+// `as` cannot reinterpret `any` as a nominal type: that asserts a type without
+// static proof, a runtime nominal check, or backend representation validation.
+// `cast<T>` is the explicit escape hatch for erased storage and FFI recovery.
+//! expect: cannot convert `any` to `Point` with `as`; `as` converts only between numeric types, or where `any`
+struct Point { x: int, y: int }
+fn f(a: any) -> int {
+    let p = a as Point
+    5
+}
+

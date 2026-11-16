@@ -1,0 +1,23 @@
+//! `newtype UserId(int)` is a distinct nominal wrapper over a base type.
+//! Construction is explicit (`UserId(42)` : UserId); the base type does NOT
+//! coerce to the newtype (verified vs rock: `let x: UserId = 5` is rejected).
+//! Registered like a struct (passes 1-2), constructed via the Call path.
+
+//=== TEST CASE: newtype_no_base_coercion_Generic ===
+// The wrapped base type does not implicitly become the newtype.
+//! expect: type mismatch: expected `UserId`, found `int`
+newtype UserId(int)
+fn f() -> int {
+    let bad: UserId = 5
+    0
+}
+
+//=== TEST CASE: newtype_construct_wrong_arg_Generic ===
+// Construction arg must match the wrapped type.
+//! expect: type mismatch: expected `int`, found `string`
+newtype UserId(int)
+fn f() -> int {
+    let id = UserId("nope")
+    0
+}
+

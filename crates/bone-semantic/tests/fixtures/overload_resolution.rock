@@ -32,15 +32,3 @@ fn f() -> any {
       //^ any
     r
 }
-
-// No candidate accepts the argument types.
-//- no_viable_fail @fail
-fn pick(x: int) -> int { x }
-fn pick(x: bool) -> bool { x }
-fn f() -> int { pick("hi") }
-
-// Two candidates fit equally well -> ambiguous.
-//- ambiguous_fail @fail
-fn amb(x: any, y: int) -> int { 0 }
-fn amb(x: int, y: any) -> int { 1 }
-fn f() -> int { amb(2, 3) }

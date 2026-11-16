@@ -126,49 +126,12 @@ fn f() {
     }
 }
 
-// value position requires an else; today bone types this `()` (the
-// annotation matches, making the section pass and trip @fail) -- after the
-// fix it must be a "missing else" error
-//- value_let_no_else_fail @fail
-fn gives_int() -> int { 42 }
-fn f() -> int {
-    let x = 1
-    let u = if x == 1 { gives_int() }
-      //^ ()
-    x
-}
-
-//- value_let_annotated_no_else_fail @fail
-fn gives_int() -> int { 42 }
-fn f() -> int {
-    let x = 1
-    let v: int = if x == 1 { gives_int() }
-      //^ int
-    x
-}
-
-//- value_let_open_chain_fail @fail
-fn f() -> int {
-    let x = 1
-    let u = if x == 1 { 10 } else if x == 2 { 20 }
-      //^ int
-    x
-}
-
 //- value_let_closed_uniform
 fn f() -> int {
     let x = 1
     let u = if x == 1 { 10 } else { 20 }
       //^ int
     u
-}
-
-//- value_let_closed_mismatched_fail @fail
-fn f() -> int {
-    let x = 1
-    let u = if x == 1 { 10 } else { "s" }
-      //^ int
-    x
 }
 
 //- value_fn_tail_closed
@@ -179,13 +142,6 @@ fn f(x: int) -> int {
         10
     } else {
         20
-    }
-}
-
-//- value_fn_tail_no_else_fail @fail
-fn f(x: int) -> int {
-    if x == 1 {
-        10
     }
 }
 
@@ -200,16 +156,6 @@ fn f() -> int {
     let y = 1
       //^ int
     y
-}
-
-// value if-let without else; today bone types this `()` (annotation
-// matches, trips @fail) -- after the fix it must be a "missing else" error
-//- value_iflet_no_else_fail @fail
-fn f() -> int {
-    let m: int? = 42
-    let u = if let n = m { n }
-      //^ ()
-    1
 }
 
 //- value_iflet_closed
@@ -268,28 +214,4 @@ fn f() -> int {
     let y = 1
       //^ int
     y
-}
-
-// an expected NON-unit return keeps the lambda body in value position
-//- lambda_arg_int_ret_no_else_fail @fail
-fn run(cb: fn() -> int) -> int { cb() }
-fn f() -> int {
-    let r = run(() => {
-        let x = 1
-        if x == 1 { 42 }
-    })
-      //^ int
-    r
-}
-
-// an unconstrained lambda's body stays in value position (strict: its
-// return type is inferred from the tail)
-//- lambda_bare_no_else_fail @fail
-fn f() -> int {
-    let g = () => {
-        let x = 1
-        if x == 1 { 42 }
-    }
-      //^ fn() -> int
-    1
 }

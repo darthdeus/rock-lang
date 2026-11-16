@@ -48,10 +48,3 @@ fn wrap<T>(x: T) -> [T] { [x] }
 fn takes(p: [int]) -> int { 5 }
 fn f() -> int { takes(wrap(5)) }
               //^ int
-
-// element mismatch: [int] arg vs [bool] param must fail at unify
-//- array_unify_element_mismatch @fail
-fn wrap<T>(x: T) -> [T] { [x] }
-fn takes(p: [bool]) -> int { 5 }
-fn f() -> int { takes(wrap(5)) }
-              //^ int

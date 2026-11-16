@@ -1,0 +1,76 @@
+//=== TEST CASE: value_let_no_else_fail_Generic ===
+// value position requires an else
+//! expect: `if` without a final `else` cannot be used as a value
+fn gives_int() -> int { 42 }
+fn f() -> int {
+    let x = 1
+    let u = if x == 1 { gives_int() }
+    x
+}
+
+//=== TEST CASE: value_let_annotated_no_else_fail_Generic ===
+//! expect: `if` without a final `else` cannot be used as a value
+fn gives_int() -> int { 42 }
+fn f() -> int {
+    let x = 1
+    let v: int = if x == 1 { gives_int() }
+    x
+}
+
+//=== TEST CASE: value_let_open_chain_fail_Generic ===
+//! expect: `if` without a final `else` cannot be used as a value
+fn f() -> int {
+    let x = 1
+    let u = if x == 1 { 10 } else if x == 2 { 20 }
+    x
+}
+
+//=== TEST CASE: value_let_closed_mismatched_fail_Generic ===
+//! expect: type mismatch: expected `string`, found `int`
+fn f() -> int {
+    let x = 1
+    let u = if x == 1 { 10 } else { "s" }
+    x
+}
+
+//=== TEST CASE: value_fn_tail_no_else_fail_Generic ===
+//! expect: `if` without a final `else` cannot be used as a value
+fn f(x: int) -> int {
+    if x == 1 {
+        10
+    }
+}
+
+//=== TEST CASE: value_iflet_no_else_fail_Generic ===
+// value if-let requires an else
+//! expect: `if let` without an `else` cannot be used as a value
+fn f() -> int {
+    let m: int? = 42
+    let u = if let n = m { n }
+    1
+}
+
+//=== TEST CASE: lambda_arg_int_ret_no_else_fail_Generic ===
+// an expected NON-unit return keeps the lambda body in value position
+//! expect: `if` without a final `else` cannot be used as a value
+fn run(cb: fn() -> int) -> int { cb() }
+fn f() -> int {
+    let r = run(() => {
+        let x = 1
+        if x == 1 { 42 }
+    })
+    r
+}
+
+//=== TEST CASE: lambda_bare_no_else_fail_Generic ===
+// an unconstrained lambda's body stays in value position (strict: its
+// return type is inferred from the tail)
+//! expect: `if` without a final `else` cannot be used as a value
+fn f() -> int {
+    let g = () => {
+        let x = 1
+        if x == 1 { 42 }
+    }
+    1
+}
+

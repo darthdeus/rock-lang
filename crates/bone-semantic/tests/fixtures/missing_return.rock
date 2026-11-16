@@ -10,13 +10,6 @@
 //! Bare `return` (no value) must also match the declared type via the Return
 //! statement check, not slip through as divergence.
 
-// fall-through with no value: must be rejected.
-//- missing_return_let_only @fail
-fn f() -> int {
-    let x = 5
-      //^ int
-}
-
 // explicit `return <value>` satisfies the declared type.
 //- return_satisfies
 fn f() -> int {
@@ -38,24 +31,6 @@ fn f() -> int {
 fn f() {
     let x = 5
       //^ int
-}
-
-// bare `return` (returns unit) in an int function must be rejected.
-//- return_unit_mismatch @fail
-fn f() -> int {
-    let z = 1
-      //^ int
-    return
-}
-
-// a bare `return` in VALUE position is still a unit return -- the position does
-// not change that it returns nothing where an int is declared. Must be rejected
-// (bone is intentionally stricter than rock here: rock accepts this).
-//- bare_return_value_position_rejected @fail
-fn f() -> int {
-    let x: int = return
-      //^ int
-    x
 }
 
 // the `?? return` early-exit idiom lives in UNIT functions, where a bare return

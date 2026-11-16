@@ -1,0 +1,13 @@
+//! Named call args: `f(b: x, a: y)` matches by param name, in any order, mixed
+//! with positional and defaults (verified vs rock). bone drops names at lowering
+//! and matched positionally -> out-of-order named calls mis-typecheck. Names must
+//! be carried to inference and reordered against the callee's params.
+
+//=== TEST CASE: named_args_unknown_rejected_Generic ===
+// Unknown param name is rejected.
+//! expect: unknown parameter `nope`
+fn g(a: int) -> int { a }
+fn f() -> int {
+    g(nope: 1)
+}
+

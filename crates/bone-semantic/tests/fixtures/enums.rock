@@ -53,14 +53,6 @@ fn f() -> Option<int> {
   //^ Option<int>
 }
 
-// wrong payload type is rejected.
-//- enum_payload_mismatch @fail
-enum Shape { Circle(float), Rect(float, float) }
-fn f() -> Shape {
-    Shape::Circle(true)
-  //^ Shape
-}
-
 // record-style variant: named payload fields, constructed by name.
 //- enum_record_construct
 enum Shape { Dot, Rect { w: float, h: float } }

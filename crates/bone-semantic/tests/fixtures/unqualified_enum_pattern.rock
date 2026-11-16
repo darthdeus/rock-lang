@@ -19,27 +19,6 @@ fn f(c: Choice) -> int {
     y
 }
 
-// A variant that doesn't exist on the scrutinee enum is rejected.
-//- unqualified_unknown_variant @fail
-enum Choice { A, B }
-fn f(c: Choice) -> int {
-    match c {
-        A => 1
-        Nope => 2
-    }
-}
-
-// A bare variant arm tag-tests, so it COVERS its variant and catches nothing
-// else. Reading it as a catch-all made a partial match look exhaustive while
-// skull emitted a tag test, so the uncovered variant fell through to nil.
-//- unqualified_variant_is_not_a_catch_all @fail
-enum Choice { A, B }
-fn f(c: Choice) -> int {
-    match c {
-        A => 1
-    }
-}
-
 // A lowercase arm name is a binding, not a variant -- it stays legal even
 // though no variant is named that, and it binds the scrutinee.
 //- lowercase_arm_binds

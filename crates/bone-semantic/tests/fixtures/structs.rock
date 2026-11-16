@@ -31,13 +31,6 @@ fn f(o: Outer) -> int {
     5
 }
 
-// a genuinely unknown type name is still rejected.
-//- unknown_type_still_errors @fail
-fn f(p: Nope) -> int {
-   //^ int
-    5
-}
-
 // --- slice B: struct literals ---
 
 // a literal has the struct's type.
@@ -63,33 +56,6 @@ fn f() -> Point {
 struct Point { x: int, y: int }
 fn f() -> int {
     let p = Point { y: 2, x: 1 }
-      //^ Point
-    5
-}
-
-// a field value with the wrong type is rejected.
-//- struct_literal_wrong_field_type @fail
-struct Point { x: int, y: int }
-fn f() -> int {
-    let p = Point { x: 1, y: true }
-      //^ Point
-    5
-}
-
-// a missing field is rejected.
-//- struct_literal_missing_field @fail
-struct Point { x: int, y: int }
-fn f() -> int {
-    let p = Point { x: 1 }
-      //^ Point
-    5
-}
-
-// an unknown field is rejected.
-//- struct_literal_unknown_field @fail
-struct Point { x: int, y: int }
-fn f() -> int {
-    let p = Point { x: 1, y: 2, z: 3 }
       //^ Point
     5
 }
@@ -122,25 +88,6 @@ value Inner { a: int }
 struct Outer { inner: Inner }
 fn f(o: Outer) -> int {
     let a = o.inner.a
-      //^ int
-    5
-}
-
-// accessing a field the struct doesn't have is rejected.
-//- struct_unknown_field_access @fail
-struct Point { x: int, y: int }
-fn f() -> int {
-    let p = Point { x: 1, y: 2 }
-    let a = p.z
-      //^ int
-    5
-}
-
-// accessing a field on a non-struct is rejected.
-//- field_access_on_non_struct @fail
-fn f() -> int {
-    let n = 5
-    let a = n.x
       //^ int
     5
 }

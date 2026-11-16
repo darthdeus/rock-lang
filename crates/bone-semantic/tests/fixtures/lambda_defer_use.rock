@@ -109,29 +109,3 @@ fn main() {
     let y: float = f(5)
       //^ float
 }
-
-//- unpinned_lambda_param_errors @fail
-struct W { a: float }
-operator *(l: int, r: int) -> int { return l }
-operator *(l: W, r: int) -> W { return l }
-fn main() {
-    let f = x => x * 2
-}
-
-//- first_use_pins_second_conflicts @fail
-struct W { a: float }
-operator *(l: int, r: int) -> int { return l }
-operator *(l: W, r: int) -> W { return l }
-fn main() {
-    let f = x => x * 2
-    let a = f(W { a: 1.0 })
-    let b = f(5)
-}
-
-//- solved_lambda_param_ambiguity_still_errors @fail
-fn amb(x: any, y: int) -> int { return 0 }
-fn amb(x: int, y: any) -> int { return 1 }
-fn main() {
-    let f = (x: int) => amb(x, 3)
-    let y = f(5)
-}

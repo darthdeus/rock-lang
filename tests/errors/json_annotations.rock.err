@@ -1,0 +1,44 @@
+//=== TEST CASE: missing_name_Generic ===
+//! expect: requires one nonempty string argument
+struct Row { @json_name internal: string }
+
+//=== TEST CASE: empty_name_Generic ===
+//! expect: requires one nonempty string argument
+struct Row { @json_name("") internal: string }
+
+//=== TEST CASE: numeric_name_Generic ===
+//! expect: requires one nonempty string argument
+struct Row { @json_name(1) internal: string }
+
+//=== TEST CASE: function_position_Generic ===
+//! expect: not allowed
+@json_name("external") fn example() {}
+
+//=== TEST CASE: duplicate_annotation_Generic ===
+//! expect: duplicate @json_name
+struct Row { @json_name("one") @json_name("two") value: int }
+
+//=== TEST CASE: duplicate_wire_name_Generic ===
+//! expect: duplicate JSON field name
+struct Row { @json_name("same") one: int, @json_name("same") two: int }
+
+//=== TEST CASE: collision_with_unrenamed_field_Generic ===
+//! expect: duplicate JSON field name
+struct Row { @json_name("two") one: int, two: int }
+
+//=== TEST CASE: default_requires_expression_Generic ===
+//! expect: require a declared default
+struct Row { @json_default value: int }
+
+//=== TEST CASE: skip_requires_expression_Generic ===
+//! expect: require a declared default
+struct Row { @json_skip value: int }
+
+//=== TEST CASE: default_field_position_Generic ===
+//! expect: not allowed
+@json_default fn example() {}
+
+//=== TEST CASE: skip_no_arguments_Generic ===
+//! expect: annotation `@json_skip` takes no arguments
+struct Row { @json_skip(1) value: int = 0 }
+

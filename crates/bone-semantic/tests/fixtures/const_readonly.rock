@@ -12,15 +12,6 @@
 //! Each section reads the global into `r` (a valid `//^` anchor) so the ONLY
 //! thing that can make a `@fail` section fail is the write itself.
 
-//- assign_to_const @fail
-const FOO: int = 5
-fn f() -> int {
-    let r = FOO
-      //^ int
-    FOO = 6
-    return r
-}
-
 // control: a mutable global remains writable.
 //- mutable_global_assign_ok
 global BAR: int = 5

@@ -27,14 +27,3 @@ fn f() -> int {
       //^ int
     u
 }
-
-//- value_match_mismatched_fail @fail
-fn f() -> int {
-    let x = 1
-    let u = match x {
-        1 => 10,
-        _ => "s",
-    }
-      //^ int
-    x
-}

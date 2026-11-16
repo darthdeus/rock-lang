@@ -1,0 +1,30 @@
+//! Index expressions: `a[i]`. For `[T]` arrays the index is `int` and the
+//! result is `T`; for `Map<K, V>` the index is `K` and the result is `V`.
+//! Needs `Expr::Index` HIR + lowering (`ExprKind::Index`) + inference.
+
+//=== TEST CASE: index_array_bad_index_Generic ===
+// a non-int index into an array must fail
+//! expect: type mismatch: expected `int`, found `bool`
+fn f() -> int {
+    let xs = [1, 2, 3]
+    let x = xs[true]
+    5
+}
+
+//=== TEST CASE: index_map_bad_key_Generic ===
+// a wrong key type into a map must fail
+//! expect: type mismatch: expected `string`, found `int`
+fn f(m: Map<string, int>) -> int {
+    let v = m[5]
+    5
+}
+
+//=== TEST CASE: index_non_indexable_Generic ===
+// indexing a non-indexable type must fail
+//! expect: cannot index into type int
+fn f() -> int {
+    let y = 5
+    let x = y[0]
+    5
+}
+

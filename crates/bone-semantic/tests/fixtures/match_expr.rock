@@ -40,15 +40,3 @@ fn f(o: Opt<int>) -> int {
       //^ int
     r
 }
-
-// arms whose bodies disagree are rejected.
-//- match_arm_mismatch @fail
-enum Color { Red, Green, Blue }
-fn f(c: Color) -> int {
-    let r = match c {
-        Color::Red => 1,
-        _ => "no",
-    }
-      //^ int
-    r
-}

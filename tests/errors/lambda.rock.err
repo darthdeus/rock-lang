@@ -1,0 +1,15 @@
+//! Lambda expressions synthesize a function type `(P...) -> R`. This slice is
+//! pure synthesis: params must be annotated, the body's type becomes the return
+//! type. (Bidirectional propagation of expected param types from a call site or
+//! an annotated slot is a later slice.) Exercises the HIR `Expr::Lambda` node,
+//! the `TypeExpr::Function` construction, and its `render`.
+//! Marker on the `let` binding holding the lambda.
+
+//=== TEST CASE: lambda_body_type_error_Generic ===
+// the lambda body is type-checked: an ordering op on a bool body must fail
+//! expect: ordering operators require numeric operands, got bool
+fn f() -> int {
+    let g = (x: bool) => x < x
+    5
+}
+

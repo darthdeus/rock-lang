@@ -43,11 +43,3 @@ fn g(n: int) -> int {
       //^ int
     x
 }
-
-// The body IS type-checked: assigning the string `target.name` to an `int`
-// local is a type error, so this section must fail.
-//- deco_body_type_error @fail
-struct __DecoTarget { name: string, params: [string], func: any }
-deco init bad {
-    let n: int = target.name
-}

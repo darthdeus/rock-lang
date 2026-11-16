@@ -43,17 +43,3 @@ fn f() -> int {
     x
   //^ int
 }
-
-// negating a bool must fail the numeric constraint
-//- neg_bool_fail @fail
-fn f(b: bool) -> int {
-    let x = -b
-    5
-}
-
-// negating a string must fail
-//- neg_string_fail @fail
-fn f(s: string) -> int {
-    let x = -s
-    5
-}

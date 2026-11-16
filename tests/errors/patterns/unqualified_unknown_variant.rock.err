@@ -6,6 +6,7 @@
 //! Tags: patterns, enums, match
 
 //=== TEST CASE: unqualified_unknown_variant_rejected ===
+//! expect: enum `Choice` has no variant `Nope`
 enum Choice { A, B }
 
 fn f(c: Choice) -> int {

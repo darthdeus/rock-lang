@@ -19,22 +19,6 @@ fn f(t: Tag) -> int {
     5
 }
 
-// The wrapped base type does not implicitly become the newtype.
-//- newtype_no_base_coercion @fail
-newtype UserId(int)
-fn f() -> int {
-    let bad: UserId = 5
-    0
-}
-
-// Construction arg must match the wrapped type.
-//- newtype_construct_wrong_arg @fail
-newtype UserId(int)
-fn f() -> int {
-    let id = UserId("nope")
-    0
-}
-
 // Generic newtype: construction infers the type parameter.
 //- generic_newtype_construct
 newtype Box<T>(T)
@@ -52,20 +36,4 @@ fn f() -> int {
     let p = Pair((1, "hi"))
       //^ Pair<int, string>
     5
-}
-
-// A newtype wraps exactly one type; a multi-field def is rejected at the
-// declaration, whether or not it is ever constructed.
-//- newtype_multi_field_rejected @fail
-newtype Bad(int, string)
-fn f() -> int {
-    0
-}
-
-// A newtype binds exactly one value; multi-binding patterns are rejected.
-//- newtype_multi_binding_rejected @fail
-newtype UserId(int)
-fn f(u: UserId) -> int {
-    let UserId(a, b) = u
-    0
 }

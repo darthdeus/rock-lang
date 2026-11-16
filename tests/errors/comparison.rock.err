@@ -1,0 +1,41 @@
+//! Comparison / logical operators carry operand constraints beyond "-> bool":
+//!   <, <=, >, >=  require numeric operands (int/float); int and float widen.
+//!   &&, ||        require bool operands.
+//!   ==, !=        equality-compatible operands; int/float widen, null-compare ok.
+
+//=== TEST CASE: lt_bool_fail_Generic ===
+// ordering on bools must be rejected
+//! expect: ordering operators require numeric operands, got bool
+fn f() -> bool {
+    let b = true < false
+    b
+}
+
+//=== TEST CASE: lt_string_fail_Generic ===
+// ordering on non-numeric operands (string) must be rejected
+//! expect: ordering operators require numeric operands, got string
+fn f() -> bool {
+    "a" < "b"
+}
+
+//=== TEST CASE: and_int_fail_Generic ===
+//! expect: type mismatch: expected `bool`, found `int`
+fn f() -> bool {
+    let b = 1 && 2
+    b
+}
+
+//=== TEST CASE: or_int_fail_Generic ===
+//! expect: type mismatch: expected `bool`, found `int`
+fn f() -> bool {
+    let b = 1 || 0
+    b
+}
+
+//=== TEST CASE: eq_mismatch_fail_Generic ===
+//! expect: type mismatch: expected `bool`, found `int`
+fn f() -> bool {
+    let b = 1 == true
+    b
+}
+

@@ -62,13 +62,5 @@ fn f() -> int {
     5
 }
 
-// the lambda body is type-checked: an ordering op on a bool body must fail
-//- lambda_body_type_error @fail
-fn f() -> int {
-    let g = (x: bool) => x < x
-      //^ fn(bool) -> bool
-    5
-}
-
 // unannotated params with no expected-type slot are inferred (body /
 // application constraints), not rejected -- see lambda_nonarg.rock

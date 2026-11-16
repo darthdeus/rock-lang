@@ -1,0 +1,11 @@
+//! `[T]` is syntactic sugar for `struct Vec<T> { _data: any, len: int }` -- they
+//! are the same type. bone represents `[T]` as `App{Array}`, so field access on
+//! a `[T]` must route through the Vec struct: `.len` -> int, `._data` -> any,
+//! with the Vec generic T bound to the element type.
+
+//=== TEST CASE: vec_unknown_field_fail_Generic ===
+//! expect: struct `Vec` has no field `nope`
+fn f(v: [int]) -> int {
+    v.nope
+}
+
