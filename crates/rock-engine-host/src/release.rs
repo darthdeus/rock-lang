@@ -508,65 +508,6 @@ mod tests {
     use super::*;
     use rock_host::stick::StickConfig;
 
-    #[derive(serde::Deserialize)]
-    struct ReleaseAssetOracle {
-        release: ReleaseAssetRootsOracle,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct ReleaseAssetRootsOracle {
-        assets: Vec<String>,
-        predefined_levels: Vec<String>,
-    }
-
-    fn independent_keys_for_roots(
-        project: &Path,
-        game_key: &str,
-        roots: impl IntoIterator<Item = String>,
-    ) -> Vec<String> {
-        let mut keys = BTreeMap::new();
-        for root in roots {
-            let source = project.join(root);
-            if source.is_file() {
-                let relative = source.strip_prefix(project).unwrap();
-                keys.insert(
-                    format!(
-                        "{game_key}/{}",
-                        relative.to_string_lossy().replace('\\', "/")
-                    ),
-                    (),
-                );
-            } else if source.is_dir() {
-                for entry in walkdir::WalkDir::new(source)
-                    .into_iter()
-                    .filter_map(Result::ok)
-                {
-                    if entry.file_type().is_file() {
-                        let relative = entry.path().strip_prefix(project).unwrap();
-                        keys.insert(
-                            format!(
-                                "{game_key}/{}",
-                                relative.to_string_lossy().replace('\\', "/")
-                            ),
-                            (),
-                        );
-                    }
-                }
-            }
-        }
-        keys.into_keys().collect()
-    }
-
-    fn independent_release_keys(project: &Path, game_key: &str, config: &str) -> Vec<String> {
-        let parsed: ReleaseAssetOracle = basic_toml::from_str(config).unwrap();
-        let roots = parsed
-            .release
-            .assets
-            .into_iter()
-            .chain(parsed.release.predefined_levels);
-        independent_keys_for_roots(project, game_key, roots)
-    }
-
     #[test]
     fn configured_predefined_levels_match_selected_and_packaged_keys() {
         let root = tempfile::tempdir().unwrap();
@@ -578,23 +519,17 @@ mod tests {
         std::fs::write(project.join("levels/crypt.json"), "level").unwrap();
         std::fs::write(project.join("levels/editor.json"), "editor-only").unwrap();
         std::fs::write(project.join("level.txt"), "legacy").unwrap();
-        let config_text = concat!(
-            "[package]\nname = \"configured-levels\"\n",
-            "[release]\nassets = [\"assets\"]\n",
-            "predefined_levels = [\"levels/index.json\", \"levels/crypt.json\"]\n",
-        );
-        let config = StickConfig::new_from_str(config_text)
-            .expect("release configuration must parse named predefined levels");
-        let expected = independent_release_keys(&project, "games/configured-levels", config_text);
-
-        let native = select_assets_with_overlays(
-            &project,
-            "games/configured-levels",
-            Some(&config),
-            Some(&root.path().join("stone")),
-            &[],
-        )
-        .unwrap();
+        let select = |config: Option<&str>| {
+            let config = config.map(|text| StickConfig::new_from_str(text).unwrap());
+            select_assets_with_overlays(
+                &project,
+                "games/configured-levels",
+                config.as_ref(),
+                Some(&root.path().join("stone")),
+                &[],
+            )
+            .unwrap()
+        };
         let keys = |selection: &AssetSelection| {
             selection
                 .assets
@@ -602,60 +537,26 @@ mod tests {
                 .map(|asset| asset.key.clone())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(
-            keys(&native),
-            expected,
-            "native selector follows configured release roots"
-        );
 
+        let native = select(Some(concat!(
+            "[package]\nname = \"configured-levels\"\n",
+            "[release]\nassets = [\"assets\"]\n",
+            "predefined_levels = [\"levels/index.json\", \"levels/crypt.json\"]\n",
+        )));
+        let expected = [
+            "games/configured-levels/assets/ui.txt",
+            "games/configured-levels/levels/crypt.json",
+            "games/configured-levels/levels/index.json",
+        ];
+        assert_eq!(keys(&native), expected);
         let staged = stage_assets(&native, &root.path().join("package/assets")).unwrap();
-        assert_eq!(
-            staged.keys, expected,
-            "packaged keys follow the same configured roots"
-        );
-        assert!(
-            staged
-                .keys
-                .iter()
-                .any(|key| key.ends_with("levels/crypt.json"))
-        );
-        assert!(!staged.keys.iter().any(|key| key.ends_with("level.txt")));
-        assert!(
-            !staged
-                .keys
-                .iter()
-                .any(|key| key.ends_with("levels/editor.json"))
-        );
+        assert_eq!(staged.keys, expected, "packaging follows the selection");
 
-        let config_without_release =
-            StickConfig::new_from_str("[package]\nname = \"defaults\"\n").unwrap();
-        let default_expected =
-            independent_keys_for_roots(&project, "games/configured-levels", ["assets".to_string()]);
-        let no_config = select_assets_with_overlays(
-            &project,
-            "games/configured-levels",
-            None,
-            Some(&root.path().join("stone")),
-            &[],
-        )
-        .unwrap();
-        let config_without_release = select_assets_with_overlays(
-            &project,
-            "games/configured-levels",
-            Some(&config_without_release),
-            Some(&root.path().join("stone")),
-            &[],
-        )
-        .unwrap();
+        let defaults = ["games/configured-levels/assets/ui.txt"];
+        assert_eq!(keys(&select(None)), defaults);
         assert_eq!(
-            keys(&no_config),
-            default_expected,
-            "unconfigured native default is assets only"
-        );
-        assert_eq!(
-            keys(&config_without_release),
-            default_expected,
-            "StickConfig default is assets only"
+            keys(&select(Some("[package]\nname = \"defaults\"\n"))),
+            defaults
         );
     }
 
@@ -758,28 +659,20 @@ mod tests {
     }
 
     #[test]
-    fn staging_refuses_a_directory_it_did_not_generate() {
+    fn staging_owns_only_directories_it_generated_or_found_empty() {
         let root = tempfile::tempdir().unwrap();
-        let out = root.path().join("assets");
-        std::fs::create_dir_all(out.join("art")).unwrap();
-        std::fs::write(out.join("art/original.png"), "irreplaceable").unwrap();
-
-        let selection = AssetSelection::default();
-        let err = stage_assets(&selection, &out).expect_err("unowned directory must reject");
-        assert!(
-            format!("{err}").contains("staging"),
-            "error names the staging-tree refusal: {err}"
-        );
+        let unowned = root.path().join("unowned");
+        std::fs::create_dir_all(unowned.join("art")).unwrap();
+        std::fs::write(unowned.join("art/original.png"), "irreplaceable").unwrap();
+        let err = stage_assets(&AssetSelection::default(), &unowned)
+            .expect_err("unowned directory must reject");
+        assert!(format!("{err}").contains("staging"), "{err}");
         assert_eq!(
-            std::fs::read(out.join("art/original.png")).unwrap(),
+            std::fs::read(unowned.join("art/original.png")).unwrap(),
             b"irreplaceable",
             "refusal must not delete anything"
         );
-    }
 
-    #[test]
-    fn restaging_a_generated_tree_clears_and_recopies() {
-        let root = tempfile::tempdir().unwrap();
         let project = root.path().join("demo");
         std::fs::create_dir_all(project.join("assets")).unwrap();
         std::fs::write(project.join("assets/a.txt"), "a").unwrap();
@@ -790,9 +683,13 @@ mod tests {
             }],
             missing: vec![],
         };
-
         let out = root.path().join("staged/assets");
+        std::fs::create_dir_all(&out).unwrap();
         stage_assets(&selection, &out).unwrap();
+        assert!(
+            staging_marker_path(&out).is_file(),
+            "claimed dir carries the marker"
+        );
         std::fs::write(out.join("stale.txt"), "stale").unwrap();
         let staged = stage_assets(&selection, &out).unwrap();
         assert_eq!(staged.file_count, 1);
@@ -801,18 +698,6 @@ mod tests {
             "restaging clears the generated tree"
         );
         assert_eq!(std::fs::read(out.join("demo/assets/a.txt")).unwrap(), b"a");
-    }
-
-    #[test]
-    fn staging_claims_an_empty_directory() {
-        let root = tempfile::tempdir().unwrap();
-        let out = root.path().join("assets");
-        std::fs::create_dir_all(&out).unwrap();
-        stage_assets(&AssetSelection::default(), &out).unwrap();
-        assert!(
-            staging_marker_path(&out).is_file(),
-            "claimed dir carries the marker"
-        );
     }
 
     #[test]
