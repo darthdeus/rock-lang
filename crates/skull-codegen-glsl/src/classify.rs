@@ -2,25 +2,10 @@
 
 use super::*;
 
-/// The vertex stage: which shader stage a reachability walk is emitting (drives
-/// per-stage builtin gating).
-#[derive(Copy, Clone, PartialEq, Eq)]
-pub(crate) enum Stage {
-    Vertex,
-    Fragment,
-}
-
-/// A classified `@shader(vertex)` entry.
-pub(crate) struct VertexShape {
-    /// Attribute struct param indices, in location-assignment order (per-vertex
-    /// `@attr` first, then `@instance` -- the numbering continues).
-    pub(crate) attr_params: Vec<usize>,
-    /// The attribute structs in location-assignment order, in the NEUTRAL
-    /// vocabulary. THE classification -- a GLSL-typed copy with baked locations
-    /// stood beside it and was free to disagree with the ABI plan about both.
-    /// Locations come from `ShaderAbiPlan::attribute_locations`; the spelling
-    /// from `attr_glsl_ty` at the point of emission.
-    pub(crate) inputs: Vec<LogicalVertexInput>,
+/// The resource params either pipeline stage may declare: its `@uniform` and
+/// `@engine` groups, its `@textures` group, bare samplers and uniform arrays.
+#[derive(Default)]
+pub(crate) struct StageResources {
     /// `@uniform` struct param indices (at most one).
     pub(crate) uniform_params: Vec<usize>,
     /// The `@uniform` group's struct name, if the stage declares one. Each
@@ -34,15 +19,124 @@ pub(crate) struct VertexShape {
     /// its lifetime is the pass rather than the draw, and it binds at index 0 so
     /// both stages of a program name the same block.
     pub(crate) engine_group: Option<Ustr>,
-    /// `@textures` group param indices -- see the field of the same name on
-    /// `FragShape`. Vertex texture fetch is legal in GL 3.3.
+    /// `@textures` group param indices. Their fields are already expanded into
+    /// `samplers`; the params themselves render as bare globals like a uniform
+    /// struct, so they belong in `global_params`. Vertex texture fetch is legal
+    /// in GL 3.3.
     pub(crate) texture_params: Vec<usize>,
     /// The `@textures` group's struct name, if the stage declares one.
     pub(crate) texture_group: Option<Ustr>,
-    /// Sampler params (rare in vertex, but legal).
     pub(crate) samplers: Vec<(usize, Ustr, SamplerKind)>,
     /// `UniformArray<T>` params, declaration order -- the array block's members.
     pub(crate) arrays: Vec<ArrayParam>,
+}
+
+/// What a stage param is once the shared resource roles have been ruled out.
+enum OtherParam {
+    /// A tier-0 value that is not a sampler: no stage accepts one.
+    Value(GlslTy),
+    /// A value struct, whose role marker the stage decides.
+    Struct,
+}
+
+impl StageResources {
+    /// Record param `i` if it is an array, a `@textures` group or a sampler.
+    fn classify(
+        &mut self,
+        ws: &Workspace,
+        pd: &bone_core::hir::ParamDecl,
+        i: usize,
+        span: Span,
+        stage: &str,
+    ) -> Result<Option<OtherParam>, CompilerError> {
+        if let Some(a) = classify_array_param(ws, pd, i, span, stage)? {
+            self.arrays.push(a);
+            return Ok(None);
+        }
+        if has_anno(&pd.annotations, "textures") {
+            reject_conflicting_texture_role(&pd.annotations, pd.name, span, stage)?;
+            if self.texture_group.is_some() {
+                return Err(err(
+                    span,
+                    format!(
+                        "shader {stage}: at most one @textures group param is allowed -- one group is the binding set"
+                    ),
+                ));
+            }
+            self.texture_group = nominal_name(ws, pd.ty);
+            self.samplers
+                .extend(texture_group_samplers(ws, pd.ty, i, span, stage)?);
+            self.texture_params.push(i);
+            return Ok(None);
+        }
+        match glsl_ty(ws, &SpecSubst::default(), pd.ty, span, "parameter") {
+            Ok(t) if t.is_sampler() => {
+                self.samplers.push((i, pd.name, sampler_kind_of(t)));
+                Ok(None)
+            }
+            Ok(other) => Ok(Some(OtherParam::Value(other))),
+            Err(_) => Ok(Some(OtherParam::Struct)),
+        }
+    }
+
+    // A group's fields are validated where they become the interface's
+    // members (`uniform_group_members`), which is the std140 question.
+    fn add_uniform(&mut self, ws: &Workspace, pd: &bone_core::hir::ParamDecl, i: usize) {
+        self.uniform_group = nominal_name(ws, pd.ty);
+        self.uniform_params.push(i);
+    }
+
+    fn add_engine(&mut self, ws: &Workspace, pd: &bone_core::hir::ParamDecl, i: usize) {
+        self.engine_group = nominal_name(ws, pd.ty);
+        self.engine_params.push(i);
+    }
+
+    fn check_counts(&self, span: Span, stage: &str) -> Result<(), CompilerError> {
+        if self.uniform_params.len() > 1 {
+            return Err(err(
+                span,
+                format!("shader {stage}: at most one @uniform struct param is allowed"),
+            ));
+        }
+        if self.engine_params.len() > 1 {
+            return Err(err(
+                span,
+                format!(
+                    "shader {stage}: at most one @engine struct param is allowed -- it is one engine-owned block"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The group params whose field reads render as bare globals.
+    pub(crate) fn global_params(&self) -> impl Iterator<Item = usize> + '_ {
+        self.engine_params
+            .iter()
+            .chain(&self.uniform_params)
+            .chain(&self.texture_params)
+            .copied()
+    }
+
+    pub(crate) fn has_bare_sampler(&self) -> bool {
+        has_bare_sampler(&self.samplers, &self.texture_params)
+    }
+
+    pub(crate) fn bare_samplers(&self, stage: IrStage) -> Vec<LogicalSampler> {
+        bare_sampler_list(&self.samplers, &self.texture_params, stage)
+    }
+}
+
+/// A classified `@shader(vertex)` entry.
+pub(crate) struct VertexShape {
+    /// Attribute struct param indices, in location-assignment order (per-vertex
+    /// `@attr` first, then `@instance` -- the numbering continues).
+    pub(crate) attr_params: Vec<usize>,
+    /// The attribute structs in location-assignment order, in the NEUTRAL
+    /// vocabulary. Locations come from `ShaderAbiPlan::attribute_locations`;
+    /// the spelling from `attr_glsl_ty` at the point of emission.
+    pub(crate) inputs: Vec<LogicalVertexInput>,
+    pub(crate) res: StageResources,
     /// The varyings value-struct return type.
     pub(crate) varyings_ty: TyId,
 }
@@ -55,27 +149,12 @@ pub(crate) struct VaryingsShape {
     pub(crate) varyings: Vec<LogicalVarying>,
 }
 
+/// The pipeline fragment entry's varyings-struct param index: always the first.
+pub(crate) const VARYINGS_PARAM: usize = 0;
+
 /// A classified pipeline `@shader(fragment)` entry (varyings-consuming form).
 pub(crate) struct FragShape {
-    /// The varyings-struct param index (always 0 -- the first param).
-    pub(crate) varyings_param: usize,
-    pub(crate) uniform_params: Vec<usize>,
-    /// The `@uniform` group's struct name, if the stage declares one. Its own
-    /// std140 block, at its own binding index -- see `VertexShape`.
-    pub(crate) uniform_group: Option<Ustr>,
-    /// `@engine` struct param indices (at most one) -- see `VertexShape`.
-    pub(crate) engine_params: Vec<usize>,
-    /// The `@engine` group's struct name, if the stage declares one.
-    pub(crate) engine_group: Option<Ustr>,
-    /// `@textures` group param indices. Their fields are already expanded into
-    /// `samplers`; the params themselves render as bare globals like a uniform
-    /// struct, so they belong in `global_params`.
-    pub(crate) texture_params: Vec<usize>,
-    /// The `@textures` group's struct name, if the stage declares one.
-    pub(crate) texture_group: Option<Ustr>,
-    pub(crate) samplers: Vec<(usize, Ustr, SamplerKind)>,
-    /// `UniformArray<T>` params, declaration order -- the array block's members.
-    pub(crate) arrays: Vec<ArrayParam>,
+    pub(crate) res: StageResources,
     /// How the stage's colour output is shaped, in the NEUTRAL vocabulary:
     /// `Mrt` when the entry returns a value struct (one
     /// `layout(location=N) out <ty> <field>` per field, declaration order),
@@ -415,34 +494,12 @@ pub(crate) fn attr_glsl_ty(k: AttrKind) -> GlslTy {
 /// return type is the varyings struct.
 pub(crate) fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, CompilerError> {
     let span = f.name_span;
-    let (mut per_vertex, mut instanced, mut uniform_params, mut samplers, mut arrays) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let mut texture_params = Vec::new();
-    let mut texture_group: Option<Ustr> = None;
-    let mut uniform_group: Option<Ustr> = None;
-    let mut engine_group: Option<Ustr> = None;
-    let mut engine_params: Vec<usize> = Vec::new();
+    let (mut per_vertex, mut instanced) = (Vec::new(), Vec::new());
+    let mut res = StageResources::default();
     for (i, pd) in f.param_decls.iter().enumerate() {
-        if let Some(a) = classify_array_param(ws, pd, i, span, "vertex")? {
-            arrays.push(a);
-            continue;
-        }
-        if has_anno(&pd.annotations, "textures") {
-            reject_conflicting_texture_role(&pd.annotations, pd.name, span, "vertex")?;
-            if texture_group.is_some() {
-                return Err(err(
-                    span,
-                    "shader vertex: at most one @textures group param is allowed -- one group is the binding set",
-                ));
-            }
-            texture_group = nominal_name(ws, pd.ty);
-            samplers.extend(texture_group_samplers(ws, pd.ty, i, span, "vertex")?);
-            texture_params.push(i);
-            continue;
-        }
-        match glsl_ty(ws, &SpecSubst::default(), pd.ty, span, "parameter") {
-            Ok(t) if t.is_sampler() => samplers.push((i, pd.name, sampler_kind_of(t))),
-            Ok(other) => {
+        match res.classify(ws, pd, i, span, "vertex")? {
+            None => {}
+            Some(OtherParam::Value(other)) => {
                 return Err(err(
                     span,
                     format!(
@@ -452,7 +509,7 @@ pub(crate) fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShap
                     ),
                 ));
             }
-            Err(_) => match (
+            Some(OtherParam::Struct) => match (
                 has_anno(&pd.annotations, "attr"),
                 has_anno(&pd.annotations, "instance"),
                 has_anno(&pd.annotations, "uniform"),
@@ -460,14 +517,8 @@ pub(crate) fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShap
             ) {
                 (true, false, false, false) => per_vertex.push(i),
                 (false, true, false, false) => instanced.push(i),
-                (false, false, true, false) => {
-                    uniform_group = nominal_name(ws, pd.ty);
-                    uniform_params.push(i);
-                }
-                (false, false, false, true) => {
-                    engine_group = nominal_name(ws, pd.ty);
-                    engine_params.push(i);
-                }
+                (false, false, true, false) => res.add_uniform(ws, pd, i),
+                (false, false, false, true) => res.add_engine(ws, pd, i),
                 (false, false, false, false) => {
                     return Err(err(
                         span,
@@ -489,18 +540,7 @@ pub(crate) fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShap
             },
         }
     }
-    if uniform_params.len() > 1 {
-        return Err(err(
-            span,
-            "shader vertex: at most one @uniform struct param is allowed",
-        ));
-    }
-    if engine_params.len() > 1 {
-        return Err(err(
-            span,
-            "shader vertex: at most one @engine struct param is allowed -- it is one engine-owned block",
-        ));
-    }
+    res.check_counts(span, "vertex")?;
     let mut attr_params = Vec::new();
     let mut inputs: Vec<LogicalVertexInput> = Vec::new();
     // @attr params first, then @instance -- the ORDER locations are assigned
@@ -544,16 +584,9 @@ pub(crate) fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShap
         )
     })?;
     Ok(VertexShape {
-        uniform_group,
-        engine_params,
-        engine_group,
         attr_params,
         inputs,
-        uniform_params,
-        texture_params,
-        texture_group,
-        samplers,
-        arrays,
+        res,
         varyings_ty,
     })
 }
@@ -642,7 +675,7 @@ pub(crate) fn classify_pipeline_fragment(
     vert_varyings_ty: TyId,
 ) -> Result<FragShape, CompilerError> {
     let span = f.name_span;
-    let Some(first) = f.param_decls.first() else {
+    let Some(first) = f.param_decls.get(VARYINGS_PARAM) else {
         return Err(err(
             span,
             "shader fragment: the entry must take the varyings struct as its first param",
@@ -656,33 +689,11 @@ pub(crate) fn classify_pipeline_fragment(
             "shader fragment: the first param must be the varyings struct (the vertex entry's return type) -- the pair's varyings types do not match",
         ));
     }
-    let (mut uniform_params, mut samplers, mut arrays) = (Vec::new(), Vec::new(), Vec::new());
-    let mut texture_params = Vec::new();
-    let mut texture_group: Option<Ustr> = None;
-    let mut uniform_group: Option<Ustr> = None;
-    let mut engine_group: Option<Ustr> = None;
-    let mut engine_params: Vec<usize> = Vec::new();
-    for (i, pd) in f.param_decls.iter().enumerate().skip(1) {
-        if let Some(a) = classify_array_param(ws, pd, i, span, "fragment")? {
-            arrays.push(a);
-            continue;
-        }
-        if has_anno(&pd.annotations, "textures") {
-            reject_conflicting_texture_role(&pd.annotations, pd.name, span, "fragment")?;
-            if texture_group.is_some() {
-                return Err(err(
-                    span,
-                    "shader fragment: at most one @textures group param is allowed -- one group is the binding set",
-                ));
-            }
-            texture_group = nominal_name(ws, pd.ty);
-            samplers.extend(texture_group_samplers(ws, pd.ty, i, span, "fragment")?);
-            texture_params.push(i);
-            continue;
-        }
-        match glsl_ty(ws, &SpecSubst::default(), pd.ty, span, "parameter") {
-            Ok(t) if t.is_sampler() => samplers.push((i, pd.name, sampler_kind_of(t))),
-            Ok(other) => {
+    let mut res = StageResources::default();
+    for (i, pd) in f.param_decls.iter().enumerate().skip(VARYINGS_PARAM + 1) {
+        match res.classify(ws, pd, i, span, "fragment")? {
+            None => {}
+            Some(OtherParam::Value(other)) => {
                 return Err(err(
                     span,
                     format!(
@@ -692,52 +703,34 @@ pub(crate) fn classify_pipeline_fragment(
                     ),
                 ));
             }
-            Err(_) => {
-                if has_anno(&pd.annotations, "engine") {
-                    if has_anno(&pd.annotations, "uniform") {
-                        return Err(err(
-                            span,
-                            format!(
-                                "shader fragment: param `{}` has conflicting role markers",
-                                pd.name
-                            ),
-                        ));
-                    }
-                    // The group's fields are validated where they become the
-                    // interface's members (`uniform_group_members`), which is
-                    // the std140 question. A `glsl_ty` pass here was a weaker
-                    // restatement -- it admits Sampler2D and Bvec3, which no
-                    // uniform block can pack.
-                    engine_group = nominal_name(ws, pd.ty);
-                    engine_params.push(i);
-                } else {
-                    if !has_anno(&pd.annotations, "uniform") {
-                        return Err(err(
-                            span,
-                            format!(
-                                "shader fragment: value-struct param `{}` needs @uniform (this shader's block) or @engine (the engine-owned frame/pass block)",
-                                pd.name
-                            ),
-                        ));
-                    }
-                    uniform_group = nominal_name(ws, pd.ty);
-                    uniform_params.push(i);
+            Some(OtherParam::Struct) => match (
+                has_anno(&pd.annotations, "uniform"),
+                has_anno(&pd.annotations, "engine"),
+            ) {
+                (true, false) => res.add_uniform(ws, pd, i),
+                (false, true) => res.add_engine(ws, pd, i),
+                (false, false) => {
+                    return Err(err(
+                        span,
+                        format!(
+                            "shader fragment: value-struct param `{}` needs @uniform (this shader's block) or @engine (the engine-owned frame/pass block)",
+                            pd.name
+                        ),
+                    ));
                 }
-            }
+                (true, true) => {
+                    return Err(err(
+                        span,
+                        format!(
+                            "shader fragment: param `{}` has conflicting role markers",
+                            pd.name
+                        ),
+                    ));
+                }
+            },
         }
     }
-    if uniform_params.len() > 1 {
-        return Err(err(
-            span,
-            "shader fragment: at most one @uniform struct param is allowed",
-        ));
-    }
-    if engine_params.len() > 1 {
-        return Err(err(
-            span,
-            "shader fragment: at most one @engine struct param is allowed -- it is one engine-owned block",
-        ));
-    }
+    res.check_counts(span, "fragment")?;
     // Return: a single Vec4 (implicit FragColor), a single int (an R32I-only
     // target, e.g. the silhouette mask), OR a value struct of Vec4/int fields
     // (MRT -- one `layout(location=N) out <ty> <field>` per field, in order;
@@ -805,15 +798,7 @@ pub(crate) fn classify_pipeline_fragment(
         }
     };
     Ok(FragShape {
-        uniform_group,
-        engine_params,
-        engine_group,
-        varyings_param: 0,
-        uniform_params,
-        texture_params,
-        texture_group,
-        samplers,
-        arrays,
+        res,
         output,
         frag_depth,
     })
@@ -822,12 +807,10 @@ pub(crate) fn classify_pipeline_fragment(
 /// Reject a fragment-stage read of the varyings `position` field: it is
 /// gl_Position (vertex-only), not a fragment input.
 pub(crate) fn reject_position_read(
-    ws: &Workspace,
     mf: &MirFunc,
     varyings_cell: Idx<Cell>,
     span: Span,
 ) -> Result<(), CompilerError> {
-    let _ = ws;
     for (_, inst) in mf.insts.iter() {
         if let Inst::Field { base, field } = inst {
             if field.as_str() == "position"

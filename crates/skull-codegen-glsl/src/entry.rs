@@ -155,21 +155,17 @@ pub(crate) fn plan_stage_from_view(
     ws: &Workspace,
     scx: &ScalarCtx,
     view: &ShaderStageView,
-    expected: Stage,
+    expected: ShaderStage,
     concrete_plans: &Arc<ConcretePlans>,
 ) -> Result<StagePlan, CompilerError> {
-    let expected_ir = match expected {
-        Stage::Vertex => ShaderStage::Vertex,
-        Stage::Fragment => ShaderStage::Fragment,
-    };
-    if view.stage != expected_ir {
+    if view.stage != expected {
         return Err(CompilerError::new_no_location(format!(
-            "shader graph/view stage mismatch: expected {expected_ir:?}, got {:?}",
+            "shader graph/view stage mismatch: expected {expected:?}, got {:?}",
             view.stage
         )));
     }
     let input = skull_codegen_shader::ConcreteStageInput {
-        stage: expected_ir,
+        stage: expected,
         entry: view.entry.clone(),
         retained: view.retained.iter().cloned().collect(),
         helpers: view.helpers.iter().cloned().collect(),
@@ -327,7 +323,7 @@ fn plan_shader_entry_inner(
     // and is not a tier-0 leaf (asking the library check of an entry rejected
     // 1,539 real shaders).
     let class = skull_codegen_shader::classify_entry(ws, f)?;
-    let stage = plan_stage_from_view(ws, scx, stage_view, Stage::Fragment, concrete_plans)?;
+    let stage = plan_stage_from_view(ws, scx, stage_view, IrStage::Fragment, concrete_plans)?;
     let interface = ShaderInterfacePlan {
         stages: vec![IrStage::Fragment],
         uniform_groups: class

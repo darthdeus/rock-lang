@@ -21,9 +21,7 @@ fn emit_vertex_stage(
             .attr_params
             .iter()
             .copied()
-            .chain(v.engine_params.iter().copied())
-            .chain(v.uniform_params.iter().copied())
-            .chain(v.texture_params.iter().copied())
+            .chain(v.res.global_params())
             .collect(),
         // Body-level typing of bare-global reads. Attribute types come from the
         // INTERFACE, spelled here -- `GlslTy` is the emitter's own working type
@@ -34,8 +32,8 @@ fn emit_vertex_stage(
             .flat_map(|i| i.attrs.iter().map(|(n, k)| (*n, attr_glsl_ty(*k))))
             .chain(stage_uniform_fields(iface, IrStage::Vertex))
             .collect(),
-        sampler_params: v.samplers.iter().map(|&(i, _, _)| i).collect(),
-        arrays: v.arrays.iter().map(|a| a.param).collect(),
+        sampler_params: v.res.samplers.iter().map(|&(i, _, _)| i).collect(),
+        arrays: v.res.arrays.iter().map(|a| a.param).collect(),
         main_out: Some(MainOut {
             fields: iface
                 .varyings
@@ -143,10 +141,8 @@ fn emit_fragment_stage(
             .then_some((FRAG_DEPTH_FIELD, "gl_FragDepth", GlslTy::Float)),
     });
     let shape = EntryShape {
-        global_params: std::iter::once(fs.varyings_param)
-            .chain(fs.engine_params.iter().copied())
-            .chain(fs.uniform_params.iter().copied())
-            .chain(fs.texture_params.iter().copied())
+        global_params: std::iter::once(VARYINGS_PARAM)
+            .chain(fs.res.global_params())
             .collect(),
         uniform_fields: iface
             .varyings
@@ -154,8 +150,8 @@ fn emit_fragment_stage(
             .map(|v| (v.name, wire_glsl(v.kind)))
             .chain(stage_uniform_fields(iface, IrStage::Fragment))
             .collect(),
-        sampler_params: fs.samplers.iter().map(|&(i, _, _)| i).collect(),
-        arrays: fs.arrays.iter().map(|a| a.param).collect(),
+        sampler_params: fs.res.samplers.iter().map(|&(i, _, _)| i).collect(),
+        arrays: fs.res.arrays.iter().map(|a| a.param).collect(),
         main_out,
         reserved: entry_reserved_names(iface),
     };
@@ -479,10 +475,12 @@ fn plan_shader_pipeline_inner(
     // camera/time/screen band lives in `@engine` instead, which is what lets
     // instanced grass keep a shader-owned `entity_count` beside them.
     let vert_group = vshape
+        .res
         .uniform_group
         .map(|g| logical_uniform_group(ws, UniformRole::Stage(IrStage::Vertex), g, vf.name_span))
         .transpose()?;
     let frag_group = fshape
+        .res
         .uniform_group
         .map(|g| logical_uniform_group(ws, UniformRole::Stage(IrStage::Fragment), g, ff.name_span))
         .transpose()?;
@@ -498,7 +496,7 @@ fn plan_shader_pipeline_inner(
     // ENGINE compares at registration, which is the layer that owns the answer;
     // a game marking its own struct `@engine` gets a block nothing fills, and
     // that check belongs there rather than here.
-    let engine_group = match (vshape.engine_group, fshape.engine_group) {
+    let engine_group = match (vshape.res.engine_group, fshape.res.engine_group) {
         (Some(v), Some(f)) if v != f => {
             return Err(err(
                 vf.name_span,
@@ -517,12 +515,12 @@ fn plan_shader_pipeline_inner(
     // reserved binding. Built from the SAME std140 authority as the scalar
     // blocks above and refusing the same element set, so the declaration and the
     // host's offsets cannot come from two different answers.
-    let vert_array_group = logical_array_group(IrStage::Vertex, vf.name, &vshape.arrays);
-    let frag_array_group = logical_array_group(IrStage::Fragment, ff.name, &fshape.arrays);
+    let vert_array_group = logical_array_group(IrStage::Vertex, vf.name, &vshape.res.arrays);
+    let frag_array_group = logical_array_group(IrStage::Fragment, ff.name, &fshape.res.arrays);
 
     // `@textures` is one group per PROGRAM (texture units are program-scoped),
     // unlike `@uniform`, which is one block per STAGE.
-    let group = match (vshape.texture_group, fshape.texture_group) {
+    let group = match (vshape.res.texture_group, fshape.res.texture_group) {
         (Some(v), Some(f)) if v != f => {
             return Err(err(
                 vf.name_span,
@@ -533,14 +531,21 @@ fn plan_shader_pipeline_inner(
         }
         (v, f) => v.or(f),
     };
-    let bare = has_bare_sampler(&vshape.samplers, &vshape.texture_params)
-        || has_bare_sampler(&fshape.samplers, &fshape.texture_params);
+    let bare = vshape.res.has_bare_sampler() || fshape.res.has_bare_sampler();
     // WHICH stages read the group -- a stage that samples must declare the
     // sampler in its own section, so "the program has one" cannot drive
     // emission.
     let group_stages: Vec<IrStage> = [
-        vshape.texture_group.is_some().then_some(IrStage::Vertex),
-        fshape.texture_group.is_some().then_some(IrStage::Fragment),
+        vshape
+            .res
+            .texture_group
+            .is_some()
+            .then_some(IrStage::Vertex),
+        fshape
+            .res
+            .texture_group
+            .is_some()
+            .then_some(IrStage::Fragment),
     ]
     .into_iter()
     .flatten()
@@ -555,13 +560,11 @@ fn plan_shader_pipeline_inner(
         varyings: varyings.varyings.clone(),
         fragment_output: fshape.output.clone(),
         frag_depth: fshape.frag_depth,
-        bare_samplers: bare_sampler_list(&vshape.samplers, &vshape.texture_params, IrStage::Vertex)
+        bare_samplers: vshape
+            .res
+            .bare_samplers(IrStage::Vertex)
             .into_iter()
-            .chain(bare_sampler_list(
-                &fshape.samplers,
-                &fshape.texture_params,
-                IrStage::Fragment,
-            ))
+            .chain(fshape.res.bare_samplers(IrStage::Fragment))
             .collect(),
         uniform_groups: engine_logical
             .into_iter()
@@ -585,12 +588,11 @@ fn plan_shader_pipeline_inner(
         vf.name_span,
     )?;
 
-    let vert = plan_stage_from_view(ws, scx, stage_views.0, Stage::Vertex, concrete_plans)?;
-    let frag = plan_stage_from_view(ws, scx, stage_views.1, Stage::Fragment, concrete_plans)?;
+    let vert = plan_stage_from_view(ws, scx, stage_views.0, IrStage::Vertex, concrete_plans)?;
+    let frag = plan_stage_from_view(ws, scx, stage_views.1, IrStage::Fragment, concrete_plans)?;
     reject_position_read(
-        ws,
         &frag.ir.body,
-        frag.ir.body.params[fshape.varyings_param],
+        frag.ir.body.params[VARYINGS_PARAM],
         ff.name_span,
     )?;
 
