@@ -583,7 +583,6 @@ pub fn emit_overlay_with_span_edits(
     let d_stale = t_stale.elapsed();
     let t_relower = t2.elapsed();
     let t3 = Instant::now();
-    let published_code_artifact = cache.code_artifact.clone();
     let (mut emit, overlay_unit_reads, fingerprint_code_rows) = assemble_overlay(
         ws,
         cache,
@@ -592,8 +591,6 @@ pub fn emit_overlay_with_span_edits(
         fingerprint_identities,
     )?;
     cache.fingerprint_code_rows = Some(fingerprint_code_rows);
-    cache.repair_stats.code_artifact_assembly_reused =
-        std::sync::Arc::ptr_eq(&published_code_artifact, &emit.code_artifact);
     cache.code_artifact = emit.code_artifact.clone();
     cache.lifecycle_plan = Some(std::sync::Arc::new(emit.lifecycle_plan.clone()));
     cache.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));

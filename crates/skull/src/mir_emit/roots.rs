@@ -181,7 +181,20 @@ pub(super) fn sim_glue_roots(ws: &Workspace) -> Vec<FuncRef> {
 /// that decision itself. See [`all_roots`], which adds the generated-glue
 /// obligations on top.
 pub fn emission_roots(ws: &Workspace, project_root: Option<&str>) -> Vec<FuncRef> {
-    emission_roots_with_census(ws, project_root, None)
+    let decorators = DecoratorTable::collect(ws);
+    let program = is_program_target(ws, project_root);
+    let mut roots = Vec::new();
+    for module in ws.source_modules() {
+        for (fid, f) in module.functions.iter() {
+            if is_emission_root(module.file.as_str(), project_root, program, f, &decorators) {
+                roots.push(FuncRef {
+                    module: module.id,
+                    func: fid,
+                });
+            }
+        }
+    }
+    roots
 }
 
 /// Harness roots plus the global roots every build keeps. Package tests and
@@ -291,30 +304,6 @@ fn is_program_target(ws: &Workspace, project_root: Option<&str>) -> bool {
         })
 }
 
-fn emission_roots_with_census(
-    ws: &Workspace,
-    project_root: Option<&str>,
-    mut census: Option<&mut RootEnumerationCensus>,
-) -> Vec<FuncRef> {
-    let decorators = DecoratorTable::collect(ws);
-    let program = is_program_target(ws, project_root);
-    let mut roots = Vec::new();
-    for module in ws.source_modules() {
-        if let Some(census) = census.as_deref_mut() {
-            census.functions_examined += module.functions.len();
-        }
-        for (fid, f) in module.functions.iter() {
-            if is_emission_root(module.file.as_str(), project_root, program, f, &decorators) {
-                roots.push(FuncRef {
-                    module: module.id,
-                    func: fid,
-                });
-            }
-        }
-    }
-    roots
-}
-
 /// The roots one Lua build is taken over: the declared emission roots plus the
 /// obligations GENERATED GLUE TEXT carries.
 ///
@@ -328,22 +317,12 @@ fn emission_roots_with_census(
 ///
 /// The shader collection is therefore built BEFORE the graph, not beside the
 /// assembly that renders it.
-#[cfg(test)]
 pub(super) fn all_roots(
     ws: &Workspace,
     project_root: Option<&str>,
     shader_roots: &[FuncRef],
 ) -> Vec<FuncRef> {
-    all_roots_with_census(ws, project_root, shader_roots, None)
-}
-
-pub(super) fn all_roots_with_census(
-    ws: &Workspace,
-    project_root: Option<&str>,
-    shader_roots: &[FuncRef],
-    census: Option<&mut RootEnumerationCensus>,
-) -> Vec<FuncRef> {
-    let mut roots = emission_roots_with_census(ws, project_root, census);
+    let mut roots = emission_roots(ws, project_root);
     let mut seen: FxHashSet<FuncRef> = roots.iter().copied().collect();
     let mut glue: Vec<FuncRef> = sim_glue_roots(ws);
     glue.extend(shader_roots.iter().copied());
@@ -368,11 +347,6 @@ pub(super) fn cached_roots(
     glue.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
     roots.extend(glue.into_iter().filter(|f| seen.insert(*f)));
     roots
-}
-
-#[derive(Default)]
-pub(super) struct RootEnumerationCensus {
-    pub(super) functions_examined: usize,
 }
 
 pub(super) fn sim_registration_lines(

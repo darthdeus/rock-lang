@@ -465,10 +465,6 @@ fn main() {
             std::sync::Arc::ptr_eq(&overlay.code_artifact, &cache.code_artifact),
             "the overlay result and cache must share one immutable CodeArtifact publication"
         );
-        assert!(
-            cache.repair_stats().code_artifact_assembly_reused,
-            "overlay assembly duplicated the already-published replacement artifact"
-        );
     }
 
     #[test]

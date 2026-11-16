@@ -85,38 +85,6 @@ pub(super) fn build_inline_candidate_table(
     added: Option<&BTreeSet<Instance>>,
     removed: Option<&BTreeSet<Instance>>,
 ) -> Result<std::sync::Arc<skull_transform::InlineCandidateTable>, CompilerError> {
-    let mut census = CandidateBuildStats::default();
-    build_inline_candidate_table_with_census(
-        ws,
-        scx,
-        concrete,
-        keys,
-        base,
-        invalidated,
-        warm_keys_override,
-        added,
-        removed,
-        &mut census,
-    )
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub(super) struct CandidateBuildStats {
-    pub(super) warmed: usize,
-}
-
-pub(super) fn build_inline_candidate_table_with_census(
-    ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
-    concrete: &crate::concrete_body::ConcreteBodies,
-    keys: Vec<Instance>,
-    base: Option<&std::sync::Arc<skull_transform::InlineCandidateTable>>,
-    invalidated: Option<&FxHashSet<FuncRef>>,
-    warm_keys_override: Option<Vec<Instance>>,
-    added: Option<&BTreeSet<Instance>>,
-    removed: Option<&BTreeSet<Instance>>,
-    census: &mut CandidateBuildStats,
-) -> Result<std::sync::Arc<skull_transform::InlineCandidateTable>, CompilerError> {
     // The old incremental route left this unset and filtered every key here.
     // Count the exact iterator population so a mutation that restores that
     // route is visible rather than looking like a timing-only regression.
@@ -139,7 +107,6 @@ pub(super) fn build_inline_candidate_table_with_census(
     )
     .into_iter()
     .collect::<Result<_, _>>()?;
-    census.warmed = warms.len();
     if let Some(base) = base {
         if let (Some(added), Some(removed)) = (added, removed) {
             return Ok(std::sync::Arc::new(

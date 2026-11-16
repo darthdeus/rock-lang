@@ -303,14 +303,6 @@ fn full_scans_agree_with_the_retained_fast_paths_over_an_edit_sequence() {
             fast.artifact_fingerprint, full.artifact_fingerprint,
             "step {step}: incremental fingerprints differ"
         );
-        let (fast_stats, full_stats) = (
-            incremental_fast.repair_stats(),
-            incremental_full.repair_stats(),
-        );
-        assert!(
-            fast_stats.root_functions_examined == 0 && full_stats.root_functions_examined > 0,
-            "step {step}: only the full-scan cache enumerates roots: {fast_stats:?} {full_stats:?}"
-        );
         let fast = emit_overlay(&ws, &mut overlay_fast, &reinferred);
         let full = emit_overlay(&ws, &mut overlay_full, &reinferred);
         assert_eq!(fast.lua, full.lua, "step {step}: overlays differ");

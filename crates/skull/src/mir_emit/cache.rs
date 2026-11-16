@@ -166,20 +166,15 @@ pub struct SkullEmitCache {
     pub(super) full_scans: bool,
 }
 
-/// Structural work performed by the last body-only cache update. The counters
-/// are ordinary per-cache state; they do not use synchronization or process-
-/// global atomics. The route records only work it already performs.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct IncrementalRepairStats {
-    pub root_functions_examined: usize,
-    pub chunks_rebuilt: usize,
+/// Phase timings of the last body-only cache update, reported by the overlay.
+#[derive(Clone, Copy, Default)]
+pub(super) struct IncrementalRepairStats {
     pub graph_update_ns: u64,
     pub concrete_update_ns: u64,
     pub artifact_update_ns: u64,
     pub candidate_update_ns: u64,
     pub affected_selection_ns: u64,
     pub relowering_ns: u64,
-    pub code_artifact_assembly_reused: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -269,10 +264,6 @@ impl SkullEmitCache {
             })
             .map(|(_, _, wire)| wire)
             .collect()
-    }
-
-    pub fn repair_stats(&self) -> IncrementalRepairStats {
-        self.repair_stats
     }
 
     pub(super) fn refresh_effect_snapshot(&mut self, ws: &Workspace) {
@@ -930,14 +921,11 @@ impl SkullEmitCache {
         // The full root enumerator remains an oracle for tests and verification;
         // the body route consumes the retained root cache above.
         let forced_roots = if let Some(previous_roots) = roots_before {
-            let mut census = RootEnumerationCensus::default();
-            let roots = all_roots_with_census(
+            let roots = all_roots(
                 ws,
                 cache.roots.project_root.as_deref(),
                 &cache.roots.shader_roots,
-                Some(&mut census),
             );
-            cache.repair_stats.root_functions_examined = census.functions_examined;
             root_added = roots
                 .iter()
                 .filter(|root| !previous_roots.contains(root))
@@ -1062,8 +1050,7 @@ impl SkullEmitCache {
         let t_candidate = Instant::now();
         let previous_candidate_table = cache.inline_cache.candidate_table();
         let force_candidate_scan = cache.full_scans;
-        let mut candidate_census = CandidateBuildStats::default();
-        let candidate_table = build_inline_candidate_table_with_census(
+        let candidate_table = build_inline_candidate_table(
             ws,
             scx,
             &cache.concrete,
@@ -1077,7 +1064,6 @@ impl SkullEmitCache {
             (!force_candidate_scan).then_some(warm_keys),
             Some(&concrete_update.candidate_keys_added),
             Some(&concrete_update.candidate_keys_removed),
-            &mut candidate_census,
         )?;
         // A residual call embeds no callee body. It can keep its chunk when every
         // concrete candidate for that declaration has the same decision inputs.
@@ -1188,7 +1174,6 @@ impl SkullEmitCache {
         // `affected`), so invalidate them before re-lowering. Everything else is
         // provably unchanged and reused.
         let t_relow = Instant::now();
-        let mut chunks_rebuilt = 0;
         for body in &affected {
             cache.inline_cache.invalidate(body.func);
         }
@@ -1209,7 +1194,6 @@ impl SkullEmitCache {
             // An edit can flip a body between cached (ordinary/coroutine) and
             // regenerated (extern / inline(lua)); only the former has a chunk.
             if is_cached_emitted_body(f, body) {
-                chunks_rebuilt += 1;
                 let chunk = rebuild_chunk(
                     ws,
                     cg,
@@ -1236,7 +1220,6 @@ impl SkullEmitCache {
                 cache.chunks.remove(body);
             }
         }
-        cache.repair_stats.chunks_rebuilt = chunks_rebuilt;
         let (added_errors, added_fingerprint_identities) =
             Self::build_graph_added_chunks(cache, ws, &update.added);
         fingerprint_identities.extend(added_fingerprint_identities);
