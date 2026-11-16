@@ -16,10 +16,6 @@ impl Emitter<'_> {
             return;
         }
         self.mark_line(out, id);
-        if let Some(forward) = self.call_arg_forwards.get(id) {
-            self.emit_call_arg_forward(out, forward);
-            return;
-        }
         // An `@inline inline(lua)` call is spliced inline (body in the caller's
         // scope) instead of emitting a `callee(args)` call -- see the method.
         if matches!(&self.func.insts[id], Inst::Call { .. })
@@ -44,24 +40,28 @@ impl Emitter<'_> {
         }
     }
 
-    fn emit_call_arg_forward(&self, out: &mut String, forward: &CallArgForward) {
-        out.push(' ');
-        if self.colors[raw(forward.consumer) as usize] != u32::MAX {
-            write_vname(out, self.func, &self.colors, forward.consumer);
-            out.push_str(" = ");
+    pub(crate) fn write_call(&self, out: &mut String, id: Idx<Inst>) {
+        match &self.func.insts[id] {
+            Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => {
+                out.push_str(&self.callee_name(id, *func));
+                out.push('(');
+                if let Some(forward) = self.call_arg_forwards.get(id) {
+                    self.write_csv(out, &args[..forward.prefix_len]);
+                    if forward.prefix_len > 0 {
+                        out.push_str(", ");
+                    }
+                    self.write_call(out, forward.producer);
+                } else {
+                    self.write_csv(out, self.call_args(*func, args));
+                }
+            }
+            Inst::CallValue { callee, args } | Inst::CallValueMulti { callee, args, .. } => {
+                self.write_opnd(out, *callee);
+                out.push('(');
+                self.write_csv(out, args);
+            }
+            _ => unreachable!("not a call"),
         }
-        self.write_call_arg_forward(out, forward);
-        out.push('\n');
-    }
-
-    pub(crate) fn write_call_arg_forward(&self, out: &mut String, forward: &CallArgForward) {
-        out.push_str(&self.callee_name(forward.consumer, forward.func));
-        out.push('(');
-        self.write_csv(out, &forward.prefix);
-        if !forward.prefix.is_empty() {
-            out.push_str(", ");
-        }
-        self.write_forward_call(out, &forward.producer);
         out.push(')');
     }
 

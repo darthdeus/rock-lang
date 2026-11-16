@@ -297,32 +297,15 @@ impl Emitter<'_> {
     }
 
     fn emit_tail_forward(&self, out: &mut String, tail: &TailForward) {
-        if let TailForwardCall::Direct { call, .. } = &tail.call {
-            self.mark_line(out, *call);
+        if matches!(
+            self.func.insts[tail.call],
+            Inst::Call { .. } | Inst::CallMulti { .. }
+        ) {
+            self.mark_line(out, tail.call);
         }
         out.push_str(" do return ");
-        self.write_forward_call(out, &tail.call);
+        self.write_call(out, tail.call);
         out.push_str(" end\n");
-    }
-
-    pub(crate) fn write_forward_call(&self, out: &mut String, call: &TailForwardCall) {
-        match call {
-            TailForwardCall::Direct { call, func, args } => {
-                if let Some(forward) = self.call_arg_forwards.get(*call) {
-                    self.write_call_arg_forward(out, forward);
-                    return;
-                }
-                out.push_str(&self.callee_name(*call, *func));
-                out.push('(');
-                self.write_csv(out, self.call_args(*func, args));
-            }
-            TailForwardCall::Value { callee, args } => {
-                self.write_opnd(out, *callee);
-                out.push('(');
-                self.write_csv(out, args);
-            }
-        }
-        out.push(')');
     }
 
     /// The `for <slot> = <slot>, hi[-1] do` line of a counted loop, with the

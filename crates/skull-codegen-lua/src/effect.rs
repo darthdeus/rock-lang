@@ -266,26 +266,9 @@ impl Emitter<'_> {
                     out.push(')');
                 });
             }
-            // Scalar-ABI multi-return: `d0, d1, ... = callee(args)`.
-            Inst::CallMulti { dests, func, args } => {
-                self.write_cells_assignment(out, dests, |out| {
-                    write!(out, "{}(", self.callee_name(id, *func)).unwrap();
-                    self.write_csv(out, self.call_args(*func, args));
-                    out.push(')');
-                });
-            }
-            // Multi-assign keeps all results returned through a function value.
-            Inst::CallValueMulti {
-                dests,
-                callee,
-                args,
-            } => {
-                self.write_cells_assignment(out, dests, |out| {
-                    self.write_opnd(out, *callee);
-                    out.push('(');
-                    self.write_csv(out, args);
-                    out.push(')');
-                });
+            // Multi-assign keeps every scalar-ABI or tuple result.
+            Inst::CallMulti { dests, .. } | Inst::CallValueMulti { dests, .. } => {
+                self.write_cells_assignment(out, dests, |out| self.write_call(out, id));
             }
             // Rewritten to `s.__inner = ..` by the coroutine transform.
             Inst::CoroSetInner(_) => {

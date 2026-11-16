@@ -78,13 +78,12 @@ pub(crate) fn check_frame_limits(
     for forward in call_arg_forwards.iter() {
         // `f(prefix.., g(..))`: only the prefix are fixed arguments of `f`, and
         // `g`'s own results never land in locals.
-        fixed_arity_override[raw(forward.consumer) as usize] = Some(forward.prefix.len());
-        let producer = match &forward.producer {
-            TailForwardCall::Direct { call, .. } => Some(*call),
-            TailForwardCall::Value { .. } => None,
-        };
-        if let Some(call) = producer {
-            results_unassigned[raw(call) as usize] = true;
+        fixed_arity_override[raw(forward.consumer) as usize] = Some(forward.prefix_len);
+        if matches!(
+            func.insts[forward.producer],
+            Inst::Call { .. } | Inst::CallMulti { .. }
+        ) {
+            results_unassigned[raw(forward.producer) as usize] = true;
         }
     }
     let shape = frame_limits::EmittedShape {

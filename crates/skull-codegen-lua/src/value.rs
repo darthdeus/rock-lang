@@ -185,19 +185,7 @@ impl Emitter<'_> {
                 out.push_str("))");
             }
 
-            Inst::Call { func, args } => {
-                let callee = self.callee_name(id, *func);
-                out.push_str(&callee);
-                out.push('(');
-                self.write_csv(out, self.call_args(*func, args));
-                out.push(')');
-            }
-            Inst::CallValue { callee, args } => {
-                self.write_opnd(out, *callee);
-                out.push('(');
-                self.write_csv(out, args);
-                out.push(')');
-            }
+            Inst::Call { .. } | Inst::CallValue { .. } => self.write_call(out, id),
             Inst::Lambda { .. } => self.reject_pass_residue("a closure", "closure conversion"),
 
             Inst::MakeTuple(vs) => {

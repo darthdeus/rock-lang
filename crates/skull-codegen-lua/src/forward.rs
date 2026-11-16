@@ -43,31 +43,17 @@ pub(crate) fn referenced_cells_in_region(
 }
 
 #[derive(Clone)]
-pub(crate) enum TailForwardCall {
-    Direct {
-        call: Idx<Inst>,
-        func: FuncRef,
-        args: Vec<Idx<Inst>>,
-    },
-    Value {
-        callee: Idx<Inst>,
-        args: Vec<Idx<Inst>>,
-    },
-}
-
-#[derive(Clone)]
 pub(crate) struct TailForward {
     pub(crate) first_suppressed: usize,
     pub(crate) suppressed: Vec<Idx<Inst>>,
-    pub(crate) call: TailForwardCall,
+    pub(crate) call: Idx<Inst>,
 }
 
 #[derive(Clone)]
 pub(crate) struct CallArgForward {
-    pub(crate) producer: TailForwardCall,
-    pub(crate) prefix: Vec<Idx<Inst>>,
+    pub(crate) producer: Idx<Inst>,
+    pub(crate) prefix_len: usize,
     pub(crate) consumer: Idx<Inst>,
-    pub(crate) func: FuncRef,
 }
 
 /// The call-argument forwards of a body, sorted by consumer. Few calls
@@ -95,22 +81,6 @@ fn multi_dests(inst: &Inst) -> Option<&[Idx<Cell>]> {
     match inst {
         Inst::CallMulti { dests, .. } | Inst::CallValueMulti { dests, .. } => Some(dests),
         _ => None,
-    }
-}
-
-/// The multi-return call `id` as the call a forward re-emits.
-fn multi_call(func: &MirFunc, id: Idx<Inst>) -> TailForwardCall {
-    match &func.insts[id] {
-        Inst::CallMulti { func, args, .. } => TailForwardCall::Direct {
-            call: id,
-            func: *func,
-            args: args.clone(),
-        },
-        Inst::CallValueMulti { callee, args, .. } => TailForwardCall::Value {
-            callee: *callee,
-            args: args.clone(),
-        },
-        other => unreachable!("{other:?} is not a multi-return call"),
     }
 }
 
@@ -175,8 +145,7 @@ pub(crate) fn tail_forwards(
         if direct
             && let Some(&call_id) = block.insts.last()
             && let Inst::Call {
-                func: callee_ref,
-                args,
+                func: callee_ref, ..
             } = &func.insts[call_id]
         {
             let callee = func_of(ws, *callee_ref);
@@ -197,11 +166,7 @@ pub(crate) fn tail_forwards(
                 forwards[raw(block_id) as usize] = Some(TailForward {
                     first_suppressed: block.insts.len() - 1,
                     suppressed: vec![call_id],
-                    call: TailForwardCall::Direct {
-                        call: call_id,
-                        func: *callee_ref,
-                        args: args.clone(),
-                    },
+                    call: call_id,
                 });
                 continue;
             }
@@ -233,7 +198,7 @@ pub(crate) fn tail_forwards(
         forwards[raw(block_id) as usize] = Some(TailForward {
             first_suppressed: first,
             suppressed: block.insts[first..].to_vec(),
-            call: multi_call(func, call_id),
+            call: call_id,
         });
     }
     forwards
@@ -294,10 +259,9 @@ pub(crate) fn call_arg_forwards(ws: &Workspace, func: &MirFunc) -> (CallArgForwa
                 suppressed[raw(load) as usize] = true;
             }
             forwards.push(CallArgForward {
-                producer: multi_call(func, producer_id),
-                prefix: consumer_args[..prefix_len].to_vec(),
+                producer: producer_id,
+                prefix_len,
                 consumer,
-                func: *consumer_func,
             });
         }
     }
