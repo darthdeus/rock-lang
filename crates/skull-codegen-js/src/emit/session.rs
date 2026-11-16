@@ -40,17 +40,12 @@ pub(super) struct JsSession {
     pub(super) graph: InstanceGraph,
     pub(super) view: ArtifactView,
     pub(super) concrete: skull_graph::concrete_body::ConcreteBodies,
-    pub(super) last_update: Option<JsGraphUpdate>,
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct JsGraphUpdate {
-    pub before: usize,
-    pub after: usize,
-    pub added: usize,
-    pub removed: usize,
-    pub added_instances: BTreeSet<Instance>,
-    pub removed_instances: BTreeSet<Instance>,
+/// The instances one session update added to and removed from the graph.
+pub(super) struct JsGraphUpdate {
+    pub(super) added: BTreeSet<Instance>,
+    pub(super) removed: BTreeSet<Instance>,
 }
 
 fn js_root_plan(
@@ -175,7 +170,6 @@ pub(super) fn new_js_session(
         graph,
         view,
         concrete,
-        last_update: None,
     }
 }
 
@@ -185,8 +179,7 @@ pub(super) fn update_js_session(
     roots: &[FuncRef],
     changed: &[(bone_core::prelude::ModuleId, bone_core::hir::BodyOwner)],
     edits: &[skull_graph::instance_graph::TextEditDelta],
-) {
-    let before = session.graph.instances.len();
+) -> JsGraphUpdate {
     let previous_roots = session.roots.clone();
     let root_added: Vec<FuncRef> = roots
         .iter()
@@ -227,14 +220,10 @@ pub(super) fn update_js_session(
         &root_removed,
     );
     session.roots = roots.to_vec();
-    session.last_update = Some(JsGraphUpdate {
-        before,
-        after: session.graph.instances.len(),
-        added: update.added.len(),
-        removed: update.removed.len(),
-        added_instances: update.added,
-        removed_instances: update.removed,
-    });
+    JsGraphUpdate {
+        added: update.added,
+        removed: update.removed,
+    }
 }
 
 pub fn emit_program(

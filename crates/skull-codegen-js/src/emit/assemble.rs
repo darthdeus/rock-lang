@@ -509,16 +509,8 @@ impl JsEmitCache {
         self.scx.interner_handle()
     }
 
-    pub fn graph_population(&self) -> usize {
-        self.session.graph.instances.len()
-    }
-
     pub fn graph(&self) -> &InstanceGraph {
         &self.session.graph
-    }
-
-    pub fn graph_update(&self) -> Option<JsGraphUpdate> {
-        self.session.last_update.clone()
     }
 
     pub fn global_layout(&self) -> &str {

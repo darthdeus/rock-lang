@@ -91,7 +91,7 @@ pub fn emit_overlay_with_span_edits(
     if current_roots != session_roots {
         return Ok(JsReload::FullRequired);
     }
-    update_js_session(ws, &mut cache.session, &root_plan.refs, reinferred, edits);
+    let update = update_js_session(ws, &mut cache.session, &root_plan.refs, reinferred, edits);
     let current = assemble_program_core(ws, &cache.scx, &root_plan.named, &cache.session)?;
     if current.global_layout != cache.build.global_layout {
         return Ok(JsReload::FullRequired);
@@ -103,11 +103,6 @@ pub fn emit_overlay_with_span_edits(
     {
         return Ok(JsReload::FullRequired);
     }
-    let update = cache
-        .session
-        .last_update
-        .as_ref()
-        .expect("JS session update must publish its graph delta");
     if current.stable != cache.build.stable {
         return Ok(JsReload::FullRequired);
     }
@@ -123,7 +118,7 @@ pub fn emit_overlay_with_span_edits(
         .filter(|instance| !cache.build.spec_chunks.contains_key(*instance))
         .cloned()
         .collect();
-    if !newly_reached_specs.is_subset(&update.added_instances) {
+    if !newly_reached_specs.is_subset(&update.added) {
         return Err(CompilerError::new_no_location(
             "JS graph delta omitted a newly retained specialization".to_string(),
         ));
@@ -135,7 +130,7 @@ pub fn emit_overlay_with_span_edits(
         .filter(|instance| !current.spec_chunks.contains_key(*instance))
         .cloned()
         .collect();
-    if !stranded_specs.is_subset(&update.removed_instances) {
+    if !stranded_specs.is_subset(&update.removed) {
         return Err(CompilerError::new_no_location(
             "JS graph delta omitted a removed specialization".to_string(),
         ));
@@ -145,7 +140,7 @@ pub fn emit_overlay_with_span_edits(
         .spec_chunks
         .iter()
         .filter_map(|(inst, chunk)| {
-            if update.added_instances.contains(inst) {
+            if update.added.contains(inst) {
                 return Some(chunk);
             }
             cache
@@ -159,7 +154,7 @@ pub fn emit_overlay_with_span_edits(
         .build
         .spec_chunks
         .iter()
-        .filter_map(|(inst, chunk)| update.removed_instances.contains(inst).then_some(chunk))
+        .filter_map(|(inst, chunk)| update.removed.contains(inst).then_some(chunk))
         .collect();
     changed_specs.sort_by(|left, right| left.name.cmp(&right.name));
     removed_specs.sort_by(|left, right| left.name.cmp(&right.name));
