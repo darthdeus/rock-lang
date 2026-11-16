@@ -90,38 +90,9 @@ pub fn ensure_workspace_root() -> Result<()> {
     ))
 }
 
-/// Find project directory by looking for stick.toml or other project markers
-/// This walks up the directory tree from the given path until it finds a project root
+/// The nearest directory at or above `path` holding a `stick.toml`.
 pub fn find_project_root(path: &Path) -> Option<PathBuf> {
-    // Convert to absolute path first to handle relative paths correctly
-    let initial_path = fs_err::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-
-    // Start from the directory containing the path (or the path itself if it's a directory)
-    let mut current_path = if initial_path.is_file() || initial_path.extension().is_some() {
-        // If it's a file or has an extension, start from parent
-        initial_path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| initial_path.clone())
-    } else {
-        initial_path
-    };
-
-    // Project markers in order of preference
-    // Only look for stick.toml - don't treat Cargo.toml or .git as Rock project roots
-    let markers = ["stick.toml"];
-
-    loop {
-        // Check for each marker in order
-        for marker in &markers {
-            let marker_path = current_path.join(marker);
-            if marker_path.exists() {
-                return Some(current_path);
-            }
-        }
-
-        current_path = current_path.parent()?.to_path_buf();
-    }
+    find_ancestor(path, |dir| dir.join("stick.toml").exists())
 }
 
 /// Returns true when the rock_dir looks like an extracted release zip
@@ -420,59 +391,25 @@ mod tests {
     }
 
     #[test]
-    fn test_find_project_root_with_stick_toml() {
+    fn find_project_root_walks_up_to_the_nearest_stick_toml() {
         let temp = TempDir::new().unwrap();
-        // Canonicalize the temp path to resolve symlinks (e.g., /var -> /private/var on macOS)
-        let project_dir = temp.path().canonicalize().unwrap();
+        // macOS temp dirs sit behind a /var symlink.
+        let root = temp.path().canonicalize().unwrap();
+        let loose = root.join("loose.rock");
+        fs::write(&loose, "fn main() {}").unwrap();
+        // .git is not a project marker; only stick.toml is.
+        fs::create_dir(root.join(".git")).unwrap();
+        assert_eq!(find_project_root(&loose), None);
 
-        // Create stick.toml
-        fs::write(project_dir.join("stick.toml"), "[package]\nname = \"test\"").unwrap();
-
-        // Create a subdirectory with a file
-        let sub_dir = project_dir.join("src");
-        fs::create_dir(&sub_dir).unwrap();
-        let file_path = sub_dir.join("main.rock");
-        fs::write(&file_path, "fn main() {}").unwrap();
-
-        // Should find project root from file in subdirectory
-        assert_eq!(
-            find_project_root(&file_path),
-            Some(project_dir.to_path_buf())
-        );
-
-        // Should find project root from subdirectory
-        assert_eq!(find_project_root(&sub_dir), Some(project_dir.to_path_buf()));
-
-        // Should find project root from project directory itself
-        assert_eq!(
-            find_project_root(&project_dir),
-            Some(project_dir.to_path_buf())
-        );
-    }
-
-    #[test]
-    fn test_find_project_root_with_git() {
-        let temp = TempDir::new().unwrap();
-        let project_dir = temp.path().canonicalize().unwrap();
-
-        // Create .git directory (but no stick.toml)
-        fs::create_dir(project_dir.join(".git")).unwrap();
-
-        let file_path = project_dir.join("main.rock");
-        fs::write(&file_path, "fn main() {}").unwrap();
-
-        // .git alone is NOT a project marker (only stick.toml is), so should return None
-        assert_eq!(find_project_root(&file_path), None);
-    }
-
-    #[test]
-    fn test_find_project_root_none() {
-        let temp = TempDir::new().unwrap();
-        let file_path = temp.path().join("main.rock");
-        fs::write(&file_path, "fn main() {}").unwrap();
-
-        // No project markers, should return None
-        assert_eq!(find_project_root(&file_path), None);
+        let project = root.join("my.game");
+        let src = project.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(project.join("stick.toml"), "[package]\nname = \"test\"").unwrap();
+        let main = src.join("main.rock");
+        fs::write(&main, "fn main() {}").unwrap();
+        for start in [&main, &src, &project, &src.join("unsaved.rock")] {
+            assert_eq!(find_project_root(start), Some(project.clone()), "{start:?}");
+        }
     }
 
     #[test]
