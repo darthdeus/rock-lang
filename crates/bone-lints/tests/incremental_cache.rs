@@ -83,6 +83,48 @@ fn function_owner_in(ws: &Workspace, file: &str, name: &str) -> (ModuleId, BodyO
     (module.id, BodyOwner::Function(fid))
 }
 
+fn action_selection() -> LintOptions {
+    LintOptions::only([bone_lints::ACTION_CALLERS.to_owned()])
+        .with_action_policy(Some(&support::POLICY))
+}
+
+fn sibling_selection() -> LintOptions {
+    LintOptions::only([bone_lints::BACKEND_SIBLING_MISMATCH.to_owned()])
+}
+
+fn seeded_cache(parts: &[(&str, &str)], selection: &LintOptions) -> IncrementalLintCache {
+    let mut cache = IncrementalLintCache::default();
+    run_update(
+        &mut cache,
+        &workspace_many(parts),
+        &sources_many(parts),
+        selection,
+        &LintCacheUpdate::full(),
+    );
+    cache
+}
+
+/// Move `cache` to `parts` as a body edit of `changed`, re-inferring
+/// `function` in the first changed file, and check it against a fresh lint.
+fn body_edit(
+    cache: &mut IncrementalLintCache,
+    parts: &[(&str, &str)],
+    selection: &LintOptions,
+    changed: &[&str],
+    function: Option<&str>,
+) -> (Vec<Finding>, LintCacheStats) {
+    let ws = workspace_many(parts);
+    let sources = sources_many(parts);
+    let reinferred = function.map(|name| function_owner_in(&ws, changed[0], name));
+    let change = LintCacheUpdate::body_only(changed.iter().map(|f| Ustr::from(f)), reinferred, []);
+    let (cached, stats) = run_update(cache, &ws, &sources, selection, &change);
+    assert_eq!(
+        shapes(&cached),
+        shapes(&lint_fresh(&ws, &sources, selection))
+    );
+    (cached, stats)
+}
+
 #[test]
 fn local_body_findings_can_be_added_and_removed() {
     let old = "fn main() { let used = 1\n print(used) }\n";
@@ -468,34 +510,15 @@ fn action_caller_addition_is_incremental_when_opted_in() {
     let old =
         "global ACT_USED: int = 1\nfn gameplay() { let value = 0 }\nfn main() { gameplay() }\n";
     let new = "global ACT_USED: int = 1\nfn gameplay() { let value = ACT_USED }\nfn main() { gameplay() }\n";
-    let old_ws = workspace_many(&[(ACTION_FILE, old)]);
-    let new_ws = workspace_many(&[(ACTION_FILE, new)]);
-    let file = Ustr::from(ACTION_FILE);
-    let (gameplay_mid, gameplay_owner) = function_owner_in(&new_ws, ACTION_FILE, "gameplay");
-    let selection = LintOptions::only([bone_lints::ACTION_CALLERS.to_owned()])
-        .with_action_policy(Some(&support::POLICY));
-    let mut old_sources = FxHashMap::default();
-    old_sources.insert(file, old);
-    let mut new_sources = FxHashMap::default();
-    new_sources.insert(file, new);
-    let mut cache = IncrementalLintCache::default();
-    run_update(
+    let selection = action_selection();
+    let mut cache = seeded_cache(&[(ACTION_FILE, old)], &selection);
+    let (cached, stats) = body_edit(
         &mut cache,
-        &old_ws,
-        &old_sources,
+        &[(ACTION_FILE, new)],
         &selection,
-        &LintCacheUpdate::full(),
+        &[ACTION_FILE],
+        Some("gameplay"),
     );
-
-    let (cached, stats) = run_update(
-        &mut cache,
-        &new_ws,
-        &new_sources,
-        &selection,
-        &LintCacheUpdate::body_only([file], [(gameplay_mid, gameplay_owner)], []),
-    );
-    let fresh = lint_fresh(&new_ws, &new_sources, &selection);
-    assert_eq!(shapes(&cached), shapes(&fresh));
     assert!(cached.is_empty());
     assert_eq!(stats.full_rebuilds, 0);
     assert_eq!(stats.global_passes, 0);
@@ -506,34 +529,15 @@ fn action_caller_removal_is_incremental_when_opted_in() {
     let old = "global ACT_USED: int = 1\nfn gameplay() { let value = ACT_USED }\nfn main() { gameplay() }\n";
     let new =
         "global ACT_USED: int = 1\nfn gameplay() { let value = 0 }\nfn main() { gameplay() }\n";
-    let old_ws = workspace_many(&[(ACTION_FILE, old)]);
-    let new_ws = workspace_many(&[(ACTION_FILE, new)]);
-    let file = Ustr::from(ACTION_FILE);
-    let (gameplay_mid, gameplay_owner) = function_owner_in(&new_ws, ACTION_FILE, "gameplay");
-    let selection = LintOptions::only([bone_lints::ACTION_CALLERS.to_owned()])
-        .with_action_policy(Some(&support::POLICY));
-    let mut old_sources = FxHashMap::default();
-    old_sources.insert(file, old);
-    let mut new_sources = FxHashMap::default();
-    new_sources.insert(file, new);
-    let mut cache = IncrementalLintCache::default();
-    run_update(
+    let selection = action_selection();
+    let mut cache = seeded_cache(&[(ACTION_FILE, old)], &selection);
+    let (cached, stats) = body_edit(
         &mut cache,
-        &old_ws,
-        &old_sources,
+        &[(ACTION_FILE, new)],
         &selection,
-        &LintCacheUpdate::full(),
+        &[ACTION_FILE],
+        Some("gameplay"),
     );
-
-    let (cached, stats) = run_update(
-        &mut cache,
-        &new_ws,
-        &new_sources,
-        &selection,
-        &LintCacheUpdate::body_only([file], [(gameplay_mid, gameplay_owner)], []),
-    );
-    let fresh = lint_fresh(&new_ws, &new_sources, &selection);
-    assert_eq!(shapes(&cached), shapes(&fresh));
     assert_eq!(cached.len(), 1);
     assert!(cached[0].error.message.contains("ACT_USED"));
     assert_eq!(stats.full_rebuilds, 0);
@@ -547,29 +551,15 @@ fn backend_sibling_signature_change_revisits_only_its_group() {
         "inline(js) fn probe(x: int)",
         "inline(js) fn probe(x: float)",
     );
-    let old_ws = workspace(old);
-    let new_ws = workspace(&new);
-    let selection = LintOptions::only([bone_lints::BACKEND_SIBLING_MISMATCH.to_owned()]);
-    let file = Ustr::from(FILE);
-    let (main_mid, main_owner) = function_owner(&new_ws, "main");
-    let mut cache = IncrementalLintCache::default();
-    run_update(
+    let selection = sibling_selection();
+    let mut cache = seeded_cache(&[(FILE, old)], &selection);
+    let (cached, stats) = body_edit(
         &mut cache,
-        &old_ws,
-        &sources(old),
+        &[(FILE, &new)],
         &selection,
-        &LintCacheUpdate::full(),
+        &[FILE],
+        Some("main"),
     );
-
-    let (cached, stats) = run_update(
-        &mut cache,
-        &new_ws,
-        &sources(&new),
-        &selection,
-        &LintCacheUpdate::body_only([file], [(main_mid, main_owner)], []),
-    );
-    let fresh = lint_fresh(&new_ws, &sources(&new), &selection);
-    assert_eq!(shapes(&cached), shapes(&fresh));
     assert!(
         cached
             .iter()
@@ -583,31 +573,18 @@ fn backend_sibling_signature_change_revisits_only_its_group() {
 
 #[test]
 fn backend_sibling_addition_and_removal_update_the_group() {
-    let lua = "inline(lua) fn probe(x: int) -> int = \"return x\"\nfn main() {}\n";
-    let both = "inline(lua) fn probe(x: int) -> int = \"return x\"\ninline(js) fn probe(x: float) -> int = \"return x;\"\nfn main() {}\n";
-    let lua_ws = workspace(lua);
-    let both_ws = workspace(both);
-    let selection = LintOptions::only([bone_lints::BACKEND_SIBLING_MISMATCH.to_owned()]);
-    let file = Ustr::from(FILE);
-    let (main_mid, main_owner) = function_owner(&both_ws, "main");
-    let mut cache = IncrementalLintCache::default();
-    run_update(
-        &mut cache,
-        &lua_ws,
-        &sources(lua),
-        &selection,
-        &LintCacheUpdate::full(),
-    );
+    let lua = [(
+        FILE,
+        "inline(lua) fn probe(x: int) -> int = \"return x\"\nfn main() {}\n",
+    )];
+    let both = [(
+        FILE,
+        "inline(lua) fn probe(x: int) -> int = \"return x\"\ninline(js) fn probe(x: float) -> int = \"return x;\"\nfn main() {}\n",
+    )];
+    let selection = sibling_selection();
+    let mut cache = seeded_cache(&lua, &selection);
 
-    let (added, added_stats) = run_update(
-        &mut cache,
-        &both_ws,
-        &sources(both),
-        &selection,
-        &LintCacheUpdate::body_only([file], [(main_mid, main_owner)], []),
-    );
-    let added_fresh = lint_fresh(&both_ws, &sources(both), &selection);
-    assert_eq!(shapes(&added), shapes(&added_fresh));
+    let (added, added_stats) = body_edit(&mut cache, &both, &selection, &[FILE], Some("main"));
     assert!(!added.is_empty());
     assert!(
         added
@@ -616,15 +593,7 @@ fn backend_sibling_addition_and_removal_update_the_group() {
     );
     assert_eq!(added_stats.full_rebuilds, 0);
 
-    let (removed, removed_stats) = run_update(
-        &mut cache,
-        &lua_ws,
-        &sources(lua),
-        &selection,
-        &LintCacheUpdate::body_only([file], [], []),
-    );
-    let removed_fresh = lint_fresh(&lua_ws, &sources(lua), &selection);
-    assert_eq!(shapes(&removed), shapes(&removed_fresh));
+    let (removed, removed_stats) = body_edit(&mut cache, &lua, &selection, &[FILE], None);
     assert!(removed.is_empty());
     assert_eq!(removed_stats.full_rebuilds, 0);
 }
@@ -648,35 +617,15 @@ fn backend_sibling_file_movement_revisits_old_and_new_groups() {
         ),
         ("<sibling-b>", "fn helper() {}\n"),
     ];
-    let old_ws = workspace_many(&old_parts);
-    let new_ws = workspace_many(&new_parts);
-    let old_sources = sources_many(&old_parts);
-    let new_sources = sources_many(&new_parts);
-    let selection = LintOptions::only([bone_lints::BACKEND_SIBLING_MISMATCH.to_owned()]);
-    let main_file = Ustr::from("<sibling-a>");
-    let (main_mid, main_owner) = function_owner_in(&new_ws, "<sibling-a>", "main");
-    let mut cache = IncrementalLintCache::default();
-    run_update(
+    let selection = sibling_selection();
+    let mut cache = seeded_cache(&old_parts, &selection);
+    let (cached, stats) = body_edit(
         &mut cache,
-        &old_ws,
-        &old_sources,
+        &new_parts,
         &selection,
-        &LintCacheUpdate::full(),
+        &["<sibling-a>", "<sibling-b>"],
+        Some("main"),
     );
-
-    let (cached, stats) = run_update(
-        &mut cache,
-        &new_ws,
-        &new_sources,
-        &selection,
-        &LintCacheUpdate::body_only(
-            [Ustr::from("<sibling-a>"), Ustr::from("<sibling-b>")],
-            [(main_mid, main_owner)],
-            [],
-        ),
-    );
-    let fresh = lint_fresh(&new_ws, &new_sources, &selection);
-    assert_eq!(shapes(&cached), shapes(&fresh));
     assert!(
         cached
             .iter()
@@ -685,36 +634,26 @@ fn backend_sibling_file_movement_revisits_old_and_new_groups() {
     assert_eq!(stats.full_rebuilds, 0);
     assert_eq!(stats.global_passes, 0);
     assert!(stats.sibling_groups_revisited > 0);
-    assert!(cached.iter().all(|finding| finding.file() == main_file));
+    assert!(
+        cached
+            .iter()
+            .all(|finding| finding.file() == Ustr::from("<sibling-a>"))
+    );
 }
 
 #[test]
 fn backend_sibling_portable_replacement_revisits_the_serving_group() {
     let old = "inline(lua) fn probe(x: int) -> int = \"return x\"\ninline(js) fn probe(x: int) -> int = \"return x;\"\nfn probe(x: float) -> int { return 0 }\nfn main() {}\n";
     let new = "inline(lua) fn probe(x: int) -> int = \"return x\"\ninline(js) fn probe(x: int) -> int = \"return x;\"\ninline(lua) fn probe(x: float) -> int = \"return x\"\nfn main() {}\n";
-    let old_ws = workspace(old);
-    let new_ws = workspace(new);
-    let selection = LintOptions::only([bone_lints::BACKEND_SIBLING_MISMATCH.to_owned()]);
-    let file = Ustr::from(FILE);
-    let (main_mid, main_owner) = function_owner(&new_ws, "main");
-    let mut cache = IncrementalLintCache::default();
-    run_update(
+    let selection = sibling_selection();
+    let mut cache = seeded_cache(&[(FILE, old)], &selection);
+    let (cached, stats) = body_edit(
         &mut cache,
-        &old_ws,
-        &sources(old),
+        &[(FILE, new)],
         &selection,
-        &LintCacheUpdate::full(),
+        &[FILE],
+        Some("main"),
     );
-
-    let (cached, stats) = run_update(
-        &mut cache,
-        &new_ws,
-        &sources(new),
-        &selection,
-        &LintCacheUpdate::body_only([file], [(main_mid, main_owner)], []),
-    );
-    let fresh = lint_fresh(&new_ws, &sources(new), &selection);
-    assert_eq!(shapes(&cached), shapes(&fresh));
     assert!(!cached.is_empty());
     assert_eq!(stats.full_rebuilds, 0);
     assert_eq!(stats.global_passes, 0);
@@ -725,30 +664,15 @@ fn backend_sibling_portable_replacement_revisits_the_serving_group() {
 fn action_declaration_addition_updates_the_empty_population() {
     let old = "fn main() {}\n";
     let new = "global ACT_NEW: int = 1\nfn main() { let value = ACT_NEW }\n";
-    let old_ws = workspace_many(&[(ACTION_FILE, old)]);
-    let new_ws = workspace_many(&[(ACTION_FILE, new)]);
-    let selection = LintOptions::only([bone_lints::ACTION_CALLERS.to_owned()])
-        .with_action_policy(Some(&support::POLICY));
-    let file = Ustr::from(ACTION_FILE);
-    let (main_mid, main_owner) = function_owner_in(&new_ws, ACTION_FILE, "main");
-    let mut cache = IncrementalLintCache::default();
-    run_update(
+    let selection = action_selection();
+    let mut cache = seeded_cache(&[(ACTION_FILE, old)], &selection);
+    let (cached, stats) = body_edit(
         &mut cache,
-        &old_ws,
-        &sources_many(&[(ACTION_FILE, old)]),
+        &[(ACTION_FILE, new)],
         &selection,
-        &LintCacheUpdate::full(),
+        &[ACTION_FILE],
+        Some("main"),
     );
-
-    let (cached, stats) = run_update(
-        &mut cache,
-        &new_ws,
-        &sources_many(&[(ACTION_FILE, new)]),
-        &selection,
-        &LintCacheUpdate::body_only([file], [(main_mid, main_owner)], []),
-    );
-    let fresh = lint_fresh(&new_ws, &sources_many(&[(ACTION_FILE, new)]), &selection);
-    assert_eq!(shapes(&cached), shapes(&fresh));
     assert!(cached.is_empty());
     assert_eq!(stats.full_rebuilds, 0);
     assert_eq!(stats.global_passes, 0);
@@ -758,30 +682,15 @@ fn action_declaration_addition_updates_the_empty_population() {
 fn action_declaration_removal_restores_the_empty_population() {
     let old = "global ACT_OLD: int = 1\nfn main() { let value = ACT_OLD }\n";
     let new = "fn main() { let value = 0 }\n";
-    let old_ws = workspace_many(&[(ACTION_FILE, old)]);
-    let new_ws = workspace_many(&[(ACTION_FILE, new)]);
-    let selection = LintOptions::only([bone_lints::ACTION_CALLERS.to_owned()])
-        .with_action_policy(Some(&support::POLICY));
-    let file = Ustr::from(ACTION_FILE);
-    let (main_mid, main_owner) = function_owner_in(&new_ws, ACTION_FILE, "main");
-    let mut cache = IncrementalLintCache::default();
-    run_update(
+    let selection = action_selection();
+    let mut cache = seeded_cache(&[(ACTION_FILE, old)], &selection);
+    let (cached, stats) = body_edit(
         &mut cache,
-        &old_ws,
-        &sources_many(&[(ACTION_FILE, old)]),
+        &[(ACTION_FILE, new)],
         &selection,
-        &LintCacheUpdate::full(),
+        &[ACTION_FILE],
+        Some("main"),
     );
-
-    let (cached, stats) = run_update(
-        &mut cache,
-        &new_ws,
-        &sources_many(&[(ACTION_FILE, new)]),
-        &selection,
-        &LintCacheUpdate::body_only([file], [(main_mid, main_owner)], []),
-    );
-    let fresh = lint_fresh(&new_ws, &sources_many(&[(ACTION_FILE, new)]), &selection);
-    assert_eq!(shapes(&cached), shapes(&fresh));
     assert_eq!(cached.len(), 1);
     assert!(cached[0].error.message.contains("no production App ACT_*"));
     assert_eq!(stats.full_rebuilds, 0);
@@ -801,30 +710,15 @@ fn action_population_elected_in_an_unchanged_file_is_published() {
         ("app/other.rock", "fn helper() {}\n"),
         (ACTION_FILE, "fn main() { let value = 0 }\n"),
     ];
-    let old_ws = workspace_many(&old_parts);
-    let new_ws = workspace_many(&new_parts);
-    let selection = LintOptions::only([bone_lints::ACTION_CALLERS.to_owned()])
-        .with_action_policy(Some(&support::POLICY));
-    let changed_file = Ustr::from(ACTION_FILE);
-    let (main_mid, main_owner) = function_owner_in(&new_ws, ACTION_FILE, "main");
-    let mut cache = IncrementalLintCache::default();
-    run_update(
+    let selection = action_selection();
+    let mut cache = seeded_cache(&old_parts, &selection);
+    let (cached, stats) = body_edit(
         &mut cache,
-        &old_ws,
-        &sources_many(&old_parts),
+        &new_parts,
         &selection,
-        &LintCacheUpdate::full(),
+        &[ACTION_FILE],
+        Some("main"),
     );
-
-    let (cached, stats) = run_update(
-        &mut cache,
-        &new_ws,
-        &sources_many(&new_parts),
-        &selection,
-        &LintCacheUpdate::body_only([changed_file], [(main_mid, main_owner)], []),
-    );
-    let fresh = lint_fresh(&new_ws, &sources_many(&new_parts), &selection);
-    assert_eq!(shapes(&cached), shapes(&fresh));
     assert_eq!(cached.len(), 1);
     assert_eq!(cached[0].file(), Ustr::from("app/other.rock"));
     assert_eq!(stats.full_rebuilds, 0);
