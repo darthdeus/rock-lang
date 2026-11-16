@@ -31,6 +31,22 @@ fn column_sort_key_takes_value_leaves_without_boxing() {
 }
 
 #[test]
+fn wide_sort_does_not_allocate_row_indices() {
+    let lua = emit_module(
+        "value V2 { x: float, y: float }
+         fn main() {
+             let xs = [V2 { x: 2.0, y: 1.0 }, V2 { x: 1.0, y: 2.0 }]
+             xs.sort(p => p)
+             print(xs[0].x)
+         }",
+    );
+    assert!(
+        !lua.contains("= __sort_rows_int_fn_int_int_ret_bool("),
+        "wide sort must not allocate row indices"
+    );
+}
+
+#[test]
 fn rejected_sort_key_labels_the_user_call() {
     for key in ["(x > 1, x)", "(x as int?, x)"] {
         let src = format!("fn main() {{ let xs = [1, 2]\n xs.sort(x => {key}) }}");

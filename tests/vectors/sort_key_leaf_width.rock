@@ -212,3 +212,36 @@ fn nullable_vector_sorts_value_leaves() {
         print(join(parts, " "))
     }
 }
+
+@test
+fn wide_sort_preserves_every_row_across_heap_boundaries() {
+    for n in [0, 1, 2, 3, 31, 64, 257] {
+        for pattern in 0..5 {
+            let xs: [V2] = []
+            let seen: [bool] = []
+            for i in 0..n {
+                let rank = match pattern {
+                    0 => i,
+                    1 => n - i,
+                    2 => (i * 73) % 31,
+                    3 => min(i, n - 1 - i),
+                    _ => 1,
+                }
+                xs.push(V2 { x: float(rank), y: float(i) })
+                seen.push(false)
+            }
+            xs.sort(p => p)
+            assert_eq(xs.len, n)
+            for i in 0..n {
+                let row = xs[i]
+                let id = int(row.y)
+                assert(!seen[id], "sort must preserve each row once")
+                seen[id] = true
+                if i > 0 {
+                    let prev = xs[i - 1]
+                    assert(prev.x < row.x || (prev.x == row.x && prev.y <= row.y), "keys must be ordered")
+                }
+            }
+        }
+    }
+}

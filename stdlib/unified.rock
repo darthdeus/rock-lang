@@ -3836,12 +3836,30 @@ fn Vec<T>.sort<K>(vec, key_fn: fn(T) -> K) {
     error("__sort_key_lt must be compiler-expanded")
 """
 
-// Sorts row indices, then moves the rows, so one body serves every storage.
+// An in-place heap keeps auxiliary space constant for every element storage.
 fn __vec_sort_by_key_leaves<T, K>(vec: [T], key_fn: fn(T) -> K) {
-    let order = __sort_rows(vec.len, (i: int, j: int) => __sort_key_lt(key_fn, vec[i], vec[j]))
-    let rows = vec.clone()
-    for r in 0..vec.len {
-        vec[r] = rows[order[r]]
+    let start = int(vec.len / 2)
+    let end = vec.len
+    while end > 1 {
+        let root = 0
+        if start > 0 {
+            start -= 1
+            root = start
+        } else {
+            end -= 1
+            let row = vec[0]
+            vec[0] = vec[end]
+            vec[end] = row
+        }
+        while root * 2 + 1 < end {
+            let child = root * 2 + 1
+            if child + 1 < end && __sort_key_lt(key_fn, vec[child], vec[child + 1]) { child += 1 }
+            if !__sort_key_lt(key_fn, vec[root], vec[child]) { break }
+            let row = vec[root]
+            vec[root] = vec[child]
+            vec[child] = row
+            root = child
+        }
     }
 }
 
