@@ -102,7 +102,6 @@ pub(super) fn build_inline_candidate_table(
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct CandidateBuildStats {
-    pub(super) keys_examined: usize,
     pub(super) warmed: usize,
 }
 
@@ -121,7 +120,6 @@ pub(super) fn build_inline_candidate_table_with_census(
     // The old incremental route left this unset and filtered every key here.
     // Count the exact iterator population so a mutation that restores that
     // route is visible rather than looking like a timing-only regression.
-    census.keys_examined = usize::from(warm_keys_override.is_none()) * keys.len();
     let warm_keys: Vec<Instance> = warm_keys_override.unwrap_or_else(|| {
         keys.iter()
             .filter(|key| match base {

@@ -171,35 +171,11 @@ pub struct SkullEmitCache {
 /// global atomics. The route records only work it already performs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IncrementalRepairStats {
-    pub body_only_edits: usize,
-    pub owners_revisited: usize,
-    pub instances_revisited: usize,
-    pub graph_contributions_retracted: usize,
-    pub graph_contributions_installed: usize,
     pub full_graph_rebuilds: usize,
-    pub concrete_entries_derived: usize,
-    pub concrete_entries_reused: usize,
-    pub concrete_entries_retracted: usize,
-    pub full_concrete_rebuilds: usize,
-    pub artifact_chunks_revisited: usize,
-    pub artifact_chunks_removed: usize,
     pub full_artifact_view_realizations: usize,
-    pub broad_owner_scans: usize,
-    pub broad_candidate_scans: usize,
-    pub root_requests: usize,
-    pub root_modules_examined: usize,
     pub root_functions_examined: usize,
-    pub root_reseeds: usize,
-    pub root_instances_checked: usize,
     pub shader_delta_requests: usize,
-    pub declaration_lookup_requests: usize,
-    pub candidate_entries_requested: usize,
     pub chunks_rebuilt: usize,
-    pub chunk_rebuild_requests: usize,
-    pub artifact_iterations: usize,
-    pub artifact_iteration_requests: usize,
-    pub artifact_index_rows_examined: usize,
-    pub artifact_scalar_context_builds: usize,
     pub artifact_realize_invocations: usize,
     pub graph_update_ns: u64,
     pub concrete_update_ns: u64,
@@ -208,7 +184,6 @@ pub struct IncrementalRepairStats {
     pub affected_selection_ns: u64,
     pub relowering_ns: u64,
     pub code_artifact_assembly_reused: bool,
-    pub fingerprint_code_rows_derived: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -894,7 +869,6 @@ impl SkullEmitCache {
         let mut fingerprint_identities = FxHashSet::default();
         let shader_delta_requests = cache.repair_stats.shader_delta_requests;
         cache.repair_stats = IncrementalRepairStats {
-            body_only_edits: 1,
             shader_delta_requests,
             ..IncrementalRepairStats::default()
         };
@@ -928,7 +902,6 @@ impl SkullEmitCache {
         // rejected: 15-33 ms release against a sub-millisecond edit.
         let t_graph = Instant::now();
         let graph_builds_before = crate::instance_graph::build_invocations();
-        cache.repair_stats.root_requests = 1;
         let previous_shader_roots = cache.roots.shader_roots.clone();
         let current_shader_roots = cache.shader_registrations.roots.clone();
         let shader_roots_changed = previous_shader_roots != current_shader_roots;
@@ -975,8 +948,6 @@ impl SkullEmitCache {
                 Some(&mut census),
             );
             cache.repair_stats.root_functions_examined = census.functions_examined;
-            cache.repair_stats.root_modules_examined = census.modules_examined;
-            cache.repair_stats.root_reseeds = census.roots_reseeded;
             root_added = roots
                 .iter()
                 .filter(|root| !previous_roots.contains(root))
@@ -1003,13 +974,6 @@ impl SkullEmitCache {
         cache.repair_stats.graph_update_ns = t_graph.elapsed().as_nanos() as u64;
         cache.repair_stats.full_graph_rebuilds =
             crate::instance_graph::build_invocations().saturating_sub(graph_builds_before) as usize;
-        cache.repair_stats.owners_revisited = update.revisited_owners.len();
-        cache.repair_stats.instances_revisited = update.revisited.len();
-        cache.repair_stats.graph_contributions_retracted = update.retracted_owners.len();
-        cache.repair_stats.graph_contributions_installed = update.revisited_owners.len();
-        cache.repair_stats.broad_owner_scans = update.broad_scans;
-        cache.repair_stats.root_instances_checked = update.census.root_instances_checked;
-        let concrete_builds_before = crate::concrete_body::build_invocations();
         let t_concrete = Instant::now();
         let concrete_update = cache.concrete.update_local_with_span_edits(
             ws,
@@ -1019,12 +983,6 @@ impl SkullEmitCache {
             &update.revisited_owners,
             edits,
         );
-        cache.repair_stats.concrete_entries_derived = concrete_update.derived;
-        cache.repair_stats.concrete_entries_reused = concrete_update.reused;
-        cache.repair_stats.concrete_entries_retracted = concrete_update.retracted;
-        cache.repair_stats.full_concrete_rebuilds = crate::concrete_body::build_invocations()
-            .saturating_sub(concrete_builds_before)
-            as usize;
         cache.repair_stats.concrete_update_ns = t_concrete.elapsed().as_nanos() as u64;
 
         // Before any borrow of the cache's own fields, because it mutates several.
@@ -1036,13 +994,8 @@ impl SkullEmitCache {
         // The retained view owns the predecessor/successor indexes needed to
         // update reachability without realizing the full graph again.
         let t_artifact = Instant::now();
-        cache.repair_stats.artifact_iteration_requests = update
-            .revisited
-            .len()
-            .saturating_add(update.added.len())
-            .saturating_add(update.removed.len());
         let artifact_realize_before = crate::artifact::realize_invocations();
-        let artifact_update = cache.lua_view.update_local_with_root_delta(
+        cache.lua_view.update_local_with_root_delta(
             ws,
             &cache.graph,
             &crate::artifact::ArtifactRequest::new(
@@ -1058,11 +1011,6 @@ impl SkullEmitCache {
             &root_added,
             &root_removed,
         );
-        cache.repair_stats.artifact_chunks_revisited = artifact_update.revisited;
-        cache.repair_stats.artifact_chunks_removed = artifact_update.removed;
-        cache.repair_stats.artifact_iterations = artifact_update.iterations;
-        cache.repair_stats.artifact_index_rows_examined = artifact_update.local_index_rows_examined;
-        cache.repair_stats.artifact_scalar_context_builds = artifact_update.scalar_context_builds;
         cache.repair_stats.artifact_realize_invocations =
             crate::artifact::realize_invocations().saturating_sub(artifact_realize_before) as usize;
         cache.repair_stats.full_artifact_view_realizations =
@@ -1128,7 +1076,6 @@ impl SkullEmitCache {
                 warm_keys.extend(keys.iter().cloned());
             }
         }
-        let candidate_entries_requested = warm_keys.len();
         let warm_keys: Vec<Instance> = warm_keys.into_iter().collect();
         let t_candidate = Instant::now();
         let previous_candidate_table = cache.inline_cache.candidate_table();
@@ -1182,8 +1129,6 @@ impl SkullEmitCache {
             }
         }
         cache.inline_cache.replace_candidate_table(candidate_table);
-        cache.repair_stats.candidate_entries_requested = candidate_entries_requested;
-        cache.repair_stats.broad_candidate_scans = candidate_census.keys_examined;
         cache.repair_stats.candidate_update_ns = t_candidate.elapsed().as_nanos() as u64;
         // **A changed declaration maps to its LIVE INSTANCES through the graph**,
         // not to one declaration-shaped key. Editing a generic `co fn` with two
@@ -1213,7 +1158,6 @@ impl SkullEmitCache {
                     .map(|_| body.clone())
             }));
         }
-        cache.repair_stats.declaration_lookup_requests = changed.len();
         for c in &changed {
             let instances: Vec<Instance> = cache.graph.instances_of(*c).cloned().collect();
             affected.extend(instances);
@@ -1255,7 +1199,6 @@ impl SkullEmitCache {
         // Construction of graph additions happens after invalidation below, so a
         // newly reached body cannot reuse an inline decision made for the old body.
         cache.repair_stats.affected_selection_ns = _t_aff.elapsed().as_nanos() as u64;
-        cache.repair_stats.chunk_rebuild_requests = affected.len();
 
         // The persistent InlineCache keeps unchanged callee bodies across edits; the
         // affected entries are exactly those whose lowered body could have changed

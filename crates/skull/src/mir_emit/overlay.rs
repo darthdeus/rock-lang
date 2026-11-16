@@ -107,7 +107,6 @@ fn assemble_overlay(
         MirEmit,
         UnitComptimeReads,
         crate::artifact_fingerprint::CodeRows,
-        usize,
     ),
     CompilerError,
 > {
@@ -373,7 +372,7 @@ fn assemble_overlay(
         )
     })?;
     let t_fingerprint_rows = Instant::now();
-    let fingerprint_rows_derived = fingerprint_code_rows
+    fingerprint_code_rows
         .replace(
             ws,
             cache.scx.interner(),
@@ -469,7 +468,6 @@ fn assemble_overlay(
         },
         unit_reads,
         fingerprint_code_rows,
-        fingerprint_rows_derived,
     ))
 }
 
@@ -586,16 +584,14 @@ pub fn emit_overlay_with_span_edits(
     let t_relower = t2.elapsed();
     let t3 = Instant::now();
     let published_code_artifact = cache.code_artifact.clone();
-    let (mut emit, overlay_unit_reads, fingerprint_code_rows, fingerprint_rows_derived) =
-        assemble_overlay(
-            ws,
-            cache,
-            shader_changed,
-            initialize_code_slots,
-            fingerprint_identities,
-        )?;
+    let (mut emit, overlay_unit_reads, fingerprint_code_rows) = assemble_overlay(
+        ws,
+        cache,
+        shader_changed,
+        initialize_code_slots,
+        fingerprint_identities,
+    )?;
     cache.fingerprint_code_rows = Some(fingerprint_code_rows);
-    cache.repair_stats.fingerprint_code_rows_derived = fingerprint_rows_derived;
     cache.repair_stats.code_artifact_assembly_reused =
         std::sync::Arc::ptr_eq(&published_code_artifact, &emit.code_artifact);
     cache.code_artifact = emit.code_artifact.clone();

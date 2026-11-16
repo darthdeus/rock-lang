@@ -458,9 +458,8 @@ impl CodeRows {
         interner: &MonoInterner,
         artifact: &CodeArtifact,
         identities: impl IntoIterator<Item = &'a CodeIdentity>,
-    ) -> Result<usize, FingerprintError> {
+    ) -> Result<(), FingerprintError> {
         use std::hash::{Hash, Hasher};
-        let mut derived = 0;
         for identity in identities {
             let entry = artifact.entries.get(identity).ok_or_else(|| {
                 FingerprintError(format!(
@@ -493,9 +492,8 @@ impl CodeRows {
                 hasher.finish(),
                 0,
             ));
-            derived += 1;
         }
-        Ok(derived)
+        Ok(())
     }
 
     fn len(&self) -> usize {

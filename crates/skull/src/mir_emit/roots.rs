@@ -301,7 +301,6 @@ fn emission_roots_with_census(
     let mut roots = Vec::new();
     for module in ws.source_modules() {
         if let Some(census) = census.as_deref_mut() {
-            census.modules_examined += 1;
             census.functions_examined += module.functions.len();
         }
         for (fid, f) in module.functions.iter() {
@@ -351,9 +350,6 @@ pub(super) fn all_roots_with_census(
     // Deterministic: `dependencies` is a hash set, so its iteration order is not.
     glue.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
     roots.extend(glue.into_iter().filter(|f| seen.insert(*f)));
-    if let Some(census) = census {
-        census.roots_reseeded += roots.len();
-    }
     roots
 }
 
@@ -376,9 +372,7 @@ pub(super) fn cached_roots(
 
 #[derive(Default)]
 pub(super) struct RootEnumerationCensus {
-    pub(super) modules_examined: usize,
     pub(super) functions_examined: usize,
-    pub(super) roots_reseeded: usize,
 }
 
 pub(super) fn sim_registration_lines(
