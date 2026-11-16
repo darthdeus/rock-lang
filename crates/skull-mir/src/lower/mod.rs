@@ -3491,7 +3491,7 @@ impl<'a> Builder<'a> {
                 r.representation(),
                 self.owned_value_children(r.into_value())?,
             );
-            return self.repr_to_leaves_bundle_after_presence(&r, shape);
+            return self.repr_to_leaves_bundle_for_shape(&r, shape);
         }
         if let Some(shape) = self.result_tuple() {
             if shape.nullable {

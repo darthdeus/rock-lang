@@ -2978,7 +2978,21 @@ impl<'a> Builder<'a> {
             )));
         }
         if actual.nullable && !expected.nullable {
-            return self.repr_to_leaves_bundle_after_presence(bundle, expected);
+            // Narrowing to a non-null shape drops the presence tag, which only
+            // a Group that still carries it can prove was set.
+            if !matches!(
+                bundle.value(),
+                ValueRepr::Group {
+                    present: Some(_),
+                    ..
+                }
+            ) {
+                return Err(self.gap_here(format!(
+                    "representation {:?} lost its presence witness before narrowing",
+                    bundle.representation()
+                )));
+            }
+            return self.repr_to_leaves_shape(bundle.value(), expected);
         }
         if actual == expected {
             self.repr_to_leaves_bundle(bundle)
@@ -3015,46 +3029,6 @@ impl<'a> Builder<'a> {
                 bundle.representation()
             ))),
         }
-    }
-
-    pub(crate) fn repr_to_leaves_bundle_after_presence(
-        &mut self,
-        bundle: &ValueBundle,
-        expected: &ValueShape,
-    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        let actual = self
-            .scx
-            .rep_arena()
-            .value_shape(bundle.representation())
-            .ok_or_else(|| {
-                self.gap_here(format!(
-                    "representation {:?} has no value leaf plan while lowering `{}`",
-                    bundle.representation(),
-                    self.f.name
-                ))
-            })?;
-        if actual.name != expected.name || actual.fields != expected.fields {
-            return Err(self.gap_here(format!(
-                "representation {:?} does not match narrowed return shape",
-                bundle.representation()
-            )));
-        }
-        if !actual.nullable || expected.nullable {
-            return self.repr_to_leaves_bundle_for_shape(bundle, expected);
-        }
-        if !matches!(
-            bundle.value(),
-            ValueRepr::Group {
-                present: Some(_),
-                ..
-            }
-        ) {
-            return Err(self.gap_here(format!(
-                "representation {:?} lost its presence witness before narrowing",
-                bundle.representation()
-            )));
-        }
-        self.repr_to_leaves_shape(bundle.value(), expected)
     }
 
     pub(crate) fn opaque_boundary_leaves(
@@ -3108,15 +3082,6 @@ impl<'a> Builder<'a> {
                                 == *expected
                         {
                             return self.repr_to_leaves_shape(bundle.value(), expected);
-                        }
-                        if actual.name != expected.name || actual.fields != expected.fields {
-                            return Err(self.gap_here(format!(
-                                "representation {:?} shape does not match its leaves slot shape",
-                                bundle.representation()
-                            )));
-                        }
-                        if actual.nullable && !expected.nullable {
-                            return self.repr_to_leaves_bundle_after_presence(bundle, expected);
                         }
                         self.repr_to_leaves_bundle_for_shape(bundle, expected)
                     }
