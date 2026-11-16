@@ -17,6 +17,10 @@ libraries and `pkg-config`. Native Stone crates run through
 `python3 scripts/test_native.py`, which needs `cargo-nextest`. Rust test targets using a shared integration
 harness register their modules in the crate's `tests/main.rs`.
 
+Keep a separate Cargo target directory for each Git worktree. Sharing targets
+can reuse another checkout's dependencies and embedded source paths, making
+builds and test results stale.
+
 ## Rock tests
 
 ```sh
