@@ -666,73 +666,6 @@ impl Emitter<'_> {
         parts.push(id);
     }
 
-    /// Box an enum: `__rock_make_enum(<tag>, "<ty>", [0, p0, 1, p1, "name", v, ..])`.
-    /// `tag_expr` is a rendered JS expression (a string literal for `MakeEnum`, the
-    /// dynamic tag operand for `MakeEnumDyn`). The ctor drops nil `kv` slots so a
-    /// union-wide rebox owns exactly the active variant's keys.
-    /// Rebuild the declared nested-object shape from a flattened leaf field list
-    /// (`("pos.x", ..), ("pos.y", ..)` -> `{pos: {__ty:"NV2", x:.., y:..}}`).
-    /// The leaf form exists only between the end of `cleanup` and emit; luajit
-    /// consumes it via a generated leaf ctor, JS has to reassemble.
-    /// The struct type of `name`'s field `head`, when that field is itself a
-    /// value struct -- so a rebuilt sub-object carries the `__ty` the non-leaf
-    /// path would give it, and the inspect renderer can recurse into a
-    /// flattened group. Fails closed: a non-struct field yields `None`.
-    fn nested_field_struct_name(
-        &self,
-        name: ustr::Ustr,
-        head: &str,
-    ) -> Result<Option<ustr::Ustr>, CompilerError> {
-        let sid = self
-            .ws
-            .struct_by_name
-            .get(&name)
-            .ok_or_else(|| err(format!("leaf-form value `{name}` has no declared struct")))?;
-        let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
-        let Some(f) = sd.fields.iter().find(|f| f.name.as_str() == head) else {
-            return Err(err(format!("struct `{name}` has no field `{head}`")));
-        };
-        let plan = skull_mir::lower::struct_field_plan(
-            self.ws,
-            bone_core::hir::FnBackend::Js,
-            name,
-            f.name,
-            false,
-        )
-        .map_err(|e| err(e.message))?;
-        Ok(plan
-            .child()
-            .filter(|child| self.ws.struct_by_name.contains_key(child)))
-    }
-
-    /// Split a possibly-FLATTENED field list into exact fields and per-head
-    /// groups of dotted leaves. Shared by the leaf-form object renderer and the
-    /// inspect renderer so the two read the same shape the same way.
-    fn split_leaf_fields(
-        fields: &[(ustr::Ustr, Idx<Inst>)],
-    ) -> (
-        HashMap<ustr::Ustr, Idx<Inst>>,
-        Vec<(String, Vec<(ustr::Ustr, Idx<Inst>)>)>,
-    ) {
-        let mut exact: HashMap<ustr::Ustr, Idx<Inst>> = HashMap::new();
-        let mut groups: Vec<(String, Vec<(ustr::Ustr, Idx<Inst>)>)> = Vec::new();
-        for (f, v) in fields {
-            match f.as_str().split_once('.') {
-                None => {
-                    exact.insert(*f, *v);
-                }
-                Some((head, rest)) => {
-                    let rest = ustr::Ustr::from(rest);
-                    match groups.iter_mut().find(|(h, _)| h == head) {
-                        Some((_, sub)) => sub.push((rest, *v)),
-                        None => groups.push((head.to_string(), vec![(rest, *v)])),
-                    }
-                }
-            }
-        }
-        (exact, groups)
-    }
-
     /// A value constructor that arrives as its leaf paths (`pos.x`, `pos.y`, a
     /// presence tag at an inline child's own name). A CData value's box is a
     /// plain nested JS object -- its dotted paths are only the luajit byte
@@ -787,29 +720,14 @@ impl Emitter<'_> {
         }
         // Nested groups in first-seen order, so the emitted object matches the
         // declared field order the non-leaf path produces.
-        let mut top: Vec<(ustr::Ustr, String)> = Vec::new();
-        let mut groups: Vec<(ustr::Ustr, Vec<(ustr::Ustr, Idx<Inst>)>)> = Vec::new();
-        for (key, value) in fields {
-            match key.as_str().split_once('.') {
-                None => top.push((*key, self.render_val(*value)?)),
-                Some((head, rest)) => {
-                    let head = ustr::Ustr::from(head);
-                    let rest = ustr::Ustr::from(rest);
-                    match groups.iter_mut().find(|(h, _)| *h == head) {
-                        Some((_, sub)) => sub.push((rest, *value)),
-                        None => groups.push((head, vec![(rest, *value)])),
-                    }
-                }
-            }
-        }
+        let (top, groups) = split_leaf_paths(fields.iter().copied());
         let mut parts = vec![format!("__ty: {}", js_string_lit(name.as_ref())?)];
-        for (key, rendered) in &top {
-            parts.push(format!("{}: {rendered}", js_key(key)?));
+        for (key, value) in &top {
+            parts.push(format!("{}: {}", js_key(key)?, self.render_val(*value)?));
         }
         for (head, sub) in &groups {
-            let child = self
-                .nested_field_struct_name(name, head.as_str())?
-                .ok_or_else(|| {
+            let child =
+                nested_field_struct_name(self.ws, name, head.as_str())?.ok_or_else(|| {
                     CompilerError::new_no_location(format!(
                         "leaf-form ctor for `{name}`: field `{head}` is not a value struct"
                     ))
@@ -823,6 +741,10 @@ impl Emitter<'_> {
         Ok(format!("({{{}}})", parts.join(", ")))
     }
 
+    /// Box an enum: `__rock_make_enum(<tag>, "<ty>", [0, p0, 1, p1, "name", v, ..])`.
+    /// `tag_expr` is a rendered JS expression (a string literal for `MakeEnum`, the
+    /// dynamic tag operand for `MakeEnumDyn`). The ctor drops nil `kv` slots so a
+    /// union-wide rebox owns exactly the active variant's keys.
     fn render_make_enum(
         &self,
         tag_expr: &str,
@@ -894,19 +816,17 @@ impl Emitter<'_> {
     ) -> Result<String, CompilerError> {
         let order = skull_mir::lower::gc_free_value_struct_field_order(self.ws, name)
             .ok_or_else(|| err(format!("`{name}` is not a GC-free value struct")))?;
-        let (exact, groups) = Self::split_leaf_fields(fields);
+        let (exact, groups) = split_leaf_paths(fields.iter().copied());
         let mut expr = js_string_lit(&format!("{name} {{ "))?;
         for (i, fname) in order.iter().enumerate() {
             if i > 0 {
                 expr.push_str(&format!(" + {}", js_string_lit(", ")?));
             }
             expr.push_str(&format!(" + {}", js_string_lit(&format!("{fname}: "))?));
-            let rendered = if let Some(vid) = exact.get(fname) {
+            let rendered = if let Some((_, vid)) = exact.iter().find(|(f, _)| f == fname) {
                 self.render_value_struct_inspect(*vid, cyc, prec)?
-            } else if let Some((_, sub)) = groups.iter().find(|(h, _)| h == fname.as_str()) {
-                let sub_name = self
-                    .nested_field_struct_name(name, fname)?
-                    .ok_or_else(|| {
+            } else if let Some((_, sub)) = groups.iter().find(|(h, _)| h == fname) {
+                let sub_name = nested_field_struct_name(self.ws, name, fname)?.ok_or_else(|| {
                         err(format!(
                             "value struct `{name}` field `{fname}` arrives as leaves but is not a value struct"
                         ))

@@ -441,41 +441,59 @@ fn col_mat_object(
     paths: &[ustr::Ustr],
     prefix: &str,
 ) -> Result<String, CompilerError> {
-    let mut top: Vec<(ustr::Ustr, String)> = Vec::new();
-    let mut groups: Vec<(ustr::Ustr, Vec<ustr::Ustr>)> = Vec::new();
-    for p in paths {
-        match p.as_str().split_once('.') {
-            None => {
-                let col = js_string_lit(&format!("{prefix}{p}"))?;
-                top.push((*p, format!("v[{col}][i]")));
-            }
-            Some((head, rest)) => {
-                let (head, rest) = (ustr::Ustr::from(head), ustr::Ustr::from(rest));
-                match groups.iter_mut().find(|(h, _)| *h == head) {
-                    Some((_, sub)) => sub.push(rest),
-                    None => groups.push((head, vec![rest])),
-                }
-            }
-        }
-    }
+    let (top, groups) = split_leaf_paths(paths.iter().map(|p| (*p, ())));
     let mut parts = vec![format!("__ty: {}", js_string_lit(name.as_str())?)];
-    for (f, read) in &top {
-        parts.push(format!("{}: {read}", js_key(f)?));
+    for (f, ()) in &top {
+        let col = js_string_lit(&format!("{prefix}{f}"))?;
+        parts.push(format!("{}: v[{col}][i]", js_key(f)?));
     }
     for (head, sub) in &groups {
-        let child = nested_value_field_struct_name(ws, name, head.as_str())?.ok_or_else(|| {
-            err(format!(
-                "JS subset: column element `{name}` field `{head}` is not a value struct"
-            ))
-        })?;
-        let inner = col_mat_object(ws, child, sub, &format!("{prefix}{head}."))?;
+        let child = nested_field_struct_name(ws, name, head.as_str())?
+            .filter(|child| {
+                ws.struct_by_name
+                    .get(child)
+                    .is_some_and(|sid| ws.module(sid.module).structs[sid.def].is_value)
+            })
+            .ok_or_else(|| {
+                err(format!(
+                    "JS subset: column element `{name}` field `{head}` is not a value struct"
+                ))
+            })?;
+        let sub: Vec<ustr::Ustr> = sub.iter().map(|(p, ())| *p).collect();
+        let inner = col_mat_object(ws, child, &sub, &format!("{prefix}{head}."))?;
         parts.push(format!("{}: {inner}", js_key(head)?));
     }
     Ok(format!("({{{}}})", parts.join(", ")))
 }
 
-/// The nominal name of `parent`'s `field`, when that field is a struct.
-fn nested_value_field_struct_name(
+/// Split a possibly-FLATTENED leaf list into its undotted entries and per-head
+/// groups of dotted leaves (head stripped), both in first-seen order, so every
+/// renderer that rebuilds a nested value reads the same shape the same way.
+pub(super) fn split_leaf_paths<T>(
+    fields: impl IntoIterator<Item = (ustr::Ustr, T)>,
+) -> (
+    Vec<(ustr::Ustr, T)>,
+    Vec<(ustr::Ustr, Vec<(ustr::Ustr, T)>)>,
+) {
+    let mut top = Vec::new();
+    let mut groups: Vec<(ustr::Ustr, Vec<(ustr::Ustr, T)>)> = Vec::new();
+    for (key, value) in fields {
+        match key.as_str().split_once('.') {
+            None => top.push((key, value)),
+            Some((head, rest)) => {
+                let (head, rest) = (ustr::Ustr::from(head), ustr::Ustr::from(rest));
+                match groups.iter_mut().find(|(h, _)| *h == head) {
+                    Some((_, sub)) => sub.push((rest, value)),
+                    None => groups.push((head, vec![(rest, value)])),
+                }
+            }
+        }
+    }
+    (top, groups)
+}
+
+/// The struct `parent`'s `field` holds, when that field is a declared struct.
+pub(super) fn nested_field_struct_name(
     ws: &Workspace,
     parent: ustr::Ustr,
     field: &str,
@@ -483,10 +501,10 @@ fn nested_value_field_struct_name(
     let sid = ws
         .struct_by_name
         .get(&parent)
-        .ok_or_else(|| err(format!("column element `{parent}` has no declared struct")))?;
+        .ok_or_else(|| err(format!("value `{parent}` has no declared struct")))?;
     let s = &ws.module(sid.module).structs[sid.def];
     let Some(f) = s.fields.iter().find(|f| f.name.as_str() == field) else {
-        return Err(err(format!("struct `{parent}` has no field `{field}")));
+        return Err(err(format!("struct `{parent}` has no field `{field}`")));
     };
     let plan = skull_mir::lower::struct_field_plan(
         ws,
@@ -496,11 +514,9 @@ fn nested_value_field_struct_name(
         false,
     )
     .map_err(|e| err(e.message))?;
-    Ok(plan.child().filter(|child| {
-        ws.struct_by_name
-            .get(child)
-            .is_some_and(|sid| ws.module(sid.module).structs[sid.def].is_value)
-    }))
+    Ok(plan
+        .child()
+        .filter(|child| ws.struct_by_name.contains_key(child)))
 }
 
 /// The entry module's nullary `main`, if it defines one -- the program entry.
