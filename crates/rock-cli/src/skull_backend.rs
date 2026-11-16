@@ -570,24 +570,29 @@ for n, t in ipairs(__skull_run) do
   io.write = function(...)
     for i = 1, select('#', ...) do buf[#buf + 1] = tostring((select(i, ...))) end
   end
-  -- The stdlib's view of this test's error records; `assert_error_logs`
-  -- removes the records it verifies. A test process has no native logger
-  -- unless a test loads one, so the records the Rock sink sees are the list.
+  -- Stone's collector observes Rust and Rock records through the same sink.
+  -- Plain processes retain the portable list used by assert_error_logs.
   local errors = {}
   local previous_errors = _G.__rock_logged_errors
-  _G.__rock_logged_errors = {
-    records = function() return errors, 0 end,
-    truncate = function(count) for i = #errors, count + 1, -1 do errors[i] = nil end end,
-  }
+  local native_errors = _G.__rock_collect_logged_errors ~= nil
+  if native_errors then
+    _G.__rock_collect_logged_errors()
+  else
+    _G.__rock_logged_errors = {
+      records = function() return errors, 0 end,
+      truncate = function(count) for i = #errors, count + 1, -1 do errors[i] = nil end end,
+    }
+  end
   local sink = _G.__rock_log_sink
   _G.__rock_log_sink = function(level, category, msg, wall_clock)
     local line = category and #category > 0 and ("[" .. category .. "] " .. msg) or msg
-    if level == 0 then errors[#errors + 1] = line end
+    if level == 0 and not native_errors then errors[#errors + 1] = line end
     if sink then sink(level, category, msg, wall_clock) else print(line) end
   end
   local start = __skull_now()
   local ok, ret = pcall(t.f)
   local ms = __skull_now() - start
+  local errors, overflow = _G.__rock_logged_errors.records()
   _G.__rock_log_sink = sink
   _G.__rock_logged_errors = previous_errors
   print = rp
@@ -595,7 +600,7 @@ for n, t in ipairs(__skull_run) do
   local got = table.concat(buf, ""):gsub("%s+$", "")
   -- An exact output assertion can verify intentional logger failures. Every
   -- error must appear as a complete record, in order, not just any one error.
-  local expected_errors = t.out ~= nil and got == t.out
+  local expected_errors = overflow == 0 and t.out ~= nil and got == t.out
   local pos = 1
   for _, message in ipairs(errors) do
     local _, last = string.find("\n" .. got .. "\n", "\n" .. message .. "\n", pos, true)
@@ -605,8 +610,10 @@ for n, t in ipairs(__skull_run) do
   local result = "fail"
   if not ok then
     io.write("\n__SKULL__\tFAIL\t", t.name, ": error: ", __esc(tostring(ret)), "\n")
-  elseif #errors > 0 and not expected_errors then
-    io.write("\n__SKULL__\tFAIL\t", t.name, ": error: logged error(s): ", __esc(table.concat(errors, "\n")), "\n")
+  elseif (#errors > 0 or overflow > 0) and not expected_errors then
+    local detail = table.concat(errors, "\n")
+    if overflow > 0 then detail = detail .. "\n" .. overflow .. " additional error record(s) dropped" end
+    io.write("\n__SKULL__\tFAIL\t", t.name, ": error: logged error(s): ", __esc(detail), "\n")
   elseif t.out ~= nil and got ~= t.out then
     io.write("\n__SKULL__\tFAIL\t", t.name, ": output mismatch: expected <", __esc(t.out), "> got <", __esc(got), ">\n")
   elseif t.val then

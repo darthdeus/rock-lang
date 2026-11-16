@@ -40,9 +40,13 @@ fn snapshot_history_failed_publication_saves_document_and_preserves_ids() {
         let publication = snapshot_history_publish(state, path, level, document, checkpoint: true)
         assert(!publication.done && !file_exists(level),
             "publication returns before writing the document")
-        assert_error_logs(["[SNAPSHOT] history publication failed: {path}"], () => {
-            while !snapshot_history_publication_poll(publication, true) {}
-        })
+        while !snapshot_history_publication_poll(publication, true) {}
+        let records = logged_error_records()
+        assert_eq(records.len(), 2, "native failure and publication failure are both reported")
+        // The operating system owns the final error wording.
+        assert(records[0].starts_with("[FILE] file transaction rename failed for {path}: "), records[0])
+        assert_eq(records[1], "[SNAPSHOT] history publication failed: {path}")
+        for record in records { assert(take_logged_error(record)) }
         assert_eq(file_read(level) ?? "", document,
             "failed history publication still saves the production current document")
         assert(publication.history_failed && publication.failed && publication.failures > 0,
@@ -77,12 +81,14 @@ fn snapshot_history_clean_retries_failed_checkpoint_before_append() {
     assert(snapshot_history_save(state, path, checkpoint: true), "original history exists")
     assert(create_directory(path + ".compact.tmp"), "checkpoint failure fixture created")
     snapshot_history_clean(state, original + " ")
-    assert_error_logs([
-        "[SNAPSHOT] history publication failed: {path}",
-        "[SNAPSHOT] failed to remove incomplete checkpoint: {path}.compact.tmp",
-    ], () => {
-        assert(!snapshot_history_save(state, path, checkpoint: true), "replacement checkpoint fails")
-    })
+    assert(!snapshot_history_save(state, path, checkpoint: true), "replacement checkpoint fails")
+    let records = logged_error_records()
+    assert_eq(records.len(), 3, "native failure, publication failure and cleanup refusal are reported")
+    // The operating system owns the final error wording.
+    assert(records[0].starts_with("[FILE] file transaction write failed for {path}.compact.tmp: "), records[0])
+    assert_eq(records[1], "[SNAPSHOT] history publication failed: {path}")
+    assert_eq(records[2], "[SNAPSHOT] failed to remove incomplete checkpoint: {path}.compact.tmp")
+    for record in records { assert(take_logged_error(record)) }
     assert(remove_dir(path + ".compact.tmp"), "checkpoint can be retried")
     assert(snapshot_history_commit(state, original + "  ", "new edit"), "new edit follows replacement root")
     assert(snapshot_history_save(state, path), "publication retries the replacement checkpoint")

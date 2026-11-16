@@ -46,23 +46,7 @@ const __rock_log_sink_installed: bool = __rock_install_log_sink()
 // as "[CAT] msg"; `_G.__rock_logged_errors` is the stdlib's view of that list,
 // and `assert_error_logs` removes the records it verifies.
 inline(lua) fn collect_logged_errors() = """
-    stone.stone_log_collect_errors()
-    local len = ffi.new("size_t[1]")
-    _G.__rock_logged_errors = {
-        -- The records in emission order, then how many the cap dropped.
-        records = function()
-            local text = ffi.string(stone.stone_log_collected_errors(len), len[0])
-            local records, start = {}, 1
-            while true do
-                local stop = text:find("\0", start, true)
-                if not stop then return records, tonumber(text:sub(start)) end
-                records[#records + 1] = text:sub(start, stop - 1)
-                start = stop + 1
-            end
-        end,
-        take = function(record) return stone.stone_log_take_collected_error(record, #record) ~= 0 end,
-        truncate = function(count) stone.stone_log_truncate_collected_errors(count) end,
-    }
+    _G.__rock_collect_logged_errors()
 """
 
 inline(lua) fn logged_error_records_lua() -> any = """
