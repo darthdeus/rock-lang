@@ -5,57 +5,77 @@ type Result = std::result::Result<(), String>;
 
 fn check_rock(file_name: &str, contents: &str) -> Result {
     // Modules-v1 multi-file fixtures: sections hold embedded `//--` files.
-    if file_name.starts_with("modules_") {
-        if file_name == "modules_std.rock" {
-            return check_std_fixture(contents);
-        }
-        return check_modules_fixture(contents);
+    if file_name == "modules_std.rock" {
+        return check_std_fixture(contents);
     }
+    let modules = file_name.starts_with("modules_");
+    let check = |src: &str| {
+        if modules {
+            crate::test_support::check_types_embedded_with_stdlib(
+                &crate::test_support::parse_embedded_files(src),
+                stdlib_sources(),
+            )
+        } else {
+            crate::test_support::check_types(src)
+        }
+    };
     let sections = test_utils::parse_sections(contents);
-
     if sections.is_empty() {
-        // Bare fixture (no `//- name` markers) — whole file is one case.
-        if let Err(e) = crate::test_support::check_types(contents) {
-            panic!("{}", e);
+        // Bare fixture (no `//- name` markers): the whole file is one case.
+        if let Err(e) = check(contents) {
+            panic!("{e}");
         }
-    } else {
-        for section in sections {
-            // `@fail` expects any rejection; `@fail=<text>` also pins the reason.
-            let (name, expect_fail, want) = match section.name.split_once(" @fail") {
-                Some((n, rest)) => (n, true, rest.strip_prefix('=').map(str::trim)),
-                None => (section.name, false, None),
-            };
-            match (
-                crate::test_support::check_types(section.content),
-                expect_fail,
-            ) {
-                (Ok(_), true) => {
-                    panic!("section `{name}` was marked @fail but passed")
-                }
-                (Err(e), false) => panic!("section `{name}` failed:\n{e}"),
-                // `check_types` reports a section with no `//^` marker as an
-                // error, which an `@fail` section would otherwise absorb as its
-                // expected failure -- so a rule that stopped being enforced
-                // reads as pinned. Only a real type error counts as the fail.
-                (Err(e), true) if e == "no //^ annotations in source" => panic!(
-                    "section `{name}` is marked @fail but produced no type error \
-                     (it only failed on the missing `//^` marker) -- the rule it \
-                     claims to pin is not enforced"
-                ),
-                (Err(e), true) => {
-                    if let Some(want) = want {
-                        assert!(
-                            e.contains(want),
-                            "section `{name}` failed for the wrong reason: \
-                             expected the error to contain `{want}`, got:\n{e}"
-                        );
-                    }
-                }
-                _ => {}
-            }
-        }
+        return Ok(());
+    }
+    let failures: Vec<String> = sections
+        .iter()
+        .filter_map(|section| section_failure(section.name, check(section.content)))
+        .collect();
+    if !failures.is_empty() {
+        panic!("{}", failures.join("\n\n"));
     }
     Ok(())
+}
+
+/// Why a section's outcome breaks its contract. `@fail` expects any
+/// rejection; `@fail=<text>` also pins the reason, so a case cannot pass by
+/// failing for an unrelated reason, and a trailing ` @not=<text>` pins text
+/// the rejection must not contain.
+fn section_failure(header: &str, outcome: Result) -> Option<String> {
+    let Some((name, rest)) = header.split_once(" @fail") else {
+        return outcome
+            .err()
+            .map(|e| format!("section `{header}` failed:\n{e}"));
+    };
+    let (rest, unwanted) = match rest.split_once(" @not=") {
+        Some((rest, unwanted)) => (rest, Some(unwanted.trim())),
+        None => (rest, None),
+    };
+    let want = rest.strip_prefix('=').map(str::trim);
+    let e = match outcome {
+        Ok(()) => return Some(format!("section `{name}` was marked @fail but passed")),
+        Err(e) => e,
+    };
+    // `check_types` reports a section with no `//^` marker as an error, which
+    // would otherwise read as the expected failure of a rule no longer
+    // enforced.
+    if e == "no //^ annotations in source" {
+        return Some(format!(
+            "section `{name}` is marked @fail but produced no type error"
+        ));
+    }
+    if let Some(want) = want.filter(|want| !e.contains(want)) {
+        return Some(format!(
+            "section `{name}` failed for the wrong reason: \
+             expected the error to contain `{want}`, got:\n{e}"
+        ));
+    }
+    if let Some(unwanted) = unwanted.filter(|unwanted| e.contains(unwanted)) {
+        return Some(format!(
+            "section `{name}` failed with text it must not contain: `{unwanted}`, got:\n{e}"
+        ));
+    }
+    None
 }
 
 /// The stdlib under its loader ids (`<stdlib>/name`), in load order.
@@ -93,12 +113,13 @@ fn check_std_fixture(contents: &str) -> Result {
         "prelude inventory must be strictly sorted"
     );
 
-    let mut std_modules = Vec::new();
-    for (file, source) in stdlib_sources() {
-        let module = skull_parser::parse_module_clean(source, bone_core::prelude::ustr(file))
-            .map_err(|e| format!("{file}: {e}"))?;
-        std_modules.push(module);
-    }
+    let mut std_modules = stdlib_sources()
+        .iter()
+        .map(|(file, source)| {
+            skull_parser::parse_module_clean(source, bone_core::prelude::ustr(file))
+                .map_err(|e| format!("{file}: {e}"))
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     let std_ws = bone_semantic::semantic_passes::semantic_pass(&mut std_modules)
         .map_err(|e| format!("stdlib semantic pass failed: {e}"))?;
     let std_package = std_ws
@@ -129,117 +150,8 @@ fn check_std_fixture(contents: &str) -> Result {
         !user_files.is_empty(),
         "v1_default_prelude has no embedded file"
     );
-    let mut modules = Vec::new();
-    for (file, source) in stdlib_sources() {
-        let module = skull_parser::parse_module_clean(source, bone_core::prelude::ustr(file))
-            .map_err(|e| format!("{file}: {e}"))?;
-        modules.push(module);
-    }
-    for file in &user_files {
-        let mut module = skull_parser::parse_module_with_dialect(
-            file.src,
-            bone_core::prelude::ustr(file.file),
-            if file.modules_v1 {
-                skull_parser::Dialect::V1
-            } else {
-                skull_parser::Dialect::Legacy
-            },
-        )
-        .map_err(|e| format!("{}: {e}", file.file))?;
-        module.package = file
-            .package
-            .map(|(name, id)| rock_core::source_code::PackageTag {
-                id,
-                self_name: name.to_owned(),
-                identity_storage: Default::default(),
-                root: String::new(),
-            });
-        modules.push(module);
-    }
-    let ws = bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(&mut modules)
-        .map_err(|e| format!("stdlib + v1 semantic pass failed: {e}"))?;
-    for file in &user_files {
-        let module = ws
-            .modules
-            .iter()
-            .find(|module| module.file == bone_core::prelude::ustr(file.file))
-            .expect("v1 prelude fixture module missing");
-        let body_error = ws
-            .inference(module.id)
-            .into_iter()
-            .flat_map(|inf| inf.errors.values().flatten())
-            .chain(module.lowering_errors.values().flatten())
-            .chain(module.interface_errors.iter())
-            .next();
-        if let Some(error) = body_error {
-            return Err(format!("v1 default prelude failed: {error}"));
-        }
-    }
-    Ok(())
-}
-
-fn check_modules_fixture(contents: &str) -> Result {
-    let sections = test_utils::parse_sections(contents);
-    if sections.is_empty() {
-        if let Err(e) = crate::test_support::check_types_embedded_with_stdlib(
-            &crate::test_support::parse_embedded_files(contents),
-            stdlib_sources(),
-        ) {
-            panic!("{}", e);
-        }
-        return Ok(());
-    }
-    let mut failures = Vec::new();
-    for section in sections {
-        // `@fail` expects any rejection; `@fail=<text>` also pins the reason,
-        // so a case cannot pass by failing for an unrelated reason, and a
-        // trailing ` @not=<text>` pins text the rejection must not contain.
-        let (name, expect_fail, want, unwanted) = match section.name.split_once(" @fail") {
-            Some((n, rest)) => {
-                let (rest, unwanted) = match rest.split_once(" @not=") {
-                    Some((rest, unwanted)) => (rest, Some(unwanted.trim().to_string())),
-                    None => (rest, None),
-                };
-                (
-                    n.to_string(),
-                    true,
-                    rest.strip_prefix('=').map(|w| w.trim().to_string()),
-                    unwanted,
-                )
-            }
-            None => (section.name.to_string(), false, None, None),
-        };
-        let files = crate::test_support::parse_embedded_files(section.content);
-        match (
-            crate::test_support::check_types_embedded_with_stdlib(&files, stdlib_sources()),
-            expect_fail,
-        ) {
-            (Ok(_), true) => failures.push(format!("section `{name}` was marked @fail but passed")),
-            (Err(e), false) => failures.push(format!("section `{name}` failed:\n{e}")),
-            (Err(e), true) => {
-                if let Some(want) = want {
-                    if !e.contains(&want) {
-                        failures.push(format!(
-                            "section `{name}` failed for the wrong reason: \
-                             expected the error to contain `{want}`, got:\n{e}"
-                        ));
-                    }
-                }
-                if let Some(unwanted) = unwanted {
-                    if e.contains(&unwanted) {
-                        failures.push(format!(
-                            "section `{name}` failed with text it must not contain: `{unwanted}`, got:\n{e}"
-                        ));
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    if !failures.is_empty() {
-        panic!("{}", failures.join("\n\n"));
-    }
-    Ok(())
+    crate::test_support::check_types_embedded_with_stdlib(&user_files, stdlib_sources())
+        .map_err(|e| format!("v1 default prelude failed: {e}"))
 }
 
 fn main() -> std::process::ExitCode {

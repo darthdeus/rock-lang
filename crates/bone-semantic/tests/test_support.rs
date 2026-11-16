@@ -46,28 +46,8 @@ pub fn check_types(src: &str) -> Result<(), String> {
         bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(&mut [module])
             .map_err(|e| stage("semantic_pass", e))?;
 
-    // `semantic_pass` Ok means "lowered and checked", not "no type errors" —
-    // body-level errors are collected per BodyOwner. A fixture section fails
-    // (and `@fail` passes) on the first body error in source order. Lowering
-    // errors (e.g. `_` placeholder inside an explicit lambda/block) live on the
-    // module, not the inference, so include those too — a body that fails to
-    // lower is a failure. Interface-position type errors (unknown / wrong-arity
-    // type in a signature / global / field) recover to `Error` + a soft
-    // `interface_errors` entry under total lowering, so a fixture naming a bad
-    // type in a signature must fail here too, not slip through as `Ok`.
-    let mut body_errs: Vec<&CompilerError> = ws
-        .inferences_iter()
-        .flat_map(|(_, inf)| inf.errors.values().flatten())
-        .chain(
-            ws.modules
-                .iter()
-                .flat_map(|m| m.lowering_errors.values().flatten()),
-        )
-        .chain(ws.modules.iter().flat_map(|m| m.interface_errors.iter()))
-        .collect();
-    body_errs.sort_by_key(|e| e.location.offset);
-    if let Some(e) = body_errs.first() {
-        return Err(stage("type-check", (*e).clone()));
+    if let Some(e) = first_error(&ws) {
+        return Err(stage("type-check", e.clone()));
     }
 
     // the single user module: everything in the workspace except the builtin one
@@ -113,6 +93,21 @@ pub fn check_types(src: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The first body, lowering or interface error in source order: a fixture
+/// fails (and `@fail` passes) on it. `semantic_pass` Ok means "lowered and
+/// checked", not "no errors": these are collected per module and body.
+fn first_error(ws: &Workspace) -> Option<&CompilerError> {
+    ws.inferences_iter()
+        .flat_map(|(_, inf)| inf.errors.values().flatten())
+        .chain(
+            ws.modules
+                .iter()
+                .flat_map(|m| m.lowering_errors.values().flatten()),
+        )
+        .chain(ws.modules.iter().flat_map(|m| m.interface_errors.iter()))
+        .min_by_key(|e| e.location.offset)
 }
 
 /// Build a CompilerError that labels every interval in the position index
@@ -307,20 +302,7 @@ fn check_types_packages_inner(
     )
     .map_err(|e| render_err(&srcs, &e))?;
 
-    // Body / lowering / interface errors fail the fixture (an `@fail` caller
-    // treats any Err as the expected outcome).
-    let mut body_errs: Vec<&CompilerError> = ws
-        .inferences_iter()
-        .flat_map(|(_, inf)| inf.errors.values().flatten())
-        .chain(
-            ws.modules
-                .iter()
-                .flat_map(|m| m.lowering_errors.values().flatten()),
-        )
-        .chain(ws.modules.iter().flat_map(|m| m.interface_errors.iter()))
-        .collect();
-    body_errs.sort_by_key(|e| e.location.offset);
-    if let Some(e) = body_errs.first() {
+    if let Some(e) = first_error(&ws) {
         return Err(render_err(&srcs, e));
     }
 
