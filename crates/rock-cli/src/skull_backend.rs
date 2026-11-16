@@ -24,7 +24,8 @@ use std::time::Duration;
 /// whether the caller appends the entry call. Not recovered from the text: the
 /// emitted spelling of a definition is the emitter's business.
 fn skull_emit(file: &str, src: &str) -> std::result::Result<(String, bool), Vec<CompilerError>> {
-    let (emit, _) = skull_emit_full(file, src).map_err(EmitFullErr::into_errs)?;
+    let (emit, _) = skull_emit_full(file, src, |ws, mid, _| skull::module_tests(ws, mid))
+        .map_err(EmitFullErr::into_errs)?;
     if let Err(e) = write_allocation_report(None, &emit.allocation_report) {
         log::error!(target: "SKULL", "cannot write allocation report for {}: {:#}", file, e);
         crate::invocation_log::exit(1);
@@ -268,7 +269,7 @@ impl skull::pipeline::CompileHost for PackageTestHost<'_> {
         entry: bone_semantic::prelude::ModuleId,
         _target: skull::pipeline::EmitTarget,
     ) -> std::result::Result<skull::mir_emit::MirEmit, CompilerError> {
-        self.tests = collect_package_test_fns(ws, self.test_dir)?;
+        self.tests = collect_package_test_fns(ws, self.test_dir, self.inner.sources)?;
         let roots = self.tests.iter().map(|(func, _)| *func).collect::<Vec<_>>();
         skull::mir_emit::FullEmit::package_test(&roots)
             .run(ws, entry)
@@ -277,11 +278,16 @@ impl skull::pipeline::CompileHost for PackageTestHost<'_> {
 }
 
 /// Emit the workspace and also discover the user module's `@test` functions
-/// (for execution). `file` is stamped as the source-file id so spans (and
-/// `__SITE__`) carry the real path.
+/// with `discover` (for execution). `file` is stamped as the source-file id so
+/// spans (and `__SITE__`) carry the real path.
 fn skull_emit_full(
     file: &str,
     src: &str,
+    discover: impl FnOnce(
+        &bone_semantic::inference::Workspace,
+        bone_semantic::prelude::ModuleId,
+        &SourceFiles,
+    ) -> std::result::Result<Vec<skull::SkullTest>, CompilerError>,
 ) -> std::result::Result<(skull::mir_emit::MirEmit, Vec<skull::SkullTest>), EmitFullErr> {
     let (sources, lint_root) = crate::lint_pass::single_file_scope(file, src);
     let mut host = CliCompileHost {
@@ -304,7 +310,7 @@ fn skull_emit_full(
     )
     .map_err(|failure| EmitFullErr::Compile(failure.errors))?;
     crate::compile_budget::emission(&emit);
-    let tests = skull::module_tests(&ws, user_mid).map_err(EmitFullErr::Discovery)?;
+    let tests = discover(&ws, user_mid, &sources).map_err(EmitFullErr::Discovery)?;
     Ok((emit, tests))
 }
 
@@ -784,7 +790,11 @@ fn skull_build(
     })?;
     // bone type-check + skull emit. Errors here are bone's (most files) or a
     // skull codegen gap; both carry a `CompilerError`.
-    let (emit, tests) = match skull_emit_full(file, src) {
+    let checked_tests = |ws: &_, mid, sources: &_| {
+        let tests = crate::type_holes::module_tests(ws, mid, sources)?;
+        Ok(tests.into_iter().map(|(_, test)| test).collect())
+    };
+    let (emit, tests) = match skull_emit_full(file, src, checked_tests) {
         Ok(v) => v,
         Err(EmitFullErr::Compile(errs)) => {
             // A file whose `@test`s ALL expect failure is supposed to fail to
@@ -808,7 +818,7 @@ fn skull_build(
         }
         Err(EmitFullErr::Discovery(e)) => {
             return Err(SkullFailure {
-                reason: categorize(&e.message),
+                reason: crate::test_unit::discovery_reason(&e),
                 rendered: render_file_errs(file, src, &[e]),
             });
         }
@@ -1618,6 +1628,7 @@ fn test_program_facts(
 pub(crate) fn collect_package_test_fns(
     ws: &bone_semantic::inference::Workspace,
     dir: &str,
+    sources: &SourceFiles,
 ) -> std::result::Result<Vec<(skull_mir::mir::FuncRef, skull::SkullTest)>, CompilerError> {
     let root = std::path::Path::new(dir)
         .canonicalize()
@@ -1630,7 +1641,7 @@ pub(crate) fn collect_package_test_fns(
             .unwrap_or(false);
         if under {
             out.extend(
-                skull::module_tests_with_ids(ws, m.id)?
+                crate::type_holes::module_tests(ws, m.id, sources)?
                     .into_iter()
                     .map(|(fid, t)| {
                         (

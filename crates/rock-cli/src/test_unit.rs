@@ -36,6 +36,12 @@ impl UnitFailure {
     }
 }
 
+/// A rejected `@test` annotation names the test and what is wrong with it,
+/// so its first line is the reason, uncut.
+pub(crate) fn discovery_reason(e: &CompilerError) -> String {
+    e.message.lines().next().unwrap_or_default().to_string()
+}
+
 pub(crate) enum UnitCheck {
     Checked {
         ws: Box<Workspace>,
@@ -83,8 +89,11 @@ pub(crate) fn check_file(file: &str, build_vars: bool) -> Result<UnitCheck, Unit
     let module = crate::bone_backend::entry_module_id(&ws, user_file);
     // A malformed `@test` on a bone-accepted file is a rejection, never an
     // expected compile failure.
-    let tests = skull::module_tests_with_ids(&ws, module)
-        .map_err(|e| UnitFailure::compile(&sources, &[e]))?
+    let tests = crate::type_holes::module_tests(&ws, module, &sources)
+        .map_err(|e| UnitFailure {
+            reason: discovery_reason(&e),
+            rendered: crate::skull_backend::render_project_errs(&sources, &[e]),
+        })?
         .into_iter()
         .map(|(func, test)| (FuncRef { module, func }, test))
         .collect();
@@ -108,9 +117,11 @@ pub(crate) fn check_package(dir: &str, build_vars: bool) -> Result<UnitCheck, Un
         resolve_build_vars(&mut ws, dir)?;
     }
     let tests =
-        crate::skull_backend::collect_package_test_fns(&ws, dir).map_err(|e| UnitFailure {
-            reason: categorize(&e.message),
-            rendered: e.message,
+        crate::skull_backend::collect_package_test_fns(&ws, dir, &sources).map_err(|e| {
+            UnitFailure {
+                reason: discovery_reason(&e),
+                rendered: e.message,
+            }
         })?;
     Ok(UnitCheck::Checked {
         ws: Box::new(ws),

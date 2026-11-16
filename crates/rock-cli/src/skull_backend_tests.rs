@@ -4200,6 +4200,19 @@ mod value_test_exec {
             err.reason
         );
     }
+
+    #[test]
+    fn a_type_hole_mismatch_fails_the_unit() {
+        let src = "@test(type_holes = [[0, \"string\"]])\nfn a_test_with_a_long_descriptive_name() { let x: ? = 1 }\n";
+        let err = skull_build("holes.rock", src, None).expect_err("hole mismatch must reject");
+        assert!(
+            err.reason.contains(
+                "`a_test_with_a_long_descriptive_name`: hole 0: expected `string`, inferred `int`"
+            ),
+            "unexpected reason: {}",
+            err.reason
+        );
+    }
 }
 
 #[cfg(test)]
