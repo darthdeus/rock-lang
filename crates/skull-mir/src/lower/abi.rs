@@ -42,7 +42,6 @@ pub enum BoundaryClass {
     InlineBody,
     Intrinsic,
     ErasedRuntimeEntry,
-    Invalid,
 }
 
 impl BoundaryClass {
@@ -52,7 +51,6 @@ impl BoundaryClass {
             Self::InlineBody => "inline-body",
             Self::Intrinsic => "intrinsic",
             Self::ErasedRuntimeEntry => "erased-runtime-entry",
-            Self::Invalid => "invalid",
         }
     }
 }
