@@ -749,73 +749,41 @@ impl<'a> Builder<'a> {
                 // over the standalone body -- but that happens after lowering, so
                 // this decision cannot see the specialized callee it would need.
                 self.ret_rep = lam_plan.result();
-                if self.ret_rep.is_none() {
+                let leaves = if self.ret_rep.is_none() {
                     self.lower_stmt_expr(body)?;
-                    if self.is_open() {
-                        self.f.set_term(self.cur, Term::Return(Vec::new()));
-                    }
-                    self.defers = saved_defers;
-                    self.in_defer_body = saved_in_defer;
-                    self.defer_mode = saved_mode;
-                    self.ret_rep = saved_ret_rep;
-                    self.flat_ret = saved_flat_ret;
-                    self.cur = saved;
-                    let id = self.emit_cur(Inst::Lambda {
-                        params: param_cells,
-                        entry,
-                    });
-                    self.f
-                        .lambda_abi_fingerprints
-                        .insert(id, lam_plan.logical_fingerprint(self.scx.rep_arena()));
-                    self.f
-                        .lambda_abi_representations
-                        .insert(id, lam_plan.clone());
-                    return Ok(id);
-                }
-                if let Some(_shape) = self.result_shape() {
+                    Vec::new()
+                } else if self.result_shape().is_some() {
                     let r = self.lower_expr_repr(body)?;
                     if self.is_open() {
-                        let leaves = self.repr_to_leaves_bundle(&r)?;
-                        self.f.set_term(self.cur, Term::Return(leaves));
+                        self.repr_to_leaves_bundle(&r)?
+                    } else {
+                        Vec::new()
                     }
-                    self.defers = saved_defers;
-                    self.in_defer_body = saved_in_defer;
-                    self.defer_mode = saved_mode;
-                    self.ret_rep = saved_ret_rep;
-                    self.flat_ret = saved_flat_ret;
-                    self.cur = saved;
-                    let id = self.emit_cur(Inst::Lambda {
-                        params: param_cells,
-                        entry,
-                    });
-                    self.f
-                        .lambda_abi_fingerprints
-                        .insert(id, lam_plan.logical_fingerprint(self.scx.rep_arena()));
-                    self.f
-                        .lambda_abi_representations
-                        .insert(id, lam_plan.clone());
-                    return Ok(id);
-                }
-                match self.result_tuple() {
-                    // A splatting tuple return needs the body as a repr, so a
-                    // `nobox` element reaches the wire as leaves.
-                    Some(shape) if shape.splats() => {
-                        let r = self.lower_expr_repr(body)?;
-                        if self.is_open() {
-                            let leaves = self.tuple_repr_to_slots(r.into_value(), &shape)?;
-                            self.f.set_term(self.cur, Term::Return(leaves));
+                } else {
+                    match self.result_tuple() {
+                        // A splatting tuple return needs the body as a repr, so a
+                        // `nobox` element reaches the wire as leaves.
+                        Some(shape) if shape.splats() => {
+                            let r = self.lower_expr_repr(body)?;
+                            if self.is_open() {
+                                self.tuple_repr_to_slots(r.into_value(), &shape)?
+                            } else {
+                                Vec::new()
+                            }
                         }
-                    }
-                    other => {
-                        let v = self.lower_expr(body)?;
-                        if self.is_open() {
-                            let leaves = match other {
-                                Some(shape) => self.tuple_return_operands(v, shape.slots.len()),
-                                None => vec![v],
-                            };
-                            self.f.set_term(self.cur, Term::Return(leaves));
+                        Some(shape) => {
+                            let v = self.lower_expr(body)?;
+                            if self.is_open() {
+                                self.tuple_return_operands(v, shape.slots.len())
+                            } else {
+                                Vec::new()
+                            }
                         }
+                        None => vec![self.lower_expr(body)?],
                     }
+                };
+                if self.is_open() {
+                    self.f.set_term(self.cur, Term::Return(leaves));
                 }
                 self.defers = saved_defers;
                 self.in_defer_body = saved_in_defer;
