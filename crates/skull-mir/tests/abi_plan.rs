@@ -1,15 +1,6 @@
-//! The backend ABI of ONE EMITTED BODY.
-//!
-//! Pre-cutover, emission writes two populations of definition: one shared body
-//! per declaration, plus a specialized body per `(FuncRef, Vec<MonoTy>)` the
-//! lowerer decided to serve. Those are the emitted bodies, and each has its own
-//! backend ABI -- a generic that takes and returns `T` is one boxed slot on the
-//! declaration and two float leaves at `T = V2`. The declaration's answer is
-//! not a narrower version of the instantiation's, it is a different question.
-//!
-//! What this pins is that ONE oracle answers it for whichever body is being
-//! emitted, so a definition's parameter list and the call that targets it
-//! cannot come from two derivations that merely agree today.
+//! Owned ABI and representation choices for bodies, boundaries and storage.
+//! Expected physical layouts stay explicit so internally consistent but
+//! incorrect representation choices still fail.
 
 use crate::common::checked_ws_of;
 use std::sync::Arc;
@@ -259,12 +250,9 @@ fn main() { print("{generic_tuple_take((V2 { x: 1.0, y: 2.0 }, 3.0)).0.x}") }
     assert_eq!(written_abi.param_leaf_widths(), Some(vec![3]));
 }
 
-/// The first RepPlan cut has to join every physical consumer of a concrete
-/// function signature.  These are deliberately different shapes, not a
-/// single scalar control: a plain scalar, a nested value, a tuple, a nullable
-/// value, and a GC-carrying value exercise boxed and multi-lane answers.
+/// Transport choices for scalar, nested, tuple, nullable and boxed signatures.
 #[test]
-fn one_owned_representation_reaches_body_call_return_and_publisher() {
+fn owned_signature_shapes_have_the_expected_transport() {
     let ws = checked_ws_of(
         r#"
 nobox value Leaf { x: float, y: float }
@@ -292,113 +280,50 @@ fn main() {
     let main = func_ref(&ws, "main");
     let (scx, bodies) = lower_test_roots(&ws, &[main]);
     let caller = lower_test_root(&ws, &scx, &bodies, main);
-    let cases = ["scalar", "nested", "tuple", "nullable", "boxed"];
-    assert_eq!(cases.len(), 5, "the RED population must remain nonzero");
-
-    for name in cases {
+    for (name, parameter_width, result_lanes) in [
+        ("scalar", None, 1),
+        ("nested", Some(3), 3),
+        ("tuple", Some(3), 3),
+        ("nullable", Some(3), 3),
+        ("boxed", None, 1),
+    ] {
         let subject = Instance::base(func_ref(&ws, name));
-        let concrete = bodies
-            .plans
-            .get(&subject)
-            .unwrap_or_else(|| panic!("the graph must retain {name}'s concrete body"));
+        let concrete = bodies.plans.get(&subject).expect("concrete body");
         let owned = BackendFnAbiPlan::for_concrete_plan(&ws, &scx, concrete);
         let entry = lower_test_root(&ws, &scx, &bodies, subject.func);
-        let body = entry
-            .abi_plan
-            .as_ref()
-            .expect("callee entry must retain its ABI plan");
         let call = caller
             .call_abi_plans
             .values()
             .find(|plan| plan.subject == subject)
             .unwrap_or_else(|| panic!("caller must retain {name}'s concrete ABI plan"));
-
         assert_eq!(
-            &owned,
-            body.as_ref(),
-            "body entry must consume the owned representation for {name}"
+            owned.param_leaf_widths(),
+            parameter_width.map(|width| vec![width]),
+            "{name}: parameter transport"
         );
         assert_eq!(
-            &owned,
-            call.as_ref(),
-            "call and callee entry must consume one owned representation for {name}"
-        );
-        assert_eq!(
-            owned.representation().return_lanes(),
             owned.result_lanes(),
-            "publisher lane sizing must be derived from the owned result plan for {name}"
+            result_lanes,
+            "{name}: result transport"
+        );
+        assert_eq!(entry.params.len(), parameter_width.unwrap_or(1), "{name}");
+        assert_eq!(entry.abi_plan.as_deref(), Some(&owned), "{name}");
+        assert_eq!(call.as_ref(), &owned, "{name}");
+        let transport = caller.insts.iter().find_map(|(_, inst)| match inst {
+            skull_mir::mir::Inst::Call { func, args } if *func == subject.func => {
+                Some((args.len(), 1))
+            }
+            skull_mir::mir::Inst::CallMulti { func, args, dests } if *func == subject.func => {
+                Some((args.len(), dests.len()))
+            }
+            _ => None,
+        });
+        assert_eq!(
+            transport,
+            Some((parameter_width.unwrap_or(1), result_lanes)),
+            "{name}"
         );
     }
-
-    let scalar = caller
-        .call_abi_plans
-        .values()
-        .find(|plan| plan.subject.func == func_ref(&ws, "nested"))
-        .expect("nested call ABI");
-    let boxed = caller
-        .call_abi_plans
-        .values()
-        .find(|plan| plan.subject.func == func_ref(&ws, "boxed"))
-        .expect("boxed call ABI");
-    assert!(
-        scalar.param_leaf_widths().is_some(),
-        "nested aggregate must use a scalar representation"
-    );
-    assert!(
-        boxed.param_leaf_widths().is_none(),
-        "opaque aggregate must retain a boxed representation, got {:?}",
-        boxed.param_leaf_widths()
-    );
-    assert!(
-        caller
-            .call_abi_plans
-            .values()
-            .find(|plan| plan.subject.func == func_ref(&ws, "tuple"))
-            .expect("tuple call ABI")
-            .result_lanes()
-            > 1,
-        "tuple return must have multiple physical lanes"
-    );
-    assert_eq!(
-        caller
-            .call_abi_plans
-            .values()
-            .find(|plan| plan.subject.func == func_ref(&ws, "tuple"))
-            .expect("tuple call ABI")
-            .param_leaf_widths(),
-        Some(vec![3]),
-        "the declaration-spelled tuple parameter must use its owned leaf plan"
-    );
-
-    let callee = func_ref(&ws, "nested");
-    let main = func_ref(&ws, "main");
-    let (scx, bodies) = lower_test_roots(&ws, &[main, callee]);
-    let caller = lower_test_root(&ws, &scx, &bodies, main);
-    let entry = lower_test_root(&ws, &scx, &bodies, callee);
-    assert_eq!(
-        entry.params.len(),
-        3,
-        "callee entry must bind Nested's three owned lanes"
-    );
-    let call = caller
-        .call_abi_plans
-        .values()
-        .find(|plan| plan.subject == Instance::base(callee))
-        .expect("caller must retain the concrete nested ABI plan");
-    let nested_call_args = caller.insts.iter().find_map(|(_, inst)| match inst {
-        skull_mir::mir::Inst::CallMulti { func, args, .. } if *func == callee => Some(args.len()),
-        _ => None,
-    });
-    assert_eq!(
-        nested_call_args,
-        Some(3),
-        "the direct call must consume Nested's three owned lanes"
-    );
-    let entry_abi = entry
-        .abi_plan
-        .as_ref()
-        .expect("callee entry must retain its ABI plan");
-    assert_eq!(entry_abi.representation(), call.representation());
 }
 
 #[test]
