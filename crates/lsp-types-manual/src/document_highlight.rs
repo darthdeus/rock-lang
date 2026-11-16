@@ -13,7 +13,7 @@ pub struct DocumentHighlight {
 }
 
 impl_lsp_struct!(
-    DocumentHighlight,
+    out DocumentHighlight,
     required {
         range: Range = "range"
     },
@@ -23,7 +23,7 @@ impl_lsp_struct!(
 );
 
 /// A document highlight kind.
-#[derive(Eq, PartialEq, Copy, Clone)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
 pub struct DocumentHighlightKind(i32);
 lsp_enum! {
 impl DocumentHighlightKind {

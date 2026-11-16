@@ -7,7 +7,7 @@ pub struct SignatureHelp {
     pub active_parameter: Option<u32>,
 }
 
-impl_lsp_struct!(SignatureHelp,
+impl_lsp_struct!(out SignatureHelp,
     required { signatures: Vec<SignatureInformation> = "signatures" },
     optional {
         active_signature: u32 = "activeSignature",
@@ -23,7 +23,7 @@ pub struct SignatureInformation {
     pub active_parameter: Option<u32>,
 }
 
-impl_lsp_struct!(SignatureInformation,
+impl_lsp_struct!(out SignatureInformation,
     required { label: String = "label" },
     optional {
         documentation: Documentation = "documentation",
@@ -39,7 +39,7 @@ pub struct ParameterInformation {
 }
 
 impl_lsp_struct!(
-    ParameterInformation,
+    out ParameterInformation,
     required {
         label: ParameterLabel = "label"
     },
@@ -55,6 +55,6 @@ pub enum ParameterLabel {
 }
 
 impl_untagged_enum!(ParameterLabel {
-    LabelOffsets([u32; 2]),
-    Simple(String),
+    LabelOffsets,
+    Simple,
 });

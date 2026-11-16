@@ -1,8 +1,6 @@
 use crate::{Command, Diagnostic, Range, TextDocumentIdentifier, WorkspaceEdit};
 use serde_json::Value;
 
-use std::borrow::Cow;
-
 /// Params for the CodeActionRequest
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct CodeActionParams {
@@ -17,7 +15,7 @@ pub struct CodeActionParams {
 }
 
 impl_lsp_struct!(
-    CodeActionParams,
+    in CodeActionParams,
     required {
         text_document: TextDocumentIdentifier = "textDocument",
         range: Range = "range",
@@ -27,17 +25,11 @@ impl_lsp_struct!(
 );
 
 #[derive(Debug, Eq, PartialEq, Hash, PartialOrd, Clone)]
-pub struct CodeActionKind(Cow<'static, str>);
+pub struct CodeActionKind(&'static str);
 
 impl serde::Serialize for CodeActionKind {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&self.0)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for CodeActionKind {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Ok(CodeActionKind(Cow::Owned(String::deserialize(d)?)))
+        s.serialize_str(self.0)
     }
 }
 
@@ -103,23 +95,11 @@ impl CodeActionKind {
     pub const SOURCE_FIX_ALL: CodeActionKind = CodeActionKind::new("source.fixAll");
 
     pub const fn new(tag: &'static str) -> Self {
-        CodeActionKind(Cow::Borrowed(tag))
+        CodeActionKind(tag)
     }
 
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<String> for CodeActionKind {
-    fn from(from: String) -> Self {
-        CodeActionKind(Cow::from(from))
-    }
-}
-
-impl From<&'static str> for CodeActionKind {
-    fn from(from: &'static str) -> Self {
-        CodeActionKind::new(from)
+    pub fn as_str(&self) -> &'static str {
+        self.0
     }
 }
 
@@ -134,7 +114,7 @@ pub struct CodeAction {
     pub data: Option<Value>,
 }
 
-impl_lsp_struct!(CodeAction,
+impl_lsp_struct!(out CodeAction,
     required { title: String = "title" },
     optional {
         kind: CodeActionKind = "kind",
@@ -153,7 +133,7 @@ pub struct CodeActionContext {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-impl_lsp_struct!(CodeActionContext,
+impl_lsp_struct!(in CodeActionContext,
     required { diagnostics: Vec<Diagnostic> = "diagnostics" },
     optional {}
 );
@@ -161,11 +141,11 @@ impl_lsp_struct!(CodeActionContext,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::test_serialization;
+    use crate::tests::assert_json;
 
     #[test]
     fn test_code_action_response() {
-        test_serialization(
+        assert_json(
             &vec![CodeAction {
                 title: "title".to_string(),
                 kind: Some(CodeActionKind::QUICKFIX),

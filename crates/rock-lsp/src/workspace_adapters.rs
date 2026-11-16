@@ -3,8 +3,8 @@ use crate::*;
 use anyhow::Result;
 use lsp_types::*;
 
-fn get_file_path_from_params(params: &TextDocumentPositionParams) -> Result<String> {
-    Ok(params.text_document.uri.to_file_path()?)
+fn doc_path(doc: &TextDocumentIdentifier) -> Result<String> {
+    Ok(doc.uri.to_file_path()?)
 }
 
 /// Workspace-aware go to definition
@@ -13,7 +13,7 @@ pub(crate) fn go_to_definition_workspace(
     params: &TextDocumentPositionParams,
 ) -> Result<Option<Vec<Location>>> {
     crate::scope!("go_to_definition_workspace");
-    let file_path = get_file_path_from_params(params)?;
+    let file_path = doc_path(&params.text_document)?;
     let pos = params.position;
     Ok(workspace
         .bone
@@ -28,7 +28,7 @@ pub(crate) fn go_to_type_definition_workspace(
     params: &TextDocumentPositionParams,
 ) -> Result<Option<Vec<Location>>> {
     crate::scope!("go_to_type_definition_workspace");
-    let file_path = get_file_path_from_params(params)?;
+    let file_path = doc_path(&params.text_document)?;
     let pos = params.position;
     Ok(workspace
         .bone
@@ -42,7 +42,7 @@ pub(crate) fn find_references_workspace(
     params: &TextDocumentPositionParams,
 ) -> Result<Option<Vec<Location>>> {
     crate::scope!("find_references_workspace");
-    let file_path = get_file_path_from_params(params)?;
+    let file_path = doc_path(&params.text_document)?;
     let pos = params.position;
     let locs = workspace.bone.references(&file_path, pos);
     Ok(if locs.is_empty() { None } else { Some(locs) })
@@ -56,7 +56,7 @@ pub fn do_document_highlight_workspace(
     params: &TextDocumentPositionParams,
 ) -> Result<Option<Vec<DocumentHighlight>>> {
     crate::scope!("do_document_highlight_workspace");
-    let file_path = get_file_path_from_params(params)?;
+    let file_path = doc_path(&params.text_document)?;
     let pos = params.position;
     let hl = workspace.bone.document_highlight(&file_path, pos);
     Ok((!hl.is_empty()).then_some(hl))
@@ -68,7 +68,7 @@ pub(crate) fn do_hover_workspace(
     params: &TextDocumentPositionParams,
 ) -> Result<Option<Hover>> {
     crate::scope!("do_hover_workspace");
-    let file_path = get_file_path_from_params(params)?;
+    let file_path = doc_path(&params.text_document)?;
     let pos = params.position;
     Ok(workspace.bone.hover(&file_path, pos))
 }
@@ -79,7 +79,7 @@ pub(crate) fn do_signature_help_workspace(
     params: &TextDocumentPositionParams,
 ) -> Result<Option<SignatureHelp>> {
     crate::scope!("do_signature_help_workspace");
-    let file_path = get_file_path_from_params(params)?;
+    let file_path = doc_path(&params.text_document)?;
     let pos = params.position;
     Ok(workspace.bone.signature_help(&file_path, pos))
 }
@@ -90,7 +90,7 @@ pub fn do_document_symbols_workspace(
     params: &TextDocumentParams,
 ) -> Result<Option<Vec<DocumentSymbol>>> {
     crate::scope!("do_document_symbols_workspace");
-    let file_path = params.text_document.uri.to_file_path()?;
+    let file_path = doc_path(&params.text_document)?;
     Ok(Some(workspace.bone.document_symbols(&file_path)))
 }
 
@@ -111,7 +111,7 @@ pub(crate) fn do_inlay_hints_workspace(
 ) -> Result<Option<Vec<InlayHint>>> {
     crate::scope!("do_inlay_hints_workspace");
     let _span = tracing::debug_span!("do_inlay_hints_workspace").entered();
-    let file_path = params.text_document.uri.to_file_path()?;
+    let file_path = doc_path(&params.text_document)?;
     Ok(Some(workspace.bone.inlay_hints(&file_path, params.range)))
 }
 
@@ -122,8 +122,8 @@ pub fn do_completion_workspace(
 ) -> Result<Option<CompletionList>> {
     crate::scope!("do_completion_workspace");
     let _span = tracing::debug_span!("do_completion_workspace").entered();
-    let file_path = get_file_path_from_params(&params.text_document_position)?;
-    let pos = params.text_document_position.position;
+    let file_path = doc_path(&params.text_document)?;
+    let pos = params.position;
     // Was this auto-fired by the space trigger character? If so, a
     // whitespace-only line prefix is `<CR>` auto-indent, and bone suppresses the
     // popup (so `<CR><CR>` inserts two newlines instead of accepting item 1).
@@ -157,7 +157,7 @@ pub(crate) fn prepare_rename_workspace(
     workspace: &mut LspWorkspace,
     params: &TextDocumentPositionParams,
 ) -> Result<Option<Range>> {
-    let file_path = get_file_path_from_params(params)?;
+    let file_path = doc_path(&params.text_document)?;
     // A refusal becomes the request's error, which editors show as the reason.
     Ok(workspace.bone.prepare_rename(&file_path, params.position)?)
 }
@@ -167,7 +167,7 @@ pub(crate) fn do_rename_workspace(
     workspace: &mut LspWorkspace,
     params: &RenameParams,
 ) -> Result<Option<WorkspaceEdit>> {
-    let file_path = get_file_path_from_params(&params.text_document_position)?;
-    let pos = params.text_document_position.position;
+    let file_path = doc_path(&params.text_document)?;
+    let pos = params.position;
     Ok(workspace.bone.rename(&file_path, pos, &params.new_name)?)
 }

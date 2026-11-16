@@ -14,7 +14,6 @@ use std::str::FromStr;
 use anyhow::Result;
 use log::error;
 use lsp_server::{Connection, ExtractError, Message, Request, RequestId, Response};
-use lsp_types::notification::Notification;
 use lsp_types::request::{
     CodeActionRequest, Completion, DocumentHighlightRequest, DocumentSymbolRequest, GotoDefinition,
     GotoTypeDefinition, HoverRequest, InlayHintRequest, PrepareRenameRequest, References, Rename,
@@ -780,7 +779,7 @@ fn bone_reload_and_publish(
         };
         out.push(lsp_server::Message::Notification(
             lsp_server::Notification {
-                method: lsp_types::notification::PublishDiagnostics::METHOD.to_string(),
+                method: "textDocument/publishDiagnostics".to_string(),
                 params: serde_json::to_value(notice)?,
             },
         ));
@@ -897,7 +896,7 @@ fn notification_path(out: &mut Vec<Message>, uri: &Uri, method: &str) -> Result<
             };
             out.push(lsp_server::Message::Notification(
                 lsp_server::Notification {
-                    method: lsp_types::notification::ShowMessage::METHOD.to_string(),
+                    method: "window/showMessage".to_string(),
                     params: serde_json::to_value(params)?,
                 },
             ));

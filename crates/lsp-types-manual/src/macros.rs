@@ -1,195 +1,48 @@
-/// Generate `Serialize` + `Deserialize` impls for a string-keyed unit enum.
+/// Generate serde impls for an LSP struct whose fields map to JSON keys.
+///
+/// The leading direction picks the impls: `out` for what the server only
+/// sends (`Serialize`), `in` for what it only reads (`Deserialize`), `both`
+/// for both.
 ///
 /// ```ignore
-/// impl_str_enum!(MyEnum {
-///     Variant = "json-string",
-///     ...
-/// });
-/// ```
-macro_rules! impl_str_enum {
-    ($T:ident { $($variant:ident = $s:literal),* $(,)? }) => {
-        impl serde::Serialize for $T {
-            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-                s.serialize_str(match self {
-                    $( $T::$variant => $s, )*
-                })
-            }
-        }
-
-        impl<'de> serde::Deserialize<'de> for $T {
-            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-                struct __Visitor;
-                impl<'de> serde::de::Visitor<'de> for __Visitor {
-                    type Value = $T;
-                    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                        write!(f, concat!("a string for enum ", stringify!($T)))
-                    }
-                    fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<$T, E> {
-                        match s {
-                            $( $s => Ok($T::$variant), )*
-                            _ => Err(E::unknown_variant(s, &[$($s,)*])),
-                        }
-                    }
-                }
-                d.deserialize_str(__Visitor)
-            }
-        }
-    };
-}
-
-/// Generate `Serialize` + `Deserialize` impls for an untagged enum.
-///
-/// All variants must be tuple variants with exactly one inner type.
-/// Serialization delegates directly to the inner value.
-/// Deserialization buffers through `serde_json::Value` and tries each
-/// variant in declaration order, returning the first that succeeds.
-///
-/// ```ignore
-/// impl_untagged_enum!(MyEnum {
-///     Variant1(Type1),
-///     Variant2(Type2),
-/// });
-/// ```
-macro_rules! impl_untagged_enum {
-    ($T:ident { $($variant:ident($vtype:ty)),* $(,)? }) => {
-        impl serde::Serialize for $T {
-            fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
-            where
-                S: serde::Serializer,
-            {
-                match self {
-                    $( $T::$variant(v) => v.serialize(s), )*
-                }
-            }
-        }
-
-        impl<'de> serde::Deserialize<'de> for $T {
-            fn deserialize<D>(d: D) -> Result<Self, D::Error>
-            where
-                D: serde::Deserializer<'de>,
-            {
-                let val = serde_json::Value::deserialize(d)?;
-                $(
-                    if let Ok(v) = serde_json::from_value::<$vtype>(val.clone()) {
-                        return Ok($T::$variant(v));
-                    }
-                )*
-                Err(serde::de::Error::custom(concat!(
-                    "data did not match any variant of ",
-                    stringify!($T)
-                )))
-            }
-        }
-    };
-}
-
-/// Generate `Serialize` + `Deserialize` impls for a plain LSP struct.
-///
-/// Syntax:
-///
-/// ```ignore
-/// impl_lsp_struct!(TypeName,
+/// impl_lsp_struct!(out TypeName,
 ///     required { field: Type = "jsonKey", ... },
-///     nullable { field: Type = "jsonKey", ... },
-///     optional { field: Type = "jsonKey", ... },
-///     flatten { field: Type, ... }
+///     optional { field: Type = "jsonKey", ... }
 /// );
 /// ```
 ///
-/// - `required`: always serialized, must be present when deserializing.
-/// - `nullable`: `Option<Type>`, always serialized (`None` → `null`).
-///   Corresponds to fields without `#[serde(skip_serializing_if)]`.
-/// - `optional`: `Option<Type>`, skipped on serialize when `None`.
-///   Corresponds to fields with `#[serde(skip_serializing_if = "Option::is_none")]`.
-/// - `flatten`: embedded struct, merged into the JSON object on both sides.
-///   Uses a serde_json::Value bridge (one extra allocation per struct with flatten).
-///
-/// All sections except required accept absent keys as None/default.
+/// `optional` fields are `Option<Type>`: left out of the JSON when `None`, and
+/// `None` when the key is absent. Unknown keys are ignored on input.
 macro_rules! impl_lsp_struct {
-    // Full form: required + nullable + optional + flatten
-    (
-        $T:ident,
-        required { $( $rf:ident : $rt:ty = $rk:literal ),* $(,)? },
-        nullable { $( $nf:ident : $nt:ty = $nk:literal ),* $(,)? },
-        optional { $( $of:ident : $ot:ty = $ok:literal ),* $(,)? },
-        flatten { $( $ff:ident : $ft:ty ),* $(,)? }
-    ) => {
-        #[allow(deprecated)]
-        impl serde::Serialize for $T {
-            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-                let mut map = serde_json::Map::new();
-                $(
-                    map.insert($rk.to_string(),
-                        serde_json::to_value(&self.$rf).map_err(serde::ser::Error::custom)?);
-                )*
-                $(
-                    map.insert($nk.to_string(),
-                        serde_json::to_value(&self.$nf).map_err(serde::ser::Error::custom)?);
-                )*
-                $(
-                    if let Some(ref v) = self.$of {
-                        map.insert($ok.to_string(),
-                            serde_json::to_value(v).map_err(serde::ser::Error::custom)?);
-                    }
-                )*
-                $(
-                    if let serde_json::Value::Object(inner) =
-                        serde_json::to_value(&self.$ff).map_err(serde::ser::Error::custom)?
-                    {
-                        map.extend(inner);
-                    }
-                )*
-                serde_json::Value::Object(map).serialize(s)
-            }
-        }
-
-        #[allow(deprecated)]
-        impl<'de> serde::Deserialize<'de> for $T {
-            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-                let map = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
-                let val = serde_json::Value::Object(map);
-                $(
-                    let $rf: $rt = val.get($rk)
-                        .ok_or_else(|| serde::de::Error::missing_field($rk))
-                        .and_then(|v| serde_json::from_value(v.clone()).map_err(serde::de::Error::custom))?;
-                )*
-                $(
-                    let $nf: Option<$nt> = crate::deserialize_optional(val.get($nk).cloned())?;
-                )*
-                $(
-                    let $of: Option<$ot> = crate::deserialize_optional(val.get($ok).cloned())?;
-                )*
-                $(
-                    let $ff: $ft = serde_json::from_value(val.clone())
-                        .map_err(serde::de::Error::custom)?;
-                )*
-                Ok($T { $($rf,)* $($nf,)* $($of,)* $($ff,)* })
-            }
-        }
+    (both $T:ident, $($fields:tt)*) => {
+        impl_lsp_struct!(out $T, $($fields)*);
+        impl_lsp_struct!(in $T, $($fields)*);
     };
 
-    // No-flatten form: required + nullable + optional (uses fast serialize_struct path)
     (
-        $T:ident,
+        out $T:ident,
         required { $( $rf:ident : $rt:ty = $rk:literal ),* $(,)? },
-        nullable { $( $nf:ident : $nt:ty = $nk:literal ),* $(,)? },
         optional { $( $of:ident : $ot:ty = $ok:literal ),* $(,)? }
     ) => {
         #[allow(deprecated)]
         impl serde::Serialize for $T {
             fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
                 use serde::ser::SerializeStruct;
-                let hint: usize = 0 $( + { let _: &str = $rk; 1 } )* $( + { let _: &str = $nk; 1 } )* $( + { let _: &str = $ok; 1 } )*;
+                let hint: usize = 0 $( + { let _: &str = $rk; 1 } )* $( + { let _: &str = $ok; 1 } )*;
                 #[allow(unused_mut)]
                 let mut st = s.serialize_struct(stringify!($T), hint)?;
                 $( st.serialize_field($rk, &self.$rf)?; )*
-                $( st.serialize_field($nk, &self.$nf)?; )*
                 $( if let Some(ref v) = self.$of { st.serialize_field($ok, v)?; } )*
                 st.end()
             }
         }
+    };
 
-        #[allow(deprecated)]
+    (
+        in $T:ident,
+        required { $( $rf:ident : $rt:ty = $rk:literal ),* $(,)? },
+        optional { $( $of:ident : $ot:ty = $ok:literal ),* $(,)? }
+    ) => {
         impl<'de> serde::Deserialize<'de> for $T {
             fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
                 struct __Visitor;
@@ -203,19 +56,16 @@ macro_rules! impl_lsp_struct {
                         mut map: A,
                     ) -> Result<$T, A::Error> {
                         $( let mut $rf: Option<$rt> = None; )*
-                        $( let mut $nf: Option<$nt> = None; )*
                         $( let mut $of: Option<$ot> = None; )*
                         while let Some(key) = map.next_key::<String>()? {
                             match key.as_str() {
                                 $( $rk => { $rf = Some(map.next_value()?); } )*
-                                $( $nk => { $nf = map.next_value()?; } )*
                                 $( $ok => { $of = map.next_value()?; } )*
                                 _ => { let _ = map.next_value::<serde::de::IgnoredAny>()?; }
                             }
                         }
                         Ok($T {
                             $( $rf: $rf.ok_or_else(|| serde::de::Error::missing_field($rk))?, )*
-                            $( $nf, )*
                             $( $of, )*
                         })
                     }
@@ -224,59 +74,18 @@ macro_rules! impl_lsp_struct {
             }
         }
     };
+}
 
-    // Shorthand: required + optional (no nullable, no flatten)
-    (
-        $T:ident,
-        required { $( $rf:ident : $rt:ty = $rk:literal ),* $(,)? },
-        optional { $( $of:ident : $ot:ty = $ok:literal ),* $(,)? }
-    ) => {
-        impl_lsp_struct!($T,
-            required { $( $rf: $rt = $rk ),* },
-            nullable {},
-            optional { $( $of: $ot = $ok ),* }
-        );
-    };
-
-    // Shorthand: required + optional + flatten (no nullable)
-    (
-        $T:ident,
-        required { $( $rf:ident : $rt:ty = $rk:literal ),* $(,)? },
-        optional { $( $of:ident : $ot:ty = $ok:literal ),* $(,)? },
-        flatten { $( $ff:ident : $ft:ty ),* $(,)? }
-    ) => {
-        impl_lsp_struct!($T,
-            required { $( $rf: $rt = $rk ),* },
-            nullable {},
-            optional { $( $of: $ot = $ok ),* },
-            flatten { $( $ff: $ft ),* }
-        );
-    };
-
-    // Shorthand: only flatten (no required/nullable/optional)
-    (
-        $T:ident,
-        flatten { $( $ff:ident : $ft:ty ),* $(,)? }
-    ) => {
-        impl_lsp_struct!($T,
-            required {},
-            nullable {},
-            optional {},
-            flatten { $( $ff: $ft ),* }
-        );
-    };
-
-    // Shorthand: optional + flatten (no required/nullable)
-    (
-        $T:ident,
-        optional { $( $of:ident : $ot:ty = $ok:literal ),* $(,)? },
-        flatten { $( $ff:ident : $ft:ty ),* $(,)? }
-    ) => {
-        impl_lsp_struct!($T,
-            required {},
-            nullable {},
-            optional { $( $of: $ot = $ok ),* },
-            flatten { $( $ff: $ft ),* }
-        );
+/// Generate `Serialize` for an untagged enum whose variants each wrap one
+/// value: a variant serializes as its inner value.
+macro_rules! impl_untagged_enum {
+    ($T:ident { $($variant:ident),* $(,)? }) => {
+        impl serde::Serialize for $T {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                match self {
+                    $( $T::$variant(v) => v.serialize(s), )*
+                }
+            }
+        }
     };
 }

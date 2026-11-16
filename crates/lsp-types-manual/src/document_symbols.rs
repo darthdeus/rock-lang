@@ -17,7 +17,7 @@ pub struct DocumentSymbol {
     pub children: Option<Vec<DocumentSymbol>>,
 }
 
-impl_lsp_struct!(DocumentSymbol,
+impl_lsp_struct!(out DocumentSymbol,
     required {
         name: String = "name",
         kind: SymbolKind = "kind",
@@ -45,7 +45,7 @@ pub struct SymbolInformation {
     pub container_name: Option<String>,
 }
 
-impl_lsp_struct!(SymbolInformation,
+impl_lsp_struct!(out SymbolInformation,
     required {
         name: String = "name",
         kind: SymbolKind = "kind",
@@ -66,7 +66,7 @@ pub struct WorkspaceSymbolParams {
 }
 
 impl_lsp_struct!(
-    WorkspaceSymbolParams,
+    in WorkspaceSymbolParams,
     required {
         query: String = "query"
     },

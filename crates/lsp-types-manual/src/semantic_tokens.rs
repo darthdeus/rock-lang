@@ -1,7 +1,3 @@
-use std::borrow::Cow;
-
-use serde::Deserialize;
-
 use crate::TextDocumentIdentifier;
 /// A set of predefined token types. This set is not fixed
 /// and clients can specify additional token types via the
@@ -9,19 +5,13 @@ use crate::TextDocumentIdentifier;
 ///
 /// @since 3.16.0
 #[derive(Debug, Eq, PartialEq, Hash, PartialOrd, Clone)]
-pub struct SemanticTokenType(Cow<'static, str>);
+pub struct SemanticTokenType(&'static str);
 
 impl serde::Serialize for SemanticTokenType {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&self.0)
+        s.serialize_str(self.0)
     }
 }
-impl<'de> serde::Deserialize<'de> for SemanticTokenType {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Ok(SemanticTokenType(Cow::Owned(String::deserialize(d)?)))
-    }
-}
-
 impl SemanticTokenType {
     pub const NAMESPACE: SemanticTokenType = SemanticTokenType::new("namespace");
     pub const TYPE: SemanticTokenType = SemanticTokenType::new("type");
@@ -50,23 +40,11 @@ impl SemanticTokenType {
     pub const DECORATOR: SemanticTokenType = SemanticTokenType::new("decorator");
 
     pub const fn new(tag: &'static str) -> Self {
-        SemanticTokenType(Cow::Borrowed(tag))
+        SemanticTokenType(tag)
     }
 
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<String> for SemanticTokenType {
-    fn from(from: String) -> Self {
-        SemanticTokenType(Cow::from(from))
-    }
-}
-
-impl From<&'static str> for SemanticTokenType {
-    fn from(from: &'static str) -> Self {
-        SemanticTokenType::new(from)
+    pub fn as_str(&self) -> &'static str {
+        self.0
     }
 }
 
@@ -76,19 +54,13 @@ impl From<&'static str> for SemanticTokenType {
 ///
 /// @since 3.16.0
 #[derive(Debug, Eq, PartialEq, Hash, PartialOrd, Clone)]
-pub struct SemanticTokenModifier(Cow<'static, str>);
+pub struct SemanticTokenModifier(&'static str);
 
 impl serde::Serialize for SemanticTokenModifier {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&self.0)
+        s.serialize_str(self.0)
     }
 }
-impl<'de> serde::Deserialize<'de> for SemanticTokenModifier {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Ok(SemanticTokenModifier(Cow::Owned(String::deserialize(d)?)))
-    }
-}
-
 impl SemanticTokenModifier {
     pub const DECLARATION: SemanticTokenModifier = SemanticTokenModifier::new("declaration");
     pub const DEFINITION: SemanticTokenModifier = SemanticTokenModifier::new("definition");
@@ -102,23 +74,11 @@ impl SemanticTokenModifier {
     pub const DEFAULT_LIBRARY: SemanticTokenModifier = SemanticTokenModifier::new("defaultLibrary");
 
     pub const fn new(tag: &'static str) -> Self {
-        SemanticTokenModifier(Cow::Borrowed(tag))
+        SemanticTokenModifier(tag)
     }
 
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<String> for SemanticTokenModifier {
-    fn from(from: String) -> Self {
-        SemanticTokenModifier(Cow::from(from))
-    }
-}
-
-impl From<&'static str> for SemanticTokenModifier {
-    fn from(from: &'static str) -> Self {
-        SemanticTokenModifier::new(from)
+    pub fn as_str(&self) -> &'static str {
+        self.0
     }
 }
 
@@ -132,7 +92,7 @@ pub struct SemanticTokensLegend {
     pub token_modifiers: Vec<SemanticTokenModifier>,
 }
 
-impl_lsp_struct!(SemanticTokensLegend,
+impl_lsp_struct!(out SemanticTokensLegend,
     required {
         token_types: Vec<SemanticTokenType> = "tokenTypes",
         token_modifiers: Vec<SemanticTokenModifier> = "tokenModifiers",
@@ -150,33 +110,6 @@ pub struct SemanticToken {
     pub token_modifiers_bitset: u32,
 }
 
-impl SemanticToken {
-    fn deserialize_tokens<'de, D>(deserializer: D) -> Result<Vec<SemanticToken>, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let data = Vec::<u32>::deserialize(deserializer)?;
-        let (chunks, remainder) = data.as_chunks::<5>();
-
-        if !remainder.is_empty() {
-            return Result::Err(serde::de::Error::custom("Length is not divisible by 5"));
-        }
-
-        Result::Ok(
-            chunks
-                .iter()
-                .map(|chunk| SemanticToken {
-                    delta_line: chunk[0],
-                    delta_start: chunk[1],
-                    length: chunk[2],
-                    token_type: chunk[3],
-                    token_modifiers_bitset: chunk[4],
-                })
-                .collect(),
-        )
-    }
-}
-
 /// @since 3.16.0
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
 pub struct SemanticTokens {
@@ -190,40 +123,31 @@ pub struct SemanticTokens {
     pub data: Vec<SemanticToken>,
 }
 
+/// Tokens go on the wire as one flat array of integer quintuples.
+fn flat(tokens: &[SemanticToken]) -> Vec<u32> {
+    tokens
+        .iter()
+        .flat_map(|t| {
+            [
+                t.delta_line,
+                t.delta_start,
+                t.length,
+                t.token_type,
+                t.token_modifiers_bitset,
+            ]
+        })
+        .collect()
+}
+
 impl serde::Serialize for SemanticTokens {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let flat: Vec<u32> = self
-            .data
-            .iter()
-            .flat_map(|t| {
-                [
-                    t.delta_line,
-                    t.delta_start,
-                    t.length,
-                    t.token_type,
-                    t.token_modifiers_bitset,
-                ]
-            })
-            .collect();
         let mut st = s.serialize_struct("SemanticTokens", 2)?;
         if let Some(ref v) = self.result_id {
             st.serialize_field("resultId", v)?;
         }
-        st.serialize_field("data", &flat)?;
+        st.serialize_field("data", &flat(&self.data))?;
         st.end()
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for SemanticTokens {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let mut map = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
-        let result_id = crate::deserialize_optional(map.remove("resultId"))?;
-        let data_val = map
-            .remove("data")
-            .ok_or_else(|| serde::de::Error::missing_field("data"))?;
-        let data = SemanticToken::deserialize_tokens(data_val).map_err(serde::de::Error::custom)?;
-        Ok(SemanticTokens { result_id, data })
     }
 }
 
@@ -243,46 +167,9 @@ impl serde::Serialize for SemanticTokensEdit {
         st.serialize_field("start", &self.start)?;
         st.serialize_field("deleteCount", &self.delete_count)?;
         if let Some(ref tokens) = self.data {
-            let flat: Vec<u32> = tokens
-                .iter()
-                .flat_map(|t| {
-                    [
-                        t.delta_line,
-                        t.delta_start,
-                        t.length,
-                        t.token_type,
-                        t.token_modifiers_bitset,
-                    ]
-                })
-                .collect();
-            st.serialize_field("data", &flat)?;
+            st.serialize_field("data", &flat(tokens))?;
         }
         st.end()
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for SemanticTokensEdit {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let mut map = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
-        let start = map
-            .remove("start")
-            .ok_or_else(|| serde::de::Error::missing_field("start"))
-            .and_then(|v| serde_json::from_value::<u32>(v).map_err(serde::de::Error::custom))?;
-        let delete_count = map
-            .remove("deleteCount")
-            .ok_or_else(|| serde::de::Error::missing_field("deleteCount"))
-            .and_then(|v| serde_json::from_value::<u32>(v).map_err(serde::de::Error::custom))?;
-        let data = match map.remove("data") {
-            None => None,
-            Some(v) => {
-                Some(SemanticToken::deserialize_tokens(v).map_err(serde::de::Error::custom)?)
-            }
-        };
-        Ok(SemanticTokensEdit {
-            start,
-            delete_count,
-            data,
-        })
     }
 }
 
@@ -292,47 +179,10 @@ pub enum SemanticTokensFullDeltaResult {
     TokensDelta(SemanticTokensDelta),
 }
 
-impl serde::Serialize for SemanticTokensFullDeltaResult {
-    fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match self {
-            Self::Tokens(v) => v.serialize(s),
-            Self::TokensDelta(v) => v.serialize(s),
-        }
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for SemanticTokensFullDeltaResult {
-    fn deserialize<D>(d: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let val = serde_json::Value::deserialize(d)?;
-        if let Ok(v) = serde_json::from_value::<SemanticTokens>(val.clone()) {
-            return Ok(Self::Tokens(v));
-        }
-        if let Ok(v) = serde_json::from_value::<SemanticTokensDelta>(val.clone()) {
-            return Ok(Self::TokensDelta(v));
-        }
-        Err(serde::de::Error::custom(
-            "data did not match any variant of SemanticTokensFullDeltaResult",
-        ))
-    }
-}
-
-impl From<SemanticTokens> for SemanticTokensFullDeltaResult {
-    fn from(from: SemanticTokens) -> Self {
-        SemanticTokensFullDeltaResult::Tokens(from)
-    }
-}
-
-impl From<SemanticTokensDelta> for SemanticTokensFullDeltaResult {
-    fn from(from: SemanticTokensDelta) -> Self {
-        SemanticTokensFullDeltaResult::TokensDelta(from)
-    }
-}
+impl_untagged_enum!(SemanticTokensFullDeltaResult {
+    Tokens,
+    TokensDelta
+});
 
 /// @since 3.16.0
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
@@ -343,7 +193,7 @@ pub struct SemanticTokensDelta {
     pub edits: Vec<SemanticTokensEdit>,
 }
 
-impl_lsp_struct!(SemanticTokensDelta,
+impl_lsp_struct!(out SemanticTokensDelta,
     required { edits: Vec<SemanticTokensEdit> = "edits" },
     optional { result_id: String = "resultId" }
 );
@@ -358,7 +208,7 @@ pub struct SemanticTokensDeltaParams {
 }
 
 impl_lsp_struct!(
-    SemanticTokensDeltaParams,
+    in SemanticTokensDeltaParams,
     required {
         text_document: TextDocumentIdentifier = "textDocument",
         previous_result_id: String = "previousResultId",
@@ -369,185 +219,47 @@ impl_lsp_struct!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::{test_deserialization, test_serialization};
+    use crate::tests::assert_json;
+
+    const TOKENS: [SemanticToken; 2] = [
+        SemanticToken {
+            delta_line: 2,
+            delta_start: 5,
+            length: 3,
+            token_type: 0,
+            token_modifiers_bitset: 3,
+        },
+        SemanticToken {
+            delta_line: 0,
+            delta_start: 5,
+            length: 4,
+            token_type: 1,
+            token_modifiers_bitset: 0,
+        },
+    ];
 
     #[test]
-    fn test_semantic_tokens_support_serialization() {
-        test_serialization(
-            &SemanticTokens {
-                result_id: None,
-                data: vec![],
-            },
-            r#"{"data":[]}"#,
-        );
-
-        test_serialization(
-            &SemanticTokens {
-                result_id: None,
-                data: vec![SemanticToken {
-                    delta_line: 2,
-                    delta_start: 5,
-                    length: 3,
-                    token_type: 0,
-                    token_modifiers_bitset: 3,
-                }],
-            },
-            r#"{"data":[2,5,3,0,3]}"#,
-        );
-
-        test_serialization(
-            &SemanticTokens {
-                result_id: None,
-                data: vec![
-                    SemanticToken {
-                        delta_line: 2,
-                        delta_start: 5,
-                        length: 3,
-                        token_type: 0,
-                        token_modifiers_bitset: 3,
-                    },
-                    SemanticToken {
-                        delta_line: 0,
-                        delta_start: 5,
-                        length: 4,
-                        token_type: 1,
-                        token_modifiers_bitset: 0,
-                    },
-                ],
-            },
-            r#"{"data":[2,5,3,0,3,0,5,4,1,0]}"#,
-        );
+    fn tokens_serialize_as_flat_quintuples() {
+        let tokens = |data: &[SemanticToken]| SemanticTokens {
+            result_id: None,
+            data: data.to_vec(),
+        };
+        assert_json(&tokens(&[]), r#"{"data":[]}"#);
+        assert_json(&tokens(&TOKENS[..1]), r#"{"data":[2,5,3,0,3]}"#);
+        assert_json(&tokens(&TOKENS), r#"{"data":[2,5,3,0,3,0,5,4,1,0]}"#);
     }
 
     #[test]
-    fn test_semantic_tokens_support_deserialization() {
-        test_deserialization(
-            r#"{"data":[]}"#,
-            &SemanticTokens {
-                result_id: None,
-                data: vec![],
-            },
-        );
-
-        test_deserialization(
-            r#"{"data":[2,5,3,0,3]}"#,
-            &SemanticTokens {
-                result_id: None,
-                data: vec![SemanticToken {
-                    delta_line: 2,
-                    delta_start: 5,
-                    length: 3,
-                    token_type: 0,
-                    token_modifiers_bitset: 3,
-                }],
-            },
-        );
-
-        test_deserialization(
-            r#"{"data":[2,5,3,0,3,0,5,4,1,0]}"#,
-            &SemanticTokens {
-                result_id: None,
-                data: vec![
-                    SemanticToken {
-                        delta_line: 2,
-                        delta_start: 5,
-                        length: 3,
-                        token_type: 0,
-                        token_modifiers_bitset: 3,
-                    },
-                    SemanticToken {
-                        delta_line: 0,
-                        delta_start: 5,
-                        length: 4,
-                        token_type: 1,
-                        token_modifiers_bitset: 0,
-                    },
-                ],
-            },
-        );
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_semantic_tokens_support_deserialization_err() {
-        test_deserialization(
-            r#"{"data":[1]}"#,
-            &SemanticTokens {
-                result_id: None,
-                data: vec![],
-            },
-        );
-    }
-
-    #[test]
-    fn test_semantic_tokens_edit_support_deserialization() {
-        test_deserialization(
-            r#"{"start":0,"deleteCount":1,"data":[2,5,3,0,3,0,5,4,1,0]}"#,
-            &SemanticTokensEdit {
-                start: 0,
-                delete_count: 1,
-                data: Some(vec![
-                    SemanticToken {
-                        delta_line: 2,
-                        delta_start: 5,
-                        length: 3,
-                        token_type: 0,
-                        token_modifiers_bitset: 3,
-                    },
-                    SemanticToken {
-                        delta_line: 0,
-                        delta_start: 5,
-                        length: 4,
-                        token_type: 1,
-                        token_modifiers_bitset: 0,
-                    },
-                ]),
-            },
-        );
-
-        test_deserialization(
-            r#"{"start":0,"deleteCount":1}"#,
-            &SemanticTokensEdit {
-                start: 0,
-                delete_count: 1,
-                data: None,
-            },
-        );
-    }
-
-    #[test]
-    fn test_semantic_tokens_edit_support_serialization() {
-        test_serialization(
-            &SemanticTokensEdit {
-                start: 0,
-                delete_count: 1,
-                data: Some(vec![
-                    SemanticToken {
-                        delta_line: 2,
-                        delta_start: 5,
-                        length: 3,
-                        token_type: 0,
-                        token_modifiers_bitset: 3,
-                    },
-                    SemanticToken {
-                        delta_line: 0,
-                        delta_start: 5,
-                        length: 4,
-                        token_type: 1,
-                        token_modifiers_bitset: 0,
-                    },
-                ]),
-            },
+    fn edits_serialize_their_tokens_flat() {
+        let edit = |data| SemanticTokensEdit {
+            start: 0,
+            delete_count: 1,
+            data,
+        };
+        assert_json(
+            &edit(Some(TOKENS.to_vec())),
             r#"{"start":0,"deleteCount":1,"data":[2,5,3,0,3,0,5,4,1,0]}"#,
         );
-
-        test_serialization(
-            &SemanticTokensEdit {
-                start: 0,
-                delete_count: 1,
-                data: None,
-            },
-            r#"{"start":0,"deleteCount":1}"#,
-        );
+        assert_json(&edit(None), r#"{"start":0,"deleteCount":1}"#);
     }
 }

@@ -21,13 +21,11 @@ fn r(player: Player) {
 
 fn completion_items(ws: &mut LspWorkspace, path: &std::path::Path) -> Vec<CompletionItem> {
     let params = CompletionParams {
-        text_document_position: TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier {
-                uri: Uri::from_file_path(path.to_str().unwrap()).unwrap(),
-            },
-            // cursor after `pg` inside `sfx(...)`.
-            position: Position::new(5, 8),
+        text_document: TextDocumentIdentifier {
+            uri: Uri::from_file_path(path.to_str().unwrap()).unwrap(),
         },
+        // cursor after `pg` inside `sfx(...)`.
+        position: Position::new(5, 8),
         context: None,
     };
     do_completion_workspace(ws, &params)

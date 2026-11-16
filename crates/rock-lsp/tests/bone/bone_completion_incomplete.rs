@@ -30,13 +30,11 @@ fn bone_completion_is_marked_incomplete() {
     ws.bone.update(path.to_str().unwrap(), SRC.to_string());
 
     let params = CompletionParams {
-        text_document_position: TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier {
-                uri: Uri::from_file_path(path.to_str().unwrap()).unwrap(),
-            },
-            // cursor after `pg` inside `sfx(...)` (line 5, char 8).
-            position: Position::new(5, 8),
+        text_document: TextDocumentIdentifier {
+            uri: Uri::from_file_path(path.to_str().unwrap()).unwrap(),
         },
+        // cursor after `pg` inside `sfx(...)` (line 5, char 8).
+        position: Position::new(5, 8),
         context: None,
     };
 

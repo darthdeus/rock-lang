@@ -1,4 +1,4 @@
-#[derive(Eq, PartialEq, Clone, Copy)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
 pub struct MessageType(i32);
 lsp_enum! {
 impl MessageType {
@@ -20,7 +20,7 @@ pub struct ShowMessageParams {
 }
 
 impl_lsp_struct!(
-    ShowMessageParams,
+    out ShowMessageParams,
     required {
         typ: MessageType = "type",
         message: String = "message",

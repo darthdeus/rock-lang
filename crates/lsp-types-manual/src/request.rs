@@ -2,9 +2,10 @@ use super::*;
 
 use serde::{de::DeserializeOwned, Serialize};
 
+/// A request the server answers: what it reads and what it sends back.
 pub trait Request {
-    type Params: DeserializeOwned + Serialize + Send + Sync + 'static;
-    type Result: DeserializeOwned + Serialize + Send + Sync + 'static;
+    type Params: DeserializeOwned;
+    type Result: Serialize;
     const METHOD: &'static str;
 }
 

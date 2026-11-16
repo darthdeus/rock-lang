@@ -15,7 +15,7 @@ pub struct InlayHint {
     pub data: Option<LSPAny>,
 }
 
-impl_lsp_struct!(InlayHint,
+impl_lsp_struct!(out InlayHint,
     required {
         position: Position = "position",
         label: InlayHintLabel = "label",
@@ -36,10 +36,7 @@ pub enum InlayHintLabel {
     LabelParts(Vec<InlayHintLabelPart>),
 }
 
-impl_untagged_enum!(InlayHintLabel {
-    LabelParts(Vec<InlayHintLabelPart>),
-    String(String),
-});
+impl_untagged_enum!(InlayHintLabel { LabelParts, String });
 
 impl From<String> for InlayHintLabel {
     #[inline]
@@ -62,8 +59,8 @@ pub enum InlayHintTooltip {
 }
 
 impl_untagged_enum!(InlayHintTooltip {
-    MarkupContent(MarkupContent),
-    String(String),
+    MarkupContent,
+    String,
 });
 
 impl From<String> for InlayHintTooltip {
@@ -91,7 +88,7 @@ pub struct InlayHintLabelPart {
 }
 
 impl_lsp_struct!(
-    InlayHintLabelPart,
+    out InlayHintLabelPart,
     required {
         value: String = "value"
     },
@@ -109,8 +106,8 @@ pub enum InlayHintLabelPartTooltip {
 }
 
 impl_untagged_enum!(InlayHintLabelPartTooltip {
-    MarkupContent(MarkupContent),
-    String(String),
+    MarkupContent,
+    String,
 });
 
 impl From<String> for InlayHintLabelPartTooltip {
@@ -130,7 +127,7 @@ impl From<MarkupContent> for InlayHintLabelPartTooltip {
 /// Inlay hint kinds.
 ///
 /// @since 3.17.0
-#[derive(Eq, PartialEq, Copy, Clone)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
 pub struct InlayHintKind(i32);
 lsp_enum! {
 impl InlayHintKind {

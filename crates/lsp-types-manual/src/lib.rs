@@ -10,66 +10,15 @@ Based on: <https://microsoft.github.io/language-server-protocol/specification>
 #[macro_use]
 mod macros;
 
-use std::{collections::HashMap, fmt::Debug};
+use std::collections::HashMap;
 
 use serde_json::Value;
-
-/// Decode an optional serde field while preserving errors for invalid values.
-/// A missing or explicit `null` field becomes `None`.
-pub(crate) fn deserialize_optional<T, E>(value: Option<Value>) -> Result<Option<T>, E>
-where
-    T: serde::de::DeserializeOwned,
-    E: serde::de::Error,
-{
-    match value {
-        Some(value) => serde_json::from_value::<Option<T>>(value).map_err(E::custom),
-        None => Ok(None),
-    }
-}
 
 pub use uri::Uri;
 mod uri;
 
-// Large enough to contain any enumeration name defined in this crate
-type PascalCaseBuf = [u8; 32];
-const fn fmt_pascal_case_const(name: &str) -> (PascalCaseBuf, usize) {
-    let mut buf = [0; 32];
-    let mut buf_i = 0;
-    let mut name_i = 0;
-    let name = name.as_bytes();
-    while name_i < name.len() {
-        let first = name[name_i];
-        name_i += 1;
-
-        buf[buf_i] = first;
-        buf_i += 1;
-
-        while name_i < name.len() {
-            let rest = name[name_i];
-            name_i += 1;
-            if rest == b'_' {
-                break;
-            }
-
-            buf[buf_i] = rest.to_ascii_lowercase();
-            buf_i += 1;
-        }
-    }
-    (buf, buf_i)
-}
-
-fn fmt_pascal_case(f: &mut std::fmt::Formatter<'_>, name: &str) -> std::fmt::Result {
-    for word in name.split('_') {
-        let mut chars = word.chars();
-        let first = chars.next().unwrap();
-        write!(f, "{}", first)?;
-        for rest in chars {
-            write!(f, "{}", rest.to_lowercase())?;
-        }
-    }
-    Ok(())
-}
-
+/// Declare the named values of an LSP integer enum and serialize it as that
+/// integer.
 macro_rules! lsp_enum {
     (impl $typ: ident { $( $(#[$attr:meta])* pub const $name: ident : $enum_type: ty = $value: expr; )* }) => {
         impl $typ {
@@ -77,33 +26,6 @@ macro_rules! lsp_enum {
             $(#[$attr])*
             pub const $name: $enum_type = $value;
             )*
-        }
-
-        impl std::fmt::Debug for $typ {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                match *self {
-                    $(
-                    Self::$name => crate::fmt_pascal_case(f, stringify!($name)),
-                    )*
-                    _ => write!(f, "{}({})", stringify!($typ), self.0),
-                }
-            }
-        }
-
-        impl std::convert::TryFrom<&str> for $typ {
-            type Error = &'static str;
-            fn try_from(value: &str) -> Result<Self, Self::Error> {
-                match () {
-                    $(
-                        _ if {
-                            const X: (crate::PascalCaseBuf, usize) = crate::fmt_pascal_case_const(stringify!($name));
-                            let (buf, len) = X;
-                            &buf[..len] == value.as_bytes()
-                        } => Ok(Self::$name),
-                    )*
-                    _ => Err("unknown enum variant"),
-                }
-            }
         }
 
         impl serde::Serialize for $typ {
@@ -117,11 +39,9 @@ macro_rules! lsp_enum {
                 Ok(Self(i32::deserialize(d)?))
             }
         }
-
     }
 }
 
-pub mod notification;
 pub mod request;
 
 mod code_action;
@@ -162,14 +82,18 @@ pub enum NumberOrString {
     String(String),
 }
 
-impl_untagged_enum!(NumberOrString {
-    Number(i32),
-    String(String),
-});
+impl_untagged_enum!(NumberOrString { Number, String });
 
-/* ----------------- Cancel support ----------------- */
-
-/* ----------------- Basic JSON Structures ----------------- */
+impl<'de> serde::Deserialize<'de> for NumberOrString {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match Value::deserialize(d)? {
+            Value::String(s) => Ok(NumberOrString::String(s)),
+            other => serde_json::from_value(other)
+                .map(NumberOrString::Number)
+                .map_err(serde::de::Error::custom),
+        }
+    }
+}
 
 /// The LSP any type
 ///
@@ -191,7 +115,7 @@ pub struct Position {
 }
 
 impl_lsp_struct!(
-    Position,
+    both Position,
     required {
         line: u32 = "line",
         character: u32 = "character",
@@ -216,7 +140,7 @@ pub struct Range {
 }
 
 impl_lsp_struct!(
-    Range,
+    both Range,
     required {
         start: Position = "start",
         end: Position = "end",
@@ -238,7 +162,7 @@ pub struct Location {
 }
 
 impl_lsp_struct!(
-    Location,
+    out Location,
     required {
         uri: Uri = "uri",
         range: Range = "range",
@@ -275,7 +199,7 @@ pub struct Diagnostic {
 }
 
 impl_lsp_struct!(
-    Diagnostic,
+    both Diagnostic,
     required {
         range: Range = "range",
         message: String = "message"
@@ -289,7 +213,7 @@ impl_lsp_struct!(
 );
 
 /// The protocol currently supports the following diagnostic severities:
-#[derive(Eq, PartialEq, Ord, PartialOrd, Clone, Copy)]
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone, Copy)]
 pub struct DiagnosticSeverity(i32);
 lsp_enum! {
 impl DiagnosticSeverity {
@@ -320,7 +244,7 @@ pub struct Command {
     pub arguments: Option<Vec<Value>>,
 }
 
-impl_lsp_struct!(Command,
+impl_lsp_struct!(out Command,
     required {
         title: String = "title",
         command: String = "command",
@@ -346,7 +270,7 @@ pub struct TextEdit {
 }
 
 impl_lsp_struct!(
-    TextEdit,
+    out TextEdit,
     required {
         range: Range = "range",
         new_text: String = "newText",
@@ -361,7 +285,7 @@ pub struct WorkspaceEdit {
     pub changes: Option<HashMap<Uri, Vec<TextEdit>>>, //    changes?: { [uri: string]: TextEdit[]; };
 }
 
-impl_lsp_struct!(WorkspaceEdit,
+impl_lsp_struct!(out WorkspaceEdit,
     required {},
     optional {
         changes: HashMap<Uri, Vec<TextEdit>> = "changes",
@@ -385,7 +309,7 @@ pub struct TextDocumentIdentifier {
 }
 
 impl_lsp_struct!(
-    TextDocumentIdentifier,
+    in TextDocumentIdentifier,
     required { uri: Uri = "uri" },
     optional {}
 );
@@ -397,7 +321,7 @@ pub struct TextDocumentParams {
 }
 
 impl_lsp_struct!(
-    TextDocumentParams,
+    in TextDocumentParams,
     required {
         text_document: TextDocumentIdentifier = "textDocument"
     },
@@ -412,7 +336,7 @@ pub struct TextDocumentRangeParams {
 }
 
 impl_lsp_struct!(
-    TextDocumentRangeParams,
+    in TextDocumentRangeParams,
     required {
         text_document: TextDocumentIdentifier = "textDocument",
         range: Range = "range",
@@ -431,7 +355,7 @@ pub struct TextDocumentPositionParams {
 }
 
 impl_lsp_struct!(
-    TextDocumentPositionParams,
+    in TextDocumentPositionParams,
     required {
         text_document: TextDocumentIdentifier = "textDocument",
         position: Position = "position",
@@ -440,7 +364,7 @@ impl_lsp_struct!(
 );
 
 /// A symbol kind.
-#[derive(Eq, PartialEq, Copy, Clone)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
 pub struct SymbolKind(i32);
 lsp_enum! {
 impl SymbolKind {
@@ -485,7 +409,7 @@ pub struct PublishDiagnosticsParams {
     pub version: Option<i32>,
 }
 
-impl_lsp_struct!(PublishDiagnosticsParams,
+impl_lsp_struct!(out PublishDiagnosticsParams,
     required {
         uri: Uri = "uri",
         diagnostics: Vec<Diagnostic> = "diagnostics",
@@ -500,8 +424,8 @@ pub enum Documentation {
 }
 
 impl_untagged_enum!(Documentation {
-    MarkupContent(MarkupContent),
-    String(String),
+    MarkupContent,
+    String,
 });
 
 /// MarkedString can be used to render human readable text. It is either a
@@ -521,8 +445,8 @@ pub enum MarkedString {
 }
 
 impl_untagged_enum!(MarkedString {
-    LanguageString(LanguageString),
-    String(String),
+    LanguageString,
+    String,
 });
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -532,7 +456,7 @@ pub struct LanguageString {
 }
 
 impl_lsp_struct!(
-    LanguageString,
+    out LanguageString,
     required {
         language: String = "language",
         value: String = "value",
@@ -548,7 +472,7 @@ pub struct ExecuteCommandParams {
     pub arguments: Vec<Value>,
 }
 
-impl_lsp_struct!(ExecuteCommandParams,
+impl_lsp_struct!(in ExecuteCommandParams,
     required {
         command: String = "command",
         arguments: Vec<Value> = "arguments",
@@ -569,7 +493,14 @@ pub enum MarkupKind {
     Markdown,
 }
 
-impl_str_enum!(MarkupKind { PlainText = "plaintext", Markdown = "markdown" });
+impl serde::Serialize for MarkupKind {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(match self {
+            MarkupKind::PlainText => "plaintext",
+            MarkupKind::Markdown => "markdown",
+        })
+    }
+}
 
 /// A `MarkupContent` literal represents a string value which content can be represented in different formats.
 /// Currently `plaintext` and `markdown` are supported formats. A `MarkupContent` is usually used in
@@ -601,7 +532,7 @@ pub struct MarkupContent {
 }
 
 impl_lsp_struct!(
-    MarkupContent,
+    out MarkupContent,
     required {
         kind: MarkupKind = "kind",
         value: String = "value",
@@ -612,7 +543,7 @@ impl_lsp_struct!(
 /// Symbol tags are extra annotations that tweak the rendering of a symbol.
 ///
 /// @since 3.16.0
-#[derive(Eq, PartialEq, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct SymbolTag(i32);
 lsp_enum! {
 impl SymbolTag {
@@ -623,40 +554,25 @@ impl SymbolTag {
 
 #[cfg(test)]
 mod tests {
-    use serde::{Deserialize, Serialize};
-
     use super::*;
 
-    pub(crate) fn test_serialization<SER>(ms: &SER, expected: &str)
-    where
-        SER: Serialize + for<'de> Deserialize<'de> + PartialEq + std::fmt::Debug,
-    {
-        let json_str = serde_json::to_string(ms).unwrap();
-        assert_eq!(&json_str, expected);
-        let deserialized: SER = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(&deserialized, ms);
-    }
-
-    pub(crate) fn test_deserialization<T>(json: &str, expected: &T)
-    where
-        T: for<'de> Deserialize<'de> + PartialEq + std::fmt::Debug,
-    {
-        let value = serde_json::from_str::<T>(json).unwrap();
-        assert_eq!(&value, expected);
+    pub(crate) fn assert_json<T: serde::Serialize>(value: &T, expected: &str) {
+        assert_eq!(serde_json::to_string(value).unwrap(), expected);
     }
 
     #[test]
     fn number_or_string() {
-        test_serialization(&NumberOrString::Number(123), r#"123"#);
-
-        test_serialization(&NumberOrString::String("abcd".into()), r#""abcd""#);
+        assert_json(&NumberOrString::Number(123), "123");
+        assert_json(&NumberOrString::String("abcd".into()), r#""abcd""#);
+        let read = |json| serde_json::from_str::<NumberOrString>(json).unwrap();
+        assert_eq!(read("123"), NumberOrString::Number(123));
+        assert_eq!(read(r#""abcd""#), NumberOrString::String("abcd".into()));
     }
 
     #[test]
     fn marked_string() {
-        test_serialization(&MarkedString::String("xxx".into()), r#""xxx""#);
-
-        test_serialization(
+        assert_json(&MarkedString::String("xxx".into()), r#""xxx""#);
+        assert_json(
             &MarkedString::LanguageString(LanguageString {
                 language: "lang".into(),
                 value: "code".into(),
@@ -666,35 +582,16 @@ mod tests {
     }
 
     #[test]
-    fn language_string() {
-        test_serialization(
-            &LanguageString {
-                language: "LL".into(),
-                value: "VV".into(),
-            },
-            r#"{"language":"LL","value":"VV"}"#,
-        );
-    }
-
-    #[test]
     fn workspace_edit() {
-        test_serialization(
+        assert_json(
             &WorkspaceEdit {
-                changes: Some(vec![].into_iter().collect()),
+                changes: Some(HashMap::new()),
             },
             r#"{"changes":{}}"#,
         );
-
-        test_serialization(&WorkspaceEdit { changes: None }, r#"{}"#);
-
-        test_serialization(
-            &WorkspaceEdit {
-                changes: Some(
-                    vec![("file://test".parse().unwrap(), vec![])]
-                        .into_iter()
-                        .collect(),
-                ),
-            },
+        assert_json(&WorkspaceEdit { changes: None }, r#"{}"#);
+        assert_json(
+            &WorkspaceEdit::new(HashMap::from([("file://test".parse().unwrap(), vec![])])),
             r#"{"changes":{"file://test":[]}}"#,
         );
     }

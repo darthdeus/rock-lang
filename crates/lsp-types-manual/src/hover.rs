@@ -11,7 +11,7 @@ pub struct Hover {
 }
 
 impl_lsp_struct!(
-    Hover,
+    out Hover,
     required {
         contents: HoverContents = "contents"
     },
@@ -29,7 +29,7 @@ pub enum HoverContents {
 }
 
 impl_untagged_enum!(HoverContents {
-    Markup(MarkupContent),
-    Scalar(MarkedString),
-    Array(Vec<MarkedString>),
+    Markup,
+    Scalar,
+    Array,
 });

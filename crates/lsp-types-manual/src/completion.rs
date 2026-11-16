@@ -1,10 +1,10 @@
-use crate::{Command, Documentation, TextDocumentPositionParams, TextEdit};
+use crate::{Command, Documentation, Position, TextDocumentIdentifier, TextEdit};
 
 use serde_json::Value;
 use std::fmt::Debug;
 
 /// Defines how to interpret the insert text in a completion item
-#[derive(Eq, PartialEq, Clone, Copy)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
 pub struct InsertTextFormat(i32);
 lsp_enum! {
 impl InsertTextFormat {
@@ -14,7 +14,7 @@ impl InsertTextFormat {
 }
 
 /// The kind of a completion entry.
-#[derive(Eq, PartialEq, Clone, Copy)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
 pub struct CompletionItemKind(i32);
 lsp_enum! {
 impl CompletionItemKind {
@@ -48,17 +48,19 @@ impl CompletionItemKind {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct CompletionParams {
-    pub text_document_position: TextDocumentPositionParams,
+    pub text_document: TextDocumentIdentifier,
+    pub position: Position,
     pub context: Option<CompletionContext>,
 }
 
 impl_lsp_struct!(
-    CompletionParams,
+    in CompletionParams,
+    required {
+        text_document: TextDocumentIdentifier = "textDocument",
+        position: Position = "position",
+    },
     optional {
         context: CompletionContext = "context"
-    },
-    flatten {
-        text_document_position: TextDocumentPositionParams,
     }
 );
 
@@ -73,7 +75,7 @@ pub struct CompletionContext {
 }
 
 impl_lsp_struct!(
-    CompletionContext,
+    in CompletionContext,
     required {
         trigger_kind: CompletionTriggerKind = "triggerKind"
     },
@@ -83,7 +85,7 @@ impl_lsp_struct!(
 );
 
 /// How a completion was triggered.
-#[derive(Eq, PartialEq, Clone, Copy)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
 pub struct CompletionTriggerKind(i32);
 lsp_enum! {
 impl CompletionTriggerKind {
@@ -105,7 +107,7 @@ pub struct CompletionList {
     pub items: Vec<CompletionItem>,
 }
 
-impl_lsp_struct!(CompletionList,
+impl_lsp_struct!(out CompletionList,
     required {
         is_incomplete: bool = "isIncomplete",
         items: Vec<CompletionItem> = "items",
@@ -173,7 +175,7 @@ pub struct CompletionItem {
     pub data: Option<Value>,
 }
 
-impl_lsp_struct!(CompletionItem,
+impl_lsp_struct!(out CompletionItem,
     required { label: String = "label" },
     optional {
         label_details: CompletionItemLabelDetails = "labelDetails",
@@ -208,34 +210,10 @@ pub struct CompletionItemLabelDetails {
 }
 
 impl_lsp_struct!(
-    CompletionItemLabelDetails,
+    out CompletionItemLabelDetails,
     required {},
     optional {
         detail: String = "detail",
         description: String = "description",
     }
 );
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_debug_enum() {
-        assert_eq!(format!("{:?}", CompletionItemKind::TEXT), "Text");
-        assert_eq!(
-            format!("{:?}", CompletionItemKind::TYPE_PARAMETER),
-            "TypeParameter"
-        );
-    }
-
-    #[test]
-    fn test_try_from_enum() {
-        use std::convert::TryInto;
-        assert_eq!("Text".try_into(), Ok(CompletionItemKind::TEXT));
-        assert_eq!(
-            "TypeParameter".try_into(),
-            Ok(CompletionItemKind::TYPE_PARAMETER)
-        );
-    }
-}

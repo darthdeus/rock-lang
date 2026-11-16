@@ -22,12 +22,10 @@ fn labels_at(line: u32, ch: u32) -> Vec<String> {
     ws.bone.update(path.to_str().unwrap(), SRC.to_string());
 
     let params = CompletionParams {
-        text_document_position: TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier {
-                uri: Uri::from_file_path(path.to_str().unwrap()).unwrap(),
-            },
-            position: Position::new(line, ch),
+        text_document: TextDocumentIdentifier {
+            uri: Uri::from_file_path(path.to_str().unwrap()).unwrap(),
         },
+        position: Position::new(line, ch),
         context: None,
     };
 
