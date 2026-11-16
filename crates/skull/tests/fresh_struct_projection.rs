@@ -1,4 +1,4 @@
-use crate::common::{compile_and_run, emit_module, function_body, run_luajit};
+use crate::common::{emit_module, function_body, run_luajit, run_main};
 
 const SOURCE: &str = r#"
 value FreshPair { x: int, y: int }
@@ -43,11 +43,7 @@ fn fresh_struct_projection_eliminates_the_unobservable_container() {
         assert!(!body.contains("__ty ="), "{body}");
         assert!(!body.contains("FreshPair_ct("), "{body}");
     }
-}
-
-#[test]
-fn fresh_struct_projection_keeps_operand_effects_and_escaping_mutation() {
-    assert_eq!(compile_and_run(SOURCE), "7 2\n7 23\n7 23\n26 2");
+    assert_eq!(run_main(&lua), "7 2\n7 23\n7 23\n26 2");
 }
 
 #[test]

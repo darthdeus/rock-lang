@@ -154,6 +154,22 @@ fn nullable_flat_enum_formats_null() {
     assert(absent_source_text(w.suspect) == "nil", "an absent stored flat enum")
 }
 
+nobox value FmtPos { x: int, y: int }
+enum FmtTarget { Idle, Tagged(FmtPos) }
+fn absent_target_text(t: FmtTarget?) -> string { return tostring(t) }
+fn absent_target_interp(t: FmtTarget?) -> string { return "{t}" }
+struct FmtHolder { target: FmtTarget? }
+
+@test
+fn nullable_flat_enum_with_a_nobox_payload_formats_null() {
+    assert(absent_target_text(null) == "nil", "tostring of an absent flat enum")
+    assert(absent_target_interp(null) == "nil", "interpolation of an absent flat enum")
+    let h = FmtHolder { target: null }
+    assert(absent_target_text(h.target) == "nil", "an absent stored flat enum")
+    let present = FmtTarget::Tagged(FmtPos { x: 3, y: 4 })
+    assert(absent_target_text(present) == "FmtTarget::Tagged(FmtPos {{ x: 3, y: 4 }})")
+}
+
 // --- Payload-free enums ---
 // All-unit enums are represented by an int ordinal, yet a `{x}` hole still
 // renders `<Enum>::<Variant>` from the static type, the same text inspect

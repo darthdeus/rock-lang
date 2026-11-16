@@ -113,22 +113,8 @@ fn value_struct_with_enum_field_has_cdef_int_not_table() {
     assert!(
         !lua.contains("_by_tag"),
         "the dead `by_tag` array must be gone:\n{lua}"
-    );
-}
-
-/// Runtime: construct + `match c.blend` + by-value pass `area(c)` (was crashing
-/// with `Cmd_ct` nil before scalarization). Can't live in `tests/` -- rock
-/// rejects a value struct with an enum field -- so it runs skull-only here.
-#[test]
-fn value_struct_with_enum_field_runs_correctly() {
-    require_luajit();
-    let emit = emit_mir(SRC);
-    let prog = emit.lua.clone();
-    let stdout = run_fn(&prog, "t");
-    assert!(
-        stdout.contains("5 Add 5"),
-        "expected '5 Add 5', got stdout={stdout:?}"
-    );
+    ); // Construct, `match c.blend`, and a by-value pass across the scalar ABI.
+    assert_eq!(run_fn(&lua, "t"), "5 Add 5");
 }
 
 /// Compile `src`, run its `fn_name` under luajit, and return the stdout.

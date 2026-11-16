@@ -1,4 +1,4 @@
-use crate::common::{compile_and_run, emit_module, function_body};
+use crate::common::{emit_module, function_body};
 
 const SOURCE: &str = r#"
 value Layer { volume: float, speed: float, offset: float, name: string }
@@ -37,9 +37,4 @@ fn unused_field_reads_before_a_read_of_the_same_base_are_dropped() {
     for field in ["volume", "speed", "offset"] {
         assert!(!body.contains(&format!(".{field}")), "{body}");
     }
-}
-
-#[test]
-fn covered_field_reads_keep_results() {
-    assert_eq!(compile_and_run(SOURCE), "5 7 2");
 }

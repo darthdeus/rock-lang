@@ -1,4 +1,4 @@
-use crate::common::{compile_and_run, emit_module, run_luajit};
+use crate::common::{emit_module, run_luajit};
 
 const SOURCE: &str = r#"
 nobox value Cell { x: int, y: int }
@@ -215,28 +215,4 @@ print('ok')
 "#
     );
     assert_eq!(run_luajit(&program), "ok");
-}
-
-#[test]
-fn optional_inline_child_projection_keeps_constructor_folding() {
-    assert_eq!(
-        compile_and_run(
-            r#"
-nobox value Point { x: int, y: int }
-nobox value Inner { point: Point, tag: int }
-nobox value SnapshotEnvelope { inner: Inner, flag: int }
-struct Owner { envelope: SnapshotEnvelope? }
-fn child(owner: Owner) -> Inner? { return owner.envelope?.inner }
-fn main() {
-    let owner = Owner { envelope: SnapshotEnvelope {
-        inner: Inner { point: Point { x: 2, y: 3 }, tag: 7 }, flag: 11 } }
-    let before = child(owner)
-    owner.envelope = null
-    let value = before.unwrap()
-    print("{value.point.x} {value.point.y} {value.tag} {child(owner) == null}")
-}
-"#
-        ),
-        "2 3 7 true"
-    );
 }

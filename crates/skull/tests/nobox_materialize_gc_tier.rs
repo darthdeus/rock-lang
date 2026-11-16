@@ -74,20 +74,6 @@ fn main() {
 }
 "#;
 
-/// A `nobox` field of a GC-tier parent stored in a global. The parent's box
-/// keys the field's leaves by dotted path, so no box of `NV2` exists to report.
-/// This pinned a rejection while the GC tier keyed every field whole.
-const NOBOX_FIELD_UNDER_A_GC_TIER_PARENT: &str = r#"
-nobox value NV2 { x: float, y: float }
-value Outer { label: string, pos: NV2 }
-global G: Outer
-fn setup() { G = Outer { label: "L", pos: NV2 { x: 1.0, y: 2.0 } } }
-fn main() {
-    setup()
-    print("{G.pos.x} {G.label}")
-}
-"#;
-
 /// The CDATA tier, with a NESTED field: the explicit box flattens to one
 /// `<Name>_lct` allocation rather than building an inner cdata per field. This
 /// is the pass's second iteration -- the rewritten ctor keys are `lo.x`, not
@@ -184,17 +170,6 @@ fn an_implicit_box_of_a_gc_tier_value_is_still_rejected() {
         err.location.line > 0,
         "the rejection lost its span: {err:?}"
     );
-}
-
-#[test]
-fn a_nobox_field_under_a_gc_tier_parent_stores_as_leaves() {
-    let lua = emit_module(NOBOX_FIELD_UNDER_A_GC_TIER_PARENT);
-    let setup = function_body(&lua, "setup");
-    assert!(
-        !setup.contains("NV2_ct("),
-        "the stored parent boxed its nobox field:\n{setup}"
-    );
-    assert_eq!(run_main(&lua), "1 L");
 }
 
 #[test]

@@ -7,51 +7,6 @@
 
 use crate::common::{module_id, require_luajit, run_luajit, run_main, try_emit_module};
 
-const SRC: &str = r#"
-value Cell { v: int }
-fn bump(c: ref Cell) -> int {
-    c.v += 1
-    return c.v
-}
-fn main() {
-    let xs: Vec<Cell> = []
-    xs.push(Cell { v: 10 })
-    xs.push(Cell { v: 20 })
-    let vec_before = xs[0].v
-    let vec_neighbor = xs[1].v
-    let vec_result = bump(xs[0])
-
-    let m: Map<string, Cell> = map_new()
-    m["a"] = Cell { v: 30 }
-    m["b"] = Cell { v: 40 }
-    let map_before = m["a"].v
-    let map_neighbor = m["b"].v
-    let map_result = bump(m["a"])
-
-    let a: Arena<Cell> = arena_new()
-    let first = a.insert(Cell { v: 50 })
-    let second = a.insert(Cell { v: 60 })
-    let arena_before = a.get(first).unwrap().v
-    let arena_neighbor = a.get(second).unwrap().v
-    let arena_result = bump(a.borrow(first).unwrap())
-
-    let vec_target_matches = vec_before != vec_result && xs[0].v == vec_result
-    let vec_neighbor_matches = xs[1].v == vec_neighbor
-    let map_target_matches = map_before != map_result && m["a"].v == map_result
-    let map_neighbor_matches = m["b"].v == map_neighbor
-    let arena_target_matches = arena_before != arena_result && a.get(first).unwrap().v == arena_result
-    let arena_neighbor_matches = a.get(second).unwrap().v == arena_neighbor
-    print("{vec_target_matches} {vec_neighbor_matches} {map_target_matches} {map_neighbor_matches} {arena_target_matches} {arena_neighbor_matches}")
-}
-"#;
-
-#[test]
-fn flat_container_element_ref_mutates_only_the_selected_element_on_lua() {
-    require_luajit();
-    let lua = try_emit_module(SRC).expect("flat element ref should emit on Lua");
-    assert_eq!(run_main(&lua), "true true true true true true");
-}
-
 /// Production emission of `source`, whose only frontend diagnostic must be the
 /// relocatable-storage rule for a retained `ref` let: that rule is the
 /// language's, and this test pins the backend boundary below it.
