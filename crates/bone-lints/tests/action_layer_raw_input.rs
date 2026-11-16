@@ -2,23 +2,13 @@
 //! markdown or source-text inventory.
 
 use crate::support;
-use bone_lints::{Finding, LintOptions, RAW_INPUT_MIGRATION, lint_workspace};
-use bone_semantic::prelude::*;
+use bone_lints::{Finding, LintOptions, RAW_INPUT_MIGRATION};
 
 const FILE: &str = "<action_layer_raw_input>";
 
 fn findings(src: &str, options: &LintOptions) -> Vec<Finding> {
-    let ast = skull_parser::parse_module_clean(src, Ustr::from(FILE)).expect("parse");
-    let ws = semantic_pass(&mut [ast]).expect("clean program typechecks");
-    let mut sources = FxHashMap::default();
-    sources.insert(Ustr::from(FILE), src);
-    lint_workspace(
-        &ws,
-        &FxHashSet::default(),
-        true,
-        &sources,
-        &options.clone().with_action_policy(Some(&support::POLICY)),
-    )
+    let options = options.clone().with_action_policy(Some(&support::POLICY));
+    crate::lint(&[(FILE, src)], &options, true)
 }
 
 fn census(src: &str) -> Vec<Finding> {

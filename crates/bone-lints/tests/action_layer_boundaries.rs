@@ -1,22 +1,11 @@
 use crate::support;
 use bone_lints::{
     ACTION_CALLERS, Finding, LintOptions, RAW_INPUT_CLASSIFICATION, RAW_INPUT_MIGRATION,
-    lint_workspace,
 };
-use bone_semantic::prelude::*;
 
 fn findings(file: &str, src: &str, lint: &str) -> Vec<Finding> {
-    let ast = skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse");
-    let ws = semantic_pass(&mut [ast]).expect("clean program typechecks");
-    let mut sources = FxHashMap::default();
-    sources.insert(Ustr::from(file), src);
-    lint_workspace(
-        &ws,
-        &FxHashSet::default(),
-        true,
-        &sources,
-        &LintOptions::only([lint.to_owned()]).with_action_policy(Some(&support::POLICY)),
-    )
+    let options = LintOptions::only([lint.to_owned()]).with_action_policy(Some(&support::POLICY));
+    crate::lint(&[(file, src)], &options, true)
 }
 
 fn quoted_after(line: &str, marker: &str) -> Option<String> {

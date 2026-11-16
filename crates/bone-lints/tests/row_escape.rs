@@ -7,12 +7,7 @@
 
 use crate::support::lint_only;
 use bone_lints::{EscapeClass, EscapeKind, Finding};
-use bone_semantic::prelude::*;
 use rock_core::errors::CompilerErrorLevel;
-
-fn parse(src: &str) -> skull_parser::Ast {
-    skull_parser::parse_module_clean(src, Ustr::from("<row_escape>")).expect("parse")
-}
 
 fn lint(src: &str) -> Vec<Finding> {
     lint_only(&[("<row_escape>", src)], bone_lints::ROW_ESCAPE)
@@ -324,17 +319,7 @@ fn default_tier_does_not_report_row_escape() {
     // bury the rest of the catalog on every build. Membership in OPT_IN_LINTS is
     // not the same claim -- this drives the runner both ways.
     let src = format!("{PRELUDE}\nfn leak(e: Entity<Mob>) -> Mob? {{\n    return e.get()\n}}\n");
-    let ws = semantic_pass(&mut [parse(&src)]).expect("typechecks");
-    let mut sources = FxHashMap::default();
-    sources.insert(Ustr::from("<row_escape>"), src.as_str());
-
-    let default_tier = bone_lints::lint_workspace(
-        &ws,
-        &FxHashSet::default(),
-        true,
-        &sources,
-        &Default::default(),
-    );
+    let default_tier = crate::lint(&[("<row_escape>", src.as_str())], &Default::default(), true);
     assert!(
         !default_tier
             .iter()
@@ -343,13 +328,7 @@ fn default_tier_does_not_report_row_escape() {
         default_tier.iter().map(|f| f.lint).collect::<Vec<_>>()
     );
 
-    let named = bone_lints::lint_workspace(
-        &ws,
-        &FxHashSet::default(),
-        true,
-        &sources,
-        &bone_lints::LintOptions::only([bone_lints::ROW_ESCAPE.to_string()]),
-    );
+    let named = lint(&src);
     assert_eq!(
         named
             .iter()

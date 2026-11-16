@@ -3,23 +3,26 @@
 //! segment, or they go silent (or noisy) the moment a package converts.
 
 use crate::support;
-use bone_lints::{ACTION_CALLERS, LintOptions, UNUSED_FN, lint_workspace};
+use bone_lints::{ACTION_CALLERS, Finding, LintOptions, UNUSED_FN};
 use bone_semantic::prelude::*;
 
-fn ws_v1(src: &str) -> Workspace {
-    let mut module = skull_parser::parse_module_clean_with_dialect(
-        src,
-        Ustr::from("main.rock"),
-        skull_parser::Dialect::V1,
-    )
-    .expect("parse");
-    module.package = Some(skull_parser::PackageTag {
-        id: 0,
-        self_name: "lintv1".to_string(),
-        identity_storage: Default::default(),
-        root: String::new(),
-    });
-    semantic_pass(&mut [module]).expect("clean program typechecks")
+fn lint_dialect(
+    src: &str,
+    file: &str,
+    dialect: skull_parser::Dialect,
+    options: &LintOptions,
+) -> Vec<Finding> {
+    let mut module = skull_parser::parse_module_clean_with_dialect(src, Ustr::from(file), dialect)
+        .expect("parse");
+    if dialect == skull_parser::Dialect::V1 {
+        module.package = Some(skull_parser::PackageTag {
+            id: 0,
+            self_name: "lintv1".to_string(),
+            identity_storage: Default::default(),
+            root: String::new(),
+        });
+    }
+    crate::lint_asts(&mut [module], &[(file, src)], options, true)
 }
 
 #[test]
@@ -30,11 +33,9 @@ global SLOT: Task? = null
 fn abandon() { SLOT = null }
 fn main() { SLOT = Task { id: 1 }; abandon() }
 "#;
-    let ws = ws_v1(src);
-    let sources: FxHashMap<Ustr, &str> = [(Ustr::from("main.rock"), src)].into_iter().collect();
     let options = LintOptions::only(["task_null_abandon".to_owned()]);
     assert_eq!(
-        lint_workspace(&ws, &FxHashSet::default(), true, &sources, &options).len(),
+        lint_dialect(src, "main.rock", skull_parser::Dialect::V1, &options).len(),
         1,
         "a v1 `Task?` slot set to null must be flagged"
     );
@@ -43,10 +44,8 @@ fn main() { SLOT = Task { id: 1 }; abandon() }
 #[test]
 fn v1_main_is_a_reachability_root() {
     let src = "fn main() { used() }\nfn used() {}\nfn dead() {}";
-    let ws = ws_v1(src);
-    let sources: FxHashMap<Ustr, &str> = [(Ustr::from("main.rock"), src)].into_iter().collect();
     let options = LintOptions::only([UNUSED_FN.to_owned()]);
-    let findings = lint_workspace(&ws, &FxHashSet::default(), true, &sources, &options);
+    let findings = lint_dialect(src, "main.rock", skull_parser::Dialect::V1, &options);
     let mut names: Vec<String> = findings.iter().map(support::quoted).collect();
     names.sort();
     assert_eq!(
@@ -57,30 +56,12 @@ fn v1_main_is_a_reachability_root() {
 }
 
 fn action_gaps(src: &str, dialect: skull_parser::Dialect) -> Vec<String> {
-    let file = Ustr::from("app/actions.rock");
-    let mut module =
-        skull_parser::parse_module_clean_with_dialect(src, file, dialect).expect("parse");
-    if dialect == skull_parser::Dialect::V1 {
-        module.package = Some(skull_parser::PackageTag {
-            id: 0,
-            self_name: "lintv1".to_string(),
-            identity_storage: Default::default(),
-            root: String::new(),
-        });
-    }
-    let ws = semantic_pass(&mut [module]).expect("clean program typechecks");
-    let mut sources = FxHashMap::default();
-    sources.insert(file, src);
-    lint_workspace(
-        &ws,
-        &FxHashSet::default(),
-        true,
-        &sources,
-        &LintOptions::only([ACTION_CALLERS.to_owned()]).with_action_policy(Some(&support::POLICY)),
-    )
-    .iter()
-    .map(|finding| finding.error.message.clone())
-    .collect()
+    let options =
+        LintOptions::only([ACTION_CALLERS.to_owned()]).with_action_policy(Some(&support::POLICY));
+    lint_dialect(src, "app/actions.rock", dialect, &options)
+        .iter()
+        .map(|finding| finding.error.message.clone())
+        .collect()
 }
 
 // The configured `action_new` and `refresh_action_defaults` register actions;

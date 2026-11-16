@@ -1,5 +1,30 @@
 // One harness avoids linking the compiler into a separate binary per test file.
+use bone_lints::{Finding, LintOptions, lint_workspace};
+use bone_semantic::prelude::*;
+
 mod support;
+
+fn lint(files: &[(&str, &str)], options: &LintOptions, is_bin: bool) -> Vec<Finding> {
+    let mut asts: Vec<skull_parser::Ast> = files
+        .iter()
+        .map(|(name, src)| skull_parser::parse_module_clean(src, Ustr::from(name)).expect("parse"))
+        .collect();
+    lint_asts(&mut asts, files, options, is_bin)
+}
+
+fn lint_asts(
+    asts: &mut [skull_parser::Ast],
+    files: &[(&str, &str)],
+    options: &LintOptions,
+    is_bin: bool,
+) -> Vec<Finding> {
+    let ws = semantic_pass(asts).expect("clean program typechecks");
+    let sources: FxHashMap<Ustr, &str> = files
+        .iter()
+        .map(|(name, src)| (Ustr::from(name), *src))
+        .collect();
+    lint_workspace(&ws, &FxHashSet::default(), is_bin, &sources, options)
+}
 
 mod action_layer_boundaries;
 mod action_layer_raw_input;

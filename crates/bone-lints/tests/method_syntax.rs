@@ -1,7 +1,7 @@
 //! `method_syntax`: a free function whose first param is a user type, written
 //! in prefix form (`fn damage(m: Mob, n: int)`) rather than receiver form
 //! (`fn Mob.damage(m, n: int)`). Opt-in, so a project can be converted a file at
-//! a time instead of in one sweep. Harness mirrors catalog.rs.
+//! a time instead of in one sweep.
 
 use bone_lints::{Finding, LintOptions, lint_workspace};
 use bone_semantic::prelude::*;
@@ -13,10 +13,7 @@ fn parse(src: &str) -> skull_parser::Ast {
 }
 
 fn findings_with(src: &str, sel: &LintOptions) -> Vec<Finding> {
-    let ws = semantic_pass(&mut [parse(src)]).expect("clean program typechecks");
-    let mut sources = FxHashMap::default();
-    sources.insert(Ustr::from(FILE), src);
-    lint_workspace(&ws, &FxHashSet::default(), true, &sources, sel)
+    crate::lint(&[(FILE, src)], sel, true)
 }
 
 /// The lint on its own: `--lints=method_syntax`, so no other lint's findings

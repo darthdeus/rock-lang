@@ -1,6 +1,6 @@
 //! The catalog runner: the surface-facing entry points every consumer (LSP,
 //! `rock lint`, the build pass) drives, so no surface assembles the lint list
-//! itself. Harness mirrors unused_var.rs.
+//! itself.
 
 use bone_lints::{Finding, KNOWN_LINTS, LintOptions, lint_workspace};
 use bone_semantic::prelude::*;
@@ -17,10 +17,7 @@ fn findings(src: &str) -> Vec<Finding> {
 }
 
 fn findings_with(src: &str, options: &LintOptions) -> Vec<Finding> {
-    let ws = semantic_pass(&mut [parse(src)]).expect("clean program typechecks");
-    let mut sources = FxHashMap::default();
-    sources.insert(Ustr::from(FILE), src);
-    lint_workspace(&ws, &FxHashSet::default(), true, &sources, options)
+    crate::lint(&[(FILE, src)], options, true)
 }
 
 fn lints_of(src: &str) -> Vec<&'static str> {
@@ -92,16 +89,7 @@ fn suppression_is_matched_per_lint_name() {
 #[test]
 fn unused_fn_is_gated_on_bin_packages() {
     let src = "fn dead() -> int { 1 }\nfn main() {}";
-    let ws = semantic_pass(&mut [parse(src)]).expect("typechecks");
-    let mut sources = FxHashMap::default();
-    sources.insert(Ustr::from(FILE), src);
-    let lib = lint_workspace(
-        &ws,
-        &FxHashSet::default(),
-        false,
-        &sources,
-        &Default::default(),
-    );
+    let lib = crate::lint(&[(FILE, src)], &Default::default(), false);
     assert!(
         lib.is_empty(),
         "a lib's public fn has no in-project caller, got {lib:?}"
