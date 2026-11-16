@@ -1,7 +1,7 @@
 //! GUARD: goto-definition on a macro INVOCATION name jumps to the `macro` decl,
 //! not to a token from the spliced expansion.
 //!
-//! Macro expansion erases the invocation and `retag_block` stamps the whole
+//! Macro expansion erases the invocation and its instantiating copy stamps the whole
 //! invocation span onto every expanded template node, so a body-first
 //! definition lookup at the call site resolves whatever expanded token now sits
 //! there (canonically `enum Wait` inside the `run_into` body). The fix reads the

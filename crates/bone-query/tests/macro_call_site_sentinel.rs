@@ -5,7 +5,7 @@
 // Mechanics: semantic tokens classify raw-source ident tokens HIR-first (by
 // span-start offset), falling back to the workspace name map where macro
 // names live. Macro expansion replaces the call expr with the template body
-// and `retag_block` stamps the WHOLE invocation's span onto every expanded
+// and the instantiating copy stamps the WHOLE invocation's span onto every expanded
 // template node -- so a template-side `Global(SPEED)` ends up with a span
 // whose START is the call-site ident's first byte, and its HIR entry
 // (variable+static) used to beat the name map's MACRO at exactly that offset.

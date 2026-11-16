@@ -537,13 +537,13 @@ fn expand_item_macro(
         }
     }
 
-    // Graft the template items into the caller, substituting `expr` and
-    // `ident` args into expressions on the way, then `ty`/`ident` args.
+    // Graft the template items into the caller, substituting the args.
     let tmpl = &cands[idx];
-    let mut items = graft_items_with(&tmpl.tmpl, ast, &tmpl.items, Fragments(expr_subs));
-    for it in &mut items {
-        subst_in_item(ast, it, &ty_subs);
-    }
+    let fragments = Fragments {
+        exprs: expr_subs,
+        types: ty_subs,
+    };
+    let items = graft_items_with(&tmpl.tmpl, ast, &tmpl.items, fragments);
     // Macro-generated module headers, `mod` declarations, and `use`
     // declarations are rejected: file/module/import selection is
     // fixed before expansion, so generated ones would mis-scope output.
@@ -1107,206 +1107,21 @@ fn expr_to_type_expr(ast: &mut Ast, e: Idx<ExprData>) -> Option<Idx<TypeExprData
     }
 }
 
-/// Rewrite a binder name if it matches an `ident`-fragment whose replacement is
-/// itself an `Ident` type (struct/fn/field/enum names).
-fn replace_ident_name(ast: &Ast, id: &mut Ident, ty_subs: &UstrMap<Idx<TypeExprData>>) {
-    if let Some(&t) = ty_subs.get(&id.name) {
-        if let TypeExprKind::Ident(new) = &ast.types[t].kind {
-            id.name = new.name;
-            id.span = new.span;
-        }
-    }
+/// An item macro's args, substituted where the spliced items name their
+/// params: `expr` and `ident` args in expressions, `ty` and `ident` args in
+/// types, and `ident` args in declared names.
+struct Fragments {
+    exprs: UstrMap<Idx<ExprData>>,
+    types: UstrMap<Idx<TypeExprData>>,
 }
-
-/// Substitute `ty`/`ident` fragments into a type subtree in place.
-fn subst_in_type(ast: &mut Ast, t: Idx<TypeExprData>, ty_subs: &UstrMap<Idx<TypeExprData>>) {
-    if ty_subs.is_empty() {
-        return;
-    }
-    match ast.types[t].kind.clone() {
-        TypeExprKind::Ident(id) => {
-            if let Some(&repl) = ty_subs.get(&id.name) {
-                let was_nullable = ast.types[t].is_nullable;
-                let repl_data = ast.types[repl].clone();
-                ast.types[t].kind = repl_data.kind;
-                ast.types[t].is_nullable = was_nullable || repl_data.is_nullable;
-            }
-        }
-        TypeExprKind::App { mut ctor, args } => {
-            if let Some(&repl) = ty_subs.get(&ctor.name) {
-                if let TypeExprKind::Ident(new) = &ast.types[repl].kind {
-                    ctor = new.clone();
-                    ast.types[t].kind = TypeExprKind::App {
-                        ctor,
-                        args: args.clone(),
-                    };
-                }
-            }
-            for a in args {
-                subst_in_type(ast, a, ty_subs);
-            }
-        }
-        TypeExprKind::Array(inner) => subst_in_type(ast, inner, ty_subs),
-        TypeExprKind::Ref(inner) => subst_in_type(ast, inner, ty_subs),
-        TypeExprKind::Tuple(items) => {
-            for it in items {
-                subst_in_type(ast, it, ty_subs);
-            }
-        }
-        TypeExprKind::Function { params, ret } => {
-            for p in params {
-                subst_in_type(ast, p, ty_subs);
-            }
-            subst_in_type(ast, ret, ty_subs);
-        }
-        _ => {}
-    }
-}
-
-/// Substitute fragments into a spliced item: `ident` into names, `ty` into type
-/// positions, `expr` into the body. Covers fn / struct / newtype / enum.
-fn subst_in_item(ast: &mut Ast, item: &mut Item, ty_subs: &UstrMap<Idx<TypeExprData>>) {
-    match &mut item.kind {
-        ItemKind::Function(f) => {
-            replace_ident_name(ast, &mut f.name, ty_subs);
-            let params = std::mem::take(&mut f.params);
-            let mut params = params;
-            for p in &mut params {
-                replace_ident_name(ast, &mut p.name, ty_subs);
-                subst_in_type(ast, p.ty, ty_subs);
-                if let Some(d) = p.default {
-                    subst_in_type_exprs(ast, d, ty_subs);
-                }
-            }
-            if let ItemKind::Function(f) = &mut item.kind {
-                f.params = params;
-                if let Some(rt) = f.return_ty {
-                    subst_in_type(ast, rt, ty_subs);
-                }
-                if let Some(body) = f.body.rock_block() {
-                    subst_in_type_exprs_block(ast, body, ty_subs);
-                }
-            }
-        }
-        ItemKind::Struct(s) => {
-            replace_ident_name(ast, &mut s.name, ty_subs);
-            let mut fields = std::mem::take(&mut s.fields);
-            for fl in &mut fields {
-                replace_ident_name(ast, &mut fl.name, ty_subs);
-                subst_in_type(ast, fl.ty, ty_subs);
-                if let Some(d) = fl.default {
-                    subst_in_type_exprs(ast, d, ty_subs);
-                }
-            }
-            if let ItemKind::Struct(s) = &mut item.kind {
-                s.fields = fields;
-            }
-        }
-        ItemKind::Newtype(n) => {
-            replace_ident_name(ast, &mut n.name, ty_subs);
-            subst_in_type(ast, n.wrapped, ty_subs);
-        }
-        ItemKind::Enum(e) => {
-            replace_ident_name(ast, &mut e.name, ty_subs);
-            let mut variants = std::mem::take(&mut e.variants);
-            for v in &mut variants {
-                match &mut v.kind {
-                    EnumVariantKind::Unit => {}
-                    EnumVariantKind::Tuple(tys) => {
-                        for &t in tys.iter() {
-                            subst_in_type(ast, t, ty_subs);
-                        }
-                    }
-                    EnumVariantKind::Record(fs) => {
-                        for fl in fs.iter_mut() {
-                            replace_ident_name(ast, &mut fl.name, ty_subs);
-                            subst_in_type(ast, fl.ty, ty_subs);
-                        }
-                    }
-                }
-            }
-            if let ItemKind::Enum(e) = &mut item.kind {
-                e.variants = variants;
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Walk a block and substitute `ty` fragments into embedded type annotations
-/// (`as`, ascription, lambda params).
-fn subst_in_type_exprs_block(
-    ast: &mut Ast,
-    b: Idx<BlockData>,
-    ty_subs: &UstrMap<Idx<TypeExprData>>,
-) {
-    if ty_subs.is_empty() {
-        return;
-    }
-    let stmts = ast.blocks[b].statements.clone();
-    for s in stmts {
-        if let StatementKind::Let(l) = &ast.stmts[s].kind {
-            if let Some(t) = l.ty {
-                subst_in_type(ast, t, ty_subs);
-            }
-        }
-        if let StatementKind::Static(st) = &ast.stmts[s].kind {
-            if let Some(t) = st.ty {
-                subst_in_type(ast, t, ty_subs);
-            }
-        }
-        let nested_fn_tys: Vec<Idx<TypeExprData>> =
-            if let StatementKind::NestedFn(f) = &ast.stmts[s].kind {
-                f.params.iter().map(|p| p.ty).chain(f.return_ty).collect()
-            } else {
-                Vec::new()
-            };
-        for t in nested_fn_tys {
-            subst_in_type(ast, t, ty_subs);
-        }
-        for e in stmt_exprs(ast, s) {
-            subst_in_type_exprs(ast, e, ty_subs);
-        }
-        for bl in stmt_blocks(ast, s) {
-            subst_in_type_exprs_block(ast, bl, ty_subs);
-        }
-    }
-}
-
-fn subst_in_type_exprs(ast: &mut Ast, e: Idx<ExprData>, ty_subs: &UstrMap<Idx<TypeExprData>>) {
-    match ast.exprs[e].kind.clone() {
-        ExprKind::As(inner, t)
-        | ExprKind::Bitcast(inner, t)
-        | ExprKind::TypeAscription(inner, t) => {
-            subst_in_type(ast, t, ty_subs);
-            subst_in_type_exprs(ast, inner, ty_subs);
-        }
-        ExprKind::Lambda { params, body, .. } => {
-            for p in params {
-                if let Some(t) = p.ty {
-                    subst_in_type(ast, t, ty_subs);
-                }
-            }
-            subst_in_type_exprs_block(ast, body, ty_subs);
-        }
-        _ => {
-            for c in child_exprs(ast, e) {
-                subst_in_type_exprs(ast, c, ty_subs);
-            }
-            for bl in child_blocks(ast, e) {
-                subst_in_type_exprs_block(ast, bl, ty_subs);
-            }
-        }
-    }
-}
-
-/// An item macro's `expr`/`ident` args, substituted where the spliced items
-/// reference their params.
-struct Fragments(UstrMap<Idx<ExprData>>);
 
 impl Rewrite for Fragments {
     fn arg(&self, name: Ustr) -> Option<Idx<ExprData>> {
-        self.0.get(&name).copied()
+        self.exprs.get(&name).copied()
+    }
+
+    fn ty_arg(&self, name: Ustr) -> Option<Idx<TypeExprData>> {
+        self.types.get(&name).copied()
     }
 }
 

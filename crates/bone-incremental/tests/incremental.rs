@@ -2360,7 +2360,7 @@ fn interface_edit_macro_body_change_relowers_users() {
     // The macro change re-expands use.rock and the now-`(base()) + 1.0` is
     // caught as a float/int mismatch, reported at the call site `use.rock` —
     // skull's macro expansion retags expanded-node spans to the invocation site
-    // (`retag_block` in skull-parser's `macro_expand`).
+    // (`Instantiation` in skull-parser's `macro_expand`).
     assert!(
         diags.iter().any(|e| e.location.file.as_str() == "use.rock"),
         "expected the now-float macro error to surface at the call site use.rock; got {diags:?}"

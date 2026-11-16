@@ -1,12 +1,8 @@
 // Item-level macros emitting non-fn type definitions: struct, newtype,
 // enum. Two invocations of the same macro must produce two
 // distinct types (their `name.id`, `field.id`, `variant.id` etc. all
-// minted afresh per splice). Substitution into the type's own ident
-// runs through `replace_ident_name` (`Name: ident` fragment).
-//
-// Pinned by `mint_item_ids` + `subst_in_item` in
-// `rock-optimizations/src/macro_expansion_pass.rs`. Was RED before
-// the mint extension landed.
+// minted afresh per splice). A `Name: ident` fragment renames the type
+// itself.
 
 // === STRUCT — basic two-invocation ident substitution ===
 
@@ -42,7 +38,7 @@ fn test_struct_ty_subst_into_field() {
 }
 
 // === STRUCT — field with a default expression that references a macro
-// `expr` arg. Tests substitute_expr_params running through field defaults. ===
+// `expr` arg. Tests substitution into field defaults. ===
 
 macro decl_with_default(Name: ident, init: expr) {
     struct Name { v: int = init }
@@ -268,4 +264,28 @@ fn test_enum_two_invocations() {
     assert(evaluate_choice_b(ChoiceB::Empty) == 0, "B unit")
     assert(evaluate_choice_b(ChoiceB::One(7)) == 70, "B tuple, distinct fn")
     assert(evaluate_choice_b(ChoiceB::Pair { a: 3, b: 4 }) == 12, "B record")
+}
+
+// === `ty` substitution reaches every type position in a body ===
+
+fn ty_identity<T>(v: T) -> T {
+    v
+}
+
+macro decl_first(Name: ident, Elem: ty) {
+    fn Name(xs: [Elem], fallback: Elem) -> Elem {
+        for x: Elem in xs {
+            return ty_identity<Elem>(x)
+        }
+        fallback
+    }
+}
+
+decl_first(first_int, int)
+decl_first(first_string, string)
+
+@test
+fn test_ty_subst_into_loop_and_generic_arg_types() {
+    assert(first_int([4, 5], 0) == 4, "int instance")
+    assert(first_string([], "none") == "none", "string instance")
 }

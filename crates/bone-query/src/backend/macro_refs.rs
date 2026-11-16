@@ -2,7 +2,7 @@
 //! raw (pre-expansion) `Ast` (`macro_param_refs`). Macros are erased before bone
 //! sees a module, so the macro definition has no HIR -- but the session keeps
 //! the raw `Ast`, and skull-parser's macro path records each param's decl + use
-//! spans there (`index_macro_param_refs`, the read-side twin of `subst_in_item`).
+//! spans there (`index_macro_param_refs`, the read-side twin of substitution).
 //! The IDE just finds the group covering the cursor.
 
 use skull_parser::ast::{ExprKind, ItemKind};

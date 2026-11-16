@@ -88,6 +88,11 @@ pub(crate) trait Rewrite {
     fn splat(&self, _name: Ustr) -> Option<&[Idx<ExprData>]> {
         None
     }
+    /// The type (in the destination arena) a type named `name` is replaced by;
+    /// a declaration named `name` takes its name when it is a bare identifier.
+    fn ty_arg(&self, _name: Ustr) -> Option<Idx<TypeExprData>> {
+        None
+    }
 }
 
 struct Plain;
@@ -177,7 +182,7 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
             ItemKind::Struct(s) => ItemKind::Struct(StructDef {
                 span: s.span,
                 keyword_span: s.keyword_span,
-                name: s.name.clone(),
+                name: self.decl(&s.name),
                 generics: self.generics(&s.generics),
                 fields: s.fields.iter().map(|fl| self.field(fl)).collect(),
                 is_value: s.is_value,
@@ -186,13 +191,13 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
             ItemKind::Enum(e) => ItemKind::Enum(EnumDef {
                 span: e.span,
                 keyword_span: e.keyword_span,
-                name: e.name.clone(),
+                name: self.decl(&e.name),
                 generics: self.generics(&e.generics),
                 variants: e.variants.iter().map(|v| self.variant(v)).collect(),
             }),
             ItemKind::Newtype(n) => ItemKind::Newtype(NewtypeDef {
                 span: n.span,
-                name: n.name.clone(),
+                name: self.decl(&n.name),
                 generics: self.generics(&n.generics),
                 wrapped: self.ty(n.wrapped),
             }),
@@ -219,7 +224,7 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
         FunctionDef {
             span: f.span,
             keyword_span: f.keyword_span,
-            name: f.name.clone(),
+            name: self.decl(&f.name),
             generics: self.generics(&f.generics),
             params: f.params.iter().map(|p| self.param(p)).collect(),
             params_span: f.params_span,
@@ -243,7 +248,7 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
     fn param(&mut self, p: &Param) -> Param {
         Param {
             span: p.span,
-            name: p.name.clone(),
+            name: self.decl(&p.name),
             ty: self.ty(p.ty),
             default: p.default.map(|e| self.expr(e)),
             is_variadic: p.is_variadic,
@@ -264,7 +269,7 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
     fn field(&mut self, fl: &Field) -> Field {
         Field {
             span: fl.span,
-            name: fl.name.clone(),
+            name: self.decl(&fl.name),
             ty: self.ty(fl.ty),
             vis: fl.vis.clone(),
             set_private: fl.set_private,
@@ -325,11 +330,18 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
     fn ty(&mut self, t: Idx<TypeExprData>) -> Idx<TypeExprData> {
         let src = self.src;
         let data = src.read(self.dst, |ast| &ast.types, t);
-        let kind = self.ty_kind(&data.kind);
+        let replaced = match &data.kind {
+            TypeExprKind::Ident(id) => self.rw.ty_arg(id.name).map(|r| &self.dst.types[r]),
+            _ => None,
+        };
+        let (kind, is_nullable) = match replaced {
+            Some(r) => (r.kind.clone(), data.is_nullable || r.is_nullable),
+            None => (self.ty_kind(&data.kind), data.is_nullable),
+        };
         self.dst.types.alloc(TypeExprData {
             span: data.span,
             kind,
-            is_nullable: data.is_nullable,
+            is_nullable,
         })
     }
 
@@ -438,6 +450,13 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
             span: self.rw.stamp().unwrap_or(data.span),
             kind,
         })
+    }
+
+    fn decl(&self, id: &Ident) -> Ident {
+        match self.rw.ty_arg(id.name).map(|r| &self.dst.types[r].kind) {
+            Some(TypeExprKind::Ident(new)) => new.clone(),
+            _ => id.clone(),
+        }
     }
 
     /// Copy `body` in a scope that `bind` first adds binders to.
@@ -803,7 +822,7 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
                 args: args.iter().map(|t| self.ty(*t)).collect(),
             },
             TypeExprKind::App { ctor, args } => TypeExprKind::App {
-                ctor: ctor.clone(),
+                ctor: self.decl(ctor),
                 args: args.iter().map(|t| self.ty(*t)).collect(),
             },
             TypeExprKind::Tuple(ts) => {

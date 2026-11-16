@@ -2,7 +2,7 @@
 //! substitute into declaration names, `ty` params into type positions,
 //! and the `!()` sigil call form lets a generic `Foo<int>` reach a `ty`
 //! slot (the `<` would otherwise parse as comparison). Implemented in
-//! `bone/src/macro_expansion.rs` (`expand_item_macro` + `subst_in_item`).
+//! `skull-parser`'s `macro_expand.rs` (`expand_item_macro`).
 
 //- ident_name_into_struct
 // `Name: ident` substitutes into the spliced struct's own name, so the
