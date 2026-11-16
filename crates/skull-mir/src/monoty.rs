@@ -596,8 +596,6 @@ pub(crate) fn infer_var_of(inf: &BodyInference, ty: TyId) -> Option<VarId> {
 pub struct MonoArena {
     tys: Vec<MonoTy>,
     interned: FxHashMap<MonoTy, MonoTyId>,
-    intern_attempts: u64,
-    intern_new: u64,
 }
 
 impl MonoArena {
@@ -623,11 +621,9 @@ impl MonoArena {
     }
 
     pub fn intern(&mut self, ty: MonoTy) -> MonoTyId {
-        self.intern_attempts += 1;
         if let Some(id) = self.interned.get(&ty) {
             return *id;
         }
-        self.intern_new += 1;
         let id = MonoTyId(self.tys.len() as u32);
         self.tys.push(ty.clone());
         self.interned.insert(ty, id);
@@ -780,31 +776,10 @@ impl std::fmt::Debug for MonoInterner {
 
 impl MonoInterner {
     pub fn new() -> Self {
-        Self::from_arena(MonoArena::new())
-    }
-
-    /// Adopt an arena an [`InstanceGraph`](../../skull/src/instance_graph.rs)
-    /// build already filled. The graph and emission share ONE arena; a second
-    /// one would give the same type two ids and the same body two identities.
-    pub(crate) fn from_arena(arena: MonoArena) -> Self {
         static ARENA_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let MonoArena {
-            tys,
-            interned,
-            intern_attempts,
-            intern_new,
-        } = arena;
-        let types = crate::append_vec::AppendVec::new();
-        for ty in tys {
-            types.push(ty);
-        }
         Self {
-            types,
-            index: std::sync::RwLock::new(MonoIndex {
-                interned,
-                intern_attempts,
-                intern_new,
-            }),
+            types: crate::append_vec::AppendVec::new(),
+            index: Default::default(),
             arena_gen: ARENA_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             write_acqs: std::sync::atomic::AtomicU64::new(0),
             shared_intern_hits: Default::default(),
