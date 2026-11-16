@@ -365,7 +365,8 @@ pub fn try_drain() -> Vec<Decoded> {
     out
 }
 
-pub fn outstanding_count() -> usize {
+#[cfg(test)]
+pub(crate) fn outstanding_count() -> usize {
     *queue().outstanding.lock().expect("outstanding poisoned")
 }
 
@@ -431,35 +432,10 @@ pub fn recv_one() -> Option<Decoded> {
     }
 }
 
-/// Wait for one completion, never for the whole queue. A missing request is an error.
-pub fn wait_one() -> Result<Decoded, String> {
-    let q = queue();
-    let mut n = q.outstanding.lock().expect("outstanding poisoned");
-    if *n == 0 {
-        return Err("no worker can complete the scheduled image request".into());
-    }
-    #[cfg(test)]
-    if let Some(notify) = TEST_WAIT_NOTICE.lock().unwrap().take() {
-        notify.send(()).expect("decode test receiver");
-    }
-    let result =
-        q.rx.lock()
-            .expect("rx poisoned")
-            .recv_timeout(std::time::Duration::from_secs(60))
-            .map_err(|e| format!("waiting for scheduled image decode: {e}"))?;
-    *n -= 1;
-    Ok(result)
-}
-
 #[cfg(test)]
-static TEST_WAIT_NOTICE: Mutex<Option<Sender<()>>> = Mutex::new(None);
-
-#[cfg(test)]
-pub(crate) fn test_completions(count: usize) -> (Sender<Decoded>, Receiver<()>) {
+pub(crate) fn test_completions(count: usize) -> Sender<Decoded> {
     *queue().outstanding.lock().unwrap() += count;
-    let (tx, rx) = channel();
-    *TEST_WAIT_NOTICE.lock().unwrap() = Some(tx);
-    (queue().tx.clone(), rx)
+    queue().tx.clone()
 }
 
 #[cfg(test)]

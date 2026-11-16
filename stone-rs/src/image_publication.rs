@@ -451,7 +451,7 @@ mod tests {
         p.receive(result(3, 4));
         p.receive(result(1, 4));
         p.retire(1);
-        let (tx, _notice) = image_decode::test_completions(2);
+        let tx = image_decode::test_completions(2);
         tx.send(result(4, 4)).unwrap();
         tx.send(result(2, 4)).unwrap();
 
@@ -492,7 +492,7 @@ mod tests {
         }
         let mut p = requests();
         p.receive(result(1, 4));
-        let (tx, _notice) = image_decode::test_completions(3);
+        let tx = image_decode::test_completions(3);
         let (published, seen) = std::sync::mpsc::channel::<u64>();
         let worker = std::thread::spawn(move || {
             let mut streamed = Vec::new();
@@ -629,7 +629,7 @@ mod tests {
             return;
         }
         let mut p = classed(&[RequestClass::Deferred, RequestClass::Required]);
-        let (tx, _notice) = image_decode::test_completions(2);
+        let tx = image_decode::test_completions(2);
         tx.send(result(2, 4)).unwrap();
         let (signal, deferred_worker) = release_on_signal(tx, 1);
         let published: Vec<u64> = p
@@ -651,7 +651,7 @@ mod tests {
         assert!(p.ready(2));
         assert!(!p.ready(1), "the Deferred request stays pending");
         assert_eq!(p.pending_bytes(), 16);
-        p.receive(image_decode::wait_one().unwrap());
+        p.receive(image_decode::recv_one().unwrap());
         assert_eq!(
             p.select("pump", |_| true)
                 .unwrap()
@@ -684,7 +684,7 @@ mod tests {
         );
         assert_eq!(p.frame_uploaded_bytes, 0);
         p.hold = 0;
-        let (tx, _notice) = image_decode::test_completions(2);
+        let tx = image_decode::test_completions(2);
         let mut order = Vec::new();
         p.select_with(
             "flush",
@@ -738,7 +738,7 @@ mod tests {
         ]);
         p.pending.budget = 0;
         p.receive(result(2, 4));
-        let (tx, _notice) = image_decode::test_completions(2);
+        let tx = image_decode::test_completions(2);
         let worker = std::thread::spawn(move || {
             tx.send(result(1, 4)).unwrap();
             tx.send(result(3, 4)).unwrap();
@@ -760,7 +760,7 @@ mod tests {
         }
         let mut p = classed(&[RequestClass::Deferred, RequestClass::Deferred]);
         p.receive(result(1, 4));
-        let (tx, _notice) = image_decode::test_completions(1);
+        let tx = image_decode::test_completions(1);
         let (signal, worker) = release_on_signal(tx, 2);
         assert!(
             p.select("flush", |_| true).unwrap().is_empty(),
@@ -854,7 +854,7 @@ mod tests {
         }
         PUBLICATIONS
             .with(|p| *p.borrow_mut() = classed(&[RequestClass::Required, RequestClass::Deferred]));
-        let (tx, _notice) = image_decode::test_completions(2);
+        let tx = image_decode::test_completions(2);
         assert_eq!(stone_image_pending_bytes(), 32);
         assert!(!stone_image_ready(1));
         // Through the public destroy path, as the FFI probe does.
