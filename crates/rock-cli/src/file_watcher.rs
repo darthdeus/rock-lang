@@ -1498,55 +1498,5 @@ mod macos {
                 HashSet::from([input])
             );
         }
-        #[test]
-        #[ignore = "manual watcher startup and steady-state measurement"]
-        fn measure_source_watch_population() {
-            use bone_core::prelude::Instant;
-            let root = PathBuf::from(
-                std::env::var_os("ROCK_WATCH_MEASURE_ROOT")
-                    .expect("set ROCK_WATCH_MEASURE_ROOT to the source tree to measure"),
-            );
-            let mut watch_roots = vec![root];
-            if let rock_stdlib::StdlibSource::Dir(dir) = rock_stdlib::stdlib_origin() {
-                watch_roots.push(dir);
-            }
-            for (name, roots) in [("source", watch_roots)] {
-                let config = FileWatcherConfig {
-                    debounce_ms: 100,
-                    watch_extensions: vec![
-                        "rock".into(),
-                        "rs".into(),
-                        "c".into(),
-                        "h".into(),
-                        "toml".into(),
-                    ],
-                    ..Default::default()
-                };
-                let mut observation = Observation {
-                    config,
-                    roots,
-                    directories: HashMap::new(),
-                    files: HashMap::new(),
-                    started: SystemTime::now(),
-                    directory_reads: 0,
-                };
-                let start = Instant::now();
-                observation.scan(true).unwrap();
-                let startup = start.elapsed();
-                let reads = observation.directory_reads;
-                let start = Instant::now();
-                for _ in 0..100 {
-                    assert!(observation.scan(false).unwrap().paths.is_empty());
-                }
-                println!(
-                    "WATCH_MEASURE {name} startup_us={} warm_mean_us={} directories={} files={} warm_directory_reads={}",
-                    startup.as_micros(),
-                    start.elapsed().as_micros() / 100,
-                    observation.directories.len(),
-                    observation.files.len(),
-                    observation.directory_reads - reads
-                );
-            }
-        }
     }
 }
