@@ -24,7 +24,6 @@ sequential = ["bone-semantic/sequential", "skull/sequential", "bone-query/sequen
 [dependencies]
 rock-engine-host = { path = "../rock-engine-host" }
 rock-visual-bank = { path = "../rock-visual-bank" }
-gamelibs = { path = "../gamelibs" }
 sound-core = { workspace = true }
 globset = "0.4.19"
 memchr = { workspace = true }

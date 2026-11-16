@@ -1840,7 +1840,6 @@ dependencies = [
  "clap_complete",
  "colored",
  "fs-err",
- "gamelibs",
  "globset",
  "libc",
  "log",
