@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 
 /// An `unused-var` finding: a local binding that is never read.
 #[derive(Clone, Debug)]
-pub struct UnusedVar {
+pub(crate) struct UnusedVar {
     pub name: Ustr,
     pub span: Span,
 }
@@ -288,10 +288,11 @@ pub struct Finding {
 
 impl Finding {
     fn of<F: LintFinding>(f: &F) -> Self {
+        let span = f.span();
         Finding {
             lint: F::LINT,
-            error: f.to_diagnostic(),
-            line: f.line(),
+            error: CompilerError::new_with_label(span, f.message()).with_level(F::LEVEL),
+            line: span.line_range().0,
         }
     }
 
@@ -3374,8 +3375,9 @@ fn lint_workspace_inner(
         .collect()
 }
 
-/// [`filter_suppressed`] for already-rendered [`Finding`]s, matching each one's
-/// own lint name. Same rule: the finding's line or the line above it.
+/// Drop findings silenced by a `// rock: allow(<lint>)` comment on the
+/// finding's own line or the line directly above it. `source` is the full text
+/// of the file the findings belong to.
 pub fn filter_suppressed_findings(findings: Vec<Finding>, source: &str) -> Vec<Finding> {
     if findings.is_empty() {
         return findings;
@@ -3413,6 +3415,10 @@ fn filter_suppressed_findings_with_entries_timed(
     filtered
 }
 
+/// Every `(line, lint)` a `// rock: allow(<lint>)` magic comment (standalone or
+/// trailing) names. Tolerates `//rock:allow`, extra whitespace, and a trailing
+/// justification arg: `allow(unused_var, "WIP")`. No typo-checking -- a
+/// misspelled name simply won't match.
 fn suppression_entries(source: &str) -> FxHashSet<(usize, &'static str)> {
     let mut allow = FxHashSet::default();
     for (n, line) in allow_lines(source) {
@@ -3475,46 +3481,45 @@ fn filter_workspace_findings(
 /// A finding that carries its lint name and source line, so one suppression
 /// pass serves every lint. `LINT` is the name matched inside
 /// `// rock: allow(<LINT>)`.
-pub trait LintFinding {
+trait LintFinding {
     const LINT: &'static str;
-    fn line(&self) -> usize;
-    fn to_diagnostic(&self) -> CompilerError;
+    const LEVEL: CompilerErrorLevel;
+    fn span(&self) -> Span;
+    fn message(&self) -> String;
 }
 
 impl LintFinding for UnusedVar {
     const LINT: &'static str = UNUSED_VAR;
-    fn line(&self) -> usize {
-        self.span.line_range().0
+    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Warning;
+    fn span(&self) -> Span {
+        self.span
     }
-    fn to_diagnostic(&self) -> CompilerError {
-        CompilerError::new_with_label(
-            self.span,
-            format!(
-                "unused variable `{}` (prefix with `_` to silence)",
-                self.name
-            ),
+    fn message(&self) -> String {
+        format!(
+            "unused variable `{}` (prefix with `_` to silence)",
+            self.name
         )
-        .with_level(CompilerErrorLevel::Warning)
     }
 }
 
 impl LintFinding for UnusedFn {
     const LINT: &'static str = UNUSED_FN;
-    fn line(&self) -> usize {
-        self.span.line_range().0
+    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Warning;
+    fn span(&self) -> Span {
+        self.span
     }
-    fn to_diagnostic(&self) -> CompilerError {
-        CompilerError::new_with_label(self.span, format!("unused function `{}`", self.name))
-            .with_level(CompilerErrorLevel::Warning)
+    fn message(&self) -> String {
+        format!("unused function `{}`", self.name)
     }
 }
 
 impl LintFinding for BackendSiblingMismatch {
     const LINT: &'static str = BACKEND_SIBLING_MISMATCH;
-    fn line(&self) -> usize {
-        self.span.line_range().0
+    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Warning;
+    fn span(&self) -> Span {
+        self.span
     }
-    fn to_diagnostic(&self) -> CompilerError {
+    fn message(&self) -> String {
         let detail = match &self.issue {
             BackendSiblingIssue::MissingOn { backend } => format!(
                 "declared for `{}` but no `{backend}` declaration has this signature -- \
@@ -3529,58 +3534,11 @@ impl LintFinding for BackendSiblingMismatch {
                  overloads key on params, so these are one overload with two answers"
             ),
         };
-        CompilerError::new_with_label(
-            self.span,
-            format!(
-                "backend sibling mismatch: `{}{}` {detail}",
-                self.name, self.signature
-            ),
+        format!(
+            "backend sibling mismatch: `{}{}` {detail}",
+            self.name, self.signature
         )
-        .with_level(CompilerErrorLevel::Warning)
     }
-}
-
-/// Drop findings silenced by a `// rock: allow(<lint>)` comment on the
-/// finding's own line or the line directly above it. `source` is the full text
-/// of the file the findings belong to.
-pub fn filter_suppressed<F: LintFinding>(findings: Vec<F>, source: &str) -> Vec<F> {
-    // Most families find nothing in most files; the scan would only build an
-    // allow set nothing reads.
-    if findings.is_empty() {
-        return findings;
-    }
-    let allow: FxHashSet<usize> = source
-        .lines()
-        .enumerate()
-        .filter(|(_, line)| parse_allow_comment(line, F::LINT))
-        .map(|(n, _)| n)
-        .collect();
-    if allow.is_empty() {
-        return findings;
-    }
-    findings
-        .into_iter()
-        .filter(|f| {
-            let line = f.line();
-            !allow.contains(&line) && !(line > 0 && allow.contains(&(line - 1)))
-        })
-        .collect()
-}
-
-/// True iff `line` bears a `// rock: allow(<lint_name>)` magic comment
-/// (standalone or trailing). Tolerates `//rock:allow`, extra whitespace, and a
-/// trailing justification arg: `allow(unused_var, "WIP")`. No typo-checking --
-/// a misspelled name simply won't match.
-fn parse_allow_comment(line: &str, lint_name: &str) -> bool {
-    let mut rest = line;
-    while let Some(pos) = find_comment_start(rest) {
-        let after = &rest[pos + 2..];
-        if allow_comment_args(after).is_some_and(|args| allow_args_name(args, lint_name)) {
-            return true;
-        }
-        rest = after;
-    }
-    false
 }
 
 /// Byte offset of the first `//` in `s`. A plain byte scan: lines are short,
@@ -3612,7 +3570,7 @@ fn allow_args_name(args: &str, lint_name: &str) -> bool {
 
 /// What is wrong with one decl of a backend-sibling set.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum BackendSiblingIssue {
+pub(crate) enum BackendSiblingIssue {
     /// No decl of this signature targets `backend` -- neither a native decl
     /// there nor a portable (`Any`) body that every backend emits.
     MissingOn { backend: &'static str },
@@ -3630,7 +3588,7 @@ pub enum BackendSiblingIssue {
 /// more than one concrete backend, where the set of declarations does not line
 /// up across those backends.
 #[derive(Clone, Debug)]
-pub struct BackendSiblingMismatch {
+pub(crate) struct BackendSiblingMismatch {
     pub name: Ustr,
     /// Rendered param list, `(int, bool)` -- the overload key.
     pub signature: String,
@@ -3822,7 +3780,7 @@ fn sibling_set_mismatches(
 
 /// An `unused-fn` finding: a top-level user function unreachable from any root.
 #[derive(Clone, Debug)]
-pub struct UnusedFn {
+pub(crate) struct UnusedFn {
     pub name: Ustr,
     pub span: Span,
 }
@@ -4058,7 +4016,7 @@ fn user_fn_names(
 /// is discarded and whose evaluation is side-effect-free. `is_comparison`
 /// tailors the message toward the canonical `==`-for-`=` typo.
 #[derive(Clone, Debug)]
-pub struct UnusedPureExpr {
+pub(crate) struct UnusedPureExpr {
     pub span: Span,
     pub is_comparison: bool,
 }
@@ -4068,16 +4026,16 @@ pub(crate) const UNUSED_PURE_EXPR: &str = "unused_pure_expr";
 
 impl LintFinding for UnusedPureExpr {
     const LINT: &'static str = UNUSED_PURE_EXPR;
-    fn line(&self) -> usize {
-        self.span.line_range().0
+    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Warning;
+    fn span(&self) -> Span {
+        self.span
     }
-    fn to_diagnostic(&self) -> CompilerError {
-        let msg = if self.is_comparison {
+    fn message(&self) -> String {
+        if self.is_comparison {
             "result of this comparison is unused -- did you mean `=`?".to_string()
         } else {
             "result of pure expression is unused".to_string()
-        };
-        CompilerError::new_with_label(self.span, msg).with_level(CompilerErrorLevel::Warning)
+        }
     }
 }
 
@@ -4187,7 +4145,7 @@ fn variant_args_pure(body: &Body, args: &bone_core::hir::VariantArgs) -> bool {
 /// handle. `inner_type` is the argument's rendered type (`int?`, `Mob?`); the
 /// diagnostic names it so the fix (`?? default` / a null check) is obvious.
 #[derive(Clone, Debug)]
-pub struct TransmuteOfNullable {
+pub(crate) struct TransmuteOfNullable {
     pub fn_name: Ustr,
     pub inner_type: String,
     pub span: Span,
@@ -4198,24 +4156,21 @@ pub const TRANSMUTE_OF_NULLABLE: &str = "transmute_of_nullable";
 
 impl LintFinding for TransmuteOfNullable {
     const LINT: &'static str = TRANSMUTE_OF_NULLABLE;
-    fn line(&self) -> usize {
-        self.span.line_range().0
+    // The catalog's only `Error`: a laundered null-on-failure is a
+    // correctness hole, not a smell. Irreducible instances do exist (a
+    // generic `R` has no `?? default` to fall back to -- see
+    // `take_result` in a host library), so unlike `entity_across_yield` the allow
+    // comment stays legal.
+    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Error;
+    fn span(&self) -> Span {
+        self.span
     }
-    fn to_diagnostic(&self) -> CompilerError {
-        CompilerError::new_with_label(
-            self.span,
-            format!(
-                "`{}` strips nullability from a `{}` -- a null-on-failure silently \
+    fn message(&self) -> String {
+        format!(
+            "`{}` strips nullability from a `{}` -- a null-on-failure silently \
                  becomes a valid value; use `?? default` or an explicit null check instead",
-                self.fn_name, self.inner_type
-            ),
+            self.fn_name, self.inner_type
         )
-        // The catalog's only `Error`: a laundered null-on-failure is a
-        // correctness hole, not a smell. Irreducible instances do exist (a
-        // generic `R` has no `?? default` to fall back to -- see
-        // `take_result` in a host library), so unlike `entity_across_yield` the allow
-        // comment stays legal.
-        .with_level(CompilerErrorLevel::Error)
     }
 }
 
@@ -4304,22 +4259,6 @@ fn head_ty(ws: &Workspace, bi: &BodyInference, ty: TyId) -> (TyId, TypeExpr) {
     }
 }
 
-/// `transmute_of_nullable` findings across every non-stdlib body in the
-/// workspace. Convenience for tests and whole-workspace CLI runs; the LSP path
-/// lints a single file's bodies (reading that module's inference) instead.
-pub fn transmute_of_nullable(ws: &Workspace) -> Vec<TransmuteOfNullable> {
-    let warm = FxHashSet::default();
-    let mut out = Vec::new();
-    for module in ws.user_modules(&warm) {
-        let inf = ws.inference(module.id);
-        for (owner, body) in module.bodies.iter() {
-            let bi = inf.and_then(|i| i.per_fn.get(owner));
-            out.extend(transmute_of_nullable_in_body(ws, bi, body));
-        }
-    }
-    out
-}
-
 /// A `method_syntax` finding: a free function whose first parameter is a user
 /// type, declared in prefix form (`fn damage(m: Mob, n: int)`) where the
 /// receiver form (`fn Mob.damage(m, n: int)`) says the same thing.
@@ -4338,18 +4277,15 @@ pub(crate) const METHOD_SYNTAX: &str = "method_syntax";
 
 impl LintFinding for MethodSyntax {
     const LINT: &'static str = METHOD_SYNTAX;
-    fn line(&self) -> usize {
-        self.span.line_range().0
+    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Advice;
+    fn span(&self) -> Span {
+        self.span
     }
-    fn to_diagnostic(&self) -> CompilerError {
-        CompilerError::new_with_label(
-            self.span,
-            format!(
-                "`{}` takes `{}` as its first parameter -- declare it as `fn {}.{}({})`",
-                self.name, self.receiver, self.receiver, self.name, self.params
-            ),
+    fn message(&self) -> String {
+        format!(
+            "`{}` takes `{}` as its first parameter -- declare it as `fn {}.{}({})`",
+            self.name, self.receiver, self.receiver, self.name, self.params
         )
-        .with_level(CompilerErrorLevel::Advice)
     }
 }
 
@@ -4404,18 +4340,15 @@ pub(crate) fn raw_input_sites_in_module(
 
 impl LintFinding for RawInputSite {
     const LINT: &'static str = RAW_INPUT_MIGRATION;
-    fn line(&self) -> usize {
-        self.span.line_range().0
+    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Advice;
+    fn span(&self) -> Span {
+        self.span
     }
-    fn to_diagnostic(&self) -> CompilerError {
-        CompilerError::new_with_label(
-            self.span,
-            format!(
-                "raw input query `{}` needs an action, editor/tool, text-input, or deliberate-remainder classification",
-                self.name
-            ),
+    fn message(&self) -> String {
+        format!(
+            "raw input query `{}` needs an action, editor/tool, text-input, or deliberate-remainder classification",
+            self.name
         )
-        .with_level(CompilerErrorLevel::Advice)
     }
 }
 
@@ -4472,29 +4405,22 @@ pub(crate) fn unclassified_raw_input_sites_in_module<'a>(
 
 impl LintFinding for RawInputClassificationGap<'_> {
     const LINT: &'static str = RAW_INPUT_CLASSIFICATION;
-    fn line(&self) -> usize {
-        self.span.line_range().0
+    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Advice;
+    fn span(&self) -> Span {
+        self.span
     }
-    fn to_diagnostic(&self) -> CompilerError {
+    fn message(&self) -> String {
         if self.line_population != 1 {
-            return CompilerError::new_with_label(
-                self.span,
-                format!(
-                    "raw input classification requires exactly one query per source line (found {})",
-                    self.line_population
-                ),
-            )
-            .with_level(CompilerErrorLevel::Advice);
+            return format!(
+                "raw input classification requires exactly one query per source line (found {})",
+                self.line_population
+            );
         }
-        CompilerError::new_with_label(
-            self.span,
-            format!(
-                "raw input query `{}` needs an adjacent `// action-layer:` marker: {}",
-                self.name,
-                self.classes.join(", ")
-            ),
+        format!(
+            "raw input query `{}` needs an adjacent `// action-layer:` marker: {}",
+            self.name,
+            self.classes.join(", ")
         )
-        .with_level(CompilerErrorLevel::Advice)
     }
 }
 
@@ -4540,11 +4466,12 @@ fn has_annotation(f: &Function, name: &str) -> bool {
 
 impl LintFinding for ActionCallerGap<'_> {
     const LINT: &'static str = ACTION_CALLERS;
-    fn line(&self) -> usize {
-        self.span.line_range().0
+    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Advice;
+    fn span(&self) -> Span {
+        self.span
     }
-    fn to_diagnostic(&self) -> CompilerError {
-        let message = if self.population_empty {
+    fn message(&self) -> String {
+        if self.population_empty {
             format!(
                 "no production {} {}* declarations found",
                 self.policy.production_label, self.policy.action_prefix
@@ -4554,8 +4481,7 @@ impl LintFinding for ActionCallerGap<'_> {
                 "production {} action `{}` has no production caller",
                 self.policy.production_label, self.action
             )
-        };
-        CompilerError::new_with_label(self.span, message).with_level(CompilerErrorLevel::Advice)
+        }
     }
 }
 
@@ -4839,7 +4765,7 @@ impl EscapeKind {
 /// A `row_escape` finding: a row place -- a `T` read out of an `Arena<T>` or a
 /// `Scene<T>` root -- reaching storage that outlives the borrow.
 #[derive(Clone, Debug)]
-pub struct RowEscape {
+pub(crate) struct RowEscape {
     pub kind: EscapeKind,
     /// Rendered type of the escaping row (`Mob`, `TrActor`).
     pub row_type: String,
@@ -4851,12 +4777,13 @@ pub const ROW_ESCAPE: &str = "row_escape";
 
 impl LintFinding for RowEscape {
     const LINT: &'static str = ROW_ESCAPE;
-    fn line(&self) -> usize {
-        self.span.line_range().0
+    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Advice;
+    fn span(&self) -> Span {
+        self.span
     }
-    fn to_diagnostic(&self) -> CompilerError {
+    fn message(&self) -> String {
         let (ty, kind) = (&self.row_type, self.kind.as_str());
-        let msg = match self.kind.class() {
+        match self.kind.class() {
             EscapeClass::Hazard => format!(
                 "row of `{ty}` is held past an invalidation point here ({kind}) -- \
                  the slot can be removed or the Scene unloaded before the next read; \
@@ -4871,13 +4798,13 @@ impl LintFinding for RowEscape {
                  nothing. The row becomes the CALLER's to account for, and this check \
                  does not cross the boundary, so audit the callers"
             ),
-        };
-        CompilerError::new_with_label(self.span, msg).with_level(CompilerErrorLevel::Advice)
+        }
     }
 }
 
 mod row_escape;
-pub use row_escape::{RowPopulation, row_escapes_in_body, row_population};
+use row_escape::row_escapes_in_body;
+pub use row_escape::{RowPopulation, row_population};
 
 /// Where a body's TRAILING expression ends up, so `row_escape` can tell a
 /// returned row from a discarded one. A unit function's tail goes nowhere --
@@ -4906,7 +4833,7 @@ pub(crate) fn nominal_type_names(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> 
 /// `place` is the rendered target (`m.co`), which the diagnostic names so the
 /// fix (`stop(m, .co)`) is spellable from the message alone.
 #[derive(Clone, Debug)]
-pub struct TaskNullAbandon {
+pub(crate) struct TaskNullAbandon {
     pub place: Option<String>,
     pub span: Span,
 }
@@ -4916,27 +4843,24 @@ pub(crate) const TASK_NULL_ABANDON: &str = "task_null_abandon";
 
 impl LintFinding for TaskNullAbandon {
     const LINT: &'static str = TASK_NULL_ABANDON;
-    fn line(&self) -> usize {
-        self.span.line_range().0
+    // `Warning`, not `Error`: nulling a slot just observed terminal, and
+    // cleanup inside the task's own terminal defer, are both legal and
+    // indistinguishable without liveness -- so the allow comment must stay
+    // reachable.
+    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Warning;
+    fn span(&self) -> Span {
+        self.span
     }
-    fn to_diagnostic(&self) -> CompilerError {
+    fn message(&self) -> String {
         let what = match &self.place {
             Some(p) => format!("`{p} = null`"),
             None => "assigning `null` to a `Task?` slot".to_string(),
         };
-        CompilerError::new_with_label(
-            self.span,
-            format!(
-                "{what} abandons the coroutine mid-stack -- it is dropped where it stands, \
+        format!(
+            "{what} abandons the coroutine mid-stack -- it is dropped where it stands, \
                  so its terminal `defer`s never run; use `stop` to cancel it (or `replace` \
                  to swap one in), which kill the coroutine first"
-            ),
         )
-        // `Warning`, not `Error`: nulling a slot just observed terminal, and
-        // cleanup inside the task's own terminal defer, are both legal and
-        // indistinguishable without liveness -- so the allow comment must stay
-        // reachable.
-        .with_level(CompilerErrorLevel::Warning)
     }
 }
 
@@ -5028,25 +4952,6 @@ fn render_place(body: &Body, e: Idx<Expr>) -> Option<String> {
         }
         _ => return None,
     })
-}
-
-/// `task_null_abandon` findings across every non-stdlib body in the workspace.
-/// Convenience for tests and whole-workspace CLI runs; the surfaces go through
-/// [`inference_findings`].
-pub fn task_null_abandon(ws: &Workspace) -> Vec<TaskNullAbandon> {
-    let warm = FxHashSet::default();
-    let mut out = Vec::new();
-    for module in ws.user_modules(&warm) {
-        let inf = ws.inference(module.id);
-        for (owner, body) in module.bodies.iter() {
-            out.extend(task_null_abandon_in_body(
-                ws,
-                inf.and_then(|i| i.per_fn.get(owner)),
-                body,
-            ));
-        }
-    }
-    out
 }
 
 /// The declared (last) segment of a DefKey; a legacy name is already bare.

@@ -1,18 +1,12 @@
 //! `task_null_abandon`: a plain `= null` over a `Task?` place drops the
 //! coroutine mid-stack, so its terminal `defer`s never run. `stop` / `replace`
 //! are the cancel verbs that fire them. Reads inference (the TARGET's type is
-//! what identifies the slot), so the harness runs a full `semantic_pass`.
-//! `Task` is declared locally -- the lint keys on the target type, not on the host library.
+//! what identifies the slot). `Task` is declared locally -- the lint keys on
+//! the target type, not on the host library.
 
-use bone_lints::{LintFinding, TaskNullAbandon, filter_suppressed, task_null_abandon};
-use bone_semantic::prelude::*;
+use crate::support::lint_only;
+use bone_lints::Finding;
 use rock_core::errors::CompilerErrorLevel;
-
-const FILE: &str = "<task_null_abandon>";
-
-fn parse(src: &str) -> skull_parser::Ast {
-    skull_parser::parse_module(src, Ustr::from(FILE)).expect("parse")
-}
 
 const PRELUDE: &str = r#"
 struct Arena<T> { _len: int }
@@ -41,10 +35,16 @@ fn stop<T>(o: T, f: FieldOf<T, Task?>) {
 }
 "#;
 
-fn findings(body: &str) -> Vec<TaskNullAbandon> {
+fn findings(body: &str) -> Vec<Finding> {
     let src = format!("{PRELUDE}\n{body}\n");
-    let ws = semantic_pass(&mut [parse(&src)]).expect("clean program typechecks");
-    task_null_abandon(&ws)
+    lint_only(&[("<task_null_abandon>", &src)], "task_null_abandon")
+}
+
+fn names_place(finding: &Finding, place: &str) -> bool {
+    finding
+        .error
+        .message
+        .starts_with(&format!("`{place} = null` abandons"))
 }
 
 fn count(body: &str) -> usize {
@@ -66,20 +66,16 @@ fn diagnostic_names_the_abandoned_slot() {
             "fn bad(e: Entity<Mob>) {\n    e.get()?.co = null\n}",
             "e.get()?.co",
         ),
+        (
+            "global SLOT: Task? = null\nfn bad() {\n    SLOT = null\n}",
+            "SLOT",
+        ),
     ];
     for (body, place) in cases {
         let fs = findings(body);
         assert_eq!(fs.len(), 1, "expected the one finding: {fs:?}");
-        assert_eq!(fs[0].place.as_deref(), Some(*place));
+        assert!(names_place(&fs[0], place), "{fs:?}");
     }
-}
-
-#[test]
-fn diagnostic_names_a_global_slot() {
-    let body = "global SLOT: Task? = null\nfn bad() {\n    SLOT = null\n}";
-    let fs = findings(body);
-    assert_eq!(fs.len(), 1, "expected the one finding: {fs:?}");
-    assert_eq!(fs[0].place.as_deref(), Some("SLOT"));
 }
 
 #[test]
@@ -138,25 +134,18 @@ fn null_assignments_to_task_slots_are_counted() {
 fn finding_reports_at_warning_level() {
     let fs = findings("fn bad(m: Mob) {\n    m.co = null\n}");
     assert_eq!(fs.len(), 1, "expected the one finding: {fs:?}");
-    assert_eq!(fs[0].to_diagnostic().level, CompilerErrorLevel::Warning);
+    assert_eq!(fs[0].level(), CompilerErrorLevel::Warning);
 }
 
 #[test]
-fn allow_comment_above_suppresses() {
-    let body = "fn bad(m: Mob) {\n    // rock: allow(task_null_abandon)\n    m.co = null\n}";
-    assert_eq!(count(body), 1, "raw finding still exists");
-    let src = format!("{PRELUDE}\n{body}\n");
-    let kept = filter_suppressed(findings(body), &src);
-    assert!(kept.is_empty(), "allow comment above silences it: {kept:?}");
-}
-
-#[test]
-fn trailing_allow_comment_suppresses() {
-    let body = "fn bad(m: Mob) {\n    m.co = null // rock: allow(task_null_abandon)\n}";
-    let src = format!("{PRELUDE}\n{body}\n");
-    let kept = filter_suppressed(findings(body), &src);
-    assert!(
-        kept.is_empty(),
-        "trailing allow comment silences it: {kept:?}"
+fn allow_comments_suppress() {
+    let above = "fn bad(m: Mob) {\n    // rock: allow(task_null_abandon)\n    m.co = null\n}";
+    assert_eq!(
+        count(&above.replace("// rock: allow(task_null_abandon)", "")),
+        1,
+        "the finding exists without the comment"
     );
+    assert_eq!(count(above), 0, "allow comment above silences it");
+    let trailing = "fn bad(m: Mob) {\n    m.co = null // rock: allow(task_null_abandon)\n}";
+    assert_eq!(count(trailing), 0, "trailing allow comment silences it");
 }

@@ -1,15 +1,11 @@
 //! transmute/cast-strips-nullability lint over bone HIR + inference. Unlike
-//! unused_var this lint READS inference (arg + result nullability), so the
-//! harness runs a full `semantic_pass` and reads `ws.inference`. cast/transmute
-//! are defined locally (no stdlib needed) -- the lint matches the callee name.
+//! unused_var this lint READS inference (arg + result nullability).
+//! cast/transmute are defined locally (no stdlib needed) -- the lint matches
+//! the callee name.
 
-use bone_lints::{LintFinding, TransmuteOfNullable, filter_suppressed, transmute_of_nullable};
-use bone_semantic::prelude::*;
+use crate::support::{lint_only, quoted};
+use bone_lints::{Finding, TRANSMUTE_OF_NULLABLE};
 use rock_core::errors::CompilerErrorLevel;
-
-fn parse(src: &str) -> skull_parser::Ast {
-    skull_parser::parse_module_clean(src, Ustr::from("<transmute_of_nullable>")).expect("parse")
-}
 
 const PRELUDE: &str = r#"
 inline(lua) fn cast<T>(value: any) -> T = "return value"
@@ -24,17 +20,13 @@ fn always_int() -> int {
 }
 "#;
 
-fn findings(body: &str) -> Vec<TransmuteOfNullable> {
+fn findings(body: &str) -> Vec<Finding> {
     let src = format!("{PRELUDE}\n{body}\n");
-    let ws = semantic_pass(&mut [parse(&src)]).expect("clean program typechecks");
-    transmute_of_nullable(&ws)
+    lint_only(&[("<transmute_of_nullable>", &src)], TRANSMUTE_OF_NULLABLE)
 }
 
 fn names(body: &str) -> Vec<String> {
-    let mut ns: Vec<String> = findings(body)
-        .iter()
-        .map(|f| f.fn_name.to_string())
-        .collect();
+    let mut ns: Vec<String> = findings(body).iter().map(quoted).collect();
     ns.sort();
     ns
 }
@@ -90,14 +82,12 @@ fn nested_outer_strips_inner_preserves() {
 
 #[test]
 fn nullable_struct_transmute_is_flagged() {
-    let src = format!(
-        "{PRELUDE}\nstruct Mob {{ hp: int }}\nfn maybe_mob() -> Mob? {{\n    return Mob {{ hp: 10 }}\n}}\nfn main() -> int {{\n    let _m: Mob = transmute(maybe_mob())\n    3\n}}\n"
+    let fs = findings(
+        "struct Mob { hp: int }\nfn maybe_mob() -> Mob? {\n    return Mob { hp: 10 }\n}\nfn main() -> int {\n    let _m: Mob = transmute(maybe_mob())\n    3\n}",
     );
-    let ws = semantic_pass(&mut [parse(&src)]).expect("typechecks");
-    let fs = transmute_of_nullable(&ws);
     assert_eq!(fs.len(), 1, "expected one transmute(Mob?) finding: {fs:?}");
-    assert_eq!(
-        fs[0].inner_type, "Mob?",
+    assert!(
+        fs[0].error.message.contains("from a `Mob?`"),
         "diagnostic names the inner type: {fs:?}"
     );
 }
@@ -112,38 +102,24 @@ fn finding_reports_at_error_level() {
     let fs = findings("fn main() -> int {\n    let _x: int = cast(maybe_int())\n    3\n}");
     assert_eq!(fs.len(), 1, "expected the one cast finding: {fs:?}");
     assert_eq!(
-        fs[0].to_diagnostic().level,
+        fs[0].level(),
         CompilerErrorLevel::Error,
         "transmute_of_nullable gates the build"
     );
 }
 
 #[test]
-fn allow_comment_above_suppresses() {
-    let body = "fn main() -> int {\n    // rock: allow(transmute_of_nullable)\n    let _x: int = cast(maybe_int())\n    3\n}";
+fn allow_comments_suppress() {
+    let above = "fn main() -> int {\n    // rock: allow(transmute_of_nullable)\n    let _x: int = cast(maybe_int())\n    3\n}";
     assert_eq!(
-        names(body),
-        vec!["cast".to_string()],
-        "raw finding still exists"
+        names(&above.replace("// rock: allow(transmute_of_nullable)", "")),
+        ["cast"],
+        "the finding exists without the comment"
     );
-    let src = format!("{PRELUDE}\n{body}\n");
-    let kept = filter_suppressed(findings(body), &src);
+    assert!(names(above).is_empty(), "allow comment above silences it");
+    let trailing = "fn main() -> int {\n    let _x: int = cast(maybe_int()) // rock: allow(transmute_of_nullable)\n    3\n}";
     assert!(
-        kept.is_empty(),
-        "allow comment above silences it: {:?}",
-        kept.iter()
-            .map(|f| f.fn_name.to_string())
-            .collect::<Vec<_>>()
-    );
-}
-
-#[test]
-fn trailing_allow_comment_suppresses() {
-    let body = "fn main() -> int {\n    let _x: int = cast(maybe_int()) // rock: allow(transmute_of_nullable)\n    3\n}";
-    let src = format!("{PRELUDE}\n{body}\n");
-    let kept = filter_suppressed(findings(body), &src);
-    assert!(
-        kept.is_empty(),
-        "trailing allow comment silences it: {kept:?}"
+        names(trailing).is_empty(),
+        "trailing allow comment silences it"
     );
 }

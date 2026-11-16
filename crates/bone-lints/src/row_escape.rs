@@ -34,7 +34,7 @@ enum RowShape {
 /// function's return, a global's initial value, `None` for a body that
 /// discards it. Without it the rule cannot tell `fn f() -> Mob? { e.get() }`
 /// from `fn f() { e.remove() }`, and the second is not an escape at all.
-pub fn row_escapes_in_body(
+pub(crate) fn row_escapes_in_body(
     ws: &Workspace,
     bi: Option<&BodyInference>,
     body: &Body,

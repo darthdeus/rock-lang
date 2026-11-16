@@ -3,7 +3,7 @@
 //! segment, or they go silent (or noisy) the moment a package converts.
 
 use crate::support;
-use bone_lints::{ACTION_CALLERS, LintOptions, UNUSED_FN, lint_workspace, task_null_abandon};
+use bone_lints::{ACTION_CALLERS, LintOptions, UNUSED_FN, lint_workspace};
 use bone_semantic::prelude::*;
 
 fn ws_v1(src: &str) -> Workspace {
@@ -24,16 +24,17 @@ fn ws_v1(src: &str) -> Workspace {
 
 #[test]
 fn v1_task_null_abandon_still_fires() {
-    let ws = ws_v1(
-        r#"
+    let src = r#"
 struct Task<R = ()> { id: int }
 global SLOT: Task? = null
 fn abandon() { SLOT = null }
 fn main() { SLOT = Task { id: 1 }; abandon() }
-"#,
-    );
+"#;
+    let ws = ws_v1(src);
+    let sources: FxHashMap<Ustr, &str> = [(Ustr::from("main.rock"), src)].into_iter().collect();
+    let options = LintOptions::only(["task_null_abandon".to_owned()]);
     assert_eq!(
-        task_null_abandon(&ws).len(),
+        lint_workspace(&ws, &FxHashSet::default(), true, &sources, &options).len(),
         1,
         "a v1 `Task?` slot set to null must be flagged"
     );
