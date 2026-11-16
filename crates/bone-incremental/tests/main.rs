@@ -2,11 +2,9 @@
 mod common;
 
 mod builtin_lifetime;
-mod error_cascade;
-mod error_recovery;
 mod file_variant;
 mod incremental;
-mod inference_recovery;
 mod rebuild_users_atomicity;
+mod recovery;
 mod v1_differential;
 mod v1_routing;
