@@ -95,11 +95,6 @@ impl<'de> serde::Deserialize<'de> for NumberOrString {
     }
 }
 
-/// The LSP any type
-///
-/// @since 3.17.0
-pub(crate) type LSPAny = serde_json::Value;
-
 /// Position in a text document expressed as zero-based line and character offset.
 /// A position is between two characters like an 'insert' cursor in a editor.
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Copy, Clone, Default, Hash)]
@@ -398,42 +393,6 @@ impl_untagged_enum!(Documentation {
     String,
 });
 
-/// MarkedString can be used to render human readable text. It is either a
-/// markdown string or a code-block that provides a language and a code snippet.
-/// The language identifier is semantically equal to the optional language
-/// identifier in fenced code blocks in GitHub issues.
-///
-/// The pair of a language and a value is an equivalent to markdown:
-///
-/// ```LANGUAGE
-/// VALUE
-/// ```
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub enum MarkedString {
-    String(String),
-    LanguageString(LanguageString),
-}
-
-impl_untagged_enum!(MarkedString {
-    LanguageString,
-    String,
-});
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct LanguageString {
-    pub language: String,
-    pub value: String,
-}
-
-impl_lsp_struct!(
-    out LanguageString,
-    required {
-        language: String = "language",
-        value: String = "value",
-    },
-    optional {}
-);
-
 #[derive(Debug, PartialEq, Clone, Default)]
 pub struct ExecuteCommandParams {
     /// The identifier of the actual command handler.
@@ -510,16 +469,6 @@ impl_lsp_struct!(
     optional {}
 );
 
-/// Symbol tags are extra annotations that tweak the rendering of a symbol.
-///
-/// @since 3.16.0
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct SymbolTag(i32);
-lsp_enum! {
-impl SymbolTag {
-}
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,18 +484,6 @@ mod tests {
         let read = |json| serde_json::from_str::<NumberOrString>(json).unwrap();
         assert_eq!(read("123"), NumberOrString::Number(123));
         assert_eq!(read(r#""abcd""#), NumberOrString::String("abcd".into()));
-    }
-
-    #[test]
-    fn marked_string() {
-        assert_json(&MarkedString::String("xxx".into()), r#""xxx""#);
-        assert_json(
-            &MarkedString::LanguageString(LanguageString {
-                language: "lang".into(),
-                value: "code".into(),
-            }),
-            r#"{"language":"lang","value":"code"}"#,
-        );
     }
 
     #[test]

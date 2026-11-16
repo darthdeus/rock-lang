@@ -86,14 +86,10 @@ impl LspWorkspace {
         true
     }
 
-    /// Update document version and invalidate caches
+    /// Update the document version.
     pub(crate) fn update_document_version(&mut self, uri: &str, version: Option<i32>) {
         if let Some(v) = version {
             self.document_versions.insert(uri.to_string(), v);
-
-            // SMART CACHE INVALIDATION: Don't remove semantic tokens immediately
-            // They will be replaced when new tokens are successfully computed
-            // This prevents semantic tokens from disappearing during recompilation
         }
     }
 

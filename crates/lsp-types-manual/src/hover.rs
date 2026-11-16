@@ -1,4 +1,4 @@
-use crate::{MarkedString, MarkupContent, Range};
+use crate::{MarkupContent, Range};
 
 /// The result of a hover request.
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -20,16 +20,10 @@ impl_lsp_struct!(
     }
 );
 
-/// Hover contents could be single entry or multiple entries.
+/// Markdown or plain text shown by a hover.
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum HoverContents {
-    Scalar(MarkedString),
-    Array(Vec<MarkedString>),
     Markup(MarkupContent),
 }
 
-impl_untagged_enum!(HoverContents {
-    Markup,
-    Scalar,
-    Array,
-});
+impl_untagged_enum!(HoverContents { Markup });

@@ -157,7 +157,7 @@ pub(crate) fn range_semantic_tokens(
 }
 
 /// Full-document semantic tokens: bone's tokenizer-based classifier (same one
-/// the `--backend bone` CLI uses), remapped to the advertised legend.
+/// the CLI uses), remapped to the advertised legend.
 /// `uri` decodes to the key `bone.update` registers on didChange.
 pub fn compute_semantic_tokens_workspace(
     workspace: &mut LspWorkspace,

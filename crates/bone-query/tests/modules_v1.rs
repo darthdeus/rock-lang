@@ -437,11 +437,9 @@ fn hover_on_v1_signature_types_records_each_nominal_spelling() {
 
     let alias_text = match alias_hover.contents {
         lsp_types::HoverContents::Markup(markup) => markup.value,
-        contents => panic!("unexpected aliased hover contents: {contents:?}"),
     };
     let qualified_text = match qualified_hover.contents {
         lsp_types::HoverContents::Markup(markup) => markup.value,
-        contents => panic!("unexpected qualified hover contents: {contents:?}"),
     };
 
     assert!(

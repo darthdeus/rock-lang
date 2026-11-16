@@ -1,20 +1,16 @@
-//! Bone-backed LSP CLI handlers (`--backend bone`), a thin one-shot shim over
+//! Bone-backed LSP CLI handlers, a thin one-shot shim over
 //! the same facade the persistent server uses (`bone_query`).
 //!
 //! There is exactly one bone-consumption path: this builds a `BoneWorkspace`,
 //! feeds it the single file, and calls the same query methods the server does,
-//! so CLI and server can never drift. Output shapes mirror the Lua-backed CLI
-//! handlers so downstream consumers don't care which backend produced them.
-//!
-//! Per `bone/CLAUDE.md` we never modify bone; this only consumes its public
-//! pipeline (transitively, via the facade).
+//! so CLI and server use the same queries.
 
 use anyhow::Result;
 use bone_query::BoneWorkspace;
 use lsp_types::{HoverContents, Position};
 use serde_json::json;
 
-/// `rock-lsp hover <file:line:col> --backend bone`.
+/// `rock lsp hover <file:line:col>`.
 pub fn hover(file_path: &str, line: u32, column: u32) -> Result<()> {
     let (file_path, bone) = open_file(file_path)?;
 
@@ -26,12 +22,6 @@ pub fn hover(file_path: &str, line: u32, column: u32) -> Result<()> {
         Some(h) => {
             let text = match h.contents {
                 HoverContents::Markup(m) => m.value,
-                HoverContents::Scalar(s) => marked_string_text(s),
-                HoverContents::Array(items) => items
-                    .into_iter()
-                    .map(marked_string_text)
-                    .collect::<Vec<_>>()
-                    .join("\n"),
             };
             (
                 text,
@@ -70,13 +60,13 @@ pub fn hover(file_path: &str, line: u32, column: u32) -> Result<()> {
 /// either all of them (`diagnostics_for`) or lints only (`lint_diagnostics`).
 type DiagFn = fn(&BoneWorkspace, &str) -> Vec<lsp_types::Diagnostic>;
 
-/// `rock-lsp diagnostics <path> --backend bone`. `path` may be a single file or
+/// `rock lsp diagnostics <path>`. `path` may be a single file or
 /// a directory (whole-project diagnostics -- see [`diagnostics_report`]).
 pub fn diagnostics(path: &str) -> Result<()> {
     print_report(diagnostics_report(path)?)
 }
 
-/// `rock-lsp lint <path> --backend bone`. Lint findings only (`unused_var`,
+/// `rock lsp lint <path>`. Lint findings only (`unused_var`,
 /// `unused_fn`) -- no typecheck errors or holes. File or directory, like
 /// `diagnostics`.
 pub fn lint(path: &str) -> Result<()> {
@@ -186,7 +176,7 @@ fn diags_to_json(diags: Vec<lsp_types::Diagnostic>) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// `rock-lsp definition <file:line:col> --backend bone`.
+/// `rock lsp definition <file:line:col>`.
 pub fn definition(file_path: &str, line: u32, column: u32) -> Result<()> {
     let (file_path, bone) = open_file(file_path)?;
 
@@ -194,7 +184,7 @@ pub fn definition(file_path: &str, line: u32, column: u32) -> Result<()> {
     emit_definitions(&file_path, line, column, loc)
 }
 
-/// `rock-lsp type-definition <file:line:col> --backend bone`.
+/// `rock lsp type-definition <file:line:col>`.
 pub fn type_definition(file_path: &str, line: u32, column: u32) -> Result<()> {
     let (file_path, bone) = open_file(file_path)?;
 
@@ -233,7 +223,7 @@ fn emit_definitions(
     Ok(())
 }
 
-/// `rock-lsp completion <file:line:col> --backend bone`.
+/// `rock lsp completion <file:line:col>`.
 pub fn completion(file_path: &str, line: u32, column: u32, explain: bool) -> Result<()> {
     let (file_path, mut bone) = open_file(file_path)?;
 
@@ -577,7 +567,7 @@ fn line_col_to_offset(src: &str, line: u32, column: u32) -> usize {
     off.min(src.len())
 }
 
-/// `rock-lsp references <file:line:col> --backend bone`.
+/// `rock lsp references <file:line:col>`.
 pub fn references(file_path: &str, line: u32, column: u32) -> Result<()> {
     // Load the whole project so cross-file references are found.
     let (file_path, bone) = open_project(file_path);
@@ -595,7 +585,7 @@ pub fn references(file_path: &str, line: u32, column: u32) -> Result<()> {
     Ok(())
 }
 
-/// `rock-lsp prepare-rename <file:line:col> --backend bone`.
+/// `rock lsp prepare-rename <file:line:col>`.
 pub fn prepare_rename(file_path: &str, line: u32, column: u32) -> Result<()> {
     let (file_path, bone) = open_file(file_path)?;
 
@@ -621,7 +611,7 @@ pub fn prepare_rename(file_path: &str, line: u32, column: u32) -> Result<()> {
     Ok(())
 }
 
-/// `rock-lsp rename <file:line:col> <new_name> --backend bone`.
+/// `rock lsp rename <file:line:col> <new_name>`.
 pub fn rename(file_path: &str, line: u32, column: u32, new_name: &str) -> Result<()> {
     // Load the whole project so rename rewrites cross-file references too.
     let (file_path, bone) = open_project(file_path);
@@ -659,7 +649,7 @@ pub fn rename(file_path: &str, line: u32, column: u32, new_name: &str) -> Result
     Ok(())
 }
 
-/// `rock-lsp signature-help <file:line:col> --backend bone`.
+/// `rock lsp signature-help <file:line:col>`.
 pub fn signature_help(file_path: &str, line: u32, column: u32) -> Result<()> {
     let (file_path, bone) = open_file(file_path)?;
 
@@ -679,7 +669,7 @@ pub fn signature_help(file_path: &str, line: u32, column: u32) -> Result<()> {
     Ok(())
 }
 
-/// `rock-lsp document-symbols <file> --backend bone`.
+/// `rock lsp document-symbols <file>`.
 pub fn document_symbols(file_path: &str) -> Result<()> {
     let (file_path, bone) = open_file(file_path)?;
 
@@ -693,7 +683,7 @@ pub fn document_symbols(file_path: &str) -> Result<()> {
     Ok(())
 }
 
-/// `rock-lsp hole-info <file:line:col> --backend bone`. Type holes only for now
+/// `rock lsp hole-info <file:line:col>`. Type holes only for now
 /// (bone rejects expression holes at lowering); prints nothing and exits 1 when
 /// the cursor isn't on a hole, matching the lua handler.
 pub fn hole_info(file_path: &str, line: u32, column: u32) -> Result<()> {
@@ -712,7 +702,7 @@ pub fn hole_info(file_path: &str, line: u32, column: u32) -> Result<()> {
     }
 }
 
-/// `rock-lsp workspace-symbols <file> <query> --backend bone`.
+/// `rock lsp workspace-symbols <file> <query>`.
 pub fn workspace_symbols(file_path: &str, query: &str) -> Result<()> {
     // Load the whole project so symbols from every user file are searched.
     let (file_path, bone) = open_project(file_path);
@@ -728,7 +718,7 @@ pub fn workspace_symbols(file_path: &str, query: &str) -> Result<()> {
     Ok(())
 }
 
-/// `rock-lsp semantic-tokens <file> --backend bone`.
+/// `rock lsp semantic-tokens <file>`.
 pub fn semantic_tokens(file_path: &str) -> Result<()> {
     let (file_path, bone) = open_file(file_path)?;
 
@@ -743,7 +733,7 @@ pub fn semantic_tokens(file_path: &str) -> Result<()> {
     Ok(())
 }
 
-/// `rock-lsp inlay-hints <file> --backend bone`. Hints over the whole file.
+/// `rock lsp inlay-hints <file>`. Hints over the whole file.
 pub fn inlay_hints(file_path: &str) -> Result<()> {
     let (file_path, bone) = open_file(file_path)?;
 
@@ -782,13 +772,6 @@ fn open_project(file_path: &str) -> (String, BoneWorkspace) {
 fn print_json(value: &serde_json::Value) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
-}
-
-fn marked_string_text(s: lsp_types::MarkedString) -> String {
-    match s {
-        lsp_types::MarkedString::String(s) => s,
-        lsp_types::MarkedString::LanguageString(ls) => ls.value,
-    }
 }
 
 fn canonical(file_path: &str) -> String {

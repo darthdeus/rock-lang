@@ -145,6 +145,5 @@ pub fn apply_edits(src: &str, mut edits: Vec<TextEdit>) -> String {
 pub fn hover_markup(bone: &BoneWorkspace, path: &str, pos: Position) -> Option<String> {
     bone.hover(path, pos).map(|h| match h.contents {
         HoverContents::Markup(m) => m.value,
-        other => panic!("expected markup hover, got {other:?}"),
     })
 }

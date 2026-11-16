@@ -1,4 +1,4 @@
-use crate::{Location, Range, SymbolKind, SymbolTag};
+use crate::{Location, Range, SymbolKind};
 
 /// Represents programming constructs like variables, classes, interfaces etc.
 /// that appear in a document. Document symbols can be hierarchical and they have two ranges:
@@ -9,9 +9,6 @@ pub struct DocumentSymbol {
     pub name: String,
     pub detail: Option<String>,
     pub kind: SymbolKind,
-    pub tags: Option<Vec<SymbolTag>>,
-    #[deprecated(note = "Use tags instead")]
-    pub deprecated: Option<bool>,
     pub range: Range,
     pub selection_range: Range,
     pub children: Option<Vec<DocumentSymbol>>,
@@ -26,8 +23,6 @@ impl_lsp_struct!(out DocumentSymbol,
     },
     optional {
         detail: String = "detail",
-        tags: Vec<SymbolTag> = "tags",
-        deprecated: bool = "deprecated",
         children: Vec<DocumentSymbol> = "children",
     }
 );
@@ -38,9 +33,6 @@ impl_lsp_struct!(out DocumentSymbol,
 pub struct SymbolInformation {
     pub name: String,
     pub kind: SymbolKind,
-    pub tags: Option<Vec<SymbolTag>>,
-    #[deprecated(note = "Use tags instead")]
-    pub deprecated: Option<bool>,
     pub location: Location,
     pub container_name: Option<String>,
 }
@@ -52,8 +44,6 @@ impl_lsp_struct!(out SymbolInformation,
         location: Location = "location",
     },
     optional {
-        tags: Vec<SymbolTag> = "tags",
-        deprecated: bool = "deprecated",
         container_name: String = "containerName",
     }
 );

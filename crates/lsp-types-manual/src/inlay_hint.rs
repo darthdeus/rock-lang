@@ -1,4 +1,4 @@
-use crate::{LSPAny, MarkupContent, Position, TextEdit};
+use crate::Position;
 
 /// Inlay hint information.
 ///
@@ -8,11 +8,8 @@ pub struct InlayHint {
     pub position: Position,
     pub label: InlayHintLabel,
     pub kind: Option<InlayHintKind>,
-    pub text_edits: Option<Vec<TextEdit>>,
-    pub tooltip: Option<InlayHintTooltip>,
     pub padding_left: Option<bool>,
     pub padding_right: Option<bool>,
-    pub data: Option<LSPAny>,
 }
 
 impl_lsp_struct!(out InlayHint,
@@ -22,11 +19,8 @@ impl_lsp_struct!(out InlayHint,
     },
     optional {
         kind: InlayHintKind = "kind",
-        text_edits: Vec<TextEdit> = "textEdits",
-        tooltip: InlayHintTooltip = "tooltip",
         padding_left: bool = "paddingLeft",
         padding_right: bool = "paddingRight",
-        data: LSPAny = "data",
     }
 );
 
@@ -37,17 +31,6 @@ pub enum InlayHintLabel {
 }
 
 impl_untagged_enum!(InlayHintLabel { LabelParts, String });
-
-#[derive(Debug, Clone)]
-pub enum InlayHintTooltip {
-    String(String),
-    MarkupContent(MarkupContent),
-}
-
-impl_untagged_enum!(InlayHintTooltip {
-    MarkupContent,
-    String,
-});
 
 /// An inlay hint label part allows for interactive and composite labels
 /// of inlay hints.

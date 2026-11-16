@@ -1962,13 +1962,10 @@ impl BoneWorkspace {
             .into_iter()
             .map(|s| {
                 let range = line_index.range(src, s.span.offset_range().0, s.span.offset_range().1);
-                #[allow(deprecated)]
                 DocumentSymbol {
                     name: s.name,
                     detail: None,
                     kind: entry_symbol_kind(s.kind, s.is_const),
-                    tags: None,
-                    deprecated: None,
                     range,
                     selection_range: range,
                     children: None,
@@ -2041,12 +2038,9 @@ impl BoneWorkspace {
                     } else {
                         &mut out
                     };
-                    #[allow(deprecated)]
                     target.push(SymbolInformation {
                         name: s.name,
                         kind: entry_symbol_kind(s.kind, s.is_const),
-                        tags: None,
-                        deprecated: None,
                         location: Location {
                             uri: uri.clone(),
                             range,
@@ -2344,11 +2338,8 @@ impl BoneWorkspace {
                     position: line_index.position(src, offset),
                     label: InlayHintLabel::String(label),
                     kind: Some(kind),
-                    text_edits: None,
-                    tooltip: None,
                     padding_left: pad_left,
                     padding_right: pad_right,
-                    data: None,
                 }
             })
             .collect()

@@ -132,9 +132,7 @@ fn main() {
             assert_eq!(location.uri.to_file_path().unwrap(), project.path(file));
             assert_eq!(location.range, expected);
             let h = b.hover(&path, p).expect("variant hover");
-            let HoverContents::Markup(markup) = h.contents else {
-                panic!("markup hover")
-            };
+            let HoverContents::Markup(markup) = h.contents;
             assert!(
                 markup.value.contains(&format!("::Circle {{ {payload} }}")),
                 "{markup:?}"
@@ -154,9 +152,7 @@ fn main() {
         assert_eq!(location.uri.to_file_path().unwrap(), project.path(file));
         assert_eq!(location.range.start, pos_of(src, "enum Shape", 0, 5));
         let h = b.hover(&path, p).expect("enum hover");
-        let HoverContents::Markup(markup) = h.contents else {
-            panic!("markup hover")
-        };
+        let HoverContents::Markup(markup) = h.contents;
         assert!(markup.value.contains("enum "), "{markup:?}");
     }
 }
@@ -247,9 +243,7 @@ fn f() {
                 let h = b
                     .hover(PATH, p)
                     .unwrap_or_else(|| panic!("no hover at {p:?}"));
-                let HoverContents::Markup(m) = h.contents else {
-                    panic!("markup hover")
-                };
+                let HoverContents::Markup(m) = h.contents;
                 assert_eq!(m.value, expected, "{marker}: hover at {p:?}");
                 assert_eq!(h.range, Some(token(marker, into, name)), "{marker}");
             }
