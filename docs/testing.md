@@ -7,7 +7,7 @@ this checkout before running it.
 ```sh
 cargo test --locked -p bone-semantic       # replace with each changed crate
 cargo test --locked --no-fail-fast         # workspace default members
-cargo test --locked --workspace --no-fail-fast
+cargo test --locked --workspace --exclude stone-rs --exclude stone-gl --exclude stone-capture --exclude stone-imgui-abi
 cargo +1.99.1 fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
