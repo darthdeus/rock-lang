@@ -703,15 +703,12 @@ impl<'a> Builder<'a> {
                 .ret
                 .expect("a flat plan has flat arguments or a flat result");
             let dests = vec![self.f.new_cell(None), self.f.new_cell(None)];
-            let call = self.emit_cur(Inst::CallMulti {
-                dests: dests.clone(),
-                func,
-                args,
-            });
+            let (call, loads) = self.call_multi(dests, func, args);
             self.record_call(call, func, dc)?;
-            self.f.flat_call_lanes.insert(call, dests.len());
-            let vec = self.emit_cur(Inst::Load(dests[0]));
-            let slot = self.emit_cur(Inst::Load(dests[1]));
+            self.f.flat_call_lanes.insert(call, 2);
+            let [vec, slot] = loads[..] else {
+                unreachable!()
+            };
             return Ok(FlatCallOut::Flat(FlatRefVal { vec, slot, key }));
         }
         let hoisted = self.flat_variant(plan, dc)?;
@@ -723,16 +720,17 @@ impl<'a> Builder<'a> {
         let callee = self.emit_cur(Inst::Global(hoisted));
         let mut argv: Vec<Idx<Inst>> = slots.into_iter().map(|(_, slot)| slot).collect();
         argv.extend(args);
+        let multi = |s: &mut Self, dests: Vec<Idx<Cell>>, argv| {
+            let lanes = dests.len();
+            let (call, loads) = s.call_value_multi(dests, callee, argv);
+            s.f.flat_call_lanes.insert(call, lanes);
+            loads
+        };
         if let Some(key) = plan.ret {
             let dests = vec![self.f.new_cell(None), self.f.new_cell(None)];
-            let call = self.emit_cur(Inst::CallValueMulti {
-                dests: dests.clone(),
-                callee,
-                args: argv,
-            });
-            self.f.flat_call_lanes.insert(call, dests.len());
-            let vec = self.emit_cur(Inst::Load(dests[0]));
-            let slot = self.emit_cur(Inst::Load(dests[1]));
+            let [vec, slot] = multi(self, dests, argv)[..] else {
+                unreachable!()
+            };
             return Ok(FlatCallOut::Flat(FlatRefVal { vec, slot, key }));
         }
         let ret_shape = if dc.plan.uses_scalar_abi() {
@@ -742,13 +740,7 @@ impl<'a> Builder<'a> {
         };
         if let Some(shape) = ret_shape {
             let dests = self.fresh_cells(shape.leaf_count());
-            let call = self.emit_cur(Inst::CallValueMulti {
-                dests: dests.clone(),
-                callee,
-                args: argv,
-            });
-            self.f.flat_call_lanes.insert(call, dests.len());
-            let leaves = self.load_cells(&dests);
+            let leaves = multi(self, dests, argv);
             return Ok(FlatCallOut::Value(
                 self.rebuild_from_leaves(shape, &leaves, &mut 0),
             ));
@@ -759,13 +751,7 @@ impl<'a> Builder<'a> {
                 .into_iter()
                 .map(|ty| self.f.new_cell_typed(None, ty))
                 .collect();
-            let call = self.emit_cur(Inst::CallValueMulti {
-                dests: dests.clone(),
-                callee,
-                args: argv,
-            });
-            self.f.flat_call_lanes.insert(call, dests.len());
-            let loads = self.load_cells(&dests);
+            let loads = multi(self, dests, argv);
             return Ok(FlatCallOut::Value(self.tuple_result(shape, &loads)));
         }
         Ok(FlatCallOut::Value(ValueRepr::Scalar(

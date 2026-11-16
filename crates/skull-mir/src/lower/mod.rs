@@ -2543,6 +2543,34 @@ impl<'a> Builder<'a> {
         self.emit_cur(Inst::Store { cell, value });
     }
 
+    /// A direct multi-return call into `dests`, and each dest loaded back.
+    fn call_multi(
+        &mut self,
+        dests: Vec<Idx<Cell>>,
+        func: FuncRef,
+        args: Vec<Idx<Inst>>,
+    ) -> (Idx<Inst>, Vec<Idx<Inst>>) {
+        let loads_from = dests.clone();
+        let call = self.emit_cur(Inst::CallMulti { dests, func, args });
+        (call, self.load_cells(&loads_from))
+    }
+
+    /// An indirect multi-return call into `dests`, and each dest loaded back.
+    fn call_value_multi(
+        &mut self,
+        dests: Vec<Idx<Cell>>,
+        callee: Idx<Inst>,
+        args: Vec<Idx<Inst>>,
+    ) -> (Idx<Inst>, Vec<Idx<Inst>>) {
+        let loads_from = dests.clone();
+        let call = self.emit_cur(Inst::CallValueMulti {
+            dests,
+            callee,
+            args,
+        });
+        (call, self.load_cells(&loads_from))
+    }
+
     fn emit_cur(&mut self, inst: Inst) -> Idx<Inst> {
         let inst = match inst {
             Inst::Field { base, field } if self.callback_records.contains(&base) => {

@@ -1527,15 +1527,10 @@ impl<'a> Builder<'a> {
                         return self.call_result_bundle(&abi.representation, ValueRepr::Scalar(v));
                     };
                     let dests = self.fresh_cells(shape.leaf_count());
-                    let call = self.emit_cur(Inst::CallValueMulti {
-                        dests: dests.clone(),
-                        callee: g,
-                        args: arg_vals,
-                    });
+                    let (call, leaves) = self.call_value_multi(dests, g, arg_vals);
                     self.f
                         .call_rep_plans
                         .insert(call, abi.representation.clone());
-                    let leaves = self.load_cells(&dests);
                     let mut idx = 0;
                     let value = self.rebuild_from_leaves(shape, &leaves, &mut idx);
                     return self.call_result_bundle(&abi.representation, value);
@@ -1995,13 +1990,8 @@ impl<'a> Builder<'a> {
     ) -> Result<ValueRepr, CompilerError> {
         if let Some(shape) = value {
             let dests = self.fresh_cells(shape.leaf_count());
-            let call = self.emit_cur(Inst::CallMulti {
-                dests: dests.clone(),
-                func,
-                args,
-            });
+            let (call, leaves) = self.call_multi(dests, func, args);
             self.record_call(call, func, dc)?;
-            let leaves = self.load_cells(&dests);
             return Ok(self.rebuild_from_leaves(shape, &leaves, &mut 0));
         }
         if let Some(shape) = tuple {
@@ -2040,13 +2030,8 @@ impl<'a> Builder<'a> {
             .into_iter()
             .map(|ty| self.f.new_cell_typed(None, ty))
             .collect();
-        let call = self.emit_cur(Inst::CallMulti {
-            dests: dests.clone(),
-            func,
-            args,
-        });
+        let (call, loads) = self.call_multi(dests, func, args);
         self.record_call(call, func, dc)?;
-        let loads = self.load_cells(&dests);
         Ok(self.tuple_result(shape, &loads))
     }
 
@@ -2093,13 +2078,8 @@ impl<'a> Builder<'a> {
         };
         if let Some(shape) = arena.tuple_shape(result) {
             let dests = self.fresh_cells(shape.slot_count());
-            let call = self.emit_cur(Inst::CallValueMulti {
-                dests: dests.clone(),
-                callee,
-                args: argv,
-            });
+            let (call, loads) = self.call_value_multi(dests, callee, argv);
             self.f.call_rep_plans.insert(call, plan.clone());
-            let loads = self.load_cells(&dests);
             return Ok(ValueBundle::new(result, self.tuple_result(&shape, &loads)));
         }
         let Some(shape) = arena.value_shape(result) else {
@@ -2108,13 +2088,8 @@ impl<'a> Builder<'a> {
             return Ok(ValueBundle::new(result, ValueRepr::Scalar(call)));
         };
         let dests = self.fresh_cells(shape.leaf_count());
-        let call = self.emit_cur(Inst::CallValueMulti {
-            dests: dests.clone(),
-            callee,
-            args: argv,
-        });
+        let (call, leaves) = self.call_value_multi(dests, callee, argv);
         self.f.call_rep_plans.insert(call, plan);
-        let leaves = self.load_cells(&dests);
         let mut idx = 0;
         Ok(ValueBundle::new(
             result,
@@ -2139,12 +2114,7 @@ impl<'a> Builder<'a> {
         match self.expr_tuple_shape(e)? {
             Some(shape) => {
                 let dests = self.fresh_cells(shape.slot_count());
-                self.emit_cur(Inst::CallValueMulti {
-                    dests: dests.clone(),
-                    callee,
-                    args,
-                });
-                let loads = self.load_cells(&dests);
+                let (_, loads) = self.call_value_multi(dests, callee, args);
                 let r = self.tuple_result(&shape, &loads);
                 Ok(self.pack(r)?)
             }
