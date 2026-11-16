@@ -393,11 +393,29 @@ impl<'a> Tokenizer<'a> {
         })
     }
 
-    /// Advance the cursor to byte index `target`, keeping line/column in step.
+    /// Advance the cursor to byte index `target` (rounded up to a char
+    /// boundary), keeping line/column in step as [`Self::advance`] would.
     fn advance_to(&mut self, target: usize) {
-        while self.byte_index < target && self.current.is_some() {
-            self.advance();
+        let bytes = self.input.as_bytes();
+        let mut end = target.min(bytes.len());
+        while end < bytes.len() && bytes[end] & 0xC0 == 0x80 {
+            end += 1;
         }
+        if end <= self.byte_index {
+            return;
+        }
+        let run = &bytes[self.byte_index..end];
+        let chars = |s: &[u8]| s.iter().filter(|&&b| b & 0xC0 != 0x80).count();
+        match run.iter().rposition(|&b| b == b'\n') {
+            Some(last) => {
+                self.line += run.iter().filter(|&&b| b == b'\n').count();
+                self.column = chars(&run[last + 1..]);
+            }
+            None => self.column += chars(run),
+        }
+        self.byte_offset += run.len();
+        self.byte_index = end;
+        self.current = decode_at(bytes, end).map(|(c, _)| c);
     }
 
     fn read_keyword_or_ident(&mut self) -> Result<TokenKind, CompilerError> {
@@ -1364,6 +1382,29 @@ mod test {
         assert_eq!(tokens[0].kind, TokenKind::String("a\nb".into()));
         assert_eq!(tokens[1].kind, TokenKind::Ident("c".into()));
         assert_eq!(tokens[1].span.line_range().0, 2);
+    }
+
+    #[test]
+    pub fn spans_after_slow_path_literals_count_lines_chars_and_bytes() {
+        // `é` is 2 bytes / 1 char. The triple literal ends on line 1 after
+        // `xé"""` (5 chars, 6 bytes) and a space, so `y` sits at line 1,
+        // column 6, byte 13.
+        let src = "\"\"\"é\nxé\"\"\" y \"a{b}é\" z";
+        let tokens = Tokenizer::from_code("t.rock", src).tokenize().unwrap();
+        let y = &tokens[1].span;
+        assert_eq!(tokens[1].kind, TokenKind::Ident("y".into()));
+        assert_eq!((y.line_range().0, y.col_range().0), (1, 6));
+        assert_eq!(y.offset_range().0, 13);
+        let z = &tokens[3].span;
+        assert_eq!(tokens[3].kind, TokenKind::Ident("z".into()));
+        assert_eq!((z.line_range().0, z.col_range().0), (1, 16));
+        assert_eq!(z.offset_range().0, 24);
+        // A bad escape on a later line is labelled at its own line and column.
+        let err = Tokenizer::from_code("t.rock", "\"é\\\nab\\q\"")
+            .tokenize()
+            .unwrap_err();
+        let span = err.labels[0].span;
+        assert_eq!((span.line_range().0, span.col_range()), (1, (2, 4)));
     }
 
     #[test]

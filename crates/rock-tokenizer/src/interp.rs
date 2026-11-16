@@ -201,7 +201,18 @@ pub fn scan_string(src: &str, start: usize) -> Scan {
         }};
     }
 
+    let plain = |c: u8| {
+        c != close[0]
+            && !(flavor.escapes() && c == b'\\')
+            && !(flavor.interpolates() && (c == b'{' || c == b'}'))
+    };
     while i < n {
+        let run = b[i..].iter().position(|&c| !plain(c)).map_or(n, |p| i + p);
+        if run > i {
+            lit_text.push_str(&src[i..run]);
+            i = run;
+            continue;
+        }
         if b[i..].starts_with(close) {
             flush_literal!(i);
             return Scan {
