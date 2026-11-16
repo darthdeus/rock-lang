@@ -81,19 +81,19 @@ fn nullable_refine_nested_else() {
     }
 }
 
-@test(output = "11", type_holes = [[0, "int"], [1, "int"], [2, "int"]])
+@test(output = "11", type_holes = [[1, "int"], [2, "int"], [3, "int?"]])
 fn double_refinement_chain() {
     let x: int? = 10
     
     if x != null {          // x : int in this branch
-        let x_refined_once: ? = x  // [0]
+        let x_refined_once: ? = x  // [1]
         if x > 5 {          // still int
-            let x_refined_twice: ? = x  // [1]
+            let x_refined_twice: ? = x  // [2]
             print(x + 1)
         }
     }
     
-    let x_reverted: ? = x  // [2] - should revert to int? after scope
+    let x_reverted: ? = x  // [3] - should revert to int? after scope
     x = null  // outer x is still int?
 }
 
@@ -101,15 +101,15 @@ fn double_refinement_chain() {
 // Complex Refinement Scenarios
 // ============================================
 
-@test(output = "5\n10", type_holes = [[0, "int"], [1, "int"]])
+@test(output = "5\n10", type_holes = [[4, "int"], [5, "int"]])
 fn refinement_with_multiple_variables() {
     let a: int? = 5
     let b: int? = 10
     
     if a != null && b != null {
         // Both a and b are refined to int here
-        let a_refined: ? = a  // [0]
-        let b_refined: ? = b  // [1]
+        let a_refined: ? = a  // [4]
+        let b_refined: ? = b  // [5]
         print(a)
         print(b)
     }
