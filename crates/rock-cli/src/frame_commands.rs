@@ -118,7 +118,7 @@ pub(crate) fn do_perf(
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs_f64();
     cmd.env("PERF_LAUNCH_UNIX_S", launched.to_string());
-    let mut child = cmd.spawn()?;
+    let mut child = crate::headless_scope::spawn_bound_child(&mut cmd, lua_file.parent().unwrap())?;
     #[cfg(unix)]
     let (process_result, launch_timed_out) = {
         let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
@@ -342,7 +342,7 @@ pub(crate) fn do_one_frame(
 
     // Use spawn instead of output to implement the progress watchdog.
     rock_host::process_management::report_spawn_phase("execution");
-    let mut child = cmd.spawn()?;
+    let mut child = crate::headless_scope::spawn_bound_child(&mut cmd, lua_file.parent().unwrap())?;
 
     let watchdog = frame_watchdog();
     let process_result = ProcessManager::wait_with_progress_watchdog(

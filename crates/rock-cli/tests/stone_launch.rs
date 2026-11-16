@@ -643,6 +643,81 @@ exit 97
     assert_eq!(std::fs::read_dir(&output).unwrap().count(), 1);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn bounded_runs_do_not_outlive_a_killed_rock() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+    struct Game(Option<i32>);
+    impl Drop for Game {
+        fn drop(&mut self) {
+            if let Some(pid) = self.0 {
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+    fn running(pid: i32) -> bool {
+        // An orphan that died but is not yet reaped is a zombie, not a game.
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(") ")
+                .is_some_and(|(_, rest)| !rest.starts_with('Z'))
+        })
+    }
+    let root = tempfile::tempdir().unwrap();
+    let wrapper = root.path().join("parked-luajit");
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\necho $$ > \"$GAME_PID.staging\"\nmv \"$GAME_PID.staging\" \"$GAME_PID\"\nexec sleep 600\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let project = root.path().join("game");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(project.join("stick.toml"), "[package]\nname = \"parked\"\n").unwrap();
+    std::fs::write(project.join("main.rock"), "fn main() {}\n").unwrap();
+    for command in ["frame", "perf"] {
+        let pid_path = root.path().join(format!("{command}.pid"));
+        let mut rock = Command::new(env!("CARGO_BIN_EXE_rock"))
+            .arg(command)
+            .arg(&project)
+            .arg("--output")
+            .arg(root.path().join(command))
+            .current_dir(root.path())
+            .env("ROCK_SKIP_ENGINE_BUILD", "1")
+            .env("ROCK_LUAJIT", &wrapper)
+            .env("ROCK_FRAME_TIMEOUT_SECS", "600")
+            .env("GAME_PID", &pid_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let start = bone_core::prelude::Instant::now();
+        let pid = loop {
+            if let Ok(pid) = std::fs::read_to_string(&pid_path) {
+                break pid.trim().parse::<i32>().unwrap();
+            }
+            if let Some(status) = rock.try_wait().unwrap() {
+                panic!("{command} exited before launching the game: {status}");
+            }
+            assert!(
+                start.elapsed() < test_utils::HANG_BACKSTOP,
+                "{command} never launched the game"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let _game = Game(Some(pid));
+        rock.kill().unwrap();
+        rock.wait().unwrap();
+        let killed = bone_core::prelude::Instant::now();
+        while running(pid) && killed.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!running(pid), "`rock {command}` left its game running");
+    }
+}
+
 #[test]
 fn sim_commands_run_and_report_an_external_stone_project() {
     let fixture = tempfile::tempdir().unwrap();
