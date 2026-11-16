@@ -3792,7 +3792,53 @@ fn reparse_with_project(
         "combined-module parse",
         "use live workspace",
     )?;
-    reparse_with_project_inner(session, combined, path, munged, fallbacks, request)
+    // Project-wide pass: every module except the current file, plus the munge.
+    // Resolves cross-file / dependency types (an `IVec2` engine param, etc.).
+    // The warm prefix stays shared unless the current file is one of them.
+    let (warm, mut users) = if combined.shared().iter().any(|a| a.file.as_str() == path) {
+        (Arc::from([]), combined.into_vec())
+    } else {
+        combined.into_parts()
+    };
+    users.retain(|a| a.file.as_str() != path);
+    // The munge is a half-typed buffer (missing bracket, `recv.` mid-edit). The
+    // parse is total -- skull-parser drops the broken statement and keeps the rest
+    // (the recovery error stays on `recovery_errors`, which the LSP path never
+    // gates on) -- so completion still resolves from the best-effort tree (backlog
+    // #21). Only a hard tokenizer failure is `Err`/`None` here.
+    let parsed = fallbacks.result(
+        session.parse_buffer(path, munged),
+        request,
+        path,
+        "parse recovery source",
+        "use live workspace",
+    )?;
+    users.push(parsed.clone());
+    let mut modules = skull_parser::stdlib::ModuleSet::new(warm, users);
+    let checked = bone_semantic::semantic_passes::semantic_pass_without_closure_gate(
+        &mut modules,
+        &session.aliases,
+    )
+    .and_then(|ws| {
+        bone_semantic::semantic_passes::pass_validate_api_closure(&ws)?;
+        Ok(ws)
+    });
+    if let Some(ws) = fallbacks.result(
+        checked,
+        request,
+        path,
+        "project semantic recovery",
+        "try single-file semantic recovery",
+    ) {
+        return Some(ws);
+    }
+    fallbacks.result(
+        bone_semantic::semantic_passes::semantic_pass(&mut [parsed]),
+        request,
+        path,
+        "single-file semantic recovery",
+        "use live workspace",
+    )
 }
 
 /// Analyze one completion munge: apply it as a speculative Session variant
@@ -3830,63 +3876,6 @@ pub(crate) fn analyze_variant<R>(
             }
         }
     }
-}
-
-fn reparse_with_project_inner(
-    session: &Session,
-    combined: skull_parser::stdlib::ModuleSet,
-    path: &str,
-    munged: &str,
-    reports: &FallbackReports,
-    request: &'static str,
-) -> Option<Workspace> {
-    // Project-wide pass: every module except the current file, plus the munge.
-    // Resolves cross-file / dependency types (an `IVec2` engine param, etc.).
-    // The warm prefix stays shared unless the current file is one of them.
-    let (warm, mut users) = if combined.shared().iter().any(|a| a.file.as_str() == path) {
-        (Arc::from([]), combined.into_vec())
-    } else {
-        combined.into_parts()
-    };
-    users.retain(|a| a.file.as_str() != path);
-    // The munge is a half-typed buffer (missing bracket, `recv.` mid-edit). The
-    // parse is total -- skull-parser drops the broken statement and keeps the rest
-    // (the recovery error stays on `recovery_errors`, which the LSP path never
-    // gates on) -- so completion still resolves from the best-effort tree (backlog
-    // #21). Only a hard tokenizer failure is `Err`/`None` here.
-    let parsed = reports.result(
-        session.parse_buffer(path, munged),
-        request,
-        path,
-        "parse recovery source",
-        "use live workspace",
-    )?;
-    users.push(parsed.clone());
-    let mut modules = skull_parser::stdlib::ModuleSet::new(warm, users);
-    let checked = bone_semantic::semantic_passes::semantic_pass_without_closure_gate(
-        &mut modules,
-        &session.aliases,
-    )
-    .and_then(|ws| {
-        bone_semantic::semantic_passes::pass_validate_api_closure(&ws)?;
-        Ok(ws)
-    });
-    if let Some(ws) = reports.result(
-        checked,
-        request,
-        path,
-        "project semantic recovery",
-        "try single-file semantic recovery",
-    ) {
-        return Some(ws);
-    }
-    reports.result(
-        bone_semantic::semantic_passes::semantic_pass(&mut [parsed]),
-        request,
-        path,
-        "single-file semantic recovery",
-        "use live workspace",
-    )
 }
 
 /// Whether a reach-path suffix (`a().b().c`, UFCS-chained) has a CALL hop to
