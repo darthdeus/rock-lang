@@ -1,47 +1,83 @@
-// Pure expressions should NOT trigger the argument-hoist path. Before
-// the purity-aware dup-safety relaxation, a body that reads a param
-// multiple times forced a `let __inline_arg_N = <arg>` hoist whenever
-// the arg wasn't a plain literal/ident/field-chain. With purity, a
-// pure function call returning a scalar, or a BinOp over dup-safe
-// operands, is accepted as directly duplicable — no hoist, matching
-// hand-written code exactly.
+// Pure argument expressions need no hoist when an @inline body reads the
+// param several times: a pure call returning a scalar, a BinOp over
+// dup-safe operands, and calls to user-vouched `@pure` opaque bodies
+// (inline(lua)/inline(js)) or verified `@pure` Rock bodies are substituted
+// directly. Mis-annotating a side-effecting opaque body silently
+// miscompiles (same trust level as @nomangle).
 
-// Plain pure function returning int — body uses `x` three times.
-// With the relaxation, `triple(abs_like(-5))` substitutes `abs_like(-5)`
-// at each site directly, no hoist local.
 @inline
 fn triple(x: int) -> int {
     return x + x + x
 }
 
-// Small pure helper — no globals, no mutation, no allocation.
+@inline
+fn sum_3(a: float) -> float {
+    return a + a + a
+}
+
 fn abs_like(n: int) -> int {
     return if n < 0 { 0 - n } else { n }
 }
 
-@test(output = "15")
-fn test_pure_call_dup_safe() {
-    let r = triple(abs_like(-5))
-    print(r)
-}
-
-// BinOp over idents must also be recognized as dup-safe even though
-// the current syntactic rule rejects all BinOps.
-@test(output = "15")
-fn test_binop_dup_safe() {
-    let a = 3
-    let b = 2
-    let r = triple(a + b)   // (a+b)=5 used 3x = 15; with relaxation no hoist
-    print(r)
-}
-
-// Pure + pure composition — arithmetic pipeline.
 fn square(n: int) -> int {
     return n * n
 }
 
-@test(output = "12")
-fn test_pure_pipeline_dup_safe() {
-    let r = triple(square(2))   // square(2) = 4, triple(4) = 12
+@test(output = "15\n15\n12")
+fn test_inferred_pure_args_dup_safe() {
+    let r = triple(abs_like(-5))
     print(r)
+    let a = 3
+    let b = 2
+    let s = triple(a + b)
+    print(s)
+    let t = triple(square(2))
+    print(t)
+}
+
+@pure
+inline(lua) fn lua_abs(n: int) -> int = "if n < 0 then return -n else return n end"
+@pure
+inline(js) fn lua_abs(n: int) -> int = "return n < 0 ? -n : n;"
+
+// A body-defined fn calling a @pure opaque fn is verified pure itself.
+fn double_it(n: int) -> int {
+    return lua_abs(n) * 2
+}
+
+@test(output = "15\n30")
+fn test_pure_opaque_body_dup_safe() {
+    let r = triple(lua_abs(-5))
+    print(r)
+    let s = triple(double_it(-5))
+    print(s)
+}
+
+// Stdlib `abs` and `floor` are @pure.
+@test(output = "4.5\n12")
+fn test_stdlib_pure_args() {
+    let x = -1.5
+    let r = sum_3(abs(x))
+    print(r)
+    let s = sum_3(floor(4.7))
+    print(s)
+}
+
+@pure
+fn square_plus_one(n: int) -> int {
+    let s = n * n
+    return s + 1
+}
+
+@pure
+fn plus_two(n: int) -> int {
+    return square_plus_one(n) + 2
+}
+
+@test(output = "51\n57")
+fn test_rock_body_pure_accepted_and_transitive() {
+    let r = sum_3(square_plus_one(4) as float)
+    print(r)
+    let s = sum_3(plus_two(4) as float)
+    print(s)
 }

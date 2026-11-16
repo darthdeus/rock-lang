@@ -1,8 +1,7 @@
 // Loop-invariant code motion for @pure calls. A pure call whose
 // arguments are all loop-invariant gets hoisted out of the loop
 // into a `let __licm_N = ...` in the enclosing block. Runtime
-// output is unchanged; the grep-the-Lua check lives in the
-// companion Rust test if/when we add one.
+// output is unchanged.
 
 @pure
 fn square_plus(x: int) -> int {
@@ -62,13 +61,6 @@ fn test_nested_pure_call_hoists() {
     print(sum)  // 10 * (110 + 1) = 1110
 }
 
-// Assignment to a captured local inside the loop → variant set picks
-// it up; a call on it can't hoist. Sum = square_plus(0..9 cumulative)
-// = square_plus at x = 45 (after i=9 iteration), but each iteration
-// sums a DIFFERENT value of square_plus(state) since state changes.
-// Iterate: state0=0, add square_plus(0)=0, state1=1; state=1+1=2,
-// add square_plus(2)=6 ... actually this is a trap test, skip.
-
 // Test that a non-pure call inside the loop stays untouched even if
 // its args are invariant. `print` is @debug_impure (demoted, not
 // pure), so no hoist.
@@ -79,10 +71,6 @@ fn test_non_pure_call_not_hoisted() {
         print(x)
     }
 }
-
-// ─────────────────────────────────────────────────────────────
-// Follow-ups from initial LICM (787b4675 park note)
-// ─────────────────────────────────────────────────────────────
 
 @pure
 fn abs_i(x: int) -> int {
@@ -124,7 +112,6 @@ fn test_ufcs_method_hoist() {
     print(sum as int)
 }
 
-
 // Value-struct return type: `@pure` fn returns V2. Should hoist
 // (value types are byte-equal / dup-safe).
 @pure
@@ -142,4 +129,36 @@ fn test_value_struct_return_hoists() {
         sum = sum + v.x + v.y
     }
     print(sum as int)
+}
+
+// Regression: LICM must NOT hoist a @pure call reading a global out of a loop.
+//
+// `pure_double(SENT_G)` reads the global `SENT_G`, which `sent_set_g` mutates
+// every iteration -- the call is loop-VARIANT and must run each iteration.
+// PureLicmAnf treats `SENT_G` as a free variable (a global: not bound by any
+// param/Let/for-binding) and refuses the hoist
+// (rock-codegen/src/anf/pure_licm.rs `all_refs_invariant`). Correct output is
+// "total=66" (2*(10+11+12)); the pre-fix bug hoisted the call above the loop and
+// computed it once from the stale entry value 1.0, giving "total=6".
+
+global SENT_G: float = 0.0
+
+fn sent_set_g(v: float) {
+    SENT_G = v
+}
+
+@pure
+fn pure_double(x: float) -> float {
+    return x * 2.0
+}
+
+@test(output = "total=66")
+fn licm_global_write_across_call_sentinel() {
+    SENT_G = 1.0
+    let total = 0.0
+    for i in 0..3 {
+        sent_set_g(float(i + 10))
+        total = total + pure_double(SENT_G)
+    }
+    print("total={total}")
 }

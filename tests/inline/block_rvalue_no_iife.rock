@@ -43,18 +43,14 @@ fn test_let_block_rvalue_nested() {
     print(x)
 }
 
-@test(output = "15")
-fn test_let_if_then_arm_is_block() {
+@test(output = "15\n7")
+fn test_let_if_arm_is_block() {
     let c = true
     let x = if c { let t = 10; t + 5 } else { 7 }
     print(x)
-}
-
-@test(output = "7")
-fn test_let_if_else_arm_taken_over_block() {
-    let c = false
-    let x = if c { let t = 10; t + 5 } else { 7 }
-    print(x)
+    let d = false
+    let y = if d { let t = 10; t + 5 } else { 7 }
+    print(y)
 }
 
 // Block locals must not leak into the surrounding scope — the inner `t`
@@ -88,9 +84,3 @@ fn test_let_block_rvalue_single_eval() {
     print(x)
     print(BLOCK_CALLS)
 }
-
-// Note: an @inline fn with a multi-statement body like
-// `side_effect(); return r` now splices as a Block expression at the
-// call site, which this lowering handles. See
-// `tests/inline/inline_multistmt.rock` for that coverage. Bodies that
-// still bind locals (`let t = ...; t * 2`) remain rejected by V0.

@@ -1,10 +1,6 @@
-// Adversarial tests: @inline — `let` bindings inside @inline body (L6).
-//
-// Body-local renaming must:
-//   - rename the body-local so it cannot collide with a caller-site
-//     local of the same name
-//   - not touch a param name (param substitution supersedes the rename)
-//   - handle inner shadowing (inner `let x = ...` rebinds x)
+// @inline bodies with their own locals and loops. Body locals are renamed so
+// they never collide with caller locals of the same name, a body local may
+// shadow a param or itself, and loops inside the body keep their semantics.
 
 @inline
 fn add_then_double(x: int) -> int {
@@ -12,38 +8,6 @@ fn add_then_double(x: int) -> int {
     return t * 2
 }
 
-@test(output = "8")
-fn test_basic_let() {
-    let r = add_then_double(3)
-    print(r)
-}
-
-// Caller has a local called `t` in scope at the splice site. The body's
-// `let t = ...` must rename so it doesn't shadow / clash with caller's t.
-@test(output = "100 8")
-fn test_caller_name_collision() {
-    let t = 100
-    let r = add_then_double(3)
-    print("{t} {r}")
-}
-
-// Shadow-collision: @inline body uses a body-local with the same name
-// as a param. The body-local rename must not interfere with param
-// substitution — the trailing `return t` reads the body-local, not the
-// caller's arg.
-@inline
-fn shadow_param(t: int) -> int {
-    let t = t + 1
-    return t
-}
-
-@test(output = "11")
-fn test_shadow_param() {
-    let r = shadow_param(10)
-    print(r)
-}
-
-// Multiple lets chained.
 @inline
 fn chain(x: int) -> int {
     let a = x + 1
@@ -51,8 +15,92 @@ fn chain(x: int) -> int {
     return b - 1
 }
 
-@test(output = "7")
-fn test_chain() {
-    let r = chain(3)
+@inline
+fn double_let(x: int) -> int {
+    let t = x + 1
+    let t = t * 2
+    return t
+}
+
+@test(output = "8 7 12")
+fn test_body_lets() {
+    print("{add_then_double(3)} {chain(3)} {double_let(5)}")
+}
+
+@test(output = "100 8")
+fn test_caller_name_collision() {
+    let t = 100
+    let r = add_then_double(3)
+    print("{t} {r}")
+}
+
+@inline
+fn uses_local_named_x(a: int) -> int {
+    let x = a * 10
+    let y = x + 1
+    return y
+}
+
+@test(output = "5 51")
+fn test_caller_x_passed_and_not_clobbered() {
+    let x = 5
+    let r = uses_local_named_x(x)
+    print("{x} {r}")
+}
+
+// The body-local rename must not interfere with param substitution: the
+// trailing `return t` reads the body local, not the caller's argument.
+@inline
+fn shadow_param(t: int) -> int {
+    let t = t + 1
+    return t
+}
+
+@inline
+fn ignore_param_shadow(a: int) -> int {
+    let a = 999
+    return a
+}
+
+@test(output = "11\n42 999")
+fn test_body_local_shadows_param() {
+    print(shadow_param(10))
+    let a = 42
+    let r = ignore_param_shadow(a)
+    print("{a} {r}")
+}
+
+@inline
+fn sum_vec(xs: [int]) -> int {
+    let total = 0
+    for x in xs {
+        total = total + x
+    }
+    return total
+}
+
+@test(output = "99 500 15")
+fn test_for_body_caller_collision() {
+    let x = 99
+    let total = 500
+    let xs = [1, 2, 3, 4, 5]
+    let r = sum_vec(xs)
+    print("{x} {total} {r}")
+}
+
+@inline
+fn count_down_sum(n: int) -> int {
+    let acc = 0
+    let i = n
+    while i > 0 {
+        acc = acc + i
+        i = i - 1
+    }
+    return acc
+}
+
+@test(output = "15")
+fn test_while_loop() {
+    let r = count_down_sum(5)
     print(r)
 }

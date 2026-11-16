@@ -1,14 +1,5 @@
-// Adversarial tests: @inline — multi-statement bodies
-//
-// V0 now accepts bodies of shape:
-//   side_effect_expr()
-//   side_effect_expr()
-//   trailing_expr    OR    return trailing_expr
-//
-// Prefix statements must be bare expression statements; no `let`,
-// `for`, `while`, `return` in the middle, etc. These tests exercise
-// the canonical "side effect then return receiver" fluent-builder
-// pattern.
+// @inline bodies with side-effecting prefix statements before the result:
+// the fluent-builder "side effect then return receiver" shape.
 
 global SIDE: int = 0
 
@@ -22,29 +13,22 @@ fn bump_by(n: int) -> int {
     return 0
 }
 
-// Bare side-effect + return receiver — the fluent-builder shape.
 @inline
 fn tap(r: int) -> int {
     bump()
     return r
 }
 
-@test(output = "7 1")
-fn test_tap_once() {
+@test(output = "7 1\n42 4")
+fn test_tap() {
     SIDE = 0
     let r = tap(7)
     print("{r} {SIDE}")
+    let c = tap(tap(tap(42)))
+    print("{c} {SIDE}")
 }
 
-@test(output = "42 3")
-fn test_tap_chained() {
-    SIDE = 0
-    let r = tap(tap(tap(42)))
-    print("{r} {SIDE}")
-}
-
-// Multiple prefix side-effects + trailing expression (no explicit
-// return).
+// Multiple prefix statements and a trailing expression without `return`.
 @inline
 fn double_tap(r: int) -> int {
     bump()
@@ -59,8 +43,7 @@ fn test_double_tap() {
     print("{r} {SIDE}")
 }
 
-// Parameter used in prefix statement — substitution must reach both
-// the side-effecting call and the trailing position.
+// Substitution must reach the parameter used in a prefix statement.
 @inline
 fn tap_with(r: int, add: int) -> int {
     bump_by(add)
@@ -72,4 +55,41 @@ fn test_tap_with_param_in_prefix() {
     SIDE = 0
     let r = tap_with(9, 10)
     print("{r} {SIDE}")
+}
+
+// Regression: a multi-statement @inline spliced at statement position after
+// a `let` must not trip Lua's "ambiguous syntax (function call x new
+// statement)" rule. Before the let emitter appended `;`, the previous line
+// `local x = <struct_ctor>(...)` ran together with a following IIFE.
+struct R { x: int, y: int }
+
+@inline
+fn tap_struct(r: R) -> R {
+    bump()
+    return r
+}
+
+@test(output = "2")
+fn test_let_struct_then_multistmt_inline() {
+    SIDE = 0
+    let r = R { x: 1, y: 2 }
+    tap_struct(r)
+    tap_struct(r)
+    print(SIDE)
+}
+
+@inline
+fn run_once(n: int) -> int {
+    bump()
+    return n
+}
+
+@test(output = "4")
+fn test_let_call_then_multistmt_inline_stmts() {
+    SIDE = 0
+    let n = bump()
+    run_once(1)
+    run_once(2)
+    run_once(3)
+    print(SIDE)
 }

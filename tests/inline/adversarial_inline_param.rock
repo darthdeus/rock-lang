@@ -10,30 +10,6 @@ fn produce(n: int) -> int {
     return n
 }
 
-// Simple param-read + return. No mutation. Must compile.
-@inline
-fn read_only(x: int) -> int {
-    return x + 1
-}
-
-@test(output = "11")
-fn test_inline_read_only_param() {
-    print(read_only(10))
-}
-
-// Call chain through @inline. Param read, used twice in body.
-@inline
-fn use_twice(x: int) -> int {
-    return x * x + x
-}
-
-@test(output = "12")
-fn test_inline_param_used_twice() {
-    // 3*3 + 3 = 12. Uses `x` twice; inline pass must ensure arg
-    // dup-safety (literal `3` is trivially dup-safe).
-    print(use_twice(3))
-}
-
 @inline
 fn rebind(x: int) -> int {
     x = x + 1

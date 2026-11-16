@@ -1,19 +1,11 @@
-// Compile-time constant folding through @pure calls. A @pure fn with
-// a single `return <expr>;` body whose args are all literal constants
-// evaluates to a literal at compile time. Runtime output is
-// unchanged from pre-folding behavior — the tests below assert
-// runtime correctness; the `compile` test under rock/tests exercises
-// the "the call is actually gone from the generated Lua" side.
+// Compile-time constant folding through @pure calls, including UFCS
+// `obj.method(...)` calls. A @pure straight-line `return <expr>` body with
+// all-literal args folds to a literal; non-constant args and impure callees
+// stay as calls. These tests assert the runtime values agree either way.
 
 @pure
 fn triple(x: int) -> int {
     return x + x + x
-}
-
-@test(output = "15")
-fn test_triple_folds() {
-    let r = triple(5)
-    print(r)
 }
 
 @pure
@@ -21,59 +13,75 @@ fn linear(a: int, b: int, x: int) -> int {
     return a * x + b
 }
 
-@test(output = "23")
-fn test_multi_arg_folds() {
-    let r = linear(4, 3, 5)
-    print(r)
-}
-
-// Nested pure calls: outer call's arg is itself a foldable pure
-// call. Post-order walk evaluates inside-out: `triple(2)` → 6,
-// then `linear(6, 1, 3)` → 19.
-@test(output = "19")
-fn test_nested_pure_calls_fold() {
-    let r = linear(triple(2), 1, 3)
-    print(r)
-}
-
-// Unary minus + bit-not + bool ops also evaluate.
 @pure
 fn boolish(a: bool, b: bool) -> bool {
     return a && b
 }
 
-@test(output = "true")
-fn test_bool_folds() {
-    let r = boolish(true, true)
-    print(r)
-}
-
-// Non-const arg defeats folding: the call stays as-is, still
-// evaluates correctly at runtime.
 @pure
 fn square(x: int) -> int {
     return x * x
 }
 
-@test(output = "49")
-fn test_non_const_arg_no_fold() {
+@test(output = "15\n23\n19\ntrue\n49")
+fn test_pure_calls_fold() {
+    let a = triple(5)
+    print(a)
+    let b = linear(4, 3, 5)
+    print(b)
+    // Post-order: triple(2) folds to 6 first, then linear(6, 1, 3).
+    let c = linear(triple(2), 1, 3)
+    print(c)
+    let d = boolish(true, true)
+    print(d)
     let n = 7
-    let r = square(n)
-    print(r)
+    let e = square(n)
+    print(e)
 }
 
-// Division by zero in the folded path: the evaluator bails
-// (returns None from eval_binop) so the original call survives
-// intact. Runtime behavior is Lua's — not our concern here.
-// The positive side: zero divisors from live data don't poison
-// compile-time folding for other calls.
 @pure
-fn maybe_div(a: int, b: int) -> int {
-    return a ./ b
+fn neg_int(x: int) -> int {
+    return -x
 }
 
-@test(output = "5")
-fn test_div_folds() {
-    let r = maybe_div(20, 4)
-    print(r)
+@pure
+fn add_int(x: int, y: int) -> int {
+    return x + y
+}
+
+fn impure_neg(x: int) -> int {
+    return -x
+}
+
+@test(output = "3\n7\n-9\n-5")
+fn test_ufcs_calls_fold() {
+    let a = (-3).neg_int()
+    print(a)
+    let b = (3).add_int(4)
+    print(b)
+    let n = 9
+    let c = n.neg_int()
+    print(c)
+    let d = (5).impure_neg()
+    print(d)
+}
+
+// Regression: the folder evaluated `int / int` and `int % int` with Rust's
+// truncate-toward-zero semantics, but runtime int division floors and `%`
+// is floor-modulo. Fold and runtime diverged whenever exactly one operand
+// was negative.
+@pure fn idiv(a: int, b: int) -> int { return a ./ b }
+@pure fn imod(a: int, b: int) -> int { return a % b }
+
+@test(output = "5\n-4\n-4\n3\n1\n-1\n-1")
+fn test_int_div_mod_match_runtime() {
+    print("{idiv(20, 4)}")
+    // idiv:    -7/2,  7/-2, -7/-2
+    print("{idiv(-7, 2)}")
+    print("{idiv(7, -2)}")
+    print("{idiv(-7, -2)}")
+    // imod:    -7%2,  7%-2, -7%-2
+    print("{imod(-7, 2)}")
+    print("{imod(7, -2)}")
+    print("{imod(-7, -2)}")
 }

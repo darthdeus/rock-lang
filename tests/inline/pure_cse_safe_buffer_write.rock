@@ -1,6 +1,6 @@
-// Roadmap §2.4 Issue 1: PureCse should treat NativeBuffer slot writes
-// as non-barriers, so identical pure calls before+after dedupe.
-// Pre-fix: 3 separate calls; post-fix: 1 call extracted, 2 references.
+// PureCse treats NativeBuffer slot writes as non-barriers, so identical
+// pure calls before and after a buffer write dedupe. Output must match the
+// un-deduplicated program.
 
 value V2 {
     x: float,
@@ -11,40 +11,58 @@ fn native_buffer_v2(n: int) -> NativeBuffer<V2> {
     return native_buffer_alloc(n)
 }
 
-@pure fn make_v2(a: float) -> V2 {
-    return V2 { x: a, y: a }
+fn print_v2s(buf: NativeBuffer<V2>, n: int) {
+    for i in 0..n {
+        let v = buf[i]
+        print("{v.x.floor()} {v.y.floor()}")
+    }
 }
 
-@test(output = "1\n1\n2\n2\n1\n1")
+@pure fn make_v2(a: float, b: float) -> V2 {
+    return V2 { x: a, y: b }
+}
+
+@test(output = "1 1\n2 2\n1 1")
 fn test_cse_survives_safe_buffer_write() {
     let buf = native_buffer_v2(3)
-
-    // make_v2(1.0) appears at slot 0 and slot 2 with one buf-write
-    // between them. Pre-fix the CSE table cleared after the slot 1
-    // write and slot 2 re-allocated. Post-fix the table survives,
-    // so slot 2 reuses slot 0's binding.
-    buf[0] = make_v2(1.0)
-    buf[1] = make_v2(2.0)
-    buf[2] = make_v2(1.0)
-
-    let a = buf[0]; print("{a.x.floor()}"); print("{a.y.floor()}")
-    let b = buf[1]; print("{b.x.floor()}"); print("{b.y.floor()}")
-    let c = buf[2]; print("{c.x.floor()}"); print("{c.y.floor()}")
+    buf[0] = make_v2(1.0, 1.0)
+    buf[1] = make_v2(2.0, 2.0)
+    buf[2] = make_v2(1.0, 1.0)
+    print_v2s(buf, 3)
 }
 
 // A multi-line `//` comment between sibling pure-call statements used to
 // reset the PureCse table between the calls.
-@test(output = "1\n1\n2\n2\n1\n1")
+@test(output = "1 1\n2 2\n1 1")
 fn test_cse_with_comment_between() {
     let buf = native_buffer_v2(3)
-    buf[0] = make_v2(1.0)
+    buf[0] = make_v2(1.0, 1.0)
     // multi-line
     // comment
     // here
-    buf[1] = make_v2(2.0)
-    buf[2] = make_v2(1.0)
+    buf[1] = make_v2(2.0, 2.0)
+    buf[2] = make_v2(1.0, 1.0)
+    print_v2s(buf, 3)
+}
 
-    let a = buf[0]; print("{a.x.floor()}"); print("{a.y.floor()}")
-    let b = buf[1]; print("{b.x.floor()}"); print("{b.y.floor()}")
-    let c = buf[2]; print("{c.x.floor()}"); print("{c.y.floor()}")
+// An @inline @pure constructor across five slot writes with three distinct
+// argument tuples, two of them repeated.
+@inline
+@pure fn make_v2_inline(x: float, y: float) -> V2 {
+    return V2 { x: x, y: y }
+}
+
+@test(output = "1 2\n3 2\n3 4\n3 4\n1 2")
+fn test_cse_inline_pure_buffer_writes() {
+    let buf = native_buffer_v2(5)
+    let a = 1.0
+    let b = 2.0
+    let c = 3.0
+    let d = 4.0
+    buf[0] = make_v2_inline(a, b)
+    buf[1] = make_v2_inline(c, b)
+    buf[2] = make_v2_inline(c, d)
+    buf[3] = make_v2_inline(c, d)
+    buf[4] = make_v2_inline(a, b)
+    print_v2s(buf, 5)
 }

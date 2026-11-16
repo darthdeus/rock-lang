@@ -1,7 +1,6 @@
-// CSE within a block for @pure calls. Two identical pure calls with
-// structurally-equal args collapse to a single `let __cse_N = ...`
-// at the first occurrence; subsequent uses reference the binding.
-// Runtime output must be unchanged.
+// CSE within a block for @pure calls, including UFCS calls whose receiver
+// sits in the call's `obj` slot. Identical calls with structurally equal
+// args collapse to one binding; output must be unchanged.
 
 @pure
 fn my_abs(x: int) -> int {
@@ -9,27 +8,18 @@ fn my_abs(x: int) -> int {
     return x
 }
 
-// Same @pure call appearing twice with the same arg → CSE'd.
-// my_abs(-7) = 7, so sum = 7 + 7 = 14.
-@test(output = "14")
-fn test_cse_same_pure_call_twice() {
+@test(output = "14\n12")
+fn test_cse_same_and_different_args() {
     let x = -7
-    let sum = my_abs(x) + my_abs(x)
-    print(sum)
-}
-
-// Different args → no CSE.
-@test(output = "12")
-fn test_no_cse_different_args() {
+    let same = my_abs(x) + my_abs(x)
+    print(same)
     let a = -5
     let b = -7
-    let sum = my_abs(a) + my_abs(b)
-    print(sum)
+    let different = my_abs(a) + my_abs(b)
+    print(different)
 }
 
-// Intervening mutation to an arg invalidates CSE — the second call
-// must see the new value of x. First: my_abs(-3) = 3; after x = 10,
-// my_abs(10) = 10. Sum = 3 + 10 = 13.
+// An intervening write to the arg invalidates CSE: 3 + 10.
 @test(output = "13")
 fn test_mutation_blocks_cse() {
     let x = -3
@@ -37,4 +27,22 @@ fn test_mutation_blocks_cse() {
     x = 10
     let b = my_abs(x)
     print(a + b)
+}
+
+value V2 { x: float, y: float }
+
+@pure
+fn length_sq(p: V2) -> float {
+    return p.x * p.x + p.y * p.y
+}
+
+@test(output = "50\n194")
+fn test_ufcs_cse_receivers() {
+    let point = V2 { x: 3.0, y: 4.0 }
+    let same = point.length_sq() + point.length_sq()
+    print(same as int)
+    let a = V2 { x: 3.0, y: 4.0 }
+    let b = V2 { x: 5.0, y: 12.0 }
+    let different = a.length_sq() + b.length_sq()
+    print(different as int)
 }

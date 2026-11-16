@@ -2,18 +2,14 @@
 // The codegen for this shape no longer allocates a Lua closure wrapper
 // (IIFE); observable semantics must be unchanged.
 
-@test(output = "1")
-fn test_let_if_rvalue_simple() {
+@test(output = "1\n2")
+fn test_let_if_rvalue_both_branches() {
     let c = true
     let x = if c { 1 } else { 2 }
     print(x)
-}
-
-@test(output = "2")
-fn test_let_if_rvalue_else_branch() {
-    let c = false
-    let x = if c { 1 } else { 2 }
-    print(x)
+    let d = false
+    let y = if d { 1 } else { 2 }
+    print(y)
 }
 
 @test(output = "many")
@@ -38,18 +34,14 @@ fn test_let_if_rvalue_shadowing() {
     print(x)
 }
 
-@test(output = "42")
-fn test_let_if_rvalue_nullable_non_null() {
+@test(output = "42\n-1")
+fn test_let_if_rvalue_nullable() {
     let c = true
     let x: int? = if c { 42 } else { null }
     if x != null { print(x) } else { print(-1) }
-}
-
-@test(output = "-1")
-fn test_let_if_rvalue_nullable_null() {
-    let c = false
-    let x: int? = if c { 42 } else { null }
-    if x != null { print(x) } else { print(-1) }
+    let d = false
+    let y: int? = if d { 42 } else { null }
+    if y != null { print(y) } else { print(-1) }
 }
 
 // Side effects in the branches must fire exactly once, matching the
@@ -68,22 +60,12 @@ fn bump_b() -> int {
     20
 }
 
-@test(output = "10\n1\n0")
-fn test_let_if_rvalue_side_effects_then() {
+@test(output = "10 1 0\n20 1 1")
+fn test_let_if_rvalue_side_effects() {
     SIDE_A = 0
     SIDE_B = 0
     let x = if true { bump_a() } else { bump_b() }
-    print(x)
-    print(SIDE_A)
-    print(SIDE_B)
-}
-
-@test(output = "20\n0\n1")
-fn test_let_if_rvalue_side_effects_else() {
-    SIDE_A = 0
-    SIDE_B = 0
-    let x = if false { bump_a() } else { bump_b() }
-    print(x)
-    print(SIDE_A)
-    print(SIDE_B)
+    print("{x} {SIDE_A} {SIDE_B}")
+    let y = if false { bump_a() } else { bump_b() }
+    print("{y} {SIDE_A} {SIDE_B}")
 }

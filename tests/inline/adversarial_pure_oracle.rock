@@ -14,8 +14,6 @@
 // by making the arm pure (param-only). This variant uses match with all
 // pure arms → verifier accepts → runtime is fine.
 // ────────────────────────────────────────────────────────────────────
-enum Sign { Neg, Zero, Pos }
-
 @pure
 fn sign_of(n: int) -> int {
     if n < 0 { return 0 - 1 }

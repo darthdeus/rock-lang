@@ -1,0 +1,44 @@
+// `@pure` accepts genuinely side-effect-free bodies: a match with a binding
+// pattern, direct self-recursion, and reads of `const` globals (consts are
+// rebind-rejected and re-initialized on hot reload, so a const read is
+// referentially transparent). Only MUTABLE global reads break purity.
+
+enum Opt { Some(int), None }
+
+@pure
+fn pure_match(o: Opt) -> int {
+    return match o {
+        Some(v) => v,
+        None => 0,
+    }
+}
+
+@pure
+fn pure_recursion(n: int) -> int {
+    if n <= 0 { return 0 }
+    return pure_recursion(n - 1) + n
+}
+
+@test(output = "42\n0\n15")
+fn test_pure_match_binding_and_recursion() {
+    print(pure_match(Opt::Some(42)))
+    print(pure_match(Opt::None))
+    print(pure_recursion(5))
+}
+
+const SCALE: float = 2.0
+const BASE: int = 10
+
+@pure fn scaled(x: float) -> float {
+    return x * SCALE
+}
+
+@pure fn shifted(x: int) -> int {
+    return x + BASE
+}
+
+@test
+fn pure_fn_reads_consts() {
+    assert_eq(scaled(3.0), 6.0)
+    assert_eq(shifted(5), 15)
+}

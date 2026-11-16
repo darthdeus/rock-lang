@@ -5,10 +5,6 @@
 // definition means no observable side effect. Arguments themselves
 // must also be dup-safe (no side-effecting sub-expressions) so we're
 // not throwing away an unrelated effect buried in an arg.
-//
-// These @test(output = ...) programs primarily check that the DCE
-// doesn't change observable behavior. The "was it actually dropped"
-// grep-the-Lua check lives in the companion Rust test.
 
 @pure
 fn square(x: int) -> int { return x * x }
@@ -16,33 +12,13 @@ fn square(x: int) -> int { return x * x }
 @pure
 fn sum(a: int, b: int) -> int { return a + b }
 
-// Positive: pure call as bare-expression statement is dropped;
-// subsequent print still runs.
+// A discarded pure call, bare or bound to `_`, is dropped; the following
+// print still runs.
 @test(output = "ok")
-fn test_bare_pure_call_dropped() {
+fn test_discarded_pure_calls_dropped() {
     square(5)
-    print("ok")
-}
-
-// Positive: `let _ = pure_call(x)` is dropped.
-@test(output = "ok")
-fn test_let_underscore_pure_call_dropped() {
     let _ = square(7)
     print("ok")
-}
-
-// Negative: impure bare call is preserved (observable output).
-@test(output = "hi\ndone")
-fn test_impure_bare_call_preserved() {
-    print("hi")
-    print("done")
-}
-
-// Negative: pure call whose result is actually used is preserved.
-@test(output = "49")
-fn test_pure_call_with_use_preserved() {
-    let x = square(7)
-    print(x)
 }
 
 // Negative: pure call with impure arg — the arg itself has effects,

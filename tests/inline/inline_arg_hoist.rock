@@ -1,11 +1,7 @@
-// Adversarial tests: @inline — argument hoisting for multi-use params
-//
-// When a param is read multiple times in the body and the caller passes
-// a non-duplication-safe arg (function call, BinOp, etc.), the splice
-// must evaluate the arg exactly once. Previous V0 behavior was to
-// hard-error; this suite verifies the new behavior: inject a fresh
-// let-binding above the call so the arg runs once and every body-side
-// reference reads through the bound local.
+// @inline argument handling: every argument evaluates exactly once, in
+// source order, whether the body reads its parameter many times, reads
+// several fields of it, or ignores it. A non-duplication-safe argument is
+// hoisted into a fresh local (or emitted as a bare statement when unused).
 
 global CALLS: int = 0
 
@@ -14,43 +10,75 @@ fn produce(n: int) -> int {
     return n
 }
 
-// Body reads `x` three times → requires hoisting when arg is a call.
+fn tick(label: string) -> int {
+    CALLS = CALLS + 1
+    print("{label}={CALLS}")
+    return CALLS
+}
+
+@inline
+fn params_reversed_usage(a: int, b: int) -> int {
+    return b * 100 + a
+}
+
+@inline
+fn ignore_second(a: int, b: int) -> int {
+    return a
+}
+
+@test(output = "A=1\nB=2\n201")
+fn test_arg_order_preserved_even_if_body_reverses() {
+    CALLS = 0
+    let r = params_reversed_usage(tick("A"), tick("B"))
+    print(r)
+}
+
+@test(output = "A=1\nB=2\n1")
+fn test_unused_arg_still_evaluates_once() {
+    CALLS = 0
+    let r = ignore_second(tick("A"), tick("B"))
+    print(r)
+}
+
+@inline
+fn constant_42(a: int, b: int) -> int {
+    return 42
+}
+
+@test(output = "42 2")
+fn test_both_ignored_side_effects() {
+    CALLS = 0
+    let r = constant_42(produce(1), produce(2))
+    print("{r} {CALLS}")
+}
+
+@inline
+fn square(x: int) -> int {
+    return x * x
+}
+
 @inline
 fn triple(x: int) -> int {
     return x + x + x
 }
 
-@test(output = "30 1")
-fn test_hoist_plain_call() {
-    CALLS = 0
-    let r = triple(produce(10))
-    print("{r} {CALLS}")
-}
-
-struct Color { r: int, g: int, b: int, a: int }
-
-fn make_color(r: int, g: int, b: int, a: int) -> Color {
-    CALLS = CALLS + 1
-    return Color { r: r, g: g, b: b, a: a }
-}
-
-// Body reads `c.r`, `c.g`, `c.b`, `c.a` — field accesses on a call arg.
-// When the arg is a struct literal, the field-level path handles this
-// without a hoist. When the arg is a call, the field-level path can't
-// fire and we need to hoist the whole value once.
 @inline
-fn color_sum(c: Color) -> int {
-    return c.r + c.g + c.b + c.a
+fn deep_use(x: int) -> int {
+    return (x * 2) + (x * 3) + x
 }
 
-@test(output = "10 1")
-fn test_hoist_call_with_field_reads() {
+@test(output = "49 1\n30 2\n42 3")
+fn test_multi_use_param_evaluates_once() {
     CALLS = 0
-    let r = color_sum(make_color(1, 2, 3, 4))
-    print("{r} {CALLS}")
+    let a = square(produce(7))
+    print("{a} {CALLS}")
+    let b = triple(produce(10))
+    print("{b} {CALLS}")
+    let c = deep_use(produce(7))
+    print("{c} {CALLS}")
 }
 
-// Mixed: one param needs hoisting, another is already dup-safe (literal).
+// One param needs hoisting, another is already dup-safe (literal).
 @inline
 fn mix(x: int, mult: int) -> int {
     return x * mult + x
@@ -63,7 +91,6 @@ fn test_hoist_mixed_params() {
     print("{r} {CALLS}")
 }
 
-// Nested hoisting: @inline of @inline, each with multi-use params.
 @inline
 fn double(x: int) -> int {
     return x + x
@@ -72,7 +99,61 @@ fn double(x: int) -> int {
 @test(output = "12 1")
 fn test_hoist_nested_inline() {
     CALLS = 0
-    // triple(2) = 6, double(6) = 12, produce called once.
     let r = double(triple(produce(2)))
+    print("{r} {CALLS}")
+}
+
+// Field reads on a call argument: the field-level path cannot fire, so the
+// whole value is hoisted once and every `param.f` reads the bound local.
+struct V2 { x: int, y: int }
+struct Color { r: int, g: int, b: int, a: int }
+
+fn produce_v2(x: int, y: int) -> V2 {
+    CALLS = CALLS + 1
+    return V2 { x: x, y: y }
+}
+
+fn make_color(r: int, g: int, b: int, a: int) -> Color {
+    CALLS = CALLS + 1
+    return Color { r: r, g: g, b: b, a: a }
+}
+
+@inline
+fn sum_xy(p: V2) -> int {
+    return p.x + p.y
+}
+
+@inline
+fn lopsided(p: V2) -> int {
+    return p.x + p.x + p.y
+}
+
+@inline
+fn color_sum(c: Color) -> int {
+    return c.r + c.g + c.b + c.a
+}
+
+@test(output = "7 1\n10 2\n10 3")
+fn test_field_projection_hoist() {
+    CALLS = 0
+    let a = sum_xy(produce_v2(3, 4))
+    print("{a} {CALLS}")
+    let b = color_sum(make_color(1, 2, 3, 4))
+    print("{b} {CALLS}")
+    let c = lopsided(produce_v2(3, 4))
+    print("{c} {CALLS}")
+}
+
+// A struct-literal argument whose unread field has a side-effecting
+// initializer: the initializer still runs once.
+@inline
+fn read_x(p: V2) -> int {
+    return p.x
+}
+
+@test(output = "5 1")
+fn test_field_level_ignored_side_effecting_init() {
+    CALLS = 0
+    let r = read_x(V2 { x: 5, y: produce(99) })
     print("{r} {CALLS}")
 }
