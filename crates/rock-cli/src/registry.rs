@@ -22,8 +22,6 @@ pub struct Registrations {
     pub scan_excluded: fn(&std::path::Path) -> bool,
     pub command_metadata: fn(&CliCommand) -> CommandMetadata,
     pub option_rules: &'static [OptionRule],
-    /// Optional recipes exposed under the public `fix` command.
-    pub fixes: &'static [FixHandler],
     pub early_entries: &'static [EarlyEntry],
     /// Process-only environment policy, called after parsing and before worker threads.
     pub initialize_process: fn(&Args),
@@ -159,14 +157,6 @@ impl RuntimeServices {
 }
 
 pub type Handler = fn(&CommandContext) -> Result<()>;
-
-/// A build's optional `rock fix` flag, help and implementation.
-pub struct FixHandler {
-    pub flag: &'static str,
-    pub help: &'static str,
-    pub usage: &'static str,
-    pub run: Handler,
-}
 
 /// The operations a backend serves. A command whose route is
 /// `Route::Backend(op)` is dispatched to the selected backend's handler for

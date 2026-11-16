@@ -208,8 +208,6 @@ pub struct Args {
     /// `rock lint --union <lib>`: judge a library's reachability against every
     /// consumer in the repo at once, reporting only what none of them reach.
     pub union: bool,
-    /// Optional host-supplied recipe selected under `rock fix`.
-    pub fix: Option<&'static registry::FixHandler>,
     /// Where `--union` looks for consumers. Defaults to the lib's parent, which
     /// is right when the lib sits beside its consumers (`libs/example/`); a nested lib
     /// (`libs/example-core`) needs the repo root passed explicitly.
@@ -304,9 +302,6 @@ impl Args {
                 .help("For `rock lint --lints=method_syntax`: comma-separated type names to drop from the sweep (--ignore-types=Color,Vec2). A name that is no type in the project is reported."))
             .arg(Arg::new("union").long("union").action(ArgAction::SetTrue)
                 .help("For `rock lint <lib>`: judge a library's reachability against every consumer in the repo at once, reporting only functions that NONE of them reach. The only sound way to run unused_fn on a lib."))
-            .args(registry::registered().fixes.iter().map(|fix|
-                Arg::new(fix.flag).long(fix.flag).action(ArgAction::SetTrue).help(fix.help)
-            ))
             .arg(Arg::new("consumers").long("consumers")
                 .help("For `rock lint --union`: directory to search for consumers (default: the lib's parent). Pass the repo root for a nested lib like `libs/example-core`."))
             .arg(Arg::new("backend").long("backend")
@@ -399,10 +394,6 @@ impl Args {
             only_types: m.get_one::<String>("only-types").cloned(),
             ignore_types: m.get_one::<String>("ignore-types").cloned(),
             union: m.get_flag("union"),
-            fix: registry::registered()
-                .fixes
-                .iter()
-                .find(|fix| m.get_flag(fix.flag)),
             consumers: m.get_one::<String>("consumers").cloned(),
             // Backend selection. An explicit `--backend` flag wins; otherwise an
             // explicit `ROCK_BACKEND` env var; otherwise the implicit default is

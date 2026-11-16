@@ -28,7 +28,6 @@ fn host_api_items_stay_public() {
     let _ = std::any::type_name::<registry::CompilerProcess>();
     let _ = std::any::type_name::<registry::CommandMetadata>();
     let _ = std::any::type_name::<registry::ProgramHost>();
-    let _ = std::any::type_name::<registry::FixHandler>();
     let _ = std::any::type_name::<registry::Handler>();
     let _ = std::any::type_name::<rock_cli::Args>();
 

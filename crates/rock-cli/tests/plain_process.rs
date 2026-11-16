@@ -593,7 +593,6 @@ fn plain_parser_rejects_options_of_absent_private_rules_and_runtimes() {
     assert!(help.status.success());
     let help = text(&help);
     for (command, option, value) in [
-        ("fix", "--across-yield", None),
         ("test", "--require-test", Some("sentinel")),
         ("test", "--show-passing", Some("sentinel")),
         ("test", "--all-rejections", Some("sentinel")),
@@ -623,6 +622,14 @@ fn plain_parser_rejects_options_of_absent_private_rules_and_runtimes() {
         );
     }
     assert!(!root.path().join("tmp").exists());
+}
+
+#[test]
+fn fix_is_not_a_command() {
+    let root = tempfile::tempdir().unwrap();
+    let out = invoke(root.path(), &["fix", "missing.rock"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert_mentions(&out, "command `fix` is unavailable in this build");
 }
 
 #[test]

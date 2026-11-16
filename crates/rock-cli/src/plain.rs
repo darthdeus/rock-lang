@@ -242,25 +242,6 @@ pub static COMMANDS: &[&CliCommand] = &[
             rock_cli::docs_index::run(&cx.args.files, cx.args.output.as_deref())
         }),
     },
-    &CliCommand {
-        name: "fix",
-        route: Route::Direct(|cx| {
-            let fixes = registry::registered().fixes;
-            if let Some(fix) = cx.args.fix {
-                return (fix.run)(cx);
-            }
-            if fixes.is_empty() {
-                anyhow::bail!("rock fix: this build registers no fixes");
-            }
-            let choices: Vec<String> = fixes.iter().map(|f| format!("`--{}`", f.flag)).collect();
-            let usage: Vec<&str> = fixes.iter().map(|f| f.usage).collect();
-            anyhow::bail!(
-                "rock fix: name the fix to run ({})\nusage: {}",
-                choices.join(" or "),
-                usage.join("\n       ")
-            )
-        }),
-    },
 ];
 
 pub static SHADER: CliCommand = CliCommand {
@@ -494,7 +475,6 @@ pub static REGISTRATIONS: registry::Registrations = registry::Registrations {
     command_metadata,
     scan_excluded: |_| false,
     early_entries: EARLY_ENTRIES,
-    fixes: &[],
     runtime_services: &RUNTIME_SERVICES,
     initialize_process: crate::frame_commands::initialize_process,
 };
