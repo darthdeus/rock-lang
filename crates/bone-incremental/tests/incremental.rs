@@ -349,6 +349,15 @@ impl Harness {
     }
 }
 
+fn run_clean_edits(initial: &[(&str, &str)], edits: &[(&str, &str)]) {
+    let mut h = Harness::new(initial);
+    h.assert_clean();
+    for &(path, source) in edits {
+        h.update(path, source);
+        h.assert_clean();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Oracle tests: session == batch after every step of each script.
 // ---------------------------------------------------------------------------
@@ -427,27 +436,9 @@ fn oracle_coroutine_body_edit_stays_a_coroutine() {
     );
 }
 
-/// PRECISION (premise-TDD for per-body `reinferred`): a body edit should report
-/// ONLY the edited body in `reinferred`, not every body in the module.
-///
-/// `classify` already pinpoints the changed items (`FileDiff::BodiesOnly(Vec<
-/// usize>)`), but `rebuild_module` re-infers and REPORTS the whole edited module
-/// (`collect_reinferred(&mids)`), so this currently returns all three fns.
-/// skull's `emit_incremental` re-emits every body in `reinferred` (+ its inline-
-/// dependent callers), so a whole-module report defeats within-module incremental
-/// codegen on a single big `main.rock`. Narrowing the report to the changed
-/// bodies (rung 1b -- `fc049f8e1` -- now narrows the re-inference WORK too, not
-/// just the report) turns this green; skull's codegen-dep expansion still catches
-/// inline-dependent callers, so emit stays correct (verified by the
-/// incremental==fresh oracles).
-#[test]
-fn body_edit_reinfers_only_the_edited_body() {
-    let v1 = "fn a() -> int { 1 }\nfn b() -> int { 2 }\nfn c() -> int { 3 }";
-    let mut h = Harness::new(&[("m.rock", v1)]);
-    let result = h.update(
-        "m.rock",
-        "fn a() -> int { 1 }\nfn b() -> int { 2 }\nfn c() -> int { 30 }",
-    );
+fn assert_reinferred_bodies(initial: &str, updated: &str, expected: &[&str]) {
+    let mut h = Harness::new(&[("m.rock", initial)]);
+    let result = h.update("m.rock", updated);
     assert_eq!(result.tier, UpdateTier::BodyOnly);
 
     let ws = h.session.workspace();
@@ -465,52 +456,29 @@ fn body_edit_reinfers_only_the_edited_body() {
     names.dedup();
     assert_eq!(
         names,
-        vec!["c".to_string()],
-        "a body edit should re-infer only the edited body `c`, got {names:?}"
+        expected
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>()
     );
 }
 
-/// Editing the BODY of a DECORATED function must report that body in
-/// `reinferred`, same as a non-decorated edit (`oracle_body_edit`). Regression
-/// guard for the body-locator fix (`lower.rs`: the `item_index` interval covers
-/// the whole item footprint, decorators included, so `rebuild_module`'s
-/// `body_at(item.offset)` resolves the decorated body instead of missing the
-/// gap left by `@deco`).
-///
-/// Why it matters: skull's hot-reload overlay re-emits only what `reinferred`
-/// reports; if a decorated `@update`/`@draw`/`@init` system body were dropped,
-/// the overlay would carry the rebind but not the new body and the running game
-/// would keep the stale code. Exercised downstream in `rock-cli`
-/// `overlay_runtime_tests::sim_overlay_rebind_runs_new_system_body`.
+#[test]
+fn body_edit_reinfers_only_the_edited_body() {
+    assert_reinferred_bodies(
+        "fn a() -> int { 1 }\nfn b() -> int { 2 }\nfn c() -> int { 3 }",
+        "fn a() -> int { 1 }\nfn b() -> int { 2 }\nfn c() -> int { 30 }",
+        &["c"],
+    );
+}
+
+// Decorator spans must still map edits to the body reported for hot reload.
 #[test]
 fn decorated_body_edit_reinfers_the_body() {
-    let v0 = "global G: int = 0\ndeco init upd { }\n@upd\nfn tick() { G = 1 }";
-    let v1 = "global G: int = 0\ndeco init upd { }\n@upd\nfn tick() { G = 2 }";
-    let mut h = Harness::new(&[("m.rock", v0)]);
-    let result = h.update("m.rock", v1);
-    assert_eq!(
-        result.tier,
-        UpdateTier::BodyOnly,
-        "a decorated body edit is still a body edit"
-    );
-
-    let ws = h.session.workspace();
-    let mut names: Vec<String> = result
-        .reinferred
-        .iter()
-        .filter_map(|(mid, owner)| match owner {
-            bone_semantic::hir::BodyOwner::Function(fid) => {
-                Some(ws.module(*mid).functions[*fid].name.as_str().to_string())
-            }
-            _ => None,
-        })
-        .collect();
-    names.sort();
-    names.dedup();
-    assert_eq!(
-        names,
-        vec!["tick".to_string()],
-        "a decorated body edit must re-infer the edited `tick`, got {names:?}"
+    assert_reinferred_bodies(
+        "global G: int = 0\ndeco init upd { }\n@upd\nfn tick() { G = 1 }",
+        "global G: int = 0\ndeco init upd { }\n@upd\nfn tick() { G = 2 }",
+        &["tick"],
     );
 }
 
@@ -692,42 +660,171 @@ fn body_edit_relowers_only_the_edited_body() {
 #[test]
 fn oracle_signature_edit_breaks_then_fixes_cross_file_caller() {
     let mut h = Harness::new(&[("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)]);
-
-    // make_point loses a param: b.rock's two-arg call site goes stale.
-    // (An int->float param change would NOT break the caller - int literals
-    // coerce to float.)
     h.update(
         "a.rock",
-        "
-struct Point {
-    x: int,
-    y: int,
-}
-
-fn make_point(x: int) -> Point {
-    Point { x: x, y: x }
-}
-",
+        "struct Point { x: int, y: int }\nfn make_point(x: int) -> Point { Point { x: x, y: x } }",
     );
-    assert!(
-        !h.session.diagnostics().is_empty(),
-        "caller in b.rock must error after the signature change"
-    );
-
-    // Fix the caller; everything recovers.
-    h.update(
-        "b.rock",
-        "
-fn double_x(p: Point) -> int {
-    p.x * 2
-}
-
-fn origin_doubled() -> int {
-    double_x(make_point(0))
-}
-",
-    );
+    assert!(!h.session.diagnostics().is_empty());
+    h.update("b.rock", "fn double_x(p: Point) -> int { p.x * 2 }\nfn origin_doubled() -> int { double_x(make_point(0)) }");
     h.assert_clean();
+}
+
+#[test]
+fn oracle_delete_defining_file_breaks_body_dependent_then_restore_recovers() {
+    let mut h = Harness::new(&[
+        ("a.rock", CROSS_FILE_A),
+        (
+            "d.rock",
+            "fn count_points() -> int { let p = make_point(1, 2)\n p.x }",
+        ),
+    ]);
+    h.assert_clean();
+    h.remove("a.rock");
+    assert!(!h.session.diagnostics().is_empty());
+    h.update("a.rock", CROSS_FILE_A);
+    h.assert_clean();
+}
+
+#[test]
+fn oracle_for_iter_protocol_invalidates_on_next_edit() {
+    // The loop's resolved iter/next pair lives in an inference side table.
+    let with_next = "struct R { hi: int }\nstruct RIt { cur: int, hi: int }\nfn iter(r: R) -> RIt { RIt { cur: 0, hi: r.hi } }\nfn next(it: RIt) -> (bool, int) { if it.cur < it.hi { let v = it.cur; it.cur = it.cur + 1; (true, v) } else { (false, 0) } }\nfn total() -> int { let s = 0; for x in (R { hi: 3 }) { s = s + x } s }";
+    let without_next = "struct R { hi: int }\nstruct RIt { cur: int, hi: int }\nfn iter(r: R) -> RIt { RIt { cur: 0, hi: r.hi } }\nfn total() -> int { let s = 0; for x in (R { hi: 3 }) { s = s + x } s }";
+    let mut h = Harness::new(&[("it.rock", with_next)]);
+    h.assert_clean();
+    h.update("it.rock", without_next);
+    assert!(!h.session.diagnostics().is_empty());
+    h.update("it.rock", with_next);
+    h.assert_clean();
+}
+
+#[test]
+fn oracle_introduce_and_fix_type_error() {
+    let mut h = Harness::new(&[("a.rock", "fn f() -> int { 1 }")]);
+    h.assert_clean();
+    h.update("a.rock", "fn f() -> int { true }");
+    assert_eq!(h.session.diagnostics().len(), 1);
+    h.update("a.rock", "fn f() -> int { 2 }");
+    h.assert_clean();
+}
+
+#[test]
+fn update_with_unlowerable_signature_recovers_and_surfaces() {
+    let mut h = Harness::new(&[("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)]);
+    h.update("b.rock", "fn f(p: Nonexistent) -> int { 1 }");
+    assert!(
+        h.session
+            .diagnostics()
+            .iter()
+            .any(|d| d.message.contains("Nonexistent"))
+    );
+    h.update("b.rock", CROSS_FILE_B);
+    h.assert_clean();
+}
+
+#[test]
+fn oracle_broken_type_definer_cascades_to_dependent() {
+    let mut h = Harness::new(&[("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)]);
+    h.assert_clean();
+    h.update("a.rock", "fn unrelated() -> int { 1 }");
+    assert!(
+        h.session
+            .diagnostics()
+            .iter()
+            .any(|d| d.message.contains("Point"))
+    );
+    h.update("a.rock", CROSS_FILE_A);
+    h.assert_clean();
+}
+
+#[test]
+fn oracle_transitive_interface_cascade() {
+    let a = "struct T { v: int }";
+    let b = "struct Wrap { inner: T }\nfn unwrap(w: Wrap) -> int { w.inner.v }";
+    let c = "fn use_wrap(w: Wrap) -> int { unwrap(w) }";
+    let mut h = Harness::new(&[("a.rock", a), ("b.rock", b), ("c.rock", c)]);
+    h.assert_clean();
+    h.update("a.rock", "fn nothing() -> int { 0 }");
+    assert!(!h.session.diagnostics().is_empty());
+    h.update("a.rock", a);
+    h.assert_clean();
+}
+
+#[test]
+fn oracle_dependent_body_type_ref_recovers_not_reverts() {
+    let a = "struct Foo { v: int }";
+    let b = "fn sig(f: Foo) -> int { let x: Foo = f\n x.v }";
+    let mut h = Harness::new(&[("a.rock", a), ("b.rock", b)]);
+    h.assert_clean();
+    h.update("a.rock", "fn nothing() -> int { 0 }");
+    assert!(!h.session.diagnostics().is_empty());
+    h.update("a.rock", a);
+    h.assert_clean();
+}
+
+#[test]
+fn oracle_type_rename_cascades_both_directions() {
+    let mut h = Harness::new(&[
+        ("a.rock", "struct Point { x: int }"),
+        ("b.rock", "fn px(p: Point) -> int { p.x }"),
+    ]);
+    h.assert_clean();
+    h.update("a.rock", "struct Pointe { x: int }");
+    assert!(
+        h.session
+            .diagnostics()
+            .iter()
+            .any(|d| d.message.contains("Point"))
+    );
+    h.update("b.rock", "fn px(p: Pointe) -> int { p.x }");
+    h.assert_clean();
+}
+
+#[test]
+fn oracle_user_macro_cross_file_edit() {
+    let macro_def = "macro twice(e: expr) { (e) + (e) }\nfn base() -> int { 3 }";
+    run_clean_edits(
+        &[
+            ("m.rock", macro_def),
+            ("use.rock", "fn quad() -> int { twice(base()) }"),
+        ],
+        &[(
+            "m.rock",
+            "macro twice(e: expr) { (e) + (e) + (e) }\nfn base() -> int { 3 }",
+        )],
+    );
+}
+
+#[test]
+fn oracle_macro_def_retype_then_user_body_edit_sees_new_registry() {
+    // The user body edit must cook against the registry rebuilt by the first edit.
+    let mut h = Harness::new(&[
+        ("m.rock", "macro wrap(e: expr) { e }"),
+        ("use.rock", "fn f() -> int { wrap(5) }"),
+    ]);
+    h.assert_clean();
+    for (path, text) in [
+        ("m.rock", "macro wrap(e: expr) { \"{e}\" }"),
+        ("use.rock", "fn f() -> int { wrap(5) + 0 }"),
+    ] {
+        h.update(path, text);
+    }
+}
+
+#[test]
+fn oracle_globals_survive_repeated_updates() {
+    // A second rebuild must purge a user global owned by a builtin type module.
+    let initial = "global GRID_W: int = 8\nfn area() -> int { GRID_W * GRID_W }";
+    run_clean_edits(
+        &[("g.rock", initial)],
+        &[
+            (
+                "g.rock",
+                "global GRID_W: int = 8\nfn area() -> int { GRID_W * GRID_W * 1 }",
+            ),
+            ("h.rock", "fn use_area() -> int { area() }"),
+        ],
+    );
 }
 
 /// REGRESSION (a 0-byte source file): an item-less user file
@@ -797,67 +894,6 @@ fn sum_xy(p: Point) -> int {
 }
 
 #[test]
-fn oracle_delete_defining_file_breaks_body_dependent_then_restore_recovers() {
-    // d.rock depends on a.rock only from a BODY (its signature is
-    // stdlib-free), so deleting a.rock degrades to a per-body error and the
-    // session keeps running.
-    let body_dependent = "
-fn count_points() -> int {
-    let p = make_point(1, 2)
-    p.x
-}
-";
-    let mut h = Harness::new(&[("a.rock", CROSS_FILE_A), ("d.rock", body_dependent)]);
-    h.assert_clean();
-
-    h.remove("a.rock");
-    assert!(
-        !h.session.diagnostics().is_empty(),
-        "d.rock calls make_point from its body and must error once a.rock is gone"
-    );
-
-    h.update("a.rock", CROSS_FILE_A);
-    h.assert_clean();
-}
-
-#[test]
-fn oracle_for_iter_protocol_invalidates_on_next_edit() {
-    // `for x in <user type>` resolves the iter/next protocol (bone records the
-    // fns in `for_iter_protocol`). Removing `next` must re-typecheck the loop and
-    // surface the error; restoring recovers. `assert_matches_batch` (inside
-    // `update`) also proves the side-table is recomputed identically to a fresh
-    // batch check after each edit.
-    let with_next = "\
-struct R { hi: int }
-struct RIt { cur: int, hi: int }
-fn iter(r: R) -> RIt { RIt { cur: 0, hi: r.hi } }
-fn next(it: RIt) -> (bool, int) {
-    if it.cur < it.hi { let v = it.cur; it.cur = it.cur + 1; (true, v) } else { (false, 0) }
-}
-fn total() -> int { let s = 0; for x in (R { hi: 3 }) { s = s + x } s }
-";
-    let mut h = Harness::new(&[("it.rock", with_next)]);
-    h.assert_clean();
-
-    // Drop `next` -> the loop can't resolve the protocol.
-    let without_next = "\
-struct R { hi: int }
-struct RIt { cur: int, hi: int }
-fn iter(r: R) -> RIt { RIt { cur: 0, hi: r.hi } }
-fn total() -> int { let s = 0; for x in (R { hi: 3 }) { s = s + x } s }
-";
-    h.update("it.rock", without_next);
-    assert!(
-        !h.session.diagnostics().is_empty(),
-        "removing `next` must break the for-loop over R"
-    );
-
-    // Restore -> recovers.
-    h.update("it.rock", with_next);
-    h.assert_clean();
-}
-
-#[test]
 fn delete_of_signature_dependency_surfaces_dependent_error() {
     // b.rock names `Point` in a SIGNATURE. With total lowering, removing a.rock
     // (Point's definition) is a normal remove via the full rebuild: b.rock's
@@ -890,101 +926,11 @@ fn delete_of_signature_dependency_surfaces_dependent_error() {
 }
 
 #[test]
-fn oracle_introduce_and_fix_type_error() {
-    let mut h = Harness::new(&[("a.rock", "fn f() -> int { 1 }")]);
-    h.assert_clean();
-
-    h.update("a.rock", "fn f() -> int { true }");
-    assert_eq!(h.session.diagnostics().len(), 1);
-
-    h.update("a.rock", "fn f() -> int { 2 }");
-    h.assert_clean();
-}
-
-#[test]
 fn oracle_noop_update_short_circuits() {
     let mut h = Harness::new(&[("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)]);
     let result = h.update("a.rock", CROSS_FILE_A);
     assert_eq!(result.tier, UpdateTier::NoChange);
     assert!(result.reinferred.is_empty());
-}
-
-#[test]
-fn update_with_unlowerable_signature_recovers_and_surfaces() {
-    // Parses fine, fails interface lowering (unknown signature type). With total
-    // lowering the param type recovers to `Error`, the edit COMMITS (no revert),
-    // and the diagnostic surfaces. The edited module is re-lowered, so the
-    // oracle (incremental == fresh) holds; fixing it converges to clean.
-    let mut h = Harness::new(&[("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)]);
-    h.update("b.rock", "fn f(p: Nonexistent) -> int { 1 }");
-    assert!(
-        h.session
-            .diagnostics()
-            .iter()
-            .any(|d| d.message.contains("Nonexistent")),
-        "the unresolved signature type surfaces: {:?}",
-        h.session
-            .diagnostics()
-            .iter()
-            .map(|e| e.message.clone())
-            .collect::<Vec<_>>()
-    );
-
-    h.update("b.rock", CROSS_FILE_B);
-    h.assert_clean();
-}
-
-#[test]
-fn oracle_broken_type_definer_cascades_to_dependent() {
-    // Editing a.rock (Point's definition) to a broken state must propagate to
-    // b.rock, which names `Point` in a SIGNATURE: the incremental session must
-    // match a fresh batch build (the oracle), which means b.rock is re-LOWERED,
-    // not just re-inferred. This is the interface-change cascade; a narrow
-    // rebuild_interface would re-infer b.rock against a stale signature and the
-    // oracle would catch the divergence.
-    let mut h = Harness::new(&[("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)]);
-    h.assert_clean();
-
-    // Drop Point entirely from a.rock (its only items are Point + make_point).
-    h.update("a.rock", "fn unrelated() -> int { 1 }");
-    assert!(
-        h.session
-            .diagnostics()
-            .iter()
-            .any(|d| d.message.contains("Point")),
-        "b.rock's signature reference to the removed Point must surface: {:?}",
-        h.session
-            .diagnostics()
-            .iter()
-            .map(|e| e.message.clone())
-            .collect::<Vec<_>>()
-    );
-
-    h.update("a.rock", CROSS_FILE_A);
-    h.assert_clean();
-}
-
-#[test]
-fn oracle_transitive_interface_cascade() {
-    // a defines T; b wraps it in a struct field (interface-position ref) AND a
-    // body reads through it; c reads b's Wrap in a body. Removing T must ripple
-    // a -> b (re-lower: Wrap.inner T->Error) -> c (re-infer: the body type it
-    // reads shifts). The oracle (asserted at every step) is the judge -- the
-    // expression types must match a fresh batch build across all three files.
-    let a = "struct T { v: int }";
-    let b = "struct Wrap { inner: T }\nfn unwrap(w: Wrap) -> int { w.inner.v }";
-    let c = "fn use_wrap(w: Wrap) -> int { unwrap(w) }";
-    let mut h = Harness::new(&[("a.rock", a), ("b.rock", b), ("c.rock", c)]);
-    h.assert_clean();
-
-    h.update("a.rock", "fn nothing() -> int { 0 }"); // drop T
-    assert!(
-        !h.session.diagnostics().is_empty(),
-        "removing T must surface an error somewhere downstream"
-    );
-
-    h.update("a.rock", a); // restore -- must converge clean
-    h.assert_clean();
 }
 
 #[test]
@@ -1007,86 +953,6 @@ fn shape_change_relowers_only_the_edited_module() {
         "a field add must re-lower only the edited module, not its dependents; got {relowered_mods:?}"
     );
     h.assert_clean(); // oracle held in h.update; defaulted field keeps b valid
-}
-
-#[test]
-fn oracle_dependent_body_type_ref_recovers_not_reverts() {
-    // A re-lowered dependent runs FULL body lowering. A body-position type ref to
-    // the removed type (`let x: Foo`) hits the fail-fast `TyPos::Body` arm -- but
-    // body recovery must catch it (the function keeps its signature, the body
-    // error is recorded), so `lower_modules` returns Ok and the edit COMMITS. If
-    // it instead `?`-aborted, rebuild_or_revert would revert and the oracle (which
-    // expects the broken, committed state) would diverge.
-    let a = "struct Foo { v: int }";
-    let b = "fn sig(f: Foo) -> int { let x: Foo = f\n x.v }"; // Foo in BOTH signature and body
-    let mut h = Harness::new(&[("a.rock", a), ("b.rock", b)]);
-    h.assert_clean();
-
-    h.update("a.rock", "fn nothing() -> int { 0 }"); // drop Foo
-    assert!(
-        !h.session.diagnostics().is_empty(),
-        "removing Foo must surface b's dangling references"
-    );
-
-    h.update("a.rock", a);
-    h.assert_clean();
-}
-
-#[test]
-fn oracle_type_rename_cascades_both_directions() {
-    // Renaming a type breaks references to the OLD name and (re)resolves the NEW
-    // one. The oracle validates the whole workspace at each keystroke.
-    let a = "struct Point { x: int }";
-    let b = "fn px(p: Point) -> int { p.x }";
-    let mut h = Harness::new(&[("a.rock", a), ("b.rock", b)]);
-    h.assert_clean();
-
-    h.update("a.rock", "struct Pointe { x: int }"); // rename Point -> Pointe
-    assert!(
-        h.session
-            .diagnostics()
-            .iter()
-            .any(|d| d.message.contains("Point")),
-        "b's reference to the old name must surface: {:?}",
-        h.session
-            .diagnostics()
-            .iter()
-            .map(|e| e.message.clone())
-            .collect::<Vec<_>>()
-    );
-
-    h.update("b.rock", "fn px(p: Pointe) -> int { p.x }"); // fix the reference
-    h.assert_clean();
-}
-
-#[test]
-fn oracle_user_macro_cross_file_edit() {
-    let macro_def = "
-macro twice(e: expr) {
-    (e) + (e)
-}
-
-fn base() -> int { 3 }
-";
-    let mut h = Harness::new(&[
-        ("m.rock", macro_def),
-        ("use.rock", "fn quad() -> int { twice(base()) }"),
-    ]);
-    h.assert_clean();
-
-    // Edit the macro definition: the user of the macro must see the change
-    // (registry is rebuilt from unexpanded modules every rebuild).
-    h.update(
-        "m.rock",
-        "
-macro twice(e: expr) {
-    (e) + (e) + (e)
-}
-
-fn base() -> int { 3 }
-",
-    );
-    h.assert_clean();
 }
 
 /// The incremental-cook path: a BODY edit of a file that USES a macro must
@@ -1119,66 +985,6 @@ fn base() -> int { 3 }
         UpdateTier::BodyOnly,
         "a macro-user body edit should be BodyOnly"
     );
-    h.assert_clean();
-}
-
-/// Registry freshness across the cache boundary: after a macro-DEF change
-/// rebuilds the registry (`rebuild_users`), a later BODY edit of the user must
-/// cook against the NEW registry. Here the new macro produces a `string` while
-/// the user still annotates `-> int`, so a stale cached registry (old identity
-/// macro) would let the body edit type-check clean -- the fresh batch rejects
-/// it, and the Harness's incremental==fresh assertion catches the divergence.
-#[test]
-fn oracle_macro_def_retype_then_user_body_edit_sees_new_registry() {
-    let mut h = Harness::new(&[
-        ("m.rock", "macro wrap(e: expr) {\n    e\n}\n"),
-        ("use.rock", "fn f() -> int { wrap(5) }"),
-    ]);
-    h.assert_clean();
-
-    // Def edit: wrap now yields a string. Routes to rebuild_users (registry
-    // rebuilt); use.rock's `wrap(5)` is now string vs `-> int` -> error.
-    h.update("m.rock", "macro wrap(e: expr) {\n    \"{e}\"\n}\n");
-
-    // Body edit of the user: must cook against the NEW (string) registry. A
-    // stale identity registry would make this pass; the batch comparator and
-    // the persisting type error pin the freshness.
-    h.update("use.rock", "fn f() -> int { wrap(5) + 0 }");
-}
-
-#[test]
-fn oracle_globals_survive_repeated_updates() {
-    // Regression: globals_by_name maps name -> TyId whose module is the
-    // TYPE's home (builtin int for `global G: int`), not the defining module,
-    // so a purge keyed on the ty's module left stale user globals behind and
-    // every rebuild after the first died with "duplicate global". Found by
-    // hand-running `rock watch example --backend bone`.
-    let with_global = "
-global GRID_W: int = 8
-
-fn area() -> int {
-    GRID_W * GRID_W
-}
-";
-    let mut h = Harness::new(&[("g.rock", with_global)]);
-    h.assert_clean();
-
-    // Any second rebuild re-registers the global; with the purge bug this
-    // failed before reaching inference.
-    h.update(
-        "g.rock",
-        "
-global GRID_W: int = 8
-
-fn area() -> int {
-    GRID_W * GRID_W * 1
-}
-",
-    );
-    h.assert_clean();
-
-    // And a third, through the OTHER rebuild path (file add).
-    h.update("h.rock", "fn use_area() -> int { area() }");
     h.assert_clean();
 }
 
@@ -2156,42 +1962,76 @@ fn other() -> int { 42 }
     assert_eq!(diff(SHAPE_BASE, new), FxHashSet::default());
 }
 
+fn assert_reinferred_paths(
+    initial: &[(&str, &str)],
+    path: &str,
+    updated: &str,
+    tier: UpdateTier,
+    includes: &[&str],
+    excludes: &[&str],
+) -> Harness {
+    let mut h = Harness::new(initial);
+    let result = h.update(path, updated);
+    assert_eq!(result.tier, tier);
+    let mids = Harness::reinferred_mids(&result);
+    for path in includes {
+        assert!(mids.contains(&h.mid(path)), "{path} must be re-inferred");
+    }
+    for path in excludes {
+        assert!(!mids.contains(&h.mid(path)), "{path} must remain cached");
+    }
+    h
+}
+
 #[test]
 fn interface_edit_reinfers_only_dependents() {
-    let mut h = Harness::new(&[
-        ("a.rock", CROSS_FILE_A),
-        ("b.rock", CROSS_FILE_B),
-        // c.rock never mentions make_point or Point.
-        ("c.rock", "fn unrelated() -> int { 7 }"),
-    ]);
-
-    // Signature edit to make_point (interface change). Only b.rock calls it.
-    let result = h.update(
+    let _ = assert_reinferred_paths(
+        &[
+            ("a.rock", CROSS_FILE_A),
+            ("b.rock", CROSS_FILE_B),
+            ("c.rock", "fn unrelated() -> int { 7 }"),
+        ],
         "a.rock",
-        "
-struct Point {
-    x: int,
-    y: int,
+        "struct Point { x: int, y: int }\nfn make_point(x: int, y: int, z: int) -> Point { Point { x: x, y: y } }",
+        UpdateTier::Interface,
+        &["b.rock"],
+        &["c.rock"],
+    );
 }
 
-fn make_point(x: int, y: int, z: int) -> Point {
-    Point { x: x, y: y }
+#[test]
+fn signature_edit_that_adds_a_function_reinfers_callers_of_the_later_ones() {
+    let _ = assert_reinferred_paths(
+        &[
+            (
+                "a.rock",
+                "fn first() -> int { 1 }\nfn later() -> int { 2 }\n",
+            ),
+            ("b.rock", "fn use_later() -> int { later() }"),
+        ],
+        "a.rock",
+        "fn first() -> int { 1 }\nfn added() -> int { 3 }\nfn later() -> int { 2 }\n",
+        UpdateTier::Interface,
+        &["b.rock"],
+        &[],
+    );
 }
-",
-    );
 
-    let mids = Harness::reinferred_mids(&result);
-
-    // The dep index narrows the fanout to the edited module + its dependents.
-    assert_eq!(result.tier, UpdateTier::Interface);
-    assert!(
-        mids.contains(&h.mid("b.rock")),
-        "b.rock calls make_point, so a signature change must re-infer it"
+#[test]
+fn interface_edit_field_add_reinfers_struct_users_only() {
+    let h = assert_reinferred_paths(
+        &[
+            ("a.rock", CROSS_FILE_A),
+            ("b.rock", CROSS_FILE_B),
+            ("c.rock", "fn unrelated() -> int { 7 }"),
+        ],
+        "a.rock",
+        "struct Point { x: int, y: int, z: int }\nfn make_point(x: int, y: int) -> Point { Point { x: x, y: y, z: 0 } }",
+        UpdateTier::Interface,
+        &["b.rock"],
+        &["c.rock"],
     );
-    assert!(
-        !mids.contains(&h.mid("c.rock")),
-        "c.rock observes neither make_point nor Point - must stay untouched"
-    );
+    h.assert_clean();
 }
 
 // A parameter added to `shifted` moves every later entry of the module's type
@@ -2266,120 +2106,58 @@ fn signature_edit_reports_only_the_bodies_it_rechecked() {
     h.assert_matches_batch();
 }
 
-// A signature edit that adds a function renumbers the later functions, and a
-// cached caller stores its callee's index: it has to re-infer.
-#[test]
-fn signature_edit_that_adds_a_function_reinfers_callers_of_the_later_ones() {
-    let without = "fn first() -> int { 1 }\nfn later() -> int { 2 }\n";
-    let with = "fn first() -> int { 1 }\nfn added() -> int { 3 }\nfn later() -> int { 2 }\n";
-    let mut h = Harness::new(&[
-        ("a.rock", without),
-        ("b.rock", "fn use_later() -> int { later() }"),
-    ]);
-
-    let result = h.update("a.rock", with);
-    assert_eq!(result.tier, UpdateTier::Interface);
-    assert!(Harness::reinferred_mids(&result).contains(&h.mid("b.rock")));
-    h.assert_matches_batch();
-}
-
-#[test]
-fn interface_edit_field_add_reinfers_struct_users_only() {
-    let mut h = Harness::new(&[
-        ("a.rock", CROSS_FILE_A),
-        ("b.rock", CROSS_FILE_B),
-        ("c.rock", "fn unrelated() -> int { 7 }"),
-    ]);
-
-    // Add a field to Point - a struct-shape change. b.rock touches `p.x`
-    // (a Point field) so it must re-infer even though it never edits; c.rock
-    // never names Point.
-    let result = h.update(
-        "a.rock",
-        "
-struct Point {
-    x: int,
-    y: int,
-    z: int,
-}
-
-fn make_point(x: int, y: int) -> Point {
-    Point { x: x, y: y, z: 0 }
-}
-",
-    );
-
-    let mids = Harness::reinferred_mids(&result);
-    assert_eq!(result.tier, UpdateTier::Interface);
+fn assert_error_in_file(initial: &[(&str, &str)], path: &str, updated: &str, file: &str) {
+    let mut h = Harness::new(initial);
+    h.update(path, updated);
     assert!(
-        mids.contains(&h.mid("b.rock")),
-        "b.rock reads Point.x, so a field-shape change must re-infer it"
-    );
-    assert!(
-        !mids.contains(&h.mid("c.rock")),
-        "c.rock never touches Point - must stay untouched"
+        h.session
+            .diagnostics()
+            .iter()
+            .any(|d| d.location.file.as_str() == file),
+        "expected an error in {file}: {:?}",
+        h.session.diagnostics()
     );
 }
 
 #[test]
 fn interface_edit_global_type_change_reinfers_readers() {
-    // F changes a global's type; a cross-module reader must re-infer (and now
-    // error). If global reads aren't recorded as deps, the reader keeps its
-    // stale (clean) inference and the oracle inside update() diverges.
-    let mut h = Harness::new(&[
-        ("f.rock", "global G: int = 0"),
-        ("b.rock", "fn use_g() -> int { G }"),
-    ]);
-    h.update("f.rock", "global G: float = 0.0");
-    let diags = h.session.diagnostics();
-    assert!(
-        diags.iter().any(|e| e.location.file.as_str() == "b.rock"),
-        "global type change must re-infer b.rock and surface its error; got {diags:?}"
+    assert_error_in_file(
+        &[
+            ("f.rock", "global G: int = 0"),
+            ("b.rock", "fn use_g() -> int { G }"),
+        ],
+        "f.rock",
+        "global G: float = 0.0",
+        "b.rock",
     );
 }
 
 #[test]
 fn interface_edit_macro_body_change_relowers_users() {
-    // A macro change alters the EXPANSION of its users, so they must be
-    // re-lowered (re-expanded), not merely re-inferred. Type-visible edit: the
-    // macro starts producing a float, so the user's int-typed fn goes
-    // ill-typed. If macro users aren't re-lowered, use.rock keeps its stale
-    // expansion (int) and the oracle diverges from a fresh batch.
-    let mut h = Harness::new(&[
-        (
-            "m.rock",
-            "macro twice(e: expr) { (e) + (e) }\nfn base() -> int { 3 }",
-        ),
-        ("use.rock", "fn quad() -> int { twice(base()) }"),
-    ]);
-    h.update(
+    assert_error_in_file(
+        &[
+            (
+                "m.rock",
+                "macro twice(e: expr) { (e) + (e) }\nfn base() -> int { 3 }",
+            ),
+            ("use.rock", "fn quad() -> int { twice(base()) }"),
+        ],
         "m.rock",
         "macro twice(e: expr) { (e) + 1.0 }\nfn base() -> int { 3 }",
-    );
-    let diags = h.session.diagnostics();
-    // The macro change re-expands use.rock and the now-`(base()) + 1.0` is
-    // caught as a float/int mismatch, reported at the call site `use.rock` —
-    // skull's macro expansion retags expanded-node spans to the invocation site
-    // (`Instantiation` in skull-parser's `macro_expand`).
-    assert!(
-        diags.iter().any(|e| e.location.file.as_str() == "use.rock"),
-        "expected the now-float macro error to surface at the call site use.rock; got {diags:?}"
+        "use.rock",
     );
 }
 
 #[test]
 fn interface_edit_newtype_wrapped_change_reinfers_users() {
-    // F changes a newtype's wrapped type; a cross-module user that unwraps it
-    // must re-infer. If newtype refs aren't recorded as deps, it's skipped.
-    let mut h = Harness::new(&[
-        ("f.rock", "newtype Meters(int)"),
-        ("b.rock", "fn unwrap(m: Meters) -> int { m.0 }"),
-    ]);
-    h.update("f.rock", "newtype Meters(float)");
-    let diags = h.session.diagnostics();
-    assert!(
-        diags.iter().any(|e| e.location.file.as_str() == "b.rock"),
-        "newtype wrapped-type change must re-infer b.rock; got {diags:?}"
+    assert_error_in_file(
+        &[
+            ("f.rock", "newtype Meters(int)"),
+            ("b.rock", "fn unwrap(m: Meters) -> int { m.0 }"),
+        ],
+        "f.rock",
+        "newtype Meters(float)",
+        "b.rock",
     );
 }
 
