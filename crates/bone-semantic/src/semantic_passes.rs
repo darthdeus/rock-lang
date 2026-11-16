@@ -525,19 +525,18 @@ fn check_frame_ref_storage(ws: &mut Workspace, fresh: &[ModuleId]) {
         .map(|&mid| {
             let module = ws.module(mid);
             let mut errs = Vec::new();
+            let mut report = |span: Span, message: String| {
+                errs.push((module.id, CompilerError::new_with_label(span, message)));
+            };
+            let stored = |what: &str, name: Ustr| {
+                format!(
+                    "{what} `{name}` cannot store a frame reference; store an `Entity<T>` or a value instead"
+                )
+            };
             for (_, def) in module.structs.iter() {
                 for field in &def.fields {
                     if ws.type_contains_ref(None, field.ty) {
-                        errs.push((
-                            module.id,
-                            CompilerError::new_with_label(
-                                field.span,
-                                format!(
-                                    "field `{}` cannot store a frame reference; store an `Entity<T>` or a value instead",
-                                    field.name
-                                ),
-                            ),
-                        ));
+                        report(field.span, stored("field", field.name));
                     }
                 }
             }
@@ -547,31 +546,13 @@ fn check_frame_ref_storage(ws: &mut Workspace, fresh: &[ModuleId]) {
                         VariantPayload::Unit => {}
                         VariantPayload::Tuple(types) => {
                             if types.iter().any(|ty| ws.type_contains_ref(None, *ty)) {
-                                errs.push((
-                                    module.id,
-                                    CompilerError::new_with_label(
-                                        variant.name_span,
-                                        format!(
-                                            "enum variant `{}` cannot store a frame reference; store an `Entity<T>` or a value instead",
-                                            variant.name
-                                        ),
-                                    ),
-                                ));
+                                report(variant.name_span, stored("enum variant", variant.name));
                             }
                         }
                         VariantPayload::Record(fields) => {
                             for field in fields {
                                 if ws.type_contains_ref(None, field.ty) {
-                                    errs.push((
-                                        module.id,
-                                        CompilerError::new_with_label(
-                                            field.span,
-                                            format!(
-                                                "enum field `{}` cannot store a frame reference; store an `Entity<T>` or a value instead",
-                                                field.name
-                                            ),
-                                        ),
-                                    ));
+                                    report(field.span, stored("enum field", field.name));
                                 }
                             }
                         }
@@ -580,27 +561,15 @@ fn check_frame_ref_storage(ws: &mut Workspace, fresh: &[ModuleId]) {
             }
             for (_, def) in module.newtypes.iter() {
                 if ws.type_contains_ref(None, def.wrapped) {
-                    errs.push((
-                        module.id,
-                        CompilerError::new_with_label(
-                            def.span,
-                            format!("newtype `{}` cannot store a frame reference", def.name),
-                        ),
-                    ));
+                    report(
+                        def.span,
+                        format!("newtype `{}` cannot store a frame reference", def.name),
+                    );
                 }
             }
             for (_, global) in module.globals.iter() {
                 if ws.type_contains_ref(None, global.ty) {
-                    errs.push((
-                        module.id,
-                        CompilerError::new_with_label(
-                            global.span,
-                            format!(
-                                "global `{}` cannot store a frame reference; store an `Entity<T>` or a value instead",
-                                global.name
-                            ),
-                        ),
-                    ));
+                    report(global.span, stored("global", global.name));
                 }
             }
             for (_, function) in module.functions.iter() {
@@ -615,16 +584,13 @@ fn check_frame_ref_storage(ws: &mut Workspace, fresh: &[ModuleId]) {
                         .return_ty
                         .is_some_and(|ty| ws.type_contains_ref(None, ty));
                 if carries_ref {
-                    errs.push((
-                        module.id,
-                        CompilerError::new_with_label(
-                            function.span,
-                            format!(
-                                "foreign or inline function `{}` cannot carry a frame reference across an opaque boundary",
-                                function.name
-                            ),
+                    report(
+                        function.span,
+                        format!(
+                            "foreign or inline function `{}` cannot carry a frame reference across an opaque boundary",
+                            function.name
                         ),
-                    ));
+                    );
                 }
             }
             errs
@@ -2070,7 +2036,6 @@ fn register_items(
                     // tools that only need the family span/name.
                     vis,
                     span: *item_span,
-                    dialect: skull_parser::Dialect::V1,
                 };
                 if def_kind == bone_core::modules::DefKind::Callable {
                     ws.defs.entry(def_key).or_insert(meta);

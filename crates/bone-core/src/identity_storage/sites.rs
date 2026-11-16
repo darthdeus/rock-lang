@@ -73,9 +73,7 @@ pub(crate) fn identity_storage_sites(ws: &Workspace, module: &Module) -> Vec<Ide
             kind,
             identity,
             span,
-            message: format!(
-                "{what} cannot store identity struct `{identity}`; store an `Entity<{identity}>` (Arena row) or make `{identity}` a `value`"
-            ),
+            message: storage_message(&what, identity),
         });
     };
     for (_, def) in module.structs.iter() {

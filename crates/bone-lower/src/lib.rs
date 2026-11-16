@@ -520,7 +520,7 @@ impl LowerCtx<'_, '_> {
     ) -> Result<(Ustr, hir::CallFamily), CompilerError> {
         let resolved = match self.v1_scope() {
             Some(frag) => self.probed_cached(&self.resolutions.optional, name, || {
-                resolve::resolve_v1_unary(self.workspace, frag, name)
+                resolve::resolve_v1_optional_callee(self.workspace, frag, name)
             }),
             None => Ok(Some(resolve::CalleeFamily::Single(resolve::plain(name)))),
         }
@@ -539,7 +539,7 @@ impl LowerCtx<'_, '_> {
             let name = Ustr::from(name);
             let resolved = match self.v1_scope() {
                 Some(frag) => self.probed_cached(&self.resolutions.optional, name, || {
-                    resolve::resolve_v1_unary(self.workspace, frag, name)
+                    resolve::resolve_v1_optional_callee(self.workspace, frag, name)
                 }),
                 None => Ok(Some(resolve::CalleeFamily::Single(resolve::plain(name)))),
             };

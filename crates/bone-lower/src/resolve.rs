@@ -263,21 +263,13 @@ pub fn resolve_v1_callee(
     frag: &FragmentScope,
     name: Ustr,
 ) -> Result<CalleeFamily, String> {
-    v1_callee(ws, frag, name)?.ok_or_else(|| unbound(name))
+    resolve_v1_optional_callee(ws, frag, name)?.ok_or_else(|| unbound(name))
 }
 
-/// A unary operator's function (`-x` -> `__unm`, `!x` -> `__not`) in a v1
-/// fragment: its family, or `None` when no tier binds the name. That is not
-/// an error here: a scalar operand never consults the family.
-pub(crate) fn resolve_v1_unary(
-    ws: &Workspace,
-    frag: &FragmentScope,
-    name: Ustr,
-) -> Result<Option<CalleeFamily>, String> {
-    v1_callee(ws, frag, name)
-}
-
-fn v1_callee(
+/// [`resolve_v1_callee`], or `None` when no tier binds the name. A unary
+/// operator's function (`-x` -> `__unm`) or the iterator protocol is optional:
+/// a scalar operand or a builtin iterable never consults the family.
+pub(crate) fn resolve_v1_optional_callee(
     ws: &Workspace,
     frag: &FragmentScope,
     name: Ustr,
@@ -391,8 +383,7 @@ fn bind_tiers(
         &mut Vec::new(),
     )?;
     if let Some(own) = own {
-        let not_found = || format!("`{name}` did not resolve to any definition");
-        let hit = collapse(ws, own, name, not_found, "definitions")?;
+        let hit = collapse(ws, own, name, || unbound(name), "definitions")?;
         tiers.bind(vec![hit], FamilyTier::Own, Via::Imports);
     }
 
@@ -520,13 +511,13 @@ fn resolve_import_target(
         }
     }
     if hits.is_empty() {
-        Err(format!("`{name}` did not resolve to any definition"))
+        Err(unbound(name))
     } else {
         Ok(Some(hits))
     }
 }
 
-fn unbound(name: Ustr) -> String {
+fn unbound(name: impl std::fmt::Display) -> String {
     format!("`{name}` did not resolve to any definition")
 }
 
@@ -838,7 +829,7 @@ fn explicit_members(
                 out.module = true;
                 return Ok(Some(out));
             }
-            return Err(format!("`{target}` did not resolve to any definition"));
+            return Err(unbound(target));
         }
         // A viewer's denial is an omission; the exporter's own is a broken
         // binding (the exporter must be permitted to name it).
@@ -1125,10 +1116,9 @@ fn check_operator_selector_target(
     if result.is_ok() || glob || path.segments.last().copied() != Some(Ustr::from("__op_sub")) {
         return result;
     }
-    let mut unary = path.clone();
-    if let Some(last) = unary.segments.last_mut() {
-        *last = Ustr::from("__unm");
-    }
+    let unary = operator_family_paths(path)
+        .nth(1)
+        .expect("an `__op_sub` path");
     if check_target(ws, frag, &unary, false, export).is_ok() {
         Ok(())
     } else {
@@ -1367,24 +1357,21 @@ pub(crate) fn resolve_member_path(
 /// The diagnostic for a value path nothing binds. A v1 `x::T` whose last
 /// segment names a type is most likely a legacy infix ascription, which v1
 /// spells `(x : T)`; name the replacement then, and only then. Otherwise an
-/// `unbound` first segment is the name reported.
+/// `unbound_head` first segment is the name reported.
 fn unresolved_value_path(
     ws: &Workspace,
     frag: &FragmentScope,
     segments: &[Ustr],
-    unbound: Option<Ustr>,
+    unbound_head: Option<Ustr>,
 ) -> String {
-    let message = format!("`{}` did not resolve to any definition", joined(segments));
+    let message = unbound(joined(segments));
     let Some((ty, prefix)) = segments.split_last() else {
         return message;
     };
     let names_a_type = BUILTIN_TYPE_NAMES.contains(&ty.as_str())
         || resolve_bare(ws, Some(frag), *ty).is_ok_and(|r| r.kind == ResolvedKind::Type);
     if prefix.is_empty() || !names_a_type {
-        return match unbound {
-            Some(name) => format!("`{name}` did not resolve to any definition"),
-            None => message,
-        };
+        return unbound_head.map_or(message, unbound);
     }
     format!(
         "{message}; `::` is a path separator in modules-v1, so a type ascription is written `({} : {ty})`",
@@ -1620,12 +1607,7 @@ fn walk_path(
         }
         WalkMode::Definition => {
             let members = walk_members(ws, frag, outer, path, visiting)?;
-            let not_found = || {
-                format!(
-                    "`{}` did not resolve to any definition",
-                    joined(&path.segments)
-                )
-            };
+            let not_found = || unbound(joined(&path.segments));
             let hit = collapse(
                 ws,
                 members,

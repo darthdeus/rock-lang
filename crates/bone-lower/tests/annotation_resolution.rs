@@ -75,7 +75,6 @@ fn lower_annotation(
                 name: spelling,
                 vis: NsVisibility::Pub,
                 span: item.span,
-                dialect: Dialect::V1,
             },
         );
         root.children.insert(name, name);

@@ -275,7 +275,6 @@ pub struct DefMeta {
     pub name: Ustr,
     pub vis: NsVisibility,
     pub span: crate::prelude::Span,
-    pub dialect: skull_parser::Dialect,
 }
 
 /// Fragment facts for one v1 file: which package/module it contributes to
