@@ -14,8 +14,7 @@ use skull_codegen_glsl::{GlslProfile, ShaderEmission};
 /// remaining `name(` is the builtin.
 fn emit_entry(src: &str, root: &str) -> ShaderEmission {
     let (ws, mid) = checked_workspace(src);
-    skull_codegen_glsl::emit_shader_entry_with_dependencies(&ws, mid, root, GlslProfile::Core330)
-        .expect("emit")
+    crate::support::emit_program(&ws, mid, None, root, GlslProfile::Core330).expect("emit")
 }
 
 fn assert_no_bare_binding(glsl: &str, name: &str) {

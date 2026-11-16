@@ -587,7 +587,7 @@ fn reaches_cycle(
 /// Over the recorded edges, not a second resolution of the program: the walk
 /// above already asked what each site calls, and this only asks whether that
 /// relation has a cycle. It does not decide the artifact's verdict --
-/// `check_entry_profile` does -- it TYPES one, and the two are compared.
+/// `plan_shader_with_view` does -- it TYPES one, and the two are compared.
 fn cyclic_instances(
     roots: &BTreeSet<Instance>,
     edges: &BTreeMap<Instance, Vec<(Instance, Span)>>,

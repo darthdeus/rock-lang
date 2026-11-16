@@ -111,14 +111,8 @@ impl HostileAbi {
 #[test]
 fn a_second_target_derives_a_different_physical_layout_from_the_same_interface() {
     let (ws, mid) = workspace(PIPELINE);
-    let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-        &ws,
-        mid,
-        "hv",
-        "hf",
-        GlslProfile::Core330,
-    )
-    .expect("the fixture must emit");
+    let em = crate::support::emit_program(&ws, mid, Some("hv"), "hf", GlslProfile::Core330)
+        .expect("the fixture must emit");
     let iface = &em.interface;
     let glsl = &em.abi;
     let hostile = HostileAbi::of(iface);
@@ -326,14 +320,8 @@ fn the_interface_plan_names_nothing_physical() {
 #[test]
 fn perturbing_an_interface_member_moves_the_derived_layout() {
     let (ws, mid) = workspace(PIPELINE);
-    let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-        &ws,
-        mid,
-        "hv",
-        "hf",
-        GlslProfile::Core330,
-    )
-    .expect("the fixture must emit");
+    let em = crate::support::emit_program(&ws, mid, Some("hv"), "hf", GlslProfile::Core330)
+        .expect("the fixture must emit");
     // Dropped before the layout below is derived: `ShaderAbiPlan::glsl` does
     // not take a `Workspace` at all, so this is a statement about the signature
     // rather than about discipline.

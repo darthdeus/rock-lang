@@ -15,18 +15,40 @@ fn build_ws(src: &str) -> (Workspace, ModuleId) {
     (ws, mid)
 }
 
-fn lower_test_instance(ws: &Workspace, fref: FuncRef) -> (ScalarCtx, MirFunc) {
+fn lower_test_instance(
+    ws: &Workspace,
+    fref: FuncRef,
+) -> (ScalarCtx, MirFunc, Arc<ConcreteBodyPlan>) {
     let interner = Arc::new(MonoInterner::new());
     let graph = skull_graph::instance_graph::build_in(ws, vec![fref], false, Arc::clone(&interner));
     let concrete = skull_graph::concrete_body::build(ws, &graph);
     let scx = ScalarCtx::new_values_first_class(ws).sharing(Arc::clone(&interner));
-    let plan = concrete
-        .plans
-        .get(&Instance::base(fref))
-        .expect("shader test concrete plan");
-    let mf = skull_mir::lower::lower_instance_with_plans(ws, &scx, plan, &concrete.plans)
+    let plan = Arc::clone(
+        concrete
+            .plans
+            .get(&Instance::base(fref))
+            .expect("shader test concrete plan"),
+    );
+    let mf = skull_mir::lower::lower_instance_with_plans(ws, &scx, &plan, &concrete.plans)
         .expect("shader test lower");
-    (scx, mf)
+    (scx, mf, plan)
+}
+
+fn emit_plain(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    fref: FuncRef,
+    mf: &MirFunc,
+    plan: &ConcreteBodyPlan,
+) -> Result<String, CompilerError> {
+    emit_fn_def_with(
+        ws,
+        scx.interner(),
+        &ShaderInstance::plain(fref),
+        mf,
+        None,
+        plan,
+    )
 }
 
 #[test]
@@ -51,7 +73,7 @@ fn concrete_signature_tier0_check_rejects_a_non_tier0_plan_type() {
 fn missed_sink_is_a_hard_emit_error() {
     let (ws, mid) = build_ws("@pure fn f(i: int) -> float { return i }");
     let fref = resolve_root(&ws, mid, "f").expect("root");
-    let (scx, mut mf) = lower_test_instance(&ws, fref);
+    let (scx, mut mf, plan) = lower_test_instance(&ws, fref);
 
     // The coercion is present today (regression pin for the return sink).
     assert!(
@@ -76,7 +98,7 @@ fn missed_sink_is_a_hard_emit_error() {
         }
     }
 
-    let r = emit_fn_def(&ws, scx.interner(), &ShaderInstance::plain(fref), &mf);
+    let r = emit_plain(&ws, &scx, fref, &mf, &plan);
     let msg = r
         .expect_err("a missed int->float sink must be a hard emit error")
         .message;
@@ -86,48 +108,9 @@ fn missed_sink_is_a_hard_emit_error() {
     );
 }
 
-/// **A generic callee with no recorded instantiation is a REJECTION.**
-///
-/// Reading an absent `spec_bindings` entry as "no instantiation" is right
-/// for a callee that has no generics and wrong for one that does: it
-/// silently substitutes the declaration's shape, which GLSL has no boxed
-/// representation for. Removing the record must reject with a span, never
-/// emit against the declaration.
-///
-/// The CONTROL is asserted first: with the record present the same body
-/// emits and names the specialized callee, so the rejection below measures
-/// the missing record and not an unemittable fixture.
-#[test]
-fn a_generic_callee_with_no_recorded_instantiation_rejects() {
-    let (ws, mid) = build_ws(
-        "@pure fn passthrough<T>(x: T) -> T { return x }\n             @pure fn caller(x: float) -> float { return passthrough(x) }",
-    );
-    let fref = resolve_root(&ws, mid, "caller").expect("root");
-    let (scx, mut mf) = lower_test_instance(&ws, fref);
-
-    // CONTROL: the record exists and the body emits against it.
-    assert_eq!(
-        mf.spec_bindings.len(),
-        1,
-        "the fixture recorded no instantiation to remove"
-    );
-    let ok = emit_fn_def(&ws, scx.interner(), &ShaderInstance::plain(fref), &mf)
-        .expect("the body emits with its instantiation recorded");
-    assert!(ok.contains("passthrough_T_spec_p_float("), "{ok}");
-
-    // Remove exactly the record, change nothing else.
-    mf.spec_bindings.clear();
-    let msg = emit_fn_def(&ws, scx.interner(), &ShaderInstance::plain(fref), &mf)
-        .expect_err("a generic callee with no instantiation must reject")
-        .message;
-    assert!(
-        msg.contains("no recorded instantiation") && msg.contains("passthrough"),
-        "the rejection does not name the callee or the cause: {msg}"
-    );
-}
-
-/// **ADMISSION CONTROL for the rule above.** A callee that declares no
-/// generics has no record to miss, so it must pass the same gate and emit.
+/// **ADMISSION CONTROL for the missing-record rejection** pinned by
+/// `production_shader_calls_use_concrete_signature_and_instance_records`. A
+/// callee that declares no generics must pass the same gate and emit.
 /// Without this the rejection and "GLSL stopped emitting calls" look alike.
 #[test]
 fn a_nongeneric_callee_needs_no_recorded_instantiation() {
@@ -135,20 +118,15 @@ fn a_nongeneric_callee_needs_no_recorded_instantiation() {
         "@pure fn doubled(x: float) -> float { return x * 2.0 }\n             @pure fn caller(x: float) -> float { return doubled(x) }",
     );
     let fref = resolve_root(&ws, mid, "caller").expect("root");
-    let (scx, mf) = lower_test_instance(&ws, fref);
+    let (scx, mf, plan) = lower_test_instance(&ws, fref);
 
-    // The fixture really does exercise the gate: a call is present, and it
-    // carries NO record -- which is the input the generic arm rejects.
+    // The fixture really does exercise the gate: a call is present.
     assert!(
         mf.insts.iter().any(|(_, i)| matches!(i, Inst::Call { .. })),
         "the fixture has no call to admit"
     );
-    assert!(
-        mf.spec_bindings.is_empty(),
-        "a non-generic callee recorded an instantiation"
-    );
 
-    let out = emit_fn_def(&ws, scx.interner(), &ShaderInstance::plain(fref), &mf)
+    let out = emit_plain(&ws, &scx, fref, &mf, &plan)
         .expect("a non-generic callee must be admitted with no record");
     assert!(out.contains("doubled_float("), "{out}");
 }
@@ -543,20 +521,21 @@ fn a_generic_callee_with_a_wrong_arity_key_rejects() {
          @pure fn caller(x: float) -> float { return pick(x, 1) }",
     );
     let fref = resolve_root(&ws, mid, "caller").expect("root");
-    let (scx, base) = lower_test_instance(&ws, fref);
+    let (scx, base, plan) = lower_test_instance(&ws, fref);
 
     // CONTROL: the recorded key has the declared arity, and the body emits.
-    let iid = *base
-        .spec_bindings
-        .keys()
-        .next()
+    let iid = base
+        .callee_instances
+        .iter()
+        .find(|(_, inst)| !inst.args.is_empty())
+        .map(|(iid, _)| *iid)
         .expect("a recorded instantiation");
     assert_eq!(
-        base.spec_bindings[&iid].args.len(),
+        base.callee_instances[&iid].args.len(),
         2,
         "the callee declares two generics"
     );
-    emit_fn_def(&ws, scx.interner(), &ShaderInstance::plain(fref), &base)
+    emit_plain(&ws, &scx, fref, &base, &plan)
         .expect("the fixture must emit with a well-formed key");
 
     for (label, key) in [
@@ -565,10 +544,10 @@ fn a_generic_callee_with_a_wrong_arity_key_rejects() {
         ("too short", vec![MonoTy::Float]),
     ] {
         let mut mf = base.clone();
-        let callee = base.spec_bindings[&iid].func;
-        mf.spec_bindings
+        let callee = base.callee_instances[&iid].func;
+        mf.callee_instances
             .insert(iid, Instance::intern(scx.interner(), callee, key));
-        let msg = emit_fn_def(&ws, scx.interner(), &ShaderInstance::plain(fref), &mf)
+        let msg = emit_plain(&ws, &scx, fref, &mf, &plan)
             .err()
             .unwrap_or_else(|| panic!("a {label} key must reject"))
             .message;
@@ -652,7 +631,7 @@ fn production_shader_calls_use_concrete_signature_and_instance_records() {
         &ShaderInstance::new(caller_inst.clone()),
         &body,
         None,
-        Some(caller_plan),
+        caller_plan,
     )
     .expect_err("a concrete call without its instance record must reject");
     assert!(
@@ -679,11 +658,3 @@ fn production_shader_calls_use_concrete_signature_and_instance_records() {
         "{bad_signature}"
     );
 }
-
-// A partial key -- a recorded instantiation with an unreified slot -- used to
-// be pinned here as its own rejection. A key is TOTAL now, so the producer
-// returns no key at all rather than one with a hole, and the state arrives
-// as an absent record. That is
-// `a_generic_callee_with_no_recorded_instantiation_rejects` above, which is
-// the surviving coverage; a second test inserting an empty key would assert
-// the same arm twice.

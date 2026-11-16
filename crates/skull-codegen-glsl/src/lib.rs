@@ -412,11 +412,7 @@ struct FnEmit<'a> {
     /// The fn's name span -- body-level emit errors anchor here (MIR insts carry
     /// no spans, so per-expression precision is not available).
     fn_span: Span,
-    concrete_plan: Option<&'a ConcreteBodyPlan>,
-    /// The INSTANCE being emitted: this body's own generic bindings. Every
-    /// declared type it renders resolves through this, so `T` is `float` here
-    /// and `int` in the sibling instance of the same declaration.
-    subst: Option<SpecSubst>,
+    concrete_plan: &'a ConcreteBodyPlan,
     /// Every direct call in this body, resolved to its callee INSTANCE by
     /// [`callee_inst_at`]. Built once so the name a call renders and the type
     /// its result takes come from one answer.

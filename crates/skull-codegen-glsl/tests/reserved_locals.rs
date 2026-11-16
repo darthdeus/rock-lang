@@ -29,8 +29,7 @@ fn register() {
 
 fn emit(root: &str, profile: GlslProfile) -> String {
     let (ws, mid) = checked_workspace(SOURCE);
-    let emission = skull_codegen_glsl::emit_shader_entry_with_dependencies(&ws, mid, root, profile)
-        .expect("emit");
+    let emission = crate::support::emit_program(&ws, mid, None, root, profile).expect("emit");
     emission.source
 }
 

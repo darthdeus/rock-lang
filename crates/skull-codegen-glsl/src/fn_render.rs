@@ -122,48 +122,19 @@ impl FnEmit<'_> {
                     }
                 }
             }
-            Inst::Call { func, args } => {
+            Inst::Call { func, .. } => {
                 let cf = &self.ws.module(func.module).functions[func.func];
-                if self.concrete_plan.is_some() {
-                    let sig = self.concrete_call_signature(iid)?;
-                    let id = sig.result.ok_or_else(|| {
-                        err(
-                            self.span(),
-                            format!(
-                                "shader profile: call to `{}` has no concrete result type",
-                                cf.name
-                            ),
-                        )
-                    })?;
-                    concrete_glsl_ty(self.interner, id, self.span(), "call result")?
-                } else {
-                    let csub = self.callee_inst(iid).subst(self.ws, self.interner);
-                    match cf
-                        .return_ty
-                        .and_then(|rt| glsl_ty(self.ws, &csub, rt, cf.name_span, "return").ok())
-                    {
-                        Some(t) => t,
-                        // Generic-return genType builtins (min<T>/max<T>/clamp/abs):
-                        // GLSL's result type is the argument type. Load-bearing under
-                        // GLSL, which requires the correct assignment type.
-                        None if matches!(
-                            declared_name(cf.name.as_str()),
-                            "min" | "max" | "clamp" | "abs"
-                        ) && !args.is_empty() =>
-                        {
-                            self.ty_of(args[0])?
-                        }
-                        None => {
-                            return Err(err(
-                                self.span(),
-                                format!(
-                                    "shader profile: call to `{}` has no tier-0 GLSL result type",
-                                    cf.name
-                                ),
-                            ));
-                        }
-                    }
-                }
+                let sig = self.concrete_call_signature(iid)?;
+                let id = sig.result.ok_or_else(|| {
+                    err(
+                        self.span(),
+                        format!(
+                            "shader profile: call to `{}` has no concrete result type",
+                            cf.name
+                        ),
+                    )
+                })?;
+                concrete_glsl_ty(self.interner, id, self.span(), "call result")?
             }
             other => {
                 return Err(err(
@@ -367,7 +338,7 @@ impl FnEmit<'_> {
     ) -> Result<String, CompilerError> {
         let cf = &self.ws.module(func.module).functions[func.func];
         let callee = self.callee_inst(iid);
-        let param_types = self.call_param_types(iid, cf)?;
+        let param_types = self.call_param_types(iid)?;
         let name = declared_name(cf.name.as_str());
         // A non-scalar `__op_*` call is a Vec operator -> native infix. An int
         // operand (`*(Vec2, int)`) is cast to float (GLSL has no vec*int).

@@ -12,8 +12,8 @@
 //! declaration drift into disagreeing about what an array holds, and "one layout
 //! authority" would be false the moment the second one exists.
 
-use crate::support::{pipeline_emission, workspace};
-use skull_codegen_glsl::{GlslProfile, ShaderEmission};
+use crate::support::{check_program, emit_unplanned, pipeline_emission, workspace};
+use skull_codegen_glsl::ShaderEmission;
 use skull_mir::gpu_layout::UniformArrayBlockPlan;
 
 /// The one block at `binding`, or a panic naming what was actually there.
@@ -397,18 +397,13 @@ fn an_array_block_name_cannot_collide_with_a_uniform_group() {
 
 #[test]
 fn the_published_check_and_emission_agree_about_array_blocks() {
-    // `check_pipeline_profile` must not admit what emission refuses. It is
+    // The view's profile check must not admit what emission refuses. It is
     // emission's own preparation, so an array-block rejection has to reach it --
     // a check that re-ran a summary of these steps would miss the layout entirely.
     for src in [VERTEX_ARRAYS, FRAGMENT_ARRAYS] {
         let (ws, mid) = workspace(src);
-        let v = skull_codegen_glsl::resolve_root(&ws, mid, "vt").expect("vert root");
-        let f = skull_codegen_glsl::resolve_root(&ws, mid, "fr").expect("frag root");
-        let checked = skull_codegen_glsl::check_pipeline_profile(&ws, v, f).map_err(|e| e.message);
-        let emitted =
-            skull_codegen_glsl::emit_shader_pipeline(&ws, mid, "vt", "fr", GlslProfile::Core330)
-                .map(|_| ())
-                .map_err(|e| e.message);
+        let checked = check_program(&ws, mid, Some("vt"), "fr");
+        let emitted = emit_unplanned(&ws, mid, Some("vt"), "fr");
         assert_eq!(checked, emitted);
     }
 }
@@ -429,13 +424,8 @@ fn the_check_rejects_an_oversized_block_exactly_as_emission_does() {
         }
     "#;
     let (ws, mid) = workspace(src);
-    let v = skull_codegen_glsl::resolve_root(&ws, mid, "vt").expect("vert root");
-    let f = skull_codegen_glsl::resolve_root(&ws, mid, "fr").expect("frag root");
-    let checked = skull_codegen_glsl::check_pipeline_profile(&ws, v, f).map_err(|e| e.message);
-    let emitted =
-        skull_codegen_glsl::emit_shader_pipeline(&ws, mid, "vt", "fr", GlslProfile::Core330)
-            .map(|_| ())
-            .map_err(|e| e.message);
+    let checked = check_program(&ws, mid, Some("vt"), "fr");
+    let emitted = emit_unplanned(&ws, mid, Some("vt"), "fr");
     assert!(checked.is_err(), "the check must reject too");
     assert_eq!(checked, emitted);
 }

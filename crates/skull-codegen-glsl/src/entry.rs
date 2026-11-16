@@ -73,18 +73,6 @@ fn entry_shape(
     }
 }
 
-/// Emit a COMPLETE single-file shader for one `@shader(fragment)` root: the
-/// generated PIXEL block (declarations + reachable helpers + the entry fn +
-/// `main`) and the default fullscreen VERTEX block.
-pub fn emit_shader_entry(
-    ws: &Workspace,
-    mid: ModuleId,
-    root: &str,
-    profile: GlslProfile,
-) -> Result<String, CompilerError> {
-    Ok(emit_shader_entry_with_dependencies(ws, mid, root, profile)?.source)
-}
-
 pub struct ShaderEmission {
     pub source: String,
     pub dependencies: Vec<FuncRef>,
@@ -148,7 +136,7 @@ impl StagePlan {
                 href,
                 &self.ir.bodies[href],
                 None,
-                Some(body_plan),
+                body_plan,
             )?);
             out.push('\n');
         }
@@ -261,8 +249,8 @@ pub(crate) fn reject_population_cycles(
 /// `@uniform` block's std140 layout and the program's `@textures` slot
 /// assignment.
 ///
-/// [`check_entry_profile`] builds this and DROPS it; [`emit_shader_entry`]
-/// builds it and renders it. There is no second sequence, so the mono shader
+/// [`plan_shader_with_view`] builds this and [`render_shader_plan`] renders
+/// it. There is no second sequence, so the mono shader
 /// artifact view structurally cannot admit a program emission refuses -- which
 /// is not what a summary of these checks could promise, and did not deliver: it
 /// accepted a standalone `@shader(vertex)` entry and never reached the
@@ -378,64 +366,10 @@ fn plan_shader_entry_inner(
     })
 }
 
-/// Validate one shader ENTRY exactly as emission does, without emitting.
-///
-/// Published for the mono SHADER ARTIFACT VIEW, which must not be able to admit
-/// what emission refuses. It is the view-fed entry plan used by emission,
-/// not a summary of it: the only thing left out below this point is the GLSL
-/// text itself.
-///
-/// Declaration-based, like the rest of GLSL lowering today --
-/// `lower_function_source`
-/// takes no substitution -- so a caller holding concrete instances must not
-/// hand this a generic declaration and read the answer as concrete.
-pub fn check_entry_profile(ws: &Workspace, fref: FuncRef) -> Result<(), CompilerError> {
-    let session = shader_program_session(
-        ws,
-        ShaderProgram {
-            vert: None,
-            frag: fref,
-        },
-    )?;
-    check_entry_profile_with_view(ws, &session.scx, &session.view)
-}
-
-/// Validate one shader entry against the graph-owned concrete population.
-pub fn check_entry_profile_with_view(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    view: &ShaderProgramView,
-) -> Result<(), CompilerError> {
-    let stage = view
-        .stages
-        .iter()
-        .find(|stage| stage.stage == ShaderStage::Fragment)
-        .ok_or_else(|| {
-            CompilerError::new_no_location(
-                "shader graph/view has no fragment stage for a single-entry shader".to_string(),
-            )
-        })?;
-    plan_shader_entry_from_view(ws, scx, stage, &view.concrete_plans).map(|_| ())
-}
-
-pub fn emit_shader_entry_with_dependencies(
-    ws: &Workspace,
-    mid: ModuleId,
-    root: &str,
-    profile: GlslProfile,
-) -> Result<ShaderEmission, CompilerError> {
-    let fref = resolve_root(ws, mid, root)?;
-    let session = shader_program_session(
-        ws,
-        ShaderProgram {
-            vert: None,
-            frag: fref,
-        },
-    )?;
-    emit_shader_entry_with_view(ws, &session.scx, &session.view, profile)
-}
-
-/// Emit a single-entry program from the graph-owned population. The caller's
+/// Emit a whole single-file shader for one `@shader(fragment)` root -- the
+/// generated PIXEL block (declarations + reachable helpers + the entry fn +
+/// `main`) and the default fullscreen VERTEX block -- from the graph-owned
+/// population. The caller's
 /// `ScalarCtx` must share the graph interner; the view supplies the concrete
 /// entry and helper order, while this backend supplies only MIR delivery and
 /// GLSL rendering.
@@ -514,7 +448,7 @@ pub(crate) fn render_shader_entry(
         &plan.stage.ir.entry,
         &plan.stage.ir.body,
         Some(shape),
-        Some(entry_plan),
+        entry_plan,
     )?);
     px.push('\n');
     px.push_str(&format!(

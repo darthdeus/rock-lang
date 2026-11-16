@@ -210,7 +210,7 @@ pub fn shader_library_session(
 
 /// The lowering context and registered-program population kept together
 /// for routes that do not already own a `skull::shader_artifact` view.
-pub(crate) struct ShaderProgramSession {
+pub struct ShaderProgramSession {
     pub scx: ScalarCtx,
     pub view: ShaderProgramView,
 }
@@ -410,10 +410,9 @@ fn realize_shader_program_view(
     })
 }
 
-/// Build a registered-program view from the shared graph. The returned session
-/// is the compatibility seam for callers that have roots but no retained
-/// `ShaderArtifactView`; emission itself still consumes the supplied view.
-pub(crate) fn shader_program_session(
+/// Build a registered-program view from the shared graph, for callers that
+/// have roots but no retained `ShaderArtifactView`.
+pub fn shader_program_session(
     ws: &Workspace,
     program: ShaderProgram,
 ) -> Result<ShaderProgramSession, CompilerError> {
@@ -514,7 +513,7 @@ pub fn emit_shader_library_with_view(
                 )
             })?;
         let mut direct = Vec::new();
-        profile_body(ws, f, &body, &mut direct, true)?;
+        profile_body(ws, f, &body, &mut direct)?;
         let retained = checked_library_callees(
             ws,
             &instance,
@@ -575,7 +574,7 @@ pub fn emit_shader_library_with_view(
             &instance,
             body,
             None,
-            Some(body_plan),
+            body_plan,
         )?);
     }
     Ok(out)

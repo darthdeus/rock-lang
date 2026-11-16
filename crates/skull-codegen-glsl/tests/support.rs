@@ -4,8 +4,10 @@
 
 use bone_core::prelude::ModuleId;
 use bone_core::workspace::Workspace;
-use skull_codegen_glsl::{GlslProfile, ShaderEmission};
+use skull_codegen_glsl::{GlslProfile, ShaderEmission, ShaderProgramSession};
+use skull_graph::shader::ShaderProgram;
 use skull_parser::Ast;
+use skull_parser::CompilerError;
 use std::sync::LazyLock;
 use ustr::Ustr;
 
@@ -81,41 +83,99 @@ pub fn emit_library(src: &str, roots: &[&str]) -> Result<String, String> {
     emit_library_with(&STDLIB, src, roots)
 }
 
-pub fn emit_entry(src: &str, root: &str) -> Result<String, String> {
-    let (ws, mid) = workspace(src);
-    skull_codegen_glsl::emit_shader_entry(&ws, mid, root, GlslProfile::Core330)
+/// The registered-program session for `vert` (if any) and `frag`.
+pub fn program_session(
+    ws: &Workspace,
+    mid: ModuleId,
+    vert: Option<&str>,
+    frag: &str,
+) -> Result<ShaderProgramSession, CompilerError> {
+    let vert = vert
+        .map(|root| skull_codegen_glsl::resolve_root(ws, mid, root))
+        .transpose()?;
+    let frag = skull_codegen_glsl::resolve_root(ws, mid, frag)?;
+    skull_codegen_glsl::shader_program_session(ws, ShaderProgram { vert, frag })
+}
+
+/// A program planned and rendered as the shader artifact view and emission do.
+pub fn emit_program(
+    ws: &Workspace,
+    mid: ModuleId,
+    vert: Option<&str>,
+    frag: &str,
+    profile: GlslProfile,
+) -> Result<ShaderEmission, CompilerError> {
+    let session = program_session(ws, mid, vert, frag)?;
+    let plan = skull_codegen_glsl::plan_shader_with_view(ws, &session.scx, &session.view)?;
+    skull_codegen_glsl::render_shader_plan(ws, session.scx.interner(), &plan, profile)
+}
+
+/// The shader artifact view's profile check: the program planned, the plan
+/// dropped.
+pub fn check_program(
+    ws: &Workspace,
+    mid: ModuleId,
+    vert: Option<&str>,
+    frag: &str,
+) -> Result<(), String> {
+    let session = program_session(ws, mid, vert, frag).map_err(|e| e.message)?;
+    skull_codegen_glsl::plan_shader_with_view(ws, &session.scx, &session.view)
+        .map(|_| ())
         .map_err(|e| e.message)
+}
+
+/// Emission of a program the view kept no plan for: planned again from the
+/// view, which must reach the check's verdict.
+pub fn emit_unplanned(
+    ws: &Workspace,
+    mid: ModuleId,
+    vert: Option<&str>,
+    frag: &str,
+) -> Result<(), String> {
+    let session = program_session(ws, mid, vert, frag).map_err(|e| e.message)?;
+    let profile = GlslProfile::Core330;
+    match vert {
+        Some(_) => skull_codegen_glsl::emit_shader_pipeline_with_view(
+            ws,
+            &session.scx,
+            &session.view,
+            profile,
+        ),
+        None => skull_codegen_glsl::emit_shader_entry_with_view(
+            ws,
+            &session.scx,
+            &session.view,
+            profile,
+        ),
+    }
+    .map(|_| ())
+    .map_err(|e| e.message)
+}
+
+pub fn emit_entry(src: &str, root: &str) -> Result<String, String> {
+    entry_emission(src, root).map(|e| e.source)
 }
 
 pub fn emit_checked_entry(src: &str, root: &str) -> Result<String, String> {
     let (ws, mid) = workspace(src);
     body_errors(&ws)?;
-    skull_codegen_glsl::emit_shader_entry(&ws, mid, root, GlslProfile::Core330)
+    emit_program(&ws, mid, None, root, GlslProfile::Core330)
+        .map(|e| e.source)
         .map_err(|e| e.message)
 }
 
 pub fn entry_emission(src: &str, root: &str) -> Result<ShaderEmission, String> {
     let (ws, mid) = workspace(src);
-    skull_codegen_glsl::emit_shader_entry_with_dependencies(&ws, mid, root, GlslProfile::Core330)
-        .map_err(|e| e.message)
+    emit_program(&ws, mid, None, root, GlslProfile::Core330).map_err(|e| e.message)
 }
 
 pub fn emit_pipeline(src: &str, vert: &str, frag: &str) -> Result<String, String> {
-    let (ws, mid) = workspace(src);
-    skull_codegen_glsl::emit_shader_pipeline(&ws, mid, vert, frag, GlslProfile::Core330)
-        .map_err(|e| e.message)
+    pipeline_emission(src, vert, frag).map(|e| e.source)
 }
 
 pub fn pipeline_emission(src: &str, vert: &str, frag: &str) -> Result<ShaderEmission, String> {
     let (ws, mid) = workspace(src);
-    skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-        &ws,
-        mid,
-        vert,
-        frag,
-        GlslProfile::Core330,
-    )
-    .map_err(|e| e.message)
+    emit_program(&ws, mid, Some(vert), frag, GlslProfile::Core330).map_err(|e| e.message)
 }
 
 /// The emitted shader contains `needle`.

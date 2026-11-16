@@ -1,7 +1,7 @@
 //! **GLSL checking and emission consume ONE validated plan**.
 //!
-//! `check_entry_profile` / `check_pipeline_profile` exist so the mono shader
-//! artifact view cannot admit what emission refuses. That guarantee is only
+//! The shader artifact view plans each program (`plan_shader_with_view`) so it
+//! cannot admit what emission refuses. That guarantee is only
 //! worth something if the two run the SAME sequence: a check that is a
 //! re-implementation of emission's preparation is free to be weaker, and was --
 //! it accepted a standalone `@shader(vertex)` entry the emitter rejects, and it
@@ -12,40 +12,25 @@
 //! that only asserted "the check rejects" would pass against two different
 //! diagnostics.
 
-use crate::support::workspace;
+use crate::support::{check_program, emit_unplanned, workspace};
 use skull_codegen_glsl::GlslProfile;
-use skull_mir::mir::FuncRef;
-
-fn fref(
-    ws: &bone_core::workspace::Workspace,
-    mid: bone_core::prelude::ModuleId,
-    name: &str,
-) -> FuncRef {
-    skull_codegen_glsl::resolve_root(ws, mid, name).expect("shader root")
-}
 
 /// The two answers for a single-entry program, as `Result<(), String>` so a
 /// message difference is a failure and not a coincidence of both being `Err`.
 fn entry_answers(src: &str, root: &str) -> (Result<(), String>, Result<(), String>) {
     let (ws, mid) = workspace(src);
-    let checked =
-        skull_codegen_glsl::check_entry_profile(&ws, fref(&ws, mid, root)).map_err(|e| e.message);
-    let emitted = skull_codegen_glsl::emit_shader_entry(&ws, mid, root, GlslProfile::Core330)
-        .map(|_| ())
-        .map_err(|e| e.message);
-    (checked, emitted)
+    (
+        check_program(&ws, mid, None, root),
+        emit_unplanned(&ws, mid, None, root),
+    )
 }
 
 fn pipeline_answers(src: &str, vert: &str, frag: &str) -> (Result<(), String>, Result<(), String>) {
     let (ws, mid) = workspace(src);
-    let checked =
-        skull_codegen_glsl::check_pipeline_profile(&ws, fref(&ws, mid, vert), fref(&ws, mid, frag))
-            .map_err(|e| e.message);
-    let emitted =
-        skull_codegen_glsl::emit_shader_pipeline(&ws, mid, vert, frag, GlslProfile::Core330)
-            .map(|_| ())
-            .map_err(|e| e.message);
-    (checked, emitted)
+    (
+        check_program(&ws, mid, Some(vert), frag),
+        emit_unplanned(&ws, mid, Some(vert), frag),
+    )
 }
 
 fn assert_agree(what: &str, (checked, emitted): (Result<(), String>, Result<(), String>)) {
@@ -326,7 +311,8 @@ fn bool_match_frag(tc: Vec2) -> Vec4 {
 
     let profile = GlslProfile::Core330;
     let (ws, mid) = workspace(src);
-    let out = skull_codegen_glsl::emit_shader_entry(&ws, mid, "bool_match_frag", profile)
+    let out = crate::support::emit_program(&ws, mid, None, "bool_match_frag", profile)
+        .map(|e| e.source)
         .expect("a valid bool-match entry must emit under every profile");
     for arm in ["= 10;", "= 20;"] {
         assert!(
@@ -403,7 +389,8 @@ fn main() { let a = rock_shader(generic_frag) }
     );
 
     let (ws, mid) = workspace(src);
-    let out = skull_codegen_glsl::emit_shader_entry(&ws, mid, "generic_frag", GlslProfile::Core330)
+    let out = crate::support::emit_program(&ws, mid, None, "generic_frag", GlslProfile::Core330)
+        .map(|e| e.source)
         .expect("a concretely instantiated generic helper must emit");
 
     let defs: Vec<&str> = out

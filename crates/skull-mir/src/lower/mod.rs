@@ -4013,10 +4013,10 @@ fn struct_expand_rejection_for_call(
 
 /// A resolved `rock_shader(...)` pipeline. Two forms:
 /// - two-arg `rock_shader(vert, frag)`: `vert = Some(..)`, `key = "<vert>+<frag>"`;
-///   the driver runs `emit_shader_pipeline`.
+///   the driver runs `emit_shader_pipeline_with_view`.
 /// - one-arg fullscreen `rock_shader(frag)`: `vert = None`, `key = "<frag>"` (a
 ///   bare name, never containing '+', so it can never collide with a pair key);
-///   the driver runs `emit_shader_entry`.
+///   the driver runs `emit_shader_entry_with_view`.
 ///
 /// `key` is the pipeline name const `pipeline()` looks up.
 #[derive(Clone, Debug, PartialEq, Eq)]

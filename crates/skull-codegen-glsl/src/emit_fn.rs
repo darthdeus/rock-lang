@@ -19,19 +19,14 @@ impl FnEmit<'_> {
         &self,
         iid: Idx<Inst>,
     ) -> Result<&ConcreteSignature, CompilerError> {
-        let plan = self.concrete_plan.ok_or_else(|| {
-            err(
-                self.span(),
-                "shader profile: concrete call queried without a body plan",
-            )
-        })?;
         let site = self.f.call_sites.get(&iid).ok_or_else(|| {
             err(
                 self.span(),
                 "shader profile: concrete call has no site identity",
             )
         })?;
-        plan.callees
+        self.concrete_plan
+            .callees
             .get(&site.site)
             .map(|callee| std::sync::Arc::as_ref(&callee.signature))
             .ok_or_else(|| {
@@ -45,36 +40,18 @@ impl FnEmit<'_> {
     pub(crate) fn call_param_types(
         &self,
         iid: Idx<Inst>,
-        cf: &Function,
     ) -> Result<Vec<Option<GlslTy>>, CompilerError> {
-        if self.concrete_plan.is_some() {
-            let sig = self.concrete_call_signature(iid)?;
-            return sig
-                .params
-                .iter()
-                .map(|&id| Ok(mono_glsl_ty(&self.interner.get(id))))
-                .collect();
-        }
-        Ok(cf
-            .param_decls
+        let sig = self.concrete_call_signature(iid)?;
+        sig.params
             .iter()
-            .map(|p| {
-                glsl_ty(
-                    self.ws,
-                    &self.callee_inst(iid).subst(self.ws, self.interner),
-                    p.ty,
-                    cf.name_span,
-                    "arg",
-                )
-                .ok()
-            })
-            .collect())
+            .map(|&id| Ok(mono_glsl_ty(&self.interner.get(id))))
+            .collect()
     }
 }
 
 /// **The one resolver of a call site's callee instance, and it FAILS CLOSED.**
 ///
-/// `MirFunc::spec_bindings` holds the instantiation lowering recorded at each
+/// `MirFunc::callee_instances` holds the instantiation lowering recorded at each
 /// call. Reading an absent entry as "no instantiation" is only correct for a
 /// callee that HAS no generics; for a generic one it silently substitutes the
 /// declaration's shape, which on GLSL means emitting or typing a body no
@@ -91,17 +68,12 @@ pub(crate) fn callee_inst_at(
     iid: Idx<Inst>,
     func: FuncRef,
     span: Span,
-    concrete: bool,
 ) -> Result<ShaderInstance, CompilerError> {
     let cf = &ws.module(func.module).functions[func.func];
     // Absent is not "the declaration": a callee with no generics HAS no
     // instantiation to record, and one that is generic and recorded nothing is
     // the rejection below.
-    let recorded = if concrete {
-        mf.callee_instances.get(&iid).cloned()
-    } else {
-        mf.spec_bindings.get(&iid).cloned()
-    };
+    let recorded = mf.callee_instances.get(&iid).cloned();
     if renders_inline(cf) || cf.generics.is_empty() {
         return Ok(ShaderInstance::new(
             recorded.unwrap_or_else(|| Instance::base(func)),
@@ -165,18 +137,8 @@ pub(crate) struct MainOut {
 /// The fragment output field that is written to `gl_FragDepth`.
 pub(crate) const FRAG_DEPTH_FIELD: &str = "FragDepth";
 
-/// Emit `<ret> <name>(<params>) { <body> }` for one lowered INSTANCE.
-#[cfg(test)]
-pub(crate) fn emit_fn_def(
-    ws: &Workspace,
-    interner: &MonoInterner,
-    inst: &ShaderInstance,
-    mf: &MirFunc,
-) -> Result<String, CompilerError> {
-    emit_fn_def_with(ws, interner, inst, mf, None, None)
-}
-
-/// [`emit_fn_def`], optionally in ENTRY mode: the uniform-struct and sampler
+/// Emit `<ret> <name>(<params>) { <body> }` for one lowered INSTANCE at its
+/// concrete plan, optionally in ENTRY mode: the uniform-struct and sampler
 /// params are dropped from the GLSL signature (their reads render as bare
 /// uniform globals) and the fn keeps its bare Rock name.
 pub(crate) fn emit_fn_def_with(
@@ -185,10 +147,9 @@ pub(crate) fn emit_fn_def_with(
     inst: &ShaderInstance,
     mf: &MirFunc,
     entry: Option<&EntryShape>,
-    concrete_plan: Option<&ConcreteBodyPlan>,
+    concrete_plan: &ConcreteBodyPlan,
 ) -> Result<String, CompilerError> {
     let fref = inst.fref();
-    let subst = concrete_plan.is_none().then(|| inst.subst(ws, interner));
     let f = &ws.module(fref.module).functions[fref.func];
     let emits_main = entry.is_some_and(|s| s.main_out.is_some());
     let name = if emits_main {
@@ -203,25 +164,11 @@ pub(crate) fn emit_fn_def_with(
     let ret_ty = if emits_main {
         None
     } else {
-        if let Some(plan) = concrete_plan {
-            plan.signature
-                .result
-                .map(|id| concrete_glsl_ty(interner, id, f.name_span, "return"))
-                .transpose()?
-        } else {
-            match f.return_ty {
-                Some(rt) => Some(glsl_ty(
-                    ws,
-                    subst
-                        .as_ref()
-                        .expect("source GLSL emission has a substitution"),
-                    rt,
-                    f.name_span,
-                    "return",
-                )?),
-                None => None,
-            }
-        }
+        concrete_plan
+            .signature
+            .result
+            .map(|id| concrete_glsl_ty(interner, id, f.name_span, "return"))
+            .transpose()?
     };
     let ret = ret_ty.map_or("void", |t| t.name());
 
@@ -230,10 +177,7 @@ pub(crate) fn emit_fn_def_with(
     let mut callee_insts: HashMap<Idx<Inst>, ShaderInstance> = HashMap::default();
     for (iid, inst) in mf.insts.iter() {
         if let Inst::Call { func, .. } = inst {
-            callee_insts.insert(
-                iid,
-                callee_inst_at(ws, mf, iid, *func, f.name_span, concrete_plan.is_some())?,
-            );
+            callee_insts.insert(iid, callee_inst_at(ws, mf, iid, *func, f.name_span)?);
         }
     }
 
@@ -290,7 +234,6 @@ pub(crate) fn emit_fn_def_with(
         main_out: entry.and_then(|s| s.main_out.clone()),
         fn_span: f.name_span,
         concrete_plan,
-        subst: subst.clone(),
         callee_insts,
         value_name: HashMap::default(),
     };
@@ -324,25 +267,18 @@ pub(crate) fn emit_fn_def_with(
         if struct_params.contains(&i) {
             continue;
         }
-        let ty = if let Some(plan) = concrete_plan {
-            let id = plan.signature.params.get(i).copied().ok_or_else(|| {
+        let id = concrete_plan
+            .signature
+            .params
+            .get(i)
+            .copied()
+            .ok_or_else(|| {
                 err(
                     f.name_span,
                     format!("shader profile: concrete parameter {i} is missing from the plan"),
                 )
             })?;
-            concrete_glsl_ty(interner, id, f.name_span, "parameter")?
-        } else {
-            glsl_ty(
-                ws,
-                subst
-                    .as_ref()
-                    .expect("source GLSL emission has a substitution"),
-                f.param_decls[i].ty,
-                f.name_span,
-                "parameter",
-            )?
-        };
+        let ty = concrete_glsl_ty(interner, id, f.name_span, "parameter")?;
         e.cell_ty.insert(c, ty);
     }
     e.compute_cell_types()?;

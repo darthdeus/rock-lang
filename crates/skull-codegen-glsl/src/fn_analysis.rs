@@ -177,25 +177,13 @@ impl FnEmit<'_> {
                 continue;
             }
             if let Some(ty) = cell.ty {
-                let g = if let Some(plan) = self.concrete_plan {
-                    let id = plan.types.ty_type(ty).ok_or_else(|| {
-                        err(
-                            self.span(),
-                            "shader profile: local cell is missing from the concrete type plan",
-                        )
-                    })?;
-                    concrete_glsl_ty(self.interner, id, self.span(), "local")?
-                } else {
-                    glsl_ty(
-                        self.ws,
-                        self.subst
-                            .as_ref()
-                            .expect("source GLSL emission has a substitution"),
-                        ty,
+                let id = self.concrete_plan.types.ty_type(ty).ok_or_else(|| {
+                    err(
                         self.span(),
-                        "local",
-                    )?
-                };
+                        "shader profile: local cell is missing from the concrete type plan",
+                    )
+                })?;
+                let g = concrete_glsl_ty(self.interner, id, self.span(), "local")?;
                 self.cell_ty.insert(cid, g);
             }
         }

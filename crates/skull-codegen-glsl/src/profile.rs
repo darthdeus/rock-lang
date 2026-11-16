@@ -25,21 +25,18 @@ pub(crate) fn check_tier0_signature_concrete(
 /// INSTANCES it calls directly.
 ///
 /// The callee's instantiation is the one lowering already recorded at the call
-/// (`MirFunc::spec_bindings`) -- the same record the Lua and JS backends read,
+/// (`MirFunc::callee_instances`) -- the same record the Lua and JS backends read,
 /// so GLSL cannot disagree with them about which body a call names.
 pub(crate) fn profile_body(
     ws: &Workspace,
     f: &Function,
     mf: &MirFunc,
     callees: &mut Vec<ShaderInstance>,
-    concrete: bool,
 ) -> Result<(), CompilerError> {
     let span = f.name_span;
     for (iid, inst) in mf.insts.iter() {
         match inst {
-            Inst::Call { func, .. } => {
-                callees.push(callee_inst_at(ws, mf, iid, *func, span, concrete)?)
-            }
+            Inst::Call { func, .. } => callees.push(callee_inst_at(ws, mf, iid, *func, span)?),
             // A `const` global folds to its literal at the use site; a mutable
             // `global` is runtime state with no GLSL equivalent.
             Inst::Global(name) => {

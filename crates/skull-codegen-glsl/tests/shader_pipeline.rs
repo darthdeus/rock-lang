@@ -45,7 +45,9 @@ fn vector_scalar_bounds_are_splatted() {
         );
         let (ws, mid) = workspace(&src);
         let profile = GlslProfile::Core330;
-        let glsl = skull_codegen_glsl::emit_shader_entry(&ws, mid, "f", profile).expect("emit");
+        let glsl = crate::support::emit_program(&ws, mid, None, "f", profile)
+            .map(|e| e.source)
+            .expect("emit");
         for expected in [
             format!("clamp(a, vec{width}(0.0), vec{width}(6.0))"),
             format!("min(a, vec{width}(6.0))"),
@@ -1240,14 +1242,8 @@ fn emission_reports_texture_slots_in_order() {
         }
     "#;
     let (ws, mid) = workspace(src);
-    let e = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-        &ws,
-        mid,
-        "vs",
-        "fs",
-        GlslProfile::Core330,
-    )
-    .expect("must emit");
+    let e = crate::support::emit_program(&ws, mid, Some("vs"), "fs", GlslProfile::Core330)
+        .expect("must emit");
     let names: Vec<String> = e.abi.texture_units.iter().map(|n| n.to_string()).collect();
     assert_eq!(names, vec!["uTexture", "mask_tex", "shadowmap_tex"]);
 }
@@ -1257,14 +1253,9 @@ fn emission_reports_texture_slots_in_order() {
 #[test]
 fn emission_reports_no_slots_without_a_group() {
     let (ws, mid) = workspace(UI_SRC);
-    let e = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-        &ws,
-        mid,
-        "ui_vert",
-        "ui_frag",
-        GlslProfile::Core330,
-    )
-    .expect("must emit");
+    let e =
+        crate::support::emit_program(&ws, mid, Some("ui_vert"), "ui_frag", GlslProfile::Core330)
+            .expect("must emit");
     assert!(
         e.abi.texture_units.is_empty(),
         "got {:?}",
@@ -1346,14 +1337,8 @@ fn engine_block_coexists_with_a_shader_owned_block() {
 #[test]
 fn engine_block_binds_at_index_zero() {
     let (ws, mid) = workspace(ENGINE_SRC);
-    let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-        &ws,
-        mid,
-        "e_vert",
-        "e_frag",
-        GlslProfile::Core330,
-    )
-    .expect("emit");
+    let em = crate::support::emit_program(&ws, mid, Some("e_vert"), "e_frag", GlslProfile::Core330)
+        .expect("emit");
     let bound: Vec<(u32, &str)> = em
         .abi
         .uniform_blocks
@@ -1533,14 +1518,9 @@ fn engine_member_colliding_with_a_stage_block_member_rejects() {
 #[test]
 fn a_program_without_an_engine_group_leaves_slot_zero_empty() {
     let (ws, mid) = workspace(UI_SRC);
-    let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-        &ws,
-        mid,
-        "ui_vert",
-        "ui_frag",
-        GlslProfile::Core330,
-    )
-    .expect("emit");
+    let em =
+        crate::support::emit_program(&ws, mid, Some("ui_vert"), "ui_frag", GlslProfile::Core330)
+            .expect("emit");
     let bound: Vec<(u32, &str)> = em
         .abi
         .uniform_blocks

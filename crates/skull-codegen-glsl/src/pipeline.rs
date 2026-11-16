@@ -111,7 +111,7 @@ fn emit_vertex_stage(
         &stage.ir.entry,
         mf,
         Some(&shape),
-        Some(entry_plan),
+        entry_plan,
     )?);
     Ok((out, dependencies))
 }
@@ -221,7 +221,7 @@ fn emit_fragment_stage(
         &stage.ir.entry,
         mf,
         Some(&shape),
-        Some(entry_plan),
+        entry_plan,
     )?);
     // Single-output: the entry fn returns Vec4; main() forwards it to FragColor.
     // MRT: the entry IS `void main()` (destructured), so no wrapper.
@@ -379,23 +379,6 @@ fn check_block_name_collisions<'a>(
     Ok(())
 }
 
-/// A2: compile a `@shader(vertex)` + `@shader(fragment)` pair into one
-/// `#ifdef VERTEX`/`#ifdef PIXEL` file. The vertex entry's
-/// return type (the varyings value struct) must be exactly the fragment entry's
-/// first param type. Vertex params are classified by annotation: `@attr` (per-
-/// vertex attribute struct), `@instance` (per-instance attribute divisor), and
-/// `@uniform` (uniform block); the varyings `position: Vec4` field drives
-/// `gl_Position` and is suppressed as a varying.
-pub fn emit_shader_pipeline(
-    ws: &Workspace,
-    mid: ModuleId,
-    vert_root: &str,
-    frag_root: &str,
-    profile: GlslProfile,
-) -> Result<String, CompilerError> {
-    Ok(emit_shader_pipeline_with_dependencies(ws, mid, vert_root, frag_root, profile)?.source)
-}
-
 /// **The one validated plan for an A2 `(vertex, fragment)` program.**
 ///
 /// Everything emission decides before it writes GLSL, in emission's own order:
@@ -406,8 +389,8 @@ pub fn emit_shader_pipeline(
 /// tier-0 + graph/view population + stage-builtin pass, and the program's
 /// `@textures` slot assignment.
 ///
-/// [`check_pipeline_profile`] builds this and DROPS it; emission builds it and
-/// renders it.
+/// [`plan_shader_with_view`] builds this and [`render_shader_plan`] renders
+/// it.
 pub(crate) struct PipelinePlan {
     vshape: VertexShape,
     fshape: FragShape,
@@ -621,61 +604,14 @@ fn plan_shader_pipeline_inner(
     })
 }
 
-/// The PIPELINE counterpart of [`check_entry_profile`]: emission's own
-/// preparation for a `(vertex, fragment)` pair, run without emitting.
-///
-/// A pipeline fragment is NOT checkable as a single entry: `classify_entry`
-/// refuses its varyings param outright, which is why the mono view must be
-/// given the PAIRS production registers rather than a flat root list.
-pub fn check_pipeline_profile(
-    ws: &Workspace,
-    vfref: FuncRef,
-    ffref: FuncRef,
-) -> Result<(), CompilerError> {
-    let session = shader_program_session(
-        ws,
-        ShaderProgram {
-            vert: Some(vfref),
-            frag: ffref,
-        },
-    )?;
-    check_pipeline_profile_with_view(ws, &session.scx, &session.view)
-}
-
-/// Validate one shader pipeline against the graph-owned concrete populations.
-pub fn check_pipeline_profile_with_view(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    view: &ShaderProgramView,
-) -> Result<(), CompilerError> {
-    if view.program.vert.is_none() {
-        return Err(CompilerError::new_no_location(
-            "shader graph/view single-entry program passed to pipeline GLSL validation".to_string(),
-        ));
-    }
-    plan_shader_pipeline_from_view(ws, scx, view).map(|_| ())
-}
-
-pub fn emit_shader_pipeline_with_dependencies(
-    ws: &Workspace,
-    mid: ModuleId,
-    vert_root: &str,
-    frag_root: &str,
-    profile: GlslProfile,
-) -> Result<ShaderEmission, CompilerError> {
-    let vfref = resolve_root(ws, mid, vert_root)?;
-    let ffref = resolve_root(ws, mid, frag_root)?;
-    let session = shader_program_session(
-        ws,
-        ShaderProgram {
-            vert: Some(vfref),
-            frag: ffref,
-        },
-    )?;
-    emit_shader_pipeline_with_view(ws, &session.scx, &session.view, profile)
-}
-
-/// Emit a pipeline from the graph-owned stage populations in `view`.
+/// A2: compile a `@shader(vertex)` + `@shader(fragment)` pair into one
+/// `#ifdef VERTEX`/`#ifdef PIXEL` file from the graph-owned stage populations
+/// in `view`. The vertex entry's return type (the varyings value struct) must
+/// be exactly the fragment entry's first param type. Vertex params are
+/// classified by annotation: `@attr` (per-vertex attribute struct),
+/// `@instance` (per-instance attribute divisor), and `@uniform` (uniform
+/// block); the varyings `position: Vec4` field drives `gl_Position` and is
+/// suppressed as a varying.
 pub fn emit_shader_pipeline_with_view(
     ws: &Workspace,
     scx: &ScalarCtx,

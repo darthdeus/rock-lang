@@ -395,7 +395,7 @@ fn cpu_target_does_not_change_the_shader_artifact() {
 /// **The view runs emission's pass, not a summary of it.** A helper whose
 /// SIGNATURE is tier 0 and whose BODY is not (a string literal), and a helper
 /// with a foreign body and no GLSL mapping, both compile as far as any
-/// signature check can see -- and both are refused by `emit_shader_entry`.
+/// signature check can see -- and both are refused by `emit_shader_entry_with_view`.
 /// A view that only checked signatures reported them clean.
 #[test]
 fn a_body_the_emitter_refuses_is_refused_by_the_view() {
