@@ -2293,6 +2293,134 @@ mod tests {
         assert_eq!(expand(&both), expand(&extended));
     }
 
+    /// Every expr and block reachable from the body of the user module's first
+    /// fn, after expanding it against `defs`.
+    fn expanded_nodes(defs: &str, user: &str) -> (Ast, Vec<Idx<ExprData>>, Vec<Idx<BlockData>>) {
+        fn walk_block(
+            ast: &Ast,
+            b: Idx<BlockData>,
+            es: &mut Vec<Idx<ExprData>>,
+            bs: &mut Vec<Idx<BlockData>>,
+        ) {
+            bs.push(b);
+            for &s in &ast.blocks[b].statements {
+                for e in stmt_exprs(ast, s) {
+                    walk_expr(ast, e, es, bs);
+                }
+                for bl in stmt_blocks(ast, s) {
+                    walk_block(ast, bl, es, bs);
+                }
+            }
+        }
+        fn walk_expr(
+            ast: &Ast,
+            e: Idx<ExprData>,
+            es: &mut Vec<Idx<ExprData>>,
+            bs: &mut Vec<Idx<BlockData>>,
+        ) {
+            es.push(e);
+            for c in child_exprs(ast, e) {
+                walk_expr(ast, c, es, bs);
+            }
+            for bl in child_blocks(ast, e) {
+                walk_block(ast, bl, es, bs);
+            }
+        }
+        let mut mods = vec![parse(defs, "defs.rock"), parse(user, "user.rock")];
+        expand_macros(&mut mods);
+        let ast = mods.pop().unwrap();
+        let body = ast
+            .items
+            .iter()
+            .find_map(|it| match &it.kind {
+                ItemKind::Function(f) => f.body.rock_block(),
+                _ => None,
+            })
+            .expect("user fn");
+        let (mut es, mut bs) = (Vec::new(), Vec::new());
+        walk_block(&ast, body, &mut es, &mut bs);
+        (ast, es, bs)
+    }
+
+    fn find_ident(ast: &Ast, es: &[Idx<ExprData>], name: &str) -> Idx<ExprData> {
+        *es.iter()
+            .find(|&&e| matches!(&ast.exprs[e].kind, ExprKind::Ident(id) if id.name == name))
+            .unwrap_or_else(|| panic!("no ident {name}"))
+    }
+
+    /// Expanded body nodes report at the call (blocks without braces); the
+    /// caller's args keep their own spans, so `__SITE__` passed as an arg names
+    /// the arg, and a braced block passed as an arg keeps its braces.
+    #[test]
+    fn expansion_stamps_the_call_span_on_body_nodes_only() {
+        let defs = "macro m(a: expr) -> int {\n    let t = 7\n    if t > 0 { t + a } else { a }\n}";
+        let user = "fn f() -> int {\n    m(g(__SITE__, { 1 }))\n}";
+        let call_span = {
+            let ast = parse(user, "user.rock");
+            let outermost = ast
+                .exprs
+                .iter()
+                .filter(|(_, d)| matches!(d.kind, ExprKind::FunctionCall { .. }))
+                .last();
+            outermost.unwrap().1.span
+        };
+        let (ast, es, bs) = expanded_nodes(defs, user);
+        let site = find_ident(&ast, &es, "__SITE__");
+        assert_ne!(ast.exprs[site].span, call_span);
+        assert_eq!(ast.exprs[site].span.file, Ustr::from("user.rock"));
+        let g = find_ident(&ast, &es, "g");
+        assert_ne!(ast.exprs[g].span, call_span);
+
+        let seven = es
+            .iter()
+            .find(|&&e| matches!(ast.exprs[e].kind, ExprKind::Int(7, _)))
+            .unwrap();
+        assert_eq!(ast.exprs[*seven].span, call_span);
+        let one = es
+            .iter()
+            .find(|&&e| matches!(ast.exprs[e].kind, ExprKind::Int(1, _)))
+            .unwrap();
+        assert_ne!(ast.exprs[*one].span, call_span);
+
+        for &e in &es {
+            assert_ne!(ast.exprs[e].span.file, Ustr::from("defs.rock"));
+        }
+        let braced: Vec<_> = bs
+            .iter()
+            .filter(|&&b| ast.blocks[b].braces.is_some())
+            .collect();
+        // The user fn body and a `{ 1 }` per branch; none of the template's.
+        assert_eq!(braced.len(), 3, "{braced:?}");
+        for &b in &bs {
+            assert_ne!(ast.blocks[b].span.file, Ustr::from("defs.rock"));
+            for &s in &ast.blocks[b].statements {
+                assert_ne!(ast.stmts[s].span.file, Ustr::from("defs.rock"));
+            }
+        }
+    }
+
+    /// A default arg is copied from the template after the body is renamed and
+    /// stamped: it keeps the template's span and its names resolve at the call
+    /// site, even one a body local shares.
+    #[test]
+    fn default_args_keep_template_spans_and_caller_names() {
+        let defs = "macro m(a: expr, b: expr = x + 5) -> int {\n    let x = 1\n    a + b + x\n}";
+        let user = "fn f(x: int) -> int {\n    m(2)\n}";
+        let (ast, es, _) = expanded_nodes(defs, user);
+        let five = es
+            .iter()
+            .find(|&&e| matches!(ast.exprs[e].kind, ExprKind::Int(5, _)))
+            .unwrap();
+        assert_eq!(ast.exprs[*five].span.file, Ustr::from("defs.rock"));
+        let x = find_ident(&ast, &es, "x");
+        assert_eq!(ast.exprs[x].span.file, Ustr::from("defs.rock"));
+        let renamed = es
+            .iter()
+            .filter(|&&e| matches!(&ast.exprs[e].kind, ExprKind::Ident(id) if is_hygiene_name(&id.name)))
+            .count();
+        assert_eq!(renamed, 1, "only the body's `x` reference is renamed");
+    }
+
     #[test]
     fn expand_one_is_idempotent() {
         let user = "fn f() -> int { twice(21) }";

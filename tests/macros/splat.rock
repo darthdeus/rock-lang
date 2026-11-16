@@ -1,0 +1,59 @@
+// `...rest` forwards a macro's captured variadic args wherever the body
+// names it, however deeply nested, but only while `rest` means the param.
+
+macro sp_count() -> int {
+    0
+}
+
+macro sp_count(x: expr, rest: ...expr) -> int {
+    1 + sp_count(...rest)
+}
+
+macro sp_sum() -> int {
+    0
+}
+
+macro sp_sum(x: expr, rest: ...expr) -> int {
+    if true {
+        let partial = {
+            x + sp_sum(...rest)
+        }
+        partial
+    } else {
+        0
+    }
+}
+
+@test
+fn test_splat_in_nested_blocks() {
+    assert(sp_sum(1, 2, 3, 4) == 10, "1 + 2 + 3 + 4")
+}
+
+macro sp_in_lambda(rest: ...expr) -> int {
+    let f = () => sp_count(...rest)
+    f()
+}
+
+@test
+fn test_splat_in_lambda_body() {
+    assert(sp_in_lambda(7, 8, 9) == 3, "three captured args")
+    assert(sp_in_lambda() == 0, "no captured args")
+}
+
+macro sp_id(v: expr) -> int {
+    v
+}
+
+macro sp_shadowed(rest: ...expr) -> int {
+    let outer = sp_count(...rest)
+    let inner = {
+        let rest = 40
+        sp_id(...rest)
+    }
+    outer + inner
+}
+
+@test
+fn test_body_local_named_like_variadic_is_not_splatted() {
+    assert(sp_shadowed(1, 2) == 42, "2 captured args + local 40")
+}
