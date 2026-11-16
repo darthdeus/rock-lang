@@ -386,7 +386,7 @@ pub(crate) fn skull_workspace_timed(
             return (false, times);
         }
     };
-    let mut ws = match crate::bone_backend::semantic_pass_with_aliases(&mut modules, &aliases) {
+    let mut ws = match skull::pipeline::semantic_pass(&mut modules, &aliases) {
         Ok(ws) => ws,
         Err(error) => {
             times.semantic = t.elapsed();
@@ -638,12 +638,6 @@ end
 /// ("Unable to fetch source") and silently drops the snippet + labels.
 pub(crate) fn render_file_errs(file: &str, src: &str, errs: &[CompilerError]) -> String {
     crate::bone_backend::render_errs(&crate::common::single_source(file, src), errs)
-}
-
-/// `map_err` for the `skull::user_module_id` lookup — the same message at every
-/// call site.
-fn no_user_module(e: CompilerError) -> anyhow::Error {
-    anyhow::anyhow!("no user module: {}", e.message)
 }
 
 /// A skull failure: a short bucketed reason + the full rendered detail.
@@ -3408,7 +3402,8 @@ impl IncrementalProject {
         let renderer_target = skull::mir_emit::RendererTarget::Gl;
         let (lua, cache, artifact_fingerprint, emits_main) = {
             let ws = project.workspace();
-            let mid = skull::user_module_id(ws).map_err(no_user_module)?;
+            let mid = skull::user_module_id(ws)
+                .map_err(|e| anyhow::anyhow!("no user module: {}", e.message))?;
             let selected = select_sims(ws)?;
             let (emit, c) = if let Some(selected) = selected {
                 skull::mir_emit::FullEmit::selected_sims(&selected)
@@ -3735,7 +3730,8 @@ impl IncrementalProject {
             }
             let lua = {
                 let ws = self.project.workspace();
-                let mid = skull::user_module_id(ws).map_err(no_user_module)?;
+                let mid = skull::user_module_id(ws)
+                    .map_err(|e| anyhow::anyhow!("no user module: {}", e.message))?;
                 let (emit, c) = skull::mir_emit::FullEmit::program()
                     .project_root(Some(self.project.dir()))
                     .renderer(self.renderer_target)
@@ -3909,7 +3905,8 @@ impl IncrementalProject {
         self.project.verdict("on restart fold")?;
         let (lua, cache, artifact_fingerprint, emits_main) = {
             let ws = self.project.workspace();
-            let mid = skull::user_module_id(ws).map_err(no_user_module)?;
+            let mid = skull::user_module_id(ws)
+                .map_err(|e| anyhow::anyhow!("no user module: {}", e.message))?;
             let (emit, c) = skull::mir_emit::FullEmit::program()
                 .project_root(Some(self.project.dir()))
                 .renderer(self.renderer_target)

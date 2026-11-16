@@ -1,14 +1,6 @@
-//! Bone backend integration for `rock-cli` (selected via `--backend bone`).
-//!
-//! `bone/` is a from-scratch bidirectional typechecker (parse -> lower to HIR ->
-//! type-check). It has no codegen or runtime yet, so the commands it can serve
-//! are exactly the ones that bottom out at "does this source type-check": parse,
-//! compile (acts as a check), test, run, stats. Commands that need to *execute* a
-//! program (frame, perf, engine, sim, ...) cannot be served by bone and return a
-//! clear error from the dispatcher rather than silently doing nothing.
-//!
-//! Per `bone/CLAUDE.md` we do NOT modify any bone compiler source; this module
-//! only *consumes* bone's public pipeline (`parse_rock` + `passes::semantic_pass`).
+//! The type-checking front end shared by every command: `rock check`, the
+//! `--backend bone` commands (type-check only), and the parse, session and
+//! diagnostic helpers the skull backend builds on.
 
 use crate::Result;
 use bone_core::prelude::Instant;
@@ -148,26 +140,16 @@ pub(crate) fn bone_session(
     // The session parses its own user modules, so the alias tables are derived
     // from the same facts `aliases_for_modules` reads off a parsed set: the
     // root package's manifest, reached through the file that carries graph id 0.
-    let aliases = aliases_for_session(&files)?;
+    // A set with no v1 file uses the empty table, exactly as the batch path does.
+    let aliases = rock_host::program_inputs::ns_aliases_for_sources(
+        files
+            .iter()
+            .map(|f| (f.path.as_str(), f.dialect, f.package.as_ref())),
+    )?;
     let stdlib = skull_parser::stdlib::cached()
         .as_ref()
         .map_err(Clone::clone)?;
     bone_incremental::session::Session::new(stdlib.clone(), files, &aliases)
-}
-
-/// [`aliases_for_modules`] for a session's file list, which is not parsed yet.
-/// A set with no v1 file uses the empty table, exactly as the batch path does.
-///
-/// Every file with a package is carried: the manifest the graph is built from
-/// is found through the ROOT package's file (graph id 0).
-pub(crate) fn aliases_for_session(
-    files: &[bone_incremental::session::SessionFile],
-) -> std::result::Result<bone_core::modules::NsAliases, CompilerError> {
-    rock_host::program_inputs::ns_aliases_for_sources(
-        files
-            .iter()
-            .map(|f| (f.path.as_str(), f.dialect, f.package.as_ref())),
-    )
 }
 
 /// The session files for a discovered project: each file's text plus the
@@ -210,9 +192,7 @@ pub(crate) fn bone_session_for_emission(
 /// `backend-stats`) layers on top so the timing split is consistent. Timed with
 /// plain `Instant`s at the call boundaries — no coupling to bone, which stays
 /// uninstrumented.
-pub(crate) fn bone_pipeline_timed(
-    src: &str,
-) -> (std::result::Result<(), Vec<CompilerError>>, BonePhaseTimes) {
+fn bone_pipeline_timed(src: &str) -> (std::result::Result<(), Vec<CompilerError>>, BonePhaseTimes) {
     let mut times = BonePhaseTimes::default();
 
     let t = Instant::now();
@@ -350,7 +330,7 @@ pub(crate) fn bone_workspace_timed(
     // Time the call from out here so bone's teardown (dropping the input ASTs at
     // fn return) is included — bone's internal phase timers stop before it.
     let t_call = Instant::now();
-    let res = semantic_pass_with_aliases(&mut modules, &aliases);
+    let res = skull::pipeline::semantic_pass(&mut modules, &aliases);
     times.semantic_call = t_call.elapsed();
     times.semantic = t_sem.elapsed();
     // The checked Workspace carries bone's own per-phase split (`phase_timings`)
@@ -359,16 +339,6 @@ pub(crate) fn bone_workspace_timed(
     // errors live per-`BodyOwner` on the workspace, so every verdict-shaped
     // consumer must run `body_errors` on `ws`.
     (res.map_err(|e| vec![e]), times)
-}
-
-/// Render bone `CompilerError`s through rock's ariadne pipeline.
-///
-/// `parse_rock` always stamps spans with the file id `<parse_rock>` (it takes no
-/// path), so the rendered `SourceFiles` must register the contents under that
-/// same id for the span lookup to resolve — the real on-disk `path` is only used
-/// in the human-facing header line we print separately.
-fn render_source_errs(src: &str, errs: &[CompilerError]) -> String {
-    render_errs(&crate::common::single_source("<parse_rock>", src), errs)
 }
 
 /// Collapse a bone error message into a short, groupable bucket. A 489-file run
@@ -431,20 +401,12 @@ pub(crate) fn categorize(msg: &str) -> String {
     }
 }
 
-/// `rock compile`/`run --backend bone`. Bone has no codegen, so the most useful
-/// behavior is a type-check: succeed silently (exit 0) when it type-checks, print
-/// the rendered error and exit 1 otherwise.
-///
-/// A directory (or a single file that belongs to a `stick.toml` project) is
-/// loaded and type-checked as ONE workspace via `bone_workspace_timed` — the only
-/// way cross-file references resolve. A bare single file keeps the isolated
-/// single-source pipeline. This makes `rock compile <project> --backend bone`
-/// (e.g. another project) a whole-project typecheck, which is the workload `just
-/// hyperfine-bone` benchmarks.
-///
-/// `iters` reuses the same profiling loop the Lua `compile --iters N` uses:
-/// run the pipeline N times and report the mean per-stage (parse/lower/check)
-/// timing on the `PROFILE` log target. `iters <= 1` reports a single timing.
+/// `rock check`, and `compile`/`run --backend bone`: type-check only. Exits 0
+/// silently when the source type-checks; otherwise prints every diagnostic and
+/// exits 1. A directory is checked as one workspace (the only way cross-file
+/// references resolve); a bare file goes through the single-source pipeline.
+/// `iters` repeats the check and reports the mean per-stage timing on the
+/// `PROFILE` log target.
 pub(crate) fn bone_check_single(path: &str, command: &str, iters: usize) -> Result<()> {
     if Path::new(path).is_dir() {
         return bone_check_project(path, command, iters);
@@ -472,7 +434,11 @@ pub(crate) fn bone_check_single(path: &str, command: &str, iters: usize) -> Resu
     }
 
     if let Some(errs) = first_err {
-        eprintln!("{}", render_source_errs(&src, &errs));
+        // `parse_rock` stamps spans with the file id `<parse_rock>`.
+        eprintln!(
+            "{}",
+            render_errs(&crate::common::single_source("<parse_rock>", &src), &errs)
+        );
         crate::invocation_log::exit(1);
     }
 
@@ -481,14 +447,8 @@ pub(crate) fn bone_check_single(path: &str, command: &str, iters: usize) -> Resu
     Ok(())
 }
 
-/// `rock compile`/`run --backend bone <project>` — load the whole project and
-/// type-check every file together as one bone workspace. Discovery goes through
-/// the SAME `path_to_source_spec` -> `discover_sources` path the Lua `rock
-/// compile` uses (stick.toml + dep resolution, `#script` files excluded from
-/// deps), so the file set bone checks is exactly the one a real compile would —
-/// this is the workload `just hyperfine-bone` benchmarks. `iters` runs the
-/// workspace check N times and reports the mean per-stage timing. On the first
-/// failure, render it against the loaded sources and exit 1.
+/// [`bone_check_single`] for a project directory: the file set a real compile
+/// discovers, type-checked as one workspace `iters` times.
 fn bone_check_project(path: &str, command: &str, iters: usize) -> Result<()> {
     let source_spec = crate::common::path_to_source_spec(path);
     let sources = crate::unified_compile::discover_sources(&source_spec)?;
@@ -541,10 +501,8 @@ fn bone_check_project(path: &str, command: &str, iters: usize) -> Result<()> {
     Ok(())
 }
 
-/// LoC stats for the [COMPILE] line: the discovered user files plus the stdlib,
-/// matching the file set the Lua backend's tokenizer counts (so `lines`/`loc per
-/// sec` line up across backends). Only `files`/`total_lines`/`bytes` are filled
-/// -- the code/comment/blank split needs tokens and isn't shown in the headline.
+/// Line and byte counts for the [COMPILE] line: the discovered user files plus
+/// the stdlib.
 fn bone_loc_stats(sources: &SourceFiles) -> rock_core::CompileStats {
     let mut stats = rock_core::CompileStats::default();
     for file in &sources.files {
@@ -561,17 +519,11 @@ fn bone_loc_stats(sources: &SourceFiles) -> rock_core::CompileStats {
     stats
 }
 
-/// Emit the rock-style `[COMPILE] done in ...` stats line for a bone-workspace
-/// compile -- shared by `--backend bone` (type-check only) and `--backend skull`
-/// (type-check + codegen). Mirrors the Lua backend headline in
-/// `unified_compile.rs`: symbols, total lines, loc/sec over the discovered user
-/// files plus stdlib (the same set the Lua tokenizer counts, so figures line up
-/// across backends). `compile` is the parse + check (+ codegen) core; `total`
-/// adds any output write (== `compile` when the caller writes nothing here);
-/// `output`, when set, is appended as `-> <path>`. `symbols` is bone's count of
-/// top-level definitions (fns/structs/enums/newtypes/globals) across all modules.
-/// Debug level: `rock run` on a project would otherwise print it before the
-/// program's own output; `--verbose` or `ROCK_LOG=debug` shows it.
+/// Log the `[COMPILE] done in ...` stats line for a checked workspace, shared
+/// by the type-check-only and emitting compiles. `compile` is the parse + check
+/// (+ codegen) core; `total` adds any output write; `output`, when set, is
+/// appended as `-> <path>`. Debug level: `rock run` on a project would
+/// otherwise print it before the program's own output.
 pub(crate) fn log_compile_stats(
     sources: &SourceFiles,
     ws: &bone_semantic::inference::Workspace,
@@ -728,9 +680,8 @@ pub(crate) fn bone_watch(path: &str) -> Result<()> {
     )
 }
 
-/// Log a per-stage timing breakdown on the `PROFILE` target (the same target
-/// the Lua `--iters` loop uses). `agg` is the SUM over `iters` runs; we divide
-/// to report the mean.
+/// Log the mean per-stage timing of `agg`, summed over `iters` runs, on the
+/// `PROFILE` target.
 fn report_phase_timing(label: &str, agg: &BonePhaseTimes, iters: usize) {
     let iters = iters.max(1);
     let ms = |d: Duration| d.as_secs_f64() * 1000.0 / iters as f64;
@@ -758,14 +709,6 @@ pub(crate) fn short_path(path: &str) -> String {
         Some(dir) => format!("{}/{}", dir, file),
         None => file.to_string(),
     }
-}
-
-/// The batch semantic pass with the API-closure gate the build enforces.
-pub fn semantic_pass_with_aliases(
-    modules: &mut skull_parser::stdlib::ModuleSet,
-    aliases: &bone_core::modules::NsAliases,
-) -> std::result::Result<bone_semantic::inference::Workspace, CompilerError> {
-    skull::pipeline::semantic_pass(modules, aliases)
 }
 
 #[cfg(test)]
