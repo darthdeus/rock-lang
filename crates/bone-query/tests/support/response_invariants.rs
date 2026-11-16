@@ -1,22 +1,15 @@
-//! Position-blind completion-response invariants: the
-//! properties that hold for EVERY completion response regardless of cursor
-//! context, checked over the ranking corpus. One invariant
-//! catches a bug class across all contexts where a per-case guard pins a
-//! single decision.
-//!
-//! Context-DEPENDENT invariants (typed-slot ordering, universe gating) live
-//! in `tests/completion_invariants.rs` with fixtures that know their slot.
+//! Position-blind invariants that hold for every completion response,
+//! whatever the cursor context. `support/completion.rs` checks them on every
+//! query, so one invariant guards a bug class across all fixtures.
 
 use lsp_types::CompletionItem;
 
-/// Violations of the position-blind response invariants; empty = clean.
-/// `typed_prefix` is the identifier prefix at the cursor (RAW case, as the
-/// user typed it).
+/// Violations of the invariants; empty = clean. `typed_prefix` is the
+/// identifier prefix at the cursor, in the case the user typed.
 pub fn completion_response_violations(items: &[CompletionItem], typed_prefix: &str) -> Vec<String> {
     let mut violations = Vec::new();
 
-    // No duplicate labels: two items with one label are indistinguishable in
-    // the popup -- always a dedup bug (sink `admit` / query-level `seen`).
+    // Two items with one label are indistinguishable in the popup.
     let mut seen = std::collections::HashSet::new();
     for it in items {
         if !seen.insert(it.label.as_str()) {
@@ -24,8 +17,7 @@ pub fn completion_response_violations(items: &[CompletionItem], typed_prefix: &s
         }
     }
 
-    // Every sort_text decodes as a RankKey encoding: a foreign sort_text
-    // means some path bypassed the ONE encoder (rank_key.rs).
+    // A foreign sort_text means some path bypassed the RankKey encoder.
     for it in items {
         match it.sort_text.as_deref() {
             None => violations.push(format!("`{}` has no sort_text", it.label)),
@@ -40,11 +32,8 @@ pub fn completion_response_violations(items: &[CompletionItem], typed_prefix: &s
         }
     }
 
-    // Array order == sortText order: the response array is emitted in rank
-    // order, so what a client shows matches what the server ranked whether
-    // it sorts by sortText or takes the array as-is. There is no sanctioned
-    // post-sort reordering (the array-only `diversify` pass was deleted as a
-    // live no-op -- the real client sorts array order dead-last).
+    // A client may sort by sortText or take the array as-is; both must show
+    // the server's ranking.
     for pair in items.windows(2) {
         let (a, b) = (&pair[0], &pair[1]);
         if let (Some(sa), Some(sb)) = (a.sort_text.as_deref(), b.sort_text.as_deref()) {
@@ -58,14 +47,10 @@ pub fn completion_response_violations(items: &[CompletionItem], typed_prefix: &s
         }
     }
 
-    // Exact-tier dominance: an item whose label IS the typed prefix
-    // (case-exact) may only be outranked by another EXACT-tier item (a
-    // named-arg `color:` whose rank name is also exactly the prefix, a
-    // type-preferred exact) -- `exact` is the RankKey's leading field, so a
-    // non-exact item sorting above an exact one means some path skipped the
-    // exact tier. Rank order is SORT_TEXT order, not array order: the array
-    // is diversity-reordered (general path) or unsorted (member path); a
-    // spec-following client sorts by sort_text.
+    // An item labelled exactly the typed prefix may only be outranked by
+    // another exact-tier item (such as a named arg `color:` whose rank name
+    // is the prefix). `exact` leads the RankKey, so anything else above it
+    // skipped the exact tier.
     if !typed_prefix.is_empty() {
         if let Some(exact_st) = items
             .iter()
