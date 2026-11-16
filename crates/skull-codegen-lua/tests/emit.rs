@@ -616,6 +616,61 @@ fn derived_scalar_constants_fold_arithmetic_without_runtime_reads() {
 }
 
 #[test]
+fn constant_bitwise_masks_fold_before_lua_emission() {
+    common::require_luajit();
+    let lua = emit_clean(
+        "const A: int = 1; const B: int = 2; const C: int = 4; const D: int = 8; fn masked(value: int) -> int { value & (A | B | C | D) }",
+        "masked",
+    );
+    assert!(!lua.contains("bit.bor"), "{lua}");
+    assert!(lua.contains("(15)"), "{lua}");
+    let symbol = lua
+        .lines()
+        .find_map(|line| line.strip_prefix("function "))
+        .unwrap()
+        .split('(')
+        .next()
+        .unwrap();
+    luajit_ok(
+        &format!("{lua}\nfor i = -10000, 10000 do assert({symbol}(i) == bit.band(i, 15)) end"),
+        &lua,
+    );
+}
+
+#[test]
+fn constant_bitwise_expressions_keep_signed_and_unsigned_results() {
+    common::require_luajit();
+    for (ty, expr, expected) in [
+        ("int", "1 | 2 | 4", "7"),
+        ("int", "(2147483647 & 7) ^ 3", "4"),
+        ("int", "~2147483647", "-2147483648"),
+        ("uint", "let a: uint = 0; ~a", "4294967295"),
+        ("uint", "let a: uint = 2147483648; a | 1", "2147483649"),
+        (
+            "uint",
+            "let a: uint = 4294967295; let b: uint = 2147483648; a ^ b",
+            "2147483647",
+        ),
+    ] {
+        let lua = emit_clean(
+            &format!("fn folded_mask() -> {ty} {{ {expr} }}"),
+            "folded_mask",
+        );
+        assert!(!lua.contains("bit.b"), "{expr}: {lua}");
+        let symbol = lua
+            .lines()
+            .find_map(|line| line.strip_prefix("function "))
+            .unwrap()
+            .split('(')
+            .next()
+            .unwrap();
+        luajit_ok(&format!("{lua}\nassert({symbol}() == {expected})"), &lua);
+    }
+    let lua = emit_clean("fn wide() -> int { 2147483648 | 1 }", "wide");
+    assert!(lua.contains("bit.bor"), "{lua}");
+}
+
+#[test]
 fn scalar_arithmetic_keeps_effects_checks_and_unrepresentable_values_at_runtime() {
     for (declarations, result) in [
         (

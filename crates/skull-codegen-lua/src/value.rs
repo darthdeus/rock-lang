@@ -19,6 +19,10 @@ impl Emitter<'_> {
 
     /// The RHS expression for a value-producing instruction.
     fn write_value_inner(&self, out: &mut String, id: Idx<Inst>, inst: &Inst) {
+        if let Some(lit) = constant_bits(self.func, self.inlinable, id) {
+            write_lit(out, &lit);
+            return;
+        }
         match inst {
             Inst::Const(l) => write_lit(out, l),
             Inst::Global(g) => {
@@ -866,4 +870,44 @@ impl Emitter<'_> {
         rhs(out);
         out.push('\n');
     }
+}
+
+fn constant_bits(func: &MirFunc, inline: &[bool], id: Idx<Inst>) -> Option<Lit> {
+    let bits = |id| {
+        if !inline[raw(id) as usize] {
+            return None;
+        }
+        let lit = match func.insts[id] {
+            // Wider int literals retain LuaJIT's runtime coercion.
+            Inst::Const(Lit::Int(n)) => return i32::try_from(n).ok().map(|n| n as u32),
+            Inst::Const(Lit::Uint(n)) => return Some(n),
+            _ => constant_bits(func, inline, id)?,
+        };
+        match lit {
+            Lit::Int(n) => Some(n as u32),
+            Lit::Uint(n) => Some(n),
+            _ => unreachable!("a bitwise constant is an integer"),
+        }
+    };
+    let inst = &func.insts[id];
+    let value = match *inst {
+        Inst::BitAnd(a, b) | Inst::UintBitAnd(a, b) => bits(a)? & bits(b)?,
+        Inst::BitOr(a, b) | Inst::UintBitOr(a, b) => bits(a)? | bits(b)?,
+        Inst::BitXor(a, b) | Inst::UintBitXor(a, b) => bits(a)? ^ bits(b)?,
+        Inst::BitNot(a) | Inst::UintBitNot(a) => !bits(a)?,
+        _ => return None,
+    };
+    Some(
+        if matches!(
+            inst,
+            Inst::UintBitAnd(..)
+                | Inst::UintBitOr(..)
+                | Inst::UintBitXor(..)
+                | Inst::UintBitNot(..)
+        ) {
+            Lit::Uint(value)
+        } else {
+            Lit::Int(i64::from(value as i32))
+        },
+    )
 }
