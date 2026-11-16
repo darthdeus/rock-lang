@@ -12,7 +12,9 @@
 //! declaration drift into disagreeing about what an array holds, and "one layout
 //! authority" would be false the moment the second one exists.
 
-use crate::support::{check_program, emit_unplanned, pipeline_emission, workspace};
+use crate::support::{
+    assert_has, assert_lacks, check_program, emit_unplanned, pipeline_emission, workspace,
+};
 use skull_codegen_glsl::ShaderEmission;
 use skull_mir::gpu_layout::UniformArrayBlockPlan;
 
@@ -95,89 +97,54 @@ const FRAGMENT_ARRAYS: &str = r#"
     }
 "#;
 
-// --- the declaration ------------------------------------------------------
-
+/// The vertex stage's arrays: one block, at the vertex array binding, laid out
+/// the way the host packs it, and agreed on by the published check.
 #[test]
 fn a_stages_arrays_are_declared_as_one_std140_block() {
     let e = emit(VERTEX_ARRAYS, "vt", "fr");
     let src = &e.source;
-    assert!(
-        src.contains("layout(std140) uniform vt_Arrays {"),
-        "expected a std140 array block for the vertex stage:\n{src}"
-    );
-    assert!(
-        src.contains("    vec2 entity_positions[32];"),
-        "got:\n{src}"
-    );
-    assert!(
-        src.contains("    float entity_influences[32];"),
-        "got:\n{src}"
-    );
-}
+    assert_has(src, "layout(std140) uniform vt_Arrays {");
+    assert_has(src, "    vec2 entity_positions[32];");
+    assert_has(src, "    float entity_influences[32];");
+    // A loose array and a block member of the same name would both compile, so
+    // the block's presence does not imply the loose form is gone.
+    assert_lacks(src, "uniform vec2 entity_positions[32];");
+    assert_lacks(src, "uniform float entity_influences[32];");
+    // The block has NO instance name, so bodies keep reading bare globals.
+    assert_has(src, "entity_positions[");
+    assert_lacks(src, "at(");
 
-#[test]
-fn the_loose_declaration_is_gone() {
-    // The point of the port. A loose array and a block member of the same name
-    // would both compile, so asserting the block exists does not imply this.
-    let src = emit(VERTEX_ARRAYS, "vt", "fr").source;
-    assert!(
-        !src.contains("uniform vec2 entity_positions[32];"),
-        "the loose form must not survive beside the block:\n{src}"
-    );
-    assert!(
-        !src.contains("uniform float entity_influences[32];"),
-        "the loose form must not survive beside the block:\n{src}"
-    );
-}
-
-#[test]
-fn bodies_still_read_the_arrays_as_bare_globals() {
-    // The block is declared with NO instance name, so its members stay bare
-    // globals and every body reading them is byte-identical to the loose form.
-    // That is what confines this change to declaration lines.
-    let src = emit(VERTEX_ARRAYS, "vt", "fr").source;
-    assert!(
-        src.contains("entity_positions["),
-        "at() must render as indexing:\n{src}"
-    );
-    assert!(
-        !src.contains("at("),
-        "at() must not render as a call:\n{src}"
-    );
-}
-
-// --- the reserved bindings ------------------------------------------------
-
-#[test]
-fn the_vertex_array_block_binds_at_its_own_reserved_slot() {
-    let e = emit(VERTEX_ARRAYS, "vt", "fr");
     assert_eq!(skull_codegen_glsl::UNIFORM_BLOCK_BINDING_VERTEX_ARRAYS, 3);
     let p = block_at(&e, 3);
     assert_eq!(p.block_name.as_str(), "vt_Arrays");
+    // A binding that means different things depending on what a program
+    // declares is not enforceable, so arrays never share a scalar binding.
+    let scalar: Vec<u32> = e.abi.uniform_blocks.iter().map(|(b, _)| *b).collect();
+    assert!(!scalar.contains(&3), "{scalar:?}");
+    // Every array stride is 16 whatever the element -- a `float[32]` costs 512
+    // bytes to carry 128. Accepted (backlog 18); visible here rather than buried.
+    assert_eq!(
+        layout(p),
+        vec![
+            ("entity_positions", 32, 0, 16),
+            ("entity_influences", 32, 512, 16)
+        ]
+    );
+    assert_eq!(p.size, 1024);
+    // Emitted as a plain numeric literal, which LuaJIT and JS both represent
+    // exactly only up to 53 bits.
+    assert!(p.fingerprint() < (1u64 << 53));
+    assert_ne!(p.fingerprint(), 0);
 }
 
 #[test]
-fn the_fragment_array_block_binds_at_its_own_reserved_slot() {
+fn a_fragment_stages_arrays_bind_at_its_own_slot_alone() {
     let e = emit(FRAGMENT_ARRAYS, "vt", "fr");
     assert_eq!(skull_codegen_glsl::UNIFORM_BLOCK_BINDING_FRAGMENT_ARRAYS, 4);
-    let p = block_at(&e, 4);
-    assert_eq!(p.block_name.as_str(), "fr_Arrays");
-}
-
-#[test]
-fn an_array_block_never_lands_on_a_scalar_blocks_binding() {
-    // The reason slot 0 was reserved for `@engine` in the first place: a binding
-    // that means different things depending on what a program happens to declare
-    // is not enforceable. Same rule one lane over.
-    let e = emit(VERTEX_ARRAYS, "vt", "fr");
-    let scalar: Vec<u32> = e.abi.uniform_blocks.iter().map(|(b, _)| *b).collect();
-    let arrays: Vec<u32> = e.abi.uniform_array_blocks.iter().map(|(b, _)| *b).collect();
-    for b in &arrays {
-        assert!(
-            !scalar.contains(b),
-            "array binding {b} collides with a scalar block: {scalar:?}"
-        );
-    }
+    assert_eq!(block_at(&e, 4).block_name.as_str(), "fr_Arrays");
+    // The vertex stage has no arrays, so it contributes no block rather than
+    // a zero-member one.
+    assert_eq!(e.abi.uniform_array_blocks.len(), 1);
 }
 
 #[test]
@@ -199,40 +166,6 @@ fn both_stages_may_carry_arrays_and_get_distinct_blocks() {
     assert_eq!(block_at(&e, 3).block_name.as_str(), "vt_Arrays");
     assert_eq!(block_at(&e, 4).block_name.as_str(), "fr_Arrays");
     assert_eq!(e.abi.uniform_array_blocks.len(), 2);
-}
-
-#[test]
-fn a_stage_with_no_arrays_declares_no_array_block() {
-    // An empty block binds nothing, so the absence must be an absence rather
-    // than a zero-member block -- the same rule `uniform_array_block` enforces.
-    let e = emit(FRAGMENT_ARRAYS, "vt", "fr");
-    assert!(
-        e.abi.uniform_array_blocks.iter().all(|(b, _)| *b == 4),
-        "the vertex stage has no arrays and must contribute no block: {:?}",
-        e.abi
-            .uniform_array_blocks
-            .iter()
-            .map(|(b, _)| *b)
-            .collect::<Vec<_>>()
-    );
-}
-
-// --- the layout the host will pack ---------------------------------------
-
-#[test]
-fn members_carry_the_std140_layout_the_host_packs_against() {
-    let e = emit(VERTEX_ARRAYS, "vt", "fr");
-    let p = block_at(&e, 3);
-    // Every array stride is 16 whatever the element -- a `float[32]` costs 512
-    // bytes to carry 128. Accepted (backlog 18); visible here rather than buried.
-    assert_eq!(
-        layout(p),
-        vec![
-            ("entity_positions", 32, 0, 16),
-            ("entity_influences", 32, 512, 16)
-        ]
-    );
-    assert_eq!(p.size, 1024);
 }
 
 /// Every element kind the array lane admits, in one block: the declaration's
@@ -277,23 +210,42 @@ fn every_admitted_element_kind_declares_and_lays_out_consistently() {
     assert_eq!(p.size, 224);
     let codes: Vec<u32> = p.members.iter().map(|m| m.elem.code()).collect();
     assert_eq!(codes, vec![0, 4, 1, 3]);
-    let src = &e.source;
     for line in [
         "    float fs[3];",
         "    int is[5];",
         "    vec2 v2s[2];",
         "    vec4 v4s[4];",
     ] {
-        assert!(src.contains(line), "missing `{line}`:\n{src}");
+        assert_has(&e.source, line);
     }
 }
 
-/// `uint` is a scalar block kind, but an array of it has no host push, so the
-/// emitter refuses it at the `@size` param rather than declaring a block the
-/// runtime can never fill.
+/// Emission rejects `src` naming every needle, and the view's profile check --
+/// emission's own preparation -- reaches the same verdict.
+fn reject(src: &str, needles: &[&str]) {
+    let msg = emit_err(src, "vt", "fr");
+    for needle in needles {
+        assert!(msg.contains(needle), "missing `{needle}` in: {msg}");
+    }
+    let (ws, mid) = workspace(src);
+    let checked = check_program(&ws, mid, Some("vt"), "fr");
+    assert_eq!(checked, emit_unplanned(&ws, mid, Some("vt"), "fr"));
+}
+
 #[test]
-fn a_uint_array_is_rejected_at_emission() {
-    let src = r#"
+fn the_published_check_and_emission_agree_about_array_blocks() {
+    for src in [VERTEX_ARRAYS, FRAGMENT_ARRAYS] {
+        let (ws, mid) = workspace(src);
+        let checked = check_program(&ws, mid, Some("vt"), "fr");
+        assert_eq!(checked, emit_unplanned(&ws, mid, Some("vt"), "fr"));
+    }
+}
+
+cases! { reject:
+    /// `uint` is a scalar block kind, but an array of it has no host push, so
+    /// the emitter refuses it at the `@size` param rather than declaring a block
+    /// the runtime can never fill.
+    a_uint_array_is_rejected_at_emission(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4 }
         @shader(vertex)
@@ -305,33 +257,11 @@ fn a_uint_array_is_rejected_at_emission() {
             let m = at(masks, 0)
             return Vec4 { x: (m as int) as float, y: 0.0, z: 0.0, w: 1.0 }
         }
-    "#;
-    let msg = emit_err(src, "vt", "fr");
-    assert!(msg.contains("`uint`"), "got: {msg}");
-    assert!(msg.contains("masks"), "got: {msg}");
-}
+    "#, &["`uint`", "masks"]);
 
-#[test]
-fn the_array_blocks_fingerprint_travels_with_it() {
-    let e = emit(VERTEX_ARRAYS, "vt", "fr");
-    let p = block_at(&e, 3);
-    // Folded to 53 bits: it is emitted as a plain numeric literal and LuaJIT and
-    // JS both represent integers exactly only that far.
-    assert!(
-        p.fingerprint() < (1u64 << 53),
-        "fingerprint must fit 53 bits"
-    );
-    assert_ne!(p.fingerprint(), 0);
-}
-
-// --- rejections, spanned at the offending param ---------------------------
-
-#[test]
-fn an_oversized_array_block_is_rejected_at_the_size_annotation() {
-    // 16 KB is the ES 3.0 guaranteed MAX_UNIFORM_BLOCK_SIZE. A desktop driver
-    // offers far more, so nothing downstream would catch this -- `shader-validate`
-    // links against the host driver's own limit.
-    let src = r#"
+    /// 16 KB is the ES 3.0 guaranteed MAX_UNIFORM_BLOCK_SIZE. A desktop driver
+    /// offers far more, so nothing downstream would catch this.
+    an_oversized_array_block_is_rejected_at_the_size_annotation(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4 }
         @shader(vertex)
@@ -343,18 +273,9 @@ fn an_oversized_array_block_is_rejected_at_the_size_annotation() {
         fn fr(vary: Vary) -> Vec4 {
             return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }
         }
-    "#;
-    let msg = emit_err(src, "vt", "fr");
-    assert!(msg.contains("16384"), "the budget must be named: {msg}");
-    assert!(
-        msg.contains("big"),
-        "the offending member must be named: {msg}"
-    );
-}
+    "#, &["16384", "big"]);
 
-#[test]
-fn a_zero_capacity_array_is_rejected() {
-    let src = r#"
+    a_zero_capacity_array_is_rejected(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4 }
         @shader(vertex)
@@ -366,16 +287,11 @@ fn a_zero_capacity_array_is_rejected() {
         fn fr(vary: Vary) -> Vec4 {
             return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }
         }
-    "#;
-    let msg = emit_err(src, "vt", "fr");
-    assert!(msg.contains("capacity 0"), "got: {msg}");
-}
+    "#, &["capacity 0"]);
 
-#[test]
-fn an_array_block_name_cannot_collide_with_a_uniform_group() {
-    // The block name is MINTED from the entry, so a user struct that happens to
-    // spell it must reject rather than produce two blocks with one name.
-    let src = r#"
+    /// The block name is MINTED from the entry, so a user struct that happens
+    /// to spell it must reject rather than produce two blocks with one name.
+    an_array_block_name_cannot_collide_with_a_uniform_group(r#"
         value QV { aPos: Vec2 }
         value vt_Arrays { entity_count: int }
         value Vary { position: Vec4 }
@@ -388,44 +304,5 @@ fn an_array_block_name_cannot_collide_with_a_uniform_group() {
         fn fr(vary: Vary) -> Vec4 {
             return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }
         }
-    "#;
-    let msg = emit_err(src, "vt", "fr");
-    assert!(msg.contains("vt_Arrays"), "got: {msg}");
-}
-
-// --- the one-plan rule ----------------------------------------------------
-
-#[test]
-fn the_published_check_and_emission_agree_about_array_blocks() {
-    // The view's profile check must not admit what emission refuses. It is
-    // emission's own preparation, so an array-block rejection has to reach it --
-    // a check that re-ran a summary of these steps would miss the layout entirely.
-    for src in [VERTEX_ARRAYS, FRAGMENT_ARRAYS] {
-        let (ws, mid) = workspace(src);
-        let checked = check_program(&ws, mid, Some("vt"), "fr");
-        let emitted = emit_unplanned(&ws, mid, Some("vt"), "fr");
-        assert_eq!(checked, emitted);
-    }
-}
-
-#[test]
-fn the_check_rejects_an_oversized_block_exactly_as_emission_does() {
-    let src = r#"
-        value QV { aPos: Vec2 }
-        value Vary { position: Vec4 }
-        @shader(vertex)
-        fn vt(@attr a: QV, @size(1025) big: UniformArray<Vec4>) -> Vary {
-            let p = at(big, 0)
-            return Vary { position: Vec4 { x: a.aPos.x + p.x, y: 0.0, z: 0.0, w: 1.0 } }
-        }
-        @shader(fragment)
-        fn fr(vary: Vary) -> Vec4 {
-            return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }
-        }
-    "#;
-    let (ws, mid) = workspace(src);
-    let checked = check_program(&ws, mid, Some("vt"), "fr");
-    let emitted = emit_unplanned(&ws, mid, Some("vt"), "fr");
-    assert!(checked.is_err(), "the check must reject too");
-    assert_eq!(checked, emitted);
+    "#, &["vt_Arrays"]);
 }

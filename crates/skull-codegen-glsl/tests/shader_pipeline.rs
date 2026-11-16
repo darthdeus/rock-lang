@@ -588,15 +588,8 @@ fn uniform_array_vertex_decl_and_at() {
         fn fr(vary: Vary) -> Vec4 { return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
     "#;
     let glsl = emit_pipeline(src, "vt", "fr").expect("emit");
-    assert_has(&glsl, "    vec2 entity_positions[32];");
-    assert!(
-        glsl.contains("entity_positions["),
-        "at() must render as indexing:\n{glsl}"
-    );
-    assert!(
-        !glsl.contains("at("),
-        "at() must not render as a call:\n{glsl}"
-    );
+    assert_has(&glsl, "entity_positions[");
+    assert_lacks(&glsl, "at(");
     // The loop-bound temp for min(int, int) must be int: GLSL has no implicit
     // int->float on assignment, so the float fallback fails to compile there.
     let line = glsl
@@ -608,26 +601,6 @@ fn uniform_array_vertex_decl_and_at() {
         glsl.contains(&format!("int {name};")),
         "bound temp `{name}` must be int:\n{glsl}"
     );
-}
-
-#[test]
-fn uniform_array_fragment_stage() {
-    let src = r#"
-        value QV { aPos: Vec2 }
-        value Vary { position: Vec4 }
-        @shader(vertex)
-        fn vt(@attr a: QV) -> Vary {
-            return Vary { position: Vec4 { x: a.aPos.x, y: 0.0, z: 0.0, w: 1.0 } }
-        }
-        @shader(fragment)
-        fn fr(vary: Vary, @size(4) weights: UniformArray<float>) -> Vec4 {
-            let w0 = at(weights, 0)
-            return Vec4 { x: w0, y: 0.0, z: 0.0, w: 1.0 }
-        }
-    "#;
-    let glsl = emit_pipeline(src, "vt", "fr").expect("emit");
-    assert_has(&glsl, "    float weights[4];");
-    assert_has(&glsl, "weights[0]");
 }
 
 cases! { reject_pipeline:
