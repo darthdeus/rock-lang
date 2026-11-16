@@ -1,0 +1,63 @@
+//- qualified_partial_defaults_in_signatures_and_bodies
+//-- types.rock @pkg=sample,1 @v1
+pub mod types;
+pub struct Pair<T, U = int> { pub a: T, pub b: U }
+pub enum Choice<T, U = int> { First(T), Second(U) }
+pub newtype Wrapped<T, U = int>((T, U))
+
+//-- main.rock @pkg=sample,1 @v1
+fn second(p: types::Pair<string>, c: types::Choice<string>, w: types::Wrapped<string>) -> int {
+    let local: types::Pair<string> = p
+    let pair = local
+             //^ sample::types::Pair<string, int>
+    let choice = c
+               //^ sample::types::Choice<string, int>
+    let wrapped = w
+                //^ sample::types::Wrapped<string, int>
+    local.b
+}
+
+//- qualified_bare_defaults
+//-- types.rock @pkg=sample,1 @v1
+pub mod types;
+pub struct Holder<T = int> { pub value: T }
+
+//-- main.rock @pkg=sample,1 @v1
+fn read(h: types::Holder) -> int {
+    let local: types::Holder = h
+    let holder = local
+               //^ sample::types::Holder<int>
+    local.value
+}
+
+//- qualified_required_arity @fail=Generic type `sample::Pair` expects 2 type argument(s), found 1
+//-- main.rock @pkg=sample,1 @v1
+pub struct Pair<T, U> { a: T, b: U }
+fn read(p: sample::Pair<int>) {}
+
+//- qualified_defaulted_excess_arity @fail=Generic type `sample::Pair` expects 1 to 2 type argument(s), found 3
+//-- main.rock @pkg=sample,1 @v1
+pub struct Pair<T, U = int> { a: T, b: U }
+fn read(p: sample::Pair<int, int, int>) {}
+
+//- qualified_bare_required_arity @fail=Generic type `sample::Pair` requires at least 1 type argument(s)
+//-- main.rock @pkg=sample,1 @v1
+pub struct Pair<T, U = int> { a: T, b: U }
+fn read(p: sample::Pair) {}
+
+//- qualified_field_ref_arity @fail=FieldRef type must have exactly 2 type arguments
+//-- main.rock @pkg=sample,1 @v1
+struct Hero { hp: int }
+fn read(f: std::FieldRef<Hero>) {}
+
+//- qualified_intrinsic_spelling_uses_nominal_defaults
+//-- types.rock @pkg=sample,1 @v1
+pub mod types;
+pub struct Map<T, U = int> { pub key: T, pub value: U }
+
+//-- main.rock @pkg=sample,1 @v1
+fn read(m: types::Map<string>) -> int {
+    let map = m
+            //^ sample::types::Map<string, int>
+    m.value
+}

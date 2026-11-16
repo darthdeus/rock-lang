@@ -821,84 +821,112 @@ fn span_recordable(
     }
 }
 
-/// Lower a nominal type reference by its resolved canonical key. Shared by
-/// bare type names (after tier resolution) and qualified type paths.
-fn lower_resolved_type_name(
+fn lower_type_application(
     ctx: &mut LowerCtx,
+    a: &Ast,
     body: &mut Body,
     pos: TyPos,
     te: &skull_parser::TypeExprData,
-    key: &Ustr,
+    key: Ustr,
 ) -> Result<TyId, CompilerError> {
-    let is_intrinsic = bone_core::modules::is_field_ref_former(*key);
-    if !is_intrinsic
-        && !(ctx.workspace.struct_by_name.contains_key(key)
-            || ctx.workspace.enums_by_name.contains_key(key)
-            || ctx.workspace.newtypes_by_name.contains_key(key))
+    use skull_parser::TypeExprKind;
+
+    let args = match &te.kind {
+        TypeExprKind::App { args, .. } | TypeExprKind::AppPath { args, .. } => {
+            Some(args.as_slice())
+        }
+        _ => None,
+    };
+    let is_field_ref = bone_core::modules::is_field_ref_former(key);
+    if args.is_none()
+        && !is_field_ref
+        && !(ctx.workspace.struct_by_name.contains_key(&key)
+            || ctx.workspace.enums_by_name.contains_key(&key)
+            || ctx.workspace.newtypes_by_name.contains_key(&key))
     {
-        let msg = format!("Unknown type name {}", key);
-        match pos {
+        let error = CompilerError::new_with_label(te.span, format!("Unknown type name {}", key));
+        return match pos {
             TyPos::Iface => {
-                ctx.module
-                    .interface_errors
-                    .push(CompilerError::new_with_label(te.span, msg));
-                return Ok(ctx.workspace.builtins.error());
+                ctx.module.interface_errors.push(error);
+                Ok(ctx.workspace.builtins.error())
             }
-            TyPos::Body => return Err(CompilerError::new_with_label(te.span, msg)),
-        }
-    }
-    let generic_arity = ctx
-        .workspace
-        .type_generics
-        .get(key)
-        .map(|entry| entry.arity)
-        .or_else(|| is_intrinsic.then_some(2))
-        .unwrap_or(0);
-    let defaults = generic_defaults(ctx.workspace, *key);
-    let min_arity = generic_arity - defaults.len();
-
-    if min_arity > 0 {
-        let msg = if defaults.is_empty() {
-            format!(
-                "Generic type `{}` requires {} type argument(s)",
-                key, generic_arity
-            )
-        } else {
-            format!(
-                "Generic type `{}` requires at least {} type argument(s)",
-                key, min_arity
-            )
+            TyPos::Body => Err(error),
         };
-        match pos {
-            TyPos::Iface => {
-                ctx.module
-                    .interface_errors
-                    .push(CompilerError::new_with_label(te.span, msg));
-                return Ok(ctx.workspace.builtins.error());
-            }
-            TyPos::Body => return Err(CompilerError::new_with_label(te.span, msg)),
+    }
+
+    if is_field_ref && args.is_some_and(|args| args.len() != 2) {
+        let name = match &te.kind {
+            TypeExprKind::App { ctor, .. } => ctor.name,
+            _ => key,
+        };
+        comp_error!(
+            te.span,
+            "{} type must have exactly 2 type arguments (<Struct, FieldType>)",
+            name
+        );
+    }
+    let mut lowered = args
+        .unwrap_or(&[])
+        .iter()
+        .map(|x| lower_type_expr_helper(ctx, a, body, pos, a.te(x)))
+        .try_vec()?;
+
+    // Exact intrinsic keys keep their own rules, even when a legacy user type
+    // has the same spelling in the workspace-wide generic map.
+    let is_map = args.is_some() && bone_core::modules::is_intrinsic_key(key, "Map");
+    if is_map && lowered.len() != 2 {
+        comp_error!(te.span, "Map type must have exactly 2 type arguments");
+    }
+    if args.is_some() && bone_core::modules::is_intrinsic_key(key, "Coroutine") {
+        while lowered.len() < 3 {
+            lowered.push(TypeExpr::Builtin(hir::BuiltinTy::Unit));
         }
     }
 
-    let params = alloc_tys_contiguous(
-        ctx,
-        body,
-        pos,
-        defaults
-            .iter()
-            .map(|d| default_type_expr(*d))
-            .collect::<Vec<_>>(),
-    );
+    let entry = ctx.workspace.type_generics.get(&key);
+    let arity = entry
+        .map(|entry| entry.arity)
+        .unwrap_or(if is_field_ref { 2 } else { 0 });
+    let defaults = entry.map(|entry| entry.defaults.as_slice()).unwrap_or(&[]);
+    let min = arity - defaults.len();
+    let supplied = args.map_or(0, |args| args.len());
+    let check_arity = args.is_none() || (entry.is_some() && !is_map && !is_field_ref);
+    if check_arity && (supplied < min || supplied > arity) {
+        let message = match (args, defaults.is_empty()) {
+            (None, true) => format!("Generic type `{}` requires {} type argument(s)", key, arity),
+            (None, false) => format!(
+                "Generic type `{}` requires at least {} type argument(s)",
+                key, min
+            ),
+            (Some(_), true) => format!(
+                "Generic type `{}` expects {} type argument(s), found {}",
+                key, arity, supplied
+            ),
+            (Some(_), false) => format!(
+                "Generic type `{}` expects {} to {} type argument(s), found {}",
+                key, min, arity, supplied
+            ),
+        };
+        let error = CompilerError::new_with_label(te.span, message);
+        if args.is_none() && matches!(pos, TyPos::Iface) {
+            ctx.module.interface_errors.push(error);
+            return Ok(ctx.workspace.builtins.error());
+        }
+        return Err(error);
+    }
+    if check_arity {
+        while lowered.len() < arity {
+            lowered.push(default_type_expr(defaults[lowered.len() - min]));
+        }
+    }
 
-    Ok(alloc_ty(
-        ctx,
-        body,
-        pos,
-        TypeExpr::App {
-            ctor: hir::TypeCtor::Nominal(*key),
-            params,
-        },
-    ))
+    let params = alloc_tys_contiguous(ctx, body, pos, lowered);
+    let ctor = if args.is_some() {
+        TypeCtor::for_name(key)
+    } else {
+        TypeCtor::Nominal(key)
+    };
+    Ok(alloc_ty(ctx, body, pos, TypeExpr::App { ctor, params }))
 }
 
 /// A type name that did not resolve, like an unknown type name: a signature
@@ -949,7 +977,7 @@ pub(crate) fn lower_type_expr_in(
 
         // Modules-v1 qualified type paths resolve through the namespace tree
         // to a canonical DefKey; everything downstream keys on it.
-        TypeExprKind::Path(path) => {
+        TypeExprKind::Path(path) | TypeExprKind::AppPath { ctor: path, .. } => {
             let Some(frag) = ctx.v1_scope() else {
                 return Err(CompilerError::new_with_label(
                     te.span,
@@ -973,43 +1001,7 @@ pub(crate) fn lower_type_expr_in(
                     Err(msg) => return Err(CompilerError::new_with_label(te.span, msg)),
                 };
             ctx.record_path(body, pos, path, hir::SegmentTarget::Def(resolved.key));
-            lower_resolved_type_name(ctx, body, pos, te, &resolved.key)?
-        }
-
-        TypeExprKind::AppPath { ctor: path, args } => {
-            let Some(frag) = ctx.v1_scope() else {
-                return Err(CompilerError::new_with_label(
-                    te.span,
-                    format!(
-                        "qualified type path `{}` is modules-v1 grammar; this file is legacy",
-                        path.segments
-                            .iter()
-                            .map(|s| s.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join("::")
-                    ),
-                ));
-            };
-            let use_path = bone_core::modules::UsePathRef {
-                from_root: path.from_root,
-                segments: path.segments.iter().map(|i| i.name).collect(),
-            };
-            let resolved =
-                match ctx.probed(|| resolve::resolve_path(ctx.workspace, frag, &use_path)) {
-                    Ok(r) => r,
-                    Err(msg) => return Err(CompilerError::new_with_label(te.span, msg)),
-                };
-            ctx.record_path(body, pos, path, hir::SegmentTarget::Def(resolved.key));
-            let params = ctx.lower_type_exprs_to_range(a, body, pos, args)?;
-            alloc_ty(
-                ctx,
-                body,
-                pos,
-                TypeExpr::App {
-                    ctor: hir::TypeCtor::for_name(resolved.key),
-                    params,
-                },
-            )
+            lower_type_application(ctx, a, body, pos, te, resolved.key)?
         }
 
         TypeExprKind::Ident(name) => {
@@ -1022,7 +1014,7 @@ pub(crate) fn lower_type_expr_in(
                 match ctx.resolve_bare_key(name.name, name.span) {
                     Ok(bare_key) => {
                         resolved_key = Some(bare_key);
-                        lower_resolved_type_name(ctx, body, pos, te, &bare_key)?
+                        lower_type_application(ctx, a, body, pos, te, bare_key)?
                     }
                     Err(e) => unresolved_type_name(ctx, body, pos, e)?,
                 }
@@ -1035,7 +1027,6 @@ pub(crate) fn lower_type_expr_in(
         }
 
         TypeExprKind::Array(orig_te) => {
-            // TODO: recursion breaks here too maybe?
             let te = lower_type_expr_helper(ctx, a, body, pos, a.te(orig_te))?;
 
             let arr = alloc_tys_contiguous(ctx, body, pos, [te]);
@@ -1078,104 +1069,7 @@ pub(crate) fn lower_type_expr_in(
                     break 'app error;
                 }
             };
-            let is_field_ref = bone_core::modules::is_field_ref_former(resolved_ctor);
-
-            if is_field_ref {
-                if args.len() != 2 {
-                    comp_error!(
-                        te.span,
-                        "{} type must have exactly 2 type arguments (<Struct, FieldType>)",
-                        ctor.name
-                    );
-                }
-
-                let t_te = lower_type_expr_helper(ctx, a, body, pos, a.te(&args[0]))?;
-                let v_te = lower_type_expr_helper(ctx, a, body, pos, a.te(&args[1]))?;
-
-                let arr = alloc_tys_contiguous(ctx, body, pos, [t_te, v_te]);
-
-                alloc_ty(
-                    ctx,
-                    body,
-                    pos,
-                    TypeExpr::App {
-                        ctor: TypeCtor::Nominal(resolved_ctor),
-                        params: arr,
-                    },
-                )
-            } else {
-                let type_key = resolved_ctor;
-                let mut lowered = args
-                    .iter()
-                    .map(|x| lower_type_expr_helper(ctx, a, body, pos, a.te(x)))
-                    .try_vec()?;
-
-                // An exact bare Map key is compiler-owned. In legacy source
-                // there is no namespace key to distinguish it from a user
-                // declaration, so a workspace-wide same-named type must not
-                // change stdlib lowering.
-                let is_map = bone_core::modules::is_intrinsic_key(type_key, "Map");
-                if is_map && args.len() != 2 {
-                    comp_error!(te.span, "Map type must have exactly 2 type arguments");
-                }
-
-                if bone_core::modules::is_intrinsic_key(type_key, "Coroutine") {
-                    // Builtin dual-arity Coroutine<Y[, R[, N]]>: same
-                    // fill-from-right mechanism as user defaults, all slots Unit.
-                    while lowered.len() < 3 {
-                        lowered.push(TypeExpr::Builtin(hir::BuiltinTy::Unit));
-                    }
-                }
-
-                // Generic-argument count for a user nominal. Trailing defaulted
-                // params (workspace map, built pre-lowering) fill from the right:
-                // `Pair<string>` on `struct Pair<T, U = int>` pads to
-                // `Pair<string, int>`. Builtins (Coroutine, Map, Vec/Array) aren't
-                // in `type_generics`, so they keep their own arity logic.
-                // Cross-module via the workspace map. The bare (0-arg) case is
-                // handled in the Ident arm.
-                if !is_map {
-                    if let Some(entry) = ctx.workspace.type_generics.get(&type_key) {
-                        let arity = entry.arity;
-                        let defaults = generic_defaults(ctx.workspace, type_key);
-                        let min = arity - defaults.len();
-                        if args.len() < min || args.len() > arity {
-                            if defaults.is_empty() {
-                                comp_error!(
-                                    te.span,
-                                    "Generic type `{}` expects {} type argument(s), found {}",
-                                    type_key,
-                                    arity,
-                                    args.len()
-                                );
-                            }
-                            comp_error!(
-                                te.span,
-                                "Generic type `{}` expects {} to {} type argument(s), found {}",
-                                type_key,
-                                min,
-                                arity,
-                                args.len()
-                            );
-                        }
-                        while lowered.len() < arity {
-                            lowered.push(default_type_expr(defaults[lowered.len() - min]));
-                        }
-                    }
-                }
-
-                let params = alloc_tys_contiguous(ctx, body, pos, lowered);
-
-                alloc_ty(
-                    ctx,
-                    body,
-                    pos,
-                    TypeExpr::App {
-                        ctor: TypeCtor::for_name(type_key),
-                        params,
-                    },
-                )
-            }
+            lower_type_application(ctx, a, body, pos, te, resolved_ctor)?
         }
 
         TypeExprKind::Function { params, ret } => {
@@ -1897,12 +1791,6 @@ pub(crate) fn lower_expr_value(
                         // not a resolvable spelling.
                         family: hir::CallFamily::from_name(ustr("<value>")),
                     }
-
-                    // comp_error!(
-                    //     func.span,
-                    //     "Only ident-based fn calls are supported, got {:?}",
-                    //     func.kind
-                    // );
                 }
             }
         }
@@ -2722,16 +2610,6 @@ fn reject_generic_bounds(
         }
     }
     Ok(())
-}
-
-/// The trailing generic defaults recorded for `name` (empty when none).
-/// Borrowed from the workspace ('w), so callers can keep the slice across
-/// later `&mut LowerCtx` uses.
-fn generic_defaults(ws: &Workspace, name: Ustr) -> &[hir::GenericDefault] {
-    ws.type_generics
-        .get(&name)
-        .map(|entry| entry.defaults.as_slice())
-        .unwrap_or(&[])
 }
 
 /// Synthesize the `TypeExpr` a default pads in at a use site: exactly what the
@@ -3613,15 +3491,6 @@ fn lower_type_expr_helper(
     orig_te: &skull_parser::TypeExprData,
 ) -> Result<hir::TypeExpr, CompilerError> {
     let id = lower_type_expr_in(ctx, a, body, pos, orig_te)?;
-    // let te = match id {
-    //     TyId::Static(module_id, idx) if module_id == ctx.module.module_id() => {
-    //         ctx.module.ty_arena[idx]
-    //     }
-    //     TyId::Static(module_id, idx) => ctx.workspace.modules[&module_id].ty_arena[idx],
-    //
-    //     TyId::Local(_) => comp_error!(orig_te.span, "Created local TyId while lowering"),
-    // };
-
     ctx.type_node(body, id)
 }
 
