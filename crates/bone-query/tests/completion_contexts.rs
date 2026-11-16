@@ -2469,6 +2469,17 @@ fn method_completion_omits_parens_when_they_already_follow() {
 }
 
 #[test]
+fn member_field_substitutes_generics_nested_in_its_type() {
+    // A struct argument substitutes inside a field type, not only when the
+    // whole field is the generic: `items: [T]` on `Box<Mob>` is `[Mob]`.
+    let src = "struct Mob { hp: int }\n\
+               struct Box<T> { items: [T], best: T? }\n\
+               fn r(b: Box<Mob>) {\n  b.\n  let _n = 0\n}\n";
+    let l = labels(src, 3, 4);
+    assert_offers(&l, &["items: [Mob]", "best: Mob?"]);
+}
+
+#[test]
 fn chained_member_through_generic_struct_field() {
     // `p.first.na|` where `first: A` is generic-substituted to `Corpse`. The
     // old structural name-walk resolved field hops by declared type and lost

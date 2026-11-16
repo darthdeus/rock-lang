@@ -212,6 +212,43 @@ pub(crate) fn struct_field_ty(
     substitute(gamma, field_ty, &subs, span).map_err(StructFieldError::from)
 }
 
+/// The struct `base_ty` names and every field typed for that instance, with
+/// the struct's arguments substituted as [`struct_field_ty`] does. A `ref` or
+/// nullable base peels to its target. `None` when the base is not a struct.
+pub fn struct_fields_of(
+    gamma: &mut Gamma,
+    base_ty: TyId,
+    span: Span,
+) -> Option<(Ustr, Vec<(Ustr, TyId)>)> {
+    let base_ty = resolve(gamma, base_ty, span);
+    let (name, params) = match *gamma.get(base_ty) {
+        TypeExpr::App {
+            ctor: TypeCtor::Ref,
+            mut params,
+        } => return struct_fields_of(gamma, base_ty.with_idx(params.next()?), span),
+        TypeExpr::Nullable(inner) => return struct_fields_of(gamma, base_ty.with_idx(inner), span),
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            params,
+        } => (name, params),
+        TypeExpr::App {
+            ctor: TypeCtor::Array,
+            params,
+        } => (*VEC, params),
+        _ => return None,
+    };
+    let ws = gamma.workspace;
+    let sid = resolve_struct(gamma, name)?;
+    let def = &ws.module(sid.module).structs[sid.def];
+    let subs = struct_arg_subs(gamma, def, base_ty, params);
+    let fields = def
+        .fields
+        .iter()
+        .map(|f| Some((f.name, substitute(gamma, f.ty, &subs, span).ok()?)))
+        .collect::<Option<Vec<_>>>()?;
+    Some((name, fields))
+}
+
 /// GLSL-style swizzle read on the float vec structs:
 /// one alphabet (`xyzw` | `rgba`), every component within the receiver's arity,
 /// at most 4 components. Result: len 1 -> float, len N -> VecN. Reached only on

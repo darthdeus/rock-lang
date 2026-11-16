@@ -19,7 +19,7 @@ pub use bone_core::modules::{AccessSite, NsVisibility, PackageId};
 pub use bone_core::workspace::{
     BodyInference, ComptimeInputs, ComptimeVarValue, InferenceResult, Substitutions, Workspace,
 };
-pub use fields::{AccessDenied, FieldAccessNeed, field_access};
+pub use fields::{AccessDenied, FieldAccessNeed, field_access, struct_fields_of};
 pub use iter::{iterable_elem, iterator_elem};
 
 mod narrowing;

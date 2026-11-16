@@ -3160,8 +3160,7 @@ pub(crate) fn struct_fields_for_path(
 /// struct's generic params with the inferred App args -- so `p: Pair<int,
 /// string>` yields `first: int` / `second: string`, not the declared `A` / `B`.
 /// Returns `None` (caller falls back to structural) when the binding has no
-/// recovered inference or its type isn't a nominal-struct `App`. Non-generic
-/// and nested-generic field types render through unchanged.
+/// recovered inference or its type isn't a struct.
 fn inferred_struct_fields(
     ws: &Workspace,
     mid: ModuleId,
@@ -3175,69 +3174,46 @@ fn inferred_struct_fields(
 
     let b_idx = find_binding_by_name(body, head, offset)?;
     let recv_ty = *bi.binding_types.get(b_idx)?;
-    struct_fields_of_ty(ws, Some(bi), recv_ty).map(|(fields, _)| fields)
+    struct_fields_of_ty(ws, mid, offset, TyRef::new(Some(bi), recv_ty)).map(|(fields, _)| fields)
 }
 
-/// Fields (name, rendered type, TyId) + struct name of the struct a `TyId`
-/// denotes. Generic-aware when `bi` is present -- App args substitute the
-/// struct's generic params so `Pair<int, string>` yields `first: int` /
-/// `second: string`, not `A` / `B`. Falls back to structural name resolution
-/// (a `Static` type with no generics -- e.g. a fn return type). `None` when
-/// `ty` isn't a nominal struct (peeling `Nullable`).
+/// Fields (name, rendered type, TyId) + struct name of the struct `recv`
+/// denotes, typed by inference for that instance (`Box<Mob>` yields
+/// `items: [Mob]`) in a scratch Gamma over the body at `offset`. A field's
+/// TyId is dropped when substitution built a type the caller's body arena
+/// lacks. Falls back to the declared fields by name when there is no
+/// inference. `None` when `recv` isn't a struct.
 fn struct_fields_of_ty(
     ws: &Workspace,
-    bi: Option<&BodyInference>,
-    ty: TyId,
+    mid: ModuleId,
+    offset: usize,
+    recv: TyRef<'_>,
 ) -> Option<(Vec<(String, String, Option<TyId>)>, Ustr)> {
-    // `[T]` (bone's Array ctor) is the stdlib `Vec` struct -- resolve it via
-    // whichever arena `ty` lives in (a nominal `struct_name_of_ty` can't peel
-    // an inference-arena Local). Fields come from the Vec struct def.
-    if array_elem_ty(ws, bi, ty).is_some() {
-        let name = Ustr::from("Vec");
-        let sdef = struct_def_by_name(ws, name)?;
-        let fields = sdef
-            .fields
-            .iter()
-            .map(|f| (f.name.to_string(), ws.render(None, f.ty), Some(f.ty)))
+    let typed = ws.inference(mid).and_then(|inf| {
+        let (mut gamma, span) = query_gamma_for(ws, mid, inf, offset, recv)?;
+        let (name, fields) = inference::struct_fields_of(&mut gamma, recv.ty, span)?;
+        let in_caller_arena = |t: TyId| match t {
+            TyId::Static(..) => true,
+            TyId::Local(idx) => recv
+                .body
+                .is_some_and(|b| (idx.into_raw().into_u32() as usize) < b.ty_arena.len()),
+        };
+        let fields = fields
+            .into_iter()
+            .map(|(n, t)| {
+                (
+                    n.to_string(),
+                    gamma.render(t),
+                    Some(t).filter(|&t| in_caller_arena(t)),
+                )
+            })
             .collect();
-        return Some((fields, name));
+        Some((fields, name))
+    });
+    if typed.is_some() {
+        return typed;
     }
-    if let Some(bi) = bi {
-        if let Some((sname, args)) = struct_app_args(ws, bi, ty) {
-            let sdef = struct_def_by_name(ws, sname)?;
-            // Positional generic-param names of the struct, so a field whose type
-            // is `Generic(_, "A")` maps to the inferred arg at that position.
-            let gnames: Vec<Ustr> = sdef
-                .generics
-                .iter()
-                .filter_map(|g| match deref_ty(ws, None, *g)? {
-                    hir::TypeExpr::Generic(_, n) => Some(*n),
-                    _ => None,
-                })
-                .collect();
-            let fields = sdef
-                .fields
-                .iter()
-                .map(|f| {
-                    // Generic field -> the receiver's inferred type arg (a TyId in
-                    // `bi`, the same arena a query-time ExpectedArg is seeded from);
-                    // else the declared static field type.
-                    let (rendered, ty_id) = match deref_ty(ws, None, f.ty) {
-                        Some(hir::TypeExpr::Generic(_, gname)) => gnames
-                            .iter()
-                            .position(|n| n == gname)
-                            .and_then(|i| args.get(i))
-                            .map(|arg| (ws.render(Some(bi), *arg), Some(*arg)))
-                            .unwrap_or_else(|| (ws.render(None, f.ty), Some(f.ty))),
-                        _ => (ws.render(None, f.ty), Some(f.ty)),
-                    };
-                    (f.name.to_string(), rendered, ty_id)
-                })
-                .collect();
-            return Some((fields, sname));
-        }
-    }
-    let sname = struct_name_of_ty(ws, None, ty)?;
+    let sname = struct_name_of_ty(ws, None, recv.ty)?;
     let sdef = struct_def_by_name(ws, sname)?;
     let fields = sdef
         .fields
@@ -3245,6 +3221,28 @@ fn struct_fields_of_ty(
         .map(|f| (f.name.to_string(), ws.render(None, f.ty), Some(f.ty)))
         .collect();
     Some((fields, sname))
+}
+
+/// [`crate::backend::query_gamma`] for asking about `recv`: a `TyId::Local`
+/// only resolves in the scratch Gamma seeded from its own body.
+fn query_gamma_for<'a>(
+    ws: &'a Workspace,
+    mid: ModuleId,
+    inf: &InferenceResult,
+    offset: usize,
+    recv: TyRef<'_>,
+) -> Option<(inference::Gamma<'a>, Span)> {
+    if let TyId::Local(_) = recv.ty {
+        let seed = ws
+            .modules
+            .get(mid.index())
+            .and_then(|m| m.body_at(offset))
+            .and_then(|o| inf.per_fn.get(&o));
+        if !matches!((seed, recv.body), (Some(a), Some(b)) if std::ptr::eq(a, b)) {
+            return None;
+        }
+    }
+    crate::backend::query_gamma(ws, mid, inf, offset)
 }
 
 /// Fields + struct name of a member RECEIVER expression whose type the
@@ -3267,7 +3265,7 @@ pub(crate) fn struct_members_of_receiver_expr(
     let inf = ws.inference(mid)?;
     let at = recv_end.checked_sub(1)?;
     let ta = bone_semantic::query::type_at(ws, mid, inf, at)?;
-    let (fields, sname) = struct_fields_of_ty(ws, ta.body, ta.ty)?;
+    let (fields, sname) = struct_fields_of_ty(ws, mid, at, TyRef::new(ta.body, ta.ty))?;
     let vec_elem = array_elem_ty(ws, ta.body, ta.ty).map(|e| TyRef::new(ta.body, e));
     let sole_arg = sole_type_arg_struct(ws, ta.body, ta.ty);
     let is_iter = receiver_is_iterator(ws, mid, inf, at, TyRef::new(ta.body, ta.ty));
@@ -4274,18 +4272,7 @@ fn receiver_is_iterator(
     offset: usize,
     recv: TyRef<'_>,
 ) -> bool {
-    // A `TyId::Local` only resolves in the scratch Gamma seeded from its body.
-    if let TyId::Local(_) = recv.ty {
-        let seed = ws
-            .modules
-            .get(mid.index())
-            .and_then(|m| m.body_at(offset))
-            .and_then(|o| inf.per_fn.get(&o));
-        if !matches!((seed, recv.body), (Some(a), Some(b)) if std::ptr::eq(a, b)) {
-            return false;
-        }
-    }
-    let Some((mut gamma, span)) = crate::backend::query_gamma(ws, mid, inf, offset) else {
+    let Some((mut gamma, span)) = query_gamma_for(ws, mid, inf, offset, recv) else {
         return false;
     };
     inference::iterator_elem(&mut gamma, recv.ty, span).is_some()
