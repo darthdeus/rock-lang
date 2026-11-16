@@ -31,79 +31,17 @@ pub(crate) fn emit_fn_with_callees(
     if mf.is_coroutine {
         return Err(err("JS subset: coroutine fn not supported"));
     }
-    let (use_count, inlinable) = compute_inlinable(mf);
-    // Range-`for` loops retain a native increment clause so JS `continue`
-    // reaches the latch. Other natural loops use `while (true)` and keep their
-    // header test in the walked body.
-    let region = reachable_blocks(mf);
-    let hoisted_temps = cross_block_temps(mf, &region, &use_count, &inlinable);
-    let unwind = mf.registers_defer_cleanup(&region);
-    let mut em = Emitter {
-        ws,
-        mf,
-        callees,
-        hoisted,
-        globals,
-        use_count,
-        inlinable,
-        pack_multi_return: false,
-        hoisted_temps,
-        out: String::new(),
-        indent: if unwind { 2 } else { 1 },
-    };
-    let Some(shape) = placement::Shape::analyze(&em, mf.entry) else {
+    let (mut frame, unwind) = FnFrame::new(ws, mf, callees, hoisted, globals, mf.entry, false);
+    let Some(shape) = placement::Shape::analyze(&frame.emitter, mf.entry) else {
         return emit_fn_trampoline(
             ws, mf, js_name, callees, hoisted, globals, mf.entry, &mf.params, true,
         );
     };
-
-    let params: Vec<String> = mf.params.iter().map(|&c| cell_name(mf, c)).collect();
-    let mut header = format!("function {js_name}({}) {{\n", params.join(", "));
-    for &c in &mf.params {
-        if cell_is_uint(ws, mf.cells[c].ty) {
-            header.push_str(&format!(
-                "  {} = {} >>> 0;\n",
-                cell_name(mf, c),
-                cell_name(mf, c)
-            ));
-        }
-    }
-
-    // Hoist declarations for stored cells and materialized values that cross
-    // block scopes. Follower labels add scopes outside the branch that defines
-    // some of those values, so they must live at the function level.
-    let param_set: HashSet<Idx<Cell>> = mf.params.iter().copied().collect();
-    let mut declared: Vec<u32> = Vec::new();
-    let mut seen = HashSet::new();
-    for &b in &region {
-        for &iid in &mf.blocks[b].insts {
-            mf.insts[iid].cell_writes_each(&mut |cell| {
-                if !param_set.contains(&cell) && seen.insert(cell) {
-                    declared.push(mf.emit_cell_id(cell));
-                }
-            });
-        }
-    }
-    let mut hoisted_names: Vec<u32> = em
-        .hoisted_temps
-        .iter()
-        .map(|&id| mf.emit_inst_id(Idx::from_raw(RawIdx::from_u32(id))))
-        .collect();
-    hoisted_names.sort_unstable();
-    if !declared.is_empty() || !hoisted_names.is_empty() {
-        declared.sort_unstable();
-        let names: Vec<String> = declared
-            .iter()
-            .map(|id| format!("c{id}"))
-            .chain(hoisted_names.iter().map(|id| format!("v{id}")))
-            .collect();
-        header.push_str(&format!("  let {};\n", names.join(", ")));
-    }
-
-    placement::emit_body(&mut em, &shape, mf.entry)?;
+    let header = frame.header(js_name, &mf.params, true);
+    placement::emit_body(&mut frame.emitter, &shape, mf.entry)?;
     Ok(format!(
         "{header}{}}}\n",
-        defer_unwind_wrap(unwind, &em.out)
+        defer_unwind_wrap(unwind, &frame.emitter.out)
     ))
 }
 
@@ -125,58 +63,18 @@ pub fn emit_fn_trampoline(
     params: &[Idx<Cell>],
     pack_multi_return: bool,
 ) -> Result<String, CompilerError> {
-    let region = reachable_from(mf, entry);
-    let (use_count, inlinable) = compute_inlinable_over(mf, &region);
-    let hoisted_temps = cross_block_temps(mf, &region, &use_count, &inlinable);
-    let unwind = mf.registers_defer_cleanup(&region);
-    let mut em = Emitter {
-        ws,
-        mf,
-        callees,
-        hoisted,
-        globals,
-        use_count,
-        inlinable,
-        pack_multi_return,
-        hoisted_temps,
-        out: String::new(),
-        indent: if unwind { 2 } else { 1 },
-    };
-    let pnames: Vec<String> = params.iter().map(|&c| cell_name(mf, c)).collect();
-    let mut header = format!("function {js_name}({}) {{\n", pnames.join(", "));
-    let param_set: HashSet<Idx<Cell>> = params.iter().copied().collect();
-    let mut declared: Vec<u32> = Vec::new();
-    let mut seen = HashSet::new();
-    for &b in &region {
-        for &iid in &mf.blocks[b].insts {
-            mf.insts[iid].cell_writes_each(&mut |cell| {
-                if !param_set.contains(&cell) && seen.insert(cell) {
-                    declared.push(mf.emit_cell_id(cell));
-                }
-            });
-        }
-    }
-    let mut hoisted_names: Vec<u32> = em
-        .hoisted_temps
-        .iter()
-        .map(|&id| mf.emit_inst_id(Idx::from_raw(RawIdx::from_u32(id))))
-        .collect();
-    hoisted_names.sort_unstable();
-    if !declared.is_empty() || !hoisted_names.is_empty() {
-        declared.sort_unstable();
-        let names: Vec<String> = declared
-            .iter()
-            .map(|id| format!("c{id}"))
-            .chain(hoisted_names.iter().map(|id| format!("v{id}")))
-            .collect();
-        header.push_str(&format!("  let {};\n", names.join(", ")));
-    }
+    let (frame, unwind) = FnFrame::new(ws, mf, callees, hoisted, globals, entry, pack_multi_return);
+    let header = frame.header(js_name, params, false);
+    let FnFrame {
+        emitter: mut em,
+        region,
+    } = frame;
     em.push(&format!("var __bb = {};", mf.emit_block_id(entry)));
     em.push("for (;;) {");
     em.indent += 1;
     em.push("switch (__bb) {");
     em.indent += 1;
-    let mut cases = region.clone();
+    let mut cases = region;
     cases.sort_by_key(|b| mf.emit_block_id(*b));
     for b in cases {
         em.push(&format!("case {}: {{", mf.emit_block_id(b)));
@@ -194,6 +92,92 @@ pub fn emit_fn_trampoline(
         "{header}{}}}\n",
         defer_unwind_wrap(unwind, &em.out)
     ))
+}
+
+/// An [`Emitter`] over the blocks reachable from `entry`, with that region.
+struct FnFrame<'a> {
+    emitter: Emitter<'a>,
+    region: Vec<Idx<Block>>,
+}
+
+impl<'a> FnFrame<'a> {
+    /// The frame, and whether the region registers `defer` cleanups that need
+    /// [`defer_unwind_wrap`].
+    fn new(
+        ws: &'a Workspace,
+        mf: &'a MirFunc,
+        callees: &'a CalleeNames,
+        hoisted: &'a HashSet<ustr::Ustr>,
+        globals: &'a GlobalCtx,
+        entry: Idx<Block>,
+        pack_multi_return: bool,
+    ) -> (Self, bool) {
+        let region = reachable_from(mf, entry);
+        let (use_count, inlinable) = compute_inlinable(mf, &region);
+        let hoisted_temps = cross_block_temps(mf, &region, &use_count, &inlinable);
+        let unwind = mf.registers_defer_cleanup(&region);
+        let emitter = Emitter {
+            ws,
+            mf,
+            callees,
+            hoisted,
+            globals,
+            use_count,
+            inlinable,
+            pack_multi_return,
+            hoisted_temps,
+            out: String::new(),
+            indent: if unwind { 2 } else { 1 },
+        };
+        (Self { emitter, region }, unwind)
+    }
+
+    /// `function <js_name>(<params>) {` plus one hoisted `let` for the stored
+    /// cells and the materialized values that cross block scopes: follower
+    /// labels and trampoline cases add scopes outside the block that defines
+    /// some of them. `coerce_uint` normalizes `uint` params on entry.
+    fn header(&self, js_name: &str, params: &[Idx<Cell>], coerce_uint: bool) -> String {
+        let (ws, mf) = (self.emitter.ws, self.emitter.mf);
+        let names: Vec<String> = params.iter().map(|&c| cell_name(mf, c)).collect();
+        let mut header = format!("function {js_name}({}) {{\n", names.join(", "));
+        if coerce_uint {
+            for &c in params {
+                if cell_is_uint(ws, mf.cells[c].ty) {
+                    let name = cell_name(mf, c);
+                    header.push_str(&format!("  {name} = {name} >>> 0;\n"));
+                }
+            }
+        }
+        let param_set: HashSet<Idx<Cell>> = params.iter().copied().collect();
+        let mut declared: Vec<u32> = Vec::new();
+        let mut seen = HashSet::new();
+        for &b in &self.region {
+            for &iid in &mf.blocks[b].insts {
+                mf.insts[iid].cell_writes_each(&mut |cell| {
+                    if !param_set.contains(&cell) && seen.insert(cell) {
+                        declared.push(mf.emit_cell_id(cell));
+                    }
+                });
+            }
+        }
+        let mut hoisted_names: Vec<u32> = self
+            .emitter
+            .hoisted_temps
+            .iter()
+            .map(|&id| mf.emit_inst_id(Idx::from_raw(RawIdx::from_u32(id))))
+            .collect();
+        hoisted_names.sort_unstable();
+        if !declared.is_empty() || !hoisted_names.is_empty() {
+            declared.sort_unstable();
+            let names: Vec<String> = declared
+                .iter()
+                .map(|id| format!("c{id}"))
+                .chain(hoisted_names.iter().map(|id| format!("v{id}")))
+                .collect();
+            header.push_str(&format!("  let {};\n", names.join(", ")));
+        }
+        header
+    }
 }
 
 /// A body that registers an ordinary-fn `defer` (`skull_mir::mir::DEFER_PUSH`)

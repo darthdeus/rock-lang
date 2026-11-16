@@ -35,17 +35,11 @@ pub(super) fn always_inlinable(inst: &Inst) -> bool {
     matches!(inst, Inst::MakeEnv { .. }) || skull_mir::sinking::always_inlinable(inst)
 }
 
-/// Use counts (dense by raw inst id, over reachable blocks) + the inlinable
+/// Use counts (dense by raw inst id, over the `blocks` region) + the inlinable
 /// mask: an `always_inlinable` value used EXACTLY ONCE with def and use in the
 /// SAME block folds into that use; everything else materializes at its program
 /// position. The shared sinking check also preserves effect/error order.
-pub(super) fn compute_inlinable(mf: &MirFunc) -> (Vec<u32>, Vec<bool>) {
-    compute_inlinable_over(mf, &reachable_blocks(mf))
-}
-
-/// [`compute_inlinable`] over an explicit block region -- the trampoline mode
-/// analyzes a detached hook/defer region, not the fn-entry region.
-pub(super) fn compute_inlinable_over(mf: &MirFunc, blocks: &[Idx<Block>]) -> (Vec<u32>, Vec<bool>) {
+pub(super) fn compute_inlinable(mf: &MirFunc, blocks: &[Idx<Block>]) -> (Vec<u32>, Vec<bool>) {
     const NONE: u32 = u32::MAX;
     let ni = mf.insts.len();
     let mut use_count = vec![0u32; ni];
@@ -202,11 +196,6 @@ pub(super) fn cross_block_temps(
         mf.blocks[b].term.uses_each(&mut check);
     }
     cross
-}
-
-/// Blocks reachable from the entry, in discovery order.
-pub(super) fn reachable_blocks(mf: &MirFunc) -> Vec<Idx<Block>> {
-    reachable_from(mf, mf.entry)
 }
 
 /// Blocks reachable over terminators from `root` (a fn entry OR a lambda entry).
