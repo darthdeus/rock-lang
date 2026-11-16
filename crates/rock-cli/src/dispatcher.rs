@@ -14,6 +14,23 @@ fn reject_device_path(path: &str) -> Result<()> {
     Ok(())
 }
 
+fn reject_device_output(path: &str) -> Result<()> {
+    if path == "/dev/stdout" {
+        anyhow::bail!(
+            "Cannot use /dev/stdout as output path.\n\
+             The compiler automatically prints to stdout when no output is specified.\n\
+             Usage: 'rock compile input.rock'"
+        );
+    }
+    if path == "/dev/stdin" || path == "/dev/stderr" {
+        anyhow::bail!(
+            "Cannot use {} as output path. Special device files are not supported.",
+            path
+        );
+    }
+    Ok(())
+}
+
 pub struct CommandContext {
     pub args: Args,
 }
@@ -71,15 +88,7 @@ impl CommandContext {
                 cmd = command_name,
             );
         };
-
-        if file == "/dev/stdin" || file == "/dev/stdout" || file == "/dev/stderr" {
-            anyhow::bail!(
-                "Cannot use {} as input file. Special device files are not supported.\n\
-                 Please provide a regular file path.",
-                file
-            );
-        }
-
+        reject_device_path(file)?;
         Ok(file)
     }
 
@@ -108,23 +117,9 @@ impl CommandContext {
             (None, _) => None,
         };
 
-        // Validate that output is not a special device file
-        if let Some(ref out) = output {
-            if out == "/dev/stdout" {
-                anyhow::bail!(
-                    "Cannot use /dev/stdout as output file.\n\
-                     The compiler automatically prints to stdout when no output is specified.\n\
-                     Usage: 'rock compile input.rock'"
-                );
-            } else if out == "/dev/stdin" || out == "/dev/stderr" {
-                anyhow::bail!(
-                    "Cannot use {} as output file. Special device files are not supported.\n\
-                     To print to stdout, omit the output argument: 'rock compile input.rock'",
-                    out
-                );
-            }
+        if let Some(out) = &output {
+            reject_device_output(out)?;
         }
-
         Ok(output)
     }
 
@@ -173,20 +168,7 @@ impl CommandContext {
             .output
             .clone()
             .unwrap_or_else(|| default.to_string());
-
-        if output == "/dev/stdout" {
-            anyhow::bail!(
-                "Cannot use /dev/stdout as output path.\n\
-                 The compiler automatically prints to stdout when no output is specified.\n\
-                 Usage: 'rock compile input.rock'"
-            );
-        } else if output == "/dev/stdin" || output == "/dev/stderr" {
-            anyhow::bail!(
-                "Cannot use {} as output path. Special device files are not supported.",
-                output
-            );
-        }
-
+        reject_device_output(&output)?;
         Ok(output)
     }
 
@@ -198,13 +180,7 @@ impl CommandContext {
         };
 
         for file in &files {
-            if file == "/dev/stdin" || file == "/dev/stdout" || file == "/dev/stderr" {
-                anyhow::bail!(
-                    "Cannot use {} as input file. Special device files are not supported.\n\
-                     Please provide regular file paths.",
-                    file
-                );
-            }
+            reject_device_path(file)?;
         }
 
         Ok(files)
