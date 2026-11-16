@@ -55,7 +55,7 @@ inline(lua) fn logged_error_records_lua() -> any = """
 """
 
 // Collected error records, or none when this run does not check them.
-fn logged_error_records() -> [string] {
+pub fn logged_error_records() -> [string] {
     let records = logged_error_records_lua()
     return __rock_vec_from_lua_array(records, table_len(records))
 }
@@ -69,7 +69,7 @@ inline(lua) fn logged_error_overflow() -> int = """
 """
 
 // Remove the first collected record equal to `record`; false when none is.
-inline(lua) fn take_logged_error(record: string) -> bool = """
+pub inline(lua) fn take_logged_error(record: string) -> bool = """
     local log = _G.__rock_logged_errors
     return log ~= nil and log.take(record)
 """
