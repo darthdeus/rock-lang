@@ -709,21 +709,10 @@ impl<'a> Builder<'a> {
     ) -> Result<Idx<Inst>, CompilerError> {
         let present = self.read_field(parent, field);
         let result = self.f.new_cell(None);
-        let nil_bb = self.f.new_block();
-        let val_bb = self.f.new_block();
-        let join = self.f.new_block();
-        self.branch_on_nil(present, nil_bb, val_bb);
-
-        self.cur = nil_bb;
-        let n = self.emit_cur(Inst::Const(Lit::Nil));
-        self.store_and_join(result, n, join);
-
-        self.cur = val_bb;
-        let boxed = self.materialize_embed(parent, field, cname)?;
-        self.store_and_join(result, boxed, join);
-
-        self.cur = join;
-        Ok(self.emit_cur(Inst::Load(result)))
+        let is_nil = self.is_nil(present);
+        self.nil_or_join(result, is_nil, false, |s| {
+            s.materialize_embed(parent, field, cname)
+        })
     }
 
     pub(crate) fn pair_embed_leaves(

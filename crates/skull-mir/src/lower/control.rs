@@ -605,6 +605,36 @@ impl<'a> Builder<'a> {
         Ok(self.slot_repr(&shape, &slots, &mut idx))
     }
 
+    /// Branch on `cond` to nil or `value_arm`, joined through `result`. The
+    /// value arm runs when `cond` equals `cond_is_presence`.
+    pub(crate) fn nil_or_join(
+        &mut self,
+        result: Idx<Cell>,
+        cond: Idx<Inst>,
+        cond_is_presence: bool,
+        value_arm: impl FnOnce(&mut Self) -> Result<Idx<Inst>, CompilerError>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let nil_bb = self.f.new_block();
+        let val_bb = self.f.new_block();
+        let join = self.f.new_block();
+        if cond_is_presence {
+            self.branch_to(cond, val_bb, nil_bb);
+        } else {
+            self.branch_to(cond, nil_bb, val_bb);
+        }
+
+        self.cur = nil_bb;
+        let n = self.emit_cur(Inst::Const(Lit::Nil));
+        self.store_and_join(result, n, join);
+
+        self.cur = val_bb;
+        let v = value_arm(self)?;
+        self.store_and_join(result, v, join);
+
+        self.cur = join;
+        Ok(self.emit_cur(Inst::Load(result)))
+    }
+
     /// If the current block is still open, store `value` into `result` and jump
     /// to `join` (the fall-through merge). A diverged arm leaves it untouched.
     pub(crate) fn store_and_join(&mut self, result: Idx<Cell>, value: Idx<Inst>, join: Idx<Block>) {

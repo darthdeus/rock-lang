@@ -2619,23 +2619,9 @@ impl<'a> Builder<'a> {
         }
         let present = slots.remove(0);
         let result = self.f.new_cell(None);
-        let absent_bb = self.f.new_block();
-        let present_bb = self.f.new_block();
-        let join = self.f.new_block();
-        self.branch_to(present, present_bb, absent_bb);
-
-        self.cur = absent_bb;
-        let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        self.store_cell(result, nil);
-        self.f.set_term(self.cur, Term::Goto(join));
-
-        self.cur = present_bb;
-        let tuple = self.emit_cur(Inst::MakeTuple(slots));
-        self.store_cell(result, tuple);
-        self.f.set_term(self.cur, Term::Goto(join));
-
-        self.cur = join;
-        Ok(self.emit_cur(Inst::Load(result)))
+        self.nil_or_join(result, present, true, |s| {
+            Ok(s.emit_cur(Inst::MakeTuple(slots)))
+        })
     }
 
     /// [`Self::pack`] for a consumer that can observe NIL-ness of the result --
@@ -2706,26 +2692,10 @@ impl<'a> Builder<'a> {
             other => return self.pack_boxed(other, kind),
         };
         let result = self.f.new_cell(None);
-        let absent_bb = self.f.new_block();
-        let present_bb = self.f.new_block();
-        let join = self.f.new_block();
-        self.branch_to(present, present_bb, absent_bb);
-
-        self.cur = absent_bb;
-        let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        self.store_cell(result, nil);
-        self.f.set_term(self.cur, Term::Goto(join));
-
-        self.cur = present_bb;
         // The present arm is an ordinary whole-value box, so it goes through the
         // same tier dispatch: a leaf-table or flat-enum payload has no
         // declared-field ctor to take.
-        let boxed = self.pack_boxed(value, kind)?;
-        self.store_cell(result, boxed);
-        self.f.set_term(self.cur, Term::Goto(join));
-
-        self.cur = join;
-        Ok(self.emit_cur(Inst::Load(result)))
+        self.nil_or_join(result, present, true, |s| s.pack_boxed(value, kind))
     }
 
     /// The physical layout of GC-table value `name` when some field is stored
@@ -4030,27 +4000,17 @@ impl<'a> Builder<'a> {
         owner_ty: Option<&MonoTy>,
     ) -> Result<Idx<Inst>, CompilerError> {
         let result = self.f.new_cell(None);
-        let nil_bb = self.f.new_block();
-        let val_bb = self.f.new_block();
-        let join = self.f.new_block();
-        self.branch_on_nil(boxed, nil_bb, val_bb);
-
-        self.cur = nil_bb;
-        let n = self.emit_cur(Inst::Const(Lit::Nil));
-        self.store_and_join(result, n, join);
-
+        let is_nil = self.is_nil(boxed);
         // The child copies made while packing are this copy's descendants.
-        self.cur = val_bb;
-        let shape = self.nominal_rep_shape_required(name, false)?;
-        self.enter_value_copy(name)?;
-        let packed = self
-            .boxed_copy_repr_of(boxed, &shape, owner_ty)
-            .and_then(|copy| self.pack(copy));
-        self.value_copy_stack.pop();
-        self.store_and_join(result, packed?, join);
-
-        self.cur = join;
-        Ok(self.emit_cur(Inst::Load(result)))
+        self.nil_or_join(result, is_nil, false, |s| {
+            let shape = s.nominal_rep_shape_required(name, false)?;
+            s.enter_value_copy(name)?;
+            let packed = s
+                .boxed_copy_repr_of(boxed, &shape, owner_ty)
+                .and_then(|copy| s.pack(copy));
+            s.value_copy_stack.pop();
+            packed
+        })
     }
 
     /// A fresh box for a whole value of type `ty` that is already held by one

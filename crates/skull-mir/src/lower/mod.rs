@@ -2501,10 +2501,14 @@ impl<'a> Builder<'a> {
         nil_bb: Idx<Block>,
         value_bb: Idx<Block>,
     ) -> Idx<Inst> {
-        let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        let cond = self.emit_cur(Inst::Eq(v, nil));
+        let cond = self.is_nil(v);
         self.branch_to(cond, nil_bb, value_bb);
         cond
+    }
+
+    fn is_nil(&mut self, v: Idx<Inst>) -> Idx<Inst> {
+        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+        self.emit_cur(Inst::Eq(v, nil))
     }
 
     fn read_field(&mut self, base: Idx<Inst>, field: Ustr) -> Idx<Inst> {
@@ -3227,8 +3231,7 @@ impl<'a> Builder<'a> {
                     self.f.mark_default_param(cell);
                 }
                 let cur = self.emit_cur(Inst::Load(cells[0]));
-                let nil = self.emit_cur(Inst::Const(Lit::Nil));
-                let is_nil = self.emit_cur(Inst::Eq(cur, nil));
+                let is_nil = self.is_nil(cur);
                 self.f.param_default_guards.insert(is_nil, i);
                 let then_bb = self.f.new_block();
                 let join = self.f.new_block();

@@ -357,8 +357,7 @@ impl<'a> Builder<'a> {
                     })
                 }
                 ValueRepr::Scalar(v) => {
-                    let nil = self.emit_cur(Inst::Const(Lit::Nil));
-                    let is_nil = self.emit_cur(Inst::Eq(v, nil));
+                    let is_nil = self.is_nil(v);
                     self.render_present_or_null(is_nil, false, NULL_TEXT, |s| {
                         s.render_fmt(inner, path, ValueRepr::Scalar(v))
                     })

@@ -2234,10 +2234,7 @@ impl<'a> Builder<'a> {
     /// The "receiver is absent" branch condition for [`SafeNavRecv`].
     pub(crate) fn safe_nav_absent_cond(&mut self, r: &SafeNavRecv) -> Idx<Inst> {
         match r {
-            SafeNavRecv::Boxed(v) => {
-                let nil = self.emit_cur(Inst::Const(Lit::Nil));
-                self.emit_cur(Inst::Eq(*v, nil))
-            }
+            SafeNavRecv::Boxed(v) => self.is_nil(*v),
             SafeNavRecv::Unboxed { present, .. } => self.emit_cur(Inst::Not(*present)),
         }
     }
@@ -2289,25 +2286,7 @@ impl<'a> Builder<'a> {
         let result = self
             .f
             .new_cell_typed(None, self.current_expr_storage_ty_id());
-        let nil_bb = self.f.new_block();
-        let val_bb = self.f.new_block();
-        let join = self.f.new_block();
-        let (then_bb, else_bb) = match presence {
-            Some(_) => (val_bb, nil_bb),
-            None => (nil_bb, val_bb),
-        };
-        self.branch_to(cond, then_bb, else_bb);
-
-        self.cur = nil_bb;
-        let n = self.emit_cur(Inst::Const(Lit::Nil));
-        self.store_and_join(result, n, join);
-
-        self.cur = val_bb;
-        let v = value_arm(self, recv)?;
-        self.store_and_join(result, v, join);
-
-        self.cur = join;
-        Ok(self.emit_cur(Inst::Load(result)))
+        self.nil_or_join(result, cond, presence.is_some(), |s| value_arm(s, recv))
     }
 
     /// The struct field plan behind `base?.field`, when the field is a named
