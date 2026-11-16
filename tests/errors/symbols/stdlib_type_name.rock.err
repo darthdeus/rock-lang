@@ -1,0 +1,7 @@
+//! Error: a user enum cannot share the stdlib Envelope struct's runtime name.
+//=== TEST CASE: enum_cannot_shadow_stdlib_struct_DuplicateSymbol ===
+//! expect: duplicate enum `Envelope` across modules
+
+enum Envelope { Empty, Text(string) }
+
+fn main() {}

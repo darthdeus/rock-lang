@@ -137,6 +137,35 @@ fn main() { print(launch_scan()) }
 }
 
 #[test]
+fn duplicate_type_names_are_rejected_on_both_backends() {
+    let ws = ws_with(
+        r#"
+enum Envelope { Empty, Text(string) }
+fn main() {
+    let follower = envelope(1.0, 2.0)
+    let event = Envelope::Text("hello")
+    print("{follower} {event}")
+}
+"#,
+    );
+    let mid = crate::common::test_mid(&ws);
+    assert!(
+        ws.module(mid)
+            .interface_errors
+            .iter()
+            .any(|error| error.message.contains("duplicate enum `Envelope`"))
+    );
+    assert!(
+        skull::mir_emit::emit_full(&ws, mid).is_err(),
+        "Lua accepts duplicate types"
+    );
+    assert!(
+        skull_codegen_js::emit::emit_program(&ws, mid).is_err(),
+        "JS accepts duplicate types"
+    );
+}
+
+#[test]
 fn template_expressions_root_nomangle_functions() {
     let ws = ws_with(
         r#"
