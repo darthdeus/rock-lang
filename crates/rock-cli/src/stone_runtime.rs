@@ -200,19 +200,14 @@ pub fn launch(dir: &str, lua: &GameProgram, emits_main: bool) -> Result<()> {
         log::error!(target: "SKULL", "cannot write {}: {}", lua_file.display(), e);
         crate::invocation_log::exit(1);
     }
-    // No timeout: games run an infinite frame loop.
-    exec_luajit_file(&lua_file, None, &[])
+    exec_luajit_file(&lua_file)
 }
 
 /// Exec luajit on a compiled `.lua` file with stdio inherited from the
 /// caller, preserving keyboard input for interactive games.
-fn exec_luajit_file(
-    lua_file: &Path,
-    timeout: Option<std::time::Duration>,
-    app_args: &[String],
-) -> Result<()> {
+fn exec_luajit_file(lua_file: &Path) -> Result<()> {
     let mut cmd = rock_host::project::luajit_command();
-    cmd.arg(lua_file).args(app_args);
+    cmd.arg(lua_file);
     cmd = crate::runtime_process::configure(
         cmd,
         crate::runtime_process::RuntimeProcess::LuaRun { headless: false },
@@ -238,29 +233,10 @@ fn exec_luajit_file(
     );
     let pid = child.id();
 
-    let status = if let Some(t) = timeout {
-        use wait_timeout::ChildExt;
-        match child
-            .wait_timeout(t)
-            .map_err(|e| anyhow::anyhow!("wait_timeout failed: {}", e))?
-        {
-            Some(s) => s,
-            None => {
-                let _ = child.kill();
-                let _ = child.wait();
-                crate::child_lifetime::release_bound_child(pid);
-                anyhow::bail!(
-                    "Luajit process timed out after {} seconds.",
-                    t.as_secs_f32()
-                );
-            }
-        }
-    } else {
-        child
-            .wait()
-            .map_err(|e| anyhow::anyhow!("wait failed: {}", e))?
-    };
-
+    // No timeout: games run an infinite frame loop.
+    let status = child
+        .wait()
+        .map_err(|e| anyhow::anyhow!("wait failed: {}", e))?;
     crate::child_lifetime::release_bound_child(pid);
     if !status.success() {
         crate::invocation_log::exit(status.code().unwrap_or(1));
