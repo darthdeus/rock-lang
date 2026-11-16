@@ -96,25 +96,54 @@ exec "$@""#,
 }
 
 /// A bound process is always reaped before its admission lease can be released.
-pub struct BoundChild(Option<Child>);
+pub struct BoundChild {
+    child: Child,
+    bound: bool,
+}
+
+impl BoundChild {
+    pub(crate) fn new(child: Child) -> Self {
+        Self { child, bound: true }
+    }
+
+    fn release(&mut self) {
+        if self.bound {
+            crate::child_lifetime::release_bound_child(self.child.id());
+            self.bound = false;
+        }
+    }
+
+    pub fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        let status = self.child.wait()?;
+        self.release();
+        Ok(status)
+    }
+
+    pub fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        let status = self.child.try_wait()?;
+        if status.is_some() {
+            self.release();
+        }
+        Ok(status)
+    }
+}
 
 impl std::ops::Deref for BoundChild {
     type Target = Child;
     fn deref(&self) -> &Child {
-        self.0.as_ref().unwrap()
+        &self.child
     }
 }
 
 impl std::ops::DerefMut for BoundChild {
     fn deref_mut(&mut self) -> &mut Child {
-        self.0.as_mut().unwrap()
+        &mut self.child
     }
 }
 
 impl Drop for BoundChild {
     fn drop(&mut self) {
-        let Some(child) = self.0.as_mut() else { return };
-        let needs_reap = match child.try_wait() {
+        let needs_reap = match self.try_wait() {
             Ok(Some(_)) => false,
             Ok(None) => true,
             Err(error) => {
@@ -123,14 +152,14 @@ impl Drop for BoundChild {
             }
         };
         if needs_reap {
-            if let Err(error) = child.kill() {
+            if let Err(error) = self.child.kill() {
                 log::warn!(target: "RUN", "child cleanup kill: {error}");
             }
-            if let Err(error) = child.wait() {
+            if let Err(error) = self.wait() {
                 log::warn!(target: "RUN", "child cleanup reap: {error}");
             }
         }
-        crate::child_lifetime::release_bound_child(child.id());
+        self.release();
     }
 }
 
@@ -141,7 +170,7 @@ pub fn spawn_bound_child(
     if std::path::Path::new(cmd.get_program()).file_name()
         != Some(std::ffi::OsStr::new("systemd-run"))
     {
-        return crate::child_lifetime::spawn_bound_child(cmd).map(|child| BoundChild(Some(child)));
+        return crate::child_lifetime::spawn_bound_child(cmd);
     }
     spawn_scoped(cmd, scratch, std::time::Duration::from_secs(10))
 }
@@ -162,7 +191,7 @@ fn spawn_scoped(
     let mut attempts = 0;
     loop {
         attempts += 1;
-        let mut child = BoundChild(Some(crate::child_lifetime::spawn_bound_child(cmd)?));
+        let mut child = crate::child_lifetime::spawn_bound_child(cmd)?;
         loop {
             if receipt.try_exists()? {
                 if attempts > 1 {
@@ -235,6 +264,25 @@ mod tests {
     use super::*;
     use std::ffi::OsStr;
 
+    #[cfg(unix)]
+    #[test]
+    fn dropping_a_bound_child_kills_and_reaps_it() {
+        let mut command = Command::new("sleep");
+        command.arg("600");
+        let child = crate::child_lifetime::spawn_bound_child(&mut command).unwrap();
+        let pid = child.id() as libc::pid_t;
+        drop(child);
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
     #[test]
     fn wrap_runs_the_inner_program_after_the_scope_options() {
         let mut inner = Command::new("/opt/luajit");
@@ -297,17 +345,24 @@ exec "$@"
         let mut cmd = wrap_in(inner, Command::new(&launcher));
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = spawn_bound_child(&mut cmd, dir.path()).unwrap();
-        let pid = child.id();
-        let result = child.0.take().unwrap().wait_with_output().unwrap();
-        crate::child_lifetime::release_bound_child(pid);
-        assert_eq!(
-            result.status.code(),
-            Some(7),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
+        use std::io::Read;
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut stdout)
+            .unwrap();
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
+        assert_eq!(child.wait().unwrap().code(), Some(7), "{stderr}");
         assert_eq!(std::fs::read_to_string(executions).unwrap(), "executed\n");
-        assert_eq!(result.stdout, b"child-output\n");
+        assert_eq!(stdout, "child-output\n");
     }
 
     #[cfg(unix)]

@@ -98,7 +98,7 @@ impl ParentDeathSignal {
 }
 
 /// Spawn `cmd` so that it does not outlive this process.
-pub fn spawn_bound_child(cmd: &mut Command) -> io::Result<Child> {
+pub fn spawn_bound_child(cmd: &mut Command) -> io::Result<crate::headless_scope::BoundChild> {
     #[cfg(unix)]
     install_forwarding();
     #[cfg(target_os = "linux")]
@@ -117,7 +117,7 @@ pub fn spawn_bound_child(cmd: &mut Command) -> io::Result<Child> {
     #[cfg(unix)]
     bind_slot(child.id())?;
     rock_host::process_management::register_child_process(child.id());
-    Ok(child)
+    Ok(crate::headless_scope::BoundChild::new(child))
 }
 
 /// Extend a long-lived bound child's binding to a launcher killed outright.
@@ -211,7 +211,7 @@ fn assign_kill_on_close_job(child: &Child) -> io::Result<()> {
 }
 
 /// Forget a bound child that has been waited for.
-pub fn release_bound_child(pid: u32) {
+pub(crate) fn release_bound_child(pid: u32) {
     #[cfg(unix)]
     for slot in BOUND.iter() {
         let _ = slot.compare_exchange(pid as i32, 0, Ordering::SeqCst, Ordering::SeqCst);
@@ -264,6 +264,35 @@ mod tests {
                 "the watcher outlived its child and would later signal a reused PID"
             );
             std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod binding_tests {
+    use super::*;
+
+    #[test]
+    fn reaping_releases_the_binding_before_the_wrapper_is_dropped() {
+        for poll in [false, true] {
+            let mut child = spawn_bound_child(&mut Command::new("true")).unwrap();
+            let pid = child.id() as i32;
+            assert!(BOUND.iter().any(|slot| slot.load(Ordering::SeqCst) == pid));
+            if poll {
+                let start = bone_core::prelude::Instant::now();
+                while child.try_wait().unwrap().is_none() {
+                    assert!(start.elapsed() < test_utils::HANG_BACKSTOP);
+                    std::thread::yield_now();
+                }
+            } else {
+                assert!(child.wait().unwrap().success());
+            }
+            assert!(BOUND.iter().all(|slot| slot.load(Ordering::SeqCst) != pid));
+            bind_slot(child.id()).unwrap();
+            drop(child);
+            let still_bound = BOUND.iter().any(|slot| slot.load(Ordering::SeqCst) == pid);
+            release_bound_child(pid as u32);
+            assert!(still_bound, "dropping a reaped child released a reused PID");
         }
     }
 }

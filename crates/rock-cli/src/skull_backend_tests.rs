@@ -1703,14 +1703,12 @@ fn main() { print(direct()) print(FLAG) print("{PAIR.x} {PAIR.y}") }
             "{failed}"
         );
         let repaired = live.overlay(&v1.replace("= explode()", "= number() + 2"));
+        let failed_attempt = checked_late_initializer_failure(&failed);
         let driver = format!(
             r#"
 local retained = direct
 local early, flag, late = EARLY, FLAG, LATE
-local ok, err = pcall(function()
-{failed}
-end)
-assert(not ok and tostring(err):find("late overlay failure", 1, true), tostring(err))
+{failed_attempt}
 assert(EARLY == early and FLAG == flag and LATE == late, "constants changed after failure")
 assert(effects() == 1, "initializer side effect was unexpectedly rolled back")
 assert(identity_T_spec_p_int == nil, "a failed overlay leaked a new specialization")
@@ -1746,6 +1744,15 @@ main()
         (prepares, drops)
     }
 
+    fn checked_late_initializer_failure(overlay: &str) -> String {
+        format!(
+            r#"local ok, err = pcall(function()
+{overlay}
+end)
+assert(not ok and tostring(err):find("late overlay failure", 1, true), tostring(err))"#
+        )
+    }
+
     #[test]
     fn failed_overlay_static_initializer_retry_preserves_successive_live_state() {
         let v0 = STATIC_RETRY_FIXTURE;
@@ -1760,14 +1767,12 @@ main()
         for overlay in [&failed, &repaired, &unrelated, &reverted] {
             assert_eq!(static_transition_counts(overlay), (1, 0));
         }
+        let failed_attempt = checked_late_initializer_failure(&failed);
         let driver = format!(
             r#"
 print(probe())
 print(probe())
-local ok, err = pcall(function()
-{failed}
-end)
-assert(not ok and tostring(err):find("late overlay failure", 1, true), tostring(err))
+{failed_attempt}
 print(probe())
 {repaired}
 print(probe())
@@ -1800,6 +1805,7 @@ print(probe())
         assert_eq!(static_transition_counts(&failed), (0, 1));
         assert_eq!(static_transition_counts(&repaired), (0, 1));
         assert_eq!(static_transition_counts(&reintroduced), (1, 0));
+        let failed_attempt = checked_late_initializer_failure(&failed);
         let driver = format!(
             r#"
 local function static_cells()
@@ -1810,10 +1816,7 @@ local function static_cells()
   return count
 end
 assert(probe() == 2 and static_cells() == 2, "the baseline static must be warm")
-local ok, err = pcall(function()
-{failed}
-end)
-assert(not ok and tostring(err):find("late overlay failure", 1, true), tostring(err))
+{failed_attempt}
 assert(probe() == 3 and static_cells() == 2, "failed removal changed the warmed static")
 {repaired}
 assert(probe() == 9 and static_cells() == 0, "retry failed to drop the removed static")
@@ -4931,4 +4934,12 @@ fn plain_luajit_without_runtime_layout() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn truncate_cuts_emitted_js_on_a_char_boundary() {
+    let js = format!("{}\u{e9}{}", "a".repeat(3999), "b".repeat(10));
+    let excerpt = super::program_excerpt(&[&js]);
+    assert!(excerpt.starts_with(&"a".repeat(3999)), "{}", &excerpt[..40]);
+    assert!(excerpt.ends_with("more bytes)"), "{excerpt}");
 }

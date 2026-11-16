@@ -151,6 +151,26 @@ pub(crate) fn drop_and_release_in_background<T: Send + 'static>(value: T) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn background_drop_returns_without_waiting_for_teardown() {
+        use std::sync::mpsc;
+        struct BlockingDrop(mpsc::Receiver<()>);
+        impl Drop for BlockingDrop {
+            fn drop(&mut self) {
+                let _ = self.0.recv();
+            }
+        }
+        let (finish_drop, drop_waits) = mpsc::channel();
+        let (returned, drop_returns) = mpsc::channel();
+        std::thread::spawn(move || {
+            super::drop_and_release_in_background(BlockingDrop(drop_waits));
+            let _ = returned.send(());
+        });
+        let outcome = drop_returns.recv_timeout(test_utils::HANG_BACKSTOP);
+        let _ = finish_drop.send(());
+        assert_eq!(outcome, Ok(()), "background teardown blocked the caller");
+    }
+
     #[cfg(not(feature = "sequential"))]
     use std::ffi::c_void;
 

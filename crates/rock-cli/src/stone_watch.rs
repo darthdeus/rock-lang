@@ -95,7 +95,7 @@ fn categorize_stone_changes(
 
 fn stone_source_watch_paths(
     project: &str,
-    compiler: &dyn crate::game_runtime::GameCompiler,
+    compiler: &crate::game_runtime::GameCompiler,
 ) -> Vec<PathBuf> {
     match compiler.package_roots() {
         Some(roots) => crate::watch::loaded_source_watch_paths(project, roots),
@@ -229,7 +229,7 @@ fn declaration_hash(path: &std::path::Path) -> u64 {
 /// Reseed the shared comptime set and its routing mirror after a successful
 /// build: the compiled program's declared inputs plus the sound project file.
 fn reseed_comptime_watch(
-    compiler: &dyn crate::game_runtime::GameCompiler,
+    compiler: &crate::game_runtime::GameCompiler,
     sound_paths: &std::collections::HashSet<PathBuf>,
     watched: &mut std::collections::HashSet<PathBuf>,
     comptime_watch: &crate::file_watcher::SharedWatchSet,
@@ -273,6 +273,7 @@ pub(crate) fn do_stone_watch(
     app_args: &[String],
     backend: crate::Backend,
 ) -> Result<()> {
+    debug_assert_eq!(backend, crate::Backend::Skull);
     if !quiet {
         info!("Starting Stone development environment");
         info!("Watching: {}, stdlib/, stone/, compiler", path);
@@ -296,11 +297,6 @@ pub(crate) fn do_stone_watch(
         rock_engine_host::project::STONE_SESSION_DIR,
     ));
 
-    // The backend-specific incremental game compiler (skull: IncrementalProject two-file
-    // split). It is the ONLY backend-specific piece of this loop; everything else
-    // (builds, process, restart) is shared. The runtime owns the changed-path
-    // accumulator the watcher feeds it.
-    //
     // The compiler gets the canonical project root: a compile stamps its
     // `embed_root` from the dir it was handed, so a relative dir would give
     // the session's artifact a different identity from the `rock frame`
@@ -309,7 +305,11 @@ pub(crate) fn do_stone_watch(
         .canonicalize()
         .map_err(|error| anyhow::anyhow!("canonicalize the project root {path}: {error}"))?;
     let compiler_dir = compiler_dir.to_string_lossy().into_owned();
-    let mut compiler = crate::game_runtime::game_compiler_for(backend, &compiler_dir, &output_path);
+    let mut compiler = crate::game_runtime::GameCompiler::new(
+        &compiler_dir,
+        output_path.clone(),
+        output_path.with_file_name("incremental.lua"),
+    );
     let mut changed_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
     // embed_string inputs are sources the extension filter can't know
@@ -356,7 +356,7 @@ pub(crate) fn do_stone_watch(
                     {
                         Ok(build_id) => {
                             reseed_comptime_watch(
-                                compiler.as_ref(),
+                                &compiler,
                                 &sound_paths,
                                 &mut watched,
                                 &comptime_watch,
@@ -399,7 +399,7 @@ pub(crate) fn do_stone_watch(
     let mut native_inputs = rock_engine_host::native_libraries::native_watch_inputs(
         &rock_engine_host::engine_build::game_engine_libs(path)?,
     )?;
-    let mut watch_paths = stone_source_watch_paths(path, compiler.as_ref());
+    let mut watch_paths = stone_source_watch_paths(path, &compiler);
     watch_paths.extend(engine_watch_paths.iter().cloned());
 
     // Create channel for file change events
@@ -594,13 +594,8 @@ pub(crate) fn do_stone_watch(
                     force_game_compile = false;
                     compilation_succeeded = true;
 
-                    reseed_comptime_watch(
-                        compiler.as_ref(),
-                        &sound_paths,
-                        &mut watched,
-                        &comptime_watch,
-                    );
-                    let mut next_paths = stone_source_watch_paths(path, compiler.as_ref());
+                    reseed_comptime_watch(&compiler, &sound_paths, &mut watched, &comptime_watch);
+                    let mut next_paths = stone_source_watch_paths(path, &compiler);
                     next_paths.extend(engine_watch_paths.iter().cloned());
                     watcher.refresh(next_paths, &watched)?;
                     if !outcome.restart_reasons.is_empty() {
@@ -954,7 +949,7 @@ mod watch_reload_tests {
         stone_source_watch_paths,
     };
     use crate::FileChangeEvent;
-    use crate::game_runtime::{GameCompiler, SkullGameCompiler};
+    use crate::game_runtime::GameCompiler;
     use bone_core::prelude::{Duration, Instant};
     use std::collections::HashSet;
     use std::path::PathBuf;
@@ -981,7 +976,7 @@ mod watch_reload_tests {
         root: PathBuf,
         edited: PathBuf,
         main: PathBuf,
-        compiler: SkullGameCompiler,
+        compiler: GameCompiler,
     }
 
     impl Fixture {
@@ -1018,7 +1013,7 @@ mod watch_reload_tests {
             )
             .unwrap();
             let main = root.join("tmp/main.lua");
-            let mut compiler = SkullGameCompiler::new(
+            let mut compiler = GameCompiler::new(
                 root.to_str().unwrap(),
                 main.clone(),
                 root.join("tmp/incremental.lua"),
@@ -1321,7 +1316,7 @@ mod watch_reload_tests {
         std::fs::write(&input, "watch-value-one").unwrap();
         std::fs::write(&next_input, "watch-value-two").unwrap();
         let main = package.join("tmp/main.lua");
-        let mut compiler = SkullGameCompiler::new(
+        let mut compiler = GameCompiler::new(
             source_root.to_str().unwrap(),
             main.clone(),
             package.join("tmp/incremental.lua"),

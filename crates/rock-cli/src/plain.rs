@@ -327,7 +327,7 @@ pub static BACKENDS: &[BackendSpec] = &[SKULL, JS, GLSL];
 
 fn bone_compile(cx: &CommandContext) -> Result<()> {
     let file = cx.get_required_file("compile")?;
-    rock_cli::bone_backend::bone_check_single(file, "compile", cx.args.iters)
+    rock_cli::bone_backend::bone_check_single(file, cx.args.iters)
 }
 
 fn skull_compile(cx: &CommandContext) -> Result<()> {

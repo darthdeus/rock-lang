@@ -3026,8 +3026,7 @@ pub(crate) fn skull_test(
     let suites_start = Instant::now();
     let mut lsp_failed = 0usize;
     for path in paths {
-        let (_t, _p, f, _i) = crate::lsp_test::run_lsp_suite(std::path::Path::new(path))?;
-        lsp_failed += f;
+        lsp_failed += crate::lsp_test::run_lsp_suite(std::path::Path::new(path))?;
     }
 
     // Error-test fixtures (`.rock.err`) verify rejection, which happens in the
@@ -3036,9 +3035,7 @@ pub(crate) fn skull_test(
     let err_start = Instant::now();
     let mut err_failed = 0usize;
     for path in paths {
-        let (_t, _p, f, _i) =
-            crate::error_test::run_error_suite(std::path::Path::new(path), verbose)?;
-        err_failed += f;
+        err_failed += crate::error_test::run_error_suite(std::path::Path::new(path), verbose)?;
     }
 
     crate::invocation_log::note_phase("error_suite", err_start.elapsed().as_millis() as u64);

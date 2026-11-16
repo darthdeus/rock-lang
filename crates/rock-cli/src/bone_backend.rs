@@ -406,9 +406,9 @@ pub(crate) fn categorize(msg: &str) -> String {
 /// references resolve); a bare file goes through the single-source pipeline.
 /// `iters` repeats the check and reports the mean per-stage timing on the
 /// `PROFILE` log target.
-pub(crate) fn bone_check_single(path: &str, command: &str, iters: usize) -> Result<()> {
+pub(crate) fn bone_check_single(path: &str, iters: usize) -> Result<()> {
     if Path::new(path).is_dir() {
-        return bone_check_project(path, command, iters);
+        return bone_check_project(path, iters);
     }
 
     let src = match fs_err::read_to_string(path) {
@@ -441,14 +441,14 @@ pub(crate) fn bone_check_single(path: &str, command: &str, iters: usize) -> Resu
         crate::invocation_log::exit(1);
     }
 
-    log::info!(target: "BONE", "{} type-checks ({})", path, command);
+    log::info!(target: "BONE", "{} type-checks", path);
     report_phase_timing(path, &agg, iters);
     Ok(())
 }
 
 /// [`bone_check_single`] for a project directory: the file set a real compile
 /// discovers, type-checked as one workspace `iters` times.
-fn bone_check_project(path: &str, command: &str, iters: usize) -> Result<()> {
+fn bone_check_project(path: &str, iters: usize) -> Result<()> {
     let source_spec = crate::common::path_to_source_spec(path);
     let sources = crate::unified_compile::discover_sources(&source_spec)?;
 
@@ -485,7 +485,7 @@ fn bone_check_project(path: &str, command: &str, iters: usize) -> Result<()> {
         crate::invocation_log::exit(1);
     }
 
-    log::info!(target: "BONE", "{} type-checks ({})", path, command);
+    log::info!(target: "BONE", "{} type-checks", path);
 
     // rock-style [COMPILE] stats line. bone has no codegen or output-write
     // phase, so `done`/`compile` coincide -- the full parse + type-check

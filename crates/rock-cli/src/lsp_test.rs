@@ -1059,9 +1059,7 @@ impl LspServerCmd<'_> {
     }
 }
 
-/// The shape a fixture's reply must have, one variant per decoder. The
-/// comparison in `run_lsp_test` matches on this, so a new request cannot be
-/// added without a decoder to compare its reply.
+/// The shape a fixture's reply must have, one variant per decoder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReplyKind {
     Completion,
@@ -1077,8 +1075,6 @@ enum ReplyKind {
 }
 
 impl LspOperation {
-    /// The decoder for the reply this request answers with. Total over the
-    /// operations, so no request can reach the comparison without a shape.
     fn reply_kind(&self) -> ReplyKind {
         match self {
             LspOperation::Completion { .. } => ReplyKind::Completion,
@@ -1168,6 +1164,30 @@ fn reply_array<'a>(
         .ok_or_else(|| anyhow::anyhow!("{request}: reply has no `{key}` array; raw reply: {raw}"))
 }
 
+fn all_expected_substrings<'a>(
+    values: impl Iterator<Item = &'a str> + Clone,
+    expected: &[String],
+) -> bool {
+    expected
+        .iter()
+        .all(|item| values.clone().any(|value| value.contains(item.as_str())))
+}
+
+fn reference_locations_match(actual: &[(u64, u64)], expected: &[(u64, u64)]) -> bool {
+    let mut actual = actual.to_vec();
+    let mut expected = expected.to_vec();
+    actual.sort_unstable();
+    expected.sort_unstable();
+    actual == expected
+}
+
+fn minimum_token_counts_match(count: usize, expected: &[String]) -> bool {
+    expected.iter().all(|item| {
+        item.strip_prefix("min_tokens:")
+            .is_none_or(|minimum| count >= minimum.trim().parse::<usize>().unwrap_or(0))
+    })
+}
+
 /// The name of a symbol's `kind`. The server sends the numeric LSP
 /// `SymbolKind`; a name is accepted as is.
 fn symbol_kind_name(kind: &serde_json::Value) -> Option<&str> {
@@ -1244,9 +1264,11 @@ fn run_lsp_test(test: &LspTest, server: LspServerCmd) -> Result<bool> {
     // Names the request in every decode and shape failure below.
     let request = format!("{} test '{}'", test.test_type, test.name);
 
-    // `ReplyKind` has one arm per decoder, so no request falls through to a
-    // raw-output substring match.
-    let all_found = match test.operation.reply_kind() {
+    // `fixture_reply_kind` keeps fixture TYPE dispatch exhaustive, so no
+    // request falls through to raw text matching.
+    let kind =
+        fixture_reply_kind(&test.test_type).expect("fixture type was validated at parse time");
+    let all_found = match kind {
         ReplyKind::Completion => check_completion_reply(test, &request, &stdout)?,
         ReplyKind::Definition => check_definition_reply(test, &request, &stdout)?,
         ReplyKind::References => check_references_reply(test, &request, &stdout)?,
@@ -1276,22 +1298,7 @@ fn run_lsp_test(test: &LspTest, server: LspServerCmd) -> Result<bool> {
 /// Write the fixture's files into a fresh project directory under
 /// `.lsp-test-tmp/` and return the primary file and that directory.
 fn write_fixture_project(test: &LspTest) -> Result<(PathBuf, PathBuf)> {
-    // Create a test file in a local test directory
-    let test_dir = std::path::PathBuf::from(".lsp-test-tmp");
-    fs_err::create_dir_all(&test_dir)?;
-
-    // Sanitise the test name for filesystem use.
-    let safe_name: String = test
-        .name
-        .chars()
-        .map(|c| if c == ' ' || c == '/' { '_' } else { c })
-        .collect();
-    // Fixture names repeat across files and fixtures run in parallel, so the
-    // directory carries the process and a counter; the file keeps the name.
-    static NEXT_PROJECT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let n = NEXT_PROJECT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let proj = test_dir.join(format!("{safe_name}-{}-{n}", std::process::id()));
-    fs_err::create_dir_all(&proj)?;
+    let (safe_name, proj) = new_fixture_project(&test.name)?;
 
     // Multi-file tests get their own subdirectory containing `stick.toml` plus
     // every `FILE:` entry. The primary file (the one with the cursor marker)
@@ -1304,10 +1311,6 @@ fn write_fixture_project(test: &LspTest) -> Result<(PathBuf, PathBuf)> {
             }
             fs_err::write(proj.join(name), content)?;
         }
-        fs_err::write(
-            proj.join("stick.toml"),
-            "[package]\nname = \"lsp_test\"\nversion = \"0.1.0\"\n",
-        )?;
         let primary = if test.primary_file.is_empty() {
             test.files
                 .first()
@@ -1324,14 +1327,31 @@ fn write_fixture_project(test: &LspTest) -> Result<(PathBuf, PathBuf)> {
         // otherwise pick up sibling fixtures' symbols and race against their
         // parallel create/delete. Isolating per test makes the project bound
         // to exactly this file.
-        fs_err::write(
-            proj.join("stick.toml"),
-            "[package]\nname = \"lsp_test\"\nversion = \"0.1.0\"\n",
-        )?;
         let tf = proj.join(format!("{}.rock", safe_name));
         fs_err::write(&tf, &test.code)?;
         Ok((tf, proj))
     }
+}
+
+/// Create a unique temporary project for one fixture. Both one-shot and
+/// edit-sequence tests need a manifest so project-wide queries stay scoped.
+fn new_fixture_project(name: &str) -> Result<(String, PathBuf)> {
+    let test_dir = PathBuf::from(".lsp-test-tmp");
+    fs_err::create_dir_all(&test_dir)?;
+
+    let safe_name: String = name
+        .chars()
+        .map(|c| if c == ' ' || c == '/' { '_' } else { c })
+        .collect();
+    static NEXT_PROJECT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT_PROJECT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let project_dir = test_dir.join(format!("{safe_name}-{}-{n}", std::process::id()));
+    fs_err::create_dir_all(&project_dir)?;
+    fs_err::write(
+        project_dir.join("stick.toml"),
+        "[package]\nname = \"lsp_test\"\nversion = \"0.1.0\"\n",
+    )?;
+    Ok((safe_name, project_dir))
 }
 
 /// The `rock lsp` subcommand and arguments that answer `op` on `test_file`,
@@ -1394,38 +1414,22 @@ fn one_shot_args(op: &LspOperation, test_file: &Path) -> Option<Vec<String>> {
     })
 }
 
-/// The `check_*_reply` functions compare one one-shot reply with the
-/// fixture's `EXPECTED:`. `Ok(false)` is a mismatch; `Err` is a reply that
-/// does not decode or has the wrong shape.
 fn check_completion_reply(test: &LspTest, request: &str, stdout: &str) -> Result<bool> {
-    let mut all_found = true;
-    // `completions` must decode as an array before any label is compared.
     let json = decode_reply(request, stdout)?;
-    let completions = reply_array(request, stdout, &json, "completions")?;
-    let labels: Vec<String> = completions
+    let labels: Vec<String> = reply_array(request, stdout, &json, "completions")?
         .iter()
-        .filter_map(|c| c.get("label").and_then(|l| l.as_str()))
-        .map(|s| s.to_string())
+        .filter_map(|item| item.get("label").and_then(|label| label.as_str()))
+        .map(str::to_string)
         .collect();
-
     if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
         eprintln!("    Checking completions for test '{}'", test.name);
         eprintln!("    Available completions: {:?}", labels);
         eprintln!("    Expected items: {:?}", test.expected);
     }
-    for expected_item in &test.expected {
-        let found = labels.iter().any(|label| label.contains(expected_item));
-        if !found {
-            all_found = false;
-            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                eprintln!("    Expected '{}' not found in completions", expected_item);
-                eprintln!("    Available completions: {:?}", labels);
-            }
-        } else if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-            eprintln!("    Found expected item: '{}'", expected_item);
-        }
-    }
-    Ok(all_found)
+    Ok(all_expected_substrings(
+        labels.iter().map(String::as_str),
+        &test.expected,
+    ))
 }
 
 fn check_definition_reply(test: &LspTest, request: &str, stdout: &str) -> Result<bool> {
@@ -1525,138 +1529,68 @@ fn check_definition_reply(test: &LspTest, request: &str, stdout: &str) -> Result
 }
 
 fn check_references_reply(test: &LspTest, request: &str, stdout: &str) -> Result<bool> {
-    let mut all_found = true;
-    // Strict set-equality: the (line, character) pairs returned by the
-    // LSP must equal exactly the pairs expected — no extras, no missing,
-    // order ignored. `file:` lines in EXPECTED are treated as
-    // placeholders and ignored, mirroring the goto_definition validator
-    // (the harness writes a single tempfile named after the test, not
-    // `main.rock`; multi-file `.rock.lsp` is unsupported, so cross-file
-    // assertions live in `rock-lang/crates/rock-lsp/tests/bone/` instead).
-    //
-    // `EXPECTED:` entries come in groups of three consecutive lines:
-    // `file: ...`, `line: N`, `character: N`. A single line containing
-    // `none` (case-insensitive) asserts the empty set.
-    //
-    // The `references` array must decode before the set is built: an
-    // undecodable or shapeless reply is a server bug, never an empty
-    // result, so it cannot satisfy `EXPECTED: none`.
     let json = decode_reply(request, stdout)?;
-    let actual_refs: Vec<(u64, u64)> = reply_array(request, stdout, &json, "references")?
+    let actual: Vec<(u64, u64)> = reply_array(request, stdout, &json, "references")?
         .iter()
-        .filter_map(|loc| {
-            let start = loc.get("range")?.get("start")?;
-            let line = start.get("line")?.as_u64()?;
-            let character = start.get("character")?.as_u64()?;
-            Some((line, character))
+        .filter_map(|location| {
+            let start = location.get("range")?.get("start")?;
+            Some((
+                start.get("line")?.as_u64()?,
+                start.get("character")?.as_u64()?,
+            ))
         })
         .collect();
-
-    let expects_none = test
+    let no_references_expected = test
         .expected
         .iter()
-        .any(|e| e.trim().eq_ignore_ascii_case("none"));
-
-    if expects_none {
-        if !actual_refs.is_empty() {
-            all_found = false;
-            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                eprintln!("    Expected no references, got {:?}", actual_refs);
-            }
-        }
-    } else {
-        // Group flat EXPECTED lines into (line, character) pairs.
-        // `file:` lines act as group separators / placeholders.
-        let mut expected_refs: Vec<(u64, u64)> = Vec::new();
-        let mut cur_line: Option<u64> = None;
+        .any(|item| item.trim().eq_ignore_ascii_case("none"));
+    let mut expected = Vec::new();
+    if !no_references_expected {
+        let mut line = None;
         for item in &test.expected {
             let item = item.trim();
             if item.starts_with("file:") {
-                cur_line = None;
-            } else if let Some(l) = item.strip_prefix("line:") {
-                cur_line = l.trim().parse().ok();
-            } else if let Some(c) = item.strip_prefix("character:") {
-                if let (Some(l), Ok(ch)) = (cur_line, c.trim().parse::<u64>()) {
-                    expected_refs.push((l, ch));
-                }
-            }
-        }
-
-        let mut a = actual_refs.clone();
-        let mut e = expected_refs.clone();
-        a.sort();
-        e.sort();
-        if a != e {
-            all_found = false;
-            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                let actual_set: std::collections::BTreeSet<_> = actual_refs.iter().collect();
-                let expected_set: std::collections::BTreeSet<_> = expected_refs.iter().collect();
-                let missing: Vec<_> = expected_set.difference(&actual_set).collect();
-                let extra: Vec<_> = actual_set.difference(&expected_set).collect();
-                if !missing.is_empty() {
-                    eprintln!("    Missing references (expected, not returned):");
-                    for r in &missing {
-                        eprintln!("      {:?}", r);
-                    }
-                }
-                if !extra.is_empty() {
-                    eprintln!("    Extra references (returned, not expected):");
-                    for r in &extra {
-                        eprintln!("      {:?}", r);
-                    }
+                line = None;
+            } else if let Some(value) = item.strip_prefix("line:") {
+                line = value.trim().parse().ok();
+            } else if let Some(value) = item.strip_prefix("character:") {
+                if let (Some(line), Ok(character)) = (line, value.trim().parse::<u64>()) {
+                    expected.push((line, character));
                 }
             }
         }
     }
-    Ok(all_found)
+    let matches = reference_locations_match(&actual, &expected);
+    if !matches && std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+        eprintln!(
+            "    Reference mismatch: got {:?}, expected {:?}",
+            actual, expected
+        );
+    }
+    Ok(matches)
 }
 
 fn check_semantic_tokens_reply(test: &LspTest, request: &str, stdout: &str) -> Result<bool> {
-    let mut all_found = true;
-    // For semantic_tokens, check for minimum number of tokens
     let json = decode_reply(request, stdout)?;
-    // The rock-lsp outputs in a custom format with count and tokens fields
-    let token_count = if let Some(count) = json.get("count").and_then(|c| c.as_u64()) {
+    let token_count = if let Some(count) = json.get("count").and_then(|value| value.as_u64()) {
         count as usize
-    } else if let Some(tokens) = json.get("tokens").and_then(|t| t.as_array()) {
+    } else if let Some(tokens) = json.get("tokens").and_then(|value| value.as_array()) {
         tokens.len()
-    } else if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
-        data.len() / 5 // Each token is 5 integers in LSP format
+    } else if let Some(data) = json.get("data").and_then(|value| value.as_array()) {
+        data.len() / 5
     } else {
         return Err(anyhow::anyhow!(
             "{request}: reply has no `count`, `tokens` or `data` field; raw reply: {stdout}"
         ));
     };
-
-    if token_count > 0 {
-        // Check if we have the minimum expected tokens
-        for expected_item in &test.expected {
-            if expected_item.starts_with("min_tokens:") {
-                let min_tokens: usize = expected_item
-                    .strip_prefix("min_tokens:")
-                    .unwrap()
-                    .trim()
-                    .parse()
-                    .unwrap_or(0);
-
-                if token_count < min_tokens {
-                    all_found = false;
-                    if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                        eprintln!(
-                            "    Expected at least {} tokens, got {}",
-                            min_tokens, token_count
-                        );
-                    }
-                }
-            }
-        }
-    } else {
-        all_found = false;
-        if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-            eprintln!("    No semantic tokens data found in output");
-        }
+    let matches = token_count > 0 && minimum_token_counts_match(token_count, &test.expected);
+    if !matches && std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+        eprintln!(
+            "    Expected semantic tokens {:?}, got {}",
+            test.expected, token_count
+        );
     }
-    Ok(all_found)
+    Ok(matches)
 }
 
 fn check_signature_help_reply(test: &LspTest, request: &str, stdout: &str) -> Result<bool> {
@@ -1782,47 +1716,26 @@ fn check_inlay_hints_reply(test: &LspTest, request: &str, stdout: &str) -> Resul
 }
 
 fn check_hover_reply(test: &LspTest, request: &str, stdout: &str) -> Result<bool> {
-    let mut all_found = true;
-    // For hover, check the hover contents
     let json = decode_reply(request, stdout)?;
-    let hover_contents = json
+    let contents = json
         .get("hover")
-        .and_then(|h| h.get("contents"))
-        .and_then(|c| {
-            // Handle both string and MarkupContent formats
-            if let Some(s) = c.as_str() {
-                Some(s.to_string())
-            } else if let Some(markup) = c.as_object() {
-                markup
-                    .get("value")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            } else {
-                None
-            }
+        .and_then(|hover| hover.get("contents"))
+        .and_then(|contents| {
+            contents
+                .as_str()
+                .or_else(|| contents.get("value").and_then(|value| value.as_str()))
         })
         .ok_or_else(|| {
             anyhow::anyhow!("{request}: reply has no `hover.contents`; raw reply: {stdout}")
         })?;
-
-    // Join all expected lines into a single expected string
-    let expected_full = test.expected.join("\n");
-
-    // Normalize whitespace for comparison
-    let contents_normalized = hover_contents.trim();
-    let expected_normalized = expected_full.trim();
-
-    if contents_normalized != expected_normalized {
-        all_found = false;
-        if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-            eprintln!("    Hover content mismatch");
-            eprintln!("    Expected:");
-            eprintln!("{}", expected_normalized);
-            eprintln!("    Actual:");
-            eprintln!("{}", contents_normalized);
-        }
+    let expected = test.expected.join("\n");
+    let matches = contents.trim() == expected.trim();
+    if !matches && std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+        eprintln!("    Hover content mismatch");
+        eprintln!("    Expected:\n{}", expected.trim());
+        eprintln!("    Actual:\n{}", contents.trim());
     }
-    Ok(all_found)
+    Ok(matches)
 }
 
 fn check_symbols_reply(test: &LspTest, request: &str, stdout: &str) -> Result<bool> {
@@ -2505,26 +2418,17 @@ fn run_edit_sequence_test(test: &EditSequenceTest, server: LspServerCmd) -> Resu
     let verbose = std::env::var("ROCK_TEST_VERBOSE").is_ok();
     let mut failures = Vec::new();
 
-    let test_dir = PathBuf::from(".lsp-test-tmp");
-    std::fs::create_dir_all(&test_dir)?;
-    let test_file = test_dir.join(format!(
-        "{}.rock",
-        test.name
-            .chars()
-            .map(|c| if c == ' ' || c == '/' { '_' } else { c })
-            .collect::<String>()
-    ));
-    let test_uri =
-        file_uri(&std::fs::canonicalize(&test_dir)?.join(test_file.file_name().unwrap()))?;
-
     let StepMode::FullReplace { code: initial_code } = &test.steps[0].mode else {
         return Err(anyhow::anyhow!(
             "First step in edit_sequence must be a full document (STEP N:), not a typing/delete step"
         ));
     };
+    let (safe_name, project_dir) = new_fixture_project(&test.name)?;
+    let test_file = project_dir.join(format!("{safe_name}.rock"));
     std::fs::write(&test_file, initial_code)?;
+    let test_uri = file_uri(&std::fs::canonicalize(&test_file)?)?;
 
-    let mut server = start_lsp_server(server, &test_dir, &test.name)?;
+    let mut server = start_lsp_server(server, &project_dir, &test.name)?;
     let mut version: i64 = 1;
     let mut current_doc = initial_code.clone();
     server.notify(
@@ -2664,7 +2568,7 @@ fn run_edit_sequence_test(test: &EditSequenceTest, server: LspServerCmd) -> Resu
     }
 
     server.shutdown()?;
-    let _ = std::fs::remove_file(&test_file);
+    let _ = fs_err::remove_dir_all(&project_dir);
     Ok(failures)
 }
 
@@ -2692,32 +2596,13 @@ fn check_semantic_tokens_response(
         );
     }
 
-    let mut all_ok = true;
-    for exp in expected {
-        if let Some(min_str) = exp.strip_prefix("min_tokens:") {
-            let min_tokens: usize = min_str.trim().parse().unwrap_or(0);
-            if token_count < min_tokens {
-                all_ok = false;
-                if verbose {
-                    eprintln!(
-                        "    Step {}: FAIL - expected at least {} tokens, got {}",
-                        step_idx + 1,
-                        min_tokens,
-                        token_count
-                    );
-                }
-            }
-        } else if exp == "non_zero" {
-            if token_count == 0 {
-                all_ok = false;
-                if verbose {
-                    eprintln!(
-                        "    Step {}: FAIL - expected non-zero tokens, got 0",
-                        step_idx + 1
-                    );
-                }
-            }
-        }
+    let all_ok = minimum_token_counts_match(token_count, expected)
+        && (!expected.iter().any(|item| item == "non_zero") || token_count > 0);
+    if !all_ok && verbose {
+        eprintln!(
+            "    Step {}: FAIL - semantic token expectations not met",
+            step_idx + 1
+        );
     }
     all_ok
 }
@@ -2754,18 +2639,12 @@ fn check_completion_response(
         );
     }
 
-    let mut all_ok = true;
-    for exp in expected {
-        if !labels.iter().any(|l| l.contains(exp)) {
-            all_ok = false;
-            if verbose {
-                eprintln!(
-                    "    Step {}: FAIL - expected completion '{}' not found",
-                    step_idx + 1,
-                    exp
-                );
-            }
-        }
+    let all_ok = all_expected_substrings(labels.iter().map(String::as_str), expected);
+    if !all_ok && verbose {
+        eprintln!(
+            "    Step {}: FAIL - expected completion not found",
+            step_idx + 1
+        );
     }
     all_ok
 }
@@ -2780,7 +2659,7 @@ fn check_references_response(
     step_idx: usize,
     verbose: bool,
 ) -> bool {
-    let mut got: Vec<(u64, u64)> = response
+    let got: Vec<(u64, u64)> = response
         .get("result")
         .and_then(|r| r.as_array())
         .map(|locs| {
@@ -2795,21 +2674,17 @@ fn check_references_response(
                 .collect()
         })
         .unwrap_or_default();
-    got.sort();
-
-    let mut want: Vec<(u64, u64)> = expected
+    let want: Vec<(u64, u64)> = expected
         .iter()
         .filter_map(|l| {
             let (a, b) = l.trim().split_once(':')?;
             Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
         })
         .collect();
-    want.sort();
-
     if verbose {
         eprintln!("    Step {}: references = {:?}", step_idx + 1, got);
     }
-    let ok = got == want;
+    let ok = reference_locations_match(&got, &want);
     if !ok && verbose {
         eprintln!(
             "    Step {}: FAIL - references mismatch: got {:?}, want {:?}",
@@ -2856,18 +2731,12 @@ fn check_hover_response(
         return ok;
     }
 
-    let mut all_ok = true;
-    for exp in expected {
-        if !hover_text.contains(exp) {
-            all_ok = false;
-            if verbose {
-                eprintln!(
-                    "    Step {}: FAIL - expected '{}' in hover",
-                    step_idx + 1,
-                    exp
-                );
-            }
-        }
+    let all_ok = all_expected_substrings(std::iter::once(hover_text), expected);
+    if !all_ok && verbose {
+        eprintln!(
+            "    Step {}: FAIL - expected hover content not found",
+            step_idx + 1
+        );
     }
     all_ok
 }
@@ -3000,11 +2869,10 @@ fn lsp_files_under(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Run the `.rock.lsp` suite under `path` (a file or a tree containing
-/// `tests/lsp`) if present. Returns `(total, passed, failed, ignored)`; zeros
-/// when there are no fixtures.
-pub(crate) fn run_lsp_suite(path: &Path) -> Result<(usize, usize, usize, usize)> {
+/// `tests/lsp`) if present. Returns the number of failed fixtures.
+pub(crate) fn run_lsp_suite(path: &Path) -> Result<usize> {
     let Some(root) = lsp_suite_root(path) else {
-        return Ok((0, 0, 0, 0));
+        return Ok(0);
     };
     let (mut lsp_files, display_root) = if root.is_file() {
         println!("\nRunning LSP test file {}...", root.display());
@@ -3033,7 +2901,7 @@ pub(crate) fn run_lsp_suite(path: &Path) -> Result<(usize, usize, usize, usize)>
     }
     lsp_files.sort();
     if lsp_files.is_empty() {
-        return Ok((0, 0, 0, 0));
+        return Ok(0);
     }
 
     let start_time = bone_core::prelude::Instant::now();
@@ -3077,7 +2945,7 @@ pub(crate) fn run_lsp_suite(path: &Path) -> Result<(usize, usize, usize, usize)>
         );
     }
 
-    Ok((total, passed, failed, 0))
+    Ok(failed)
 }
 #[cfg(test)]
 mod stderr_log_tests {

@@ -603,14 +603,3 @@ var __rock_host = {
   env_var: function(n) { var v = process.env[n]; return v === undefined ? null : v; }
 };
 "#;
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn truncate_cuts_emitted_js_on_a_char_boundary() {
-        let js = format!("{}\u{e9}{}", "a".repeat(3999), "b".repeat(10));
-        let excerpt = crate::skull_backend::program_excerpt(&[&js]);
-        assert!(excerpt.starts_with(&"a".repeat(3999)), "{}", &excerpt[..40]);
-        assert!(excerpt.ends_with("more bytes)"), "{excerpt}");
-    }
-}

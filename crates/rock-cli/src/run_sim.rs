@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ExitStatus, Stdio};
+use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -1189,7 +1189,6 @@ fn compile_receipt_in_child(
             rock_exe.display()
         )
     })?;
-    crate::child_lifetime::release_bound_child(child.id());
     if !status.success() {
         return Err(anyhow!(
             "cannot compile project {}: the sim compile process exited with {status}",
@@ -3340,7 +3339,7 @@ fn consume_reload_completion(
     Ok(request_id)
 }
 
-fn terminate_reload_child(child: &mut Child) -> Result<ExitStatus> {
+fn terminate_reload_child(child: &mut crate::headless_scope::BoundChild) -> Result<ExitStatus> {
     if let Err(kill_error) = child.kill() {
         if child.try_wait()?.is_none() {
             return Err(kill_error).context("stopping sim after reload rejection");
@@ -4195,14 +4194,14 @@ struct AdmittedWorker {
 }
 
 impl std::ops::Deref for AdmittedWorker {
-    type Target = Child;
-    fn deref(&self) -> &Child {
+    type Target = crate::headless_scope::BoundChild;
+    fn deref(&self) -> &Self::Target {
         &self.child
     }
 }
 
 impl std::ops::DerefMut for AdmittedWorker {
-    fn deref_mut(&mut self) -> &mut Child {
+    fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.child
     }
 }
@@ -4654,9 +4653,6 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
             }
         }
     };
-    // Every loop exit reaped the child; release its bound slot now so a
-    // later TERM cannot be forwarded to a reused pid.
-    crate::child_lifetime::release_bound_child(process_id);
     if let Some(recorder) = recorder {
         #[cfg(unix)]
         let signal = status.signal();

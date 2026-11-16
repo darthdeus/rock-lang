@@ -34,7 +34,6 @@ mod linux {
         )
         .unwrap();
         let status = child.wait().unwrap();
-        rock_cli::child_lifetime::release_bound_child(child.id());
         panic!("bound child exited before launcher death: {status}");
     }
 

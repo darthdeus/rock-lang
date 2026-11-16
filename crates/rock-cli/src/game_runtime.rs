@@ -1,6 +1,6 @@
 use crate::*;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// What a successful (re)compile asks of the runtime beyond hot-reloading.
 #[derive(Default)]
@@ -11,52 +11,12 @@ pub struct CompileOutcome {
     pub restart_reasons: Vec<String>,
 }
 
-/// A backend's incremental game compiler. Owns all cross-reload state and the
-/// output paths; `compile` writes `<out>/main.lua` (+ optional
-/// `<out>/incremental.lua` overlay) that the running engine hot-reloads. The
-/// caller picks `<out>`: `tmp/` for run/frame/perf, a private
-/// `tmp/stone/<game>-<pid>/` per `rock stone` session.
-pub trait GameCompiler {
-    /// (Re)compile the project. `changed` = game source paths the watcher saw
-    /// since the last call (empty on the initial build). `force_full` forces a
-    /// from-scratch rebuild (set after a compiler-binary rebuild wiped caches).
-    /// Writes the engine-loadable Lua, EXCEPT when the outcome requests a
-    /// restart (see `CompileOutcome`). The backend logs its own reload detail
-    /// (skull: full vs overlay vs no-change) internally. Err => the caller
-    /// reports the error and keeps serving the last good output.
-    fn compile(&mut self, changed: &HashSet<PathBuf>, force_full: bool) -> Result<CompileOutcome>;
-
-    /// Fold any overlay back into `main.lua` so a *process restart* (luajit
-    /// loads `main.lua` only) gets the complete current program. No-op for
-    /// backends without an overlay.
-    fn canonicalize_for_restart(&mut self) -> Result<()> {
-        Ok(())
-    }
-
-    /// Comptime file inputs (`embed_string`) baked into the current program,
-    /// with the hash of the bytes the lowering baked in. The watcher treats
-    /// them as sources and seeds them against what was compiled; empty for
-    /// backends without the concept.
-    fn comptime_watch_files_with_hashes(&self) -> Vec<(PathBuf, u64)> {
-        Vec::new()
-    }
-
-    /// Source roots retained by the successful loaded package graph.
-    fn package_roots(&self) -> Option<&[(u32, PathBuf)]> {
-        None
-    }
-
-    /// The exact compiler-owned identity of the Artifact the next process
-    /// would execute. A missing value is an error at every replay/recording
-    /// launch boundary; callers must not invent a development identity.
-    fn artifact_fingerprint(&self) -> Result<String> {
-        anyhow::bail!("compiler did not publish an Artifact fingerprint")
-    }
-}
-
-/// Skull backend: bone `Session` + `SkullEmitCache` (the `IncrementalProject` holder),
-/// emitting a full `main.lua` baseline or an `incremental.lua` overlay per tier.
-pub struct SkullGameCompiler {
+/// The incremental game compiler. Owns all cross-reload state and the output
+/// paths; `compile` writes `<out>/main.lua` (+ optional `<out>/incremental.lua`
+/// overlay) that the running engine hot-reloads. The caller picks `<out>`:
+/// `tmp/` for run/frame/perf, a private `tmp/stone/<game>-<pid>/` per `rock
+/// stone` session.
+pub struct GameCompiler {
     stone: Option<crate::skull_backend::IncrementalProject>,
     dir: String,
     output_path: PathBuf,
@@ -66,7 +26,7 @@ pub struct SkullGameCompiler {
     pending_full_write: bool,
 }
 
-impl SkullGameCompiler {
+impl GameCompiler {
     pub fn new(path: &str, output_path: PathBuf, incremental_path: PathBuf) -> Self {
         Self {
             stone: None,
@@ -76,10 +36,19 @@ impl SkullGameCompiler {
             pending_full_write: false,
         }
     }
-}
 
-impl GameCompiler for SkullGameCompiler {
-    fn compile(&mut self, changed: &HashSet<PathBuf>, force_full: bool) -> Result<CompileOutcome> {
+    /// (Re)compile the project. `changed` = game source paths the watcher saw
+    /// since the last call (empty on the initial build). `force_full` forces a
+    /// from-scratch rebuild (set after a compiler-binary rebuild wiped caches).
+    /// Writes the engine-loadable Lua, EXCEPT when the outcome requests a
+    /// restart (see `CompileOutcome`). The backend logs its own reload detail
+    /// (skull: full vs overlay vs no-change) internally. Err => the caller
+    /// reports the error and keeps serving the last good output.
+    pub fn compile(
+        &mut self,
+        changed: &HashSet<PathBuf>,
+        force_full: bool,
+    ) -> Result<CompileOutcome> {
         use crate::skull_backend::{IncrementalProject, SkullReload};
 
         if force_full {
@@ -145,7 +114,9 @@ impl GameCompiler for SkullGameCompiler {
         }
     }
 
-    fn canonicalize_for_restart(&mut self) -> Result<()> {
+    /// Fold any overlay back into `main.lua` so a *process restart* (luajit
+    /// loads `main.lua` only) gets the complete current program.
+    pub fn canonicalize_for_restart(&mut self) -> Result<()> {
         // A restart re-spawns luajit, which loads main.lua only -- it does NOT
         // dual-load the accumulated incremental.lua. Fold the overlay back in
         // first so the restarted process gets the complete current program.
@@ -161,47 +132,28 @@ impl GameCompiler for SkullGameCompiler {
         Ok(())
     }
 
-    fn comptime_watch_files_with_hashes(&self) -> Vec<(PathBuf, u64)> {
+    /// Comptime file inputs (`embed_string`) baked into the current program,
+    /// with the hash of the bytes the lowering baked in. The watcher treats
+    /// them as sources and seeds them against what was compiled.
+    pub fn comptime_watch_files_with_hashes(&self) -> Vec<(PathBuf, u64)> {
         self.stone
             .as_ref()
             .map(|st| st.comptime_watch_files_with_hashes())
             .unwrap_or_default()
     }
 
-    fn package_roots(&self) -> Option<&[(u32, PathBuf)]> {
+    /// Source roots retained by the successful loaded package graph.
+    pub fn package_roots(&self) -> Option<&[(u32, PathBuf)]> {
         self.stone.as_ref().map(|stone| stone.package_roots())
     }
 
-    fn artifact_fingerprint(&self) -> Result<String> {
+    /// The exact compiler-owned identity of the Artifact the next process
+    /// would execute. A missing value is an error at every replay/recording
+    /// launch boundary; callers must not invent a development identity.
+    pub fn artifact_fingerprint(&self) -> Result<String> {
         self.stone
             .as_ref()
             .map(|stone| stone.artifact_fingerprint().to_string())
             .ok_or_else(|| anyhow::anyhow!("compiler did not publish an Artifact fingerprint"))
-    }
-}
-
-/// Construct the `GameCompiler` for a backend. `output_path` is the caller's
-/// `main.lua`; bounded invocations and interactive sessions own their output
-/// directories. The skull overlay is its `incremental.lua` sibling. Only skull
-/// serves the game commands now (bone has no codegen, rock is gone), so anything
-/// else is a dispatch bug.
-pub(crate) fn game_compiler_for(
-    backend: crate::Backend,
-    path: &str,
-    output_path: &Path,
-) -> Box<dyn GameCompiler + Send> {
-    match backend {
-        crate::Backend::Skull => {
-            let incremental_path = output_path.with_file_name("incremental.lua");
-            Box::new(SkullGameCompiler::new(
-                path,
-                output_path.to_path_buf(),
-                incremental_path,
-            ))
-        }
-        other => panic!(
-            "game_compiler_for reached non-skull backend {:?}; only skull serves the game commands",
-            other.name()
-        ),
     }
 }

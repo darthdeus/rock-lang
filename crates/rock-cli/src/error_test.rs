@@ -317,9 +317,9 @@ fn run_case(tc: &ErrorTestCase) -> ErrorTestResult {
 /// path). `backend` is informational -- bone is the shared front end, so both
 /// verify rejection identically. The error-KIND suffix is rock-specific (bone
 /// diagnostics mostly carry no kind), so this asserts REJECTION only.
-pub(crate) fn run_error_suite(path: &Path, verbose: bool) -> Result<(usize, usize, usize, usize)> {
+pub(crate) fn run_error_suite(path: &Path, verbose: bool) -> Result<usize> {
     let Some(dir) = find_error_test_dir(path) else {
-        return Ok((0, 0, 0, 0));
+        return Ok(0);
     };
     println!(
         "\nRunning error tests in {} (bone front end)...",
@@ -327,7 +327,7 @@ pub(crate) fn run_error_suite(path: &Path, verbose: bool) -> Result<(usize, usiz
     );
 
     let start = Instant::now();
-    let (mut total, mut passed, mut failed, mut todos) = (0usize, 0usize, 0usize, 0usize);
+    let (mut passed, mut failed, mut todos) = (0usize, 0usize, 0usize);
     let mut failures: Vec<(PathBuf, String)> = Vec::new();
 
     // Fixture files in walk order; a file that does not parse is a failure.
@@ -367,7 +367,6 @@ pub(crate) fn run_error_suite(path: &Path, verbose: bool) -> Result<(usize, usiz
             }
         };
         for tc in &error_test.test_cases {
-            total += 1;
             match results.next().expect("one result per case") {
                 ErrorTestResult::Pass => {
                     passed += 1;
@@ -413,7 +412,7 @@ pub(crate) fn run_error_suite(path: &Path, verbose: bool) -> Result<(usize, usiz
         }
     }
 
-    Ok((total, passed, failed, todos))
+    Ok(failed)
 }
 
 fn is_error_test_file(path: &Path) -> bool {

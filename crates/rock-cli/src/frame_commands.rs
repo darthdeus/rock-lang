@@ -618,6 +618,52 @@ mod tests {
         );
     }
     #[test]
+    fn successful_perf_runs_preserve_the_exact_log_filter() {
+        let lines = [
+            ("plain output", false),
+            ("[profile] samples", true),
+            ("Error: runtime failure", true),
+            ("an error continuation", true),
+            ("[   0.001s ERROR] failure", true),
+            ("[   0.001s WARN ] caution", true),
+            ("[   0.001s INFO ] status", false),
+            ("[   0.001s DEBUG] status", false),
+            ("[   0.001s TRACE] status", false),
+            ("\x1b[1;31m[   0.001s ERROR] failure\x1b[0m", true),
+            ("\x1b[33m[   0.001s WARN ] caution\x1b[0m", true),
+            ("\x1b[33m[   0.001s ERROR] wrong color\x1b[0m", false),
+            ("[   0.001s WARN ] continuation without reset", true),
+            ("\x1b[0m", false),
+            ("[1.23s SCORE] result", false),
+            ("[   0.001s ERROR]no separator", false),
+            ("[    0.001s WARN ] excess padding", false),
+            ("[  0.001s WARN ] insufficient padding", false),
+            ("[   0.01s WARN ] short fraction", false),
+            ("[   0.0010s WARN ] long fraction", false),
+            ("[   0.001s WARN] short tag", false),
+            ("[   0.001s WARN ]", false),
+            ("[   0.001s WARN ] ", true),
+            ("[1234.001s WARN ] wide time", true),
+            ("[   0.001s WARN ]x", false),
+            ("[   0.001s WARN ]~time", true),
+        ];
+        let stderr = lines
+            .iter()
+            .map(|(line, _)| *line)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let expected: Vec<_> = lines
+            .iter()
+            .filter_map(|(line, keep)| keep.then_some(*line))
+            .collect();
+        assert_eq!(perf_stderr_lines(&stderr, false), expected);
+        assert_eq!(
+            perf_stderr_lines(&stderr, true),
+            stderr.lines().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn perf_process_is_headless_without_screenshot_mode() {
         let mut cmd = std::process::Command::new("true");
         apply_perf_env(&mut cmd);
