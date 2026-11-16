@@ -4,8 +4,19 @@
 // a failure here aborts module load, which would take down every other test
 // in the file.
 
+// Lua's checked host also observes module loading; verify its intentional
+// record before the first test. The JS runner does not collect startup logs.
+inline(lua) fn verify_startup_log() = """
+    local log = assert(_G.__rock_logged_errors)
+    local records = log.records()
+    assert(#records == 1 and records[1] == "[INIT_TEST] from global initializer")
+    assert(log.take(records[1]))
+"""
+inline(js) fn verify_startup_log() = ""
+
 global startup_log_count: int = {
     log_once("INIT_TEST", "from global initializer", "global-init-key")
+    verify_startup_log()
     1
 }
 

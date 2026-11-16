@@ -101,7 +101,8 @@ inline(lua) fn capture_log(body: fn() -> ()) -> string = """
     local saved = rawget(_G, "__rock_log_sink")
     local seen = {}
     _G.__rock_log_sink = function(level, category, msg)
-        seen[#seen + 1] = level .. ":" .. category .. ":" .. msg
+        assert(level == 0, "terminal cleanup logs at error level")
+        seen[#seen + 1] = "[" .. category .. "] " .. msg
     end
     pcall(body)
     _G.__rock_log_sink = saved
@@ -111,7 +112,8 @@ inline(js) fn capture_log(body: fn() -> ()) -> string = """
     var saved = __G.__rock_log_sink;
     var seen = [];
     __G.__rock_log_sink = function(level, category, msg) {
-        seen.push(level + ":" + category + ":" + msg);
+        if (level !== 0) throw new Error("terminal cleanup logs at error level");
+        seen.push("[" + category + "] " + msg);
     };
     try { __rock_call(body); } catch (e) {}
     __G.__rock_log_sink = saved;
@@ -126,7 +128,7 @@ fn kill_multi() {
 
 // The defer failure goes through the Rock logger, so an installed sink
 // receives it (error level, CO tag) and nothing is printed.
-@test(output = "0:CO:coroutine defer failed during cleanup: defer-boom")
+@test(output = "[CO] coroutine defer failed during cleanup: defer-boom")
 fn test_terminal_defer_failure_reaches_the_log_sink() {
     LOG = []
     print(capture_log(() => kill_multi()))
