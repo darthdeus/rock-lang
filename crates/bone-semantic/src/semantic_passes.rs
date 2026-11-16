@@ -650,7 +650,7 @@ fn embed_target(ws: &Workspace, ty: TyId) -> EmbedTarget {
     };
     let arena = &ws.module(mid).ty_arena;
     // Peel `?`: `embed f: Foo?` is a presence slot over the same leaves.
-    while let TypeExpr::Nullable(inner) = arena[idx] {
+    if let TypeExpr::Nullable(inner) = arena[idx] {
         idx = inner;
     }
     match arena[idx] {
