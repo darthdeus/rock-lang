@@ -119,29 +119,3 @@ fn main() {
     assert!(preflight < conditional, "{body}");
     assert_eq!(run_main(&lua), "2 1 1");
 }
-
-#[test]
-fn preparation_runs_once_when_its_callback_changes_the_receiver() {
-    let source = r#"
-struct Buffer { capacity: int, count: int, value: int }
-global HOOK: fn() = () => {}
-fn prepare(b: Buffer) -> Buffer {
-    if b.count == b.capacity { b.capacity += 1; HOOK() }
-    return b
-}
-fn tail(b: Buffer, value: int) {
-    b.value = value
-    b.count += 1
-}
-@preflight("prepare", "tail") fn append(b: Buffer, value: int) {
-    tail(prepare(b), value)
-}
-fn main() {
-    let b = Buffer { capacity: 0, count: 0, value: -1 }
-    HOOK = () => { b.count = b.capacity }
-    append(b, 7)
-    print("{b.capacity} {b.count} {b.value}")
-}
-"#;
-    assert_eq!(run_main(&emit_module(source)), "1 2 7");
-}

@@ -1,0 +1,43 @@
+// Lambdas nested inside a branch that constant folding removes are dropped
+// with it; scope analysis must not look up a parent scope for them.
+
+fn two_deep() -> int {
+    if false {
+        let outer = () => {
+            let inner = () => 3
+            return inner()
+        }
+        return outer()
+    }
+    return 42
+}
+
+fn three_deep() -> int {
+    if false {
+        let outer = () => {
+            let mid = () => {
+                let inner = () => 7
+                return inner()
+            }
+            return mid()
+        }
+        return outer()
+    }
+    return 5
+}
+
+fn capturing(x: int) -> int {
+    if false {
+        let outer = () => {
+            let inner = () => x + 1
+            return inner()
+        }
+        return outer()
+    }
+    return x * 2
+}
+
+@test(output = "42 5 8")
+fn dead_nested_lambdas_compile_and_the_live_path_runs() {
+    print("{two_deep()} {three_deep()} {capturing(4)}")
+}

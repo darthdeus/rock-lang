@@ -1,0 +1,82 @@
+// `@preflight("prepare", "tail")` hoists the receiver's preparation ahead of
+// the call's argument evaluation; the observable order must stay the source
+// order wherever an argument could see the difference.
+
+struct Buffer { capacity: int, count: int, value: int }
+fn prepare(b: Buffer) -> Buffer {
+    if b.count == b.capacity { b.capacity += 1 }
+    return b
+}
+fn tail(b: Buffer, value: int) -> bool {
+    b.value = value
+    b.count += 1
+    return true
+}
+@preflight("prepare", "tail") fn append(b: Buffer, value: int) -> bool {
+    return tail(prepare(b), value)
+}
+
+@test(output = "0 1 1")
+fn receiver_capacity_read_is_before_growth() {
+    let b = Buffer { capacity: 0, count: 0, value: -1 }
+    append(b, b.capacity)
+    print("{b.value} {b.capacity} {b.count}")
+}
+
+@test(output = "false 0 0\n9 1 1")
+fn short_circuit_and_argument_block_keep_branch_scope() {
+    let b = Buffer { capacity: 0, count: 0, value: -1 }
+    let skipped = false && append(b, 5)
+    print("{skipped} {b.capacity} {b.count}")
+    append(b, if true { let local_value = 7; local_value + 2 } else { 3 })
+    print("{b.value} {b.capacity} {b.count}")
+}
+
+global ORDER: int = 0
+fn receiver(b: Buffer) -> Buffer { ORDER = ORDER * 10 + 2; return b }
+fn arg() -> int { ORDER = ORDER * 10 + 1; return 7 }
+fn plain(a: int, b: int) -> int { return a * 10 + b }
+
+@test(output = "2 5 1\n12 7 2\n12")
+fn receiver_runs_once_and_late_named_receiver_stays_late() {
+    ORDER = 0
+    let b = Buffer { capacity: 0, count: 0, value: -1 }
+    append(receiver(b), 5)
+    print("{ORDER} {b.value} {b.count}")
+    ORDER = 0
+    append(value: arg(), b: receiver(b))
+    print("{ORDER} {b.value} {b.count}")
+    print(plain(b: 2, a: 1))
+}
+
+// A preparation whose callback re-enters user code.
+struct HookBuffer { capacity: int, count: int, value: int }
+global HOOK: fn() = () => {}
+fn prepare_hooked(b: HookBuffer) -> HookBuffer {
+    if b.count == b.capacity { b.capacity += 1; HOOK() }
+    return b
+}
+fn tail_hooked(b: HookBuffer, value: int) {
+    b.value = value
+    b.count += 1
+}
+@preflight("prepare_hooked", "tail_hooked") fn append_hooked(b: HookBuffer, value: int) {
+    tail_hooked(prepare_hooked(b), value)
+}
+
+@test(output = "1 2 7")
+fn preparation_runs_once_when_its_callback_changes_the_receiver() {
+    let b = HookBuffer { capacity: 0, count: 0, value: -1 }
+    HOOK = () => { b.count = b.capacity }
+    append_hooked(b, 7)
+    print("{b.capacity} {b.count} {b.value}")
+}
+
+@test(output = "8 9 1")
+fn captured_scalar_keeps_its_value_when_the_hook_calls_back() {
+    let x = 7
+    HOOK = () => { x = 9 }
+    let b = HookBuffer { capacity: 0, count: 0, value: -1 }
+    append_hooked(b, x + 1)
+    print("{b.value} {x} {b.count}")
+}
