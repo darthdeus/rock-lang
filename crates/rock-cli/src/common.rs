@@ -32,6 +32,14 @@ pub(crate) fn single_source(path: &str, src: &str) -> SourceFiles {
     ))
 }
 
+pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string())
+}
+
 pub struct ProcessManager;
 
 impl ProcessManager {

@@ -13,8 +13,8 @@
 //! list.
 
 use crate::Result;
-use crate::bone_backend::{categorize, short_path};
 use crate::test_protocol::{parse_skull_markers, reason_histogram};
+use crate::test_unit::{UnitCheck, UnitFailure};
 use bone_core::prelude::Instant;
 use colored::Colorize;
 use skull_mir::mir::FuncRef;
@@ -129,24 +129,7 @@ pub fn js_test_run(paths: &[String], print: bool) -> Result<JsSuiteSummary> {
     };
     let mut all_skip_reasons: Vec<String> = Vec::new();
 
-    // bone can panic during inference on some inputs (a bone bug); contain it
-    // per unit like the luajit driver does.
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-
-    let mut outcomes: Vec<(String, std::thread::Result<JsUnitOutcome>)> = Vec::new();
-    for file in &files {
-        let outcome =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| js_build_file(file)));
-        outcomes.push((short_path(file), outcome));
-    }
-    for dir in &package_dirs {
-        let outcome =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| js_build_package(dir)));
-        outcomes.push((short_path(dir), outcome));
-    }
-
-    std::panic::set_hook(prev_hook);
+    let outcomes = crate::test_unit::build_units(&files, &package_dirs, js_build_unit);
 
     for (label, outcome) in outcomes {
         summary.files += 1;
@@ -216,11 +199,7 @@ pub fn js_test_run(paths: &[String], print: bool) -> Result<JsSuiteSummary> {
             }
             Err(panic) => {
                 summary.unit_failures += 1;
-                let msg = panic
-                    .downcast_ref::<&str>()
-                    .map(|s| s.to_string())
-                    .or_else(|| panic.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "unknown panic".to_string());
+                let msg = crate::common::panic_message(&*panic);
                 if print {
                     println!("{:.<60} {}  {}", label, "PANIC".red().bold(), msg.dimmed());
                 }
@@ -232,137 +211,26 @@ pub fn js_test_run(paths: &[String], print: bool) -> Result<JsSuiteSummary> {
     Ok(summary)
 }
 
-/// One isolated test file: parse + bone type-check with the stdlib, discover
-/// `@test` fns, then run them via the per-test closure emission + node batch.
-fn js_build_file(file: &str) -> JsUnitOutcome {
-    if let Err(error) = (crate::registry::RuntimeServices::registered().prepare_unit)(file) {
+/// One test unit (a file, or a package built as ONE workspace with its tests),
+/// its `@test`s run via per-test closure emission and one node batch.
+fn js_build_unit(unit: &str, is_package: bool) -> JsUnitOutcome {
+    if let Err(error) = (crate::registry::RuntimeServices::registered().prepare_unit)(unit) {
         return JsUnitOutcome::UnitFail {
             reason: "sound bank preparation failed".to_string(),
-            rendered: format!("sound bank preparation failed for {file}: {error:#}"),
+            rendered: format!("sound bank preparation failed for {unit}: {error:#}"),
         };
     }
-    let src = match fs_err::read_to_string(file) {
-        Ok(s) => s,
-        Err(e) => {
-            return JsUnitOutcome::UnitFail {
-                reason: e.to_string(),
-                rendered: e.to_string(),
-            };
-        }
+    let checked = if is_package {
+        crate::test_unit::check_package(unit, true)
+    } else {
+        crate::test_unit::check_file(unit, true)
     };
-    let user = match skull_parser::parse_module(&src, ustr::Ustr::from(file)) {
-        Ok(u) => u,
-        Err(e) => return js_compile_failure(file, &src, &[e]),
-    };
-    let user_file = user.file;
-    let mut ws = match crate::bone_backend::check_with_stdlib([user]) {
-        Ok(ws) => ws,
-        Err(errs) => return js_compile_failure(file, &src, &errs),
-    };
-    if let Err(e) = crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(file)) {
-        return JsUnitOutcome::UnitFail {
-            reason: "build var resolution failed".to_string(),
-            rendered: format!("build var resolution failed for {file}: {e:#}"),
-        };
-    }
-    let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
-    // A discovery error (malformed `@test` annotation on a bone-accepted file)
-    // is a rejection, never an expected compile failure -- so it does NOT route
-    // through `js_compile_failure`'s expect-failure escape.
-    let tests: Vec<(FuncRef, skull::SkullTest)> = match skull::module_tests_with_ids(&ws, user_mid)
-    {
-        Ok(tests) => tests
-            .into_iter()
-            .map(|(fid, t)| {
-                (
-                    FuncRef {
-                        module: user_mid,
-                        func: fid,
-                    },
-                    t,
-                )
-            })
-            .collect(),
-        Err(e) => {
-            return JsUnitOutcome::UnitFail {
-                reason: categorize(&e.message),
-                rendered: crate::skull_backend::render_file_errs(file, &src, &[e]),
-            };
-        }
-    };
-    js_run_tests(&ws, &tests, &|e| {
-        crate::skull_backend::render_file_errs(file, &src, std::slice::from_ref(e))
-    })
-}
-
-/// A `stick.toml` package built as ONE workspace (tests included), mirroring
-/// `skull_build_package`; its `@test`s run through the same per-test path.
-fn js_build_package(dir: &str) -> JsUnitOutcome {
-    if let Err(error) = (crate::registry::RuntimeServices::registered().prepare_unit)(dir) {
-        return JsUnitOutcome::UnitFail {
-            reason: "sound bank preparation failed".to_string(),
-            rendered: format!("sound bank preparation failed for {dir}: {error:#}"),
-        };
-    }
-    let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
-    let sources = match crate::unified_compile::discover_sources(&spec) {
-        Ok(s) => s,
-        Err(e) => {
-            return JsUnitOutcome::UnitFail {
-                reason: "cannot load project".to_string(),
-                rendered: e.to_string(),
-            };
-        }
-    };
-    let (mut modules, _entry) = match crate::skull_backend::skull_assemble_project(&sources) {
-        Ok(v) => v,
-        Err(errs) => {
-            return JsUnitOutcome::UnitFail {
-                reason: categorize(&errs[0].message),
-                rendered: crate::skull_backend::render_project_errs(&sources, &errs),
-            };
-        }
-    };
-    let mut ws = match crate::bone_backend::check_modules(&mut modules) {
-        Ok(ws) => ws,
-        Err(errs) => {
-            return JsUnitOutcome::UnitFail {
-                reason: categorize(&errs[0].message),
-                rendered: crate::skull_backend::render_project_errs(&sources, &errs),
-            };
-        }
-    };
-    drop(modules);
-    if let Err(e) = crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir)) {
-        return JsUnitOutcome::UnitFail {
-            reason: "build var resolution failed".to_string(),
-            rendered: format!("build var resolution failed for {dir}: {e:#}"),
-        };
-    }
-    let tests = match crate::skull_backend::collect_package_test_fns(&ws, dir) {
-        Ok(tests) => tests,
-        Err(e) => {
-            return JsUnitOutcome::UnitFail {
-                reason: categorize(&e.message),
-                rendered: e.message,
-            };
-        }
-    };
-    js_run_tests(&ws, &tests, &|e| {
-        crate::skull_backend::render_project_errs(&sources, std::slice::from_ref(e))
-    })
-}
-
-/// The luajit driver's compile-failure rule, shared verbatim: a bone rejection
-/// where every discovered `@test` carries `expect_failure`/`@ignore` is the
-/// expected (passing) outcome; anything else is a unit failure.
-fn js_compile_failure(file: &str, src: &str, errs: &[rock_core::CompilerError]) -> JsUnitOutcome {
-    if let Some(tests) = crate::skull_backend::all_tests_expect_compile_failure(file, src) {
-        return JsUnitOutcome::ExpectFailPass { tests: tests.len() };
-    }
-    JsUnitOutcome::UnitFail {
-        reason: categorize(&errs[0].message),
-        rendered: crate::skull_backend::render_file_errs(file, src, errs),
+    match checked {
+        Ok(UnitCheck::Checked { ws, tests, sources }) => js_run_tests(&ws, &tests, &|e| {
+            crate::skull_backend::render_project_errs(&sources, std::slice::from_ref(e))
+        }),
+        Ok(UnitCheck::ExpectedFailure(tests)) => JsUnitOutcome::ExpectFailPass { tests },
+        Err(UnitFailure { reason, rendered }) => JsUnitOutcome::UnitFail { reason, rendered },
     }
 }
 
@@ -427,11 +295,7 @@ fn js_run_applicable_tests(
             }
             Ok(Err(e)) => skips.push((t.name.clone(), all_reasons(&e))),
             Err(panic) => {
-                let msg = panic
-                    .downcast_ref::<&str>()
-                    .map(|s| s.to_string())
-                    .or_else(|| panic.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "unknown panic".to_string());
+                let msg = crate::common::panic_message(&*panic);
                 skips.push((
                     t.name.clone(),
                     vec![format!("panic during JS emission: {msg}")],

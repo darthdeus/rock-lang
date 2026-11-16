@@ -193,11 +193,7 @@ where
         // produces no result, the run reports fewer tests, and there's
         // no indication why. Surface it instead of discarding the join.
         if let Err(panic) = handle.join() {
-            let msg = panic
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| panic.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "<non-string panic payload>".to_string());
+            let msg = crate::common::panic_message(&*panic);
             eprintln!("parallel_runner: a worker thread panicked: {msg}");
         }
     }

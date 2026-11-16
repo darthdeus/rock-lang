@@ -2921,11 +2921,7 @@ pub(crate) fn skull_test(
             }
             Err(panic) => {
                 failed += 1;
-                let msg = panic
-                    .downcast_ref::<&str>()
-                    .map(|s| s.to_string())
-                    .or_else(|| panic.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "unknown panic".to_string());
+                let msg = crate::common::panic_message(&*panic);
                 let reason = "bone panic (inference)".to_string();
                 println!("{:.<60} {}  {}", label, "PANIC".red().bold(), msg.dimmed());
                 *reason_counts.entry(reason).or_insert(0) += 1;

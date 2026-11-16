@@ -29,8 +29,8 @@
 //! driver. A GL error mid-run is a loud FAIL, never a silent skip.
 
 use crate::Result;
-use crate::bone_backend::{categorize, short_path};
 use crate::test_protocol::{compare_value, parse_skull_markers, reason_histogram};
+use crate::test_unit::{UnitCheck, UnitFailure};
 use bone_core::prelude::Instant;
 use colored::Colorize;
 use skull::ValueExpect;
@@ -165,22 +165,9 @@ pub fn glsl_test_run(paths: &[String], print: bool, skip_gpu: bool) -> Result<Gl
     // Per-profile accumulated skip-reason strings (bucketed at the end).
     let mut skip_reasons: [Vec<String>; PROFILES.len()] = [Vec::new()];
 
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let mut outcomes: Vec<(String, std::thread::Result<UnitOutcome>)> = Vec::new();
-    for file in &files {
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            build_file(file, &runner, &gl_available)
-        }));
-        outcomes.push((short_path(file), outcome));
-    }
-    for dir in &package_dirs {
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            build_package(dir, &runner, &gl_available)
-        }));
-        outcomes.push((short_path(dir), outcome));
-    }
-    std::panic::set_hook(prev_hook);
+    let outcomes = crate::test_unit::build_units(&files, &package_dirs, |unit, is_package| {
+        build_unit(unit, is_package, &runner, &gl_available)
+    });
 
     for (label, outcome) in outcomes {
         summary.files += 1;
@@ -228,11 +215,7 @@ pub fn glsl_test_run(paths: &[String], print: bool, skip_gpu: bool) -> Result<Gl
             }
             Err(panic) => {
                 summary.unit_failures += 1;
-                let msg = panic
-                    .downcast_ref::<&str>()
-                    .map(|s| s.to_string())
-                    .or_else(|| panic.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "unknown panic".to_string());
+                let msg = crate::common::panic_message(&*panic);
                 if print {
                     println!("{:.<60} {}  {}", label, "PANIC".red().bold(), msg.dimmed());
                 }
@@ -266,121 +249,38 @@ enum UnitOutcome {
     },
 }
 
-/// One isolated test file: parse + bone type-check, discover `@test` fns, then
-/// emit + run the value tests under the desktop profile.
-fn build_file(
-    file: &str,
-    runner: &std::path::Path,
-    gl_available: &[bool; PROFILES.len()],
-) -> UnitOutcome {
-    let src = match fs_err::read_to_string(file) {
-        Ok(s) => s,
-        Err(e) => {
-            return UnitOutcome::UnitFail {
-                reason: e.to_string(),
-                rendered: e.to_string(),
-            };
-        }
-    };
-    let user = match skull_parser::parse_module(&src, ustr::Ustr::from(file)) {
-        Ok(u) => u,
-        Err(e) => return compile_failure(file, &src, &[e]),
-    };
-    let user_file = user.file;
-    let ws = match crate::bone_backend::check_with_stdlib([user]) {
-        Ok(ws) => ws,
-        Err(errs) => return compile_failure(file, &src, &errs),
-    };
-    let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
-    let tests: Vec<(FuncRef, skull::SkullTest)> = match skull::module_tests_with_ids(&ws, user_mid)
-    {
-        Ok(tests) => tests
-            .into_iter()
-            .map(|(fid, t)| {
-                (
-                    FuncRef {
-                        module: user_mid,
-                        func: fid,
-                    },
-                    t,
-                )
-            })
-            .collect(),
-        Err(e) => {
-            return UnitOutcome::UnitFail {
-                reason: categorize(&e.message),
-                rendered: crate::skull_backend::render_file_errs(file, &src, &[e]),
-            };
-        }
-    };
-    run_tests(&ws, &tests, runner, gl_available)
-}
-
-/// A `stick.toml` package built as ONE workspace (tests included), mirroring
-/// the JS/luajit package path.
-fn build_package(
-    dir: &str,
+/// One test unit (a file, or a package built as ONE workspace with its tests):
+/// emit + run its value tests under each profile.
+fn build_unit(
+    unit: &str,
+    is_package: bool,
     runner: &std::path::Path,
     gl_available: &[bool; PROFILES.len()],
 ) -> UnitOutcome {
     // Held through the tests: their shaders are emitted from the checked
     // workspace, which stays resident until the unit ends.
-    let _slot = match crate::compile_slots::acquire(dir) {
-        Ok(slot) => slot,
-        Err(error) => {
-            return UnitOutcome::UnitFail {
-                reason: "no compile slot".to_string(),
-                rendered: format!("{error:#}"),
-            };
+    let _slot = if is_package {
+        match crate::compile_slots::acquire(unit) {
+            Ok(slot) => Some(slot),
+            Err(error) => {
+                return UnitOutcome::UnitFail {
+                    reason: "no compile slot".to_string(),
+                    rendered: format!("{error:#}"),
+                };
+            }
         }
+    } else {
+        None
     };
-    let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
-    let sources = match crate::unified_compile::discover_sources(&spec) {
-        Ok(s) => s,
-        Err(e) => {
-            return UnitOutcome::UnitFail {
-                reason: "cannot load project".to_string(),
-                rendered: e.to_string(),
-            };
-        }
+    let checked = if is_package {
+        crate::test_unit::check_package(unit, false)
+    } else {
+        crate::test_unit::check_file(unit, false)
     };
-    let (mut modules, _entry) = match crate::skull_backend::skull_assemble_project(&sources) {
-        Ok(v) => v,
-        Err(errs) => {
-            return UnitOutcome::UnitFail {
-                reason: categorize(&errs[0].message),
-                rendered: crate::skull_backend::render_project_errs(&sources, &errs),
-            };
-        }
-    };
-    let ws = match crate::bone_backend::check_modules(&mut modules) {
-        Ok(ws) => ws,
-        Err(errs) => {
-            return UnitOutcome::UnitFail {
-                reason: categorize(&errs[0].message),
-                rendered: crate::skull_backend::render_project_errs(&sources, &errs),
-            };
-        }
-    };
-    drop(modules);
-    let tests = match crate::skull_backend::collect_package_test_fns(&ws, dir) {
-        Ok(tests) => tests,
-        Err(e) => {
-            return UnitOutcome::UnitFail {
-                reason: categorize(&e.message),
-                rendered: e.message,
-            };
-        }
-    };
-    run_tests(&ws, &tests, runner, gl_available)
-}
-
-/// A bone rejection where every `@test` expects the failure is the expected
-/// (passing) outcome on the luajit path; here it just means zero value tests to
-/// run (nothing to emit), so it is not a unit failure.
-fn compile_failure(file: &str, src: &str, errs: &[rock_core::CompilerError]) -> UnitOutcome {
-    if crate::skull_backend::all_tests_expect_compile_failure(file, src).is_some() {
-        return UnitOutcome::Ran {
+    match checked {
+        Ok(UnitCheck::Checked { ws, tests, .. }) => run_tests(&ws, &tests, runner, gl_available),
+        // Nothing to emit for a file whose rejection every test expected.
+        Ok(UnitCheck::ExpectedFailure(_)) => UnitOutcome::Ran {
             outside_value_class: 0,
             profiles: PROFILES
                 .iter()
@@ -390,11 +290,8 @@ fn compile_failure(file: &str, src: &str, errs: &[rock_core::CompilerError]) -> 
                     skips: Vec::new(),
                 })
                 .collect(),
-        };
-    }
-    UnitOutcome::UnitFail {
-        reason: categorize(&errs[0].message),
-        rendered: crate::skull_backend::render_file_errs(file, src, errs),
+        },
+        Err(UnitFailure { reason, rendered }) => UnitOutcome::UnitFail { reason, rendered },
     }
 }
 
@@ -959,8 +856,9 @@ mod tests {
         let dir = package.path().to_str().unwrap().to_owned();
         // No GL profile is available, so no runner is spawned.
         crate::compile_slots::assert_compile_waits_for_slot(move || {
-            super::build_package(
+            super::build_unit(
                 &dir,
+                true,
                 std::path::Path::new("unused-runner"),
                 &[false; super::PROFILES.len()],
             );
