@@ -377,10 +377,10 @@ impl Rows {
             let lam_span = body.expr_spans[lam];
             for (idx, e) in body.expr_arena.iter() {
                 let Expr::Var(b) = e else { continue };
-                if !self.bindings.contains(b) || !contains(lam_span, body.expr_spans[idx]) {
+                if !self.bindings.contains(b) || !lam_span.contains(body.expr_spans[idx]) {
                     continue;
                 }
-                if contains(lam_span, body.binding_spans[*b]) {
+                if lam_span.contains(body.binding_spans[*b]) {
                     continue;
                 }
                 out.push(self.escape(ws, bi, body, EscapeKind::ClosureCapture, idx));
@@ -471,11 +471,6 @@ fn dedup(mut found: Vec<RowEscape>) -> Vec<RowEscape> {
     let mut seen: FxHashSet<(EscapeKind, (usize, usize))> = FxHashSet::default();
     found.retain(|f| seen.insert((f.kind, f.span.offset_range())));
     found
-}
-
-fn contains(outer: Span, inner: Span) -> bool {
-    outer.offset_range().0 <= inner.offset_range().0
-        && inner.offset_range().1 <= outer.offset_range().1
 }
 
 fn callee_fn<'a>(ws: &'a Workspace, bi: &BodyInference, call: Idx<Expr>) -> Option<&'a Function> {
