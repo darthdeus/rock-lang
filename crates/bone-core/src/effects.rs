@@ -69,11 +69,6 @@ impl MemEffect {
         self.lengths && self.fields.is_none() && self.globals && self.elems
     }
 
-    /// Whether `field` may be written.
-    pub fn writes_field(&self, field: Ustr) -> bool {
-        self.fields.as_ref().is_none_or(|set| set.contains(&field))
-    }
-
     fn join(&mut self, other: &MemEffect) {
         self.lengths |= other.lengths;
         self.globals |= other.globals;

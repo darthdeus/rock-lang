@@ -74,23 +74,18 @@ fn map_key(scope: Option<&FragmentScope>, path: &[ustr::Ustr], name: ustr::Ustr)
 struct ModuleNominalFacts {
     /// Each nominal type's key and facts, in declaration order.
     types: Vec<(ustr::Ustr, NominalFacts)>,
-    has_nobox: bool,
     decorators: Vec<ustr::Ustr>,
 }
 
 fn module_nominal_facts(scope: Option<&FragmentScope>, rock_mod: &Ast) -> ModuleNominalFacts {
     let mut facts = ModuleNominalFacts {
         types: Vec::new(),
-        has_nobox: false,
         decorators: Vec::new(),
     };
     let mut walk = |item: &Item, path: &[ustr::Ustr]| -> Result<(), CompilerError> {
         let key = |name: &ustr::Ustr| map_key(scope, path, *name);
         let (name, flavor, generics) = match &item.kind {
-            ItemKind::Struct(s) => {
-                facts.has_nobox |= s.is_nobox;
-                (&s.name.name, NominalFlavor::Struct, &s.generics)
-            }
+            ItemKind::Struct(s) => (&s.name.name, NominalFlavor::Struct, &s.generics),
             ItemKind::Enum(e) => (&e.name.name, NominalFlavor::Enum, &e.generics),
             ItemKind::Newtype(n) => (&n.name.name, NominalFlavor::Newtype, &n.generics),
             ItemKind::Decorator(d) => {
@@ -240,7 +235,6 @@ pub fn lower_modules_seeded(
                 );
             }
         }
-        ws.has_nobox_types |= facts.has_nobox;
         ws.decorator_names.extend(facts.decorators);
     }
 

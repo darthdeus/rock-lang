@@ -399,9 +399,6 @@ pub enum NodeRef {
 #[derive(Clone, Debug)]
 pub struct Module {
     pub id: ModuleId,
-    /// Bumped on any interface rebuild, batch leaves 0.
-    pub interface_generation: u64,
-
     pub lower_var_high_water: u32,
     /// `ty_arena` entries below this index are the previous lowering's, kept
     /// so that inference cached in other modules still reads valid types.
@@ -479,8 +476,6 @@ impl Default for Module {
     fn default() -> Self {
         Self {
             id: ModuleId::builtin(),
-
-            interface_generation: 0,
             lower_var_high_water: 0,
             ty_arena_live_start: 0,
             lower_var_floor: 0,
