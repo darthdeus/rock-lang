@@ -169,7 +169,7 @@ pub fn select_assets_with_overlays(
 ) -> Result<AssetSelection> {
     validate_relative_key(game_key, "game key")?;
     let names = match config {
-        Some(config) => config.release_assets(project_dir)?,
+        Some(config) => config.release_assets()?,
         None => default_asset_names(),
     };
 

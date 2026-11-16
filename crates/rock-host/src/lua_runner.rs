@@ -52,7 +52,7 @@ pub fn run_lua_code_with_timeout_and_env(
     timeout: Option<Duration>,
     env: &[(&str, &str)],
 ) -> Result<LuaRun, CompilerError> {
-    let mut command = crate::project::build_luajit_stdin_command();
+    let mut command = crate::project::luajit_command();
     command.envs(env.iter().copied());
     run_lua_code_with_command(command, code, timeout)
 }

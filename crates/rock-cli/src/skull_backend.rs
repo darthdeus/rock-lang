@@ -1308,7 +1308,8 @@ fn run_test_program(
     use rock_host::process_management::{register_child_process, unregister_child_process};
     use std::process::Stdio;
 
-    let mut command = rock_host::project::build_luajit_command(script, &[]);
+    let mut command = rock_host::project::luajit_command();
+    command.arg(script);
     // Shards and concurrent runs share one worktree; each process gets its own
     // scratch root, removed when this returns.
     let _scratch = crate::runtime_process::prepare_test(&mut command)?;

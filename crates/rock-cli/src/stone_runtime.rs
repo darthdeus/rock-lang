@@ -211,7 +211,8 @@ fn exec_luajit_file(
     timeout: Option<std::time::Duration>,
     app_args: &[String],
 ) -> Result<()> {
-    let mut cmd = rock_host::project::build_luajit_command(lua_file, app_args);
+    let mut cmd = rock_host::project::luajit_command();
+    cmd.arg(lua_file).args(app_args);
     cmd = crate::runtime_process::configure(
         cmd,
         crate::runtime_process::RuntimeProcess::LuaRun { headless: false },

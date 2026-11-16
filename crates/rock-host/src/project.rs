@@ -242,9 +242,8 @@ pub const MAIN_BYTECODE_FILENAME: &str = "main.ljbc";
 /// LuaJIT's `-b` default is `-s` (strip), which would renumber every traceback
 /// a sim or a game can print.
 ///
-/// `-b` consumes the rest of the argument list, so this cannot go through
-/// `build_luajit_command` (which puts the script first). `LUA_PATH` is the same
-/// value, and it is required rather than incidental: `-b` is implemented by
+/// `-b` must come before the script, which every other LuaJIT command puts
+/// first. `LUA_PATH` is required rather than incidental: `-b` is implemented by
 /// `jit/bcsave.lua` under `<prefix>/share/luajit-2.1/`.
 pub fn build_luajit_bytecode_command(
     lua_file: &Path,
@@ -328,14 +327,10 @@ fn write_atomic_with(
     Ok(())
 }
 
-/// Plain LuaJIT process setup. Hosts configure their runtime service before stdio.
-pub fn build_luajit_command(lua_file: &Path, app_args: &[String]) -> std::process::Command {
-    let mut cmd = build_luajit_stdin_command();
-    cmd.arg(lua_file).args(app_args);
-    cmd
-}
-
-pub fn build_luajit_stdin_command() -> std::process::Command {
+/// LuaJIT with the plain runtime environment and no arguments: callers add a
+/// script or feed one on stdin. Hosts configure their runtime service before
+/// stdio.
+pub fn luajit_command() -> std::process::Command {
     let mut cmd = std::process::Command::new(luajit_path());
     crate::compiler_thp::configure_runtime_command(&mut cmd);
     cmd.env("LUA_PATH", lua_path_value());

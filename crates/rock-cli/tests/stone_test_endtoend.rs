@@ -10,8 +10,8 @@
 //! under nextest `-P full`.
 
 use crate::stone_harness::StoneHarness;
-use rock_engine_host::runtime::run_lua_code_with_timeout;
-use rock_host::lua_runner::LuaRun;
+use rock_cli::runtime_process::{RuntimeProcess, configure};
+use rock_host::lua_runner::{LuaRun, run_lua_code_with_command};
 use std::time::Duration;
 
 const QUIESCENT: Duration = Duration::from_millis(400);
@@ -70,7 +70,12 @@ fn inaccessible_initial_source_fails_before_ready() {
 
 // `run_lua_code` kills the script after 1.8 s of wall time.
 fn run_lua(script: &str) -> anyhow::Result<LuaRun> {
-    run_lua_code_with_timeout(script, Some(test_utils::HANG_BACKSTOP))
+    let command = configure(
+        rock_host::project::luajit_command(),
+        RuntimeProcess::LuaStdin,
+    );
+    run_lua_code_with_command(command, script, Some(test_utils::HANG_BACKSTOP))
+        .map_err(|error| anyhow::anyhow!(error.message))
 }
 
 /// Validates that a global type change forces a restart

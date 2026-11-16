@@ -257,8 +257,8 @@ pub(crate) fn join_preload(
 }
 
 /// Append the resolved lib to the child command's `LD_PRELOAD` (append,
-/// never clobber). Called ONLY from `build_luajit_command` -- the final
-/// game spawn.
+/// never clobber). Applied only to commands configured with `capture` --
+/// the final game spawn.
 ///
 /// `librenderdoc.so` empties `LD_PRELOAD` in every process it loads into,
 /// so an ambient preload never survives the rock -> luajit chain (rock
@@ -306,25 +306,12 @@ pub(crate) fn apply_renderdoc_gate(cmd: &mut std::process::Command) {
     }
 }
 
-pub fn build_luajit_bytecode_command(
-    lua_file: &Path,
-    bytecode_file: &Path,
-) -> std::process::Command {
-    configure_command(
-        rock_host::project::build_luajit_bytecode_command(lua_file, bytecode_file),
-        true,
-        false,
-        false,
-    )
-}
-
+/// The game or program spawn: LuaJIT running `lua_file` with the engine's
+/// runtime environment, JIT tracing switch and capture gate.
 pub fn build_luajit_command(lua_file: &Path, app_args: &[String]) -> std::process::Command {
-    configure_command(
-        rock_host::project::build_luajit_command(lua_file, app_args),
-        true,
-        true,
-        true,
-    )
+    let mut command = rock_host::project::luajit_command();
+    command.arg(lua_file).args(app_args);
+    configure_command(command, true, true, true)
 }
 
 /// Configure before stdio. Lua commands may change executable and prepend JIT
@@ -369,21 +356,6 @@ pub fn configure_command(
         apply_renderdoc_gate(&mut configured);
     }
     configured
-}
-
-/// Private callers use the same captured evaluator with the bundled environment.
-pub fn run_lua_code_with_timeout(
-    code: &str,
-    timeout: Option<std::time::Duration>,
-) -> anyhow::Result<rock_host::lua_runner::LuaRun> {
-    let command = configure_command(
-        rock_host::project::build_luajit_stdin_command(),
-        true,
-        false,
-        false,
-    );
-    rock_host::lua_runner::run_lua_code_with_command(command, code, timeout)
-        .map_err(|error| anyhow::anyhow!(error.message))
 }
 
 #[cfg(test)]
@@ -651,8 +623,15 @@ mod tests {
                     "gate must append the override lib: {preload}"
                 );
 
-                let bytecode =
-                    super::build_luajit_bytecode_command(lua, Path::new("tmp/main.ljbc"));
+                let bytecode = super::configure_command(
+                    rock_host::project::build_luajit_bytecode_command(
+                        lua,
+                        Path::new("tmp/main.ljbc"),
+                    ),
+                    true,
+                    false,
+                    false,
+                );
                 assert!(
                     cmd_env(&bytecode, "LD_PRELOAD").is_none(),
                     "bytecode compile is not the final spawn"

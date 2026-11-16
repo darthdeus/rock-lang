@@ -5,9 +5,8 @@ use std::path::{Path, PathBuf};
 
 /// Private engine and asset policy; the public parser only supplies data.
 pub trait EngineConfigExt {
-    fn release_assets(&self, _project_dir: &Path) -> Result<Vec<String>>;
+    fn release_assets(&self) -> Result<Vec<String>>;
     fn release_overlay_assets(&self) -> Result<Vec<String>>;
-    fn asset_overlay_defaults(&self, project_dir: &Path) -> Result<Vec<PathBuf>>;
     fn asset_overlay_defaults_with_vault(
         &self,
         project_dir: &Path,
@@ -18,7 +17,7 @@ pub trait EngineConfigExt {
 impl EngineConfigExt for StickConfig {
     /// Resolve the release roots once from the already-parsed StickConfig.
     /// Predefined levels are explicit inputs, independent of the general asset roots.
-    fn release_assets(&self, _project_dir: &Path) -> Result<Vec<String>> {
+    fn release_assets(&self) -> Result<Vec<String>> {
         let mut assets = self
             .release
             .as_ref()
@@ -70,10 +69,6 @@ impl EngineConfigExt for StickConfig {
             }
         }
         Ok(assets)
-    }
-
-    fn asset_overlay_defaults(&self, project_dir: &Path) -> Result<Vec<PathBuf>> {
-        self.asset_overlay_defaults_with_vault(project_dir, &crate::art_vault::root)
     }
 
     fn asset_overlay_defaults_with_vault(
@@ -141,9 +136,8 @@ mod tests {
             cfg.release.as_ref().unwrap().assets.as_deref(),
             Some(&["assets".to_string(), "saves/level.json".to_string()][..])
         );
-        let dir = tempfile::tempdir().unwrap();
         assert_eq!(
-            cfg.release_assets(dir.path()).unwrap(),
+            cfg.release_assets().unwrap(),
             vec!["assets", "saves/level.json"]
         );
         assert_eq!(
@@ -166,10 +160,7 @@ mod tests {
             "[package]\nname = \"x\"\n[release]\nassets = [\"../outside\"]\n",
         )
         .expect("path validation happens when selecting assets");
-        let dir = tempfile::tempdir().unwrap();
-        let err = cfg
-            .release_assets(dir.path())
-            .expect_err("asset escape must reject");
+        let err = cfg.release_assets().expect_err("asset escape must reject");
         assert!(
             format!("{err}").contains("outside"),
             "error names the escape: {err}"
@@ -196,7 +187,11 @@ mod tests {
             "[package]\nname = \"x\"\n[assets]\noverlays = [\"../shared\", \"~/rock-assets\"]\n",
         )
         .unwrap();
-        let resolved = cfg.asset_overlay_defaults(project.path()).unwrap();
+        let resolved = cfg
+            .asset_overlay_defaults_with_vault(project.path(), &|| {
+                unreachable!("no entry names the vault")
+            })
+            .unwrap();
         assert_eq!(resolved[0], project_path.join("../shared"));
         let home = std::env::var_os("HOME")
             .or_else(|| std::env::var_os("USERPROFILE"))

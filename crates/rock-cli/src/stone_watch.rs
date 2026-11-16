@@ -1219,7 +1219,8 @@ mod watch_reload_tests {
     use test_utils::HANG_BACKSTOP;
 
     fn run_lua(code: &str) -> anyhow::Result<rock_host::lua_runner::LuaRun> {
-        rock_engine_host::runtime::run_lua_code_with_timeout(code, Some(HANG_BACKSTOP))
+        crate::compile_cmd::run_lua_code_with_timeout(code, Some(HANG_BACKSTOP))
+            .map_err(|error| anyhow::anyhow!(error.message))
     }
 
     fn categorize(event: &FileChangeEvent) -> StoneChanges {
