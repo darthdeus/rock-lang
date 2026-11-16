@@ -106,7 +106,10 @@ pub(crate) struct StagePlan {
     /// property of this target and not of the bodies.
     uses_idiv: bool,
     uses_imod: bool,
-    dependencies: Vec<FuncRef>,
+    /// The stage's helpers plus the stage entry itself -- the hot-reload
+    /// dependency set. DECLARATIONS: a reload watches source files, and two
+    /// instances of one generic helper share one.
+    pub(crate) dependencies: Vec<FuncRef>,
     pub(crate) concrete_plans: Arc<ConcretePlans>,
     pub(crate) concrete_interner: Arc<MonoInterner>,
 }
@@ -143,11 +146,19 @@ impl StagePlan {
         Ok(out)
     }
 
-    /// The stage's helpers plus the stage entry itself -- the hot-reload
-    /// dependency set. DECLARATIONS: a reload watches source files, and two
-    /// instances of one generic helper share one.
-    pub(crate) fn dependencies(&self) -> Vec<FuncRef> {
-        self.dependencies.clone()
+    /// The stage entry's definition, rendered under its interface shape.
+    pub(crate) fn render_entry(
+        &self,
+        ws: &Workspace,
+        interner: &MonoInterner,
+        shape: &EntryShape,
+    ) -> Result<String, CompilerError> {
+        let entry = &self.ir.entry;
+        let plan = self.concrete_plans.get(&entry.inst).ok_or_else(|| {
+            let f = &ws.module(entry.fref().module).functions[entry.fref().func];
+            err(f.name_span, "shader profile: entry has no concrete plan")
+        })?;
+        emit_fn_def_with(ws, interner, entry, &self.ir.body, Some(shape), plan)
     }
 }
 
@@ -262,13 +273,21 @@ pub(crate) struct EntryPlan {
     abi: ShaderAbiPlan,
 }
 
-fn plan_shader_entry_from_view(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    view: &ShaderStageView,
-    concrete_plans: &Arc<ConcretePlans>,
-) -> Result<EntryPlan, CompilerError> {
-    plan_shader_entry_inner(ws, scx, view.entry.func, view, concrete_plans)
+/// The stage `view` holds for `stage`, or a rejection naming the program form.
+pub(crate) fn program_stage<'a>(
+    view: &'a ShaderProgramView,
+    stage: ShaderStage,
+    form: &str,
+) -> Result<&'a ShaderStageView, CompilerError> {
+    view.stages
+        .iter()
+        .find(|s| s.stage == stage)
+        .ok_or_else(|| {
+            CompilerError::new_no_location(format!(
+                "shader graph/view has no {} stage for {form}",
+                stage.name()
+            ))
+        })
 }
 
 /// The single-entry plan of a program view: the fragment stage planned, for
@@ -278,25 +297,8 @@ pub(crate) fn plan_shader_entry_program(
     scx: &ScalarCtx,
     view: &ShaderProgramView,
 ) -> Result<EntryPlan, CompilerError> {
-    let stage = view
-        .stages
-        .iter()
-        .find(|stage| stage.stage == ShaderStage::Fragment)
-        .ok_or_else(|| {
-            CompilerError::new_no_location(
-                "shader graph/view has no fragment stage for a single-entry shader".to_string(),
-            )
-        })?;
-    plan_shader_entry_from_view(ws, scx, stage, &view.concrete_plans)
-}
-
-fn plan_shader_entry_inner(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    fref: FuncRef,
-    stage_view: &ShaderStageView,
-    concrete_plans: &Arc<ConcretePlans>,
-) -> Result<EntryPlan, CompilerError> {
+    let stage_view = program_stage(view, ShaderStage::Fragment, "a single-entry shader")?;
+    let fref = stage_view.entry.func;
     let f = &ws.module(fref.module).functions[fref.func];
     match shader_stage(f) {
         Some("fragment") => {}
@@ -323,7 +325,7 @@ fn plan_shader_entry_inner(
     // and is not a tier-0 leaf (asking the library check of an entry rejected
     // 1,539 real shaders).
     let class = skull_codegen_shader::classify_entry(ws, f)?;
-    let stage = plan_stage_from_view(ws, scx, stage_view, IrStage::Fragment, concrete_plans)?;
+    let stage = plan_stage_from_view(ws, scx, stage_view, IrStage::Fragment, &view.concrete_plans)?;
     let interface = ShaderInterfacePlan {
         stages: vec![IrStage::Fragment],
         uniform_groups: class
@@ -380,16 +382,7 @@ pub fn emit_shader_entry_with_view(
             "shader graph/view pipeline passed to single-entry GLSL emission".to_string(),
         ));
     }
-    let stage = view
-        .stages
-        .iter()
-        .find(|stage| stage.stage == ShaderStage::Fragment)
-        .ok_or_else(|| {
-            CompilerError::new_no_location(
-                "shader graph/view has no fragment stage for a single-entry shader".to_string(),
-            )
-        })?;
-    let plan = plan_shader_entry_from_view(ws, scx, stage, &view.concrete_plans)?;
+    let plan = plan_shader_entry_program(ws, scx, view)?;
     render_shader_entry(ws, scx.interner(), &plan, profile)
 }
 
@@ -415,37 +408,10 @@ pub(crate) fn render_shader_entry(
 
     let mut px = String::new();
     px.push_str("in vec2 TexCoord;\nout vec4 FragColor;\n\n");
-    if let Some(block) = resolved.engine_block {
-        px.push_str(&uniform_block_decl(block));
-    }
-    if let Some(block) = resolved.uniform_block {
-        px.push_str(&uniform_block_decl(block));
-    }
-    // Samplers are opaque: GLSL forbids them inside a uniform block, so they
-    // stay loose beside it and bind by unit. Declared from the INTERFACE -- the
-    // grouped ones in the ABI's unit order, then the bare ones.
-    for (n, k) in &resolved.samplers {
-        px.push_str(&format!(
-            "uniform {} {};\n",
-            sampler_glsl_ty(*k).uniform_decl(),
-            n
-        ));
-    }
+    px.push_str(&resolved.declarations());
     px.push('\n');
     px.push_str(&plan.stage.render_helpers(ws, interner)?);
-    let entry_plan = plan
-        .stage
-        .concrete_plans
-        .get(&plan.stage.ir.entry.inst)
-        .ok_or_else(|| err(f.name_span, "shader profile: entry has no concrete plan"))?;
-    px.push_str(&emit_fn_def_with(
-        ws,
-        interner,
-        &plan.stage.ir.entry,
-        &plan.stage.ir.body,
-        Some(shape),
-        entry_plan,
-    )?);
+    px.push_str(&plan.stage.render_entry(ws, interner, shape)?);
     px.push('\n');
     px.push_str(&format!(
         "void main() {{\n  FragColor = {}(TexCoord);\n}}\n",
@@ -458,7 +424,7 @@ pub(crate) fn render_shader_entry(
     );
     Ok(ShaderEmission {
         source,
-        dependencies: plan.stage.dependencies(),
+        dependencies: plan.stage.dependencies.clone(),
         interface: plan.interface.clone(),
         abi: plan.abi.clone(),
         ir: ShaderIR {

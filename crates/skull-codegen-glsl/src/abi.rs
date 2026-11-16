@@ -444,6 +444,34 @@ pub(crate) struct StageAbi<'a> {
     pub(crate) samplers: Vec<(Ustr, SamplerKind)>,
 }
 
+impl StageAbi<'_> {
+    /// The stage's uniform resources: the engine block first (it binds at
+    /// index 0 and both stages declare the same one), then the stage's own
+    /// block, its `@size(N)` array block, and its samplers.
+    ///
+    /// The array block is separate from the scalar one because its LIFETIME
+    /// is: arrays change per activation, the scalar group per draw. Samplers
+    /// are opaque, so GLSL forbids them inside a uniform block; they stay loose
+    /// beside it and bind by unit -- the grouped ones in the ABI's unit order,
+    /// then the bare ones.
+    pub(crate) fn declarations(&self) -> String {
+        let mut out = String::new();
+        for block in self.engine_block.iter().chain(&self.uniform_block) {
+            out.push_str(&uniform_block_decl(block));
+        }
+        if let Some(plan) = self.array_block {
+            out.push_str(&uniform_array_block_decl(plan));
+        }
+        for (n, k) in &self.samplers {
+            out.push_str(&format!(
+                "uniform {} {n};\n",
+                sampler_glsl_ty(*k).uniform_decl()
+            ));
+        }
+        out
+    }
+}
+
 /// The one block the interface says exists at `binding`, or a rejection.
 ///
 /// `want` is whether the INTERFACE has the group, so `None` means "not
