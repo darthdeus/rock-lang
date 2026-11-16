@@ -163,27 +163,6 @@ pub(super) fn build_inline_candidate_table_with_census(
     ))
 }
 
-/// Test-only observer of the specialization schedule: it sees each job as it
-/// is queued, may hold a finished job back to force a completion order, and
-/// records what is installed in which order.
-#[cfg(test)]
-pub(super) trait SpecScheduleHook: Send + Sync {
-    /// Called as a job is admitted to the queue, with its symbol. A full
-    /// build's fan-out bodies are jobs of the same queue.
-    fn scheduled(&self, name: &str);
-    /// Called on the worker once a job's chunk is built; blocking here holds
-    /// that job's completion (and so its follow-up demand) back.
-    fn finished(&self, name: &str);
-    /// Called as each demanded instance's outcome is installed.
-    fn installed(&self, name: &str, ok: bool);
-}
-
-#[cfg(test)]
-thread_local! {
-    pub(super) static SPEC_SCHEDULE_HOOK: std::cell::RefCell<Option<std::sync::Arc<dyn SpecScheduleHook>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
 /// One demanded instance's outcome, keyed by its symbol so the queue's
 /// completion order never shows in what is installed.
 type SpecOutcome = (String, Instance, Result<Chunk, CompilerError>);
@@ -233,8 +212,6 @@ pub(super) struct SpecQueue<'a> {
     /// Keep each built body's attribution record, with its thread CPU time;
     /// only a build that folds attribution reads them.
     pub(super) attribution: bool,
-    #[cfg(test)]
-    hook: Option<std::sync::Arc<dyn SpecScheduleHook>>,
 }
 
 impl<'a> SpecQueue<'a> {
@@ -252,14 +229,7 @@ impl<'a> SpecQueue<'a> {
             done: std::sync::Mutex::new(FxHashSet::default()),
             outcomes: std::sync::Mutex::new(Vec::new()),
             attribution: false,
-            #[cfg(test)]
-            hook: SPEC_SCHEDULE_HOOK.with(|hook| hook.borrow().clone()),
         }
-    }
-
-    #[cfg(test)]
-    pub(super) fn hook(&self) -> Option<&dyn SpecScheduleHook> {
-        self.hook.as_deref()
     }
 
     /// Admit every instance `demands` names; new build jobs go to `jobs`.
@@ -303,10 +273,6 @@ impl<'a> SpecQueue<'a> {
             self.record(name, inst, Ok(c.clone()));
             return;
         }
-        #[cfg(test)]
-        if let Some(hook) = &self.hook {
-            hook.scheduled(&inst.symbol(self.ws, self.scx.interner()));
-        }
         jobs.push(inst);
     }
 
@@ -334,10 +300,6 @@ impl<'a> SpecQueue<'a> {
         );
         if let Ok(chunk) = &mut result {
             chunk.finish(started);
-        }
-        #[cfg(test)]
-        if let Some(hook) = &self.hook {
-            hook.finished(&name);
         }
         if let Ok(chunk) = &result {
             self.admit_all(&chunk.specs, follow_ups);
@@ -375,10 +337,6 @@ impl<'a> SpecQueue<'a> {
         let mut errs: Vec<(String, CompilerError)> = Vec::new();
         for at in order {
             let (name, inst, result) = outcomes[at].take().expect("each outcome installs once");
-            #[cfg(test)]
-            if let Some(hook) = &self.hook {
-                hook.installed(&name, result.is_ok());
-            }
             match result {
                 Ok(chunk) => {
                     built.insert(inst, chunk);

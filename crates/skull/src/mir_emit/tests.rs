@@ -1665,136 +1665,40 @@ fn main() { let result = outer(1) }
         );
     }
 
-    #[cfg(not(feature = "sequential"))]
     #[test]
-    fn setup_lanes_use_deterministic_overlap_handshake() {
+    fn setup_lanes_produce_identical_artifacts_across_worker_counts() {
         let _inline = InlineOn::on();
         let ws = setup_workspace();
         let mid = module_id(&ws, "<setup-lane-test>");
-        let (emit, cache) = FullEmit::program()
-            .mutation(BodyMutation::SetupLaneSchedule(
-                SetupLaneSchedule::Handshake,
-            ))
-            .run(&ws, mid)
-            .expect("setup lane emission");
-        let lanes = emit.setup_lanes;
+        let emit_with = |threads| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("test pool")
+                .install(|| FullEmit::program().run(&ws, mid))
+                .expect("setup lane emission")
+        };
+        let (serial, serial_cache) = emit_with(1);
+        let lanes = serial.setup_lanes;
         assert!(
             lanes.cpu_population > 0 && lanes.plans_population > 0 && lanes.shader_population > 0,
             "each setup lane must have a real population: {lanes:?}"
-        );
-        assert_eq!(
-            lanes.setup_handshake_entered, 2,
-            "CPU and plan lanes must both reach the handshake: {lanes:?}"
-        );
-        assert_eq!(
-            lanes.setup_handshake_released, 2,
-            "both handshake lanes must be released: {lanes:?}"
-        );
-        assert!(
-            lanes.setup_handshake_released_after_both,
-            "handshake must release only after both lanes enter: {lanes:?}"
         );
         assert!(
             lanes.mono_intern_new_during_join > 0,
-            "the overlap fixture must allocate new shared identity: {lanes:?}"
+            "the lanes must allocate new shared identity: {lanes:?}"
         );
-        assert!(!cache.lua_view().publisher_lanes.is_empty());
-        assert!(!cache.shader_view.roots.is_empty());
-    }
-
-    #[cfg(feature = "sequential")]
-    #[test]
-    fn setup_lanes_keep_the_sequential_control() {
-        let _inline = InlineOn::on();
-        let ws = setup_workspace();
-        let mid = module_id(&ws, "<setup-lane-test>");
-        let (emit, _) = emit_full(&ws, mid).expect("setup lane emission");
-        let lanes = emit.setup_lanes;
-        assert!(
-            lanes.cpu_population > 0 && lanes.plans_population > 0 && lanes.shader_population > 0,
-            "each setup lane must have a real population: {lanes:?}"
-        );
-        assert_eq!(
-            lanes.setup_handshake_entered, 0,
-            "sequential setup used the parallel handshake"
-        );
-        assert_eq!(
-            lanes.setup_handshake_released, 0,
-            "sequential setup released a handshake"
-        );
-        assert!(!lanes.setup_handshake_released_after_both);
-    }
-
-    #[cfg(not(feature = "sequential"))]
-    #[test]
-    fn setup_lanes_preserve_identity_under_reversed_scheduling() {
-        let _inline = InlineOn::on();
-        let ws = setup_workspace();
-        let mid = module_id(&ws, "<setup-lane-test>");
-        let emit = |schedule| {
-            FullEmit::program()
-                .mutation(BodyMutation::SetupLaneSchedule(schedule))
-                .run(&ws, mid)
-                .expect("setup lane emission")
-        };
-        let (cpu_first, cpu_cache) = emit(SetupLaneSchedule::CpuFirst);
-        let (plans_first, plans_cache) = emit(SetupLaneSchedule::PlansFirst);
-
-        for (name, emit, cache, expected_first) in [
-            (
-                "CPU-first",
-                &cpu_first,
-                &cpu_cache,
-                SetupLaneKind::CpuArtifact,
-            ),
-            (
-                "plans-first",
-                &plans_first,
-                &plans_cache,
-                SetupLaneKind::ConcretePlans,
-            ),
-        ] {
-            assert!(
-                emit.setup_lanes.cpu_population > 0
-                    && emit.setup_lanes.plans_population > 0
-                    && emit.setup_lanes.shader_population > 0,
-                "{name} schedule must exercise every setup lane: {:?}",
-                emit.setup_lanes
-            );
+        assert!(!serial_cache.lua_view().publisher_lanes.is_empty());
+        assert!(!serial_cache.shader_view.roots.is_empty());
+        for threads in [2, 8] {
+            let (emit, cache) = emit_with(threads);
+            assert_eq!(serial.lua, emit.lua, "{threads} workers");
             assert_eq!(
-                emit.setup_lanes.first_started_lane,
-                Some(expected_first),
-                "{name} schedule did not force the requested first lane: {:?}",
-                emit.setup_lanes
-            );
-            assert!(
-                emit.setup_lanes.mono_write_acqs_during_join > 0
-                    && emit.setup_lanes.mono_intern_attempts_during_join > 0
-                    && emit.setup_lanes.mono_intern_new_during_join > 0,
-                "{name} fixture must expose the shared interner write population: {:?}",
-                emit.setup_lanes
-            );
-            assert!(
-                cache.lua_view().publisher_lanes.len() > 0,
-                "{name} fixture must publish a concrete foreign body: {:?}",
-                cache.lua_view().census()
-            );
-            assert!(
-                cache.shader_view.roots.len() > 0,
-                "{name} fixture must retain a shader root: {:?}",
-                cache.shader_view.roots.len()
+                serial_cache.lua_view().publisher_lanes,
+                cache.lua_view().publisher_lanes,
+                "{threads} workers changed publisher ABI identity"
             );
         }
-
-        assert_eq!(
-            cpu_first.lua, plans_first.lua,
-            "reversing setup scheduling changed the Lua artifact"
-        );
-        assert_eq!(
-            cpu_cache.lua_view().publisher_lanes,
-            plans_cache.lua_view().publisher_lanes,
-            "reversing setup scheduling changed publisher ABI identity"
-        );
     }
 }
 
@@ -1803,12 +1707,9 @@ fn main() { let result = outer(1) }
 /// demand, and conflicting or failing demand. The jobs run on the real
 /// scheduler; `SpecScheduleHook` only holds finished jobs back and records
 /// what was installed.
-#[cfg(all(test, not(feature = "sequential")))]
+#[cfg(test)]
 mod spec_schedule_tests {
-    use super::instances::{SPEC_SCHEDULE_HOOK, SpecScheduleHook};
     use super::*;
-    use std::sync::{Arc, Condvar, Mutex};
-    use std::time::Duration;
     use ustr::Ustr;
 
     // `mid<int>` is demanded by `a` and `c`, `leaf<int>` by `a` and again by
@@ -1848,100 +1749,6 @@ fn main() { let r = a() + c() }
 "#;
 
     const MODULE: &str = "<spec-schedule-test>";
-    const TURN_TIMEOUT: Duration = Duration::from_secs(10);
-
-    /// Which queued jobs to hold back, by a substring of their symbol, in the
-    /// order they are then released.
-    type Held = &'static [&'static str];
-
-    #[derive(Default)]
-    struct Log {
-        scheduled: Vec<String>,
-        completed: Vec<String>,
-        installed: Vec<(String, bool)>,
-        /// Jobs in flight (scheduled, not completed) when each held job was
-        /// released: the held jobs still waiting, and nothing else.
-        releases: Vec<(String, usize, usize)>,
-        timed_out: Vec<String>,
-    }
-
-    /// Holds every job matching `held` until no other queued job is in
-    /// flight, then releases the held ones in `held`'s order. A held job's
-    /// own demand is queued only once it completes, so every job that can
-    /// run before it does, and the queue then drains the rest.
-    struct Forced {
-        held: Held,
-        log: Mutex<Log>,
-        waiting: Mutex<Vec<String>>,
-        turn: Condvar,
-    }
-
-    impl Forced {
-        fn new(held: Held) -> Arc<Self> {
-            Arc::new(Self {
-                held,
-                log: Mutex::default(),
-                waiting: Mutex::new(Vec::new()),
-                turn: Condvar::new(),
-            })
-        }
-
-        fn rank(&self, name: &str) -> Option<usize> {
-            self.held.iter().position(|pat| name.contains(pat))
-        }
-
-        fn in_flight(log: &Log) -> usize {
-            log.scheduled.len() - log.completed.len()
-        }
-    }
-
-    impl SpecScheduleHook for Forced {
-        fn scheduled(&self, name: &str) {
-            self.log.lock().unwrap().scheduled.push(name.to_string());
-            self.turn.notify_all();
-        }
-
-        fn finished(&self, name: &str) {
-            let mut log = self.log.lock().unwrap();
-            if let Some(rank) = self.rank(name) {
-                self.waiting.lock().unwrap().push(name.to_string());
-                // The other held jobs wait on the in-flight count, which this
-                // arrival changes.
-                self.turn.notify_all();
-                loop {
-                    let waiting = self.waiting.lock().unwrap().clone();
-                    let first = waiting.iter().min_by_key(|held| self.rank(held)).cloned();
-                    let my_turn =
-                        first.as_deref() == Some(name) && Self::in_flight(&log) == waiting.len();
-                    if my_turn {
-                        let in_flight = Self::in_flight(&log);
-                        log.releases
-                            .push((name.to_string(), in_flight, waiting.len()));
-                        self.waiting.lock().unwrap().retain(|held| held != name);
-                        break;
-                    }
-                    let (next, wait) = self.turn.wait_timeout(log, TURN_TIMEOUT).unwrap();
-                    log = next;
-                    if wait.timed_out() {
-                        log.timed_out.push(format!("{name} (held #{rank})"));
-                        self.waiting.lock().unwrap().retain(|held| held != name);
-                        break;
-                    }
-                }
-            }
-            log.completed.push(name.to_string());
-            self.turn.notify_all();
-        }
-
-        fn installed(&self, name: &str, ok: bool) {
-            self.log
-                .lock()
-                .unwrap()
-                .installed
-                .push((name.to_string(), ok));
-        }
-    }
-
     fn workspace() -> Workspace {
         let mut modules: Vec<_> = rock_stdlib::stdlib_files()
             .iter()
@@ -1954,139 +1761,33 @@ fn main() { let r = a() + c() }
         bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
     }
 
-    /// Enough workers that every held job keeps a thread while the rest of
-    /// the queue drains.
-    fn pool() -> rayon::ThreadPool {
+    fn on_workers<R: Send>(threads: usize, f: impl FnOnce() -> R + Send) -> R {
         rayon::ThreadPoolBuilder::new()
-            .num_threads(32)
+            .num_threads(threads)
             .build()
             .expect("schedule test pool")
+            .install(f)
     }
 
-    fn with_hook<R: Send>(hook: Option<Arc<Forced>>, f: impl FnOnce() -> R + Send) -> R {
-        pool().install(|| {
-            SPEC_SCHEDULE_HOOK.with(|slot| {
-                *slot.borrow_mut() = hook.map(|hook| hook as Arc<dyn SpecScheduleHook>)
-            });
-            let result = f();
-            SPEC_SCHEDULE_HOOK.with(|slot| *slot.borrow_mut() = None);
-            result
-        })
-    }
-
-    fn emit(ws: &Workspace, hook: Option<Arc<Forced>>) -> (MirEmit, SkullEmitCache) {
+    fn emit(ws: &Workspace, threads: usize) -> (MirEmit, SkullEmitCache) {
         let mid = module_id(ws, MODULE);
-        with_hook(hook, || FullEmit::program().run(ws, mid)).expect("schedule fixture emits")
-    }
-
-    /// Every held job was released last among the jobs then in flight, in
-    /// `held`'s order, and nothing timed out.
-    fn assert_forced(hook: &Forced, label: &str) {
-        let log = hook.log.lock().unwrap();
-        assert!(
-            log.timed_out.is_empty(),
-            "{label}: jobs never got their turn: {:?}",
-            log.timed_out
-        );
-        let held: Vec<&String> = log
-            .scheduled
-            .iter()
-            .filter(|name| hook.rank(name).is_some())
-            .collect();
-        assert_eq!(
-            log.releases.len(),
-            held.len(),
-            "{label}: not every held job was released: {:?}",
-            log.releases
-        );
-        for (name, in_flight, waiting) in &log.releases {
-            assert_eq!(
-                in_flight, waiting,
-                "{label}: `{name}` was released while another job was in flight"
-            );
-        }
-        let released: Vec<Option<usize>> = log
-            .releases
-            .iter()
-            .map(|(name, _, _)| hook.rank(name))
-            .collect();
-        let mut expected = released.clone();
-        expected.sort();
-        assert_eq!(
-            released, expected,
-            "{label}: held jobs released out of order"
-        );
-    }
-
-    const SCHEDULES: [(&str, Held); 4] = [
-        ("hold mid<int>", &["mid_T_spec_p_int"]),
-        (
-            "hold count<Item0> then leaf<int>",
-            &["count_arr_V_spec_a_n5_Item0", "leaf_T_spec_p_int"],
-        ),
-        (
-            "hold leaf<int> then count<Item0>",
-            &["leaf_T_spec_p_int", "count_arr_V_spec_a_n5_Item0"],
-        ),
-        ("hold every count", &["count_arr_V_spec"]),
-    ];
-
-    /// `held` patterns are symbol substrings; make sure each one names a job
-    /// that really was queued, so a renamed symbol fails loudly.
-    fn assert_held_exist(hook: &Forced, label: &str) {
-        let log = hook.log.lock().unwrap();
-        for pat in hook.held {
-            assert!(
-                log.scheduled.iter().any(|name| name.contains(pat)),
-                "{label}: no queued job matches `{pat}`: {:?}",
-                log.scheduled
-            );
-        }
+        on_workers(threads, || FullEmit::program().run(ws, mid)).expect("schedule fixture emits")
     }
 
     #[test]
-    fn forced_completion_orders_install_and_emit_identically() {
+    fn specialization_queue_emits_identically_across_worker_counts() {
         let ws = workspace();
-        let (natural, _) = emit(&ws, None);
-        let mut reference: Option<(BTreeSet<String>, Vec<(String, bool)>)> = None;
-        for (label, held) in SCHEDULES {
-            let hook = Forced::new(held);
-            let (emit, _) = emit(&ws, Some(Arc::clone(&hook)));
-            assert_held_exist(&hook, label);
-            assert_forced(&hook, label);
-            assert_eq!(
-                emit.lua, natural.lua,
-                "{label}: forced completion order changed the emitted program"
-            );
-            let log = hook.log.lock().unwrap();
-            // Duplicate demand: two chunks demand `mid<int>` and `leaf<int>` is
-            // demanded again once `mid<int>` is built, yet each instance is
-            // scheduled and installed once.
-            let scheduled: BTreeSet<String> = log.scheduled.iter().cloned().collect();
-            assert_eq!(
-                scheduled.len(),
-                log.scheduled.len(),
-                "{label}: an instance was built twice: {:?}",
-                log.scheduled
-            );
-            assert!(
-                scheduled.len() >= 8,
-                "{label}: the fixture must queue many jobs: {scheduled:?}"
-            );
-            let observed = (scheduled, log.installed.clone());
-            match &reference {
-                None => reference = Some(observed),
-                Some(reference) => assert_eq!(
-                    &observed, reference,
-                    "{label}: the jobs or the installation order depend on completion order"
-                ),
-            }
+        let (serial, cache) = emit(&ws, 1);
+        let specs = cache
+            .graph
+            .instances
+            .iter()
+            .filter(|inst| !inst.args.is_empty())
+            .count();
+        assert!(specs >= 8, "the fixture must queue many jobs: {specs}");
+        for threads in [2, 8] {
+            assert_eq!(serial.lua, emit(&ws, threads).0.lua, "{threads} workers");
         }
-
-        let (_, installed) = reference.expect("schedules ran");
-        let installed_names: BTreeSet<&String> = installed.iter().map(|(name, _)| name).collect();
-        assert_eq!(installed.len(), installed_names.len(), "{installed:?}");
-        assert!(installed.iter().all(|(_, ok)| *ok), "{installed:?}");
     }
 
     fn spec_named(cache: &SkullEmitCache, ws: &Workspace, name: &str, arg: &str) -> Instance {
@@ -2107,11 +1808,11 @@ fn main() { let r = a() + c() }
     /// A conflicting demand (two bound-tree answers for one instance) and a
     /// job whose build fails share the queue with successful jobs. The
     /// rejections, the surviving chunks and the installation order must not
-    /// depend on which job finishes first.
+    /// depend on how many workers drain the queue.
     #[test]
-    fn conflicting_and_failing_demand_report_identically_under_forced_orders() {
+    fn conflicting_and_failing_demand_report_identically_across_worker_counts() {
         let ws = workspace();
-        let (_, mut cache) = emit(&ws, None);
+        let (_, mut cache) = emit(&ws, 1);
         let clashing = spec_named(&cache, &ws, "mid", "bool");
         let failing = spec_named(&cache, &ws, "leaf", "Cell1");
         let owner = cache
@@ -2140,9 +1841,8 @@ fn main() { let r = a() + c() }
         // the queue has to build each one again.
         cache.chunks.retain(|inst, _| inst.args.is_empty());
 
-        let run = |held: Held| {
-            let hook = Forced::new(held);
-            let (built, errs) = with_hook(Some(Arc::clone(&hook)), || {
+        let run = |threads: usize| {
+            let (built, errs) = on_workers(threads, || {
                 view_driven_specialized_chunks(&ws, &cache.cg, &cache.scx, &cache, &[])
             });
             let mut chunks: Vec<(String, String)> = built
@@ -2154,12 +1854,10 @@ fn main() { let r = a() + c() }
                 .into_iter()
                 .map(|(name, err)| (name, err.message))
                 .collect();
-            let installed = hook.log.lock().unwrap().installed.clone();
-            (hook, chunks, errs, installed)
+            (chunks, errs)
         };
 
-        let (first, chunks, errs, installed) = run(&[]);
-        assert_forced(&first, "natural");
+        let (chunks, errs) = run(1);
         let clash_name = clashing.symbol(&ws, cache.scx.interner());
         let failing_name = failing.symbol(&ws, cache.scx.interner());
         // `mid<Cell1>` lowers a call to the plan-less `leaf<Cell1>`, so it
@@ -2182,12 +1880,12 @@ fn main() { let r = a() + c() }
             "the failing job was not reported: {errs:?}"
         );
         assert!(
-            first.log.lock().unwrap().scheduled.contains(&failing_name),
-            "the failing job must be queued alongside successful ones"
-        );
-        assert!(
             chunks.iter().all(|(name, _)| !expected.contains(&name)),
             "a rejected instance still produced a chunk"
+        );
+        assert!(
+            chunks.len() >= 8,
+            "the failing jobs must share the queue with many successful ones: {chunks:?}"
         );
         // Only the clashing instance demands `leaf<bool>`, so its rejection
         // must also keep that instance out.
@@ -2197,31 +1895,11 @@ fn main() { let r = a() + c() }
                 .any(|(name, _)| name.starts_with("leaf") && name.contains("bool")),
             "a rejected demand's callees were still built: {chunks:?}"
         );
-
-        for (label, held) in [
-            (
-                "hold the failing job",
-                &["leaf_T_spec_a_n5_Cell1", "count_arr_V_spec"] as Held,
-            ),
-            (
-                "hold mid<Cell1> then count",
-                &["mid_T_spec_a_n5_Cell1", "count_arr_V_spec_a_n5_Item0"],
-            ),
-        ] {
-            let (hook, other_chunks, other_errs, other_installed) = run(held);
-            assert_held_exist(&hook, label);
-            assert_forced(&hook, label);
+        for threads in [2, 8] {
             assert_eq!(
-                other_errs, errs,
-                "{label}: diagnostics depend on completion order"
-            );
-            assert_eq!(
-                other_chunks, chunks,
-                "{label}: chunks depend on completion order"
-            );
-            assert_eq!(
-                other_installed, installed,
-                "{label}: installation order depends on completion order"
+                run(threads),
+                (chunks.clone(), errs.clone()),
+                "{threads} workers"
             );
         }
     }

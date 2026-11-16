@@ -2,91 +2,6 @@
 
 use super::*;
 
-#[cfg(all(test, not(feature = "sequential")))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum SetupLaneSchedule {
-    CpuFirst,
-    PlansFirst,
-    Handshake,
-}
-
-#[cfg(all(test, not(feature = "sequential")))]
-#[derive(Clone, Copy, Debug, Default)]
-struct SetupHandshakeState {
-    entered: usize,
-    released: usize,
-    released_after_both: bool,
-}
-
-#[cfg(all(test, not(feature = "sequential")))]
-struct SetupLaneScheduler {
-    schedule: SetupLaneSchedule,
-    finished: std::sync::Mutex<bool>,
-    handshake: std::sync::Mutex<SetupHandshakeState>,
-    wake: std::sync::Condvar,
-}
-
-#[cfg(all(test, not(feature = "sequential")))]
-impl SetupLaneScheduler {
-    fn new(schedule: SetupLaneSchedule) -> Self {
-        Self {
-            schedule,
-            finished: std::sync::Mutex::new(false),
-            handshake: std::sync::Mutex::new(SetupHandshakeState::default()),
-            wake: std::sync::Condvar::new(),
-        }
-    }
-
-    fn wait(&self, lane: SetupLaneKind) {
-        if self.schedule == SetupLaneSchedule::Handshake {
-            let mut handshake = self.handshake.lock().expect("setup handshake lock");
-            handshake.entered += 1;
-            if handshake.entered == 2 {
-                handshake.released_after_both = true;
-                self.wake.notify_all();
-            }
-            while handshake.entered < 2 {
-                handshake = self.wake.wait(handshake).expect("setup handshake wait");
-            }
-            handshake.released += 1;
-            return;
-        }
-        let first = match self.schedule {
-            SetupLaneSchedule::CpuFirst => SetupLaneKind::CpuArtifact,
-            SetupLaneSchedule::PlansFirst => SetupLaneKind::ConcretePlans,
-            SetupLaneSchedule::Handshake => unreachable!(),
-        };
-        if lane != first {
-            let mut finished = self.finished.lock().expect("setup scheduler lock");
-            while !*finished {
-                finished = self.wake.wait(finished).expect("setup scheduler wait");
-            }
-        }
-    }
-
-    fn finish(&self, lane: SetupLaneKind) {
-        let first = match self.schedule {
-            SetupLaneSchedule::CpuFirst => SetupLaneKind::CpuArtifact,
-            SetupLaneSchedule::PlansFirst => SetupLaneKind::ConcretePlans,
-            SetupLaneSchedule::Handshake => return,
-        };
-        if lane != first {
-            return;
-        }
-        *self.finished.lock().expect("setup scheduler lock") = true;
-        self.wake.notify_all();
-    }
-
-    fn handshake(&self) -> (usize, usize, bool) {
-        let handshake = *self.handshake.lock().expect("setup handshake lock");
-        (
-            handshake.entered,
-            handshake.released,
-            handshake.released_after_both,
-        )
-    }
-}
-
 /// A full build's kind with the roots it is taken over.
 #[derive(Clone, Copy)]
 pub(super) enum FullBuild<'a> {
@@ -477,58 +392,6 @@ fn mutate_concrete_plans(
     }
 }
 
-/// Test-only ordering of the setup lanes; inert in production.
-struct LaneGate {
-    #[cfg(all(test, not(feature = "sequential")))]
-    scheduler: Option<std::sync::Arc<SetupLaneScheduler>>,
-}
-
-impl LaneGate {
-    #[cfg_attr(any(not(test), feature = "sequential"), allow(unused_variables))]
-    fn new(mutation: BodyMutation) -> Self {
-        Self {
-            #[cfg(all(test, not(feature = "sequential")))]
-            scheduler: match mutation {
-                BodyMutation::SetupLaneSchedule(schedule) => {
-                    Some(std::sync::Arc::new(SetupLaneScheduler::new(schedule)))
-                }
-                _ => None,
-            },
-        }
-    }
-
-    /// Run one lane, held back or released per the test schedule. The lane
-    /// times its own window inside `f`, so the gate's waits are not counted.
-    #[cfg_attr(any(not(test), feature = "sequential"), allow(unused_variables))]
-    fn run<T>(&self, lane: SetupLaneKind, f: impl FnOnce() -> T) -> T {
-        #[cfg(all(test, not(feature = "sequential")))]
-        if let Some(scheduler) = self.scheduler.as_deref() {
-            scheduler.wait(lane);
-        }
-        let result = f();
-        #[cfg(all(test, not(feature = "sequential")))]
-        if let Some(scheduler) = self.scheduler.as_deref() {
-            scheduler.finish(lane);
-        }
-        result
-    }
-
-    #[cfg(test)]
-    fn handshake(&self) -> (usize, usize, bool) {
-        #[cfg(not(feature = "sequential"))]
-        {
-            self.scheduler
-                .as_deref()
-                .map(|scheduler| scheduler.handshake())
-                .unwrap_or((0, 0, false))
-        }
-        #[cfg(feature = "sequential")]
-        {
-            (0, 0, false)
-        }
-    }
-}
-
 /// The scalar context lowering will use and the codegen context over it,
 /// short of the call graph. Both read the workspace only (the value-reference
 /// scan, the global state slots), so they are built beside the graph.
@@ -659,17 +522,18 @@ fn run_setup_lanes(
     build_plans: impl FnOnce() -> Result<crate::concrete_body::ConcreteBodies, CompilerError> + Send,
     emission_roots: &[FuncRef],
     early: EarlyContexts,
-    mutation: BodyMutation,
 ) -> Result<(crate::concrete_body::ConcreteBodies, SetupLanes), CompilerError> {
-    let gate = LaneGate::new(mutation);
     let mono_before_lanes = graph.interner().stats();
     let (scx, cg) = early;
     assert!(
         std::sync::Arc::ptr_eq(&scx.interner_handle(), graph.interner()),
         "the scalar context mints against the graph's arena"
     );
-    let plans_branch = || {
-        gate.run(SetupLaneKind::ConcretePlans, || {
+    // The plan build stays on this thread: its build counter is a
+    // thread-local witness the incremental repair statistics read back.
+    let (cpu_result, (plans_result, plans_lane)) = join_in_place(
+        || cpu_artifact_lane(ws, graph, emission_roots, scx, cg),
+        || {
             let started = Instant::now();
             let concrete = build_plans();
             let finished = Instant::now();
@@ -685,39 +549,10 @@ fn run_setup_lanes(
                     population,
                 },
             )
-        })
-    };
-    // The plan build stays on this thread: its build counter is a
-    // thread-local witness the incremental repair statistics read back.
-    let run_lanes = || {
-        join_in_place(
-            || {
-                gate.run(SetupLaneKind::CpuArtifact, || {
-                    cpu_artifact_lane(ws, graph, emission_roots, scx, cg)
-                })
-            },
-            plans_branch,
-        )
-    };
-    #[cfg(all(test, not(feature = "sequential")))]
-    let (cpu_result, (plans_result, plans_lane)) = if matches!(
-        mutation,
-        BodyMutation::SetupLaneSchedule(SetupLaneSchedule::Handshake)
-    ) {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(3)
-            .build()
-            .expect("setup handshake test pool")
-            .install(run_lanes)
-    } else {
-        run_lanes()
-    };
-    #[cfg(any(not(test), feature = "sequential"))]
-    let (cpu_result, (plans_result, plans_lane)) = run_lanes();
+        },
+    );
     let concrete = plans_result?;
     let mono_after_lanes = graph.interner().stats();
-    #[cfg(test)]
-    let setup_handshake = gate.handshake();
     let (cpu_result, cpu_lane) = cpu_result;
     let (lua_view, scx, cg) = cpu_result?;
     let attribution = SetupLaneAttribution {
@@ -735,12 +570,6 @@ fn run_setup_lanes(
         mono_intern_new_during_join: mono_after_lanes
             .intern_new
             .saturating_sub(mono_before_lanes.intern_new),
-        #[cfg(test)]
-        setup_handshake_entered: setup_handshake.0,
-        #[cfg(test)]
-        setup_handshake_released: setup_handshake.1,
-        #[cfg(test)]
-        setup_handshake_released_after_both: setup_handshake.2,
     };
     Ok((
         concrete,
@@ -868,14 +697,6 @@ fn emit_full_chunks<'a>(
         )
     })?;
     queue.attribution = attribution;
-    #[cfg(test)]
-    if let Some(hook) = queue.hook() {
-        for job in &jobs {
-            if let FanOutJob::Body(_, _, f) = job {
-                hook.scheduled(&mangle_fn(ws, f));
-            }
-        }
-    }
     // One slot per body, so the chunk map is built in declaration order
     // without moving the chunks through a sort.
     let bodies: std::sync::Mutex<FanOutBodies> =
@@ -903,10 +724,6 @@ fn emit_full_chunks<'a>(
                         );
                         if let Ok(chunk) = &mut chunk {
                             chunk.finish(started);
-                        }
-                        #[cfg(test)]
-                        if let Some(hook) = queue.hook() {
-                            hook.finished(&mangle_fn(ws, f));
                         }
                         if let Ok(chunk) = &chunk {
                             queue.admit_all(&chunk.specs, &mut demanded);
@@ -1054,7 +871,6 @@ pub(super) fn emit_full_build(
             || build_concrete_plans(ws, &graph, mutation),
             &roots.emission_roots,
             early,
-            mutation,
         )
     })?;
     let SetupLanes {

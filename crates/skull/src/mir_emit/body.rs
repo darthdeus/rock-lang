@@ -27,8 +27,6 @@ pub(super) enum BodyMutation {
     ClearIteratorWitnessInstance {
         body: FuncRef,
     },
-    #[cfg(all(test, not(feature = "sequential")))]
-    SetupLaneSchedule(SetupLaneSchedule),
 }
 
 /// The statically-resolved callees referenced by a (post-inline) MIR function —
@@ -283,8 +281,6 @@ pub(super) fn emit_body_chunk_with_mutation(
                 BodyMutation::ClearBoundPlan { .. } => unreachable!(),
                 BodyMutation::ClearCoroutineResultPlan { .. } => unreachable!(),
                 BodyMutation::ClearIteratorWitnessInstance { .. } => unreachable!(),
-                #[cfg(all(test, not(feature = "sequential")))]
-                BodyMutation::SetupLaneSchedule(_) => unreachable!(),
             }
         }
         #[cfg(test)]

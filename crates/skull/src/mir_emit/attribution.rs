@@ -13,12 +13,6 @@ pub struct SetupLaneAttribution {
     pub mono_write_acqs_during_join: u64,
     pub mono_intern_attempts_during_join: u64,
     pub mono_intern_new_during_join: u64,
-    #[cfg(test)]
-    pub setup_handshake_entered: usize,
-    #[cfg(test)]
-    pub setup_handshake_released: usize,
-    #[cfg(test)]
-    pub setup_handshake_released_after_both: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
