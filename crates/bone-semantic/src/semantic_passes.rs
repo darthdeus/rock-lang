@@ -493,7 +493,7 @@ pub fn lower_modules_seeded(
     ws.module_timings.extend(lower_times);
     ws.log_time("insert modules", gap_timer);
 
-    check_duplicate_signatures(ws, &ids);
+    check_duplicate_definitions(ws, &ids);
     let gap_timer = Instant::now();
     check_embed_site_legality(ws, &ids);
     crate::value_recursion::check_value_recursion(ws, &ids);
@@ -506,9 +506,9 @@ pub fn lower_modules_seeded(
 
 /// Two overloads of one family that no call can tell apart: same parameter
 /// types, generics and backend. Resolution ignores the return type and the
-/// parameter names, so either difference still leaves a tie. The later
-/// definition reports, and only when its module was lowered by this call.
-fn check_duplicate_signatures(ws: &mut Workspace, fresh: &[ModuleId]) {
+/// parameter names, so either difference still leaves a tie. Decorators do
+/// not overload. Report only in modules lowered by this call.
+fn check_duplicate_definitions(ws: &mut Workspace, fresh: &[ModuleId]) {
     let same = |a: (ModuleId, Idx<crate::hir::Function>),
                 b: (ModuleId, Idx<crate::hir::Function>)| {
         let (fa, fb) = (
@@ -554,6 +554,34 @@ fn check_duplicate_signatures(ws: &mut Workspace, fresh: &[ModuleId]) {
                     ),
                 ),
             ));
+        }
+    }
+    // Kept modules precede fresh ones so a duplicate reports at the fresh definition.
+    let mut decorators = FxHashMap::default();
+    let kept = ws.source_modules().filter(|m| !fresh.contains(&m.id));
+    for m in kept.chain(fresh.iter().map(|&mid| ws.module(mid))) {
+        for (_, d) in m.decorators.iter() {
+            match decorators.entry(d.def_key) {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(d.span);
+                }
+                std::collections::hash_map::Entry::Occupied(first) if fresh.contains(&m.id) => {
+                    let at = first.get().start();
+                    errs.push((
+                        m.id,
+                        CompilerError::new_with_label(
+                            d.span,
+                            format!(
+                                "duplicate definition of decorator `{}`: already defined at {}:{}",
+                                d.name,
+                                at.file,
+                                at.line + 1
+                            ),
+                        ),
+                    ));
+                }
+                std::collections::hash_map::Entry::Occupied(_) => {}
+            }
         }
     }
     for (mid, e) in errs {

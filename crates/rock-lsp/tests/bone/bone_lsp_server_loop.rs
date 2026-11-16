@@ -85,6 +85,32 @@ fn diagnostics_for(out: &[Message], uri: &str) -> Vec<Value> {
 }
 
 #[test]
+fn duplicate_decorator_diagnostic_is_unique_and_clears_after_an_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = uri_of(&dir.path().join("main.rock"));
+    let mut server = started();
+    let source = "deco init reg {}\ndeco init reg {}\nfn main() {}\n";
+    let out = roundtrip(&mut server, did_open(&uri, source));
+    let diagnostics = diagnostics_for(&out, &uri);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert!(
+        diagnostics[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("duplicate definition of decorator `reg`"),
+        "{diagnostics:?}"
+    );
+    assert_eq!(diagnostics[0]["range"]["start"]["line"], 1);
+
+    let out = roundtrip(
+        &mut server,
+        did_change(&uri, "deco init reg {}\nfn main() {}\n"),
+    );
+    let diagnostics = diagnostics_for(&out, &uri);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
 fn initialize_replies_with_the_advertised_capabilities() {
     let id = RequestId::from(1);
     let request = Request {

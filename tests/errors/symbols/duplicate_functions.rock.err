@@ -1,5 +1,5 @@
 //! Error: two definitions that no call can tell apart
-//! Tags: symbols, duplicates, overloads, macros
+//! Tags: symbols, duplicates, overloads, macros, decorators
 //!
 //! Overloads must differ in their parameter types. A second definition with
 //! the same name and parameter types is rejected at the definition, even when
@@ -79,5 +79,28 @@ fn main() {}
 struct Meters { v: float }
 //--- FILE: b.rock ---
 newtype Meters(float)
+
+fn main() {}
+
+//=== TEST CASE: same_decorator_twice_DuplicateSymbol ===
+//! expect: duplicate definition of decorator `reg`: already defined at test.rock:1
+deco init reg {}
+deco init reg {}
+
+fn main() {}
+
+//=== TEST CASE: same_decorator_across_files_DuplicateSymbol ===
+//! expect: duplicate definition of decorator `reg`: already defined at a.rock:1
+//--- FILE: a.rock ---
+deco init reg {}
+//--- FILE: b.rock ---
+deco init reg {}
+
+fn main() {}
+
+//=== TEST CASE: decorator_params_do_not_distinguish_DuplicateSymbol ===
+//! expect: duplicate definition of decorator `reg`: already defined at test.rock:1
+deco init reg {}
+deco init reg(x: int) {}
 
 fn main() {}

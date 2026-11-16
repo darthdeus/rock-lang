@@ -4,6 +4,7 @@ mod backend_stats_summary;
 mod broken_stdlib;
 mod compile_budget;
 mod deep_programs;
+mod duplicate_decorators;
 mod gpu_process;
 mod guide;
 mod host_api;
