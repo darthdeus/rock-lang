@@ -329,18 +329,18 @@ fn unknown_request_is_not_found_and_unknown_notification_is_silent() {
 }
 
 #[test]
-fn malformed_request_params_do_not_answer() {
-    // A JSON body that cannot parse as the method's params is logged and
-    // dropped: the server emits no response rather than a wrong one.
+fn malformed_request_params_answer_invalid_params() {
+    // Every request needs a response, or the client waits on its id forever.
     let mut server = started();
     let out = roundtrip(
         &mut server,
         req(3, "textDocument/hover", json!({ "textDocument": 42 })),
     );
-    assert!(
-        out.is_empty(),
-        "JSON-mismatched request emits nothing: {out:?}"
-    );
+    let resp = response(&out);
+    assert_eq!(resp.id, RequestId::from(3));
+    assert!(resp.result.is_none(), "{resp:?}");
+    let err = resp.error.as_ref().expect("an error response");
+    assert_eq!(err.code, lsp_server::ErrorCode::InvalidParams as i32);
 }
 
 #[test]

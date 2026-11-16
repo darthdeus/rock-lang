@@ -676,7 +676,15 @@ fn answer<R: lsp_types::request::Request>(
         tracing::info_span!("lsp_request", method = R::METHOD, request_id = %req.id).entered();
     match serde_json::from_value::<R::Params>(req.params) {
         Ok(params) => send_response(out, req.id, handler(workspace, &params)),
-        Err(error) => log::error!("JSON error in {} request: {error}", R::METHOD),
+        Err(error) => {
+            let detail = format!("invalid {} params: {error}", R::METHOD);
+            log::error!("{detail}");
+            out.push(failed_request(
+                req.id,
+                lsp_server::ErrorCode::InvalidParams,
+                detail,
+            ));
+        }
     }
 }
 
