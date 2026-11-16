@@ -321,6 +321,23 @@ mod tests {
     }
 
     #[test]
+    fn source_replaced_during_staging_is_staged_again() {
+        let (_root, src, dst) = stage_fixture();
+        let mut attempts = 0;
+        stage_cdylib_from(&src, &dst, |_| {
+            attempts += 1;
+            if attempts == 1 {
+                fs_err::write(&src, b"artifact uplifted by a concurrent cargo")?;
+                anyhow::bail!("engine cdylib changed while staging");
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(attempts, 2);
+        assert_eq!(fs_err::read(&dst).unwrap(), fs_err::read(&src).unwrap());
+    }
+
+    #[test]
     fn absent_damaged_or_old_identity_requires_staging() {
         let (_root, src, dst) = stage_fixture();
         fs_err::copy(&src, &dst).unwrap();
@@ -652,16 +669,19 @@ pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
     let src = target_debug.join(cdylib_name(src_stem));
     let dst = staged_cdylib_path(&rock_root, dst_stem);
 
-    // `cargo build -p <pkg>` can exit 0 without producing the cdylib at
-    // `target/debug/lib<stem>.dylib`: a cleaned/foreign target dir
-    // (multi-worktree sharing), a crate-type that no longer includes
-    // `cdylib`, or a build that touched only dependents. A bare
-    // `fs_err::copy` then fails with a cryptic "No such file or
-    // directory (os error 2)" that points at the *destination*, hiding
-    // the real problem. Surface it.
-    if !src.exists() {
+    stage_cdylib_from(&src, &dst, |staging| {
+        prepare_staged_cdylib(staging, dst_stem)
+    })
+    .map_err(|error| {
+        // `cargo build -p <pkg>` can exit 0 without producing the cdylib: a
+        // cleaned/foreign target dir, a crate-type without `cdylib`, or a
+        // build that touched only dependents. The copy error alone names
+        // neither the cause nor the recovery.
+        if src.exists() {
+            return error;
+        }
         let pkg = src_stem.replace('_', "-");
-        anyhow::bail!(
+        anyhow::anyhow!(
             "cargo build reported success but the cdylib was not produced at `{src}`.\n\
              Likely: `CARGO_TARGET_DIR` selects a stale/cleaned/foreign target \
              dir (worktrees sharing a target), `{pkg}` `crate-type` missing \
@@ -669,11 +689,7 @@ pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
              Recover: `cargo build -p {pkg}` from this worktree (with the same \
              `CARGO_TARGET_DIR`, if set) and confirm `{src}` exists, then re-run.",
             src = src.display(),
-            pkg = pkg,
-        );
-    }
-    stage_cdylib_from(&src, &dst, |staging| {
-        prepare_staged_cdylib(staging, dst_stem)
+        )
     })
 }
 
@@ -694,10 +710,25 @@ fn stage_identity_path(dst: &Path) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// Cargo releases its target-dir lock before staging reads the artifact, so a
+/// concurrent build in the same target dir can replace it mid-copy. One retry
+/// stages whichever artifact settled.
 pub(crate) fn stage_cdylib_from(
     src: &Path,
     dst: &Path,
-    prepare: impl FnOnce(&Path) -> Result<()>,
+    mut prepare: impl FnMut(&Path) -> Result<()>,
+) -> Result<()> {
+    stage_cdylib_once(src, dst, &mut prepare).or_else(|error| {
+        log::debug!("Restaging `{}` after: {error:#}", dst.display());
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        stage_cdylib_once(src, dst, &mut prepare)
+    })
+}
+
+fn stage_cdylib_once(
+    src: &Path,
+    dst: &Path,
+    prepare: &mut impl FnMut(&Path) -> Result<()>,
 ) -> Result<()> {
     let identity_path = stage_identity_path(dst);
     // Keep one lock inode: replacing/unlinking it would let waiters publish
