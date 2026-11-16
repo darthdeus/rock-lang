@@ -217,6 +217,7 @@
 // prelude: __rock_field_pairs
 // prelude: __rock_field_selected
 // prelude: __rock_fire_hot_reload_callbacks
+// prelude: __rock_flat_enum_view
 // prelude: __rock_fmt_binary
 // prelude: __rock_fmt_grouping
 // prelude: __rock_fmt_pad

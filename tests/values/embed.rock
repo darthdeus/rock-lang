@@ -226,30 +226,52 @@ fn test_plain_child_readable_selector_controls() {
     print("{accept_plain_read_selector(.p)} {accept_plain_full_selector(.p)}")
 }
 
-// SENTINEL -- a flattened enum FIELD still does not reconstruct logically.
-//
-// The bug: an enum field is stored flattened, as the physical keys `sig.#`
-// (discriminant) and `sig.0` (payload), so the declared name `sig` indexes
-// nothing and reflection renders it as nil. The embed path above rebuilds its
-// child from the leaves; the flattened-enum path has no equivalent, because
-// this mixed, non-cdata enum is absent from `__ROCK_TYPE_TABLE`, so there is no
-// variant/payload metadata to rebuild from. Cdata-eligible enums are registered
-// separately for column materialization and logical serialization.
-//
-// This assertion is INVERTED: it passes today BECAUSE the bug exists. The raw
-// `sig.#`/`sig.0` keys no longer leak into the output -- that half is fixed by
-// the physical-key filter -- but the value itself is still lost.
-//
-// When this fails, the reconstruction landed: flip the expected output to
-// `FlatHolder {{ other = 1, sig = Sig::B("x") }}` and delete this comment.
 enum Sig { A, B(string) }
 struct FlatHolder { sig: Sig, other: int }
 
 fn show_flat(h: FlatHolder) { print("{inspect(h)}") }
 
-@test(output = "FlatHolder {{ other = 1, sig = nil }}")
-fn test_flat_enum_field_reflection_sentinel() {
+@test(output = "FlatHolder {{ other = 1, sig = Sig::B {{ [1] = \"x\" }} }}")
+fn test_flat_enum_field_reflection() {
     show_flat(FlatHolder { sig: Sig::B("x"), other: 1 })
+}
+
+enum InspectSignal { Idle, Text(string), Pair(int, bool), Named { count: int, text: string } }
+struct InspectHolder { sig: InspectSignal?, tag: int }
+struct InspectOuter { embed child: InspectHolder, tag: int }
+
+fn inspect_opaque(value: any) -> string { return inspect(value) }
+
+@test(output = "InspectHolder {{ sig = InspectSignal::Idle, tag = 1 }}\nInspectHolder {{ sig = InspectSignal::Text {{ [1] = \"hello\" }}, tag = 1 }}\nInspectHolder {{ sig = InspectSignal::Pair {{ [1] = 7, [2] = false }}, tag = 1 }}\nInspectHolder {{ sig = InspectSignal::Named {{ count = 9, text = \"named\" }}, tag = 1 }}\nInspectHolder {{ sig = nil, tag = 1 }}")
+fn test_inspect_flat_enum_variants_and_null() {
+    let h = InspectHolder { sig: InspectSignal::Idle, tag: 1 }
+    print("{inspect_opaque(h)}")
+    h.sig = InspectSignal::Text("hello")
+    print("{inspect_opaque(h)}")
+    h.sig = InspectSignal::Pair(7, false)
+    print("{inspect_opaque(h)}")
+    h.sig = InspectSignal::Named { count: 9, text: "named" }
+    print("{inspect_opaque(h)}")
+    h.sig = null
+    print("{inspect_opaque(h)}")
+}
+
+@test(output = "InspectOuter {{ child = InspectHolder {{ sig = InspectSignal::Text {{ [1] = \"nested\" }}, tag = 2 }}, tag = 3 }}")
+fn test_inspect_flat_enum_in_embed() {
+    let outer = InspectOuter {
+        child: InspectHolder { sig: InspectSignal::Text("nested"), tag: 2 }, tag: 3,
+    }
+    print("{inspect_opaque(outer)}")
+}
+
+nobox value InspectPoint { x: int, y: int }
+enum InspectEvent { Empty, At(InspectPoint), Text(string) }
+struct InspectEventHolder { event: InspectEvent }
+
+@test(output = "InspectEventHolder {{ event = InspectEvent::At {{ x = 4, y = 5 }} }}")
+fn test_inspect_flat_enum_widened_payload() {
+    let h = InspectEventHolder { event: InspectEvent::At(InspectPoint { x: 4, y: 5 }) }
+    print("{inspect_opaque(h)}")
 }
 
 // -- Nested nullable embed --

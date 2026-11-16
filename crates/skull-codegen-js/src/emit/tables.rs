@@ -634,10 +634,8 @@ fn embed_view_expr(
             true,
         )
         .map_err(|e| err(e.message))?;
-        let val = match plan.embed() {
-            Some((child, child_nullable)) => embed_view_expr(ws, &key, child, child_nullable)?,
-            _ => format!("t[{}]", js_string_lit(&key)?),
-        };
+        let val =
+            inline_view_expr(ws, &key, &plan)?.unwrap_or(format!("t[{}]", js_string_lit(&key)?));
         parts.push(format!("{}: {val}", js_string_lit(f.name.as_str())?));
     }
     let built = format!("{{{}}}", parts.join(", "));
@@ -648,6 +646,42 @@ fn embed_view_expr(
     Ok(format!(
         "((t[{p}] === null || t[{p}] === undefined) ? null : {built})"
     ))
+}
+
+fn inline_view_expr(
+    ws: &Workspace,
+    prefix: &str,
+    plan: &skull_mir::lower::StructFieldPlan,
+) -> Result<Option<String>, CompilerError> {
+    if let Some((child, nullable)) = plan.embed() {
+        return embed_view_expr(ws, prefix, child, nullable).map(Some);
+    }
+    let skull_mir::lower::StructFieldPlan::Inline {
+        flat: Some(shape), ..
+    } = plan
+    else {
+        return Ok(None);
+    };
+    let tag = format!("t[{}]", js_string_lit(&format!("{prefix}.#"))?);
+    let mut payload = Vec::new();
+    for i in 0..shape.tuple_width() {
+        payload.push(format!(
+            "{i}, t[{}]",
+            js_string_lit(&format!("{prefix}.{i}"))?
+        ));
+    }
+    for field in shape.record_fields() {
+        payload.push(format!(
+            "{}, t[{}]",
+            js_string_lit(field.as_str())?,
+            js_string_lit(&format!("{prefix}.{field}"))?
+        ));
+    }
+    Ok(Some(format!(
+        "({tag} == null ? null : __rock_make_enum({tag}, {}, [{}]))",
+        js_string_lit(shape.name().as_str())?,
+        payload.join(", ")
+    )))
 }
 
 /// Emit the `__rock_inspect_ty["<N>"] = function(t, ..) {...}` entries: the
@@ -742,10 +776,10 @@ fn build_inspect_ty_defs(
                     false,
                 )
                 .map_err(|e| err(e.message))?;
-                let val = match plan.embed() {
-                    Some((child, nullable)) => format!(
+                let val = match inline_view_expr(ws, f.name.as_str(), &plan)? {
+                    Some(view) => format!(
                         "((t[{n}] !== null && typeof t[{n}] === \"object\") ? t[{n}] : {})",
-                        embed_view_expr(ws, f.name.as_str(), child, nullable)?
+                        view
                     ),
                     None => format!("t[{n}]"),
                 };

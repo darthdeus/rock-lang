@@ -2692,6 +2692,9 @@ const EPSILON: float = 0.0000001
                 if f.embed and type(t[f.name]) ~= "table" then
                     embed_vals = embed_vals or {}
                     embed_vals[f.name] = __rock_embed_view(t, f.name, f.type, f.nullable)
+                elseif f.flat and type(t[f.name]) ~= "table" then
+                    embed_vals = embed_vals or {}
+                    embed_vals[f.name] = __rock_flat_enum_view(t, f.name, f.type)
                 end
             end
         end
@@ -2762,6 +2765,20 @@ const EPSILON: float = 0.0000001
     return result
 """
 
+// Rebuild a flat enum's box with the same union slots as a whole-field read.
+@nomangle inline(lua) fn __rock_flat_enum_view(t: any, prefix: string, ty: string) -> any = """
+    local tag = t[prefix .. ".#"]
+    if tag == nil then return nil end
+    local flat = _G.__ROCK_ENUM_FLAT_LAYOUT[ty]
+    local o = { __ty = ty, __variant = tag }
+    for i = 1, flat.tuple_width do o[i] = t[prefix .. "." .. (i - 1)] end
+    for i = 1, #flat.record_fields do
+        local key = flat.record_fields[i]
+        o[key] = t[prefix .. "." .. key]
+    end
+    return o
+"""
+
 // Rebuild an `embed` field's LOGICAL value from the parent's physical leaves.
 // The child has no box of its own: its leaves live at `<prefix>.<subfield>` on
 // the parent, recursively, and a nullable embed keeps presence at `<prefix>`.
@@ -2777,6 +2794,8 @@ const EPSILON: float = 0.0000001
         local key = prefix .. "." .. f.name
         if f.embed then
             o[f.name] = __rock_embed_view(t, key, f.type, f.nullable)
+        elseif f.flat then
+            o[f.name] = __rock_flat_enum_view(t, key, f.type)
         else
             o[f.name] = t[key]
         end
