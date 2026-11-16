@@ -733,7 +733,6 @@ fn release_one_shot_chunks(
     built_specs: &mut Vec<(Instance, Chunk)>,
     unit_reads: &UnitComptimeReads,
     compile_counts: &mut CompileCounts,
-    release_stats: &mut CompileReleaseStats,
 ) -> Vec<skull_mir::mir::ComptimeRead> {
     let reads = artifact_comptime_reads(cache, built_specs, unit_reads, true);
     compile_counts.chunks += built_specs
@@ -752,10 +751,8 @@ fn release_one_shot_chunks(
                 .map(|(_, chunk)| chunk.deps.len())
                 .sum::<usize>(),
     );
-    let chunks = cache.chunks.len() + built_specs.len();
     drop_in_background(std::mem::take(&mut cache.chunks));
     drop_in_background(std::mem::take(built_specs));
-    release_stats.chunks = chunks - cache.chunks.len() - built_specs.len();
     reads
 }
 
@@ -1014,11 +1011,6 @@ pub(super) fn assemble(
     early: Option<EarlyAssembly>,
     specs: Option<SpecChunks>,
 ) -> Result<(MirEmit, FxHashSet<Instance>, UnitComptimeReads), CompilerError> {
-    let mut release_stats = CompileReleaseStats {
-        retained_dependency_edges: cache.dependents.values().map(|keys| keys.len()).sum(),
-        retained_static_keys: cache.static_cells_since_full.len(),
-        ..CompileReleaseStats::default()
-    };
     let mut compile_counts = CompileCounts {
         concrete_plans: cache.concrete.plans.len() + cache.concrete.always_plans.len(),
         chunks: cache.chunks.len(),
@@ -1097,10 +1089,7 @@ pub(super) fn assemble(
             Ok::<_, CompilerError>((plan, stage))
         });
         let stage = stage?;
-        let plans = cache.concrete.plans.len() + cache.concrete.always_plans.len();
         drop_in_background(std::mem::take(&mut cache.concrete));
-        release_stats.concrete_plans =
-            plans - cache.concrete.plans.len() - cache.concrete.always_plans.len();
         (needed_foreign, Some(stage))
     } else {
         (needed_foreign(), None)
@@ -1227,15 +1216,8 @@ pub(super) fn assemble(
             enum_names_lua,
         )
     };
-    let one_shot_reads = (lifetime == CacheLifetime::OneShot).then(|| {
-        release_one_shot_chunks(
-            cache,
-            built_specs,
-            &asm.unit_reads,
-            &mut compile_counts,
-            &mut release_stats,
-        )
-    });
+    let one_shot_reads = (lifetime == CacheLifetime::OneShot)
+        .then(|| release_one_shot_chunks(cache, built_specs, &asm.unit_reads, &mut compile_counts));
     drop(spec_chunks);
     step("assembly: definitions", &mut steps);
 
@@ -1413,7 +1395,6 @@ pub(super) fn assemble(
     phases.extend(steps);
     Ok((
         MirEmit {
-            release_stats,
             compile_counts,
             lua: out,
             globals_bridge_end,

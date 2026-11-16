@@ -73,22 +73,11 @@ pub struct CompileCounts {
     pub dependency_edges: Option<usize>,
 }
 
-/// Containers released before one-shot assembly finishes. Live builds retain them.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct CompileReleaseStats {
-    pub graph_instances: usize,
-    pub chunks: usize,
-    pub concrete_plans: usize,
-    pub retained_dependency_edges: usize,
-    pub retained_static_keys: usize,
-}
-
 /// The assembled Lua program and what was emitted into it.
 /// The line after which a host attaches its own global directory fields.
 pub const GLOBALS_BRIDGE_LINE: &str = "__rock_globals_install_bridge()\n";
 
 pub struct MirEmit {
-    pub release_stats: CompileReleaseStats,
     pub compile_counts: CompileCounts,
     pub lua: String,
     /// The byte offset in `lua` just past [`GLOBALS_BRIDGE_LINE`]. `None` for

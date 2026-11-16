@@ -429,7 +429,6 @@ fn assemble_overlay(
 
     Ok((
         MirEmit {
-            release_stats: CompileReleaseStats::default(),
             compile_counts: CompileCounts {
                 concrete_plans: cache.concrete.plans.len() + cache.concrete.always_plans.len(),
                 chunks: cache.chunks.len(),

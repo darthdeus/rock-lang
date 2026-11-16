@@ -699,9 +699,6 @@ impl SkullEmitCache {
         self.retain_static_cells(ws)?;
         emit.compile_counts.chunks = self.chunks.len();
         emit.compile_counts.dependency_edges = Some(dependency_edges);
-        emit.release_stats.retained_dependency_edges =
-            self.dependents.values().map(|keys| keys.len()).sum();
-        emit.release_stats.retained_static_keys = self.static_cells_since_full.len();
         Ok(())
     }
 }
@@ -800,7 +797,6 @@ pub(super) fn emit_full_build(
         drop_in_background(concrete.take_build_stats());
     }
     let graph_records = (build.lifetime() == CacheLifetime::OneShot).then(|| graph.take_records());
-    let released_graph_instances = graph_records.as_ref().map_or(0, |r| r.instances.len());
     let spec_queue = SpecQueue::new(ws, &scx, graph_records.as_ref().unwrap_or(&graph), None);
     // The chunk-free assembly inputs (scaffold, decorator and global units,
     // globals directory) are prepared beside the chunk build, on the same
@@ -932,7 +928,6 @@ pub(super) fn emit_full_build(
         Some(specs),
     )?;
     let assembly_window = assembly_started.elapsed();
-    emit.release_stats.graph_instances = released_graph_instances;
     emit.concrete_stats = concrete_stats;
     emit.setup_lanes = setup_lanes;
     let mut phases = setup_phases.0;
