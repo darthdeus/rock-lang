@@ -395,12 +395,9 @@ pub(crate) fn do_stone_watch(
         log::error!(target: "STONE", "{}", error_message);
         log::info!(target: "STONE", "watching for changes; game will start when compilation succeeds");
     };
-    // Build engine cdylibs (stone-rs + optional extras per game's
-    // [engine] needs) and the rock compiler in a single cargo invocation,
-    // beside the initial compile, which does not read them. Two separate
-    // `cargo build` calls each pay cargo's graph-walk cost and serialize on
-    // the target lock; one combined call halves the perceived startup pause
-    // and streams progress to the user.
+    // Build the rock compiler and engine cdylibs (stone-rs + optional extras
+    // per game's [engine] needs) beside the initial compile, which does not
+    // read them.
     let initial_build = crate::frame_runtime::beside(
         || build_all_for_game(path),
         || {
@@ -765,9 +762,9 @@ pub(crate) fn do_stone_watch(
     Ok(())
 }
 
-/// Combined startup build: stone-rs + optional extras + rock compiler
-/// in a single `cargo build` invocation. Streams cargo output directly so
-/// the user sees "Compiling …" progress instead of a silent pause.
+/// Startup build: rock compiler, then stone-rs and optional extras. Streams
+/// cargo output directly so the user sees "Compiling ..." progress instead of
+/// a silent pause.
 ///
 /// Used at `rock stone` startup. The watch loop's incremental rebuilds keep
 /// using the per-target `build_engine_libs` / `build_compiler` since they
@@ -784,22 +781,19 @@ fn build_all_for_game(game_path: &str) -> Result<()> {
 
     let optional_libs = rock_engine_host::engine_build::game_engine_libs(game_path)?;
 
-    // `--lib --bin rock` selects both halves in ONE invocation: every default
-    // member's lib/cdylib target plus the compiler binary. The two build in
-    // parallel, and stone-rs's cdylib lands for the stage_cdylib below.
-    //
     // No `-p`: resolver-2 unifies features over the SELECTED packages only, so
     // a narrower selection is a distinct feature resolution and rebuilds every
     // shared dep plus the whole compiler stack under a second -C metadata.
     // Staying on the default-member selection keeps one set of artifacts,
-    // shared with rock.sh's build.
+    // shared with rock.sh's build. stone-rs is not a default member, so it
+    // builds on its own, as every other launch builds it.
     info!("Building engine + compiler (cargo)...");
 
     rock_host::cargo::run_cargo(
         &["build", "--lib", "--bin", "rock"],
-        "Failed to build engine + compiler",
+        "Failed to build compiler",
     )?;
-    rock_engine_host::engine_build::stage_cdylib("stone_rs", "stone")?;
+    rock_engine_host::engine_build::build_libstone()?;
     // One helper, not a second build+stage pair here: two of them drift, and
     // the drift is invisible until a lib builds on one path and not the other.
     for lib in &optional_libs {

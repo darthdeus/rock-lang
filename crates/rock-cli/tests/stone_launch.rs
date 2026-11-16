@@ -864,3 +864,56 @@ co fn portable_sim() -> Coroutine<Wait> {
         );
     }
 }
+#[cfg(unix)]
+#[test]
+fn a_stone_launch_builds_the_engine_library_it_stages() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = tempfile::tempdir().unwrap();
+    let bin = fixture.path().join("bin");
+    let game = fixture.path().join("game");
+    for path in [&bin, &game] {
+        std::fs::create_dir(path).unwrap();
+    }
+    let cargo = bin.join("cargo");
+    std::fs::write(
+        &cargo,
+        "#!/bin/sh\necho \"$*\" >> \"$CARGO_LOG\"\ncase \"$*\" in *stone-rs*) exit 1;; esac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(game.join("stick.toml"), "[package]\nname = \"probe\"\n").unwrap();
+    std::fs::write(game.join("main.rock"), "fn main() {}\n").unwrap();
+    let log = fixture.path().join("cargo.log");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rock"))
+        .arg("stone")
+        .arg(&game)
+        .current_dir(fixture.path())
+        .env("PATH", path)
+        .env("CARGO_LOG", &log)
+        .env("CARGO_TARGET_DIR", fixture.path().join("empty-target"))
+        .env(
+            "ROCK_DIR",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        )
+        .env("STONE_HEADLESS", "1")
+        .env_remove("ROCK_PREBUILT_GAME")
+        .env_remove("ROCK_ENGINE_BUILD_RECEIPT")
+        .output()
+        .unwrap();
+    let builds = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        builds.lines().any(|line| line.contains("-p stone-rs")),
+        "rock stone staged libstone without building it: {builds}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success(),
+        "the stone-rs build failure was lost"
+    );
+}
+
