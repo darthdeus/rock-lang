@@ -95,11 +95,11 @@ pub(crate) trait Rewrite {
     }
 }
 
-struct Plain;
+pub(crate) struct Plain;
 
 impl Rewrite for Plain {}
 
-struct Graft<'d, S, R> {
+pub(crate) struct Graft<'d, S, R> {
     src: S,
     dst: &'d mut Ast,
     rw: R,
@@ -108,75 +108,18 @@ struct Graft<'d, S, R> {
 /// Deep-copy the expression subtree rooted at `e` within `ast`, returning the
 /// new root.
 pub(crate) fn clone_expr(ast: &mut Ast, e: Idx<ExprData>) -> Idx<ExprData> {
-    graft_expr(SameArena, ast, e)
+    Graft::new(SameArena, ast, Plain).expr(e)
 }
 
-/// Deep-copy an item (and all its arena children) from `src` into `dst`. Used
-/// to inline a macro's `macro_items` template at an invocation site. Covers the
-/// item kinds a macro body can emit (fn / struct / enum / newtype).
-pub(crate) fn graft_item(src: &Ast, dst: &mut Ast, item: &Item) -> Item {
-    Graft {
-        src,
-        dst,
-        rw: Plain,
+impl<'d, S: Source, R: Rewrite> Graft<'d, S, R> {
+    /// A copy from `src` into `dst` with `rw` applied to every copied node.
+    pub(crate) fn new(src: S, dst: &'d mut Ast, rw: R) -> Self {
+        Graft { src, dst, rw }
     }
-    .item(item)
-}
-
-pub(crate) fn graft_block(src: impl Source, dst: &mut Ast, b: Idx<BlockData>) -> Idx<BlockData> {
-    Graft {
-        src,
-        dst,
-        rw: Plain,
-    }
-    .block(b)
-}
-
-pub(crate) fn graft_expr(src: impl Source, dst: &mut Ast, e: Idx<ExprData>) -> Idx<ExprData> {
-    Graft {
-        src,
-        dst,
-        rw: Plain,
-    }
-    .expr(e)
-}
-
-pub(crate) fn graft_type(
-    src: impl Source,
-    dst: &mut Ast,
-    t: Idx<TypeExprData>,
-) -> Idx<TypeExprData> {
-    Graft {
-        src,
-        dst,
-        rw: Plain,
-    }
-    .ty(t)
-}
-
-/// [`graft_block`] with `rw` applied to every copied node.
-pub(crate) fn graft_block_with(
-    src: &Ast,
-    dst: &mut Ast,
-    b: Idx<BlockData>,
-    rw: impl Rewrite,
-) -> Idx<BlockData> {
-    Graft { src, dst, rw }.block(b)
-}
-
-/// [`graft_item`] over `items`, with `rw` applied to every copied node.
-pub(crate) fn graft_items_with(
-    src: &Ast,
-    dst: &mut Ast,
-    items: &[Item],
-    rw: impl Rewrite,
-) -> Vec<Item> {
-    let mut g = Graft { src, dst, rw };
-    items.iter().map(|it| g.item(it)).collect()
 }
 
 impl<S: Source, R: Rewrite> Graft<'_, S, R> {
-    fn item(&mut self, item: &Item) -> Item {
+    pub(crate) fn item(&mut self, item: &Item) -> Item {
         let kind = match &item.kind {
             ItemKind::Function(f) => ItemKind::Function(self.func(f)),
             ItemKind::Struct(s) => ItemKind::Struct(StructDef {
@@ -295,7 +238,7 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
         }
     }
 
-    fn block(&mut self, b: Idx<BlockData>) -> Idx<BlockData> {
+    pub(crate) fn block(&mut self, b: Idx<BlockData>) -> Idx<BlockData> {
         let src = self.src;
         let data = src.read(self.dst, |ast| &ast.blocks, b);
         self.rw.enter();
@@ -312,7 +255,7 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
         })
     }
 
-    fn expr(&mut self, e: Idx<ExprData>) -> Idx<ExprData> {
+    pub(crate) fn expr(&mut self, e: Idx<ExprData>) -> Idx<ExprData> {
         let src = self.src;
         let data = src.read(self.dst, |ast| &ast.exprs, e);
         if let ExprKind::Ident(id) = &data.kind {
@@ -327,7 +270,7 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
         })
     }
 
-    fn ty(&mut self, t: Idx<TypeExprData>) -> Idx<TypeExprData> {
+    pub(crate) fn ty(&mut self, t: Idx<TypeExprData>) -> Idx<TypeExprData> {
         let src = self.src;
         let data = src.read(self.dst, |ast| &ast.types, t);
         let replaced = match &data.kind {

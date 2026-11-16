@@ -15,9 +15,7 @@
 
 use crate::ast::*;
 use crate::desugar::{BlockEdges, ExprEdges, child_blocks, child_exprs};
-use crate::graft::{
-    Rewrite, graft_block, graft_block_with, graft_expr, graft_item, graft_items_with, graft_type,
-};
+use crate::graft::{Graft, Plain, Rewrite};
 use rock_core::{CompilerError, Span};
 use smallvec::smallvec;
 use ustr::{Ustr, UstrMap, UstrSet};
@@ -335,20 +333,17 @@ fn build_registry<'a>(modules: impl IntoIterator<Item = &'a Ast>) -> Registry {
                 continue;
             };
             let mut tmpl = Ast::new();
-            let body = graft_block(m, &mut tmpl, body_block);
-            let return_ty = f.return_ty.map(|t| graft_type(m, &mut tmpl, t));
-            let items = f
-                .macro_items
-                .iter()
-                .map(|it| graft_item(m, &mut tmpl, it))
-                .collect();
+            let mut g = Graft::new(m, &mut tmpl, Plain);
+            let body = g.block(body_block);
+            let return_ty = f.return_ty.map(|t| g.ty(t));
+            let items = f.macro_items.iter().map(|it| g.item(it)).collect();
             let params = f
                 .params
                 .iter()
                 .map(|p| MParam {
                     name: p.name.name,
                     is_variadic: p.is_variadic,
-                    default: p.default.map(|d| graft_expr(m, &mut tmpl, d)),
+                    default: p.default.map(|d| g.expr(d)),
                     fragment: fragment_kind(m, p.ty),
                 })
                 .collect();
@@ -475,7 +470,7 @@ fn expand_item_macro(
     for (p, slot) in tmpl.params.iter().zip(bound.slots) {
         let arg = match slot {
             Some(arg) => arg,
-            None => graft_expr(&tmpl.tmpl, ast, p.default?),
+            None => Graft::new(&tmpl.tmpl, ast, Plain).expr(p.default?),
         };
         match p.fragment {
             Some(Frag::Ident) | Some(Frag::Ty) => {
@@ -496,7 +491,8 @@ fn expand_item_macro(
         exprs: expr_subs,
         types: ty_subs,
     };
-    let items = graft_items_with(&tmpl.tmpl, ast, &tmpl.items, fragments);
+    let mut g = Graft::new(&tmpl.tmpl, ast, fragments);
+    let items: Vec<Item> = tmpl.items.iter().map(|it| g.item(it)).collect();
     // Macro-generated module headers, `mod` declarations, and `use`
     // declarations are rejected: file/module/import selection is
     // fixed before expansion, so generated ones would mis-scope output.
@@ -916,7 +912,7 @@ fn try_expand(
         } else if let Some(a) = bound.slots[i] {
             inst.subs.insert(p.name, a);
         } else if let Some(d) = p.default {
-            let g = graft_expr(&tmpl.tmpl, ast, d);
+            let g = Graft::new(&tmpl.tmpl, ast, Plain).expr(d);
             inst.subs.insert(p.name, g);
         }
     }
@@ -924,7 +920,7 @@ fn try_expand(
     // Copy the body into the caller arena, rewriting it on the way
     // (`Instantiation`). Args and defaults are already in the caller arena and
     // are only ever copied plainly, so they keep their own names and spans.
-    let body = graft_block_with(&tmpl.tmpl, ast, tmpl.body, inst);
+    let body = Graft::new(&tmpl.tmpl, ast, inst).block(tmpl.body);
     // Expand macros that appear inside the spliced body (macros calling macros).
     expand_block(ast, body, reg, depth + 1, stack);
 
@@ -937,7 +933,7 @@ fn try_expand(
     let value = extract_body_value(ast, body);
     ast.exprs[e].kind = match tmpl.return_ty {
         Some(rt) => {
-            let rt = graft_type(&tmpl.tmpl, ast, rt);
+            let rt = Graft::new(&tmpl.tmpl, ast, Plain).ty(rt);
             ExprKind::TypeAscription(value, rt)
         }
         None => ast.exprs[value].kind.clone(),
