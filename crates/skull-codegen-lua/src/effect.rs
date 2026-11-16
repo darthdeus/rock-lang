@@ -258,15 +258,15 @@ impl Emitter<'_> {
                 val_cell,
                 table,
             } => {
-                let key = cellname(self.func, self.frame, self.cell_colors, *key_cell);
                 self.write_cells_assignment(out, &[*key_cell, *val_cell], |out| {
                     out.push_str("next(");
                     self.write_opnd(out, *table);
-                    write!(out, ", {key})").unwrap();
+                    out.push_str(", ");
+                    write_cellname(out, self.func, self.frame, self.cell_colors, *key_cell);
+                    out.push(')');
                 });
             }
-            // Scalar-ABI multi-return: `d0, d1, ... = callee(args)`. The callee is
-            // a value-returning fn whose return is scalarized to N leaf values.
+            // Scalar-ABI multi-return: `d0, d1, ... = callee(args)`.
             Inst::CallMulti { dests, func, args } => {
                 self.write_cells_assignment(out, dests, |out| {
                     write!(out, "{}(", self.callee_name(id, *func)).unwrap();
@@ -274,8 +274,7 @@ impl Emitter<'_> {
                     out.push(')');
                 });
             }
-            // Indirect multi-return: `d0, d1, ... = callee(args)` -- a tuple
-            // returned through a fn-value. Multi-assign so Lua doesn't truncate.
+            // Multi-assign keeps all results returned through a function value.
             Inst::CallValueMulti {
                 dests,
                 callee,
