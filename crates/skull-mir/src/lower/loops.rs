@@ -1101,14 +1101,12 @@ impl<'a> Builder<'a> {
             },
             _ => None,
         };
-        let kind = self.coll_kind(coll)?;
-        if kind == ContainerKind::Map {
+        if !self.expr_is_flat_vec(coll) && self.coll_kind(coll)? == ContainerKind::Map {
             let (ib, xpat) =
                 split.ok_or_else(|| gap("enumerate over Map with a single binding"))?;
             return self.lower_for_map_enumerate(ib, &xpat, coll, body);
         }
-        let arr_v = self.lower_expr(coll)?;
-        let len_v = self.emit_cur(Inst::Len { base: arr_v, kind });
+        let (kind, arr_v, len_v) = self.lower_counted_storage(coll)?;
         // The counter cell is named after the index var in split mode; an internal
         // cell in single-binding mode (the index is folded into the tuple).
         let i_cell = match &split {
@@ -1223,6 +1221,32 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// The storage a counted loop indexes, its container kind and its live
+    /// length. A FlatVec is bounded by its `len` field (not the buffer
+    /// capacity) and indexes its `buf` NativeBuffer.
+    fn lower_counted_storage(
+        &mut self,
+        coll: Idx<Expr>,
+    ) -> Result<(ContainerKind, Idx<Inst>, Idx<Inst>), CompilerError> {
+        if self.expr_is_flat_vec(coll) {
+            let kind = self.nb_kind(coll)?;
+            let fv = self.lower_expr(coll)?;
+            let buf = self.emit_cur(Inst::Field {
+                base: fv,
+                field: crate::names::ustr("buf"),
+            });
+            let len = self.emit_cur(Inst::Field {
+                base: fv,
+                field: crate::names::ustr("len"),
+            });
+            return Ok((kind, buf, len));
+        }
+        let kind = self.coll_kind(coll)?;
+        let arr_v = self.lower_expr(coll)?;
+        let len_v = self.emit_cur(Inst::Len { base: arr_v, kind });
+        Ok((kind, arr_v, len_v))
+    }
+
     /// `for x in coll { body }` over an indexable collection: hoist the
     /// collection + its length, then `i = 0; while i < len { x = coll[i]; ...; i++ }`.
     /// The index is a cell; `continue` -> latch (still increments).
@@ -1232,26 +1256,7 @@ impl<'a> Builder<'a> {
         iter: Idx<Expr>,
         body: Idx<Expr>,
     ) -> Result<(), CompilerError> {
-        // `for v in fv` over FlatVec: numeric loop bounded by the `len` FIELD
-        // (not the buffer capacity), elements via the `buf` NativeBuffer.
-        let (kind, arr_v, len_v) = if self.expr_is_flat_vec(iter) {
-            let kind = self.nb_kind(iter)?;
-            let fv = self.lower_expr(iter)?;
-            let buf = self.emit_cur(Inst::Field {
-                base: fv,
-                field: crate::names::ustr("buf"),
-            });
-            let len = self.emit_cur(Inst::Field {
-                base: fv,
-                field: crate::names::ustr("len"),
-            });
-            (kind, buf, len)
-        } else {
-            let kind = self.coll_kind(iter)?;
-            let arr_v = self.lower_expr(iter)?;
-            let len_v = self.emit_cur(Inst::Len { base: arr_v, kind });
-            (kind, arr_v, len_v)
-        };
+        let (kind, arr_v, len_v) = self.lower_counted_storage(iter)?;
         let i_cell = self.f.new_cell(None);
         self.f.mark_loop_binding(i_cell);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));

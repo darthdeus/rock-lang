@@ -99,6 +99,22 @@ fn flat_vec_for_iterates_len_not_capacity() {
     assert_eq(n, 3)
 }
 
+@test(output = "0 1\n1 2\n2 3\n2 3")
+fn flat_vec_enumerate_counts_live_elements() {
+    let fv: FlatVec<SV2> = flat_vec_new(8)
+    fv.push(SV2 { x: 1.0, y: 10.0 })
+    fv.push(SV2 { x: 2.0, y: 20.0 })
+    fv.push(SV2 { x: 3.0, y: 30.0 })
+    for (i, v) in enumerate(fv) {
+        print("{i} {v.x.floor()}")
+    }
+    let last = 0
+    for pair in enumerate(fv) {
+        last = pair.0
+    }
+    print("{last} {fv.get(last).x.floor()}")
+}
+
 // `==` over FlatVec<T> compares the first `len` elements by value. Without a
 // FlatVec case, __op_eq's generic walk reached the NativeBuffer's cdata
 // pointer and compared ADDRESSES: two FlatVecs with equal contents were

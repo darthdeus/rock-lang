@@ -177,7 +177,7 @@ pub(crate) fn builtin_enumerable(gamma: &Gamma, ty: TyId) -> bool {
             ctor: TypeCtor::Nominal(n),
             ..
         } => {
-            bone_core::modules::is_intrinsic_key(n, "NativeBuffer")
+            bone_core::modules::is_intrinsic_key_in(n, &["NativeBuffer", "FlatVec"])
                 || bone_core::modules::is_intrinsic_key_in(n, INT_BUFFERS)
         }
         _ => false,
