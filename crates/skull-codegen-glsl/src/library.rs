@@ -33,8 +33,19 @@ pub fn resolve_root(
 
 /// The GLSL helper functions for tier-0 semantics GLSL's builtins get wrong:
 /// floored int division/modulo (GLSL's are undefined on negative operands).
-/// Emitted only when reachable code uses `IntDiv`/`IntMod`.
-pub(crate) fn helper_prelude(uses_idiv: bool, uses_imod: bool) -> String {
+/// Emitted only when one of `bodies` uses `IntDiv`/`IntMod`, and followed by a
+/// blank line when not empty.
+pub(crate) fn helper_prelude<'a>(bodies: impl IntoIterator<Item = &'a MirFunc>) -> String {
+    let (mut uses_idiv, mut uses_imod) = (false, false);
+    for body in bodies {
+        for (_, inst) in body.insts.iter() {
+            match inst {
+                Inst::IntDiv(..) => uses_idiv = true,
+                Inst::IntMod(..) => uses_imod = true,
+                _ => {}
+            }
+        }
+    }
     let mut s = String::new();
     if uses_idiv {
         s.push_str("int rock_idiv(int a, int b) {\n  return int(floor(float(a) / float(b)));\n}\n");
@@ -44,7 +55,20 @@ pub(crate) fn helper_prelude(uses_idiv: bool, uses_imod: bool) -> String {
             "int rock_imod(int a, int b) {\n  return a - b * int(floor(float(a) / float(b)));\n}\n",
         );
     }
+    if !s.is_empty() {
+        s.push('\n');
+    }
     s
+}
+
+/// The declarations behind `instances`, first occurrence first: two instances
+/// of one generic helper share a source declaration.
+fn declaration_dependencies<'a>(instances: impl Iterator<Item = &'a Instance>) -> Vec<FuncRef> {
+    let mut seen = BTreeSet::new();
+    instances
+        .map(|instance| instance.func)
+        .filter(|func| seen.insert((func.module.raw(), func.func.into_raw().into_u32())))
+        .collect()
 }
 
 fn library_root_instance(
@@ -167,16 +191,7 @@ pub(crate) fn realize_shader_library_view(
             &mut order,
         )?;
     }
-    let mut dependencies = Vec::new();
-    let mut seen_dependencies = BTreeSet::new();
-    for instance in order.iter().chain(root_instances.iter()) {
-        if seen_dependencies.insert((
-            instance.func.module.raw(),
-            instance.func.func.into_raw().into_u32(),
-        )) {
-            dependencies.push(instance.func);
-        }
-    }
+    let dependencies = declaration_dependencies(order.iter().chain(&root_instances));
     let concrete_plans = skull_graph::concrete_body::build(ws, graph).plans;
     Ok(ShaderLibraryView {
         roots: root_instances,
@@ -270,8 +285,6 @@ pub fn emit_shader_library_with_view(
     let mut bodies: HashMap<ShaderInstance, MirFunc> = HashMap::default();
     let mut calls: HashMap<ShaderInstance, Vec<ShaderInstance>> = HashMap::default();
     let mut discovered_builtins = BTreeSet::new();
-    let mut uses_idiv = false;
-    let mut uses_imod = false;
     for raw in &view.order {
         let instance = ShaderInstance::new(raw.clone());
         let f = &ws.module(instance.fref().module).functions[instance.fref().func];
@@ -302,13 +315,6 @@ pub fn emit_shader_library_with_view(
             scx.interner(),
             &mut discovered_builtins,
         )?;
-        for (_, inst) in body.insts.iter() {
-            match inst {
-                Inst::IntDiv(..) => uses_idiv = true,
-                Inst::IntMod(..) => uses_imod = true,
-                _ => {}
-            }
-        }
         calls.insert(instance.clone(), retained);
         bodies.insert(instance, body);
     }
@@ -318,25 +324,12 @@ pub fn emit_shader_library_with_view(
         ));
     }
     reject_population_cycles(ws, &calls)?;
-    let mut dependencies = Vec::new();
-    let mut seen_dependencies = BTreeSet::new();
-    for instance in view.order.iter().chain(view.roots.iter()) {
-        if seen_dependencies.insert((
-            instance.func.module.raw(),
-            instance.func.func.into_raw().into_u32(),
-        )) {
-            dependencies.push(instance.func);
-        }
-    }
-    if dependencies != view.dependencies {
+    if declaration_dependencies(view.order.iter().chain(&view.roots)) != view.dependencies {
         return Err(CompilerError::new_no_location(
             "shader library view dependencies differ from retained order".to_string(),
         ));
     }
-    let mut out = helper_prelude(uses_idiv, uses_imod);
-    if !out.is_empty() {
-        out.push('\n');
-    }
+    let mut out = helper_prelude(bodies.values());
     for (index, raw) in view.order.iter().enumerate() {
         if index > 0 {
             out.push('\n');
@@ -375,5 +368,3 @@ pub(crate) fn emit_shader_library(
     let session = shader_library_session(ws, root_refs)?;
     emit_shader_library_with_view(ws, &session.scx, &session.view)
 }
-
-// --- A1: fragment-entry compilation --------------------

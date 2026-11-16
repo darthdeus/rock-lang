@@ -101,11 +101,6 @@ pub(crate) struct StagePlan {
     /// The stage's concrete bodies -- target-neutral, and the only part of this
     /// plan a non-GLSL backend would want.
     pub(crate) ir: ShaderStageIr,
-    /// GLSL-only: whether the reachable bodies need the int div/mod prelude.
-    /// GLSL has no integer `/` and `%` with Rock's semantics, which is a
-    /// property of this target and not of the bodies.
-    uses_idiv: bool,
-    uses_imod: bool,
     /// The stage's helpers plus the stage entry itself -- the hot-reload
     /// dependency set. DECLARATIONS: a reload watches source files, and two
     /// instances of one generic helper share one.
@@ -122,12 +117,7 @@ impl StagePlan {
         ws: &Workspace,
         interner: &MonoInterner,
     ) -> Result<String, CompilerError> {
-        let mut out = String::new();
-        let prelude = helper_prelude(self.uses_idiv, self.uses_imod);
-        if !prelude.is_empty() {
-            out.push_str(&prelude);
-            out.push('\n');
-        }
+        let mut out = helper_prelude(self.ir.bodies.values().chain([&self.ir.body]));
         for href in &self.ir.order {
             let body_plan = self.concrete_plans.get(&href.inst).ok_or_else(|| {
                 let f = &ws.module(href.fref().module).functions[href.fref().func];
@@ -186,20 +176,8 @@ pub(crate) fn plan_stage_from_view(
         concrete_plans: Arc::clone(concrete_plans),
     };
     let ir = skull_codegen_shader::plan_stage_from_concrete(ws, scx, &input, &GlslShaderPolicy)?;
-    let (mut uses_idiv, mut uses_imod) = (false, false);
-    for body in ir.bodies.values().chain(std::iter::once(&ir.body)) {
-        for (_, inst) in body.insts.iter() {
-            match inst {
-                Inst::IntDiv(..) => uses_idiv = true,
-                Inst::IntMod(..) => uses_imod = true,
-                _ => {}
-            }
-        }
-    }
     Ok(StagePlan {
         ir,
-        uses_idiv,
-        uses_imod,
         dependencies: view.dependencies.clone(),
         concrete_plans: Arc::clone(concrete_plans),
         concrete_interner: scx.interner_handle(),
@@ -433,5 +411,3 @@ pub(crate) fn render_shader_entry(
         },
     })
 }
-
-// --- A2: vertex+fragment pipeline ---------------------

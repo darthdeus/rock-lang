@@ -294,7 +294,7 @@ fn classify_array_param(
 /// The `layout(std140) uniform <Blk> { T name[N]; .. };` declaration for an
 /// array block.
 ///
-/// Every line comes from the PLAN -- element kind through [`wire_glsl_ty`], the
+/// Every line comes from the PLAN -- element kind through [`wire_glsl`], the
 /// same function the scalar declaration uses, and capacity from the member the
 /// offsets were computed for. The emitter deliberately holds no `GlslTy` for an
 /// array element: a second classification of the same param is exactly how a
@@ -305,7 +305,7 @@ pub(crate) fn uniform_array_block_decl(plan: &UniformArrayBlockPlan) -> String {
     for m in &plan.members {
         s.push_str(&format!(
             "    {} {}[{}];\n",
-            wire_glsl_ty(m.elem),
+            wire_glsl(m.elem).name(),
             m.name,
             m.capacity
         ));
@@ -321,21 +321,6 @@ fn struct_def_of(ws: &Workspace, ty: TyId) -> Option<&StructDef> {
     Some(&ws.modules[sid.module.index()].structs[sid.def])
 }
 
-/// A block member's GLSL type spelling. The one function a WGSL or Metal
-/// emitter rewrites for the uniform lane, the twin of [`attr_glsl_ty`].
-fn wire_glsl_ty(k: WireKind) -> &'static str {
-    match k {
-        WireKind::F32 => "float",
-        WireKind::F32x2 => "vec2",
-        WireKind::F32x3 => "vec3",
-        WireKind::F32x4 => "vec4",
-        WireKind::I32 => "int",
-        WireKind::U32 => "uint",
-        WireKind::Bool32 => "bool",
-        WireKind::Mat4 => "mat4",
-    }
-}
-
 /// The `layout(std140) uniform <Blk> { .. };` declaration for a group.
 ///
 /// Declared with NO instance name, which is what keeps this change confined to
@@ -349,7 +334,7 @@ fn wire_glsl_ty(k: WireKind) -> &'static str {
 pub(crate) fn uniform_block_decl(block: &GlslUniformBlock) -> String {
     let mut s = format!("layout(std140) uniform {} {{\n", block.name);
     for m in &block.plan.members {
-        s.push_str(&format!("    {} {};\n", wire_glsl_ty(m.kind), m.name));
+        s.push_str(&format!("    {} {};\n", wire_glsl(m.kind).name(), m.name));
     }
     s.push_str("};\n");
     s
@@ -406,7 +391,6 @@ pub(crate) fn has_bare_sampler(
     samplers.iter().any(|(i, _, _)| !texture_params.contains(i))
 }
 
-/// How this backend spells a `SamplerKind`.
 /// The neutral kind of a tier-0 sampler type. The inverse of
 /// [`sampler_glsl_ty`], and the point where a declared sampler param leaves
 /// GLSL's vocabulary for the interface's.

@@ -208,31 +208,14 @@ pub(crate) fn entry_reserved_names(iface: &ShaderInterfacePlan) -> Vec<Ustr> {
         .collect()
 }
 
-/// Reject duplicate global names across BOTH stages (decision 7): attributes,
-/// uniforms, varyings, samplers and the reserved gl_Position/FragColor share
-/// one GLSL namespace -- the linked program has a single uniform namespace, so
-/// a vertex/fragment same-name pair is a link error (or a silent alias), never
-/// two distinct bindings. Varyings are one name in both stages (inserted once).
-///
-/// THE ENGINE BLOCK'S MEMBERS BELONG HERE TOO. An unnamed-instance block's
-/// members are bare globals, so they sit in the same namespace as everything
-/// above. A stage's own `@uniform` group already arrives through `uniforms`
-/// whether or not it became a block, but `@engine` is a separate ROLE landing in
-/// `engine_uniforms`, so it was outside this census entirely -- and a missed
-/// pair is a raw driver error carrying no Rock span (`declaration of "uTime"
-/// conflicts with previous declaration`), which is exactly the class this
-/// exists to convert into a spanned rejection.
-///
-/// Taken from the PLAN rather than from both shapes' `engine_uniforms`: the
-/// engine block is declared in both stages but is ONE block, so listing it per
-/// stage would collide with itself.
 /// Reject two interface names that would land in GLSL's ONE cross-stage
 /// namespace.
 ///
-/// Censuses the INTERFACE, which is what makes the list complete by
-/// construction: every name a program declares is in there exactly once, so a
-/// role added to the interface joins this check by existing rather than by
-/// someone remembering to chain it.
+/// An unnamed-instance block's members are bare globals, so the `@engine`
+/// block's members sit in that namespace too, and a missed pair is a raw driver
+/// error with no Rock span. The census is the INTERFACE (see
+/// `interface_global_names`), so the engine block, declared in both stages but
+/// ONE block, is listed once.
 fn check_pipeline_collisions(iface: &ShaderInterfacePlan, span: Span) -> Result<(), CompilerError> {
     // gl_Position is always reserved. `FragColor` is reserved only for the
     // single-output form -- with MRT the outputs are explicit named fields (one

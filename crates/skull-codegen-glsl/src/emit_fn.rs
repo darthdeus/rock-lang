@@ -157,7 +157,7 @@ pub(crate) fn emit_fn_def_with(
     } else if entry.is_some() {
         symbol_of_key(f.name).to_string()
     } else {
-        glsl_name(ws, interner, inst)
+        inst.symbol(ws, interner)
     };
     // A `void main()` entry destructures its returned struct into globals
     // (gl_Position + varyings, or MRT outs) -- no signature return type.
@@ -249,22 +249,13 @@ pub(crate) fn emit_fn_def_with(
                 .collect()
         })
         .unwrap_or_default();
-    // A global-base struct param is not a tier-0 GLSL leaf (glsl_ty would reject
-    // it); its reads render as bare globals. Samplers DO map (`sampler2D`), so
-    // they still get a cell type. Uniform-array params have no tier-0 type
-    // either -- their only legal use is as `at()`'s first arg, which renders the
-    // cell name (= the declared uniform array).
-    let struct_params: HashSet<usize> = entry
-        .map(|s| {
-            s.global_params
-                .iter()
-                .copied()
-                .chain(s.arrays.iter().copied())
-                .collect()
-        })
-        .unwrap_or_default();
+    // A global-base struct param is not a tier-0 GLSL leaf; its reads render
+    // as bare globals. Samplers DO map (`sampler2D`), so they still get a cell
+    // type. Uniform-array params have no tier-0 type either -- their only legal
+    // use is as `at()`'s first arg, which renders the cell name (= the declared
+    // uniform array).
     for (i, &c) in mf.params.iter().enumerate() {
-        if struct_params.contains(&i) {
+        if e.ignored_type_cells.contains(&c) {
             continue;
         }
         let id = concrete_plan

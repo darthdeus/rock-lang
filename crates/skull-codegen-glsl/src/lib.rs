@@ -79,6 +79,8 @@ pub use entry::*;
 pub use intrinsics::*;
 pub use library::*;
 pub use pipeline::*;
+use profile::*;
+pub use value_test::*;
 
 /// A program's planned GLSL, kept from the profile check so that emission
 /// renders the same plan instead of planning the program a second time.
@@ -119,8 +121,6 @@ pub fn render_shader_plan(
         ShaderPlanKind::Entry(plan) => entry::render_shader_entry(ws, interner, plan, profile),
     }
 }
-use profile::*;
-pub use value_test::*;
 
 /// A tier-0 GLSL type. Everything else is rejected by the profile pass.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -295,8 +295,6 @@ fn fmt_float(f: f64) -> String {
     }
 }
 
-// --- const globals ----------------------------------------------------------
-
 /// The GLSL type a folded const literal renders at.
 fn const_lit_ty(lit: &Lit) -> GlslTy {
     match lit {
@@ -316,15 +314,6 @@ fn render_const_lit(lit: &Lit) -> Option<String> {
         Lit::Bool(b) => Some(b.to_string()),
         Lit::Nil | Lit::Omitted | Lit::Str(_) => None,
     }
-}
-
-// --- profile pass ------------------------------------------------------------
-
-/// The GLSL name of a shader instance. The symbol is target-neutral
-/// ([`ShaderInstance::symbol`]); this is the seam where a backend that needed a
-/// different spelling would rename, and GLSL does not.
-fn glsl_name(ws: &Workspace, interner: &MonoInterner, inst: &ShaderInstance) -> String {
-    inst.symbol(ws, interner)
 }
 
 /// A cosmetic-tier fold of a lowered `&&`/`||`/expression-`if` diamond back into

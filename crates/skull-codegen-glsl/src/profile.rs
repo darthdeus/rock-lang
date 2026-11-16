@@ -81,5 +81,3 @@ pub(crate) fn profile_body(
     }
     Ok(())
 }
-
-// --- intrinsic mapping table ------------------------------------------------

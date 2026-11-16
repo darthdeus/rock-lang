@@ -299,5 +299,3 @@ pub(crate) fn vec_op_symbol(name: &str) -> Option<&'static str> {
         _ => None,
     }
 }
-
-// --- per-function emission ---------------------------------------------------

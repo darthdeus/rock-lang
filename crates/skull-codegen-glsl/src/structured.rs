@@ -132,5 +132,3 @@ impl StructuredEmit for FnEmit<'_> {
         Ok((self.cell_name[&li.slot].clone(), self.render_val(li.bound)?))
     }
 }
-
-// --- public API --------------------------------------------------------------

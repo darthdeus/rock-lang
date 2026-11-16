@@ -108,19 +108,14 @@ impl FnEmit<'_> {
                 }
             }
             Inst::MakeValueStruct { name, .. } | Inst::MaterializeValueStruct { name, .. } => {
-                match name.as_str() {
-                    "Vec2" | "Vec2f" => GlslTy::Vec2,
-                    "Vec3" | "Vec3f" => GlslTy::Vec3,
-                    "Vec4" | "Vec4f" => GlslTy::Vec4,
-                    "Bvec3" => GlslTy::Bvec3,
-                    "Mat4" => GlslTy::Mat4,
-                    other => {
-                        return Err(err(
+                nominal_glsl_ty(name.as_str())
+                    .filter(|t| !t.is_sampler())
+                    .ok_or_else(|| {
+                        err(
                             self.span(),
-                            format!("shader profile: value struct `{other}` is not tier 0"),
-                        ));
-                    }
-                }
+                            format!("shader profile: value struct `{name}` is not tier 0"),
+                        )
+                    })?
             }
             Inst::Call { func, .. } => {
                 let cf = &self.ws.module(func.module).functions[func.func];
@@ -310,12 +305,10 @@ impl FnEmit<'_> {
                 );
                 // Bvec3 components render at a bool context; the vecN ctors take
                 // float components (int operands materialize an IntToFloat).
-                let (ctor, comp_ty) = match name.as_str() {
-                    "Vec2" | "Vec2f" => ("vec2", GlslTy::Float),
-                    "Vec3" | "Vec3f" => ("vec3", GlslTy::Float),
-                    "Vec4" | "Vec4f" => ("vec4", GlslTy::Float),
-                    "Bvec3" => ("bvec3", GlslTy::Bool),
-                    other => return Err(err(self.span(), format!("shader profile: value struct `{other}` is not tier 0"))),
+                let (ctor, comp_ty) = match nominal_glsl_ty(name.as_str()) {
+                    Some(t @ (GlslTy::Vec2 | GlslTy::Vec3 | GlslTy::Vec4)) => (t.name(), GlslTy::Float),
+                    Some(GlslTy::Bvec3) => ("bvec3", GlslTy::Bool),
+                    _ => return Err(err(self.span(), format!("shader profile: value struct `{name}` is not tier 0"))),
                 };
                 let args: Result<Vec<String>, CompilerError> =
                     fields.iter().map(|(_, v)| self.render_val_t(*v, comp_ty)).collect();
@@ -436,7 +429,7 @@ impl FnEmit<'_> {
             return Ok(s);
         }
         // An emittable user fn -> a plain call to THIS INSTANCE's GLSL name.
-        let gname = glsl_name(self.ws, self.interner, callee);
+        let gname = callee.symbol(self.ws, self.interner);
         let rargs: Result<Vec<String>, CompilerError> = args
             .iter()
             .enumerate()

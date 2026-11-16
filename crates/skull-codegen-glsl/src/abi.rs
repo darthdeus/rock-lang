@@ -86,13 +86,6 @@ impl<'a> BlockWire<'a> {
     }
 }
 
-/// Uniform block binding indices, assigned by param ROLE so the slot is
-/// structural rather than a consequence of how many groups a program declares.
-/// Slot 0 is RESERVED for `@engine` whether or not the program has one, which is
-/// what lets the engine reject a foreign block there at registration.
-///
-/// The array slots are reserved on the same terms. ES 3.0 guarantees 12 uniform
-/// blocks per stage and 24 combined, so five reserved indices are affordable.
 /// A stage's `UniformArray<T>` members, as a logical group. `None` when the
 /// stage declares none.
 pub(crate) fn logical_array_group(
@@ -787,10 +780,6 @@ pub struct ShaderAbiPlan {
 }
 
 impl ShaderAbiPlan {
-    /// GLSL's answer to `iface`.
-    /// Takes NO `Workspace`. The layout is a function of `iface` alone, which
-    /// is what makes a perturbed interface produce a perturbed layout instead
-    /// of quietly re-deriving the declaring struct's.
     /// The binding a uniform group's ROLE takes. One oracle, so the layout and
     /// the validation below cannot disagree about where a group belongs.
     fn binding_of(role: UniformRole) -> u32 {
@@ -809,12 +798,12 @@ impl ShaderAbiPlan {
         }
     }
 
+    /// GLSL's answer to `iface`. Takes NO `Workspace`: a layout is a function
+    /// of the member list alone, which is what lets a perturbed interface
+    /// produce a perturbed layout and a second target lay the same members out
+    /// its own way.
     pub fn glsl(iface: &ShaderInterfacePlan, span: Span) -> Result<Self, CompilerError> {
         let binding = Self::binding_of;
-        // std140 over the INTERFACE's members. The Workspace is not read here:
-        // a layout is a function of the member list, which is what lets a
-        // perturbed interface produce a perturbed layout and a second target
-        // lay the same members out its own way.
         let mut uniform_blocks: Vec<(u32, GlslUniformBlock)> = Vec::new();
         for g in &iface.uniform_groups {
             let plan =
@@ -895,10 +884,7 @@ pub(crate) fn check_stage_sampler_budget(
     if count <= GLSL_STAGE_SAMPLER_BUDGET {
         return Ok(());
     }
-    let name = match stage {
-        IrStage::Vertex => "vertex",
-        IrStage::Fragment => "fragment",
-    };
+    let name = stage.name();
     Err(err(
         span,
         format!(
@@ -909,6 +895,12 @@ pub(crate) fn check_stage_sampler_budget(
     ))
 }
 
+/// Uniform block binding indices, assigned by param ROLE so the slot is
+/// structural rather than a consequence of how many groups a program declares.
+/// Slot 0 is RESERVED for `@engine` whether or not the program has one, which is
+/// what lets the engine reject a foreign block there at registration. The array
+/// slots are reserved on the same terms: ES 3.0 guarantees 12 uniform blocks per
+/// stage and 24 combined, so five reserved indices are affordable.
 pub(crate) const UNIFORM_BLOCK_BINDING_ENGINE: u32 = 0;
 pub(crate) const UNIFORM_BLOCK_BINDING_VERTEX: u32 = 1;
 pub(crate) const UNIFORM_BLOCK_BINDING_FRAGMENT: u32 = 2;
