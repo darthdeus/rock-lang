@@ -11,7 +11,6 @@ pub fn emit_overlay_checked(
     skull::mir_emit::emit_overlay(ws, cache, reinferred).expect("emit_overlay")
 }
 
-#[cfg(any(test, feature = "test-support"))]
 pub enum ExecOutcome {
     /// Clean run; holds full stdout (module load prints + test prints).
     Output(String),
@@ -22,7 +21,6 @@ pub enum ExecOutcome {
     Errored(String),
 }
 
-#[cfg(any(test, feature = "test-support"))]
 impl ExecOutcome {
     /// The failure diagnostic, or a panic naming `ctx` if the run succeeded.
     pub(crate) fn expect_errored(self, ctx: &str) -> String {
@@ -38,7 +36,6 @@ impl ExecOutcome {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn exec_lua(program: &str) -> ExecOutcome {
     let timeout = Some(test_utils::HANG_BACKSTOP);
     match compile_cmd::run_lua_code_with_timeout(program, timeout) {
@@ -50,7 +47,6 @@ pub(crate) fn exec_lua(program: &str) -> ExecOutcome {
 
 /// Replace `0x<hex>` sequences with `0xADDR`: table/cdata identity prints
 /// differ per-process and would false-positive every diff.
-#[cfg(any(test, feature = "test-support"))]
 pub fn normalize_stdout(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let bytes = s.as_bytes();
@@ -75,7 +71,6 @@ pub fn normalize_stdout(s: &str) -> String {
 }
 
 /// First line where `lhs` and `rhs` differ, for divergence reporting.
-#[cfg(any(test, feature = "test-support"))]
 pub fn first_diff_line(lhs: &str, rhs: &str) -> String {
     for (i, (a, b)) in lhs.lines().zip(rhs.lines()).enumerate() {
         if a != b {

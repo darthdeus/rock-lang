@@ -92,9 +92,8 @@ pub(crate) fn parse_skull_markers(stdout: &str) -> Option<SkullMarkers> {
     (results > 0).then_some(markers)
 }
 
-/// Default relative tolerance for `@test(returns = <float>)` comparison. An
-/// explicit parameter on [`compare_value`] so a future executor with laxer
-/// arithmetic (GLSL) can widen it; int/bool stay exact regardless.
+/// Relative tolerance for `@test(returns = <float>)` on the f64 executors
+/// (luajit, node). GLSL passes its own, wider f32 tolerance.
 pub(crate) const FLOAT_REL_TOL: f64 = 1e-12;
 
 /// Compare a `VALUE` marker's serialized return value against the pinned
@@ -265,10 +264,6 @@ mod tests {
             reason_histogram(["z", "y"]),
             vec![("y".to_string(), 1), ("z".to_string(), 1)]
         );
-    }
-
-    #[test]
-    fn histogram_of_nothing_is_empty() {
         assert!(reason_histogram([]).is_empty());
     }
 
@@ -309,7 +304,7 @@ mod tests {
         assert!(compare_value(&Float(-2.5), "-2.5", FLOAT_REL_TOL).is_ok());
         // Relative diff 1e-10 is OUTSIDE the default 1e-12 tolerance.
         assert!(compare_value(&Float(1.0), "1.0000000001", FLOAT_REL_TOL).is_err());
-        // A widened tolerance (the future GLSL executor) admits it.
+        // A widened tolerance (the GLSL executor's) admits it.
         assert!(compare_value(&Float(1.0), "1.0000000001", 1e-8).is_ok());
     }
 
