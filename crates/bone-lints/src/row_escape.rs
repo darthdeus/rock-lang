@@ -263,15 +263,9 @@ impl Rows {
         tail_sink: Option<EscapeKind>,
         out: &mut Vec<RowEscape>,
     ) {
-        let mut push = |kind, e: Idx<Expr>| {
-            out.push(RowEscape {
-                kind,
-                row_type: self.render(ws, bi, e),
-                span: body.expr_spans[e],
-            })
-        };
+        let mut push = |kind, e: Idx<Expr>| out.push(self.escape(ws, bi, body, kind, e));
 
-        for (idx, expr) in body.expr_arena.iter() {
+        for (_, expr) in body.expr_arena.iter() {
             match expr {
                 Expr::Assign { target, value } if self.exprs.contains(value) => {
                     match &body.expr_arena[*target] {
@@ -306,7 +300,6 @@ impl Rows {
                 }
                 _ => {}
             }
-            let _ = idx;
         }
 
         for (_, stmt) in body.statement_arena.iter() {
@@ -368,11 +361,7 @@ impl Rows {
                 } else {
                     continue;
                 };
-                out.push(RowEscape {
-                    kind,
-                    row_type: self.render(ws, bi, a),
-                    span: body.expr_spans[a],
-                });
+                out.push(self.escape(ws, bi, body, kind, a));
             }
         }
     }
@@ -394,11 +383,7 @@ impl Rows {
                 if contains(lam_span, body.binding_spans[*b]) {
                     continue;
                 }
-                out.push(RowEscape {
-                    kind: EscapeKind::ClosureCapture,
-                    row_type: self.render(ws, bi, idx),
-                    span: body.expr_spans[idx],
-                });
+                out.push(self.escape(ws, bi, body, EscapeKind::ClosureCapture, idx));
             }
         }
     }
@@ -425,22 +410,26 @@ impl Rows {
     ) {
         let policy = RowSuspensionPolicy { rows: self, ws, bi };
         for at in uses_after_suspension(body, &policy) {
-            let row_type = match bi.expr_types.get(at).copied() {
-                Some(ty) => ws.render(Some(bi), ty),
-                None => "?".to_string(),
-            };
-            out.push(RowEscape {
-                kind: EscapeKind::AcrossYield,
-                row_type,
-                span: body.expr_spans[at],
-            });
+            out.push(self.escape(ws, bi, body, EscapeKind::AcrossYield, at));
         }
     }
 
-    fn render(&self, ws: &Workspace, bi: &BodyInference, e: Idx<Expr>) -> String {
-        match bi.expr_types.get(e).copied() {
+    fn escape(
+        &self,
+        ws: &Workspace,
+        bi: &BodyInference,
+        body: &Body,
+        kind: EscapeKind,
+        e: Idx<Expr>,
+    ) -> RowEscape {
+        let row_type = match bi.expr_types.get(e).copied() {
             Some(ty) => ws.render(Some(bi), ty),
             None => "?".to_string(),
+        };
+        RowEscape {
+            kind,
+            row_type,
+            span: body.expr_spans[e],
         }
     }
 }
