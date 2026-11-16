@@ -70,35 +70,6 @@ global G: Opt = Opt { pos: NV2 { x: 1.0, y: 2.0 } }
 fn main() { print("{G.pos?.x ?? -1.0}") }
 "#;
 
-/// A leaf-table box read back OUT of a container. The declared field name holds
-/// only the presence tag there, so a read that keys off it hands the consumer a
-/// bool -- which indexes, and silently reads `nil` for every leaf.
-const LEAF_TABLE_OUT_OF_A_MAP: &str = r#"
-nobox value NV2 { x: float, y: float }
-value Opt { pos: NV2?, a: float }
-global M: Map<string, Opt> = map_new()
-fn main() {
-    M["k"] = Opt { pos: NV2 { x: 1.0, y: 2.0 }, a: 3.0 }
-    let v = M["k"]
-    print("{v.pos?.x ?? -1.0} {v.pos?.y ?? -1.0} {v.a}")
-}
-"#;
-
-/// The two ways to spell an ABSENT payload -- an absent literal and a later
-/// `= null` write -- must produce the same storage. `__eq` compares per key, so
-/// a ctor spelling absence `false` while a store spells it `nil` makes two
-/// logically-equal values compare unequal.
-const ABSENT_SPELLINGS_AGREE: &str = r#"
-nobox value NV2 { x: float, y: float }
-value Opt { pos: NV2?, a: float }
-global G: Opt = Opt { pos: null, a: 3.0 }
-global H: Opt = Opt { pos: NV2 { x: 1.0, y: 2.0 }, a: 3.0 }
-fn main() {
-    H.pos = null
-    print("{G == H} {H.pos == null}")
-}
-"#;
-
 /// A LOCAL the outer struct is bound to, reassembled by a spread that escapes
 /// somewhere unscalarized. SROA splits the local into per-field cells, and the
 /// `pos` cell then holds a whole `NV2` -- the box. Normalization alone cannot
@@ -145,29 +116,6 @@ co fn build() -> Coroutine<float> {
 fn main() {
     let c = build()
     for n in c { print("{n as int}") }
-}
-"#;
-
-/// An explicit `materialize` must stay legal -- it is the sanctioned escape.
-const EXPLICIT_MATERIALIZE: &str = r#"
-nobox value NV2 { x: float, y: float }
-fn main() {
-    let m = materialize(NV2 { x: 1.0, y: 2.0 })
-    print("{m.x} {m.y}")
-}
-"#;
-
-/// An EXPLICIT box as a nested operand is legal and must be left WHOLE by
-/// normalization -- the trigger is implicit nested ctors only. Not a sentinel:
-/// this must pass before and after the pass lands.
-const MATERIALIZED_OPERAND: &str = r#"
-nobox value NV2 { x: float, y: float }
-value E5 { pos: NV2, a: float, b: float, c: float }
-global G: E5
-fn setup() { G = E5 { pos: materialize(NV2 { x: 1.0, y: 2.0 }), a: 3.0, b: 4.0, c: 5.0 } }
-fn main() {
-    setup()
-    print("{G.pos.x} {G.pos.y} {G.a}")
 }
 "#;
 
@@ -232,18 +180,6 @@ fn a_nullable_nobox_field_in_a_gc_tier_outer_carries_presence() {
 }
 
 #[test]
-fn a_leaf_table_element_read_out_of_a_container_projects_its_leaves() {
-    let lua = emit_module(LEAF_TABLE_OUT_OF_A_MAP);
-    assert_eq!(run_main(&lua).trim(), "1 2 3");
-}
-
-#[test]
-fn both_absent_spellings_store_the_same_tag() {
-    let lua = emit_module(ABSENT_SPELLINGS_AGREE);
-    assert_eq!(run_main(&lua).trim(), "true true");
-}
-
-#[test]
 fn an_sroa_split_local_reassembled_into_an_escape_does_not_box_its_nested_field() {
     let lua = emit_module(SROA_SPLIT_REASSEMBLY);
     assert!(
@@ -263,16 +199,4 @@ fn a_coroutine_frame_carries_a_value_with_a_nested_nobox_field() {
         "the coroutine frame materialized its nested nobox field:\n{lua}"
     );
     assert_eq!(run_main(&lua).trim(), "0\nboundary\n11");
-}
-
-#[test]
-fn an_explicit_materialize_stays_legal() {
-    let lua = emit_module(EXPLICIT_MATERIALIZE);
-    assert_eq!(run_main(&lua).trim(), "1 2");
-}
-
-#[test]
-fn an_explicitly_materialized_nested_operand_is_left_whole() {
-    let lua = emit_module(MATERIALIZED_OPERAND);
-    assert_eq!(run_main(&lua).trim(), "1 2 3");
 }

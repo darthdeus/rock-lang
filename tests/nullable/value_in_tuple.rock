@@ -1,0 +1,31 @@
+// An absent nullable value placed in a tuple must read as absent: the boxed
+// tuple slot stores `nil`, not a ctor built regardless of presence. The struct
+// twin bounds the class.
+
+value NV2 { x: float, y: float }
+
+fn probe_value(m: Map<int, NV2>, k: int) -> bool {
+    let t = (m.get(k), 1)
+    return t.0 == null
+}
+
+@test(output = "false true")
+fn an_absent_value_in_a_tuple_reads_as_absent() {
+    let m: Map<int, NV2> = map_new()
+    m[1] = NV2 { x: 1.0, y: 2.0 }
+    print("{probe_value(m, 1)} {probe_value(m, 9)}")
+}
+
+struct SV2 { x: float, y: float }
+
+fn probe_struct(m: Map<int, SV2>, k: int) -> bool {
+    let t = (m.get(k), 1)
+    return t.0 == null
+}
+
+@test(output = "false true")
+fn a_struct_in_a_tuple_is_correct() {
+    let m: Map<int, SV2> = map_new()
+    m[1] = SV2 { x: 1.0, y: 2.0 }
+    print("{probe_struct(m, 1)} {probe_struct(m, 9)}")
+}

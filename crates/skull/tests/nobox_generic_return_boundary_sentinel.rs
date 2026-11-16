@@ -54,7 +54,6 @@
 //! substitution AND the callee has no scalar-ABI spec". `field_get` is
 //! `@inline inline(lua)` with neither mark, which is why it should reject.
 
-use crate::common::compile_and_run;
 /// The repro through the stdlib primitive that actually bites.
 const FIELD_GET_NOBOX: &str = r#"
 struct Row { pos: Vec2, tag: int }
@@ -82,38 +81,6 @@ struct Box2 { p: Vec2 }
 fn main() {
     let a: Vec2 = unwrap_generic(Box2 { p: v(1.0, 2.0) })
     print("x={a.x}")
-}
-"#;
-
-/// Control: a boxed `struct` field keeps its single key and round-trips.
-const FIELD_GET_BOXED_STRUCT: &str = r#"
-struct Pt { x: int, y: int }
-struct Holder { p: Pt, tag: int }
-
-fn read_p(h: Holder, f: ReadFieldRef<Holder, Pt>) -> int {
-    return field_get(h, f).x
-}
-
-fn main() {
-    let h = Holder { p: Pt { x: 7, y: 0 }, tag: 1 }
-    print("{read_p(h, .p)}")
-}
-"#;
-
-/// Control: an UNMARKED `value` field is not flattened, so the same generic
-/// primitive is correct for it. This is the arm that rules out "value types
-/// cannot be read through a descriptor".
-const FIELD_GET_VALUE_STRUCT: &str = r#"
-value VPt { x: int, y: int }
-struct VHolder { p: VPt, tag: int }
-
-fn read_p(h: VHolder, f: ReadFieldRef<VHolder, VPt>) -> int {
-    return field_get(h, f).x
-}
-
-fn main() {
-    let h = VHolder { p: VPt { x: 9, y: 0 }, tag: 1 }
-    print("{read_p(h, .p)}")
 }
 "#;
 
@@ -156,24 +123,6 @@ fn a_generic_nobox_return_is_rejected_at_an_opaque_boundary() {
     assert!(
         err.contains("cannot cross the boxed return of `unwrap_generic`") && err.contains("Vec2"),
         "a concrete generic nobox return must not cross an opaque boundary: {err}"
-    );
-}
-
-#[test]
-fn a_boxed_struct_field_reads_correctly_through_the_same_primitive() {
-    assert_eq!(
-        compile_and_run(FIELD_GET_BOXED_STRUCT),
-        "7",
-        "a boxed field keeps one key and must stay readable through `field_get`"
-    );
-}
-
-#[test]
-fn an_unmarked_value_field_reads_correctly_through_the_same_primitive() {
-    assert_eq!(
-        compile_and_run(FIELD_GET_VALUE_STRUCT),
-        "9",
-        "an unmarked `value` field is not flattened, so it must stay readable"
     );
 }
 

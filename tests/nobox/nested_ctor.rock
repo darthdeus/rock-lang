@@ -164,3 +164,46 @@ fn a_nested_nobox_field_binds_to_a_local() {
     let m = o.m
     print("{m.v.x} {m.v.y}")
 }
+
+// A leaf-table box read back out of a container: the declared field name holds
+// only the presence tag, so a read keyed off it would see `nil` leaves.
+value OptPos { pos: NV2?, a: float }
+
+global OPT_MAP: Map<string, OptPos> = map_new()
+
+@test(output = "1 2 3")
+fn a_leaf_table_element_read_out_of_a_container_projects_its_leaves() {
+    OPT_MAP["k"] = OptPos { pos: NV2 { x: 1.0, y: 2.0 }, a: 3.0 }
+    let v = OPT_MAP["k"]
+    print("{v.pos?.x ?? -1.0} {v.pos?.y ?? -1.0} {v.a}")
+}
+
+// An absent literal and a later `= null` write must store the same tag, or
+// per-key `__eq` makes two logically equal values compare unequal.
+global ABSENT_LIT: OptPos = OptPos { pos: null, a: 3.0 }
+global ABSENT_WRITE: OptPos = OptPos { pos: NV2 { x: 1.0, y: 2.0 }, a: 3.0 }
+
+@test(output = "true true", backends = "lua")
+fn both_absent_spellings_store_the_same_tag() {
+    ABSENT_WRITE.pos = null
+    print("{ABSENT_LIT == ABSENT_WRITE} {ABSENT_WRITE.pos == null}")
+}
+
+@test(output = "1 2")
+fn an_explicit_materialize_stays_legal() {
+    let m = materialize(NV2 { x: 1.0, y: 2.0 })
+    print("{m.x} {m.y}")
+}
+
+// An explicit box as a nested operand of a global's ctor is left whole.
+global MATERIALIZED_E5: E5
+
+fn setup_materialized_e5() {
+    MATERIALIZED_E5 = E5 { pos: materialize(NV2 { x: 1.0, y: 2.0 }), a: 3.0, b: 4.0, c: 5.0 }
+}
+
+@test(output = "1 2 3")
+fn an_explicitly_materialized_nested_operand_is_left_whole() {
+    setup_materialized_e5()
+    print("{MATERIALIZED_E5.pos.x} {MATERIALIZED_E5.pos.y} {MATERIALIZED_E5.a}")
+}

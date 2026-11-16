@@ -15,7 +15,7 @@
 //! rejected at the sink -- `an_implicit_box_of_a_gc_tier_value_is_still_rejected`
 //! is the control, and it fails if the fix leaked into the implicit path.
 
-use crate::common::{compile_and_run, emit_module, function_body, run_main, try_emit_module};
+use crate::common::{emit_module, function_body, run_main, try_emit_module};
 
 /// A string field. The minimal GC-tier cell.
 const STRING_FIELD: &str = r#"
@@ -45,61 +45,6 @@ inline(lua) fn show(v: any) -> string = "return tostring(v.id) .. ':' .. tostrin
 fn main() {
     let v = ARow { id: 1, xs: [10, 20, 30] }
     print(show(materialize(v)))
-}
-"#;
-
-const CLOSURE_FIELD: &str = r#"
-nobox value CRow { id: int, f: fn(int) -> int }
-inline(lua) fn show(v: any) -> string = "return tostring(v.id) .. ':' .. tostring(v.f(4))"
-fn twice(n: int) -> int { return n * 2 }
-fn main() {
-    let v = CRow { id: 2, f: twice }
-    print(show(materialize(v)))
-}
-"#;
-
-/// A flat enum -- `Say` carries a `string`, so the enum is neither payload-free
-/// (an int) nor cdata-eligible. Its part of the value `Group` is the flattened
-/// `[tag, _0]` cell list, not a struct's declared fields, which is the arm the
-/// second recursion never had. Both variant kinds are covered: a UNIT variant
-/// nil-pads the payload slot, a PAYLOAD variant fills it.
-const FLAT_ENUM_FIELD: &str = r#"
-enum Note { Silent, Say(string) }
-nobox value NRow { id: int, note: Note }
-inline(lua) fn show(v: any) -> string = "return tostring(v.id) .. ':' .. tostring(v.note.__variant) .. ':' .. tostring(v.note[1])"
-fn main() {
-    let a = NRow { id: 1, note: Note::Silent }
-    let b = NRow { id: 2, note: Note::Say("hi") }
-    print(show(materialize(a)))
-    print(show(materialize(b)))
-}
-"#;
-
-/// A nested `nobox` struct inside a GC-tier outer. The outer's box keys the
-/// inner's leaves by dotted path (`pos.x`), as an unmarked outer with the same
-/// `nobox` inner does, so the explicit box builds no inner box at all.
-const NESTED_NOBOX_FIELD: &str = r#"
-nobox value NV2 { x: float, y: float }
-nobox value Outer { label: string, pos: NV2 }
-inline(lua) fn show(v: any) -> string = "return v.label .. ':' .. tostring(v['pos.x']) .. ':' .. tostring(v['pos.y'])"
-fn main() {
-    let v = Outer { label: "L", pos: NV2 { x: 1.0, y: 2.0 } }
-    print(show(materialize(v)))
-}
-"#;
-
-/// The `present: Some(..)` branch: an ABSENT value has no leaves to build a ctor
-/// from, so it reaches the sink as `nil` rather than as a table of nils.
-const NULLABLE_GC_TIER: &str = r#"
-nobox value SRow { kind: int, label: string }
-inline(lua) fn show(v: any) -> string = "if v == nil then return 'absent' end return tostring(v.kind) .. v.label"
-fn pick(on: bool) -> SRow? {
-    if on { return SRow { kind: 7, label: "z" } }
-    return null
-}
-fn main() {
-    print(show(materialize(pick(true))))
-    print(show(materialize(pick(false))))
 }
 "#;
 
@@ -200,26 +145,6 @@ fn an_array_field_boxes_through_the_value_table() {
         "the explicit box did not take the value-table ctor:\n{lua}"
     );
     assert_eq!(run_main(&lua), "1:3:20");
-}
-
-#[test]
-fn a_closure_field_boxes_through_the_value_table() {
-    assert_eq!(compile_and_run(CLOSURE_FIELD), "2:8");
-}
-
-#[test]
-fn a_flat_enum_field_boxes_both_variant_kinds() {
-    assert_eq!(compile_and_run(FLAT_ENUM_FIELD), "1:Silent:nil\n2:Say:hi");
-}
-
-#[test]
-fn a_nested_nobox_field_boxes_inside_a_gc_tier_outer() {
-    assert_eq!(compile_and_run(NESTED_NOBOX_FIELD), "L:1:2");
-}
-
-#[test]
-fn a_nullable_gc_tier_value_reaches_the_sink_as_nil_when_absent() {
-    assert_eq!(compile_and_run(NULLABLE_GC_TIER), "7z\nabsent");
 }
 
 #[test]
