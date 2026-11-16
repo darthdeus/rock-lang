@@ -1,7 +1,8 @@
-// Coverage for the full type grammar at macro-arg position. The sigil
-// arg parser tries `parse_type_expr` first with cursor backtracking —
-// any shape `parse_type_expr` accepts at top level is automatically
-// accepted as a macro `ty:` arg, including arbitrarily nested forms.
+// The type grammar at sigil macro-arg position. The sigil arg parser tries
+// `parse_type_expr` first with cursor backtracking, so any shape it accepts
+// at top level (`Foo<T>`, `[T]`, `(T, U)`, `Map<K, V>`, nullable, nested)
+// is accepted as a `ty:` arg. Without the sigil, `Foo<T>` would parse `<`
+// as comparison.
 
 struct BoxL<T> { v: T }
 
@@ -9,59 +10,39 @@ macro hold(Name: ident, Elem: ty) {
     struct Name { v: Elem }
 }
 
-// === Compound types at top level ===
-
+hold!(WrapBox, BoxL<int>)
 hold!(ArrInt, [int])
+hold!(WrapPair, (int, string))
+hold!(WrapMap, Map<int, string>)
 hold!(BoxArrInt, BoxL<[int]>)
-hold!(ArrBox, [BoxL<int>])               // nested: array of type-app
-hold!(ArrArrInt, [[int]])                // nested: array of array
-hold!(BoxBoxInt, BoxL<BoxL<int>>)        // nested type-app
-hold!(TupNested, ([int], BoxL<string>))  // tuple of compound types
-hold!(MapToBox, Map<int, BoxL<int>>)     // Map with compound value
+hold!(ArrBox, [BoxL<int>])
+hold!(ArrArrInt, [[int]])
+hold!(BoxBoxInt, BoxL<BoxL<int>>)
+hold!(TupNested, ([int], BoxL<string>))
+hold!(MapToBox, Map<int, BoxL<int>>)
 
 @test
-fn test_array_of_builtin() {
-    let h = ArrInt { v: [1, 2, 3] }
-    assert(h.v.len() == 3, "[int]")
-}
-
-@test
-fn test_typeapp_with_array_inner() {
-    let h = BoxArrInt { v: BoxL { v: [10, 20] } }
-    assert(h.v.v[0] + h.v.v[1] == 30, "BoxL<[int]>")
-}
-
-@test
-fn test_array_of_typeapp() {
-    let h = ArrBox { v: [BoxL { v: 5 }, BoxL { v: 7 }] }
-    assert(h.v[0].v + h.v[1].v == 12, "[BoxL<int>]")
-}
-
-@test
-fn test_array_of_array() {
-    let h = ArrArrInt { v: [[1, 2], [3, 4]] }
-    assert(h.v[0][0] + h.v[1][1] == 5, "[[int]]")
-}
-
-@test
-fn test_typeapp_of_typeapp() {
-    let h = BoxBoxInt { v: BoxL { v: BoxL { v: 99 } } }
-    assert(h.v.v.v == 99, "BoxL<BoxL<int>>")
-}
-
-@test
-fn test_tuple_of_compound() {
-    let h = TupNested { v: ([1, 2, 3], BoxL { v: "hi" }) }
-    assert(h.v.0.len() == 3, "tuple first elem")
-    assert(h.v.1.v == "hi", "tuple second elem")
-}
-
-@test
-fn test_map_with_compound_value() {
+fn test_compound_type_args() {
+    assert(WrapBox { v: BoxL { v: 7 } }.v.v == 7, "BoxL<int>")
+    assert(ArrInt { v: [1, 2, 3] }.v.len() == 3, "[int]")
+    let p = WrapPair { v: (5, "hello") }
+    assert(p.v.0 == 5 && p.v.1 == "hello", "(int, string)")
+    let sm: Map<int, string> = map_new()
+    sm[1] = "a"
+    assert(WrapMap { v: sm }.v[1] == "a", "Map<int, string>")
+    let ba = BoxArrInt { v: BoxL { v: [10, 20] } }
+    assert(ba.v.v[0] + ba.v.v[1] == 30, "BoxL<[int]>")
+    let ab = ArrBox { v: [BoxL { v: 5 }, BoxL { v: 7 }] }
+    assert(ab.v[0].v + ab.v[1].v == 12, "[BoxL<int>]")
+    let aa = ArrArrInt { v: [[1, 2], [3, 4]] }
+    assert(aa.v[0][0] + aa.v[1][1] == 5, "[[int]]")
+    assert(BoxBoxInt { v: BoxL { v: BoxL { v: 99 } } }.v.v.v == 99, "BoxL<BoxL<int>>")
+    let t = TupNested { v: ([1, 2, 3], BoxL { v: "hi" }) }
+    assert(t.v.0.len() == 3, "tuple first elem")
+    assert(t.v.1.v == "hi", "tuple second elem")
     let m: Map<int, BoxL<int>> = map_new()
     m[1] = BoxL { v: 42 }
-    let h = MapToBox { v: m }
-    assert(h.v[1].v == 42, "Map<int, BoxL<int>>")
+    assert(MapToBox { v: m }.v[1].v == 42, "Map<int, BoxL<int>>")
 }
 
 // === Nullable shapes ===
@@ -71,26 +52,42 @@ hold!(NullBox, BoxL<int>?)
 hold!(BoxOfNullInt, BoxL<int?>)
 
 @test
-fn test_nullable_builtin() {
-    let h = NullInt { v: null }
-    assert(h.v == null, "int? — null inhabits")
-    let h2 = NullInt { v: 7 }
-    assert(h2.v == 7, "int? — non-null also inhabits")
-}
-
-@test
-fn test_nullable_typeapp() {
-    let h = NullBox { v: null }
-    assert(h.v == null, "BoxL<int>? null")
-}
-
-@test
-fn test_typeapp_with_nullable_inner() {
-    // Construct via the field's declared type so Rock picks up the
-    // `int?` from `v`'s annotation instead of inferring `int` from a
-    // bare literal. The macro arg `BoxL<int?>` substituted correctly —
-    // proven by the fact that this annotation drives inference.
+fn test_nullable_type_args() {
+    assert(NullInt { v: null }.v == null, "int? - null inhabits")
+    assert(NullInt { v: 7 }.v == 7, "int? - non-null also inhabits")
+    assert(NullBox { v: null }.v == null, "BoxL<int>? null")
+    // The annotation makes `v` an `int?` rather than inferring `int` from a
+    // bare literal; it only type-checks if the macro substituted BoxL<int?>.
     let v: BoxL<int?> = BoxL { v: null }
-    let h = BoxOfNullInt { v: v }
-    assert(h.v.v == null, "BoxL<int?> with null inner")
+    assert(BoxOfNullInt { v: v }.v.v == null, "BoxL<int?> with null inner")
+}
+
+// === Line comments inside type args ===
+//
+// The parser must keep skipping comments after the cursor-backtracking
+// `parse_type_expr` enters its sub-parser. A tuple ending with `)` also
+// abuts the call's outer `)`.
+
+hold!(
+    HolderA,
+    BoxL< // comment after `<`
+        int  // comment before `>`
+    >
+)
+
+hold!(
+    TupHolder,
+    (
+        int?,    // nullable int
+        [bool]   // vec of bool
+    )
+)
+
+@test
+fn test_comments_inside_type_args() {
+    let h = HolderA { v: BoxL { v: 42 } }
+    assert(h.v.v == 42, "type-app arg with internal comments parsed")
+    let t = TupHolder { v: (null, [true, false]) }
+    assert(t.v.0 == null, "nullable tuple element 0")
+    assert(t.v.1.len() == 2, "vec tuple element 1 has expected len")
 }

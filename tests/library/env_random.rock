@@ -1,15 +1,6 @@
 // random_seed and the random streams, parse_int, parse_float and env_var.
 
 @test(output = "true")
-fn test_random_seed_deterministic() {
-    random_seed(42)
-    let a = random_int(0, 1000)
-    random_seed(42)
-    let b = random_int(0, 1000)
-    print(a == b)
-}
-
-@test(output = "true")
 fn test_random_seed_changes_sequence() {
     random_seed(1)
     let a = random_int(0, 1000000)
@@ -104,28 +95,11 @@ fn test_random_zero_seed_differs_from_one() {
 @test(output = "true")
 fn test_random_int_small_buckets_are_reachable() {
     random_seed(2718)
-    let seen0 = false
-    let seen1 = false
-    let seen2 = false
-    let seen3 = false
-    let seen4 = false
-    let seen5 = false
-    let seen6 = false
-    let seen7 = false
+    let seen = [false, false, false, false, false, false, false, false]
     for _ in 0..10000 {
-        match random_int(0, 8) {
-            0 => seen0 = true,
-            1 => seen1 = true,
-            2 => seen2 = true,
-            3 => seen3 = true,
-            4 => seen4 = true,
-            5 => seen5 = true,
-            6 => seen6 = true,
-            7 => seen7 = true,
-            _ => {}
-        }
+        seen[random_int(0, 8)] = true
     }
-    print(seen0 && seen1 && seen2 && seen3 && seen4 && seen5 && seen6 && seen7)
+    print(seen.iter().all(s => s))
 }
 
 // random() draws from the SAME numeric stream as random_int (unified
@@ -143,38 +117,13 @@ fn test_random_shares_single_stream() {
     print(a != b)
 }
 
-@test(output = "42")
-fn test_parse_int_valid() {
-    let result = "42".parse_int()
-    if result != null {
-        print(result)
-    }
-}
-
-@test(output = "true")
-fn test_parse_int_invalid() {
-    let result = "not_a_number".parse_int()
-    print(result == null)
-}
-
-@test(output = "true")
-fn test_parse_int_empty() {
-    let result = "".parse_int()
-    print(result == null)
-}
-
-@test(output = "1.5")
-fn test_parse_float_valid() {
-    let result = "1.5".parse_float()
-    if result != null {
-        print(result)
-    }
-}
-
-@test(output = "true")
-fn test_parse_float_invalid() {
-    let result = "abc".parse_float()
-    print(result == null)
+@test
+fn test_parse_int_and_float() {
+    assert_eq("42".parse_int(), 42)
+    assert_null("not_a_number".parse_int())
+    assert_null("".parse_int())
+    assert_eq("1.5".parse_float(), 1.5)
+    assert_null("abc".parse_float())
 }
 
 @test(output = "true")

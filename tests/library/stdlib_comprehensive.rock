@@ -1,8 +1,6 @@
-// Standard library functions for vectors, maps, copying and other operations.
-
-// ============================================
-// Vector tests
-// ============================================
+// Standard library functions for vectors, maps and iterator adapters.
+// Deepcopy is in deepcopy.rock and js_deepcopy.rock; key/value ordering is in
+// stdlib_audit.rock.
 
 @test(output = "hi\nbye\nfoo\nfoo\nbye\nlen: 0")
 fn vector_insert_and_lookup() {
@@ -18,217 +16,53 @@ fn vector_insert_and_lookup() {
 
     let a = pop(v)
     let b = pop(v)
-    let c = pop(v)
+    let _c = pop(v)
 
     print(a)
     print(b)
-
-    // Vec should be empty now, but test direct access
     print("len: {vec_len(v)}")
 }
 
-// ============================================
-// Map tests
-// ============================================
-
-@test(output = "100")
-fn map_insert_and_lookup() {
+@test(output = "100\n100\ntrue\nVec {{ }}\nVec {{ {{ \"hp\", 100 }} }}\nVec {{ {{ \"hp\", 150 }} }}")
+fn map_insert_remove_and_to_array() {
     let m: Map<string, int> = map_new()
     insert(m, "hp", 100)
-    let v = get(m, "hp")
-    print(v)
-}
-
-@test(output = "100\ntrue")
-fn map_remove_and_lookup() {
-    let m: Map<string, int> = map_new()
-    insert(m, "hp", 100)
-    let r = remove(m, "hp")
-    print(r)
-    let v = get(m, "hp")
-    print(v == null)
-}
-
-@test(output = "Vec {{ }}")
-fn map_to_array_empty() {
-    let m: Map<int, string> = map_new()
-    print(inspect(to_array(m)))
-}
-
-@test(output = "Vec {{ {{ \"hp\", 100 }} }}")
-fn map_to_array_after_inserts() {
-    let m: Map<string, int> = map_new()
+    print(get(m, "hp"))
+    print(remove(m, "hp"))
+    print(get(m, "hp") == null)
+    let empty: Map<int, string> = map_new()
+    print(inspect(to_array(empty)))
     insert(m, "hp", 100)
     print(inspect(to_array(m)))
-}
-
-@test(output = "Vec {{ {{ \"hp\", 150 }} }}")
-fn map_insert_overwrite() {
-    let m: Map<string, int> = map_new()
-    insert(m, "hp", 100)
     insert(m, "hp", 150)
     print(inspect(to_array(m)))
 }
 
-@test(output = "true\nfalse\n2\n0")
+@test(output = "0\nfalse\ntrue\nfalse\n2\n0")
 fn contains_len_and_clear() {
+    let empty: Map<int, string> = map_new()
+    print(empty.len())
+    print(empty.contains(42))
+
     let m: Map<string, int> = map_new()
     insert(m, "a", 1)
     insert(m, "b", 2)
-
     print(m.contains("a"))
     print(m.contains("c"))
     print(m.len())
-
     clear(m)
     print(m.len())
 }
 
-@test(output = "Vec {{ \"one\", \"three\", \"two\" }}\nVec {{ 1, 3, 2 }}")
-fn keys_and_values() {
-    let m: Map<string, int> = map_new()
-    insert(m, "one", 1)
-    insert(m, "two", 2)
-    insert(m, "three", 3)
-
-    let ks = keys(m)
-    let vs = values(m)
-
-    print(inspect(ks))
-    print(inspect(vs))
-}
-
-@test(output = "0\nfalse")
-fn len_and_contains_empty() {
-    let m: Map<int, string> = map_new()
-    print(m.len())
-    print(m.contains(42))
-}
-
-// ============================================
-// Deepcopy tests
-// ============================================
-
-@test(output = "true\ntrue\ntrue")
-fn primitive_copy() {
-    let a = 123
-    let b = deepcopy(a)
-    print(a == b)
-
-    let s = "foo"
-    let t = deepcopy(s)
-    print(s == t)
-
-    let f = true
-    let g = deepcopy(f)
-    print(f == g)
-}
-
-// Skip array deepcopy tests - marked as TODO/ignored in original
-
-@test(output = "1\n99")
-fn modify_copy_doesnt_affect_original() {
-    let orig = [[1], [2]]
-    let c = deepcopy(orig)
-    c[0][0] = 99
-    print(orig[0][0])
-    print(c[0][0])
-}
-
-@test(output = "42\n1")
-fn deepcopy_vec_preserves_metatable() {
-    let v = vec_new()
-    vec_push(v, 42)
-    let c = deepcopy(v)
-    print(vec_get(c, 0))
-    print(vec_len(c))
-}
-
-// ============================================
-// Vec map tests
-// ============================================
-
-@test(output = "ok")
-fn vec_map_basic() {
-    let vec = [1, 2, 3, 4, 5]
-
-    // Test with unannotated lambda - should infer int from context
-    let doubled = vec.iter().map((x) => x * 2).collect()
-
-    assert(doubled[0] == 2)
-    assert(doubled[1] == 4)
-    assert(doubled[2] == 6)
-    assert(doubled[3] == 8)
-    assert(doubled[4] == 10)
-
-    print("ok")
-}
-
-@test(output = "ok")
-fn vec_map_addition() {
-    let vec = [10, 20, 30]
-
-    // Using addition operator with unannotated lambda
-    let incremented = vec.iter().map((x) => x + 5).collect()
-
-    assert(incremented[0] == 15)
-    assert(incremented[1] == 25)
-    assert(incremented[2] == 35)
-
-    print("ok")
-}
-
-// Skip map tests marked as ignored in original
-
-@test(output = "ok")
-fn vec_map_empty() {
+// Unannotated lambda params infer `int` from the receiver.
+@test
+fn vec_map_and_filter() {
+    assert_eq([1, 2, 3, 4, 5].iter().map((x) => x * 2).collect(), [2, 4, 6, 8, 10])
+    assert_eq([10, 20, 30].iter().map((x) => x + 5).collect(), [15, 25, 35])
     let empty: [int] = vec_new()
+    assert(vec_len(empty.iter().map((x) => x * 2).collect()) == 0)
 
-    let result = empty.iter().map((x) => x * 2).collect()
-
-    assert(vec_len(result) == 0)
-
-    print("ok")
+    assert_eq([1, 2, 3, 4, 5, 6].iter().filter((x) => x % 2 == 0).collect(), [2, 4, 6])
+    assert(vec_len([1, 3, 5, 7, 9].iter().filter((x) => x % 2 == 0).collect()) == 0)
+    assert_eq([2, 4, 6, 8].iter().filter((x) => x % 2 == 0).collect(), [2, 4, 6, 8])
 }
-
-// ============================================
-// Vec filter tests
-// ============================================
-
-@test(output = "ok")
-fn vec_filter_basic() {
-    let vec = [1, 2, 3, 4, 5, 6]
-
-    // Filter even numbers using lambda with unannotated parameter
-    let evens = vec.iter().filter((x) => x % 2 == 0).collect()
-
-    assert_eq(evens, [2, 4, 6])
-
-    print("ok")
-}
-
-@test(output = "ok")
-fn vec_filter_empty_result() {
-    let vec = [1, 3, 5, 7, 9]
-
-    // Filter for even numbers (none exist)
-    let evens = vec.iter().filter((x) => x % 2 == 0).collect()
-
-    assert(vec_len(evens) == 0)
-
-    print("ok")
-}
-
-@test(output = "ok")
-fn vec_filter_all_pass() {
-    let vec = [2, 4, 6, 8]
-
-    // All numbers are even
-    let evens = vec.iter().filter((x) => x % 2 == 0).collect()
-
-    assert_eq(evens, [2, 4, 6, 8])
-
-    print("ok")
-}
-
-// Skip tests marked as ignored in original file

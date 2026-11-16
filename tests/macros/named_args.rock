@@ -51,6 +51,16 @@ fn label_may_name_the_first_param() {
     assert(bind3(a: 7) == "7/20/30", "macro: {bind3(a: 7)}")
 }
 
+// Every arg labelled, out of order. Subtraction is not commutative, so
+// positional binding would give 3 - 10 == -7.
+macro sub2(a: expr, b: expr) -> int { a - b }
+
+@test(output = "7\n-7")
+fn test_macro_named_args_bind_by_name_not_position() {
+    print(sub2(b: 3, a: 10))
+    print(sub2(3, 10))
+}
+
 // UFCS puts the receiver in the first slot positionally; labels still apply to
 // the parameters after it.
 struct Box { n: int }

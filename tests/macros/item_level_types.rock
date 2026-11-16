@@ -4,22 +4,6 @@
 // minted afresh per splice). A `Name: ident` fragment renames the type
 // itself.
 
-// === STRUCT — basic two-invocation ident substitution ===
-
-macro decl_pair(Name: ident) {
-    value Name { x: int, y: int }
-}
-
-decl_pair(PairFoo)
-decl_pair(PairBar)
-
-@test
-fn test_struct_ident_subst_two_invocations() {
-    let f = PairFoo { x: 1, y: 2 }
-    let b = PairBar { x: 3, y: 4 }
-    assert(f.x + b.y == 5, "two distinct structs from same macro template")
-}
-
 // === STRUCT — `ty` substitution into a field type ===
 
 macro decl_holder(Name: ident, Elem: ty) {

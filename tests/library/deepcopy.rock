@@ -23,13 +23,6 @@ fn shared_box_aliasing_preserved_in_copy() {
     print(orig.get())
 }
 
-struct Inner { v: int }
-struct State { a: Inner, b: Inner }
-
-
-struct Node { tag: int, next: Node? }
-
-
 // P2: a capturing co-fn lambda hoists to an
 // env record whose `c<S>` capture is the frame table itself, and the record
 // lives in a frame field -> the frame holds a record that points back at the

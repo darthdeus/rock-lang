@@ -7,6 +7,8 @@
 // body's `x` stays distinct.
 
 // --- (1) let in body, plain --------------------------------------------------
+// Regression: the body-local is renamed before param substitution, so it
+// cannot capture an `expr` arg sharing its surface name.
 
 macro hyg_let(arg: expr) -> int {
     let x = 7

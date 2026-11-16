@@ -5,8 +5,8 @@
 // pass; investigate.
 //
 // Bare identifiers in a macro body resolve at the call site; a macro reads a
-// global through `_G.name` (test_hygiene_body_resolves_to_def_scope) and a
-// caller binding through `^name`.
+// global through `_G.name` and a caller binding through `^name` (both in
+// anaphoric.rock). Body-local renaming is in hygiene_adversarial.rock.
 
 global SIDE_EFFECT_COUNTER: int = 0
 
@@ -31,39 +31,6 @@ fn test_macro_assigns_through_params() {
     let t = 2
     swap_places(x, t)
     assert(x == 2 && t == 1, "swap writes both caller locals")
-}
-
-// Hygiene: macro body introduces a local with same name as caller's local.
-macro reads_local_temp(x: expr) -> int {
-    let __tmp = x + 1
-    __tmp * 2
-}
-
-@test
-fn test_hygiene_body_local_no_collision() {
-    let __tmp = 999     // caller's __tmp
-    let result = reads_local_temp(5)
-    assert(result == 12, "(5+1)*2 = 12")
-    assert(__tmp == 999, "caller's __tmp must NOT be clobbered by macro's __tmp")
-}
-
-// Macro body references a name that ALSO matches a caller-scope binding.
-// Should resolve to the macro definition's scope, not the caller's.
-global MACRO_SCOPE_GLOBAL: int = 100
-
-macro reads_global() -> int {
-    _G.MACRO_SCOPE_GLOBAL
-}
-
-@test
-fn test_hygiene_body_resolves_to_def_scope() {
-    // rock: allow(unused_var, "intentional shadow — tests that body ignores caller local")
-    let MACRO_SCOPE_GLOBAL = 7
-    let result = reads_global()
-    // If the macro body resolves identifiers in its DEF scope (correct),
-    // we read 100 from the global. If it resolves in the CALLER scope
-    // (broken hygiene), we'd read 7.
-    assert(result == 100, "macro body must read its def-scope global, not the caller's local")
 }
 
 // === SIDE-EFFECT DUPLICATION ===
@@ -164,28 +131,10 @@ fn test_macro_inside_if() {
     assert(r == 10, "macro inside if-then branch")
 }
 
-// === RECURSION ===
-
-// Non-variadic recursive macro. Inline pass typically detects recursion
-// and refuses to inline indefinitely. Probe what happens.
-macro maybe_recursive(x: expr) -> int {
-    x   // no recursion — control case
-}
-
-@test
-fn test_non_recursive_macro_ok() {
-    assert(maybe_recursive(5) == 5, "trivial pass-through")
-}
-
 // === RETURN TYPES ===
 
 macro returns_string(x: expr) -> string {
     "got_{x}"
-}
-
-@test
-fn test_macro_returns_string() {
-    assert(returns_string(42) == "got_42", "string return + interp")
 }
 
 macro returns_bool(x: expr) -> bool {
@@ -193,7 +142,8 @@ macro returns_bool(x: expr) -> bool {
 }
 
 @test
-fn test_macro_returns_bool() {
+fn test_macro_return_types() {
+    assert(returns_string(42) == "got_42", "string return + interp")
     assert(returns_bool(5), "5 > 0")
     assert(!returns_bool(-3), "-3 not > 0")
 }
@@ -209,7 +159,7 @@ macro ignores_arg(_x: expr) -> int {
 @test
 fn test_unused_arg_still_evaluated() {
     SIDE_EFFECT_COUNTER = 0
-    let _r = ignores_arg(next_counter())
+    assert(ignores_arg(next_counter()) == 42, "body result ignores the arg")
     // If counter is 0, the arg was DROPPED entirely (likely on naive
     // textual subst when param is unused). If 1, it was let-bound.
     // Both are defensible — document which we get.

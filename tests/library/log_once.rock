@@ -32,6 +32,41 @@ fn test_log_dedup_count_one_site() {
     print(log_dedup_count())
 }
 
+// Distinct explicit sites do not dedupe each other.
+@test(output = "[A] m1\n[B] m2")
+fn test_log_once_distinct_sites() {
+    log_reset_dedup()
+    log_set_level(0)
+    log_once("A", "m1", "key-a")
+    log_once("B", "m2", "key-b")
+    log_once("A", "m1", "key-a")
+    log_once("B", "m2", "key-b")
+}
+
+// reset lets the same site fire again.
+@test(output = "[X] hi\n[X] hi")
+fn test_log_reset_refires() {
+    log_reset_dedup()
+    log_set_level(0)
+    log_once("X", "hi", "shared")
+    log_reset_dedup()
+    log_once("X", "hi", "shared")
+}
+
+@test(output = "[DC] a\n[DC] b\n2\n[DC] a\n[DC] b\n[DC] c\n3")
+fn test_log_dedup_count_many_sites() {
+    for count in [2, 3] {
+        log_reset_dedup()
+        log_set_level(0)
+        let sites = ["a", "b", "c"]
+        for i in 0..count {
+            log_once("DC", sites[i], sites[i])
+        }
+        log_once("DC", "a", "a")
+        print(log_dedup_count())
+    }
+}
+
 // ============================================================
 // log_throttled — tested via the mockable seam log_throttled_with_now
 // ============================================================
@@ -47,13 +82,16 @@ fn test_log_throttled_distinct_sites_independent() {
     log_throttled_with_now(0.5, "B", "b", 1.0, "key-b")  // suppressed
 }
 
-// Edge case: now == last + interval should fire (>=, not >).
-@test(output = "[E] go\n[E] go")
-fn test_log_throttled_boundary_fires() {
+// Fires at interval boundaries (>=, not >) and suppresses within.
+@test(output = "[T] tick\n[T] tick\n[T] tick")
+fn test_log_throttled_interval_boundaries() {
     log_reset_dedup()
     log_set_level(0)
-    log_throttled_with_now(0.0, "E", "go", 0.5, "boundary")
-    log_throttled_with_now(0.5, "E", "go", 0.5, "boundary")
+    log_throttled_with_now(0.0, "T", "tick", 1.0, "tk")
+    log_throttled_with_now(0.5, "T", "tick", 1.0, "tk")
+    log_throttled_with_now(1.0, "T", "tick", 1.0, "tk")
+    log_throttled_with_now(1.5, "T", "tick", 1.0, "tk")
+    log_throttled_with_now(2.0, "T", "tick", 1.0, "tk")
 }
 
 // Edge case: now < last + interval (just barely) is suppressed.
@@ -86,30 +124,17 @@ fn test_log_throttled_just_under_boundary_suppressed() {
 // Severity: documented behavior, not a bug.
 // ============================================================
 
-@test(output = "[Z] go\n[Z] go\n[Z] go")
-fn test_log_throttled_zero_interval_fires_every_call() {
+// Rock has no nan() literal; 0.0 / 0.0 constructs NaN.
+@test(output = "[Z] go\n[Z] go\n[Z] go\n[N] go\n[N] go\n[N] go\n[NAN] go\n[NAN] go\n[NAN] go")
+fn test_log_throttled_degenerate_intervals_fire_every_call() {
     log_reset_dedup()
     log_set_level(0)
     log_throttled_with_now(0.0, "Z", "go", 0.0, "zero-key")
     log_throttled_with_now(0.0, "Z", "go", 0.0, "zero-key")
     log_throttled_with_now(0.0, "Z", "go", 0.0, "zero-key")
-}
-
-@test(output = "[N] go\n[N] go\n[N] go")
-fn test_log_throttled_negative_interval_fires_every_call() {
-    log_reset_dedup()
-    log_set_level(0)
     log_throttled_with_now(0.0, "N", "go", -1.0, "neg-key")
     log_throttled_with_now(0.0, "N", "go", -1.0, "neg-key")
     log_throttled_with_now(0.0, "N", "go", -1.0, "neg-key")
-}
-
-// Construct NaN as 0.0 / 0.0 in Rock. Rock has no nan() literal, but float
-// division is available.
-@test(output = "[NAN] go\n[NAN] go\n[NAN] go")
-fn test_log_throttled_nan_interval_fires_every_call() {
-    log_reset_dedup()
-    log_set_level(0)
     let nan: float = 0.0 / 0.0
     log_throttled_with_now(0.0, "NAN", "go", nan, "nan-key")
     log_throttled_with_now(1.0, "NAN", "go", nan, "nan-key")

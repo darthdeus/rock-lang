@@ -39,14 +39,20 @@ fn cycle_copies_without_hanging() {
     print(n.tag)
 }
 
-// A deep-copied Vec is independent of the original.
-@test(output = "10\n1")
+// A deep-copied Vec, and the vecs nested in it, are independent of the
+// original.
+@test(output = "10\n1\n1\n99")
 fn vec_copy_is_independent() {
     let v = [1, 2, 3]
     let c = deepcopy(v)
     c.set(0, 10)
     print(c[0])
     print(v[0])
+    let orig = [[1], [2]]
+    let nested = deepcopy(orig)
+    nested[0][0] = 99
+    print(orig[0][0])
+    print(nested[0][0])
 }
 
 // A deep-copied Map is independent of the original.
@@ -60,10 +66,12 @@ fn map_copy_is_independent() {
     print(m["k"])
 }
 
-// A primitive passes through unchanged.
-@test(returns = 42)
-fn primitive_passthrough() -> int {
-    return deepcopy(42)
+// Primitives pass through unchanged.
+@test(output = "42\ntrue\ntrue")
+fn primitive_passthrough() {
+    print(deepcopy(42))
+    print(deepcopy("foo") == "foo")
+    print(deepcopy(true))
 }
 
 // `clone_into` of a column-stored Vec copies each column; the copy owns them.

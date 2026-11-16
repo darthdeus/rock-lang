@@ -34,3 +34,16 @@ fn test_g_access_write_bypasses_shadow() {
     assert_eq(_G.GAF_SHADOWED, 51)
     _G.GAF_SHADOWED = 50         // restore
 }
+
+// A bare global read in another fn's body emits as `_G.<name>`, so a
+// caller-scope Lua local of the same name cannot intercept it.
+global GH_GLOBAL: int = 100
+
+fn gh_read_global() -> int { return GH_GLOBAL }
+
+@test
+fn test_global_read_through_local_shadow() {
+    let GH_GLOBAL = 7
+    assert_eq(GH_GLOBAL, 7)
+    assert_eq(gh_read_global(), 100)
+}

@@ -33,72 +33,23 @@ fn test_map_basic_operations() {
     assert $ get(map, "three") == 3
 }
 
-// Test Map with different key types (if supported)
-@test
-fn test_map_string_keys_comprehensive() {
-    let inventory: Map<string, int> = map_new()
-
-    // Test various string keys
-    insert(inventory, "sword", 1)
-    insert(inventory, "health_potion", 5)
-    insert(inventory, "magic-staff", 1)
-    insert(inventory, "gold coin", 50)
-    insert(inventory, "", 999) // empty string key
-
-    assert $ inventory.len() == 5
-
-    // Test iteration covers all items
-    let total_items = 0
-    let key_count = 0
-
-    for (item_name, quantity) in inventory {
-        total_items = total_items + quantity
-        key_count = key_count + 1
-
-        // Validate each key-value pair
-        if item_name == "sword" {
-            assert quantity == 1
-        } else if item_name == "health_potion" {
-            assert quantity == 5
-        } else if item_name == "magic-staff" {
-            assert quantity == 1
-        } else if item_name == "gold coin" {
-            assert quantity == 50
-        } else if item_name == "" {
-            assert quantity == 999
-        } else {
-            error("Unexpected item: " + item_name)
-        }
-    }
-
-    assert total_items == 1056 // 1+5+1+50+999
-    assert key_count == 5
-}
-
-// Test array operations and iteration
+// Test array indexing and enumerate
 @test
 fn test_array_operations() {
     let numbers = [10, 20, 30, 40, 50]
 
     assert $ vec_len(numbers) == 5
     assert $ numbers[0] == 10
-    assert $ numbers[1] == 20
     assert $ numbers[4] == 50
 
-    // Test array iteration with index
     let sum = 0
     let index_sum = 0
-    let count = 0
-
     for (i, num) in enumerate(numbers) {
         sum = sum + num
         index_sum = index_sum + i
-        count = count + 1
     }
-
     assert sum == 150
-    assert count == 5
-    // Note: index_sum will depend on whether we use 0-based or 1-based indexing in Lua pairs
+    assert index_sum == 10 // 0-based: 0+1+2+3+4
 }
 
 // Test complex nested data structures
@@ -257,39 +208,27 @@ fn test_large_collections() {
     assert sum == 9900 // sum of 0*2 + 1*2 + ... + 99*2 = 2 * (0+1+...+99) = 2 * 4950
 }
 
-// Test edge cases with special characters in keys
+// String keys with special characters, including the empty string, round-trip
+// through get and iteration.
 @test
 fn test_special_character_keys() {
-    let special_map: Map<string, string> = map_new()
-
-    insert(special_map, "normal", "value1")
-    insert(special_map, "with spaces", "value2")
-    insert(special_map, "with-dashes", "value3")
-    insert(special_map, "with_underscores", "value4")
-    insert(special_map, "with.dots", "value5")
-    insert(special_map, "123numbers", "value6")
-    insert(special_map, "UPPERCASE", "value7")
-
-    assert $ special_map.len() == 7
-
-    // Test retrieval
-    assert $ get(special_map, "normal") == "value1"
-    assert $ get(special_map, "with spaces") == "value2"
-    assert $ get(special_map, "with-dashes") == "value3"
-    assert $ get(special_map, "with_underscores") == "value4"
-    assert $ get(special_map, "with.dots") == "value5"
-    assert $ get(special_map, "123numbers") == "value6"
-    assert $ get(special_map, "UPPERCASE") == "value7"
-
-    // Test iteration includes all special keys
-    let keys_found = 0
-
-    for (key, value) in special_map {
-        keys_found = keys_found + 1
-        assert $ key.len() > 0
-        assert $ value.len() > 0
-        assert $ value.starts_with("value")
+    let keys = ["normal", "with spaces", "with-dashes", "with_underscores", "with.dots", "123numbers", "UPPERCASE", ""]
+    let m: Map<string, int> = map_new()
+    for (i, k) in enumerate(keys) {
+        insert(m, k, i + 1)
+    }
+    assert $ m.len() == 8
+    for (i, k) in enumerate(keys) {
+        assert $ get(m, k) == i + 1
     }
 
-    assert keys_found == 7
+    let seen = 0
+    let total = 0
+    for (k, v) in m {
+        assert $ keys[v - 1] == k
+        seen = seen + 1
+        total = total + v
+    }
+    assert seen == 8
+    assert total == 36
 }

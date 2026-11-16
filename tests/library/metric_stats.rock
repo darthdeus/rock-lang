@@ -7,11 +7,9 @@
 @test(output = "n=5 min=1 max=5 mean=3")
 fn test_metric_basic() {
     let m = metric_new("t", 16)
-    metric_add(m, 1.0)
-    metric_add(m, 2.0)
-    metric_add(m, 3.0)
-    metric_add(m, 4.0)
-    metric_add(m, 5.0)
+    for i in 1..6 {
+        metric_add(m, i as float)
+    }
     let mn = m.min as int
     let mx = m.max as int
     let me = m.mean as int
@@ -32,10 +30,9 @@ fn test_metric_single() {
 @test(output = "mean=4 std=0 p50=4 p99=4")
 fn test_metric_all_equal() {
     let m = metric_new("t", 8)
-    metric_add(m, 4.0)
-    metric_add(m, 4.0)
-    metric_add(m, 4.0)
-    metric_add(m, 4.0)
+    for _ in 0..4 {
+        metric_add(m, 4.0)
+    }
     let me = m.mean as int
     let sd = m.stddev as int
     let p50 = m.p50 as int
@@ -47,11 +44,9 @@ fn test_metric_all_equal() {
 @test(output = "n=3 min=3 max=5 mean=4")
 fn test_metric_eviction() {
     let m = metric_new("t", 3)
-    metric_add(m, 1.0)
-    metric_add(m, 2.0)
-    metric_add(m, 3.0)
-    metric_add(m, 4.0)
-    metric_add(m, 5.0)
+    for i in 1..6 {
+        metric_add(m, i as float)
+    }
     let mn = m.min as int
     let mx = m.max as int
     let me = m.mean as int
