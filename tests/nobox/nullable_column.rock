@@ -7,7 +7,7 @@
 // inferred from an expression's type -- a safe-nav result is an identical
 // `Nullable(T)` with no presence slot behind it.
 //
-// Column shape lives in `rock-lang/crates/skull/tests/vec_value_columns.rs`; this file is
+// Column shape lives in `crates/skull/tests/vec_value_columns.rs`; this file is
 // the behavioral net. Values are asserted on BOTH sides of a null, because a
 // per-column decomposition can emit column-shaped code and still desync the
 // columns -- a presence column that shifts by a different amount than its leaf

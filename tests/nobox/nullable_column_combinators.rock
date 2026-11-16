@@ -1,15 +1,11 @@
 // The combinator + terminal surface over a NULLABLE column `[Vec2?]`, the twin
-// of `nobox/column_combinators.rock`,
-// step 5: the element destination is split into {presence cell, leaf cells} at
-// the point the shape is known, so a presence-carrying element crosses the
+// of `nobox/column_combinators.rock` (which holds the unmarked-value control).
+// The element destination is split into {presence cell, leaf cells} at the
+// point the shape is known, so a presence-carrying element crosses the
 // placeholder splice without ever being repacked into a box.
 //
-// Every shape here funnels through ONE arm, measured (`40958a4fb`) -- so the
-// enumeration is the point. Unlocking the arm makes fourteen shapes reachable at
-// once against a suite that covered none of them, and the ops nobody thought of
-// are the ones that break. Values, not statuses: each test returns the answer.
-
-value BV2 { x: float, y: float }
+// Every shape here funnels through ONE arm, so the enumeration is the point.
+// Values, not statuses: each test returns the answer.
 
 fn px(v: Vec2?) -> float {
     if v != null { return v.x }
@@ -182,18 +178,9 @@ fn the_remaining_combinators_over_a_nullable_column() -> int {
     return n * 10 + (py(a.max_by(px)) + py(a.min_by(px))) as int
 }
 
-// The unmarked twin: the same pipeline over a boxed `value` keeps working.
-@test(returns = 3)
-fn unmarked_value_pipeline_still_works() -> int {
-    let a: [BV2] = [BV2 { x: 1.0, y: 1.0 }, BV2 { x: 2.0, y: 2.0 }]
-    let t = 0.0
-    for v in a { t = t + v.x }
-    return t as int
-}
-
 // The unmarked NULLABLE twin is not here because it is not a column at all:
 // `[BV2?]` at an unmarked value emits a boxed `_data` vec (only the
 // non-nullable `[BV2]` and the MARKED `[MV2?]` are column-stored). It used to
 // die packing `BV2_ct(nil, nil)` on the absent row, which was an SROA license
 // bug at a generic bound to `V?` rather than anything about columns -- fixed,
-// with its controls, in `rock-lang/crates/skull/tests/nullable_generic_binding_sroa.rs`.
+// with its controls, in `tests/nullable/generic_binding_sroa.rock`.

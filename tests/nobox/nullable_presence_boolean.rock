@@ -15,164 +15,88 @@ fn presence_tuple(present: bool) -> (PresenceId, int)? {
     return null
 }
 
+// Each position is checked for an absent state `a` and a present state `p`.
+
 @test
-fn absent_nobox_presence_field() {
-    let state = PresenceState {}
-    let row = PresenceRow { present: state.id != null }
-    assert_eq(row.present, false)
+fn nobox_presence_field() {
+    let a = PresenceState {}
+    let p = present_state()
+    let a_present = PresenceRow { present: a.id != null }
+    let a_absent = PresenceRow { present: a.id == null }
+    let p_present = PresenceRow { present: p.id != null }
+    let p_absent = PresenceRow { present: p.id == null }
+    assert_eq(a_present.present, false)
+    assert_eq(a_absent.present, true)
+    assert_eq(p_present.present, true)
+    assert_eq(p_absent.present, false)
 }
 
 @test
-fn absent_nobox_presence_local() {
-    let state = PresenceState {}
-    let result: bool = state.id != null
-    assert_eq(result, false)
+fn nobox_presence_local() {
+    let a = PresenceState {}
+    let p = present_state()
+    let a_present: bool = a.id != null
+    let a_absent: bool = a.id == null
+    let p_present: bool = p.id != null
+    let p_absent: bool = p.id == null
+    assert_eq(a_present, false)
+    assert_eq(a_absent, true)
+    assert_eq(p_present, true)
+    assert_eq(p_absent, false)
 }
 
 @test
-fn absent_nobox_presence_parameter() {
-    let state = PresenceState {}
-    check_presence(state.id != null, false)
+fn nobox_presence_parameter() {
+    let a = PresenceState {}
+    let p = present_state()
+    check_presence(a.id != null, false)
+    check_presence(a.id == null, true)
+    check_presence(p.id != null, true)
+    check_presence(p.id == null, false)
 }
 
 @test
-fn absent_nobox_presence_return() {
-    let state = PresenceState {}
-    assert_eq(presence_return(state), false)
+fn nobox_presence_return() {
+    let a = PresenceState {}
+    let p = present_state()
+    assert_eq(presence_return(a), false)
+    assert_eq(absence_return(a), true)
+    assert_eq(presence_return(p), true)
+    assert_eq(absence_return(p), false)
 }
 
 @test
-fn absent_nobox_presence_equality() {
-    let state = PresenceState {}
-    assert_eq((state.id != null) == false, true)
-    assert_eq((null != state.id) == false, true)
+fn nobox_presence_equality() {
+    let a = PresenceState {}
+    let p = present_state()
+    assert_eq((a.id != null) == false, true)
+    assert_eq((null != a.id) == false, true)
+    assert_eq((a.id == null) == true, true)
+    assert_eq((null == a.id) == true, true)
+    assert_eq((p.id != null) == true, true)
+    assert_eq((null != p.id) == true, true)
+    assert_eq((p.id == null) == false, true)
+    assert_eq((null == p.id) == false, true)
 }
 
 @test
-fn absent_nobox_absence_field() {
-    let state = PresenceState {}
-    let row = PresenceRow { present: state.id == null }
-    assert_eq(row.present, true)
+fn nobox_short_circuit_values() {
+    let a = PresenceState {}
+    let p = present_state()
+    assert_eq(true && a.id != null, false)
+    assert_eq(false || a.id != null, false)
+    assert_eq(true && p.id != null, true)
+    assert_eq(false || p.id != null, true)
 }
 
 @test
-fn absent_nobox_absence_local() {
-    let state = PresenceState {}
-    let result: bool = state.id == null
-    assert_eq(result, true)
-}
-
-@test
-fn absent_nobox_absence_parameter() {
-    let state = PresenceState {}
-    check_presence(state.id == null, true)
-}
-
-@test
-fn absent_nobox_absence_return() {
-    let state = PresenceState {}
-    assert_eq(absence_return(state), true)
-}
-
-@test
-fn absent_nobox_absence_equality() {
-    let state = PresenceState {}
-    assert_eq((state.id == null) == true, true)
-    assert_eq((null == state.id) == true, true)
-}
-
-@test
-fn absent_nobox_short_circuit_values() {
-    let state = PresenceState {}
-    assert_eq(true && state.id != null, false)
-    assert_eq(false || state.id != null, false)
-}
-
-@test
-fn absent_tuple_presence_values() {
-    let tuple = presence_tuple(false)
-    check_presence(tuple != null, false)
-    check_presence(tuple == null, true)
-}
-
-@test
-fn present_nobox_presence_field() {
-    let state = present_state()
-    let row = PresenceRow { present: state.id != null }
-    assert_eq(row.present, true)
-}
-
-@test
-fn present_nobox_presence_local() {
-    let state = present_state()
-    let result: bool = state.id != null
-    assert_eq(result, true)
-}
-
-@test
-fn present_nobox_presence_parameter() {
-    let state = present_state()
-    check_presence(state.id != null, true)
-}
-
-@test
-fn present_nobox_presence_return() {
-    let state = present_state()
-    assert_eq(presence_return(state), true)
-}
-
-@test
-fn present_nobox_presence_equality() {
-    let state = present_state()
-    assert_eq((state.id != null) == true, true)
-    assert_eq((null != state.id) == true, true)
-}
-
-@test
-fn present_nobox_absence_field() {
-    let state = present_state()
-    let row = PresenceRow { present: state.id == null }
-    assert_eq(row.present, false)
-}
-
-@test
-fn present_nobox_absence_local() {
-    let state = present_state()
-    let result: bool = state.id == null
-    assert_eq(result, false)
-}
-
-@test
-fn present_nobox_absence_parameter() {
-    let state = present_state()
-    check_presence(state.id == null, false)
-}
-
-@test
-fn present_nobox_absence_return() {
-    let state = present_state()
-    assert_eq(absence_return(state), false)
-}
-
-@test
-fn present_nobox_absence_equality() {
-    let state = present_state()
-    assert_eq((state.id == null) == false, true)
-    assert_eq((null == state.id) == false, true)
-}
-
-@test
-fn present_nobox_short_circuit_values() {
-    let state = present_state()
-    assert_eq(true && state.id != null, true)
-    assert_eq(false || state.id != null, true)
-}
-
-@test
-fn present_tuple_presence_values() {
-    let tuple = presence_tuple(true)
-    check_presence(tuple != null, true)
-    check_presence(tuple == null, false)
+fn tuple_presence_values() {
+    let absent = presence_tuple(false)
+    check_presence(absent != null, false)
+    check_presence(absent == null, true)
+    let present = presence_tuple(true)
+    check_presence(present != null, true)
+    check_presence(present == null, false)
 }
 
 @test

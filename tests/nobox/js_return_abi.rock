@@ -321,10 +321,10 @@ fn maybe_wire(a: int) -> NV? {
 // every bank mutation because it reaches none of the ABI).
 //
 // The shape that matters is inside a `co fn`. `classify`
-// (rock-lang/crates/skull-transform/src/inline.rs) hard-excludes a coroutine body, so an operator
+// (crates/skull-transform/src/inline.rs) hard-excludes a coroutine body, so an operator
 // called there stays a real multi-value call -- and that is the ENGINE's real
-// shape, not a contrivance: mag emits 13 such `__op_add_Vec2_Vec2`
-// call sites, every one inside a `__step` lambda, each capturing the bank:
+// shape, not a contrivance: a game's `__op_add_Vec2_Vec2` call sites sit
+// inside `__step` lambdas, each capturing the bank:
 //   c23 = __op_add_Vec2_Vec2(v52, v53, v62, v63); c24 = __rock_ret1;
 //
 // Self-recursive and lambda-bearing are the other two documented exclusions and
@@ -381,7 +381,7 @@ operator *(a: RV, b: RV) -> RV {
 }
 
 // The ENGINE's actual shape: an ordinary (inlinable) operator called from inside
-// a `co fn`, which the inliner will not enter. This is what mag's 13 Vec2
+// a `co fn`, which the inliner will not enter. This is what a game's Vec2
 // operator call sites are; the two cases above reach the same ABI only through
 // exclusions a game does not normally hit.
 nobox value IV { x: int, y: int }

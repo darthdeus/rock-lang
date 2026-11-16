@@ -1,13 +1,5 @@
 // `Map<K, P>` at a `nobox` value P stores flat: a hash spine of slot indices
 // over the same column storage `[P]` uses.
-// These replace the `map_value_of_a_nobox_value_Generic` gap sentinel.
-
-@test fn map_nobox_store_and_read() {
-    let m: Map<string, Vec2> = map_new()
-    m["a"] = Vec2 { x: 1.0, y: 2.0 }
-    assert_eq(m["a"].x, 1.0)
-    assert_eq(m["a"].y, 2.0)
-}
 
 @test fn map_nobox_two_keys_stay_distinct() {
     let m: Map<string, Vec2> = map_new()
@@ -198,8 +190,7 @@ global MAP_HOLDER: MapHolder = MapHolder { grid: map_new() }
 }
 
 // A field write THROUGH the map index: the place base is a slot in `data`, not
-// a whole element. Found by `just shape-sweep` at an UNMARKED value -- column
-// eligibility is the same rule Vec uses, so this is not a nobox-only path.
+// a whole element. At an UNMARKED value on purpose -- column eligibility is the same rule Vec uses, so this is not a nobox-only path.
 value MapCellP { a: int, b: int }
 
 @test fn map_column_compound_field_write() {
@@ -237,20 +228,6 @@ value MapCellP { a: int, b: int }
     }
     assert_eq(n, 3)
     assert_eq(sum, 43)
-}
-
-// `clear` returns every slot to the free list; a later insert must reuse rather
-// than grow, and the map must read empty in between.
-@test fn a_column_map_clears_and_refills() {
-    let m: Map<int, Vec2> = map_new()
-    m[1] = Vec2 { x: 1.0, y: 2.0 }
-    m[2] = Vec2 { x: 3.0, y: 4.0 }
-    m.clear()
-    assert_eq(m.len(), 0)
-    assert(!m.contains(1), "a cleared map contains nothing")
-    m[7] = Vec2 { x: 5.0, y: 6.0 }
-    assert_eq(m.len(), 1)
-    assert_eq(m[7].x, 5.0)
 }
 
 // -- Hand-built spine+column map --

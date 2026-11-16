@@ -2,9 +2,6 @@
 // ABI is read off the fn TYPE at both ends -- a call through a fn value cannot
 // see its callee, so definition and call site agree only by reading the same
 // signature.
-//
-// Was `tests/errors/nobox_indirect_call_arg.rock.err`, a sentinel pinning the
-// gap; it named this file's shape as what to write when the gap closed.
 
 nobox value NV { x: float, y: float }
 
@@ -52,28 +49,7 @@ fn remap(f: (NV) -> NV, v: NV) -> NV { return f(v) }
     assert_eq(lam.y, 1.0)
 }
 
-// A lambda in RETURN position records the type of the HOLE it fills, not its
-// own narrower inferred type -- otherwise the hoisted body and the indirect
-// call site derive different fn-value ABIs from it (the body omits the presence
-// slot the site binds). All three return positions check: the fn-body TAIL, a
-// `Statement::Return` and an `Expr::Return`. The full control set:
-// `tests/nobox/fn_value_nullable_return.rock`.
-nobox value RL { x: int, y: int }
-
-fn rl_tail() -> (bool) -> RL? { present => if present { RL { x: 5, y: 6 } } else { null } }
-fn rl_return() -> (bool) -> RL? { return present => if present { RL { x: 5, y: 6 } } else { null } }
-
-@test
-fn a_returned_lambda_agrees_with_its_call_site_on_the_presence_slot() {
-    let f = rl_tail()
-    assert_eq(f(true)?.x ?? -1, 5)
-    assert_eq(f(true)?.y ?? -1, 6)
-    assert_eq(f(false)?.x ?? -1, -1)
-
-    let g = rl_return()
-    assert_eq(g(true)?.x ?? -1, 5)
-    assert_eq(g(false)?.x ?? -1, -1)
-}
+// Returned lambdas at a nullable nobox return: `fn_value_nullable_return.rock`.
 
 // A lambda literal returning a plain value, passed where the fn type returns a
 // nullable nobox value, takes the nullable return ABI.

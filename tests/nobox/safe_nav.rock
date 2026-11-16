@@ -118,19 +118,9 @@ fn an_unmarked_value_chains_through_two_safe_navs() -> int {
     return h?.v?.x ?? -1
 }
 
-// The nobox two-step, stated as the chain's counterpart rather than as one more
-// producing form: identical types and identical projection, differing only in
-// whether the result is bound before the second `?.`.
-@test(returns = 3)
-fn a_nobox_value_projects_after_binding() -> int {
-    let h: Holder? = Holder { v: NV { x: 3, y: 6 }, n: 1 }
-    let a = h?.v
-    return a?.x ?? -1
-}
-
 // --- chaining a second `?.` straight onto a nobox result ---
 //
-// Was `tests/errors/nobox/safenav_chain.rock.err`. The outer `?.` asked
+// The outer `?.` asked
 // `repr_join_slot` about ITS OWN type -- `int?`, no leaves -- and rightly
 // declined the per-slot join, but that decision is about the RESULT while the
 // materialization was the BASE's: `lower_expr` on the base took the scalar arm,

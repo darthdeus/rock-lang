@@ -2,7 +2,7 @@
 // materializes. luajit flattens the ctor to a generated leaf-taking form
 // (`E5_lct`); JS rebuilds the nested object from the same dotted leaf list.
 // Cross-backend on purpose -- the two representations must agree.
-// Emitted-shape assertions: rock-lang/crates/skull/tests/nobox_nested_ctor.rs
+// Emitted-shape assertions: crates/skull/tests/nobox_nested_ctor.rs
 
 nobox value NV2 { x: float, y: float }
 value E5 { pos: NV2, a: float, b: float, c: float }
@@ -40,8 +40,8 @@ fn an_opaque_nested_operand_is_decomposed() {
 // A ctor result crossing a function boundary. NOTE: this does NOT reproduce the
 // terminator-remap bug -- it passes with that remap disabled. That bug (a `Term`
 // left pointing at the replaced ctor, which regalloc reads as an unassigned
-// value index and panics on) reproduces only at game scale, A/B'd on mag with
-// `Vec2` marked. Reducing it to a unit test is an open coverage gap.
+// value index and panics on) reproduces only at game scale with `Vec2`
+// marked. Reducing it to a unit test is an open coverage gap.
 fn make_e5(k: float) -> E5 {
     return E5 { pos: NV2 { x: k, y: k + 1.0 }, a: 3.0, b: 4.0, c: 5.0 }
 }

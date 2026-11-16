@@ -1,16 +1,7 @@
-// RED: a `nobox value` field typed `T?` with a `= null` declaration default
-// crashes at runtime when the struct literal omits the field. The default
-// injection peels the `?` and scalarizes `null` unconditionally, emitting
-//
-//     r0 = nil
-//     r1 = r0.r     -- attempt to index local 'r0' (a nil value)
-//
-// Discriminant: an explicit `tint: null` at the literal is correct, and a
-// plain (non-`nobox`) `value` field with the same `= null` default is
-// correct. Only the nobox declaration-default path is broken.
-//
-// Live repro: mag's `channel_outline` omits `Outline.occluded_color`
-// (`occluded_color: Color? = null`, stone/engine/rendering/outline.rock).
+// A `nobox value` field typed `T?` with a `= null` declaration default, omitted
+// from the struct literal. The default injection used to peel the `?` and
+// scalarize `null` unconditionally, indexing nil at run time. An explicit
+// `tint: null` and a plain `value` field with the same default are controls.
 
 nobox value NbColor { r: float, g: float }
 value BoxColor { r: float, g: float }
@@ -75,8 +66,7 @@ fn nobox_stored_null() {
     print("{h.id} {describe(h.tint)}")
 }
 
-// Control: the nearest working shape -- same default, `value` instead of
-// `nobox value`. Passing today; it must stay passing after the fix.
+// Control: the same default on a `value` instead of a `nobox value`.
 @test(output = "6 null")
 fn plain_value_null_default_omitted() {
     let h = BoxHolder { id: 6 }

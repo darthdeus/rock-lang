@@ -1,24 +1,26 @@
 // A lambda returned as a fn value whose return type is a nullable nobox value
 // must emit its presence slot, so `f(true)?.x` reads `x` and not the next
-// leaf. Every return position (tail, `return`, via a declared local) records
-// the declared fn type; the named-fn, param and typed-local forms are controls.
+// leaf. A lambda in return position records the type of the hole it fills, not
+// its own narrower inferred type, at every return position (tail, `return`,
+// via a declared local); the named-fn, param and typed-local forms are
+// controls.
 
 nobox value P { x: int, y: int }
 
 fn mk_tail() -> (bool) -> P? { present => if present { P { x: 5, y: 6 } } else { null } }
 
-@test(output = "5 -1")
+@test(output = "5 6 -1")
 fn a_returned_lambda_at_a_nullable_nobox_return_reads_the_right_field() {
     let f = mk_tail()
-    print("{f(true)?.x ?? -1} {f(false)?.x ?? -1}")
+    print("{f(true)?.x ?? -1} {f(true)?.y ?? -1} {f(false)?.x ?? -1}")
 }
 
 fn mk_explicit() -> (bool) -> P? { return present => if present { P { x: 5, y: 6 } } else { null } }
 
-@test(output = "5")
+@test(output = "5 -1")
 fn an_explicitly_returned_lambda_reads_the_right_field() {
     let f = mk_explicit()
-    print("{f(true)?.x ?? -1}")
+    print("{f(true)?.x ?? -1} {f(false)?.x ?? -1}")
 }
 
 fn mk_via_local() -> (bool) -> P? {

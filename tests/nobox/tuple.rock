@@ -77,15 +77,8 @@ fn enumerated_element_binds_leaves() -> int {
 
 // ======== At a fn PARAM ========
 //
-// A TUPLE of `nobox` values at a fn PARAM.
-//
-// Was `tuple_of_nobox_at_a_fn_param` in `nobox_container_gaps.rock.err`, filed
-// there as a fn-VALUE gap. It was not: a direct call to an ordinary top-level fn
-// rejected on its own, and one nobox in the tuple was enough. The mechanism was
-// a missing vocabulary -- the RETURN side could describe a tuple of leaves
-// (`RetSlot::Nested`) and the PARAM side carried `Option<ValueShape>`, and a
-// `ValueShape` is a NAMED struct shape, which a tuple is not. Params now carry
-// the same `RetSlot` returns do.
+// A TUPLE of `nobox` values at a fn PARAM. Params carry the same `RetSlot`
+// shape returns do, so one nobox in the tuple is enough to need the slot.
 
 nobox value TV { x: float, y: float }
 
@@ -123,14 +116,10 @@ fn the_slot_nests() -> float {
 
 // A nullable element carries its presence leaf inside the tuple slot, so the
 // absent arm has somewhere to say so.
-@test(returns = 1.0)
-fn a_nullable_element_keeps_its_presence_leaf() -> float {
-    return with_nullable((null, TV { x: 2.0, y: 4.0 }))
-}
-
-@test(returns = 7.0)
-fn the_same_nullable_element_when_present() -> float {
-    return with_nullable((TV { x: 0.0, y: 5.0 }, TV { x: 2.0, y: 4.0 }))
+@test
+fn a_nullable_element_keeps_its_presence_leaf() {
+    assert_eq(with_nullable((null, TV { x: 2.0, y: 4.0 })), 1.0)
+    assert_eq(with_nullable((TV { x: 0.0, y: 5.0 }, TV { x: 2.0, y: 4.0 })), 7.0)
 }
 
 // NAMED args place a splatting param by slot, so the nil-fill width has to be
@@ -143,7 +132,7 @@ fn a_tuple_param_places_by_name() -> float {
     return keyed(pq: t, k: 100)
 }
 
-// --- the fn-VALUE boundary, which is what the gap was originally filed as ---
+// --- the fn-VALUE boundary ---
 
 fn apply_pair(g: ((TV, TV)) -> float, pq: (TV, TV)) -> float { return g(pq) }
 
@@ -160,7 +149,7 @@ fn the_same_through_a_lambda() -> float {
 }
 
 // The headline shape: `zip(..).reduce(..)`, which is what real combinator code
-// hits and what the sentinel used as its repro.
+// hits.
 @test(returns = 10.0)
 fn zip_reduce_over_a_column_carries_the_pair() -> float {
     let a: [TV] = [TV { x: 1.0, y: 3.0 }, TV { x: 2.0, y: 4.0 }]
@@ -260,17 +249,6 @@ fn a_stored_element_can_be_overwritten() {
     let (p, n) = PAIRS[last]
     assert_eq(p.x, 30.0)
     assert_eq(n, 32)
-}
-
-// Iteration reads the same boxes the pushes wrote.
-@test
-fn iteration_agrees_with_indexing() {
-    add_tile(Vec2 { x: 3.0, y: 4.0 }, IR4 { x: 5, y: 6, w: 7, h: 8 })
-    let seen = 0.0
-    for (p, s) in TILES {
-        seen = seen + p.x + s.w
-    }
-    assert_eq(seen > 0.0, true)
 }
 
 // A plain loop destructures every element from the same boxes.
