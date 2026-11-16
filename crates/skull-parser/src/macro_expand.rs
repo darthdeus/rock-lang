@@ -3,16 +3,15 @@
 //! Runs as the FIRST cook stage, before desugar (bone's order), so the
 //! desugars see fully-expanded code.
 //!
-//! Scope: expression-position macros (`macro f(a: expr, ...) { <rock body> }`),
+//! Expression-position macros (`macro f(a: expr, ...) { <rock body> }`),
 //! selected by arity (defaults widen the range), params substituted by deep
 //! copy, the call replaced by a `Block` of the substituted body. Macro bodies
 //! live in their defining module's arena, so inlining a body into a caller is a
 //! cross-arena graft (`graft.rs`). Macro defs are dropped after expansion.
 //!
-//! Not implemented: variadic `...rest` splat, body-local hygiene rename, span retag for
-//! `__SITE__` (the literal rides along as an `Ident`; retag only affects the
-//! later site-resolution pass, not the cooked s-expr), `ty`/`ident` fragment
-//! substitution, and top-level item-macro splicing.
+//! Expansion grafts the body, freshens its binders (hygiene), retags its spans
+//! to the call site, splats `...rest` args and substitutes params. Item macros
+//! splice their substituted items at top level.
 
 use crate::ast::*;
 use crate::desugar::{BlockEdges, ExprEdges, child_blocks, child_exprs};
