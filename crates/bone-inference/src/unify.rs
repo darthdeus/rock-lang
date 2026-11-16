@@ -456,6 +456,17 @@ pub(crate) fn nullable_of(gamma: &mut Gamma, inner: TyId, span: Span) -> TyId {
     TyId::Local(idx)
 }
 
+/// `ty` under one `ref`, unchanged when it is not a reference.
+pub(crate) fn peel_ref(gamma: &Gamma, ty: TyId) -> TyId {
+    match *gamma.get(ty) {
+        TypeExpr::App {
+            ctor: TypeCtor::Ref,
+            mut params,
+        } => params.next().map_or(ty, |inner| ty.with_idx(inner)),
+        _ => ty,
+    }
+}
+
 // If `ty` resolves to Nullable, return the resolved inner
 pub(crate) fn peel_nullable(gamma: &mut Gamma, ty: TyId, span: Span) -> TyId {
     let ty = resolve(gamma, ty, span);
@@ -901,28 +912,9 @@ pub fn coerce_to_interface(
         CompilerError::new_with_label(span, format!("unknown interface `{iname}`"))
     })?;
 
-    let ifields: Vec<(Ustr, TyId, NsVisibility)> = gamma.workspace.module(isid.module).structs
-        [isid.def]
-        .fields
-        .iter()
-        .map(|f| (f.name, f.ty, f.write_vis.clone()))
-        .collect();
+    let ifields = &gamma.workspace.module(isid.module).structs[isid.def].fields;
 
-    let from_peeled = match *gamma.get(from) {
-        TypeExpr::App {
-            ctor: TypeCtor::Ref,
-            params,
-        } => {
-            let mut params = params;
-            if let Some(inner) = params.next() {
-                from.with_idx(inner)
-            } else {
-                from
-            }
-        }
-        _ => from,
-    };
-    let from_key = match *gamma.get(from_peeled) {
+    let from_key = match *gamma.get(peel_ref(gamma, from)) {
         TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
             ..
@@ -930,7 +922,8 @@ pub fn coerce_to_interface(
         _ => None,
     };
 
-    for (fname, fty, fwrite_vis) in ifields {
+    for field in ifields {
+        let fname = field.name;
         let actual = struct_field_ty(gamma, from, fname, span).map_err(|e| match e {
             StructFieldError::MissingField { .. }
             | StructFieldError::AccessDenied {
@@ -950,7 +943,7 @@ pub fn coerce_to_interface(
 
         // Structural interface conformance capability check:
         // An external conversion cannot use a public getter to satisfy a publicly writable interface field.
-        if fwrite_vis == NsVisibility::Pub {
+        if field.write_vis == NsVisibility::Pub {
             if let Some(skey) = from_key {
                 if gamma.workspace.interface_names.contains(&skey) {
                     let from_sid = resolve_struct(gamma, skey).ok_or_else(|| {
@@ -975,7 +968,7 @@ pub fn coerce_to_interface(
             }
         }
 
-        coerce(gamma, actual, fty, span)?;
+        coerce(gamma, actual, field.ty, span)?;
     }
 
     Ok(())

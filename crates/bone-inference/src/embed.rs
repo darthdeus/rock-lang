@@ -92,15 +92,10 @@ fn scalar_abi_callee(c: BodyCtx, gamma: &Gamma, call: Idx<Expr>, callee: Callee)
 }
 
 /// The struct field `<base>.<field>` resolves to, when it is an `embed` one.
-fn embed_field_of(gamma: &mut Gamma, base_ty: TyId, field: Ustr, span: Span) -> bool {
-    let base_r = resolve(gamma, base_ty, span);
-    let mut ty = base_r;
+pub(crate) fn embed_field_of(gamma: &mut Gamma, base_ty: TyId, field: Ustr, span: Span) -> bool {
     // A nullable owner still owns the field; the access itself is checked
     // elsewhere.
-    if let TypeExpr::Nullable(inner) = *gamma.get(ty) {
-        ty = ty.with_idx(inner);
-        ty = resolve(gamma, ty, span);
-    }
+    let ty = peel_nullable(gamma, base_ty, span);
     let TypeExpr::App {
         ctor: TypeCtor::Nominal(name),
         ..

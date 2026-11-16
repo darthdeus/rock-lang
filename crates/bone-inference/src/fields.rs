@@ -634,20 +634,7 @@ pub(crate) fn check_field_write_access(
 ) -> Result<(), CompilerError> {
     let base_ty = infer_expr(c, gamma, base)?;
     let base_ty = resolve(gamma, base_ty, span);
-    let base_ty = match *gamma.get(base_ty) {
-        TypeExpr::App {
-            ctor: TypeCtor::Ref,
-            params,
-        } => {
-            let mut params = params;
-            if let Some(inner) = params.next() {
-                base_ty.with_idx(inner)
-            } else {
-                base_ty
-            }
-        }
-        _ => base_ty,
-    };
+    let base_ty = peel_ref(gamma, base_ty);
     if let TypeExpr::App {
         ctor: TypeCtor::Nominal(struct_key),
         ..
@@ -667,24 +654,8 @@ pub(crate) fn check_field_write_access(
     } = c.body.expr_arena[base]
     {
         let is_value = ty_is_value_struct(gamma, base_ty).is_some();
-        let mut is_embed = false;
         let parent_ty = infer_expr(c, gamma, parent)?;
-        let mut p_ty = resolve(gamma, parent_ty, span);
-        if let TypeExpr::Nullable(inner) = *gamma.get(p_ty) {
-            p_ty = resolve(gamma, p_ty.with_idx(inner), span);
-        }
-        if let TypeExpr::App {
-            ctor: TypeCtor::Nominal(p_name),
-            ..
-        } = *gamma.get(p_ty)
-        {
-            if let Some(sid) = resolve_struct(gamma, p_name) {
-                is_embed = gamma.workspace.module(sid.module).structs[sid.def]
-                    .fields
-                    .iter()
-                    .any(|f| f.name == parent_field && f.is_embed);
-            }
-        }
+        let is_embed = crate::embed::embed_field_of(gamma, parent_ty, parent_field, span);
         if is_value || is_embed {
             check_field_write_access(c, gamma, parent, parent_field, span)?;
         }
