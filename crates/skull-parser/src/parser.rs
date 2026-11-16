@@ -82,17 +82,6 @@ struct HoleFrame {
     column: usize,
 }
 
-struct Hole {
-    expr: HoleFrame,
-    spec: Option<HoleFrame>,
-}
-
-/// A literal segment, or the index of the hole that goes in this slot.
-enum Pending {
-    Literal(Ustr),
-    Hole(usize),
-}
-
 /// A cursor walking a frame's text, carrying the (line, column) of `at`.
 #[derive(Clone, Copy)]
 struct Pos {
@@ -3850,10 +3839,7 @@ impl<'a> Parser<'a> {
                 "string literal span does not point into the parsed source".to_string(),
             ));
         };
-        // Read everything the sub-parses need off the frame first, so the
-        // borrow ends before they run. The scan is over RAW source, so hole
-        // offsets are exact rather than reconstructed from cooked content.
-        let (pending, holes) = {
+        let (scan, mut pos) = {
             let frame = &self.frames[fi];
             let local = frame.to_local(lit_start).expect("checked above");
             if interp::Flavor::at(frame.text(), local).is_none() {
@@ -3863,74 +3849,51 @@ impl<'a> Parser<'a> {
                 ));
             }
             let scan = interp::scan_string(frame.text(), local);
-            // `pos` walks the frame text alongside the pieces, converting byte
-            // offsets to (line, column) without rescanning from the top.
-            let mut pos = Pos {
+            let pos = Pos {
                 at: local,
                 line: frame.origin().map_or(span.line_range().0, |o| o.0),
                 column: frame.origin().map_or(span.col_range().0, |o| o.1),
             };
-            let mut pending = Vec::new();
-            let mut holes = Vec::new();
-            for piece in &scan.pieces {
-                match piece {
-                    interp::Piece::Literal { text, .. } => {
-                        pending.push(Pending::Literal(Ustr::from(&collapse_brace_escapes(text))));
-                    }
-                    interp::Piece::Hole {
-                        range, expr, spec, ..
-                    } => {
-                        pos.advance(frame.text(), range.0);
-                        let cook = |at: (usize, usize), from: Pos| {
-                            let mut p = from;
-                            p.advance(frame.text(), at.0);
-                            // `hole_source` maps into this frame's text, which
-                            // is a slice of the file or an enclosing hole.
-                            let (text, local) = scan.hole_source(frame.text(), at);
-                            let map = local.into_iter().map(|o| frame.to_file(o)).collect();
-                            HoleFrame {
-                                text,
-                                map,
-                                line: p.line,
-                                column: p.column,
-                            }
-                        };
-                        pending.push(Pending::Hole(holes.len()));
-                        holes.push(Hole {
-                            expr: cook(*expr, pos),
-                            spec: spec.map(|sp| cook(sp, pos)),
-                        });
-                    }
-                }
-                pos.advance(frame.text(), piece.range().1);
-            }
-            (pending, holes)
+            (scan, pos)
         };
 
-        let mut parsed = Vec::with_capacity(holes.len());
-        for hole in &holes {
-            let e = self.in_hole_frame(&hole.expr, |p, f| {
-                p.parse_interp_subexpr(&f.text, file, &f.map, f.line, f.column)
-            })?;
-            // A hole that fails to parse is a spanned error, not literal text:
-            // silent fallback ("emit the braces verbatim") shipped wrong output
-            // for any `:`-bearing hole. Reject, don't fall back.
-            let spec = match &hole.spec {
-                None => None,
-                Some(sf) => Some(self.in_hole_frame(sf, |p, f| {
-                    p.parse_format_spec(&f.text, file, f.map[0], f.line, f.column)
-                })?),
-            };
-            parsed.push(InterpolatedPart::Expr(e, spec));
+        let mut parts = Vec::with_capacity(scan.pieces.len());
+        for piece in &scan.pieces {
+            let frame = &self.frames[fi];
+            pos.advance(frame.text(), piece.range().0);
+            match piece {
+                interp::Piece::Literal { text, .. } => {
+                    parts.push(InterpolatedPart::Literal(Ustr::from(
+                        &collapse_brace_escapes(text),
+                    )));
+                }
+                interp::Piece::Hole { expr, spec, .. } => {
+                    let cook = |at: (usize, usize)| {
+                        let mut p = pos;
+                        p.advance(frame.text(), at.0);
+                        let (text, local) = scan.hole_source(frame.text(), at);
+                        HoleFrame {
+                            text,
+                            map: local.into_iter().map(|o| frame.to_file(o)).collect(),
+                            line: p.line,
+                            column: p.column,
+                        }
+                    };
+                    let expr = cook(*expr);
+                    let spec = spec.map(cook);
+                    let e = self.in_hole_frame(&expr, |p, f| {
+                        p.parse_interp_subexpr(&f.text, file, &f.map, f.line, f.column)
+                    })?;
+                    let spec = match spec {
+                        None => None,
+                        Some(sf) => Some(self.in_hole_frame(&sf, |p, f| {
+                            p.parse_format_spec(&f.text, file, f.map[0], f.line, f.column)
+                        })?),
+                    };
+                    parts.push(InterpolatedPart::Expr(e, spec));
+                }
+            }
         }
-
-        let parts: Vec<InterpolatedPart> = pending
-            .into_iter()
-            .map(|p| match p {
-                Pending::Literal(l) => InterpolatedPart::Literal(l),
-                Pending::Hole(i) => parsed[i].clone(),
-            })
-            .collect();
 
         let kind = if parts.is_empty() {
             ExprKind::String(Ustr::from(""))
