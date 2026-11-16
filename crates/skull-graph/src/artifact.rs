@@ -44,7 +44,7 @@ use crate::concrete_body::BoundaryId;
 use crate::instance_graph::{
     self, BoundaryClass, Concreteness, DeclKey, Instance, InstanceGraph, Site, SiteOutcome,
 };
-use crate::target_projection::{CpuTargetSpec, TargetSpec, supports};
+use crate::target_projection::{supports, CpuTargetSpec, TargetSpec};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 thread_local! {
@@ -138,7 +138,7 @@ impl<'a> ArtifactMappings<'a> {
 /// that renames deliberately is what keeps the two apart.
 pub trait SymbolPlanner: Sync {
     fn symbol(&self, ws: &Workspace, g: &InstanceGraph, i: &Instance, realized: Realized)
-    -> String;
+        -> String;
     fn describe(&self) -> &'static str;
 }
 
@@ -640,16 +640,11 @@ struct ArtifactIndex {
     realizable: FxHashMap<Instance, Result<Realized, Unrealizable>>,
     /// The graph revision the view's decisions were taken over.
     graph_revision: u64,
-    /// Whether the update-only rows below are present: `outgoing`,
-    /// `incoming`, `site_counts`, `fn_values_by_caller`, `fn_value_users`,
-    /// `symbol_users`, `realization_by_decl` and `instances_by_decl`. A
-    /// realization has no reader for them; the first update derives them from
-    /// the graph revision the view was realized from and keeps them current.
+    /// Derived before the first edit, while the graph still matches this view.
     update_rows: bool,
     outgoing: FxHashMap<Instance, FxHashMap<Site, Instance>>,
     incoming: FxHashMap<Instance, FxHashSet<Instance>>,
     site_counts: FxHashMap<Instance, usize>,
-    fn_values_by_caller: FxHashMap<Instance, FxHashSet<Instance>>,
     fn_value_users: FxHashMap<Instance, FxHashSet<Instance>>,
     /// Realizable instances an always-emitted body takes as a value. They have
     /// no caller instance, so `fn_value_users` cannot hold them.
@@ -659,11 +654,9 @@ struct ArtifactIndex {
     symbol_users: FxHashMap<String, FxHashSet<Instance>>,
     realization_by_decl: FxHashMap<FuncRef, FxHashSet<Instance>>,
     instances_by_decl: FxHashMap<FuncRef, FxHashSet<Instance>>,
-    inline_by_owner: BTreeMap<DeclKey, (Vec<InlineDep>, Vec<UnresolvedInlineDep>)>,
     inline_consumers: BTreeMap<DeclKey, BTreeSet<DeclKey>>,
     inline_dependencies_by_owner: BTreeMap<DeclKey, BTreeSet<DeclKey>>,
     publication_candidates: BTreeMap<Instance, String>,
-    publication_decls: BTreeMap<DeclKey, BTreeSet<Instance>>,
     publication_users: BTreeMap<String, BTreeSet<Instance>>,
     root_decls: BTreeSet<DeclKey>,
 }
@@ -695,6 +688,21 @@ impl<'g> ArtifactSiteRows<'g> {
 }
 
 impl ArtifactIndex {
+    fn remove_fn_value_user(
+        users: &mut FxHashMap<Instance, FxHashSet<Instance>>,
+        owner: &Instance,
+        callee: &Instance,
+    ) -> bool {
+        let empty = users.get_mut(callee).is_some_and(|users| {
+            users.remove(owner);
+            users.is_empty()
+        });
+        if empty {
+            users.remove(callee);
+        }
+        empty
+    }
+
     // The owner's old rows must be retracted before installing its replacement.
     fn install_site_rows(&mut self, owner: &Instance, rows: ArtifactSiteRows<'_>) {
         self.site_counts.insert(owner.clone(), rows.site_count);
@@ -707,10 +715,6 @@ impl ArtifactIndex {
                 .or_default()
                 .insert(owner.clone());
             if fn_value {
-                self.fn_values_by_caller
-                    .entry(owner.clone())
-                    .or_default()
-                    .insert(callee.clone());
                 self.fn_value_users
                     .entry(callee.clone())
                     .or_default()
@@ -1000,23 +1004,21 @@ impl ArtifactView {
             local_index_rows_examined += 1;
             if let Some(edges) = self.index.outgoing.remove(i) {
                 local_index_rows_examined += edges.len();
-                for callee in edges.values() {
+                for (site, callee) in &edges {
                     if let Some(preds) = self.index.incoming.get_mut(callee) {
                         preds.remove(i);
                         if preds.is_empty() {
                             self.index.incoming.remove(callee);
                         }
                     }
-                }
-            }
-            if let Some(values) = self.index.fn_values_by_caller.remove(i) {
-                local_index_rows_examined += values.len();
-                for callee in values {
-                    if let Some(users) = self.index.fn_value_users.get_mut(&callee) {
-                        users.remove(i);
-                        if users.is_empty() {
-                            self.index.fn_value_users.remove(&callee);
-                            self.fn_value_targets.remove(&callee);
+                    if site.op == skull_mir::site::SiteOp::FnValue {
+                        local_index_rows_examined += 1;
+                        if ArtifactIndex::remove_fn_value_user(
+                            &mut self.index.fn_value_users,
+                            i,
+                            callee,
+                        ) {
+                            self.fn_value_targets.remove(callee);
                         }
                     }
                 }
@@ -1303,14 +1305,16 @@ impl ArtifactView {
         if !self.index.fn_value_users.contains_key(i) {
             self.fn_value_targets.remove(i);
         }
-        if let Some(values) = self.index.fn_values_by_caller.get(i).cloned() {
-            for callee in values {
-                if let Some(users) = self.index.fn_value_users.get_mut(&callee) {
-                    users.remove(i);
-                    if users.is_empty() {
-                        self.index.fn_value_users.remove(&callee);
-                        self.fn_value_targets.remove(&callee);
-                    }
+        if let Some(edges) = self.index.outgoing.get(i) {
+            for (site, callee) in edges {
+                if site.op == skull_mir::site::SiteOp::FnValue
+                    && ArtifactIndex::remove_fn_value_user(
+                        &mut self.index.fn_value_users,
+                        i,
+                        callee,
+                    )
+                {
+                    self.fn_value_targets.remove(callee);
                 }
             }
         }
@@ -1358,9 +1362,11 @@ impl ArtifactView {
                 },
             );
         }
-        if let Some(values) = self.index.fn_values_by_caller.get(i) {
-            for callee in values {
-                self.fn_value_targets.insert(callee.clone());
+        if let Some(edges) = self.index.outgoing.get(i) {
+            for (site, callee) in edges {
+                if site.op == skull_mir::site::SiteOp::FnValue {
+                    self.fn_value_targets.insert(callee.clone());
+                }
             }
         }
         if self.index.always_fn_values.contains(i) {
@@ -1429,13 +1435,11 @@ impl ArtifactView {
                 }
             }
             let Some(entries) = g.inline_body_deps.get(owner) else {
-                self.index.inline_by_owner.remove(owner);
                 continue;
             };
             if !self.index.realization_by_decl.contains_key(&owner.0)
                 && !self.index.instances_by_decl.contains_key(&owner.0)
             {
-                self.index.inline_by_owner.remove(owner);
                 continue;
             }
             let mut inline = Vec::new();
@@ -1497,25 +1501,20 @@ impl ArtifactView {
                     callee,
                 });
             }
-            self.index
-                .inline_by_owner
-                .insert(*owner, (inline, unresolved));
-            if let Some((deps, unresolved)) = self.index.inline_by_owner.get(owner) {
-                rows_examined += deps.len() + unresolved.len();
-                for dep in deps {
-                    let position = self
-                        .inline_deps
-                        .binary_search_by(|current| inline_dep_order(current, dep))
-                        .unwrap_or_else(|position| position);
-                    self.inline_deps.insert(position, dep.clone());
-                }
-                for dep in unresolved {
-                    let position = self
-                        .unresolved_inline_deps
-                        .binary_search_by(|current| unresolved_inline_dep_order(current, dep))
-                        .unwrap_or_else(|position| position);
-                    self.unresolved_inline_deps.insert(position, dep.clone());
-                }
+            rows_examined += inline.len() + unresolved.len();
+            for dep in inline {
+                let position = self
+                    .inline_deps
+                    .binary_search_by(|current| inline_dep_order(current, &dep))
+                    .unwrap_or_else(|position| position);
+                self.inline_deps.insert(position, dep);
+            }
+            for dep in unresolved {
+                let position = self
+                    .unresolved_inline_deps
+                    .binary_search_by(|current| unresolved_inline_dep_order(current, &dep))
+                    .unwrap_or_else(|position| position);
+                self.unresolved_inline_deps.insert(position, dep);
             }
         }
         rows_examined
@@ -1564,29 +1563,25 @@ impl ArtifactView {
         let mut changed = BTreeSet::new();
         let mut rows_examined = root_added.len() + root_removed.len();
         for decl in root_removed {
-            let Some(instances) = self.index.publication_decls.remove(decl) else {
+            let instance = Instance::base(decl.0);
+            let Some(symbol) = self.index.publication_candidates.remove(&instance) else {
                 continue;
             };
-            rows_examined += instances.len();
-            for instance in instances {
-                let Some(symbol) = self.index.publication_candidates.remove(&instance) else {
-                    continue;
-                };
-                changed.insert(symbol.clone());
-                if let Some(users) = self.index.publication_users.get_mut(&symbol) {
-                    rows_examined += users.len();
-                    users.remove(&instance);
-                    if users.is_empty() {
-                        self.index.publication_users.remove(&symbol);
-                    }
+            rows_examined += 1;
+            changed.insert(symbol.clone());
+            if let Some(users) = self.index.publication_users.get_mut(&symbol) {
+                rows_examined += users.len();
+                users.remove(&instance);
+                if users.is_empty() {
+                    self.index.publication_users.remove(&symbol);
                 }
-                self.publications.remove(&instance);
-                if let Ok(position) = self
-                    .unrepresented_publications
-                    .binary_search_by(|current| func_ref_order(current, &instance.func))
-                {
-                    self.unrepresented_publications.remove(position);
-                }
+            }
+            self.publications.remove(&instance);
+            if let Ok(position) = self
+                .unrepresented_publications
+                .binary_search_by(|current| func_ref_order(current, &instance.func))
+            {
+                self.unrepresented_publications.remove(position);
             }
         }
         let target = req.spec.cpu();
@@ -1613,11 +1608,6 @@ impl ArtifactView {
             {
                 continue;
             }
-            self.index
-                .publication_decls
-                .entry(*decl)
-                .or_default()
-                .insert(instance.clone());
             self.index
                 .publication_users
                 .entry(symbol.clone())
@@ -2411,22 +2401,6 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     }
     inline_deps.sort_by(inline_dep_order);
     unresolved_inline_deps.sort_by(unresolved_inline_dep_order);
-    for dep in &inline_deps {
-        index
-            .inline_by_owner
-            .entry(DeclKey(dep.owner))
-            .or_default()
-            .0
-            .push(dep.clone());
-    }
-    for dep in &unresolved_inline_deps {
-        index
-            .inline_by_owner
-            .entry(DeclKey(dep.owner))
-            .or_default()
-            .1
-            .push(dep.clone());
-    }
 
     // The result-lane width of every foreign body this artifact emits. Asked of
     // the SELECTED declaration -- the one whose body is emitted -- under this
@@ -2512,11 +2486,6 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         index
             .publication_users
             .entry(symbol.clone())
-            .or_default()
-            .insert(instance.clone());
-        index
-            .publication_decls
-            .entry(DeclKey(instance.func))
             .or_default()
             .insert(instance.clone());
         index

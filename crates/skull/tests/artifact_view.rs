@@ -2248,3 +2248,50 @@ fn a_global_initializer_fn_value_target_follows_a_local_retarget() {
     assert_eq!(fn_value_target_names(&ws, &fresh), ["dec"]);
     assert_eq!(local.fn_value_targets, fresh.fn_value_targets);
 }
+
+#[test]
+fn repeated_fn_value_sites_retarget_without_losing_other_callers() {
+    for shared in [false, true] {
+        let source = |target| {
+            format!(
+                r#"
+fn inc(x: int) -> int {{ return x + 1 }}
+fn dec(x: int) -> int {{ return x - 1 }}
+fn keep() -> int {{ let f = inc; return f(0) }}
+fn caller() {{
+    let f = {target}
+    let g = {target}
+    print("{{f(1)}} {{g(2)}}")
+}}
+fn main() {{
+    caller()
+    print("{{inc(0)}} {{dec(0)}}")
+    {}
+}}
+"#,
+                if shared { "print(\"{keep()}\")" } else { "" }
+            )
+        };
+        let LocalUpdate {
+            ws, local, fresh, ..
+        } = update_locally(
+            &source("inc"),
+            &source("dec"),
+            "caller",
+            None,
+            main_roots,
+            None,
+            |ws, view| assert_eq!(fn_value_target_names(ws, view), ["inc"]),
+        );
+        let expected = if shared {
+            vec!["dec", "inc"]
+        } else {
+            vec!["dec"]
+        };
+        assert_eq!(fn_value_target_names(&ws, &fresh), expected);
+        assert_eq!(
+            local.fn_value_targets, fresh.fn_value_targets,
+            "shared={shared}"
+        );
+    }
+}
