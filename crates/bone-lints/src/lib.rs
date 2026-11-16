@@ -2662,7 +2662,8 @@ impl IncrementalLintCache {
                 !sel.enabled(METHOD_SYNTAX),
                 "method_syntax is not cacheable"
             );
-            let mut raw = flat_findings_with(
+            let mut raw = missing_policy_advice(module, sel);
+            raw.extend(flat_findings_with(
                 ws,
                 &self.variants,
                 warm,
@@ -2670,8 +2671,8 @@ impl IncrementalLintCache {
                 source,
                 sel,
                 &FxHashSet::default(),
-            );
-            raw.extend(inference_findings_with(ws, warm, module.id, source, sel));
+            ));
+            raw.extend(inference_findings_with(ws, warm, module.id, sel));
             for finding in raw {
                 match finding_owner(module, &finding) {
                     Some(owner) if is_inference_lint(finding.lint) => {
@@ -3114,13 +3115,37 @@ fn shift_findings(findings: &mut [Finding], edit: &TextEditDelta) -> usize {
     shifted
 }
 
+/// One advice per selected action-layer lint when no policy is configured.
+fn missing_policy_advice(module: &Module, sel: &LintOptions) -> Vec<Finding> {
+    if sel.action_policy.is_some() {
+        return Vec::new();
+    }
+    [
+        ACTION_CALLERS,
+        RAW_INPUT_MIGRATION,
+        RAW_INPUT_CLASSIFICATION,
+    ]
+    .into_iter()
+    .filter(|lint| sel.enabled(lint))
+    .map(|lint| Finding {
+        lint,
+        error: CompilerError::new_with_label(
+            Span::new(module.file, (0, 0), (0, 0), (0, 0)),
+            "no action-layer policy configured".to_owned(),
+        )
+        .with_level(CompilerErrorLevel::Advice),
+        line: 0,
+    })
+    .collect()
+}
+
 /// The lints that read only a body's HIR -- no inference, no other file. A
 /// file's findings change only when that file's own text changes, which is what
 /// lets the LSP cache them per file across unrelated edits.
 ///
-/// `src` is the file's text, for `// rock: allow(...)` suppression. A warm
-/// (stdlib) module lints to nothing: it is a read-only reference to the author,
-/// and every stdlib helper would false-flag.
+/// `src` is the file's text, which some lints read. Findings are returned
+/// unsuppressed. A warm (stdlib) module lints to nothing: it is a read-only
+/// reference to the author, and every stdlib helper would false-flag.
 ///
 /// `variants` and `types` are whole-workspace scans, so a caller linting EVERY
 /// module computes them once instead of once per file. `types` is only read by
@@ -3139,29 +3164,9 @@ fn flat_findings_with(
     }
     let module = ws.module(mid);
     let mut out: Vec<Finding> = Vec::new();
-    if sel.action_policy.is_none() {
-        for lint in [
-            ACTION_CALLERS,
-            RAW_INPUT_MIGRATION,
-            RAW_INPUT_CLASSIFICATION,
-        ] {
-            if sel.enabled(lint) {
-                out.push(Finding {
-                    lint,
-                    error: CompilerError::new_with_label(
-                        Span::new(module.file, (0, 0), (0, 0), (0, 0)),
-                        "no action-layer policy configured".to_owned(),
-                    )
-                    .with_level(CompilerErrorLevel::Advice),
-                    line: 0,
-                });
-            }
-        }
-    }
-
     if sel.enabled(UNUSED_VAR) {
         let found = unused_vars_in_module(module, variants);
-        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
+        out.extend(found.iter().map(Finding::of));
     }
     if sel.enabled(UNUSED_PURE_EXPR) {
         let found: Vec<_> = module
@@ -3169,23 +3174,23 @@ fn flat_findings_with(
             .values()
             .flat_map(unused_pure_exprs_in_body)
             .collect();
-        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
+        out.extend(found.iter().map(Finding::of));
     }
     if sel.enabled(METHOD_SYNTAX) {
         let found = method_syntax_in_module(ws, module, types, src);
-        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
+        out.extend(found.iter().map(Finding::of));
     }
     if sel.enabled(RAW_INPUT_MIGRATION)
         && let Some(policy) = sel.action_policy.as_deref()
     {
         let found = raw_input_sites_in_module(module, policy);
-        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
+        out.extend(found.iter().map(Finding::of));
     }
     if sel.enabled(RAW_INPUT_CLASSIFICATION)
         && let Some(policy) = sel.action_policy.as_deref()
     {
         let found = unclassified_raw_input_sites_in_module(module, src, policy);
-        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
+        out.extend(found.iter().map(Finding::of));
     }
     out
 }
@@ -3197,7 +3202,6 @@ fn inference_findings_with(
     ws: &Workspace,
     warm: &FxHashSet<ModuleId>,
     mid: ModuleId,
-    src: &str,
     sel: &LintOptions,
 ) -> Vec<Finding> {
     if warm.contains(&mid) {
@@ -3213,7 +3217,7 @@ fn inference_findings_with(
             .iter()
             .flat_map(|(owner, body)| transmute_of_nullable_in_body(ws, bi(owner), body))
             .collect();
-        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
+        out.extend(found.iter().map(Finding::of));
     }
     if sel.enabled(TASK_NULL_ABANDON) {
         let found: Vec<_> = module
@@ -3221,7 +3225,7 @@ fn inference_findings_with(
             .iter()
             .flat_map(|(owner, body)| task_null_abandon_in_body(ws, bi(owner), body))
             .collect();
-        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
+        out.extend(found.iter().map(Finding::of));
     }
     if sel.enabled(ROW_ESCAPE) {
         let found: Vec<_> = module
@@ -3231,7 +3235,7 @@ fn inference_findings_with(
                 row_escapes_in_body(ws, bi(owner), body, tail_sink(module, owner))
             })
             .collect();
-        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
+        out.extend(found.iter().map(Finding::of));
     }
     out
 }
@@ -3356,15 +3360,14 @@ fn lint_workspace_inner(
     per_module
         .into_par_iter()
         .map(|(module, src, workspace_findings)| {
-            let mut out = flat_findings_with(ws, &variants, warm, module.id, src, sel, &types);
-            out.extend(inference_findings_with(ws, warm, module.id, src, sel));
-            if let Some(findings) = workspace_findings {
-                if suppress {
-                    out.extend(filter_suppressed_findings(findings, src));
-                } else {
-                    out.extend(findings);
-                }
+            let mut out = missing_policy_advice(module, sel);
+            let mut found = flat_findings_with(ws, &variants, warm, module.id, src, sel, &types);
+            found.extend(inference_findings_with(ws, warm, module.id, sel));
+            found.extend(workspace_findings.into_iter().flatten());
+            if suppress {
+                found = filter_suppressed_findings(found, src);
             }
+            out.extend(found);
             out
         })
         .flatten()

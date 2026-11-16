@@ -1604,3 +1604,48 @@ fn file_set_change_takes_the_explicit_full_reconstruction_route() {
     assert_eq!(shapes(&cached), shapes(&fresh));
     assert_eq!(stats.full_rebuilds, 1);
 }
+
+#[test]
+fn suppression_removal_after_a_suppressed_rebuild_restores_the_finding() {
+    let suppressed = "fn main() {\n    // rock: allow(unused_var)\n    let unused = 1\n}\n";
+    let shown = "fn main() {\n    let unused = 1\n}\n";
+    let suppressed_ws = workspace(suppressed);
+    let shown_ws = workspace(shown);
+    let file = Ustr::from(FILE);
+    let removal = suppressed.find("// rock").expect("suppression");
+    let mut cache = IncrementalLintCache::default();
+    cache.update(
+        &suppressed_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(suppressed),
+        &LintOptions::default(),
+        &LintCacheUpdate::full(),
+    );
+    let (cached, stats) = cache.update(
+        &shown_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(shown),
+        &LintOptions::default(),
+        &LintCacheUpdate::body_only(
+            [file],
+            [],
+            [TextEditDelta {
+                file,
+                at: removal,
+                byte_delta: -((suppressed.len() - shown.len()) as isize),
+                line_delta: -1,
+            }],
+        ),
+    );
+    let fresh = lint_workspace(
+        &shown_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(shown),
+        &LintOptions::default(),
+    );
+    assert_eq!(shapes(&cached), shapes(&fresh));
+    assert_eq!(stats.full_rebuilds, 0);
+}
