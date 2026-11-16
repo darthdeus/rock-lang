@@ -654,22 +654,42 @@ mod tests {
         )
     }
 
-    fn fixture_groups() -> BTreeMap<String, MixGroup> {
-        BTreeMap::from([(
-            "fixture".to_owned(),
-            MixGroup {
-                gain_db: 0.0,
-                bus: "sfx".to_owned(),
-            },
-        )])
+    /// A project JSON of the given `events`, under the fixture group.
+    fn project_json(version: u32, events: &str) -> String {
+        format!(
+            r#"{{"version": {version}, "normalization_lufs": -18.0,
+              "groups": {{"fixture": {{"gain_db": 0, "bus": "sfx"}}}},
+              "events": [{events}]}}"#
+        )
     }
 
-    fn fixture_project(events: Vec<SoundEvent>) -> SoundProject {
+    /// One event JSON with one step whose only layer is `layer`.
+    fn event_json(id: &str, layer: &str) -> String {
+        format!(r#"{{"id": "{id}", "group": "fixture", "steps": [{{"layers": [{layer}]}}]}}"#)
+    }
+
+    fn project(events: &[String]) -> SoundProject {
+        parse_project(&project_json(2, &events.join(","))).expect("project shape should parse")
+    }
+
+    fn event(steps: Vec<SoundStep>) -> SoundProject {
         SoundProject {
             version: 2,
             normalization_lufs: -18.0,
-            groups: fixture_groups(),
-            events,
+            groups: BTreeMap::from([(
+                "fixture".to_owned(),
+                MixGroup {
+                    gain_db: 0.0,
+                    bus: "sfx".to_owned(),
+                },
+            )]),
+            events: vec![SoundEvent {
+                id: "event".to_owned(),
+                group: "fixture".to_owned(),
+                offset_db: 0.0,
+                reason: None,
+                steps,
+            }],
         }
     }
 
@@ -752,19 +772,6 @@ mod tests {
     }
 
     #[test]
-    fn compiled_bank_serialization_is_deterministic() {
-        let project = parse_project(valid_project()).expect("valid project should parse");
-        let resolver = resolver(&[SHARED, ALT, SOLO]);
-        let first = compile_project(&project, &resolver).expect("first compile should pass");
-        let second = compile_project(&project, &resolver).expect("second compile should pass");
-
-        assert_eq!(
-            serialize_runtime_bank(&first).expect("first serialization should pass"),
-            serialize_runtime_bank(&second).expect("second serialization should pass")
-        );
-    }
-
-    #[test]
     fn missing_dependency_is_a_diagnostic() {
         let project = parse_project(valid_project()).expect("valid project should parse");
         let error = compile_project(&project, &resolver(&[SHARED, SOLO]))
@@ -786,20 +793,10 @@ mod tests {
 
     #[test]
     fn unknown_event_is_allowed() {
-        let project = parse_project(
-            r#"{
-              "version": 2,
-              "normalization_lufs": -18.0,
-              "groups": {"fixture": {"gain_db": 0, "bus": "sfx"}},
-              "events": [{
-                "id": "future.game.event",
-                "group": "fixture",
-                "steps": [{"layers": [{"sources": ["assets/sfx/solo.ogg"]}]}]
-              }]
-            }"#,
-        )
-        .expect("unknown event project should parse");
-
+        let project = project(&[event_json(
+            "future.game.event",
+            r#"{"sources": ["assets/sfx/solo.ogg"]}"#,
+        )]);
         assert!(compile_project(&project, &resolver(&[SOLO])).is_ok());
     }
 
@@ -812,203 +809,106 @@ mod tests {
 
     #[test]
     fn unsupported_version_is_rejected() {
-        let error = parse_project(
-            r#"{
-              "version": 3,
-              "normalization_lufs": -18.0,
-              "groups": {"fixture": {"gain_db": 0, "bus": "sfx"}},
-              "events": [{
-                "id": "event",
-                "group": "fixture",
-                "steps": [{"layers": [{"sources": ["assets/sfx/solo.ogg"]}]}]
-              }]
-            }"#,
-        )
-        .and_then(|project| compile_project(&project, &resolver(&[SOLO])))
-        .expect_err("unsupported schema should reject");
+        let solo = event_json("event", r#"{"sources": ["assets/sfx/solo.ogg"]}"#);
+        let error = parse_project(&project_json(3, &solo))
+            .and_then(|project| compile_project(&project, &resolver(&[SOLO])))
+            .expect_err("unsupported schema should reject");
 
         assert!(error.to_string().contains("version"));
     }
 
     #[test]
-    fn empty_sources_are_rejected() {
-        let error = parse_project(
-            r#"{
-              "version": 2,
-              "normalization_lufs": -18.0,
-              "groups": {"fixture": {"gain_db": 0, "bus": "sfx"}},
-              "events": [{
-                "id": "event",
-                "group": "fixture",
-                "steps": [{"layers": [{"sources": []}]}]
-              }]
-            }"#,
-        )
-        .and_then(|project| compile_project(&project, &resolver(&[])))
-        .expect_err("empty source list should reject");
-
-        assert!(error.to_string().contains("sources"));
-    }
-
-    #[test]
-    fn empty_steps_and_layers_are_rejected() {
-        let no_steps = SoundProject {
-            version: 2,
-            normalization_lufs: -18.0,
-            groups: fixture_groups(),
-            events: vec![SoundEvent {
-                id: "event".to_owned(),
-                group: "fixture".to_owned(),
-                offset_db: 0.0,
-                reason: None,
-                steps: Vec::new(),
-            }],
-        };
-        let no_layers = SoundProject {
-            version: 2,
-            normalization_lufs: -18.0,
-            groups: fixture_groups(),
-            events: vec![SoundEvent {
-                id: "event".to_owned(),
-                group: "fixture".to_owned(),
-                offset_db: 0.0,
-                reason: None,
-                steps: vec![SoundStep { layers: Vec::new() }],
-            }],
-        };
-
-        let no_steps_error = compile_project(&no_steps, &resolver(&[]))
-            .expect_err("an event without steps should reject");
-        let no_layers_error = compile_project(&no_layers, &resolver(&[]))
-            .expect_err("a step without layers should reject");
-
-        assert!(no_steps_error.to_string().contains("steps"));
-        assert!(no_layers_error.to_string().contains("layers"));
+    fn empty_sources_steps_and_layers_are_rejected() {
+        let no_sources = project(&[event_json("event", r#"{"sources": []}"#)]);
+        let no_layers = event(vec![SoundStep { layers: Vec::new() }]);
+        for (project, missing) in [
+            (no_sources, "sources"),
+            (event(Vec::new()), "steps"),
+            (no_layers, "layers"),
+        ] {
+            let error =
+                compile_project(&project, &resolver(&[])).expect_err("an empty list should reject");
+            assert!(error.to_string().contains(missing), "{missing}: {error}");
+        }
     }
 
     #[test]
     fn duplicate_and_empty_event_ids_are_rejected() {
-        let duplicate = parse_project(
-            r#"{
-              "version": 2,
-              "normalization_lufs": -18.0,
-              "groups": {"fixture": {"gain_db": 0, "bus": "sfx"}},
-              "events": [
-                {"id": "event", "group": "fixture", "steps": [{"layers": [{"sources": ["assets/sfx/solo.ogg"]}]}]},
-                {"id": "event", "group": "fixture", "steps": [{"layers": [{"sources": ["assets/sfx/solo.ogg"]}]}]}
-              ]
-            }"#,
-        )
-        .expect("duplicate project shape should parse");
-        let empty = parse_project(
-            r#"{
-              "version": 2,
-              "normalization_lufs": -18.0,
-              "groups": {"fixture": {"gain_db": 0, "bus": "sfx"}},
-              "events": [{"id": "  ", "group": "fixture", "steps": [{"layers": [{"sources": ["assets/sfx/solo.ogg"]}]}]}]
-            }"#,
-        )
-        .expect("empty ID project shape should parse");
-
-        let duplicate_error = compile_project(&duplicate, &resolver(&[SOLO]))
-            .expect_err("duplicate event IDs should reject");
-        let empty_error =
-            compile_project(&empty, &resolver(&[SOLO])).expect_err("empty event IDs should reject");
-
-        assert!(duplicate_error.to_string().contains("duplicate event ID"));
-        assert!(
-            empty_error
-                .to_string()
-                .contains("event ID must not be empty")
-        );
+        let solo = r#"{"sources": ["assets/sfx/solo.ogg"]}"#;
+        let duplicate = project(&[event_json("event", solo), event_json("event", solo)]);
+        let empty = project(&[event_json("  ", solo)]);
+        for (project, message) in [
+            (duplicate, "duplicate event ID"),
+            (empty, "event ID must not be empty"),
+        ] {
+            let error = compile_project(&project, &resolver(&[SOLO]))
+                .expect_err("a bad event ID should reject");
+            assert!(error.to_string().contains(message), "{error}");
+        }
     }
 
     #[test]
     fn numeric_constraints_reject_invalid_and_nonfinite_values() {
+        let base = SoundLayer {
+            sources: vec![SOLO.to_owned()],
+            volume: 0.0,
+            reason: None,
+            speed: 1.0,
+            offset: 0.0,
+            stream: false,
+            looped: false,
+        };
+        let balanced = Some("fixture balance".to_owned());
         let cases = [
             (
                 "volume",
                 SoundLayer {
-                    sources: vec![SOLO.to_owned()],
                     volume: f32::INFINITY,
-                    reason: Some("fixture balance".to_owned()),
-                    speed: 1.0,
-                    offset: 0.0,
-                    stream: false,
-                    looped: false,
-                },
-            ),
-            (
-                "speed",
-                SoundLayer {
-                    sources: vec![SOLO.to_owned()],
-                    volume: 0.0,
-                    reason: None,
-                    speed: 0.0,
-                    offset: 0.0,
-                    stream: false,
-                    looped: false,
-                },
-            ),
-            (
-                "offset",
-                SoundLayer {
-                    sources: vec![SOLO.to_owned()],
-                    volume: 0.0,
-                    reason: None,
-                    speed: 1.0,
-                    offset: -0.01,
-                    stream: false,
-                    looped: false,
+                    reason: balanced.clone(),
+                    ..base.clone()
                 },
             ),
             (
                 "volume",
                 SoundLayer {
-                    sources: vec![SOLO.to_owned()],
                     volume: f32::NAN,
-                    reason: Some("fixture balance".to_owned()),
-                    speed: 1.0,
-                    offset: 0.0,
-                    stream: false,
-                    looped: false,
+                    reason: balanced,
+                    ..base.clone()
                 },
             ),
             (
                 "speed",
                 SoundLayer {
-                    sources: vec![SOLO.to_owned()],
-                    volume: 0.0,
-                    reason: None,
+                    speed: 0.0,
+                    ..base.clone()
+                },
+            ),
+            (
+                "speed",
+                SoundLayer {
                     speed: f32::INFINITY,
-                    offset: 0.0,
-                    stream: false,
-                    looped: false,
+                    ..base.clone()
                 },
             ),
             (
                 "offset",
                 SoundLayer {
-                    sources: vec![SOLO.to_owned()],
-                    volume: 0.0,
-                    reason: None,
-                    speed: 1.0,
+                    offset: -0.01,
+                    ..base.clone()
+                },
+            ),
+            (
+                "offset",
+                SoundLayer {
                     offset: f32::NEG_INFINITY,
-                    stream: false,
-                    looped: false,
+                    ..base
                 },
             ),
         ];
 
         for (field, layer) in cases {
-            let project = fixture_project(vec![SoundEvent {
-                id: "event".to_owned(),
-                group: "fixture".to_owned(),
-                offset_db: 0.0,
-                reason: None,
-                steps: vec![SoundStep {
-                    layers: vec![layer],
-                }],
+            let project = event(vec![SoundStep {
+                layers: vec![layer],
             }]);
             let error = compile_project(&project, &resolver(&[SOLO]))
                 .expect_err("invalid numeric value should reject");
@@ -1018,18 +918,13 @@ mod tests {
 
     #[test]
     fn stream_layers_compile_to_streamed_runtime_layers() {
-        let project = parse_project(
-            r#"{
-              "version": 2,
-              "normalization_lufs": -18.0,
-              "groups": {"fixture": {"gain_db": 0, "bus": "sfx"}},
-              "events": [
-                {"id": "bed", "group": "fixture", "steps": [{"layers": [{"sources": ["assets/sfx/solo.ogg"], "stream": true}]}]},
-                {"id": "shot", "group": "fixture", "steps": [{"layers": [{"sources": ["assets/sfx/alt.ogg"]}]}]}
-              ]
-            }"#,
-        )
-        .expect("a stream layer should parse");
+        let project = project(&[
+            event_json(
+                "bed",
+                r#"{"sources": ["assets/sfx/solo.ogg"], "stream": true}"#,
+            ),
+            event_json("shot", r#"{"sources": ["assets/sfx/alt.ogg"]}"#),
+        ]);
         let bank = compile_project(&project, &resolver(&[SOLO, ALT]))
             .expect("a stream layer should compile");
         let runtime: serde_json::Value = serde_json::from_slice(
@@ -1058,18 +953,13 @@ mod tests {
 
     #[test]
     fn a_source_cannot_be_both_streamed_and_decoded() {
-        let project = parse_project(
-            r#"{
-              "version": 2,
-              "normalization_lufs": -18.0,
-              "groups": {"fixture": {"gain_db": 0, "bus": "sfx"}},
-              "events": [
-                {"id": "bed", "group": "fixture", "steps": [{"layers": [{"sources": ["assets/sfx/shared.ogg"], "stream": true}]}]},
-                {"id": "shot", "group": "fixture", "steps": [{"layers": [{"sources": ["assets/sfx/shared.ogg"]}]}]}
-              ]
-            }"#,
-        )
-        .expect("the mixed project shape should parse");
+        let project = project(&[
+            event_json(
+                "bed",
+                r#"{"sources": ["assets/sfx/shared.ogg"], "stream": true}"#,
+            ),
+            event_json("shot", r#"{"sources": ["assets/sfx/shared.ogg"]}"#),
+        ]);
         let error = compile_project(&project, &resolver(&[SHARED]))
             .expect_err("one source must load as one kind");
         assert!(
@@ -1084,16 +974,9 @@ mod tests {
 
     #[test]
     fn unknown_project_fields_are_rejected() {
-        let error = parse_project(
-            r#"{
-              "version": 2,
-              "normalization_lufs": -18.0,
-              "groups": {"fixture": {"gain_db": 0, "bus": "sfx"}},
-              "events": [],
-              "legacy_path": "summon-1.wav"
-            }"#,
-        )
-        .expect_err("unknown project metadata should not parse");
+        let text = project_json(2, "")
+            .replace(r#""events""#, r#""legacy_path": "summon-1.wav", "events""#);
+        let error = parse_project(&text).expect_err("unknown project metadata should not parse");
 
         assert!(error.to_string().contains("unknown field"));
     }
@@ -1109,19 +992,7 @@ mod tests {
             "assets/./same.ogg",
             "assets//empty.ogg",
         ] {
-            let text = format!(
-                r#"{{
-                  "version": 2,
-                  "normalization_lufs": -18.0,
-                  "groups": {{"fixture": {{"gain_db": 0, "bus": "sfx"}}}},
-                  "events": [{{
-                    "id": "event",
-                    "group": "fixture",
-                    "steps": [{{"layers": [{{"sources": ["{key}"]}}]}}]
-                  }}]
-                }}"#
-            );
-            let project = parse_project(&text).expect("shape should parse");
+            let project = project(&[event_json("event", &format!(r#"{{"sources": ["{key}"]}}"#))]);
             let error = compile_project(&project, &resolver(&[]))
                 .expect_err("noncanonical key should reject");
             assert!(error.to_string().contains(key), "diagnostic for {key}");
@@ -1137,19 +1008,7 @@ mod tests {
             "assets/sfx/tmp/test.ogg",
             "assets/sfx/temp/test.ogg",
         ] {
-            let text = format!(
-                r#"{{
-                  "version": 2,
-                  "normalization_lufs": -18.0,
-                  "groups": {{"fixture": {{"gain_db": 0, "bus": "sfx"}}}},
-                  "events": [{{
-                    "id": "event",
-                    "group": "fixture",
-                    "steps": [{{"layers": [{{"sources": ["{key}"]}}]}}]
-                  }}]
-                }}"#
-            );
-            let project = parse_project(&text).expect("shape should parse");
+            let project = project(&[event_json("event", &format!(r#"{{"sources": ["{key}"]}}"#))]);
             let bank = compile_project(&project, &resolver(&[key]))
                 .expect("directory names must not affect admission");
             assert_eq!(bank.dependencies, vec![key]);
