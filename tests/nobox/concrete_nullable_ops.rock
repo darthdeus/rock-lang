@@ -10,7 +10,7 @@
 // do, and this file is what keeps them working.
 //
 // The fifth -- a value-position merge of a present arm and `null` -- does NOT,
-// and is pinned as a crash by `rock-lang/crates/skull/tests/nobox_nullable_phi_return_sentinel.rs`.
+// and crashed until fixed; `tests/nobox/nullable_phi_return.rock` covers it.
 // The controls below bound it: the defect needs a value-position merge AND
 // nullability AND the mark, all three. Remove any one and it works, which is
 // what `merge_of_two_present_arms`, `unmarked_nullable_merge` and
@@ -63,7 +63,7 @@ fn nullable_crosses_a_fn_value_param() -> int {
 }
 
 // A lambda RETURNED as a fn value at a nullable nobox return, with no merge in
-// its body. `nobox_fn_value_nullable_return_sentinel` pins the failing form of
+// its body. `tests/nobox/fn_value_nullable_return.rock` covers the once-failing form of
 // this, whose lambda body is `present => if present { P { .. } } else { null }`
 // -- a value-position merge. So the fn-value path is NOT sufficient on its own
 // to break the ABI; this passes with the merge removed and nothing else changed.

@@ -70,8 +70,7 @@ fn test_h3_nullable_value_return() {
 // A BOXED tuple slot can be observed for nil-ness, so an absent nullable value
 // element has to land there as `nil` rather than as the ctor `pack` builds
 // regardless of presence. The reference-struct twin was always correct and
-// bounds the class; emitted-shape coverage in
-// `rock-lang/crates/skull/tests/nullable_value_in_tuple_sentinel.rs`.
+// bounds the class; see `tests/nullable/value_in_tuple.rock`.
 value TupV2 { x: float, y: float }
 struct TupS2 { x: float, y: float }
 

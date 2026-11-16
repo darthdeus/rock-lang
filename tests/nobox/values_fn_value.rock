@@ -56,8 +56,8 @@ fn remap(f: (NV) -> NV, v: NV) -> NV { return f(v) }
 // own narrower inferred type -- otherwise the hoisted body and the indirect
 // call site derive different fn-value ABIs from it (the body omits the presence
 // slot the site binds). All three return positions check: the fn-body TAIL, a
-// `Statement::Return` and an `Expr::Return`. Emitted-shape coverage and the
-// full control set: `rock-lang/crates/skull/tests/nobox_fn_value_nullable_return_sentinel.rs`.
+// `Statement::Return` and an `Expr::Return`. The full control set:
+// `tests/nobox/fn_value_nullable_return.rock`.
 nobox value RL { x: int, y: int }
 
 fn rl_tail() -> (bool) -> RL? { present => if present { RL { x: 5, y: 6 } } else { null } }

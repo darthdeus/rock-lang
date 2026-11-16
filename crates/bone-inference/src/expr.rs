@@ -2035,7 +2035,7 @@ fn infer_block(
         // a checked block pushes the hole down to its TAIL. Without it a
         // lambda in tail position records its own type, which is narrower
         // than the hole it fills, and the fn-value ABI disagrees at the
-        // two ends (`nobox_fn_value_nullable_return_sentinel`).
+        // two ends (`tests/nobox/fn_value_nullable_return.rock`).
         Some(tail) => match expected {
             Some(exp) => match check_expr(c, gamma, *tail, exp, c.body.expr_spans[*tail]) {
                 Ok(()) => exp,

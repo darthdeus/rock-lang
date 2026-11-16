@@ -6,7 +6,7 @@ enum Event { Empty, Text(string), Colored(string, Tint), Pair(string, int) }
 enum Envelope { Wrapped(Event), Other(string) }
 struct Record { event: Event, envelope: Envelope, optional: Event? }
 
-@test(output = "ok")
+@test(output = "ok", backends = "lua")
 fn typed_json_flat_enum_fields_and_widened_payloads() {
     let codec = JsonRecordCodec {}
     for event in [Event::Empty, Event::Text("hello"), Event::Colored("red", Tint { red: 0.5, visible: false }), Event::Pair("count", 7)] {

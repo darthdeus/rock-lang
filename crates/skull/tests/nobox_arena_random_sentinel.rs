@@ -11,7 +11,7 @@
 //! today -- binding or projecting the `T` half materializes and is rejected -- so
 //! the load-bearing assertion here is that the program RUNS. Its `true` does not
 //! prove the presence slot: that comparison folds to a constant, which is pinned
-//! separately in `nobox_tuple_option_presence_sentinel.rs`.
+//! separately in `tests/nobox/tuple_option_presence.rock`.
 
 use crate::common::run_luajit_capturing;
 
