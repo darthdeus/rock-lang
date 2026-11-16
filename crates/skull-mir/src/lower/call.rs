@@ -2658,30 +2658,13 @@ impl<'a> Builder<'a> {
         r: ValueRepr,
         kind: BoxKind,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let (present, value) = match r {
-            ValueRepr::Group {
-                name,
-                parts,
-                present: Some(present),
-            } => (
-                present,
-                ValueRepr::Group {
-                    name,
-                    parts,
-                    present: None,
-                },
-            ),
-            ValueRepr::Tuple {
-                parts,
-                present: Some(present),
-            } => (
-                present,
-                ValueRepr::Tuple {
-                    parts,
-                    present: None,
-                },
-            ),
-            other => return self.pack_boxed(other, kind),
+        let mut value = r;
+        let present = match &mut value {
+            ValueRepr::Group { present, .. } | ValueRepr::Tuple { present, .. } => present.take(),
+            ValueRepr::Scalar(_) => None,
+        };
+        let Some(present) = present else {
+            return self.pack_boxed(value, kind);
         };
         let result = self.f.new_cell(None);
         // The present arm is an ordinary whole-value box, so it goes through the
