@@ -113,6 +113,12 @@ pub(crate) static SIM_PIXEL_ROOTS: &[&str] = &[
 /// stay small.
 pub(crate) static SIM_CAPACITY_GLOBALS: &[&str] = &["BLOOM_LEVELS", "SCENE_CAPACITY"];
 
+type FnKey = (
+    bone_core::prelude::ModuleId,
+    bone_core::prelude::Idx<bone_core::hir::Function>,
+);
+type NameMap = std::collections::HashMap<ustr::Ustr, Vec<FnKey>>;
+
 /// Callee edges of one body: resolved calls and protocol dispatch from its
 /// inference, plus function-valued references from a body scan (a named fn
 /// passed as a value lowers to `Expr::Global`, never a call). Mirrors
@@ -120,19 +126,9 @@ pub(crate) static SIM_CAPACITY_GLOBALS: &[&str] = &["BLOOM_LEVELS", "SCENE_CAPAC
 /// bodies) are leaves, matched by name at their callers instead.
 fn sim_callee_edges(
     ws: &bone_semantic::inference::Workspace,
-    mid: bone_core::prelude::ModuleId,
-    fid: bone_core::prelude::Idx<bone_core::hir::Function>,
-    name_map: &std::collections::HashMap<
-        ustr::Ustr,
-        Vec<(
-            bone_core::prelude::ModuleId,
-            bone_core::prelude::Idx<bone_core::hir::Function>,
-        )>,
-    >,
-) -> Vec<(
-    bone_core::prelude::ModuleId,
-    bone_core::prelude::Idx<bone_core::hir::Function>,
-)> {
+    (mid, fid): FnKey,
+    name_map: &NameMap,
+) -> Vec<FnKey> {
     use bone_core::hir::{BodyOwner, Callee, Expr};
     let owner = BodyOwner::Function(fid);
     let mut out = Vec::new();
@@ -169,13 +165,7 @@ fn sim_callee_edges(
     out
 }
 
-fn sim_collect_bound_next(
-    bn: &bone_core::workspace::BoundNext,
-    out: &mut Vec<(
-        bone_core::prelude::ModuleId,
-        bone_core::prelude::Idx<bone_core::hir::Function>,
-    )>,
-) {
+fn sim_collect_bound_next(bn: &bone_core::workspace::BoundNext, out: &mut Vec<FnKey>) {
     if let bone_core::workspace::BoundNext::Concrete { func, sub, .. } = bn {
         out.push(*func);
         for bn in sub.next.values() {
@@ -184,118 +174,59 @@ fn sim_collect_bound_next(
     }
 }
 
-/// True when the sim at `(mid, fid)` can read pixels: one of
-/// [`SIM_PIXEL_ROOTS`] is among its transitive callees (memoized across sims,
-/// so one compile walks the shared call graph once). A new sim that captures
-/// is classified by its own calls, never by a name list.
-fn sim_reads_pixels(
+/// True when `matches` holds for `key` or any of its transitive callees.
+/// Memoized across sims, so one compile walks the shared call graph once.
+fn sim_reaches(
     ws: &bone_semantic::inference::Workspace,
-    mid: bone_core::prelude::ModuleId,
-    fid: bone_core::prelude::Idx<bone_core::hir::Function>,
-    memo: &mut std::collections::HashMap<
-        (
-            bone_core::prelude::ModuleId,
-            bone_core::prelude::Idx<bone_core::hir::Function>,
-        ),
-        bool,
-    >,
-    visiting: &mut std::collections::HashSet<(
-        bone_core::prelude::ModuleId,
-        bone_core::prelude::Idx<bone_core::hir::Function>,
-    )>,
-    name_map: &std::collections::HashMap<
-        ustr::Ustr,
-        Vec<(
-            bone_core::prelude::ModuleId,
-            bone_core::prelude::Idx<bone_core::hir::Function>,
-        )>,
-    >,
+    key: FnKey,
+    matches: &dyn Fn(FnKey) -> bool,
+    memo: &mut std::collections::HashMap<FnKey, bool>,
+    visiting: &mut std::collections::HashSet<FnKey>,
+    name_map: &NameMap,
 ) -> bool {
-    if let Some(&known) = memo.get(&(mid, fid)) {
+    if let Some(&known) = memo.get(&key) {
         return known;
     }
-    if !visiting.insert((mid, fid)) {
+    if !visiting.insert(key) {
         return false;
     }
-    let callee = &ws.module(mid).functions[fid];
-    let mut reads = sim_name_reads_pixels(skull_mir::mangle::declared_name(callee.name.as_str()));
-    if !reads {
-        for (callee_mid, callee_fid) in sim_callee_edges(ws, mid, fid, name_map) {
-            if sim_reads_pixels(ws, callee_mid, callee_fid, memo, visiting, name_map) {
-                reads = true;
-                break;
-            }
-        }
-    }
-    visiting.remove(&(mid, fid));
-    memo.insert((mid, fid), reads);
-    reads
+    let reaches = matches(key)
+        || sim_callee_edges(ws, key, name_map)
+            .into_iter()
+            .any(|callee| sim_reaches(ws, callee, matches, memo, visiting, name_map));
+    visiting.remove(&key);
+    memo.insert(key, reaches);
+    reaches
 }
 
-/// True when the sim at `(mid, fid)` references a scene capacity global: one
-/// of [`SIM_CAPACITY_GLOBALS`] is named by its transitive bodies (memoized
-/// like [`sim_reads_pixels`]). Data globals lower to `Expr::Global` exactly
+/// True when the function names one of [`SIM_PIXEL_ROOTS`] or a
+/// [`SIM_PIXEL_PREFIXES`] family. A new sim that captures is classified by
+/// its own calls, never by a name list.
+fn names_pixel_reader(ws: &bone_semantic::inference::Workspace, (mid, fid): FnKey) -> bool {
+    let callee = &ws.module(mid).functions[fid];
+    sim_name_reads_pixels(skull_mir::mangle::declared_name(callee.name.as_str()))
+}
+
+/// True when the body references a scene capacity global, one of
+/// [`SIM_CAPACITY_GLOBALS`]. Data globals lower to `Expr::Global` exactly
 /// like function-valued references; a name that resolves to no function is a
 /// data reference and is matched by declared (bare) name.
-fn sim_reads_capacity(
+fn references_capacity(
     ws: &bone_semantic::inference::Workspace,
-    mid: bone_core::prelude::ModuleId,
-    fid: bone_core::prelude::Idx<bone_core::hir::Function>,
-    memo: &mut std::collections::HashMap<
-        (
-            bone_core::prelude::ModuleId,
-            bone_core::prelude::Idx<bone_core::hir::Function>,
-        ),
-        bool,
-    >,
-    visiting: &mut std::collections::HashSet<(
-        bone_core::prelude::ModuleId,
-        bone_core::prelude::Idx<bone_core::hir::Function>,
-    )>,
-    name_map: &std::collections::HashMap<
-        ustr::Ustr,
-        Vec<(
-            bone_core::prelude::ModuleId,
-            bone_core::prelude::Idx<bone_core::hir::Function>,
-        )>,
-    >,
+    (mid, fid): FnKey,
+    name_map: &NameMap,
 ) -> bool {
     use bone_core::hir::{BodyOwner, Expr};
-    if let Some(&known) = memo.get(&(mid, fid)) {
-        return known;
-    }
-    if !visiting.insert((mid, fid)) {
+    let Some(body) = ws.module(mid).bodies.get(&BodyOwner::Function(fid)) else {
         return false;
-    }
-    let mut reads = false;
-    if let Some(body) = ws.module(mid).bodies.get(&BodyOwner::Function(fid)) {
-        for (_, expr) in body.expr_arena.iter() {
-            let name = match expr {
-                Expr::Global(n) | Expr::SiblingRef(n) => Some(n),
-                _ => None,
-            };
-            let Some(name) = name else { continue };
-            if name_map.contains_key(name) {
-                continue;
-            }
-            let declared = name.as_str().rsplit("::").next().unwrap_or(name.as_str());
-            if SIM_CAPACITY_GLOBALS.contains(&declared) {
-                reads = true;
-                break;
-            }
-        }
-    }
-    if !reads {
-        for (callee_mid, callee_fid) in sim_callee_edges(ws, mid, fid, name_map) {
-            if sim_reads_capacity(ws, callee_mid, callee_fid, memo, visiting, name_map) {
-                reads = true;
-                break;
-            }
-        }
-    }
-    visiting.remove(&(mid, fid));
-    memo.insert((mid, fid), reads);
-    reads
+    };
+    body.expr_arena.iter().any(|(_, expr)| {
+        let (Expr::Global(name) | Expr::SiblingRef(name)) = expr else {
+            return false;
+        };
+        let declared = name.as_str().rsplit("::").next().unwrap_or(name.as_str());
+        !name_map.contains_key(name) && SIM_CAPACITY_GLOBALS.contains(&declared)
+    })
 }
 
 pub(crate) fn apply(
@@ -303,10 +234,7 @@ pub(crate) fn apply(
     sims: &mut [crate::skull_backend::SimDescriptor],
 ) {
     use bone_core::prelude::ModuleId;
-    let mut name_map: std::collections::HashMap<
-        ustr::Ustr,
-        Vec<(ModuleId, bone_core::prelude::Idx<bone_core::hir::Function>)>,
-    > = std::collections::HashMap::new();
+    let mut name_map = NameMap::new();
     for module in ws.modules.iter() {
         if module.id == ModuleId::builtin() {
             continue;
@@ -315,6 +243,8 @@ pub(crate) fn apply(
             name_map.entry(f.name).or_default().push((module.id, fid));
         }
     }
+    let reads_pixels = |key| names_pixel_reader(ws, key);
+    let reads_capacity = |key| references_capacity(ws, key, &name_map);
     let mut pixel_memo = std::collections::HashMap::new();
     let mut capacity_memo = std::collections::HashMap::new();
     let mut visiting = std::collections::HashSet::new();
@@ -326,20 +256,21 @@ pub(crate) fn apply(
         // Skipped when the sim declares any `STONE_WINDOW` (an explicit
         // empty keeps the game's own size); prepended so the pair order
         // reads default-first.
+        let key = (sim.module, sim.function);
         let explicit_window = sim.env_pairs.iter().any(|(k, _)| k == "STONE_WINDOW");
         if !explicit_window
-            && !sim_reads_pixels(
+            && !sim_reaches(
                 ws,
-                sim.module,
-                sim.function,
+                key,
+                &reads_pixels,
                 &mut pixel_memo,
                 &mut visiting,
                 &name_map,
             )
-            && !sim_reads_capacity(
+            && !sim_reaches(
                 ws,
-                sim.module,
-                sim.function,
+                key,
+                &reads_capacity,
                 &mut capacity_memo,
                 &mut visiting,
                 &name_map,
