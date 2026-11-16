@@ -1963,17 +1963,13 @@ fn two_nomangle_roots_sharing_a_bare_name_collide_and_retract_locally() {
         .filter(|root| *root != removed_root)
         .collect();
     let fresh = realize(&ws, &g, LUAJIT_DESKTOP, &narrowed);
-    let stats = local.update_local(
+    local.update_local(
         &ws,
         &g,
         &ArtifactRequest::new(LUAJIT_DESKTOP, &narrowed),
         &Default::default(),
         &Default::default(),
         &Default::default(),
-    );
-    assert!(
-        stats.root_entries_examined > 0,
-        "root-delta fixture did no indexed root work: {stats:?}"
     );
     assert_eq!(
         local.publications, fresh.publications,
@@ -1992,17 +1988,13 @@ fn two_nomangle_roots_sharing_a_bare_name_collide_and_retract_locally() {
         "symbol rows changed under a publication delta"
     );
     let restored = realize(&ws, &g, LUAJIT_DESKTOP, &roots);
-    let install_stats = local.update_local(
+    local.update_local(
         &ws,
         &g,
         &ArtifactRequest::new(LUAJIT_DESKTOP, &roots),
         &Default::default(),
         &Default::default(),
         &Default::default(),
-    );
-    assert!(
-        install_stats.root_entries_examined > 0,
-        "root-addition fixture did no indexed root work: {install_stats:?}"
     );
     assert_eq!(
         local.publications, restored.publications,
@@ -2036,7 +2028,6 @@ struct LocalUpdate {
     ws: Workspace,
     local: artifact::ArtifactView,
     fresh: artifact::ArtifactView,
-    stats: artifact::ArtifactUpdateStats,
 }
 
 /// `v1`'s view, updated locally after the user body `changed` is edited to
@@ -2078,7 +2069,7 @@ fn update_locally(
     );
     let fresh_graph = instance_graph::build(&ws2, roots2, false);
     let fresh = artifact::realize(&ws2, &fresh_graph, &request(&request_roots));
-    let stats = local.update_local(
+    local.update_local(
         &ws2,
         &graph,
         &request(&request_roots),
@@ -2090,7 +2081,6 @@ fn update_locally(
         ws: ws2,
         local,
         fresh,
-        stats,
     }
 }
 
@@ -2100,12 +2090,7 @@ fn all_roots(_: &Workspace, roots: &[FuncRef]) -> Vec<FuncRef> {
 
 #[test]
 fn local_symbol_collision_retraction_matches_fresh_view() {
-    let LocalUpdate {
-        local,
-        fresh,
-        stats,
-        ..
-    } = update_locally(
+    let LocalUpdate { local, fresh, .. } = update_locally(
         "fn left() -> int { return 1 }\nfn right() -> int { return 2 }\n\
          fn main() { let a = left()\n let b = right()\n print(\"{a}{b}\") }",
         "fn left() -> int { return 1 }\nfn right() -> int { return 2 }\n\
@@ -2122,10 +2107,6 @@ fn local_symbol_collision_retraction_matches_fresh_view() {
             );
         },
     );
-    assert!(
-        stats.iterations > 0,
-        "symbol-delta fixture did no local artifact work: {stats:?}"
-    );
     assert_eq!(
         local.symbol_collisions, fresh.symbol_collisions,
         "symbol collision rows went stale"
@@ -2138,12 +2119,7 @@ fn local_symbol_collision_retraction_matches_fresh_view() {
 
 #[test]
 fn local_inline_foreign_dependency_retraction_matches_fresh_view() {
-    let LocalUpdate {
-        local,
-        fresh,
-        stats,
-        ..
-    } = update_locally(
+    let LocalUpdate { local, fresh, .. } = update_locally(
         r#"
 inline(lua) fn foreign_dep(x: int) -> int = """
     return __rock_vec_column_elements({ len = 1 }, x)
@@ -2170,10 +2146,6 @@ fn main() { let x = caller() }
                 "inline foreign-dependency fixture had no retained dependency"
             );
         },
-    );
-    assert!(
-        stats.iterations > 0,
-        "inline-delta fixture did no local artifact work: {stats:?}"
     );
     assert_eq!(
         local.inline_deps, fresh.inline_deps,
