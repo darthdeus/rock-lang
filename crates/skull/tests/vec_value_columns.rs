@@ -33,53 +33,34 @@ fn fill(n: int) -> float {
 fn main() { let _ = fill(8) }
 "#;
 
-/// The headline property: nothing in the push/read loop constructs an element.
-/// This is the single assertion the whole feature exists to make true.
+/// The headline properties: pushes and reads stay in leaf columns without
+/// constructing or fetching whole elements.
 #[test]
-fn vec_of_value_struct_never_boxes_an_element() {
+fn vec_of_value_struct_uses_columns_for_push_and_read() {
     let lua = emit_module(VEC_VALUE_LOOP);
     let body = function_body(&lua, "fill");
     assert!(
         !body.contains("V2_ct("),
-        "[V2] push boxed the element (`V2_ct(..)`); flat storage means the \
-         element table never exists:\n{body}"
+        "[V2] push boxed the element (`V2_ct(..)`); source:\n{VEC_VALUE_LOOP}\nemitted body:\n{body}"
     );
-}
-
-/// `push` today splices the `vec_push` inline(lua) body, which writes a whole
-/// element into one backing (`vec._data[vec.len] = item`). Under columns it must
-/// write each leaf into its own column instead.
-#[test]
-fn push_writes_one_slot_per_leaf() {
-    let lua = emit_module(VEC_VALUE_LOOP);
-    let body = function_body(&lua, "fill");
     assert!(
         !body.contains("_data"),
-        "[V2] push still wrote the single `_data` backing; columns replace it:\n{body}"
+        "[V2] push still wrote the single `_data` backing; source:\n{VEC_VALUE_LOOP}\nemitted body:\n{body}"
     );
     // The literal builds one array per leaf. Regalloc splits the store itself
     // into `rN = vec.x` / `rN[i] = ..`, so assert the CONSTRUCTION shape (which
     // is stable) rather than a fused `vec.x[i]` text that never appears.
     assert!(
         body.contains(r#"["x"] = {}"#) && body.contains(r#"["y"] = {}"#),
-        "[V2] literal did not build per-leaf column arrays:\n{body}"
+        "[V2] literal did not build per-leaf column arrays; source:\n{VEC_VALUE_LOOP}\nemitted body:\n{body}"
     );
     assert!(
         body.contains(".x") && body.contains(".y"),
-        "[V2] push did not reach the leaf columns:\n{body}"
+        "[V2] push did not reach the leaf columns; source:\n{VEC_VALUE_LOOP}\nemitted body:\n{body}"
     );
-}
-
-/// A projecting read must touch exactly the column it needs. Today this is
-/// `__vec_checked_get(xs, i).x` -- fetch the whole element table, then project.
-#[test]
-fn projecting_read_indexes_one_column() {
-    let lua = emit_module(VEC_VALUE_LOOP);
-    let body = function_body(&lua, "fill");
     assert!(
         !body.contains("__vec_checked_get("),
-        "`xs[i].x` still fetched the whole element; a column read indexes the \
-         `x` column directly:\n{body}"
+        "`xs[i].x` still fetched the whole element; source:\n{VEC_VALUE_LOOP}\nemitted body:\n{body}"
     );
 }
 
@@ -566,11 +547,8 @@ fn nobox_column_sort_never_materializes_an_element() {
         !body.contains("NP_ct(") && !body.contains("NP_lct("),
         "[NP].sort built an element; the key fn takes leaves:\n{body}"
     );
-    assert_eq!(
-        crate::common::run_main(&lua),
-        "1,10,2,20,3,30",
-        "every column must permute in lockstep with the key's column"
-    );
+    // Runtime sorting and the zero-materialization count are covered by
+    // `tests/vectors/column_stdlib_surface.rock`.
 }
 
 #[test]

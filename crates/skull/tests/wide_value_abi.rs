@@ -125,31 +125,28 @@ fn main() { print("{queue_sprites(0.5, 3)}") }
 "#;
 
 #[test]
-fn the_wide_uniform_witness_compiles_loads_and_computes() {
+fn the_wide_uniform_witness_uses_one_slot_per_wide_value() {
     let lua = try_emit_module(WIDE_UNIFORM_SRC).expect("the wide-uniform shape must emit");
     luajit_loads(&lua).expect("the emitted chunk must load");
-    // Per iteration: count 1 + sprite_position.x (the index) + sprite_receiver 1
-    // + origin.x 0.5, plus 0 + 1 + 2 from the three live narrow locals.
-    // (2.5 + 3.5 + 4.5) + 3 * 3 = 19.5.
-    assert_eq!(run_main(&lua), "19.5");
-}
-
-/// The 58-leaf ordinary value crosses as ONE slot, so the helper's emitted
-/// parameter list is two entries, not 59.
-#[test]
-fn the_wide_uniform_helper_takes_one_slot_per_wide_value() {
-    let lua = try_emit_module(WIDE_UNIFORM_SRC).expect("emits");
     assert_eq!(
         emitted_params(&lua, "sprite_uniform").len(),
         2,
-        "the 58-leaf ordinary value must cross as one slot:\n{}",
+        "the 58-leaf ordinary value must cross as one slot; source:\n{WIDE_UNIFORM_SRC}\nemitted body:\n{}",
         function_body(&lua, "sprite_uniform")
     );
     assert_eq!(
         emitted_params(&lua, "uniform_signal").len(),
         1,
-        "the 58-leaf ordinary value must cross as one slot:\n{}",
+        "the 58-leaf ordinary value must cross as one slot; source:\n{WIDE_UNIFORM_SRC}\nemitted body:\n{}",
         function_body(&lua, "uniform_signal")
+    );
+    // Per iteration: count 1 + sprite_position.x (the index) + sprite_receiver 1
+    // + origin.x 0.5, plus 0 + 1 + 2 from the three live narrow locals.
+    // (2.5 + 3.5 + 4.5) + 3 * 3 = 19.5.
+    assert_eq!(
+        run_main(&lua),
+        "19.5",
+        "wide uniform computation; source:\n{WIDE_UNIFORM_SRC}"
     );
 }
 
@@ -248,23 +245,25 @@ fn a_value_one_leaf_over_the_cut_takes_the_aggregate_wire() {
 /// under the cut, one boxed slot over it.
 #[test]
 fn a_nullable_ordinary_value_takes_the_cut_of_its_payload() {
-    for (payload, lanes) in [(2, 3), (WIDE_VALUE_PAYLOAD_LEAF_CUT + 1, 1)] {
-        let lua = try_emit_module(&cut_fixture(payload, true)).expect("emits");
-        assert_eq!(
-            emitted_params(&lua, "thru").len(),
-            lanes,
-            "`V?` at {payload} payload leaves:\n{}",
-            function_body(&lua, "thru")
-        );
-    }
-    for payload in [
-        2,
-        WIDE_VALUE_PAYLOAD_LEAF_CUT,
-        WIDE_VALUE_PAYLOAD_LEAF_CUT + 1,
+    for (payload, lanes) in [
+        (2, Some(3)),
+        (WIDE_VALUE_PAYLOAD_LEAF_CUT, None),
+        (WIDE_VALUE_PAYLOAD_LEAF_CUT + 1, Some(1)),
     ] {
+        let src = cut_fixture(payload, true);
+        let lua = try_emit_module(&src).expect("emits");
+        if let Some(lanes) = lanes {
+            assert_eq!(
+                emitted_params(&lua, "thru").len(),
+                lanes,
+                "`V?` at {payload} payload leaves; source:\n{src}\nemitted body:\n{}",
+                function_body(&lua, "thru")
+            );
+        }
         assert_eq!(
-            run_main(&try_emit_module(&cut_fixture(payload, true)).expect("emits")),
+            run_main(&lua),
             "1",
+            "nullable round trip at {payload} payload leaves; source:\n{src}"
         );
     }
 }
@@ -353,14 +352,15 @@ fn main() {{
     )
 }
 
-/// The regime the budget fixtures need. Checked as its own test so a `K` or
-/// budget change that invalidates them says so directly.
+/// Check the fixture regime and every budget decision against one emission, so
+/// a cut or budget change says which case moved without compiling the source
+/// again for the separate boxed and nobox assertions.
 #[test]
 #[expect(
     clippy::assertions_on_constants,
     reason = "Keep fixture assumptions checked by this named runtime test"
 )]
-fn the_budget_fixtures_are_in_the_regime_they_claim() {
+fn the_lane_budget_boxes_widest_ordinary_values_and_never_nobox_values() {
     let b = SIGNATURE_SCALAR_LANE_BUDGET;
     assert!(
         BUDGET_MEMBER <= WIDE_VALUE_PAYLOAD_LEAF_CUT
@@ -390,40 +390,30 @@ fn the_budget_fixtures_are_in_the_regime_they_claim() {
             .contains(&b),
         "budget_nobox_widest must need exactly one box"
     );
-}
-
-#[test]
-fn a_signature_over_the_lane_budget_boxes_widest_first() {
-    let lua = try_emit_module(&budget_src()).expect("emits");
+    let src = budget_src();
+    let lua = try_emit_module(&src).expect("emits");
     let params = emitted_params(&lua, "budget_five");
     assert_eq!(
         params.len(),
         2 + BUDGET_MEMBER * 3,
-        "the budget must box the two widest values and leave the rest scalar:\n{}",
+        "budget_five must box the two widest values and leave the rest scalar; source:\n{src}\nemitted body:\n{}",
         function_body(&lua, "budget_five")
     );
     assert!(
         params.len() < SIGNATURE_SCALAR_LANE_BUDGET,
-        "the surviving lanes must fit the budget: {}",
+        "budget_five surviving lanes must fit the budget: {}",
         params.len() + 1
     );
     assert_eq!(
         run_main(&lua),
         "15",
-        "boxing must not change what the call computes"
+        "budget_five boxing must preserve the result; source:\n{src}"
     );
-}
-
-/// The budget never boxes a `nobox` member, and counts its REAL lanes
-/// (presence flags included) against the budget like any other.
-#[test]
-fn the_budget_never_boxes_a_nobox_member() {
-    let lua = try_emit_module(&budget_src()).expect("emits");
     let params = emitted_params(&lua, "budget_mixed");
     assert_eq!(
         params.len(),
         1 + BUDGET_MEMBER * 2 + BUDGET_NARROW * 2,
-        "exactly one ordinary value must box, and the nobox member must keep its lanes:\n{}",
+        "budget_mixed must box one ordinary value and keep nobox lanes; source:\n{src}\nemitted body:\n{}",
         function_body(&lua, "budget_mixed")
     );
     // The WIDEST member here is the `nobox` one. Ranking candidates without
@@ -432,7 +422,7 @@ fn the_budget_never_boxes_a_nobox_member() {
     assert_eq!(
         widest.len(),
         BUDGET_NOBOX_WIDE + 1 + BUDGET_MEMBER * 2,
-        "the budget boxed the nobox member instead of the widest ORDINARY value:\n{}",
+        "budget_nobox_widest must box the widest ordinary value; source:\n{src}\nemitted body:\n{}",
         function_body(&lua, "budget_nobox_widest")
     );
 }
@@ -510,14 +500,31 @@ fn call_kinds_src() -> String {
 
 #[test]
 fn every_call_kind_agrees_on_the_boxed_wire() {
-    let lua = try_emit_module(&call_kinds_src()).expect("emits");
+    let src = call_kinds_src();
+    let lua = try_emit_module(&src).expect("emits");
     assert_eq!(
         emitted_params(&lua, "bump").len(),
         1,
-        "a value one leaf over the cut must box:\n{}",
+        "a value one leaf over the cut must box; source:\n{src}\nemitted body:\n{}",
         function_body(&lua, "bump")
     );
-    assert_eq!(run_main(&lua), "1 1 1 1 0 1 3 1 2",);
+    let names = definition_names(&lua);
+    for name in names {
+        if !name.starts_with("bump") {
+            continue;
+        }
+        assert_eq!(
+            emitted_params(&lua, name).len(),
+            1,
+            "a `bump` variant disagrees on the boxed wire; source:\n{src}\nemitted body:\n{}",
+            function_body(&lua, name)
+        );
+    }
+    assert_eq!(
+        run_main(&lua),
+        "1 1 1 1 0 1 3 1 2",
+        "call kinds disagreed at runtime; source:\n{src}"
+    );
 }
 
 /// Value semantics survive the box: a callee that mutates its own copy of a
@@ -551,7 +558,7 @@ fn main() {{
     assert_eq!(
         emitted_params(&lua, "keep_and_mutate").len(),
         1,
-        "the fixture must exercise a BOXED parameter:\n{}",
+        "the fixture must exercise a BOXED parameter; source:\n{src}\nemitted body:\n{}",
         function_body(&lua, "keep_and_mutate")
     );
     assert_eq!(
@@ -584,36 +591,14 @@ fn main() {{
     assert_eq!(
         emitted_params(&lua, "forward").len(),
         1,
-        "the forwarder must take the box:\n{body}"
+        "the forwarder must take the box; source:\n{src}\nemitted body:\n{body}"
     );
     assert_eq!(
         body.matches("_ct(").count(),
         0,
-        "the forwarder must reuse the argument box:\n{body}"
+        "the forwarder must reuse the argument box; source:\n{src}\nemitted body:\n{body}"
     );
     assert_eq!(run_main(&lua), "3 9");
-}
-
-/// The boxed wire is a property of the type alone, so a body whose CALLEE's
-/// wire changed must be re-emitted. Byte identity between a full build and an
-/// incremental one is what proves both agree; the witness here is narrower and
-/// local: every definition the full build emits is emitted with the same
-/// parameter arity for the boxed callee and its callers.
-#[test]
-fn the_boxed_wire_is_consistent_across_every_emitted_definition() {
-    let lua = try_emit_module(&call_kinds_src()).expect("emits");
-    let names = definition_names(&lua);
-    for name in names {
-        if !name.starts_with("bump") {
-            continue;
-        }
-        assert_eq!(
-            emitted_params(&lua, name).len(),
-            1,
-            "a `bump` variant disagrees on the boxed wire:\n{}",
-            function_body(&lua, name)
-        );
-    }
 }
 
 /// The frame-limit diagnostic is what a wide `nobox` value still meets, and it

@@ -99,17 +99,28 @@ fn main() {
 "#;
 
 #[test]
-fn wide_nobox_vec_declares_strided_storage() {
+fn wide_nobox_vec_stores_each_leaf_in_strided_rows() {
     let lua =
         try_emit_module(&program(PUSH_MAIN)).expect("a wide nobox element must stay flat in a Vec");
     let main = function_body(&lua, "main");
     assert!(
         crate::common::has_vec_header(main, "strided", None),
-        "a wide nobox Vec must use the row-major strided backing:\n{main}"
+        "a wide nobox Vec must use the row-major strided backing; source:\n{}\nemitted body:\n{main}",
+        program(PUSH_MAIN)
     );
     assert!(
         !main.contains(r#"["pay.__tag"] = {}"#),
-        "a wide nobox Vec must not build one table per leaf:\n{main}"
+        "a wide nobox Vec must not build one table per leaf; source:\n{}\nemitted body:\n{main}",
+        program(PUSH_MAIN)
+    );
+    assert_eq!(
+        run_main(&lua),
+        "1:o1,2,7,false:bob:hit:true:0:f4:s3:9|\
+         2:d5:-::false:0:nf:ns:0.5|\
+         3:thi:-::false:0:nf:ns:0.5|\
+         4:n:-::false:0:nf:ns:0.5|",
+        "wide nobox leaves did not round trip; source:\n{}",
+        program(PUSH_MAIN)
     );
 }
 
@@ -149,18 +160,6 @@ fn main() {{ let xs: [Row] = []; emit(xs, Row {{ {values} }}) }}
         assert_eq!(*shared_base.get_or_insert(base), base, "{push}");
         assert_eq!(physical, format!("({}))", offset + 1), "{push}");
     }
-}
-
-#[test]
-fn wide_nobox_elements_round_trip_every_leaf_kind() {
-    let lua = try_emit_module(&program(PUSH_MAIN)).expect("emits");
-    assert_eq!(
-        run_main(&lua),
-        "1:o1,2,7,false:bob:hit:true:0:f4:s3:9|\
-         2:d5:-::false:0:nf:ns:0.5|\
-         3:thi:-::false:0:nf:ns:0.5|\
-         4:n:-::false:0:nf:ns:0.5|"
-    );
 }
 
 const RESERVE_MAIN: &str = r#"

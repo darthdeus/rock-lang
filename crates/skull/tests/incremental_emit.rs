@@ -53,16 +53,24 @@ fn scalar_constant_edits_refresh_full_incremental_and_overlay_emission() {
 #[test]
 fn derived_scalar_constant_edits_refresh_transitive_readers_at_runtime() {
     let template = "fn source() -> int { 32 }\nconst BASE: int = INIT\nconst SCALE: int = BASE * 128\nconst DERIVED: int = SCALE + 1\n@nomangle fn choose() -> int { DERIVED }";
-    for (from, to, expected_before, expected_after, folded_after) in [
-        ("8", "16", 1025, 2049, true),
-        ("16", "source()", 2049, 4097, false),
-        ("source()", "8", 4097, 1025, true),
+    assert_eq!(
+        template.matches("INIT").count(),
+        1,
+        "one initializer marker"
+    );
+    let with_init = |init: &str| template.replacen("INIT", init, 1);
+    let ws1 = ws_with_stdlib(&with_init("8"));
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut incremental_cache) = emit_full(&ws1, mid).unwrap();
+    let (_, mut overlay_cache) = emit_full(&ws1, mid).unwrap();
+    let mut runtime = format!("{}\nassert(choose() == 1025)\n", full.lua);
+    for (label, init, expected_before, expected_after, folded_after) in [
+        ("BASE 8 -> 16", "16", 1025, 2049, true),
+        ("BASE 16 -> source()", "source()", 2049, 4097, false),
+        ("BASE source() -> 8", "8", 4097, 1025, true),
     ] {
-        let ws1 = ws_with_stdlib(&template.replace("INIT", from));
-        let mid = skull::user_module_id(&ws1).unwrap();
-        let (full, mut incremental_cache) = emit_full(&ws1, mid).unwrap();
-        let (_, mut overlay_cache) = emit_full(&ws1, mid).unwrap();
-        let ws2 = ws_with_stdlib(&template.replace("INIT", to));
+        let source = with_init(init);
+        let ws2 = ws_with_stdlib(&source);
         let (mid2, gid) = ws2
             .modules
             .iter()
@@ -74,24 +82,28 @@ fn derived_scalar_constant_edits_refresh_transitive_readers_at_runtime() {
             })
             .unwrap();
         let edited = [(mid2, BodyOwner::Global(gid))];
-        let incremental = emit_incremental(&ws2, &mut incremental_cache, &edited).unwrap();
-        assert_eq!(incremental.lua, emit_full(&ws2, mid).unwrap().0.lua);
+        let incremental = emit_incremental(&ws2, &mut incremental_cache, &edited)
+            .unwrap_or_else(|err| panic!("{label}: incremental emit failed: {err:?}"));
+        assert_eq!(
+            incremental.lua,
+            emit_full(&ws2, mid).unwrap().0.lua,
+            "{label}: incremental != fresh"
+        );
         let overlay = emit_overlay(&ws2, &mut overlay_cache, &edited);
         let after = crate::common::function_body(&overlay.lua, "choose");
-        if folded_after {
-            assert!(
-                after.contains(&expected_after.to_string()) && !after.contains("DERIVED"),
-                "{after}"
-            );
-        } else {
-            assert!(after.contains("DERIVED"), "{after}");
-        }
-        let run = format!(
-            "{}\nassert(choose() == {expected_before})\n{}\nassert(choose() == {expected_after})\nprint('ok')",
-            full.lua, overlay.lua
+        assert_eq!(
+            after.contains(&expected_after.to_string()),
+            folded_after,
+            "{label}: {after}"
         );
-        assert_eq!(crate::common::run_luajit(&run), "ok");
+        assert_eq!(after.contains("DERIVED"), !folded_after, "{label}: {after}");
+        runtime.push_str(&format!(
+            "assert(choose() == {expected_before})\n{}\nassert(choose() == {expected_after})\n",
+            overlay.lua
+        ));
     }
+    runtime.push_str("print('ok')");
+    assert_eq!(crate::common::run_luajit(&runtime), "ok");
 }
 
 #[test]
@@ -695,9 +707,9 @@ fn main() {}
 "#;
 
 #[test]
-fn code_slot_staging_names_each_distinct_call_abi_once() {
-    let ws = ws_of(SHARED_ABI_SLOTS);
-    let (full, _cache) = emit_full_of(&ws, "emit_full");
+fn shared_call_abis_are_staged_once_and_remain_compatible_across_overlays() {
+    let ws1 = ws_of(SHARED_ABI_SLOTS);
+    let (full, mut cache) = emit_full_of(&ws1, "emit_full");
     let abis: std::collections::BTreeSet<&str> = full
         .code_artifact
         .entries
@@ -723,13 +735,7 @@ fn code_slot_staging_names_each_distinct_call_abi_once() {
             "ABI {literal} must be named once"
         );
     }
-}
-
-#[test]
-fn a_shared_call_abi_stays_compatible_across_an_overlay() {
     let v2 = SHARED_ABI_SLOTS.replace("@tick fn first() {}", "@tick fn first() { let x = 1 }");
-    let ws1 = ws_of(SHARED_ABI_SLOTS);
-    let (full, mut cache) = emit_full_of(&ws1, "emit_full");
     let escaping: Vec<_> = full
         .code_artifact
         .entries

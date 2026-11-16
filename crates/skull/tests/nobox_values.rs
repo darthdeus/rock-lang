@@ -126,23 +126,19 @@ fn main() {}
 "#;
 
 #[test]
-fn nobox_equality_compares_leaves_without_materializing() {
+fn nobox_whole_value_operators_do_not_materialize() {
     let lua = emit_module(NOBOX_WHOLE_VALUE_OPERATORS);
-    let body = function_body(&lua, "same");
-    assert!(
-        !body.contains("NV2_ct("),
-        "nobox equality materialized its operands:\n{body}"
-    );
-}
-
-#[test]
-fn nobox_null_check_does_not_materialize() {
-    let lua = emit_module(NOBOX_WHOLE_VALUE_OPERATORS);
-    let body = function_body(&lua, "absent");
-    assert!(
-        !body.contains("NV2_ct("),
-        "nobox null check materialized its operand:\n{body}"
-    );
+    for (name, case) in [
+        ("same", "equality"),
+        ("absent", "null check"),
+        ("render", "interpolation"),
+    ] {
+        let body = function_body(&lua, name);
+        assert!(
+            !body.contains("NV2_ct("),
+            "nobox {case} materialized in `{name}`; source:\n{NOBOX_WHOLE_VALUE_OPERATORS}\nemitted body:\n{body}"
+        );
+    }
 }
 
 const NOBOX_NULLABLE_CALL: &str = r#"
@@ -548,16 +544,6 @@ fn a_column_read_widens_to_nullable_without_materializing() {
         );
     }
     assert_eq!(run_main(&lua), "1\n12\n34\n-1\n56\n12\n34\n-1\n-1\n78");
-}
-
-#[test]
-fn nobox_interpolation_does_not_materialize() {
-    let lua = emit_module(NOBOX_WHOLE_VALUE_OPERATORS);
-    let body = function_body(&lua, "render");
-    assert!(
-        !body.contains("NV2_ct("),
-        "nobox interpolation materialized its operand:\n{body}"
-    );
 }
 
 // A shape that still materializes, so the gate below stays a gate. Twice
@@ -1380,19 +1366,13 @@ fn main() {
 "#;
 
 #[test]
-fn a_generic_nullable_param_threads_a_nobox_argument_as_leaves() {
+fn nullable_generic_params_keep_their_declared_abis() {
     let lua = emit_module(NOBOX_THROUGH_GENERIC_NULLABLE);
     let body = function_body(&lua, "nobox_sum");
     assert!(
         !body.contains("NV2_ct("),
-        "a nobox value crossing `T?` materialized a cdata:\n{body}"
+        "a nobox value crossing `T?` materialized a cdata; source:\n{NOBOX_THROUGH_GENERIC_NULLABLE}\nemitted body:\n{body}"
     );
-    assert_eq!(run_main(&lua), "3 30");
-}
-
-#[test]
-fn a_nullable_param_takes_the_presence_lane_for_an_unmarked_value() {
-    let lua = emit_module(NOBOX_THROUGH_GENERIC_NULLABLE);
     let head = function_body(&lua, "boxed_sum")
         .lines()
         .next()
@@ -1402,7 +1382,12 @@ fn a_nullable_param_takes_the_presence_lane_for_an_unmarked_value() {
     // presence lane plus its leaves. `nobox` adds the guarantee, not the wire.
     assert!(
         head.ends_with("(c0, c1, c2)"),
-        "an unmarked nullable value struct is not on the presence wire: {head}"
+        "an unmarked nullable value struct is not on the presence wire; source:\n{NOBOX_THROUGH_GENERIC_NULLABLE}\nheader: {head}"
+    );
+    assert_eq!(
+        run_main(&lua),
+        "3 30",
+        "nullable generic params computed the wrong result; source:\n{NOBOX_THROUGH_GENERIC_NULLABLE}"
     );
 }
 
@@ -1425,23 +1410,19 @@ fn main() {
 "#;
 
 #[test]
-fn null_coalescing_a_nobox_nullable_stays_on_leaves() {
+fn nullable_nobox_bindings_stay_on_leaves() {
     let lua = emit_module(NOBOX_NULLABLE_BINDINGS);
-    let body = function_body(&lua, "coalesce");
-    assert!(
-        !body.contains("NV2_ct("),
-        "`??` materialized a nobox cdata:\n{body}"
-    );
-    assert_eq!(run_main(&lua), "3 11 7 -1");
-}
-
-#[test]
-fn if_let_binding_a_nobox_nullable_stays_on_leaves() {
-    let lua = emit_module(NOBOX_NULLABLE_BINDINGS);
-    let body = function_body(&lua, "if_let");
-    assert!(
-        !body.contains("NV2_ct("),
-        "`if let` materialized a nobox cdata:\n{body}"
+    for (name, case) in [("coalesce", "`??`"), ("if_let", "`if let`")] {
+        let body = function_body(&lua, name);
+        assert!(
+            !body.contains("NV2_ct("),
+            "{case} materialized a nobox cdata in `{name}`; source:\n{NOBOX_NULLABLE_BINDINGS}\nemitted body:\n{body}"
+        );
+    }
+    assert_eq!(
+        run_main(&lua),
+        "3 11 7 -1",
+        "nullable coalesce/if-let result; source:\n{NOBOX_NULLABLE_BINDINGS}"
     );
 }
 
@@ -1561,7 +1542,7 @@ fn a_nobox_value_in_a_tuple_return_carries_its_leaves() {
         3,
         "the flag plus two leaves must come back as three values:\n{lua}"
     );
-    assert_eq!(run_main(&lua), "true 1 2");
+    // Runtime return/value coverage is in `tests/nobox/tuple.rock`.
 }
 
 const NOBOX_PHI_CONTROLS: &str = r#"
