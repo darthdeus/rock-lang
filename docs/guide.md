@@ -633,7 +633,7 @@ fn whisper(s: string) -> string {
 
 The files live in `16_modules/`; `rock run 16_modules` (or `rock run .`
 inside it) prints `HELLO!`. See the [modules reference](modules.md) for
-imports, visibility, and compatibility with legacy packages.
+imports, visibility, and how v1 and legacy packages relate.
 
 ## Tests
 

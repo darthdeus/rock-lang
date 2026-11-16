@@ -923,16 +923,11 @@ fn render_pretty(report: &Report, verdict: &Verdict) -> String {
                     let target = graph.package(edge.target);
                     let _ = writeln!(
                         o,
-                        "      dependency `{}` -> {} (#{}, {}){}",
+                        "      dependency `{}` -> {} (#{}, {})",
                         edge.alias,
                         target.manifest_name,
                         edge.target.0,
                         dialect_str(target.dialect),
-                        if edge.allow_legacy {
-                            " allow_legacy"
-                        } else {
-                            ""
-                        }
                     );
                 }
             }
@@ -1434,7 +1429,6 @@ fn render_json(report: &Report, verdict: &Verdict) -> Value {
                             "alias": e.alias,
                             "package": graph.package(e.target).manifest_name,
                             "id": e.target.0,
-                            "allow_legacy": e.allow_legacy,
                         })).collect::<Vec<_>>(),
                     })
                 })

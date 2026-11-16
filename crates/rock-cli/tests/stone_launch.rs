@@ -222,8 +222,11 @@ fn a_stone_launch_preserves_process_and_state_on_the_first_body_edit() {
     let game = fixture.path().join("game");
     std::fs::create_dir(&game).unwrap();
     std::fs::write(game.join("stick.toml"),
-        "[package]\nname = \"watch-probe\"\n[dependencies]\nstone = { package = \"stone\" }\n[build.vars]\nGIT_SHA = \"probe\"\nBUILD_UNIX = \"0\"\nBUILD_DATE = \"test\"\nCHANNEL = { builtin = \"channel\" }\nPLATFORM = { builtin = \"platform\" }\n").unwrap();
+        "[package]\nname = \"watch-probe\"\n[language]\nmodules = \"v1\"\n[dependencies]\nstone = { package = \"stone\" }\nstone-core = { package = \"stone-core\" }\n[build.vars]\nGIT_SHA = \"probe\"\nBUILD_UNIX = \"0\"\nBUILD_DATE = \"test\"\nCHANNEL = { builtin = \"channel\" }\nPLATFORM = { builtin = \"platform\" }\n").unwrap();
     let source = r#"
+use stone::*;
+use stone_core::*;
+
 global ticks: int = 0
 fn version() -> int { 17 }
 inline(lua) fn record(ticks: int, version: int) = """
@@ -435,12 +438,15 @@ fn bounded_commands_run_an_external_stone_project() {
     std::fs::create_dir(&game).unwrap();
     std::fs::write(
         game.join("stick.toml"),
-        "[package]\nname = \"bounded-probe\"\n[dependencies]\nstone = { package = \"stone\" }\n[build.vars]\nGIT_SHA = \"probe\"\nBUILD_UNIX = \"0\"\nBUILD_DATE = \"test\"\nCHANNEL = { builtin = \"channel\" }\nPLATFORM = { builtin = \"platform\" }\n",
+        "[package]\nname = \"bounded-probe\"\n[language]\nmodules = \"v1\"\n[dependencies]\nstone = { package = \"stone\" }\nstone-core = { package = \"stone-core\" }\n[build.vars]\nGIT_SHA = \"probe\"\nBUILD_UNIX = \"0\"\nBUILD_DATE = \"test\"\nCHANNEL = { builtin = \"channel\" }\nPLATFORM = { builtin = \"platform\" }\n",
     )
     .unwrap();
     std::fs::write(
         game.join("main.rock"),
         r#"
+use stone::*;
+use stone_core::*;
+
 @init
 fn probe_init() {
     if os_getenv("BOUNDED_FAIL") == "throw" { error("bounded runtime sentinel") }
@@ -648,12 +654,15 @@ fn sim_commands_run_and_report_an_external_stone_project() {
     let game = fixture.path().join("game");
     std::fs::create_dir_all(game.join("tests/sims")).unwrap();
     std::fs::write(game.join("stick.toml"),
-        "[package]\nname = \"sim-probe\"\n[dependencies]\nstone = { package = \"stone\" }\n[build.vars]\nGIT_SHA = \"probe\"\nBUILD_UNIX = \"0\"\nBUILD_DATE = \"test\"\nCHANNEL = { builtin = \"channel\" }\nPLATFORM = { builtin = \"platform\" }\n").unwrap();
+        "[package]\nname = \"sim-probe\"\n[language]\nmodules = \"v1\"\n[dependencies]\nstone = { package = \"stone\" }\nstone-core = { package = \"stone-core\" }\n[build.vars]\nGIT_SHA = \"probe\"\nBUILD_UNIX = \"0\"\nBUILD_DATE = \"test\"\nCHANNEL = { builtin = \"channel\" }\nPLATFORM = { builtin = \"platform\" }\n").unwrap();
     std::fs::write(game.join("main.rock"),
-        "fn main() { stone_run_game(GameConfig { title: \"sim-probe\", width: 64, height: 64, vsync: 0 }) }\n").unwrap();
+        "use stone::*;\nfn main() { stone_run_game(GameConfig { title: \"sim-probe\", width: 64, height: 64, vsync: 0 }) }\n").unwrap();
     std::fs::write(
         game.join("tests/sims/probe.rock"),
         r#"
+use stone::*;
+use stone_core::*;
+
 // The engine logs a null scope name at error level from Rust.
 inline(lua) fn probe_native_error() = "stone.stone_gpu_scope_begin(nil)"
 

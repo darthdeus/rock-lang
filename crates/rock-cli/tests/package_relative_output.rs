@@ -9,26 +9,39 @@ fn write(root: &Path, path: &str, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
-/// A legacy `app` (file-keyed definitions) using a v1 `lib`, under `base`.
-fn compile_under(base: &Path) -> String {
+/// An `app` using a `lib`, both in modules v1 or both legacy (file-keyed
+/// definitions), under `base`.
+fn compile_under(base: &Path, v1: bool) -> String {
+    let (language, export, import) = if v1 {
+        (
+            "\n[language]\nmodules = \"v1\"\n",
+            "pub ",
+            "use lib::{lib_offset, lib_site};\n",
+        )
+    } else {
+        ("", "", "")
+    };
     write(
         base,
         "lib/stick.toml",
-        "[package]\nname = \"lib\"\nversion = \"0.1.0\"\ntype = \"lib\"\n\n\
-         [language]\nmodules = \"v1\"\n",
+        &format!("[package]\nname = \"lib\"\nversion = \"0.1.0\"\ntype = \"lib\"\n{language}"),
     );
     write(
         base,
         "lib/lib.rock",
-        "pub fn lib_site() -> string { __SITE__ }\n\
-         pub fn lib_apply(f: (int) -> int, x: int) -> int { f(x) }\n\
-         pub fn lib_offset(x: int) -> int { lib_apply((v) => v + x, 1) }\n",
+        &format!(
+            "{export}fn lib_site() -> string {{ __SITE__ }}\n\
+             {export}fn lib_apply(f: (int) -> int, x: int) -> int {{ f(x) }}\n\
+             {export}fn lib_offset(x: int) -> int {{ lib_apply((v) => v + x, 1) }}\n"
+        ),
     );
     write(
         base,
         "app/stick.toml",
-        "[package]\nname = \"app\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n\
-         [dependencies]\nlib = { path = \"../lib\" }\n",
+        &format!(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\ntype = \"bin\"\n{language}\n\
+             [dependencies]\nlib = {{ path = \"../lib\" }}\n"
+        ),
     );
     write(
         base,
@@ -40,11 +53,13 @@ fn compile_under(base: &Path) -> String {
     write(
         base,
         "app/main.rock",
-        "fn main() {\n\
-         \x20   print(app_site())\n\
-         \x20   print(lib_site())\n\
-         \x20   print(\"{apply((v) => v + 1, 2)} {lib_offset(3)} {COUNT}\")\n\
-         }\n",
+        &format!(
+            "{import}fn main() {{\n\
+             \x20   print(app_site())\n\
+             \x20   print(lib_site())\n\
+             \x20   print(\"{{apply((v) => v + 1, 2)}} {{lib_offset(3)}} {{COUNT}}\")\n\
+             }}\n"
+        ),
     );
     let out = base.join("out.lua");
     let status = Command::new(env!("CARGO_BIN_EXE_rock"))
@@ -63,11 +78,17 @@ fn compile_under(base: &Path) -> String {
 
 #[test]
 fn a_package_compiled_from_two_directories_gives_identical_lua() {
+    for v1 in [true, false] {
+        compiled_from_two_directories(v1);
+    }
+}
+
+fn compiled_from_two_directories(v1: bool) {
     let first = tempfile::tempdir().unwrap();
     let second = tempfile::tempdir().unwrap();
     let nested = second.path().join("a").join("deeper").join("checkout");
-    let a = compile_under(first.path());
-    let b = compile_under(&nested);
+    let a = compile_under(first.path(), v1);
+    let b = compile_under(&nested, v1);
     for (lua, root) in [(&a, first.path()), (&b, nested.as_path())] {
         let canonical = root.canonicalize().unwrap();
         for spelling in [root, canonical.as_path()] {

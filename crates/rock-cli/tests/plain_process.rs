@@ -643,12 +643,13 @@ fn run_loads_a_manifest_dependency() {
     write(
         root.path(),
         "app/stick.toml",
-        "[package]\nname = \"app\"\ntype = \"bin\"\n[dependencies]\nlib = { path = \"../lib\" }\n",
+        "[package]\nname = \"app\"\ntype = \"bin\"\n[language]\nmodules = \"v1\"\n\
+         [dependencies]\nlib = { path = \"../lib\" }\n",
     );
     write(
         root.path(),
         "app/main.rock",
-        "fn main() { print(answer()) }\n",
+        "use lib::answer;\nfn main() { print(answer()) }\n",
     );
     let out = invoke(root.path(), &["run", "app"]);
     assert!(out.status.success(), "{}", text(&out));

@@ -43,8 +43,11 @@ fn make_seed(main_rock: &str) -> Vec<(String, String)> {
          name = \"deco_cleanup_test\"\n\
          version = \"0.1.0\"\n\
          type = \"bin\"\n\n\
+         [language]\n\
+         modules = \"v1\"\n\n\
          [dependencies]\n\
-         stone = { package = \"stone\" }\n";
+         stone = { package = \"stone\" }\n\
+         stone-core = { package = \"stone-core\" }\n";
     let stick = format!(
         "{stick}\n\n[build]\nchannels = [\"dev\"]\ndefault_channel = \"dev\"\n\n\
          [build.vars]\n\
@@ -56,7 +59,10 @@ fn make_seed(main_rock: &str) -> Vec<(String, String)> {
     );
     vec![
         ("stick.toml".to_string(), stick),
-        ("main.rock".to_string(), main_rock.to_string()),
+        (
+            "main.rock".to_string(),
+            format!("use stone::*;\nuse stone_core::*;\n\n{main_rock}"),
+        ),
     ]
 }
 

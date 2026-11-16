@@ -549,10 +549,10 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
                     fragments.values().sum::<usize>()
                 ));
             }
-            Some(e) if node.dialect == Dialect::Legacy && !e.allow_legacy => {
+            Some(_) if node.dialect == Dialect::Legacy => {
                 legacy_referenced.insert(owner);
                 owner_blockers.insert(format!(
-                    "the package references legacy dependency `{}` ({} reference(s)); a v1 package reaches a legacy one only through an `allow_legacy = true` edge (see \"Legacy dependencies\" in docs/modules.md), which the migrator does not add on the author's behalf",
+                    "the package references legacy dependency `{}` ({} reference(s)); a v1 package cannot depend on a legacy package (see \"Legacy packages\" in docs/modules.md)",
                     node.manifest_name,
                     fragments.values().sum::<usize>(),
                 ));
@@ -566,12 +566,9 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
     }
     for e in &p_node.dependencies {
         let target = pctx.graph.package(e.target);
-        if target.dialect == Dialect::Legacy
-            && !e.allow_legacy
-            && !legacy_referenced.contains(&e.target.0)
-        {
+        if target.dialect == Dialect::Legacy && !legacy_referenced.contains(&e.target.0) {
             owner_blockers.insert(format!(
-                "dependency `{}` is legacy: a v1 package needs `allow_legacy = true` on that edge (see \"Legacy dependencies\" in docs/modules.md); the migrator does not opt in on the author's behalf",
+                "dependency `{}` is legacy: a v1 package cannot depend on a legacy package (see \"Legacy packages\" in docs/modules.md)",
                 e.declared_key
             ));
         }

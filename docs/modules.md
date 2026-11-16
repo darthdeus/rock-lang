@@ -110,20 +110,9 @@ Public APIs must expose accessible types for their public signatures and fields.
 A public item can be re-exported from an otherwise private implementation
 module, provided the re-export does not expose a private definition.
 
-## Legacy dependencies
+## Legacy packages
 
-A legacy consumer can use the public root exports of a v1 dependency through
-its flat compatibility view; v1 privacy still applies. A v1 package may depend
-on a legacy package only when that dependency explicitly opts in:
-
-```toml
-[dependencies]
-old_lib = { path = "../old-lib", allow_legacy = true }
-```
-
-The legacy provider exposes its own declarations through that boundary, not
-every name available to its compilation unit. Its bodies still use legacy
-lookup, so the boundary does not establish package isolation. Legacy source
-can use `use` to import or alias a v1 export while retaining legacy expression
-syntax. `rock modules audit <project> --closed` reports reachable legacy
-boundaries; it does not prove purity or independence from external effects.
+A package depends only on packages with the same `[language] modules`
+setting: a legacy package cannot depend on a v1 package, and a v1 package
+cannot depend on a legacy one. The package graph rejects such an edge. Both
+dialects reach the compiler-owned standard library.

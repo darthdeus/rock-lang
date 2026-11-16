@@ -26,7 +26,7 @@ fn text(out: &Output) -> String {
     ))
 }
 
-/// A legacy `app` depending on a v1 `lib`, laid out as `app/` and `lib/`.
+/// A legacy `app` depending on a legacy `lib`, laid out as `app/` and `lib/`.
 fn workspace() -> tempfile::TempDir {
     let root = tempfile::tempdir().unwrap();
     let write = |path: &str, text: &str| {
@@ -36,10 +36,9 @@ fn workspace() -> tempfile::TempDir {
     };
     write(
         "lib/stick.toml",
-        "[package]\nname = \"lib\"\nversion = \"0.1.0\"\ntype = \"lib\"\n\n\
-         [language]\nmodules = \"v1\"\n",
+        "[package]\nname = \"lib\"\nversion = \"0.1.0\"\ntype = \"lib\"\n",
     );
-    write("lib/lib.rock", "pub fn answer() -> int { 42 }\n");
+    write("lib/lib.rock", "fn answer() -> int { 42 }\n");
     write(
         "app/stick.toml",
         "[package]\nname = \"app\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n\
@@ -68,8 +67,8 @@ fn module_reports_print_paths_relative_to_the_working_directory() {
             "\"file\": \"app/main.rock\"",
         ),
         (
-            &["modules", "migrate", "app", "--check"],
-            "    app/main.rock: lib (1)\n",
+            &["modules", "migrate", "lib", "--check", "--consumer", "app"],
+            "first at app/main.rock:2)",
         ),
     ] {
         let out = text(&invoke(root.path(), args));

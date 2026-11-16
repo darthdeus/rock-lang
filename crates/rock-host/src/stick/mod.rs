@@ -491,10 +491,6 @@ pub struct DetailedDependency {
     /// a shipping channel excludes the package from the compile set entirely,
     /// so generated shipping code carries none of its symbols.
     pub channels: Vec<String>,
-    /// Authorizes a v1 consumer's dependency edge to a legacy provider.
-    /// Rejected when the edge lacks it; a removable
-    /// warning when the provider is already v1.
-    pub allow_legacy: bool,
 }
 
 /// A dependency has exactly one source; package names refer to this toolchain.
@@ -543,7 +539,6 @@ impl<'de> serde::Deserialize<'de> for DetailedDependency {
             ) -> Result<DetailedDependency, A::Error> {
                 let mut source = None;
                 let mut channels: Vec<String> = Vec::new();
-                let mut allow_legacy = false;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "path" | "package" => {
@@ -562,12 +557,9 @@ impl<'de> serde::Deserialize<'de> for DetailedDependency {
                         "channels" => {
                             channels = map.next_value()?;
                         }
-                        "allow_legacy" => {
-                            allow_legacy = map.next_value()?;
-                        }
                         other => {
                             return Err(serde::de::Error::custom(format!(
-                                "unknown key `{other}` in dependency; known keys: path, package, channels, allow_legacy"
+                                "unknown key `{other}` in dependency; known keys: path, package, channels"
                             )));
                         }
                     }
@@ -575,11 +567,7 @@ impl<'de> serde::Deserialize<'de> for DetailedDependency {
                 let source = source.ok_or_else(|| {
                     serde::de::Error::custom("dependency requires exactly one path or package key")
                 })?;
-                Ok(DetailedDependency {
-                    source,
-                    channels,
-                    allow_legacy,
-                })
+                Ok(DetailedDependency { source, channels })
             }
         }
         d.deserialize_map(Vis)

@@ -3,8 +3,8 @@
 //! Resolves a project's stick.toml dependency tree recursively and
 //! manifest-relative (each dependency's own manifest resolves its deps
 //! relative to its own directory), dedupes packages by canonicalized root
-//! path, and validates the v1/legacy edges (`allow_legacy`), alias
-//! normalization (`-` to `_`), and file-ownership overlaps. Every consumer
+//! path, rejects edges between v1 and legacy packages, and validates alias
+//! normalization (`-` to `_`) and file-ownership overlaps. Every consumer
 //! that used to resolve dependencies on its own (CLI source discovery, the
 //! compilation-unit loader, watch, global directory metadata) reads facts from
 //! here instead of re-walking manifests.
@@ -33,7 +33,6 @@ pub struct PackageEdge {
     pub alias: String,
     pub declared_key: String,
     pub target: PackageId,
-    pub allow_legacy: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -211,19 +210,16 @@ impl Builder {
             .collect();
         direct.sort_by(|a, b| a.0.cmp(b.0));
         for (key, dep) in direct {
-            let (dep_manifest_dir, dep_allow_legacy, package_name) = match dep {
-                super::Dependency::Path(path) => (manifest_dir.join(path), false, None),
-                super::Dependency::Detailed(detailed) => {
-                    let (dir, name) = match &detailed.source {
-                        super::DependencySource::Path(path) => (manifest_dir.join(path), None),
-                        super::DependencySource::Package(name) => (
-                            rock_stdlib::package_dir(name)
-                                .map_err(|e| anyhow!("dependency `{key}`: {e}"))?,
-                            Some(name),
-                        ),
-                    };
-                    (dir, detailed.allow_legacy, name)
-                }
+            let (dep_manifest_dir, package_name) = match dep {
+                super::Dependency::Path(path) => (manifest_dir.join(path), None),
+                super::Dependency::Detailed(detailed) => match &detailed.source {
+                    super::DependencySource::Path(path) => (manifest_dir.join(path), None),
+                    super::DependencySource::Package(name) => (
+                        rock_stdlib::package_dir(name)
+                            .map_err(|e| anyhow!("dependency `{key}`: {e}"))?,
+                        Some(name),
+                    ),
+                },
             };
             let dep_manifest = dep_manifest_dir.join("stick.toml");
             if !dep_manifest.exists() {
@@ -248,7 +244,6 @@ impl Builder {
                 alias: normalize_dep_key(key)?,
                 declared_key: key.clone(),
                 target,
-                allow_legacy: dep_allow_legacy,
             });
         }
         dependencies.sort_by(|a, b| a.declared_key.cmp(&b.declared_key));
@@ -307,26 +302,20 @@ impl Builder {
 
         let _ = root;
 
-        // A v1 consumer of a legacy provider needs the explicit opt-in; the
-        // flag on a v1 provider is a removable warning so its upgrade does
-        // not force simultaneous manifest edits in every consumer.
+        // Neither module system can name the other's definitions, so an edge
+        // across them would only fail later as unresolved names.
         for edge in dependencies {
             let target = self.node(edge.target);
-            if dialect == Dialect::V1 && target.dialect == Dialect::Legacy && !edge.allow_legacy {
+            if target.dialect != dialect {
                 return Err(anyhow!(
-                    "package `{}` (language.modules = \"v1\") depends on legacy package `{}`; \
-                     add `allow_legacy = true` to the `{}` dependency if the legacy boundary is intended",
+                    "{} package `{}` depends on {} package `{}` (dependency `{}`); \
+                     a package can only depend on packages with the same `[language] modules` setting",
+                    dialect_name(dialect),
                     config.package.name,
+                    dialect_name(target.dialect),
                     target.manifest_name,
                     edge.declared_key,
                 ));
-            }
-            if dialect == Dialect::V1 && target.dialect == Dialect::V1 && edge.allow_legacy {
-                eprintln!(
-                    "rock: warning: package `{}`: `allow_legacy` on dependency `{}` is redundant; \
-                     `{}` already selects modules = \"v1\" and the flag can be removed",
-                    config.package.name, edge.declared_key, target.manifest_name,
-                );
             }
         }
         Ok(())
@@ -594,6 +583,13 @@ impl PackageGraph {
     }
 }
 
+fn dialect_name(dialect: Dialect) -> &'static str {
+    match dialect {
+        Dialect::Legacy => "legacy",
+        Dialect::V1 => "v1",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -724,56 +720,51 @@ mod tests {
         assert_eq!(absent.dialect(), Dialect::Legacy);
     }
 
-    #[test]
-    fn v1_consumer_of_legacy_dependency_requires_allow_legacy() {
+    fn mixed_edge_error(consumer: &str, provider: &str) -> String {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("app");
         let lib = tmp.path().join("lib");
-        write_manifest(&lib, "legacy-lib", "");
+        write_manifest(&lib, "lib-pkg", provider);
         write_manifest(
             &root,
             "app",
-            "\n[language]\nmodules = \"v1\"\n\n[dependencies]\nlib = { path = \"../lib\" }\n",
+            &format!("{consumer}\n[dependencies]\nlib = {{ path = \"../lib\" }}\n"),
         );
-
-        let err = PackageGraph::build(&root).expect_err("missing allow_legacy must reject");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("allow_legacy"),
-            "error should name the fix: {msg}"
-        );
-        assert!(
-            msg.contains("legacy-lib"),
-            "error should name the provider: {msg}"
-        );
-
-        write_manifest(
-            &root,
-            "app",
-            "\n[language]\nmodules = \"v1\"\n\n[dependencies]\nlib = { path = \"../lib\", allow_legacy = true }\n",
-        );
-        let graph = PackageGraph::build(&root).expect("flagged edge builds");
-        let lib_node = graph
-            .packages()
-            .iter()
-            .find(|p| p.manifest_name == "legacy-lib")
-            .expect("provider in graph");
-        assert_eq!(lib_node.dialect, Dialect::Legacy);
+        PackageGraph::build(&root)
+            .expect_err("a dependency across module systems must reject")
+            .to_string()
     }
 
     #[test]
-    fn allow_legacy_on_v1_provider_builds_without_error() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().join("app");
-        let lib = tmp.path().join("lib");
-        write_manifest(&lib, "v1-lib", "\n[language]\nmodules = \"v1\"\n");
-        write_manifest(
-            &root,
-            "app",
-            "\n[language]\nmodules = \"v1\"\n\n[dependencies]\nlib = { path = \"../lib\", allow_legacy = true }\n",
+    fn v1_consumer_of_legacy_dependency_is_rejected() {
+        let msg = mixed_edge_error("\n[language]\nmodules = \"v1\"\n", "");
+        assert!(
+            msg.contains("v1 package `app` depends on legacy package `lib-pkg`"),
+            "{msg}"
         );
-        let graph = PackageGraph::build(&root).expect("redundant flag is a warning, not an error");
-        assert_eq!(graph.packages().len(), 2);
+    }
+
+    #[test]
+    fn legacy_consumer_of_v1_dependency_is_rejected() {
+        let msg = mixed_edge_error("", "\n[language]\nmodules = \"v1\"\n");
+        assert!(
+            msg.contains("legacy package `app` depends on v1 package `lib-pkg`"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn allow_legacy_dependency_key_is_rejected() {
+        let err = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[language]\nmodules = \"v1\"\n\n\
+             [dependencies]\nlib = { path = \"../lib\", allow_legacy = true }\n",
+        )
+        .expect_err("allow_legacy no longer exists");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("unknown key `allow_legacy` in dependency"),
+            "{msg}"
+        );
     }
 
     #[test]
