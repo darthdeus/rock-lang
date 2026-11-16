@@ -79,25 +79,6 @@ mod tests {
     use super::{FormatConfig, try_format};
 
     #[test]
-    fn item_annotations_preserve_trailing_comments() {
-        let cases = [
-            "@sim_env(\"SIM_DRAW\", \"every_frame\") // draw policy\n@sim\nco fn probe() {\n}\n",
-            "@sim // final annotation\nco fn probe() {\n}\n",
-            "@first @second // shared line\nfn probe() {\n}\n",
-        ];
-        for source in cases {
-            let formatted = try_format(source, &FormatConfig::default()).expect("format fixture");
-            assert_eq!(formatted, source);
-            skull_parser::parse_module_clean(&formatted, "<annotation-comment>".into())
-                .expect("formatted annotations must parse");
-            assert_eq!(
-                try_format(&formatted, &FormatConfig::default()).unwrap(),
-                formatted
-            );
-        }
-    }
-
-    #[test]
     fn trailing_block_lambda_keeps_call_layout_after_expansion() {
         let config = FormatConfig {
             max_line_length: 20,

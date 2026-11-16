@@ -1,0 +1,494 @@
+//! Test: forms whose spelling the printer once changed or broke
+//! Tags: regressions, roundtrip, macros, comments, operators
+
+//=== TEST CASE: call_type_arguments_and_single_tuples_are_kept ===
+fn f() {
+    let nb = native_buffer_alloc<WideLeaf>(1)
+    let k = key<T>()
+    let m = Map<string, int>()
+    let r = a.b<int>(1).c(2).d()
+    let r = a.b(1).c<int>(2).d()
+    let single = (5,)
+}
+//=== NO CHANGE ===
+
+//=== TEST CASE: unary_minus_over_a_negative_operand_keeps_its_space ===
+fn f() {
+    return - -1
+}
+
+fn g() {
+    let x = sin(- -1.3) - - --y
+}
+//=== NO CHANGE ===
+
+//=== TEST CASE: spaced_unary_minus_over_a_number_keeps_its_shape ===
+fn f() {
+    x += - 1
+    x = - 1
+    x = - 1.5
+    x = - .5
+    f(- 2)
+    x -= -1
+    x = -y
+}
+//=== NO CHANGE ===
+
+//=== TEST CASE: macro_call_bang_is_kept ===
+fn f() {
+    let a = m!(1, 2)
+    let a = m!()
+    let b = x.m!(a)
+    let b = x.m!()
+    let b = x.y.m!(a, 2)
+    let b = f(1).m!(a)
+    let c = x.m!(a).n!(b).k!()
+    let c = x.m!(a).n(b).k!()
+    let c = x.n(b).m!(a)
+    let d = m!(Foo<int>, [int], (int, string), int?)
+    let d = m!(Map<int, Box<int>>)
+    let e = x.m!(Map<int, string>)
+    let e = x.m!([Box<int>])
+    let f = m!(n!(1), x.k!(2))
+    let f = m!(x.n!(Foo<int>))
+    let g = m!(...rest)
+    let h = x.m!(a) + n!(b)
+}
+//=== NO CHANGE ===
+
+//=== TEST CASE: comment_after_a_dollar_call_stays_on_the_statement ===
+fn f() {
+    assert $ g(x) // why
+}
+
+fn g() {
+    let y = assert $ 1 // why
+}
+//=== EXPECTED ===
+fn f() {
+    assert(g(x))  // why
+}
+
+fn g() {
+    let y = assert(1)  // why
+}
+
+//=== TEST CASE: comment_after_a_multi_line_dollar_argument_appears_once ===
+fn f() {
+    assert $ g(
+        x
+    ) // why
+}
+//=== EXPECTED ===
+fn f() {
+    assert(
+        g(
+            x
+        )
+    ) // why
+}
+
+//=== TEST CASE: comment_on_the_last_argument_of_an_at_head_appears_once ===
+fn f() {
+    g(
+        a // why
+    ) @ print(1)
+}
+//=== NO CHANGE ===
+
+//=== TEST CASE: comment_after_an_at_survives ===
+fn f() {
+    g(
+        a,
+    ) @ // why
+    print(1)
+}
+//=== NO CHANGE ===
+
+//=== TEST CASE: at_form_keeps_the_macro_sigil ===
+fn f() {
+    m!(1) @ print(1)
+    m!() @ x
+    m!(Pair<int, int>, [int]) @ {
+        print(1)
+        print(2)
+    }
+    o.m!(1) @ print(1)
+    o.m!() @ x
+    o.m!(Pair<int, int>) @ {
+        print(1)
+        print(2)
+    }
+}
+//=== NO CHANGE ===
+
+//=== TEST CASE: at_form_keeps_explicit_generic_arguments ===
+fn f() {
+    g<int>(1) @ print(1)
+    g<int>() @ print(1)
+}
+//=== NO CHANGE ===
+
+//=== TEST CASE: nullable_function_returning_nullable_value_keeps_its_outer_parens ===
+struct Hooks {
+    callback: (() -> Vec2?)? = null,
+}
+//=== NO CHANGE ===
+
+//=== TEST CASE: nullable_parenthesized_function_type ===
+struct Hooks {
+    on_close: (fn())? = null,
+}
+//=== EXPECTED ===
+struct Hooks {
+    on_close: (fn() -> ())? = null,
+}
+
+//=== TEST CASE: item_annotations_preserve_trailing_comments ===
+@sim_env("SIM_DRAW", "every_frame") // draw policy
+@sim
+co fn probe() {
+}
+
+@sim // final annotation
+co fn probe() {
+}
+
+@first @second // shared line
+fn probe() {
+}
+//=== NO CHANGE ===
+
+//=== TEST CASE: call_splat_in_a_variadic_macro ===
+macro sum_of(x: expr, rest: ...expr) -> int {
+    x + sum_of(...rest)
+}
+//=== EXPECTED ===
+macro sum_of(x: expr, rest: expr...) -> int {
+    x + sum_of(...rest)
+}
+
+//=== TEST CASE: call_splat_in_a_macro_call ===
+macro fwd(rest: ...expr) -> int { sum_of!(...rest) }
+//=== EXPECTED ===
+macro fwd(rest: expr...) -> int { sum_of!(...rest) }
+
+//=== TEST CASE: call_splat_after_an_argument ===
+fn f(xs: ...int) {
+    g(1, ...xs)
+}
+//=== EXPECTED ===
+fn f(xs: int...) {
+    g(1, ...xs)
+}
+
+//=== TEST CASE: range_and_safe_navigation_keep_their_spaces_1 ===
+fn f() {
+    print(src .. .w.f0)
+}
+//=== NO CHANGE ===
+
+//=== TEST CASE: range_and_safe_navigation_keep_their_spaces_2 ===
+fn f() {
+    let r = a..b
+}
+//=== NO CHANGE ===
+
+//=== TEST CASE: range_and_safe_navigation_keep_their_spaces_3 ===
+fn f() {
+    sum2(.. .p)
+}
+//=== NO CHANGE ===
+
+//=== TEST CASE: range_and_safe_navigation_keep_their_spaces_4 ===
+fn f() {
+    (s? ?.x)
+}
+//=== NO CHANGE ===
+
+//=== TEST CASE: range_and_safe_navigation_keep_their_spaces_5 ===
+fn f() {
+    s? .x
+}
+//=== NO CHANGE ===
+
+//=== TEST CASE: range_and_safe_navigation_keep_their_spaces_6 ===
+fn f() {
+    s? .a().b()
+}
+//=== NO CHANGE ===
+
+//=== TEST CASE: split_statement_keeps_its_boundary_1 ===
+fn f(){({y 7;&  y})}fn g(){}
+//=== EXPECTED ===
+fn f() {
+    ({
+        y 7;
+        &  y
+    })
+}
+
+fn g() {
+}
+
+//=== TEST CASE: split_statement_keeps_its_boundary_2 ===
+fn f() {
+    a(); -b
+}
+//=== EXPECTED ===
+fn f() {
+    a();
+    -b
+}
+
+//=== TEST CASE: split_statement_keeps_its_boundary_3 ===
+fn f() {
+    x = 7; .y = 1
+}
+//=== EXPECTED ===
+fn f() {
+    x = 7;
+    .y = 1
+}
+
+//=== TEST CASE: split_statement_keeps_its_boundary_4 ===
+fn f() {
+    x = 7; -q // note
+}
+//=== EXPECTED ===
+fn f() {
+    x = 7;
+    -q        // note
+}
+
+//=== TEST CASE: shared_line_group_does_not_duplicate_the_next_statement_1 ===
+fn f() {
+    () let
+    y 13
+}
+//=== EXPECTED ===
+fn f() {
+    ()
+    let y
+    13
+}
+
+//=== TEST CASE: shared_line_group_does_not_duplicate_the_next_statement_2 ===
+fn f() {
+    a(); b(() => {
+        c()
+    }); d()
+}
+//=== EXPECTED ===
+fn f() {
+    a()
+    b(() => {
+        c()
+    })
+    d()
+}
+
+//=== TEST CASE: single_line_container_with_multiline_children_1 ===
+fn f() {
+    print({ let x = 5; x * 2 })
+}
+//=== EXPECTED ===
+fn f() {
+    print({
+        let x = 5
+        x * 2
+    })
+}
+
+//=== TEST CASE: single_line_container_with_multiline_children_2 ===
+fn f() {
+    print({ let x = 5; x * 2 } + { let y = 3; y + 1 })
+}
+//=== EXPECTED ===
+fn f() {
+    print(
+        {
+            let x = 5
+            x * 2
+        } + {
+            let y = 3
+            y + 1
+        }
+    )
+}
+
+//=== TEST CASE: single_line_container_with_multiline_children_3 ===
+fn f() {
+    print(if { let r = true; r } { 1 } else { 2 })
+}
+//=== EXPECTED ===
+fn f() {
+    print(
+        if {
+            let r = true
+            r
+        } { 1 } else { 2 }
+    )
+}
+
+//=== TEST CASE: single_line_container_with_multiline_children_4 ===
+fn f() {
+    print({})
+}
+//=== EXPECTED ===
+fn f() {
+    print({
+    })
+}
+
+//=== TEST CASE: single_line_container_with_multiline_children_5 ===
+fn f() -> C {
+    return C { bump: () => { n = n + 1; return n }, tag: 1 }
+}
+//=== EXPECTED ===
+fn f() -> C {
+    return C {
+        bump: () => {
+            n = n + 1
+            return n
+        },
+        tag: 1
+    }
+}
+
+//=== TEST CASE: single_line_container_with_multiline_children_6 ===
+fn f() -> P {
+    return P { get: () => n, bump: () => { n = n + 1; return n } }
+}
+//=== EXPECTED ===
+fn f() -> P {
+    return P {
+        get: () => n,
+        bump: () => {
+            n = n + 1
+            return n
+        }
+    }
+}
+
+//=== TEST CASE: single_line_container_with_multiline_children_7 ===
+fn f() {
+    let q = F { a + b: { c = c + 1; 10 }, d: 2 }
+}
+//=== EXPECTED ===
+fn f() {
+    let q = F {
+        a + b: {
+            c = c + 1
+            10
+        },
+        d: 2
+    }
+}
+
+//=== TEST CASE: single_line_container_with_multiline_children_8 ===
+fn f() {
+    for x in v.iter().map(x => { t.push(x); x }).filter(x => { u(); true }) {
+        print(x)
+    }
+}
+//=== EXPECTED ===
+fn f() {
+    for x in v.iter()
+        .map(x => {
+            t.push(x)
+            x
+        })
+        .filter(x => {
+            u()
+            true
+        }) {
+        print(x)
+    }
+}
+
+//=== TEST CASE: single_line_container_with_multiline_children_9 ===
+fn f() -> P {
+    return P { get: () => n, bump: () => {
+        n = n + 1
+        return n
+    } }
+}
+//=== EXPECTED ===
+fn f() -> P {
+    return P {
+        get: () => n, bump: () => {
+            n = n + 1
+            return n
+        }
+    }
+}
+
+//=== TEST CASE: single_line_container_with_multiline_children_10 ===
+fn f() {
+    x = [{ y: {} }]
+}
+//=== EXPECTED ===
+fn f() {
+    x = [
+        {
+            y : {
+            }
+        }
+    ]
+}
+
+//=== TEST CASE: single_line_container_with_multiline_children_11 ===
+fn f() {
+    let a = [1, { let x = 5; x * 2 }]
+}
+//=== EXPECTED ===
+fn f() {
+    let a = [
+        1,
+        {
+            let x = 5
+            x * 2
+        }
+    ]
+}
+
+//=== TEST CASE: single_line_container_with_multiline_children_12 ===
+fn f() {
+    let t = ({ let x = 5; x * 2 }, 1)
+}
+//=== EXPECTED ===
+fn f() {
+    let t = (
+        {
+            let x = 5
+            x * 2
+        },
+        1
+    )
+}
+
+//=== TEST CASE: qualified_call_keeps_path_separators_tight ===
+fn probe() {
+    app_world::world_tick::update(actor)
+}
+//=== NO CHANGE ===
+
+//=== TEST CASE: legacy_ascription_keeps_its_spacing ===
+fn ratio(value: int) {
+    let wide = value  ::  float
+    let tight = value::float
+    let sum = (value + 1) :: float
+}
+//=== EXPECTED ===
+fn ratio(value: int) {
+    let wide = value :: float
+    let tight = value::float
+    let sum = (value + 1) :: float
+}
+
+//=== TEST CASE: path_qualified_return_literal ===
+fn profile(mob: Mob) {
+    if mob.active { return app_world::world_tick::WorldActorTurnProfile { move_speed: mob.move_speed() } }
+}
+//=== NO CHANGE ===

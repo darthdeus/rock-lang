@@ -2,5 +2,4 @@
 
 mod comment_multiset;
 mod corpus;
-mod path_struct_literal;
 mod roundtrip;
