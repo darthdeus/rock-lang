@@ -16,11 +16,7 @@ use serde_json::json;
 
 /// `rock-lsp hover <file:line:col> --backend bone`.
 pub fn hover(file_path: &str, line: u32, column: u32) -> Result<()> {
-    let file_path = canonical(file_path);
-    let src = fs_err::read_to_string(&file_path)?;
-
-    let mut bone = BoneWorkspace::new();
-    bone.update(&file_path, src);
+    let (file_path, bone) = open_file(file_path)?;
 
     // CLI positions are 1-based; LSP/`Position` is 0-based.
     let pos = Position::new(line - 1, column - 1);
@@ -66,7 +62,7 @@ pub fn hover(file_path: &str, line: u32, column: u32) -> Result<()> {
         "position": { "line": line - 1, "character": column - 1 },
         "hover": { "contents": contents, "range": range.unwrap_or(serde_json::Value::Null) },
     });
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    print_json(&output)?;
     Ok(())
 }
 
@@ -90,7 +86,7 @@ pub fn lint(path: &str) -> Result<()> {
 /// Print a diagnostics report, then fail when the directory walk could not read
 /// some files: their diagnostics are missing, so the report is not a clean bill.
 fn print_report(report: serde_json::Value) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(&report)?);
+    print_json(&report)?;
     let unreadable: Vec<&str> = report["unreadable"]
         .as_array()
         .into_iter()
@@ -127,10 +123,7 @@ fn report_with(path: &str, diag_fn: DiagFn) -> Result<serde_json::Value> {
     if fs_err::metadata(path)?.is_dir() {
         return dir_report(path, diag_fn);
     }
-    let file_path = canonical(path);
-    let src = fs_err::read_to_string(&file_path)?;
-    let mut bone = BoneWorkspace::new();
-    bone.update(&file_path, src);
+    let (file_path, bone) = open_file(path)?;
     Ok(json!({
         "file": file_path,
         "backend": "bone",
@@ -195,10 +188,7 @@ fn diags_to_json(diags: Vec<lsp_types::Diagnostic>) -> Vec<serde_json::Value> {
 
 /// `rock-lsp definition <file:line:col> --backend bone`.
 pub fn definition(file_path: &str, line: u32, column: u32) -> Result<()> {
-    let file_path = canonical(file_path);
-    let src = fs_err::read_to_string(&file_path)?;
-    let mut bone = BoneWorkspace::new();
-    bone.update(&file_path, src);
+    let (file_path, bone) = open_file(file_path)?;
 
     let loc = bone.definition(&file_path, Position::new(line - 1, column - 1));
     emit_definitions(&file_path, line, column, loc)
@@ -206,10 +196,7 @@ pub fn definition(file_path: &str, line: u32, column: u32) -> Result<()> {
 
 /// `rock-lsp type-definition <file:line:col> --backend bone`.
 pub fn type_definition(file_path: &str, line: u32, column: u32) -> Result<()> {
-    let file_path = canonical(file_path);
-    let src = fs_err::read_to_string(&file_path)?;
-    let mut bone = BoneWorkspace::new();
-    bone.update(&file_path, src);
+    let (file_path, bone) = open_file(file_path)?;
 
     let loc = bone.type_definition(&file_path, Position::new(line - 1, column - 1));
     emit_definitions(&file_path, line, column, loc)
@@ -242,16 +229,13 @@ fn emit_definitions(
         "position": { "line": line - 1, "character": column - 1 },
         "definitions": definitions,
     });
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    print_json(&output)?;
     Ok(())
 }
 
 /// `rock-lsp completion <file:line:col> --backend bone`.
 pub fn completion(file_path: &str, line: u32, column: u32, explain: bool) -> Result<()> {
-    let file_path = canonical(file_path);
-    let src = fs_err::read_to_string(&file_path)?;
-    let mut bone = BoneWorkspace::new();
-    bone.update(&file_path, src);
+    let (file_path, mut bone) = open_file(file_path)?;
 
     let pos = Position::new(line - 1, column - 1);
     let items = bone.completion(&file_path, pos);
@@ -275,7 +259,7 @@ pub fn completion(file_path: &str, line: u32, column: u32, explain: bool) -> Res
         "position": { "line": line - 1, "character": column - 1 },
         "completions": serde_json::to_value(&items)?,
     });
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    print_json(&output)?;
     Ok(())
 }
 
@@ -595,10 +579,8 @@ fn line_col_to_offset(src: &str, line: u32, column: u32) -> usize {
 
 /// `rock-lsp references <file:line:col> --backend bone`.
 pub fn references(file_path: &str, line: u32, column: u32) -> Result<()> {
-    let file_path = canonical(file_path);
-    let mut bone = BoneWorkspace::new();
     // Load the whole project so cross-file references are found.
-    bone.load_project(&file_path);
+    let (file_path, bone) = open_project(file_path);
 
     let pos = Position::new(line - 1, column - 1);
     let locs = bone.references(&file_path, pos);
@@ -609,16 +591,13 @@ pub fn references(file_path: &str, line: u32, column: u32) -> Result<()> {
         "position": { "line": line - 1, "character": column - 1 },
         "references": serde_json::to_value(&locs)?,
     });
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    print_json(&output)?;
     Ok(())
 }
 
 /// `rock-lsp prepare-rename <file:line:col> --backend bone`.
 pub fn prepare_rename(file_path: &str, line: u32, column: u32) -> Result<()> {
-    let file_path = canonical(file_path);
-    let src = fs_err::read_to_string(&file_path)?;
-    let mut bone = BoneWorkspace::new();
-    bone.update(&file_path, src);
+    let (file_path, bone) = open_file(file_path)?;
 
     let pos = Position::new(line - 1, column - 1);
     let prepared = bone.prepare_rename(&file_path, pos);
@@ -638,16 +617,14 @@ pub fn prepare_rename(file_path: &str, line: u32, column: u32) -> Result<()> {
     if let Some(refusal) = refusal {
         output["error"] = json!(refusal);
     }
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    print_json(&output)?;
     Ok(())
 }
 
 /// `rock-lsp rename <file:line:col> <new_name> --backend bone`.
 pub fn rename(file_path: &str, line: u32, column: u32, new_name: &str) -> Result<()> {
-    let file_path = canonical(file_path);
-    let mut bone = BoneWorkspace::new();
     // Load the whole project so rename rewrites cross-file references too.
-    bone.load_project(&file_path);
+    let (file_path, bone) = open_project(file_path);
 
     let pos = Position::new(line - 1, column - 1);
     let mut changes = serde_json::Map::new();
@@ -678,16 +655,13 @@ pub fn rename(file_path: &str, line: u32, column: u32, new_name: &str) -> Result
     if let Some(refusal) = refusal {
         output["error"] = json!(refusal);
     }
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    print_json(&output)?;
     Ok(())
 }
 
 /// `rock-lsp signature-help <file:line:col> --backend bone`.
 pub fn signature_help(file_path: &str, line: u32, column: u32) -> Result<()> {
-    let file_path = canonical(file_path);
-    let src = fs_err::read_to_string(&file_path)?;
-    let mut bone = BoneWorkspace::new();
-    bone.update(&file_path, src);
+    let (file_path, bone) = open_file(file_path)?;
 
     let pos = Position::new(line - 1, column - 1);
     match bone.signature_help(&file_path, pos) {
@@ -707,10 +681,7 @@ pub fn signature_help(file_path: &str, line: u32, column: u32) -> Result<()> {
 
 /// `rock-lsp document-symbols <file> --backend bone`.
 pub fn document_symbols(file_path: &str) -> Result<()> {
-    let file_path = canonical(file_path);
-    let src = fs_err::read_to_string(&file_path)?;
-    let mut bone = BoneWorkspace::new();
-    bone.update(&file_path, src);
+    let (file_path, bone) = open_file(file_path)?;
 
     let symbols = bone.document_symbols(&file_path);
     let output = json!({
@@ -718,7 +689,7 @@ pub fn document_symbols(file_path: &str) -> Result<()> {
         "backend": "bone",
         "symbols": serde_json::to_value(&symbols)?,
     });
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    print_json(&output)?;
     Ok(())
 }
 
@@ -726,10 +697,7 @@ pub fn document_symbols(file_path: &str) -> Result<()> {
 /// (bone rejects expression holes at lowering); prints nothing and exits 1 when
 /// the cursor isn't on a hole, matching the lua handler.
 pub fn hole_info(file_path: &str, line: u32, column: u32) -> Result<()> {
-    let file_path = canonical(file_path);
-    let src = fs_err::read_to_string(&file_path)?;
-    let mut bone = BoneWorkspace::new();
-    bone.update(&file_path, src);
+    let (file_path, bone) = open_file(file_path)?;
 
     let pos = Position::new(line - 1, column - 1);
     match bone.hole_info(&file_path, pos) {
@@ -746,10 +714,8 @@ pub fn hole_info(file_path: &str, line: u32, column: u32) -> Result<()> {
 
 /// `rock-lsp workspace-symbols <file> <query> --backend bone`.
 pub fn workspace_symbols(file_path: &str, query: &str) -> Result<()> {
-    let file_path = canonical(file_path);
-    let mut bone = BoneWorkspace::new();
     // Load the whole project so symbols from every user file are searched.
-    bone.load_project(&file_path);
+    let (file_path, bone) = open_project(file_path);
 
     let symbols = bone.workspace_symbols(query);
     let output = json!({
@@ -758,47 +724,28 @@ pub fn workspace_symbols(file_path: &str, query: &str) -> Result<()> {
         "query": query,
         "symbols": serde_json::to_value(&symbols)?,
     });
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    print_json(&output)?;
     Ok(())
 }
 
 /// `rock-lsp semantic-tokens <file> --backend bone`.
 pub fn semantic_tokens(file_path: &str) -> Result<()> {
-    let file_path = canonical(file_path);
-    let src = fs_err::read_to_string(&file_path)?;
-    let mut bone = BoneWorkspace::new();
-    bone.update(&file_path, src);
+    let (file_path, bone) = open_file(file_path)?;
 
     let tokens = bone.semantic_tokens(&file_path);
-    let data: Vec<u32> = tokens
-        .data
-        .iter()
-        .flat_map(|t| {
-            [
-                t.delta_line,
-                t.delta_start,
-                t.length,
-                t.token_type,
-                t.token_modifiers_bitset,
-            ]
-        })
-        .collect();
     let output = json!({
         "file": file_path,
         "backend": "bone",
         "count": tokens.data.len(),
-        "data": data,
+        "data": serde_json::to_value(&tokens)?["data"],
     });
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    print_json(&output)?;
     Ok(())
 }
 
 /// `rock-lsp inlay-hints <file> --backend bone`. Hints over the whole file.
 pub fn inlay_hints(file_path: &str) -> Result<()> {
-    let file_path = canonical(file_path);
-    let src = fs_err::read_to_string(&file_path)?;
-    let mut bone = BoneWorkspace::new();
-    bone.update(&file_path, src);
+    let (file_path, bone) = open_file(file_path)?;
 
     let full = lsp_types::Range {
         start: Position::new(0, 0),
@@ -810,7 +757,30 @@ pub fn inlay_hints(file_path: &str) -> Result<()> {
         "backend": "bone",
         "hints": serde_json::to_value(&hints)?,
     });
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    print_json(&output)?;
+    Ok(())
+}
+
+/// Canonicalize `file_path` and open just that file on a fresh workspace.
+fn open_file(file_path: &str) -> Result<(String, BoneWorkspace)> {
+    let file_path = canonical(file_path);
+    let src = fs_err::read_to_string(&file_path)?;
+    let mut bone = BoneWorkspace::new();
+    bone.update(&file_path, src);
+    Ok((file_path, bone))
+}
+
+/// Canonicalize `file_path` and load its whole project, so cross-file
+/// queries see every file.
+fn open_project(file_path: &str) -> (String, BoneWorkspace) {
+    let file_path = canonical(file_path);
+    let mut bone = BoneWorkspace::new();
+    bone.load_project(&file_path);
+    (file_path, bone)
+}
+
+fn print_json(value: &serde_json::Value) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }
 
