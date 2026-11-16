@@ -291,15 +291,7 @@ pub(super) fn check_bodies(
     bodies: &[&MirFunc],
     rejections: &mut Vec<(String, CompilerError)>,
 ) -> Result<(HashSet<ustr::Ustr>, String), CompilerError> {
-    rejections.extend(check_scalar_abi(
-        ws,
-        scx,
-        &st.lowered,
-        &st.spec_lowered,
-        bodies,
-        st.concrete,
-        &st.artifact_decls,
-    ));
+    rejections.extend(check_scalar_abi(ws, scx, st, bodies));
     let hoisted = collect_hoisted(bodies);
     let registry =
         skull_mir::lower::StructRegistryPlan::for_bodies(ws, bone_core::hir::FnBackend::Js, bodies)

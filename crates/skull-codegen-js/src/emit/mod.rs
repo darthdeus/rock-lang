@@ -163,6 +163,14 @@ fn nobox_errs(
     Err(e)
 }
 
+/// [`nobox_errs`] for `mf` and each of its hoisted bodies, as findings.
+fn nobox_tree_errs(ws: &Workspace, mf: &MirFunc, findings: &mut Vec<CompilerError>) {
+    collect(findings, nobox_errs(ws, mf));
+    for nf in &mf.nested_fns {
+        collect(findings, nobox_errs(ws, nf));
+    }
+}
+
 /// Every finding in ONE definition as a single error carrying the rest as
 /// siblings. `None` when there was nothing to report.
 fn merge_findings(findings: Vec<CompilerError>) -> Option<CompilerError> {

@@ -295,14 +295,13 @@ pub(super) fn schedule_residual_calls(
             continue;
         };
         let cf = &ws.module(selected.module).functions[selected.func];
-        let Some(name) = st.names.get(&instance).cloned() else {
+        if st.names.get(&instance).is_none() {
             findings.push(err(format!(
                 "JS: the artifact view has no symbol for the `{}` call instance",
                 cf.name
             )));
             continue;
-        };
-        st.names.insert(instance.clone(), name);
+        }
         if js_supply(ws, cf).is_some() {
             continue;
         }

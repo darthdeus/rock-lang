@@ -75,10 +75,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
             &mut findings,
             skull_transform::validate_no_residual_bound_calls(self.ws, f, &mf),
         );
-        collect(&mut findings, nobox_errs(self.ws, &mf));
-        for nf in &mf.nested_fns {
-            collect(&mut findings, nobox_errs(self.ws, nf));
-        }
+        nobox_tree_errs(self.ws, &mf, &mut findings);
         findings.extend(self.schedule_body(&mf)?);
         match merge_findings(findings) {
             Some(e) => self.st.reject(&name, e),
@@ -224,12 +221,8 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
             return Ok(());
         }
         let mut findings: Vec<CompilerError> = Vec::new();
-        collect(&mut findings, nobox_errs(self.ws, &mf));
-        for nf in &mf.nested_fns {
-            collect(&mut findings, nobox_errs(self.ws, nf));
-        }
+        nobox_tree_errs(self.ws, &mf, &mut findings);
         mf.name = ustr::Ustr::from(name.as_str());
-        self.st.names.insert(inst.clone(), name.clone());
         findings.extend(self.schedule_body(&mf)?);
         match merge_findings(findings) {
             Some(e) => self.st.reject(&name, e),
@@ -281,10 +274,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
             return Ok(());
         }
         let mut findings: Vec<CompilerError> = Vec::new();
-        collect(&mut findings, nobox_errs(self.ws, &mf));
-        for nf in &mf.nested_fns {
-            collect(&mut findings, nobox_errs(self.ws, nf));
-        }
+        nobox_tree_errs(self.ws, &mf, &mut findings);
         findings.extend(self.schedule_body(&mf)?);
         if let Some(e) = merge_findings(findings) {
             self.st.reject(&init_name, e);
@@ -525,13 +515,12 @@ pub(super) fn emit_spec_bodies(
 pub(super) fn check_scalar_abi(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
-    lowered: &[(FuncRef, MirFunc)],
-    spec_lowered: &[(Instance, MirFunc)],
+    st: &WorklistState,
     bodies: &[&MirFunc],
-    concrete: &skull_mir::concrete::ConcretePlans,
-    artifact_decls: &HashMap<Instance, FuncRef>,
 ) -> Vec<(String, CompilerError)> {
-    let arities: HashMap<FuncRef, usize> = lowered
+    let (concrete, artifact_decls) = (st.concrete, &st.artifact_decls);
+    let arities: HashMap<FuncRef, usize> = st
+        .lowered
         .iter()
         .map(|(fr, mf)| (*fr, mf.params.len()))
         .collect();
@@ -540,7 +529,8 @@ pub(super) fn check_scalar_abi(
     // so a spec-bound call must be measured against its own copy, not the shared
     // body it shares a `FuncRef` with. Checking the shared arity reads every
     // correct specialized call as a dropped-leaf bug.
-    let spec_arities: HashMap<Instance, usize> = spec_lowered
+    let spec_arities: HashMap<Instance, usize> = st
+        .spec_lowered
         .iter()
         .map(|(inst, mf)| (inst.clone(), mf.params.len()))
         .collect();
