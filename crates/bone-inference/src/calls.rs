@@ -1042,7 +1042,7 @@ pub(crate) fn spread_struct_fields(
                 )
             })?;
 
-            let def = gamma.workspace.module(sid.module).structs[sid.def].clone();
+            let def = &gamma.workspace.module(sid.module).structs[sid.def];
             let subs = struct_arg_subs(gamma, &def, r, params);
             def.fields
                 .iter()
@@ -1213,7 +1213,7 @@ pub(crate) fn spread_constituents(
                 CompilerError::new_with_label(span, format!("cannot spread `{}`", name))
             })?;
 
-            let def = gamma.workspace.module(sid.module).structs[sid.def].clone();
+            let def = &gamma.workspace.module(sid.module).structs[sid.def];
             // mirror struct_field_ty; empty for generics
             let subs = struct_arg_subs(gamma, &def, r, params);
             def.fields
@@ -1480,7 +1480,7 @@ pub(crate) fn resolve_named_call_inner(
 
         if recv_override.is_none() {
             if let Some(NewtypeId { module: ntm, def }) = resolve_newtype(gamma, name) {
-                let nt = gamma.workspace.module(ntm).newtypes[def].clone();
+                let nt = &gamma.workspace.module(ntm).newtypes[def];
                 let (subs, fresh) = gamma.instantiate_generics(&nt.generics, span)?;
 
                 if args.len() != 1 {

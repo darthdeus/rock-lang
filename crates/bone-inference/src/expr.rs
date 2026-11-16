@@ -320,7 +320,7 @@ pub(crate) fn infer_statement(
                     )
                 })?;
 
-            let nt = gamma.workspace.module(ntm).newtypes[def].clone();
+            let nt = &gamma.workspace.module(ntm).newtypes[def];
 
             let mut subs = FxHashMap::default();
             if let TypeExpr::App {
@@ -710,7 +710,7 @@ pub(crate) fn infer_expr_used(
                 &resolve_callee(gamma, &fn_value_family(c, e, *name)).visible,
             ) {
                 [(mid, fid)] => {
-                    let function = gamma.workspace.module(*mid).functions[*fid].clone();
+                    let function = &gamma.workspace.module(*mid).functions[*fid];
                     // A view-owned value names one definition among the bare
                     // key's overloads; the backend reads which from here.
                     if c.body.value_owners.contains_key(&e) {
@@ -1329,15 +1329,13 @@ pub(crate) fn infer_expr_used(
                 CompilerError::new_with_label(expr_span, format!("unknown enum `{}`", enum_name))
             })?;
 
-            // TODO: maybe make this Copy and then no alloc here?
-            let def = gamma.workspace.module(eid.module).enums[eid.def].clone();
+            let def = &gamma.workspace.module(eid.module).enums[eid.def];
             let (subs, arg_tys) = gamma.instantiate_generics(&def.generics, expr_span)?;
 
             let vdef = def
                 .variants
                 .iter()
                 .find(|v| v.name == variant)
-                .cloned()
                 .ok_or_else(|| {
                     CompilerError::new_with_label(
                         expr_span,
@@ -1643,7 +1641,7 @@ pub(crate) fn infer_expr_used(
 
             gamma.out.resolved_overload_calls.insert(e, (mid, fid));
 
-            let function = gamma.workspace.module(mid).functions[fid].clone();
+            let function = &gamma.workspace.module(mid).functions[fid];
             let (subs, _) = gamma.instantiate_generics(&function.generics, expr_span)?;
 
             let ret_ty = function

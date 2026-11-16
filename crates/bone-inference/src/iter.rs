@@ -353,7 +353,7 @@ pub(crate) fn resolve_for_iter_protocol(
     // A bounded `next` (combinator chain) resolves its inner bounds HERE -- the
     // for-loop is the mono root; the tree drives skull's placeholder
     // substitution when the chain inlines.
-    let next_callee = gamma.workspace.module(next_fn.0).functions[next_fn.1].clone();
+    let next_callee = &gamma.workspace.module(next_fn.0).functions[next_fn.1];
     let mut sub = BoundTree::default();
     if next_callee.generic_bounds.iter().any(Option::is_some) {
         check_iterator_bounds(c, gamma, &next_callee, &next_subs, &mut sub, true, 0, span)?;
@@ -480,7 +480,7 @@ pub(crate) fn check_iterator_bounds(
                     );
                 }
 
-                let next_callee = gamma.workspace.module(next_fn.0).functions[next_fn.1].clone();
+                let next_callee = &gamma.workspace.module(next_fn.0).functions[next_fn.1];
                 let mut sub = BoundTree::default();
                 if next_callee.generic_bounds.iter().any(Option::is_some) {
                     check_iterator_bounds(
@@ -696,7 +696,6 @@ pub(crate) fn resolve_unary_by_recv(
     };
 
     let function = &gamma.workspace.module(mid).functions[fid];
-    let generics = function.generics.clone();
     let n_params = function.param_decls.len();
     let num_required = function.num_required;
     let param0 = function.param_decls.first().map(|p| p.ty);
@@ -714,7 +713,7 @@ pub(crate) fn resolve_unary_by_recv(
         comp_error!(span, "`{}` has no receiver parameter", name);
     };
 
-    let (subs, _) = gamma.instantiate_generics(&generics, span)?;
+    let (subs, _) = gamma.instantiate_generics(&function.generics, span)?;
     let p0_sub = substitute(gamma, p0, &subs, span)?;
     coerce(gamma, recv_ty, p0_sub, span)?;
 

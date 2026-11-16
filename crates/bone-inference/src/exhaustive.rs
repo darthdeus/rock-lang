@@ -173,7 +173,7 @@ impl Checker<'_, '_, '_> {
                 params,
             } => {
                 if let Some(eid) = resolve_enum(self.gamma, name) {
-                    let def = self.gamma.workspace.module(eid.module).enums[eid.def].clone();
+                    let def = &self.gamma.workspace.module(eid.module).enums[eid.def];
                     let mut subs = FxHashMap::default();
                     for (g, arg) in def.generics.iter().zip(params) {
                         if let TypeExpr::Generic(var_id, _) = self.gamma.get(*g) {
@@ -211,7 +211,7 @@ impl Checker<'_, '_, '_> {
                         variants,
                     }
                 } else if let Some(sid) = resolve_struct(self.gamma, name) {
-                    let def = self.gamma.workspace.module(sid.module).structs[sid.def].clone();
+                    let def = &self.gamma.workspace.module(sid.module).structs[sid.def];
                     let subs = struct_arg_subs(self.gamma, &def, ty, params);
                     let mut fields = Vec::with_capacity(def.fields.len());
                     for f in &def.fields {
