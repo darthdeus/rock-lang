@@ -282,30 +282,16 @@ fn main() { print("x") }
 
     // CONTROL: an exact match joins, or the refusal below proves nothing.
     assert_eq!(
-        crate::support::site_join::check_callee(
-            &ws,
-            &g,
-            &skull::concrete_body::Callee::Rock(inst(decls[0])),
-            decls[0],
-            None,
-            lua,
-        )
-        .outcome(),
-        Ok(crate::support::site_join::Verified::NonGeneric),
+        crate::support::site_join::check_callee(&ws, &g, &inst(decls[0]), decls[0], None, lua,)
+            .outcome(),
+        Ok(crate::support::site_join::Verified::Boundary),
     );
 
     // The defect: the FIRST declaration's instance offered for a call that
     // targets the SECOND. Same name, same rendered signature, different body.
     assert_eq!(
-        crate::support::site_join::check_callee(
-            &ws,
-            &g,
-            &skull::concrete_body::Callee::Rock(inst(decls[0])),
-            decls[1],
-            None,
-            lua,
-        )
-        .outcome(),
+        crate::support::site_join::check_callee(&ws, &g, &inst(decls[0]), decls[1], None, lua,)
+            .outcome(),
         Err(Unjoined::CalleeMismatch),
         "a declaration the language does not group was accepted as the callee"
     );

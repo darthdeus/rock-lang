@@ -1,31 +1,4 @@
-//! `ConcreteBody` type tables.
-//!
-//! An instance's body states its types CONCRETELY: every `Idx<Expr>` and every
-//! `Idx<BindingInfo>` maps to a [`MonoTyId`], converted from the inferred `TyId`
-//! under that instance's substitution. MIR lowering must not receive a
-//! substitution map, so the substitution is consumed HERE and nowhere later.
-//!
-//! **"No free generic types" is not a structural check** -- [`MonoTy`] has no
-//! generic constructor, so a table that exists cannot hold one. The assertion
-//! has content only as a TOTALITY claim: every slot of every expanded instance
-//! converts. A slot that would have held a free generic becomes a recorded
-//! [`FreeType`] with a reason bucket and a span instead, and the census reports
-//! those beside the number of slots examined -- a zero over an unstated
-//! denominator says nothing.
-//!
-//! The population is [`InstanceGraph::expanded`]: the bodies the walk actually
-//! entered, recorded rather than inferred from a proxy. A boundary has no Rock
-//! body to state types for.
-//!
-//! **The callee tables come from the WALK, not from a second resolution.**
-//! `direct_calls`, `fn_values`, `iterator_ops` and `synthesized_calls` are
-//! [`InstanceGraph::call_sites`] projected per table: the walk already resolved
-//! every operation under the instance's substitution, so the substitution is
-//! consumed there and here and nowhere later. A second HIR resolver could
-//! disagree with the graph, and correlating the two by span could not detect
-//! that -- a `for` head's `iter` and `next` share one span by construction.
-//!
-//! [`MonoTy`]: skull_mir::monoty::MonoTy
+//! Concrete lowering plans and request-time owner diagnostics.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -44,9 +17,8 @@ use skull_mir::monoty::{MonoCtor, MonoInterner, MonoSubst, MonoTy, MonoTyId, Mon
 use ustr::Ustr;
 
 use crate::instance_graph::{
-    boundary_class_for, function_body, is_spanless, stdlib_entry_representative, BoundaryClass,
-    FunctionBody, Instance, InstanceGraph, Owner, Site, SiteDomain, SiteOp, SiteOutcome,
-    TextEditDelta,
+    boundary_class_for, function_body, is_spanless, BoundaryClass, FunctionBody, Instance,
+    InstanceGraph, Owner, Site, SiteDomain, SiteOp, SiteOutcome, TextEditDelta,
 };
 use crate::target_projection::CpuTargetSpec;
 
@@ -78,134 +50,7 @@ pub struct BoundaryId {
     pub symbol: String,
 }
 
-/// Deliberately NOT `Ord`. The hand-written ordering this replaces keyed on
-/// `(module, func, symbol)` while `Eq` also compared the class and the target,
-/// so two unequal identities compared `Equal` and any ordered collection keyed
-/// by it would merge boundaries the contract says are distinct. Nothing orders
-/// a `BoundaryId` today -- `ArtifactView::boundaries` is keyed by the
-/// [`Instance`] that reached it -- so the inconsistency is removed rather than
-/// re-derived. A consumer that needs an ordering should key on the instance, or
-/// bring its own total order and a test that it agrees with `Eq`.
-/// Plan S 9's `enum Callee { Rock(InstanceId), Boundary(BoundaryId) }`, in the
-/// SHARED graph's target-neutral form.
-///
-/// There is no third arm and no absent arm. A call that resolved to neither is
-/// a [`CalleeHole`], reported with its span, never an entry a consumer could
-/// read as callable.
-///
-/// [`Self::Boundary`] carries the [`Instance`] and its DECLARED class, not a
-/// [`BoundaryId`]: an id names a target and an emitted symbol, and a shared body
-/// has neither. Minting one is `artifact::realize`'s job, which is also the only
-/// place that knows the declaration this instance resolves to on a given target
-/// and the planner that spells it. The class here is the declaration's own
-/// (`boundary_class_for`); an artifact may realize the same declaration
-/// differently, and that is its answer to make.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Callee {
-    Rock(Instance),
-    Boundary(Instance, BoundaryClass),
-}
-
-impl Callee {
-    /// The instance either arm names. Both arms have one -- the split is about
-    /// whether a body is LOWERED here, not about whether there is a callee.
-    pub fn instance(&self) -> &Instance {
-        match self {
-            Self::Rock(i) | Self::Boundary(i, _) => i,
-        }
-    }
-}
-
-/// What a call synthesized by lowering to the runtime entry `name` calls: the
-/// entry's base instance, which every build roots. `None` when `name` is not a
-/// synthesized entry or the graph does not hold it.
-pub fn synthesized_callee(ws: &Workspace, g: &InstanceGraph, name: &str) -> Option<Callee> {
-    if !skull_mir::lower::SYNTHESIZED_ENTRIES.contains(&name) {
-        return None;
-    }
-    let instance = Instance::base(stdlib_entry_representative(ws, name)?);
-    if !g.instances.contains(&instance) {
-        return None;
-    }
-    let function = &ws.module(instance.func.module).functions[instance.func.func];
-    Some(match boundary_class_for(function) {
-        Some(class) => Callee::Boundary(instance, class),
-        None => Callee::Rock(instance),
-    })
-}
-
-/// Which iterator operation an [`Site`] in `iterator_ops` is.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum IteratorOpKind {
-    /// The `for` head's `iter()`.
-    Iter,
-    /// The `for` protocol's `next`, at any depth of its conformance tree.
-    Next,
-    /// An iterable argument coerced through `iter()` at an `Iterator`-bounded
-    /// parameter.
-    ImplicitIter,
-    /// A `next` witness of a bounded CALL's conformance tree.
-    BoundNext,
-}
-
-impl IteratorOpKind {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Iter => "iter",
-            Self::Next => "next",
-            Self::ImplicitIter => "implicit-iter",
-            Self::BoundNext => "bound-next",
-        }
-    }
-}
-
-/// Plan S 9's `ConcreteIteratorOp`: a resolved iterator operation.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct ConcreteIteratorOp {
-    pub kind: IteratorOpKind,
-    pub callee: Callee,
-}
-
-/// One instance's concrete callee tables.
-///
-/// Type tables live only on `ConcreteBodyPlan`: lowerers and artifact views
-/// consume that plan, while this record remains the graph-side call-fact join.
-///
-/// EVERY callee table is keyed by [`Site`] rather than by `Idx<Expr>`. One
-/// expression can carry more than one callee obligation -- a `for` head has an
-/// `iter` and a `next`, a column-Map store emits a slot AND a free -- and an
-/// index is only meaningful against ONE arena, which a struct-default
-/// initializer's is not. Plan S 9 writes `Map<ExprId, ..>`; an expression key
-/// there silently keeps one of each pair and reads a foreign index against the
-/// owner's body.
-#[derive(Clone)]
-pub struct ConcreteBody {
-    pub instance: Instance,
-    pub direct_calls: BTreeMap<Site, Callee>,
-    pub fn_values: BTreeMap<Site, Callee>,
-    pub iterator_ops: BTreeMap<Site, ConcreteIteratorOp>,
-    /// Calls no source expression contains. Not in `direct_calls`: the same
-    /// expression can hold a source call and a synthesized one, and they are
-    /// different obligations with different callees.
-    pub synthesized_calls: BTreeMap<Site, Callee>,
-}
-
 type TypeConversionMemo = FxHashMap<TyId, Result<(MonoTyId, usize), MonoTyReason>>;
-
-impl ConcreteBody {
-    /// Every callee this body names, with the site that named it.
-    pub fn callees(&self) -> impl Iterator<Item = (&Site, &Callee)> {
-        self.direct_calls
-            .iter()
-            .chain(self.fn_values.iter())
-            .chain(
-                self.iterator_ops
-                    .iter()
-                    .map(|(site, op)| (site, &op.callee)),
-            )
-            .chain(self.synthesized_calls.iter())
-    }
-}
 
 /// A site the walk could not resolve to any callee. The span is where the
 /// Stage-3 compile error goes.
@@ -265,69 +110,12 @@ pub struct MissingBody {
 }
 
 /// The tables for one graph, plus everything that did not convert.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ConcreteBodies {
-    pub bodies: BTreeMap<Instance, ConcreteBody>,
-    /// Whether the diagnostic per-site maps are retained. The lowering build
-    /// keeps the owner facts and plans, but does not retain a second copy of
-    /// every callee obligation.
-    retain_callee_maps: bool,
-    /// Compatibility projections below are refreshed only for a full-build
-    /// snapshot. Local repair reads the owner records instead; this is the
-    /// non-owner instrumentation contribution that has no body to attach to.
-    /// The plan production lowering consumes. It is stored beside the census
-    /// body so a graph update can retract a plan with its instance. Behind an
-    /// `Arc` so the shader artifact view and the JS session can consume the
-    /// SAME table instead of rebuilding it from the graph.
-    pub plans: std::sync::Arc<ConcretePlans>,
+    pub plans: Arc<ConcretePlans>,
     pub always_plans: ConcreteAlwaysPlans,
-    pub plan_failures: Vec<(Instance, MonoTyReason)>,
-    pub always_plan_failures: Vec<(ConcreteOwner, MonoTyReason)>,
-    /// Compatibility projection of the owner-local free-type findings. The
-    /// per-owner records below are authoritative during local repair.
-    pub free_types: Vec<(Instance, FreeType)>,
-    pub gaps: Vec<MissingBody>,
-    pub expr_examined: usize,
-    pub binding_examined: usize,
-    /// See [`Converted::generics_bound`].
-    pub generics_bound: usize,
-    /// See [`Converted::untyped_exprs`]. An expression with no inferred type is
-    /// a slot the tables never saw, so it cannot appear as a free type either.
-    pub untyped: Vec<(Instance, UntypedExpr)>,
-    pub untyped_bindings: usize,
-    /// The arenas the two above are measured against.
-    pub expr_slots: usize,
-    pub binding_slots: usize,
-    /// Bodies built under a NON-EMPTY substitution. The population in which a
-    /// free generic is even possible.
-    pub generic_bodies: usize,
-    /// Sites the walk recorded for the instances that got a body -- the
-    /// denominator for every callee count below.
-    pub sites_examined: usize,
-    pub callee_holes: Vec<CalleeHole>,
-    /// A `Callee::Rock` whose instance is not in the graph. Must be empty: the
-    /// walk `reach`es every callee it resolves, so a missing one means the
-    /// tables and the graph disagree about what exists.
-    pub unknown_rock_callees: Vec<(Instance, Site)>,
-    /// Untyped expression slots that are ALSO a callee-table key, by expression
-    /// kind. This is the measurement the type-table slice deferred: a kind with
-    /// a non-zero count here has a callee entry built for an expression with no
-    /// inferred type, so the entry names the oracle that answered instead.
-    pub untyped_as_callee_key: BTreeMap<&'static str, usize>,
-    /// Signature-memo effectiveness over this build: questions asked vs
-    /// signatures actually derived. Derivations strictly below requests is the
-    /// witness that per-site callee questions were served from the memo.
-    pub signature_requests: usize,
+    /// Signatures derived during full-build publication.
     pub signature_derivations: usize,
-    pub signature_slots_cloned: usize,
-    /// Conversions the per-body TyId memos actually ran over the EXPANDED
-    /// instances (always-emitted bodies excluded); `expr_examined +
-    /// binding_examined` is the per-slot denominator it deduplicates.
-    pub slot_conversions: usize,
-    /// Last explicitly requested compatibility snapshot of the owner records.
-    /// Ordinary construction and owner-local repair leave this field untouched.
-    pub build_stats: ConcreteBuildStats,
-    eager_owner_fact_scans: usize,
     instance_facts: FxHashMap<Instance, OwnerFacts>,
     always_facts: FxHashMap<ConcreteOwner, OwnerFacts>,
     /// Foreign-domain publication is a shared full-build contribution. It is
@@ -348,48 +136,6 @@ pub struct ConcreteBodies {
 struct CandidateIndex {
     by_func: FxHashMap<FuncRef, FxHashSet<Instance>>,
     users: FxHashMap<Instance, FxHashSet<Instance>>,
-}
-
-impl Default for ConcreteBodies {
-    fn default() -> Self {
-        CONCRETE_DEFAULT_INVOCATIONS.with(|count| count.set(count.get() + 1));
-        Self {
-            bodies: BTreeMap::new(),
-            retain_callee_maps: true,
-            plans: std::sync::Arc::new(ConcretePlans::new()),
-            always_plans: ConcreteAlwaysPlans::default(),
-            plan_failures: Vec::new(),
-            always_plan_failures: Vec::new(),
-            free_types: Vec::new(),
-            gaps: Vec::new(),
-            expr_examined: 0,
-            binding_examined: 0,
-            generics_bound: 0,
-            untyped: Vec::new(),
-            untyped_bindings: 0,
-            expr_slots: 0,
-            binding_slots: 0,
-            generic_bodies: 0,
-            sites_examined: 0,
-            callee_holes: Vec::new(),
-            unknown_rock_callees: Vec::new(),
-            untyped_as_callee_key: BTreeMap::new(),
-            signature_requests: 0,
-            signature_derivations: 0,
-            signature_slots_cloned: 0,
-            slot_conversions: 0,
-            build_stats: ConcreteBuildStats::default(),
-            eager_owner_fact_scans: 0,
-            instance_facts: FxHashMap::default(),
-            always_facts: FxHashMap::default(),
-            global_build_stats: ConcreteBuildStats::default(),
-            plan_failure_index: BTreeMap::new(),
-            always_plan_failure_index: FxHashMap::default(),
-            candidate_keys: BTreeSet::new(),
-            owner_candidates: FxHashMap::default(),
-            candidate_index: std::sync::OnceLock::new(),
-        }
-    }
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
@@ -474,33 +220,6 @@ impl ConcreteBodies {
         facts
     }
 
-    /// Materialize compatibility vectors for an explicit diagnostic/census
-    /// request. Ordinary fresh construction keeps owner facts authoritative.
-    pub fn refresh_flat_views(&mut self) {
-        self.eager_owner_fact_scans += self.instance_facts.len() + self.always_facts.len();
-        let facts = self.aggregate_facts();
-        self.plan_failures = facts.plan_failures;
-        self.always_plan_failures = facts.always_plan_failures;
-        self.free_types = facts.free_types;
-        self.gaps = facts.gaps;
-        self.expr_examined = facts.expr_examined;
-        self.binding_examined = facts.binding_examined;
-        self.generics_bound = facts.generics_bound;
-        self.untyped = facts.untyped;
-        self.untyped_bindings = facts.untyped_bindings;
-        self.expr_slots = facts.expr_slots;
-        self.binding_slots = facts.binding_slots;
-        self.generic_bodies = facts.generic_bodies;
-        self.sites_examined = facts.sites_examined;
-        self.callee_holes = facts.callee_holes;
-        self.unknown_rock_callees = facts.unknown_rock_callees;
-        self.untyped_as_callee_key = facts.untyped_as_callee_key;
-        self.signature_requests = facts.signature_requests;
-        self.signature_slots_cloned = facts.signature_slots_cloned;
-        self.slot_conversions = facts.slot_conversions;
-        self.build_stats = facts.build_stats;
-    }
-
     pub fn plan_for(&self, instance: &Instance) -> Option<&ConcreteBodyPlan> {
         self.plans.get(instance).map(|plan| &**plan)
     }
@@ -562,14 +281,16 @@ impl ConcreteBodies {
         )
     }
 
-    pub fn snapshot_build_stats(&mut self) -> ConcreteBuildStats {
-        let stats = self.aggregate_facts().build_stats;
-        self.build_stats = stats;
+    pub fn snapshot_build_stats(&self) -> ConcreteBuildStats {
+        let mut stats = self.global_build_stats;
+        for facts in self
+            .instance_facts
+            .values()
+            .chain(self.always_facts.values())
+        {
+            stats.add(facts.build_stats);
+        }
         stats
-    }
-
-    pub fn eager_owner_fact_scans(&self) -> usize {
-        self.eager_owner_fact_scans
     }
 
     pub fn first_plan_failure(&self) -> Option<(&Instance, &MonoTyReason)> {
@@ -610,10 +331,7 @@ impl ConcreteBodies {
         let mut candidate_keys_added = BTreeSet::new();
         let mut candidate_keys_removed = BTreeSet::new();
         for instance in &instance_subjects {
-            if self.instance_facts.contains_key(instance)
-                || self.bodies.contains_key(instance)
-                || self.plans.get(instance).is_some()
-            {
+            if self.instance_facts.contains_key(instance) || self.plans.get(instance).is_some() {
                 retracted += 1;
             }
             let (removed_candidates, _scans) = self.remove_instance(instance);
@@ -622,8 +340,7 @@ impl ConcreteBodies {
         let mut targets = revisited.clone();
         targets.extend(removed.iter().cloned());
         targets.retain(|instance| g.instances.contains(instance));
-        let (results, publication_stats) =
-            build_instance_delta(ws, g, &targets, self.retain_callee_maps);
+        let (results, publication_stats) = build_instance_delta(ws, g, &targets);
         let _local_publication_stats = publication_stats;
         let mut derived = results.len();
         for result in results {
@@ -643,9 +360,6 @@ impl ConcreteBodies {
                         Arc::get_mut(&mut self.plans)
                             .expect("local concrete update lost its unique plan store")
                             .insert(instance.clone(), Arc::new(plan));
-                    }
-                    if self.retain_callee_maps {
-                        self.bodies.insert(instance.clone(), built.concrete);
                     }
                     self.install_failure_index(&facts);
                     self.instance_facts.insert(instance, facts);
@@ -783,16 +497,8 @@ impl ConcreteBodies {
                 }
             }
         }
-        if self.instance_facts.remove(instance).is_some() {
-            self.plan_failure_index.remove(instance);
-        } else {
-            self.bodies.remove(instance);
-            Arc::get_mut(&mut self.plans)
-                .expect("local concrete update lost its unique plan store")
-                .remove(instance);
-            return (removed, 0);
-        }
-        self.bodies.remove(instance);
+        self.instance_facts.remove(instance);
+        self.plan_failure_index.remove(instance);
         Arc::get_mut(&mut self.plans)
             .expect("local concrete update lost its unique plan store")
             .remove(instance);
@@ -847,11 +553,10 @@ impl ConcreteBodies {
     pub fn census(&self) -> BodyCensus {
         let facts = self.aggregate_facts();
         let mut c = BodyCensus {
-            bodies: if self.retain_callee_maps {
-                self.bodies.len()
-            } else {
-                facts.callee_summary.bodies
-            },
+            signature_requests: facts.signature_requests,
+            signature_derivations: self.signature_derivations,
+            slot_conversions: facts.slot_conversions,
+            bodies: facts.callee_summary.bodies,
             expr_examined: facts.expr_examined,
             binding_examined: facts.binding_examined,
             generics_bound: facts.generics_bound,
@@ -873,29 +578,12 @@ impl ConcreteBodies {
             foreign_domain_unique: facts.build_stats.foreign_domain_unique,
             ..Default::default()
         };
-        if self.retain_callee_maps {
-            for b in self.bodies.values() {
-                c.direct_calls += b.direct_calls.len();
-                c.fn_values += b.fn_values.len();
-                c.synthesized_calls += b.synthesized_calls.len();
-                for op in b.iterator_ops.values() {
-                    *c.iterator_ops.entry(op.kind.label()).or_insert(0) += 1;
-                }
-                for (_, callee) in b.callees() {
-                    match callee {
-                        Callee::Rock(_) => c.rock_callees += 1,
-                        Callee::Boundary(..) => c.boundary_callees += 1,
-                    }
-                }
-            }
-        } else {
-            c.direct_calls = facts.callee_summary.direct_calls;
-            c.fn_values = facts.callee_summary.fn_values;
-            c.synthesized_calls = facts.callee_summary.synthesized_calls;
-            c.iterator_ops = facts.callee_summary.iterator_ops.clone();
-            c.rock_callees = facts.callee_summary.rock_callees;
-            c.boundary_callees = facts.callee_summary.boundary_callees;
-        }
+        c.direct_calls = facts.callee_summary.direct_calls;
+        c.fn_values = facts.callee_summary.fn_values;
+        c.synthesized_calls = facts.callee_summary.synthesized_calls;
+        c.iterator_ops = facts.callee_summary.iterator_ops.clone();
+        c.rock_callees = facts.callee_summary.rock_callees;
+        c.boundary_callees = facts.callee_summary.boundary_callees;
         for h in &facts.callee_holes {
             let k = c.callee_holes.entry(h.reason).or_default();
             k.0 += 1;
@@ -1028,6 +716,9 @@ impl ConcreteBodies {
 
 #[derive(Default, Debug)]
 pub struct BodyCensus {
+    pub signature_requests: usize,
+    pub signature_derivations: usize,
+    pub slot_conversions: usize,
     pub bodies: usize,
     pub expr_examined: usize,
     pub binding_examined: usize,
@@ -1066,7 +757,7 @@ pub struct BodyCensus {
 }
 
 impl BodyCensus {
-    /// Entries across all four callee tables.
+    /// Resolved callee obligations across all operation kinds.
     pub fn callee_entries(&self) -> usize {
         self.direct_calls
             + self.fn_values
@@ -1241,32 +932,6 @@ pub fn convert_body(
     c.conversions = conversions;
     c.type_memo = memo;
     c
-}
-
-/// Record the graph's classification for the independent site/MIR audit.
-fn record_diagnostic_callee(body: &mut ConcreteBody, site: &Site, callee: Callee) {
-    match &site.op {
-        SiteOp::DirectCall => {
-            body.direct_calls.insert(site.clone(), callee);
-        }
-        SiteOp::FnValue => {
-            body.fn_values.insert(site.clone(), callee);
-        }
-        SiteOp::Synthesized(_) | SiteOp::Dispatched { .. } => {
-            body.synthesized_calls.insert(site.clone(), callee);
-        }
-        op => {
-            let kind = match op {
-                SiteOp::ForIter => IteratorOpKind::Iter,
-                SiteOp::ForNext(_) => IteratorOpKind::Next,
-                SiteOp::ImplicitIter => IteratorOpKind::ImplicitIter,
-                SiteOp::BoundNext(_) => IteratorOpKind::BoundNext,
-                _ => unreachable!("non-iterator sites handled above"),
-            };
-            body.iterator_ops
-                .insert(site.clone(), ConcreteIteratorOp { kind, callee });
-        }
-    }
 }
 
 fn concrete_signature(
@@ -1544,7 +1209,6 @@ fn collect_type_nodes(ws: &Workspace, inf: &BodyInference, ty: TyId, out: &mut F
 
 struct BuiltInstance {
     instance: Instance,
-    concrete: ConcreteBody,
     plan: Result<ConcreteBodyPlan, MonoTyReason>,
     candidate_refs: FxHashSet<Instance>,
     facts: OwnerFacts,
@@ -1574,9 +1238,7 @@ impl InstanceResult {
     }
 }
 
-/// Compact per-owner callee census. The detailed site-to-callee maps are an
-/// audit view; these counts keep aggregate census and incremental retraction
-/// exact when that view is omitted.
+/// Compact per-owner callee census with exact incremental retraction.
 #[derive(Clone, Default)]
 struct CalleeSummary {
     bodies: usize,
@@ -1640,8 +1302,6 @@ struct OwnerFacts {
     unknown_rock_callees: Vec<(Instance, Site)>,
     untyped_as_callee_key: BTreeMap<&'static str, usize>,
     signature_requests: usize,
-    signature_derivations: usize,
-    signature_slots_cloned: usize,
     slot_conversions: usize,
     callee_summary: CalleeSummary,
     build_stats: ConcreteBuildStats,
@@ -1720,8 +1380,6 @@ impl OwnerFacts {
             *out.untyped_as_callee_key.entry(kind).or_insert(0) += count;
         }
         out.signature_requests += self.signature_requests;
-        out.signature_derivations += self.signature_derivations;
-        out.signature_slots_cloned += self.signature_slots_cloned;
         out.slot_conversions += self.slot_conversions;
         out.callee_summary.add(&self.callee_summary);
         out.build_stats.add(self.build_stats);
@@ -1988,7 +1646,6 @@ fn build_instance_delta(
     ws: &Workspace,
     g: &InstanceGraph,
     targets: &BTreeSet<Instance>,
-    retain_callee_maps: bool,
 ) -> (Vec<InstanceResult>, ConcreteBuildStats) {
     if targets.is_empty() {
         return (Vec::new(), ConcreteBuildStats::default());
@@ -2012,7 +1669,6 @@ fn build_instance_delta(
                     &signatures,
                     &published_domains,
                     timing_enabled,
-                    retain_callee_maps,
                 )),
             },
         )
@@ -2407,8 +2063,7 @@ where
     Ok(out)
 }
 
-/// Project recorded graph sites into lowering facts; audit maps are optional
-/// parallel output, never the source of the plan or derived from the plan.
+/// Project recorded graph sites into lowering plans and compact owner facts.
 fn concrete_plan_from_sites(
     ws: &Workspace,
     g: &InstanceGraph,
@@ -2420,7 +2075,6 @@ fn concrete_plan_from_sites(
     signatures: &PublishedSignatures,
     domains: &PublishedDomains,
     timing_enabled: bool,
-    mut diagnostic: Option<&mut ConcreteBody>,
 ) -> Result<(ConcreteBodyPlan, FxHashSet<Instance>), MonoTyReason> {
     let mut callees = BTreeMap::new();
     let mut candidate_refs = FxHashSet::default();
@@ -2450,13 +2104,6 @@ fn concrete_plan_from_sites(
                     let function = &ws.module(target.func.module).functions[target.func.func];
                     let class = boundary_class_for(function);
                     let boundary = class.is_some();
-                    if let Some(body) = diagnostic.as_deref_mut() {
-                        let callee = match class {
-                            Some(class) => Callee::Boundary(target.clone(), class),
-                            None => Callee::Rock(target.clone()),
-                        };
-                        record_diagnostic_callee(body, site, callee);
-                    }
                     facts.callee_summary.record_classified(site, boundary);
                     if !boundary && !g.instances.contains(target) {
                         facts
@@ -2569,10 +2216,7 @@ fn concrete_plan_from_sites(
     ))
 }
 
-/// Order of the rich map chain in [`ConcreteBody::callees`]. Lowering mode
-/// visits graph sites in graph order, but when more than one signature is
-/// unavailable the reported plan failure must match the rich path's first
-/// failing callee.
+/// Preserve diagnostic precedence when several callee signatures fail.
 fn callee_table_rank(site: &Site) -> u8 {
     match &site.op {
         SiteOp::DirectCall => 0,
@@ -2589,7 +2233,6 @@ fn produce_instance(
     signatures: &PublishedSignatures,
     domains: &PublishedDomains,
     timing_enabled: bool,
-    retain_callee_maps: bool,
 ) -> BuiltInstance {
     let started_instance = bone_core::prelude::Instant::now();
     let PreparedInstance {
@@ -2603,13 +2246,6 @@ fn produce_instance(
         slot_tyids,
         unique_slot_tyids,
     } = prepared;
-    let mut concrete = ConcreteBody {
-        instance: inst.clone(),
-        direct_calls: BTreeMap::new(),
-        fn_values: BTreeMap::new(),
-        iterator_ops: BTreeMap::new(),
-        synthesized_calls: BTreeMap::new(),
-    };
     facts.callee_summary.bodies = 1;
     let callee_time = std::time::Duration::ZERO;
     let started = bone_core::prelude::Instant::now();
@@ -2625,7 +2261,6 @@ fn produce_instance(
         signatures,
         domains,
         timing_enabled,
-        retain_callee_maps.then_some(&mut concrete),
     );
     let (plan, candidate_refs) = match plan_result {
         Ok((plan, candidate_refs)) => (Ok(plan), candidate_refs),
@@ -2645,7 +2280,6 @@ fn produce_instance(
     }
     BuiltInstance {
         instance: inst,
-        concrete,
         plan,
         candidate_refs,
         facts,
@@ -2900,7 +2534,6 @@ fn produce_instances(
     signatures: &PublishedSignatures,
     domains: &PublishedDomains,
     timing_enabled: bool,
-    retain_callee_maps: bool,
 ) -> Vec<InstanceResult> {
     concrete_map(prepared, |prepared| match prepared {
         PreparedInstanceResult::Gap(gap) => InstanceResult::Gap(gap),
@@ -2911,12 +2544,11 @@ fn produce_instances(
             signatures,
             domains,
             timing_enabled,
-            retain_callee_maps,
         )),
     })
 }
 
-/// Build a [`ConcreteBody`] for every instance the walk expanded.
+/// Build a concrete lowering plan for every instance the walk expanded.
 ///
 /// The tables intern into the graph's arena: a second arena would hand out ids
 /// that mean nothing beside `Instance::args`.
@@ -2930,25 +2562,9 @@ pub fn build_invocations() -> u64 {
 
 thread_local! {
     static BUILD_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    static CONCRETE_DEFAULT_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
-    build_impl(ws, g, true)
-}
-
-/// Build the plans and compact callee census used by lowering without
-/// retaining the diagnostic per-site callee maps on each body. Use [`build`]
-/// for site-join audits; owner-local updates preserve this lighter mode.
-pub fn build_for_lowering(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
-    build_impl(ws, g, false)
-}
-
-pub fn concrete_default_invocations() -> u64 {
-    CONCRETE_DEFAULT_INVOCATIONS.with(std::cell::Cell::get)
-}
-
-fn build_impl(ws: &Workspace, g: &InstanceGraph, retain_callee_maps: bool) -> ConcreteBodies {
     BUILD_INVOCATIONS.with(|count| count.set(count.get() + 1));
     let t_build = bone_core::prelude::Instant::now();
     let intern_before = g.interner().stats();
@@ -3016,7 +2632,6 @@ fn build_impl(ws: &Workspace, g: &InstanceGraph, retain_callee_maps: bool) -> Co
         signatures.as_ref(),
         published_domains.as_ref(),
         timing_enabled,
-        retain_callee_maps,
     );
     let ordinary_parallel_time = t_ordinary_parallel.elapsed();
     results.sort_by(|left, right| left.instance().cmp(right.instance()));
@@ -3024,7 +2639,6 @@ fn build_impl(ws: &Workspace, g: &InstanceGraph, retain_callee_maps: bool) -> Co
     let t_ordinary_merge = bone_core::prelude::Instant::now();
     let mut out = ConcreteBodies {
         global_build_stats: publication_stats,
-        retain_callee_maps,
         ..ConcreteBodies::default()
     };
     out.instance_facts.reserve(results.len());
@@ -3057,13 +2671,11 @@ fn build_impl(ws: &Workspace, g: &InstanceGraph, retain_callee_maps: bool) -> Co
     // The results are sorted by instance, so the ordered tables are built in
     // bulk from the sorted rows rather than one insertion at a time.
     let mut plan_rows: Vec<(Instance, Arc<skull_mir::concrete::ConcreteBodyPlan>)> = Vec::new();
-    let mut body_rows: Vec<(Instance, ConcreteBody)> = Vec::new();
     let mut per_inst = Vec::new();
     let mut t_convert = std::time::Duration::ZERO;
     let mut t_callee = std::time::Duration::ZERO;
     let mut t_plan = std::time::Duration::ZERO;
     let mut plan_insert_time = std::time::Duration::ZERO;
-    let mut body_insert_time = std::time::Duration::ZERO;
     let mut failure_index_time = std::time::Duration::ZERO;
     let mut owner_fact_insert_time = std::time::Duration::ZERO;
     let mut slot_tyids = 0usize;
@@ -3096,13 +2708,6 @@ fn build_impl(ws: &Workspace, g: &InstanceGraph, retain_callee_maps: bool) -> Co
                             }
                         }
                         let started = timing_enabled.then(bone_core::prelude::Instant::now);
-                        if retain_callee_maps {
-                            body_rows.push((instance.clone(), built.concrete));
-                            if let Some(started) = started {
-                                body_insert_time += started.elapsed();
-                            }
-                        }
-                        let started = timing_enabled.then(bone_core::prelude::Instant::now);
                         out.install_failure_index(&facts);
                         if let Some(started) = started {
                             failure_index_time += started.elapsed();
@@ -3122,11 +2727,6 @@ fn build_impl(ws: &Workspace, g: &InstanceGraph, retain_callee_maps: bool) -> Co
     let plans: skull_mir::concrete::ConcretePlans = plan_rows.into_iter().collect();
     if let Some(started) = started {
         plan_insert_time += started.elapsed();
-    }
-    let started = timing_enabled.then(bone_core::prelude::Instant::now);
-    out.bodies = body_rows.into_iter().collect();
-    if let Some(started) = started {
-        body_insert_time += started.elapsed();
     }
     let ordinary_merge_time = t_ordinary_merge.elapsed();
 
@@ -3168,7 +2768,6 @@ fn build_impl(ws: &Workspace, g: &InstanceGraph, retain_callee_maps: bool) -> Co
     let always_merge_time = t_always_merge.elapsed();
     out.plans = std::sync::Arc::new(plans);
     out.signature_derivations = signature_derivations;
-    out.signature_slots_cloned = 0;
     if log::log_enabled!(log::Level::Debug) {
         let intern_after = g.interner().stats();
         let total_time = t_build.elapsed();
@@ -3187,8 +2786,6 @@ fn build_impl(ws: &Workspace, g: &InstanceGraph, retain_callee_maps: bool) -> Co
                 .get((per_inst.len().saturating_sub(1)) * p / 100)
                 .map_or(std::time::Duration::ZERO, |(_, duration)| *duration)
         };
-        // The owner records are authoritative; the compatibility fields on
-        // `out` are only filled by an explicit snapshot, so read the fold.
         let totals = out.aggregate_facts();
         let top: Vec<String> = per_inst
             .iter()
@@ -3211,7 +2808,7 @@ fn build_impl(ws: &Workspace, g: &InstanceGraph, retain_callee_maps: bool) -> Co
              per-instance p50 {:?} p95 {:?} max {:?}, top [{}]; \
              slot tyids {} / {} unique per-body; mono interns {} attempts -> {} new during build; \
              type nodes {}/{} ({} memo hits, {} unresolved, {:?}), struct literals {} fields {} ({:?}), \
-             foreign domains {}/{} ({:?}), signatures {}/{} cloned-slots {} ({:?})",
+             foreign domains {}/{} ({:?}), signatures {}/{} ({:?})",
             per_inst.len(),
             unique_decls.len(),
             totals.generic_bodies,
@@ -3254,16 +2851,14 @@ fn build_impl(ws: &Workspace, g: &InstanceGraph, retain_callee_maps: bool) -> Co
             std::time::Duration::from_nanos(totals.build_stats.foreign_domains_ns),
             totals.signature_requests,
             out.signature_derivations,
-            totals.signature_slots_cloned,
             std::time::Duration::from_nanos(totals.build_stats.signature_ns),
         );
         log::debug!(
-            "concrete merge detail: candidate refs {} rows {:?}, plans {:?}, bodies {:?}, \
+            "concrete merge detail: candidate refs {} rows {:?}, plans {:?}, \
              failures {:?}, owner facts {:?}",
             candidate_ref_rows,
             candidate_install_time,
             plan_insert_time,
-            body_insert_time,
             failure_index_time,
             owner_fact_insert_time,
         );

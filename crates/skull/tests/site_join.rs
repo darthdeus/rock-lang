@@ -1,4 +1,4 @@
-//! Controls for the MIR-call -> `ConcreteBody` join
+//! Controls for the MIR-call -> graph site records join
 //! (`crate::support::site_join`). The join's value is that a call instruction
 //! selects the RIGHT concrete body, so the properties are about two things
 //! that must not collapse onto one key, plus mutation arms proving each half
@@ -34,10 +34,6 @@ fn concrete(ws: &Workspace) -> (InstanceGraph, ConcreteBodies, ScalarCtx) {
     let bodies = skull::concrete_body::build(ws, &g);
     let scx = scalar_ctx(ws, &g);
     (g, bodies, scx)
-}
-
-fn rock(inst: &Instance) -> skull::concrete_body::Callee {
-    skull::concrete_body::Callee::Rock(inst.clone())
 }
 
 fn instance_of(ws: &Workspace, g: &InstanceGraph, name: &str) -> Instance {
@@ -596,9 +592,8 @@ fn main() {
     assert_eq!((c0.args.len(), c1.args.len()), (1, 1));
     assert_ne!(c0.args, c1.args, "the two claims must differ");
 
-    let check = |inst: &Instance, claim: &Instance| {
-        check_callee(&ws, &g, &rock(inst), fref, Some(claim), LUA)
-    };
+    let check =
+        |inst: &Instance, claim: &Instance| check_callee(&ws, &g, inst, fref, Some(claim), LUA);
     assert_eq!(check(insts[0], &c0), CalleeCheck::Instance);
     assert_eq!(check(insts[1], &c1), CalleeCheck::Instance);
     assert_eq!(
@@ -624,11 +619,11 @@ fn main() { print("{one(1)} {two(2)}") }
     let two = instance_of(&ws, &g, "two");
     assert_ne!(one.func, two.func);
     assert_eq!(
-        check_callee(&ws, &g, &rock(&one), one.func, None, LUA),
+        check_callee(&ws, &g, &one, one.func, None, LUA),
         CalleeCheck::NonGeneric
     );
     assert_eq!(
-        check_callee(&ws, &g, &rock(&one), two.func, None, LUA),
+        check_callee(&ws, &g, &one, two.func, None, LUA),
         CalleeCheck::DeclMismatch,
         "a callee resolved to another declaration was accepted"
     );
@@ -650,7 +645,7 @@ fn main() { print("{pair(1, 2.0)} {other(1, 2.0)}") }
     let alien = instance_of(&ws, &g, "other");
     assert_ne!(inst.func, alien.func);
     assert_eq!(inst.args.len(), 2, "fixture must declare two generics");
-    let check = |c: Option<&Instance>| check_callee(&ws, &g, &rock(&inst), inst.func, c, LUA);
+    let check = |c: Option<&Instance>| check_callee(&ws, &g, &inst, inst.func, c, LUA);
 
     assert_eq!(check(Some(&inst)), CalleeCheck::Instance);
     assert_eq!(check(None), CalleeCheck::NoInstance);
@@ -664,9 +659,7 @@ fn main() { print("{pair(1, 2.0)} {other(1, 2.0)}") }
     assert_eq!(check(Some(&partial)), CalleeCheck::InstanceMismatch);
 }
 
-/// A generic BOUNDARY callee verifies as a boundary, not by a Rock
-/// instantiation it does not have; the same instance as a Rock callee still
-/// demands the record.
+/// A generic boundary callee verifies by its declaration and class.
 #[test]
 fn a_generic_boundary_callee_verifies_as_a_boundary() {
     let (ws, g) = graph_of(
@@ -678,31 +671,23 @@ fn main() {
 }
 "#,
     );
-    let bodies = skull::concrete_body::build(&ws, &g);
-    let (inst, class) = bodies
-        .bodies
-        .values()
-        .flat_map(|b| b.callees())
-        .find_map(|(_, c)| match c {
-            skull::concrete_body::Callee::Boundary(i, cl)
-                if !ws.module(i.func.module).functions[i.func.func]
-                    .generics
-                    .is_empty() =>
-            {
-                Some((i.clone(), *cl))
+    let (inst, class) = g
+        .call_sites()
+        .flat_map(|(_, sites)| sites.values())
+        .find_map(|record| {
+            let skull::instance_graph::SiteOutcome::Resolved(i) = &record.outcome else {
+                return None;
+            };
+            let function = &ws.module(i.func.module).functions[i.func.func];
+            if function.generics.is_empty() {
+                return None;
             }
-            _ => None,
+            skull::instance_graph::boundary_class_for(function).map(|class| (i.clone(), class))
         })
         .expect("the fixture must reach a GENERIC boundary");
-    let boundary = skull::concrete_body::Callee::Boundary(inst.clone(), class);
     assert_eq!(
-        check_callee(&ws, &g, &boundary, inst.func, None, LUA),
+        check_callee(&ws, &g, &inst, inst.func, None, LUA),
         CalleeCheck::Boundary(class)
-    );
-    assert_eq!(
-        check_callee(&ws, &g, &rock(&inst), inst.func, None, LUA),
-        CalleeCheck::NoInstance,
-        "the boundary exemption leaked to the Rock arm"
     );
 }
 
@@ -718,13 +703,13 @@ fn main() { print("{ident(1)}") }
     );
     let inst = instance_of(&ws, &g, "ident");
     assert_eq!(
-        check_callee(&ws, &g, &rock(&inst), inst.func, Some(&inst), LUA),
+        check_callee(&ws, &g, &inst, inst.func, Some(&inst), LUA),
         CalleeCheck::Instance
     );
     assert!(g.index.subst.remove(&inst).is_some(), "nothing was removed");
     g.root_instances.remove(&inst);
     assert_eq!(
-        check_callee(&ws, &g, &rock(&inst), inst.func, Some(&inst), LUA),
+        check_callee(&ws, &g, &inst, inst.func, Some(&inst), LUA),
         CalleeCheck::ResolvedUnrecorded,
         "a resolved instance with no recorded substitution was treated as agreement"
     );

@@ -11,7 +11,7 @@ use bone_semantic::hir::{BodyOwner, Expr, TypeExpr};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{ModuleId, TyId};
 use comfy_la_arena::{ArenaMap, Idx, IdxRange};
-use skull::concrete_body::{self, Callee, ConcreteBodies, IteratorOpKind, Slot};
+use skull::concrete_body::{self, ConcreteBodies, Slot};
 use skull::instance_graph::{self, Instance, InstanceGraph, Site, SiteOp, SiteOutcome};
 use skull_mir::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcretePlans};
 use skull_mir::mir::{Inst, MirFunc, Term};
@@ -24,8 +24,7 @@ use ustr::Ustr;
 fn bodies_of(src: &str) -> (Workspace, InstanceGraph, ConcreteBodies) {
     let ws = ws_with_stdlib(src);
     let g = graph_of(&ws);
-    let mut bodies = concrete_body::build(&ws, &g);
-    bodies.refresh_flat_views();
+    let bodies = concrete_body::build(&ws, &g);
     (ws, g, bodies)
 }
 
@@ -35,8 +34,7 @@ fn project_bodies_of(src: &str) -> (Workspace, InstanceGraph, ConcreteBodies) {
     let ws = ws_with_stdlib(src);
     let roots = skull::mir_emit::emission_roots(&ws, Some("<project>"));
     let g = instance_graph::build(&ws, roots, false);
-    let mut bodies = concrete_body::build(&ws, &g);
-    bodies.refresh_flat_views();
+    let bodies = concrete_body::build(&ws, &g);
     (ws, g, bodies)
 }
 
@@ -124,81 +122,6 @@ fn with_callee_signature(
     );
     edit(Arc::make_mut(&mut plan.signature));
     plans
-}
-
-fn callee_identity(ws: &Workspace, g: &InstanceGraph, callee: &Callee) -> String {
-    match callee {
-        Callee::Rock(i) | Callee::Boundary(i, _) => g.identity(ws, i),
-    }
-}
-
-#[track_caller]
-fn assert_gap(bodies: &ConcreteBodies, inst: &Instance, label: &str) {
-    assert!(
-        !bodies.bodies.contains_key(inst),
-        "a `{label}` instance still got a ConcreteBody"
-    );
-    assert!(
-        bodies
-            .gaps
-            .iter()
-            .any(|gap| gap.instance == *inst && gap.gap.label() == label),
-        "the `{label}` gap was not classified: {:?}",
-        bodies.census().gaps
-    );
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct LogicalCalleeCensus {
-    bodies: usize,
-    sites_examined: usize,
-    direct_calls: usize,
-    fn_values: usize,
-    synthesized_calls: usize,
-    iterator_ops: std::collections::BTreeMap<&'static str, usize>,
-    rock_callees: usize,
-    boundary_callees: usize,
-    callee_holes: std::collections::BTreeMap<&'static str, (usize, usize)>,
-    unknown_rock_callees: usize,
-}
-
-fn logical_callee_census(bodies: &ConcreteBodies) -> LogicalCalleeCensus {
-    let census = bodies.census();
-    LogicalCalleeCensus {
-        bodies: census.bodies,
-        sites_examined: census.sites_examined,
-        direct_calls: census.direct_calls,
-        fn_values: census.fn_values,
-        synthesized_calls: census.synthesized_calls,
-        iterator_ops: census.iterator_ops,
-        rock_callees: census.rock_callees,
-        boundary_callees: census.boundary_callees,
-        callee_holes: census.callee_holes,
-        unknown_rock_callees: census.unknown_rock_callees,
-    }
-}
-
-fn assert_lowering_projection_matches_rich(lowering: &ConcreteBodies, rich: &ConcreteBodies) {
-    assert!(
-        lowering.bodies.is_empty(),
-        "lowering projection retained concrete bodies: {}",
-        lowering.bodies.len()
-    );
-    assert!(
-        !rich.bodies.is_empty(),
-        "rich build did not retain any concrete bodies"
-    );
-    assert_eq!(
-        lowering.plans.as_ref(),
-        rich.plans.as_ref(),
-        "lowering plans diverged from the independent rich build"
-    );
-    assert_eq!(rich.census().bodies, rich.bodies.len());
-    assert_eq!(
-        logical_callee_census(lowering),
-        logical_callee_census(rich),
-        "lowering callee census diverged from the independent rich build"
-    );
 }
 
 const ID_CALL_SOURCE: &str = r#"
@@ -1016,7 +939,7 @@ fn main() {
         "no binding slots were converted: {c:?}"
     );
     assert_eq!(
-        bodies.free_types.len(),
+        c.free_by_reason.values().sum::<usize>(),
         0,
         "free types in supposedly concrete bodies, over {} expr and {} binding slots: {:?}",
         c.expr_examined,
@@ -1028,7 +951,7 @@ fn main() {
             .collect::<Vec<_>>()
     );
     assert_eq!(
-        bodies.gaps.len(),
+        c.gaps.values().sum::<usize>(),
         0,
         "expanded instances with no body: {:?}",
         c.gaps
@@ -1049,14 +972,14 @@ fn main() {
     // substitution, not an absent one).
     for i in g.expanded() {
         assert!(
-            bodies.bodies.contains_key(i),
+            bodies.plans.contains_key(i),
             "expanded instance `{}` has no ConcreteBody",
             g.identity(&ws, i)
         );
     }
 
     let insts: Vec<&Instance> = bodies
-        .bodies
+        .plans
         .keys()
         .filter(|i| g.identity(&ws, i).starts_with("ident"))
         .collect();
@@ -1116,9 +1039,18 @@ fn main() { let a = plain(1) }
         "the instance graph expanded a body from stale inference"
     );
 
-    let mut bodies = concrete_body::build(&ws, &g);
-    bodies.refresh_flat_views();
-    assert_gap(&bodies, &inst, "stale-inference");
+    let bodies = concrete_body::build(&ws, &g);
+
+    assert!(
+        !bodies.plans.contains_key(&inst),
+        "stale inference produced a ConcreteBody"
+    );
+    let census = bodies.census();
+    assert!(
+        census.gaps.contains_key("stale-inference"),
+        "stale inference was not classified: {:?}",
+        census.gaps
+    );
 }
 
 /// The failure arm fires, and says WHERE. Perturbing only the CONSUMER's
@@ -1217,26 +1149,31 @@ fn body(v: [int]) -> int {
 fn main() { let a = body([1, 2]) }
 "#,
     );
-    let mut kinds: BTreeSet<&str> = Default::default();
-    for (i, u) in &bodies.untyped {
-        if g.identity(&ws, i).starts_with("body") {
-            kinds.insert(u.kind);
-        }
-    }
-    assert_eq!(
-        kinds.iter().copied().collect::<Vec<_>>(),
-        PINNED,
-        "the untyped-slot population moved"
-    );
-    // The fixture can distinguish: its ordinary expressions ARE typed, so the
-    // four above are a property of those kinds and not of the whole body.
     let body_inst = bodies
-        .bodies
+        .plans
         .keys()
         .find(|i| g.identity(&ws, i).starts_with("body"))
-        .expect("`body` has no ConcreteBody");
-    let hir_body =
-        &ws.module(body_inst.func.module).bodies[&BodyOwner::Function(body_inst.func.func)];
+        .expect("`body` has no concrete plan");
+    let hir_body = ws
+        .module(body_inst.func.module)
+        .bodies
+        .get(&bone_semantic::hir::BodyOwner::Function(
+            body_inst.func.func,
+        ))
+        .expect("`body` has no HIR body");
+    let body_types = &bodies.plans[body_inst].types;
+    let kinds = body_types
+        .untyped_exprs
+        .iter()
+        .map(|expr| match hir_body.expr_arena[*expr] {
+            Expr::Call { .. } => "Call",
+            Expr::IfLet { .. } => "IfLet",
+            Expr::Range { .. } => "Range",
+            Expr::Var(..) => "Var",
+            ref other => panic!("unexpected untyped expression: {other:?}"),
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(kinds.iter().copied().collect::<Vec<_>>(), PINNED);
     let mut annotated_targets = Vec::new();
     let mut inferred_targets = Vec::new();
     for (_, expr) in hir_body.expr_arena.iter() {
@@ -1262,7 +1199,6 @@ fn main() { let a = body([1, 2]) }
         2,
         "fixture has the wrong inferred targets"
     );
-    let body_types = &bodies.plans[body_inst].types;
     assert!(
         annotated_targets
             .iter()
@@ -1279,27 +1215,29 @@ fn main() { let a = body([1, 2]) }
         body_types.expr_types.values().count() > 20,
         "almost nothing in `body` was typed, so the pinned kinds are not what is special"
     );
-    let body = &bodies.bodies[body_inst];
+    let sites = g
+        .call_sites()
+        .find(|(instance, _)| *instance == body_inst)
+        .map(|(_, sites)| sites)
+        .expect("body has no graph sites");
     assert!(
-        !body.direct_calls.is_empty(),
-        "the fixture recorded no callee at all"
+        sites
+            .keys()
+            .any(|site| matches!(site.op, SiteOp::DirectCall))
     );
-    assert!(
-        bodies.census().untyped_as_callee_key.is_empty(),
-        "a callee entry is keyed on an expression with no inferred type: {:?}",
-        bodies.census().untyped_as_callee_key
-    );
-    let header = bodies
-        .untyped
+    let census = bodies.census();
+    assert!(census.untyped_as_callee_key.is_empty());
+    for header in body_types
+        .untyped_exprs
         .iter()
-        .find(|(i, u)| i == body_inst && u.kind == "Call")
-        .map(|(_, u)| u.expr)
-        .expect("no untyped `Call`");
-    assert!(
-        body.callees().all(|(site, _)| site.expr != header),
-        "the template-lowered `for` header has a callee entry after all"
-    );
-    assert_eq!(bodies.free_types.len(), 0);
+        .filter(|expr| matches!(hir_body.expr_arena[**expr], Expr::Call { .. }))
+    {
+        assert!(
+            sites.keys().all(|site| site.expr != *header),
+            "the template-lowered for header has a callee entry"
+        );
+    }
+    assert_eq!(census.free_by_reason.values().sum::<usize>(), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1366,13 +1304,11 @@ fn main() {
         // One graph for every build: raw type IDs are arena-local.
         let graph = graph_of(&ws);
         let build_with = |threads| {
-            let mut bodies = rayon::ThreadPoolBuilder::new()
+            rayon::ThreadPoolBuilder::new()
                 .num_threads(threads)
                 .build()
                 .expect("test pool")
-                .install(|| concrete_body::build(&ws, &graph));
-            bodies.refresh_flat_views();
-            bodies
+                .install(|| concrete_body::build(&ws, &graph))
         };
         let serial = build_with(1);
         assert!(serial.plans.len() > 1, "fixture exposed too few plans");
@@ -1380,28 +1316,8 @@ fn main() {
             !serial.always_plans.is_empty(),
             "fixture exposed no always-emitted plans"
         );
-        let expected_free = graph
-            .expanded()
-            .flat_map(|instance| {
-                serial
-                    .free_types
-                    .iter()
-                    .filter(move |(owner, _)| owner == instance)
-                    .map(|(owner, failure)| {
-                        format!(
-                            "{} {} {} at {}:{}",
-                            graph.identity(&ws, owner),
-                            failure.slot.kind(),
-                            failure.reason.bucket(),
-                            failure.span.file,
-                            failure.span.line_range().0 + 1
-                        )
-                    })
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(serial.render_free_types(&ws, &graph), expected_free);
         let timeless = |bodies: &ConcreteBodies| {
-            let mut stats = bodies.build_stats;
+            let mut stats = bodies.snapshot_build_stats();
             stats.signature_ns = 0;
             stats.type_nodes_ns = 0;
             stats.struct_fields_ns = 0;
@@ -1413,7 +1329,10 @@ fn main() {
             assert_eq!(timeless(&serial), timeless(&parallel), "{threads} workers");
             assert_eq!(*serial.plans, *parallel.plans, "{threads} workers");
             assert_eq!(serial.always_plans, parallel.always_plans);
-            assert_eq!(serial.plan_failures, parallel.plan_failures);
+            assert_eq!(
+                serial.diagnostic_snapshot(&ws, &graph),
+                parallel.diagnostic_snapshot(&ws, &graph)
+            );
             assert_eq!(
                 format!("{:?}", serial.census()),
                 format!("{:?}", parallel.census())
@@ -1436,7 +1355,7 @@ fn main() {
 /// individual count still looked healthy.
 #[test]
 fn every_recorded_operation_becomes_one_entry_a_hole_or_a_rejection() {
-    let (ws, g, bodies) = bodies_of(RICH);
+    let (_ws, g, bodies) = bodies_of(RICH);
     let c = bodies.census();
     assert!(
         c.sites_examined > 0,
@@ -1464,7 +1383,7 @@ fn every_recorded_operation_becomes_one_entry_a_hole_or_a_rejection() {
         g.edges().count()
     );
     assert!(
-        bodies.gaps.is_empty(),
+        c.gaps.is_empty(),
         "an expanded instance got no body: {:?}",
         c.gaps
     );
@@ -1483,48 +1402,19 @@ fn every_recorded_operation_becomes_one_entry_a_hole_or_a_rejection() {
             c.iterator_ops
         );
     }
-    // Both arms of the split are populated: a fixture that reached only Rock
-    // bodies could not tell `Callee::Boundary` from a dead variant.
     assert!(c.rock_callees > 0, "no Rock callee: {c:?}");
     assert!(c.boundary_callees > 0, "no boundary callee: {c:?}");
     assert_eq!(
         c.unknown_rock_callees, 0,
         "a Rock callee names an instance the graph does not have: {:?}",
-        bodies.unknown_rock_callees
+        c.unknown_rock_callees
     );
     assert!(
         g.duplicate_sites().next().is_none(),
         "two operations collapsed onto one site key: {:?}",
         g.duplicate_sites().collect::<Vec<_>>()
     );
-    // Every hole is located -- a hole with no span cannot become a compile
-    // error at the Stage-3 cutover.
-    for h in &bodies.callee_holes {
-        assert!(
-            !instance_graph::is_spanless(&h.span),
-            "a callee hole carries no span: {:?}",
-            h.site
-        );
-    }
-    // A boundary callee names the INSTANCE the walk resolved and the class the
-    // ONE classifier gives that declaration. It carries no target and no
-    // spelling: a shared body has neither, and `artifact::realize` is what
-    // turns this into a `BoundaryId`
-    // (`artifact_view::an_artifact_realizes_the_shared_instance_to_the_sibling_that_serves_it`).
-    for b in bodies.bodies.values() {
-        for (site, callee) in b.callees() {
-            let Callee::Boundary(inst, class) = callee else {
-                continue;
-            };
-            let f = &ws.module(inst.func.module).functions[inst.func.func];
-            assert_eq!(
-                Some(*class),
-                instance_graph::boundary_class_for(f),
-                "wrong boundary class at {:?}",
-                site.op
-            );
-        }
-    }
+    assert!(c.callee_holes.values().all(|(_, spanless)| *spanless == 0));
 }
 
 #[test]
@@ -1635,7 +1525,7 @@ fn vanishing() -> int {
     );
     let fresh_roots = skull::mir_emit::emission_roots(&ws2, Some("/project"));
     let fresh_graph = instance_graph::build(&ws2, fresh_roots, false);
-    let mut fresh = concrete_body::build(&ws2, &fresh_graph);
+    let fresh = concrete_body::build(&ws2, &fresh_graph);
     assert_eq!(
         local.diagnostic_snapshot(&ws2, &graph),
         fresh.diagnostic_snapshot(&ws2, &fresh_graph),
@@ -1758,64 +1648,44 @@ fn main() {
 }
 
 #[test]
-fn lowering_projection_omits_bodies_and_survives_local_callee_retraction() {
-    let source_v1 = r#"
-fn echo<T>(x: T) -> T { return x }
-fn main() {
-    let value = echo(1)
-    print("{value}")
-}
-"#;
-    let source_v2 = r#"
-fn echo<T>(x: T) -> T { return x }
-fn main() {
-    let value = echo("changed")
-    print("{value}")
-}
-"#;
-
-    let ws1 = ws_with_stdlib(source_v1);
+fn local_plans_replace_a_retracted_generic_callee() {
+    let source = |argument| {
+        format!(
+            "fn echo<T>(x: T) -> T {{ return x }}\n\
+             fn main() {{ let value = echo({argument}); print(\"{{value}}\") }}"
+        )
+    };
+    let ws1 = ws_with_stdlib(&source("1"));
     let mut graph = graph_of(&ws1);
-    let mut lowering = concrete_body::build_for_lowering(&ws1, &graph);
-    let rich = concrete_body::build(&ws1, &graph);
-    assert_lowering_projection_matches_rich(&lowering, &rich);
-    let old_echoes = lowering
+    let mut local = concrete_body::build(&ws1, &graph);
+    let old_echo = local
         .plans
         .keys()
-        .filter(|instance| fn_name(&ws1, instance.func) == "echo")
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    assert_eq!(old_echoes.len(), 1, "fixture did not build echo<int>");
+        .find(|instance| fn_name(&ws1, instance.func) == "echo")
+        .expect("echo<int> plan")
+        .clone();
 
-    let ws2 = ws_with_stdlib(source_v2);
+    let ws2 = ws_with_stdlib(&source("\"changed\""));
     let main = body_id(&ws2, "main");
     let update = graph.update_bodies_with_root_delta(&ws2, &[], &[], &[main], &[]);
-    assert!(
-        update
-            .removed
-            .iter()
-            .any(|instance| fn_name(&ws1, instance.func) == "echo"),
-        "changing the only generic call did not retract its old callee: {update:?}"
-    );
-    lowering.update_local(
+    assert!(update.removed.contains(&old_echo));
+    local.update_local(
         &ws2,
         &graph,
         &update.revisited,
         &update.removed,
         &update.revisited_owners,
     );
-    let fresh_rich = concrete_body::build(&ws2, &graph);
-    assert_lowering_projection_matches_rich(&lowering, &fresh_rich);
-    let new_echoes = lowering
-        .plans
-        .keys()
-        .filter(|instance| fn_name(&ws2, instance.func) == "echo")
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    assert_eq!(new_echoes.len(), 1, "fixture did not build echo<string>");
-    assert_ne!(
-        old_echoes, new_echoes,
-        "the old generic callee survived after its only call changed type"
+    let fresh = concrete_body::build(&ws2, &graph);
+    assert_eq!(local.plans, fresh.plans);
+    assert!(!local.plans.contains_key(&old_echo));
+    assert_eq!(
+        local
+            .plans
+            .keys()
+            .filter(|instance| fn_name(&ws2, instance.func) == "echo")
+            .count(),
+        1
     );
 }
 
@@ -1826,8 +1696,8 @@ fn main() {
 #[test]
 fn one_generic_body_names_a_different_callee_per_instance() {
     let (ws, g, bodies) = bodies_of(RICH);
-    let wraps: Vec<&Instance> = bodies
-        .bodies
+    let wraps: Vec<&skull::instance_graph::Instance> = bodies
+        .plans
         .keys()
         .filter(|i| g.identity(&ws, i).starts_with("wrap"))
         .collect();
@@ -1836,25 +1706,18 @@ fn one_generic_body_names_a_different_callee_per_instance() {
         2,
         "expected two `wrap` instances, got {wraps:?}"
     );
-    let (a, b) = (&bodies.bodies[wraps[0]], &bodies.bodies[wraps[1]]);
-    let shared: Vec<(Site, &Callee, &Callee)> = a
-        .direct_calls
+    let (a, b) = (&bodies.plans[wraps[0]], &bodies.plans[wraps[1]]);
+    let shared = a
+        .callees
         .iter()
-        .filter_map(|(s, x)| b.direct_calls.get(s).map(|y| (s.clone(), x, y)))
-        .collect();
-    assert!(
-        !shared.is_empty(),
-        "the two `wrap` bodies share no call site"
-    );
-    let named: Vec<(String, String)> = shared
+        .filter_map(|(site, x)| b.callees.get(site).map(|y| (&x.instance, &y.instance)))
+        .collect::<Vec<_>>();
+    assert!(!shared.is_empty(), "the two wrap plans share no call site");
+    let named = shared
         .iter()
-        .filter_map(|(_, x, y)| match (x, y) {
-            (Callee::Rock(x), Callee::Rock(y)) if x != y => {
-                Some((g.identity(&ws, x), g.identity(&ws, y)))
-            }
-            _ => None,
-        })
-        .collect();
+        .filter(|(x, y)| x != y)
+        .map(|(x, y)| (g.identity(&ws, x), g.identity(&ws, y)))
+        .collect::<Vec<_>>();
     assert!(
         named
             .iter()
@@ -1895,15 +1758,16 @@ fn main() {
     );
 
     let pull = bodies
-        .bodies
+        .plans
         .keys()
         .find(|i| g.identity(&ws, i).starts_with("pull"))
         .expect("no concrete `pull` instance");
-    let pull_calls: Vec<String> = bodies.bodies[pull]
-        .direct_calls
-        .values()
-        .map(|c| callee_identity(&ws, &g, c))
-        .collect();
+    let pull_calls = bodies.plans[pull]
+        .callees
+        .iter()
+        .filter(|(site, _)| matches!(site.op, SiteOp::DirectCall))
+        .map(|(_, callee)| g.identity(&ws, &callee.instance))
+        .collect::<Vec<_>>();
     assert!(
         pull_calls
             .iter()
@@ -1912,16 +1776,16 @@ fn main() {
     );
 
     let sum_it = bodies
-        .bodies
+        .plans
         .keys()
         .find(|i| g.identity(&ws, i).starts_with("sum_it"))
         .expect("no concrete `sum_it` instance");
-    let loop_nexts: Vec<String> = bodies.bodies[sum_it]
-        .iterator_ops
-        .values()
-        .filter(|op| op.kind == IteratorOpKind::Next)
-        .map(|op| callee_identity(&ws, &g, &op.callee))
-        .collect();
+    let loop_nexts = bodies.plans[sum_it]
+        .callees
+        .iter()
+        .filter(|(site, _)| matches!(site.op, SiteOp::ForNext(_)))
+        .map(|(_, callee)| g.identity(&ws, &callee.instance))
+        .collect::<Vec<_>>();
     assert!(
         loop_nexts
             .iter()
@@ -1966,9 +1830,17 @@ fn main() { let n = sum_it([1, 2].iter()) }
             instance_graph::InstanceBoundTree::default(),
         );
 
-    let mut bodies = concrete_body::build(&ws, &g);
-    bodies.refresh_flat_views();
-    assert_gap(&bodies, &inst, "inconsistent-bounds");
+    let bodies = concrete_body::build(&ws, &g);
+    assert!(
+        !bodies.plans.contains_key(&inst),
+        "an ambiguous body was still built"
+    );
+    let census = bodies.census();
+    assert!(
+        census.gaps.contains_key("inconsistent-bounds"),
+        "the disagreement was not classified: {:?}",
+        census.gaps
+    );
 }
 
 /// A `for` head resolves to a concrete `iter` AND a concrete `next`, and a
@@ -1978,27 +1850,36 @@ fn main() { let n = sum_it([1, 2].iter()) }
 fn iterator_operations_resolve_to_concrete_witnesses() {
     let (ws, g, bodies) = bodies_of(RICH);
     let main = bodies
-        .bodies
+        .plans
         .keys()
         .find(|i| g.identity(&ws, i).starts_with("main@"))
         .expect("no `main` body");
-    let ops = &bodies.bodies[main].iterator_ops;
-    let named: Vec<(IteratorOpKind, String)> = ops
-        .values()
-        .map(|op| (op.kind, callee_identity(&ws, &g, &op.callee)))
-        .collect();
+    let ops = g
+        .call_sites()
+        .find(|(instance, _)| *instance == main)
+        .map(|(_, sites)| sites)
+        .expect("main has no graph sites");
+    let named = ops
+        .iter()
+        .filter_map(|(site, record)| {
+            let SiteOutcome::Resolved(instance) = &record.outcome else {
+                return None;
+            };
+            Some((&site.op, g.identity(&ws, instance)))
+        })
+        .collect::<Vec<_>>();
     // Named, not merely present: the `for` over `[int]` resolves `next` at
     // `VecIter<int>`, so the ELEMENT type is in the callee's identity.
     assert!(
-        named
-            .iter()
-            .any(|(k, n)| *k == IteratorOpKind::Iter && n.contains("p_int")),
+        named.iter().any(
+            |(k, n)| matches!(k, SiteOp::ForIter | SiteOp::ImplicitIter) && n.contains("p_int")
+        ),
         "no concrete `iter` at the int element: {named:?}"
     );
     assert!(
         named
             .iter()
-            .any(|(k, n)| *k == IteratorOpKind::Next && n.starts_with("next_VecIter")),
+            .any(|(k, n)| matches!(k, SiteOp::ForNext(_)) && n.starts_with("next_VecIter")),
         "no concrete `next` for the `for` protocol: {named:?}"
     );
     // The chain's nested witnesses: `map(..).sum()` resolves MapIter's `next`

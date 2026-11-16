@@ -262,7 +262,7 @@ fn build_concrete_plans(
     ws: &Workspace,
     graph: &crate::instance_graph::InstanceGraph,
 ) -> Result<crate::concrete_body::ConcreteBodies, CompilerError> {
-    let concrete = crate::concrete_body::build_for_lowering(ws, graph);
+    let concrete = crate::concrete_body::build(ws, graph);
     if let Some((instance, reason)) = concrete.first_plan_failure() {
         let f = &ws.module(instance.func.module).functions[instance.func.func];
         return Err(CompilerError::new_with_label(

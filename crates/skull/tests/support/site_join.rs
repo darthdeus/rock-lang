@@ -1,4 +1,4 @@
-//! The MIR-call -> `ConcreteBody` join, measured.
+//! The MIR-call -> graph site records join, measured.
 //!
 //! Instance-driven emission answers "what does THIS call instruction call"
 //! from the graph's own resolution, keyed by the [`CallSite`] lowering stamps
@@ -8,7 +8,7 @@
 //! The census measures the body that comes out of
 //! [`skull::mir_emit::prepare_instance_body_with_plans`]: inlining deletes calls
 //! and splices others in, and the spliced ones join through the CALLEE
-//! instance's `ConcreteBody`. Only reachable blocks count, since cleanup leaves
+//! instance's graph site records. Only reachable blocks count, since cleanup leaves
 //! unreachable ones in the arena and they are never emitted.
 //!
 //! Every exclusion is counted by cause, and the join fails closed: an owner the
@@ -25,7 +25,7 @@ use skull_mir::mir::{FuncRef, Inst, MirFunc};
 use skull_mir::site::CallSite;
 use ustr::Ustr;
 
-use skull::concrete_body::{Callee, ConcreteBodies};
+use skull::concrete_body::ConcreteBodies;
 use skull::instance_graph::{Instance, InstanceGraph};
 
 /// Why a call instruction is not joined.
@@ -38,7 +38,7 @@ pub enum Unjoined {
     OwnerNotInTable,
     /// The owner corresponds to no `Instance` in the graph.
     OwnerNotAnInstance,
-    /// The owning instance has no `ConcreteBody`.
+    /// The owning instance has no concrete lowering plan.
     NoBody,
     /// The body records no callee at this site: lowering synthesized a call the
     /// graph walk does not model.
@@ -488,22 +488,28 @@ impl<'a> Join<'a> {
         else {
             return (Some(Unjoined::OwnerNotAnInstance), op);
         };
-        let Some(body) = self.bodies.bodies.get(owner_inst) else {
+        if self.bodies.plan_for(owner_inst).is_none() {
             return (Some(Unjoined::NoBody), op);
-        };
+        }
         let synthesized = match cs.site.op {
-            skull_mir::site::SiteOp::Synthesized(name) => {
-                skull::concrete_body::synthesized_callee(self.ws, self.g, name)
+            skull_mir::site::SiteOp::Synthesized(name)
+                if skull_mir::lower::SYNTHESIZED_ENTRIES.contains(&name) =>
+            {
+                skull::instance_graph::stdlib_entry_representative(self.ws, name)
+                    .map(Instance::base)
+                    .filter(|instance| self.g.instances.contains(instance))
             }
             _ => None,
         };
-        let resolved = || {
-            body.callees()
-                .filter(|(site, _)| *site == &cs.site)
-                .map(|(_, callee)| callee)
-                .last()
-        };
-        let Some(callee) = synthesized.as_ref().or_else(resolved) else {
+        let resolved = self
+            .g
+            .sites_of(owner_inst)
+            .and_then(|sites| sites.get(&cs.site))
+            .and_then(|record| match &record.outcome {
+                skull::instance_graph::SiteOutcome::Resolved(inst) => Some(inst),
+                skull::instance_graph::SiteOutcome::Failed(_) => None,
+            });
+        let Some(callee) = synthesized.as_ref().or(resolved) else {
             return (Some(Unjoined::SiteNotInBody), op);
         };
         let verdict = check_callee(
@@ -525,9 +531,10 @@ impl<'a> Join<'a> {
             Verified::NonGeneric => c.joined_non_generic += 1,
             Verified::Boundary => c.joined_boundary_verified += 1,
         }
-        match callee {
-            Callee::Rock(_) => c.joined_rock += 1,
-            Callee::Boundary(..) => c.joined_boundary += 1,
+        if matches!(kind, Verified::Boundary) {
+            c.joined_boundary += 1;
+        } else {
+            c.joined_rock += 1;
         }
         if owner_inst != measured {
             c.joined_spliced += 1;
@@ -661,12 +668,11 @@ pub enum Verified {
 pub fn check_callee(
     ws: &Workspace,
     g: &InstanceGraph,
-    callee: &Callee,
+    callee_inst: &Instance,
     target: FuncRef,
     call_inst: Option<&Instance>,
     target_backend: FnBackend,
 ) -> CalleeCheck {
-    let callee_inst = callee.instance();
     // The graph records a backend variant group's representative while MIR
     // calls the sibling serving this backend, so ask the emitter's own
     // selection rule rather than compare `FuncRef`s.
@@ -680,8 +686,10 @@ pub fn check_callee(
     }
     // An opaque body is emitted once per declaration and target, so its
     // generic arguments are not part of what emission spells.
-    if let Callee::Boundary(_, class) = callee {
-        return CalleeCheck::Boundary(*class);
+    if let Some(class) = skull::instance_graph::boundary_class_for(
+        &ws.module(callee_inst.func.module).functions[callee_inst.func.func],
+    ) {
+        return CalleeCheck::Boundary(class);
     }
     if ws.module(target.module).functions[target.func]
         .generics

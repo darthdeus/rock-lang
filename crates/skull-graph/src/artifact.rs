@@ -420,12 +420,7 @@ pub struct SeveredGroup {
     pub callers: BTreeSet<Instance>,
 }
 
-/// What a call in THIS artifact terminates in -- [`Callee`] with the boundary
-/// arm REALIZED.
-///
-/// The shared form cannot carry a [`BoundaryId`]: an id names a target and an
-/// emitted symbol, and a target-neutral body has neither. This is the same
-/// split one rung down, not a second callee model.
+/// A call target with its backend-specific boundary identity.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum RealizedCallee {
     Rock(Instance),
@@ -2235,9 +2230,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
                         .push(row.clone());
                     severed.push(row);
                 }
-                // The walk resolved a callee the graph does not hold. Already a
-                // `ConcreteBody` finding (`unknown_rock_callees`); nothing to
-                // realize here.
+                // Missing graph instances are reported by concrete plan construction.
                 None => {}
             }
         }

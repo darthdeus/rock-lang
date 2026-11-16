@@ -13,7 +13,6 @@ use crate::common::{
 };
 use crate::support::site_join::Unjoined;
 use bone_semantic::inference::Workspace;
-use skull::concrete_body::Callee;
 use skull::instance_graph::InstanceGraph;
 use skull_mir::mir::MirFunc;
 use skull_mir::site::SiteDomain;
@@ -122,19 +121,16 @@ fn main() {
     );
     // The two are DIFFERENT keys, so the body's table holds both.
     let g = graph_of(&ws);
-    let bodies = skull::concrete_body::build(&ws, &g);
     let mid = module_id(&ws, "<test>");
-    let main = bodies
-        .bodies
-        .iter()
+    let main = g
+        .call_sites()
         .find(|(i, _)| {
             i.func.module == mid && ws.module(mid).functions[i.func.func].name.as_str() == "main"
         })
-        .map(|(_, b)| b)
-        .expect("main has a concrete body");
+        .map(|(_, sites)| sites)
+        .expect("main has graph sites");
     for e in &collisions {
-        let at: Vec<&Callee> = main
-            .direct_calls
+        let at: Vec<_> = main
             .iter()
             .filter(|(s, _)| s.expr.into_raw().into_u32() == *e)
             .map(|(_, c)| c)
@@ -143,7 +139,7 @@ fn main() {
             at.len(),
             2,
             "index {e} carries one callee, so the two arenas collapsed: {:?}",
-            main.direct_calls.keys().collect::<Vec<_>>()
+            main.keys().collect::<Vec<_>>()
         );
     }
 }
