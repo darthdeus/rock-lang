@@ -2,6 +2,7 @@
 //! the same texts publishes, after every step of a script mixing body edits,
 //! signature edits, added and removed functions, and renames.
 
+use crate::fixture::Project;
 use bone_query::BoneWorkspace;
 
 const A0: &str = "\
@@ -63,36 +64,26 @@ fn lint_rows(bone: &BoneWorkspace, path: &str) -> Rows {
     rows
 }
 
-struct Project {
-    _dir: tempfile::TempDir,
+struct Script {
+    _project: Project,
     paths: Vec<String>,
     texts: Vec<String>,
     bone: BoneWorkspace,
 }
 
-impl Project {
-    fn new() -> Project {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("stick.toml"),
-            "[package]\nname = \"lints\"\n",
-        )
-        .unwrap();
-        let mut paths = Vec::new();
-        let mut texts = Vec::new();
-        for (name, text) in [("a.rock", A0), ("b.rock", B0), ("c.rock", C0)] {
-            std::fs::write(dir.path().join(name), text).unwrap();
-            paths.push(bone_query::canonicalize_lenient(
-                &dir.path().join(name).to_string_lossy(),
-            ));
-            texts.push(text.to_string());
-        }
+impl Script {
+    fn new() -> Script {
+        let files = [("a.rock", A0), ("b.rock", B0), ("c.rock", C0)];
+        let manifest = ("stick.toml", "[package]\nname = \"lints\"\n");
+        let project = Project::new(&[manifest, files[0], files[1], files[2]]);
+        let paths: Vec<String> = files.iter().map(|(name, _)| project.path(name)).collect();
+        let texts: Vec<String> = files.iter().map(|(_, text)| text.to_string()).collect();
         let mut bone = BoneWorkspace::new();
         for (path, text) in paths.iter().zip(&texts) {
             bone.update(path, text.clone());
         }
-        Project {
-            _dir: dir,
+        Script {
+            _project: project,
             paths,
             texts,
             bone,
@@ -133,7 +124,7 @@ impl Project {
 
 #[test]
 fn lint_cache_matches_a_fresh_load_after_mixed_edits() {
-    let mut p = Project::new();
+    let mut p = Script::new();
     p.assert_matches_fresh("initial load");
     let initial = p.all_rows();
     for expected in ["unused_main", "spare", "idle", "dead_a", "dead_b", "lonely"] {
