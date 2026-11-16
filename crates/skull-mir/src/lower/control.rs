@@ -426,8 +426,8 @@ impl<'a> Builder<'a> {
             }
             // Short-circuit operators: the rhs may not evaluate, so they lower
             // to branches with the result flowing through a cell.
-            BinOp::And => self.lower_and(lhs, rhs, condition),
-            BinOp::Or => self.lower_or(lhs, rhs, condition),
+            BinOp::And => self.lower_short_circuit(lhs, rhs, condition, true),
+            BinOp::Or => self.lower_short_circuit(lhs, rhs, condition, false),
             BinOp::NullCoalesce => self.lower_nullcoalesce(lhs, rhs),
         }
     }
@@ -688,60 +688,33 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// `a && b` == `if a then b else false`.
-    fn lower_and(
+    /// `a && b` == `if a then b else false`; `a || b` == `if a then true else b`.
+    fn lower_short_circuit(
         &mut self,
         lhs: Idx<Expr>,
         rhs: Idx<Expr>,
         condition: bool,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let result = self
-            .f
-            .new_cell_typed(None, self.current_expr_storage_ty_id());
-        let lv = self.lower_condition(lhs)?;
-        let rhs_bb = self.f.new_block();
-        let else_bb = self.f.new_block();
-        let join = self.f.new_block();
-        self.branch_to(lv, rhs_bb, else_bb);
-        self.cur = rhs_bb;
-        let rv = if condition {
-            self.lower_condition(rhs)?
-        } else {
-            self.lower_expr(rhs)?
-        };
-        self.store_and_join(result, rv, join);
-        self.cur = else_bb;
-        let f = self.emit_cur(Inst::Const(Lit::Bool(false)));
-        self.store_and_join(result, f, join);
-        self.cur = join;
-        Ok(self.emit_cur(Inst::Load(result)))
-    }
-
-    /// `a || b` == `if a then true else b`.
-    fn lower_or(
-        &mut self,
-        lhs: Idx<Expr>,
-        rhs: Idx<Expr>,
-        condition: bool,
+        and: bool,
     ) -> Result<Idx<Inst>, CompilerError> {
         let result = self
             .f
             .new_cell_typed(None, self.current_expr_storage_ty_id());
         let lv = self.lower_condition(lhs)?;
         let then_bb = self.f.new_block();
-        let rhs_bb = self.f.new_block();
+        let else_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.branch_to(lv, then_bb, rhs_bb);
-        self.cur = then_bb;
-        let t = self.emit_cur(Inst::Const(Lit::Bool(true)));
-        self.store_and_join(result, t, join);
-        self.cur = rhs_bb;
-        let rv = if condition {
-            self.lower_condition(rhs)?
-        } else {
-            self.lower_expr(rhs)?
-        };
-        self.store_and_join(result, rv, join);
+        self.branch_to(lv, then_bb, else_bb);
+        for (bb, evaluates_rhs) in [(then_bb, and), (else_bb, !and)] {
+            self.cur = bb;
+            let v = if !evaluates_rhs {
+                self.emit_cur(Inst::Const(Lit::Bool(!and)))
+            } else if condition {
+                self.lower_condition(rhs)?
+            } else {
+                self.lower_expr(rhs)?
+            };
+            self.store_and_join(result, v, join);
+        }
         self.cur = join;
         Ok(self.emit_cur(Inst::Load(result)))
     }
