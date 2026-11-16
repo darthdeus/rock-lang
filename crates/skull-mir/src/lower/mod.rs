@@ -2493,6 +2493,27 @@ impl<'a> Builder<'a> {
     }
 
     /// A representation-planning error, at its own span or else the cursor's.
+    /// End the current block with a branch to `nil_bb` when `v` is nil, else
+    /// to `value_bb`. Returns the nil test.
+    pub(crate) fn branch_on_nil(
+        &mut self,
+        v: Idx<Inst>,
+        nil_bb: Idx<Block>,
+        value_bb: Idx<Block>,
+    ) -> Idx<Inst> {
+        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+        let cond = self.emit_cur(Inst::Eq(v, nil));
+        self.f.set_term(
+            self.cur,
+            Term::Branch {
+                cond,
+                then_bb: nil_bb,
+                else_bb: value_bb,
+            },
+        );
+        cond
+    }
+
     fn rep_error(&self, error: RepError) -> CompilerError {
         match error.span.or(self.cur_span) {
             Some(span) => CompilerError::new_with_label(span, error.message),

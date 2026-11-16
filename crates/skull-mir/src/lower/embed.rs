@@ -572,20 +572,11 @@ impl<'a> Builder<'a> {
         // Dynamic `Child?`: one presence test, leaves read only on the present
         // arm and joined through cells.
         let v = self.lower_expr(value)?;
-        let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        let is_nil = self.emit_cur(Inst::Eq(v, nil));
         let cells: Vec<Idx<Cell>> = paths.iter().map(|_| self.f.new_cell(None)).collect();
         let absent_bb = self.f.new_block();
         let present_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: is_nil,
-                then_bb: absent_bb,
-                else_bb: present_bb,
-            },
-        );
+        let is_nil = self.branch_on_nil(v, absent_bb, present_bb);
 
         self.cur = absent_bb;
         for &c in &cells {
@@ -719,18 +710,9 @@ impl<'a> Builder<'a> {
                 field,
             });
             // False presence still needs normalization for boxed embed readers.
-            let nil = self.emit_cur(Inst::Const(Lit::Nil));
-            let absent = self.emit_cur(Inst::Eq(present, nil));
             let clear = self.f.new_block();
             let join = self.f.new_block();
-            self.f.set_term(
-                self.cur,
-                Term::Branch {
-                    cond: absent,
-                    then_bb: join,
-                    else_bb: clear,
-                },
-            );
+            self.branch_on_nil(present, join, clear);
             self.cur = clear;
             Some(join)
         } else {
@@ -763,20 +745,11 @@ impl<'a> Builder<'a> {
             base: parent,
             field,
         });
-        let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        let is_nil = self.emit_cur(Inst::Eq(present, nil));
         let result = self.f.new_cell(None);
         let nil_bb = self.f.new_block();
         let val_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: is_nil,
-                then_bb: nil_bb,
-                else_bb: val_bb,
-            },
-        );
+        self.branch_on_nil(present, nil_bb, val_bb);
 
         self.cur = nil_bb;
         let n = self.emit_cur(Inst::Const(Lit::Nil));

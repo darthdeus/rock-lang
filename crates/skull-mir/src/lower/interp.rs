@@ -189,19 +189,10 @@ impl<'a> Builder<'a> {
         render: impl FnOnce(&mut Self) -> Result<Idx<Inst>, CompilerError>,
     ) -> Result<Idx<Inst>, CompilerError> {
         let result = self.f.new_cell(None);
-        let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        let is_nil = self.emit_cur(Inst::Eq(v, nil));
         let nil_bb = self.f.new_block();
         let val_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: is_nil,
-                then_bb: nil_bb,
-                else_bb: val_bb,
-            },
-        );
+        self.branch_on_nil(v, nil_bb, val_bb);
 
         self.cur = nil_bb;
         let n = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr("nil"))));

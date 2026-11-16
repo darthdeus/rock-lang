@@ -871,16 +871,7 @@ impl<'a> Builder<'a> {
             table,
         });
         let k = self.emit_cur(Inst::Load(key_cell));
-        let nil2 = self.emit_cur(Inst::Const(Lit::Nil));
-        let done = self.emit_cur(Inst::Eq(k, nil2));
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: done,
-                then_bb: exit,
-                else_bb: body_bb,
-            },
-        );
+        self.branch_on_nil(k, exit, body_bb);
 
         self.cur = body_bb;
         let needs_value = match vars {

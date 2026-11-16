@@ -471,19 +471,10 @@ impl<'a> Builder<'a> {
         }
 
         let result = self.f.new_cell(None);
-        let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        let is_nil = self.emit_cur(Inst::Eq(tag, nil));
         let nil_bb = self.f.new_block();
         let box_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: is_nil,
-                then_bb: nil_bb,
-                else_bb: box_bb,
-            },
-        );
+        self.branch_on_nil(tag, nil_bb, box_bb);
         self.cur = nil_bb;
         let absent = self.emit_cur(Inst::Const(Lit::Nil));
         self.emit_cur(Inst::Store {

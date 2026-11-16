@@ -3344,19 +3344,10 @@ impl<'a> Builder<'a> {
             // (tag = nil, the null sentinel); else spread the box's keys.
             let n = es.leaf_count();
             let cells: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
-            let nil = self.emit_cur(Inst::Const(Lit::Nil));
-            let is_nil = self.emit_cur(Inst::Eq(v, nil));
             let nil_bb = self.f.new_block();
             let val_bb = self.f.new_block();
             let join = self.f.new_block();
-            self.f.set_term(
-                self.cur,
-                Term::Branch {
-                    cond: is_nil,
-                    then_bb: nil_bb,
-                    else_bb: val_bb,
-                },
-            );
+            self.branch_on_nil(v, nil_bb, val_bb);
             self.cur = nil_bb;
             for c in &cells {
                 let z = self.emit_cur(Inst::Const(Lit::Nil));
@@ -4207,20 +4198,11 @@ impl<'a> Builder<'a> {
         name: Ustr,
         owner_ty: Option<&MonoTy>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        let is_nil = self.emit_cur(Inst::Eq(boxed, nil));
         let result = self.f.new_cell(None);
         let nil_bb = self.f.new_block();
         let val_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: is_nil,
-                then_bb: nil_bb,
-                else_bb: val_bb,
-            },
-        );
+        self.branch_on_nil(boxed, nil_bb, val_bb);
 
         self.cur = nil_bb;
         let n = self.emit_cur(Inst::Const(Lit::Nil));

@@ -977,17 +977,8 @@ impl<'a> Builder<'a> {
             let join = self.f.new_block();
             if self.expr_is_nullable(value) {
                 let val_v = self.scrut_value(&scrut);
-                let nil = self.emit_cur(Inst::Const(Lit::Nil));
-                let is_nil = self.emit_cur(Inst::Eq(val_v, nil));
                 let cont = self.f.new_block();
-                self.f.set_term(
-                    self.cur,
-                    Term::Branch {
-                        cond: is_nil,
-                        then_bb: else_bb,
-                        else_bb: cont,
-                    },
-                );
+                self.branch_on_nil(val_v, else_bb, cont);
                 self.cur = cont;
             }
             let variants = self.scrut_variants(value);
@@ -1230,17 +1221,8 @@ impl<'a> Builder<'a> {
         // never nullable, so `scrut_value` is a plain `Val` here.)
         if self.expr_is_nullable(value) {
             let val_v = self.scrut_value(&scrut);
-            let nil = self.emit_cur(Inst::Const(Lit::Nil));
-            let is_nil = self.emit_cur(Inst::Eq(val_v, nil));
             let cont = self.f.new_block();
-            self.f.set_term(
-                self.cur,
-                Term::Branch {
-                    cond: is_nil,
-                    then_bb: exit,
-                    else_bb: cont,
-                },
-            );
+            self.branch_on_nil(val_v, exit, cont);
             self.cur = cont;
         }
         // Match: failure exits the loop; on success `self.cur` holds the bindings.

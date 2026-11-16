@@ -1419,16 +1419,7 @@ impl<'a> Builder<'a> {
         // header: loop while the inner's last yield wasn't nil (still producing).
         self.cur = header;
         let v = self.emit_cur(Inst::Load(slot));
-        let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        let is_nil = self.emit_cur(Inst::Eq(v, nil));
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: is_nil,
-                then_bb: exit,
-                else_bb: body,
-            },
-        );
+        self.branch_on_nil(v, exit, body);
 
         // body: yield the inner's value, resume it with our resume arg.
         self.cur = body;

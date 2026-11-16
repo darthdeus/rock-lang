@@ -769,19 +769,10 @@ impl<'a> Builder<'a> {
             .f
             .new_cell_typed(None, self.current_expr_storage_ty_id());
         let lv = self.lower_expr(lhs)?;
-        let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        let is_nil = self.emit_cur(Inst::Eq(lv, nil));
         let rhs_bb = self.f.new_block();
         let lhs_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: is_nil,
-                then_bb: rhs_bb,
-                else_bb: lhs_bb,
-            },
-        );
+        self.branch_on_nil(lv, rhs_bb, lhs_bb);
         self.cur = rhs_bb;
         let rv = self.lower_expr(rhs)?;
         self.store_and_join(result, rv, join);

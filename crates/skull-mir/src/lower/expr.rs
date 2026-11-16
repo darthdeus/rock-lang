@@ -1481,17 +1481,8 @@ impl<'a> Builder<'a> {
             }
             Expr::SafeNav { base, field } => {
                 let recv = self.lower_guarded_place_base(base, absent_join)?;
-                let nil = self.emit_cur(Inst::Const(Lit::Nil));
-                let is_nil = self.emit_cur(Inst::Eq(recv, nil));
                 let present = self.f.new_block();
-                self.f.set_term(
-                    self.cur,
-                    Term::Branch {
-                        cond: is_nil,
-                        then_bb: absent_join,
-                        else_bb: present,
-                    },
-                );
+                self.branch_on_nil(recv, absent_join, present);
                 self.cur = present;
                 Ok(self.emit_cur(Inst::Field { base: recv, field }))
             }
@@ -1932,17 +1923,8 @@ impl<'a> Builder<'a> {
             Expr::SafeNav { base, field } => {
                 let join = self.f.new_block();
                 let recv = self.lower_guarded_place_base(base, join)?;
-                let nil = self.emit_cur(Inst::Const(Lit::Nil));
-                let is_nil = self.emit_cur(Inst::Eq(recv, nil));
                 let store_bb = self.f.new_block();
-                self.f.set_term(
-                    self.cur,
-                    Term::Branch {
-                        cond: is_nil,
-                        then_bb: join,
-                        else_bb: store_bb,
-                    },
-                );
+                self.branch_on_nil(recv, join, store_bb);
                 self.cur = store_bb;
                 let v = self.lower_expr(value)?;
                 self.emit_cur(Inst::StoreField {
@@ -2032,17 +2014,8 @@ impl<'a> Builder<'a> {
             Expr::SafeNav { base, field } => {
                 let join = self.f.new_block();
                 let recv = self.lower_guarded_place_base(base, join)?;
-                let nil = self.emit_cur(Inst::Const(Lit::Nil));
-                let is_nil = self.emit_cur(Inst::Eq(recv, nil));
                 let store_bb = self.f.new_block();
-                self.f.set_term(
-                    self.cur,
-                    Term::Branch {
-                        cond: is_nil,
-                        then_bb: join,
-                        else_bb: store_bb,
-                    },
-                );
+                self.branch_on_nil(recv, join, store_bb);
                 self.cur = store_bb;
                 let cur = self.emit_cur(Inst::Field { base: recv, field });
                 let new_v = combine(self, cur)?;
