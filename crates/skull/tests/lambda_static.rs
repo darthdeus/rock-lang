@@ -51,43 +51,23 @@ fn lambda_body_static_folds_into_enclosing_chunk_statics() {
     );
 }
 
-/// RE-INIT on init-edit: editing the lambda static's initializer (100 -> 7)
-/// changes its key, the reset preamble clears the cell, and the next call
-/// re-inits -> 8 (not the preserved 102).
+/// Editing the lambda static's initializer (100 -> 7) changes its key, the
+/// reset preamble clears the cell, and the next call re-inits to 8. Reloading
+/// the same source keeps the live value: the second call gives 102, where a
+/// reset would give 101.
 #[test]
-fn lambda_body_static_reinits_on_initializer_edit() {
+fn lambda_body_static_reinits_only_on_initializer_edit() {
     let before = emit_module(PROBE);
-    let after = emit_module(&PROBE.replace("static n = 100", "static n = 7"));
-    let script = format!(
-        "_G.HOT_RELOAD = false\n{before}\nmain()\n\
-         _G.HOT_RELOAD = true\n{after}\nmain()\n\
-         local result_key = __rock_global_entry(\"RESULT\").slots[1]\n\
-         if __rock_globals[result_key] == 8 then print(\"PASS\")\n\
-         else print(\"FAIL RESULT=\"..tostring(__rock_globals[result_key])) end\n"
-    );
-    let out = run_luajit(&script);
-    assert!(
-        out.starts_with("PASS"),
-        "expected lambda static to reset on init-edit; got: {out}"
-    );
-}
-
-/// PRESERVE otherwise: reload the SAME source, key unchanged -> the live value
-/// survives, initializer does NOT re-run. First main -> 101, second call would
-/// be 102 (n preserved), NOT 101 (a reset would give 101).
-#[test]
-fn lambda_body_static_preserved_across_identical_reload() {
-    let prog = emit_module(PROBE);
-    let script = format!(
-        "_G.HOT_RELOAD = false\n{prog}\nmain()\n\
-         _G.HOT_RELOAD = true\n{prog}\nmain()\n\
-         local result_key = __rock_global_entry(\"RESULT\").slots[1]\n\
-         if __rock_globals[result_key] == 102 then print(\"PASS\")\n\
-         else print(\"FAIL RESULT=\"..tostring(__rock_globals[result_key])) end\n"
-    );
-    let out = run_luajit(&script);
-    assert!(
-        out.starts_with("PASS"),
-        "expected lambda static preserved across identical reload; got: {out}"
-    );
+    for (after, expected) in [
+        (PROBE.replace("static n = 100", "static n = 7"), "8"),
+        (PROBE.to_string(), "102"),
+    ] {
+        let after = emit_module(&after);
+        let script = format!(
+            "_G.HOT_RELOAD = false\n{before}\nmain()\n\
+             _G.HOT_RELOAD = true\n{after}\nmain()\n\
+             print(__rock_globals[__rock_global_entry(\"RESULT\").slots[1]])\n"
+        );
+        assert_eq!(run_luajit(&script), expected);
+    }
 }

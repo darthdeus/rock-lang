@@ -1,15 +1,6 @@
 //! `const` globals re-initialize on hot reload, while mutable globals keep their
 //! live value in the global storage.
-use crate::common::{run_luajit, ws_of};
-
-/// Compile `src` to a full skull Lua program (no stdlib -- int/empty-main only).
-fn emit_program(src: &str) -> String {
-    let ws = ws_of(src);
-    let mid = skull::user_module_id(&ws).unwrap();
-    skull::mir_emit::emit_workspace_mir(&ws, mid)
-        .expect("emit")
-        .lua
-}
+use crate::common::{emit_without_stdlib, run_luajit, ws_of};
 
 fn global_slot(lua: &str, name: &str) -> u32 {
     crate::common::global_slots(lua, &format!("global:<t>::{name}"))[0]
@@ -57,7 +48,7 @@ fn const_reinits_on_hot_reload_but_session_global_is_preserved() {
 #[test]
 fn const_value_edit_takes_effect_on_reload_runtime() {
     let program = |foo: i32| {
-        emit_program(&format!(
+        emit_without_stdlib(&format!(
             "const FOO: int = {foo}\nglobal bar: int = 7\nfn foo() -> int {{ FOO }}\nfn main() {{}}\n"
         ))
     };
@@ -84,7 +75,7 @@ fn const_value_edit_takes_effect_on_reload_runtime() {
 /// the global: it gets neither an initializer function nor an assignment.
 #[test]
 fn a_const_whose_reads_are_all_literals_emits_no_global() {
-    let lua = emit_program("const FOO: int = 5\nfn foo() -> int { FOO }\nfn main() {}\n");
+    let lua = emit_without_stdlib("const FOO: int = 5\nfn foo() -> int { FOO }\nfn main() {}\n");
     assert!(!lua.contains("__skull_ginit_FOO"), "{lua}");
     assert!(!lua.contains("FOO ="), "{lua}");
     let foo = crate::common::mangled_name(&lua, "foo");
@@ -96,7 +87,7 @@ fn a_const_whose_reads_are_all_literals_emits_no_global() {
 /// that is not a literal keeps its initializer.
 #[test]
 fn a_const_with_a_computed_initializer_keeps_it() {
-    let lua = emit_program(
+    let lua = emit_without_stdlib(
         "inline(lua) fn setup() -> int = \"SETUP_RAN = true return 1\"\n\
          const READY: int = setup()\nfn main() {}\n",
     );
@@ -109,7 +100,7 @@ fn a_const_with_a_computed_initializer_keeps_it() {
 /// compiler does not see as a read, so a const it spells stays a global.
 #[test]
 fn a_const_spelled_by_inline_lua_stays_a_global() {
-    let lua = emit_program(
+    let lua = emit_without_stdlib(
         "const FOO: int = 5\ninline(lua) fn foo() -> int = \"return FOO\"\n\
          fn bar() -> int { foo() }\nfn main() {}\n",
     );

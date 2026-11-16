@@ -9,15 +9,7 @@
 //! (it routes through a stdlib op fn), so the static is observed via a bool
 //! toggle + assignment instead of a counter.
 
-use crate::common::{body_id, emit_full_of, run_luajit};
-
-fn emit_program(src: &str) -> String {
-    let ws = crate::common::ws_of(src);
-    let mid = skull::user_module_id(&ws).unwrap();
-    skull::mir_emit::emit_workspace_mir(&ws, mid)
-        .expect("emit")
-        .lua
-}
+use crate::common::{body_id, emit_full_of, emit_without_stdlib, run_luajit};
 
 /// Two in-process emits of the same string/int statics must be byte-identical.
 /// A process-seeded Ustr hash in the init key made consecutive `rock compile`
@@ -34,8 +26,8 @@ fn main() { RESULT = probe() }
 
 #[test]
 fn static_initializer_hash_is_reproducible_across_two_emits() {
-    let a = emit_program(STRING_STATIC);
-    let b = emit_program(STRING_STATIC);
+    let a = emit_without_stdlib(STRING_STATIC);
+    let b = emit_without_stdlib(STRING_STATIC);
     assert_eq!(
         a, b,
         "two in-process emits of the same static inits must be byte-identical"
@@ -56,71 +48,44 @@ fn probe() -> int {
 fn main() { RESULT = probe() }
 ";
 
-/// PRESERVE: same source reloaded, key unchanged -> the live value (99, written
-/// pre-reload) survives; the initializer does NOT re-run.
-#[test]
-fn static_survives_hot_reload_no_reinit() {
-    let prog = emit_program(PROBE);
-    let script = format!(
-        "_G.HOT_RELOAD = false\n{prog}\n\
-         local result_key = __rock_global_entry(\"RESULT\").slots[1]\n\
-         local do_set_key = __rock_global_entry(\"DO_SET\").slots[1]\n\
-         __rock_globals[do_set_key] = true; main()   -- n inits 42, set -> 99, RESULT = 99\n\
-         _G.HOT_RELOAD = true\n{prog}\n\
-         __rock_globals[do_set_key] = false; main()  -- key unchanged: n preserved (99), RESULT = 99\n\
-         if __rock_globals[result_key] == 99 then print(\"PASS\")\n\
-         else print(\"FAIL RESULT=\"..tostring(__rock_globals[result_key])); os.exit(1) end\n"
-    );
-    assert!(
-        run_luajit(&script).trim().starts_with("PASS"),
-        "expected preserved static"
-    );
-}
-
-/// RE-INIT: edit the initializer (42 -> 7) -> the key's init-hash changes, the
-/// reset preamble clears the cell + done-flag, and the next reach re-inits.
-#[test]
-fn static_reinits_when_initializer_edited() {
-    let before = emit_program(PROBE);
-    let after = emit_program(&PROBE.replace("static n = 42", "static n = 7"));
-    let script = format!(
+/// Run `before` with DO_SET (the static becomes 99), hot-reload `after` and
+/// run it with DO_SET off. RESULT tells PRESERVE (still 99) from RESET (the
+/// initializer re-ran).
+fn result_after_reload(before: &str, after: &str) -> String {
+    run_luajit(&format!(
         "_G.HOT_RELOAD = false\n{before}\n\
          local result_key = __rock_global_entry(\"RESULT\").slots[1]\n\
          local do_set_key = __rock_global_entry(\"DO_SET\").slots[1]\n\
-         __rock_globals[do_set_key] = false; main()  -- n inits 42, RESULT = 42\n\
+         __rock_globals[do_set_key] = true; main()\n\
          _G.HOT_RELOAD = true\n{after}\n\
-         __rock_globals[do_set_key] = false; main()  -- init edited: n resets, re-inits 7, RESULT = 7\n\
-         if __rock_globals[result_key] == 7 then print(\"PASS\")\n\
-         else print(\"FAIL RESULT=\"..tostring(__rock_globals[result_key])); os.exit(1) end\n"
-    );
-    assert!(
-        run_luajit(&script).trim().starts_with("PASS"),
-        "expected re-init on edit"
-    );
+         __rock_globals[do_set_key] = false; main()\n\
+         print(__rock_globals[result_key])\n"
+    ))
 }
 
-/// UNRELATED edit in the same body must NOT change the static's key (the hash
-/// covers the initializer expr, not arena indices or sibling statements), so the
-/// value is preserved across that reload.
+/// The static's key hashes its initializer expression, not arena indices or
+/// sibling statements: reloading the same source or an unrelated edit of the
+/// body keeps the live value, and editing the initializer (42 -> 7) clears the
+/// cell and done-flag so the next reach re-inits.
 #[test]
-fn static_preserved_when_unrelated_body_edited() {
-    let before = emit_program(PROBE);
-    let edited = PROBE.replace("    return n\n", "    let unused = 0\n    return n\n");
-    let after = emit_program(&edited);
-    let script = format!(
-        "_G.HOT_RELOAD = false\n{before}\n\
-         local result_key = __rock_global_entry(\"RESULT\").slots[1]\n\
-         local do_set_key = __rock_global_entry(\"DO_SET\").slots[1]\n\
-         __rock_globals[do_set_key] = true; main()   -- RESULT = 99\n\
-         _G.HOT_RELOAD = true\n{after}\n\
-         __rock_globals[do_set_key] = false; main()  -- key unchanged despite edit: n preserved, RESULT = 99\n\
-         if __rock_globals[result_key] == 99 then print(\"PASS\")\n\
-         else print(\"FAIL RESULT=\"..tostring(__rock_globals[result_key])); os.exit(1) end\n"
-    );
-    assert!(
-        run_luajit(&script).trim().starts_with("PASS"),
-        "expected key stable under unrelated edit"
-    );
+fn static_reload_preserves_unless_the_initializer_changed() {
+    let before = emit_without_stdlib(PROBE);
+    for (case, after, expected) in [
+        ("identical reload", PROBE.to_string(), "99"),
+        (
+            "unrelated body edit",
+            PROBE.replace("    return n\n", "    let unused = 0\n    return n\n"),
+            "99",
+        ),
+        (
+            "initializer edit",
+            PROBE.replace("static n = 42", "static n = 7"),
+            "7",
+        ),
+    ] {
+        let after = emit_without_stdlib(&after);
+        assert_eq!(result_after_reload(&before, &after), expected, "{case}");
+    }
 }
 
 /// A body edit that adds or removes a `static` changes no global's storage, so

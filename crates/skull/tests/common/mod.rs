@@ -720,6 +720,15 @@ pub fn ws_of(src: &str) -> Workspace {
     bone_semantic::semantic_passes::semantic_pass(&mut [module]).expect("semantic_pass")
 }
 
+/// The program [`ws_of`] `src` emits.
+pub fn emit_without_stdlib(src: &str) -> String {
+    let ws = ws_of(src);
+    let mid = skull::user_module_id(&ws).unwrap();
+    skull::mir_emit::emit_workspace_mir(&ws, mid)
+        .expect("emit")
+        .lua
+}
+
 /// Panic unless `luajit` runs. Execution-oracle tests call this up front
 /// instead of skipping when the binary is absent: a host without luajit must
 /// report red for tests that never ran, never green.

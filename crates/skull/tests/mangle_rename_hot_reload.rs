@@ -18,20 +18,7 @@
 //! (adding an overload renamed the unique `foo` and orphaned the running global,
 //! silent-stale). The fix (always-mangle) landed; the assertions are flipped to
 //! guard the correct behavior.
-use crate::common::{run_luajit, ws_of};
-
-/// `src` -> full skull Lua program (stdlib-free: int/string/empty-main only).
-///
-/// A caller holds its callee as an immutable upvalue, so a closure captured
-/// BEFORE the reload keeps calling the pre-edit body -- which is why the host
-/// watch command publishes a whole `main.lua` and re-runs the binding pass
-/// instead of an overlay (the full-reload binding test). The mangling property
-/// pinned here is about the symbol: it is still `foo_int` after the edit.
-fn emit_program(src: &str) -> String {
-    let ws = ws_of(src);
-    let mid = skull::user_module_id(&ws).unwrap();
-    skull::mir_emit::emit_full(&ws, mid).expect("emit").0.lua
-}
+use crate::common::{emit_without_stdlib, run_luajit};
 
 // v1: `foo(int)` body returns the version marker 51 (no arithmetic -- the
 // stdlib-free `ws_of` has no `__op_*`). `probe` calls `foo` BY NAME; under
@@ -66,8 +53,8 @@ fn main() {}
 /// re-invert.
 #[test]
 fn overload_add_orphans_running_global_sentinel() {
-    let before = emit_program(V1);
-    let after = emit_program(V2_OVERLOAD);
+    let before = emit_without_stdlib(V1);
+    let after = emit_without_stdlib(V2_OVERLOAD);
     for lua in [&before, &after] {
         assert!(
             lua.contains("\nfoo_int = function(")

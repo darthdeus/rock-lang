@@ -15,18 +15,9 @@
 //! ONCE at install. `_G` normally has no metatable at all, so the resolved miss
 //! path is a plain `return nil` with no call in it.
 
-use crate::common::{run_luajit, ws_of};
+use crate::common::{emit_without_stdlib, run_luajit, ws_of};
 
 const SRC: &str = "global bar: int = 7\nfn main() {}\n";
-
-fn program() -> String {
-    let ws = ws_of(SRC);
-    let mid = skull::user_module_id(&ws).unwrap();
-    skull::mir_emit::emit_full(&ws, mid)
-        .expect("emit_full")
-        .0
-        .lua
-}
 
 /// The body of `mt.<name> = function(..)` inside the installer, up to the
 /// matching `end` at that indentation.
@@ -47,7 +38,7 @@ fn metamethod_body<'a>(lua: &'a str, name: &str) -> &'a str {
 /// the installer already knows the answer to.
 #[test]
 fn the_bridge_miss_path_is_not_a_tail_call() {
-    let lua = program();
+    let lua = emit_without_stdlib(SRC);
     assert!(
         !lua.contains("old_read") && !lua.contains("old_write"),
         "the per-miss fallback helpers are still emitted; the installer is supposed to \
@@ -72,7 +63,7 @@ fn the_bridge_miss_path_is_not_a_tail_call() {
 /// captured by a REINSTALL, which is what a hot reload performs.
 #[test]
 fn every_fallback_shape_and_the_state_path_survive_a_reinstall() {
-    let mut prog = program();
+    let mut prog = emit_without_stdlib(SRC);
     prog.push_str(
         r#"
 local function check(label, got, want)
