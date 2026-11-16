@@ -1,28 +1,9 @@
 //! LSP positions over the shapes that have gone wrong before: tokens spanning
 //! lines, multibyte text ahead of a name, UFCS calls and generic parameters.
 
+use crate::fixture::{PATH, decode_tokens, pos as at, workspace};
 use bone_query::BoneWorkspace;
 use lsp_types::{Location, Position, SemanticTokens};
-
-const PATH: &str = "/tmp/rock_lsp_span_coverage.rock";
-
-fn workspace(src: &str) -> BoneWorkspace {
-    let mut bone = BoneWorkspace::new();
-    bone.update(PATH, src.to_string());
-    bone
-}
-
-/// Position `extra` bytes into the first occurrence of `needle`, with the
-/// column counted in scalar values independently of the code under test.
-fn at(src: &str, needle: &str, extra: usize) -> Position {
-    let idx = src.find(needle).expect(needle) + extra;
-    let before = &src[..idx];
-    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
-    Position::new(
-        before.matches('\n').count() as u32,
-        src[line_start..idx].chars().count() as u32,
-    )
-}
 
 /// What the range covers in `src`, with its line and start column.
 fn text(src: &str, location: &Location) -> (u32, u32, String) {
@@ -67,19 +48,9 @@ fn renamed_sites(bone: &BoneWorkspace, pos: Position) -> Vec<(u32, u32)> {
 
 /// Tokens as absolute `(line, column, length)`.
 fn absolute(tokens: &SemanticTokens) -> Vec<(u32, u32, u32)> {
-    let (mut line, mut col) = (0, 0);
-    tokens
-        .data
-        .iter()
-        .map(|t| {
-            if t.delta_line != 0 {
-                line += t.delta_line;
-                col = t.delta_start;
-            } else {
-                col += t.delta_start;
-            }
-            (line, col, t.length)
-        })
+    decode_tokens(&tokens.data)
+        .into_iter()
+        .map(|(line, col, t)| (line, col, t.length))
         .collect()
 }
 

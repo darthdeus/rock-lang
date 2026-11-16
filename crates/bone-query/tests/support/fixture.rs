@@ -3,7 +3,23 @@
 #![allow(dead_code)]
 
 use bone_query::BoneWorkspace;
-use lsp_types::{Diagnostic, HoverContents, Position, Range, TextEdit};
+use lsp_types::{Diagnostic, HoverContents, Position, Range, SemanticToken, TextEdit};
+
+/// Delta-decoded semantic tokens as `(line, start column, token)`.
+pub fn decode_tokens(data: &[SemanticToken]) -> Vec<(u32, u32, SemanticToken)> {
+    let (mut line, mut col) = (0, 0);
+    data.iter()
+        .map(|t| {
+            if t.delta_line != 0 {
+                line += t.delta_line;
+                col = t.delta_start;
+            } else {
+                col += t.delta_start;
+            }
+            (line, col, *t)
+        })
+        .collect()
+}
 
 #[cfg(not(windows))]
 pub const PATH: &str = "/tmp/rock_lsp_bone_test_main.rock";

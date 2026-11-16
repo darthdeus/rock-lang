@@ -1,6 +1,6 @@
 //! Semantic-token classification: each token's type and modifiers.
 
-use crate::fixture::{PATH, Project, workspace};
+use crate::fixture::{PATH, Project, decode_tokens, workspace};
 use bone_query::{BoneWorkspace, semantic_tokens_legend, semantic_tokens_modifiers_legend};
 
 /// Absolute `(line, col, "type.modifier...")` tokens, modifiers in legend
@@ -8,24 +8,19 @@ use bone_query::{BoneWorkspace, semantic_tokens_legend, semantic_tokens_modifier
 fn rendered(bone: &BoneWorkspace, path: &str) -> Vec<(u32, u32, String)> {
     let types = semantic_tokens_legend();
     let mods = semantic_tokens_modifiers_legend();
-    let (mut line, mut col) = (0, 0);
-    let mut out = Vec::new();
-    for t in bone.semantic_tokens(path).data {
-        if t.delta_line != 0 {
-            line += t.delta_line;
-            col = t.delta_start;
-        } else {
-            col += t.delta_start;
-        }
-        let mut name = types[t.token_type as usize].as_str().to_string();
-        for (i, m) in mods.iter().enumerate() {
-            if t.token_modifiers_bitset & (1 << i) != 0 {
-                name = format!("{name}.{}", m.as_str());
+    let tokens = decode_tokens(&bone.semantic_tokens(path).data);
+    tokens
+        .into_iter()
+        .map(|(line, col, t)| {
+            let mut name = types[t.token_type as usize].as_str().to_string();
+            for (i, m) in mods.iter().enumerate() {
+                if t.token_modifiers_bitset & (1 << i) != 0 {
+                    name = format!("{name}.{}", m.as_str());
+                }
             }
-        }
-        out.push((line, col, name));
-    }
-    out
+            (line, col, name)
+        })
+        .collect()
 }
 
 #[track_caller]
