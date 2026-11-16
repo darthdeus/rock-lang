@@ -2947,36 +2947,33 @@ mod shape_drift_tests {
         );
     }
 
-    /// Marking a `value` type `nobox` moves every global of that type from one
-    /// boxed slot to K leaf globals, while the rendered type stays `"NV2"`. The
-    /// emitted per-global preservation guard compares only that rendered type, so
-    /// it would preserve across the move and leave the new leaves nil -- this
-    /// restart is what stops the reload reaching it. `struct_shape_hash` hashing
-    /// `is_nobox` is the one line that makes it fire.
+    /// Layout edits that freeze against the running process: marking a `value`
+    /// type `nobox` moves its globals from one boxed slot to leaf globals while
+    /// the rendered type (all the preservation guard compares) stays the same,
+    /// and a value-struct field reorder changes the process ctype.
     #[test]
-    fn marking_a_type_nobox_requests_restart() {
-        let v0 = "value NV2 { x: float, y: float }\n\
-                  global SPOT: NV2 = NV2 { x: 1.0, y: 2.0 }\nfn main() { }\n";
-        let v1 = "nobox value NV2 { x: float, y: float }\n\
-                  global SPOT: NV2 = NV2 { x: 1.0, y: 2.0 }\nfn main() { }\n";
-        let mut fx = ProjectFixture::boot(v0);
-        let reload = fx.edit(v1).expect("recompile v1");
-        assert!(
-            matches!(&reload, SkullReload::ShapeChanged { types } if types.iter().any(|t| t == "NV2")),
-            "a nobox flip relocates live global storage -- must restart, got {reload:?}"
-        );
-    }
-
-    #[test]
-    fn value_struct_layout_edit_requests_restart() {
-        let v0 = "value P { x: int, y: int }\nfn probe(p: P) -> int { p.x }\nfn main() { }\n";
-        let v1 = "value P { y: int, x: int }\nfn probe(p: P) -> int { p.x }\nfn main() { }\n";
-        let mut fx = ProjectFixture::boot(v0);
-        let reload = fx.edit(v1).expect("recompile v1");
-        assert!(
-            matches!(&reload, SkullReload::ShapeChanged { types } if types.iter().any(|t| t == "P")),
-            "a value-struct field reorder freezes against the process ctype -- must restart, got {reload:?}"
-        );
+    fn value_layout_edits_request_restart() {
+        for (v0, v1, ty) in [
+            (
+                "value NV2 { x: float, y: float }\n\
+                 global SPOT: NV2 = NV2 { x: 1.0, y: 2.0 }\nfn main() { }\n",
+                "nobox value NV2 { x: float, y: float }\n\
+                 global SPOT: NV2 = NV2 { x: 1.0, y: 2.0 }\nfn main() { }\n",
+                "NV2",
+            ),
+            (
+                "value P { x: int, y: int }\nfn probe(p: P) -> int { p.x }\nfn main() { }\n",
+                "value P { y: int, x: int }\nfn probe(p: P) -> int { p.x }\nfn main() { }\n",
+                "P",
+            ),
+        ] {
+            let mut fx = ProjectFixture::boot(v0);
+            let reload = fx.edit(v1).expect("recompile v1");
+            assert!(
+                matches!(&reload, SkullReload::ShapeChanged { types } if types.iter().any(|t| t == ty)),
+                "{ty}: a layout edit must restart, got {reload:?}"
+            );
+        }
     }
 
     #[test]
