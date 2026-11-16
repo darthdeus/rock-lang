@@ -63,13 +63,6 @@ mod debug_path_tests {
     }
 }
 
-#[macro_export]
-macro_rules! debug_log {
-    ($($arg:tt)*) => {
-        log::trace!($($arg)*);
-    };
-}
-
 /// Answer one ordinary LSP request inside `handle_request` and return early.
 ///
 /// Takes the typed params, runs the workspace query and responds. The
@@ -267,7 +260,6 @@ pub fn server_capabilities() -> serde_json::Value {
 
 pub fn run_lsp_server() -> Result<()> {
     log::info!("Starting Rock LSP server ...");
-    debug_log!("LSP_SERVER_STARTING: Debug logging enabled");
 
     let (link, threads) = Connection::stdio();
 
@@ -405,8 +397,6 @@ impl LspServer {
         {
             panic!("deliberate test panic ($/rockDebugPanic)");
         }
-
-        // debug!("got request: {req:?}");
 
         dispatch_request!(
             req,
@@ -599,11 +589,8 @@ impl LspServer {
         not: lsp_server::Notification,
         out: &mut Vec<Message>,
     ) -> Result<()> {
-        // debug_log!("NOTIFICATION_PROCESSING: method={}", not.method);
-
         // Handle exit notification
         if not.method == "exit" {
-            // debug_log!("EXIT_NOTIFICATION_RECEIVED");
             // Exit the main loop when we receive the exit notification
             self.exited = true;
             return Ok(());
@@ -611,7 +598,6 @@ impl LspServer {
 
         // In shutdown mode, ignore all other notifications
         if self.shutdown_mode {
-            // debug_log!("IGNORING_NOTIFICATION_AFTER_SHUTDOWN: method={}", not.method);
             return Ok(());
         }
 
@@ -628,8 +614,6 @@ impl LspServer {
             || method == "workspace/didChangeConfiguration"
         {
             // No settings to apply.
-        } else {
-            // debug_log!("UNEXPECTED_NOTIFICATION: method={}", not.method);
         }
         Ok(())
     }
