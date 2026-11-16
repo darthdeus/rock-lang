@@ -52,8 +52,8 @@ mod global_layout;
 mod global_storage;
 #[path = "multivalue.rs"]
 mod multivalue;
-#[path = "nb_differential.rs"]
-mod nb_differential;
+#[path = "nb_checked_set.rs"]
+mod nb_checked_set;
 #[path = "nb_leaf_layout_premise.rs"]
 mod nb_leaf_layout_premise;
 #[path = "no_inline_function.rs"]
