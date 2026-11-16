@@ -202,6 +202,20 @@ impl StoneWatcher {
     }
 }
 
+fn watch_all_files<'a>(
+    paths: impl IntoIterator<Item = &'a PathBuf>,
+    tx: &std::sync::mpsc::Sender<FileChangeEvent>,
+) -> Result<Option<crate::file_watcher::WatchHandle>> {
+    let paths: Vec<PathBuf> = paths.into_iter().cloned().collect();
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    let watch = FileWatcher::default_for_rock_sources()
+        .with_all_files()
+        .watch(paths, tx.clone())?;
+    Ok(Some(watch))
+}
+
 /// Content hash anchoring a declared input the compiler never reads (the
 /// sound project file): the hash of what is on disk now. An unreadable file
 /// anchors to 0, which only costs one extra watcher event before the seed
@@ -398,21 +412,8 @@ pub(crate) fn do_stone_watch(
         rock_root.join("tmp/restart.txt"),
         PathBuf::from("tmp/restart.txt"),
     ];
-    let mut sound_watch = if sound_inputs.directories.is_empty() {
-        None
-    } else {
-        Some(
-            FileWatcher::default_for_rock_sources()
-                .with_all_files()
-                .watch(
-                    sound_inputs.directories.iter().cloned().collect(),
-                    change_tx.clone(),
-                )?,
-        )
-    };
-    let mut native_watcher = FileWatcher::default_for_rock_sources()
-        .with_all_files()
-        .watch(native_inputs.paths.clone(), change_tx.clone())?;
+    let mut sound_watch = watch_all_files(&sound_inputs.directories, &change_tx)?;
+    let mut native_watcher = watch_all_files(&native_inputs.paths, &change_tx)?;
     let mut watcher = StoneWatcher::new(comptime_watch.clone(), restart_files, change_tx.clone());
     watcher.refresh(watch_paths, &watched)?;
 
@@ -492,11 +493,8 @@ pub(crate) fn do_stone_watch(
             let rebuilt = (|| -> Result<_> {
                 let libs = rock_engine_host::engine_build::game_engine_libs(path)?;
                 let inputs = rock_engine_host::native_libraries::native_watch_inputs(&libs)?;
-                let watcher = FileWatcher::default_for_rock_sources()
-                    .with_all_files()
-                    .watch(inputs.paths.clone(), change_tx.clone())?;
+                native_watcher = watch_all_files(&inputs.paths, &change_tx)?;
                 native_inputs = inputs;
-                native_watcher = watcher;
                 for lib in &libs {
                     rock_engine_host::engine_build::build_optional_engine_lib(lib)?;
                 }
@@ -551,18 +549,7 @@ pub(crate) fn do_stone_watch(
             match crate::package::sound_watch_inputs(path) {
                 Ok(inputs) => {
                     if inputs.directories != sound_inputs.directories || sound_watch.is_none() {
-                        sound_watch = if inputs.directories.is_empty() {
-                            None
-                        } else {
-                            Some(
-                                FileWatcher::default_for_rock_sources()
-                                    .with_all_files()
-                                    .watch(
-                                        inputs.directories.iter().cloned().collect(),
-                                        change_tx.clone(),
-                                    )?,
-                            )
-                        };
+                        sound_watch = watch_all_files(&inputs.directories, &change_tx)?;
                     }
                     sound_inputs = inputs;
                 }
@@ -577,10 +564,7 @@ pub(crate) fn do_stone_watch(
                         force_game_compile = true;
                     }
                 }
-                Err(e) => {
-                    let error_message = format!("Error compiling sound project: {}", e);
-                    log::error!(target: "STONE", "{}", error_message);
-                }
+                Err(e) => log::error!(target: "STONE", "Error compiling sound project: {e}"),
             }
         }
 
@@ -899,49 +883,23 @@ mod tests {
             assert!(!marker.exists(), "prebuilt startup invoked Cargo: {case}");
         }
     }
-    #[test]
-    fn a_stone_session_never_writes_the_shared_main_lua() {
-        let shared = rock_host::project::default_main_lua_path();
-        let session = rock_engine_host::project::stone_session_main_lua_path("games/match3", 4242);
-        assert_ne!(session, shared, "the session must have its own main.lua");
-        assert!(
-            session.starts_with(rock_engine_host::project::STONE_SESSION_DIR),
-            "session output belongs under {}: {}",
-            rock_engine_host::project::STONE_SESSION_DIR,
-            session.display()
-        );
-        assert!(
-            !shared.starts_with(rock_engine_host::project::STONE_SESSION_DIR),
-            "the shared slot must stay outside the session root"
-        );
-    }
-
-    /// Two concurrent sessions must not share a slot, and a session must keep
-    /// the same one across its own recompiles (the path is recomputed nowhere,
-    /// but a pid-stable name is what makes a restart land where the watcher
-    /// is looking).
+    /// Concurrent sessions never share a slot or the shared main.lua, and a
+    /// session keeps its slot across restarts.
     #[test]
     fn session_dirs_separate_by_game_and_pid() {
         let p = |game, pid| rock_engine_host::project::stone_session_main_lua_path(game, pid);
-        assert_ne!(
-            p("sample", 1),
-            p("sample", 2),
-            "two sessions of one game differ"
-        );
-        assert_ne!(p("sample", 1), p("other", 1), "two games differ");
-        assert_eq!(p("sample", 1), p("sample", 1), "the same session is stable");
+        let root = rock_engine_host::project::STONE_SESSION_DIR;
+        assert!(p("games/nested", 7).starts_with(root));
+        assert!(!rock_host::project::default_main_lua_path().starts_with(root));
+        assert_ne!(p("sample", 1), p("sample", 2));
+        assert_ne!(p("sample", 1), p("other", 1));
+        assert_eq!(p("sample", 1), p("sample", 1));
         // A nested project path contributes its name, not its separators.
-        let nested = p("games/match3", 7);
-        assert!(
-            nested.to_string_lossy().contains("match3"),
-            "the dir should name the game: {}",
-            nested.display()
-        );
         assert_eq!(
-            nested.components().count(),
-            p("match3", 7).components().count(),
-            "a nested game path must not deepen the session dir"
+            p("games/nested", 7).components().count(),
+            p("nested", 7).components().count()
         );
+        assert!(p("games/nested", 7).to_string_lossy().contains("nested"));
     }
     #[cfg(unix)]
     #[test]
@@ -1304,10 +1262,7 @@ mod watch_reload_tests {
         assert!(!inputs.contains(&variants.join("preview.wav")));
         assert!(!inputs.contains(&root.join("main.rock")));
         let (tx, rx) = channel();
-        let _watch = crate::file_watcher::FileWatcher::default_for_rock_sources()
-            .with_all_files()
-            .watch(inputs.directories.iter().cloned().collect(), tx)
-            .unwrap();
+        let _watch = super::watch_all_files(&inputs.directories, &tx).unwrap();
         let added = variants.join("take_new.wav");
         std::fs::write(&added, b"new").unwrap();
         for path in [&added, &removed] {
