@@ -159,7 +159,7 @@ impl<'a> BodyCtx<'a> {
         let generics = function
             .generics
             .iter()
-            .filter_map(|&g| match resolve(ws, None, g) {
+            .filter_map(|&g| match ws.resolve_ty(None, g) {
                 Some((_, TypeExpr::Generic(var, _))) => Some(var),
                 _ => None,
             })
@@ -536,7 +536,7 @@ fn is_reference_struct(ws: &Workspace, bi: &BodyInference, ty: TyId) -> bool {
 }
 
 fn ref_target(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<TyId> {
-    match resolve(ws, Some(bi), ty)? {
+    match ws.resolve_ty(Some(bi), ty)? {
         (base, TypeExpr::Nullable(inner)) => ref_target(ws, bi, base.with_idx(inner)),
         (
             base,
@@ -594,34 +594,13 @@ impl SuspensionPolicy for ArenaCrossings<'_> {
     }
 }
 
-pub(crate) fn resolve(
-    ws: &Workspace,
-    bi: Option<&BodyInference>,
-    ty: TyId,
-) -> Option<(TyId, TypeExpr)> {
-    let mut cur = ty;
-    loop {
-        let expr = match cur {
-            TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
-            TyId::Local(idx) => bi?.ty_arena[idx],
-        };
-        match expr {
-            TypeExpr::Infer(var, _) => match bi.and_then(|bi| bi.substitutions.get(var)) {
-                Some(next) => cur = next,
-                None => return Some((cur, expr)),
-            },
-            _ => return Some((cur, expr)),
-        }
-    }
-}
-
 /// `ty` under any `ref` and `?`.
 pub(crate) fn strip_ref(
     ws: &Workspace,
     bi: Option<&BodyInference>,
     ty: TyId,
 ) -> Option<(TyId, TypeExpr)> {
-    let (base, expr) = resolve(ws, bi, ty)?;
+    let (base, expr) = ws.resolve_ty(bi, ty)?;
     match expr {
         TypeExpr::Nullable(inner) => strip_ref(ws, bi, base.with_idx(inner)),
         TypeExpr::App {
@@ -656,7 +635,7 @@ fn render_key(
     if out.len() > MAX_KEY_LEN {
         return;
     }
-    let Some((base, expr)) = resolve(ws, bi, ty) else {
+    let Some((base, expr)) = ws.resolve_ty(bi, ty) else {
         out.push_str(ANY_KEY);
         return;
     };
@@ -776,7 +755,7 @@ fn bodiless_summary(ws: &Workspace, key: FnKey) -> Effect {
     } else if !is_stdlib_module_file(module.file.as_str())
         || function.param_decls.iter().any(|p| {
             matches!(
-                resolve(ws, None, p.ty),
+                ws.resolve_ty(None, p.ty),
                 Some((_, TypeExpr::Function { .. }))
             )
         })

@@ -259,7 +259,7 @@ pub(crate) fn is_identity_storage_edge(
             ctor: TypeCtor::Nominal(name),
             ..
         },
-    )) = (Types { ws, bi: Some(bi) }).resolve(owner)
+    )) = ws.resolve_ty(Some(bi), owner)
     else {
         return false;
     };
@@ -284,27 +284,6 @@ struct Types<'a> {
     bi: Option<&'a BodyInference>,
 }
 
-impl Types<'_> {
-    /// The type behind `ty`, following inference variables, with the id whose
-    /// arena its child indices point into.
-    fn resolve(self, ty: TyId) -> Option<(TyId, TypeExpr)> {
-        let mut cur = ty;
-        loop {
-            let expr = match cur {
-                TyId::Static(mid, idx) => self.ws.module(mid).ty_arena[idx],
-                TyId::Local(idx) => self.bi?.ty_arena[idx],
-            };
-            match expr {
-                TypeExpr::Infer(var, _) => match self.bi.and_then(|bi| bi.substitutions.get(var)) {
-                    Some(next) => cur = next,
-                    None => return Some((cur, expr)),
-                },
-                _ => return Some((cur, expr)),
-            }
-        }
-    }
-}
-
 pub(crate) struct TyIdChildren {
     base: TyId,
     range: IdxRange<TypeExpr>,
@@ -321,7 +300,7 @@ impl IdentityTypes for Types<'_> {
     type Ty = TyId;
     type Children = TyIdChildren;
     fn node(self, ty: TyId) -> Option<IdentityNode<TyId, TyIdChildren>> {
-        let (base, expr) = self.resolve(ty)?;
+        let (base, expr) = self.ws.resolve_ty(self.bi, ty)?;
         let children = |range| TyIdChildren { base, range };
         Some(match expr {
             TypeExpr::Builtin(_)

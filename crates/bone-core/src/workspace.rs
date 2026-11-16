@@ -539,6 +539,26 @@ impl Workspace {
         !mid.is_builtin() && !warm.contains(&mid)
     }
 
+    /// The type behind `ty`, following solved inference variables, with the id
+    /// whose arena its child indices point into (`id.with_idx(child)`). `None`
+    /// for a `Local` type without its body.
+    pub fn resolve_ty(&self, body: Option<&BodyInference>, ty: TyId) -> Option<(TyId, TypeExpr)> {
+        let mut cur = ty;
+        loop {
+            let expr = match cur {
+                TyId::Static(mid, idx) => self.module(mid).ty_arena[idx],
+                TyId::Local(idx) => body?.ty_arena[idx],
+            };
+            match expr {
+                TypeExpr::Infer(var, _) => match body.and_then(|b| b.substitutions.get(var)) {
+                    Some(next) => cur = next,
+                    None => return Some((cur, expr)),
+                },
+                _ => return Some((cur, expr)),
+            }
+        }
+    }
+
     pub fn render(&self, body: Option<&BodyInference>, ty: TyId) -> String {
         let te = match ty {
             TyId::Static(mid, idx) => self.module(mid).ty_arena[idx],
