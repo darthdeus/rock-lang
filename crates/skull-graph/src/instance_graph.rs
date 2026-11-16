@@ -389,15 +389,8 @@ struct RecursionFinding {
 /// durable.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ExpandTiming {
-    pub admissibility_ns: u64,
-    pub body_prep_ns: u64,
-    pub signature_type_conversion_ns: u64,
     pub mono_interner_self_ns: u64,
     pub mono_timed_mutation_calls: u64,
-    pub call_site_resolution_ns: u64,
-    pub witness_bound_tree_ns: u64,
-    pub walk_body_edges_ns: u64,
-    pub walk_struct_default_edges_ns: u64,
 }
 
 /// The per-owner census costs real time on every build, so it runs only
@@ -409,10 +402,6 @@ fn graph_timing_enabled() -> bool {
 
 fn elapsed_ns(start: Option<Instant>) -> u64 {
     start.map_or(0, |start| start.elapsed().as_nanos() as u64)
-}
-
-fn add_elapsed(slot: &mut u64, start: Option<Instant>) {
-    *slot += elapsed_ns(start);
 }
 
 fn percentile_usize(values: &mut [usize], percentile: usize) -> usize {
@@ -460,10 +449,6 @@ struct Walk<'a> {
 }
 
 impl Walk<'_> {
-    fn timer(&self) -> Option<Instant> {
-        self.timing_enabled.then(Instant::now)
-    }
-
     fn with_interner<R>(&mut self, f: impl FnOnce(&MonoInterner) -> R) -> R {
         if !self.timing_enabled {
             return f(self.interner);
@@ -1287,31 +1272,18 @@ pub fn build_in(
             intern_after.intern_new - intern_before.intern_new,
         );
         log::debug!(
-            "graph census: first {} ({:.3}ms), duplicate-pending {} ({:.3}ms), \
+            "graph census: first {}, duplicate-pending {}, \
              suppressed {} duplicate pending owners, \
-             witness-settlement {} ({:.3}ms), incremental-forced {} ({:.3}ms), \
-             stranded-skipped {}; phases admissibility {:.3}ms, body-prep {:.3}ms, \
-             signature/type {:.3}ms, call-resolution {:.3}ms, witness/bound {:.3}ms, \
-             body-walk {:.3}ms, struct-default-walk {:.3}ms, uninstall {:.3}ms, \
+             witness-settlement {}, incremental-forced {}, \
+             stranded-skipped {}; phases uninstall {:.3}ms, \
              index-maintenance {:.3}ms [subst {:.3}, trees {:.3}, \
              always {:.3}, preds {:.3}, decls {:.3}, commit {:.3}]",
             stats.first_owner_visits,
-            stats.first_owner_ns as f64 / 1_000_000.0,
             stats.duplicate_pending_visits,
-            stats.duplicate_pending_ns as f64 / 1_000_000.0,
             stats.duplicate_pending_suppressed,
             stats.witness_settlement_rewalks,
-            stats.witness_settlement_ns as f64 / 1_000_000.0,
             stats.incremental_forced_rewalks,
-            stats.incremental_forced_ns as f64 / 1_000_000.0,
             stats.skipped_stranded_owners,
-            stats.admissibility_ns as f64 / 1_000_000.0,
-            stats.body_prep_ns as f64 / 1_000_000.0,
-            stats.signature_type_conversion_ns as f64 / 1_000_000.0,
-            stats.call_site_resolution_ns as f64 / 1_000_000.0,
-            stats.witness_bound_tree_ns as f64 / 1_000_000.0,
-            stats.walk_body_edges_ns as f64 / 1_000_000.0,
-            stats.walk_struct_default_edges_ns as f64 / 1_000_000.0,
             stats.uninstall_ns as f64 / 1_000_000.0,
             stats.index_maintenance_ns as f64 / 1_000_000.0,
             stats.index_subst_ns as f64 / 1_000_000.0,
@@ -1746,32 +1718,13 @@ impl InstanceGraph {
                             }
                         }
                         match visit_kind {
-                            VisitKind::FirstOwner => {
-                                stats.first_owner_visits += 1;
-                                stats.first_owner_ns += visit_ns;
-                            }
-                            VisitKind::DuplicatePending => {
-                                stats.duplicate_pending_visits += 1;
-                                stats.duplicate_pending_ns += visit_ns;
-                            }
-                            VisitKind::WitnessSettlement => {
-                                stats.witness_settlement_rewalks += 1;
-                                stats.witness_settlement_ns += visit_ns;
-                            }
-                            VisitKind::IncrementalForced => {
-                                stats.incremental_forced_rewalks += 1;
-                                stats.incremental_forced_ns += visit_ns;
-                            }
+                            VisitKind::FirstOwner => stats.first_owner_visits += 1,
+                            VisitKind::DuplicatePending => stats.duplicate_pending_visits += 1,
+                            VisitKind::WitnessSettlement => stats.witness_settlement_rewalks += 1,
+                            VisitKind::IncrementalForced => stats.incremental_forced_rewalks += 1,
                         }
-                        stats.admissibility_ns += c.timing.admissibility_ns;
-                        stats.body_prep_ns += c.timing.body_prep_ns;
-                        stats.signature_type_conversion_ns += c.timing.signature_type_conversion_ns;
                         stats.mono_interner_self_ns += c.timing.mono_interner_self_ns;
                         stats.mono_timed_mutation_calls += c.timing.mono_timed_mutation_calls;
-                        stats.call_site_resolution_ns += c.timing.call_site_resolution_ns;
-                        stats.witness_bound_tree_ns += c.timing.witness_bound_tree_ns;
-                        stats.walk_body_edges_ns += c.timing.walk_body_edges_ns;
-                        stats.walk_struct_default_edges_ns += c.timing.walk_struct_default_edges_ns;
                         stats.add_body_rows(&c);
                         if timing_enabled {
                             stats.contribution_reached += c.reached.len();
@@ -2187,16 +2140,13 @@ fn expand_sites(
     let mut out = Box::<Contribution>::default();
     match owner {
         Owner::AlwaysEmitted(module, body_owner) => {
-            let prep_start = timing_enabled.then(Instant::now);
             let Some(inf) = ws
                 .inference(*module)
                 .and_then(|ir| ir.per_fn.get(body_owner))
             else {
-                add_elapsed(&mut out.timing.body_prep_ns, prep_start);
                 return out;
             };
             let body = ws.module(*module).bodies.get(body_owner);
-            add_elapsed(&mut out.timing.body_prep_ns, prep_start);
             let mut w = Walk {
                 interner,
                 scratch,
@@ -2205,7 +2155,6 @@ fn expand_sites(
                 last_file: None,
                 timing_enabled,
             };
-            let walk_start = w.timer();
             walk_body_edges(
                 &mut w,
                 ws,
@@ -2216,7 +2165,6 @@ fn expand_sites(
                 &SiteDomain::Own,
                 None,
             );
-            add_elapsed(&mut w.out.timing.walk_body_edges_ns, walk_start);
             // An always-emitted body's struct literals omit fields too --
             // `global POLLER: CoroutinePoller = CoroutinePoller {}` reaches
             // `coroutines: Arena<CoState> = arena_new()` exactly as an
@@ -2228,7 +2176,6 @@ fn expand_sites(
             // identically on every corpus project (`arena_new<CoState>` and
             // its own `__arena_new_owned<int>` call).
             if let Some(body) = body {
-                let defaults_start = w.timer();
                 walk_struct_default_edges(
                     &mut w,
                     ws,
@@ -2238,17 +2185,12 @@ fn expand_sites(
                     None,
                     &MonoSubst::default(),
                 );
-                add_elapsed(
-                    &mut w.out.timing.walk_struct_default_edges_ns,
-                    defaults_start,
-                );
             }
         }
         Owner::Instance(inst) => {
             // The one admissibility oracle, shared with both emitters. The
             // graph DECLINES to expand where they reject: a capped instance
             // is a changing-instance-recursion candidate, not yet a verdict.
-            let admissibility_start = timing_enabled.then(Instant::now);
             let too_deep = skull_mir::monoty::too_deep_to_instantiate(
                 inst.args
                     .iter()
@@ -2258,19 +2200,15 @@ fn expand_sites(
             )
             .is_some();
             if too_deep {
-                add_elapsed(&mut out.timing.admissibility_ns, admissibility_start);
                 out.depth_capped = true;
                 return out;
             }
             let f = &ws.module(inst.func.module).functions[inst.func.func];
             let is_boundary = declared_boundary(f).is_some();
-            add_elapsed(&mut out.timing.admissibility_ns, admissibility_start);
             if is_boundary {
                 return out;
             }
-            let prep_start = timing_enabled.then(Instant::now);
             let FunctionBody::Ready { inf, body } = function_body(ws, inst.func) else {
-                add_elapsed(&mut out.timing.body_prep_ns, prep_start);
                 return out;
             };
             // A boundary's Rock body is not the one emission uses -- it
@@ -2291,7 +2229,6 @@ fn expand_sites(
                 .expect("every reached instance has a recorded substitution");
             let default_tree = InstanceBoundTree::default();
             let owner_tree = inputs.tree.as_ref().unwrap_or(&default_tree);
-            add_elapsed(&mut out.timing.body_prep_ns, prep_start);
             let mut w = Walk {
                 interner,
                 scratch,
@@ -2300,7 +2237,6 @@ fn expand_sites(
                 last_file: None,
                 timing_enabled,
             };
-            let walk_start = w.timer();
             walk_body_edges(
                 &mut w,
                 ws,
@@ -2311,7 +2247,6 @@ fn expand_sites(
                 &SiteDomain::Own,
                 None,
             );
-            add_elapsed(&mut w.out.timing.walk_body_edges_ns, walk_start);
             for site in crate::identity_storage::substitution_only_sites(
                 ws,
                 f,
@@ -2327,7 +2262,6 @@ fn expand_sites(
                     message: format!("in this instantiation of `{}`, {}", f.name, site.message),
                 });
             }
-            let defaults_start = w.timer();
             walk_struct_default_edges(
                 &mut w,
                 ws,
@@ -2336,10 +2270,6 @@ fn expand_sites(
                 BodyOwner::Function(inst.func.func),
                 Some(inst),
                 subst,
-            );
-            add_elapsed(
-                &mut w.out.timing.walk_struct_default_edges_ns,
-                defaults_start,
             );
         }
     }
@@ -4213,10 +4143,6 @@ pub struct RunStats {
     pub witness_settlement_rewalks: usize,
     pub incremental_forced_rewalks: usize,
     pub skipped_stranded_owners: usize,
-    pub first_owner_ns: u64,
-    pub duplicate_pending_ns: u64,
-    pub witness_settlement_ns: u64,
-    pub incremental_forced_ns: u64,
     pub mono_intern_attempts: u64,
     pub mono_new_types: u64,
     pub mono_write_acqs: u64,
@@ -4230,13 +4156,6 @@ pub struct RunStats {
     pub contribution_rejections: usize,
     pub contribution_failures: usize,
     pub contribution_always_emitted_targets: usize,
-    pub admissibility_ns: u64,
-    pub body_prep_ns: u64,
-    pub signature_type_conversion_ns: u64,
-    pub call_site_resolution_ns: u64,
-    pub witness_bound_tree_ns: u64,
-    pub walk_body_edges_ns: u64,
-    pub walk_struct_default_edges_ns: u64,
     pub uninstall_ns: u64,
     pub index_maintenance_ns: u64,
     pub index_subst_ns: u64,
@@ -4700,33 +4619,10 @@ fn record_call(
     span: Span,
     site: Site,
 ) -> Option<Instance> {
-    let started = w.timer();
-    let result = record_call_impl(w, ws, inf, from, subst, callee, bindings, span, site);
-    add_elapsed(&mut w.out.timing.call_site_resolution_ns, started);
-    result
-}
-
-#[allow(clippy::too_many_arguments)]
-fn record_call_impl(
-    w: &mut Walk,
-    ws: &Workspace,
-    inf: &BodyInference,
-    from: Option<&Instance>,
-    subst: &MonoSubst,
-    callee: FuncRef,
-    bindings: Option<&Vec<bone_core::prelude::TyId>>,
-    span: Span,
-    site: Site,
-) -> Option<Instance> {
     let cf = &ws.module(callee.module).functions[callee.func];
-    let conversion_start = w.timer();
     let instantiated = w.with_interner(|a| {
         instantiate(a, ws, inf, callee.module, callee.func, cf, bindings, subst)
     });
-    add_elapsed(
-        &mut w.out.timing.signature_type_conversion_ns,
-        conversion_start,
-    );
     let (args, callee_subst) = match instantiated {
         Ok(v) => v,
         // An always-emitted body has no `from` to file against, but the
@@ -4980,7 +4876,6 @@ fn record_witness(
     span: Span,
     site: Site,
 ) {
-    let started = w.timer();
     let rep = FuncRef {
         module: witness.func.0,
         func: witness.func.1,
@@ -4988,13 +4883,8 @@ fn record_witness(
     let resolved = &ws.module(rep.module).functions[rep.func];
     let callee = rep;
     let cf = &ws.module(callee.module).functions[callee.func];
-    let conversion_start = w.timer();
     let instantiated = w
         .with_interner(|a| instantiate_witness(a, ws, inf, resolved, cf, &witness.generics, subst));
-    add_elapsed(
-        &mut w.out.timing.signature_type_conversion_ns,
-        conversion_start,
-    );
     match instantiated {
         Ok((args, callee_subst)) => {
             let to = Instance { func: callee, args };
@@ -5063,7 +4953,6 @@ fn record_witness(
             w.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
         }
     }
-    add_elapsed(&mut w.out.timing.witness_bound_tree_ns, started);
 }
 
 /// The callee obligations an instance picks up from the field DEFAULTS of the
@@ -5312,13 +5201,8 @@ fn record_bound_next(
     let resolved = &ws.module(rep.module).functions[rep.func];
     let callee = rep;
     let cf = &ws.module(callee.module).functions[callee.func];
-    let conversion_start = w.timer();
     let instantiated =
         w.with_interner(|a| instantiate_witness(a, ws, inf, resolved, cf, next_generics, subst));
-    add_elapsed(
-        &mut w.out.timing.signature_type_conversion_ns,
-        conversion_start,
-    );
     match instantiated {
         Ok((args, callee_subst)) => {
             let to = Instance { func: callee, args };
@@ -5414,7 +5298,6 @@ fn walk_bound_tree(
     domain: &SiteDomain,
     path: &[usize],
 ) -> InstanceBoundTree {
-    let started = w.timer();
     let mut resolved = InstanceBoundTree::default();
     let mut keys: Vec<&usize> = tree.next.keys().collect();
     keys.sort();
@@ -5439,7 +5322,6 @@ fn walk_bound_tree(
             resolved.next.insert(*k, next);
         }
     }
-    add_elapsed(&mut w.out.timing.witness_bound_tree_ns, started);
     resolved
 }
 
