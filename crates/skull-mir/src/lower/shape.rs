@@ -10,7 +10,7 @@
 
 use super::*;
 
-use bone_core::hir::{BuiltinTy, Expr, FnBackend, TyId, TypeCtor, TypeExpr, VariantPayload};
+use bone_core::hir::{BuiltinTy, FnBackend, TyId, TypeCtor, TypeExpr, VariantPayload};
 use bone_core::type_equiv::TyRef;
 use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
@@ -1733,108 +1733,6 @@ fn peel_nullable_layers(mut ty: &MonoTy) -> (&MonoTy, bool) {
         ty = inner.as_ref();
     }
     (ty, nullable)
-}
-
-/// The concrete instance a generic direct call targets, independently of
-/// inlining or target policy. Missing bindings for a resolved generic call are
-/// compiler-state errors; an incomplete binding is an explicit absent instance.
-///
-/// `None` means the instantiation is genuinely not complete here -- a callee
-/// with no generics, or one whose bindings do not all reify (a caller-generic
-/// slot inside a shared body).
-pub fn callee_instance_subst(
-    ws: &Workspace,
-    inf: &BodyInference,
-    e: Idx<Expr>,
-    func: FuncRef,
-    enclosing: &SpecSubst,
-) -> Result<Option<SpecSubst>, CompilerError> {
-    let f = &ws.module(func.module).functions[func.func];
-    if f.generics.is_empty() {
-        return Ok(None);
-    }
-    let Some(bindings) = inf.call_generic_bindings.get(&e) else {
-        return Err(CompilerError::new_with_label(
-            f.name_span,
-            format!(
-                "internal: no recorded generic bindings for a resolved call to `{}`",
-                f.name
-            ),
-        ));
-    };
-    instance_subst_from_bindings(ws, inf, func, bindings, enclosing)
-}
-
-/// The concrete instance a set of generic bindings resolves to.
-///
-/// Converts through [`crate::monoty::convert`] -- the one TOTAL logical-type
-/// oracle shared by graph construction and delivery.
-///
-/// `UnboundGeneric` is the one legitimate `None`: the enclosing body is a
-/// shared generic snapshot, so this call site decides no instantiation.
-/// `UnresolvedInfer` is a compiler-state rejection carrying the callee's span;
-/// it is not a partial physical plan. Every other reason is also a compiler-state
-/// rejection carrying the callee's span: a recovery type, a missing node or a
-/// cyclic substitution chain is not a type the program is allowed to have
-/// reached here.
-pub(crate) fn instance_subst_from_bindings(
-    ws: &Workspace,
-    inf: &BodyInference,
-    func: FuncRef,
-    bindings: &[TyId],
-    enclosing: &SpecSubst,
-) -> Result<Option<SpecSubst>, CompilerError> {
-    use crate::monoty::MonoTyReason;
-    let f = &ws.module(func.module).functions[func.func];
-    if bindings.len() != f.generics.len() {
-        return Err(CompilerError::new_with_label(
-            f.name_span,
-            format!(
-                "internal: `{}` declares {} generic(s) but its call site supplied {} binding(s)",
-                f.name,
-                f.generics.len(),
-                bindings.len()
-            ),
-        ));
-    }
-    let mut subst = SpecSubst::default();
-    for (g, b) in f.generics.iter().zip(bindings) {
-        let Some(TypeExpr::Generic(var, _)) = ty_node(ws, inf, *g) else {
-            return Err(CompilerError::new_with_label(
-                f.name_span,
-                format!(
-                    "internal: declared generic of `{}` is not a generic type variable",
-                    f.name
-                ),
-            ));
-        };
-        match crate::monoty::convert(ws, inf, *b, enclosing) {
-            Ok(ty) => {
-                subst.insert(var, ty);
-            }
-            Err(MonoTyReason::UnboundGeneric(_)) => return Ok(None),
-            Err(MonoTyReason::UnresolvedInfer(name)) => {
-                return Err(CompilerError::new_with_label(
-                    f.name_span,
-                    format!(
-                        "internal: a call to `{}` has unresolved inference type `{name}`",
-                        f.name
-                    ),
-                ));
-            }
-            Err(reason) => {
-                return Err(CompilerError::new_with_label(
-                    f.name_span,
-                    format!(
-                        "internal: a call to `{}` supplies a type argument that is not a logical type ({}), so the instance it names cannot be stated",
-                        f.name,
-                        reason.bucket()
-                    ),
-                ));
-            }
-        }
-    }
-    Ok(Some(subst))
 }
 
 /// Rebuild the [`SpecSubst`] (callee generic `VarId` -> concrete type) for `fref`

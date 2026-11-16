@@ -207,8 +207,9 @@ fn main() {
 #[test]
 fn every_concrete_call_identity_appears_in_the_instance_graph() {
     use bone_semantic::hir::BodyOwner;
-    use skull_mir::lower::{SpecSubst, callee_instance_subst, spec_key_from_subst};
+    use skull_mir::lower::SpecSubst;
     use skull_mir::mir::FuncRef;
+    use skull_mir::monoty::{MonoTyReason, convert};
     use std::collections::HashSet;
 
     let (ws, g) = graph_of(
@@ -255,16 +256,22 @@ fn main() {
                     module: *m,
                     func: *f,
                 };
+                let Some(bindings) = inf.call_generic_bindings.get(e) else {
+                    continue;
+                };
                 // An empty enclosing substitution reads a call inside a generic
                 // body as the source states it, independently of the walk.
-                let key = match callee_instance_subst(&ws, inf, *e, func, &SpecSubst::default()) {
-                    Ok(None) => continue,
-                    Ok(Some(subst)) => spec_key_from_subst(&ws, func, &subst),
-                    Err(_) => None,
-                };
-                let Some(key) = key else {
-                    unresolved.push(fn_name(&ws, func));
-                    continue;
+                let key = bindings
+                    .iter()
+                    .map(|b| convert(&ws, inf, *b, &SpecSubst::default()))
+                    .collect::<Result<Vec<_>, _>>();
+                let key = match key {
+                    Ok(key) => key,
+                    Err(MonoTyReason::UnboundGeneric(_)) => continue,
+                    Err(_) => {
+                        unresolved.push(fn_name(&ws, func));
+                        continue;
+                    }
                 };
                 calls += 1;
                 let identity = (func, key.iter().map(|t| t.canonical()).collect::<Vec<_>>());
