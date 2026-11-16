@@ -1389,9 +1389,7 @@ impl<'a> Builder<'a> {
                 // it opaque forces the splice to rebuild an aggregate, which a
                 // presence-carrying element cannot be rebuilt into.
                 let shape = self.bound_next_tuple_shape(gidx)?;
-                let dests: Vec<Idx<Cell>> = (0..shape.slot_count())
-                    .map(|_| self.f.new_cell(None))
-                    .collect();
+                let dests = self.fresh_cells(shape.slot_count());
                 let call = self.emit_cur(Inst::CallBoundMulti {
                     dests: dests.clone(),
                     generic_idx: gidx as u32,
@@ -1400,10 +1398,7 @@ impl<'a> Builder<'a> {
                 if shape.splats() {
                     self.f.bound_next_split.insert(call);
                 }
-                let loads: Vec<Idx<Inst>> = dests
-                    .iter()
-                    .map(|c| self.emit_cur(Inst::Load(*c)))
-                    .collect();
+                let loads = self.load_cells(&dests);
                 let value = self.tuple_result(&shape, &loads);
                 return self.value_bundle_for_expr(e, value);
             }
@@ -1531,9 +1526,7 @@ impl<'a> Builder<'a> {
                         self.f.call_rep_plans.insert(v, abi.representation.clone());
                         return self.call_result_bundle(&abi.representation, ValueRepr::Scalar(v));
                     };
-                    let dests: Vec<Idx<Cell>> = (0..shape.leaf_count())
-                        .map(|_| self.f.new_cell(None))
-                        .collect();
+                    let dests = self.fresh_cells(shape.leaf_count());
                     let call = self.emit_cur(Inst::CallValueMulti {
                         dests: dests.clone(),
                         callee: g,
@@ -1542,10 +1535,7 @@ impl<'a> Builder<'a> {
                     self.f
                         .call_rep_plans
                         .insert(call, abi.representation.clone());
-                    let leaves: Vec<Idx<Inst>> = dests
-                        .iter()
-                        .map(|c| self.emit_cur(Inst::Load(*c)))
-                        .collect();
+                    let leaves = self.load_cells(&dests);
                     let mut idx = 0;
                     let value = self.rebuild_from_leaves(shape, &leaves, &mut idx);
                     return self.call_result_bundle(&abi.representation, value);
@@ -1836,44 +1826,13 @@ impl<'a> Builder<'a> {
                 // CALLEE, so making it arity-dependent would be a guarantee hole the
                 // day a `@gpu_only` intrinsic returns a tuple.
                 self.authorize_gpu_boundary_boxes(&func, &args);
-                if let Some(shape) = &ret_tuple {
-                    return self.emit_tuple_call_tree(e, func, args, shape, &dc);
-                }
-                let call = self.emit_cur(Inst::Call { func, args });
-                self.record_call(call, func, &dc)?;
-                return Ok(ValueRepr::Scalar(call));
+                return self.emit_direct_call(e, func, args, None, ret_tuple.as_ref(), &dc);
             }
             let (args, tail) = self.direct_call_args(e, func, arg_idxs, any_named, &dc, true)?;
             if let Some(tail) = tail {
                 return self.emit_preflight_tail(e, tail, args);
             }
-            let ret_shape = dc.plan.ret_shape();
-            match ret_shape {
-                Some(shape) => {
-                    let n = shape.leaf_count();
-                    let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
-                    let call = self.emit_cur(Inst::CallMulti {
-                        dests: dests.clone(),
-                        func,
-                        args,
-                    });
-                    self.record_call(call, func, &dc)?;
-                    let leaves: Vec<Idx<Inst>> = dests
-                        .iter()
-                        .map(|c| self.emit_cur(Inst::Load(*c)))
-                        .collect();
-                    let mut idx = 0;
-                    Ok(self.rebuild_from_leaves(shape, &leaves, &mut idx))
-                }
-                None => match &ret_tuple {
-                    Some(shape) => Ok(self.emit_tuple_call_tree(e, func, args, shape, &dc)?),
-                    None => {
-                        let call = self.emit_cur(Inst::Call { func, args });
-                        self.record_call(call, func, &dc)?;
-                        Ok(ValueRepr::Scalar(call))
-                    }
-                },
-            }
+            self.emit_direct_call(e, func, args, dc.plan.ret_shape(), ret_tuple.as_ref(), &dc)
         })()?;
         self.call_result_bundle(dc.plan.representation(), value)
     }
@@ -2024,6 +1983,35 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// A direct call returning `value`'s leaves, `tuple`'s slots, or one value.
+    fn emit_direct_call(
+        &mut self,
+        e: Idx<Expr>,
+        func: FuncRef,
+        args: Vec<Idx<Inst>>,
+        value: Option<&ValueShape>,
+        tuple: Option<&TupleRetShape>,
+        dc: &DirectCall<'a>,
+    ) -> Result<ValueRepr, CompilerError> {
+        if let Some(shape) = value {
+            let dests = self.fresh_cells(shape.leaf_count());
+            let call = self.emit_cur(Inst::CallMulti {
+                dests: dests.clone(),
+                func,
+                args,
+            });
+            self.record_call(call, func, dc)?;
+            let leaves = self.load_cells(&dests);
+            return Ok(self.rebuild_from_leaves(shape, &leaves, &mut 0));
+        }
+        if let Some(shape) = tuple {
+            return self.emit_tuple_call_tree(e, func, args, shape, dc);
+        }
+        let call = self.emit_cur(Inst::Call { func, args });
+        self.record_call(call, func, dc)?;
+        Ok(ValueRepr::Scalar(call))
+    }
+
     /// A direct call to a tuple-returning fn under the multi-return ABI: the
     /// callee returns its slots, captured into that many dest cells via
     /// [`Inst::CallMulti`]. The result value is `MakeTuple(loads)` -- a boxed use
@@ -2058,10 +2046,7 @@ impl<'a> Builder<'a> {
             args,
         });
         self.record_call(call, func, dc)?;
-        let loads: Vec<Idx<Inst>> = dests
-            .iter()
-            .map(|c| self.emit_cur(Inst::Load(*c)))
-            .collect();
+        let loads = self.load_cells(&dests);
         Ok(self.tuple_result(shape, &loads))
     }
 
@@ -2107,19 +2092,14 @@ impl<'a> Builder<'a> {
             return self.call_result_bundle(&plan, ValueRepr::Scalar(call));
         };
         if let Some(shape) = arena.tuple_shape(result) {
-            let dests: Vec<Idx<Cell>> = (0..shape.slot_count())
-                .map(|_| self.f.new_cell(None))
-                .collect();
+            let dests = self.fresh_cells(shape.slot_count());
             let call = self.emit_cur(Inst::CallValueMulti {
                 dests: dests.clone(),
                 callee,
                 args: argv,
             });
             self.f.call_rep_plans.insert(call, plan.clone());
-            let loads: Vec<Idx<Inst>> = dests
-                .iter()
-                .map(|c| self.emit_cur(Inst::Load(*c)))
-                .collect();
+            let loads = self.load_cells(&dests);
             return Ok(ValueBundle::new(result, self.tuple_result(&shape, &loads)));
         }
         let Some(shape) = arena.value_shape(result) else {
@@ -2127,19 +2107,14 @@ impl<'a> Builder<'a> {
             self.f.call_rep_plans.insert(call, plan.clone());
             return Ok(ValueBundle::new(result, ValueRepr::Scalar(call)));
         };
-        let dests: Vec<Idx<Cell>> = (0..shape.leaf_count())
-            .map(|_| self.f.new_cell(None))
-            .collect();
+        let dests = self.fresh_cells(shape.leaf_count());
         let call = self.emit_cur(Inst::CallValueMulti {
             dests: dests.clone(),
             callee,
             args: argv,
         });
         self.f.call_rep_plans.insert(call, plan);
-        let leaves: Vec<Idx<Inst>> = dests
-            .iter()
-            .map(|c| self.emit_cur(Inst::Load(*c)))
-            .collect();
+        let leaves = self.load_cells(&dests);
         let mut idx = 0;
         Ok(ValueBundle::new(
             result,
@@ -2163,18 +2138,13 @@ impl<'a> Builder<'a> {
     ) -> Result<Idx<Inst>, CompilerError> {
         match self.expr_tuple_shape(e)? {
             Some(shape) => {
-                let dests: Vec<Idx<Cell>> = (0..shape.slot_count())
-                    .map(|_| self.f.new_cell(None))
-                    .collect();
+                let dests = self.fresh_cells(shape.slot_count());
                 self.emit_cur(Inst::CallValueMulti {
                     dests: dests.clone(),
                     callee,
                     args,
                 });
-                let loads: Vec<Idx<Inst>> = dests
-                    .iter()
-                    .map(|c| self.emit_cur(Inst::Load(*c)))
-                    .collect();
+                let loads = self.load_cells(&dests);
                 let r = self.tuple_result(&shape, &loads);
                 Ok(self.pack(r)?)
             }
@@ -2230,14 +2200,8 @@ impl<'a> Builder<'a> {
                 // return is `(..)?` carries its presence tag in the repr, and the
                 // join forwards that tag rather than minting `true` -- `a?.m()` is
                 // absent when either link is.
-                return Ok(match dc.plan.ret_tuple() {
-                    Some(shape) => self.emit_tuple_call_tree(e, func, argv, &shape, &dc)?,
-                    None => {
-                        let call = self.emit_cur(Inst::Call { func, args: argv });
-                        self.record_call(call, func, &dc)?;
-                        ValueRepr::Scalar(call)
-                    }
-                });
+                let ret_tuple = dc.plan.ret_tuple();
+                return self.emit_direct_call(e, func, argv, None, ret_tuple.as_ref(), &dc);
             };
             let param_shapes = dc.plan.argument_shapes();
             let mut argv = Vec::new();
@@ -2271,29 +2235,7 @@ impl<'a> Builder<'a> {
                 argv.extend(self.arg_values_for_slot(&slot, a)?);
             }
             let argv = dc.plan.transport_arguments(argv)?;
-            match dc.plan.ret_shape() {
-                Some(shape) => {
-                    let n = shape.leaf_count();
-                    let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
-                    let call = self.emit_cur(Inst::CallMulti {
-                        dests: dests.clone(),
-                        func,
-                        args: argv,
-                    });
-                    self.record_call(call, func, &dc)?;
-                    let leaves: Vec<Idx<Inst>> = dests
-                        .iter()
-                        .map(|c| self.emit_cur(Inst::Load(*c)))
-                        .collect();
-                    let mut idx = 0;
-                    Ok(self.rebuild_from_leaves(shape, &leaves, &mut idx))
-                }
-                None => {
-                    let call = self.emit_cur(Inst::Call { func, args: argv });
-                    self.record_call(call, func, &dc)?;
-                    Ok(ValueRepr::Scalar(call))
-                }
-            }
+            self.emit_direct_call(e, func, argv, dc.plan.ret_shape(), None, &dc)
         })()?;
         self.call_result_bundle(dc.plan.representation(), value)
     }
@@ -3057,8 +2999,7 @@ impl<'a> Builder<'a> {
 
                 let nil = self.emit_cur(Inst::Const(Lit::Nil));
                 let present = self.emit_cur(Inst::NotEq(*v, nil));
-                let cells: Vec<Idx<Cell>> =
-                    (0..field_count).map(|_| self.f.new_cell(None)).collect();
+                let cells = self.fresh_cells(field_count);
                 let nil_bb = self.f.new_block();
                 let value_bb = self.f.new_block();
                 let join = self.f.new_block();
@@ -3090,7 +3031,7 @@ impl<'a> Builder<'a> {
                 self.cur = join;
                 let mut out = Vec::with_capacity(1 + field_count);
                 out.push(present);
-                out.extend(cells.iter().map(|cell| self.emit_cur(Inst::Load(*cell))));
+                out.extend(self.load_cells(&cells));
                 Ok(out)
             }
             ValueRepr::Scalar(v) => self.cdata_leaves(*v, shape),
@@ -3343,7 +3284,7 @@ impl<'a> Builder<'a> {
             // `nil.__variant`/`nil[1]` would fault. Branch on nil -> all-nil leaves
             // (tag = nil, the null sentinel); else spread the box's keys.
             let n = es.leaf_count();
-            let cells: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
+            let cells = self.fresh_cells(n);
             let nil_bb = self.f.new_block();
             let val_bb = self.f.new_block();
             let join = self.f.new_block();
@@ -3373,10 +3314,7 @@ impl<'a> Builder<'a> {
             } else {
                 &cells[range]
             };
-            return Ok(selected
-                .iter()
-                .map(|c| self.emit_cur(Inst::Load(*c)))
-                .collect());
+            return Ok(self.load_cells(selected));
         }
         // A shape with no nullable and no enum child anywhere is a plain key
         // walk: the paths come from the one rule the uniform packer reads a
@@ -3542,7 +3480,7 @@ impl<'a> Builder<'a> {
         let field_count = range.end.saturating_sub(1) - range.start.saturating_sub(1);
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
         let present = self.emit_cur(Inst::NotEq(fv, nil));
-        let cells: Vec<Idx<Cell>> = (0..field_count).map(|_| self.f.new_cell(None)).collect();
+        let cells = self.fresh_cells(field_count);
         let nil_bb = self.f.new_block();
         let value_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -3577,7 +3515,7 @@ impl<'a> Builder<'a> {
         } else {
             Vec::new()
         };
-        out.extend(cells.iter().map(|c| self.emit_cur(Inst::Load(*c))));
+        out.extend(self.load_cells(&cells));
         Ok(out)
     }
 

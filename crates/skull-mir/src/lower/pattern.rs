@@ -24,9 +24,7 @@ impl<'a> Builder<'a> {
         arms: comfy_la_arena::IdxRange<MatchArm>,
         shape: RetSlot,
     ) -> Result<ValueRepr, CompilerError> {
-        let results: Vec<Idx<Cell>> = (0..shape.slot_count())
-            .map(|_| self.f.new_cell(None))
-            .collect();
+        let results = self.fresh_cells(shape.slot_count());
         let variants = self.scrut_variants(scrut);
         let scrut_enum = self.scrut_enum_name(scrut);
         let scrut_s = self.lower_scrut(scrut)?;
@@ -52,10 +50,7 @@ impl<'a> Builder<'a> {
         self.f.set_term(self.cur, Term::Unreachable);
 
         self.cur = join;
-        let slots: Vec<Idx<Inst>> = results
-            .iter()
-            .map(|&cell| self.emit_cur(Inst::Load(cell)))
-            .collect();
+        let slots = self.load_cells(&results);
         let mut idx = 0;
         Ok(self.slot_repr(&shape, &slots, &mut idx))
     }
@@ -1039,10 +1034,7 @@ impl<'a> Builder<'a> {
             self.store_bundle_and_join(&results, &shape, &ev, join)?;
 
             self.cur = join;
-            let slots: Vec<Idx<Inst>> = results
-                .iter()
-                .map(|&cell| self.emit_cur(Inst::Load(cell)))
-                .collect();
+            let slots = self.load_cells(&results);
             let mut idx = 0;
             Ok(Some(self.slot_repr(&shape, &slots, &mut idx)))
         } else {

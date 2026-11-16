@@ -572,7 +572,7 @@ impl<'a> Builder<'a> {
         // Dynamic `Child?`: one presence test, leaves read only on the present
         // arm and joined through cells.
         let v = self.lower_expr(value)?;
-        let cells: Vec<Idx<Cell>> = paths.iter().map(|_| self.f.new_cell(None)).collect();
+        let cells = self.fresh_cells(paths.len());
         let absent_bb = self.f.new_block();
         let present_bb = self.f.new_block();
         let join = self.f.new_block();

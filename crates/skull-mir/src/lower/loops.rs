@@ -314,7 +314,7 @@ impl<'a> Builder<'a> {
         // header: (ok, elem..) = next(it); branch on ok.
         self.cur = header;
         let it_load = self.emit_cur(Inst::Load(it_cell));
-        let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
+        let dests = self.fresh_cells(n);
         match &info.next {
             BoundNext::Concrete {
                 func: (m, f), sub, ..
@@ -390,10 +390,7 @@ impl<'a> Builder<'a> {
         // are a tuple `bind_pattern_slot` destructures against a matching tuple
         // pattern (no alloc).
         self.cur = body_bb;
-        let loads: Vec<Idx<Inst>> = dests[1..]
-            .iter()
-            .map(|c| self.emit_cur(Inst::Load(*c)))
-            .collect();
+        let loads = self.load_cells(&dests[1..]);
         let elem_slot = match &ret_shape.slots[1..] {
             [one] => one.clone(),
             rest => RetSlot::Nested(TupleRetShape {

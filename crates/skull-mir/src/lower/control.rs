@@ -530,10 +530,7 @@ impl<'a> Builder<'a> {
         self.store_bundle_and_join(&results, &shape, &ev, join)?;
 
         self.cur = join;
-        let slots: Vec<Idx<Inst>> = results
-            .iter()
-            .map(|&cell| self.emit_cur(Inst::Load(cell)))
-            .collect();
+        let slots = self.load_cells(&results);
         let mut idx = 0;
         Ok(self.slot_repr(&shape, &slots, &mut idx))
     }
@@ -593,9 +590,7 @@ impl<'a> Builder<'a> {
     ) -> Result<ValueRepr, CompilerError> {
         let recv = self.lower_safe_nav_receiver(receiver)?;
         let is_nil = self.safe_nav_absent_cond(&recv);
-        let results: Vec<Idx<Cell>> = (0..shape.slot_count())
-            .map(|_| self.f.new_cell(None))
-            .collect();
+        let results = self.fresh_cells(shape.slot_count());
         let nil_bb = self.f.new_block();
         let val_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -619,10 +614,7 @@ impl<'a> Builder<'a> {
         self.store_bundle_and_join(&results, &shape, &nil, join)?;
 
         self.cur = join;
-        let slots: Vec<Idx<Inst>> = results
-            .iter()
-            .map(|&cell| self.emit_cur(Inst::Load(cell)))
-            .collect();
+        let slots = self.load_cells(&results);
         let mut idx = 0;
         Ok(self.slot_repr(&shape, &slots, &mut idx))
     }

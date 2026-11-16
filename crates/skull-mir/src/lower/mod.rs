@@ -2521,6 +2521,17 @@ impl<'a> Builder<'a> {
         }
     }
 
+    fn fresh_cells(&mut self, n: usize) -> Vec<Idx<Cell>> {
+        (0..n).map(|_| self.f.new_cell(None)).collect()
+    }
+
+    fn load_cells(&mut self, cells: &[Idx<Cell>]) -> Vec<Idx<Inst>> {
+        cells
+            .iter()
+            .map(|&c| self.emit_cur(Inst::Load(c)))
+            .collect()
+    }
+
     fn emit_cur(&mut self, inst: Inst) -> Idx<Inst> {
         let inst = match inst {
             Inst::Field { base, field } if self.callback_records.contains(&base) => {

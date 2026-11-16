@@ -701,10 +701,7 @@ impl<'a> Builder<'a> {
             // packed table (which would re-materialize a `nobox` element).
             Expr::Var(b) if self.tuple_binds.contains_key(&raw(b)) => {
                 let (cells, shape) = self.tuple_binds.get(&raw(b)).cloned().unwrap();
-                let slots: Vec<Idx<Inst>> = cells
-                    .iter()
-                    .map(|c| self.emit_cur(Inst::Load(*c)))
-                    .collect();
+                let slots = self.load_cells(&cells);
                 let mut idx = 0;
                 Ok(self.tuple_from_slots(&shape, &slots, &mut idx))
             }
@@ -1073,9 +1070,7 @@ impl<'a> Builder<'a> {
             (*first, rest.to_vec())
         };
 
-        let cells: Vec<Idx<Cell>> = (0..shape.leaf_count())
-            .map(|_| self.f.new_cell(None))
-            .collect();
+        let cells = self.fresh_cells(shape.leaf_count());
         let lhs_bb = self.f.new_block();
         let rhs_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -1101,10 +1096,7 @@ impl<'a> Builder<'a> {
         self.store_slots_and_join(&cells, &lhs_slots, join)?;
 
         self.cur = join;
-        let loads: Vec<Idx<Inst>> = cells
-            .iter()
-            .map(|&c| self.emit_cur(Inst::Load(c)))
-            .collect();
+        let loads = self.load_cells(&cells);
         let mut idx = 0;
         Ok(self.rebuild_from_leaves(&shape, &loads, &mut idx))
     }
@@ -1139,7 +1131,7 @@ impl<'a> Builder<'a> {
             .expect("a nullable wire carries its presence slot first");
         let (present, lhs_values) = (*present, lhs_values.to_vec());
 
-        let cells: Vec<Idx<Cell>> = lhs_values.iter().map(|_| self.f.new_cell(None)).collect();
+        let cells = self.fresh_cells(lhs_values.len());
         let lhs_bb = self.f.new_block();
         let rhs_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -1162,10 +1154,7 @@ impl<'a> Builder<'a> {
         self.store_slots_and_join(&cells, &lhs_values, join)?;
 
         self.cur = join;
-        let loads: Vec<Idx<Inst>> = cells
-            .iter()
-            .map(|&c| self.emit_cur(Inst::Load(c)))
-            .collect();
+        let loads = self.load_cells(&cells);
         let mut idx = 0;
         Ok(self.tuple_from_slots(&shape, &loads, &mut idx))
     }

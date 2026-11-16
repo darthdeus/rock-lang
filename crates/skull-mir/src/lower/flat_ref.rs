@@ -741,19 +741,14 @@ impl<'a> Builder<'a> {
             None
         };
         if let Some(shape) = ret_shape {
-            let dests: Vec<Idx<Cell>> = (0..shape.leaf_count())
-                .map(|_| self.f.new_cell(None))
-                .collect();
+            let dests = self.fresh_cells(shape.leaf_count());
             let call = self.emit_cur(Inst::CallValueMulti {
                 dests: dests.clone(),
                 callee,
                 args: argv,
             });
             self.f.flat_call_lanes.insert(call, dests.len());
-            let leaves: Vec<Idx<Inst>> = dests
-                .iter()
-                .map(|c| self.emit_cur(Inst::Load(*c)))
-                .collect();
+            let leaves = self.load_cells(&dests);
             return Ok(FlatCallOut::Value(
                 self.rebuild_from_leaves(shape, &leaves, &mut 0),
             ));
@@ -770,10 +765,7 @@ impl<'a> Builder<'a> {
                 args: argv,
             });
             self.f.flat_call_lanes.insert(call, dests.len());
-            let loads: Vec<Idx<Inst>> = dests
-                .iter()
-                .map(|c| self.emit_cur(Inst::Load(*c)))
-                .collect();
+            let loads = self.load_cells(&dests);
             return Ok(FlatCallOut::Value(self.tuple_result(shape, &loads)));
         }
         Ok(FlatCallOut::Value(ValueRepr::Scalar(

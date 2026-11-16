@@ -2014,7 +2014,7 @@ impl<'a> Builder<'a> {
         } else {
             1
         };
-        let cells: Vec<Idx<Cell>> = (0..cell_count).map(|_| self.f.new_cell(None)).collect();
+        let cells = self.fresh_cells(cell_count);
         let hit = self.f.new_block();
         let miss = self.f.new_block();
         let join = self.f.new_block();
@@ -2048,10 +2048,7 @@ impl<'a> Builder<'a> {
         }
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = join;
-        let loaded: Vec<Idx<Inst>> = cells
-            .iter()
-            .map(|c| self.emit_cur(Inst::Load(*c)))
-            .collect();
+        let loaded = self.load_cells(&cells);
         if !unboxed {
             return Ok(ValueBundle::new(
                 elem.representation(),
