@@ -641,7 +641,7 @@ exit 97
                 .arg(&project)
                 .arg("--output")
                 .arg(&output)
-                .args(["--frames", "1", "--headless"])
+                .args(["--frames", "1"])
                 .current_dir(root.path())
                 .env("ROCK_SKIP_ENGINE_BUILD", "1")
                 .env("REAL_LUAJIT", rock_engine_host::runtime::luajit_path())

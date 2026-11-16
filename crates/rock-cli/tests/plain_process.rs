@@ -1115,7 +1115,6 @@ fn public_frame_and_perf_options_preserve_their_units_and_defaults() {
         "2",
         "--gc-window-mode",
         "running",
-        "--headless",
         "--jv",
     ]);
     assert_eq!(perf.frames, 7);
@@ -1123,7 +1122,7 @@ fn public_frame_and_perf_options_preserve_their_units_and_defaults() {
     assert_eq!(perf.warmup, 0);
     assert_eq!((perf.gc_window, perf.gc_window_start), (3, 2));
     assert_eq!(perf.gc_window_mode, "running");
-    assert!(perf.headless && perf.jv);
+    assert!(perf.jv);
     let test = parse(&[
         "rock",
         "test",
@@ -1159,6 +1158,11 @@ fn flags_that_change_nothing_are_rejected() {
     }
     let parsed = rock_cli::Args::command().try_get_matches_from(["rock", "run", "--timeout", "5"]);
     assert!(parsed.is_err(), "--timeout is accepted");
+    for command in ["frame", "perf"] {
+        let parsed =
+            rock_cli::Args::command().try_get_matches_from(["rock", command, "--headless"]);
+        assert!(parsed.is_err(), "{command} --headless is accepted");
+    }
 }
 
 #[test]

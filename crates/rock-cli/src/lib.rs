@@ -135,7 +135,6 @@ pub struct Args {
     pub top: usize,
     pub sim_log_dir: Option<String>,
     pub sim_entry: Option<String>,
-    pub headless: bool,
     pub test_threads: Option<usize>,
     /// `--channel`: release channel for `[build.vars]` resolution.
     /// None = the project's default_channel.
@@ -314,7 +313,6 @@ impl Args {
             top: Default::default(),
             sim_log_dir: Default::default(),
             sim_entry: Default::default(),
-            headless: Default::default(),
             test_threads: m.get_one::<usize>("test-threads").copied(),
             channel: m.get_one::<String>("channel").cloned(),
             target_os: m.get_one::<String>("target-os").cloned(),

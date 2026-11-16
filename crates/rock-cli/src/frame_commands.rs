@@ -559,10 +559,6 @@ pub fn arguments(command: clap::Command) -> clap::Command {
                 .value_parser(["stopped", "running"])
                 .help("`rock perf --gc-window` only: `stopped` pauses GC after a collection; gross requests still include JIT compilation; `running` preserves the ordinary collector schedule. The mode is recorded in profiler output."),
         ] },
-        registry::ArgumentGroup { before: "test-threads", arguments: vec![
-            Arg::new("headless").long("headless").action(ArgAction::SetTrue)
-                .help("Run frame command in headless mode (no display required)"),
-        ] },
         registry::ArgumentGroup { before: "app_args", arguments: vec![
             Arg::new("jv").long("jv").action(ArgAction::SetTrue)
                 .help("Run the game's luajit with -jv (verbose JIT trace log to stderr). Same as STONE_JV=1; works for stone/frame/run/perf/sim."),
@@ -589,7 +585,6 @@ pub fn decode(m: &clap::ArgMatches, args: &mut Args) {
     args.gc_window = *m.get_one::<usize>("gc-window").unwrap();
     args.gc_window_start = *m.get_one::<usize>("gc-window-start").unwrap();
     args.gc_window_mode = m.get_one::<String>("gc-window-mode").cloned().unwrap();
-    args.headless = m.get_flag("headless");
     args.jv = m.get_flag("jv");
 }
 
