@@ -140,6 +140,7 @@ fn spawn_parent_watcher(parent_pid: u32, child_pid: u32) {
         r#"#!/bin/bash
 # Monitor parent PID {parent_pid} and kill child PID {child_pid} when parent dies
 while kill -0 {parent_pid} 2>/dev/null; do
+    kill -0 {child_pid} 2>/dev/null || exit 0
     sleep 0.1
 done
 kill -TERM {child_pid} 2>/dev/null
@@ -235,4 +236,34 @@ pub(crate) fn pid_alive(pid: u32) -> bool {
 pub(crate) fn pid_alive(_pid: u32) -> bool {
     // Without a liveness probe, keep PID-keyed artifacts.
     true
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    #[test]
+    fn the_parent_watcher_exits_with_its_child() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("0.2")
+            .spawn()
+            .unwrap();
+        super::guard_against_parent_kill(&child).unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        let watcher_alive = || {
+            std::process::Command::new("pgrep")
+                .args(["-f", &format!("kill -TERM {pid} 2>")])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+        let deadline = bone_core::prelude::Instant::now() + std::time::Duration::from_secs(5);
+        while watcher_alive() {
+            assert!(
+                bone_core::prelude::Instant::now() < deadline,
+                "the watcher outlived its child and would later signal a reused PID"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
 }
