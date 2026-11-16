@@ -242,9 +242,6 @@ impl<'a> WorklistState<'a> {
         }
     }
 
-    /// Every emitted top-level body (fn defs + ginit init fns) for the cross-
-    /// cutting passes (arity guard, hoisted-name set, vt_eq). Excludes nested
-    /// (lambda) fns, matching the pre-refactor scan.
     /// Drain the worklists into their canonical order and register the code
     /// slots of every body, `extra` included. Returns the rejections so far.
     pub(super) fn finish(
@@ -269,6 +266,9 @@ impl<'a> WorklistState<'a> {
         Ok(std::mem::take(&mut self.rejections))
     }
 
+    /// Every emitted top-level body (fn defs + ginit init fns) for the cross-
+    /// cutting passes (arity guard, hoisted-name set, vt_eq). Excludes nested
+    /// (lambda) fns.
     pub(super) fn top_bodies(&self) -> Vec<&MirFunc> {
         self.lowered
             .iter()
@@ -398,12 +398,6 @@ pub(super) fn emit_inline_js_fn(
     Ok(format!("function {js_name}({params}) {{\n{src}\n}}\n"))
 }
 
-/// Drain the fn + ginit worklists: lower each queued fn (same per-body pipeline
-/// the luajit path runs -- lower -> inline -> cleanup -> closures -> FORL ->
-/// residual-bound-call validation; coroutines skip inline/FORL), discover its
-/// callees + module-global reads (feeding both queues), and record the lowered
-/// body. A ginit is a lowered `lower_global` returning the init value (never
-/// inlined, mirroring the luajit global path).
 /// Register a body's `static` locals as `__G` state: each lowers to a private
 /// `__static_*` cell + done-flag global (`lower_static`). No initializer line
 /// is needed -- an undefined done-flag is falsy, so the first-reach guard runs

@@ -99,14 +99,6 @@ struct JsPlacement<'a, 'e> {
 }
 
 impl JsPlacement<'_, '_> {
-    fn push(&mut self, line: &str) {
-        for _ in 0..self.em.indent {
-            self.em.out.push_str("  ");
-        }
-        self.em.out.push_str(line);
-        self.em.out.push('\n');
-    }
-
     fn enter_nesting(
         &mut self,
         cost: u32,
@@ -205,9 +197,9 @@ impl PlacementEmit for JsPlacement<'_, '_> {
         };
         if ladder.open {
             self.em.indent -= 1;
-            self.push(&format!("}} else if ({condition}) {{"));
+            self.em.push(&format!("}} else if ({condition}) {{"));
         } else {
-            self.push(&format!("if ({condition}) {{"));
+            self.em.push(&format!("if ({condition}) {{"));
         }
         self.em.indent += 1;
         ladder.open = true;
@@ -227,7 +219,7 @@ impl PlacementEmit for JsPlacement<'_, '_> {
     fn otherwise(&mut self, ladder: &mut Self::Ladder) -> Result<(), Self::Error> {
         if ladder.open {
             self.em.indent -= 1;
-            self.push("} else {");
+            self.em.push("} else {");
             self.em.indent += 1;
         }
         Ok(())
@@ -236,7 +228,7 @@ impl PlacementEmit for JsPlacement<'_, '_> {
     fn end_ladder(&mut self, ladder: Self::Ladder) -> Result<(), Self::Error> {
         if ladder.open {
             self.em.indent -= 1;
-            self.push("}");
+            self.em.push("}");
         }
         self.nesting -= ladder.nesting_cost;
         Ok(())
@@ -244,20 +236,22 @@ impl PlacementEmit for JsPlacement<'_, '_> {
 
     fn open_follower(&mut self, block: Idx<Block>) -> Result<(), Self::Error> {
         self.enter_nesting(NESTING_COST_BRANCH, Some(block), None)?;
-        self.push(&format!("F{}: {{", self.em.mf.emit_block_id(block)));
+        self.em
+            .push(&format!("F{}: {{", self.em.mf.emit_block_id(block)));
         self.em.indent += 1;
         Ok(())
     }
 
     fn close_follower(&mut self, _block: Idx<Block>, _referenced: bool) -> Result<(), Self::Error> {
         self.em.indent -= 1;
-        self.push("}");
+        self.em.push("}");
         self.nesting -= NESTING_COST_BRANCH;
         Ok(())
     }
 
     fn follower_jump(&mut self, block: Idx<Block>) -> Result<(), Self::Error> {
-        self.push(&format!("break F{};", self.em.mf.emit_block_id(block)));
+        self.em
+            .push(&format!("break F{};", self.em.mf.emit_block_id(block)));
         Ok(())
     }
 
@@ -277,11 +271,11 @@ impl PlacementEmit for JsPlacement<'_, '_> {
                 .ok_or_else(|| err("JS subset: invalid counted-loop placement"))?;
             let (slot, bound) = self.em.counted_slot_bound(&loop_info)?;
             let cmp = if loop_info.inclusive { "<=" } else { "<" };
-            self.push(&format!(
+            self.em.push(&format!(
                 "{label}: for (; {slot} {cmp} {bound}; {slot} = {slot} + 1) {{"
             ));
         } else {
-            self.push(&format!("{label}: while (true) {{"));
+            self.em.push(&format!("{label}: while (true) {{"));
         }
         self.em.indent += 1;
         Ok(LoopToken {
@@ -298,7 +292,7 @@ impl PlacementEmit for JsPlacement<'_, '_> {
         _continued: bool,
     ) -> Result<(), Self::Error> {
         self.em.indent -= 1;
-        self.push("}");
+        self.em.push("}");
         self.nesting -= token.nesting_cost;
         Ok(())
     }
@@ -314,7 +308,7 @@ impl PlacementEmit for JsPlacement<'_, '_> {
         } else {
             format!("continue L{};", self.em.mf.emit_block_id(header))
         };
-        self.push(&statement);
+        self.em.push(&statement);
         Ok(())
     }
 
@@ -324,7 +318,7 @@ impl PlacementEmit for JsPlacement<'_, '_> {
         } else {
             format!("break L{};", self.em.mf.emit_block_id(header))
         };
-        self.push(&statement);
+        self.em.push(&statement);
         Ok(true)
     }
 }
