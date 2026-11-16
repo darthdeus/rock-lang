@@ -101,7 +101,7 @@ impl<'a> PreprocessorLexer<'a> {
         let start = self.position;
 
         while let Some(ch) = self.peek() {
-            if ch.is_alphanumeric() || ch == '_' || ch == '-' {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
                 self.advance();
             } else {
                 break;

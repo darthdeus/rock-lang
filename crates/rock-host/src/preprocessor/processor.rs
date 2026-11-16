@@ -195,6 +195,13 @@ mod tests {
     }
 
     #[test]
+    fn a_non_ascii_word_after_hash_is_not_a_directive() {
+        let input = "fn main() {}\n#\u{e9}t\u{e9}\n";
+        let result = preprocess(input, &PreprocessorContext::new("lua")).unwrap();
+        assert_eq!(result.content, input);
+    }
+
+    #[test]
     fn test_if_else() {
         let input = r#"fn main() {
 #if lua
