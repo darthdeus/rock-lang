@@ -203,8 +203,7 @@ impl<'a> Builder<'a> {
         let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
         let base = self.emit_cur(Inst::IntMul(row, width));
         let mut at = if !compact && self.column_base_is_one() {
-            let first = self.emit_cur(Inst::Const(Lit::Int(1)));
-            self.emit_cur(Inst::IntAdd(base, first))
+            self.int_plus_one(base)
         } else {
             base
         };
@@ -305,8 +304,7 @@ impl<'a> Builder<'a> {
         }
         // The appended row is the old length, counted from 0.
         self.strided_store_leaves_at(vec, len, leaves, stride, elem);
-        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
-        let next = self.emit_cur(Inst::IntAdd(len, one));
+        let next = self.int_plus_one(len);
         self.emit_cur(Inst::StoreField {
             base: vec,
             field: crate::names::ustr("len"),
@@ -531,8 +529,7 @@ impl<'a> Builder<'a> {
         self.cur = body;
         let i = self.emit_cur(Inst::Load(cell));
         let raw_index = if self.column_base_is_one() {
-            let one = self.emit_cur(Inst::Const(Lit::Int(1)));
-            self.emit_cur(Inst::IntAdd(i, one))
+            self.int_plus_one(i)
         } else {
             i
         };
@@ -551,8 +548,7 @@ impl<'a> Builder<'a> {
             ValueBundle::new(elem.representation(), unpacked)
         };
         self.strided_append_bundle(vec, &bundle, elem)?;
-        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
-        let next = self.emit_cur(Inst::IntAdd(i, one));
+        let next = self.int_plus_one(i);
         self.emit_cur(Inst::Store { cell, value: next });
         self.f.set_term(self.cur, Term::Goto(header));
         self.cur = exit;
@@ -1071,8 +1067,7 @@ impl<'a> Builder<'a> {
         );
         self.cur = body;
         self.column_unset(vec, i, elem)?;
-        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
-        let next = self.emit_cur(Inst::IntAdd(i, one));
+        let next = self.int_plus_one(i);
         self.emit_cur(Inst::Store { cell, value: next });
         self.f.set_term(self.cur, Term::Goto(head));
         self.cur = exit;
@@ -1481,8 +1476,7 @@ impl<'a> Builder<'a> {
             base: vec,
             field: crate::names::ustr("len"),
         });
-        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
-        let next = self.emit_cur(Inst::IntAdd(len, one));
+        let next = self.int_plus_one(len);
         // A column indexes the way its backend's `_data` does -- 1-based on
         // luajit, 0-based on JS -- so the appended slot is the NEW length on one
         // and the OLD length on the other. The read side gets this from

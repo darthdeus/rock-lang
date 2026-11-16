@@ -2895,13 +2895,7 @@ impl<'a> Builder<'a> {
         let i_now = self.emit_cur(Inst::Load(i_cell));
         let repr = self.loop_element_repr_at(src, i_now, src_kind)?;
         self.append_spread_value(arr, repr, dest)?;
-        let i2 = self.emit_cur(Inst::Load(i_cell));
-        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
-        let inc = self.emit_cur(Inst::IntAdd(i2, one));
-        self.emit_cur(Inst::Store {
-            cell: i_cell,
-            value: inc,
-        });
+        self.increment_cell(i_cell);
         self.f.set_term(self.cur, Term::Goto(header));
 
         self.cur = exit;

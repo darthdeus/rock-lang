@@ -2532,6 +2532,17 @@ impl<'a> Builder<'a> {
             .collect()
     }
 
+    fn int_plus_one(&mut self, value: Idx<Inst>) -> Idx<Inst> {
+        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
+        self.emit_cur(Inst::IntAdd(value, one))
+    }
+
+    fn increment_cell(&mut self, cell: Idx<Cell>) {
+        let value = self.emit_cur(Inst::Load(cell));
+        let value = self.int_plus_one(value);
+        self.emit_cur(Inst::Store { cell, value });
+    }
+
     fn emit_cur(&mut self, inst: Inst) -> Idx<Inst> {
         let inst = match inst {
             Inst::Field { base, field } if self.callback_records.contains(&base) => {
