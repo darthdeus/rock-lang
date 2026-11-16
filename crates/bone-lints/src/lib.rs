@@ -588,17 +588,9 @@ impl LintDependencyIndex {
     }
 
     fn build_action_rows(&mut self, ws: &Workspace, warm: &FxHashSet<ModuleId>) {
-        for module in ws.user_modules(warm).filter(|module| {
-            is_production_action_module(module.file, self.action_policy.as_deref())
-        }) {
-            for (_, global) in module
-                .globals
-                .iter()
-                .filter(|(_, global)| is_action_name(global.name, self.action_policy.as_deref()))
-            {
-                self.action_declarations
-                    .insert(global.name, (module.file, global.name_span));
-            }
+        let policy = self.action_policy.as_deref();
+        for (action, file, span) in action_declarations_in(ws.user_modules(warm), policy) {
+            self.action_declarations.insert(action, (file, span));
         }
         let declared: FxHashSet<Ustr> = self.action_declarations.keys().copied().collect();
         for module in ws
@@ -1165,20 +1157,12 @@ impl LintDependencyIndex {
             }
         }
         let policy = self.action_policy.as_deref();
-        let declared_now: Vec<(Ustr, Ustr, Span)> = ws
-            .user_modules(&FxHashSet::default())
-            .filter(|module| {
-                changed_files.contains(&module.file)
-                    && is_production_action_module(module.file, policy)
-            })
-            .flat_map(|module| {
-                module
-                    .globals
-                    .values()
-                    .filter(|global| is_action_name(global.name, policy))
-                    .map(|global| (global.name, module.file, global.name_span))
-            })
-            .collect();
+        let none_warm = FxHashSet::default();
+        let changed_modules = ws
+            .user_modules(&none_warm)
+            .filter(|module| changed_files.contains(&module.file));
+        let declared_now: Vec<(Ustr, Ustr, Span)> =
+            action_declarations_in(changed_modules, policy).collect();
         for &(action, file, span) in &declared_now {
             invalidation.names.insert(action);
             invalidation.locations.insert((file, span.offset_range().0));
@@ -1293,6 +1277,23 @@ fn action_declaration_fingerprint(module: &Module, policy: Option<&ActionLayerPo
         .collect::<Vec<_>>();
     rows.sort();
     rows.join("\n")
+}
+
+/// `(action, file, name span)` for every action global that a production
+/// module among `modules` declares.
+fn action_declarations_in<'a>(
+    modules: impl Iterator<Item = &'a Module> + 'a,
+    policy: Option<&'a ActionLayerPolicy>,
+) -> impl Iterator<Item = (Ustr, Ustr, Span)> + 'a {
+    modules
+        .filter(move |module| is_production_action_module(module.file, policy))
+        .flat_map(move |module| {
+            module
+                .globals
+                .values()
+                .filter(move |global| is_action_name(global.name, policy))
+                .map(move |global| (global.name, module.file, global.name_span))
+        })
 }
 
 fn action_edges_in_body(
@@ -3891,17 +3892,8 @@ pub(crate) fn action_caller_gaps<'a>(
     warm: &FxHashSet<ModuleId>,
     policy: &'a ActionLayerPolicy,
 ) -> Vec<ActionCallerGap<'a>> {
-    let declarations: Vec<(Ustr, Ustr, Span)> = ws
-        .user_modules(warm)
-        .filter(|module| is_production_action_module(module.file, Some(policy)))
-        .flat_map(|module| {
-            module
-                .globals
-                .iter()
-                .filter(|(_, global)| is_action_name(global.name, Some(policy)))
-                .map(move |(_, global)| (global.name, module.file, global.name_span))
-        })
-        .collect();
+    let declarations: Vec<(Ustr, Ustr, Span)> =
+        action_declarations_in(ws.user_modules(warm), Some(policy)).collect();
 
     if declarations.is_empty() {
         let Some(module) = ws
