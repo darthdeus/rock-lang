@@ -112,16 +112,9 @@ pub fn check_modules(
     Ok((ws, errs))
 }
 
-/// The checks expansion would make impossible, since it drops the macro
-/// definitions and the argument labels. Macro names must be unique against
-/// function names (call-position ambiguity), and a macro argument label must
-/// name a parameter.
+/// Check declaration collisions before expansion removes macro definitions.
 fn macro_gates(modules: &[&Ast]) -> Vec<CompilerError> {
-    let macro_dupes = skull_parser::check_macro_name_uniqueness(modules.iter().copied());
-    if !macro_dupes.is_empty() {
-        return macro_dupes;
-    }
-    skull_parser::check_macro_call_labels(modules.iter().copied())
+    skull_parser::check_macro_name_uniqueness(modules.iter().copied())
 }
 
 /// Modules the lint pass treats as warm (scanned, never reported): every

@@ -101,20 +101,23 @@ pub fn parse_one_item(
     Ok(ast)
 }
 
-/// Cook a SINGLE module against a prebuilt `registry`: macro-expand it, then
-/// syntax-desugar it. The per-module unit of `cook`, exposed so an incremental
-/// driver can re-cook just one edited file -- build the registry once with
-/// `collect_registry` from the un-expanded modules, then `cook_one` each file
-/// (or only the edited one). Equivalent to that module's slice of `cook` since
-/// both expansion and desugar are per-module given a fixed registry.
-pub fn cook_one(ast: &mut Ast, registry: &macro_expand::MacroRegistry) {
+/// Expand and synthesize one module using the workspace's macro registry.
+/// Existing parse diagnostics remain available; newly reported expansion errors fail cooking.
+pub fn cook_one(
+    ast: &mut Ast,
+    registry: &macro_expand::MacroRegistry,
+) -> Result<(), CompilerError> {
+    let errors_before = ast.recovery_errors.len();
     macro_expand::expand_one(ast, registry);
+    if let Some(error) = ast.recovery_errors.get(errors_before) {
+        return Err(error.clone());
+    }
     desugar::desugar(ast);
+    Ok(())
 }
 
 pub use macro_expand::{
-    MacroRegistry, check_macro_call_labels, check_macro_call_labels_in,
-    check_macro_name_uniqueness, collect_registry, is_hygiene_name, macro_reach,
+    MacroRegistry, check_macro_name_uniqueness, collect_registry, is_hygiene_name, macro_reach,
 };
 
 #[cfg(test)]

@@ -3,8 +3,7 @@ use std::sync::Arc;
 use skull_parser::stdlib::ModuleSet;
 use skull_parser::{
     Ast, Dialect, FunctionBody, GlobalPolicy, ItemKind, MacroRegistry, PackageTag,
-    check_macro_call_labels, check_macro_call_labels_in, check_macro_name_uniqueness,
-    collect_registry, cook_one,
+    check_macro_name_uniqueness, collect_registry, cook_one,
 };
 
 use bone_core::modules::ScopeProbe;
@@ -452,15 +451,10 @@ pub enum FileDiff {
     Interface,
 }
 
-/// Reject a macro name colliding with a function name (call-position ambiguity)
-/// and a macro call whose argument labels don't fit its parameters, cross-module,
-/// on the pre-expansion module set (macros still present). The same gates
-/// `check_modules` applies on the CLI compile path, so CLI / LSP rebuilds
-/// refuse the same programs. Returns the first offender.
+/// Reject declaration collisions before expansion removes macro definitions.
 fn reject_macro_name_collisions(modules: &ModuleSet) -> Result<(), CompilerError> {
     match check_macro_name_uniqueness(modules.iter())
         .into_iter()
-        .chain(check_macro_call_labels(modules.iter()))
         .next()
     {
         Some(e) => Err(e),
@@ -1261,7 +1255,10 @@ impl Session {
         )?;
         lowered
             .par_iter_mut()
-            .for_each(|ast| cook_one(ast, registry));
+            .map(|ast| cook_one(ast, registry))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .collect::<Result<(), _>>()?;
         let mids = lower_and_infer(&mut ws, &lowered)?;
         // The same whole-program gate the batch path runs, so an export whose
         // type closure is not public fails in a session too rather than only
@@ -1285,12 +1282,17 @@ impl Session {
         if matches!(self.warm_base, WarmBase::Unbuilt) {
             let mut ws = Workspace::default();
             let mut cooked = self.warm.to_vec();
-            cooked
+            let cooked_ok = cooked
                 .par_iter_mut()
-                .for_each(|ast| cook_one(ast, registry));
+                .map(|ast| cook_one(ast, registry))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .all(|r| r.is_ok());
             // A refusal here is not the build's verdict: the warm modules may
             // name a user definition, and the combined build decides.
-            let built = lower_and_infer(&mut ws, &cooked).is_ok() && body_errors(&ws).is_empty();
+            let built = cooked_ok
+                && lower_and_infer(&mut ws, &cooked).is_ok()
+                && body_errors(&ws).is_empty();
             ws.phase_timings.clear();
             self.warm_base = if built {
                 WarmBase::Clean(Box::new(ws))
@@ -1479,13 +1481,13 @@ impl Session {
         // uses the provided AST); cook + lower them together with the edited
         // module so intra-closure and closure->kept references resolve.
         let mut edited = module;
-        self.cook_edited(&mut edited)?;
+        cook_one(&mut edited, &self.registry)?;
         let mut asts: Vec<Ast> = Vec::with_capacity(to_relower.len() + 1);
         asts.push(edited);
         for &m in &to_relower {
             let path = self.ws.module(m).file;
             let mut a = self.parse_stored(path)?;
-            cook_one(&mut a, &self.registry);
+            cook_one(&mut a, &self.registry)?;
             asts.push(a);
         }
 
@@ -1903,7 +1905,7 @@ impl Session {
         self.ws.phase_timings.clear();
 
         let mut edited = ast;
-        self.cook_edited(&mut edited)?;
+        cook_one(&mut edited, &self.registry)?;
         lower_modules_seeded(&mut self.ws, &[edited], seeds)?;
 
         let changed_owners: FxHashSet<BodyOwner> = {
@@ -2080,7 +2082,7 @@ impl Session {
         if !mini.recovery_errors.is_empty() {
             return Ok(None);
         }
-        self.cook_edited(&mut mini)?;
+        cook_one(&mut mini, &self.registry)?;
 
         // The re-parsed item must be exactly one function with the SAME name and
         // interface; otherwise the "body edit" actually moved the interface and
@@ -2314,7 +2316,7 @@ impl Session {
         let clone_dur = t_clone.elapsed();
 
         let t_cook = Instant::now();
-        self.cook_edited(&mut edited)?;
+        cook_one(&mut edited, &self.registry)?;
         let cook_dur = t_cook.elapsed();
 
         // Defensive: the edited item should survive cooking unchanged. If it
@@ -2406,12 +2408,6 @@ impl Session {
         })
     }
 
-    /// Cook the edited file against the cached registry, first refusing a
-    /// macro call whose argument labels do not fit (`check_macro_call_labels`,
-    /// which `Session::new` and `rebuild_users` run over every file). The
-    /// narrow paths that call this are taken only when no macro definition
-    /// changed, so the cached registry is current and every other file's
-    /// calls were checked against it already.
     /// The module's whole type arena as a seed for its next lowering, or `None`
     /// once earlier lowerings have piled up enough dead entries that the edit
     /// should re-lower from empty (and re-infer every caller) to reclaim them.
@@ -2423,17 +2419,6 @@ impl Session {
             arena: module.ty_arena.clone(),
             var_high_water: module.lower_var_high_water,
         })
-    }
-
-    fn cook_edited(&self, ast: &mut Ast) -> Result<(), CompilerError> {
-        if let Some(e) = check_macro_call_labels_in(ast, &self.registry)
-            .into_iter()
-            .next()
-        {
-            return Err(e);
-        }
-        cook_one(ast, &self.registry);
-        Ok(())
     }
 
     fn rebuild_or_revert(

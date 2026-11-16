@@ -158,7 +158,11 @@ fn build() -> Option<StdlibBase> {
     let mut cooked = stdlib.to_vec();
     cooked
         .par_iter_mut()
-        .for_each(|ast| cook_one(ast, &registry));
+        .map(|ast| cook_one(ast, &registry))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect::<Result<(), _>>()
+        .ok()?;
     if cooked.iter().any(|ast| !ast.recovery_errors.is_empty()) {
         return None;
     }
@@ -261,7 +265,10 @@ pub(crate) fn semantic_pass(
         let timer = Instant::now();
         users
             .par_iter_mut()
-            .for_each(|ast| cook_one(ast, &registry));
+            .map(|ast| cook_one(ast, &registry))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .collect::<Result<(), _>>()?;
         ws.log_time("macro_expand", timer);
         crate::semantic_passes::lower_and_infer(&mut ws, users)?;
         Ok(ws)

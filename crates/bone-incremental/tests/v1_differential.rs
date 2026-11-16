@@ -1350,7 +1350,7 @@ fn a_function_named_like_a_macro_is_refused_like_a_fresh_build() {
 }
 
 /// A macro call whose argument label names no parameter: a fresh session
-/// refuses it (`check_macro_call_labels`), so an edit that introduces it is
+/// refuses it during expansion, so an edit that introduces it is
 /// refused the same way on every update path -- a body edit, an interface
 /// edit and a scope edit alike -- rather than leaving the call unexpanded.
 #[test]

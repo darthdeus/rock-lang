@@ -185,45 +185,6 @@ pub fn check_macro_name_uniqueness<'a>(
     errs
 }
 
-/// Every macro call whose argument labels don't fit the macro's parameters,
-/// across the whole module set. Runs BEFORE expansion (which erases the macro
-/// defs) and alongside [`check_macro_name_uniqueness`], for the same reason:
-/// `expand_macros` is driven from bone and returns no diagnostics, so a
-/// rejection has to be raised by a pass the caller can collect from.
-///
-/// Both this and the expander bind through `bind_macro_args`, so what is
-/// reported here is exactly what would have been bound.
-///
-/// Without this, a bad label leaves the call UNEXPANDED and the user sees
-/// "missing function `foo`" -- a true rejection naming the wrong cause.
-pub fn check_macro_call_labels<'a>(
-    modules: impl IntoIterator<Item = &'a Ast> + Clone,
-) -> Vec<CompilerError> {
-    let reg = build_registry(modules.clone());
-    if reg.is_empty() {
-        return Vec::new();
-    }
-    // Every call of every module is visited; the modules are independent and
-    // the errors keep module order.
-    use rayon::prelude::*;
-    let modules: Vec<&Ast> = modules.into_iter().collect();
-    modules
-        .par_iter()
-        .map(|m| call_label_errors(m, &reg))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .flatten()
-        .collect()
-}
-
-/// [`check_macro_call_labels`] for the calls of ONE module against a prebuilt
-/// `registry`: what an incremental driver runs on an edited file when no
-/// macro definition changed (every other file's calls were checked against
-/// the same registry already).
-pub fn check_macro_call_labels_in(m: &Ast, registry: &MacroRegistry) -> Vec<CompilerError> {
-    call_label_errors(m, &registry.0)
-}
-
 fn call_label_errors(m: &Ast, reg: &Registry) -> Vec<CompilerError> {
     if reg.is_empty() {
         return Vec::new();
@@ -290,6 +251,11 @@ fn call_label_errors(m: &Ast, reg: &Registry) -> Vec<CompilerError> {
 /// already-expanded module: defs are gone and no registered call remains.
 pub(crate) fn expand_one(ast: &mut Ast, registry: &MacroRegistry) {
     let reg = &registry.0;
+    let errors = call_label_errors(ast, reg);
+    if !errors.is_empty() {
+        ast.recovery_errors.extend(errors);
+        return;
+    }
     if !reg.is_empty() {
         // Item-macro invocations splice their items in first, so the spliced
         // bodies also get expr-expanded by the walk below.
@@ -928,7 +894,7 @@ fn try_expand(
     // positional one (or its default); a variadic param captures all trailing
     // args, spliced wherever the body forwards `...rest`.
     //
-    // A binding error is reported by `check_macro_call_labels`, which runs the
+    // A binding error is reported by the expansion preflight, which runs the
     // same binder before the compile proceeds; leaving the call unexpanded here
     // is what makes that report the only thing the user sees.
     let Ok(bound) = bind_macro_args(&tmpl.params, &arg_values) else {
@@ -1116,19 +1082,7 @@ struct Bound {
     variadic: Option<(usize, Vec<Idx<ExprData>>)>,
 }
 
-/// Map a call's args onto a macro's params the way a fn call maps them:
-/// unlabelled args fill params left to right, a labelled arg fills the param it
-/// NAMES wherever that sits, and a param no arg reaches falls back to its
-/// default.
-///
-/// This is the single binding implementation -- the expander uses it to bind and
-/// `check_macro_call_labels` uses it to report. A second copy of the rule in the
-/// checker is how the checker and the expander come to disagree about what a
-/// call means.
-///
-/// Binding by position alone (what this replaced) silently mis-binds every call
-/// that labels an argument out of its declared slot, and silently accepts a
-/// label naming no parameter at all.
+/// Bind labelled arguments by name and positional arguments to the next free slot.
 fn bind_macro_args(params: &[MParam], args: &[MacroArg]) -> Result<Bound, BindErr> {
     let mut slots: Vec<Option<Idx<ExprData>>> = vec![None; params.len()];
     let mut variadic: Option<(usize, Vec<Idx<ExprData>>)> = None;
@@ -1531,6 +1485,24 @@ mod tests {
                 _ => false,
             })
             .count()
+    }
+
+    #[test]
+    fn expansion_records_label_errors_in_calls_and_unused_templates() {
+        let mut ast = parse(
+            "macro identity(value: expr) { value }\nmacro unused() { identity(wrong: 1) }\nfn main() { identity(other: 2) }",
+            "labels.rock",
+        );
+        let registry = collect_registry([&ast]);
+        expand_one(&mut ast, &registry);
+        let errors: Vec<_> = ast
+            .recovery_errors
+            .iter()
+            .map(|e| e.message.as_str())
+            .collect();
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors[0].contains("no parameter named `wrong`"));
+        assert!(errors[1].contains("no parameter named `other`"));
     }
 
     #[test]
