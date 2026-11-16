@@ -79,8 +79,10 @@
 //! the pass can be compared; a measurement switch, never a shipped mode.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
+use std::ops::Deref;
 
-use rustc_hash::FxHashSet as HashSet;
+use rustc_hash::{FxHashMap, FxHashSet as HashSet};
 
 use bone_core::hir::FnBackend;
 use bone_core::workspace::Workspace;
@@ -105,6 +107,31 @@ pub fn elide_bounds_checks_for_target(
     if disabled_by_env() {
         return 0;
     }
+    let proven = proven_accesses(ws, func, target);
+    for &id in &proven {
+        match &mut func.insts[id] {
+            Inst::Index { kind, .. } | Inst::StoreIndex { kind, .. } => {
+                *kind = match kind {
+                    ContainerKind::Vec => ContainerKind::VecInBounds,
+                    ContainerKind::VecNonNull => ContainerKind::VecNonNullInBounds,
+                    _ => ContainerKind::NativeBufferInBounds,
+                };
+            }
+            Inst::VecCheckedIndex { index, .. } => {
+                let index = *index;
+                func.insts[id] = Inst::VecIndexSlot(index);
+            }
+            Inst::Call { args, .. } => {
+                let index = args[1];
+                func.insts[id] = Inst::NbIndexSlot(index);
+            }
+            _ => unreachable!(),
+        }
+    }
+    proven.len()
+}
+
+fn proven_accesses(ws: Option<&Workspace>, func: &MirFunc, target: FnBackend) -> Vec<Idx<Inst>> {
     let rpo = reverse_postorder(func, func.entry);
     let mut has_checked = false;
     let mut has_make_vec = false;
@@ -114,7 +141,7 @@ pub fn elide_bounds_checks_for_target(
     for &b in &rpo {
         for &i in &func.blocks[b].insts {
             match func.insts[i] {
-                Inst::Lambda { .. } => return 0,
+                Inst::Lambda { .. } => return Vec::new(),
                 Inst::MakeVec(_) => has_make_vec = true,
                 Inst::MakeStruct { .. } => has_make_struct = true,
                 Inst::Index {
@@ -128,7 +155,7 @@ pub fn elide_bounds_checks_for_target(
         }
     }
     if !has_checked {
-        return 0;
+        return Vec::new();
     }
     let (preds, _) = predecessors(func, &rpo);
     let reexecuting = reexecuting_blocks(func, &rpo);
@@ -167,6 +194,8 @@ pub fn elide_bounds_checks_for_target(
             })
         }),
     };
+    let body = Body::new(func);
+    let func = &body;
     let n = func.blocks.len();
     let mut ins: Vec<Option<Facts>> = vec![None; n];
     let mut outs: Vec<Option<Facts>> = vec![None; n];
@@ -272,27 +301,7 @@ pub fn elide_bounds_checks_for_target(
             step(&mut facts, func, &ctx, id, reexecuting[raw(b)]);
         }
     }
-    for &id in &proven {
-        match &mut func.insts[id] {
-            Inst::Index { kind, .. } | Inst::StoreIndex { kind, .. } => {
-                *kind = match kind {
-                    ContainerKind::Vec => ContainerKind::VecInBounds,
-                    ContainerKind::VecNonNull => ContainerKind::VecNonNullInBounds,
-                    _ => ContainerKind::NativeBufferInBounds,
-                };
-            }
-            Inst::VecCheckedIndex { index, .. } => {
-                let index = *index;
-                func.insts[id] = Inst::VecIndexSlot(index);
-            }
-            Inst::Call { args, .. } => {
-                let index = args[1];
-                func.insts[id] = Inst::NbIndexSlot(index);
-            }
-            _ => unreachable!(),
-        }
-    }
-    proven.len()
+    proven
 }
 
 fn needs_bounds_proof(ws: Option<&Workspace>, inst: &Inst) -> bool {
@@ -480,7 +489,7 @@ fn relevant_values(func: &MirFunc, rpo: &[Idx<Block>]) -> Vec<bool> {
 /// The facts flowing along the edge `from -> to`: the block's out-state
 /// sharpened by its branch condition.
 fn edge_facts<'a>(
-    func: &MirFunc,
+    func: &Body<'_>,
     out: &'a Facts,
     from: Idx<Block>,
     to: Idx<Block>,
@@ -502,61 +511,141 @@ fn edge_facts<'a>(
 }
 
 /// What a fact is about: the value an instruction produced, or a place.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-enum Key {
+/// Interned per body, so facts copy, compare and hash keys as integers.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct Key(u32);
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum KeyData {
     Value(Idx<Inst>),
     /// An integer literal, so two `Const` instructions of one value agree.
     Const(i64),
     Cell(Idx<Cell>),
-    Scale(Box<Key>, i64),
-    Sum(Box<Key>, Box<Key>),
-    Product(Box<Key>, Box<Key>),
+    Scale(Key, i64),
+    Sum(Key, Key),
+    Product(Key, Key),
     Global(Ustr),
-    Field(Box<Key>, Ustr),
+    Field(Key, Ustr),
     /// The element `base[index]` of a container.
-    Elem(Box<Key>, Box<Key>),
+    Elem(Key, Key),
 }
 
-impl Key {
-    fn mentions(&self, pred: &impl Fn(&Key) -> bool) -> bool {
-        pred(self)
-            || match self {
-                Key::Field(base, _) | Key::Scale(base, _) => base.mentions(pred),
-                Key::Elem(base, index) | Key::Sum(base, index) | Key::Product(base, index) => {
-                    base.mentions(pred) || index.mentions(pred)
-                }
-                _ => false,
-            }
+/// The body under analysis and the keys interned for it. Value and cell keys
+/// are numbered by their index; other keys are hash-consed after them.
+struct Body<'a> {
+    func: &'a MirFunc,
+    keys: RefCell<Vec<Interned>>,
+    ids: RefCell<FxHashMap<KeyData, Key>>,
+}
+
+#[derive(Clone, Copy)]
+struct Interned {
+    data: KeyData,
+    /// The union of [`value_bit`] over every value the key mentions.
+    values: u64,
+}
+
+fn value_bit(id: Idx<Inst>) -> u64 {
+    1 << (raw(id) % 64)
+}
+
+impl Deref for Body<'_> {
+    type Target = MirFunc;
+
+    fn deref(&self) -> &MirFunc {
+        self.func
+    }
+}
+
+impl<'a> Body<'a> {
+    fn new(func: &'a MirFunc) -> Self {
+        let values = func.insts.iter().map(|(id, _)| Interned {
+            data: KeyData::Value(id),
+            values: value_bit(id),
+        });
+        let cells = func.cells.iter().map(|(c, _)| Interned {
+            data: KeyData::Cell(c),
+            values: 0,
+        });
+        Body {
+            func,
+            keys: RefCell::new(values.chain(cells).collect()),
+            ids: RefCell::default(),
+        }
     }
 
-    /// Reached through memory another body can write: a global, a field or
-    /// an element.
-    fn through_memory(&self) -> bool {
-        self.mentions(&|k| matches!(k, Key::Global(_) | Key::Field(..) | Key::Elem(..)))
+    fn key(&self, data: KeyData) -> Key {
+        match data {
+            KeyData::Value(id) => Key(raw(id) as u32),
+            KeyData::Cell(c) => Key((self.func.insts.len() + raw(c)) as u32),
+            _ => *self.ids.borrow_mut().entry(data).or_insert_with(|| {
+                let mut keys = self.keys.borrow_mut();
+                let of = |k: Key| keys[k.0 as usize].values;
+                let values = match data {
+                    KeyData::Field(base, _) | KeyData::Scale(base, _) => of(base),
+                    KeyData::Elem(a, b) | KeyData::Sum(a, b) | KeyData::Product(a, b) => {
+                        of(a) | of(b)
+                    }
+                    _ => 0,
+                };
+                keys.push(Interned { data, values });
+                Key((keys.len() - 1) as u32)
+            }),
+        }
     }
+
+    fn data(&self, key: Key) -> KeyData {
+        self.keys.borrow()[key.0 as usize].data
+    }
+
+    fn mentions(&self, key: Key, pred: &impl Fn(KeyData) -> bool) -> bool {
+        mentions(&self.keys.borrow(), key, pred)
+    }
+}
+
+fn mentions(keys: &[Interned], key: Key, pred: &impl Fn(KeyData) -> bool) -> bool {
+    let data = keys[key.0 as usize].data;
+    pred(data)
+        || match data {
+            KeyData::Field(base, _) | KeyData::Scale(base, _) => mentions(keys, base, pred),
+            KeyData::Elem(base, index)
+            | KeyData::Sum(base, index)
+            | KeyData::Product(base, index) => {
+                mentions(keys, base, pred) || mentions(keys, index, pred)
+            }
+            _ => false,
+        }
+}
+
+/// Reached through memory another body can write: a global, a field or an
+/// element.
+fn through_memory(key: KeyData) -> bool {
+    matches!(
+        key,
+        KeyData::Global(_) | KeyData::Field(..) | KeyData::Elem(..)
+    )
 }
 
 /// The key of `id` as a value: a literal by its value, anything else by
 /// its instruction.
-fn value_key(func: &MirFunc, id: Idx<Inst>) -> Key {
+fn value_key(func: &Body<'_>, id: Idx<Inst>) -> Key {
     match func.insts[id] {
-        Inst::Const(Lit::Int(n)) => Key::Const(n),
-        _ => Key::Value(id),
+        Inst::Const(Lit::Int(n)) => func.key(KeyData::Const(n)),
+        _ => func.key(KeyData::Value(id)),
     }
 }
 
 /// The place `id` reads, when it reads one.
-fn place_of(func: &MirFunc, id: Idx<Inst>) -> Option<Key> {
+fn place_of(func: &Body<'_>, id: Idx<Inst>) -> Option<Key> {
     let via = |x: Idx<Inst>| place_of(func, x).unwrap_or_else(|| value_key(func, x));
-    match &func.insts[id] {
-        Inst::Load(c) => Some(Key::Cell(*c)),
-        Inst::Global(g) => Some(Key::Global(*g)),
-        Inst::Field { base, field } => Some(Key::Field(Box::new(via(*base)), *field)),
-        Inst::Index { base, index, .. } => {
-            Some(Key::Elem(Box::new(via(*base)), Box::new(via(*index))))
-        }
-        _ => None,
-    }
+    let data = match &func.insts[id] {
+        Inst::Load(c) => KeyData::Cell(*c),
+        Inst::Global(g) => KeyData::Global(*g),
+        Inst::Field { base, field } => KeyData::Field(via(*base), *field),
+        Inst::Index { base, index, .. } => KeyData::Elem(via(*base), via(*index)),
+        _ => return None,
+    };
+    Some(func.key(data))
 }
 
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
@@ -601,33 +690,49 @@ impl Facts {
     }
 
     /// Drop every fact and tie whose keys mention a key `pred` accepts.
-    fn forget(&mut self, pred: impl Fn(&Key) -> bool) {
+    fn forget(&mut self, func: &Body<'_>, pred: impl Fn(KeyData) -> bool) {
         if self.is_empty() {
             return;
         }
-        self.private_tables.retain(|(k, _)| !k.mentions(&pred));
-        self.whole.retain(|k| !k.mentions(&pred));
-        self.ordered
-            .retain(|(a, b, _)| !a.mentions(&pred) && !b.mentions(&pred));
+        let keys = func.keys.borrow();
+        let m = |k: &Key| mentions(&keys, *k, &pred);
+        self.private_tables.retain(|(k, _)| !m(k));
+        self.whole.retain(|k| !m(k));
+        self.ordered.retain(|(a, b, _)| !m(a) && !m(b));
         self.same
-            .retain(|(v, p)| !pred(&Key::Value(*v)) && !p.mentions(&pred));
-        self.nonneg.retain(|k| !k.mentions(&pred));
-        self.le_len
-            .retain(|(k, v)| !k.mentions(&pred) && !v.mentions(&pred));
-        self.lt
-            .retain(|(k, v)| !k.mentions(&pred) && !v.mentions(&pred));
+            .retain(|(v, p)| !pred(KeyData::Value(*v)) && !m(p));
+        self.nonneg.retain(|k| !m(k));
+        self.le_len.retain(|(k, v)| !m(k) && !m(v));
+        self.lt.retain(|(k, v)| !m(k) && !m(v));
     }
 
-    fn forget_cell(&mut self, cell: Idx<Cell>) {
-        self.forget(|k| *k == Key::Cell(cell));
+    fn forget_cell(&mut self, func: &Body<'_>, cell: Idx<Cell>) {
+        self.forget(func, |k| k == KeyData::Cell(cell));
     }
 
-    fn forget_value(&mut self, id: Idx<Inst>) {
-        self.forget(|k| *k == Key::Value(id));
+    /// Runs at every value an instruction in a loop produces, and almost
+    /// never finds a fact to drop: rule the value out by the keys' summaries
+    /// before rebuilding every set.
+    fn forget_value(&mut self, func: &Body<'_>, id: Idx<Inst>) {
+        let bit = value_bit(id);
+        let found = {
+            let keys = func.keys.borrow();
+            let has = |k: &Key| keys[k.0 as usize].values & bit != 0;
+            self.same.iter().any(|(v, p)| *v == id || has(p))
+                || self.private_tables.iter().any(|(k, _)| has(k))
+                || self.whole.iter().any(has)
+                || self.nonneg.iter().any(has)
+                || self.ordered.iter().any(|(a, b, _)| has(a) || has(b))
+                || self.le_len.iter().any(|(k, v)| has(k) || has(v))
+                || self.lt.iter().any(|(k, v)| has(k) || has(v))
+        };
+        if found {
+            self.forget(func, |k| k == KeyData::Value(id));
+        }
     }
 
-    fn forget_field(&mut self, field: Ustr) {
-        self.forget(|k| matches!(k, Key::Field(_, f) if *f == field));
+    fn forget_field(&mut self, func: &Body<'_>, field: Ustr) {
+        self.forget(func, |k| matches!(k, KeyData::Field(_, f) if f == field));
     }
 
     /// A vector may have shrunk.
@@ -639,34 +744,31 @@ impl Facts {
 
     /// Unknown code ran: any vector may have shrunk, any global, field or
     /// element may hold something else.
-    fn after_unknown_call(&mut self) {
+    fn after_unknown_call(&mut self, func: &Body<'_>) {
         self.forget_lengths();
-        self.forget(|k| k.through_memory());
+        self.forget(func, through_memory);
     }
 
     /// The value `id` and every place known to hold it.
-    fn keys_of(&self, func: &MirFunc, id: Idx<Inst>) -> Vec<Key> {
+    fn keys_of(&self, func: &Body<'_>, id: Idx<Inst>) -> Vec<Key> {
         let mut keys = vec![value_key(func, id)];
-        keys.extend(
-            self.same
-                .iter()
-                .filter(|(v, _)| *v == id)
-                .map(|(_, p)| p.clone()),
-        );
+        keys.extend(self.same.iter().filter(|(v, _)| *v == id).map(|&(_, p)| p));
         keys
     }
 
-    fn product_operand(&self, func: &MirFunc, id: Idx<Inst>) -> Key {
+    fn product_operand(&self, func: &Body<'_>, id: Idx<Inst>) -> Key {
         if let Inst::Load(cell) = func.insts[id]
             && !func.cells[cell].borrowed
-            && self.same.contains(&(id, Key::Cell(cell)))
         {
-            return Key::Cell(cell);
+            let cell = func.key(KeyData::Cell(cell));
+            if self.same.contains(&(id, cell)) {
+                return cell;
+            }
         }
         value_key(func, id)
     }
 
-    fn nonneg(&self, func: &MirFunc, id: Idx<Inst>) -> bool {
+    fn nonneg(&self, func: &Body<'_>, id: Idx<Inst>) -> bool {
         // Only integer arithmetic over proven operands: a `len` field can be
         // written by source code, and the unsigned representation is not
         // vouched for here.
@@ -693,7 +795,7 @@ impl Facts {
 
     fn track_private_tables(
         &mut self,
-        func: &MirFunc,
+        func: &Body<'_>,
         ctx: &Ctx<'_>,
         id: Idx<Inst>,
     ) -> (bool, bool) {
@@ -703,7 +805,8 @@ impl Facts {
         let inst = &func.insts[id];
         if self.private_tables.is_empty() {
             if matches!(inst, Inst::MakeVec(_) | Inst::MakeStruct { .. }) {
-                self.private_tables.insert((Key::Value(id), id));
+                self.private_tables
+                    .insert((func.key(KeyData::Value(id)), id));
             }
             return (false, false);
         }
@@ -777,11 +880,13 @@ impl Facts {
             .retain(|(_, root)| !escaped.contains(root));
         match inst {
             Inst::MakeVec(_) | Inst::MakeStruct { .. } => {
-                self.private_tables.insert((Key::Value(id), id));
+                self.private_tables
+                    .insert((func.key(KeyData::Value(id)), id));
             }
             Inst::Load(cell) => {
-                if let Some(root) = self.private_root(&Key::Cell(*cell)) {
-                    self.private_tables.insert((Key::Value(id), root));
+                if let Some(root) = self.private_root(&func.key(KeyData::Cell(*cell))) {
+                    self.private_tables
+                        .insert((func.key(KeyData::Value(id)), root));
                 }
             }
             _ => {}
@@ -789,104 +894,106 @@ impl Facts {
         (safe_push, record.is_some())
     }
 
-    fn after_private_push(&mut self) {
+    fn after_private_push(&mut self, func: &Body<'_>) {
         // The numeric length only grows, so captured upper bounds remain true.
         // Current length reads and element-derived facts no longer name memory.
-        self.forget_field(Ustr::from(LEN));
-        self.forget(|k| matches!(k, Key::Elem(..)));
+        self.forget_field(func, Ustr::from(LEN));
+        self.forget(func, |k| matches!(k, KeyData::Elem(..)));
     }
 
-    fn whole_key(&self, key: &Key) -> bool {
-        matches!(key, Key::Const(_)) || self.whole.contains(key)
+    fn whole_key(&self, func: &Body<'_>, key: &Key) -> bool {
+        matches!(func.data(*key), KeyData::Const(_)) || self.whole.contains(key)
     }
 
-    fn whole_value(&self, func: &MirFunc, id: Idx<Inst>) -> bool {
-        self.keys_of(func, id).iter().any(|k| self.whole_key(k))
+    fn whole_value(&self, func: &Body<'_>, id: Idx<Inst>) -> bool {
+        self.keys_of(func, id)
+            .iter()
+            .any(|k| self.whole_key(func, k))
     }
 
-    fn ordered_fact(&mut self, func: &MirFunc, a: Idx<Inst>, b: Idx<Inst>, strict: bool) {
+    fn ordered_fact(&mut self, func: &Body<'_>, a: Idx<Inst>, b: Idx<Inst>, strict: bool) {
         let lengths = self.le_len_of(func, b);
         for ka in self.keys_of(func, a) {
             for kb in self.keys_of(func, b) {
-                self.ordered.insert((ka.clone(), kb, strict));
+                self.ordered.insert((ka, kb, strict));
             }
-            if matches!(ka, Key::Scale(..)) {
-                for v in &lengths {
-                    self.le_len.insert((ka.clone(), v.clone()));
+            if matches!(func.data(ka), KeyData::Scale(..)) {
+                for &v in &lengths {
+                    self.le_len.insert((ka, v));
                 }
             }
         }
     }
 
-    fn aliases(&self, key: &Key) -> Vec<Key> {
-        let mut keys = vec![key.clone()];
-        if let Key::Value(id) = key {
-            keys.extend(
-                self.same
-                    .iter()
-                    .filter(|(v, _)| v == id)
-                    .map(|(_, p)| p.clone()),
-            );
+    fn aliases(&self, func: &Body<'_>, key: &Key) -> Vec<Key> {
+        let mut keys = vec![*key];
+        if let KeyData::Value(id) = func.data(*key) {
+            keys.extend(self.same.iter().filter(|(v, _)| *v == id).map(|&(_, p)| p));
         }
         keys
     }
 
     // A bounded search through explicit comparisons, not an iteratively growing
     // interval domain: loops cannot require one solver iteration per integer.
-    fn upper(&self, key: &Key, depth: usize) -> Option<i64> {
-        self.upper_with_budget(key, depth, &mut 64)
+    fn upper(&self, func: &Body<'_>, key: &Key, depth: usize) -> Option<i64> {
+        self.upper_with_budget(func, key, depth, &mut 64)
     }
 
-    fn upper_with_budget(&self, key: &Key, depth: usize, budget: &mut usize) -> Option<i64> {
+    fn upper_with_budget(
+        &self,
+        func: &Body<'_>,
+        key: &Key,
+        depth: usize,
+        budget: &mut usize,
+    ) -> Option<i64> {
         if depth == 0 || *budget == 0 {
             return None;
         }
         *budget -= 1;
-        if let Key::Const(n) = key {
-            return ((-EXACT_INT..=EXACT_INT).contains(n)).then_some(*n);
+        if let KeyData::Const(n) = func.data(*key) {
+            return ((-EXACT_INT..=EXACT_INT).contains(&n)).then_some(n);
         }
-        let aliases = self.aliases(key);
+        let aliases = self.aliases(func, key);
         self.ordered
             .iter()
             .filter_map(|(a, b, strict)| {
                 if !aliases.contains(a) {
                     return None;
                 }
-                let bound = self.upper_with_budget(b, depth - 1, budget)?;
-                Some(bound - i64::from(*strict && self.whole_key(a) && self.whole_key(b)))
+                let bound = self.upper_with_budget(func, b, depth - 1, budget)?;
+                Some(
+                    bound
+                        - i64::from(*strict && self.whole_key(func, a) && self.whole_key(func, b)),
+                )
             })
             .min()
     }
 
-    fn upper_value(&self, func: &MirFunc, id: Idx<Inst>) -> Option<i64> {
+    fn upper_value(&self, func: &Body<'_>, id: Idx<Inst>) -> Option<i64> {
         self.keys_of(func, id)
             .iter()
-            .filter_map(|k| self.upper(k, 8))
+            .filter_map(|k| self.upper(func, k, 8))
             .min()
     }
 
-    fn known_nonneg(&self, func: &MirFunc, id: Idx<Inst>) -> bool {
-        self.keys_of(func, id)
-            .iter()
-            .any(|k| matches!(k, Key::Const(n) if *n >= 0) || self.nonneg.contains(k))
+    fn known_nonneg(&self, func: &Body<'_>, id: Idx<Inst>) -> bool {
+        self.keys_of(func, id).iter().any(|k| {
+            matches!(func.data(*k), KeyData::Const(n) if n >= 0) || self.nonneg.contains(k)
+        })
     }
 
-    fn affine_in_bounds(&self, func: &MirFunc, index: Idx<Inst>, vec: Idx<Inst>) -> bool {
+    fn affine_in_bounds(&self, func: &Body<'_>, index: Idx<Inst>, vec: Idx<Inst>) -> bool {
         let Some((product, row, stride, lane)) = affine_shape(func, index) else {
             return false;
         };
         // MIR instruction ids can execute again. Only expand arithmetic while
         // its operand snapshots still describe the value that was computed.
-        if !self.same.contains(&(
-            index,
-            Key::Sum(
-                Box::new(value_key(func, product)),
-                Box::new(value_key(func, lane)),
-            ),
-        )) || !self
-            .same
-            .contains(&(product, Key::Scale(Box::new(value_key(func, row)), stride)))
-        {
+        let sum = func.key(KeyData::Sum(
+            value_key(func, product),
+            value_key(func, lane),
+        ));
+        let scale = func.key(KeyData::Scale(value_key(func, row), stride));
+        if !self.same.contains(&(index, sum)) || !self.same.contains(&(product, scale)) {
             return false;
         }
         if !self.whole_value(func, row)
@@ -916,16 +1023,16 @@ impl Facts {
         let rows = self.keys_of(func, row);
         let vectors = self.keys_of(func, vec);
         self.le_len.iter().any(|(limit, vector)| {
-            let Key::Scale(count, scale) = limit else {
+            let KeyData::Scale(count, scale) = func.data(*limit) else {
                 return false;
             };
-            if *scale != stride || !vectors.contains(vector) || !self.whole_key(count) {
+            if scale != stride || !vectors.contains(vector) || !self.whole_key(func, &count) {
                 return false;
             }
-            let Some(max) = self.upper(count, 8) else {
+            let Some(max) = self.upper(func, &count, 8) else {
                 return false;
             };
-            let counts = self.aliases(count);
+            let counts = self.aliases(func, &count);
             max >= 0
                 && max.checked_mul(stride).is_some_and(|n| n <= EXACT_INT)
                 && self
@@ -936,7 +1043,7 @@ impl Facts {
     }
 
     /// The vectors whose live length bounds the integer `id` from above.
-    fn le_len_of(&self, func: &MirFunc, id: Idx<Inst>) -> Vec<Key> {
+    fn le_len_of(&self, func: &Body<'_>, id: Idx<Inst>) -> Vec<Key> {
         // `n - c` for a constant `c >= 0` is no larger than `n`.
         if let Inst::IntSub(a, b) = func.insts[id]
             && matches!(func.insts[b], Inst::Const(Lit::Int(c)) if c >= 0)
@@ -947,7 +1054,7 @@ impl Facts {
         self.le_len
             .iter()
             .filter(|(k, _)| keys.contains(k))
-            .map(|(_, v)| v.clone())
+            .map(|&(_, v)| v)
             .collect()
     }
 
@@ -955,13 +1062,13 @@ impl Facts {
     /// floor modulo with a positive divisor. Subtracting a positive integer
     /// from a length does not prove a strict bound: infinity and large
     /// floating-point integers can remain unchanged by the subtraction.
-    fn lt_of(&self, func: &MirFunc, id: Idx<Inst>) -> Vec<Key> {
+    fn lt_of(&self, func: &Body<'_>, id: Idx<Inst>) -> Vec<Key> {
         let keys = self.keys_of(func, id);
         let mut out: Vec<Key> = self
             .lt
             .iter()
             .filter(|(k, _)| keys.contains(k))
-            .map(|(_, v)| v.clone())
+            .map(|&(_, v)| v)
             .collect();
         match func.insts[id] {
             Inst::IntMod(_, b) => out.extend(self.positive_lengths(func, b)),
@@ -972,11 +1079,11 @@ impl Facts {
 
     /// The vectors whose live length the value `id` is: a `len` read of
     /// `v`, by the tie the read established.
-    fn lengths_of(&self, func: &MirFunc, id: Idx<Inst>) -> Vec<Key> {
+    fn lengths_of(&self, func: &Body<'_>, id: Idx<Inst>) -> Vec<Key> {
         self.keys_of(func, id)
             .into_iter()
-            .filter_map(|k| match k {
-                Key::Field(base, f) if f.as_str() == LEN => Some(*base),
+            .filter_map(|k| match func.data(k) {
+                KeyData::Field(base, f) if f.as_str() == LEN => Some(base),
                 _ => None,
             })
             .collect()
@@ -984,14 +1091,14 @@ impl Facts {
 
     /// [`Facts::lengths_of`], kept to the vectors proven non-empty
     /// (`0 < len` holds).
-    fn positive_lengths(&self, func: &MirFunc, id: Idx<Inst>) -> Vec<Key> {
+    fn positive_lengths(&self, func: &Body<'_>, id: Idx<Inst>) -> Vec<Key> {
         self.lengths_of(func, id)
             .into_iter()
-            .filter(|v| self.lt.contains(&(Key::Const(0), v.clone())))
+            .filter(|v| self.lt.contains(&(func.key(KeyData::Const(0)), *v)))
             .collect()
     }
 
-    fn in_bounds(&self, func: &MirFunc, index: Idx<Inst>, vec: Idx<Inst>) -> bool {
+    fn in_bounds(&self, func: &Body<'_>, index: Idx<Inst>, vec: Idx<Inst>) -> bool {
         if self.affine_in_bounds(func, index, vec) {
             return true;
         }
@@ -1008,7 +1115,7 @@ impl Facts {
                 };
                 self.lengths_of(func, a)
                     .iter()
-                    .any(|v| self.lt.contains(&(Key::Const(c - 1), v.clone())))
+                    .any(|v| self.lt.contains(&(func.key(KeyData::Const(c - 1)), *v)))
             }
             _ => false,
         };
@@ -1019,19 +1126,19 @@ impl Facts {
     }
 
     /// `v[k]` ran without raising, or was proven not to.
-    fn checked_access(&mut self, func: &MirFunc, vec: Idx<Inst>, index: Idx<Inst>) {
+    fn checked_access(&mut self, func: &Body<'_>, vec: Idx<Inst>, index: Idx<Inst>) {
         let vecs = self.keys_of(func, vec);
         for k in self.keys_of(func, index) {
-            self.nonneg.insert(k.clone());
-            for v in &vecs {
-                self.lt.insert((k.clone(), v.clone()));
+            self.nonneg.insert(k);
+            for &v in &vecs {
+                self.lt.insert((k, v));
             }
         }
     }
 }
 
 /// Sharpen `facts` with `cond == truth`.
-fn cond_facts(facts: &mut Facts, func: &MirFunc, cond: Idx<Inst>, truth: bool, affine: bool) {
+fn cond_facts(facts: &mut Facts, func: &Body<'_>, cond: Idx<Inst>, truth: bool, affine: bool) {
     if truth && affine {
         match func.insts[cond] {
             Inst::IntLt(a, b) | Inst::IntGt(b, a) => facts.ordered_fact(func, a, b, true),
@@ -1061,23 +1168,23 @@ fn cond_facts(facts: &mut Facts, func: &MirFunc, cond: Idx<Inst>, truth: bool, a
     }
 }
 
-fn equal_capacity_facts(facts: &mut Facts, func: &MirFunc, a: Idx<Inst>, b: Idx<Inst>) {
+fn equal_capacity_facts(facts: &mut Facts, func: &Body<'_>, a: Idx<Inst>, b: Idx<Inst>) {
     for (value, equal) in [(a, b), (b, a)] {
         let capacities = facts.le_len_of(func, equal);
         for key in facts.keys_of(func, value) {
-            for owner in &capacities {
-                facts.le_len.insert((key.clone(), owner.clone()));
+            for &owner in &capacities {
+                facts.le_len.insert((key, owner));
             }
         }
     }
 }
 
 /// `a < b` holds.
-fn lt_fact(facts: &mut Facts, func: &MirFunc, a: Idx<Inst>, b: Idx<Inst>) {
+fn lt_fact(facts: &mut Facts, func: &Body<'_>, a: Idx<Inst>, b: Idx<Inst>) {
     let bounds = facts.le_len_of(func, b);
     for k in facts.keys_of(func, a) {
-        for v in &bounds {
-            facts.lt.insert((k.clone(), v.clone()));
+        for &v in &bounds {
+            facts.lt.insert((k, v));
         }
     }
     // `-1 < b` or `0 <= a < b` makes `b` positive.
@@ -1093,7 +1200,7 @@ fn lt_fact(facts: &mut Facts, func: &MirFunc, a: Idx<Inst>, b: Idx<Inst>) {
 }
 
 /// `a <= b` holds.
-fn leq_fact(facts: &mut Facts, func: &MirFunc, a: Idx<Inst>, b: Idx<Inst>) {
+fn leq_fact(facts: &mut Facts, func: &Body<'_>, a: Idx<Inst>, b: Idx<Inst>) {
     if facts.nonneg(func, a) {
         for k in facts.keys_of(func, b) {
             facts.nonneg.insert(k);
@@ -1106,30 +1213,30 @@ fn leq_fact(facts: &mut Facts, func: &MirFunc, a: Idx<Inst>, b: Idx<Inst>) {
 /// push drops only facts through `len`, a callee that may shrink a vector
 /// drops the length facts, and field, global and element writes drop the
 /// facts through those places. Without a workspace every call is unknown.
-fn after_direct_call(facts: &mut Facts, ctx: &Ctx<'_>, fref: FuncRef) {
+fn after_direct_call(facts: &mut Facts, func: &Body<'_>, ctx: &Ctx<'_>, fref: FuncRef) {
     let Some(ws) = ctx.ws else {
-        facts.after_unknown_call();
+        facts.after_unknown_call(func);
         return;
     };
     let effect = ws.effects().of(fref.module, fref.func);
     if effect.is_all() {
-        facts.after_unknown_call();
+        facts.after_unknown_call(func);
         return;
     }
     if effect.lengths {
         facts.forget_lengths();
     }
     if effect.globals {
-        facts.forget(|k| matches!(k, Key::Global(_)));
+        facts.forget(func, |k| matches!(k, KeyData::Global(_)));
     }
     if effect.elems {
-        facts.forget(|k| matches!(k, Key::Elem(..)));
+        facts.forget(func, |k| matches!(k, KeyData::Elem(..)));
     }
     match &effect.fields {
-        None => facts.forget(|k| matches!(k, Key::Field(..))),
+        None => facts.forget(func, |k| matches!(k, KeyData::Field(..))),
         Some(fields) => {
             for &field in fields {
-                facts.forget_field(field);
+                facts.forget_field(func, field);
             }
         }
     }
@@ -1168,7 +1275,7 @@ const LEN: &str = "len";
 /// compiler cannot read, so it rides on the same review as the body.
 fn seed_declared_result_facts(
     facts: &mut Facts,
-    func: &MirFunc,
+    func: &Body<'_>,
     ctx: &Ctx<'_>,
     call: Idx<Inst>,
     fref: FuncRef,
@@ -1180,7 +1287,7 @@ fn seed_declared_result_facts(
     let f = &ws.module(fref.module).functions[fref.func];
     for anno in &f.annotations {
         if anno.is_builtin("returns_nonneg") {
-            facts.nonneg.insert(Key::Value(call));
+            facts.nonneg.insert(func.key(KeyData::Value(call)));
         }
         if anno.is_builtin("returns_index_below")
             && let Some(bone_core::hir::AnnoArg {
@@ -1197,20 +1304,20 @@ fn seed_declared_result_facts(
             let fields: Vec<Ustr> = parts.map(Ustr::from).collect();
             for mut key in facts.keys_of(func, arg) {
                 for &field in &fields {
-                    key = Key::Field(Box::new(key), field);
+                    key = func.key(KeyData::Field(key, field));
                 }
-                facts.lt.insert((Key::Value(call), key));
+                facts.lt.insert((func.key(KeyData::Value(call)), key));
             }
         }
     }
 }
 
 /// Advance `facts` across `id`.
-fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>, may_reexecute: bool) {
+fn step(facts: &mut Facts, func: &Body<'_>, ctx: &Ctx<'_>, id: Idx<Inst>, may_reexecute: bool) {
     let inst = &func.insts[id];
     if inst.produces_value() {
         if may_reexecute {
-            facts.forget_value(id);
+            facts.forget_value(func, id);
         }
         if ctx.relevant[raw(id)]
             && let Some(place) = place_of(func, id)
@@ -1223,13 +1330,11 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>, may_ree
     {
         // Identical operand snapshots repeat the same floating-point operation.
         // Do not reassociate products or recursively expand expression trees.
-        facts.same.insert((
-            id,
-            Key::Product(
-                Box::new(facts.product_operand(func, *a)),
-                Box::new(facts.product_operand(func, *b)),
-            ),
-        ));
+        let product = KeyData::Product(
+            facts.product_operand(func, *a),
+            facts.product_operand(func, *b),
+        );
+        facts.same.insert((id, func.key(product)));
     }
     if ctx.affine && inst.produces_value() && ctx.relevant[raw(id)] {
         let whole = match inst {
@@ -1243,15 +1348,12 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>, may_ree
             facts.whole.insert(value_key(func, id));
         }
         if let Some((value, scale)) = constant_scale(func, id) {
-            facts
-                .same
-                .insert((id, Key::Scale(Box::new(value_key(func, value)), scale)));
+            let scaled = func.key(KeyData::Scale(value_key(func, value), scale));
+            facts.same.insert((id, scaled));
         }
         if let Inst::IntAdd(a, b) = inst {
-            facts.same.insert((
-                id,
-                Key::Sum(Box::new(value_key(func, *a)), Box::new(value_key(func, *b))),
-            ));
+            let sum = func.key(KeyData::Sum(value_key(func, *a), value_key(func, *b)));
+            facts.same.insert((id, sum));
         }
     }
     let (private_push, private_record_read) = facts.track_private_tables(func, ctx, id);
@@ -1260,18 +1362,18 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>, may_ree
             // A fresh descriptor's length equals its initializer snapshot.
             if let Some((_, len)) = fields.iter().rev().find(|(field, _)| field.as_str() == LEN) {
                 for key in facts.keys_of(func, *len) {
-                    facts.le_len.insert((key, Key::Value(id)));
+                    facts.le_len.insert((key, func.key(KeyData::Value(id))));
                 }
             }
         }
         Inst::Len { base, .. } => {
             for v in facts.keys_of(func, *base) {
-                facts.le_len.insert((Key::Value(id), v));
+                facts.le_len.insert((func.key(KeyData::Value(id)), v));
             }
         }
         Inst::Field { base, field } if field.as_str() == LEN => {
             for v in facts.keys_of(func, *base) {
-                facts.le_len.insert((Key::Value(id), v));
+                facts.le_len.insert((func.key(KeyData::Value(id)), v));
             }
         }
         Inst::Index {
@@ -1285,7 +1387,7 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>, may_ree
                 | ContainerKind::Map
                 | ContainerKind::Record,
             ..
-        } => facts.after_unknown_call(),
+        } => facts.after_unknown_call(func),
         Inst::Index {
             base,
             index,
@@ -1306,9 +1408,9 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>, may_ree
                     | ContainerKind::Map
                     | ContainerKind::Record
             ) {
-                facts.after_unknown_call();
+                facts.after_unknown_call(func);
             } else {
-                facts.forget(|k| matches!(k, Key::Elem(..)));
+                facts.forget(func, |k| matches!(k, KeyData::Elem(..)));
             }
             if matches!(
                 kind,
@@ -1327,64 +1429,66 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>, may_ree
                 .le_len
                 .iter()
                 .filter(|(bound, owner)| {
-                    owners.contains(owner) && !bound.mentions(&|k| *k == Key::Cell(*cell))
+                    owners.contains(owner) && !func.mentions(*bound, &|k| k == KeyData::Cell(*cell))
                 })
-                .map(|(bound, _)| bound.clone())
+                .map(|&(bound, _)| bound)
                 .collect();
             let private = facts.private_root(&value_key(func, *value));
             let whole = ctx.affine && facts.whole_value(func, *value);
             let nonneg = facts.nonneg(func, *value);
             let le_len = facts.le_len_of(func, *value);
             let lt = facts.lt_of(func, *value);
-            facts.forget_cell(*cell);
-            let k = Key::Cell(*cell);
+            facts.forget_cell(func, *cell);
+            let k = func.key(KeyData::Cell(*cell));
             for bound in capacities {
-                facts.le_len.insert((bound, k.clone()));
+                facts.le_len.insert((bound, k));
             }
             if let Some(root) = private {
-                facts.private_tables.insert((k.clone(), root));
+                facts.private_tables.insert((k, root));
             }
             if whole {
-                facts.whole.insert(k.clone());
+                facts.whole.insert(k);
             }
             if ctx.affine
                 && let Inst::Const(Lit::Int(n)) = func.insts[*value]
             {
-                facts.ordered.insert((k.clone(), Key::Const(n), false));
+                facts
+                    .ordered
+                    .insert((k, func.key(KeyData::Const(n)), false));
             }
             if nonneg {
-                facts.nonneg.insert(k.clone());
+                facts.nonneg.insert(k);
             }
             for v in le_len {
-                facts.le_len.insert((k.clone(), v));
+                facts.le_len.insert((k, v));
             }
             for v in lt {
-                facts.lt.insert((k.clone(), v));
+                facts.lt.insert((k, v));
             }
             if ctx.relevant[raw(*value)] {
                 facts.same.insert((*value, k));
             }
         }
-        Inst::StoreGlobal { name, .. } => facts.forget(|k| *k == Key::Global(*name)),
+        Inst::StoreGlobal { name, .. } => facts.forget(func, |k| k == KeyData::Global(*name)),
         Inst::StoreField { field, .. } => {
             if field.as_str() == LEN {
                 facts.forget_lengths();
             }
-            facts.forget_field(*field);
+            facts.forget_field(func, *field);
         }
         // A foreign backing can enter __newindex while appending an absent slot.
         Inst::ArrayPush { .. } => {
             if private_push {
-                facts.after_private_push();
+                facts.after_private_push(func);
             } else {
-                facts.after_unknown_call();
+                facts.after_unknown_call(func);
             }
         }
         Inst::Call { func: fref, args } => {
             if private_push {
-                facts.after_private_push();
+                facts.after_private_push(func);
             } else {
-                after_direct_call(facts, ctx, *fref);
+                after_direct_call(facts, func, ctx, *fref);
             }
             if is_stdlib_fn(ctx.ws, *fref, "__nb_checked_index") && args.len() == 2 {
                 facts.checked_access(func, args[0], args[1]);
@@ -1394,27 +1498,27 @@ fn step(facts: &mut Facts, func: &MirFunc, ctx: &Ctx<'_>, id: Idx<Inst>, may_ree
         Inst::CallMulti {
             dests, func: fref, ..
         } => {
-            after_direct_call(facts, ctx, *fref);
+            after_direct_call(facts, func, ctx, *fref);
             for d in dests {
-                facts.forget_cell(*d);
+                facts.forget_cell(func, *d);
             }
         }
-        Inst::CallValue { .. } => facts.after_unknown_call(),
+        Inst::CallValue { .. } => facts.after_unknown_call(func),
         Inst::CallValueMulti { dests, .. } | Inst::CallBoundMulti { dests, .. } => {
-            facts.after_unknown_call();
+            facts.after_unknown_call(func);
             for d in dests {
-                facts.forget_cell(*d);
+                facts.forget_cell(func, *d);
             }
         }
         // String conversion can reach a user `to_string`.
         Inst::Format { .. } | Inst::FormatDyn { .. } | Inst::ToString(_) => {
-            facts.after_unknown_call()
+            facts.after_unknown_call(func)
         }
         Inst::MapNext {
             key_cell, val_cell, ..
         } => {
-            facts.forget_cell(*key_cell);
-            facts.forget_cell(*val_cell);
+            facts.forget_cell(func, *key_cell);
+            facts.forget_cell(func, *val_cell);
         }
         _ => {}
     }
