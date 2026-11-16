@@ -306,86 +306,67 @@ fn update_and_check(
     }
 }
 
+fn tok(
+    delta_line: u32,
+    delta_start: u32,
+    length: u32,
+    token_type: u32,
+    mods: u32,
+) -> SemanticToken {
+    SemanticToken {
+        delta_line,
+        delta_start,
+        length,
+        token_type,
+        token_modifiers_bitset: mods,
+    }
+}
+
+/// Checks the stream for `source`, then restores the case's source and
+/// requires its baseline stream back.
+fn check_and_repair(
+    bone: &mut BoneWorkspace,
+    case: &Case,
+    source: &str,
+    context: &str,
+    baseline: &[SemanticToken],
+) {
+    with_repair(bone, case.source, |bone| {
+        update_and_check(bone, source, false, context);
+    });
+    check_stream(bone, case.source, case.valid, context);
+    assert_eq!(
+        bone.semantic_tokens(PATH).data,
+        baseline,
+        "{context}: repair changed baseline"
+    );
+}
+
 #[test]
 fn validator_rejects_corrupt_streams_before_production_controls() {
-    let good = SemanticToken {
-        delta_line: 0,
-        delta_start: 0,
-        length: 1,
-        token_type: 0,
-        token_modifiers_bitset: 0,
-    };
+    let good = tok(0, 0, 1, 0, 0);
     assert!(validate("x\n", &[good], true).is_ok());
+    let types = semantic_tokens_legend().len() as u32;
+    let mods = semantic_tokens_modifiers_legend().len();
     let corruptions = [
-        (
-            "shift-column",
-            SemanticToken {
-                delta_start: 1,
-                ..good
-            },
-        ),
-        (
-            "shift-line",
-            SemanticToken {
-                delta_line: 2,
-                ..good
-            },
-        ),
-        ("cross-newline", SemanticToken { length: 2, ..good }),
-        ("zero-length", SemanticToken { length: 0, ..good }),
-        (
-            "bad-type",
-            SemanticToken {
-                token_type: semantic_tokens_legend().len() as u32,
-                ..good
-            },
-        ),
-        (
-            "bad-modifier",
-            SemanticToken {
-                token_modifiers_bitset: 1 << semantic_tokens_modifiers_legend().len(),
-                ..good
-            },
-        ),
+        ("shift-column", tok(0, 1, 1, 0, 0)),
+        ("shift-line", tok(2, 0, 1, 0, 0)),
+        ("cross-newline", tok(0, 0, 2, 0, 0)),
+        ("zero-length", tok(0, 0, 0, 0, 0)),
+        ("bad-type", tok(0, 0, 1, types, 0)),
+        ("bad-modifier", tok(0, 0, 1, 0, 1 << mods)),
     ];
     for (name, bad) in corruptions {
         let error = validate("x\n", &[bad], true).expect_err(name);
         eprintln!("rejected {name}: {error}");
     }
-    assert!(
-        validate("x\n", &[], true).is_err(),
-        "empty fallback passed a valid control"
-    );
+    assert!(validate("x\n", &[], true).is_err(), "empty control passed");
     assert!(
         validate("", &[], false).is_ok(),
-        "malformed/empty buffers may emit nothing"
+        "empty buffers may emit nothing"
     );
-    assert!(
-        decode(&[
-            SemanticToken {
-                delta_start: u32::MAX,
-                ..good
-            },
-            SemanticToken {
-                delta_start: 1,
-                ..good
-            }
-        ])
-        .is_err()
-    );
-    assert!(
-        decode(&[
-            SemanticToken {
-                delta_line: u32::MAX,
-                ..good
-            },
-            SemanticToken {
-                delta_line: 1,
-                ..good
-            }
-        ])
-        .is_err()
-    );
+    assert!(decode(&[tok(0, u32::MAX, 1, 0, 0), tok(0, 1, 1, 0, 0)]).is_err());
+    assert!(decode(&[tok(u32::MAX, 0, 1, 0, 0), tok(1, 0, 1, 0, 0)]).is_err());
     assert!(
         validate("xx\n", &[good, good], true).is_err(),
         "overlap accepted"
@@ -478,15 +459,7 @@ fn targeted_boundary_edits_keep_spans_valid_and_repair() {
                     inserted: insert.into(),
                 };
                 let context = replay(case, "boundary", &[edit], &source);
-                with_repair(&mut bone, case.source, |bone| {
-                    update_and_check(bone, &source, false, &context);
-                });
-                check_stream(&bone, case.source, case.valid, &context);
-                assert_eq!(
-                    bone.semantic_tokens(PATH).data,
-                    baseline,
-                    "{context}: boundary repair"
-                );
+                check_and_repair(&mut bone, case, &source, &context, &baseline);
                 edits_checked += 1;
             }
         }
@@ -523,15 +496,7 @@ fn targeted_malformed_buffers_repair_and_failure_cleanup() {
             inserted: malformed.into(),
         };
         let context = replay(case, "targeted", &[edit], malformed);
-        with_repair(&mut bone, case.source, |bone| {
-            update_and_check(bone, malformed, false, &context);
-        });
-        check_stream(&bone, case.source, true, &context);
-        assert_eq!(
-            bone.semantic_tokens(PATH).data,
-            baseline,
-            "{context}: targeted repair"
-        );
+        check_and_repair(&mut bone, case, malformed, &context, &baseline);
     }
     let intentional = catch_unwind(AssertUnwindSafe(|| {
         with_repair(&mut bone, case.source, |bone| {
