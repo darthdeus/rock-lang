@@ -3311,186 +3311,116 @@ fn find_binding_by_name(body: &Body, head: &str, offset: usize) -> Option<Idx<hi
 /// parser AST. bone's HIR `Pattern::EnumVariant` carries no span, but the parser
 /// keeps the variant- and enum-name `Ident` spans -- so the facade resolves the
 /// pattern here when `hover_at` declines (the match expr is no longer a catch-all
-/// for arm patterns). Returns `Type: enum E` and the name span the cursor is on,
-/// walking match-arm patterns (recursing tuple/or/variant-arg sub-patterns).
+/// for arm patterns). The variant name renders the variant with its payload, the
+/// enum qualifier (incl. the `::`) renders the full enum body.
 pub(crate) fn enum_variant_pattern_hover(
     ws: &Workspace,
     ast: &skull_parser::Ast,
     offset: usize,
 ) -> Option<(String, Span)> {
-    for ed in ast.exprs.values() {
-        if let skull_parser::ExprKind::Match { arms, .. } = &ed.kind {
-            for arm in arms {
-                if let Some(hit) = pat_variant_hover(ws, &arm.pattern, offset) {
-                    return Some(hit);
-                }
-            }
+    match variant_head_at(ast, offset)? {
+        VariantHead::Variant { enum_name, variant } => {
+            render_variant(ws, enum_name, variant.name).map(|s| (s, variant.span))
         }
-    }
-    None
-}
-
-fn pat_variant_hover(
-    ws: &Workspace,
-    pat: &skull_parser::Pattern,
-    offset: usize,
-) -> Option<(String, Span)> {
-    use skull_parser::Pattern;
-    match pat {
-        Pattern::EnumVariant {
-            enum_name,
-            variant_name,
-            args,
+        VariantHead::Qualifier {
+            enum_ident,
+            variant,
         } => {
-            if let Some(hit) = variant_head_hover(ws, enum_name, variant_name, offset) {
-                return Some(hit);
-            }
-            args.as_ref()
-                .and_then(|ps| ps.iter().find_map(|sub| pat_variant_hover(ws, sub, offset)))
+            let edef = enum_def_for_variant(ws, Some(enum_ident.name), variant)?;
+            render_enum_def(ws, edef.name).map(|s| (s, enum_ident.span))
         }
-        // An enum record-variant pattern (`E::B { .. }`); a bare struct head
-        // (`Point { .. }`) resolves to `None` here and falls through to the
-        // struct-def hover in `hover_record_pat`.
-        Pattern::Record {
-            enum_name,
-            name: Some(variant_name),
-            fields,
-            ..
-        } => {
-            if let Some(hit) = variant_head_hover(ws, enum_name, variant_name, offset) {
-                return Some(hit);
-            }
-            fields
-                .iter()
-                .find_map(|(_, sub)| pat_variant_hover(ws, sub, offset))
-        }
-        Pattern::Tuple(ps) | Pattern::Or(ps) => {
-            ps.iter().find_map(|sub| pat_variant_hover(ws, sub, offset))
-        }
-        _ => None,
     }
 }
 
-/// Hover for the head of a variant pattern (`Enum::Variant` / `Variant`): the
-/// variant name renders the variant with its payload, the enum qualifier (incl.
-/// the `::`) renders the full enum body. `None` when `offset` is on neither, or
-/// when the head names a struct rather than a known enum variant.
-fn variant_head_hover(
-    ws: &Workspace,
-    enum_name: &Option<skull_parser::Ident>,
-    variant_name: &skull_parser::Ident,
-    offset: usize,
-) -> Option<(String, Span)> {
-    let on = |sp: Span| {
-        let (s, e) = sp.offset_range();
-        s <= offset && offset < e
-    };
-    let want = enum_name.as_ref().map(|i| i.name);
-    if on(variant_name.span) {
-        if let Some(s) = render_variant(ws, want, variant_name.name) {
-            return Some((s, variant_name.span));
-        }
-    }
-    if let Some(en) = enum_name {
-        // The qualifier plus the `::` up to the variant name.
-        let qual = en
-            .span
-            .with_offset_range((en.span.offset_range().0, variant_name.span.offset_range().0));
-        if on(qual) {
-            if let Some(edef) = enum_def_for_variant(ws, want, variant_name.name) {
-                if let Some(s) = render_enum_def(ws, edef.name) {
-                    return Some((s, en.span));
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Declaration span for the head of a variant pattern: the variant name -> the
+/// Goto-definition for an enum-variant match pattern: the variant name -> the
 /// variant decl, the enum qualifier -> the enum decl. Mirrors
-/// [`variant_head_hover`].
-fn variant_head_def(
-    ws: &Workspace,
-    enum_name: &Option<skull_parser::Ident>,
-    variant_name: &skull_parser::Ident,
-    offset: usize,
-) -> Option<Span> {
-    let on = |sp: Span| {
-        let (s, e) = sp.offset_range();
-        s <= offset && offset < e
-    };
-    let want = enum_name.as_ref().map(|i| i.name);
-    if on(variant_name.span) {
-        if let Some(sp) = variant_def_span(ws, want, variant_name.name) {
-            return Some(sp);
-        }
-    }
-    if let Some(en) = enum_name {
-        let qual = en
-            .span
-            .with_offset_range((en.span.offset_range().0, variant_name.span.offset_range().0));
-        if on(qual) {
-            if let Some(edef) = enum_def_for_variant(ws, want, variant_name.name) {
-                return Some(edef.name_span);
-            }
-        }
-    }
-    None
-}
-
-/// Goto-definition for an enum-variant match pattern, resolved from the raw AST
-/// (the HIR pattern node isn't in `node_index`). Mirrors
 /// [`enum_variant_pattern_hover`].
 pub(crate) fn enum_variant_pattern_def(
     ws: &Workspace,
     ast: &skull_parser::Ast,
     offset: usize,
 ) -> Option<Span> {
-    for ed in ast.exprs.values() {
-        if let skull_parser::ExprKind::Match { arms, .. } = &ed.kind {
-            for arm in arms {
-                if let Some(hit) = pat_variant_def(ws, &arm.pattern, offset) {
-                    return Some(hit);
-                }
-            }
+    match variant_head_at(ast, offset)? {
+        VariantHead::Variant { enum_name, variant } => {
+            variant_def_span(ws, enum_name, variant.name)
         }
+        VariantHead::Qualifier {
+            enum_ident,
+            variant,
+        } => enum_def_for_variant(ws, Some(enum_ident.name), variant).map(|e| e.name_span),
     }
-    None
 }
 
-fn pat_variant_def(ws: &Workspace, pat: &skull_parser::Pattern, offset: usize) -> Option<Span> {
-    use skull_parser::Pattern;
-    match pat {
-        Pattern::EnumVariant {
-            enum_name,
-            variant_name,
-            args,
-        } => {
-            if let Some(hit) = variant_head_def(ws, enum_name, variant_name, offset) {
-                return Some(hit);
+/// The part of a match-arm variant pattern head under the cursor.
+enum VariantHead<'a> {
+    Variant {
+        enum_name: Option<Ustr>,
+        variant: &'a skull_parser::Ident,
+    },
+    /// The enum qualifier plus the `::` up to the variant name.
+    Qualifier {
+        enum_ident: &'a skull_parser::Ident,
+        variant: Ustr,
+    },
+}
+
+/// Walks match-arm patterns (recursing tuple/or/variant sub-patterns) for the
+/// variant-pattern head under `offset`. A bare struct head (`Point { .. }`)
+/// is reported too; resolving it as a variant fails and the caller falls
+/// through to the struct-def hover in `hover_record_pat`.
+fn variant_head_at(ast: &skull_parser::Ast, offset: usize) -> Option<VariantHead<'_>> {
+    fn in_pattern(pat: &skull_parser::Pattern, offset: usize) -> Option<VariantHead<'_>> {
+        use skull_parser::Pattern;
+        let (enum_name, variant_name, subs): (_, _, Vec<&Pattern>) = match pat {
+            Pattern::EnumVariant {
+                enum_name,
+                variant_name,
+                args,
+            } => (enum_name, variant_name, args.iter().flatten().collect()),
+            Pattern::Record {
+                enum_name,
+                name: Some(variant_name),
+                fields,
+                ..
+            } => (
+                enum_name,
+                variant_name,
+                fields.iter().map(|(_, p)| p).collect(),
+            ),
+            Pattern::Tuple(ps) | Pattern::Or(ps) => {
+                return ps.iter().find_map(|sub| in_pattern(sub, offset));
             }
-            args.as_ref()
-                .and_then(|ps| ps.iter().find_map(|sub| pat_variant_def(ws, sub, offset)))
+            _ => return None,
+        };
+        let on = |sp: Span| {
+            let (s, e) = sp.offset_range();
+            s <= offset && offset < e
+        };
+        if on(variant_name.span) {
+            return Some(VariantHead::Variant {
+                enum_name: enum_name.as_ref().map(|i| i.name),
+                variant: variant_name,
+            });
         }
-        Pattern::Record {
-            enum_name,
-            name: Some(variant_name),
-            fields,
-            ..
-        } => {
-            if let Some(hit) = variant_head_def(ws, enum_name, variant_name, offset) {
-                return Some(hit);
+        if let Some(en) = enum_name {
+            let qual = en
+                .span
+                .with_offset_range((en.span.offset_range().0, variant_name.span.offset_range().0));
+            if on(qual) {
+                return Some(VariantHead::Qualifier {
+                    enum_ident: en,
+                    variant: variant_name.name,
+                });
             }
-            fields
-                .iter()
-                .find_map(|(_, sub)| pat_variant_def(ws, sub, offset))
         }
-        Pattern::Tuple(ps) | Pattern::Or(ps) => {
-            ps.iter().find_map(|sub| pat_variant_def(ws, sub, offset))
+        subs.into_iter().find_map(|sub| in_pattern(sub, offset))
+    }
+    ast.exprs.values().find_map(|ed| match &ed.kind {
+        skull_parser::ExprKind::Match { arms, .. } => {
+            arms.iter().find_map(|arm| in_pattern(&arm.pattern, offset))
         }
         _ => None,
-    }
+    })
 }
 
 /// Enum definition for `variant`, by `enum_name` if given, else the first enum
