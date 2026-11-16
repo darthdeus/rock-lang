@@ -44,7 +44,6 @@ mod tests {
     use std::collections::HashSet;
     use std::path::PathBuf;
     use std::sync::mpsc;
-    use std::time::Duration;
 
     /// A compiler whose teardown blocks until the test lets it finish.
     struct BlockingDrop(mpsc::Receiver<()>);
@@ -73,7 +72,7 @@ mod tests {
             let artifact = compile_with(Box::new(BlockingDrop(drop_waits)));
             let _ = returned.send(artifact.is_ok());
         });
-        let outcome = compile_returns.recv_timeout(Duration::from_secs(10));
+        let outcome = compile_returns.recv_timeout(test_utils::HANG_BACKSTOP);
         let _ = finish_drop.send(());
         assert_eq!(
             outcome,

@@ -333,6 +333,59 @@ fn main() {
 
 #[cfg(unix)]
 #[test]
+fn a_stone_launch_builds_the_engine_library_it_stages() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = tempfile::tempdir().unwrap();
+    let bin = fixture.path().join("bin");
+    let game = fixture.path().join("game");
+    for path in [&bin, &game] {
+        std::fs::create_dir(path).unwrap();
+    }
+    let cargo = bin.join("cargo");
+    std::fs::write(
+        &cargo,
+        "#!/bin/sh\necho \"$*\" >> \"$CARGO_LOG\"\ncase \"$*\" in *stone-rs*) exit 1;; esac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(game.join("stick.toml"), "[package]\nname = \"probe\"\n").unwrap();
+    std::fs::write(game.join("main.rock"), "fn main() {}\n").unwrap();
+    let log = fixture.path().join("cargo.log");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rock"))
+        .arg("stone")
+        .arg(&game)
+        .current_dir(fixture.path())
+        .env("PATH", path)
+        .env("CARGO_LOG", &log)
+        .env("CARGO_TARGET_DIR", fixture.path().join("empty-target"))
+        .env(
+            "ROCK_DIR",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        )
+        .env("STONE_HEADLESS", "1")
+        .env_remove("ROCK_PREBUILT_GAME")
+        .env_remove("ROCK_ENGINE_BUILD_RECEIPT")
+        .output()
+        .unwrap();
+    let builds = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        builds.lines().any(|line| line.contains("-p stone-rs")),
+        "rock stone staged libstone without building it: {builds}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success(),
+        "the stone-rs build failure was lost"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn concurrent_game_runs_keep_their_own_output() {
     use std::process::{Child, Command, Stdio};
     struct Runs(Vec<Child>);
@@ -473,7 +526,10 @@ fn main() {
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
             )
             .env("STONE_SCREENSHOT_PATH", &screenshot)
-            .env("ROCK_FRAME_TIMEOUT_SECS", "120")
+            .env(
+                "ROCK_FRAME_TIMEOUT_SECS",
+                test_utils::HANG_BACKSTOP.as_secs().to_string(),
+            )
             .env("BOUNDED_FAIL", failure.unwrap_or("none"))
             .env_remove("STONE_HOT_RELOAD")
             .env_remove("FRAME_COUNT");
@@ -550,7 +606,7 @@ for argument in "$@"; do
     case "$argument" in *.lua) printf '%s' "$argument" > "$LAUNCH_PATH";; esac
 done
 : > "$LAUNCH_READY"
-for attempt in $(seq 1 1200); do
+for attempt in $(seq 1 12000); do
     if test -f "$LAUNCH_RELEASE"; then exec "$REAL_LUAJIT" "$@"; fi
     sleep 0.05
 done
@@ -593,6 +649,11 @@ exit 97
                 .env("LAUNCH_PATH", root.path().join(format!("{name}.path")))
                 .env("LAUNCH_READY", root.path().join(format!("{name}.ready")))
                 .env("LAUNCH_RELEASE", &release)
+                // The held run idles in startup until the other run is ready.
+                .env(
+                    "ROCK_FRAME_TIMEOUT_SECS",
+                    test_utils::HANG_BACKSTOP.as_secs().to_string(),
+                )
                 .stdout(Stdio::from(log.try_clone().unwrap()))
                 .stderr(Stdio::from(log))
                 .spawn()
@@ -711,7 +772,7 @@ fn bounded_runs_do_not_outlive_a_killed_rock() {
         rock.kill().unwrap();
         rock.wait().unwrap();
         let killed = bone_core::prelude::Instant::now();
-        while running(pid) && killed.elapsed() < std::time::Duration::from_secs(10) {
+        while running(pid) && killed.elapsed() < test_utils::HANG_BACKSTOP {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(!running(pid), "`rock {command}` left its game running");
@@ -787,7 +848,10 @@ co fn portable_sim() -> Coroutine<Wait> {
             .env("SIM_PROBE_FAIL", if fail { "1" } else { "0" })
             .env("PROBE_VARIANT", "declared-workload")
             .env("UNRELATED_VALUE", "excluded")
-            .env("ROCK_SIM_TIMEOUT_SECS", "60")
+            .env(
+                "ROCK_SIM_TIMEOUT_SECS",
+                test_utils::HANG_BACKSTOP.as_secs().to_string(),
+            )
             .env_remove("STONE_HOT_RELOAD")
             .output()
             .unwrap();
@@ -864,56 +928,3 @@ co fn portable_sim() -> Coroutine<Wait> {
         );
     }
 }
-#[cfg(unix)]
-#[test]
-fn a_stone_launch_builds_the_engine_library_it_stages() {
-    use std::os::unix::fs::PermissionsExt;
-    let fixture = tempfile::tempdir().unwrap();
-    let bin = fixture.path().join("bin");
-    let game = fixture.path().join("game");
-    for path in [&bin, &game] {
-        std::fs::create_dir(path).unwrap();
-    }
-    let cargo = bin.join("cargo");
-    std::fs::write(
-        &cargo,
-        "#!/bin/sh\necho \"$*\" >> \"$CARGO_LOG\"\ncase \"$*\" in *stone-rs*) exit 1;; esac\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::fs::write(game.join("stick.toml"), "[package]\nname = \"probe\"\n").unwrap();
-    std::fs::write(game.join("main.rock"), "fn main() {}\n").unwrap();
-    let log = fixture.path().join("cargo.log");
-    let path = format!(
-        "{}:{}",
-        bin.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rock"))
-        .arg("stone")
-        .arg(&game)
-        .current_dir(fixture.path())
-        .env("PATH", path)
-        .env("CARGO_LOG", &log)
-        .env("CARGO_TARGET_DIR", fixture.path().join("empty-target"))
-        .env(
-            "ROCK_DIR",
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
-        )
-        .env("STONE_HEADLESS", "1")
-        .env_remove("ROCK_PREBUILT_GAME")
-        .env_remove("ROCK_ENGINE_BUILD_RECEIPT")
-        .output()
-        .unwrap();
-    let builds = std::fs::read_to_string(&log).unwrap_or_default();
-    assert!(
-        builds.lines().any(|line| line.contains("-p stone-rs")),
-        "rock stone staged libstone without building it: {builds}\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        !output.status.success(),
-        "the stone-rs build failure was lost"
-    );
-}
-
