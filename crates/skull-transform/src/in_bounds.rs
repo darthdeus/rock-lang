@@ -1163,20 +1163,7 @@ impl Facts {
         if below.is_empty() {
             return false;
         }
-        // `len - c` is nonnegative when `len > c - 1`; any index may also
-        // be known nonnegative by an earlier access or guard.
-        let by_length = match func.insts[index] {
-            Inst::IntSub(a, b) if matches!(func.insts[b], Inst::Const(Lit::Int(c)) if c >= 1) => {
-                let Inst::Const(Lit::Int(c)) = func.insts[b] else {
-                    unreachable!()
-                };
-                self.lengths_of(func, a)
-                    .iter()
-                    .any(|v| self.lt.contains(&(func.key(KeyData::Const(c - 1)), *v)))
-            }
-            _ => false,
-        };
-        if !by_length && !self.nonneg(func, index) {
+        if !self.nonneg(func, index) {
             return false;
         }
         self.keys_of(func, vec).iter().any(|v| below.contains(v))
