@@ -771,25 +771,29 @@ fn variant_def_span(ws: &Workspace, enum_name: Option<Ustr>, variant: Ustr) -> O
         .map(|v| v.name_span)
 }
 
+fn bare_nominal_name(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Option<Ustr> {
+    match ws.resolve_ty(bi, ty)? {
+        (
+            _,
+            hir::TypeExpr::App {
+                ctor: hir::TypeCtor::Nominal(name),
+                params,
+            },
+        ) if params.is_empty() => Some(name),
+        _ => None,
+    }
+}
+
 /// Hover text for a type annotation (`m: Movable`, `-> Vec2`): a bare nominal
 /// struct shows its full definition, an enum its variants; anything else
 /// (generics, builtins, nullable) falls back to `Type: <rendered>`.
 fn render_type_hover(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> String {
-    if let Some((
-        _,
-        hir::TypeExpr::App {
-            ctor: hir::TypeCtor::Nominal(name),
-            params,
-        },
-    )) = ws.resolve_ty(bi, ty)
-    {
-        if params.is_empty() {
-            if let Some(def) = render_struct_def(ws, name) {
-                return def;
-            }
-            if let Some(def) = render_enum_def(ws, name) {
-                return def;
-            }
+    if let Some(name) = bare_nominal_name(ws, bi, ty) {
+        if let Some(def) = render_struct_def(ws, name) {
+            return def;
+        }
+        if let Some(def) = render_enum_def(ws, name) {
+            return def;
         }
     }
     format!("Type: {}", render_hover_type(ws, bi, ty))
@@ -799,29 +803,20 @@ fn render_type_hover(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> St
 /// (`struct Foo` / `enum Bar`); generic instances and builtins fall through to
 /// the workspace renderer (`Box<int>`, `int`, `string?`, `[int]`).
 fn render_hover_type(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> String {
-    if let Some((
-        _,
-        hir::TypeExpr::App {
-            ctor: hir::TypeCtor::Nominal(name),
-            params,
-        },
-    )) = ws.resolve_ty(bi, ty)
-    {
-        if params.is_empty() {
-            if ws
-                .modules
-                .iter()
-                .any(|m| m.struct_by_name.contains_key(&name))
-            {
-                return format!("struct {}", name);
-            }
-            if ws
-                .modules
-                .iter()
-                .any(|m| m.enums_by_name.contains_key(&name))
-            {
-                return format!("enum {}", name);
-            }
+    if let Some(name) = bare_nominal_name(ws, bi, ty) {
+        if ws
+            .modules
+            .iter()
+            .any(|m| m.struct_by_name.contains_key(&name))
+        {
+            return format!("struct {}", name);
+        }
+        if ws
+            .modules
+            .iter()
+            .any(|m| m.enums_by_name.contains_key(&name))
+        {
+            return format!("enum {}", name);
         }
     }
     ws.render(bi, ty)
@@ -3671,6 +3666,22 @@ pub(crate) fn variant_record_fields(
 // fill match arms (code action: generate missing enum variants)
 // ---------------------------------------------------------------------------
 
+fn smallest_expr_covering(
+    body: &Body,
+    offset: usize,
+    matches: impl Fn(&hir::Expr) -> bool,
+) -> Option<Idx<hir::Expr>> {
+    body.expr_arena
+        .iter()
+        .filter(|(_, expr)| matches(expr))
+        .filter_map(|(e, _)| {
+            let (start, end) = body.expr_spans.get(e)?.offset_range();
+            (start <= offset && offset < end).then(|| (end - start, e))
+        })
+        .min_by_key(|(len, _)| *len)
+        .map(|(_, e)| e)
+}
+
 /// If `offset` is inside a `match` whose scrutinee is an enum with uncovered
 /// variants (and no catch-all arm), return the match expression's span and the
 /// generated arm patterns for the missing variants -- `EnumName::Variant => {}`,
@@ -3688,24 +3699,7 @@ pub(crate) fn match_arms_fill(
     let body = module.bodies.get(&owner)?;
     let bi = inf.per_fn.get(&owner)?;
 
-    // Smallest `match` expr covering the cursor.
-    let mut best: Option<(usize, Idx<hir::Expr>)> = None;
-    for (e, expr) in body.expr_arena.iter() {
-        if !matches!(expr, hir::Expr::Match { .. }) {
-            continue;
-        }
-        let Some(sp) = body.expr_spans.get(e) else {
-            continue;
-        };
-        let (s, en) = sp.offset_range();
-        if s <= offset && offset < en {
-            let len = en - s;
-            if best.map_or(true, |(bl, _)| len < bl) {
-                best = Some((len, e));
-            }
-        }
-    }
-    let (_, e) = best?;
+    let e = smallest_expr_covering(body, offset, |expr| matches!(expr, hir::Expr::Match { .. }))?;
     let (enum_name, missing) = match_missing_variants(ws, body, bi, e)?;
     let arms_text: Vec<String> = missing
         .iter()
@@ -3780,24 +3774,9 @@ pub(crate) fn struct_fields_fill(
     // Require inference on this body (parity w/ match_arms_fill).
     let bi = inf.per_fn.get(&owner)?;
 
-    // Smallest struct literal covering the cursor.
-    let mut best: Option<(usize, Idx<hir::Expr>)> = None;
-    for (e, expr) in body.expr_arena.iter() {
-        if !matches!(expr, hir::Expr::StructLiteral { .. }) {
-            continue;
-        }
-        let Some(sp) = body.expr_spans.get(e) else {
-            continue;
-        };
-        let (s, en) = sp.offset_range();
-        if s <= offset && offset < en {
-            let len = en - s;
-            if best.map_or(true, |(bl, _)| len < bl) {
-                best = Some((len, e));
-            }
-        }
-    }
-    let (_, e) = best?;
+    let e = smallest_expr_covering(body, offset, |expr| {
+        matches!(expr, hir::Expr::StructLiteral { .. })
+    })?;
     let hir::Expr::StructLiteral {
         name,
         fields,

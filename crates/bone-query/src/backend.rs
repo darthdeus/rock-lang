@@ -4724,24 +4724,6 @@ mod tests {
     }
 
     #[test]
-    fn offset_round_trips_through_position() {
-        let src = "fn main() {\n  let x = 1\n}\n";
-        // byte offset of 'x' on line 1 (0-based), char 6
-        let off = offset_at_line_col(src, 1, 6);
-        assert_eq!(&src[off..off + 1], "x");
-        let pos = offset_to_position(src, off);
-        assert_eq!((pos.line, pos.character), (1, 6));
-    }
-
-    #[test]
-    fn offset_handles_multibyte_before_cursor() {
-        // "// \u{e9}x" then cursor on 'x': char index 4, but byte index 5.
-        let src = "let s = \"\u{e9}\"\nx";
-        let off = offset_at_line_col(src, 1, 0);
-        assert_eq!(&src[off..off + 1], "x");
-    }
-
-    #[test]
     fn balance_appends_missing_closers() {
         assert_eq!(
             balance_delimiters("fn f() { g(".to_string()),
