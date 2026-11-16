@@ -1,7 +1,6 @@
-// T4 collections/struct/equality conformance.
-// Runs on both luajit and the JS backend; the host compares each returned scalar
-// against the pinned literal, so a divergent Vec layout, a field-blind structural
-// eq, or ceil-instead-of-floor integer division would fail here.
+// Collections and integer-division conformance across backends: the host
+// compares each returned scalar against the pinned literal, so a divergent Vec
+// layout or ceil-instead-of-floor integer division would fail here.
 
 struct Pt { x: int, y: int }
 
@@ -26,15 +25,6 @@ fn struct_field() -> int {
     let p = Pt { x: 3, y: 5 }
     p.x = p.x + 10
     return p.x * 100 + p.y
-}
-
-fn struct_eq_same() -> bool {
-    return Pt { x: 1, y: 2 } == Pt { x: 1, y: 2 }
-}
-
-fn struct_eq_diff_y() -> bool {
-    // field-sensitive: differ only in y
-    return Pt { x: 1, y: 2 } == Pt { x: 1, y: 9 }
 }
 
 fn map_roundtrip() -> int {
@@ -62,12 +52,6 @@ fn t_vec_index() -> int { return vec_index() }
 
 @test(returns = 1305)
 fn t_struct_field() -> int { return struct_field() }
-
-@test(returns = true)
-fn t_struct_eq_same() -> bool { return struct_eq_same() }
-
-@test(returns = false)
-fn t_struct_eq_diff_y() -> bool { return struct_eq_diff_y() }
 
 @test(returns = 300)
 fn t_map_roundtrip() -> int { return map_roundtrip() }

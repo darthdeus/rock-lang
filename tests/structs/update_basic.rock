@@ -6,25 +6,15 @@ struct Point { x: int, y: int, z: int }
 
 value VPoint { x: int, y: int, z: int }
 
-@test(output = "1 20 3")
-fn test_update_override_one_field() {
+@test(output = "1 20 3\n1 2 3\n10 20 30")
+fn test_update_overrides() {
     let base = Point { x: 1, y: 2, z: 3 }
-    let p = Point { ..base, y: 20 }
-    print("{p.x} {p.y} {p.z}")
-}
-
-@test(output = "1 2 3")
-fn test_update_no_overrides_copies_all() {
-    let base = Point { x: 1, y: 2, z: 3 }
-    let p = Point { ..base }
-    print("{p.x} {p.y} {p.z}")
-}
-
-@test(output = "10 20 30")
-fn test_update_override_multiple() {
-    let base = Point { x: 1, y: 2, z: 3 }
-    let p = Point { ..base, x: 10, y: 20, z: 30 }
-    print("{p.x} {p.y} {p.z}")
+    let one = Point { ..base, y: 20 }
+    print("{one.x} {one.y} {one.z}")
+    let none = Point { ..base }
+    print("{none.x} {none.y} {none.z}")
+    let all = Point { ..base, x: 10, y: 20, z: 30 }
+    print("{all.x} {all.y} {all.z}")
 }
 
 @test(output = "1 99 3")

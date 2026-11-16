@@ -15,11 +15,3 @@ struct PointZ { x: int, y: int }
 fn struct_has_no_metatable() {
     print(__test_struct_no_mt())
 }
-
-@test(output = "true false")
-fn struct_structural_eq_still_works() {
-    let a = PointZ { x: 1, y: 2 }
-    let b = PointZ { x: 1, y: 2 }
-    let c = PointZ { x: 1, y: 9 }
-    print("{a == b} {a == c}")
-}

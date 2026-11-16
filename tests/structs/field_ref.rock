@@ -4,15 +4,10 @@
 struct Mob { health: int, attack_co: int? }
 value FixVec2 { x: float, y: float }
 
-@test(output = "10")
-fn test_field_get_read() {
+@test(output = "10\n99")
+fn test_field_get_and_set() {
     let m = Mob { health: 10, attack_co: null }
     print("{field_get(m, .health)}")
-}
-
-@test(output = "99")
-fn test_field_set_write() {
-    let m = Mob { health: 10, attack_co: null }
     field_set(m, .health, 99)
     print("{field_get(m, .health)}")
 }
@@ -47,31 +42,18 @@ fn probe(x: int) -> int {
     return x
 }
 
-@test(output = "5")
+@test(output = "5 5 5")
 fn test_field_ref_arg_with_overload_set() {
     let m = Mob { health: 10, attack_co: 5 }
-    print("{probe(m, .attack_co)}")
-}
-
-@test(output = "5")
-fn test_field_ref_arg_ufcs_with_overload_set() {
-    let m = Mob { health: 10, attack_co: 5 }
-    print("{m.probe(.attack_co)}")
-}
-
-@test(output = "5")
-fn test_field_ref_arg_named_with_overload_set() {
-    let m = Mob { health: 10, attack_co: 5 }
-    let r = probe(m, f: .attack_co)
-    print("{r}")
+    print("{probe(m, .attack_co)} {m.probe(.attack_co)} {probe(m, f: .attack_co)}")
 }
 
 // A `FieldRef<T, V>` arg must coerce to a `ReadFieldRef<T, V>` param even when the
 // callee name carries more than one overload -- the multi-candidate path scores
 // through `fit_cost`, which must know the coercion, not just the single-
 // candidate bypass. Regression: a second `field_get` decl (a backend sibling
-// counted as a candidate) turned every `field_get(o, f: FieldRef<..>)` in
-// stone's coroutines into "No overload".
+// counted as a candidate) turned every `field_get(o, f: FieldRef<..>)` into
+// "No overload".
 fn field_get(a: int, b: int) -> int {
     return a + b
 }

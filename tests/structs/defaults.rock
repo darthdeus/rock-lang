@@ -3,7 +3,6 @@
 // provided fields override them, and a literal that provides every field
 // injects nothing.
 
-// Helper functions for default value testing
 fn fixv(x: float, y: float) -> int {
     return 42
 }
@@ -12,10 +11,8 @@ fn add(a: int, b: int) -> int {
     return a + b
 }
 
-// Struct definitions at top level
 struct Point1 { x: int = 10, y: int = 20 }
 struct Point2 { x: int = 1, y: int = 2, z: int = 3 }
-struct Point3 { x: int = 1, y: int = 2 }
 struct Inner1 { a: int = 7, b: int = 8 }
 struct Outer1 { inner: Inner1 = Inner1{ a: 1 }, c: int = 9 }
 struct Inner2 { a: int = 1, b: int = 2 }
@@ -25,47 +22,20 @@ struct TestStruct {
     field2: int = add(10, 5)
 }
 
-@test(output = "10\n20")
-fn test_default_struct_empty_literal() {
+@test(output = "10 20\n1 5 3")
+fn test_default_struct_empty_and_partial_literal() {
     let p = Point1 {}
-
-    print(p.x)
-    print(p.y)
+    print("{p.x} {p.y}")
+    let q = Point2 { y: 5 }
+    print("{q.x} {q.y} {q.z}")
 }
 
-@test(output = "1\n5\n3")
-fn test_default_struct_partial_override() {
-    let p = Point2 { y: 5 }
-
-    print(p.x)
-    print(p.y)
-    print(p.z)
-}
-
-@test(output = "7\n8")
-fn test_default_struct_all_override() {
-    let p = Point3 { x: 7, y: 8 }
-
-    print(p.x)
-    print(p.y)
-}
-
-@test(output = "1\n8\n9")
+@test(output = "1 8 9\n1 5 3")
 fn test_nested_struct_defaults() {
     let o = Outer1 {}
-
-    print(o.inner.a)
-    print(o.inner.b)
-    print(o.c)
-}
-
-@test(output = "1\n5\n3")
-fn test_nested_struct_partial_override() {
-    let o = Outer2 { inner: Inner2 { b: 5 } }
-
-    print(o.inner.a)
-    print(o.inner.b)
-    print(o.c)
+    print("{o.inner.a} {o.inner.b} {o.c}")
+    let q = Outer2 { inner: Inner2 { b: 5 } }
+    print("{q.inner.a} {q.inner.b} {q.c}")
 }
 
 @test(output = "42\n15")
@@ -82,32 +52,16 @@ struct Cfg {
     scale: float = 1.5,
 }
 
-@test(output = "10\n100\nuntitled")
-fn test_omit_all_defaults() {
+@test(output = "10 100 untitled 3\n10 42 untitled")
+fn test_omit_and_override_defaults() {
     let c = Cfg { width: 10 }
-    print("{c.width}")
-    print("{c.height}")
-    print("{c.label}")
+    print("{c.width} {c.height} {c.label} {(c.scale * 2.0).floor()}")
+    let o = Cfg { width: 10, height: 42 }
+    print("{o.width} {o.height} {o.label}")
 }
 
-@test(output = "10\n42\nuntitled")
-fn test_override_one_default() {
-    let c = Cfg { width: 10, height: 42 }
-    print("{c.width}")
-    print("{c.height}")
-    print("{c.label}")
-}
-
-@test(output = "3")
-fn test_default_float_used() {
-    let c = Cfg { width: 1 }
-    print("{(c.scale * 2.0).floor()}")
-}
-
-@test(output = "2\n9\nhi")
+@test(output = "2 9 hi 4")
 fn test_provide_all_no_injection() {
     let c = Cfg { width: 2, height: 9, label: "hi", scale: 2.0 }
-    print("{c.width}")
-    print("{c.height}")
-    print("{c.label}")
+    print("{c.width} {c.height} {c.label} {(c.scale * 2.0).floor()}")
 }
