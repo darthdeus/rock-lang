@@ -129,12 +129,8 @@ fn sim_receipt_prepare_releases_session() {
     const HELPER: &str = "ROCK_TEST_RECEIPT_RELEASE_HELPER";
     if let Some(root) = std::env::var_os(HELPER) {
         let root = PathBuf::from(root);
-        let prepared = prepare_sims(
-            crate::Backend::Skull,
-            root.join("project"),
-            root.join("output"),
-        )
-        .expect("prepare receipt");
+        let prepared =
+            prepare_sims(root.join("project"), root.join("output")).expect("prepare receipt");
         assert!(
             prepared.stone.is_none(),
             "receipt preparation retained its compiler session"
@@ -237,16 +233,9 @@ fn reload_lane_reuses_the_compiled_session_and_isolates_its_chunk() {
     let original = std::fs::read(&main).unwrap();
     let fingerprint = stone.artifact_fingerprint().to_string();
     std::fs::remove_file(&source).unwrap();
-    let lane = reload_lane_session(
-        crate::Backend::Skull,
-        project.path(),
-        true,
-        shared.path(),
-        Some(stone),
-        true,
-    )
-    .expect("reuse without reading source")
-    .expect("selected lane");
+    let lane = reload_lane_session(project.path(), true, shared.path(), Some(stone), true)
+        .expect("reuse without reading source")
+        .expect("selected lane");
     assert_eq!(lane.stone.artifact_fingerprint(), fingerprint);
     let lane_main = Path::new(&lane.output).join(rock_host::project::MAIN_LUA_FILENAME);
     assert_eq!(std::fs::read(&lane_main).unwrap(), original);

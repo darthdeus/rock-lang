@@ -1,12 +1,9 @@
 //! Dispatch the sim command.
 use anyhow::Result;
 
-/// `rock sim` on the active backend (list / run-all / run-one). Single source
-/// for both the rock-default and skull dispatch arms; the backend selects the
-/// compile + `@sim` collection (rock: `unified_compile` + `sim_registry`;
-/// skull: the bone workspace + skull's emitted registry).
+/// `rock sim`: list, plan, the allocation diagnostics, or a run. Only skull
+/// serves sims.
 pub(crate) fn handle_sim(cx: &crate::CommandContext) -> Result<()> {
-    let backend = cx.args.backend;
     if cx.args.allocation_census.is_some() && cx.args.allocation_sites.is_some() {
         anyhow::bail!("--allocation-census and --allocation-sites are separate diagnostic arms");
     }
@@ -30,7 +27,6 @@ pub(crate) fn handle_sim(cx: &crate::CommandContext) -> Result<()> {
             anyhow::bail!("sim --plan needs a project: rock sim --plan <project> [names]");
         }
         return crate::run_sim::do_plan_sims(
-            backend,
             &cx.args.files[0],
             &cx.args.files[1..],
             cx.args.jobs,
@@ -47,7 +43,6 @@ pub(crate) fn handle_sim(cx: &crate::CommandContext) -> Result<()> {
             );
         }
         crate::run_sim::do_run_allocation_sites(
-            backend,
             &cx.args.files[0],
             &cx.args.files[1..],
             path,
@@ -64,7 +59,6 @@ pub(crate) fn handle_sim(cx: &crate::CommandContext) -> Result<()> {
             );
         }
         crate::run_sim::do_run_allocation_census(
-            backend,
             &cx.args.files[0],
             &cx.args.files[1..],
             path,
@@ -76,14 +70,13 @@ pub(crate) fn handle_sim(cx: &crate::CommandContext) -> Result<()> {
             anyhow::bail!("sim --list needs a project: rock sim --list <project>");
         }
         let project = &cx.args.files[0];
-        crate::run_sim::do_list_sims(backend, project)
+        crate::run_sim::do_list_sims(project)
     } else if cx.args.files.is_empty() {
         anyhow::bail!("sim needs a project: rock sim <project> [name]");
     } else if cx.args.files.len() == 1 {
         // No name: run the whole suite.
         let project = &cx.args.files[0];
         crate::run_sim::do_run_all_sims(
-            backend,
             project,
             cx.args.quiet,
             cx.args.update_snapshots,
@@ -98,7 +91,6 @@ pub(crate) fn handle_sim(cx: &crate::CommandContext) -> Result<()> {
         let project = &cx.args.files[0];
         let names = cx.args.files[1..].to_vec();
         crate::run_sim::do_run_named_sims(
-            backend,
             project,
             &names,
             cx.args.quiet,

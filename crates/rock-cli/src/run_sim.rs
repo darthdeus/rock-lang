@@ -495,7 +495,6 @@ fn timed_sim_compile_phase<T>(
 /// validate the project dir or build engine libs -- callers own that (listing
 /// needs neither).
 fn compile_sims(
-    backend: crate::Backend,
     project_path: PathBuf,
     output_path: PathBuf,
 ) -> Result<(
@@ -505,7 +504,7 @@ fn compile_sims(
     crate::skull_backend::IncrementalProject,
 )> {
     let (names, env, sources, session, _) =
-        compile_sims_with_allocation(backend, project_path, output_path, None, &[])?;
+        compile_sims_with_allocation(project_path, output_path, None, &[])?;
     Ok((names, env, sources, session))
 }
 
@@ -967,11 +966,7 @@ fn load_sim_receipt(
     )
 }
 
-fn prepare_sims(
-    backend: crate::Backend,
-    project_path: PathBuf,
-    output_path: PathBuf,
-) -> Result<PreparedSims> {
+fn prepare_sims(project_path: PathBuf, output_path: PathBuf) -> Result<PreparedSims> {
     crate::package::check_project_assets(&project_path)?;
     let selection = child_sim_selection()?;
     let Some(root) = std::env::var_os(SIM_COMPILE_RECEIPT_DIR_ENV)
@@ -979,7 +974,7 @@ fn prepare_sims(
         .map(PathBuf::from)
     else {
         let (wire_names, env_by_wire, source_files, stone, _) =
-            compile_sims_with_allocation(backend, project_path, output_path, None, &selection)?;
+            compile_sims_with_allocation(project_path, output_path, None, &selection)?;
         return Ok(PreparedSims {
             wire_names,
             env_by_wire,
@@ -1007,13 +1002,7 @@ fn prepare_sims(
         ));
     }
     let (wire_names, env_by_wire, source_files, stone, selection_is_full) =
-        compile_sims_with_allocation(
-            backend,
-            project_path.clone(),
-            output_path.clone(),
-            None,
-            &selection,
-        )?;
+        compile_sims_with_allocation(project_path.clone(), output_path.clone(), None, &selection)?;
     let inputs = receipt_inputs_from_stone(&project_path, &stone)?;
     let receipt_selection = if selection_is_full {
         Vec::new()
@@ -1087,7 +1076,6 @@ fn consume_sim_receipt(
 /// rules. The compile child is `rock_exe`: the CLI passes itself, a test
 /// harness the `rock` binary it was built beside.
 fn prepare_sims_out_of_process(
-    backend: crate::Backend,
     project_path: PathBuf,
     output_path: PathBuf,
     rock_exe: &Path,
@@ -1096,7 +1084,7 @@ fn prepare_sims_out_of_process(
     crate::package::check_project_assets(&project_path)?;
     rock_host::process_management::report_spawn_phase("compile-prepare");
     if std::env::var_os(SIM_COMPILE_RECEIPT_DIR_ENV).is_some_and(|value| !value.is_empty()) {
-        return prepare_sims(backend, project_path, output_path);
+        return prepare_sims(project_path, output_path);
     }
     sweep_stale_sim_receipt_roots(Path::new("tmp"));
     let project_path = project_path
@@ -1110,7 +1098,7 @@ fn prepare_sims_out_of_process(
         .prefix(&receipt_prefix)
         .tempdir_in("tmp")
         .context("creating sim compile receipt directory")?;
-    compile_receipt_in_child(backend, &project_path, rock_exe, root.path(), selection)?;
+    compile_receipt_in_child(&project_path, rock_exe, root.path(), selection)?;
     consume_sim_receipt(
         &sim_receipt_project_dir(root.path(), &project_path),
         &project_path,
@@ -1166,7 +1154,6 @@ fn sweep_stale_sim_receipt_roots(tmp: &Path) {
 /// under `receipt_root`, with this invocation's flags that change what the
 /// compile builds or reports.
 fn compile_receipt_in_child(
-    backend: crate::Backend,
     project_path: &Path,
     rock_exe: &Path,
     receipt_root: &Path,
@@ -1180,7 +1167,7 @@ fn compile_receipt_in_child(
         .arg("sim")
         .arg("--list")
         .arg("--backend")
-        .arg(backend.name())
+        .arg("skull")
         .arg(project_path)
         .env(SIM_COMPILE_RECEIPT_DIR_ENV, receipt_root)
         .env(SIM_COMPILE_RECEIPT_PREPARE_ENV, "1")
@@ -1525,7 +1512,6 @@ mod sim_source_path_tests {
 }
 
 fn compile_sims_with_allocation(
-    backend: crate::Backend,
     project_path: PathBuf,
     output_path: PathBuf,
     allocation_manifest: Option<&Path>,
@@ -1550,29 +1536,21 @@ fn compile_sims_with_allocation(
         Some(&output_path),
         || crate::package::prepare_sound_bank(&project_path.to_string_lossy()).map(|_| ()),
     )?;
-    match backend {
-        crate::Backend::Skull => {
-            let main_path = output_path.join(rock_host::project::MAIN_LUA_FILENAME);
-            timed_sim_compile_phase(
-                "compile_sims",
-                "skull_compile_emit",
-                &project_path,
-                Some(&output_path),
-                || {
-                    skull_compile_game_and_collect_sims_with_allocation(
-                        &project_path.to_string_lossy(),
-                        &main_path,
-                        allocation_manifest,
-                        selection,
-                    )
-                },
+    let main_path = output_path.join(rock_host::project::MAIN_LUA_FILENAME);
+    timed_sim_compile_phase(
+        "compile_sims",
+        "skull_compile_emit",
+        &project_path,
+        Some(&output_path),
+        || {
+            skull_compile_game_and_collect_sims_with_allocation(
+                &project_path.to_string_lossy(),
+                &main_path,
+                allocation_manifest,
+                selection,
             )
-        }
-        other => panic!(
-            "compile_sims reached non-skull backend {:?}; only skull serves sims",
-            other.name()
-        ),
-    }
+        },
+    )
 }
 
 /// The reload lane owns the live compile session and an isolated copy of the
@@ -1584,7 +1562,6 @@ pub(crate) struct ReloadLaneSession {
 }
 
 fn reload_lane_session(
-    backend: crate::Backend,
     project_path: &Path,
     lane_is_selected: bool,
     shared_output: &Path,
@@ -1605,14 +1582,7 @@ fn reload_lane_session(
             stone
         }
         // A receipt contains emitted code, but no editable compiler Session.
-        None => {
-            compile_sims(
-                backend,
-                project_path.to_path_buf(),
-                dir.path().to_path_buf(),
-            )?
-            .3
-        }
+        None => compile_sims(project_path.to_path_buf(), dir.path().to_path_buf())?.3,
     };
     if !quiet {
         println!("[sim] hot-reload lane: isolated chunk with the shared callee shape");
@@ -1637,11 +1607,11 @@ fn any_reload_lane_selected(
 /// Compile the project and print each `@sim` wire name on stdout, one
 /// per line, sorted by source span. Lets scripts enumerate the suite without
 /// hardcoding names.
-pub(crate) fn do_list_sims(backend: crate::Backend, project: &str) -> Result<()> {
+pub(crate) fn do_list_sims(project: &str) -> Result<()> {
     let project_path = rock_engine_host::project::resolve_project_dir(project)?;
 
     let out_dir = sim_output_dir()?;
-    let prepared = prepare_sims(backend, project_path, out_dir.path().to_path_buf())?;
+    let prepared = prepare_sims(project_path, out_dir.path().to_path_buf())?;
     for name in prepared.wire_names {
         // Result output, NOT logging: `--list` exists to print the sim
         // names to stdout — this is the command's answer, consumed by
@@ -1654,7 +1624,6 @@ pub(crate) fn do_list_sims(backend: crate::Backend, project: &str) -> Result<()>
 /// Compile/discover and report the run plan without building engines
 /// or spawning children. Explicit names retain their occurrence semantics.
 pub(crate) fn do_plan_sims(
-    backend: crate::Backend,
     project: &str,
     names: &[String],
     jobs: Option<usize>,
@@ -1662,7 +1631,7 @@ pub(crate) fn do_plan_sims(
 ) -> Result<()> {
     let project_path = rock_engine_host::project::resolve_project_dir(project)?;
     let out_dir = sim_output_dir()?;
-    let prepared = prepare_sims(backend, project_path.clone(), out_dir.path().to_path_buf())?;
+    let prepared = prepare_sims(project_path.clone(), out_dir.path().to_path_buf())?;
     let mut manual_excluded = 0;
     let specs = if names.is_empty() {
         let mut routine = Vec::new();
@@ -1695,7 +1664,6 @@ pub(crate) fn do_plan_sims(
 }
 
 fn do_run_sim_opts_with_request(
-    backend: crate::Backend,
     project: &str,
     sim_name: &str,
     quiet: bool,
@@ -1704,7 +1672,6 @@ fn do_run_sim_opts_with_request(
 ) -> Result<()> {
     let recorder = SimRunRecorder::begin(project, sim_name, quiet, requested_jobs);
     let result = do_run_sim_opts_recorded(
-        backend,
         project,
         sim_name,
         quiet,
@@ -1718,7 +1685,6 @@ fn do_run_sim_opts_with_request(
 }
 
 fn do_run_sim_opts_recorded(
-    backend: crate::Backend,
     project: &str,
     sim_name: &str,
     quiet: bool,
@@ -1747,7 +1713,6 @@ fn do_run_sim_opts_recorded(
     // influence env-var-driven game config like `MATCH3_PRESET`.
     let mut prepared = recorder.phase("compile_and_discover", || {
         prepare_sims_out_of_process(
-            backend,
             project_path.clone(),
             output_path.clone(),
             &rock_host::process_management::current_executable_image()?,
@@ -1762,7 +1727,7 @@ fn do_run_sim_opts_recorded(
     if prepared.stone.is_none() && entry_is_reload_lane(sim_name, &prepared.env_by_wire) {
         let (wire_names, env_by_wire, source_files, stone) = recorder
             .phase("compile_reload_session", || {
-                compile_sims(backend, project_path.clone(), output_path)
+                compile_sims(project_path.clone(), output_path)
             })?;
         prepared = PreparedSims {
             wire_names,
@@ -2005,7 +1970,6 @@ fn verdict_word(summary: &SimSummary) -> &'static str {
 /// named entry gets its own tempdir. Returns Err (non-zero exit) if any
 /// named entry failed.
 pub(crate) fn do_run_named_sims(
-    backend: crate::Backend,
     project: &str,
     names: &[String],
     quiet: bool,
@@ -2020,19 +1984,11 @@ pub(crate) fn do_run_named_sims(
         if jobs.is_some_and(|j| j > 1) {
             resolve_jobs(jobs, Some(1), update_snapshots, jobs_force)?;
         }
-        return do_run_sim_opts_with_request(
-            backend,
-            project,
-            &names[0],
-            quiet,
-            update_snapshots,
-            jobs,
-        );
+        return do_run_sim_opts_with_request(project, &names[0], quiet, update_snapshots, jobs);
     }
 
     let recorder = SimRunRecorder::begin(project, &names.join(" "), quiet, jobs);
     let result = do_run_named_sims_recorded(
-        backend,
         project,
         names,
         quiet,
@@ -2048,7 +2004,6 @@ pub(crate) fn do_run_named_sims(
 }
 
 fn do_run_named_sims_recorded(
-    backend: crate::Backend,
     project: &str,
     names: &[String],
     quiet: bool,
@@ -2070,7 +2025,6 @@ fn do_run_named_sims_recorded(
     let output = out_dir.path().to_string_lossy().into_owned();
     let prepared = recorder.phase("compile_and_discover", || {
         prepare_sims_out_of_process(
-            backend,
             project_path.clone(),
             PathBuf::from(&output),
             &rock_host::process_management::current_executable_image()?,
@@ -2110,7 +2064,6 @@ fn do_run_named_sims_recorded(
         &source_files,
     );
     let mut reload_lane = reload_lane_session(
-        backend,
         &project_path,
         any_reload_lane_selected(names, &env_by_wire),
         Path::new(&output),
@@ -2579,7 +2532,6 @@ where
 }
 
 pub(crate) fn do_run_all_sims(
-    backend: crate::Backend,
     project: &str,
     quiet: bool,
     update_snapshots: bool,
@@ -2589,7 +2541,6 @@ pub(crate) fn do_run_all_sims(
 ) -> Result<()> {
     let recorder = SimRunRecorder::begin(project, "<all>", quiet, jobs);
     let result = do_run_all_sims_recorded(
-        backend,
         project,
         quiet,
         update_snapshots,
@@ -2604,7 +2555,6 @@ pub(crate) fn do_run_all_sims(
 }
 
 fn do_run_all_sims_recorded(
-    backend: crate::Backend,
     project: &str,
     quiet: bool,
     update_snapshots: bool,
@@ -2625,7 +2575,6 @@ fn do_run_all_sims_recorded(
     let output = out_dir.path().to_string_lossy().into_owned();
     let prepared = recorder.phase("compile_and_discover", || {
         prepare_sims_out_of_process(
-            backend,
             project_path.clone(),
             PathBuf::from(&output),
             &rock_host::process_management::current_executable_image()?,
@@ -2676,7 +2625,6 @@ fn do_run_all_sims_recorded(
     let entry_ids = routine_ids;
     let manual_excluded = selected - wire_names.len();
     let mut reload_lane = reload_lane_session(
-        backend,
         &project_path,
         any_reload_lane_selected(&wire_names, &env_by_wire),
         Path::new(&output),
@@ -2871,7 +2819,6 @@ fn census_rankings(
 /// This is deliberately separate from ordinary `rock sim`: the sensor is a
 /// discovery instrument, not a default test-suite cost or a regression gate.
 pub(crate) fn do_run_allocation_census(
-    backend: crate::Backend,
     project: &str,
     names: &[String],
     output_path: &str,
@@ -2890,7 +2837,7 @@ pub(crate) fn do_run_allocation_census(
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
     let (wire_names, env_by_wire, source_files, stone) =
-        compile_sims(backend, project_path.clone(), PathBuf::from(&output))?;
+        compile_sims(project_path.clone(), PathBuf::from(&output))?;
     let sim_sources = resolve_sim_sources(&project_path, &source_files)?;
     emit_bytecode_image(Path::new(&output));
 
@@ -2907,7 +2854,6 @@ pub(crate) fn do_run_allocation_census(
     let jobs = resolve_pool_jobs(jobs, None, false, jobs_force)?;
     // Reload entries own the Session and an isolated copy of the boot chunk.
     let mut reload_lane = reload_lane_session(
-        backend,
         &project_path,
         !reload_idx.is_empty(),
         Path::new(&output),
@@ -3136,7 +3082,6 @@ fn allocation_activation_population(text: &str) -> Result<(usize, usize)> {
 }
 
 pub(crate) fn do_run_allocation_sites(
-    backend: crate::Backend,
     project: &str,
     names: &[String],
     output_dir: &str,
@@ -3170,7 +3115,6 @@ pub(crate) fn do_run_allocation_sites(
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
     let (wire_names, env_by_wire, source_files, stone, _) = compile_sims_with_allocation(
-        backend,
         project_path.clone(),
         PathBuf::from(&output),
         Some(&manifest_path),
