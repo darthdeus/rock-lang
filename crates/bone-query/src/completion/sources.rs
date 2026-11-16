@@ -224,7 +224,7 @@ pub(crate) fn field_ref_arg_completions(
     let (recv_struct, recv_elem) = recv_end
         .and_then(|e| {
             let mid = user_module_for_path(ws, path)?;
-            let (_, sname, _, sole) = crate::query::struct_members_of_receiver_expr(ws, mid, e)?;
+            let (_, sname, _, sole, _) = crate::query::struct_members_of_receiver_expr(ws, mid, e)?;
             Some((Some(sname), sole))
         })
         .unwrap_or((None, None));
@@ -1497,7 +1497,7 @@ pub(crate) fn member_completions_by_receiver(
     for munged in completion_munges(src, offset) {
         let attempt = analyze_variant(session, path, &munged, |ws| {
             let mid = user_module_for_path(ws, path)?;
-            let (fields, recv_struct, vec_elem, recv_elem) =
+            let (fields, recv_struct, vec_elem, recv_elem, recv_is_iter) =
                 crate::query::struct_members_of_receiver_expr(ws, mid, recv_end)?;
             Some(build_member_items(
                 ws,
@@ -1507,6 +1507,7 @@ pub(crate) fn member_completions_by_receiver(
                 Some(recv_struct),
                 vec_elem,
                 recv_elem,
+                recv_is_iter,
                 prefix,
                 arg_slot.clone(),
                 anchor,
@@ -1553,6 +1554,8 @@ pub(crate) fn member_completion_items(
     let recv_struct = crate::query::struct_name_for_path(ws, mid, offset, segments);
     let vec_elem = crate::query::receiver_vec_elem(ws, mid, offset, segments);
     let recv_elem = crate::query::receiver_sole_arg_struct(ws, mid, offset, segments);
+    let recv_is_iter = recv_struct
+        .is_some_and(|name| crate::query::named_receiver_is_iterator(ws, mid, offset, name));
     build_member_items(
         ws,
         mid,
@@ -1561,6 +1564,7 @@ pub(crate) fn member_completion_items(
         recv_struct,
         vec_elem,
         recv_elem,
+        recv_is_iter,
         prefix,
         arg_slot,
         anchor,
@@ -1714,6 +1718,8 @@ fn build_member_items(
     // Receiver's sole type-arg struct (`Entity<Glyph>` -> "Glyph"); the FieldRef
     // owner `T` binds through it on wrapper-receiver overloads (`e.run_into(.co)`).
     recv_elem: Option<Ustr>,
+    // The receiver takes the `Iterator`-bounded combinators.
+    recv_is_iter: bool,
     prefix: &str,
     arg_slot: Option<(String, usize)>,
     anchor: Option<SlotAnchor>,
@@ -1729,7 +1735,7 @@ fn build_member_items(
         // callable as `recv.method(...)`. Surfaced alongside fields, as rock does.
         // Non-struct receivers have no nominal UFCS methods.
         let methods = recv_struct
-            .map(|name| crate::query::ufcs_methods_in_scope(ws, name, vec_elem, frag))
+            .map(|name| crate::query::ufcs_methods_in_scope(ws, name, vec_elem, recv_is_iter, frag))
             .unwrap_or_default();
         if fields.is_empty() && methods.is_empty() {
             return Vec::new();

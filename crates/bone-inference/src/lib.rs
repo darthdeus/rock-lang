@@ -20,7 +20,7 @@ pub use bone_core::workspace::{
     BodyInference, ComptimeInputs, ComptimeVarValue, InferenceResult, Substitutions, Workspace,
 };
 pub use fields::{AccessDenied, FieldAccessNeed, field_access};
-pub use iter::iterable_elem;
+pub use iter::{iterable_elem, iterator_elem};
 
 mod narrowing;
 

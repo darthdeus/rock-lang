@@ -306,6 +306,21 @@ fn iterator_combinators_offered_on_user_defined_iterator() {
 }
 
 #[test]
+fn iterator_combinators_offered_on_iterable_receivers() {
+    // A combinator's `Iterator`-bounded receiver takes an iterable through
+    // the implicit `iter(recv)` coercion, so `names.map(..)` compiles on a
+    // Vec or an Arena and completion must offer it there too.
+    let src = "fn r(names: [int]) {\n  names.\n  let _n = 0\n}\n";
+    let l = labels(src, 1, 8);
+    assert_offers(&l, &["map", "filter", "enumerate"]);
+
+    let src = "struct Mob { hp: int }\n\
+               fn r(mobs: Arena<Mob>) {\n  mobs.\n  let _n = 0\n}\n";
+    let l = labels(src, 2, 7);
+    assert_offers(&l, &["map", "filter", "enumerate"]);
+}
+
+#[test]
 fn iterator_combinators_not_offered_when_next_is_nonconforming() {
     // A `next` that does NOT return `(bool, E)` (here `-> int`) does not make the
     // receiver an `Iterator` -- no combinators. Mirrors `bound_next_elem`.

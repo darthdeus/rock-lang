@@ -97,15 +97,31 @@ pub fn iterable_elem(gamma: &mut Gamma, ty: TyId, span: Span) -> Option<TyId> {
         if let Ok(elem) = for_elem_ty(g, ty, span) {
             return Some(elem);
         }
-        let next_ret = protocol_next_ret(g, ty, span)?;
+        let next_ret = protocol_next_ret(g, ty, false, span)?;
         for_iter_next_elem(g, next_ret, span).ok()
     })
 }
 
-/// `next`'s return type for the protocol rule `resolve_for_iter_protocol`
-/// applies: through an unbounded `iter(ty)` when one resolves, else on `ty`
-/// itself.
-fn protocol_next_ret(gamma: &mut Gamma, ty: TyId, span: Span) -> Option<TyId> {
+/// The element `ty` yields at an `Iterator<E>`-bounded parameter (a
+/// combinator receiver): itself when `next(ty)` resolves, else through the
+/// implicit `iter(ty)` coercion. `None` when no combinator call on it would
+/// type-check. Same rollback contract as [`iterable_elem`].
+pub fn iterator_elem(gamma: &mut Gamma, ty: TyId, span: Span) -> Option<TyId> {
+    gamma.trial(|g| {
+        let ty = resolve(g, ty, span);
+        if let TypeExpr::Generic(v, _) = *g.get(ty) {
+            return g.fn_bound_for(v).map(|(_, elem)| elem);
+        }
+        let next_ret = protocol_next_ret(g, ty, true, span)?;
+        bound_next_elem(g, next_ret, ty, span).ok()
+    })
+}
+
+/// `next`'s return type under the iterator protocol: through an unbounded
+/// `iter(ty)` when one resolves, else on `ty` itself. `next_first` tries `ty`
+/// itself first, the order `implicit_iter_target` uses at bounded params;
+/// the `for` head (`resolve_for_iter_protocol`) prefers `iter`.
+fn protocol_next_ret(gamma: &mut Gamma, ty: TyId, next_first: bool, span: Span) -> Option<TyId> {
     // An unresolved or failed type would bind to whatever `next` takes.
     if matches!(
         *gamma.get(ty),
@@ -114,6 +130,14 @@ fn protocol_next_ret(gamma: &mut Gamma, ty: TyId, span: Span) -> Option<TyId> {
         return None;
     }
     let c = gamma.body_ctx();
+    let next = Ustr::from("next");
+    let cp = gamma.out.checkpoint();
+    if next_first {
+        if let Ok((_, ret, _)) = resolve_unary_by_recv(c, gamma, next, ty, span) {
+            return Some(ret);
+        }
+        gamma.out.rollback_to(cp);
+    }
     let it = match resolve_unary_by_recv(c, gamma, Ustr::from("iter"), ty, span) {
         Ok(((m, f), _, _))
             if gamma.workspace.module(m).functions[f]
@@ -124,9 +148,12 @@ fn protocol_next_ret(gamma: &mut Gamma, ty: TyId, span: Span) -> Option<TyId> {
             return None;
         }
         Ok((_, ret, _)) => ret,
-        Err(_) => ty,
+        Err(_) => {
+            gamma.out.rollback_to(cp);
+            ty
+        }
     };
-    resolve_unary_by_recv(c, gamma, Ustr::from("next"), it, span)
+    resolve_unary_by_recv(c, gamma, next, it, span)
         .ok()
         .map(|(_, ret, _)| ret)
 }

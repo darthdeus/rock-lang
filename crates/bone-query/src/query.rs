@@ -1,5 +1,6 @@
 use bone_core::type_equiv::TyRef;
 use bone_semantic::hir::{BindingKind, Function};
+use bone_semantic::inference;
 use bone_semantic::{hir::NodeRef, prelude::*};
 use skull_parser::Ast;
 
@@ -3250,6 +3251,8 @@ fn struct_fields_of_ty(
 /// structural name-walk can't encode -- a call (`x.find_spell().|`), index, etc.
 /// `recv_end` is the receiver expr's end offset; `type_at` at `recv_end-1`
 /// yields its inferred TyId, which `struct_fields_of_ty` turns into members.
+/// The trailing bool says whether the receiver takes the `Iterator`-bounded
+/// combinators.
 pub(crate) fn struct_members_of_receiver_expr(
     ws: &Workspace,
     mid: ModuleId,
@@ -3259,13 +3262,16 @@ pub(crate) fn struct_members_of_receiver_expr(
     Ustr,
     Option<TyRef<'_>>,
     Option<Ustr>,
+    bool,
 )> {
     let inf = ws.inference(mid)?;
-    let ta = bone_semantic::query::type_at(ws, mid, inf, recv_end.checked_sub(1)?)?;
+    let at = recv_end.checked_sub(1)?;
+    let ta = bone_semantic::query::type_at(ws, mid, inf, at)?;
     let (fields, sname) = struct_fields_of_ty(ws, ta.body, ta.ty)?;
     let vec_elem = array_elem_ty(ws, ta.body, ta.ty).map(|e| TyRef::new(ta.body, e));
     let sole_arg = sole_type_arg_struct(ws, ta.body, ta.ty);
-    Some((fields, sname, vec_elem, sole_arg))
+    let is_iter = receiver_is_iterator(ws, mid, inf, at, TyRef::new(ta.body, ta.ty));
+    Some((fields, sname, vec_elem, sole_arg, is_iter))
 }
 
 /// ELEMENT type of a Vec receiver (`POS_HIST: [Vec2]` -> `Vec2`), for
@@ -4199,7 +4205,7 @@ pub(crate) fn ufcs_methods(
     name: Ustr,
     recv_elem: Option<TyRef<'_>>,
 ) -> Vec<UfcsMethod> {
-    ufcs_methods_in_scope(ws, name, recv_elem, None)
+    ufcs_methods_in_scope(ws, name, recv_elem, false, None)
 }
 
 /// Scope-aware UFCS method enumeration. The unscoped wrapper remains for
@@ -4209,6 +4215,7 @@ pub(crate) fn ufcs_methods_in_scope(
     ws: &Workspace,
     name: Ustr,
     recv_elem: Option<TyRef<'_>>,
+    recv_is_iter: bool,
     frag: Option<&bone_core::modules::FragmentScope>,
 ) -> Vec<UfcsMethod> {
     let mut out = Vec::new();
@@ -4216,12 +4223,10 @@ pub(crate) fn ufcs_methods_in_scope(
     // the duplicate is popup noise), first-wins to match the general path's
     // per-name fn dedup.
     let mut seen: std::collections::HashSet<Ustr> = std::collections::HashSet::new();
-    // Iterator receivers additionally get the generic `Iterator`-bounded
-    // combinators (`enumerate`/`map`/`filter`/`collect`/...) whose first param
-    // is `it: I` with `<I: Iterator<..>>` -- not a nominal match, but UFCS-legal
-    // (`it.enumerate()`). Gated on the receiver structurally satisfying
-    // `Iterator` (bone's rule: a `next(recv) -> (bool, E)` in scope).
-    let recv_is_iter = receiver_is_iterator(ws, name, frag);
+    // Iterator receivers (`recv_is_iter`) additionally get the generic
+    // `Iterator`-bounded combinators (`enumerate`/`map`/`filter`/`collect`/...)
+    // whose first param is `it: I` with `<I: Iterator<..>>` -- not a nominal
+    // match, but UFCS-legal (`it.enumerate()`).
     for m in ws.modules.iter() {
         for (fid, f) in m.functions.iter() {
             if f.name.as_str().starts_with("__") {
@@ -4259,39 +4264,57 @@ pub(crate) fn ufcs_methods_in_scope(
     out
 }
 
-/// Whether receiver struct `name` structurally satisfies `Iterator` -- bone's
-/// rule (`bone-inference/src/iter.rs`): a `next(name) -> (bool, E)` resolves.
-/// Gates the generic `Iterator`-bounded UFCS combinators.
+/// Whether a receiver of type `recv` takes the `Iterator`-bounded combinators:
+/// inference's `iterator_elem`, asked in a scratch Gamma over the body at
+/// `offset`.
 fn receiver_is_iterator(
     ws: &Workspace,
-    name: Ustr,
-    frag: Option<&bone_core::modules::FragmentScope>,
+    mid: ModuleId,
+    inf: &InferenceResult,
+    offset: usize,
+    recv: TyRef<'_>,
 ) -> bool {
-    ws.modules.iter().any(|m| {
-        m.functions.iter().any(|(fid, f)| {
-            f.name.as_str() == "next"
-                && !frag.is_some_and(|frag| {
-                    !crate::modules_scope::callable_member_admitted(ws, frag, f.name, m.id, fid)
-                })
-                && f.param_decls
-                    .first()
-                    .is_some_and(|p0| struct_name_of_ty(ws, None, p0.ty) == Some(name))
-                && f.return_ty.is_some_and(|rt| ty_is_bool_first_pair(ws, rt))
-        })
-    })
-}
-
-/// Whether `ty` is a 2-tuple `(bool, _)` -- an `Iterator` `next` return shape.
-fn ty_is_bool_first_pair(ws: &Workspace, ty: TyId) -> bool {
-    let Some(hir::TypeExpr::Tuple { elements }) = deref_ty(ws, None, ty) else {
+    // A `TyId::Local` only resolves in the scratch Gamma seeded from its body.
+    if let TyId::Local(_) = recv.ty {
+        let seed = ws
+            .modules
+            .get(mid.index())
+            .and_then(|m| m.body_at(offset))
+            .and_then(|o| inf.per_fn.get(&o));
+        if !matches!((seed, recv.body), (Some(a), Some(b)) if std::ptr::eq(a, b)) {
+            return false;
+        }
+    }
+    let Some((mut gamma, span)) = crate::backend::query_gamma(ws, mid, inf, offset) else {
         return false;
     };
-    let idxs: Vec<_> = elements.into_iter().collect();
-    idxs.len() == 2
-        && matches!(
-            deref_ty(ws, None, ty.with_idx(idxs[0])),
-            Some(hir::TypeExpr::Builtin(hir::BuiltinTy::Bool))
-        )
+    inference::iterator_elem(&mut gamma, recv.ty, span).is_some()
+}
+
+/// [`receiver_is_iterator`] for a receiver known only by its struct name (the
+/// structural fallback): some instance of the struct.
+pub(crate) fn named_receiver_is_iterator(
+    ws: &Workspace,
+    mid: ModuleId,
+    offset: usize,
+    name: Ustr,
+) -> bool {
+    let Some(sdef) = struct_def_by_name(ws, name) else {
+        return false;
+    };
+    let Some(inf) = ws.inference(mid) else {
+        return false;
+    };
+    let Some((mut gamma, span)) = crate::backend::query_gamma(ws, mid, inf, offset) else {
+        return false;
+    };
+    let Ok(args) =
+        gamma.trial(|g| inference::instantiate_params(g, &sdef.generics, &sdef.generics, span))
+    else {
+        return false;
+    };
+    let recv = gamma.nominal_app(name, &args, span);
+    inference::iterator_elem(&mut gamma, recv, span).is_some()
 }
 
 /// Whether fn `f`'s first param is an `Iterator`-bounded generic (`it: I` with
