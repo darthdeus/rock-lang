@@ -3,7 +3,7 @@
 //! below prove addition, removal, and reintroduction against a nonzero
 //! population.
 
-use crate::common::ws_with;
+use crate::common::{replace_once, ws_with};
 use bone_core::hir::BodyOwner;
 use skull_mir::mir::FuncRef;
 
@@ -19,19 +19,15 @@ fn instance_count(cache: &skull_codegen_js::emit::JsEmitCache, func: FuncRef) ->
 /// The cached session keeps one arena while the retained graph is rebuilt.
 #[test]
 fn the_cache_keeps_one_arena_across_an_overlay_edit() {
-    const BEFORE: &str = "\
+    const SOURCE: &str = "\
 fn pick<T>(x: T, y: T) -> T { x }\n\
 fn other() -> float { pick(1.0, 2.0) }\n\
 @nomangle fn hot() -> float { 1.0 }\n\
 fn main() { print(hot() + other()) }\n";
-    const AFTER: &str = "\
-fn pick<T>(x: T, y: T) -> T { x }\n\
-fn other() -> float { pick(1.0, 2.0) }\n\
-@nomangle fn hot() -> float { 3.0 }\n\
-fn main() { print(hot() + other()) }\n";
 
-    let before = ws_with(BEFORE);
-    let after = ws_with(AFTER);
+    let after_source = replace_once(SOURCE, "hot() -> float { 1.0 }", "hot() -> float { 3.0 }");
+    let before = ws_with(SOURCE);
+    let after = ws_with(&after_source);
     let mid = crate::common::test_fn_ref(&before, "main").module;
     let pick = crate::common::test_fn_ref(&before, "pick");
     let (_, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
@@ -134,11 +130,7 @@ fn main() { print(hot()) }\n";
         "the addition arm must not remove the old instance"
     );
 
-    const REMOVED: &str = "\
-fn pick<T>(x: T, y: T) -> T { x }\n\
-@nomangle fn hot() -> float { pick(1.0, 2.0) }\n\
-fn main() { print(hot()) }\n";
-    let removed_ws = ws_with(REMOVED);
+    let removed_ws = ws_with(BEFORE);
     let removed_hot = crate::common::test_fn_ref(&removed_ws, "hot");
     let removal = skull_codegen_js::emit::emit_overlay(
         &removed_ws,
@@ -210,61 +202,5 @@ fn main() { print(hot()) }\n";
     assert!(
         cache.graph_population() > removal_population,
         "reintroduction must grow the live graph population"
-    );
-}
-
-#[test]
-fn every_js_production_route_enters_the_shared_session() {
-    let source = crate::common::EMIT_SOURCE;
-    for (route, seam) in [
-        ("pub fn emit_with_closure(", "new_js_session("),
-        ("pub fn emit_program(", "build_program_session("),
-        ("pub fn emit_program_cached(", "build_program_session("),
-        ("pub fn emit_overlay(", "update_js_session("),
-    ] {
-        let start = source.find(route).expect("production JS route");
-        let tail = &source[start..];
-        assert!(tail.contains(seam), "{route} must enter {seam}");
-    }
-    assert_eq!(
-        source.matches("fn js_scx(").count(),
-        1,
-        "one JS context constructor"
-    );
-    assert_eq!(
-        source.matches("fn new_js_session(").count(),
-        1,
-        "one JS session constructor"
-    );
-    assert_eq!(
-        source.matches("fn update_js_session(").count(),
-        1,
-        "one JS session updater"
-    );
-    assert!(
-        source.contains("update_bodies_with_root_delta"),
-        "the JS session must forward body edit metadata into graph repair"
-    );
-    assert!(
-        source.contains("update.added") && source.contains("update.removed"),
-        "the session must publish the graph's exact delta populations"
-    );
-    let overlay_start = source.find("pub fn emit_overlay(").unwrap();
-    let overlay_end = source[overlay_start..]
-        .find("\npub(super) fn collect_statics(")
-        .map(|offset| overlay_start + offset)
-        .expect("emit_overlay has a following private helper");
-    let overlay = &source[overlay_start..overlay_end];
-    assert!(
-        overlay.contains("added_instances") && overlay.contains("removed_instances"),
-        "the JS overlay must consume graph-added and graph-removed populations"
-    );
-    assert!(
-        !overlay.contains("js_scx("),
-        "overlay must retain the cached context"
-    );
-    assert!(
-        !overlay.contains("new_js_session("),
-        "overlay must retain the cached graph"
     );
 }

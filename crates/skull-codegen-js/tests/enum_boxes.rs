@@ -8,9 +8,6 @@ use crate::common::ws_with;
 
 #[test]
 fn inspect_flat_enum_payload_names_require_exact_leaf_count() {
-    if !crate::common::require_node() {
-        return;
-    }
     let src = "nobox value Pos { x: int, y: int }\n\
                enum Event { At(Pos), Maybe(Pos, int?), Named { x: int }, Text(string) }\n\
                fn root() -> int { 0 }";

@@ -1,10 +1,7 @@
-use crate::common::{emit_closure, require_node, run_node, ws_with};
+use crate::common::{emit_closure, run_node, ws_with};
 
 #[test]
 fn bounded_affine_native_buffer_loop_matches_js_boundaries() {
-    if !require_node() {
-        return;
-    }
     let ws = ws_with(include_str!("../../../benchmarks/guard_proofs.rock"));
     let js = emit_closure(&ws, "guard_stride_proven").unwrap();
     let js = format!("{}\n{js}", skull_codegen_js::JS_NB_CHECK_SHIMS);

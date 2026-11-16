@@ -4,9 +4,6 @@
 
 #[test]
 fn copied_code_ref_env_shares_logical_slot() {
-    if !crate::common::require_node() {
-        return;
-    }
     let program = format!(
         "{}{}\n\
          function old(e) {{ return e.c + 1; }}\n\
@@ -32,9 +29,6 @@ fn copied_code_ref_env_shares_logical_slot() {
 // its element width, so a write through a view shows through `.ptr`.
 #[test]
 fn native_buffer_copy_rebuilds_leaf_views_over_its_storage() {
-    if !crate::common::require_node() {
-        return;
-    }
     let program = format!(
         "{}{}\n\
          var ptr = Object.assign(new Float32Array(4), {{__rock_elem_size: 8}});\n\

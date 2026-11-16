@@ -1,10 +1,7 @@
-use crate::common::{emit_closure, require_node, run_node, ws_with};
+use crate::common::{emit_closure, run_node, ws_with};
 
 #[test]
 fn foreign_type_tag_getter_invalidates_vector_bounds() {
-    if !require_node() {
-        return;
-    }
     let ws = ws_with(
         r#"
 @nomangle fn after_type_tag(xs: [int], value: any) -> int {
@@ -36,9 +33,6 @@ console.log('ok');
 
 #[test]
 fn foreign_string_conversion_invalidates_vector_bounds() {
-    if !require_node() {
-        return;
-    }
     let ws = ws_with(
         r#"
 @nomangle fn after_conversion(xs: [int], value: any) -> int {
@@ -70,9 +64,6 @@ console.log('ok');
 
 #[test]
 fn foreign_join_access_invalidates_vector_bounds() {
-    if !require_node() {
-        return;
-    }
     let ws = ws_with(
         r#"
 @nomangle fn after_join(xs: [int], parts: [string]) -> int {
@@ -107,9 +98,6 @@ console.log('ok');
 
 #[test]
 fn foreign_heap_record_callbacks_invalidate_vector_bounds() {
-    if !require_node() {
-        return;
-    }
     let ws = ws_with(
         r#"
 struct ExternalRecord { value: int? }

@@ -1,10 +1,7 @@
-use crate::common::{emit_closure, require_node, run_node, ws_with};
+use crate::common::{emit_closure, run_node, ws_with};
 
 #[test]
 fn fresh_js_arrays_can_inherit_index_setters() {
-    if !require_node() {
-        return;
-    }
     let ws = ws_with(
         r#"
 @nomangle fn collect_private(xs: [int]) -> [int] {

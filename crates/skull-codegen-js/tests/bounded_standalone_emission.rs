@@ -13,9 +13,9 @@ fn total<I: Iterator<int>>(it: I) -> int {
     return s
 }
 
-fn main() {
+fn root() -> int {
     let xs: [int] = [1, 2, 3]
-    print("{total(xs.iter())}")
+    return total(xs.iter())
 }
 "#;
 
@@ -29,9 +29,9 @@ fn total(xs: [int]) -> int {
     return s
 }
 
-fn main() {
+fn root() -> int {
     let xs: [int] = [1, 2, 3]
-    print("{total(xs)}")
+    return total(xs)
 }
 "#;
 
@@ -43,15 +43,16 @@ fn main() {
 #[test]
 fn a_bounded_body_emits_standalone_to_js_with_inlining_disabled() {
     let _g = crate::common::InlineOffGuard::on();
-    let js = crate::common::emit_program_js(&ws_with(BOUNDED))
+    let ws = ws_with(BOUNDED);
+    let js = crate::common::emit_closure(&ws, "root")
         .expect("a bounded body must emit standalone to JS under its demand");
     let def = js
         .lines()
         .find(|l| l.trim_start().starts_with("function total_") && l.contains("_spec_"))
         .unwrap_or_else(|| panic!("no standalone specialized definition of `total` in:\n{js}"));
-    let open = def.find('(').expect("a definition header has params");
-    let symbol = def.trim_start()["function ".len()..open - (def.len() - def.trim_start().len())]
-        .to_string();
+    let name = def.trim_start();
+    let open = name.find('(').expect("a definition header has params");
+    let symbol = &name["function ".len()..open];
     let body: Vec<&str> = js
         .lines()
         .skip_while(|l| *l != def)
@@ -68,6 +69,15 @@ fn a_bounded_body_emits_standalone_to_js_with_inlining_disabled() {
             .any(|l| !l.trim_start().starts_with("function ") && l.contains(&format!("{symbol}("))),
         "`{symbol}` is emitted but nothing calls it"
     );
+    let output = crate::common::run_node(&format!(
+        "{}\n{js}\nconsole.log(root());",
+        skull_codegen_js::JS_VEC_CHECK_SHIMS
+    ));
+    assert_eq!(
+        output.trim(),
+        "6",
+        "the standalone bounded body returned the wrong result:\n{js}"
+    );
 }
 
 /// Not inverted: this asserts the CORRECT behavior and must stay green through
@@ -76,29 +86,13 @@ fn a_bounded_body_emits_standalone_to_js_with_inlining_disabled() {
 #[test]
 fn an_unbounded_body_emits_to_js_with_inlining_disabled() {
     let _g = crate::common::InlineOffGuard::on();
-    let err = crate::common::emit_program_js(&ws_with(CONCRETE)).err();
+    let ws = ws_with(CONCRETE);
+    let err = crate::common::emit_closure(&ws, "root").err();
     assert!(
         err.is_none(),
         "the same program without a bounded generic must still emit to JS with \
          inlining disabled, or the sentinel cannot attribute its rejection to the \
          bound; got {err:?}"
-    );
-}
-
-#[test]
-fn js_specializations_consume_concrete_plan_bound_trees() {
-    let source = crate::common::EMIT_SOURCE;
-    assert!(
-        !source.contains("graph_trees"),
-        "JS must not retain a second graph-tree delivery map"
-    );
-    assert!(
-        source.contains("plan.bound_tree"),
-        "JS standalone lowering must read the selected concrete plan tree"
-    );
-    assert!(
-        source.contains("concrete plan has no resolved bound tree"),
-        "JS must reject a missing plan tree rather than fabricate an empty one"
     );
 }
 

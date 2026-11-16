@@ -1,4 +1,4 @@
-use crate::common::{run_node, ws_with};
+use crate::common::{replace_once, run_node, ws_with};
 use bone_core::hir::BodyOwner;
 
 fn global(
@@ -283,18 +283,13 @@ fn main() {{}}
 
 #[test]
 fn const_value_overlay_redefines_users_without_reinitializing_state() {
-    let before = ws_with(
-        "const WISP_COUNT: int = 5\n\
-         global STATE: int = 7\n\
-         @nomangle fn hot() -> int { WISP_COUNT }\n\
-         fn main() { print(hot()) }\n",
-    );
-    let after = ws_with(
-        "const WISP_COUNT: int = 10\n\
-         global STATE: int = 7\n\
-         @nomangle fn hot() -> int { WISP_COUNT }\n\
-         fn main() { print(hot()) }\n",
-    );
+    const SOURCE: &str = "const WISP_COUNT: int = 5\n\
+        global STATE: int = 7\n\
+        @nomangle fn hot() -> int { WISP_COUNT }\n\
+        fn main() { print(hot()) }\n";
+    let after_source = replace_once(SOURCE, "WISP_COUNT: int = 5", "WISP_COUNT: int = 10");
+    let before = ws_with(SOURCE);
+    let after = ws_with(&after_source);
     let mid = crate::common::test_fn_ref(&before, "main").module;
     let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let (global_mid, global_id) = global(&after, "WISP_COUNT");
@@ -318,18 +313,13 @@ fn const_value_overlay_redefines_users_without_reinitializing_state() {
 
 #[test]
 fn const_value_overlay_reinitializes_dependent_constants() {
-    let before = ws_with(
-        "const BASE: int = 5\n\
-         const COUNT: int = BASE + 1\n\
-         @nomangle fn hot() -> int { COUNT }\n\
-         fn main() { print(hot()) }\n",
-    );
-    let after = ws_with(
-        "const BASE: int = 10\n\
-         const COUNT: int = BASE + 1\n\
-         @nomangle fn hot() -> int { COUNT }\n\
-         fn main() { print(hot()) }\n",
-    );
+    const SOURCE: &str = "const BASE: int = 5\n\
+        const COUNT: int = BASE + 1\n\
+        @nomangle fn hot() -> int { COUNT }\n\
+        fn main() { print(hot()) }\n";
+    let after_source = replace_once(SOURCE, "BASE: int = 5", "BASE: int = 10");
+    let before = ws_with(SOURCE);
+    let after = ws_with(&after_source);
     let mid = crate::common::test_fn_ref(&before, "main").module;
     let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let (global_mid, global_id) = global(&after, "BASE");
@@ -353,16 +343,12 @@ fn const_value_overlay_reinitializes_dependent_constants() {
 
 #[test]
 fn overlay_redefines_a_function_without_reinitializing_global_state() {
-    let before = ws_with(
-        "global STATE: int = 7\n\
-         @nomangle fn hot() -> int { 1 }\n\
-         fn main() { print(hot()) }\n",
-    );
-    let after = ws_with(
-        "global STATE: int = 7\n\
-         @nomangle fn hot() -> int { 2 }\n\
-         fn main() { print(hot()) }\n",
-    );
+    const SOURCE: &str = "global STATE: int = 7\n\
+        @nomangle fn hot() -> int { 1 }\n\
+        fn main() { print(hot()) }\n";
+    let after_source = replace_once(SOURCE, "fn hot() -> int { 1 }", "fn hot() -> int { 2 }");
+    let before = ws_with(SOURCE);
+    let after = ws_with(&after_source);
     let mid = crate::common::test_fn_ref(&before, "main").module;
     let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let hot = crate::common::test_fn_ref(&after, "hot");
@@ -513,21 +499,18 @@ fn wire_failure_after_publication_keeps_the_candidate_code_ref_live() {
 
 #[test]
 fn successive_overlays_accumulate_changed_function_definitions() {
-    let v0 = ws_with(
-        "@nomangle fn first() -> int { 1 }\n\
-         @nomangle fn second() -> int { 10 }\n\
-         fn main() { print(first() + second()) }\n",
+    const SOURCE: &str = "@nomangle fn first() -> int { 1 }\n\
+        @nomangle fn second() -> int { 10 }\n\
+        fn main() { print(first() + second()) }\n";
+    let v1_source = replace_once(SOURCE, "fn first() -> int { 1 }", "fn first() -> int { 2 }");
+    let v2_source = replace_once(
+        &v1_source,
+        "fn second() -> int { 10 }",
+        "fn second() -> int { 20 }",
     );
-    let v1 = ws_with(
-        "@nomangle fn first() -> int { 2 }\n\
-         @nomangle fn second() -> int { 10 }\n\
-         fn main() { print(first() + second()) }\n",
-    );
-    let v2 = ws_with(
-        "@nomangle fn first() -> int { 2 }\n\
-         @nomangle fn second() -> int { 20 }\n\
-         fn main() { print(first() + second()) }\n",
-    );
+    let v0 = ws_with(SOURCE);
+    let v1 = ws_with(&v1_source);
+    let v2 = ws_with(&v2_source);
     let mid = crate::common::test_fn_ref(&v0, "main").module;
     let (_, mut cache) = skull_codegen_js::emit::emit_program_cached(&v0, mid).unwrap();
     let first = crate::common::test_fn_ref(&v1, "first");
@@ -545,22 +528,15 @@ fn successive_overlays_accumulate_changed_function_definitions() {
 
 #[test]
 fn changed_static_initializer_resets_only_its_live_cell() {
-    let before = ws_with(
-        "@nomangle fn hot() -> int {\n\
-             static count = 1\n\
-             count += 1\n\
-             count\n\
-         }\n\
-         fn main() { print(hot()) }\n",
-    );
-    let after = ws_with(
-        "@nomangle fn hot() -> int {\n\
-             static count = 10\n\
-             count += 1\n\
-             count\n\
-         }\n\
-         fn main() { print(hot()) }\n",
-    );
+    const SOURCE: &str = "@nomangle fn hot() -> int {\n\
+        static count = 1\n\
+        count += 1\n\
+        count\n\
+    }\n\
+    fn main() { print(hot()) }\n";
+    let after_source = replace_once(SOURCE, "static count = 1", "static count = 10");
+    let before = ws_with(SOURCE);
+    let after = ws_with(&after_source);
     let mid = crate::common::test_fn_ref(&before, "main").module;
     let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let hot = crate::common::test_fn_ref(&after, "hot");
@@ -654,7 +630,12 @@ fn unrelated_body_overlay_restages_unchanged_generic_callback_with_concrete_abi(
         @nomangle fn edited() -> int { 1 }\n\
         fn main() { invoke(); edited() }\n";
     let before = ws_with(source);
-    let after = ws_with(&source.replace("fn edited() -> int { 1 }", "fn edited() -> int { 2 }"));
+    let after_source = replace_once(
+        source,
+        "fn edited() -> int { 1 }",
+        "fn edited() -> int { 2 }",
+    );
+    let after = ws_with(&after_source);
     let mid = crate::common::test_fn_ref(&before, "main").module;
     let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let caller = crate::common::test_fn_ref(&after, "edited");

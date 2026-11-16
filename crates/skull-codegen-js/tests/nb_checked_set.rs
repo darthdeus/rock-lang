@@ -9,9 +9,6 @@ use skull_codegen_js::JS_NB_CHECK_SHIMS;
 // luajit the store is backend-native, so there is nothing to compare.
 #[test]
 fn nb_js_checked_set_rejects_nan_into_int_buffer() {
-    if !crate::common::require_node() {
-        return;
-    }
     let prog = format!(
         "{JS_NB_CHECK_SHIMS}\n\
          var ib = {{ ptr: new Int32Array(1), len: 1 }};\n\

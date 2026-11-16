@@ -9,27 +9,6 @@ use skull_mir::lower::{ScalarCtx, lower_instance_with_plans};
 use skull_mir::mir::{FuncRef, MirFunc};
 use skull_mir::monoty::MonoInterner;
 
-/// The JS emitter's source, one string, for tests that pin its structure.
-/// `session` comes last so each route reads its session seam after it.
-pub const EMIT_SOURCE: &str = concat!(
-    include_str!("../../src/emit/mod.rs"),
-    include_str!("../../src/emit/lanes.rs"),
-    include_str!("../../src/emit/function.rs"),
-    include_str!("../../src/emit/structured.rs"),
-    include_str!("../../src/emit/effects.rs"),
-    include_str!("../../src/emit/inst.rs"),
-    include_str!("../../src/emit/assemble.rs"),
-    include_str!("../../src/emit/overlay.rs"),
-    include_str!("../../src/emit/worklist.rs"),
-    include_str!("../../src/emit/delivery.rs"),
-    include_str!("../../src/emit/plan_stages.rs"),
-    include_str!("../../src/emit/tables.rs"),
-    include_str!("../../src/emit/globals.rs"),
-    include_str!("../../src/emit/coroutine.rs"),
-    include_str!("../../src/emit/analysis.rs"),
-    include_str!("../../src/emit/session.rs")
-);
-
 pub struct InlineOffGuard(#[allow(dead_code)] skull_transform::InlineOffGuard);
 
 impl InlineOffGuard {
@@ -57,28 +36,6 @@ pub fn tool(name: &str) -> std::process::Command {
     let mut cmd = std::process::Command::new(name);
     cmd.env_remove("FORCE_COLOR").env("NO_COLOR", "1");
     cmd
-}
-
-/// Set to skip, instead of fail, the tests that run emitted JS when `node` is
-/// not on PATH. CI has node, so a missing binary there must not read as a pass.
-pub const SKIP_NODE_ENV: &str = "ROCK_SKIP_NODE_TESTS";
-
-/// True when `node` runs. When it does not, panics unless [`SKIP_NODE_ENV`] is
-/// set, in which case it logs the skip and returns false.
-pub fn require_node() -> bool {
-    if node()
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success())
-    {
-        return true;
-    }
-    assert!(
-        std::env::var_os(SKIP_NODE_ENV).is_some(),
-        "`node` is not on PATH; install it or set {SKIP_NODE_ENV}=1 to skip the tests that run JS"
-    );
-    eprintln!("SKIP: `node` not on PATH ({SKIP_NODE_ENV} is set)");
-    false
 }
 
 /// Run `program` under `node -e` and return its stdout. Panics, showing the
@@ -117,9 +74,6 @@ fn print_root_program(runtime: &[&str], defs: &str, root: &str) -> String {
 
 /// Evaluate `<root>()` under node and check it prints the integer `expect`.
 pub fn eval_int(runtime: &[&str], defs: &str, root: &str, expect: i64) {
-    if !require_node() {
-        return;
-    }
     let program = print_root_program(runtime, defs, root);
     let s = run_node(&program);
     let got: i64 = s
@@ -183,6 +137,15 @@ pub fn ws_with_named(file: &str, src: &str) -> bone_core::workspace::Workspace {
         .collect();
     modules.push(skull_parser::parse_module_clean(src, ustr::Ustr::from(file)).expect("parse"));
     bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
+}
+
+pub fn replace_once(source: &str, old: &str, new: &str) -> String {
+    assert_eq!(
+        source.matches(old).count(),
+        1,
+        "fixture replacement must match exactly once: {old:?}"
+    );
+    source.replacen(old, new, 1)
 }
 
 /// Lower one test root through the graph-owned concrete plan. Keeping this

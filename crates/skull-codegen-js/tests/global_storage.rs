@@ -33,9 +33,6 @@ fn mutable_global_accesses_use_the_global_storage() {
 
 #[test]
 fn opaque_js_global_reads_and_writes_go_through_the_bridge() {
-    if !crate::common::require_node() {
-        return;
-    }
     let source = r#"
 global GRID: [int] = [1]
 
@@ -65,9 +62,6 @@ fn main() {
 
 #[test]
 fn opaque_js_nobox_physical_leaves_route_through_the_bridge() {
-    if !crate::common::require_node() {
-        return;
-    }
     let program = r#"
 var __G = {};
 __rock_globals_open("flat-layout");

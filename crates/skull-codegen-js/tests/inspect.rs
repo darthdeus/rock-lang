@@ -10,9 +10,6 @@ use crate::common::ws_with;
 fn eval_str(src: &str, root: &str) -> String {
     let ws = ws_with(src);
     let js = crate::common::emit_closure(&ws, root).expect("inspect emits");
-    if !crate::common::require_node() {
-        return String::new();
-    }
     let program = format!(
         "{}{}{}{}\n{js}\nprocess.stdout.write(\"<<<\" + {root}() + \">>>\");",
         skull_codegen_js::JS_VEC_CHECK_SHIMS,
