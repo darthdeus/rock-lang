@@ -20,7 +20,7 @@ use bone_core::{
 };
 
 #[derive(Copy, Clone, Debug)]
-pub enum TyPos {
+pub(crate) enum TyPos {
     /// Interface position (signatures, fields, globals, enum/newtype):
     /// module ty_arena, TyId::Static - what other modules may reference
     Iface,
@@ -118,7 +118,7 @@ pub(crate) fn alloc_tys_contiguous(
 /// immutable, and its first lookup records dependencies in `scope_probes`.
 /// Re-lowering constructs a fresh context instead of retaining these answers.
 #[derive(Debug, Default)]
-pub struct ResolutionCache {
+pub(crate) struct ResolutionCache {
     bare: std::cell::RefCell<FxHashMap<Ustr, Result<resolve::Resolved, String>>>,
     callee: std::cell::RefCell<FxHashMap<Ustr, Result<resolve::CalleeFamily, String>>>,
     optional: std::cell::RefCell<FxHashMap<Ustr, Result<Option<resolve::CalleeFamily>, String>>>,
@@ -135,30 +135,30 @@ fn use_path_ref(path: &skull_parser::Path) -> bone_core::modules::UsePathRef {
 pub struct LowerCtx<'w, 'm> {
     pub workspace: &'w Workspace,
     pub module: &'m mut hir::Module,
-    pub generics_in_scope: FxHashMap<Ustr, TyId>,
+    pub(crate) generics_in_scope: FxHashMap<Ustr, TyId>,
 
     pub _next_var_id: u32,
 
-    pub placeholder_param: Option<Idx<BindingInfo>>,
-    pub placeholder_forbidden: bool,
+    pub(crate) placeholder_param: Option<Idx<BindingInfo>>,
+    pub(crate) placeholder_forbidden: bool,
 
     /// The namespace facts this lowering's lookups read, moved
     /// into `Module.scope_probes` when the lowering finishes
     /// ([`LowerCtx::flush_scope_probes`]). A cell because lookups run from
     /// `&self` helpers.
-    pub scope_probes: std::cell::RefCell<Vec<bone_core::modules::ScopeProbe>>,
-    pub resolutions: ResolutionCache,
+    pub(crate) scope_probes: std::cell::RefCell<Vec<bone_core::modules::ScopeProbe>>,
+    pub(crate) resolutions: ResolutionCache,
     /// Place subexpressions of the compound assignment being lowered that were
     /// already evaluated into a temporary, keyed by the source node's address:
     /// lowering such a node again yields a read of its temporary, so the place
     /// can be both read and written without evaluating it twice.
-    pub place_temps: Vec<(usize, Idx<BindingInfo>)>,
+    pub(crate) place_temps: Vec<(usize, Idx<BindingInfo>)>,
     /// While a function body lowers, the names it could not resolve. A name
     /// recorded here lowers to a placeholder and lowering continues, so one
     /// pass reports every such name; the body is then dropped as failed, so
     /// the placeholders never reach inference. `None` outside a body: a name
     /// error there is returned as before.
-    pub name_errors: std::cell::RefCell<Option<Vec<CompilerError>>>,
+    pub(crate) name_errors: std::cell::RefCell<Option<Vec<CompilerError>>>,
 }
 
 impl<'w, 'm> LowerCtx<'w, 'm> {
@@ -602,7 +602,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
             .map(|&(_, b)| b)
     }
 
-    pub fn next_var_id(&mut self) -> VarId {
+    pub(crate) fn next_var_id(&mut self) -> VarId {
         self._next_var_id += 1;
         VarId(self._next_var_id)
     }
@@ -626,7 +626,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         idx
     }
 
-    pub fn alloc_expr(&mut self, body: &mut Body, expr: Expr, span: Span) -> Idx<Expr> {
+    pub(crate) fn alloc_expr(&mut self, body: &mut Body, expr: Expr, span: Span) -> Idx<Expr> {
         let is_block = matches!(expr, Expr::Block { .. });
         let idx = body.expr_arena.alloc(expr);
 
@@ -644,7 +644,12 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         idx
     }
 
-    pub fn alloc_block_expr(&mut self, body: &mut Body, expr: Expr, b: &BlockData) -> Idx<Expr> {
+    pub(crate) fn alloc_block_expr(
+        &mut self,
+        body: &mut Body,
+        expr: Expr,
+        b: &BlockData,
+    ) -> Idx<Expr> {
         debug_assert!(matches!(expr, Expr::Block { .. }));
         let idx = body.expr_arena.alloc(expr);
 
@@ -768,7 +773,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
     }
 }
 
-pub fn lower_type_expr(
+pub(crate) fn lower_type_expr(
     ctx: &mut LowerCtx,
     a: &Ast,
     body: &mut Body,
@@ -2376,7 +2381,7 @@ pub(crate) fn lower_expr_value(
     Ok(result)
 }
 
-pub fn lower_expr(
+pub(crate) fn lower_expr(
     ctx: &mut LowerCtx,
     a: &Ast,
     body: &mut Body,
@@ -2558,23 +2563,33 @@ fn reject_generic_defaults(
     Ok(())
 }
 
-/// Name-RESOLUTION check for a decl's generic defaults: lower each default
-/// normally (result discarded) so an unknown type name or a bare generic type
-/// (`= Entity` for `Entity<T>`) errors at the DECL's span rather than at some
-/// distant use site's pad. Runs after `validate_generic_defaults`, so sibling
-/// refs never reach the generics-in-scope lookup.
-fn lower_generic_defaults_for_check(
+/// Validate and declare a type decl's generics, returning their ids and the
+/// decl's body. Each default is also lowered (result discarded) so an unknown
+/// type name or a bare generic type (`= Entity` for `Entity<T>`) errors at the
+/// DECL's span rather than at some distant use site's pad; validation runs
+/// first, so sibling refs never reach the generics-in-scope lookup.
+fn type_def_generics(
     ctx: &mut LowerCtx,
     a: &Ast,
-    body: &mut Body,
+    what: &str,
     generics: &[skull_parser::Generic],
-) -> Result<(), CompilerError> {
+) -> Result<(Vec<TyId>, Body), CompilerError> {
+    reject_generic_bounds(what, generics)?;
+    validate_generic_defaults(what, generics, a)?;
+    let ids = ctx.declare_generics(generics);
+    let mut body = Body::default();
     for g in generics {
         if let Some(d) = &g.default {
-            lower_type_expr(ctx, a, body, a.te(d))?;
+            lower_type_expr(ctx, a, &mut body, a.te(d))?;
         }
     }
-    Ok(())
+    Ok((ids, body))
+}
+
+fn insert_item_body(ctx: &mut LowerCtx, owner: BodyOwner, body: Body, span: Span) {
+    ctx.module.insert_body(owner, body);
+    let (start, stop) = span.offset_range();
+    ctx.module.make_lapper(start, stop, owner);
 }
 
 /// Decl-side validation for type-decl generic defaults (the authoritative,
@@ -2674,23 +2689,7 @@ pub(crate) fn build_function(
     // annotation is mid-typed (decorator completion runs on it), and
     // `body_errors()` already turns any lowering error into a hard verdict.
     let annotations = lower_annotations_with_ctx(ctx, a, annotations)?;
-    let mut anno_errors = Vec::new();
-    if let Err(e) = validate_annotations(
-        AnnoPos::FnItem,
-        &annotations,
-        &ctx.workspace.decorator_names,
-    ) {
-        anno_errors.push(e);
-    }
-    for pd in param_decls.iter() {
-        if let Err(e) = validate_annotations(
-            AnnoPos::Param,
-            &pd.annotations,
-            &ctx.workspace.decorator_names,
-        ) {
-            anno_errors.push(e);
-        }
-    }
+    let anno_errors = fn_annotation_errors(ctx, &annotations, &param_decls);
 
     let (body_failed, inline_body, is_extern, ffi_lib, backend, mut errors) =
         lower_fn_body_into(ctx, a, f, &mut body, &param_tys)?;
@@ -2743,6 +2742,47 @@ pub(crate) fn build_function(
     Ok((func, if body_failed { None } else { Some(body) }, errors))
 }
 
+fn fn_annotation_errors(
+    ctx: &LowerCtx,
+    annotations: &[hir::Annotation],
+    params: &[ParamDecl],
+) -> Vec<CompilerError> {
+    let names = &ctx.workspace.decorator_names;
+    std::iter::once(validate_annotations(AnnoPos::FnItem, annotations, names))
+        .chain(
+            params
+                .iter()
+                .map(|pd| validate_annotations(AnnoPos::Param, &pd.annotations, names)),
+        )
+        .filter_map(Result::err)
+        .collect()
+}
+
+/// Install a re-lowered body and REPLACE its lowering errors, clearing stale
+/// ones from a prior edit. Returns whether a body was installed.
+fn install_relowered_body(
+    module: &mut hir::Module,
+    owner: BodyOwner,
+    body: Option<Body>,
+    errors: Vec<CompilerError>,
+) -> bool {
+    if errors.is_empty() {
+        module.lowering_errors.remove(&owner);
+    } else {
+        module.lowering_errors.insert(owner, errors);
+    }
+    match body {
+        Some(body) => {
+            module.insert_body(owner, body);
+            true
+        }
+        None => {
+            module.bodies.remove(&owner);
+            false
+        }
+    }
+}
+
 /// Lower a function's BODY into `body`, given its already-resolved param types
 /// (`param_tys`, one per `f.params`, in order). This allocates ONLY into `body`
 /// (its binding / expr / scope / `lowered_tys` arenas) -- it never touches the
@@ -2750,7 +2790,7 @@ pub(crate) fn build_function(
 /// (`relower_function_in_place`) reuse the unchanged signature's interface
 /// types instead of re-lowering them: re-lowering a signature appends fresh
 /// entries to `module.ty_arena` and orphans the old ones, leaking one slot per
-/// edit (pinned by the `bone-incremental` `sentinel_body_edit_leaks_ty_arena_entries`).
+/// edit (pinned by the `bone-incremental` `body_edit_does_not_grow_module_ty_arena`).
 ///
 /// Returns the body-kind flags (`body_failed`, `inline_body`, `is_extern`,
 /// `ffi_lib`, `backend`); the caller owns assembling / keeping the `Function`
@@ -2944,7 +2984,7 @@ pub fn relower_function_in_place(
     // `build_function` would re-lower the signature, appending fresh interface
     // type-exprs to `module.ty_arena` and orphaning the old ones: one leaked slot
     // per edit, unbounded over an editing session (pinned by the `bone-incremental`
-    // `sentinel_body_edit_leaks_ty_arena_entries`).
+    // `body_edit_does_not_grow_module_ty_arena`).
     let sig_reusable = module.functions[fid].param_decls.len() == f.params.len()
         && module.functions[fid].generics.len() == f.generics.len();
 
@@ -2960,23 +3000,7 @@ pub fn relower_function_in_place(
 
         ctx.module.lower_var_high_water = ctx._next_var_id;
         ctx.module.functions[fid] = func;
-        // REPLACE this body's lowering errors (clears stale ones from a prior edit).
-        if errors.is_empty() {
-            ctx.module.lowering_errors.remove(&owner);
-        } else {
-            ctx.module.lowering_errors.insert(owner, errors);
-        }
-
-        return Ok(match body {
-            Some(body) => {
-                ctx.module.insert_body(owner, body);
-                true
-            }
-            None => {
-                ctx.module.bodies.remove(&owner);
-                false
-            }
-        });
+        return Ok(install_relowered_body(ctx.module, owner, body, errors));
     }
 
     // Reuse the existing signature's resolved param types + generic `TyId`s
@@ -3025,31 +3049,12 @@ pub fn relower_function_in_place(
     // would otherwise clear a still-present annotation violation recorded by
     // the last full lower.
     let lowered_annos = lower_annotations_with_ctx(&ctx, a, annotations)?;
-    if let Err(e) = validate_annotations(
-        AnnoPos::FnItem,
+    errors.extend(fn_annotation_errors(
+        &ctx,
         &lowered_annos,
-        &ctx.workspace.decorator_names,
-    ) {
-        errors.push(e);
-    }
-    for pd in ctx.module.functions[fid].param_decls.iter() {
-        if let Err(e) = validate_annotations(
-            AnnoPos::Param,
-            &pd.annotations,
-            &ctx.workspace.decorator_names,
-        ) {
-            errors.push(e);
-        }
-    }
+        &ctx.module.functions[fid].param_decls,
+    ));
     ctx.flush_scope_probes();
-
-    // REPLACE this body's lowering errors (clears stale ones from a prior edit) --
-    // the flat-Vec append was the lower-error-path leak + stale-diagnostic bug.
-    if errors.is_empty() {
-        ctx.module.lowering_errors.remove(&owner);
-    } else {
-        ctx.module.lowering_errors.insert(owner, errors);
-    }
 
     // The signature is kept as-is EXCEPT its span: `shift_module_after_edit`
     // deliberately skips the edited fn's own span (it expected `build_function`
@@ -3059,13 +3064,8 @@ pub fn relower_function_in_place(
     existing.span = f.span;
     existing.name_span = f.name.span;
 
-    Ok(if body_failed {
-        ctx.module.bodies.remove(&owner);
-        false
-    } else {
-        ctx.module.insert_body(owner, body);
-        true
-    })
+    let body = (!body_failed).then_some(body);
+    Ok(install_relowered_body(ctx.module, owner, body, errors))
 }
 
 // Runtime marker keys: eq, inspect, deepcopy, and call dispatch duck-type on
@@ -3081,11 +3081,7 @@ pub fn lower_struct_def(
     s: &skull_parser::StructDef,
     reg_key: Ustr,
 ) -> Result<(), CompilerError> {
-    reject_generic_bounds("a struct", &s.generics)?;
-    validate_generic_defaults("a struct", &s.generics, a)?;
-    let generic_var_ids = ctx.declare_generics(&s.generics);
-    let mut body = Body::default();
-    lower_generic_defaults_for_check(ctx, a, &mut body, &s.generics)?;
+    let (generic_var_ids, mut body) = type_def_generics(ctx, a, "a struct", &s.generics)?;
 
     let mut fields = Vec::new();
     let def_scope = body.alloc_root_scope();
@@ -3106,13 +3102,7 @@ pub fn lower_struct_def(
             .lowering_errors
             .insert(BodyOwner::StructDefaults(idx), names);
     }
-    ctx.module.insert_body(BodyOwner::StructDefaults(idx), body);
-
-    ctx.module.make_lapper(
-        s.span.offset_range().0,
-        s.span.offset_range().1,
-        BodyOwner::StructDefaults(idx),
-    );
+    insert_item_body(ctx, BodyOwner::StructDefaults(idx), body, s.span);
 
     Ok(())
 }
@@ -3248,11 +3238,7 @@ pub fn lower_enum_def(
     e: &skull_parser::EnumDef,
     reg_key: Ustr,
 ) -> Result<(), CompilerError> {
-    reject_generic_bounds("an enum", &e.generics)?;
-    validate_generic_defaults("an enum", &e.generics, a)?;
-    let generic_var_ids = ctx.declare_generics(&e.generics);
-    let mut body = Body::default();
-    lower_generic_defaults_for_check(ctx, a, &mut body, &e.generics)?;
+    let (generic_var_ids, mut body) = type_def_generics(ctx, a, "an enum", &e.generics)?;
 
     let mut variants = Vec::new();
 
@@ -3340,13 +3326,7 @@ pub fn lower_enum_def(
     ctx.module.enums[idx].variants = variants;
     ctx.module.enums[idx].generics = generic_var_ids;
 
-    ctx.module.insert_body(BodyOwner::Enum(idx), body);
-
-    ctx.module.make_lapper(
-        e.span.offset_range().0,
-        e.span.offset_range().1,
-        BodyOwner::Enum(idx),
-    );
+    insert_item_body(ctx, BodyOwner::Enum(idx), body, e.span);
 
     Ok(())
 }
@@ -3357,24 +3337,14 @@ pub fn lower_newtype_def(
     n: &skull_parser::NewtypeDef,
     reg_key: Ustr,
 ) -> Result<(), CompilerError> {
-    reject_generic_bounds("a newtype", &n.generics)?;
-    validate_generic_defaults("a newtype", &n.generics, a)?;
-    let generic_var_ids = ctx.declare_generics(&n.generics);
-    let mut body = Body::default();
-    lower_generic_defaults_for_check(ctx, a, &mut body, &n.generics)?;
+    let (generic_var_ids, mut body) = type_def_generics(ctx, a, "a newtype", &n.generics)?;
 
     let idx = ctx.module.newtypes_by_name[&reg_key];
 
     ctx.module.newtypes[idx].wrapped = lower_type_expr(ctx, a, &mut body, a.te(&n.wrapped))?;
     ctx.module.newtypes[idx].generics = generic_var_ids;
 
-    ctx.module.insert_body(BodyOwner::Newtype(idx), body);
-
-    ctx.module.make_lapper(
-        n.span.offset_range().0,
-        n.span.offset_range().1,
-        BodyOwner::Newtype(idx),
-    );
+    insert_item_body(ctx, BodyOwner::Newtype(idx), body, n.span);
 
     Ok(())
 }
@@ -3548,13 +3518,7 @@ pub fn lower_global(
             .lowering_errors
             .insert(BodyOwner::Global(idx), names);
     }
-    ctx.module.insert_body(BodyOwner::Global(idx), body);
-
-    ctx.module.make_lapper(
-        g.span.offset_range().0,
-        g.span.offset_range().1,
-        BodyOwner::Global(idx),
-    );
+    insert_item_body(ctx, BodyOwner::Global(idx), body, g.span);
 
     Ok(())
 }
@@ -3610,6 +3574,44 @@ fn reject_inline_lua_if_forbidden(a: &Ast, f: &FunctionDef) -> Result<(), Compil
     );
 }
 
+/// Resolve and record a modules-v1 qualified variant pattern's path to the
+/// enum's DefKey and variant. On a name error the sub-patterns still lower and
+/// `None` tells the caller to lower a wildcard.
+fn resolve_pattern_path<'p>(
+    ctx: &mut LowerCtx,
+    a: &Ast,
+    body: &mut Body,
+    scope: Idx<Scope>,
+    path: &skull_parser::Path,
+    subpats: impl IntoIterator<Item = &'p skull_parser::Pattern>,
+) -> Result<Option<(Ustr, Ustr)>, CompilerError> {
+    let Some(frag) = ctx.v1_scope() else {
+        return Err(CompilerError::new_with_label(
+            path.span(),
+            "qualified patterns are modules-v1 grammar; this file is legacy".to_string(),
+        ));
+    };
+    let use_path = use_path_ref(path);
+    match ctx.probed(|| resolve::resolve_variant_pattern(ctx.workspace, frag, &use_path)) {
+        Ok((enum_key, variant)) => {
+            ctx.record_path(
+                body,
+                TyPos::Body,
+                path,
+                hir::SegmentTarget::Variant { enum_key, variant },
+            );
+            Ok(Some((enum_key, variant)))
+        }
+        Err(msg) => {
+            ctx.recover_name(CompilerError::new_with_label(path.span(), msg))?;
+            for p in subpats {
+                lower_pattern_value(ctx, a, body, scope, p)?;
+            }
+            Ok(None)
+        }
+    }
+}
+
 fn lower_pattern_value(
     ctx: &mut LowerCtx,
     a: &Ast,
@@ -3620,30 +3622,11 @@ fn lower_pattern_value(
     // Modules-v1 qualified variant patterns resolve to the enum's DefKey and
     // lower exactly like the legacy two-segment forms.
     if let skull_parser::Pattern::PathVariant { path, args } = pat {
-        let Some(frag) = ctx.v1_scope() else {
-            return Err(CompilerError::new_with_label(
-                path.span(),
-                "qualified patterns are modules-v1 grammar; this file is legacy".to_string(),
-            ));
+        let subpats = args.iter().flatten();
+        let Some((enum_key, variant)) = resolve_pattern_path(ctx, a, body, scope, path, subpats)?
+        else {
+            return Ok(Pattern::Wildcard);
         };
-        let use_path = use_path_ref(path);
-        let (enum_key, variant) =
-            match ctx.probed(|| resolve::resolve_variant_pattern(ctx.workspace, frag, &use_path)) {
-                Ok(target) => target,
-                Err(msg) => {
-                    ctx.recover_name(CompilerError::new_with_label(path.span(), msg))?;
-                    for p in args.iter().flatten() {
-                        lower_pattern_value(ctx, a, body, scope, p)?;
-                    }
-                    return Ok(Pattern::Wildcard);
-                }
-            };
-        ctx.record_path(
-            body,
-            TyPos::Body,
-            path,
-            hir::SegmentTarget::Variant { enum_key, variant },
-        );
         let sub = match args {
             None => IdxRange::new_empty(),
             Some(pats) => {
@@ -3663,30 +3646,11 @@ fn lower_pattern_value(
         });
     }
     if let skull_parser::Pattern::PathRecord { path, fields, rest } = pat {
-        let Some(frag) = ctx.v1_scope() else {
-            return Err(CompilerError::new_with_label(
-                path.span(),
-                "qualified patterns are modules-v1 grammar; this file is legacy".to_string(),
-            ));
+        let subpats = fields.iter().map(|(_, p)| p);
+        let Some((enum_key, variant)) = resolve_pattern_path(ctx, a, body, scope, path, subpats)?
+        else {
+            return Ok(Pattern::Wildcard);
         };
-        let use_path = use_path_ref(path);
-        let (enum_key, variant) =
-            match ctx.probed(|| resolve::resolve_variant_pattern(ctx.workspace, frag, &use_path)) {
-                Ok(target) => target,
-                Err(msg) => {
-                    ctx.recover_name(CompilerError::new_with_label(path.span(), msg))?;
-                    for (_, subpat) in fields.iter() {
-                        lower_pattern_value(ctx, a, body, scope, subpat)?;
-                    }
-                    return Ok(Pattern::Wildcard);
-                }
-            };
-        ctx.record_path(
-            body,
-            TyPos::Body,
-            path,
-            hir::SegmentTarget::Variant { enum_key, variant },
-        );
         let mut entries = Vec::with_capacity(fields.len());
         for (fname, subpat) in fields.iter() {
             let p = lower_pattern_value(ctx, a, body, scope, subpat)?;
@@ -4112,13 +4076,7 @@ pub fn lower_decorator_def(
             .insert(BodyOwner::Decorator(idx), names);
         return Ok(idx);
     }
-    ctx.module.insert_body(BodyOwner::Decorator(idx), body);
-
-    ctx.module.make_lapper(
-        d.span.offset_range().0,
-        d.span.offset_range().1,
-        BodyOwner::Decorator(idx),
-    );
+    insert_item_body(ctx, BodyOwner::Decorator(idx), body, d.span);
 
     Ok(idx)
 }
