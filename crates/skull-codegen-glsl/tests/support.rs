@@ -4,8 +4,9 @@
 
 use bone_core::prelude::ModuleId;
 use bone_core::workspace::Workspace;
-use skull_codegen_glsl::{GlslProfile, ShaderEmission, ShaderProgramSession};
-use skull_graph::shader::ShaderProgram;
+use skull::shader_artifact::{ShaderArtifactRequest, ShaderProgram, ShaderProgramView};
+use skull_codegen_glsl::{GlslProfile, ShaderEmission};
+use skull_mir::lower::ScalarCtx;
 use skull_parser::Ast;
 use skull_parser::CompilerError;
 use std::sync::LazyLock;
@@ -83,18 +84,35 @@ pub fn emit_library(src: &str, roots: &[&str]) -> Result<String, String> {
     emit_library_with(&STDLIB, src, roots)
 }
 
-/// The registered-program session for `vert` (if any) and `frag`.
+/// The registered-program view for `vert` (if any) and `frag`, realized by the
+/// driver's shader artifact pass.
 pub fn program_session(
     ws: &Workspace,
     mid: ModuleId,
     vert: Option<&str>,
     frag: &str,
-) -> Result<ShaderProgramSession, CompilerError> {
+) -> Result<(ScalarCtx, ShaderProgramView), CompilerError> {
     let vert = vert
         .map(|root| skull_codegen_glsl::resolve_root(ws, mid, root))
         .transpose()?;
     let frag = skull_codegen_glsl::resolve_root(ws, mid, frag)?;
-    skull_codegen_glsl::shader_program_session(ws, ShaderProgram { vert, frag })
+    let program = ShaderProgram { vert, frag };
+    let roots = vert.into_iter().chain([frag]).collect();
+    let graph = skull::instance_graph::build(ws, roots, false);
+    let scx =
+        ScalarCtx::new_values_first_class(ws).sharing(std::sync::Arc::clone(graph.interner()));
+    let mut artifact = skull::shader_artifact::realize_shader_with_context(
+        ws,
+        &graph,
+        &ShaderArtifactRequest {
+            spec: skull::target_projection::LUAJIT_DESKTOP,
+            programs: &[program],
+        },
+        &scx,
+    )
+    .expect("the desktop target packages a shader artifact");
+    let view = artifact.program_views.pop().expect("one program view");
+    Ok((scx, view))
 }
 
 /// A program planned and rendered as the shader artifact view and emission do.
@@ -105,9 +123,9 @@ pub fn emit_program(
     frag: &str,
     profile: GlslProfile,
 ) -> Result<ShaderEmission, CompilerError> {
-    let session = program_session(ws, mid, vert, frag)?;
-    let plan = skull_codegen_glsl::plan_shader_with_view(ws, &session.scx, &session.view)?;
-    skull_codegen_glsl::render_shader_plan(ws, session.scx.interner(), &plan, profile)
+    let (scx, view) = program_session(ws, mid, vert, frag)?;
+    let plan = skull_codegen_glsl::plan_shader_with_view(ws, &scx, &view)?;
+    skull_codegen_glsl::render_shader_plan(ws, scx.interner(), &plan, profile)
 }
 
 /// The shader artifact view's profile check: the program planned, the plan
@@ -118,8 +136,8 @@ pub fn check_program(
     vert: Option<&str>,
     frag: &str,
 ) -> Result<(), String> {
-    let session = program_session(ws, mid, vert, frag).map_err(|e| e.message)?;
-    skull_codegen_glsl::plan_shader_with_view(ws, &session.scx, &session.view)
+    let (scx, view) = program_session(ws, mid, vert, frag).map_err(|e| e.message)?;
+    skull_codegen_glsl::plan_shader_with_view(ws, &scx, &view)
         .map(|_| ())
         .map_err(|e| e.message)
 }
@@ -132,21 +150,11 @@ pub fn emit_unplanned(
     vert: Option<&str>,
     frag: &str,
 ) -> Result<(), String> {
-    let session = program_session(ws, mid, vert, frag).map_err(|e| e.message)?;
+    let (scx, view) = program_session(ws, mid, vert, frag).map_err(|e| e.message)?;
     let profile = GlslProfile::Core330;
     match vert {
-        Some(_) => skull_codegen_glsl::emit_shader_pipeline_with_view(
-            ws,
-            &session.scx,
-            &session.view,
-            profile,
-        ),
-        None => skull_codegen_glsl::emit_shader_entry_with_view(
-            ws,
-            &session.scx,
-            &session.view,
-            profile,
-        ),
+        Some(_) => skull_codegen_glsl::emit_shader_pipeline_with_view(ws, &scx, &view, profile),
+        None => skull_codegen_glsl::emit_shader_entry_with_view(ws, &scx, &view, profile),
     }
     .map(|_| ())
     .map_err(|e| e.message)

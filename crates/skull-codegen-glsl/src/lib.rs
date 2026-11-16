@@ -27,7 +27,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use skull_codegen_shader::{const_lit, inst_kind, is_tier0_inst, non_tier0_error};
 use skull_graph::instance_graph::{InstanceGraph, SiteOutcome};
 pub use skull_graph::shader::ShaderLibraryView;
-use skull_graph::shader::{ShaderProgram, ShaderProgramView, ShaderStageView};
+use skull_graph::shader::{ShaderProgramView, ShaderStageView};
 use skull_mir::cfg::relooper::{LoopCtx, LoopTest, StructuredEmit};
 use skull_mir::cfg::reverse_postorder;
 use skull_mir::cfg::structure::{

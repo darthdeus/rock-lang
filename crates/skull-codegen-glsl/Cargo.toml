@@ -28,6 +28,8 @@ ustr = { workspace = true }
 [dev-dependencies]
 bone-semantic = { workspace = true }
 rock-stdlib = { workspace = true }
+# The integration tests realize program views the way the driver does.
+skull = { workspace = true }
 
 [lints]
 workspace = true

@@ -1,4 +1,5 @@
 use super::*;
+use skull_graph::shader::ShaderProgram;
 use ustr::Ustr;
 
 fn build_ws(src: &str) -> (Workspace, ModuleId) {
@@ -474,16 +475,32 @@ fn a_fragment_stage_with_no_declared_output_rejects() {
     );
     let vf = resolve_root(&ws, mid, "ov").expect("root");
     let ff = resolve_root(&ws, mid, "of").expect("root");
-    let session = shader_program_session(
-        &ws,
-        ShaderProgram {
+    // The fixture's entries call no helpers, so each stage's population is its
+    // entry alone, beside the builtins both entries share.
+    let session = shader_library_session(&ws, vec![vf, ff]).expect("the fixture must realize");
+    assert_eq!(session.view.order.len(), 2, "the fixture has no helpers");
+    let stage = |stage, entry: &Instance| ShaderStageView {
+        stage,
+        entry: entry.clone(),
+        retained: BTreeSet::from([entry.clone()]),
+        helpers: BTreeSet::new(),
+        builtins: session.view.builtins.clone(),
+        order: Vec::new(),
+        dependencies: vec![entry.func],
+    };
+    let view = ShaderProgramView {
+        program: ShaderProgram {
             vert: Some(vf),
             frag: ff,
         },
-    )
-    .expect("the fixture must realize");
-    let mut plan = plan_shader_pipeline_from_view(&ws, &session.scx, &session.view)
-        .expect("the fixture must plan");
+        stages: vec![
+            stage(ShaderStage::Vertex, &session.view.roots[0]),
+            stage(ShaderStage::Fragment, &session.view.roots[1]),
+        ],
+        concrete_plans: Arc::clone(&session.view.concrete_plans),
+    };
+    let mut plan =
+        plan_shader_pipeline_from_view(&ws, &session.scx, &view).expect("the fixture must plan");
 
     // CONTROL: it renders with the output declared.
     assert!(matches!(
