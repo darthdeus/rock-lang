@@ -29,19 +29,6 @@ fn golden(src: &str, root: &str, expected: &str) {
 }
 
 #[test]
-fn function_library_preserves_no_version_contract() {
-    let glsl = emit(
-        "fn helper(value: float) -> float { return value + 1.0 }",
-        &["helper"],
-    )
-    .expect("emit");
-    assert!(
-        !glsl.starts_with("#version"),
-        "route-B function libraries must not select a GLSL profile:\n{glsl}"
-    );
-}
-
-#[test]
 fn function_library_requires_concrete_body_plans() {
     let src = r#"
         @pure fn identity<T>(value: T) -> T { return value }
@@ -65,19 +52,6 @@ fn function_library_requires_concrete_body_plans() {
     );
 }
 
-cases! { golden:
-    scalar_remap(
-        r#"
-            @pure fn remap(value: float, min1: float, max1: float, min2: float, max2: float) -> float {
-                return min2 + (value - min1) * (max2 - min2) / (max1 - min1)
-            }
-        "#,
-        "remap",
-        "float remap_float_float_float_float_float(float value, float min1, float max1, float min2, float max2) {\n  \
-         return (min2 + (((value - min1) * (max2 - min2)) / (max1 - min1)));\n}",
-    );
-}
-
 #[test]
 fn callee_before_caller() {
     let src = r#"
@@ -89,6 +63,14 @@ fn callee_before_caller() {
         }
     "#;
     let glsl = emit(src, &["map01"]).expect("emit");
+    assert!(
+        !glsl.starts_with("#version"),
+        "route-B function libraries must not select a GLSL profile:\n{glsl}"
+    );
+    assert_has(
+        &glsl,
+        "float remap_float_float_float_float_float(float value, float min1, float max1, float min2, float max2) {\n  return (min2 + (((value - min1) * (max2 - min2)) / (max1 - min1)));\n}",
+    );
     // remap must appear before map01 (topological: callees first).
     let ri = glsl
         .find("float remap_float_float_float_float_float(")
@@ -1045,51 +1027,15 @@ fn fragment_entry_scaffold() {
         !glsl.contains("u."),
         "uniform struct must not survive as a param:\n{glsl}"
     );
+    assert!(
+        !glsl.contains("uniform float strength;"),
+        "no loose uniform member survives:\n{glsl}"
+    );
     assert_has(&glsl, "void main() {\n  FragColor = glow(TexCoord);\n}");
     // Default fullscreen vertex stage.
     assert_has(&glsl, "#ifdef VERTEX");
     assert_has(&glsl, "gl_Position = vec4(aPos, 0.0, 1.0);");
     assert_has(&glsl, "TexCoord = aTexCoord;");
-}
-
-/// `@uniform` is ONE std140 block, not a run of loose uniforms. The block is
-/// declared with no instance name, so its members stay bare GLSL globals and
-/// every body reading them is unchanged -- that is what confines this change to
-/// declaration lines. Samplers are opaque and cannot live in a
-/// block, so they stay loose beside it.
-#[test]
-fn fragment_entry_uniforms_are_one_std140_block() {
-    let src = r#"
-        value GlowU { strength: float, center: Vec2, radius: float }
-
-        @shader(fragment)
-        fn glow(@uniform u: GlowU, scene: Sampler2D, tc: Vec2) -> Vec4 {
-            let d = tc.distance(u.center)
-            let k = 1.0 + u.strength * (1.0 - smoothstep(0.0, u.radius, d))
-            let t = texture(scene, tc)
-            return Vec4 { x: t.x * k, y: t.y * k, z: t.z * k, w: t.w }
-        }
-    "#;
-    let glsl = emit_entry(src, "glow").expect("emit");
-    // Member order is field order -- the same contract @attr uses for locations
-    // and @textures for slots.
-    assert!(
-        glsl.contains(
-            "layout(std140) uniform GlowU {\n    float strength;\n    vec2 center;\n    float radius;\n};\n"
-        ),
-        "got:\n{glsl}"
-    );
-    assert_has(&glsl, "uniform sampler2D scene;");
-    assert!(
-        !glsl.contains("uniform float strength;"),
-        "no loose member survives:\n{glsl}"
-    );
-    // The block is UNNAMED-instance, so reads are bare globals exactly as before.
-    assert_has(&glsl, "distance(tc, center)");
-    assert!(
-        !glsl.contains("u."),
-        "uniform struct must not survive as a param:\n{glsl}"
-    );
 }
 
 /// Entry with samplers only (no uniform struct) is legal.

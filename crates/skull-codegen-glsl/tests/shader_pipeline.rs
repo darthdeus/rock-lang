@@ -173,78 +173,70 @@ const UI_SRC: &str = r#"
     }
 "#;
 
-/// A2 gets ONE std140 block PER STAGE, at its own binding index -- not one
-/// block shared by both.
+/// A2 gets ONE std140 block PER STAGE, at its own binding index. This single
+/// emission pins both stages' scaffold, link interface, single-output fragment,
+/// and the ABI bindings consumed by the engine.
 ///
 /// The stages declare different `@uniform` types and cannot be made to share
-/// one: `ui_vert` is a single fn consumed by three different fragment stages
-/// (solid, SDF bar and dissolve), each with its own uniform
-/// struct, so a merged per-program type would need `ui_vert` to declare a
-/// different struct per program. Two blocks is also what WGSL/Vulkan/Metal do.
+/// one: `ui_vert` is consumed by fragment stages with their own uniform struct.
+/// Two blocks is also what WGSL/Vulkan/Metal do.
 ///
 /// Verified to compile and link on real drivers in both profiles before this
 /// was built (a two-block program through a native GLSL harness).
 #[test]
-fn pipeline_emits_one_block_per_stage() {
-    let glsl = emit_pipeline(UI_SRC, "ui_vert", "ui_frag").expect("emit");
-    // The FRAGMENT group is game-authored, so it is a block today.
+fn pipeline_scaffold_and_abi() {
+    let em = crate::support::pipeline_emission(UI_SRC, "ui_vert", "ui_frag").expect("emit");
+    let glsl = &em.source;
+    assert!(glsl.starts_with("#version 330 core\n"), "got:\n{glsl}");
+    assert_has(glsl, "#ifdef VERTEX");
+    // Attribute struct fields -> `in` with declaration-order locations.
+    assert_has(glsl, "layout (location = 0) in vec2 aPos;");
+    assert_has(glsl, "layout (location = 1) in vec2 aTexCoord;");
+    assert_has(glsl, "layout (location = 2) in vec4 aColor;");
+    // Vertex uniforms are a std140 block with an unnamed instance.
     assert_has(
-        &glsl,
-        "layout(std140) uniform UiFragU {\n    vec2 uSize;\n    float uRatio;\n};\n",
-    );
-    // The VERTEX group is a block too: one per STAGE, each at its own binding.
-    assert_has(
-        &glsl,
+        glsl,
         "layout(std140) uniform UiVertU {\n    mat4 uProjection;\n    mat4 uView;\n    mat4 uTransform;\n};\n",
     );
-    // No member falls back to a loose uniform -- a block member has no location,
-    // so a by-name setter aimed at one writes nothing.
-    assert_lacks(&glsl, "uniform mat4 uProjection;");
-    // Unnamed instance -- members stay bare globals, so bodies are unchanged.
-    assert_lacks(&glsl, "u.uSize");
-}
-
-#[test]
-fn pipeline_scaffold_vertex_block() {
-    let glsl = emit_pipeline(UI_SRC, "ui_vert", "ui_frag").expect("emit");
-    assert!(glsl.starts_with("#version 330 core\n"), "got:\n{glsl}");
-    assert_has(&glsl, "#ifdef VERTEX");
-    // Attribute struct fields -> `in` with declaration-order locations.
-    assert_has(&glsl, "layout (location = 0) in vec2 aPos;");
-    assert_has(&glsl, "layout (location = 1) in vec2 aTexCoord;");
-    assert_has(&glsl, "layout (location = 2) in vec4 aColor;");
-    // Vertex uniforms are a std140 block -- see `pipeline_emits_one_block_per_stage`.
-    assert_has(&glsl, "layout(std140) uniform UiVertU {");
-    assert_has(&glsl, "    mat4 uProjection;");
-    assert_has(&glsl, "    mat4 uView;");
-    assert_has(&glsl, "    mat4 uTransform;");
-    // Varyings out -- position is suppressed (it is gl_Position, not a varying).
-    assert_has(&glsl, "out vec2 TexCoord;");
-    assert_has(&glsl, "out vec4 Color;");
-    assert!(
-        !glsl.contains("out vec4 position;"),
-        "position must not be a varying:\n{glsl}"
-    );
-    // main writes gl_Position from the position field + the varying outs.
-    assert_has(&glsl, "gl_Position =");
-    assert_has(&glsl, "TexCoord = ");
-}
-
-#[test]
-fn pipeline_scaffold_pixel_block() {
-    let glsl = emit_pipeline(UI_SRC, "ui_vert", "ui_frag").expect("emit");
-    assert_has(&glsl, "#ifdef PIXEL");
-    // Varyings arrive as `in`, matching the vertex `out` (position excluded).
-    assert_has(&glsl, "in vec2 TexCoord;");
-    assert_has(&glsl, "in vec4 Color;");
-    assert_has(&glsl, "out vec4 FragColor;");
-    // The fragment stage's own block, separate from the vertex stage's.
+    // The fragment stage gets its own block; no member falls back to a loose
+    // uniform, and members stay bare globals in both bodies.
     assert_has(
-        &glsl,
-        "layout(std140) uniform UiFragU {\n    vec2 uSize;\n    float uRatio;\n};",
+        glsl,
+        "layout(std140) uniform UiFragU {\n    vec2 uSize;\n    float uRatio;\n};\n",
     );
-    assert_has(&glsl, "void main()");
-    assert_has(&glsl, "FragColor = ui_frag(");
+    assert_lacks(glsl, "uniform mat4 uProjection;");
+    assert_lacks(glsl, "u.uSize");
+    // Varyings out -- position is suppressed (it is gl_Position, not a varying).
+    assert_has(glsl, "out vec2 TexCoord;");
+    assert_has(glsl, "out vec4 Color;");
+    assert_lacks(glsl, "out vec4 position;");
+    assert_has(glsl, "gl_Position =");
+    assert_has(glsl, "TexCoord = ");
+    // Pixel inputs match the vertex outputs; this fixture has one bare output.
+    assert_has(glsl, "#ifdef PIXEL");
+    assert_has(glsl, "in vec2 TexCoord;");
+    assert_has(glsl, "in vec4 Color;");
+    assert_has(glsl, "out vec4 FragColor;");
+    assert_has(glsl, "void main()");
+    assert_has(glsl, "FragColor = ui_frag(");
+    assert_lacks(glsl, "layout(location = 0) out vec4");
+
+    let bound: Vec<(u32, &str)> = em
+        .abi
+        .uniform_blocks
+        .iter()
+        .map(|(b, p)| (*b, p.plan.struct_name.as_str()))
+        .collect();
+    assert_eq!(
+        bound,
+        vec![(1, "UiVertU"), (2, "UiFragU")],
+        "role -> binding"
+    );
+    assert!(
+        em.abi.texture_units.is_empty(),
+        "program with no texture group must report no slots: {:?}",
+        em.abi.texture_units
+    );
 }
 
 // --- pipeline rejects (spanned emit CompilerError) ---------------------------
@@ -428,18 +420,6 @@ fn mrt_fragment_outputs_by_field_order() {
     assert!(
         !glsl.contains("\nout vec4 FragColor;"),
         "MRT must not emit the bare FragColor out:\n{glsl}"
-    );
-}
-
-/// Single-Vec4 fragment return is unchanged by the MRT work.
-#[test]
-fn single_output_fragment_still_wraps() {
-    let glsl = emit_pipeline(UI_SRC, "ui_vert", "ui_frag").expect("emit");
-    assert_has(&glsl, "out vec4 FragColor;");
-    assert_has(&glsl, "FragColor = ui_frag(");
-    assert!(
-        !glsl.contains("layout(location = 0) out vec4"),
-        "single output has no layout:\n{glsl}"
     );
 }
 
@@ -1110,35 +1090,6 @@ fn mat4_attribute_rejects_rather_than_misnumbering_what_follows() {
 // over the other with nothing to report. Grouping them makes the unit a
 // property of field order, which the CPU side reads from the artifact.
 
-#[test]
-fn textures_group_declares_each_sampler() {
-    let src = r#"
-        struct GrassTex { uTexture: Sampler2D, mask_tex: Sampler2D, shadowmap_tex: Sampler2D }
-        value Quad { aPos: Vec2, aUv: Vec2 }
-        value Vary { position: Vec4, uv: Vec2 }
-        @shader(vertex)
-        fn vs(@attr a: Quad) -> Vary {
-            return Vary { position: v(a.aPos, 0.0, 1.0), uv: a.aUv }
-        }
-        @shader(fragment)
-        fn fs(vary: Vary, @textures t: GrassTex) -> Vec4 {
-            return texture(t.uTexture, vary.uv) * texture(t.mask_tex, vary.uv)
-        }
-    "#;
-    let glsl = emit_pipeline(src, "vs", "fs").expect("must emit");
-    for n in ["uTexture", "mask_tex", "shadowmap_tex"] {
-        assert!(
-            glsl.contains(&format!("uniform sampler2D {n};")),
-            "want `{n}` declared:\n{glsl}"
-        );
-    }
-    // The group param is not itself a GLSL entity -- field reads are bare globals.
-    assert!(
-        !glsl.contains("t."),
-        "the group param must not survive into GLSL:\n{glsl}"
-    );
-}
-
 /// An integer sampler in the group keeps its kind: `isampler2D`, not the float
 /// spelling. Reading an r32i id target through a float sampler is undefined.
 #[test]
@@ -1225,10 +1176,10 @@ cases! { reject_pipeline:
     "#, "vs", "fs", "one program has one group");
 }
 
-/// The emission hands the engine the slot order -- the whole compiler-to-engine
-/// channel for texture binding.
+/// Declarations and ABI slot order come from the same field order, the whole
+/// compiler-to-engine channel for texture binding.
 #[test]
-fn emission_reports_texture_slots_in_order() {
+fn texture_group_emits_and_reports_slots_in_order() {
     let src = r#"
         struct GrassTex { uTexture: Sampler2D, mask_tex: Sampler2D, shadowmap_tex: Sampler2D }
         value Quad { aPos: Vec2, aUv: Vec2 }
@@ -1239,30 +1190,16 @@ fn emission_reports_texture_slots_in_order() {
         fn fs(vary: Vary, @textures t: GrassTex) -> Vec4 {
             let a = texture(t.uTexture, vary.uv)
             let b = texture(t.mask_tex, vary.uv)
-            let c = texture(t.shadowmap_tex, vary.uv)
-            return Vec4 { x: a.x, y: b.y, z: c.z, w: 1.0 }
+            return Vec4 { x: a.x, y: b.y, z: 0.0, w: 1.0 }
         }
     "#;
-    let (ws, mid) = workspace(src);
-    let e = crate::support::emit_program(&ws, mid, Some("vs"), "fs", GlslProfile::Core330)
-        .expect("must emit");
+    let e = crate::support::pipeline_emission(src, "vs", "fs").expect("must emit");
+    for n in ["uTexture", "mask_tex", "shadowmap_tex"] {
+        assert_has(&e.source, &format!("uniform sampler2D {n};"));
+    }
+    assert_lacks(&e.source, "t.");
     let names: Vec<String> = e.abi.texture_units.iter().map(|n| n.to_string()).collect();
     assert_eq!(names, vec!["uTexture", "mask_tex", "shadowmap_tex"]);
-}
-
-/// No group -> nothing for the engine to bind by slot; the bare-sampler path is
-/// unchanged.
-#[test]
-fn emission_reports_no_slots_without_a_group() {
-    let (ws, mid) = workspace(UI_SRC);
-    let e =
-        crate::support::emit_program(&ws, mid, Some("ui_vert"), "ui_frag", GlslProfile::Core330)
-            .expect("must emit");
-    assert!(
-        e.abi.texture_units.is_empty(),
-        "got {:?}",
-        e.abi.texture_units
-    );
 }
 
 // --- @engine: the engine-owned block at binding 0 ----------------------------
@@ -1298,49 +1235,27 @@ const ENGINE_SRC: &str = r#"
     }
 "#;
 
+/// One emission pins EngineU in both stages, its coexistence with per-stage
+/// shader blocks, and the role-index ABI consumed by the engine.
 #[test]
-fn engine_block_is_declared_in_both_stages() {
-    let glsl = emit_pipeline(ENGINE_SRC, "e_vert", "e_frag").expect("emit");
+fn engine_block_coexists_and_binds_at_zero() {
+    let em = crate::support::pipeline_emission(ENGINE_SRC, "e_vert", "e_frag").expect("emit");
+    let glsl = &em.source;
     let decl = "layout(std140) uniform EngineU {\n    mat4 uProjection;\n    mat4 uView;\n    vec2 uYBounds;\n    float uTime;\n};\n";
     assert_eq!(glsl.matches(decl).count(), 2, "one per stage:\n{glsl}");
     // Unnamed instance, so members stay bare globals in both bodies.
-    assert_has(&glsl, "uProjection * uView");
-    assert_lacks(&glsl, "e.uProjection");
-}
-
-/// The shader's OWN group survives beside the engine block -- the case that
-/// rules out collapsing everything into one shared camera type (instanced grass
-/// mixes engine-owned camera/time with a game-owned `entity_count`).
-///
-/// Asserted on BOTH stages: the engine block and a shader-owned block coexist at
-/// distinct bindings, which is the property here.
-#[test]
-fn engine_block_coexists_with_a_shader_owned_block() {
-    let glsl = emit_pipeline(ENGINE_SRC, "e_vert", "e_frag").expect("emit");
+    assert_has(glsl, "uProjection * uView");
+    assert_lacks(glsl, "e.uProjection");
     assert_has(
-        &glsl,
+        glsl,
         "layout(std140) uniform UiFragU {\n    vec2 uSize;\n    float uRatio;\n};\n",
     );
-    assert_has(&glsl, "layout(std140) uniform EngineU {");
-    // The vertex stage's own group is a block at its own binding.
+    assert_has(glsl, "layout(std140) uniform EngineU {");
     assert_has(
-        &glsl,
+        glsl,
         "layout(std140) uniform GrassVertU {\n    int entity_count;\n};\n",
     );
-    // ...but the engine block's members never fall back to loose uniforms.
-    assert_lacks(&glsl, "uniform mat4 uProjection;");
-}
-
-/// The binding index comes from the param ROLE, not from position: `@engine` is
-/// slot 0, the vertex group 1, the fragment group 2. Reserved that way so slot 0
-/// means "the engine's block" even for a program that declares no `@engine` --
-/// which is what `register_uniform_blocks` relies on to turn a foreign block
-/// away there.
-#[test]
-fn engine_block_binds_at_index_zero() {
-    let (ws, mid) = workspace(ENGINE_SRC);
-    let em = crate::support::emit_program(&ws, mid, Some("e_vert"), "e_frag", GlslProfile::Core330)
-        .expect("emit");
+    assert_lacks(glsl, "uniform mat4 uProjection;");
     let bound: Vec<(u32, &str)> = em
         .abi
         .uniform_blocks
