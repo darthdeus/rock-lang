@@ -777,8 +777,8 @@ fn explicit_members(
         return Ok(None);
     };
     let mut out = Members::default();
-    if let Some(kind) = owned_kind(node, name) {
-        let key = first_owned(node, name).expect("kind implies key");
+    if let Some((key, kind)) = node.owned(name) {
+        let kind = resolved_kind(kind);
         if all_admit_key(ws, viewers, key) {
             out.found.push(Resolved {
                 key,
@@ -1763,27 +1763,4 @@ pub(crate) fn plain(name: Ustr) -> Resolved {
         kind: ResolvedKind::Binding,
         owner: None,
     }
-}
-
-fn owned_kind(node: &bone_core::modules::NsNode, name: Ustr) -> Option<ResolvedKind> {
-    if node.owned_types.contains_key(&name) {
-        Some(ResolvedKind::Type)
-    } else if node.owned_globals.contains_key(&name) {
-        Some(ResolvedKind::Global)
-    } else if node.owned_callables.contains_key(&name) {
-        Some(ResolvedKind::Callable)
-    } else if node.owned_decorators.contains_key(&name) {
-        Some(ResolvedKind::Decorator)
-    } else {
-        None
-    }
-}
-
-fn first_owned(node: &bone_core::modules::NsNode, name: Ustr) -> Option<Ustr> {
-    node.owned_types
-        .get(&name)
-        .or_else(|| node.owned_globals.get(&name))
-        .or_else(|| node.owned_callables.get(&name))
-        .or_else(|| node.owned_decorators.get(&name))
-        .copied()
 }

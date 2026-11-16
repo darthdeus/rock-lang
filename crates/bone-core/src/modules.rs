@@ -241,6 +241,21 @@ pub struct NsNode {
     pub glob_exports: Vec<ExportBinding>,
 }
 
+impl NsNode {
+    /// The definition this node owns under `name`, with its kind, read from
+    /// the type, global, callable and decorator tables in that order.
+    pub fn owned(&self, name: Ustr) -> Option<(Ustr, DefKind)> {
+        [
+            (&self.owned_types, DefKind::Type),
+            (&self.owned_globals, DefKind::Global),
+            (&self.owned_callables, DefKind::Callable),
+            (&self.owned_decorators, DefKind::Decorator),
+        ]
+        .into_iter()
+        .find_map(|(table, kind)| table.get(&name).map(|&key| (key, kind)))
+    }
+}
+
 /// A shared export binding: `pub use` / `private use` at module
 /// scope. The target stays UNRESOLVED — the resolver chases it lazily from
 /// the exporting module (with cycle rejection), so declaration order never
@@ -413,20 +428,7 @@ impl NsTree {
 
     /// Look up one member of the compiler-owned default export view.
     pub fn std_definition(&self, name: Ustr) -> Option<(Ustr, DefKind)> {
-        let root = self.std_root()?;
-        if let Some(&key) = root.owned_types.get(&name) {
-            return Some((key, DefKind::Type));
-        }
-        if let Some(&key) = root.owned_globals.get(&name) {
-            return Some((key, DefKind::Global));
-        }
-        if let Some(&key) = root.owned_callables.get(&name) {
-            return Some((key, DefKind::Callable));
-        }
-        root.owned_decorators
-            .get(&name)
-            .copied()
-            .map(|key| (key, DefKind::Decorator))
+        self.std_root()?.owned(name)
     }
 
     /// Whether `vis` on a node in `owner_pkg` admits access FROM

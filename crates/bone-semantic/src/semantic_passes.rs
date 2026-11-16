@@ -1536,7 +1536,7 @@ pub fn assemble_namespaces(
         let mut errs: Vec<CompilerError> = Vec::new();
         if let Some(h) = &contribution.header {
             if let Some(vis) = &h.vis {
-                let ns_vis = to_ns_vis(vis);
+                let ns_vis = NsVisibility::from_parser(vis);
                 let pkg = ws.ns.packages.get_mut(&pkg_id).expect("package ensured");
                 let key = NsPackage::path_key(&module_path);
                 let node = pkg.nodes.entry(key).or_insert_with(|| NsNode {
@@ -1903,7 +1903,7 @@ fn register_items(
                         segments: child.clone(),
                         ..Default::default()
                     });
-                    let ns_vis = to_ns_vis(&vis);
+                    let ns_vis = NsVisibility::from_parser(&vis);
                     if let Some(existing) = &node.vis {
                         if *existing != ns_vis {
                             errs.push(CompilerError::new_with_label(
@@ -1989,7 +1989,7 @@ fn register_items(
                     "callable" => bone_core::modules::DefKind::Callable,
                     _ => bone_core::modules::DefKind::Decorator,
                 };
-                let vis = to_ns_vis(
+                let vis = NsVisibility::from_parser(
                     &item_vis
                         .clone()
                         .unwrap_or(skull_parser::Visibility::Private),
@@ -2062,7 +2062,7 @@ fn share_export(
     let vis = decl.vis.clone();
     let binding = bone_core::modules::ExportBinding {
         target,
-        vis: to_ns_vis(&vis.unwrap_or(skull_parser::Visibility::Private)),
+        vis: NsVisibility::from_parser(&vis.unwrap_or(skull_parser::Visibility::Private)),
     };
     let pkg = ws.ns.packages.get_mut(&pkg_id).expect("package");
     let key = NsPackage::path_key(path);
@@ -2094,10 +2094,6 @@ fn owned_name_and_kind(item: &ItemKind) -> Option<(ustr::Ustr, &'static str)> {
         ItemKind::Decorator(d) => Some((d.name.name, "decorator")),
         _ => None,
     }
-}
-
-fn to_ns_vis(vis: &skull_parser::Visibility) -> NsVisibility {
-    NsVisibility::from_parser(vis)
 }
 
 pub fn check_module_incremental(
