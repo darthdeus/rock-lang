@@ -2,6 +2,8 @@
 // instead of one per file. nextest still runs each test in its own
 // process, so isolation is unchanged.
 
+#[path = "support/fixture.rs"]
+mod fixture;
 #[path = "support/label_asserts.rs"]
 mod label_asserts;
 #[path = "support/response_invariants.rs"]
