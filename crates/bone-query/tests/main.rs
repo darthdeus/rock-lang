@@ -49,8 +49,6 @@ mod lint_incremental_matches_fresh;
 mod lsp_span_coverage;
 #[path = "lsp_utf16_columns.rs"]
 mod lsp_utf16_columns;
-#[path = "macro_call_site_sentinel.rs"]
-mod macro_call_site_sentinel;
 #[path = "macro_goto_definition.rs"]
 mod macro_goto_definition;
 #[path = "modules_v1.rs"]

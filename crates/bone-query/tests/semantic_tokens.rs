@@ -183,6 +183,14 @@ fn token_classification() {
             "macro twice(x: int) -> int {\n  x * 2\n}\nfn f() -> int {\n  return twice(3)\n}\n",
             &[(0, 6, "macro"), (4, 9, "macro")],
         ),
+        // Expansion stamps the whole invocation span onto every template node,
+        // so the template's `SPEED` starts at the call-site ident and its HIR
+        // entry (variable.static) once won over the macro name.
+        (
+            "macro call whose template starts with a global",
+            "global SPEED: int = 10\nmacro get_speed() -> int {\n  SPEED\n}\nfn f() -> int {\n  return get_speed()\n}\n",
+            &[(5, 9, "macro")],
+        ),
         (
             "contextual static keyword",
             "fn counter() -> int {\n    static n = 0\n    return n\n}\n",
