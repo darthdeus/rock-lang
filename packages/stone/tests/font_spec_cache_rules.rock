@@ -113,7 +113,10 @@ fn declaring_a_bad_font_keeps_the_current_font() {
         if before.get(font_spec_key(spec)) == null { font = declared }
         let rendered = DEFAULT_FONT.unwrap().data().unwrap().backend_id
         let bad_spec = font_spec_cache_test_spec(bad)
-        assert_error_logs(["[FONT] load_font failed for {bad} (size=24); keeping the current font"], () => {
+        assert_error_logs([
+            "[TEXT] rasterize_glyphs: failed to parse font '{bad}': UnknownMagic",
+            "[FONT] load_font failed for {bad} (size=24); keeping the current font",
+        ], () => {
             assert(declare_game_font(bad_spec) == null, "an unloadable font reports failure")
         })
         assert_eq(DEFAULT_FONT.unwrap().data().unwrap().backend_id, rendered,

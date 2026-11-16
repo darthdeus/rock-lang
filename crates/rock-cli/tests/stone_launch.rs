@@ -1,6 +1,90 @@
 use std::path::Path;
 
 #[test]
+fn package_tests_observe_native_errors_and_scoped_mixed_records() {
+    for dependency in ["stone", "stone-native"] {
+        let fixture = tempfile::tempdir().unwrap();
+        let manifest = "[package]\nname = \"native-errors\"\n[language]\nmodules = \"v1\"\n[dependencies]\nstone = { package = \"stone\" }\nstone-core = { package = \"stone-core\" }\n[build.vars]\nGIT_SHA = \"probe\"\nBUILD_UNIX = \"0\"\nBUILD_DATE = \"test\"\nCHANNEL = { builtin = \"channel\" }\nPLATFORM = { builtin = \"platform\" }\n";
+        std::fs::write(
+            fixture.path().join("stick.toml"),
+            manifest.replace(
+                "stone = { package = \"stone\" }",
+                &format!("{dependency} = {{ package = \"{dependency}\" }}"),
+            ),
+        )
+        .unwrap();
+        let source = r#"
+inline(lua) fn native_error() = "ffi.cdef('void stone_gpu_scope_begin(const char* name);'); stone.stone_gpu_scope_begin(nil)"
+inline(lua) fn continued() = "local f = assert(io.open('continued', 'w')); f:write('yes'); f:close()"
+@test
+fn native_failure() {
+    native_error()
+    continued()
+}
+@test
+fn scoped_mixed_control() {
+    assert_error_logs(["[PROBE] expected", "[STONE] stone_gpu_scope_begin: null name"], () => {
+        log_error("PROBE", "expected")
+        native_error()
+    })
+}
+@test
+fn later_clean_control() { assert(true) }
+@test
+fn extra_native_failure() {
+    assert_error_logs(["[PROBE] expected"], () => {
+        log_error("PROBE", "expected")
+        native_error()
+    })
+}
+@test
+fn native_overflow_failure() {
+    for _ in 0..257 { native_error() }
+}
+"#;
+        std::fs::write(
+            fixture.path().join("main.rock"),
+            format!("use {}::*;\n{source}", dependency.replace('-', "_")),
+        )
+        .unwrap();
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_rock"))
+            .arg("test")
+            .arg(fixture.path())
+            .current_dir(fixture.path())
+            .env(
+                "ROCK_DIR",
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+            )
+            .env("ROCK_TEST_SHARDS", "1")
+            .env("STONE_HEADLESS", "1")
+            .env_remove("ROCK_TEST_VERBOSE")
+            .env_remove("ROCK_PREBUILT_GAME")
+            .env_remove("ROCK_ENGINE_BUILD_RECEIPT")
+            .output()
+            .unwrap();
+        let text = test_utils::strip_ansi_sgr(&format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+        assert!(!output.status.success(), "native errors passed: {text}");
+        for expected in [
+            "native_errors::native_failure: error:",
+            "native_errors::extra_native_failure: error:",
+            "native_errors::native_overflow_failure: error:",
+            "2/5 @tests passed (3 failed)",
+            "1 additional error record(s) dropped",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?}: {text}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(fixture.path().join("continued")).unwrap(),
+            "yes"
+        );
+    }
+}
+
+#[test]
 fn an_external_project_rebuilds_its_native_library_with_a_prebuilt_toolchain() {
     let fixture = tempfile::tempdir().unwrap();
     let game = fixture.path().join("game");

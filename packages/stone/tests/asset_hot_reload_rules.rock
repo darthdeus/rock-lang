@@ -71,7 +71,9 @@ fn font_hot_reload_rerasterizes_into_the_same_backend() {
         assert(width_b != width_a, "reloading a different font changes the metrics ({width_a} -> {width_b})")
 
         assert(stone_file_write(tmp, "not a font"), "corrupt the temp font")
-        assert(!stone_reload_font_ffi(backend, tmp, raster), "reloading a corrupt font fails")
+        assert_error_logs(["[TEXT] rasterize_glyphs: failed to parse font '{tmp}': UnknownMagic"], () => {
+            assert(!stone_reload_font_ffi(backend, tmp, raster), "reloading a corrupt font fails")
+        })
         assert_eq(loaded.data().unwrap().backend_id, backend, "a failed reload keeps the font handle")
         assert_eq(loaded.measure(text, 16.0).x, width_b, "a failed reload keeps the old atlas metrics")
     }, () => {

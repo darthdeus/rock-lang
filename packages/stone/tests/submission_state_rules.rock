@@ -67,7 +67,9 @@ fn submission_state_case(fail: bool, trace: bool, depth_compare: string) {
         let write = stone_gl_write_state()
         let depth_write = stone_gl_depth_write_enabled()
         let errors = stone_log_record_total(0)
-        set_depth_mode("invalid-submission-depth", false)
+        assert_error_logs(["[RENDER] stone_set_depth_mode: unknown comparison \"invalid-submission-depth\"; depth state unchanged"], () => {
+            set_depth_mode("invalid-submission-depth", false)
+        })
         assert_eq(stone_log_record_total(0), errors + 1,
             "the public string API reports rejected depth names through the shared logger")
         assert(stone_log_records_text(0, errors + 1).contains("invalid-submission-depth"))
