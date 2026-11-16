@@ -105,7 +105,7 @@ pub fn transitive_global_reads<G: AsRef<[Ustr]>, C: AsRef<[Ustr]>>(
         callees[from as usize].push(to);
     }
 
-    let components = tarjan_components(&callees);
+    let components = strongly_connected_components(&callees);
     let mut component_of = vec![u32::MAX; node_count];
     for (index, members) in components.iter().enumerate() {
         for &member in members {
@@ -149,7 +149,7 @@ pub fn transitive_global_reads<G: AsRef<[Ustr]>, C: AsRef<[Ustr]>>(
 /// Tarjan's strongly connected components over `callees`, iteratively, in
 /// the order the search finishes them: every component appears after each
 /// component it has an edge into.
-fn tarjan_components(callees: &[Vec<u32>]) -> Vec<Vec<u32>> {
+pub fn strongly_connected_components(callees: &[Vec<u32>]) -> Vec<Vec<u32>> {
     const UNVISITED: u32 = u32::MAX;
     let n = callees.len();
     let mut index_of = vec![UNVISITED; n];
