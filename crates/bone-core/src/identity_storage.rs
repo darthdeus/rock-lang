@@ -106,36 +106,13 @@ pub(crate) fn identity_local_storage_violation(
     )
 }
 
-/// [`identity_storage_violation`] for an `@identity_storage` field: the Vec's
-/// direct elements are rows, and everything below them is ordinary storage.
+/// [`identity_violation_in`] at [`IdentityPosition::Row`] for the declared
+/// type of an `@identity_storage` field.
 pub(crate) fn identity_storage_field_violation(
     ws: &Workspace,
     ty: TyId,
 ) -> Option<IdentityStorageViolation> {
-    let mut classes = ParamClasses::default();
-    match static_expr(ws, ty) {
-        Some(TypeExpr::App {
-            ctor: TypeCtor::Array,
-            mut params,
-        }) => params.find_map(|p| {
-            visit(
-                ws,
-                Types { ws, bi: None },
-                ty.with_idx(p),
-                Top::Admitted,
-                IdentityStorageVia::Container,
-                &mut classes,
-            )
-        }),
-        _ => visit(
-            ws,
-            Types { ws, bi: None },
-            ty,
-            Top::Stored,
-            IdentityStorageVia::Direct,
-            &mut classes,
-        ),
-    }
+    identity_violation_in(ws, Types { ws, bi: None }, ty, IdentityPosition::Row)
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]

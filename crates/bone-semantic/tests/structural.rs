@@ -2007,6 +2007,20 @@ fn identity_storage_capability_is_the_arena_files_alone() {
     );
 }
 
+#[test]
+fn identity_storage_map_field_reports_only_the_capability() {
+    let errors = identity_storage_errors(
+        "<stdlib>/arena.rock",
+        MINI_ARENA_STORE,
+        Some("game"),
+        "struct Mob { hp: int }\nstruct Rows {\n    @identity_storage\n    by_id: Map<int, Mob>,\n}",
+    );
+    assert_eq!(
+        errors,
+        ["`@identity_storage` is reserved for the standard arena row store"],
+    );
+}
+
 // A package's own declaration decides whether its sites are reported: the
 // package name exempts nothing, and stdlib and unpackaged programs keep the
 // compiler's built-in exemption.
