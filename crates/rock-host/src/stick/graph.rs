@@ -689,37 +689,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unknown_language_modules_value_is_load_error() {
-        let err = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[language]\nmodules = \"v2\"\n",
-        )
-        .expect_err("unknown modules value must reject");
-        assert!(
-            err.to_string()
-                .contains("unknown `[language] modules` value")
-        );
-    }
-
-    #[test]
-    fn language_modules_v1_and_legacy_select_dialect() {
-        let v1 = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[language]\nmodules = \"v1\"\n",
-        )
-        .expect("v1 manifest parses");
-        assert_eq!(v1.dialect(), Dialect::V1);
-
-        let legacy = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[language]\nmodules = \"legacy\"\n",
-        )
-        .expect("legacy manifest parses");
-        assert_eq!(legacy.dialect(), Dialect::Legacy);
-
-        let absent = StickConfig::new_from_str("[package]\nname = \"x\"\nversion = \"0.1.0\"\n")
-            .expect("manifest without [language] parses");
-        assert_eq!(absent.dialect(), Dialect::Legacy);
-    }
-
     fn mixed_edge_error(consumer: &str, provider: &str) -> String {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("app");
@@ -736,35 +705,59 @@ mod tests {
     }
 
     #[test]
-    fn v1_consumer_of_legacy_dependency_is_rejected() {
-        let msg = mixed_edge_error("\n[language]\nmodules = \"v1\"\n", "");
-        assert!(
-            msg.contains("v1 package `app` depends on legacy package `lib-pkg`"),
-            "{msg}"
-        );
+    fn dependencies_across_module_systems_are_rejected() {
+        let v1 = "\n[language]\nmodules = \"v1\"\n";
+        for (consumer, provider, want) in [
+            (
+                v1,
+                "",
+                "v1 package `app` depends on legacy package `lib-pkg`",
+            ),
+            (
+                "",
+                v1,
+                "legacy package `app` depends on v1 package `lib-pkg`",
+            ),
+        ] {
+            let msg = mixed_edge_error(consumer, provider);
+            assert!(msg.contains(want), "{msg}");
+        }
     }
 
+    /// Channel scoping survives a transitive hop, or a dev-only package
+    /// reached through a library would ship in a release build.
     #[test]
-    fn legacy_consumer_of_v1_dependency_is_rejected() {
-        let msg = mixed_edge_error("", "\n[language]\nmodules = \"v1\"\n");
-        assert!(
-            msg.contains("legacy package `app` depends on v1 package `lib-pkg`"),
-            "{msg}"
+    fn channel_scoped_dependencies_resolve_only_on_matching_channels() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("app");
+        write_manifest(&tmp.path().join("leaf"), "leaf", "");
+        write_manifest(&tmp.path().join("tool"), "tool", "");
+        write_manifest(
+            &tmp.path().join("mid"),
+            "mid",
+            "\n[dependencies]\nleaf = { path = \"../leaf\", channels = [\"dev\"] }\n",
         );
-    }
-
-    #[test]
-    fn allow_legacy_dependency_key_is_rejected() {
-        let err = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[language]\nmodules = \"v1\"\n\n\
-             [dependencies]\nlib = { path = \"../lib\", allow_legacy = true }\n",
-        )
-        .expect_err("allow_legacy no longer exists");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("unknown key `allow_legacy` in dependency"),
-            "{msg}"
+        write_manifest(
+            &root,
+            "app",
+            "\n[dependencies]\nmid = \"../mid\"\ntool = { path = \"../tool\", channels = [\"dev\"] }\n",
         );
+        let config =
+            StickConfig::new_from_str(&fs::read_to_string(root.join("stick.toml")).unwrap())
+                .expect("manifest");
+        for (channel, want) in [
+            ("dev", vec!["app", "leaf", "mid", "tool"]),
+            ("steam", vec!["app", "mid"]),
+        ] {
+            let graph = PackageGraph::build_with_channel(&root, &config, channel).expect("graph");
+            let mut names: Vec<&str> = graph
+                .packages()
+                .iter()
+                .map(|p| p.manifest_name.as_str())
+                .collect();
+            names.sort();
+            assert_eq!(names, want, "{channel}");
+        }
     }
 
     #[test]

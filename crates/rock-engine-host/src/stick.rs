@@ -147,15 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn release_section_rejects_unknown_keys_and_escape_paths() {
-        let err =
-            StickConfig::new_from_str("[package]\nname = \"x\"\n[release]\nasset = [\"assets\"]\n")
-                .expect_err("unknown release key must reject");
-        assert!(
-            format!("{err}").contains("asset"),
-            "error names the bad release key: {err}"
-        );
-
+    fn release_section_rejects_escape_paths() {
         let cfg = StickConfig::new_from_str(
             "[package]\nname = \"x\"\n[release]\nassets = [\"../outside\"]\n",
         )

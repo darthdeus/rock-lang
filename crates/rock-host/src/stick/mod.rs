@@ -1166,6 +1166,10 @@ impl StickConfig {
 mod tests {
     use super::*;
 
+    fn manifest(body: &str) -> Result<StickConfig> {
+        StickConfig::new_from_str(&format!("[package]\nname = \"x\"\n{body}"))
+    }
+
     #[test]
     fn toolchain_package_dependencies_resolve_through_the_graph() {
         let temp = tempfile::tempdir().unwrap();
@@ -1184,25 +1188,70 @@ mod tests {
         );
     }
 
+    /// Fail closed: a misspelled key would otherwise silently drop the
+    /// declaration it belonged to.
     #[test]
-    fn the_language_memory_key_is_a_removal_error() {
-        let err =
-            StickConfig::new_from_str("[package]\nname = \"x\"\n[language]\nmemory = \"game\"\n")
-                .expect_err("`[language] memory` must not load");
-        let text = format!("{err:#}");
-        assert!(
-            text.contains("`[language] memory` was removed; delete it"),
-            "{text}"
-        );
+    fn manifest_rejections_name_the_offending_key() {
+        for (body, wants) in [
+            ("[dependecies]\n", ["`dependecies`", "top level"]),
+            (
+                "[ios]\norientation = \"portrait\"\n",
+                ["unknown key `ios`", "top level"],
+            ),
+            ("verison = \"1\"\n", ["`verison`", "[package]"]),
+            ("[engine]\nneed = []\n", ["`need`", "[engine]"]),
+            ("[build]\nchanels = [\"dev\"]\n", ["`chanels`", "[build]"]),
+            (
+                "[build.vars]\nX = { comand = \"echo hi\" }\n",
+                ["`comand`", "[build.vars] entry"],
+            ),
+            (
+                "[build.vars]\nCLOCK = { value = \"now\", volatlie = true }\n",
+                ["`volatlie`", "[build.vars] entry"],
+            ),
+            (
+                "[build.vars]\nTREE = { source_fingerprint = { roots = [\"src\"], unknown = [\"x\"] } }\n",
+                ["`unknown`", "roots"],
+            ),
+            (
+                "[build.vars]\nCLOCK = { value = \"now\", volatile = \"yes\" }\n",
+                ["expected a boolean", "CLOCK"],
+            ),
+            ("[sound]\npath = \"x.json\"\n", ["`path`", "[sound]"]),
+            ("[sound]\n", ["missing field", "project"]),
+            (
+                "[assets]\noverlay = [\"somewhere\"]\n",
+                ["`overlay`", "known keys: overlays"],
+            ),
+            (
+                "[release]\nasset = [\"assets\"]\n",
+                ["`asset`", "[release]"],
+            ),
+            (
+                "[language]\nmemory = \"game\"\n",
+                ["`[language] memory` was removed", "delete it"],
+            ),
+            (
+                "[language]\nmodules = \"v2\"\n",
+                ["unknown `[language] modules` value", "`v2`"],
+            ),
+            (
+                "[dependencies]\nlib = { path = \"../lib\", allow_legacy = true }\n",
+                ["unknown key `allow_legacy`", "in dependency"],
+            ),
+        ] {
+            let text = format!("{:#}", manifest(body).expect_err(body));
+            assert!(
+                wants.iter().all(|want| text.contains(want)),
+                "{body}: {text}"
+            );
+        }
     }
 
     #[test]
     fn the_language_identity_storage_key_declares_the_migration_state() {
         use rock_core::source_code::IdentityStorage;
-        let state = |language: &str| {
-            StickConfig::new_from_str(&format!("[package]\nname = \"x\"\n{language}"))
-                .map(|c| c.identity_storage())
-        };
+        let state = |language: &str| manifest(language).map(|c| c.identity_storage());
         assert_eq!(state("").unwrap(), IdentityStorage::Enforced);
         assert_eq!(
             state("[language]\nidentity_storage = \"enforced\"\n").unwrap(),
@@ -1239,303 +1288,55 @@ mod tests {
     }
 
     #[test]
-    fn dependency_tables_require_exactly_one_source() {
-        for source in [
-            "",
-            "path = \"../x\", package = \"x\"",
-            "package = \"x\", package = \"y\"",
+    fn language_modules_select_the_dialect() {
+        for (body, dialect) in [
+            ("", rock_core::source_code::Dialect::Legacy),
+            (
+                "[language]\nmodules = \"legacy\"\n",
+                rock_core::source_code::Dialect::Legacy,
+            ),
+            (
+                "[language]\nmodules = \"v1\"\n",
+                rock_core::source_code::Dialect::V1,
+            ),
         ] {
-            let text =
-                format!("[package]\nname = \"consumer\"\n[dependencies]\nx = {{ {source} }}\n");
-            assert!(StickConfig::new_from_str(&text).is_err(), "{text}");
+            assert_eq!(manifest(body).unwrap().dialect(), dialect, "{body}");
         }
     }
 
     #[test]
-    fn a_channel_scoped_dependency_parses_its_channel_list() {
-        let cfg = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[dependencies]\ndev-only = { path = \"../dep\", channels = [\"dev\"] }\n",
+    fn dependencies_are_a_path_or_a_table_with_exactly_one_source() {
+        let cfg = manifest(
+            "[dependencies]\ncore = \"../core\"\ndev-only = { path = \"../dep\", channels = [\"dev\"] }\n",
         )
-        .expect("channel-scoped dependency parses");
+        .unwrap();
+        assert!(matches!(cfg.dependencies["core"], Dependency::Path(_)));
         let Dependency::Detailed(dep) = &cfg.dependencies["dev-only"] else {
             panic!("inline table dependency must parse as detailed");
         };
         assert_eq!(dep.source, DependencySource::Path("../dep".into()));
         assert_eq!(dep.channels, vec!["dev".to_string()]);
-    }
-
-    #[test]
-    fn a_path_dependency_has_no_channel_scope() {
-        let cfg = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[dependencies]\ncore = \"../core\"\n",
-        )
-        .expect("path dependency parses");
-        assert!(matches!(cfg.dependencies["core"], Dependency::Path(_)));
-    }
-
-    #[test]
-    fn a_channel_scoped_dependency_resolves_only_on_a_matching_channel() {
-        let workspace = tempfile::tempdir().expect("tempdir");
-        let consumer = workspace.path().join("consumer");
-        let dep = workspace.path().join("dep");
-        fs_err::create_dir_all(&consumer).unwrap();
-        fs_err::create_dir_all(&dep).unwrap();
-        fs_err::write(
-            consumer.join("stick.toml"),
-            "[package]\nname = \"consumer\"\n[dependencies]\ndev-only = { path = \"../dep\", channels = [\"dev\"] }\n",
-        )
-        .unwrap();
-        fs_err::write(
-            dep.join("stick.toml"),
-            "[package]\nname = \"dep\"\ntype = \"lib\"\n",
-        )
-        .unwrap();
-
-        let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
-        let dev =
-            graph::PackageGraph::build_with_channel(&consumer, &cfg, "dev").expect("dev resolve");
-        assert_eq!(
-            dev.package(dev.root()).dependencies.len(),
-            1,
-            "matching channel includes the scoped dep"
-        );
-
-        let steam = graph::PackageGraph::build_with_channel(&consumer, &cfg, "steam")
-            .expect("steam resolve");
-        assert!(
-            steam.package(steam.root()).dependencies.is_empty(),
-            "non-matching channel excludes the scoped dep"
-        );
-    }
-
-    #[test]
-    fn an_unscoped_dependency_resolves_on_every_channel() {
-        let workspace = tempfile::tempdir().expect("tempdir");
-        let consumer = workspace.path().join("consumer");
-        let dep = workspace.path().join("dep");
-        fs_err::create_dir_all(&consumer).unwrap();
-        fs_err::create_dir_all(&dep).unwrap();
-        fs_err::write(
-            consumer.join("stick.toml"),
-            "[package]\nname = \"consumer\"\n[dependencies]\ncore = \"../dep\"\n",
-        )
-        .unwrap();
-        fs_err::write(
-            dep.join("stick.toml"),
-            "[package]\nname = \"dep\"\ntype = \"lib\"\n",
-        )
-        .unwrap();
-
-        let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
-        for channel in ["dev", "steam", "itch"] {
-            let resolved =
-                graph::PackageGraph::build_with_channel(&consumer, &cfg, channel).expect("resolve");
-            assert_eq!(
-                resolved.package(resolved.root()).dependencies.len(),
-                1,
-                "unscoped dep resolves on {channel}"
-            );
+        for source in [
+            "",
+            "path = \"../x\", package = \"x\"",
+            "package = \"x\", package = \"y\"",
+        ] {
+            let body = format!("[dependencies]\nx = {{ {source} }}\n");
+            assert!(manifest(&body).is_err(), "{body}");
         }
     }
 
-    /// A three-package chain, consumer -> mid -> leaf, where the consumer
-    /// declares only `mid`. Without transitive resolution `leaf` is silently
-    /// dropped from the module set and every symbol it defines is an undefined
-    /// name at type-check time, which is what made a shared core package
-    /// impossible without editing every consumer's manifest.
-    #[test]
-    fn a_transitive_dependency_resolves_through_its_parent() {
-        let workspace = tempfile::tempdir().expect("tempdir");
-        let consumer = workspace.path().join("consumer");
-        let mid = workspace.path().join("mid");
-        let leaf = workspace.path().join("leaf");
-        for dir in [&consumer, &mid, &leaf] {
-            fs_err::create_dir_all(dir).unwrap();
-        }
-        fs_err::write(
-            consumer.join("stick.toml"),
-            "[package]\nname = \"consumer\"\n[dependencies]\nmid = \"../mid\"\n",
-        )
-        .unwrap();
-        fs_err::write(
-            mid.join("stick.toml"),
-            "[package]\nname = \"mid\"\ntype = \"lib\"\n[dependencies]\nleaf = \"../leaf\"\n",
-        )
-        .unwrap();
-        fs_err::write(
-            leaf.join("stick.toml"),
-            "[package]\nname = \"leaf\"\ntype = \"lib\"\n",
-        )
-        .unwrap();
-
-        let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
-        let graph =
-            graph::PackageGraph::build_with_channel(&consumer, &cfg, "dev").expect("resolve");
-        let names: Vec<&str> = graph
-            .load_order()
-            .iter()
-            .filter(|id| **id != graph.root())
-            .map(|id| graph.package(*id).manifest_name.as_str())
-            .collect();
-        assert_eq!(
-            names,
-            vec!["leaf", "mid"],
-            "a transitive dependency is resolved, and before the package that needs it"
-        );
-    }
-
-    /// The path in a dependency's manifest is relative to THAT manifest, not to
-    /// the root project. A chain that only works when every package sits in one
-    /// flat directory would pass the test above and still break on the real
-    /// tree, where libs/ and games/ are nested at different depths.
-    #[test]
-    fn a_transitive_path_resolves_against_its_own_manifest() {
-        let workspace = tempfile::tempdir().expect("tempdir");
-        let consumer = workspace.path().join("games").join("consumer");
-        let mid = workspace.path().join("libs").join("mid");
-        let leaf = workspace.path().join("leaf");
-        for dir in [&consumer, &mid, &leaf] {
-            fs_err::create_dir_all(dir).unwrap();
-        }
-        fs_err::write(
-            consumer.join("stick.toml"),
-            "[package]\nname = \"consumer\"\n[dependencies]\nmid = \"../../libs/mid\"\n",
-        )
-        .unwrap();
-        // "../../leaf" from libs/mid. Read against the root it would be wrong.
-        fs_err::write(
-            mid.join("stick.toml"),
-            "[package]\nname = \"mid\"\ntype = \"lib\"\n[dependencies]\nleaf = \"../../leaf\"\n",
-        )
-        .unwrap();
-        fs_err::write(
-            leaf.join("stick.toml"),
-            "[package]\nname = \"leaf\"\ntype = \"lib\"\n",
-        )
-        .unwrap();
-
-        let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
-        let graph =
-            graph::PackageGraph::build_with_channel(&consumer, &cfg, "dev").expect("resolve");
-        let found = graph
-            .packages()
-            .iter()
-            .find(|p| p.manifest_name == "leaf")
-            .expect("the transitive leaf resolves");
-        assert_eq!(
-            found.root.canonicalize().unwrap(),
-            leaf.canonicalize().unwrap(),
-            "the leaf resolves to the path its own manifest names"
-        );
-    }
-
-    /// Channel scoping has to survive the extra hop, or a dev-only package
-    /// reached through a library would ship in a release build.
-    #[test]
-    fn a_channel_scoped_transitive_dependency_keeps_its_scope() {
-        let workspace = tempfile::tempdir().expect("tempdir");
-        let consumer = workspace.path().join("consumer");
-        let mid = workspace.path().join("mid");
-        let leaf = workspace.path().join("leaf");
-        for dir in [&consumer, &mid, &leaf] {
-            fs_err::create_dir_all(dir).unwrap();
-        }
-        fs_err::write(
-            consumer.join("stick.toml"),
-            "[package]\nname = \"consumer\"\n[dependencies]\nmid = \"../mid\"\n",
-        )
-        .unwrap();
-        fs_err::write(
-            mid.join("stick.toml"),
-            "[package]\nname = \"mid\"\ntype = \"lib\"\n[dependencies]\nleaf = { path = \"../leaf\", channels = [\"dev\"] }\n",
-        )
-        .unwrap();
-        fs_err::write(
-            leaf.join("stick.toml"),
-            "[package]\nname = \"leaf\"\ntype = \"lib\"\n",
-        )
-        .unwrap();
-
-        let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
-        let names_on = |channel: &str| -> Vec<String> {
-            let graph =
-                graph::PackageGraph::build_with_channel(&consumer, &cfg, channel).expect("resolve");
-            graph
-                .packages()
-                .iter()
-                .map(|p| p.manifest_name.clone())
-                .collect()
-        };
-        let dev_names = names_on("dev");
-        assert!(
-            dev_names.contains(&"leaf".to_string()),
-            "dev keeps the scoped leaf"
-        );
-
-        let steam_names = names_on("steam");
-        assert!(
-            !steam_names.contains(&"leaf".to_string()),
-            "a dev-only package reached through a library stays out of a release build"
-        );
-        assert!(
-            steam_names.contains(&"mid".to_string()),
-            "the library itself still resolves"
-        );
-    }
-
-    /// A cycle through a transitive edge must be reported, not looped on.
-    #[test]
-    fn a_dependency_cycle_is_reported() {
-        let workspace = tempfile::tempdir().expect("tempdir");
-        let consumer = workspace.path().join("consumer");
-        let a = workspace.path().join("a");
-        let b = workspace.path().join("b");
-        for dir in [&consumer, &a, &b] {
-            fs_err::create_dir_all(dir).unwrap();
-        }
-        fs_err::write(
-            consumer.join("stick.toml"),
-            "[package]\nname = \"consumer\"\n[dependencies]\na = \"../a\"\n",
-        )
-        .unwrap();
-        fs_err::write(
-            a.join("stick.toml"),
-            "[package]\nname = \"a\"\ntype = \"lib\"\n[dependencies]\nb = \"../b\"\n",
-        )
-        .unwrap();
-        fs_err::write(
-            b.join("stick.toml"),
-            "[package]\nname = \"b\"\ntype = \"lib\"\n[dependencies]\na = \"../a\"\n",
-        )
-        .unwrap();
-
-        let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
-        let err = graph::PackageGraph::build_with_channel(&consumer, &cfg, "dev")
-            .expect_err("a cycle is an error, not a hang");
-        assert!(
-            err.to_string().contains("circular") && err.to_string().contains("a -> b -> a"),
-            "the error names the cycle, got: {err}"
-        );
-    }
-
+    /// A minimal manifest without a version used to crash rock-lsp shortly
+    /// after initialize.
     #[test]
     fn package_version_defaults_when_missing() {
-        // Minimal stick.toml without a version field used to crash
-        // rock-lsp ~100ms after initialize. Now parses cleanly with
-        // a default version. Pinned by editors/nvim/tests/
-        // rock_lsp_minimal_project_sentinel_spec.lua — flip when
-        // committing this fix.
-        let cfg = StickConfig::new_from_str("[package]\nname = \"x\"\n")
-            .expect("minimal stick.toml must parse without explicit version");
+        let cfg = manifest("").expect("minimal stick.toml must parse without explicit version");
         assert_eq!(cfg.package.name, "x");
         assert_eq!(cfg.package.version(), "0.0.0");
-    }
-
-    #[test]
-    fn package_version_preserved_when_set() {
-        let cfg =
-            StickConfig::new_from_str("[package]\nname = \"x\"\nversion = \"1.2.3\"\n").unwrap();
-        assert_eq!(cfg.package.version(), "1.2.3");
+        assert_eq!(
+            manifest("version = \"1.2.3\"\n").unwrap().package.version(),
+            "1.2.3"
+        );
     }
 
     #[test]
@@ -1562,410 +1363,22 @@ mod tests {
         }
     }
 
+    /// Optional loading distinguishes an absent manifest from a malformed or
+    /// unreadable one.
     #[test]
-    fn top_package_and_engine_reject_unknown_keys() {
-        for (toml, key, table) in [
-            (
-                "[package]\nname = \"x\"\n[dependecies]\n",
-                "dependecies",
-                "top level",
-            ),
-            (
-                "[package]\nname = \"x\"\nverison = \"1\"\n",
-                "verison",
-                "[package]",
-            ),
-            (
-                "[package]\nname = \"x\"\n[engine]\nneed = []\n",
-                "need",
-                "[engine]",
-            ),
-        ] {
-            let msg = format!("{}", StickConfig::new_from_str(toml).expect_err(toml));
-            assert!(
-                msg.contains(&format!("`{key}`")) && msg.contains(table),
-                "{msg}"
-            );
-        }
-    }
-
-    #[test]
-    fn retired_ios_section_rejects() {
-        let err = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[ios]\norientation = \"portrait\"\n",
-        )
-        .expect_err("retired [ios] section must be rejected");
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("unknown key `ios`"),
-            "error names the bad key: {msg}"
-        );
-    }
-
-    // RED-then-GREEN: from_path_optional must distinguish "no manifest"
-    // (Ok(None)) from "manifest exists but is malformed" (Err). The old
-    // Optional loading must distinguish absence from malformed manifests.
-    // (silent-errors audit, 2026-05-02).
-
-    #[test]
-    fn from_path_optional_returns_none_when_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("does-not-exist.toml");
-        let result =
-            StickConfig::from_path_optional(&missing).expect("missing file must not be an error");
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn from_path_optional_returns_some_when_valid() {
+    fn from_path_optional_distinguishes_absence_from_failure() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("stick.toml");
+        assert!(StickConfig::from_path_optional(&path).unwrap().is_none());
+
         std::fs::write(&path, "[package]\nname = \"x\"\n").unwrap();
-        let result = StickConfig::from_path_optional(&path)
-            .expect("valid manifest must parse")
-            .expect("must be Some when file exists and parses");
-        assert_eq!(result.package.name, "x");
-    }
+        let found = StickConfig::from_path_optional(&path).unwrap().unwrap();
+        assert_eq!(found.package.name, "x");
 
-    #[test]
-    fn build_section_parses_channels_and_vars() {
-        let cfg = StickConfig::new_from_str(concat!(
-            "[package]\nname = \"x\"\n",
-            "[build]\n",
-            "channels = [\"dev\", \"steam\"]\n",
-            "default_channel = \"dev\"\n",
-            "[build.vars]\n",
-            "GIT_SHA = { cmd = \"git rev-parse --short HEAD\" }\n",
-            "CHANNEL = { builtin = \"channel\" }\n",
-            "ENDPOINT = \"https://example.test/v1\"\n",
-            "TOKEN = { cmd = \"./load.sh\", channels = [\"steam\"], default = \"\", secret = true }\n",
-        )).expect("build section must parse");
-        let build = cfg.build.as_ref().expect("build config present");
-        assert_eq!(build.channels, vec!["dev", "steam"]);
-        assert_eq!(build.default_channel.as_deref(), Some("dev"));
-        let sha = &build.vars["GIT_SHA"];
-        assert_eq!(sha.cmd.as_deref(), Some("git rev-parse --short HEAD"));
-        assert!(!sha.secret);
-        let chan = &build.vars["CHANNEL"];
-        assert_eq!(chan.builtin.as_deref(), Some("channel"));
-        let endpoint = &build.vars["ENDPOINT"];
-        assert_eq!(endpoint.value.as_deref(), Some("https://example.test/v1"));
-        let token = &build.vars["TOKEN"];
-        assert_eq!(token.channels.as_deref(), Some(&["steam".to_string()][..]));
-        assert_eq!(token.default.as_deref(), Some(""));
-        assert!(token.secret);
-        cfg.validate_build()
-            .expect("well-formed build section validates");
-    }
-
-    #[test]
-    fn build_section_rejects_unknown_key() {
-        let err =
-            StickConfig::new_from_str("[package]\nname = \"x\"\n[build]\nchanels = [\"dev\"]\n")
-                .expect_err("unknown [build] key must be rejected");
-        assert!(
-            format!("{err}").contains("chanels"),
-            "error names the bad key: {err}"
-        );
-    }
-
-    #[test]
-    fn sound_section_declares_a_project_path() {
-        let cfg = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[sound]\nproject = \"sound_project.json\"\n",
-        )
-        .expect("sound section must parse");
-
-        assert_eq!(
-            cfg.sound.as_ref().map(|sound| sound.project.as_str()),
-            Some("sound_project.json")
-        );
-    }
-
-    #[test]
-    fn sound_section_rejects_unknown_keys_and_missing_project() {
-        let unknown = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[sound]\npath = \"sound_project.json\"\n",
-        )
-        .expect_err("unknown sound key must reject");
-        assert!(format!("{unknown}").contains("path"));
-
-        let missing = StickConfig::new_from_str("[package]\nname = \"x\"\n[sound]\n")
-            .expect_err("sound project is required");
-        assert!(format!("{missing}").contains("project"));
-    }
-
-    #[test]
-    fn assets_section_rejects_unknown_keys() {
-        let err = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[assets]\noverlay = [\"somewhere\"]\n",
-        )
-        .expect_err("misspelled overlay key must reject");
-        assert!(format!("{err}").contains("known keys: overlays"));
-    }
-
-    #[test]
-    fn build_var_rejects_unknown_key() {
-        let err = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[build.vars]\nX = { comand = \"echo hi\" }\n",
-        )
-        .expect_err("unknown var key must be rejected");
-        assert!(
-            format!("{err}").contains("comand"),
-            "error names the bad key: {err}"
-        );
-    }
-
-    #[test]
-    fn build_var_parses_source_fingerprint_and_rejects_unknown_nested_keys() {
-        let cfg = StickConfig::new_from_str(concat!(
-            "[package]\nname = \"x\"\n",
-            "[build.vars]\n",
-            "REV = \"abc\"\n",
-            "TREE = { source_fingerprint = { roots = [\"src\"], files = [\"lock.json\"], vars = [\"REV\"] } }\n",
-        )).expect("source fingerprint declaration must parse");
-        let fingerprint = cfg.build.as_ref().unwrap().vars["TREE"]
-            .source_fingerprint
-            .as_ref()
-            .expect("source fingerprint is retained");
-        assert_eq!(fingerprint.roots, vec!["src"]);
-        assert_eq!(fingerprint.files, vec!["lock.json"]);
-        assert_eq!(fingerprint.vars, vec!["REV"]);
-        cfg.validate_build()
-            .expect("source fingerprint declaration validates");
-
-        let defaults = StickConfig::new_from_str(concat!(
-            "[package]\nname = \"x\"\n",
-            "[build.vars]\n",
-            "TREE = { source_fingerprint = {} }\n",
-        ))
-        .expect("omitted source fingerprint fields default to empty lists");
-        let fingerprint = defaults.build.as_ref().unwrap().vars["TREE"]
-            .source_fingerprint
-            .as_ref()
-            .expect("source fingerprint is retained");
-        assert!(fingerprint.roots.is_empty());
-        assert!(fingerprint.files.is_empty());
-        assert!(fingerprint.vars.is_empty());
-
-        let err = StickConfig::new_from_str(concat!(
-            "[package]\nname = \"x\"\n",
-            "[build.vars]\n",
-            "TREE = { source_fingerprint = { roots = [\"src\"], unknown = [\"x\"] } }\n",
-        ))
-        .expect_err("unknown source fingerprint key must reject");
-        assert!(
-            format!("{err}").contains("unknown"),
-            "error names the nested key: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_build_counts_source_fingerprint_as_a_source() {
-        let cfg = StickConfig::new_from_str(concat!(
-            "[package]\nname = \"x\"\n",
-            "[build.vars]\n",
-            "TREE = { source_fingerprint = { roots = [\"src\"] }, value = \"literal\" }\n",
-        ))
-        .expect("both source declarations parse");
-        let err = cfg.validate_build().expect_err("two sources must reject");
-        assert!(
-            format!("{err}").contains("TREE"),
-            "error names the var: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_build_requires_nonempty_source_fingerprint_roots_and_entries() {
-        for source in [
-            "roots = []",
-            "roots = [\"\"]",
-            "roots = [\"src\"], files = [\"\"]",
-            "roots = [\"src\"], vars = [\"\"]",
-        ] {
-            let manifest = format!(
-                "[package]\nname = \"x\"\n[build.vars]\nTREE = {{ source_fingerprint = {{ {source} }} }}\n"
-            );
-            let cfg = StickConfig::new_from_str(&manifest).expect("declaration parses");
-            let err = cfg
-                .validate_build()
-                .expect_err("empty source fingerprint entries must reject");
-            assert!(
-                format!("{err}").contains("TREE"),
-                "error names the var: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn validate_build_rejects_invalid_source_fingerprint_dependencies_and_metadata() {
-        let missing = StickConfig::new_from_str(concat!(
-            "[package]\nname = \"x\"\n",
-            "[build.vars]\n",
-            "TREE = { source_fingerprint = { roots = [\"src\"], vars = [\"MISSING\"] } }\n",
-        ))
-        .unwrap();
-        let err = missing
-            .validate_build()
-            .expect_err("undeclared fingerprint var must reject");
-        assert!(
-            format!("{err}").contains("MISSING"),
-            "error names the missing var: {err}"
-        );
-
-        let self_ref = StickConfig::new_from_str(concat!(
-            "[package]\nname = \"x\"\n",
-            "[build.vars]\n",
-            "TREE = { source_fingerprint = { roots = [\"src\"], vars = [\"TREE\"] } }\n",
-        ))
-        .unwrap();
-        self_ref
-            .validate_build()
-            .expect_err("self-reference must reject");
-
-        let deferred_ref = StickConfig::new_from_str(concat!(
-            "[package]\nname = \"x\"\n",
-            "[build.vars]\n",
-            "TREE = { source_fingerprint = { roots = [\"src\"], vars = [\"OTHER\"] } }\n",
-            "OTHER = { source_fingerprint = { roots = [\"other\"] } }\n",
-        ))
-        .unwrap();
-        deferred_ref
-            .validate_build()
-            .expect_err("deferred dependency must reject");
-
-        let volatile = StickConfig::new_from_str(concat!(
-            "[package]\nname = \"x\"\n",
-            "[build.vars]\n",
-            "TREE = { source_fingerprint = { roots = [\"src\"] }, volatile = true }\n",
-        ))
-        .unwrap();
-        volatile
-            .validate_build()
-            .expect_err("source fingerprint cannot be volatile");
-    }
-
-    #[test]
-    fn optional_channels_remains_cmd_only_with_source_fingerprint() {
-        let cfg = StickConfig::new_from_str(concat!(
-            "[package]\nname = \"x\"\n",
-            "[build]\nchannels = [\"dev\"]\n",
-            "[build.vars]\n",
-            "TREE = { source_fingerprint = { roots = [\"src\"] }, optional_channels = [\"dev\"], default = \"\" }\n",
-        )).unwrap();
-        let err = cfg
-            .validate_build()
-            .expect_err("optional_channels remains cmd-only");
-        assert!(
-            format!("{err}").contains("cmd"),
-            "error explains the cmd requirement: {err}"
-        );
-    }
-
-    #[test]
-    fn build_var_volatile_metadata_is_explicit_and_typed() {
-        let cfg = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[build.vars]\nCLOCK = { value = \"now\", volatile = true }\n",
-        )
-        .expect("volatile declaration must parse");
-        assert!(cfg.build.as_ref().unwrap().vars["CLOCK"].volatile);
-        cfg.validate_build()
-            .expect("volatile declaration must validate");
-
-        let err = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[build.vars]\nCLOCK = { value = \"now\", volatile = \"yes\" }\n",
-        ).expect_err("malformed volatile declaration must reject");
-        assert!(
-            format!("{err}").contains("boolean"),
-            "error explains the volatile type: {err}"
-        );
-    }
-
-    #[test]
-    fn build_var_unknown_metadata_cannot_disappear() {
-        let err = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[build.vars]\nCLOCK = { value = \"now\", volatlie = true }\n",
-        )
-        .expect_err("misspelled volatile declaration must reject");
-        assert!(
-            format!("{err}").contains("volatlie"),
-            "error names the bad key: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_build_rejects_multiple_sources() {
-        let cfg = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[build.vars]\nX = { cmd = \"echo hi\", builtin = \"channel\" }\n",
-        ).expect("parses; source arity is a validate error");
-        let err = cfg.validate_build().expect_err("two sources must reject");
-        assert!(format!("{err}").contains("X"), "error names the var: {err}");
-    }
-
-    #[test]
-    fn validate_build_rejects_sourceless_var() {
-        let cfg = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[build.vars]\nX = { secret = true }\n",
-        )
-        .unwrap();
-        cfg.validate_build()
-            .expect_err("a var with no source must reject");
-    }
-
-    #[test]
-    fn validate_build_rejects_unknown_builtin() {
-        let cfg = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[build.vars]\nX = { builtin = \"hostname\" }\n",
-        )
-        .unwrap();
-        let err = cfg
-            .validate_build()
-            .expect_err("unknown builtin must reject");
-        assert!(
-            format!("{err}").contains("hostname"),
-            "error names the builtin: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_build_rejects_undeclared_var_channel() {
-        let cfg = StickConfig::new_from_str(concat!(
-            "[package]\nname = \"x\"\n",
-            "[build]\nchannels = [\"dev\"]\n",
-            "[build.vars]\nX = { cmd = \"echo hi\", channels = [\"steam\"] }\n",
-        ))
-        .unwrap();
-        let err = cfg
-            .validate_build()
-            .expect_err("var channel outside [build] channels must reject");
-        assert!(
-            format!("{err}").contains("steam"),
-            "error names the channel: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_build_rejects_default_channel_outside_channels() {
-        let cfg = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[build]\nchannels = [\"dev\"]\ndefault_channel = \"steam\"\n",
-        )
-        .unwrap();
-        cfg.validate_build()
-            .expect_err("default_channel must be a declared channel");
-    }
-
-    #[test]
-    fn from_path_optional_surfaces_parse_errors() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("stick.toml");
         std::fs::write(&path, "this is not valid toml = = =\n").unwrap();
         let err = StickConfig::from_path_optional(&path)
             .expect_err("malformed manifest must surface as Err, not Ok(None)");
-        let msg = format!("{:#}", err);
-        assert!(
-            msg.contains("parse stick.toml") || msg.contains("stick.toml"),
-            "error mentions stick.toml: {msg}"
-        );
+        assert!(format!("{err:#}").contains("stick.toml"), "{err:#}");
 
         #[cfg(unix)]
         {
@@ -1985,27 +1398,140 @@ mod tests {
             );
         }
     }
-}
 
-#[cfg(test)]
-mod sim_config_tests {
-    use super::StickConfig;
+    #[test]
+    fn build_section_parses_channels_and_vars() {
+        let cfg = manifest(concat!(
+            "[build]\n",
+            "channels = [\"dev\", \"steam\"]\n",
+            "default_channel = \"dev\"\n",
+            "[build.vars]\n",
+            "GIT_SHA = { cmd = \"git rev-parse --short HEAD\" }\n",
+            "CHANNEL = { builtin = \"channel\" }\n",
+            "ENDPOINT = \"https://example.test/v1\"\n",
+            "TOKEN = { cmd = \"./load.sh\", channels = [\"steam\"], default = \"\", secret = true }\n",
+            "CLOCK = { value = \"now\", volatile = true }\n",
+            "REV = \"abc\"\n",
+            "TREE = { source_fingerprint = { roots = [\"src\"], files = [\"lock.json\"], vars = [\"REV\"] } }\n",
+        ))
+        .expect("build section must parse");
+        let build = cfg.build.as_ref().expect("build config present");
+        assert_eq!(build.channels, vec!["dev", "steam"]);
+        assert_eq!(build.default_channel.as_deref(), Some("dev"));
+        let sha = &build.vars["GIT_SHA"];
+        assert_eq!(sha.cmd.as_deref(), Some("git rev-parse --short HEAD"));
+        assert!(!sha.secret && !sha.volatile);
+        assert_eq!(build.vars["CHANNEL"].builtin.as_deref(), Some("channel"));
+        assert_eq!(
+            build.vars["ENDPOINT"].value.as_deref(),
+            Some("https://example.test/v1")
+        );
+        let token = &build.vars["TOKEN"];
+        assert_eq!(token.channels.as_deref(), Some(&["steam".to_string()][..]));
+        assert_eq!(token.default.as_deref(), Some(""));
+        assert!(token.secret);
+        assert!(build.vars["CLOCK"].volatile);
+        let fingerprint = build.vars["TREE"].source_fingerprint.as_ref().unwrap();
+        assert_eq!(fingerprint.roots, vec!["src"]);
+        assert_eq!(fingerprint.files, vec!["lock.json"]);
+        assert_eq!(fingerprint.vars, vec!["REV"]);
+        cfg.validate_build()
+            .expect("well-formed build section validates");
+    }
+
+    /// Omitted fields default to empty lists so validation can name the var.
+    #[test]
+    fn source_fingerprint_fields_default_to_empty_lists() {
+        let cfg = manifest("[build.vars]\nTREE = { source_fingerprint = {} }\n").unwrap();
+        let empty = cfg.build.unwrap().vars["TREE"]
+            .source_fingerprint
+            .clone()
+            .unwrap();
+        assert!(empty.roots.is_empty() && empty.files.is_empty() && empty.vars.is_empty());
+    }
+
+    #[test]
+    fn validate_build_rejects_inconsistent_declarations() {
+        let fingerprint = |fields: &str| {
+            format!("[build.vars]\nTREE = {{ source_fingerprint = {{ {fields} }} }}\n")
+        };
+        for (body, want) in [
+            (
+                "[build]\nchannels = [\"dev\"]\ndefault_channel = \"steam\"\n".to_string(),
+                "default_channel \"steam\"",
+            ),
+            (
+                "[build.vars]\nX = { cmd = \"echo hi\", builtin = \"channel\" }\n".into(),
+                "X has more than one source",
+            ),
+            (
+                "[build.vars]\nTREE = { source_fingerprint = { roots = [\"src\"] }, value = \"literal\" }\n"
+                    .into(),
+                "TREE has more than one source",
+            ),
+            (
+                "[build.vars]\nX = { secret = true }\n".into(),
+                "X has no source",
+            ),
+            (
+                "[build.vars]\nX = { builtin = \"hostname\" }\n".into(),
+                "unknown builtin \"hostname\"",
+            ),
+            (
+                "[build]\nchannels = [\"dev\"]\n[build.vars]\nX = { cmd = \"echo hi\", channels = [\"steam\"] }\n"
+                    .into(),
+                "restricts to channel \"steam\"",
+            ),
+            (fingerprint("roots = []"), "TREE source_fingerprint requires at least one root"),
+            (fingerprint("roots = [\"\"]"), "roots must be nonempty"),
+            (
+                fingerprint("roots = [\"src\"], files = [\"\"]"),
+                "files must be nonempty",
+            ),
+            (
+                fingerprint("roots = [\"src\"], vars = [\"\"]"),
+                "var names must be nonempty",
+            ),
+            (
+                fingerprint("roots = [\"src\"], vars = [\"MISSING\"]"),
+                "undeclared var \"MISSING\"",
+            ),
+            (
+                fingerprint("roots = [\"src\"], vars = [\"TREE\"]"),
+                "cannot depend on itself",
+            ),
+            (
+                format!(
+                    "{}OTHER = {{ source_fingerprint = {{ roots = [\"other\"] }} }}\n",
+                    fingerprint("roots = [\"src\"], vars = [\"OTHER\"]")
+                ),
+                "deferred var \"OTHER\"",
+            ),
+            (
+                "[build.vars]\nTREE = { source_fingerprint = { roots = [\"src\"] }, volatile = true }\n"
+                    .into(),
+                "cannot be volatile",
+            ),
+            (
+                "[build]\nchannels = [\"dev\"]\n[build.vars]\nTREE = { source_fingerprint = { roots = [\"src\"] }, optional_channels = [\"dev\"], default = \"\" }\n"
+                    .into(),
+                "optional_channels but has no cmd source",
+            ),
+        ] {
+            let cfg = manifest(&body).expect(&body);
+            let err = cfg.validate_build().expect_err(&body);
+            assert!(format!("{err}").contains(want), "{body}: {err}");
+        }
+    }
 
     #[test]
     fn sim_timing_environment_requires_explicit_nonempty_namespaces() {
-        let manifest = "[package]\nname = \"sample\"\n";
-        assert!(StickConfig::new_from_str(manifest).unwrap().sim.is_none());
-        let config = StickConfig::new_from_str(&format!(
-            "{manifest}[sim]\nenvironment_prefixes = [\"APP_\"]\n"
-        ))
-        .unwrap();
+        assert!(manifest("").unwrap().sim.is_none());
+        let config = manifest("[sim]\nenvironment_prefixes = [\"APP_\"]\n").unwrap();
         assert_eq!(config.sim.unwrap().environment_prefixes, ["APP_"]);
         for prefix in ["", "_", "APP", "app_", "APP-_"] {
             assert!(
-                StickConfig::new_from_str(&format!(
-                    "{manifest}[sim]\nenvironment_prefixes = [\"{prefix}\"]\n"
-                ))
-                .is_err(),
+                manifest(&format!("[sim]\nenvironment_prefixes = [\"{prefix}\"]\n")).is_err(),
                 "{prefix:?}"
             );
         }
