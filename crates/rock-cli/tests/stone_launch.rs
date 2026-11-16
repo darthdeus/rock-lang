@@ -1217,3 +1217,162 @@ co fn portable_sim() -> Coroutine<Wait> {
         );
     }
 }
+
+#[cfg(unix)]
+fn game_run_fixture(root: &Path) -> std::path::PathBuf {
+    let project = root.join("game");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(
+        project.join("stick.toml"),
+        "[package]\nname = \"launch-probe\"\n",
+    )
+    .unwrap();
+    std::fs::write(project.join("main_stone.rock"), "fn main() {}\n").unwrap();
+    project
+}
+
+#[cfg(unix)]
+#[test]
+fn game_run_forwards_app_arguments() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let project = game_run_fixture(root.path());
+    let wrapper = root.path().join("luajit-probe");
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ARGUMENTS\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let arguments = root.path().join("arguments");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rock"))
+        .arg("run")
+        .arg(project)
+        .args(["--", "first", "two words", "--flag"])
+        .current_dir(root.path())
+        .env("ROCK_SKIP_ENGINE_BUILD", "1")
+        .env("ROCK_LUAJIT", wrapper)
+        .env("ROCK_HEADLESS_SCOPE", "0")
+        .env("STONE_HEADLESS", "0")
+        .env("STONE_JV", "0")
+        .env("ARGUMENTS", &arguments)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let arguments = std::fs::read_to_string(arguments).unwrap();
+    let arguments: Vec<_> = arguments.lines().collect();
+    assert_eq!(&arguments[1..], ["first", "two words", "--flag"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn game_run_retries_a_scope_failure_before_execution() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let project = game_run_fixture(root.path());
+    let launcher = root.path().join("systemd-run");
+    std::fs::write(
+        &launcher,
+        r#"#!/bin/sh
+if [ ! -e "$ATTEMPTS" ]; then
+    echo failed > "$ATTEMPTS"
+    exit 1
+fi
+: > "$ROCK_SCOPE_START_RECEIPT" || exit 125
+echo executed >> "$EXECUTIONS"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let executions = root.path().join("executions");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rock"))
+        .arg("run")
+        .arg(project)
+        .current_dir(root.path())
+        .env("ROCK_SKIP_ENGINE_BUILD", "1")
+        .env("ROCK_LUAJIT", launcher)
+        .env("ROCK_HEADLESS_SCOPE", "0")
+        .env("STONE_HEADLESS", "1")
+        .env("ATTEMPTS", root.path().join("attempts"))
+        .env("EXECUTIONS", &executions)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(executions).unwrap(), "executed\n");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn game_run_does_not_outlive_a_killed_rock() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+    struct Processes(std::process::Child, Option<i32>);
+    impl Drop for Processes {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+            if let Some(pid) = self.1 {
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let project = game_run_fixture(root.path());
+    let wrapper = root.path().join("parked-luajit");
+    std::fs::write(&wrapper, "#!/bin/sh\necho $$ > \"$GAME_PID.staging\"\nmv \"$GAME_PID.staging\" \"$GAME_PID\"\nexec sleep 600\n").unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let pid_path = root.path().join("game.pid");
+    let mut processes = Processes(
+        Command::new(env!("CARGO_BIN_EXE_rock"))
+            .arg("run")
+            .arg(project)
+            .current_dir(root.path())
+            .env("ROCK_SKIP_ENGINE_BUILD", "1")
+            .env("ROCK_LUAJIT", wrapper)
+            .env("ROCK_HEADLESS_SCOPE", "0")
+            .env("STONE_HEADLESS", "0")
+            .env("GAME_PID", &pid_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+        None,
+    );
+    let start = bone_core::prelude::Instant::now();
+    let pid = loop {
+        if let Ok(pid) = std::fs::read_to_string(&pid_path) {
+            break pid.trim().parse::<i32>().unwrap();
+        }
+        assert!(
+            processes.0.try_wait().unwrap().is_none(),
+            "launcher exited before game startup"
+        );
+        assert!(
+            start.elapsed() < test_utils::HANG_BACKSTOP,
+            "game never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    processes.1 = Some(pid);
+    processes.0.kill().unwrap();
+    processes.0.wait().unwrap();
+    let killed = bone_core::prelude::Instant::now();
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        assert!(
+            killed.elapsed() < test_utils::HANG_BACKSTOP,
+            "game outlived launcher"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    processes.1 = None;
+}

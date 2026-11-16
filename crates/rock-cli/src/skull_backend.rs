@@ -2175,9 +2175,9 @@ pub(crate) fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
 
 /// `rock run <file> --backend skull` — emit Lua, append a `main()` call if the
 /// file defines one, and execute it.
-pub(crate) fn skull_run(path: &str) -> Result<()> {
+pub(crate) fn skull_run(path: &str, app_args: &[String]) -> Result<()> {
     if std::path::Path::new(path).is_dir() {
-        return skull_run_project(path);
+        return skull_run_project(path, app_args);
     }
     let src = match fs_err::read_to_string(path) {
         Ok(s) => s,
@@ -2735,11 +2735,11 @@ pub(crate) fn skull_compile_project_with_recorded_inputs(
     Ok(emit.comptime_inputs)
 }
 
-fn skull_run_project(dir: &str) -> Result<()> {
+fn skull_run_project(dir: &str, app_args: &[String]) -> Result<()> {
     let runtime = RuntimeServices::registered();
     (runtime.prepare_run)(dir)?;
     let (lua, emits_main) = skull_emit_project(dir)?;
-    (runtime.launch)(dir, &lua, emits_main)
+    (runtime.launch)(dir, &lua, emits_main, app_args)
 }
 
 /// One JSON line per finished `@test`: `{unit, name, ms, status}`.

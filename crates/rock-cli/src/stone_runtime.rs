@@ -174,7 +174,7 @@ pub(crate) fn prepare_run(dir: &str) -> Result<()> {
 }
 
 /// Select the runtime recipe after the public compiler has emitted definitions.
-pub fn launch(dir: &str, lua: &GameProgram, emits_main: bool) -> Result<()> {
+pub fn launch(dir: &str, lua: &GameProgram, emits_main: bool, app_args: &[String]) -> Result<()> {
     if !rock_engine_host::project::is_game_project(Path::new(dir)).unwrap_or(false) {
         return crate::compile_cmd::run_lua_program(
             &program_preamble(dir, ProgramKind::Project)?,
@@ -200,14 +200,14 @@ pub fn launch(dir: &str, lua: &GameProgram, emits_main: bool) -> Result<()> {
         log::error!(target: "SKULL", "cannot write {}: {}", lua_file.display(), e);
         crate::invocation_log::exit(1);
     }
-    exec_luajit_file(&lua_file)
+    exec_luajit_file(&lua_file, app_args)
 }
 
 /// Exec luajit on a compiled `.lua` file with stdio inherited from the
 /// caller, preserving keyboard input for interactive games.
-fn exec_luajit_file(lua_file: &Path) -> Result<()> {
+fn exec_luajit_file(lua_file: &Path, app_args: &[String]) -> Result<()> {
     let mut cmd = rock_host::project::luajit_command();
-    cmd.arg(lua_file);
+    cmd.arg(lua_file).args(app_args);
     cmd = crate::runtime_process::configure(
         cmd,
         crate::runtime_process::RuntimeProcess::LuaRun { headless: false },
@@ -224,20 +224,18 @@ fn exec_luajit_file(lua_file: &Path) -> Result<()> {
     let spawn_t = bone_core::prelude::Instant::now();
     log::info!(target: "RUN", "launching luajit -> {}", lua_file.display());
 
-    let mut child = crate::child_lifetime::spawn_bound_child(&mut cmd)
+    let mut child = crate::runtime_process::spawn_game(&mut cmd, lua_file.parent().unwrap())
         .map_err(|e| anyhow::anyhow!("failed to exec luajit: {}", e))?;
     log::info!(target: "RUN",
         "luajit pid {} spawned in {:.0}ms; waiting for game",
         child.id(),
         spawn_t.elapsed().as_secs_f64() * 1000.0
     );
-    let pid = child.id();
 
     // No timeout: games run an infinite frame loop.
     let status = child
         .wait()
         .map_err(|e| anyhow::anyhow!("wait failed: {}", e))?;
-    crate::child_lifetime::release_bound_child(pid);
     if !status.success() {
         crate::invocation_log::exit(status.code().unwrap_or(1));
     }

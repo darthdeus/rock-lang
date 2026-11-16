@@ -781,13 +781,10 @@ fn start_game_process(
             "STONE_RELOAD_CONTROL",
             lua_file.with_file_name("reload.hold"),
         );
-    // Its own process group keeps terminal signals with this launcher, which
-    // forwards them, and lets the macOS guard end the whole group.
-    #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-    let child = crate::headless_scope::spawn_bound_child(&mut cmd, lua_file.parent().unwrap())?;
-    crate::child_lifetime::guard_against_parent_kill(&child)?;
-    Ok(child)
+    Ok(crate::runtime_process::spawn_game(
+        &mut cmd,
+        lua_file.parent().unwrap(),
+    )?)
 }
 
 #[cfg(test)]

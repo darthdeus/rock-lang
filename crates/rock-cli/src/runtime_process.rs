@@ -34,6 +34,19 @@ pub fn configure(command: Command, purpose: RuntimeProcess) -> Command {
     }
 }
 
+/// Bind an interactive game's lifetime to its launcher, including SIGKILL.
+pub(crate) fn spawn_game(
+    command: &mut Command,
+    scratch: &std::path::Path,
+) -> std::io::Result<crate::headless_scope::BoundChild> {
+    // The macOS guard must be able to end the whole game process group.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(command, 0);
+    let child = crate::headless_scope::spawn_bound_child(command, scratch)?;
+    crate::child_lifetime::guard_against_parent_kill(&child)?;
+    Ok(child)
+}
+
 /// Portable scratch belongs to the OS/user-selected temporary directory,
 /// independently of project and installation roots.
 pub(crate) fn prepare_test(command: &mut std::process::Command) -> Result<tempfile::TempDir> {

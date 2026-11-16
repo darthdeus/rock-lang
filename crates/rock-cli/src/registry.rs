@@ -142,7 +142,7 @@ pub struct RuntimeServices {
     /// Prepare runtime inputs before public emission, preserving build-time asset reads.
     pub prepare_run: fn(&str) -> Result<()>,
     /// Own project runtime selection, native staging, file layout and execution.
-    pub launch: fn(&str, &crate::skull_backend::GameProgram, bool) -> Result<()>,
+    pub launch: fn(&str, &crate::skull_backend::GameProgram, bool, &[String]) -> Result<()>,
     pub program_preamble: fn(&str, ProgramKind) -> Result<String>,
     pub program_host: fn(TestUnit<'_>) -> std::result::Result<ProgramHost, RuntimeFailure>,
     /// Selection belongs to the private runner; compiler code requests it through this seam.

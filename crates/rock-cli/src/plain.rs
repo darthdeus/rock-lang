@@ -283,7 +283,7 @@ pub(crate) static SKULL: BackendSpec = BackendSpec {
         (Operation::TestCompile, skull_compile),
         (Operation::Run, |cx| {
             let file = cx.get_required_file("run")?;
-            rock_cli::skull_backend::skull_run(file)
+            rock_cli::skull_backend::skull_run(file, &cx.args.app_args)
         }),
         (Operation::Watch, |cx| {
             let path = cx.get_project_dir_or_current()?;
