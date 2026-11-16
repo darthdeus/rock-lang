@@ -1550,8 +1550,7 @@ fn definition_plan_stage_lua(
         };
         let mut mf = skull_mir::lower::lower_definition_factory(ws, scx, concrete, factory)?;
         skull_transform::cleanup_with_nobox(ws, &mut mf)?;
-        let body =
-            skull_codegen_lua::emit_named_with_statics(ws, cg, scx.interner(), "", &mf, &[], None);
+        let body = skull_codegen_lua::emit_named(ws, cg, scx.interner(), "", &mf, None);
         if let Some(error) = cg.take_rejection() {
             return Err(error);
         }

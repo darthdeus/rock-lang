@@ -37,32 +37,17 @@ pub(super) fn emit_named_with_allocation_report(
     bound: Option<&skull_codegen_lua::CalleeBindingPlan>,
 ) -> skull_codegen_lua::LuaEmission {
     skull_codegen_lua::with_constants_baked(cg, mf, |mf| {
-        if crate::allocation_report::enabled() {
-            skull_codegen_lua::emit_named_framed_with_allocation_sites(
-                ws,
-                cg,
-                interner,
-                name,
-                mf,
-                None,
-                inherited_statics,
-                bound,
-                crate::allocation_report::activation_enabled(),
-            )
-        } else {
-            skull_codegen_lua::LuaEmission {
-                lua: skull_codegen_lua::emit_named_with_statics(
-                    ws,
-                    cg,
-                    interner,
-                    name,
-                    mf,
-                    inherited_statics,
-                    bound,
-                ),
-                allocation_sites: Vec::new(),
-            }
-        }
+        skull_codegen_lua::emit_lua_definition(
+            ws,
+            cg,
+            interner,
+            name,
+            mf,
+            None,
+            inherited_statics,
+            bound,
+            crate::allocation_report::enabled().then(crate::allocation_report::activation_enabled),
+        )
     })
 }
 
@@ -593,15 +578,18 @@ pub(super) fn emit_pass_nested_fns(
         } else {
             let name = nf.name;
             out.push_str(&skull_codegen_lua::with_constants_baked(cg, nf, |nf| {
-                skull_codegen_lua::emit_named_with_statics(
+                skull_codegen_lua::emit_lua_definition(
                     ws,
                     cg,
                     scx.interner(),
                     name.as_str(),
                     nf,
+                    None,
                     inherited_statics,
                     None,
+                    None,
                 )
+                .lua
             }));
         }
         let emit = te.elapsed();

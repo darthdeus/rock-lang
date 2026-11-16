@@ -9,7 +9,7 @@ use bone_semantic::prelude::CompilerError;
 use comfy_la_arena::Idx;
 use rustc_hash::FxHashSet;
 use skull_codegen_lua::{
-    CodegenCtx, FrameCtx, LuaEmission, emit_named_framed, emit_named_framed_with_allocation_sites,
+    CodegenCtx, FrameCtx, LuaEmission, emit_lua_definition, emit_named_framed,
 };
 use skull_mir::code_identity::CodeArtifact;
 use skull_mir::lower::CoroutinePlan;
@@ -169,7 +169,7 @@ fn emit_coroutine_body(
     let LuaEmission {
         lua,
         allocation_sites,
-    } = emit_named_framed_with_allocation_sites(
+    } = emit_lua_definition(
         ws,
         ctx,
         interner,
@@ -178,7 +178,7 @@ fn emit_coroutine_body(
         frame,
         &[],
         None,
-        crate::allocation_report::activation_enabled(),
+        Some(crate::allocation_report::activation_enabled()),
     );
     let body = crate::allocation_report::collect_emitted_body(
         ws,

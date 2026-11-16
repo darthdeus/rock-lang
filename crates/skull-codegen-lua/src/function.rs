@@ -28,33 +28,7 @@ pub fn emit_named(
     func: &MirFunc,
     bound: Option<&CalleeBindingPlan>,
 ) -> String {
-    emit_named_with_statics(ws, ctx, interner, name, func, &[], bound)
-}
-
-/// Emit a function whose static cells may be owned by an enclosing lowered
-/// function. Closure conversion moves the lambda body into a sibling function,
-/// while its static cell remains owned by the enclosing callable.
-pub fn emit_named_with_statics(
-    ws: &Workspace,
-    ctx: &CodegenCtx,
-    interner: &MonoInterner,
-    name: &str,
-    func: &MirFunc,
-    inherited_statics: &[StaticCell],
-    bound: Option<&CalleeBindingPlan>,
-) -> String {
-    emit_body(
-        ws,
-        ctx,
-        interner,
-        name,
-        func,
-        None,
-        inherited_statics,
-        bound,
-        None,
-    )
-    .0
+    emit_lua_definition(ws, ctx, interner, name, func, None, &[], bound, None).lua
 }
 
 /// The coroutine state-table context: a `co fn`'s `__step` reads/writes its
@@ -82,12 +56,6 @@ pub(crate) struct AllocationEmission<'a> {
 }
 
 /// [`emit_named`] with an optional coroutine frame context (the `__step` fn).
-///
-/// Closures no longer convert here: `skull_transform::convert_closures` (the
-/// shared MIR pass) has already rewritten every reachable `Inst::Lambda` into a
-/// `MakeEnv` record / bare `Global` + a hoisted sibling `MirFunc` before emission.
-/// So this fn only renders the given
-/// region.
 pub fn emit_named_framed(
     ws: &Workspace,
     ctx: &CodegenCtx,
@@ -97,10 +65,19 @@ pub fn emit_named_framed(
     frame: Option<&FrameCtx>,
     bound: Option<&CalleeBindingPlan>,
 ) -> String {
-    emit_body(ws, ctx, interner, name, func, frame, &[], bound, None).0
+    emit_lua_definition(ws, ctx, interner, name, func, frame, &[], bound, None).lua
 }
 
-pub fn emit_named_framed_with_allocation_sites(
+/// The one Lua emission of a MIR function under the exact name `name`.
+///
+/// `frame` is the coroutine state-table context of a `__step` fn.
+/// `inherited_statics` are static cells owned by an enclosing function:
+/// closure conversion moves a lambda body into a sibling function while its
+/// static cell stays with the enclosing callable. `allocation_sites`, when
+/// set, collects the body's allocation sites, and `Some(true)` also
+/// instruments them in the emitted Lua.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_lua_definition(
     ws: &Workspace,
     ctx: &CodegenCtx,
     interner: &MonoInterner,
@@ -109,8 +86,25 @@ pub fn emit_named_framed_with_allocation_sites(
     frame: Option<&FrameCtx>,
     inherited_statics: &[StaticCell],
     bound: Option<&CalleeBindingPlan>,
-    instrument: bool,
+    allocation_sites: Option<bool>,
 ) -> LuaEmission {
+    let Some(instrument) = allocation_sites else {
+        let (lua, _) = emit_body(
+            ws,
+            ctx,
+            interner,
+            name,
+            func,
+            frame,
+            inherited_statics,
+            bound,
+            None,
+        );
+        return LuaEmission {
+            lua,
+            allocation_sites: Vec::new(),
+        };
+    };
     let sites = RefCell::new(Vec::new());
     // The header offset comes back from the emission rather than from a search
     // for `function <name>`: a bound body's only
