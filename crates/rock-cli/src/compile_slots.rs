@@ -709,8 +709,16 @@ fn process_peak_mib() -> Option<u64> {
 pub(crate) fn assert_compile_waits_for_slot<T: Send + 'static>(
     compile: impl FnOnce() -> T + Send + 'static,
 ) -> T {
-    let slots = tempfile::tempdir().unwrap();
-    let config = SlotConfig::for_compiles(slots.path(), 1, CompileClass::Batch);
+    assert_compile_waits_for_slot_in(tempfile::tempdir().unwrap().path(), compile)
+}
+
+/// [`assert_compile_waits_for_slot`] with the pool kept in `slots`.
+#[cfg(test)]
+pub(crate) fn assert_compile_waits_for_slot_in<T: Send + 'static>(
+    slots: &Path,
+    compile: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let config = SlotConfig::for_compiles(slots, 1, CompileClass::Batch);
     let held = acquire_with(&config, "test holder").unwrap();
     let (worker, waiting) = spawn_slot_waiter(move || {
         set_thread_config(Some(config));

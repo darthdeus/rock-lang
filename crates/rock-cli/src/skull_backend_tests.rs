@@ -218,7 +218,14 @@ impl ProjectFixture {
     }
 
     fn try_boot(source_text: &str) -> anyhow::Result<Self> {
+        Self::try_boot_with_manifest(None, source_text)
+    }
+
+    fn try_boot_with_manifest(manifest: Option<&str>, source_text: &str) -> anyhow::Result<Self> {
         let dir = tempfile::tempdir().expect("tempdir");
+        if let Some(manifest) = manifest {
+            std::fs::write(dir.path().join("stick.toml"), manifest).expect("stick.toml");
+        }
         let root = dir.path().to_str().expect("tempdir path").to_string();
         let main = dir.path().join("main.lua");
         let incremental = dir.path().join("incremental.lua");
@@ -343,138 +350,112 @@ mod incremental_watch_tests {
     use super::files;
     use crate::bone_backend::bone_session;
 
+    /// Boot a session from `initial` legacy files, then apply each body-only
+    /// `(file, text)` edit: its incremental emit must equal a full emit of a
+    /// fresh session over the same sources.
+    fn assert_edits_match_fresh(initial: &[(&str, &str)], edits: &[(&str, &str)]) {
+        let session_of = |sources: &[(String, String)]| {
+            bone_session(
+                sources
+                    .iter()
+                    .map(|(path, text)| {
+                        bone_incremental::session::SessionFile::legacy(path.as_str(), text.as_str())
+                    })
+                    .collect(),
+            )
+            .expect("session")
+        };
+        let mut sources: Vec<(String, String)> = initial
+            .iter()
+            .map(|(path, text)| (path.to_string(), text.to_string()))
+            .collect();
+        let mut session = session_of(&sources);
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (_, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("initial emit_full");
+        for (step, (file, text)) in edits.iter().enumerate() {
+            let result = session.update_file(file, text).expect("update");
+            assert!(
+                matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
+                "edit {step} to {file} should be BodyOnly, got {:?}",
+                result.tier
+            );
+            let incremental = skull::mir_emit::emit_incremental(
+                session.workspace(),
+                &mut cache,
+                &result.reinferred,
+            )
+            .expect("emit_incremental");
+            sources
+                .iter_mut()
+                .find(|(path, _)| path == file)
+                .expect("edited file is a source")
+                .1 = text.to_string();
+            let fresh_session = session_of(&sources);
+            let fresh = skull::mir_emit::emit_full(fresh_session.workspace(), mid)
+                .expect("fresh emit_full")
+                .0;
+            assert_eq!(
+                incremental.lua, fresh.lua,
+                "edit {step} to {file}: incremental != fresh"
+            );
+        }
+    }
+
     #[test]
     fn session_body_edit_incremental_matches_fresh() {
-        let v1 = "fn helper() -> int { 3 }\nfn use_it() -> int { helper() }";
-        let v2 = "fn helper() -> int { 5 }\nfn use_it() -> int { helper() }";
-
-        // Warm session at v1, full emit -> cache.
-        let mut session = bone_session(files(v1)).expect("session v1");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (_full_v1, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1");
-
-        // Edit helper's body -> a body-level re-inference.
-        let result = session.update_file("main.rock", v2).expect("update");
-        assert!(
-            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
-            "editing a fn body should be a BodyOnly update, got {:?}",
-            result.tier
-        );
-        let incremental =
-            skull::mir_emit::emit_incremental(session.workspace(), &mut cache, &result.reinferred)
-                .expect("emit_incremental");
-
-        // Fresh session at v2, full emit.
-        let fresh_session = bone_session(files(v2)).expect("session v2");
-        let fresh = skull::mir_emit::emit_full(fresh_session.workspace(), mid)
-            .expect("emit_full v2")
-            .0;
-
-        assert_eq!(
-            incremental.lua, fresh.lua,
-            "Session-driven incremental emit != fresh full emit after a body edit"
+        assert_edits_match_fresh(
+            &[(
+                "main.rock",
+                "fn helper() -> int { 3 }\nfn use_it() -> int { helper() }",
+            )],
+            &[(
+                "main.rock",
+                "fn helper() -> int { 5 }\nfn use_it() -> int { helper() }",
+            )],
         );
     }
 
+    /// a.rock's `helper` is inlined into b.rock's `caller`: editing a.rock
+    /// re-infers only a's body, but its cross-module inliner must re-emit.
     #[test]
     fn cross_file_inline_edit_matches_fresh() {
-        // a.rock's tiny `helper` is inlined into b.rock's `caller` (a CROSS-MODULE
-        // inline dep — `deps` holds the callee's FuncRef across modules). Editing
-        // a.rock re-infers only a's body, but skull must still re-emit b's caller.
-        let mut session = bone_session(vec![
-            bone_incremental::session::SessionFile::legacy(
-                "a.rock",
-                "@inline\nfn helper() -> int { 3 }",
-            ),
-            bone_incremental::session::SessionFile::legacy(
-                "b.rock",
-                "fn caller() -> int { helper() }",
-            ),
-        ])
-        .expect("session");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (_init, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full");
-
-        let result = session
-            .update_file("a.rock", "@inline\nfn helper() -> int { 7 }")
-            .expect("update");
-        let incremental =
-            skull::mir_emit::emit_incremental(session.workspace(), &mut cache, &result.reinferred)
-                .expect("inc");
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
-            .expect("fresh")
-            .0;
-        assert_eq!(
-            incremental.lua, fresh.lua,
-            "cross-file inline edit: incremental != fresh"
+        assert_edits_match_fresh(
+            &[
+                ("a.rock", "@inline\nfn helper() -> int { 3 }"),
+                ("b.rock", "fn caller() -> int { helper() }"),
+            ],
+            &[("a.rock", "@inline\nfn helper() -> int { 7 }")],
         );
     }
 
-    /// Byte-identity oracle for the taken_by_ref -> ScalarCtx -> affected-set
-    /// interaction. `foo` has a value-struct param: while a body takes it BY
-    /// REFERENCE (`let f = foo`) it keeps the single-cdata ABI; with no by-ref it
-    /// scalarizes. A body edit that flips that membership must re-emit foo's chunk
-    /// AND its direct callers (their call-site shape changes), even though foo's
-    /// own body is unchanged. Each case asserts incremental == fresh.
-    fn abi_flip_case(v1: &str, v2: &str) {
-        let mut session = bone_session(files(v1)).expect("session v1");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (_full, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1");
-        let result = session.update_file("main.rock", v2).expect("update");
-        assert!(
-            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
-            "edit should be BodyOnly, got {:?}",
-            result.tier
-        );
-        let incremental =
-            skull::mir_emit::emit_incremental(session.workspace(), &mut cache, &result.reinferred)
-                .expect("inc");
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
-            .expect("fresh")
-            .0;
-        assert_eq!(
-            incremental.lua, fresh.lua,
-            "by-ref ABI flip: incremental != fresh"
-        );
-    }
-
+    /// `foo` takes a value struct: while a body takes it BY REFERENCE it keeps
+    /// the single-cdata ABI, otherwise it scalarizes. A body edit flipping that
+    /// membership must re-emit foo and its direct callers although foo's own
+    /// body is unchanged.
     const ABI_DECL: &str = "value V2 { x: float, y: float }\n\
                             fn foo(v: V2) -> float { v.x }\n\
                             fn other() -> float { foo(V2 { x: 2.0, y: 3.0 }) }\n";
 
     #[test]
-    fn taken_by_ref_removal_flips_abi() {
-        // use_ref drops its by-ref to foo -> foo scalarizes (cdata -> splat).
-        abi_flip_case(
-            &format!(
-                "{ABI_DECL}fn use_ref() -> float {{ let f = foo; f(V2 {{ x: 1.0, y: 2.0 }}) }}"
-            ),
-            &format!("{ABI_DECL}fn use_ref() -> float {{ other() }}"),
+    fn taken_by_ref_edits_flip_abi() {
+        let by_ref = format!(
+            "{ABI_DECL}fn use_ref() -> float {{ let f = foo; f(V2 {{ x: 1.0, y: 2.0 }}) }}"
         );
+        let no_ref = format!("{ABI_DECL}fn use_ref() -> float {{ other() }}");
+        // Removing the only by-ref scalarizes foo; adding it back is the
+        // runtime-dangerous direction (a stale scalarized foo would get a cdata).
+        assert_edits_match_fresh(
+            &[("main.rock", &by_ref)],
+            &[("main.rock", &no_ref), ("main.rock", &by_ref)],
+        );
+        assert_edits_match_fresh(&[("main.rock", &no_ref)], &[("main.rock", &by_ref)]);
     }
 
-    #[test]
-    fn taken_by_ref_addition_flips_abi() {
-        // use_ref STARTS taking foo by ref -> foo must flip scalar -> cdata. This
-        // is the runtime-dangerous direction: a stale scalarized foo def would get
-        // a single cdata from the new CallValue site.
-        abi_flip_case(
-            &format!("{ABI_DECL}fn use_ref() -> float {{ other() }}"),
-            &format!(
-                "{ABI_DECL}fn use_ref() -> float {{ let f = foo; f(V2 {{ x: 1.0, y: 2.0 }}) }}"
-            ),
-        );
-    }
-
+    /// Two bodies take foo by ref; removing ONE must keep foo's cdata ABI --
+    /// the refcount, not a set, is load-bearing.
     #[test]
     fn taken_by_ref_refcount_keeps_abi_when_one_referencer_remains() {
-        // TWO bodies take foo by ref; removing ONE must NOT flip foo (still taken
-        // by ref by the other) -- the refcount, not a naive set, is load-bearing.
-        // A naive set-removal would wrongly scalarize foo here; incremental would
-        // then diverge from fresh (which keeps foo as cdata).
         let v1 = format!(
             "{ABI_DECL}fn ref_a() -> float {{ let f = foo; f(V2 {{ x: 1.0, y: 2.0 }}) }}\n\
              fn ref_b() -> float {{ let g = foo; g(V2 {{ x: 3.0, y: 4.0 }}) }}"
@@ -483,43 +464,28 @@ mod incremental_watch_tests {
             "{ABI_DECL}fn ref_a() -> float {{ other() }}\n\
              fn ref_b() -> float {{ let g = foo; g(V2 {{ x: 3.0, y: 4.0 }}) }}"
         );
-        abi_flip_case(&v1, &v2);
+        assert_edits_match_fresh(&[("main.rock", &v1)], &[("main.rock", &v2)]);
     }
 
+    /// Incremental-parse fast path: growing `a` by lines shifts every following
+    /// item, and a later edit to `c` must locate it through the shifted metadata.
     #[test]
     fn fast_path_multiline_then_following_edit_matches_fresh() {
-        // Incremental-parse fast path: edit `a`'s body so it GROWS by lines
-        // (line_delta != 0, shifting every following item), then edit `c` (which
-        // sits after `a`). The second edit must locate `c` through the metadata
-        // shifted by the first. Each step's emit must equal a fresh full build.
-        let v0 = "fn a() -> int { 1 }\nfn b() -> int { 2 }\nfn c() -> int { 3 }";
-        let v1 = "fn a() -> int {\n    let x = 1\n    x + 10\n}\nfn b() -> int { 2 }\nfn c() -> int { 3 }";
-        let v2 = "fn a() -> int {\n    let x = 1\n    x + 10\n}\nfn b() -> int { 2 }\nfn c() -> int { 99 }";
-
-        let mut session = bone_session(files(v0)).expect("v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (_f0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit v0");
-
-        let r1 = session.update_file("main.rock", v1).expect("update a");
-        let inc1 =
-            skull::mir_emit::emit_incremental(session.workspace(), &mut cache, &r1.reinferred)
-                .expect("inc1");
-        let fresh1 = skull::mir_emit::emit_full(bone_session(files(v1)).unwrap().workspace(), mid)
-            .expect("fresh1")
-            .0;
-        assert_eq!(inc1.lua, fresh1.lua, "after multi-line growth edit to `a`");
-
-        let r2 = session.update_file("main.rock", v2).expect("update c");
-        let inc2 =
-            skull::mir_emit::emit_incremental(session.workspace(), &mut cache, &r2.reinferred)
-                .expect("inc2");
-        let fresh2 = skull::mir_emit::emit_full(bone_session(files(v2)).unwrap().workspace(), mid)
-            .expect("fresh2")
-            .0;
-        assert_eq!(
-            inc2.lua, fresh2.lua,
-            "after editing `c` following a multi-line edit to `a`"
+        assert_edits_match_fresh(
+            &[(
+                "main.rock",
+                "fn a() -> int { 1 }\nfn b() -> int { 2 }\nfn c() -> int { 3 }",
+            )],
+            &[
+                (
+                    "main.rock",
+                    "fn a() -> int {\n    let x = 1\n    x + 10\n}\nfn b() -> int { 2 }\nfn c() -> int { 3 }",
+                ),
+                (
+                    "main.rock",
+                    "fn a() -> int {\n    let x = 1\n    x + 10\n}\nfn b() -> int { 2 }\nfn c() -> int { 99 }",
+                ),
+            ],
         );
     }
 
@@ -672,22 +638,6 @@ mod incremental_watch_tests {
         fuzz_incremental_matches_fresh_seed6 = 6,
         fuzz_incremental_matches_fresh_seed7 = 7,
         fuzz_incremental_matches_fresh_seed8 = 8,
-    }
-
-    #[test]
-    #[ignore = "soak; set SKULL_FUZZ_SEEDS / SKULL_FUZZ_STEPS and run with --ignored"]
-    fn fuzz_incremental_matches_fresh_soak() {
-        let steps: usize = std::env::var("SKULL_FUZZ_STEPS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(120);
-        let seeds: u64 = std::env::var("SKULL_FUZZ_SEEDS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(8);
-        for seed in 1..=seeds {
-            fuzz_incremental_matches_fresh(seed, steps);
-        }
     }
 
     #[test]
@@ -857,48 +807,28 @@ mod overlay_runtime_tests {
     }
 
     fn run_production_body_overlay(manifest: Option<&str>) -> String {
-        let dir = tempfile::tempdir().expect("tempdir");
-        if let Some(manifest) = manifest {
-            std::fs::write(dir.path().join("stick.toml"), manifest).expect("stick.toml");
-        }
-        let main_path = dir.path().join("main.lua");
-        let incremental_path = dir.path().join("incremental.lua");
-        let source_path = dir.path().join("main.rock");
         let v0 = "fn probe() -> int { static value = 1\n value = value + 1\n value }\nfn main() { print(probe()) }\n";
         let v1 = "fn probe() -> int { static value = 1\n value = value + 10\n value }\nfn main() { print(probe()) }\n";
-        std::fs::write(&source_path, v0).expect("initial source");
-        let mut project = IncrementalProject::init(
-            dir.path().to_str().expect("tempdir path"),
-            &main_path,
-            &incremental_path,
-        )
-        .expect("initial production build");
+        let mut fx = super::ProjectFixture::try_boot_with_manifest(manifest, v0)
+            .expect("initial production build");
         assert!(
-            !incremental_path.exists(),
+            !fx.incremental.exists(),
             "initial load must not leave an overlay"
         );
-
-        std::fs::write(&source_path, v1).expect("edited source");
-        let reload = project
-            .recompile(
-                std::slice::from_ref(&source_path),
-                &main_path,
-                &incremental_path,
-            )
-            .expect("body edit through production recompile");
+        let reload = fx.edit(v1).expect("body edit through production recompile");
         assert!(
             matches!(reload, SkullReload::Incremental { .. }),
             "body edit must publish an overlay, got {reload:?}"
         );
         assert!(
-            incremental_path.exists(),
+            fx.incremental.exists(),
             "body edit must write incremental.lua"
         );
 
         // The first call is made by main.lua's production entry wrapper. The
         // second call happens after the overlay is loaded, so the static cell
         // proves both changed code and retained state.
-        run_project_artifacts(&main_path, &incremental_path, true)
+        run_project_artifacts(&fx.main, &fx.incremental, true)
     }
 
     #[test]
@@ -925,40 +855,16 @@ mod overlay_runtime_tests {
     /// in the published artifacts.
     #[test]
     fn production_reload_defines_an_own_function_an_edit_starts_calling() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let main_path = dir.path().join("main.lua");
-        let incremental_path = dir.path().join("incremental.lua");
-        let source_path = dir.path().join("main.rock");
-        std::fs::write(
-            &source_path,
+        let mut fx = super::ProjectFixture::boot(
             "fn later(x: int) -> int { return x * 3 + 2 }\nfn main() { print(0) }\n",
-        )
-        .expect("initial source");
-        let mut project = IncrementalProject::init(
-            dir.path().to_str().expect("tempdir path"),
-            &main_path,
-            &incremental_path,
-        )
-        .expect("initial production build");
+        );
         assert!(
-            !std::fs::read_to_string(&main_path)
-                .expect("main.lua")
-                .contains("later"),
+            !fx.main_text().contains("later"),
             "the unreached function must not be defined at boot"
         );
-        std::fs::write(
-            &source_path,
-            "fn later(x: int) -> int { return x * 3 + 2 }\nfn main() { print(later(4)) }\n",
-        )
-        .expect("edited source");
-        project
-            .recompile(
-                std::slice::from_ref(&source_path),
-                &main_path,
-                &incremental_path,
-            )
+        fx.edit("fn later(x: int) -> int { return x * 3 + 2 }\nfn main() { print(later(4)) }\n")
             .expect("recompile after the edit");
-        let out = run_project_artifacts(&main_path, &incremental_path, true);
+        let out = run_project_artifacts(&fx.main, &fx.incremental, true);
         assert_eq!(out.trim().lines().last(), Some("14"), "{out}");
     }
 
@@ -1323,59 +1229,36 @@ mod overlay_runtime_tests {
         assert_runtime_eq(&live.baseline, &overlay, &fresh, "const FOO 5->10");
     }
 
-    /// A `static` local's INITIALIZER edit hot-reloads through the overlay -- the
-    /// static analog of `concrete_const_value_edit_runtime_eq` and the direct
-    /// regression for the static-local hot-reload overlay bug. Unlike a const, a
-    /// static is lazy (inits on first reach) and name-keyed (its cell persists
-    /// across reloads BY DESIGN), so the overlay must emit an UNGUARDED reset (nil
-    /// the cell + clear its done-flag) for a static whose init key changed, or the
-    /// redefined fn re-reads the stale warmed cell and the edit is silently ignored.
+    /// A `static` local's INITIALIZER edit hot-reloads through the overlay. A
+    /// static is lazy and name-keyed (its cell persists across reloads by
+    /// design), so the overlay must reset a static whose init key changed or
+    /// the redefined fn re-reads the stale warmed cell. Nested fns are hoisted
+    /// to sibling chunks, so their statics must reach the same reset.
     ///
-    /// Models the LIVE game: the baseline runs once (warming the static to 5), THEN
-    /// the overlay loads and it runs again. Without the reset the second call still
-    /// prints 5; with it, 10. (`assert_runtime_eq`'s compose order never warms the
-    /// static before the overlay, so it can't see this -- hence the bespoke run.)
+    /// Models the live game: the baseline runs once (warming the static to 5),
+    /// then the overlay loads and it runs again. `assert_runtime_eq`'s compose
+    /// order never warms the static before the overlay, hence the bespoke run.
     #[test]
-    fn concrete_static_init_edit_runtime_eq() {
-        let v0 = "fn probe() -> int { static x = 5\n x }\nfn main() { print(\"{probe()}\") }\n";
-        let v1 = "fn probe() -> int { static x = 10\n x }\nfn main() { print(\"{probe()}\") }\n";
-
-        let mut live = Live::boot(v0);
-
-        let overlay = live.overlay(v1);
-
-        // Warm the static in the frozen baseline (first main() -> inits x=5, sets
-        // the done-flag), THEN load the overlay + call again. The bug is observable
-        // precisely because the cell is already warm: without the overlay's reset
-        // the redefined `probe` skips re-init and re-reads the stale 5.
-        assert_run(
-            &live.baseline,
-            &["main()", &overlay, "main()"],
-            "5\n10",
-            "warm baseline prints 5; after the overlay reload the static re-inits to 10",
-        );
-    }
-
-    /// A `static` inside a NESTED `fn` must hot-reload too. Nested fns are hoisted
-    /// to sibling chunks, so their statics have to be folded into the enclosing
-    /// chunk's `statics` (both the full-reload preamble and the overlay read
-    /// `chunk.statics`); if they aren't, the cell is invisible to the reset logic
-    /// and an initializer edit is silently ignored on every reload.
-    #[test]
-    fn nested_fn_static_init_edit_runtime_eq() {
-        let v0 = "fn probe() -> int { fn inner() -> int { static x = 5\n x }\n inner() }\nfn main() { print(\"{probe()}\") }\n";
-        let v1 = "fn probe() -> int { fn inner() -> int { static x = 10\n x }\n inner() }\nfn main() { print(\"{probe()}\") }\n";
-
-        let mut live = Live::boot(v0);
-
-        let overlay = live.overlay(v1);
-
-        assert_run(
-            &live.baseline,
-            &["main()", &overlay, "main()"],
-            "5\n10",
-            "nested-fn static must re-init on initializer edit through the overlay",
-        );
+    fn static_init_edit_runtime_eq() {
+        for (v0, v1) in [
+            (
+                "fn probe() -> int { static x = 5\n x }\nfn main() { print(\"{probe()}\") }\n",
+                "fn probe() -> int { static x = 10\n x }\nfn main() { print(\"{probe()}\") }\n",
+            ),
+            (
+                "fn probe() -> int { fn inner() -> int { static x = 5\n x }\n inner() }\nfn main() { print(\"{probe()}\") }\n",
+                "fn probe() -> int { fn inner() -> int { static x = 10\n x }\n inner() }\nfn main() { print(\"{probe()}\") }\n",
+            ),
+        ] {
+            let mut live = Live::boot(v0);
+            let overlay = live.overlay(v1);
+            assert_run(
+                &live.baseline,
+                &["main()", &overlay, "main()"],
+                "5\n10",
+                &format!("the static must re-init on an initializer edit:\n{v0}"),
+            );
+        }
     }
 
     /// Cumulative overlays repeat static preparation. The runtime compares the
@@ -1646,22 +1529,6 @@ mod overlay_runtime_tests {
         runtime_accumulation_fuzz_seed2 = 2,
         runtime_accumulation_fuzz_seed3 = 3,
         runtime_accumulation_fuzz_seed4 = 4,
-    }
-
-    #[test]
-    #[ignore = "soak; set SKULL_RT_FUZZ_SEEDS / SKULL_RT_FUZZ_STEPS and run with --ignored"]
-    fn runtime_accumulation_fuzz_soak() {
-        let steps: usize = std::env::var("SKULL_RT_FUZZ_STEPS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(20);
-        let seeds: u64 = std::env::var("SKULL_RT_FUZZ_SEEDS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(4);
-        for seed in 1..=seeds {
-            runtime_accumulation_fuzz(seed, steps);
-        }
     }
 
     // --- sim tier: a registry retains and observes a CodeRef -------------------
@@ -4981,12 +4848,7 @@ fn test_limit_names_the_real_test_despite_forged_markers() {
 
 #[test]
 fn package_compile_holds_a_compile_slot_only_while_compiling() {
-    use crate::compile_slots::{
-        CompileClass, SlotConfig, acquire_with, finish_slot_waiter, last_acquisition,
-        set_thread_config, spawn_slot_waiter,
-    };
     let slots = tempfile::tempdir().expect("slot dir");
-    let config = SlotConfig::for_compiles(slots.path(), 1, CompileClass::Batch);
     let package = tempfile::tempdir().expect("package");
     std::fs::write(
         package.path().join("stick.toml"),
@@ -5005,28 +4867,13 @@ fn package_compile_holds_a_compile_slot_only_while_compiling() {
         ),
     )
     .unwrap();
-
-    let held = acquire_with(&config, "test holder").unwrap();
-    let (compile, waiting) = {
-        let config = config.clone();
-        let package = package.path().to_str().unwrap().to_owned();
-        spawn_slot_waiter(move || {
-            set_thread_config(Some(config));
-            let result =
-                super::skull_build_package_with_limit(&package, Duration::from_secs(10), 1, None);
-            (result, last_acquisition())
-        })
-    };
-    let ((result, acquisition), held_for) = finish_slot_waiter(held, compile, waiting);
+    let package = package.path().to_str().unwrap().to_owned();
+    let result = crate::compile_slots::assert_compile_waits_for_slot_in(slots.path(), move || {
+        super::skull_build_package_with_limit(&package, Duration::from_secs(10), 1, None)
+    });
     assert!(
         matches!(result, Ok(super::SkullOutcome::Pass { tests: 1, .. })),
         "{result:?}"
-    );
-    let acquisition = acquisition.expect("the package compile took no slot");
-    assert_eq!(acquisition.slot.as_deref(), Some("held-000000000002"));
-    assert!(
-        acquisition.waited >= held_for,
-        "held after observing contention: {held_for:?}; {acquisition:?}"
     );
 }
 
