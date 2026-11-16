@@ -560,9 +560,8 @@ pub(super) fn build_enum_global_defs(ws: &Workspace) -> HashMap<ustr::Ustr, Stri
                 && e.variants
                     .iter()
                     .all(|v| matches!(v.payload, VariantPayload::Unit));
-            let symbol = skull_mir::mangle::type_symbol(ws, e.name);
             if all_unit {
-                let name = ustr::Ustr::from(format!("__rock_enum_{symbol}_names").as_str());
+                let name = skull_mir::mangle::enum_names_global(ws, e.name);
                 let items: Vec<String> = e
                     .variants
                     .iter()
@@ -576,8 +575,7 @@ pub(super) fn build_enum_global_defs(ws: &Workspace) -> HashMap<ustr::Ustr, Stri
             } else {
                 for v in e.variants.iter() {
                     if matches!(v.payload, VariantPayload::Unit) {
-                        let name =
-                            ustr::Ustr::from(format!("__rock_enum_{}_{}", symbol, v.name).as_str());
+                        let name = skull_mir::mangle::enum_singleton_global(ws, e.name, v.name);
                         out.insert(
                             name,
                             format!(

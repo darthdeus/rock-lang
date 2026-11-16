@@ -171,6 +171,17 @@ pub fn type_symbol(ws: &Workspace, key: ustr::Ustr) -> ustr::Ustr {
     }
 }
 
+/// The interned singleton global of a mixed enum's unit variant, so the value
+/// is reference-equal across uses and usable as a map key.
+pub fn enum_singleton_global(ws: &Workspace, key: ustr::Ustr, variant: ustr::Ustr) -> ustr::Ustr {
+    ustr::Ustr::from(format!("__rock_enum_{}_{variant}", type_symbol(ws, key)).as_str())
+}
+
+/// The display-name table global of a payload-free enum, indexed by ordinal.
+pub fn enum_names_global(ws: &Workspace, key: ustr::Ustr) -> ustr::Ustr {
+    ustr::Ustr::from(format!("__rock_enum_{}_names", type_symbol(ws, key)).as_str())
+}
+
 /// The digest of a DefKey's `<package>::<module path>` prefix. Hashes the
 /// prefix BYTES with std's `DefaultHasher` (the `StaticCell.init_hash`
 /// precedent): stable across processes AND across compiler builds, unlike a

@@ -385,13 +385,6 @@ pub fn module_tests_with_ids(
 
 // --- emit-name helpers (pure; shared by the new-path `mir_emit` + scaffolding) ---
 
-/// The interned singleton global for a unit enum variant (`Color::Red` ->
-/// `__rock_enum_Color_Red`), so the value is reference-equal across uses and
-/// usable as a Lua map key.
-pub(crate) fn enum_singleton_name(enum_name: &str, variant: &str) -> String {
-    format!("__rock_enum_{enum_name}_{variant}")
-}
-
 /// Lua name for a global's init fn (`<global> = __skull_ginit_<global>()`).
 pub(crate) fn global_init_fn_name(global: &str) -> String {
     format!("__skull_ginit_{}", global)
@@ -1690,7 +1683,7 @@ fn value_struct_metatypes(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::
 ///   tables; its unit variants lower to an interned singleton
 ///   (`__rock_enum_<E>_<V> = <self> or { __variant=.., __ty=.. }`), so they're
 ///   stable Lua map keys and reference-equal across uses
-///   (see `lower::enum_singleton_name`).
+///   (see `skull_mir::mangle::enum_singleton_global`).
 ///
 /// The `<global> = <global> or { ... }` preserve-if-exists form is
 /// load-bearing for HOT RELOAD: a reload re-dofiles the whole chunk, and a
@@ -1766,11 +1759,8 @@ pub(crate) fn enum_names_defs(ws: &Workspace, read: &rustc_hash::FxHashSet<ustr:
             }
             // The table is a Lua GLOBAL, so its name carries the enum's
             // symbol; the values it holds are display text.
-            let name = format!(
-                "__rock_enum_{}_names",
-                skull_mir::mangle::type_symbol(ws, e.name)
-            );
-            if !read.contains(&ustr::Ustr::from(name.as_str())) {
+            let name = skull_mir::mangle::enum_names_global(ws, e.name);
+            if !read.contains(&name) {
                 continue;
             }
             let items: Vec<String> = e
@@ -1812,7 +1802,7 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
                 for v in e.variants.iter() {
                     if matches!(v.payload, VariantPayload::Unit) {
                         let sym = skull_mir::mangle::type_symbol(ws, e.name);
-                        let g = enum_singleton_name(sym.as_str(), v.name.as_str());
+                        let g = skull_mir::mangle::enum_singleton_global(ws, e.name, v.name);
                         // `__ty` is looked up in `__ROCK_TYPE_TABLE`, so it is
                         // the same spelling that registry is keyed on.
                         out.push_str(&format!(

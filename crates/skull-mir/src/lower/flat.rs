@@ -504,14 +504,7 @@ impl<'a> Builder<'a> {
                 },
             );
             self.cur = unit_bb;
-            let global = crate::names::ustr(
-                format!(
-                    "__rock_enum_{}_{}",
-                    crate::mangle::type_symbol(self.ws, shape.name),
-                    variant,
-                )
-                .as_str(),
-            );
+            let global = crate::mangle::enum_singleton_global(self.ws, shape.name, variant);
             let singleton = self.emit_cur(Inst::Global(global));
             self.emit_cur(Inst::Store {
                 cell: result,
@@ -542,14 +535,7 @@ impl<'a> Builder<'a> {
         variant: Ustr,
     ) -> Idx<Inst> {
         if self.variant_is_unit(shape.name, variant) {
-            let global = crate::names::ustr(
-                format!(
-                    "__rock_enum_{}_{}",
-                    crate::mangle::type_symbol(self.ws, shape.name),
-                    variant,
-                )
-                .as_str(),
-            );
+            let global = crate::mangle::enum_singleton_global(self.ws, shape.name, variant);
             return self.emit_cur(Inst::Global(global));
         }
         let (width, fields) = shape.box_layout(self.ws, variant);

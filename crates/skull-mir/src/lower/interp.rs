@@ -254,12 +254,8 @@ impl<'a> Builder<'a> {
             // enum passed to `inspect`/stored in `any`/inside a composite) is the
             // deferred box-on-escape-into-`any` work.
             StringifyRoute::EnumNames(name) => {
-                let names = self.emit_cur(Inst::Global(crate::names::ustr(
-                    format!(
-                        "__rock_enum_{}_names",
-                        crate::mangle::type_symbol(self.ws, *name)
-                    )
-                    .as_str(),
+                let names = self.emit_cur(Inst::Global(crate::mangle::enum_names_global(
+                    self.ws, *name,
                 )));
                 Ok(self.emit_cur(Inst::Index {
                     base: names,

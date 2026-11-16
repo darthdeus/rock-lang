@@ -1386,13 +1386,7 @@ impl<'a> Builder<'a> {
             // INTERNED singleton table (emitted by `enum_runtime_defs`): the
             // enum still has payload variants, so its values stay tables, and the
             // singleton is reference-equal across uses + usable as a Map key.
-            let g = crate::names::ustr(
-                format!(
-                    "__rock_enum_{}_{variant}",
-                    crate::mangle::type_symbol(self.ws, enum_name)
-                )
-                .as_str(),
-            );
+            let g = crate::mangle::enum_singleton_global(self.ws, enum_name, variant);
             return Ok(self.emit_cur(Inst::Global(g)));
         }
         let (positional, named) = match args {
