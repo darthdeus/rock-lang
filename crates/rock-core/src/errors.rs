@@ -280,19 +280,6 @@ impl std::fmt::Display for CompilerError {
     }
 }
 
-pub trait ErrorExt<T> {
-    fn to_compiler_error(self, span: Span) -> Result<T, CompilerError>;
-}
-
-impl<T> ErrorExt<T> for Result<T>
-where
-    T: std::fmt::Debug,
-{
-    fn to_compiler_error(self, span: Span) -> Result<T, CompilerError> {
-        self.map_err(|e| CompilerError::new_with_label(span, format!("{:?}", e)))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -628,21 +615,6 @@ mod tests {
         assert_eq!(error.message, "");
         assert!(error.labels.is_empty());
         assert_eq!(error.level, CompilerErrorLevel::Error);
-    }
-
-    fn fallible() -> anyhow::Result<u8> {
-        Err(anyhow::anyhow!("boom"))
-    }
-
-    #[test]
-    fn to_compiler_error_wraps_the_debug_rendering() {
-        let error = fallible()
-            .to_compiler_error(at("main.rock", 0, 0, 0))
-            .unwrap_err();
-        assert_eq!(error.message, "boom");
-        assert_eq!(error.labels.len(), 1);
-        assert_eq!(error.labels[0].message, "boom");
-        assert_eq!(error.location.offset, 0);
     }
 
     #[test]
