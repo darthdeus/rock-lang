@@ -10,9 +10,10 @@ use skull_mir::mir::{Inst, MirFunc, ValueCtorForm};
 use skull_mir::monoty::{MonoInterner, MonoTy};
 
 #[test]
-fn coroutine_flat_refs_reject_at_the_call_with_a_user_diagnostic() {
+fn coroutine_flat_refs_keep_a_defensive_lowering_diagnostic() {
     for call in ["bump(xs[0])", "relay(xs[0])"] {
-        let ws = crate::common::checked_ws_of(&format!(
+        // Admission rejects this source; exercise lowering without that gate.
+        let ws = crate::common::ws_of(&format!(
             "value Cell {{ w: int }}\n\
              co fn bump(c: ref Cell) -> Coroutine<int> {{ c.w += 1; yield c.w }}\n\
              fn relay(c: ref Cell) -> Coroutine<int> {{ return bump(c) }}\n\

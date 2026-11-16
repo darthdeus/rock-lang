@@ -1,8 +1,8 @@
-//! Error: flat element references are unsupported coroutine arguments.
+//! Error: relocatable element references cannot be retained by coroutines.
 //! Tags: coroutines, refs, flat-storage
 
 //=== TEST CASE: coroutine_cannot_receive_a_flat_element_ref ===
-//! expect: cannot pass a reference to a flat-stored container element to coroutine `bump`
+//! expect: cannot pass a reference into a relocatable Vec or Map element to `bump`: the reference is retained by a coroutine
 value Cell { w: int }
 co fn bump(c: ref Cell) -> Coroutine<int> {
     c.w += 1
@@ -15,7 +15,7 @@ fn main() {
 }
 
 //=== TEST CASE: coroutine_cannot_receive_a_forwarded_flat_element_ref ===
-//! expect: cannot pass a reference to a flat-stored container element to coroutine `bump`
+//! expect: cannot pass a reference into a relocatable Vec or Map element to `relay`: the reference is retained by a coroutine
 value Cell { w: int }
 co fn bump(c: ref Cell) -> Coroutine<int> {
     c.w += 1
@@ -26,4 +26,14 @@ fn main() {
     let xs: [Cell] = [Cell { w: 1 }]
     let c = relay(xs[0])
     resume(c)
+}
+
+//=== TEST CASE: coroutine_cannot_receive_a_map_element_ref ===
+//! expect: cannot pass a reference into a relocatable Vec or Map element to `bump`: the reference is retained by a coroutine
+value Cell { w: int }
+co fn bump(c: ref Cell) -> Coroutine<int> { yield c.w }
+fn main() {
+    let cells: Map<string, Cell> = map_new()
+    cells["a"] = Cell { w: 1 }
+    let task = bump(cells["a"])
 }

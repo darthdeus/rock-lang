@@ -4,7 +4,8 @@
 //! the old reference lands in the superseded buffer.
 //!
 //! Inference already rejects retaining an element reference (a `ref` local, a
-//! ref return), so one is live only while the call it was passed to runs. The
+//! ref return). Coroutine retention is tracked through reference parameters,
+//! so an element reference is live only while its immediate call runs. The
 //! check is therefore at that call: every function gets a summary of the
 //! collections whose structure it may change, and a call that receives an
 //! element reference is rejected when its summary, or a later argument, may
@@ -54,6 +55,8 @@ type FnKey = (ModuleId, Idx<Function>);
 struct Effect {
     /// Runs a closure or foreign code whose effect is not known.
     unknown: Option<Span>,
+    /// Keeps these reference parameters in a coroutine frame.
+    retained: BTreeMap<u16, Span>,
     /// Changes the structure of the collection passed as this parameter.
     params: BTreeMap<u16, Span>,
     /// Changes the structure of some other reachable collection with this
@@ -77,11 +80,15 @@ impl Effect {
     /// settles; only the keys decide convergence.
     fn same_shape(&self, other: &Effect) -> bool {
         self.unknown.is_some() == other.unknown.is_some()
+            && self.retained.keys().eq(other.retained.keys())
             && self.params.keys().eq(other.params.keys())
             && self.elements.keys().eq(other.elements.keys())
     }
 
     fn union(&mut self, other: &Effect) {
+        for (&p, &at) in &other.retained {
+            self.retained.entry(p).or_insert(at);
+        }
         if let Some(at) = other.unknown {
             self.add_unknown(at);
         }
@@ -100,6 +107,8 @@ impl Effect {
 /// One argument of a call, as the caller sees it.
 #[derive(Clone)]
 struct Arg {
+    expr: Idx<Expr>,
+    ref_params: BTreeSet<u16>,
     /// A local Vec/Map built fresh in this body: only this body can reach it.
     fresh: Option<Idx<BindingInfo>>,
     /// The caller's own parameter, passed through directly.
@@ -283,10 +292,71 @@ impl<'a> BodyCtx<'a> {
             ),
             _ => (None, None),
         };
+        let mut ref_params = BTreeSet::new();
+        self.ref_params(expr, &mut ref_params, &mut FxHashSet::default());
         Arg {
+            expr,
+            ref_params,
             fresh,
             param,
             element: self.element_key(expr),
+        }
+    }
+
+    fn ref_params(&self, e: Idx<Expr>, out: &mut BTreeSet<u16>, seen: &mut FxHashSet<Idx<Expr>>) {
+        if !seen.insert(e) {
+            return;
+        }
+        match self.body.expr_arena[e] {
+            Expr::Var(binding) => {
+                if let Some(&param) = self.params.get(&binding) {
+                    out.insert(param);
+                }
+                for &value in self.ref_values.get(&binding).into_iter().flatten() {
+                    self.ref_params(value, out, seen);
+                }
+            }
+            Expr::FieldAccess { base, .. }
+            | Expr::SafeNav { base, .. }
+            | Expr::TupleIndex { tuple: base, .. }
+            | Expr::As { value: base, .. } => self.ref_params(base, out, seen),
+            Expr::Block {
+                tail: Some(tail), ..
+            } => self.ref_params(tail, out, seen),
+            Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            }
+            | Expr::IfLet {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.ref_params(then_branch, out, seen);
+                if let Some(branch) = else_branch {
+                    self.ref_params(branch, out, seen);
+                }
+            }
+            Expr::Match { arms, .. } => {
+                for arm in arms {
+                    self.ref_params(self.body.match_arm_arena[arm].body, out, seen);
+                }
+            }
+            Expr::BinOp {
+                op: BinOp::NullCoalesce,
+                lhs,
+                rhs,
+            } => {
+                self.ref_params(lhs, out, seen);
+                self.ref_params(rhs, out, seen);
+            }
+            Expr::Call { .. } | Expr::SafeNavCall { .. } => {
+                for &arg in self.bi.ref_call_args.get(&e).into_iter().flatten() {
+                    self.ref_params(arg, out, seen);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -714,6 +784,13 @@ fn keys_may_alias(a: &str, b: &str) -> bool {
 /// The callee's summary as seen from one call.
 fn map_edge(edge: &Edge, callee: &Effect, at: Span) -> Effect {
     let mut mapped = Effect::default();
+    for (&p, &witness) in &callee.retained {
+        if let Some(Some(arg)) = edge.args.get(p as usize) {
+            for &q in &arg.ref_params {
+                mapped.retained.entry(q).or_insert(witness);
+            }
+        }
+    }
     if let Some(witness) = callee.unknown {
         mapped.add_unknown(witness);
     }
@@ -789,8 +866,7 @@ impl Relevance {
         self.all || key.contains('$') || key.contains(ANY_KEY) || self.keys.contains(key)
     }
 
-    /// An unknown effect already rejects every reference, so the rest is
-    /// dropped with it.
+    /// Unknown code subsumes structural effects; retention still propagates.
     fn trim(&self, effect: &mut Effect) {
         if effect.unknown.is_some() {
             effect.params.clear();
@@ -962,11 +1038,20 @@ impl<'a> Program<'a> {
     }
 
     fn summary(&self, key: FnKey) -> Effect {
-        match self.summaries.get(&key) {
+        let mut effect = match self.summaries.get(&key) {
             Some(effect) => effect.clone(),
             None if self.facts.contains_key(&key) => Effect::default(),
             None => bodiless_summary(self.ws, key),
+        };
+        let function = &self.ws.module(key.0).functions[key.1];
+        if function.is_coroutine {
+            for (index, param) in function.param_decls.iter().enumerate() {
+                if self.ws.type_contains_ref(None, param.ty) {
+                    effect.retained.insert(index as u16, function.span);
+                }
+            }
         }
+        effect
     }
 
     fn call_effect(&self, body: &Body, call: Idx<Expr>, site: &CallSite) -> Effect {
@@ -1001,9 +1086,6 @@ impl<'a> Program<'a> {
             let facts = &self.facts[&key];
             let mut effect = facts.direct.clone();
             for (call, site) in &facts.calls {
-                if effect.unknown.is_some() {
-                    break;
-                }
                 effect.union(&self.call_effect(body, *call, site));
             }
             effect.locals.clear();
@@ -1089,7 +1171,7 @@ impl<'a> Program<'a> {
                 ));
             }
         }
-        for (call, _) in &facts.calls {
+        for (call, site) in &facts.calls {
             let Some(ref_args) = bi.ref_call_args.get(call) else {
                 continue;
             };
@@ -1097,6 +1179,26 @@ impl<'a> Program<'a> {
                 let mut roots = Vec::new();
                 ctx.element_roots(ref_arg, &mut roots);
                 if roots.is_empty() {
+                    continue;
+                }
+                if roots.iter().any(|root| !root.key.starts_with("Arena<"))
+                    && let CallSite::Known(edge) = site
+                    && let Some(witness) =
+                        self.summary(edge.callee)
+                            .retained
+                            .iter()
+                            .find_map(|(&p, &at)| {
+                                edge.args
+                                    .get(p as usize)
+                                    .and_then(Option::as_ref)
+                                    .filter(|arg| arg.expr == ref_arg)
+                                    .map(|_| at)
+                            })
+                {
+                    errors.push(CompilerError::new_with_label(
+                        body.expr_spans[ref_arg],
+                        format!("{REJECTION_PREFIX} to `{}`: the reference is retained by a coroutine; pass the container and index instead", callee_name(&ctx, *call)),
+                    ).with_label(witness, "the coroutine retains its parameters until resume".to_string()));
                     continue;
                 }
                 let effect = self.effect_while_live(&ctx, &effects, *call, ref_arg);
