@@ -90,9 +90,11 @@ fn snap(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
 /// the updater is actually compared on.
 #[test]
 fn discovery_order_does_not_change_the_canonical_form() {
-    let (ws_a, a) = build(false);
-    let (ws_b, b) = build(true);
-    let (sa, sb) = (snap(&ws_a, &a), snap(&ws_b, &b));
+    let ws = ws_of_files(&[("<test>", SRC)]);
+    let roots = skull::mir_emit::emission_roots(&ws, None);
+    let a = instance_graph::build(&ws, roots.clone(), false);
+    let b = instance_graph::build(&ws, roots, true);
+    let (sa, sb) = (snap(&ws, &a), snap(&ws, &b));
     let d = sa.diff(&sb);
     assert!(
         d.is_empty(),
@@ -909,7 +911,7 @@ fn every_semantic_field_is_observed() {
     // otherwise hide the rest behind it.
     let mut blind: Vec<String> = Vec::new();
     let mut misblamed: Vec<String> = Vec::new();
-    let (ws, _) = build(false);
+    let (ws, base) = build(false);
     for Arm {
         name,
         section,
@@ -917,8 +919,7 @@ fn every_semantic_field_is_observed() {
         b,
     } in arms()
     {
-        let (_, mut ga) = build(false);
-        let (_, mut gb) = build(false);
+        let (mut ga, mut gb) = (base.clone(), base.clone());
         a(&mut ga);
         b(&mut gb);
         let (sa, sb) = (snap(&ws, &ga), snap(&ws, &gb));
@@ -960,14 +961,15 @@ fn counters_and_arena_growth_are_not_semantic() {
     let (ws, base) = build(false);
     let before = snap(&ws, &base);
 
-    let (_, mut g) = build(false);
-    // The agreement counters are DERIVED from the reach index now, so moving
-    // them means moving the index -- an extra reach of an instance the graph
-    // already has, which is work performed and not a fact about the graph.
+    let mut g = base.clone();
+    // Agreement counts are derived from their owner indexes, but are not graph
+    // facts; changing those counts must not change the canonical form.
     if let Some(a) = g.index.subst.values_mut().next() {
         a.total += 11;
     }
-    assert!(g.subst_comparisons() > 0 && g.bound_tree_comparisons() == g.bound_tree_comparisons());
+    if let Some(a) = g.index.trees.values_mut().next() {
+        a.total += 11;
+    }
     // An orphan type interned but referenced by no instance -- exactly what a
     // persisted arena accumulates across edits.
     g.interner().intern(MonoTy::Never);

@@ -655,7 +655,7 @@ fn count_int_to_float(mir: &MirFunc) -> usize {
 }
 
 #[test]
-fn production_call_coercion_consumes_the_selected_callee_signature() {
+fn production_lowering_consumes_and_validates_concrete_signatures() {
     let (ws, g, bodies) = bodies_of(ID_CALL_SOURCE);
     let (_, main_plan) = plan_named(&ws, &bodies, "main");
     let callee = callee_named(&ws, main_plan, "id");
@@ -665,6 +665,7 @@ fn production_call_coercion_consumes_the_selected_callee_signature() {
         "callee signature has no parameter population"
     );
     let float = g.interner().intern(MonoTy::Float);
+
     let mut caller = (**main_plan).clone();
     let recorded = caller
         .callees
@@ -677,35 +678,26 @@ fn production_call_coercion_consumes_the_selected_callee_signature() {
         count_int_to_float(&mir) > 0,
         "call lowering ignored the selected callee's concrete parameter signature"
     );
-}
 
-#[test]
-fn production_call_rejects_a_callee_signature_body_disagreement() {
-    let (ws, g, bodies) = bodies_of(ID_CALL_SOURCE);
-    let (_, main_plan) = plan_named(&ws, &bodies, "main");
-    let callee = callee_named(&ws, main_plan, "id");
-    let float = g.interner().intern(MonoTy::Float);
-    let plans = with_callee_signature(&bodies, &callee, |signature| signature.params[0] = float);
-    let err = lower(&ws, &g, main_plan, &plans)
+    let mismatched =
+        with_callee_signature(&bodies, &callee, |signature| signature.params[0] = float);
+    let err = lower(&ws, &g, main_plan, &mismatched)
         .expect_err("lowering accepted a mismatched callee body plan");
     assert!(
         err.message
             .contains("concrete callee signature disagrees with its body plan"),
         "unexpected mismatch diagnostic: {err:?}"
     );
-}
 
-#[test]
-fn production_return_coercion_consumes_the_body_signature() {
-    let (ws, g, bodies) = bodies_of(ID_CALL_SOURCE);
-    let (_, plan) = plan_named(&ws, &bodies, "id");
-    let mut plan = (**plan).clone();
+    let (_, body_plan) = plan_named(&ws, &bodies, "id");
+    let mut body_plan = (**body_plan).clone();
     assert!(
-        plan.signature.result.is_some(),
+        body_plan.signature.result.is_some(),
         "body signature has no result population"
     );
-    Arc::make_mut(&mut plan.signature).result = Some(g.interner().intern(MonoTy::Float));
-    let mir = lower(&ws, &g, &plan, &bodies.plans).expect("plan-driven return lowering failed");
+    Arc::make_mut(&mut body_plan.signature).result = Some(float);
+    let mir =
+        lower(&ws, &g, &body_plan, &bodies.plans).expect("plan-driven return lowering failed");
     assert!(
         count_int_to_float(&mir) > 0,
         "return lowering ignored the body's concrete result signature"

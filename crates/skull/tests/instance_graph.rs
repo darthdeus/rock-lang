@@ -66,12 +66,14 @@ fn main() {
 fn each_distinct_instantiation_is_its_own_instance() {
     let cases = [
         (
-            "two arguments",
+            "ordinary generic loop",
             r#"
 fn ident<T>(x: T) -> T { return x }
 fn main() {
     let a = ident(1)
     let b = ident("s")
+    let xs = [1, 2, 3]
+    for v in xs { ident(v) }
 }
 "#,
             "ident",
@@ -107,6 +109,11 @@ fn main() {
     ];
     for (label, src, name, args) in cases {
         let (ws, g) = graph_of(src);
+        let rejected: Vec<String> = g.rejections().map(|r| r.message.clone()).collect();
+        assert!(
+            rejected.is_empty(),
+            "{label}: valid generic program rejected: {rejected:?}"
+        );
         let lines = g.manifest_lines(&ws);
         let found: Vec<&String> = lines.iter().filter(|s| s.contains(name)).collect();
         assert_eq!(found.len(), args.len(), "{label}: {found:?}");
@@ -820,29 +827,6 @@ fn main() {
     assert!(
         makes[0].ends_with("<int>"),
         "T did not unify to int: {makes:?}"
-    );
-}
-
-/// A valid program reaches instance construction with NOTHING rejected. Without
-/// this, every assertion above could be satisfied by a gate that rejects
-/// everything.
-#[test]
-fn an_ordinary_generic_program_is_not_rejected() {
-    let (_ws, g) = graph_of(
-        r#"
-fn ident<T>(x: T) -> T { return x }
-fn main() {
-    let a = ident(1)
-    let b = ident("s")
-    let xs = [1, 2, 3]
-    for v in xs { ident(v) }
-}
-"#,
-    );
-    let rejected: Vec<String> = g.rejections().map(|r| r.message.clone()).collect();
-    assert!(
-        rejected.is_empty(),
-        "a valid program was rejected: {rejected:?}"
     );
 }
 

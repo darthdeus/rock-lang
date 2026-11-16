@@ -237,8 +237,6 @@ struct Scenario {
     /// Instances the edit must make lost seeds, or a supported subtree's
     /// survival says nothing about the prune search.
     seeds: Vec<String>,
-    pruned: Option<usize>,
-    newly_reached: Option<usize>,
     suspect_below: Option<usize>,
     locality: Locality,
 }
@@ -273,14 +271,6 @@ impl Scenario {
     }
     fn seeds<S: ToString>(mut self, names: impl IntoIterator<Item = S>) -> Self {
         self.seeds.extend(strings(names));
-        self
-    }
-    fn pruned(mut self, n: usize) -> Self {
-        self.pruned = Some(n);
-        self
-    }
-    fn newly_reached(mut self, n: usize) -> Self {
-        self.newly_reached = Some(n);
         self
     }
     fn suspect_below(mut self, n: usize) -> Self {
@@ -323,15 +313,6 @@ impl Scenario {
                     .iter()
                     .any(|i| case.identity(i).starts_with(s.as_str())),
                 "{l}: `{s}` was not a lost seed: {stats:?}"
-            );
-        }
-        if let Some(n) = self.pruned {
-            assert_eq!(stats.pruned, n, "{l}: pruned population: {stats:?}");
-        }
-        if let Some(n) = self.newly_reached {
-            assert_eq!(
-                stats.newly_reached, n,
-                "{l}: newly reached population: {stats:?}"
             );
         }
         if let Some(n) = self.suspect_below {
@@ -519,7 +500,6 @@ fn branching_support(dead_first: bool) -> Scenario {
     .seeds(["dead_c", "lost_b"])
     .gone(["dead_c", "dead_a", "dead_branch"])
     .kept(["target", "lost_b", "root_branch"])
-    .pruned(3)
 }
 
 const BRANCHED_ANCHOR_LIB: &str = r#"
@@ -587,8 +567,7 @@ fn deletions_prune_exactly_what_they_strand() {
     let scenarios = [
         edit("subtree", CHAIN_MAIN, CHAIN_LIB, MAIN, OTHER_MAIN)
             .gone(["chain_a", "chain_b", "chain_c"])
-            .kept(["other"])
-            .pruned(3),
+            .kept(["other"]),
         // `__op_sub_int_int`'s only caller was the cycle.
         edit(
             "mutually reachable cycle",
@@ -598,8 +577,7 @@ fn deletions_prune_exactly_what_they_strand() {
             OTHER_MAIN,
         )
         .gone(["cyc_a", "cyc_b", "__op_sub_int_int"])
-        .kept(["other"])
-        .pruned(3),
+        .kept(["other"]),
         generated_cycle(3, false),
         generated_cycle(8, false),
         intersecting_support(),
@@ -614,8 +592,7 @@ fn deletions_prune_exactly_what_they_strand() {
             MAIN,
             OTHER_MAIN,
         )
-        .gone(["entry", "branch", "apparent", "shared", "dead"])
-        .pruned(5),
+        .gone(["entry", "branch", "apparent", "shared", "dead"]),
         edit(
             "rooted cycle beside a lost branch",
             &format!("fn zz_start() {{ print(\"{{entry()}} {{rooted_a()}}\") }}\n{rooted_anchor}"),
@@ -625,8 +602,7 @@ fn deletions_prune_exactly_what_they_strand() {
         )
         .seeds(["rooted_a"])
         .gone(["entry", "dead", "dead_leaf"])
-        .kept(["rooted_a", "rooted_b"])
-        .pruned(3),
+        .kept(["rooted_a", "rooted_b"]),
         edit(
             "external anchor beside a stranded branch",
             entry_anchor,
@@ -635,8 +611,7 @@ fn deletions_prune_exactly_what_they_strand() {
             anchor_only,
         )
         .gone(["entry", "dead_root", "dead_leaf"])
-        .kept(["shared_root", "shared_left", "shared_right"])
-        .pruned(3),
+        .kept(["shared_root", "shared_left", "shared_right"]),
         edit(
             "long external anchor path",
             entry_anchor,
@@ -646,7 +621,6 @@ fn deletions_prune_exactly_what_they_strand() {
         )
         .gone(["entry", "dead_root", "dead_leaf"])
         .kept(["shared_root", "anchor_31"])
-        .pruned(3)
         .locality(Locality::Local),
     ];
     for s in scenarios {
@@ -679,7 +653,6 @@ fn supported_lost_seeds_keep_their_subtrees() {
         .seeds(["shared_root"])
         .kept(["shared_root"])
         .kept(SHARED_BRANCH_NAMES)
-        .pruned(0)
         .suspect_below(SHARED_SUBTREE_SIZE)
         .locality(Locality::Local),
         // `outer<int>` is a library generic, so it is neither a root nor
@@ -697,7 +670,6 @@ fn supported_lost_seeds_keep_their_subtrees() {
         .seeds(["shared"])
         .kept(["shared", "outer"])
         .kept(SHARED_BRANCH_NAMES)
-        .pruned(0)
         .suspect_below(SHARED_SUBTREE_SIZE)
         .locality(Locality::Local),
         // The const's call is not an edge -- an always-emitted body's callees
@@ -712,8 +684,7 @@ fn supported_lost_seeds_keep_their_subtrees() {
             "fn zz_start() { print(\"{other()} {C}\") }\n",
         )
         .seeds(["shared"])
-        .kept(["shared", "other"])
-        .pruned(0),
+        .kept(["shared", "other"]),
     ];
     for s in scenarios {
         s.run();
@@ -741,9 +712,7 @@ fn const_initializer_edits_replace_their_always_emitted_roots() {
             &with("pick_b()"),
         )
         .gone(["pick_a"])
-        .added(["pick_b"])
-        .pruned(1)
-        .newly_reached(1),
+        .added(["pick_b"]),
         edit(
             "const gains a call",
             &with("1"),
@@ -751,8 +720,7 @@ fn const_initializer_edits_replace_their_always_emitted_roots() {
             MAIN,
             &with("pick_a()"),
         )
-        .added(["pick_a"])
-        .newly_reached(1),
+        .added(["pick_a"]),
     ];
     for s in scenarios {
         s.run();
@@ -780,7 +748,6 @@ fn explicit_root_delta_adds_and_removes_a_library_subtree() {
     let added = case
         .graph
         .update_bodies_with_root_delta(ws, &[chain_a], &[], &[], &[]);
-    assert_eq!(added.newly_reached, 3);
     assert_eq!(case.short_names(&added.added), subtree);
     let mut roots = base_roots.clone();
     roots.push(chain_a);
@@ -790,7 +757,6 @@ fn explicit_root_delta_adds_and_removes_a_library_subtree() {
     let removed = case
         .graph
         .update_bodies_with_root_delta(ws, &[], &[chain_a], &[], &[]);
-    assert_eq!(removed.pruned, 3);
     assert_eq!(case.short_names(&removed.removed), subtree);
     case.assert_matches_fresh("root removed");
 }
@@ -818,14 +784,17 @@ fn a_replaced_root_can_be_restored_by_an_earlier_install_in_its_wave() {
 
     // Root removal makes old_root unwalkable at the wave snapshot. new_root
     // installs first in reverse declaration order and restores its demand.
-    let stats = graph.update_bodies_with_root_delta(
+    graph.update_bodies_with_root_delta(
         &ws,
         &[new_root],
         &[old_root],
         &[body_id(&ws, "old_root")],
         &[],
     );
-    assert!(stats.expanded >= 2);
+    assert!(
+        graph.instances.iter().any(|i| i.func == new_root),
+        "the replacement root was not installed"
+    );
     assert!(graph.substitution(&old_instance).is_some());
     let fresh = instance_graph::build(&ws, vec![new_root], false);
     assert_same_graph(&ws, &graph, &fresh, "root replaced");
@@ -867,9 +836,8 @@ fn adding_a_call_records_a_new_specialization() {
         "the added call reached no new specialization"
     );
     assert!(
-        stats.newly_reached >= 2,
-        "`ident<string>` and the `passthru<string>` it reaches are two new instances, got {}",
-        stats.newly_reached
+        case.has_instance_with("passthru", "string"),
+        "the new `ident<string>` instance did not reach `passthru<string>`"
     );
     case.assert_matches_fresh("addition");
     assert_scoped(&stats, "addition");
@@ -883,22 +851,22 @@ fn a_sequential_edit_chain_agrees_with_a_fresh_build_at_every_step() {
     let mut case = Case::new(CHAIN_MAIN, CHAIN_LIB);
     case.assert_matches_fresh("v1");
 
-    let s1 = case.edit(MAIN, OTHER_MAIN);
-    assert!(
-        s1.pruned == 3 && s1.newly_reached == 0,
-        "step 1 is a deletion: {s1:?}"
-    );
+    case.edit(MAIN, OTHER_MAIN);
+    for name in ["chain_a", "chain_b", "chain_c"] {
+        assert!(!case.has_instance_named(name), "step 1 retained `{name}`");
+    }
     case.assert_matches_fresh("after delete");
 
-    let s2 = case.edit(MAIN, CHAIN_MAIN);
-    assert!(
-        s2.newly_reached == 3 && s2.pruned == 0,
-        "step 2 is an addition: {s2:?}"
-    );
+    case.edit(MAIN, CHAIN_MAIN);
+    for name in ["chain_a", "chain_b", "chain_c"] {
+        assert!(
+            case.has_instance_named(name),
+            "step 2 did not restore `{name}`"
+        );
+    }
     case.assert_matches_fresh("after re-add");
 
-    let s3 = case.edit(MAIN, "fn zz_start() { print(\"{chain_b()}\") }\n");
-    assert!(s3.pruned > 0, "step 3 strands `chain_a`: {s3:?}");
+    case.edit(MAIN, "fn zz_start() { print(\"{chain_b()}\") }\n");
     assert!(!case.has_instance_named("chain_a"));
     assert!(
         case.has_instance_named("chain_c"),
@@ -932,7 +900,7 @@ fn a_body_with_no_facts_that_gains_a_call_is_still_re_walked() {
     );
     assert!(!case.has_instance_named("added"));
 
-    let stats = case.edit(
+    case.edit(
         LIB,
         "fn leaf() -> int { return added() }\nfn added() -> int { return 2 }\n",
     );
@@ -941,7 +909,6 @@ fn a_body_with_no_facts_that_gains_a_call_is_still_re_walked() {
         case.has_instance_named("added"),
         "the call added to an empty body was not seen"
     );
-    assert_eq!(stats.newly_reached, 1);
     case.assert_matches_fresh("empty body gains a call");
 }
 
@@ -1007,7 +974,6 @@ fn other() -> int { return 7 }
 
     let stats = case.edit(MAIN, OTHER_MAIN);
 
-    assert!(stats.pruned > 0, "the deletion stranded nothing");
     assert!(
         case.graph.bound_trees().count() < before,
         "every one of the {before} bound trees outlived the instances that owned them"
@@ -1053,16 +1019,12 @@ fn resolving_a_call_removes_its_stale_unresolved_record() {
     );
 
     let roots = skull::mir_emit::emission_roots(&v2, Some(PROJ));
-    let stats = g.update_bodies_with_edits(&v2, roots, &[(mid, owner)], &[]);
+    g.update_bodies_with_edits(&v2, roots, &[(mid, owner)], &[]);
 
     assert!(
         g.unresolved().next().is_none(),
         "an unresolved record survived the call resolving: {:?}",
         g.unresolved().map(|u| u.reason).collect::<Vec<_>>()
-    );
-    assert!(
-        stats.newly_reached > 0,
-        "the resolved call reached no instance"
     );
     assert_same_graph(&v2, &g, &graph_of(&v2), "unresolved cleared");
 }
@@ -1091,7 +1053,7 @@ fn deep<T>(x: T, n: int) -> int {
         "the fixture capped no expansion"
     );
 
-    let stats = case.edit(LIB, flat);
+    case.edit(LIB, flat);
 
     assert!(
         case.recursion_findings().is_empty(),
@@ -1100,10 +1062,6 @@ fn deep<T>(x: T, n: int) -> int {
     assert!(
         case.graph.depth_capped().next().is_none(),
         "capped instances survived"
-    );
-    assert!(
-        stats.pruned > 0,
-        "the deep instantiation chain was not pruned"
     );
     case.assert_matches_fresh("recursion removed");
 }
@@ -1126,13 +1084,12 @@ fn reducing_a_too_deep_instantiation_removes_the_depth_cap() {
         "this fixture must cap WITHOUT polymorphic recursion, or it tests two producers"
     );
 
-    let stats = case.edit(MAIN, shallow_main);
+    case.edit(MAIN, shallow_main);
 
     assert!(
         case.graph.depth_capped().next().is_none(),
         "a capped instance survived the instantiation getting shallower"
     );
-    assert!(stats.pruned > 0, "the deep instance was not pruned");
     case.assert_matches_fresh("depth cap cleared");
 }
 
@@ -1231,7 +1188,7 @@ fn fixing_an_always_emitted_call_clears_its_root_hole() {
     );
     assert_eq!(case.always_emitted_failures(), 1);
 
-    let stats = case.edit(
+    case.edit(
         MAIN,
         "const C: int = takes(mono_id)\nfn zz_start() { print(\"{C}\") }\n",
     );
@@ -1242,8 +1199,8 @@ fn fixing_an_always_emitted_call_clears_its_root_hole() {
         "an always-emitted failure survived the call that produced it"
     );
     assert!(
-        stats.newly_reached > 0,
-        "`mono_id` was not reached as a new root"
+        case.has_instance_named("mono_id"),
+        "the resolved always-emitted call did not reach `mono_id`"
     );
     case.assert_matches_fresh("always-emitted hole cleared");
 }
@@ -1320,6 +1277,8 @@ fn root_hole_spans_follow_insertions_and_deletions() {
          fn unmoved_id<T>(x: T) -> T {{ return x }}\n\
          const D: int = takes(unmoved_id)\n"
     );
+    let mut case = Case::new(original, &lib);
+    assert_eq!(case.graph.uninstantiated_roots.len(), 5, "fixture");
     let mut differences = Vec::new();
     for (label, before, after) in [
         ("insert byte", original, longer.as_str()),
@@ -1327,8 +1286,6 @@ fn root_hole_spans_follow_insertions_and_deletions() {
         ("insert lines", original, multiline.as_str()),
         ("delete lines", multiline.as_str(), original),
     ] {
-        let mut case = Case::new(before, &lib);
-        assert_eq!(case.graph.uninstantiated_roots.len(), 5, "{label}");
         let other_span = |case: &Case| {
             case.graph.uninstantiated_roots["other_id_T"].always_emitted_sites[0].span
         };

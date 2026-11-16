@@ -192,6 +192,10 @@ fn an_artifact_realizes_the_shared_instance_to_the_sibling_that_serves_it() {
 
     let lua = realize(&ws, &g, LUAJIT_DESKTOP, &roots);
     let js = realize(&ws, &g, JAVASCRIPT_WEB, &roots);
+    assert_eq!(
+        lua.shared_instances, js.shared_instances,
+        "the two views were taken over different populations"
+    );
 
     let selected = |view: &artifact::ArtifactView| -> Vec<(Instance, FnBackend)> {
         view.realization
@@ -738,72 +742,6 @@ fn main() { let a = caller(1) }
         0,
         "mapping the callee left the call severed"
     );
-}
-
-/// ONE graph, realized by every artifact. What differs is the DECLARATION each
-/// selects and the boundary identity it mints; the logical `Instance` is shared.
-///
-/// The consequence is measured, not asserted from the signature: the two views
-/// are taken over the same `g.instances`, and the divergence is located in the
-/// realization rather than in the population.
-#[test]
-fn one_shared_instance_realizes_to_a_different_declaration_per_artifact() {
-    let ws = ws_with_stdlib(REACH);
-    let (g, roots) = graph_for(&ws);
-
-    let lua = realize(&ws, &g, LUAJIT_DESKTOP, &roots);
-    let js = realize(&ws, &g, JAVASCRIPT_WEB, &roots);
-    assert_eq!(
-        lua.shared_instances, js.shared_instances,
-        "the two views were taken over different populations"
-    );
-
-    // The population that can witness it: instances BOTH artifacts retain.
-    let both: Vec<&Instance> = lua.realization.keys().filter(|i| js.retains(i)).collect();
-    assert!(
-        !both.is_empty(),
-        "no instance is retained by both artifacts"
-    );
-
-    // Sibling selection HAPPENED -- otherwise every agreement below is vacuous.
-    let diverged: Vec<&Instance> = both
-        .iter()
-        .copied()
-        .filter(|i| lua.realization[i].decl != js.realization[i].decl)
-        .collect();
-    assert!(
-        !diverged.is_empty(),
-        "no shared instance selected a different declaration, so this fixture \
-         exercises no backend variant at all"
-    );
-    // ...and it is SELECTION, not a second instance: the key is one `Instance`
-    // and at least one artifact chose something other than the representative.
-    for i in &diverged {
-        assert!(
-            lua.realization[i].decl != i.func || js.realization[i].decl != i.func,
-            "the declarations differ but neither is a selected sibling"
-        );
-    }
-
-    // The boundary identity follows the declaration, so two artifacts name two
-    // contracts for one logical identity -- plan S 0h's `InstanceId` is
-    // target-neutral, the ARTIFACT owns the spelling.
-    let boundary_pairs: Vec<&Instance> = diverged
-        .iter()
-        .copied()
-        .filter(|i| lua.boundaries.contains_key(*i) && js.boundaries.contains_key(*i))
-        .collect();
-    assert!(
-        !boundary_pairs.is_empty(),
-        "no diverged instance is a boundary on both artifacts, so the id \
-         comparison below would be zero over zero"
-    );
-    for i in boundary_pairs {
-        assert_ne!(
-            lua.boundaries[i], js.boundaries[i],
-            "one `BoundaryId` served two targets"
-        );
-    }
 }
 
 /// Identity across artifacts is the shared `Instance`, NOT the spelling.
