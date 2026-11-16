@@ -174,15 +174,8 @@ impl<'a> Builder<'a> {
         elem: ColumnElem,
     ) -> Result<(), CompilerError> {
         let shape = self.column_shape(elem)?;
-        let leaves = self.repr_to_storage_leaves(bundle, &shape, "strided store")?;
         let stride = shape.leaf_count();
-        if leaves.len() != stride {
-            return Err(gap(format!(
-                "strided store arity mismatch for [{}]: {} leaves vs {stride} slots",
-                elem.name,
-                leaves.len()
-            )));
-        }
+        let leaves = self.element_storage_leaves(bundle, &shape, stride, elem, "strided store")?;
         let slot = self.checked_column_index(vec, index);
         let row = self.strided_row_of(slot);
         self.strided_store_leaves_at(vec, row, leaves, stride, elem);
@@ -301,15 +294,8 @@ impl<'a> Builder<'a> {
         elem: ColumnElem,
     ) -> Result<(), CompilerError> {
         let shape = self.column_shape(elem)?;
-        let leaves = self.repr_to_storage_leaves(bundle, &shape, "strided append")?;
         let stride = shape.leaf_count();
-        if leaves.len() != stride {
-            return Err(gap(format!(
-                "strided append arity mismatch for [{}]: {} leaves vs {stride} slots",
-                elem.name,
-                leaves.len()
-            )));
-        }
+        let leaves = self.element_storage_leaves(bundle, &shape, stride, elem, "strided append")?;
         let len = self.emit_cur(Inst::Field {
             base: vec,
             field: crate::names::ustr("len"),
@@ -1473,10 +1459,9 @@ impl<'a> Builder<'a> {
         item: Idx<Expr>,
         elem: ColumnElem,
     ) -> Result<ValueRepr, CompilerError> {
-        let shape = self.column_shape(elem)?;
         let vec = self.lower_expr(recv)?;
         let repr = self.lower_expr_repr(item)?;
-        self.column_append_bundle_with_shape(vec, &repr, elem, &shape)?;
+        self.column_append_bundle(vec, &repr, elem)?;
         Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))))
     }
 
@@ -1487,37 +1472,9 @@ impl<'a> Builder<'a> {
         elem: ColumnElem,
     ) -> Result<(), CompilerError> {
         let shape = self.column_shape(elem)?;
-        let leaves = self.repr_to_storage_leaves(bundle, &shape, "column append")?;
-        self.column_append_leaves(vec, leaves, elem, &shape)
-    }
-
-    pub(crate) fn column_append_bundle_with_shape(
-        &mut self,
-        vec: Idx<Inst>,
-        bundle: &ValueBundle,
-        elem: ColumnElem,
-        shape: &ValueShape,
-    ) -> Result<(), CompilerError> {
-        let leaves = self.repr_to_storage_leaves(bundle, shape, "column append")?;
-        self.column_append_leaves(vec, leaves, elem, shape)
-    }
-
-    fn column_append_leaves(
-        &mut self,
-        vec: Idx<Inst>,
-        leaves: Vec<Idx<Inst>>,
-        elem: ColumnElem,
-        shape: &ValueShape,
-    ) -> Result<(), CompilerError> {
-        let paths = column_leaf_paths(shape);
-        if leaves.len() != paths.len() {
-            return Err(gap(format!(
-                "column push arity mismatch for [{}]: {} leaves vs {} columns",
-                elem.name,
-                leaves.len(),
-                paths.len()
-            )));
-        }
+        let paths = column_leaf_paths(&shape);
+        let leaves =
+            self.element_storage_leaves(bundle, &shape, paths.len(), elem, "column append")?;
         // `len` is shared by every column, so it advances ONCE. Bumping per
         // column would desync them.
         let len = self.emit_cur(Inst::Field {
@@ -1537,18 +1494,7 @@ impl<'a> Builder<'a> {
             field: crate::names::ustr("len"),
             value: next,
         });
-        for (path, leaf) in paths.into_iter().zip(leaves) {
-            let col = self.emit_cur(Inst::Field {
-                base: vec,
-                field: path,
-            });
-            self.emit_cur(Inst::StoreIndex {
-                base: col,
-                index: slot,
-                value: leaf,
-                kind: ContainerKind::VecColumn,
-            });
-        }
+        self.store_column_leaves(vec, slot, paths, leaves);
         Ok(())
     }
 
@@ -2079,17 +2025,21 @@ impl<'a> Builder<'a> {
         elem: ColumnElem,
     ) -> Result<(), CompilerError> {
         let shape = self.column_shape(elem)?;
-        let leaves = self.repr_to_storage_leaves(bundle, &shape, "column store")?;
         let paths = column_leaf_paths(&shape);
-        if leaves.len() != paths.len() {
-            return Err(gap(format!(
-                "column store arity mismatch for [{}]: {} leaves vs {} columns",
-                elem.name,
-                leaves.len(),
-                paths.len()
-            )));
-        }
+        let leaves =
+            self.element_storage_leaves(bundle, &shape, paths.len(), elem, "column store")?;
         let slot = self.checked_column_index(vec, index);
+        self.store_column_leaves(vec, slot, paths, leaves);
+        Ok(())
+    }
+
+    fn store_column_leaves(
+        &mut self,
+        vec: Idx<Inst>,
+        slot: Idx<Inst>,
+        paths: Vec<Ustr>,
+        leaves: Vec<Idx<Inst>>,
+    ) {
         for (path, leaf) in paths.into_iter().zip(leaves) {
             let col = self.emit_cur(Inst::Field {
                 base: vec,
@@ -2102,7 +2052,26 @@ impl<'a> Builder<'a> {
                 kind: ContainerKind::VecColumn,
             });
         }
-        Ok(())
+    }
+
+    /// `bundle`'s storage leaves, checked to fill exactly `slots` element slots.
+    pub(crate) fn element_storage_leaves(
+        &mut self,
+        bundle: &ValueBundle,
+        shape: &ValueShape,
+        slots: usize,
+        elem: ColumnElem,
+        reason: &str,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let leaves = self.repr_to_storage_leaves(bundle, shape, reason)?;
+        if leaves.len() != slots {
+            return Err(gap(format!(
+                "{reason} arity mismatch for [{}]: {} leaves vs {slots} slots",
+                elem.name,
+                leaves.len()
+            )));
+        }
+        Ok(leaves)
     }
 
     /// `__vec_checked_index(vec, i)` — the backing slot index, bounds-checked

@@ -2634,15 +2634,8 @@ impl<'a> Builder<'a> {
             .collect();
         for &e in elems {
             let repr = self.lower_expr_repr(e)?;
-            let leaves = self.repr_to_storage_leaves(&repr, &shape, "column literal")?;
-            if leaves.len() != paths.len() {
-                return Err(gap(format!(
-                    "column literal arity mismatch for [{}]: {} leaves vs {} columns",
-                    elem.name,
-                    leaves.len(),
-                    paths.len()
-                )));
-            }
+            let leaves =
+                self.element_storage_leaves(&repr, &shape, paths.len(), elem, "column literal")?;
             for (col, leaf) in columns.iter_mut().zip(leaves) {
                 col.1.push(leaf);
             }
@@ -2668,14 +2661,8 @@ impl<'a> Builder<'a> {
         let mut values = Vec::with_capacity(elems.len() * stride);
         for &expr in elems {
             let bundle = self.lower_expr_repr(expr)?;
-            let leaves = self.repr_to_storage_leaves(&bundle, &shape, "strided literal")?;
-            if leaves.len() != stride {
-                return Err(gap(format!(
-                    "strided literal arity mismatch for [{}]: {} leaves vs {stride} slots",
-                    elem.name,
-                    leaves.len()
-                )));
-            }
+            let leaves =
+                self.element_storage_leaves(&bundle, &shape, stride, elem, "strided literal")?;
             if self.strided_stores_raw(elem) {
                 values.extend(leaves);
             } else {
