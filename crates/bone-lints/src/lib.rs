@@ -1616,29 +1616,15 @@ impl IncrementalLintCache {
             }
         }
 
-        if invalidation.is_some() && self.dependency.action_declarations.is_empty() {
-            if let Some(module) = ws.user_modules(warm).find(|module| {
-                is_production_action_module(module.file, self.dependency.action_policy.as_deref())
-            }) {
-                if let Some((_, function)) = module.functions.iter().next() {
-                    let file = module.file;
-                    if sources.contains_key(&file) {
-                        let raw = Finding::of(&ActionCallerGap {
-                            action: Ustr::from("<none>"),
-                            file,
-                            span: function.span,
-                            population_empty: true,
-                            policy: self
-                                .dependency
-                                .action_policy
-                                .as_deref()
-                                .expect("configured action policy"),
-                        });
-                        self.push_global(file, raw, stats);
-                        self.action_population_file = Some(file);
-                    }
-                }
-            }
+        if invalidation.is_some()
+            && self.dependency.action_declarations.is_empty()
+            && let Some(policy) = self.dependency.action_policy.as_deref()
+            && let Some(gap) = empty_action_population(ws, warm, policy)
+            && sources.contains_key(&gap.file)
+        {
+            let file = gap.file;
+            self.push_global(file, Finding::of(&gap), stats);
+            self.action_population_file = Some(file);
         }
 
         for &action in affected {
@@ -3887,6 +3873,26 @@ impl LintFinding for ActionCallerGap<'_> {
 
 /// HIR-backed caller census for production project actions. Global declaration
 /// initializers and `@wire` refresh bodies are registration, not callers.
+/// The single finding that a policy names no action: on the first function
+/// of the first production module.
+fn empty_action_population<'a>(
+    ws: &Workspace,
+    warm: &FxHashSet<ModuleId>,
+    policy: &'a ActionLayerPolicy,
+) -> Option<ActionCallerGap<'a>> {
+    let module = ws
+        .user_modules(warm)
+        .find(|module| is_production_action_module(module.file, Some(policy)))?;
+    let function = module.functions.values().next()?;
+    Some(ActionCallerGap {
+        action: Ustr::from("<none>"),
+        file: module.file,
+        span: function.span,
+        population_empty: true,
+        policy,
+    })
+}
+
 pub(crate) fn action_caller_gaps<'a>(
     ws: &Workspace,
     warm: &FxHashSet<ModuleId>,
@@ -3896,22 +3902,9 @@ pub(crate) fn action_caller_gaps<'a>(
         action_declarations_in(ws.user_modules(warm), Some(policy)).collect();
 
     if declarations.is_empty() {
-        let Some(module) = ws
-            .user_modules(warm)
-            .find(|module| is_production_action_module(module.file, Some(policy)))
-        else {
-            return Vec::new();
-        };
-        let Some((_, function)) = module.functions.iter().next() else {
-            return Vec::new();
-        };
-        return vec![ActionCallerGap {
-            action: Ustr::from("<none>"),
-            file: module.file,
-            span: function.span,
-            population_empty: true,
-            policy,
-        }];
+        return empty_action_population(ws, warm, policy)
+            .into_iter()
+            .collect();
     }
 
     let declared: FxHashSet<Ustr> = declarations.iter().map(|(name, _, _)| *name).collect();
