@@ -144,26 +144,21 @@ impl Emitter<'_> {
         let first_site = self.allocation.map_or(0, |a| a.sites.borrow().len());
         let mut locals = String::new();
         let mut stand_ins = Vec::new();
-        for (i, (p, a)) in callee.param_decls.iter().zip(args.iter()).enumerate() {
+        for (p, a) in callee.param_decls.iter().zip(args.iter()) {
             let mut operand = String::new();
             self.write_opnd(&mut operand, *a);
             let standalone = operand
                 .bytes()
                 .all(|c| c.is_ascii_alphanumeric() || c == b'_')
                 || one_group(&operand);
-            // A pure expression the body reads at most once may also move to
-            // that read: nothing the body does can change its value.
-            // So may a read of memory the body's first statement makes before
-            // anything else runs, when no later argument calls anything.
+            // A pure expression may move to its read if it is evaluated once.
+            // A materialized read is already a snapshot in a local operand.
             let movable = || {
                 self.opnd_is_plain(*a)
                     || self.folds_pure(*a)
                         && analyzed
                             .param_reads(p.name.as_str())
                             .is_some_and(|n| n <= 1)
-                    || self.folds_no_call(*a)
-                        && analyzed.reads_first(p.name.as_str())
-                        && args[i + 1..].iter().all(|&later| self.folds_no_call(later))
             };
             if standalone
                 && !(operand.starts_with('(') && analyzed.opens_statement(p.name.as_str()))

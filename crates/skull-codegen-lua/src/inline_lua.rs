@@ -324,35 +324,6 @@ impl<'a> InlineLuaBody<'a> {
         Some(self.variable_refs(name).count())
     }
 
-    /// True if `body` reads parameter `name` once, in its first statement, with
-    /// no call returned, branch taken or assignment made before that read: an
-    /// expression passed for it reads the same memory there as before the body.
-    pub(crate) fn reads_first(&self, name: &str) -> bool {
-        let body = self.text;
-        if self.names.iter().any(|&(s, e)| {
-            matches!(
-                &body[s..e],
-                "for" | "while" | "repeat" | "function" | "goto"
-            )
-        }) {
-            return false;
-        }
-        let mut refs = self.variable_refs(name);
-        let (Some((at, _)), None) = (refs.next(), refs.next()) else {
-            return false;
-        };
-        let start = body.len() - body.trim_start().len();
-        if body[start..at].contains(['\n', ')', ';']) {
-            return false;
-        }
-        self.names
-            .iter()
-            .filter(|&&(s, _)| start <= s && s < at)
-            .all(|&(s, e)| {
-                matches!(&body[s..e], "return" | "local" | "if" | "not") || !is_keyword(&body[s..e])
-            })
-    }
-
     /// True if a reference to `name` begins a statement, where a parenthesized
     /// stand-in would read as a call of the previous line.
     pub(crate) fn opens_statement(&self, name: &str) -> bool {
@@ -367,34 +338,6 @@ impl<'a> InlineLuaBody<'a> {
                 || matches!(word, "then" | "do" | "else" | "end" | "repeat")
         })
     }
-}
-
-fn is_keyword(word: &str) -> bool {
-    matches!(
-        word,
-        "and"
-            | "break"
-            | "do"
-            | "else"
-            | "elseif"
-            | "end"
-            | "false"
-            | "for"
-            | "function"
-            | "goto"
-            | "if"
-            | "in"
-            | "local"
-            | "nil"
-            | "not"
-            | "or"
-            | "repeat"
-            | "return"
-            | "then"
-            | "true"
-            | "until"
-            | "while"
-    )
 }
 
 /// True if `s` is one parenthesized group, so it reads as a single operand

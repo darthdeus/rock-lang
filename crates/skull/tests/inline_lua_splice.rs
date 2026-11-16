@@ -79,11 +79,11 @@ fn a_splice_with_nothing_to_declare_opens_no_block() {
 }
 
 #[test]
-fn a_field_read_first_in_the_body_moves_to_that_read() {
+fn a_field_read_is_snapshotted_before_the_spliced_body() {
     let lua = emit_module(ORDER_SRC);
     let body = function_body(&lua, "run");
-    assert!(!body.contains("local b = "), "{body}");
-    assert!(body.contains(".b).n + 1"), "{body}");
+    assert!(body.contains("local b = (c0.b)"), "{body}");
+    assert!(!body.contains(".b).n + 1"), "{body}");
     // A call passed after it could change what it reads, so `h.n` is read
     // before `tick` runs.
     assert_eq!(compile_and_run(ORDER_SRC), "16 3 2");

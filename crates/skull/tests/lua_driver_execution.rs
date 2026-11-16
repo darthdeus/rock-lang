@@ -418,3 +418,25 @@ fn after_equal(xs: [int], a: any, b: any) -> int {
     );
     assert_eq!(out, "ok");
 }
+
+#[test]
+fn exec_spliced_inline_lua_keeps_memory_argument_snapshot() {
+    let src = r#"
+struct SnapshotState { i: int }
+inline(lua) fn snapshot_build(state: SnapshotState) -> any = """
+return setmetatable({}, {
+  __index = function()
+    state.i = 2
+    return {11, 22}
+  end,
+})
+"""
+@inline inline(lua) fn snapshot_pick(t: any, i: int) -> int = "return t.values[i]"
+fn snapshot_run() -> int {
+    let state = SnapshotState {i: 1}
+    let t = snapshot_build(state)
+    snapshot_pick(t, state.i)
+}
+"#;
+    assert_eq!(run(src, "snapshot_run()"), "11");
+}
