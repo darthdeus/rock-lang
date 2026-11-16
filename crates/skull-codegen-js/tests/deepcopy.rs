@@ -1,62 +1,6 @@
-//! deepcopy emission (T8d): `deepcopy` maps to the `__rock_deepcopy_value`
-//! runtime (`JS_DEEPCOPY_RUNTIME`) -- a `seen`-Map clone that preserves the
-//! object graph (shared refs copy once, cycles terminate). Node execution is the
-//! correctness oracle; `tests/library/js_deepcopy.rock` cross-checks against luajit.
-
-use crate::common::ws_with;
-
-crate::runtime_eval!(eval_int: JS_VEC_CHECK_SHIMS, JS_TABLE_PRIM, JS_CALL_HELPER, JS_STRING_RUNTIME, JS_DEEPCOPY_RUNTIME);
-
-// A shared inner struct copies once: mutating via one field shows through the
-// other, and the original is untouched (99*100 + 1 encodes copy-then-original).
-#[test]
-fn shared_ref_copies_once() {
-    let src = "struct Inner { v: int }\n\
-               struct State { a: Inner, b: Inner }\n\
-               fn root() -> int {\n\
-                   let inner = Inner { v: 1 }\n\
-                   let s = State { a: inner, b: inner }\n\
-                   let c = deepcopy(s)\n\
-                   c.a.v = 99\n\
-                   c.b.v * 100 + s.a.v\n\
-               }";
-    let ws = ws_with(src);
-    let js = crate::common::emit_closure(&ws, "root").expect("deepcopy emits");
-    assert!(js.contains("deepcopy("), "renders deepcopy:\n{js}");
-    eval_int(&js, "root", 9901);
-}
-
-// A self-referential struct copies without hanging; mutating the copy is visible
-// through its own back-reference, and the original is untouched.
-#[test]
-fn cycle_copies_without_hanging() {
-    let src = "struct Node { tag: int, next: Node? }\n\
-               fn root() -> int {\n\
-                   let n = Node { tag: 1, next: null }\n\
-                   n.next = n\n\
-                   let c = deepcopy(n)\n\
-                   c.tag = 5\n\
-                   let via = if c.next != null { c.next.tag } else { 0 }\n\
-                   via * 100 + n.tag\n\
-               }";
-    let ws = ws_with(src);
-    let js = crate::common::emit_closure(&ws, "root").expect("cyclic deepcopy emits");
-    eval_int(&js, "root", 501);
-}
-
-// A deep-copied Vec is independent of the original.
-#[test]
-fn vec_copy_is_independent() {
-    let src = "fn root() -> int {\n\
-                   let v = [1, 2, 3]\n\
-                   let c = deepcopy(v)\n\
-                   c.set(0, 10)\n\
-                   c[0] * 100 + v[0]\n\
-               }";
-    let ws = ws_with(src);
-    let js = crate::common::emit_closure(&ws, "root").expect("vec deepcopy emits");
-    eval_int(&js, "root", 1001);
-}
+//! The JS deepcopy runtime (`JS_DEEPCOPY_RUNTIME`) on shapes only the JS
+//! backend has: a code-ref environment and a NativeBuffer with typed leaf views.
+//! Deepcopy of program values is tests/library/js_deepcopy.rock.
 
 #[test]
 fn copied_code_ref_env_shares_logical_slot() {
@@ -81,24 +25,6 @@ fn copied_code_ref_env_shares_logical_slot() {
     );
     let out = crate::common::run_node(&program);
     assert_eq!(out.trim(), "107", "{program}");
-}
-
-// A column-stored Vec cannot enter the opaque `clone_into` body, which would
-// walk `_data`; the shared lowering copies each column instead, as on luajit.
-// The copy owns its columns: writing the original afterwards leaves it alone.
-#[test]
-fn clone_into_copies_column_vec_storage() {
-    let src = "fn root() -> int {\n\
-                   let owner: [int] = []\n\
-                   let points = [Vec2 { x: 1.0, y: 2.0 }, Vec2 { x: 3.0, y: 4.0 }]\n\
-                   let copied = points.clone_into(owner.storage)\n\
-                   points[0] = Vec2 { x: 9.0, y: 10.0 }\n\
-                   copied.push(Vec2 { x: 5.0, y: 6.0 })\n\
-                   return int(copied[0].x) * 100 + copied.len() * 10 + points.len()\n\
-               }";
-    let ws = ws_with(src);
-    let js = crate::common::emit_closure(&ws, "root").expect("column clone_into emits");
-    eval_int(&js, "root", 132);
 }
 
 // A value-struct NativeBuffer is one flat array plus typed leaf views over its

@@ -3,8 +3,7 @@
 // _binary / _percent) and the `Format`/`FormatDyn` MIR nodes that lower a printf
 // conversion (`string.format(spec, value)`). The JS printf port __rock_sprintf
 // matches C/luajit byte-for-byte incl. round-half-to-even (`%.0f` of 2.5 -> 2,
-// 3.5 -> 4, where JS toFixed diverges). Pins
-// crates/skull-codegen-js/tests/format_specs.rs.
+// 3.5 -> 4, where JS toFixed diverges).
 
 // Padding: right / left / centered fill.
 @test(output = "[  42]|[42  ]|[ 42 ]")

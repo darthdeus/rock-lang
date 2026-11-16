@@ -65,3 +65,38 @@ fn counter_output() {
     COUNTER = 0
     print("{bump()} {bump()} {bump()}")
 }
+
+// Init order is transitive: ACT's initializer reads REG only inside
+// `register`, and REG must still be initialized first.
+global REG: Map<string, int> = map_new()
+
+fn register(k: string) -> int {
+    REG[k] = 1
+    return 42
+}
+
+global ACT: int = register("x")
+
+@test(returns = 42)
+fn transitive_init_order_through_call() -> int {
+    return ACT
+}
+
+// A `nobox` global is stored as its leaves; its initializer assigns each one.
+nobox value NP { x: int, y: int }
+global ORIGIN: NP = NP { x: 3, y: 4 }
+
+@test(returns = 34)
+fn nobox_global_initializes_its_leaves() -> int {
+    return ORIGIN.x * 10 + ORIGIN.y
+}
+
+// A lambda initializer resolves through code slots that are staged only after
+// every body is emitted, so it must run after that staging.
+global SQUARE: fn(int) -> int = (x: int) => x * x
+const OPS: [fn(int) -> int] = [(x: int) => x + 1]
+
+@test(returns = 54)
+fn lambda_global_initializer() -> int {
+    return SQUARE(7) + OPS[0](4)
+}

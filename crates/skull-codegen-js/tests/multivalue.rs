@@ -1,12 +1,7 @@
-//! Multi-value ABI + loop-capture emission (T7). A scalarized tuple/multi return
-//! sends leaf 0 as the ordinary return value and leaves 1..N through module-scope
-//! scratch slots (`__rock_ret1 = b; return a;`), which the `CallMulti` caller
-//! captures inseparably (`d0 = f(); d1 = __rock_ret1;`); dest cells hoist-declare
-//! at the fn top. An array would allocate. A closure created
-//! in a loop that captures an iteration-local cell gets a per-iteration `let`
-//! inside the loop body. Boundaries that this raw-lowered path can't emit
-//! correctly REJECT (skip): a closure capturing a loop counter/cursor, a value
-//! struct (deferred to a future arc), a scalar-ABI arg/param count mismatch.
+//! The multi-value ABI: a scalarized tuple/multi return sends leaf 0 as the
+//! ordinary return value and leaves 1..N through module-scope scratch slots
+//! (`__rock_ret1 = b; return a;`), which the caller reads back right after the
+//! call. An array or an object on that wire would allocate per call.
 
 use crate::common::{emit_user, ws_with};
 
@@ -26,65 +21,37 @@ fn tuple_return_uses_scratch_slots() {
     );
 }
 
-// A closure capturing an iteration-local `let` copy snapshots THAT iteration's
-// value into a fresh env record built inside the loop body (`convert_closures`
-// classifies the copy as a by-value capture). Per-iteration correctness is pinned
-// behaviorally in tests/functions/js_multivalue.rock on both backends.
+/// A `nobox` return crosses the JS call boundary as LEAVES, not as anything the
+/// guarantee forbids. This replaced a blanket rejection, so it asserts the
+/// property that rejection was protecting rather than the rejection itself: the
+/// value must not materialize as an object OR as a transport array (which is an
+/// allocation just the same, and does not vanish under V8's escape analysis).
 #[test]
-fn loop_capture_snapshots_per_iteration() {
-    let ws = ws_with(
-        "fn f() {\n\
-             let fns: [fn() -> int] = []\n\
-             for i in 0..3 { let a = i; fns.push(() => a) }\n\
-         }",
-    );
-    let js = crate::common::emit_closure(&ws, "f").expect("emits");
+fn nobox_value_return_crosses_as_leaves_not_a_box() {
+    let src = "nobox value V { x: int, y: int }\n\
+               fn mk() -> V { V { x: 1, y: 2 } }\n\
+               fn root() -> int {\n\
+                   let v = mk()\n\
+                   return v.x * 10 + v.y\n\
+               }";
+    let ws = ws_with(src);
+    let js = crate::common::emit_closure(&ws, "root")
+        .expect("a nobox return emits under the scratch ABI");
     assert!(
-        js.contains("__slot: __rock_code_slot_ref("),
-        "per-iteration capture record:\n{js}"
+        !js.contains("\"V\""),
+        "nobox value materialized an object:\n{js}"
     );
-    assert!(js.contains("function f__lambda0("), "hoisted body:\n{js}");
-}
-
-// A closure capturing the loop COUNTER directly now EMITS -- the shared
-// closure-conversion pass classifies the counter as a per-iteration by-value
-// capture (the fresh record each iteration snapshots the counter's value),
-// where the deleted T7 path rejected it as out of subset. Per-iteration
-// correctness is pinned in tests/closures/capture_semantics.rock on both backends.
-#[test]
-fn loop_counter_capture_now_emits() {
-    let ws = ws_with(
-        "fn f() {\n\
-             let fns: [fn() -> int] = []\n\
-             for i in 0..3 { fns.push(() => i) }\n\
-         }",
-    );
-    let js = crate::common::emit_closure(&ws, "f").expect("counter capture now emits");
     assert!(
-        js.contains("__slot: __rock_code_slot_ref("),
-        "counter snapshotted into a record:\n{js}"
+        !js.contains("return ["),
+        "nobox return allocated a transport array:\n{js}"
+    );
+    assert!(
+        js.contains("__rock_ret1 = "),
+        "leaf 1 must ride the scratch bank:\n{js}"
     );
 }
 
-// A reassigned param captured in a loop stays function-scoped (shared box), NOT
-// per-iteration -- it emits (does not reject) and keeps a single binding.
-#[test]
-fn reassigned_param_stays_shared() {
-    let ws = ws_with(
-        "fn f(p: int) {\n\
-             let fns: [fn() -> int] = []\n\
-             for i in 0..3 { fns.push(() => p); p = p + 10 }\n\
-         }",
-    );
-    let js = crate::common::emit_closure(&ws, "f").expect("emits");
-    // `p` is the fn param `c0`; it is not relocated into the loop body.
-    assert!(js.starts_with("function f(c0)"), "p stays a param:\n{js}");
-}
-
-// Value-struct emission (all-scalar emit, GC-carrying reject) is covered by
-// tests/value_structs.rs (T8b); the T7-era whole-value reject pin retired there.
-
-// A `nobox` element of a tuple return carries its LEAVES into the return array,
+// A `nobox` element of a tuple return carries its LEAVES onto the return wire,
 // so no `NV2` object crosses the boundary; an UNMARKED value keeps its single
 // boxed slot (the asymmetry guard). JS gets this from the shared MIR shape, not
 // a backend-local rule.

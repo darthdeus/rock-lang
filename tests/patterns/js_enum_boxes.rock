@@ -4,8 +4,7 @@
 // positional keys, unlike luajit's 1-based table keys; the observable output is
 // unchanged. Unit variants of a mixed enum are interned singletons
 // (`__rock_enum_<E>_<V>`); a payload-free enum keeps its int repr with a names
-// table (`__rock_enum_<E>_names`) for `{x}` interpolation. Cross-backend corpus;
-// the node pins in crates/skull-codegen-js/tests/enum_boxes.rs are the JS oracle.
+// table (`__rock_enum_<E>_names`) for `{x}` interpolation.
 
 // Recursive (non-cdata) enum: unit singleton + tuple variants.
 enum Node {
@@ -114,4 +113,61 @@ fn test_payload_free_names() {
     print("{r}")
     print("{g}")
     print("{b}")
+}
+
+// A unit singleton survives whole as a nested payload.
+@test(returns = 9)
+fn test_unit_singleton_nested_payload() -> int {
+    node_sum(Node::Pair(9, Node::Nil))
+}
+
+// A struct field flattens `Sig` with a union-wide inactive second slot; its
+// rebox must compare equal to a direct construction.
+enum Sig { Idle, Num(int), Pair(int, int), Act(() -> ()) }
+struct SigHolder { sig: Sig }
+
+@test(returns = 1)
+fn test_nil_slot_rebox_eq() -> int {
+    let h = SigHolder { sig: Sig::Num(5) }
+    if h.sig == Sig::Num(5) { 1 } else { 0 }
+}
+
+// A flat enum widens a `nobox` payload's leaves into positional slots; inspect
+// names them only when the active payload layout is exact.
+nobox value Pos { x: int, y: int }
+enum Event { At(Pos), Both(Pos, Pos), Text(string) }
+struct EventHolder { event: Event }
+
+nobox value Inner { x: int, y: int }
+nobox value Deep { p: Inner, z: int }
+enum DeepEvent { At(Deep), Text(string) }
+struct DeepHolder { event: DeepEvent }
+
+enum Mode { A, B }
+nobox value Moded { mode: Mode, y: int }
+enum ModeEvent { At(Moded), Text(string) }
+struct ModeHolder { event: ModeEvent }
+
+@test
+fn test_inspect_flat_enum_payload_names() {
+    assert_eq(inspect(EventHolder { event: Event::At(Pos { x: 4, y: 9 }) }.event),
+        "Event::At {{ x = 4, y = 9 }}")
+}
+
+@test
+fn test_inspect_flat_enum_duplicate_names_stay_positional() {
+    assert_eq(inspect(EventHolder { event: Event::Both(Pos { x: 1, y: 2 }, Pos { x: 3, y: 4 }) }.event),
+        "Event::Both {{\n  [1] = 1,\n  [2] = 2,\n  [3] = 3,\n  [4] = 4\n}}")
+}
+
+@test
+fn test_inspect_flat_enum_nested_nominal_stays_positional() {
+    assert_eq(inspect(DeepHolder { event: DeepEvent::At(Deep { p: Inner { x: 1, y: 2 }, z: 3 }) }.event),
+        "DeepEvent::At {{\n  [1] = 1,\n  [2] = 2,\n  [3] = 3\n}}")
+}
+
+@test
+fn test_inspect_flat_enum_nominal_field_stays_positional() {
+    assert_eq(inspect(ModeHolder { event: ModeEvent::At(Moded { mode: Mode::A, y: 9 }) }.event),
+        "ModeEvent::At {{ [1] = 0, [2] = 9 }}")
 }

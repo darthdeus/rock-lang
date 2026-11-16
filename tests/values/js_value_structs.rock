@@ -5,8 +5,7 @@
 // struct) whose structural deep-eq matches luajit's byte-value equality for
 // all-scalar leaves. (A value struct read straight off its scalar-ABI leaves
 // already scalarizes through -- that is T8a; this corpus pins the boxed path.)
-// GC-carrying value structs stay rejected (reference-field eq needs type-aware
-// codegen) -- pinned in crates/skull-codegen-js/tests/value_structs.rs.
+// GC-carrying value-struct equality is values/gc_carrying.rock.
 
 value V { x: int, y: int }
 
@@ -42,4 +41,95 @@ fn test_nested_value_struct_eq() -> int {
     let p = Line { a: V { x: 1, y: 2 }, b: V { x: 3, y: 4 } }
     let q = Line { a: V { x: 1, y: 2 }, b: V { x: 3, y: 4 } }
     if p == q { 1 } else { 0 }
+}
+
+// An ordinary value holding a flat enum crosses a return as leaves.
+enum Payload { A, B }
+enum Kind { Plain, Payload(Payload) }
+value Row { kind: Kind, key: string, count: int }
+
+fn make_row(kind: Kind, n: int) -> Row {
+    return match kind {
+        Kind::Plain => Row { kind, key: "plain", count: n + 1 },
+        Kind::Payload(_) => Row { kind, key: "payload", count: n + 1 },
+    }
+}
+
+fn consume_row(row: Row) -> int {
+    let key_bonus = if row.key == "payload" { 10 } else { 0 }
+    return match row.kind {
+        Kind::Plain => row.count + key_bonus,
+        Kind::Payload(payload) => match payload {
+            Payload::A => row.count + key_bonus,
+            Payload::B => row.count + key_bonus + 4,
+        },
+    }
+}
+
+@test(returns = 19)
+fn test_flat_enum_value_return() -> int {
+    consume_row(make_row(Kind::Payload(Payload::B), 4))
+}
+
+// A value stored in a Vec keeps its inline children and nullable nobox field.
+nobox value Id { value: int }
+value Cell { id: int, tag: Id? = null, pos: V }
+
+@test(returns = 236)
+fn test_inline_children_in_vec() -> int {
+    let cells: [Cell] = []
+    cells.push(Cell { id: 1, tag: Id { value: 5 }, pos: V { x: 2, y: 3 } })
+    let p = cells[0].pos
+    let tag = cells[0].tag.unwrap()
+    return p.x * 100 + p.y * 10 + tag.value + cells[0].id
+}
+
+// `field_get` over a nullable nobox field evaluates its owner once, copies the
+// payload, and keeps `false` and nested absence distinct from null.
+nobox value Place { area: int, x: int, y: int }
+struct Owner { place: Place?, other: Place?, reads: int }
+nobox value Flag { enabled: bool, place: Place? }
+struct Flags { flag: Flag? }
+
+fn reflected_read<T, R>(owner: T, field: ReadFieldRef<T, R>) -> R {
+    return field_get(owner, field)
+}
+
+fn owner_once(owner: Owner) -> Owner {
+    owner.reads += 1
+    return owner
+}
+
+@test
+fn test_nullable_field_get_evaluates_owner_once() {
+    let owner = Owner { place: Place { area: 3, x: 5, y: 7 }, other: null, reads: 0 }
+    let snapshot = field_get(f: .place, o: owner_once(owner)).unwrap()
+    owner.place = Place { area: 11, x: 13, y: 17 }
+    assert_eq(owner.reads, 1)
+    assert_eq(snapshot.area * 100 + snapshot.x * 10 + snapshot.y, 357)
+}
+
+@test
+fn test_nullable_field_get_nested_presence() {
+    let owner = Flags { flag: Flag { enabled: false, place: null } }
+    let read = reflected_read(owner, .flag).unwrap()
+    assert(!read.enabled && read.place == null, "absent payload")
+    owner.flag = Flag { enabled: true, place: Place { area: 19, x: 23, y: 29 } }
+    let present = reflected_read(owner, .flag).unwrap()
+    assert(present.enabled && present.place.unwrap().x == 23, "present payload")
+    owner.flag = null
+    assert(reflected_read(owner, .flag) == null, "cleared payload")
+}
+
+@test
+fn test_nullable_field_get_reassigned_payloads() {
+    let owner = Owner { place: Place { area: 7, x: 11, y: 13 }, other: null, reads: 0 }
+    let read = reflected_read(owner, .place).unwrap()
+    assert_eq(read.area * 10000 + read.x * 100 + read.y, 71113)
+    assert(reflected_read(owner, .other) == null, "absent field")
+    owner.place = null
+    assert(reflected_read(owner, .place) == null, "cleared field")
+    owner.place = Place { area: 17, x: 19, y: 23 }
+    let reread = reflected_read(owner, .place).unwrap()
+    assert_eq(reread.area * 10000 + reread.x * 100 + reread.y, 171923)
 }

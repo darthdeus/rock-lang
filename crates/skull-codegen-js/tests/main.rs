@@ -49,8 +49,6 @@ mod map_key_admission;
 mod match_fold;
 #[path = "misc_intrinsics.rs"]
 mod misc_intrinsics;
-#[path = "module_globals.rs"]
-mod module_globals;
 #[path = "multi_rejection.rs"]
 mod multi_rejection;
 #[path = "publisher_abi.rs"]
@@ -119,10 +117,6 @@ mod trampoline_fallback;
 mod try_call;
 #[path = "uint.rs"]
 mod uint;
-#[path = "value_gc_eq.rs"]
-mod value_gc_eq;
-#[path = "value_structs.rs"]
-mod value_structs;
 #[path = "vec_columns.rs"]
 mod vec_columns;
 #[path = "vec_flat_enum_strided.rs"]

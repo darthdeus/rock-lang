@@ -71,3 +71,39 @@ fn array_render() -> bool {
     let s = inspect(t)
     return s.contains("7, 8, 9")
 }
+
+// Byte-exact renders, through `assert_eq` so braces can be escaped.
+@test
+fn exact_struct_renders() {
+    assert_eq(inspect(Person { name: "Alice", age: 30 }), "Person {{ age = 30, name = \"Alice\" }}")
+    assert_eq(inspect(Triple { a: 1, b: 2, c: 3 }), "Triple {{\n  a = 1,\n  b = 2,\n  c = 3\n}}")
+    assert_eq(inspect([10, 20, 30]), "Vec {{ 10, 20, 30 }}")
+}
+
+// A GC-free value struct renders colon-format in declaration order (the luajit
+// cdata `__tostring`), recursing into nested value structs.
+value V2 { y: int, x: int }
+value IV { x: int, y: int }
+value NestedV { a: IV, b: int }
+
+@test
+fn value_struct_colon_render() {
+    assert_eq(inspect(V2 { y: 5, x: 3 }), "V2 {{ y: 5, x: 3 }}")
+    assert_eq(inspect(NestedV { a: IV { x: 1, y: 2 }, b: 9 }), "NestedV {{ a: IV {{ x: 1, y: 2 }}, b: 9 }}")
+}
+
+// An embedded child is physically inline; inspect rebuilds the logical child.
+struct Holder { embed p: Point, tag: int }
+
+@test
+fn embed_field_render() {
+    assert_eq(inspect(Holder { p: Point { x: 1, y: 2 }, tag: 3 }), "Holder {{ p = Point {{ x = 1, y = 2 }}, tag = 3 }}")
+}
+
+// A payload-bearing enum stored as a scalar tag box renders its variant name.
+enum Color { Red, Custom { r: int, g: int } }
+
+@test
+fn scalar_enum_box_render() {
+    assert_eq(inspect(Color::Custom { r: 1, g: 2 }), "Color::Custom {{ g = 2, r = 1 }}")
+}

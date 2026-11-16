@@ -65,3 +65,14 @@ fn map_copy_is_independent() {
 fn primitive_passthrough() -> int {
     return deepcopy(42)
 }
+
+// `clone_into` of a column-stored Vec copies each column; the copy owns them.
+@test(returns = 132)
+fn clone_into_copies_column_storage() -> int {
+    let owner: [int] = []
+    let points = [Vec2 { x: 1.0, y: 2.0 }, Vec2 { x: 3.0, y: 4.0 }]
+    let copied = points.clone_into(owner.storage)
+    points[0] = Vec2 { x: 9.0, y: 10.0 }
+    copied.push(Vec2 { x: 5.0, y: 6.0 })
+    return int(copied[0].x) * 100 + copied.len() * 10 + points.len()
+}

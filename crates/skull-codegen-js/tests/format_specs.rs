@@ -1,62 +1,9 @@
-//! String-interpolation format-spec emission (T8d). The `{x:spec}` helper calls
-//! (__rock_fmt_pad/_grouping/_binary/_percent) plus the `Format`/`FormatDyn` MIR
-//! nodes (`string.format(spec, value)`) lowered through the single-value C printf
-//! port `__rock_sprintf`. The node-executed checks are the correctness oracle
-//! (byte-match incl. round-half-to-even); `tests/strings/js_format_specs.rock`
-//! cross-checks against luajit.
+//! Code sinking must not move a side effect ahead of a format or checked
+//! numeric operation that can throw: each probe counts the marks that ran
+//! before the error and compares with the unsunk order. Format-spec output is
+//! tests/strings/js_format_specs.rock.
 
 use crate::common::ws_with;
-
-crate::runtime_eval!(eval_str: JS_NB_CHECK_SHIMS, JS_VEC_CHECK_SHIMS, JS_STRING_RUNTIME);
-
-// The %f conversion rounds half-to-EVEN (C printf), NOT half-up (JS toFixed):
-// 2.5 -> "2", 3.5 -> "4".
-#[test]
-fn fixed_point_half_even() {
-    let src = "fn root() -> string {\n\
-                   let a = 2.5\n\
-                   let b = 3.5\n\
-                   \"{a:.0f}|{b:.0f}\"\n\
-               }";
-    let ws = ws_with(src);
-    let js = crate::common::emit_closure(&ws, "root").expect("format emits");
-    assert!(
-        js.contains("__rock_sprintf"),
-        "renders the printf port:\n{js}"
-    );
-    eval_str(&js, "root", "2|4");
-}
-
-// Padding / width / hex through the helper + Format nodes.
-#[test]
-fn pad_width_hex() {
-    let src = "fn root() -> string {\n\
-                   let x = 42\n\
-                   let h = 255\n\
-                   \"[{x:>5}]|{x:05d}|{h:x}\"\n\
-               }";
-    let ws = ws_with(src);
-    let js = crate::common::emit_closure(&ws, "root").expect("format emits");
-    eval_str(&js, "root", "[   42]|00042|ff");
-}
-
-// Digit grouping composes with the %d Format node.
-#[test]
-fn grouping() {
-    let src = "fn root() -> string { let x = 1234567; \"{x:,}\" }";
-    let ws = ws_with(src);
-    let js = crate::common::emit_closure(&ws, "root").expect("format emits");
-    eval_str(&js, "root", "1,234,567");
-}
-
-// FormatDyn: format_float builds the spec at runtime.
-#[test]
-fn format_float_dynamic() {
-    let src = "fn root() -> string { \"[{format_float(3.14159, 6, 2)}]\" }";
-    let ws = ws_with(src);
-    let js = crate::common::emit_closure(&ws, "root").expect("format_float emits");
-    eval_str(&js, "root", "[  3.14]");
-}
 
 #[test]
 fn sinking_preserves_dynamic_format_error_order() {
