@@ -1947,7 +1947,12 @@ fn infer_block(
             let diverges = (*statements)
                 .into_iter()
                 .rfind(|&s| !matches!(c.body.statement_arena[s], Statement::Comment(_)))
-                .is_some_and(|s| matches!(c.body.statement_arena[s], Statement::Return(_)));
+                .is_some_and(|s| {
+                    matches!(
+                        c.body.statement_arena[s],
+                        Statement::Return(_) | Statement::Break | Statement::Continue
+                    )
+                });
 
             if diverges {
                 gamma.workspace.builtins.never()

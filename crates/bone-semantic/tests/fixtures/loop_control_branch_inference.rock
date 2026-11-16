@@ -1,0 +1,72 @@
+//! Final `break` and `continue` statements make their block branches never,
+//! leaving the reachable if-expression arm to determine its value type.
+
+//- final_break_then_value
+fn f(stop: bool) -> int {
+    while stop {
+        let value = if stop { break } else { 1 }
+          //^ int
+    }
+    5
+}
+
+//- final_continue_then_value
+fn f(stop: bool) -> int {
+    while stop {
+        let value = if stop { continue } else { 1 }
+          //^ int
+        return value
+    }
+    5
+}
+
+//- value_then_final_break
+fn f(stop: bool) -> int {
+    while stop {
+        let value = if stop { 1 } else { break }
+          //^ int
+        return value
+    }
+    5
+}
+
+//- value_then_final_continue
+fn f(stop: bool) -> int {
+    while stop {
+        let value = if stop { 1 } else { continue }
+          //^ int
+        return value
+    }
+    5
+}
+
+//- both_branches_exit
+fn f(stop: bool) -> int {
+    while stop {
+        let value: int = if stop { break } else { continue }
+          //^ int
+        return value
+    }
+    5
+}
+
+//- reachable_branch_type_is_checked @fail=type mismatch: expected `bool`, found `int`
+fn f(stop: bool) -> int {
+    while stop {
+        let value: bool = if stop { break } else { 1 }
+          //^ bool
+    }
+    5
+}
+
+//- break_still_requires_loop @fail=`break`/`continue` is only valid inside a loop body
+fn f(stop: bool) {
+    let value = if stop { break } else { 1 }
+      //^ int
+}
+
+//- continue_still_requires_loop @fail=`break`/`continue` is only valid inside a loop body
+fn f(stop: bool) {
+    let value = if stop { continue } else { 1 }
+      //^ int
+}
