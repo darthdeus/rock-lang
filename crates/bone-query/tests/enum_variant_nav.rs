@@ -1,18 +1,10 @@
-//! Hover + goto-definition on enum variant *references* (match patterns and
-//! construction) and on the enum/variant declarations themselves.
-//!
-//! The variant name resolves to the variant (with its payload types); the enum
-//! qualifier resolves to the enum (its full body). Both patterns and
-//! construction go through different code paths (AST-based pattern walk vs the
-//! HIR construction nodes), so each case is pinned separately.
+//! Hover and goto-definition on enum variant references and declarations.
+//! Patterns (an AST walk) and construction (HIR nodes) take different paths,
+//! so each is pinned.
 
+use crate::fixture::{PATH, hover_markup, pos, workspace};
 use bone_query::BoneWorkspace;
-use lsp_types::{HoverContents, Position};
-
-#[cfg(not(windows))]
-const PATH: &str = "/tmp/rock_enum_variant_nav.rock";
-#[cfg(windows)]
-const PATH: &str = r"C:\tmp\rock_enum_variant_nav.rock";
+use lsp_types::{HoverContents, Position, Range};
 
 const SRC: &str = "\
 enum SpellState {
@@ -46,29 +38,9 @@ enum SpellState {\n\
 
 const VARIANT_CASTING: &str = "```rock\nSpellState::Casting(SpellKind, float, float)\n```";
 
-fn fresh() -> BoneWorkspace {
-    let mut bone = BoneWorkspace::new();
-    bone.update(PATH, SRC.to_string());
-    bone
-}
-
-/// Position of `SRC[find(marker) + into]` (0-based line/char).
-fn pos(marker: &str, into: usize) -> Position {
-    let idx = SRC
-        .find(marker)
-        .unwrap_or_else(|| panic!("marker not found: {marker:?}"))
-        + into;
-    let before = &SRC[..idx];
-    let line = before.matches('\n').count() as u32;
-    let col = (idx - before.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32;
-    Position::new(line, col)
-}
-
+#[track_caller]
 fn hover(bone: &BoneWorkspace, p: Position) -> String {
-    match bone.hover(PATH, p).map(|h| h.contents) {
-        Some(HoverContents::Markup(m)) => m.value,
-        other => panic!("expected markup hover at {p:?}, got {other:?}"),
-    }
+    hover_markup(bone, PATH, p).unwrap_or_else(|| panic!("no hover at {p:?}"))
 }
 
 fn def(bone: &BoneWorkspace, p: Position) -> (u32, u32) {
@@ -77,8 +49,6 @@ fn def(bone: &BoneWorkspace, p: Position) -> (u32, u32) {
         .unwrap_or_else(|| panic!("no definition at {p:?}"));
     (loc.range.start.line, loc.range.start.character)
 }
-
-// == Match-pattern references ================================================
 
 #[test]
 fn hover_on_variants_and_enum_qualifiers() {
@@ -96,9 +66,9 @@ fn hover_on_variants_and_enum_qualifiers() {
         // `    Casting(SpellKind, float, float),` variant name on line 2.
         ("Casting(SpellKind, float", 0, VARIANT_CASTING),
     ];
+    let b = workspace(SRC);
     for (marker, into, expected) in cases {
-        let b = fresh();
-        assert_eq!(hover(&b, pos(marker, *into)), *expected, "{marker}");
+        assert_eq!(hover(&b, pos(SRC, marker, *into)), *expected, "{marker}");
     }
 }
 
@@ -112,20 +82,15 @@ fn definition_on_variants_and_enum_qualifiers() {
         ("SpellState::Casting(SpellKind", 12, (2, 4)),
         ("SpellState::Casting(SpellKind", 0, (0, 5)),
     ];
+    let b = workspace(SRC);
     for (marker, into, expected) in cases {
-        let b = fresh();
-        assert_eq!(def(&b, pos(marker, *into)), *expected, "{marker}");
+        assert_eq!(def(&b, pos(SRC, marker, *into)), *expected, "{marker}");
     }
 }
-
-// == Construction references =================================================
-
-// == Declarations ============================================================
 
 #[test]
 fn qualified_record_paths_keep_canonical_identity_and_token_spans() {
     use crate::modules_v1::{V1Project, pos_of};
-    use lsp_types::Range;
 
     let project = V1Project::new();
     let main = "\
@@ -198,7 +163,6 @@ fn main() {
 
 mod record {
     use super::*;
-    use lsp_types::Range;
 
     const SRC: &str = "\
 enum Shape {
@@ -214,167 +178,85 @@ fn f() {
 }
 ";
 
-    fn fresh() -> BoneWorkspace {
-        let mut bone = BoneWorkspace::new();
-        bone.update(PATH, SRC.to_string());
-        bone
-    }
-
-    fn pos(marker: &str, into: usize) -> Position {
-        let idx = SRC.find(marker).expect(marker) + into;
-        let before = &SRC[..idx];
-        Position::new(
-            before.matches('\n').count() as u32,
-            (idx - before.rfind('\n').map_or(0, |i| i + 1)) as u32,
-        )
-    }
-
+    /// The range of `name`, found `into` bytes past `marker`.
     fn token(marker: &str, into: usize, name: &str) -> Range {
-        Range::new(pos(marker, into), pos(marker, into + name.len()))
+        Range::new(pos(SRC, marker, into), pos(SRC, marker, into + name.len()))
     }
 
-    fn assert_definition(b: &BoneWorkspace, marker: &str, into: usize, name: &str, target: Range) {
-        for i in 0..name.len() {
-            let p = pos(marker, into + i);
-            let loc = b
-                .definition(PATH, p)
-                .unwrap_or_else(|| panic!("no definition at {p:?}"));
-            assert_eq!(loc.uri.to_file_path().unwrap(), PATH);
-            assert_eq!(loc.range, target, "definition at {p:?}");
+    #[test]
+    fn every_byte_of_a_record_reference_navigates_to_its_declaration() {
+        let circle = token("Circle { radius: float", 0, "Circle");
+        let radius = token("Circle { radius: float", 9, "radius");
+        // (reference marker, offset of the name in it, name, declaration)
+        let cases = [
+            ("Circle { radius: 1", 0, "Circle", circle),
+            ("Shape::Circle", 7, "Circle", circle),
+            ("Shape::Circle", 0, "Shape", token("enum Shape", 5, "Shape")),
+            ("Circle { radius: 1", 9, "radius", radius),
+            ("Shape::Circle { radius: 2", 16, "radius", radius),
+            (
+                "Point { radius: 3",
+                0,
+                "Point",
+                token("struct Point", 7, "Point"),
+            ),
+            (
+                "Point { radius: 3",
+                8,
+                "radius",
+                token("Point { radius: float", 8, "radius"),
+            ),
+        ];
+        let b = workspace(SRC);
+        for (marker, into, name, target) in cases {
+            for i in 0..name.len() {
+                let p = pos(SRC, marker, into + i);
+                let loc = b
+                    .definition(PATH, p)
+                    .unwrap_or_else(|| panic!("no definition at {p:?}"));
+                assert_eq!(loc.uri.to_file_path().unwrap(), PATH);
+                assert_eq!(loc.range, target, "{marker}: definition at {p:?}");
+            }
         }
     }
 
-    fn assert_hover(b: &BoneWorkspace, marker: &str, into: usize, name: &str, expected: &str) {
-        for i in 0..name.len() {
-            let p = pos(marker, into + i);
-            assert_eq!(hover(b, p), expected, "hover at {p:?}");
-            assert_eq!(
-                b.hover(PATH, p).unwrap().range,
-                Some(token(marker, into, name))
-            );
-        }
-    }
-
     #[test]
-    fn bare_record_head_definition_is_the_variant() {
-        let b = fresh();
-        assert_definition(
-            &b,
-            "Circle { radius: 1",
-            0,
-            "Circle",
-            token("Circle { radius: float", 0, "Circle"),
-        );
-    }
-
-    #[test]
-    fn qualified_record_head_definition_is_the_variant() {
-        let b = fresh();
-        assert_definition(
-            &b,
-            "Shape::Circle",
-            7,
-            "Circle",
-            token("Circle { radius: float", 0, "Circle"),
-        );
-    }
-
-    #[test]
-    fn hover_on_record_variant_heads_shows_the_payload() {
-        let cases: &[(&str, usize, &str, &str)] = &[
+    fn every_byte_of_a_record_reference_hovers_its_token() {
+        let b = workspace(SRC);
+        let circle = "```rock\nShape::Circle { radius: float }\n```";
+        let enum_hover = hover(&b, pos(SRC, "enum Shape", 5));
+        let circle_radius = "radius: float (field of Shape::Circle)";
+        // (marker, offset of the name in it, name, hover)
+        let cases = [
+            ("Circle { radius: 1", 0, "Circle", circle),
+            ("Shape::Circle", 7, "Circle", circle),
+            ("Circle { radius: float", 0, "Circle", circle),
+            ("Shape::Circle", 0, "Shape", &enum_hover),
+            ("Circle { radius: 1", 9, "radius", circle_radius),
+            ("Shape::Circle { radius: 2", 16, "radius", circle_radius),
             (
-                "Circle { radius: 1",
-                0,
-                "Circle",
-                "```rock\nShape::Circle { radius: float }\n```",
-            ),
-            (
-                "Shape::Circle",
-                7,
-                "Circle",
-                "```rock\nShape::Circle { radius: float }\n```",
-            ),
-            (
-                "Circle { radius: float",
-                0,
-                "Circle",
-                "```rock\nShape::Circle { radius: float }\n```",
+                "Point { radius: 3",
+                8,
+                "radius",
+                "radius: float (field of Point)",
             ),
         ];
         for (marker, into, name, expected) in cases {
-            let b = fresh();
-            assert_hover(&b, marker, *into, name, expected);
+            for i in 0..name.len() {
+                let p = pos(SRC, marker, into + i);
+                let h = b
+                    .hover(PATH, p)
+                    .unwrap_or_else(|| panic!("no hover at {p:?}"));
+                let HoverContents::Markup(m) = h.contents else {
+                    panic!("markup hover")
+                };
+                assert_eq!(m.value, expected, "{marker}: hover at {p:?}");
+                assert_eq!(h.range, Some(token(marker, into, name)), "{marker}");
+            }
         }
-    }
-
-    #[test]
-    fn record_qualifier_keeps_enum_target_and_hover() {
-        let b = fresh();
-        assert_definition(
-            &b,
-            "Shape::Circle",
-            0,
-            "Shape",
-            token("enum Shape", 5, "Shape"),
-        );
-        assert_hover(
-            &b,
-            "Shape::Circle",
-            0,
-            "Shape",
-            &hover(&b, pos("enum Shape", 5)),
-        );
-    }
-
-    #[test]
-    fn record_payload_fields_keep_field_targets_and_hovers() {
-        let b = fresh();
-        for marker in ["Circle { radius: 1", "Shape::Circle { radius: 2"] {
-            let into = marker.find("radius").unwrap();
-            assert_definition(
-                &b,
-                marker,
-                into,
-                "radius",
-                token("Circle { radius: float", 9, "radius"),
-            );
-            assert_hover(
-                &b,
-                marker,
-                into,
-                "radius",
-                "radius: float (field of Shape::Circle)",
-            );
-        }
-    }
-
-    #[test]
-    fn ordinary_struct_heads_and_fields_keep_struct_targets() {
-        let b = fresh();
-        assert_definition(
-            &b,
-            "Point { radius: 3",
-            0,
-            "Point",
-            token("struct Point", 7, "Point"),
-        );
         assert_eq!(
-            hover(&b, pos("Point { radius: 3", 0)),
-            hover(&b, pos("struct Point", 7))
-        );
-        assert_definition(
-            &b,
-            "Point { radius: 3",
-            8,
-            "radius",
-            token("Point { radius: float", 8, "radius"),
-        );
-        assert_hover(
-            &b,
-            "Point { radius: 3",
-            8,
-            "radius",
-            "radius: float (field of Point)",
+            hover(&b, pos(SRC, "Point { radius: 3", 0)),
+            hover(&b, pos(SRC, "struct Point", 7))
         );
     }
 }
