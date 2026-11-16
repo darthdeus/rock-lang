@@ -401,6 +401,15 @@ work. Standing rules:
 - Text is centered vertically by cap height, one rule for all text, so labels
   do not move with descenders. Migrating a legacy em-height size converts by
   the face's cap/em ratio.
+- UI text uses cap-height units when `cap_height_fonts` is enabled. Scene text
+  keeps em-height world units; `world_overlay.text` uses cap-height world units.
+  Do not change these units as part of a font or rasterization refactor.
+- Glyphs are monochrome coverage. Games declare an explicit glyph roster and
+  derive `extra:` from it, rather than scanning ranges or string tables. Keep
+  each atlas's declared glyph set fixed; introduce on-demand glyph packing only
+  when a concrete roster needs it. Raster resolution remains demand-driven.
+  Fallback glyphs use their font's natural metrics and baseline; change these
+  only for a demonstrated visual defect. Color glyphs remain deferred.
 - Cap demand must go through the cap/em ratio: `required_ppem =
   target_cap_px * U_em / U_cap * font_coverage_oversampling`, rounded upward
   to a coverage bucket. Comparing cap pixels directly with an em-sized bucket

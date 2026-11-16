@@ -80,6 +80,9 @@ inline(lua) fn __imgui_prelude_init(
                     end
                     -- NULL result (lib not loaded under this name) is fine: there
                     -- is nothing to pin, and nothing registered an atexit handler.
+                    -- The GL loader registers an atexit callback. LuaJIT can
+                    -- dlclose cimgui before process exit; keep its code mapped
+                    -- so that callback cannot jump into an unloaded library.
                     ffi.C.dlopen(name, RTLD_NOW + RTLD_NOLOAD + RTLD_NODELETE)
                 end
             end
