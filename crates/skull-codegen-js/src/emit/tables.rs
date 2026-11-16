@@ -44,6 +44,131 @@ pub(super) fn emit_vt_eq(
     build_vt_eq_defs(ws, &vt_names)
 }
 
+/// Per-type `__rock_tostring_ty` renderers for every value struct the program
+/// realizes, so `lua_tostring` (`print`, `tostring`) of one matches the
+/// `__tostring` luajit attaches to it in `skull::value_struct_metatypes` (cdata)
+/// and `skull::value_struct_gc_defs` (GC and leaf tables): `Name { f: v, .. }`
+/// over the representation's own keys, each leaf through `lua_tostring`.
+pub(super) fn emit_tostring_ty(
+    ws: &Workspace,
+    registry: Option<&skull_mir::lower::StructRegistryPlan>,
+) -> Result<String, CompilerError> {
+    use skull_mir::lower::ValueStorage;
+    use skull_mir::lua_nesting::{LuaDisplayPart, display_record};
+
+    let Some(registry) = registry else {
+        return Ok(String::new());
+    };
+    let arena = registry.arena();
+    let leaf = |key: &str| vec![LuaDisplayPart::Expr(format!("tostring(v[\"{key}\"])"))];
+    let mut out = String::new();
+    for (&name, &representation) in registry.value_plans() {
+        let plan = arena.try_get(representation).ok_or_else(|| {
+            err(format!(
+                "JS subset: value `{name}` carries a foreign representation plan"
+            ))
+        })?;
+        let Some(storage) = plan.value_storage() else {
+            continue;
+        };
+        let open = format!("{name} {{ ");
+        let fields: Vec<(String, Vec<LuaDisplayPart>)> = match storage {
+            ValueStorage::CData => {
+                let sid = ws.struct_by_name.get(&name).ok_or_else(|| {
+                    err(format!(
+                        "JS subset: value `{name}` is not a declared struct"
+                    ))
+                })?;
+                ws.module(sid.module).structs[sid.def]
+                    .fields
+                    .iter()
+                    .map(|f| (format!("{}: ", f.name), leaf(f.name.as_str())))
+                    .collect()
+            }
+            ValueStorage::LeafTable => arena
+                .nominal_value_leaf_paths_required(ws, bone_core::hir::FnBackend::Js, name)
+                .map_err(|e| err(e.message))?
+                .iter()
+                .map(|p| (format!("{p}: "), leaf(p.as_str())))
+                .collect(),
+            ValueStorage::GcTable => {
+                skull_mir::lower::gc_table_fields(ws, bone_core::hir::FnBackend::Js, name)
+                    .map_err(|e| err(e.message))?
+                    .iter()
+                    .map(|f| (format!("{}: ", f.name), f.lua_display_parts()))
+                    .collect()
+            }
+        };
+        let parts = if fields.is_empty() {
+            vec![LuaDisplayPart::literal(&format!("{name} {{ }}"))]
+        } else {
+            display_record(&open, fields, " }")
+        };
+        if out.is_empty() {
+            out.push_str("var __rock_tostring_ty = __rock_tostring_ty || {};\n");
+        }
+        out.push_str(&format!(
+            "__rock_tostring_ty[{}] = function(v) {{ return {}; }};\n",
+            js_string_lit(name.as_str())?,
+            js_display_expr(&parts)?
+        ));
+    }
+    Ok(out)
+}
+
+/// The JS spelling of a display body shared with the luajit `__tostring`
+/// emitter. Its operands are only string literals and `tostring(v.<key>)` /
+/// `tostring(v["<key>"])` reads, which are JS too once `tostring` is
+/// `lua_tostring`; anything else is rejected rather than guessed at.
+fn js_display_expr(
+    parts: &[skull_mir::lua_nesting::LuaDisplayPart],
+) -> Result<String, CompilerError> {
+    use skull_mir::lua_nesting::LuaDisplayPart;
+
+    let read = |e: &str| -> Option<String> {
+        let inner = e.strip_prefix("tostring(")?.strip_suffix(')')?;
+        is_js_box_read(inner).then(|| format!("lua_tostring({inner})"))
+    };
+    let mut terms = Vec::with_capacity(parts.len());
+    for part in parts {
+        terms.push(match part {
+            LuaDisplayPart::Expr(e)
+                if e.len() >= 2
+                    && e.starts_with('"')
+                    && e.ends_with('"')
+                    && !e[1..e.len() - 1].contains(['"', '\\']) =>
+            {
+                e.clone()
+            }
+            LuaDisplayPart::Expr(e) => read(e).ok_or_else(|| {
+                err(format!(
+                    "JS subset: display operand `{e}` has no JS spelling"
+                ))
+            })?,
+            LuaDisplayPart::UnlessNil { value, parts } if is_js_box_read(value) => format!(
+                "({value} == null ? \"nil\" : ({}))",
+                js_display_expr(parts)?
+            ),
+            LuaDisplayPart::UnlessNil { value, .. } => {
+                return Err(err(format!(
+                    "JS subset: display presence read `{value}` has no JS spelling"
+                )));
+            }
+        });
+    }
+    Ok(terms.join(" + "))
+}
+
+/// `v.<ident>` or `v["<key>"]`: the same read in Lua and JS.
+fn is_js_box_read(e: &str) -> bool {
+    if let Some(key) = e.strip_prefix("v.") {
+        return !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    }
+    e.strip_prefix("v[\"")
+        .and_then(|rest| rest.strip_suffix("\"]"))
+        .is_some_and(|key| !key.contains(['"', '\\']))
+}
+
 /// Per-type `__rock_inspect_ty` registry for every realized struct, closed over
 /// all declared struct fields.
 pub(super) fn emit_inspect_ty(
@@ -86,6 +211,7 @@ pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> Result<String, Compile
         let ed = &ws.modules[eid.module.index()].enums[eid.def];
         if out.is_empty() {
             out.push_str("var __rock_inspect_ty = __rock_inspect_ty || {};\n");
+            out.push_str("var __rock_tostring_ty = __rock_tostring_ty || {};\n");
         }
         let mut body = String::from("var g = t.__tag; ");
         for (tag, variant) in ed.variants.iter().enumerate() {
@@ -119,9 +245,10 @@ pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> Result<String, Compile
             body.push_str(&format!("if (g === {tag}) return {render}; "));
         }
         body.push_str("return \"?\";");
+        let key = js_string_lit(name.as_str())?;
         out.push_str(&format!(
-            "__rock_inspect_ty[{}] = function(t) {{ {body} }};\n",
-            js_string_lit(name.as_str())?
+            "__rock_inspect_ty[{key}] = function(t) {{ {body} }};\n\
+             __rock_tostring_ty[{key}] = __rock_inspect_ty[{key}];\n"
         ));
     }
     Ok(out)

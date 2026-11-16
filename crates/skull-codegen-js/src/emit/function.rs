@@ -359,6 +359,7 @@ pub fn emit_with_closure(
     out.push_str(&emit_enum_singletons(&st.gctx, &st.enum_defs));
     out.push_str(&emit_inspect_enum_payloads(ws)?);
     out.push_str(&emit_vt_eq(ws, struct_registry.as_ref())?);
+    out.push_str(&emit_tostring_ty(ws, struct_registry.as_ref())?);
     out.push_str(&emit_inspect_ty(ws, struct_registry.as_ref())?);
     out.push_str(&emit_inspect_cdata_enums(ws)?);
     out.push_str(&emit_col_mat(ws, struct_registry.as_ref())?);

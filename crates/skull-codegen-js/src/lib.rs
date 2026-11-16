@@ -1625,7 +1625,27 @@ function lua_tostring(x) {
   if (x === true) return "true";
   if (x === false) return "false";
   if (x === null || x === undefined) return "nil";
+  if (typeof x === "string") return x;
+  if (typeof x === "function") return "function: builtin";
+  if (typeof x === "object") {
+    if (typeof __rock_code_ref_kind === "function" && __rock_code_ref_kind(x) !== null) return "function: builtin";
+    var render = x.__ty !== undefined && typeof __rock_tostring_ty === "object" ? __rock_tostring_ty[x.__ty] : undefined;
+    if (render !== undefined) return render(x);
+    return "table: 0x" + __rock_table_address(x);
+  }
   return String(x);
+}
+// luajit's `tostring` of a table without `__tostring` is its address; an object
+// gets a stable stand-in on first sight.
+var __rock_table_addresses = new WeakMap();
+var __rock_table_address_next = 1;
+function __rock_table_address(t) {
+  var a = __rock_table_addresses.get(t);
+  if (a === undefined) {
+    a = (__rock_table_address_next++).toString(16).padStart(8, "0");
+    __rock_table_addresses.set(t, a);
+  }
+  return a;
 }
 function __rock_format_float(v) {
   // Non-finite first: C `%.2g` renders these as inf/-inf/nan, and __c_g below

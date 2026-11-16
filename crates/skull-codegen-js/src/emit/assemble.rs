@@ -145,6 +145,9 @@ pub(super) fn assemble_program_core(
     let vt_eq = emit_vt_eq(ws, struct_registry.as_ref())?;
     out.push_str(&vt_eq);
     stable.push_str(&vt_eq);
+    let tostring_ty = emit_tostring_ty(ws, struct_registry.as_ref())?;
+    out.push_str(&tostring_ty);
+    stable.push_str(&tostring_ty);
     let inspect_ty = emit_inspect_ty(ws, struct_registry.as_ref())?;
     out.push_str(&inspect_ty);
     stable.push_str(&inspect_ty);

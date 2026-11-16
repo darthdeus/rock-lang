@@ -1,0 +1,117 @@
+// `print` and `tostring` of composite values render what luajit's
+// `tostring` renders: a value struct through its `__tostring`
+// (`Name { f: v }`, declaration order), a payload enum through its baked
+// variant render, and any other table as its `table: 0x..` address.
+
+value P2 { x: int, y: int }
+value PF { x: float, b: bool }
+value Line { a: P2, b: P2 }
+value Named { name: string, n: int }
+value WithOpt { s: string, n: int? }
+nobox value Id { value: int }
+value Cell { id: int, tag: Id? = null, pos: P2 }
+value Gen<T> { v: T }
+enum E { A, B(int), C { r: int, g: int } }
+value WithE { e: E, f: float }
+enum U { X, Y }
+struct R { a: int, p: P2 }
+
+fn show<T>(x: T) -> string {
+    return tostring(x)
+}
+
+@test(output = "P2 {{ x: 1, y: 2 }}")
+fn print_value_struct() {
+    print(P2 { x: 1, y: 2 })
+}
+
+@test(output = "P2 {{ x: 3, y: 4 }}\nnil")
+fn print_nullable_value_struct() {
+    let q: P2? = P2 { x: 3, y: 4 }
+    let n: P2? = null
+    print(q)
+    print(n)
+}
+
+@test(output = "P2 {{ x: 7, y: 8 }}\tP2 {{ x: 5, y: 6 }}")
+fn print_value_struct_from_containers() {
+    let xs = [P2 { x: 1, y: 2 }, P2 { x: 7, y: 8 }]
+    let r = R { a: 1, p: P2 { x: 5, y: 6 } }
+    print(xs[1], r.p)
+}
+
+@test(output = "P2 {{ x: 9, y: 1 }}")
+fn print_value_struct_from_map() {
+    let m: Map<string, P2> = map_new()
+    m["k"] = P2 { x: 9, y: 1 }
+    print(m["k"])
+}
+
+@test(output = "Line {{ a: P2 {{ x: 1, y: 2 }}, b: P2 {{ x: 3, y: 4 }} }}\nPF {{ x: 1.5, b: true }}")
+fn print_nested_and_float_value_structs() {
+    print(Line { a: P2 { x: 1, y: 2 }, b: P2 { x: 3, y: 4 } })
+    print(PF { x: 1.5, b: true })
+}
+
+@test(output = "Named {{ name: a, n: 1 }}\nWithOpt {{ s: b, n: nil }}\nWithOpt {{ s: c, n: 3 }}")
+fn print_gc_carrying_value_structs() {
+    print(Named { name: "a", n: 1 })
+    print(WithOpt { s: "b", n: null })
+    print(WithOpt { s: "c", n: 3 })
+}
+
+@test(output = "Cell {{ id: 1, tag: true, tag.value: 5, pos.x: 2, pos.y: 3 }}\nCell {{ id: 1, tag: nil, tag.value: nil, pos.x: 2, pos.y: 3 }}")
+fn print_leaf_table_value_struct() {
+    print(Cell { id: 1, tag: Id { value: 5 }, pos: P2 { x: 2, y: 3 } })
+    print(Cell { id: 1, pos: P2 { x: 2, y: 3 } })
+}
+
+@test(output = "Gen {{ v: 3 }}")
+fn print_generic_value_struct() {
+    print(Gen { v: 3 })
+}
+
+@test(output = "E::A\nE::B {{ [1] = 3 }}\nE::C {{ g = 2, r = 1 }}\n1")
+fn print_enums() {
+    print(E::A)
+    print(E::B(3))
+    print(E::C { r: 1, g: 2 })
+    print(U::Y)
+}
+
+@test(output = "WithE {{ e: E::B {{ [1] = 2 }}, f: 2 }}")
+fn print_value_struct_with_enum_field() {
+    print(WithE { e: E::B(2), f: 2.0 })
+}
+
+@test(output = "P2 {{ x: 1, y: 2 }}|E::B(4)")
+fn tostring_through_generic() {
+    print(show(P2 { x: 1, y: 2 }) + "|" + show(E::B(4)))
+}
+
+@test(output = "i P2 {{ x: 1, y: 2 }} P2 {{ x: 3, y: 4 }} nil Id {{ value: 5 }}")
+fn interpolate_value_structs() {
+    let p = P2 { x: 1, y: 2 }
+    let q: P2? = P2 { x: 3, y: 4 }
+    let n: P2? = null
+    let id = Id { value: 5 }
+    print("i {p} {q} {n} {id}")
+}
+
+@test(output = "R {{ a = 1, p = P2 {{ x: 5, y: 6 }} }}\nVec {{ P2 {{ x: 1, y: 2 }}, P2 {{ x: 7, y: 8 }} }}\nE::B(3)")
+fn interpolate_containers_of_value_structs() {
+    let r = R { a: 1, p: P2 { x: 5, y: 6 } }
+    let xs = [P2 { x: 1, y: 2 }, P2 { x: 7, y: 8 }]
+    print("{r}")
+    print("{xs}")
+    print("{E::B(3)}")
+}
+
+@test(returns = true)
+fn tostring_of_tables_is_an_address() -> bool {
+    let r = R { a: 1, p: P2 { x: 5, y: 6 } }
+    let xs = [1, 2]
+    let t = (1, "a")
+    return show(r).starts_with("table: 0x") && show(xs).starts_with("table: 0x")
+        && show(t).starts_with("table: 0x")
+}
