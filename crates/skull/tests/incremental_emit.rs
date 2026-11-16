@@ -2018,6 +2018,35 @@ return c.v }
 }
 
 #[test]
+fn flat_ref_callee_body_overlay_updates_a_specialized_caller() {
+    crate::common::require_luajit();
+    let v1 = r#"
+value Cell { v: int }
+global xs: [Cell] = []
+fn apply(c: ref Cell, delta: int) -> int { c.v += delta
+return c.v }
+@nomangle fn seed() { xs.push(Cell { v: 10 }) }
+@nomangle fn snapshot() -> int { return xs[0].v }
+fn step<T>(_tag: T, delta: int) -> bool {
+    let before = xs[0].v
+    let seen = apply(xs[0], delta)
+    return seen != before && xs[0].v == seen
+}
+@nomangle fn tick(delta: int) -> bool { return step(1, delta) }
+"#;
+    let v2 = v1.replace("c.v += delta", "c.v -= delta");
+    let ws1 = ws_with_stdlib(v1);
+    let (full, mut cache) = emit_full(&ws1, skull::user_module_id(&ws1).unwrap()).unwrap();
+    let ws2 = ws_with_stdlib(&v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "apply")]);
+    let run = format!(
+        "{}\nseed()\nassert(tick(2))\nlocal before = snapshot()\n{}\nassert(snapshot() == before)\nassert(tick(3))\nassert(snapshot() < before)\nprint('ok')\n",
+        full.lua, overlay.lua,
+    );
+    assert_eq!(crate::common::run_luajit(&run), "ok");
+}
+
+#[test]
 fn flat_ref_signature_change_refuses_an_overlay() {
     let v1 = r#"
 value Cell { v: int }
