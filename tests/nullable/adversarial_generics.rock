@@ -70,6 +70,82 @@ fn test_nullable_box_of_nullable_null() {
     }
 }
 
+// A generic body specialized at a nullable `T` builds `T?` over `int?`; it
+// must be `int?` there too, or each consumer of the doubled type diverges.
+
+fn find_first<T>(xs: Vec<T>) -> T? {
+    for x in xs { return x }
+    return null
+}
+
+fn describe<T>(x: T) -> string { return "{x}" }
+
+fn describe_first<T>(xs: Vec<T>) -> string { return describe(find_first(xs)) }
+
+fn first_or<T>(xs: Vec<T>, fallback: T) -> T { return find_first(xs) ?? fallback }
+
+fn same_nullable<T>(a: T?, b: T?) -> bool { return a == b }
+
+fn same_first<T>(xs: Vec<T>, ys: Vec<T>) -> bool {
+    return same_nullable(find_first(xs), find_first(ys))
+}
+
+fn describe_lookup<K, V>(m: Map<K, V>, k: K) -> string { return describe(m.get(k)) }
+
+fn describe_box<T>(b: NullableBox<T>) -> string { return describe(b.val) }
+
+value NestedPoint { x: float, y: float }
+
+@test(output = "nil 4 nil")
+fn test_describe_generic_nullable_of_nullable_int() {
+    let a: Vec<int?> = [null, 4]
+    let b: Vec<int?> = [4, null]
+    let c: Vec<int?> = []
+    print("{describe_first(a)} {describe_first(b)} {describe_first(c)}")
+}
+
+@test(output = "true nil")
+fn test_describe_generic_nullable_of_nullable_value() {
+    let p: NestedPoint? = NestedPoint { x: 1.0, y: 2.0 }
+    let ps: Vec<NestedPoint?> = [p, null]
+    let qs: Vec<NestedPoint?> = [null]
+    print("{describe_first(ps) == describe(p)} {describe_first(qs)}")
+}
+
+@test(output = "9 4 true")
+fn test_coalesce_generic_nullable_of_nullable() {
+    let ns: Vec<int?> = [null, 4]
+    let ms: Vec<int?> = [4]
+    let ps: Vec<NestedPoint?> = [null]
+    let want: NestedPoint? = NestedPoint { x: 5.0, y: 6.0 }
+    print("{first_or(ns, 9)} {first_or(ms, 9)} {first_or(ps, want) == want}")
+}
+
+@test(output = "true true false")
+fn test_equality_generic_nullable_of_nullable() {
+    let ps: Vec<NestedPoint?> = [NestedPoint { x: 1.0, y: 2.0 }]
+    let qs: Vec<NestedPoint?> = [NestedPoint { x: 1.0, y: 2.0 }]
+    let ns: Vec<int?> = [null]
+    let empty: Vec<int?> = []
+    let three: Vec<int?> = [3]
+    print("{same_first(ps, qs)} {same_first(ns, empty)} {same_first(ns, three)}")
+}
+
+@test(output = "nil 3 nil")
+fn test_describe_generic_map_get_of_nullable() {
+    let m: Map<string, int?> = map_new()
+    m.insert("a", null)
+    m.insert("b", 3)
+    print("{describe_lookup(m, "a")} {describe_lookup(m, "b")} {describe_lookup(m, "c")}")
+}
+
+@test(output = "nil 42")
+fn test_describe_generic_nullable_field_of_nullable() {
+    let a: NullableBox<int?> = NullableBox { val: null }
+    let b: NullableBox<int?> = NullableBox { val: 42 }
+    print("{describe_box(a)} {describe_box(b)}")
+}
+
 // --- Vec of nullable elements ---
 
 // --- Nullable Vec vs Vec of nullable ---

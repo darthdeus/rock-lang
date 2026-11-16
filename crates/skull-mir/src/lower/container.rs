@@ -191,7 +191,7 @@ impl ContainerPlan {
             }
         };
         let physical_element = if nullable {
-            crate::monoty::MonoTy::Nullable(Box::new(element.clone()))
+            crate::monoty::MonoTy::nullable(element.clone())
         } else {
             element.clone()
         };

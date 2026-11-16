@@ -592,12 +592,6 @@ mod tests {
         assert_eq!(enc(&MonoTy::String), "p_string");
 
         assert_eq!(enc(&MonoTy::Nullable(Box::new(MonoTy::Int))), "o_p_int");
-        assert_eq!(
-            enc(&MonoTy::Nullable(Box::new(MonoTy::Nullable(Box::new(
-                MonoTy::Int
-            ))))),
-            "o_o_p_int"
-        );
 
         assert_eq!(enc(&MonoTy::Tuple(vec![])), "t_0_z");
         assert_eq!(enc(&MonoTy::Tuple(vec![MonoTy::Int])), "t_1_p_int_z");

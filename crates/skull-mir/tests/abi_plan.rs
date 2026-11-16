@@ -1499,32 +1499,26 @@ fn consume(value: Many) -> int {{ let whole = value; return whole.child0?.a ?? -
     assert!(mir.params.len() < budget);
 }
 
-/// `T?` at `T = V2?` is `V2??`, which has `V2?`'s shape and so shares its
-/// representation key. Its facts must be `V2?`'s too, or the arena keeps
-/// whichever of the two answers a worker happened to plan first.
+/// `T?` at `T = V2?` is `V2?` itself, so it can only plan as `V2?` does.
 #[test]
-fn a_nested_nullable_value_plans_like_the_single_nullable() {
+fn a_nullable_over_a_nullable_value_plans_as_the_single_nullable() {
     let ws = checked_ws_of("nobox value V2 { x: float, y: float }");
-    let once = MonoTy::Nullable(Box::new(nominal("V2")));
-    let twice = MonoTy::Nullable(Box::new(once.clone()));
-    let plan = |arena: &RepArena, ty: &MonoTy| {
-        let id = arena
-            .plan(
-                &ws,
-                bone_core::hir::FnBackend::Lua,
-                ty,
-                RepUse::Return,
-                &RepUseFacts::default(),
-                RepGuarantees::default(),
-            )
-            .expect("a nullable nobox value must plan");
-        let plan = arena.get(id);
-        (plan.value_storage(), plan.column_eligible(), plan.nobox())
-    };
-    let expected = (Some(ValueStorage::CData), true, true);
-    assert_eq!(plan(&RepArena::default(), &once), expected);
-    assert_eq!(plan(&RepArena::default(), &twice), expected);
-    let nested_first = RepArena::default();
-    plan(&nested_first, &twice);
-    assert_eq!(plan(&nested_first, &once), expected);
+    let once = MonoTy::nullable(nominal("V2"));
+    assert_eq!(MonoTy::nullable(once.clone()), once);
+    let arena = RepArena::default();
+    let id = arena
+        .plan(
+            &ws,
+            bone_core::hir::FnBackend::Lua,
+            &once,
+            RepUse::Return,
+            &RepUseFacts::default(),
+            RepGuarantees::default(),
+        )
+        .expect("a nullable nobox value must plan");
+    let plan = arena.get(id);
+    assert_eq!(
+        (plan.value_storage(), plan.column_eligible(), plan.nobox()),
+        (Some(ValueStorage::CData), true, true)
+    );
 }

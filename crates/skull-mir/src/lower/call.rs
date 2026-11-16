@@ -4080,10 +4080,7 @@ impl<'a> Builder<'a> {
         ty: &MonoTy,
         share: bool,
     ) -> Result<(), CompilerError> {
-        let mut payload = ty;
-        while let MonoTy::Nullable(inner) = payload {
-            payload = inner;
-        }
+        let (payload, _) = ty.peel_nullable();
         match r {
             ValueRepr::Scalar(v)
                 if payload.nominal().is_some_and(|name| {
@@ -4312,12 +4309,7 @@ impl<'a> Builder<'a> {
         ty: &MonoTy,
         v: Idx<Inst>,
     ) -> Result<ValueRepr, CompilerError> {
-        let mut payload = ty;
-        let mut nullable = false;
-        while let MonoTy::Nullable(inner) = payload {
-            payload = inner;
-            nullable = true;
-        }
+        let (payload, nullable) = ty.peel_nullable();
         let Some(name) = payload
             .nominal()
             .filter(|name| self.is_value_struct(*name) && !self.is_nobox_struct(*name))

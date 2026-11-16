@@ -1693,7 +1693,7 @@ pub fn nobox_global_accessor_shape(
 pub type SpecSubst = crate::monoty::MonoSubst;
 
 pub(crate) fn mono_value_shape(ws: &Workspace, ty: &MonoTy) -> Option<ValueShape> {
-    let (payload, nullable) = peel_nullable_layers(ty);
+    let (payload, nullable) = ty.peel_nullable();
     let MonoTy::App {
         ctor: MonoCtor::Nominal(name),
         ..
@@ -1709,7 +1709,7 @@ pub(crate) fn mono_value_shape(ws: &Workspace, ty: &MonoTy) -> Option<ValueShape
 }
 
 pub(crate) fn mono_nobox_value_shape(ws: &Workspace, ty: &MonoTy) -> Option<ValueShape> {
-    let (payload, nullable) = peel_nullable_layers(ty);
+    let (payload, nullable) = ty.peel_nullable();
     let MonoTy::App {
         ctor: MonoCtor::Nominal(name),
         ..
@@ -1724,15 +1724,6 @@ pub(crate) fn mono_nobox_value_shape(ws: &Workspace, ty: &MonoTy) -> Option<Valu
             sig_shape_of_nominal(ws, *name)
         }
     })?
-}
-
-pub(super) fn peel_nullable_layers(mut ty: &MonoTy) -> (&MonoTy, bool) {
-    let mut nullable = false;
-    while let MonoTy::Nullable(inner) = ty {
-        nullable = true;
-        ty = inner.as_ref();
-    }
-    (ty, nullable)
 }
 
 /// Rebuild the [`SpecSubst`] (callee generic `VarId` -> concrete type) for `fref`

@@ -894,7 +894,7 @@ fn wire_value_shape(
 }
 
 fn declared_nobox(ws: &Workspace, ty: &crate::monoty::MonoTy) -> bool {
-    let (payload, _) = super::shape::peel_nullable_layers(ty);
+    let (payload, _) = ty.peel_nullable();
     let crate::monoty::MonoTy::App {
         ctor: crate::monoty::MonoCtor::Nominal(name),
         ..
@@ -1075,9 +1075,8 @@ impl RepArena {
         if let Some(id) = self.lookup_key(&key) {
             return id;
         }
-        // The facts read only the shape's nominal name, never the planned
-        // type: `V?` and `V??` share this key, and the first worker to plan
-        // either must record the answer the other would have.
+        // The facts read only the shape's nominal name, so every type that
+        // plans to this key records the same answer whichever worker is first.
         let (storage, column_eligible, boxable) = value_shape_facts(ws, shape.name);
         let nobox = crate::lower::is_nobox_nominal(ws, shape.name);
         let id = self.intern_with_facts(

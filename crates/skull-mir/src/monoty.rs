@@ -328,6 +328,15 @@ impl MonoTy {
         }
     }
 
+    /// `inner?`. A `?` over a nullable type is that type: both spell absence
+    /// as one null, so `T?` at `T = V?` is `V?` and no type has two layers.
+    pub fn nullable(inner: MonoTy) -> MonoTy {
+        match inner {
+            MonoTy::Nullable(_) => inner,
+            other => MonoTy::Nullable(Box::new(other)),
+        }
+    }
+
     /// `(payload, nullable)` -- the type with its `?` stripped.
     pub fn peel_nullable(&self) -> (&MonoTy, bool) {
         match self {
@@ -657,7 +666,7 @@ impl MonoArena {
     /// Intern `Nullable` over an already-interned child.
     pub fn nullable(&mut self, inner: MonoTyId) -> MonoTyId {
         let inner = self.get(inner).clone();
-        self.intern(MonoTy::Nullable(Box::new(inner)))
+        self.intern(MonoTy::nullable(inner))
     }
 
     /// Intern `Tuple` over already-interned parts.
@@ -1100,14 +1109,14 @@ fn convert_at<S: std::hash::BuildHasher>(
             *bound += 1;
             return Ok(bound_to);
         }
-        TypeExpr::Nullable(inner) => MonoTy::Nullable(Box::new(convert_at(
+        TypeExpr::Nullable(inner) => MonoTy::nullable(convert_at(
             ws,
             env,
             ty.with_idx(inner),
             subst,
             depth + 1,
             bound,
-        )?)),
+        )?),
         TypeExpr::Tuple { elements } => {
             let mut parts = Vec::new();
             for el in elements {
