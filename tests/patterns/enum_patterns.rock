@@ -29,7 +29,6 @@ fn test_wildcard_pattern() {
     }
     
     assert_eq(result, "matched wildcard")
-    print("Wildcard pattern test passed")
 }
 
 // Test literal patterns
@@ -62,8 +61,6 @@ fn test_literal_patterns() {
         false => "off",
     }
     assert_eq(status, "on")
-    
-    print("Literal pattern tests passed")
 }
 
 // Test nested enum patterns
@@ -88,8 +85,6 @@ fn test_nested_enum_patterns() {
         Result::Err(e) => -1,
     }
     assert_eq(value2, 0)
-    
-    print("Nested enum pattern tests passed")
 }
 
 // Test pattern variable binding
@@ -114,8 +109,6 @@ fn test_pattern_variable_binding() {
         },
         _ => assert(false),
     }
-    
-    print("Pattern variable binding tests passed")
 }
 
 // Single variant enum for exhaustiveness testing
@@ -146,8 +139,6 @@ fn test_exhaustiveness_edge_cases() {
         Toggle::Off => false,
     }
     assert(state)
-    
-    print("Exhaustiveness edge case tests passed")
 }
 
 // Test pattern matching with different types
@@ -168,8 +159,6 @@ fn test_pattern_type_checking() {
         Option::Some(s) => s,
     }
     assert_eq(string_result, "hello")
-    
-    print("Pattern type checking tests passed")
 }
 
 // Test enum equality with complex variants
@@ -191,42 +180,6 @@ fn test_complex_enum_equality() {
     
     // Different variants
     assert(c1 != r1)
-    
-    print("Complex enum equality tests passed")
-}
-
-// Test with nullable enum values
-@test
-fn test_nullable_enum_patterns() {
-    // For now, test simpler nullable scenarios
-    let maybe_int: int? = 42
-    
-    // Test if-let with nullable
-    if let x = maybe_int {
-        assert_eq(x, 42)
-    } else {
-        assert(false)
-    }
-    
-    // Test with null
-    let null_int: int? = null
-    let found = if let x = null_int {
-        false
-    } else {
-        true
-    }
-    assert(found)
-    
-    // Test nullable handling works correctly
-    // Note: Nullable enums are a complex case that needs more work
-    let some_value = Option::Some(42)
-    let none_value: Option<int> = Option::None
-    
-    // Verify basic enum equality works
-    assert(some_value == Option::Some(42))
-    assert(none_value == Option::None)
-    
-    print("Nullable enum pattern tests passed")
 }
 
 // Tree enum for nested pattern testing
@@ -255,8 +208,6 @@ fn test_deeply_nested_patterns() {
         },
         _ => assert(false),
     }
-    
-    print("Deeply nested pattern tests passed")
 }
 
 // Helper function for pattern matching in function returns
@@ -285,8 +236,6 @@ fn test_pattern_contexts() {
     // Pattern matching in function returns
     assert_eq(extract_or_default(Option::Some(42)), 42)
     assert_eq(extract_or_default(Option::None), 0)
-    
-    print("Pattern context tests passed")
 }
 
 @test
@@ -301,7 +250,6 @@ fn test_if_let_enum_workaround() {
     }
     
     assert_eq(result, 84)
-    print("Match expression works as expected")
 }
 
 @test  
@@ -316,7 +264,6 @@ fn test_nullable_if_let() {
     }
     
     assert_eq(result, 84)
-    print("if-let with nullable types works")
 }
 
 @test
@@ -360,5 +307,4 @@ fn test_enum_to_nullable_if_let() {
     }
     
     assert_eq(result, 101)
-    print("Converting enum to nullable for if-let works")
 }

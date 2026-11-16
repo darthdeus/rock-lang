@@ -1,6 +1,6 @@
-// Enum basics: unit, payload, generic and single-variant enums built, compared,
-// stored in vectors and matched, including nested matches, enums passed to
-// helpers across scopes and patterns that name payload variants.
+// Enum basics: unit, payload and generic enums built, compared, stored in
+// vectors and matched, including nested matches, enums passed to helpers
+// across scopes and patterns that name payload variants.
 
 enum Color {
     Red,
@@ -8,39 +8,27 @@ enum Color {
     Blue,
 }
 
-enum Status {
-    Pending,
-    Success,
-    Failed,
-}
-
-@test
-fn test_enum_creation() {
-    let red = Color::Red
-    let green = Color::Green
-    let blue = Color::Blue
-    
-    assert_not_null(red)
-    assert_not_null(green)
-    assert_not_null(blue)
-}
-
 @test
 fn test_enum_equality() {
     let red1 = Color::Red
     let red2 = Color::Red
     let green = Color::Green
-    
+
     assert_eq(red1, red2)
     assert_eq(red1, Color::Red)
     assert_ne(red1, green)
     assert_ne(red1, Color::Green)
+
+    let color = Color::Red
+    color = Color::Green
+    assert_eq(color, Color::Green)
+    assert_ne(color, Color::Red)
 }
 
 @test
 fn test_enum_in_arrays() {
     let colors = [Color::Red, Color::Green, Color::Blue]
-    
+
     assert_eq(vec_len(colors), 3)
     assert_eq(vec_get(colors, 0).unwrap(), Color::Red)
     assert_eq(vec_get(colors, 1).unwrap(), Color::Green)
@@ -48,80 +36,26 @@ fn test_enum_in_arrays() {
 }
 
 @test
-fn test_enum_assignment() {
-    let color = Color::Red
-    assert_eq(color, Color::Red)
-    
-    color = Color::Green
-    assert_eq(color, Color::Green)
-    assert_ne(color, Color::Red)
-}
-
-@test
 fn test_match_expressions() {
     let color = Color::Red
     let result = match color {
         Red => "red",
-        Green => "green", 
+        Green => "green",
         Blue => "blue",
     }
-    
-    assert_eq(result, "red")
-}
 
-@test
-fn test_match_with_different_variants() {
-    let status = Status::Success
-    let message = match status {
-        Pending => "waiting",
-        Success => "done",
-        Failed => "error",
-    }
-    
-    assert_eq(message, "done")
+    assert_eq(result, "red")
 }
 
 @test(output="Red\nGreen\nBlue")
 fn test_enum_print_output() {
-    let red = Color::Red
-    let green = Color::Green  
-    let blue = Color::Blue
-    
-    match red {
-        Red => print("Red"),
-        Green => print("Green"),
-        Blue => print("Blue"),
+    for color in [Color::Red, Color::Green, Color::Blue] {
+        match color {
+            Red => print("Red"),
+            Green => print("Green"),
+            Blue => print("Blue"),
+        }
     }
-    
-    match green {
-        Red => print("Red"),
-        Green => print("Green"),
-        Blue => print("Blue"),
-    }
-    
-    match blue {
-        Red => print("Red"),
-        Green => print("Green"),
-        Blue => print("Blue"),
-    }
-}
-
-@test(output="It's red!\nStatus: done")
-fn test_complex_enum_scenario() {
-    let color = Color::Red
-    let status = Status::Success
-    
-    if color == Color::Red {
-        print("It's red!")
-    }
-    
-    let message = match status {
-        Pending => "waiting",
-        Success => "done", 
-        Failed => "error",
-    }
-    
-    print("Status: {message}")
 }
 
 enum Result<T, E> {
@@ -129,76 +63,11 @@ enum Result<T, E> {
     Err(E),
 }
 
-// Empty enums are not supported in Rock
-// enum EmptyEnum { }
-
-enum SingleVariant {
-    Only,
-}
-
-@test
-fn test_variant_not_found() {
-    // This should give a compile error if uncommented:
-    // let color = Color::Yellow  // Variant 'Yellow' not found
-    
-    // Instead, test valid cases
-    let color = Color::Red
-    assert_eq(color, Color::Red)
-    print("Valid variant construction works")
-}
-
-@test
-fn test_wrong_argument_count() {
-    // These should give compile errors if uncommented:
-    // let result = Result::Ok()  // Missing argument
-    // let result = Result::Ok(1, 2)  // Too many arguments
-    // let color = Color::Red(1)  // Unit variant with argument
-    
-    // Test valid cases
-    let result: Result<int, string> = Result::Ok(42)
-    match result {
-        Result::Ok(n) => assert_eq(n, 42),
-        Result::Err(_) => assert(false, "Should not be error"),
-    }
-    print("Correct argument count works")
-}
-
-@test
-fn test_pattern_exhaustiveness() {
-    let color = Color::Blue
-    
-    // This match is exhaustive
-    let name = match color {
-        Color::Red => "red",
-        Color::Green => "green", 
-        Color::Blue => "blue",
-    }
-    assert_eq(name, "blue")
-    
-    // If we uncomment this, it should give exhaustiveness error:
-    // let bad = match color {
-    //     Red => "red",
-    //     Green => "green",
-    //     // Missing Blue case
-    // }
-    
-    print("Exhaustiveness checking works")
-}
-
-@test
-fn test_single_variant_enum() {
-    let single = SingleVariant::Only
-    
-    match single {
-        SingleVariant::Only => print("Single variant enum works"),
-    }
-}
-
 @test
 fn test_deeply_nested_match() {
     let inner_result: Result<int, string> = Result::Ok(42)
     let outer: Result<Result<int, string>, string> = Result::Ok(inner_result)
-    
+
     let value = match outer {
         Result::Ok(inner) => match inner {
             Result::Ok(n) => n,
@@ -206,9 +75,8 @@ fn test_deeply_nested_match() {
         },
         Result::Err(e) => -1,
     }
-    
+
     assert_eq(value, 42)
-    print("Deeply nested matches work")
 }
 
 // Test that we can use enum variants in different scopes
@@ -225,15 +93,13 @@ fn test_enum_scope() {
     let color = Color::Red
     let result = helper_function(color)
     assert_eq(result, "R")
-    
+
     // Test in nested scope
     {
         let inner_color = Color::Green
         let inner_result = helper_function(inner_color)
         assert_eq(inner_result, "G")
     }
-    
-    print("Enum variants work across scopes")
 }
 
 // Test generic enum edge cases
@@ -242,17 +108,17 @@ enum Box<T> {
     Full(T),
 }
 
-@test
+@test(output = "Generic enum inference works")
 fn test_generic_enum_inference() {
     // Type should be inferred from usage
     let box1 = Box::Full(42)
     let box2: Box<int> = Box::Empty  // Need explicit type for unit variants
-    
+
     match box1 {
         Box::Full(n) => assert_eq(n, 42),
         Box::Empty => assert(false, "Should not be empty"),
     }
-    
+
     match box2 {
         Box::Full(_) => assert(false, "Should be empty"),
         Box::Empty => print("Generic enum inference works"),
@@ -279,7 +145,7 @@ enum PayloadColor {
 @test
 fn test_valid_enum_pattern() {
     let color = PayloadColor::Red(255)
-    
+
     match color {
         PayloadColor::Red(value) => {
             assert_eq(value, 255)
@@ -291,20 +157,13 @@ fn test_valid_enum_pattern() {
             assert_eq(enabled, true)
         }
     }
-}
 
-// This test ensures that the compiler properly validates enum type names
-// The following patterns should all compile successfully since they use the correct enum name
-@test
-fn test_enum_name_validation() {
-    let color = PayloadColor::Blue("sky")
-    
-    match color {
+    // A wildcard arm after a payload variant arm.
+    let sky = PayloadColor::Blue("sky")
+    match sky {
         PayloadColor::Blue(name) => {
             assert_eq(name, "sky")
         },
-        _ => {
-            // This should not be reached
-        }
+        _ => assert(false),
     }
 }

@@ -20,20 +20,6 @@ enum Expr {
     Multiply(Expr, Expr),
 }
 
-@test
-fn test_recursive_list_basic() {
-    // Create a simple list: [1, 2, 3]
-    let list = List::Cons(1, List::Cons(2, List::Cons(3, List::Nil)))
-    
-    // Pattern match to extract first element
-    match list {
-        Cons(head, _) => assert_eq(head, 1),
-        Nil => assert(false, "List should not be nil"),
-    }
-    
-    print("Recursive list construction works")
-}
-
 fn list_length<T>(list: List<T>) -> int {
     match list {
         Nil => 0,
@@ -51,8 +37,6 @@ fn test_list_length() {
     
     let three = List::Cons(1, List::Cons(2, List::Cons(3, List::Nil)))
     assert_eq(list_length(three), 3)
-    
-    print("List length calculation works")
 }
 
 fn eval(expr: Expr) -> float {
@@ -76,8 +60,6 @@ fn test_expression_tree() {
     
     let result = eval(expr)
     assert_eq(result, 14.0)
-    
-    print("Expression tree evaluation works")
 }
 
 fn tree_height<T>(tree: Tree<T>) -> int {
@@ -110,8 +92,6 @@ fn test_tree_height() {
         Tree::Node(3, Tree::Leaf, Tree::Leaf)
     )
     assert_eq(tree_height(balanced), 2)
-    
-    print("Tree height calculation works")
 }
 
 // JSON-like data structure
@@ -171,28 +151,6 @@ fn test_json_construction() {
         },
         _ => assert(false, "Expected an object"),
     }
-    
-    print("JSON-like structure works")
-}
-
-fn count_list<T>(list: List<T>) -> int {
-    match list {
-        Nil => 0,
-        Cons(_, tail) => 1 + count_list(tail),
-    }
-}
-
-@test
-fn test_deeply_nested_list() {
-    // Create a deeply nested list
-    let deep = List::Cons(1, 
-        List::Cons(2, 
-            List::Cons(3, 
-                List::Cons(4, 
-                    List::Cons(5, List::Nil)))))
-    
-    assert_eq(count_list(deep), 5)
-    print("Deeply nested list works")
 }
 
 fn list_map<T, U>(list: List<T>, f: (T) -> U) -> List<U> {
@@ -212,8 +170,6 @@ fn test_list_map() {
         Cons(head, _) => assert_eq(head, 2),
         Nil => assert(false, "List should not be empty"),
     }
-    
-    print("List map function works")
 }
 
 fn tree_fold<T, U>(tree: Tree<T>, leaf_val: U, node_fn: (T, U, U) -> U) -> U {
@@ -238,6 +194,4 @@ fn test_tree_fold() {
     // Sum all values in the tree
     let sum = tree_fold(tree, 0, (val, left, right) => val + left + right)
     assert_eq(sum, 30)
-    
-    print("Tree fold works")
 }

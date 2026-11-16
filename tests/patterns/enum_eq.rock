@@ -13,28 +13,22 @@ enum Msg {
 }
 
 @test
-fn test_payloadless_same_variant() {
+fn test_payloadless_eq() {
     let a = TileType::Wall
     let b = TileType::Wall
     assert_eq(a == b, true)
     assert_eq(a != b, false)
-}
 
-@test
-fn test_payloadless_different_variants() {
-    let a = TileType::Floor
-    let b = TileType::Water
-    assert_eq(a == b, false)
-    assert_eq(a != b, true)
-}
+    let floor = TileType::Floor
+    let water = TileType::Water
+    assert_eq(floor == water, false)
+    assert_eq(floor != water, true)
 
-@test
-fn test_payloadless_variable_vs_literal() {
-    let t = TileType::Wall
-    assert_eq(t == TileType::Wall, true)
-    assert_eq(TileType::Wall == t, true)
-    assert_eq(t == TileType::Floor, false)
-    assert_eq(TileType::Floor != t, true)
+    // Variable against a variant literal, on either side.
+    assert_eq(a == TileType::Wall, true)
+    assert_eq(TileType::Wall == a, true)
+    assert_eq(a == TileType::Floor, false)
+    assert_eq(TileType::Floor != a, true)
 }
 
 @test
@@ -52,40 +46,24 @@ fn test_payloadless_in_if() {
 }
 
 @test
-fn test_payloaded_same_payload() {
+fn test_payloaded_eq() {
     let a = Msg::Val(5)
-    let b = Msg::Val(5)
-    assert_eq(a == b, true)
-}
-
-@test
-fn test_payloaded_different_payload() {
-    let a = Msg::Val(5)
-    let b = Msg::Val(6)
-    assert_eq(a == b, false)
-    assert_eq(a != b, true)
-}
-
-@test
-fn test_payloaded_different_variants() {
-    let a = Msg::Val(5)
-    let b = Msg::Str("hi")
-    assert_eq(a == b, false)
-}
-
-@test
-fn test_payloaded_vs_unit_variant() {
-    let a = Msg::Ping
-    let b = Msg::Val(0)
-    assert_eq(a == b, false)
-    assert_eq(a != b, true)
-}
-
-@test
-fn test_mixed_enum_with_units_and_payloads() {
-    let a = Msg::Ping
-    let b = Msg::Ping
-    assert_eq(a == b, true)
+    let same = Msg::Val(5)
+    let other = Msg::Val(6)
+    let str = Msg::Str("hi")
+    assert_eq(a == same, true)
+    // Same variant, different payload.
+    assert_eq(a == other, false)
+    assert_eq(a != other, true)
+    // Different payload variants.
+    assert_eq(a == str, false)
+    // Unit variant against a payload variant, and against itself.
+    let ping = Msg::Ping
+    let ping2 = Msg::Ping
+    let zero = Msg::Val(0)
+    assert_eq(ping == zero, false)
+    assert_eq(ping != zero, true)
+    assert_eq(ping == ping2, true)
 }
 
 // Moved from enum_tuple_variants.rock: loop + match over heterogeneous vec
@@ -241,7 +219,7 @@ fn test_match_like_eq() {
     assert_eq(name, "g")
 }
 
-// Case 8: map with enum keys — exercises equality in map key paths.
+// Case 8: map with enum keys -- exercises equality in map key paths.
 @test
 fn test_enum_as_map_key() {
     let m = map_new()

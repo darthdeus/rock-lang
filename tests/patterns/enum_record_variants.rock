@@ -13,17 +13,6 @@ struct FixVec2 {
 }
 
 @test
-fn test_record_variant_construction() {
-    let point = Shape::Point
-    let line = Shape::Line { start: FixVec2 { x: 0.0, y: 0.0 }, end: FixVec2 { x: 10.0, y: 10.0 } }
-    let circle = Shape::Circle { center: FixVec2 { x: 5.0, y: 5.0 }, radius: 3.0 }
-    let rect = Shape::Rectangle { x: 0.0, y: 0.0, width: 100.0, height: 50.0 }
-
-    assert(point == Shape::Point)
-    print("Record variant construction works")
-}
-
-@test
 fn test_record_variant_pattern_matching() {
     let shape = Shape::Circle { center: FixVec2 { x: 5.0, y: 5.0 }, radius: 2.5 }
     
@@ -66,7 +55,6 @@ fn test_record_variant_equality() {
     
     assert(circle1 == circle2)
     assert(circle1 != circle3)
-    print("Record variant equality works")
 }
 
 @test

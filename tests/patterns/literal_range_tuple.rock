@@ -16,13 +16,9 @@ fn test_exhaustive_enum() {
     })
 }
 
-@test(output = "10")
+@test(output = "10\n20")
 fn test_range_two_arm() {
     print(match 3 { 1..5 => 10, _ => 20 })
-}
-
-@test(output = "20")
-fn test_range_two_arm_miss() {
     print(match 9 { 1..5 => 10, _ => 20 })
 }
 

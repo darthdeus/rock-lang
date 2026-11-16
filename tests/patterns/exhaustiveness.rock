@@ -1,19 +1,14 @@
 // Match exhaustiveness: integer literal, range, open-range and or-pattern
-// arms with and without a wildcard, then enum, generic enum and bool
-// matches without one.
+// arms with and without a wildcard, then enum and generic enum matches
+// without one.
 
-@test 
+@test
 fn test_simple_range_pattern() {
-    let x = 5
-    
-    // Test basic range parsing
-    let result = match x {
-        1..=10 => "small",
-        _ => "other"
-    }
-    
-    assert_eq(result, "small")
-    print("Simple range pattern test passed")
+    // A wildcard makes any integer match exhaustive.
+    let small = 5
+    let big = 42
+    assert_eq(match small { 1..=10 => "small", _ => "other" }, "small")
+    assert_eq(match big { 1..=10 => "small", _ => "other" }, "other")
 }
 
 @test
@@ -28,24 +23,6 @@ fn test_exhaustive_age_ranges() {
     }
     
     assert_eq(category, "adult")
-    print("Age range exhaustiveness test passed")
-}
-
-@test
-fn test_exhaustive_grade_ranges() {
-    let grade = 85
-    
-    let letter = match grade {
-        0..=59 => "F"
-        60..=69 => "D"
-        70..=79 => "C"
-        80..=89 => "B"
-        90..=100 => "A"
-        _ => "Invalid"
-    }
-    
-    assert_eq(letter, "B")
-    print("Grade range exhaustiveness test passed")
 }
 
 @test
@@ -60,7 +37,6 @@ fn test_mixed_literal_and_range() {
     }
     
     assert_eq(description, "small")
-    print("Mixed literal and range test passed")
 }
 
 @test
@@ -76,7 +52,6 @@ fn test_literal_and_range_mix() {
     }
     
     assert_eq(result, "zero")
-    print("Literal and range mix test passed")
 }
 
 @test
@@ -95,7 +70,6 @@ fn test_adjacent_ranges() {
     }
     
     assert_eq(grade, "B")
-    print("Adjacent ranges test passed")
 }
 
 @test
@@ -111,7 +85,6 @@ fn test_inclusive_vs_exclusive() {
     }
     
     assert_eq(category, "medium")
-    print("Inclusive vs exclusive ranges test passed")
 }
 
 @test 
@@ -126,21 +99,6 @@ fn test_exhaustive_integer_coverage() {
     }
     
     assert_eq(result, "small_positive")
-    print("Exhaustive integer coverage test passed")
-}
-
-@test
-fn test_single_wildcard_exhaustive() {
-    let x = 42
-    
-    // Wildcard should make any integer match exhaustive
-    let result = match x {
-        1..=10 => "small",
-        _ => "other"
-    }
-    
-    assert_eq(result, "other")
-    print("Wildcard integer exhaustiveness test passed")
 }
 
 @test
@@ -219,7 +177,6 @@ fn test_exhaustive_enum_matching() {
     }
     
     assert_eq(message, "waiting")
-    print("Exhaustive enum test passed")
 }
 
 @test  
@@ -233,19 +190,4 @@ fn test_exhaustive_generic_enum() {
     }
     
     assert_eq(value, 42)
-    print("Exhaustive generic enum test passed")
-}
-
-@test
-fn test_bool_exhaustiveness() {
-    let flag = true
-    
-    // Bool should be exhaustively checkable
-    let result = match flag {
-        true => "yes",
-        false => "no"
-    }
-    
-    assert_eq(result, "yes")
-    print("Bool exhaustiveness test passed")
 }

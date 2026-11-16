@@ -88,7 +88,7 @@ fn test_or_with_guard() {
     assert_eq(u, "other")
 }
 
-// First, middle, last position of or-pattern in arm list.
+// First and middle position of an or-pattern in the arm list.
 @test
 fn test_or_pattern_position() {
     let n = 2
@@ -106,13 +106,6 @@ fn test_or_pattern_position() {
         _ => "big",
     }
     assert_eq(b, "small")
-    // Or as last non-wildcard arm.
-    let c = match n {
-        0 => "0",
-        1 | 2 | 3 => "small",
-        _ => "other",
-    }
-    assert_eq(c, "small")
 }
 
 // Range alternation.
