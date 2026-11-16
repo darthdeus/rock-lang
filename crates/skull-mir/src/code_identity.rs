@@ -1275,7 +1275,7 @@ impl BodyHasher {
                 self.inst_idx(*value);
             }
             Inst::VecIndexSlot(index) => {
-                self.tag(93);
+                self.tag(95);
                 self.inst_idx(*index);
             }
             Inst::NbIndexSlot(index) => {
@@ -1324,7 +1324,7 @@ impl BodyHasher {
                 }
             }
             Inst::MakeNullableValue { present, value } => {
-                self.tag(89);
+                self.tag(96);
                 self.inst_idx(*present);
                 self.inst_idx(*value);
             }
@@ -1760,6 +1760,20 @@ mod tests {
         assert_ne!(
             fingerprint(10, 11, 10, false),
             fingerprint(10, 11, 10, true),
+        );
+    }
+
+    #[test]
+    fn body_fingerprint_separates_instructions_with_the_same_operands() {
+        let hash = |inst: Inst| {
+            let mut hasher = BodyHasher::default();
+            hasher.inst_with_volatile(&inst, &FxHashMap::default(), false);
+            hasher.finish()
+        };
+        let value = Idx::from_raw(RawIdx::from_u32(3));
+        assert_ne!(
+            hash(Inst::FloatToF32(value)),
+            hash(Inst::VecIndexSlot(value))
         );
     }
 }
