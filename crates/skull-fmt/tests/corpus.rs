@@ -1,8 +1,5 @@
-//! Runs the `tests/fmt` corpus through skull-fmt and asserts every case
-//! formats to its expected output. Prints a pass/fail histogram (run with
-//! `--nocapture`) and fails on ANY mismatch, listing the offending cases. A
-//! genuine bring-up gap goes in `KNOWN_FAILING`, which forces a same-commit
-//! removal the moment the case starts passing.
+//! Runs the `tests/fmt` corpus through skull-fmt: every case must format to
+//! its expected output, which must reparse and be a fixed point.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,18 +11,26 @@ pub(crate) struct Case {
     expected: String,
 }
 
-pub(crate) fn corpus_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fmt")
+/// Every case in the corpus, in file order.
+pub(crate) fn cases() -> Vec<Case> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fmt");
+    let mut files = Vec::new();
+    collect(&dir, &mut files);
+    files.sort();
+    files
+        .iter()
+        .flat_map(|f| {
+            let short = f.strip_prefix(&dir).unwrap().to_string_lossy().to_string();
+            parse_cases(&short, &fs::read_to_string(f).unwrap())
+        })
+        .collect()
 }
 
-pub(crate) fn collect_fmt_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for e in entries.flatten() {
+fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
+    for e in fs::read_dir(dir).expect("read the corpus").flatten() {
         let p = e.path();
         if p.is_dir() {
-            collect_fmt_files(&p, out);
+            collect(&p, out);
         } else if p.extension().and_then(|s| s.to_str()) == Some("fmt") {
             out.push(p);
         }
@@ -35,7 +40,7 @@ pub(crate) fn collect_fmt_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// Split a `.rock.fmt` file into cases. A case is `//=== TEST CASE: name ===`
 /// then input then `//=== EXPECTED ===`+output OR `//=== NO CHANGE ===`
 /// (output == input).
-pub(crate) fn parse_cases(file: &str, text: &str) -> Vec<Case> {
+fn parse_cases(file: &str, text: &str) -> Vec<Case> {
     let mut cases = Vec::new();
     let lines: Vec<&str> = text.lines().collect();
     let mut i = 0;
@@ -56,165 +61,76 @@ pub(crate) fn parse_cases(file: &str, text: &str) -> Vec<Case> {
             .trim()
             .to_string();
         i += 1;
-        let mut input = Vec::new();
-        let mut no_change = false;
+        let start = i;
         while i < lines.len() && !marker(lines[i], "EXPECTED") && !marker(lines[i], "NO CHANGE") {
-            input.push(lines[i]);
             i += 1;
         }
-        if i < lines.len() && marker(lines[i], "NO CHANGE") {
-            no_change = true;
-        }
+        let input = trim_block(&lines[start..i]);
+        let no_change = i < lines.len() && marker(lines[i], "NO CHANGE");
         i += 1; // consume sentinel
-        let input_s = trim_block(&input);
         let expected = if no_change {
-            input_s.clone()
+            input.clone()
         } else {
-            let mut out = Vec::new();
+            let start = i.min(lines.len());
             while i < lines.len() && !marker(lines[i], "TEST CASE") {
-                out.push(lines[i]);
                 i += 1;
             }
-            trim_block(&out)
+            trim_block(&lines[start..i.max(start)])
         };
         cases.push(Case {
             file: file.to_string(),
             name,
-            input: input_s,
+            input,
             expected,
         });
     }
     cases
 }
 
-/// Cases the formatter does not yet handle. `(file, case_name)` — matched
-/// exactly against the values printed in the failure list. Empty means the
-/// whole corpus is expected to pass; adding an entry is a ratchet: the case
-/// starts passing -> the "expected-fail passed" check goes red -> you must
-/// remove the entry in the same commit.
-const KNOWN_FAILING: &[(&str, &str)] = &[];
-
 fn trim_block(lines: &[&str]) -> String {
-    let mut v: Vec<&str> = lines.to_vec();
-    while v.first().map(|l| l.trim().is_empty()).unwrap_or(false) {
-        v.remove(0);
-    }
-    while v.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
-        v.pop();
-    }
-    v.join("\n")
+    let is_blank = |l: &&str| l.trim().is_empty();
+    let start = lines
+        .iter()
+        .position(|l| !is_blank(l))
+        .unwrap_or(lines.len());
+    let end = lines
+        .iter()
+        .rposition(|l| !is_blank(l))
+        .map_or(start, |e| e + 1);
+    lines[start..end].join("\n")
 }
 
 #[test]
-fn corpus_report() {
-    let mut files = Vec::new();
-    collect_fmt_files(&corpus_dir(), &mut files);
-    files.sort();
-
-    let mut total = 0;
-    let mut pass = 0;
-    let mut parse_err = 0;
+fn corpus_cases_format_to_their_expected_output() {
+    let cases = cases();
+    assert!(!cases.is_empty(), "corpus silently empty");
     let mut failures = Vec::new();
-
-    for f in &files {
-        let text = fs::read_to_string(f).unwrap();
-        let short = f
-            .strip_prefix(corpus_dir())
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
-        let cases = parse_cases(&short, &text);
-        for c in cases {
-            total += 1;
-            let got = std::panic::catch_unwind(|| skull_fmt::format_code(&c.input)).unwrap_or_else(
-                |_| {
-                    panic!(
-                        "formatter panicked for {} :: {}\n{}",
-                        c.file, c.name, c.input
-                    )
-                },
-            );
-            let got_trim = got.trim_end();
-            let exp_trim = c.expected.trim_end();
-            if got_trim == exp_trim {
-                pass += 1;
-            } else {
-                if got_trim == c.input.trim_end()
-                    && skull_parser::parse_module_clean(&c.input, "x".into()).is_err()
-                {
-                    parse_err += 1;
-                }
-                failures.push((
-                    c.file,
-                    c.name,
-                    c.input,
-                    exp_trim.to_string(),
-                    got_trim.to_string(),
-                ));
-            }
-        }
-    }
-
-    eprintln!(
-        "\n=== skull-fmt corpus: {pass}/{total} cases pass ({parse_err} parse-fail passthrough) ===\n"
-    );
-
-    let is_known =
-        |file: &str, name: &str| KNOWN_FAILING.iter().any(|(f, n)| *f == file && *n == name);
-
-    // Partition failures into unexpected (must go red) and known bring-up gaps.
-    let mut unexpected = Vec::new();
-    for (file, name, input, exp, got) in &failures {
-        if is_known(file, name) {
+    for c in &cases {
+        let id = format!("{} :: {}", c.file, c.name);
+        // Only a `parse_error*` case may hold source that does not parse; it
+        // checks the passthrough, so a case cannot pass by accident.
+        let parses = skull_parser::parse_module_clean(&c.input, "<corpus>".into()).is_ok();
+        if parses == c.name.starts_with("parse_error") {
+            failures.push(format!("{id}: parses is {parses}"));
             continue;
         }
-        unexpected.push((
-            file.clone(),
-            name.clone(),
-            input.clone(),
-            exp.clone(),
-            got.clone(),
-        ));
-    }
-
-    // Ratchet: an allowlisted case that now passes must be removed same-commit.
-    let failed: std::collections::HashSet<(String, String)> = failures
-        .iter()
-        .map(|(f, n, ..)| (f.clone(), n.clone()))
-        .collect();
-    let stale: Vec<_> = KNOWN_FAILING
-        .iter()
-        .filter(|(f, n)| !failed.contains(&(f.to_string(), n.to_string())))
-        .collect();
-
-    if !unexpected.is_empty() {
-        eprintln!("=== {} unexpected failure(s) ===", unexpected.len());
-        for (file, name, input, exp, got) in &unexpected {
-            eprintln!("---- {file} :: {name} ----");
-            eprintln!("INPUT:\n{input}");
-            eprintln!("EXPECTED:\n{exp}");
-            eprintln!("GOT:\n{got}\n");
+        let got = skull_fmt::format_code(&c.input);
+        if got.trim_end() != c.expected.trim_end() {
+            failures.push(format!(
+                "{id}\nINPUT:\n{}\nEXPECTED:\n{}\nGOT:\n{got}",
+                c.input, c.expected
+            ));
+        } else if parses && skull_parser::parse_module_clean(&got, "<corpus>".into()).is_err() {
+            failures.push(format!("{id}: output does not parse:\n{got}"));
+        } else if skull_fmt::format_code(&got) != got {
+            failures.push(format!("{id}: output is not a fixed point:\n{got}"));
         }
-        let list: Vec<String> = unexpected
-            .iter()
-            .map(|(f, n, ..)| format!("{f} :: {n}"))
-            .collect();
-        panic!(
-            "{} corpus case(s) formatted differently than expected:\n{}",
-            unexpected.len(),
-            list.join("\n")
-        );
     }
-
     assert!(
-        stale.is_empty(),
-        "KNOWN_FAILING entries now pass -- remove them:\n{}",
-        stale
-            .iter()
-            .map(|(f, n)| format!("{f} :: {n}"))
-            .collect::<Vec<_>>()
-            .join("\n")
+        failures.is_empty(),
+        "{} of {} corpus case(s) failed:\n{}",
+        failures.len(),
+        cases.len(),
+        failures.join("\n\n")
     );
-
-    assert!(pass > 0, "no corpus cases passed (corpus silently empty?)");
 }

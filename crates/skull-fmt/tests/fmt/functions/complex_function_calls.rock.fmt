@@ -2,7 +2,9 @@
 //! Tags: function-calls, complex, multiline
 
 //=== TEST CASE: fn_calls_nowrap ===
-let steps = max(1, float_to_int(ceil(movement.length() / (radius * 0.5))))
+fn test() {
+    let steps = max(1, float_to_int(ceil(movement.length() / (radius * 0.5))))
+}
 
 //=== NO CHANGE ===
 

@@ -3,14 +3,14 @@
 
 //=== TEST CASE:break_fmt ===
 
-{
+fn test() {
     loop {
         if x > max_x { break }
     }
 }
 
 //=== EXPECTED ===
-{
+fn test() {
     loop {
         if x > max_x { break }
     }

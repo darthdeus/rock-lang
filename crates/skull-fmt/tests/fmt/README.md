@@ -21,5 +21,5 @@ fn example() { return 42 }
 Run the corpus from the repository root:
 
 ```sh
-cargo test -p skull-fmt --test skull_fmt_tests corpus_report -- --nocapture
+cargo test -p skull-fmt --test skull_fmt_tests corpus
 ```

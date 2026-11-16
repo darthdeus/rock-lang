@@ -138,19 +138,13 @@ fn repository_sources_keep_every_comment() {
 
 #[test]
 fn formatter_corpus_keeps_every_comment() {
-    let mut files = Vec::new();
-    crate::corpus::collect_fmt_files(&crate::corpus::corpus_dir(), &mut files);
-    files.sort();
     let mut failures = Vec::new();
-    for file in &files {
-        let text = fs::read_to_string(file).expect("read a corpus file");
-        for case in crate::corpus::parse_cases(&file.display().to_string(), &text) {
-            let Some(formatted) = format_any_dialect(&case.input) else {
-                continue;
-            };
-            if let Some(diff) = comment_diff(&case.input, &formatted) {
-                failures.push(format!("{} :: {}: {diff}", case.file, case.name));
-            }
+    for case in crate::corpus::cases() {
+        let Some(formatted) = format_any_dialect(&case.input) else {
+            continue;
+        };
+        if let Some(diff) = comment_diff(&case.input, &formatted) {
+            failures.push(format!("{} :: {}: {diff}", case.file, case.name));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
