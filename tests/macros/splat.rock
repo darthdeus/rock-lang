@@ -29,6 +29,14 @@ fn test_splat_in_nested_blocks() {
     assert(sp_sum(1, 2, 3, 4) == 10, "1 + 2 + 3 + 4")
 }
 
+// A forwarded arg is the caller's expression: the macro's own `x` param must
+// not be substituted into a caller variable that happens to be named `x`.
+@test
+fn test_splatted_args_are_not_substituted() {
+    let x = 10
+    assert(sp_sum(1, x) == 11, "1 + caller's x")
+}
+
 macro sp_in_lambda(rest: ...expr) -> int {
     let f = () => sp_count(...rest)
     f()

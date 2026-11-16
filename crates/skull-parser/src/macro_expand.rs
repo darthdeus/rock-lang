@@ -9,13 +9,15 @@
 //! live in their defining module's arena, so inlining a body into a caller is a
 //! cross-arena graft (`graft.rs`). Macro defs are dropped after expansion.
 //!
-//! Expansion grafts the body, freshens its binders (hygiene), retags its spans
-//! to the call site, splats `...rest` args and substitutes params. Item macros
-//! splice their substituted items at top level.
+//! Expansion grafts the body in one copy that freshens its binders (hygiene),
+//! stamps the call site's span, splats `...rest` args and substitutes params.
+//! Item macros splice their substituted items at top level.
 
 use crate::ast::*;
 use crate::desugar::{BlockEdges, ExprEdges, child_blocks, child_exprs};
-use crate::graft::{clone_expr, graft_block, graft_expr, graft_item, graft_type};
+use crate::graft::{
+    Rewrite, graft_block, graft_block_with, graft_expr, graft_item, graft_items_with, graft_type,
+};
 use rock_core::{CompilerError, Span};
 use smallvec::smallvec;
 use ustr::{Ustr, UstrMap, UstrSet};
@@ -134,7 +136,7 @@ pub fn macro_reach(ast: &Ast) -> impl Iterator<Item = Ustr> + '_ {
 }
 
 /// Whether `name` is one expansion gives a renamed body local
-/// ([`fresh_local`]).
+/// ([`Instantiation`]).
 pub fn is_hygiene_name(name: &str) -> bool {
     name.starts_with(HYGIENE_PREFIX)
 }
@@ -535,12 +537,12 @@ fn expand_item_macro(
         }
     }
 
-    // Graft the template items into the caller, then substitute.
-    let mut items: Vec<Item> = (0..cands[idx].items.len())
-        .map(|k| graft_item(&cands[idx].tmpl, ast, &cands[idx].items[k]))
-        .collect();
+    // Graft the template items into the caller, substituting `expr` and
+    // `ident` args into expressions on the way, then `ty`/`ident` args.
+    let tmpl = &cands[idx];
+    let mut items = graft_items_with(&tmpl.tmpl, ast, &tmpl.items, Fragments(expr_subs));
     for it in &mut items {
-        subst_in_item(ast, it, &ty_subs, &expr_subs);
+        subst_in_item(ast, it, &ty_subs);
     }
     // Macro-generated module headers, `mod` declarations, and `use`
     // declarations are rejected: file/module/import selection is
@@ -604,8 +606,7 @@ fn is_shadowed(stack: &[ShadowScope], name: Ustr) -> bool {
     stack.iter().any(|s| s.contains(&name))
 }
 
-/// Collect the names a `let`/`for` target binds (shadow-side twin of
-/// `rename_binding`).
+/// Collect the names a `let`/`for` target binds.
 fn shadow_binding(b: &Binding, scope: &mut ShadowScope) {
     match b {
         Binding::Ident(id) => {
@@ -622,8 +623,7 @@ fn shadow_binding(b: &Binding, scope: &mut ShadowScope) {
     }
 }
 
-/// Collect the names a match/if-let/while-let pattern binds (shadow-side twin
-/// of `rename_pattern`).
+/// Collect the names a match/if-let/while-let pattern binds.
 fn shadow_pattern(p: &Pattern, scope: &mut ShadowScope) {
     match p {
         Pattern::Wildcard | Pattern::Literal(_) | Pattern::Range { .. } => {}
@@ -752,8 +752,8 @@ fn expand_stmt(
 
 /// Post-order (bone parity): expand inner calls before the enclosing one, so a
 /// macro argument that is itself a macro call is expanded first.
-/// Binding-introducing exprs mirror `rename_expr`: the pattern/params scope only
-/// the body, with the scrutinee/value walked in the outer scope.
+/// A pattern or param list scopes only the body; the scrutinee/value is walked
+/// in the outer scope.
 fn expand_expr(
     ast: &mut Ast,
     e: Idx<ExprData>,
@@ -961,29 +961,6 @@ fn try_expand(
         return;
     }
 
-    // Graft the template body into the caller arena.
-    let body = graft_block(&tmpl.tmpl, ast, tmpl.body);
-
-    // Hygiene: rename body-local bindings to fresh names BEFORE param
-    // substitution, so a body-local can't capture a substituted arg that shares
-    // its surface name (rock's `rename_body_locals_for_macro`). The call-site
-    // arena index is the per-expansion id; the `__inline_local_*` names collapse
-    // back to the original under the cook oracle's hygiene normalization.
-    {
-        let callsite = e.into_raw().into_u32();
-        let mut counter = 0u32;
-        let mut stack: Vec<RenameScope> = Vec::new();
-        rename_block(ast, body, callsite, &mut counter, &mut stack);
-    }
-
-    // Span retag: stamp the macro invocation's span on every expanded body
-    // node BEFORE substitution, so `__SITE__` resolves to the caller's source
-    // position (not the macro body's) and body-originated type errors report at
-    // the call site. Args, substituted in below, keep their own caller spans.
-    // Nested macros propagate the outermost caller's span (the inner call was
-    // itself retagged before it expands).
-    retag_block(ast, body, ast.exprs[e].span);
-
     // Bind params: a regular param takes the arg that names it or the next
     // positional one (or its default); a variadic param captures all trailing
     // args, spliced wherever the body forwards `...rest`.
@@ -994,27 +971,31 @@ fn try_expand(
     let Ok(bound) = bind_macro_args(&tmpl.params, &arg_values) else {
         return;
     };
-    let mut subs: UstrMap<Idx<ExprData>> = UstrMap::default();
-    let mut variadic: UstrMap<Vec<Idx<ExprData>>> = UstrMap::default();
+    let mut inst = Instantiation {
+        callsite: e.into_raw().into_u32(),
+        counter: 0,
+        call_span: ast.exprs[e].span,
+        scopes: Vec::new(),
+        subs: UstrMap::default(),
+        variadic: UstrMap::default(),
+    };
     for (i, p) in tmpl.params.iter().enumerate() {
         if p.is_variadic {
             let rest = bound.variadic.as_ref().filter(|(vi, _)| *vi == i);
-            variadic.insert(p.name, rest.map(|(_, v)| v.clone()).unwrap_or_default());
+            let rest = rest.map(|(_, v)| v.clone()).unwrap_or_default();
+            inst.variadic.insert(p.name, rest);
         } else if let Some(a) = bound.slots[i] {
-            subs.insert(p.name, a);
+            inst.subs.insert(p.name, a);
         } else if let Some(d) = p.default {
             let g = graft_expr(&tmpl.tmpl, ast, d);
-            subs.insert(p.name, g);
+            inst.subs.insert(p.name, g);
         }
     }
 
-    // Splat BEFORE substitution: `...rest` forwards expand to the captured args
-    // (e.g. `sum_of(...rest)` -> `sum_of(2, 3, 4)`), which the recursive expand
-    // below then re-dispatches on the reduced arity until the base case.
-    if !variadic.is_empty() {
-        splat_expand_block(ast, body, &variadic);
-    }
-    substitute_block(ast, body, &subs);
+    // Copy the body into the caller arena, rewriting it on the way
+    // (`Instantiation`). Args and defaults are already in the caller arena and
+    // are only ever copied plainly, so they keep their own names and spans.
+    let body = graft_block_with(&tmpl.tmpl, ast, tmpl.body, inst);
     // Expand macros that appear inside the spliced body (macros calling macros).
     expand_block(ast, body, reg, depth + 1, stack);
 
@@ -1184,12 +1165,7 @@ fn subst_in_type(ast: &mut Ast, t: Idx<TypeExprData>, ty_subs: &UstrMap<Idx<Type
 
 /// Substitute fragments into a spliced item: `ident` into names, `ty` into type
 /// positions, `expr` into the body. Covers fn / struct / newtype / enum.
-fn subst_in_item(
-    ast: &mut Ast,
-    item: &mut Item,
-    ty_subs: &UstrMap<Idx<TypeExprData>>,
-    expr_subs: &UstrMap<Idx<ExprData>>,
-) {
+fn subst_in_item(ast: &mut Ast, item: &mut Item, ty_subs: &UstrMap<Idx<TypeExprData>>) {
     match &mut item.kind {
         ItemKind::Function(f) => {
             replace_ident_name(ast, &mut f.name, ty_subs);
@@ -1199,7 +1175,6 @@ fn subst_in_item(
                 replace_ident_name(ast, &mut p.name, ty_subs);
                 subst_in_type(ast, p.ty, ty_subs);
                 if let Some(d) = p.default {
-                    substitute_expr(ast, d, expr_subs);
                     subst_in_type_exprs(ast, d, ty_subs);
                 }
             }
@@ -1209,7 +1184,6 @@ fn subst_in_item(
                     subst_in_type(ast, rt, ty_subs);
                 }
                 if let Some(body) = f.body.rock_block() {
-                    substitute_block(ast, body, expr_subs);
                     subst_in_type_exprs_block(ast, body, ty_subs);
                 }
             }
@@ -1221,7 +1195,6 @@ fn subst_in_item(
                 replace_ident_name(ast, &mut fl.name, ty_subs);
                 subst_in_type(ast, fl.ty, ty_subs);
                 if let Some(d) = fl.default {
-                    substitute_expr(ast, d, expr_subs);
                     subst_in_type_exprs(ast, d, ty_subs);
                 }
             }
@@ -1324,6 +1297,16 @@ fn subst_in_type_exprs(ast: &mut Ast, e: Idx<ExprData>, ty_subs: &UstrMap<Idx<Ty
                 subst_in_type_exprs_block(ast, bl, ty_subs);
             }
         }
+    }
+}
+
+/// An item macro's `expr`/`ident` args, substituted where the spliced items
+/// reference their params.
+struct Fragments(UstrMap<Idx<ExprData>>);
+
+impl Rewrite for Fragments {
+    fn arg(&self, name: Ustr) -> Option<Idx<ExprData>> {
+        self.0.get(&name).copied()
     }
 }
 
@@ -1450,480 +1433,102 @@ fn select_overload(cands: &[MacroTemplate], argc: usize) -> Option<&MacroTemplat
     exact.or(variadic)
 }
 
-/// Replace every `...rest` call argument (a splat of a captured variadic param)
-/// with the captured args, in place, across the body.
-fn splat_expand_block(ast: &mut Ast, b: Idx<BlockData>, variadic: &UstrMap<Vec<Idx<ExprData>>>) {
-    for call in collect_calls(ast, b) {
-        let ExprKind::FunctionCall { args, .. } = &ast.exprs[call].kind else {
-            continue;
-        };
-        if !args.iter().any(|a| a.is_splat) {
-            continue;
-        }
-        let old = args.clone();
-        let mut new_args: Vec<FunctionCallArg> = Vec::with_capacity(old.len());
-        for a in old {
-            let captured = if a.is_splat {
-                match &ast.exprs[a.value].kind {
-                    ExprKind::Ident(id) => variadic.get(&id.name).cloned(),
-                    _ => None,
-                }
-            } else {
-                None
-            };
-            match captured {
-                Some(items) => {
-                    for c in items {
-                        let v = clone_expr(ast, c);
-                        new_args.push(FunctionCallArg {
-                            name: None,
-                            value: v,
-                            is_splat: false,
-                            is_spread: false,
-                        });
-                    }
-                }
-                None => new_args.push(a),
-            }
-        }
-        if let ExprKind::FunctionCall { args, .. } = &mut ast.exprs[call].kind {
-            *args = new_args;
-        }
-    }
-}
-
-/// Every `FunctionCall` expr reachable from a block (for splat expansion).
-fn collect_calls(ast: &Ast, b: Idx<BlockData>) -> Vec<Idx<ExprData>> {
-    let mut out = Vec::new();
-    let stmts = ast.blocks[b].statements.clone();
-    for s in stmts {
-        for e in stmt_exprs(ast, s) {
-            collect_calls_expr(ast, e, &mut out);
-        }
-        for bl in stmt_blocks(ast, s) {
-            out.extend(collect_calls(ast, bl));
-        }
-    }
-    out
-}
-
-fn collect_calls_expr(ast: &Ast, e: Idx<ExprData>, out: &mut Vec<Idx<ExprData>>) {
-    if matches!(ast.exprs[e].kind, ExprKind::FunctionCall { .. }) {
-        out.push(e);
-    }
-    for c in child_exprs(ast, e) {
-        collect_calls_expr(ast, c, out);
-    }
-    for bl in child_blocks(ast, e) {
-        out.extend(collect_calls(ast, bl));
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Param substitution: replace each `Ident(param)` use with a fresh deep copy of
-// the bound argument. A lambda param that shadows a macro param stops the
-// substitution under that lambda (bone parity).
-// ---------------------------------------------------------------------------
-
-fn substitute_block(ast: &mut Ast, b: Idx<BlockData>, subs: &UstrMap<Idx<ExprData>>) {
-    let stmts = ast.blocks[b].statements.clone();
-    for s in stmts {
-        for e in stmt_exprs(ast, s) {
-            substitute_expr(ast, e, subs);
-        }
-        for bl in stmt_blocks(ast, s) {
-            substitute_block(ast, bl, subs);
-        }
-    }
-}
-
-fn substitute_expr(ast: &mut Ast, e: Idx<ExprData>, subs: &UstrMap<Idx<ExprData>>) {
-    // Replace this node if it is a bare param ident.
-    if let ExprKind::Ident(id) = &ast.exprs[e].kind {
-        if let Some(&arg) = subs.get(&id.name) {
-            let copy = clone_expr(ast, arg);
-            ast.exprs[e] = ast.exprs[copy].clone();
-            return;
-        }
-    }
-    // An `ident` fragment in constructor position: `Name { .. }` / `Name::V`.
-    // The bound arg is an `Ident` expr; lift its name into the ctor.
-    let ctor_name = match &ast.exprs[e].kind {
-        ExprKind::StructLiteral { name, .. } => Some(name.name),
-        ExprKind::EnumVariantRecord { enum_name, .. } => Some(enum_name.name),
-        ExprKind::QualifiedIdent { base, .. } => Some(base.name),
-        _ => None,
-    };
-    if let Some(cn) = ctor_name {
-        if let Some(&arg) = subs.get(&cn) {
-            if let ExprKind::Ident(id) = ast.exprs[arg].kind.clone() {
-                match &mut ast.exprs[e].kind {
-                    ExprKind::StructLiteral { name, .. } => *name = id,
-                    ExprKind::EnumVariantRecord { enum_name, .. } => *enum_name = id,
-                    ExprKind::QualifiedIdent { base, .. } => *base = id,
-                    _ => {}
-                }
-            }
-        }
-    }
-    for child in child_exprs(ast, e) {
-        substitute_expr(ast, child, subs);
-    }
-    for blk in child_blocks(ast, e) {
-        substitute_block(ast, blk, subs);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Body-local hygiene rename (rock's `rename_body_locals_for_macro`)
+// Instantiation: the rewrite a macro body gets as it is copied to a call site
 //
-// Before param substitution, every binding the macro body introduces is renamed
-// to a fresh `__inline_local_<callsite>_<n>_<orig>` so a body-local can never
-// capture a substituted `expr` arg that shares its surface name. Scope-aware:
-// inner shadows freshen independently; references resolve to the nearest
-// enclosing rename. `^name` (AnaphoricIdent) escapes hygiene — it is an explicit
-// caller-scope reference and must keep its surface name.
+// Hygiene (rock's `rename_body_locals_for_macro`): every binder the body
+// introduces is renamed to a fresh `__inline_local_<callsite>_<n>_<orig>`, and
+// references resolve to the nearest enclosing rename, so a body local never
+// captures a substituted arg that shares its surface name. A reference that
+// resolves to a body local is therefore never a param, nor a `...rest` splat.
+// `^name` (AnaphoricIdent) is an explicit caller-scope reference and keeps its
+// name.
+//
+// Span stamp: every body node gets the call's span, so `__SITE__` resolves to
+// the caller's position and body-originated errors report at the call. Nested
+// macro calls in the body carry it on, so the outermost call's span wins.
 // ---------------------------------------------------------------------------
 
-type RenameScope = UstrMap<Ustr>;
-
-fn fresh_local(orig: Ustr, callsite: u32, counter: &mut u32) -> Ustr {
-    let n = *counter;
-    *counter += 1;
-    Ustr::from(&format!("{HYGIENE_PREFIX}{}_{}_{}", callsite, n, orig))
-}
-
-fn lookup_rename(stack: &[RenameScope], name: Ustr) -> Option<Ustr> {
-    stack.iter().rev().find_map(|s| s.get(&name).copied())
-}
-
-/// Rename the bindings introduced by a `let`/`for` target into `scope`.
-fn rename_binding(b: &mut Binding, callsite: u32, counter: &mut u32, scope: &mut RenameScope) {
-    match b {
-        Binding::Ident(id) => {
-            let fresh = fresh_local(id.name, callsite, counter);
-            scope.insert(id.name, fresh);
-            id.name = fresh;
-        }
-        Binding::Tuple(bs) => {
-            for b in bs.iter_mut() {
-                rename_binding(b, callsite, counter, scope);
-            }
-        }
-        Binding::Newtype { binding, .. } => {
-            let fresh = fresh_local(binding.name, callsite, counter);
-            scope.insert(binding.name, fresh);
-            binding.name = fresh;
-        }
-    }
-}
-
-/// Rename the bindings introduced by a match/if-let/while-let pattern into
-/// `scope`. Literal/range sub-exprs bind nothing (rock parity — they are not
-/// walked here).
-fn rename_pattern(p: &mut Pattern, callsite: u32, counter: &mut u32, scope: &mut RenameScope) {
-    match p {
-        Pattern::Wildcard | Pattern::Literal(_) | Pattern::Range { .. } => {}
-        Pattern::Ident(id) => {
-            let fresh = fresh_local(id.name, callsite, counter);
-            scope.insert(id.name, fresh);
-            id.name = fresh;
-        }
-        Pattern::Tuple(ps) | Pattern::Or(ps) => {
-            for p in ps.iter_mut() {
-                rename_pattern(p, callsite, counter, scope);
-            }
-        }
-        Pattern::EnumVariant { args, .. } => {
-            if let Some(ps) = args {
-                for p in ps.iter_mut() {
-                    rename_pattern(p, callsite, counter, scope);
-                }
-            }
-        }
-        Pattern::Record { fields, .. } => {
-            for (_, sub) in fields.iter_mut() {
-                rename_pattern(sub, callsite, counter, scope);
-            }
-        }
-        Pattern::PathVariant { args, .. } => {
-            if let Some(ps) = args {
-                for p in ps.iter_mut() {
-                    rename_pattern(p, callsite, counter, scope);
-                }
-            }
-        }
-        Pattern::PathRecord { fields, .. } => {
-            for (_, sub) in fields.iter_mut() {
-                rename_pattern(sub, callsite, counter, scope);
-            }
-        }
-    }
-}
-
-fn rename_block(
-    ast: &mut Ast,
-    b: Idx<BlockData>,
+struct Instantiation {
+    /// The call's arena index: the per-expansion part of fresh names.
     callsite: u32,
-    counter: &mut u32,
-    stack: &mut Vec<RenameScope>,
-) {
-    // Each block is its own scope: its `let` bindings unbind at block exit.
-    stack.push(RenameScope::default());
-    let stmts = ast.blocks[b].statements.clone();
-    for s in stmts {
-        rename_stmt(ast, s, callsite, counter, stack);
-    }
-    stack.pop();
+    counter: u32,
+    call_span: Span,
+    scopes: Vec<UstrMap<Ustr>>,
+    subs: UstrMap<Idx<ExprData>>,
+    variadic: UstrMap<Vec<Idx<ExprData>>>,
 }
 
-fn rename_stmt(
-    ast: &mut Ast,
-    s: Idx<StatementData>,
-    callsite: u32,
-    counter: &mut u32,
-    stack: &mut Vec<RenameScope>,
-) {
-    match &ast.stmts[s].kind {
-        StatementKind::Let(l) => {
-            // RHS sees the outer scope; the binding freshens for the rest of the
-            // current block (the top scope frame).
-            let value = l.value;
-            if let Some(v) = value {
-                rename_expr(ast, v, callsite, counter, stack);
-            }
-            let top = stack.last_mut().expect("rename_stmt: block scope present");
-            if let StatementKind::Let(l) = &mut ast.stmts[s].kind {
-                rename_binding(&mut l.binding, callsite, counter, top);
-            }
-        }
-        StatementKind::Static(st) => {
-            let value = st.value;
-            rename_expr(ast, value, callsite, counter, stack);
-            let top = stack.last_mut().expect("rename_stmt: block scope present");
-            if let StatementKind::Static(st) = &mut ast.stmts[s].kind {
-                let fresh = fresh_local(st.name.name, callsite, counter);
-                top.insert(st.name.name, fresh);
-                st.name.name = fresh;
-            }
-        }
-        StatementKind::For(f) => {
-            let iter = f.iter;
-            let body = f.body;
-            rename_expr(ast, iter, callsite, counter, stack);
-            let mut scope = RenameScope::default();
-            if let StatementKind::For(f) = &mut ast.stmts[s].kind {
-                rename_binding(&mut f.var, callsite, counter, &mut scope);
-            }
-            stack.push(scope);
-            rename_block(ast, body, callsite, counter, stack);
-            stack.pop();
-        }
-        StatementKind::WhileLet(w) => {
-            let value = w.value;
-            let body = w.body;
-            rename_expr(ast, value, callsite, counter, stack);
-            let mut scope = RenameScope::default();
-            if let StatementKind::WhileLet(w) = &mut ast.stmts[s].kind {
-                rename_pattern(&mut w.pattern, callsite, counter, &mut scope);
-            }
-            stack.push(scope);
-            rename_block(ast, body, callsite, counter, stack);
-            stack.pop();
-        }
-        _ => {
-            for e in stmt_exprs(ast, s) {
-                rename_expr(ast, e, callsite, counter, stack);
-            }
-            for bl in stmt_blocks(ast, s) {
-                rename_block(ast, bl, callsite, counter, stack);
-            }
-        }
+impl Instantiation {
+    fn renamed(&self, name: Ustr) -> Option<Ustr> {
+        self.scopes.iter().rev().find_map(|s| s.get(&name).copied())
     }
 }
 
-fn rename_expr(
-    ast: &mut Ast,
-    e: Idx<ExprData>,
-    callsite: u32,
-    counter: &mut u32,
-    stack: &mut Vec<RenameScope>,
-) {
-    // Leaves: rename an in-scope reference; `^name` escapes hygiene untouched.
-    match &mut ast.exprs[e].kind {
-        ExprKind::Ident(id) => {
-            if let Some(fresh) = lookup_rename(stack, id.name) {
-                id.name = fresh;
-            }
-            return;
-        }
-        ExprKind::AnaphoricIdent(_) => return,
-        _ => {}
+impl Rewrite for Instantiation {
+    fn stamp(&self) -> Option<Span> {
+        Some(self.call_span)
     }
 
-    // Binding-introducing exprs: the pattern/binding scopes only the body, with
-    // the scrutinee/value evaluated in the outer scope. Handled explicitly so
-    // the generic child walk below never re-visits them.
-    match &ast.exprs[e].kind {
-        ExprKind::IfLet { .. } => {
-            let (value, then_b, else_b) = match &ast.exprs[e].kind {
-                ExprKind::IfLet {
-                    value,
-                    then_block,
-                    else_block,
-                    ..
-                } => (*value, *then_block, *else_block),
-                _ => unreachable!(),
-            };
-            rename_expr(ast, value, callsite, counter, stack);
-            let mut scope = RenameScope::default();
-            if let ExprKind::IfLet { pattern, .. } = &mut ast.exprs[e].kind {
-                rename_pattern(pattern, callsite, counter, &mut scope);
-            }
-            stack.push(scope);
-            rename_block(ast, then_b, callsite, counter, stack);
-            stack.pop();
-            if let Some(eb) = else_b {
-                rename_block(ast, eb, callsite, counter, stack);
-            }
-            return;
-        }
-        ExprKind::IfLetChain { .. } => {
-            let (n_clauses, then_b, else_b) = match &ast.exprs[e].kind {
-                ExprKind::IfLetChain {
-                    clauses,
-                    then_block,
-                    else_block,
-                } => (clauses.len(), *then_block, *else_block),
-                _ => unreachable!(),
-            };
-            // Bindings accumulate left-to-right: a later clause's value sees the
-            // earlier clauses' renames.
-            stack.push(RenameScope::default());
-            for i in 0..n_clauses {
-                let value = match &ast.exprs[e].kind {
-                    ExprKind::IfLetChain { clauses, .. } => match &clauses[i] {
-                        IfLetClause::Binding { value, .. } => Some(*value),
-                        IfLetClause::Condition(c) => Some(*c),
-                    },
-                    _ => unreachable!(),
-                };
-                if let Some(v) = value {
-                    rename_expr(ast, v, callsite, counter, stack);
-                }
-                let top = stack.last_mut().expect("rename_stmt: chain scope present");
-                if let ExprKind::IfLetChain { clauses, .. } = &mut ast.exprs[e].kind {
-                    if let IfLetClause::Binding { pattern, .. } = &mut clauses[i] {
-                        rename_pattern(pattern, callsite, counter, top);
-                    }
-                }
-            }
-            rename_block(ast, then_b, callsite, counter, stack);
-            stack.pop();
-            if let Some(eb) = else_b {
-                rename_block(ast, eb, callsite, counter, stack);
-            }
-            return;
-        }
-        ExprKind::Match { .. } => {
-            let (scrutinee, n_arms) = match &ast.exprs[e].kind {
-                ExprKind::Match { scrutinee, arms } => (*scrutinee, arms.len()),
-                _ => unreachable!(),
-            };
-            rename_expr(ast, scrutinee, callsite, counter, stack);
-            for i in 0..n_arms {
-                let (guard, body) = match &ast.exprs[e].kind {
-                    ExprKind::Match { arms, .. } => (arms[i].guard, arms[i].body),
-                    _ => unreachable!(),
-                };
-                let mut scope = RenameScope::default();
-                if let ExprKind::Match { arms, .. } = &mut ast.exprs[e].kind {
-                    rename_pattern(&mut arms[i].pattern, callsite, counter, &mut scope);
-                }
-                stack.push(scope);
-                if let Some(g) = guard {
-                    rename_expr(ast, g, callsite, counter, stack);
-                }
-                rename_block(ast, body, callsite, counter, stack);
-                stack.pop();
-            }
-            return;
-        }
-        ExprKind::Lambda { .. } => {
-            let mut scope = RenameScope::default();
-            let ExprKind::Lambda { params, body, .. } = &mut ast.exprs[e].kind else {
-                unreachable!()
-            };
-            for p in params.iter_mut() {
-                let fresh = fresh_local(p.name.name, callsite, counter);
-                scope.insert(p.name.name, fresh);
-                p.name.name = fresh;
-            }
-            let body = *body;
-            stack.push(scope);
-            rename_block(ast, body, callsite, counter, stack);
-            stack.pop();
-            return;
-        }
-        ExprKind::SafeNavigationLet { .. } => {
-            let (receiver, body) = match &ast.exprs[e].kind {
-                ExprKind::SafeNavigationLet { receiver, body, .. } => (*receiver, *body),
-                _ => unreachable!(),
-            };
-            rename_expr(ast, receiver, callsite, counter, stack);
-            let mut scope = RenameScope::default();
-            if let ExprKind::SafeNavigationLet { binding, .. } = &mut ast.exprs[e].kind {
-                let fresh = fresh_local(binding.name, callsite, counter);
-                scope.insert(binding.name, fresh);
-                binding.name = fresh;
-            }
-            stack.push(scope);
-            rename_block(ast, body, callsite, counter, stack);
-            stack.pop();
-            return;
-        }
-        _ => {}
+    fn enter(&mut self) {
+        self.scopes.push(UstrMap::default());
     }
 
-    // Plain exprs: recurse over direct children. Child blocks (If branches,
-    // `Block`, lambda body) each open their own scope via `rename_block`.
-    for child in child_exprs(ast, e) {
-        rename_expr(ast, child, callsite, counter, stack);
+    fn exit(&mut self) {
+        self.scopes.pop();
     }
-    for blk in child_blocks(ast, e) {
-        rename_block(ast, blk, callsite, counter, stack);
+
+    fn bind(&mut self, name: &mut Ustr) {
+        let fresh = Ustr::from(&format!(
+            "{HYGIENE_PREFIX}{}_{}_{}",
+            self.callsite, self.counter, name
+        ));
+        self.counter += 1;
+        let scope = self.scopes.last_mut().expect("binder outside a scope");
+        scope.insert(*name, fresh);
+        *name = fresh;
     }
-}
 
-// ---------------------------------------------------------------------------
-// Span retag for macro expansion (rock's `retag_block_spans_for_macro`)
-// ---------------------------------------------------------------------------
-
-fn retag_block(ast: &mut Ast, b: Idx<BlockData>, call_span: Span) {
-    ast.blocks[b].span = call_span;
-    // The braces of the macro TEMPLATE's blocks don't exist at the call site;
-    // a retagged block is effectively synthetic, so it gets no brace spans
-    // (real spans here would plant brace markers at template offsets).
-    ast.blocks[b].braces = None;
-    let stmts = ast.blocks[b].statements.clone();
-    for s in stmts {
-        ast.stmts[s].span = call_span;
-        for e in stmt_exprs(ast, s) {
-            retag_expr(ast, e, call_span);
-        }
-        for bl in stmt_blocks(ast, s) {
-            retag_block(ast, bl, call_span);
+    fn bind_binding(&mut self, b: &mut Binding) {
+        match b {
+            Binding::Ident(id) | Binding::Newtype { binding: id, .. } => self.bind(&mut id.name),
+            Binding::Tuple(bs) => bs.iter_mut().for_each(|b| self.bind_binding(b)),
         }
     }
-}
 
-fn retag_expr(ast: &mut Ast, e: Idx<ExprData>, call_span: Span) {
-    ast.exprs[e].span = call_span;
-    for c in child_exprs(ast, e) {
-        retag_expr(ast, c, call_span);
+    fn bind_pattern(&mut self, p: &mut Pattern) {
+        match p {
+            Pattern::Wildcard | Pattern::Literal(_) | Pattern::Range { .. } => {}
+            Pattern::Ident(id) => self.bind(&mut id.name),
+            Pattern::Tuple(ps)
+            | Pattern::Or(ps)
+            | Pattern::EnumVariant { args: Some(ps), .. }
+            | Pattern::PathVariant { args: Some(ps), .. } => {
+                ps.iter_mut().for_each(|p| self.bind_pattern(p))
+            }
+            Pattern::EnumVariant { args: None, .. } | Pattern::PathVariant { args: None, .. } => {}
+            Pattern::Record { fields, .. } | Pattern::PathRecord { fields, .. } => {
+                fields.iter_mut().for_each(|(_, p)| self.bind_pattern(p))
+            }
+        }
     }
-    for bl in child_blocks(ast, e) {
-        retag_block(ast, bl, call_span);
+
+    fn resolve(&self, name: Ustr) -> Ustr {
+        self.renamed(name).unwrap_or(name)
+    }
+
+    fn arg(&self, name: Ustr) -> Option<Idx<ExprData>> {
+        match self.renamed(name) {
+            Some(_) => None,
+            None => self.subs.get(&name).copied(),
+        }
+    }
+
+    fn splat(&self, name: Ustr) -> Option<&[Idx<ExprData>]> {
+        match self.renamed(name) {
+            Some(_) => None,
+            None => self.variadic.get(&name).map(Vec::as_slice),
+        }
     }
 }
 
@@ -1959,11 +1564,11 @@ fn stmt_blocks(ast: &Ast, s: Idx<StatementData>) -> BlockEdges {
 }
 
 // ---------------------------------------------------------------------------
-// Macro-parameter reference index (read-side twin of subst_in_item)
+// Macro-parameter reference index (read-side twin of substitution)
 // ---------------------------------------------------------------------------
 //
 // Substitution REWRITES param-name occurrences in a grafted clone at
-// invocation (and `retag_block` stamps the call-site span first); this COLLECTS
+// invocation (which also stamps the call-site span); this COLLECTS
 // them in the *definition*, with their source spans, at parse time -- the data
 // IDE references/rename for a macro parameter needs. The two walks visit the
 // same node shapes but one is `&mut Ast` (rewrite) and one is `&Ast` (read), so
