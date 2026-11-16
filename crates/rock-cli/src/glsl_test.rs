@@ -42,80 +42,70 @@ use skull_mir::mir::FuncRef;
 /// territory (24-bit mantissa). int/bool stay exact regardless.
 const GLSL_FLOAT_REL_TOL: f64 = 1e-6;
 
-const PROFILES: [(&str, GlslProfile); 1] = [("330core", GlslProfile::Core330)];
+/// The GL profile every test and shader validates against.
+const PROFILE_NAME: &str = "330core";
+const PROFILE: GlslProfile = GlslProfile::Core330;
 
-/// One profile's tallies over the whole run.
-pub struct GlslProfileSummary {
-    /// `"330core"`.
-    pub profile: &'static str,
-    pub passed: usize,
-    /// FAIL detail lines (a GL compile/link/render error, or a value mismatch).
-    pub failed: Vec<String>,
-    /// Tier-2 SKIP reasons (emission rejected), bucketed count-desc.
-    pub skip_reasons: Vec<(String, usize)>,
-    /// True once a GL context was created for this profile; false = no display
-    /// / driver -> explicitly skipped GPU verdicts.
-    pub gl_available: bool,
-}
-
-/// Whole-run tallies -- the testable core consumed by the ratchet test.
-pub struct GlslSuiteSummary {
-    pub files: usize,
-    /// Tier-1: `@test` fns with no `returns=` (outside the value class). One
-    /// collapsed number, never a histogram.
-    pub outside_value_class: usize,
+/// Whole-run tallies of `rock test --backend glsl`.
+struct GlslSuiteSummary {
+    files: usize,
+    /// `@test` fns with no `returns=` (outside the value class). One collapsed
+    /// number, never a histogram.
+    outside_value_class: usize,
     /// bone-rejected units (unexpected compile failure) / harness breaches.
-    pub unit_failures: usize,
-    pub per_profile: Vec<GlslProfileSummary>,
+    unit_failures: usize,
+    passed: usize,
+    /// FAIL detail lines (a GL compile/link/render error, or a value mismatch).
+    failed: Vec<String>,
+    /// SKIP reasons (emission rejected), bucketed count-desc.
+    skip_reasons: Vec<(String, usize)>,
+    /// False = no display / driver; GPU verdicts were explicitly skipped.
+    gl_available: bool,
 }
 
-/// `rock test --backend glsl` entry: run, print per-profile lines + the
+/// `rock test --backend glsl` entry: run, print per-unit lines + the
 /// end-of-run summary, exit non-zero on any FAIL or unit failure.
 pub(crate) fn glsl_test(paths: &[String], skip_gpu: bool) -> Result<()> {
     let start = Instant::now();
-    let summary = glsl_test_run(paths, true, skip_gpu)?;
+    let summary = glsl_test_run(paths, skip_gpu)?;
 
-    let total_failed: usize = summary.per_profile.iter().map(|p| p.failed.len()).sum();
     println!(
         "\nglsl backend: {} @tests outside the value class (no returns=), across {} files ({:.2}s)",
         summary.outside_value_class.to_string().yellow(),
         summary.files,
         start.elapsed().as_secs_f64(),
     );
-    for p in &summary.per_profile {
-        if !p.gl_available {
-            println!(
-                "  [{}] {} -- value verdicts SKIPPED (no GL context)",
-                p.profile.cyan(),
-                "no display / driver".yellow()
-            );
-            continue;
-        }
-        let total = p.passed + p.failed.len();
+    if !summary.gl_available {
+        println!(
+            "  [{}] {} -- value verdicts SKIPPED (no GL context)",
+            PROFILE_NAME.cyan(),
+            "no display / driver".yellow()
+        );
+    } else {
+        let total = summary.passed + summary.failed.len();
         println!(
             "  [{}] {}/{} value tests passed ({} failed)",
-            p.profile.cyan(),
-            p.passed.to_string().green(),
+            PROFILE_NAME.cyan(),
+            summary.passed.to_string().green(),
             total,
-            if p.failed.is_empty() {
-                p.failed.len().to_string().green()
+            if summary.failed.is_empty() {
+                summary.failed.len().to_string().green()
             } else {
-                p.failed.len().to_string().red()
+                summary.failed.len().to_string().red()
             },
         );
-        for detail in &p.failed {
+        for detail in &summary.failed {
             println!("    {} {}", "FAIL".red(), detail);
         }
-        if !p.skip_reasons.is_empty() {
+        if !summary.skip_reasons.is_empty() {
             println!(
                 "    {}",
                 format!(
-                    "=== [{}] skip reasons (glsl) -- the A1 fn-emission work list ===",
-                    p.profile
+                    "=== [{PROFILE_NAME}] skip reasons (glsl) -- the A1 fn-emission work list ==="
                 )
                 .bold()
             );
-            for (reason, count) in p.skip_reasons.iter().take(50) {
+            for (reason, count) in summary.skip_reasons.iter().take(50) {
                 println!("      {:>5}  {}", count.to_string().yellow(), reason);
             }
         }
@@ -126,149 +116,112 @@ pub(crate) fn glsl_test(paths: &[String], skip_gpu: bool) -> Result<()> {
             summary.unit_failures.to_string().red()
         );
     }
-    if total_failed > 0 || summary.unit_failures > 0 {
+    if !summary.failed.is_empty() || summary.unit_failures > 0 {
         crate::invocation_log::exit(1);
     }
     Ok(())
 }
 
-/// Run the suite; optionally print per-unit lines as they complete. Public for
-/// the ratchet test (`print = false`).
-pub fn glsl_test_run(paths: &[String], print: bool, skip_gpu: bool) -> Result<GlslSuiteSummary> {
+/// Run the suite, printing per-unit lines as they complete.
+fn glsl_test_run(paths: &[String], skip_gpu: bool) -> Result<GlslSuiteSummary> {
     let (files, package_dirs) = crate::skull_backend::collect_test_units(paths)?;
 
-    // A missing runner is a hard error (workspace artifact -- build it). Probe
-    // once per profile: exit 2 requires an explicit GPU opt-out; any other
-    // probe anomaly is a hard error.
+    // A missing runner is a hard error (workspace artifact -- build it). The
+    // probe's exit 2 (no GL context) requires an explicit GPU opt-out; any
+    // other probe anomaly is a hard error.
     let runner = locate_runner()?;
-    let mut gl_available: [bool; PROFILES.len()] = [false; PROFILES.len()];
-    for (i, (pname, _)) in PROFILES.iter().enumerate() {
-        gl_available[i] = probe_gl(&runner, pname, skip_gpu)?;
-    }
+    let gl_available = probe_gl(&runner, PROFILE_NAME, skip_gpu)?;
 
     let mut summary = GlslSuiteSummary {
         files: 0,
         outside_value_class: 0,
         unit_failures: 0,
-        per_profile: PROFILES
-            .iter()
-            .enumerate()
-            .map(|(i, (name, _))| GlslProfileSummary {
-                profile: name,
-                passed: 0,
-                failed: Vec::new(),
-                skip_reasons: Vec::new(),
-                gl_available: gl_available[i],
-            })
-            .collect(),
+        passed: 0,
+        failed: Vec::new(),
+        skip_reasons: Vec::new(),
+        gl_available,
     };
-    // Per-profile accumulated skip-reason strings (bucketed at the end).
-    let mut skip_reasons: [Vec<String>; PROFILES.len()] = [Vec::new()];
+    let mut skip_reasons: Vec<String> = Vec::new();
 
     let outcomes = crate::test_unit::build_units(&files, &package_dirs, |unit, is_package| {
-        build_unit(unit, is_package, &runner, &gl_available)
+        build_unit(unit, is_package, &runner, gl_available)
     });
 
     for (label, outcome) in outcomes {
         summary.files += 1;
         match outcome {
-            Ok(UnitOutcome::Ran {
+            Ok(Ok(UnitRun {
                 outside_value_class,
-                profiles,
-            }) => {
+                passed,
+                failed,
+                skips,
+            })) => {
                 summary.outside_value_class += outside_value_class;
-                for (i, pr) in profiles.into_iter().enumerate() {
-                    summary.per_profile[i].passed += pr.passed;
-                    let any = pr.passed + pr.failed.len() + pr.skips.len();
-                    summary.per_profile[i]
-                        .failed
-                        .extend(pr.failed.iter().map(|d| format!("{d} [{}]", PROFILES[i].0)));
-                    for (_, reason) in &pr.skips {
-                        skip_reasons[i].push(reason.clone());
-                    }
-                    if print && gl_available[i] && any > 0 {
-                        let status = if pr.failed.is_empty() {
-                            "ok".green()
-                        } else {
-                            "FAILED".red()
-                        };
-                        println!(
-                            "{:.<52} [{}] {}  ({} pass, {} fail, {} skip)",
-                            label,
-                            PROFILES[i].0.cyan(),
-                            status,
-                            pr.passed,
-                            pr.failed.len(),
-                            pr.skips.len(),
-                        );
-                    }
+                summary.passed += passed;
+                let any = passed + failed.len() + skips.len();
+                if gl_available && any > 0 {
+                    let status = if failed.is_empty() {
+                        "ok".green()
+                    } else {
+                        "FAILED".red()
+                    };
+                    println!(
+                        "{:.<52} [{}] {}  ({} pass, {} fail, {} skip)",
+                        label,
+                        PROFILE_NAME.cyan(),
+                        status,
+                        passed,
+                        failed.len(),
+                        skips.len(),
+                    );
                 }
+                summary
+                    .failed
+                    .extend(failed.iter().map(|d| format!("{d} [{PROFILE_NAME}]")));
+                skip_reasons.extend(skips.into_iter().map(|(_, reason)| reason));
             }
-            Ok(UnitOutcome::UnitFail { reason, rendered }) => {
+            Ok(Err(failure)) => {
                 summary.unit_failures += 1;
-                if print {
-                    println!("{:.<60} {}  {}", label, "FAILED".red(), reason.dimmed());
-                    if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                        println!("{rendered}");
-                    }
-                }
+                failure.print(&label);
             }
             Err(panic) => {
                 summary.unit_failures += 1;
-                let msg = crate::common::panic_message(&*panic);
-                if print {
-                    println!("{:.<60} {}  {}", label, "PANIC".red().bold(), msg.dimmed());
-                }
+                crate::test_unit::print_unit_panic(&label, &*panic);
             }
         }
     }
 
-    for (i, reasons) in skip_reasons.into_iter().enumerate() {
-        summary.per_profile[i].skip_reasons = reason_histogram(reasons.iter().map(|s| s.as_str()));
-    }
+    summary.skip_reasons = reason_histogram(skip_reasons.iter().map(|s| s.as_str()));
     Ok(summary)
 }
 
-/// One profile's per-unit results.
-struct ProfileRun {
+/// One unit's value-test results.
+#[derive(Default)]
+struct UnitRun {
+    outside_value_class: usize,
     passed: usize,
     failed: Vec<String>,
     /// (test name, reason) for value tests whose GLSL emission rejected.
     skips: Vec<(String, String)>,
 }
 
-enum UnitOutcome {
-    Ran {
-        outside_value_class: usize,
-        /// One entry per profile, in `PROFILES` order.
-        profiles: Vec<ProfileRun>,
-    },
-    UnitFail {
-        reason: String,
-        rendered: String,
-    },
-}
-
 /// One test unit (a file, or a package built as ONE workspace with its tests):
-/// emit + run its value tests under each profile.
+/// emit + run its value tests.
 fn build_unit(
     unit: &str,
     is_package: bool,
     runner: &std::path::Path,
-    gl_available: &[bool; PROFILES.len()],
-) -> UnitOutcome {
+    gl_available: bool,
+) -> std::result::Result<UnitRun, UnitFailure> {
     // Held through the tests: their shaders are emitted from the checked
     // workspace, which stays resident until the unit ends.
     let _slot = if is_package {
-        match crate::compile_slots::acquire(unit) {
-            Ok(slot) => Some(slot),
-            Err(error) => {
-                return UnitOutcome::UnitFail {
-                    reason: "no compile slot".to_string(),
-                    rendered: format!("{error:#}"),
-                };
-            }
-        }
+        Some(
+            crate::compile_slots::acquire(unit).map_err(|error| UnitFailure {
+                reason: "no compile slot".to_string(),
+                rendered: format!("{error:#}"),
+            })?,
+        )
     } else {
         None
     };
@@ -277,125 +230,84 @@ fn build_unit(
     } else {
         crate::test_unit::check_file(unit, false)
     };
-    match checked {
-        Ok(UnitCheck::Checked { ws, tests, .. }) => run_tests(&ws, &tests, runner, gl_available),
+    Ok(match checked? {
+        UnitCheck::Checked { ws, tests, .. } => run_tests(&ws, &tests, runner, gl_available),
         // Nothing to emit for a file whose rejection every test expected.
-        Ok(UnitCheck::ExpectedFailure(_)) => UnitOutcome::Ran {
-            outside_value_class: 0,
-            profiles: PROFILES
-                .iter()
-                .map(|_| ProfileRun {
-                    passed: 0,
-                    failed: Vec::new(),
-                    skips: Vec::new(),
-                })
-                .collect(),
-        },
-        Err(UnitFailure { reason, rendered }) => UnitOutcome::UnitFail { reason, rendered },
-    }
+        UnitCheck::ExpectedFailure(_) => UnitRun::default(),
+    })
 }
 
-/// Emit + GPU-run one unit's value tests under the desktop profile.
+/// Emit + GPU-run one unit's value tests.
 fn run_tests(
     ws: &bone_semantic::inference::Workspace,
     tests: &[(FuncRef, skull::SkullTest)],
     runner: &std::path::Path,
-    gl_available: &[bool; PROFILES.len()],
-) -> UnitOutcome {
-    let mut outside_value_class = 0usize;
-    // Value tests only (returns=). Non-value @tests are permanently outside the
-    // class -- one collapsed count, never a histogram. So are tests that
-    // `@test(backends = ...)` limits to other backends.
-    let value_tests: Vec<(FuncRef, &skull::SkullTest, &ValueExpect)> = tests
-        .iter()
-        .filter_map(|(fr, t)| match &t.returns {
-            Some(expect) if t.runs_on(bone_core::annotations::TestBackend::Glsl) => {
-                Some((*fr, t, expect))
+    gl_available: bool,
+) -> UnitRun {
+    let mut run = UnitRun::default();
+    // (name, expected, shaders) for the tests that emitted.
+    let mut runnable: Vec<(String, ValueExpect, ValueTestShaders)> = Vec::new();
+    for (fr, t) in tests {
+        // Value tests only (returns=). Non-value @tests are permanently outside
+        // the class -- one collapsed count, never a histogram. So are tests
+        // that `@test(backends = ...)` limits to other backends.
+        let Some(expect) = t
+            .returns
+            .as_ref()
+            .filter(|_| t.runs_on(bone_core::annotations::TestBackend::Glsl))
+        else {
+            run.outside_value_class += 1;
+            continue;
+        };
+        // An int expectation outside i32 can't survive the R32I readback
+        // (GLSL has no int64) -- a real SKIP, part of the work list.
+        if let ValueExpect::Int(i) = expect {
+            if *i < i32::MIN as i64 || *i > i32::MAX as i64 {
+                run.skips.push((
+                    t.name.clone(),
+                    "value test: returns literal exceeds i32 range (GLSL has no int64)".to_string(),
+                ));
+                continue;
             }
-            _ => {
-                outside_value_class += 1;
-                None
-            }
-        })
-        .collect();
+        }
+        match emit_value_test(ws, fr.module, &t.name, PROFILE) {
+            Ok(shaders) => runnable.push((t.name.clone(), *expect, shaders)),
+            Err(e) => run.skips.push((t.name.clone(), e.message.clone())),
+        }
+    }
 
-    let mut profiles: Vec<ProfileRun> = Vec::with_capacity(PROFILES.len());
-    for (pi, (pname, profile)) in PROFILES.iter().enumerate() {
-        let mut passed = 0usize;
-        let mut failed: Vec<String> = Vec::new();
-        let mut skips: Vec<(String, String)> = Vec::new();
-        // (name, expected, shaders) for the tests that emitted.
-        let mut runnable: Vec<(String, ValueExpect, ValueTestShaders)> = Vec::new();
-
-        for (fr, t, expect) in &value_tests {
-            // An int expectation outside i32 can't survive the R32I readback
-            // (GLSL has no int64) -- a real SKIP, part of the work list.
-            if let ValueExpect::Int(i) = expect {
-                if *i < i32::MIN as i64 || *i > i32::MAX as i64 {
-                    skips.push((
-                        t.name.clone(),
-                        "value test: returns literal exceeds i32 range (GLSL has no int64)"
-                            .to_string(),
+    // No GL context -> the runnable ones are neither pass nor fail.
+    if !gl_available || runnable.is_empty() {
+        return run;
+    }
+    match run_batch(runner, PROFILE_NAME, &runnable) {
+        Ok(markers) => {
+            run.failed.extend(markers.fails);
+            run.passed += markers.passed;
+            let expects: std::collections::HashMap<&str, &ValueExpect> =
+                runnable.iter().map(|(n, e, _)| (n.as_str(), e)).collect();
+            for (name, val) in &markers.values {
+                let Some(expect) = expects.get(name.as_str()) else {
+                    run.failed.push(format!(
+                        "harness breach: VALUE for `{name}` without an expectation"
                     ));
                     continue;
-                }
-            }
-            match emit_value_test(ws, fr.module, &t.name, *profile) {
-                Ok(shaders) => runnable.push((t.name.clone(), **expect, shaders)),
-                Err(e) => skips.push((t.name.clone(), e.message.clone())),
-            }
-        }
-
-        // No GL context for this profile -> the runnable ones are skipped with a
-        // log; do NOT count them as pass or fail.
-        if gl_available[pi] && !runnable.is_empty() {
-            match run_batch(runner, pname, &runnable) {
-                Ok(markers) => {
-                    failed.extend(markers.fails);
-                    passed += markers.passed;
-                    let expects: std::collections::HashMap<&str, &ValueExpect> =
-                        runnable.iter().map(|(n, e, _)| (n.as_str(), e)).collect();
-                    for (name, val) in &markers.values {
-                        let Some(expect) = expects.get(name.as_str()) else {
-                            failed.push(format!(
-                                "harness breach: VALUE for `{name}` without an expectation"
-                            ));
-                            continue;
-                        };
-                        match compare_value(expect, val, GLSL_FLOAT_REL_TOL) {
-                            Ok(()) => passed += 1,
-                            Err(detail) => failed.push(format!("{name}: {detail}")),
-                        }
-                    }
-                }
-                Err(detail) => {
-                    // A runner-level failure (bad emitted GLSL, protocol breach)
-                    // is a loud FAIL for every runnable test, never a silent skip.
-                    for (name, _, _) in &runnable {
-                        failed.push(format!("{name}: runner error: {detail}"));
-                    }
+                };
+                match compare_value(expect, val, GLSL_FLOAT_REL_TOL) {
+                    Ok(()) => run.passed += 1,
+                    Err(detail) => run.failed.push(format!("{name}: {detail}")),
                 }
             }
         }
-        profiles.push(ProfileRun {
-            passed,
-            failed,
-            skips,
-        });
+        Err(detail) => {
+            // A runner-level failure (bad emitted GLSL, protocol breach) is a
+            // loud FAIL for every runnable test, never a silent skip.
+            for (name, _, _) in &runnable {
+                run.failed.push(format!("{name}: runner error: {detail}"));
+            }
+        }
     }
-
-    UnitOutcome::Ran {
-        outside_value_class,
-        profiles,
-    }
-}
-
-/// Parsed marker lines from one runner invocation. Reuses the shared parser so
-/// the host side is blind to the GPU transport.
-struct RunnerMarkers {
-    passed: usize,
-    fails: Vec<String>,
-    values: Vec<(String, String)>,
+    run
 }
 
 /// Spawn the runner for one unit+profile, feed the shaders as a JSON job array,
@@ -404,7 +316,7 @@ fn run_batch(
     runner: &std::path::Path,
     profile: &str,
     runnable: &[(String, ValueExpect, ValueTestShaders)],
-) -> std::result::Result<RunnerMarkers, String> {
+) -> std::result::Result<crate::test_protocol::SkullMarkers, String> {
     let job = jobs_json(runnable);
     let (code, stdout, stderr) = spawn_runner(runner, profile, &job)?;
     if code == Some(2) {
@@ -413,22 +325,15 @@ fn run_batch(
     if code != Some(0) {
         return Err(format!("runner exited {code:?}: {}", stderr.trim()));
     }
-    let markers = match parse_skull_markers(&stdout) {
-        Some(m) if m.passed + m.fails.len() + m.values.len() == runnable.len() => m,
-        _ => {
-            return Err(format!(
-                "invalid runner output (expected {} markers): stdout=<{}> stderr=<{}>",
-                runnable.len(),
-                stdout.trim(),
-                stderr.trim()
-            ));
-        }
-    };
-    Ok(RunnerMarkers {
-        passed: markers.passed,
-        fails: markers.fails,
-        values: markers.values,
-    })
+    match parse_skull_markers(&stdout) {
+        Some(m) if m.passed + m.fails.len() + m.values.len() == runnable.len() => Ok(m),
+        _ => Err(format!(
+            "invalid runner output (expected {} markers): stdout=<{}> stderr=<{}>",
+            runnable.len(),
+            stdout.trim(),
+            stderr.trim()
+        )),
+    }
 }
 
 /// Serialize the runnable shaders to the runner's JSON job protocol.
@@ -585,24 +490,14 @@ pub fn shader_validate_run(
     skip_gpu: bool,
 ) -> Result<ValidateSummary> {
     let runner = locate_runner()?;
-    let mut gl_available: [bool; PROFILES.len()] = [false; PROFILES.len()];
-    for (i, (pname, _)) in PROFILES.iter().enumerate() {
-        gl_available[i] = probe_gl(&runner, pname, skip_gpu)?;
-    }
-
-    let mut summary = ValidateSummary {
-        projects: Vec::new(),
-        per_profile: PROFILES
-            .iter()
-            .enumerate()
-            .map(|(i, (name, _))| ValidateProfileSummary {
-                profile: name,
-                passed: 0,
-                failed: Vec::new(),
-                gl_available: gl_available[i],
-            })
-            .collect(),
+    let gl_available = probe_gl(&runner, PROFILE_NAME, skip_gpu)?;
+    let mut profile_summary = ValidateProfileSummary {
+        profile: PROFILE_NAME,
+        passed: 0,
+        failed: Vec::new(),
+        gl_available,
     };
+    let mut projects = Vec::new();
 
     for dir in dirs {
         // Held while this project's shaders are emitted and linked from its
@@ -611,7 +506,7 @@ pub fn shader_validate_run(
         let ws = validate_workspace(dir)?;
         let pairs = skull_mir::lower::collect_shader_pairs(&ws)
             .map_err(|e| anyhow::anyhow!("{dir}: collect_shader_pairs: {}", e.message))?;
-        summary.projects.push((dir.clone(), pairs.len()));
+        projects.push((dir.clone(), pairs.len()));
         let programs: Vec<skull::shader_artifact::ShaderProgram> = pairs
             .iter()
             .map(|pair| skull::shader_artifact::ShaderProgram {
@@ -632,76 +527,77 @@ pub fn shader_validate_run(
         let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(&ws)
             .sharing(std::sync::Arc::clone(graph.interner()));
 
-        for (pi, (pname, profile)) in PROFILES.iter().enumerate() {
-            if !gl_available[pi] {
-                continue;
-            }
-            let view = skull::shader_artifact::realize_shader_with_context(
-                &ws,
-                &graph,
-                &skull::shader_artifact::ShaderArtifactRequest {
-                    spec: skull::target_projection::TargetSpec {
-                        shader: Some(skull::target_projection::ShaderTargetSpec::Glsl(*profile)),
-                        ..skull::target_projection::LUAJIT_DESKTOP
-                    },
-                    programs: &programs,
-                },
-                &shader_scx,
-            )
-            .ok_or_else(|| anyhow::anyhow!("{dir}: GLSL shader view is unavailable"))?;
-            if view.program_views.len() != pairs.len() {
-                anyhow::bail!("{dir}: GLSL shader view/collection denominator differs");
-            }
-            let mut jobs: Vec<(String, String, String)> = Vec::with_capacity(pairs.len());
-            for (pair, program_view) in pairs.iter().zip(&view.program_views) {
-                let emission = match pair.vert {
-                    Some(_) => skull_codegen_glsl::emit_shader_pipeline_with_view(
-                        &ws,
-                        &shader_scx,
-                        program_view,
-                        *profile,
-                    ),
-                    None => skull_codegen_glsl::emit_shader_entry_with_view(
-                        &ws,
-                        &shader_scx,
-                        program_view,
-                        *profile,
-                    ),
-                }
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "{dir}: `{}` failed to emit for {pname}: {}",
-                        pair.key,
-                        e.message
-                    )
-                })?;
-                let (vertex, fragment) = split_stages(&emission.source);
-                jobs.push((format!("{dir}:{}", pair.key), vertex, fragment));
-            }
-            if jobs.is_empty() {
-                continue;
-            }
-            let (passed, failed) = compile_batch(&runner, pname, &jobs)?;
-            if print {
-                let status = if failed.is_empty() {
-                    "ok".green()
-                } else {
-                    "FAILED".red()
-                };
-                println!(
-                    "{:.<52} [{}] {}  ({} pass, {} fail)",
-                    dir,
-                    pname.cyan(),
-                    status,
-                    passed,
-                    failed.len(),
-                );
-            }
-            summary.per_profile[pi].passed += passed;
-            summary.per_profile[pi].failed.extend(failed);
+        if !gl_available {
+            continue;
         }
+        let view = skull::shader_artifact::realize_shader_with_context(
+            &ws,
+            &graph,
+            &skull::shader_artifact::ShaderArtifactRequest {
+                spec: skull::target_projection::TargetSpec {
+                    shader: Some(skull::target_projection::ShaderTargetSpec::Glsl(PROFILE)),
+                    ..skull::target_projection::LUAJIT_DESKTOP
+                },
+                programs: &programs,
+            },
+            &shader_scx,
+        )
+        .ok_or_else(|| anyhow::anyhow!("{dir}: GLSL shader view is unavailable"))?;
+        if view.program_views.len() != pairs.len() {
+            anyhow::bail!("{dir}: GLSL shader view/collection denominator differs");
+        }
+        let mut jobs: Vec<(String, String, String)> = Vec::with_capacity(pairs.len());
+        for (pair, program_view) in pairs.iter().zip(&view.program_views) {
+            let emission = match pair.vert {
+                Some(_) => skull_codegen_glsl::emit_shader_pipeline_with_view(
+                    &ws,
+                    &shader_scx,
+                    program_view,
+                    PROFILE,
+                ),
+                None => skull_codegen_glsl::emit_shader_entry_with_view(
+                    &ws,
+                    &shader_scx,
+                    program_view,
+                    PROFILE,
+                ),
+            }
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "{dir}: `{}` failed to emit for {PROFILE_NAME}: {}",
+                    pair.key,
+                    e.message
+                )
+            })?;
+            let (vertex, fragment) = split_stages(&emission.source);
+            jobs.push((format!("{dir}:{}", pair.key), vertex, fragment));
+        }
+        if jobs.is_empty() {
+            continue;
+        }
+        let (passed, failed) = compile_batch(&runner, PROFILE_NAME, &jobs)?;
+        if print {
+            let status = if failed.is_empty() {
+                "ok".green()
+            } else {
+                "FAILED".red()
+            };
+            println!(
+                "{:.<52} [{}] {}  ({} pass, {} fail)",
+                dir,
+                PROFILE_NAME.cyan(),
+                status,
+                passed,
+                failed.len(),
+            );
+        }
+        profile_summary.passed += passed;
+        profile_summary.failed.extend(failed);
     }
-    Ok(summary)
+    Ok(ValidateSummary {
+        projects,
+        per_profile: vec![profile_summary],
+    })
 }
 
 /// Build a project directory into ONE type-checked workspace, tests included
@@ -851,12 +747,7 @@ mod tests {
         let dir = package.path().to_str().unwrap().to_owned();
         // No GL profile is available, so no runner is spawned.
         crate::compile_slots::assert_compile_waits_for_slot(move || {
-            super::build_unit(
-                &dir,
-                true,
-                std::path::Path::new("unused-runner"),
-                &[false; super::PROFILES.len()],
-            );
+            let _ = super::build_unit(&dir, true, std::path::Path::new("unused-runner"), false);
         });
     }
 }

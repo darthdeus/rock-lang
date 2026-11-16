@@ -19,7 +19,6 @@ use bone_core::prelude::Instant;
 use colored::Colorize;
 use skull_mir::mir::FuncRef;
 
-/// One unit's (file or package) outcome under the JS executor.
 /// Every reason one emission rejection carries: the emitter's primary plus its
 /// siblings (independent findings from the same pass). One skipped test can owe
 /// the subset several constructs.
@@ -29,29 +28,27 @@ fn all_reasons(e: &rock_core::CompilerError) -> Vec<String> {
         .collect()
 }
 
-enum JsUnitOutcome {
-    /// bone accepted the unit; per-test verdicts follow.
-    Ran {
-        passed: usize,
-        /// FAIL detail lines (throw under node, or a harness-invariant breach).
-        fails: Vec<String>,
-        /// (test name, EVERY skip reason) for tests outside the JS subset. All
-        /// of them, not just the emitter's primary: the reason histogram is the
-        /// subset's work list, and one reason per skipped test makes it a floor
-        /// (the emitter computes the rest of the list in the same pass).
-        skips: Vec<(String, Vec<String>)>,
-        /// Tests `@test(backends = ...)` limits to other backends.
-        other_backend: usize,
-    },
-    /// bone rejected the unit and every `@test` expected the failure -- each
-    /// counts as a passing test (luajit-path parity).
-    ExpectFailPass { tests: usize },
-    /// bone rejected the unit unexpectedly, or the emitted JS failed to load
-    /// under node (a backend bug, not a test failure).
-    UnitFail { reason: String, rendered: String },
+/// The verdicts of one unit (file or package) bone accepted, or whose every
+/// `@test` expected the rejection (each then counts as passing).
+#[derive(Default)]
+struct JsUnitRun {
+    passed: usize,
+    /// FAIL detail lines (throw under node, or a harness-invariant breach).
+    fails: Vec<String>,
+    /// (test name, EVERY skip reason) for tests outside the JS subset. All
+    /// of them, not just the emitter's primary: the reason histogram is the
+    /// subset's work list, and one reason per skipped test makes it a floor
+    /// (the emitter computes the rest of the list in the same pass).
+    skips: Vec<(String, Vec<String>)>,
+    /// Tests `@test(backends = ...)` limits to other backends.
+    other_backend: usize,
 }
 
-/// Whole-run tallies -- the testable core consumed by the ratchet test.
+/// A unit bone rejected unexpectedly, or whose emitted JS failed to load
+/// under node (a backend bug, not a test failure).
+type JsUnitOutcome = std::result::Result<JsUnitRun, UnitFailure>;
+
+/// Whole-run tallies.
 pub struct JsSuiteSummary {
     pub files: usize,
     pub tests_passed: usize,
@@ -113,8 +110,7 @@ pub fn js_test(paths: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Run the suite; optionally print per-file lines as units complete. Public for
-/// the ratchet test (`print = false`).
+/// Run the suite; optionally print per-file lines as units complete.
 pub fn js_test_run(paths: &[String], print: bool) -> Result<JsSuiteSummary> {
     let (files, package_dirs) = crate::skull_backend::collect_test_units(paths)?;
 
@@ -134,12 +130,12 @@ pub fn js_test_run(paths: &[String], print: bool) -> Result<JsSuiteSummary> {
     for (label, outcome) in outcomes {
         summary.files += 1;
         match outcome {
-            Ok(JsUnitOutcome::Ran {
+            Ok(Ok(JsUnitRun {
                 passed,
                 fails,
                 skips,
                 other_backend,
-            }) => {
+            })) => {
                 summary.tests_passed += passed;
                 summary.tests_failed += fails.len();
                 summary.tests_skipped += skips.len();
@@ -177,31 +173,16 @@ pub fn js_test_run(paths: &[String], print: bool) -> Result<JsSuiteSummary> {
                     }
                 }
             }
-            Ok(JsUnitOutcome::ExpectFailPass { tests }) => {
-                summary.tests_passed += tests;
-                if print {
-                    println!(
-                        "{:.<60} {}  ({} pass, 0 fail, 0 skip)",
-                        label,
-                        "ok".green(),
-                        tests
-                    );
-                }
-            }
-            Ok(JsUnitOutcome::UnitFail { reason, rendered }) => {
+            Ok(Err(failure)) => {
                 summary.unit_failures += 1;
                 if print {
-                    println!("{:.<60} {}  {}", label, "FAILED".red(), reason.dimmed());
-                    if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                        println!("{rendered}");
-                    }
+                    failure.print(&label);
                 }
             }
             Err(panic) => {
                 summary.unit_failures += 1;
-                let msg = crate::common::panic_message(&*panic);
                 if print {
-                    println!("{:.<60} {}  {}", label, "PANIC".red().bold(), msg.dimmed());
+                    crate::test_unit::print_unit_panic(&label, &*panic);
                 }
             }
         }
@@ -215,26 +196,29 @@ pub fn js_test_run(paths: &[String], print: bool) -> Result<JsSuiteSummary> {
 /// its `@test`s run via per-test closure emission and one node batch.
 fn js_build_unit(unit: &str, is_package: bool) -> JsUnitOutcome {
     if let Err(error) = (crate::registry::RuntimeServices::registered().prepare_unit)(unit) {
-        return JsUnitOutcome::UnitFail {
+        return Err(UnitFailure {
             reason: "sound bank preparation failed".to_string(),
             rendered: format!("sound bank preparation failed for {unit}: {error:#}"),
-        };
+        });
     }
     let checked = if is_package {
         crate::test_unit::check_package(unit, true)
     } else {
         crate::test_unit::check_file(unit, true)
     };
-    match checked {
-        Ok(UnitCheck::Checked { ws, tests, sources }) => js_run_tests(&ws, &tests, &|e| {
+    match checked? {
+        UnitCheck::Checked { ws, tests, sources } => js_run_tests(&ws, &tests, &|e| {
             crate::skull_backend::render_project_errs(&sources, std::slice::from_ref(e))
         }),
-        Ok(UnitCheck::ExpectedFailure(tests)) => JsUnitOutcome::ExpectFailPass { tests },
-        Err(UnitFailure { reason, rendered }) => JsUnitOutcome::UnitFail { reason, rendered },
+        UnitCheck::ExpectedFailure(tests) => Ok(JsUnitRun {
+            passed: tests,
+            ..JsUnitRun::default()
+        }),
     }
 }
 
-/// Run the unit's tests that apply to JS. A test limited by
+/// Per-test closure emission + one node invocation for the unit's tests that
+/// apply to JS, speaking the `__SKULL__` protocol. A test limited by
 /// `@test(backends = ...)` to other backends is neither emitted nor run; it is
 /// counted apart so it never reads as a JS gap.
 fn js_run_tests(
@@ -242,33 +226,12 @@ fn js_run_tests(
     tests: &[(FuncRef, skull::SkullTest)],
     render: &dyn Fn(&rock_core::CompilerError) -> String,
 ) -> JsUnitOutcome {
-    let (on_js, elsewhere): (Vec<_>, Vec<_>) = tests
+    let (tests, elsewhere): (Vec<_>, Vec<_>) = tests
         .iter()
         .cloned()
         .partition(|(_, t)| t.runs_on(bone_core::annotations::TestBackend::Js));
-    match js_run_applicable_tests(ws, &on_js, render) {
-        JsUnitOutcome::Ran {
-            passed,
-            fails,
-            skips,
-            ..
-        } => JsUnitOutcome::Ran {
-            passed,
-            fails,
-            skips,
-            other_backend: elsewhere.len(),
-        },
-        other => other,
-    }
-}
-
-/// Per-test closure emission + one node invocation for the unit's runnable
-/// tests, speaking the `__SKULL__` protocol.
-fn js_run_applicable_tests(
-    ws: &bone_semantic::inference::Workspace,
-    tests: &[(FuncRef, skull::SkullTest)],
-    render: &dyn Fn(&rock_core::CompilerError) -> String,
-) -> JsUnitOutcome {
+    let tests = tests.as_slice();
+    let other_backend = elsewhere.len();
     let mut fails: Vec<String> = Vec::new();
     let mut skips: Vec<(String, Vec<String>)> = Vec::new();
 
@@ -288,10 +251,10 @@ fn js_run_applicable_tests(
             Ok(Ok(js)) => supported.push((i, js)),
             Ok(Err(e)) if is_decorator_populated_reject(&e.message) => deco_pending.push(i),
             Ok(Err(e)) if e.kind == rock_core::errors::CompilerErrorKind::TargetLimit => {
-                return JsUnitOutcome::UnitFail {
+                return Err(UnitFailure {
                     reason: e.message.clone(),
                     rendered: render(&e),
-                };
+                });
             }
             Ok(Err(e)) => skips.push((t.name.clone(), all_reasons(&e))),
             Err(panic) => {
@@ -351,12 +314,12 @@ fn js_run_applicable_tests(
     };
 
     if run_idxs.is_empty() {
-        return JsUnitOutcome::Ran {
+        return Ok(JsUnitRun {
             passed: 0,
             fails,
             skips,
-            other_backend: 0,
-        };
+            other_backend,
+        });
     }
 
     // (display name, root JS name, expected output, value test?) per runnable test.
@@ -378,10 +341,10 @@ fn js_run_applicable_tests(
     let run = match crate::js_runner::run_node_code_with_timeout(&program, timeout) {
         Ok(r) => r,
         Err(e) => {
-            return JsUnitOutcome::UnitFail {
+            return Err(UnitFailure {
                 reason: "node run failed".to_string(),
                 rendered: e.message,
-            };
+            });
         }
     };
 
@@ -391,13 +354,13 @@ fn js_run_applicable_tests(
     let markers = match parse_skull_markers(&run.stdout) {
         Some(m) if m.passed + m.fails.len() + m.values.len() == meta.len() => m,
         _ if run.stderr.contains("Maximum call stack size exceeded") => {
-            return JsUnitOutcome::UnitFail {
+            return Err(UnitFailure {
                 reason: "emitted program too deeply nested for node's parser".to_string(),
                 rendered: run.stderr,
-            };
+            });
         }
         _ => {
-            return JsUnitOutcome::UnitFail {
+            return Err(UnitFailure {
                 reason: "invalid JS emitted (js backend bug)".to_string(),
                 rendered: format!(
                     "stdout:\n{}\nstderr:\n{}\n\n--- emitted js (truncated) ---\n{}",
@@ -405,7 +368,7 @@ fn js_run_applicable_tests(
                     run.stderr,
                     crate::skull_backend::program_excerpt(&[&program])
                 ),
-            };
+            });
         }
     };
     fails.extend(markers.fails);
@@ -420,10 +383,10 @@ fn js_run_applicable_tests(
         .collect();
     for (name, val) in &markers.values {
         let Some(expect) = expects.get(name.as_str()) else {
-            return JsUnitOutcome::UnitFail {
+            return Err(UnitFailure {
                 reason: "harness invariant breach (js backend bug)".to_string(),
                 rendered: format!("VALUE line for `{name}` without a returns expectation"),
-            };
+            });
         };
         match crate::test_protocol::compare_value(expect, val, crate::test_protocol::FLOAT_REL_TOL)
         {
@@ -431,12 +394,12 @@ fn js_run_applicable_tests(
             Err(detail) => fails.push(format!("{name}: {detail}")),
         }
     }
-    JsUnitOutcome::Ran {
+    Ok(JsUnitRun {
         passed,
         fails,
         skips,
-        other_backend: 0,
-    }
+        other_backend,
+    })
 }
 
 /// `rock run <file> --backend js`: emit the whole file (+ stdlib) as ONE node
@@ -447,7 +410,7 @@ fn js_run_applicable_tests(
 /// emit reject prints the diagnostic and exits non-zero -- never a silent fallback.
 pub(crate) fn js_run(path: &str) -> Result<()> {
     let emitted = if std::path::Path::new(path).is_dir() {
-        emit_js_program_project(path).0
+        emit_js_program_project(path)
     } else {
         emit_js_program_single(path)
     };
@@ -514,18 +477,11 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
 }
 
 /// Emit the whole program for a project directory (`rock run <dir> --backend
-/// js`). Mirrors `skull_emit_project`'s front half: discover the deterministic
-/// module set, bone-check, resolve the entry module, then the SAME
-/// `emit_program` the single-file path runs (module-loop-driven, order fixed by
-/// `project.rs` file-name sort). Game projects drop test-only files. Any
-/// rejection prints the project diagnostic and exits. Also returns the checked
-/// workspace -- the web assembler collects `rock_shader` pairs from it.
-pub(crate) fn emit_js_program_project(
-    dir: &str,
-) -> (
-    skull_codegen_js::emit::JsProgram,
-    bone_semantic::inference::Workspace,
-) {
+/// js`): discover the deterministic module set, bone-check, resolve the entry
+/// module, then emit the whole program as the single-file path does. Game
+/// projects drop test-only files. Any rejection prints the project diagnostic
+/// and exits.
+fn emit_js_program_project(dir: &str) -> skull_codegen_js::emit::JsProgram {
     match try_emit_js_program_project(dir) {
         Ok(emitted) => emitted,
         Err(e) => {
@@ -535,23 +491,7 @@ pub(crate) fn emit_js_program_project(
     }
 }
 
-pub(crate) fn try_emit_js_program_project(
-    dir: &str,
-) -> Result<(
-    skull_codegen_js::emit::JsProgram,
-    bone_semantic::inference::Workspace,
-)> {
-    let (program, _cache, ws) = try_emit_js_program_project_cached(dir)?;
-    Ok((program, ws))
-}
-
-pub(crate) fn try_emit_js_program_project_cached(
-    dir: &str,
-) -> Result<(
-    skull_codegen_js::emit::JsProgram,
-    skull_codegen_js::emit::JsEmitCache,
-    bone_semantic::inference::Workspace,
-)> {
+fn try_emit_js_program_project(dir: &str) -> Result<skull_codegen_js::emit::JsProgram> {
     // A game builds without its tests, like the luajit compile.
     let is_game =
         (crate::registry::RuntimeServices::registered().is_game_project)(std::path::Path::new(dir))
@@ -566,16 +506,11 @@ pub(crate) fn try_emit_js_program_project_cached(
     })?;
     crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir))?;
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
-    let (prog, cache) = match skull_codegen_js::emit::emit_program_cached(&ws, user_mid) {
-        Ok(p) => p,
-        Err(e) => {
-            return Err(anyhow::anyhow!(
-                "{}",
-                crate::skull_backend::render_project_err(&sources, &e)
-            ));
-        }
-    };
-    Ok((prog, cache, ws))
+    // The cached emission also collects the project's shaders, so a project
+    // whose shaders do not collect is rejected here, unlike a single file.
+    skull_codegen_js::emit::emit_program_cached(&ws, user_mid)
+        .map(|(program, _cache)| program)
+        .map_err(|e| anyhow::anyhow!("{}", crate::skull_backend::render_project_err(&sources, &e)))
 }
 
 /// The streaming run program: the shipped prelude over node's host (direct,
@@ -598,7 +533,7 @@ fn build_run_program(emitted: &skull_codegen_js::emit::JsProgram) -> String {
 /// A JS double-quoted string literal for a Rust string, escaping the control
 /// and non-ASCII chars a JS lexer needs (test output can carry arbitrary
 /// bytes). `{:?}` would emit Rust's `\u{XXXX}`, which JS rejects.
-pub(crate) fn js_str(s: &str) -> String {
+fn js_str(s: &str) -> String {
     let mut o = String::from("\"");
     for c in s.chars() {
         match c {

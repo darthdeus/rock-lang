@@ -13,6 +13,21 @@ pub(crate) struct UnitFailure {
 }
 
 impl UnitFailure {
+    /// The unit's `FAILED` line, plus the rendered diagnostic under
+    /// `ROCK_TEST_VERBOSE`.
+    pub fn print(&self, label: &str) {
+        use colored::Colorize;
+        println!(
+            "{:.<60} {}  {}",
+            label,
+            "FAILED".red(),
+            self.reason.dimmed()
+        );
+        if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+            println!("{}", self.rendered);
+        }
+    }
+
     fn compile(sources: &SourceFiles, errs: &[CompilerError]) -> Self {
         UnitFailure {
             reason: categorize(&errs[0].message),
@@ -23,7 +38,7 @@ impl UnitFailure {
 
 pub(crate) enum UnitCheck {
     Checked {
-        ws: Workspace,
+        ws: Box<Workspace>,
         tests: Vec<(FuncRef, skull::SkullTest)>,
         sources: SourceFiles,
     },
@@ -73,7 +88,11 @@ pub(crate) fn check_file(file: &str, build_vars: bool) -> Result<UnitCheck, Unit
         .into_iter()
         .map(|(func, test)| (FuncRef { module, func }, test))
         .collect();
-    Ok(UnitCheck::Checked { ws, tests, sources })
+    Ok(UnitCheck::Checked {
+        ws: Box::new(ws),
+        tests,
+        sources,
+    })
 }
 
 /// Assemble and bone-check a package with its tests as one workspace.
@@ -93,7 +112,18 @@ pub(crate) fn check_package(dir: &str, build_vars: bool) -> Result<UnitCheck, Un
             reason: categorize(&e.message),
             rendered: e.message,
         })?;
-    Ok(UnitCheck::Checked { ws, tests, sources })
+    Ok(UnitCheck::Checked {
+        ws: Box::new(ws),
+        tests,
+        sources,
+    })
+}
+
+/// The line for a unit whose build panicked.
+pub(crate) fn print_unit_panic(label: &str, panic: &(dyn std::any::Any + Send)) {
+    use colored::Colorize;
+    let msg = crate::common::panic_message(panic);
+    println!("{:.<60} {}  {}", label, "PANIC".red().bold(), msg.dimmed());
 }
 
 /// Build every unit with `build`, containing a panic to its unit: bone can
