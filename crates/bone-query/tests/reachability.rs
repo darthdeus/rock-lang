@@ -54,7 +54,7 @@ fn path_search_cases() {
     ];
     for (case, src, root, target, expected) in cases {
         let mut got: Vec<(String, bool, bool)> = index_of(src)
-            .paths_to(root, &[target.to_string()], 64)
+            .paths_to(root, &[target.to_string()], 64, None)
             .paths
             .into_iter()
             .map(|p| (p.suffix, p.is_method, p.takes_args))
@@ -92,7 +92,7 @@ fn capped_paths_preserve_distance_spelling_and_terminal_metadata() {
     ] {
         let expected: Vec<&str> = expected.split(' ').collect();
         for cap in 0..=expected.len() + 1 {
-            let result = index.paths_to("Root?", &wanted, cap);
+            let result = index.paths_to("Root?", &wanted, cap, None);
             assert_eq!(
                 result
                     .paths
@@ -130,7 +130,7 @@ fn field_and_method_with_same_name_rank_by_complete_suffix() {
 ",
     );
     for cap in 0..=3 {
-        let result = index.paths_to("Root", &["Goal".to_string()], cap);
+        let result = index.paths_to("Root", &["Goal".to_string()], cap, None);
         let expected = ["a().goal", "a.goal"];
         assert_eq!(
             result

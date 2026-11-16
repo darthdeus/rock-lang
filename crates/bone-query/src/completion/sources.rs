@@ -1846,7 +1846,7 @@ fn build_member_items(
                         &local_idx
                     }
                 };
-                let res = idx.paths_to(rs.as_str(), reach_targets, REACH_CAP);
+                let res = idx.paths_to(rs.as_str(), reach_targets, REACH_CAP, None);
                 let pfx = prefix.as_bytes();
                 let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                 for p in res.paths {

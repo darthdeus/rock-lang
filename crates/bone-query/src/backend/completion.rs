@@ -1170,10 +1170,7 @@ fn push_reach_paths(
         }
     }
     for (vname, vty, root_kind) in roots {
-        let res = match frag {
-            Some(frag) => reach.paths_to_in_scope(ws, frag, &vty, expected_types, REACH_CAP),
-            None => reach.paths_to(&vty, expected_types, REACH_CAP),
-        };
+        let res = reach.paths_to(&vty, expected_types, REACH_CAP, frag.map(|frag| (ws, frag)));
         for p in res.paths {
             // A path that CALLS the enclosing fn (`k.partition_style()`
             // inside `partition_style`) is a recursive self-reference -- skip

@@ -236,23 +236,8 @@ impl ReachabilityIndex {
     }
 
     /// Simple paths ranked by (distance, suffix), retaining at most `cap`.
-    pub fn paths_to(&self, root_ty: &str, expected: &[String], cap: usize) -> ReachResult {
-        self.paths_to_impl(root_ty, expected, cap, None)
-    }
-
-    /// `paths_to` with per-member visibility applied for a modules-v1 query.
-    pub(crate) fn paths_to_in_scope(
-        &self,
-        ws: &Workspace,
-        frag: &FragmentScope,
-        root_ty: &str,
-        expected: &[String],
-        cap: usize,
-    ) -> ReachResult {
-        self.paths_to_impl(root_ty, expected, cap, Some((ws, frag)))
-    }
-
-    fn paths_to_impl(
+    /// `visibility` applies per-member visibility for a modules-v1 query.
+    pub fn paths_to(
         &self,
         root_ty: &str,
         expected: &[String],
@@ -595,7 +580,7 @@ mod search_tests {
         let module = skull_parser::parse_module_clean(&source, Ustr::from("<reach-test>")).unwrap();
         let ws = bone_semantic::semantic_passes::semantic_pass(&mut [module]).unwrap();
         let index = ReachabilityIndex::build(&ws);
-        let result = index.paths_to("N0", &["Goal".to_string()], 1);
+        let result = index.paths_to("N0", &["Goal".to_string()], 1, None);
         assert_eq!(
             result
                 .paths
