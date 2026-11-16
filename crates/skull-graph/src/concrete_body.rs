@@ -1343,44 +1343,27 @@ fn prepare_always(
     timing_enabled: bool,
 ) -> PreparedAlways {
     let owner = concrete_owner_for(module, body_owner);
+    let unplanned = |type_error, skip| PreparedAlways {
+        order,
+        module,
+        body_owner,
+        owner: owner.clone(),
+        types: None,
+        type_error,
+        skip,
+        stats: ConcreteBuildStats::default(),
+    };
     let Some(body) = ws.module(module).bodies.get(&body_owner) else {
-        return PreparedAlways {
-            order,
-            module,
-            body_owner,
-            owner,
-            types: None,
-            type_error: Some(MonoTyReason::NoNode),
-            skip: false,
-            stats: ConcreteBuildStats::default(),
-        };
+        return unplanned(Some(MonoTyReason::NoNode), false);
     };
     if matches!(body_owner, BodyOwner::Global(_)) && body.root.is_none() {
-        return PreparedAlways {
-            order,
-            module,
-            body_owner,
-            owner,
-            types: None,
-            type_error: None,
-            skip: true,
-            stats: ConcreteBuildStats::default(),
-        };
+        return unplanned(None, true);
     }
     let Some(inf) = ws
         .inference(module)
         .and_then(|ir| ir.per_fn.get(&body_owner))
     else {
-        return PreparedAlways {
-            order,
-            module,
-            body_owner,
-            owner,
-            types: None,
-            type_error: Some(MonoTyReason::NoNode),
-            skip: false,
-            stats: ConcreteBuildStats::default(),
-        };
+        return unplanned(Some(MonoTyReason::NoNode), false);
     };
     let mut stats = ConcreteBuildStats::default();
     let declared_types = match body_owner {
