@@ -916,7 +916,7 @@ fn fit_candidate(
     // so without this check a bounded combinator would tie with -- or shadow --
     // the concrete overloads (`map([T], f)`, `map(Arena<T>, f)`).
     let f = &gamma.workspace.module(mid).functions[fid];
-    if f.generic_bounds.iter().any(Option::is_some) {
+    if f.has_iterator_bounds() {
         let mut tree = BoundTree::default();
         if let Err(error) =
             gamma.trial(|g| check_iterator_bounds(c, g, f, &subs, &mut tree, false, 0, span))
@@ -1695,7 +1695,7 @@ pub(crate) fn commit_selected_call(
     // `Iterator`-bounded callee: conformance is (re)tried after every arg
     // unification -- resolving `next(C)` is also what binds the bound's elem
     // generic, and a LATER lambda arg (`map(it, x => ..)`) must see it bound.
-    let has_bounds = function.generic_bounds.iter().any(Option::is_some);
+    let has_bounds = function.has_iterator_bounds();
     let mut bound_tree = BoundTree::default();
 
     let mut param_tys = Vec::with_capacity(c.body.param_bindings.len());

@@ -712,7 +712,7 @@ pub(crate) fn infer_expr_used(
                     // A bounded fn only exists monomorphized-by-inlining at its
                     // call sites; as a value it would need a runtime identity
                     // its placeholder bound-calls can't have.
-                    if function.generic_bounds.iter().any(Option::is_some) {
+                    if function.has_iterator_bounds() {
                         comp_error!(
                             expr_span,
                             "`{}` has `Iterator` bounds and cannot be used as a value; call it directly",

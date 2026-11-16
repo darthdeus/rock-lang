@@ -631,6 +631,12 @@ pub struct Function {
     pub json_field_for: Option<(Ustr, Ustr, skull_parser::JsonFieldOperation)>,
 }
 
+impl Function {
+    pub fn has_iterator_bounds(&self) -> bool {
+        self.generic_bounds.iter().any(Option::is_some)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Annotation {
     pub span: Span,

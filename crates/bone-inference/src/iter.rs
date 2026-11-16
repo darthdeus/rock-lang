@@ -141,12 +141,7 @@ fn protocol_next_ret(gamma: &mut Gamma, ty: TyId, next_first: bool, span: Span) 
         gamma.out.rollback_to(cp);
     }
     let it = match resolve_unary_by_recv(c, gamma, Ustr::from("iter"), ty, span) {
-        Ok(((m, f), _, _))
-            if gamma.workspace.module(m).functions[f]
-                .generic_bounds
-                .iter()
-                .any(Option::is_some) =>
-        {
+        Ok(((m, f), _, _)) if gamma.workspace.module(m).functions[f].has_iterator_bounds() => {
             return None;
         }
         Ok((_, ret, _)) => ret,
@@ -302,11 +297,7 @@ pub(crate) fn resolve_for_iter_protocol(
     ) {
         Ok((f, ret, subs)) => {
             let (fm, ff) = f;
-            if gamma.workspace.module(fm).functions[ff]
-                .generic_bounds
-                .iter()
-                .any(Option::is_some)
-            {
+            if gamma.workspace.module(fm).functions[ff].has_iterator_bounds() {
                 comp_error!(
                     span,
                     "`iter({})` resolves to a fn with `Iterator` bounds; bounded `iter` fns are not supported",
@@ -355,7 +346,7 @@ pub(crate) fn resolve_for_iter_protocol(
     // substitution when the chain inlines.
     let next_callee = &gamma.workspace.module(next_fn.0).functions[next_fn.1];
     let mut sub = BoundTree::default();
-    if next_callee.generic_bounds.iter().any(Option::is_some) {
+    if next_callee.has_iterator_bounds() {
         check_iterator_bounds(c, gamma, next_callee, &next_subs, &mut sub, true, 0, span)?;
     }
 
@@ -482,7 +473,7 @@ pub(crate) fn check_iterator_bounds(
 
                 let next_callee = &gamma.workspace.module(next_fn.0).functions[next_fn.1];
                 let mut sub = BoundTree::default();
-                if next_callee.generic_bounds.iter().any(Option::is_some) {
+                if next_callee.has_iterator_bounds() {
                     check_iterator_bounds(
                         c,
                         gamma,
@@ -585,11 +576,7 @@ pub(crate) fn implicit_iter_target(
         Ok((f, ret, subs)) => {
             // A bounded `iter` fn can't be a coercion target (same restriction
             // as the for head).
-            if gamma.workspace.module(f.0).functions[f.1]
-                .generic_bounds
-                .iter()
-                .any(Option::is_some)
-            {
+            if gamma.workspace.module(f.0).functions[f.1].has_iterator_bounds() {
                 gamma.out.rollback_to(snap);
                 return None;
             }
