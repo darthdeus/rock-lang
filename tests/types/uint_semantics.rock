@@ -1,0 +1,114 @@
+// `uint` is a 32-bit unsigned value on every backend: arithmetic wraps
+// modulo 2^32, comparisons are unsigned, and a dynamic shift count above 31
+// raises instead of masking. Operands pass through `idu` so nothing folds.
+
+fn idu(x: uint) -> uint { return x }
+
+@intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
+    local ok, err = pcall(f)
+    return not ok
+"""
+
+@test
+fn uint_wraps_and_orders_unsigned() {
+    assert_eq(idu(4294967295 as uint) + idu(1 as uint), 0 as uint)
+    assert_eq(idu(4294967295 as uint) * idu(4294967295 as uint), 1 as uint)
+    assert_eq(idu(2147483648 as uint) >> idu(31 as uint), 1 as uint)
+    assert(idu(2147483648 as uint) > idu(0 as uint), "unsigned order")
+    assert_eq(bitcast<int>(idu(2147483648 as uint)), -2147483648)
+}
+
+@test
+fn uint_increment_and_decrement_wrap() {
+    let x: uint = idu(0 as uint)
+    x--
+    assert_eq(x, 4294967295 as uint)
+    x++
+    assert_eq(x, 0 as uint)
+}
+
+@test
+fn uint_ranges_stay_unsigned() {
+    let last: uint = 0
+    for i in idu(2147483648 as uint)..idu(2147483651 as uint) { last = i }
+    assert_eq(last, 2147483650 as uint)
+    let values: [uint] = idu(2147483648 as uint)..idu(2147483651 as uint)
+    assert_eq(values[2], 2147483650 as uint)
+}
+
+@test
+fn uint_formats_as_unsigned() {
+    let value = idu(4294967295 as uint)
+    assert_eq(tostring(value), "4294967295")
+    assert_eq("{value}", "4294967295")
+}
+
+value UintRecord { payload: uint }
+
+fn identity<T>(value: T) -> T { return value }
+
+@test
+fn uint_survives_generic_value_vec_and_nullable_paths() {
+    let record = UintRecord { payload: 4294967295 as uint }
+    let values: [uint] = [4294967295 as uint]
+    let maybe: uint? = 4294967295 as uint
+    assert(maybe != null, "present")
+    assert_eq(identity(record).payload & values[0], 4294967295 as uint)
+    let b = native_buffer_uint(1)
+    b[0] = 4294967295
+    assert_eq(b[0], 4294967295 as uint)
+}
+
+global SINK: uint = 0 as uint
+
+@test
+fn uint_dynamic_shift_rejects_counts_above_31() {
+    assert_eq(idu(1 as uint) << idu(31 as uint), 2147483648 as uint)
+    assert_eq(idu(4294967295 as uint) >> idu(31 as uint), 1 as uint)
+    for count in [32, 33, 4294967295] {
+        // Zero must still reject even though the result would be zero.
+        for value in [0, 1] {
+            assert(try_call(() => {
+                SINK = idu(value as uint) << idu(count as uint)
+            }), "<< {count}")
+            assert(try_call(() => {
+                SINK = idu(value as uint) >> idu(count as uint)
+            }), ">> {count}")
+        }
+    }
+}
+
+// A checked operation whose result is unused still raises.
+@test
+fn unused_checked_uint_operations_still_raise() {
+    assert(try_call(() => { let _ = idu(1 as uint) << idu(32 as uint) }), "unused <<")
+    assert(try_call(() => { let _ = idu(1 as uint) >> idu(32 as uint) }), "unused >>")
+    assert(try_call(() => { let _ = (0.0 - 1.0) as uint }), "unused float conversion")
+    assert(
+        try_call(() => {
+            let n = -1
+            let _ = n as uint
+        }),
+        "unused int conversion"
+    )
+}
+
+// The unused shift is the only statement of the else arm, which therefore
+// cannot chain as an `else if`.
+fn shift_before_else_if(flag: bool, other: bool, count: uint) -> int {
+    let r = 0
+    if flag {
+        r = 1
+    } else {
+        let _ = count << count
+        if other { r = 2 } else { r = 3 }
+    }
+    return r
+}
+
+@test
+fn unused_checked_shift_keeps_its_else_arm() {
+    assert_eq(shift_before_else_if(true, true, 32 as uint), 1)
+    assert_eq(shift_before_else_if(false, false, 3 as uint), 3)
+    assert(try_call(() => { let _ = shift_before_else_if(false, true, 32 as uint) }), "else <<")
+}

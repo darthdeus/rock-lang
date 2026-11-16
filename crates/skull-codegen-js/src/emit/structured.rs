@@ -293,8 +293,7 @@ impl Emitter<'_> {
         let k = raw(iid) as usize;
         if inst.produces_value() {
             (!self.inlinable[k] && self.use_count[k] > 0)
-                || (matches!(inst, Inst::Call { .. } | Inst::CallValue { .. })
-                    && self.use_count[k] == 0)
+                || (self.use_count[k] == 0 && effects::evaluated_when_unused(inst))
         } else {
             true // a non-value effect inst (rejected at emit if unsupported)
         }

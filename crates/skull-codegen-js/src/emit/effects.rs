@@ -2,6 +2,37 @@
 
 use super::*;
 
+/// A value inst that still runs as a statement when its result is unused:
+/// a call (`nb_set(b, i, v)`, `(f)(x)`), an index that checks bounds or may
+/// enter a host getter (a Map, heap record, or proxy-backed Vec), the shared
+/// element check of a column or strided read, and a range-checked uint shift
+/// or conversion.
+pub(super) fn evaluated_when_unused(inst: &Inst) -> bool {
+    match inst {
+        Inst::Index { kind, .. } => {
+            matches!(
+                kind,
+                ContainerKind::Vec
+                    | ContainerKind::VecInBounds
+                    | ContainerKind::VecNonNull
+                    | ContainerKind::VecNonNullInBounds
+                    | ContainerKind::Map
+                    | ContainerKind::Record
+            ) || kind.is_native_buffer()
+        }
+        _ => matches!(
+            inst,
+            Inst::Call { .. }
+                | Inst::CallValue { .. }
+                | Inst::VecCheckedIndex { .. }
+                | Inst::UintShl(..)
+                | Inst::UintShr(..)
+                | Inst::IntToUint(_)
+                | Inst::FloatToUint(_)
+        ),
+    }
+}
+
 impl Emitter<'_> {
     pub(super) fn emit_block_effects(&mut self, b: Idx<Block>) -> Result<(), CompilerError> {
         for iid in self.mf.blocks[b].insts.clone() {
@@ -105,11 +136,7 @@ impl Emitter<'_> {
                     );
                     self.push(&line);
                 }
-                // A call in statement position (value unused): `nb_set(b, i, v)`
-                // or a closure invoked for effect, `(f)(x);`.
-                Inst::Call { .. } | Inst::CallValue { .. }
-                    if self.use_count[raw(iid) as usize] == 0 =>
-                {
+                other if self.use_count[raw(iid) as usize] == 0 && evaluated_when_unused(other) => {
                     let line = format!("{};", self.render_inst_expr(iid)?);
                     self.push(&line);
                 }
@@ -166,29 +193,6 @@ impl Emitter<'_> {
                     self.globals.uses_storage.set(true);
                     let v = self.render_val(*value)?;
                     self.push(&format!("__rock_globals[{}] = {v};", js_string_lit(slot)?));
-                }
-                // An unused index still checks bounds or may enter a host
-                // getter (including a Map, heap record, or proxy-backed Vec).
-                Inst::Index { kind, .. }
-                    if (matches!(
-                        kind,
-                        ContainerKind::Vec
-                            | ContainerKind::VecInBounds
-                            | ContainerKind::VecNonNull
-                            | ContainerKind::VecNonNullInBounds
-                            | ContainerKind::Map
-                            | ContainerKind::Record
-                    ) || kind.is_native_buffer())
-                        && self.use_count[raw(iid) as usize] == 0 =>
-                {
-                    let line = format!("{};", self.render_inst_expr(iid)?);
-                    self.push(&line);
-                }
-                // The shared element check of a column or strided read
-                // likewise stays when every leaf read was dropped.
-                Inst::VecCheckedIndex { .. } if self.use_count[raw(iid) as usize] == 0 => {
-                    let line = format!("{};", self.render_inst_expr(iid)?);
-                    self.push(&line);
                 }
                 // A used, non-inlinable value inst: materialize it at its
                 // program position as `let v<raw> = <expr>` so cell reads capture
