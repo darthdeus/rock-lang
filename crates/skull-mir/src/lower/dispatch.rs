@@ -645,6 +645,50 @@ impl<'a> DispatchCtx<'a> {
         })
     }
 
+    /// Arguments whose native print representation exposes enum or leaf storage.
+    pub fn print_routes(&self, call: Idx<Expr>) -> Vec<(Idx<Expr>, StringifyRoute)> {
+        let Expr::Call {
+            callee: bone_core::hir::Callee::Unresolved { name, .. },
+            args,
+            ..
+        } = &self.body.expr_arena[call]
+        else {
+            return Vec::new();
+        };
+        if name.as_str() != "print" {
+            return Vec::new();
+        }
+        let resolved = self
+            .inf
+            .and_then(|i| i.resolved_overload_calls.get(&call))
+            .copied()
+            .or_else(|| super::unique_fn(self.ws, *name));
+        let Some((module, func)) = resolved else {
+            return Vec::new();
+        };
+        let def = &self.ws.module(module).functions[func];
+        if !def.is_extern
+            || !bone_core::modules::is_stdlib_module_file(self.ws.module(module).file.as_str())
+        {
+            return Vec::new();
+        }
+        args.into_iter()
+            .filter_map(|arg| {
+                if self.body.spread_args.contains(&arg) {
+                    return None;
+                }
+                let ty = self.hole_mono(arg)?;
+                let name = ty.peel_nullable().0.nominal()?;
+                let leaf_table = super::shape::planned_value(self.ws, name)
+                    .is_some_and(|plan| plan.storage == super::ValueStorage::LeafTable);
+                if !self.ws.enums_by_name.contains_key(&name) && !leaf_table {
+                    return None;
+                }
+                Some((arg, self.structural_route(arg)?))
+            })
+            .collect()
+    }
+
     /// `tostring(x)` / `to_string(x)` where `x` formats structurally: the
     /// argument and its route. Only the stdlib's extern `tostring` and the
     /// `to_string(any)` fallback qualify -- a user function or a typed overload

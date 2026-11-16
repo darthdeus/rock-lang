@@ -490,6 +490,17 @@ impl<'a> Builder<'a> {
             .iter()
             .map(|f| f.name)
             .collect();
+        let repr = match repr {
+            ValueRepr::Scalar(v)
+                if super::shape::planned_value(self.ws, name)
+                    .is_some_and(|plan| plan.storage == ValueStorage::LeafTable) =>
+            {
+                let shape = self.nominal_rep_shape_required(name, false)?;
+                let leaves = self.cdata_leaves(v, &shape)?;
+                self.rebuild_from_leaves(&shape, &leaves, &mut 0)
+            }
+            repr => repr,
+        };
         match repr {
             ValueRepr::Group {
                 parts,

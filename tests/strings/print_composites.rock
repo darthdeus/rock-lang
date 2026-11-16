@@ -1,7 +1,5 @@
-// `print` and `tostring` of composite values render what luajit's
-// `tostring` renders: a value struct through its `__tostring`
-// (`Name { f: v }`, declaration order), a payload enum through its baked
-// variant render, and any other table as its `table: 0x..` address.
+// Print enums and leaf-table values through their logical fields, matching
+// interpolation. Other values retain the native tostring representation.
 
 value P2 { x: int, y: int }
 value PF { x: float, b: bool }
@@ -60,7 +58,7 @@ fn print_gc_carrying_value_structs() {
     print(WithOpt { s: "c", n: 3 })
 }
 
-@test(output = "Cell {{ id: 1, tag: true, tag.value: 5, pos.x: 2, pos.y: 3 }}\nCell {{ id: 1, tag: nil, tag.value: nil, pos.x: 2, pos.y: 3 }}")
+@test(output = "Cell {{ id: 1, tag: Id {{ value: 5 }}, pos: P2 {{ x: 2, y: 3 }} }}\nCell {{ id: 1, tag: null, pos: P2 {{ x: 2, y: 3 }} }}")
 fn print_leaf_table_value_struct() {
     print(Cell { id: 1, tag: Id { value: 5 }, pos: P2 { x: 2, y: 3 } })
     print(Cell { id: 1, pos: P2 { x: 2, y: 3 } })
@@ -71,7 +69,7 @@ fn print_generic_value_struct() {
     print(Gen { v: 3 })
 }
 
-@test(output = "E::A\nE::B {{ [1] = 3 }}\nE::C {{ g = 2, r = 1 }}\n1")
+@test(output = "E::A\nE::B(3)\nE::C {{ r: 1, g: 2 }}\nU::Y")
 fn print_enums() {
     print(E::A)
     print(E::B(3))
@@ -114,4 +112,14 @@ fn tostring_of_tables_is_an_address() -> bool {
     let t = (1, "a")
     return show(r).starts_with("table: 0x") && show(xs).starts_with("table: 0x")
         && show(t).starts_with("table: 0x")
+}
+
+@test(output = "E::B(4)\tE::B(4)\nCell {{ id: 2, tag: Id {{ value: 8 }}, pos: P2 {{ x: 3, y: 4 }} }}\tCell {{ id: 2, tag: Id {{ value: 8 }}, pos: P2 {{ x: 3, y: 4 }} }}\nnil\tnil")
+fn print_matches_interpolation() {
+    let e: E? = E::B(4)
+    let cell: Cell? = Cell { id: 2, tag: Id { value: 8 }, pos: P2 { x: 3, y: 4 } }
+    let absent: Cell? = null
+    print(e, "{e}")
+    print(cell, "{cell}")
+    print(absent, "{absent}")
 }

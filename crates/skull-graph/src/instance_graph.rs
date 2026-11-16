@@ -5684,18 +5684,21 @@ fn dispatched_sites(
             }
             E::Call { .. } => {
                 for dispatch in &dispatches {
-                    let Some((arg, route)) = dispatch.tostring_route(e) else {
-                        continue;
-                    };
-                    for (path, name) in route.obligations() {
-                        out.push((
-                            Site {
-                                domain: domain.clone(),
-                                expr: arg,
-                                op: SiteOp::dispatched(name, path),
-                            },
-                            name,
-                        ));
+                    let routes = dispatch
+                        .print_routes(e)
+                        .into_iter()
+                        .chain(dispatch.tostring_route(e));
+                    for (arg, route) in routes {
+                        for (path, name) in route.obligations() {
+                            out.push((
+                                Site {
+                                    domain: domain.clone(),
+                                    expr: arg,
+                                    op: SiteOp::dispatched(name, path),
+                                },
+                                name,
+                            ));
+                        }
                     }
                 }
             }

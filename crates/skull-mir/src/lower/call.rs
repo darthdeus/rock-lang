@@ -1854,6 +1854,19 @@ impl<'a> Builder<'a> {
         dc: &DirectCall<'a>,
         preflight: Option<&PreflightPlan>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let print_routes = self.dispatch().print_routes(e);
+        if !print_routes.is_empty() {
+            return arg_idxs
+                .iter()
+                .map(|&arg| {
+                    if print_routes.iter().any(|(rendered, _)| *rendered == arg) {
+                        self.with_site_expr(arg, |s| s.stringify_structural(arg))
+                    } else {
+                        self.lower_expr(arg)
+                    }
+                })
+                .collect();
+        }
         if dc.plan.uses_scalar_abi() {
             // A boxed argument the callee does not read is still rejected, so
             // the diagnostic does not depend on the callee's body.
