@@ -3,9 +3,9 @@
 //! single-module workspace (`ws_of`). Each integration harness declares this
 //! module once; its test modules import helpers through `crate::common`.
 
+use crate::support::site_join::{self, SiteJoinCensus, Unjoined};
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::{self, InstanceGraph};
-use skull::site_join::{self, SiteJoinCensus, Unjoined};
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::MirFunc;
 use ustr::Ustr;

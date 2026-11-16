@@ -35,7 +35,7 @@ use bone_semantic::prelude::Span;
 use skull_mir::mangle::mangle_fn;
 use skull_mir::monoty::MonoSubst;
 
-use crate::instance_graph::{Instance, InstanceBoundTree, InstanceGraph, Site, SiteDomain, SiteOp};
+use skull::instance_graph::{Instance, InstanceBoundTree, InstanceGraph, Site, SiteDomain, SiteOp};
 
 /// One graph's semantic state: section name -> sorted canonical lines.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -307,10 +307,10 @@ pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
                     .iter()
                     .map(|(s, r)| {
                         let outcome = match &r.outcome {
-                            crate::instance_graph::SiteOutcome::Resolved(t) => {
+                            skull::instance_graph::SiteOutcome::Resolved(t) => {
                                 format!("resolved({})", key(t))
                             }
-                            crate::instance_graph::SiteOutcome::Failed(why) => {
+                            skull::instance_graph::SiteOutcome::Failed(why) => {
                                 format!("failed({why})")
                             }
                         };
@@ -345,10 +345,10 @@ pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
                     .iter()
                     .map(|s| {
                         let outcome = match &s.outcome {
-                            crate::instance_graph::AlwaysEmittedOutcome::Unresolved(r) => {
+                            skull::instance_graph::AlwaysEmittedOutcome::Unresolved(r) => {
                                 format!("unresolved({r})")
                             }
-                            crate::instance_graph::AlwaysEmittedOutcome::Rejection(k) => {
+                            skull::instance_graph::AlwaysEmittedOutcome::Rejection(k) => {
                                 format!("rejection({})", k.name())
                             }
                         };

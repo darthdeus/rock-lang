@@ -13,8 +13,8 @@
 use crate::common::{
     census_of, graph_of, module_id, prepared_body, unjoined, ws_of_files, ws_with_stdlib,
 };
+use crate::support::site_join::{SiteJoinCensus, Unjoined};
 use bone_semantic::inference::Workspace;
-use skull::site_join::{SiteJoinCensus, Unjoined};
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::{Inst, MirFunc};
 use skull_mir::site::SiteOp;

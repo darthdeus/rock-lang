@@ -1,5 +1,5 @@
 //! Controls for the MIR-call -> `ConcreteBody` join
-//! (`skull::site_join`, plan S 9 / Stage 3).
+//! (`crate::support::site_join`, plan S 9 / Stage 3).
 //!
 //! The join's value is that a call instruction selects the RIGHT concrete body.
 //! Every property below is therefore about DISTINGUISHABILITY -- two things
@@ -10,9 +10,9 @@ use crate::common::{
     census_of, census_of_graph, fn_name, graph_of as graph_of_ws, module_id, scalar_ctx,
     ws_with_stdlib,
 };
+use crate::support::site_join::{self, Unjoined};
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::InstanceGraph;
-use skull::site_join::{self, Unjoined};
 use skull_mir::mir::{Inst, MirFunc};
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use skull_mir::site::{Site, SiteDomain, SiteOp};
@@ -696,7 +696,7 @@ fn main() { print("{build()}") }
 /// only way to test the guard is to hand it one.
 #[test]
 fn a_call_filed_under_the_wrong_operation_fails_accounting() {
-    use skull::site_join::{SiteJoinCensus, Unjoined};
+    use crate::support::site_join::{SiteJoinCensus, Unjoined};
 
     let mut c = SiteJoinCensus {
         obligations_examined: 2,
@@ -830,25 +830,25 @@ fn main() {
 
     // Matched: the instance and its OWN claim.
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &rock(insts[0]), fref, Some(&c0), LUA),
-        skull::site_join::CalleeCheck::Instance,
+        crate::support::site_join::check_callee(&ws, &g, &rock(insts[0]), fref, Some(&c0), LUA),
+        crate::support::site_join::CalleeCheck::Instance,
         "an instance did not verify against its own claim"
     );
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &rock(insts[1]), fref, Some(&c1), LUA),
-        skull::site_join::CalleeCheck::Instance
+        crate::support::site_join::check_callee(&ws, &g, &rock(insts[1]), fref, Some(&c1), LUA),
+        crate::support::site_join::CalleeCheck::Instance
     );
     // SWAPPED: same FuncRef, other instantiation. A declaration-only comparison
     // returns agreement here; the instance comparison must not.
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &rock(insts[0]), fref, Some(&c1), LUA),
-        skull::site_join::CalleeCheck::InstanceMismatch,
+        crate::support::site_join::check_callee(&ws, &g, &rock(insts[0]), fref, Some(&c1), LUA),
+        crate::support::site_join::CalleeCheck::InstanceMismatch,
         "two instantiations of one declaration compared equal -- the comparison is \
          declaration-level, not instance-level"
     );
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &rock(insts[1]), fref, Some(&c0), LUA),
-        skull::site_join::CalleeCheck::InstanceMismatch
+        crate::support::site_join::check_callee(&ws, &g, &rock(insts[1]), fref, Some(&c0), LUA),
+        crate::support::site_join::CalleeCheck::InstanceMismatch
     );
 }
 
@@ -875,13 +875,13 @@ fn main() { print("{one(1)} {two(2)}") }
     let two = find("two");
     assert_ne!(one.func, two.func, "the fixture must give two declarations");
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &rock(&one), one.func, None, LUA),
-        skull::site_join::CalleeCheck::NonGeneric,
+        crate::support::site_join::check_callee(&ws, &g, &rock(&one), one.func, None, LUA),
+        crate::support::site_join::CalleeCheck::NonGeneric,
         "a non-generic callee against its own declaration must verify"
     );
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &rock(&one), two.func, None, LUA),
-        skull::site_join::CalleeCheck::DeclMismatch,
+        crate::support::site_join::check_callee(&ws, &g, &rock(&one), two.func, None, LUA),
+        crate::support::site_join::CalleeCheck::DeclMismatch,
         "a callee resolved to another declaration was accepted"
     );
 }
@@ -920,7 +920,7 @@ fn main() { print("{pair(1, 2.0)} {other(1, 2.0)}") }
     );
 
     let check = |c: Option<&skull::instance_graph::Instance>| {
-        skull::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, c, LUA)
+        crate::support::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, c, LUA)
     };
 
     // ADMISSION CONTROL: the instance's own recorded substitution verifies.
@@ -928,14 +928,17 @@ fn main() { print("{pair(1, 2.0)} {other(1, 2.0)}") }
     assert_eq!(good.args.len(), 2, "one entry per generic: {good:?}");
     assert_eq!(
         check(Some(&good)),
-        skull::site_join::CalleeCheck::Instance,
+        crate::support::site_join::CalleeCheck::Instance,
         "the independently-built correct claim did not verify, so the rejections below \
          prove nothing"
     );
 
     // No record at all -- a concrete call without an owner is an invariant
     // failure, not an optional specialization result.
-    assert_eq!(check(None), skull::site_join::CalleeCheck::NoInstance);
+    assert_eq!(
+        check(None),
+        crate::support::site_join::CalleeCheck::NoInstance
+    );
 
     // A record naming ANOTHER declaration. Not a policy outcome: the record is
     // written beside the call it belongs to, so this can only be a recorder bug.
@@ -945,7 +948,7 @@ fn main() { print("{pair(1, 2.0)} {other(1, 2.0)}") }
     };
     assert_eq!(
         check(Some(&wrong_decl)),
-        skull::site_join::CalleeCheck::ClaimDeclMismatch
+        crate::support::site_join::CalleeCheck::ClaimDeclMismatch
     );
 
     // Right declaration, WRONG substitution: a partial one names no instance.
@@ -953,7 +956,7 @@ fn main() { print("{pair(1, 2.0)} {other(1, 2.0)}") }
     partial.args.pop();
     assert_eq!(
         check(Some(&partial)),
-        skull::site_join::CalleeCheck::InstanceMismatch
+        crate::support::site_join::CalleeCheck::InstanceMismatch
     );
 }
 
@@ -998,16 +1001,16 @@ fn main() {
 
     let boundary = skull::concrete_body::Callee::Boundary(inst.clone(), class);
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &boundary, inst.func, None, LUA),
-        skull::site_join::CalleeCheck::Boundary(class),
+        crate::support::site_join::check_callee(&ws, &g, &boundary, inst.func, None, LUA),
+        crate::support::site_join::CalleeCheck::Boundary(class),
         "a generic boundary was asked for a Rock instantiation it cannot have"
     );
     // CONTROL: the same generic instance as a ROCK callee still demands the
     // record. Without this the arm above would read as "generic callees are
     // exempt", which is the opposite of what it says.
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, None, LUA),
-        skull::site_join::CalleeCheck::NoInstance,
+        crate::support::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, None, LUA),
+        crate::support::site_join::CalleeCheck::NoInstance,
         "the boundary exemption leaked to the Rock arm"
     );
 }
@@ -1033,8 +1036,15 @@ fn main() { print("{ident(1)}") }
     let claim = inst.clone();
     // Control: with the substitution present, the claim verifies.
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, Some(&claim), LUA),
-        skull::site_join::CalleeCheck::Instance
+        crate::support::site_join::check_callee(
+            &ws,
+            &g,
+            &rock(&inst),
+            inst.func,
+            Some(&claim),
+            LUA
+        ),
+        crate::support::site_join::CalleeCheck::Instance
     );
     // Remove ONLY the resolved instance's record -- the call still carries the
     // same complete claim, so nothing about the CALL changed.
@@ -1047,8 +1057,15 @@ fn main() { print("{ident(1)}") }
         "nothing was removed, so the arm below is untested"
     );
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, Some(&claim), LUA),
-        skull::site_join::CalleeCheck::ResolvedUnrecorded,
+        crate::support::site_join::check_callee(
+            &ws,
+            &g,
+            &rock(&inst),
+            inst.func,
+            Some(&claim),
+            LUA
+        ),
+        crate::support::site_join::CalleeCheck::ResolvedUnrecorded,
         "a resolved instance with no recorded substitution was treated as agreement"
     );
 }
@@ -1437,7 +1454,7 @@ fn main() { print("{top()}") }
     assert!(
         after
             .bodies_skipped
-            .contains_key(&skull::site_join::BodySkip::NoSubstitution),
+            .contains_key(&crate::support::site_join::BodySkip::NoSubstitution),
         "the victim's body vanished from the space without a recorded cause: {after:?}"
     );
     assert!(
@@ -1603,7 +1620,7 @@ fn main() { print("{apply(add_one, 3)}") }
     assert!(c.accounts(), "accounting identity broken: {c:?}");
     let runtime = c
         .indirect_forms_by_producer
-        .get(&skull::site_join::IndirectProducer::RuntimeValue)
+        .get(&crate::support::site_join::IndirectProducer::RuntimeValue)
         .copied()
         .unwrap_or(0);
     assert!(
@@ -1717,7 +1734,8 @@ fn main() { print("{apply(add_one, 1)}") }
 
     // CONTROL: unmodified, the mint is in the denominator and it JOINS.
     let scx = scalar_ctx(&ws, &g);
-    let before = skull::site_join::measure_prepared_body(&ws, &scx, &g, &bodies, &main_inst, &mf);
+    let before =
+        crate::support::site_join::measure_prepared_body(&ws, &scx, &g, &bodies, &main_inst, &mf);
     assert_eq!(
         before.symbol_mints, 1,
         "the mint left the denominator: {before:?}"
@@ -1755,7 +1773,8 @@ fn main() { print("{apply(add_one, 1)}") }
     );
     mf.fn_value_symbols.insert(mint, alien);
 
-    let after = skull::site_join::measure_prepared_body(&ws, &scx, &g, &bodies, &main_inst, &mf);
+    let after =
+        crate::support::site_join::measure_prepared_body(&ws, &scx, &g, &bodies, &main_inst, &mf);
     // The mint is still EXAMINED -- a corrupted record must not drop out of the
     // denominator, which would look like agreement.
     assert_eq!(

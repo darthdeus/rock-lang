@@ -8,10 +8,8 @@
 
 pub mod allocation_report;
 pub(crate) mod coroutine_emit;
-pub mod graph_snapshot;
 pub mod mir_emit;
 pub mod shader_artifact;
-pub mod site_join;
 
 /// Whether emitted Lua carries LuaJIT line directives (`ROCK_SKULL_LINE_DIRECTIVES`).
 pub use skull_codegen_lua::line_directives_mode;

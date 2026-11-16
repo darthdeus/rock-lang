@@ -19,9 +19,9 @@
 use crate::common::{body_id, stdlib_asts, ws_of_files};
 use std::collections::BTreeSet;
 
+use crate::support::graph_snapshot::{canonical, instance_key};
 use bone_incremental::session::{NsAliases, Session, SessionFile, UpdateTier};
 use bone_semantic::inference::Workspace;
-use skull::graph_snapshot::{canonical, instance_key};
 use skull::instance_graph::{self, Instance, InstanceGraph, RejectionKind, UpdateStats};
 
 /// The compilation target's own directory. Everything outside it is a LIBRARY,

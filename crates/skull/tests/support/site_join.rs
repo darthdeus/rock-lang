@@ -9,7 +9,7 @@
 //! though they are not calls.
 //!
 //! **The phase is POST-TRANSFORM, and that is load-bearing.** Emission renders
-//! the body that comes out of [`crate::mir_emit::prepare_instance_body_with_plans`] --
+//! the body that comes out of [`skull::mir_emit::prepare_instance_body_with_plans`] --
 //! inlined, cleaned, closure-converted, FORL-recovered -- so that is the only
 //! body whose calls are the ones actually emitted. Measuring the raw lowering
 //! output would count calls inlining deletes and miss calls it splices in, and
@@ -43,8 +43,8 @@ use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::{Inst, MirFunc};
 use skull_mir::site::{CallSite, Site};
 
-use crate::concrete_body::{Callee, ConcreteBodies};
-use crate::instance_graph::{Instance, InstanceGraph};
+use skull::concrete_body::{Callee, ConcreteBodies};
+use skull::instance_graph::{Instance, InstanceGraph};
 
 /// Why a call instruction is not joined. Every arm is a real population with a
 /// count, so "0 unjoined" is a claim about a stated space rather than about
@@ -562,13 +562,13 @@ fn resolve_owner<'a>(
 
 /// Whether skull lowers a standalone body for this declaration at all.
 ///
-/// Delegates to [`crate::mir_emit::is_cached_body`], the definition loop's OWN
+/// Delegates to [`skull::mir_emit::is_cached_body`], the definition loop's OWN
 /// admission rule, plus the presence of a body to lower. A restatement of that
 /// rule here would be free to be weaker and silently drift, which is how the
 /// census would end up measuring a population emission does not have.
 fn has_lowered_body(ws: &Workspace, fref: skull_mir::mir::FuncRef) -> bool {
     let f = &ws.module(fref.module).functions[fref.func];
-    crate::mir_emit::is_cached_body(f)
+    skull::mir_emit::is_cached_body(f)
         && ws
             .module(fref.module)
             .bodies
@@ -582,7 +582,7 @@ fn has_lowered_body(ws: &Workspace, fref: skull_mir::mir::FuncRef) -> bool {
 /// mutation that stops at [`check_callee`] proves the comparison rather than
 /// that the corrupted record travels through `reachable_call_rows` and lands in
 /// a census bucket. `mf` must already be through
-/// [`crate::mir_emit::prepare_instance_body_with_plans`], which is the phase the join is
+/// [`skull::mir_emit::prepare_instance_body_with_plans`], which is the phase the join is
 /// measured at.
 pub fn measure_prepared_body(
     ws: &Workspace,
@@ -748,7 +748,7 @@ pub fn census(
 /// Detail is a parameter rather than always-on because the rows are per CALL
 /// and the corpus has hundreds of thousands; the manifest writes them only when
 /// asked for a dump directory.
-pub(crate) fn census_detailed(
+fn census_detailed(
     ws: &Workspace,
     scx: &ScalarCtx,
     g: &InstanceGraph,
@@ -797,7 +797,7 @@ pub(crate) fn census_detailed(
         };
         // THE emitted body: the same sequence `emit_spec_chunk` runs.
         let name = skull_mir::mangle::mangle_fn(ws, f);
-        if crate::mir_emit::prepare_instance_body_with_plans(
+        if skull::mir_emit::prepare_instance_body_with_plans(
             ws,
             scx,
             inst.func,
@@ -836,7 +836,7 @@ pub enum CalleeCheck {
     /// identity is its declaration, class, target and spelling rather than a
     /// Rock instantiation. Counted apart from `NonGeneric` because a boundary
     /// CAN be generic -- what it cannot have is a Rock body per instantiation.
-    Boundary(crate::instance_graph::BoundaryClass),
+    Boundary(skull::instance_graph::BoundaryClass),
     /// Declaration agrees and the callee is non-generic, so it has exactly one
     /// instance and there are no arguments to compare.
     NonGeneric,
@@ -1044,7 +1044,7 @@ fn classify(
 
     let synthesized = match cs.site.op {
         skull_mir::site::SiteOp::Synthesized(name) => {
-            crate::concrete_body::synthesized_callee(ws, g, name)
+            skull::concrete_body::synthesized_callee(ws, g, name)
         }
         _ => None,
     };

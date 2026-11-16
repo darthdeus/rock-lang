@@ -2,7 +2,7 @@
 //! (plan S 9 / Stage 3, phase A3).
 //!
 //! `MirFunc::callee_instances` is the call's CLAIM about which concrete
-//! instance it targets, and `skull::site_join` compares it against the graph's
+//! instance it targets, and `crate::support::site_join` compares it against the graph's
 //! own substitution. Both derive it from ONE oracle,
 //! `skull_mir::monoty::convert`. A second, narrower converter is the failure
 //! this guards: one that declines a function type gives `unwrap<fn()>` a graph
@@ -15,9 +15,9 @@
 //! property the identity exists for.
 
 use crate::common::{census_of, graph_of, module_id, unjoined, ws_with_stdlib};
+use crate::support::site_join::{SiteJoinCensus, Unjoined};
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::InstanceGraph;
-use skull::site_join::{SiteJoinCensus, Unjoined};
 use ustr::Ustr;
 
 /// The rendered instantiations of every instance of `<test>`'s fn `name`.
@@ -50,7 +50,7 @@ fn assert_population(c: &SiteJoinCensus) {
     assert!(c.accounts(), "accounting identity broken: {c:?}");
     let failed = c
         .bodies_skipped
-        .get(&skull::site_join::BodySkip::LowerFailed)
+        .get(&crate::support::site_join::BodySkip::LowerFailed)
         .copied()
         .unwrap_or(0);
     assert_eq!(
@@ -371,7 +371,7 @@ fn main() { print("x") }
 
     // CONTROL: an exact match joins, or the refusal below proves nothing.
     assert_eq!(
-        skull::site_join::check_callee(
+        crate::support::site_join::check_callee(
             &ws,
             &g,
             &skull::concrete_body::Callee::Rock(inst(decls[0])),
@@ -380,13 +380,13 @@ fn main() { print("x") }
             lua,
         )
         .outcome(),
-        Ok(skull::site_join::Verified::NonGeneric),
+        Ok(crate::support::site_join::Verified::NonGeneric),
     );
 
     // The defect: the FIRST declaration's instance offered for a call that
     // targets the SECOND. Same name, same rendered signature, different body.
     assert_eq!(
-        skull::site_join::check_callee(
+        crate::support::site_join::check_callee(
             &ws,
             &g,
             &skull::concrete_body::Callee::Rock(inst(decls[0])),

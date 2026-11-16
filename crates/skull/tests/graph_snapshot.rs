@@ -15,9 +15,9 @@
 use crate::common::ws_of_files;
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::support::graph_snapshot::{CanonicalGraph, canonical};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::Span;
-use skull::graph_snapshot::{CanonicalGraph, canonical};
 use skull::instance_graph::{
     self, Agreed, AlwaysEmittedFailure, AlwaysEmittedOutcome, Boundary, BoundaryClass, DeclKey,
     EdgeKind, Instance, InstanceBoundNext, InstanceBoundTree, InstanceGraph, Owner, Rejection,

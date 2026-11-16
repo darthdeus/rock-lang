@@ -8,9 +8,9 @@
 use crate::common::{stdlib_asts, try_ws_of_files};
 use std::path::{Path, PathBuf};
 
+use crate::support::graph_snapshot::canonical;
 use bone_incremental::session::{NsAliases, Session, SessionFile};
 use bone_semantic::inference::Workspace;
-use skull::graph_snapshot::canonical;
 use skull::instance_graph::{self, InstanceGraph, RunStats};
 
 const PROJ: &str = "proj/";

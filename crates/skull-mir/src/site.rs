@@ -17,8 +17,8 @@
 //! - `skull::concrete_body::ConcreteBody`'s callee tables, keyed by it.
 //!
 //! Those three are INTENDED to agree, and the agreement is MEASURED rather than
-//! assumed: `skull::site_join::census` reports the join with every exclusion
-//! named by cause. It is not yet total.
+//! assumed: the site-join census in skull's tests reports the join with every
+//! exclusion named by cause. It is not yet total.
 //!
 //! Correlating them by span could not even detect a disagreement -- several of
 //! these share one span, which is the whole reason the operation is in the key.

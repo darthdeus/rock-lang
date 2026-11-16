@@ -733,7 +733,7 @@ pub(super) fn emit_pass_nested_fns(
 /// NEITHER: it is emitted STANDALONE per instantiation, resolving its
 /// placeholder bound-calls from the tree that specialization demand carries, so
 /// there is no declaration-keyed chunk to cache.
-pub(crate) fn is_cached_body(f: &bone_semantic::hir::Function) -> bool {
+pub fn is_cached_body(f: &bone_semantic::hir::Function) -> bool {
     !f.is_extern && f.inline_body.is_none() && !fn_has_bounds(f) && !is_generic(f)
 }
 
@@ -965,7 +965,7 @@ pub(super) fn order_specialized_callees<'c>(
 
 /// **THE transform sequence an instance body is emitted through.**
 ///
-/// Extracted so `emit_spec_chunk` and `skull::site_join`'s census
+/// Extracted so `emit_spec_chunk` and the site-join census in skull's tests
 /// consume ONE sequence rather than two that agree today. The census's whole
 /// claim is about the body EMISSION sees, so a census that re-listed these
 /// passes would be free to drift into measuring a body no emitter renders --

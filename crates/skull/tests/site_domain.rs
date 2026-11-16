@@ -11,10 +11,10 @@
 use crate::common::{
     census_of, fn_name, graph_of, module_id, prepared_body, unjoined, ws_with_stdlib,
 };
+use crate::support::site_join::Unjoined;
 use bone_semantic::inference::Workspace;
 use skull::concrete_body::Callee;
 use skull::instance_graph::InstanceGraph;
-use skull::site_join::Unjoined;
 use skull_mir::mir::MirFunc;
 use skull_mir::site::SiteDomain;
 

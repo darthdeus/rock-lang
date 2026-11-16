@@ -2551,7 +2551,7 @@ impl<'a> Builder<'a> {
         // rejection.
         //
         // Not yet total: a call emitted outside any expression carries no site,
-        // reported by `skull::site_join::census` rather than assumed away.
+        // reported by the site-join census in skull's tests rather than assumed away.
         // A fn-value MINT is stamped too. It is not a call, but it is a callee
         // OBLIGATION -- the one place a declaration becomes a spelled value --
         // and the graph records it at the same `Site { expr, FnValue }`. Keyed
