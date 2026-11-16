@@ -118,6 +118,17 @@ fn vec_returning_and_intrinsics() {
 }
 
 #[test]
+fn a_user_fn_named_like_an_intrinsic_is_its_own_function() {
+    let src = r#"
+        @pure fn abs(b: bool) -> int { if b { return 5 } return 7 }
+        @pure fn root() -> int { return abs(true) * 10 + abs(false) }
+    "#;
+    let glsl = emit(src, &["root"]).expect("emit");
+    assert_has(&glsl, "int abs_bool(bool b) {");
+    assert_has(&glsl, "return ((abs_bool(true) * 10) + abs_bool(false));");
+}
+
+#[test]
 fn vec3_vec4_constructors() {
     // A shader that computes a color from scratch needs vecN construction --
     // v(r,g,b) / v(r,g,b,a) must lower to GLSL vec3()/vec4(), not a struct.

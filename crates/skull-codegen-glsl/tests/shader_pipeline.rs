@@ -26,8 +26,9 @@ fn vector_scalar_bounds_are_splatted() {
             .map(|c| format!("max(a.{c}, b)"))
             .collect::<Vec<_>>()
             .join(", ");
-        // Scalar min/max overloads exercise the intrinsic mapping alongside
-        // the stdlib's scalar clamp and vector-bound overloads.
+        // The stdlib's scalar-bound clamp splats into GLSL's vector clamp. The
+        // user's scalar min/max overloads share GLSL builtin names but are their
+        // own functions, so their bodies are emitted and called.
         let src = format!(
             r#"
             fn Vec{width}.min(a, b: float) -> Vec{width} {{ return v({min}) }}
@@ -50,8 +51,9 @@ fn vector_scalar_bounds_are_splatted() {
             .expect("emit");
         for expected in [
             format!("clamp(a, vec{width}(0.0), vec{width}(6.0))"),
-            format!("min(a, vec{width}(6.0))"),
-            format!("max(a, vec{width}(0.0))"),
+            format!("vec{width} min_Vec{width}_float(vec{width} a, float b) {{"),
+            format!("min_Vec{width}_float(a, 6.0)"),
+            format!("max_Vec{width}_float(a, 0.0)"),
             "clamp(a, a, a)".to_string(),
             "min(a, a)".to_string(),
             "max(a, a)".to_string(),

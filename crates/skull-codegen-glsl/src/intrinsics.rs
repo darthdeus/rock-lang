@@ -6,9 +6,8 @@ use super::*;
 /// (name, arity) -> `$1..$n` expression template. Single source for both
 /// [`GlslIntrinsics::lookup`] (call-site rendering) and
 /// [`GlslIntrinsics::entries`] (the fail-closed key surface), so the two can
-/// never drift. Keyed by base name + arity (a user fn that merely shares a name
-/// still resolves here -- acceptable for the restricted profile; the stdlib owns
-/// these names). Vector operators (`__op_*` reaching codegen are non-scalar, so
+/// never drift. Keyed by base name + arity over stdlib declarations only (see
+/// [`intrinsic_template`]). Vector operators (`__op_*` reaching codegen are non-scalar, so
 /// Vec) are handled at the call site, not here.
 const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     ("sin", 1, "sin($1)"),
@@ -86,8 +85,15 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
 ];
 
 /// The GLSL intrinsic template for a callee, or `None` if it must be emitted as
-/// a GLSL fn definition. Backs [`GlslIntrinsics::lookup`].
+/// a GLSL fn definition. Backs [`GlslIntrinsics::lookup`]. Only the stdlib's
+/// declarations are keyed (the Vec methods and constructors are plain stdlib
+/// fns): a user fn that shares a name and arity is its own function.
 pub(crate) fn intrinsic_template(f: &Function) -> Option<&'static str> {
+    if !skull_mir::intrinsics::is_intrinsic(f)
+        && !bone_core::modules::is_stdlib_module_file(f.span.file.as_str())
+    {
+        return None;
+    }
     let n = declared_name(f.name.as_str());
     let arity = f.param_decls.len();
     GLSL_INTRINSICS
