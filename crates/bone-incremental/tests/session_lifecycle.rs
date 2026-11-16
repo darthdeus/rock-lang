@@ -1,8 +1,9 @@
-//! The builtin module's lifetime through a production session lifecycle.
+//! Workspace invariants through a production session lifecycle.
 //! `Workspace::new` puts the synthetic `$builtin` module, owner of every
 //! builtin type node, in the ordinary module table. Editing, re-lowering,
 //! rebuilding and evicting must keep it, and source-module counts and user
-//! iteration must leave it out.
+//! iteration must leave it out. A failed full rebuild keeps the last-good
+//! workspace.
 
 use bone_incremental::session::{Session, SessionFile, UpdateTier};
 use bone_semantic::prelude::*;
@@ -107,4 +108,42 @@ fn eviction_keeps_the_builtin_module() {
         before,
         "evicting every module must leave the builtin module's slot alone"
     );
+}
+
+/// A failed `rebuild_users` leaves the last-good workspace. Modules are
+/// interned into `module_ids` before `insert_module` grows `modules`, so a
+/// mid-build error once left `module_ids` ahead of `modules` and the next
+/// `ws.module(mid)` panicked out of bounds. A duplicate global fails in
+/// `register_globals`, after interning and before insertion.
+#[test]
+fn failed_rebuild_users_keeps_workspace_consistent() {
+    let mut s = session();
+    assert_eq!(s.ws.modules.len(), s.ws.module_ids.len());
+    let good_len = s.ws.modules.len();
+
+    s.files.get_mut("b.rock").unwrap().text =
+        "global dup: int = 1\nglobal dup: int = 2\n".to_string();
+    assert!(
+        s.rebuild_users().is_err(),
+        "a duplicate global fails the rebuild"
+    );
+
+    assert_eq!(s.ws.modules.len(), s.ws.module_ids.len());
+    assert_eq!(s.ws.modules.len(), good_len);
+    for &mid in s.ws.module_ids.values() {
+        let _ = s.ws.module(mid);
+    }
+}
+
+/// The host resolves build variables once onto the session's workspace
+/// (`bone_session_for_emission`); a full rebuild replaces that workspace and
+/// has to carry them over.
+#[test]
+fn rebuild_users_keeps_the_comptime_inputs() {
+    let mut s = session();
+    s.ws.comptime_inputs.channel = "dev".to_string();
+    s.ws.comptime_inputs.modules_mode = "v1".to_string();
+    s.rebuild_users().expect("an unchanged program rebuilds");
+    assert_eq!(s.ws.comptime_inputs.channel, "dev");
+    assert_eq!(s.ws.comptime_inputs.modules_mode, "v1");
 }
