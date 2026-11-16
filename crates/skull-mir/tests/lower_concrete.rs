@@ -9,10 +9,112 @@ use skull_mir::lower::{
 use skull_mir::mir::{Inst, MirFunc, ValueCtorForm};
 use skull_mir::monoty::{MonoInterner, MonoTy};
 
+#[test]
+fn coroutine_flat_refs_reject_at_the_call_with_a_user_diagnostic() {
+    for call in ["bump(xs[0])", "relay(xs[0])"] {
+        let ws = crate::common::checked_ws_of(&format!(
+            "value Cell {{ w: int }}\n\
+             co fn bump(c: ref Cell) -> Coroutine<int> {{ c.w += 1; yield c.w }}\n\
+             fn relay(c: ref Cell) -> Coroutine<int> {{ return bump(c) }}\n\
+             fn main() {{ let xs: [Cell] = [Cell {{ w: 1 }}]; let c = {call} }}"
+        ));
+        let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
+        let (fid, _) = ws
+            .module(mid)
+            .functions
+            .iter()
+            .find(|(_, f)| f.name == "main")
+            .unwrap();
+        for backend in [
+            bone_core::hir::FnBackend::Lua,
+            bone_core::hir::FnBackend::Js,
+        ] {
+            let err = lower_test_root_with_context(
+                &ws,
+                mid,
+                fid,
+                ScalarCtx::new(&ws).with_target(backend),
+            )
+            .expect_err("flat coroutine arguments must reject");
+            assert!(
+                err.message.contains(
+                    "cannot pass a reference to a flat-stored container element to coroutine `bump`"
+                ),
+                "{backend:?} {call}: {err:?}"
+            );
+            assert!(!err.message.contains("lowering gap"), "{err:?}");
+            assert_eq!(err.location.file.as_str(), "<test>");
+        }
+    }
+}
+
+#[test]
+fn checked_compound_assignments_only_keep_safe_navigation_targets() {
+    use bone_core::hir::Expr;
+
+    let ws = crate::common::checked_ws_of(
+        "struct Boxed { x: int, next: Boxed? }\n\
+         fn update(b: Boxed?, x: int) {\n\
+             let n = x\n\
+             n += 1\n\
+             let xs: [int] = [1]\n\
+             xs[0] += 2\n\
+             b?.x += 3\n\
+             b?.next?.x += 4\n\
+         }",
+    );
+    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
+    let module = ws.module(mid);
+    let (fid, _) = module
+        .functions
+        .iter()
+        .find(|(_, f)| f.name == "update")
+        .unwrap();
+    let body = &module.bodies[&bone_core::hir::BodyOwner::Function(fid)];
+    let targets: Vec<_> = body
+        .expr_arena
+        .iter()
+        .filter_map(|(_, expr)| {
+            if let Expr::CompoundAssign { target, .. } = expr {
+                Some(*target)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(targets.len(), 2);
+    assert!(
+        targets
+            .iter()
+            .all(|target| matches!(body.expr_arena[*target], Expr::SafeNav { .. }))
+    );
+    lower_test_root(&ws, mid, fid).expect("safe-navigation assignments lower");
+
+    for target in ["b?.next.x", "b?.xs[0]"] {
+        let ws = crate::common::ws_of(&format!(
+            "struct Boxed {{ x: int, next: Boxed, xs: [int] }}\n\
+             fn update(b: Boxed?) {{ {target} += 1 }}"
+        ));
+        assert!(
+            !skull_mir::verdict::body_errors(&ws).is_empty(),
+            "{target} must be rejected before MIR"
+        );
+    }
+}
+
 fn lower_test_root(
     ws: &bone_core::workspace::Workspace,
     mid: bone_core::prelude::ModuleId,
     fid: comfy_la_arena::Idx<bone_core::hir::Function>,
+) -> Result<skull_mir::mir::MirFunc, skull_parser::CompilerError> {
+    lower_test_root_with_context(ws, mid, fid, ScalarCtx::new(ws))
+}
+
+fn lower_test_root_with_context(
+    ws: &bone_core::workspace::Workspace,
+    mid: bone_core::prelude::ModuleId,
+    fid: comfy_la_arena::Idx<bone_core::hir::Function>,
+    scx: ScalarCtx,
 ) -> Result<skull_mir::mir::MirFunc, skull_parser::CompilerError> {
     let root = skull_mir::mir::FuncRef {
         module: mid,
@@ -21,11 +123,37 @@ fn lower_test_root(
     let interner = Arc::new(MonoInterner::new());
     let graph = instance_graph::build_in(ws, vec![root], false, Arc::clone(&interner));
     let concrete = skull_graph::concrete_body::build(ws, &graph);
-    let scx = ScalarCtx::new(ws).sharing(interner);
+    let scx = scx.sharing(interner);
     let plan = concrete.plans.get(&Instance::base(root)).ok_or_else(|| {
         skull_parser::CompilerError::new_no_location("no concrete plan for test root")
     })?;
     lower_instance_with_plans(ws, &scx, plan, &concrete.plans)
+}
+
+#[test]
+fn nested_first_class_field_updates_rebuild_every_parent() {
+    let ws = crate::common::checked_ws_of(
+        "value Inner { x: int, y: int }\n\
+         value Outer { inner: Inner, z: int }\n\
+         fn update(p: Outer) -> int { let old = p.inner.x++; return old + p.inner.x }",
+    );
+    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
+    let (fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name == "update")
+        .unwrap();
+    let mir = lower_test_root_with_context(&ws, mid, fid, ScalarCtx::new_values_first_class(&ws))
+        .expect("nested first-class update lowers before the shader profile gate");
+    for name in ["Inner", "Outer"] {
+        value_constructor(&mir, name);
+    }
+    assert!(
+        !mir.insts
+            .iter()
+            .any(|(_, inst)| matches!(inst, Inst::StoreField { .. }))
+    );
 }
 
 fn value_constructor(mir: &MirFunc, name: &str) -> Idx<Inst> {

@@ -1837,7 +1837,6 @@ impl<'a> Builder<'a> {
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
         let f32_target = self.assign_target_is_f32(target);
-        let nobox_global_place = self.nobox_global_place(target)?;
         let scalar = self.arith_ty(target).zip(self.arith_ty(value));
         // Non-scalar: resolve the operator overload once (overload target on the
         // expr, else the named op fn).
@@ -1852,36 +1851,29 @@ impl<'a> Builder<'a> {
         let combine = |s: &mut Self, cur| {
             s.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)
         };
-        match self.body.expr_arena[target] {
-            // `base?.field <op>= value` — skip silently if any `?.` link is null.
-            // The read-modify-write and `value` run only on the non-null path.
-            Expr::SafeNav { .. }
-                if let Some((guards, cells, FieldShape::Prim)) = self.group_leaf_walk(target) =>
-            {
-                let join = self.f.new_block();
-                self.group_presence_guard(&guards, join);
-                let cell = cells[0].cell();
-                let cur = self.emit_cur(Inst::Load(cell));
-                let new_v = combine(self, cur)?;
-                self.store_cell(cell, new_v);
-                self.f.set_term(self.cur, Term::Goto(join));
-                self.cur = join;
-            }
-            Expr::SafeNav { base, field } => {
-                let join = self.f.new_block();
-                let recv = self.lower_guarded_place_base(base, join)?;
-                let store_bb = self.f.new_block();
-                self.branch_on_nil(recv, join, store_bb);
-                self.cur = store_bb;
-                let cur = self.read_field(recv, field);
-                let new_v = combine(self, cur)?;
-                self.write_field(recv, field, new_v);
-                self.f.set_term(self.cur, Term::Goto(join));
-                self.cur = join;
-            }
-            _ => {
-                self.lower_read_modify_write(target, nobox_global_place, None, combine)?;
-            }
+        let Expr::SafeNav { base, field } = self.body.expr_arena[target] else {
+            unreachable!("compound assignment without a top-level safe navigation")
+        };
+        if let Some((guards, cells, FieldShape::Prim)) = self.group_leaf_walk(target) {
+            let join = self.f.new_block();
+            self.group_presence_guard(&guards, join);
+            let cell = cells[0].cell();
+            let cur = self.emit_cur(Inst::Load(cell));
+            let new_v = combine(self, cur)?;
+            self.store_cell(cell, new_v);
+            self.f.set_term(self.cur, Term::Goto(join));
+            self.cur = join;
+        } else {
+            let join = self.f.new_block();
+            let recv = self.lower_guarded_place_base(base, join)?;
+            let store_bb = self.f.new_block();
+            self.branch_on_nil(recv, join, store_bb);
+            self.cur = store_bb;
+            let cur = self.read_field(recv, field);
+            let new_v = combine(self, cur)?;
+            self.write_field(recv, field, new_v);
+            self.f.set_term(self.cur, Term::Goto(join));
+            self.cur = join;
         }
         Ok(())
     }
@@ -1969,26 +1961,21 @@ impl<'a> Builder<'a> {
                 bumped
             }
         };
-        let result =
-            self.lower_read_modify_write(target, nobox_global_place, Some(postfix), |s, old| {
-                Ok(bump(s, old))
-            })?;
-        Ok(result.expect("a requested result"))
+        self.lower_read_modify_write(target, nobox_global_place, postfix, |s, old| {
+            Ok(bump(s, old))
+        })
     }
 
     /// Read `target`, store `update` of the read back into it, and yield the old
-    /// value (`Some(true)`), the new one (`Some(false)`) or nothing (`None`).
-    /// `x++` passes a result; `x op= v` does not, and refuses a `nobox` global,
-    /// which bone desugars before skull sees it: the rejection surfaces a future
-    /// routing change instead of a silent read of a nil global.
+    /// value for postfix increments/decrements, the new one for prefix.
     fn lower_read_modify_write(
         &mut self,
         target: Idx<Expr>,
         nobox_global_place: Option<(Vec<Ustr>, Option<ValueShape>)>,
-        result: Option<bool>,
+        postfix: bool,
         update: impl FnOnce(&mut Self, Idx<Inst>) -> Result<Idx<Inst>, CompilerError>,
-    ) -> Result<Option<Idx<Inst>>, CompilerError> {
-        let pick = |old, new| result.map(|postfix| if postfix { old } else { new });
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let pick = |old, new| if postfix { old } else { new };
         match self.body.expr_arena[target] {
             Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
                 let name = self.static_cells[&raw(b)];
@@ -2006,9 +1993,6 @@ impl<'a> Builder<'a> {
                 let new = update(self, old)?;
                 self.store_cell(cell, new);
                 Ok(pick(old, new))
-            }
-            _ if nobox_global_place.is_some() && result.is_none() => {
-                Err(gap("compound assignment reached a `nobox` global place"))
             }
             // A primitive leaf of a `nobox` global (`SPOT.x++`) is its own global.
             // `arith_ty` already restricted the target to a scalar, so a whole
@@ -2030,7 +2014,8 @@ impl<'a> Builder<'a> {
             Expr::FieldAccess { .. }
                 if let Some((cell, path)) = self.first_class_field_place(target) =>
             {
-                self.first_class_field_update(cell, &path, result, update)
+                self.first_class_field_update(cell, &path, Some(postfix), update)
+                    .map(|value| value.expect("increment/decrement requests a result"))
             }
             Expr::FieldAccess { .. }
                 if let Some((cells, FieldShape::Prim)) = self.group_leaf_place(target) =>

@@ -1,0 +1,24 @@
+value RecursiveRefCell { w: int }
+
+fn recursive_ref_first(c: ref RecursiveRefCell, n: int) -> ref RecursiveRefCell {
+    if n == 0 { return c }
+    return recursive_ref_second(c, n - 1)
+}
+
+fn recursive_ref_second(c: ref RecursiveRefCell, n: int) -> ref RecursiveRefCell {
+    return recursive_ref_third(c, n)
+}
+
+fn recursive_ref_third(c: ref RecursiveRefCell, n: int) -> ref RecursiveRefCell {
+    return recursive_ref_first(c, n)
+}
+
+fn recursive_ref_write(c: ref RecursiveRefCell) { c.w += 1 }
+
+@test
+fn mutually_recursive_ref_returns_settle_on_the_flat_element_storage() {
+    let xs: [RecursiveRefCell] = [RecursiveRefCell { w: 7 }, RecursiveRefCell { w: 13 }]
+    recursive_ref_write(recursive_ref_first(xs[0], 5))
+    assert_eq(xs[0].w, 8)
+    assert_eq(xs[1].w, 13)
+}

@@ -1,0 +1,29 @@
+//! Error: flat element references are unsupported coroutine arguments.
+//! Tags: coroutines, refs, flat-storage
+
+//=== TEST CASE: coroutine_cannot_receive_a_flat_element_ref ===
+//! expect: cannot pass a reference to a flat-stored container element to coroutine `bump`
+value Cell { w: int }
+co fn bump(c: ref Cell) -> Coroutine<int> {
+    c.w += 1
+    yield c.w
+}
+fn main() {
+    let xs: [Cell] = [Cell { w: 1 }]
+    let c = bump(xs[0])
+    resume(c)
+}
+
+//=== TEST CASE: coroutine_cannot_receive_a_forwarded_flat_element_ref ===
+//! expect: cannot pass a reference to a flat-stored container element to coroutine `bump`
+value Cell { w: int }
+co fn bump(c: ref Cell) -> Coroutine<int> {
+    c.w += 1
+    yield c.w
+}
+fn relay(c: ref Cell) -> Coroutine<int> { return bump(c) }
+fn main() {
+    let xs: [Cell] = [Cell { w: 1 }]
+    let c = relay(xs[0])
+    resume(c)
+}

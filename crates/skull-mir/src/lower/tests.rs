@@ -53,6 +53,47 @@ fn spec_fn(ws: &Workspace, mid: ModuleId, name: &str) -> FuncRef {
 }
 
 #[test]
+fn uniform_values_rejects_missing_and_unresolved_inference_records() {
+    let (ws, mid) = spec_ws("fn vals(u: int) -> int { u }\nfn main() { vals(1) }");
+    let main = spec_fn(&ws, mid, "main");
+    let vals = spec_fn(&ws, mid, "vals");
+    let owner = BodyOwner::Function(main.func);
+    let body = &ws.module(mid).bodies[&owner];
+    let (call, args) = body
+        .expr_arena
+        .iter()
+        .find_map(|(e, expr)| {
+            if let Expr::Call { args, .. } = expr {
+                Some((e, args.into_iter().collect::<Vec<_>>()))
+            } else {
+                None
+            }
+        })
+        .expect("call");
+    let mut inf = ws.inference(mid).unwrap().per_fn[&owner].clone();
+    let decl = &ws.module(mid).functions[vals.func];
+    inf.expr_types.remove(call);
+    let err = uniform_values_rejection_for_call(&ws, &inf, body, call, decl, &args)
+        .expect("a missing packet inference record must reject");
+    assert!(
+        err.message.contains("has no inferred packet result"),
+        "{err:?}"
+    );
+
+    let unresolved = inf.ty_arena.alloc(TypeExpr::Infer(
+        bone_core::hir::VarId(u32::MAX),
+        ustr::Ustr::from("packet"),
+    ));
+    inf.expr_types.insert(call, TyId::Local(unresolved));
+    let err = uniform_values_rejection_for_call(&ws, &inf, body, call, decl, &args)
+        .expect("an unresolved packet inference record must reject");
+    assert!(
+        err.message.contains("has no concrete packet result"),
+        "{err:?}"
+    );
+}
+
+#[test]
 fn first_class_context_skips_value_ref_facts_and_updates() {
     let (ws, mid) = spec_ws(
         "fn target(x: int) -> int { x }\n\

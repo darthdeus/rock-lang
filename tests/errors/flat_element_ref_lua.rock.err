@@ -28,7 +28,7 @@ fn main() {
 }
 
 //=== TEST CASE: safe_nav_call_cannot_receive_a_flat_ref_result ===
-//! expect: returns a `ref` to a flat-stored container element, which only a direct call can receive
+//! expect: returns a `ref` to a flat-stored container element, which only a direct call can receive on this backend
 value Cell { w: int }
 
 fn borrow_cell(a: Arena<Cell>, e: Entity<Cell>) -> (ref Cell)? {

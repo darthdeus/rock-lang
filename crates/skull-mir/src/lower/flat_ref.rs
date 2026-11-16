@@ -507,9 +507,9 @@ impl<'a> Builder<'a> {
         returns: &[Idx<Expr>],
         depth: usize,
     ) -> Result<Option<Option<FlatRefKey>>, CompilerError> {
-        // Unknown, then the first answer, then its confirmation.
-        const PASSES: usize = 3;
-        for _ in 0..PASSES {
+        // Agreement only refines an unknown answer. Once known, a return
+        // either confirms it or agree_flat_returns rejects the disagreement.
+        loop {
             let answer = self.agree_flat_returns(decl, returns, depth)?;
             let mut reg = self.flat_variants.borrow_mut();
             let scan = &mut reg.scanning[depth];
@@ -523,15 +523,6 @@ impl<'a> Builder<'a> {
                 _ => return Ok(answer),
             }
         }
-        Err(CompilerError::new_with_label(
-            decl.name_span,
-            format!(
-                "`{}` returns a `ref` whose storage does not settle across its recursive calls; \
-                 the Lua backend passes a flat-stored element `ref` as the container and a slot, \
-                 so every return must address the same storage",
-                decl.name
-            ),
-        ))
     }
 
     fn agree_flat_returns(
@@ -541,7 +532,7 @@ impl<'a> Builder<'a> {
         depth: usize,
     ) -> Result<Option<Option<FlatRefKey>>, CompilerError> {
         let unknown_reads = || self.flat_variants.borrow().scanning[depth].unknown_reads;
-        let mut agreed: Option<Option<FlatRefKey>> = None;
+        let mut agreed = self.flat_variants.borrow().scanning[depth].assumed;
         for &r in returns {
             if matches!(self.body.expr_arena[r], Expr::Null) || is_phantom_call(self.body, r) {
                 continue;
@@ -598,7 +589,7 @@ impl<'a> Builder<'a> {
             self.body.expr_spans[e],
             format!(
                 "`{}` returns a `ref` to a flat-stored container element, which only a direct \
-                 call can receive on the Lua backend",
+                 call can receive on this backend",
                 decl.name
             ),
         ))
@@ -816,7 +807,11 @@ impl<'a> Builder<'a> {
             return unsupported("its body is inline Lua");
         }
         if decl.is_coroutine {
-            return unsupported("it is a coroutine");
+            return Err(self.located(CompilerError::new_no_location(format!(
+                "cannot pass a reference to a flat-stored container element to coroutine `{}`; \
+                 pass the container and index instead",
+                decl.name
+            ))));
         }
         let Some(body) = module.bodies.get(&BodyOwner::Function(inst.func.func)) else {
             return unsupported("it has no body");
