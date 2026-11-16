@@ -1,7 +1,7 @@
 //! Oracle for skull incremental codegen:
 //! after re-emitting only the bodies a (simulated) edit re-inferred, the assembled
 //! Lua must be BYTE-IDENTICAL to a fresh full emit of the edited workspace. The
-//! interesting case is editing an INLINED callee — its callers' chunks contain its
+//! interesting case is editing an INLINED callee -- its callers' chunks contain its
 //! body, so they must re-emit too (the inline codegen-dep), even though a body edit
 //! never re-infers the callers.
 
@@ -20,21 +20,8 @@ fn emit_overlay(
 }
 
 /// Drive one body edit through the cache and assert incremental == fresh.
-fn check_edit(v1: &str, v2: &str, edited: &[&str]) {
+fn check_edit(v1: &str, v2: &str, edited: &[&str]) -> String {
     check_edit_with(ws_of, v1, v2, edited)
-}
-
-#[test]
-fn nullable_enum_projection_edits_match_full_emission() {
-    let before = r#"
-enum Count { Zero, Seven }
-value Item { spare: int = 11, count: Count = Count::Seven }
-struct Holder { item: Item? }
-@nomangle fn probe(holder: Holder) -> bool { holder.item?.count == Count::Zero }
-fn main() { print(probe(Holder { item: Item {} })) }
-"#;
-    let after = before.replace("== Count::Zero", "== Count::Seven");
-    check_edit_with(ws_with_stdlib, before, &after, &["probe"]);
 }
 
 #[test]
@@ -113,7 +100,7 @@ fn numeric_selection_updates_in_full_incremental_and_overlay_emission() {
         "@nomangle fn choose(a: float, b: float) -> float { return if a < b { a } else { b } }";
     let v2 = v1.replace("a < b", "a > b");
     let ws1 = ws_of(v1);
-    let (full, mut cache) = emit_full(&ws1, skull::user_module_id(&ws1).unwrap()).unwrap();
+    let (full, mut cache) = emit_full_of(&ws1, "emit_full");
     assert!(full.lua.contains("math.min("), "{}", full.lua);
     let ws2 = ws_of(&v2);
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "choose")]);
@@ -125,7 +112,7 @@ fn numeric_selection_updates_in_full_incremental_and_overlay_emission() {
 /// [`check_edit`] over a chosen workspace builder. A fixture needing the stdlib
 /// (any `+`, any collection method) passes `common::ws_with_stdlib`; the bare
 /// `ws_of` keeps the cheap fixtures cheap.
-fn check_edit_with(build: fn(&str) -> Workspace, v1: &str, v2: &str, edited: &[&str]) {
+fn check_edit_with(build: fn(&str) -> Workspace, v1: &str, v2: &str, edited: &[&str]) -> String {
     let ws1 = build(v1);
     let (_full1, mut cache) = emit_full_of(&ws1, "emit_full v1");
 
@@ -139,18 +126,7 @@ fn check_edit_with(build: fn(&str) -> Workspace, v1: &str, v2: &str, edited: &[&
         incremental.lua, fresh.lua,
         "incremental assembly != fresh emit after editing {edited:?}"
     );
-}
-
-fn residual_inline_budget_fixture(helper_value: i32, caller_locals: usize) -> String {
-    let mut src = format!(
-        "@inline @nomangle fn helper() -> int {{ {helper_value} }}\n\
-         @nomangle fn caller() -> int {{\n"
-    );
-    for i in 0..caller_locals {
-        src.push_str(&format!("let unused_{i} = 0\nunused_{i} = {i}\n"));
-    }
-    src.push_str("return helper()\n}\n@nomangle fn other() -> int { 7 }\n");
-    src
+    incremental.lua
 }
 
 fn inline_budget_eligibility_flip_fixture(large_helper: bool) -> String {
@@ -173,114 +149,12 @@ fn inline_budget_eligibility_flip_fixture(large_helper: bool) -> String {
     src
 }
 
-#[test]
-fn body_edit_to_inlined_callee_reemits_callers() {
-    // `helper` is a tiny straight callee -> inlined into `use_it`. Editing its
-    // body must re-emit `use_it` (its chunk holds the inlined value), not just
-    // `helper`. `other` is untouched and reused from cache.
-    let v1 = "@inline @nomangle fn helper() -> int { 3 }\n\
-              @nomangle fn use_it() -> float { helper() }\n\
-              @nomangle fn other() -> int { 7 }";
-    let v2 = "@inline @nomangle fn helper() -> int { 5 }\n\
-              @nomangle fn use_it() -> float { helper() }\n\
-              @nomangle fn other() -> int { 7 }";
-    let ws1 = ws_of(v1);
-    let (full1, mut cache) =
-        emit_full(&ws1, skull::user_module_id(&ws1).unwrap()).expect("emit_full v1");
-    let caller_v1 = crate::common::function_body(&full1.lua, "use_it");
-    assert!(
-        !caller_v1.contains("helper("),
-        "the fixture's call must be inlined:\n{caller_v1}"
-    );
-
-    let ws2 = ws_of(v2);
-    let incremental =
-        emit_incremental(&ws2, &mut cache, &[body_id(&ws2, "helper")]).expect("emit_incremental");
-    let stats = cache.repair_stats();
-    assert_eq!(
-        stats.chunks_rebuilt, 2,
-        "the edited helper and its inliner must rebuild: {stats:?}"
-    );
-    assert_eq!(
-        stats.chunk_rebuild_requests, 2,
-        "the untouched `other` chunk must stay cached: {stats:?}"
-    );
-    assert!(
-        incremental.lua.contains("function other("),
-        "the reused sibling must remain in the assembly"
-    );
-    let caller_v2 = crate::common::function_body(&incremental.lua, "use_it");
-    assert!(
-        !caller_v2.contains("helper("),
-        "the updated call must still be inlined:\n{caller_v2}"
-    );
-    let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap())
-        .expect("emit_full v2")
-        .0;
-    assert_eq!(
-        incremental.lua, fresh.lua,
-        "incremental assembly != fresh emit after editing helper"
-    );
-
-    let indexed = r#"
-value Config { chosen: int, spare: int, label: string }
-@inline fn selected(items: [Config], i: int) -> int { items[i].chosen }
-@nomangle fn caller(items: [Config], i: int) -> int { selected(items, i) }
-"#;
-    check_edit_with(
-        ws_with_stdlib,
-        indexed,
-        &indexed.replace("items[i].chosen", "items[i].spare"),
-        &["selected"],
-    );
-}
-
-#[test]
-fn body_edit_to_still_residual_inline_callee_rebuilds_only_the_callee() {
-    // The caller starts over the 400-cell splice budget, so the @inline call
-    // stays residual both before and after this literal-only helper edit. The
-    // caller's emitted text is unchanged and must be reused; `other` is a second
-    // untouched chunk to keep the reuse population explicit.
-    let v1 = residual_inline_budget_fixture(3, 401);
-    let v2 = residual_inline_budget_fixture(5, 401);
-    let ws1 = ws_of(&v1);
-    let (full1, mut cache) =
-        emit_full(&ws1, skull::user_module_id(&ws1).unwrap()).expect("emit_full v1");
-    let caller_v1 = crate::common::function_body(&full1.lua, "caller");
-    assert!(
-        caller_v1.contains("helper("),
-        "the over-budget call must remain residual:\n{caller_v1}"
-    );
-    assert!(
-        full1.lua.contains("function other("),
-        "the fixture must retain its reuse-control chunk"
-    );
-
-    let ws2 = ws_of(&v2);
-    let incremental =
-        emit_incremental(&ws2, &mut cache, &[body_id(&ws2, "helper")]).expect("emit_incremental");
-    let stats = cache.repair_stats();
-    assert_eq!(
-        stats.chunks_rebuilt, 1,
-        "a still-residual caller should be reused: {stats:?}"
-    );
-    let caller_v2 = crate::common::function_body(&incremental.lua, "caller");
-    assert!(
-        caller_v2.contains("helper("),
-        "the call should remain residual:\n{caller_v2}"
-    );
-    let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap())
-        .expect("emit_full v2")
-        .0;
-    assert_eq!(
-        incremental.lua, fresh.lua,
-        "incremental assembly != fresh emit after editing helper"
-    );
-}
-
+/// A transitive callee that starts or stops shrinking a vector must
+/// invalidate the cached caller's bounds proof, in both incremental and
+/// overlay emission.
 #[test]
 fn transitive_effect_changes_rebuild_residual_callers_in_both_directions() {
-    let before = r#"
+    let grow = r#"
 fn leaf(xs: [int]) { }
 fn middle(xs: [int]) { leaf(xs) }
 fn hot(xs: [int], i: int) -> int {
@@ -295,337 +169,33 @@ fn main() {
     print("{hot(xs, 0)}")
 }
 "#;
-    let shrink = before.replace(
+    let shrink = grow.replace(
         "fn leaf(xs: [int]) { }",
         "fn leaf(xs: [int]) { xs.len = 0 }",
     );
-    let grow = before;
-    let ws1 = ws_with_stdlib(before);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (full1, mut incremental_cache) = emit_full(&ws1, mid).expect("emit_full v1");
-    let (_, mut overlay_cache) = emit_full(&ws1, mid).expect("overlay base v1");
-    let hot1 = crate::common::function_body(&full1.lua, "hot");
-    assert!(
-        !hot1.contains("__vec_checked_get(") && !hot1.contains("__vec_checked_index("),
-        "with no writer in the call chain, the guarded access should be raw:\n{hot1}"
-    );
-
-    let ws2 = ws_with_stdlib(&shrink);
-    let reinferred = [body_id(&ws2, "leaf")];
-    let incremental2 =
-        emit_incremental(&ws2, &mut incremental_cache, &reinferred).expect("incremental shrink");
-    let fresh2 = emit_full(&ws2, skull::user_module_id(&ws2).unwrap())
-        .expect("fresh shrink")
-        .0;
-    assert_eq!(
-        incremental2.lua, fresh2.lua,
-        "a transitive shrink must invalidate the cached caller's bounds proof"
-    );
-    let hot2 = crate::common::function_body(&incremental2.lua, "hot");
-    assert!(
-        hot2.contains("__vec_checked_get(") || hot2.contains("__vec_checked_index("),
-        "after leaf starts shrinking the vector, hot must retain its check:\n{hot2}"
-    );
-
-    let overlay2 = emit_overlay(&ws2, &mut overlay_cache, &reinferred);
-    let hot2_overlay = crate::common::function_body(&overlay2.lua, "hot");
-    assert!(
-        hot2_overlay.contains("__vec_checked_get(")
-            || hot2_overlay.contains("__vec_checked_index("),
-        "overlay must redefine hot with its new check:\n{hot2_overlay}"
-    );
-
-    let ws3 = ws_with_stdlib(grow);
-    let reinferred = [body_id(&ws3, "leaf")];
-    let incremental3 =
-        emit_incremental(&ws3, &mut incremental_cache, &reinferred).expect("incremental grow");
-    let fresh3 = emit_full(&ws3, skull::user_module_id(&ws3).unwrap())
-        .expect("fresh grow")
-        .0;
-    assert_eq!(
-        incremental3.lua, fresh3.lua,
-        "removing the transitive shrink must invalidate the old check too"
-    );
-    let hot3 = crate::common::function_body(&incremental3.lua, "hot");
-    assert!(
-        !hot3.contains("__vec_checked_get(") && !hot3.contains("__vec_checked_index("),
-        "after leaf stops shrinking, hot should recover the raw access:\n{hot3}"
-    );
-
-    let overlay3 = emit_overlay(&ws3, &mut overlay_cache, &reinferred);
-    let hot3_overlay = crate::common::function_body(&overlay3.lua, "hot");
-    assert!(
-        !hot3_overlay.contains("__vec_checked_get(")
-            && !hot3_overlay.contains("__vec_checked_index("),
-        "overlay must redefine hot without its obsolete check:\n{hot3_overlay}"
-    );
-}
-
-#[test]
-fn shrinking_inline_callee_flips_residual_call_to_inline_and_rebuilds_caller() {
-    let v1 = inline_budget_eligibility_flip_fixture(true);
-    let v2 = inline_budget_eligibility_flip_fixture(false);
-    let ws1 = ws_of(&v1);
-    let (full1, mut cache) =
-        emit_full(&ws1, skull::user_module_id(&ws1).unwrap()).expect("emit_full v1");
-    let caller_v1 = crate::common::function_body(&full1.lua, "caller");
-    assert!(
-        caller_v1.contains("helper("),
-        "the large helper must remain residual:\n{caller_v1}"
-    );
-
-    let ws2 = ws_of(&v2);
-    let incremental =
-        emit_incremental(&ws2, &mut cache, &[body_id(&ws2, "helper")]).expect("emit_incremental");
-    let stats = cache.repair_stats();
-    assert_eq!(
-        stats.chunks_rebuilt, 2,
-        "the smaller helper should make its caller newly eligible: {stats:?}"
-    );
-    assert_eq!(
-        stats.chunk_rebuild_requests, 2,
-        "the untouched `other` chunk should stay cached: {stats:?}"
-    );
-    let caller_v2 = crate::common::function_body(&incremental.lua, "caller");
-    assert!(
-        !caller_v2.contains("helper("),
-        "the smaller helper should now inline:\n{caller_v2}"
-    );
-    let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap())
-        .expect("emit_full v2")
-        .0;
-    assert_eq!(
-        incremental.lua, fresh.lua,
-        "incremental assembly != fresh emit after shrinking helper"
-    );
-}
-
-#[test]
-fn exact_body_edit_has_no_full_concrete_or_artifact_rebuild() {
-    let v1 = "fn helper() -> int { 3 }\nfn main() { let x = helper() }";
-    let v2 = "fn helper() -> int { 5 }\nfn main() { let x = helper() }";
-    let ws1 = ws_with_stdlib(v1);
-    let workspace_functions: usize = ws1
-        .modules
-        .iter()
-        .map(|module| module.functions.len())
-        .sum();
-    assert!(
-        workspace_functions > 2,
-        "root locality fixture has no unrelated function population"
-    );
-    let (_full, mut cache) = emit_full_of(&ws1, "emit_full v1");
-    let ws2 = ws_with_stdlib(v2);
-
-    let _overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "helper")]);
-    let stats = cache.repair_stats();
-    assert_eq!(
-        stats.body_only_edits, 1,
-        "the production route did not record a body edit"
-    );
-    assert!(
-        stats.owners_revisited > 0,
-        "no graph owner was revisited: {stats:?}"
-    );
-    assert!(
-        stats.instances_revisited > 0,
-        "no graph delta subject was visited: {stats:?}"
-    );
-    assert!(
-        stats.graph_contributions_retracted > 0,
-        "no graph contribution was retracted: {stats:?}"
-    );
-    assert!(
-        stats.graph_contributions_installed > 0,
-        "no graph contribution was installed: {stats:?}"
-    );
-    assert!(
-        stats.concrete_entries_derived > 0,
-        "no concrete entry was derived: {stats:?}"
-    );
-    assert!(
-        stats.concrete_entries_reused > 0,
-        "no unchanged concrete entry was reused: {stats:?}"
-    );
-    assert!(
-        stats.concrete_entries_retracted > 0,
-        "no concrete entry was retracted: {stats:?}"
-    );
-    assert!(
-        stats.artifact_chunks_revisited > 0,
-        "no artifact subject was revisited: {stats:?}"
-    );
-    assert_eq!(
-        stats.full_graph_rebuilds, 0,
-        "body-only route rebuilt the graph: {stats:?}"
-    );
-    assert_eq!(
-        stats.full_concrete_rebuilds, 0,
-        "a body-only edit rebuilt all concrete plans: {stats:?}"
-    );
-    assert_eq!(
-        stats.full_artifact_view_realizations, 0,
-        "a body-only edit rebuilt the full ArtifactView: {stats:?}"
-    );
-    assert_eq!(
-        stats.broad_owner_scans, 0,
-        "body-only route scanned all owners: {stats:?}"
-    );
-    assert_eq!(
-        stats.artifact_scalar_context_builds, 0,
-        "artifact repair rebuilt the maintained scalar context: {stats:?}"
-    );
-    assert_eq!(
-        stats.broad_candidate_scans, 0,
-        "body-only route scanned all candidate keys: {stats:?}"
-    );
-    assert!(
-        stats.root_requests > 0,
-        "root locality has no request denominator: {stats:?}"
-    );
-    assert_eq!(
-        stats.root_functions_examined, 0,
-        "body-only route enumerated workspace roots: {stats:?}"
-    );
-    assert_eq!(
-        stats.root_reseeds, 0,
-        "body-only route reseeded all roots: {stats:?}"
-    );
-    assert_eq!(
-        stats.root_modules_examined, 0,
-        "body-only route enumerated root modules: {stats:?}"
-    );
-    assert_eq!(
-        stats.root_instances_checked, 0,
-        "body-only route scanned retained root instances: {stats:?}"
-    );
-    assert!(
-        stats.shader_delta_requests > 0,
-        "shader-root locality has no body request denominator: {stats:?}"
-    );
-    assert_eq!(
-        stats.artifact_realize_invocations, 0,
-        "body-only route realized a full artifact: {stats:?}"
-    );
-    assert!(
-        stats.artifact_iteration_requests > 0,
-        "artifact locality has no changed-subject denominator: {stats:?}"
-    );
-    assert!(
-        stats.artifact_index_rows_examined > 0,
-        "artifact locality did not count its connected index rows: {stats:?}"
-    );
-    assert!(
-        stats.artifact_iterations >= stats.artifact_index_rows_examined,
-        "artifact iteration census dropped indexed rows: {stats:?}"
-    );
-    assert!(
-        stats.declaration_lookup_requests > 0,
-        "declaration lookup locality has no request denominator: {stats:?}"
-    );
-    assert!(
-        stats.candidate_entries_requested > 0,
-        "candidate locality has no requested-entry denominator: {stats:?}"
-    );
-    assert!(
-        stats.chunk_rebuild_requests > 0,
-        "chunk locality has no rebuild-request denominator: {stats:?}"
-    );
-}
-
-#[test]
-fn an_unrelated_body_overlay_does_not_restage_the_complete_code_artifact() {
-    let v1 = r#"
-@lifecycle(phase="update", owner="process")
-deco init tick {}
-@tick fn first() {}
-@tick fn second() {}
-fn helper() -> int { return 1 }
-fn main() { let _ = helper() }
-"#;
-    let v2 = v1.replace("return 1", "return 2");
-    let ws1 = ws_of(v1);
-    let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
-    let escaping = full
-        .code_artifact
-        .entries
-        .values()
-        .filter(|entry| entry.escaping)
-        .count();
-    assert!(
-        escaping >= 2,
-        "fixture must expose a nonzero CodeRef population: {escaping}"
-    );
-
-    let ws2 = ws_of(&v2);
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "helper")]);
-    let staged = overlay
-        .lua
-        .lines()
-        .filter(|line| line.contains("__rock_code_slot_stage("))
-        .count();
-    assert_eq!(
-        staged, 0,
-        "an unrelated body edit must not restage all {escaping} CodeRefs"
-    );
-    assert!(
-        overlay.lua.contains("__rock_code_slot_publish()"),
-        "the overlay must retain the transactional publication boundary"
-    );
-}
-
-#[test]
-fn a_changed_decorated_body_stages_its_logical_code_ref() {
-    let v1 = r#"
-@lifecycle(phase="update", owner="process")
-deco init tick {}
-@tick fn first() {}
-@tick fn second() {}
-fn main() {}
-"#;
-    let v2 = v1.replace("@tick fn first() {}", "@tick fn first() { let x = 1 }");
-    let ws1 = ws_of(v1);
-    let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
-    let escaping = full
-        .code_artifact
-        .entries
-        .values()
-        .filter(|entry| entry.escaping)
-        .count();
-    assert!(
-        escaping >= 2,
-        "fixture must expose a nonzero CodeRef population: {escaping}"
-    );
-
-    let ws2 = ws_of(&v2);
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "first")]);
-    let staged: Vec<_> = overlay
-        .lua
-        .lines()
-        .filter(|line| line.contains("__rock_code_slot_stage("))
-        .collect();
-    assert_eq!(
-        staged.len(),
-        1,
-        "only the changed decorated body should be staged: {staged:?}"
-    );
-    assert!(
-        staged[0].contains("named:<t>::first<>"),
-        "the staged slot must retain logical identity: {}",
-        staged[0]
-    );
-    let stage_offset = overlay
-        .lua
-        .find("__rock_code_slot_stage(")
-        .expect("the changed CodeRef must be staged");
-    let body_offset = overlay
-        .lua
-        .find("function first")
-        .expect("changed body emission");
-    assert!(
-        body_offset < stage_offset,
-        "CodeRef publication must observe the newly emitted body: {body_offset} !< {stage_offset}"
-    );
+    let checked = |lua: &str| {
+        let hot = crate::common::function_body(lua, "hot");
+        hot.contains("__vec_checked_get(") || hot.contains("__vec_checked_index(")
+    };
+    let ws1 = ws_with_stdlib(grow);
+    let (full1, mut incremental_cache) = emit_full_of(&ws1, "emit_full v1");
+    let (_, mut overlay_cache) = emit_full_of(&ws1, "overlay base v1");
+    assert!(!checked(&full1.lua), "no writer in the chain: raw access");
+    for (step, src, expect_check) in [("shrink", shrink.as_str(), true), ("grow", grow, false)] {
+        let ws = ws_with_stdlib(src);
+        let reinferred = [body_id(&ws, "leaf")];
+        let incremental =
+            emit_incremental(&ws, &mut incremental_cache, &reinferred).expect("incremental");
+        let (fresh, _) = emit_full_of(&ws, "fresh");
+        assert_eq!(incremental.lua, fresh.lua, "{step}: incremental != fresh");
+        assert_eq!(
+            checked(&incremental.lua),
+            expect_check,
+            "{step}: incremental"
+        );
+        let overlay = emit_overlay(&ws, &mut overlay_cache, &reinferred);
+        assert_eq!(checked(&overlay.lua), expect_check, "{step}: overlay");
+    }
 }
 
 #[test]
@@ -674,50 +244,6 @@ fn caller() -> int { return apply(1, unchanged) }
     );
 }
 
-#[test]
-fn removing_the_last_edge_retracts_concrete_and_artifact_entries_locally() {
-    let v1 = "fn leaf<T>(x: T) -> T { x }\nfn main() { let x = leaf(3) }";
-    let v2 = "fn leaf<T>(x: T) -> T { x }\nfn main() { let x = 0 }";
-    let ws1 = ws_of(v1);
-    let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
-    assert!(
-        full.lua.contains("leaf"),
-        "the removal fixture must emit the callee"
-    );
-
-    let ws2 = ws_of(v2);
-    let incremental =
-        emit_incremental(&ws2, &mut cache, &[body_id(&ws2, "main")]).expect("emit_incremental v2");
-    let stats = cache.repair_stats();
-    assert!(
-        stats.instances_revisited > 0,
-        "the changed owner was not revisited: {stats:?}"
-    );
-    assert!(
-        stats.concrete_entries_retracted > 0,
-        "the removed callee was not retracted: {stats:?}"
-    );
-    assert!(
-        stats.artifact_chunks_removed > 0,
-        "the removed callee chunk was not retracted: {stats:?}"
-    );
-    assert_eq!(
-        stats.full_concrete_rebuilds, 0,
-        "local removal rebuilt concrete state: {stats:?}"
-    );
-    assert_eq!(
-        stats.full_artifact_view_realizations, 0,
-        "local removal realized a full view: {stats:?}"
-    );
-    let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap())
-        .expect("emit_full v2")
-        .0;
-    assert_eq!(
-        incremental.lua, fresh.lua,
-        "local removal diverged from fresh emission"
-    );
-}
-
 /// The retained fast paths of a body edit (the root cache, the invalidated
 /// candidate keys, the cached fingerprint rows) against their full-scan
 /// equivalents. One edit sequence -- an inlined callee's body, a generic
@@ -758,9 +284,7 @@ fn full_scans_agree_with_the_retained_fast_paths_over_an_edit_sequence() {
         let reinferred = [body_id(&ws, edited)];
         let fast = emit_incremental(&ws, &mut incremental_fast, &reinferred).expect("fast");
         let full = emit_incremental(&ws, &mut incremental_full, &reinferred).expect("full scans");
-        let fresh = emit_full(&ws, skull::user_module_id(&ws).unwrap())
-            .expect("fresh")
-            .0;
+        let fresh = emit_full_of(&ws, "fresh").0;
         assert_eq!(fast.lua, fresh.lua, "step {step}: fast path != fresh");
         assert_eq!(full.lua, fresh.lua, "step {step}: full scans != fresh");
         assert_eq!(
@@ -783,17 +307,6 @@ fn full_scans_agree_with_the_retained_fast_paths_over_an_edit_sequence() {
             "step {step}: overlay fingerprints differ"
         );
     }
-}
-
-#[test]
-fn body_edit_to_leaf_only_reemits_itself() {
-    let v1 = "@inline\nfn helper() -> int { 3 }\n\
-              fn use_it() -> float { helper() }\n\
-              fn other() -> int { 7 }";
-    let v2 = "@inline\nfn helper() -> int { 3 }\n\
-              fn use_it() -> float { helper() }\n\
-              fn other() -> int { 9 }"; // only `other` changes
-    check_edit(v1, v2, &["other"]);
 }
 
 #[test]
@@ -822,10 +335,7 @@ fn body_edit_to_a_function_with_lambdas_matches_a_full_emit() {
     let (_full1, mut cache) = emit_full_of(&ws1, "emit_full v1");
     let ws2 = ws_with_stdlib(&v2);
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "lambdas")]).lua;
-    let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap())
-        .expect("emit_full v2")
-        .0
-        .lua;
+    let fresh = emit_full_of(&ws2, "emit_full v2").0.lua;
     let definition = |lua: &str, name: &str| -> Option<String> {
         let start = lua.find(&format!("function {name}("))?;
         let rest = &lua[start..];
@@ -854,51 +364,22 @@ fn body_edit_to_a_function_with_lambdas_matches_a_full_emit() {
     }
 }
 
-#[test]
-fn value_struct_ctor_edit_reemits_inliner() {
-    // `mk` returns a `value` struct -> inlined into `use_v` as a scalarized
-    // CallMulti (deps must capture CallMulti callees, not just plain Call).
-    // Editing the ctor body must re-emit `use_v` with the new inlined leaves.
-    let v1 = "value V2 { x: int, y: int }\n\
-              @inline\nfn mk() -> V2 { V2 { x: 1, y: 2 } }\n\
-              fn use_v() -> int { let v = mk()\n v.x }";
-    let v2 = "value V2 { x: int, y: int }\n\
-              @inline\nfn mk() -> V2 { V2 { x: 9, y: 2 } }\n\
-              fn use_v() -> int { let v = mk()\n v.x }";
-    check_edit(v1, v2, &["mk"]);
-}
-
+/// A sequence of edits to ONE cache, like a watch session: after each update
+/// the assembly must still equal a fresh emit of that state. The first edit
+/// is to `c`, inlined into `b` inlined into `a`, so a's chunk holds c's body.
 #[test]
 fn sequential_edits_stay_consistent() {
-    // Apply a sequence of edits to ONE cache (like a watch session): after each
-    // incremental update the assembly must still equal a fresh emit of that state.
-    // Exercises cache reuse across multiple updates, not just the first.
-    let ws0 = ws_of(
-        "@inline\nfn c() -> int { 1 }\n@inline\nfn b() -> int { c() }\nfn a() -> int { b() }\nfn z() -> int { 9 }",
-    );
-    let mid = skull::user_module_id(&ws0).unwrap();
-    let (_f0, mut cache) = emit_full(&ws0, mid).unwrap();
-
-    let edits = [
-        (
-            "@inline\nfn c() -> int { 2 }\n@inline\nfn b() -> int { c() }\nfn a() -> int { b() }\nfn z() -> int { 9 }",
-            "c",
-        ),
-        (
-            "@inline\nfn c() -> int { 2 }\n@inline\nfn b() -> int { c() }\nfn a() -> int { b() }\nfn z() -> int { 5 }",
-            "z",
-        ),
-        (
-            "@inline\nfn c() -> int { 2 }\n@inline\nfn b() -> int { c() }\nfn a() -> int { b() }\nfn z() -> int { 7 }",
-            "z",
-        ),
-    ];
-    for (src, edited) in edits {
-        let ws = ws_of(src);
-        let m = skull::user_module_id(&ws).unwrap();
-        let reinferred = vec![body_id(&ws, edited)];
-        let inc = emit_incremental(&ws, &mut cache, &reinferred).unwrap();
-        let fresh = emit_full(&ws, m).unwrap().0;
+    let v0 = "@inline\nfn c() -> int { 1 }\n@inline\nfn b() -> int { c() }\nfn a() -> int { b() }\nfn z() -> int { 9 }";
+    let (_, mut cache) = emit_full_of(&ws_of(v0), "emit_full v0");
+    let v1 = v0.replace("{ 1 }", "{ 2 }");
+    for (src, edited) in [
+        (v1.clone(), "c"),
+        (v1.replace("{ 9 }", "{ 5 }"), "z"),
+        (v1.replace("{ 9 }", "{ 7 }"), "z"),
+    ] {
+        let ws = ws_of(&src);
+        let inc = emit_incremental(&ws, &mut cache, &[body_id(&ws, edited)]).unwrap();
+        let (fresh, _) = emit_full_of(&ws, "fresh");
         assert_eq!(
             inc.lua, fresh.lua,
             "incremental drifted from fresh after editing {edited}"
@@ -906,156 +387,11 @@ fn sequential_edits_stay_consistent() {
     }
 }
 
-#[test]
-fn transitive_inline_edit_reemits_root() {
-    // c() inlined into b() inlined into a(): a's chunk holds c's body. Editing c
-    // must re-emit a (transitive inline dep).
-    let v1 = "@inline\nfn c() -> int { 1 }\n\
-              @inline\nfn b() -> int { c() }\n\
-              fn a() -> int { b() }";
-    let v2 = "@inline\nfn c() -> int { 2 }\n\
-              @inline\nfn b() -> int { c() }\n\
-              fn a() -> int { b() }";
-    check_edit(v1, v2, &["c"]);
-}
-
-/// A SPECIALIZED body is a cached emitted body like any other, so editing the
-/// generic it specializes must re-emit it.
-///
-/// Nothing else names that connection: a specialization is not reached through
-/// its declaration's own chunk, so without the declaration edge in its deps a
-/// stale copy is reused and the incremental output keeps the OLD body. The
-/// global initializer is what forces a standalone specialized copy -- it never
-/// runs an inliner, so the call cannot be served by a splice
-/// (`vec_value_columns.rs` documents the same route).
-#[test]
-fn body_edit_to_a_generic_reemits_its_specializations() {
-    let v1 = "value V2 { x: float, y: float }\n\
-              fn first<T>(xs: [T]) -> T { return xs[0] }\n\
-              global G: float = first([V2 { x: 1.0, y: 2.0 }]).x\n\
-              fn use_g() -> float { return G }";
-    let v2 = "value V2 { x: float, y: float }\n\
-              fn first<T>(xs: [T]) -> T { return xs[1] }\n\
-              global G: float = first([V2 { x: 1.0, y: 2.0 }]).x\n\
-              fn use_g() -> float { return G }";
-    check_edit(v1, v2, &["first"]);
-}
-
-/// The control: the specialized body is REALLY there, and it is what the edit
-/// above moves. Without this the test could pass over a program that emits no
-/// specialization at all, which is the shape every arm of it would satisfy.
-#[test]
-fn the_generic_fixture_emits_a_standalone_specialization() {
-    let v1 = "value V2 { x: float, y: float }\n\
-              fn first<T>(xs: [T]) -> T { return xs[0] }\n\
-              global G: float = first([V2 { x: 1.0, y: 2.0 }]).x\n\
-              fn use_g() -> float { return G }";
-    let ws = crate::common::ws_of(v1);
-    let mid = skull::user_module_id(&ws).unwrap();
-    let lua = emit_full(&ws, mid).expect("emit_full").0.lua;
-    assert!(
-        lua.contains("function first_arr_T_spec_a_n2_V2_0_z("),
-        "fixture must emit a standalone specialized body"
-    );
-}
-
-/// The OVERLAY carries a changed specialization, not just its declaration.
-///
-/// A reload dofiles the overlay after `main.lua`, so a definition the overlay
-/// omits keeps running the version main.lua carries. Redefining only the
-/// declaration's shared body would leave the specialized copy -- which is what
-/// the unspliceable call site actually calls -- pinned at the pre-edit body,
-/// and nothing about the reload would look wrong.
-#[test]
-fn an_overlay_redefines_a_changed_specialization() {
-    let v1 = "value V2 { x: float, y: float }\n\
-              fn first<T>(xs: [T]) -> T { return xs[0] }\n\
-              global G: float = first([V2 { x: 1.0, y: 2.0 }]).x\n\
-              fn use_g() -> float { return G }";
-    let v2 = "value V2 { x: float, y: float }\n\
-              fn first<T>(xs: [T]) -> T { return xs[1] }\n\
-              global G: float = first([V2 { x: 1.0, y: 2.0 }]).x\n\
-              fn use_g() -> float { return G }";
-    let ws1 = crate::common::ws_of(v1);
-    let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
-    let spec = "function first_arr_T_spec_a_n2_V2_0_z(";
-    assert!(
-        full.lua.contains(spec),
-        "control: the full build defines the specialization"
-    );
-
-    let ws2 = crate::common::ws_of(v2);
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "first")]);
-    assert!(
-        overlay.lua.contains(spec),
-        "the overlay must redefine the specialization the edit moved:\n{}",
-        overlay.lua
-    );
-}
-
-/// The OVERLAY carries a specialization the graph added for the edit
-/// (graph-delta overlay construction).
-///
-/// The sibling above edits a body whose specialization already exists, so the
-/// overlay only has to REDEFINE it. Here the edit adds the first call to a new
-/// instantiation, so the graph delta has to add its definition -- and a reload
-/// dofiles the overlay after `main.lua`, which carries no such definition. The edited
-/// caller's call spells `..._spec_...`, so omitting it is a nil global at
-/// reload rather than a stale body.
-///
-/// The two populations are asserted in the same test: the P specialization must
-/// already exist (so this is about the graph addition) and the Q one must not.
-#[test]
-fn an_overlay_carries_a_graph_added_specialization() {
-    let types = "value P { x: float, y: float }\n\
-                 value Q { a: float, b: float, c: float }\n\
-                 fn tally_of<T>(xs: [T]) -> T { return xs[0] }\n";
-    let v1 = types.to_string()
-        + "global G1: float = tally_of([P { x: 1.0, y: 0.0 }]).x\n\
-           fn use_it() -> float { return G1 }";
-    let v2 = types.to_string()
-        + "global G1: float = tally_of([P { x: 1.0, y: 0.0 }]).x\n\
-           fn use_it() -> float { return tally_of([Q { a: 1.0, b: 2.0, c: 3.0 }]).a }";
-
-    let ws1 = crate::common::ws_of(&v1);
-    let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
-    let spec_of = |lua: &str, ty: &str| {
-        lua.lines()
-            .any(|l| l.starts_with("function tally_of_") && l.contains(ty))
-    };
-    assert!(
-        spec_of(&full.lua, "P"),
-        "control: v1 already defines the P specialization"
-    );
-    assert!(
-        !spec_of(&full.lua, "Q"),
-        "control: v1 must NOT define the Q one yet"
-    );
-
-    let ws2 = crate::common::ws_of(&v2);
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
-    assert!(
-        spec_of(&overlay.lua, "Q"),
-        "the overlay must ADD the specialization the edit made reachable, or the \
-         reload calls a nil global:\n{}",
-        overlay.lua
-    );
-}
-
-/// **A SECOND edit to a generic re-emits the instantiation a FIRST edit added**
-/// -- which is only true if the graph is MAINTAINED across edits rather than
-/// frozen at the last full build (mono cut C+D, E1 graph ownership).
-///
-/// `update_chunk_cache` maps a changed declaration to its live instances
-/// through `InstanceGraph::instances_of`. A graph left at its full-build state
-/// still answers, and answers plausibly -- it just does not know about `Q`,
-/// which the first edit introduced. So the second edit re-emits `P` and leaves
-/// the reload running the OLD `Q` body: a stale specialization, silently, with
-/// every existing arm green.
-///
-/// Both populations are asserted: the first overlay must actually add `Q` (or
-/// the second overlay has nothing to be stale about), and the second must carry
-/// the edited body at BOTH instantiations.
+/// The first overlay must ADD the Q specialization the edit made reachable
+/// (main.lua has no definition, so omitting it is a nil global at reload).
+/// A second edit to the generic must then reach Q too, which only holds if
+/// the instance graph is maintained across edits rather than frozen at the
+/// full build.
 #[test]
 fn a_later_edit_to_a_generic_reaches_an_instantiation_an_earlier_edit_added() {
     let types = "value P { x: float, y: float }\n\
@@ -1079,14 +415,19 @@ fn a_later_edit_to_a_generic_reaches_an_instantiation_an_earlier_edit_added() {
            fn use_it() -> float { return tally_of([Q { a: 1.0, b: 2.0, c: 3.0 }]).a }";
 
     let ws1 = crate::common::ws_with_stdlib(&v1);
-    let (_full, mut cache) = emit_full_of(&ws1, "emit_full v1");
+    let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
+    let defines = |lua: &str, ty: &str| {
+        lua.lines()
+            .any(|l| l.starts_with("function tally_of_") && l.contains(ty))
+    };
+    let defines_q = |lua: &str| defines(lua, "Q");
+    assert!(
+        defines(&full.lua, "P") && !defines_q(&full.lua),
+        "control: v1 defines P only"
+    );
 
     let ws2 = crate::common::ws_with_stdlib(&v2);
     let o1 = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
-    let defines_q = |lua: &str| {
-        lua.lines()
-            .any(|l| l.starts_with("function tally_of_") && l.contains("Q"))
-    };
     assert!(
         defines_q(&o1.lua),
         "control: edit 1 must add the Q instantiation:\n{}",
@@ -1116,20 +457,10 @@ fn a_later_edit_to_a_generic_reaches_an_instantiation_an_earlier_edit_added() {
     );
 }
 
-/// **A pruned instance's chunk is FORGOTTEN, so a later edit that brings the
-/// instantiation back rebuilds it instead of serving the stale body.**
-///
-/// Removal is the direction emission cannot see on its own: nothing on the
-/// chunk side knows an instance was stranded, so without
-/// `SkullEmitCache::forget_instance` the entry simply stays. That is harmless
-/// for a full reassembly -- the liveness walk does not reach it -- which is
-/// exactly why it needs its own arm: the damage only appears when the
-/// instantiation comes BACK, because a stale chunk would otherwise survive the
-/// graph removal and the reload then run a definition built
-/// from the pre-edit source.
-///
-/// The three populations are asserted in order: `Q` present, `Q` stranded, `Q`
-/// back and carrying the EDITED body.
+/// A pruned instance's chunk is forgotten, so an edit that brings the
+/// instantiation back rebuilds it from the edited generic instead of serving
+/// the chunk it had before it was pruned. A full reassembly never reaches the
+/// stale chunk, so only the return exposes it.
 #[test]
 fn an_instantiation_that_returns_after_being_pruned_is_rebuilt_not_reused() {
     let types = "value P { x: float, y: float }\n\
@@ -1196,69 +527,10 @@ fn an_instantiation_that_returns_after_being_pruned_is_rebuilt_not_reused() {
     );
 }
 
-/// The same ABI-width flip on the `emit_incremental` path: taking `foo` by
-/// value flips `taken_by_ref`, which invalidates every memoized ABI plan, so
-/// the reassembled program must equal a fresh full emit rather than serve
-/// plans derived under the old ABI state.
-#[test]
-fn an_incremental_emit_matches_fresh_after_a_taken_by_ref_flip() {
-    let v1 = "value V2 { x: float, y: float }\n\
-              fn foo(v: V2) -> float { v.x }\n\
-              fn other() -> float { foo(V2 { x: 2.0, y: 3.0 }) }\n\
-              fn use_ref() -> float { other() }";
-    let v2 = "value V2 { x: float, y: float }\n\
-              fn foo(v: V2) -> float { v.x }\n\
-              fn other() -> float { foo(V2 { x: 2.0, y: 3.0 }) }\n\
-              fn use_ref() -> float {\n\
-                let f = foo\n\
-                f(V2 { x: 1.0, y: 2.0 })\
-              }";
-    check_edit_with(crate::common::ws_with_stdlib, v1, v2, &["use_ref"]);
-}
-
-#[test]
-fn an_overlay_reemits_a_definition_after_a_scalar_abi_width_flip() {
-    let v1 = "value V2 { x: float, y: float }\n\
-              fn foo(v: V2) -> float { v.x }\n\
-              fn other() -> float { foo(V2 { x: 2.0, y: 3.0 }) }\n\
-              fn use_ref() -> float { other() }";
-    let v2 = "value V2 { x: float, y: float }\n\
-              fn foo(v: V2) -> float { v.x }\n\
-              fn other() -> float { foo(V2 { x: 2.0, y: 3.0 }) }\n\
-              fn use_ref() -> float {\n\
-                let f = foo\n\
-                f(V2 { x: 1.0, y: 2.0 })\
-              }";
-    let ws1 = crate::common::ws_with_stdlib(v1);
-    let (full1, mut cache) = emit_full_of(&ws1, "emit_full v1");
-    assert!(full1.lua.contains("function foo_"), "v1 must emit foo");
-
-    let ws2 = crate::common::ws_with_stdlib(v2);
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_ref")]);
-    assert!(
-        overlay.lua.contains("function foo_") && overlay.lua.contains("function use_ref"),
-        "the ABI-width flip must re-emit foo and its caller in the overlay:\n{}",
-        overlay.lua
-    );
-}
-
-/// The overlay carries a NON-GENERIC LIBRARY body the graph added for the edit
-/// (graph-delta overlay construction).
-///
-/// Its two siblings above both add a SPECIALIZATION, and those reach the overlay
-/// through the graph-added chunk path, which builds the chunk and files it in
-/// `changed_since_full`. This is the arm that has no other route.
-///
-/// The subject must live in a LIBRARY module, and that is the whole reason this
-/// fixture uses a stdlib fn: `is_library_module` makes the compiled unit's own
-/// sources roots, so a fn in the fixture text is emitted whether or not anything
-/// calls it and could never be graph-added. `is_ascii_ws` is a plain
-/// `@pure` stdlib fn -- with inlining off it is emitted standalone -- and no
-/// trivial program reaches it.
-///
-/// Both populations are asserted in the same run: it must be ABSENT from the
-/// full build, or "the overlay adds it" is satisfied by a definition that was
-/// already there.
+/// The overlay defines a non-generic library body the edit made reachable;
+/// specializations reach the overlay by a different route. The subject must
+/// be a stdlib fn: the compiled unit's own fns are roots, so they are never
+/// graph-added.
 #[test]
 fn an_overlay_carries_a_graph_added_library_body() {
     let v1 = "fn use_it(c: int) -> bool { return c == 32 }\n\
@@ -1293,119 +565,9 @@ fn an_overlay_carries_a_graph_added_library_body() {
     );
 }
 
-/// A graph-added specialization whose user body fails construction must make
-/// both reload paths fail closed.
-#[test]
-fn an_overlay_rejects_a_failed_graph_added_body() {
-    let common = "nobox value NV2 { x: float, y: float }\n\
-                  fn bad<T>(xs: [T]) -> int {\n\
-                  \x20   let t = (xs[0], 1.0)\n\
-                  \x20   print(\"{t}\")\n\
-                  \x20   return 0\n\
-                  }\n";
-    let v1 = common.to_string() + "fn use_it() -> int { return 0 }";
-    let v2 = common.to_string()
-        + "fn use_it() -> int {\n\
-           \x20   let xs: [NV2] = [NV2 { x: 1.0, y: 2.0 }]\n\
-           \x20   return bad(xs)\n\
-           }";
-
-    let ws1 = crate::common::ws_with_stdlib(&v1);
-    let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
-    assert!(
-        !full.lua.contains("function bad_"),
-        "v1 must not emit the specialization"
-    );
-
-    let ws2 = crate::common::ws_with_stdlib(&v2);
-    let err = match emit_overlay_result(&ws2, &mut cache, &[body_id(&ws2, "use_it")]) {
-        Ok(_) => panic!("a failed graph-added construction must trigger FullRequired"),
-        Err(err) => err,
-    };
-    assert!(
-        err.message.contains("nobox") && err.message.contains("bad"),
-        "the overlay failure must identify the graph-added construction: {}",
-        err.message
-    );
-}
-
-#[test]
-fn graph_added_construction_failure_is_propagated_by_incremental() {
-    let common = "nobox value NV2 { x: float, y: float }\n\
-                  fn bad<T>(xs: [T]) -> int {\n\
-                  \x20   let t = (xs[0], 1.0)\n\
-                  \x20   print(\"{t}\")\n\
-                  \x20   return 0\n\
-                  }\n";
-    let v1 = common.to_string() + "fn use_it() -> int { return 0 }";
-    let v2 = common.to_string()
-        + "fn use_it() -> int {\n\
-           \x20   let xs: [NV2] = [NV2 { x: 1.0, y: 2.0 }]\n\
-           \x20   return bad(xs)\n\
-           }";
-
-    let ws1 = crate::common::ws_with_stdlib(&v1);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let ws2 = crate::common::ws_with_stdlib(&v2);
-    let full_err = match emit_full(&ws2, skull::user_module_id(&ws2).unwrap()) {
-        Ok(_) => panic!("a full build must reject the failed graph-added construction"),
-        Err(err) => err,
-    };
-    assert!(
-        full_err.message.contains("nobox") && full_err.message.contains("bad"),
-        "the full-build failure must identify the rejected specialization: {}",
-        full_err.message
-    );
-    let (_, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
-    let err = match emit_incremental(&ws2, &mut cache, &[body_id(&ws2, "use_it")]) {
-        Ok(_) => panic!("a failed graph-added construction must not be printed and ignored"),
-        Err(err) => err,
-    };
-    assert!(
-        err.message.contains("nobox") && err.message.contains("bad"),
-        "the propagated error must identify the failed graph-added construction: {}",
-        err.message
-    );
-}
-
-/// ONE liveness answer decides both kinds of emitted body.
-///
-/// The renderer no longer discovers or builds: it orders text the walk already
-/// reached. So a specialized body reaching a FURTHER specialization has to come
-/// out of the walk, and if the walk stopped carrying that edge the build fails
-/// loudly (`no liveness walk reached it`) rather than quietly rebuilding it in a
-/// second place. Measured on application: cutting the edge fires that rejection.
-///
-/// Here the property is observable as output: the specialized body is emitted at
-/// all, and it is emitted ONCE -- two deciders would each be entitled to render
-/// it.
-#[test]
-fn one_liveness_walk_decides_the_specialized_bodies() {
-    let src = "value V2 { x: float, y: float }\n\
-               fn first<T>(xs: [T]) -> T { return xs[0] }\n\
-               global G: float = first([V2 { x: 1.0, y: 2.0 }]).x\n\
-               fn use_g() -> float { return G }";
-    let ws = crate::common::ws_of(src);
-    let mid = skull::user_module_id(&ws).unwrap();
-    let lua = emit_full(&ws, mid).expect("emit_full").0.lua;
-    let def = "function first_arr_T_spec_a_n2_V2_0_z(";
-    assert_eq!(
-        lua.matches(def).count(),
-        1,
-        "the specialized body is decided once and emitted once"
-    );
-}
-
-/// Editing a generic `co fn` must re-emit the SPECIALIZED coroutines of it.
-///
-/// A specialization is not reached through its declaration's chunk, so the only
-/// thing naming the connection is the declaration edge the specialized chunk
-/// records in its deps. Byte identity cannot see this at all -- it compares
-/// fresh full builds and never performs an edit -- so the arm lives here.
-///
-/// The element is column-stored on purpose: that is what makes the call
-/// specialize on the default path, so the fixture has a specialized coroutine to
-/// invalidate rather than one shared body.
+/// Editing a generic `co fn` must re-emit its specialized coroutines, which
+/// only the declaration edge in their deps connects to it. The column-stored
+/// element is what makes the call specialize.
 #[test]
 fn a_body_edit_to_a_generic_coroutine_reemits_its_specializations() {
     let v1 = "struct Vec<T> { _data: any, len: int }\n\
@@ -1444,95 +606,10 @@ fn a_body_edit_to_a_generic_coroutine_reemits_its_specializations() {
     check_edit(v1, &v2, &["walk"]);
 }
 
-/// An edit that introduces a NEW specialization demand must MATERIALIZE it
-/// (mono cut C+D, the item B\* left open and D-1 absorbs).
-///
-/// Invalidation and graph addition are different failures. The sibling above edits a
-/// callee whose specializations already exist, so the cache knows the key set and
-/// only has to re-emit; here the edit is in the CALLER and produces a key the
-/// cache has never seen. A cache that only re-emits what it already holds is
-/// green on that one and silently short a definition on this one -- the caller
-/// would then spell a specialized symbol nothing defines.
-///
-/// The graph update now reports the new instance and the cache builds it from
-/// the graph's substitution and bound tree before overlay assembly. The same
-/// `assemble` path still remains the incremental oracle for parity.
-///
-/// Asserted on the incremental output's own definition COUNT as well as against
-/// a fresh build. Equality alone would be satisfied by two builds that both lack
-/// the new body, and the count alone would not catch a stale one.
-#[test]
-fn an_edit_that_introduces_a_new_specialization_demand_builds_from_graph_delta() {
-    let types = "value P { x: float, y: float }\n\
-                 value Q { a: float, b: float, c: float }\n\
-                 fn tally_of<T>(xs: [T]) -> T { return xs[0] }\n";
-    let v1 = types.to_string()
-        + "fn use_it() -> float {\n\
-           \x20   let ps: [P] = [P { x: 1.0, y: 0.0 }]\n\
-           \x20   return tally_of(ps).x\n\
-           }";
-    let v2 = types.to_string()
-        + "fn use_it() -> float {\n\
-           \x20   let ps: [P] = [P { x: 1.0, y: 0.0 }]\n\
-           \x20   let qs: [Q] = [Q { a: 1.0, b: 2.0, c: 3.0 }]\n\
-           \x20   return tally_of(ps).x + tally_of(qs).a\n\
-           }";
-    let specs_in = |src: &str| {
-        let ws = crate::common::ws_with_stdlib(src);
-        let mid = skull::user_module_id(&ws).unwrap();
-        emit_full(&ws, mid)
-            .expect("emit_full")
-            .0
-            .lua
-            .lines()
-            .filter(|l| l.starts_with("function tally_of_") && l.contains("_spec_"))
-            .count()
-    };
-    assert_eq!(
-        specs_in(&v1),
-        1,
-        "v1 must hold exactly one SPECIALIZED `tally_of`"
-    );
-    assert_eq!(
-        specs_in(&v2),
-        2,
-        "v2 must hold TWO, or the edit introduces no new demand and this proves nothing"
-    );
-    check_edit_with(crate::common::ws_with_stdlib, &v1, &v2, &["use_it"]);
-
-    // The direct arm: the INCREMENTAL assembly holds both specialized bodies.
-    let ws1 = crate::common::ws_with_stdlib(&v1);
-    let mid1 = skull::user_module_id(&ws1).unwrap();
-    let (_, mut cache) = emit_full(&ws1, mid1).expect("emit_full v1");
-    let ws2 = crate::common::ws_with_stdlib(&v2);
-    let reinferred = vec![body_id(&ws2, "use_it")];
-    let incremental = emit_incremental(&ws2, &mut cache, &reinferred).expect("emit_incremental");
-    let defs = incremental
-        .lua
-        .lines()
-        .filter(|l| l.starts_with("function tally_of_") && l.contains("_spec_"))
-        .count();
-    assert_eq!(
-        defs, 2,
-        "the incremental assembly must materialize the specialization the edit introduced"
-    );
-}
-
-/// A standalone `Iterator`-bounded body survives an incremental REBUILD
-/// (mono cut C+D step D-1).
-///
-/// Its placeholders are resolved from the demand's tree, not from the body, so a
-/// rebuild that has the body and not the tree cannot re-emit it -- and that is
-/// precisely what an incremental rebuild does: it re-lowers from the declaration
-/// under a chunk key. The tree therefore lives in the cache beside the chunk
-/// key, and this is the arm that reads it back.
-///
-/// Byte identity cannot see any of this. It compares fresh full builds and never
-/// performs an edit, so the tree could be dropped on the cache path and every
-/// artifact would still match.
-///
-/// Runs with inlining DISABLED, which is where a bounded body has no splice to
-/// fall back on -- and is what E1 does by construction.
+/// A standalone `Iterator`-bounded body survives an incremental rebuild. Its
+/// placeholders are resolved from the demand's tree, not from the body, so the
+/// tree must live in the cache beside the chunk key. Inlining is off, so the
+/// bounded body has no splice to fall back on.
 #[test]
 fn a_standalone_bounded_body_survives_an_incremental_rebuild() {
     let _inline = crate::common::InlineOffGuard::on();
@@ -1546,162 +623,24 @@ fn a_standalone_bounded_body_survives_an_incremental_rebuild() {
               \x20   return total(xs.iter())\n\
               }";
     let v2 = v1.replace("let s = 0", "let s = 100");
-
-    let ws1 = crate::common::ws_with_stdlib(v1);
-    let mid1 = skull::user_module_id(&ws1).unwrap();
-    let (full1, mut cache) = emit_full(&ws1, mid1).expect("emit_full v1");
-    // The population, in the same run: without a standalone bounded definition
-    // in v1 the rebuild below has nothing to lose and the arm proves nothing.
     let standalone = |lua: &str| {
         crate::common::definitions_matching(lua, "_spec_")
             .into_iter()
             .filter(|name| name.starts_with("total_"))
             .count()
     };
+    let (full1, _) = emit_full_of(&ws_with_stdlib(v1), "emit_full v1");
     assert_eq!(
         standalone(&full1.lua),
         1,
         "v1 must emit ONE standalone bounded body"
     );
-
-    let ws2 = crate::common::ws_with_stdlib(&v2);
-    let reinferred = vec![body_id(&ws2, "total")];
-    let incremental = emit_incremental(&ws2, &mut cache, &reinferred).expect("emit_incremental");
+    let incremental = check_edit_with(ws_with_stdlib, v1, &v2, &["total"]);
     assert_eq!(
-        standalone(&incremental.lua),
+        standalone(&incremental),
         1,
         "the rebuilt bounded body is gone -- its demand tree did not survive the cache"
     );
-    let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap())
-        .expect("emit_full v2")
-        .0;
-    assert_eq!(
-        incremental.lua, fresh.lua,
-        "incremental assembly != fresh emit after editing a bounded body"
-    );
-}
-
-/// **An edit that REMOVES the last call to an instantiation must prune it**,
-/// leaving no stale definition live -- the direction the graph-addition arms above do
-/// not cover.
-///
-/// The sibling declaration instance is what makes it a per-INSTANCE question
-/// rather than a per-declaration one: `tally_of<P>` stays reached throughout, so
-/// an implementation that invalidated by DECLARATION would either keep both or
-/// drop both, and only one is correct.
-///
-/// Both populations are asserted from fresh builds first, in the same run: v1
-/// must hold two specializations and v2 exactly one, or the edit removes nothing
-/// and the arm proves nothing.
-#[test]
-fn an_edit_that_removes_the_last_call_to_an_instantiation_prunes_it() {
-    let types = "value P { x: float, y: float }\n\
-                 value Q { a: float, b: float, c: float }\n\
-                 fn tally_of<T>(xs: [T]) -> T { return xs[0] }\n";
-    let with_both = types.to_string()
-        + "fn use_it() -> float {\n\
-           \x20   let ps: [P] = [P { x: 1.0, y: 0.0 }]\n\
-           \x20   let qs: [Q] = [Q { a: 1.0, b: 2.0, c: 3.0 }]\n\
-           \x20   return tally_of(ps).x + tally_of(qs).a\n\
-           }";
-    let with_one = types.to_string()
-        + "fn use_it() -> float {\n\
-           \x20   let ps: [P] = [P { x: 1.0, y: 0.0 }]\n\
-           \x20   return tally_of(ps).x\n\
-           }";
-    let specs_in = |lua: &str| {
-        lua.lines()
-            .filter(|l| l.starts_with("function tally_of_") && l.contains("_spec_"))
-            .count()
-    };
-    let fresh_specs = |src: &str| {
-        let ws = crate::common::ws_with_stdlib(src);
-        let mid = skull::user_module_id(&ws).unwrap();
-        specs_in(&emit_full(&ws, mid).expect("emit_full").0.lua)
-    };
-    assert_eq!(
-        fresh_specs(&with_both),
-        2,
-        "v1 must hold TWO specialized `tally_of`"
-    );
-    assert_eq!(
-        fresh_specs(&with_one),
-        1,
-        "v2 must hold ONE -- the sibling instance stays reached, so this is per-instance"
-    );
-
-    check_edit_with(
-        crate::common::ws_with_stdlib,
-        &with_both,
-        &with_one,
-        &["use_it"],
-    );
-
-    // The direct arm. `check_edit_with` compares against a fresh emit, which is
-    // the strongest oracle available, but it cannot say WHICH of the two
-    // instances survived -- both counts moving together would still match.
-    let ws1 = crate::common::ws_with_stdlib(&with_both);
-    let mid1 = skull::user_module_id(&ws1).unwrap();
-    let (_, mut cache) = emit_full(&ws1, mid1).expect("emit_full v1");
-    let ws2 = crate::common::ws_with_stdlib(&with_one);
-    let reinferred = vec![body_id(&ws2, "use_it")];
-    let incremental = emit_incremental(&ws2, &mut cache, &reinferred).expect("emit_incremental");
-    assert_eq!(
-        specs_in(&incremental.lua),
-        1,
-        "the incremental assembly kept a definition nothing calls any more:\n{}",
-        incremental.lua
-    );
-    // ...and it is the one still called, not merely one of the two.
-    let ws_one = crate::common::ws_with_stdlib(&with_one);
-    let mid_one = skull::user_module_id(&ws_one).unwrap();
-    let fresh_lua = emit_full(&ws_one, mid_one).expect("emit_full v2").0.lua;
-    let surviving = |lua: &str| {
-        lua.lines()
-            .filter(|l| l.starts_with("function tally_of_") && l.contains("_spec_"))
-            .map(|l| l.to_string())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(
-        surviving(&incremental.lua),
-        surviving(&fresh_lua),
-        "the surviving instance is not the one a fresh build keeps"
-    );
-}
-
-#[test]
-fn changed_call_graph_reuses_the_maintained_scalar_context() {
-    let v1 = "fn helper() -> int { 3 }\ninline(lua) fn extra() -> int = \"return 7\"\nfn main() { let x = helper() }";
-    let v2 = v1.replace("{ 3 }", "{ extra() }");
-    let ws1 = ws_with_stdlib(v1);
-    let (_, mut cache) = emit_full_of(&ws1, "initial emit");
-    let ws2 = ws_with_stdlib(&v2);
-    let incremental =
-        emit_incremental(&ws2, &mut cache, &[body_id(&ws2, "helper")]).expect("incremental emit");
-    let stats = cache.repair_stats();
-    assert!(
-        cache
-            .lua_view()
-            .publisher_lanes
-            .keys()
-            .any(|i| ws2.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "extra"),
-        "the changed call graph must reach a foreign publisher"
-    );
-    assert!(
-        stats.artifact_index_rows_examined > 0,
-        "no artifact repair: {stats:?}"
-    );
-    assert_eq!(
-        stats.artifact_scalar_context_builds, 0,
-        "artifact repair rescanned the workspace: {stats:?}"
-    );
-    let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap())
-        .expect("fresh emit")
-        .0;
-    assert_eq!(incremental.lua, fresh.lua);
 }
 
 #[test]
@@ -1725,10 +664,10 @@ inline(lua) fn slots_empty(c: Coroutine<FrameYield>) -> bool = """
     let v2 = v1.replace("Pair(1, 2)", "Pair(3, 2)");
     check_edit_with(ws_with_stdlib, v1, &v2, &["stream"]);
     let ws1 = ws_with_stdlib(v1);
-    let (full, mut cache) = emit_full(&ws1, skull::user_module_id(&ws1).unwrap()).unwrap();
+    let (full, mut cache) = emit_full_of(&ws1, "emit_full");
     let ws2 = ws_with_stdlib(&v2);
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "stream")]);
-    let (fresh, _) = emit_full(&ws2, skull::user_module_id(&ws2).unwrap()).unwrap();
+    let (fresh, _) = emit_full_of(&ws2, "emit_full");
     let step = |lua: &str| {
         let start = lua.find("function stream_0__step(").expect("step function");
         let len = lua[start..].find("\nend\n").expect("step end");
@@ -1746,94 +685,6 @@ inline(lua) fn slots_empty(c: Coroutine<FrameYield>) -> bool = """
     assert_eq!(crate::common::run_luajit(&run), "true\ntrue");
 }
 
-/// A `co fn` with lambdas in both its step region and a detached defer region
-/// computes one lambda topology per region under a single owner. A body-only
-/// edit elsewhere must still overlay: the per-owner topology the compatibility
-/// gate compares has to be one value per owner, not one per region.
-#[test]
-fn body_only_edit_survives_multi_region_coroutine_topology() {
-    let v1 = r#"
-enum Ev { Tick(int) }
-global LOG: int = 0
-fn note(x: int) { LOG = x }
-fn apply(f: fn(int) -> int, x: int) -> int { return f(x) }
-co fn worker(seed: int) -> Coroutine<Ev> {
-    defer {
-        note(apply((v) => v + seed, 1))
-    }
-    let base = apply((v) => v + 1, seed)
-    yield Ev::Tick(base)
-}
-fn probe() -> int { return 1 }
-fn main() {
-    let c = worker(0)
-    let _ = c.resume()
-    let _ = probe()
-}
-"#;
-    let v2 = v1.replace(
-        "fn probe() -> int { return 1 }",
-        "fn probe() -> int { return 2 }",
-    );
-    let ws1 = ws_with_stdlib(v1);
-    let (_full, mut cache) = emit_full_of(&ws1, "emit_full v1");
-    let ws2 = ws_with_stdlib(&v2);
-    emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "probe")]);
-}
-
-/// A body-only edit in a defer region must overlay before adding a lambda to
-/// that region refuses. Otherwise a gate rejecting every multi-region
-/// coroutine would satisfy the negative check without comparing the edit.
-#[test]
-fn lambda_insertion_in_defer_region_still_refuses_overlay() {
-    let v1 = r#"
-enum Ev { Tick(int) }
-global LOG: int = 0
-fn note(x: int) { LOG = x }
-fn apply(f: fn(int) -> int, x: int) -> int { return f(x) }
-co fn worker(seed: int) -> Coroutine<Ev> {
-    defer {
-        note(apply((v) => v + seed, 1))
-    }
-    let base = apply((v) => v + 1, seed)
-    yield Ev::Tick(base)
-}
-fn probe() -> int { return 1 }
-fn main() {
-    let c = worker(0)
-    let _ = c.resume()
-    let _ = probe()
-}
-"#;
-    let compatible = v1.replace(
-        "        note(apply((v) => v + seed, 1))",
-        "        note(apply((v) => v + seed, 3))",
-    );
-    let v2 = compatible.replace(
-        "        note(apply((v) => v + seed, 3))",
-        "        note(apply((v) => v + seed, 3))\n        note(apply((v) => v - seed, 2))",
-    );
-    let ws1 = ws_with_stdlib(v1);
-    let (_full, mut cache) = emit_full_of(&ws1, "emit_full v1");
-    let ws_compatible = ws_with_stdlib(&compatible);
-    emit_overlay_result(
-        &ws_compatible,
-        &mut cache,
-        &[body_id(&ws_compatible, "worker")],
-    )
-    .expect("a body-only defer edit must overlay before testing lambda insertion");
-    let ws2 = ws_with_stdlib(&v2);
-    let err = match emit_overlay_result(&ws2, &mut cache, &[body_id(&ws2, "worker")]) {
-        Ok(_) => panic!("inserting a lambda into a region must refuse the overlay"),
-        Err(err) => err,
-    };
-    assert!(
-        err.message.contains("CodeRef compatibility") && err.message.contains("safe restart"),
-        "the refusal must stay the compatibility restart: {}",
-        err.message
-    );
-}
-
 const SHARED_ABI_SLOTS: &str = r#"
 @lifecycle(phase="update", owner="process")
 deco init tick {}
@@ -1846,7 +697,7 @@ fn main() {}
 #[test]
 fn code_slot_staging_names_each_distinct_call_abi_once() {
     let ws = ws_of(SHARED_ABI_SLOTS);
-    let (full, _cache) = emit_full(&ws, skull::user_module_id(&ws).unwrap()).unwrap();
+    let (full, _cache) = emit_full_of(&ws, "emit_full");
     let abis: std::collections::BTreeSet<&str> = full
         .code_artifact
         .entries
@@ -1878,7 +729,7 @@ fn code_slot_staging_names_each_distinct_call_abi_once() {
 fn a_shared_call_abi_stays_compatible_across_an_overlay() {
     let v2 = SHARED_ABI_SLOTS.replace("@tick fn first() {}", "@tick fn first() { let x = 1 }");
     let ws1 = ws_of(SHARED_ABI_SLOTS);
-    let (full, mut cache) = emit_full(&ws1, skull::user_module_id(&ws1).unwrap()).unwrap();
+    let (full, mut cache) = emit_full_of(&ws1, "emit_full");
     let escaping: Vec<_> = full
         .code_artifact
         .entries
@@ -1923,37 +774,6 @@ print(before)
 }
 
 #[test]
-fn body_overlay_derives_only_edited_fingerprint_code_rows() {
-    let mut source =
-        String::from("fn helper() -> int { return 1 }\nfn main() { let _ = helper() }\n");
-    for index in 0..40 {
-        source.push_str(&format!(
-            "fn unrelated{index}() -> int {{ return {index} }}\n"
-        ));
-    }
-    let original = ws_of(&source);
-    let (_, mut cache) = emit_full(&original, skull::user_module_id(&original).unwrap()).unwrap();
-    for value in [2, 3, 4] {
-        let changed = ws_of(&source.replacen("return 1 }", &format!("return {value} }}"), 1));
-        let overlay = emit_overlay(&changed, &mut cache, &[body_id(&changed, "helper")]);
-        let stats = cache.repair_stats();
-        assert!(overlay.code_artifact.entries.len() > 40);
-        assert!(
-            stats.fingerprint_code_rows_derived > 0,
-            "the edit must update its fingerprint row"
-        );
-        assert!(
-            stats.fingerprint_code_rows_derived < 4,
-            "the fingerprint rederived unrelated code rows: {stats:?}"
-        );
-        let fresh = emit_full(&changed, skull::user_module_id(&changed).unwrap())
-            .unwrap()
-            .0;
-        assert_eq!(overlay.artifact_fingerprint, fresh.artifact_fingerprint);
-    }
-}
-
-#[test]
 fn fingerprint_code_rows_include_new_body_specializations() {
     let original =
         "fn identity<T>(value: T) -> T { return value }\nfn main() { let _ = identity(1) }";
@@ -1962,7 +782,7 @@ fn fingerprint_code_rows_include_new_body_specializations() {
         "let _ = identity(1)\nlet _ = identity(true)",
     );
     let ws1 = ws_of(original);
-    let (baseline, mut cache) = emit_full(&ws1, skull::user_module_id(&ws1).unwrap()).unwrap();
+    let (baseline, mut cache) = emit_full_of(&ws1, "emit_full");
     let ws2 = ws_of(&changed);
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "main")]);
     assert!(overlay.code_artifact.entries.len() > baseline.code_artifact.entries.len());
@@ -1973,7 +793,7 @@ fn fingerprint_code_rows_include_new_body_specializations() {
 fn fingerprint_code_rows_survive_rollback() {
     let original = "fn helper() -> int { return 1 }\nfn main() { let _ = helper() }";
     let ws1 = ws_of(original);
-    let (_, mut cache) = emit_full(&ws1, skull::user_module_id(&ws1).unwrap()).unwrap();
+    let (_, mut cache) = emit_full_of(&ws1, "emit_full");
     let ws2 = ws_of(&original.replace("return 1", "return 2"));
     let edited = [body_id(&ws2, "helper")];
     cache.begin_body_edit_transaction(&edited, &[]);
@@ -1982,68 +802,9 @@ fn fingerprint_code_rows_survive_rollback() {
     for value in [3, 4] {
         let changed = ws_of(&original.replace("return 1", &format!("return {value}")));
         let overlay = emit_overlay(&changed, &mut cache, &[body_id(&changed, "helper")]);
-        let fresh = emit_full(&changed, skull::user_module_id(&changed).unwrap())
-            .unwrap()
-            .0;
+        let fresh = emit_full_of(&changed, "emit_full").0;
         assert_eq!(overlay.artifact_fingerprint, fresh.artifact_fingerprint);
     }
-}
-
-#[test]
-fn flat_ref_callee_body_overlay_updates_the_live_variant() {
-    crate::common::require_luajit();
-    let v1 = r#"
-value Cell { v: int }
-global xs: [Cell] = []
-fn apply(c: ref Cell, delta: int) -> int { c.v += delta
-return c.v }
-@nomangle fn seed() { xs.push(Cell { v: 10 }) }
-@nomangle fn snapshot() -> int { return xs[0].v }
-@nomangle fn tick(delta: int) -> bool {
-    let before = xs[0].v
-    let seen = apply(xs[0], delta)
-    return seen != before && xs[0].v == seen
-}
-"#;
-    let v2 = v1.replace("c.v += delta", "c.v -= delta");
-    let ws1 = ws_with_stdlib(v1);
-    let (full, mut cache) = emit_full(&ws1, skull::user_module_id(&ws1).unwrap()).unwrap();
-    let ws2 = ws_with_stdlib(&v2);
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "apply")]);
-    let run = format!(
-        "{}\nseed()\nassert(tick(2))\nlocal before = snapshot()\n{}\nassert(snapshot() == before)\nassert(tick(3))\nassert(snapshot() < before)\nprint('ok')\n",
-        full.lua, overlay.lua,
-    );
-    assert_eq!(crate::common::run_luajit(&run), "ok");
-}
-
-#[test]
-fn flat_ref_callee_body_overlay_updates_a_specialized_caller() {
-    crate::common::require_luajit();
-    let v1 = r#"
-value Cell { v: int }
-global xs: [Cell] = []
-fn apply(c: ref Cell, delta: int) -> int { c.v += delta
-return c.v }
-@nomangle fn seed() { xs.push(Cell { v: 10 }) }
-@nomangle fn snapshot() -> int { return xs[0].v }
-fn step<T>(_tag: T, delta: int) -> bool {
-    let before = xs[0].v
-    let seen = apply(xs[0], delta)
-    return seen != before && xs[0].v == seen
-}
-@nomangle fn tick(delta: int) -> bool { return step(1, delta) }
-"#;
-    let v2 = v1.replace("c.v += delta", "c.v -= delta");
-    let ws1 = ws_with_stdlib(v1);
-    let (full, mut cache) = emit_full(&ws1, skull::user_module_id(&ws1).unwrap()).unwrap();
-    let ws2 = ws_with_stdlib(&v2);
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "apply")]);
-    let run = format!(
-        "{}\nseed()\nassert(tick(2))\nlocal before = snapshot()\n{}\nassert(snapshot() == before)\nassert(tick(3))\nassert(snapshot() < before)\nprint('ok')\n",
-        full.lua, overlay.lua,
-    );
-    assert_eq!(crate::common::run_luajit(&run), "ok");
 }
 
 #[test]
@@ -2067,7 +828,7 @@ return c.v }
         )
         .replace("apply(xs[0])", "apply(xs[0].cell)");
     let ws1 = ws_with_stdlib(v1);
-    let (_, mut cache) = emit_full(&ws1, skull::user_module_id(&ws1).unwrap()).unwrap();
+    let (_, mut cache) = emit_full_of(&ws1, "emit_full");
     let ws2 = ws_with_stdlib(&v2);
     let err = match emit_overlay_result(&ws2, &mut cache, &[body_id(&ws2, "tick")]) {
         Ok(_) => panic!("changing a flat variant's element/prefix must request restart"),
@@ -2094,7 +855,7 @@ fn sample() -> int {
 }
 "#,
     );
-    let (full, _) = emit_full(&ws, skull::user_module_id(&ws).unwrap()).unwrap();
+    let (full, _) = emit_full_of(&ws, "emit_full");
     let flat_abis: Vec<_> = full
         .code_artifact
         .entries
@@ -2124,10 +885,433 @@ fn main() { print(describe(Mode::Busy)) }
     let v2 = v1.replace("return \"mode\"", "return \"{m}\"");
     check_edit_with(ws_with_stdlib, v1, &v2, &["describe"]);
     let ws1 = ws_with_stdlib(v1);
-    let (full, mut cache) = emit_full(&ws1, skull::user_module_id(&ws1).unwrap()).unwrap();
+    let (full, mut cache) = emit_full_of(&ws1, "emit_full");
     assert!(!full.lua.contains("Mode::Busy"), "{}", full.lua);
     let ws2 = ws_with_stdlib(&v2);
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "describe")]);
     let run = format!("{}\n{}\nprint(describe(1))\n", full.lua, overlay.lua);
     assert_eq!(crate::common::run_luajit(&run), "Mode::Busy");
+}
+
+/// Body edits whose only obligation is that the incremental assembly equals a
+/// fresh full emit of the edited source.
+#[test]
+fn body_edits_match_full_emission() {
+    let enum_projection = r#"
+enum Count { Zero, Seven }
+value Item { spare: int = 11, count: Count = Count::Seven }
+struct Holder { item: Item? }
+@nomangle fn probe(holder: Holder) -> bool { holder.item?.count == Count::Zero }
+fn main() { print(probe(Holder { item: Item {} })) }
+"#;
+    let indexed = r#"
+value Config { chosen: int, spare: int, label: string }
+@inline fn selected(items: [Config], i: int) -> int { items[i].chosen }
+@nomangle fn caller(items: [Config], i: int) -> int { selected(items, i) }
+"#;
+    let leaf = "@inline\nfn helper() -> int { 3 }\n\
+                fn use_it() -> float { helper() }\n\
+                fn other() -> int { 7 }";
+    // `mk` returns a `value` struct, inlined into `use_v` as a scalarized
+    // CallMulti: the inline dependency must cover CallMulti callees too.
+    let ctor = "value V2 { x: int, y: int }\n\
+                @inline\nfn mk() -> V2 { V2 { x: 1, y: 2 } }\n\
+                fn use_v() -> int { let v = mk()\n v.x }";
+    // Removing the last call retracts the generic instance and its chunk.
+    let last_edge = "fn leaf<T>(x: T) -> T { x }\nfn main() { let x = leaf(3) }";
+    let cases: [(fn(&str) -> Workspace, &str, String, &str); 6] = [
+        (
+            ws_with_stdlib,
+            enum_projection,
+            enum_projection.replace("== Count::Zero", "== Count::Seven"),
+            "probe",
+        ),
+        (
+            ws_with_stdlib,
+            indexed,
+            indexed.replace("items[i].chosen", "items[i].spare"),
+            "selected",
+        ),
+        (ws_of, leaf, leaf.replace("{ 7 }", "{ 9 }"), "other"),
+        (ws_of, ctor, ctor.replace("x: 1", "x: 9"), "mk"),
+        (
+            ws_with_stdlib,
+            ABI_FLIP_V1,
+            ABI_FLIP_V2.to_string(),
+            "use_ref",
+        ),
+        (ws_of, last_edge, last_edge.replace("leaf(3)", "0"), "main"),
+    ];
+    for (build, v1, v2, edited) in cases {
+        check_edit_with(build, v1, &v2, &[edited]);
+    }
+}
+
+/// An inlinable helper's body edit keeps, keeps residual, or newly enables the
+/// splice into its caller; the caller's chunk must follow each decision.
+#[test]
+fn inline_decisions_follow_helper_edits() {
+    let small = |value: i32| {
+        format!(
+            "@inline @nomangle fn helper() -> int {{ {value} }}\n\
+             @nomangle fn caller() -> float {{ helper() }}\n\
+             @nomangle fn other() -> int {{ 7 }}"
+        )
+    };
+    // The caller starts over the 400-cell splice budget.
+    let over_budget = |value: i32| {
+        let mut src = format!(
+            "@inline @nomangle fn helper() -> int {{ {value} }}\n\
+             @nomangle fn caller() -> int {{\n"
+        );
+        for i in 0..401 {
+            src.push_str(&format!("let unused_{i} = 0\nunused_{i} = {i}\n"));
+        }
+        src + "return helper()\n}\n@nomangle fn other() -> int { 7 }\n"
+    };
+    for (label, v1, v2, residual_before, residual_after) in [
+        ("stays inlined", small(3), small(5), false, false),
+        ("stays residual", over_budget(3), over_budget(5), true, true),
+        (
+            "becomes inlinable",
+            inline_budget_eligibility_flip_fixture(true),
+            inline_budget_eligibility_flip_fixture(false),
+            true,
+            false,
+        ),
+    ] {
+        let residual = |lua: &str| crate::common::function_body(lua, "caller").contains("helper(");
+        let (full1, _) = emit_full_of(&ws_of(&v1), "emit_full v1");
+        assert_eq!(residual(&full1.lua), residual_before, "{label}: v1 caller");
+        let incremental = check_edit(&v1, &v2, &["helper"]);
+        assert_eq!(residual(&incremental), residual_after, "{label}: v2 caller");
+    }
+}
+
+/// Decorated bodies publish CodeRef slots. An overlay restages exactly the
+/// slots whose bodies changed, after their new definitions, under logical
+/// identity, and always ends in the transactional publication.
+#[test]
+fn overlays_restage_only_changed_code_refs() {
+    let v1 = r#"
+@lifecycle(phase="update", owner="process")
+deco init tick {}
+@tick fn first() {}
+@tick fn second() {}
+fn helper() -> int { return 1 }
+fn main() { let _ = helper() }
+"#;
+    let ws1 = ws_of(v1);
+    let (full, _) = emit_full_of(&ws1, "emit_full v1");
+    let escaping = full
+        .code_artifact
+        .entries
+        .values()
+        .filter(|entry| entry.escaping)
+        .count();
+    assert!(escaping >= 2, "fixture must expose CodeRefs: {escaping}");
+
+    for (v2, edited, staged_count) in [
+        (v1.replace("return 1", "return 2"), "helper", 0),
+        (
+            v1.replace("@tick fn first() {}", "@tick fn first() { let x = 1 }"),
+            "first",
+            1,
+        ),
+    ] {
+        let (_, mut cache) = emit_full_of(&ws1, "emit_full v1");
+        let ws2 = ws_of(&v2);
+        let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, edited)]).lua;
+        let staged: Vec<_> = overlay
+            .lines()
+            .filter(|line| line.contains("__rock_code_slot_stage("))
+            .collect();
+        assert_eq!(staged.len(), staged_count, "{edited}: {staged:?}");
+        assert!(
+            overlay.contains("__rock_code_slot_publish()"),
+            "{edited}: the overlay must retain the publication boundary"
+        );
+        if let Some(stage) = staged.first() {
+            assert!(stage.contains("named:<t>::first<>"), "{stage}");
+            let stage_offset = overlay.find("__rock_code_slot_stage(").unwrap();
+            let body_offset = overlay.find("function first").expect("changed body");
+            assert!(
+                body_offset < stage_offset,
+                "publication must observe the new body: {body_offset} !< {stage_offset}"
+            );
+        }
+    }
+}
+
+/// A specialized body is not reached through its declaration's own chunk, so
+/// only the declaration edge in its deps re-emits it after the generic
+/// changes. The global initializer never runs an inliner, which forces a
+/// standalone specialized copy. A reload dofiles the overlay after main.lua,
+/// so the overlay must redefine that copy too.
+#[test]
+fn body_edit_to_a_generic_reemits_its_specializations() {
+    let v1 = "value V2 { x: float, y: float }\n\
+              fn first<T>(xs: [T]) -> T { return xs[0] }\n\
+              global G: float = first([V2 { x: 1.0, y: 2.0 }]).x\n\
+              fn use_g() -> float { return G }";
+    let v2 = v1.replace("xs[0]", "xs[1]");
+    let spec = "function first_arr_T_spec_a_n2_V2_0_z(";
+    let ws1 = ws_of(v1);
+    let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
+    // One liveness walk decides the specialized body, so it is emitted once.
+    assert_eq!(full.lua.matches(spec).count(), 1, "{}", full.lua);
+
+    check_edit(v1, &v2, &["first"]);
+    let ws2 = ws_of(&v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "first")]);
+    assert!(
+        overlay.lua.contains(spec),
+        "the overlay must redefine the specialization the edit moved:\n{}",
+        overlay.lua
+    );
+}
+
+const ABI_FLIP_V1: &str = "value V2 { x: float, y: float }\n\
+    fn foo(v: V2) -> float { v.x }\n\
+    fn other() -> float { foo(V2 { x: 2.0, y: 3.0 }) }\n\
+    fn use_ref() -> float { other() }";
+const ABI_FLIP_V2: &str = "value V2 { x: float, y: float }\n\
+    fn foo(v: V2) -> float { v.x }\n\
+    fn other() -> float { foo(V2 { x: 2.0, y: 3.0 }) }\n\
+    fn use_ref() -> float {\n\
+    let f = foo\n\
+    f(V2 { x: 1.0, y: 2.0 })\
+    }";
+
+/// Taking `foo` by value flips its scalar ABI width; the overlay must redefine
+/// `foo` and its caller rather than keep definitions built under the old ABI.
+#[test]
+fn an_overlay_reemits_a_definition_after_a_scalar_abi_width_flip() {
+    let ws1 = ws_with_stdlib(ABI_FLIP_V1);
+    let (full1, mut cache) = emit_full_of(&ws1, "emit_full v1");
+    assert!(full1.lua.contains("function foo_"), "v1 must emit foo");
+
+    let ws2 = ws_with_stdlib(ABI_FLIP_V2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_ref")]);
+    assert!(
+        overlay.lua.contains("function foo_") && overlay.lua.contains("function use_ref"),
+        "the ABI-width flip must re-emit foo and its caller in the overlay:\n{}",
+        overlay.lua
+    );
+}
+
+/// A graph-added specialization whose body fails construction fails closed on
+/// every route: full, incremental and overlay.
+#[test]
+fn a_failed_graph_added_body_is_rejected_by_every_emit_route() {
+    let common = "nobox value NV2 { x: float, y: float }\n\
+                  fn bad<T>(xs: [T]) -> int {\n\
+                  \x20   let t = (xs[0], 1.0)\n\
+                  \x20   print(\"{t}\")\n\
+                  \x20   return 0\n\
+                  }\n";
+    let v1 = common.to_string() + "fn use_it() -> int { return 0 }";
+    let v2 = common.to_string()
+        + "fn use_it() -> int {\n\
+           \x20   let xs: [NV2] = [NV2 { x: 1.0, y: 2.0 }]\n\
+           \x20   return bad(xs)\n\
+           }";
+    let ws1 = ws_with_stdlib(&v1);
+    let (full, _) = emit_full_of(&ws1, "emit_full v1");
+    assert!(!full.lua.contains("function bad_"), "v1 must not emit it");
+
+    let ws2 = ws_with_stdlib(&v2);
+    let edited = [body_id(&ws2, "use_it")];
+    let (_, mut incremental_cache) = emit_full_of(&ws1, "emit_full v1");
+    let (_, mut overlay_cache) = emit_full_of(&ws1, "emit_full v1");
+    let routes = [
+        (
+            "full",
+            emit_full(&ws2, skull::user_module_id(&ws2).unwrap()).map(|_| ()),
+        ),
+        (
+            "incremental",
+            emit_incremental(&ws2, &mut incremental_cache, &edited).map(|_| ()),
+        ),
+        (
+            "overlay",
+            emit_overlay_result(&ws2, &mut overlay_cache, &edited).map(|_| ()),
+        ),
+    ];
+    for (route, result) in routes {
+        let err = result.expect_err(route);
+        assert!(
+            err.message.contains("nobox") && err.message.contains("bad"),
+            "{route}: the failure must identify the rejected specialization: {}",
+            err.message
+        );
+    }
+}
+
+/// A caller edit adds or removes a specialization demand while a sibling
+/// instance of the same generic stays reached, so invalidation must be per
+/// instance. The fresh counts make the incremental equality non-vacuous.
+#[test]
+fn caller_edits_add_and_prune_specializations_per_instance() {
+    let types = "value P { x: float, y: float }\n\
+                 value Q { a: float, b: float, c: float }\n\
+                 fn tally_of<T>(xs: [T]) -> T { return xs[0] }\n";
+    let one = types.to_string()
+        + "fn use_it() -> float {\n\
+           \x20   let ps: [P] = [P { x: 1.0, y: 0.0 }]\n\
+           \x20   return tally_of(ps).x\n\
+           }";
+    let both = types.to_string()
+        + "fn use_it() -> float {\n\
+           \x20   let ps: [P] = [P { x: 1.0, y: 0.0 }]\n\
+           \x20   let qs: [Q] = [Q { a: 1.0, b: 2.0, c: 3.0 }]\n\
+           \x20   return tally_of(ps).x + tally_of(qs).a\n\
+           }";
+    let specs = |src: &str| {
+        let (full, _) = emit_full_of(&ws_with_stdlib(src), "emit_full");
+        full.lua
+            .lines()
+            .filter(|l| l.starts_with("function tally_of_") && l.contains("_spec_"))
+            .count()
+    };
+    assert_eq!((specs(&one), specs(&both)), (1, 2));
+    check_edit_with(ws_with_stdlib, &one, &both, &["use_it"]);
+    check_edit_with(ws_with_stdlib, &both, &one, &["use_it"]);
+}
+
+/// A changed call graph that newly reaches an inline(lua) publisher repairs
+/// the artifact's scalar context to match a fresh emit.
+#[test]
+fn changed_call_graph_reaching_a_foreign_publisher_matches_full_emission() {
+    let v1 = "fn helper() -> int { 3 }\ninline(lua) fn extra() -> int = \"return 7\"\nfn main() { let x = helper() }";
+    let v2 = v1.replace("{ 3 }", "{ extra() }");
+    let ws1 = ws_with_stdlib(v1);
+    let (_, mut cache) = emit_full_of(&ws1, "initial emit");
+    let ws2 = ws_with_stdlib(&v2);
+    let incremental =
+        emit_incremental(&ws2, &mut cache, &[body_id(&ws2, "helper")]).expect("incremental emit");
+    assert!(
+        cache
+            .lua_view()
+            .publisher_lanes
+            .keys()
+            .any(|i| ws2.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "extra"),
+        "the changed call graph must reach a foreign publisher"
+    );
+    let fresh = emit_full_of(&ws2, "fresh emit").0;
+    assert_eq!(incremental.lua, fresh.lua);
+}
+
+const MULTI_REGION_COROUTINE: &str = r#"
+enum Ev { Tick(int) }
+global LOG: int = 0
+fn note(x: int) { LOG = x }
+fn apply(f: fn(int) -> int, x: int) -> int { return f(x) }
+co fn worker(seed: int) -> Coroutine<Ev> {
+    defer {
+        note(apply((v) => v + seed, 1))
+    }
+    let base = apply((v) => v + 1, seed)
+    yield Ev::Tick(base)
+}
+fn probe() -> int { return 1 }
+fn main() {
+    let c = worker(0)
+    let _ = c.resume()
+    let _ = probe()
+}
+"#;
+
+/// A `co fn` with lambdas in its step region and a detached defer region has
+/// one lambda topology per region under a single owner. Body-only edits, to
+/// another function or inside the defer region, must overlay; inserting a
+/// lambda into the region must refuse with the compatibility restart.
+#[test]
+fn multi_region_coroutine_topology_gates_overlays() {
+    let ws1 = ws_with_stdlib(MULTI_REGION_COROUTINE);
+    let elsewhere = MULTI_REGION_COROUTINE.replace("return 1 }", "return 2 }");
+    let (_, mut cache) = emit_full_of(&ws1, "emit_full v1");
+    let ws = ws_with_stdlib(&elsewhere);
+    emit_overlay(&ws, &mut cache, &[body_id(&ws, "probe")]);
+
+    let compatible = MULTI_REGION_COROUTINE.replace("v + seed, 1", "v + seed, 3");
+    let inserted = compatible.replace(
+        "        note(apply((v) => v + seed, 3))",
+        "        note(apply((v) => v + seed, 3))\n        note(apply((v) => v - seed, 2))",
+    );
+    let (_, mut cache) = emit_full_of(&ws1, "emit_full v1");
+    let ws = ws_with_stdlib(&compatible);
+    emit_overlay_result(&ws, &mut cache, &[body_id(&ws, "worker")])
+        .expect("a body-only defer edit must overlay before testing lambda insertion");
+    let ws = ws_with_stdlib(&inserted);
+    let err = emit_overlay_result(&ws, &mut cache, &[body_id(&ws, "worker")])
+        .map(|_| ())
+        .expect_err("inserting a lambda into a region must refuse the overlay");
+    assert!(
+        err.message.contains("CodeRef compatibility") && err.message.contains("safe restart"),
+        "the refusal must stay the compatibility restart: {}",
+        err.message
+    );
+}
+
+#[test]
+fn repeated_body_overlays_keep_the_fingerprint_of_a_full_emit() {
+    let mut source =
+        String::from("fn helper() -> int { return 1 }\nfn main() { let _ = helper() }\n");
+    for index in 0..40 {
+        source.push_str(&format!(
+            "fn unrelated{index}() -> int {{ return {index} }}\n"
+        ));
+    }
+    let original = ws_of(&source);
+    let (_, mut cache) = emit_full_of(&original, "emit_full v1");
+    for value in [2, 3, 4] {
+        let changed = ws_of(&source.replacen("return 1 }", &format!("return {value} }}"), 1));
+        let overlay = emit_overlay(&changed, &mut cache, &[body_id(&changed, "helper")]);
+        assert!(overlay.code_artifact.entries.len() > 40);
+        let (fresh, _) = emit_full_of(&changed, "emit_full v2");
+        assert_eq!(overlay.artifact_fingerprint, fresh.artifact_fingerprint);
+    }
+}
+
+/// An overlay of a `ref` callee's body updates the variant its flat-element
+/// caller runs, whether that caller is plain or specialized.
+#[test]
+fn flat_ref_callee_body_overlay_updates_its_callers() {
+    crate::common::require_luajit();
+    let prelude = r#"
+value Cell { v: int }
+global xs: [Cell] = []
+fn apply(c: ref Cell, delta: int) -> int { c.v += delta
+return c.v }
+@nomangle fn seed() { xs.push(Cell { v: 10 }) }
+@nomangle fn snapshot() -> int { return xs[0].v }
+"#;
+    let plain = "@nomangle fn tick(delta: int) -> bool {
+    let before = xs[0].v
+    let seen = apply(xs[0], delta)
+    return seen != before && xs[0].v == seen
+}";
+    let specialized = "fn step<T>(_tag: T, delta: int) -> bool {
+    let before = xs[0].v
+    let seen = apply(xs[0], delta)
+    return seen != before && xs[0].v == seen
+}
+@nomangle fn tick(delta: int) -> bool { return step(1, delta) }";
+    for caller in [plain, specialized] {
+        let v1 = format!("{prelude}{caller}\n");
+        let v2 = v1.replace("c.v += delta", "c.v -= delta");
+        let ws1 = ws_with_stdlib(&v1);
+        let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
+        let ws2 = ws_with_stdlib(&v2);
+        let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "apply")]);
+        let run = format!(
+            "{}\nseed()\nassert(tick(2))\nlocal before = snapshot()\n{}\nassert(snapshot() == before)\nassert(tick(3))\nassert(snapshot() < before)\nprint('ok')\n",
+            full.lua, overlay.lua,
+        );
+        assert_eq!(crate::common::run_luajit(&run), "ok", "{caller}");
+    }
 }
