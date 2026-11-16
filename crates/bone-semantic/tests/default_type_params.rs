@@ -1,7 +1,3 @@
-//! Default type params work cross-module regardless of module order: the
-//! defaults map is built in the pre-lowering pass (the `type_generic_arity`
-//! pattern), so a use site lowering before its decl's module still pads.
-
 use bone_semantic::prelude::*;
 
 fn parse(name: &str, src: &str) -> skull_parser::Ast {

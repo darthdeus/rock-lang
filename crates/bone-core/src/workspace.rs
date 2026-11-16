@@ -10,6 +10,15 @@ use crate::prelude::*;
 pub static MODULE_TIMINGS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Generic parameters read by lowering before nominal definitions are available.
+#[derive(Clone, Debug)]
+pub struct TypeGenerics {
+    pub owner: ModuleId,
+    pub arity: usize,
+    /// Best-effort trailing defaults; authoritative validation is in bone-lower.
+    pub defaults: Vec<hir::GenericDefault>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Workspace {
     pub modules: Vec<Module>,
@@ -30,26 +39,10 @@ pub struct Workspace {
     pub has_nobox_types: bool,
     pub enums_by_name: FxHashMap<Ustr, EnumId>,
     pub newtypes_by_name: FxHashMap<Ustr, NewtypeId>,
-    /// Declared generic-parameter count for every nominal type (struct / enum /
-    /// newtype) across ALL modules, keyed by name. Built from the raw AST in
-    /// `lower_modules` BEFORE type lowering, so the bare-generic arity check in
-    /// `lower_type_expr_in` works cross-module (during the initial parallel
-    /// lowering the other modules aren't in `ws.modules` yet -- this map is).
-    /// Names are unique workspace-wide (duplicate-type-name is rejected).
-    pub type_generic_arity: FxHashMap<Ustr, usize>,
-    /// Trailing defaulted generic params per nominal, keyed by name (the
-    /// `type_generic_arity` pattern: built from the raw AST in `lower_modules`
-    /// BEFORE lowering, insert-not-clear for incremental). `defaults.len() <=
-    /// arity`; a use site supplying `arity - defaults.len()..=arity` args pads
-    /// the missing tail from here, fill-from-right. Best-effort: only cleanly
-    /// classifiable trailing defaults are stored -- the authoritative
-    /// validation (with spans) is bone-lower's `validate_generic_defaults`.
-    pub type_generic_defaults: FxHashMap<Ustr, Vec<hir::GenericDefault>>,
-    /// Which module's declaration the `type_generic_arity` /
-    /// `type_generic_defaults` entries came from: the first definer wins, and
-    /// the incremental re-lower refreshes only its own modules' entries (a
-    /// later duplicate must neither overwrite nor be refreshed over them).
-    pub type_generic_owner: FxHashMap<Ustr, ModuleId>,
+    /// Generic parameters collected before cross-module type lowering.
+    /// Keys are canonical DefKeys in v1 fragments and bare names in legacy files.
+    /// The first defining module owns an entry; re-lowering refreshes its own.
+    pub type_generics: FxHashMap<Ustr, TypeGenerics>,
     pub interface_names: FxHashSet<Ustr>,
     pub globals_by_name: FxHashMap<Ustr, TyId>,
     /// Names of `const` globals (read-only). A whole-global assignment to one of
@@ -64,8 +57,8 @@ pub struct Workspace {
     /// [`Workspace::index_param_signature`].
     pub param_signatures: Vec<ArenaMap<Idx<Function>, Ustr>>,
 
-    /// Workspace-wide `deco` declaration names, collected from the raw ASTs in
-    /// `lower_modules` BEFORE lowering (the `type_generic_arity` pattern) so
+    /// Workspace-wide `deco` declaration names, collected from the ASTs in
+    /// `lower_modules` BEFORE lowering (like `type_generics`) so
     /// annotation validation can accept `@<deco>` cross-module. Insert-only:
     /// the incremental single-module re-lower augments rather than wipes.
     pub decorator_names: FxHashSet<Ustr>,
@@ -225,9 +218,7 @@ impl Workspace {
             has_nobox_types: false,
             enums_by_name: Default::default(),
             newtypes_by_name: Default::default(),
-            type_generic_arity: Default::default(),
-            type_generic_defaults: Default::default(),
-            type_generic_owner: Default::default(),
+            type_generics: Default::default(),
             interface_names: Default::default(),
             globals_by_name: Default::default(),
             const_globals: Default::default(),

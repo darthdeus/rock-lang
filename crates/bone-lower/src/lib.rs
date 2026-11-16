@@ -849,9 +849,9 @@ fn lower_resolved_type_name(
     }
     let generic_arity = ctx
         .workspace
-        .type_generic_arity
+        .type_generics
         .get(key)
-        .copied()
+        .map(|entry| entry.arity)
         .or_else(|| is_intrinsic.then_some(2))
         .unwrap_or(0);
     let defaults = generic_defaults(ctx.workspace, *key);
@@ -1131,11 +1131,12 @@ pub(crate) fn lower_type_expr_in(
                 // params (workspace map, built pre-lowering) fill from the right:
                 // `Pair<string>` on `struct Pair<T, U = int>` pads to
                 // `Pair<string, int>`. Builtins (Coroutine, Map, Vec/Array) aren't
-                // in `type_generic_arity`, so they keep their own arity logic.
+                // in `type_generics`, so they keep their own arity logic.
                 // Cross-module via the workspace map. The bare (0-arg) case is
                 // handled in the Ident arm.
                 if !is_map {
-                    if let Some(&arity) = ctx.workspace.type_generic_arity.get(&type_key) {
+                    if let Some(entry) = ctx.workspace.type_generics.get(&type_key) {
+                        let arity = entry.arity;
                         let defaults = generic_defaults(ctx.workspace, type_key);
                         let min = arity - defaults.len();
                         if args.len() < min || args.len() > arity {
@@ -2727,9 +2728,9 @@ fn reject_generic_bounds(
 /// Borrowed from the workspace ('w), so callers can keep the slice across
 /// later `&mut LowerCtx` uses.
 fn generic_defaults(ws: &Workspace, name: Ustr) -> &[hir::GenericDefault] {
-    ws.type_generic_defaults
+    ws.type_generics
         .get(&name)
-        .map(Vec::as_slice)
+        .map(|entry| entry.defaults.as_slice())
         .unwrap_or(&[])
 }
 

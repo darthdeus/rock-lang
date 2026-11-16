@@ -75,17 +75,15 @@ struct ModuleNominalFacts {
     /// A legacy module's owned names: a legacy lookup that could also reach
     /// a projected v1 name is decided from them.
     legacy_owned: Option<Vec<(ustr::Ustr, DefKind)>>,
-    /// Each nominal type's key, generic arity and trailing generic defaults,
-    /// in declaration order.
-    types: Vec<(ustr::Ustr, usize, Vec<bone_core::hir::GenericDefault>)>,
+    /// Each nominal type's key and facts, in declaration order.
+    types: Vec<(ustr::Ustr, NominalFacts)>,
     has_nobox: bool,
     decorators: Vec<ustr::Ustr>,
 }
 
-fn module_nominal_facts(ws: &Workspace, rock_mod: &Ast) -> ModuleNominalFacts {
+fn module_nominal_facts(scope: Option<&FragmentScope>, rock_mod: &Ast) -> ModuleNominalFacts {
     let legacy_owned =
         (rock_mod.dialect == skull_parser::Dialect::Legacy).then(|| legacy_owned_names(rock_mod));
-    let scope = ws.fragment_scopes.get(&rock_mod.file);
     let mut facts = ModuleNominalFacts {
         legacy_owned,
         types: Vec::new(),
@@ -94,13 +92,13 @@ fn module_nominal_facts(ws: &Workspace, rock_mod: &Ast) -> ModuleNominalFacts {
     };
     let mut walk = |item: &Item, path: &[ustr::Ustr]| -> Result<(), CompilerError> {
         let key = |name: &ustr::Ustr| map_key(scope, path, *name);
-        let (name, generics) = match &item.kind {
+        let (name, flavor, generics) = match &item.kind {
             ItemKind::Struct(s) => {
                 facts.has_nobox |= s.is_nobox;
-                (&s.name.name, &s.generics)
+                (&s.name.name, NominalFlavor::Struct, &s.generics)
             }
-            ItemKind::Enum(e) => (&e.name.name, &e.generics),
-            ItemKind::Newtype(n) => (&n.name.name, &n.generics),
+            ItemKind::Enum(e) => (&e.name.name, NominalFlavor::Enum, &e.generics),
+            ItemKind::Newtype(n) => (&n.name.name, NominalFlavor::Newtype, &n.generics),
             ItemKind::Decorator(d) => {
                 facts.decorators.push(key(&d.name.name));
                 return Ok(());
@@ -109,8 +107,11 @@ fn module_nominal_facts(ws: &Workspace, rock_mod: &Ast) -> ModuleNominalFacts {
         };
         facts.types.push((
             key(name),
-            generics.len(),
-            trailing_generic_defaults(rock_mod, generics),
+            NominalFacts {
+                flavor,
+                arity: generics.len(),
+                defaults: trailing_generic_defaults(rock_mod, generics),
+            },
         ));
         Ok(())
     };
@@ -128,10 +129,7 @@ pub enum NominalFlavor {
     Newtype,
 }
 
-/// What lowering elsewhere reads about one nominal type besides its name:
-/// its flavor (`resolve_member_path` asks whether a key is an enum; a
-/// newtype path is called by name), its generic arity and its trailing
-/// generic defaults (`lower_type_expr` checks both at the use site).
+/// Declaration facts that affect lowering at use sites.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NominalFacts {
     pub flavor: NominalFlavor,
@@ -141,33 +139,15 @@ pub struct NominalFacts {
 
 /// The nominal types `rock_mod` defines, keyed as the workspace maps key
 /// them (`scope` is the file's fragment scope, `None` for a legacy file),
-/// read from the un-expanded AST the way `lower_modules` records them.
+/// collected from the supplied AST with the same visitor as `lower_modules`.
 pub fn nominal_type_facts(
     scope: Option<&FragmentScope>,
     rock_mod: &Ast,
 ) -> FxHashMap<ustr::Ustr, NominalFacts> {
-    let mut out = FxHashMap::default();
-    let start = scope.map(|s| s.module_path.clone()).unwrap_or_default();
-    let mut walk = |item: &Item, path: &[ustr::Ustr]| -> Result<(), CompilerError> {
-        let (name, flavor, generics) = match &item.kind {
-            ItemKind::Struct(s) => (s.name.name, NominalFlavor::Struct, &s.generics),
-            ItemKind::Enum(e) => (e.name.name, NominalFlavor::Enum, &e.generics),
-            ItemKind::Newtype(n) => (n.name.name, NominalFlavor::Newtype, &n.generics),
-            _ => return Ok(()),
-        };
-        out.insert(
-            map_key(scope, path, name),
-            NominalFacts {
-                flavor,
-                arity: generics.len(),
-                defaults: trailing_generic_defaults(rock_mod, generics),
-            },
-        );
-        Ok(())
-    };
-    for_each_def_item(rock_mod.items.as_slice(), &start, &mut walk)
-        .expect("collecting nominal facts cannot fail");
-    out
+    module_nominal_facts(scope, rock_mod)
+        .types
+        .into_iter()
+        .collect()
 }
 
 /// Expand macros and desugar the parse trees in place; reads no workspace.
@@ -230,7 +210,7 @@ pub fn lower_modules_seeded(
         }
     }
 
-    // Record nominal generic arity from the raw AST, workspace-wide, BEFORE
+    // Record nominal generic parameters workspace-wide, BEFORE
     // type lowering -- so the bare-generic check in `lower_type_expr_in` works
     // cross-module (other modules aren't in `ws.modules` yet during this
     // parallel lowering; this map is). Insert (not clear) so the incremental
@@ -244,20 +224,29 @@ pub fn lower_modules_seeded(
     // module order, since the first declaration wins.
     let facts = rock_modules
         .par_iter()
-        .map(|rock_mod| module_nominal_facts(ws, rock_mod))
+        .map(|rock_mod| module_nominal_facts(ws.fragment_scopes.get(&rock_mod.file), rock_mod))
         .collect::<Vec<_>>();
     for (module, facts) in modules.iter().zip(facts) {
         let mid = module.id;
         if let Some(names) = facts.legacy_owned {
             ws.ns.legacy_owned.replace_file(module.file, names);
         }
-        for (k, arity, defaults) in facts.types {
-            // Whether this module may write `k`'s facts: a vacant slot, or one
+        for (key, facts) in facts.types {
+            // Whether this module may write `key`'s facts: a vacant slot, or one
             // this same module owns (its own re-lower refreshing them).
-            if ws.type_generic_owner.get(&k).is_none_or(|o| *o == mid) {
-                ws.type_generic_arity.insert(k, arity);
-                ws.type_generic_defaults.insert(k, defaults);
-                ws.type_generic_owner.insert(k, mid);
+            if ws
+                .type_generics
+                .get(&key)
+                .is_none_or(|entry| entry.owner == mid)
+            {
+                ws.type_generics.insert(
+                    key,
+                    TypeGenerics {
+                        owner: mid,
+                        arity: facts.arity,
+                        defaults: facts.defaults,
+                    },
+                );
             }
         }
         ws.has_nobox_types |= facts.has_nobox;

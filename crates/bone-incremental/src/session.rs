@@ -1544,15 +1544,15 @@ impl Session {
         // repopulates them), the new ones the fresh AST's.
         let old_types: FxHashMap<Ustr, bone_semantic::semantic_passes::NominalFacts> = {
             use bone_semantic::semantic_passes::{NominalFacts, NominalFlavor};
-            let facts = |key: &Ustr, flavor| NominalFacts {
-                flavor,
-                arity: self.ws.type_generic_arity.get(key).copied().unwrap_or(0),
-                defaults: self
-                    .ws
-                    .type_generic_defaults
-                    .get(key)
-                    .cloned()
-                    .unwrap_or_default(),
+            let facts = |key: &Ustr, flavor| {
+                let generics = self.ws.type_generics.get(key);
+                NominalFacts {
+                    flavor,
+                    arity: generics.map_or(0, |entry| entry.arity),
+                    defaults: generics
+                        .map(|entry| entry.defaults.clone())
+                        .unwrap_or_default(),
+                }
             };
             self.ws
                 .struct_by_name
@@ -1845,18 +1845,7 @@ impl Session {
         // The arity/defaults facts owned by evicted modules go with them; a
         // re-lowered module re-inserts its own. Facts owned by kept modules
         // stay, so a kept first definer still wins over a re-lowered duplicate.
-        let doomed: Vec<Ustr> = self
-            .ws
-            .type_generic_owner
-            .iter()
-            .filter(|(_, owner)| !keep(**owner))
-            .map(|(name, _)| *name)
-            .collect();
-        for name in doomed {
-            self.ws.type_generic_owner.remove(&name);
-            self.ws.type_generic_arity.remove(&name);
-            self.ws.type_generic_defaults.remove(&name);
-        }
+        self.ws.type_generics.retain(|_, entry| keep(entry.owner));
 
         self.ws.functions_by_name.retain(|_, fns| {
             fns.retain(|(mid, _)| keep(*mid));

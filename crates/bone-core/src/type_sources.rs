@@ -20,7 +20,7 @@ pub struct TypeSource {
 /// so no concrete instantiation or inference arena mutation is necessary.
 pub fn declaration_sources(ws: &Workspace, roots: &[Ustr]) -> Result<Vec<TypeSource>, String> {
     for root in roots {
-        if ws.type_generic_arity.get(root).copied().unwrap_or(0) != 0 {
+        if ws.type_generics.get(root).map_or(0, |entry| entry.arity) != 0 {
             return Err(format!(
                 "source provenance requires a closed named root: {root}"
             ));
