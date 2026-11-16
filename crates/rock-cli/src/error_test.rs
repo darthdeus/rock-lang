@@ -55,7 +55,7 @@ fn parse_error_test_cases(content: &str) -> Result<Vec<ErrorTestCase>> {
     while i < lines.len() {
         let line = lines[i].trim();
 
-        // Look for test case start: //=== TEST CASE: name_ExpectedErrorKind{params} ===
+        // Look for test case start: //=== TEST CASE: name_ExpectedErrorKind ===
         if line.starts_with("//=== TEST CASE:") && line.ends_with(" ===") {
             let case_header = line
                 .strip_prefix("//=== TEST CASE:")
@@ -64,8 +64,6 @@ fn parse_error_test_cases(content: &str) -> Result<Vec<ErrorTestCase>> {
                 .unwrap()
                 .trim();
 
-            // Parse the expected error from the test case name. The `{params}`
-            // suffix is validated but not checked against the diagnostic.
             let (case_name, expected_error_kind) = parse_test_case_name(case_header)?;
 
             // Collect the input code until we find the next test case or end of file
@@ -118,24 +116,17 @@ fn parse_error_test_cases(content: &str) -> Result<Vec<ErrorTestCase>> {
     Ok(test_cases)
 }
 
-/// Split `simple_undefined_UndefinedSymbol{name="undefined_function"}` into
-/// the case name and the expected kind. A `{params}` suffix must be closed but
-/// is otherwise ignored.
+/// Split `simple_undefined_UndefinedSymbol` into the case name and the
+/// expected error kind after its last underscore.
 fn parse_test_case_name(case_header: &str) -> Result<(String, String)> {
-    let (case_name, error_part) = case_header
-        .rsplit_once('_')
-        .ok_or_else(|| anyhow!("Invalid test case name format: {}", case_header))?;
-    let error_kind = match error_part.split_once('{') {
-        Some((kind, params)) if params.ends_with('}') => kind,
-        Some(_) => {
-            return Err(anyhow!(
-                "Invalid parameter format in test case: {}",
-                case_header
-            ));
+    match case_header.rsplit_once('_') {
+        Some((case_name, error_kind))
+            if !error_kind.is_empty() && error_kind.chars().all(|c| c.is_ascii_alphanumeric()) =>
+        {
+            Ok((case_name.to_string(), error_kind.to_string()))
         }
-        None => error_part,
-    };
-    Ok((case_name.to_string(), error_kind.to_string()))
+        _ => Err(anyhow!("Invalid test case name format: {}", case_header)),
+    }
 }
 
 /// Split a test-case body into one or more (path, contents) pairs.
@@ -464,4 +455,24 @@ fn find_error_test_dir(path: &Path) -> Option<PathBuf> {
         return path.parent().map(|p| p.to_path_buf());
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_case_name_ends_in_a_bare_error_kind() {
+        assert_eq!(
+            parse_test_case_name("simple_undefined_UndefinedSymbol").unwrap(),
+            (
+                "simple_undefined".to_string(),
+                "UndefinedSymbol".to_string()
+            )
+        );
+        let error = parse_test_case_name("simple_undefined_UndefinedSymbol{name=\"f\"}")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Invalid test case name format"), "{error}");
+    }
 }

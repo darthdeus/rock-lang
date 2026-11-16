@@ -125,7 +125,6 @@ struct EditStepCheck {
 #[derive(Debug, Clone)]
 enum EditStepOperation {
     SemanticTokens,
-    Diagnostics,
     Completion {
         line: usize,
         character: usize,
@@ -449,7 +448,7 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
         };
         let operation = match op_type {
             "inlay_hints" => LspOperation::InlayHints,
-            "semantic_tokens" | "full_document" => LspOperation::SemanticTokens,
+            "semantic_tokens" => LspOperation::SemanticTokens,
             "document_symbols" => LspOperation::DocumentSymbols,
             "workspace_symbols" => {
                 let query = match lines.next_if(|l| l.starts_with("QUERY:")) {
@@ -784,7 +783,6 @@ fn parse_step_mode(header: &str, body: String) -> Option<StepMode> {
 fn parse_check_operation(op: &str) -> Option<EditStepOperation> {
     match op {
         "semantic_tokens" => return Some(EditStepOperation::SemanticTokens),
-        "diagnostics" => return Some(EditStepOperation::Diagnostics),
         _ => {}
     }
     let (kind, args) = op.split_once('(')?;
@@ -1108,9 +1106,7 @@ fn fixture_reply_kind(test_type: &str) -> Option<ReplyKind> {
         "completion" => ReplyKind::Completion,
         "goto_definition" | "goto_type_definition" => ReplyKind::Definition,
         "references" => ReplyKind::References,
-        // `full_document` is the older name for a whole-file token request; it
-        // builds the same operation as `semantic_tokens`.
-        "semantic_tokens" | "full_document" => ReplyKind::SemanticTokens,
+        "semantic_tokens" => ReplyKind::SemanticTokens,
         "signature_help" => ReplyKind::SignatureHelp,
         "inlay_hints" => ReplyKind::InlayHints,
         "hover" => ReplyKind::Hover,
@@ -1248,9 +1244,8 @@ fn run_lsp_test(test: &LspTest, server: LspServerCmd) -> Result<bool> {
     // Names the request in every decode and shape failure below.
     let request = format!("{} test '{}'", test.test_type, test.name);
 
-    // Dispatch on the request, not the `TYPE:` spelling: a fixture that
-    // reached `TYPE: full_document` used to fall through to a raw-output
-    // substring match. `ReplyKind` has one arm per decoder.
+    // `ReplyKind` has one arm per decoder, so no request falls through to a
+    // raw-output substring match.
     let all_found = match test.operation.reply_kind() {
         ReplyKind::Completion => check_completion_reply(test, &request, &stdout)?,
         ReplyKind::Definition => check_definition_reply(test, &request, &stdout)?,
@@ -1300,13 +1295,11 @@ fn write_fixture_project(test: &LspTest) -> Result<(PathBuf, PathBuf)> {
 
     // Multi-file tests get their own subdirectory containing `stick.toml` plus
     // every `FILE:` entry. The primary file (the one with the cursor marker)
-    // is the path passed to the rock-lsp CLI. `project.toml` in the spec is
-    // translated to `stick.toml` since that's Rock's real project manifest.
+    // is the path passed to the rock-lsp CLI.
     if !test.files.is_empty() {
         for (name, content) in &test.files {
-            // Skip user-supplied manifests — we write our own below so the
-            // format matches what rock-lsp's stick.toml parser expects.
-            if name == "project.toml" || name == "stick.toml" {
+            // The harness writes its own manifest below.
+            if name == "stick.toml" {
                 continue;
             }
             fs_err::write(proj.join(name), content)?;
@@ -1910,8 +1903,8 @@ fn check_rename_reply(test: &LspTest, request: &str, stdout: &str) -> Result<boo
         // expected per-file content.
         if !test.expected_files.is_empty() {
             for (fname, expected_content) in &test.expected_files {
-                // Skip non-rock manifest entries that the renamer never touches.
-                if fname == "project.toml" || fname == "stick.toml" {
+                // The renamer never touches the manifest.
+                if fname == "stick.toml" {
                     continue;
                 }
                 let original = test
@@ -2421,10 +2414,7 @@ fn start_lsp_server(server: LspServerCmd, root_dir: &Path, name: &str) -> Result
     // within the timeout. Without this, a wedged server would block
     // `read_response` forever (no read-deadline on the pipe), and the
     // parallel runner would stall the whole suite indefinitely.
-    let timeout_secs: u64 = std::env::var("ROCK_LSP_TEST_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(60);
+    let timeout_secs: u64 = 60;
     let child_pid = child.id();
     let test_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let watchdog_done = test_done.clone();
@@ -2650,17 +2640,6 @@ fn run_edit_sequence_test(test: &EditSequenceTest, server: LspServerCmd) -> Resu
                         serde_json::json!({ "textDocument": { "uri": test_uri } }),
                     )?;
                     check_semantic_tokens_response(&response, &check.expected, step_idx, verbose)
-                }
-                EditStepOperation::Diagnostics => {
-                    // Diagnostics come as notifications -- for now just check no crash
-                    // TODO: capture diagnostics from notifications between steps
-                    if verbose {
-                        eprintln!(
-                            "    Step {}: diagnostics check (pass-through)",
-                            step_idx + 1
-                        );
-                    }
-                    true
                 }
                 EditStepOperation::Completion { line, character } => {
                     let response =
@@ -2916,17 +2895,10 @@ fn print_file_result(r: &FileTestResult) {
     } else {
         "FAILED".red()
     };
-    if std::env::var("ROCK_VERBOSE_TIMING").is_ok() {
-        println!(
-            "{} {} {} ({}/{} tests, {:.2}ms)",
-            r.file_name, dots, status, r.passed, total, total_ms,
-        );
-    } else {
-        println!(
-            "{} {} {} ({}/{} tests, {:.0}ms)",
-            r.file_name, dots, status, r.passed, total, total_ms,
-        );
-    }
+    println!(
+        "{} {} {} ({}/{} tests, {:.0}ms)",
+        r.file_name, dots, status, r.passed, total, total_ms,
+    );
     for (test_name, error) in &r.failed_test_details {
         println!("  {} ... {}", test_name, "FAILED".red());
         for line in error.lines() {
@@ -3314,18 +3286,15 @@ fn main() {\n\
 }\n\
 ===\n";
 
-    /// `full_document` is the older spelling of a whole-file semantic-token
-    /// request. It builds the semantic-token operation, so its reply has to
-    /// decode as one whatever the fixture calls the type.
-    const FULL_DOCUMENT_FIXTURE: &str = "\
-TEST: stub full document\n\
-TYPE: full_document\n\
+    const SEMANTIC_TOKENS_FIXTURE: &str = "\
+TEST: stub semantic tokens\n\
+TYPE: semantic_tokens\n\
 ---\n\
 fn main() {\n\
     let count = 1;\n\
 }\n\
 ---\n\
-OPERATION: full_document\n\
+OPERATION: semantic_tokens\n\
 EXPECTED:\n\
 min_tokens: 5\n\
 ===\n";
@@ -3416,7 +3385,7 @@ min_tokens: 5\n\
             (HOVER_FIXTURE, "fn main()", "hover"),
             (INLAY_HINTS_FIXTURE, ": int", "inlay_hints"),
             (RENAME_FIXTURE, "let total = 1", "rename"),
-            (FULL_DOCUMENT_FIXTURE, "min_tokens: 5", "full_document"),
+            (SEMANTIC_TOKENS_FIXTURE, "min_tokens: 5", "semantic_tokens"),
         ];
         for (fixture, expected_text, request) in cases {
             let reply = format!("not json {expected_text}");
@@ -3447,6 +3416,17 @@ min_tokens: 5\n\
             (
                 COMPLETION_FIXTURE.replace("OPERATION: completion", "OPERATION: teleport"),
                 vec!["OPERATION 'teleport'", "stub completion"],
+            ),
+            (
+                SEMANTIC_TOKENS_FIXTURE
+                    .replace("TYPE: semantic_tokens", "TYPE: full_document")
+                    .replace("OPERATION: semantic_tokens", "OPERATION: full_document"),
+                vec!["TYPE 'full_document'", "stub semantic tokens"],
+            ),
+            (
+                SEMANTIC_TOKENS_FIXTURE
+                    .replace("OPERATION: semantic_tokens", "OPERATION: full_document"),
+                vec!["OPERATION 'full_document'", "stub semantic tokens"],
             ),
             // A code block opened with `--` used to vanish from the run.
             (
@@ -3561,6 +3541,19 @@ min_tokens: 5\n\
     }
 
     /// Prose notes before and between blocks are documentation, not fixtures.
+    /// Only `stick.toml` is the harness's manifest; any other `FILE:` lands as written.
+    #[test]
+    fn a_multi_file_fixture_writes_project_toml_as_an_ordinary_file() {
+        let fixture = "TEST: stub manifest\nTYPE: hover\nFILES:\n---\nFILE: main.rock\n---\nfn main() {}\n---\nFILE: project.toml\n---\nnot a manifest\n---\nFILE: stick.toml\n---\nignored\n---\nOPERATION: hover\nPOSITION: line=0, character=3\nEXPECTED:\nfn main()\n===\n";
+        let tests = parse_fixtures(fixture).unwrap();
+        let (_, project) = write_fixture_project(&tests[0]).unwrap();
+        let read = |name: &str| std::fs::read_to_string(project.join(name)).unwrap();
+        let (written, manifest) = (read("project.toml"), read("stick.toml"));
+        std::fs::remove_dir_all(&project).unwrap();
+        assert_eq!(written.trim_end(), "not a manifest");
+        assert!(manifest.contains("name = \"lsp_test\""), "{manifest}");
+    }
+
     #[test]
     fn prose_between_blocks_is_allowed() {
         let fixture = format!(
@@ -3579,6 +3572,10 @@ min_tokens: 5\n\
             (
                 sequence("STEP 1:\nfn main() {}\n---\nCHECK: hover(1)\n"),
                 "malformed check `CHECK: hover(1)`",
+            ),
+            (
+                sequence("STEP 1:\nfn main() {}\n---\nCHECK: diagnostics\n"),
+                "malformed check `CHECK: diagnostics`",
             ),
             (
                 sequence("STEP 1:\nfn main() {}\n---\nCHECK: teleport\n"),
@@ -3673,7 +3670,7 @@ min_tokens: 5\n\
                 RENAME_FIXTURE,
                 r#"{"changes": {"file:///fixture.rock": [{"range": {"start": {"line": 1, "character": 4}, "end": {"line": 1, "character": 9}}, "new_text": "total"}, {"range": {"start": {"line": 2, "character": 6}, "end": {"line": 2, "character": 11}}, "new_text": "total"}]}}"#,
             ),
-            (FULL_DOCUMENT_FIXTURE, r#"{"count": 7}"#),
+            (SEMANTIC_TOKENS_FIXTURE, r#"{"count": 7}"#),
         ];
         for (fixture, reply) in cases {
             let (result, invocations) = run_against_stub(fixture, reply);
