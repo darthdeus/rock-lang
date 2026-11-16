@@ -756,9 +756,32 @@ impl Emitter<'_> {
             .and_then(|plan| plan.value_storage())
             == Some(skull_mir::lower::ValueStorage::CData);
         if !cdata {
+            // An absent tag canonicalizes to `null` -- the form a `= null` write
+            // and an absent literal both store. The scalar ABI spells absence
+            // `false`, and equality compares tags per key.
+            let presence = arena
+                .nominal_value_leaf_presence_flags_required(
+                    self.ws,
+                    bone_core::hir::FnBackend::Js,
+                    name,
+                )
+                .map_err(|e| err(e.message))?;
+            if presence.len() != fields.len() {
+                return Err(err(format!(
+                    "`{name}` leaf-form constructor has {} leaves for {} presence flags",
+                    fields.len(),
+                    presence.len()
+                )));
+            }
             let mut parts = vec![format!("__ty: {}", js_string_lit(name.as_ref())?)];
-            for (key, value) in fields {
-                parts.push(format!("{}: {}", js_key(key)?, self.render_val(*value)?));
+            for ((key, value), tag) in fields.iter().zip(presence) {
+                let rendered = self.render_val(*value)?;
+                let rendered = if tag {
+                    format!("({rendered} ? true : null)")
+                } else {
+                    rendered
+                };
+                parts.push(format!("{}: {rendered}", js_key(key)?));
             }
             return Ok(format!("({{{}}})", parts.join(", ")));
         }
