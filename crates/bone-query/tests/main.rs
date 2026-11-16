@@ -2,6 +2,8 @@
 // instead of one per file. nextest still runs each test in its own
 // process, so isolation is unchanged.
 
+#[path = "support/completion.rs"]
+mod completion;
 #[path = "support/fixture.rs"]
 mod fixture;
 #[path = "support/label_asserts.rs"]
@@ -9,24 +11,10 @@ mod label_asserts;
 #[path = "support/response_invariants.rs"]
 mod response_invariants;
 
-#[path = "completion_blank_line.rs"]
-mod completion_blank_line;
 #[path = "completion_contexts.rs"]
 mod completion_contexts;
 #[path = "completion_dispatch.rs"]
 mod completion_dispatch;
-#[path = "completion_in_comment.rs"]
-mod completion_in_comment;
-#[path = "completion_in_string.rs"]
-mod completion_in_string;
-#[path = "completion_invariants.rs"]
-mod completion_invariants;
-#[path = "completion_macros.rs"]
-mod completion_macros;
-#[path = "completion_magic_comment.rs"]
-mod completion_magic_comment;
-#[path = "completion_numeric_prefix.rs"]
-mod completion_numeric_prefix;
 #[path = "completion_ranking.rs"]
 mod completion_ranking;
 #[path = "completion_sweep.rs"]
