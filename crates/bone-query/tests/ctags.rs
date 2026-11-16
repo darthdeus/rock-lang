@@ -16,7 +16,8 @@ fn has_tag(tags: &str, name: &str) -> bool {
 fn write_ctags_emits_every_symbol_kind_with_its_fields() {
     let src = "fn add(a: int, b: int) -> int {\n  a + b\n}\n\nstruct Point {\n  x: int,\n  y: int,\n}\n\nenum Color {\n  Red,\n  Blue,\n}\n\nglobal MAX_HP: int = 100\ndeco init my_system(stage: int = 100) {\n}\nmacro twice(x: expr, rest: ...expr) -> string {\n  x\n}\n";
     let project = Project::new(&[("game.rock", src)]);
-    let path = project.dir.path().join("game.rock");
+    // Tags name the canonical path; on macOS the temp dir is behind a symlink.
+    let path = project.dir.path().join("game.rock").canonicalize().unwrap();
     let path = path.to_string_lossy();
     let mut bone = BoneWorkspace::new();
     bone.update(&path, src.to_string());
