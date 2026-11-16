@@ -5,6 +5,8 @@ use rustc_hash::FxHashSet as HashSet;
 use skull_mir::cfg::{Dominators, dominates, dominators, reachable_blocks_from};
 use skull_mir::mir::{Block, Cell, Inst, MirFunc};
 
+use crate::visit::raw;
+
 #[derive(Clone, Copy, Debug)]
 enum Definition {
     None,
@@ -28,10 +30,6 @@ struct Analysis {
     defs: Vec<Definition>,
     loads: Vec<Vec<(Idx<Block>, usize, Idx<Inst>)>>,
     excluded: Vec<bool>,
-}
-
-fn raw<T>(id: Idx<T>) -> usize {
-    u32::from(id.into_raw()) as usize
 }
 
 fn record_definition(defs: &mut [Definition], cell: Idx<Cell>, next: Definition) {

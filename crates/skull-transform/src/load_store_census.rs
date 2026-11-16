@@ -96,14 +96,13 @@ pub fn observe_cleanup(
     cleanup(func)?;
     let mut live = vec![false; func.insts.len()];
     for (inst, _, _) in live_accesses(func) {
-        live[raw(inst) as usize] = true;
+        live[raw(inst)] = true;
     }
     for &(inst, cell, is_load) in &before {
         let row = &mut census.rows[func.cells[cell].producer as usize];
         // An access rewritten in place to another cell or another inst is gone.
-        let kept =
-            live[raw(inst) as usize] && cell_access(&func.insts[inst]) == Some((cell, is_load));
-        let spliced = raw(inst) as usize >= spliced_floor;
+        let kept = live[raw(inst)] && cell_access(&func.insts[inst]) == Some((cell, is_load));
+        let spliced = raw(inst) >= spliced_floor;
         match (is_load, kept) {
             (true, _) => row.loads_before += 1,
             (false, _) => row.stores_before += 1,
@@ -120,7 +119,7 @@ pub fn observe_cleanup(
         }
     }
     for (inst, cell, is_load) in live_accesses(func) {
-        if (raw(inst) as usize) < inst_floor {
+        if (raw(inst)) < inst_floor {
             continue;
         }
         let row = &mut census.rows[func.cells[cell].producer as usize];

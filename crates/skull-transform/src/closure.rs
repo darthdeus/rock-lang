@@ -26,11 +26,9 @@ use skull_mir::code_identity::{
     FrameSchema, LambdaSiteId, LambdaTopologyFingerprint,
 };
 use skull_mir::mir::*;
-use ustr::Ustr;
 
-fn raw<T>(i: Idx<T>) -> u32 {
-    i.into_raw().into()
-}
+use crate::visit::raw;
+use ustr::Ustr;
 
 /// Environment slots are local to the capture plan, so copies of one lambda
 /// site have the same body even when injected into different MIR arena slots.

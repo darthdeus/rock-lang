@@ -282,15 +282,15 @@ struct LoadUses {
 fn initially_disqualified(func: &MirFunc, nc: usize) -> Vec<bool> {
     let mut disq = vec![false; nc];
     for c in &func.params {
-        disq[raw(*c) as usize] = true; // params are the Lua signature; never split
+        disq[raw(*c)] = true; // params are the Lua signature; never split
     }
     for (c, cell) in func.cells.iter() {
         if cell.borrowed {
-            disq[raw(c) as usize] = true;
+            disq[raw(c)] = true;
         }
     }
     if let Some(ra) = func.resume_arg {
-        disq[raw(ra) as usize] = true;
+        disq[raw(ra)] = true;
     }
     for (_, b) in func.blocks.iter() {
         for &i in &b.insts {
@@ -298,16 +298,14 @@ fn initially_disqualified(func: &MirFunc, nc: usize) -> Vec<bool> {
                 Inst::CallMulti { dests, .. }
                 | Inst::CallValueMulti { dests, .. }
                 | Inst::CallBoundMulti { dests, .. } => {
-                    dests.iter().for_each(|c| disq[raw(*c) as usize] = true)
+                    dests.iter().for_each(|c| disq[raw(*c)] = true)
                 }
-                Inst::Lambda { params, .. } => {
-                    params.iter().for_each(|c| disq[raw(*c) as usize] = true)
-                }
+                Inst::Lambda { params, .. } => params.iter().for_each(|c| disq[raw(*c)] = true),
                 Inst::MapNext {
                     key_cell, val_cell, ..
                 } => {
-                    disq[raw(*key_cell) as usize] = true;
-                    disq[raw(*val_cell) as usize] = true;
+                    disq[raw(*key_cell)] = true;
+                    disq[raw(*val_cell)] = true;
                 }
                 _ => {}
             }
@@ -330,7 +328,7 @@ fn cell_enum_hints(func: &MirFunc, nc: usize) -> Vec<Option<ustr::Ustr>> {
                 if let Inst::MakeEnum { ty, .. } | Inst::MakeEnumDyn { ty, .. } =
                     &func.insts[*value]
                 {
-                    cell_enum[raw(*cell) as usize].get_or_insert(*ty);
+                    cell_enum[raw(*cell)].get_or_insert(*ty);
                 }
             }
         }
@@ -346,9 +344,9 @@ fn value_use_counts(func: &MirFunc) -> Vec<u32> {
     let mut vuse = vec![0u32; func.insts.len()];
     for (_, b) in func.blocks.iter() {
         for &i in &b.insts {
-            func.insts[i].uses_each(&mut |op| vuse[raw(op) as usize] += 1);
+            func.insts[i].uses_each(&mut |op| vuse[raw(op)] += 1);
         }
-        b.term.uses_each(&mut |op| vuse[raw(op) as usize] += 1);
+        b.term.uses_each(&mut |op| vuse[raw(op)] += 1);
     }
     vuse
 }
@@ -373,7 +371,7 @@ impl Families {
             let in_main = main.contains(&bid);
             for &i in &b.insts {
                 if let Inst::Store { cell, value } = &func.insts[i] {
-                    let ck = raw(*cell) as usize;
+                    let ck = raw(*cell);
                     has_store[ck] = true;
                     if !in_main {
                         disq[ck] = true;
@@ -400,8 +398,7 @@ impl Families {
                     }
                     match ctor_fields(&func.insts[*value], cell_enum[ck]) {
                         Some((id, fields)) => {
-                            if cand[ck].is_some_and(|n| n != id) || vuse[raw(*value) as usize] != 1
-                            {
+                            if cand[ck].is_some_and(|n| n != id) || vuse[raw(*value)] != 1 {
                                 disq[ck] = true;
                             } else {
                                 cand[ck] = Some(id);
@@ -467,7 +464,7 @@ impl Families {
             let root = loop {
                 match alias[cur] {
                     Some(o) if steps <= nc => {
-                        cur = raw(o) as usize;
+                        cur = raw(o);
                         steps += 1;
                         // An alias THROUGH a disqualified cell must not resolve past it:
                         // a disqualified intermediate stays a whole aggregate whose value
@@ -555,7 +552,7 @@ impl Families {
         for (_, b) in func.blocks.iter() {
             for &i in &b.insts {
                 if let Inst::Load(c) = &func.insts[i] {
-                    let ck = raw(*c) as usize;
+                    let ck = raw(*c);
                     if cand[ck].is_some() && !disq[ck] {
                         load_cell.insert(i, *c);
                     }
@@ -570,7 +567,7 @@ impl Families {
                 func.insts[i].uses_each(&mut |op| {
                     if let Some(&c) = load_cell.get(&op) {
                         let known = |f: &ustr::Ustr| {
-                            cand_fields[rep[raw(c) as usize]]
+                            cand_fields[rep[raw(c)]]
                                 .as_ref()
                                 .is_some_and(|s| s.contains(f))
                         };
@@ -592,10 +589,7 @@ impl Families {
                                 *base == op && known(&skull_mir::names::indexed("_", "", *index))
                             }
                             Inst::Eq(a, b) | Inst::NotEq(a, b)
-                                if matches!(
-                                    cand[rep[raw(c) as usize]],
-                                    Some(StructId::Value(_))
-                                ) =>
+                                if matches!(cand[rep[raw(c)]], Some(StructId::Value(_))) =>
                             {
                                 let other = if *a == op { *b } else { *a };
                                 let is_nil = (*a == op) != (*b == op)
@@ -606,10 +600,7 @@ impl Families {
                                 is_nil
                             }
                             Inst::Eq(a, b)
-                                if matches!(
-                                    cand[rep[raw(c) as usize]],
-                                    Some(StructId::Enum(_))
-                                ) =>
+                                if matches!(cand[rep[raw(c)]], Some(StructId::Enum(_))) =>
                             {
                                 let other = if *a == op {
                                     Some(*b)
@@ -632,14 +623,14 @@ impl Families {
                             // of a copy (`let t = h.t ?? return` feeding a loop body's
                             // binding) reads its immediate source's leaves.
                             Inst::Store { cell, value } => {
-                                let yk = raw(*cell) as usize;
+                                let yk = raw(*cell);
                                 let accepted = *value == op
                                     && alias[yk].is_some()
                                     && !disq[yk]
-                                    && (rep[yk] == rep[raw(c) as usize]
+                                    && (rep[yk] == rep[raw(c)]
                                         || (copy_alias[yk].is_some() && alias[yk] == Some(c)));
                                 if accepted && copy_alias[yk].is_some_and(|r| r != c) {
-                                    chained_roots.insert(raw(copy_alias[yk].unwrap()) as usize);
+                                    chained_roots.insert(raw(copy_alias[yk].unwrap()));
                                 }
                                 accepted
                             }
@@ -651,7 +642,7 @@ impl Families {
                             if func.cells[c].nonnull_value_struct {
                                 escape_loads.push((op, c));
                             } else {
-                                disq[raw(c) as usize] = true;
+                                disq[raw(c)] = true;
                             }
                         }
                     }
@@ -662,7 +653,7 @@ impl Families {
                     if func.cells[c].nonnull_value_struct {
                         escape_loads.push((op, c)); // rebuild at the terminator use
                     } else {
-                        disq[raw(c) as usize] = true; // a load used by a terminator escapes
+                        disq[raw(c)] = true; // a load used by a terminator escapes
                     }
                 }
             });
@@ -679,7 +670,7 @@ impl Families {
     /// The family root a cell's leaves live under: its copy source, else its
     /// representative.
     fn leaf_root(&self, k: usize) -> usize {
-        self.copy_alias[k].map_or(self.rep[k], |r| raw(r) as usize)
+        self.copy_alias[k].map_or(self.rep[k], raw)
     }
 
     fn settle_disqualification(
@@ -690,7 +681,7 @@ impl Families {
         // A chained family that also escapes would rebuild its value at every
         // escaping use, which can cost more than the one copy it replaces.
         for (_, c) in escape_loads {
-            let root = self.leaf_root(raw(*c) as usize);
+            let root = self.leaf_root(raw(*c));
             if chained_roots.contains(&root) {
                 self.disq[root] = true;
             }
@@ -722,7 +713,7 @@ impl Families {
                 // Load(root))` would read the root's now-uninit aggregate, so it
                 // takes the root too.
                 if let Some(root) = copy_alias[k] {
-                    let rk = raw(root) as usize;
+                    let rk = raw(root);
                     if disq[k] {
                         disq[rk] = true;
                     }
@@ -740,7 +731,7 @@ impl Families {
     fn add_presence_leaves(&mut self, value_nil_tests: &[(Idx<Inst>, Idx<Inst>, Idx<Cell>)]) {
         let present_field = present_field();
         for (_, _, c) in value_nil_tests {
-            let root = self.leaf_root(raw(*c) as usize);
+            let root = self.leaf_root(raw(*c));
             self.presence_roots.insert(root);
         }
         for k in 0..self.nc {
@@ -754,7 +745,7 @@ impl Families {
     }
 
     fn needs_presence(&self, c: Idx<Cell>) -> bool {
-        let k = raw(c) as usize;
+        let k = raw(c);
         k < self.nc && self.presence_roots.contains(&self.leaf_root(k))
     }
 
@@ -763,7 +754,7 @@ impl Families {
     // cell that the later `store_expansions` scan sees): they are never candidates
     // this round, and indexing the round's `nc`-sized arrays with them would panic.
     fn is_cand(&self, c: Idx<Cell>) -> bool {
-        let k = raw(c) as usize;
+        let k = raw(c);
         k < self.nc && self.cand[k].is_some() && !self.disq[k] && self.has_store[k]
     }
 
@@ -774,7 +765,7 @@ impl Families {
     // Alias members resolve through `rep` FIRST, so a family shares one set of
     // field cells (by-ref mutation through any member lands in the shared cell).
     fn to_rep(&self, c: Idx<Cell>) -> Idx<Cell> {
-        let k = raw(c) as usize;
+        let k = raw(c);
         if k < self.nc && self.rep[k] != k {
             Idx::from_raw(RawIdx::from_u32(self.rep[k] as u32))
         } else {
@@ -784,13 +775,13 @@ impl Families {
 
     /// Only a field the CTOR actually provides has a cell to redirect to.
     fn provides(&self, c: Idx<Cell>, f: &ustr::Ustr) -> bool {
-        self.cand_fields[self.rep[raw(c) as usize]]
+        self.cand_fields[self.rep[raw(c)]]
             .as_ref()
             .is_some_and(|s| s.contains(f))
     }
 
     fn candidate_fields(&self, c: Idx<Cell>) -> Result<Vec<ustr::Ustr>, CompilerError> {
-        let k = raw(c) as usize;
+        let k = raw(c);
         let root = *self.rep.get(k).ok_or_else(|| {
             CompilerError::new_no_location("SROA candidate cell is outside its analysis tables")
         })?;
@@ -1063,7 +1054,7 @@ fn plan_store_expansions(
                     }
                     // A value-struct alias member copies its source's leaves.
                     if let (Inst::Load(src), Some(_)) =
-                        (&func.insts[*value], fam.copy_alias[raw(*cell) as usize])
+                        (&func.insts[*value], fam.copy_alias[raw(*cell)])
                     {
                         let src = fam.to_rep(*src);
                         let mut fs = fam.candidate_fields(*cell)?;
@@ -1077,7 +1068,7 @@ fn plan_store_expansions(
                         )));
                     }
                     let Some((_, mut fields)) =
-                        ctor_fields(&func.insts[*value], fam.cell_enum[raw(*cell) as usize])
+                        ctor_fields(&func.insts[*value], fam.cell_enum[raw(*cell)])
                     else {
                         return Ok(None);
                     };
@@ -1113,7 +1104,7 @@ fn alias_deletions(func: &MirFunc, fam: &Families) -> HashMap<Idx<Inst>, Vec<Idx
         .flat_map(|(_, b)| b.insts.iter().copied())
         .filter(|&i| match &func.insts[i] {
             Inst::Store { cell, value } => {
-                let ck = raw(*cell) as usize;
+                let ck = raw(*cell);
                 ck < fam.nc
                     && fam.alias[ck].is_some()
                     && fam.copy_alias[ck].is_none()
@@ -1221,12 +1212,10 @@ fn rematerialize_escapes(
             continue;
         }
         let root = fam.to_rep(c);
-        let Some(StructId::Value(name)) = fam.cand[raw(root) as usize] else {
+        let Some(StructId::Value(name)) = fam.cand[raw(root)] else {
             continue;
         };
-        let Some((order, representation, form)) =
-            fam.value_order.get(&(raw(root) as usize)).cloned()
-        else {
+        let Some((order, representation, form)) = fam.value_order.get(&(raw(root))).cloned() else {
             continue;
         };
         let mut news = Vec::with_capacity(order.len() + 1);

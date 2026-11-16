@@ -89,11 +89,9 @@ use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::cfg::{predecessors, reverse_postorder, successors};
 use skull_mir::mir::*;
-use ustr::Ustr;
 
-fn raw<T>(i: Idx<T>) -> usize {
-    i.into_raw().into_u32() as usize
-}
+use crate::visit::raw;
+use ustr::Ustr;
 
 /// Mark every provably in-bounds `[T]` element access in `func`, returning how
 /// many accesses were marked. Adds only allocation guarantees of the actual

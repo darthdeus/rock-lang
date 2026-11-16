@@ -53,10 +53,10 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) -> bool {
                 if let Some(cp) = cp {
                     insts[i].remap_uses(&|x| resolve_subst(&cp.subst, x));
                 }
-                insts[i].uses_each(&mut |op| use_count[raw(op) as usize] += 1);
+                insts[i].uses_each(&mut |op| use_count[raw(op)] += 1);
                 match &insts[i] {
-                    Inst::Load(c) => load_count[raw(*c) as usize] += 1,
-                    Inst::Store { cell, .. } => store_n[raw(*cell) as usize] += 1,
+                    Inst::Load(c) => load_count[raw(*c)] += 1,
+                    Inst::Store { cell, .. } => store_n[raw(*cell)] += 1,
                     _ => {}
                 }
             }
@@ -65,12 +65,12 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) -> bool {
             }
             // Terminator operands are permanent uses (terms are never removed), so
             // their +1 is never decremented — a value used by a term stays live.
-            b.term.uses_each(&mut |v| use_count[raw(v) as usize] += 1);
+            b.term.uses_each(&mut |v| use_count[raw(v)] += 1);
         }
     }
     // Compact templates summarize these loads instead of cloning their dead blocks.
     for &cell in &func.inline_cleanup_load_cells {
-        load_count[raw(cell) as usize] = load_count[raw(cell) as usize].saturating_add(1);
+        load_count[raw(cell)] = load_count[raw(cell)].saturating_add(1);
     }
     // CSR: stores grouped by cell, so a cell whose last `Load` is removed cascades
     // its now-dead stores in O(stores-of-that-cell).
@@ -83,8 +83,8 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) -> bool {
     for (_, b) in func.blocks.iter() {
         for &i in &b.insts {
             if let Inst::Store { cell, .. } = &func.insts[i] {
-                let c = raw(*cell) as usize;
-                store_list[fill[c] as usize] = raw(i);
+                let c = raw(*cell);
+                store_list[fill[c] as usize] = raw(i) as u32;
                 fill[c] += 1;
             }
         }
@@ -99,11 +99,10 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) -> bool {
         for &i in &b.insts {
             if is_dead_rc(&func.insts[i], i, &use_count, &load_count)
                 || cp.is_some_and(|cp| {
-                    cp.self_stores[raw(i) as usize]
-                        || (cp.nonthrowing[raw(i) as usize] && use_count[raw(i) as usize] == 0)
+                    cp.self_stores[raw(i)] || (cp.nonthrowing[raw(i)] && use_count[raw(i)] == 0)
                 })
             {
-                dead[raw(i) as usize] = true;
+                dead[raw(i)] = true;
                 work.push(i);
             }
         }
@@ -121,12 +120,12 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) -> bool {
             continue;
         };
         if let Inst::Store { cell, .. } = &func.insts[i] {
-            removed_store_cells.push(raw(*cell) as usize);
+            removed_store_cells.push(raw(*cell));
         }
         // Each value operand of the removed inst loses a use; a value that hits
         // zero (and is pure) is itself now dead.
         func.insts[i].uses_each(&mut |op| {
-            let k = raw(op) as usize;
+            let k = raw(op);
             exposes |= matches!(func.insts[op], Inst::MakeStruct { .. });
             use_count[k] = use_count[k].saturating_sub(1);
             if !dead[k]
@@ -140,13 +139,13 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) -> bool {
         // Removing a `Load` drops its cell's load count; a cell with no remaining
         // loads makes its stores dead (their value operands then cascade on pop).
         if let Inst::Load(c) = &func.insts[i] {
-            let ck = raw(*c) as usize;
+            let ck = raw(*c);
             load_count[ck] = load_count[ck].saturating_sub(1);
             if load_count[ck] == 0 {
                 for si in store_off[ck]..store_off[ck + 1] {
                     let s = Idx::from_raw(RawIdx::from_u32(store_list[si as usize]));
-                    if !dead[raw(s) as usize] {
-                        dead[raw(s) as usize] = true;
+                    if !dead[raw(s)] {
+                        dead[raw(s)] = true;
                         work.push(s);
                     }
                 }
@@ -182,7 +181,7 @@ fn drop_repeated_projections(
         let mut run: Option<ProjectionBase> = None;
         let mut used = false;
         for &id in &b.insts {
-            if dead[raw(id) as usize] {
+            if dead[raw(id)] {
                 continue;
             }
             let inst = &func.insts[id];
@@ -205,7 +204,7 @@ fn drop_repeated_projections(
                 end_run(used, &mut unused, dead, work);
                 (run, used) = (Some(base), false);
             }
-            if use_count[raw(id) as usize] == 0 {
+            if use_count[raw(id)] == 0 {
                 unused.push(id);
             } else {
                 used = true;
@@ -218,7 +217,7 @@ fn drop_repeated_projections(
 fn end_run(used: bool, unused: &mut Vec<Idx<Inst>>, dead: &mut [bool], work: &mut Vec<Idx<Inst>>) {
     let kept = usize::from(!used).min(unused.len());
     for &id in &unused[kept..] {
-        dead[raw(id) as usize] = true;
+        dead[raw(id)] = true;
         work.push(id);
     }
     unused.clear();
@@ -229,7 +228,7 @@ fn drop_flagged(func: &mut MirFunc, dead: &[bool]) {
     let block_ids: Vec<Idx<Block>> = func.blocks.iter().map(|(id, _)| id).collect();
     for bid in block_ids {
         let mut insts = std::mem::take(&mut func.blocks[bid].insts);
-        insts.retain(|&i| !dead[raw(i) as usize]);
+        insts.retain(|&i| !dead[raw(i)]);
         func.blocks[bid].insts = insts;
     }
 }
@@ -505,25 +504,24 @@ fn has_unreached_code(func: &MirFunc) -> bool {
     let mut stack = vec![func.entry];
     stack.extend(func.coro_defers.iter().map(|(_, e)| *e));
     for b in &stack {
-        reach[raw(*b) as usize] = true;
+        reach[raw(*b)] = true;
     }
     while let Some(b) = stack.pop() {
         skull_mir::cfg::successors(&func.blocks[b].term, |t| {
-            if !std::mem::replace(&mut reach[raw(t) as usize], true) {
+            if !std::mem::replace(&mut reach[raw(t)], true) {
                 stack.push(t);
             }
         });
     }
     let holds_code = func.blocks.iter().any(|(b, block)| {
-        !reach[raw(b) as usize]
-            && (!block.insts.is_empty() || !matches!(block.term, Term::Unreachable))
+        !reach[raw(b)] && (!block.insts.is_empty() || !matches!(block.term, Term::Unreachable))
     });
     holds_code
         || func.emit_ids.as_ref().is_some_and(|ids| {
             let reached: rustc_hash::FxHashSet<u32> = func
                 .blocks
                 .iter()
-                .filter(|(b, _)| reach[raw(*b) as usize])
+                .filter(|(b, _)| reach[raw(*b)])
                 .map(|(b, _)| func.emit_block_id(b))
                 .collect();
             ids.forced_cell_blocks.iter().any(|b| !reached.contains(b))
@@ -585,8 +583,8 @@ fn clear_unreachable_blocks(func: &mut MirFunc) -> bool {
 /// checked `Index` read can error, so a discarded read must still run.
 fn is_dead_rc(inst: &Inst, i: Idx<Inst>, use_count: &[u32], load_count: &[u32]) -> bool {
     match inst {
-        Inst::Store { cell, .. } => load_count[raw(*cell) as usize] == 0,
-        _ => is_dead_value(inst) && use_count[raw(i) as usize] == 0,
+        Inst::Store { cell, .. } => load_count[raw(*cell)] == 0,
+        _ => is_dead_value(inst) && use_count[raw(i)] == 0,
     }
 }
 

@@ -209,7 +209,6 @@ pub struct InlineCloneStats {
     pub dead_cloned_cells: usize,
     pub dead_cloned_blocks: usize,
     pub cleanup_load_roots: usize,
-    pub coalesced_cells: usize,
     pub inst_remap_entries: usize,
     pub cell_remap_entries: usize,
     pub block_remap_entries: usize,
@@ -300,7 +299,6 @@ impl InlineCloneStats {
         self.dead_cloned_cells += other.dead_cloned_cells;
         self.dead_cloned_blocks += other.dead_cloned_blocks;
         self.cleanup_load_roots += other.cleanup_load_roots;
-        self.coalesced_cells += other.coalesced_cells;
         self.inst_remap_entries += other.inst_remap_entries;
         self.cell_remap_entries += other.cell_remap_entries;
         self.block_remap_entries += other.block_remap_entries;
@@ -444,7 +442,7 @@ pub struct InlineCandidateProfile {
     pub compact_cell_capacity: usize,
     pub compact_block_capacity: usize,
     pub worker: String,
-    pub rejection_reason: Option<String>,
+    pub rejection_reason: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -454,26 +452,9 @@ pub struct InlineCandidateTableStats {
     pub reused: usize,
     pub eligible: usize,
     pub rejected: usize,
-    pub lower_attempted: usize,
-    pub lowered: usize,
-    pub rejected_before_lower: usize,
     pub lower_ns: u64,
-    pub full_clone_ns: u64,
     pub cleanup_ns: u64,
-    pub compact_ns: u64,
-    pub full_clone_inst_capacity: usize,
-    pub full_clone_cell_capacity: usize,
-    pub full_clone_block_capacity: usize,
-    pub compact_inst_capacity: usize,
-    pub compact_cell_capacity: usize,
-    pub compact_block_capacity: usize,
     pub eligibility_ns: u64,
-    pub raw_instructions: usize,
-    pub raw_cells: usize,
-    pub raw_blocks: usize,
-    pub cleaned_instructions: usize,
-    pub cleaned_cells: usize,
-    pub cleaned_blocks: usize,
     pub profiles: BTreeMap<Instance, InlineCandidateProfile>,
     pub lower_ns_by_key: BTreeMap<Instance, u64>,
     pub worker_derivations: BTreeMap<String, usize>,
@@ -483,57 +464,7 @@ pub struct InlineCandidateTableStats {
 pub struct InlineCandidateWarm {
     key: CacheKey,
     candidate: Option<Arc<CalleeBody>>,
-    pub lower_ns: u64,
-    pub full_clone_ns: u64,
-    pub cleanup_ns: u64,
-    pub compact_ns: u64,
-    pub lower_attempted: bool,
-    pub lowered: bool,
-    pub raw_instructions: usize,
-    pub raw_cells: usize,
-    pub raw_blocks: usize,
-    pub cleaned_instructions: usize,
-    pub cleaned_cells: usize,
-    pub cleaned_blocks: usize,
-    pub full_clone_inst_capacity: usize,
-    pub full_clone_cell_capacity: usize,
-    pub full_clone_block_capacity: usize,
-    pub compact_inst_capacity: usize,
-    pub compact_cell_capacity: usize,
-    pub compact_block_capacity: usize,
-    pub eligibility_ns: u64,
-    pub rejection: Option<&'static str>,
-    worker: String,
-}
-
-impl InlineCandidateProfile {
-    fn from_warm(warm: &InlineCandidateWarm) -> Self {
-        Self {
-            lower_ns: warm.lower_ns,
-            full_clone_ns: warm.full_clone_ns,
-            cleanup_ns: warm.cleanup_ns,
-            compact_ns: warm.compact_ns,
-            eligibility_ns: warm.eligibility_ns,
-            lower_attempted: warm.lower_attempted,
-            lowered: warm.lowered,
-            eligible: warm.rejection.is_none(),
-            rejected_before_lower: warm.rejection.is_some() && !warm.lower_attempted,
-            raw_instructions: warm.raw_instructions,
-            raw_cells: warm.raw_cells,
-            raw_blocks: warm.raw_blocks,
-            cleaned_instructions: warm.cleaned_instructions,
-            cleaned_cells: warm.cleaned_cells,
-            cleaned_blocks: warm.cleaned_blocks,
-            full_clone_inst_capacity: warm.full_clone_inst_capacity,
-            full_clone_cell_capacity: warm.full_clone_cell_capacity,
-            full_clone_block_capacity: warm.full_clone_block_capacity,
-            compact_inst_capacity: warm.compact_inst_capacity,
-            compact_cell_capacity: warm.compact_cell_capacity,
-            compact_block_capacity: warm.compact_block_capacity,
-            worker: warm.worker.clone(),
-            rejection_reason: warm.rejection.map(str::to_string),
-        }
-    }
+    profile: InlineCandidateProfile,
 }
 
 fn adjust_count(map: &mut BTreeMap<String, usize>, key: &str, add: bool) {
@@ -562,35 +493,9 @@ fn adjust_candidate_profile(
             }
         };
     }
-    macro_rules! adjust_bool {
-        ($field:ident) => {
-            if add {
-                stats.$field += usize::from(profile.$field);
-            } else {
-                stats.$field = stats.$field.saturating_sub(usize::from(profile.$field));
-            }
-        };
-    }
     adjust!(lower_ns);
-    adjust!(full_clone_ns);
     adjust!(cleanup_ns);
-    adjust!(compact_ns);
     adjust!(eligibility_ns);
-    adjust_bool!(lower_attempted);
-    adjust_bool!(lowered);
-    adjust_bool!(rejected_before_lower);
-    adjust!(raw_instructions);
-    adjust!(raw_cells);
-    adjust!(raw_blocks);
-    adjust!(cleaned_instructions);
-    adjust!(cleaned_cells);
-    adjust!(cleaned_blocks);
-    adjust!(full_clone_inst_capacity);
-    adjust!(full_clone_cell_capacity);
-    adjust!(full_clone_block_capacity);
-    adjust!(compact_inst_capacity);
-    adjust!(compact_cell_capacity);
-    adjust!(compact_block_capacity);
     if add {
         stats.eligible += usize::from(profile.eligible);
         stats.rejected += usize::from(!profile.eligible);
@@ -603,7 +508,7 @@ fn adjust_candidate_profile(
     if !profile.worker.is_empty() {
         adjust_count(&mut stats.worker_derivations, &profile.worker, add);
     }
-    if let Some(reason) = &profile.rejection_reason {
+    if let Some(reason) = profile.rejection_reason {
         adjust_count(&mut stats.rejection_reasons, reason, add);
     }
     if profile.lowered {
@@ -631,7 +536,7 @@ impl InlineCandidateTable {
             warmed: warms.len(),
             ..InlineCandidateTableStats::default()
         };
-        let census_enabled = warms.iter().any(|warm| !warm.worker.is_empty())
+        let census_enabled = warms.iter().any(|warm| !warm.profile.worker.is_empty())
             || base.is_some_and(|table| !table.stats.profiles.is_empty());
         if census_enabled {
             if let Some(base) = base {
@@ -639,49 +544,9 @@ impl InlineCandidateTable {
             }
         }
         for warm in warms {
-            stats.lower_ns += warm.lower_ns;
-            stats.full_clone_ns += warm.full_clone_ns;
-            stats.cleanup_ns += warm.cleanup_ns;
-            stats.compact_ns += warm.compact_ns;
-            stats.full_clone_inst_capacity += warm.full_clone_inst_capacity;
-            stats.full_clone_cell_capacity += warm.full_clone_cell_capacity;
-            stats.full_clone_block_capacity += warm.full_clone_block_capacity;
-            stats.compact_inst_capacity += warm.compact_inst_capacity;
-            stats.compact_cell_capacity += warm.compact_cell_capacity;
-            stats.compact_block_capacity += warm.compact_block_capacity;
-            stats.raw_instructions += warm.raw_instructions;
-            stats.raw_cells += warm.raw_cells;
-            stats.raw_blocks += warm.raw_blocks;
-            stats.cleaned_instructions += warm.cleaned_instructions;
-            stats.cleaned_cells += warm.cleaned_cells;
-            stats.cleaned_blocks += warm.cleaned_blocks;
-            if warm.lower_attempted {
-                stats.lower_attempted += 1;
-            }
-            stats.lowered += usize::from(warm.lowered);
-            stats.eligibility_ns += warm.eligibility_ns;
-            if !warm.worker.is_empty() {
-                *stats
-                    .worker_derivations
-                    .entry(warm.worker.clone())
-                    .or_default() += 1;
-            }
-            if let Some(reason) = warm.rejection {
-                stats.rejected += 1;
-                if !warm.lower_attempted {
-                    stats.rejected_before_lower += 1;
-                }
-                *stats
-                    .rejection_reasons
-                    .entry(reason.to_string())
-                    .or_default() += 1;
-            } else {
-                stats.eligible += 1;
-            }
+            adjust_candidate_profile(&mut stats, &warm.key, &warm.profile, true);
             if census_enabled {
-                stats
-                    .profiles
-                    .insert(warm.key.clone(), InlineCandidateProfile::from_warm(&warm));
+                stats.profiles.insert(warm.key.clone(), warm.profile);
             }
             let previous = warmed.insert(warm.key, warm.candidate);
             assert!(
@@ -689,15 +554,11 @@ impl InlineCandidateTable {
                 "inline candidate table received a duplicate key"
             );
         }
-        if census_enabled {
-            stats.lower_ns_by_key = stats
-                .profiles
-                .iter()
-                .filter_map(|(key, profile)| {
-                    profile.lowered.then_some((key.clone(), profile.lower_ns))
-                })
-                .collect();
-        }
+        stats.lower_ns_by_key = stats
+            .profiles
+            .iter()
+            .filter_map(|(key, profile)| profile.lowered.then_some((key.clone(), profile.lower_ns)))
+            .collect();
         stats.reused = keys.len().saturating_sub(stats.warmed);
 
         let mut entries = HashMap::default();
@@ -736,7 +597,7 @@ impl InlineCandidateTable {
         let mut entries = HashMap::default();
         let mut stats = base.stats.clone();
         let census_enabled =
-            !stats.profiles.is_empty() || warms.iter().any(|warm| !warm.worker.is_empty());
+            !stats.profiles.is_empty() || warms.iter().any(|warm| !warm.profile.worker.is_empty());
         if census_enabled {
             for key in removed {
                 if let Some(profile) = stats.profiles.remove(key) {
@@ -749,9 +610,8 @@ impl InlineCandidateTable {
                 if let Some(profile) = stats.profiles.remove(&warm.key) {
                     adjust_candidate_profile(&mut stats, &warm.key, &profile, false);
                 }
-                let profile = InlineCandidateProfile::from_warm(warm);
-                adjust_candidate_profile(&mut stats, &warm.key, &profile, true);
-                stats.profiles.insert(warm.key.clone(), profile);
+                adjust_candidate_profile(&mut stats, &warm.key, &warm.profile, true);
+                stats.profiles.insert(warm.key.clone(), warm.profile.clone());
             }
         }
         for warm in warms {
@@ -921,7 +781,7 @@ impl UseIndex {
     }
 
     fn slot(&mut self, value: Idx<Inst>) -> &mut SmallVec<[UseSite; 2]> {
-        let at = crate::visit::raw(value) as usize;
+        let at = crate::visit::raw(value);
         if self.users.len() <= at {
             self.users.resize_with(at + 1, SmallVec::new);
         }
@@ -936,7 +796,7 @@ impl UseIndex {
     }
 
     fn remove_use(&mut self, value: Idx<Inst>, site: UseSite) {
-        if let Some(users) = self.users.get_mut(crate::visit::raw(value) as usize) {
+        if let Some(users) = self.users.get_mut(crate::visit::raw(value)) {
             users.retain(|user| *user != site);
         }
     }
@@ -1083,7 +943,7 @@ impl InlineCache {
         concrete_plans: &ConcretePlans,
     ) -> Result<InlineCandidateWarm, CompilerError> {
         let started = self.census_enabled.then(Instant::now);
-        let mut timing = CandidateTiming::default();
+        let mut timing = InlineCandidateProfile::default();
         let result = classify(
             ws,
             scx,
@@ -1101,31 +961,14 @@ impl InlineCache {
             })
             .unwrap_or(0);
         let candidate = result?.map(Arc::new);
-        let rejection = timing.rejection;
+        timing.eligibility_ns = eligibility_ns;
+        timing.eligible = timing.rejection_reason.is_none();
+        timing.rejected_before_lower = !timing.eligible && !timing.lower_attempted;
+        timing.worker = self.worker.clone();
         Ok(InlineCandidateWarm {
             key: inst,
             candidate,
-            lower_ns: timing.lower_ns,
-            full_clone_ns: timing.full_clone_ns,
-            cleanup_ns: timing.cleanup_ns,
-            compact_ns: timing.compact_ns,
-            lower_attempted: timing.lower_attempted,
-            lowered: timing.lowered,
-            raw_instructions: timing.raw_instructions,
-            raw_cells: timing.raw_cells,
-            raw_blocks: timing.raw_blocks,
-            cleaned_instructions: timing.cleaned_instructions,
-            cleaned_cells: timing.cleaned_cells,
-            cleaned_blocks: timing.cleaned_blocks,
-            full_clone_inst_capacity: timing.full_clone_inst_capacity,
-            full_clone_cell_capacity: timing.full_clone_cell_capacity,
-            full_clone_block_capacity: timing.full_clone_block_capacity,
-            compact_inst_capacity: timing.compact_inst_capacity,
-            compact_cell_capacity: timing.compact_cell_capacity,
-            compact_block_capacity: timing.compact_block_capacity,
-            eligibility_ns,
-            rejection,
-            worker: self.worker.clone(),
+            profile: timing,
         })
     }
 
@@ -1219,12 +1062,12 @@ impl ArenaFacts {
     fn forced_cells(&self, func: &MirFunc, entry: Idx<Block>) -> Vec<(u32, u32)> {
         let mut top = vec![false; func.blocks.len()];
         for block in crate::visit::top_level_blocks_from(func, entry) {
-            top[u32::from(block.into_raw()) as usize] = true;
+            top[crate::visit::raw(block)] = true;
         }
         let mut cells: Vec<(u32, u32)> = self
             .uses
             .iter()
-            .filter(|(_, _, block)| !top[u32::from(block.into_raw()) as usize])
+            .filter(|(_, _, block)| !top[crate::visit::raw(*block)])
             .map(|&(cell, block, _)| (cell, block))
             .collect();
         if !self.lambda_params.is_empty() {
@@ -1470,15 +1313,15 @@ fn compact_region(
 
     let mut emit_insts = vec![0; insts.len()];
     for (old, new) in &inst_map {
-        emit_insts[u32::from(new.into_raw()) as usize] = arena.emit_inst_id(*old);
+        emit_insts[crate::visit::raw(*new)] = arena.emit_inst_id(*old);
     }
     let mut emit_cells = vec![0; cells.len()];
     for (old, new) in &cell_map {
-        emit_cells[u32::from(new.into_raw()) as usize] = arena.emit_cell_id(*old);
+        emit_cells[crate::visit::raw(*new)] = arena.emit_cell_id(*old);
     }
     let mut emit_blocks = vec![0; blocks.len()];
     for (old, new) in &block_map {
-        emit_blocks[u32::from(new.into_raw()) as usize] = arena.emit_block_id(*old);
+        emit_blocks[crate::visit::raw(*new)] = arena.emit_block_id(*old);
     }
 
     let mut template = MirFunc::new(header.name);
@@ -1764,7 +1607,6 @@ fn full_clone_stats(
     } else {
         cand.func.inline_cleanup_load_cells.len()
     };
-    stats.coalesced_cells = coalesced_cells;
     stats.inst_remap_entries = maps.inst_entries;
     stats.cell_remap_entries = maps.cell_entries;
     stats.block_remap_entries = maps.block_entries;
@@ -1797,35 +1639,12 @@ fn full_clone_stats(
     stats
 }
 
-#[derive(Default)]
-struct CandidateTiming {
-    lower_ns: u64,
-    full_clone_ns: u64,
-    cleanup_ns: u64,
-    compact_ns: u64,
-    lower_attempted: bool,
-    lowered: bool,
-    raw_instructions: usize,
-    raw_cells: usize,
-    raw_blocks: usize,
-    cleaned_instructions: usize,
-    cleaned_cells: usize,
-    cleaned_blocks: usize,
-    full_clone_inst_capacity: usize,
-    full_clone_cell_capacity: usize,
-    full_clone_block_capacity: usize,
-    compact_inst_capacity: usize,
-    compact_cell_capacity: usize,
-    compact_block_capacity: usize,
-    rejection: Option<&'static str>,
-}
-
 fn reject_candidate(
-    timing: &mut Option<&mut CandidateTiming>,
+    timing: &mut Option<&mut InlineCandidateProfile>,
     reason: &'static str,
 ) -> Result<Option<CalleeBody>, CompilerError> {
     if let Some(timing) = timing.as_deref_mut() {
-        timing.rejection = Some(reason);
+        timing.rejection_reason = Some(reason);
     }
     Ok(None)
 }
@@ -1839,7 +1658,7 @@ fn classify(
     scx: &ScalarCtx,
     inst: &Instance,
     concrete_plans: &ConcretePlans,
-    mut timing: Option<&mut CandidateTiming>,
+    mut timing: Option<&mut InlineCandidateProfile>,
 ) -> Result<Option<CalleeBody>, CompilerError> {
     let fref = inst.func;
     let f = &ws.module(fref.module).functions[fref.func];
@@ -2151,7 +1970,7 @@ fn get<'a>(
                 .or_default() += 1;
         }
         let started = cache.census_enabled.then(Instant::now);
-        let mut timing = CandidateTiming::default();
+        let mut timing = InlineCandidateProfile::default();
         let result = classify(
             ws,
             scx,
@@ -2172,7 +1991,7 @@ fn get<'a>(
         let v = match result? {
             Some(candidate) => Some(Arc::new(candidate)),
             None => {
-                if let Some(reason) = timing.rejection {
+                if let Some(reason) = timing.rejection_reason {
                     cache.rejection(reason);
                 }
                 None

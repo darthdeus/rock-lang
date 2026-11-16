@@ -4,8 +4,8 @@ use skull_mir::mir::*;
 
 /// Field name for a frame cell in the state table.
 #[inline]
-pub(crate) fn raw<T>(i: Idx<T>) -> u32 {
-    i.into_raw().into()
+pub(crate) fn raw<T>(i: Idx<T>) -> usize {
+    i.into_raw().into_u32() as usize
 }
 
 /// Blocks reachable from the function entry via terminators — the co-fn's own
@@ -18,12 +18,12 @@ pub(crate) fn top_level_blocks_from(f: &MirFunc, entry: Idx<Block>) -> Vec<Idx<B
     let mut seen = vec![false; f.blocks.len()];
     let mut stack = Vec::with_capacity(f.blocks.len());
     stack.push(entry);
-    seen[raw(entry) as usize] = true;
+    seen[raw(entry)] = true;
     let mut order = Vec::with_capacity(f.blocks.len());
     while let Some(b) = stack.pop() {
         order.push(b);
         successors(&f.blocks[b].term, |s| {
-            let seen = &mut seen[raw(s) as usize];
+            let seen = &mut seen[raw(s)];
             if !*seen {
                 *seen = true;
                 stack.push(s);

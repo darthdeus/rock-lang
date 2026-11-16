@@ -30,7 +30,7 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
     // (treat as opaque). Closure bodies are the blocks NOT reachable from entry.
     let mut main = vec![false; func.blocks.len()];
     for b in top_level_blocks(func) {
-        main[raw(b) as usize] = true;
+        main[raw(b)] = true;
     }
     // Dense per-id side-tables (raw-keyed) replace the Idx HashMaps/HashSets:
     // `escaping` cell flag, `subst` value->value chain, and per-block `cur`
@@ -39,12 +39,12 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
     // A `ref`-borrowed cell is written through an alias this pass cannot see.
     let mut escaping: Vec<bool> = func.cells.iter().map(|(_, cell)| cell.borrowed).collect();
     for (bid, b) in func.blocks.iter() {
-        if main[raw(bid) as usize] {
+        if main[raw(bid)] {
             continue;
         }
         for &i in &b.insts {
             if let Inst::Store { cell, .. } = &func.insts[i] {
-                escaping[raw(*cell) as usize] = true;
+                escaping[raw(*cell)] = true;
             }
         }
     }
@@ -71,7 +71,7 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
             }
             if let Inst::Store { cell, value } = &func.insts[i] {
                 if matches!(&func.insts[*value], Inst::MakeValueStruct { .. }) {
-                    holds_value[raw(*cell) as usize] = true;
+                    holds_value[raw(*cell)] = true;
                 }
             }
         }
@@ -82,9 +82,9 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
         let mut uses = vec![0u32; func.insts.len()];
         for (_, b) in func.blocks.iter() {
             for &i in &b.insts {
-                func.insts[i].uses_each(&mut |op| uses[raw(op) as usize] += 1);
+                func.insts[i].uses_each(&mut |op| uses[raw(op)] += 1);
             }
-            b.term.uses_each(&mut |op| uses[raw(op) as usize] += 1);
+            b.term.uses_each(&mut |op| uses[raw(op)] += 1);
         }
         uses
     } else {
@@ -100,8 +100,8 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
             loop {
                 match &func.insts[cur] {
                     Inst::Load(c) => {
-                        if holds_value[raw(*c) as usize] {
-                            escaping[raw(*c) as usize] = true;
+                        if holds_value[raw(*c)] {
+                            escaping[raw(*c)] = true;
                         }
                         break;
                     }
@@ -124,7 +124,7 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
     // value's live range grows across blocks.
     let mut preds = vec![0u32; func.blocks.len()];
     for (_, b) in func.blocks.iter() {
-        skull_mir::cfg::successors(&b.term, |t| preds[raw(t) as usize] += 1);
+        skull_mir::cfg::successors(&b.term, |t| preds[raw(t)] += 1);
     }
     let mut entry_literals: Vec<Option<Vec<(usize, Idx<Inst>)>>> = vec![None; func.blocks.len()];
     for (bid, b) in func.blocks.iter() {
@@ -132,7 +132,7 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
             cur[t] = None;
         }
         touched.clear();
-        if let Some(carried) = entry_literals[raw(bid) as usize].take() {
+        if let Some(carried) = entry_literals[raw(bid)].take() {
             for (ck, v) in carried {
                 cur[ck] = Some(v);
                 touched.push(ck);
@@ -151,7 +151,7 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
             }
             if !matches!(func.insts[id], Inst::Store { .. }) {
                 // Multi-result calls and `MapNext` assign their cells directly.
-                func.insts[id].cell_writes_each(&mut |c| cur[raw(c) as usize] = None);
+                func.insts[id].cell_writes_each(&mut |c| cur[raw(c)] = None);
             }
             if let Inst::Store { cell, .. } = &func.insts[id] {
                 let rebound = Operand::Cell(*cell);
@@ -168,8 +168,8 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                         operand_key(func, &subst, &escaping, *index),
                     );
                     if let Some(&(_, earlier)) = vec_checks.iter().find(|(k, _)| *k == key) {
-                        subst[raw(id) as usize] = Some(earlier);
-                        nonthrowing[raw(id) as usize] = true;
+                        subst[raw(id)] = Some(earlier);
+                        nonthrowing[raw(id)] = true;
                         any_subst = true;
                     } else {
                         vec_checks.push((key, id));
@@ -189,8 +189,8 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                 {
                     checked_native_buffers.insert(resolve_subst(&subst, args[0]));
                 }
-                Inst::Store { cell, value } if !escaping[raw(*cell) as usize] => {
-                    let ck = raw(*cell) as usize;
+                Inst::Store { cell, value } if !escaping[raw(*cell)] => {
+                    let ck = raw(*cell);
                     let v = resolve_subst(&subst, *value);
                     // A store that writes back the value the cell already holds is a
                     // no-op -- invisible to `is_dead_rc`, which only drops a store
@@ -206,7 +206,7 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                         None => matches!(&func.insts[*value], Inst::Load(d) if *d == *cell),
                     };
                     if noop {
-                        self_stores[raw(id) as usize] = true;
+                        self_stores[raw(id)] = true;
                     } else {
                         exposes_more |= cur[ck].is_none()
                             && matches!(&func.insts[v], Inst::Load(d) if *d == *cell);
@@ -217,8 +217,8 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                     }
                 }
                 Inst::Load(c) => {
-                    if let Some(v) = cur[raw(*c) as usize] {
-                        subst[raw(id) as usize] = Some(v);
+                    if let Some(v) = cur[raw(*c)] {
+                        subst[raw(id)] = Some(v);
                         any_subst = true;
                     }
                 }
@@ -244,39 +244,38 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                     {
                         // The retained bounds check already accessed this exact
                         // buffer. Its generated view keys are plain table fields.
-                        nonthrowing[raw(id) as usize] = true;
+                        nonthrowing[raw(id)] = true;
                     }
                     if checked_vecs.contains(&operand_key(func, &subst, &escaping, base)) {
                         // A completed bounds check read this Vec's `len`, so it is
                         // a plain table: its column and `_data` reads cannot raise.
-                        nonthrowing[raw(id) as usize] = true;
+                        nonthrowing[raw(id)] = true;
                     }
                     if let Inst::MakeValueStruct { fields, form, .. } = &func.insts[rb] {
-                        nonthrowing[raw(id) as usize] =
-                            fields.iter().any(|(name, _)| *name == field)
-                                || (*form == ValueCtorForm::Leaves
-                                    && fields.iter().any(|(name, _)| {
-                                        name.as_str()
-                                            .strip_prefix(field.as_str())
-                                            .is_some_and(|tail| tail.starts_with('.'))
-                                    }));
+                        nonthrowing[raw(id)] = fields.iter().any(|(name, _)| *name == field)
+                            || (*form == ValueCtorForm::Leaves
+                                && fields.iter().any(|(name, _)| {
+                                    name.as_str()
+                                        .strip_prefix(field.as_str())
+                                        .is_some_and(|tail| tail.starts_with('.'))
+                                }));
                         if let Some((_, op)) = fields.iter().find(|(n, _)| *n == field) {
-                            subst[raw(id) as usize] = Some(resolve_subst(&subst, *op));
+                            subst[raw(id)] = Some(resolve_subst(&subst, *op));
                             any_subst = true;
                         }
                     } else if base != rb && matches!(func.insts[rb], Inst::MakeStruct { .. }) {
                         exposes_more = true;
                     } else if base == rb
                         && !struct_uses.is_empty()
-                        && struct_uses[raw(base) as usize] == 1
+                        && struct_uses[raw(base)] == 1
                         && let Inst::MakeStruct { fields, .. } = &func.insts[base]
                         && let Some((_, op)) = fields.iter().find(|(name, _)| *name == field)
                     {
                         // The fresh object is used only by this field read: no
                         // alias can mutate it or observe its identity. Operands
                         // have already run in source order, including unused ones.
-                        nonthrowing[raw(id) as usize] = true;
-                        subst[raw(id) as usize] = Some(resolve_subst(&subst, *op));
+                        nonthrowing[raw(id)] = true;
+                        subst[raw(id)] = Some(resolve_subst(&subst, *op));
                         any_subst = true;
                     } else if let Some((ctor, prefix)) = leaf_form_path(func, &subst, rb) {
                         // `Field(Field(ctor, c0), x)` is the ctor's `c0.x` leaf.
@@ -284,7 +283,7 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                             unreachable!("leaf_form_path roots at a value ctor")
                         };
                         let key = format!("{prefix}.{field}");
-                        nonthrowing[raw(id) as usize] = fields.iter().any(|(name, _)| {
+                        nonthrowing[raw(id)] = fields.iter().any(|(name, _)| {
                             name.as_str() == key
                                 || name
                                     .as_str()
@@ -292,7 +291,7 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                                     .is_some_and(|tail| tail.starts_with('.'))
                         });
                         if let Some((_, op)) = fields.iter().find(|(n, _)| n.as_str() == key) {
-                            subst[raw(id) as usize] = Some(resolve_subst(&subst, *op));
+                            subst[raw(id)] = Some(resolve_subst(&subst, *op));
                             any_subst = true;
                         }
                     }
@@ -309,8 +308,8 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                     let rb = resolve_subst(&subst, base);
                     if let Inst::MakeTuple(vs) = &func.insts[rb] {
                         if let Some(op) = vs.get(index) {
-                            nonthrowing[raw(id) as usize] = true;
-                            subst[raw(id) as usize] = Some(resolve_subst(&subst, *op));
+                            nonthrowing[raw(id)] = true;
+                            subst[raw(id)] = Some(resolve_subst(&subst, *op));
                             any_subst = true;
                         }
                     }
@@ -319,7 +318,7 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
             }
         }
         if let Term::Goto(next) = b.term
-            && preds[raw(next) as usize] == 1
+            && preds[raw(next)] == 1
             && raw(next) > raw(bid)
         {
             let carried = touched
@@ -329,7 +328,7 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                     matches!(func.insts[v], Inst::Const(_)).then_some((ck, v))
                 })
                 .collect();
-            entry_literals[raw(next) as usize] = Some(carried);
+            entry_literals[raw(next)] = Some(carried);
         }
     }
     (any_subst || self_stores.iter().any(|&noop| noop) || nonthrowing.iter().any(|&safe| safe))
@@ -357,7 +356,7 @@ fn operand_key(
 ) -> Operand {
     let v = resolve_subst(subst, v);
     match func.insts[v] {
-        Inst::Load(cell) if !escaping[raw(cell) as usize] => Operand::Cell(cell),
+        Inst::Load(cell) if !escaping[raw(cell)] => Operand::Cell(cell),
         _ => Operand::Value(v),
     }
 }
@@ -422,7 +421,7 @@ fn leaf_form_path(
 
 /// Follow a copy-prop substitution chain to its final value (guards self-loops).
 pub(crate) fn resolve_subst(subst: &[Option<Idx<Inst>>], mut x: Idx<Inst>) -> Idx<Inst> {
-    while let Some(y) = subst[raw(x) as usize] {
+    while let Some(y) = subst[raw(x)] {
         if y == x {
             break;
         }
