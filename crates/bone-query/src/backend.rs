@@ -735,6 +735,28 @@ impl BoneWorkspace {
         self.projects.get(&Self::root_for(path))
     }
 
+    /// The canonical path of open file `path`, its project and its text.
+    fn open_file(&self, path: &str) -> Option<(String, &BoneProject, &str)> {
+        let path = self.canon(path);
+        let proj = self.project(&path)?;
+        let src = proj.texts.get(&path)?.as_str();
+        Some((path, proj, src))
+    }
+
+    /// `open_file` plus the byte offset of `pos`, the checked workspace and
+    /// the file's module.
+    fn cursor(
+        &self,
+        path: &str,
+        pos: Position,
+    ) -> Option<(String, &BoneProject, &str, usize, &Workspace, ModuleId)> {
+        let (path, proj, src) = self.open_file(path)?;
+        let offset = offset_at_line_col(src, pos.line, pos.character);
+        let ws = proj.session.workspace();
+        let mid = user_module_for_path(ws, &path)?;
+        Some((path, proj, src, offset, ws, mid))
+    }
+
     /// Load every `.rock` file under `path`'s project root into the session, so
     /// cross-file queries (references/rename) see the whole project rather than
     /// only the files an editor happened to open. Idempotent; reads from disk.
@@ -1170,20 +1192,14 @@ impl BoneWorkspace {
     /// view the last `update` applied, not the disk copy. Recorder/debug
     /// surface (the completion corpus records the exact text it ranked).
     pub fn file_text(&self, path: &str) -> Option<&str> {
-        let path_c = self.canon(path);
-        self.project(path_c.as_str())?
-            .texts
-            .get(path_c.as_str())
-            .map(|s| s.as_str())
+        self.open_file(path).map(|(_, _, src)| src)
     }
 
     // -- Feature: hover (implemented via bone_semantic::query::type_at) ---------------
 
     pub fn hover(&self, path: &str, pos: Position) -> Option<Hover> {
-        let path_c = self.canon(path);
-        let path = path_c.as_str();
-        let proj = self.project(path)?;
-        let src = proj.texts.get(path)?;
+        let (path, proj, src) = self.open_file(path)?;
+        let path = path.as_str();
         let offset = offset_at_line_col(src, pos.line, pos.character);
 
         // Whitespace guard: hovering the blanks between tokens resolves to
@@ -1310,13 +1326,8 @@ impl BoneWorkspace {
     // -- Feature: goto-definition ----------------------------------------------
 
     pub fn definition(&self, path: &str, pos: Position) -> Option<Location> {
-        let path_c = self.canon(path);
-        let path = path_c.as_str();
-        let proj = self.project(path)?;
-        let src = proj.texts.get(path)?;
-        let offset = offset_at_line_col(src, pos.line, pos.character);
-        let ws = proj.session.workspace();
-        let mid = user_module_for_path(ws, path)?;
+        let (path, proj, _, offset, ws, mid) = self.cursor(path, pos)?;
+        let path = path.as_str();
         let inf = ws.inference(mid)?;
         // Raw-AST resolutions run FIRST (the HIR node isn't in `node_index`):
         // a macro INVOCATION name (erased by expansion -- otherwise the cursor
@@ -1356,13 +1367,7 @@ impl BoneWorkspace {
     /// the declaration of its *type* (on `mob` -> `struct Mob`). None when the
     /// cursor isn't on a typed node or the type has no navigable declaration.
     pub fn type_definition(&self, path: &str, pos: Position) -> Option<Location> {
-        let path_c = self.canon(path);
-        let path = path_c.as_str();
-        let proj = self.project(path)?;
-        let src = proj.texts.get(path)?;
-        let offset = offset_at_line_col(src, pos.line, pos.character);
-        let ws = proj.session.workspace();
-        let mid = user_module_for_path(ws, path)?;
+        let (_, proj, _, offset, ws, mid) = self.cursor(path, pos)?;
         let inf = ws.inference(mid)?;
         let span = crate::query::type_definition_at(ws, mid, inf, offset)?;
         self.location_from_span(proj, &span)
@@ -1371,14 +1376,10 @@ impl BoneWorkspace {
     // -- Feature: find-references ----------------------------------------------
 
     pub fn references(&self, path: &str, pos: Position) -> Vec<Location> {
-        let path_c = self.canon(path);
-        let path = path_c.as_str();
-        let Some(proj) = self.project(path) else {
+        let Some((path, proj, src)) = self.open_file(path) else {
             return Vec::new();
         };
-        let Some(src) = proj.texts.get(path) else {
-            return Vec::new();
-        };
+        let path = path.as_str();
         let offset = offset_at_line_col(src, pos.line, pos.character);
         let mut idx_cache: HashMap<String, LineIndex> = HashMap::new();
         // Find-usages scopes to the specific overload under the cursor.
@@ -1423,13 +1424,8 @@ impl BoneWorkspace {
     /// type; expression holes don't yet (bone rejects them at lowering -- see the
     /// LSP roadmap), but still list the bindings in scope.
     pub fn hole_info(&self, path: &str, pos: Position) -> Option<String> {
-        let path_c = self.canon(path);
-        let path = path_c.as_str();
-        let proj = self.project(path)?;
-        let src = proj.texts.get(path)?;
-        let offset = offset_at_line_col(src, pos.line, pos.character);
-        let ws = proj.session.workspace();
-        let mid = user_module_for_path(ws, path)?;
+        let (path, proj, _, offset, ws, mid) = self.cursor(path, pos)?;
+        let path = path.as_str();
         let inf = ws.inference(mid)?;
         let ast = proj.reparse_user_file(path, "hole_info")?;
         let hi = crate::query::hole_info(ws, mid, inf, &ast, offset)?;
@@ -1442,13 +1438,7 @@ impl BoneWorkspace {
     /// `}` with the generated `EnumName::Variant => {}` arms) and the count, or
     /// None when there's nothing to fill. See `query::match_arms_fill`.
     pub fn fill_match_arms(&self, path: &str, pos: Position) -> Option<MatchArmsFill> {
-        let path_c = self.canon(path);
-        let path = path_c.as_str();
-        let proj = self.project(path)?;
-        let src = proj.texts.get(path)?;
-        let offset = offset_at_line_col(src, pos.line, pos.character);
-        let ws = proj.session.workspace();
-        let mid = user_module_for_path(ws, path)?;
+        let (_, _, src, offset, ws, mid) = self.cursor(path, pos)?;
         let inf = ws.inference(mid)?;
         let (span, arms) = crate::query::match_arms_fill(ws, mid, inf, offset)?;
 
@@ -1491,13 +1481,7 @@ impl BoneWorkspace {
     /// a `field: ?` hole, keeping the literal's single- or multi-line shape, or
     /// None when nothing's missing. See `query::struct_fields_fill`.
     pub fn fill_struct_fields(&self, path: &str, pos: Position) -> Option<StructFieldsFill> {
-        let path_c = self.canon(path);
-        let path = path_c.as_str();
-        let proj = self.project(path)?;
-        let src = proj.texts.get(path)?;
-        let offset = offset_at_line_col(src, pos.line, pos.character);
-        let ws = proj.session.workspace();
-        let mid = user_module_for_path(ws, path)?;
+        let (_, _, src, offset, ws, mid) = self.cursor(path, pos)?;
         let inf = ws.inference(mid)?;
         let (span, missing) = crate::query::struct_fields_fill(ws, mid, inf, offset)?;
 
@@ -1560,13 +1544,7 @@ impl BoneWorkspace {
     /// added when it isn't atomic) and delete the `let` line. None otherwise.
     /// See `query::inline_local`.
     pub fn inline_local(&self, path: &str, pos: Position) -> Option<InlineLocalEdits> {
-        let path_c = self.canon(path);
-        let path = path_c.as_str();
-        let proj = self.project(path)?;
-        let src = proj.texts.get(path)?;
-        let offset = offset_at_line_col(src, pos.line, pos.character);
-        let ws = proj.session.workspace();
-        let mid = user_module_for_path(ws, path)?;
+        let (_, _, src, offset, ws, mid) = self.cursor(path, pos)?;
         let sites = crate::query::inline_local(ws, mid, offset)?;
 
         let (istart, iend) = sites.init_span.offset_range();
@@ -1622,13 +1600,7 @@ impl BoneWorkspace {
     /// unknown), the return type from a concrete use site (else Unit), and the
     /// body is a `?` hole. See `query::generate_function`.
     pub fn generate_function(&self, path: &str, pos: Position) -> Option<GenerateFunctionEdit> {
-        let path_c = self.canon(path);
-        let path = path_c.as_str();
-        let proj = self.project(path)?;
-        let src = proj.texts.get(path)?;
-        let offset = offset_at_line_col(src, pos.line, pos.character);
-        let ws = proj.session.workspace();
-        let mid = user_module_for_path(ws, path)?;
+        let (_, _, src, offset, ws, mid) = self.cursor(path, pos)?;
         let inf = ws.inference(mid)?;
         let gf = crate::query::generate_function(ws, mid, inf, offset)?;
 
@@ -1848,14 +1820,10 @@ impl BoneWorkspace {
         path: &str,
         pos: Position,
     ) -> Result<Option<Range>, RenameRefusal> {
-        let path_c = self.canon(path);
-        let path = path_c.as_str();
-        let Some(proj) = self.project(path) else {
+        let Some((path, proj, src)) = self.open_file(path) else {
             return Ok(None);
         };
-        let Some(src) = proj.texts.get(path) else {
-            return Ok(None);
-        };
+        let path = path.as_str();
         let offset = offset_at_line_col(src, pos.line, pos.character);
         // Reuse the exact reference resolution `rename` uses, so prepare-rename
         // and rename can never disagree: the token is renameable iff it has
@@ -1884,14 +1852,10 @@ impl BoneWorkspace {
         pos: Position,
         new_name: &str,
     ) -> Result<Option<WorkspaceEdit>, RenameRefusal> {
-        let path_c = self.canon(path);
-        let path = path_c.as_str();
-        let Some(proj) = self.project(path) else {
+        let Some((path, proj, src)) = self.open_file(path) else {
             return Ok(None);
         };
-        let Some(src) = proj.texts.get(path) else {
-            return Ok(None);
-        };
+        let path = path.as_str();
         let offset = offset_at_line_col(src, pos.line, pos.character);
         // Rename rewrites the whole (shared) overloaded name, not one overload.
         let sites = self.rename_plan(proj, path, offset)?;
@@ -1983,14 +1947,10 @@ impl BoneWorkspace {
     // -- Feature: document symbols (stubbed: crate::query::document_symbols) ---------
 
     pub fn document_symbols(&self, path: &str) -> Vec<DocumentSymbol> {
-        let path_c = self.canon(path);
-        let path = path_c.as_str();
-        let Some(proj) = self.project(path) else {
+        let Some((path, proj, src)) = self.open_file(path) else {
             return Vec::new();
         };
-        let Some(src) = proj.texts.get(path) else {
-            return Vec::new();
-        };
+        let path = path.as_str();
         let ws = proj.session.workspace();
         let Some(mid) = user_module_for_path(ws, path) else {
             return Vec::new();
@@ -2273,13 +2233,7 @@ impl BoneWorkspace {
     // -- Feature: signature help (stubbed: crate::query::signature_help) -------------
 
     pub fn signature_help(&self, path: &str, pos: Position) -> Option<SignatureHelp> {
-        let path_c = self.canon(path);
-        let path = path_c.as_str();
-        let proj = self.project(path)?;
-        let src = proj.texts.get(path)?;
-        let offset = offset_at_line_col(src, pos.line, pos.character);
-        let ws = proj.session.workspace();
-        let mid = user_module_for_path(ws, path)?;
+        let (_, proj, src, offset, ws, mid) = self.cursor(path, pos)?;
         // Inference is optional: tiers 2/3 (by-name overload list, struct ctor)
         // serve a signature even when the file doesn't fully type-check.
         let inf = ws.inference(mid);
@@ -2328,14 +2282,10 @@ impl BoneWorkspace {
     // -- Feature: inlay hints ------------------------------------------------
 
     pub fn inlay_hints(&self, path: &str, range: Range) -> Vec<InlayHint> {
-        let path_c = self.canon(path);
-        let path = path_c.as_str();
-        let Some(proj) = self.project(path) else {
+        let Some((path, proj, src)) = self.open_file(path) else {
             return Vec::new();
         };
-        let Some(src) = proj.texts.get(path) else {
-            return Vec::new();
-        };
+        let path = path.as_str();
         let start = offset_at_line_col(src, range.start.line, range.start.character);
         let end = offset_at_line_col(src, range.end.line, range.end.character);
         // Prefer the live session; reparse with RECOVERY if a broken buffer
