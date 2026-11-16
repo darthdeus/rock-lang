@@ -2494,41 +2494,6 @@ mod tests {
         assert!(!prelude.contains("ffi.new(\"uint64_t\", 0)"));
     }
 
-    /// Bare-name aliases (`_G["pick"] = pick_bool`) for the user module's
-    /// fns, so the execution-oracle drivers can keep calling by SOURCE name under
-    /// always-mangle (every non-exempt fn now emits a mangled symbol). A name with
-    /// more than one non-exempt definition is left unaliased -- a bare-name call
-    /// to an overload is ambiguous and no driver relies on one. Exempt fns
-    /// (`main`/`@nomangle`/...) already emit bare, so they need no alias.
-    fn user_fn_aliases(src: &str) -> String {
-        let module = skull_parser::parse_module(src, ustr::Ustr::from("<skull>")).expect("parse");
-        let ws = match bone_semantic::semantic_passes::semantic_pass(&mut [module]) {
-            Ok(ws) => ws,
-            Err(_) => return String::new(),
-        };
-        let Ok(mid) = super::user_module_id(&ws) else {
-            return String::new();
-        };
-        use std::collections::HashMap;
-        let mut counts: HashMap<ustr::Ustr, usize> = HashMap::new();
-        for (_, f) in ws.module(mid).functions.iter() {
-            if !skull_mir::mangle::is_exempt(f) {
-                *counts.entry(f.name).or_insert(0) += 1;
-            }
-        }
-        let mut out = String::new();
-        for (_, f) in ws.module(mid).functions.iter() {
-            if skull_mir::mangle::is_exempt(f) || counts[&f.name] > 1 {
-                continue;
-            }
-            let mangled = skull_mir::mangle::mangle_fn(&ws, f);
-            if mangled != f.name.as_str() {
-                out.push_str(&format!("_G[\"{}\"] = {}\n", f.name, mangled));
-            }
-        }
-        out
-    }
-
     /// The schema-drift restart trigger's oracle:
     /// the hash moves iff the runtime LAYOUT moves. Body edits are invisible;
     /// each shape-edit class moves exactly its own type's entry; a removed type
@@ -2688,23 +2653,12 @@ mod tests {
     }
 
     /// Execution oracle: emit Lua, append a `driver`, run under luajit, return
-    /// trimmed stdout. Panics when luajit isn't on PATH: a host without it must
-    /// report red for tests that never ran, never green.
-    /// CRLF is normalized to `\n`: on Windows luajit's stdout goes through
-    /// text-mode translation (`\n` -> `\r\n`), so without this every
-    /// multi-line `assert_eq!` expectation would spuriously mismatch.
+    /// trimmed stdout. Drivers call the emitted (mangled) names. Panics when
+    /// luajit isn't on PATH: a host without it must report red for tests that
+    /// never ran, never green. CRLF is normalized to `\n` because luajit's
+    /// stdout is text-mode on Windows.
     fn run(src: &str, driver: &str) -> String {
-        // Stdlib-free harness: codegen emits calls to the checked Vec helpers
-        // the stdlib normally provides -- prepend the canonical shims. Alias the
-        // user fns back to their bare source names so the driver can call them
-        // (every non-exempt fn mangles under the unified scheme).
-        let lua = format!(
-            "{}\n{}\n{}\n{}",
-            emit(src),
-            skull_codegen_lua::VEC_CHECK_SHIMS,
-            user_fn_aliases(src),
-            driver
-        );
+        let lua = format!("{}\n{}", emit(src), driver);
         let out = std::process::Command::new("luajit")
             .arg("-e")
             .arg(&lua)
@@ -2721,251 +2675,6 @@ mod tests {
             .replace("\r\n", "\n")
             .trim()
             .to_string()
-    }
-
-    /// Run `src` + `driver` under luajit and assert stdout == `expected`.
-    fn exec_eq(src: &str, driver: &str, expected: &str) {
-        assert_eq!(run(src, driver), expected);
-    }
-
-    /// A global that depends on another global only THROUGH a struct
-    /// default (`B = Foo {}` where Foo's default reads `A`) must still init
-    /// after it. The read is inside `__skull_default_Foo_x`, invisible to
-    /// direct `Op::Global` scanning — emit_workspace's transitive call-graph
-    /// closure (`transitive_global_reads`) follows the `Op::Call` to the helper
-    /// and picks up its read of `A`. `B` is declared FIRST so source order
-    /// alone gets it wrong.
-    #[test]
-    fn global_init_orders_through_struct_default_helper() {
-        let out = run(
-            "global B: Foo = Foo {}\nstruct Foo { x: int = A }\nglobal A: int = 42\nfn bx() -> int { B.x }",
-            "print(bx())",
-        );
-        assert_eq!(out, "42");
-    }
-
-    /// Global-init ordering across a call boundary: `A` initializes by calling
-    /// `read_b`, which reads global `B`. The dependency A -> read_b -> B is only
-    /// visible transitively (the init expression `read_b()` names no global), so
-    /// `B` must still init before `A`. Pre-fix, `A` (declared first) ran before
-    /// `B`, read `B` as nil, and `A` latched nil — exactly the
-    /// `global sprite_batch_shader = watched_shader(...)` -> `SHADERS_TO_LOAD`
-    /// crash that took an application down under skull (there a nil vec push, here a nil
-    /// latch). (No arithmetic: the stdlib-less test path has no `__op_add`.)
-    #[test]
-    fn exec_global_init_dep_through_call() {
-        exec_eq(
-            "global A: int = read_b()\nglobal B: int = 42\n\
-                   fn read_b() -> int { B }\nfn get_a() -> int { A }",
-            "print(get_a())",
-            "42",
-        );
-    }
-
-    #[test]
-    fn nobox_value_holding_a_plain_value_reads_the_stored_value() {
-        exec_eq(
-            "nobox value Sid { value: int }\nvalue Pt { x: float, y: float }\n\
-             nobox value CPlace { space: Sid, pos: Pt }\nstruct Holder { place: CPlace }\n\
-             fn make(p: CPlace) -> Holder { return Holder { place: p } }\n\
-             fn pos_x(h: Holder) -> float { return h.place.pos.x }\n\
-             fn drive() -> float { pos_x(make(CPlace { space: Sid { value: 3 }, pos: Pt { x: 9.5, y: 2.0 } })) }",
-            "print(drive())",
-            "9.5",
-        );
-    }
-
-    /// The same edge when the helper returns a value through the scalar ABI:
-    /// the init calls it as a multi-return (`Inst::CallMulti`), which must count
-    /// as a call edge too, or `A` runs before `B` and indexes nil.
-    #[test]
-    fn exec_global_init_dep_through_value_returning_call() {
-        exec_eq(
-            "global A: int = read_b().x\nvalue P { x: int, s: string }\n\
-                   global B: P = P { x: 42, s: \"b\" }\n\
-                   fn read_b() -> P { B }\nfn get_a() -> int { A }",
-            "print(get_a())",
-            "42",
-        );
-    }
-
-    /// Execution oracle for interpolated strings:
-    /// `tostring("n=") .. tostring(7) .. tostring("!")` -> "n=7!".
-    #[test]
-    fn exec_string_interpolation() {
-        let out = run(
-            "fn greet() -> string {\n    let n = 7\n    \"n={n}!\"\n}",
-            "print(greet())",
-        );
-        assert_eq!(out, "n=7!");
-    }
-
-    /// Execution oracle for a format specifier: `{x:.2f}` -> `string.format`.
-    #[test]
-    fn exec_string_interpolation_format_spec() {
-        let out = run(
-            "fn f() -> string {\n    let x = 3.14159\n    \"pi={x:.2f}\"\n}",
-            "print(f())",
-        );
-        assert_eq!(out, "pi=3.14");
-    }
-
-    #[test]
-    fn exec_if_and_identity() {
-        exec_eq(
-            "fn pick(c: bool) -> int { if c { 1 } else { 2 } }\nfn id(x: int) -> int { x }",
-            "print(pick(true)); print(pick(false)); print(id(42))",
-            "1\n2\n42",
-        );
-    }
-
-    #[test]
-    fn exec_comparison() {
-        exec_eq(
-            "fn lt(a: int, b: int) -> bool { a < b }",
-            "print(lt(1, 2)); print(lt(2, 1))",
-            "true\nfalse",
-        );
-    }
-
-    #[test]
-    fn exec_short_circuit_and_or() {
-        exec_eq(
-            "fn band(a: bool, b: bool) -> bool { a && b }\nfn bor(a: bool, b: bool) -> bool { a || b }",
-            "print(band(true,false)); print(band(true,true)); print(bor(false,false)); print(bor(false,true))",
-            "false\ntrue\nfalse\ntrue",
-        );
-    }
-
-    #[test]
-    fn exec_let_then_compare() {
-        exec_eq(
-            "fn f(x: int) -> bool {\n    let lo = 0\n    lo < x\n}",
-            "print(f(5)); print(f(-3))",
-            "true\nfalse",
-        );
-    }
-
-    #[test]
-    fn exec_nested_if() {
-        exec_eq(
-            "fn sign(x: int) -> int { if x < 0 { 0 } else { if x == 0 { 1 } else { 2 } } }",
-            "print(sign(-9)); print(sign(0)); print(sign(9))",
-            "0\n1\n2",
-        );
-    }
-
-    #[test]
-    fn exec_unary_minus() {
-        exec_eq(
-            "fn neg(x: int) -> int { -x }\nfn negf(x: float) -> float { -x }",
-            "print(neg(5)); print(neg(-3)); print(negf(2.5))",
-            "-5\n3\n-2.5",
-        );
-    }
-
-    #[test]
-    fn exec_for_range_with_assignment() {
-        // `last` returns the final loop index (n-1), or 0 when the loop is empty.
-        exec_eq(
-            "fn last(n: int) -> int {\n    let r = 0\n    for i in 0..n {\n        r = i\n    }\n    r\n}",
-            "print(last(5)); print(last(1)); print(last(0))",
-            "4\n0\n0",
-        );
-    }
-
-    #[test]
-    fn exec_while_with_assignment() {
-        // Loops once: sets r, then flips the flag false.
-        exec_eq(
-            "fn once() -> int {\n    let flag = true\n    let r = 0\n    while flag {\n        r = 1\n        flag = false\n    }\n    r\n}",
-            "print(once())",
-            "1",
-        );
-    }
-
-    #[test]
-    fn exec_lambda_return_and_call() {
-        // bone can't call a function value yet, so call the returned closure
-        // from the Lua driver.
-        exec_eq(
-            "fn make() -> (int) -> int {\n    (x: int) => x\n}",
-            "print(make()(5))",
-            "5",
-        );
-    }
-
-    #[test]
-    fn exec_lambda_captures_upvalue() {
-        // The lambda captures `n` (outer slot) as a Lua upvalue and ignores x.
-        exec_eq(
-            "fn constfn(n: int) -> (int) -> int {\n    (x: int) => n\n}",
-            "print(constfn(7)(99)); print(constfn(3)(0))",
-            "7\n3",
-        );
-    }
-
-    #[test]
-    fn exec_field_assignment() {
-        exec_eq(
-            "struct P { x: int, y: int }\nfn f() -> int {\n    let p = P { x: 1, y: 2 }\n    p.x = 10\n    p.x\n}",
-            "print(f())",
-            "10",
-        );
-    }
-
-    #[test]
-    fn exec_index_assignment() {
-        exec_eq(
-            "fn f() -> int {\n    let xs = [1, 2, 3]\n    xs[1] = 9\n    xs[1]\n}",
-            "print(f())",
-            "9",
-        );
-    }
-
-    #[test]
-    fn exec_array_index() {
-        // 0-indexed Rock -> 1-indexed Lua: xs[1] is the second element.
-        exec_eq(
-            "fn f() -> int {\n    let xs = [10, 20, 30]\n    xs[1]\n}",
-            "print(f())",
-            "20",
-        );
-    }
-
-    #[test]
-    fn exec_as_cast_identity() {
-        exec_eq("fn w(x: int) -> float { x as float }", "print(w(5))", "5");
-    }
-
-    #[test]
-    fn exec_checked_uint_helpers_from_runtime_prelude() {
-        exec_eq(
-            "fn cast(value: float) -> uint { value as uint }\n\
-             fn left(value: uint, count: uint) -> uint { value << count }\n\
-             fn right(value: uint, count: uint) -> uint { value >> count }",
-            "assert(cast(3.9) == 3)\n\
-             assert(left(1, 31) == 2147483648)\n\
-             assert(right(4294967295, 31) == 1)\n\
-             print('PASS')",
-            "PASS",
-        );
-    }
-
-    #[test]
-    fn exec_coroutine_yield() {
-        // A `co fn` emits a stackless state machine; calling it returns a
-        // Frame driven by the per-co-fn `__resume` stored as a literal field
-        // (the ctor returns the frame; `__`-method fields take it explicitly).
-        exec_eq(
-            "co fn counter() -> Coroutine<int> {\n\
-                       yield 1\n\
-                       yield 2\n\
-                       yield 3\n\
-                   }",
-            "local c = counter(); print(c.__resume(c)); print(c.__resume(c)); print(c.__resume(c))",
-            "1\n2\n3",
-        );
     }
 
     /// A flat-enum channel writes its yield leaves into reused `s.__y*`
@@ -3016,7 +2725,7 @@ mod tests {
             !lua.contains("coroutine."),
             "co fn must not emit LuaJIT coroutines, got:\n{lua}"
         );
-        // Top-level shared step fn — NOT a per-instance `local function` closure.
+        // Top-level shared step fn -- NOT a per-instance `local function` closure.
         assert!(
             lua.contains("function counter_0__step("),
             "expected top-level step fn, got:\n{lua}"
@@ -3037,16 +2746,18 @@ mod tests {
             "expected name-referenced pcall, got:\n{lua}"
         );
         // State machine: writes to the state field + a completed terminal -3
-        // (killed is -1, errored -2), over an ordinary goto-CFG — NOT the
+        // (killed is -1, errored -2), over an ordinary goto-CFG -- NOT the
         // emit-time goto-into-block re-entry labels.
         assert!(
             lua.contains(".__state ="),
             "expected state-saving write, got:\n{lua}"
         );
-        exec_eq(
-            "co fn counter() -> Coroutine<int> {\n yield 1\n yield 2\n }",
-            "local c = counter(); c.__resume(c); c.__resume(c); c.__resume(c); print(c.__state)",
-            "-3",
+        assert_eq!(
+            run(
+                "co fn counter() -> Coroutine<int> {\n yield 1\n yield 2\n }",
+                "local c = counter_0(); c.__resume(c); c.__resume(c); c.__resume(c); print(c.__state)",
+            ),
+            "-3"
         );
         assert!(
             lua.contains("goto bb"),
@@ -3058,244 +2769,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn exec_coroutine_yield_delegate() {
-        // `await inner()` pumps the inner coroutine's values outward.
-        exec_eq(
-            "co fn inner() -> Coroutine<int> {\n\
-                       yield 1\n\
-                       yield 2\n\
-                   }\n\
-                   co fn outer() -> Coroutine<int> {\n\
-                       yield 0\n\
-                       await inner()\n\
-                       yield 9\n\
-                   }",
-            "local c = outer(); for i=1,4 do print(c.__resume(c)) end",
-            "0\n1\n2\n9",
-        );
-    }
-
-    #[test]
-    fn exec_format_dynamic_width_precision() {
-        // `{x:{w}.{p}f}` assembles the string.format conversion at runtime.
-        exec_eq(
-            "fn f() -> string {\n\
-                       let x = 3.14159\n\
-                       let w = 8\n\
-                       let p = 2\n\
-                       \"[{x:{w}.{p}f}]\"\n\
-                   }",
-            "print(f())",
-            "[    3.14]",
-        );
-    }
-
-    #[test]
-    fn exec_array_spread() {
-        // Tuple spread (static arity), struct spread (declared fields), and
-        // array spread (runtime copy loop), all spliced into one literal.
-        let src = "struct FixVec2 { x: int, y: int }\n\
-                   fn tup() -> [int] { [0, ...(1, 2), 3] }\n\
-                   fn strct(p: FixVec2) -> [int] { [...p, 9] }\n\
-                   fn vecs(a: [int], b: [int]) -> [int] { [...a, ...b, 99] }";
-        // Returns/params typed `[T]` are the Vec shape `{_data, len}`; `show`
-        // reads it, `v` builds it.
-        let driver = "local function show(t) local s = {} \
-                      for i=1,t.len do s[i] = tostring(t._data[i]) end \
-                      print(table.concat(s, \",\")) end \
-                      local function v(t) return {_data = t, len = #t} end \
-                      show(tup()); show(strct({x=10, y=20})); show(vecs(v{1,2}, v{3,4}))";
-        let out = run(src, driver);
-        assert_eq!(out, "0,1,2,3\n10,20,9\n1,2,3,4,99");
-    }
-
-    #[test]
-    fn exec_overload_mangling_dispatch() {
-        // Two `pick` overloads collide unmangled (last def wins). Mangling by
-        // the resolved target's signature makes `pick(5)` reach the int
-        // overload (5), not the bool one (1). `use_it` is uniquely named, so it
-        // stays callable by its surface name from the driver.
-        exec_eq(
-            "fn pick(x: int) -> int { x }\n\
-                   fn pick(x: bool) -> int { 1 }\n\
-                   fn use_it() -> int { pick(5) }",
-            "print(use_it())",
-            "5",
-        );
-    }
-
-    #[test]
-    fn exec_inline_lua_body() {
-        // bone now hands skull the verbatim `inline(lua)` body (it used to drop
-        // it). skull emits it as a real function with the original param names,
-        // and a Rock caller resolves to it.
-        exec_eq(
-            "@nomangle inline(lua) fn double(x: int) -> int = \"return x * 2\"\n\
-                   fn use_it(n: int) -> int { double(n) }",
-            "print(use_it(21))",
-            "42",
-        );
-    }
-
-    #[test]
-    fn exec_bitwise() {
-        // Bitwise binops lower to LuaJIT `bit.*` calls.
-        exec_eq(
-            "fn band(a: int, b: int) -> int { a & b }\n\
-                   fn shl(a: int, n: int) -> int { a << n }",
-            "print(band(6, 3)); print(shl(1, 4))",
-            "2\n16",
-        );
-    }
-
-    #[test]
-    fn exec_for_enumerate() {
-        // `enumerate(coll)` yields (0-based index, element); bone special-cases
-        // it in for-position, so skull detects it syntactically.
-        exec_eq(
-            "fn idx() -> int {\n\
-                       let r = 0\n\
-                       for (i, v) in enumerate([10, 20, 30]) { r = i }\n\
-                       r\n\
-                   }\n\
-                   fn elem() -> int {\n\
-                       let r = 0\n\
-                       for (i, v) in enumerate([10, 20, 30]) { r = v }\n\
-                       r\n\
-                   }",
-            "print(idx()); print(elem())",
-            "2\n30",
-        );
-    }
-
-    #[test]
-    fn exec_for_over_map() {
-        // `next`-based iteration; single-entry map so order is unambiguous.
-        exec_eq(
-            "fn val(m: Map<string, int>) -> int {\n\
-                       let n = 0\n\
-                       for (k, v) in m { n = v }\n\
-                       n\n\
-                   }",
-            "print(val({a = 42}))",
-            "42",
-        );
-    }
-
-    #[test]
-    fn exec_enum_match() {
-        // Tuple-payload variants -> tagged tables; match discriminates on
-        // `__tag` and reads payload by position.
-        exec_eq(
-            "enum Shape { Circle(int), Square(int, int) }\n\
-                   fn pick(s: Shape) -> int {\n\
-                       match s {\n\
-                           Circle(r) => r,\n\
-                           Square(w, h) => w,\n\
-                       }\n\
-                   }\n\
-                   fn mkc(r: int) -> Shape { Shape::Circle(r) }\n\
-                   fn mks(w: int, h: int) -> Shape { Shape::Square(w, h) }",
-            "print(pick(mkc(7))); print(pick(mks(3, 4)))",
-            "7\n3",
-        );
-    }
-
-    #[test]
-    fn exec_nested_pattern_bindings() {
-        // Nested binding patterns: enum payload is a tuple, struct field is a
-        // struct. The inner reads materialize in the matched arm (guarded), so
-        // the `None` case never faults reading a missing payload.
-        exec_eq(
-            "enum Opt { Some((int, int)), None }\n\
-                   fn fst(o: Opt) -> int {\n\
-                       match o {\n\
-                           Some((x, y)) => x,\n\
-                           None => -1,\n\
-                       }\n\
-                   }\n\
-                   struct Point { x: int, y: int }\n\
-                   struct Wrapper { inner: Point, tag: int }\n\
-                   fn inner_x(w: Wrapper) -> int {\n\
-                       match w {\n\
-                           Wrapper { inner: Point { x, y }, tag } => x,\n\
-                       }\n\
-                   }\n\
-                   fn mk(a: int, b: int) -> Opt { Opt::Some((a, b)) }\n\
-                   fn none() -> Opt { Opt::None }",
-            "print(fst(mk(3, 4))); print(fst(none())); \
-             print(inner_x({inner = {x = 10, y = 20}, tag = 5}))",
-            "3\n-1\n10",
-        );
-    }
-
-    #[test]
-    fn exec_match_literal_arms() {
-        exec_eq(
-            "fn name(n: int) -> string {\n\
-                       match n {\n\
-                           0 => \"zero\",\n\
-                           1 => \"one\",\n\
-                           _ => \"many\",\n\
-                       }\n\
-                   }",
-            "print(name(0)); print(name(1)); print(name(9))",
-            "zero\none\nmany",
-        );
-    }
-
-    #[test]
-    fn exec_if_let_enum() {
-        // `opt_unwrap` (unique name, emitted bare; the stdlib `unwrap_or` would
-        // otherwise shadow it) + Rock `check_*` wrappers: the driver is RAW LUA, and
-        // `Opt` is now a cdata enum that multi-returns `(tag, _0)`, so calling
-        // `opt_unwrap(mk(5), 0)` directly in Lua would TRUNCATE `mk`'s second return.
-        // The Rock wrappers spill the multi-return correctly (skull's own ABI).
-        exec_eq(
-            "enum Opt { Some(int), None }\n\
-                   fn opt_unwrap(o: Opt, d: int) -> int {\n\
-                       if let Some(x) = o { x } else { d }\n\
-                   }\n\
-                   fn mk(x: int) -> Opt { Opt::Some(x) }\n\
-                   fn empty() -> Opt { Opt::None }\n\
-                   fn check_some() -> int { return opt_unwrap(mk(5), 0) }\n\
-                   fn check_none() -> int { return opt_unwrap(empty(), 99) }",
-            "print(check_some()); print(check_none())",
-            "5\n99",
-        );
-    }
-
-    #[test]
-    fn exec_for_with_conditional_assign() {
-        // Conditional assignment inside the loop: r tracks i only while i < 3.
-        // (Uses no `break`/`continue` — bone's inference doesn't support those
-        // yet, though skull's lowering for them is in place; see skull-plan.md.)
-        exec_eq(
-            "fn upto3(n: int) -> int {\n    let r = 0\n    for i in 0..n {\n        if i < 3 {\n            r = i\n        }\n    }\n    r\n}",
-            "print(upto3(10)); print(upto3(2))",
-            "2\n1",
-        );
-    }
-
-    /// `recv?.f(args)` on a fn-typed FIELD: nil-guarded `(recv.f)(args)`
-    /// indirect call, no receiver argument. Cannot live in `tests/` while
-    /// rock (legacy) rejects the shape — bone-only language rule.
-    #[test]
-    fn exec_safe_nav_field_call() {
-        exec_eq(
-            "struct S { f: fn() -> int, g: fn(int) -> int }\n\
-                   fn mk() -> S? { S { f: () => 42, g: (x) => x } }\n\
-                   fn none() -> S? { null }\n\
-                   fn a() -> int { mk()?.f() ?? -1 }\n\
-                   fn b() -> int { mk()?.g(7) ?? -1 }\n\
-                   fn c() -> int { none()?.f() ?? -1 }",
-            "print(a()); print(b()); print(c())",
-            "42\n7\n-1",
-        );
-    }
-
-    /// Body slice of a single emitted function — from its `function NAME()`
+    /// Body slice of a single emitted function -- from its `function NAME()`
     /// header to the next top-level `function ` (or end). Lets a codegen
     /// assertion scope to one fn and ignore the always-emitted value-struct
     /// `copy = function(v) return V2_ct(...) end` metatype helpers.
@@ -3331,373 +2805,187 @@ mod tests {
         &rest[..end]
     }
 
-    /// A defaulted flat-value param is scalarized like any other value param:
-    /// an explicit value arg splats its fields with NO cdata ctor, and the
-    /// default-fill stores per-field scalars (no cdata either). RED before the
-    /// defaulted-value-param scalarization: the callsite packed `V2_ct(...)` to
-    /// feed the single-cdata defaulted slot (application's per-tile `wall_pivot`).
+    /// Scalar-ABI boundaries that must not build cdata or dispatch generically.
+    /// Each row lists functions whose bodies must not contain a token:
+    /// - a defaulted flat-value param splats its fields at the call site and
+    ///   default-fills per-field scalars (it once packed `V2_ct(...)` for the
+    ///   single defaulted slot);
+    /// - a NON-flat value (`Rect` of `V2`s) builds, returns and threads
+    ///   flattened leaves (it once returned `Rect_ct(V2_ct(...), V2_ct(...))`);
+    /// - `==`/`!=` on a payloadless enum is native Lua equality, not the
+    ///   trace-hostile `__op_eq`/`__op_ne` dispatch.
     #[test]
-    fn scalar_abi_defaulted_value_param_no_cdata() {
-        // No arithmetic: the stdlib-less unit path has no `__op_*` (see
-        // `exec_global_init_dep_through_call`). Field reads suffice.
-        let src = "value V2 { x: float, y: float }\n\
-                   fn sink(base: V2, off: V2 = V2 { x: 1.0, y: 2.0 }) -> float { off.y }\n\
-                   fn provided() -> float { sink(V2 { x: 3.0, y: 4.0 }, V2 { x: 5.0, y: 6.0 }) }\n\
-                   fn omitted() -> float { sink(V2 { x: 3.0, y: 4.0 }) }";
-        let lua = emit(src);
-        let prov = fn_body(&lua, "provided");
-        assert!(
-            !prov.contains("_ct("),
-            "provided() must splat scalars, not pack cdata; got:\n{prov}"
-        );
-        // sink's default-fill must not materialize a cdata for `off` either.
-        let sink = fn_body(&lua, "sink");
-        assert!(
-            !sink.contains("_ct("),
-            "sink() default-fill must store scalars, not cdata; got:\n{sink}"
-        );
-        let omit = fn_body(&lua, "omitted");
-        assert!(
-            !omit.contains("_ct("),
-            "omitted() must pass scalars (Lua nils trigger default-fill); got:\n{omit}"
-        );
+    fn scalar_abi_boundaries_build_no_cdata() {
+        let cases: &[(&str, &str, &[(&str, &str)])] = &[
+            (
+                "defaulted value param",
+                "value V2 { x: float, y: float }\n\
+                 fn sink(base: V2, off: V2 = V2 { x: 1.0, y: 2.0 }) -> float { off.y }\n\
+                 fn provided() -> float { sink(V2 { x: 3.0, y: 4.0 }, V2 { x: 5.0, y: 6.0 }) }\n\
+                 fn omitted() -> float { sink(V2 { x: 3.0, y: 4.0 }) }",
+                &[("provided", "_ct("), ("sink", "_ct("), ("omitted", "_ct(")],
+            ),
+            (
+                "nested value",
+                "value V2 { x: float, y: float }\n\
+                 value Rect { tl: V2, br: V2 }\n\
+                 fn mk(a: float, b: float, c: float, d: float) -> Rect { Rect { tl: V2 { x: a, y: b }, br: V2 { x: c, y: d } } }\n\
+                 fn br_x(r: Rect) -> float { r.br.x }\n\
+                 fn drive() -> float { br_x(mk(1.0, 2.0, 3.0, 4.0)) }",
+                &[("mk", "_ct("), ("drive", "_ct(")],
+            ),
+            (
+                "payloadless enum equality",
+                "enum E { Ground, Wall }\n\
+                 fn is_wall(t: E) -> bool { t == E::Wall }\n\
+                 fn not_wall(t: E) -> bool { t != E::Wall }",
+                &[("is_wall", "__op_eq"), ("not_wall", "__op_ne")],
+            ),
+        ];
+        for (label, src, checks) in cases {
+            let lua = emit(src);
+            for (name, token) in *checks {
+                let body = fn_body(&lua, name);
+                assert!(
+                    !body.contains(token),
+                    "{label}: {name}() must not contain `{token}`; got:\n{body}"
+                );
+            }
+        }
     }
 
-    /// Runtime correctness across all three callsite shapes: arg provided
-    /// positionally, arg omitted (default fires), and arg omitted via a named
-    /// LATER arg (the gap case — a single omitted scalar param must still
-    /// arrive as N nils so the callee's per-field default-fill triggers).
+    /// `@inline` splices: a scalarized value-struct ctor in a hot loop (so the
+    /// loop traces with no per-iteration call frame), a multi-block callee
+    /// spliced through the general CFG path, and a transitive chain re-scanned
+    /// after each splice. A surviving call names the callee symbol at the call
+    /// site or in the caller's bound-callee factory, so each spliced callee's
+    /// symbol must occur once: at its own definition. The driver proves the
+    /// spliced code computes the same result.
     #[test]
-    fn exec_defaulted_value_param() {
-        // No arithmetic (stdlib-less path); observe via field reads. `scale` is
-        // a trailing defaulted scalar to force the named-arg gap shape.
-        let src = "value V2 { x: float, y: float }\n\
-                   fn off_y(base: V2, off: V2 = V2 { x: 10.0, y: 20.0 }) -> float { off.y }\n\
-                   fn gap_off(base: V2, off: V2 = V2 { x: 10.0, y: 20.0 }, scale: float = 3.0) -> float { off.y }\n\
-                   fn gap_scale(base: V2, off: V2 = V2 { x: 10.0, y: 20.0 }, scale: float = 3.0) -> float { scale }\n\
-                   fn provided() -> float { off_y(V2 { x: 1.0, y: 2.0 }, V2 { x: 3.0, y: 4.0 }) }\n\
-                   fn omitted() -> float { off_y(V2 { x: 1.0, y: 2.0 }) }\n\
-                   fn gap_default_off() -> float { gap_off(V2 { x: 1.0, y: 2.0 }, scale: 7.0) }\n\
-                   fn gap_named_scale() -> float { gap_scale(V2 { x: 1.0, y: 2.0 }, scale: 7.0) }";
-        let out = run(
-            src,
-            "print(provided()); print(omitted()); print(gap_default_off()); print(gap_named_scale())",
-        );
-        // provided off.y=4 ; omitted -> default off.y=20 ;
-        // gap: off omitted (default 20) while scale named=7 -> off.y=20, scale=7
-        assert_eq!(out, "4\n20\n20\n7");
+    fn inline_splices_callees_and_keeps_results() {
+        let cases: &[(&str, &str, &[&str], &str, &str)] = &[
+            (
+                "value-struct ctor in a loop",
+                "value IVec2 { x: int, y: int }\n\
+                 @inline\n\
+                 fn iv(a: int, b: int) -> IVec2 { IVec2 { x: a, y: b } }\n\
+                 fn run() -> int {\n\
+                     let s = 0\n\
+                     for i in 0..4 {\n\
+                         let c = iv(i, 100)\n\
+                         s = c.y\n\
+                     }\n\
+                     s\n\
+                 }",
+                &["iv_int_int"],
+                "print(run_0())",
+                "100",
+            ),
+            (
+                "multi-block callee",
+                "@inline\n\
+                 fn pick(c: bool) -> int { if c { 10 } else { 20 } }\n\
+                 fn run(c: bool) -> int {\n\
+                     let s = pick(c)\n\
+                     s\n\
+                 }",
+                &["pick_bool"],
+                "print(run_bool(true)); print(run_bool(false))",
+                "10\n20",
+            ),
+            (
+                "transitive chain",
+                "@inline\n\
+                 fn c() -> int { 3 }\n\
+                 @inline\n\
+                 fn b() -> int { c() }\n\
+                 fn a() -> int { b() }",
+                &["b_0", "c_0"],
+                "print(a_0())",
+                "3",
+            ),
+        ];
+        for (label, src, callees, driver, expected) in cases {
+            let lua = emit(src);
+            for callee in *callees {
+                assert_eq!(
+                    lua.matches(callee).count(),
+                    1,
+                    "{label}: `{callee}` must be referenced only by its definition; got:\n{lua}"
+                );
+            }
+            assert_eq!(run(src, driver), *expected, "{label}");
+        }
     }
 
-    /// A defaulted value param whose default is a GLOBAL value struct (not a
-    /// literal). The global reads back as a single cdata (`Scalar`), not a
-    /// `Group`, so the per-field default-fill must field-read its components —
-    /// not store the whole cdata into the first slot. RED before that handling:
-    /// An application crashed `Color_ct(<cdata>, nil, nil, nil)` on
-    /// `journal_log("...")` omitting `hue: Color = JOURNAL_HUE_DEFAULT`.
-    #[test]
-    fn exec_defaulted_value_param_global_default() {
-        let src = "value V2 { x: float, y: float }\n\
-                   global DEF: V2 = mk(7.0, 8.0)\n\
-                   fn mk(a: float, b: float) -> V2 { V2 { x: a, y: b } }\n\
-                   fn pick(base: V2, off: V2 = DEF) -> float { off.x }\n\
-                   fn pick_y(base: V2, off: V2 = DEF) -> float { off.y }\n\
-                   fn omitted_x() -> float { pick(V2 { x: 1.0, y: 2.0 }) }\n\
-                   fn omitted_y() -> float { pick_y(V2 { x: 1.0, y: 2.0 }) }\n\
-                   fn provided_x() -> float { pick(V2 { x: 1.0, y: 2.0 }, V2 { x: 3.0, y: 4.0 }) }";
-        let out = run(
-            src,
-            "print(omitted_x()); print(omitted_y()); print(provided_x())",
-        );
-        // omitted -> default DEF = (7, 8): x=7, y=8 ; provided -> off.x=3
-        assert_eq!(out, "7\n8\n3");
-    }
-
-    /// A NON-flat value struct (`Rect` whose fields are themselves `V2` value
-    /// structs) scalarizes through the boundary as flattened leaf scalars: the
-    /// nested literal builds no cdata, the return flattens, the param rebuilds,
-    /// and a nested field access (`r.br.x`) reads a leaf. RED before nested
-    /// scalarization: `mk` returned `Rect_ct(V2_ct(...), V2_ct(...))`.
-    #[test]
-    fn scalar_abi_nested_value_no_cdata() {
-        let src = "value V2 { x: float, y: float }\n\
-                   value Rect { tl: V2, br: V2 }\n\
-                   fn mk(a: float, b: float, c: float, d: float) -> Rect { Rect { tl: V2 { x: a, y: b }, br: V2 { x: c, y: d } } }\n\
-                   fn br_x(r: Rect) -> float { r.br.x }\n\
-                   fn drive() -> float { br_x(mk(1.0, 2.0, 3.0, 4.0)) }";
-        let lua = emit(src);
-        let mk = fn_body(&lua, "mk");
-        assert!(
-            !mk.contains("_ct("),
-            "mk must build nested value as scalars; got:\n{mk}"
-        );
-        let drive = fn_body(&lua, "drive");
-        assert!(
-            !drive.contains("_ct("),
-            "drive must thread leaves, no cdata; got:\n{drive}"
-        );
-    }
-
-    /// Runtime correctness of nested value scalarization across literal build,
-    /// nested return, nested param, and nested field access (`r.tl.y`/`r.br.x`).
-    #[test]
-    fn exec_nested_value_struct() {
-        let src = "value V2 { x: float, y: float }\n\
-                   value Rect { tl: V2, br: V2 }\n\
-                   fn mk(a: float, b: float, c: float, d: float) -> Rect { Rect { tl: V2 { x: a, y: b }, br: V2 { x: c, y: d } } }\n\
-                   fn br_x(r: Rect) -> float { r.br.x }\n\
-                   fn tl_y(r: Rect) -> float { r.tl.y }\n\
-                   fn whole(r: Rect) -> Rect { r }\n\
-                   fn a() -> float { br_x(mk(1.0, 2.0, 3.0, 4.0)) }\n\
-                   fn b() -> float { tl_y(mk(1.0, 2.0, 3.0, 4.0)) }\n\
-                   fn c() -> float { br_x(whole(mk(1.0, 2.0, 3.0, 4.0))) }";
-        let out = run(src, "print(a()); print(b()); print(c())");
-        // br.x=3 ; tl.y=2 ; whole passes Rect through then br.x=3
-        assert_eq!(out, "3\n2\n3");
-    }
-
-    /// `==`/`!=` on a PAYLOADLESS enum lowers to native Lua `==`/`~=` (identity
-    /// == structural for unit-only variants), not the generic `__op_eq` dispatch
-    /// (type()/pairs() — a static-over-dynamic smell, and trace-hostile in hot
-    /// loops). RED before: `tile == E::Wall` emitted `__op_eq(tile, ...)`.
-    #[test]
-    fn scalar_abi_payloadless_enum_eq_native() {
-        let src = "enum E { Ground, Wall }\n\
-                   fn is_wall(t: E) -> bool { t == E::Wall }\n\
-                   fn not_wall(t: E) -> bool { t != E::Wall }";
-        let lua = emit(src);
-        let w = fn_body(&lua, "is_wall");
-        assert!(
-            !w.contains("__op_eq"),
-            "payloadless enum == must be native; got:\n{w}"
-        );
-        let nw = fn_body(&lua, "not_wall");
-        assert!(
-            !nw.contains("__op_ne"),
-            "payloadless enum != must be native; got:\n{nw}"
-        );
-    }
-
-    /// Runtime correctness: payloadless-enum equality (both arms) and nil compare
-    /// give the same answers as the generic comparator would. (In the stdlib-less
-    /// unit harness `__op_eq` doesn't exist, so the old codegen would also fail to
-    /// run here — the native lowering is what makes this executable at all.)
-    #[test]
-    fn exec_payloadless_enum_eq() {
-        exec_eq(
-            "enum E { Ground, Wall }\n\
-                   fn check(t: E) -> int { if t == E::Wall { 1 } else { 0 } }\n\
-                   fn a() -> int { check(E::Wall) }\n\
-                   fn b() -> int { check(E::Ground) }",
-            "print(a()); print(b())",
-            "1\n0",
-        );
-    }
-
-    /// Function inlining: a tiny single-block value-struct constructor called in
-    /// a hot loop is spliced into the caller. The scalar-ABI ctor arrives as a
-    /// `CallMulti` (`r1, r2 = iv(...)`); after inlining the caller no longer
-    /// calls it, yet computes the same sum. This is the lever
-    /// that lets the loop trace (no per-tile call frame).
-    #[test]
-    fn inlines_value_struct_ctor_call() {
-        let src = "value IVec2 { x: int, y: int }\n\
-                   @inline\n\
-                   fn iv(a: int, b: int) -> IVec2 { IVec2 { x: a, y: b } }\n\
-                   fn run() -> int {\n\
-                       let s = 0\n\
-                       for i in 0..4 {\n\
-                           let c = iv(i, 100)\n\
-                           s = c.y\n\
-                       }\n\
-                       s\n\
-                   }";
-        let lua = emit(src);
-        // `iv()` is a small straight-line callee (a scalarized value-struct ctor),
-        // so the inline pass splices it into `run()` and the hot loop traces with
-        // no per-iter call frame -> no `= iv(` call survives. Splice mechanics:
-        // `inline.rs` in `skull-transform`.
-        assert!(
-            !lua.contains("= iv("),
-            "expected iv() inlined (no `= iv(` call), got:\n{lua}"
-        );
-        // Correctness holds regardless of inlining — last iteration c.y == 100.
-        exec_eq(src, "print(run())", "100");
-    }
-
-    /// Multi-block inlining: a callee with internal control flow (`pick` has an
-    /// `if`, so its entry block ends in a Branch, not a Return) is spliced via the
-    /// general CFG path — caller block split, callee blocks cloned, each Return
-    /// routed to a continuation block whose param is the call's destination. The
-    /// call disappears and both branch outcomes stay correct.
-    #[test]
-    fn inlines_multi_block_callee() {
-        let src = "@inline\n\
-                   fn pick(c: bool) -> int { if c { 10 } else { 20 } }\n\
-                   fn run(c: bool) -> int {\n\
-                       let s = pick(c)\n\
-                       s\n\
-                   }";
-        let lua = emit(src);
-        // `pick()` has internal control flow (an `if`), so it is spliced via the
-        // general CFG path: the caller block splits, the callee blocks clone, and
-        // each Return routes to a continuation block -> no `= pick(` call survives.
-        assert!(
-            !lua.contains("= pick("),
-            "expected pick() inlined (no `= pick(` call), got:\n{lua}"
-        );
-        exec_eq(src, "print(run(true)); print(run(false))", "10\n20");
-    }
-
-    #[test]
-    fn inlines_straight_result_across_branch() {
-        let src = "@inline\n\
-                   fn identity(flag: bool) -> bool { return flag }\n\
-                   fn run(select: bool) -> bool {\n\
-                       let value = identity(true)\n\
-                       if select { return value }\n\
-                       return value\n\
-                   }";
-        exec_eq(src, "print(run(true)); print(run(false))", "true\ntrue");
-    }
-
-    #[test]
-    fn inlines_straight_nullable_result_across_coalesce_branches() {
-        let src = "@inline\n\
-                   fn identity(value: int?) -> int? { return value }\n\
-                   fn run(select: bool) -> int {\n\
-                       let value = identity(null)\n\
-                       if select { return value ?? 1 }\n\
-                       return value ?? 2\n\
-                   }";
-        exec_eq(src, "print(run(true)); print(run(false))", "1\n2");
-    }
-
-    #[test]
-    fn inlines_void_straight_result() {
-        let src = "@inline\n\
-                   fn touch() { return }\n\
-                   fn run() -> int { touch(); return 7 }";
-        exec_eq(src, "print(run())", "7");
-    }
-
-    /// Transitive inlining: `a` calls `b` calls `c`; re-scanning the caller after
-    /// each splice inlines the calls the spliced body introduces, so neither
-    /// `= b(` nor `= c(` survives in `a`. (Arithmetic ops aren't used — the
-    /// stdlib-free `emit` harness can't resolve `__op_*`.)
-    #[test]
-    fn inlines_transitively() {
-        let src = "@inline\n\
-                   fn c() -> int { 3 }\n\
-                   @inline\n\
-                   fn b() -> int { c() }\n\
-                   fn a() -> int { b() }";
-        let lua = emit(src);
-        assert!(
-            !lua.contains("= b("),
-            "expected b() inlined into a(), got:\n{lua}"
-        );
-        assert!(
-            !lua.contains("= c("),
-            "expected c() inlined transitively, got:\n{lua}"
-        );
-        exec_eq(src, "print(a())", "3");
-    }
-
-    /// A self-recursive callee is NOT a candidate (cloning it would never
-    /// terminate), so the call into it survives. `r` self-calls `r(true)`; the
-    /// caller's `r(false)` therefore stays a real call. Output stays correct.
+    /// A self-recursive callee is never an inline candidate (cloning it would
+    /// not terminate), so its body (the literal 7) must not appear in the caller.
     #[test]
     fn recursive_callee_not_inlined() {
         let src = "@inline\n\
                    fn r(stop: bool) -> int { if stop { 7 } else { r(true) } }\n\
                    fn caller() -> int { r(false) }";
         let lua = emit(src);
+        let body = fn_body(&lua, "caller_0");
         assert!(
-            lua.contains("r("),
-            "a self-recursive callee must stay a real call, got:\n{lua}"
+            !body.contains("(7)"),
+            "a self-recursive callee must stay a real call, got:\n{body}"
         );
-        exec_eq(src, "print(caller())", "7");
+        assert_eq!(run(src, "print(caller_0())"), "7");
     }
 
-    // --- Relooper: counted loops recovered as a real numeric `for` (FORL) ---
-    //
-    // The relooper (`skull-codegen-lua` `recognize_counted_loops`/`expand_for`)
-    // recovers the canonical counted-loop CFG (preheader-store / `i < hi` header /
-    // pure-increment latch) as a Lua numeric `for c<slot> = c<slot>, hi-1 do`, so
-    // LuaJIT specializes the induction var (FORL) instead of unrolling a goto-loop
-    // into an mcode blowup. Shapes that fail the soundness guards stay goto loops
-    // (see `counter_reassigned_in_body_stays_correct`). Emit-shape + execution.
-
+    /// The relooper recovers the canonical counted-loop CFG (preheader store,
+    /// `i < hi` header, pure-increment latch) as a numeric `for c<slot> = ...`
+    /// so LuaJIT specializes the induction variable (FORL) instead of unrolling
+    /// a goto loop. A loop that reassigns its own counter must stay a goto loop:
+    /// a synthesized `for` would ignore `i = n`, run 6 times and return 5
+    /// instead of 0. Each program is a single fn, so the module-wide `for c`
+    /// count is that fn's.
     #[test]
-    fn counted_range_loop_emits_real_for() {
-        let src = "fn sum(n: int) -> int {\n\
-                   let last = 0\n\
-                   for i in 0..n { last = i }\n\
-                   last\n\
-                   }";
-        let lua = emit(src);
-        assert!(
-            lua.contains("for c"),
-            "expected a numeric for-loop (FORL), got:\n{lua}"
-        );
-        let out = run(src, "print(sum(5))");
-        assert_eq!(out, "4");
-    }
-
-    #[test]
-    fn nested_counted_loops_both_for_and_correct() {
-        let src = "fn grid(w: int, h: int) -> int {\n\
-                   let last = 0\n\
-                   for y in 0..h { for x in 0..w { last = x } }\n\
-                   last\n\
-                   }";
-        let lua = emit(src);
-        assert_eq!(
-            lua.matches("for c").count(),
-            2,
-            "expected two numeric for-loops (outer + inner), got:\n{lua}"
-        );
-        let out = run(src, "print(grid(5, 3))");
-        assert_eq!(out, "4");
-    }
-
-    /// Guard: an array spread (`[...a, ...b]`) builds via a loop whose increment
-    /// is fused INTO the body block (no dedicated latch). It must NOT be treated
-    /// as a counted loop — doing so would double the increment (body + the
-    /// synthesized `for`). Execution proves the elements copy exactly once.
-    #[test]
-    fn array_spread_not_restructured_no_double_increment() {
-        exec_eq(
-            "fn cat(a: [int], b: [int]) -> [int] { [...a, ...b] }",
-            "local r = cat({_data={1,2},len=2}, {_data={3,4},len=2})\n\
-             local s = {} for i=1,r.len do s[i]=tostring(r._data[i]) end\n\
-             print(r.len .. ':' .. table.concat(s, ','))",
-            "4:1,2,3,4",
-        );
-    }
-
-    /// Guard: a loop that reassigns its own counter in the body can't become a
-    /// `for` (the for-variable would be loop-controlled, ignoring the write), so
-    /// it stays a goto loop and the reassignment is honored. `for i in 0..6 {
-    /// last = i; i = n }` with `n = 10` runs ONCE (i jumps to 10, fails `< 6`),
-    /// leaving `last = 0`. A wrongly-synthesized `for` would ignore `i = n`, run
-    /// 6 times, and leave `last = 5`.
-    #[test]
-    fn counter_reassigned_in_body_stays_correct() {
-        let src = "fn f(n: int) -> int {\n\
-                   let last = 99\n\
-                   for i in 0..6 { last = i\n i = n }\n\
-                   last\n\
-                   }";
-        let lua = emit(src);
-        // Naive substring over the whole emitted module: any `for c` anywhere
-        // (another fn's counted loop, a stray comment) would trip it, so keep
-        // this program a single fn with no counted loop of its own.
-        assert!(
-            !lua.contains("for c"),
-            "counter-reassigning loop must NOT become a for (slot stored >2x), got:\n{lua}"
-        );
-        let out = run(src, "print(f(10))");
-        assert_eq!(out, "0");
+    fn counted_loops_become_numeric_for_only_when_sound() {
+        let cases: &[(&str, &str, usize, &str, &str)] = &[
+            (
+                "range loop",
+                "fn sum(n: int) -> int {\n\
+                 let last = 0\n\
+                 for i in 0..n { last = i }\n\
+                 last\n\
+                 }",
+                1,
+                "print(sum_int(5))",
+                "4",
+            ),
+            (
+                "nested range loops",
+                "fn grid(w: int, h: int) -> int {\n\
+                 let last = 0\n\
+                 for y in 0..h { for x in 0..w { last = x } }\n\
+                 last\n\
+                 }",
+                2,
+                "print(grid_int_int(5, 3))",
+                "4",
+            ),
+            (
+                "counter reassigned in the body",
+                "fn f(n: int) -> int {\n\
+                 let last = 99\n\
+                 for i in 0..6 { last = i\n i = n }\n\
+                 last\n\
+                 }",
+                0,
+                "print(f_int(10))",
+                "0",
+            ),
+        ];
+        for (label, src, fors, driver, expected) in cases {
+            let lua = emit(src);
+            assert_eq!(
+                lua.matches("for c").count(),
+                *fors,
+                "{label}: numeric for-loops; got:\n{lua}"
+            );
+            assert_eq!(run(src, driver), *expected, "{label}");
+        }
     }
 }

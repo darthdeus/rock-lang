@@ -1,0 +1,140 @@
+// Runtime results of lowering paths that once miscompiled: global init order
+// through edges only a transitive scan sees, nobox and defaulted value-struct
+// boundaries, checked uint casts and shifts, nil-guarded calls through
+// fn-typed fields, and inlined callees whose single result crosses a branch.
+
+// `B` reads `A` only inside `Foo`'s field-default helper, and is declared
+// first, so source order alone initializes it too early.
+global INIT_B: InitFoo = InitFoo {}
+struct InitFoo { x: int = INIT_A }
+global INIT_A: int = 42
+
+@test(output = "42")
+fn global_init_orders_through_struct_default_helper() {
+    print(INIT_B.x)
+}
+
+// `CALL_A` names no global; the edge to `CALL_B` is inside `read_call_b`.
+global CALL_A: int = read_call_b()
+global CALL_B: int = 42
+fn read_call_b() -> int { CALL_B }
+
+@test(output = "42")
+fn global_init_orders_through_a_call() {
+    print(CALL_A)
+}
+
+// The same edge through a value-returning (multi-return) call.
+global MULTI_A: int = read_multi_b().x
+value MultiP { x: int, s: string }
+global MULTI_B: MultiP = MultiP { x: 42, s: "b" }
+fn read_multi_b() -> MultiP { MULTI_B }
+
+@test(output = "42")
+fn global_init_orders_through_a_value_returning_call() {
+    print(MULTI_A)
+}
+
+nobox value Sid { value: int }
+value PlacePt { x: float, y: float }
+nobox value CPlace { space: Sid, pos: PlacePt }
+struct PlaceHolder { place: CPlace }
+fn make_place_holder(p: CPlace) -> PlaceHolder { return PlaceHolder { place: p } }
+fn place_pos_x(h: PlaceHolder) -> float { return h.place.pos.x }
+
+@test
+fn nobox_value_holding_a_plain_value_reads_the_stored_value() {
+    let h = make_place_holder(CPlace { space: Sid { value: 3 }, pos: PlacePt { x: 9.5, y: 2.0 } })
+    assert_eq(place_pos_x(h), 9.5)
+}
+
+fn cast_uint(value: float) -> uint { value as uint }
+fn shl_uint(value: uint, count: uint) -> uint { value << count }
+fn shr_uint(value: uint, count: uint) -> uint { value >> count }
+
+@test
+fn checked_uint_cast_and_shifts() {
+    assert(cast_uint(3.9) == 3)
+    assert(shl_uint(1, 31) == 2147483648)
+    assert(shr_uint(4294967295, 31) == 1)
+}
+
+struct NavFns { f: fn() -> int, g: fn(int) -> int }
+fn nav_some() -> NavFns? { NavFns { f: () => 42, g: (x) => x } }
+fn nav_none() -> NavFns? { null }
+
+@test(output = "42\n7\n-1")
+fn safe_nav_call_through_a_fn_typed_field() {
+    print(nav_some()?.f() ?? -1)
+    print(nav_some()?.g(7) ?? -1)
+    print(nav_none()?.f() ?? -1)
+}
+
+// An omitted value-struct param must arrive as one nil per leaf, including when
+// a LATER param is passed by name, so the callee's per-field default fill fires.
+value DV2 { x: float, y: float }
+fn dv_off_y(base: DV2, off: DV2 = DV2 { x: 10.0, y: 20.0 }) -> float { off.y }
+fn dv_gap_off(base: DV2, off: DV2 = DV2 { x: 10.0, y: 20.0 }, scale: float = 3.0) -> float { off.y }
+fn dv_gap_scale(base: DV2, off: DV2 = DV2 { x: 10.0, y: 20.0 }, scale: float = 3.0) -> float { scale }
+
+@test
+fn defaulted_value_param_provided_omitted_and_named_gap() {
+    assert_eq(dv_off_y(DV2 { x: 1.0, y: 2.0 }, DV2 { x: 3.0, y: 4.0 }), 4.0)
+    assert_eq(dv_off_y(DV2 { x: 1.0, y: 2.0 }), 20.0)
+    assert_eq(dv_gap_off(DV2 { x: 1.0, y: 2.0 }, scale: 7.0), 20.0)
+    assert_eq(dv_gap_scale(DV2 { x: 1.0, y: 2.0 }, scale: 7.0), 7.0)
+}
+
+// A global default reads back as one value, which the default fill must split
+// into its leaves rather than store whole into the first one.
+global DV_DEF: DV2 = dv_mk(7.0, 8.0)
+fn dv_mk(a: float, b: float) -> DV2 { DV2 { x: a, y: b } }
+fn dv_pick_x(base: DV2, off: DV2 = DV_DEF) -> float { off.x }
+fn dv_pick_y(base: DV2, off: DV2 = DV_DEF) -> float { off.y }
+
+@test
+fn defaulted_value_param_with_a_global_default() {
+    assert_eq(dv_pick_x(DV2 { x: 1.0, y: 2.0 }), 7.0)
+    assert_eq(dv_pick_y(DV2 { x: 1.0, y: 2.0 }), 8.0)
+    assert_eq(dv_pick_x(DV2 { x: 1.0, y: 2.0 }, DV2 { x: 3.0, y: 4.0 }), 3.0)
+}
+
+@inline
+fn inl_identity_bool(flag: bool) -> bool { return flag }
+
+fn inl_bool_across_branch(select: bool) -> bool {
+    let value = inl_identity_bool(true)
+    if select { return value }
+    return value
+}
+
+@test(output = "true\ntrue")
+fn inlined_straight_result_across_branch() {
+    print(inl_bool_across_branch(true))
+    print(inl_bool_across_branch(false))
+}
+
+@inline
+fn inl_identity_nullable(value: int?) -> int? { return value }
+
+fn inl_nullable_across_coalesce(select: bool) -> int {
+    let value = inl_identity_nullable(null)
+    if select { return value ?? 1 }
+    return value ?? 2
+}
+
+@test(output = "1\n2")
+fn inlined_straight_nullable_result_across_coalesce_branches() {
+    print(inl_nullable_across_coalesce(true))
+    print(inl_nullable_across_coalesce(false))
+}
+
+@inline
+fn inl_touch() { return }
+
+fn inl_void_then_value() -> int { inl_touch(); return 7 }
+
+@test(output = "7")
+fn inlined_void_straight_result() {
+    print(inl_void_then_value())
+}
