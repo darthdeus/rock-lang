@@ -42,21 +42,17 @@ fn test_while_let_enum_countdown() {
 
 enum E { A(int, int), B }
 
-@test(output = "5 6")
+@test(output = "5 6\n10")
 fn test_while_let_multi_arg() {
     let e: E = E::A(5, 6);
     while let A(x, y) = e {
         print("{x} {y}");
         e = E::B;
     }
-}
-
-@test(output = "10")
-fn test_while_let_wildcard_arg() {
-    let e: E = E::A(10, 20);
-    while let A(x, _) = e {
+    let w: E = E::A(10, 20);
+    while let A(x, _) = w {
         print("{x}");
-        e = E::B;
+        w = E::B;
     }
 }
 
@@ -77,26 +73,22 @@ fn test_nested_enum_match_extracts_inner() {
 }
 
 @test
-fn test_nested_enum_no_match_skips_body() {
+fn test_nested_enum_mismatch_skips_body() {
+    // outer matches L but inner is K, not J
     let e: Outer = Outer::L(Inner::K)
     let entered = 0
     while let L(J(x)) = e {
         entered = entered + 1
         e = Outer::M(0)
     }
-    assert_eq(entered, 0)  // outer matches L but inner is K, not J
-}
-
-@test
-fn test_nested_enum_outer_mismatch_skips() {
-    let e: Outer = Outer::M(7)
-    let entered = 0
-    while let L(J(x)) = e {
+    assert_eq(entered, 0)
+    // outer is M, not L: short-circuits before touching the slot J would need
+    let m: Outer = Outer::M(7)
+    while let L(J(x)) = m {
         entered = entered + 1
-        e = Outer::M(0)
+        m = Outer::M(0)
     }
-    assert_eq(entered, 0)  // outer is M, not L — short-circuits before
-                          // touching the slot that J would need
+    assert_eq(entered, 0)
 }
 
 // --- Nullable binding from a call evaluated each iteration ---

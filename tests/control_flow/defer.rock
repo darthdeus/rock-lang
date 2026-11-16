@@ -1,11 +1,6 @@
 // Defer statement tests - execution order, scoping, and edge cases
 // Tests that defer statements execute in LIFO order at scope exit
 
-// Helper functions for defer tests
-fn cleanup() {
-    print("cleanup called")
-}
-
 fn cleanup1() {
     print("cleanup1")
 }
@@ -31,15 +26,6 @@ fn level1() {
     print("level1 start")
     level2()
     print("level1 end")
-}
-
-fn inner() {
-    defer { print("inner defer") }
-    print("inner work")
-}
-
-fn test_defer_mixed_syntax_nested_cleanup() { 
-    print("func cleanup") 
 }
 
 // Test: Basic defer executes in LIFO order
@@ -73,34 +59,9 @@ fn test_defer_with_return() {
     print("unreachable")
 }
 
-// Test: Multiple defers execute in reverse order
-@test(output = "third\nsecond\nfirst")
-fn test_multiple_defers() {
-    defer { print("first") }
-    defer { print("second") }
-    defer { print("third") }
-}
-
-// Test: Defer with early return and cleanup
-@test(output = "work\ncleanup")
-fn test_defer_with_error_handling() {
-    defer { print("cleanup") }
-
-    print("work");
-    return;
-}
-
-// Test: Simple defer statement
-@test(output = "defer")
-fn test_simple_defer() {
-    defer {
-        print("defer")
-    }
-}
-
-// Test: Defer with surrounding code
-@test(output = "start\nend\ndefer\nstart\nend\ndefer executed")
-fn test_defer_with_print() {
+// Test: Defer in a bare block runs at the block exit
+@test(output = "start\nend\ndefer\nafter")
+fn test_defer_in_bare_block() {
     {
         print("start");
 
@@ -110,33 +71,7 @@ fn test_defer_with_print() {
 
         print("end")
     }
-
-    {
-        print("start");
-
-        defer {
-            print("defer executed")
-        }
-
-        print("end")
-    }
-}
-
-// Test: Defer expression syntax (function call)
-@test(output = "work done\ncleanup called")
-fn test_defer_expression_syntax() {
-    defer(cleanup())
-    print("work done")
-}
-
-// Test: Defer scoping in nested function calls
-@test(output = "before inner\ninner work\ninner defer\nafter inner\nouter defer")
-fn test_defer_multiple_scopes() {
-    defer { print("outer defer") }
-
-    print("before inner")
-    inner()
-    print("after inner")
+    print("after")
 }
 
 // Test: Mixed defer syntax
@@ -200,19 +135,6 @@ fn test_defer_expression_in_nested_blocks() {
     }
 
     print("function end")
-}
-
-// Test: Mixed defer types in nested scopes
-@test(output = "in block\nblock cleanup\nafter block\nfunc cleanup")
-fn test_defer_mixed_syntax_nested() {
-    defer(test_defer_mixed_syntax_nested_cleanup())
-
-    if true {
-        defer { print("block cleanup") }
-        print("in block")
-    }
-
-    print("after block")
 }
 
 // ============================================

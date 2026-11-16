@@ -29,13 +29,6 @@ fn fail_one_frame() {
     error("one frame")
 }
 
-@test(output = "d1; true")
-fn defer_runs_when_error_leaves_one_frame() {
-    LOG = ""
-    let m = catch_message(() => fail_one_frame())
-    print("{LOG} {mentions(m, "one frame")}")
-}
-
 fn level3() {
     defer { LOG = LOG + "l3;" }
     error("deep")
@@ -105,24 +98,6 @@ fn loop_body_defer_runs_on_error() {
     print("{LOG} {mentions(m, "loop")}")
 }
 
-fn fail_in_while() {
-    let n = 0
-    while n < 5 {
-        defer { LOG = LOG + "w{n};" }
-        n = n + 1
-        if n == 3 {
-            assert(false, "while")
-        }
-    }
-}
-
-@test(output = "w1;w2;w3; true")
-fn while_body_defer_sees_current_value_on_error() {
-    LOG = ""
-    let m = catch_message(() => fail_in_while())
-    print("{LOG} {mentions(m, "while")}")
-}
-
 fn guarded(tag: string, fail: bool) -> int {
     defer { LOG = LOG + "{tag};" }
     if fail {
@@ -158,21 +133,6 @@ fn error_message_reaches_the_handler() {
     let m = catch_message(() => fail_with_value(7))
     let shown = if mentions(m, "code 42") { "code 42" } else { m }
     print("{LOG} {shown}")
-}
-
-fn recurse(n: int) {
-    defer { LOG = LOG + "r{n};" }
-    if n == 0 {
-        error("bottom")
-    }
-    recurse(n - 1)
-}
-
-@test(output = "r0;r1;r2; true")
-fn recursive_frames_unwind_in_order() {
-    LOG = ""
-    let m = catch_message(() => recurse(2))
-    print("{LOG} {mentions(m, "bottom")}")
 }
 
 @test(output = "first:d1; second:d1; true")

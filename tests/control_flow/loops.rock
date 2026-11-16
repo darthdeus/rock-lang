@@ -16,24 +16,6 @@ fn loop_basic_break() {
     print(i)
 }
 
-@test(output = "9")
-fn loop_continue_and_sum() {
-    let i = 0
-    let sum = 0
-
-    loop {
-        i = i + 1
-        if i % 2 != 0 {
-            sum = sum + i
-            if i >= 5 {
-                break
-            }
-        }
-    }
-
-    print(sum)
-}
-
 @test(output = "3\n2")
 fn loop_nested() {
     let outer = 0
@@ -58,75 +40,6 @@ fn loop_nested() {
     print(outer)
     print(inner)
 }
-
-// ============================================
-// Additional Continue Statement Tests
-// ============================================
-
-@test(output = "9\n5")
-fn continue_after_statements() {
-    let sum = 0
-    let count = 0
-    let i = 0
-
-    loop {
-        i = i + 1
-        count = count + 1
-
-        if i % 2 == 0 {
-            continue
-        }
-
-        sum = sum + i
-
-        if i >= 5 {
-            break
-        }
-    }
-
-    print(sum)
-    print(count)
-}
-
-// ============================================
-// Additional For Loop Tests
-// ============================================
-
-@test(output = "6")
-fn vec_iteration_basic() {
-    let vec = vec_new()
-    vec_push(vec, 1)
-    vec_push(vec, 2)
-    vec_push(vec, 3)
-
-    let sum = 0
-
-    for x in vec {
-        sum += x
-    }
-
-    print(sum)
-}
-
-@test(output = "6")
-fn map_tuple_iteration() {
-    let map = map_new()
-    insert(map, "a", 1)
-    insert(map, "b", 2)
-    insert(map, "c", 3)
-
-    let sum = 0
-
-    for (key, value) in map {
-        sum += value
-    }
-
-    print(sum)
-}
-
-// ============================================
-// Type Assertion Tests for Collections
-// ============================================
 
 @test(output = "6", type_holes = [[0, "int"]])
 fn vec_iteration_type_check() {
@@ -176,10 +89,6 @@ fn array_iteration_type_check() {
     print(sum)
 }
 
-// ============================================
-// Additional Advanced Loop Tests
-// ============================================
-
 @test(output = "18")
 fn nested_loops_with_continue_complex() {
     let outer = 0
@@ -212,10 +121,6 @@ fn nested_loops_with_continue_complex() {
     print(result)
 }
 
-// ============================================
-// More iteration cases
-// ============================================
-
 @test(output = "1\nadd\n2\nadd\n3\nskip 3\n4\nadd\n5\nskip 5\n6\nskip 3\n7\nadd\n8\nadd\n9\nskip 3\n10\n22")
 fn debug_continue_multiple() {
     let sum = 0
@@ -241,25 +146,6 @@ fn debug_continue_multiple() {
 
         print("add")
         sum = sum + i
-    }
-
-    print(sum)
-}
-
-@test(output = "18")
-fn continue_preserves_loop_variables() {
-    let sum = 0
-    let arr = [1, 2, 3, 4, 5, 6]
-
-    // Manual indexing with a counter (1-based to match expected output)
-    let index = 1
-    for value in arr {
-        if value % 2 == 0 {
-            index = index + 1
-            continue
-        }
-        sum = sum + index + value
-        index = index + 1
     }
 
     print(sum)

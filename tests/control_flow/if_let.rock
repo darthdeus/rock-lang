@@ -19,15 +19,11 @@ fn get_null_container() -> Container? { return null }
 // Single binding
 // ==============================
 
-@test(output = "5")
-fn basic_nonnull() {
+@test(output = "5\nmissing")
+fn basic_nonnull_and_null_else() {
     if let x = get_item(5) {
         print(x.value)
     }
-}
-
-@test(output = "missing")
-fn basic_null_else() {
     if let x = get_null_item() {
         print(x.value)
     } else {
@@ -35,15 +31,11 @@ fn basic_null_else() {
     }
 }
 
-// Wildcard _ is a liveness-only check — value is not bound
+// Wildcard _ is a liveness-only check -- value is not bound
 @test(output = "exists")
 fn discard_binding() {
     if let _ = get_item(99) { print("exists") }
-}
-
-@test(output = "")
-fn discard_binding_null() {
-    if let _ = get_null_item() { print("exists") }
+    if let _ = get_null_item() { print("null exists") }
 }
 
 // ==============================
@@ -52,17 +44,13 @@ fn discard_binding_null() {
 // ==============================
 
 @test
-fn value_expr_nonnull() {
+fn value_expr() {
     let x: int? = 42
     let result = if let y = x { y + 1 } else { 0 }
     assert_eq(result, 43)
-}
-
-@test
-fn value_expr_null() {
-    let x: int? = null
-    let result = if let y = x { y + 1 } else { 0 }
-    assert_eq(result, 0)
+    let n: int? = null
+    let none = if let y = n { y + 1 } else { 0 }
+    assert_eq(none, 0)
 }
 
 @test
@@ -103,23 +91,18 @@ fn binding_not_in_scope_after() {
 // Nested if let
 // ==============================
 
-@test(output = "1\n2")
-fn nested_both_nonnull() {
+@test(output = "1\n2\n1")
+fn nested() {
     let a: Item? = Item { value: 1 }
     let b: Item? = Item { value: 2 }
+    let n: Item? = null
     if let x = a {
         print(x.value)
         if let y = b { print(y.value) }
     }
-}
-
-@test(output = "1")
-fn nested_inner_null() {
-    let a: Item? = Item { value: 1 }
-    let b: Item? = null
     if let x = a {
         print(x.value)
-        if let y = b { print(y.value) }
+        if let y = n { print(y.value) }
     }
 }
 
@@ -133,12 +116,8 @@ fn with_safe_nav() {
     if let c = o?.inner {
         print(c.item?.value ?? -1)
     }
-}
-
-@test(output = "")
-fn with_safe_nav_null() {
-    let o: Outer? = Outer { inner: null }
-    if let c = o?.inner {
+    let empty: Outer? = Outer { inner: null }
+    if let c = empty?.inner {
         print(c.item?.value ?? -1)
     }
 }
@@ -148,24 +127,16 @@ fn with_safe_nav_null() {
 // First-null and second-null are distinct: first exits before evaluating second.
 // ==============================
 
-@test(output = "42")
-fn chain_both_nonnull() {
+@test(output = "42\nnope\nnope")
+fn chain_two_bindings() {
     if let c = get_container(42) && let item = c.item {
         print(item.value)
     }
-}
-
-@test(output = "nope")
-fn chain_first_null() {
     if let c = get_null_container() && let item = c.item {
         print(item.value)
     } else {
         print("nope")
     }
-}
-
-@test(output = "nope")
-fn chain_second_null() {
     let c: Container? = Container { item: null }
     if let container = c && let item = container.item {
         print(item.value)
@@ -184,18 +155,14 @@ fn chain_both_in_scope() {
 }
 
 // ==============================
-// Chain: binding + condition
+// Chain: binding + condition, and condition before binding
 // ==============================
 
-@test(output = "42")
-fn chain_condition_passes() {
+@test(output = "42\nnope")
+fn chain_binding_then_condition() {
     if let x = get_item(42) && x.value > 0 {
         print(x.value)
     }
-}
-
-@test(output = "nope")
-fn chain_condition_fails() {
     if let x = get_item(-1) && x.value > 0 {
         print(x.value)
     } else {
@@ -203,22 +170,14 @@ fn chain_condition_fails() {
     }
 }
 
-// ==============================
-// Chain: condition before binding
-// ==============================
-
-@test(output = "42")
-fn chain_cond_then_binding() {
+@test(output = "42\nnope")
+fn chain_condition_then_binding() {
     let flag = true
     if flag && let x = get_item(42) {
         print(x.value)
     }
-}
-
-@test(output = "nope")
-fn chain_cond_false_skips() {
-    let flag = false
-    if flag && let x = get_item(42) {
+    let off = false
+    if off && let x = get_item(42) {
         print(x.value)
     } else {
         print("nope")
@@ -229,22 +188,14 @@ fn chain_cond_false_skips() {
 // Three-clause chain
 // ==============================
 
-@test(output = "42")
-fn three_clause_all_pass() {
+@test(output = "42\n42")
+fn three_clause() {
     if let c = get_container(42) && let item = c.item && item.value > 0 {
         print(item.value)
     }
-}
-
-@test(output = "")
-fn three_clause_condition_fails() {
     if let c = get_container(-5) && let item = c.item && item.value > 0 {
         print(item.value)
     }
-}
-
-@test(output = "42")
-fn three_clause_cond_first() {
     let flag = true
     if flag && let c = get_container(42) && let item = c.item {
         print(item.value)
@@ -269,83 +220,60 @@ fn chain_literal_pattern() {
 }
 
 // ==============================
-// Value position with a call as the value
+// Value position with a call as the value; each chain clause short-circuits
+// to the else branch
 // ==============================
 
 fn maybe(have: bool, v: int) -> int? {
     if have { v } else { null }
 }
 
-@test(output = "42")
-fn test_iflet_some_binds() {
+@test(output = "42\n0\n100")
+fn test_iflet_call_value() {
     let r = if let v = maybe(true, 42) { v } else { 0 }
     print(r)
+    let n = if let v = maybe(false, 42) { v } else { 0 }
+    print(n)
+    let w = if let _ = maybe(true, 5) { 100 } else { 0 }
+    print(w)
 }
 
-@test(output = "0")
-fn test_iflet_none_else() {
-    let r = if let v = maybe(false, 42) { v } else { 0 }
-    print(r)
-}
-
-@test(output = "100")
-fn test_iflet_wildcard() {
-    let r = if let _ = maybe(true, 5) { 100 } else { 0 }
-    print(r)
-}
-
-// ==============================
-// Value-position chains: each clause short-circuits to the else branch
-// ==============================
-
-@test(output = "7")
-fn test_iflet_chain_all_some() {
-    let r = if let x = maybe(true, 3) && let y = maybe(true, 4) {
+@test(output = "7\n-1\n-1")
+fn test_iflet_chain_value() {
+    let all = if let x = maybe(true, 3) && let y = maybe(true, 4) {
         x + y
     } else {
         -1
     }
-    print(r)
-}
-
-@test(output = "-1")
-fn test_iflet_chain_first_none() {
-    let r = if let x = maybe(false, 3) && let y = maybe(true, 4) {
+    print(all)
+    let first = if let x = maybe(false, 3) && let y = maybe(true, 4) {
         x + y
     } else {
         -1
     }
-    print(r)
-}
-
-@test(output = "-1")
-fn test_iflet_chain_second_none() {
-    let r = if let x = maybe(true, 3) && let y = maybe(false, 4) {
+    print(first)
+    let second = if let x = maybe(true, 3) && let y = maybe(false, 4) {
         x + y
     } else {
         -1
     }
-    print(r)
+    print(second)
 }
 
-@test(output = "9")
-fn test_iflet_chain_with_cond_pass() {
-    let r = if let x = maybe(true, 4) && x > 2 {
+@test(output = "9\n-1")
+fn test_iflet_chain_with_cond_value() {
+    let pass = if let x = maybe(true, 4) && x > 2 {
         x + 5
     } else {
         -1
     }
-    print(r)
-}
-
-@test(output = "-1")
-fn test_iflet_chain_with_cond_fail() {
-    let r = if let x = maybe(true, 1) && x > 2 {
+    print(pass)
+    let fail = if let x = maybe(true, 1) && x > 2 {
         x + 5
     } else {
         -1
     }
-    print(r)
+    print(fail)
 }
 
 // ==============================
