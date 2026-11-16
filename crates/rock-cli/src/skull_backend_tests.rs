@@ -4937,14 +4937,6 @@ exec sleep 600
     assert_eq!(run.running_test, Some(0));
 }
 
-#[test]
-fn truncate_cuts_emitted_lua_on_a_char_boundary() {
-    let lua = format!("{}\u{e9}{}", "a".repeat(3999), "b".repeat(10));
-    let excerpt = super::truncate(&lua);
-    assert!(excerpt.starts_with(&"a".repeat(3999)), "{}", &excerpt[..40]);
-    assert!(excerpt.ends_with("more bytes)"), "{excerpt}");
-}
-
 /// Lua writing numeric-protocol start markers directly to stderr (plus a
 /// stdout lookalike), bypassing the harness's print/io.write capture.
 fn forge_marker_lua() -> String {

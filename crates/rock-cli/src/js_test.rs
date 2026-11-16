@@ -539,7 +539,7 @@ fn js_run_applicable_tests(
                     "stdout:\n{}\nstderr:\n{}\n\n--- emitted js (truncated) ---\n{}",
                     run.stdout,
                     run.stderr,
-                    truncate_js(&program)
+                    crate::skull_backend::program_excerpt(&[&program])
                 ),
             };
         }
@@ -851,11 +851,13 @@ var __rock_host = {
 };
 "#;
 
-/// Keep emitted-JS dumps in error reports manageable.
-fn truncate_js(s: &str) -> String {
-    if s.len() > 4000 {
-        format!("{}\n... ({} more bytes)", &s[..4000], s.len() - 4000)
-    } else {
-        s.to_string()
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn truncate_cuts_emitted_js_on_a_char_boundary() {
+        let js = format!("{}\u{e9}{}", "a".repeat(3999), "b".repeat(10));
+        let excerpt = crate::skull_backend::program_excerpt(&[&js]);
+        assert!(excerpt.starts_with(&"a".repeat(3999)), "{}", &excerpt[..40]);
+        assert!(excerpt.ends_with("more bytes)"), "{excerpt}");
     }
 }

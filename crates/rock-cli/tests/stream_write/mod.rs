@@ -98,3 +98,13 @@ fn streamed_atomic_replace_failure_preserves_old_file() {
         "old complete program"
     );
 }
+
+/// Independent oracle for `program_excerpt` over one part.
+fn truncate(s: &str) -> String {
+    if s.len() > 4000 {
+        let end = s.floor_char_boundary(4000);
+        format!("{}\n... ({} more bytes)", &s[..end], s.len() - end)
+    } else {
+        s.to_string()
+    }
+}

@@ -1272,7 +1272,8 @@ impl From<String> for TestProgram {
     }
 }
 
-fn program_excerpt(parts: &[&str]) -> String {
+/// Keep emitted-program dumps in error reports manageable.
+pub(crate) fn program_excerpt(parts: &[&str]) -> String {
     let bytes: usize = parts.iter().map(|part| part.len()).sum();
     let mut head = String::with_capacity(bytes.min(4000));
     for part in parts {
@@ -1651,17 +1652,6 @@ pub(crate) fn collect_package_test_fns(
         }
     }
     Ok(out)
-}
-
-/// Keep emitted-Lua dumps in error reports manageable.
-#[cfg(test)]
-fn truncate(s: &str) -> String {
-    if s.len() > 4000 {
-        let end = s.floor_char_boundary(4000);
-        format!("{}\n... ({} more bytes)", &s[..end], s.len() - end)
-    } else {
-        s.to_string()
-    }
 }
 
 /// Parse the `--profile` value for the `rock shader` entry forms -- the only
