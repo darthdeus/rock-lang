@@ -1466,48 +1466,32 @@ impl RepArena {
         };
         let tuple_element_shape = matches!(use_context, RepUse::TupleElement);
         match ty {
-            MonoTy::Nullable(inner) => match inner.as_ref() {
-                MonoTy::Tuple(parts) => {
-                    let slots = parts
-                        .iter()
-                        .map(|part| {
-                            self.plan(ws, target, part, RepUse::TupleElement, facts, guarantees)
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let splats = slots.iter().any(|id| self.get(*id).lanes(self) > 1);
-                    if splats
-                        && (matches!(use_context, RepUse::Return | RepUse::TupleElement)
-                            || facts.tuple_spelled)
-                    {
-                        return Ok(self.intern(
-                            target,
-                            use_context,
-                            RepLayout::Tuple {
-                                slots,
-                                nullable: true,
-                            },
-                        ));
-                    }
-                    if guarantees.nobox && !guarantees.allow_opaque {
-                        return Err(reject("nullable tuple cannot cross a nobox boundary without a physical tuple plan".into()));
-                    }
-                    Ok(self.intern(target, use_context, RepLayout::Opaque))
+            MonoTy::Nullable(inner) if let MonoTy::Tuple(parts) = inner.as_ref() => {
+                let slots = parts
+                    .iter()
+                    .map(|part| {
+                        self.plan(ws, target, part, RepUse::TupleElement, facts, guarantees)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let splats = slots.iter().any(|id| self.get(*id).lanes(self) > 1);
+                if splats
+                    && (matches!(use_context, RepUse::Return | RepUse::TupleElement)
+                        || facts.tuple_spelled)
+                {
+                    return Ok(self.intern(
+                        target,
+                        use_context,
+                        RepLayout::Tuple {
+                            slots,
+                            nullable: true,
+                        },
+                    ));
                 }
-                _ => {
-                    let shape =
-                        wire_value_shape(ws, ty, use_context, guarantees, tuple_element_shape);
-                    if let Some(shape) = shape {
-                        return Ok(self.intern_value_shape_plan(ws, target, use_context, shape));
-                    }
-                    if guarantees.nobox && !guarantees.allow_opaque {
-                        return Err(reject(format!(
-                            "{} has no concrete nobox representation",
-                            ty.render()
-                        )));
-                    }
-                    Ok(self.intern(target, use_context, RepLayout::Opaque))
+                if guarantees.nobox && !guarantees.allow_opaque {
+                    return Err(reject("nullable tuple cannot cross a nobox boundary without a physical tuple plan".into()));
                 }
-            },
+                Ok(self.intern(target, use_context, RepLayout::Opaque))
+            }
             MonoTy::Tuple(parts) => {
                 let slots = parts
                     .iter()
@@ -1529,12 +1513,10 @@ impl RepArena {
                         },
                     ));
                 }
-                if guarantees.nobox && !facts.tuple_spelled {
-                    return Ok(self.intern(target, use_context, RepLayout::Opaque));
-                }
                 Ok(self.intern(target, use_context, RepLayout::Opaque))
             }
-            MonoTy::App {
+            MonoTy::Nullable(_)
+            | MonoTy::App {
                 ctor: MonoCtor::Nominal(_),
                 ..
             } => {
