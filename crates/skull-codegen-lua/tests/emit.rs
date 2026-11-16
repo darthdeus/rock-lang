@@ -2113,17 +2113,23 @@ fn f(ds: [D]) -> int { for d in ds { for b in d.bindings { if b.slot < 0 { retur
 }
 
 /// A `[T]` element read is the backing read itself. Only a slot that reads
-/// nil or false goes on to the checked helper, which raises when the index is
-/// out of bounds and otherwise returns that nil or false.
+/// nil goes on to the checked helper, which raises when the index is out of
+/// bounds and otherwise returns that nil; a `false` slot is the element, so a
+/// `[bool]` of mostly `false` makes no call per element.
 #[test]
 fn vec_index_read_is_direct_with_a_checked_fallback() {
     let lua = emit("fn f(xs: [int], i: int) -> int { return xs[i] }", "f");
     assert!(
-        lua.contains("._data[") && lua.contains(" + 1] or __vec_checked_get("),
+        lua.contains("._data[c1 + 1] or (c0._data[c1 + 1] == nil and __vec_checked_get(c0, c1))"),
         "{lua}"
     );
     let lua = emit("fn first(xs: [int]) -> int { return xs[0] }", "first");
-    assert!(lua.contains("._data[1] or __vec_checked_get("), "{lua}");
+    assert!(
+        lua.contains("._data[1] or (c0._data[1] == nil and __vec_checked_get("),
+        "{lua}"
+    );
+    let lua = emit("fn f(xs: [bool], i: int) -> bool { return xs[i] }", "f");
+    assert!(lua.contains(" == nil and __vec_checked_get("), "{lua}");
 }
 
 /// A call in the body that may shrink the vector keeps the loop's element
@@ -2141,7 +2147,7 @@ fn vec_loop_reads_its_element_directly() {
     );
     assert!(lua.contains("for "), "{lua}");
     assert!(
-        lua.contains("._data[") && lua.contains(" + 1] or __vec_checked_get("),
+        lua.contains(" + 1] or (") && lua.contains(" == nil and __vec_checked_get("),
         "{lua}"
     );
 }

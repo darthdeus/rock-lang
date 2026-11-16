@@ -638,21 +638,25 @@ impl Emitter<'_> {
     ) {
         match kind {
             // A Vec keeps every slot outside `[0, len)` nil, so a slot that
-            // reads as a value is in bounds and is the answer: no call per
-            // element. A nil or false slot is either such an element or out of
-            // bounds, and the helper tells which. A read whose result is
-            // discarded is a bare statement, which only the call can be.
+            // reads as non-nil is in bounds and is the answer: no call per
+            // element, `false` included. A nil slot is either a nil element or
+            // out of bounds, and the helper tells which. A read whose result
+            // is discarded is a bare statement, which only the call can be.
             ContainerKind::Vec | ContainerKind::VecNonNull
                 if self.repeatable(base, 2) && self.repeatable(index, 2) && self.has_home(id) =>
             {
-                self.write_opnd(out, base);
-                out.push_str("._data[");
-                self.write_vec_slot(out, index);
-                out.push_str("] or __vec_checked_get(");
+                for prefix in ["", " or ("] {
+                    out.push_str(prefix);
+                    self.write_opnd(out, base);
+                    out.push_str("._data[");
+                    self.write_vec_slot(out, index);
+                    out.push(']');
+                }
+                out.push_str(" == nil and __vec_checked_get(");
                 self.write_opnd(out, base);
                 out.push_str(", ");
                 self.write_opnd(out, index);
-                out.push(')');
+                out.push_str("))");
             }
             ContainerKind::Vec | ContainerKind::VecNonNull => {
                 out.push_str("__vec_checked_get(");
