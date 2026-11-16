@@ -1,0 +1,55 @@
+// Controls for rejecting a column-stored map at an opaque `inline(lua)`
+// `Map<K, V>` param (the rejections live in skull's
+// inline_body_column_map_param.rs): a boxed value keeps the bare table and
+// passes through the same bodies, an `any` param still admits a column map,
+// and the intercepted stdlib surface keeps working over column storage.
+
+value Q { x: float, y: float }
+struct Boxy { s: string }
+
+@nomangle inline(lua) fn Map<K, V>.probe(map) -> int = """
+    local n = 0
+    for k, v in pairs(map) do n = n + 1 end
+    return n
+"""
+
+@test(output = "1", backends = "lua")
+fn an_implicit_method_receiver_at_a_boxed_value_is_correct() {
+    let m: Map<string, Boxy> = map_new()
+    m["a"] = Boxy { s: "z" }
+    print("{m.probe()}")
+}
+
+@nomangle inline(lua) fn map_probe<V>(m: Map<string, V>) -> int = """
+    local n = 0
+    for k, v in pairs(m) do n = n + 1 end
+    return n
+"""
+
+@test(output = "1", backends = "lua")
+fn a_boxed_value_through_the_same_body_is_correct() {
+    let m: Map<string, Boxy> = map_new()
+    m["a"] = Boxy { s: "z" }
+    print("{map_probe(m)}")
+}
+
+@nomangle inline(lua) fn map_shape(m: any) -> string = """
+    if m.spine ~= nil then return "spine" end
+    return "bare"
+"""
+
+@test(output = "spine", backends = "lua")
+fn an_any_param_still_admits_a_column_map() {
+    let m: Map<string, Q> = map_new()
+    m["a"] = Q { x: 1.0, y: 2.0 }
+    print("{map_shape(m)}")
+}
+
+@test(output = "1truetrue3")
+fn a_column_map_still_works_through_the_stdlib_surface() {
+    let m: Map<string, Q> = map_new()
+    m["a"] = Q { x: 1.0, y: 2.0 }
+    m["b"] = Q { x: 3.0, y: 4.0 }
+    m.remove("a")
+    print("{m.len()}{m.contains(\"b\")}{m.get(\"a\") == null}{m[\"b\"].x}")
+}

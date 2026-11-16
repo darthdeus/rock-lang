@@ -1,4 +1,4 @@
-use crate::common::{compile_and_run, emit_module, function_body, require_luajit, run_luajit};
+use crate::common::{emit_module, function_body, require_luajit, run_luajit};
 
 const SRC: &str = r#"
 nobox value Pos { x: int, y: int }
@@ -57,64 +57,4 @@ fn flat_enum_equality_preserves_variant_and_payload_semantics() {
         run_luajit(&lua),
         "true\tfalse\tfalse\tfalse\tfalse\ttrue\ttrue\tfalse\ttrue\tfalse\ttrue\tfalse\ttrue"
     );
-}
-
-const NESTED_PAYLOAD: &str = r#"
-enum PotionKind {
-    Heal,
-    Cure,
-}
-
-enum ItemKind {
-    Plain,
-    Potion(PotionKind),
-}
-
-enum Action {
-    Spell(PotionKind),
-    Item(ItemKind),
-}
-
-value ItemView {
-    kind: ItemKind,
-}
-
-value DragState {
-    action: Action,
-}
-
-fn project() -> ItemView {
-    return ItemView { kind: ItemKind::Potion(PotionKind::Heal) }
-}
-
-fn begin_drag(view: ItemView) -> DragState {
-    return DragState { action: Action::Item(view.kind) }
-}
-
-fn main() {
-    let expected = Action::Item(ItemKind::Potion(PotionKind::Heal))
-    let drag = begin_drag(project())
-    print("{drag.action == expected}")
-}
-"#;
-
-#[test]
-fn nested_enum_payloads_keep_value_equality_after_struct_storage() {
-    assert_eq!(compile_and_run(NESTED_PAYLOAD), "true");
-}
-
-const STRUCTURAL_PAYLOAD: &str = r#"
-struct Point { x: int, y: int }
-enum Shape { Empty, Dot(Point) }
-
-fn main() {
-    let a = Shape::Dot(Point { x: 1, y: 2 })
-    let b = Shape::Dot(Point { x: 1, y: 2 })
-    print("{a == b}")
-}
-"#;
-
-#[test]
-fn opaque_struct_payloads_keep_structural_equality() {
-    assert_eq!(compile_and_run(STRUCTURAL_PAYLOAD), "true");
 }

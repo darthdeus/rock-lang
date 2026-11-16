@@ -16,10 +16,9 @@
 //! The intercepted stdlib names (`get`, `contains`, `len`, `clear`,
 //! `table_unset`, `map_new`) are exempt BY CONSTRUCTION rather than by an
 //! exception here: `lower_call` replaces them at `call.rs:138-210` and returns,
-//! so they never reach the check at `:645`. `a_column_map_still_works_through_
-//! the_stdlib_surface` is the control that keeps that true.
+//! so they never reach the check at `:645`. The boxed-value, `any` and stdlib
+//! surface controls are in `tests/maps/opaque_map_param_controls.rock`.
 
-use crate::common::compile_and_run;
 /// Control 2 proper: the receiver is IMPLICIT. `probe` writes no type for
 /// `map`, so only the semantic `param_decls` slot 0 carries `Map<K, V>` -- a
 /// rule reading written syntax sees nothing here. Called through method syntax.
@@ -37,24 +36,6 @@ value Q { x: float, y: float }
 fn main() {
     let m: Map<string, Q> = map_new()
     m["a"] = Q { x: 1.0, y: 2.0 }
-    print("{m.probe()}")
-}
-"#;
-
-/// The same implicit receiver at a BOXED value: the identical method must stay
-/// correct, or the rejection above is just "methods reject".
-const IMPLICIT_RECEIVER_BOXED: &str = r#"
-struct Boxy { s: string }
-
-@nomangle inline(lua) fn Map<K, V>.probe(map) -> int = """
-    local n = 0
-    for k, v in pairs(map) do n = n + 1 end
-    return n
-"""
-
-fn main() {
-    let m: Map<string, Boxy> = map_new()
-    m["a"] = Boxy { s: "z" }
     print("{m.probe()}")
 }
 "#;
@@ -93,58 +74,6 @@ fn main() {
 }
 "#;
 
-/// Bounds the rule on the VALUE type. A boxed value keeps the bare table, so the
-/// identical body must stay correct -- without this, a change that rejected
-/// every `inline(lua)` Map param would leave the rest green and read as progress.
-const BOXED_VALUE_ELEM: &str = r#"
-struct Boxy { s: string }
-
-@nomangle inline(lua) fn map_probe<V>(m: Map<string, V>) -> int = """
-    local n = 0
-    for k, v in pairs(m) do n = n + 1 end
-    return n
-"""
-
-fn main() {
-    let m: Map<string, Boxy> = map_new()
-    m["a"] = Boxy { s: "z" }
-    print("{map_probe(m)}")
-}
-"#;
-
-/// Control 3's Map twin, and the one that fails OPEN. An `any` param claims no
-/// representation, so it must still be admitted -- the rule may not read the
-/// ARGUMENT's type. This goes red only if the rule over-fires.
-const ANY_PARAM_PROBE: &str = r#"
-value Q { x: float, y: float }
-
-@nomangle inline(lua) fn map_shape(m: any) -> string = """
-    if m.spine ~= nil then return "spine" end
-    return "bare"
-"""
-
-fn main() {
-    let m: Map<string, Q> = map_new()
-    m["a"] = Q { x: 1.0, y: 2.0 }
-    print("{map_shape(m)}")
-}
-"#;
-
-/// The stdlib surface over the very same representation. Exempt by construction
-/// (the intercept returns before the check), and this is what proves widening
-/// the rule to `Map` did not take the stdlib down with it.
-const STDLIB_SURFACE: &str = r#"
-value Q { x: float, y: float }
-
-fn main() {
-    let m: Map<string, Q> = map_new()
-    m["a"] = Q { x: 1.0, y: 2.0 }
-    m["b"] = Q { x: 3.0, y: 4.0 }
-    m.remove("a")
-    print("{m.len()}{m.contains(\"b\")}{m.get(\"a\") == null}{m[\"b\"].x}")
-}
-"#;
-
 fn rejection(src: &str) -> String {
     crate::common::try_emit_module(src)
         .expect_err("a column map at an opaque `Map<K, V>` param must reject")
@@ -164,15 +93,6 @@ fn an_implicit_method_receiver_is_classified() {
 }
 
 #[test]
-fn an_implicit_method_receiver_at_a_boxed_value_is_correct() {
-    assert_eq!(
-        compile_and_run(IMPLICIT_RECEIVER_BOXED),
-        "1",
-        "the rejection is about the value's storage, not about method syntax"
-    );
-}
-
-#[test]
 fn a_generic_inline_lua_body_over_a_column_map_rejects() {
     let msg = rejection(USER_BODY_GENERIC);
     assert!(
@@ -184,32 +104,4 @@ fn a_generic_inline_lua_body_over_a_column_map_rejects() {
 #[test]
 fn a_non_generic_inline_lua_body_over_a_column_map_rejects_identically() {
     assert!(rejection(USER_BODY_CONCRETE).contains("column-stored `Map<_, Q>`"));
-}
-
-#[test]
-fn a_boxed_value_through_the_same_body_is_correct() {
-    assert_eq!(
-        compile_and_run(BOXED_VALUE_ELEM),
-        "1",
-        "a boxed value keeps the bare table, so the same body must stay correct"
-    );
-}
-
-/// Fails OPEN: red only if the rule over-fires by reading the argument type.
-#[test]
-fn an_any_param_still_admits_a_column_map() {
-    assert_eq!(
-        compile_and_run(ANY_PARAM_PROBE),
-        "spine",
-        "an `any` param claims no representation, so it must still be admitted"
-    );
-}
-
-#[test]
-fn a_column_map_still_works_through_the_stdlib_surface() {
-    assert_eq!(
-        compile_and_run(STDLIB_SURFACE),
-        "1truetrue3",
-        "the intercepted stdlib names are exempt by construction"
-    );
 }

@@ -29,10 +29,10 @@
 //! Keying on the argument instead rejects the bodies that handle columns
 //! CORRECTLY -- measured: it turned three passing files red.
 //!
-//! The bounding controls stay: `[int]` is boxed, keeps `_data`, and still passes
-//! through the very same body; and an `any` param still admits a column vec.
+//! The bounding controls are in `tests/vectors/opaque_container_param_controls.rock`:
+//! `[int]` is boxed, keeps `_data`, and still passes through the very same body;
+//! and an `any` param still admits a column vec.
 
-use crate::common::compile_and_run;
 /// Guarded: the body probes for `_data` before touching it, so the column case
 /// is a silent wrong ANSWER rather than a death.
 const GUARDED_GENERIC: &str = r#"
@@ -80,33 +80,6 @@ fn main() {
 }
 "#;
 
-/// Bounding control: a boxed element keeps `_data`, so the same body is correct.
-const GUARDED_INT_ELEM: &str = r#"
-@nomangle inline(lua) fn probe_len<T>(v: [T]) -> int = """
-    if v._data == nil then return -1 end
-    return #v._data
-"""
-
-fn main() {
-    let xs: [int] = [1, 2, 3]
-    print("{probe_len(xs)}")
-}
-"#;
-
-/// The `any` bound: a body that reads the column layout itself is still allowed.
-const ANY_PARAM_PROBE: &str = r#"
-nobox value P { x: float, y: float }
-
-@nomangle inline(lua) fn header_repr(v: any) -> string = """
-    return v["@vec"].repr
-"""
-
-fn main() {
-    let xs: [P] = [P { x: 1.0, y: 2.0 }]
-    print("{header_repr(xs)}")
-}
-"#;
-
 /// Unguarded -- what a user actually writes.
 const UNGUARDED_GENERIC: &str = r#"
 nobox value P { x: float, y: float }
@@ -138,37 +111,6 @@ nobox value P { x: float, y: float }
 fn main() {
     let xs: [P] = [P { x: 1.0, y: 2.0 }]
     print("{opaque_t(xs)}")
-}
-"#;
-
-/// Same signature, boxed element: the binding is still `T = [int]`, so this
-/// bounds the fix on the ELEMENT rather than on "a generic param rejects".
-const GENERIC_PARAM_BOXED_ELEM: &str = r#"
-@nomangle inline(lua) fn opaque_t<T>(v: T) -> int = """
-    if v._data == nil then return -1 end
-    return #v._data
-"""
-
-fn main() {
-    let xs: [int] = [1, 2, 3]
-    print("{opaque_t(xs)}")
-}
-"#;
-
-/// A bare generic bound to a NON-container: the rule must find no constructor
-/// and stay silent, or every generic opaque body would reject.
-/// The type guard leads because indexing a number THROWS in Lua before the body
-/// could answer -- without it this fixture dies for a reason unrelated to the
-/// rule, and would read as the rule firing.
-const GENERIC_PARAM_SCALAR: &str = r#"
-@nomangle inline(lua) fn opaque_t<T>(v: T) -> int = """
-    if type(v) ~= "table" then return -1 end
-    if v._data == nil then return -2 end
-    return #v._data
-"""
-
-fn main() {
-    print("{opaque_t(7)}")
 }
 "#;
 
@@ -206,29 +148,6 @@ fn an_unguarded_inline_lua_body_over_a_column_vec_rejects() {
     assert!(rejection(UNGUARDED_GENERIC).contains("column-stored `[P]`"));
 }
 
-/// Bounds the rule on the element type. Without this, a change that rejected
-/// every `inline(lua)` container param would leave the others green and read as
-/// progress.
-#[test]
-fn a_boxed_element_through_the_same_body_is_correct() {
-    assert_eq!(
-        compile_and_run(GUARDED_INT_ELEM),
-        "3",
-        "a boxed `[int]` keeps `_data`, so the same body must stay correct"
-    );
-}
-
-/// Bounds the rule on the PARAM SPELLING: a body that claims no representation
-/// still receives a column vec, which is how the introspection probes work.
-#[test]
-fn an_any_param_still_admits_a_column_vec() {
-    assert_eq!(
-        compile_and_run(ANY_PARAM_PROBE),
-        "columns",
-        "an `any` param claims no representation, so it must still be admitted"
-    );
-}
-
 /// The call's binding, not the caller's. Without it the body is ADMITTED and
 /// the guarded form silently answers `-1`.
 #[test]
@@ -238,17 +157,4 @@ fn a_generic_param_bound_to_a_column_vec_at_the_call_rejects() {
         msg.contains("column-stored `[P]`") && msg.contains("opaque_t"),
         "a param spelled `T` that binds to `[P]` here must reject, got: {msg}"
     );
-}
-
-/// Bounds it on the element: same generic param, boxed element, still correct.
-#[test]
-fn a_generic_param_bound_to_a_boxed_vec_is_correct() {
-    assert_eq!(compile_and_run(GENERIC_PARAM_BOXED_ELEM), "3");
-}
-
-/// Bounds it on the constructor: a generic bound to a scalar names no
-/// container, so the rule must not fire.
-#[test]
-fn a_generic_param_bound_to_a_scalar_is_admitted() {
-    assert_eq!(compile_and_run(GENERIC_PARAM_SCALAR), "-1");
 }

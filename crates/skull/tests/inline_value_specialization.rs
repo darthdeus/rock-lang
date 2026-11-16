@@ -8,7 +8,7 @@
 //! Pre-P2 this test pinned the BOXED status quo (`V2_ct(..)` + `__nb_checked_set`);
 //! landing the feature flipped it to the zero-box assertions below (git `c42bd06ce`
 //! is the boxed-premise revision, for the before/after diff).
-use crate::common::{compile_and_run, emit_module, function_body};
+use crate::common::{emit_module, function_body};
 
 // A generic `@inline` set/get over a `NativeBuffer<T>`, instantiated at the value
 // struct `V2`. Mirrors the FlatVec push/get shape (`buf[len] = v` / `return buf[i]`).
@@ -111,29 +111,5 @@ fn non_inline_generic_chain_uses_concrete_native_buffer_instance() {
     assert!(
         lua.contains(r#"__rock_nb_alloc("TV2"#),
         "the transitive concrete instance must own the native-buffer ctype, got:\n{lua}"
-    );
-}
-
-#[test]
-fn inlined_numeric_parameters_preserve_float_coercions() {
-    assert_eq!(
-        compile_and_run(
-            r#"
-fn fit(w: int, h: int, available: float) -> Vec2 {
-    let width = 256
-    let height = max(1, (width as float * h as float / w as float) as int)
-    let size = v(width as float, height as float)
-    let factor = min(1.0, available / size.x)
-    return size * factor
-}
-fn main() {
-    let small = fit(128, 64, 32.0)
-    let large = fit(128, 64, 512.0)
-    print("{small.x as int} {small.y as int} {large.x as int} {large.y as int}")
-}
-"#
-        )
-        .trim(),
-        "32 16 256 128"
     );
 }

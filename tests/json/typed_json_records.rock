@@ -1,0 +1,41 @@
+// Typed JSON records round-trip enums, nullable fields, maps and value
+// structs into an owned copy, and reject malformed fields on decode.
+
+enum Event { Empty, Text(string), Pair(int, float), Names([string]) }
+value Tint { red: float, visible: bool }
+value Change { event: Event, count: int }
+struct Record {
+    rows: [Change],
+    title: string?,
+    weights: Map<string, float>,
+    tint: Tint,
+}
+
+@test(output = "ok")
+fn typed_json_records_roundtrip_and_reject_malformed_fields() {
+    let codec = JsonRecordCodec {}
+    let weights: Map<string, float> = map_new()
+    weights["alpha"] = 1.25
+    let source = Record { rows: [Change { event: Event::Empty, count: 1 },
+        Change { event: Event::Pair(5, 2.5), count: 2 },
+        Change { event: Event::Names(["a", "b"]), count: 3 }],
+        title: null, weights, tint: Tint { red: 0.75, visible: false } }
+    let wire = json_record_encode(codec, source)
+    let copy = json_record_decode(codec, json_decode(json_encode(wire)).unwrap(), source).unwrap()
+    assert(copy == source)
+    assert(!same_ref(copy, source))
+    copy.rows[0] = Change { event: Event::Text("changed"), count: 8 }
+    assert(source.rows[0].count == 1)
+    let fields = json_as_object(wire).unwrap()
+    fields["rows"] = json_str("wrong")
+    assert(json_record_decode(codec, wire, source) == null)
+    fields["rows"] = json_array([json_object(map_new())])
+    assert(json_record_decode(codec, wire, source) == null)
+    fields["rows"] = json_array([])
+    fields["weights"] = json_str("wrong")
+    assert(json_record_decode(codec, wire, source) == null)
+    fields["weights"] = json_object(map_new())
+    fields["title"] = json_int(4)
+    assert(json_record_decode(codec, wire, source) == null)
+    print("ok")
+}

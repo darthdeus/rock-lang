@@ -1,0 +1,51 @@
+// `a ?? b` yielding a scalarized value struct, used directly as a struct
+// literal's field initializer, must thread the selected value into the
+// parent's dotted physical slots. The hoisted, boxed and scalar shapes are
+// controls that isolate scalarization in the literal field position.
+
+struct InlineThing { at: Vec2 = v(0, 0) }
+
+@test(output = "7 8")
+fn coalesce_into_value_struct_literal_field_is_correct() {
+    let fallback: Vec2? = null
+    let t = InlineThing { at: fallback ?? v(7, 8) }
+    print("{t.at.x as int} {t.at.y as int}")
+}
+
+fn make_thing(fallback: Vec2?) -> InlineThing? {
+    return InlineThing { at: fallback ?? return null }
+}
+
+@test(output = "13 17\ntrue")
+fn a_diverging_coalesce_arm_does_not_build_the_parent_from_nil_leaves() {
+    let t = make_thing(v(13, 17)).unwrap()
+    print("{t.at.x as int} {t.at.y as int}")
+    print("{make_thing(null) == null}")
+}
+
+@test(output = "7 8")
+fn hoisting_the_coalesce_into_a_let_is_correct() {
+    let fallback: Vec2? = null
+    let launch = fallback ?? v(7, 8)
+    let t = InlineThing { at: launch }
+    print("{t.at.x as int} {t.at.y as int}")
+}
+
+struct Boxed { a: int, b: int }
+struct BoxedThing { at: Boxed = Boxed { a: 0, b: 0 } }
+
+@test(output = "7 8")
+fn a_boxed_struct_through_the_same_coalesce_is_correct() {
+    let fallback: Boxed? = null
+    let t = BoxedThing { at: fallback ?? Boxed { a: 7, b: 8 } }
+    print("{t.at.a} {t.at.b}")
+}
+
+struct ScalarThing { n: int = 0 }
+
+@test(output = "7")
+fn a_scalar_through_the_same_coalesce_is_correct() {
+    let fallback: int? = null
+    let t = ScalarThing { n: fallback ?? 7 }
+    print("{t.n}")
+}

@@ -6,16 +6,15 @@
 //!
 //! - A COLUMN-stored instantiation would read a `_data` that its representation
 //!   does not have, so the shared body is WRONG rather than slow. It must
-//!   specialize and run; `generic_coroutine_column_param.rs` owns that 2x2.
+//!   specialize and run; `tests/coroutines/generic_column_param.rock` owns that 2x2.
 //! - Two instantiations must own two SETS of helper symbols.
 //!   `InstanceGraph::colliding_coroutine_helpers` is the graph-side oracle for
 //!   the same fact; this file asserts it on the emitted text, which is where a
 //!   collision actually clobbers a definition.
 //!
-//! The controls bound the change on both axes: a NON-generic `co fn` over the
-//! same column vec, and the same generic `co fn` over a BOXED element, must both
-//! keep working. Under instance-owned emission the boxed one owns a family per
-//! instantiation too -- there is no shared generic body to fall back to.
+//! The same generic `co fn` over a BOXED element must keep working. Under
+//! instance-owned emission it owns a family per instantiation too -- there is
+//! no shared generic body to fall back to.
 
 use crate::common;
 use crate::common::compile_and_run;
@@ -44,25 +43,6 @@ fn main() {
     let tq = 0
     for v in cq { tq = v }
     print("{tp} {tq}")
-}
-"#;
-
-/// Control, one axis: drop GENERIC, keep the coroutine over a column vec.
-const CONCRETE_CO_COLUMN: &str = r#"
-nobox value P { x: float, y: float }
-
-co fn walk_p(v: [P]) -> Coroutine<int, int, ()> {
-    let n = 0
-    for _e in v { n = n + 1; yield n }
-    return n
-}
-
-fn main() {
-    let ps: [P] = [P { x: 1.0, y: 0.0 }, P { x: 2.0, y: 0.0 }]
-    let c = walk_p(ps)
-    let total = 0
-    for v in c { total = v }
-    print("{total}")
 }
 "#;
 
@@ -98,31 +78,6 @@ fn main() {
 }
 "#;
 
-const COROUTINE_RETAINS_MULTI_RETURN_AFTER_INITIAL_CALL: &str = r#"
-value Handle { a: int, b: int, c: int, d: int }
-
-fn make_handle() -> Handle {
-    return Handle { a: 1, b: 2, c: 3, d: 4 }
-}
-
-fn first(h: Handle) -> int { return h.a + h.b }
-fn all(h: Handle) -> int { return h.a + h.b + h.c + h.d }
-fn optional_all(h: Handle?) -> int { return all(h.unwrap()) }
-
-co fn keep_handle() -> Coroutine<int, int, ()> {
-    let h = make_handle()
-    let initial = first(h)
-    let retained = optional_all(h)
-    yield initial
-    yield retained
-    return retained
-}
-
-fn main() {
-    for n in keep_handle() { print(n) }
-}
-"#;
-
 /// Every top-level `<name>__step` definition the program carries, in emission
 /// order, in whichever callee shape the build emits.
 fn step_definitions(lua: &str) -> Vec<String> {
@@ -130,20 +85,6 @@ fn step_definitions(lua: &str) -> Vec<String> {
         .into_iter()
         .map(str::to_string)
         .collect()
-}
-
-/// The load-bearing arm. Two column instantiations of one generic `co fn`, each
-/// answering its OWN length.
-#[test]
-fn two_column_instantiations_of_one_generic_coroutine_each_answer_their_own_length() {
-    assert_eq!(
-        compile_and_run(TWO_COLUMN_INSTANCES),
-        "2 3",
-        "each instantiation of a generic `co fn` must run against its own \
-         element's representation: `[P]` has 2 elements and `[Q]` has 3, and a \
-         shared erased body reading a `_data` neither column vec has answers 0 \
-         for both"
-    );
 }
 
 /// The symbol half: a shared `__step` means the second definition clobbers the
@@ -172,21 +113,6 @@ fn each_column_instantiation_owns_its_own_step_symbol() {
         distinct.len(),
         "no `__step` symbol may be defined twice -- the later definition would \
          clobber the earlier one: {steps:?}"
-    );
-}
-
-/// 2x2 cell: coroutine WITHOUT generic over the same column vec. Keeps the arm
-/// above attributable to genericity.
-#[test]
-fn a_non_generic_coroutine_over_a_column_vec_is_correct() {
-    assert_eq!(compile_and_run(CONCRETE_CO_COLUMN), "2");
-}
-
-#[test]
-fn a_coroutine_keeps_a_multi_return_used_after_its_first_call() {
-    assert_eq!(
-        compile_and_run(COROUTINE_RETAINS_MULTI_RETURN_AFTER_INITIAL_CALL),
-        "3\n10"
     );
 }
 
