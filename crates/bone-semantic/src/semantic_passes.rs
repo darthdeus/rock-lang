@@ -272,18 +272,7 @@ pub fn lower_modules_seeded(
     // Runs AFTER forward decls so the more specific rejections there (retired
     // `@value`) fire first.
     for lower_item in items.iter_mut() {
-        let mut ctx = LowerCtx {
-            workspace: ws,
-            module: lower_item.module,
-            generics_in_scope: Default::default(),
-            _next_var_id: 0,
-            placeholder_param: None,
-            placeholder_forbidden: false,
-            scope_probes: Default::default(),
-            resolutions: Default::default(),
-            place_temps: Vec::new(),
-            name_errors: Default::default(),
-        };
+        let mut ctx = LowerCtx::new(ws, lower_item.module, 0);
         for ast_item in lower_item.rock_module.items.iter() {
             if ast_item.annotations.is_empty() {
                 continue;
@@ -398,18 +387,7 @@ pub fn lower_modules_seeded(
             .par_iter_mut()
             .map(|item| {
                 let first_var = item.module.lower_var_high_water;
-                let mut ctx = LowerCtx {
-                    workspace: ws,
-                    module: item.module,
-                    generics_in_scope: Default::default(),
-                    _next_var_id: first_var,
-                    placeholder_param: None,
-                    placeholder_forbidden: false,
-                    scope_probes: Default::default(),
-                    resolutions: Default::default(),
-                    place_temps: Vec::new(),
-                    name_errors: Default::default(),
-                };
+                let mut ctx = LowerCtx::new(ws, item.module, first_var);
 
                 pass_lower_fields(item.rock_module, &mut ctx)?;
                 bone_lower::record_use_paths(item.rock_module, &mut ctx);

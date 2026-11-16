@@ -9,18 +9,7 @@ use crate::LowerCtx;
 fn repeated_probes_do_not_inflate_the_module_probe_set() {
     let ws = Workspace::new();
     let mut module = hir::Module::default();
-    let mut ctx = LowerCtx {
-        workspace: &ws,
-        module: &mut module,
-        generics_in_scope: Default::default(),
-        _next_var_id: 0,
-        placeholder_param: None,
-        placeholder_forbidden: false,
-        scope_probes: Default::default(),
-        resolutions: Default::default(),
-        place_temps: Vec::new(),
-        name_errors: Default::default(),
-    };
+    let mut ctx = LowerCtx::new(&ws, &mut module, 0);
     let node = |name| ScopeProbe::Node {
         package: 1,
         node: ustr(name),

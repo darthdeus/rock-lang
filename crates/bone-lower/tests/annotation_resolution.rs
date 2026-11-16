@@ -103,18 +103,7 @@ fn lower_annotation(
         file,
         ..Default::default()
     };
-    let ctx = LowerCtx {
-        workspace: &ws,
-        module: &mut module,
-        generics_in_scope: Default::default(),
-        _next_var_id: 0,
-        placeholder_param: None,
-        placeholder_forbidden: false,
-        scope_probes: Default::default(),
-        resolutions: Default::default(),
-        place_temps: Vec::new(),
-        name_errors: Default::default(),
-    };
+    let ctx = LowerCtx::new(&ws, &mut module, 0);
     let item = ast.items.last().unwrap();
     let annotations = match &item.kind {
         ItemKind::Struct(buffer) => &buffer.fields[0].annotations,

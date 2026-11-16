@@ -154,7 +154,24 @@ pub struct LowerCtx<'w, 'm> {
     pub name_errors: std::cell::RefCell<Option<Vec<CompilerError>>>,
 }
 
-impl LowerCtx<'_, '_> {
+impl<'w, 'm> LowerCtx<'w, 'm> {
+    /// A context lowering into `module`, numbering type variables from
+    /// `first_var`.
+    pub fn new(workspace: &'w Workspace, module: &'m mut hir::Module, first_var: u32) -> Self {
+        LowerCtx {
+            workspace,
+            module,
+            generics_in_scope: Default::default(),
+            _next_var_id: first_var,
+            placeholder_param: None,
+            placeholder_forbidden: false,
+            scope_probes: Default::default(),
+            resolutions: Default::default(),
+            place_temps: Vec::new(),
+            name_errors: Default::default(),
+        }
+    }
+
     /// Run one resolver lookup and record what it read.
     fn probed<R>(&self, lookup: impl FnOnce() -> R) -> R {
         if self.workspace.skip_session_facts {
@@ -712,18 +729,18 @@ impl LowerCtx<'_, '_> {
             .iter()
             .map(|x| {
                 let id = lower_type_expr_in(self, a, body, pos, &a.types[*x])?;
-                self.type_node(body, id)
+                Ok(self.type_node(body, id))
             })
             .collect::<Result<_, _>>()?;
 
         Ok(alloc_tys_contiguous(self, body, pos, nodes))
     }
 
-    pub(crate) fn type_node(&self, body: &Body, ty: TyId) -> Result<TypeExpr, CompilerError> {
+    pub(crate) fn type_node(&self, body: &Body, ty: TyId) -> TypeExpr {
         match ty {
-            TyId::Static(m, i) if m == self.module.module_id() => Ok(self.module.ty_arena[i]),
-            TyId::Static(m, i) => Ok(self.workspace.module(m).ty_arena[i]),
-            TyId::Local(i) => Ok(body.lowered_tys[i]),
+            TyId::Static(m, i) if m == self.module.module_id() => self.module.ty_arena[i],
+            TyId::Static(m, i) => self.workspace.module(m).ty_arena[i],
+            TyId::Local(i) => body.lowered_tys[i],
         }
     }
 
@@ -1076,7 +1093,7 @@ pub(crate) fn lower_type_expr_in(
     };
 
     let idx = if te.is_nullable {
-        let inner_te = ctx.type_node(body, idx)?;
+        let inner_te = ctx.type_node(body, idx);
         let inner = alloc_ty_raw(ctx, body, pos, inner_te);
 
         alloc_ty(ctx, body, pos, TypeExpr::Nullable(inner))
@@ -2951,18 +2968,7 @@ pub fn relower_function_in_place(
         // this as an Interface edit). Fall back to a full rebuild of the fn --
         // correctness over the no-leak optimization.
         let high_water = module.lower_var_high_water;
-        let mut ctx = LowerCtx {
-            workspace: ws,
-            module,
-            generics_in_scope: Default::default(),
-            _next_var_id: high_water,
-            placeholder_param: None,
-            placeholder_forbidden: false,
-            scope_probes: Default::default(),
-            resolutions: Default::default(),
-            place_temps: Vec::new(),
-            name_errors: Default::default(),
-        };
+        let mut ctx = LowerCtx::new(ws, module, high_water);
 
         let (func, body, errors) = build_function(&mut ctx, a, f, annotations)?;
         ctx.flush_scope_probes();
@@ -3005,16 +3011,8 @@ pub fn relower_function_in_place(
 
     let high_water = module.lower_var_high_water;
     let mut ctx = LowerCtx {
-        workspace: ws,
-        module,
         generics_in_scope,
-        _next_var_id: high_water,
-        placeholder_param: None,
-        placeholder_forbidden: false,
-        scope_probes: Default::default(),
-        resolutions: Default::default(),
-        place_temps: Vec::new(),
-        name_errors: Default::default(),
+        ..LowerCtx::new(ws, module, high_water)
     };
 
     let mut body = Body::default();
@@ -3404,7 +3402,7 @@ fn lower_type_expr_helper(
     orig_te: &skull_parser::TypeExprData,
 ) -> Result<hir::TypeExpr, CompilerError> {
     let id = lower_type_expr_in(ctx, a, body, pos, orig_te)?;
-    ctx.type_node(body, id)
+    Ok(ctx.type_node(body, id))
 }
 
 fn lower_exprs<'a>(
