@@ -141,11 +141,7 @@ fn preflight_safe_node(
                             _ => false,
                         }
                 } else {
-                    let resolved = inf.resolved_overload_calls.get(&e).copied().or_else(|| {
-                        let list = ws.functions_by_name.get(&name)?;
-                        (list.len() == 1).then(|| list[0])
-                    });
-                    let Some((mid, fid)) = resolved else {
+                    let Some((mid, fid)) = resolve_call_fn(ws, inf, e, name) else {
                         return false;
                     };
                     let f = &ws.module(mid).functions[fid];
@@ -709,10 +705,7 @@ impl<'a> Builder<'a> {
         if crate::verify::checks_enabled() && &callee.instance != inst {
             return Err(self.gap_here("concrete callee identity disagrees with its site plan"));
         }
-        if crate::lower::requires_concrete_body_plan(self.ws, inst)
-            && crate::monoty::too_deep_to_instantiate(inst.arg_types(self.scx.interner()).iter())
-                .is_none()
-        {
+        if callee_has_body_plan(self.ws, self.scx, inst) {
             Ok(std::sync::Arc::clone(
                 &self
                     .concrete_plans
@@ -733,10 +726,7 @@ impl<'a> Builder<'a> {
         dc: &DirectCall<'a>,
     ) -> Result<&'a crate::concrete::ConcreteSignature, CompilerError> {
         let inst = &dc.callee_inst;
-        if crate::lower::requires_concrete_body_plan(self.ws, inst)
-            && crate::monoty::too_deep_to_instantiate(inst.arg_types(self.scx.interner()).iter())
-                .is_none()
-        {
+        if callee_has_body_plan(self.ws, self.scx, inst) {
             dc.callee_plan
                 .map(|plan| &*plan.signature)
                 .ok_or_else(|| self.gap_here("concrete callee body plan is missing for its site"))
@@ -797,12 +787,7 @@ impl<'a> Builder<'a> {
         };
         let result = if let Some(callee) = body_plan.callees.get(&site) {
             let owner = &callee.instance;
-            let signature = if crate::lower::requires_concrete_body_plan(self.ws, owner)
-                && crate::monoty::too_deep_to_instantiate(
-                    owner.arg_types(self.scx.interner()).iter(),
-                )
-                .is_none()
-            {
+            let signature = if callee_has_body_plan(self.ws, self.scx, owner) {
                 &self
                     .concrete_plans
                     .get(owner)

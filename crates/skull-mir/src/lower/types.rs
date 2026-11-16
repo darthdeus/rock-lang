@@ -73,10 +73,7 @@ impl<'a> Builder<'a> {
                     allow_opaque: true,
                 },
             )
-            .map_err(|error| match error.span.or(self.cur_span) {
-                Some(span) => CompilerError::new_with_label(span, error.message),
-                None => CompilerError::new_no_location(error.message),
-            })
+            .map_err(|error| self.rep_error(error))
     }
 
     /// Plan ordinary expressions from their concrete type and presence carrier.
@@ -191,12 +188,16 @@ impl<'a> Builder<'a> {
         Ok(None)
     }
 
-    pub(crate) fn nominal_value_representation(&self, name: Ustr) -> Result<RepId, CompilerError> {
+    fn nominal_rep_id(&self, name: Ustr, nobox: bool) -> Result<RepId, CompilerError> {
         let ty = MonoTy::App {
             ctor: crate::monoty::MonoCtor::Nominal(name),
             params: Vec::new(),
         };
-        self.concrete_rep_id(&ty, RepUse::Value, false, false)
+        self.concrete_rep_id(&ty, RepUse::Value, false, nobox)
+    }
+
+    pub(crate) fn nominal_value_representation(&self, name: Ustr) -> Result<RepId, CompilerError> {
+        self.nominal_rep_id(name, false)
     }
 
     pub(crate) fn nominal_rep_shape(
@@ -204,28 +205,7 @@ impl<'a> Builder<'a> {
         name: Ustr,
         nobox: bool,
     ) -> Result<Option<ValueShape>, CompilerError> {
-        let ty = MonoTy::App {
-            ctor: crate::monoty::MonoCtor::Nominal(name),
-            params: Vec::new(),
-        };
-        let id = self
-            .scx
-            .rep_arena()
-            .plan(
-                self.ws,
-                self.scx.target(),
-                &ty,
-                RepUse::Value,
-                &RepUseFacts::default(),
-                RepGuarantees {
-                    nobox,
-                    allow_opaque: true,
-                },
-            )
-            .map_err(|error| match error.span.or(self.cur_span) {
-                Some(span) => CompilerError::new_with_label(span, error.message),
-                None => CompilerError::new_no_location(error.message),
-            })?;
+        let id = self.nominal_rep_id(name, nobox)?;
         Ok(self.scx.rep_arena().value_shape(id).cloned())
     }
 
@@ -234,15 +214,7 @@ impl<'a> Builder<'a> {
         name: Ustr,
         nobox: bool,
     ) -> Result<ValueShape, CompilerError> {
-        let ty = MonoTy::App {
-            ctor: crate::monoty::MonoCtor::Nominal(name),
-            params: Vec::new(),
-        };
-        let id = self.concrete_rep_id(&ty, RepUse::Value, false, nobox)?;
-        self.scx
-            .rep_arena()
-            .value_shape(id)
-            .cloned()
+        self.nominal_rep_shape(name, nobox)?
             .ok_or_else(|| self.gap_here(format!("`{name}` has no planned value shape")))
     }
 

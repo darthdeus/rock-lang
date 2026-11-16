@@ -1874,6 +1874,17 @@ fn validate_always_plan(
     Ok(())
 }
 
+/// Whether a call to `owner` reads the signature of the callee's own body
+/// plan rather than the one the site recorded.
+fn callee_has_body_plan(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    owner: &crate::instance::Instance,
+) -> bool {
+    requires_concrete_body_plan(ws, owner)
+        && crate::monoty::too_deep_to_instantiate(owner.arg_types(scx.interner()).iter()).is_none()
+}
+
 fn validate_concrete_callee_plans(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -1882,10 +1893,7 @@ fn validate_concrete_callee_plans(
 ) -> Result<(), CompilerError> {
     for (site, callee) in &plan.callees {
         let owner = &callee.instance;
-        let needs_plan = requires_concrete_body_plan(ws, owner)
-            && crate::monoty::too_deep_to_instantiate(owner.arg_types(scx.interner()).iter())
-                .is_none();
-        if !needs_plan {
+        if !callee_has_body_plan(ws, scx, owner) {
             continue;
         }
         let callee_plan = concrete_plans.get(owner).ok_or_else(|| {
@@ -2481,6 +2489,14 @@ impl<'a> Builder<'a> {
         match self.cur_span {
             Some(span) => error.or_at(span),
             None => error,
+        }
+    }
+
+    /// A representation-planning error, at its own span or else the cursor's.
+    fn rep_error(&self, error: RepError) -> CompilerError {
+        match error.span.or(self.cur_span) {
+            Some(span) => CompilerError::new_with_label(span, error.message),
+            None => CompilerError::new_no_location(error.message),
         }
     }
 
@@ -3763,20 +3779,15 @@ fn map_key_rejection_reason(
             // One payload variant is enough to make the type cdata- or
             // table-carrying, and the key that misses is the payload-carrying
             // one -- a `Color::Red` control would hit and hide it.
-            if let Some(eid) = ws.enums_by_name.get(&name) {
-                let e = &ws.modules[eid.module.index()].enums[eid.def];
-                return e
-                    .variants
-                    .iter()
-                    .any(|v| !matches!(v.payload, VariantPayload::Unit))
-                    .then(|| {
+            if ws.enums_by_name.contains_key(&name) {
+                return (!is_payload_free_enum(ws, name)).then(|| {
                         format!(
                             "`{name}` has payload-carrying variants, keyed by cdata or object \
                              identity (a payload-free enum is an int ordinal and stays allowed)"
                         )
                     });
             }
-            if map_is_value_struct(ws, name) {
+            if is_value_struct(ws, name) {
                 Some(format!("`{name}` is a `value` struct, keyed by cdata identity"))
             } else {
                 Some(format!("`{name}` is a struct, keyed by object identity"))
@@ -3801,13 +3812,6 @@ fn map_key_rejection_reason(
             Some("a function is keyed by identity".to_string())
         }
     }
-}
-
-fn map_is_value_struct(ws: &Workspace, name: Ustr) -> bool {
-    ws.struct_by_name
-        .get(&name)
-        .map(|sid| has_value_plan(&ws.modules[sid.module.index()].structs[sid.def]))
-        .unwrap_or(false)
 }
 
 /// When `ty` resolves to `Map<K, V>` with an inadmissible `K`, returns why.
@@ -3853,7 +3857,7 @@ pub fn map_key_rejection(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)
 /// position. Not a legal C boundary type: no `ffi.cdef` typedef exists, so
 /// `ffi.new`/`sizeof`/`ffi.istype`/the extern ABI cannot name it.
 fn nominal_is_gc_value(ws: &Workspace, name: Ustr) -> bool {
-    map_is_value_struct(ws, name)
+    is_value_struct(ws, name)
         && !matches!(
             crate::lower::declared_value_storage(ws, bone_core::hir::FnBackend::Lua, name),
             Some(ValueStorage::CData)
@@ -3955,6 +3959,11 @@ fn resolve_call_fn(
     if let Some(&r) = inf.resolved_overload_calls.get(&e) {
         return Some(r);
     }
+    unique_fn(ws, name)
+}
+
+/// The one function declared under `name`, if exactly one is.
+fn unique_fn(ws: &Workspace, name: Ustr) -> Option<(ModuleId, Idx<Function>)> {
     match ws.functions_by_name.get(&name).map(|l| l.as_slice()) {
         Some([single]) => Some(*single),
         _ => None,
@@ -4074,17 +4083,12 @@ fn resolve_shader_arg(
             "`rock_shader` argument must be a direct reference to a top-level `@shader({want_stage})` fn"
         )));
     };
-    let fref = match ws.functions_by_name.get(&name).map(|l| l.as_slice()) {
-        Some([(module, func)]) => FuncRef {
-            module: *module,
-            func: *func,
-        },
-        _ => {
-            return Err(reject(format!(
-                "`rock_shader` argument `{name}` is not a unique top-level fn"
-            )));
-        }
+    let Some((module, func)) = unique_fn(ws, name) else {
+        return Err(reject(format!(
+            "`rock_shader` argument `{name}` is not a unique top-level fn"
+        )));
     };
+    let fref = FuncRef { module, func };
     let f = &ws.module(fref.module).functions[fref.func];
     match shader_stage_of(f) {
         Some(stage) if stage == want_stage => Ok(fref),
@@ -4532,10 +4536,7 @@ pub fn body_has_shader_pipeline_call(ws: &Workspace, mid: ModuleId, owner: BodyO
         };
         let resolved = match inf {
             Some(inf) => resolve_call_fn(ws, inf, e, *name),
-            None => match ws.functions_by_name.get(name).map(|l| l.as_slice()) {
-                Some([single]) => Some(*single),
-                _ => None,
-            },
+            None => unique_fn(ws, *name),
         };
         resolved.is_some_and(|(fmod, fid)| {
             matches!(
@@ -4572,10 +4573,7 @@ pub fn collect_shader_body(
         };
         let resolved = match inf {
             Some(inf) => resolve_call_fn(ws, inf, e, *name),
-            None => match ws.functions_by_name.get(name).map(|list| list.as_slice()) {
-                Some([single]) => Some(*single),
-                _ => None,
-            },
+            None => unique_fn(ws, *name),
         };
         let Some((fmod, fid)) = resolved else {
             continue;

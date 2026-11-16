@@ -759,10 +759,9 @@ fn value_shape_facts(ws: &Workspace, name: Ustr) -> (Option<ValueStorage>, bool,
     let Some(plan) = super::shape::planned_value(ws, name) else {
         return (None, false, true);
     };
-    let column_eligible = ws.struct_by_name.get(&name).is_some_and(|sid| {
-        super::shape::has_value_plan(&ws.modules[sid.module.index()].structs[sid.def])
-    }) && (plan.shape.is_some()
-        || (crate::lower::is_nobox_nominal(ws, name) && plan.gc_shape.is_some()));
+    let column_eligible = super::shape::is_value_struct(ws, name)
+        && (plan.shape.is_some()
+            || (crate::lower::is_nobox_nominal(ws, name) && plan.gc_shape.is_some()));
     (
         Some(plan.storage),
         column_eligible,

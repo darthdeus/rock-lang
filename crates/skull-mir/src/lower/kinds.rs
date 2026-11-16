@@ -68,10 +68,7 @@ impl<'a> Builder<'a> {
                     plan
                 }
             })
-            .map_err(|error| match error.span.or(self.cur_span) {
-                Some(span) => CompilerError::new_with_label(span, error.message),
-                None => CompilerError::new_no_location(error.message),
-            })
+            .map_err(|error| self.rep_error(error))
     }
 
     pub(crate) fn container_plan_for(
@@ -174,10 +171,7 @@ impl<'a> Builder<'a> {
         let arena = self.scx.rep_arena();
         let rep = arena
             .plan_container_element(self.ws, self.scx.target, payload)
-            .map_err(|error| match error.span.or(self.cur_span) {
-                Some(span) => CompilerError::new_with_label(span, error.message),
-                None => CompilerError::new_no_location(error.message),
-            })?;
+            .map_err(|error| self.rep_error(error))?;
         Ok(arena.value_shape(rep).map(|shape| shape.name))
     }
 

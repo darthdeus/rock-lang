@@ -1589,19 +1589,8 @@ impl<'a> Builder<'a> {
     /// single workspace-wide definition (the `@nomangle` stdlib interp helpers —
     /// `__rock_format_float`, `inspect` — are unique, so they resolve here).
     pub(crate) fn resolve_global_fn(&self, name: &str) -> Result<FuncRef, CompilerError> {
-        match self
-            .ws
-            .functions_by_name
-            .get(&crate::names::ustr(name))
-            .map(|l| l.as_slice())
-        {
-            Some([(module, func)]) => Ok(FuncRef {
-                module: *module,
-                func: *func,
-            }),
-            _ => Err(gap(format!(
-                "interp helper `{name}` not uniquely resolvable"
-            ))),
-        }
+        let (module, func) = unique_fn(self.ws, crate::names::ustr(name))
+            .ok_or_else(|| gap(format!("interp helper `{name}` not uniquely resolvable")))?;
+        Ok(FuncRef { module, func })
     }
 }

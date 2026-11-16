@@ -103,9 +103,7 @@ pub(crate) fn formats_structurally(ws: &Workspace, name: Ustr) -> bool {
     if handle_fields(name).is_some() || ws.enums_by_name.contains_key(&name) {
         return true;
     }
-    ws.struct_by_name
-        .get(&name)
-        .is_some_and(|sid| super::has_value_plan(&ws.module(sid.module).structs[sid.def]))
+    super::shape::is_value_struct(ws, name)
 }
 
 fn handle_fields(name: Ustr) -> Option<&'static [(&'static str, &'static str)]> {
@@ -276,7 +274,7 @@ fn nominal_tree(
         });
     }
     if let Some(eid) = ws.enums_by_name.get(&name) {
-        if payload_free_enum_variants(ws, name).is_some() {
+        if is_payload_free_enum(ws, name) {
             let ty = MonoTy::App {
                 ctor: MonoCtor::Nominal(name),
                 params: params.to_vec(),

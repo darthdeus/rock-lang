@@ -46,10 +46,7 @@ impl<'a> Builder<'a> {
         else {
             return;
         };
-        let Some(sid) = self.ws.struct_by_name.get(name) else {
-            return;
-        };
-        if !self.ws.modules[sid.module.index()].structs[sid.def].is_nobox {
+        if !is_nobox_nominal(self.ws, *name) {
             return;
         }
         let (name, representation, form, fields) = (*name, *representation, *form, fields.clone());
@@ -101,10 +98,7 @@ impl<'a> Builder<'a> {
                 let Some(name) = ty.peel_nullable().0.nominal() else {
                     continue;
                 };
-                let Some(sid) = self.ws.struct_by_name.get(&name) else {
-                    continue;
-                };
-                if self.ws.modules[sid.module.index()].structs[sid.def].is_nobox {
+                if is_nobox_nominal(self.ws, name) {
                     return Err(CompilerError::new_with_label(
                         self.body.expr_spans[arg],
                         format!(
@@ -448,10 +442,7 @@ impl<'a> Builder<'a> {
         else {
             return Ok(());
         };
-        let Some(sid) = self.ws.struct_by_name.get(&name) else {
-            return Ok(());
-        };
-        if !self.ws.modules[sid.module.index()].structs[sid.def].is_nobox {
+        if !is_nobox_nominal(self.ws, name) {
             return Ok(());
         }
         Err(CompilerError::new_with_label(
@@ -489,13 +480,9 @@ impl<'a> Builder<'a> {
     /// Round `value` when it is written into an `f32` field of struct `name`.
     /// Every write path calls this, so the field's number never depends on
     /// whether it lands in cdata, a table or scalarized leaves.
-    pub(crate) fn round_f32_field(
-        &mut self,
-        name: Ustr,
-        field: Ustr,
-        value: Idx<Inst>,
-    ) -> Idx<Inst> {
-        let narrow = self.ws.struct_by_name.get(&name).is_some_and(|sid| {
+    /// Whether struct `name` declares `field` with `f32` storage.
+    pub(crate) fn field_is_f32(&self, name: Ustr, field: Ustr) -> bool {
+        self.ws.struct_by_name.get(&name).is_some_and(|sid| {
             self.ws.modules[sid.module.index()].structs[sid.def].fields.iter().any(|f| {
                 f.name == field
                     && matches!(
@@ -504,8 +491,16 @@ impl<'a> Builder<'a> {
                             if matches!(self.ws.module(m).ty_arena[i], TypeExpr::Builtin(BuiltinTy::F32))
                     )
             })
-        });
-        if narrow {
+        })
+    }
+
+    pub(crate) fn round_f32_field(
+        &mut self,
+        name: Ustr,
+        field: Ustr,
+        value: Idx<Inst>,
+    ) -> Idx<Inst> {
+        if self.field_is_f32(name, field) {
             self.emit_cur(Inst::FloatToF32(value))
         } else {
             value
@@ -660,10 +655,7 @@ impl<'a> Builder<'a> {
         }
         BackendFnAbiPlan::for_function_value(self.ws, self.call_scx, ty)
             .map(Some)
-            .map_err(|error| match error.span.or(self.cur_span) {
-                Some(span) => CompilerError::new_with_label(span, error.message),
-                None => CompilerError::new_no_location(error.message),
-            })
+            .map_err(|error| self.rep_error(error))
     }
 
     pub(crate) fn nobox_shape_of_ty(&self, ty: TyId) -> Result<Option<ValueShape>, CompilerError> {

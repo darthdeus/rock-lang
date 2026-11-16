@@ -1976,16 +1976,7 @@ impl<'a> Builder<'a> {
         else {
             return false;
         };
-        self.ws.struct_by_name.get(&sname).is_some_and(|sid| {
-            self.ws.modules[sid.module.index()].structs[sid.def].fields.iter().any(|f| {
-                f.name == field
-                    && matches!(
-                        f.storage_ty,
-                        TyId::Static(m, i)
-                            if matches!(self.ws.module(m).ty_arena[i], TypeExpr::Builtin(BuiltinTy::F32))
-                    )
-            })
-        })
+        self.field_is_f32(sname, field)
     }
 
     pub(crate) fn lower_compound_assign_effect(

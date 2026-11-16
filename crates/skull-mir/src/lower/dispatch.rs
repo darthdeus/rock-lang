@@ -25,9 +25,7 @@ use bone_core::prelude::Idx;
 use bone_core::workspace::{BodyInference, Workspace};
 use ustr::Ustr;
 
-use super::{
-    EnumPlan, RepArena, RepGuarantees, RepUse, RepUseFacts, shape::payload_free_enum_variants,
-};
+use super::{EnumPlan, RepArena, RepGuarantees, RepUse, RepUseFacts, shape::is_payload_free_enum};
 use crate::concrete::{ConcreteBodyPlan, ConcreteTypeTables};
 use crate::monoty::MonoSubst;
 
@@ -444,9 +442,7 @@ impl<'a> DispatchCtx<'a> {
     /// "cdata value structs ... hit the primitive `==` fast path", and its
     /// GC-carrying branch documents the per-type metatable as authoritative).
     pub fn is_value_struct(&self, name: Ustr) -> bool {
-        self.ws.struct_by_name.get(&name).is_some_and(|sid| {
-            crate::lower::has_value_plan(&self.ws.modules[sid.module.index()].structs[sid.def])
-        })
+        crate::lower::shape::is_value_struct(self.ws, name)
     }
 
     /// The declared `value` struct name of `e`'s (nullable-peeled) static
@@ -493,14 +489,7 @@ impl<'a> DispatchCtx<'a> {
             else {
                 return false;
             };
-            let Some(eid) = self.ws.enums_by_name.get(name) else {
-                return false;
-            };
-            let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
-            return ed
-                .variants
-                .iter()
-                .all(|v| matches!(v.payload, bone_core::hir::VariantPayload::Unit));
+            return is_payload_free_enum(self.ws, *name);
         }
         if self.concrete_plan.is_some() {
             return false;
@@ -512,13 +501,7 @@ impl<'a> DispatchCtx<'a> {
         else {
             return false;
         };
-        let Some(eid) = self.ws.enums_by_name.get(&name) else {
-            return false;
-        };
-        let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
-        ed.variants
-            .iter()
-            .all(|v| matches!(v.payload, bone_core::hir::VariantPayload::Unit))
+        is_payload_free_enum(self.ws, name)
     }
 
     pub(crate) fn eq_is_scalar(&self, e: Idx<Expr>) -> bool {
@@ -601,9 +584,7 @@ impl<'a> DispatchCtx<'a> {
                 crate::monoty::MonoTy::App {
                     ctor: crate::monoty::MonoCtor::Nominal(name),
                     ..
-                } if payload_free_enum_variants(self.ws, *name).is_some() => {
-                    StringifyRoute::EnumNames(*name)
-                }
+                } if is_payload_free_enum(self.ws, *name) => StringifyRoute::EnumNames(*name),
                 crate::monoty::MonoTy::App {
                     ctor: crate::monoty::MonoCtor::Nominal(name),
                     ..
@@ -635,9 +616,7 @@ impl<'a> DispatchCtx<'a> {
             Some(TypeExpr::App {
                 ctor: TypeCtor::Nominal(name),
                 ..
-            }) if payload_free_enum_variants(self.ws, name).is_some() => {
-                StringifyRoute::EnumNames(name)
-            }
+            }) if is_payload_free_enum(self.ws, name) => StringifyRoute::EnumNames(name),
             Some(TypeExpr::App {
                 ctor: TypeCtor::Nominal(name),
                 ..
@@ -686,12 +665,9 @@ impl<'a> DispatchCtx<'a> {
         let (Some(arg), None) = (args.next(), args.next()) else {
             return None;
         };
-        let resolved = match self.inf.and_then(|i| i.resolved_overload_calls.get(&call)) {
-            Some(&(module, func)) => vec![(module, func)],
-            None => self.ws.functions_by_name.get(name)?.to_vec(),
-        };
-        let [(module, func)] = resolved[..] else {
-            return None;
+        let (module, func) = match self.inf.and_then(|i| i.resolved_overload_calls.get(&call)) {
+            Some(&resolved) => resolved,
+            None => super::unique_fn(self.ws, *name)?,
         };
         let def = &self.ws.module(module).functions[func];
         let takes_any = match def.param_decls.as_slice() {

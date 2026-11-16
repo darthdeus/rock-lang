@@ -216,9 +216,10 @@ impl<'a> Builder<'a> {
     }
 
     pub(crate) fn struct_field_names(&self, name: Ustr) -> Option<Vec<Ustr>> {
-        let sid = *self.ws.struct_by_name.get(&name)?;
-        let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
-        Some(sd.fields.iter().map(|f| f.name).collect())
+        self.ws
+            .struct_by_name
+            .contains_key(&name)
+            .then(|| struct_field_names(self.ws, name))
     }
 
     pub(crate) fn struct_field_names_required(
@@ -229,27 +230,15 @@ impl<'a> Builder<'a> {
             .ok_or_else(|| self.gap_here(format!("nominal `{name}` has no declared field plan")))
     }
 
-    /// Whether nominal `name` is a `value` struct (C-layout cdata).
     /// Whether `e`'s type is a `value` struct -- the shape whose rvalue lowering
     /// packs a fresh cdata rather than handing back shared storage.
     pub(crate) fn expr_is_value_struct(&self, e: Idx<Expr>) -> bool {
-        if let Some(ty) = self.concrete_expr_ty(e) {
-            return matches!(
-                ty.peel_nullable().0,
-                MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Nominal(name), ..
-                } if self.is_value_struct(name.to_owned().into())
-            );
-        }
-        false
+        self.value_struct_name_of(e).is_some()
     }
 
+    /// Whether nominal `name` is a `value` struct (C-layout cdata).
     pub(crate) fn is_value_struct(&self, name: Ustr) -> bool {
-        self.ws
-            .struct_by_name
-            .get(&name)
-            .map(|sid| has_value_plan(&self.ws.modules[sid.module.index()].structs[sid.def]))
-            .unwrap_or(false)
+        super::shape::is_value_struct(self.ws, name)
     }
 
     /// Whether `e` denotes a mutable PLACE -- storage a later write can reach

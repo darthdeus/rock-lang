@@ -165,10 +165,7 @@ impl<'a> Builder<'a> {
             fn_ty,
             taken_by_value,
         )
-        .map_err(|error| match error.span.or(self.cur_span) {
-            Some(span) => CompilerError::new_with_label(span, error.message),
-            None => CompilerError::new_no_location(error.message),
-        })?;
+        .map_err(|error| self.rep_error(error))?;
         let abi = NestedFn {
             hoisted,
             param_names,

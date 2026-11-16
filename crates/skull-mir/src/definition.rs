@@ -105,18 +105,11 @@ fn annotation<'a>(
     Ok(first)
 }
 
-fn static_type(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
-    match ty {
-        TyId::Static(module, index) => Some(ws.module(module).ty_arena[index]),
-        TyId::Local(_) => None,
-    }
-}
-
 fn artifact_definition_type(ws: &Workspace, return_ty: TyId) -> Option<TyId> {
     let TypeExpr::App {
         ctor: TypeCtor::Array,
         params,
-    } = static_type(ws, return_ty)?
+    } = crate::lower::static_ty(ws, return_ty)?
     else {
         return None;
     };
@@ -128,7 +121,7 @@ fn artifact_definition_type(ws: &Workspace, return_ty: TyId) -> Option<TyId> {
     let TypeExpr::App {
         ctor: TypeCtor::Nominal(name),
         params,
-    } = static_type(ws, element)?
+    } = crate::lower::static_ty(ws, element)?
     else {
         return None;
     };

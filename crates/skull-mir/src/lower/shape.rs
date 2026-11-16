@@ -27,6 +27,13 @@ pub fn has_value_plan(sd: &bone_core::hir::StructDef) -> bool {
     sd.is_value && !bone_core::modules::is_descriptor_key(sd.name)
 }
 
+/// Whether `name` is a declared struct with a value plan.
+pub(crate) fn is_value_struct(ws: &Workspace, name: Ustr) -> bool {
+    ws.struct_by_name
+        .get(&name)
+        .is_some_and(|sid| has_value_plan(&ws.modules[sid.module.index()].structs[sid.def]))
+}
+
 /// Max leaf count that stores an unmarked value in columns. Above it, columns
 /// fall off a measured write cliff (9.3x on LuaJIT / 9.1x on V8 at K=16, x86;
 /// 17.1x / 11.7x on arm64), so an unmarked wider type stays boxed. An explicit
@@ -41,7 +48,7 @@ pub(crate) fn dense_flat_enum_vec_eligible(ws: &Workspace, name: Ustr) -> bool {
             Some(TypeExpr::App {
                 ctor: TypeCtor::Nominal(child),
                 ..
-            }) if payload_free_enum_variants(ws, child).is_some() => true,
+            }) if is_payload_free_enum(ws, child) => true,
             Some(TypeExpr::App {
                 ctor: TypeCtor::Nominal(child),
                 ..
@@ -626,7 +633,7 @@ fn planned_value_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Op
             Some(TypeExpr::App {
                 ctor: TypeCtor::Nominal(child),
                 ..
-            }) if payload_free_enum_variants(ws, child).is_some() => PlannedField::Primitive("int"),
+            }) if is_payload_free_enum(ws, child) => PlannedField::Primitive("int"),
             Some(TypeExpr::App {
                 ctor: TypeCtor::Nominal(child),
                 ..
@@ -838,6 +845,16 @@ pub(crate) fn planned_value_contains_flat_enum(ws: &Workspace, name: Ustr) -> bo
 
 /// `Some(ordered variant names)` iff `name` is a PAYLOAD-FREE enum (every variant
 /// `Unit`) — the tier-1 scalarizable case. The index is the variant's int tag.
+/// Whether `name` is a declared enum whose every variant is a unit variant.
+pub(crate) fn is_payload_free_enum(ws: &Workspace, name: Ustr) -> bool {
+    ws.enums_by_name.get(&name).is_some_and(|eid| {
+        ws.modules[eid.module.index()].enums[eid.def]
+            .variants
+            .iter()
+            .all(|v| matches!(v.payload, VariantPayload::Unit))
+    })
+}
+
 pub(crate) fn payload_free_enum_variants(ws: &Workspace, name: Ustr) -> Option<Vec<Ustr>> {
     let eid = *ws.enums_by_name.get(&name)?;
     let ed = &ws.modules[eid.module.index()].enums[eid.def];
@@ -867,7 +884,7 @@ pub(crate) fn lua_value_is_immutable(ws: &Workspace, ty: &MonoTy) -> bool {
 }
 
 fn lua_nominal_is_immutable(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> bool {
-    if payload_free_enum_variants(ws, name).is_some() {
+    if is_payload_free_enum(ws, name) {
         return true;
     }
     let Some(sid) = ws.struct_by_name.get(&name) else {
@@ -2146,7 +2163,7 @@ pub(crate) fn value_field_c_type_guarded(ws: &Workspace, ty: TyId) -> Option<Str
         TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
             ..
-        } if map_is_value_struct(ws, name) => {
+        } if is_value_struct(ws, name) => {
             if value_storage_is_gc_guarded(ws, name) {
                 None
             } else {
@@ -2156,7 +2173,7 @@ pub(crate) fn value_field_c_type_guarded(ws: &Workspace, ty: TyId) -> Option<Str
         TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
             ..
-        } if payload_free_enum_variants(ws, name).is_some() => Some("int".into()),
+        } if is_payload_free_enum(ws, name) => Some("int".into()),
         TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
             ..
@@ -2188,7 +2205,7 @@ pub fn gc_field_eq(ws: &Workspace, ty: TyId) -> GcFieldEq {
             ctor: TypeCtor::Nominal(name),
             ..
         }) => {
-            if map_is_value_struct(ws, name) {
+            if is_value_struct(ws, name) {
                 GcFieldEq::Native
             } else if ws.enums_by_name.contains_key(&name) {
                 GcFieldEq::Structural
@@ -2332,8 +2349,7 @@ fn build_flat_enum_shape_inner(
 ) -> Option<EnumFlatShape> {
     let eid = *ws.enums_by_name.get(&name)?;
     // Payload-free enums are ints; cdata-eligible enums scalarize via cdata.
-    if payload_free_enum_variants(ws, name).is_some() || build_enum_cdata_shape(ws, name).is_some()
-    {
+    if is_payload_free_enum(ws, name) || build_enum_cdata_shape(ws, name).is_some() {
         return None;
     }
     if visiting.contains(&name) {
@@ -2421,7 +2437,7 @@ impl EnumPlan {
     }
 
     fn for_name_uncached(ws: &Workspace, name: Ustr) -> Option<Rc<Self>> {
-        let layout = if payload_free_enum_variants(ws, name).is_some() {
+        let layout = if is_payload_free_enum(ws, name) {
             EnumLayout::PayloadFree
         } else if let Some(shape) = build_enum_cdata_shape(ws, name) {
             EnumLayout::Cdata(shape)
@@ -2469,7 +2485,7 @@ fn flat_payload_shape(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ustr>) -> Opt
     else {
         return None;
     };
-    if map_is_value_struct(ws, n) {
+    if is_value_struct(ws, n) {
         // The value's own shape plans its enum fields from scratch, without
         // `visiting`, so a payload that leads back to an enum being built
         // (`enum L { Cons(Cell) }`, `value Cell { tail: L }`) stays opaque.
@@ -2588,7 +2604,7 @@ fn equality_payload_is_leafwise(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ust
             ctor: TypeCtor::Nominal(n),
             ..
         } => {
-            if map_is_value_struct(ws, n) {
+            if is_value_struct(ws, n) {
                 return true;
             }
             let Some(plan) = EnumPlan::for_name(ws, n) else {
