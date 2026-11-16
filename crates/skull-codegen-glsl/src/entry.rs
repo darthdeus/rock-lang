@@ -342,28 +342,6 @@ pub(crate) fn plan_shader_entry_program(
     })
 }
 
-/// Emit a whole single-file shader for one `@shader(fragment)` root -- the
-/// generated PIXEL block (declarations + reachable helpers + the entry fn +
-/// `main`) and the default fullscreen VERTEX block -- from the graph-owned
-/// population. The caller's
-/// `ScalarCtx` must share the graph interner; the view supplies the concrete
-/// entry and helper order, while this backend supplies only MIR delivery and
-/// GLSL rendering.
-pub fn emit_shader_entry_with_view(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    view: &ShaderProgramView,
-    profile: GlslProfile,
-) -> Result<ShaderEmission, CompilerError> {
-    if view.program.vert.is_some() {
-        return Err(CompilerError::new_no_location(
-            "shader graph/view pipeline passed to single-entry GLSL emission".to_string(),
-        ));
-    }
-    let plan = plan_shader_entry_program(ws, scx, view)?;
-    render_shader_entry(ws, scx.interner(), &plan, profile)
-}
-
 pub(crate) fn render_shader_entry(
     ws: &Workspace,
     interner: &MonoInterner,

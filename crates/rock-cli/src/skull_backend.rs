@@ -1693,17 +1693,7 @@ fn emit_shader_program_with_view(
     let program_view = view.program_views.first().ok_or_else(|| {
         skull_parser::CompilerError::new_no_location("GLSL shader view has no program".to_string())
     })?;
-    match program.vert {
-        Some(_) => skull_codegen_glsl::emit_shader_pipeline_with_view(
-            ws,
-            &shader_scx,
-            program_view,
-            profile,
-        ),
-        None => {
-            skull_codegen_glsl::emit_shader_entry_with_view(ws, &shader_scx, program_view, profile)
-        }
-    }
+    skull_codegen_glsl::emit_shader_with_view(ws, &shader_scx, program_view, profile)
 }
 
 /// `rock shader <file.rock> <fn> [fn...] [--output <file.glsl>]` -- GLSL emission.

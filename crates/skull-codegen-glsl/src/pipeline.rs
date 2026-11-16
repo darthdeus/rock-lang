@@ -474,29 +474,6 @@ pub(crate) fn plan_shader_pipeline_from_view(
     })
 }
 
-/// A2: compile a `@shader(vertex)` + `@shader(fragment)` pair into one
-/// `#ifdef VERTEX`/`#ifdef PIXEL` file from the graph-owned stage populations
-/// in `view`. The vertex entry's return type (the varyings value struct) must
-/// be exactly the fragment entry's first param type. Vertex params are
-/// classified by annotation: `@attr` (per-vertex attribute struct),
-/// `@instance` (per-instance attribute divisor), and `@uniform` (uniform
-/// block); the varyings `position: Vec4` field drives `gl_Position` and is
-/// suppressed as a varying.
-pub fn emit_shader_pipeline_with_view(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    view: &ShaderProgramView,
-    profile: GlslProfile,
-) -> Result<ShaderEmission, CompilerError> {
-    if view.program.vert.is_none() {
-        return Err(CompilerError::new_no_location(
-            "shader graph/view single-entry program passed to pipeline GLSL emission".to_string(),
-        ));
-    }
-    let plan = plan_shader_pipeline_from_view(ws, scx, view)?;
-    render_shader_pipeline(ws, scx.interner(), &plan, profile)
-}
-
 pub(crate) fn render_shader_pipeline(
     ws: &Workspace,
     interner: &MonoInterner,

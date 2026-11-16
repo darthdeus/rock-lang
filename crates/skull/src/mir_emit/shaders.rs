@@ -246,33 +246,17 @@ pub(super) fn shader_registration_lines(
         use bone_core::prelude::*;
         programs
             .par_iter()
-            .map(|(pair, program_view, plan)| {
+            .map(|(_, program_view, plan)| {
                 // The view's profile pass already planned an accepted program;
                 // a program it did not plan is emitted from the view, which
                 // reports the same refusal at the same span.
-                if let Some(plan) = plan {
-                    return skull_codegen_glsl::render_shader_plan(
-                        ws,
-                        scx.interner(),
-                        plan,
-                        profile,
-                    );
-                }
-                // vert=None is the A3c single-arg fullscreen form -> the A1
-                // single-entry emitter (PIXEL body + fullscreen VERTEX passthrough).
-                match pair.vert {
-                    Some(_) => skull_codegen_glsl::emit_shader_pipeline_with_view(
-                        ws,
-                        scx,
-                        program_view,
-                        profile,
-                    ),
-                    None => skull_codegen_glsl::emit_shader_entry_with_view(
-                        ws,
-                        scx,
-                        program_view,
-                        profile,
-                    ),
+                match plan {
+                    Some(plan) => {
+                        skull_codegen_glsl::render_shader_plan(ws, scx.interner(), plan, profile)
+                    }
+                    None => {
+                        skull_codegen_glsl::emit_shader_with_view(ws, scx, program_view, profile)
+                    }
                 }
             })
             .collect()

@@ -26,7 +26,7 @@ use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use skull_codegen_shader::{const_lit, inst_kind, is_tier0_inst, non_tier0_error};
 use skull_graph::instance_graph::{InstanceGraph, SiteOutcome};
-pub use skull_graph::shader::ShaderLibraryView;
+use skull_graph::shader::ShaderLibraryView;
 use skull_graph::shader::{ShaderProgramView, ShaderStageView};
 use skull_mir::cfg::relooper::{LoopCtx, LoopTest, StructuredEmit};
 use skull_mir::cfg::reverse_postorder;
@@ -74,7 +74,7 @@ use emit_fn::*;
 pub use entry::*;
 pub use intrinsics::*;
 pub use library::*;
-pub use pipeline::*;
+use pipeline::*;
 use profile::*;
 pub use value_test::*;
 
@@ -116,6 +116,19 @@ pub fn render_shader_plan(
         }
         ShaderPlanKind::Entry(plan) => entry::render_shader_entry(ws, interner, plan, profile),
     }
+}
+
+/// Emit one program from its graph-owned stage populations: a vertex +
+/// fragment pair renders one `#ifdef VERTEX`/`#ifdef PIXEL` file, a lone
+/// fragment root renders its PIXEL block over the default fullscreen VERTEX.
+pub fn emit_shader_with_view(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    view: &ShaderProgramView,
+    profile: GlslProfile,
+) -> Result<ShaderEmission, CompilerError> {
+    let plan = plan_shader_with_view(ws, scx, view)?;
+    render_shader_plan(ws, scx.interner(), &plan, profile)
 }
 
 /// A tier-0 GLSL type. Everything else is rejected by the profile pass.

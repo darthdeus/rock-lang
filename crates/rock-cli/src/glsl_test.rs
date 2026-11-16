@@ -548,27 +548,15 @@ pub fn shader_validate_run(
         }
         let mut jobs: Vec<(String, String, String)> = Vec::with_capacity(pairs.len());
         for (pair, program_view) in pairs.iter().zip(&view.program_views) {
-            let emission = match pair.vert {
-                Some(_) => skull_codegen_glsl::emit_shader_pipeline_with_view(
-                    &ws,
-                    &shader_scx,
-                    program_view,
-                    PROFILE,
-                ),
-                None => skull_codegen_glsl::emit_shader_entry_with_view(
-                    &ws,
-                    &shader_scx,
-                    program_view,
-                    PROFILE,
-                ),
-            }
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "{dir}: `{}` failed to emit for {PROFILE_NAME}: {}",
-                    pair.key,
-                    e.message
-                )
-            })?;
+            let emission =
+                skull_codegen_glsl::emit_shader_with_view(&ws, &shader_scx, program_view, PROFILE)
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "{dir}: `{}` failed to emit for {PROFILE_NAME}: {}",
+                            pair.key,
+                            e.message
+                        )
+                    })?;
             let (vertex, fragment) = split_stages(&emission.source);
             jobs.push((format!("{dir}:{}", pair.key), vertex, fragment));
         }

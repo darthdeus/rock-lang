@@ -298,7 +298,7 @@ fn new_shader_callsite_overlay_carries_registration() {
 
 // -- A3c: single-arg fullscreen form `rock_shader(frag)`. Key = the bare frag
 // name (never contains '+', so it cannot collide with a pair key); the driver
-// routes vert=None to `emit_shader_entry_with_view`, which emits the same complete file
+// routes vert=None to `emit_shader_with_view`, which emits the same complete file
 // the A1 single-entry emitter produces (PIXEL body + fullscreen VERTEX
 // passthrough). No new GLSL emission -- resolution + routing only. --
 

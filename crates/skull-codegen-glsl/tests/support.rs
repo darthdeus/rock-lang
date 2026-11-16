@@ -152,12 +152,9 @@ pub fn emit_unplanned(
 ) -> Result<(), String> {
     let (scx, view) = program_session(ws, mid, vert, frag).map_err(|e| e.message)?;
     let profile = GlslProfile::Core330;
-    match vert {
-        Some(_) => skull_codegen_glsl::emit_shader_pipeline_with_view(ws, &scx, &view, profile),
-        None => skull_codegen_glsl::emit_shader_entry_with_view(ws, &scx, &view, profile),
-    }
-    .map(|_| ())
-    .map_err(|e| e.message)
+    skull_codegen_glsl::emit_shader_with_view(ws, &scx, &view, profile)
+        .map(|_| ())
+        .map_err(|e| e.message)
 }
 
 pub fn emit_entry(src: &str, root: &str) -> Result<String, String> {
