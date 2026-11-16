@@ -1487,30 +1487,18 @@ impl<'a> Builder<'a> {
                 Err(gap_err) => {
                     // `g(args)` where `g` is a fn-typed module global.
                     if !any_named && self.is_fn_global(name) {
-                        let abi = match self.ws.globals_by_name.get(&name) {
-                            Some(&ty) => {
-                                let mono = crate::monoty::convert_decl(self.ws, ty, &SpecSubst::default())
-                                    .map_err(|reason| {
-                                        self.gap_here(format!(
-                                            "fn-typed global `{name}` has no concrete function type ({reason:?})"
-                                        ))
-                                    })?;
-                                self.fn_value_rep_plan_for_mono(&mono)?
-                            }
-                            None => None,
-                        };
-                        if let Some(abi) = abi {
-                            let g = self.emit_cur(Inst::Global(name));
-                            return self.indirect_call_by_plan(abi, g, &arg_idxs);
-                        }
-                        let arg_vals: Vec<Idx<Inst>> = arg_idxs
-                            .iter()
-                            .map(|&a| self.lower_expr(a))
-                            .collect::<Result<_, _>>()?;
+                        let ty = self.ws.globals_by_name[&name];
+                        let mono = crate::monoty::convert_decl(self.ws, ty, &SpecSubst::default())
+                            .map_err(|reason| {
+                                self.gap_here(format!(
+                                    "fn-typed global `{name}` has no concrete function type ({reason:?})"
+                                ))
+                            })?;
+                        let abi = self.fn_value_rep_plan_for_mono(&mono)?.ok_or_else(|| {
+                            self.gap_here(format!("fn-typed global `{name}` has no function ABI"))
+                        })?;
                         let g = self.emit_cur(Inst::Global(name));
-                        let v = self.emit_call_value(e, g, arg_vals)?;
-                        let value = ValueRepr::Scalar(v);
-                        return self.value_bundle_for_expr(e, value);
+                        return self.indirect_call_by_plan(abi, g, &arg_idxs);
                     }
                     Err(gap_err)
                 }
@@ -2173,18 +2161,7 @@ impl<'a> Builder<'a> {
         callee: Idx<Inst>,
         args: Vec<Idx<Inst>>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        self.emit_call_value_n(self.expr_tuple_shape(e)?, callee, args)
-    }
-
-    /// [`Self::emit_call_value`] with an explicit tuple shape (the safe-nav call
-    /// paths pass the nil-peeled shape, since their expr type is `(..)?`).
-    pub(crate) fn emit_call_value_n(
-        &mut self,
-        shape: Option<TupleRetShape>,
-        callee: Idx<Inst>,
-        args: Vec<Idx<Inst>>,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        match shape {
+        match self.expr_tuple_shape(e)? {
             Some(shape) => {
                 let dests: Vec<Idx<Cell>> = (0..shape.slot_count())
                     .map(|_| self.f.new_cell(None))

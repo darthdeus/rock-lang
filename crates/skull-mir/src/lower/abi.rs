@@ -1978,10 +1978,6 @@ impl RepArena {
     }
 }
 
-/// Whether a callee is a Rock body subject that the concrete registry must
-/// contain. Foreign, compile-time expansion, and native-required intrinsic
-/// declarations still have an ABI, but no body plan exists for them because
-/// their backend or lowering arm supplies the body itself.
 /// The ABI of an ALREADY-SELECTED owner instance -- its concrete plan when the
 /// owner requires one, the opaque boundary otherwise. The one entry point for
 /// consumers holding a resolved owner (bound rewrites, inline snapshots,
@@ -2020,21 +2016,7 @@ fn owner_abi_plan_impl(
     if let Some(plan) = scx.abi_plan_cached(AbiQuestion::Owner, owner) {
         return Ok(plan);
     }
-    let derived = derive_owner_abi_plan(ws, scx, plans, owner, in_hand)?;
-    scx.abi_plan_store(AbiQuestion::Owner, owner, &derived);
-    Ok(derived)
-}
-
-/// The owner ABI derivation behind [`owner_abi_plan`], without the memo:
-/// the warm derives every key in parallel and stores the results in bulk.
-fn derive_owner_abi_plan(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    plans: &crate::concrete::ConcretePlans,
-    owner: &crate::instance::Instance,
-    in_hand: Option<&ConcreteBodyPlan>,
-) -> Result<BackendFnAbiPlanHandle, skull_parser::CompilerError> {
-    let derived = if !requires_concrete_body_plan(ws, owner) {
+    let derived = Arc::new(if !requires_concrete_body_plan(ws, owner) {
         BackendFnAbiPlan::for_boundary_instance(ws, scx, owner)
     } else {
         let plan = in_hand
@@ -2047,8 +2029,8 @@ fn derive_owner_abi_plan(
                 ))
             })?;
         BackendFnAbiPlan::for_concrete_plan(ws, scx, plan)
-    };
-    let derived = Arc::new(derived);
+    });
+    scx.abi_plan_store(AbiQuestion::Owner, owner, &derived);
     Ok(derived)
 }
 
@@ -2083,17 +2065,6 @@ pub(super) fn callee_abi_plan_for_instance(
     if let Some(plan) = scx.abi_plan_cached(AbiQuestion::Callee, inst) {
         return Ok(plan);
     }
-    let derived = derive_callee_abi_plan(ws, scx, plans, inst)?;
-    scx.abi_plan_store(AbiQuestion::Callee, inst, &derived);
-    Ok(derived)
-}
-
-fn derive_callee_abi_plan(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    plans: &crate::concrete::ConcretePlans,
-    inst: &crate::instance::Instance,
-) -> Result<BackendFnAbiPlanHandle, skull_parser::CompilerError> {
     let selected = selected_abi_instance(ws, scx, inst)?;
     let derived = if !requires_concrete_body_plan(ws, inst) {
         Arc::new(BackendFnAbiPlan::for_boundary_instance(ws, scx, &selected))
@@ -2132,6 +2103,7 @@ fn derive_callee_abi_plan(
             owner_abi_plan_impl(ws, scx, plans, inst, Some(plan))?
         }
     };
+    scx.abi_plan_store(AbiQuestion::Callee, inst, &derived);
     Ok(derived)
 }
 
@@ -2165,6 +2137,10 @@ pub fn selected_sibling_abi_plan(
     ))
 }
 
+/// Whether a callee is a Rock body subject that the concrete registry must
+/// contain. Foreign, compile-time expansion, and native-required intrinsic
+/// declarations still have an ABI, but no body plan exists for them because
+/// their backend or lowering arm supplies the body itself.
 pub fn requires_concrete_body_plan(ws: &Workspace, inst: &crate::instance::Instance) -> bool {
     let f = &ws.module(inst.func.module).functions[inst.func.func];
     !f.is_extern

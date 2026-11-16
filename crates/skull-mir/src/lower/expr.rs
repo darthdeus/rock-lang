@@ -2011,103 +2011,10 @@ impl<'a> Builder<'a> {
         } else {
             None
         };
+        let combine = |s: &mut Self, cur| {
+            s.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)
+        };
         match self.body.expr_arena[target] {
-            Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
-                let name = self.static_cells[&raw(b)];
-                let cur = self.emit_cur(Inst::Global(name));
-                let new_v =
-                    self.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
-                self.emit_cur(Inst::StoreGlobal { name, value: new_v });
-            }
-            Expr::Var(b) => {
-                let cell = *self
-                    .binds
-                    .get(&raw(b))
-                    .ok_or_else(|| gap("compound-assign to an unbound variable"))?;
-                let cur = self.emit_cur(Inst::Load(cell));
-                let new_v =
-                    self.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
-                self.emit_cur(Inst::Store { cell, value: new_v });
-            }
-            // A `nobox` global is stored as leaves, so neither the whole-group
-            // nor the leaf form has a slot the arms below can read-modify-write
-            // through. bone desugars `t <op>= v` to `t = t <op> v` before skull
-            // sees it, so this is unreachable by construction (proved by
-            // `error`-ing the arm over the full surface: zero fires). It rejects
-            // rather than falling through so a future routing change surfaces
-            // here instead of as a silent read of a nil global.
-            _ if nobox_global_place.is_some() => {
-                return Err(gap("compound assignment reached a `nobox` global place"));
-            }
-            Expr::Global(name) => {
-                let cur = self.emit_cur(Inst::Global(name));
-                let new_v =
-                    self.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
-                self.emit_cur(Inst::StoreGlobal { name, value: new_v });
-            }
-            Expr::FieldAccess { .. }
-                if let Some((cell, path)) = self.first_class_field_place(target) =>
-            {
-                self.first_class_field_update(cell, &path, None, |s, cur| {
-                    s.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)
-                })?;
-            }
-            Expr::FieldAccess { .. }
-                if let Some((cells, FieldShape::Prim)) = self.group_leaf_place(target) =>
-            {
-                let cell = cells[0].cell();
-                let cur = self.emit_cur(Inst::Load(cell));
-                let new_v =
-                    self.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
-                self.emit_cur(Inst::Store { cell, value: new_v });
-            }
-            Expr::FieldAccess { base, field } => {
-                if let Some((buf, checked, _, place)) = self.nb_leaf_rmw_place(target)? {
-                    let cur = self.nb_leaf_load(buf, checked, &place);
-                    let new_v = self
-                        .compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
-                    self.nb_leaf_store(buf, checked, &place, new_v);
-                    return Ok(());
-                }
-                if let Some((vec, slot, elem, storage, path)) =
-                    self.flat_leaf_rmw_place(base, field)?
-                {
-                    let cur = self.flat_leaf_load(vec, slot, elem, storage, path)?;
-                    let new_v = self
-                        .compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
-                    return self.flat_leaf_store(vec, slot, elem, storage, path, new_v);
-                }
-                let (pbase, key) = self.physical_field(base, field)?;
-                let b = self.lower_place_base(pbase)?;
-                let cur = self.emit_cur(Inst::Field {
-                    base: b,
-                    field: key,
-                });
-                let new_v =
-                    self.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
-                self.emit_cur(Inst::StoreField {
-                    base: b,
-                    field: key,
-                    value: new_v,
-                });
-            }
-            Expr::Index { base, index } => {
-                let (b, kind) = self.lower_index_base(base)?;
-                let i = self.lower_expr(index)?;
-                let cur = self.emit_cur(Inst::Index {
-                    base: b,
-                    index: i,
-                    kind,
-                });
-                let new_v =
-                    self.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
-                self.emit_cur(Inst::StoreIndex {
-                    base: b,
-                    index: i,
-                    value: new_v,
-                    kind,
-                });
-            }
             // `base?.field <op>= value` — skip silently if any `?.` link is null.
             // The read-modify-write and `value` run only on the non-null path.
             Expr::SafeNav { .. }
@@ -2117,8 +2024,7 @@ impl<'a> Builder<'a> {
                 self.group_presence_guard(&guards, join);
                 let cell = cells[0].cell();
                 let cur = self.emit_cur(Inst::Load(cell));
-                let new_v =
-                    self.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
+                let new_v = combine(self, cur)?;
                 self.emit_cur(Inst::Store { cell, value: new_v });
                 self.f.set_term(self.cur, Term::Goto(join));
                 self.cur = join;
@@ -2139,8 +2045,7 @@ impl<'a> Builder<'a> {
                 );
                 self.cur = store_bb;
                 let cur = self.emit_cur(Inst::Field { base: recv, field });
-                let new_v =
-                    self.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
+                let new_v = combine(self, cur)?;
                 self.emit_cur(Inst::StoreField {
                     base: recv,
                     field,
@@ -2149,7 +2054,9 @@ impl<'a> Builder<'a> {
                 self.f.set_term(self.cur, Term::Goto(join));
                 self.cur = join;
             }
-            _ => return Err(gap("compound-assign to this target form (later)")),
+            _ => {
+                self.lower_read_modify_write(target, nobox_global_place, None, combine)?;
+            }
         }
         Ok(())
     }
@@ -2231,23 +2138,46 @@ impl<'a> Builder<'a> {
             };
             s.emit_cur(inst)
         };
+        let result =
+            self.lower_read_modify_write(target, nobox_global_place, Some(postfix), |s, old| {
+                Ok(bump(s, old))
+            })?;
+        Ok(result.expect("a requested result"))
+    }
+
+    /// Read `target`, store `update` of the read back into it, and yield the old
+    /// value (`Some(true)`), the new one (`Some(false)`) or nothing (`None`).
+    /// `x++` passes a result; `x op= v` does not, and refuses a `nobox` global,
+    /// which bone desugars before skull sees it: the rejection surfaces a future
+    /// routing change instead of a silent read of a nil global.
+    fn lower_read_modify_write(
+        &mut self,
+        target: Idx<Expr>,
+        nobox_global_place: Option<(Vec<Ustr>, Option<ValueShape>)>,
+        result: Option<bool>,
+        update: impl FnOnce(&mut Self, Idx<Inst>) -> Result<Idx<Inst>, CompilerError>,
+    ) -> Result<Option<Idx<Inst>>, CompilerError> {
+        let pick = |old, new| result.map(|postfix| if postfix { old } else { new });
         match self.body.expr_arena[target] {
             Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
                 let name = self.static_cells[&raw(b)];
                 let old = self.emit_cur(Inst::Global(name));
-                let new = bump(self, old);
+                let new = update(self, old)?;
                 self.emit_cur(Inst::StoreGlobal { name, value: new });
-                Ok(if postfix { old } else { new })
+                Ok(pick(old, new))
             }
             Expr::Var(b) => {
                 let cell = *self
                     .binds
                     .get(&raw(b))
-                    .ok_or_else(|| gap("inc/dec of an unbound variable"))?;
+                    .ok_or_else(|| gap("read-modify-write of an unbound variable"))?;
                 let old = self.emit_cur(Inst::Load(cell));
-                let new = bump(self, old);
+                let new = update(self, old)?;
                 self.emit_cur(Inst::Store { cell, value: new });
-                Ok(if postfix { old } else { new })
+                Ok(pick(old, new))
+            }
+            _ if nobox_global_place.is_some() && result.is_none() => {
+                Err(gap("compound assignment reached a `nobox` global place"))
             }
             // A primitive leaf of a `nobox` global (`SPOT.x++`) is its own global.
             // `arith_ty` already restricted the target to a scalar, so a whole
@@ -2256,48 +2186,44 @@ impl<'a> Builder<'a> {
                 let (leaves, _) = nobox_global_place.expect("guard matched");
                 let name = leaves[0];
                 let old = self.emit_cur(Inst::Global(name));
-                let new = bump(self, old);
+                let new = update(self, old)?;
                 self.emit_cur(Inst::StoreGlobal { name, value: new });
-                Ok(if postfix { old } else { new })
+                Ok(pick(old, new))
             }
             Expr::Global(name) => {
                 let old = self.emit_cur(Inst::Global(name));
-                let new = bump(self, old);
+                let new = update(self, old)?;
                 self.emit_cur(Inst::StoreGlobal { name, value: new });
-                Ok(if postfix { old } else { new })
+                Ok(pick(old, new))
             }
             Expr::FieldAccess { .. }
                 if let Some((cell, path)) = self.first_class_field_place(target) =>
             {
-                let result =
-                    self.first_class_field_update(cell, &path, Some(postfix), |s, old| {
-                        Ok(bump(s, old))
-                    })?;
-                Ok(result.expect("a requested result"))
+                self.first_class_field_update(cell, &path, result, update)
             }
             Expr::FieldAccess { .. }
                 if let Some((cells, FieldShape::Prim)) = self.group_leaf_place(target) =>
             {
                 let cell = cells[0].cell();
                 let old = self.emit_cur(Inst::Load(cell));
-                let new = bump(self, old);
+                let new = update(self, old)?;
                 self.emit_cur(Inst::Store { cell, value: new });
-                Ok(if postfix { old } else { new })
+                Ok(pick(old, new))
             }
             Expr::FieldAccess { base, field } => {
                 if let Some((buf, checked, _, place)) = self.nb_leaf_rmw_place(target)? {
                     let old = self.nb_leaf_load(buf, checked, &place);
-                    let new = bump(self, old);
+                    let new = update(self, old)?;
                     self.nb_leaf_store(buf, checked, &place, new);
-                    return Ok(if postfix { old } else { new });
+                    return Ok(pick(old, new));
                 }
                 if let Some((vec, slot, elem, storage, path)) =
                     self.flat_leaf_rmw_place(base, field)?
                 {
                     let old = self.flat_leaf_load(vec, slot, elem, storage, path)?;
-                    let new = bump(self, old);
+                    let new = update(self, old)?;
                     self.flat_leaf_store(vec, slot, elem, storage, path, new)?;
-                    return Ok(if postfix { old } else { new });
+                    return Ok(pick(old, new));
                 }
                 let (pbase, key) = self.physical_field(base, field)?;
                 let b = self.lower_place_base(pbase)?;
@@ -2305,13 +2231,13 @@ impl<'a> Builder<'a> {
                     base: b,
                     field: key,
                 });
-                let new = bump(self, old);
+                let new = update(self, old)?;
                 self.emit_cur(Inst::StoreField {
                     base: b,
                     field: key,
                     value: new,
                 });
-                Ok(if postfix { old } else { new })
+                Ok(pick(old, new))
             }
             Expr::Index { base, index } => {
                 let (b, kind) = self.lower_index_base(base)?;
@@ -2321,16 +2247,16 @@ impl<'a> Builder<'a> {
                     index: i,
                     kind,
                 });
-                let new = bump(self, old);
+                let new = update(self, old)?;
                 self.emit_cur(Inst::StoreIndex {
                     base: b,
                     index: i,
                     value: new,
                     kind,
                 });
-                Ok(if postfix { old } else { new })
+                Ok(pick(old, new))
             }
-            _ => Err(gap("inc/dec of a non-assignable target")),
+            _ => Err(gap("read-modify-write of a non-assignable target")),
         }
     }
 
