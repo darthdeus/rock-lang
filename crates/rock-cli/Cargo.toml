@@ -78,8 +78,26 @@ libc = "0.2"
 [dev-dependencies]
 test-utils = { workspace = true }
 
-[lints]
-workspace = true
+# Cargo cannot combine workspace lint inheritance with this crate's check-cfg.
+[lints.clippy]
+disallowed_types = "deny"
+collapsible_match = "allow"
+collapsible_if = "allow"
+to_string_trait_impl = "allow"
+new_without_default = "allow"
+single_match = "allow"
+len_zero = "allow"
+unused_enumerate_index = "allow"
+inherent_to_string = "allow"
+result_large_err = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
+uninlined_format_args = "allow"
+manual_strip = "allow"
+unnecessary_map_or = "allow"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
 
 [[bin]]
 name = "rock"

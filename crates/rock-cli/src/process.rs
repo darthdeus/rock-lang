@@ -189,6 +189,13 @@ fn exit_without_teardown() -> ! {
     use std::io::Write;
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
+    #[cfg(coverage)]
+    unsafe {
+        unsafe extern "C" {
+            fn __llvm_profile_write_file() -> std::ffi::c_int;
+        }
+        __llvm_profile_write_file();
+    }
     // SAFETY: `_exit` takes no pointers; the buffered standard streams are
     // flushed above, and every file the command wrote is closed by now.
     unsafe { libc::_exit(0) }
