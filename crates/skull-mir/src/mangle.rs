@@ -112,6 +112,13 @@ fn last_path_separator(key: &str) -> Option<usize> {
 /// shared mangler must also satisfy.
 /// [`collision_errors`] rejects a residual collision either way.
 pub fn ident_of_key(key: &str) -> std::borrow::Cow<'_, str> {
+    if let Some(standalone) = key.strip_prefix(bone_core::modules::STANDALONE_PACKAGE_PREFIX) {
+        if let Some((_, name)) = standalone.split_once("::") {
+            if !name.contains("::") {
+                return std::borrow::Cow::Borrowed(name);
+            }
+        }
+    }
     match last_path_separator(key) {
         None => std::borrow::Cow::Borrowed(key),
         Some(cut) => std::borrow::Cow::Owned(format!(
@@ -574,6 +581,18 @@ pub fn collision_errors_of<'a>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn standalone_root_symbols_keep_the_declared_spelling() {
+        assert_eq!(
+            super::ident_of_key("$standalone$script.rock::helper"),
+            "helper"
+        );
+        assert_ne!(
+            super::ident_of_key("$standalone$script.rock::child::helper"),
+            "helper"
+        );
+    }
+
     use super::encode_mono_type;
     use crate::monoty::{MonoCtor, MonoTy};
     use ustr::Ustr;

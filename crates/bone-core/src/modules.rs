@@ -18,6 +18,10 @@ pub type PackageId = u32;
 pub const STD_PACKAGE_ID: PackageId = u32::MAX;
 pub const STD_PACKAGE_NAME: &str = "std";
 
+/// Compiler-owned package identity for a standalone source. This prefix is
+/// outside the identifier grammar, so a manifest name cannot claim it.
+pub const STANDALONE_PACKAGE_PREFIX: &str = "$standalone$";
+
 /// How a compiler-known type former is admitted and resolved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IntrinsicType {

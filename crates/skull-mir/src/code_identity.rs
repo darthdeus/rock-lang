@@ -27,6 +27,12 @@ use crate::monoty::MonoInterner;
 /// state and its code slot. A legacy definition is unique only within its file,
 /// so it keeps today's `<file>::<name>`.
 pub(crate) fn logical_def_key(file: Ustr, name: Ustr) -> String {
+    if let Some(key) = name
+        .as_str()
+        .strip_prefix(bone_core::modules::STANDALONE_PACKAGE_PREFIX)
+    {
+        return key.to_string();
+    }
     match name.as_str().contains("::") {
         true => name.to_string(),
         false => format!("{file}::{name}"),
@@ -1551,6 +1557,17 @@ impl Fnv64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn standalone_definition_identity_keeps_the_file_and_name() {
+        assert_eq!(
+            super::logical_def_key(
+                ustr::ustr("script.rock"),
+                ustr::ustr("$standalone$script.rock::counter")
+            ),
+            "script.rock::counter",
+        );
+    }
+
     use super::*;
     use bone_core::prelude::ModuleId;
     use comfy_la_arena::{Idx, RawIdx};

@@ -1541,6 +1541,18 @@ pub fn assemble_namespaces(
         .count();
     ws.defs.reserve(defs);
     ws.fragment_scopes.reserve(contributions.len());
+    let mut next_standalone_id = aliases
+        .packages
+        .iter()
+        .map(|p| p.id)
+        .chain(
+            contributions
+                .iter()
+                .filter_map(|c| c.package.as_ref().map(|p| p.id)),
+        )
+        .filter(|id| *id != STD_PACKAGE_ID)
+        .max()
+        .map_or(0, |id| id + 1);
     for contribution in contributions.iter() {
         if is_stdlib_module_file(contribution.file.as_str()) {
             register_stdlib_items(ws, contribution)?;
@@ -1568,15 +1580,20 @@ pub fn assemble_namespaces(
             .as_ref()
             .map(|h| h.span)
             .unwrap_or_else(crate::prelude::Span::unknown);
-        let Some(tag) = contribution.package.clone() else {
-            // A v1 file without a package tag: standalone sources must
-            // not silently become legacy — that would reinterpret their
-            // `::` ascriptions. Reject with the reason.
-            return Err(CompilerError::new_with_label(
-                header_span,
-                "modules-v1 source has no owning package (standalone v1 sources need a package or script context)".to_string(),
-            ));
-        };
+        let tag = contribution.package.clone().unwrap_or_else(|| {
+            let id = next_standalone_id;
+            next_standalone_id += 1;
+            skull_parser::PackageTag {
+                id,
+                self_name: format!(
+                    "{}{}",
+                    bone_core::modules::STANDALONE_PACKAGE_PREFIX,
+                    contribution.file
+                ),
+                identity_storage: Default::default(),
+                root: String::new(),
+            }
+        });
         let pkg_id = tag.id;
         if tag.self_name == STD_PACKAGE_NAME {
             return Err(CompilerError::new_with_label(
