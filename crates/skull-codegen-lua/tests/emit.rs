@@ -69,6 +69,46 @@ fn luajit_ok(driver: &str, context: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+fn luajit_loads(lua: &str) {
+    let dir = std::env::temp_dir().join(format!(
+        "skull_inline_body_limits_{}_{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("chunk.lua");
+    std::fs::write(&path, lua).expect("write Lua chunk");
+    let output = std::process::Command::new("luajit")
+        .arg(&path)
+        .output()
+        .expect("spawn luajit");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        output.status.success(),
+        "LuaJIT rejected emitted chunk:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn emit_run(src: &str) -> (String, bool) {
+    let (ws, mid) = stdlib_workspace(src);
+    let fid = test_fn(&ws, mid, "run");
+    let (func, interner) = common::lower_test_ref(&ws, mid, fid).expect("lower");
+    let ctx = CodegenCtx::new(&ws);
+    let lua = emit_function(
+        &ws,
+        &ctx,
+        &interner,
+        FuncRef {
+            module: mid,
+            func: fid,
+        },
+        &func,
+        None,
+    );
+    (lua, ctx.take_rejection().is_some())
+}
+
 fn emit_dump(modules: Vec<skull_parser::Ast>, fn_name: &str) -> String {
     emit_dump_with(modules, fn_name, |_| {})
 }
@@ -903,6 +943,33 @@ fn spliced_lua_control_counts_toward_the_body_limits() {
     );
     let error = ctx.take_rejection().expect("Lua name-limit rejection");
     assert!(error.message.contains("LJ_MAX_VSTACK"), "{error:?}");
+}
+
+#[test]
+fn fake_spliced_control_in_long_strings_and_comments_does_not_count() {
+    let fake_control = "goto bb0\n::bb0::\n".repeat(16_370);
+    let src = format!(
+        "@inline inline(lua) fn many() = \"\"\"\nlocal text = [=[\n{fake_control}]=]\n\
+         --[=[\n{fake_control}]=]\n\"\"\"\nfn run() {{ many() }}"
+    );
+    let (lua, rejected) = emit_run(&src);
+    assert!(
+        !rejected,
+        "inert long-string and comment text caused a rejection"
+    );
+    luajit_loads(&lua);
+}
+
+#[test]
+fn fake_spliced_assignments_in_a_long_string_do_not_extend_a_real_jump() {
+    let fake_assignments = "r0 = 1\n".repeat(32_768);
+    let src = format!(
+        "@inline inline(lua) fn many() = \"\"\"\nlocal text\ngoto bb0\n\
+         text = [=[\n{fake_assignments}]=]\n::bb0::\n\"\"\"\nfn run() {{ many() }}"
+    );
+    let (lua, rejected) = emit_run(&src);
+    assert!(!rejected, "inert assignments extended the emitted jump");
+    luajit_loads(&lua);
 }
 
 #[test]

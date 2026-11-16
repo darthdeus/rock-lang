@@ -63,6 +63,7 @@
 //! equals `loadfile`'s on every member.
 
 use crate::control::{ControlLines, Target};
+use crate::lua_line_starts_in_code;
 use comfy_la_arena::Idx;
 use rustc_hash::FxHashMap as HashMap;
 use skull_mir::mir::{Block, Inst, MirFunc, Term};
@@ -142,11 +143,12 @@ pub(crate) fn measure_body(
     if declared + control.names > LJ_MAX_VSTACK {
         return Some(BodyOverflow::Names(declared + control.names));
     }
+    let code_lines = lua_line_starts_in_code(body);
     let mut position = 0;
     let mut control_at = Vec::with_capacity(control.lines.len());
     let mut next_control = control.lines.iter().peekable();
     let mut offset = base;
-    for line in body.split_inclusive('\n') {
+    for (line_index, line) in body.split_inclusive('\n').enumerate() {
         let start = offset;
         offset += line.len();
         if let Some(&&(at, instructions)) = next_control.peek()
@@ -155,7 +157,7 @@ pub(crate) fn measure_body(
             next_control.next();
             control_at.push(position);
             position += instructions as usize;
-        } else if assigns_a_value(line.trim()) {
+        } else if code_lines[line_index] && assigns_a_value(line.trim()) {
             position += 1;
         }
     }

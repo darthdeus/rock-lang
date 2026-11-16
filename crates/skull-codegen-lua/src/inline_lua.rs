@@ -184,9 +184,9 @@ fn is_expr_inline_lua_body(s: &str) -> bool {
     true
 }
 
-/// The byte ranges of the identifiers and keywords in a Lua body, skipping
-/// strings, comments and numbers.
-fn lua_names(body: &str) -> Vec<(usize, usize)> {
+/// Walk identifiers and inert text in a Lua body, skipping strings, comments
+/// and numbers.
+fn visit_lua(body: &str, mut name: impl FnMut(usize, usize), mut inert: impl FnMut(usize, usize)) {
     let b = body.as_bytes();
     // `[`, `=`* and `[` open a long bracket; returns its level and length.
     let long_open = |i: usize| -> Option<(usize, usize)> {
@@ -199,25 +199,30 @@ fn lua_names(body: &str) -> Vec<(usize, usize)> {
             .find(&close)
             .map_or(b.len(), |at| from + at + close.len())
     };
-    let mut names = Vec::new();
     let mut i = 0;
     while i < b.len() {
         let c = b[i];
         if c == b'-' && b.get(i + 1) == Some(&b'-') {
+            let start = i;
             i += 2;
             match (b.get(i) == Some(&b'[')).then(|| long_open(i)).flatten() {
                 Some((level, len)) => i = long_close(i + len, level),
                 None => i = body[i..].find('\n').map_or(b.len(), |at| i + at),
             }
+            inert(start, i);
         } else if c == b'[' && long_open(i).is_some() {
+            let start = i;
             let (level, len) = long_open(i).unwrap_or_default();
             i = long_close(i + len, level);
+            inert(start, i);
         } else if c == b'"' || c == b'\'' {
+            let start = i;
             i += 1;
             while i < b.len() && b[i] != c {
                 i += if b[i] == b'\\' { 2 } else { 1 };
             }
             i += 1;
+            inert(start, i);
         } else if c.is_ascii_digit() {
             while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'.' || b[i] == b'_') {
                 i += 1;
@@ -227,12 +232,55 @@ fn lua_names(body: &str) -> Vec<(usize, usize)> {
             while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
                 i += 1;
             }
-            names.push((start, i));
+            name(start, i);
         } else {
             i += 1;
         }
     }
+}
+
+/// The byte ranges of the identifiers and keywords in a Lua body, skipping
+/// strings, comments and numbers.
+fn lua_names(body: &str) -> Vec<(usize, usize)> {
+    let mut names: Vec<(usize, usize)> = Vec::new();
+    visit_lua(body, |start, end| names.push((start, end)), |_, _| {});
     names
+}
+
+/// Whether each line starts in Lua code rather than inside a string or comment.
+/// Control-flow and assignment accounting only recognizes whole-line forms, so
+/// checking the first non-whitespace byte is sufficient for those candidates.
+pub(crate) fn lua_line_starts_in_code(body: &str) -> Vec<bool> {
+    let mut starts = Vec::new();
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        starts.push(
+            line.bytes()
+                .position(|byte| !byte.is_ascii_whitespace())
+                .map(|at| offset + at),
+        );
+        offset += line.len();
+    }
+    let mut active = vec![true; starts.len()];
+    let mut line = 0;
+    visit_lua(
+        body,
+        |_, _| {},
+        |start, end| {
+            while line < starts.len() {
+                match starts[line] {
+                    None => line += 1,
+                    Some(at) if at < start => line += 1,
+                    Some(at) if at < end => {
+                        active[line] = false;
+                        line += 1;
+                    }
+                    Some(_) => break,
+                }
+            }
+        },
+    );
+    active
 }
 
 pub(crate) struct InlineLuaBody<'a> {

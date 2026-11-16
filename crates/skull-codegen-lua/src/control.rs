@@ -89,15 +89,19 @@ impl ControlLines {
     /// Preserve bbN label and goto accounting inside spliced Lua.
     pub(crate) fn raw_lua(&mut self, body: &str, base: usize) {
         let mut offset = base;
-        for line in body.split_inclusive('\n') {
+        let code_lines = lua_line_starts_in_code(body);
+        for (line_index, line) in body.split_inclusive('\n').enumerate() {
             let text = line.trim();
-            if let Some(number) = text
-                .strip_prefix("::")
-                .and_then(|text| text.strip_suffix("::"))
-                .and_then(label_number)
+            if code_lines[line_index]
+                && let Some(number) = text
+                    .strip_prefix("::")
+                    .and_then(|text| text.strip_suffix("::"))
+                    .and_then(label_number)
             {
                 self.label(offset, Label::Block, number);
-            } else if let Some((targets, instructions)) = goto_line(text) {
+            } else if code_lines[line_index]
+                && let Some((targets, instructions)) = goto_line(text)
+            {
                 let at = self.line(offset, instructions);
                 for target in targets.into_iter().flatten() {
                     self.goto(at, 0, instructions - 1, Label::Block, target);
