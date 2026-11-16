@@ -26,16 +26,16 @@ pub(crate) fn collect_rock_files(paths: &[String]) -> Result<Vec<String>> {
                 eprintln!("File '{}' is not a Rock file (.rock)", path);
             }
         } else if metadata.is_dir() {
-            for entry in WalkDir::new(path) {
-                let entry = entry?;
-                if entry.file_type().is_file() {
-                    let file_path = entry.path();
-                    if let Some(ext) = file_path.extension() {
-                        if ext == "rock" {
-                            push(file_path.to_string_lossy().to_string(), &mut collected);
-                        }
-                    }
-                }
+            let base = fs::canonicalize(path)?;
+            for file in rock_host::project::find_rock_files_at_path(&base)? {
+                let relative = Path::new(&file).strip_prefix(&base)?;
+                push(
+                    Path::new(path)
+                        .join(relative)
+                        .to_string_lossy()
+                        .into_owned(),
+                    &mut collected,
+                );
             }
         } else {
             eprintln!("Path '{}' is neither a file nor a directory", path);
@@ -160,86 +160,29 @@ fn format_rock_file(file_path: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::collect_rock_files;
-    use std::fs;
-
-    fn write(dir: &std::path::Path, name: &str) -> String {
-        let path = dir.join(name);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        fs::write(&path, "fn main() {}\n").unwrap();
-        path.to_string_lossy().to_string()
-    }
 
     #[test]
-    fn every_named_file_is_collected_not_only_the_first() {
+    fn every_argument_contributes_its_rock_files_once() {
         let dir = tempfile::tempdir().unwrap();
-        let first = write(dir.path(), "a.rock");
-        let second = write(dir.path(), "b.rock");
-        let third = write(dir.path(), "c.rock");
+        let write = |name: &str| {
+            let path = dir.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "fn main() {}\n").unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        let first = write("a.rock");
+        let second = write("b.rock");
+        let text = write("notes.txt");
+        let nested = write("nested/deep.rock");
+        write("nested/notes.txt");
+        let top = dir.path().to_string_lossy().into_owned();
 
         let collected =
-            collect_rock_files(&[first.clone(), second.clone(), third.clone()]).unwrap();
+            collect_rock_files(&[first.clone(), text, second.clone(), first.clone(), top]).unwrap();
+        assert_eq!(collected, vec![first.clone(), second, nested]);
 
-        assert_eq!(collected, vec![first, second, third]);
-    }
-
-    #[test]
-    fn a_directory_argument_contributes_every_rock_file_under_it() {
-        let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "top.rock");
-        write(dir.path(), "nested/deep.rock");
-        write(dir.path(), "nested/notes.txt");
-
-        let collected = collect_rock_files(&[dir.path().to_string_lossy().to_string()]).unwrap();
-
-        let mut names: Vec<_> = collected
-            .iter()
-            .map(|path| {
-                std::path::Path::new(path)
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string()
-            })
-            .collect();
-        names.sort();
-        assert_eq!(names, vec!["deep.rock", "top.rock"]);
-    }
-
-    #[test]
-    fn a_file_named_twice_is_collected_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = write(dir.path(), "a.rock");
-
-        let collected = collect_rock_files(&[
-            file.clone(),
-            dir.path().to_string_lossy().to_string(),
-            file.clone(),
-        ])
-        .unwrap();
-
-        assert_eq!(collected, vec![file]);
-    }
-
-    #[test]
-    fn a_non_rock_file_is_skipped_without_dropping_the_rest() {
-        let dir = tempfile::tempdir().unwrap();
-        let text = write(dir.path(), "notes.txt");
-        let rock = write(dir.path(), "a.rock");
-
-        let collected = collect_rock_files(&[text, rock.clone()]).unwrap();
-
-        assert_eq!(collected, vec![rock]);
-    }
-
-    #[test]
-    fn a_missing_path_is_an_error_rather_than_a_silent_skip() {
-        let dir = tempfile::tempdir().unwrap();
-        let rock = write(dir.path(), "a.rock");
-        let missing = dir.path().join("gone.rock").to_string_lossy().to_string();
-
-        assert!(collect_rock_files(&[rock, missing]).is_err());
+        let missing = dir.path().join("gone.rock").to_string_lossy().into_owned();
+        assert!(collect_rock_files(&[first, missing]).is_err());
     }
 
     #[cfg(unix)]
