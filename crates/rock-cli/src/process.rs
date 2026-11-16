@@ -129,23 +129,9 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
         rock_cli::invocation_log::exit(1);
     }
 
-    // `--verbose` raises the unified logger to debug. (Pre-unification
-    // this was env_logger's `default_filter_or("debug")` inside
-    // setup_environment; that env_logger is now dead for rock-cli —
-    // rock_log won set_logger first — so the flag is wired here
-    // instead. Only raises, never lowers a ROCK_LOG=trace base.)
+    // `--verbose` only raises the level, never lowers a ROCK_LOG=trace base.
     if args.verbose {
         rock_log::set_level(rock_log::level().max(3));
-    }
-
-    // `--trace` (perfetto flamegraph capture) lived in the legacy rock
-    // pipeline's `setup_environment`; rock-cli no longer links it. Reject
-    // rather than silently ignore so a profiling invocation fails loudly.
-    if args.trace {
-        eprintln!(
-            "Error: --trace is not supported (the perfetto tracing path lived in the removed rock pipeline)"
-        );
-        rock_cli::invocation_log::exit(1);
     }
 
     (registrations.initialize_process)(&args);

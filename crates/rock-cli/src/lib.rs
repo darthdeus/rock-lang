@@ -146,7 +146,6 @@ pub struct Args {
     pub target_os: Option<String>,
     /// `--var NAME=VALUE` overrides, raw; parsed/validated at resolution.
     pub build_var_overrides: Vec<String>,
-    pub trace: bool,
     pub timeout: u64,
     pub no_timeout: bool,
     pub update_snapshots: bool,
@@ -279,8 +278,6 @@ impl Args {
                 .help("Artifact target for the `platform` builtin (linux, osx, windows). Cross-builds package on one OS for another; defaults to the host."))
             .arg(Arg::new("lua-line-directives").long("lua-line-directives").action(ArgAction::SetTrue)
                 .help("Number emitted Lua with Rock file:line through LuaJIT line directives, so errors, tracebacks and jit.util report Rock source. Needs a LuaJIT 2.1 from commit c41d727d (2026-10-20) or later. A development option: rejected with a --channel other than dev. Same as ROCK_SKULL_LINE_DIRECTIVES=1."))
-            .arg(Arg::new("trace").long("trace").action(ArgAction::SetTrue)
-                .help("Enable trace file generation (trace.folded and trace.perfetto) for profiling"))
             .arg(Arg::new("timeout").long("timeout").default_value("60")
                 .value_parser(clap::value_parser!(u64))
                 .help("Timeout for run command in seconds (default: 60)"))
@@ -364,7 +361,6 @@ impl Args {
                 .get_many::<String>("var")
                 .map(|vals| vals.cloned().collect())
                 .unwrap_or_default(),
-            trace: m.get_flag("trace"),
             timeout: *m.get_one::<u64>("timeout").unwrap(),
             no_timeout: m.get_flag("no-timeout"),
             update_snapshots: Default::default(),
