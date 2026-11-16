@@ -21,10 +21,6 @@ mod closure;
 mod deepcopy;
 #[path = "defer_unwind.rs"]
 mod defer_unwind;
-#[path = "differential.rs"]
-mod differential;
-#[path = "emit.rs"]
-mod emit;
 #[path = "enum_boxes.rs"]
 mod enum_boxes;
 #[path = "format_specs.rs"]

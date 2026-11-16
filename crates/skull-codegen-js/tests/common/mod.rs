@@ -164,7 +164,7 @@ fn print_root_program(runtime: &[&str], defs: &str, root: &str) -> String {
     format!("{}\n{defs}\nconsole.log({root}());", runtime.concat())
 }
 
-/// Define a local `eval_int` or `eval_str` that runs `<root>()` under the listed
+/// Define a local `eval_int` that runs `<root>()` under the listed
 /// `skull_codegen_js` runtime pieces, in order. Each file names only the pieces
 /// it needs, so a missing dependency between them still fails.
 #[macro_export]
@@ -172,11 +172,6 @@ macro_rules! runtime_eval {
     (eval_int: $($piece:ident),+ $(,)?) => {
         fn eval_int(defs: &str, root: &str, expect: i64) {
             $crate::common::eval_int(&[$(skull_codegen_js::$piece),+], defs, root, expect);
-        }
-    };
-    (eval_str: $($piece:ident),+ $(,)?) => {
-        fn eval_str(defs: &str, root: &str, expect: &str) {
-            $crate::common::eval_str(&[$(skull_codegen_js::$piece),+], defs, root, expect);
         }
     };
 }
@@ -193,20 +188,6 @@ pub fn eval_int(runtime: &[&str], defs: &str, root: &str, expect: i64) {
         .parse()
         .unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
     assert_eq!(got, expect, "wrong result for `{root}`\n{program}");
-}
-
-/// Evaluate `<root>()` under node and check it prints exactly `expect`.
-pub fn eval_str(runtime: &[&str], defs: &str, root: &str, expect: &str) {
-    if !require_node() {
-        return;
-    }
-    let program = print_root_program(runtime, defs, root);
-    let s = run_node(&program);
-    assert_eq!(
-        s.trim_end_matches('\n'),
-        expect,
-        "wrong result for `{root}`\n{program}"
-    );
 }
 
 /// The id of the `<test>` module.
@@ -320,34 +301,4 @@ pub fn emit_user_err(ws: &bone_core::workspace::Workspace, name: &str) -> String
         Ok(js) => panic!("expected `{name}` to reject, got:\n{js}"),
         Err(e) => e.message,
     }
-}
-
-/// Lower + emit the `@intrinsic` Rock-fallback overload of `name` with `arity`
-/// params, under the JS name `<name>_fb`. Panics if none matches or emit fails.
-/// The Vec overloads (multi-value return) reject, so the first that emits is the
-/// scalar one.
-pub fn emit_scalar(ws: &bone_core::workspace::Workspace, name: &str, arity: usize) -> String {
-    for &mid in ws.module_ids.values() {
-        let module = ws.module(mid);
-        for (fid, f) in module.functions.iter() {
-            if f.name.as_str() != name
-                || f.param_decls.len() != arity
-                || f.inline_body.is_some()
-                || !f
-                    .annotations
-                    .iter()
-                    .any(|a| a.name.name.as_str() == "intrinsic")
-            {
-                continue;
-            }
-            let mf = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                lower_test_ref(ws, mid, fid)
-            }));
-            let Ok(mf) = mf else { continue };
-            if let Ok(js) = skull_codegen_js::emit::emit_fn(ws, &mf, &format!("{name}_fb")) {
-                return js;
-            }
-        }
-    }
-    panic!("no emittable scalar `{name}`/{arity} overload");
 }

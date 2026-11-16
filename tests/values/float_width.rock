@@ -69,3 +69,11 @@ fn test_f32_leaves_agree_across_storage() {
     let (first, _) = NARROW_TILES[0]
     assert(first == local, "stored and scalarized f32 values differ")
 }
+
+// `native_buffer_float` is f32 storage despite its element type.
+@test
+fn test_native_buffer_float_stores_f32() {
+    let b = native_buffer_float(1)
+    b[0] = 0.7
+    assert(b[0] == f32_of_0_7(), "native_buffer_float did not round: {b[0]}")
+}
