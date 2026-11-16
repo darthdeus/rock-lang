@@ -3,6 +3,15 @@
 //! `while let` / `for` range forms built on the same machinery.
 use super::*;
 
+enum LetScrutinee {
+    Generic,
+    Nobox {
+        binding: Idx<BindingInfo>,
+        shape: ValueShape,
+    },
+    Tuple(TupleRetShape),
+}
+
 impl<'a> Builder<'a> {
     /// `match scrut { pat => body, ... }` as a value. Each arm is a test block
     /// (branch to its body on match, else to the next arm) and a body block that
@@ -815,195 +824,43 @@ impl<'a> Builder<'a> {
         result_shape: Option<RetSlot>,
         statement: bool,
     ) -> Result<Option<ValueRepr>, CompilerError> {
-        enum IfLetScrutinee {
-            Generic,
-            Nobox {
-                binding: Idx<BindingInfo>,
-                values: Vec<Idx<Inst>>,
-                shape: ValueShape,
-                then_bb: Idx<Block>,
-            },
-            Tuple {
-                pattern: Idx<Pattern>,
-                slots: Vec<Idx<Inst>>,
-                shape: TupleRetShape,
-                then_bb: Idx<Block>,
-            },
-        }
-
         let use_repr = result_shape.is_some();
         let shape = result_shape.unwrap_or(RetSlot::Opaque);
-        let result_count = if statement {
-            0
-        } else if use_repr {
-            shape.slot_count()
-        } else {
-            1
+        let alloc_results = |s: &mut Self| -> Vec<Idx<Cell>> {
+            if statement {
+                Vec::new()
+            } else if use_repr {
+                s.fresh_cells(shape.slot_count())
+            } else {
+                let ty = s.current_expr_unit_storage_ty_id();
+                vec![s.f.new_cell_typed(None, ty)]
+            }
         };
-        let result_ty = if statement || use_repr {
-            None
-        } else {
-            self.current_expr_unit_storage_ty_id()
-        };
-        let nobox_binding = match self.body.pattern_arena[pattern] {
-            Pattern::Bind(binding) if self.expr_is_nullable(value) => self
-                .nobox_binding_shape(binding)?
-                .or(self.nullable_value_shape_of(value)?.map(|mut shape| {
-                    shape.nullable = false;
-                    shape
-                }))
-                .map(|shape| (binding, shape)),
-            _ => None,
-        };
-        let tuple_shape = if nobox_binding.is_none() && self.pattern_is_names_only(pattern) {
-            self.nullable_tuple_wire_shape(value)?
-        } else {
-            None
-        };
-
-        let (scrutinee, results, else_bb, join) = if let Some((binding, binding_shape)) =
-            nobox_binding
-        {
-            let mut scrut_shape = binding_shape.clone();
-            scrut_shape.nullable = true;
-            let bundle = self.lower_expr_repr(value)?;
-            let owned = self.snapshot_opaque_value(bundle.value().clone())?;
-            let bundle = ValueBundle::new(bundle.representation(), owned);
-            let leaves = self.repr_to_slot_values_bundle(&bundle, &RetSlot::Leaves(scrut_shape))?;
-            let (present, values) = leaves
-                .split_first()
-                .expect("a nullable shape carries its presence leaf first");
-            let results: Vec<Idx<Cell>> = (0..result_count)
-                .map(|_| {
-                    if use_repr {
-                        self.f.new_cell(None)
-                    } else {
-                        self.f.new_cell_typed(None, result_ty)
-                    }
-                })
-                .collect();
-            let then_bb = self.f.new_block();
-            let else_bb = self.f.new_block();
-            let join = self.f.new_block();
-            self.f.set_term(
-                self.cur,
-                Term::Branch {
-                    cond: *present,
-                    then_bb,
-                    else_bb,
-                },
-            );
-            (
-                IfLetScrutinee::Nobox {
-                    binding,
-                    values: values.to_vec(),
-                    shape: binding_shape,
-                    then_bb,
-                },
-                results,
-                else_bb,
-                join,
-            )
-        } else if let Some(tuple_shape) = tuple_shape {
-            let results: Vec<Idx<Cell>> = (0..result_count)
-                .map(|_| {
-                    if use_repr {
-                        self.f.new_cell(None)
-                    } else {
-                        self.f.new_cell_typed(None, result_ty)
-                    }
-                })
-                .collect();
-            let repr = self.lower_expr_repr(value)?.into_value();
-            let ValueRepr::Tuple {
-                parts,
-                present: Some(present),
-            } = repr
-            else {
-                return Err(gap(
-                    "a nullable tuple scrutinee arrived without its presence slot",
-                ));
-            };
-            let bound_shape = TupleRetShape {
-                slots: tuple_shape.slots,
-                nullable: false,
-            };
-            let slots = self.tuple_repr_to_slots(
-                ValueRepr::Tuple {
-                    parts,
-                    present: None,
-                },
-                &bound_shape,
-            )?;
-            let then_bb = self.f.new_block();
-            let else_bb = self.f.new_block();
-            let join = self.f.new_block();
-            self.f.set_term(
-                self.cur,
-                Term::Branch {
-                    cond: present,
-                    then_bb,
-                    else_bb,
-                },
-            );
-            (
-                IfLetScrutinee::Tuple {
-                    pattern,
-                    slots,
-                    shape: bound_shape,
-                    then_bb,
-                },
-                results,
-                else_bb,
-                join,
-            )
-        } else {
-            let results: Vec<Idx<Cell>> = (0..result_count)
-                .map(|_| {
-                    if use_repr {
-                        self.f.new_cell(None)
-                    } else {
-                        self.f.new_cell_typed(None, result_ty)
-                    }
-                })
-                .collect();
+        let kind = self.let_scrutinee(pattern, value)?;
+        let (results, else_bb, join) = if let LetScrutinee::Generic = kind {
+            let results = alloc_results(self);
             let scrut = self.lower_scrut(value)?;
             let else_bb = self.f.new_block();
             let join = self.f.new_block();
-            if self.expr_is_nullable(value) {
-                let val_v = self.scrut_value(&scrut);
-                let cont = self.f.new_block();
-                self.branch_on_nil(val_v, else_bb, cont);
-                self.cur = cont;
-            }
-            let variants = self.scrut_variants(value);
-            let scrut_enum = self.scrut_enum_name(value);
-            self.match_pattern(&scrut, pattern, else_bb, &variants, true, scrut_enum)?;
-            (IfLetScrutinee::Generic, results, else_bb, join)
+            self.match_let(pattern, value, &scrut, else_bb)?;
+            (results, else_bb, join)
+        } else {
+            // Kept apart from the generic arm only to preserve the order cells
+            // and blocks are numbered in.
+            let (results, (present, values)) = if let LetScrutinee::Nobox { .. } = kind {
+                let lowered = self.lower_present_let(value, &kind)?;
+                (alloc_results(self), lowered)
+            } else {
+                let results = alloc_results(self);
+                (results, self.lower_present_let(value, &kind)?)
+            };
+            let then_bb = self.f.new_block();
+            let else_bb = self.f.new_block();
+            let join = self.f.new_block();
+            self.branch_present_let(present, then_bb, else_bb);
+            self.bind_present_let(pattern, kind, &values)?;
+            (results, else_bb, join)
         };
-
-        match scrutinee {
-            IfLetScrutinee::Nobox {
-                binding,
-                values,
-                shape,
-                then_bb,
-            } => {
-                self.cur = then_bb;
-                self.bind_leaves(binding, &values, shape)?;
-            }
-            IfLetScrutinee::Tuple {
-                pattern,
-                slots,
-                shape,
-                then_bb,
-            } => {
-                self.cur = then_bb;
-                let mut idx = 0;
-                self.bind_names_slot(pattern, &RetSlot::Nested(shape), &slots, &mut idx)?;
-            }
-            IfLetScrutinee::Generic => {}
-        }
 
         if statement {
             self.lower_stmt_expr(then_branch)?;
@@ -1051,6 +908,147 @@ impl<'a> Builder<'a> {
 
             self.cur = join;
             Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Load(result)))))
+        }
+    }
+
+    /// How an `if let`/`while let` tests its scrutinee. A nullable `nobox`
+    /// binding and a names-only pattern over a nullable tuple branch on the
+    /// presence leaf they carry, so neither packs a box to compare with nil.
+    fn let_scrutinee(
+        &mut self,
+        pattern: Idx<Pattern>,
+        value: Idx<Expr>,
+    ) -> Result<LetScrutinee, CompilerError> {
+        if let Pattern::Bind(binding) = self.body.pattern_arena[pattern]
+            && self.expr_is_nullable(value)
+            && let Some(shape) = self.nobox_binding_shape(binding)?.or(self
+                .nullable_value_shape_of(value)?
+                .map(|mut shape| {
+                    shape.nullable = false;
+                    shape
+                }))
+        {
+            return Ok(LetScrutinee::Nobox { binding, shape });
+        }
+        if self.pattern_is_names_only(pattern)
+            && let Some(shape) = self.nullable_tuple_wire_shape(value)?
+        {
+            return Ok(LetScrutinee::Tuple(TupleRetShape {
+                slots: shape.slots,
+                nullable: false,
+            }));
+        }
+        Ok(LetScrutinee::Generic)
+    }
+
+    /// Test `value` against an `if let`/`while let` pattern. A miss jumps to
+    /// `miss`; a match leaves `self.cur` where the pattern's names are bound.
+    fn lower_let_test(
+        &mut self,
+        pattern: Idx<Pattern>,
+        value: Idx<Expr>,
+        miss: Idx<Block>,
+    ) -> Result<(), CompilerError> {
+        let kind = self.let_scrutinee(pattern, value)?;
+        if let LetScrutinee::Generic = kind {
+            let scrut = self.lower_scrut(value)?;
+            return self.match_let(pattern, value, &scrut, miss);
+        }
+        let (present, values) = self.lower_present_let(value, &kind)?;
+        let then_bb = self.f.new_block();
+        self.branch_present_let(present, then_bb, miss);
+        self.bind_present_let(pattern, kind, &values)
+    }
+
+    /// A nullable scrutinee misses on nil before its pattern is matched;
+    /// otherwise a plain binding would always match and bind nil.
+    fn match_let(
+        &mut self,
+        pattern: Idx<Pattern>,
+        value: Idx<Expr>,
+        scrut: &Scrut,
+        miss: Idx<Block>,
+    ) -> Result<(), CompilerError> {
+        if self.expr_is_nullable(value) {
+            let val_v = self.scrut_value(scrut);
+            let cont = self.f.new_block();
+            self.branch_on_nil(val_v, miss, cont);
+            self.cur = cont;
+        }
+        let variants = self.scrut_variants(value);
+        let scrut_enum = self.scrut_enum_name(value);
+        self.match_pattern(scrut, pattern, miss, &variants, true, scrut_enum)
+    }
+
+    /// The presence and bound leaves of a presence-carrying scrutinee.
+    fn lower_present_let(
+        &mut self,
+        value: Idx<Expr>,
+        kind: &LetScrutinee,
+    ) -> Result<(Idx<Inst>, Vec<Idx<Inst>>), CompilerError> {
+        match kind {
+            LetScrutinee::Nobox { shape, .. } => {
+                let mut scrut_shape = shape.clone();
+                scrut_shape.nullable = true;
+                let bundle = self.lower_expr_repr(value)?;
+                let owned = self.snapshot_opaque_value(bundle.value().clone())?;
+                let bundle = ValueBundle::new(bundle.representation(), owned);
+                let leaves =
+                    self.repr_to_slot_values_bundle(&bundle, &RetSlot::Leaves(scrut_shape))?;
+                let (&present, values) = leaves
+                    .split_first()
+                    .expect("a nullable shape carries its presence leaf first");
+                Ok((present, values.to_vec()))
+            }
+            LetScrutinee::Tuple(shape) => {
+                let repr = self.lower_expr_repr(value)?.into_value();
+                let ValueRepr::Tuple {
+                    parts,
+                    present: Some(present),
+                } = repr
+                else {
+                    return Err(gap(
+                        "a nullable tuple scrutinee arrived without its presence slot",
+                    ));
+                };
+                let slots = self.tuple_repr_to_slots(
+                    ValueRepr::Tuple {
+                        parts,
+                        present: None,
+                    },
+                    shape,
+                )?;
+                Ok((present, slots))
+            }
+            LetScrutinee::Generic => Err(gap("a generic let scrutinee carries no presence")),
+        }
+    }
+
+    fn branch_present_let(&mut self, present: Idx<Inst>, then_bb: Idx<Block>, miss: Idx<Block>) {
+        self.f.set_term(
+            self.cur,
+            Term::Branch {
+                cond: present,
+                then_bb,
+                else_bb: miss,
+            },
+        );
+        self.cur = then_bb;
+    }
+
+    fn bind_present_let(
+        &mut self,
+        pattern: Idx<Pattern>,
+        kind: LetScrutinee,
+        values: &[Idx<Inst>],
+    ) -> Result<(), CompilerError> {
+        match kind {
+            LetScrutinee::Nobox { binding, shape } => self.bind_leaves(binding, values, shape),
+            LetScrutinee::Tuple(shape) => {
+                let mut idx = 0;
+                self.bind_names_slot(pattern, &RetSlot::Nested(shape), values, &mut idx)
+            }
+            LetScrutinee::Generic => Ok(()),
         }
     }
 
@@ -1203,22 +1201,7 @@ impl<'a> Builder<'a> {
         self.f.set_term(self.cur, Term::Goto(header));
 
         self.cur = header;
-        let variants = self.scrut_variants(value);
-        let scrut_enum = self.scrut_enum_name(value);
-        let scrut = self.lower_scrut(value)?;
-        // A nullable scrutinee (`while let v = some_opt`) exits the loop on nil
-        // (the runtime value of a `T?` is the unwrapped value or nil) — mirrors
-        // `if let`. Without this, a plain Bind always "matches" and the loop runs
-        // with `v = nil`, then a use of `v` faults. (A flat-field scrutinee is
-        // never nullable, so `scrut_value` is a plain `Val` here.)
-        if self.expr_is_nullable(value) {
-            let val_v = self.scrut_value(&scrut);
-            let cont = self.f.new_block();
-            self.branch_on_nil(val_v, exit, cont);
-            self.cur = cont;
-        }
-        // Match: failure exits the loop; on success `self.cur` holds the bindings.
-        self.match_pattern(&scrut, pattern, exit, &variants, true, scrut_enum)?;
+        self.lower_let_test(pattern, value, exit)?;
         self.loop_targets.push((header, exit, self.defers.len()));
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();

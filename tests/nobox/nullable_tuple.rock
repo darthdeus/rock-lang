@@ -155,6 +155,46 @@ fn a_hole_does_not_make_an_absent_tuple_present() -> int {
     if let (v, _) = maybe(false) { return v.x } else { return 1 }
 }
 
+// `while let` tests the same presence slot on every iteration.
+
+global countdown: int = 0
+
+fn next_pair() -> (NV, int)? {
+    countdown = countdown - 1
+    if countdown >= 0 { return (NV { x: countdown, y: 1 }, countdown * 10) }
+    return null
+}
+
+fn next_nv() -> NV? {
+    countdown = countdown - 1
+    if countdown >= 0 { return NV { x: countdown, y: 1 } }
+    return null
+}
+
+@test(returns = 36)
+fn while_let_destructures_each_present_nullable_tuple() -> int {
+    countdown = 3
+    let sum = 0
+    while let (v, n) = next_pair() { sum = sum + v.x + v.y + n }
+    return sum
+}
+
+@test(returns = 33)
+fn while_let_holes_consume_their_slots() -> int {
+    countdown = 3
+    let sum = 0
+    while let (_, n) = next_pair() { sum = sum + n + 1 }
+    return sum
+}
+
+@test(returns = 6)
+fn while_let_binds_each_present_nobox_value() -> int {
+    countdown = 3
+    let sum = 0
+    while let v = next_nv() { sum = sum + v.x + v.y }
+    return sum
+}
+
 // --- `??` ---
 //
 // The lhs presence SLOT is the branch condition. Going through the boxed path
