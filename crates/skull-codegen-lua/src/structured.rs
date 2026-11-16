@@ -21,7 +21,6 @@
 //! time the label would be printed.
 
 use super::*;
-use crate::frame_limits::ControlLines;
 use skull_mir::cfg::structure::{Placement, Succ, place};
 
 #[inline]
@@ -199,39 +198,8 @@ struct Walk<'w, 'e> {
     /// Open loops, innermost last, with where each one's `break`s start in
     /// `breaks`.
     loops: Vec<(Idx<Block>, usize)>,
-    /// What the jump-length model needs.
-    control: ControlLines,
     breaks: Vec<u32>,
     escapes: Vec<u32>,
-    /// `(line, key, jump instruction)` of each `goto` and `(key, line)` of
-    /// each label; see [`key`].
-    gotos: Vec<(u32, u32, u8)>,
-    labels: Vec<(u32, u32)>,
-}
-
-/// The label kinds a structured body prints, each named by its block.
-#[derive(Clone, Copy)]
-enum Label {
-    /// `L<block>`: a follower that some edge reaches by `goto`.
-    Follower = 0,
-    /// `c<block>`: the end of a `for` loop's body.
-    Continue = 1,
-    /// `w<block>`: the header of a loop other than a `for`.
-    Header = 2,
-}
-
-impl Label {
-    fn prefix(self) -> &'static str {
-        match self {
-            Label::Follower => "L",
-            Label::Continue => "c",
-            Label::Header => "w",
-        }
-    }
-}
-
-fn key(kind: Label, b: Idx<Block>) -> u32 {
-    4 * raw(b) + kind as u32
 }
 
 /// An open `if`/`elseif` ladder: the conditional jump still waiting for the
@@ -246,7 +214,7 @@ impl Walk<'_, '_> {
     /// Write a control line that compiles to `instructions` jumps or loop
     /// instructions at least; returns its index in `control`.
     fn line(&mut self, s: &str, instructions: u8) -> u32 {
-        let at = self.control.line(self.out.len(), instructions);
+        let at = self.em.control.line(self.out.len(), instructions);
         self.out.push(' ');
         self.out.push_str(s);
         self.out.push('\n');
@@ -254,36 +222,17 @@ impl Walk<'_, '_> {
     }
 
     fn jump(&mut self, from: (u32, u8), to: (u32, u8)) {
-        self.control.jumps.push((from.0, from.1, to.0, to.1));
+        self.em.control.jump(from, to);
     }
 
-    /// `::<kind><block>::`.
-    fn label(&mut self, kind: Label, b: Idx<Block>) {
-        let at = self.control.line(self.out.len(), 0);
-        self.control.names += 1;
-        self.labels.push((key(kind, b), at));
-        self.out.push_str(" ::");
-        self.out.push_str(kind.prefix());
-        push_uint(self.out, self.em.func.emit_block_id(b));
-        self.out.push_str("::\n");
-    }
-
-    /// `goto <kind><block>`. Only a jump back to a loop header is preceded by
-    /// the `LOOP` instruction LuaJIT counts hotness with.
     fn goto(&mut self, kind: Label, b: Idx<Block>) {
         match kind {
             Label::Follower => self.goto_ref[bx(b)] = true,
             Label::Continue => self.cont_ref[bx(b)] = true,
             Label::Header => {}
+            Label::Block => unreachable!("flat labels are not structured targets"),
         }
-        let jump = u8::from(matches!(kind, Label::Header));
-        let at = self.control.line(self.out.len(), jump + 1);
-        self.control.names += 1;
-        self.gotos.push((at, key(kind, b), jump));
-        self.out.push_str(" goto ");
-        self.out.push_str(kind.prefix());
-        push_uint(self.out, self.em.func.emit_block_id(b));
-        self.out.push('\n');
+        self.em.write_goto(self.out, kind, b);
     }
 
     fn ladder(&self) -> Ladder {
@@ -305,7 +254,7 @@ impl Walk<'_, '_> {
         } else {
             2
         };
-        let at = self.control.line(self.out.len(), escape + test);
+        let at = self.em.control.line(self.out.len(), escape + test);
         if !lad.first {
             self.escapes.push(at);
         }
@@ -377,7 +326,7 @@ impl Walk<'_, '_> {
             Some((&last, rest)) => {
                 self.with_followers(rest, Follow::Block(last), inner);
                 if self.goto_ref[bx(last)] {
-                    self.label(Label::Follower, last);
+                    self.em.write_label(self.out, Label::Follower, last);
                 }
                 self.tree(last, follow);
             }
@@ -401,15 +350,15 @@ impl Walk<'_, '_> {
             self.visited[bx(h)] = true;
             self.visited[bx(latch)] = true;
             let body_entry = self.em.loops[&h].body_entry;
-            let em = &*self.em;
+            let em = &mut *self.em;
             // Dead on entry to the header is dead for the whole loop unless
             // redefined, so the header's kills go once, above it.
             em.write_kills(self.out, em.kills.at_entry(h));
-            let head = self.control.line(self.out.len(), 1);
+            let head = em.control.line(self.out.len(), 1);
             em.write_for_head(self.out, h);
             self.with_followers(&inside, Follow::Cont(h), Inner::Tree(body_entry));
             if self.cont_ref[bx(h)] {
-                self.label(Label::Continue, h);
+                self.em.write_label(self.out, Label::Continue, h);
             }
             let em = &*self.em;
             if latch != h {
@@ -422,7 +371,7 @@ impl Walk<'_, '_> {
             self.jump((end, 0), (head, 1));
             end
         } else {
-            self.label(Label::Header, h);
+            self.em.write_label(self.out, Label::Header, h);
             self.with_followers(&inside, Follow::Cont(h), Inner::Node(h));
             if self.reaches_end.get() {
                 self.goto(Label::Header, h);
@@ -608,7 +557,7 @@ impl Walk<'_, '_> {
             // A `break` lands where the `for` falls out to its exit.
             if i + 1 == depth && counted && self.sh.thread(self.em.loops[&h].exit) == t {
                 let at = self.line("break", 1);
-                self.control.names += 1;
+                self.em.control.names += 1;
                 self.breaks.push(at);
                 return;
             }
@@ -631,13 +580,8 @@ impl Walk<'_, '_> {
 }
 
 /// Print the structured body of `em`'s function from `entry` into `out`,
-/// returning its control lines for the jump-length model.
-pub(crate) fn emit_body(
-    em: &mut Emitter<'_>,
-    shape: &Shape,
-    entry: Idx<Block>,
-    out: &mut String,
-) -> ControlLines {
+/// recording its control lines for the jump-length model.
+pub(crate) fn emit_body(em: &mut Emitter<'_>, shape: &Shape, entry: Idx<Block>, out: &mut String) {
     let n = em.func.blocks.len();
     let mut walk = Walk {
         em,
@@ -648,24 +592,8 @@ pub(crate) fn emit_body(
         visited: vec![false; n],
         reaches_end: std::cell::Cell::new(false),
         loops: Vec::new(),
-        control: ControlLines::default(),
         breaks: Vec::new(),
         escapes: Vec::new(),
-        gotos: Vec::new(),
-        labels: Vec::new(),
     };
     walk.tree(entry, Follow::End);
-    let Walk {
-        mut control,
-        gotos,
-        mut labels,
-        ..
-    } = walk;
-    labels.sort_unstable();
-    for (from, key, jump) in gotos {
-        if let Ok(i) = labels.binary_search_by_key(&key, |&(k, _)| k) {
-            control.jumps.push((from, jump, labels[i].1, 0));
-        }
-    }
-    control
 }

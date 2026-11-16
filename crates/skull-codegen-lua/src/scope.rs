@@ -296,7 +296,7 @@ pub(crate) fn render_scope(
         alias,
         emitted: vec![false; func.blocks.len()],
         label_refs: Vec::new(),
-        last_goto: std::cell::Cell::new(None),
+        control: ControlLines::default(),
         hoist,
         hoist_names,
         state_slots,
@@ -312,8 +312,8 @@ pub(crate) fn render_scope(
     let body_start = out.len();
     // A coroutine `__step` keeps its flat labels: its yields resume mid-body
     // through a dispatch on the saved state.
-    let control = if frame.is_some() {
-        None
+    let structured = if frame.is_some() {
+        false
     } else if let &[only] = rpo
         && matches!(func.blocks[only].term, Term::Return(_) | Term::Unreachable)
     {
@@ -322,7 +322,7 @@ pub(crate) fn render_scope(
         if !em.emit_block_statements(out, only) {
             em.emit_term(out, &func.blocks[only].term, only);
         }
-        Some(frame_limits::ControlLines::default())
+        true
     } else {
         structured::Shape::analyze(
             func,
@@ -333,8 +333,9 @@ pub(crate) fn render_scope(
             |b| crate::raises(ws, func, b),
         )
         .map(|shape| structured::emit_body(&mut em, &shape, entry, out))
+        .is_some()
     };
-    if control.is_none() {
+    if !structured {
         em.label_refs = block::label_ref_counts(func, rpo, &loops);
         for &bb in rpo {
             em.emit_block(out, bb); // self-skips an already-emitted block (loop body)
@@ -343,14 +344,13 @@ pub(crate) fn render_scope(
     if ctx.frame_limits() {
         let declared =
             params.len() + top_locals + loops.values().map(ForLoop::control_locals).sum::<usize>();
-        let control = control.unwrap_or_default();
         check_body_limits(
             ctx,
             lua_name,
             func,
             &out[body_start..],
             declared,
-            &control,
+            &em.control,
             body_start,
         );
     }

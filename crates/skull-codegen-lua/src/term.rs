@@ -324,7 +324,7 @@ impl Emitter<'_> {
         Some((target, SelectionValue::MinMax(a, b, op)))
     }
 
-    pub(crate) fn emit_term(&self, out: &mut String, term: &Term, bb: Idx<Block>) {
+    pub(crate) fn emit_term(&mut self, out: &mut String, term: &Term, bb: Idx<Block>) {
         match term {
             Term::Return(vals) if !vals.is_empty() => self.mark_inline_operand(out, vals[0]),
             Term::Branch { cond, .. } => self.mark_inline_operand(out, *cond),
@@ -352,7 +352,7 @@ impl Emitter<'_> {
                 }
             }
             Term::Goto(b) => {
-                self.write_goto(out, *b);
+                self.write_goto(out, Label::Block, *b);
             }
             Term::Branch {
                 cond,
@@ -362,16 +362,21 @@ impl Emitter<'_> {
                 if let Some((target, value)) = self.selection(bb, *cond, *then_bb, *else_bb) {
                     self.write_selection(out, bb, target, value);
                     if let SelectionTarget::Cell { join, .. } = target {
-                        self.write_goto(out, join);
+                        self.write_goto(out, Label::Block, join);
                     }
                     return;
+                }
+                let at = self.control.line(out.len(), 3);
+                for target in [*then_bb, *else_bb] {
+                    self.control
+                        .goto(at, 0, 2, Label::Block, self.func.emit_block_id(target));
                 }
                 out.push_str(" if ");
                 self.write_opnd(out, *cond);
                 out.push_str(" then goto ");
-                self.write_label_ref(out, *then_bb);
+                self.write_label_ref(out, Label::Block, *then_bb);
                 out.push_str(" else goto ");
-                self.write_label_ref(out, *else_bb);
+                self.write_label_ref(out, Label::Block, *else_bb);
                 out.push_str(" end\n");
             }
             Term::Switch {
@@ -383,19 +388,25 @@ impl Emitter<'_> {
                 let d = self.opnd_str(*discr);
                 let mut first = true;
                 for (l, b) in cases {
+                    let at = self.control.line(out.len(), 1);
+                    self.control
+                        .goto(at, 0, 0, Label::Block, self.func.emit_block_id(*b));
                     let kw = if first { "if" } else { "elseif" };
                     first = false;
                     let _ = write!(out, " {kw} {d} == ");
                     write_lit(out, l);
                     out.push_str(" then goto ");
-                    self.write_label_ref(out, *b);
+                    self.write_label_ref(out, Label::Block, *b);
                     out.push('\n');
                 }
                 if first {
-                    self.write_goto(out, *default);
+                    self.write_goto(out, Label::Block, *default);
                 } else {
+                    let at = self.control.line(out.len(), 1);
+                    self.control
+                        .goto(at, 0, 0, Label::Block, self.func.emit_block_id(*default));
                     out.push_str(" else goto ");
-                    self.write_label_ref(out, *default);
+                    self.write_label_ref(out, Label::Block, *default);
                     out.push_str(" end\n");
                 }
             }

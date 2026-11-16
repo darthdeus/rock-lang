@@ -85,7 +85,7 @@ impl Emitter<'_> {
             .unwrap_or(name)
     }
 
-    fn try_emit_inline_lua_splice(&self, out: &mut String, id: Idx<Inst>) -> bool {
+    fn try_emit_inline_lua_splice(&mut self, out: &mut String, id: Idx<Inst>) -> bool {
         let Inst::Call { func, args } = &self.func.insts[id] else {
             return false;
         };
@@ -104,7 +104,7 @@ impl Emitter<'_> {
     /// unit body, or a single TAIL `return`. Early / multiple returns fall back to
     /// a call -- rewriting those line-by-line would drop the control flow.
     fn splice_inline_lua(
-        &self,
+        &mut self,
         out: &mut String,
         callee: &Function,
         args: &[Idx<Inst>],
@@ -193,6 +193,7 @@ impl Emitter<'_> {
         if block {
             out.push_str(" end\n");
         }
+        self.control.raw_lua(&out[splice_start..], splice_start);
         // Operands were rendered into scratch strings, so their allocation
         // sites recorded scratch offsets. An instrumented site is found by its
         // ID; an uninstrumented one gets the splice's first line.

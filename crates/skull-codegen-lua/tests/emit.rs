@@ -879,6 +879,33 @@ fn inline_lua_with_inline_annotation_is_spliced() {
 }
 
 #[test]
+fn spliced_lua_control_counts_toward_the_body_limits() {
+    let mut body = String::new();
+    for i in 0..32_739 {
+        body.push_str(&format!("goto bb{i}\n::bb{i}::\n"));
+    }
+    let src =
+        format!("@inline inline(lua) fn many() = \"\"\"\n{body}\"\"\"\nfn run() {{ many() }}");
+    let (ws, mid) = stdlib_workspace(&src);
+    let fid = test_fn(&ws, mid, "run");
+    let (func, interner) = common::lower_test_ref(&ws, mid, fid).expect("lower");
+    let ctx = CodegenCtx::new(&ws);
+    emit_function(
+        &ws,
+        &ctx,
+        &interner,
+        FuncRef {
+            module: mid,
+            func: fid,
+        },
+        &func,
+        None,
+    );
+    let error = ctx.take_rejection().expect("Lua name-limit rejection");
+    assert!(error.message.contains("LJ_MAX_VSTACK"), "{error:?}");
+}
+
+#[test]
 fn inline_lua_without_inline_annotation_is_called() {
     // Plain inline(lua) (no @inline) is still emitted as a function and CALLED --
     // splicing is opt-in (heavy unconditional inlining bloats code / traces).

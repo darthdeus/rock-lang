@@ -188,29 +188,21 @@ impl Emitter<'_> {
     /// after a label: LuaJIT nests one syntax level per label in a run of
     /// them, so a long chain of empty blocks would overflow its limit.
     fn drop_fallthrough_goto(&mut self, out: &mut String, bb: Idx<Block>) {
-        if let Some((start, end, target)) = self.last_goto.take()
+        if let Some((start, end, target)) = self.control.last_goto.take()
             && target == bb
             && end == out.len()
             && !out[..start].ends_with("::\n")
         {
             out.truncate(start);
+            self.control.pop_goto(start);
             self.label_refs[raw(bb) as usize] -= 1;
         }
     }
 
-    fn write_block_label(&self, out: &mut String, bb: Idx<Block>) {
-        if self.label_refs[raw(bb) as usize] == 0 {
-            return;
+    fn write_block_label(&mut self, out: &mut String, bb: Idx<Block>) {
+        if self.label_refs[raw(bb) as usize] != 0 {
+            self.write_label(out, Label::Block, bb);
         }
-        out.push_str(" ::bb");
-        push_uint(out, self.func.emit_block_id(bb));
-        out.push_str("::\n");
-    }
-
-    /// The label an edge to `t` names: `t`'s own block label.
-    pub(crate) fn write_label_ref(&self, out: &mut String, t: Idx<Block>) {
-        out.push_str("bb");
-        push_uint(out, self.func.emit_block_id(t));
     }
 
     /// Report what an earlier pass should have removed. The MIR verifier
@@ -224,14 +216,6 @@ impl Emitter<'_> {
                 self.func.name
             )),
         );
-    }
-
-    pub(crate) fn write_goto(&self, out: &mut String, t: Idx<Block>) {
-        let start = out.len();
-        out.push_str(" goto ");
-        self.write_label_ref(out, t);
-        out.push('\n');
-        self.last_goto.set(Some((start, out.len(), t)));
     }
 
     /// The statements of `bb` and its terminator, without its label.
@@ -433,7 +417,7 @@ impl Emitter<'_> {
         }
         out.push_str(" end\n");
         scope_guard::close(self.func, header);
-        self.write_goto(out, exit);
+        self.write_goto(out, Label::Block, exit);
     }
 }
 

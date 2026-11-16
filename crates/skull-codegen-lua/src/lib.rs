@@ -20,6 +20,7 @@
 
 mod binding;
 mod block;
+mod control;
 mod effect;
 mod for_loops;
 mod forward;
@@ -44,6 +45,7 @@ mod trace_frames;
 mod value;
 
 pub use binding::*;
+use control::{ControlLines, Label};
 use for_loops::*;
 use forward::*;
 use frame_check::*;
@@ -1005,9 +1007,7 @@ struct Emitter<'a> {
     emitted: Vec<bool>,
     /// Dense `raw(block) -> edges that goto it`; a block with none is unlabeled.
     label_refs: Vec<u32>,
-    /// The last whole-line `goto` written: its start and end offsets in the
-    /// output and its target, so a goto to the very next block can be dropped.
-    last_goto: std::cell::Cell<Option<(usize, usize, Idx<Block>)>>,
+    control: ControlLines,
     /// All-constant `MakeValueStruct` insts hoisted to a module-scope global:
     /// `inst -> group`. A reference emits `hoist_names[group]`; the statement is
     /// skipped (the def is emitted once, before the function).
