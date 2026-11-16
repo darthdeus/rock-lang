@@ -253,7 +253,7 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
                     "`@artifact_catalog` catalog= must not be empty".to_string(),
                 ));
             }
-            if !catalogs.contains_key(&catalog) {
+            let Some(plan_catalog) = catalogs.get_mut(&catalog) else {
                 return Err(CompilerError::new_with_label(
                     ann.span,
                     format!(
@@ -261,7 +261,7 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
                         function.name
                     ),
                 ));
-            }
+            };
             if !function.generics.is_empty()
                 || !function.param_decls.is_empty()
                 || !function.is_extern
@@ -309,15 +309,6 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
                         ),
                     )
                 })?;
-            let Some(plan_catalog) = catalogs.get_mut(&catalog) else {
-                return Err(CompilerError::new_with_label(
-                    ann.span,
-                    format!(
-                        "artifact catalog accessor `{}` names unknown catalog `{catalog}`",
-                        function.name
-                    ),
-                ));
-            };
             if plan_catalog.accessor.is_some() {
                 return Err(CompilerError::new_with_label(
                     ann.span,
@@ -360,7 +351,8 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
                         ),
                     ));
                 }
-                let Some(return_ty) = function.return_ty else {
+                let Some(return_ty) = function.return_ty.filter(|ty| *ty != ws.builtins.unit())
+                else {
                     return Err(CompilerError::new_with_label(
                         function.span,
                         format!(
@@ -369,15 +361,6 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
                         ),
                     ));
                 };
-                if return_ty == ws.builtins.unit() {
-                    return Err(CompilerError::new_with_label(
-                        function.span,
-                        format!(
-                            "artifact definition target `{}` must return a concrete definition",
-                            function.name
-                        ),
-                    ));
-                }
                 if let Some(expected_type) = catalogs
                     .get(&role.catalog)
                     .and_then(|catalog| catalog.definition_type.as_ref())
