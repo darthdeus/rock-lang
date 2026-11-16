@@ -46,37 +46,27 @@ fn main() {
     );
 }
 
-/// One generic function called at two element types is TWO instances, even
-/// when neither argument requires a representation-specific lowering.
+/// Instance identity: one generic called at two types is two instances; a
+/// generic caller passes its OWN binding down; and two nominals with
+/// identical leaves -- the S 20g.2 adversary -- do not collapse.
 #[test]
-fn one_generic_two_arguments_is_two_instances() {
-    let (ws, g) = graph_of(
-        r#"
+fn each_distinct_instantiation_is_its_own_instance() {
+    let cases = [
+        (
+            "two arguments",
+            r#"
 fn ident<T>(x: T) -> T { return x }
 fn main() {
     let a = ident(1)
     let b = ident("s")
 }
 "#,
-    );
-    let syms = g.manifest_lines(&ws);
-    let idents: Vec<&String> = syms.iter().filter(|s| s.contains("ident")).collect();
-    assert_eq!(
-        idents.len(),
-        2,
-        "expected ident<int> and ident<string> as distinct instances, got {idents:?}"
-    );
-    assert!(idents.iter().any(|s| s.ends_with("<int>")), "{idents:?}");
-    assert!(idents.iter().any(|s| s.ends_with("<string>")), "{idents:?}");
-}
-
-/// Transitive instantiation: a generic caller passes its OWN binding down, so
-/// the callee's instance is decided by the caller's substitution rather than by
-/// the inner call site alone.
-#[test]
-fn instantiation_flows_through_a_generic_caller() {
-    let (ws, g) = graph_of(
-        r#"
+            "ident",
+            ["<int>", "<string>"],
+        ),
+        (
+            "through a generic caller",
+            r#"
 fn inner<T>(x: T) -> T { return x }
 fn outer<T>(x: T) -> T { return inner(x) }
 fn main() {
@@ -84,17 +74,35 @@ fn main() {
     let b = outer(true)
 }
 "#,
-    );
-    let syms = g.manifest_lines(&ws);
-    for want in ["<int>", "<bool>"] {
-        assert!(
-            syms.iter()
-                .any(|s| s.contains("inner") && s.ends_with(want)),
-            "inner was not instantiated at {want}: {:?}",
-            syms.iter()
-                .filter(|s| s.contains("inner"))
-                .collect::<Vec<_>>()
-        );
+            "inner",
+            ["<int>", "<bool>"],
+        ),
+        (
+            "same-shape nominals",
+            r#"
+value P { x: float, y: float }
+value Q { x: float, y: float }
+fn ident<T>(v: T) -> T { return v }
+fn main() {
+    let p = ident(P { x: 1.0, y: 2.0 })
+    let q = ident(Q { x: 1.0, y: 2.0 })
+}
+"#,
+            "ident",
+            ["<P>", "<Q>"],
+        ),
+    ];
+    for (label, src, name, args) in cases {
+        let (ws, g) = graph_of(src);
+        let lines = g.manifest_lines(&ws);
+        let found: Vec<&String> = lines.iter().filter(|s| s.contains(name)).collect();
+        assert_eq!(found.len(), args.len(), "{label}: {found:?}");
+        for arg in args {
+            assert!(
+                found.iter().any(|s| s.ends_with(arg)),
+                "{label}: `{name}` was not instantiated at {arg}: {found:?}"
+            );
+        }
     }
 }
 
@@ -143,61 +151,6 @@ fn main() { near(); far() }
     assert_eq!(
         instance_graph::manifest_digest(&ws, &fwd),
         instance_graph::manifest_digest(&ws, &rev)
-    );
-}
-
-/// Two nominals with identical leaves must NOT collapse into one instance --
-/// the S 20g.2 adversary, carried through from `MonoTy` into instance identity.
-#[test]
-fn same_shape_nominals_produce_distinct_instances() {
-    let (ws, g) = graph_of(
-        r#"
-value P { x: float, y: float }
-value Q { x: float, y: float }
-fn ident<T>(v: T) -> T { return v }
-fn main() {
-    let p = ident(P { x: 1.0, y: 2.0 })
-    let q = ident(Q { x: 1.0, y: 2.0 })
-}
-"#,
-    );
-    let syms = g.manifest_lines(&ws);
-    let idents: Vec<&String> = syms.iter().filter(|s| s.contains("ident")).collect();
-    assert_eq!(
-        idents.len(),
-        2,
-        "P and Q must not share an instance: {idents:?}"
-    );
-    assert!(idents.iter().any(|s| s.ends_with("<P>")), "{idents:?}");
-    assert!(idents.iter().any(|s| s.ends_with("<Q>")), "{idents:?}");
-}
-
-/// A `for` over a user collection contributes an `iterator-next` edge with a
-/// CONCRETE witness instance (plan S 12). Without reading `next_generics` the
-/// witness has no instantiation and the edge is lost entirely -- which is how
-/// the first version of this walk reported zero iterator edges over the whole
-/// corpus while looking healthy.
-#[test]
-fn iterator_next_witness_is_instantiated() {
-    let (_ws, g) = graph_of(
-        r#"
-fn main() {
-    let xs: [int] = [1, 2, 3]
-    let total = 0
-    for v in xs.iter().map(_ + 1) { total = total + v }
-}
-"#,
-    );
-    let nexts = g
-        .edges()
-        .filter(|e| e.kind == EdgeKind::IteratorNext)
-        .count();
-    assert!(nexts > 0, "no iterator-next edge was recorded");
-    assert!(
-        g.edges()
-            .filter(|e| e.kind == EdgeKind::IteratorNext)
-            .all(|e| !e.to.args.is_empty()),
-        "an iterator-next witness reached a generic callee with no instantiation"
     );
 }
 
@@ -306,42 +259,10 @@ fn main() {
     );
 }
 
-/// A Rock function taken as a VALUE is an edge. The known-positive fixture
-/// `bbc06d767` asked for: the first attempt at this edge kind searched
-/// `resolved_overload_calls` and measured zero, which is indistinguishable from
-/// "the corpus has none" without a fixture that MUST produce one.
-///
-/// bone records nothing in that map here -- `apply` is not overloaded -- which
-/// is why the discriminant is skull's own `Expr::Global`-names-a-function scan
-/// (`lower/expr.rs:75`).
-#[test]
-fn a_function_taken_as_a_value_is_an_edge() {
-    let (ws, g) = graph_of(
-        r#"
-fn bump(x: int) -> int { return x + 1 }
-fn apply(f: fn(int) -> int, v: int) -> int { return f(v) }
-fn main() {
-    let g = bump
-    apply(bump, 1)
-}
-"#,
-    );
-    let vals: Vec<&str> = g
-        .edges()
-        .filter(|e| e.kind == EdgeKind::FnValue)
-        .map(|e| g.symbol(&ws, &e.to))
-        .collect::<Vec<_>>()
-        .leak()
-        .iter()
-        .map(|s| s.as_str())
-        .collect();
-    assert!(
-        vals.iter().any(|s| s.contains("bump")),
-        "`bump` is taken as a value twice and produced no fn-value edge: {vals:?}"
-    );
-}
-
-/// Every level of a combinator chain gets a concrete `next` instance.
+/// Every level of a combinator chain gets a concrete `next` instance. Without
+/// reading `next_generics` a witness has no instantiation and its edge is lost
+/// entirely -- which is how the first version of this walk reported zero
+/// iterator edges over the whole corpus while looking healthy.
 #[test]
 fn a_chained_iterator_reaches_each_next_instance() {
     let (ws, g) = graph_of(
@@ -367,6 +288,12 @@ fn main() {
             "no witness edge for `{want}`; got {witnesses:?}"
         );
     }
+    assert!(
+        g.edges()
+            .filter(|e| e.kind == EdgeKind::IteratorNext)
+            .all(|e| !e.to.args.is_empty()),
+        "an iterator-next witness reached a generic callee with no instantiation"
+    );
 }
 
 /// A repeated backend makes the whole same-signature set a genuine overload
@@ -477,40 +404,24 @@ fn main() { host_tick(3) }
     }
 }
 
-/// A coroutine instance OWNS helper symbols, and today every one of them is
-/// named from the SOURCE `FuncRef` (`coroutine_emit.rs:21`). Recording the
-/// owning instance beside the name is what lets Stage 3 re-base them.
+/// A coroutine instance OWNS helper symbols, recorded with the owning
+/// instance's identity so emission can name them per instance. The graph's
+/// accounting must match the concrete coroutine plan's declared helpers.
 #[test]
-fn a_coroutine_instance_owns_its_helper_symbols() {
-    let (_ws, g) = graph_of(
-        r#"
+fn coroutine_graph_helpers_match_the_concrete_signature_plan() {
+    let cases = [
+        (
+            r#"
 co fn ticker(n: int) {
     let i = 0
     while i < n { yield; i = i + 1 }
 }
 fn main() { let c = ticker(3) }
 "#,
-    );
-    let helpers: Vec<&str> = g
-        .coroutine_helpers
-        .iter()
-        .filter(|h| h.symbol_today.contains("ticker"))
-        .map(|h| h.suffix)
-        .collect();
-    assert!(
-        helpers.contains(&"__step"),
-        "no `__step` helper: {helpers:?}"
-    );
-    assert!(
-        helpers.contains(&"__resume"),
-        "no `__resume` helper: {helpers:?}"
-    );
-}
-
-#[test]
-fn coroutine_graph_helpers_match_the_concrete_signature_plan() {
-    let (ws, g) = graph_of(
-        r#"
+            &["__step", "__resume"][..],
+        ),
+        (
+            r#"
 nobox value Payload { x: float, y: float }
 enum Event { Tick(Payload) }
 co fn ticker() -> Coroutine<Event> {
@@ -518,42 +429,45 @@ co fn ticker() -> Coroutine<Event> {
 }
 fn main() { let c = ticker(); let _ = c.resume() }
 "#,
-    );
-    let bodies = skull::concrete_body::build(&ws, &g);
-    let mut compared = 0;
-    for (inst, concrete) in bodies.plans.iter() {
-        let f = &ws.module(inst.func.module).functions[inst.func.func];
-        if !f.is_coroutine {
-            continue;
+            &["__advance"][..],
+        ),
+    ];
+    for (src, required) in cases {
+        let (ws, g) = graph_of(src);
+        let bodies = skull::concrete_body::build(&ws, &g);
+        let mut compared = 0;
+        for (inst, concrete) in bodies.plans.iter() {
+            let f = &ws.module(inst.func.module).functions[inst.func.func];
+            if !f.is_coroutine {
+                continue;
+            }
+            let plan = skull_mir::lower::CoroutinePlan::from_concrete_plan(
+                &ws,
+                g.interner(),
+                concrete,
+                inst.symbol(&ws, g.interner()),
+            )
+            .expect("concrete coroutine plan");
+            let expected: std::collections::BTreeSet<&str> =
+                plan.declared_suffixes().into_iter().collect();
+            let actual: std::collections::BTreeSet<&str> = g
+                .coroutine_helpers
+                .iter()
+                .filter(|helper| helper.owner_identity == g.identity(&ws, inst))
+                .map(|helper| helper.suffix)
+                .collect();
+            assert_eq!(
+                actual, expected,
+                "graph helper accounting drifted from the plan"
+            );
+            for suffix in required {
+                assert!(actual.contains(suffix), "no `{suffix}` helper: {actual:?}");
+            }
+            compared += 1;
         }
-        let plan = skull_mir::lower::CoroutinePlan::from_concrete_plan(
-            &ws,
-            g.interner(),
-            concrete,
-            inst.symbol(&ws, g.interner()),
-        )
-        .expect("concrete coroutine plan");
-        let expected: std::collections::BTreeSet<&str> =
-            plan.declared_suffixes().into_iter().collect();
-        let actual: std::collections::BTreeSet<&str> = g
-            .coroutine_helpers
-            .iter()
-            .filter(|helper| helper.owner_identity == g.identity(&ws, inst))
-            .map(|helper| helper.suffix)
-            .collect();
-        assert_eq!(
-            actual, expected,
-            "graph helper accounting drifted from the plan"
-        );
-        assert!(
-            expected.contains("__advance"),
-            "fixture did not produce a yield channel"
-        );
-        compared += 1;
+        assert!(compared > 0, "fixture produced no concrete coroutine plan");
     }
-    assert!(compared > 0, "fixture produced no concrete coroutine plan");
 }
-
 /// S 0g: the manifest must be stable with inlining DISABLED, as well as under a
 /// perturbed discovery order.
 ///
@@ -717,13 +631,19 @@ fn main() { first(); second() }
     assert_eq!(expected, rejections_of(&ws, &reverse, kind));
 }
 
-/// Mutual polymorphic recursion. The type grows around a two-function cycle, so
-/// neither edge on its own changes a function's own arguments -- a self-edge
-/// check alone cannot see this.
+/// The other decided rejections: mutual polymorphic recursion, where the type
+/// grows around a two-function cycle so no single edge changes a function's
+/// own arguments; a GENERIC function taken as a value, which has no call site
+/// to key an instantiation on (THE WATCH ITEM, plan S 0h) and must be rejected
+/// rather than instantiated at an invented type or dropped; and a type argument
+/// no constraint reaches, where every site carrying the unbound variable is
+/// rejected -- `len` is called on the `[T]` that `make` returned.
 #[test]
-fn mutual_changing_instance_recursion_is_rejected() {
-    let (ws, g) = graph_of(
-        r#"
+fn decided_rejections_name_their_sites() {
+    use instance_graph::RejectionKind::*;
+    let cases = [
+        (
+            r#"
 fn ping<T>(x: T, n: int) -> int {
     if n <= 0 { return 0 }
     return pong(x, n - 1)
@@ -734,18 +654,41 @@ fn pong<T>(x: T, n: int) -> int {
 }
 fn main() { ping(1, 3) }
 "#,
-    );
-    let r = rejections_of(
-        &ws,
-        &g,
-        instance_graph::RejectionKind::ChangingInstanceRecursion,
-    );
-    assert!(
-        !r.is_empty(),
-        "mutual polymorphic recursion was not rejected"
-    );
+            ChangingInstanceRecursion,
+            &["ping", "pong"][..],
+        ),
+        (
+            r#"
+fn ident<T>(x: T) -> T { return x }
+fn apply(f: fn(int) -> int, v: int) -> int { return f(v) }
+fn main() {
+    apply(ident, 1)
 }
-
+"#,
+            GenericFnValue,
+            &["ident"][..],
+        ),
+        (
+            r#"
+fn make<T>() -> [T] { return [] }
+fn main() {
+    let xs = make()
+    let n = xs.len()
+}
+"#,
+            UnconstrainedTypeVar,
+            &["make", "len_arr_T"][..],
+        ),
+    ];
+    for (src, kind, names) in cases {
+        let (ws, g) = graph_of(src);
+        let r = rejections_of(&ws, &g, kind);
+        assert_eq!(r.len(), names.len(), "{kind:?}: {r:?}");
+        for name in names {
+            assert!(r.iter().any(|s| s.contains(name)), "{kind:?}: {r:?}");
+        }
+    }
+}
 /// CONTROL: ordinary same-instance recursion, direct and mutual, is finite and
 /// must survive. It is the shape the corpus actually contains (11 direct, 9
 /// mutual), so a gate that rejected it would reject every real program.
@@ -803,33 +746,6 @@ fn main() {
     );
 }
 
-/// THE WATCH ITEM (plan S 0h). A GENERIC function taken as a value has no call
-/// site to key an instantiation on -- structurally the same gap as the `iter`
-/// witness, decided the other way. It must be REJECTED with a real diagnostic,
-/// not instantiated at an invented type and not silently dropped.
-#[test]
-fn a_generic_fn_value_is_rejected() {
-    let (ws, g) = graph_of(
-        r#"
-fn ident<T>(x: T) -> T { return x }
-fn apply(f: fn(int) -> int, v: int) -> int { return f(v) }
-fn main() {
-    apply(ident, 1)
-}
-"#,
-    );
-    let r = rejections_of(&ws, &g, instance_graph::RejectionKind::GenericFnValue);
-    assert_eq!(
-        r.len(),
-        1,
-        "expected one generic-fn-value rejection, got {r:?}"
-    );
-    assert!(
-        r[0].contains("ident"),
-        "the rejection does not name the function: {r:?}"
-    );
-}
-
 /// CONTROL: a concrete function taken as a value is ordinary and must survive.
 #[test]
 fn a_concrete_fn_value_is_not_rejected() {
@@ -847,32 +763,15 @@ fn main() {
         rejections_of(&ws, &g, instance_graph::RejectionKind::GenericFnValue).is_empty(),
         "a concrete fn value was rejected"
     );
+    // A function taken as a value is an edge. bone records nothing in
+    // `resolved_overload_calls` here -- `apply` is not overloaded -- so this is
+    // skull's own `Expr::Global`-names-a-function scan.
     assert!(
-        g.edges().any(|e| e.kind == EdgeKind::FnValue),
-        "the fixture produced no fn-value edge to control against"
+        g.edges()
+            .filter(|e| e.kind == EdgeKind::FnValue)
+            .any(|e| fn_name(&ws, e.to.func) == "bump"),
+        "`bump` is taken as a value twice and produced no fn-value edge"
     );
-}
-
-/// A type argument no constraint reaches. `make()`'s `T` is bound by nothing at
-/// the call, in the body, or at the binding -- there is no concrete type to
-/// instantiate, and today it compiles and runs. Decided REJECT (plan S 0h).
-#[test]
-fn an_unconstrained_type_variable_is_rejected() {
-    let (ws, g) = graph_of(
-        r#"
-fn make<T>() -> [T] { return [] }
-fn main() {
-    let xs = make()
-    let n = xs.len()
-}
-"#,
-    );
-    // Every site that carries the unbound variable is rejected, not only the one
-    // that introduced it: `len` is called on the `[T]` it returned.
-    let r = rejections_of(&ws, &g, instance_graph::RejectionKind::UnconstrainedTypeVar);
-    assert_eq!(r.len(), 2, "expected `make` and `len`, got {r:?}");
-    assert!(r.iter().any(|s| s.contains("make")), "{r:?}");
-    assert!(r.iter().any(|s| s.contains("len_arr_T")), "{r:?}");
 }
 
 /// CONTROL: a type variable constrained anywhere in the body -- not at the call
@@ -946,122 +845,82 @@ fn main() {
 // `Iterator`-bounded param (`implicit_iter_args`).
 // ---------------------------------------------------------------------------
 
-/// The `for` head over a type whose `iter` is GENERIC. `iter<T>(Arena<T>)` is
-/// the stdlib's own, so the fixture does not invent a protocol.
+/// A synthesized `iter` witness over a GENERIC `iter` (the stdlib's own
+/// `iter<T>(Arena<T>)`) is instantiated from bone's retained record, through
+/// both routes: the `for` head (`for_iter_protocol`) and an iterable argument
+/// coerced at an `Iterator`-bounded param (`implicit_iter_args`), from a
+/// function body and from an always-emitted global initializer. The `next`
+/// witness's own record is separate and must stay concrete beside it.
 #[test]
-fn a_generic_for_head_iter_witness_is_instantiated() {
-    let (ws, g) = graph_of(
-        r#"
-fn main() {
-    let a: Arena<int> = arena_new()
-    let total = 0
-    for (e, v) in a { total = total + v }
-}
-"#,
-    );
-    let iters: Vec<String> = g
-        .edges()
-        .filter(|e| e.kind == EdgeKind::IteratorIter)
-        .map(|e| g.symbol(&ws, &e.to))
-        .collect();
-    assert!(
-        !iters.is_empty(),
-        "the `for` head recorded no iterator-iter edge"
-    );
-    assert!(
-        iters
-            .iter()
-            .any(|s| s.contains("iter") && s.ends_with("<int>")),
-        "the generic `iter` witness was not instantiated at `int`: {iters:?}"
-    );
-    assert!(
-        !g.unresolved()
-            .any(|u| u.reason == "iter-witness-no-instantiation-record"),
-        "a witness was still filed as having no instantiation record"
-    );
-}
-
-/// The call-argument route. `count<I: Iterator<T>, T>` takes an `Iterator`, so
-/// passing an `Arena<int>` coerces through the same generic `iter` -- a
-/// DIFFERENT bone map (`implicit_iter_args`) reached by a different code path.
-#[test]
-fn a_generic_implicit_iter_witness_is_instantiated() {
-    let (ws, g) = graph_of(
-        r#"
-fn main() {
-    let a: Arena<int> = arena_new()
-    let n = a.count()
-}
-"#,
-    );
-    let iters: Vec<String> = g
-        .edges()
-        .filter(|e| e.kind == EdgeKind::ImplicitIter)
-        .map(|e| g.symbol(&ws, &e.to))
-        .collect();
-    assert!(
-        !iters.is_empty(),
-        "the coerced argument recorded no implicit-iter edge"
-    );
-    assert!(
-        iters
-            .iter()
-            .any(|s| s.contains("iter") && s.ends_with("<int>")),
-        "the generic `iter` witness was not instantiated at `int`: {iters:?}"
-    );
-    assert!(
-        !g.unresolved()
-            .any(|u| u.reason == "implicit-iter-witness-no-instantiation-record"),
-        "a witness was still filed as having no instantiation record"
-    );
-}
-
-#[test]
-fn always_emitted_implicit_iterator_edges_are_instantiated() {
-    let (ws, g) = graph_of(
-        r#"
-global TOTAL: int = {
-    let a: Arena<int> = arena_new()
-    a.count()
-}
-fn main() { print("{TOTAL}") }
-"#,
-    );
-    let symbols: Vec<String> = g.instances.iter().map(|i| g.symbol(&ws, i)).collect();
-    for name in ["count", "iter", "next"] {
+fn generic_iter_witnesses_are_instantiated() {
+    let for_head = "let a: Arena<int> = arena_new()\n    let total = 0\n    for (e, v) in a { total = total + v }";
+    let implicit = "let a: Arena<int> = arena_new()\n    let n = a.count()";
+    for (label, src, kind, no_record) in [
+        (
+            "for head",
+            format!("fn main() {{\n    {for_head}\n}}\n"),
+            EdgeKind::IteratorIter,
+            "iter-witness-no-instantiation-record",
+        ),
+        (
+            "implicit iter",
+            format!("fn main() {{\n    {implicit}\n}}\n"),
+            EdgeKind::ImplicitIter,
+            "implicit-iter-witness-no-instantiation-record",
+        ),
+    ] {
+        let (ws, g) = graph_of(&src);
+        let iters: Vec<String> = g
+            .edges()
+            .filter(|e| e.kind == kind)
+            .map(|e| g.symbol(&ws, &e.to))
+            .collect();
         assert!(
-            symbols
+            iters
                 .iter()
-                .any(|s| s.contains(name) && s.contains("int")),
-            "global initializer did not seed concrete `{name}` reachability: {symbols:?}"
+                .any(|s| s.contains("iter") && s.ends_with("<int>")),
+            "{label}: the generic `iter` witness was not instantiated at `int`: {iters:?}"
+        );
+        assert!(
+            !g.unresolved().any(|u| u.reason == no_record),
+            "{label}: a witness was still filed as having no instantiation record"
+        );
+        let nexts: Vec<&instance_graph::Edge> = g
+            .edges()
+            .filter(|e| e.kind == EdgeKind::IteratorNext || e.kind == EdgeKind::BoundNextWitness)
+            .collect();
+        assert!(!nexts.is_empty(), "{label}: no next witness edge");
+        assert!(
+            nexts.iter().all(|e| !e.to.args.is_empty()),
+            "{label}: a `next` witness lost its instantiation"
         );
     }
-}
-
-#[test]
-fn always_emitted_for_protocol_edges_are_instantiated() {
-    let (ws, g) = graph_of(
-        r#"
-global TOTAL: int = {
-    let a: Arena<int> = arena_new()
-    let total = 0
-    for (_, v) in a { total += v }
-    total
-}
-fn main() { print("{TOTAL}") }
-"#,
-    );
-    let symbols: Vec<String> = g.instances.iter().map(|i| g.symbol(&ws, i)).collect();
-    for name in ["iter", "next"] {
-        assert!(
-            symbols
-                .iter()
-                .any(|s| s.contains(name) && s.contains("int")),
-            "global initializer did not seed concrete `{name}` reachability: {symbols:?}"
-        );
+    for (label, body, names) in [
+        (
+            "for head",
+            format!("{for_head}\n    total"),
+            &["iter", "next"][..],
+        ),
+        (
+            "implicit iter",
+            implicit.replace("let n = ", ""),
+            &["count", "iter", "next"][..],
+        ),
+    ] {
+        let (ws, g) = graph_of(&format!(
+            "global TOTAL: int = {{\n    {body}\n}}\nfn main() {{ print(\"{{TOTAL}}\") }}\n"
+        ));
+        let symbols: Vec<String> = g.instances.iter().map(|i| g.symbol(&ws, i)).collect();
+        for name in names {
+            assert!(
+                symbols
+                    .iter()
+                    .any(|s| s.contains(name) && s.contains("int")),
+                "{label}: global initializer did not seed concrete `{name}` reachability: {symbols:?}"
+            );
+        }
     }
 }
-
 /// CONTROL: a NON-generic `iter` witness needs no record and must keep working
 /// through the empty-substitution path.
 #[test]
@@ -1096,31 +955,6 @@ fn main() {
             .filter(|e| e.kind == EdgeKind::IteratorIter)
             .all(|e| e.to.args.is_empty()),
         "a non-generic witness was given instance arguments: {iters:?}"
-    );
-}
-
-/// CONTROL: the `next` witness's own record (`next_generics`) is untouched by
-/// the `iter` one. Both witnesses of one loop must be concrete, and they are
-/// resolved from two separate records.
-#[test]
-fn the_next_witness_record_is_unchanged() {
-    let (_ws, g) = graph_of(
-        r#"
-fn main() {
-    let a: Arena<int> = arena_new()
-    let total = 0
-    for (e, v) in a { total = total + v }
-}
-"#,
-    );
-    let nexts: Vec<&instance_graph::Edge> = g
-        .edges()
-        .filter(|e| e.kind == EdgeKind::IteratorNext)
-        .collect();
-    assert!(!nexts.is_empty(), "no iterator-next edge was recorded");
-    assert!(
-        nexts.iter().all(|e| !e.to.args.is_empty()),
-        "a `next` witness lost its instantiation"
     );
 }
 
@@ -1207,8 +1041,9 @@ fn main() {
 // Stage 2 gate: graph closure and symbol injectivity.
 // ---------------------------------------------------------------------------
 
-/// Every reached instance was expanded or is a boundary, nothing was cut by the
-/// depth cap, and no two distinct instances encode to one logical symbol.
+/// Every reached instance is EITHER expanded or a boundary and never both --
+/// the partition the closure gate's arithmetic depends on -- nothing was cut by
+/// the depth cap, and no two distinct instances encode to one logical symbol.
 ///
 /// NOT a closure assertion. `is_closed()` also requires that no generic emission
 /// root went uninstantiated, and a program built against the whole stdlib always
@@ -1219,7 +1054,9 @@ fn main() {
 fn every_instance_is_expanded_or_a_boundary() {
     let (ws, g) = graph_of(
         r#"
+value P { x: float, y: float }
 fn ident<T>(x: T) -> T { return x }
+@intrinsic fn portable_op(x: int) -> int { return x + 1 }
 fn main() {
     let xs: [int] = [1, 2, 3]
     let ys: [string] = ["a"]
@@ -1227,15 +1064,32 @@ fn main() {
     ys.push(ident("b"))
     let total = 0
     for v in xs { total = total + v }
+    let ps: [P] = [P { x: 1.0, y: 2.0 }]
+    ps.push(P { x: 3.0, y: 4.0 })
+    portable_op(1)
+    let s = "{ps.len()}"
 }
 "#,
     );
     let c = g.closure(&ws);
     assert!(
         c.unexpanded.is_empty(),
-        "instances with a missing body: {:?}",
+        "neither expanded nor a boundary: {:?}",
         c.unexpanded
     );
+    let both: Vec<String> = g
+        .expanded()
+        .filter(|i| {
+            instance_graph::boundary_class_for(&ws.module(i.func.module).functions[i.func.func])
+                .is_some()
+        })
+        .map(|i| g.identity(&ws, i))
+        .collect();
+    assert!(
+        both.is_empty(),
+        "instances counted as BOTH expanded and boundary: {both:?}"
+    );
+
     assert!(
         c.depth_capped.is_empty(),
         "expansion was cut: {:?}",
@@ -1355,8 +1209,8 @@ fn main() { bump(1) }
 /// / 23 callees, but that is measured on the EMISSION path, which still lowers
 /// shared generic bodies. In the graph every walked body is an instance, so the
 /// binding always has a substitution to resolve against, and no `unbound-generic`
-/// can arise; this fixture is one level deeper than
-/// `instantiation_flows_through_a_generic_caller` -- the inner call binds a
+/// can arise; this fixture is one level deeper than the generic-caller case of
+/// `each_distinct_instantiation_is_its_own_instance` -- the inner call binds a
 /// collection over the caller's own generic rather than the generic itself.
 #[test]
 fn a_callee_binding_inside_a_generic_body_is_concrete() {
@@ -1401,163 +1255,83 @@ fn main() {
 // Stage 2: `@intrinsic` is not unconditionally a boundary.
 // ---------------------------------------------------------------------------
 
-fn is_expanded(ws: &Workspace, g: &instance_graph::InstanceGraph, name: &str) -> bool {
-    g.expanded().any(|i| fn_name(ws, i.func) == name)
-}
-
-fn reached(ws: &Workspace, g: &instance_graph::InstanceGraph, name: &str) -> bool {
-    g.instances.iter().any(|i| fn_name(ws, i.func) == name)
-}
-
 /// HOSTILE: an `@intrinsic` whose body is a portable ROCK fallback. Emit
 /// resolution is `backend mapping > portable fallback > reject`, so the shared
 /// graph must EXPAND that fallback -- it is the body a target with no mapping
-/// runs, and its callees are real edges. Classifying every `@intrinsic` as
-/// foreign made "expanded or boundary" a label rather than a partition: the walk
-/// enumerated the body and recorded its edges while the closure gate excused the
-/// instance as having none.
+/// runs, and its callees are real edges. `@native_required` SKIPS the fallback
+/// rung, and an intrinsic with only a FOREIGN body has nothing to expand: both
+/// stay boundaries with no outgoing edges.
+///
+/// Each helper is GENERIC so that only an instantiation puts it in the graph:
+/// a non-generic callee is an emission root in its own right, so its presence
+/// would prove nothing about whether the fallback body was walked.
 #[test]
-fn a_rock_bodied_intrinsic_expands_its_fallback() {
-    let (ws, g) = graph_of(
-        r#"
+fn an_intrinsic_expands_only_a_portable_rock_fallback() {
+    let cases = [
+        (
+            r#"
 fn helper_called_only_by_the_fallback<T>(x: T) -> T { return x }
 @intrinsic fn portable_op(x: int) -> int {
     return helper_called_only_by_the_fallback(x)
 }
 fn main() { portable_op(1) }
 "#,
-    );
-    assert!(
-        is_expanded(&ws, &g, "portable_op"),
-        "a Rock-bodied intrinsic was excused as a boundary instead of expanded"
-    );
-    // GENERIC on purpose: a non-generic callee is an emission root in its own
-    // right, so its presence would prove nothing about whether the fallback body
-    // was walked. A generic one has an INSTANCE only if some body instantiated
-    // it.
-    assert!(
-        reached(&ws, &g, "helper_called_only_by_the_fallback"),
-        "the fallback body's callee is missing from the graph"
-    );
-    assert!(
-        !g.boundaries.keys().any(|k| k.contains("portable_op")),
-        "a Rock-bodied intrinsic was classified as a foreign boundary: {:?}",
-        g.boundaries.keys().collect::<Vec<_>>()
-    );
-}
-
-/// CONTROL: `@native_required` SKIPS the fallback rung -- a missing backend
-/// mapping is fatal rather than portable -- so its body is never the emitted one
-/// and it stays a boundary even with a Rock body beside it.
-#[test]
-fn a_native_required_intrinsic_stays_a_boundary() {
-    let (ws, g) = graph_of(
-        r#"
+            "portable_op",
+            true,
+            Some("helper_called_only_by_the_fallback"),
+        ),
+        (
+            r#"
 fn unreachable_through_a_native_required_body<T>(x: T) -> T { return x }
 @intrinsic @native_required fn pinned_op(x: int) -> int {
     return unreachable_through_a_native_required_body(x)
 }
 fn main() { pinned_op(1) }
 "#,
-    );
-    assert!(
-        !is_expanded(&ws, &g, "pinned_op"),
-        "a native-required intrinsic expanded a fallback rung it skips"
-    );
-    assert!(
-        g.boundaries.keys().any(|k| k.contains("pinned_op")),
-        "a native-required intrinsic was not classified as a boundary"
-    );
-    // The fixture's callee is named for what must be true of it, and is GENERIC
-    // so that only an instantiation puts it in the graph. Marking the instance
-    // unexpanded while still enumerating its body left this reachable: a body
-    // emission never routes through, contributing edges to the graph.
-    assert!(
-        !reached(&ws, &g, "unreachable_through_a_native_required_body"),
-        "a callee reachable ONLY through a skipped fallback rung is in the graph"
-    );
-    let out: Vec<String> = g
-        .edges()
-        .filter(|e| {
-            ws.module(e.from.func.module).functions[e.from.func.func]
-                .name
-                .as_str()
-                == "pinned_op"
-        })
-        .map(|e| g.symbol(&ws, &e.to))
-        .collect();
-    assert!(
-        out.is_empty(),
-        "a boundary produced outgoing edges: {out:?}"
-    );
-}
-
-/// CONTROL: an intrinsic with only a FOREIGN body has nothing to expand.
-#[test]
-fn a_foreign_bodied_intrinsic_stays_a_boundary() {
-    let (ws, g) = graph_of(
-        r#"
+            "pinned_op",
+            false,
+            Some("unreachable_through_a_native_required_body"),
+        ),
+        (
+            r#"
 @intrinsic inline(lua) fn mapped_op(x: int) -> int = "return x + 1"
 fn main() { mapped_op(1) }
 "#,
-    );
-    assert!(
-        !is_expanded(&ws, &g, "mapped_op"),
-        "an inline-only intrinsic reported an expansion"
-    );
-    assert!(
-        g.boundaries.keys().any(|k| k.contains("mapped_op")),
-        "an inline-only intrinsic was not classified as a boundary"
-    );
-    assert!(
-        !g.edges().any(|e| {
-            ws.module(e.from.func.module).functions[e.from.func.func]
-                .name
-                .as_str()
-                == "mapped_op"
-        }),
-        "a foreign-bodied boundary produced outgoing edges"
-    );
+            "mapped_op",
+            false,
+            None,
+        ),
+    ];
+    for (src, op, expands, helper) in cases {
+        let (ws, g) = graph_of(src);
+        assert_eq!(
+            g.expanded().any(|i| fn_name(&ws, i.func) == op),
+            expands,
+            "`{op}` expansion"
+        );
+        assert_eq!(
+            g.boundaries.keys().any(|k| k.contains(op)),
+            !expands,
+            "`{op}` boundary classification: {:?}",
+            g.boundaries.keys().collect::<Vec<_>>()
+        );
+        if let Some(helper) = helper {
+            assert_eq!(
+                g.instances.iter().any(|i| fn_name(&ws, i.func) == helper),
+                expands,
+                "`{helper}` is reachable exactly when `{op}`'s body is walked"
+            );
+        }
+        if !expands {
+            let out: Vec<String> = g
+                .edges()
+                .filter(|e| fn_name(&ws, e.from.func) == op)
+                .map(|e| g.symbol(&ws, &e.to))
+                .collect();
+            assert!(out.is_empty(), "boundary `{op}` produced edges: {out:?}");
+        }
+    }
 }
-
-/// Every instance is EITHER expanded or classified as a boundary -- the property
-/// the closure gate's arithmetic depends on, asserted directly rather than
-/// inferred from `unexpanded` being empty.
-#[test]
-fn expanded_and_boundary_partition_the_instances() {
-    let (ws, g) = graph_of(
-        r#"
-value P { x: float, y: float }
-@intrinsic fn portable_op(x: int) -> int { return x + 1 }
-fn main() {
-    let xs: [P] = [P { x: 1.0, y: 2.0 }]
-    xs.push(P { x: 3.0, y: 4.0 })
-    portable_op(1)
-    let s = "{xs.len()}"
-}
-"#,
-    );
-    let c = g.closure(&ws);
-    assert!(
-        c.unexpanded.is_empty(),
-        "neither expanded nor a boundary: {:?}",
-        c.unexpanded
-    );
-    let both: Vec<String> = g
-        .expanded()
-        .filter(|i| {
-            instance_graph::boundary_class_for(&ws.module(i.func.module).functions[i.func.func])
-                .is_some()
-        })
-        .map(|i| g.identity(&ws, i))
-        .collect();
-    assert!(
-        both.is_empty(),
-        "instances counted as BOTH expanded and boundary: {both:?}"
-    );
-    assert!(c.expanded > 0 && c.expanded < c.instances);
-}
-
 /// A generic emission root can have concrete instances from other call sites
 /// and STILL be a hole. Its obligation is to exist under a BARE name that
 /// opaque Lua text can call; instances do not discharge that, a boundary
@@ -1944,109 +1718,83 @@ fn main() { let y = F(1) }
     );
 }
 
-/// `record_call`'s own `Unresolved` write, reached the way the corpus reached
-/// it: `instantiate` answers `no-bindings` when a generic call has no
-/// `call_generic_bindings` record. That is not a poisoned program -- the plan
-/// measured `no-bindings` 126 times on valid corpus code before the graph fix
-/// -- so the fixture removes the RECORD from a successfully inferred workspace
-/// rather than corrupting the source.
-///
+/// Each recorder's own `Unresolved` write: `record_call`, `record_witness` and
+/// `record_bound_next` push independently, so covering one says nothing about
+/// the others. `record_call` answers `no-bindings` when a generic call has no
+/// `call_generic_bindings` record, which the plan measured 126 times on valid
+/// corpus code before the graph fix -- so each fixture removes a RECORD from a
+/// successfully inferred workspace rather than corrupting the source.
 /// `BodyInference` is public result data, so this reaches the recorder without
 /// inventing an invalid program, and it is what makes a `Span::unknown`
-/// mutation in `record_call` visible.
+/// mutation in a recorder visible.
+///
+/// The two witness halves both fail through `instantiate_witness` with
+/// `witness-generic-unbound`, so each case requires every site of its reason to
+/// name its own callee, and keeps the OTHER half's edge as a control.
 #[test]
-fn a_call_with_no_binding_record_is_unresolved_with_a_span() {
-    let mut ws = ws_with_stdlib(
-        r#"
-fn ident<T>(x: T) -> T { return x }
-fn main() { let a = ident(1) }
-"#,
-    );
-    let removed = drop_generic_binding_records(&mut ws, "main");
-    // EXACT: `main` has one generic call, so one record is dropped and one site
-    // must appear. This equality only became assertable once the helper stopped
-    // applying a module-local `BodyOwner` to every module -- before that it
-    // removed a same-index stdlib `get` record too and reported 2.
-    assert_eq!(
-        removed, 1,
-        "expected exactly `ident`'s binding record to be dropped"
-    );
-    let g = crate::common::graph_of(&ws);
-    let sites: Vec<&instance_graph::Unresolved> = g
-        .unresolved()
-        .filter(|u| u.reason == "no-bindings")
-        .collect();
-    let callees: Vec<&str> = sites
-        .iter()
-        .map(|u| {
-            ws.module(u.callee.module).functions[u.callee.func]
-                .name
-                .as_str()
-        })
-        .collect();
-    assert_eq!(
-        callees,
-        vec!["ident"],
-        "expected exactly the `ident` call to lose its instantiation, got {:?}",
-        g.unresolved().map(|u| u.reason).collect::<Vec<_>>()
-    );
-    assert_eq!(
-        sites.len(),
-        removed,
-        "one dropped record, one unresolved site"
-    );
-    assert!(
-        sites.iter().all(|u| !instance_graph::is_spanless(&u.span)),
-        "a `no-bindings` unresolved call carries no span: {sites:?}"
-    );
-}
-
-/// The witness recorders' `Unresolved` write, same method: strip the
-/// `for`-protocol witness generics that `instantiate_witness` reads.
-#[test]
-fn a_witness_with_no_generic_record_is_unresolved_with_a_span() {
-    let mut ws = ws_with_stdlib(
-        r#"
+fn a_call_or_witness_with_no_generic_record_is_unresolved_with_a_span() {
+    let for_loop = r#"
 fn main() {
     let xs: [int] = [1, 2, 3]
     let t = 0
     for x in xs { t = t + x }
 }
-"#,
-    );
-    let removed = drop_witness_generic_records(&mut ws, "main");
-    assert_eq!(
-        removed, 1,
-        "expected the one `for`-protocol ITER record to be dropped"
-    );
-    let g = crate::common::graph_of(&ws);
-    // Discriminated by CALLEE, not by reason: both halves fail through
-    // `instantiate_witness` and report `witness-generic-unbound`, so a
-    // reason-only filter would accept the other recorder's site.
-    let sites = unresolved_witnesses_of(&ws, &g, "iter");
-    assert_eq!(
-        sites.len(),
-        removed,
-        "expected exactly one unresolved `iter` witness, got {:?}",
-        all_unresolved(&ws, &g)
-    );
-    assert!(
-        sites.iter().all(|u| !instance_graph::is_spanless(&u.span)),
-        "a witness unresolved site carries no span: {sites:?}"
-    );
-    // CONTROL: the NEXT half is untouched and still resolves. Without it this
-    // fixture would also pass on a `record_bound_next` regression.
-    assert!(
-        g.edges().any(|e| e.kind == EdgeKind::IteratorNext),
-        "the fixture disturbed the next half too, so it does not isolate `record_witness`"
-    );
-    assert!(
-        unresolved_witnesses_of(&ws, &g, "next").is_empty(),
-        "the next half went unresolved as well: {:?}",
-        all_unresolved(&ws, &g)
-    );
+"#;
+    let cases: [(
+        &str,
+        fn(&mut Workspace, &str) -> usize,
+        &str,
+        &str,
+        Option<EdgeKind>,
+    ); 3] = [
+        (
+            "fn ident<T>(x: T) -> T { return x }\nfn main() { let a = ident(1) }\n",
+            drop_generic_binding_records,
+            "no-bindings",
+            "ident",
+            None,
+        ),
+        (
+            for_loop,
+            drop_witness_generic_records,
+            "witness-generic-unbound",
+            "iter",
+            Some(EdgeKind::IteratorNext),
+        ),
+        (
+            for_loop,
+            drop_bound_next_generic_records,
+            "witness-generic-unbound",
+            "next",
+            Some(EdgeKind::IteratorIter),
+        ),
+    ];
+    for (src, drop, reason, callee, control) in cases {
+        let mut ws = ws_with_stdlib(src);
+        // EXACT: each fixture has one such record in `main`, and a helper that
+        // removed a same-index stdlib record too would report 2.
+        assert_eq!(drop(&mut ws, "main"), 1, "{callee}: records dropped");
+        let g = crate::common::graph_of(&ws);
+        let sites: Vec<&instance_graph::Unresolved> =
+            g.unresolved().filter(|u| u.reason == reason).collect();
+        let callees: Vec<&str> = sites.iter().map(|u| fn_name(&ws, u.callee)).collect();
+        assert_eq!(
+            callees,
+            vec![callee],
+            "expected exactly the `{callee}` site to lose its instantiation"
+        );
+        assert!(
+            sites.iter().all(|u| !instance_graph::is_spanless(&u.span)),
+            "an unresolved `{callee}` site carries no span: {sites:?}"
+        );
+        if let Some(kind) = control {
+            assert!(
+                g.edges().any(|e| e.kind == kind),
+                "{callee}: the fixture disturbed the other witness half too"
+            );
+        }
+    }
 }
-
 /// Plan S 9's precondition: a `ConcreteBody`'s type tables are built under the
 /// instance's substitution, so that substitution must be a FUNCTION OF THE
 /// INSTANCE. Nothing structural forces it -- the `VarId` keys come from
@@ -2149,81 +1897,6 @@ fn main_ref(ws: &Workspace) -> skull_mir::mir::FuncRef {
     panic!("no `main`");
 }
 
-/// `record_bound_next`'s own `Unresolved` write. The three recorders do NOT
-/// share one: `record_call`, `record_witness` and `record_bound_next` each push
-/// independently, so covering the `iter` half of a `for` protocol says nothing
-/// about the `next` half.
-#[test]
-fn a_bound_next_with_no_generic_record_is_unresolved_with_a_span() {
-    let mut ws = ws_with_stdlib(
-        r#"
-fn main() {
-    let xs: [int] = [1, 2, 3]
-    let t = 0
-    for x in xs { t = t + x }
-}
-"#,
-    );
-    let removed = drop_bound_next_generic_records(&mut ws, "main");
-    assert_eq!(
-        removed, 1,
-        "expected the one `for`-protocol `next` record to be dropped"
-    );
-    let g = crate::common::graph_of(&ws);
-    // Same discriminant as the iter fixture, pointed at the other callee.
-    let sites = unresolved_witnesses_of(&ws, &g, "next");
-    assert_eq!(
-        sites.len(),
-        removed,
-        "expected exactly one unresolved `next` witness, got {:?}",
-        all_unresolved(&ws, &g)
-    );
-    assert!(
-        sites.iter().all(|u| !instance_graph::is_spanless(&u.span)),
-        "a bound-next unresolved site carries no span: {sites:?}"
-    );
-    // CONTROL: the ITER half is untouched, so its witness still resolves. This
-    // is what separates this fixture from the `record_witness` one -- without
-    // it, either mutation would satisfy both tests.
-    assert!(
-        g.edges().any(|e| e.kind == EdgeKind::IteratorIter),
-        "the fixture disturbed the iter half too, so it does not isolate `record_bound_next`"
-    );
-}
-
-/// Unresolved witness sites whose CALLEE is `fn_name`. The `iter` and `next`
-/// halves of a `for` protocol both fail through `instantiate_witness` with
-/// `witness-generic-unbound`, so the callee is what separates the two
-/// recorders.
-fn unresolved_witnesses_of<'g>(
-    ws: &Workspace,
-    g: &'g instance_graph::InstanceGraph,
-    fn_name: &str,
-) -> Vec<&'g instance_graph::Unresolved> {
-    g.unresolved()
-        .filter(|u| {
-            u.reason == "witness-generic-unbound"
-                && ws.module(u.callee.module).functions[u.callee.func]
-                    .name
-                    .as_str()
-                    == fn_name
-        })
-        .collect()
-}
-
-fn all_unresolved(ws: &Workspace, g: &instance_graph::InstanceGraph) -> Vec<(String, String)> {
-    g.unresolved()
-        .map(|u| {
-            (
-                u.reason.to_string(),
-                ws.module(u.callee.module).functions[u.callee.func]
-                    .name
-                    .to_string(),
-            )
-        })
-        .collect()
-}
-
 /// Run `f` over exactly one body's inference record.
 fn with_body_inference<R>(
     ws: &mut Workspace,
@@ -2287,90 +1960,4 @@ fn drop_bound_next_generic_records(ws: &mut Workspace, fn_name: &str) -> usize {
         }
         n
     })
-}
-
-/// The positive fixture for the `Unresolved` axis of the span census.
-///
-/// **The recursion pass may not search from an instance whose declaration has
-/// exactly one instance graph-wide.**
-///
-/// `detect_changing_instance_recursion` looks for `f<A>` reaching some `f<B>`
-/// with `A != B`, and the reachable set only ever contains instances the graph
-/// HOLDS -- so a declaration with a single instance cannot satisfy it and its
-/// search is fruitless by construction.
-///
-/// This is structural on purpose. The pass's OUTPUT is empty on every program
-/// without polymorphic recursion, so a rejection-output test passes whether the
-/// search is bounded or exhaustive; it cannot be the red for a cost change.
-/// `recursion_starts` can.
-///
-/// The population is counted over ALL instances, leaves included: a declaration's
-/// second instance may have no outgoing edges of its own and so never appear
-/// among the candidate starts, while still being exactly what makes the first
-/// one's search worth running.
-#[test]
-fn the_recursion_search_skips_single_instance_declarations() {
-    let (_ws, g) = graph_of(
-        r#"
-fn passthru<T>(x: T) -> T { return x }
-// Two instances, and each has an outgoing edge of its own -- a leaf pair would
-// never appear among the candidate starts at all.
-fn ident<T>(x: T) -> T { return passthru(x) }
-
-fn only_once(a: int) -> int { return a + 1 }
-fn also_once(a: int) -> int { return only_once(a) + 1 }
-fn third(a: int) -> int { return also_once(a) + 1 }
-
-fn main() {
-    print("{ident(1)} {ident("s")} {third(2)}")
-}
-"#,
-    );
-
-    // Declarations with more than one instance, over EVERY instance the graph
-    // holds rather than only those with outgoing edges.
-    let mut per_decl: std::collections::BTreeMap<(u32, u32), usize> = Default::default();
-    for i in &g.instances {
-        *per_decl
-            .entry((i.func.module.raw(), i.func.func.into_raw().into_u32()))
-            .or_default() += 1;
-    }
-    let multi: std::collections::BTreeSet<(u32, u32)> = per_decl
-        .iter()
-        .filter(|(_, n)| **n > 1)
-        .map(|(k, _)| *k)
-        .collect();
-
-    // The candidate starts are instances with outgoing edges -- what the pass
-    // would search from with no filter at all.
-    let mut candidates: std::collections::BTreeSet<&instance_graph::Instance> = Default::default();
-    for e in g.edges() {
-        candidates.insert(&e.from);
-    }
-    let admissible = candidates
-        .iter()
-        .filter(|i| multi.contains(&(i.func.module.raw(), i.func.func.into_raw().into_u32())))
-        .count();
-
-    // The fixture must actually contain both populations, or this asserts
-    // nothing: single-instance declarations to skip, and a multi-instance one
-    // (`ident`) to keep.
-    assert!(
-        admissible < candidates.len(),
-        "fixture has no single-instance declarations to skip ({admissible} of {})",
-        candidates.len()
-    );
-    assert!(
-        admissible > 0,
-        "fixture has no multi-instance declaration to keep"
-    );
-
-    assert_eq!(
-        g.recursion_starts,
-        admissible,
-        "the pass searched from {} instances but only {admissible} of {} candidates \
-         belong to a declaration with more than one instance",
-        g.recursion_starts,
-        candidates.len()
-    );
 }
