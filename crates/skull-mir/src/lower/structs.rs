@@ -744,21 +744,8 @@ impl<'a> Builder<'a> {
         for (nm, c) in &shape.slots {
             let v = match by_slot.get(nm) {
                 Some(v) => *v,
-                None => {
-                    // This variant has no such field -> pad with the slot's zero.
-                    let zero = match *c {
-                        "int" => Lit::Int(0),
-                        "float" | "double" => Lit::Float(0.0),
-                        "bool" => Lit::Bool(false),
-                        "uint32_t" => Lit::Uint(0),
-                        other => {
-                            return Err(gap(format!(
-                                "enum cdata slot has unknown scalar type `{other}`"
-                            )));
-                        }
-                    };
-                    self.emit_cur(Inst::Const(zero))
-                }
+                // This variant has no such field -> pad with the slot's zero.
+                None => self.emit_cur(Inst::Const(cdata_slot_zero(c)?)),
             };
             parts.push(ValueRepr::Scalar(v));
         }
@@ -1358,12 +1345,7 @@ impl<'a> Builder<'a> {
                 let v = if *nm == slot_name("0") {
                     payload
                 } else {
-                    let zero = match *c {
-                        "float" | "double" => Lit::Float(0.0),
-                        "bool" => Lit::Bool(false),
-                        _ => Lit::Int(0),
-                    };
-                    self.emit_cur(Inst::Const(zero))
+                    self.emit_cur(Inst::Const(cdata_slot_zero(c)?))
                 };
                 parts.push(ValueRepr::Scalar(v));
             }
@@ -1489,4 +1471,18 @@ impl GlobalUniformSource {
             GlobalUniformSource::Boxed { paths, .. } => paths.len(),
         }
     }
+}
+
+fn cdata_slot_zero(ctype: &str) -> Result<Lit, CompilerError> {
+    Ok(match ctype {
+        "int" => Lit::Int(0),
+        "float" | "double" => Lit::Float(0.0),
+        "bool" => Lit::Bool(false),
+        "uint32_t" => Lit::Uint(0),
+        other => {
+            return Err(gap(format!(
+                "enum cdata slot has unknown scalar type `{other}`"
+            )));
+        }
+    })
 }
