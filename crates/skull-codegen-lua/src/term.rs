@@ -267,12 +267,12 @@ impl Emitter<'_> {
         }
     }
 
-    fn write_selection_result(
+    pub(crate) fn write_selection(
         &self,
         out: &mut String,
         bb: Idx<Block>,
         target: SelectionTarget,
-        value: impl FnOnce(&mut String),
+        value: SelectionValue,
     ) {
         out.push(' ');
         match target {
@@ -282,7 +282,22 @@ impl Emitter<'_> {
             }
             SelectionTarget::Return => out.push_str("do return "),
         }
-        value(out);
+        match value {
+            SelectionValue::MinMax(a, b, op) => {
+                out.push_str("math.");
+                out.push_str(op);
+                out.push('(');
+                self.write_opnd(out, a);
+                out.push_str(", ");
+                self.write_opnd(out, b);
+                out.push(')');
+            }
+            SelectionValue::Clamp(value, lo, hi) => {
+                write!(out, "math.max({lo:?}, math.min({hi:?}, ").unwrap();
+                self.write_opnd(out, value);
+                out.push_str("))");
+            }
+        }
         match target {
             SelectionTarget::Cell { join, .. } => {
                 out.push('\n');
@@ -290,32 +305,23 @@ impl Emitter<'_> {
                 if !self.kills.reaches_return(join) {
                     self.write_kills(out, &self.kills.on_edge(bb, join));
                 }
-                if !self.structured {
-                    self.write_goto(out, join);
-                }
             }
             SelectionTarget::Return => out.push_str(" end\n"),
         }
     }
 
-    /// Where a branch the printer folds into a `math.max`/`math.min`
-    /// selection continues: `Some(Some(join))`, `Some(None)` for a returning
-    /// selection, `None` when the branch is not a selection.
-    pub(crate) fn selection_next(
+    pub(crate) fn selection(
         &self,
         bb: Idx<Block>,
         cond: Idx<Inst>,
         then_bb: Idx<Block>,
         else_bb: Idx<Block>,
-    ) -> Option<Option<Idx<Block>>> {
-        let target = match self.numeric_clamp(bb, cond, then_bb, else_bb) {
-            Some((target, ..)) => target,
-            None => self.numeric_selection(bb, cond, then_bb, else_bb)?.0,
-        };
-        Some(match target {
-            SelectionTarget::Cell { join, .. } => Some(join),
-            SelectionTarget::Return => None,
-        })
+    ) -> Option<(SelectionTarget, SelectionValue)> {
+        if let Some((target, value, lo, hi)) = self.numeric_clamp(bb, cond, then_bb, else_bb) {
+            return Some((target, SelectionValue::Clamp(value, lo, hi)));
+        }
+        let (target, a, b, op) = self.numeric_selection(bb, cond, then_bb, else_bb)?;
+        Some((target, SelectionValue::MinMax(a, b, op)))
     }
 
     pub(crate) fn emit_term(&self, out: &mut String, term: &Term, bb: Idx<Block>) {
@@ -353,28 +359,11 @@ impl Emitter<'_> {
                 then_bb,
                 else_bb,
             } => {
-                if let Some((target, value, lo, hi)) =
-                    self.numeric_clamp(bb, *cond, *then_bb, *else_bb)
-                {
-                    self.write_selection_result(out, bb, target, |out| {
-                        write!(out, "math.max({lo:?}, math.min({hi:?}, ").unwrap();
-                        self.write_opnd(out, value);
-                        out.push_str("))");
-                    });
-                    return;
-                }
-                if let Some((target, a, b, op)) =
-                    self.numeric_selection(bb, *cond, *then_bb, *else_bb)
-                {
-                    self.write_selection_result(out, bb, target, |out| {
-                        out.push_str("math.");
-                        out.push_str(op);
-                        out.push('(');
-                        self.write_opnd(out, a);
-                        out.push_str(", ");
-                        self.write_opnd(out, b);
-                        out.push(')');
-                    });
+                if let Some((target, value)) = self.selection(bb, *cond, *then_bb, *else_bb) {
+                    self.write_selection(out, bb, target, value);
+                    if let SelectionTarget::Cell { join, .. } = target {
+                        self.write_goto(out, join);
+                    }
                     return;
                 }
                 out.push_str(" if ");

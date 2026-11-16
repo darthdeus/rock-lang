@@ -308,7 +308,6 @@ pub(crate) fn render_scope(
         kills,
         line_marks,
         bound,
-        structured: false,
     };
     let body_start = out.len();
     // A coroutine `__step` keeps its flat labels: its yields resume mid-body

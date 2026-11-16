@@ -922,6 +922,11 @@ mod emitted_body_header_tests {
 
 type EnumBoxGroups = Vec<(Vec<ustr::Ustr>, (usize, Vec<ustr::Ustr>))>;
 
+enum SelectionValue {
+    MinMax(Idx<Inst>, Idx<Inst>, &'static str),
+    Clamp(Idx<Inst>, f64, f64),
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SelectionTarget {
     Cell { cell: Idx<Cell>, join: Idx<Block> },
@@ -1020,9 +1025,6 @@ struct Emitter<'a> {
     /// Where each statement starts and which instruction it renders, when the
     /// definition is numbered with line directives.
     line_marks: Option<&'a RefCell<Vec<LineMark>>>,
-    /// The structured printer owns control flow: a folded selection does not
-    /// jump to its join.
-    structured: bool,
 }
 
 fn write_lit(out: &mut String, l: &Lit) {

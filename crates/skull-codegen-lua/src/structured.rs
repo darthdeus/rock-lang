@@ -461,9 +461,10 @@ impl Walk<'_, '_> {
                 then_bb,
                 else_bb,
             } => {
-                if let Some(next) = self.em.selection_next(x, cond, then_bb, else_bb) {
-                    self.em.emit_term(self.out, &func.blocks[x].term, x);
-                    if let Some(join) = next {
+                if let Some((target, value)) = self.em.selection(x, cond, then_bb, else_bb) {
+                    self.em.mark_inline_operand(self.out, cond);
+                    self.em.write_selection(self.out, x, target, value);
+                    if let SelectionTarget::Cell { join, .. } = target {
                         self.branch_to(join, follow);
                     }
                     return;
@@ -531,7 +532,7 @@ impl Walk<'_, '_> {
         {
             return None;
         }
-        if self.em.selection_next(b, cond, then_bb, else_bb).is_some() {
+        if self.em.selection(b, cond, then_bb, else_bb).is_some() {
             return None;
         }
         Some((cond, then_bb, else_bb))
@@ -638,7 +639,6 @@ pub(crate) fn emit_body(
     out: &mut String,
 ) -> ControlLines {
     let n = em.func.blocks.len();
-    em.structured = true;
     let mut walk = Walk {
         em,
         sh: shape,
