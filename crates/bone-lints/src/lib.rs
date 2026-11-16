@@ -11,6 +11,7 @@ use bone_core::prelude::*;
 use bone_core::workspace::{BodyInference, BoundNext, BoundTree};
 use rock_core::errors::CompilerErrorLevel;
 use std::collections::BTreeSet;
+use std::hash::Hash;
 
 /// An `unused-var` finding: a local binding that is never read.
 #[derive(Clone, Debug)]
@@ -427,9 +428,7 @@ impl CachedFileFindings {
         }
     }
 
-    /// Rank `module`'s bodies in declaration order, give each a raw row, and
-    /// derive every filtered row.
-    fn index_bodies(&mut self, module: &Module, stats: &mut LintCacheStats) {
+    fn rank_bodies(&mut self, module: &Module) {
         self.owner_order = module.bodies.keys().copied().collect();
         self.owner_rank = self
             .owner_order
@@ -437,6 +436,12 @@ impl CachedFileFindings {
             .enumerate()
             .map(|(rank, &owner)| (owner, rank))
             .collect();
+    }
+
+    /// Rank `module`'s bodies in declaration order, give each a raw row, and
+    /// derive every filtered row.
+    fn index_bodies(&mut self, module: &Module, stats: &mut LintCacheStats) {
+        self.rank_bodies(module);
         for &owner in &self.owner_order {
             self.flat_raw.entry(owner).or_default();
             self.inference_raw.entry(owner).or_default();
@@ -763,18 +768,8 @@ impl LintDependencyIndex {
         for function in old_functions {
             if let Some(declaration) = self.sibling_declarations.remove(&function) {
                 let group = (declaration.name, declaration.signature.clone());
-                if let Some(functions) = self.sibling_groups.get_mut(&group) {
-                    functions.remove(&function);
-                    if functions.is_empty() {
-                        self.sibling_groups.remove(&group);
-                    }
-                }
-                if let Some(functions) = self.sibling_names.get_mut(&declaration.name) {
-                    functions.remove(&function);
-                    if functions.is_empty() {
-                        self.sibling_names.remove(&declaration.name);
-                    }
-                }
+                remove_from_set(&mut self.sibling_groups, &group, &function);
+                remove_from_set(&mut self.sibling_names, &declaration.name, &function);
             }
         }
         for module in ws.user_modules(&FxHashSet::default()) {
@@ -804,14 +799,12 @@ impl LintDependencyIndex {
             .collect();
         stats.sibling_groups_requested += new_groups.difference(&old_groups).count();
         stats.sibling_groups_revisited += old_groups.union(&new_groups).count();
-        for &file in changed_files {
-            if let Some(module) = ws.modules.iter().find(|module| module.file == file) {
-                self.declaration_fingerprints
-                    .insert(file, declaration_fingerprint(ws, module));
-            } else {
-                self.declaration_fingerprints.remove(&file);
-            }
-        }
+        refresh_fingerprints(
+            &mut self.declaration_fingerprints,
+            ws,
+            changed_files,
+            |module| declaration_fingerprint(ws, module),
+        );
         invalidation
     }
 
@@ -919,12 +912,7 @@ impl LintDependencyIndex {
                 continue;
             }
             for target in &old {
-                if let Some(callers) = self.reverse_callers.get_mut(target) {
-                    callers.remove(&body_key);
-                    if callers.is_empty() {
-                        self.reverse_callers.remove(target);
-                    }
-                }
+                remove_from_set(&mut self.reverse_callers, target, &body_key);
             }
             stats.call_edges_retracted += old.len();
             stats.call_edges_installed += new.len();
@@ -1030,12 +1018,11 @@ impl LintDependencyIndex {
                 .unwrap_or_default();
             stats.call_edges_retracted += old_edges.len();
             for target in old_edges {
-                if let Some(callers) = self.reverse_callers.get_mut(&target) {
-                    callers.remove(&(function.0, BodyOwner::Function(function.1)));
-                    if callers.is_empty() {
-                        self.reverse_callers.remove(&target);
-                    }
-                }
+                remove_from_set(
+                    &mut self.reverse_callers,
+                    &target,
+                    &(function.0, BodyOwner::Function(function.1)),
+                );
             }
             self.function_nodes.remove(&function);
             self.declaration_files.remove(&function);
@@ -1087,24 +1074,17 @@ impl LintDependencyIndex {
                 stats.call_edges_retracted += old.len();
                 stats.call_edges_installed += edges.len();
                 for target in old {
-                    if let Some(callers) = self.reverse_callers.get_mut(&target) {
-                        callers.remove(&(function.0, owner));
-                        if callers.is_empty() {
-                            self.reverse_callers.remove(&target);
-                        }
-                    }
+                    remove_from_set(&mut self.reverse_callers, &target, &(function.0, owner));
                 }
                 self.install_edges((function.0, owner), edges);
             }
         }
-        for &file in changed_files {
-            if let Some(module) = ws.modules.iter().find(|module| module.file == file) {
-                self.declaration_fingerprints
-                    .insert(file, declaration_fingerprint(ws, module));
-            } else {
-                self.declaration_fingerprints.remove(&file);
-            }
-        }
+        refresh_fingerprints(
+            &mut self.declaration_fingerprints,
+            ws,
+            changed_files,
+            |module| declaration_fingerprint(ws, module),
+        );
         stats.changed_declarations += invalidation.functions.len();
         invalidation
     }
@@ -1136,12 +1116,7 @@ impl LintDependencyIndex {
             let old = self.body_edges.remove(&key).unwrap_or_default();
             stats.call_edges_retracted += old.len();
             for target in old {
-                if let Some(callers) = self.reverse_callers.get_mut(&target) {
-                    callers.remove(&key);
-                    if callers.is_empty() {
-                        self.reverse_callers.remove(&target);
-                    }
-                }
+                remove_from_set(&mut self.reverse_callers, &target, &key);
                 seeds.insert((target.0, BodyOwner::Function(target.1)));
             }
             self.always_live_bodies.remove(&key);
@@ -1236,12 +1211,7 @@ impl LintDependencyIndex {
                 continue;
             }
             for action in &old {
-                if let Some(callers) = self.action_callers.get_mut(action) {
-                    callers.remove(&body_key);
-                    if callers.is_empty() {
-                        self.action_callers.remove(action);
-                    }
-                }
+                remove_from_set(&mut self.action_callers, action, &body_key);
             }
             affected.extend(old.iter().copied());
             affected.extend(new.iter().copied());
@@ -1297,16 +1267,13 @@ impl LintDependencyIndex {
             }
         }
         if invalidation.names.is_empty() {
-            for &file in changed_files {
-                if let Some(module) = ws.modules.iter().find(|module| module.file == file) {
-                    self.action_declaration_fingerprints.insert(
-                        file,
-                        action_declaration_fingerprint(module, self.action_policy.as_deref()),
-                    );
-                } else {
-                    self.action_declaration_fingerprints.remove(&file);
-                }
-            }
+            let policy = self.action_policy.as_deref();
+            refresh_fingerprints(
+                &mut self.action_declaration_fingerprints,
+                ws,
+                changed_files,
+                |module| action_declaration_fingerprint(module, policy),
+            );
             return invalidation;
         }
 
@@ -1349,25 +1316,17 @@ impl LintDependencyIndex {
                 .collect();
             for action in removed_edges {
                 edges.remove(&action);
-                if let Some(callers) = self.action_callers.get_mut(&action) {
-                    callers.remove(&body);
-                    if callers.is_empty() {
-                        self.action_callers.remove(&action);
-                    }
-                }
+                remove_from_set(&mut self.action_callers, &action, &body);
             }
             self.action_body_edges.insert(body, edges);
         }
-        for &file in changed_files {
-            if let Some(module) = ws.modules.iter().find(|module| module.file == file) {
-                self.action_declaration_fingerprints.insert(
-                    file,
-                    action_declaration_fingerprint(module, self.action_policy.as_deref()),
-                );
-            } else {
-                self.action_declaration_fingerprints.remove(&file);
-            }
-        }
+        let policy = self.action_policy.as_deref();
+        refresh_fingerprints(
+            &mut self.action_declaration_fingerprints,
+            ws,
+            changed_files,
+            |module| action_declaration_fingerprint(module, policy),
+        );
         invalidation
     }
 
@@ -1382,6 +1341,20 @@ impl LintDependencyIndex {
                 None => self.declaration_fingerprints.contains_key(file),
             }
         })
+    }
+}
+
+fn refresh_fingerprints(
+    fingerprints: &mut FxHashMap<Ustr, String>,
+    ws: &Workspace,
+    files: &FxHashSet<Ustr>,
+    fingerprint: impl Fn(&Module) -> String,
+) {
+    for &file in files {
+        match ws.modules.iter().find(|module| module.file == file) {
+            Some(module) => fingerprints.insert(file, fingerprint(module)),
+            None => fingerprints.remove(&file),
+        };
     }
 }
 
@@ -1591,16 +1564,24 @@ impl IncrementalLintCache {
         filter_suppressed_findings_with_entries_timed(findings, &cached.suppressions, stats)
     }
 
+    /// `file`'s suppressed and raw global rows, which every edit keeps in step.
+    fn global_rows(&mut self, file: Ustr) -> impl Iterator<Item = &mut Vec<Finding>> {
+        [self.global.get_mut(&file), self.global_raw.get_mut(&file)]
+            .into_iter()
+            .flatten()
+    }
+
+    fn push_global(&mut self, file: Ustr, raw: Finding, stats: &mut LintCacheStats) {
+        let kept = self.filter_cached_suppressions(file, vec![raw.clone()], stats);
+        self.global_raw.entry(file).or_default().push(raw);
+        self.global.entry(file).or_default().extend(kept);
+    }
+
     fn refresh_global_span_index(&mut self, output_files: &FxHashSet<Ustr>) {
         for &output_file in output_files {
             if let Some(old) = self.global_referenced_files.remove(&output_file) {
                 for referenced in old {
-                    if let Some(owners) = self.global_span_owners.get_mut(&referenced) {
-                        owners.remove(&output_file);
-                        if owners.is_empty() {
-                            self.global_span_owners.remove(&referenced);
-                        }
-                    }
+                    remove_from_set(&mut self.global_span_owners, &referenced, &output_file);
                 }
             }
             let mut referenced = FxHashSet::default();
@@ -1661,13 +1642,7 @@ impl IncrementalLintCache {
                 .filter(|file| sources.contains_key(file)),
         );
         for file in &affected_files {
-            if let Some(findings) = self.global.get_mut(file) {
-                findings.retain(|finding| {
-                    finding.lint != UNUSED_FN
-                        || !locations.contains(&(finding.file(), finding_offset(finding)))
-                });
-            }
-            if let Some(findings) = self.global_raw.get_mut(file) {
+            for findings in self.global_rows(*file) {
                 findings.retain(|finding| {
                     finding.lint != UNUSED_FN
                         || !locations.contains(&(finding.file(), finding_offset(finding)))
@@ -1709,25 +1684,18 @@ impl IncrementalLintCache {
             derived.entry(module.file).or_default().extend(kept);
         }
         for findings in derived.values_mut() {
-            findings.sort_by(|a, b| {
-                finding_offset(a)
-                    .cmp(&finding_offset(b))
-                    .then_with(|| a.lint.cmp(b.lint))
-                    .then_with(|| a.error.message.cmp(&b.error.message))
-            });
+            findings.sort_by(cmp_by_offset);
         }
         for file in affected_files {
-            let old_raw = self.global_raw.remove(&file).unwrap_or_default();
-            let mut raw = derived_raw.remove(&file).unwrap_or_default();
-            raw.extend(old_raw);
-            if !raw.is_empty() {
-                self.global_raw.insert(file, raw);
-            }
-            let old = self.global.remove(&file).unwrap_or_default();
-            let mut findings = derived.remove(&file).unwrap_or_default();
-            findings.extend(old);
-            if !findings.is_empty() {
-                self.global.insert(file, findings);
+            for (rows, derived) in [
+                (&mut self.global_raw, &mut derived_raw),
+                (&mut self.global, &mut derived),
+            ] {
+                let mut merged = derived.remove(&file).unwrap_or_default();
+                merged.extend(rows.remove(&file).unwrap_or_default());
+                if !merged.is_empty() {
+                    rows.insert(file, merged);
+                }
             }
         }
     }
@@ -1769,7 +1737,6 @@ impl IncrementalLintCache {
         invalidation: Option<&ActionInvalidation>,
         stats: &mut LintCacheStats,
     ) {
-        if invalidation.is_none() {}
         let mut locations: FxHashSet<(Ustr, usize)> = affected
             .iter()
             .filter_map(|action| self.dependency.action_declarations.get(action))
@@ -1788,14 +1755,7 @@ impl IncrementalLintCache {
             .collect::<FxHashSet<_>>();
         removal_files.extend(population_file);
         for file in removal_files {
-            if let Some(findings) = self.global.get_mut(&file) {
-                findings.retain(|finding| {
-                    finding.lint != ACTION_CALLERS
-                        || (population_file != Some(file)
-                            && !locations.contains(&(file, finding_offset(finding))))
-                });
-            }
-            if let Some(findings) = self.global_raw.get_mut(&file) {
+            for findings in self.global_rows(file) {
                 findings.retain(|finding| {
                     finding.lint != ACTION_CALLERS
                         || (population_file != Some(file)
@@ -1823,9 +1783,7 @@ impl IncrementalLintCache {
                                 .as_deref()
                                 .expect("configured action policy"),
                         });
-                        let kept = self.filter_cached_suppressions(file, vec![raw.clone()], stats);
-                        self.global_raw.entry(file).or_default().push(raw.clone());
-                        self.global.entry(file).or_default().extend(kept);
+                        self.push_global(file, raw, stats);
                         self.action_population_file = Some(file);
                         files.insert(file);
                     }
@@ -1861,16 +1819,11 @@ impl IncrementalLintCache {
                     .as_deref()
                     .expect("configured action policy"),
             });
-            let kept = self.filter_cached_suppressions(file, vec![raw.clone()], stats);
-            self.global_raw.entry(file).or_default().push(raw.clone());
-            self.global.entry(file).or_default().extend(kept);
+            self.push_global(file, raw, stats);
             files.insert(file);
         }
         for file in files {
-            if let Some(findings) = self.global.get_mut(&file) {
-                findings.sort_by_key(finding_offset);
-            }
-            if let Some(findings) = self.global_raw.get_mut(&file) {
+            for findings in self.global_rows(file) {
                 findings.sort_by_key(finding_offset);
             }
         }
@@ -1889,15 +1842,7 @@ impl IncrementalLintCache {
             .map(|(file, _)| *file)
             .collect::<FxHashSet<_>>()
         {
-            if let Some(findings) = self.global.get_mut(&file) {
-                findings.retain(|finding| {
-                    finding.lint != BACKEND_SIBLING_MISMATCH
-                        || !invalidation
-                            .locations
-                            .contains(&(file, finding_offset(finding)))
-                });
-            }
-            if let Some(findings) = self.global_raw.get_mut(&file) {
+            for findings in self.global_rows(file) {
                 findings.retain(|finding| {
                     finding.lint != BACKEND_SIBLING_MISMATCH
                         || !invalidation
@@ -1917,28 +1862,13 @@ impl IncrementalLintCache {
                 if !sources.contains_key(&file) {
                     continue;
                 }
-                let kept = self.filter_cached_suppressions(file, vec![raw.clone()], stats);
                 files.insert(file);
-                self.global_raw.entry(file).or_default().push(raw.clone());
-                self.global.entry(file).or_default().extend(kept);
+                self.push_global(file, raw, stats);
             }
         }
         for file in files {
-            if let Some(findings) = self.global.get_mut(&file) {
-                findings.sort_by(|a, b| {
-                    finding_offset(a)
-                        .cmp(&finding_offset(b))
-                        .then_with(|| a.lint.cmp(b.lint))
-                        .then_with(|| a.error.message.cmp(&b.error.message))
-                });
-            }
-            if let Some(findings) = self.global_raw.get_mut(&file) {
-                findings.sort_by(|a, b| {
-                    finding_offset(a)
-                        .cmp(&finding_offset(b))
-                        .then_with(|| a.lint.cmp(b.lint))
-                        .then_with(|| a.error.message.cmp(&b.error.message))
-                });
+            for findings in self.global_rows(file) {
+                findings.sort_by(cmp_by_offset);
             }
         }
     }
@@ -1995,19 +1925,9 @@ impl IncrementalLintCache {
             let Some(source) = sources.get(&file).copied() else {
                 continue;
             };
-            let mut cached = CachedFileFindings {
-                suppression_fingerprint: suppression_fingerprint(source),
-                suppressions: suppression_entries_for_cache(source, &mut stats),
-                ..Default::default()
-            };
+            let mut cached = CachedFileFindings::new(source, &mut stats);
             if let Some(module) = ws.modules.iter().find(|module| module.file == file) {
-                cached.owner_order = module.bodies.keys().copied().collect();
-                cached.owner_rank = cached
-                    .owner_order
-                    .iter()
-                    .enumerate()
-                    .map(|(rank, &owner)| (owner, rank))
-                    .collect();
+                cached.rank_bodies(module);
             }
             self.files.insert(file, cached);
         }
@@ -2320,10 +2240,7 @@ impl IncrementalLintCache {
         // Every unused-fn and sibling finding in a relowered file sits on one of
         // its own declarations, all of which are derived again below.
         for file in &reseeded_files {
-            for findings in [self.global.get_mut(file), self.global_raw.get_mut(file)]
-                .into_iter()
-                .flatten()
-            {
+            for findings in self.global_rows(*file) {
                 findings.retain(|finding| {
                     !matches!(finding.lint, UNUSED_FN | BACKEND_SIBLING_MISMATCH)
                 });
@@ -2376,10 +2293,7 @@ impl IncrementalLintCache {
             self.refilter_suppression_files(&suppression_changed_files, sources, &mut stats);
         }
         for file in &dirty_output_files {
-            if let Some(findings) = self.global.get_mut(file) {
-                sort_global_findings(findings);
-            }
-            if let Some(findings) = self.global_raw.get_mut(file) {
+            for findings in self.global_rows(*file) {
                 sort_global_findings(findings);
             }
         }
@@ -2649,6 +2563,20 @@ impl IncrementalLintCache {
     }
 }
 
+/// Remove `value` from the set at `key`, dropping the set once it empties.
+fn remove_from_set<K: Eq + Hash, V: Eq + Hash>(
+    map: &mut FxHashMap<K, FxHashSet<V>>,
+    key: &K,
+    value: &V,
+) {
+    if let Some(set) = map.get_mut(key) {
+        set.remove(value);
+        if set.is_empty() {
+            map.remove(key);
+        }
+    }
+}
+
 fn is_global_lint(lint: &str) -> bool {
     matches!(lint, UNUSED_FN | BACKEND_SIBLING_MISMATCH | ACTION_CALLERS)
 }
@@ -2673,6 +2601,13 @@ fn finding_offset(finding: &Finding) -> usize {
         .first()
         .map(|label| label.span.offset_range().0)
         .unwrap_or(finding.error.location.offset)
+}
+
+fn cmp_by_offset(a: &Finding, b: &Finding) -> std::cmp::Ordering {
+    finding_offset(a)
+        .cmp(&finding_offset(b))
+        .then_with(|| a.lint.cmp(b.lint))
+        .then_with(|| a.error.message.cmp(&b.error.message))
 }
 
 fn sort_global_findings(findings: &mut [Finding]) {
