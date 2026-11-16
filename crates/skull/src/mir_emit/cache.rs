@@ -182,7 +182,6 @@ pub struct IncrementalRepairStats {
     pub concrete_entries_retracted: usize,
     pub full_concrete_rebuilds: usize,
     pub artifact_chunks_revisited: usize,
-    pub artifact_chunks_added: usize,
     pub artifact_chunks_removed: usize,
     pub full_artifact_view_realizations: usize,
     pub broad_owner_scans: usize,
@@ -193,28 +192,18 @@ pub struct IncrementalRepairStats {
     pub root_reseeds: usize,
     pub root_instances_checked: usize,
     pub shader_delta_requests: usize,
-    pub shader_roots_examined: usize,
-    pub shader_roots_derived: usize,
-    pub declaration_instance_lookups: usize,
     pub declaration_lookup_requests: usize,
-    pub candidate_entries_invalidated: usize,
-    pub candidate_entries_derived: usize,
-    pub candidate_entries_reused: usize,
     pub candidate_entries_requested: usize,
-    pub dependents_visited: usize,
-    pub dependent_requests: usize,
     pub chunks_rebuilt: usize,
     pub chunk_rebuild_requests: usize,
     pub artifact_iterations: usize,
     pub artifact_iteration_requests: usize,
-    pub artifact_root_entries_examined: usize,
     pub artifact_index_rows_examined: usize,
     pub artifact_scalar_context_builds: usize,
     pub artifact_realize_invocations: usize,
     pub root_hole_names_examined: usize,
     pub root_hole_rows_examined: usize,
     pub root_hole_decls_examined: usize,
-    pub root_hole_reason_buckets_examined: usize,
     pub graph_update_ns: u64,
     pub concrete_update_ns: u64,
     pub artifact_update_ns: u64,
@@ -564,8 +553,6 @@ impl SkullEmitCache {
         if !affected {
             return Ok(false);
         }
-        let mut roots_examined = 0;
-        let mut roots_derived = 0;
         for &(mid, owner) in reinferred {
             let key = (mid, owner);
             let old_shader = self
@@ -573,10 +560,6 @@ impl SkullEmitCache {
                 .shader_contributions
                 .remove(&key)
                 .unwrap_or_default();
-            roots_examined += old_shader
-                .iter()
-                .map(|pair| usize::from(pair.vert.is_some()) + 1)
-                .sum::<usize>();
             for pair in old_shader {
                 let users = self
                     .shader_registrations
@@ -597,10 +580,6 @@ impl SkullEmitCache {
             }
 
             let (shader, shader_callsite) = skull_mir::lower::collect_shader_body(ws, mid, owner)?;
-            roots_derived += shader
-                .iter()
-                .map(|pair| usize::from(pair.vert.is_some()) + 1)
-                .sum::<usize>();
             for pair in &shader {
                 let users = self
                     .shader_registrations
@@ -641,8 +620,6 @@ impl SkullEmitCache {
             .keys()
             .cloned()
             .collect();
-        self.repair_stats.shader_roots_examined = roots_examined;
-        self.repair_stats.shader_roots_derived = roots_derived;
         Ok(true)
     }
 
@@ -919,13 +896,9 @@ impl SkullEmitCache {
         }
         let mut fingerprint_identities = FxHashSet::default();
         let shader_delta_requests = cache.repair_stats.shader_delta_requests;
-        let shader_roots_examined = cache.repair_stats.shader_roots_examined;
-        let shader_roots_derived = cache.repair_stats.shader_roots_derived;
         cache.repair_stats = IncrementalRepairStats {
             body_only_edits: 1,
             shader_delta_requests,
-            shader_roots_examined,
-            shader_roots_derived,
             ..IncrementalRepairStats::default()
         };
         // Fold each re-inferred body's value-reference contribution into the cached
@@ -1041,8 +1014,6 @@ impl SkullEmitCache {
         cache.repair_stats.root_hole_names_examined = update.census.root_hole_names_examined;
         cache.repair_stats.root_hole_rows_examined = update.census.root_hole_rows_examined;
         cache.repair_stats.root_hole_decls_examined = update.census.root_hole_decls_examined;
-        cache.repair_stats.root_hole_reason_buckets_examined =
-            update.census.root_hole_reason_buckets_examined;
         cache.repair_stats.root_instances_checked = update.census.root_instances_checked;
         let concrete_builds_before = crate::concrete_body::build_invocations();
         let t_concrete = Instant::now();
@@ -1094,10 +1065,8 @@ impl SkullEmitCache {
             &root_removed,
         );
         cache.repair_stats.artifact_chunks_revisited = artifact_update.revisited;
-        cache.repair_stats.artifact_chunks_added = artifact_update.added;
         cache.repair_stats.artifact_chunks_removed = artifact_update.removed;
         cache.repair_stats.artifact_iterations = artifact_update.iterations;
-        cache.repair_stats.artifact_root_entries_examined = artifact_update.root_entries_examined;
         cache.repair_stats.artifact_index_rows_examined = artifact_update.local_index_rows_examined;
         cache.repair_stats.artifact_scalar_context_builds = artifact_update.scalar_context_builds;
         cache.repair_stats.artifact_realize_invocations =
@@ -1166,14 +1135,6 @@ impl SkullEmitCache {
             }
         }
         let candidate_entries_requested = warm_keys.len();
-        let candidate_entries_invalidated = concrete_update.candidate_keys_removed.len()
-            + warm_keys
-                .iter()
-                .filter(|key| {
-                    !concrete_update.candidate_keys_added.contains(*key)
-                        && cache.concrete.candidate_keys().contains(*key)
-                })
-                .count();
         let warm_keys: Vec<Instance> = warm_keys.into_iter().collect();
         let t_candidate = Instant::now();
         let previous_candidate_table = cache.inline_cache.candidate_table();
@@ -1228,10 +1189,6 @@ impl SkullEmitCache {
         }
         cache.inline_cache.replace_candidate_table(candidate_table);
         cache.repair_stats.candidate_entries_requested = candidate_entries_requested;
-        cache.repair_stats.candidate_entries_invalidated = candidate_entries_invalidated;
-        cache.repair_stats.candidate_entries_derived = candidate_census.warmed;
-        cache.repair_stats.candidate_entries_reused =
-            candidate_entries_requested.saturating_sub(candidate_census.warmed);
         cache.repair_stats.broad_candidate_scans = candidate_census.keys_examined;
         cache.repair_stats.candidate_update_ns = t_candidate.elapsed().as_nanos() as u64;
         // **A changed declaration maps to its LIVE INSTANCES through the graph**,
@@ -1265,7 +1222,6 @@ impl SkullEmitCache {
         cache.repair_stats.declaration_lookup_requests = changed.len();
         for c in &changed {
             let instances: Vec<Instance> = cache.graph.instances_of(*c).cloned().collect();
-            cache.repair_stats.declaration_instance_lookups += instances.len();
             affected.extend(instances);
         }
         // ...plus every chunk that DEPENDS on a changed fn. This is the CODEGEN
@@ -1278,8 +1234,6 @@ impl SkullEmitCache {
             changed.union(&effect_changed).copied().collect();
         for c in &dependency_seeds {
             if let Some(deps) = cache.dependents.get(c) {
-                cache.repair_stats.dependent_requests += 1;
-                cache.repair_stats.dependents_visited += deps.len();
                 if effect_changed.contains(c) {
                     // The candidate decision is irrelevant to a changed memory
                     // effect: every caller's dataflow proof may have changed.
