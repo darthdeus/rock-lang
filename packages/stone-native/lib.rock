@@ -196,6 +196,14 @@ inline(lua) fn __stone_register_error_collector() -> bool = """
             end,
             take = function(record) return stone.stone_log_take_collected_error(record, #record) ~= 0 end,
             truncate = function(count) stone.stone_log_truncate_collected_errors(count) end,
+            finish = function()
+                local records, overflow = _G.__rock_logged_errors.records()
+                if #records > 0 or overflow > 0 then
+                    local detail = table.concat(records, "\n")
+                    if overflow > 0 then detail = detail .. "\n" .. overflow .. " additional error record(s) dropped" end
+                    error("logged error(s) after main: " .. detail, 0)
+                end
+            end,
         }
         _G.__rock_native_errors_collected = true
     end

@@ -982,11 +982,17 @@ fn sim_commands_run_and_report_an_external_stone_project() {
     std::fs::write(
         game.join("main.rock"),
         r#"use stone::*;
+inline(lua) fn sim_exit_finalizer() = """
+    local guard = newproxy(true)
+    getmetatable(guard).__gc = function() __rock_log(0, "PROBE", "finalizer failure") end
+"""
 fn main() {
     if os_getenv("SIM_PROBE_EARLY") == "1" {
         log_error("PROBE", "startup failure")
     }
     stone_run_game(GameConfig { title: "sim-probe", width: 64, height: 64, vsync: 0 })
+    if os_getenv("SIM_PROBE_TAIL") == "1" { log_error("PROBE", "tail failure") }
+    if os_getenv("SIM_PROBE_FINALIZER") == "1" { sim_exit_finalizer() }
 }
 "#,
     )
@@ -1081,7 +1087,7 @@ co fn portable_sim() -> Coroutine<Wait> {
     assert!(plan.status.success(), "{text}");
     let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
     assert_eq!(plan["entries"].as_array().unwrap().len(), 1);
-    for phase in ["startup", "shutdown"] {
+    for phase in ["startup", "shutdown", "tail", "finalizer"] {
         let late = std::process::Command::new(&rock)
             .args(["sim", project, "portable_sim", "--jobs", "1"])
             .current_dir(fixture.path())
@@ -1091,10 +1097,11 @@ co fn portable_sim() -> Coroutine<Wait> {
             )
             .env("ROCK_SIM_LOG_DIR", fixture.path().join(phase))
             .env(
-                if phase == "startup" {
-                    "SIM_PROBE_EARLY"
-                } else {
-                    "SIM_PROBE_LATE"
+                match phase {
+                    "startup" => "SIM_PROBE_EARLY",
+                    "shutdown" => "SIM_PROBE_LATE",
+                    "tail" => "SIM_PROBE_TAIL",
+                    _ => "SIM_PROBE_FINALIZER",
                 },
                 "1",
             )
