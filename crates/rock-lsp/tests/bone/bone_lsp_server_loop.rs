@@ -16,7 +16,7 @@ fn init_params() -> Value {
 }
 
 fn started() -> LspServer {
-    LspServer::new(init_params()).expect("init params parse")
+    LspServer::new()
 }
 
 fn req(id: i32, method: &str, params: Value) -> Message {
@@ -92,7 +92,7 @@ fn initialize_replies_with_the_advertised_capabilities() {
         method: "initialize".to_string(),
         params: init_params(),
     };
-    let (_server, reply) = LspServer::initialize(request).expect("initialize must succeed");
+    let (_server, reply) = LspServer::initialize(request);
     let Message::Response(resp) = reply else {
         panic!("initialize must answer with a response");
     };
@@ -104,6 +104,28 @@ fn initialize_replies_with_the_advertised_capabilities() {
         serde_json::to_value(rock_lsp::server_capabilities()).unwrap(),
         "the initialize reply must carry exactly server_capabilities()"
     );
+}
+
+#[test]
+fn initialize_ignores_client_capabilities_it_does_not_read() {
+    // Required sub-fields are missing, as real clients sometimes send.
+    let params = json!({
+        "capabilities": {
+            "general": { "staleRequestSupport": { "cancel": true } },
+            "textDocument": { "codeAction": { "codeActionLiteralSupport": {} } }
+        },
+        "rootUri": Value::Null
+    });
+    let request = Request {
+        id: RequestId::from(1),
+        method: "initialize".to_string(),
+        params,
+    };
+    let (_server, reply) = LspServer::initialize(request);
+    let Message::Response(resp) = reply else {
+        panic!("initialize must answer with a response");
+    };
+    assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
 }
 
 #[test]

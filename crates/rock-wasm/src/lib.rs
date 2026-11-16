@@ -146,7 +146,7 @@ fn lsp(request: &Value) -> Result<Value, String> {
     let handled = LSP.with_borrow_mut(|server| -> anyhow::Result<()> {
         match (server.as_mut(), message) {
             (None, Message::Request(req)) if req.method == "initialize" => {
-                let (started, response) = rock_lsp::LspServer::initialize(req)?;
+                let (started, response) = rock_lsp::LspServer::initialize(req);
                 *server = Some(started);
                 out.push(response);
             }

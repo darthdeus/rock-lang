@@ -24,8 +24,8 @@ use lsp_types::request::{
 };
 use lsp_types::{
     CodeActionKind, CodeActionOptions, CodeActionProviderCapability, CompletionOptions,
-    CompletionResponse, GotoDefinitionResponse, Hover, HoverProviderCapability, InitializeParams,
-    InlayHint, InlayHintServerCapabilities, OneOf, RenameOptions, SaveOptions, ServerCapabilities,
+    CompletionResponse, GotoDefinitionResponse, Hover, HoverProviderCapability, InlayHint,
+    InlayHintServerCapabilities, OneOf, RenameOptions, SaveOptions, ServerCapabilities,
     SignatureHelp, SignatureHelpOptions, TextDocumentPositionParams, TextDocumentSyncCapability,
     TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
     WorkDoneProgressOptions,
@@ -309,20 +309,14 @@ pub fn run_lsp_server() -> Result<()> {
 
     let advertised = serde_json::to_value(server_capabilities())?;
 
-    let handshake: serde_json::Value = match link.initialize(advertised) {
-        Ok(got) => got,
-        Err(broken) => {
-            let dead = broken.channel_is_disconnected();
-            if dead {
-                threads.join()?;
-            }
-
-            return Err(anyhow::Error::from(broken));
+    if let Err(broken) = link.initialize(advertised) {
+        if broken.channel_is_disconnected() {
+            threads.join()?;
         }
-    };
+        return Err(anyhow::Error::from(broken));
+    }
 
-    let outcome =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| main_loop(link, handshake)));
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| main_loop(link)));
 
     match outcome {
         Ok(Ok(_)) => {
@@ -357,8 +351,8 @@ pub fn run_lsp_server() -> Result<()> {
     Ok(())
 }
 
-fn main_loop(link: Connection, params: serde_json::Value) -> Result<()> {
-    let mut server = LspServer::new(params)?;
+fn main_loop(link: Connection) -> Result<()> {
+    let mut server = LspServer::new();
     let mut pending: Vec<Message> = Vec::new();
     for incoming in &link.receiver {
         let done = server.handle(incoming, &mut pending);
@@ -383,23 +377,20 @@ pub struct LspServer {
 }
 
 impl LspServer {
-    /// Build the workspace from the client's `initialize` params, once the
-    /// handshake (or the direct `initialize` below) has delivered them.
-    pub fn new(params: serde_json::Value) -> Result<Self> {
-        check_initialize_params(params)?;
-        Ok(Self {
+    /// The server reads nothing from the client's `initialize` params.
+    pub fn new() -> Self {
+        Self {
             workspace: LspWorkspace::new(),
             shutdown_mode: false,
             exited: false,
-        })
+        }
     }
 
     /// Reply to `initialize` without lsp-server's blocking handshake, for
     /// hosts that pass JSON-RPC messages through directly.
-    pub fn initialize(req: Request) -> Result<(Self, Message)> {
-        let made = Self::new(req.params)?;
+    pub fn initialize(req: Request) -> (Self, Message) {
         let payload = serde_json::json!({ "capabilities": server_capabilities() });
-        Ok((made, Response::new_ok(req.id, payload).into()))
+        (Self::new(), Response::new_ok(req.id, payload).into())
     }
 
     /// Whether the client has sent `exit`.
@@ -1001,88 +992,6 @@ impl LspServer {
         self.workspace.close_document(at.as_str());
         Ok(())
     }
-}
-
-fn check_initialize_params(params: serde_json::Value) -> Result<()> {
-    let mut params_val = params;
-
-    // It has been observed that some LSP clients (e.g., some versions of Neovim's native LSP)
-    // announce semantic token capabilities but omit the required `tokenTypes`, `tokenModifiers`,
-    // and `formats` fields, which violates the LSP specification.
-    // This non-compliance causes deserialization of `InitializeParams` to fail.
-    // To ensure robustness, we defensively patch the `semanticTokens` object here by
-    // inserting empty or default values for these missing fields before deserialization.
-    if let Some(semantic_tokens) = params_val
-        .get_mut("capabilities")
-        .and_then(|caps| caps.get_mut("textDocument"))
-        .and_then(|td| td.get_mut("semanticTokens"))
-    {
-        // Log what the CLIENT declares it supports BEFORE we patch defaults in.
-        // `requests.range` / `requests.full.delta` decide whether advertising
-        // semanticTokens/range or /full/delta is even useful -- a client that
-        // doesn't list a request kind won't send it no matter what we advertise.
-        let requests = semantic_tokens.get("requests").cloned();
-        log::info!(
-            "[semtok-caps] client semanticTokens.requests = {}",
-            requests
-                .map(|r| r.to_string())
-                .unwrap_or_else(|| "<absent>".to_string())
-        );
-        if let Some(obj) = semantic_tokens.as_object_mut() {
-            if obj.get("tokenTypes").is_none() {
-                log::warn!(
-                    "Client sent non-compliant semantic token capabilities. Patching missing 'tokenTypes'."
-                );
-                obj.insert("tokenTypes".to_string(), serde_json::json!([]));
-            }
-            if obj.get("tokenModifiers").is_none() {
-                log::warn!(
-                    "Client sent non-compliant semantic token capabilities. Patching missing 'tokenModifiers'."
-                );
-                obj.insert("tokenModifiers".to_string(), serde_json::json!([]));
-            }
-            // Per LSP spec, `relative` is the only format currently defined.
-            // It's a safe default to assume if the client supports semantic tokens at all.
-            if obj.get("formats").is_none() {
-                log::warn!(
-                    "Client sent non-compliant semantic token capabilities. Patching missing 'formats'."
-                );
-                obj.insert("formats".to_string(), serde_json::json!(["relative"]));
-            }
-            // The 'requests' field is also required by the spec
-            if obj.get("requests").is_none() {
-                log::warn!(
-                    "Client sent non-compliant semantic token capabilities. Patching missing 'requests'."
-                );
-                obj.insert(
-                    "requests".to_string(),
-                    serde_json::json!({
-                        "full": true,
-                        "range": false
-                    }),
-                );
-            }
-        }
-    }
-
-    let _params: InitializeParams = serde_json::from_value(params_val.clone()).map_err(|err| {
-        // Log the exact payload that failed deserialization (after patching)
-        eprintln!(
-            "Failed to deserialize InitializeParams after patching: {}. Payload: {}",
-            err,
-            serde_json::to_string_pretty(&params_val)
-                .unwrap_or_else(|_| "INVALID JSON".to_string())
-        );
-        err
-    })?;
-    // fs_err::write("/tmp/lsp_debug.log", "MAIN_LOOP_STARTED\n").ok();
-    log::info!("Starting example main loop");
-
-    // let _lsp_context = LspContext::new();
-
-    // debug_log!("LSP_SERVER_INITIALIZED: Workspace created, entering main loop");
-
-    Ok(())
 }
 
 /// Regenerate the `.rock.tags` for the project root containing `uri` from the
