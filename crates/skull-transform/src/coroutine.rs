@@ -286,12 +286,31 @@ fn cells_live_at_yield_resumes(func: &MirFunc, blocks: &[Idx<Block>]) -> HashSet
         block_def.insert(block, defs);
     }
 
-    let mut live_in: HashMap<Idx<Block>, HashSet<Idx<Cell>>> = blocks
+    let live_in = live_in(func, blocks, &block_use, &block_def);
+
+    let mut live = HashSet::default();
+    for &block in blocks {
+        if let Term::Yield { resume, .. } = func.blocks[block].term {
+            live.extend(live_in[&resume].iter().copied());
+        }
+    }
+    live
+}
+
+/// Backward liveness over `blocks`: what is live into each block, given each
+/// block's upward-exposed uses and its definitions.
+fn live_in<K: Copy + Eq + std::hash::Hash>(
+    func: &MirFunc,
+    blocks: &[Idx<Block>],
+    block_use: &HashMap<Idx<Block>, HashSet<K>>,
+    block_def: &HashMap<Idx<Block>, HashSet<K>>,
+) -> HashMap<Idx<Block>, HashSet<K>> {
+    let mut live_in: HashMap<Idx<Block>, HashSet<K>> = blocks
         .iter()
         .copied()
         .map(|block| (block, HashSet::default()))
         .collect();
-    let mut live_out: HashMap<Idx<Block>, HashSet<Idx<Cell>>> = blocks
+    let mut live_out: HashMap<Idx<Block>, HashSet<K>> = blocks
         .iter()
         .copied()
         .map(|block| (block, HashSet::default()))
@@ -324,14 +343,7 @@ fn cells_live_at_yield_resumes(func: &MirFunc, blocks: &[Idx<Block>]) -> HashSet
             break;
         }
     }
-
-    let mut live = HashSet::default();
-    for &block in blocks {
-        if let Term::Yield { resume, .. } = func.blocks[block].term {
-            live.extend(live_in[&resume].iter().copied());
-        }
-    }
-    live
+    live_in
 }
 
 /// Cells used by detached defer/hook regions must remain in the shared frame;
@@ -420,44 +432,7 @@ fn values_live_at_resume_blocks(
         block_def.insert(block, defs);
     }
 
-    let mut live_in: HashMap<Idx<Block>, HashSet<Idx<Inst>>> = blocks
-        .iter()
-        .copied()
-        .map(|block| (block, HashSet::default()))
-        .collect();
-    let mut live_out: HashMap<Idx<Block>, HashSet<Idx<Inst>>> = blocks
-        .iter()
-        .copied()
-        .map(|block| (block, HashSet::default()))
-        .collect();
-    loop {
-        let mut changed = false;
-        for &block in blocks.iter().rev() {
-            let mut out = HashSet::default();
-            successors(&func.blocks[block].term, |succ| {
-                if let Some(next) = live_in.get(&succ) {
-                    out.extend(next.iter().copied());
-                }
-            });
-            let mut input = block_use[&block].clone();
-            input.extend(out.difference(&block_def[&block]).copied());
-            if live_out
-                .insert(block, out.clone())
-                .is_some_and(|old| old != out)
-            {
-                changed = true;
-            }
-            if live_in
-                .insert(block, input.clone())
-                .is_some_and(|old| old != input)
-            {
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
+    let live_in = live_in(func, blocks, &block_use, &block_def);
 
     let mut live = HashSet::default();
     for &resume in resume_blocks {
