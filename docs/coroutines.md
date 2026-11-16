@@ -4,6 +4,9 @@ A `co fn` creates a resumable computation. Calling it creates a handle; the
 body runs when the handle is resumed. `yield` suspends the body and produces a
 value for the caller. A later resume continues after that yield.
 
+The lifetime rule for explicit references retained between construction and first
+resume is unresolved; see [#346](https://github.com/darthdeus/rock-lang/issues/346).
+
 ```rock
 co fn counter() -> Coroutine<int, string> {
     yield 1

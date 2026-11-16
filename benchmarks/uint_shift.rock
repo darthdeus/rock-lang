@@ -1,4 +1,3 @@
-// Constant-count guard probe; see docs/guard-elimination.md.
 @nomangle fn shift_mix(value: uint, count: int) -> uint {
     let x = value
     for i in 0..count {

@@ -38,8 +38,6 @@ result. This 32-bit behavior does not describe ordinary `int` arithmetic.
 For `uint`, `+`, `-`, `*` and bitwise results wrap as unsigned 32-bit values.
 Shifts require a count in `0..=31`: invalid literal counts are rejected during
 checking, and invalid dynamic counts fail at runtime. The counts do not wrap.
-See the [numeric operator audit](numeric-operators-decisions.md) for the
-implementation map and executable checks.
 
 Whether
 arithmetic such as `0.0 * -1.0` yields `-0` depends on LuaJIT's platform, so
@@ -52,6 +50,11 @@ in persistent storage, across opaque boundaries, or live across coroutine
 suspension. A relocatable collection element can be borrowed for an immediate
 call but cannot be retained. See [reference fixtures](../tests/values/refs.rock)
 and [admission tests](../crates/bone-semantic/tests/structural.rs).
+
+`as` checks an independently inferred operand against the target type; it allows
+assignment-compatible types and numeric conversions. Contextual type ascription
+supplies a type to the operand (`::` in legacy syntax, `: Type` in modules v1).
+Use `cast<T>` to extract a nominal value from `any`.
 
 ## Function forms and static locals
 
@@ -194,7 +197,8 @@ A collection can define `iter(collection)` to return an iterator. An iterator
 provides `next(iterator) -> (bool, T)`: the boolean says whether the returned
 value is present. A `for` loop calls these operations; an iterator with `next`
 can also be used directly. A generic function can require this protocol with
-`I: Iterator<T>`.
+`I: Iterator<T>`. A multi-value `next` can drive a direct `for`, but does
+not satisfy the two-result `(bool, T)` bound.
 
 ```rock
 let result = [1, 2, 3, 4].iter()
@@ -210,12 +214,6 @@ iterator-bounded function when its `iter` method supplies the iterator.
 The same holds for a lambda's result where the callee expects an iterator,
 so `[1, 2].flat_map(n => [n, n])` iterates each returned Vec; a named fn
 returning a Vec goes through a lambda (`n => pair(n)`).
-The tested `iter().filter(...).collect()` chain also runs inside a coroutine
-body; see the [coroutine audit](coroutine-rejections.md). The old blanket
-rejection claim came from a fixture with an invalid coroutine signature, not
-from a rejection of its iterator chain. Other residual or recursive bounded
-calls are outside that audit.
-
 ## Compile-time inputs
 
 Declare build variables in the project's `stick.toml`:

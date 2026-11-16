@@ -1,4 +1,3 @@
-// Guard audit probes. See docs/guard-elimination.md for proof limitations.
 @nomangle fn guard_fresh_push(n: int) -> int {
     let xs: [int] = []
     let out: [int] = []

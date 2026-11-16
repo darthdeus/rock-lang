@@ -1,17 +1,7 @@
 # Compiler performance tracking
 
-For source size, test locations, diagnostic-expectation gaps and a small
-rerunnable claim ledger, see [evidence-driven cleanup](../docs/evidence.md).
-`python3 perf/inventory.py` writes the local inventory to
-`target/inventory/index.html`; `python3 perf/check_evidence.py` reruns its
-bounded evidence checks. Neither is a compiler quality score.
-
-`python3 perf/overview.py` writes `target/inventory/overview.html`: a searchable
-dark subsystem map with size, test locations, declared dependencies, bounded
-claim results, unknowns and a short cleanup queue. Its reviewed ownership and
-source anchors live in `docs/subsystems.json`. Missing paths or anchors fail
-generation; unmapped source stays visible. Run the evidence checker first for
-current results. Commands listed in the map are not automatically executed.
+`python3 perf/inventory.py` writes a source-size and test-location inventory to
+`target/inventory/index.html`. Track cleanup work in GitHub issues.
 
 Scripts that measure the compiler on the public corpora and chart the results
 over commits. Three questions: how long is a cold build, how long is an

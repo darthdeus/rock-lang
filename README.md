@@ -115,13 +115,6 @@ the check explicitly disables the systemd user scope inside the container.
 
 The [compiler structure guide](docs/compiler.md) maps the implementation and
 its shared lowering and incremental-emission boundaries.
-The [evidence baseline](docs/evidence.md) records checked claims, discrepancies
-and commands for measuring source and test organization.
-The [subsystem map](docs/subsystems.md) adds responsibilities, test entrypoints,
-known unknowns and a bounded cleanup queue to the local dark report.
-The [compact language contract](docs/language-contract.md) connects selected
-language rules to implementations and checks, separating unresolved decisions.
-
 Use `cargo run --quiet --bin rock -- test file.rock` to rebuild and test with
 this checkout. See [Testing compiler changes](docs/testing.md) for runtime cases,
 expected compiler errors, backend comparison, filtering, and Rust test commands.

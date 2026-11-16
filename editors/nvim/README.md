@@ -112,11 +112,6 @@ Workspace symbol queries match the symbol's own name (case-insensitive
 substring), or its qualified name when the query contains `::`; an empty query
 returns everything. Test functions are listed after other symbols.
 
-When semantic token highlighting misbehaves (fields wrong colors, type
-names split, no highlighting despite valid server output), see
-[`semantic-tokens-debugging.md`](semantic-tokens-debugging.md) —
-it documents the `:RockSemTokens*` commands and the known failure modes.
-
 ## User commands
 
 | Command | Action |
@@ -131,7 +126,7 @@ it documents the `:RockSemTokens*` commands and the known failure modes.
 | `:RockColorPick` | highlight groups and hex colors under the cursor |
 | `:RockCapture [note]` | write a bug snapshot (buffer, position, LSP state) for a report |
 | `:RockSemTokens` / `:RockSemTokensAll` | dump the semantic tokens Neovim holds for the current line / whole buffer |
-| `:RockSemTokensDebug` / `:RockSemTokensHook` / `:RockSemTokensTrace` | semantic-token highlighter internals (see `semantic-tokens-debugging.md`) |
+| `:RockSemTokensDebug` / `:RockSemTokensHook` / `:RockSemTokensTrace` | inspect, hook, and trace the semantic-token highlighter |
 | `:RockCompletionLog [on\|off\|toggle]` | runtime switch for the JSONL completion log |
 | `:RockDump [path]` | write a JSON snapshot of state + events + timings to `/tmp/rock-nvim-<ts>.json` (or given path) |
 | `:RockRestart` | stop+reattach rock clients (also `<Tab>`, `<F3>`) |
@@ -184,170 +179,6 @@ Inside the modules floater (`:RockModules`):
 | `q` / `<Esc>` | close |
 | `r` | refetch from server |
 
-## Panel sections
-
-From top to bottom:
-
-```
-rock.nvim               [s] swap side [q] close [?] help
-
-BINARY
-  <path>                      -- resolved absolute path
-  mtime HH:MM:SS (rel)  size  -- latest stat
-  id <sha8>                   -- flips on rebuild
-  MISMATCH                    -- present only when worktree != binary's
-    cwd expects: <worktree>
-    binary from: <worktree>
-
-CLIENT
-  state: attached  up 12m  restarts 2
-  id 3
-  last exit: code=1 sig=0 (3s ago)   -- only after a crash
-
-BUFFERS (N)
-  * 1   main.rock                    -- * = attached, . = detached
-
-PERF  (<leader>rt for detail)        -- compact; full view in :RockPerf
-  method                n   p50   p95  hist
-  td/completion         8  11.1  11.2  ▂        █
-  ...
-
-MODULES  (N total, M contexts)       -- polled every 10s via rock/modules
-  [script]    2  main.rock
-     . main.rock                     540ms ago
-     . unified.rock                  2.9s ago  STALE
-  ...
-
-STATS (rock/stats)                   -- polled every 5s
-  avg_compile_ms        9.9
-  document_versions     3
-  incremental_hit_rate  0.66
-  inlay_hint_cache      3
-  last_compile_ms       2.1
-  last_modules          40
-  last_sources          5
-  last_stale_modules    2
-  lib_files             0
-  projects              1
-  script_files          0
-  semantic_token_cache  3
-  total_compiles        47
-
-LAST COMPLETION  (<leader>rc for detail)
-  14:22:03  items=87  4.2ms  trig='.'
-    1. foo
-    2. foo_bar
-    ...
-
-LOG (N, tail)                        -- filtered lines from :LspLog
-  [INFO]... "LSP[rock]" ...
-
-EVENTS (N, newest first)
-  14:22:03 <-resp  textDocument/comp {"result"
-  14:22:03 ->req   textDocument/comp {"req_id"
-  ...
-```
-
-## `rock/stats` fields
-
-The server answers a custom `rock/stats` request (implemented in
-`crates/rock-lsp/src/lib.rs`) with counts and compile metrics:
-
-| Field | Meaning |
-|-------|---------|
-| `projects` | Number of `ProjectContext`s (one per `stick.toml` workspace). |
-| `script_files` | Files with a `#script` pragma, each in their own context. |
-| `lib_files` | `//! love-lib:`-tagged contexts. |
-| `document_versions` | Buffers the LSP is version-tracking. |
-| `semantic_token_cache` | Entries in the semantic-token cache. |
-| `inlay_hint_cache` | Entries in the inlay-hint cache. |
-| `total_compiles` | Cumulative compile count for this process. |
-| `last_compile_ms` | Wall-time of the most recent compile. |
-| `avg_compile_ms` | `total_compile_us / total_compiles`. |
-| `last_stale_modules` | Modules marked stale on the last compile. |
-| `last_sources` | Source files in the last `CompilationRequest`. |
-| `last_modules` | `storage.modules.len()` after the last compile. |
-| `incremental_hit_rate` | `1 - last_stale_modules / last_sources`. |
-| `method_counts` | Per-LSP-method request count (server-side). Nested map; rendered in the panel as `tostring()` so you'll see a compact inline summary. Full breakdown via `:RockPerf`. |
-| `process_rss_mb` | Resident set size of the rock-lsp process in megabytes (macOS: `task_info`; Linux: `/proc/self/status` VmRSS). Useful for spotting memory leaks across long sessions. |
-| `git_sha` | Git commit SHA baked into the binary at compile time (8-char short SHA). Cross-check with the binary `id` in the BINARY section to confirm what you're running. |
-
-Extend by adding fields in `LspWorkspace::stats_snapshot()` — the panel
-renders any new key automatically (keys are sorted alphabetically).
-
-## `rock/modules`
-
-Custom request returning every module currently known to the server,
-grouped by context:
-
-```json
-{
-  "total_modules": 214,
-  "contexts": [
-    {
-      "kind": "project",
-      "root": "/path/to/workspace",
-      "module_count": 42,
-      "modules": [
-        { "id": ".../main.rock", "last_compile_us": 1234,
-          "ago_ms": 540, "stale": false,
-          "is_stdlib": false, "is_builtin": false }
-      ]
-    }
-  ]
-}
-```
-
-`kind` is one of `project` (stick.toml workspace), `script` (`#script`
-pragma), or `lib` (`//! love-lib:` tag). `last_compile_us` comes from
-`CompilationStorage::module_compile_times`; `ago_ms` is
-`Instant::now() - metadata.last_compiled`.
-
-## Per-method latency (`:RockPerf`)
-
-Client-side. Measures request send → response receive via the wrapped
-`vim.lsp.rpc` transport. Every JSON-RPC request is sampled.
-
-```
- PER-METHOD LATENCY (client-observed, ms)
-
- method                             n    min   mean    p50    p95    p99    max  hist
- -------------------------------------------------------------------------------------
- textDocument/completion           20   8.26  11.54  11.98  17.10  17.15  17.15  █▆ ▂ ...
- textDocument/inlayHint             3  11.05  11.63  11.83  11.99  11.99  11.99  █     ...
- rock/stats                         2   1.41   2.16   1.41   2.92   2.92   2.92  █     ...
-```
-
-Samples are capped at 500 per method (FIFO). `r` inside the floater
-resets all samples. Sorted by sample count descending.
-
-This is the client-observed number — what nvim (and your user
-experience) actually sees, including transport and nvim-side
-handler time. Compare with server `last_compile_ms` to see where time
-is being spent.
-
-## Completion debug
-
-Triggered by `<leader>rc` or `:RockCompletion`. Shows:
-
-```
- LAST COMPLETION  14:22:03
-   location : main.rock:42:15
-   trigger  : '.'   kind=TriggerChar
-   latency  : 4.67ms   items=87  (isIncomplete)
-
- LABEL                            KIND         DETAIL
- ------------------------------------------------------------
- foo                              Function     fn(x: int) -> str
- foo_bar                          Function     fn() -> bool
- ...
-```
-
-Capped at 500 stored items and 200 rendered. Data source is the
-wrapped `vim.lsp.rpc` layer in `lua/rock/client.lua` — no cmp cooperation
-needed. Use this when cmp shows something weird: the floater is
-ground truth for what the server sent.
-
 ## Status line
 
 ```lua
@@ -377,41 +208,6 @@ In priority order:
 If the resolved path is a shell script, we peek inside for a line
 matching `*/target/*/rock` and use that instead, so a wrapper around a
 debug build still gets fs-watched as a real binary.
-
-## Architecture
-
-```
-lsp/rock.lua                -- nvim 0.11 auto-discovered default (fallback)
-lua/rock/
-  init.lua                  -- public API, setup(), user commands, keymaps
-  state.lua                 -- central observable store; ring buffers
-  binary.lua                -- resolve, stat, sha-id, worktree match, fs-watch
-  client.lua                -- wraps vim.lsp.rpc.start dispatchers for
-                            --   traffic capture; restart + reattach;
-                            --   on_exit crash marks
-  panel.lua                 -- right/left sidebar, auto-open, timer refresh
-  completion.lua            -- floating window for last completion
-  perf.lua                  -- per-method latency stats + histograms
-  modules.lua               -- loaded-modules floater (rock/modules fetch)
-  doctor.lua                -- :RockLspDoctor health check floater
-  dump.lua                  -- :RockDump JSON snapshot writer
-  ui.lua                    -- shared helpers (ensure_named_buffer, etc)
-  log.lua                   -- tails vim.lsp.get_log_path(), filters to rock
-  stats.lua                 -- polls rock/stats (5s) + rock/modules (10s)
-  statusline.lua            -- lualine component
-```
-
-Every module feeds `state.lua`. The panel subscribes and re-renders on
-any state change plus a 1-second wall-clock ticker (for the `up` field).
-
-## Known followups
-
-- **Completion side-by-side** — compare raw LSP items vs. what nvim-cmp
-  ultimately displayed. Needs a cmp source wrapper.
-- **Module load/unload timeline** — currently we show a point-in-time
-  snapshot. A true timeline would track load/unload events over time.
-- **Event filter keybinds** inside the panel (`f` to toggle `$/progress`).
-- **Persisted panel side** across sessions (currently per-session).
 
 ## Troubleshooting
 

@@ -24,8 +24,10 @@ on what. Runtime is judged with the JIT on. An interpreter measurement can
 explain a cause, but it is not the target: it neither justifies a change nor
 blocks one.
 
-Write what a later session needs into this file, `docs/` or an issue, not
-into an agent's private memory.
+Keep `docs/` for language guidance and high-level design. Track actionable work
+in GitHub issues; do not add audit logs, test-result ledgers or source inventories
+to the documentation. Prefer readable code to explanatory comments. Do not use
+an agent's private memory for project knowledge.
 
 - Never write private information: home-directory or machine-specific paths,
   host names, email addresses, credentials, or details of games and other

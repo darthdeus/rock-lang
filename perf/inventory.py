@@ -124,10 +124,6 @@ def report(data, root, destination):
              '<h1>Rock source inventory</h1>',
              f'<p>Revision <code>{escape(data["revision"])}</code>; working tree {"dirty" if data["dirty"] else "clean"}. Counts read tracked files from the working tree. JSON: <a href="inventory.json">full inventory</a>.</p>',
              '<p>Physical lines include comments and blanks. Test-file lines exclude inline tests in source files. Test markers are textual <code>#[test]</code> / <code>@test</code> occurrences, not executed tests: embedded snippets can inflate them; custom harnesses and macro-generated tests can be missed. Corpus directories are locations, not feature coverage. No quality score.</p>']
-    parts.append('<p>Claim definitions and interpretation: ' + link('docs/evidence.md') + '. Rerun with <code>python3 perf/check_evidence.py</code>.</p>')
-    parts.append('<p><a href="overview.html">Subsystem map and cleanup queue</a> (generate with <code>python3 perf/overview.py</code>).</p>')
-    if (destination.parent / 'evidence/results.json').exists():
-        parts.append('<p><a href="evidence/results.json">Last evidence-check results and log filenames</a>. These record their own revision; they are not a guarantee about later edits.</p>')
     for key, heading in [("origin", "Project and upstream-derived code"), ("role", "File roles"), ("language", "Languages"), ("group", "Subsystems and corpus directories")]:
         parts.append(f'<h2>{heading}</h2>')
         parts.append(table(["Group", "Files", "Lines", "Test-file lines", "Test markers", "Error cases", "Unpinned errors"],
