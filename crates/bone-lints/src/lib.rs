@@ -638,17 +638,22 @@ impl LintDependencyIndex {
     fn build_sibling_rows(&mut self, ws: &Workspace) {
         for decls in ws.functions_by_name.values() {
             for &(mid, fid) in decls {
-                let declaration = sibling_decl(ws, mid, fid);
-                let key = (declaration.name, declaration.signature.clone());
-                let function = (mid, fid);
-                self.sibling_groups.entry(key).or_default().insert(function);
-                self.sibling_names
-                    .entry(declaration.name)
-                    .or_default()
-                    .insert(function);
-                self.sibling_declarations.insert(function, declaration);
+                self.insert_sibling((mid, fid), sibling_decl(ws, mid, fid));
             }
         }
+    }
+
+    fn insert_sibling(&mut self, function: FunctionKey, declaration: SiblingDecl) {
+        let group = (declaration.name, declaration.signature.clone());
+        self.sibling_groups
+            .entry(group)
+            .or_default()
+            .insert(function);
+        self.sibling_names
+            .entry(declaration.name)
+            .or_default()
+            .insert(function);
+        self.sibling_declarations.insert(function, declaration);
     }
 
     fn update_sibling_declarations(
@@ -679,14 +684,7 @@ impl LintDependencyIndex {
             }
         }
         for module in ws.user_modules(&FxHashSet::default()) {
-            if !invalidation
-                .names
-                .iter()
-                .any(|name| module.functions.iter().any(|(_, f)| f.name == *name))
-            {
-                continue;
-            }
-            for (_, function) in module.functions.iter() {
+            for function in module.functions.values() {
                 if invalidation.names.contains(&function.name) {
                     invalidation
                         .locations
@@ -721,18 +719,7 @@ impl LintDependencyIndex {
                 continue;
             }
             for (fid, _) in module.functions.iter() {
-                let declaration = sibling_decl(ws, module.id, fid);
-                let group = (declaration.name, declaration.signature.clone());
-                let function = (module.id, fid);
-                self.sibling_groups
-                    .entry(group)
-                    .or_default()
-                    .insert(function);
-                self.sibling_names
-                    .entry(declaration.name)
-                    .or_default()
-                    .insert(function);
-                self.sibling_declarations.insert(function, declaration);
+                self.insert_sibling((module.id, fid), sibling_decl(ws, module.id, fid));
             }
         }
         let new_groups: FxHashSet<SiblingGroupKey> = self
