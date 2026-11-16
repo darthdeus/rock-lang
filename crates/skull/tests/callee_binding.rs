@@ -18,8 +18,7 @@ fn main() { let _ = top(3) }
 
 fn emit(src: &str) -> String {
     let ws = ws_with_stdlib(src);
-    let mid = skull::user_module_id(&ws).unwrap();
-    emit_full(&ws, mid).expect("emit_full").0.lua
+    emit_full_of(&ws, "emit_full").0.lua
 }
 
 /// The byte offset of `needle`, which must occur exactly once.

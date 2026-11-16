@@ -250,8 +250,7 @@ pub fn module_tests(ws: &Workspace, mid: ModuleId) -> Result<Vec<SkullTest>, Com
         .collect())
 }
 
-/// [`module_tests`] carrying each test's `Idx<Function>` too -- the JS test
-/// executor needs the `FuncRef` to lower/emit the fn, not just its Lua name.
+/// [`module_tests`] carrying each test's `Idx<Function>` for backend emission.
 pub fn module_tests_with_ids(
     ws: &Workspace,
     mid: ModuleId,

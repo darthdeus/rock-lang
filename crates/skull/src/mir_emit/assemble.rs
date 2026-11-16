@@ -1296,7 +1296,11 @@ pub(super) fn assemble(
     }
     // Global initializer bodies (including their escaping lambdas) are now
     // defined, so slot staging must follow them but precede initializer calls.
-    let code_slot_stage = code_slot_registration_lua(ws, scx, code_artifact)?;
+    code_artifact
+        .check_stageable()
+        .map_err(CompilerError::new_no_location)?;
+    let code_slot_stage =
+        code_slot_registration_lua_entries(ws, scx, code_artifact.entries.values(), false)?;
     out.push_str(&wrap_large_lua_section(
         "__rock_code_slot_stage_part",
         &code_slot_stage,
@@ -1417,17 +1421,6 @@ pub(super) fn assemble(
         emitted_bodies,
         unit_reads,
     ))
-}
-
-fn code_slot_registration_lua(
-    ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
-    artifact: &skull_mir::code_identity::CodeArtifact,
-) -> Result<String, CompilerError> {
-    artifact
-        .check_stageable()
-        .map_err(CompilerError::new_no_location)?;
-    code_slot_registration_lua_entries(ws, scx, artifact.entries.values(), false)
 }
 
 pub(super) fn code_slot_registration_lua_entries<'a>(
