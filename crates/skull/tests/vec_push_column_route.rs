@@ -14,7 +14,7 @@
 //! 2.4 diagnostic, because the receiver's declared `[T]` names a layout the
 //! column element does not have. It cannot silently reach `_data`.
 
-use crate::common::compile_and_run;
+use crate::common::run_main;
 const COLUMN_RECEIVER: &str = r#"
 value PushCell { a: int, b: int }
 
@@ -79,6 +79,7 @@ fn a_column_receiver_never_reaches_the_boxed_body() {
         !reaches_boxed_body(&lua),
         "a column push must emit per-leaf stores and never the `_data` splice"
     );
+    assert_eq!(run_main(&lua), "7");
 }
 
 /// Without this the assertion above is unfalsifiable.
@@ -89,6 +90,7 @@ fn a_boxed_receiver_does_reach_the_boxed_body() {
         reaches_boxed_body(&lua),
         "a boxed push is exactly the case the boxed body serves"
     );
+    assert_eq!(run_main(&lua), "7");
 }
 
 #[test]
@@ -98,13 +100,7 @@ fn a_column_payload_reaches_the_boxed_body_and_is_correct() {
         reaches_boxed_body(&lua),
         "the OUTER vec is boxed, so its push is the ordinary `_data` splice"
     );
-    assert_eq!(compile_and_run(COLUMN_PAYLOAD), "1");
-}
-
-#[test]
-fn both_receiver_forms_answer_correctly() {
-    assert_eq!(compile_and_run(COLUMN_RECEIVER), "7");
-    assert_eq!(compile_and_run(BOXED_RECEIVER), "7");
+    assert_eq!(run_main(&lua), "1");
 }
 
 /// An opaque body has one declaration-owned boundary plan, so retyping the

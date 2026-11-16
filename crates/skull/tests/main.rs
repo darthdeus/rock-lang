@@ -172,7 +172,6 @@ mod user_fn_emit_rejection;
 mod valid_type_identity;
 mod value_ctor;
 mod value_leaf_layout;
-mod value_push_generic_boundary;
 mod value_scalarize;
 mod value_struct_eq_dispatch;
 mod value_test_discovery;
@@ -188,7 +187,6 @@ mod condition_branches;
 mod projection_demand;
 
 mod read_folding;
-mod result_destinations;
 mod return_kills;
 
 mod argument_demand;

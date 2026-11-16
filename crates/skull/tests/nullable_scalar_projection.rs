@@ -1,4 +1,4 @@
-use crate::common::{compile_and_run, emit_module, function_body, run_main};
+use crate::common::{emit_module, function_body, run_main};
 
 const SOURCE: &str = r#"
 value ProjectionPoint { x: int, y: int }
@@ -38,14 +38,6 @@ fn main() {
 "#;
 
 #[test]
-fn nullable_scalar_projection_preserves_effects_absence_and_snapshots() {
-    assert_eq!(
-        compile_and_run(SOURCE),
-        "-1 -1 1\n11 13 2\nold false -1\n11 99 11 7\n7"
-    );
-}
-
-#[test]
 fn nullable_scalar_projection_emits_one_receiver_and_no_sibling_reads() {
     let lua = emit_module(SOURCE);
     let body = function_body(&lua, "selected_width");
@@ -55,6 +47,10 @@ fn nullable_scalar_projection_emits_one_receiver_and_no_sibling_reads() {
     }
     let point = function_body(&lua, "selected_x");
     assert!(!point.contains(".y"), "{point}");
+    assert_eq!(
+        run_main(&lua),
+        "-1 -1 1\n11 13 2\nold false -1\n11 99 11 7\n7"
+    );
 }
 
 #[test]

@@ -135,29 +135,6 @@ fn nobox_equality_compares_leaves_without_materializing() {
     );
 }
 
-const NOBOX_MIXED_NULLABLE_EQUALITY: &str = r#"
-nobox value NV2 { x: float, y: float }
-
-fn matches(value: NV2?, expected: NV2) -> bool {
-    return value == expected && expected == value
-}
-
-fn main() {
-    let expected = NV2 { x: 1.0, y: 2.0 }
-    print(matches(expected, expected))
-    print(!matches(null, expected))
-    print(!matches(NV2 { x: 1.0, y: 3.0 }, expected))
-}
-"#;
-
-#[test]
-fn nullable_nobox_equality_with_a_non_nullable_operand_compares_presence_and_leaves() {
-    assert_eq!(
-        compile_and_run(NOBOX_MIXED_NULLABLE_EQUALITY),
-        "true\ntrue\ntrue"
-    );
-}
-
 #[test]
 fn nobox_null_check_does_not_materialize() {
     let lua = emit_module(NOBOX_WHOLE_VALUE_OPERATORS);
@@ -866,12 +843,7 @@ fn global_of_a_nobox_value_stores_leaves() {
             "`{f}` materialized the nobox global:\n{body}"
         );
     }
-}
-
-#[test]
-fn nobox_global_reads_and_writes_leaves_at_runtime() {
-    let out = compile_and_run(NOBOX_GLOBAL);
-    assert_eq!(out, "3\n12\n300");
+    assert_eq!(run_main(&lua), "3\n12\n300");
 }
 
 // Re-pointed for the same reason as `NOBOX_INDIRECT_SINK`, and to the same
@@ -1155,28 +1127,6 @@ fn a_nested_fn_with_an_inferred_nobox_return_threads_leaves() {
         "an inferred nobox return materialized:\n{body}"
     );
     assert_eq!(run_main(&lua), "3");
-}
-
-const VALUE_NESTED_FN_BY_VALUE: &str = r#"
-value V2 { x: float, y: float }
-
-fn apply(f: fn(V2) -> float, v: V2) -> float { return f(v) }
-
-fn outer(p: V2) -> float {
-    fn sum(v: V2) -> float { return v.x + v.y }
-    return sum(p) + apply(sum, p)
-}
-
-fn main() {
-    print("{outer(V2 { x: 1.0, y: 2.0 })}")
-}
-"#;
-
-#[test]
-fn a_nested_fn_taken_by_value_keeps_one_boxed_abi_at_every_call() {
-    // The scalar ABI is all-or-nothing per callee: a nested fn reachable as a
-    // fn VALUE cannot splat, so its direct calls must not splat either.
-    assert_eq!(compile_and_run(VALUE_NESTED_FN_BY_VALUE), "6");
 }
 
 const NOBOX_SCALAR_ABI_FFI: &str = r#"
@@ -1482,6 +1432,7 @@ fn null_coalescing_a_nobox_nullable_stays_on_leaves() {
         !body.contains("NV2_ct("),
         "`??` materialized a nobox cdata:\n{body}"
     );
+    assert_eq!(run_main(&lua), "3 11 7 -1");
 }
 
 #[test]
@@ -1492,11 +1443,6 @@ fn if_let_binding_a_nobox_nullable_stays_on_leaves() {
         !body.contains("NV2_ct("),
         "`if let` materialized a nobox cdata:\n{body}"
     );
-}
-
-#[test]
-fn nobox_nullable_bindings_evaluate_correctly() {
-    assert_eq!(compile_and_run(NOBOX_NULLABLE_BINDINGS), "3 11 7 -1");
 }
 
 const NOBOX_REJECTION_SITE: &str = r#"

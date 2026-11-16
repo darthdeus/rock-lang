@@ -1,0 +1,33 @@
+// Runtime results of nobox and value-struct operations whose emitted shape is
+// pinned in the skull Rust tests.
+
+nobox value NV2 { x: float, y: float }
+
+fn matches(value: NV2?, expected: NV2) -> bool {
+    return value == expected && expected == value
+}
+
+// Mixed nullable/non-nullable equality compares presence, then leaves.
+@test(output = "true\ntrue\ntrue")
+fn nullable_nobox_equality_with_a_non_nullable_operand_compares_presence_and_leaves() {
+    let expected = NV2 { x: 1.0, y: 2.0 }
+    print(matches(expected, expected))
+    print(!matches(null, expected))
+    print(!matches(NV2 { x: 1.0, y: 3.0 }, expected))
+}
+
+value V2 { x: float, y: float }
+
+fn apply(f: fn(V2) -> float, v: V2) -> float { return f(v) }
+
+fn outer(p: V2) -> float {
+    fn sum(v: V2) -> float { return v.x + v.y }
+    return sum(p) + apply(sum, p)
+}
+
+// A nested fn reachable as a fn value cannot splat, so its direct calls must
+// use the same boxed ABI.
+@test(output = "6")
+fn a_nested_fn_taken_by_value_keeps_one_boxed_abi_at_every_call() {
+    print("{outer(V2 { x: 1.0, y: 2.0 })}")
+}

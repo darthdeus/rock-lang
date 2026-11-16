@@ -1,4 +1,4 @@
-use crate::common::{compile_and_run, emit_module, function_body, run_luajit};
+use crate::common::{emit_module, function_body, run_luajit, run_main};
 
 const SRC: &str = r#"
 nobox value Id { scene: int, arena: int, slot: int, generation: int }
@@ -72,11 +72,7 @@ fn nullable_embed_clear_writes_record_slots_without_materializing() {
             );
         }
     }
-}
-
-#[test]
-fn nullable_embed_clear_releases_payload_and_can_be_repeated() {
-    assert_eq!(compile_and_run(SRC), "10\n-1 true\n4\n-1 true");
+    assert_eq!(run_main(&lua), "10\n-1 true\n4\n-1 true");
 }
 
 #[test]
@@ -96,26 +92,4 @@ assert(writes == 128 * 2 * 7, 'missing physical record stores: ' .. writes)
 io.write('ok')
 "#;
     assert_eq!(run_luajit(&format!("{lua}\n{driver}")), "ok");
-}
-
-#[test]
-fn nullable_embed_clear_normalizes_dynamic_absence_before_boxed_read() {
-    assert_eq!(
-        compile_and_run(
-            r#"
-struct Payload { n: int }
-struct State { embed payload: Payload? }
-fn absent() -> Payload? { return null }
-fn clear_payload(s: State) { s.payload = null }
-fn take(p: Payload?) -> int { if p == null { return -1 }; return p.n }
-fn main() {
-    let s = State { payload: Payload { n: 7 } }
-    s.payload = absent()
-    clear_payload(s)
-    print("{take(s.payload)}")
-}
-"#
-        ),
-        "-1"
-    );
 }

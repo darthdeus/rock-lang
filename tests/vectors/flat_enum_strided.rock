@@ -1,0 +1,82 @@
+// A Vec of a wide numeric flat enum is stored as dense strided lanes. Its whole
+// mutating surface, the erased Lua array bridge, capacity accounting and
+// equality must behave as on boxed elements.
+
+enum Kind { A, B }
+
+nobox value Row {
+    kind: Kind,
+    remaining: float,
+    duration: float,
+    level: int,
+}
+
+enum Slot {
+    Entry(Row),
+    Overflow(int),
+}
+
+fn kind_score(kind: Kind) -> int { return match kind { Kind::A => 0, Kind::B => 1 } }
+
+fn score(slot: Slot) -> int {
+    return match slot {
+        Slot::Entry(row) => int(row.remaining) * 1000 + int(row.duration) * 100 + row.level * 10 + kind_score(row.kind),
+        Slot::Overflow(hidden) => hidden,
+    }
+}
+
+@test(output = "5670|8931|4|9,2340|1|12|3")
+fn strided_vec_preserves_the_complete_mutating_surface() {
+    let slots: [Slot] = [
+        Slot::Entry(Row { kind: Kind::B, remaining: 8.0, duration: 9.0, level: 3 }),
+        Slot::Overflow(7),
+        Slot::Entry(Row { kind: Kind::A, remaining: 2.0, duration: 3.0, level: 4 }),
+    ]
+    slots.set(1, Slot::Entry(Row { kind: Kind::A, remaining: 5.0, duration: 6.0, level: 7 }))
+    slots.insert_at(1, Slot::Overflow(9))
+    let removed = slots.remove_at(2)
+    let swapped = slots.swap_remove(0)
+    slots.push(Slot::Overflow(4))
+    let popped = slots.pop()
+    let copy = slots.clone()
+    copy.sort(score)
+    slots.clear()
+    slots.push(Slot::Overflow(1))
+    let spread: [Slot] = [...copy, Slot::Overflow(12)]
+    print("{score(removed.unwrap())}|{score(swapped.unwrap())}|{score(popped.unwrap())}|{score(copy[0])},{score(copy[1])}|{score(slots[0])}|{score(spread[2])}|{copy.capacity()}")
+}
+
+nobox value Quad { a: int, b: int, c: int, d: int }
+enum QuadSlot { Entry(Quad), Overflow(int) }
+
+fn quad_score(slot: QuadSlot) -> int {
+    return match slot {
+        QuadSlot::Entry(row) => row.a * 1000 + row.b * 100 + row.c * 10 + row.d,
+        QuadSlot::Overflow(hidden) => hidden,
+    }
+}
+
+@test(output = "1234,8,2", backends = "lua")
+fn erased_array_bridge_materializes_and_reimports_strided_elements() {
+    let slots: [QuadSlot] = [QuadSlot::Entry(Quad { a: 1, b: 2, c: 3, d: 4 }), QuadSlot::Overflow(8)]
+    let copy: [QuadSlot] = __rock_vec_from_lua_array(__rock_vec_to_lua_array(slots), slots.len)
+    print("{quad_score(copy[0])},{quad_score(copy[1])},{copy.len}")
+}
+
+@test(output = "2,2")
+fn inactive_payload_lanes_remain_physically_dense() {
+    let slots: [QuadSlot] = []
+    slots.push(QuadSlot::Entry(Quad { a: 1, b: 2, c: 3, d: 4 }))
+    slots.push(QuadSlot::Overflow(8))
+    print("{slots.len},{slots.capacity()}")
+}
+
+@test(output = "true,false,false,true")
+fn strided_vec_equality_compares_logical_elements_not_storage_metadata() {
+    let a: [QuadSlot] = [QuadSlot::Entry(Quad { a: 1, b: 2, c: 3, d: 4 }), QuadSlot::Overflow(8)]
+    let b: [QuadSlot] = []
+    b.push(QuadSlot::Entry(Quad { a: 1, b: 2, c: 3, d: 4 }))
+    b.push(QuadSlot::Overflow(8))
+    let c: [QuadSlot] = [QuadSlot::Entry(Quad { a: 1, b: 2, c: 3, d: 5 }), QuadSlot::Overflow(8)]
+    print("{a == b},{a != b},{a == c},{a != c}")
+}

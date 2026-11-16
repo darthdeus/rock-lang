@@ -19,7 +19,6 @@
 //! tell them apart from "unknown annotation `@repr`". That is why these assert
 //! MESSAGES.
 
-use crate::common::compile_and_run;
 const ON_A_ROCK_BODY: &str = r#"
 fn plain(@repr(opaque) v: int) -> int { v }
 fn main() { print("{plain(1)}") }
@@ -65,25 +64,8 @@ const EXTRA_ARGUMENTS: &str = r#"
 fn main() { print("{f(1)}") }
 "#;
 
-/// `vec_push`'s shape. `sink: [T]` names the vec layout; `item: T` is stored and
-/// never indexed. Called with `T = [P]`: the sink is `[[P]]`, whose element is a
-/// Vec and therefore boxed, while the payload is a COLUMN vec.
-const PAYLOAD_ADMITTED: &str = r#"
-value P { x: float, y: float }
-
-@nomangle inline(lua) fn take<T>(sink: [T], @repr(opaque) item: T) -> int = """
-    sink._data[1] = item
-    return 1
-"""
-
-fn main() {
-    let outer: [[P]] = []
-    let inner: [P] = [P { x: 1.0, y: 2.0 }]
-    print("{take(outer, inner)}")
-}
-"#;
-
-/// The SAME signature, with the column container at the UNANNOTATED parameter.
+/// `vec_push`'s signature (admitted in `tests/annotations/opaque_slot_admission.rock`),
+/// with the column container at the UNANNOTATED parameter.
 /// `T = P` makes `sink` a column `[P]`, and the contract on `item` must not
 /// reach it: the waiver is per parameter, not per call.
 const EXEMPTS_ONLY_THAT_PARAM: &str = r#"
@@ -205,11 +187,6 @@ fn repr_with_a_non_ident_kind_rejects() {
 #[test]
 fn repr_with_extra_arguments_rejects() {
     assert!(registry_rejection(EXTRA_ARGUMENTS).contains("@repr"));
-}
-
-#[test]
-fn an_opaque_payload_is_admitted_and_correct() {
-    assert_eq!(compile_and_run(PAYLOAD_ADMITTED), "1");
 }
 
 /// The waiver is PER PARAMETER. Without this, annotating any parameter could

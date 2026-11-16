@@ -1,0 +1,63 @@
+// A projection out of a wide boxed value reads only the selected fields, yet
+// keeps snapshot semantics for selected children, nullable nobox fields and
+// opaque nullable children, and evaluates arguments in order.
+
+value Plain { x: int, y: int }
+value Child { point: Plain, opaque: Plain? }
+nobox value Flat { x: int, y: int }
+value Wide {
+    f0: int = 0, f1: int = 1, f2: int = 2, f3: int = 3, f4: int = 4,
+    f5: int = 5, f6: int = 6, f7: int = 7, f8: int = 8, f9: int = 9,
+    f10: int = 10, f11: int = 11, f12: int = 12, f13: int = 13, f14: int = 14,
+    f15: int = 15, f16: int = 16, f17: int = 17, f18: int = 18, f19: int = 19,
+    f20: int = 20, f21: int = 21, f22: int = 22, f23: int = 23, f24: int = 24,
+    f25: int = 25, f26: int = 26, f27: int = 27, f28: int = 28, f29: int = 29,
+    f30: int = 30, f31: int = 31, f32: int = 32, f33: int = 33, f34: int = 34,
+    f35: int = 35, f36: int = 36, f37: int = 37, f38: int = 38, f39: int = 39,
+    f40: int = 40, f41: int = 41, f42: int = 42, f43: int = 43, f44: int = 44,
+    f45: int = 45, f46: int = 46, f47: int = 47, f48: int = 48, f49: int = 49,
+    child: Child, nullable: Flat?
+}
+struct Owner { wide: Wide, calls: int }
+
+fn scalar(v: Wide) -> int { v.f1 }
+fn nested(v: Wide) -> int { v.child.point.y }
+fn selected(v: Wide) -> Child { v.child }
+fn nullable(v: Wide) -> Flat? { v.nullable }
+fn narrowed(v: Wide) -> int { if v.nullable != null { return v.nullable.y }; return -1 }
+fn narrowed_root(v: Wide?) -> int { if v != null { return v.f1 }; return -1 }
+fn opaque(v: Wide) -> Plain? { v.child.opaque }
+fn produced(o: Owner) -> Wide { o.calls += 1; return o.wide }
+fn sum(a: int, b: int) -> int { a + b }
+fn ordered(v: Wide) -> int { sum(v.f1, { v = Wide { ..v, f1: 90 }; 1 }) }
+
+@test(output = "1\n5\n2\n5\n5\n11\n11\n17\n17\n1\n-1\n1\n1\ntrue\n-1\n2")
+fn boxed_wide_projection_preserves_selected_snapshots_and_opaque_children() {
+    let o = Owner { wide: Wide { child: Child { point: Plain { x: 3, y: 5 },
+        opaque: Plain { x: 7, y: 11 } }, nullable: Flat { x: 13, y: 17 } }, calls: 0 }
+    let local = o.wide
+    let before = selected(local)
+    let direct_before = o.wide.child
+    let opaque_before = opaque(local)
+    let nullable_before = nullable(local)
+    print(scalar(local))
+    print(nested(local))
+    print(ordered(local))
+    o.wide.child.point.y = 99
+    if o.wide.child.opaque != null { o.wide.child.opaque.y = 101 }
+    o.wide.nullable = Flat { x: 103, y: 107 }
+    print(before.point.y)
+    print(direct_before.point.y)
+    print(before.opaque?.y ?? -1)
+    print(opaque_before?.y ?? -1)
+    print(nullable_before?.y ?? -1)
+    print(narrowed(local))
+    print(narrowed_root(local))
+    print(narrowed_root(null))
+    print(produced(o).f1)
+    print(o.calls)
+    o.wide.nullable = null
+    print(nullable(o.wide) == null)
+    print(narrowed(o.wide))
+    print(local.f2)
+}

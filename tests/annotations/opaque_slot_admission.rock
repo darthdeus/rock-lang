@@ -1,0 +1,86 @@
+// Admission controls for the opaque-body container-layout rule: a boxed or
+// scalar declared slot, a waived `@repr(opaque)` parameter (also under named
+// out-of-order arguments), an unpinned irrelevant generic and a nullable slot
+// at a boxed element all compile and run. The column-stored twins are
+// rejected; those rejections are pinned in the skull Rust tests.
+
+value G { x: float, y: float }
+struct B { s: string }
+
+@nomangle inline(lua) fn make_boxed<T>() -> T = """
+    return {_data = {}, len = 0, __ty = "Vec"}
+"""
+
+@test(output = "0", backends = "lua")
+fn a_generic_return_at_a_boxed_element_is_admitted() {
+    let xs: [B] = make_boxed()
+    print("{xs.len}")
+}
+
+@nomangle inline(lua) fn make_scalar<T>() -> T = """
+    return 7
+"""
+
+@test(output = "7", backends = "lua")
+fn a_generic_return_at_a_scalar_is_admitted() {
+    let n: int = make_scalar()
+    print("{n}")
+}
+
+@nomangle inline(lua) fn probe_named<T>(sink: [T], token: int) -> int = """
+    return #sink._data + token
+"""
+
+@test(output = "1", backends = "lua")
+fn a_named_out_of_order_boxed_argument_is_admitted() {
+    let xs: [B] = [B { s: "a" }]
+    print("{probe_named(token: 0, sink: xs)}")
+}
+
+// `vec_push`'s shape: the sink `[[G]]` has a boxed element while the stored,
+// never-indexed payload is a column vec.
+@nomangle inline(lua) fn take_payload<T>(sink: [T], @repr(opaque) item: T) -> int = """
+    sink._data[1] = item
+    return 1
+"""
+
+@test(output = "1", backends = "lua")
+fn an_opaque_payload_is_admitted_and_correct() {
+    let outer: [[G]] = []
+    let inner: [G] = [G { x: 1.0, y: 2.0 }]
+    print("{take_payload(outer, inner)}")
+}
+
+@nomangle inline(lua) fn take_named<T>(sink: [T], @repr(opaque) item: T, token: int) -> int = """
+    sink._data[1] = item
+    return token
+"""
+
+// The waiver follows the declared index, not the call's argument order.
+@test(output = "5", backends = "lua")
+fn repr_opaque_waives_the_declared_slot_under_named_arguments() {
+    let outer: [[G]] = []
+    let inner: [G] = [G { x: 1.0, y: 2.0 }]
+    print("{take_named(token: 5, item: inner, sink: outer)}")
+}
+
+@nomangle inline(lua) fn probe_unbound<T, U>(sink: [T]) -> int = """
+    return #sink._data
+"""
+
+@test(output = "1", backends = "lua")
+fn an_irrelevant_unbound_generic_still_admits_a_boxed_element() {
+    let xs: [B] = [B { s: "a" }]
+    print("{probe_unbound(xs)}")
+}
+
+@nomangle inline(lua) fn probe_nullable<T>(sink: [T]? = null) -> int = """
+    if sink == nil then return 0 end
+    return #sink._data
+"""
+
+@test(output = "1", backends = "lua")
+fn a_nullable_slot_at_a_boxed_element_is_admitted() {
+    let xs: [B] = [B { s: "a" }]
+    print("{probe_nullable(xs)}")
+}

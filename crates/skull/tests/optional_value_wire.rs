@@ -5,7 +5,7 @@
 //! non-escaping path builds no box; an escape (a field, a boxed local) boxes
 //! once, and to `nil` when absent.
 
-use crate::common::{compile_and_run, emit_module, function_body};
+use crate::common::{emit_module, function_body, run_main};
 
 const OPTIONAL_VALUE: &str = r#"
 value Mix { gain: float, pan: float }
@@ -103,12 +103,8 @@ fn optional_value_return_builds_no_box_on_the_presence_path() {
         body.contains("do return (false) end"),
         "absent arm is the presence lane alone; Lua fills the leaves with nil:\n{body}"
     );
-}
-
-#[test]
-fn optional_value_wire_keeps_null_present_nested_and_escape_semantics() {
     assert_eq!(
-        compile_and_run(OPTIONAL_VALUE),
+        run_main(&lua),
         "5\n-1\n5\ntrue\ntrue\ntrue\ntrue\n5\n0\n4\n7\n9\ntrue\ntrue\ntrue\n4\nt\nd"
     );
 }

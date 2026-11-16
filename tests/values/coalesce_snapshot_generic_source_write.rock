@@ -1,3 +1,6 @@
+// A value coalesced out of a nullable source keeps a snapshot of its nullable
+// child: a later write to the source must not reach the retained copy.
+
 value Child { id: int, tags: [int] }
 value Wrap<T> { child: T?, width: int }
 struct Source { value: Wrap<Child>? }

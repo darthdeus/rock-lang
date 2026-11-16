@@ -1,4 +1,4 @@
-use crate::common::{compile_and_run, emit_module, function_body};
+use crate::common::{compile_and_run, emit_module, function_body, run_main};
 
 const SOURCE: &str = r#"
 value Row { text: string, n: int }
@@ -16,15 +16,11 @@ fn main() {
 "#;
 
 #[test]
-fn optional_receiver_call_is_evaluated_once() {
-    assert_eq!(compile_and_run(SOURCE), "7 1");
-}
-
-#[test]
 fn optional_receiver_fallback_does_not_emit_a_discarded_call() {
     let lua = emit_module(SOURCE);
     let body = function_body(&lua, "read_once");
     assert_eq!(body.matches("next_row(").count(), 1, "{body}");
+    assert_eq!(run_main(&lua), "7 1");
 }
 
 #[test]

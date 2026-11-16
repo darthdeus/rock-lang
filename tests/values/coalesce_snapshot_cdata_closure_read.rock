@@ -1,8 +1,11 @@
-value Child { id: int, tags: [int] }
+// A value coalesced out of a nullable source keeps a snapshot of its nullable
+// child: a later write to the source must not reach the retained copy.
+
+value Child { id: int }
 value Asset { child: Child?, width: int }
 struct Source { asset: Asset? }
 struct Kept { asset: Asset }
-fn source() -> Source { Source { asset: Asset { child: Child { id: 1, tags: [] }, width: 7 } } }
+fn source() -> Source { Source { asset: Asset { child: Child { id: 1 }, width: 7 } } }
 fn id(a: Asset) -> int { a.child?.id ?? -1 }
 fn mutate(a: ref Asset) { if a.child != null { a.child.id = 99 } }
 fn mutate_source(s: Source) { if s.asset != null && s.asset.child != null { s.asset.child.id = 99 } }

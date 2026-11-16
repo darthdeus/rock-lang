@@ -1,3 +1,6 @@
+// A value coalesced out of a nullable source keeps a snapshot of its nullable
+// child: a later write to the source must not reach the retained copy.
+
 value Child { id: int, tags: [int] }
 value Asset { child: Child?, width: int }
 struct Source { asset: Asset? }
@@ -11,4 +14,4 @@ fn reader(s: Source) -> fn() -> int { let a = s.asset ?? return () => -1; return
 fn writer(s: Source) -> fn() { let a = s.asset ?? return () => {}; return () => mutate(a) }
 fn by_value_mutate(a: Asset) { mutate(a) }
 @test(output = "1")
-fn probe() { let s = source(); let slots: [Asset?] = [s.asset]; let a = slots[0] ?? return; slots[0]?.child?.id = 99; print(id(a)) }
+fn probe() { let s = source(); let f = reader(s); mutate_source(s); print(f()) }

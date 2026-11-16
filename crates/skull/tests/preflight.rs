@@ -33,11 +33,7 @@ fn preflight_precedes_safe_float_argument_construction() {
         .unwrap_or_else(|| panic!("preflight call missing:\n{body}"));
     let arithmetic = body.find("1.25").expect("float arithmetic");
     assert!(preflight < arithmetic, "{body}");
-}
-
-#[test]
-fn otherwise_unreferenced_preflight_helper_is_emitted_and_runs() {
-    assert_eq!(run_main(&emit_module(SOURCE)), "2.5 1 1");
+    assert_eq!(run_main(&lua), "2.5 1 1");
 }
 
 #[test]

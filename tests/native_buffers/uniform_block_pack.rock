@@ -1,0 +1,90 @@
+// `pack_uniform_block` of a value with a nested nobox member, bound to a local
+// inside a lambda, stores every leaf (the nested member is stored under dotted
+// leaf names, so `.params` names no field cell). The controls each drop one
+// leg: the local, the nesting, the lambda. `uniform_block_id` reads only its
+// argument's type and never evaluates it.
+
+value ProbeU {
+    scalar: float,
+    params: Vec2,
+}
+
+@test(output = "1\n5\n6")
+fn a_nested_member_survives_a_local_inside_a_lambda() {
+    let body = () => {
+        let f = native_buffer_float(8)
+        let i = native_buffer_int(8)
+        let u = ProbeU { scalar: 1.0, params: v(5.0, 6.0) }
+        pack_uniform_block(f.ptr, i.ptr, u)
+        print(f[0])
+        print(f[2])
+        print(f[3])
+    }
+    body()
+}
+
+@test(output = "1\n5\n6")
+fn control_a_literal_packed_directly_inside_a_lambda() {
+    let body = () => {
+        let f = native_buffer_float(8)
+        let i = native_buffer_int(8)
+        pack_uniform_block(f.ptr, i.ptr, ProbeU { scalar: 1.0, params: v(5.0, 6.0) })
+        print(f[0])
+        print(f[2])
+        print(f[3])
+    }
+    body()
+}
+
+value FlatU {
+    scalar: float,
+    px: float,
+    py: float,
+}
+
+@test(output = "1\n5\n6")
+fn control_a_flat_value_in_a_lambda_local() {
+    let body = () => {
+        let f = native_buffer_float(8)
+        let i = native_buffer_int(8)
+        let u = FlatU { scalar: 1.0, px: 5.0, py: 6.0 }
+        pack_uniform_block(f.ptr, i.ptr, u)
+        print(f[0])
+        print(f[1])
+        print(f[2])
+    }
+    body()
+}
+
+@test(output = "1\n5\n6")
+fn control_a_local_packed_at_function_scope() {
+    let f = native_buffer_float(8)
+    let i = native_buffer_int(8)
+    let u = ProbeU { scalar: 1.0, params: v(5.0, 6.0) }
+    pack_uniform_block(f.ptr, i.ptr, u)
+    print(f[0])
+    print(f[2])
+    print(f[3])
+}
+
+value FpProbeU { a: float, b: float }
+
+global FP_CALLS: int = 0
+
+fn make_probe() -> FpProbeU {
+    FP_CALLS = FP_CALLS + 1
+    return FpProbeU { a: 1.0, b: 2.0 }
+}
+
+// A non-zero id proves the fingerprint was produced, and the later pack proves
+// the constructor is not inert, so the zero count is the fingerprint's doing.
+@test(output = "true\n0\n1")
+fn the_fingerprint_never_evaluates_its_argument() {
+    let id = uniform_block_id(make_probe())
+    print(id != 0)
+    print(FP_CALLS)
+    let f = native_buffer_float(8)
+    let i = native_buffer_int(8)
+    pack_uniform_block(f.ptr, i.ptr, make_probe())
+    print(FP_CALLS)
+}
