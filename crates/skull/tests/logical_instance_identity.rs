@@ -60,16 +60,26 @@ fn assert_population(c: &SiteJoinCensus) {
     assert!(c.joined > 0, "the fixture joined nothing: {c:?}");
 }
 
-/// A generic instantiated at a FUNCTION type records its instance, and the four
-/// neighbouring shapes stay distinct from it and from each other.
+/// Each fixture instantiates `ident` at shapes a narrower converter would
+/// decline beside shapes it accepts. Every instance must be recorded under its
+/// own identity, and every call must claim the instance the graph gave it.
 ///
-/// `fn() -> unit` is the shape a narrower converter declines. The other four are
-/// the admission control: a converter that lost structure would collapse
-/// `(int, int)` and `[int]` and `int?` onto one identity while still reporting
-/// "converted".
+/// - `fn() -> unit` is the shape a narrower converter declines; the tuple,
+///   array and nullable rows are the admission control, since a converter that
+///   lost structure would collapse them onto one identity while still
+///   reporting "converted".
+/// - A coroutine's yield type is a function type one level down, so the
+///   container arm is not redundant with the bare one.
+/// - A nested application keeps both levels: `[[int]]` and `[int]` are two
+///   identities, not one erased `Vec<..>`. The Stage-1 census recorded that
+///   29.6% of substituted reads carry a tuple, a nullable or an application
+///   with arguments whose children the lossy adapter erases.
 #[test]
-fn a_function_typed_instantiation_records_a_distinct_instance() {
-    let src = r#"
+fn every_instantiation_records_a_distinct_instance_its_call_claims() {
+    let cases = [
+        (
+            "function-typed",
+            r#"
 fn ident<T>(x: T) -> T { return x }
 fn nudge(a: int) -> int { return a + 1 }
 
@@ -83,46 +93,12 @@ fn main() {
     let m = ident(1)
     print("{t} {a} {o} {m} {f(1)}")
 }
-"#;
-    let ws = ws_with_stdlib(src);
-    let g = graph_of(&ws);
-    let insts = instantiations_of(&ws, &g, "ident");
-    assert_eq!(
-        insts.len(),
-        5,
-        "expected five distinct `ident` instances, got {insts:?}"
-    );
-    assert!(
-        insts.iter().any(|s| s.contains("fn(")),
-        "no function-typed instance was recorded: {insts:?}"
-    );
-    let unique: std::collections::BTreeSet<&String> = insts.iter().collect();
-    assert_eq!(
-        unique.len(),
-        insts.len(),
-        "two shapes share one identity: {insts:?}"
-    );
-
-    let c = census_of(src);
-    assert_population(&c);
-    assert_eq!(
-        unjoined(&c, Unjoined::CalleeNoInstance),
-        0,
-        "a call recorded no instance for its own instantiation: {c:?}"
-    );
-    assert_eq!(unjoined(&c, Unjoined::CalleeInstanceMismatch), 0, "{c:?}");
-}
-
-/// A generic instantiated at a COROUTINE type, and at a container of one,
-/// records its instance.
-///
-/// application's remaining three cases were `tick`/`start` over a coroutine payload
-/// and `clear` over a `Map` of them -- the coroutine's yield type is a function
-/// type one level down, which is why the container arm is not redundant with
-/// the bare one.
-#[test]
-fn a_coroutine_typed_instantiation_records_a_distinct_instance() {
-    let src = r#"
+"#,
+            5,
+        ),
+        (
+            "coroutine-typed",
+            r#"
 fn ident<T>(x: T) -> T { return x }
 
 co fn counter() -> Coroutine<int, int, ()> {
@@ -138,35 +114,12 @@ fn main() {
     print("{b}")
     let _ = a
 }
-"#;
-    let ws = ws_with_stdlib(src);
-    let g = graph_of(&ws);
-    let insts = instantiations_of(&ws, &g, "ident");
-    assert_eq!(
-        insts.len(),
-        2,
-        "expected two `ident` instances, got {insts:?}"
-    );
-    assert_ne!(
-        insts[0], insts[1],
-        "the bare and contained coroutine share one identity"
-    );
-
-    let c = census_of(src);
-    assert_population(&c);
-    assert_eq!(unjoined(&c, Unjoined::CalleeNoInstance), 0, "{c:?}");
-}
-
-/// A NESTED application keeps both levels: `Vec<Vec<int>>` and `Vec<int>` are
-/// two identities, not one erased `Vec<..>`.
-///
-/// The Stage-1 census recorded that 29.6% of substituted reads carry a tuple, a
-/// nullable or an application WITH ARGUMENTS whose children the lossy adapter
-/// erases. This is the arm that would go red if the identity path ever went
-/// back through it.
-#[test]
-fn a_nested_application_keeps_both_levels_of_its_identity() {
-    let src = r#"
+"#,
+            2,
+        ),
+        (
+            "nested application",
+            r#"
 fn ident<T>(x: T) -> T { return x }
 
 fn main() {
@@ -176,23 +129,40 @@ fn main() {
     let b = ident(outer)
     print("{a} {b}")
 }
-"#;
-    let ws = ws_with_stdlib(src);
-    let g = graph_of(&ws);
-    let insts = instantiations_of(&ws, &g, "ident");
-    assert_eq!(
-        insts.len(),
-        2,
-        "expected two `ident` instances, got {insts:?}"
-    );
-    assert_ne!(
-        insts[0], insts[1],
-        "`[int]` and `[[int]]` collapsed onto one identity: {insts:?}"
-    );
+"#,
+            2,
+        ),
+    ];
+    for (case, src, expected) in cases {
+        let ws = ws_with_stdlib(src);
+        let insts = instantiations_of(&ws, &graph_of(&ws), "ident");
+        assert_eq!(insts.len(), expected, "{case}: {insts:?}");
+        let unique: std::collections::BTreeSet<&String> = insts.iter().collect();
+        assert_eq!(
+            unique.len(),
+            insts.len(),
+            "{case}: two shapes share one identity: {insts:?}"
+        );
+        if case == "function-typed" {
+            assert!(
+                insts.iter().any(|s| s.contains("fn(")),
+                "no function-typed instance was recorded: {insts:?}"
+            );
+        }
 
-    let c = census_of(src);
-    assert_population(&c);
-    assert_eq!(unjoined(&c, Unjoined::CalleeNoInstance), 0, "{c:?}");
+        let c = census_of(src);
+        assert_population(&c);
+        assert_eq!(
+            unjoined(&c, Unjoined::CalleeNoInstance),
+            0,
+            "{case}: a call recorded no instance for its own instantiation: {c:?}"
+        );
+        assert_eq!(
+            unjoined(&c, Unjoined::CalleeInstanceMismatch),
+            0,
+            "{case}: {c:?}"
+        );
+    }
 }
 
 /// A game's `inline(lua)` override of an engine's portable `@nomangle` body is
