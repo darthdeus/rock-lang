@@ -258,15 +258,16 @@ fn caller() -> int { return apply(1, unchanged) }
 
 /// The retained fast paths of a body edit (the root cache, the invalidated
 /// candidate keys, the cached fingerprint rows) against their full-scan
-/// equivalents. One edit sequence -- an inlined callee's body, a generic
-/// instance removed, another added -- runs through a default cache and a
+/// equivalents. One edit sequence -- the body of a callee inlined through
+/// another inlined callee, a generic instance removed, another added -- runs through a default cache and a
 /// `set_full_scans` cache. Both must produce the same incremental Lua as a
 /// fresh emit, and the same overlay and artifact fingerprint as each other.
 #[test]
 fn full_scans_agree_with_the_retained_fast_paths_over_an_edit_sequence() {
     let v0 = "@inline\nfn helper() -> int { 3 }\n\
+              @inline\nfn middle() -> int { helper() }\n\
               fn leaf<T>(x: T) -> T { x }\n\
-              fn use_it() -> int { let a = leaf(1)\n helper() }\n\
+              fn use_it() -> int { let a = leaf(1)\n middle() }\n\
               fn main() { let x = use_it() }";
     let steps = [
         (v0.replace("{ 3 }", "{ 5 }"), "helper"),
@@ -364,29 +365,6 @@ fn body_edit_to_a_function_with_lambdas_matches_a_full_emit() {
             definition(&overlay, name),
             expected,
             "overlay and full emit disagree on `{name}`:\n{overlay}"
-        );
-    }
-}
-
-/// A sequence of edits to ONE cache, like a watch session: after each update
-/// the assembly must still equal a fresh emit of that state. The first edit
-/// is to `c`, inlined into `b` inlined into `a`, so a's chunk holds c's body.
-#[test]
-fn sequential_edits_stay_consistent() {
-    let v0 = "@inline\nfn c() -> int { 1 }\n@inline\nfn b() -> int { c() }\nfn a() -> int { b() }\nfn z() -> int { 9 }";
-    let (_, mut cache) = emit_full_of(&ws_of(v0), "emit_full v0");
-    let v1 = v0.replace("{ 1 }", "{ 2 }");
-    for (src, edited) in [
-        (v1.clone(), "c"),
-        (v1.replace("{ 9 }", "{ 5 }"), "z"),
-        (v1.replace("{ 9 }", "{ 7 }"), "z"),
-    ] {
-        let ws = ws_of(&src);
-        let inc = emit_incremental(&ws, &mut cache, &[body_id(&ws, edited)]).unwrap();
-        let (fresh, _) = emit_full_of(&ws, "fresh");
-        assert_eq!(
-            inc.lua, fresh.lua,
-            "incremental drifted from fresh after editing {edited}"
         );
     }
 }
@@ -785,24 +763,6 @@ fn fingerprint_code_rows_include_new_body_specializations() {
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "main")]);
     assert!(overlay.code_artifact.entries.len() > baseline.code_artifact.entries.len());
     assert_ne!(overlay.artifact_fingerprint, baseline.artifact_fingerprint);
-}
-
-#[test]
-fn fingerprint_code_rows_survive_rollback() {
-    let original = "fn helper() -> int { return 1 }\nfn main() { let _ = helper() }";
-    let ws1 = ws_of(original);
-    let (_, mut cache) = emit_full_of(&ws1, "emit_full");
-    let ws2 = ws_of(&original.replace("return 1", "return 2"));
-    let edited = [body_id(&ws2, "helper")];
-    cache.begin_body_edit_transaction(&edited, &[]);
-    let _ = emit_overlay(&ws2, &mut cache, &edited);
-    cache.rollback_body_edit(&ws1).expect("rollback");
-    for value in [3, 4] {
-        let changed = ws_of(&original.replace("return 1", &format!("return {value}")));
-        let overlay = emit_overlay(&changed, &mut cache, &[body_id(&changed, "helper")]);
-        let fresh = emit_full_of(&changed, "emit_full").0;
-        assert_eq!(overlay.artifact_fingerprint, fresh.artifact_fingerprint);
-    }
 }
 
 #[test]
@@ -1266,8 +1226,15 @@ fn repeated_body_overlays_keep_the_fingerprint_of_a_full_emit() {
     }
     let original = ws_of(&source);
     let (_, mut cache) = emit_full_of(&original, "emit_full v1");
-    for value in [2, 3, 4] {
-        let changed = ws_of(&source.replacen("return 1 }", &format!("return {value} }}"), 1));
+    let edit = |value: i32| ws_of(&source.replacen("return 1 }", &format!("return {value} }}"), 1));
+    // A rolled-back overlay must leave no fingerprint rows behind.
+    let rolled_back = edit(2);
+    let edited = [body_id(&rolled_back, "helper")];
+    cache.begin_body_edit_transaction(&edited, &[]);
+    let _ = emit_overlay(&rolled_back, &mut cache, &edited);
+    cache.rollback_body_edit(&original).expect("rollback");
+    for value in [3, 4, 5] {
+        let changed = edit(value);
         let overlay = emit_overlay(&changed, &mut cache, &[body_id(&changed, "helper")]);
         assert!(overlay.code_artifact.entries.len() > 40);
         let (fresh, _) = emit_full_of(&changed, "emit_full v2");
