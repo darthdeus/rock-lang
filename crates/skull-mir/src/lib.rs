@@ -32,6 +32,7 @@ pub mod sinking;
 pub mod site;
 mod striped;
 pub mod struct_defaults;
+pub mod type_table;
 pub mod verdict;
 pub mod verify;
 pub mod vertex_plan;

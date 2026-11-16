@@ -1905,233 +1905,249 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
     out
 }
 
-/// Declared shape for runtime record walkers. Unsupported types remain `any`;
-/// consumers that reconstruct typed values must reject those descriptors.
-pub(crate) fn type_desc_lua(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<String> {
-    let mut out = String::new();
-    desc_into(ws, ty, &mut out, 0).then_some(out)
-}
-
-/// Nominal leaves stop recursion; structural nesting has a finite depth bound.
-fn desc_into(
-    ws: &Workspace,
-    ty: bone_semantic::prelude::TyId,
-    out: &mut String,
-    depth: u32,
-) -> bool {
-    use bone_semantic::hir::{BuiltinTy, TypeCtor, TypeExpr};
-    use bone_semantic::prelude::TyId;
-
-    const MAX_DEPTH: u32 = 12;
-    if depth >= MAX_DEPTH {
-        out.push_str("{k=\"any\"}");
-        return false;
-    }
-    let te = match ty {
-        TyId::Static(m, idx) => match ws.modules.get(m.index()) {
-            Some(module) => module.ty_arena[idx],
-            None => {
-                out.push_str("{k=\"any\"}");
-                return false;
-            }
-        },
-        // A local (body) arena type never reaches a declaration's descriptor.
-        TyId::Local(_) => {
-            out.push_str("{k=\"any\"}");
-            return false;
-        }
-    };
-    match te {
-        TypeExpr::Builtin(kind) => {
-            let name = match kind {
-                BuiltinTy::Int => "int",
-                BuiltinTy::Uint => "uint",
-                BuiltinTy::Float => "float",
-                BuiltinTy::Bool => "bool",
-                BuiltinTy::String => "string",
-                _ => "any",
-            };
-            out.push_str(&format!("{{k=\"{name}\"}}"));
-            name != "any"
-        }
-        TypeExpr::Generic(..) | TypeExpr::Infer(..) | TypeExpr::Function { .. } => {
-            out.push_str("{k=\"any\"}");
-            false
-        }
-        TypeExpr::Nullable(inner) => {
+fn shape_lua(shape: &skull_mir::type_table::Shape, out: &mut String) {
+    use skull_mir::type_table::Shape;
+    match shape {
+        Shape::Prim(name) => out.push_str(&format!("{{k=\"{name}\"}}")),
+        Shape::Opt(inner) => {
             out.push_str("{k=\"opt\",inner=");
-            let found = desc_into(ws, ty.with_idx(inner), out, depth + 1);
+            shape_lua(inner, out);
             out.push('}');
-            found
         }
-        TypeExpr::Tuple { elements } => {
+        Shape::Tuple(elems) => {
             out.push_str("{k=\"tuple\",elems={");
-            let mut found = false;
-            for (i, e) in elements.into_iter().enumerate() {
+            for (i, e) in elems.iter().enumerate() {
                 if i > 0 {
                     out.push(',');
                 }
-                found |= desc_into(ws, ty.with_idx(e), out, depth + 1);
+                shape_lua(e, out);
             }
             out.push_str("}}");
-            found
         }
-        TypeExpr::App { ctor, params } => match ctor {
-            TypeCtor::Array => {
-                // An array with no argument carries no element type to render.
-                let Some(elem) = params.into_iter().next() else {
-                    out.push_str("{k=\"any\"}");
-                    return false;
-                };
-                out.push_str("{k=\"vec\",elem=");
-                let found = desc_into(ws, ty.with_idx(elem), out, depth + 1);
-                out.push('}');
-                found
-            }
-            TypeCtor::Map => {
-                let mut params = params.into_iter();
-                let (Some(key), Some(val)) = (params.next(), params.next()) else {
-                    out.push_str("{k=\"any\"}");
-                    return false;
-                };
-                out.push_str("{k=\"map\",key=");
-                let key_found = desc_into(ws, ty.with_idx(key), out, depth + 1);
-                out.push_str(",val=");
-                let val_found = desc_into(ws, ty.with_idx(val), out, depth + 1);
-                out.push('}');
-                key_found || val_found
-            }
-            TypeCtor::Ref => {
-                unreachable!("frame references are rejected from reflected storage")
-            }
-            TypeCtor::Nominal(name) => {
-                if name.as_str() == "JsonField"
-                    && ws.struct_by_name.get(&name).is_some_and(|sid| {
-                        rock_core::is_stdlib_module_file(ws.module(sid.module).file.as_str())
-                    })
-                {
-                    let Some(inner) = params.into_iter().next() else {
-                        out.push_str("{k=\"any\"}");
-                        return false;
-                    };
-                    out.push_str("{k=\"field\",inner=");
-                    let found = desc_into(ws, ty.with_idx(inner), out, depth + 1);
-                    out.push('}');
-                    return found;
-                }
-                // The name is the whole answer for a nominal leaf: the consumer
-                // asks the ONE classifier whether it is a native class, and a
-                // struct's own fields are reached through the type table's
-                // per-field descriptors rather than repeated inside this one.
-                out.push_str("{k=\"nom\",name=\"");
-                out.push_str(skull_mir::mangle::type_symbol(ws, name).as_str());
-                out.push_str("\"}");
-                true
-            }
-        },
+        Shape::Vec(elem) => {
+            out.push_str("{k=\"vec\",elem=");
+            shape_lua(elem, out);
+            out.push('}');
+        }
+        Shape::Map(key, val) => {
+            out.push_str("{k=\"map\",key=");
+            shape_lua(key, out);
+            out.push_str(",val=");
+            shape_lua(val, out);
+            out.push('}');
+        }
+        Shape::Field(inner) => {
+            out.push_str("{k=\"field\",inner=");
+            shape_lua(inner, out);
+            out.push('}');
+        }
+        Shape::Nom(name) => {
+            out.push_str("{k=\"nom\",name=\"");
+            out.push_str(name.as_str());
+            out.push_str("\"}");
+        }
     }
 }
 
-/// Complete boxed-enum alternatives, including units and primitive payloads.
-fn boxed_variant_descs(ws: &Workspace, e: &bone_semantic::hir::EnumDef) -> Option<String> {
-    use bone_semantic::hir::VariantPayload;
-    let flat =
-        skull_mir::lower::EnumPlan::for_name(ws, e.name).and_then(|plan| plan.flat().cloned());
-    let mut any = false;
-    let mut variants: Vec<String> = Vec::new();
-    for variant in e.variants.iter() {
-        let body = match &variant.payload {
-            VariantPayload::Unit => "pos={}".to_string(),
-            VariantPayload::Tuple(types) => {
-                let entries: Vec<String> = types
-                    .iter()
-                    .enumerate()
-                    .map(|(i, ty)| {
-                        let mut d = type_desc_lua(ws, *ty).unwrap_or_else(|| "{k=\"any\"}".into());
-                        if let Some(flat) = &flat {
-                            d.pop();
-                            d.push_str(&format!(",slot={}", flat.slot_offset(i) + 1));
-                            if let bone_semantic::prelude::TyId::Static(mid, idx) = *ty {
-                                if let bone_semantic::hir::TypeExpr::App {
-                                    ctor: bone_semantic::hir::TypeCtor::Nominal(name),
-                                    ..
-                                } = ws.modules[mid.index()].ty_arena[idx]
-                                {
-                                    if let Some(paths) = flat.position_leaf_paths(i, name) {
-                                        let paths = paths
-                                            .iter()
-                                            .map(|path| format!("{:?}", path.as_str()))
-                                            .collect::<Vec<_>>()
-                                            .join(",");
-                                        d.push_str(&format!(",leaves={{{paths}}}"));
-                                    }
-                                }
-                            }
-                            d.push('}');
+fn shape_lua_string(shape: &skull_mir::type_table::Shape) -> String {
+    let mut out = String::new();
+    shape_lua(shape, &mut out);
+    out
+}
+
+fn variant_lua(entry: &skull_mir::type_table::VariantEntry) -> String {
+    use skull_mir::type_table::VariantEntry;
+    match entry {
+        VariantEntry::Positional(positions) if positions.is_empty() => "pos={}".to_string(),
+        VariantEntry::Positional(positions) => {
+            let entries: Vec<String> = positions
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let mut d = p
+                        .shape
+                        .as_ref()
+                        .map_or_else(|| "{k=\"any\"}".into(), shape_lua_string);
+                    if let Some(slot) = p.slot {
+                        d.pop();
+                        d.push_str(&format!(",slot={}", slot + 1));
+                        if let Some(paths) = &p.leaves {
+                            let paths = paths
+                                .iter()
+                                .map(|path| format!("{:?}", path.as_str()))
+                                .collect::<Vec<_>>()
+                                .join(",");
+                            d.push_str(&format!(",leaves={{{paths}}}"));
                         }
-                        format!("[{}]={d}", i + 1)
-                    })
-                    .collect();
-                if entries.is_empty() {
-                    continue;
-                }
-                format!("pos={{{}}}", entries.join(","))
-            }
-            VariantPayload::Record(fields) => {
-                let entries: Vec<String> = fields
-                    .iter()
-                    .filter_map(|f| {
-                        let d = type_desc_lua(ws, f.ty)?;
-                        Some(format!("[{:?}]={d}", f.name.as_str()))
-                    })
-                    .collect();
-                if entries.is_empty() {
-                    continue;
-                }
-                format!("named={{{}}}", entries.join(","))
-            }
-        };
-        any = true;
-        variants.push(format!("[{:?}]={{{body}}}", variant.name.as_str()));
+                        d.push('}');
+                    }
+                    format!("[{}]={d}", i + 1)
+                })
+                .collect();
+            format!("pos={{{}}}", entries.join(","))
+        }
+        VariantEntry::Named(fields) => {
+            let entries: Vec<String> = fields
+                .iter()
+                .map(|(name, shape)| format!("[{:?}]={}", name.as_str(), shape_lua_string(shape)))
+                .collect();
+            format!("named={{{}}}", entries.join(","))
+        }
     }
-    any.then(|| variants.join(","))
 }
 
-/// (reflection type-string, nullable) for a struct field's `TyId`. The string
-/// matches rock's `to_simple_string` for the cases the reflection stdlib needs
-/// (int/float/string/bool, a nominal name, `[..]`); anything else is "any".
-/// Used only for the reflection type table, not for C layout.
-fn reflect_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> (String, bool) {
-    use bone_semantic::hir::{BuiltinTy, TypeCtor, TypeExpr};
-    let resolve = |t: bone_semantic::prelude::TyId| -> Option<TypeExpr> {
-        match t {
-            bone_semantic::prelude::TyId::Static(mid, idx) => {
-                ws.modules.get(mid.index()).map(|m| m.ty_arena[idx])
-            }
-            bone_semantic::prelude::TyId::Local(_) => None,
+fn type_entry_lua(entry: &skull_mir::type_table::Entry, out: &mut String) {
+    use skull_codegen_lua::lua_string;
+    use skull_mir::type_table::Entry;
+    match entry {
+        Entry::StridedRows { name, paths } => {
+            let entries = paths
+                .iter()
+                .enumerate()
+                .map(|(i, path)| format!("[{}] = {}", lua_string(path.as_str()), i + 1))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!(
+                "_G.__ROCK_STRIDED_ROWS[{}] = {{ {entries} }}\n",
+                lua_string(name.as_str())
+            ));
         }
-    };
-    match resolve(ty) {
-        Some(TypeExpr::Builtin(BuiltinTy::Int)) => ("int".into(), false),
-        Some(TypeExpr::Builtin(BuiltinTy::Uint)) => ("uint".into(), false),
-        Some(TypeExpr::Builtin(BuiltinTy::Float)) => ("float".into(), false),
-        Some(TypeExpr::Builtin(BuiltinTy::Bool)) => ("bool".into(), false),
-        Some(TypeExpr::Builtin(BuiltinTy::String)) => ("string".into(), false),
-        Some(TypeExpr::Nullable(_)) => ("any".into(), true),
-        Some(TypeExpr::App {
-            ctor: TypeCtor::Nominal(name),
-            ..
-        }) => (
-            skull_mir::mangle::type_symbol(ws, name)
-                .as_str()
-                .to_string(),
-            false,
-        ),
-        Some(TypeExpr::App {
-            ctor: TypeCtor::Array,
-            ..
-        }) => ("[]".into(), false),
-        _ => ("any".into(), false),
+        Entry::Struct {
+            name,
+            kind,
+            fields,
+            vec_columns,
+        } => {
+            let fields: Vec<String> = fields
+                .iter()
+                .map(|f| {
+                    let embed = if f.embed { ", embed = true" } else { "" };
+                    let flat = f
+                        .flat
+                        .as_ref()
+                        .map(|keys| {
+                            let keys = keys
+                                .iter()
+                                .map(|key| format!("{:?}", key.as_str()))
+                                .collect::<Vec<_>>()
+                                .join(",");
+                            format!(", flat = {{{keys}}}")
+                        })
+                        .unwrap_or_default();
+                    let desc = f
+                        .shape
+                        .as_ref()
+                        .map(|d| format!(", desc = {}", shape_lua_string(d)))
+                        .unwrap_or_default();
+                    let mut json = f
+                        .json_name
+                        .map(|name| format!(", json_name = {}", lua_string(name.as_str())))
+                        .unwrap_or_default();
+                    if let Some(factory) = &f.json_default {
+                        json.push_str(&format!(", json_default = {}", lua_string(factory)));
+                    }
+                    if let Some(predicate) = &f.json_omit {
+                        json.push_str(&format!(", json_omit = {}", lua_string(predicate)));
+                    }
+                    if f.json_skip {
+                        json.push_str(", json_skip = true");
+                    }
+                    format!(
+                        "{{ name = \"{}\", type = \"{}\", nullable = {}{}{}{}{} }}",
+                        f.name, f.ty, f.nullable, embed, flat, desc, json
+                    )
+                })
+                .collect();
+            let vec_columns = vec_columns
+                .as_ref()
+                .map(|paths| {
+                    let keys = paths
+                        .iter()
+                        .map(|p| lua_string(p.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!(", vec_columns = {{ {keys} }}")
+                })
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "_G.__ROCK_TYPE_TABLE[\"{name}\"] = {{ name = \"{name}\", kind = \"{kind}\", fields = {{ {f} }}{vec_columns} }}\n",
+                f = fields.join(", ")
+            ));
+        }
+        Entry::Newtype { name } => out.push_str(&format!(
+            "_G.__ROCK_TYPE_TABLE[\"{name}\"] = {{ name = \"{name}\", kind = \"newtype\", fields = {{ }} }}\n",
+        )),
+        Entry::FlatLayout {
+            name,
+            tuple_width,
+            record_fields,
+        } => {
+            let names = record_fields
+                .iter()
+                .map(|name| format!("\"{name}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!(
+                "_G.__ROCK_ENUM_FLAT_LAYOUT[\"{name}\"] = {{ tuple_width = {tuple_width}, record_fields = {{ {names} }} }}\n",
+            ));
+        }
+        Entry::EnumTag { name, variants } => {
+            let variants = variants
+                .iter()
+                .enumerate()
+                .map(|(i, v)| format!("[{i}]={:?}", v.as_str()))
+                .collect::<Vec<_>>()
+                .join(",");
+            out.push_str(&format!(
+                "_G.__ROCK_TYPE_TABLE[\"{name}\"] = {{ name = \"{name}\", kind = \"enum_tag\", variants = {{ {variants} }} }}\n"
+            ));
+        }
+        Entry::Enum { name, variants } => {
+            let vd = variants
+                .iter()
+                .map(|(variant, entry)| format!("[{:?}]={{{}}}", variant.as_str(), variant_lua(entry)))
+                .collect::<Vec<_>>()
+                .join(",");
+            out.push_str(&format!(
+                "_G.__ROCK_TYPE_TABLE[\"{name}\"] = {{ name = \"{name}\", kind = \"enum\", fields = {{ }}, variant_desc = {{ {vd} }} }}\n",
+            ));
+        }
+        Entry::CEnum {
+            name,
+            slots,
+            variants,
+        } => {
+            let mut fields =
+                vec!["{ name = \"__tag\", type = \"int\", nullable = false }".to_string()];
+            fields.extend(slots.iter().map(|(slot, c_type)| {
+                let field_type = if *c_type == "double" { "float" } else { c_type };
+                format!("{{ name = \"{slot}\", type = \"{field_type}\", nullable = false }}")
+            }));
+            let variants: Vec<String> = variants
+                .iter()
+                .enumerate()
+                .map(|(tag, (variant, payload))| {
+                    let payload: Vec<String> = payload
+                        .iter()
+                        .map(|p| {
+                            format!(
+                                "{{ name = \"{}\", slot = \"{}\", type = \"{}\" }}",
+                                p.name, p.slot, p.ty
+                            )
+                        })
+                        .collect();
+                    format!(
+                        "[{tag}] = {{ name = \"{variant}\", fields = {{ {} }} }}",
+                        payload.join(", ")
+                    )
+                })
+                .collect();
+            out.push_str(&format!(
+                "_G.__ROCK_TYPE_TABLE[\"{name}\"] = {{ name = \"{name}\", kind = \"c_enum\", fields = {{ {f} }}, variants = {{ {v} }} }}\n",
+                f = fields.join(", "),
+                v = variants.join(", ")
+            ));
+        }
     }
 }
 
@@ -2145,258 +2161,36 @@ fn type_table_defs(
     gc: &rustc_hash::FxHashSet<ustr::Ustr>,
     arena: &skull_mir::lower::RepArena,
 ) -> Result<String, CompilerError> {
-    let defaults: std::collections::HashMap<_, _> = ws
-        .modules
-        .iter()
-        .flat_map(|m| m.functions.iter())
-        .filter_map(|(_, f)| {
-            f.json_field_for
-                .map(|owner| (owner, skull_mir::mangle::mangle_fn(ws, f)))
-        })
-        .collect();
+    use skull_mir::type_table;
+    let factories = type_table::json_field_factories(ws);
+    let is_gc = |name| gc.contains(&name);
     let mut out = String::from("_G.__ROCK_ENUM_FLAT_LAYOUT = {}\n_G.__ROCK_STRIDED_ROWS = {}\n");
     for module in ws.modules.iter() {
         for (_, s) in module.structs.iter() {
-            let mut vec_columns = String::new();
-            if s.is_value {
-                use skull_mir::lower::{ContainerFamily, ContainerPlan, ContainerStorage};
-                use skull_mir::monoty::{MonoCtor, MonoTy};
-                let ty = MonoTy::App {
-                    ctor: MonoCtor::Array,
-                    params: vec![MonoTy::App {
-                        ctor: MonoCtor::Nominal(s.name),
-                        params: Vec::new(),
-                    }],
-                };
-                let plan = ContainerPlan::for_type(
-                    ws,
-                    bone_semantic::hir::FnBackend::Lua,
-                    arena,
-                    ContainerFamily::Vec,
-                    &ty,
-                )
-                .map_err(|e| CompilerError::new_no_location(e.message))?;
-                if let Some(shape) = plan.element_shape(arena) {
-                    let paths = skull_mir::lower::value_leaf_paths(&shape);
-                    match plan.storage() {
-                        ContainerStorage::Columns { .. } => {
-                            let keys = paths
-                                .iter()
-                                .map(|p| skull_codegen_lua::lua_string(p.as_str()))
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            vec_columns = format!(", vec_columns = {{ {keys} }}");
-                        }
-                        ContainerStorage::Strided { .. } => {
-                            let entries = paths
-                                .iter()
-                                .enumerate()
-                                .map(|(i, path)| {
-                                    format!(
-                                        "[{}] = {}",
-                                        skull_codegen_lua::lua_string(path.as_str()),
-                                        i + 1
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            out.push_str(&format!(
-                                "_G.__ROCK_STRIDED_ROWS[{}] = {{ {entries} }}\n",
-                                skull_codegen_lua::lua_string(
-                                    skull_mir::mangle::type_symbol(ws, s.name).as_str()
-                                )
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            // Tier-distinguishing kind so reflection/inspect/serialize stay honest:
-            // FFI-clean value structs are cdata (`c_struct`), GC-carrying ones are
-            // immutable Lua tables (`value_table`).
-            let kind = if !skull_mir::lower::has_value_plan(s) {
-                "struct"
-            } else if gc.contains(&s.name) {
-                "value_table"
-            } else {
-                "c_struct"
-            };
-            let mut fields = Vec::with_capacity(s.fields.len());
-            for f in &s.fields {
-                let (tystr, _) = reflect_field_type(ws, f.ty);
-                let plan = skull_mir::lower::struct_field_plan(
-                    ws,
-                    bone_semantic::hir::FnBackend::Lua,
-                    s.name,
-                    f.name,
-                    false,
-                )
-                .map_err(|e| CompilerError::new_no_location(e.message))?;
-                let nullable = plan.nullable();
-                let (tystr, embed) = match &plan {
-                    skull_mir::lower::StructFieldPlan::Inline { child, flat, .. } => (
-                        skull_mir::mangle::type_symbol(ws, *child)
-                            .as_str()
-                            .to_string(),
-                        if flat.is_none() { ", embed = true" } else { "" },
-                    ),
-                    _ => (tystr, ""),
-                };
-                let flat = plan
-                    .flat_storage_keys(f.name)
-                    .map(|keys| {
-                        let keys = keys
-                            .iter()
-                            .map(|key| format!("{:?}", key.as_str()))
-                            .collect::<Vec<_>>()
-                            .join(",");
-                        format!(", flat = {{{keys}}}")
-                    })
-                    .unwrap_or_default();
-                let desc = match type_desc_lua(ws, f.ty) {
-                    Some(d) => format!(", desc = {d}"),
-                    None => String::new(),
-                };
-                let json = bone_core::annotations::json_field_name(&f.annotations)
-                    .map(|name| {
-                        format!(
-                            ", json_name = {}",
-                            skull_codegen_lua::lua_string(name.as_str())
-                        )
-                    })
-                    .unwrap_or_default();
-                let mut json = json;
-                if let Some(factory) =
-                    defaults.get(&(s.name, f.name, skull_parser::JsonFieldOperation::Default))
-                {
-                    json.push_str(&format!(
-                        ", json_default = {}",
-                        skull_codegen_lua::lua_string(factory)
-                    ));
-                }
-                if let Some(predicate) =
-                    defaults.get(&(s.name, f.name, skull_parser::JsonFieldOperation::Omit))
-                {
-                    json.push_str(&format!(
-                        ", json_omit = {}",
-                        skull_codegen_lua::lua_string(predicate)
-                    ));
-                }
-                if f.annotations.iter().any(|a| a.is_builtin("json_skip")) {
-                    json.push_str(", json_skip = true");
-                }
-                fields.push(format!(
-                    "{{ name = \"{}\", type = \"{}\", nullable = {}{}{}{}{} }}",
-                    f.name, tystr, nullable, embed, flat, desc, json
-                ));
-            }
-            out.push_str(&format!(
-                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"{k}\", fields = {{ {f} }}{vec_columns} }}\n",
-                n = skull_mir::mangle::type_symbol(ws, s.name),
-                k = kind,
-                f = fields.join(", ")
-            ));
+            let entries = type_table::struct_entries(
+                ws,
+                bone_semantic::hir::FnBackend::Lua,
+                arena,
+                &is_gc,
+                &factories,
+                s,
+            )?;
+            entries.iter().for_each(|e| type_entry_lua(e, &mut out));
         }
         for (_, nt) in module.newtypes.iter() {
-            out.push_str(&format!(
-                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"newtype\", fields = {{ }} }}\n",
-                n = skull_mir::mangle::type_symbol(ws, nt.name),
-            ));
+            type_entry_lua(
+                &type_table::Entry::Newtype {
+                    name: skull_mir::mangle::type_symbol(ws, nt.name),
+                },
+                &mut out,
+            );
         }
     }
     for module in ws.modules.iter() {
         for (_, e) in module.enums.iter() {
-            use bone_semantic::hir::VariantPayload;
-
-            let plan = skull_mir::lower::EnumPlan::for_name(ws, e.name);
-            if let Some(flat) = plan.as_ref().and_then(|plan| plan.flat()) {
-                let names = flat
-                    .record_fields()
-                    .iter()
-                    .map(|name| format!("\"{name}\""))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                out.push_str(&format!(
-                    "_G.__ROCK_ENUM_FLAT_LAYOUT[\"{}\"] = {{ tuple_width = {}, record_fields = {{ {} }} }}\n",
-                    skull_mir::mangle::type_symbol(ws, e.name), flat.tuple_width(), names,
-                ));
+            for entry in type_table::enum_entries(ws, e) {
+                type_entry_lua(&entry, &mut out);
             }
-            if plan.as_ref().is_none_or(|p| p.cdata().is_none())
-                && !e.variants.is_empty()
-                && e.variants
-                    .iter()
-                    .all(|v| matches!(v.payload, VariantPayload::Unit))
-            {
-                let variants = e
-                    .variants
-                    .iter()
-                    .enumerate()
-                    .map(|(i, v)| format!("[{i}]={:?}", v.name.as_str()))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                out.push_str(&format!("_G.__ROCK_TYPE_TABLE[\"{}\"] = {{ name = \"{}\", kind = \"enum_tag\", variants = {{ {variants} }} }}\n",
-                    skull_mir::mangle::type_symbol(ws, e.name), skull_mir::mangle::type_symbol(ws, e.name)));
-                continue;
-            }
-            let Some(shape) = plan.and_then(|plan| plan.cdata().cloned()) else {
-                if let Some(vd) = boxed_variant_descs(ws, e) {
-                    out.push_str(&format!(
-                        "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"enum\", fields = {{ }}, variant_desc = {{ {vd} }} }}\n",
-                        n = skull_mir::mangle::type_symbol(ws, e.name),
-                    ));
-                }
-                continue;
-            };
-            let mut fields =
-                vec!["{ name = \"__tag\", type = \"int\", nullable = false }".to_string()];
-            fields.extend(shape.slots.iter().map(|(name, c_type)| {
-                let field_type = if *c_type == "double" { "float" } else { c_type };
-                format!("{{ name = \"{name}\", type = \"{field_type}\", nullable = false }}")
-            }));
-            let variants: Vec<String> = e
-                .variants
-                .iter()
-                .enumerate()
-                .map(|(tag, variant)| {
-                    let payload: Vec<String> = match &variant.payload {
-                        VariantPayload::Unit => Vec::new(),
-                        VariantPayload::Tuple(types) => types
-                            .iter()
-                            .enumerate()
-                            .map(|(index, ty)| {
-                                let (field_type, _) = reflect_field_type(ws, *ty);
-                                format!(
-                                    "{{ name = \"{}\", slot = \"_{}\", type = \"{}\" }}",
-                                    index + 1,
-                                    index,
-                                    field_type
-                                )
-                            })
-                            .collect(),
-                        VariantPayload::Record(fields) => fields
-                            .iter()
-                            .map(|field| {
-                                let (field_type, _) = reflect_field_type(ws, field.ty);
-                                format!(
-                                    "{{ name = \"{0}\", slot = \"_{0}\", type = \"{1}\" }}",
-                                    field.name, field_type
-                                )
-                            })
-                            .collect(),
-                    };
-                    format!(
-                        "[{tag}] = {{ name = \"{}\", fields = {{ {} }} }}",
-                        variant.name,
-                        payload.join(", ")
-                    )
-                })
-                .collect();
-            out.push_str(&format!(
-                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"c_enum\", fields = {{ {f} }}, variants = {{ {v} }} }}\n",
-                n = skull_mir::mangle::type_symbol(ws, e.name),
-                f = fields.join(", "),
-                v = variants.join(", ")
-            ));
         }
     }
     Ok(out)
