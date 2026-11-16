@@ -130,13 +130,7 @@ mod tests {
     }
 
     fn discover(src: &str) -> Vec<TestMetadata> {
-        let mut sf = SourceFiles::empty();
-        sf.add_or_update_file(source_file_from_path_and_contents(
-            "t.rock".to_string(),
-            "t.rock".to_string(),
-            src.to_string(),
-        ));
-        find_test_functions_from_sources(&sf)
+        find_test_functions_from_sources(&crate::common::single_source("t.rock", src))
     }
 
     // Pins the compile-failure fallback's contract: it discovers every `@test`

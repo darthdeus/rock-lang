@@ -358,7 +358,7 @@ fn js_build_package(dir: &str) -> JsUnitOutcome {
 /// expected (passing) outcome; anything else is a unit failure.
 fn js_compile_failure(file: &str, src: &str, errs: &[rock_core::CompilerError]) -> JsUnitOutcome {
     if let Some(tests) = crate::skull_backend::all_tests_expect_compile_failure(file, src) {
-        return JsUnitOutcome::ExpectFailPass { tests };
+        return JsUnitOutcome::ExpectFailPass { tests: tests.len() };
     }
     JsUnitOutcome::UnitFail {
         reason: categorize(&errs[0].message),

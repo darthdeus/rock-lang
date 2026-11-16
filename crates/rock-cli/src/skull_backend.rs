@@ -625,13 +625,7 @@ end
 /// that same id -- registering under a placeholder makes every span lookup fail
 /// ("Unable to fetch source") and silently drops the snippet + labels.
 pub(crate) fn render_file_errs(file: &str, src: &str, errs: &[CompilerError]) -> String {
-    let mut sf = SourceFiles::empty();
-    sf.add_or_update_file(source_file_from_path_and_contents(
-        file.to_string(),
-        file.to_string(),
-        src.to_string(),
-    ));
-    crate::bone_backend::render_errs(&sf, errs)
+    crate::bone_backend::render_errs(&crate::common::single_source(file, src), errs)
 }
 
 /// `map_err` for the `skull::user_module_id` lookup — the same message at every
@@ -784,23 +778,13 @@ fn skull_build(
             // compile — a bone rejection here is the expected (passing) outcome.
             // (Mirrors the real rock runner's compile-Err branch.)
             if let Some(tests) = all_tests_expect_compile_failure(file, src) {
-                let selected = if let Some(filter) = filter {
-                    let mut sources = SourceFiles::empty();
-                    sources.add_or_update_file(source_file_from_path_and_contents(
-                        file.to_string(),
-                        file.to_string(),
-                        src.to_string(),
-                    ));
-                    crate::test::find_test_functions_from_sources(&sources)
-                        .iter()
-                        .filter(|test| filter.matches(&test.name, file))
-                        .count()
-                } else {
-                    tests
-                };
+                let selected = tests
+                    .iter()
+                    .filter(|test| filter.is_none_or(|filter| filter.matches(&test.name, file)))
+                    .count();
                 return Ok(SkullOutcome::Pass {
                     tests: selected,
-                    skipped: tests - selected,
+                    skipped: tests.len() - selected,
                     timings: Vec::new(),
                 });
             }
@@ -830,23 +814,18 @@ fn skull_build(
     run_emitted_tests(lua, &tests, &files, TEST_CPU_LIMIT, 1, filter, false)
 }
 
-/// `Some(count)` when `file` declares `@test` fns and EVERY one carries
+/// The `@test` fns of `file` when there are some and EVERY one carries
 /// `expect_failure`/`@ignore` -- a compile rejection is then the expected
-/// (passing) outcome and each counts as a passing test. Shared by the luajit
-/// and JS executors (both bone-type-check first, so the rule is identical).
-pub(crate) fn all_tests_expect_compile_failure(file: &str, src: &str) -> Option<usize> {
-    let mut sf = SourceFiles::empty();
-    sf.add_or_update_file(source_file_from_path_and_contents(
-        file.to_string(),
-        file.to_string(),
-        src.to_string(),
-    ));
-    let test_fns = crate::test::find_test_functions_from_sources(&sf);
-    if !test_fns.is_empty() && test_fns.iter().all(|t| t.expect_failure || t.ignored) {
-        Some(test_fns.len())
-    } else {
-        None
-    }
+/// (passing) outcome and each counts as a passing test. Shared by the luajit,
+/// JS and GLSL executors (all bone-type-check first, so the rule is identical).
+pub(crate) fn all_tests_expect_compile_failure(
+    file: &str,
+    src: &str,
+) -> Option<Vec<crate::test::TestMetadata>> {
+    let test_fns =
+        crate::test::find_test_functions_from_sources(&crate::common::single_source(file, src));
+    (!test_fns.is_empty() && test_fns.iter().all(|t| t.expect_failure || t.ignored))
+        .then_some(test_fns)
 }
 
 /// Given emitted workspace Lua and the `@test` fns discovered in it, run them

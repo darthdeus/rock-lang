@@ -368,13 +368,7 @@ pub(crate) fn bone_workspace_timed(
 /// same id for the span lookup to resolve — the real on-disk `path` is only used
 /// in the human-facing header line we print separately.
 fn render_source_errs(src: &str, errs: &[CompilerError]) -> String {
-    let mut sf = SourceFiles::empty();
-    sf.add_or_update_file(source_file_from_path_and_contents(
-        "<parse_rock>".to_string(),
-        "<parse_rock>".to_string(),
-        src.to_string(),
-    ));
-    render_errs(&sf, errs)
+    render_errs(&crate::common::single_source("<parse_rock>", src), errs)
 }
 
 /// Collapse a bone error message into a short, groupable bucket. A 489-file run

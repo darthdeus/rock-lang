@@ -10,7 +10,7 @@
 use bone_core::prelude::Instant;
 use bone_core::prelude::{FxHashMap, FxHashSet, ModuleId, Ustr};
 use bone_semantic::inference::Workspace;
-use rock_core::{CompilerError, SourceFiles, source_file_from_path_and_contents};
+use rock_core::{CompilerError, SourceFiles};
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -297,12 +297,7 @@ pub enum Scope {
 /// same path the module was parsed under, or every span lookup misses and the
 /// findings render without their snippet.
 pub(crate) fn single_file_scope(file: &str, src: &str) -> (SourceFiles, std::path::PathBuf) {
-    let mut sources = SourceFiles::empty();
-    sources.add_or_update_file(source_file_from_path_and_contents(
-        file.to_string(),
-        file.to_string(),
-        src.to_string(),
-    ));
+    let sources = crate::common::single_source(file, src);
     let root = Path::new(file)
         .parent()
         .unwrap_or(Path::new("."))

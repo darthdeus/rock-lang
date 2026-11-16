@@ -22,6 +22,16 @@ pub(crate) fn path_to_source_spec(path: &str) -> crate::unified_compile::SourceS
     }
 }
 
+/// One in-memory source registered under `path`, which must be the file id its
+/// spans carry or every snippet lookup misses.
+pub(crate) fn single_source(path: &str, src: &str) -> SourceFiles {
+    SourceFiles::from_single_file(source_file_from_path_and_contents(
+        path.to_string(),
+        path.to_string(),
+        src.to_string(),
+    ))
+}
+
 pub struct ProcessManager;
 
 impl ProcessManager {

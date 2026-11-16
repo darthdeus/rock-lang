@@ -73,14 +73,14 @@ pub(crate) fn do_lint(
         let src = fs_err::read_to_string(path)?;
         let module = match skull_parser::parse_module(&src, ustr::Ustr::from(path)) {
             Ok(m) => m,
-            Err(e) => return Err(reject(&single_source(path, &src), &[e])),
+            Err(e) => return Err(reject(&crate::common::single_source(path, &src), &[e])),
         };
         let ws = match crate::bone_backend::check_with_stdlib([module]) {
             Ok(ws) => ws,
-            Err(errs) => return Err(reject(&single_source(path, &src), &errs)),
+            Err(errs) => return Err(reject(&crate::common::single_source(path, &src), &errs)),
         };
         let root = file.parent().unwrap_or(Path::new(".")).to_path_buf();
-        (ws, single_source(path, &src), root)
+        (ws, crate::common::single_source(path, &src), root)
     };
 
     // The two lists fail in opposite directions, so a bad name is handled in
@@ -187,14 +187,4 @@ fn tally(findings: &[bone_lints::Finding]) -> String {
 fn reject(sources: &SourceFiles, errs: &[rock_core::CompilerError]) -> anyhow::Error {
     eprintln!("{}", crate::bone_backend::render_errs(sources, errs));
     anyhow::anyhow!("lint: source does not type-check ({} error(s))", errs.len())
-}
-
-fn single_source(path: &str, src: &str) -> SourceFiles {
-    let mut sources = SourceFiles::empty();
-    sources.add_or_update_file(rock_core::source_file_from_path_and_contents(
-        path.to_string(),
-        path.to_string(),
-        src.to_string(),
-    ));
-    sources
 }
