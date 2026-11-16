@@ -1595,60 +1595,40 @@ pub extern "C" fn stone_sound_decode_sync(handle: u64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn stone_sound_resident(handle: u64) -> bool {
-    AUDIO_STATE.with(|state| {
-        state
-            .borrow()
-            .as_ref()
-            .and_then(|audio| audio.sounds.get(&handle))
-            .is_some_and(|sound| sound.samples.is_some())
-    })
+    with_sound(handle, |sound| sound.samples.is_some()).unwrap_or(false)
 }
 
 /// Admitted for playback: resident PCM, or a stream source's encoded file.
 #[no_mangle]
 pub extern "C" fn stone_sound_playable(handle: u64) -> bool {
-    AUDIO_STATE.with(|state| {
-        state
-            .borrow()
-            .as_ref()
-            .and_then(|audio| audio.sounds.get(&handle))
-            .is_some_and(SoundData::playable)
-    })
+    with_sound(handle, SoundData::playable).unwrap_or(false)
 }
 
 /// Encoded bytes a stream source holds (0 before admission), or -1 for a
 /// handle that is not a live stream source.
 #[no_mangle]
 pub extern "C" fn stone_sound_stream_bytes(handle: u64) -> i64 {
-    AUDIO_STATE.with(|state| {
-        state
-            .borrow()
-            .as_ref()
-            .and_then(|audio| audio.sounds.get(&handle))
-            .filter(|sound| sound.stream)
-            .map_or(-1, |sound| {
-                sound.encoded.as_ref().map_or(0, |bytes| bytes.len() as i64)
-            })
+    with_sound(handle, |sound| {
+        if !sound.stream {
+            return -1;
+        }
+        sound.encoded.as_ref().map_or(0, |bytes| bytes.len() as i64)
     })
+    .unwrap_or(-1)
 }
 
 /// Decoded PCM size: resident samples, else the recipe's estimate. A stream
 /// source never holds PCM, so it always reports the estimate.
 #[no_mangle]
 pub extern "C" fn stone_sound_pcm_bytes(handle: u64) -> i64 {
-    AUDIO_STATE.with(|state| {
-        state
-            .borrow()
-            .as_ref()
-            .and_then(|audio| audio.sounds.get(&handle))
-            .map_or(-1, |sound| {
-                let bytes = sound.samples.as_ref().map_or_else(
-                    || sound.estimated_bytes(),
-                    |samples| (samples.len() * std::mem::size_of::<f32>()) as u64,
-                );
-                bytes.min(i64::MAX as u64) as i64
-            })
+    with_sound(handle, |sound| {
+        let bytes = sound.samples.as_ref().map_or_else(
+            || sound.estimated_bytes(),
+            |samples| (samples.len() * std::mem::size_of::<f32>()) as u64,
+        );
+        bytes.min(i64::MAX as u64) as i64
     })
+    .unwrap_or(-1)
 }
 
 /// Re-decode `path` into the same sound `handle` in place. Stops in-flight
@@ -1664,14 +1644,9 @@ pub extern "C" fn stone_reload_sound(handle: u64, path: *const c_char) -> bool {
         Err(_) => return false,
     };
 
-    let stream = AUDIO_STATE.with(|state| {
-        state
-            .borrow()
-            .as_ref()
-            .and_then(|audio| audio.sounds.get(&handle))
-            .map(|sound| sound.stream)
-    });
-    let Some(stream) = stream else { return false };
+    let Some(stream) = with_sound(handle, |sound| sound.stream) else {
+        return false;
+    };
     let payload = if stream {
         let Some((encoded, rate, channels)) = load_stream_bytes(path_str) else {
             return false;
@@ -1715,16 +1690,13 @@ pub extern "C" fn stone_reload_sound(handle: u64, path: *const c_char) -> bool {
 /// without PCM; -1 means the handle is not live.
 #[no_mangle]
 pub extern "C" fn stone_sound_sample_count(handle: u64) -> i64 {
-    AUDIO_STATE.with(|state| {
-        let Some(ref audio) = *state.borrow() else {
-            return -1;
-        };
-        audio.sounds.get(&handle).map_or(-1, |sd| {
-            sd.samples
-                .as_ref()
-                .map_or(0, |samples| samples.len() as i64)
-        })
+    with_sound(handle, |sound| {
+        sound
+            .samples
+            .as_ref()
+            .map_or(0, |samples| samples.len() as i64)
     })
+    .unwrap_or(-1)
 }
 
 /// How far into the track the single sink is now, in milliseconds, or -1 when
@@ -1732,15 +1704,11 @@ pub extern "C" fn stone_sound_sample_count(handle: u64) -> i64 {
 /// 0, and "silent" is a different state from "at the beginning".
 #[no_mangle]
 pub extern "C" fn stone_music_position_ms() -> i64 {
-    AUDIO_STATE.with(|state| {
-        let Some(ref audio) = *state.borrow() else {
-            return -1;
-        };
-        audio
-            .music_playback
-            .as_ref()
-            .map_or(-1, |p| p.player.get_pos().as_millis() as i64)
+    with_audio(|audio| {
+        let playback = audio.music_playback.as_ref()?;
+        Some(playback.player.get_pos().as_millis() as i64)
     })
+    .unwrap_or(-1)
 }
 
 #[no_mangle]
@@ -1793,39 +1761,21 @@ pub extern "C" fn stone_load_music(path: *const c_char) -> u64 {
     })
 }
 
-// Free a previously-loaded sound. Stops any currently-playing instances
-// before dropping the slot — hot-reload-from-disk replaces the .wav, the
-// in-flight samples should not keep playing. Returns false if the handle
-// was already absent (idempotent, no panic).
 /// Live loaded-sound handles (`native_ledger`).
 pub(crate) fn live_sound_ids() -> Vec<u64> {
-    AUDIO_STATE.with(|state| match *state.borrow() {
-        Some(ref audio) => audio.sounds.keys().copied().collect(),
-        None => Vec::new(),
-    })
+    with_audio(|audio| Some(audio.sounds.keys().copied().collect())).unwrap_or_default()
 }
 
 /// Live decoded-music handles (`native_ledger`).
 pub(crate) fn live_music_ids() -> Vec<u64> {
-    AUDIO_STATE.with(|state| match *state.borrow() {
-        Some(ref audio) => audio.music.keys().copied().collect(),
-        None => Vec::new(),
-    })
+    with_audio(|audio| Some(audio.music.keys().copied().collect())).unwrap_or_default()
 }
 
 /// Encoded bytes one music track holds, for the asset report's CPU column.
 /// -1 for a handle that is not live.
 #[no_mangle]
 pub extern "C" fn stone_music_byte_len(handle: u64) -> i64 {
-    AUDIO_STATE.with(|state| {
-        let Some(ref audio) = *state.borrow() else {
-            return -1;
-        };
-        audio
-            .music
-            .get(&handle)
-            .map_or(-1, |bytes| bytes.len() as i64)
-    })
+    with_audio(|audio| audio.music.get(&handle).map(|bytes| bytes.len() as i64)).unwrap_or(-1)
 }
 
 /// Live PLAYING voices (`native_ledger`).
@@ -1835,10 +1785,7 @@ pub extern "C" fn stone_music_byte_len(handle: u64) -> i64 {
 /// a sim reaching the raw FFI still mints a real voice, so the class is
 /// observable and is inventoried rather than assumed empty.
 pub(crate) fn live_voice_ids() -> Vec<u64> {
-    AUDIO_STATE.with(|state| match *state.borrow() {
-        Some(ref audio) => audio.voices.keys().copied().collect(),
-        None => Vec::new(),
-    })
+    with_audio(|audio| Some(audio.voices.keys().copied().collect())).unwrap_or_default()
 }
 
 /// Whether the single music sink is playing something, and if so which handle
@@ -1846,10 +1793,7 @@ pub(crate) fn live_voice_ids() -> Vec<u64> {
 /// loaded" and "is music playing" are different questions.
 #[no_mangle]
 pub extern "C" fn stone_music_playing_handle() -> u64 {
-    AUDIO_STATE.with(|state| match *state.borrow() {
-        Some(ref audio) => audio.music_playback.as_ref().map_or(0, |p| p.handle),
-        None => 0,
-    })
+    with_audio(|audio| audio.music_playback.as_ref().map(|p| p.handle)).unwrap_or(0)
 }
 
 fn stop_music_playback(playback: &mut Option<MusicPlayback>) {
@@ -1884,6 +1828,8 @@ pub extern "C" fn stone_unload_music(handle: u64) -> bool {
     })
 }
 
+/// Free a loaded sound, stopping its playing voices first so a hot-reloaded
+/// file does not keep playing the old samples. False if the handle was absent.
 #[no_mangle]
 pub extern "C" fn stone_unload_sound(handle: u64) -> bool {
     AUDIO_STATE.with(|state| {
@@ -2196,14 +2142,7 @@ pub extern "C" fn stone_play_sound(
 /// such elsewhere.
 #[no_mangle]
 pub extern "C" fn stone_get_sound_duration(handle: u64) -> c_float {
-    AUDIO_STATE.with(|state| {
-        if let Some(ref audio) = *state.borrow() {
-            if let Some(sd) = audio.sounds.get(&handle) {
-                return sd.duration_seconds();
-            }
-        }
-        0.0
-    })
+    with_sound(handle, SoundData::duration_seconds).unwrap_or(0.0)
 }
 
 /// Peak-amplitude envelope of resident PCM: `buckets` evenly-spaced spans of
@@ -2229,14 +2168,8 @@ pub unsafe extern "C" fn stone_get_sound_peaks(
     if out.is_null() || buckets <= 0 {
         return 0;
     }
-    AUDIO_STATE.with(|state| {
-        let Some(ref audio) = *state.borrow() else {
-            return 0;
-        };
-        let Some(sd) = audio.sounds.get(&handle) else {
-            return 0;
-        };
-        let Some(samples) = sd.samples.as_ref() else {
+    with_sound(handle, |sound| {
+        let Some(samples) = sound.samples.as_ref() else {
             return 0;
         };
         let n = samples.len();
@@ -2261,6 +2194,7 @@ pub unsafe extern "C" fn stone_get_sound_peaks(
         }
         buckets as i32
     })
+    .unwrap_or(0)
 }
 
 #[no_mangle]
@@ -2272,20 +2206,11 @@ pub extern "C" fn stone_stop_sound(handle: u64) {
     });
 }
 
-/// True while `voice` is addressable. This is MAP MEMBERSHIP, not
-/// `Player::empty()`: rodio's `stop()` only sets an atomic, and the player's
-/// sound_count doesn't drop until the audio thread next drains the source, so
-/// an empty()-based answer would race with our own stop calls. A voice that
-/// ends on its own stays "active" until the next `stone_play_sound` reaps it.
 /// Source frames a stream voice has decoded since it started, counting every
 /// loop pass; -1 for an unknown voice or one playing resident PCM.
 #[no_mangle]
 pub extern "C" fn stone_voice_stream_frames(voice: u64) -> i64 {
-    AUDIO_STATE.with(|state| {
-        let state = state.borrow();
-        let Some(voice) = state.as_ref().and_then(|audio| audio.voices.get(&voice)) else {
-            return -1;
-        };
+    with_voice(voice, |voice| {
         voice
             .stream_position
             .as_ref()
@@ -2293,16 +2218,17 @@ pub extern "C" fn stone_voice_stream_frames(voice: u64) -> i64 {
                 (position.load(Ordering::Relaxed) / u64::from((*channels).max(1))) as i64
             })
     })
+    .unwrap_or(-1)
 }
 
+/// True while `voice` is addressable. This is MAP MEMBERSHIP, not
+/// `Player::empty()`: rodio's `stop()` only sets an atomic, and the player's
+/// sound_count doesn't drop until the audio thread next drains the source, so
+/// an empty()-based answer would race with our own stop calls. A voice that
+/// ends on its own stays "active" until the next `stone_play_sound` reaps it.
 #[no_mangle]
 pub extern "C" fn stone_voice_active(voice: u64) -> bool {
-    AUDIO_STATE.with(|state| {
-        state
-            .borrow()
-            .as_ref()
-            .is_some_and(|audio| audio.voices.contains_key(&voice))
-    })
+    with_voice(voice, |_| ()).is_some()
 }
 
 /// Stop one voice, leaving every sibling voice of the same asset playing.
@@ -2325,16 +2251,7 @@ pub extern "C" fn stone_voice_stop(voice: u64) -> bool {
 /// rodio's 5ms control tick. False for an unknown/dead voice.
 #[no_mangle]
 pub extern "C" fn stone_voice_set_gain(voice: u64, gain: c_float) -> bool {
-    AUDIO_STATE.with(|state| {
-        if let Some(ref mut audio) = *state.borrow_mut() {
-            let scaled = gain.max(0.0);
-            if let Some(v) = audio.voices.get(&voice) {
-                v.player.set_volume(scaled);
-                return true;
-            }
-        }
-        false
-    })
+    with_voice(voice, |v| v.player.set_volume(gain.max(0.0))).is_some()
 }
 
 /// Change a spatial voice at the next stereo frame without restarting it.
@@ -2343,32 +2260,20 @@ pub extern "C" fn stone_voice_set_pan(voice: u64, pan: c_float) -> bool {
     if !pan.is_finite() {
         return false;
     }
-    AUDIO_STATE.with(|state| {
-        let state = state.borrow();
-        let Some(audio) = state.as_ref() else {
-            return false;
-        };
-        let Some(control) = audio.voices.get(&voice).and_then(|v| v.pan.as_ref()) else {
-            return false;
-        };
-        control.store(pan.clamp(-1.0, 1.0).to_bits(), Ordering::Relaxed);
-        true
+    with_voice(voice, |v| {
+        v.pan
+            .as_ref()
+            .map(|control| control.store(pan.clamp(-1.0, 1.0).to_bits(), Ordering::Relaxed))
     })
+    .flatten()
+    .is_some()
 }
 
 /// Playback rate: resamples, so pitch and duration move together.
 /// False for an unknown/dead voice.
 #[no_mangle]
 pub extern "C" fn stone_voice_set_speed(voice: u64, speed: c_float) -> bool {
-    AUDIO_STATE.with(|state| {
-        if let Some(ref mut audio) = *state.borrow_mut() {
-            if let Some(v) = audio.voices.get(&voice) {
-                v.player.set_speed(speed.max(0.01));
-                return true;
-            }
-        }
-        false
-    })
+    with_voice(voice, |v| v.player.set_speed(speed.max(0.01))).is_some()
 }
 
 #[no_mangle]
@@ -2509,15 +2414,7 @@ pub extern "C" fn stone_audio_ambient_report() -> *const c_char {
 /// stepped value from Rock does not zipper. False for an unknown bus.
 #[no_mangle]
 pub extern "C" fn stone_bus_set_gain(bus: u32, gain: c_float) -> bool {
-    AUDIO_STATE.with(|state| {
-        if let Some(ref audio) = *state.borrow() {
-            if let Some(b) = audio.buses.get(bus) {
-                b.set_gain(gain);
-                return true;
-            }
-        }
-        false
-    })
+    with_bus(bus, |b| b.set_gain(gain))
 }
 
 /// Samples this bus has produced. Monotonic; a bus that is alive and being
@@ -2525,13 +2422,7 @@ pub extern "C" fn stone_bus_set_gain(bus: u32, gain: c_float) -> bool {
 /// is live without capturing audio, and is the basis for level metering.
 #[no_mangle]
 pub extern "C" fn stone_bus_samples_pulled(bus: u32) -> u64 {
-    AUDIO_STATE.with(|state| {
-        state
-            .borrow()
-            .as_ref()
-            .and_then(|audio| audio.buses.get(bus))
-            .map_or(0, |b| b.samples_pulled())
-    })
+    read_bus(bus, 0, Bus::samples_pulled)
 }
 
 /// This bus's TARGET gain -- what was last asked for, not the slewed value the
@@ -2539,13 +2430,7 @@ pub extern "C" fn stone_bus_samples_pulled(bus: u32) -> u64 {
 /// assert that a settings apply reached the right bus.
 #[no_mangle]
 pub extern "C" fn stone_bus_gain(bus: u32) -> c_float {
-    AUDIO_STATE.with(|state| {
-        state
-            .borrow()
-            .as_ref()
-            .and_then(|audio| audio.buses.get(bus))
-            .map_or(0.0, |b| b.gain())
-    })
+    read_bus(bus, 0.0, Bus::gain)
 }
 
 /// Loudest sample this bus has OUTPUT since the last call, post-fader -- so it
@@ -2559,13 +2444,7 @@ pub extern "C" fn stone_bus_gain(bus: u32) -> c_float {
 /// landed since the other's read.
 #[no_mangle]
 pub extern "C" fn stone_bus_peak(bus: u32) -> c_float {
-    AUDIO_STATE.with(|state| {
-        state
-            .borrow()
-            .as_ref()
-            .and_then(|audio| audio.buses.get(bus))
-            .map_or(0.0, |b| b.meter())
-    })
+    read_bus(bus, 0.0, Bus::meter)
 }
 
 /// How many ducks have been FIRED on this bus. The latch generation the audio
@@ -2575,13 +2454,7 @@ pub extern "C" fn stone_bus_peak(bus: u32) -> c_float {
 /// by `duck_attacks_then_releases`.
 #[no_mangle]
 pub extern "C" fn stone_bus_duck_count(bus: u32) -> u64 {
-    AUDIO_STATE.with(|state| {
-        state
-            .borrow()
-            .as_ref()
-            .and_then(|audio| audio.buses.get(bus))
-            .map_or(0, |b| b.duck_count())
-    })
+    read_bus(bus, 0, Bus::duck_count)
 }
 
 /// Lowpass insert. `cutoff_hz` is the automation target -- slewed sample-side
@@ -2594,13 +2467,7 @@ pub extern "C" fn stone_bus_set_lowpass(bus: u32, cutoff_hz: c_float, q: c_float
 
 #[no_mangle]
 pub extern "C" fn stone_bus_lowpass_cutoff(bus: u32) -> c_float {
-    AUDIO_STATE.with(|state| {
-        state
-            .borrow()
-            .as_ref()
-            .and_then(|audio| audio.buses.get(bus))
-            .map_or(0.0, |b| b.lowpass_cutoff())
-    })
+    read_bus(bus, 0.0, Bus::lowpass_cutoff)
 }
 
 /// Distortion insert. `drive` >= 1 into a soft clipper, `mix` 0..1 against
@@ -2640,16 +2507,28 @@ pub extern "C" fn stone_bus_duck(
 }
 
 fn with_bus(bus: u32, f: impl FnOnce(&Bus)) -> bool {
-    AUDIO_STATE.with(|state| {
-        if let Some(ref audio) = *state.borrow() {
-            if let Some(b) = audio.buses.get(bus) {
-                f(b);
-                return true;
-            }
-        }
-        false
+    read_bus(bus, false, |b| {
+        f(b);
+        true
     })
 }
+
+fn read_bus<T>(bus: u32, unknown: T, f: impl FnOnce(&Bus) -> T) -> T {
+    with_audio(|audio| audio.buses.get(bus).map(f)).unwrap_or(unknown)
+}
+
+fn with_sound<T>(handle: u64, f: impl FnOnce(&SoundData) -> T) -> Option<T> {
+    with_audio(|audio| audio.sounds.get(&handle).map(f))
+}
+
+fn with_voice<T>(voice: u64, f: impl FnOnce(&Voice) -> T) -> Option<T> {
+    with_audio(|audio| audio.voices.get(&voice).map(f))
+}
+
+fn with_audio<T>(f: impl FnOnce(&AudioState) -> Option<T>) -> Option<T> {
+    AUDIO_STATE.with(|state| state.borrow().as_ref().and_then(f))
+}
+
 /// Set Freeverb reverb effect for sounds
 /// - enabled: whether to apply reverb to sounds
 /// - room_size: 0.0-1.0 (larger = more reverb)
