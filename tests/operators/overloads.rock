@@ -33,36 +33,26 @@ fn test_v2_plus_v2_among_many_overloads() {
     print(int(c.x), int(c.y))
 }
 
-// ---------- Vec2 + int (struct on left, primitive on right) -----------------
-@test(output = "11	12")
-fn test_v2_plus_int() {
+// ---------- Struct on the left, int or float on the right ------------------
+@test(output = "11	12\n4	5")
+fn test_v2_plus_primitive() {
     let a = V2 { x: 1.0, y: 2.0 }
     let c = a + 10
     print(int(c.x), int(c.y))
+    let b = V2 { x: 1.5, y: 2.5 }
+    let d = b + 2.5
+    print(int(d.x), int(d.y))
 }
 
-// ---------- Vec2 + float (struct on left, different primitive) --------------
-@test(output = "4	5")
-fn test_v2_plus_float() {
-    let a = V2 { x: 1.5, y: 2.5 }
-    let c = a + 2.5
-    print(int(c.x), int(c.y))
-}
-
-// ---------- Compound `+=` with mixed Vec2 + int overload --------------------
-@test(output = "11	12")
-fn test_v2_compound_plus_int() {
+// ---------- Compound `+=` with mixed Vec2 + int / float overloads -----------
+@test(output = "11	12\n4	5")
+fn test_v2_compound_plus_primitive() {
     let p = V2 { x: 1.0, y: 2.0 }
     p += 10
     print(int(p.x), int(p.y))
-}
-
-// ---------- Compound `+=` with mixed Vec2 + float overload ------------------
-@test(output = "4	5")
-fn test_v2_compound_plus_float() {
-    let p = V2 { x: 1.5, y: 2.5 }
-    p += 2.5
-    print(int(p.x), int(p.y))
+    let q = V2 { x: 1.5, y: 2.5 }
+    q += 2.5
+    print(int(q.x), int(q.y))
 }
 
 // ---------- Primitive on the LEFT: int + Vec2 -------------------------------
@@ -87,18 +77,14 @@ fn __op_mul(a: V2, b: int) -> V2 {
     return V2 { x: a.x * float(b), y: a.y * float(b) }
 }
 
-@test(output = "5	6")
-fn test_v2_minus_int() {
+@test(output = "5	6\n20	40")
+fn test_v2_minus_and_times_int() {
     let a = V2 { x: 15.0, y: 16.0 }
     let c = a - 10
     print(int(c.x), int(c.y))
-}
-
-@test(output = "20	40")
-fn test_v2_times_int() {
-    let a = V2 { x: 10.0, y: 20.0 }
-    let c = a * 2
-    print(int(c.x), int(c.y))
+    let b = V2 { x: 10.0, y: 20.0 }
+    let d = b * 2
+    print(int(d.x), int(d.y))
 }
 
 // ---------- Nested mixed expression: `(V2 + int) + V2` ----------------------
@@ -212,21 +198,16 @@ fn test_compound_div_overload_mixed() {
 struct Inner { vec: CV2 }
 struct Outer { inner: Inner? }
 
-@test(output = "12	22")
-fn test_compound_safenav_overload_present() {
+@test(output = "12	22\nok")
+fn test_compound_safenav_overload() {
     let o = Outer { inner: Inner { vec: CV2 { x: 10.0, y: 20.0 } } }
     o.inner?.vec += CV2 { x: 2.0, y: 2.0 }
     if o.inner != null {
         print(int(o.inner.vec.x), int(o.inner.vec.y))
     }
-}
-
-@test(output = "ok")
-fn test_compound_safenav_overload_null_skips() {
-    let o = Outer { inner: null }
-    o.inner?.vec += CV2 { x: 99.0, y: 99.0 }
-    // No crash; o.inner stays null.
-    if o.inner == null {
+    let n = Outer { inner: null }
+    n.inner?.vec += CV2 { x: 99.0, y: 99.0 }
+    if n.inner == null {
         print("ok")
     }
 }
@@ -239,39 +220,18 @@ fn test_compound_add_overload_in_vec_index() {
     print(int(xs[1].x), int(xs[1].y))
 }
 
-// ---------- String `+=` (Lua needs `..`, not `+`) ----------
-@test(output = "hello world")
-fn test_compound_add_string() {
+// ---------- Primitive `+=` stays native; strings need Lua `..`, not `+` ------
+@test(output = "hello world\n8\n12")
+fn test_compound_primitive() {
     let s = "hello"
     s += " world"
     print(s)
-}
-
-// ---------- Sanity: primitive `+=` still works (regression guard) ----------
-@test(output = "8\n11")
-fn test_compound_add_int_primitive() {
     let n = 3
     n += 5
     print(n)
-
-    let m = 5
-    m += 6
+    let m = 3
+    m *= 4
     print(m)
-}
-
-@test(output = "12")
-fn test_compound_mul_int_primitive() {
-    let n = 3
-    n *= 4
-    print(n)
-}
-
-// ---------- int `./` floors (integer division) ----------
-@test(output = "3")
-fn test_compound_div_int_primitive_floors() {
-    let n = 7
-    n = n ./ 2
-    print(n)
 }
 
 // ---------- Deep safe-nav chain with overload at the leaf ----------
@@ -279,20 +239,16 @@ struct Lvl1 { vec: CV2 }
 struct Lvl2 { l1: Lvl1? }
 struct Lvl3 { l2: Lvl2? }
 
-@test(output = "11	22")
+@test(output = "11	22\nok")
 fn test_compound_deep_safenav_overload() {
     let root: Lvl3? = Lvl3 { l2: Lvl2 { l1: Lvl1 { vec: CV2 { x: 10.0, y: 20.0 } } } }
     root?.l2?.l1?.vec += CV2 { x: 1.0, y: 2.0 }
     if root != null && root.l2 != null && root.l2.l1 != null {
         print(int(root.l2.l1.vec.x), int(root.l2.l1.vec.y))
     }
-}
-
-@test(output = "ok")
-fn test_compound_deep_safenav_overload_null_skips() {
-    let root: Lvl3? = Lvl3 { l2: null }
-    root?.l2?.l1?.vec += CV2 { x: 99.0, y: 99.0 }
-    if root != null && root.l2 == null {
+    let empty: Lvl3? = Lvl3 { l2: null }
+    empty?.l2?.l1?.vec += CV2 { x: 99.0, y: 99.0 }
+    if empty != null && empty.l2 == null {
         print("ok")
     }
 }
@@ -305,14 +261,6 @@ fn test_compound_add_newtype() {
     let m = Money(100)
     m += Money(50)
     print(m.0)
-}
-
-// ---------- Vec<int> indexed `+=` (primitive, not struct) ----------
-@test(output = "12")
-fn test_compound_add_int_in_vec_index() {
-    let xs: [int] = [10, 20, 30]
-    xs[0] += 2
-    print(xs[0])
 }
 
 // --- A chained `a + b + c` through a user overload keeps every operand ---

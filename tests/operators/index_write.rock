@@ -4,19 +4,6 @@
 // write it back.
 
 @test
-fn test_eval_order_basic() {
-    let arr = [0, 0, 0, 0, 0]
-    let idx = 0
-    let tricky = (val: int) => {
-        arr[idx] = val + { idx += 1; idx }
-    }
-    tricky(100)
-    // LHS captured idx=0, RHS mutates idx to 1, sum 100+1 = 101.
-    assert_eq(arr[0], 101)
-    assert_eq(idx, 1)
-}
-
-@test
 fn test_eval_order_nested_writes() {
     let arr = [10, 20, 30]
     let i = 0
@@ -24,25 +11,20 @@ fn test_eval_order_nested_writes() {
         arr[i] = v + { i += 1; i }
     }
     bump(5)
-    // arr[0] = 5 + 1 = 6
+    // LHS captured i=0, RHS mutates i to 1: arr[0] = 5 + 1 = 6
     assert_eq(arr[0], 6)
+    assert_eq(i, 1)
     bump(50)
     // arr[1] = 50 + 2 = 52
     assert_eq(arr[1], 52)
 }
 
-@test(output = "4")
-fn test_map_compound_add() {
+@test(output = "4\n12")
+fn test_map_compound_assign() {
     let m: Map<string, int> = map_new()
     insert(m, "k", 3)
     m["k"] += 1
     print(unwrap(get(m, "k")))
-}
-
-@test(output = "6")
-fn test_map_compound_mul() {
-    let m: Map<string, int> = map_new()
-    insert(m, "k", 2)
     m["k"] *= 3
     print(unwrap(get(m, "k")))
 }
