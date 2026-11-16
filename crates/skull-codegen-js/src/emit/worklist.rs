@@ -49,6 +49,7 @@ pub(super) struct WorklistState<'a> {
     /// The bare `@nomangle` declarations each `inline(js)` body names. They are
     /// emitted only once the body that names them is.
     opaque_targets: BTreeMap<skull_graph::instance_graph::DeclKey, rustc_hash::FxHashSet<FuncRef>>,
+    pub(super) json_types: super::json_types::JsonTypes,
 }
 
 fn opaque_js_global_names(ws: &Workspace, body: &JsInlineBody) -> Vec<ustr::Ustr> {
@@ -150,6 +151,7 @@ impl<'a> WorklistState<'a> {
             artifact_decls,
             fn_value_targets: view.fn_value_targets.iter().cloned().collect(),
             opaque_targets: view.opaque_boundary_roots.clone(),
+            json_types: super::json_types::JsonTypes::new(scx),
         };
         for &(requested, _) in roots {
             st.queue_root(ws, requested)?;
@@ -166,6 +168,12 @@ impl<'a> WorklistState<'a> {
                 ws.module(requested.module).functions[requested.func].name
             ))
         })?;
+        // A root named only from opaque JS (an inline body or the JSON type
+        // table) has no published symbol; that JS calls it by its JS name.
+        if self.names.get(&key).is_none() {
+            self.names
+                .insert(key.clone(), callee_js_name(ws, requested));
+        }
         let fr = self.artifact_decls.get(&key).copied().unwrap_or(requested);
         let f = &ws.module(fr.module).functions[fr.func];
         if matches!(f.inline_body, Some((bone_core::hir::FnBackend::Js, _))) {
@@ -191,12 +199,14 @@ impl<'a> WorklistState<'a> {
         if self.inline_js.iter().any(|body| body.instance == instance) {
             return Ok(());
         }
+        let factories = self.json_types.add_body(ws, decl, &instance.args)?;
         self.inline_js.push(JsInlineBody { instance, decl });
         let mut targets: Vec<FuncRef> = self
             .opaque_targets
             .get(&skull_graph::instance_graph::DeclKey(decl))
             .map(|targets| targets.iter().copied().collect())
             .unwrap_or_default();
+        targets.extend(factories);
         targets.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
         for target in targets {
             self.queue_root(ws, target)?;

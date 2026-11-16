@@ -304,6 +304,7 @@ pub fn emit_with_closure(
         }
     }
     push_synthesized_entry_roots(ws, &mut refs, &mut ref_set);
+    push_json_factory_roots(ws, &mut refs, &mut ref_set);
     let mut root_plan = JsRootPlan {
         named: roots.to_vec(),
         refs,

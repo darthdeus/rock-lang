@@ -31,6 +31,8 @@ mod generic_inline;
 mod inline_pipeline;
 #[path = "inspect.rs"]
 mod inspect;
+#[path = "json_record_types.rs"]
+mod json_record_types;
 #[path = "lambda.rs"]
 mod lambda;
 #[path = "map_key_admission.rs"]

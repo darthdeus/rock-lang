@@ -42,6 +42,7 @@ mod effects;
 mod function;
 mod globals;
 mod inst;
+mod json_types;
 mod lanes;
 mod overlay;
 mod plan_stages;

@@ -157,6 +157,9 @@ pub(super) fn assemble_program_core(
     let col_mat = emit_col_mat(ws, struct_registry.as_ref())?;
     out.push_str(&col_mat);
     stable.push_str(&col_mat);
+    let json_types = st.json_types.render()?;
+    out.push_str(&json_types);
+    stable.push_str(&json_types);
     let ret_slots = ret_slot_decls(
         max_multi_wire(&bodies)?.max(max_published_lanes(&session.view, &st.inline_js)?),
     );

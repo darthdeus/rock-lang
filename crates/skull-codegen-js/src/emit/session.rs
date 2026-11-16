@@ -87,7 +87,28 @@ fn js_root_plan(
         }
     }
     push_synthesized_entry_roots(ws, &mut refs, &mut seen);
+    push_json_factory_roots(ws, &mut refs, &mut seen);
     Ok(JsRootPlan { named, refs })
+}
+
+/// Graph roots only: a typed-JSON record walker calls these field factories
+/// from opaque JS, and the worklist emits one once a walker reaches its field.
+pub(super) fn push_json_factory_roots(
+    ws: &Workspace,
+    refs: &mut Vec<FuncRef>,
+    seen: &mut HashSet<FuncRef>,
+) {
+    for module in ws.modules.iter() {
+        for (fid, f) in module.functions.iter() {
+            let fr = FuncRef {
+                module: module.id,
+                func: fid,
+            };
+            if f.json_field_for.is_some() && seen.insert(fr) {
+                refs.push(fr);
+            }
+        }
+    }
 }
 
 /// Graph roots only: a synthesized call resolves to the entry's base instance,

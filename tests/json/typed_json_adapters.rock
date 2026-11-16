@@ -29,7 +29,7 @@ fn kind_decode(value: JsonValue) -> Kind? {
     return null
 }
 
-@test(output = "ok", backends = "lua")
+@test(output = "ok")
 fn typed_json_uses_declared_scalar_enum_adapters_and_embedded_values() {
     let key = Key { namespace: "sample", name: "record" }
     let marker = Marker { point: Point { x: 7, y: -3 }, tint: Tint { red: 0.25, visible: false } }

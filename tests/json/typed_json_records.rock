@@ -11,7 +11,7 @@ struct Record {
     tint: Tint,
 }
 
-@test(output = "ok", backends = "lua")
+@test(output = "ok")
 fn typed_json_records_roundtrip_and_reject_malformed_fields() {
     let codec = JsonRecordCodec {}
     let weights: Map<string, float> = map_new()

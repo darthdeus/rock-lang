@@ -573,3 +573,503 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
     }
     return true;
 """
+
+// Typed JSON records: the JS sibling of the record walker in `json.rock`. It
+// reads the compiler's `__rock_json_types` table, which carries the same
+// per-type facts luajit reads from `__ROCK_TYPE_TABLE`, in JS's layouts:
+// 0-based positional slots and Vec data, `Map` objects, and plain objects for
+// native values. The compiler emits the table for the types reachable from
+// the `T` of each entry point whose body names it. A failed decode is a
+// `{ __json_record_js_error: error }` box. Decoded objects carry every
+// physical key a constructor writes, because `__op_eq` compares key sets.
+
+@nomangle inline(js) fn __json_record_js_node(tag: string, item: any) -> any = """
+    if (tag === "Null") return { __variant: "Null", __ty: "JsonValue" };
+    return { __variant: tag, __ty: "JsonValue", 0: item };
+"""
+
+@nomangle inline(js) fn __json_record_js_tag(value: any, tag: string) -> bool = """
+    return value !== null && typeof value === "object" && value.__variant === tag;
+"""
+
+@nomangle inline(js) fn __json_record_js_failure(shape: any, value: any) -> any = """
+    var actual;
+    if (value === null || value === undefined) actual = "missing";
+    else if (typeof value === "object") actual = value.__variant !== undefined ? value.__variant : "table";
+    else actual = typeof value;
+    return { __json_record_js_error: { __ty: "JsonRecordError", path: "",
+        expected: shape.name !== undefined ? shape.name : shape.k, actual: actual } };
+"""
+
+@nomangle inline(js) fn __json_record_js_failed(result: any) -> bool = """
+    return result !== null && typeof result === "object" && result.__json_record_js_error !== undefined;
+"""
+
+@nomangle inline(js) fn __json_record_js_error_at(failure: any, key: any) -> any = """
+    var error = failure.__json_record_js_error;
+    error.path = "/" + String(key).replace(/~/g, "~0").replace(/\//g, "~1") + error.path;
+    return failure;
+"""
+
+@nomangle inline(js) fn __json_record_js_native_get(source: any, name: string, prefix: string) -> any = """
+    var fields = __rock_json_types.types[name].fields;
+    var result = { __ty: name };
+    for (var i = 0; i < fields.length; i++) {
+        var field = fields[i], path = prefix + field.name;
+        var child = __rock_json_types.types[field.type];
+        result[field.name] = child !== undefined && child.kind === "c_struct"
+            ? __json_record_js_native_get(source, field.type, path + ".") : source[path];
+    }
+    return result;
+"""
+
+// A null `value` still writes every leaf key, as an absent embed does.
+@nomangle inline(js) fn __json_record_js_native_put(target: any, value: any, name: string, prefix: string) = """
+    var fields = __rock_json_types.types[name].fields;
+    for (var i = 0; i < fields.length; i++) {
+        var field = fields[i], path = prefix + field.name;
+        var item = value === null ? null : value[field.name];
+        var child = __rock_json_types.types[field.type];
+        if (child !== undefined && child.kind === "c_struct") {
+            __json_record_js_native_put(target, item === undefined ? null : item, field.type, path + ".");
+        } else target[path] = item;
+    }
+"""
+
+@nomangle inline(js) fn __json_record_js_table_put(target: any, value: any, name: string, prefix: string) = """
+    if (value !== null) {
+        for (var key in value) {
+            if (Object.prototype.hasOwnProperty.call(value, key) && key !== "__ty") target[prefix + key] = value[key];
+        }
+        return;
+    }
+    var fields = __rock_json_types.types[name].fields;
+    for (var i = 0; i < fields.length; i++) {
+        var field = fields[i];
+        if (field.flat) {
+            for (var j = 0; j < field.flat.length; j++) target[prefix + field.flat[j]] = null;
+        } else if (field.embed) {
+            __json_record_js_field_put(target, { name: prefix + field.name, type: field.type,
+                nullable: field.nullable, embed: true }, null);
+        } else target[prefix + field.name] = null;
+    }
+"""
+
+@nomangle inline(js) fn __json_record_js_field_get(source: any, field: any) -> any = """
+    var key = field.name;
+    if (field.flat) {
+        var tag = source[field.flat[0]];
+        if (tag === null || tag === undefined) return null;
+        var value = { __variant: tag, __ty: field.type };
+        for (var i = 1; i < field.flat.length; i++) {
+            var item = source[field.flat[i]];
+            if (item !== null && item !== undefined) value[i - 1] = item;
+        }
+        return value;
+    }
+    if (!field.embed) return source[key] === undefined ? null : source[key];
+    if (field.nullable && !source[key]) return null;
+    if (__rock_json_types.types[field.type].kind === "c_struct") {
+        return __json_record_js_native_get(source, field.type, key + ".");
+    }
+    var result = { __ty: field.type }, prefix = key + ".";
+    for (var name in source) {
+        if (Object.prototype.hasOwnProperty.call(source, name) && name.substring(0, prefix.length) === prefix) {
+            result[name.substring(prefix.length)] = source[name];
+        }
+    }
+    return result;
+"""
+
+@nomangle inline(js) fn __json_record_js_field_put(target: any, field: any, value: any) = """
+    var key = field.name, absent = value === null || value === undefined;
+    if (field.flat) {
+        target[field.flat[0]] = absent ? null : value.__variant;
+        for (var i = 1; i < field.flat.length; i++) target[field.flat[i]] = absent ? null : value[i - 1];
+    } else if (field.embed) {
+        if (field.nullable) target[key] = absent ? null : true;
+        if (__rock_json_types.types[field.type].kind === "c_struct") {
+            __json_record_js_native_put(target, absent ? null : value, field.type, key + ".");
+        } else {
+            __json_record_js_table_put(target, absent ? null : value, field.type, key + ".");
+        }
+    } else target[key] = absent ? null : value;
+"""
+
+// Payload slots are 0-based here; luajit's are 1-based.
+@nomangle inline(js) fn __json_record_js_payload_get(value: any, shape: any, index: int) -> any = """
+    var slot = shape.slot !== undefined ? shape.slot : index;
+    if (!shape.leaves) return value[slot];
+    var flat = __rock_json_types.flat[shape.name];
+    var result, i, item;
+    if (flat) {
+        result = { __variant: value[slot], __ty: shape.name };
+        for (i = 0; i < flat.tuple_width; i++) {
+            item = value[slot + 1 + i];
+            if (item !== null && item !== undefined) result[i] = item;
+        }
+        return result;
+    }
+    result = { __ty: shape.name };
+    for (i = 0; i < shape.leaves.length; i++) {
+        var path = shape.leaves[i];
+        if (path.indexOf(".") >= 0) throw new Error("json record unsupported nested value payload");
+        result[path] = value[slot + i];
+    }
+    return result;
+"""
+
+@nomangle inline(js) fn __json_record_js_payload_put(target: any, shape: any, index: int, value: any) = """
+    var slot = shape.slot !== undefined ? shape.slot : index;
+    function put(key, item) { if (item !== null && item !== undefined) target[key] = item; }
+    if (!shape.leaves) { put(slot, value); return; }
+    var flat = __rock_json_types.flat[shape.name];
+    var i;
+    if (flat) {
+        put(slot, value.__variant);
+        for (i = 0; i < flat.tuple_width; i++) put(slot + 1 + i, value[i]);
+        return;
+    }
+    for (i = 0; i < shape.leaves.length; i++) {
+        var path = shape.leaves[i];
+        if (path.indexOf(".") >= 0) throw new Error("json record unsupported nested value payload");
+        put(slot + i, value[path]);
+    }
+"""
+
+@nomangle inline(js) fn __json_record_js_row_object(row: any, name: string) -> any = """
+    var fields = __rock_json_types.types[name].fields;
+    for (var i = 0; i < fields.length; i++) {
+        var field = fields[i], child = __rock_json_types.types[field.type], here = row[field.name];
+        if (field.embed && field.nullable && here === false) row[field.name] = here = null;
+        if (child !== undefined && child.kind === "value_table" && !field.embed
+            && (!field.nullable || (here !== null && here !== undefined))
+            && (here === null || here === undefined || typeof here !== "object")) {
+            var value = { __ty: field.type }, prefix = field.name + ".";
+            for (var path in row) {
+                if (path.substring(0, prefix.length) === prefix) value[path.substring(prefix.length)] = row[path];
+            }
+            row[field.name] = __json_record_js_row_object(value, field.type);
+        }
+    }
+    return row;
+"""
+
+@nomangle inline(js) fn __json_record_js_row_leaf(value: any, path: string) -> any = """
+    var direct = value[path];
+    if (direct !== null && direct !== undefined) return direct;
+    var dot = path.indexOf(".");
+    if (dot >= 0) {
+        var child = value[path.substring(0, dot)];
+        if (child !== null && typeof child === "object") return __json_record_js_row_leaf(child, path.substring(dot + 1));
+        return null;
+    }
+    var decl = __rock_json_types.types[value.__ty];
+    if (decl !== undefined && decl.kind !== "c_struct") {
+        for (var i = 0; i < decl.fields.length; i++) {
+            var field = decl.fields[i];
+            if (field.name === path && field.embed && field.nullable) return false;
+        }
+    }
+    return null;
+"""
+
+@nomangle inline(js) fn __json_record_js_visit(codec: any, shape: any,
+    value: any, reading: bool, seen: any, depth: int, defaults: any) -> any = """
+    var types = codec.types.types;
+    var fail = __json_record_js_failure, failed = __json_record_js_failed;
+    var at = __json_record_js_error_at, node = __json_record_js_node, tagged = __json_record_js_tag;
+    var has = Object.prototype.hasOwnProperty;
+    var i, r, item, label;
+    if (depth > 128) {
+        if (reading) return fail(shape, value);
+        throw new Error("json record nesting exceeds 128");
+    }
+    var kind = shape.k;
+    if (kind === "field") {
+        if (reading) {
+            if (value === null || value === undefined) return { __ty: "JsonField", present: false, value: null };
+            r = __json_record_js_visit(codec, shape.inner, value, true, seen, depth + 1, null);
+            if (failed(r)) return r;
+            return { __ty: "JsonField", present: true, value: r };
+        }
+        if (!value.present) throw new Error("json record absent field requires an object field");
+        return __json_record_js_visit(codec, shape.inner, value.value, false, seen, depth + 1, null);
+    }
+    if (kind === "opt") {
+        if (reading && tagged(value, "Null")) return null;
+        if (!reading && (value === null || value === undefined)) return node("Null", null);
+        return __json_record_js_visit(codec, shape.inner, value, reading, seen, depth + 1, defaults);
+    }
+    if (kind === "int" || kind === "uint") {
+        var n = reading && (tagged(value, "Int") || tagged(value, "Float")) ? value[0] : value;
+        if (typeof n !== "number" || !Number.isFinite(n) || n !== Math.floor(n)
+            || (kind === "uint" && n < 0)) return fail(shape, value);
+        return reading ? n : node("Int", n);
+    }
+    if (kind === "float") {
+        if (reading) {
+            var f = __rock_call(codec.decode_float, value);
+            if (typeof f !== "number" || !Number.isFinite(f)) return fail(shape, value);
+            return f;
+        }
+        if (!Number.isFinite(value)) throw new Error("json record cannot encode a nonfinite float");
+        return __rock_call(codec.encode_float, value);
+    }
+    if (kind === "string" || kind === "bool") {
+        var tag = kind === "string" ? "Str" : "Bool";
+        if (reading) return tagged(value, tag) ? value[0] : fail(shape, value);
+        return node(tag, value);
+    }
+    if (kind === "vec") {
+        var element = shape.elem.k === "nom" ? types[shape.elem.name] : undefined;
+        if (element !== undefined && element.kind === "c_enum") {
+            throw new Error("json record does not support native enum arrays");
+        }
+        if (reading && !tagged(value, "Array")) return fail(shape, value);
+        var items = reading ? value[0] : value;
+        var offsets = element !== undefined ? __rock_json_types.strided[shape.elem.name] : undefined;
+        var columns = element !== undefined && element.kind === "c_struct" ? element.vec_columns : undefined;
+        var header = items["@vec"];
+        var column_stored = !reading && header !== undefined && header !== null && header.repr === "columns";
+        var strided = header !== undefined && header !== null && header.repr === "strided";
+        if ((column_stored && !columns) || (strided && !offsets)) {
+            throw new Error("json record does not support this array storage");
+        }
+        var stride = 0, path, c;
+        if (offsets) for (path in offsets) stride = Math.max(stride, offsets[path] + 1);
+        var result = [];
+        if (reading && columns) {
+            result = {};
+            for (c = 0; c < columns.length; c++) result[columns[c]] = [];
+        }
+        for (i = 0; i < items.len; i++) {
+            if (column_stored) {
+                var row = {};
+                for (c = 0; c < columns.length; c++) row[columns[c]] = items[columns[c]][i];
+                item = __json_record_js_native_get(row, shape.elem.name, "");
+            } else if (strided) {
+                var cells = { __ty: shape.elem.name };
+                for (path in offsets) cells[path] = items._data[i * header.stride + offsets[path]];
+                item = element.kind === "c_struct" ? __json_record_js_native_get(cells, shape.elem.name, "")
+                    : __json_record_js_row_object(cells, shape.elem.name);
+            } else item = items._data[i];
+            r = __json_record_js_visit(codec, shape.elem, item, reading, seen, depth + 1, null);
+            if (failed(r)) return at(r, i);
+            if (reading && columns) {
+                for (c = 0; c < columns.length; c++) result[columns[c]][i] = __json_record_js_row_leaf(r, columns[c]);
+            } else if (reading && offsets) {
+                for (path in offsets) result[i * stride + offsets[path]] = __json_record_js_row_leaf(r, path);
+            } else result[i] = r;
+        }
+        if (reading) {
+            if (columns) {
+                result["@vec"] = { repr: "columns", elem: shape.elem.name, cap: items.len };
+                result.len = items.len;
+                result.__ty = "Vec";
+                return result;
+            }
+            var vec = { _data: result, len: items.len, __ty: "Vec" };
+            if (offsets) vec["@vec"] = { repr: "strided", elem: shape.elem.name, stride: stride, cap: items.len };
+            return vec;
+        }
+        return node("Array", { _data: result, len: items.len, __ty: "Vec" });
+    }
+    if (kind === "map") {
+        if (shape.key.k !== "string") throw new Error("json record maps require string keys");
+        var held = shape.val.k === "nom" ? types[shape.val.name] : undefined;
+        if (held !== undefined && (held.kind === "c_struct" || held.kind === "c_enum")) {
+            throw new Error("json record does not support native value maps");
+        }
+        if (reading && !tagged(value, "Object")) return fail(shape, value);
+        var entries = reading ? value[0] : value;
+        var map = new Map();
+        for (var entry of entries) {
+            r = __json_record_js_visit(codec, shape.val, entry[1], reading, seen, depth + 1, null);
+            if (failed(r)) return at(r, entry[0]);
+            map.set(entry[0], r);
+        }
+        return reading ? map : node("Object", map);
+    }
+    if (kind !== "nom") throw new Error("json record unsupported shape: " + String(kind));
+    var name = shape.name;
+    var adapter = codec.adapters[name];
+    if (adapter !== undefined) {
+        if (!reading) return __rock_call(adapter.encode, value);
+        r = __rock_call(adapter.decode, value);
+        return r === null || r === undefined ? fail(shape, value) : r;
+    }
+    var decl = types[name];
+    if (decl === undefined) throw new Error("json record missing declaration: " + name);
+    if (decl.kind === "enum_tag") {
+        if (reading) {
+            if (!tagged(value, "Array") || value[0].len !== 1) return fail(shape, value);
+            label = value[0]._data[0];
+            if (!tagged(label, "Str")) return fail(shape, value);
+            var ordinal = decl.variants.indexOf(label[0]);
+            return ordinal < 0 ? fail(shape, value) : ordinal;
+        }
+        label = decl.variants[value];
+        if (typeof label !== "string") return fail(shape, value);
+        return node("Array", { _data: [node("Str", label)], len: 1, __ty: "Vec" });
+    }
+    if (!reading) {
+        if (value === null || value === undefined) {
+            throw new Error("json record missing value for " + name + " at depth " + depth);
+        }
+        if (seen.has(value)) throw new Error("json record cannot encode cycles");
+        seen.add(value);
+    }
+    var out, data;
+    if (decl.kind === "enum" || decl.kind === "c_enum") {
+        var variant, payload = [], selected, fields = null, count;
+        if (reading) {
+            if (!tagged(value, "Array") || value[0].len < 1) return fail(shape, value);
+            label = value[0]._data[0];
+            if (!tagged(label, "Str")) return fail(shape, value);
+        }
+        if (decl.kind === "c_enum") {
+            if (reading) {
+                for (i = 0; i < decl.variants.length; i++) {
+                    if (decl.variants[i].name === label[0]) { variant = i; selected = decl.variants[i]; break; }
+                }
+            } else {
+                variant = value.__tag;
+                selected = decl.variants[variant];
+            }
+            if (selected === undefined) return fail(shape, value);
+            fields = selected.fields;
+            for (i = 0; i < fields.length; i++) {
+                if (fields[i].name !== String(i + 1)) throw new Error("json record does not support record enum payloads");
+                payload.push(types[fields[i].type] !== undefined ? { k: "nom", name: fields[i].type } : { k: fields[i].type });
+            }
+        } else {
+            variant = reading ? label[0] : value.__variant;
+            selected = has.call(decl.variant_desc, variant) ? decl.variant_desc[variant] : undefined;
+            if (selected === undefined) {
+                if (!reading) throw new Error("json record invalid variant " + name + ":" + String(variant));
+                return fail(shape, value);
+            }
+            if (!selected.pos) throw new Error("json record does not support record enum payloads");
+            payload = selected.pos;
+        }
+        count = payload.length;
+        if (reading && value[0].len !== count + 1) return fail(shape, value);
+        if (reading) {
+            out = fields ? { __ty: name, __tag: variant } : { __variant: variant, __ty: name };
+            if (fields) for (i = 0; i < decl.slots.length; i++) out[decl.slots[i]] = 0;
+        } else data = [];
+        for (i = 0; i < count; i++) {
+            if (reading) item = value[0]._data[i + 1];
+            else if (fields) item = value[fields[i].slot];
+            else item = __json_record_js_payload_get(value, payload[i], i);
+            r = __json_record_js_visit(codec, payload[i], item, reading, seen, depth + 1, null);
+            if (failed(r)) {
+                if (!reading) throw new Error("json record invalid payload " + name + "." + String(variant) + "[" + (i + 1) + "]");
+                return at(r, i + 1);
+            }
+            if (!reading) data.push(r);
+            else if (fields) out[fields[i].slot] = r;
+            else __json_record_js_payload_put(out, payload[i], i, r);
+        }
+        if (!reading) {
+            data.unshift(node("Str", fields ? selected.name : variant));
+            out = node("Array", { _data: data, len: count + 1, __ty: "Vec" });
+        }
+    } else if (decl.kind === "struct" || decl.kind === "value_table" || decl.kind === "c_struct") {
+        if (reading && !tagged(value, "Object")) return fail(shape, value);
+        var defaulted = defaults !== null && defaults !== undefined;
+        if (reading && codec.reject_unknown_fields) {
+            var names = codec.field_names[name];
+            if (names === undefined) {
+                names = new Set();
+                for (i = 0; i < decl.fields.length; i++) {
+                    var declared = decl.fields[i];
+                    if (!declared.json_skip) names.add(declared.json_name !== undefined ? declared.json_name : declared.name);
+                }
+                codec.field_names[name] = names;
+            }
+            for (var key of value[0].keys()) {
+                if (!names.has(key)) {
+                    return at({ __json_record_js_error: { __ty: "JsonRecordError", path: "",
+                        expected: "declared field", actual: "unknown field" } }, key);
+                }
+            }
+        }
+        data = reading ? { __ty: name } : new Map();
+        for (i = 0; i < decl.fields.length; i++) {
+            var field = decl.fields[i];
+            if (field.json_skip) {
+                if (reading) __json_record_js_field_put(data, field, field.json_default());
+                continue;
+            }
+            var wire = field.json_name !== undefined ? field.json_name : field.name;
+            if (reading) item = value[0].get(wire);
+            else if (decl.kind === "c_struct") item = value[field.name];
+            else item = __json_record_js_field_get(value, field);
+            var child = field.desc;
+            if (!child) child = types[field.type] !== undefined ? { k: "nom", name: field.type } : { k: field.type };
+            if (field.nullable && child.k !== "opt") child = { k: "opt", inner: child };
+            var absent = !reading && child.k === "field" && !item.present;
+            if (absent || (!reading && field.json_omit && field.json_omit(item))) continue;
+            if (decl.kind === "c_struct" && field.nullable) {
+                throw new Error("json record does not support nullable native fields");
+            }
+            var fallback = null;
+            if (reading && defaulted) {
+                fallback = decl.kind === "c_struct" ? defaults[field.name] : __json_record_js_field_get(defaults, field);
+            }
+            if (reading && (item === null || item === undefined)) {
+                if (defaulted) r = __json_record_copy_default(fallback);
+                else if (field.json_default) r = field.json_default();
+                else if (child.k === "field") r = __json_record_js_visit(codec, child, null, true, seen, depth + 1, null);
+                else return at(fail(child, null), wire);
+            } else {
+                r = __json_record_js_visit(codec, child, item, reading, seen, depth + 1, fallback);
+            }
+            if (failed(r)) {
+                if (!reading) throw new Error("json record invalid field " + name + "." + field.name);
+                return at(r, wire);
+            }
+            if (reading) __json_record_js_field_put(data, field, r);
+            else data.set(wire, r);
+        }
+        out = reading ? data : node("Object", data);
+    } else throw new Error("json record unsupported declaration: " + name);
+    if (!reading) seen.delete(value);
+    return out;
+"""
+
+@nomangle inline(js) fn __json_record_js_context(codec: any, types: any) -> any = """
+    var adapters = Object.create(null);
+    for (var i = 0; i < codec.adapters.len; i++) {
+        var adapter = codec.adapters._data[i];
+        if (adapters[adapter.name] !== undefined) throw new Error("json record duplicate adapter: " + adapter.name);
+        adapters[adapter.name] = adapter;
+    }
+    return { types: types, adapters: adapters, encode_float: codec.encode_float, decode_float: codec.decode_float,
+        reject_unknown_fields: codec.reject_unknown_fields, field_names: Object.create(null) };
+"""
+
+@nomangle inline(js) fn __json_record_js_decode(codec: any, context: any, name: string, value: any, defaults: any) -> any = """
+    var result = __json_record_js_visit(context, { k: "nom", name: name }, value, true, new Set(), 0, defaults);
+    if (!__json_record_js_failed(result)) return result;
+    if (codec.on_error !== null && codec.on_error !== undefined) __rock_call(codec.on_error, result.__json_record_js_error);
+    return null;
+"""
+
+inline(js) fn __json_record_encode<T>(name: string, codec: JsonRecordCodec, value: T) -> JsonValue = """
+    var result = __json_record_js_visit(__json_record_js_context(codec, __rock_json_types),
+        { k: "nom", name: name }, value, false, new Set(), 0, null);
+    if (__json_record_js_failed(result)) throw new Error("invalid value for json record encoding");
+    return result;
+"""
+
+inline(js) fn __json_record_decode<T>(name: string, codec: JsonRecordCodec, value: JsonValue) -> T? = """
+    return __json_record_js_decode(codec, __json_record_js_context(codec, __rock_json_types), name, value, null);
+"""
+
+inline(js) fn __json_record_decode_with_defaults<T>(name: string, codec: JsonRecordCodec,
+    value: JsonValue, defaults: T) -> T? = """
+    return __json_record_js_decode(codec, __json_record_js_context(codec, __rock_json_types), name, value, defaults);
+"""
