@@ -611,7 +611,9 @@ impl InlineCandidateTable {
                     adjust_candidate_profile(&mut stats, &warm.key, &profile, false);
                 }
                 adjust_candidate_profile(&mut stats, &warm.key, &warm.profile, true);
-                stats.profiles.insert(warm.key.clone(), warm.profile.clone());
+                stats
+                    .profiles
+                    .insert(warm.key.clone(), warm.profile.clone());
             }
         }
         for warm in warms {
@@ -4126,27 +4128,13 @@ fn top() -> int { return sum_all(Counter { n: 0 }) }
         InlineCandidateWarm {
             key,
             candidate: None,
-            lower_ns: 0,
-            full_clone_ns: 0,
-            cleanup_ns: 0,
-            compact_ns: 0,
-            lower_attempted: false,
-            lowered: false,
-            raw_instructions: 0,
-            raw_cells: 0,
-            raw_blocks: 0,
-            cleaned_instructions: 0,
-            cleaned_cells: 0,
-            cleaned_blocks: 0,
-            full_clone_inst_capacity: 0,
-            full_clone_cell_capacity: 0,
-            full_clone_block_capacity: 0,
-            compact_inst_capacity: 0,
-            compact_cell_capacity: 0,
-            compact_block_capacity: 0,
-            eligibility_ns: 0,
-            rejection,
-            worker: "candidate-table-test".to_string(),
+            profile: InlineCandidateProfile {
+                eligible: rejection.is_none(),
+                rejected_before_lower: rejection.is_some(),
+                rejection_reason: rejection,
+                worker: "candidate-table-test".to_string(),
+                ..InlineCandidateProfile::default()
+            },
         }
     }
 
@@ -4183,15 +4171,16 @@ fn top() -> int { return sum_all(Counter { n: 0 }) }
     #[test]
     fn lower_times_by_key_are_kept_only_for_a_census() {
         let key = candidate_test_key();
-        let lowered = |worker: &str| InlineCandidateWarm {
-            lowered: true,
-            lower_ns: 7,
-            worker: worker.to_string(),
-            ..candidate_warm(key.clone(), None)
+        let lowered = |worker: &str| {
+            let mut warm = candidate_warm(key.clone(), None);
+            warm.profile.lowered = true;
+            warm.profile.lower_ns = 7;
+            warm.profile.worker = worker.to_string();
+            warm
         };
         let plain =
             InlineCandidateTable::from_warms_with_base(None, vec![key.clone()], vec![lowered("")]);
-        assert_eq!(plain.stats().lowered, 1);
+        assert_eq!(plain.stats().lower_ns, 7);
         assert!(plain.stats().lower_ns_by_key.is_empty());
         let census = InlineCandidateTable::from_warms_with_base(
             None,
