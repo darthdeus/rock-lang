@@ -2132,6 +2132,75 @@ fn vec_index_read_is_direct_with_a_checked_fallback() {
     assert!(lua.contains(" == nil and __vec_checked_get("), "{lua}");
 }
 
+/// An element of a vector type is a table, so like a scalar it fills every
+/// live slot: reading one cannot reach a backing metamethod, and the loop's
+/// proof survives it.
+#[test]
+fn loops_over_vector_elements_read_raw() {
+    let lua = emit_inlined(
+        "fn sum(rows: [[int]]) -> int {
+            let t = 0
+            for row in rows { for x in row { t += x } }
+            return t
+        }",
+        "sum",
+    );
+    assert!(!lua.contains("__vec_checked_get("), "{lua}");
+}
+
+/// A `[bool]` read the loop proves is the slot itself, even beside an
+/// unproven read of a vector of vectors, which cannot reach a metamethod.
+#[test]
+fn proven_bool_reads_beside_table_element_reads_are_raw() {
+    let lua = emit_inlined(
+        "fn sum(live: [bool], rows: [[int]]) -> int {
+            let t = 0
+            for i in 0..live.len() { if live[i] { t += rows[i].len() } }
+            return t
+        }",
+        "sum",
+    );
+    assert_eq!(lua.matches("__vec_checked_get(").count(), 1, "{lua}");
+    assert!(
+        lua.lines()
+            .filter(|l| l.contains("if "))
+            .all(|l| !l.contains("__vec_checked_get(")),
+        "{lua}"
+    );
+}
+
+/// The arena walk reads its occupancy column under the loop's own bound. A
+/// heap record field read may run a host getter that shrinks the column, so
+/// with one in the body the read stays checked, but a free (`false`) slot
+/// still makes no call.
+#[test]
+fn arena_occupancy_reads_are_raw() {
+    let lua = emit_inlined(
+        "struct Mote { life: int }
+        fn count(us: Arena<Mote>) -> int {
+            let t = 0
+            for (_, _) in us { t += 1 }
+            return t
+        }",
+        "count",
+    );
+    assert!(!lua.contains("__vec_checked_get("), "{lua}");
+    let lua = emit_inlined(
+        "struct Mote { life: int }
+        fn sum(us: Arena<Mote>) -> int {
+            let t = 0
+            for (_, m) in us { t += m.life }
+            return t
+        }",
+        "sum",
+    );
+    let occupancy = lua.lines().find(|l| l.contains("if ")).unwrap_or_default();
+    assert!(
+        occupancy.contains(" == nil and __vec_checked_get("),
+        "{lua}"
+    );
+}
+
 /// A call in the body that may shrink the vector keeps the loop's element
 /// read on its checked fallback.
 #[test]

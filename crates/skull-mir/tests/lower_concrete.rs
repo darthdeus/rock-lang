@@ -710,6 +710,18 @@ fn nullable_and_any_vecs_keep_callback_capable_kind() {
 }
 
 #[test]
+fn record_and_vector_elements_fill_every_live_slot() {
+    let record = mir(
+        "struct P { x: int }
+        fn f(xs: [P]) -> P { xs[0] }",
+        "f",
+    );
+    assert!(record.contains("index.VecNonNull "), "{record}");
+    let nested = mir("fn f(xs: [[int]]) -> [int] { xs[0] }", "f");
+    assert!(nested.contains("index.VecNonNull "), "{nested}");
+}
+
+#[test]
 fn tuple_index_projects() {
     assert_eq!(
         mir("fn f(t: (int, bool)) -> int { t.0 }", "f"),

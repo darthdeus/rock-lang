@@ -294,7 +294,10 @@ impl<'a> Builder<'a> {
             && let Some(name) = self.value_struct_of(root)
             && !self.is_nobox_struct(name)
             && !self.expr_is_flat_vec(base)
-            && matches!(self.coll_kind(base)?, ContainerKind::Vec)
+            && matches!(
+                self.coll_kind(base)?,
+                ContainerKind::Vec | ContainerKind::VecNonNull
+            )
             && self
                 .scx
                 .rep_arena()

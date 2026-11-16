@@ -136,6 +136,28 @@ fn sum_pairs(xs: [int]) -> int {
     return t
 }
 
+// Nine flags in ten are false.
+fn flags(n: int) -> [bool] {
+    let out: [bool] = []
+    for i in 0..n { out.push(i % 10 == 3) }
+    return out
+}
+
+fn count_flags(flags: [bool]) -> int {
+    let t = 0
+    for f in flags { if f { t += 1 } }
+    return t
+}
+
+// The record field read may run a host getter, so the flag reads stay checked.
+fn sum_flagged(flags: [bool], ms: [Mote]) -> int {
+    let t = 0
+    for i in 0..flags.len() {
+        if flags[i] { t += ms[i].life }
+    }
+    return t
+}
+
 fn units(n: int) -> Arena<Mote> {
     let out: Arena<Mote> = arena_new()
     let drop: [Entity<Mote>] = []
@@ -485,6 +507,9 @@ fn main() {
     drive("sum_field", 1000, 20000, () => sum_field(swarm))
     drive("copy_big", 1000, 10000, () => copy_big(xs, out) as float)
     drive("sum_grid", 1000, 20000, () => sum_grid(grid) as float)
+    let fs = flags(1000)
+    drive("count_flags", 1000, 20000, () => count_flags(fs) as float)
+    drive("sum_flagged", 1000, 20000, () => sum_flagged(fs, ms) as float)
     let cs = columns(1000)
     let ss = strided(1000)
     let writes = ints(1000)

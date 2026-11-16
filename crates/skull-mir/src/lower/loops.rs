@@ -609,9 +609,10 @@ impl<'a> Builder<'a> {
                 field: crate::names::ustr("data"),
             })
         });
+        let occupied_kind = self.boxed_vec_kind(Some(&MonoTy::Bool));
         let n = self.emit_cur(Inst::Len {
             base: occupied,
-            kind: ContainerKind::Vec,
+            kind: occupied_kind,
         });
         let i_cell = self.f.new_cell(None);
         self.f.mark_loop_binding(i_cell);
@@ -660,7 +661,7 @@ impl<'a> Builder<'a> {
         let occ = self.emit_cur(Inst::Index {
             base: occupied,
             index: idx,
-            kind: ContainerKind::Vec,
+            kind: occupied_kind,
         });
         self.f.set_term(
             self.cur,
@@ -687,7 +688,7 @@ impl<'a> Builder<'a> {
             let e_gen = self.emit_cur(Inst::Index {
                 base: generations,
                 index: idx,
-                kind: ContainerKind::Vec,
+                kind: self.boxed_vec_kind(Some(&MonoTy::Int)),
             });
             let entity_representation =
                 self.nominal_value_representation(crate::names::ustr("Entity"))?;
@@ -718,10 +719,16 @@ impl<'a> Builder<'a> {
                 None => {
                     // The stored element stays the entry's; the binder gets its own
                     // copy, as `ArenaPairIter.next` gives the plain loop.
+                    let elem = match self.concrete_expr_ty(iter).map(|ty| ty.peel_nullable().0) {
+                        Some(MonoTy::App { params, .. }) if self.iter_is_arena(iter) => {
+                            params.first()
+                        }
+                        _ => None,
+                    };
                     let stored = self.emit_cur(Inst::Index {
                         base: data,
                         index: idx,
-                        kind: ContainerKind::Vec,
+                        kind: self.boxed_vec_kind(elem),
                     });
                     let ty = match &pat {
                         BindingPattern::Tuple(subs) if subs.len() == 2 => {

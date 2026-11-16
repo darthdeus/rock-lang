@@ -225,19 +225,27 @@ impl<'a> Builder<'a> {
         if let Some(elem) = self.vec_strided_elem_of(e)? {
             return Ok(ContainerKind::VecValueStrided(elem));
         }
-        if matches!(self.scx.target, bone_core::hir::FnBackend::Lua)
-            && let Some(MonoTy::App {
+        let elem = match self.concrete_expr_ty(e) {
+            Some(MonoTy::App {
                 ctor: crate::monoty::MonoCtor::Array,
                 params,
-            }) = self.concrete_expr_ty(e)
-            && matches!(
-                params.first(),
-                Some(MonoTy::Int | MonoTy::Uint | MonoTy::Float | MonoTy::Bool | MonoTy::String)
-            )
+            }) => params.first(),
+            _ => None,
+        };
+        Ok(self.boxed_vec_kind(elem))
+    }
+
+    /// The kind of a `[T]` with one `_data` backing. On Lua an element that is
+    /// never nil fills every live slot, so an in-bounds access cannot reach a
+    /// metamethod of a foreign backing table.
+    pub(crate) fn boxed_vec_kind(&self, elem: Option<&MonoTy>) -> ContainerKind {
+        if matches!(self.scx.target, bone_core::hir::FnBackend::Lua)
+            && elem.is_some_and(|ty| crate::nilness::monoty_never_nil(self.ws, ty))
         {
-            return Ok(ContainerKind::VecNonNull);
+            ContainerKind::VecNonNull
+        } else {
+            ContainerKind::Vec
         }
-        Ok(ContainerKind::Vec)
     }
 
     /// The column-eligible value-struct element of `e`'s `[E]` type, if any.
