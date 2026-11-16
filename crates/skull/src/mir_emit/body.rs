@@ -58,34 +58,6 @@ fn collect_abi_dependencies(mf: &MirFunc, out: &mut FxHashMap<FuncRef, u64>) {
     }
 }
 
-fn emit_function_with_allocation_report(
-    ws: &Workspace,
-    cg: &CodegenCtx,
-    interner: &skull_mir::monoty::MonoInterner,
-    self_ref: FuncRef,
-    mf: &mut MirFunc,
-    bound: Option<&skull_codegen_lua::CalleeBindingPlan>,
-) -> skull_codegen_lua::LuaEmission {
-    skull_codegen_lua::with_constants_baked(cg, mf, |mf| {
-        if crate::allocation_report::enabled() {
-            skull_codegen_lua::emit_function_with_allocation_sites(
-                ws,
-                cg,
-                interner,
-                self_ref,
-                mf,
-                bound,
-                crate::allocation_report::activation_enabled(),
-            )
-        } else {
-            skull_codegen_lua::LuaEmission {
-                lua: emit_function(ws, cg, interner, self_ref, mf, bound),
-                allocation_sites: Vec::new(),
-            }
-        }
-    })
-}
-
 pub(super) fn emit_named_with_allocation_report(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -258,42 +230,21 @@ pub(super) fn emit_body_chunk_with_mutation(
     inline_cache: &mut skull_transform::InlineCache,
     mutation: BodyMutation,
 ) -> Result<Chunk, CompilerError> {
-    let mut times = PhaseTimes::default();
-    let mut attribution = UnitAttribution {
-        owner: inline_owner_key(self_ref),
-        ..UnitAttribution::default()
-    };
-    let tl = Instant::now();
     let plan = concrete.plan_for(&shared(self_ref)).ok_or_else(|| {
         CompilerError::new_with_label(f.name_span, format!("no concrete plan for `{}`", f.name))
     })?;
     let ordinary_instance = plan.function_instance().cloned();
-    let canonical_body = ordinary_instance
-        .as_ref()
-        .and_then(|instance| inline_cache.canonical_body(instance));
-    let canonical_reused = canonical_body.is_some();
-    let mut mf = match canonical_body {
-        Some(body) => (*body).clone(),
-        None => skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &concrete.plans)?,
-    };
-    times.lower = tl.elapsed();
-    times.lower_work = mf.insts.len() > 0;
-    attribution.examined = true;
-    attribution.hir_nodes =
-        hir_nodes_for_owner(ws, self_ref.module, BodyOwner::Function(self_ref.func));
-    attribution.mir_instructions = mf.insts.len();
-    attribution.mir_lowered = mf.insts.len();
-    attribution.lower_facts = mf.lower_attribution.clone();
-    attribution.abi_plan = mf.abi_plan.clone();
-    attribution.consumer_instance = ordinary_instance
-        .clone()
-        .map(|instance| (instance, LoweredInstanceKind::Ordinary));
-    attribution.canonical_reused = canonical_reused;
-    if !canonical_reused {
-        attribution.lowered_instance = ordinary_instance
-            .clone()
-            .map(|instance| (instance, LoweredInstanceKind::Ordinary));
-    }
+    let (mut mf, mut times, mut attribution) = lower_body(
+        ws,
+        scx,
+        concrete,
+        plan,
+        ordinary_instance.as_ref(),
+        LoweredInstanceKind::Ordinary,
+        inline_owner_key(self_ref),
+        self_ref,
+        inline_cache,
+    )?;
     match mutation {
         BodyMutation::None => {}
         #[cfg(test)]
@@ -342,15 +293,15 @@ pub(super) fn emit_body_chunk_with_mutation(
         #[cfg(test)]
         _ => {}
     }
+    let owner = BodyOwner::Function(self_ref.func);
+    let ctx = skull_mir::bound::concrete_body_ctx(
+        ws,
+        self_ref.module,
+        owner,
+        &plan.bound_tree,
+        scx.interner(),
+    );
     if f.is_coroutine {
-        let owner = BodyOwner::Function(self_ref.func);
-        let ctx = skull_mir::bound::concrete_body_ctx(
-            ws,
-            self_ref.module,
-            owner,
-            &plan.bound_tree,
-            scx.interner(),
-        );
         let name = mangle_fn(ws, f);
         let mut chunk = emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &name, &mut mf, times)?;
         attribution.mir_instructions = mf.insts.len();
@@ -386,7 +337,7 @@ pub(super) fn emit_body_chunk_with_mutation(
         counted_loops: skull_transform::body_chain::CountedLoops::Root,
         inline_hoisted: true,
     };
-    let mut deps =
+    let deps =
         skull_transform::body_chain::prepare_body(ws, inliner, &mut mf, &name, &opts, &mut stats)
             .map_err(|e| match e.pass {
             skull_transform::body_chain::BodyPass::HoistedInline => {
@@ -394,6 +345,85 @@ pub(super) fn emit_body_chunk_with_mutation(
             }
             _ => e.error,
         })?;
+    finish_body_chunk(
+        ws,
+        cg,
+        scx,
+        f,
+        self_ref,
+        &name,
+        LoweredInstanceKind::Ordinary,
+        &ctx,
+        mf,
+        deps,
+        &mut Vec::new(),
+        times,
+        attribution,
+    )
+}
+
+/// Lower `instance`'s body, or clone the inline cache's canonical copy of it,
+/// and start the body's attribution.
+fn lower_body(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    concrete: &crate::concrete_body::ConcreteBodies,
+    plan: &skull_mir::concrete::ConcreteBodyPlan,
+    instance: Option<&Instance>,
+    kind: LoweredInstanceKind,
+    owner: String,
+    fref: FuncRef,
+    inline_cache: &mut skull_transform::InlineCache,
+) -> Result<(MirFunc, PhaseTimes, UnitAttribution), CompilerError> {
+    let tl = Instant::now();
+    let canonical_body = instance.and_then(|instance| inline_cache.canonical_body(instance));
+    let canonical_reused = canonical_body.is_some();
+    let mf = match canonical_body {
+        Some(body) => (*body).clone(),
+        None => skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &concrete.plans)?,
+    };
+    let times = PhaseTimes {
+        lower: tl.elapsed(),
+        lower_work: !mf.insts.is_empty(),
+        ..PhaseTimes::default()
+    };
+    let attribution = UnitAttribution {
+        owner,
+        examined: true,
+        hir_nodes: hir_nodes_for_owner(ws, fref.module, BodyOwner::Function(fref.func)),
+        mir_instructions: mf.insts.len(),
+        mir_lowered: mf.insts.len(),
+        lower_facts: mf.lower_attribution.clone(),
+        abi_plan: mf.abi_plan.clone(),
+        consumer_instance: instance.map(|instance| (instance.clone(), kind)),
+        lowered_instance: instance
+            .filter(|_| !canonical_reused)
+            .map(|instance| (instance.clone(), kind)),
+        canonical_reused,
+        ..UnitAttribution::default()
+    };
+    Ok((mf, times, attribution))
+}
+
+/// The emission every non-coroutine body shares once its pass chain has run:
+/// validate it, print it and its hoisted fns, and collect the chunk's
+/// dependency facts.
+fn finish_body_chunk(
+    ws: &Workspace,
+    cg: &CodegenCtx,
+    scx: &skull_mir::lower::ScalarCtx,
+    f: &bone_semantic::hir::Function,
+    self_ref: FuncRef,
+    name: &str,
+    kind: LoweredInstanceKind,
+    ctx: &skull_mir::bound::BoundCtx,
+    mut mf: MirFunc,
+    mut deps: FxHashSet<FuncRef>,
+    specs: &mut Vec<skull_mir::bound::SpecDemand>,
+    mut times: PhaseTimes,
+    mut attribution: UnitAttribution,
+) -> Result<Chunk, CompilerError> {
+    let ordinary = matches!(kind, LoweredInstanceKind::Ordinary);
     let tv = Instant::now();
     skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
     skull_transform::body_chain::debug_verify(
@@ -401,36 +431,46 @@ pub(super) fn emit_body_chunk_with_mutation(
         skull_mir::verify::Stage::EMIT_READY,
         &"the residual-bound-call gate",
     );
-    let mut specs = Vec::new();
-    let owner = BodyOwner::Function(self_ref.func);
-    let ctx = skull_mir::bound::concrete_body_ctx(
-        ws,
-        self_ref.module,
-        owner,
-        &plan.bound_tree,
-        scx.interner(),
-    );
-    validate_emitted_body(ws, &ctx, &mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
-    let embedded_deps = deps.clone();
+    // Discovered BEFORE the verdict, and handed back through `specs` even when
+    // the verdict rejects: the inline worklist pushed them into the live queue
+    // first, so a failing build reports over that same closure.
+    let before = specs.len();
+    let prefix = if ordinary {
+        String::new()
+    } else {
+        format!("cannot emit specialized `{name}`: ")
+    };
+    validate_emitted_body(ws, ctx, &mf, specs).map_err(|r| r.into_error(f.name_span, &prefix))?;
+    let specs = specs[before..].to_vec();
+    // A specialization's residual callees count as embedded, so every edit to
+    // one rebuilds it.
+    let embedded_deps = ordinary.then(|| deps.clone());
     collect_callee_frefs(&mf, &mut deps);
     let mut code_artifact =
         skull_mir::code_identity::CodeArtifact::from_mir_tree_with_volatile_vars(
             &mf,
             &ws.comptime_inputs.volatile_vars,
         );
-    code_artifact.set_body_names(&mf, &name);
-    let (direct_globals, direct_calls) = direct_refs(ws, cg, &mf);
-    times.validation = tv.elapsed();
+    code_artifact.set_body_names(&mf, name);
+    // Global-init ordering is stated over declarations, so a specialization's
+    // ordering facts are its declaration's.
+    let (direct_globals, direct_calls) = if ordinary {
+        direct_refs(ws, cg, &mf)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    times.validation += tv.elapsed();
     times.validation_work = true;
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
-    let bind = skull_codegen_lua::callee_binding_plan(ws, cg, scx.interner(), &name, self_ref, &mf);
-    let emission = emit_function_with_allocation_report(
+    let bind = skull_codegen_lua::callee_binding_plan(ws, cg, scx.interner(), name, self_ref, &mf);
+    let emission = emit_named_with_allocation_report(
         ws,
         cg,
         scx.interner(),
-        self_ref,
+        name,
         &mut mf,
+        &[],
         bind.as_ref(),
     );
     let mut lua = emission.lua;
@@ -438,17 +478,23 @@ pub(super) fn emit_body_chunk_with_mutation(
     if let Some(body) = crate::allocation_report::collect_emitted_body(
         ws,
         scx.interner(),
-        &name,
+        name,
         f.name.as_str(),
         &mf,
         emission.allocation_sites,
     ) {
         allocation_bodies.push(body);
     }
-    times.emit = te.elapsed();
-    times.emit_work = times.emit > Duration::ZERO;
-    times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
-    times.regalloc_work = times.regalloc > Duration::ZERO;
+    let root_emit = te.elapsed();
+    times.emit += root_emit;
+    times.emit_work |= root_emit > Duration::ZERO;
+    let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(root_emit);
+    times.regalloc += regalloc;
+    times.regalloc_work |= regalloc > Duration::ZERO;
+    // Read before the nested fns are emitted, which detaches their children.
+    let mut literal_globals = skull_mir::reach::global_ref_names(&mf);
+    let mut abi_deps = FxHashMap::default();
+    collect_abi_dependencies(&mf, &mut abi_deps);
     // Nested `fn`s are hoisted to sibling top-level Lua fns in the same chunk
     // (their `__local_*` names are already final -- emit_named, no mangling). Their
     // `static` cells fold into THIS chunk's `statics` so the hot-reload preamble +
@@ -468,26 +514,22 @@ pub(super) fn emit_body_chunk_with_mutation(
     )?;
     attribution.mir_instructions = mf.insts.len();
     attribution.times = times;
-    let calls = skull_mir::reach::call_targets(&mf);
-    let mut abi_deps = FxHashMap::default();
-    collect_abi_dependencies(&mf, &mut abi_deps);
     deps.extend(abi_deps.keys().copied());
-    let mut literal_globals = skull_mir::reach::global_ref_names(&mf);
     crate::push_value_ctor_calls(&lua, &mut literal_globals);
     Ok(Chunk {
-        name: Ustr::from(&name),
+        name: Ustr::from(name),
         abi_deps,
         definition_count: lua_definition_count(&lua),
         lua,
         literal_globals,
         allocation_bodies,
+        embedded_deps: embedded_deps.unwrap_or_else(|| deps.clone()),
         deps,
-        embedded_deps,
         direct_globals,
         direct_calls,
         times,
         statics,
-        calls,
+        calls: skull_mir::reach::call_targets(&mf),
         specs,
         code_artifact: code_artifact.into(),
         attribution: Some(Box::new(attribution)),
@@ -761,16 +803,6 @@ pub(super) fn fn_has_bounds(f: &bone_semantic::hir::Function) -> bool {
 /// residual callees. That edge is what makes editing a generic's body invalidate
 /// every specialization of it: nothing else names the connection, since a
 /// specialization is not reached through the declaration's own chunk.
-///
-/// Two fields are deliberately empty, matching what the inline worklist
-/// contributed:
-/// - `direct_globals` / `direct_calls`: global-init ordering is stated over
-///   declarations, and a specialization's ordering facts are its declaration's.
-///
-/// `statics` is NOT one of them. A specialized body's `static` cells are cells
-/// the emitted program uses, so leaving them out would leave them without a
-/// reload reset. With emission owned by the
-/// instance, every generic body with a `static` is one.
 pub(super) fn emit_spec_chunk(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -788,33 +820,18 @@ pub(super) fn emit_spec_chunk(
     })?;
     let tree = &plan.bound_tree;
     skull_mir::lower::validate_concrete_bound_plan(f, plan)?;
-    let tl = Instant::now();
-    let canonical_body = inline_cache.canonical_body(body);
-    let canonical_reused = canonical_body.is_some();
-    let mut mf = match canonical_body {
-        Some(body) => (*body).clone(),
-        None => skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &concrete.plans)
-            .map_err(|e| e.or_at(f.name_span))?,
-    };
-    let mut times = PhaseTimes {
-        lower: tl.elapsed(),
-        lower_work: !mf.insts.is_empty(),
-        ..PhaseTimes::default()
-    };
-    let mut attribution = UnitAttribution {
-        owner: name.to_string(),
-        examined: true,
-        hir_nodes: hir_nodes_for_owner(ws, fref.module, BodyOwner::Function(fref.func)),
-        mir_instructions: mf.insts.len(),
-        mir_lowered: mf.insts.len(),
-        lower_facts: mf.lower_attribution.clone(),
-        abi_plan: mf.abi_plan.clone(),
-        consumer_instance: Some((body.clone(), LoweredInstanceKind::Specialized)),
-        lowered_instance: (!canonical_reused)
-            .then(|| (body.clone(), LoweredInstanceKind::Specialized)),
-        canonical_reused,
-        ..UnitAttribution::default()
-    };
+    let (mut mf, mut times, mut attribution) = lower_body(
+        ws,
+        scx,
+        concrete,
+        plan,
+        Some(body),
+        LoweredInstanceKind::Specialized,
+        name.to_string(),
+        fref,
+        inline_cache,
+    )
+    .map_err(|e| e.or_at(f.name_span))?;
     // BEFORE every transform: an `Iterator`-bounded body's placeholders are what
     // make it unemittable on its own, and the demand that reached here is what
     // resolves them. The splice path does the same substitution at the moment it
@@ -846,7 +863,7 @@ pub(super) fn emit_spec_chunk(
         },
         ..skull_transform::body_chain::ChainOptions::PLAIN
     };
-    let (mut deps, prepared_times, prepared_inline) = prepare_instance_body_with_attribution(
+    let (deps, prepared_times, prepared_inline) = prepare_instance_body_with_attribution(
         ws,
         scx,
         fref,
@@ -862,95 +879,21 @@ pub(super) fn emit_spec_chunk(
     prepared_inline.specialized_splices = prepared_inline.accepted_splices;
     prepared_inline.census.ordinary_keys.push(body.clone());
     attribution.inline.add(prepared_inline);
-    let before = specs.len();
-    // Discovered BEFORE the verdict, and handed back through `specs` even when
-    // the verdict rejects: the inline worklist pushed them into the live queue
-    // first, so a failing build reports over that same closure.
-    let tv = Instant::now();
-    validate_emitted_body(ws, &ctx, &mf, specs)
-        .map_err(|r| r.into_error(f.name_span, &format!("cannot emit specialized `{name}`: ")))?;
-    times.validation += tv.elapsed();
-    times.validation_work = true;
-    let specs = specs[before..].to_vec();
-    let mut code_artifact =
-        skull_mir::code_identity::CodeArtifact::from_mir_tree_with_volatile_vars(
-            &mf,
-            &ws.comptime_inputs.volatile_vars,
-        );
-    code_artifact.set_body_names(&mf, name);
-    skull_codegen_lua::regalloc_time_reset();
-    let te = Instant::now();
-    let bind = skull_codegen_lua::callee_binding_plan(ws, cg, scx.interner(), name, fref, &mf);
-    let emission = emit_named_with_allocation_report(
-        ws,
-        cg,
-        scx.interner(),
-        name,
-        &mut mf,
-        &[],
-        bind.as_ref(),
-    );
-    let mut lua = emission.lua;
-    let mut allocation_bodies = Vec::new();
-    if let Some(body) = crate::allocation_report::collect_emitted_body(
-        ws,
-        scx.interner(),
-        name,
-        f.name.as_str(),
-        &mf,
-        emission.allocation_sites,
-    ) {
-        allocation_bodies.push(body);
-    }
-    let root_emit = te.elapsed();
-    times.emit += root_emit;
-    times.emit_work |= root_emit > Duration::ZERO;
-    let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(root_emit);
-    times.regalloc += regalloc;
-    times.regalloc_work |= regalloc > Duration::ZERO;
-    let mut statics = mf.statics.clone();
-    let mut literal_globals = skull_mir::reach::global_ref_names(&mf);
-    let mut nested_abi_deps = FxHashMap::default();
-    collect_abi_dependencies(&mf, &mut nested_abi_deps);
-    emit_nested_fns(
+    finish_body_chunk(
         ws,
         cg,
         scx,
-        &mut mf.nested_fns,
-        &mf.statics,
-        &mut deps,
-        &mut statics,
-        &mut allocation_bodies,
-        &mut lua,
-        &mut times,
-    )?;
-    collect_callee_frefs(&mf, &mut deps);
-    attribution.mir_instructions = mf.insts.len();
-    attribution.times = times;
-    let mut abi_deps = nested_abi_deps;
-    collect_abi_dependencies(&mf, &mut abi_deps);
-    deps.extend(abi_deps.keys().copied());
-    crate::push_value_ctor_calls(&lua, &mut literal_globals);
-    Ok(Chunk {
-        name: Ustr::from(name),
-        abi_deps,
-        definition_count: lua_definition_count(&lua),
-        lua,
-        allocation_bodies,
-        embedded_deps: deps.clone(),
+        f,
+        fref,
+        name,
+        LoweredInstanceKind::Specialized,
+        &ctx,
+        mf,
         deps,
-        literal_globals,
-        direct_globals: Vec::new(),
-        direct_calls: Vec::new(),
-        times,
-        attribution: Some(Box::new(attribution)),
-        statics,
-        comptime_reads: mf.comptime_reads.clone(),
-        calls: skull_mir::reach::call_targets(&mf),
         specs,
-        code_artifact: code_artifact.into(),
-        binds: bind.into_iter().collect(),
-    })
+        times,
+        attribution,
+    )
 }
 
 /// Place every specialized body the liveness walk found, in the order the

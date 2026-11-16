@@ -17,19 +17,6 @@ pub fn emit_function(
     emit_named(ws, ctx, interner, &name, func, bound)
 }
 
-pub fn emit_function_with_allocation_sites(
-    ws: &Workspace,
-    ctx: &CodegenCtx,
-    interner: &MonoInterner,
-    self_ref: FuncRef,
-    func: &MirFunc,
-    bound: Option<&CalleeBindingPlan>,
-    instrument: bool,
-) -> LuaEmission {
-    let name = mangle_fn(ws, func_of(ws, self_ref));
-    emit_named_with_allocation_sites(ws, ctx, interner, &name, func, bound, instrument)
-}
-
 /// Emit a MIR function under the EXACT Lua name `name` (no mangling) — for
 /// synthetic functions with an already-final name (a global-initializer fn).
 /// Calls inside the body still mangle their `FuncRef`s via `ctx`.
@@ -42,28 +29,6 @@ pub fn emit_named(
     bound: Option<&CalleeBindingPlan>,
 ) -> String {
     emit_named_with_statics(ws, ctx, interner, name, func, &[], bound)
-}
-
-pub(crate) fn emit_named_with_allocation_sites(
-    ws: &Workspace,
-    ctx: &CodegenCtx,
-    interner: &MonoInterner,
-    name: &str,
-    func: &MirFunc,
-    bound: Option<&CalleeBindingPlan>,
-    instrument: bool,
-) -> LuaEmission {
-    emit_named_framed_with_allocation_sites(
-        ws,
-        ctx,
-        interner,
-        name,
-        func,
-        None,
-        &[],
-        bound,
-        instrument,
-    )
 }
 
 /// Emit a function whose static cells may be owned by an enclosing lowered

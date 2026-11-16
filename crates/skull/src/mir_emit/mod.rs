@@ -17,7 +17,7 @@ use bone_semantic::hir::{BodyOwner, Expr};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{Idx, ModuleId, is_stdlib_module_file};
 use rustc_hash::{FxHashMap, FxHashSet};
-use skull_codegen_lua::{CodegenCtx, emit_function, mangle_fn};
+use skull_codegen_lua::{CodegenCtx, mangle_fn};
 use skull_mir::decorator::{DecoratorTable, SimValues, decorator_symbol};
 use skull_mir::global_storage::{StaticBaseline, static_cell_key};
 use skull_mir::instance::Instance;
