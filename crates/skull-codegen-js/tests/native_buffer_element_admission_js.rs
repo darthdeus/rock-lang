@@ -34,17 +34,7 @@ fn main() {
 
 fn emit_main(src: &str) -> Result<String, skull_parser::CompilerError> {
     let ws = ws_with(src);
-    let mid = crate::common::test_mid(&ws);
-    let root = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == "main")
-        .map(|(fid, _)| skull_mir::mir::FuncRef {
-            module: mid,
-            func: fid,
-        })
-        .expect("main");
+    let root = crate::common::test_fn_ref(&ws, "main");
     skull_codegen_js::emit::emit_with_closure(&ws, &[(root, "main".to_string())])
 }
 

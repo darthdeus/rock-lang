@@ -14,7 +14,6 @@
 //! validator refuses every disagreeing shape.
 
 use skull_mir::lower::ScalarCtx;
-use skull_mir::mir::FuncRef;
 
 use crate::common::ws_with;
 
@@ -42,21 +41,10 @@ fn reject(src: &str, root: &str, needle: &str) {
 fn lanes(src: &str, name: &str) -> usize {
     let ws = ws_with(src);
     let scx = ScalarCtx::new(&ws).with_target(bone_core::hir::FnBackend::Js);
-    let mid = crate::common::test_mid(&ws);
-    let fid = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == name)
-        .map(|(fid, _)| fid)
-        .expect("fn");
     skull_mir::lower::BackendFnAbiPlan::for_boundary_declaration(
         &ws,
         &scx,
-        FuncRef {
-            module: mid,
-            func: fid,
-        },
+        crate::common::test_fn_ref(&ws, name),
     )
     .result_lanes()
 }

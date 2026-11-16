@@ -15,7 +15,6 @@
 use std::sync::Arc;
 
 use skull_mir::lower::ScalarCtx;
-use skull_mir::mir::FuncRef;
 
 use crate::common::ws_with;
 
@@ -98,33 +97,13 @@ fn main() {
 "#,
     );
     let interner = Arc::new(skull_mir::monoty::MonoInterner::new());
-    let mid = crate::common::test_mid(&ws);
-    let fid = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == "pair")
-        .map(|(fid, _)| fid)
-        .expect("pair");
+    let fr = crate::common::test_fn_ref(&ws, "pair");
     // The window is read off the ABI rather than off a rejection, because the
     // rejecting input is not constructible from source: a short call is a type
     // error bone refuses long before emission, so a fixture "proving" the
     // rejection would be measuring bone. What IS checkable here is that the
     // admission window did not widen for a callee with nothing to omit.
-    let fr = FuncRef {
-        module: mid,
-        func: fid,
-    };
-    let main = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == "main")
-        .map(|(fid, _)| FuncRef {
-            module: mid,
-            func: fid,
-        })
-        .expect("main");
+    let main = crate::common::test_fn_ref(&ws, "main");
     let graph =
         skull_graph::instance_graph::build_in(&ws, vec![main], false, Arc::clone(&interner));
     let concrete = skull_graph::concrete_body::build(&ws, &graph);
@@ -149,31 +128,8 @@ fn main() {
         );
     }
     let with_default = ws_with(OMITTED_DEFAULT_AT_SPEC);
-    let dmid = *with_default
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("module");
-    let dfid = with_default
-        .module(dmid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == "take")
-        .map(|(fid, _)| fid)
-        .expect("take");
-    let dfr = FuncRef {
-        module: dmid,
-        func: dfid,
-    };
-    let dmain = with_default
-        .module(dmid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == "main")
-        .map(|(fid, _)| FuncRef {
-            module: dmid,
-            func: fid,
-        })
-        .expect("main");
+    let dfr = crate::common::test_fn_ref(&with_default, "take");
+    let dmain = crate::common::test_fn_ref(&with_default, "main");
     let dinterner = Arc::new(skull_mir::monoty::MonoInterner::new());
     let dgraph = skull_graph::instance_graph::build_in(
         &with_default,

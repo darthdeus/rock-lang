@@ -25,21 +25,9 @@
 //! scope here.
 
 use crate::common::ws_with;
-use skull_mir::mir::FuncRef;
 
 fn emit(ws: &bone_core::workspace::Workspace, root: &str) -> String {
-    let mid = crate::common::test_mid(ws);
-    let mut r = None;
-    for (fid, f) in ws.module(mid).functions.iter() {
-        if f.name.as_str() == root {
-            r = Some(FuncRef {
-                module: mid,
-                func: fid,
-            });
-        }
-    }
-    skull_codegen_js::emit::emit_with_closure(ws, &[(r.expect(root), root.to_string())])
-        .unwrap_or_else(|e| panic!("emit `{root}`: {}", e.message))
+    crate::common::emit_closure(ws, root).unwrap_or_else(|e| panic!("emit `{root}`: {e}"))
 }
 
 /// Occurrences of `function` immediately followed (modulo blanks) by `(` -- an

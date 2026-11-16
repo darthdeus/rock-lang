@@ -151,7 +151,7 @@ pub fn replace_once(source: &str, old: &str, new: &str) -> String {
 /// Lower one test root through the graph-owned concrete plan. Keeping this
 /// helper here makes every JS MIR fixture exercise the same entry as the
 /// production emitter, including the callee table and shared type arena.
-pub fn lower_test_ref(
+fn lower_test_ref(
     ws: &bone_core::workspace::Workspace,
     mid: bone_core::prelude::ModuleId,
     fid: comfy_la_arena::Idx<bone_core::hir::Function>,
@@ -166,10 +166,7 @@ pub fn lower_test_ref(
     let concrete = skull_graph::concrete_body::build(ws, &graph);
     let plan = concrete
         .plans
-        .get(&Instance::base(FuncRef {
-            module: mid,
-            func: fid,
-        }))
+        .get(&Instance::base(root))
         .unwrap_or_else(|| panic!("no concrete plan for <test> function {fid:?}"));
     lower_instance_with_plans(ws, &scx, plan, &concrete.plans)
         .unwrap_or_else(|e| panic!("lower concrete test root: {}", e.message))
@@ -177,13 +174,8 @@ pub fn lower_test_ref(
 
 /// Lower the fn named `name` in the `<test>` module (must be unique there).
 pub fn lower_test_fn(ws: &bone_core::workspace::Workspace, name: &str) -> skull_mir::mir::MirFunc {
-    let mid = test_mid(ws);
-    for (fid, f) in ws.module(mid).functions.iter() {
-        if f.name.as_str() == name {
-            return lower_test_ref(ws, mid, fid);
-        }
-    }
-    panic!("no fn `{name}` in <test> module");
+    let fr = test_fn_ref(ws, name);
+    lower_test_ref(ws, fr.module, fr.func)
 }
 
 /// Lower the fn named `name` in the `<test>` module and emit it to JS under its

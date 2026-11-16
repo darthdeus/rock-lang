@@ -73,21 +73,7 @@ fn main() {
 
 /// Emit the `main` closure for the JS target.
 fn js(src: &str) -> Result<(), String> {
-    let ws = crate::common::ws_with(src);
-    let mid = crate::common::test_mid(&ws);
-    let root = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == "main")
-        .map(|(fid, _)| skull_mir::mir::FuncRef {
-            module: mid,
-            func: fid,
-        })
-        .expect("main");
-    skull_codegen_js::emit::emit_with_closure(&ws, &[(root, "main".to_string())])
-        .map(|_| ())
-        .map_err(|e| e.message)
+    crate::common::emit_closure(&crate::common::ws_with(src), "main").map(|_| ())
 }
 
 /// The luajit control, through the ordinary module emit.

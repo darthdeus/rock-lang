@@ -93,16 +93,10 @@ fn layout_changing_edit_requires_a_full_js_publication() {
     let after = ws_with(
         "global STATE: int = 0\nglobal OTHER: int = 1\n@nomangle fn hot() -> int { STATE }\nfn main() {}\n",
     );
-    let mid = *before
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let mid = crate::common::test_mid(&before);
     let (_, mut cache) =
         skull_codegen_js::emit::emit_program_cached(&before, mid).expect("full JS emit");
-    let after_mid = *after
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let after_mid = crate::common::test_mid(&after);
     let other = after
         .module(after_mid)
         .globals

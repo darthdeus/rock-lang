@@ -7,7 +7,7 @@
 //! tests/vectors/nobox_columns.rock and nobox/nullable_column.rock run the
 //! round trips on both backends; these pin that no element object is built.
 
-use crate::common::{lower_test_ref, ws_with};
+use crate::common::ws_with;
 
 const SRC: &str = r#"
 value V2 { x: float, y: float }
@@ -47,15 +47,7 @@ fn emit_js(name: &str) -> Result<String, String> {
 /// columns on the backend that has always had them.
 fn lua_mir(name: &str) -> String {
     let ws = ws_with(SRC);
-    let mid = crate::common::test_mid(&ws);
-    let fid = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == name)
-        .map(|(fid, _)| fid)
-        .expect("fn in <test>");
-    lower_test_ref(&ws, mid, fid).to_string()
+    crate::common::lower_test_fn(&ws, name).to_string()
 }
 
 /// Just `function <name>(` .. the next top-level `}`, so a body assertion is not
