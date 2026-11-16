@@ -7,30 +7,11 @@ use serde::de::DeserializeOwned;
 
 use crate::error::ExtractError;
 
+#[derive(Clone, Debug)]
 pub enum Message {
     Request(Request),
     Response(Response),
     Notification(Notification),
-}
-
-// Manual Clone/Debug since we removed the derives
-impl Clone for Message {
-    fn clone(&self) -> Self {
-        match self {
-            Message::Request(r) => Message::Request(r.clone()),
-            Message::Response(r) => Message::Response(r.clone()),
-            Message::Notification(n) => Message::Notification(n.clone()),
-        }
-    }
-}
-impl fmt::Debug for Message {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Message::Request(r) => f.debug_tuple("Request").field(r).finish(),
-            Message::Response(r) => f.debug_tuple("Response").field(r).finish(),
-            Message::Notification(n) => f.debug_tuple("Notification").field(n).finish(),
-        }
-    }
 }
 
 impl From<Request> for Message {
@@ -429,18 +410,11 @@ impl<'de> serde::Deserialize<'de> for Message {
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub enum ErrorCode {
-    ParseError = -32700,
     InvalidRequest = -32600,
     MethodNotFound = -32601,
     InvalidParams = -32602,
     InternalError = -32603,
-    ServerErrorStart = -32099,
-    ServerErrorEnd = -32000,
     ServerNotInitialized = -32002,
-    UnknownErrorCode = -32001,
-    RequestCanceled = -32800,
-    ContentModified = -32801,
-    ServerCancelled = -32802,
     RequestFailed = -32803,
 }
 
@@ -455,10 +429,7 @@ macro_rules! invalid_data {
 }
 
 impl Message {
-    pub fn read(r: &mut impl BufRead) -> io::Result<Option<Message>> {
-        Message::_read(r)
-    }
-    fn _read(r: &mut dyn BufRead) -> io::Result<Option<Message>> {
+    pub fn read(r: &mut dyn BufRead) -> io::Result<Option<Message>> {
         let text = match read_msg_text(r)? {
             None => return Ok(None),
             Some(text) => text,
@@ -467,10 +438,7 @@ impl Message {
             .map_err(|e| invalid_data!("malformed LSP payload: {:?}", e))?;
         Ok(Some(msg))
     }
-    pub fn write(&self, w: &mut impl Write) -> io::Result<()> {
-        self._write(w)
-    }
-    fn _write(&self, w: &mut dyn Write) -> io::Result<()> {
+    pub fn write(&self, w: &mut dyn Write) -> io::Result<()> {
         // Serialize as {"jsonrpc":"2.0", ...message fields...}
         let inner = serde_json::to_value(self).map_err(invalid_data)?;
         let mut map = serde_json::Map::new();
@@ -509,13 +477,6 @@ impl Response {
 }
 
 impl Request {
-    pub fn new<P: serde::Serialize>(id: RequestId, method: String, params: P) -> Request {
-        Request {
-            id,
-            method,
-            params: serde_json::to_value(params).unwrap(),
-        }
-    }
     pub fn extract<P: DeserializeOwned>(
         self,
         method: &str,
@@ -537,27 +498,6 @@ impl Request {
 }
 
 impl Notification {
-    pub fn new(method: String, params: impl serde::Serialize) -> Notification {
-        Notification {
-            method,
-            params: serde_json::to_value(params).unwrap(),
-        }
-    }
-    pub fn extract<P: DeserializeOwned>(
-        self,
-        method: &str,
-    ) -> Result<P, ExtractError<Notification>> {
-        if self.method != method {
-            return Err(ExtractError::MethodMismatch(self));
-        }
-        match serde_json::from_value(self.params) {
-            Ok(params) => Ok(params),
-            Err(error) => Err(ExtractError::JsonError {
-                method: self.method,
-                error,
-            }),
-        }
-    }
     pub(crate) fn is_exit(&self) -> bool {
         self.method == "exit"
     }
