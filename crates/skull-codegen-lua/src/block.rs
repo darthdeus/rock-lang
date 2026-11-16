@@ -108,37 +108,16 @@ impl Emitter<'_> {
         }
     }
 
-    pub(crate) fn record_value_allocation_site(
+    /// Records `id` as an allocation site of `kind` when allocation sites are
+    /// being collected, and returns it when the emission is instrumented.
+    pub(crate) fn record_allocation_site(
         &self,
         id: Idx<Inst>,
-        inst: &Inst,
+        kind: Option<EmittedAllocationKind>,
         lua_byte_offset: usize,
     ) -> Option<EmittedAllocationSite> {
         let allocation = self.allocation?;
-        let kind = emitted_value_allocation_kind(inst)?;
-        let site = self.record_allocation_site(allocation, id, kind, lua_byte_offset);
-        allocation.instrument.then_some(site)
-    }
-
-    pub(crate) fn record_effect_allocation_site(
-        &self,
-        id: Idx<Inst>,
-        inst: &Inst,
-        lua_byte_offset: usize,
-    ) -> Option<EmittedAllocationSite> {
-        let allocation = self.allocation?;
-        let kind = emitted_effect_allocation_kind(inst)?;
-        let site = self.record_allocation_site(allocation, id, kind, lua_byte_offset);
-        allocation.instrument.then_some(site)
-    }
-
-    fn record_allocation_site(
-        &self,
-        allocation: AllocationEmission<'_>,
-        id: Idx<Inst>,
-        kind: EmittedAllocationKind,
-        lua_byte_offset: usize,
-    ) -> EmittedAllocationSite {
+        let kind = kind?;
         let span = self.func.inst_spans.get(id).copied();
         let site = EmittedAllocationSite {
             id: allocation_site_id(allocation.body, id, kind, span),
@@ -149,7 +128,7 @@ impl Emitter<'_> {
             lua_byte_offset,
         };
         allocation.sites.borrow_mut().push(site.clone());
-        site
+        allocation.instrument.then_some(site)
     }
 
     pub(crate) fn emit_block(&mut self, out: &mut String, bb: Idx<Block>) {

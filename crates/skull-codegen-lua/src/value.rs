@@ -4,7 +4,8 @@ use super::*;
 
 impl Emitter<'_> {
     pub(crate) fn write_value(&self, out: &mut String, id: Idx<Inst>, inst: &Inst) {
-        let instrument = self.record_value_allocation_site(id, inst, out.len());
+        let instrument =
+            self.record_allocation_site(id, emitted_value_allocation_kind(inst), out.len());
         if let Some(ref site) = instrument {
             out.push_str("(__rock_alloc_site[\"");
             write!(out, "{:016x}", site.id).unwrap();

@@ -26,7 +26,9 @@ impl Emitter<'_> {
     }
 
     pub(crate) fn write_effect(&self, out: &mut String, id: Idx<Inst>, inst: &Inst) {
-        if let Some(site) = self.record_effect_allocation_site(id, inst, out.len()) {
+        if let Some(site) =
+            self.record_allocation_site(id, emitted_effect_allocation_kind(inst), out.len())
+        {
             out.push_str(" __rock_alloc_hit_effect(\"");
             write!(out, "{:016x}", site.id).unwrap();
             out.push_str("\")\n");
