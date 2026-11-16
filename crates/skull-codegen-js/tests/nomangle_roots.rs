@@ -41,7 +41,8 @@ fn inline_js_body_roots_nomangle_inline_js_sibling() {
 """
 
 inline(js) fn launch2(x: int) -> int = """
-  return web_helper_probe(x);
+  const helpers = { web_helper_probe };
+  return helpers.web_helper_probe(x);
 """
 
 fn main() {
@@ -102,4 +103,55 @@ fn main() {
         "opaque-boundary root population must be nonzero"
     );
     assert_eq!(targets, &FxHashSet::from_iter([target]));
+}
+
+#[test]
+fn inline_js_properties_literals_and_substrings_do_not_root_functions() {
+    let ws = ws_with(
+        r#"
+@nomangle inline(lua) fn scan_probe() -> int = "return 1"
+inline(js) fn launch_scan() -> int = """
+    const object = { scan_probe: 7, __json_record_failure: 1 };
+    const $scan_probe = 9;
+    // scan_probe()
+    /* scan_probe() */
+    const text = "scan_probe";
+    const pattern = /scan_probe/;
+    const template = `scan_probe`;
+    return object /* gap */ . /* gap */ scan_probe + $scan_probe;
+"""
+fn main() { print(launch_scan()) }
+"#,
+    );
+    let prog = crate::common::emit_program_js(&ws).expect("property names are not callees");
+    assert!(!prog.contains("function scan_probe("));
+    assert_eq!(
+        crate::common::run_node(&format!(
+            "{}\n{}\nmain();",
+            skull_codegen_js::assemble_prelude(&prog, true, skull_codegen_js::JS_NODE_HOST, &[]),
+            prog
+        ))
+        .trim(),
+        "16"
+    );
+}
+
+#[test]
+fn template_expressions_root_nomangle_functions() {
+    let ws = ws_with(
+        r#"
+@nomangle fn template_probe(x: int) -> int { return x + 7 }
+inline(js) fn template_launch(x: int) -> string = """
+    return `value ${template_probe(x)}`;
+"""
+fn main() { print(template_launch(1)) }
+"#,
+    );
+    let prog = crate::common::emit_program_js(&ws).expect("template expressions retain callees");
+    let runtime =
+        skull_codegen_js::assemble_prelude(&prog, true, skull_codegen_js::JS_NODE_HOST, &[]);
+    assert_eq!(
+        crate::common::run_node(&format!("{runtime}\n{prog}\nmain();")).trim(),
+        "value 8"
+    );
 }

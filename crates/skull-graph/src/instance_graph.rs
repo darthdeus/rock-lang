@@ -5907,36 +5907,21 @@ fn opaque_js_nomangle_targets(ws: &Workspace, member: FuncRef) -> Option<FxHashS
         return None;
     };
     let mut targets = FxHashSet::default();
-    let text = body.as_str();
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i] as char;
-        if c.is_ascii_alphabetic() || c == '_' {
-            let start = i;
-            while i < bytes.len()
-                && ((bytes[i] as char).is_ascii_alphanumeric() || bytes[i] == b'_')
-            {
-                i += 1;
-            }
-            let name = ustr::Ustr::from(&text[start..i]);
-            if let Some(candidates) = ws.functions_by_name.get(&name) {
-                for &(target_module, target_func) in candidates {
-                    let target = &ws.module(target_module).functions[target_func];
-                    if target
-                        .annotations
-                        .iter()
-                        .any(|annotation| annotation.name.name.as_str() == "nomangle")
-                    {
-                        targets.insert(FuncRef {
-                            module: target_module,
-                            func: target_func,
-                        });
-                    }
+    for name in crate::inline_js::bare_names(body.as_str()) {
+        if let Some(candidates) = ws.functions_by_name.get(&ustr::Ustr::from(name)) {
+            for &(target_module, target_func) in candidates {
+                let target = &ws.module(target_module).functions[target_func];
+                if target
+                    .annotations
+                    .iter()
+                    .any(|annotation| annotation.name.name.as_str() == "nomangle")
+                {
+                    targets.insert(FuncRef {
+                        module: target_module,
+                        func: target_func,
+                    });
                 }
             }
-        } else {
-            i += 1;
         }
     }
     Some(targets)
