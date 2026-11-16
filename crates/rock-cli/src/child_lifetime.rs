@@ -120,6 +120,95 @@ pub fn spawn_bound_child(cmd: &mut Command) -> io::Result<Child> {
     Ok(child)
 }
 
+/// Extend a long-lived bound child's binding to a launcher killed outright.
+/// Linux already has this from the parent-death signal. macOS has none, so a
+/// detached watcher kills the child's process group once this process is gone;
+/// on Windows a kill-on-close job ends the child with this process.
+pub(crate) fn guard_against_parent_kill(child: &Child) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    spawn_parent_watcher(std::process::id(), child.id());
+    #[cfg(windows)]
+    assign_kill_on_close_job(child)?;
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let _ = child;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_parent_watcher(parent_pid: u32, child_pid: u32) {
+    let script = format!(
+        r#"#!/bin/bash
+# Monitor parent PID {parent_pid} and kill child PID {child_pid} when parent dies
+while kill -0 {parent_pid} 2>/dev/null; do
+    sleep 0.1
+done
+kill -TERM {child_pid} 2>/dev/null
+sleep 0.1
+kill -KILL {child_pid} 2>/dev/null
+kill -KILL -{child_pid} 2>/dev/null
+"#
+    );
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg(script)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    // Double fork so the watcher is orphaned and outlives this process.
+    unsafe {
+        let pid = libc::fork();
+        if pid == 0 {
+            libc::setsid();
+            if libc::fork() == 0 {
+                if let Err(error) = cmd.spawn() {
+                    log::error!(target: "STONE",
+                        "failed to spawn the macOS parent watcher (parent {parent_pid}, child {child_pid}): {error}"
+                    );
+                }
+            }
+            // `_exit`, not `exit`: a fork of a multithreaded process must not
+            // run the parent's exit handlers or flush its inherited stdio.
+            libc::_exit(0);
+        } else if pid > 0 {
+            let mut status = 0;
+            libc::waitpid(pid, &mut status, 0);
+        }
+    }
+}
+
+/// The job handle is leaked on purpose: Windows closes it when this process
+/// exits by any route, and closing it kills every process in the job.
+#[cfg(windows)]
+fn assign_kill_on_close_job(child: &Child) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use winapi::um::{jobapi2, winnt};
+    let failed =
+        |call: &str| io::Error::other(format!("{call} failed: {}", io::Error::last_os_error()));
+    unsafe {
+        let job = jobapi2::CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
+        if job.is_null() {
+            return Err(failed("CreateJobObjectW"));
+        }
+        let mut info: winnt::JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = winnt::JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if jobapi2::SetInformationJobObject(
+            job,
+            winnt::JobObjectExtendedLimitInformation,
+            &mut info as *mut _ as *mut _,
+            std::mem::size_of::<winnt::JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        ) == 0
+        {
+            return Err(failed("SetInformationJobObject"));
+        }
+        let handle = child.as_raw_handle() as winapi::shared::ntdef::HANDLE;
+        if jobapi2::AssignProcessToJobObject(job, handle) == 0 {
+            return Err(failed("AssignProcessToJobObject"));
+        }
+    }
+    Ok(())
+}
+
 /// Forget a bound child that has been waited for.
 pub fn release_bound_child(pid: u32) {
     #[cfg(unix)]

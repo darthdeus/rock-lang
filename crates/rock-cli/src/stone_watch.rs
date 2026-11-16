@@ -1,74 +1,9 @@
 const SESSION_RETENTION: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
 
 use crate::compiler_watch::is_compiler_source;
+use crate::headless_scope::BoundChild;
 use crate::*;
-use std::process::{Child, Stdio};
-
-#[cfg(target_os = "macos")]
-fn spawn_monitor_process(parent_pid: u32, child_pid: u32) {
-    use std::process::Command;
-
-    // Create a shell script that will monitor and kill the child when parent dies
-    let script = format!(
-        r#"#!/bin/bash
-# Monitor parent PID {} and kill child PID {} when parent dies
-while kill -0 {} 2>/dev/null; do
-    sleep 0.1
-done
-# Parent died, kill the child
-kill -TERM {} 2>/dev/null
-sleep 0.1
-kill -KILL {} 2>/dev/null
-kill -KILL -{} 2>/dev/null  # Kill process group
-"#,
-        parent_pid, child_pid, parent_pid, child_pid, child_pid, child_pid
-    );
-
-    // Use nohup and disown to truly detach the monitoring process
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c")
-        .arg(script)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-
-    // Double fork to create an orphan process
-    unsafe {
-        let pid = libc::fork();
-        if pid == 0 {
-            // Child process - become session leader
-            libc::setsid();
-
-            // Second fork to ensure we can't acquire a terminal
-            let pid2 = libc::fork();
-            if pid2 == 0 {
-                // Grandchild - run the monitoring script. Surface spawn
-                // failure to stderr: silently dropping it (`let _ =`)
-                // disables orphan prevention with no diagnostic, so a
-                // shell that can't exec leaves game children alive after
-                // `rock stone` exits (silent-errors audit, 2026-05-02).
-                if let Err(e) = cmd.spawn() {
-                    log::error!(target: "STONE",
-                        "failed to spawn macOS orphan-prevention monitor (parent {parent_pid}, child {child_pid}): {e}"
-                    );
-                }
-                // `_exit`, not `exit`. These are `fork` children of a
-                // multithreaded process (rayon builds a global pool), so they
-                // must touch nothing the parent owns: a lock another thread held
-                // at fork time stays held, and `exit` would flush the parent's
-                // inherited stdio buffers.
-                libc::_exit(0);
-            } else {
-                // First child exits immediately. Same reasoning as above.
-                libc::_exit(0);
-            }
-        } else if pid > 0 {
-            // Parent waits for first child to exit
-            let mut status = 0;
-            libc::waitpid(pid, &mut status, 0);
-        }
-    }
-}
+use std::process::Stdio;
 
 /// Replace this process with the freshly rebuilt `rock` binary, preserving the
 /// original `stone` arguments. The new process re-runs `do_stone_watch` from
@@ -78,20 +13,14 @@ kill -KILL -{} 2>/dev/null  # Kill process group
 /// otherwise linger as a second luajit beside the one the new process spawns. On
 /// Unix `exec` only returns on failure (logged; caller falls back to the old
 /// binary). Non-Unix has no `exec`, so spawn a replacement and exit.
-fn reexec_with_new_binary(game_process: &mut Option<Child>) {
-    if let Some(mut p) = game_process.take() {
-        let _ = kill_game_process(&mut p);
-    }
+fn reexec_with_new_binary(game_process: &mut Option<BoundChild>) {
+    drop(game_process.take());
     info!("Compiler changed -- re-exec'ing rock with the new binary");
     if let Err(e) = crate::watch::reexec_current_binary() {
         error!(
             "stone: {e}; staying on the old compiler binary (Ctrl-C + rerun to pick up the change)"
         );
     }
-}
-
-fn full_reload_requires_restart(restart_reasons: &[String]) -> bool {
-    !restart_reasons.is_empty()
 }
 
 #[derive(Default)]
@@ -690,7 +619,7 @@ pub(crate) fn do_stone_watch(
                     let mut next_paths = stone_source_watch_paths(path, compiler.as_ref());
                     next_paths.extend(engine_watch_paths.iter().cloned());
                     watcher.refresh(next_paths, &watched)?;
-                    if full_reload_requires_restart(&outcome.restart_reasons) {
+                    if !outcome.restart_reasons.is_empty() {
                         info!(
                             "live reload requires a process restart ({})",
                             outcome.restart_reasons.join(", ")
@@ -730,7 +659,7 @@ pub(crate) fn do_stone_watch(
         // Restart the game process if a rebuild actually produced new
         // artifacts (or the user manually triggered) and the game is up.
         else if should_restart {
-            if let Some(ref mut process) = game_process {
+            if let Some(process) = game_process.take() {
                 // Kill FIRST: a shape-changed compile deferred its main.lua
                 // write precisely so the old process never hot-reloads the
                 // new-shape program -- the canonicalize below is what writes
@@ -740,7 +669,7 @@ pub(crate) fn do_stone_watch(
                 // dual-load any accumulated overlay, so the fold must run
                 // before the new process starts.
                 info!("Restarting game process...");
-                kill_game_process(process)?;
+                drop(process);
                 if let Err(e) = compiler.canonicalize_for_restart() {
                     error!(
                         "fold before restart failed: {} (restart may load a stale main.lua)",
@@ -863,151 +792,23 @@ fn start_game_process(
     lua_file: &std::path::Path,
     app_args: &[String],
     build_id: &str,
-) -> Result<Child> {
-    // Platform-specific process management for orphan prevention
-    #[cfg(not(windows))]
-    {
-        use std::os::unix::process::CommandExt;
-
-        let mut cmd = rock_engine_host::runtime::build_luajit_command(lua_file, app_args);
-        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-        // Only the stone watch loop enables the in-game hot-reload watcher.
-        cmd.env("STONE_HOT_RELOAD", "1")
-            .env("STONE_BUILD_ID", build_id)
-            .env(
-                "STONE_RELOAD_CONTROL",
-                lua_file.with_file_name("reload.hold"),
-            );
-
-        // 1) Linux: Ensure the child gets PDEATHSIG (SIGTERM) if parent dies
-        #[cfg(target_os = "linux")]
-        unsafe {
-            cmd.pre_exec(|| {
-                // If parent dies, deliver SIGTERM to this child
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-
-        // 2) Set process group to enable proper cleanup
-        // This creates a new process group with the child as leader
-        cmd.process_group(0);
-
-        let child = cmd.spawn()?;
-        let pid = child.id();
-        rock_host::process_management::register_child_process(pid);
-
-        // 3) macOS: PDEATHSIG doesn't exist, so spawn a detached
-        // monitor that kills the child if the parent dies (even on
-        // parent SIGKILL).
-        #[cfg(target_os = "macos")]
-        spawn_monitor_process(std::process::id(), pid);
-
-        Ok(child)
-    }
-
-    #[cfg(windows)]
-    {
-        // Windows: Use Job Objects for automatic cleanup when parent dies
-        //
-        // Job Object Lifetime Semantics:
-        // 1. We create a Job Object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE flag
-        // 2. We assign the child process to this job
-        // 3. We intentionally leak the job handle with std::mem::forget()
-        // 4. The handle stays alive for the lifetime of the parent process
-        // 5. When parent exits (even SIGKILL), Windows closes all handles
-        // 6. Job Object cleanup kills all processes in the job automatically
-        //
-        // This is the same pattern used in the original love.rs implementation.
-        // Alternative approaches would require storing the handle somewhere, which
-        // complicates the architecture without improving reliability.
-        unsafe {
-            // Create a Job object
-            let job = winapi::um::jobapi2::CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
-            if job.is_null() {
-                anyhow::bail!(
-                    "CreateJobObjectW failed: {}",
-                    std::io::Error::last_os_error()
-                );
-            }
-
-            // Configure job: kill all processes when job handle is closed
-            let mut info: winapi::um::winnt::JOBOBJECT_EXTENDED_LIMIT_INFORMATION =
-                std::mem::zeroed();
-            info.BasicLimitInformation.LimitFlags =
-                winapi::um::winnt::JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            let ok = winapi::um::jobapi2::SetInformationJobObject(
-                job,
-                winapi::um::winnt::JobObjectExtendedLimitInformation,
-                &mut info as *mut _ as *mut _,
-                std::mem::size_of::<winapi::um::winnt::JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()
-                    as u32,
-            );
-            if ok == 0 {
-                anyhow::bail!(
-                    "SetInformationJobObject failed: {}",
-                    std::io::Error::last_os_error()
-                );
-            }
-
-            // Spawn the process
-            let mut cmd = rock_engine_host::runtime::build_luajit_command(lua_file, app_args);
-            cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-            // Only the stone watch loop enables the in-game hot-reload watcher.
-            cmd.env("STONE_HOT_RELOAD", "1")
-                .env("STONE_BUILD_ID", build_id)
-                .env(
-                    "STONE_RELOAD_CONTROL",
-                    lua_file.with_file_name("reload.hold"),
-                );
-
-            let child = cmd.spawn()?;
-
-            // Assign process to job object
-            use std::os::windows::io::AsRawHandle;
-            let child_handle = child.as_raw_handle() as winapi::shared::ntdef::HANDLE;
-            let assigned = winapi::um::jobapi2::AssignProcessToJobObject(job, child_handle);
-            if assigned == 0 {
-                anyhow::bail!(
-                    "AssignProcessToJobObject failed: {}",
-                    std::io::Error::last_os_error()
-                );
-            }
-
-            // Intentionally leak the job handle so it stays alive for parent's lifetime
-            // When parent process exits, Windows automatically closes the handle and kills
-            // all processes in the job. This is the intended behavior.
-            std::mem::forget(job);
-
-            let pid = child.id();
-            rock_host::process_management::register_child_process(pid);
-            Ok(child)
-        }
-    }
-}
-
-/// Kill the game process and reap the zombie.
-///
-/// `Child::kill` sends SIGKILL on Unix / `TerminateProcess` on Windows; both
-/// are guaranteed to terminate the target. The follow-up `wait()` then reaps
-/// the zombie — without it the child PID lingers in the process table until
-/// the parent exits. No timeout / polling loop is needed: SIGKILL can't be
-/// caught or ignored, so `wait()` returns essentially immediately.
-fn kill_game_process(child: &mut Child) -> Result<()> {
-    rock_host::process_management::unregister_child_process(child.id());
-
-    if let Err(e) = child.kill() {
-        // ESRCH (already exited) is not a real error here — fall through to wait().
-        warn!("Error killing game process: {}", e);
-    }
-
-    if let Err(e) = child.wait() {
-        warn!("Error waiting for game process to exit: {}", e);
-    }
-
-    Ok(())
+) -> Result<BoundChild> {
+    let mut cmd = rock_engine_host::runtime::build_luajit_command(lua_file, app_args);
+    cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    // Only the stone watch loop enables the in-game hot-reload watcher.
+    cmd.env("STONE_HOT_RELOAD", "1")
+        .env("STONE_BUILD_ID", build_id)
+        .env(
+            "STONE_RELOAD_CONTROL",
+            lua_file.with_file_name("reload.hold"),
+        );
+    // Its own process group keeps terminal signals with this launcher, which
+    // forwards them, and lets the macOS guard end the whole group.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let child = crate::headless_scope::spawn_bound_child(&mut cmd, lua_file.parent().unwrap())?;
+    crate::child_lifetime::guard_against_parent_kill(&child)?;
+    Ok(child)
 }
 
 #[cfg(test)]
@@ -1097,16 +898,6 @@ mod tests {
             );
             assert!(!marker.exists(), "prebuilt startup invoked Cargo: {case}");
         }
-    }
-    #[test]
-    fn structural_reload_requests_clean_restart() {
-        assert!(full_reload_requires_restart(
-            &["schema changed".to_string()]
-        ));
-        assert!(
-            !full_reload_requires_restart(&[]),
-            "a body-only edit must not request a restart"
-        );
     }
     #[test]
     fn a_stone_session_never_writes_the_shared_main_lua() {
