@@ -4,22 +4,6 @@ use std::io::{BufRead, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// `ROCK_BACKEND` override (if any) for the *spawned* `rock-lsp` child running
-/// `.rock.lsp` fixtures. The bone-backed LSP (`rock-lang/crates/rock-lsp/src/lib.rs`) is
-/// the language-server front for the skull/bone stack, so `rock test
-/// --backend {skull,bone}` runs fixtures through it; `--backend rock` uses the
-/// legacy LSP unless `ROCK_LSP_TEST_BACKEND=bone` forces the bone path.
-///
-/// We deliberately set this on the CHILD only, never the parent's
-/// `ROCK_BACKEND`: a parent override would also switch `rock test` itself,
-/// which then type-checks the `«cursor»`-marked fixture as Rock source and
-/// chokes on the marker.
-fn lsp_child_backend_env(backend: crate::Backend) -> Option<(&'static str, &'static str)> {
-    let bone = matches!(backend, crate::Backend::Bone | crate::Backend::Skull)
-        || std::env::var("ROCK_LSP_TEST_BACKEND").ok().as_deref() == Some("bone");
-    bone.then_some(("ROCK_BACKEND", "bone"))
-}
-
 /// LSP test file structure
 #[derive(Debug, Clone)]
 struct LspTest {
@@ -1157,24 +1141,18 @@ fn lsp_server_bin() -> Result<PathBuf> {
     })
 }
 
-/// The server a fixture talks to: the binary to spawn and the backend its
-/// LSP routes to. Tests pass a stub binary here.
+/// The server binary a fixture talks to. Tests pass a stub binary here.
 #[derive(Clone, Copy)]
 struct LspServerCmd<'a> {
     bin: &'a Path,
-    backend: crate::Backend,
 }
 
 impl LspServerCmd<'_> {
-    /// `<bin> lsp` with the backend's environment. The one-shot handlers and
-    /// the interactive server both live under `rock lsp`; there is no
-    /// separate `rock-lsp` binary.
+    /// `<bin> lsp`. The one-shot handlers and the interactive server both live
+    /// under `rock lsp`; there is no separate `rock-lsp` binary.
     fn command(&self) -> Command {
         let mut cmd = Command::new(self.bin);
         cmd.arg("lsp");
-        if let Some((k, v)) = lsp_child_backend_env(self.backend) {
-            cmd.env(k, v);
-        }
         cmd
     }
 }
@@ -3323,33 +3301,24 @@ fn display_name_for_lsp_file(file: &Path, root: &Path) -> String {
 }
 
 /// Run the `.rock.lsp` suite under `path` (a file or a tree containing
-/// `tests/lsp`) if present, with the spawned `rock-lsp` child routed to
-/// `backend`'s LSP. Returns `(total, passed, failed, ignored)`; zeros when
-/// there are no fixtures. The single dispatch point shared by every backend's
-/// `test` runner (rock's `do_test_multiple`, `skull_test`, `bone_test`) so the
-/// "is there an LSP suite here + which dir + which backend" logic lives once.
-pub(crate) fn run_lsp_suite(
-    path: &Path,
-    backend: crate::Backend,
-) -> Result<(usize, usize, usize, usize)> {
+/// `tests/lsp`) if present. Returns `(total, passed, failed, ignored)`; zeros
+/// when there are no fixtures.
+pub(crate) fn run_lsp_suite(path: &Path) -> Result<(usize, usize, usize, usize)> {
     if !has_lsp_tests(path) {
         return Ok((0, 0, 0, 0));
     }
     if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("lsp") {
         println!("\nRunning LSP test file {}...", path.display());
-        run_lsp_tests(path, backend)
+        run_lsp_tests(path)
     } else if let Some(lsp_dir) = find_lsp_test_dir(path) {
         println!("\nRunning LSP tests in {}...", lsp_dir.display());
-        run_lsp_tests(&lsp_dir, backend)
+        run_lsp_tests(&lsp_dir)
     } else {
         Ok((0, 0, 0, 0))
     }
 }
 
-pub(crate) fn run_lsp_tests(
-    dir: &Path,
-    backend: crate::Backend,
-) -> Result<(usize, usize, usize, usize)> {
+fn run_lsp_tests(dir: &Path) -> Result<(usize, usize, usize, usize)> {
     // Find all .lsp files in the directory
     let mut lsp_files = Vec::new();
     let root_dir = if dir.is_file() {
@@ -3411,7 +3380,7 @@ pub(crate) fn run_lsp_tests(
     let (total, passed, failed, ignored) =
         parallel_runner::run_files_parallel(lsp_files, None, move |file| {
             let display_name = display_name_for_lsp_file(file, &root_dir);
-            let server = LspServerCmd { bin: &bin, backend };
+            let server = LspServerCmd { bin: &bin };
             run_lsp_file(file, &display_name, server)
         });
 
@@ -3499,10 +3468,7 @@ mod runner_tests {
         let marker = dir.path().join("invocations");
         let path = dir.path().join("fixture.rock.lsp");
         std::fs::write(&path, fixture).unwrap();
-        let server = LspServerCmd {
-            bin: &bin,
-            backend: crate::Backend::Bone,
-        };
+        let server = LspServerCmd { bin: &bin };
         let result = run_lsp_file(&path, "fixture", server);
         let invocations = std::fs::read_to_string(&marker)
             .map(|log| log.lines().count())
