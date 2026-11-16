@@ -306,6 +306,17 @@ fn mir_std(src: &str, fn_name: &str) -> String {
     lower_dump(modules, fn_name)
 }
 
+macro_rules! mir_snapshots {
+    ($($name:ident($lower:ident, $src:expr, $root:expr, $expected:expr);)*) => {
+        $(
+            #[test]
+            fn $name() {
+                assert_eq!($lower($src, $root), $expected);
+            }
+        )*
+    };
+}
+
 #[test]
 fn value_struct_literal_scalarizes_at_boundary_else_cdata() {
     // Under the scalar value ABI a value RETURN flattens to leaf scalars — no
@@ -394,19 +405,6 @@ fn compound_assign_to_struct_field() {
 }
 
 #[test]
-fn int_literal_and_return() {
-    assert_eq!(
-        mir("fn five() -> int { 5 }", "five"),
-        "\
-fn five() {
-  bb0:
-v0 = const 5
-return v0
-}"
-    );
-}
-
-#[test]
 fn explicit_int_to_float_is_a_typed_mir_conversion() {
     let dump = mir("fn widen(value: int) -> float { value as float }", "widen");
     assert!(
@@ -454,155 +452,7 @@ fn inferred_lambda_result_remains_value_bearing() {
     );
 }
 
-#[test]
-fn param_is_a_cell_read_via_load() {
-    assert_eq!(
-        mir("fn id(x: int) -> int { x }", "id"),
-        "\
-fn id(c0) {
-  bb0:
-v0 = load c0
-return v0
-}"
-    );
-}
-
-#[test]
-fn let_bindings_never_written_again_bind_their_values() {
-    assert_eq!(
-        mir("fn f() -> int { let a = 1; let b = 2; a }", "f"),
-        "\
-fn f() {
-  bb0:
-v0 = const 1
-v1 = const 2
-return v0
-}"
-    );
-}
-
-#[test]
-fn int_arithmetic_dispatches_to_typed_op() {
-    assert_eq!(
-        mir_std("fn add(a: int, b: int) -> int { a + b }", "add"),
-        "\
-fn add(c0, c1) {
-  bb0:
-v0 = load c0
-v1 = load c1
-v2 = int.add v0, v1
-return v2
-}"
-    );
-}
-
-#[test]
-fn float_arithmetic_dispatches_to_float_op() {
-    assert_eq!(
-        mir_std("fn addf(a: float, b: float) -> float { a + b }", "addf"),
-        "\
-fn addf(c0, c1) {
-  bb0:
-v0 = load c0
-v1 = load c1
-v2 = float.add v0, v1
-return v2
-}"
-    );
-}
-
-#[test]
-fn string_plus_is_concat() {
-    assert_eq!(
-        mir_std("fn cat(a: string, b: string) -> string { a + b }", "cat"),
-        "\
-fn cat(c0, c1) {
-  bb0:
-v0 = load c0
-v1 = load c1
-v2 = str.concat v0, v1
-return v2
-}"
-    );
-}
-
-#[test]
-fn int_comparison_is_typed() {
-    assert_eq!(
-        mir("fn lt(a: int, b: int) -> bool { a < b }", "lt"),
-        "\
-fn lt(c0, c1) {
-  bb0:
-v0 = load c0
-v1 = load c1
-v2 = int.lt v0, v1
-return v2
-}"
-    );
-}
-
-#[test]
-fn direct_call_resolves_to_a_funcref() {
-    // user module is mid 1 (builtin is 0); `g` is fn 0, `f` is fn 1, so the
-    // call to `g` carries FuncRef 1:0 — a (module, fn) ref, NOT a string.
-    assert_eq!(
-        mir("fn g() -> int { 7 }\nfn f() -> int { g() }", "f"),
-        "\
-fn f() {
-  bb0:
-v0 = call 1:0()
-return v0
-}"
-    );
-}
-
-#[test]
-fn calling_a_fn_typed_param_is_call_value() {
-    assert_eq!(
-        mir("fn ap(f: fn() -> int) -> int { f() }", "ap"),
-        "\
-fn ap(c0) {
-  bb0:
-v0 = load c0
-v1 = call_value v0()
-return v1
-}"
-    );
-}
-
 // --- Phase 2: control flow as branches + cells ---
-
-/// An `if` consumed by a local joins through a result cell (store in
-/// each arm, load in the join), with no block params. Terminal destinations
-/// bypass this join, so use a non-tail value consumer to retain this contract.
-#[test]
-fn if_as_value_joins_through_a_cell() {
-    assert_eq!(
-        mir(
-            "fn sign(x: int) -> int { let value = if x < 0 { 0 } else { 1 }; value }",
-            "sign"
-        ),
-        "\
-fn sign(c0) {
-  bb0:
-v0 = load c0
-v1 = const 0
-v2 = int.lt v0, v1
-branch v2 -> bb1, bb2
-  bb1:
-v3 = const 0
-store c1, v3
-goto bb3
-  bb2:
-v4 = const 1
-store c1, v4
-goto bb3
-  bb3:
-v5 = load c1
-return v5
-}"
-    );
-}
 
 #[test]
 fn diverging_if_join_does_not_declare_never_storage() {
@@ -658,179 +508,7 @@ fn nullable_aggregate_if_join_does_not_declare_payload_storage() {
     );
 }
 
-#[test]
-fn and_short_circuits_through_a_cell() {
-    assert_eq!(
-        mir("fn f(a: bool, b: bool) -> bool { a && b }", "f"),
-        "\
-fn f(c0, c1) {
-  bb0:
-v0 = load c0
-branch v0 -> bb1, bb2
-  bb1:
-v1 = load c1
-store c2, v1
-goto bb3
-  bb2:
-v2 = const false
-store c2, v2
-goto bb3
-  bb3:
-v3 = load c2
-return v3
-}"
-    );
-}
-
-#[test]
-fn or_short_circuits_through_a_cell() {
-    assert_eq!(
-        mir("fn f(a: bool, b: bool) -> bool { a || b }", "f"),
-        "\
-fn f(c0, c1) {
-  bb0:
-v0 = load c0
-branch v0 -> bb1, bb2
-  bb1:
-v1 = const true
-store c2, v1
-goto bb3
-  bb2:
-v2 = load c1
-store c2, v2
-goto bb3
-  bb3:
-v3 = load c2
-return v3
-}"
-    );
-}
-
-#[test]
-fn null_coalesce_evaluates_lhs_once() {
-    assert_eq!(
-        mir("fn f(a: int?) -> int { a ?? 0 }", "f"),
-        "\
-fn f(c0) {
-  bb0:
-v0 = load c0
-v1 = const nil
-v2 = eq v0, v1
-branch v2 -> bb1, bb2
-  bb1:
-v3 = const 0
-store c1, v3
-goto bb3
-  bb2:
-store c1, v0
-goto bb3
-  bb3:
-v4 = load c1
-return v4
-}"
-    );
-}
-
-#[test]
-fn while_loop_is_header_body_backedge_exit() {
-    assert_eq!(
-        mir("fn f(c: bool) { while c { } }", "f"),
-        "\
-fn f(c0) {
-  bb0:
-goto bb1
-  bb1:
-v0 = load c0
-branch v0 -> bb2, bb3
-  bb2:
-goto bb1
-  bb3:
-return
-}"
-    );
-}
-
-#[test]
-fn for_range_has_header_body_latch_exit() {
-    // loop var `i` and bound are cells; the latch increments so `continue`
-    // still steps. No block params.
-    assert_eq!(
-        mir("fn f(n: int) { for i in 0..n { } }", "f"),
-        "\
-fn f(c0) {
-  bb0:
-v0 = const 0
-store c1, v0
-v1 = load c0
-store c2, v1
-goto bb1
-  bb1:
-v2 = load c1
-v3 = load c2
-v4 = int.lt v2, v3
-branch v4 -> bb2, bb4
-  bb2:
-goto bb3
-  bb3:
-v5 = load c1
-v6 = const 1
-v7 = int.add v5, v6
-store c1, v7
-goto bb1
-  bb4:
-return
-}"
-    );
-}
-
 // --- Phase 2.5: aggregates + container reads ---
-
-#[test]
-fn vec_literal_builds_a_vec() {
-    assert_eq!(
-        mir("fn f() -> [int] { [1, 2, 3] }", "f"),
-        "\
-fn f() {
-  bb0:
-v0 = const 1
-v1 = const 2
-v2 = const 3
-v3 = vec [v0, v1, v2]
-return v3
-}"
-    );
-}
-
-#[test]
-fn tuple_return_splats_multi_value() {
-    // A tuple-return destination consumes its N operands directly through
-    // the multi-return ABI, without constructing an intermediate tuple.
-    assert_eq!(
-        mir("fn f() -> (int, bool) { (1, true) }", "f"),
-        "\
-fn f() {
-  bb0:
-v0 = const 1
-v1 = const true
-return v0, v1
-}"
-    );
-}
-
-#[test]
-fn vec_index_carries_container_kind() {
-    assert_eq!(
-        mir("fn f(xs: [int]) -> int { xs[0] }", "f"),
-        "\
-fn f(c0) {
-  bb0:
-v0 = load c0
-v1 = const 0
-v2 = index.VecNonNull v0[v1]
-return v2
-}"
-    );
-}
 
 #[test]
 fn nullable_and_any_vecs_keep_callback_capable_kind() {
@@ -853,150 +531,6 @@ fn record_and_vector_elements_fill_every_live_slot() {
 }
 
 #[test]
-fn tuple_index_projects() {
-    assert_eq!(
-        mir("fn f(t: (int, bool)) -> int { t.0 }", "f"),
-        "\
-fn f(c0) {
-  bb0:
-v0 = load c0
-v1 = tuple_index v0.0
-return v1
-}"
-    );
-}
-
-#[test]
-fn enum_unit_variant() {
-    // A payload-free enum is just its integer tag: the unit variant lowers
-    // to a plain int const (Red = 0), not an interned singleton table.
-    assert_eq!(
-        mir(
-            "enum Color { Red, Green }\nfn f() -> Color { Color::Red }",
-            "f"
-        ),
-        "\
-fn f() {
-  bb0:
-v0 = const 0
-return v0
-}"
-    );
-}
-
-#[test]
-fn enum_tuple_variant_carries_payload() {
-    // A scalar-payload enum scalarizes to (tag, _0, _1). The widest variant
-    // Square has two fields, so Circle(5) is (0, 5, 0) -- the unused _1 slot
-    // is zero-filled.
-    assert_eq!(
-        mir(
-            "enum Shape { Circle(int), Square(int, int) }\nfn f() -> Shape { Shape::Circle(5) }",
-            "f"
-        ),
-        "\
-fn f() {
-  bb0:
-v0 = const 0
-v1 = const 5
-v2 = const 0
-return v0, v1, v2
-}"
-    );
-}
-
-#[test]
-fn struct_literal_in_declared_field_order() {
-    assert_eq!(
-        mir(
-            "struct Point { x: int, y: int }\nfn f() -> Point { Point { x: 1, y: 2 } }",
-            "f"
-        ),
-        "\
-fn f() {
-  bb0:
-v0 = const 1
-v1 = const 2
-v2 = struct Point {x=v0, y=v1}
-return v2
-}"
-    );
-}
-
-#[test]
-fn struct_literal_injects_omitted_field_default() {
-    // `y` is omitted; its `= 0` default is lowered from the StructDefaults
-    // body inline at the literal site.
-    assert_eq!(
-        mir(
-            "struct P { x: int, y: int = 0 }\nfn f() -> P { P { x: 1 } }",
-            "f"
-        ),
-        "\
-fn f() {
-  bb0:
-v0 = const 1
-v1 = const 0
-v2 = struct P {x=v0, y=v1}
-return v2
-}"
-    );
-}
-
-#[test]
-fn struct_field_access() {
-    assert_eq!(
-        mir(
-            "struct Point { x: int, y: int }\nfn f(p: Point) -> int { p.x }",
-            "f"
-        ),
-        "\
-fn f(c0) {
-  bb0:
-v0 = load c0
-v1 = const \"x\"
-v2 = index.Record v0[v1]
-return v2
-}"
-    );
-}
-
-#[test]
-fn for_over_native_buffer_indexes_each_element() {
-    // NativeBuffer: the builtin counted template. (`[T]` routes through
-    // the stdlib VecIter protocol instead and never reaches this path.)
-    assert_eq!(
-        mir("fn f(xs: NativeBuffer<int>) { for x in xs { } }", "f"),
-        "\
-fn f(c0) {
-  bb0:
-v0 = load c0
-v1 = len.NativeBuffer v0
-v2 = const 0
-store c1, v2
-goto bb1
-  bb1:
-v3 = load c1
-v4 = int.lt v3, v1
-branch v4 -> bb2, bb4
-  bb2:
-v5 = load c1
-v6 = index.NativeBuffer v0[v5]
-store c2, v6
-goto bb3
-  bb3:
-v7 = load c1
-v8 = const 1
-v9 = int.add v7, v8
-store c1, v9
-goto bb1
-  bb4:
-return
-}"
-    );
-}
-
-#[test]
 fn nested_native_buffer_value_store_accepts_boxed_function_result() {
     let src = "value Pair { x: int, y: int }\n\
                value Outer { p: Pair, z: int }\n\
@@ -1013,142 +547,6 @@ fn nested_native_buffer_value_store_accepts_boxed_function_result() {
 }
 
 // --- Phase 2.5 long tail: assignment targets ---
-
-#[test]
-fn reassignment_stores_to_the_cell() {
-    assert_eq!(
-        mir("fn f() -> int { let x = 1; x = 2; x }", "f"),
-        "\
-fn f() {
-  bb0:
-v0 = const 1
-store c0, v0
-v1 = const 2
-store c0, v1
-v2 = load c0
-return v2
-}"
-    );
-}
-
-#[test]
-fn field_assignment_uses_record_store_index() {
-    assert_eq!(
-        mir(
-            "struct P { x: int, y: int }\nfn f(p: P) -> int { p.x = 5; p.x }",
-            "f"
-        ),
-        "\
-fn f(c0) {
-  bb0:
-v0 = load c0
-v1 = const 5
-v2 = const \"x\"
-store_index.Record v0[v2], v1
-v3 = load c0
-v4 = const \"x\"
-v5 = index.Record v3[v4]
-return v5
-}"
-    );
-}
-
-#[test]
-fn index_assignment_is_store_index() {
-    assert_eq!(
-        mir("fn f(xs: [int]) -> int { xs[0] = 9; xs[0] }", "f"),
-        "\
-fn f(c0) {
-  bb0:
-v0 = load c0
-v1 = const 0
-v2 = const 9
-store_index.VecNonNull v0[v1], v2
-v3 = load c0
-v4 = const 0
-v5 = index.VecNonNull v3[v4]
-return v5
-}"
-    );
-}
-
-#[test]
-fn global_assignment_is_store_global() {
-    assert_eq!(
-        mir("global G: int = 0\nfn f() -> int { G = 5; G }", "f"),
-        "\
-fn f() {
-  bb0:
-v0 = const 5
-store_global G, v0
-v1 = global G
-return v1
-}"
-    );
-}
-
-#[test]
-fn compound_assignment_reads_ops_writes_back() {
-    assert_eq!(
-        mir_std("fn f(n: int) -> int { let x = 0; x += n; x }", "f"),
-        "\
-fn f(c0) {
-  bb0:
-v0 = const 0
-store c1, v0
-v1 = load c1
-v2 = load c0
-v3 = int.add v1, v2
-store c1, v3
-v4 = load c1
-return v4
-}"
-    );
-}
-
-#[test]
-fn match_enum_tests_tag_and_binds_payload_through_cells() {
-    // A scalar-payload enum is cdata: passed as (tag, _0) scalars,
-    // reconstructed via `Opt_ct`, then matched by int-tag compare
-    // (Some = 0, None = 1) reading the `_0` payload field.
-    assert_eq!(
-        mir(
-            "enum Opt { Some(int), None }\nfn f(o: Opt) -> int { match o { Opt::Some(n) => n, Opt::None => 0 } }",
-            "f"
-        ),
-        "\
-fn f(c0, c1) {
-  bb0:
-v0 = load c0
-v1 = load c1
-v2 = Opt_ct(__tag: v0, _0: v1)
-v3 = field v2.__tag
-v4 = const 0
-v5 = eq v3, v4
-branch v5 -> bb3, bb2
-  bb1:
-v6 = load c2
-return v6
-  bb2:
-v7 = field v2.__tag
-v8 = const 1
-v9 = eq v7, v8
-branch v9 -> bb5, bb4
-  bb3:
-v10 = field v2._0
-store c3, v10
-v11 = load c3
-store c2, v11
-goto bb1
-  bb4:
-unreachable
-  bb5:
-v12 = const 0
-store c2, v12
-goto bb1
-}"
-    );
-}
 
 #[test]
 fn match_payload_bindings_retain_their_semantic_types() {
@@ -1186,23 +584,420 @@ fn match_payload_bindings_retain_their_semantic_types() {
     }
 }
 
-#[test]
-fn match_nested_enum_gates_child_read_behind_parent_tag() {
-    // `Some(Circle(r))`: the inner Circle tag test must be GATED behind the
-    // outer Some tag (parent tag before any child read) — a cont block after
-    // each tag test. This is what the single-level version couldn't do.
-    //
-    // The outer Opt rides the flat-enum param ABI: tag leaf `c0` (variant
-    // name string) + payload slot `c1` (the Shape, cdata in the dynamic
-    // slot). The gate: bb3 (inner `.__tag` int compare) and bb4 (`._0`
-    // bind) are reachable only through the outer "Some" branch; the
-    // wildcard arm bb2 is the fallthrough of BOTH tag tests.
-    assert_eq!(
-        mir(
-            "enum Shape { Circle(int), Square(int) }\nenum Opt { Some(Shape), None }\nfn f(o: Opt) -> int { match o { Opt::Some(Shape::Circle(r)) => r, _ => 0 } }",
-            "f",
-        ),
-        "\
+mir_snapshots! {
+        int_literal_and_return(mir, "fn five() -> int { 5 }", "five", "\
+fn five() {
+  bb0:
+v0 = const 5
+return v0
+}");
+
+        param_is_a_cell_read_via_load(mir, "fn id(x: int) -> int { x }", "id", "\
+fn id(c0) {
+  bb0:
+v0 = load c0
+return v0
+}");
+
+        let_bindings_never_written_again_bind_their_values(mir, "fn f() -> int { let a = 1; let b = 2; a }", "f", "\
+fn f() {
+  bb0:
+v0 = const 1
+v1 = const 2
+return v0
+}");
+
+        int_arithmetic_dispatches_to_typed_op(mir_std, "fn add(a: int, b: int) -> int { a + b }", "add", "\
+fn add(c0, c1) {
+  bb0:
+v0 = load c0
+v1 = load c1
+v2 = int.add v0, v1
+return v2
+}");
+
+        float_arithmetic_dispatches_to_float_op(mir_std, "fn addf(a: float, b: float) -> float { a + b }", "addf", "\
+fn addf(c0, c1) {
+  bb0:
+v0 = load c0
+v1 = load c1
+v2 = float.add v0, v1
+return v2
+}");
+
+        string_plus_is_concat(mir_std, "fn cat(a: string, b: string) -> string { a + b }", "cat", "\
+fn cat(c0, c1) {
+  bb0:
+v0 = load c0
+v1 = load c1
+v2 = str.concat v0, v1
+return v2
+}");
+
+        int_comparison_is_typed(mir, "fn lt(a: int, b: int) -> bool { a < b }", "lt", "\
+fn lt(c0, c1) {
+  bb0:
+v0 = load c0
+v1 = load c1
+v2 = int.lt v0, v1
+return v2
+}");
+
+        // user module is mid 1 (builtin is 0); `g` is fn 0, `f` is fn 1, so the
+        // call to `g` carries FuncRef 1:0 -- a (module, fn) ref, NOT a string.
+        direct_call_resolves_to_a_funcref(mir, "fn g() -> int { 7 }\nfn f() -> int { g() }", "f", "\
+fn f() {
+  bb0:
+v0 = call 1:0()
+return v0
+}");
+
+        calling_a_fn_typed_param_is_call_value(mir, "fn ap(f: fn() -> int) -> int { f() }", "ap", "\
+fn ap(c0) {
+  bb0:
+v0 = load c0
+v1 = call_value v0()
+return v1
+}");
+
+        // An `if` consumed by a local joins through a result cell (store in
+        // each arm, load in the join), with no block params. Terminal destinations
+        // bypass this join, so use a non-tail value consumer to retain this contract.
+        if_as_value_joins_through_a_cell(mir, "fn sign(x: int) -> int { let value = if x < 0 { 0 } else { 1 }; value }", "sign", "\
+fn sign(c0) {
+  bb0:
+v0 = load c0
+v1 = const 0
+v2 = int.lt v0, v1
+branch v2 -> bb1, bb2
+  bb1:
+v3 = const 0
+store c1, v3
+goto bb3
+  bb2:
+v4 = const 1
+store c1, v4
+goto bb3
+  bb3:
+v5 = load c1
+return v5
+}");
+
+        and_short_circuits_through_a_cell(mir, "fn f(a: bool, b: bool) -> bool { a && b }", "f", "\
+fn f(c0, c1) {
+  bb0:
+v0 = load c0
+branch v0 -> bb1, bb2
+  bb1:
+v1 = load c1
+store c2, v1
+goto bb3
+  bb2:
+v2 = const false
+store c2, v2
+goto bb3
+  bb3:
+v3 = load c2
+return v3
+}");
+
+        or_short_circuits_through_a_cell(mir, "fn f(a: bool, b: bool) -> bool { a || b }", "f", "\
+fn f(c0, c1) {
+  bb0:
+v0 = load c0
+branch v0 -> bb1, bb2
+  bb1:
+v1 = const true
+store c2, v1
+goto bb3
+  bb2:
+v2 = load c1
+store c2, v2
+goto bb3
+  bb3:
+v3 = load c2
+return v3
+}");
+
+        null_coalesce_evaluates_lhs_once(mir, "fn f(a: int?) -> int { a ?? 0 }", "f", "\
+fn f(c0) {
+  bb0:
+v0 = load c0
+v1 = const nil
+v2 = eq v0, v1
+branch v2 -> bb1, bb2
+  bb1:
+v3 = const 0
+store c1, v3
+goto bb3
+  bb2:
+store c1, v0
+goto bb3
+  bb3:
+v4 = load c1
+return v4
+}");
+
+        while_loop_is_header_body_backedge_exit(mir, "fn f(c: bool) { while c { } }", "f", "\
+fn f(c0) {
+  bb0:
+goto bb1
+  bb1:
+v0 = load c0
+branch v0 -> bb2, bb3
+  bb2:
+goto bb1
+  bb3:
+return
+}");
+
+        // loop var `i` and bound are cells; the latch increments so `continue`
+        // still steps. No block params.
+        for_range_has_header_body_latch_exit(mir, "fn f(n: int) { for i in 0..n { } }", "f", "\
+fn f(c0) {
+  bb0:
+v0 = const 0
+store c1, v0
+v1 = load c0
+store c2, v1
+goto bb1
+  bb1:
+v2 = load c1
+v3 = load c2
+v4 = int.lt v2, v3
+branch v4 -> bb2, bb4
+  bb2:
+goto bb3
+  bb3:
+v5 = load c1
+v6 = const 1
+v7 = int.add v5, v6
+store c1, v7
+goto bb1
+  bb4:
+return
+}");
+
+        vec_literal_builds_a_vec(mir, "fn f() -> [int] { [1, 2, 3] }", "f", "\
+fn f() {
+  bb0:
+v0 = const 1
+v1 = const 2
+v2 = const 3
+v3 = vec [v0, v1, v2]
+return v3
+}");
+
+        // A tuple-return destination consumes its N operands directly through
+        // the multi-return ABI, without constructing an intermediate tuple.
+        tuple_return_splats_multi_value(mir, "fn f() -> (int, bool) { (1, true) }", "f", "\
+fn f() {
+  bb0:
+v0 = const 1
+v1 = const true
+return v0, v1
+}");
+
+        vec_index_carries_container_kind(mir, "fn f(xs: [int]) -> int { xs[0] }", "f", "\
+fn f(c0) {
+  bb0:
+v0 = load c0
+v1 = const 0
+v2 = index.VecNonNull v0[v1]
+return v2
+}");
+
+        tuple_index_projects(mir, "fn f(t: (int, bool)) -> int { t.0 }", "f", "\
+fn f(c0) {
+  bb0:
+v0 = load c0
+v1 = tuple_index v0.0
+return v1
+}");
+
+        // A payload-free enum is just its integer tag: the unit variant lowers
+        // to a plain int const (Red = 0), not an interned singleton table.
+        enum_unit_variant(mir, "enum Color { Red, Green }\nfn f() -> Color { Color::Red }", "f", "\
+fn f() {
+  bb0:
+v0 = const 0
+return v0
+}");
+
+        // A scalar-payload enum scalarizes to (tag, _0, _1). The widest variant
+        // Square has two fields, so Circle(5) is (0, 5, 0) -- the unused _1 slot
+        // is zero-filled.
+        enum_tuple_variant_carries_payload(mir, "enum Shape { Circle(int), Square(int, int) }\nfn f() -> Shape { Shape::Circle(5) }", "f", "\
+fn f() {
+  bb0:
+v0 = const 0
+v1 = const 5
+v2 = const 0
+return v0, v1, v2
+}");
+
+        struct_literal_in_declared_field_order(mir, "struct Point { x: int, y: int }\nfn f() -> Point { Point { x: 1, y: 2 } }", "f", "\
+fn f() {
+  bb0:
+v0 = const 1
+v1 = const 2
+v2 = struct Point {x=v0, y=v1}
+return v2
+}");
+
+        // `y` is omitted; its `= 0` default is lowered from the StructDefaults
+        // body inline at the literal site.
+        struct_literal_injects_omitted_field_default(mir, "struct P { x: int, y: int = 0 }\nfn f() -> P { P { x: 1 } }", "f", "\
+fn f() {
+  bb0:
+v0 = const 1
+v1 = const 0
+v2 = struct P {x=v0, y=v1}
+return v2
+}");
+
+        struct_field_access(mir, "struct Point { x: int, y: int }\nfn f(p: Point) -> int { p.x }", "f", "\
+fn f(c0) {
+  bb0:
+v0 = load c0
+v1 = const \"x\"
+v2 = index.Record v0[v1]
+return v2
+}");
+
+        // NativeBuffer: the builtin counted template. (`[T]` routes through
+        // the stdlib VecIter protocol instead and never reaches this path.)
+        for_over_native_buffer_indexes_each_element(mir, "fn f(xs: NativeBuffer<int>) { for x in xs { } }", "f", "\
+fn f(c0) {
+  bb0:
+v0 = load c0
+v1 = len.NativeBuffer v0
+v2 = const 0
+store c1, v2
+goto bb1
+  bb1:
+v3 = load c1
+v4 = int.lt v3, v1
+branch v4 -> bb2, bb4
+  bb2:
+v5 = load c1
+v6 = index.NativeBuffer v0[v5]
+store c2, v6
+goto bb3
+  bb3:
+v7 = load c1
+v8 = const 1
+v9 = int.add v7, v8
+store c1, v9
+goto bb1
+  bb4:
+return
+}");
+
+        reassignment_stores_to_the_cell(mir, "fn f() -> int { let x = 1; x = 2; x }", "f", "\
+fn f() {
+  bb0:
+v0 = const 1
+store c0, v0
+v1 = const 2
+store c0, v1
+v2 = load c0
+return v2
+}");
+
+        field_assignment_uses_record_store_index(mir, "struct P { x: int, y: int }\nfn f(p: P) -> int { p.x = 5; p.x }", "f", "\
+fn f(c0) {
+  bb0:
+v0 = load c0
+v1 = const 5
+v2 = const \"x\"
+store_index.Record v0[v2], v1
+v3 = load c0
+v4 = const \"x\"
+v5 = index.Record v3[v4]
+return v5
+}");
+
+        index_assignment_is_store_index(mir, "fn f(xs: [int]) -> int { xs[0] = 9; xs[0] }", "f", "\
+fn f(c0) {
+  bb0:
+v0 = load c0
+v1 = const 0
+v2 = const 9
+store_index.VecNonNull v0[v1], v2
+v3 = load c0
+v4 = const 0
+v5 = index.VecNonNull v3[v4]
+return v5
+}");
+
+        global_assignment_is_store_global(mir, "global G: int = 0\nfn f() -> int { G = 5; G }", "f", "\
+fn f() {
+  bb0:
+v0 = const 5
+store_global G, v0
+v1 = global G
+return v1
+}");
+
+        compound_assignment_reads_ops_writes_back(mir_std, "fn f(n: int) -> int { let x = 0; x += n; x }", "f", "\
+fn f(c0) {
+  bb0:
+v0 = const 0
+store c1, v0
+v1 = load c1
+v2 = load c0
+v3 = int.add v1, v2
+store c1, v3
+v4 = load c1
+return v4
+}");
+
+        // A scalar-payload enum is cdata: passed as (tag, _0) scalars,
+        // reconstructed via `Opt_ct`, then matched by int-tag compare
+        // (Some = 0, None = 1) reading the `_0` payload field.
+        match_enum_tests_tag_and_binds_payload_through_cells(mir, "enum Opt { Some(int), None }\nfn f(o: Opt) -> int { match o { Opt::Some(n) => n, Opt::None => 0 } }", "f", "\
+fn f(c0, c1) {
+  bb0:
+v0 = load c0
+v1 = load c1
+v2 = Opt_ct(__tag: v0, _0: v1)
+v3 = field v2.__tag
+v4 = const 0
+v5 = eq v3, v4
+branch v5 -> bb3, bb2
+  bb1:
+v6 = load c2
+return v6
+  bb2:
+v7 = field v2.__tag
+v8 = const 1
+v9 = eq v7, v8
+branch v9 -> bb5, bb4
+  bb3:
+v10 = field v2._0
+store c3, v10
+v11 = load c3
+store c2, v11
+goto bb1
+  bb4:
+unreachable
+  bb5:
+v12 = const 0
+store c2, v12
+goto bb1
+}");
+
+        // `Some(Circle(r))`: the inner Circle tag test must be GATED behind the
+        // outer Some tag (parent tag before any child read) -- a cont block after
+        // each tag test. This is what the single-level version couldn't do.
+        //
+        // The outer Opt rides the flat-enum param ABI: tag leaf `c0` (variant
+        // name string) + payload slot `c1` (the Shape, cdata in the dynamic
+        // slot). The gate: bb3 (inner `.__tag` int compare) and bb4 (`._0`
+        // bind) are reachable only through the outer "Some" branch; the
+        // wildcard arm bb2 is the fallthrough of BOTH tag tests.
+        match_nested_enum_gates_child_read_behind_parent_tag(mir, "enum Shape { Circle(int), Square(int) }\nenum Opt { Some(Shape), None }\nfn f(o: Opt) -> int { match o { Opt::Some(Shape::Circle(r)) => r, _ => 0 } }", "f", "\
 fn f(c0, c1) {
   bb0:
 v0 = load c0
@@ -1230,20 +1025,11 @@ store c2, v10
 goto bb1
   bb5:
 unreachable
-}"
-    );
-}
+}");
 
-#[test]
-fn if_let_binds_on_match_else_branch_otherwise() {
-    // Scalar-payload enum: cdata reconstructed from (tag, _0) scalars; the
-    // if-let is an int-tag compare (Some = 0) binding the `_0` payload.
-    assert_eq!(
-        mir(
-            "enum Opt { Some(int), None }\nfn f(o: Opt) -> int { if let Opt::Some(n) = o { n } else { 0 } }",
-            "f"
-        ),
-        "\
+        // Scalar-payload enum: cdata reconstructed from (tag, _0) scalars; the
+        // if-let is an int-tag compare (Some = 0) binding the `_0` payload.
+        if_let_binds_on_match_else_branch_otherwise(mir, "enum Opt { Some(int), None }\nfn f(o: Opt) -> int { if let Opt::Some(n) = o { n } else { 0 } }", "f", "\
 fn f(c0, c1) {
   bb0:
 v0 = load c0
@@ -1266,15 +1052,9 @@ store c3, v8
 v9 = load c3
 store c2, v9
 goto bb2
-}"
-    );
-}
+}");
 
-#[test]
-fn for_over_map_uses_next_iteration() {
-    assert_eq!(
-        mir("fn f(m: Map<int, int>) { for (k, v) in m { } }", "f"),
-        "\
+        for_over_map_uses_next_iteration(mir, "fn f(m: Map<int, int>) { for (k, v) in m { } }", "f", "\
 fn f(c0) {
   bb0:
 v0 = load c0
@@ -1291,15 +1071,9 @@ branch v4 -> bb3, bb2
 goto bb1
   bb3:
 return
-}"
-    );
-}
+}");
 
-#[test]
-fn for_enumerate_binds_index_and_element() {
-    assert_eq!(
-        mir_std("fn f(xs: [int]) { for (i, x) in enumerate(xs) { } }", "f"),
-        "\
+        for_enumerate_binds_index_and_element(mir_std, "fn f(xs: [int]) { for (i, x) in enumerate(xs) { } }", "f", "\
 fn f(c0) {
   bb0:
 v0 = load c0
@@ -1324,15 +1098,9 @@ store c1, v9
 goto bb1
   bb4:
 return
-}"
-    );
-}
+}");
 
-#[test]
-fn break_jumps_to_loop_exit() {
-    assert_eq!(
-        mir("fn f(c: bool) { while c { break } }", "f"),
-        "\
+        break_jumps_to_loop_exit(mir, "fn f(c: bool) { while c { break } }", "f", "\
 fn f(c0) {
   bb0:
 goto bb1
@@ -1343,8 +1111,7 @@ branch v0 -> bb2, bb3
 goto bb3
   bb3:
 return
-}"
-    );
+}");
 }
 
 #[test]
