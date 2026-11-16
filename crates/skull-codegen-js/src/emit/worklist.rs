@@ -245,6 +245,30 @@ impl<'a> WorklistState<'a> {
     /// Every emitted top-level body (fn defs + ginit init fns) for the cross-
     /// cutting passes (arity guard, hoisted-name set, vt_eq). Excludes nested
     /// (lambda) fns, matching the pre-refactor scan.
+    /// Drain the worklists into their canonical order and register the code
+    /// slots of every body, `extra` included. Returns the rejections so far.
+    pub(super) fn finish(
+        &mut self,
+        ws: &Workspace,
+        scx: &skull_mir::lower::ScalarCtx,
+        extra: &[&MirFunc],
+    ) -> Result<Vec<(String, CompilerError)>, CompilerError> {
+        drain_worklists(ws, scx, self)?;
+        self.canonicalize_emission_order();
+        let interner = scx.interner();
+        for mf in self
+            .lowered
+            .iter()
+            .map(|(_, mf)| mf)
+            .chain(self.spec_lowered.iter().map(|(_, mf)| mf))
+            .chain(self.ginits.iter().map(|g| &g.mf))
+            .chain(extra.iter().copied())
+        {
+            register_code_slots(ws, interner, mf, &mut self.gctx);
+        }
+        Ok(std::mem::take(&mut self.rejections))
+    }
+
     pub(super) fn top_bodies(&self) -> Vec<&MirFunc> {
         self.lowered
             .iter()

@@ -91,40 +91,11 @@ pub(super) fn assemble_program_core(
         }
     }
 
-    drain_worklists(ws, scx, &mut st)?;
-    st.canonicalize_emission_order();
-    for (_, mf) in &st.lowered {
-        register_code_slots(ws, scx.interner(), mf, &mut st.gctx);
-    }
-    for (_, mf) in &st.spec_lowered {
-        register_code_slots(ws, scx.interner(), mf, &mut st.gctx);
-    }
-    for g in &st.ginits {
-        register_code_slots(ws, scx.interner(), &g.mf, &mut st.gctx);
-    }
-    for (_, mf) in &deco_bodies {
-        register_code_slots(ws, scx.interner(), mf, &mut st.gctx);
-    }
-
-    let mut rejections = std::mem::take(&mut st.rejections);
+    let deco_mfs: Vec<&MirFunc> = deco_bodies.iter().map(|(_, mf)| mf).collect();
+    let mut rejections = st.finish(ws, scx, &deco_mfs)?;
     let mut bodies = st.top_bodies();
-    bodies.extend(deco_bodies.iter().map(|(_, mf)| mf));
-    rejections.extend(check_scalar_abi(
-        ws,
-        scx,
-        &st.lowered,
-        &st.spec_lowered,
-        &bodies,
-        st.concrete,
-        &st.artifact_decls,
-    ));
-    let hoisted = collect_hoisted(&bodies);
-    let struct_registry = skull_mir::lower::StructRegistryPlan::for_bodies(
-        ws,
-        bone_core::hir::FnBackend::Js,
-        &bodies,
-    )
-    .map_err(|error| err(error.message))?;
+    bodies.extend(deco_mfs);
+    let (hoisted, tables) = check_bodies(ws, scx, &st, &bodies, &mut rejections)?;
 
     let mut out = String::new();
     let mut stable = String::new();
@@ -136,27 +107,8 @@ pub(super) fn assemble_program_core(
         code_artifact.merge(artifact);
         all_statics.extend(collect_statics(mf));
     }
-    let enum_singletons = emit_enum_singletons(&st.gctx, &st.enum_defs);
-    out.push_str(&enum_singletons);
-    stable.push_str(&enum_singletons);
-    let inspect_enum_payloads = emit_inspect_enum_payloads(ws)?;
-    out.push_str(&inspect_enum_payloads);
-    stable.push_str(&inspect_enum_payloads);
-    let vt_eq = emit_vt_eq(ws, struct_registry.as_ref())?;
-    out.push_str(&vt_eq);
-    stable.push_str(&vt_eq);
-    let tostring_ty = emit_tostring_ty(ws, struct_registry.as_ref())?;
-    out.push_str(&tostring_ty);
-    stable.push_str(&tostring_ty);
-    let inspect_ty = emit_inspect_ty(ws, struct_registry.as_ref())?;
-    out.push_str(&inspect_ty);
-    stable.push_str(&inspect_ty);
-    let inspect_cdata_enums = emit_inspect_cdata_enums(ws)?;
-    out.push_str(&inspect_cdata_enums);
-    stable.push_str(&inspect_cdata_enums);
-    let col_mat = emit_col_mat(ws, struct_registry.as_ref())?;
-    out.push_str(&col_mat);
-    stable.push_str(&col_mat);
+    out.push_str(&tables);
+    stable.push_str(&tables);
     let json_types = st.json_types.render()?;
     out.push_str(&json_types);
     stable.push_str(&json_types);
@@ -177,41 +129,25 @@ pub(super) fn assemble_program_core(
     }
     // 2. fn defs (main, decorated fns, transitive callees).
     let mut chunks = HashMap::new();
-    for (fr, mf) in &st.lowered {
-        let name = st
-            .names
-            .name_for_decl(ws, *fr)
-            .expect("emitted body has a name");
-        let plan = session
-            .concrete
-            .plans
-            .get(&Instance::base(*fr))
-            .ok_or_else(|| err(format!("JS: no concrete plan for `{name}`")))?;
-        match emit_lowered_fn(
-            ws,
-            scx.interner(),
-            mf,
-            name,
-            plan,
-            &st.names,
-            &hoisted,
-            &st.gctx,
-        ) {
-            Ok((js, artifact)) => {
-                out.push_str(&js);
-                code_artifact.merge(artifact.clone());
-                all_statics.extend(collect_statics(mf));
-                chunks.insert(
-                    *fr,
-                    JsChunk {
-                        js,
-                        statics: collect_statics(mf),
-                    },
-                );
-            }
-            Err(e) => rejections.push((name.clone(), e)),
-        }
-    }
+    emit_lowered_defs(
+        ws,
+        scx,
+        &st,
+        &hoisted,
+        &mut rejections,
+        |fr, mf, js, artifact| {
+            out.push_str(&js);
+            code_artifact.merge(artifact);
+            all_statics.extend(collect_statics(mf));
+            chunks.insert(
+                fr,
+                JsChunk {
+                    js,
+                    statics: collect_statics(mf),
+                },
+            );
+        },
+    )?;
     // 2a. standalone specialized copies. They are keyed by Instance so an
     // overlay can add, remove, or rebuild one without confusing it with the
     // shared generic declaration.
@@ -343,6 +279,76 @@ pub(super) fn assemble_program_core(
         const_order,
         const_init_lines,
     })
+}
+
+/// The scalar-ABI findings over every emitted body (filed into `rejections`),
+/// their hoisted lambda names, and the per-type runtime tables a program
+/// carries ahead of its definitions.
+pub(super) fn check_bodies(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    st: &WorklistState,
+    bodies: &[&MirFunc],
+    rejections: &mut Vec<(String, CompilerError)>,
+) -> Result<(HashSet<ustr::Ustr>, String), CompilerError> {
+    rejections.extend(check_scalar_abi(
+        ws,
+        scx,
+        &st.lowered,
+        &st.spec_lowered,
+        bodies,
+        st.concrete,
+        &st.artifact_decls,
+    ));
+    let hoisted = collect_hoisted(bodies);
+    let registry =
+        skull_mir::lower::StructRegistryPlan::for_bodies(ws, bone_core::hir::FnBackend::Js, bodies)
+            .map_err(|error| err(error.message))?;
+    let registry = registry.as_ref();
+    let mut tables = emit_enum_singletons(&st.gctx, &st.enum_defs);
+    tables.push_str(&emit_inspect_enum_payloads(ws)?);
+    tables.push_str(&emit_vt_eq(ws, registry)?);
+    tables.push_str(&emit_tostring_ty(ws, registry)?);
+    tables.push_str(&emit_inspect_ty(ws, registry)?);
+    tables.push_str(&emit_inspect_cdata_enums(ws)?);
+    tables.push_str(&emit_col_mat(ws, registry)?);
+    Ok((hoisted, tables))
+}
+
+/// Every lowered base body as a definition; `each` receives the ones that
+/// emit, and a failure is filed under the body's name.
+pub(super) fn emit_lowered_defs(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    st: &WorklistState,
+    hoisted: &HashSet<ustr::Ustr>,
+    rejections: &mut Vec<(String, CompilerError)>,
+    mut each: impl FnMut(FuncRef, &MirFunc, String, CodeArtifact),
+) -> Result<(), CompilerError> {
+    for (fr, mf) in &st.lowered {
+        let name = st
+            .names
+            .name_for_decl(ws, *fr)
+            .expect("emitted body has a name");
+        let plan = st
+            .concrete
+            .get(&Instance::base(*fr))
+            .ok_or_else(|| err(format!("JS: no concrete plan for `{name}`")))?;
+        match emit_lowered_fn(
+            ws,
+            scx.interner(),
+            mf,
+            name,
+            plan,
+            &st.names,
+            hoisted,
+            &st.gctx,
+        ) {
+            Ok((js, artifact)) => each(*fr, mf, js, artifact),
+            Err(e) => rejections.push((name.clone(), e)),
+        }
+    }
+    Ok(())
 }
 
 /// Opens (or reattaches to) the global storage and publishes the directory.

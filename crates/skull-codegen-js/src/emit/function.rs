@@ -254,45 +254,12 @@ pub fn emit_with_closure(
         session.concrete.plans.as_ref(),
         &session.concrete.always_plans,
     )?;
-    drain_worklists(ws, &scx, &mut st)?;
-    st.canonicalize_emission_order();
-    for (_, mf) in &st.lowered {
-        register_code_slots(ws, scx.interner(), mf, &mut st.gctx);
-    }
-    for (_, mf) in &st.spec_lowered {
-        register_code_slots(ws, scx.interner(), mf, &mut st.gctx);
-    }
-    for g in &st.ginits {
-        register_code_slots(ws, scx.interner(), &g.mf, &mut st.gctx);
-    }
-    let mut rejections = std::mem::take(&mut st.rejections);
+    let mut rejections = st.finish(ws, &scx, &[])?;
     let bodies = st.top_bodies();
-    rejections.extend(check_scalar_abi(
-        ws,
-        &scx,
-        &st.lowered,
-        &st.spec_lowered,
-        &bodies,
-        st.concrete,
-        &st.artifact_decls,
-    ));
-    let hoisted = collect_hoisted(&bodies);
-    let struct_registry = skull_mir::lower::StructRegistryPlan::for_bodies(
-        ws,
-        bone_core::hir::FnBackend::Js,
-        &bodies,
-    )
-    .map_err(|error| err(error.message))?;
+    let (hoisted, tables) = check_bodies(ws, &scx, &st, &bodies, &mut rejections)?;
 
-    let mut out = String::new();
+    let mut out = tables;
     let mut code_artifact = CodeArtifact::default();
-    out.push_str(&emit_enum_singletons(&st.gctx, &st.enum_defs));
-    out.push_str(&emit_inspect_enum_payloads(ws)?);
-    out.push_str(&emit_vt_eq(ws, struct_registry.as_ref())?);
-    out.push_str(&emit_tostring_ty(ws, struct_registry.as_ref())?);
-    out.push_str(&emit_inspect_ty(ws, struct_registry.as_ref())?);
-    out.push_str(&emit_inspect_cdata_enums(ws)?);
-    out.push_str(&emit_col_mat(ws, struct_registry.as_ref())?);
     out.push_str(&ret_slot_decls(
         max_multi_wire(&bodies)?.max(max_published_lanes(&session.view, &st.inline_js)?),
     ));
@@ -318,32 +285,17 @@ pub fn emit_with_closure(
     for init in &init_lines {
         init_js.push_str(&init.js);
     }
-    for (fr, mf) in &st.lowered {
-        let name = st
-            .names
-            .name_for_decl(ws, *fr)
-            .expect("emitted body has a name");
-        let plan = st
-            .concrete
-            .get(&Instance::base(*fr))
-            .ok_or_else(|| err(format!("JS: no concrete plan for `{name}`")))?;
-        match emit_lowered_fn(
-            ws,
-            scx.interner(),
-            mf,
-            name,
-            plan,
-            &st.names,
-            &hoisted,
-            &st.gctx,
-        ) {
-            Ok((js, artifact)) => {
-                out.push_str(&js);
-                code_artifact.merge(artifact);
-            }
-            Err(e) => rejections.push((name.clone(), e)),
-        }
-    }
+    emit_lowered_defs(
+        ws,
+        &scx,
+        &st,
+        &hoisted,
+        &mut rejections,
+        |_, _, js, artifact| {
+            out.push_str(&js);
+            code_artifact.merge(artifact);
+        },
+    )?;
     out.push_str(&emit_spec_bodies(
         ws,
         scx.interner(),
