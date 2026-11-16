@@ -43,3 +43,35 @@ fn definition_catalog_preserves_value_factory_results() {
         "catalog values remain complete after copying")
     print("catalog values preserved")
 }
+
+struct WidgetDef { value: int }
+
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {}
+
+@artifact_definition(catalog="empty_widgets", key_param="key")
+deco init empty_widget(key: string) {}
+
+@artifact_catalog(catalog="widgets")
+@intrinsic extern(lua) fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+
+@artifact_catalog(catalog="empty_widgets")
+@intrinsic extern(lua) fn empty_widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+
+@widget(key="beta")
+fn make_beta() -> WidgetDef { return WidgetDef { value: 2 } }
+
+@widget(key="alpha")
+fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
+
+// Entries keep declaration order, not key order, and a catalog with no
+// members is an empty list rather than missing.
+@test
+fn catalog_entries_keep_declaration_order() {
+    let plan = widget_definition_plan()
+    assert_eq(plan.len, 2)
+    assert_eq(plan[0].key, "beta")
+    assert_eq(plan[0].definition.value, 2)
+    assert_eq(plan[1].key, "alpha")
+    assert_eq(empty_widget_definition_plan().len, 0)
+}

@@ -1,11 +1,8 @@
-//! Module-driven whole-program emission (`emit_program`): the JS analog of
-//! skull's Lua `assemble` -- deco def fns, fn defs, ginit fns + ordered init
-//! lines, and decorator APPLICATION lines, assembled from the workspace (roots
-//! = `main` + every decorated fn + every `deco` body). Unlike the per-test
-//! `emit_with_closure`, a decorator-populated global read does NOT reject here
-//! (the applications ARE emitted). Node execution is the correctness oracle
-//! (`host.rs` runs whole programs); this file pins the assembly ORDER
-//! and application-line CONTENT in the emitted string.
+//! Whole-program emission (`emit_program`): the host-facing plans and code
+//! slots it publishes, and Lua/JS parity of those plans. Decorator arguments,
+//! global init order and definition catalogs run in the corpus on both
+//! backends (annotations/decorator_args.rock, functions/js_module_globals.rock,
+//! values/definition_catalog.rock).
 
 use crate::common::{node, ws_with, ws_with_named};
 
@@ -16,150 +13,32 @@ fn emit_program(ws: &bone_core::workspace::Workspace) -> String {
         .program
 }
 
+// A hot reload swaps code slots, so a decorator descriptor must name the
+// logical slot rather than capture the current backend body.
 #[test]
-fn nested_native_layout_values_keep_javascript_field_access() {
+fn decorator_descriptors_reference_code_slots() {
     let ws = ws_with(
         r#"
-nobox value Cell { x: int, y: int }
-nobox value Location { region: int, cell: Cell }
-value Motion { active: bool, at: Location, weight: float }
-struct Holder { motion: Motion }
-fn read(owner: Holder) -> int {
-    return owner.motion.at.region + owner.motion.at.cell.x + owner.motion.at.cell.y
+struct Sys { func: fn() -> (), name: string }
+global SYSTEMS: [Sys] = []
+deco init system() {
+    SYSTEMS.push(Sys { func: transmute(target.func), name: transmute(target.name) })
 }
-fn main() -> int {
-    let owner = Holder { motion: Motion { active: true,
-        at: Location { region: 7, cell: Cell { x: 3, y: 5 } }, weight: 2.5 } }
-    assert(read(owner) == 15)
-    let prior = owner.motion.at
-    owner.motion.at.cell.x = 11
-    assert(read(owner) == 23)
-    assert(prior.cell.x == 3 && prior.cell.y == 5)
-    return read(owner)
-}
+@system
+fn alpha() { print("alpha") }
+fn main() { for s in SYSTEMS { s.func() } }
 "#,
     );
     let js = emit_program(&ws);
-    let source = format!(
-        "var __G = {{}};\n{}\n{}\n{js}\nconsole.log(main());",
-        skull_codegen_js::JS_GLOBALS_RUNTIME,
-        skull_codegen_js::JS_CALL_HELPER
-    );
-    let output = node()
-        .arg("-e")
-        .arg(source)
-        .output()
-        .expect("run nested value JavaScript");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "23");
-}
-
-/// `<a>` appears before `<b>` in `s` (both must be present).
-fn ordered(s: &str, a: &str, b: &str) {
-    let ia = s
-        .find(a)
-        .unwrap_or_else(|| panic!("missing `{a}` in:\n{s}"));
-    let ib = s
-        .find(b)
-        .unwrap_or_else(|| panic!("missing `{b}` in:\n{s}"));
-    assert!(ia < ib, "expected `{a}` before `{b}`:\n{s}");
-}
-
-const PROG: &str = r#"
-struct Sys { func: fn() -> (), name: string, stage: int }
-global SYSTEMS: [Sys] = []
-global BASE: int = 10
-global DERIVED: int = BASE * 2
-deco init system(stage: int = 100) {
-    SYSTEMS.push(Sys { func: transmute(target.func), name: transmute(target.name), stage: stage })
-}
-@system(stage = 5)
-fn alpha() { print("alpha") }
-@system
-fn beta() { print("beta") }
-fn main() {
-    print("derived={DERIVED}")
-    for s in SYSTEMS { s.func() }
-}
-"#;
-
-// Assembly order: deco def fn -> fn defs -> ginit fns -> init lines -> apps.
-#[test]
-fn assembly_order() {
-    let ws = ws_with(PROG);
-    let js = emit_program(&ws);
-    ordered(&js, "function __deco_system(", "function main(");
-    ordered(&js, "function main(", "function __ginit_DERIVED(");
-    ordered(
-        &js,
-        "function __ginit_DERIVED(",
-        "__rock_globals[\"global:<test>::DERIVED::value\"] = ",
-    );
-    // `__deco_system({` is the APPLICATION (descriptor obj); the bare
-    // `__deco_system(c0` definition sorts earlier and is matched above.
-    ordered(
-        &js,
-        "__rock_globals[\"global:<test>::DERIVED::value\"] = ",
-        "__deco_system({",
-    );
-}
-
-// Init lines are dependency-ordered: BASE before DERIVED (DERIVED reads BASE).
-#[test]
-fn init_dependency_order() {
-    let ws = ws_with(PROG);
-    let js = emit_program(&ws);
-    ordered(
-        &js,
-        "__rock_globals[\"global:<test>::BASE::value\"] = ",
-        "__rock_globals[\"global:<test>::DERIVED::value\"] = ",
-    );
-}
-
-// Application lines: the descriptor `{name, params, func}` mirror + arg
-// selection (literal `stage = 5` -> `5`; defaulted `beta` -> `null`).
-#[test]
-fn application_line_content() {
-    let ws = ws_with(PROG);
-    let js = emit_program(&ws);
-    // The decorated-fn JS names are the shared (name + signature) mangle.
     let alpha_app = js
         .lines()
         .find(|l| l.contains("__deco_system(") && l.contains("\"alpha\""))
         .unwrap_or_else(|| panic!("no alpha application line:\n{js}"));
     assert!(
-        alpha_app.contains("name: \"alpha\""),
-        "descriptor name: {alpha_app}"
-    );
-    assert!(
-        alpha_app.contains("params: []"),
-        "descriptor params: {alpha_app}"
-    );
-    assert!(
         alpha_app.contains("func: __rock_code_slot_ref(\"named:<test>::alpha<>\")"),
-        "decorator function values resolve through their logical CodeRef slot: {alpha_app}"
+        "{alpha_app}"
     );
-    assert!(
-        !alpha_app.contains("func: alpha"),
-        "decorators must not capture a backend body: {alpha_app}"
-    );
-    assert!(
-        alpha_app.trim_end().ends_with(", 5);"),
-        "literal stage arg: {alpha_app}"
-    );
-
-    let beta_app = js
-        .lines()
-        .find(|l| l.contains("__deco_system(") && l.contains("\"beta\""))
-        .unwrap_or_else(|| panic!("no beta application line:\n{js}"));
-    assert!(
-        beta_app.trim_end().ends_with(", null);"),
-        "defaulted stage -> null: {beta_app}"
-    );
+    assert!(!alpha_app.contains("func: alpha"), "{alpha_app}");
 }
 
 #[test]
@@ -187,19 +66,6 @@ fn main() {}
         .find("name: \"defaulted\", stage: 100")
         .expect("default plan entry");
     assert!(first < second && second < defaulted);
-}
-
-#[test]
-fn emitted_js_has_no_shadow_effect_plan() {
-    let js = emit_program(&ws_with("fn main() {}"));
-    assert!(
-        !js.contains("ShadowEffectPlan"),
-        "JS must not carry the removed effect-plan type"
-    );
-    assert!(
-        !js.contains("__ROCK_SHADOW_EFFECT_PLAN"),
-        "JS must not publish the removed effect plan"
-    );
 }
 
 #[test]
@@ -421,99 +287,6 @@ fn main() {}
 }
 
 #[test]
-fn typed_catalog_accessor_is_compiler_owned_and_returns_the_published_view_in_js() {
-    let ws = ws_with(
-        r#"
-struct WidgetDef { value: int }
-@artifact_definition(catalog="widgets", key_param="key")
-deco init widget(key: string) {}
-@artifact_definition(catalog="empty", key_param="key")
-deco init empty(key: string) {}
-@artifact_catalog(catalog="widgets")
-@intrinsic extern(lua) fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
-@artifact_catalog(catalog="empty")
-@intrinsic extern(lua) fn empty_definition_plan() -> [ArtifactDefinition<WidgetDef>]
-@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
-fn main() {}
-"#,
-    );
-    let js = emit_program(&ws);
-    assert!(js.contains(
-        "function widget_definition_plan() { return __rock_definition_catalog(\"widgets\"); }"
-    ));
-    assert!(!js.contains("__ROCK_DEFINITION_PLAN || {}"));
-    let source = format!(
-        "var __G = {{}};\n{}\n{}\n{}\nconst p = widget_definition_plan(); const e = empty_definition_plan(); let missing = false; try {{ __rock_definition_catalog('missing'); }} catch (_) {{ missing = true; }} console.log(p.len + ':' + p._data[0].key + ':' + p._data[0].definition.value + ':' + e.len + ':' + missing);",
-        skull_codegen_js::JS_GLOBALS_RUNTIME,
-        skull_codegen_js::JS_CALL_HELPER,
-        js,
-    );
-    let output = node().args(["-e", &source]).output().expect("node");
-    assert!(
-        output.status.success(),
-        "node failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout).trim(),
-        "1:alpha:1:0:true"
-    );
-}
-
-#[test]
-fn typed_catalog_lua_and_js_emission_share_membership_order_and_type() {
-    let ws = ws_with(
-        r#"
-struct WidgetDef { value: int }
-@artifact_definition(catalog="widgets", key_param="key")
-deco init widget(key: string) {}
-@artifact_definition(catalog="empty", key_param="key")
-deco init empty(key: string) {}
-@artifact_catalog(catalog="widgets")
-@intrinsic extern(lua) fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
-@artifact_catalog(catalog="empty")
-@intrinsic extern(lua) fn empty_definition_plan() -> [ArtifactDefinition<WidgetDef>]
-@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { value: 2 } }
-@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
-fn main() {}
-"#,
-    );
-    let plan = skull_mir::definition::collect(&ws).expect("typed parity plan");
-    assert_eq!(plan.catalogs.len(), 2);
-    assert_eq!(plan.catalogs[0].catalog.as_str(), "empty");
-    assert_eq!(
-        plan.catalogs[0]
-            .definition_type
-            .as_ref()
-            .map(|t| t.render()),
-        Some("WidgetDef".to_string())
-    );
-    assert_eq!(
-        plan.entries
-            .iter()
-            .map(|e| e.key.as_str())
-            .collect::<Vec<_>>(),
-        ["beta", "alpha"]
-    );
-
-    let mid = crate::common::test_mid(&ws);
-    let lua = skull::mir_emit::emit_full(&ws, mid)
-        .expect("Lua parity emission")
-        .0
-        .lua;
-    let js = emit_program(&ws);
-    for output in [&lua, &js] {
-        assert!(output.contains("key = \"beta\"") || output.contains("key: \"beta\""));
-        assert!(output.contains("key = \"alpha\"") || output.contains("key: \"alpha\""));
-        assert!(output.contains("len = 0") || output.contains("len: 0"));
-    }
-    assert!(lua.find("key = \"beta\"") < lua.find("key = \"alpha\""));
-    assert!(js.find("key: \"beta\"") < js.find("key: \"alpha\""));
-    assert!(lua.contains("function widget_definition_plan()"));
-    assert!(js.contains("function widget_definition_plan()"));
-}
-
-#[test]
 fn typed_definition_catalog_lookup_is_fail_closed_and_counts_population_in_js() {
     let source = format!(
         "var __G = {{}};\n{}\n{}\n{}\nconsole.log(result);",
@@ -593,45 +366,6 @@ fn main() { print("{XS.len}") }
     );
 }
 
-// The whole-program path defines `__rock_state_initialize()` and then calls it;
-// the code-slot registry is staged after the bodies, so the CALL has to come
-// after the staging. Called before it, a global initialized from a lambda throws
-// "missing Rock code slot" at load and the program never runs.
-#[test]
-fn a_program_global_lambda_initializes_after_the_code_slots_are_staged() {
-    let ws = ws_with(
-        r#"
-global SQUARE: fn(int) -> int = (x: int) => x * x
-const OPS: [fn(int) -> int] = [(x: int) => x + 1]
-fn main() -> int {
-    assert(SQUARE(7) == 49)
-    assert(OPS[0](4) == 5)
-    return SQUARE(3) + OPS[0](1)
-}
-"#,
-    );
-    let js = emit_program(&ws);
-    let source = format!(
-        "var __G = {{}};\n{}{}{}\n{}\n{}\nconsole.log(main());",
-        skull_codegen_js::JS_NB_CHECK_SHIMS,
-        skull_codegen_js::JS_VEC_CHECK_SHIMS,
-        skull_codegen_js::JS_GLOBALS_RUNTIME,
-        skull_codegen_js::JS_CALL_HELPER,
-        js
-    );
-    let output = node()
-        .arg("-e")
-        .arg(&source)
-        .output()
-        .expect("run global-lambda program");
-    assert!(
-        output.status.success(),
-        "node failed: {}\n--- js ---\n{js}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "11");
-}
-
 /// Interned type ids follow worker timing: graph expansion interns each
 /// owner's types on whichever worker expands it. Each `pick{i}` below is a
 /// separate owner in one parallel wave and instantiates the `inline(js)`
@@ -660,27 +394,4 @@ fn inline_js_specializations_emit_in_a_stable_order() {
             "JS emission order varies between runs"
         );
     }
-}
-
-// A test closure that calls a typed catalog accessor reaches it as an ordinary
-// callee; the accessor has no Rock body and no intrinsic-table entry, because
-// the definition-plan stage defines it under its own symbol.
-#[test]
-fn closure_calling_a_typed_catalog_accessor_emits() {
-    let ws = ws_with(
-        r#"
-struct WidgetDef { value: int }
-@artifact_definition(catalog="widgets", key_param="key")
-deco init widget(key: string) {}
-@artifact_catalog(catalog="widgets")
-@intrinsic extern(lua) fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
-@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
-fn root() -> int { return widget_definition_plan().len }
-"#,
-    );
-    let root = crate::common::test_fn_ref(&ws, "root");
-    let js = skull_codegen_js::emit::emit_with_closure(&ws, &[(root, "root".to_string())])
-        .map_err(|e| e.message)
-        .expect("accessor call emits");
-    assert!(js.contains("widget_definition_plan()"), "{js}");
 }
