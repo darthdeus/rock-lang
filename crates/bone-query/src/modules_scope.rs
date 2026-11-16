@@ -5,7 +5,7 @@
 //! fragment name it. Nothing here matches names against definitions itself.
 
 use bone_core::modules::{AccessSite, DefKind, DefMeta, FragmentScope, UsePathRef};
-use bone_semantic::lower::resolve::{self, CalleeFamily, ResolvedKind, Viewer};
+use bone_semantic::lower::resolve::{self, CalleeFamily, ResolvedKind};
 use bone_semantic::prelude::*;
 use bone_semantic::semantic_passes::{FragmentContribution, ScopeItem};
 
@@ -60,7 +60,7 @@ pub(crate) fn admitted_overloads<'w>(
 /// the module's own members, the fragment's named imports (by their local
 /// names), its glob imports' members, and the std prelude. Sorted.
 fn tier_names(ws: &Workspace, frag: &FragmentScope) -> Vec<Ustr> {
-    let viewers = [Viewer::Fragment(frag)];
+    let viewers = [frag];
     // Broken export paths are source diagnostics; omit that tier while offering other names.
     let mut names: Vec<Ustr> =
         resolve::module_member_names(ws, &viewers, frag.package, &frag.module_path)
@@ -301,7 +301,7 @@ pub(crate) fn path_members(
     };
     // A prefix may name an enum instead of a module; probe that below on a module miss.
     if let Ok((package, path)) = resolve::resolve_path_to_module(ws, frag, &prefix) {
-        let viewers = [Viewer::Fragment(frag)];
+        let viewers = [frag];
         let mut out = Vec::new();
         // Broken re-exports are source diagnostics; still offer accessible child modules.
         for name in resolve::module_member_names(ws, &viewers, package, &path).unwrap_or_default() {

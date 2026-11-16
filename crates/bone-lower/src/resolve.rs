@@ -370,7 +370,7 @@ fn bind_tiers(
         }
         return Ok(tiers);
     }
-    let viewers = [Viewer::Fragment(frag)];
+    let viewers = [frag];
 
     // Tier 2: the current logical module's own definitions and explicit
     // export bindings.
@@ -584,7 +584,7 @@ fn glob_candidates(
     frag: &FragmentScope,
     name: Ustr,
 ) -> Result<Vec<Resolved>, String> {
-    let viewers = [Viewer::Fragment(frag)];
+    let viewers = [frag];
     let mut visiting = Vec::new();
     let mut hits = glob_export_members(
         ws,
@@ -610,47 +610,39 @@ fn glob_candidates(
     Ok(hits)
 }
 
-/// Who names a module member. A lookup through an export binding is seen by
-/// every viewer along the chain: the path's author and each exporting module
+/// Whether `frag` may name a definition with visibility `vis` owned by
+/// `owner_path` in `owner_pkg`. A lookup through an export binding is seen by
+/// every fragment along the chain: the path's author and each exporting module
 /// it passed through, so a re-export never widens what it re-exports.
-#[derive(Clone, Copy)]
-pub enum Viewer<'a> {
-    /// A v1 fragment (or an exporting module standing in for one).
-    Fragment(&'a FragmentScope),
+fn admits(
+    ws: &Workspace,
+    frag: &FragmentScope,
+    vis: &NsVisibility,
+    owner_pkg: u32,
+    owner_path: &[Ustr],
+) -> bool {
+    ws.ns
+        .can_access(vis, owner_pkg, owner_path, frag.package, &frag.module_path)
 }
 
-impl Viewer<'_> {
-    fn admits(
-        &self,
-        ws: &Workspace,
-        vis: &NsVisibility,
-        owner_pkg: u32,
-        owner_path: &[Ustr],
-    ) -> bool {
-        let Viewer::Fragment(frag) = self;
-        ws.ns
-            .can_access(vis, owner_pkg, owner_path, frag.package, &frag.module_path)
-    }
-
-    /// A key with no recorded metadata is the stdlib or an intrinsic: public
-    /// to a fragment.
-    fn admits_key(&self, ws: &Workspace, key: Ustr) -> bool {
-        match ws.defs.get(&key) {
-            Some(meta) if meta.kind == DefKind::Callable => ws
-                .callable_family_members(key)
-                .map(|members| {
-                    members
-                        .iter()
-                        .any(|member| self.admits(ws, &member.vis, meta.package, &meta.module))
-                })
-                .unwrap_or_else(|| self.admits(ws, &meta.vis, meta.package, &meta.module)),
-            Some(meta) => self.admits(ws, &meta.vis, meta.package, &meta.module),
-            None => true,
-        }
+/// A key with no recorded metadata is the stdlib or an intrinsic: public
+/// to a fragment.
+fn admits_key(ws: &Workspace, frag: &FragmentScope, key: Ustr) -> bool {
+    match ws.defs.get(&key) {
+        Some(meta) if meta.kind == DefKind::Callable => ws
+            .callable_family_members(key)
+            .map(|members| {
+                members
+                    .iter()
+                    .any(|member| admits(ws, frag, &member.vis, meta.package, &meta.module))
+            })
+            .unwrap_or_else(|| admits(ws, frag, &meta.vis, meta.package, &meta.module)),
+        Some(meta) => admits(ws, frag, &meta.vis, meta.package, &meta.module),
+        None => true,
     }
 }
 
-fn all_admit_key(ws: &Workspace, viewers: &[Viewer], key: Ustr) -> bool {
+fn all_admit_key(ws: &Workspace, viewers: &[&FragmentScope], key: Ustr) -> bool {
     if let Some(meta) = ws
         .defs
         .get(&key)
@@ -663,21 +655,21 @@ fn all_admit_key(ws: &Workspace, viewers: &[Viewer], key: Ustr) -> bool {
             return members.iter().any(|member| {
                 viewers
                     .iter()
-                    .all(|viewer| viewer.admits(ws, &member.vis, meta.package, &meta.module))
+                    .all(|viewer| admits(ws, viewer, &member.vis, meta.package, &meta.module))
             });
         }
     }
-    viewers.iter().all(|v| v.admits_key(ws, key))
+    viewers.iter().all(|v| admits_key(ws, v, key))
 }
 
 fn all_admit(
     ws: &Workspace,
-    viewers: &[Viewer],
+    viewers: &[&FragmentScope],
     vis: &NsVisibility,
     pkg: u32,
     path: &[Ustr],
 ) -> bool {
-    viewers.iter().all(|v| v.admits(ws, vis, pkg, path))
+    viewers.iter().all(|v| admits(ws, v, vis, pkg, path))
 }
 
 /// What one module offers under one name to a chain of viewers.
@@ -736,7 +728,7 @@ enum Guard {
 /// followed to a fixed point with canonical keys deduplicated.
 pub fn module_members(
     ws: &Workspace,
-    viewers: &[Viewer],
+    viewers: &[&FragmentScope],
     pkg_id: u32,
     path: &[Ustr],
     name: Ustr,
@@ -746,7 +738,7 @@ pub fn module_members(
 
 fn members_of(
     ws: &Workspace,
-    viewers: &[Viewer],
+    viewers: &[&FragmentScope],
     pkg_id: u32,
     path: &[Ustr],
     name: Ustr,
@@ -763,7 +755,7 @@ fn members_of(
 /// globs, if at all.
 fn explicit_members(
     ws: &Workspace,
-    viewers: &[Viewer],
+    viewers: &[&FragmentScope],
     pkg_id: u32,
     path: &[Ustr],
     name: Ustr,
@@ -849,7 +841,7 @@ fn explicit_members(
 /// What the module's glob export bindings offer under `name`.
 fn glob_export_members(
     ws: &Workspace,
-    viewers: &[Viewer],
+    viewers: &[&FragmentScope],
     pkg_id: u32,
     path: &[Ustr],
     name: Ustr,
@@ -868,7 +860,7 @@ fn glob_export_members(
     }
     let exporter = exporter_scope(pkg, path);
     let mut chain = viewers.to_vec();
-    chain.push(Viewer::Fragment(&exporter));
+    chain.push(&exporter);
     // Kept in target path order (`UsePathRef::insert_sorted`).
     for binding in &node.glob_exports {
         if !all_admit(ws, viewers, &binding.vis, pkg_id, path) {
@@ -926,7 +918,7 @@ fn exporter_scope(pkg: &bone_core::modules::NsPackage, path: &[Ustr]) -> Fragmen
 /// decide each name through `module_members`; this only enumerates.
 pub fn module_member_names(
     ws: &Workspace,
-    viewers: &[Viewer],
+    viewers: &[&FragmentScope],
     pkg_id: u32,
     path: &[Ustr],
 ) -> Result<Vec<Ustr>, String> {
@@ -939,7 +931,7 @@ pub fn module_member_names(
 
 fn collect_member_names(
     ws: &Workspace,
-    viewers: &[Viewer],
+    viewers: &[&FragmentScope],
     pkg_id: u32,
     path: &[Ustr],
     names: &mut Vec<Ustr>,
@@ -1008,7 +1000,7 @@ fn collapse(
 /// The visibility access predicate for a definition named from `frag`. A key
 /// with no recorded metadata is the stdlib or an intrinsic, which is public.
 fn key_accessible(ws: &Workspace, frag: &FragmentScope, key: Ustr) -> bool {
-    Viewer::Fragment(frag).admits_key(ws, key)
+    admits_key(ws, frag, key)
 }
 
 fn check_key_access(ws: &Workspace, frag: &FragmentScope, key: Ustr) -> Result<(), String> {
@@ -1312,7 +1304,7 @@ pub(crate) fn resolve_member_path(
             i += 1;
             continue;
         }
-        let members = module_members(ws, &[Viewer::Fragment(frag)], pkg_id, &cur, seg)?;
+        let members = module_members(ws, &[frag], pkg_id, &cur, seg)?;
         let not_found = || {
             bare_error.clone().unwrap_or_else(|| {
                 let unbound = (first_unbound && i == 0).then_some(segments[0]);
@@ -1579,7 +1571,7 @@ fn step_module(
     let Some(target) = target? else {
         return Ok(None);
     };
-    if !Viewer::Fragment(frag).admits(ws, &binding.vis, pkg_id, cur) {
+    if !admits(ws, frag, &binding.vis, pkg_id, cur) {
         return Err(format!(
             "module `{}` is not accessible from this module",
             seg
@@ -1595,7 +1587,7 @@ fn step_module(
 fn walk_path(
     ws: &Workspace,
     frag: &FragmentScope,
-    outer: &[Viewer],
+    outer: &[&FragmentScope],
     path: &UsePathRef,
     mode: WalkMode,
     visiting: &mut Visiting,
@@ -1626,7 +1618,7 @@ fn walk_path(
 fn walk_optional_definition(
     ws: &Workspace,
     frag: &FragmentScope,
-    outer: &[Viewer],
+    outer: &[&FragmentScope],
     path: &UsePathRef,
     visiting: &mut Visiting,
 ) -> Result<Option<Resolved>, String> {
@@ -1664,14 +1656,14 @@ fn walk_optional_definition(
 fn walk_members(
     ws: &Workspace,
     frag: &FragmentScope,
-    outer: &[Viewer],
+    outer: &[&FragmentScope],
     path: &UsePathRef,
     visiting: &mut Visiting,
 ) -> Result<Members, String> {
     let segments = &path.segments;
     let (pkg_id, cur) = walk_module_path(ws, frag, path, segments.len() - 1, visiting)?
         .ok_or_else(|| format!("no module `{}` in path", segments[segments.len() - 2]))?;
-    let mut viewers = vec![Viewer::Fragment(frag)];
+    let mut viewers = vec![frag];
     viewers.extend_from_slice(outer);
     members_of(ws, &viewers, pkg_id, &cur, last_of(segments), visiting)
 }
