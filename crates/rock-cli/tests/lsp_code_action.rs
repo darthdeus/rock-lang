@@ -1,6 +1,6 @@
 //! `TYPE: code_action` fixtures run through the real `rock lsp serve`: the
-//! action is requested, its edit applied, and the result compared.
-use std::process::Command;
+//! action is requested, its edit applied, and the result compared. The passing
+//! case is tests/lsp/inline_local_variable.rock.lsp in the corpus.
 
 const FIXTURE: &str = "\
 TEST: inline_count
@@ -27,27 +27,12 @@ fn main() {
 fn run_fixture(fixture: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("action.rock.lsp"), fixture).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .current_dir(dir.path())
+    let out = crate::support::rock(dir.path())
         .args(["test", "action.rock.lsp"])
         .env("ROCK_TEST_VERBOSE", "1")
-        .env("ROCK_INVOCATION_LOG", "off")
         .output()
         .expect("start rock test");
-    test_utils::strip_ansi_sgr(&format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    ))
-}
-
-#[test]
-fn a_code_action_fixture_applies_the_action_and_passes() {
-    let output = run_fixture(FIXTURE);
-    assert!(
-        output.contains("LSP tests: ok. 1 passed; 0 failed"),
-        "{output}"
-    );
+    crate::support::text(&out)
 }
 
 /// The expected text is compared, so a wrong RESULT fails the fixture.

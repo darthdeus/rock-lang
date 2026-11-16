@@ -1,41 +1,11 @@
 //! The user guide's examples are runnable files under `examples/guide`, and
 //! every ```rock fence in `docs/guide.md` is one of those files byte for
 //! byte, so the guide cannot drift from what the compiler accepts.
+use crate::support::{invoke, repo_root, text};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates dir")
-        .parent()
-        .expect("repo root")
-        .to_path_buf()
-}
 
 fn guide_dir() -> PathBuf {
     repo_root().join("examples").join("guide")
-}
-
-fn invoke(cwd: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_rock"))
-        .current_dir(cwd)
-        .args(args)
-        .env("ROCK_DIR", cwd)
-        .env("ROCK_INVOCATION_LOG", "off")
-        .env_remove("ROCK_STDLIB_DIR")
-        .env_remove("LUA_PATH")
-        .env_remove("LUA_CPATH")
-        .output()
-        .expect("start rock")
-}
-
-fn text(out: &Output) -> String {
-    format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    )
 }
 
 /// One runnable example: a single file, or a project directory, plus the

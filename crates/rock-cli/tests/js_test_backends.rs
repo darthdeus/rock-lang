@@ -1,8 +1,9 @@
 //! `@test(backends = "...")` limits a test to the listed backends. Every other
 //! backend neither compiles nor runs it, and the JS summary counts it apart
 //! from real skips, so the CI skip cap measures only JS gaps.
+#![cfg(feature = "backend-js")]
 
-use std::path::Path;
+use crate::support::{repo_root, rock_test_source};
 
 /// Each backend-limited test pins the output only its own backend produces, so
 /// running it anywhere else fails.
@@ -23,37 +24,10 @@ fn listed_both() { assert(1 + 1 == 2) }
 fn unscoped() { assert(2 + 2 == 4) }
 "#;
 
-fn workspace_root() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root")
-}
-
-/// Writes `src` to a temp `.rock` and runs `rock test <file> [args]`.
-fn rock_test(src: &str, args: &[&str]) -> (bool, String) {
-    let dir = tempfile::tempdir().expect("fixture dir");
-    let file = dir.path().join("scoped.rock");
-    std::fs::write(&file, src).expect("write fixture");
-    let out = crate::command::rock_bin()
-        .arg("test")
-        .arg(&file)
-        .args(args)
-        .current_dir(workspace_root())
-        .output()
-        .expect("spawn rock");
-    let text = test_utils::strip_ansi_sgr(&format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    ));
-    (out.status.success(), text)
-}
-
 /// The skip count CI reads, extracted with the same sed expression ci.yml runs.
 fn ci_skip_count(text: &str) -> String {
-    let ci = std::fs::read_to_string(workspace_root().join(".github/workflows/ci.yml"))
-        .expect("read ci.yml");
+    let ci =
+        std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read ci.yml");
     let line = ci
         .lines()
         .find(|l| l.contains("sed -n") && l.contains("js backend"))
@@ -80,7 +54,7 @@ fn ci_skip_count(text: &str) -> String {
 
 #[test]
 fn js_runner_counts_other_backend_tests_apart_from_skips() {
-    let (ok, text) = rock_test(FIXTURE, &["--backend", "js"]);
+    let (ok, text) = rock_test_source(FIXTURE, &["--backend", "js"]);
     assert!(ok, "JS run must pass:\n{text}");
     assert!(
         text.contains("js backend: 3/3 @tests passed (0 failed, 0 skipped, 1 not for js)"),
@@ -102,7 +76,7 @@ fn ci_skip_count_reads_the_skip_number_not_the_backend_count() {
 
 #[test]
 fn lua_runner_runs_only_tests_scoped_to_lua() {
-    let (ok, text) = rock_test(FIXTURE, &[]);
+    let (ok, text) = rock_test_source(FIXTURE, &[]);
     assert!(ok, "Lua run must pass:\n{text}");
     assert!(
         text.contains("3/3 @tests passed"),
@@ -112,7 +86,7 @@ fn lua_runner_runs_only_tests_scoped_to_lua() {
 
 #[test]
 fn unknown_backend_name_is_a_compile_error() {
-    let (ok, text) = rock_test("@test(backends = \"luajit\")\nfn a() { }\n", &[]);
+    let (ok, text) = rock_test_source("@test(backends = \"luajit\")\nfn a() { }\n", &[]);
     assert!(!ok, "an unknown backend must fail the run:\n{text}");
     assert!(
         text.contains("unknown backend `luajit`"),

@@ -1,16 +1,6 @@
 //! A package's `rock test` program reflects a `nobox` global as its logical
 //! value through the global directory, like a game build does.
-use std::path::{Path, PathBuf};
-
-fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .canonicalize()
-        .unwrap()
-}
+use crate::support::{repo_root, rock, text};
 
 const MAIN: &str = r#"
 nobox value Probe { x: int, y: int }
@@ -59,19 +49,13 @@ fn package_test_program_reflects_nobox_globals_by_logical_value() {
     std::fs::write(project.join("main.rock"), MAIN).unwrap();
     std::fs::write(project.join("tests/shape.rock"), TEST).unwrap();
 
-    let test = std::process::Command::new(env!("CARGO_BIN_EXE_rock"))
+    let test = rock(&repo_root())
         .arg("test")
         .arg(project.join("tests"))
-        .current_dir(root())
         .env("ROCK_TEST_VERBOSE", "1")
-        .env_remove("ROCK_TEST_FILTER")
         .output()
         .expect("run fixture package tests");
-    let text = test_utils::strip_ansi_sgr(&format!(
-        "{}{}",
-        String::from_utf8_lossy(&test.stdout),
-        String::from_utf8_lossy(&test.stderr)
-    ));
+    let text = text(&test);
     assert!(test.status.success(), "package test failed:\n{text}");
     assert!(
         text.contains("1/1 @tests passed"),

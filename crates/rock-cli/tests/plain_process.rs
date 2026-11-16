@@ -1,26 +1,13 @@
 //! The public CLI runs outside the monorepo with only a LuaJIT installation.
+use crate::support::{rock, text};
 use std::io::ErrorKind;
 use std::path::Path;
 use std::process::{Command, Output};
-
-/// The built binary rooted at `root`, with no ambient stdlib or invocation log.
-fn rock(root: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
-    command
-        .current_dir(root)
-        .env("ROCK_DIR", root)
-        .env("ROCK_INVOCATION_LOG", "off")
-        .env_remove("ROCK_STDLIB_DIR");
-    command
-}
 
 fn invoke(root: &Path, args: &[&str]) -> Output {
     rock(root)
         .args(args)
         .env("ROCK_TEST_VERBOSE", "1")
-        .env_remove("LUA_PATH")
-        .env_remove("LUA_CPATH")
-        .env_remove("ROCK_SKULL_LINE_DIRECTIVES")
         .output()
         .expect("start public plain CLI")
 }
@@ -35,14 +22,6 @@ fn assert_mentions(out: &Output, needle: &str) {
     assert!(text.contains(needle), "missing {needle:?} in: {text}");
 }
 
-fn text(out: &Output) -> String {
-    test_utils::strip_ansi_sgr(&format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    ))
-}
-
 #[test]
 fn plain_lsp_serve_answers_initialize_over_stdio() {
     use std::io::{BufRead, BufReader, Read, Write};
@@ -51,8 +30,6 @@ fn plain_lsp_serve_answers_initialize_over_stdio() {
     let root = tempfile::tempdir().unwrap();
     let child = rock(root.path())
         .args(["lsp", "serve"])
-        .env_remove("LUA_PATH")
-        .env_remove("LUA_CPATH")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

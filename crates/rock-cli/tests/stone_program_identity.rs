@@ -1,5 +1,3 @@
-use std::process::Command;
-
 #[test]
 fn stone_attributes_source_and_stripped_programs_to_their_loaded_root() {
     let dir = tempfile::tempdir().unwrap();
@@ -18,11 +16,10 @@ fn main() { check_identity() }
 "#,
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .args(["compile", ".", "main.lua", "--lua-line-directives"])
-        .current_dir(dir.path())
-        .output()
-        .unwrap();
+    let output = crate::support::invoke(
+        dir.path(),
+        &["compile", ".", "main.lua", "--lua-line-directives"],
+    );
     assert!(
         output.status.success(),
         "{}",

@@ -1,12 +1,10 @@
 //! Generated Lua names source files relative to their package, so one package
 //! compiled from two checkouts gives the same bytes.
+use crate::support::{rock, write_files};
 use std::path::Path;
-use std::process::Command;
 
 fn write(root: &Path, path: &str, text: &str) {
-    let path = root.join(path);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, text).unwrap();
+    write_files(root, &[(path, text)]);
 }
 
 /// An `app` using a `lib`, both in modules v1 or both legacy (file-keyed
@@ -62,14 +60,10 @@ fn compile_under(base: &Path, v1: bool) -> String {
         ),
     );
     let out = base.join("out.lua");
-    let status = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let status = rock(base)
         .current_dir(base.join("app"))
         .args(["compile", ".", "--output"])
         .arg(&out)
-        .env("ROCK_DIR", base)
-        .env("ROCK_INVOCATION_LOG", "off")
-        .env_remove("ROCK_STDLIB_DIR")
-        .env_remove("ROCK_SKULL_LINE_DIRECTIVES")
         .status()
         .expect("start rock");
     assert!(status.success(), "compile under {}", base.display());

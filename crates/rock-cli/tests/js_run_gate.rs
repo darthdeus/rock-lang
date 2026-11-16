@@ -6,6 +6,7 @@
 //! Drives the real binary on both backends so the whole driver path (capability
 //! gate -> emit_program -> node stream) is exercised, and pins the cross-backend
 //! parity `rock run` promises.
+#![cfg(feature = "backend-js")]
 
 // Exercises: a registry global (SYSTEMS) populated by a `deco init` at module
 // load, two `@system`-applied fns (alpha with a literal `stage = 5`, beta
@@ -60,19 +61,6 @@ fn main() {
 
 const EXPECTED: &str = "derived=20\nalpha stage=5\nalpha\nbeta stage=100\nbeta\n1\n2\n";
 
-fn run(backend: Option<&str>, path: &std::path::Path) -> (String, bool) {
-    let mut cmd = crate::command::rock_bin();
-    cmd.args(["run", path.to_str().unwrap()]);
-    if let Some(b) = backend {
-        cmd.args(["--backend", b]);
-    }
-    let out = cmd.output().expect("spawn rock");
-    (
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        out.status.success(),
-    )
-}
-
 // `rock run <dir> --backend js` (project mode) -- a multi-file
 // project (main + a sibling module) emits via the deterministic module walk and
 // runs `main` end to end, byte-identical to the luajit `rock run` of the dir.
@@ -99,29 +87,24 @@ const MODULES_V1_FILES: &[(&str, &str)] = &[
 // applications), matching luajit -- and prints nothing, exiting cleanly.
 const NO_MAIN: &str = "global X: int = 7\nfn helper() -> int { X + 1 }\n";
 
-fn assert_backends_agree(path: &std::path::Path, expected: &str) {
-    let (lua_out, lua_ok) = run(None, path);
-    assert!(lua_ok, "luajit run failed:\n{lua_out}");
-    assert_eq!(lua_out, expected, "luajit output");
-
-    let (js_out, js_ok) = run(Some("js"), path);
-    assert!(js_ok, "js run failed:\n{js_out}");
-    assert_eq!(js_out, expected, "js output");
+/// `rock run <target>` prints `expected` on luajit and on node.
+fn assert_backends_agree(dir: &std::path::Path, target: &str, expected: &str) {
+    for backend in [&[][..], &["--backend", "js"]] {
+        let out = crate::support::invoke(dir, &[&["run", target][..], backend].concat());
+        assert_eq!(crate::support::success(out), expected, "{backend:?} output");
+    }
 }
 
 fn both_backends(source: &str, expected: &str) {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("gate.rock");
-    std::fs::write(&path, source).unwrap();
-    assert_backends_agree(&path, expected);
+    std::fs::write(dir.path().join("gate.rock"), source).unwrap();
+    assert_backends_agree(dir.path(), "gate.rock", expected);
 }
 
 fn both_backends_project(files: &[(&str, &str)], expected: &str) {
     let dir = tempfile::tempdir().unwrap();
-    for (name, contents) in files {
-        std::fs::write(dir.path().join(name), contents).unwrap();
-    }
-    assert_backends_agree(dir.path(), expected);
+    crate::support::write_files(dir.path(), files);
+    assert_backends_agree(dir.path(), ".", expected);
 }
 
 macro_rules! parity_tests {
@@ -129,7 +112,7 @@ macro_rules! parity_tests {
         $(
             #[test]
             fn $test() {
-                if crate::command::require_node() {
+                if crate::support::require_node() {
                     $check($input, $expected);
                 }
             }

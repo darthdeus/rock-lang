@@ -1,51 +1,9 @@
 //! The `perf/` tracker reads `backend-stats` and `incremental-stats` as JSON.
-use std::path::Path;
-use std::process::{Command, Output};
-
-const MAIN: &str = r#"
-mod main;
-
-use super::util::bump;
-
-fn main() {
-    print("{bump(41)}")
-}
-"#;
-
-const UTIL: &str = r#"
-mod util;
-
-pub fn bump(n: int) -> int {
-    let step = 1
-    return n + step
-}
-
-pub fn twice(n: int) -> int {
-    return bump(bump(n))
-}
-"#;
+use crate::support::invoke;
+use std::process::Output;
 
 fn project() -> tempfile::TempDir {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::write(
-        root.path().join("stick.toml"),
-        "[package]\nname = \"perfstats\"\n\n[language]\nmodules = \"v1\"\n",
-    )
-    .unwrap();
-    std::fs::write(root.path().join("main.rock"), MAIN).unwrap();
-    std::fs::write(root.path().join("util.rock"), UTIL).unwrap();
-    root
-}
-
-fn invoke(root: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_rock"))
-        .current_dir(root)
-        .args(args)
-        .env("ROCK_DIR", root)
-        .env("ROCK_INVOCATION_LOG", "off")
-        .env_remove("ROCK_STDLIB_DIR")
-        .output()
-        .expect("start rock")
+    crate::support::two_module_package("perfstats")
 }
 
 fn json_stdout(out: &Output) -> serde_json::Value {

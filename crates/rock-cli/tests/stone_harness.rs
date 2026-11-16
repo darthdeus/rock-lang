@@ -68,13 +68,7 @@ impl StoneHarness {
     /// test here).
     pub fn spawn_with_env(seed: &[(&str, &str)], env: &[(&str, &str)]) -> Self {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        for (path, content) in seed {
-            let full = tempdir.path().join(path);
-            if let Some(parent) = full.parent() {
-                std::fs::create_dir_all(parent).unwrap();
-            }
-            std::fs::write(&full, content).unwrap();
-        }
+        crate::support::write_files(tempdir.path(), seed);
 
         let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
         command

@@ -1,9 +1,10 @@
+use crate::support::{failure, success};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 fn run(root: &Path, args: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
-    command.current_dir(root).env("ROCK_DIR", root).args(args);
+    let mut command = crate::support::rock(root);
+    command.args(args);
     for key in [
         "ROCK_ENGINE_BUILD_RECEIPT",
         "ROCK_PREBUILT_GAME",
@@ -13,26 +14,6 @@ fn run(root: &Path, args: &[&str]) -> Output {
         command.env_remove(key);
     }
     command.output().expect("run public CLI")
-}
-
-fn success(output: Output) -> String {
-    assert!(
-        output.status.success(),
-        "stdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap()
-}
-
-fn failure(output: Output, expected: &str) {
-    assert!(!output.status.success());
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(text.contains(expected), "expected {expected:?}: {text}");
 }
 
 #[test]

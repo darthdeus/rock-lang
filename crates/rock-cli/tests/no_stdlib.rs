@@ -1,33 +1,12 @@
 //! `--no-stdlib` compiles with no standard-library modules: a program that
 //! names a stdlib declaration fails, an operator-free one still builds.
-use std::path::Path;
-use std::process::{Command, Output};
+use crate::support::{invoke, text};
 
 const NEEDS_STDLIB: &str = "fn main() {\n    print(\"from stdlib\")\n}\n";
 const OPERATOR_FREE: &str = "fn main() {\n    let x = 1\n}\n";
 const NEEDS_STDLIB_TEST: &str =
     "@test(output = \"from stdlib\")\nfn uses_print() {\n    print(\"from stdlib\")\n}\n";
 const OPERATOR_FREE_TEST: &str = "@test\nfn bare() {\n    let x = 1\n}\n";
-
-fn invoke(root: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_rock"))
-        .current_dir(root)
-        .args(args)
-        .env("ROCK_DIR", root)
-        .env("ROCK_INVOCATION_LOG", "off")
-        .env_remove("ROCK_STDLIB_DIR")
-        .env_remove("ROCK_SKULL_LINE_DIRECTIVES")
-        .output()
-        .expect("start rock")
-}
-
-fn text(out: &Output) -> String {
-    test_utils::strip_ansi_sgr(&format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    ))
-}
 
 fn program(source: &str) -> tempfile::TempDir {
     let root = tempfile::tempdir().unwrap();

@@ -1,7 +1,8 @@
 #![cfg(unix)]
 
+use crate::support::{rock, text};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 fn fixture(root: &Path, code: i32) -> std::path::PathBuf {
     std::fs::write(
@@ -22,14 +23,8 @@ fn fixture(root: &Path, code: i32) -> std::path::PathBuf {
 }
 
 fn invoke(root: &Path, runner: &Path, shader: bool, skip: bool) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
-    command
-        .current_dir(root)
-        .env("ROCK_DIR", root)
-        .env("ROCK_GLSL_RUNNER", runner)
-        .env("ROCK_INVOCATION_LOG", "off")
-        .env_remove("ROCK_TEST_FILTER")
-        .env_remove("ROCK_BACKEND");
+    let mut command = rock(root);
+    command.env("ROCK_GLSL_RUNNER", runner);
     if shader {
         command.args(["shader-validate", "."]);
     } else {
@@ -39,14 +34,6 @@ fn invoke(root: &Path, runner: &Path, shader: bool, skip: bool) -> Output {
         command.arg("--skip-gpu");
     }
     command.output().unwrap()
-}
-
-fn text(output: &Output) -> String {
-    test_utils::strip_ansi_sgr(&format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    ))
 }
 
 #[test]
@@ -113,13 +100,7 @@ fn skip_gpu_keeps_runner_errors_hard() {
 fn skip_gpu_is_limited_to_gpu_commands() {
     let root = tempfile::tempdir().unwrap();
     for args in [vec!["check", "--skip-gpu"], vec!["test", "--skip-gpu"]] {
-        let output = Command::new(env!("CARGO_BIN_EXE_rock"))
-            .current_dir(root.path())
-            .args(args)
-            .env_remove("ROCK_BACKEND")
-            .env("ROCK_INVOCATION_LOG", "off")
-            .output()
-            .unwrap();
+        let output = crate::support::invoke(root.path(), &args);
         assert!(!output.status.success());
         assert!(
             text(&output).contains("supported only by"),

@@ -1,52 +1,18 @@
 //! `ROCK_COMPILE_STATS=<file>` appends one compile budget record per compile:
 //! a tree whose every level sums to its parent, so a phase cannot hide.
+use crate::support::{PACKAGE_MAIN, rock};
 use std::path::Path;
-use std::process::{Command, Output};
-
-const MAIN: &str = r#"
-mod main;
-
-use super::util::bump;
-
-fn main() {
-    print("{bump(41)}")
-}
-"#;
-
-const UTIL: &str = r#"
-mod util;
-
-pub fn bump(n: int) -> int {
-    let step = 1
-    return n + step
-}
-
-pub fn twice(n: int) -> int {
-    return bump(bump(n))
-}
-"#;
+use std::process::Output;
 
 fn project() -> tempfile::TempDir {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::write(
-        root.path().join("stick.toml"),
-        "[package]\nname = \"budget\"\n\n[language]\nmodules = \"v1\"\n",
-    )
-    .unwrap();
-    std::fs::write(root.path().join("main.rock"), MAIN).unwrap();
-    std::fs::write(root.path().join("util.rock"), UTIL).unwrap();
-    root
+    crate::support::two_module_package("budget")
 }
 
 fn compile(root: &Path, stats: &Path, output: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_rock"))
-        .current_dir(root)
+    rock(root)
         .args(["compile", ".", "--output"])
         .arg(output)
-        .env("ROCK_DIR", root)
-        .env("ROCK_INVOCATION_LOG", "off")
         .env("ROCK_COMPILE_STATS", stats)
-        .env_remove("ROCK_STDLIB_DIR")
         .output()
         .expect("start rock")
 }
@@ -177,14 +143,10 @@ fn a_compile_appends_a_budget_whose_levels_sum_to_the_wall() {
 fn without_the_variable_nothing_is_written() {
     let root = project();
     let output = root.path().join("out.lua");
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .current_dir(root.path())
+    let out = rock(root.path())
         .args(["compile", ".", "--output"])
         .arg(&output)
-        .env("ROCK_DIR", root.path())
-        .env("ROCK_INVOCATION_LOG", "off")
         .env_remove("ROCK_COMPILE_STATS")
-        .env_remove("ROCK_STDLIB_DIR")
         .output()
         .expect("start rock");
     assert!(
@@ -202,15 +164,11 @@ fn body_costs_name_each_body_by_its_source_definition() {
     let root = project();
     let costs = root.path().join("costs.jsonl");
     let attributed = root.path().join("attributed.lua");
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .current_dir(root.path())
+    let out = rock(root.path())
         .args(["compile", ".", "--output"])
         .arg(&attributed)
-        .env("ROCK_DIR", root.path())
-        .env("ROCK_INVOCATION_LOG", "off")
         .env("ROCK_BODY_COSTS", &costs)
         .env_remove("ROCK_COMPILE_STATS")
-        .env_remove("ROCK_STDLIB_DIR")
         .output()
         .expect("start rock");
     assert!(
@@ -287,15 +245,11 @@ fn body_costs_record_the_value_types_a_signature_flattens() {
     .unwrap();
     std::fs::write(root.path().join("main.rock"), WIDE).unwrap();
     let costs = root.path().join("costs.jsonl");
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .current_dir(root.path())
+    let out = rock(root.path())
         .args(["compile", ".", "--output"])
         .arg(root.path().join("out.lua"))
-        .env("ROCK_DIR", root.path())
-        .env("ROCK_INVOCATION_LOG", "off")
         .env("ROCK_BODY_COSTS", &costs)
         .env_remove("ROCK_COMPILE_STATS")
-        .env_remove("ROCK_STDLIB_DIR")
         .output()
         .expect("start rock");
     assert!(
@@ -350,7 +304,7 @@ fn slow_build_var_commands_overlap_the_front_end() {
     .unwrap();
     std::fs::write(
         root.path().join("main.rock"),
-        MAIN.replace("{bump(41)}", "{bump(41)} {build_var(\"SLOW\")}"),
+        PACKAGE_MAIN.replace("{bump(41)}", "{bump(41)} {build_var(\"SLOW\")}"),
     )
     .unwrap();
     let stats = root.path().join("stats.jsonl");

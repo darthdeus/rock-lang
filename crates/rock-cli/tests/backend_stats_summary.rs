@@ -1,7 +1,6 @@
 //! `rock backend-stats` under `ROCK_LOG=debug`: every concrete build logs a
 //! summary line, and its totals must be the folded owner totals the report's
 //! concrete-facts lines print, on every repeated build in the process.
-use std::process::Command;
 
 const PROGRAM: &str = r#"
 fn seed<T>() -> T? { return null }
@@ -40,8 +39,7 @@ fn pair(line: &str, key: &str, sep: &str) -> (u64, u64) {
 fn concrete_build_summary_reports_folded_totals_on_every_build() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("main.rock"), PROGRAM).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .current_dir(root.path())
+    let out = crate::support::rock(root.path())
         .args([
             "backend-stats",
             "main.rock",
@@ -50,17 +48,10 @@ fn concrete_build_summary_reports_folded_totals_on_every_build() {
             "--warmup",
             "1",
         ])
-        .env("ROCK_DIR", root.path())
-        .env("ROCK_INVOCATION_LOG", "off")
         .env("ROCK_LOG", "debug")
-        .env_remove("ROCK_STDLIB_DIR")
         .output()
         .expect("start rock");
-    let text = test_utils::strip_ansi_sgr(&format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    ));
+    let text = crate::support::text(&out);
     assert!(out.status.success(), "{text}");
 
     let facts = text

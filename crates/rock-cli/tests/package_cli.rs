@@ -1,17 +1,12 @@
+use crate::support::{failure, success};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 fn run(cwd: &Path, args: &[&str], overlay: Option<&Path>) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
-    command
-        .current_dir(cwd)
-        .args(args)
-        .env("ROCK_DIR", cwd)
-        .env("ROCK_INVOCATION_LOG", "off")
-        .env("ROCK_NUM_THREADS", "1");
+    let mut command = crate::support::rock(cwd);
+    command.args(args);
     for key in [
         "ROCK_ASSET_OVERLAYS",
-        "ROCK_SKULL_LINE_DIRECTIVES",
         "ROCK_CONTEXT_ROOT",
         "ROCK_PREBUILT_GAME",
     ] {
@@ -21,21 +16,6 @@ fn run(cwd: &Path, args: &[&str], overlay: Option<&Path>) -> Output {
         command.env("ROCK_ASSET_OVERLAYS", overlay);
     }
     command.output().expect("run public packaging command")
-}
-
-fn success(output: Output) {
-    assert!(
-        output.status.success(),
-        "stdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-fn failure(output: Output, expected: &str) {
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains(expected), "expected {expected:?}: {stderr}");
 }
 
 fn project(root: &Path, extra_release: &str) {
