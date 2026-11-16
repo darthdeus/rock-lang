@@ -18,6 +18,7 @@
 //! `call_generic_bindings`, then the enclosing substitution for the caller's own
 //! -- so named arguments, defaults and spreads need no special case, because no
 //! argument list is walked at all.
+use crate::common::emit_rejection;
 
 const GENERIC_RETURN: &str = r#"
 value G { x: float, y: float }
@@ -75,13 +76,9 @@ fn main() {
 }
 "#;
 
-fn outcome(src: &str) -> Result<String, String> {
-    crate::common::try_emit_module(src).map_err(|e| e.message)
-}
-
 #[test]
 fn a_generic_return_inferred_as_a_column_vec_rejects() {
-    let msg = outcome(GENERIC_RETURN).expect_err("must reject");
+    let msg = emit_rejection(GENERIC_RETURN);
     assert!(
         msg.contains("cannot BUILD column-stored `[G]`") && msg.contains("make"),
         "got: {msg}"
@@ -90,7 +87,7 @@ fn a_generic_return_inferred_as_a_column_vec_rejects() {
 
 #[test]
 fn a_named_out_of_order_column_argument_rejects() {
-    let msg = outcome(NAMED_OUT_OF_ORDER).expect_err("must reject");
+    let msg = emit_rejection(NAMED_OUT_OF_ORDER);
     assert!(
         msg.contains("column-stored `[G]`") && msg.contains("probe"),
         "got: {msg}"
@@ -100,16 +97,12 @@ fn a_named_out_of_order_column_argument_rejects() {
 /// The reach control: the same call written positionally already rejected.
 #[test]
 fn the_positional_form_rejects_too() {
-    assert!(
-        outcome(POSITIONAL_CONTROL)
-            .expect_err("must reject")
-            .contains("column-stored `[G]`")
-    );
+    assert!(emit_rejection(POSITIONAL_CONTROL).contains("column-stored `[G]`"));
 }
 
 #[test]
 fn a_defaulted_slot_is_reached() {
-    let msg = outcome(DEFAULTED_SLOT).expect_err("must reject");
+    let msg = emit_rejection(DEFAULTED_SLOT);
     assert!(msg.contains("column-stored `[G]`"), "got: {msg}");
 }
 
@@ -132,7 +125,7 @@ fn main() {
 
 #[test]
 fn an_irrelevant_unbound_generic_does_not_disarm_the_rule() {
-    let msg = outcome(IRRELEVANT_UNBOUND_GENERIC).expect_err("must reject");
+    let msg = emit_rejection(IRRELEVANT_UNBOUND_GENERIC);
     assert!(
         msg.contains("column-stored `[G]`") && msg.contains("probe"),
         "the checked slot is determined; an unrelated generic is not its business, \
@@ -173,7 +166,7 @@ fn main() {
 
 #[test]
 fn a_nullable_slot_is_reached() {
-    let msg = outcome(NULLABLE_SLOT).expect_err("must reject");
+    let msg = emit_rejection(NULLABLE_SLOT);
     assert!(
         msg.contains("column-stored `[G]`") && msg.contains("probe"),
         "got: {msg}"
@@ -182,7 +175,7 @@ fn a_nullable_slot_is_reached() {
 
 #[test]
 fn a_tuple_slot_is_reached() {
-    let msg = outcome(TUPLE_SLOT).expect_err("must reject");
+    let msg = emit_rejection(TUPLE_SLOT);
     assert!(
         msg.contains("column-stored `[G]`") && msg.contains("probe"),
         "got: {msg}"

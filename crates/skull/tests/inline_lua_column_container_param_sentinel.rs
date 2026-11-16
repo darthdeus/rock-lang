@@ -32,6 +32,7 @@
 //! The bounding controls are in `tests/vectors/opaque_container_param_controls.rock`:
 //! `[int]` is boxed, keeps `_data`, and still passes through the very same body;
 //! and an `any` param still admits a column vec.
+use crate::common::emit_rejection;
 
 /// Guarded: the body probes for `_data` before touching it, so the column case
 /// is a silent wrong ANSWER rather than a death.
@@ -115,15 +116,9 @@ fn main() {
 "#;
 
 /// The rejection an opaque body over a column vec now produces.
-fn rejection(src: &str) -> String {
-    crate::common::try_emit_module(src)
-        .expect_err("a column vec at an opaque `[T]` param must reject")
-        .message
-}
-
 #[test]
 fn a_generic_inline_lua_body_over_a_column_vec_rejects() {
-    let msg = rejection(GUARDED_GENERIC);
+    let msg = emit_rejection(GUARDED_GENERIC);
     assert!(
         msg.contains("column-stored `[P]`") && msg.contains("probe_len"),
         "the rejection must name the element and the callee, got: {msg}"
@@ -134,25 +129,25 @@ fn a_generic_inline_lua_body_over_a_column_vec_rejects() {
 /// the opaque boundary rather than to instance discovery.
 #[test]
 fn a_non_generic_inline_lua_body_over_a_column_vec_rejects_identically() {
-    assert!(rejection(GUARDED_CONCRETE).contains("column-stored `[P]`"));
+    assert!(emit_rejection(GUARDED_CONCRETE).contains("column-stored `[P]`"));
 }
 
 /// Records the blast radius: this is a column-storage rule, not a `nobox` one.
 #[test]
 fn an_unmarked_value_element_rejects_identically() {
-    assert!(rejection(GUARDED_UNMARKED).contains("column-stored `[Q]`"));
+    assert!(emit_rejection(GUARDED_UNMARKED).contains("column-stored `[Q]`"));
 }
 
 #[test]
 fn an_unguarded_inline_lua_body_over_a_column_vec_rejects() {
-    assert!(rejection(UNGUARDED_GENERIC).contains("column-stored `[P]`"));
+    assert!(emit_rejection(UNGUARDED_GENERIC).contains("column-stored `[P]`"));
 }
 
 /// The call's binding, not the caller's. Without it the body is ADMITTED and
 /// the guarded form silently answers `-1`.
 #[test]
 fn a_generic_param_bound_to_a_column_vec_at_the_call_rejects() {
-    let msg = rejection(GENERIC_PARAM_BOUND_AT_CALL);
+    let msg = emit_rejection(GENERIC_PARAM_BOUND_AT_CALL);
     assert!(
         msg.contains("column-stored `[P]`") && msg.contains("opaque_t"),
         "a param spelled `T` that binds to `[P]` here must reject, got: {msg}"

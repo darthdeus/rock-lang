@@ -14,6 +14,7 @@
 //!
 //! Both answers come from `spec_key_has_target_storage`'s oracle rather than a
 //! second derivation.
+use crate::common::emit_rejection;
 
 const ARENA_PARAM: &str = r#"
 value G { x: float, y: float }
@@ -43,13 +44,9 @@ fn main() {
 }
 "#;
 
-fn lua_outcome(src: &str) -> Result<String, String> {
-    crate::common::try_emit_module(src).map_err(|e| e.message)
-}
-
 #[test]
 fn an_arena_at_a_column_element_rejects() {
-    let msg = lua_outcome(ARENA_PARAM).expect_err("must reject");
+    let msg = emit_rejection(ARENA_PARAM);
     assert!(
         msg.contains("Arena<G>") && msg.contains("probe"),
         "must name the container and the callee, got: {msg}"
@@ -61,7 +58,7 @@ fn an_arena_at_a_column_element_rejects() {
 #[test]
 fn an_arena_at_a_boxed_element_is_admitted() {
     assert!(
-        lua_outcome(ARENA_BOXED_ELEM).is_ok(),
+        crate::common::try_emit_module(ARENA_BOXED_ELEM).is_ok(),
         "a boxed element keeps `data._data`, so the same body stays valid"
     );
 }
@@ -118,7 +115,7 @@ fn main() {
 
 #[test]
 fn an_opaque_body_returning_a_column_vec_rejects() {
-    let msg = lua_outcome(CTOR_RETURNS_COLUMN_VEC).expect_err("must reject");
+    let msg = emit_rejection(CTOR_RETURNS_COLUMN_VEC);
     assert!(
         msg.contains("cannot BUILD column-stored `[G]`") && msg.contains("make"),
         "got: {msg}"
@@ -127,7 +124,7 @@ fn an_opaque_body_returning_a_column_vec_rejects() {
 
 #[test]
 fn an_opaque_body_returning_a_boxed_vec_is_admitted() {
-    assert!(lua_outcome(CTOR_RETURNS_BOXED_VEC).is_ok());
+    assert!(crate::common::try_emit_module(CTOR_RETURNS_BOXED_VEC).is_ok());
 }
 
 #[test]

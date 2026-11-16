@@ -18,6 +18,7 @@
 //! exception here: `lower_call` replaces them at `call.rs:138-210` and returns,
 //! so they never reach the check at `:645`. The boxed-value, `any` and stdlib
 //! surface controls are in `tests/maps/opaque_map_param_controls.rock`.
+use crate::common::emit_rejection;
 
 /// Control 2 proper: the receiver is IMPLICIT. `probe` writes no type for
 /// `map`, so only the semantic `param_decls` slot 0 carries `Map<K, V>` -- a
@@ -74,18 +75,12 @@ fn main() {
 }
 "#;
 
-fn rejection(src: &str) -> String {
-    crate::common::try_emit_module(src)
-        .expect_err("a column map at an opaque `Map<K, V>` param must reject")
-        .message
-}
-
 /// CONTROL 2. Distinct from the explicitly-typed cases below: the receiver has
 /// no written type at all, so this is the only case that proves the rule reads
 /// the semantic declared type rather than the syntax.
 #[test]
 fn an_implicit_method_receiver_is_classified() {
-    let msg = rejection(IMPLICIT_RECEIVER);
+    let msg = emit_rejection(IMPLICIT_RECEIVER);
     assert!(
         msg.contains("column-stored `Map<_, Q>`") && msg.contains("probe"),
         "an implicit `Map<K, V>` receiver must be classified, got: {msg}"
@@ -94,7 +89,7 @@ fn an_implicit_method_receiver_is_classified() {
 
 #[test]
 fn a_generic_inline_lua_body_over_a_column_map_rejects() {
-    let msg = rejection(USER_BODY_GENERIC);
+    let msg = emit_rejection(USER_BODY_GENERIC);
     assert!(
         msg.contains("column-stored `Map<_, Q>`") && msg.contains("map_probe"),
         "the rejection must name the value type and the callee, got: {msg}"
@@ -103,5 +98,5 @@ fn a_generic_inline_lua_body_over_a_column_map_rejects() {
 
 #[test]
 fn a_non_generic_inline_lua_body_over_a_column_map_rejects_identically() {
-    assert!(rejection(USER_BODY_CONCRETE).contains("column-stored `Map<_, Q>`"));
+    assert!(emit_rejection(USER_BODY_CONCRETE).contains("column-stored `Map<_, Q>`"));
 }

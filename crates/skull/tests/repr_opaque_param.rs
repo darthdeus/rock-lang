@@ -18,6 +18,7 @@
 //! Every registry violation carries kind `Generic`, so `tests/errors/` cannot
 //! tell them apart from "unknown annotation `@repr`". That is why these assert
 //! MESSAGES.
+use crate::common::emit_rejection;
 
 const ON_A_ROCK_BODY: &str = r#"
 fn plain(@repr(opaque) v: int) -> int { v }
@@ -132,12 +133,6 @@ fn registry_rejection(src: &str) -> String {
 }
 
 /// A SKULL rejection: the 2.4 layout rule, raised at emit.
-fn rejection(src: &str) -> String {
-    crate::common::try_emit_module(src)
-        .expect_err("must reject")
-        .message
-}
-
 /// The outcome of emitting, as a comparable value, so two sources can be
 /// asserted IDENTICAL rather than each asserted separately.
 fn outcome(src: &str) -> Result<(), String> {
@@ -193,7 +188,7 @@ fn repr_with_extra_arguments_rejects() {
 /// silently disarm the rule for the whole call.
 #[test]
 fn the_waiver_does_not_reach_the_unannotated_parameter() {
-    let msg = rejection(EXEMPTS_ONLY_THAT_PARAM);
+    let msg = emit_rejection(EXEMPTS_ONLY_THAT_PARAM);
     assert!(
         msg.contains("column-stored `[P]`") && msg.contains("take"),
         "the unannotated container parameter must still reject, got: {msg}"
@@ -204,7 +199,7 @@ fn the_waiver_does_not_reach_the_unannotated_parameter() {
 /// admission above would prove nothing.
 #[test]
 fn the_same_payload_without_the_contract_rejects() {
-    assert!(rejection(UNANNOTATED_PAYLOAD_REJECTS).contains("column-stored `[P]`"));
+    assert!(emit_rejection(UNANNOTATED_PAYLOAD_REJECTS).contains("column-stored `[P]`"));
 }
 
 /// Not a nobox escape: the annotated and unannotated sources must reach the

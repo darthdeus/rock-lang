@@ -230,6 +230,14 @@ pub fn try_emit_module(src: &str) -> Result<String, skull_parser::CompilerError>
     skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
 }
 
+/// The message emission rejects `src` with; panics if it emits.
+pub fn emit_rejection(src: &str) -> String {
+    match try_emit_module(src) {
+        Ok(lua) => panic!("expected a rejection, emitted:\n{lua}"),
+        Err(e) => e.message,
+    }
+}
+
 /// [`try_emit_module`] with identity storage enforced on the unpackaged
 /// `<test>` module, as bone fixtures do: the program's package is not exempt.
 pub fn try_emit_module_enforcing_identity_storage(
