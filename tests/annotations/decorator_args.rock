@@ -28,34 +28,10 @@ fn system_mid_priority() {
 
 @test
 fn test_default_args_work() {
-    assert(vec_len(REGISTRATIONS) == 3, "Expected 3 registrations")
-
-    let found_default = false
-    let found_low = false
-    let found_mid = false
-
-    for entry in REGISTRATIONS {
-        if entry.contains("priority(100): system_default") {
-            found_default = true
-        }
-        if entry.contains("priority(10): system_low_priority") {
-            found_low = true
-        }
-        if entry.contains("priority(50): system_mid_priority") {
-            found_mid = true
-        }
-    }
-
-    assert(found_default, "system_default should use default priority 100")
-    assert(found_low, "system_low_priority should have priority 10")
-    assert(found_mid, "system_mid_priority should have priority 50")
-}
-
-@test(output="default priority system\nlow priority system\nmid priority system")
-fn test_decorated_functions_work() {
-    system_default()
-    system_low_priority()
-    system_mid_priority()
+    assert_eq(REGISTRATIONS.len, 3, "Expected 3 registrations")
+    assert(REGISTRATIONS.any(_ == "priority(100): system_default"), "system_default should use default priority 100")
+    assert(REGISTRATIONS.any(_ == "priority(10): system_low_priority"), "system_low_priority should have priority 10")
+    assert(REGISTRATIONS.any(_ == "priority(50): system_mid_priority"), "system_mid_priority should have priority 50")
 }
 
 // --- One decorator whose optional params cover several call shapes ---
@@ -93,37 +69,11 @@ fn opt_system_tagged() {
 
 @test
 fn test_overload_selection() {
-    // Check that correct behavior was selected based on provided args
-    assert(vec_len(opt_registered) == 3, "Expected 3 registrations")
-
-    // Find each registration
-    let found_default = false
-    let found_priority = false
-    let found_tagged = false
-
-    for entry in opt_registered {
-        if entry.contains("default: opt_system_default") {
-            found_default = true
-        }
-        if entry.contains("priority(10): opt_system_priority") {
-            found_priority = true
-        }
-        if entry.contains("priority(5), tag(physics): opt_system_tagged") {
-            found_tagged = true
-        }
-    }
-
-    assert(found_default, "Default should be selected for @register_opt")
-    assert(found_priority, "Priority should be selected for @register_opt(priority=10)")
-    assert(found_tagged, "Tagged should be selected for @register_opt(priority=5, tag=\"physics\")")
-}
-
-@test(output="default system\npriority system\ntagged system")
-fn test_functions_still_work() {
-    // Verify the decorated functions still work
-    opt_system_default()
-    opt_system_priority()
-    opt_system_tagged()
+    // The provided args select the branch.
+    assert_eq(opt_registered.len, 3, "Expected 3 registrations")
+    assert(opt_registered.any(_ == "default: opt_system_default"), "Default should be selected for @register_opt")
+    assert(opt_registered.any(_ == "priority(10): opt_system_priority"), "Priority should be selected for @register_opt(priority=10)")
+    assert(opt_registered.any(_ == "priority(5), tag(physics): opt_system_tagged"), "Tagged should be selected for @register_opt(priority=5, tag=\"physics\")")
 }
 
 // --- Decorators declared before use, as if from another module ---
@@ -166,38 +116,22 @@ fn render_system() {
 
 @test
 fn test_cross_module_registration() {
-    // Verify all 4 systems were registered
-    assert(vec_len(CROSS_MODULE_REGISTRY) == 4, "Expected 4 registrations, got {vec_len(CROSS_MODULE_REGISTRY)}")
-
-    // Check each registration
-    let found_a = false
-    let found_b = false
-    let found_physics = false
-    let found_render = false
-
-    for entry in CROSS_MODULE_REGISTRY {
-        if entry.contains("registered: system_a") {
-            found_a = true
-        }
-        if entry.contains("registered: system_b") {
-            found_b = true
-        }
-        if entry.contains("registered(physics): physics_system") {
-            found_physics = true
-        }
-        if entry.contains("registered(render): render_system") {
-            found_render = true
-        }
-    }
-
-    assert(found_a, "system_a should be registered")
-    assert(found_b, "system_b should be registered")
-    assert(found_physics, "physics_system should be registered with tag")
-    assert(found_render, "render_system should be registered with tag")
+    assert_eq(CROSS_MODULE_REGISTRY.len, 4, "Expected 4 registrations")
+    assert(CROSS_MODULE_REGISTRY.any(_ == "registered: system_a"), "system_a should be registered")
+    assert(CROSS_MODULE_REGISTRY.any(_ == "registered: system_b"), "system_b should be registered")
+    assert(CROSS_MODULE_REGISTRY.any(_ == "registered(physics): physics_system"), "physics_system should be registered with tag")
+    assert(CROSS_MODULE_REGISTRY.any(_ == "registered(render): render_system"), "render_system should be registered with tag")
 }
 
-@test(output="system_a executed\nsystem_b executed\nphysics_system executed\nrender_system executed")
-fn test_cross_module_decorated_functions_work() {
+// Decorated functions stay callable.
+@test(output="default priority system\nlow priority system\nmid priority system\ndefault system\npriority system\ntagged system\nsystem_a executed\nsystem_b executed\nphysics_system executed\nrender_system executed")
+fn test_decorated_functions_work() {
+    system_default()
+    system_low_priority()
+    system_mid_priority()
+    opt_system_default()
+    opt_system_priority()
+    opt_system_tagged()
     system_a()
     system_b()
     physics_system()

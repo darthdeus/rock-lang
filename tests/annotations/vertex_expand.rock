@@ -4,7 +4,7 @@
 // at the call site; the `inline(lua)` bodies exist only to fail loudly if one
 // is ever reached.
 //
-// THREE DIFFERENT LAYOUTS on purpose. The engine's only consumer (bitgun grass)
+// THREE DIFFERENT LAYOUTS on purpose. The only known consumer (a grass shader)
 // is `[2,1,1,1]` with stride 5, so an expander HARDCODED to those numbers would
 // satisfy the grass call site, its pixel oracle and `final_grade` alike -- the
 // same coincidence trap the derivation's own unit tests are shaped around
@@ -45,17 +45,4 @@ fn test_vertex_expand_derives_the_element_layout() {
 
     let c: FlatVec<VC> = flat_vec_new()
     print("VC {vstride(c)} {join(vsizes(c))}")
-}
-
-// The two halves come from one `vertex_plan`, so the stride must equal the sum
-// of the component counts -- the same equality `stone-rs`'s `validate_layout`
-// enforces at mesh creation, asserted here at the source level.
-@test(output = "sum=3 stride=3\nsum=4 stride=4\nsum=8 stride=8")
-fn test_vertex_expand_halves_agree() {
-    let a: FlatVec<VA> = flat_vec_new()
-    print("sum={vsizes(a).sum()} stride={vstride(a)}")
-    let b: FlatVec<VB> = flat_vec_new()
-    print("sum={vsizes(b).sum()} stride={vstride(b)}")
-    let c: FlatVec<VC> = flat_vec_new()
-    print("sum={vsizes(c).sum()} stride={vstride(c)}")
 }
