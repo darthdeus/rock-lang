@@ -1,13 +1,5 @@
 use std::time::Duration;
 
-/// Run an emitted program to completion. A real program may run as long as it
-/// needs; only test harnesses impose a timeout.
-pub(crate) fn run_lua_code(
-    code: &str,
-) -> std::result::Result<rock_host::lua_runner::LuaRun, rock_core::CompilerError> {
-    run_lua_code_with_timeout(code, None)
-}
-
 pub fn run_lua_code_with_timeout(
     code: &str,
     timeout: Option<Duration>,
@@ -26,8 +18,14 @@ use anyhow::Result;
 /// Run an ordinary emitted program through the captured stdin evaluator.
 pub(crate) fn run_lua_program(preamble: &str, lua: &GameProgram, emits_main: bool) -> Result<()> {
     // The captured stdin evaluator requires contiguous input.
-    let program = crate::skull_backend::skull_game_main(preamble, lua, emits_main).concat();
-    match run_lua_code(&program) {
+    run_program(&crate::skull_backend::skull_game_main(preamble, lua, emits_main).concat())
+}
+
+/// Run `program` to completion, relay its output and exit with its status. A
+/// real program may run as long as it needs; only test harnesses impose a
+/// timeout.
+pub(crate) fn run_program(program: &str) -> Result<()> {
+    match run_lua_code_with_timeout(program, None) {
         Ok(run) => {
             print!("{}", run.stdout);
             if !run.stderr.is_empty() {

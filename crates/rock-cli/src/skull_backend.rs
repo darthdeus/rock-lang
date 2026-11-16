@@ -2163,25 +2163,7 @@ pub(crate) fn skull_run(path: &str) -> Result<()> {
     } else {
         lua
     };
-    match crate::compile_cmd::run_lua_code(&program) {
-        Ok(run) => {
-            print!("{}", run.stdout);
-            if !run.stderr.is_empty() {
-                eprint!("{}", run.stderr);
-            }
-            // The program's own exit status is the answer. Printing a crash and
-            // returning Ok is how `rock run` used to exit 0 on a dead program.
-            if !run.success {
-                log::error!(target: "SKULL", "program exited with a runtime error");
-                crate::invocation_log::exit(1);
-            }
-            Ok(())
-        }
-        Err(e) => {
-            log::error!(target: "SKULL", "runtime error: {}", e.message);
-            crate::invocation_log::exit(1);
-        }
-    }
+    crate::compile_cmd::run_program(&program)
 }
 
 /// Render a bone `CompilerError` against a whole project's source set, so spans

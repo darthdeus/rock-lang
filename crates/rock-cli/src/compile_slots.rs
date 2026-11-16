@@ -23,7 +23,7 @@ use std::time::Duration;
 
 #[cfg(not(test))]
 const ADMISSION_ENV: &str = "ROCK_COMPILE_ADMISSION";
-pub use rock_host::process_management::report_spawn_phase;
+use rock_host::process_management::report_spawn_phase;
 
 #[cfg(test)]
 const AUTHOR_SLOT: &str = "priority-0";
