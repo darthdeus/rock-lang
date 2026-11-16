@@ -310,11 +310,7 @@ pub(crate) fn render_scope(
         bound,
     };
     let body_start = out.len();
-    // A coroutine `__step` keeps its flat labels: its yields resume mid-body
-    // through a dispatch on the saved state.
-    let structured = if frame.is_some() {
-        false
-    } else if let &[only] = rpo
+    let structured = if let &[only] = rpo
         && matches!(func.blocks[only].term, Term::Return(_) | Term::Unreachable)
     {
         // Half of all bodies: one block that returns, with no control flow to

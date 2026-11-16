@@ -2736,7 +2736,7 @@ mod tests {
             "expected name-referenced pcall, got:\n{lua}"
         );
         // State machine: writes to the state field + a completed terminal -3
-        // (killed is -1, errored -2), over an ordinary goto-CFG -- NOT the
+        // (killed is -1, errored -2), over an ordinary CFG -- NOT the
         // emit-time goto-into-block re-entry labels.
         assert!(
             lua.contains(".__state ="),
@@ -2748,10 +2748,6 @@ mod tests {
                 "local c = counter_0(); c.__resume(c); c.__resume(c); c.__resume(c); print(c.__state)",
             ),
             "-3"
-        );
-        assert!(
-            lua.contains("goto bb"),
-            "expected ordinary goto CFG, got:\n{lua}"
         );
         assert!(
             !lua.contains("__co_resume_"),

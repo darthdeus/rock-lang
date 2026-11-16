@@ -4,7 +4,7 @@
 //! `if c then goto w1 end`, compiles to a bare JMP: a loop whose hot path
 //! takes it never starts a trace and runs interpreted.
 
-use crate::common::{emit_module, run_luajit, run_main};
+use crate::common::{definition_names, emit_module, function_body, run_luajit, run_main};
 
 const FIXTURE: &str = include_str!("fixtures/traceable_loops.rock");
 
@@ -69,6 +69,17 @@ fn the_check_sees_a_nested_backward_goto() {
     assert_eq!(uncovered_backward_jumps(nested), "0:6");
     let level = "local i = 0\n::w1::\ni = i + 1\nif i >= 9 then return end\ngoto w1\n";
     assert_eq!(uncovered_backward_jumps(level), "");
+}
+
+#[test]
+fn a_step_loop_that_does_not_cross_a_yield_prints_structured() {
+    let lua = emit_module(FIXTURE);
+    let name = definition_names(&lua)
+        .into_iter()
+        .find(|n| n.starts_with("sum_then_yield") && n.ends_with("__step"))
+        .expect("step of `sum_then_yield`");
+    let step = function_body(&lua, name);
+    assert!(!step.contains("::bb"), "flat step:\n{step}");
 }
 
 #[test]
