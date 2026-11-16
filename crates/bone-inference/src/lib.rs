@@ -14,7 +14,6 @@ use ustr::ustr;
 
 // Compilation storage + inference result structs now live in bone-core; re-export
 // them through the historical `bone::inference::*` path so consumers don't churn.
-pub use bone_core::modules::vec_swizzle_components;
 pub use bone_core::modules::{AccessSite, NsVisibility, PackageId};
 pub use bone_core::workspace::{
     BodyInference, ComptimeInputs, ComptimeVarValue, InferenceResult, Substitutions, Workspace,
@@ -396,34 +395,9 @@ impl<'a> Gamma<'a> {
         ty: TyId,
     ) -> Result<(), CompilerError> {
         let span = c.body.expr_spans.get(e).copied().unwrap_or(Span::unknown());
-
         let ty = resolve(self, ty, span);
-
-        if let Some(old_ty) = self.out.expr_types.insert(e, ty) {
-            let old_ty = resolve(self, old_ty, span);
-
-            if !types_equal(self, ty, old_ty) {
-                let old_str = self.render(old_ty);
-                let new_str = self.render(ty);
-
-                let mut err = CompilerError::new_with_label(
-                    span,
-                    format!("expression inferred twice: was `{old_str}`, now `{new_str}`"),
-                );
-
-                if let Some(s) = self.span_of(old_ty) {
-                    err = err.with_label(s, format!("`{old_str}` from here"));
-                }
-
-                if let Some(s) = self.span_of(ty) {
-                    err = err.with_label(s, format!("`{new_str}` from here"));
-                }
-
-                return Err(err);
-            }
-        }
-
-        Ok(())
+        let old_ty = self.out.expr_types.insert(e, ty);
+        self.check_reassigned_type("expression", old_ty, ty, span)
     }
 
     pub(crate) fn assign_named_type(
@@ -437,34 +411,45 @@ impl<'a> Gamma<'a> {
             .get(name)
             .copied()
             .unwrap_or(Span::unknown());
-
         let ty = resolve(self, ty, span);
+        let old_ty = self.out.binding_types.insert(name, ty);
+        self.check_reassigned_type("binding", old_ty, ty, span)
+    }
 
-        if let Some(old_ty) = self.out.binding_types.insert(name, ty) {
-            let old_ty = resolve(self, old_ty, span);
-
-            if !types_equal(self, ty, old_ty) {
-                let old_str = self.render(old_ty);
-                let new_str = self.render(ty);
-
-                let mut err = CompilerError::new_with_label(
-                    span,
-                    format!("binding inferred twice: was `{old_str}`, now `{new_str}`"),
-                );
-
-                if let Some(s) = self.span_of(old_ty) {
-                    err = err.with_label(s, format!("`{old_str}` from here"));
-                }
-
-                if let Some(s) = self.span_of(ty) {
-                    err = err.with_label(s, format!("`{new_str}` from here"));
-                }
-
-                return Err(err);
-            }
+    /// Rejects an `expression` or `binding` given a type that differs from
+    /// the one it already had.
+    fn check_reassigned_type(
+        &mut self,
+        what: &str,
+        old_ty: Option<TyId>,
+        ty: TyId,
+        span: Span,
+    ) -> Result<(), CompilerError> {
+        let Some(old_ty) = old_ty else {
+            return Ok(());
+        };
+        let old_ty = resolve(self, old_ty, span);
+        if types_equal(self, ty, old_ty) {
+            return Ok(());
         }
 
-        Ok(())
+        let old_str = self.render(old_ty);
+        let new_str = self.render(ty);
+
+        let mut err = CompilerError::new_with_label(
+            span,
+            format!("{what} inferred twice: was `{old_str}`, now `{new_str}`"),
+        );
+
+        if let Some(s) = self.span_of(old_ty) {
+            err = err.with_label(s, format!("`{old_str}` from here"));
+        }
+
+        if let Some(s) = self.span_of(ty) {
+            err = err.with_label(s, format!("`{new_str}` from here"));
+        }
+
+        Err(err)
     }
 }
 
@@ -526,7 +511,7 @@ pub fn check_function(
         }
     } else if let Some(ret) = f.return_ty {
         gamma.declared_ret_ty = Some(ret);
-    } else if !f.is_coroutine {
+    } else {
         // No annotation: a top-level fn returns `()`. Its tail is discarded
         // (the `f.return_ty`-gated branch below takes the `else`), but an
         // explicit `return <value>` is a real error -- you cannot return a

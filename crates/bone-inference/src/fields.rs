@@ -263,15 +263,7 @@ pub(crate) fn vec_swizzle_ty(
     field: Ustr,
     span: Span,
 ) -> Option<Result<TyId, CompilerError>> {
-    let arity = if bone_core::modules::is_intrinsic_key(struct_name, "Vec2") {
-        2
-    } else if bone_core::modules::is_intrinsic_key(struct_name, "Vec3") {
-        3
-    } else if bone_core::modules::is_intrinsic_key(struct_name, "Vec4") {
-        4
-    } else {
-        return None;
-    };
+    let arity = bone_core::modules::vec_swizzle_arity(struct_name)?;
     let s = field.as_str();
     if s.is_empty() || !s.chars().all(|ch| "xyzwrgba".contains(ch)) {
         return None;
@@ -330,7 +322,7 @@ pub(crate) fn reject_swizzle_write(
     else {
         return Ok(());
     };
-    if vec_swizzle_components(name.as_str(), field.as_str()).is_none() {
+    if bone_core::modules::vec_swizzle_components_of(name, field.as_str()).is_none() {
         return Ok(());
     }
     let is_real_field = resolve_struct(gamma, name).is_some_and(|sid| {

@@ -48,7 +48,7 @@ fn legal_positions(c: BodyCtx, gamma: &Gamma) -> FxHashSet<Idx<Expr>> {
 
             // `advance(h.p, dt)` -- legal only when the callee takes LEAVES.
             Expr::Call { callee, args, .. } => {
-                if scalar_abi_callee(c, gamma, e, callee) {
+                if scalar_abi_callee(gamma, e, callee) {
                     ok.extend(args);
                 }
             }
@@ -75,8 +75,7 @@ fn legal_positions(c: BodyCtx, gamma: &Gamma) -> FxHashSet<Idx<Expr>> {
 /// `extern` / `inline(<backend>)` callee receives a BOX (its body is an opaque
 /// string to the compiler), and a callee reached through a fn VALUE has no
 /// known decl at all -- both materialize the aggregate.
-fn scalar_abi_callee(c: BodyCtx, gamma: &Gamma, call: Idx<Expr>, callee: Callee) -> bool {
-    let _ = c;
+fn scalar_abi_callee(gamma: &Gamma, call: Idx<Expr>, callee: Callee) -> bool {
     match callee {
         Callee::Local(_) | Callee::Value(_) => false,
         Callee::Unresolved { .. } => match gamma.out.resolved_overload_calls.get(&call) {

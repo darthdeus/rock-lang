@@ -60,24 +60,8 @@ pub fn is_intrinsic_key(key: Ustr, spelling: &str) -> bool {
 /// arity/alphabet rules of `vec_swizzle_ty` with the errors collapsed to None.
 /// Callers (assignment rejection, MIR expansion) key off "would this read as a
 /// swizzle"; invalid shapes surface through the read-path diagnostics instead.
-pub fn vec_swizzle_components(struct_name: &str, field: &str) -> Option<Vec<usize>> {
-    if field.is_empty() || field.len() > 4 {
-        return None;
-    }
-    vec_swizzle_components_of(Ustr::from(struct_name), field)
-}
-
-/// [`vec_swizzle_components`] for an already interned struct key.
 pub fn vec_swizzle_components_of(struct_name: Ustr, field: &str) -> Option<Vec<usize>> {
-    let arity = if is_intrinsic_key(struct_name, "Vec2") {
-        2
-    } else if is_intrinsic_key(struct_name, "Vec3") {
-        3
-    } else if is_intrinsic_key(struct_name, "Vec4") {
-        4
-    } else {
-        return None;
-    };
+    let arity = vec_swizzle_arity(struct_name)?;
     if field.is_empty() || field.len() > 4 {
         return None;
     }
@@ -85,6 +69,14 @@ pub fn vec_swizzle_components_of(struct_name: Ustr, field: &str) -> Option<Vec<u
     let rgba: Option<Vec<usize>> = field.chars().map(|ch| "rgba".find(ch)).collect();
     let idxs = xyzw.or(rgba)?;
     idxs.iter().all(|&i| i < arity).then_some(idxs)
+}
+
+/// The component count of a swizzlable vector type.
+pub fn vec_swizzle_arity(struct_name: Ustr) -> Option<usize> {
+    ["Vec2", "Vec3", "Vec4"]
+        .iter()
+        .position(|spelling| is_intrinsic_key(struct_name, spelling))
+        .map(|i| i + 2)
 }
 
 /// The intrinsic type former whose canonical key is `key`, if any.
