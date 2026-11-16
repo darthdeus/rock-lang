@@ -775,13 +775,11 @@ mod tests {
 
     #[test]
     fn fmt_body_brackets_only_our_categories() {
-        let a = format_args!("hi {}", 1).to_string();
         // module-path / empty target -> bare (third-party, untargeted)
         assert_eq!(fmt_body("symphonia_core::x", &format_args!("m")), "m");
         assert_eq!(fmt_body("", &format_args!("m")), "m");
         // our short category -> [CAT] prefix
         assert_eq!(fmt_body("AUDIO", &format_args!("m")), "[AUDIO] m");
-        let _ = a;
     }
 }
 
