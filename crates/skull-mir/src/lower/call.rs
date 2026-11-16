@@ -1867,7 +1867,7 @@ impl<'a> Builder<'a> {
                 })
                 .collect();
         }
-        if let Some(args) = self.sort_call_args(e, func, arg_idxs)? {
+        if let Some(args) = self.sort_call_args(e, dc, arg_idxs, None)? {
             return dc.plan.transport_arguments(args);
         }
         if dc.plan.uses_scalar_abi() {
@@ -2159,7 +2159,7 @@ impl<'a> Builder<'a> {
     ) -> Result<ValueBundle, CompilerError> {
         let dc = self.plan_direct_call(e)?;
         let value = (|| -> Result<ValueRepr, CompilerError> {
-            if let Some(args) = self.sort_ufcs_args(e, func, recv, arg_idxs)? {
+            if let Some(args) = self.sort_call_args(e, &dc, arg_idxs, Some(recv))? {
                 let args = dc.plan.transport_arguments(args)?;
                 return self.emit_direct_call(e, func, args, None, None, &dc);
             }

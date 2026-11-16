@@ -2,6 +2,7 @@
 //! tuple compares `K` leaf by leaf, first leaf first. The stdlib routes such a
 //! sort through `__sort_key_wide` (a compile-time bool an `if` folds on) and
 //! `__sort_key_lt` (the comparison), so a scalar key keeps its original path.
+use super::call::DirectCall;
 use super::*;
 use crate::lower::shape::mono_value_shape;
 use crate::monoty::MonoTy;
@@ -18,80 +19,92 @@ impl<'a> Builder<'a> {
     fn is_stdlib_sort(&self, func: FuncRef) -> bool {
         let module = self.ws.module(func.module);
         let decl = &module.functions[func.func];
-        decl.name.as_str() == "sort"
+        matches!(decl.name.as_str(), "sort" | "__vec_sort_by_key_leaves")
             && bone_core::modules::is_stdlib_module_file(module.file.as_str())
             && decl.param_decls.len() == 2
     }
 
-    pub(crate) fn sort_ufcs_args(
-        &mut self,
-        e: Idx<Expr>,
-        func: FuncRef,
-        recv: Idx<Inst>,
-        args: &[Idx<Expr>],
-    ) -> Result<Option<Vec<Idx<Inst>>>, CompilerError> {
-        let [key] = args else { return Ok(None) };
-        if !self.is_stdlib_sort(func) || !self.sort_key_is_structured(*key)? {
-            return Ok(None);
-        }
-        self.validate_sort_key(e, &self.sort_key_ty(*key)?)?;
-        Ok(Some(vec![recv, self.lower_sort_key(*key)?]))
-    }
-
-    /// Only the stdlib sort consumes this private callback ABI. Other uses of
-    /// the same function value keep their ordinary calling convention.
+    /// Only the stdlib sort consumes this private callback ABI. Evaluate and
+    /// place arguments like the ordinary binder, including spread overrides.
     pub(crate) fn sort_call_args(
         &mut self,
         e: Idx<Expr>,
-        func: FuncRef,
+        dc: &DirectCall<'a>,
         args: &[Idx<Expr>],
+        recv: Option<Idx<Inst>>,
     ) -> Result<Option<Vec<Idx<Inst>>>, CompilerError> {
-        if !self.is_stdlib_sort(func) || args.len() != 2 {
+        let func = dc.callee_inst.func;
+        if !self.is_stdlib_sort(func) {
             return Ok(None);
         }
-        let decl = &self.ws.module(func.module).functions[func.func];
-        let mut positions = [0, 1];
-        for (i, arg) in args.iter().enumerate() {
-            if let Some(name) = self.body.arg_names.get(arg) {
-                let Some(pos) = decl.param_decls.iter().position(|p| p.name == *name) else {
-                    return Ok(None);
-                };
-                positions[i] = pos;
-            }
+        // Vec.sort already received the private callback from its caller.
+        if self.site_owner.as_ref().is_some_and(|owner| {
+            let module = self.ws.module(owner.func.module);
+            module.functions[owner.func.func].name.as_str() == "sort"
+                && bone_core::modules::is_stdlib_module_file(module.file.as_str())
+        }) {
+            return Ok(None);
         }
-        let recv = args[positions.iter().position(|p| *p == 0).unwrap_or(0)];
-        let key = args[positions.iter().position(|p| *p == 1).unwrap_or(1)];
-        if !matches!(
-            self.concrete_expr_ty(recv),
-            Some(MonoTy::App {
-                ctor: MonoCtor::Array,
-                ..
-            })
-        ) || !self.sort_key_is_structured(key)?
+        let signature = self.direct_call_signature(dc)?;
+        let key_ty = self
+            .concrete_param_ty_of(signature, &dc.callee_inst, 1)?
+            .ok_or_else(|| self.gap_here("sort key function has no concrete type"))?;
+        let MonoTy::Function { ret, .. } = key_ty.as_ref() else {
+            return Err(self.gap_here("sort key function has no concrete function type"));
+        };
+        if !matches!(ret.peel_nullable().0, MonoTy::Tuple(_))
+            && mono_value_shape(self.ws, ret).is_none()
         {
             return Ok(None);
         }
-        let ty = self.sort_key_ty(key)?;
-        self.validate_sort_key(e, &ty)?;
-        let mut values = vec![None; 2];
-        for (arg, pos) in args.iter().zip(positions) {
-            values[pos] = Some(if pos == 1 {
-                self.lower_sort_key(*arg)?
+        self.validate_sort_key(e, ret)?;
+        let plan = self.sort_key_plan(&key_ty, true)?;
+        let decl = &self.ws.module(func.module).functions[func.func];
+        let mut slots = [recv, None];
+        let mut next_pos = usize::from(recv.is_some());
+        for &arg in args {
+            if self.body.spread_args.contains(&arg) {
+                for (name, bundle) in self.spread_field_bundles(arg)? {
+                    let pos = decl
+                        .param_decls
+                        .iter()
+                        .position(|p| p.name == name)
+                        .ok_or_else(|| self.gap_here("sort spread field matches no parameter"))?;
+                    let value = self.pack(bundle.into_value())?;
+                    slots[pos] = Some(if pos == 1 {
+                        self.adapt_sort_key(arg, value, &key_ty, plan.clone())?
+                    } else {
+                        value
+                    });
+                }
+                continue;
+            }
+            let pos = if let Some(name) = self.body.arg_names.get(&arg) {
+                decl.param_decls
+                    .iter()
+                    .position(|p| p.name == *name)
+                    .ok_or_else(|| self.gap_here("sort argument matches no parameter"))?
             } else {
-                self.lower_expr(*arg)?
+                let pos = next_pos;
+                next_pos += 1;
+                pos
+            };
+            let slot = slots
+                .get_mut(pos)
+                .ok_or_else(|| self.gap_here("sort argument is outside its parameter list"))?;
+            *slot = Some(if pos == 1 {
+                self.lower_sort_key(arg, &key_ty, plan.clone())?
+            } else {
+                self.lower_expr(arg)?
             });
         }
-        Ok(Some(values.into_iter().flatten().collect()))
+        let [Some(vec), Some(key)] = slots else {
+            return Err(self.gap_here("sort is missing its receiver or key"));
+        };
+        Ok(Some(vec![vec, key]))
     }
 
-    fn sort_key_plan(
-        &self,
-        key_fn: Idx<Expr>,
-        leaves: bool,
-    ) -> Result<FunctionRepPlan, CompilerError> {
-        let ty = self
-            .concrete_expr_ty(key_fn)
-            .ok_or_else(|| self.gap_here("sort key function has no concrete type"))?;
+    fn sort_key_plan(&self, ty: &MonoTy, leaves: bool) -> Result<FunctionRepPlan, CompilerError> {
         if self.scx.values_first_class || !leaves {
             BackendFnAbiPlan::for_function_value(self.ws, self.call_scx, ty)
         } else {
@@ -100,15 +113,26 @@ impl<'a> Builder<'a> {
         .map_err(|error| self.rep_error(error))
     }
 
-    fn lower_sort_key(&mut self, key: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
-        let plan = self.sort_key_plan(key, true)?;
+    fn lower_sort_key(
+        &mut self,
+        key: Idx<Expr>,
+        ty: &MonoTy,
+        plan: FunctionRepPlan,
+    ) -> Result<Idx<Inst>, CompilerError> {
         if let Expr::Lambda { params, body } = self.body.expr_arena[key] {
             return self.lower_lambda_with_plan(key, params, body, plan);
         }
         let callee = self.lower_expr(key)?;
-        let ty = self
-            .concrete_expr_ty(key)
-            .ok_or_else(|| self.gap_here("sort key function has no concrete type"))?;
+        self.adapt_sort_key(key, callee, ty, plan)
+    }
+
+    fn adapt_sort_key(
+        &mut self,
+        key: Idx<Expr>,
+        callee: Idx<Inst>,
+        ty: &MonoTy,
+        plan: FunctionRepPlan,
+    ) -> Result<Idx<Inst>, CompilerError> {
         let original = self
             .fn_value_rep_plan_for_mono(ty)?
             .ok_or_else(|| self.gap_here("sort key function has no ABI"))?;
@@ -154,7 +178,11 @@ impl<'a> Builder<'a> {
         let leaves = self.sort_slot_values(value, &arena.ret_slot(result))?;
         self.f.set_term(self.cur, Term::Return(leaves));
         self.cur = saved;
+        let outer_expr = self.cur_expr.replace(key);
+        let outer_span = self.cur_span.replace(self.body.expr_spans[key]);
         let lambda = self.emit_cur(Inst::Lambda { params, entry });
+        self.cur_expr = outer_expr;
+        self.cur_span = outer_span;
         self.f
             .lambda_abi_fingerprints
             .insert(lambda, plan.logical_fingerprint(arena));
@@ -266,7 +294,10 @@ impl<'a> Builder<'a> {
             }
             Err(error) => return Err(error),
         };
-        let plan = self.sort_key_plan(*key_fn, self.uses_sort_key_leaf_abi())?;
+        let fn_ty = self
+            .concrete_expr_ty(*key_fn)
+            .ok_or_else(|| self.gap_here("sort key function has no concrete type"))?;
+        let plan = self.sort_key_plan(fn_ty, self.uses_sort_key_leaf_abi())?;
         let callee = self.lower_expr(*key_fn)?;
         let lhs = self.sort_key_leaves(&plan, callee, *a, &ty)?;
         let rhs = self.sort_key_leaves(&plan, callee, *b, &ty)?;

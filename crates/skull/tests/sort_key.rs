@@ -72,6 +72,10 @@ fn rejected_sort_key_labels_the_user_call() {
             "fn main() { let xs: [int]? = [1, 2]\n xs?.sort(x => (x > 1, x)) }",
             "xs?.sort(x => (x > 1, x))",
         ),
+        (
+            "struct Key { key_fn: fn(int) -> (bool, int) } fn main() { let xs = [1, 2]\n xs.sort(..Key { key_fn: x => (x > 1, x) }) }",
+            "xs.sort(..Key { key_fn: x => (x > 1, x) })",
+        ),
     ] {
         let err = try_emit_module(src).expect_err("unordered key must be rejected");
         assert!(err.message.contains("cannot sort by a key"), "{err:?}");
