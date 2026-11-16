@@ -1091,3 +1091,17 @@ fn a_comment_may_close_a_delimited_list() {
         parse(src, Dialect::Legacy);
     }
 }
+
+#[test]
+fn a_comment_may_sit_before_any_list_comma() {
+    for src in [
+        "fn f() {\n    g(a /* c */, b)\n}\n",
+        "fn f() {\n    g(x: a /* c */, y: b)\n}\n",
+        "fn f() {\n    let v = [a /* c */, b]\n}\n",
+        "@a(1 /* c */, 2)\nfn f() {}\n",
+        "fn f(m: Map<int /* c */, int>) {}\n",
+        "fn f(m: Map<\n    // c\n    int,\n>) {}\n",
+    ] {
+        parse(src, Dialect::Legacy);
+    }
+}

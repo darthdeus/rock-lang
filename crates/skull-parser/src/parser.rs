@@ -591,6 +591,24 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Whether another element of a comma list closed by `close` follows,
+    /// after any comments. A `>` close also stops at the `>>` that
+    /// `expect_generic_close` splits.
+    fn list_item_follows(&mut self, close: TokenKind) -> bool {
+        self.skip_comments();
+        let k = self.kind();
+        !(k == close
+            || (close == TokenKind::GreaterThan && k == TokenKind::RightShift)
+            || self.at_end())
+    }
+
+    /// After a list element: whether a comma, possibly after comments, says
+    /// another element or the close follows.
+    fn list_continues(&mut self) -> bool {
+        self.skip_comments();
+        self.eat(TokenKind::Comma)
+    }
+
     // ---- items ------------------------------------------------------------
 
     /// Parse leading visibility modifiers (v1): any sequence of `pub`,
@@ -742,14 +760,9 @@ impl<'a> Parser<'a> {
         let kind = if self.kind() == TokenKind::OpenCurly {
             self.advance();
             let mut trees = Vec::new();
-            loop {
-                self.skip_comments();
-                if self.kind() == TokenKind::CloseCurly || self.at_end() {
-                    break;
-                }
+            while self.list_item_follows(TokenKind::CloseCurly) {
                 trees.push(self.parse_use_tree(false)?);
-                self.skip_comments();
-                if !self.eat(TokenKind::Comma) {
+                if !self.list_continues() {
                     break;
                 }
             }
@@ -1023,14 +1036,9 @@ impl<'a> Parser<'a> {
         let sigil = self.eat(TokenKind::Bang);
         self.expect(TokenKind::OpenParen)?;
         let mut args = Vec::new();
-        while self.kind() != TokenKind::CloseParen && !self.at_end() {
-            self.skip_comments();
-            if self.kind() == TokenKind::CloseParen {
-                break;
-            }
+        while self.list_item_follows(TokenKind::CloseParen) {
             args.push(self.parse_macro_arg(sigil)?);
-            self.skip_comments();
-            if !self.eat(TokenKind::Comma) {
+            if !self.list_continues() {
                 break;
             }
         }
@@ -1052,11 +1060,7 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::OpenParen)?;
         self.delimiter_depth += 1;
         let mut args = Vec::new();
-        while self.kind() != TokenKind::CloseParen && !self.at_end() {
-            self.skip_comments();
-            if self.kind() == TokenKind::CloseParen {
-                break;
-            }
+        while self.list_item_follows(TokenKind::CloseParen) {
             let is_splat = self.eat(TokenKind::TripleDot); // `inner!(...rest)`
             let value = self.parse_macro_arg(true)?;
             args.push(FunctionCallArg {
@@ -1065,8 +1069,7 @@ impl<'a> Parser<'a> {
                 is_splat,
                 is_spread: false,
             });
-            self.skip_comments();
-            if !self.eat(TokenKind::Comma) {
+            if !self.list_continues() {
                 break;
             }
         }
@@ -1268,13 +1271,9 @@ impl<'a> Parser<'a> {
             if self.kind() == TokenKind::OpenParen {
                 self.advance();
                 self.delimiter_depth += 1;
-                while self.kind() != TokenKind::CloseParen && !self.at_end() {
-                    self.skip_comments();
-                    if self.kind() == TokenKind::CloseParen {
-                        break;
-                    }
+                while self.list_item_follows(TokenKind::CloseParen) {
                     // Named arg `name = value`.
-                    let arg_name = if matches!(self.kind(), TokenKind::Ident(_))
+                    let name = if matches!(self.kind(), TokenKind::Ident(_))
                         && self.peek_kind() == TokenKind::Assign
                     {
                         let n = self.expect_ident()?;
@@ -1284,11 +1283,8 @@ impl<'a> Parser<'a> {
                         None
                     };
                     let value = self.with_allow_literals(true, |p| p.parse_expr(0))?;
-                    args.push(AnnoArg {
-                        name: arg_name,
-                        value,
-                    });
-                    if !self.eat(TokenKind::Comma) {
+                    args.push(AnnoArg { name, value });
+                    if !self.list_continues() {
                         break;
                     }
                 }
@@ -1755,18 +1751,12 @@ impl<'a> Parser<'a> {
     /// Parse a `<T, U = Default, ...>` generic parameter list (empty if no `<`).
     /// Closes on `>` or a split `>>` (`expect_generic_close`).
     fn parse_generics(&mut self) -> PResult<Vec<Generic>> {
-        let mut out = Vec::new();
         if self.kind() != TokenKind::LessThan {
-            return Ok(out);
+            return Ok(Vec::new());
         }
         self.advance(); // `<`
-        while !matches!(self.kind(), TokenKind::GreaterThan | TokenKind::RightShift)
-            && !self.at_end()
-        {
-            self.skip_comments();
-            if matches!(self.kind(), TokenKind::GreaterThan | TokenKind::RightShift) {
-                break;
-            }
+        let mut out = Vec::new();
+        while self.list_item_follows(TokenKind::GreaterThan) {
             let name = self.expect_ident()?;
             let bound = if self.eat(TokenKind::Colon) {
                 Some(self.parse_type()?)
@@ -1783,8 +1773,7 @@ impl<'a> Parser<'a> {
                 bound,
                 default,
             });
-            self.skip_comments(); // `<T /* c */>`
-            if !self.eat(TokenKind::Comma) {
+            if !self.list_continues() {
                 break;
             }
         }
@@ -1865,11 +1854,7 @@ impl<'a> Parser<'a> {
             self.skip_comments();
             self.eat(TokenKind::Comma);
         }
-        while self.kind() != TokenKind::CloseParen && !self.at_end() {
-            self.skip_comments();
-            if self.kind() == TokenKind::CloseParen {
-                break;
-            }
+        while self.list_item_follows(TokenKind::CloseParen) {
             let annotations = self.parse_item_annotations()?;
             let name = self.expect_ident()?;
             self.expect(TokenKind::Colon)?;
@@ -1892,8 +1877,7 @@ impl<'a> Parser<'a> {
                 is_variadic,
                 annotations,
             });
-            self.skip_comments();
-            if !self.eat(TokenKind::Comma) {
+            if !self.list_continues() {
                 break;
             }
         }
@@ -2008,11 +1992,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.delimiter_depth += 1;
                 let mut tys = Vec::new();
-                while self.kind() != TokenKind::CloseParen && !self.at_end() {
-                    self.skip_comments();
-                    if self.kind() == TokenKind::CloseParen {
-                        break;
-                    }
+                while self.list_item_follows(TokenKind::CloseParen) {
                     if matches!(self.kind(), TokenKind::Ident(_))
                         && self.peek_kind() == TokenKind::Colon
                     {
@@ -2020,8 +2000,7 @@ impl<'a> Parser<'a> {
                         self.advance(); // `:`
                     }
                     tys.push(self.parse_type()?);
-                    self.skip_comments(); // `Rect(float /* c */, float /* c */)`
-                    if !self.eat(TokenKind::Comma) {
+                    if !self.list_continues() {
                         break;
                     }
                 }
@@ -2214,12 +2193,9 @@ impl<'a> Parser<'a> {
     /// `<T, U>` generic type arguments after an explicit `<` (v1 path ctor).
     fn parse_type_arg_list(&mut self) -> PResult<Vec<Idx<TypeExprData>>> {
         let mut args = Vec::new();
-        while !matches!(self.kind(), TokenKind::GreaterThan | TokenKind::RightShift)
-            && !self.at_end()
-        {
+        while self.list_item_follows(TokenKind::GreaterThan) {
             args.push(self.parse_type()?);
-            self.skip_comments();
-            if !self.eat(TokenKind::Comma) {
+            if !self.list_continues() {
                 break;
             }
         }
@@ -2340,19 +2316,7 @@ impl<'a> Parser<'a> {
                         // Generic application `Foo<A, B>`.
                         else if self.kind() == TokenKind::LessThan {
                             self.advance();
-                            let mut args = Vec::new();
-                            while !matches!(
-                                self.kind(),
-                                TokenKind::GreaterThan | TokenKind::RightShift
-                            ) && !self.at_end()
-                            {
-                                args.push(self.parse_type()?);
-                                self.skip_comments(); // `Foo<int /* c */>`
-                                if !self.eat(TokenKind::Comma) {
-                                    break;
-                                }
-                            }
-                            self.expect_generic_close()?;
+                            let args = self.parse_type_arg_list()?;
                             TypeExprKind::App { ctor, args }
                         } else {
                             TypeExprKind::Ident(ctor)
@@ -3288,32 +3252,17 @@ impl<'a> Parser<'a> {
     ) -> PResult<Idx<ExprData>> {
         self.advance(); // consume `(`
         self.delimiter_depth += 1;
-        let mut args = Vec::new();
         let mut seen_named = false;
-        while self.kind() != TokenKind::CloseParen && !self.at_end() {
-            self.skip_comments();
-            if self.kind() == TokenKind::CloseParen {
-                break;
-            }
+        let mut args = Vec::new();
+        while self.list_item_follows(TokenKind::CloseParen) {
             // Struct spread `..expr` — the operand's fields expand into named
             // args at this position (resolved in bone). A spread carries no
             // name and may legally follow a named arg, so it's detected before
             // the positional-after-named check.
-            if self.kind() == TokenKind::DoubleDot {
-                self.advance();
-                let value = self.with_allow_literals(true, |p| p.parse_expr(0))?;
-                args.push(FunctionCallArg {
-                    name: None,
-                    value,
-                    is_splat: false,
-                    is_spread: true,
-                });
-                if !self.eat(TokenKind::Comma) {
-                    break;
-                }
-                continue;
-            }
-            let name = if matches!(self.kind(), TokenKind::Ident(_))
+            let is_spread = self.eat(TokenKind::DoubleDot);
+            let name = if is_spread {
+                None
+            } else if matches!(self.kind(), TokenKind::Ident(_))
                 && self.peek_kind() == TokenKind::Colon
             {
                 let ident = self.expect_ident()?;
@@ -3328,15 +3277,15 @@ impl<'a> Parser<'a> {
             // `f(...rest)` — a splat arg (carried as a flag, value = the inner
             // expr), matching rock; otherwise `...x` would parse as a `Spread`
             // expr and macro splat expansion couldn't recognize it.
-            let is_splat = self.eat(TokenKind::TripleDot);
+            let is_splat = !is_spread && self.eat(TokenKind::TripleDot);
             let value = self.with_allow_literals(true, |p| p.parse_expr(0))?;
             args.push(FunctionCallArg {
                 name,
                 value,
                 is_splat,
-                is_spread: false,
+                is_spread,
             });
-            if !self.eat(TokenKind::Comma) {
+            if !self.list_continues() {
                 break;
             }
         }
@@ -3430,11 +3379,7 @@ impl<'a> Parser<'a> {
         {
             self.advance(); // `(`
             let mut params = Vec::new();
-            while self.kind() != TokenKind::CloseParen && !self.at_end() {
-                self.skip_comments();
-                if self.kind() == TokenKind::CloseParen {
-                    break;
-                }
+            while self.list_item_follows(TokenKind::CloseParen) {
                 let name = self.expect_ident()?;
                 let ty = if self.eat(TokenKind::Colon) {
                     Some(self.parse_type()?)
@@ -3443,8 +3388,7 @@ impl<'a> Parser<'a> {
                 };
                 let span = self.span_from(name.span);
                 params.push(LambdaParam { span, name, ty });
-                self.skip_comments();
-                if !self.eat(TokenKind::Comma) {
+                if !self.list_continues() {
                     break;
                 }
             }
@@ -3828,13 +3772,9 @@ impl<'a> Parser<'a> {
     fn parse_expr_list(&mut self, close: TokenKind) -> PResult<Vec<Idx<ExprData>>> {
         self.delimiter_depth += 1;
         let mut items = Vec::new();
-        while self.kind() != close && !self.at_end() {
-            self.skip_comments();
-            if self.kind() == close {
-                break;
-            }
+        while self.list_item_follows(close) {
             items.push(self.with_allow_literals(true, |p| p.parse_expr(0))?);
-            if !self.eat(TokenKind::Comma) {
+            if !self.list_continues() {
                 break;
             }
         }
