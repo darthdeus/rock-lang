@@ -43,7 +43,7 @@ pub fn emit_named_with_statics(
     inherited_statics: &[StaticCell],
     bound: Option<&CalleeBindingPlan>,
 ) -> String {
-    emit_named_framed_with_statics(
+    emit_body(
         ws,
         ctx,
         interner,
@@ -52,7 +52,9 @@ pub fn emit_named_with_statics(
         None,
         inherited_statics,
         bound,
+        None,
     )
+    .0
 }
 
 /// The coroutine state-table context: a `co fn`'s `__step` reads/writes its
@@ -95,31 +97,7 @@ pub fn emit_named_framed(
     frame: Option<&FrameCtx>,
     bound: Option<&CalleeBindingPlan>,
 ) -> String {
-    emit_named_framed_with_statics(ws, ctx, interner, name, func, frame, &[], bound)
-}
-
-fn emit_named_framed_with_statics(
-    ws: &Workspace,
-    ctx: &CodegenCtx,
-    interner: &MonoInterner,
-    name: &str,
-    func: &MirFunc,
-    frame: Option<&FrameCtx>,
-    inherited_statics: &[StaticCell],
-    bound: Option<&CalleeBindingPlan>,
-) -> String {
-    emit_named_framed_with_statics_impl(
-        ws,
-        ctx,
-        interner,
-        name,
-        func,
-        frame,
-        inherited_statics,
-        bound,
-        None,
-    )
-    .0
+    emit_body(ws, ctx, interner, name, func, frame, &[], bound, None).0
 }
 
 pub fn emit_named_framed_with_allocation_sites(
@@ -137,7 +115,7 @@ pub fn emit_named_framed_with_allocation_sites(
     // The header offset comes back from the emission rather than from a search
     // for `function <name>`: a bound body's only
     // copy sits inside a factory and that spelling does not appear at all.
-    let (lua, header_offset) = emit_named_framed_with_statics_impl(
+    let (lua, header_offset) = emit_body(
         ws,
         ctx,
         interner,
@@ -215,7 +193,7 @@ pub fn with_constants_baked<R>(
 /// Returns the emitted definition and the byte offset of its header (the
 /// `function` keyword that opens the body), which the allocation-site reporter
 /// turns into a body-relative line number.
-fn emit_named_framed_with_statics_impl(
+fn emit_body(
     ws: &Workspace,
     ctx: &CodegenCtx,
     interner: &MonoInterner,

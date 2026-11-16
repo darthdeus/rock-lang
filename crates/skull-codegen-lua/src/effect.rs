@@ -258,65 +258,21 @@ impl Emitter<'_> {
                 val_cell,
                 table,
             } => {
-                if self.cell_is_frame_field(*key_cell) || self.cell_is_frame_field(*val_cell) {
-                    let targets: Vec<_> = [*key_cell, *val_cell]
-                        .iter()
-                        .map(|c| {
-                            (
-                                cellname(self.func, self.frame, self.cell_colors, *c),
-                                self.cell_is_frame_field(*c),
-                            )
-                        })
-                        .collect();
-                    self.write_frame_assignment(out, &targets, |out| {
-                        out.push_str("next(");
-                        self.write_opnd(out, *table);
-                        write!(out, ", {})", targets[0].0).unwrap();
-                    });
-                    return;
-                }
-                // `key_cell` is referenced twice; render it once.
-                let k = cellname(self.func, self.frame, self.cell_colors, *key_cell);
-                let _ = write!(out, " {k}, ");
-                write_cellname(out, self.func, self.frame, self.cell_colors, *val_cell);
-                let _ = write!(out, " = next(");
-                self.write_opnd(out, *table);
-                let _ = writeln!(out, ", {k})");
+                let key = cellname(self.func, self.frame, self.cell_colors, *key_cell);
+                self.write_cells_assignment(out, &[*key_cell, *val_cell], |out| {
+                    out.push_str("next(");
+                    self.write_opnd(out, *table);
+                    write!(out, ", {key})").unwrap();
+                });
             }
             // Scalar-ABI multi-return: `d0, d1, ... = callee(args)`. The callee is
             // a value-returning fn whose return is scalarized to N leaf values.
             Inst::CallMulti { dests, func, args } => {
-                if dests.iter().any(|c| self.cell_is_frame_field(*c)) {
-                    let targets: Vec<_> = dests
-                        .iter()
-                        .map(|c| {
-                            (
-                                cellname(self.func, self.frame, self.cell_colors, *c),
-                                self.cell_is_frame_field(*c),
-                            )
-                        })
-                        .collect();
-                    self.write_frame_assignment(out, &targets, |out| {
-                        write!(out, "{}(", self.callee_name(id, *func)).unwrap();
-                        self.write_csv(out, self.call_args(*func, args));
-                        out.push(')');
-                    });
-                    return;
-                }
-                out.push(' ');
-                for (i, c) in dests.iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(", ");
-                    }
-                    write_cellname(out, self.func, self.frame, self.cell_colors, *c);
-                }
-                let callee = self.callee_name(id, *func);
-                if !dests.is_empty() {
-                    out.push_str(" = ");
-                }
-                let _ = write!(out, "{callee}(");
-                self.write_csv(out, self.call_args(*func, args));
-                out.push_str(")\n");
+                self.write_cells_assignment(out, dests, |out| {
+                    write!(out, "{}(", self.callee_name(id, *func)).unwrap();
+                    self.write_csv(out, self.call_args(*func, args));
+                    out.push(')');
+                });
             }
             // Indirect multi-return: `d0, d1, ... = callee(args)` -- a tuple
             // returned through a fn-value. Multi-assign so Lua doesn't truncate.
@@ -325,38 +281,12 @@ impl Emitter<'_> {
                 callee,
                 args,
             } => {
-                if dests.iter().any(|c| self.cell_is_frame_field(*c)) {
-                    let targets: Vec<_> = dests
-                        .iter()
-                        .map(|c| {
-                            (
-                                cellname(self.func, self.frame, self.cell_colors, *c),
-                                self.cell_is_frame_field(*c),
-                            )
-                        })
-                        .collect();
-                    self.write_frame_assignment(out, &targets, |out| {
-                        self.write_opnd(out, *callee);
-                        out.push('(');
-                        self.write_csv(out, args);
-                        out.push(')');
-                    });
-                    return;
-                }
-                out.push(' ');
-                for (i, c) in dests.iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(", ");
-                    }
-                    write_cellname(out, self.func, self.frame, self.cell_colors, *c);
-                }
-                if !dests.is_empty() {
-                    out.push_str(" = ");
-                }
-                self.write_opnd(out, *callee);
-                out.push('(');
-                self.write_csv(out, args);
-                out.push_str(")\n");
+                self.write_cells_assignment(out, dests, |out| {
+                    self.write_opnd(out, *callee);
+                    out.push('(');
+                    self.write_csv(out, args);
+                    out.push(')');
+                });
             }
             // Rewritten to `s.__inner = ..` by the coroutine transform.
             Inst::CoroSetInner(_) => {

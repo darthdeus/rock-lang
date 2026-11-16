@@ -681,20 +681,6 @@ impl Emitter<'_> {
                 self.write_vec_slot(out, index);
                 out.push(']');
             }
-            // A leaf column: `index` is already 1-based and already checked
-            // (`VecCheckedIndex`), so this is a raw array read.
-            ContainerKind::VecColumn => {
-                self.write_opnd(out, base);
-                out.push('[');
-                self.write_opnd(out, index);
-                out.push(']');
-            }
-            ContainerKind::VecStrideSlot => {
-                self.write_opnd(out, base);
-                out.push('[');
-                self.write_opnd(out, index);
-                out.push(']');
-            }
             // A whole-element read has no single slot to name -- column storage
             // has no element table. Lowering decomposes every such read into
             // per-column reads (`column_element_repr`), so reaching emit means
@@ -726,9 +712,14 @@ impl Emitter<'_> {
                 self.write_opnd(out, index);
                 out.push(']');
             }
-            // A leaf view is a raw C pointer: index it directly. The index is
-            // absolute and the ELEMENT access was bounds-checked once already.
-            ContainerKind::NativeBufferLeaf | ContainerKind::Map => {
+            // A leaf column or stride slot: `index` is already 1-based and
+            // checked (`VecCheckedIndex`), so this is a raw array read. A leaf
+            // view is a raw C pointer whose ELEMENT access was bounds-checked
+            // once already.
+            ContainerKind::VecColumn
+            | ContainerKind::VecStrideSlot
+            | ContainerKind::NativeBufferLeaf
+            | ContainerKind::Map => {
                 self.write_opnd(out, base);
                 out.push('[');
                 self.write_opnd(out, index);
@@ -846,5 +837,40 @@ impl Emitter<'_> {
             }
         }
         out.push_str(" end\n");
+    }
+
+    /// `d0, d1, ... = <rhs>` into cells, through [`Self::write_frame_assignment`]
+    /// when any destination is a frame field. No destinations leave a bare
+    /// `<rhs>` statement.
+    pub(crate) fn write_cells_assignment(
+        &self,
+        out: &mut String,
+        dests: &[Idx<Cell>],
+        rhs: impl FnOnce(&mut String),
+    ) {
+        if dests.iter().any(|c| self.cell_is_frame_field(*c)) {
+            let targets: Vec<_> = dests
+                .iter()
+                .map(|c| {
+                    (
+                        cellname(self.func, self.frame, self.cell_colors, *c),
+                        self.cell_is_frame_field(*c),
+                    )
+                })
+                .collect();
+            return self.write_frame_assignment(out, &targets, rhs);
+        }
+        out.push(' ');
+        for (i, c) in dests.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            write_cellname(out, self.func, self.frame, self.cell_colors, *c);
+        }
+        if !dests.is_empty() {
+            out.push_str(" = ");
+        }
+        rhs(out);
+        out.push('\n');
     }
 }
