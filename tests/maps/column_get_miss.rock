@@ -11,20 +11,11 @@
 value GetCell { a: int, b: int }
 value GetCellF { x: float, y: float }
 
-@test fn map_column_get_miss_on_a_fresh_map() {
+@test fn map_column_get_miss_on_a_fresh_map_and_beside_a_live_key() {
     let m: Map<string, GetCell> = map_new()
     assert(m.get("nope") == null)
-}
-
-@test fn map_column_get_miss_beside_a_live_key() {
-    let m: Map<string, GetCell> = map_new()
     m["a"] = GetCell { a: 1, b: 2 }
     assert(m.get("nope") == null)
-}
-
-@test fn map_column_get_miss_bound_to_a_local() {
-    let m: Map<string, GetCell> = map_new()
-    m["a"] = GetCell { a: 1, b: 2 }
     let f = m.get("nope")
     assert(f == null)
 }

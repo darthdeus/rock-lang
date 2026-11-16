@@ -9,11 +9,6 @@
 //
 // Cross-backend on purpose: this is free on luajit and is the whole question on
 // JS. Run with `--backend js` too.
-//
-// Column-stored maps are probed with `contains` / index / `remove` rather than
-// `.get`: `Map<K, V: value>.get` on a MISS is broken independently of any of
-// this, and routing around it keeps this file
-// about spine keys.
 
 value Slot { a: int, b: int }
 

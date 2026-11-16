@@ -3,123 +3,35 @@
 // `continue`, string, int and struct keys and values, empty maps and an
 // inferred map type. Map order is unspecified, so assertions are order-free.
 
-@test(output = "6\n3")
-fn test_map_sum_values() {
+@test(output = "6\n3\n3")
+fn test_map_pair_iteration() {
     let m: Map<string, int> = map_new()
     m["a"] = 1
     m["b"] = 2
-    m["c"] = 3
+    insert(m, "c", 3)
     let total = 0
     let count = 0
     for (k, v) in m {
+        if k == "a" {
+            assert_eq(v, 1)
+        } else if k == "b" {
+            assert_eq(v, 2)
+        } else if k == "c" {
+            assert_eq(v, 3)
+        } else {
+            error("Unexpected key: " + k)
+        }
         total = total + v
         count = count + 1
     }
     print("{total}")
     print("{count}")
-}
-
-@test(output = "2")
-fn test_map_iter_with_continue() {
-    let m: Map<int, int> = map_new()
-    m[1] = 10
-    m[2] = 20
-    m[3] = 30
-    let seen = 0
-    for (k, v) in m {
-        if k == 2 {
-            continue
-        }
-        seen = seen + 1
-    }
-    print("{seen}")
-}
-
-@test(output = "100")
-fn test_map_iter_key_used() {
-    let m: Map<int, int> = map_new()
-    m[10] = 1
-    m[40] = 1
-    m[50] = 1
-    let ksum = 0
-    for (k, v) in m {
-        ksum = ksum + k
-    }
-    print("{ksum}")
-}
-
-@test
-fn test_map_tuple_destructuring() {
-    let m: Map<string, int> = map_new()
-    insert(m, "a", 1)
-    insert(m, "b", 2)
 
     let item_count = 0
     for item in m {
         item_count = item_count + 1
     }
-    assert_eq(item_count, 2)
-
-    let pair_count = 0
-    let found_a = false
-    let found_b = false
-    for (k, v) in m {
-        pair_count = pair_count + 1
-        if k == "a" {
-            assert_eq(v, 1)
-            found_a = true
-        } else if k == "b" {
-            assert_eq(v, 2)
-            found_b = true
-        }
-    }
-    assert_eq(pair_count, 2)
-    assert(found_a)
-    assert(found_b)
-}
-
-@test
-fn test_map_for_in_basic() {
-    let test_map: Map<string, string> = map_new()
-    insert(test_map, "key1", "value1")
-    insert(test_map, "key2", "value2")
-    insert(test_map, "key3", "value3")
-
-    let found_keys = 0
-    let found_values = 0
-
-    for (key, value) in test_map {
-        found_keys = found_keys + 1
-        found_values = found_values + 1
-
-        // Make sure we get the right key-value pairs
-        if key == "key1" {
-            assert value == "value1"
-        } else if key == "key2" {
-            assert value == "value2"
-        } else if key == "key3" {
-            assert value == "value3"
-        } else {
-            error("Unexpected key: " + key)
-        }
-    }
-
-    // Should iterate over all 3 entries
-    assert found_keys == 3
-    assert found_values == 3
-}
-
-@test
-fn test_map_for_in_empty() {
-    let empty_map: Map<string, int> = map_new()
-    let iterations = 0
-
-    for (key, value) in empty_map {
-        iterations = iterations + 1
-        error("Should not iterate over empty map")
-    }
-
-    assert iterations == 0
+    print("{item_count}")
 }
 
 struct TestStruct {
@@ -128,19 +40,16 @@ struct TestStruct {
 }
 
 @test
-fn test_map_for_in_complex_values() {
+fn test_map_for_in_struct_values() {
     let struct_map: Map<string, TestStruct> = map_new()
-
     insert(struct_map, "struct1", TestStruct { name: "first", value: 10 })
     insert(struct_map, "struct2", TestStruct { name: "second", value: 20 })
 
     let total_value = 0
     let total_entries = 0
-
     for (key, item) in struct_map {
         total_entries = total_entries + 1
         total_value = total_value + item.value
-
         if key == "struct1" {
             assert item.name == "first"
             assert item.value == 10
@@ -149,82 +58,75 @@ fn test_map_for_in_complex_values() {
             assert item.value == 20
         }
     }
-
     assert total_entries == 2
     assert total_value == 30
 }
 
-@test
-fn test_map_iteration_destructuring() {
+@test(output = "100\n2")
+fn test_map_int_keys_and_continue() {
+    let m: Map<int, int> = map_new()
+    m[10] = 1
+    m[40] = 1
+    m[50] = 1
+    let ksum = 0
+    let seen = 0
+    for (k, v) in m {
+        ksum = ksum + k
+        if k == 40 {
+            continue
+        }
+        seen = seen + 1
+    }
+    print("{ksum}")
+    print("{seen}")
+}
+
+@test(output = "3\nSum of values: 60")
+fn test_map_iteration_with_wildcards() {
     let m: Map<string, int> = map_new()
     insert(m, "a", 10)
     insert(m, "b", 20)
     insert(m, "c", 30)
 
-    print("Destructuring:")
-
-    // Collect all keys to verify they're present (order doesn't matter)
-    let found_a = false
-    let found_b = false
-    let found_c = false
-
+    let found = 0
     for (key, _) in m {
-        print(key)
-        if key == "a" {
-            found_a = true
-        }
-        if key == "b" {
-            found_b = true
-        }
-        if key == "c" {
-            found_c = true
+        if key == "a" || key == "b" || key == "c" {
+            found = found + 1
         }
     }
-
-    assert(found_a, "Key 'a' not found")
-    assert(found_b, "Key 'b' not found")
-    assert(found_c, "Key 'c' not found")
-}
-
-@test(output = "Sum of values: 150")
-fn test_map_iteration_computation() {
-    let m: Map<string, int> = map_new()
-    insert(m, "first", 30)
-    insert(m, "second", 50)
-    insert(m, "third", 70)
+    print(found)
 
     let sum = 0
     for (_, value) in m {
         sum = sum + value
     }
-
     print("Sum of values: {sum}")
 }
 
-@test(output = "Empty map iteration count: 0")
+@test(output = "0 0")
 fn test_empty_map_iteration() {
-    let m: Map<int, int> = map_new()
-
-    let count = 0
-    for _ in m {
-        count = count + 1
+    let empty_map: Map<string, int> = map_new()
+    let pairs = 0
+    for (key, value) in empty_map {
+        pairs = pairs + 1
+        error("Should not iterate over empty map")
     }
-
-    print("Empty map iteration count: {count}")
+    let ints: Map<int, int> = map_new()
+    let singles = 0
+    for _ in ints {
+        singles = singles + 1
+    }
+    print("{pairs} {singles}")
 }
 
-@test(output = "Type inference works: 3")
+@test(output = "3")
 fn test_map_iteration_type_inference() {
-    // Test that type inference works correctly for map iteration
     let m = map_new()
     insert(m, "x", 1)
     insert(m, "y", 2)
-
-    // The type of k and v should be inferred
     let total = 0
     for (k, v) in m {
-        total = total + v  // v should be inferred as int
+        total = total + v
     }
-
-    print("Type inference works: {total}")
+    print(total)
 }

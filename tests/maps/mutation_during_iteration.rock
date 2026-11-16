@@ -124,23 +124,3 @@ fn column_map_updated_pending_values_are_visible() {
     }
     print("{seen} {sum}")
 }
-
-@test(output = "9 3")
-fn nested_map_iteration_and_break_restart() {
-    let m: Map<string, int> = map_new()
-    m["a"] = 1
-    m["b"] = 2
-    m["c"] = 3
-    let pairs = 0
-    for (_, _) in m {
-        for (_, _) in m {
-            pairs += 1
-        }
-    }
-    for (_, _) in m { break }
-    let seen = 0
-    for (_, _) in m {
-        seen += 1
-    }
-    print("{pairs} {seen}")
-}

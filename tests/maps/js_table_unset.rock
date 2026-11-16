@@ -1,43 +1,26 @@
-// `table_unset` corpus for the `--backend js` ratchet (T8d). `table_unset(t, k)`
-// is the stdlib `inline(lua)` primitive `t[k] = nil` backing Map.remove and the
-// Vec drain ops (pop / remove_at / swap_remove / clear). On JS it dispatches on
-// `instanceof Map` -- `map.delete(k)` vs `delete arr[k]` -- so a removed Map key
-// reads back as nil and a popped Vec slot becomes a hole the tracked `.len`
-// skips. Map iteration (MapNext) stays out of scope, so no test here
-// iterates a Map.
+// `table_unset(t, k)` is the stdlib primitive `t[k] = nil` backing Map.remove
+// and the Vec drain ops (pop / remove_at / swap_remove / clear). On JS it
+// dispatches on `instanceof Map` -- `map.delete(k)` vs `delete arr[k]` -- so a
+// removed Map key reads back as nil and a popped Vec slot becomes a hole the
+// tracked `.len` skips.
 
-// A removed Map key reads back as nil; siblings survive.
+// A removed Map key reads back as nil and remove returns the old value;
+// siblings survive, and removing an absent key returns null.
 @test(returns = 1)
 fn test_map_remove() -> int {
     let m = map_new()
     m[1] = 10
     m[2] = 20
     m[3] = 30
-    m.remove(2)
+    let old = m.remove(2) ?? 0
+    let absent = m.remove(99) ?? 0
     let gone = if m.get(2) == null { 1 } else { 0 }
     let a = m[1]
     let c = m[3]
-    if gone == 1 && a == 10 && c == 30 { 1 } else { 0 }
+    if old == 20 && absent == 0 && gone == 1 && a == 10 && c == 30 { 1 } else { 0 }
 }
 
 // Map.remove returns the old value.
-@test(returns = 20)
-fn test_map_remove_returns_old() -> int {
-    let m = map_new()
-    m[2] = 20
-    let old = m.remove(2)
-    old ?? 0
-}
-
-// Removing an absent key is a no-op that returns null.
-@test(returns = 0)
-fn test_map_remove_absent() -> int {
-    let m = map_new()
-    m[1] = 10
-    let old = m.remove(99)
-    old ?? 0
-}
-
 // Vec.pop drains the last slot via table_unset; len shrinks.
 @test(returns = 32)
 fn test_vec_pop() -> int {
