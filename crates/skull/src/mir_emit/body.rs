@@ -849,6 +849,12 @@ pub(super) fn emit_spec_chunk(
         chunk.attribution = Some(Box::new(attribution));
         return Ok(chunk);
     }
+    let opts = skull_transform::body_chain::ChainOptions {
+        reserve: &|name| {
+            cg.mint_synthetic(name.to_string());
+        },
+        ..skull_transform::body_chain::ChainOptions::PLAIN
+    };
     let (mut deps, prepared_times, prepared_inline) = prepare_instance_body_with_attribution(
         ws,
         scx,
@@ -857,6 +863,7 @@ pub(super) fn emit_spec_chunk(
         &mut mf,
         inline_cache,
         &concrete.plans,
+        &opts,
     )
     .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
     times.add(&prepared_times);
@@ -1042,7 +1049,8 @@ pub fn prepare_instance_body_with_plans(
     cache: &mut skull_transform::InlineCache,
     concrete_plans: &skull_mir::concrete::ConcretePlans,
 ) -> Result<FxHashSet<FuncRef>, CompilerError> {
-    prepare_instance_body_with_attribution(ws, scx, fref, name, mf, cache, concrete_plans)
+    let opts = skull_transform::body_chain::ChainOptions::PLAIN;
+    prepare_instance_body_with_attribution(ws, scx, fref, name, mf, cache, concrete_plans, &opts)
         .map(|(spliced, _, _)| spliced)
 }
 
@@ -1054,6 +1062,7 @@ fn prepare_instance_body_with_attribution(
     mf: &mut skull_mir::mir::MirFunc,
     cache: &mut skull_transform::InlineCache,
     concrete_plans: &skull_mir::concrete::ConcretePlans,
+    opts: &skull_transform::body_chain::ChainOptions<'_>,
 ) -> Result<(FxHashSet<FuncRef>, PhaseTimes, InlineWork), CompilerError> {
     let mut times = PhaseTimes::default();
     let mut work = InlineWork::default();
@@ -1068,7 +1077,7 @@ fn prepare_instance_body_with_attribution(
         inliner,
         mf,
         name,
-        &skull_transform::body_chain::ChainOptions::PLAIN,
+        opts,
         &mut ChainStats::new(&mut times, &mut work),
     )
     .map_err(|e| e.error)?;

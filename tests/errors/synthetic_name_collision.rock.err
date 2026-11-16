@@ -46,3 +46,9 @@ co fn worker() -> Coroutine<int> {
     yield 2
 }
 fn main() { let w = worker() }
+
+//=== TEST CASE: nomangle_fn_vs_specialized_lambda_Generic ===
+// A specialized body names its lambdas after the instance symbol.
+@nomangle fn spec_T_spec_p_int__lambda0() -> int { return 7 }
+fn spec<T>(x: T) -> T { let g = () => x return g() }
+fn main() { print("{spec(5)}") print("{spec_T_spec_p_int__lambda0()}") }
