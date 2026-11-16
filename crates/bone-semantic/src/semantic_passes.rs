@@ -318,8 +318,14 @@ pub fn lower_modules_seeded(
             // `struct Scene` unseating stdlib `Scene<T>`) and mask this error.
             let mut dup_errs: Vec<CompilerError> = Vec::new();
 
+            let type_taken = |ws: &Workspace, name: &Ustr| {
+                ws.struct_by_name.contains_key(name)
+                    || ws.enums_by_name.contains_key(name)
+                    || ws.newtypes_by_name.contains_key(name)
+            };
+
             for (name, def) in item.module.struct_by_name.iter() {
-                if ws.struct_by_name.contains_key(name) {
+                if type_taken(ws, name) {
                     let span = item.module.structs[*def].span;
                     dup_errs.push(CompilerError::new_with_label(
                         span,
@@ -337,7 +343,7 @@ pub fn lower_modules_seeded(
             }
 
             for (name, def) in item.module.enums_by_name.iter() {
-                if ws.enums_by_name.contains_key(name) {
+                if type_taken(ws, name) {
                     let span = item.module.enums[*def].span;
                     dup_errs.push(CompilerError::new_with_label(
                         span,
@@ -355,7 +361,7 @@ pub fn lower_modules_seeded(
             }
 
             for (name, def) in item.module.newtypes_by_name.iter() {
-                if ws.newtypes_by_name.contains_key(name) {
+                if type_taken(ws, name) {
                     let span = item.module.newtypes[*def].span;
                     dup_errs.push(CompilerError::new_with_label(
                         span,
@@ -487,6 +493,7 @@ pub fn lower_modules_seeded(
     ws.module_timings.extend(lower_times);
     ws.log_time("insert modules", gap_timer);
 
+    check_duplicate_signatures(ws, &ids);
     let gap_timer = Instant::now();
     check_embed_site_legality(ws, &ids);
     crate::value_recursion::check_value_recursion(ws, &ids);
@@ -495,6 +502,63 @@ pub fn lower_modules_seeded(
     crate::identity_storage::check_identity_storage(ws, &ids);
 
     Ok(ids)
+}
+
+/// Two overloads of one family that no call can tell apart: same parameter
+/// types, generics and backend. Resolution ignores the return type and the
+/// parameter names, so either difference still leaves a tie. The later
+/// definition reports, and only when its module was lowered by this call.
+fn check_duplicate_signatures(ws: &mut Workspace, fresh: &[ModuleId]) {
+    let same = |a: (ModuleId, Idx<crate::hir::Function>),
+                b: (ModuleId, Idx<crate::hir::Function>)| {
+        let (fa, fb) = (
+            &ws.module(a.0).functions[a.1],
+            &ws.module(b.0).functions[b.1],
+        );
+        ws.param_signatures[a.0.index()][a.1] == ws.param_signatures[b.0.index()][b.1]
+            && fa.backend == fb.backend
+            && fa.is_variadic == fb.is_variadic
+            && fa.generics.len() == fb.generics.len()
+            && fa.generic_bounds.len() == fb.generic_bounds.len()
+            && fa
+                .generic_bounds
+                .iter()
+                .zip(&fb.generic_bounds)
+                .all(|(x, y)| match (x, y) {
+                    (None, None) => true,
+                    (Some(x), Some(y)) => ws.render(None, *x) == ws.render(None, *y),
+                    _ => false,
+                })
+    };
+    let mut errs: Vec<(ModuleId, CompilerError)> = Vec::new();
+    for fns in ws.functions_by_name.values() {
+        for (j, &later) in fns.iter().enumerate().skip(1) {
+            if !fresh.contains(&later.0) {
+                continue;
+            }
+            let Some(&first) = fns[..j].iter().find(|&&first| same(first, later)) else {
+                continue;
+            };
+            let f = &ws.module(later.0).functions[later.1];
+            let at = ws.module(first.0).functions[first.1].name_span.start();
+            let bare = f.name.rsplit("::").next().unwrap_or(&f.name);
+            let params = ws.param_signatures[later.0.index()][later.1].replace('\u{1}', ", ");
+            errs.push((
+                later.0,
+                CompilerError::new_with_label(
+                    f.name_span,
+                    format!(
+                        "duplicate definition of `{bare}({params})`: already defined at {}:{}",
+                        at.file,
+                        at.line + 1
+                    ),
+                ),
+            ));
+        }
+    }
+    for (mid, e) in errs {
+        ws.module_mut(mid).interface_errors.push(e);
+    }
 }
 
 fn check_frame_ref_storage(ws: &mut Workspace, fresh: &[ModuleId]) {
@@ -2280,6 +2344,11 @@ pub(crate) fn pass_register_forward_decls(
             if module.struct_by_name.insert(reg_name, idx).is_some() {
                 comp_error!(item.span, "duplicate struct definition: `{}`", s.name.name);
             }
+            if module.enums_by_name.contains_key(&reg_name)
+                || module.newtypes_by_name.contains_key(&reg_name)
+            {
+                comp_error!(item.span, "duplicate type definition: `{}`", s.name.name);
+            }
         } else if let ItemKind::Enum(e) = &item.kind {
             let reg_name = def_key(&e.name.name);
             let idx = module.enums.alloc(hir::EnumDef {
@@ -2292,6 +2361,11 @@ pub(crate) fn pass_register_forward_decls(
 
             if module.enums_by_name.insert(reg_name, idx).is_some() {
                 comp_error!(item.span, "duplicate enum definition: `{}`", e.name.name);
+            }
+            if module.struct_by_name.contains_key(&reg_name)
+                || module.newtypes_by_name.contains_key(&reg_name)
+            {
+                comp_error!(item.span, "duplicate type definition: `{}`", e.name.name);
             }
         } else if let ItemKind::Newtype(n) = &item.kind {
             let placeholder = module
@@ -2310,6 +2384,11 @@ pub(crate) fn pass_register_forward_decls(
 
             if module.newtypes_by_name.insert(reg_name, idx).is_some() {
                 comp_error!(item.span, "duplicate newtype definition: `{}`", n.name.name);
+            }
+            if module.struct_by_name.contains_key(&reg_name)
+                || module.enums_by_name.contains_key(&reg_name)
+            {
+                comp_error!(item.span, "duplicate type definition: `{}`", n.name.name);
             }
         }
         Ok(())

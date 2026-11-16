@@ -38,7 +38,7 @@ fn use_it() -> string {
     s
 }
 
-//- a_repeated_backend_keeps_the_group_tied @fail=Ambiguous overload for `dup` with argument types (int)
+//- a_repeated_backend_is_a_duplicate @fail=duplicate definition of `dup(int)`
 //-- main.rock @pkg=game,1
 inline(lua) fn dup(x: int) -> int = """return x + 1"""
 inline(lua) fn dup(x: int) -> int = """return x + 2"""

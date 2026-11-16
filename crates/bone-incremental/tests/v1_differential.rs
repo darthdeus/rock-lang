@@ -867,7 +867,8 @@ fn warm_one_family() -> Option<String> {
 /// A legacy file that starts defining a std-named function does not join the
 /// std family a v1 call reaches through tier 5: the call keeps
 /// selecting the std definition rather than tying with the legacy one, in
-/// the incremental session as in a fresh build.
+/// the incremental session as in a fresh build. The legacy definition itself
+/// duplicates the legacy std one, which every legacy call would tie on.
 #[test]
 fn a_legacy_definition_of_a_std_name_added_leaves_the_v1_call_on_std() {
     let without = "fn other() -> int {\n    2\n}\n";
@@ -877,7 +878,7 @@ fn a_legacy_definition_of_a_std_name_added_leaves_the_v1_call_on_std() {
     assert_eq!(h.call_keys("c.rock"), vec![("warm_one".to_string(), None)]);
 
     h.edit("legacy_def.rock", with).expect("accepted");
-    h.assert_no_diagnostics();
+    h.assert_diagnostic("duplicate definition of `warm_one()`");
     assert_eq!(h.call_keys("c.rock"), vec![("warm_one".to_string(), None)]);
     let selected: Vec<String> = snapshot(h.session.workspace(), &h.files)
         .references

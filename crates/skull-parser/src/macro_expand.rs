@@ -145,7 +145,7 @@ const HYGIENE_PREFIX: &str = "__inline_local_";
 /// module set: `foo(...)` in call position is ambiguous when both a `macro foo`
 /// and a `fn foo` exist (expansion would silently claim the call and shadow the
 /// fn), so it is rejected -- a macro always has exactly one meaning. Macro
-/// OVERLOADS (same name, different arity) stay legal; a same-named LOCAL binding
+/// OVERLOADS stay legal when no argument count selects two of them; a same-named LOCAL binding
 /// (param, nested fn, `let`) legally shadows a macro and is not a top-level fn,
 /// so it never collides. Cross-module: all parsed modules share one namespace,
 /// so this runs over the full parsed set before expansion erases the macro defs.
@@ -165,9 +165,30 @@ pub fn check_macro_name_uniqueness<'a>(
     }
     let mut errs = Vec::new();
     let mut reported: UstrSet = UstrSet::default();
+    let mut arities: UstrMap<Vec<(MacroArity, Span)>> = UstrMap::default();
     for m in modules {
         for item in &m.items {
             if let ItemKind::Function(f) = &item.kind {
+                if f.is_macro {
+                    let arity = MacroArity::of(f);
+                    let earlier = arities.entry(f.name.name).or_default();
+                    if let Some((argc, at)) = earlier
+                        .iter()
+                        .find_map(|(other, at)| Some((arity.overlap(other)?, at.start())))
+                    {
+                        errs.push(CompilerError::new_with_label(
+                            f.name.span,
+                            format!(
+                                "duplicate definition of macro `{}` taking {argc} argument{}: already defined at {}:{}",
+                                f.name.name,
+                                if argc == 1 { "" } else { "s" },
+                                at.file,
+                                at.line + 1
+                            ),
+                        ));
+                    }
+                    earlier.push((arity, f.name.span));
+                }
                 if f.is_macro && fn_names.contains(&f.name.name) && reported.insert(f.name.name) {
                     errs.push(CompilerError::new_with_label(
                         f.name.span,
@@ -181,6 +202,38 @@ pub fn check_macro_name_uniqueness<'a>(
         }
     }
     errs
+}
+
+/// The argument counts a macro overload accepts, as [`select_overload`]
+/// matches them: a fixed overload takes `lo..=hi`, a variadic one `lo` or more
+/// and loses to any fixed overload that also fits.
+struct MacroArity {
+    lo: usize,
+    hi: usize,
+    variadic: bool,
+}
+
+impl MacroArity {
+    fn of(f: &FunctionDef) -> Self {
+        match f.params.iter().position(|p| p.is_variadic) {
+            Some(lo) => MacroArity {
+                lo,
+                hi: usize::MAX,
+                variadic: true,
+            },
+            None => MacroArity {
+                lo: f.params.iter().filter(|p| p.default.is_none()).count(),
+                hi: f.params.len(),
+                variadic: false,
+            },
+        }
+    }
+
+    /// The smallest argument count both overloads would claim.
+    fn overlap(&self, other: &Self) -> Option<usize> {
+        let lo = self.lo.max(other.lo);
+        (self.variadic == other.variadic && lo <= self.hi.min(other.hi)).then_some(lo)
+    }
 }
 
 fn call_label_errors(m: &Ast, reg: &Registry) -> Vec<CompilerError> {

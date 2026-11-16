@@ -7,35 +7,6 @@
 use crate::common::emit_module;
 
 #[test]
-fn return_only_overloads_in_separate_modules_are_rejected() {
-    let ws = crate::common::ws_with_stdlib_module(
-        "fn return_pair(x: int) -> int { return x }",
-        "fn return_pair(x: int) -> string { return \"value\" }",
-    );
-    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
-    let result = skull::mir_emit::emit_workspace_mir(&ws, mid);
-    let error = match result {
-        Ok(_) => panic!("return-only overloads compiled successfully"),
-        Err(error) => error,
-    };
-    assert!(
-        error.message.contains("differ only in return type"),
-        "{}",
-        error.message
-    );
-    assert!(error.message.contains("return_pair"), "{}", error.message);
-    let files: Vec<_> = error
-        .labels
-        .iter()
-        .map(|label| label.span.file.as_str())
-        .collect();
-    assert!(
-        files.contains(&"<test>") && files.contains(&rock_stdlib::stdlib_file_id("probe").as_str()),
-        "{files:?}"
-    );
-}
-
-#[test]
 fn function_parameter_return_types_keep_distinct_symbols() {
     let lua = emit_module(
         r#"

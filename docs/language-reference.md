@@ -63,6 +63,11 @@ declares an ordinary function whose first parameter has type `Point`. The
 receiver has no type annotation at that position; both `p.move(1)` and
 `move(p, 1)` use the same function and overload rules.
 
+Overloads of one name must differ in their parameter types. A second
+definition with the same parameter types is rejected even when only its
+return type or parameter names differ. Per-backend variants (`inline(js)`
+beside `inline(lua)`) are one function, not overloads.
+
 A named function can be declared inside a function. It is visible from its
 declaration to the end of its block and can refer to globals, in-scope static
 locals and earlier nested functions. It cannot capture enclosing parameters or
@@ -129,7 +134,9 @@ macro double(x: expr) -> int { x + x }
 let result = double(5)
 ```
 
-Macros can be overloaded by argument shape and arity, and a variadic macro can
+Macros can be overloaded by arity. Two fixed-arity overloads, or two variadic
+ones, that accept the same argument count are rejected; a fixed-arity overload
+takes precedence over a variadic one. A variadic macro can
 expand recursively using `rest: ...expr` and `...rest`. A macro body can use
 `_G.name` for an explicit global and `^name` for a binding in the caller's
 scope. Macro-introduced local bindings do not capture substituted arguments.

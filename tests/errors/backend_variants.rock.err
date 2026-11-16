@@ -3,8 +3,8 @@
 //!            binding: bone accepts (its typecheck is backend-agnostic), then
 //!            skull's lua emission rejects at call lowering (`resolve_funcref`
 //!            backend select, target=Lua). (2) A genuine same-name
-//!            same-signature same-backend duplicate is NOT collapsed and still
-//!            ties -> "Ambiguous overload" at the call. (3) An unknown inline
+//!            same-signature same-backend duplicate is NOT collapsed: the
+//!            second definition is rejected. (3) An unknown inline
 //!            backend name is a fail-closed parse rejection.
 //! Tags: backends, extern-js, inline-js, overloads, stone-web
 
@@ -15,7 +15,8 @@ fn main() {
     print("{js_only()}")
 }
 
-//=== TEST CASE: same_backend_duplicate_still_ties_Ambiguous ===
+//=== TEST CASE: same_backend_duplicate_is_rejected_DuplicateSymbol ===
+//! expect: duplicate definition of `dup(int)`: already defined at test.rock:1
 inline(lua) fn dup(x: int) -> int = """return x + 1"""
 inline(lua) fn dup(x: int) -> int = """return x + 2"""
 
