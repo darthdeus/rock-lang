@@ -79,10 +79,6 @@ pub(crate) fn infer_statement(
                 }
                 gamma.ref_binding_provenance.insert(*name, provenance);
             }
-
-            // ctx.assign_named_type(*name, inf_ty);
-            // ctx.assign_type(name, ty)?;
-            // ctx.assign_type(e, ty)
         }
 
         Statement::Static { name, value } => {
@@ -433,13 +429,6 @@ pub(crate) fn infer_expr_used(
                     "yield is only allowed in a coroutine (co fn)".to_string(),
                 )
             })?;
-
-            // let ret = gamma.declared_ret_ty.ok_or_else(|| {
-            //     CompilerError::new_with_label(
-            //         expr_span,
-            //         "yield is only allowed in functions with an annotated return type".to_string(),
-            //     )
-            // })?;
 
             let (y, _r, n) = coroutine_yrn(gamma, ret, expr_span)?;
 
@@ -931,7 +920,6 @@ pub(crate) fn infer_expr_used(
                 }
 
                 let joined = join(gamma, lhs_ty, rhs_ty, expr_span)?;
-                // unify(gamma, lhs_ty, rhs_ty, expr_span)?;
 
                 let resolved = resolve(gamma, joined, expr_span);
 
@@ -1577,7 +1565,6 @@ pub(crate) fn infer_expr_used(
             else_branch,
         } => {
             let (unwrapped, deferred) = match infer_expr(c, gamma, *value) {
-                // if let x = 0 ... x: T
                 Ok(t) => (peel_nullable(gamma, t, expr_span), None),
                 Err(err) => (gamma.workspace.builtins.error(), Some(err)),
             };

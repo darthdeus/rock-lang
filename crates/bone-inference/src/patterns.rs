@@ -118,8 +118,7 @@ pub(crate) fn check_pattern(
                 CompilerError::new_with_label(span, format!("unknown enum `{}`", ename))
             })?;
 
-            // TODO: maybe don't need to clone
-            let def = gamma.workspace.module(eid.module).enums[eid.def].clone();
+            let def = &gamma.workspace.module(eid.module).enums[eid.def];
 
             let mut subs = FxHashMap::default();
             for (g, arg) in def.generics.iter().zip(params) {
@@ -132,7 +131,6 @@ pub(crate) fn check_pattern(
                 .variants
                 .iter()
                 .find(|v| v.name == variant)
-                .cloned()
                 .ok_or_else(|| {
                     CompilerError::new_with_label(
                         span,
@@ -140,7 +138,7 @@ pub(crate) fn check_pattern(
                     )
                 })?;
 
-            match vdef.payload {
+            match &vdef.payload {
                 VariantPayload::Unit => {
                     if sub.len() != 0 {
                         comp_error!(
@@ -194,8 +192,7 @@ pub(crate) fn check_pattern(
                 let ename = enum_name.unwrap_or(scrut);
 
                 if let Some(eid) = resolve_enum(gamma, ename) {
-                    // TODO: another clone we might not need?
-                    let def = gamma.workspace.module(eid.module).enums[eid.def].clone();
+                    let def = &gamma.workspace.module(eid.module).enums[eid.def];
 
                     let mut subs = FxHashMap::default();
                     for (g, arg) in def.generics.iter().zip(params) {
@@ -215,7 +212,6 @@ pub(crate) fn check_pattern(
                         .variants
                         .iter()
                         .find(|v| v.name == vname)
-                        .cloned()
                         .ok_or_else(|| {
                             CompilerError::new_with_label(
                                 span,
@@ -223,7 +219,7 @@ pub(crate) fn check_pattern(
                             )
                         })?;
 
-                    let rec = match vdef.payload {
+                    let rec = match &vdef.payload {
                         VariantPayload::Record(fs) => fs,
                         _ => comp_error!(span, "variant `{}` is not a record variant", vname),
                     };
@@ -332,17 +328,16 @@ pub(crate) fn destructure_pattern(
 
             match *gamma.get(resolved) {
                 TypeExpr::Tuple { elements } => {
-                    let es: Vec<_> = elements.into_iter().collect();
-                    if es.len() != subs.len() {
+                    if elements.len() != subs.len() {
                         comp_error!(
                             span,
                             "tuple binding count mismatch: expected {}, got {}",
                             subs.len(),
-                            es.len()
+                            elements.len()
                         );
                     }
 
-                    for (sub, e) in subs.iter().zip(es) {
+                    for (sub, e) in subs.iter().zip(elements) {
                         let et = resolve(gamma, resolved.with_idx(e), span);
                         // recurse
                         destructure_pattern(gamma, sub, et, span)?;

@@ -152,7 +152,7 @@ pub(crate) fn struct_field_ty(
                 }
             };
 
-            let def = gamma.workspace.module(sid.module).structs[sid.def].clone();
+            let def = &gamma.workspace.module(sid.module).structs[sid.def];
             let (subs, fresh) = gamma.instantiate_generics(&def.generics, span)?;
 
             let struct_ty = gamma.nominal_app(def.name, &fresh, span);
@@ -425,7 +425,7 @@ pub(crate) fn tuple_or_newtype_index_ty(
             params,
         } if gamma.workspace.newtypes_by_name.contains_key(&name) => {
             let NewtypeId { module: ntm, def } = resolve_newtype(gamma, name).unwrap();
-            let nt = gamma.workspace.module(ntm).newtypes[def].clone();
+            let nt = &gamma.workspace.module(ntm).newtypes[def];
 
             let mut subs = FxHashMap::default();
 
