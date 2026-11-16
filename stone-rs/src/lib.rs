@@ -3085,6 +3085,18 @@ fn follow_wm_fullscreen_exit(window: &mut StoneWindow) {
     ::log::info!(target: "STONE", "the WM took the window out of fullscreen: windowed at ({},{}) size {}x{}", pos.0, pos.1, w, h);
 }
 
+/// A hidden window (headless boot or runtime hide) must not change the real
+/// display: exclusive fullscreen switches the monitor's mode, and moving or
+/// fullscreening reconfigures outputs on the developer's desktop. Show applies
+/// its own mode, so a request made while hidden has no lasting effect anyway.
+fn display_change_allowed(window: &StoneWindow, request: &str) -> bool {
+    if window.runtime_hidden {
+        ::log::debug!(target: "VIDEO", "{request} ignored while the window is hidden");
+        return false;
+    }
+    true
+}
+
 fn set_fullscreen_impl(window: &mut StoneWindow, mode: c_int) -> bool {
     let fullscreen = match mode {
         1 => sdl2::video::FullscreenType::Desktop,
@@ -3137,6 +3149,9 @@ fn set_fullscreen_impl(window: &mut StoneWindow, mode: c_int) -> bool {
 pub extern "C" fn stone_set_fullscreen(mode: c_int) {
     WINDOW.with(|w| {
         if let Some(window) = w.borrow_mut().as_mut() {
+            if !display_change_allowed(window, "set_fullscreen") {
+                return;
+            }
             set_fullscreen_impl(window, mode);
         }
     });
@@ -3149,6 +3164,9 @@ pub extern "C" fn stone_toggle_fullscreen() -> c_int {
     WINDOW.with(|w| {
         if let Some(window) = w.borrow_mut().as_mut() {
             let is_fs = window.window.fullscreen_state() != sdl2::video::FullscreenType::Off;
+            if !display_change_allowed(window, "toggle_fullscreen") {
+                return is_fs as c_int;
+            }
             let is_max = (window.window.window_flags()
                 & sdl2::sys::SDL_WindowFlags::SDL_WINDOW_MAXIMIZED as u32)
                 != 0;
@@ -3438,6 +3456,9 @@ fn headless_window_size(game: (i32, i32)) -> (i32, i32) {
 pub extern "C" fn stone_set_window_display(index: c_int) {
     WINDOW.with(|w| {
         if let Some(window) = w.borrow_mut().as_mut() {
+            if !display_change_allowed(window, "set_window_display") {
+                return;
+            }
             // Already on the target display: nothing to do. Keeps a redundant
             // re-apply (boot's first display push, reopening settings) from
             // needlessly dropping + restoring fullscreen below.
@@ -3512,6 +3533,9 @@ pub extern "C" fn stone_set_window_display(index: c_int) {
 pub extern "C" fn stone_set_display_mode(width: c_int, height: c_int) {
     WINDOW.with(|w| {
         if let Some(window) = w.borrow_mut().as_mut() {
+            if !display_change_allowed(window, "set_display_mode") {
+                return;
+            }
             let idx = window.window.display_index().unwrap_or(0);
             let displays = gather_display_reports(&window._video);
             let Some(d) = displays.iter().find(|d| d.index == idx) else {

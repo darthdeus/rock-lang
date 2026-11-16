@@ -5,6 +5,9 @@ use std::process::Command;
 #[path = "support/stone_cdylib.rs"]
 mod stone_cdylib;
 
+#[path = "support/private_display.rs"]
+mod private_display;
+
 fn compile(source: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let c = dir.path().join("frontier.c");
@@ -135,8 +138,7 @@ fn desktop_imgui_frontier_reaches_real_widgets_and_draw_lists() {
     // The probe needs a real window; SDL's headless `offscreen` driver aborts
     // on `window != NULL`. macOS always has a GUI session.
     #[cfg(target_os = "linux")]
-    if std::env::var("DISPLAY").is_err() && std::env::var("WAYLAND_DISPLAY").is_err() {
-        println!("skipping: no display (headless Linux)");
+    if !private_display::available() {
         return;
     }
     run(
@@ -202,8 +204,7 @@ int main(void) {
 #[cfg(target_os = "linux")]
 #[test]
 fn imgui_pointer_follows_a_window_the_wm_moved_out_of_fullscreen() {
-    if std::env::var("DISPLAY").is_err() {
-        println!("skipping: no X display");
+    if !private_display::available() {
         return;
     }
     run(

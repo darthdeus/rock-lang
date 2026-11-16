@@ -6,15 +6,17 @@ use serial_test::serial;
 use std::ffi::CString;
 use stone_rs::{
     stone_create_window_ex, stone_get_fullscreen, stone_get_window_position, stone_get_window_size,
-    stone_init, stone_poll_event, stone_set_fullscreen, stone_show_window_if_deferred,
-    stone_teardown, stone_toggle_fullscreen, StoneEvent,
+    stone_init, stone_poll_event, stone_set_fullscreen, stone_show_window,
+    stone_show_window_if_deferred, stone_teardown, stone_toggle_fullscreen, StoneEvent,
 };
+
+#[path = "support/private_display.rs"]
+mod private_display;
 
 #[test]
 #[serial]
 fn toggle_fullscreen_restores_windowed_bounds() {
-    if std::env::var("DISPLAY").is_err() {
-        println!("skipping: no DISPLAY");
+    if !private_display::available() {
         return;
     }
     std::env::set_var("SDL_VIDEODRIVER", "x11");
@@ -65,11 +67,37 @@ fn toggle_fullscreen_restores_windowed_bounds() {
     assert!(stone_teardown());
 }
 
+/// A hidden window leaves the real display alone; once shown it obeys again.
+#[test]
+#[serial]
+fn hidden_window_ignores_fullscreen_requests() {
+    if !private_display::available() {
+        return;
+    }
+    std::env::set_var("SDL_VIDEODRIVER", "x11");
+    std::env::set_var("STONE_HEADLESS", "1");
+    assert!(stone_init());
+
+    let title = CString::new("test-hidden-fs").unwrap();
+    let window = stone_create_window_ex(title.as_ptr(), 200, 150, 480, 360, -1, true, 0);
+    assert!(!window.is_null());
+    stone_set_fullscreen(2);
+    assert_eq!(stone_get_fullscreen(), 0);
+    assert_eq!(stone_toggle_fullscreen(), 0);
+    assert_eq!(stone_get_fullscreen(), 0);
+
+    stone_show_window();
+    stone_set_fullscreen(1);
+    assert_eq!(stone_get_fullscreen(), 1);
+
+    assert!(stone_teardown());
+    std::env::remove_var("STONE_HEADLESS");
+}
+
 #[test]
 #[serial]
 fn alt_enter_key_event_toggles_fullscreen_and_suppresses_repeat() {
-    if std::env::var("DISPLAY").is_err() {
-        println!("skipping: no DISPLAY");
+    if !private_display::available() {
         return;
     }
     std::env::set_var("SDL_VIDEODRIVER", "x11");
@@ -170,10 +198,9 @@ fn run_frames(frames: u32) {
 #[test]
 #[serial]
 fn wm_fullscreen_exit_leaves_stone_windowed_at_the_wm_geometry() {
-    assert!(
-        std::env::var("DISPLAY").is_ok(),
-        "run through the private-display test wrapper"
-    );
+    if !private_display::available() {
+        return;
+    }
     std::env::set_var("SDL_VIDEODRIVER", "x11");
     std::env::remove_var("STONE_HEADLESS");
     std::env::set_var("STONE_IMMEDIATE_SHOW", "1");

@@ -84,6 +84,8 @@ display_number=$(tr -dc '0-9' < "$display_file")
 [[ -n $display_number ]] || fail "Xvfb reported no display number"
 
 export DISPLAY=":$display_number"
+# Window tests run only when this marker says the display is private.
+export STONE_PRIVATE_DISPLAY=1
 # The private server has no session bus, keyring or compositor behind it.
 unset WAYLAND_DISPLAY XAUTHORITY
 # llvmpipe is the only GL driver Xvfb offers, and its rasterizer thread pool

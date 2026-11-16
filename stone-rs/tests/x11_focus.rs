@@ -9,8 +9,8 @@
 //! unwind out of extern "C" stone_create_window_ex and abort the
 //! process); the stamp must degrade to a warn instead.
 //!
-//! The X11 test needs a real server and skips with a print when $DISPLAY
-//! is absent.
+//! The X11 tests need the private display (see support/private_display.rs)
+//! and skip with a print without it.
 //!
 //! Both tests are #[serial]: SDL_VIDEODRIVER is process-global env and
 //! SDL only initializes one video driver per process.
@@ -22,6 +22,9 @@ use std::ffi::{c_int, c_uchar, c_ulong};
 use serial_test::serial;
 use stone_rs::x11_focus;
 use x11::xlib;
+
+#[path = "support/private_display.rs"]
+mod private_display;
 
 fn make_window(driver: &str) -> (sdl2::Sdl, sdl2::video::Window) {
     std::env::set_var("SDL_VIDEODRIVER", driver);
@@ -71,8 +74,7 @@ fn no_wminfo_degrades_gracefully() {
 #[test]
 #[serial]
 fn deferred_map_request_does_not_wait_for_map_notify() {
-    if std::env::var("DISPLAY").is_err() {
-        println!("skipping: no DISPLAY");
+    if !private_display::available() {
         return;
     }
     let (_sdl, window) = make_window("x11");
@@ -92,8 +94,7 @@ fn deferred_map_request_does_not_wait_for_map_notify() {
 #[test]
 #[serial]
 fn stamps_user_time_zero_on_x11() {
-    if std::env::var("DISPLAY").is_err() {
-        println!("skipping: no DISPLAY");
+    if !private_display::available() {
         return;
     }
     let (_sdl, window) = make_window("x11");

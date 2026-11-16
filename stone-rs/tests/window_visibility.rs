@@ -15,11 +15,13 @@ use x11::xlib;
 #[path = "support/x11_window.rs"]
 mod x11_window;
 
+#[path = "support/private_display.rs"]
+mod private_display;
+
 #[test]
 #[serial]
 fn show_after_hide_resets_user_time_zero_when_user_time_was_dirty() {
-    if std::env::var("DISPLAY").is_err() {
-        println!("skipping: no DISPLAY");
+    if !private_display::available() {
         return;
     }
     std::env::set_var("SDL_VIDEODRIVER", "x11");
@@ -97,8 +99,7 @@ fn show_after_hide_resets_user_time_zero_when_user_time_was_dirty() {
 #[test]
 #[serial]
 fn initially_hidden_session_applies_saved_placement_on_first_show() {
-    if std::env::var("DISPLAY").is_err() {
-        println!("skipping: no DISPLAY");
+    if !private_display::available() {
         return;
     }
     const CHILD: &str = "STONE_WINDOW_VISIBILITY_GEOMETRY_CHILD";
@@ -232,8 +233,7 @@ fn initially_hidden_session_applies_saved_placement_on_first_show() {
 #[test]
 #[serial]
 fn hide_and_show_preserves_position_after_runtime_move() {
-    if std::env::var("DISPLAY").is_err() {
-        println!("skipping: no DISPLAY");
+    if !private_display::available() {
         return;
     }
     std::env::set_var("SDL_VIDEODRIVER", "x11");
@@ -289,8 +289,7 @@ fn hide_and_show_preserves_position_after_runtime_move() {
 #[test]
 #[serial]
 fn hide_and_show_survives_wm_frame_teardown() {
-    if std::env::var("DISPLAY").is_err() {
-        println!("skipping: no DISPLAY");
+    if !private_display::available() {
         return;
     }
     std::env::set_var("SDL_VIDEODRIVER", "x11");
@@ -358,8 +357,7 @@ fn hide_and_show_survives_wm_frame_teardown() {
 #[test]
 #[serial]
 fn hide_and_show_preserves_fullscreen_mode() {
-    if std::env::var("DISPLAY").is_err() {
-        println!("skipping: no DISPLAY");
+    if !private_display::available() {
         return;
     }
     std::env::set_var("SDL_VIDEODRIVER", "x11");
@@ -397,8 +395,7 @@ fn hide_and_show_preserves_fullscreen_mode() {
 #[test]
 #[serial]
 fn saving_geometry_while_hidden_does_not_corrupt_saved_state() {
-    if std::env::var("DISPLAY").is_err() {
-        println!("skipping: no DISPLAY");
+    if !private_display::available() {
         return;
     }
     let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -435,8 +432,7 @@ fn saving_geometry_while_hidden_does_not_corrupt_saved_state() {
 #[test]
 #[serial]
 fn showing_fullscreen_session_as_windowed_preserves_actual_focus_and_pointer() {
-    if std::env::var("DISPLAY").is_err() {
-        println!("skipping: no DISPLAY");
+    if !private_display::available() {
         return;
     }
     if !window_manager_is_running() {
@@ -492,8 +488,7 @@ fn showing_fullscreen_session_as_windowed_preserves_actual_focus_and_pointer() {
 #[test]
 #[serial]
 fn explicit_activation_works_after_headless_boot_is_shown() {
-    if std::env::var("DISPLAY").is_err() {
-        println!("skipping: no DISPLAY");
+    if !private_display::available() {
         return;
     }
     if !window_manager_is_running() {

@@ -9,6 +9,9 @@ use x11::xlib;
 #[path = "support/x11_window.rs"]
 mod x11_window;
 
+#[path = "support/private_display.rs"]
+mod private_display;
+
 extern "C" {
     fn stone_set_canvas(handle: u64);
     fn stone_clear_canvas(r: f32, g: f32, b: f32, a: f32);
@@ -20,8 +23,7 @@ fn headless_screen_reaches_shown_window() {
     const CHILD: &str = "STONE_PRESENT_CHILD";
     const FAIL: &str = "STONE_PRESENT_FAIL";
     if std::env::var_os(CHILD).is_none() {
-        if std::env::var_os("DISPLAY").is_none() {
-            println!("skipping: needs an isolated X11 display");
+        if !private_display::available() {
             return;
         }
         let before: Vec<_> = std::env::vars_os().collect();
