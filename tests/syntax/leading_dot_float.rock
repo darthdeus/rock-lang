@@ -5,22 +5,10 @@
 fn test_leading_dot_literal() {
     let a = .35
     assert_eq(a, 0.35)
-}
-
-@test
-fn test_leading_dot_annotated() {
     let b: float = .5
     assert_eq(b, 0.5)
-}
-
-@test
-fn test_leading_dot_in_list() {
     let xs = [.1, .25, .5]
     assert_eq(xs[0] + xs[1] + xs[2], 0.85)
-}
-
-@test
-fn test_leading_dot_after_operator() {
     assert_eq(2.0 + .5, 2.5)
 }
 

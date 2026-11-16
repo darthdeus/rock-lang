@@ -7,13 +7,6 @@ value V2 {
     y: float,
 }
 
-value R {
-    x: int,
-    y: int,
-    w: int,
-    h: int,
-}
-
 // `value` as a param name, local binding, and field name -- all stay
 // as plain identifiers.
 struct Box {

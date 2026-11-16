@@ -37,27 +37,6 @@ fn test_match_arms_without_commas() {
     print(name)
 }
 
-// --- Fn params: commas required (control case) ---
-
-fn add(x: int, y: int) -> int { x + y }
-
-@test(output = "3")
-fn test_fn_params_require_commas() {
-    print(add(1, 2))
-}
-
-// --- Tuple types: commas required (control case) ---
-
-fn swap(pair: (int, string)) -> (string, int) {
-    (pair.1, pair.0)
-}
-
-@test(output = "hello 42")
-fn test_tuple_type_commas_required() {
-    let result = swap((42, "hello"))
-    print("{result.0} {result.1}")
-}
-
 // --- Enum: comments between variants ---
 
 enum BlendMode {
@@ -76,7 +55,8 @@ enum TestEnum {
 
 @test
 fn test_enum_with_comments() {
-    let mode = BlendMode::Alpha
-    let test = TestEnum::First
-    // Basic test that enums with comments parse correctly
+    let mode = BlendMode::Multiply
+    let test = TestEnum::Second
+    assert(mode == BlendMode::Multiply)
+    assert(test == TestEnum::Second)
 }

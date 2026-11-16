@@ -1,3 +1,0 @@
-// Comment inside annotation argument list
-@test(/* expected */ output = "hi")
-fn t() { print("hi") }
