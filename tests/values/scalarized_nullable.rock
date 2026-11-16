@@ -52,18 +52,11 @@ fn opt_or_fn(v: FV2?, fb: FV2) -> FV2 {
 
 fn takes_v(v: FV2) -> float { return v.x + v.y }
 
-@test(output = "30")
-fn return_slot_some() {
-    let m: FV2? = FV2 { x: 10.0, y: 20.0 }
+@test(output = "30\n2")
+fn return_slot_some_and_none() {
+    let some: FV2? = FV2 { x: 10.0, y: 20.0 }
+    let none: FV2? = null
     let fb = FV2 { x: 1.0, y: 1.0 }
-    let r = opt_or_fn(m, fb)
-    print(takes_v(r))
-}
-
-@test(output = "2")
-fn return_slot_none() {
-    let m: FV2? = null
-    let fb = FV2 { x: 1.0, y: 1.0 }
-    let r = opt_or_fn(m, fb)
-    print(takes_v(r))
+    print(takes_v(opt_or_fn(some, fb)))
+    print(takes_v(opt_or_fn(none, fb)))
 }

@@ -1,0 +1,51 @@
+// A value coalesced out of a nullable source keeps a snapshot of its nullable
+// child: a later write to the source must not reach the retained copy. `Child`
+// carries a GC field; `CChild` is all-scalar, so its `Asset` lowers as cdata.
+
+value Child { id: int, tags: [int] }
+value Asset { child: Child?, width: int }
+struct Source { asset: Asset? }
+struct Kept { asset: Asset }
+fn source() -> Source { Source { asset: Asset { child: Child { id: 1, tags: [] }, width: 7 } } }
+fn id(a: Asset) -> int { a.child?.id ?? -1 }
+fn mutate_source(s: Source) { if s.asset != null && s.asset.child != null { s.asset.child.id = 99 } }
+fn reader(s: Source) -> fn() -> int { let a = s.asset ?? return () => -1; return () => id(a) }
+
+@test(output = "1")
+fn source_write() { let s = source(); let a = s.asset ?? return; mutate_source(s); print(id(a)) }
+
+@test(output = "1")
+fn source_write_then_escape() { let s = source(); let a = s.asset ?? return; mutate_source(s); let k = Kept { asset: a }; print(id(k.asset)) }
+
+@test(output = "1")
+fn closure_read() { let s = source(); let f = reader(s); mutate_source(s); print(f()) }
+
+@test(output = "1")
+fn array_source_write() { let s = source(); let slots: [Asset?] = [s.asset]; let a = slots[0] ?? return; slots[0]?.child?.id = 99; print(id(a)) }
+
+global ART: Asset? = null
+fn init_art() { ART = Asset { child: Child { id: 1, tags: [] }, width: 7 } }
+
+@test(output = "1")
+fn global_source_write() { init_art(); let a = ART ?? return; if ART != null && ART.child != null { ART.child.id = 99 }; print(id(a)) }
+
+value CChild { id: int }
+value CAsset { child: CChild?, width: int }
+struct CSource { asset: CAsset? }
+fn csource() -> CSource { CSource { asset: CAsset { child: CChild { id: 1 }, width: 7 } } }
+fn cid(a: CAsset) -> int { a.child?.id ?? -1 }
+fn cmutate_source(s: CSource) { if s.asset != null && s.asset.child != null { s.asset.child.id = 99 } }
+fn creader(s: CSource) -> fn() -> int { let a = s.asset ?? return () => -1; return () => cid(a) }
+
+@test(output = "1")
+fn cdata_source_write() { let s = csource(); let a = s.asset ?? return; cmutate_source(s); print(cid(a)) }
+
+@test(output = "1")
+fn cdata_closure_read() { let s = csource(); let f = creader(s); cmutate_source(s); print(f()) }
+
+value Wrap<T> { child: T?, width: int }
+struct GenericSource { value: Wrap<Child>? }
+fn write_generic_source(s: GenericSource) { if s.value != null && s.value.child != null { s.value.child.id = 99 } }
+
+@test(output = "1")
+fn generic_source_write() { let s = GenericSource { value: Wrap { child: Child { id: 1, tags: [] }, width: 7 } }; let a = s.value ?? return; write_generic_source(s); print(a.child?.id ?? -1) }

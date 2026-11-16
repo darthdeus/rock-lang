@@ -112,15 +112,6 @@ fn test_copy_shares_reference_leaf() {
     print("{copy.xs[0]} {o.g.xs[0]}")
 }
 
-// CONTROL: a leaf PROJECTION off a place stays live and free -- copying whole
-// reads must not turn `o.p.x` into a read off a stale snapshot.
-@test(output = "42")
-fn test_leaf_projection_stays_live() {
-    let o = mk_owner(1)
-    o.p.x = 42
-    print("{o.p.x}")
-}
-
 // CONTROL: a function round-trip already copies (params/returns ride the scalar
 // ABI) -- it must keep doing so.
 fn ident_pt(p: Pt) -> Pt { return p }

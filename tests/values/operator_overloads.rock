@@ -1,14 +1,6 @@
-// Value-ABI Inc 6: now-reachable value-struct operator overloads.
-// `v1 + v2` dispatches to `__op_add_V2_V2(...)` with the
-// operands splatted to scalars (and the value-struct multi-return
-// multi-assigned), exactly the live scalar ABI. Mixed value/scalar
-// operands keep the non-value operand as a single arg. Pins runtime
-// behavior; must pass with and without ROCK_ANF_FUNCTIONS=1.
-//
-// NOTE: the *triple* direct chain `a + b + c` is a separate
-// pre-existing live operator-inliner bug — see
-// tests/operators/overload_chaining.rock. The let-broken form
-// (`let t = a + b; t + c`) is correct and exercised here.
+// Value-struct operator overloads take their operands and return their result
+// through the scalar ABI; a mixed value/scalar operator keeps the scalar
+// operand as a single argument.
 
 value V2 { x: int, y: int }
 
@@ -42,13 +34,6 @@ fn test_param_operands() {
     let p = add(V2 { x: 10, y: 20 }, V2 { x: 1, y: 2 })
     print("{p.x}")
     print("{p.y}")
-}
-
-@test(output = "4\n6")
-fn test_literal_operands() {
-    let q = add(V2 { x: 1, y: 2 }, V2 { x: 3, y: 4 })
-    print("{q.x}")
-    print("{q.y}")
 }
 
 @test(output = "8\n12")

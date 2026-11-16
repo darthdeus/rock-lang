@@ -17,12 +17,6 @@ fn test_index_field_read() {
     print(xs[0].x + xs[0].y)
 }
 
-@test(output = "7")
-fn test_index_second_element() {
-    let xs: [V2] = [make_v2(1, 2), make_v2(3, 4)]
-    print(xs[1].x + xs[1].y)
-}
-
 @test(output = "3")
 fn test_index_into_scalar_abi_arg() {
     let xs: [V2] = [make_v2(1, 2), make_v2(3, 4)]

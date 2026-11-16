@@ -1,15 +1,12 @@
-// Phase-4 adversarial coverage for value types.
-//
-// Probes sites that earlier adversarial phases did not cover:
-//   1. Arena of value structs — insert/get/iter/filter
-//   2. Coroutine `yield <value_call>` and `yield <value_local>`
+// Value-returning calls and value locals at container, coroutine, fn-value,
+// defer and generic sites:
+//   1. Arena of value structs -- insert/get/iter
+//   2. Coroutine `yield <value_call>`, `yield <literal>` and `yield <local>`
 //   3. FunctionRef to a scalarized fn with value-typed params
-//   4. defer { value_call().field }
+//   4. defer { value_call() }
 //   5. Operator-overload chains
-//   6. Ternary / if-expr leaves at more contexts (regression guards)
-//
-// Every case that takes a value-returning Rock call (`make_v2(...)`) into a
-// Lua single-value context is at risk of multi-return truncation.
+//   6. Generic passthrough
+//   7. Defer body with an operator chain
 
 value V2 {
     x: int,
@@ -122,38 +119,20 @@ fn test_fn_ref_value_param() {
 // return value is discarded but side effects / scalar semantics must not
 // truncate.
 
-fn global_sum() -> int {
-    return __global_side_effect()
-}
-
-// Side-effect accumulator in a global.
 global SIDE_EFFECT_ACC: int = 0
 
-fn __reset_side_effect() {
-    SIDE_EFFECT_ACC = 0
-}
-
-fn __global_side_effect() -> int {
-    return SIDE_EFFECT_ACC
-}
-
 fn record_sum(v: V2) -> V2 {
-    // Side effect: add to accumulator, return v unchanged.
-    __add_to_acc(v.x + v.y)
+    SIDE_EFFECT_ACC = SIDE_EFFECT_ACC + v.x + v.y
     return v
-}
-
-fn __add_to_acc(n: int) {
-    SIDE_EFFECT_ACC = SIDE_EFFECT_ACC + n
 }
 
 @test(output = "7")
 fn test_defer_value_call() {
-    __reset_side_effect()
+    SIDE_EFFECT_ACC = 0
     {
         defer { record_sum(make_v2(3, 4)) }
     }
-    print(global_sum())
+    print(SIDE_EFFECT_ACC)
 }
 
 // --- 5. Operator-overload chains (3-deep) ---------------------------------
@@ -195,18 +174,18 @@ fn test_generic_passthrough_value() {
     print(first.x + first.y)
 }
 
-// --- 8. Defer body with binop-returning-value consumed by side effect -----
+// --- 7. Defer body with binop-returning-value consumed by side effect -----
 // Exercises a binop chain inside a defer block (a new statement context)
 // to catch IIFE-wrap or state-hoist regressions.
 
 @test(output = "17")
 fn test_defer_value_binop_chain() {
-    __reset_side_effect()
+    SIDE_EFFECT_ACC = 0
     {
         defer {
             record_sum(make_v2(1, 2))                       // +3
             record_sum(v2_scale(V2 { x: 1, y: 1 }, 7) * 1)  // +14
         }
     }
-    print(global_sum())
+    print(SIDE_EFFECT_ACC)
 }

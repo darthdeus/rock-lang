@@ -1,9 +1,5 @@
-// Value-ABI Inc 5: nested / value-typed value fields.
-// A `value` struct with value-struct fields has a one-slot-per-direct-
-// field scalar ABI; a value field's slot is that field's single cdata
-// (mirrors live `emit_scalar_param_list` + `pack_value_expr`). These
-// tests pin runtime behavior; they must pass with and without
-// ROCK_ANF_FUNCTIONS=1.
+// A `value` struct with value-struct fields crosses calls whole, field by
+// field, and as an element of a Vec.
 
 value V2 {
     x: float,

@@ -1,0 +1,63 @@
+// Value structs with assorted field types and names lower and construct:
+// names that look like C types, a one-letter name, digits in a name, a bool
+// leaf, and a nested value field.
+
+value Color {
+    r: float,
+    g: float,
+    b: float,
+    a: float,
+}
+
+value V {
+    x: float,
+}
+
+value FixVec3 {
+    x: float,
+    y: float,
+    z: float,
+}
+
+value Mixed {
+    x: int,
+    y: float,
+    active: bool,
+}
+
+value Inner {
+    a: float,
+    b: float,
+}
+
+value Outer {
+    pos: Inner,
+    scale: float,
+}
+
+@test
+fn value_types_construct_and_coexist() {
+    let c = Color { r: 1.0, g: 0.5, b: 0.0, a: 1.0 }
+    assert(c.r == 1.0)
+    assert(c.g == 0.5)
+    assert(c.b == 0.0)
+    assert(c.a == 1.0)
+    assert(c == Color { r: 1.0, g: 0.5, b: 0.0, a: 1.0 })
+
+    let v = V { x: 42.0 }
+    assert(v.x == 42.0)
+
+    let f = FixVec3 { x: 1.0, y: 2.0, z: 3.0 }
+    assert(f.x == 1.0)
+    assert(f.y == 2.0)
+    assert(f.z == 3.0)
+
+    let m = Mixed { x: 1, y: 2.0, active: true }
+    assert(m.x == 1)
+    assert(m.y == 2.0)
+    assert(m.active == true)
+
+    let o = Outer { pos: Inner { a: 1.0, b: 2.0 }, scale: 3.0 }
+    assert(o.pos.a == 1.0)
+    assert(o.scale == 3.0)
+}

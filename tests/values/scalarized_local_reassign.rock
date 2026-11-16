@@ -1,10 +1,5 @@
-// 8A: scalarized value-local reassignment.
-//
-// When `v` is a scalarized value local (per-field scalars `v__x`,
-// `v__y`), an `Assign` `v = <rhs>` must fan-out into one Assign per
-// slot. The default `lower_assign` path emits a single Assign which is
-// wrong shape (and the previous code rejected to live). This test
-// drives the absorbed ANF path: byte-equivalent Lua across rebinds.
+// Reassigning a scalarized value local (one cell per leaf) writes every leaf
+// from a literal, another local or a call.
 
 value V2 { x: int, y: int }
 
@@ -34,11 +29,8 @@ fn test_value_local_reassign_from_call() {
     print(v.x + v.y)
 }
 
-// Reassignment must COPY, not bind the source place. These are the cases the
-// three above do not reach: they check the value ARRIVES, not that it is
-// independent of where it came from. Copy-on-whole-value-read is the invariant
-// the place model rests on, and it is broken for
-// one other shape -- see tests/values/nullable_place_read_copies.rock.
+// Reassignment must COPY, not bind the source place: the tests above check
+// that the value arrives, these that it is independent of its source.
 
 struct Box { p: V2 }
 struct NBox { p: V2? }
@@ -52,9 +44,6 @@ fn reassign_from_field_copies() {
     print("v={v.x} src={src.p.x}")
 }
 
-// The nullable path is where the sibling file's aliasing bug lives; through
-// reassignment it copies correctly, which is what scopes that bug to a ctor
-// field operand rather than to nullable value reads at large.
 @test(output = "v=1 src=99")
 fn reassign_from_nullable_field_copies() {
     let src = NBox { p: V2 { x: 1, y: 2 } }

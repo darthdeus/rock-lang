@@ -1,28 +1,21 @@
-// GC-free value-struct corpus for the `--backend js` ratchet (T8b). An
-// all-scalar `value` struct used as a WHOLE value (compared with `==`, stored in
-// a Vec, returned/passed boxed) keeps a `MakeValueStruct` through cleanup; the JS
-// backend emits it as a plain `{__ty, ...}` object (same shape as a reference
-// struct) whose structural deep-eq matches luajit's byte-value equality for
-// all-scalar leaves. (A value struct read straight off its scalar-ABI leaves
-// already scalarizes through -- that is T8a; this corpus pins the boxed path.)
-// GC-carrying value-struct equality is values/gc_carrying.rock.
+// An all-scalar `value` struct used as a WHOLE value (compared with `==`,
+// stored in a Vec, returned/passed boxed) keeps a `MakeValueStruct` through
+// cleanup; the JS backend emits it as a plain `{__ty, ...}` object whose
+// structural deep-eq matches LuaJIT's byte-value equality for all-scalar
+// leaves. GC-carrying value-struct equality is values/gc_carrying.rock.
 
 value V { x: int, y: int }
 
 // Two distinct constructions with equal contents compare EQUAL (luajit byte-value
 // eq; JS structural deep-eq).
-@test(returns = 1)
-fn test_value_struct_eq_equal() -> int {
+@test(returns = 10)
+fn test_value_struct_eq() -> int {
     let a = V { x: 1, y: 2 }
     let b = V { x: 1, y: 2 }
-    if a == b { 1 } else { 0 }
-}
-
-@test(returns = 0)
-fn test_value_struct_eq_unequal() -> int {
-    let a = V { x: 1, y: 2 }
-    let b = V { x: 1, y: 3 }
-    if a == b { 1 } else { 0 }
+    let c = V { x: 1, y: 3 }
+    let equal = if a == b { 10 } else { 0 }
+    let unequal = if a == c { 1 } else { 0 }
+    equal + unequal
 }
 
 // A value struct stored whole in a Vec, then read back and projected.

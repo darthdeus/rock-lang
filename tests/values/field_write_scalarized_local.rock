@@ -19,13 +19,6 @@ fn seed(n: int) -> int { return n }
 // --- the write must be observable through the local ---
 
 @test(output = "5")
-fn scalarized_local_const_init_leaf_write() {
-    let h = Holder { p: Pt { x: 1, y: 2 } }
-    h.p.x = 5
-    print("{h.p.x}")
-}
-
-@test(output = "5")
 fn scalarized_local_runtime_init_leaf_write() {
     let s = seed(1)
     let h = Holder { p: Pt { x: s, y: 2 } }

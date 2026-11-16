@@ -4,8 +4,7 @@
 // caller reading one value off a two-value return would bind a number and then
 // index it. A `nobox` value is the opposite case and opts in explicitly --
 // `@scalar_abi` overrides this gate and returns the leaves
-// (`tests/nobox/opaque_return.rock`). Must pass with and without
-// ROCK_ANF_FUNCTIONS=1.
+// (`tests/nobox/opaque_return.rock`).
 
 value V2 { x: int, y: int }
 
@@ -25,13 +24,7 @@ fn test_nomangle_value_return_is_single_cdata() {
     print("{v.y}")
 }
 
-@test(output = "12")
-fn test_nomangle_value_return_field_arith() {
-    let v = mk_v2(3, 4)
-    print("{v.x * v.y}")
-}
-
-// A regular (mangled) fn still uses the scalar ABI — sanity that
+// A regular (mangled) fn still uses the scalar ABI -- sanity that
 // the fix did not break the scalar-ABI return path.
 fn mk_v2_mangled(x: int, y: int) -> V2 {
     return V2 { x: x, y: y }

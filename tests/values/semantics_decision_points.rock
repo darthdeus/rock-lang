@@ -1,7 +1,5 @@
-// Scalarization stage-0, Phase C: the four value-semantics decision points
-// All four are
-// decided; each is pinned here to the rule that was chosen, not merely to
-// what the tree happens to do.
+// Value-semantics decision points, each pinned to the rule that was chosen,
+// not merely to what the tree happens to do.
 
 value Pt { x: int, y: int }
 
@@ -53,11 +51,8 @@ fn c1_value_capture_single_assign() {
 
 // --- C2: global value places ---
 //
-// The WRITE is legal (Phase B place/rvalue classification: a global is mutable
-// storage, so a value field of a value-struct global is writable in place). The
-// leaf-knowledge invalidation across non-@pure calls / yields the axes doc calls
-// for is forward-looking -- there is no value-leaf CSE yet to invalidate, so
-// nothing to pin behaviorally beyond the write.
+// A global is mutable storage, so a value field of a value-struct global is
+// writable in place.
 global CAST_ENV: Pt = Pt { x: 1, y: 2 }
 
 @test(output = "42")

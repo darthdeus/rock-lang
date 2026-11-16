@@ -71,22 +71,8 @@ value V2 { x: int, y: int }
 @nomangle
 fn sum_v2(v: V2) -> int { v.x + v.y }
 
-@test(output = "21")
-fn const_hoist_first_call() {
-    print(sum_v2(V2 { x: 10, y: 11 }))
-}
-
-@test(output = "42")
-fn const_hoist_distinct_literals_distinct_locals() {
-    // Distinct field values — distinct hoisted const locals.
-    print(sum_v2(V2 { x: 20, y: 22 }))
-}
-
-@test(output = "5")
-fn const_hoist_dynamic_field_no_hoist() {
-    // Dynamic field expression — no hoist, per-call pack.
-    // This still works; the test pins that dynamic shapes don't
-    // crash through the hoist path.
+@test(output = "21 42 5")
+fn const_hoist_nomangle_arguments() {
     let n = 2
-    print(sum_v2(V2 { x: n, y: 3 }))
+    print("{sum_v2(V2 { x: 10, y: 11 })} {sum_v2(V2 { x: 20, y: 22 })} {sum_v2(V2 { x: n, y: 3 })}")
 }
