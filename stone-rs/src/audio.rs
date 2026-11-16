@@ -539,6 +539,12 @@ impl Biquad {
         let y = self.b0 * x + s[0];
         s[0] = self.b1 * x - self.a1 * y + s[1];
         s[1] = self.b2 * x - self.a2 * y;
+        // Subnormal feedback can persist indefinitely and make silence costly.
+        for state in s {
+            if state.is_subnormal() {
+                *state = 0.0;
+            }
+        }
         y
     }
 }
@@ -2673,6 +2679,18 @@ pub extern "C" fn stone_set_reverb(
 mod tests {
     use super::*;
     use rodio::buffer::SamplesBuffer;
+
+    #[test]
+    fn lowpass_silence_does_not_retain_subnormal_state() {
+        let mut filter = Biquad::new();
+        filter.set_lowpass(21_600.0, 0.707, 48_000.0);
+        assert!(filter.process(0, 1.0).abs() > 0.1);
+        for _ in 0..48_000 {
+            filter.process(0, 0.0);
+        }
+        assert_eq!(filter.state[0], [0.0, 0.0]);
+        assert_eq!(filter.process(0, 0.0), 0.0);
+    }
 
     #[test]
     fn stream_errors_are_counted_without_flooding_the_log() {
