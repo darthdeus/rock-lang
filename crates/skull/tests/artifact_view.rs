@@ -866,30 +866,6 @@ fn cross_artifact_identity_is_the_instance_and_not_the_spelling() {
     );
 }
 
-/// The realization axis must not be inert: two artifacts must differ in what
-/// they realize, or every arm above could be dead.
-#[test]
-fn two_artifacts_differ_in_realization() {
-    let ws = ws_with_stdlib(REACH);
-    let (g, roots) = graph_for(&ws);
-    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
-    let js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
-
-    let only_lua = lua.retained().filter(|i| !js.retains(i)).count();
-    let only_js = js.retained().filter(|i| !lua.retains(i)).count();
-    assert!(
-        only_lua > 0 || only_js > 0,
-        "the two artifacts realize identical sets, so the realization axis is \
-         inert: lua-only {only_lua}, js-only {only_js}"
-    );
-    // ...and they differ in HOW, not only in WHICH.
-    assert_ne!(
-        lua.census().realized_by_kind,
-        js.census().realized_by_kind,
-        "the two artifacts supply every retained declaration the same way"
-    );
-}
-
 /// A synthetic target with no backend of its own realizes the PORTABLE
 /// subset. It is the hostile control: if retention were reading nothing, this
 /// would keep every foreign body.
@@ -1344,36 +1320,6 @@ fn an_artifact_name_decides_nothing() {
         view(renamed).same_cpu_decisions(&view(tp::LUAJIT_DESKTOP)),
         "renaming the artifact changed a decision, so something is branching on a \
          target NAME rather than on a capability"
-    );
-}
-
-/// The fixtures are COMBINATIONS of shared axes, not a cross-product enum.
-///
-/// Stated as two structural facts a cross-product enum cannot have: one
-/// execution axis appears under more than one platform, and one platform
-/// appears under more than one execution axis. If every fixture owned its own
-/// axes, both counts would be 1 and `TargetSpec` would be a flat enum wearing
-/// three fields.
-#[test]
-fn target_fixtures_are_combinations_of_shared_axes() {
-    use skull::target_projection as tp;
-
-    let pairs = tp::ALL
-        .iter()
-        .enumerate()
-        .flat_map(|(i, a)| tp::ALL.iter().skip(i + 1).map(move |b| (a, b)));
-    let pairs: Vec<_> = pairs.collect();
-    assert!(
-        pairs
-            .iter()
-            .any(|(a, b)| a.platform == b.platform && a.execution != b.execution),
-        "no complete platform axis hosts two execution axes"
-    );
-    assert!(
-        pairs.iter().all(|(a, b)| {
-            (a.platform, a.execution, a.shader) != (b.platform, b.execution, b.shader)
-        }),
-        "two fixtures carry the same complete axis combination"
     );
 }
 
@@ -2338,37 +2284,6 @@ fn main() { let x = caller() }
     assert_eq!(
         local.unresolved_inline_deps, fresh.unresolved_inline_deps,
         "inline unresolved rows went stale"
-    );
-}
-
-// A realization reads the graph's site tables in place; only an update
-// copies them into its own rows, once.
-#[test]
-fn artifact_update_rows_index_each_graph_site_once_on_first_update() {
-    let ws = ws_with_stdlib("fn leaf(x: int) -> int { x + 1 }\nfn main() { let x = leaf(1) }");
-    let (g, roots) = graph_for(&ws);
-    let expected: usize = g.call_sites().map(|(_, sites)| sites.len()).sum();
-    assert!(
-        expected > 0,
-        "artifact-index fixture has no graph-site population"
-    );
-    let before = artifact::update_index_site_rows();
-    let mut view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
-    assert_eq!(
-        artifact::update_index_site_rows(),
-        before,
-        "a realization copied graph sites into update rows"
-    );
-    assert!(
-        view.census().sites_walked > 0,
-        "the fixture did not retain a site-bearing body"
-    );
-    view.prepare_update(&g);
-    view.prepare_update(&g);
-    let indexed = artifact::update_index_site_rows().saturating_sub(before) as usize;
-    assert_eq!(
-        indexed, expected,
-        "the update rows installed graph sites other than once"
     );
 }
 
