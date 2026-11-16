@@ -72,7 +72,7 @@ struct Role {
     key_param: Ustr,
 }
 
-fn string_arg(ann: &bone_core::hir::Annotation, name: &str) -> Option<Ustr> {
+pub(crate) fn string_arg(ann: &bone_core::hir::Annotation, name: &str) -> Option<Ustr> {
     ann.args.iter().find_map(|arg| {
         (arg.name.as_ref().is_some_and(|n| n.name.as_str() == name)).then_some(match arg.value {
             AnnoValue::String(value) => Some(value),

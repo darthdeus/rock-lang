@@ -5,6 +5,7 @@ use ustr::Ustr;
 
 use crate::code_identity::CodeArtifact;
 use crate::code_identity::{CodeIdentity, CodeOwner, CodeOwnerKind};
+use crate::definition::string_arg;
 use crate::instance::Instance;
 use crate::mir::FuncRef;
 use crate::monoty::{MonoCtor, MonoSubst, MonoTy, convert_decl};
@@ -190,17 +191,6 @@ pub fn scene_root_type_key(root_type: &MonoTy) -> Option<String> {
         } if params.is_empty() => Some(root_type.canonical()),
         _ => None,
     }
-}
-
-fn string_arg(ann: &bone_core::hir::Annotation, name: &str) -> Option<Ustr> {
-    ann.args.iter().find_map(|a| {
-        (a.name.as_ref().is_some_and(|n| n.name.as_str() == name))
-            .then_some(match a.value {
-                AnnoValue::String(s) => Some(s),
-                _ => None,
-            })
-            .flatten()
-    })
 }
 
 fn int_expr(body: &bone_core::hir::Body, e: Idx<bone_core::hir::Expr>) -> Option<i64> {
