@@ -1095,6 +1095,75 @@ pub enum FnRefScope {
     AllOverloads,
 }
 
+/// The symbol a reference walk starts from, in the order [`ref_target_at`]
+/// tries them.
+enum RefTarget {
+    /// A local, parameter or pattern binding, with its sites already found.
+    Binding(Vec<RefSite>),
+    GenericParam(ModuleId, Idx<hir::TypeExpr>),
+    EnumVariant(Ustr, Ustr),
+    Enum(Ustr),
+    Newtype(Ustr),
+    Struct(Ustr),
+    Field(Ustr, Ustr),
+    VariantField(Ustr, Ustr, Ustr),
+    Function(ModuleId, Idx<hir::Function>),
+    Global(Ustr),
+    Decorator(Ustr),
+}
+
+fn ref_target_at<'t>(
+    ws: &Workspace,
+    mid: ModuleId,
+    inf: &InferenceResult,
+    offset: usize,
+    text_of: TextOf<'_, 't>,
+) -> Option<RefTarget> {
+    if let Some(sites) = local_references(ws, mid, offset) {
+        return Some(RefTarget::Binding(sites));
+    }
+    if let Some((gmid, gidx)) = generic_param_at(ws, mid, offset) {
+        return Some(RefTarget::GenericParam(gmid, gidx));
+    }
+    if let Some((ename, variant)) = enum_variant_at(ws, mid, offset) {
+        return Some(RefTarget::EnumVariant(ename, variant));
+    }
+    if let Some(name) = enum_at(ws, mid, offset) {
+        return Some(RefTarget::Enum(name));
+    }
+    if let Some(name) = newtype_decl_at(ws, mid, offset) {
+        return Some(RefTarget::Newtype(name));
+    }
+    if let Some(name) = struct_at(ws, mid, offset) {
+        // `struct_at` matches any Nominal annotation ctor, including enums
+        // (`c: Color`) and newtypes (`id: UserId`) -- route those to their
+        // own walks so declarations and ctor/qualifier sites rename too.
+        return Some(if enum_def_by_name(ws, name).is_some() {
+            RefTarget::Enum(name)
+        } else if newtype_declared(ws, name) {
+            RefTarget::Newtype(name)
+        } else {
+            RefTarget::Struct(name)
+        });
+    }
+    if let Some((sname, field)) = struct_field_at(ws, mid, inf, offset) {
+        return Some(RefTarget::Field(sname, field));
+    }
+    if let Some((ename, variant, field)) = variant_field_at(ws, mid, offset) {
+        return Some(RefTarget::VariantField(ename, variant, field));
+    }
+    if let Some((fmid, fid)) = function_target(ws, mid, inf, offset) {
+        return Some(RefTarget::Function(fmid, fid));
+    }
+    if let Some(name) = global_at(ws, mid, offset) {
+        return Some(RefTarget::Global(name));
+    }
+    decorator_at(ws, mid, offset, text_of).map(RefTarget::Decorator)
+}
+
+/// Every site (declaration included) of the symbol at `offset`, for
+/// find-references and rename. Shorthand sites (`S { x }`) carry a
+/// [`Shorthand`] tag so rename expands them instead of replacing the token.
 pub fn references<'t>(
     ws: &Workspace,
     mid: ModuleId,
@@ -1104,87 +1173,56 @@ pub fn references<'t>(
     fn_scope: FnRefScope,
 ) -> Vec<RefSite> {
     let plain = |spans: Vec<Span>| spans.into_iter().map(RefSite::plain).collect();
-
-    if let Some(mut local) = local_references(ws, mid, offset) {
-        // A fn PARAM also renames at callers' named-arg labels
-        // (`spawn_it(count: 3)`), resolved per-overload.
-        local.extend(param_named_arg_sites(ws, mid, offset, text_of));
-        return local;
-    }
-
-    if let Some((gmid, gidx)) = generic_param_at(ws, mid, offset) {
-        return plain(generic_param_references(ws, gmid, gidx));
-    }
-
-    if let Some((ename, variant)) = enum_variant_at(ws, mid, offset) {
-        return plain(enum_variant_references(ws, ename, variant));
-    }
-
-    if let Some(name) = enum_at(ws, mid, offset) {
-        return plain(enum_references(ws, name));
-    }
-
-    if let Some(name) = newtype_decl_at(ws, mid, offset) {
-        return plain(newtype_references(ws, name, text_of));
-    }
-
-    if let Some(name) = struct_at(ws, mid, offset) {
-        // `struct_at` matches any Nominal annotation ctor, including enums
-        // (`c: Color`) and newtypes (`id: UserId`) -- route those to their
-        // own walks so declarations and ctor/qualifier sites rename too.
-        if enum_def_by_name(ws, name).is_some() {
-            return plain(enum_references(ws, name));
+    let mut sites: Vec<RefSite> = match ref_target_at(ws, mid, inf, offset, text_of) {
+        None => Vec::new(),
+        Some(RefTarget::Binding(mut sites)) => {
+            // A fn PARAM also renames at callers' named-arg labels
+            // (`spawn_it(count: 3)`), resolved per-overload.
+            sites.extend(param_named_arg_sites(ws, mid, offset, text_of));
+            sites
         }
-        if newtype_declared(ws, name) {
-            return plain(newtype_references(ws, name, text_of));
+        Some(RefTarget::GenericParam(gmid, gidx)) => {
+            plain(generic_param_references(ws, gmid, gidx))
         }
-        return plain(struct_references(ws, name));
-    }
-
-    if let Some((sname, field)) = struct_field_at(ws, mid, inf, offset) {
-        return field_references(ws, sname, field);
-    }
-
-    if let Some((ename, variant, field)) = variant_field_at(ws, mid, offset) {
-        return variant_field_references(ws, ename, variant, field);
-    }
-
-    if let Some((fmid, fid)) = function_target(ws, mid, inf, offset) {
-        let name = ws.modules.get(fmid.index()).map(|m| m.functions[fid].name);
-        if let Some(name) = name {
+        Some(RefTarget::EnumVariant(ename, variant)) => {
+            plain(enum_variant_references(ws, ename, variant))
+        }
+        Some(RefTarget::Enum(name)) => plain(enum_references(ws, name)),
+        Some(RefTarget::Newtype(name)) => plain(newtype_references(ws, name, text_of)),
+        Some(RefTarget::Struct(name)) => plain(struct_references(ws, name)),
+        Some(RefTarget::Field(sname, field)) => field_references(ws, sname, field),
+        Some(RefTarget::VariantField(ename, variant, field)) => {
+            variant_field_references(ws, ename, variant, field)
+        }
+        Some(RefTarget::Function(fmid, fid)) => {
+            let name = ws.module(fmid).functions[fid].name;
             // Find-usages scopes to this overload; rename keeps the shared
             // name, but only across overloads the user owns: a stdlib overload
             // sharing the name is a different function. A read-only target
             // keeps its whole family, and rename then refuses on those sites.
             let (target, owned_only) = match fn_scope {
                 FnRefScope::ThisOverload => (Some((fmid, fid)), false),
-                FnRefScope::AllOverloads => (
-                    None,
-                    ws.modules
-                        .get(fmid.index())
-                        .is_some_and(|m| !is_read_only_source(m.file.as_str())),
-                ),
+                FnRefScope::AllOverloads => {
+                    (None, !is_read_only_source(ws.module(fmid).file.as_str()))
+                }
             };
-            return plain(function_references_by_name(
+            plain(function_references_by_name(
                 ws, name, target, owned_only, text_of,
-            ));
+            ))
         }
-    }
-
-    if let Some(name) = global_at(ws, mid, offset) {
-        return plain(global_references(ws, name));
-    }
-
-    if let Some(name) = decorator_at(ws, mid, offset, text_of) {
-        return plain(decorator_references(ws, name, text_of));
-    }
-
-    Vec::new()
+        Some(RefTarget::Global(name)) => plain(global_references(ws, name)),
+        Some(RefTarget::Decorator(name)) => plain(decorator_references(ws, name, text_of)),
+    };
+    // Walks may meet one token twice (a declaration that is also a use);
+    // the first sighting wins.
+    let mut seen = std::collections::HashSet::new();
+    sites.retain(|s| seen.insert((s.span.file, s.span.offset_range())));
+    sites
 }
 
-/// What kind of symbol [`references`] resolves at `offset`, in the same
-/// order it tries them. Rename uses it to decide which names opaque code
-/// (an `inline(lua)` body, a `@nomangle` caller) can reach by spelling.
+/// What kind of symbol [`references`] resolves at `offset`. Rename uses it to
+/// decide which names opaque code (an `inline(lua)` body, a `@nomangle`
+/// caller) can reach by spelling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RenameSubject {
     /// A local, parameter or pattern binding.
@@ -1202,48 +1240,24 @@ pub(crate) enum RenameSubject {
     Other,
 }
 
-pub(crate) fn rename_subject(
+pub(crate) fn rename_subject<'t>(
     ws: &Workspace,
     mid: ModuleId,
     inf: &InferenceResult,
     offset: usize,
+    text_of: TextOf<'_, 't>,
 ) -> RenameSubject {
-    if local_references(ws, mid, offset).is_some() {
-        return RenameSubject::Binding;
-    }
-    if generic_param_at(ws, mid, offset).is_some() || enum_variant_at(ws, mid, offset).is_some() {
-        return RenameSubject::Other;
-    }
-    if enum_at(ws, mid, offset).is_some() {
-        return RenameSubject::Type(None);
-    }
-    if newtype_decl_at(ws, mid, offset).is_some() {
-        return RenameSubject::Other;
-    }
-    if let Some(name) = struct_at(ws, mid, offset) {
-        if enum_def_by_name(ws, name).is_some() {
-            return RenameSubject::Type(None);
+    match ref_target_at(ws, mid, inf, offset, text_of) {
+        Some(RefTarget::Binding(_)) => RenameSubject::Binding,
+        Some(RefTarget::Function(fmid, fid)) => {
+            RenameSubject::Function(ws.module(fmid).functions[fid].name)
         }
-        if newtype_declared(ws, name) {
-            return RenameSubject::Other;
-        }
-        return RenameSubject::Type(Some(name));
+        Some(RefTarget::Global(name)) => RenameSubject::Global(name),
+        Some(RefTarget::Field(..)) => RenameSubject::Field,
+        Some(RefTarget::Enum(_)) => RenameSubject::Type(None),
+        Some(RefTarget::Struct(name)) => RenameSubject::Type(Some(name)),
+        _ => RenameSubject::Other,
     }
-    if struct_field_at(ws, mid, inf, offset).is_some() {
-        return RenameSubject::Field;
-    }
-    if variant_field_at(ws, mid, offset).is_some() {
-        return RenameSubject::Other;
-    }
-    if let Some((fmid, fid)) = function_target(ws, mid, inf, offset) {
-        if let Some(m) = ws.modules.get(fmid.index()) {
-            return RenameSubject::Function(m.functions[fid].name);
-        }
-    }
-    if let Some(name) = global_at(ws, mid, offset) {
-        return RenameSubject::Global(name);
-    }
-    RenameSubject::Other
 }
 
 fn newtype_declared(ws: &Workspace, name: Ustr) -> bool {
@@ -1270,18 +1284,10 @@ fn newtype_decl_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Ustr>
 fn newtype_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>) -> Vec<Span> {
     let len = name.as_str().len();
     let mut out: Vec<Span> = Vec::new();
-    let mut push = |sp: Span| {
-        if !out
-            .iter()
-            .any(|s| s.offset_range() == sp.offset_range() && s.file == sp.file)
-        {
-            out.push(sp);
-        }
-    };
 
     for m in ws.modules.iter() {
         if let Some(idx) = m.newtypes_by_name.get(&name) {
-            push(m.newtypes[*idx].name_span);
+            out.push(m.newtypes[*idx].name_span);
         }
         let text = text_of(m.file.as_str());
         for body in m.bodies.values() {
@@ -1291,7 +1297,7 @@ fn newtype_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>) -
                     t.get(clipped.offset_range().0..clipped.offset_range().1) == Some(name.as_str())
                 });
                 if verified {
-                    push(clipped);
+                    out.push(clipped);
                 }
             });
             for (_, expr) in body.expr_arena.iter() {
@@ -1305,7 +1311,7 @@ fn newtype_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>) -
                 } = expr
                 {
                     if *cn == name {
-                        push(body.name_spans[*name_span]);
+                        out.push(body.name_spans[*name_span]);
                     }
                 }
             }
@@ -1383,20 +1389,13 @@ fn variant_field_references(
     field: Ustr,
 ) -> Vec<RefSite> {
     let mut out: Vec<RefSite> = Vec::new();
-    let mut push = |site: RefSite| {
-        if !out.iter().any(|s| {
-            s.span.offset_range() == site.span.offset_range() && s.span.file == site.span.file
-        }) {
-            out.push(site);
-        }
-    };
 
     for m in ws.modules.iter() {
         if let Some(idx) = m.enums_by_name.get(&ename) {
             if let Some(v) = m.enums[*idx].variants.iter().find(|v| v.name == variant) {
                 if let hir::VariantPayload::Record(fields) = &v.payload {
                     if let Some(f) = fields.iter().find(|f| f.name == field) {
-                        push(RefSite::plain(f.span));
+                        out.push(RefSite::plain(f.span));
                     }
                 }
             }
@@ -1421,7 +1420,7 @@ fn variant_field_references(
                                 .expr_spans
                                 .get(f.value)
                                 .is_some_and(|vs| vs.offset_range() == f.name_span.offset_range());
-                            push(RefSite {
+                            out.push(RefSite {
                                 span: f.name_span,
                                 shorthand: is_shorthand.then_some(Shorthand::KeepBinding(f.name)),
                             });
@@ -1452,7 +1451,7 @@ fn variant_field_references(
                                 }
                                 _ => false,
                             };
-                            push(RefSite {
+                            out.push(RefSite {
                                 span: f.name_span,
                                 shorthand: is_shorthand.then_some(Shorthand::KeepBinding(f.name)),
                             });
@@ -1517,14 +1516,6 @@ fn decorator_declared(ws: &Workspace, name: Ustr) -> bool {
 /// (text-located) and every `@name` application on a fn.
 fn decorator_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>) -> Vec<Span> {
     let mut out: Vec<Span> = Vec::new();
-    let mut push = |sp: Span| {
-        if !out
-            .iter()
-            .any(|s| s.offset_range() == sp.offset_range() && s.file == sp.file)
-        {
-            out.push(sp);
-        }
-    };
 
     for m in ws.modules.iter() {
         for d in m.decorators.values() {
@@ -1541,13 +1532,13 @@ fn decorator_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>)
                 d.name.as_str(),
                 &d.span,
             ) {
-                push(sp);
+                out.push(sp);
             }
         }
         for f in m.functions.values() {
             for a in &f.annotations {
                 if a.resolved_name.unwrap_or(a.name.name) == name {
-                    push(a.name.span);
+                    out.push(a.name.span);
                 }
             }
         }
@@ -1594,25 +1585,17 @@ fn global_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Ustr> {
 fn global_references(ws: &Workspace, name: Ustr) -> Vec<Span> {
     let len = name.as_str().len();
     let mut out: Vec<Span> = Vec::new();
-    let mut push = |sp: Span| {
-        if !out
-            .iter()
-            .any(|s| s.offset_range() == sp.offset_range() && s.file == sp.file)
-        {
-            out.push(sp);
-        }
-    };
 
     for m in ws.modules.iter() {
         if let Some(gidx) = m.global_by_name.get(&name) {
-            push(m.globals[*gidx].name_span);
+            out.push(m.globals[*gidx].name_span);
         }
         for body in m.bodies.values() {
             for (e, expr) in body.expr_arena.iter() {
                 if matches!(expr, hir::Expr::Global(n) if *n == name) {
                     if let Some(sp) = body.expr_spans.get(e) {
                         let end = sp.offset_range().1;
-                        push(sp.with_offset_range((end - len, end)));
+                        out.push(sp.with_offset_range((end - len, end)));
                     }
                 }
             }
@@ -1766,19 +1749,12 @@ fn struct_field_at(
 fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
     let flen = field.as_str().len();
     let mut out: Vec<RefSite> = Vec::new();
-    let mut push = |site: RefSite| {
-        if !out.iter().any(|s| {
-            s.span.offset_range() == site.span.offset_range() && s.span.file == site.span.file
-        }) {
-            out.push(site);
-        }
-    };
 
     for m in ws.modules.iter() {
         // Declaration.
         if let Some(idx) = m.struct_by_name.get(&sname) {
             if let Some(f) = m.structs[*idx].fields.iter().find(|f| f.name == field) {
-                push(RefSite::plain(f.span));
+                out.push(RefSite::plain(f.span));
             }
         }
 
@@ -1798,7 +1774,7 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                                 let is_shorthand = body.expr_spans.get(f.value).is_some_and(|vs| {
                                     vs.offset_range() == f.name_span.offset_range()
                                 });
-                                push(RefSite {
+                                out.push(RefSite {
                                     span: f.name_span,
                                     shorthand: is_shorthand
                                         .then_some(Shorthand::KeepBinding(f.name)),
@@ -1820,7 +1796,7 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                         if resolves {
                             if let Some(sp) = body.expr_spans.get(e) {
                                 let end = sp.offset_range().1;
-                                push(RefSite::plain(sp.with_offset_range((end - flen, end))));
+                                out.push(RefSite::plain(sp.with_offset_range((end - flen, end))));
                             }
                         }
                     }
@@ -1841,7 +1817,7 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                         if of_struct {
                             if let Some(sp) = body.expr_spans.get(e) {
                                 let end = sp.offset_range().1;
-                                push(RefSite::plain(sp.with_offset_range((end - flen, end))));
+                                out.push(RefSite::plain(sp.with_offset_range((end - flen, end))));
                             }
                         }
                     }
@@ -1872,7 +1848,7 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                                     }
                                     _ => false,
                                 };
-                                push(RefSite {
+                                out.push(RefSite {
                                     span: f.name_span,
                                     shorthand: is_shorthand
                                         .then_some(Shorthand::KeepBinding(f.name)),
@@ -1895,15 +1871,7 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
 fn struct_references(ws: &Workspace, name: Ustr) -> Vec<Span> {
     let len = name.as_str().len();
     let mut out: Vec<Span> = Vec::new();
-    let mut push = |sp: &Span| {
-        let clipped = leading_name_span(sp, len);
-        if !out
-            .iter()
-            .any(|s| s.offset_range() == clipped.offset_range() && s.file == clipped.file)
-        {
-            out.push(clipped);
-        }
-    };
+    let mut push = |sp: &Span| out.push(leading_name_span(sp, len));
 
     for m in ws.modules.iter() {
         if let Some(idx) = m.struct_by_name.get(&name) {
@@ -2039,19 +2007,11 @@ fn enum_variant_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<(Ustr
 /// carry the enum name; unqualified patterns resolve structurally).
 fn enum_variant_references(ws: &Workspace, ename: Ustr, variant: Ustr) -> Vec<Span> {
     let mut out: Vec<Span> = Vec::new();
-    let mut push = |sp: Span| {
-        if !out
-            .iter()
-            .any(|s| s.offset_range() == sp.offset_range() && s.file == sp.file)
-        {
-            out.push(sp);
-        }
-    };
 
     for m in ws.modules.iter() {
         if let Some(idx) = m.enums_by_name.get(&ename) {
             if let Some(v) = m.enums[*idx].variants.iter().find(|v| v.name == variant) {
-                push(v.name_span);
+                out.push(v.name_span);
             }
         }
 
@@ -2065,7 +2025,7 @@ fn enum_variant_references(ws: &Workspace, ename: Ustr, variant: Ustr) -> Vec<Sp
                 } = expr
                 {
                     if *enum_name == ename && *v == variant {
-                        push(body.name_spans[*variant_span]);
+                        out.push(body.name_spans[*variant_span]);
                     }
                 }
             }
@@ -2080,7 +2040,7 @@ fn enum_variant_references(ws: &Workspace, ename: Ustr, variant: Ustr) -> Vec<Sp
                     } if *v == variant => {
                         let resolved = enum_def_for_variant(ws, *enum_name, *v).map(|e| e.name);
                         if resolved == Some(ename) {
-                            push(*variant_span);
+                            out.push(*variant_span);
                         }
                     }
                     hir::Pattern::Record {
@@ -2089,7 +2049,7 @@ fn enum_variant_references(ws: &Workspace, ename: Ustr, variant: Ustr) -> Vec<Sp
                         name_span: Some(nspan),
                         ..
                     } if *en == ename && *v == variant => {
-                        push(*nspan);
+                        out.push(*nspan);
                     }
                     _ => {}
                 }
@@ -2156,15 +2116,7 @@ fn enum_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Ustr> {
 fn enum_references(ws: &Workspace, name: Ustr) -> Vec<Span> {
     let len = name.as_str().len();
     let mut out: Vec<Span> = Vec::new();
-    let mut push = |sp: &Span| {
-        let clipped = leading_name_span(sp, len);
-        if !out
-            .iter()
-            .any(|s| s.offset_range() == clipped.offset_range() && s.file == clipped.file)
-        {
-            out.push(clipped);
-        }
-    };
+    let mut push = |sp: &Span| out.push(leading_name_span(sp, len));
 
     for m in ws.modules.iter() {
         if let Some(idx) = m.enums_by_name.get(&name) {
@@ -2299,15 +2251,7 @@ fn generic_param_references(ws: &Workspace, gmid: ModuleId, gidx: Idx<hir::TypeE
     let is_param = |idx: Idx<hir::TypeExpr>| matches!(m.ty_arena[idx], hir::TypeExpr::Generic(v, _) if v == var);
 
     let mut out: Vec<Span> = Vec::new();
-    let mut push = |sp: Span| {
-        let clipped = leading_name_span(&sp, len);
-        if !out
-            .iter()
-            .any(|s| s.offset_range() == clipped.offset_range() && s.file == clipped.file)
-        {
-            out.push(clipped);
-        }
-    };
+    let mut push = |sp: Span| out.push(leading_name_span(&sp, len));
 
     if let Some(decl) = generic_decl_span(ws, gmid, gidx) {
         push(decl);

@@ -9,7 +9,6 @@
 //! (`crate::query`).
 
 mod completion;
-pub mod gaps;
 mod macro_refs;
 mod rename_guard;
 
@@ -1308,7 +1307,7 @@ impl BoneWorkspace {
             .collect()
     }
 
-    // -- Feature: goto-definition (stubbed: gaps::definition) ----------------
+    // -- Feature: goto-definition ----------------------------------------------
 
     pub fn definition(&self, path: &str, pos: Position) -> Option<Location> {
         let path_c = self.canon(path);
@@ -1347,11 +1346,11 @@ impl BoneWorkspace {
             .and_then(|ast| crate::query::enum_variant_pattern_def(ws, ast, offset));
         let span = pat_def
             .or_else(|| crate::query::generic_param_def(ws, mid, offset))
-            .or_else(|| gaps::definition(ws, mid, inf, offset))?;
+            .or_else(|| crate::query::definition_at(ws, mid, inf, offset))?;
         self.location_from_span(proj, &span)
     }
 
-    // -- Feature: goto-type-definition (gaps::type_definition) ----------------
+    // -- Feature: goto-type-definition -----------------------------------------
 
     /// LSP `textDocument/typeDefinition`: jump from the value under the cursor to
     /// the declaration of its *type* (on `mob` -> `struct Mob`). None when the
@@ -1365,11 +1364,11 @@ impl BoneWorkspace {
         let ws = proj.session.workspace();
         let mid = user_module_for_path(ws, path)?;
         let inf = ws.inference(mid)?;
-        let span = gaps::type_definition(ws, mid, inf, offset)?;
+        let span = crate::query::type_definition_at(ws, mid, inf, offset)?;
         self.location_from_span(proj, &span)
     }
 
-    // -- Feature: find-references (stubbed: gaps::references) -----------------
+    // -- Feature: find-references ----------------------------------------------
 
     pub fn references(&self, path: &str, pos: Position) -> Vec<Location> {
         let path_c = self.canon(path);
@@ -1696,7 +1695,7 @@ impl BoneWorkspace {
                 request,
             );
         }
-        gaps::references(ws, mid, inf, offset, &text_of, fn_scope)
+        crate::query::references(ws, mid, inf, offset, &text_of, fn_scope)
     }
 
     /// The sites a rename at `offset` rewrites: [`Self::v1_rename_sites`]
@@ -1754,7 +1753,7 @@ impl BoneWorkspace {
             None => {
                 let key =
                     crate::query::v1_def_named_at(ws, Ustr::from(path), offset).or_else(|| {
-                        let def = gaps::definition(ws, mid, ws.inference(mid)?, offset)?;
+                        let def = crate::query::definition_at(ws, mid, ws.inference(mid)?, offset)?;
                         crate::query::v1_def_declared_at(ws, &def)
                     })?;
                 let src = proj.texts.get(path)?;
@@ -1839,7 +1838,7 @@ impl BoneWorkspace {
         items
     }
 
-    // -- Feature: rename + prepare-rename (stubbed: gaps::references) --------
+    // -- Feature: rename + prepare-rename -------------------------------------
 
     /// The identifier range a rename at `pos` would rewrite: `Ok(None)` when
     /// nothing there is renameable, `Err` when the symbol is renameable in
@@ -1861,7 +1860,7 @@ impl BoneWorkspace {
         // Reuse the exact reference resolution `rename` uses, so prepare-rename
         // and rename can never disagree: the token is renameable iff it has
         // reference sites, and the editable range is the cursor's own site (the
-        // identifier token). `gaps::definition` + `type_at` did neither -- None
+        // identifier token). `definition_at` + `type_at` did neither -- None
         // at a declaration name ("nothing to rename" on `fn foo`), and the whole
         // enclosing `Call` span at a callee (prefilling `foo(args)`, not `foo`).
         let here = self
@@ -1973,7 +1972,7 @@ impl BoneWorkspace {
                 // On a caller's named-arg label the subject is the parameter.
                 match crate::query::named_arg_param_at(ws, mid, inf, offset, &text_of) {
                     Some(_) => crate::query::RenameSubject::Binding,
-                    None => crate::query::rename_subject(ws, mid, inf, offset),
+                    None => crate::query::rename_subject(ws, mid, inf, offset, &text_of),
                 }
             });
         rename_guard::check_unpinned(ws, subject, old, &text_of)?;
@@ -2327,7 +2326,7 @@ impl BoneWorkspace {
         })
     }
 
-    // -- Feature: inlay hints (stubbed: gaps::inlay_hints) ------------------
+    // -- Feature: inlay hints ------------------------------------------------
 
     pub fn inlay_hints(&self, path: &str, range: Range) -> Vec<InlayHint> {
         let path_c = self.canon(path);
@@ -2381,35 +2380,31 @@ impl BoneWorkspace {
             // The parse refusal above was logged; retain other inferred hints.
             .unwrap_or_default()
             .into_iter()
-            .map(|(span, label)| gaps::HintEntry {
-                span,
-                label,
-                leading: false,
-            });
-        gaps::inlay_hints(ws, mid, inf, start, end)
+            .map(|(span, label)| (span, label, false));
+        let lets = crate::query::inferred_let_bindings(ws, mid, inf, start, end)
             .into_iter()
+            .map(|(span, ty)| (span, format!(": {ty}"), false));
+        let params = crate::query::call_param_hints(ws, mid, inf, start, end)
+            .into_iter()
+            .map(|(span, label)| (span, label, true));
+        lets.chain(params)
             .chain(recv_hints)
-            .map(|h| {
+            .map(|(span, label, leading)| {
                 // A leading (parameter-name) hint renders before its span with
                 // trailing padding; a type hint renders after with leading padding.
-                let (offset, kind, pad_left, pad_right) = if h.leading {
+                let (offset, kind, pad_left, pad_right) = if leading {
                     (
-                        h.span.offset_range().0,
+                        span.offset_range().0,
                         InlayHintKind::PARAMETER,
                         None,
                         Some(true),
                     )
                 } else {
-                    (
-                        h.span.offset_range().1,
-                        InlayHintKind::TYPE,
-                        Some(true),
-                        None,
-                    )
+                    (span.offset_range().1, InlayHintKind::TYPE, Some(true), None)
                 };
                 InlayHint {
                     position: line_index.position(src, offset),
-                    label: InlayHintLabel::String(h.label),
+                    label: InlayHintLabel::String(label),
                     kind: Some(kind),
                     text_edits: None,
                     tooltip: None,
