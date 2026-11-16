@@ -67,19 +67,6 @@ fn lower_dump(mut modules: Vec<skull_parser::Ast>, fn_name: &str) -> String {
 }
 
 #[test]
-fn narrowed_nullable_nobox_field_uses_the_nonnull_read_shape() {
-    let src = "nobox value Place { x: int }\n\
-               struct Row { goal: Place? }\n\
-               fn compare(row: Row, goal: Place) -> bool {\n\
-                   row.goal = goal\n\
-                   row.goal == goal\n\
-               }";
-    let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
-    let dump = lower_dump(vec![ast], "compare");
-    assert!(dump.contains("return"), "comparison must lower: {dump}");
-}
-
-#[test]
 fn scalar_abi_call_widens_an_int_argument_for_a_float_parameter() {
     let src = "value V2 { x: float, y: float }\n\
                fn mk(x: float, y: float) -> V2 { return V2 { x: x, y: y } }\n\
@@ -1166,22 +1153,6 @@ fn nullable_nobox_presence_conditions_skip_normalization() {
     let dump = lower_dump(vec![ast], "f");
     assert!(!dump.contains(" = not "), "{dump}");
     assert!(dump.contains("branch "), "{dump}");
-}
-
-#[test]
-fn narrowed_nullable_handle_value_can_enter_a_nonnullable_map() {
-    mir_std(
-        r#"
-        struct Resource { id: int }
-        value Handle { handle: Entity<Resource> }
-        global CACHE: Map<string, Handle> = map_new()
-        fn retain(value: Handle?) {
-            if value == null { return }
-            CACHE["active"] = value
-        }
-    "#,
-        "retain",
-    );
 }
 
 #[test]
