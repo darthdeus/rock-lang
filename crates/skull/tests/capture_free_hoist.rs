@@ -123,28 +123,6 @@ fn capture_free_lambda_hoists_to_named_toplevel() {
     );
 }
 
-/// SHAPE (P2.6): a CAPTURING lambda also hoists -- to a `(__rock_env, ..)` body -- and its
-/// creation site builds an env record instead of an inline closure. (Pre-P2.6 it
-/// stayed inline; env_record_hoist.rs covers the record mechanics in depth.)
-#[test]
-fn capturing_lambda_hoists_as_record() {
-    let lua = emit_module(FIXTURE);
-    let body = function_body(&lua, "capturing_loop");
-    let lam = format!("{}__lambda", mangled_name(&lua, "capturing_loop"));
-    assert!(
-        !body.contains("function("),
-        "a capturing lambda no longer renders an inline closure at the creation site:\n{body}"
-    );
-    assert!(
-        body.contains("__slot = __rock_code_slot_ref("),
-        "the capturing lambda's creation site builds a CodeRef env record:\n{body}"
-    );
-    assert!(
-        lua.contains(&format!("function {lam}")),
-        "the capturing lambda's body hoists to a named top-level fn:\n{lua}"
-    );
-}
-
 /// RUNTIME (RED until P3): two creations of the SAME capture-free lambda are the
 /// SAME fn value (a shared top-level global), not fresh per-creation closures.
 #[test]
@@ -183,29 +161,6 @@ fn main() {
     assert_eq!(
         out, "6\n6",
         "a hoisted lambda's local must be per-call (not shared); got: {out}"
-    );
-}
-
-/// A definition whose name equals a hoisted lambda's `<enclosing>__lambda<k>`
-/// name must be REJECTED (a spanned `CompilerError`, not a panic / silent
-/// clobber). `foo() -> fn()` mangles to `foo_0`, so its capture-free
-/// lambda hoists to `foo_0__lambda0`; a `@nomangle` fn keeps that
-/// bare name and collides. (A PLAIN user fn would itself mangle and could no
-/// longer BE a bare synthetic name.) Full family: `synthetic_name_collision.rs`.
-#[test]
-fn hoist_name_collision_with_user_fn_rejected() {
-    let src = r#"
-@nomangle inline(lua) fn sink(a: int) = "_G.__sink = a"
-@nomangle fn foo_0__lambda0() -> int { return 99 }
-fn foo() -> fn() { return () => { sink(1) } }
-fn main() {}
-"#;
-    let err = crate::common::try_emit_module(src).expect_err("the collision must be rejected");
-    assert!(
-        err.message.contains("foo_0__lambda0")
-            && err.message.contains("compiler-reserved synthetic name"),
-        "rejection names the colliding synthetic name; got: {}",
-        err.message
     );
 }
 

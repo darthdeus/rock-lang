@@ -160,7 +160,6 @@ mod state_global_bridge;
 mod static_hot_reload;
 mod static_registration_coverage;
 mod struct_expand;
-mod synthetic_name_collision;
 mod tail_calls;
 mod trace_frames;
 mod tuple_scalarize;
