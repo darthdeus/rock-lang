@@ -55,7 +55,7 @@ pub(crate) fn resolve_rock_dir_with(
             if let Some(target_dir) = profile_dir.parent() {
                 if target_dir.file_name().and_then(|n| n.to_str()) == Some("target") {
                     if let Some(root) = target_dir.parent() {
-                        if root.join("Cargo.toml").exists() && root.join("crates").is_dir() {
+                        if project::is_dev_workspace(root) {
                             return root.to_string_lossy().into_owned();
                         }
                     }

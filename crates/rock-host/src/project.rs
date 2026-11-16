@@ -7,7 +7,11 @@ use std::path::{Path, PathBuf};
 /// - Dev workspace: has Cargo.toml + crates/
 /// - Release layout: has bin/rock + lib/
 fn is_rock_root(path: &Path) -> bool {
-    (path.join("Cargo.toml").exists() && path.join("crates").is_dir()) || is_release_layout_in(path)
+    is_dev_workspace(path) || is_release_layout_in(path)
+}
+
+pub(crate) fn is_dev_workspace(path: &Path) -> bool {
+    path.join("Cargo.toml").exists() && path.join("crates").is_dir()
 }
 
 /// Find the Rock workspace root by looking for known layout markers.
@@ -16,49 +20,26 @@ fn is_rock_root(path: &Path) -> bool {
 ///
 /// Walks up from the given path. Returns None if no workspace root is found.
 pub fn find_workspace_root(path: &Path) -> Option<PathBuf> {
-    if let Some(root) = context_root_from_env() {
-        return Some(root);
-    }
-    if let Some(root) = release_root_from_exe() {
-        return Some(root);
-    }
-
-    let initial_path = fs_err::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-
-    let mut current = if initial_path.is_file() {
-        initial_path.parent()?.to_path_buf()
-    } else {
-        initial_path
-    };
-
-    loop {
-        if is_rock_root(&current) {
-            return Some(current);
-        }
-        current = current.parent()?.to_path_buf();
-    }
+    context_root_from_env()
+        .or_else(release_root_from_exe)
+        .or_else(|| find_ancestor(path, is_rock_root))
 }
 
 /// Find the source workspace root for a project path without consulting the
 /// executable's installed toolchain layout.
 pub fn find_source_root(path: &Path) -> Option<PathBuf> {
-    if let Some(root) = context_root_from_env() {
-        return Some(root);
-    }
+    context_root_from_env().or_else(|| find_ancestor(path, is_dev_workspace))
+}
 
-    let initial_path = fs_err::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let mut current = if initial_path.is_file() {
-        initial_path.parent()?.to_path_buf()
-    } else {
-        initial_path
-    };
-
-    loop {
-        if current.join("Cargo.toml").exists() && current.join("crates").is_dir() {
-            return Some(current);
-        }
-        current = current.parent()?.to_path_buf();
-    }
+/// The nearest directory at or above `path` (canonicalized when possible)
+/// that satisfies `is_root`. A file never holds a marker, so a file path
+/// starts the walk at its directory.
+fn find_ancestor(path: &Path, is_root: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    let start = fs_err::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    start
+        .ancestors()
+        .find(|dir| is_root(dir))
+        .map(Path::to_path_buf)
 }
 
 pub(crate) fn context_root_from_env() -> Option<PathBuf> {
@@ -275,13 +256,9 @@ pub fn default_main_lua_path() -> PathBuf {
 /// complete old or the complete new file, never a truncated mid-write
 /// (which the hot-reload poller would `dofile` as an empty program,
 /// clearing the system registries and blanking the screen).
-///
-/// The temp name is PID + a process-global counter, so concurrent
-/// compiler instances (e.g. parallel tests) and concurrent writes within
-/// one process never collide on the temp path. The single atomic-write
-/// path shared by every generated-Lua writer (rock + skull backends).
 pub fn write_atomic(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
-    write_atomic_impl(path.as_ref(), contents.as_ref(), false)
+    use std::io::Write;
+    write_atomic_streamed(path, |file| file.write_all(contents.as_ref()))
 }
 
 /// Stream a generated artifact into a same-directory temporary file before
@@ -290,19 +267,7 @@ pub fn write_atomic_streamed(
     path: impl AsRef<Path>,
     write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    write_atomic_with(path.as_ref(), write, false)
-}
-
-fn write_atomic_impl(path: &Path, contents: &[u8], durable: bool) -> std::io::Result<()> {
-    use std::io::Write;
-    write_atomic_with(path, |file| file.write_all(contents), durable)
-}
-
-fn write_atomic_with(
-    path: &Path,
-    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
-    durable: bool,
-) -> std::io::Result<()> {
+    let path = path.as_ref();
     let parent = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
@@ -313,17 +278,10 @@ fn write_atomic_with(
     // (atomic) rename. NamedTempFile gives an OS-level unique name -- no
     // collisions between concurrent compiler / test instances -- and is
     // removed on any early return, so a failed write leaves no `.tmp`
-    // litter. Generated artifacts skip fsync; authored documents request it.
+    // litter. Generated artifacts skip fsync.
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     write(tmp.as_file_mut())?;
-    if durable {
-        tmp.as_file().sync_all()?;
-    }
     tmp.persist(path).map_err(|e| e.error)?;
-    #[cfg(unix)]
-    if durable {
-        fs_err::File::open(parent)?.sync_all()?;
-    }
     Ok(())
 }
 
