@@ -6,24 +6,12 @@
 //! re-assembles the tree. A signature, field or payload edit keeps
 //! its DefKey and stays on the interface path.
 
+use crate::common::{in_package, package_tag, v1};
+use crate::v1_differential::V1Harness;
+
 use bone_core::modules::NsAliases;
 use bone_incremental::session::{Session, SessionFile, UpdateTier};
-use skull_parser::{Dialect, GlobalPolicy, PackageTag};
-
-fn v1(path: &str, text: &str) -> SessionFile {
-    SessionFile {
-        path: path.into(),
-        text: text.into(),
-        dialect: Dialect::V1,
-        package: Some(PackageTag {
-            id: 1,
-            self_name: "livev1".into(),
-            identity_storage: Default::default(),
-            root: String::new(),
-        }),
-        global_policy: GlobalPolicy::Any,
-    }
-}
+use skull_parser::{Dialect, GlobalPolicy};
 
 fn diagnostics(session: &Session) -> Vec<String> {
     let mut out: Vec<String> = session
@@ -35,43 +23,25 @@ fn diagnostics(session: &Session) -> Vec<String> {
     out
 }
 
-/// Apply `edit` to `path` in a session over `files`, check the session's
-/// diagnostics against a fresh session over the edited texts, and return the
-/// tier and those diagnostics.
-fn edit_with_diagnostics(
-    files: Vec<SessionFile>,
-    path: &str,
-    edit: &str,
-) -> (UpdateTier, Vec<String>) {
-    edit_with_aliases(files, path, edit, &NsAliases::default())
-}
-
-/// `edit_with_diagnostics` under an explicit package alias table.
+/// Apply `edit` to `path` in a harness over `files` (which checks it against
+/// a fresh build) and return the tier and the session's diagnostics.
 fn edit_with_aliases(
     files: Vec<SessionFile>,
     path: &str,
     edit: &str,
     aliases: &NsAliases,
 ) -> (UpdateTier, Vec<String>) {
-    let mut session = Session::new(vec![], files.clone(), aliases).expect("baseline builds");
-    let tier = session
-        .update_file(path, edit)
-        .expect("the edit is accepted")
-        .tier;
+    let mut h = V1Harness::with_aliases(files, aliases.clone());
+    let tier = h.edit(path, edit).expect("the edit is accepted").tier;
+    (tier, h.diagnostics())
+}
 
-    let edited: Vec<SessionFile> = files
-        .into_iter()
-        .map(|mut f| {
-            if f.path == path {
-                f.text = edit.to_string();
-            }
-            f
-        })
-        .collect();
-    let fresh = Session::new(vec![], edited, aliases).expect("fresh build");
-    let diags = diagnostics(&session);
-    assert_eq!(diags, diagnostics(&fresh), "incremental and fresh disagree");
-    (tier, diags)
+fn edit_with_diagnostics(
+    files: Vec<SessionFile>,
+    path: &str,
+    edit: &str,
+) -> (UpdateTier, Vec<String>) {
+    edit_with_aliases(files, path, edit, &NsAliases::default())
 }
 
 fn edit_matches_fresh(files: Vec<SessionFile>, path: &str, edit: &str) -> UpdateTier {
@@ -198,21 +168,6 @@ fn a_legacy_added_definition_stays_on_the_interface_path() {
     );
 }
 
-fn v1_in(package: u32, name: &str, path: &str, text: &str) -> SessionFile {
-    SessionFile {
-        path: path.into(),
-        text: text.into(),
-        dialect: Dialect::V1,
-        package: Some(PackageTag {
-            id: package,
-            self_name: name.into(),
-            identity_storage: Default::default(),
-            root: String::new(),
-        }),
-        global_policy: GlobalPolicy::Any,
-    }
-}
-
 const PICK_INT: &str = "pub fn pick(n: int) -> int {\n    n\n}\n";
 const PICK_STRING: &str = "pub fn pick(s: string) -> string {\n    s\n}\n";
 const PICK_USE: &str = "fn use_it() -> int {\n    let s = pick(\"v1\")\n    pick(1)\n}\n";
@@ -241,21 +196,6 @@ fn aliases_of(files: &[SessionFile]) -> NsAliases {
     }
 }
 
-fn in_package(dialect: Dialect, package: u32, name: &str, path: &str, text: &str) -> SessionFile {
-    SessionFile {
-        path: path.into(),
-        text: text.into(),
-        dialect,
-        package: Some(PackageTag {
-            id: package,
-            self_name: name.into(),
-            identity_storage: Default::default(),
-            root: String::new(),
-        }),
-        global_policy: GlobalPolicy::Any,
-    }
-}
-
 const IMPORT_A: &str = "use lib_a::pick;\n\n";
 const IMPORT_BOTH: &str = "use lib_a::pick;\nuse lib_b::pick;\n\n";
 
@@ -268,9 +208,15 @@ const IMPORT_BOTH: &str = "use lib_a::pick;\nuse lib_b::pick;\n\n";
 fn a_second_explicit_import_composes_and_removing_it_splits_the_family() {
     let files = |imports: &str| {
         vec![
-            v1_in(1, "lib_a", "a.rock", PICK_INT),
-            v1_in(2, "lib_b", "b.rock", PICK_STRING),
-            v1_in(3, "game", "use.rock", &format!("{imports}{PICK_USE}")),
+            in_package(Dialect::V1, 1, "lib_a", "a.rock", PICK_INT),
+            in_package(Dialect::V1, 2, "lib_b", "b.rock", PICK_STRING),
+            in_package(
+                Dialect::V1,
+                3,
+                "game",
+                "use.rock",
+                &format!("{imports}{PICK_USE}"),
+            ),
         ]
     };
     let aliases = aliases_of(&files(""));
@@ -300,9 +246,15 @@ fn a_member_signature_edit_ties_a_composed_import_family() {
          lib_b::pick(s: string) -> string (v1 definition lib_b::pick)";
     let files = |b: &str| {
         vec![
-            v1_in(1, "lib_a", "a.rock", PICK_STRING),
-            v1_in(2, "lib_b", "b.rock", b),
-            v1_in(3, "game", "use.rock", &format!("{IMPORT_BOTH}{PICK_USE}")),
+            in_package(Dialect::V1, 1, "lib_a", "a.rock", PICK_STRING),
+            in_package(Dialect::V1, 2, "lib_b", "b.rock", b),
+            in_package(
+                Dialect::V1,
+                3,
+                "game",
+                "use.rock",
+                &format!("{IMPORT_BOTH}{PICK_USE}"),
+            ),
         ]
     };
     let aliases = aliases_of(&files(PICK_INT));
@@ -328,9 +280,15 @@ const GLOB_BOTH: &str = "use lib_a::*;\nuse lib_b::*;\n\n";
 fn a_second_glob_composes_and_removing_it_splits_the_family() {
     let files = |imports: &str| {
         vec![
-            v1_in(1, "lib_a", "a.rock", PICK_INT),
-            v1_in(2, "lib_b", "b.rock", PICK_STRING),
-            v1_in(3, "game", "use.rock", &format!("{imports}{PICK_USE}")),
+            in_package(Dialect::V1, 1, "lib_a", "a.rock", PICK_INT),
+            in_package(Dialect::V1, 2, "lib_b", "b.rock", PICK_STRING),
+            in_package(
+                Dialect::V1,
+                3,
+                "game",
+                "use.rock",
+                &format!("{imports}{PICK_USE}"),
+            ),
         ]
     };
     let aliases = aliases_of(&files(""));
@@ -358,9 +316,15 @@ fn a_member_added_to_a_second_globbed_module_relowers_the_globber() {
     let other = "pub fn other() -> int {\n    1\n}\n";
     let files = |b: &str| {
         vec![
-            v1_in(1, "lib_a", "a.rock", PICK_INT),
-            v1_in(2, "lib_b", "b.rock", b),
-            v1_in(3, "game", "use.rock", &format!("{GLOB_BOTH}{PICK_USE}")),
+            in_package(Dialect::V1, 1, "lib_a", "a.rock", PICK_INT),
+            in_package(Dialect::V1, 2, "lib_b", "b.rock", b),
+            in_package(
+                Dialect::V1,
+                3,
+                "game",
+                "use.rock",
+                &format!("{GLOB_BOTH}{PICK_USE}"),
+            ),
         ]
     };
     let aliases = aliases_of(&files(other));
@@ -410,8 +374,8 @@ fn a_unary_operator_added_to_a_globbed_module_relowers_the_caller() {
     let caller = "use geo::*;\n\nfn neg() -> int {\n    let p = -Pt { x: 1 }\n    let negative = -p\n    negative.x\n}\n";
     let files = |geo: &str| {
         vec![
-            v1_in(1, "geo", "geo.rock", geo),
-            v1_in(2, "app", "app.rock", caller),
+            in_package(Dialect::V1, 1, "geo", "geo.rock", geo),
+            in_package(Dialect::V1, 2, "app", "app.rock", caller),
         ]
     };
     let aliases = aliases_of(&files(without));
@@ -442,12 +406,7 @@ fn a_file_entering_after_new_reads_with_its_declared_facts() {
         .declare_file_facts(
             "extra.rock",
             Dialect::V1,
-            Some(PackageTag {
-                id: 1,
-                self_name: "livev1".into(),
-                identity_storage: Default::default(),
-                root: String::new(),
-            }),
+            Some(package_tag(1, "livev1")),
             GlobalPolicy::Any,
         )
         .expect("an unheld file takes declared facts");
@@ -477,12 +436,7 @@ fn a_held_file_refuses_different_facts() {
             .declare_file_facts(
                 "a.rock",
                 Dialect::V1,
-                Some(PackageTag {
-                    id: 1,
-                    self_name: "livev1".into(),
-                    identity_storage: Default::default(),
-                    root: String::new(),
-                }),
+                Some(package_tag(1, "livev1")),
                 GlobalPolicy::Any
             )
             .is_ok()
@@ -577,9 +531,9 @@ fn a_dependency_module_alias_added_or_removed_takes_the_scope_path() {
     let with = "use lib_a::sub as s;\n\nfn use_it() -> int {\n    s::pick(1)\n}\n";
     let files = |user: &str| {
         vec![
-            v1_in(1, "lib_a", "lib.rock", lib),
-            v1_in(1, "lib_a", "sub.rock", sub),
-            v1_in(2, "game", "use.rock", user),
+            in_package(Dialect::V1, 1, "lib_a", "lib.rock", lib),
+            in_package(Dialect::V1, 1, "lib_a", "sub.rock", sub),
+            in_package(Dialect::V1, 2, "game", "use.rock", user),
         ]
     };
     let aliases = aliases_of(&files(without));

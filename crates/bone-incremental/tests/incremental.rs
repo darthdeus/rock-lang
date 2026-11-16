@@ -2574,12 +2574,7 @@ fn fuzz_session_fixture_package_graph() {
                 path: path.to_string_lossy().to_string(),
                 text,
                 dialect: node.dialect,
-                package: Some(skull_parser::PackageTag {
-                    id: node.id.0,
-                    self_name: node.self_name.clone(),
-                    identity_storage: Default::default(),
-                    root: String::new(),
-                }),
+                package: Some(common::package_tag(node.id.0, &node.self_name)),
                 global_policy: node.global_policy,
             };
             if *id == root {

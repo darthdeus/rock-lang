@@ -16,7 +16,7 @@
 //! Each gate asserts its tier, the bodies re-inferred and re-lowered, and --
 //! through `edit` -- that the result equals a fresh build.
 
-use crate::common;
+use crate::common::{self, PACKAGE, v1};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::Ordering;
@@ -25,28 +25,11 @@ use bone_core::modules::NsAliases;
 use bone_incremental::session::{BodyId, Session, SessionFile, UpdateResult, UpdateTier};
 use bone_semantic::hir::{BodyOwner, CallFamily, Expr, Module, TypeCtor, TypeExpr};
 use bone_semantic::prelude::*;
-use skull_parser::{Ast, Dialect, GlobalPolicy, PackageTag};
+use skull_parser::{Ast, Dialect};
 
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
-
-const PACKAGE: &str = "livev1";
-
-fn v1(path: &str, text: &str) -> SessionFile {
-    SessionFile {
-        path: path.into(),
-        text: text.into(),
-        dialect: Dialect::V1,
-        package: Some(PackageTag {
-            id: 1,
-            self_name: PACKAGE.into(),
-            identity_storage: Default::default(),
-            root: String::new(),
-        }),
-        global_policy: GlobalPolicy::Any,
-    }
-}
 
 fn legacy(path: &str, text: &str) -> SessionFile {
     SessionFile::legacy(path, text)
@@ -302,8 +285,8 @@ fn fresh_with(files: &[SessionFile], aliases: &NsAliases) -> Outcome {
 // The edit-script harness
 // ---------------------------------------------------------------------------
 
-struct V1Harness {
-    session: Session,
+pub(crate) struct V1Harness {
+    pub(crate) session: Session,
     /// The texts the session holds, in tracking order.
     files: Vec<SessionFile>,
     aliases: NsAliases,
@@ -311,12 +294,12 @@ struct V1Harness {
 
 impl V1Harness {
     #[track_caller]
-    fn new(files: Vec<SessionFile>) -> Self {
+    pub(crate) fn new(files: Vec<SessionFile>) -> Self {
         Self::with_aliases(files, NsAliases::default())
     }
 
     #[track_caller]
-    fn with_aliases(files: Vec<SessionFile>, aliases: NsAliases) -> Self {
+    pub(crate) fn with_aliases(files: Vec<SessionFile>, aliases: NsAliases) -> Self {
         let session = Session::new(warm(), files.clone(), &aliases).expect("baseline builds");
         let h = V1Harness {
             session,
@@ -332,7 +315,7 @@ impl V1Harness {
     /// with the same message, and the session (which reverts) must still
     /// equal a fresh build of the previous texts.
     #[track_caller]
-    fn edit(&mut self, path: &str, text: &str) -> Result<UpdateResult, String> {
+    pub(crate) fn edit(&mut self, path: &str, text: &str) -> Result<UpdateResult, String> {
         let mut edited = self.files.clone();
         edited
             .iter_mut()
@@ -444,7 +427,7 @@ impl V1Harness {
         );
     }
 
-    fn diagnostics(&self) -> Vec<String> {
+    pub(crate) fn diagnostics(&self) -> Vec<String> {
         self.session
             .diagnostics()
             .iter()

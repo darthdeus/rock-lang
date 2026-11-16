@@ -30,3 +30,35 @@ pub fn type_profile(ws: &Workspace, path: &str, text: &str, stride: usize) -> Ve
         })
         .collect()
 }
+
+/// The package every single-package modules-v1 fixture belongs to.
+pub const PACKAGE: &str = "livev1";
+
+pub fn package_tag(id: u32, name: &str) -> skull_parser::PackageTag {
+    skull_parser::PackageTag {
+        id,
+        self_name: name.into(),
+        identity_storage: Default::default(),
+        root: String::new(),
+    }
+}
+
+pub fn in_package(
+    dialect: skull_parser::Dialect,
+    package: u32,
+    name: &str,
+    path: &str,
+    text: &str,
+) -> bone_incremental::session::SessionFile {
+    bone_incremental::session::SessionFile {
+        path: path.into(),
+        text: text.into(),
+        dialect,
+        package: Some(package_tag(package, name)),
+        global_policy: skull_parser::GlobalPolicy::Any,
+    }
+}
+
+pub fn v1(path: &str, text: &str) -> bone_incremental::session::SessionFile {
+    in_package(skull_parser::Dialect::V1, 1, PACKAGE, path, text)
+}
