@@ -199,13 +199,46 @@ mod tests {
         assert_eq!(memory["peak_commit_bytes"], 3_875_405_824u64);
     }
 
+    /// Runs `test` alone in a fresh process with `env` set, and fails with
+    /// its output unless it passes.
+    fn run_fresh(test: &str, env: &[(&str, &str)]) {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child.args(["--exact", test, "--nocapture"]);
+        for (key, value) in env {
+            child.env(key, value);
+        }
+        let out = child.output().expect("spawn fresh test process");
+        assert!(
+            out.status.success(),
+            "{test} with {env:?}: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+    }
+
     /// The compiler allocates on rayon workers and the host frees the result
     /// on its own thread before it waits on a child. Those pages belong to the
     /// workers' heaps, so a collect on the calling thread alone keeps them.
     /// A `sequential` build has no pool-owned allocations to collect.
+    ///
+    /// The commit counter is process-wide, and compile tests in this binary
+    /// release freed memory on the same workers, so a release racing ahead of
+    /// the measurement would return these pages before it is taken.
     #[cfg(not(feature = "sequential"))]
     #[test]
     fn release_returns_pages_freed_into_pool_thread_heaps() {
+        run_fresh(
+            "allocator::tests::release_child",
+            &[("ROCK_ALLOC_RELEASE_CHILD", "1")],
+        );
+    }
+
+    #[cfg(not(feature = "sequential"))]
+    #[test]
+    fn release_child() {
+        if std::env::var_os("ROCK_ALLOC_RELEASE_CHILD").is_none() {
+            return;
+        }
         // The unit-test binary keeps the system global allocator, so this
         // allocates through mimalloc's C API as the `rock` binary does.
         const PER_THREAD: usize = 64 << 20;
@@ -263,18 +296,9 @@ mod tests {
     #[cfg(feature = "sequential")]
     #[test]
     fn sequential_release_does_not_create_rayon_pool() {
-        let exe = std::env::current_exe().expect("test binary path");
-        let out = std::process::Command::new(exe)
-            .arg("--exact")
-            .arg("allocator::tests::sequential_release_child")
-            .arg("--nocapture")
-            .env("ROCK_ALLOC_SEQ_CHILD", "1")
-            .output()
-            .expect("spawn fresh test process");
-        assert!(
-            out.status.success(),
-            "release_freed_memory initialized a rayon pool in a fresh sequential process: {}",
-            String::from_utf8_lossy(&out.stderr),
+        run_fresh(
+            "allocator::tests::sequential_release_child",
+            &[("ROCK_ALLOC_SEQ_CHILD", "1")],
         );
     }
 
