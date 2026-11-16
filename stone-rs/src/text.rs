@@ -206,20 +206,21 @@ thread_local! {
 pub(crate) const FALLBACK_FONT: &[u8] =
     include_bytes!("../../packages/stone/engine/assets/fonts/DroidSans.ttf");
 
+fn font_slot<R>(idx: usize, f: impl FnOnce(Option<&FontEntry>) -> R) -> R {
+    FONTS.with(|fonts| f(fonts.borrow().get(idx).and_then(Option::as_ref)))
+}
+
+fn font_slot_mut<R>(idx: usize, f: impl FnOnce(Option<&mut FontEntry>) -> R) -> R {
+    FONTS.with(|fonts| f(fonts.borrow_mut().get_mut(idx).and_then(Option::as_mut)))
+}
+
 // Resolve a 1-based font_id to a Vec index. Returns None if out of range.
 fn font_index(font_id: u32) -> Option<usize> {
     if font_id == 0 {
         return None;
     }
     let idx = (font_id - 1) as usize;
-    FONTS.with(|f| {
-        let fonts = f.borrow();
-        if idx < fonts.len() && fonts[idx].is_some() {
-            Some(idx)
-        } else {
-            None
-        }
-    })
+    font_slot(idx, |entry| entry.map(|_| idx))
 }
 
 #[no_mangle]
@@ -811,11 +812,8 @@ fn run_gl_upload(upload: impl FnOnce(&crate::DebugGl)) -> Option<()> {
 }
 
 fn apply_raster(idx: usize, pixel_size: i32, raster: RasterizedAtlas) -> bool {
-    let texture: Option<glow::Texture> = match FONTS.with(|f| {
-        f.borrow()
-            .get(idx)
-            .and_then(|o| o.as_ref())
-            .map(|e| (e.atlas_texture, e.coverage_released))
+    let texture: Option<glow::Texture> = match font_slot(idx, |entry| {
+        entry.map(|e| (e.atlas_texture, e.coverage_released))
     }) {
         // The outer Option is "is there a font"; the inner one is "does it own a
         // texture". A metrics-only font is refused here rather than silently
@@ -854,8 +852,8 @@ fn apply_raster(idx: usize, pixel_size: i32, raster: RasterizedAtlas) -> bool {
         }
     }
 
-    FONTS.with(|fonts| {
-        if let Some(entry) = fonts.borrow_mut().get_mut(idx).and_then(|o| o.as_mut()) {
+    font_slot_mut(idx, |entry| {
+        if let Some(entry) = entry {
             entry.glyphs = raster.glyphs.clone();
             // The unit answers move with the raster they describe: a failed
             // reload never reaches this commit, so the old answers stand with
@@ -930,20 +928,16 @@ fn build_instance_rasters(
     charset: &Charset,
     source_path: &str,
 ) -> Option<Vec<BuiltInstanceRaster>> {
-    let descriptors = FONTS.with(|fonts| {
-        fonts
-            .borrow()
-            .get(idx)
-            .and_then(|entry| entry.as_ref())
-            .map(|entry| {
-                entry
-                    .instances
-                    .iter()
-                    .enumerate()
-                    .skip(1)
-                    .map(|(index, instance)| (index, instance.pixel_size, instance.texture))
-                    .collect::<Vec<_>>()
-            })
+    let descriptors = font_slot(idx, |entry| {
+        entry.map(|entry| {
+            entry
+                .instances
+                .iter()
+                .enumerate()
+                .skip(1)
+                .map(|(index, instance)| (index, instance.pixel_size, instance.texture))
+                .collect::<Vec<_>>()
+        })
     });
     let descriptors = descriptors?;
     let mut built = Vec::with_capacity(descriptors.len());
@@ -980,13 +974,8 @@ fn commit_instance_rasters(
         if !replace_atlas_texture(texture, &raster.atlas_data, width, height) {
             return false;
         }
-        FONTS.with(|fonts| {
-            if let Some(instance) = fonts
-                .borrow_mut()
-                .get_mut(idx)
-                .and_then(|entry| entry.as_mut())
-                .and_then(|entry| entry.instances.get_mut(index))
-            {
+        font_slot_mut(idx, |entry| {
+            if let Some(instance) = entry.and_then(|entry| entry.instances.get_mut(index)) {
                 instance.glyphs = glyphs;
                 instance.width = width as i32;
                 instance.height = height as i32;
@@ -1135,22 +1124,13 @@ pub extern "C" fn stone_reload_font(
         }
     };
 
-    let declared = FONTS.with(|fonts| {
-        fonts
-            .borrow()
-            .get(idx)
-            .and_then(|o| o.as_ref())
-            .map(|e| (e.faces, e.charset.clone()))
-    });
+    let declared = font_slot(idx, |entry| entry.map(|e| (e.faces, e.charset.clone())));
     let (faces, charset) = match declared {
         Some(d) => d,
         None => return false,
     };
-    let next_revision = FONTS.with(|fonts| {
-        fonts
-            .borrow()
-            .get(idx)
-            .and_then(|entry| entry.as_ref())
+    let next_revision = font_slot(idx, |entry| {
+        entry
             .map(|entry| entry.face_revision.saturating_add(1))
             .unwrap_or(1)
     });
@@ -1177,8 +1157,8 @@ pub extern "C" fn stone_reload_font(
         return false;
     }
 
-    FONTS.with(|fonts| {
-        if let Some(entry) = fonts.borrow_mut().get_mut(idx).and_then(|o| o.as_mut()) {
+    font_slot_mut(idx, |entry| {
+        if let Some(entry) = entry {
             entry.font_data = font_data;
             entry.source_path = path_str.to_owned();
             entry.face_revision = next_revision;
@@ -1202,19 +1182,15 @@ pub extern "C" fn stone_resize_font(font_id: c_uint, pixel_size: c_int) -> bool 
         Some(i) => i,
         None => return false,
     };
-    let source = FONTS.with(|fonts| {
-        fonts
-            .borrow()
-            .get(idx)
-            .and_then(|o| o.as_ref())
-            .map(|entry| {
-                (
-                    entry.font_data.clone(),
-                    entry.source_path.clone(),
-                    entry.faces,
-                    entry.charset.clone(),
-                )
-            })
+    let source = font_slot(idx, |entry| {
+        entry.map(|entry| {
+            (
+                entry.font_data.clone(),
+                entry.source_path.clone(),
+                entry.faces,
+                entry.charset.clone(),
+            )
+        })
     });
     let (font_data, source_path, faces, charset) = match source {
         Some(s) => s,
@@ -1243,14 +1219,8 @@ fn with_font_entry<R>(font_id: u32, default: R, f: impl FnOnce(&FontEntry) -> R)
         Some(i) => i,
         None => return default,
     };
-    FONTS.with(|fonts| {
-        let fonts = fonts.borrow();
-        // font_index already confirmed Some(_); this expect documents
-        // the invariant and panics loudly if it's ever violated.
-        let entry = fonts[idx]
-            .as_ref()
-            .expect("font_index returned a None slot");
-        f(entry)
+    font_slot(idx, |entry| {
+        f(entry.expect("font_index returned a None slot"))
     })
 }
 
@@ -1648,20 +1618,10 @@ pub extern "C" fn stone_get_font_atlas_image(font_id: c_uint) -> u64 {
     // refusal is also NOT cached below: 0 is the absence of an image, not an
     // image id, and caching it would make the answer permanent for a font that
     // a later GPU load could legitimately publish.
-    let has_atlas = FONTS.with(|fonts| {
-        fonts.borrow()[idx]
-            .as_ref()
-            .expect("font_index returned a None slot")
-            .atlas_texture
-            .is_some()
+    let (has_atlas, released) = with_font_entry(font_id, (false, false), |entry| {
+        (entry.atlas_texture.is_some(), entry.coverage_released)
     });
     if !has_atlas {
-        let released = FONTS.with(|fonts| {
-            fonts.borrow()[idx]
-                .as_ref()
-                .expect("font_index returned a None slot")
-                .coverage_released
-        });
         if released {
             crate::log_once!(
                 "TEXT",
@@ -1678,11 +1638,7 @@ pub extern "C" fn stone_get_font_atlas_image(font_id: c_uint) -> u64 {
         return 0;
     }
 
-    let id = FONTS.with(|fonts| {
-        let fonts = fonts.borrow();
-        let entry = fonts[idx]
-            .as_ref()
-            .expect("font_index returned a None slot");
+    let id = with_font_entry(font_id, 0, |entry| {
         let atlas = entry
             .atlas_texture
             .expect("the metrics-only refusal above proved this font owns a texture");
@@ -1720,13 +1676,8 @@ pub extern "C" fn stone_get_font_atlas_image(font_id: c_uint) -> u64 {
             imgs[idx] = Some(id);
         }
     });
-    FONTS.with(|fonts| {
-        if let Some(instance) = fonts
-            .borrow_mut()
-            .get_mut(idx)
-            .and_then(|entry| entry.as_mut())
-            .and_then(|entry| entry.instances.first_mut())
-        {
+    font_slot_mut(idx, |entry| {
+        if let Some(instance) = entry.and_then(|entry| entry.instances.first_mut()) {
             retain_font_instance_image(&mut instance.image, id);
         }
     });
@@ -1744,9 +1695,8 @@ pub extern "C" fn stone_get_font_atlas_size(
         Some(i) => i,
         None => return false,
     };
-    FONTS.with(|fonts| {
-        let fonts = fonts.borrow();
-        let Some(entry) = fonts.get(idx).and_then(|slot| slot.as_ref()) else {
+    font_slot(idx, |entry| {
+        let Some(entry) = entry else {
             return false;
         };
         if entry.coverage_released {
@@ -2309,37 +2259,29 @@ pub extern "C" fn stone_ensure_font_atlas_instance(font_id: c_uint, pixel_size: 
         Some(idx) => idx,
         None => return 0,
     };
-    let existing = FONTS.with(|fonts| {
-        fonts
-            .borrow()
-            .get(idx)
-            .and_then(|entry| entry.as_ref())
-            .and_then(|entry| {
-                let revision = entry.face_revision;
-                entry
-                    .instances
-                    .iter()
-                    .position(|instance| instance_matches(instance, pixel_size, revision))
-            })
+    let existing = font_slot(idx, |entry| {
+        entry.and_then(|entry| {
+            let revision = entry.face_revision;
+            entry
+                .instances
+                .iter()
+                .position(|instance| instance_matches(instance, pixel_size, revision))
+        })
     });
     if let Some(instance) = existing {
         return atlas_instance_id(font_id, instance);
     }
 
-    let source = FONTS.with(|fonts| {
-        fonts
-            .borrow()
-            .get(idx)
-            .and_then(|entry| entry.as_ref())
-            .map(|entry| {
-                (
-                    entry.font_data.clone(),
-                    entry.faces,
-                    entry.charset.clone(),
-                    entry.source_path.clone(),
-                    entry.face_revision,
-                )
-            })
+    let source = font_slot(idx, |entry| {
+        entry.map(|entry| {
+            (
+                entry.font_data.clone(),
+                entry.faces,
+                entry.charset.clone(),
+                entry.source_path.clone(),
+                entry.face_revision,
+            )
+        })
     });
     let Some((font_data, faces, charset, source_path, face_revision)) = source else {
         return 0;
@@ -2365,9 +2307,8 @@ pub extern "C" fn stone_ensure_font_atlas_instance(font_id: c_uint, pixel_size: 
         image: None,
         face_revision,
     };
-    FONTS.with(|fonts| {
-        let mut fonts = fonts.borrow_mut();
-        let Some(entry) = fonts.get_mut(idx).and_then(|entry| entry.as_mut()) else {
+    font_slot_mut(idx, |entry| {
+        let Some(entry) = entry else {
             return 0;
         };
         entry.instances.push(instance);
@@ -2382,11 +2323,8 @@ fn with_atlas_instance<R>(instance_id: u64, default: R, f: impl FnOnce(&AtlasIns
     let Some(font_idx) = font_index(font_id) else {
         return default;
     };
-    FONTS.with(|fonts| {
-        let fonts = fonts.borrow();
-        fonts
-            .get(font_idx)
-            .and_then(|entry| entry.as_ref())
+    font_slot(font_idx, |entry| {
+        entry
             .and_then(|entry| entry.instances.get(index))
             .map_or(default, f)
     })
@@ -2397,11 +2335,8 @@ pub extern "C" fn stone_font_atlas_instance_count(font_id: c_uint) -> c_int {
     let Some(idx) = font_index(font_id) else {
         return 0;
     };
-    FONTS.with(|fonts| {
-        fonts
-            .borrow()
-            .get(idx)
-            .and_then(|entry| entry.as_ref())
+    font_slot(idx, |entry| {
+        entry
             .map(|entry| entry.instances.len() as c_int)
             .unwrap_or(0)
     })
@@ -2415,11 +2350,8 @@ pub extern "C" fn stone_get_font_atlas_instance_pixel_size(
     let Some(idx) = font_index(font_id) else {
         return 0;
     };
-    FONTS.with(|fonts| {
-        fonts
-            .borrow()
-            .get(idx)
-            .and_then(|entry| entry.as_ref())
+    font_slot(idx, |entry| {
+        entry
             .and_then(|entry| entry.instances.get(index as usize))
             .map(|instance| instance.pixel_size)
             .unwrap_or(0)
@@ -2431,11 +2363,8 @@ pub extern "C" fn stone_get_font_atlas_instance_image(font_id: c_uint, index: c_
     let Some(idx) = font_index(font_id) else {
         return 0;
     };
-    FONTS.with(|fonts| {
-        fonts
-            .borrow()
-            .get(idx)
-            .and_then(|entry| entry.as_ref())
+    font_slot(idx, |entry| {
+        entry
             .and_then(|entry| entry.instances.get(index as usize))
             .and_then(|instance| instance.image)
             .unwrap_or(0)
@@ -2527,28 +2456,21 @@ pub extern "C" fn stone_get_font_instance_image(instance_id: u64) -> u64 {
     let Some(font_idx) = font_index(font_id) else {
         return 0;
     };
-    let cached = FONTS.with(|fonts| {
-        fonts
-            .borrow()
-            .get(font_idx)
-            .and_then(|entry| entry.as_ref())
-            .and_then(|entry| entry.instances.get(index))
-            .and_then(|instance| instance.image)
+    let details = font_slot(font_idx, |entry| {
+        let instance = entry?.instances.get(index)?;
+        Some((
+            instance.image,
+            instance.texture,
+            instance.width,
+            instance.height,
+        ))
     });
+    let Some((cached, texture, width, height)) = details else {
+        return 0;
+    };
     if let Some(image) = cached {
         return image;
     }
-    let details = FONTS.with(|fonts| {
-        fonts
-            .borrow()
-            .get(font_idx)
-            .and_then(|entry| entry.as_ref())
-            .and_then(|entry| entry.instances.get(index))
-            .map(|instance| (instance.texture, instance.width, instance.height))
-    });
-    let Some((texture, width, height)) = details else {
-        return 0;
-    };
     with_gl(|gl| unsafe {
         gl.bind_texture(glow::TEXTURE_2D, Some(texture));
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_SWIZZLE_R, glow::RED as i32);
@@ -2570,13 +2492,8 @@ pub extern "C" fn stone_get_font_instance_image(instance_id: u64) -> u64 {
             },
         );
     });
-    FONTS.with(|fonts| {
-        if let Some(instance) = fonts
-            .borrow_mut()
-            .get_mut(font_idx)
-            .and_then(|entry| entry.as_mut())
-            .and_then(|entry| entry.instances.get_mut(index))
-        {
+    font_slot_mut(font_idx, |entry| {
+        if let Some(instance) = entry.and_then(|entry| entry.instances.get_mut(index)) {
             instance.image = Some(image);
         }
     });
@@ -2598,13 +2515,7 @@ pub extern "C" fn stone_get_font_unit_metrics(font_id: c_uint, out: *mut c_float
         return false;
     };
     // Prepared at raster time from the same bytes: no parse, no clone.
-    let metrics = FONTS.with(|fonts| {
-        fonts
-            .borrow()
-            .get(idx)
-            .and_then(|entry| entry.as_ref())
-            .map(|entry| entry.unit_metrics)
-    });
+    let metrics = font_slot(idx, |entry| entry.map(|entry| entry.unit_metrics));
     let Some(metrics) = metrics else { return false };
     unsafe {
         *out.add(0) = metrics.units_per_em;
@@ -2635,19 +2546,15 @@ pub extern "C" fn stone_get_glyph_unit_metrics(
     // Prepared at raster time from the same bytes at unit scale: a slot
     // outside the table, a charset hole and an uncovered codepoint all read
     // back the `None` the per-query parse answered with. No parse, no clone.
-    let metrics = FONTS.with(|fonts| {
-        fonts
-            .borrow()
-            .get(idx)
-            .and_then(|entry| entry.as_ref())
-            .and_then(|entry| {
-                entry
-                    .glyph_unit
-                    .get(face.index())?
-                    .get(char_code as usize)?
-                    .as_ref()
-                    .copied()
-            })
+    let metrics = font_slot(idx, |entry| {
+        entry.and_then(|entry| {
+            entry
+                .glyph_unit
+                .get(face.index())?
+                .get(char_code as usize)?
+                .as_ref()
+                .copied()
+        })
     });
     let Some(metrics) = metrics else {
         return false;
@@ -2684,10 +2591,8 @@ pub extern "C" fn stone_font_data_len(font_id: c_uint) -> i64 {
     let Some(idx) = font_index(font_id) else {
         return -1;
     };
-    FONTS.with(|fonts| {
-        fonts.borrow()[idx]
-            .as_ref()
-            .map_or(-1, |entry| entry.font_data.len() as i64)
+    font_slot(idx, |entry| {
+        entry.map_or(-1, |entry| entry.font_data.len() as i64)
     })
 }
 
@@ -2821,12 +2726,8 @@ pub extern "C" fn stone_font_release_coverage(font_id: c_uint) -> bool {
         Some(i) => i,
         None => return false,
     };
-    let (atlas, instances) = FONTS.with(|fonts| {
-        let mut fonts = fonts.borrow_mut();
-        let entry = fonts
-            .get_mut(idx)
-            .and_then(|entry| entry.as_mut())
-            .expect("font_index returned a None slot");
+    let (atlas, instances) = font_slot_mut(idx, |entry| {
+        let entry = entry.expect("font_index returned a None slot");
         if entry.atlas_texture.is_some() || !entry.instances.is_empty() {
             entry.coverage_released = true;
         }
