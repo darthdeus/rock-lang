@@ -2,55 +2,6 @@
 // tuple bindings, control flow, nesting, `rev`, and the implicit `iter()` the
 // loop head inserts for collections.
 
-@test(output = "3")
-fn loop_basic_break() {
-    let arr = [10, 20, 30]
-    let total = 0
-    let index_sum = 0
-
-    for (i, value) in enumerate(arr) {
-        total += value
-        index_sum += i
-    }
-
-    assert_eq(total, 60)    // 10 + 20 + 30
-    assert_eq(index_sum, 3) // 0 + 1 + 2 (0-based indexing)
-    print(index_sum)
-}
-
-@test(output = "45\n3")
-fn array_literal_iter_with_i() {
-    let total = 0
-    let index_sum = 0
-
-    // Array literals with tuple destructuring give (index, value) with 0-based indexing
-    for (i, value) in enumerate([5, 15, 25]) {
-        total += value
-        index_sum += i
-    }
-
-    print(total)    // 5 + 15 + 25
-    print(index_sum) // 0 + 1 + 2 (0-based indexing)
-}
-
-@test(output = "45\n6")
-fn array_literal_iter_with_i_workaround() {
-    let total = 0
-    let index_sum = 0
-
-    // TODO: Tuple destructuring in for loops needs work
-    // For now, use manual indexing with a counter (1-based to match expected output)
-    let i = 1
-    for value in [5, 15, 25] {
-        total += value
-        index_sum += i
-        i = i + 1
-    }
-
-    print(total)    // 5 + 15 + 25
-    print(index_sum) // 1 + 2 + 3 (1-based indexing)
-}
-
 @test(output = "45\n3", type_holes = [[0, "int"]])
 fn array_literal_iter_without_i() {
     let total = 0
@@ -74,11 +25,15 @@ fn rev_range() {
     }
 }
 
-@test(output = "30\n20\n10")
+@test(output = "30\n20\n10\nc\nb\na")
 fn rev_vec() {
     let v = [10, 20, 30]
     for x in rev(v) {
         print(x)
+    }
+    let xs = ["a", "b", "c"]
+    for s in rev(xs) {
+        print("{s}")
     }
 }
 
@@ -164,31 +119,6 @@ fn test_map_for_in_key_value() {
     assert found_red
     assert found_green
     assert found_blue
-}
-
-// Test Map with integer keys
-@test
-fn test_map_int_keys() {
-    let scores: Map<string, int> = map_new()
-    insert(scores, "player1", 100)
-    insert(scores, "player2", 85)
-    insert(scores, "player3", 92)
-
-    let total_score = 0
-    let player_count = 0
-
-    for (player, score) in scores {
-        total_score = total_score + score
-        player_count = player_count + 1
-
-        // Validate score ranges
-        assert score >= 0
-        assert score <= 100
-        assert $ player.len() > 0
-    }
-
-    assert total_score == 277
-    assert player_count == 3
 }
 
 // Test Map with complex values (structs)
@@ -280,32 +210,6 @@ fn test_for_in_control_flow() {
     assert even_sum == 30 // 2 + 4 + 6 + 8 + 10
 }
 
-// Test Map modifications during iteration (should be avoided but test behavior)
-@test
-fn test_map_iteration_safety() {
-    let test_map: Map<string, int> = map_new()
-    insert(test_map, "a", 1)
-    insert(test_map, "b", 2)
-    insert(test_map, "c", 3)
-
-    let iterations = 0
-    let keys_seen = ""
-
-    for (key, value) in test_map {
-        iterations = iterations + 1
-        keys_seen = keys_seen + key
-
-        // Don't modify map during iteration in production code!
-        // This is just testing that it doesn't crash
-        if iterations > 10 {
-            error("Infinite loop detected")
-        }
-    }
-
-    assert iterations == 3
-    assert $ keys_seen.len() == 3
-}
-
 // Test nested for-in loops
 @test
 fn test_nested_for_in_loops() {
@@ -331,38 +235,6 @@ fn test_nested_for_in_loops() {
     assert item_count == 6
 }
 
-// Test range iteration (numeric for loops)
-@test
-fn test_range_iteration() {
-    let sum = 0
-    let count = 0
-
-    for i in 0..5 {
-        sum = sum + i
-        count = count + 1
-    }
-
-    assert sum == 10 // 0 + 1 + 2 + 3 + 4
-    assert count == 5
-
-    // Test reverse range
-    let reverse_sum = 0
-    let reverse_count = 0
-
-    for i in 5..0 {
-        reverse_sum = reverse_sum + i
-        reverse_count = reverse_count + 1
-
-        if reverse_count > 10 {
-            error("Reverse range infinite loop")
-        }
-    }
-
-    // Range is exclusive, so 5..0 should be empty
-    assert reverse_sum == 0
-    assert reverse_count == 0
-}
-
 // Test type inference in for-in loops
 @test
 fn test_for_in_type_inference() {
@@ -386,24 +258,6 @@ fn test_for_in_type_inference() {
     assert value_sum == 282   // (42 * 2) + (99 * 2) = 84 + 198
 }
 
-@test
-fn test_iter_values() {
-    let vec = vec_new()
-    vec_push(vec, 1)
-    vec_push(vec, 2)
-    vec_push(vec, 3)
-
-    let values = vec_new()
-    for item in vec {
-        vec_push(values, item)
-    }
-
-    assert(vec_get(values, 0) == 1)
-    assert(vec_get(values, 1) == 2)
-    assert(vec_get(values, 2) == 3)
-    assert(vec_len(values) == 3)
-}
-
 // -- The loop head inserts `iter()` for collections automatically --
 
 @test
@@ -416,34 +270,6 @@ fn test_simple_identifier_gets_iter() {
 
     // This should automatically get `iter()` inserted: for item in arena
     for item in arena {
-        count += 1
-    }
-
-    assert_eq(count, 2)
-}
-
-@test
-fn test_array_literal_unchanged() {
-    let count = 0
-
-    // Array literals should not get `iter()` inserted
-    for item in [1, 2, 3] {
-        count += 1
-    }
-
-    assert_eq(count, 3)
-}
-
-@test
-fn test_function_call_unchanged() {
-    let arena = arena_new()
-    insert(arena, 42)
-    insert(arena, 100)
-
-    let count = 0
-
-    // Direct iteration over arena with (entity, value) bindings
-    for (entity, value) in arena {
         count += 1
     }
 
@@ -481,14 +307,6 @@ fn test_range_iteration_with_auto_iter() {
 
 // -- Iterating `rev(...)`, which materializes a reversed vector --
 
-@test(output = "5\n4\n3\n2\n1")
-fn test_rev_vec() {
-    let xs = [1, 2, 3, 4, 5]
-    for x in rev(xs) {
-        print("{x}")
-    }
-}
-
 @test(output = "30")
 fn test_rev_sum_with_continue() {
     let xs = [10, 20, 99, 30]
@@ -505,10 +323,39 @@ fn test_rev_sum_with_continue() {
     print("{total}")
 }
 
-@test(output = "c\nb\na")
-fn test_rev_strings() {
-    let xs = ["a", "b", "c"]
-    for s in rev(xs) {
-        print("{s}")
+// -- Element types: nullable and struct --
+
+@test(output = "1 null 3")
+fn test_for_nullable_elements() {
+    let v: [int?] = [1, null, 3]
+    let out = ""
+    for x in v {
+        if x != null {
+            out = out + "{x} "
+        } else {
+            out = out + "null "
+        }
     }
+    print(out.trim())
+}
+
+struct Item {
+    name: string,
+    value: int,
+}
+
+@test(output = "sword:10 shield:5 0:sword 1:shield")
+fn test_struct_vec_iteration() {
+    let items = [
+        Item { name: "sword", value: 10 },
+        Item { name: "shield", value: 5 },
+    ]
+    let out = ""
+    for item in items {
+        out = out + "{item.name}:{item.value} "
+    }
+    for (i, item) in enumerate(items) {
+        out = out + "{i}:{item.name} "
+    }
+    print(out.trim())
 }

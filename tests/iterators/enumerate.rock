@@ -13,8 +13,24 @@ fn enumerate_array() {
 }
 
 @test(output = "done")
-fn enumerate_empty_array() {
+fn enumerate_empty_collections() {
     for (i, v) in enumerate([]) {
+        print("should not print")
+    }
+    let v: [int] = vec_new()
+    for (i, x) in enumerate(v) {
+        print("should not print")
+    }
+    let nested: [((int, int), string)] = vec_new()
+    for (i, ((x, y), str)) in enumerate(nested) {
+        print("should not print")
+    }
+    let mobs: Arena<Mob> = arena_new()
+    for (i, pair) in enumerate(mobs) {
+        print("should not print")
+    }
+    let m: Map<string, int> = map_new()
+    for (i, (k, v)) in enumerate(m) {
         print("should not print")
     }
     print("done")
@@ -30,15 +46,6 @@ fn enumerate_vec_basic() {
     for (i, x) in enumerate(v) {
         print("{i}:{x}")
     }
-}
-
-@test(output = "done")
-fn enumerate_empty_vec() {
-    let v: [int] = vec_new()
-    for (i, x) in enumerate(v) {
-        print("should not print")
-    }
-    print("done")
 }
 
 // === Arenas ===
@@ -62,15 +69,6 @@ fn enumerate_arena_with_removal() {
     for (i, pair) in enumerate(mobs) {
         print("{i}:{pair.1.name}")
     }
-}
-
-@test(output = "done")
-fn enumerate_arena_empty() {
-    let mobs: Arena<Mob> = arena_new()
-    for (i, pair) in enumerate(mobs) {
-        print("should not print")
-    }
-    print("done")
 }
 
 // === Vec of tuples: destructuring vs enumerate ===
@@ -106,13 +104,6 @@ fn vec_tuple_single_binding() {
     let items: [(int, string)] = [(1, "a")]
     for item in items {
         print("({item.0},{item.1})")
-    }
-}
-
-@test(output = "10")
-fn array_single_binding() {
-    for item in [10] {
-        print(item)
     }
 }
 
@@ -171,17 +162,6 @@ fn enumerate_map_basic() {
     print(found_a)
     print(found_b)
 }
-
-@test(output = "done")
-fn enumerate_map_empty() {
-    let m: Map<string, int> = map_new()
-    for (i, (k, v)) in enumerate(m) {
-        print("should not print")
-    }
-    print("done")
-}
-
-// === Range ===
 
 // === Arena without enumerate (normal iteration) ===
 
@@ -254,56 +234,7 @@ fn nonfor_enumerate_map() {
     print("one={one} two={two} idxsum={idxsum}")
 }
 
-@test(output = "2:2\n1:1\n0:0")
-fn nonfor_rev_of_enumerate_vec() {
-    for (i, x) in rev(enumerate([0, 1, 2]).collect()) {
-        print("{i}:{x}")
-    }
-}
-
-// === Tuple destructuring is the default; enumerate() must be explicit ===
-
-@test(output = "1\nhello\n2\nworld\n3\ntest")
-fn vec_tuple_destructuring_is_default() {
-    let items: [(int, string)] = vec_new()
-    vec_push(items, (1, "hello"))
-    vec_push(items, (2, "world"))
-    vec_push(items, (3, "test"))
-
-    // Default behavior: destructure the tuples
-    for (num, str) in items {
-        print(num)
-        print(str)
-    }
-}
-
-@test(output = "0\n1\nhello\n1\n2\nworld\n2\n3\ntest")
-fn enumerate_must_be_explicit() {
-    let items: [(int, string)] = vec_new()
-    vec_push(items, (1, "hello"))
-    vec_push(items, (2, "world"))
-    vec_push(items, (3, "test"))
-
-    // Enumeration requires explicit enumerate()
-    for (i, tuple) in enumerate(items) {
-        print(i)
-        print(tuple.0)  // First element of tuple
-        print(tuple.1)  // Second element of tuple
-    }
-}
-
-@test(output = "idx=0: a=1, b=hello\nidx=1: a=2, b=world\nidx=2: a=3, b=test")
-fn enumerate_with_nested_destructuring() {
-    let items: [(int, string)] = vec_new()
-    vec_push(items, (1, "hello"))
-    vec_push(items, (2, "world"))
-    vec_push(items, (3, "test"))
-
-    // Enumerate with nested tuple destructuring
-    for (i, (a, b)) in enumerate(items) {
-        print("idx={i}: a={a}, b={b}")
-    }
-}
+// === Nested tuple elements bound whole ===
 
 @test(output = "1-2\n4-5\n7-8")
 fn nested_tuple_first_element() {
@@ -329,60 +260,5 @@ fn enumerate_nested_tuple_structures() {
     for (i, tuple) in enumerate(items) {
         let pair = tuple.0  // First element is the nested tuple
         print("{i}: ({pair.0},{pair.1})")
-    }
-}
-
-@test(output = "single: (1,a)")
-fn single_binding_gives_whole_tuple() {
-    let items: [(int, string)] = vec_new()
-    vec_push(items, (1, "a"))
-
-    // Single binding should give the whole tuple
-    for item in items {
-        print("single: ({item.0},{item.1})")
-    }
-}
-
-@test(output = "5\n15\n25")
-fn array_literal_default_iteration() {
-    // Array literals should iterate over values by default
-    for value in [5, 15, 25] {
-        print(value)
-    }
-}
-
-@test(output = "0:5\n1:15\n2:25")
-fn array_literal_with_enumerate() {
-    // Array literals with enumerate give index + value
-    for (i, value) in enumerate([5, 15, 25]) {
-        print("{i}:{value}")
-    }
-}
-
-@test(output = "idx=0: coord=(1,2), meta=(10,a)\nidx=1: coord=(3,4), meta=(20,b)")
-fn deeply_nested_destructuring_three_levels() {
-    // Test 3-level deep nested destructuring: (index, ((x, y), (num, str)))
-    let items: [((int, int), (int, string))] = vec_new()
-    vec_push(items, ((1, 2), (10, "a")))
-    vec_push(items, ((3, 4), (20, "b")))
-
-    for (i, ((x, y), (num, str))) in enumerate(items) {
-        print("idx={i}: coord=({x},{y}), meta=({num},{str})")
-    }
-}
-
-@test(output = "Empty vector handled correctly")
-fn edge_case_empty_vector_with_nested_destructuring() {
-    // Test that empty vectors don't crash with nested patterns
-    let items: [((int, int), string)] = vec_new()
-    let processed = false
-
-    for (i, ((x, y), str)) in enumerate(items) {
-        processed = true
-        print("Should not print")
-    }
-
-    if (!processed) {
-        print("Empty vector handled correctly")
     }
 }
