@@ -46,84 +46,10 @@ const GLSL_FLOAT_REL_TOL: f64 = 1e-6;
 const PROFILE_NAME: &str = "330core";
 const PROFILE: GlslProfile = GlslProfile::Core330;
 
-/// Whole-run tallies of `rock test --backend glsl`.
-struct GlslSuiteSummary {
-    files: usize,
-    /// `@test` fns with no `returns=` (outside the value class). One collapsed
-    /// number, never a histogram.
-    outside_value_class: usize,
-    /// bone-rejected units (unexpected compile failure) / harness breaches.
-    unit_failures: usize,
-    passed: usize,
-    /// FAIL detail lines (a GL compile/link/render error, or a value mismatch).
-    failed: Vec<String>,
-    /// SKIP reasons (emission rejected), bucketed count-desc.
-    skip_reasons: Vec<(String, usize)>,
-    /// False = no display / driver; GPU verdicts were explicitly skipped.
-    gl_available: bool,
-}
-
 /// `rock test --backend glsl` entry: run, print per-unit lines + the
 /// end-of-run summary, exit non-zero on any FAIL or unit failure.
 pub(crate) fn glsl_test(paths: &[String], skip_gpu: bool) -> Result<()> {
     let start = Instant::now();
-    let summary = glsl_test_run(paths, skip_gpu)?;
-
-    println!(
-        "\nglsl backend: {} @tests outside the value class (no returns=), across {} files ({:.2}s)",
-        summary.outside_value_class.to_string().yellow(),
-        summary.files,
-        start.elapsed().as_secs_f64(),
-    );
-    if !summary.gl_available {
-        println!(
-            "  [{}] {} -- value verdicts SKIPPED (no GL context)",
-            PROFILE_NAME.cyan(),
-            "no display / driver".yellow()
-        );
-    } else {
-        let total = summary.passed + summary.failed.len();
-        println!(
-            "  [{}] {}/{} value tests passed ({} failed)",
-            PROFILE_NAME.cyan(),
-            summary.passed.to_string().green(),
-            total,
-            if summary.failed.is_empty() {
-                summary.failed.len().to_string().green()
-            } else {
-                summary.failed.len().to_string().red()
-            },
-        );
-        for detail in &summary.failed {
-            println!("    {} {}", "FAIL".red(), detail);
-        }
-        if !summary.skip_reasons.is_empty() {
-            println!(
-                "    {}",
-                format!(
-                    "=== [{PROFILE_NAME}] skip reasons (glsl) -- the A1 fn-emission work list ==="
-                )
-                .bold()
-            );
-            for (reason, count) in summary.skip_reasons.iter().take(50) {
-                println!("      {:>5}  {}", count.to_string().yellow(), reason);
-            }
-        }
-    }
-    if summary.unit_failures > 0 {
-        println!(
-            "  {} unit(s) failed to build (see FAILED lines above)",
-            summary.unit_failures.to_string().red()
-        );
-    }
-    if !summary.failed.is_empty() || summary.unit_failures > 0 {
-        crate::invocation_log::exit(1);
-    }
-    Ok(())
-}
-
-/// Run the suite, printing per-unit lines as they complete.
-fn glsl_test_run(paths: &[String], skip_gpu: bool) -> Result<GlslSuiteSummary> {
     let (files, package_dirs) = crate::skull_backend::collect_test_units(paths)?;
 
     // A missing runner is a hard error (workspace artifact -- build it). The
@@ -132,32 +58,32 @@ fn glsl_test_run(paths: &[String], skip_gpu: bool) -> Result<GlslSuiteSummary> {
     let runner = locate_runner()?;
     let gl_available = probe_gl(&runner, PROFILE_NAME, skip_gpu)?;
 
-    let mut summary = GlslSuiteSummary {
-        files: 0,
-        outside_value_class: 0,
-        unit_failures: 0,
-        passed: 0,
-        failed: Vec::new(),
-        skip_reasons: Vec::new(),
-        gl_available,
-    };
+    // `@test` fns with no `returns=` (outside the value class). One collapsed
+    // number, never a histogram.
+    let mut outside_value_class = 0;
+    // bone-rejected units (unexpected compile failure) / harness breaches.
+    let mut unit_failures = 0;
+    let mut passed_total = 0;
+    // FAIL detail lines (a GL compile/link/render error, or a value mismatch).
+    let mut failed_total: Vec<String> = Vec::new();
+    // SKIP reasons (emission rejected).
     let mut skip_reasons: Vec<String> = Vec::new();
 
     let outcomes = crate::test_unit::build_units(&files, &package_dirs, |unit, is_package| {
         build_unit(unit, is_package, &runner, gl_available)
     });
+    let file_count = outcomes.len();
 
     for (label, outcome) in outcomes {
-        summary.files += 1;
         match outcome {
             Ok(Ok(UnitRun {
-                outside_value_class,
+                outside_value_class: outside,
                 passed,
                 failed,
                 skips,
             })) => {
-                summary.outside_value_class += outside_value_class;
-                summary.passed += passed;
+                outside_value_class += outside;
+                passed_total += passed;
                 let any = passed + failed.len() + skips.len();
                 if gl_available && any > 0 {
                     let status = if failed.is_empty() {
@@ -175,24 +101,72 @@ fn glsl_test_run(paths: &[String], skip_gpu: bool) -> Result<GlslSuiteSummary> {
                         skips.len(),
                     );
                 }
-                summary
-                    .failed
-                    .extend(failed.iter().map(|d| format!("{d} [{PROFILE_NAME}]")));
+                failed_total.extend(failed.iter().map(|d| format!("{d} [{PROFILE_NAME}]")));
                 skip_reasons.extend(skips.into_iter().map(|(_, reason)| reason));
             }
             Ok(Err(failure)) => {
-                summary.unit_failures += 1;
+                unit_failures += 1;
                 failure.print(&label);
             }
             Err(panic) => {
-                summary.unit_failures += 1;
+                unit_failures += 1;
                 crate::test_unit::print_unit_panic(&label, &*panic);
             }
         }
     }
 
-    summary.skip_reasons = reason_histogram(skip_reasons.iter().map(|s| s.as_str()));
-    Ok(summary)
+    println!(
+        "\nglsl backend: {} @tests outside the value class (no returns=), across {} files ({:.2}s)",
+        outside_value_class.to_string().yellow(),
+        file_count,
+        start.elapsed().as_secs_f64(),
+    );
+    if !gl_available {
+        println!(
+            "  [{}] {} -- value verdicts SKIPPED (no GL context)",
+            PROFILE_NAME.cyan(),
+            "no display / driver".yellow()
+        );
+    } else {
+        let total = passed_total + failed_total.len();
+        println!(
+            "  [{}] {}/{} value tests passed ({} failed)",
+            PROFILE_NAME.cyan(),
+            passed_total.to_string().green(),
+            total,
+            if failed_total.is_empty() {
+                failed_total.len().to_string().green()
+            } else {
+                failed_total.len().to_string().red()
+            },
+        );
+        for detail in &failed_total {
+            println!("    {} {}", "FAIL".red(), detail);
+        }
+        let skip_reasons = reason_histogram(skip_reasons.iter().map(|s| s.as_str()));
+        if !skip_reasons.is_empty() {
+            println!(
+                "    {}",
+                format!(
+                    "=== [{PROFILE_NAME}] skip reasons (glsl) -- the A1 fn-emission work list ==="
+                )
+                .bold()
+            );
+            for (reason, count) in skip_reasons.iter().take(50) {
+                println!("      {:>5}  {}", count.to_string().yellow(), reason);
+            }
+        }
+    }
+    if unit_failures > 0 {
+        println!(
+            "  {} unit(s) failed to build (see FAILED lines above)",
+            unit_failures.to_string().red()
+        );
+    }
+    if !failed_total.is_empty() || unit_failures > 0 {
+        crate::invocation_log::exit(1);
+    }
+    Ok(())
 }
 
 /// One unit's value-test results.
@@ -417,26 +391,11 @@ fn spawn_runner(
 // The value-test corpus above proves the EMITTER on desktop GL; this proves
 // the shaders games actually register.
 
-/// One profile's tallies over a `shader-validate` run.
-pub struct ValidateProfileSummary {
-    /// `"330core"`.
-    pub profile: &'static str,
-    pub passed: usize,
-    /// FAIL detail lines (driver compile/link log, or a harness breach).
-    pub failed: Vec<String>,
-    /// False = no GL context for this profile (explicitly skipped).
-    pub gl_available: bool,
-}
-
-/// Whole-run tallies for `rock shader-validate` -- the testable core.
-pub struct ValidateSummary {
-    /// (project dir, registered shader-pair count).
-    pub projects: Vec<(String, usize)>,
-    pub per_profile: Vec<ValidateProfileSummary>,
-}
-
 /// `rock shader-validate <project>...`: print verdicts, exit non-zero on any
-/// FAIL; missing GL profiles require the explicit GPU opt-out.
+/// FAIL; missing GL profiles require the explicit GPU opt-out. Hard errors
+/// (missing runner, a project that fails to build, a pair that fails to EMIT)
+/// are `Err` -- the same pairs emit inside every game build, so an emit failure
+/// here is a regression or a profile-specific emitter gap, never a skip.
 pub(crate) fn shader_validate(dirs: &[String], skip_gpu: bool) -> Result<()> {
     if dirs.is_empty() {
         crate::bail!(
@@ -444,60 +403,12 @@ pub(crate) fn shader_validate(dirs: &[String], skip_gpu: bool) -> Result<()> {
         );
     }
     let start = Instant::now();
-    let summary = shader_validate_run(dirs, true, skip_gpu)?;
-
-    let shader_total: usize = summary.projects.iter().map(|(_, n)| n).sum();
-    println!(
-        "\nshader-validate: {} registered pair(s) across {} project(s) ({:.2}s)",
-        shader_total,
-        summary.projects.len(),
-        start.elapsed().as_secs_f64(),
-    );
-    let mut any_failed = false;
-    for p in &summary.per_profile {
-        if !p.gl_available {
-            println!(
-                "  [{}] {} -- verdicts SKIPPED (no GL context)",
-                p.profile.cyan(),
-                "no display / driver".yellow()
-            );
-            continue;
-        }
-        println!(
-            "  [{}] {}/{} compiled+linked",
-            p.profile.cyan(),
-            p.passed.to_string().green(),
-            p.passed + p.failed.len(),
-        );
-        for detail in &p.failed {
-            any_failed = true;
-            println!("    {} {}", "FAIL".red(), detail);
-        }
-    }
-    if any_failed {
-        crate::invocation_log::exit(1);
-    }
-    Ok(())
-}
-
-/// Run the validation; public for the gate test (`print = false`). Hard errors
-/// (missing runner, a project that fails to build, a pair that fails to EMIT)
-/// are `Err` -- the same pairs emit inside every game build, so an emit failure
-/// here is a regression or a profile-specific emitter gap, never a skip.
-pub fn shader_validate_run(
-    dirs: &[String],
-    print: bool,
-    skip_gpu: bool,
-) -> Result<ValidateSummary> {
     let runner = locate_runner()?;
     let gl_available = probe_gl(&runner, PROFILE_NAME, skip_gpu)?;
-    let mut profile_summary = ValidateProfileSummary {
-        profile: PROFILE_NAME,
-        passed: 0,
-        failed: Vec::new(),
-        gl_available,
-    };
-    let mut projects = Vec::new();
+    let mut shader_total = 0;
+    let mut total_passed = 0;
+    // FAIL detail lines (driver compile/link log, or a harness breach).
+    let mut total_failed: Vec<String> = Vec::new();
 
     for dir in dirs {
         // Held while this project's shaders are emitted and linked from its
@@ -506,7 +417,7 @@ pub fn shader_validate_run(
         let ws = validate_workspace(dir)?;
         let pairs = skull_mir::lower::collect_shader_pairs(&ws)
             .map_err(|e| anyhow::anyhow!("{dir}: collect_shader_pairs: {}", e.message))?;
-        projects.push((dir.clone(), pairs.len()));
+        shader_total += pairs.len();
         let programs: Vec<skull::shader_artifact::ShaderProgram> = pairs
             .iter()
             .map(|pair| skull::shader_artifact::ShaderProgram {
@@ -564,28 +475,50 @@ pub fn shader_validate_run(
             continue;
         }
         let (passed, failed) = compile_batch(&runner, PROFILE_NAME, &jobs)?;
-        if print {
-            let status = if failed.is_empty() {
-                "ok".green()
-            } else {
-                "FAILED".red()
-            };
-            println!(
-                "{:.<52} [{}] {}  ({} pass, {} fail)",
-                dir,
-                PROFILE_NAME.cyan(),
-                status,
-                passed,
-                failed.len(),
-            );
-        }
-        profile_summary.passed += passed;
-        profile_summary.failed.extend(failed);
+        let status = if failed.is_empty() {
+            "ok".green()
+        } else {
+            "FAILED".red()
+        };
+        println!(
+            "{:.<52} [{}] {}  ({} pass, {} fail)",
+            dir,
+            PROFILE_NAME.cyan(),
+            status,
+            passed,
+            failed.len(),
+        );
+        total_passed += passed;
+        total_failed.extend(failed);
     }
-    Ok(ValidateSummary {
-        projects,
-        per_profile: vec![profile_summary],
-    })
+
+    println!(
+        "\nshader-validate: {} registered pair(s) across {} project(s) ({:.2}s)",
+        shader_total,
+        dirs.len(),
+        start.elapsed().as_secs_f64(),
+    );
+    if !gl_available {
+        println!(
+            "  [{}] {} -- verdicts SKIPPED (no GL context)",
+            PROFILE_NAME.cyan(),
+            "no display / driver".yellow()
+        );
+        return Ok(());
+    }
+    println!(
+        "  [{}] {}/{} compiled+linked",
+        PROFILE_NAME.cyan(),
+        total_passed.to_string().green(),
+        total_passed + total_failed.len(),
+    );
+    for detail in &total_failed {
+        println!("    {} {}", "FAIL".red(), detail);
+    }
+    if !total_failed.is_empty() {
+        crate::invocation_log::exit(1);
+    }
+    Ok(())
 }
 
 /// Build a project directory into ONE type-checked workspace, tests included
