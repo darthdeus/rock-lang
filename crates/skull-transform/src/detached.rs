@@ -44,7 +44,7 @@ pub(crate) fn lower_detached_region(
     aux.code_identity = source
         .code_identity
         .as_ref()
-        .and_then(skull_mir::code_identity::CodeIdentity::owner)
+        .map(skull_mir::code_identity::CodeIdentity::owner)
         .zip(detached_region_site(source, &region))
         .map(
             |(enclosing, site)| skull_mir::code_identity::CodeIdentity::Nested {

@@ -97,7 +97,7 @@ pub fn prepare_coroutine(
         let mut aux = crate::lower_detached_region(&lowered.step, *entry, &name, &frame_info);
         // A hook without a body site uses its registration lambda's source site.
         if aux.code_identity.is_none() {
-            let enclosing = func.code_identity.as_ref().and_then(CodeIdentity::owner);
+            let enclosing = func.code_identity.as_ref().map(CodeIdentity::owner);
             let site = hook_registration_site(func, *kind, *entry);
             let (Some(enclosing), Some(site)) = (enclosing, site) else {
                 return Err(CompilerError::new_with_label(
@@ -283,7 +283,7 @@ fn add_coroutine_code_values(
     hooks: &[(CoroHookKind, MirFunc)],
 ) -> CoroutineKeys {
     let root = lowered.step.code_identity.as_ref().expect("co fn identity");
-    let owner = root.owner().expect("co fn owner");
+    let owner = root.owner();
     let root_compatibility = artifact
         .entries
         .get(root)

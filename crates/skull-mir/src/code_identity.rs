@@ -98,9 +98,9 @@ pub enum CodeIdentity {
 }
 
 impl CodeIdentity {
-    pub fn owner(&self) -> Option<CodeOwner> {
+    pub fn owner(&self) -> CodeOwner {
         match self {
-            Self::Named(i) => Some(CodeOwner::Instance(i.clone())),
+            Self::Named(i) => CodeOwner::Instance(i.clone()),
             Self::Artifact(owner)
             | Self::Lambda {
                 enclosing: owner, ..
@@ -110,7 +110,7 @@ impl CodeIdentity {
             }
             | Self::Generated {
                 enclosing: owner, ..
-            } => Some(owner.clone()),
+            } => owner.clone(),
         }
     }
 
@@ -572,9 +572,7 @@ impl CodeArtifact {
         let mut per_owner: BTreeMap<CodeOwner, BTreeSet<LambdaTopologyFingerprint>> =
             BTreeMap::new();
         for entry in self.entries.values() {
-            let Some(owner) = entry.identity.owner() else {
-                continue;
-            };
+            let owner = entry.identity.owner();
             let topology = entry.compatibility.lambda_topology;
             if topology == LambdaTopologyFingerprint::default() {
                 continue;
@@ -597,9 +595,7 @@ impl CodeArtifact {
             if entry.compatibility.lambda_topology == LambdaTopologyFingerprint::default() {
                 continue;
             }
-            let Some(owner) = entry.identity.owner() else {
-                continue;
-            };
+            let owner = entry.identity.owner();
             if let Some(unified) = unions.get(&owner) {
                 entry.compatibility.lambda_topology = *unified;
             }
@@ -725,9 +721,7 @@ impl CodeArtifact {
             if !new.escaping {
                 return false;
             }
-            if old.compatibility.lambda_topology != new.compatibility.lambda_topology
-                || !old.compatibility.compatible_with(&new.compatibility)
-            {
+            if !old.compatibility.compatible_with(&new.compatibility) {
                 return false;
             }
         }
@@ -746,9 +740,7 @@ impl CodeArtifact {
         }
         let mut owners: BTreeMap<CodeOwner, LambdaTopologyFingerprint> = BTreeMap::new();
         for entry in self.entries.values().chain(next.entries.values()) {
-            let Some(owner) = entry.identity.owner() else {
-                continue;
-            };
+            let owner = entry.identity.owner();
             let topology = entry.compatibility.lambda_topology;
             if topology == LambdaTopologyFingerprint::default() {
                 continue;
