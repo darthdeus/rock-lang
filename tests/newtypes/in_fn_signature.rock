@@ -1,8 +1,6 @@
-// Generic newtype in function signature positions (param + return).
-// Pre-fix: rejected with "Type constructor 'Box' not found" because the
-// App-arm arity check in compilation_storage{,/symbols}.rs only matched
-// Struct/Enum, never Newtype. Generic struct in the same positions
-// always worked, exposing the divergence.
+// Generic newtypes in function signature positions (param + return).
+// Regression: these were rejected with "Type constructor 'Box' not found"
+// while generic structs in the same positions worked.
 
 newtype Box<T>(T)
 newtype DualBox<T, U>((T, U))
@@ -35,16 +33,10 @@ fn unwrap_box<T>(b: Box<T>) -> T {
     v
 }
 
-@test(output = "99")
+@test(output = "99\nhello")
 fn test_generic_typearg_through_polymorphic_fn() {
-    let b = make_box(99)
-    print(unwrap_box(b))
-}
-
-@test(output = "hello")
-fn test_generic_typearg_string_specialization() {
-    let b = make_box("hello")
-    print(unwrap_box(b))
+    print(unwrap_box(make_box(99)))
+    print(unwrap_box(make_box("hello")))
 }
 
 // ---- Multi-generic in signature ----
@@ -61,7 +53,7 @@ fn test_multi_generic_typearg_in_signature() {
     print(pair.1)
 }
 
-// ---- App-wrapped (composes the two earlier fixes from this branch) ----
+// ---- App-wrapped ----
 
 newtype Handle<T>(Entity<T>)
 
