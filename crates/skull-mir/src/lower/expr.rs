@@ -2399,6 +2399,27 @@ impl<'a> Builder<'a> {
         Ok(self.emit_cur(Inst::Load(result)))
     }
 
+    /// The struct field plan behind `base?.field`, when the field is a named
+    /// struct field rather than a tuple index, newtype unwrap or swizzle.
+    fn safe_nav_field_plan(
+        &self,
+        base: Idx<Expr>,
+        field: Ustr,
+    ) -> Result<Option<StructFieldPlan>, CompilerError> {
+        if field.parse::<usize>().is_ok() || self.expr_is_newtype(base) {
+            return Ok(None);
+        }
+        match self.field_base_ty(base) {
+            Some(TypeExpr::App {
+                ctor: TypeCtor::Nominal(sname),
+                ..
+            }) if self.swizzle_of(base, field).is_none() => {
+                Ok(Some(self.struct_field_plan(sname, field, false)?))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Read a field from an already evaluated, present boxed receiver.
     /// Shared by scalar and per-slot safe navigation.
     pub(crate) fn safe_nav_field_value(
@@ -2408,19 +2429,7 @@ impl<'a> Builder<'a> {
         bv: Idx<Inst>,
         field: Ustr,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let embed_plan = if field.parse::<usize>().is_ok() || self.expr_is_newtype(base) {
-            None
-        } else {
-            match self.field_base_ty(base) {
-                Some(TypeExpr::App {
-                    ctor: TypeCtor::Nominal(sname),
-                    ..
-                }) if self.swizzle_of(base, field).is_none() => {
-                    Some(self.struct_field_plan(sname, field, false)?)
-                }
-                _ => None,
-            }
-        };
+        let embed_plan = self.safe_nav_field_plan(base, field)?;
         let embed = embed_plan.as_ref().and_then(|p| p.embed());
         let fv = match field.as_str().parse::<usize>() {
             // `x?.0` on a transparent newtype is identity (see TupleIndex).
@@ -2510,19 +2519,7 @@ impl<'a> Builder<'a> {
         field: Ustr,
         shape: RetSlot,
     ) -> Result<ValueRepr, CompilerError> {
-        let plan = if field.parse::<usize>().is_ok() || self.expr_is_newtype(base) {
-            None
-        } else {
-            match self.field_base_ty(base) {
-                Some(TypeExpr::App {
-                    ctor: TypeCtor::Nominal(sname),
-                    ..
-                }) if self.swizzle_of(base, field).is_none() => {
-                    Some(self.struct_field_plan(sname, field, false)?)
-                }
-                _ => None,
-            }
-        };
+        let plan = self.safe_nav_field_plan(base, field)?;
         let embed = plan.and_then(|p| p.inline_child());
         let group_shape = match embed {
             Some(cname) => self.nobox_embed_group_shape(cname)?,
