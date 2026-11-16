@@ -552,19 +552,12 @@ pub(crate) fn try_emit_js_program_project_cached(
     skull_codegen_js::emit::JsEmitCache,
     bone_semantic::inference::Workspace,
 )> {
-    use std::path::PathBuf;
-    let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
-    let sources = crate::unified_compile::discover_sources(&spec)
+    // A game builds without its tests, like the luajit compile.
+    let is_game =
+        (crate::registry::RuntimeServices::registered().is_game_project)(std::path::Path::new(dir))
+            .unwrap_or(false);
+    let sources = crate::live_project::project_sources(dir, !is_game)
         .map_err(|e| anyhow::anyhow!("cannot load project {dir}: {e}"))?;
-    let sources =
-        if (crate::registry::RuntimeServices::registered().is_game_project)(&PathBuf::from(dir))
-            .unwrap_or(false)
-        {
-            rock_host::source_files::production_only(&sources, std::path::Path::new(dir))
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?
-        } else {
-            sources
-        };
     let (mut ws, entry_file) = crate::skull_backend::check_project(&sources).map_err(|errs| {
         anyhow::anyhow!(
             "{}",
