@@ -105,3 +105,27 @@ fn policy_changes_invalidate_incremental_action_findings() {
         }
     }
 }
+
+#[test]
+fn allow_comments_never_hide_the_missing_policy_notice_on_either_path() {
+    let file = "game/player.rock";
+    let source =
+        format!("// rock: allow({ACTION_CALLERS})\nglobal DO_MOVE: int = 1\nfn main() {{}}\n");
+    let source = source.as_str();
+    let ws = workspace(file, source);
+    let sources = [(Ustr::from(file), source)].into_iter().collect();
+    let options = LintOptions::only([ACTION_CALLERS.to_owned()]);
+    let fresh = lint_workspace(&ws, &FxHashSet::default(), true, &sources, &options);
+    let (cached, _) = IncrementalLintCache::default().update(
+        &ws,
+        &FxHashSet::default(),
+        true,
+        &sources,
+        &options,
+        &LintCacheUpdate::full(),
+    );
+    for found in [&fresh, &cached] {
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].error.message, "no action-layer policy configured");
+    }
+}

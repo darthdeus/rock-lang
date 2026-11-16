@@ -56,7 +56,11 @@ fn shapes(findings: &[Finding]) -> Vec<String> {
         .iter()
         .map(|finding| {
             let span = finding.error.labels.first().map(|label| label.span);
-            format!("{}:{}:{:?}", finding.lint, finding.error.message, span)
+            let offsets = span.map(|span| span.offset_range());
+            format!(
+                "{}:{}:{span:?}:{offsets:?}",
+                finding.lint, finding.error.message
+            )
         })
         .collect()
 }
@@ -274,13 +278,7 @@ fn cached_findings_match_fresh_after_body_edit_and_span_shift() {
     );
     let fresh = lint_fresh(&new_ws, &new_sources, &LintOptions::default());
 
-    assert_eq!(shapes(&cached), shapes(&fresh));
-    let debug = |findings: &[Finding]| {
-        let mut keys: Vec<String> = findings.iter().map(|f| format!("{f:?}")).collect();
-        keys.sort();
-        keys
-    };
-    assert_eq!(debug(&cached), debug(&fresh));
+    assert_eq!(format!("{cached:?}"), format!("{fresh:?}"));
     assert!(stats.body_updates > 0);
     assert_eq!(stats.full_rebuilds, 0);
     assert!(stats.declarations_reused > 0);
@@ -1291,4 +1289,35 @@ fn suppression_removal_after_a_suppressed_rebuild_restores_the_finding() {
     let fresh = lint_fresh(&shown_ws, &sources(shown), &LintOptions::default());
     assert_eq!(shapes(&cached), shapes(&fresh));
     assert_eq!(stats.full_rebuilds, 0);
+}
+
+#[test]
+fn cached_and_fresh_findings_share_one_order_after_a_body_update() {
+    let src = "fn first(a: int) {\n    a == 1\n    let first_unused = 1\n}\nfn second(b: int) {\n    b == 2\n    let second_unused = 2\n}\nfn main() { first(1); second(2) }\n";
+    let ws = workspace(src);
+    let file = Ustr::from(FILE);
+    let sources = sources(src);
+    let options = LintOptions::default();
+    let mut cache = IncrementalLintCache::default();
+    let (rebuilt, _) = run_update(
+        &mut cache,
+        &ws,
+        &sources,
+        &options,
+        &LintCacheUpdate::full(),
+    );
+    let (mid, owner) = function_owner(&ws, "second");
+    let (updated, stats) = run_update(
+        &mut cache,
+        &ws,
+        &sources,
+        &options,
+        &LintCacheUpdate::body_only([file], [(mid, owner)], []),
+    );
+    let fresh = lint_fresh(&ws, &sources, &options);
+
+    assert_eq!(stats.full_rebuilds, 0);
+    assert_eq!(fresh.len(), 4, "{:?}", shapes(&fresh));
+    assert_eq!(shapes(&rebuilt), shapes(&fresh));
+    assert_eq!(shapes(&updated), shapes(&fresh));
 }
