@@ -6,12 +6,12 @@ use bone_semantic::prelude::*;
 pub fn lint_only(files: &[(&str, &str)], lint: &str) -> Vec<Finding> {
     let mut asts: Vec<skull_parser::Ast> = files
         .iter()
-        .map(|(name, src)| skull_parser::parse_module_clean(src, Ustr::from(*name)).expect("parse"))
+        .map(|(name, src)| skull_parser::parse_module_clean(src, Ustr::from(name)).expect("parse"))
         .collect();
     let ws = semantic_pass(&mut asts).expect("clean program typechecks");
     let sources: FxHashMap<Ustr, &str> = files
         .iter()
-        .map(|(name, src)| (Ustr::from(*name), *src))
+        .map(|(name, src)| (Ustr::from(name), *src))
         .collect();
     lint_workspace(
         &ws,

@@ -356,7 +356,7 @@ pub(crate) fn resolve_for_iter_protocol(
     let next_callee = &gamma.workspace.module(next_fn.0).functions[next_fn.1];
     let mut sub = BoundTree::default();
     if next_callee.generic_bounds.iter().any(Option::is_some) {
-        check_iterator_bounds(c, gamma, &next_callee, &next_subs, &mut sub, true, 0, span)?;
+        check_iterator_bounds(c, gamma, next_callee, &next_subs, &mut sub, true, 0, span)?;
     }
 
     gamma.out.for_iter_protocol.insert(
@@ -486,7 +486,7 @@ pub(crate) fn check_iterator_bounds(
                     check_iterator_bounds(
                         c,
                         gamma,
-                        &next_callee,
+                        next_callee,
                         &next_subs,
                         &mut sub,
                         true,
