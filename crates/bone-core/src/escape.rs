@@ -56,12 +56,6 @@ fn unique_target(ws: &Workspace, callee: &Callee) -> Option<(ModuleId, Idx<Funct
     }
 }
 
-fn contains(outer: Span, inner: Span) -> bool {
-    outer.file == inner.file
-        && outer.offset_range().0 <= inner.offset_range().0
-        && inner.offset_range().1 <= outer.offset_range().1
-}
-
 fn param_is_nonescaping(
     ws: &Workspace,
     (mid, fid): (ModuleId, Idx<Function>),
@@ -109,7 +103,7 @@ fn param_body_is_nonescaping(
     let in_lambda = |id: Idx<Expr>| {
         lambdas
             .iter()
-            .any(|outer| contains(*outer, body.expr_spans[id]))
+            .any(|outer| outer.contains(body.expr_spans[id]))
     };
     let mut forwarded = FxHashSet::default();
     for (call, expr) in body.expr_arena.iter() {

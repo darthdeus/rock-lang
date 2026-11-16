@@ -1126,7 +1126,7 @@ impl<'a> Program<'a> {
             }
             for (id, _) in ctx.body.expr_arena.iter() {
                 let inner = ctx.body.expr_spans[id];
-                if !contains(span, inner) {
+                if !span.contains(inner) {
                     continue;
                 }
                 if let Some(nested) = effects.get(&id) {
@@ -1134,19 +1134,13 @@ impl<'a> Program<'a> {
                 }
             }
             for (id, _) in ctx.body.expr_arena.iter() {
-                if contains(span, ctx.body.expr_spans[id]) {
+                if span.contains(ctx.body.expr_spans[id]) {
                     ctx.assign_write(id, &mut effect);
                 }
             }
         }
         effect
     }
-}
-
-fn contains(outer: Span, inner: Span) -> bool {
-    outer.file == inner.file
-        && outer.offset_range().0 <= inner.offset_range().0
-        && inner.offset_range().1 <= outer.offset_range().1
 }
 
 fn callee_name(ctx: &BodyCtx, call: Idx<Expr>) -> String {

@@ -325,8 +325,8 @@ pub fn identity_body_sites_with(
             let Expr::Var(binding) = *use_expr else {
                 continue;
             };
-            if !contains(lambda_span, body.expr_spans[use_id])
-                || contains(lambda_span, body.binding_spans[binding])
+            if !lambda_span.contains(body.expr_spans[use_id])
+                || lambda_span.contains(body.binding_spans[binding])
                 || !captured.insert(binding)
             {
                 continue;
@@ -411,12 +411,6 @@ impl<T: BodySlotTypes> SuspensionPolicy for IdentityBorrowPolicy<'_, T> {
         };
         self.types.local(ty).is_none() && self.types.stored(ty).is_some()
     }
-}
-
-fn contains(outer: Span, inner: Span) -> bool {
-    outer.file == inner.file
-        && outer.offset_range().0 <= inner.offset_range().0
-        && inner.offset_range().1 <= outer.offset_range().1
 }
 
 fn used_binding(body: &Body, at: Idx<Expr>) -> Option<Idx<BindingInfo>> {

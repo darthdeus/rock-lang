@@ -300,6 +300,13 @@ impl Span {
         }
     }
 
+    /// Whether `inner` lies within this span, in the same file.
+    pub fn contains(&self, inner: Span) -> bool {
+        self.file == inner.file
+            && self.offset_range.0 <= inner.offset_range.0
+            && inner.offset_range.1 <= self.offset_range.1
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
