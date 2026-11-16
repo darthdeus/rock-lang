@@ -576,31 +576,17 @@ for n, t in ipairs(__skull_run) do
   io.write = function(...)
     for i = 1, select('#', ...) do buf[#buf + 1] = tostring((select(i, ...))) end
   end
-  -- Stone's collector observes Rust and Rock records through the same sink.
-  -- Plain processes retain the portable list used by assert_error_logs.
-  local errors = {}
-  local previous_errors = _G.__rock_logged_errors
-  local native_errors = _G.__rock_collect_logged_errors ~= nil
-  if native_errors then
-    _G.__rock_collect_logged_errors()
-  else
-    _G.__rock_logged_errors = {
-      records = function() return errors, 0 end,
-      truncate = function(count) for i = #errors, count + 1, -1 do errors[i] = nil end end,
-    }
-  end
-  local sink = _G.__rock_log_sink
-  _G.__rock_log_sink = function(level, category, msg, wall_clock)
-    local line = category and #category > 0 and ("[" .. category .. "] " .. msg) or msg
-    if level == 0 and not native_errors then errors[#errors + 1] = line end
-    if sink then sink(level, category, msg, wall_clock) else print(line) end
-  end
+  __rock_test_check_errors()
   local start = __skull_now()
   local ok, ret = pcall(t.f)
   local ms = __skull_now() - start
   local errors, overflow = _G.__rock_logged_errors.records()
-  _G.__rock_log_sink = sink
-  _G.__rock_logged_errors = previous_errors
+  local total_overflow = overflow
+  overflow = overflow - _G.__rock_test_error_overflow
+  _G.__rock_test_error_overflow = total_overflow
+  -- Remove only the records this result reports. A background record arriving
+  -- after the snapshot stays pending instead of disappearing in a reset.
+  for _, record in ipairs(errors) do _G.__rock_logged_errors.take(record) end
   print = rp
   io.write = rw
   local got = table.concat(buf, ""):gsub("%s+$", "")
@@ -644,6 +630,45 @@ end
     );
     h
 }
+
+// Installed before module initialization, including for load-only test files.
+// Native packages promote the collector when their module loads; errors from
+// before that promotion remain in the initial portable list.
+const TEST_ERROR_PRELUDE: &str = r#"
+_G.__rock_test_mode = true
+_G.__rock_test_error_overflow = 0
+do
+  local errors = {}
+  local initial = {
+    add = function(record) errors[#errors + 1] = record end,
+    records = function()
+      local records = {}
+      for i, message in ipairs(errors) do records[i] = message end
+      return records, 0
+    end,
+    truncate = function(count) for i = #errors, count + 1, -1 do errors[i] = nil end end,
+    take = function(record)
+      for i, message in ipairs(errors) do
+        if message == record then table.remove(errors, i); return true end
+      end
+      return false
+    end,
+  }
+  _G.__rock_logged_errors = initial
+  _G.__rock_test_check_errors = function()
+    local records, overflow = _G.__rock_logged_errors.records()
+    overflow = overflow - _G.__rock_test_error_overflow
+    if _G.__rock_logged_errors ~= initial then
+      for _, record in ipairs(errors) do records[#records + 1] = record end
+    end
+    if #records > 0 or overflow > 0 then
+      local detail = table.concat(records, "\n")
+      if overflow > 0 then detail = detail .. "\n" .. overflow .. " additional error record(s) dropped" end
+      error("logged error(s) outside test bodies: " .. detail, 0)
+    end
+  end
+end
+"#;
 
 /// Render single-file errors against `src`. `skull_emit_full` parses with the
 /// real `file` path as the span file id, so the source must be registered under
@@ -904,7 +929,7 @@ fn run_emitted_tests(
         })?;
         if run.timed_out || !run.output.status.success() {
             return Err(SkullFailure {
-                reason: "invalid lua emitted (skull bug)".to_string(),
+                reason: "test program failed during module load".to_string(),
                 rendered: if run.timed_out {
                     format!(
                         "loading emitted program: timed out after {}s",
@@ -1298,7 +1323,14 @@ fn write_test_program(
     harness: &str,
 ) -> Result<(tempfile::NamedTempFile, String)> {
     use std::io::Write;
-    let parts = [&*program.preamble, &*program.lua, program.setup, harness];
+    let parts = [
+        TEST_ERROR_PRELUDE,
+        &*program.preamble,
+        &*program.lua,
+        program.setup,
+        harness,
+        "\ncollectgarbage('collect')\n__rock_test_check_errors()\n",
+    ];
     let excerpt = program_excerpt(&parts);
     let mut script = tempfile::NamedTempFile::new()?;
     for part in parts {

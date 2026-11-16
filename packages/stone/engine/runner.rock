@@ -946,10 +946,10 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
         }
     }
 
-    // A sim reports these in its verdict (`runner_sim_advance`).
+    // The entry reports its own errors; shutdown can still log after its end.
     let logged_errors = logged_error_records()
     let overflow = logged_error_overflow()
-    if bounded && (logged_errors.len() > 0 || overflow > 0) {
+    if runner_checked_run() && (logged_errors.len() > 0 || overflow > 0) {
         let records = ""
         for record in logged_errors { records = records + "\n  " + record }
         if overflow > 0 { records = records + "\n  ({overflow} more past the collection cap)" }

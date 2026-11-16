@@ -39,6 +39,10 @@ global __rock_log_level: int = -1
 // record by declaration instead of sniffing its text
 // (`rock_log::WALL_CLOCK_MARK`); the print() fallback has no stamp to mark.
 @intrinsic @nomangle inline(lua) fn __rock_log_emit(level: int, category: string, msg: string, wall_clock: bool) = """
+    local errors = level == 0 and _G.__rock_logged_errors
+    if errors and errors.add then
+        errors.add(category and #category > 0 and ("[" .. category .. "] " .. msg) or msg)
+    end
     local sink = _G.__rock_log_sink
     if sink ~= nil then
         sink(level, category or "", msg, wall_clock)
