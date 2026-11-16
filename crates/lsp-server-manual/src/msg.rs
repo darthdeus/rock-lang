@@ -3,10 +3,6 @@ use std::{
     io::{self, BufRead, Write},
 };
 
-use serde::de::DeserializeOwned;
-
-use crate::error::ExtractError;
-
 #[derive(Clone, Debug)]
 pub enum Message {
     Request(Request),
@@ -477,21 +473,6 @@ impl Response {
 }
 
 impl Request {
-    pub fn extract<P: DeserializeOwned>(
-        self,
-        method: &str,
-    ) -> Result<(RequestId, P), ExtractError<Request>> {
-        if self.method != method {
-            return Err(ExtractError::MethodMismatch(self));
-        }
-        match serde_json::from_value(self.params) {
-            Ok(params) => Ok((self.id, params)),
-            Err(error) => Err(ExtractError::JsonError {
-                method: self.method,
-                error,
-            }),
-        }
-    }
     pub(crate) fn is_initialize(&self) -> bool {
         self.method == "initialize"
     }

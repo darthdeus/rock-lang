@@ -16,7 +16,7 @@ mod stdio;
 use crossbeam_channel::{Receiver, RecvError, Sender};
 
 pub use crate::{
-    error::{ExtractError, ProtocolError},
+    error::ProtocolError,
     msg::{ErrorCode, Message, Notification, Request, RequestId, Response, ResponseError},
     stdio::IoThreads,
 };

@@ -13,12 +13,12 @@ use std::str::FromStr;
 
 use anyhow::Result;
 use log::error;
-use lsp_server::{Connection, ExtractError, Message, Request, RequestId, Response};
+use lsp_server::{Connection, Message, Request, RequestId, Response};
 use lsp_types::request::{
     CodeActionRequest, Completion, DocumentHighlightRequest, DocumentSymbolRequest, GotoDefinition,
     GotoTypeDefinition, HoverRequest, InlayHintRequest, PrepareRenameRequest, References, Rename,
-    SemanticTokensFullDeltaRequest, SemanticTokensFullRequest, SemanticTokensRangeRequest,
-    SignatureHelpRequest, WorkspaceSymbolRequest,
+    Request as _, SemanticTokensFullDeltaRequest, SemanticTokensFullRequest,
+    SemanticTokensRangeRequest, SignatureHelpRequest, WorkspaceSymbolRequest,
 };
 use lsp_types::{
     CompletionList, Hover, InlayHint, Location, SignatureHelp, TextDocumentPositionParams, Uri,
@@ -58,33 +58,6 @@ mod debug_path_tests {
             assert_eq!(path.parent(), Some(std::env::temp_dir().as_path()));
         }
     }
-}
-
-/// Answer one ordinary LSP request inside `handle_request` and return early.
-///
-/// Takes the typed params, runs the workspace query and responds. The
-/// handler's answer must have the request's declared result type, so a
-/// handler cannot send a shape the protocol does not allow.
-macro_rules! dispatch_request {
-    ($req:ident, $out:expr, $ws:expr, $ReqType:ty, $span:literal, $handler:expr) => {
-        let $req = match take::<$ReqType>($req) {
-            Ok((req_id, args)) => {
-                let _span = tracing::info_span!($span, request_id = %req_id).entered();
-                let outcome: Result<<$ReqType as lsp_types::request::Request>::Result> =
-                    $handler(&mut $ws, &args);
-                send_response($out, req_id, outcome)?;
-                return Ok(());
-            }
-            Err(fault @ ExtractError::JsonError { .. }) => {
-                log::error!(
-                    concat!("JSON error in ", stringify!($ReqType), " request: {:?}"),
-                    fault
-                );
-                return Ok(());
-            }
-            Err(ExtractError::MethodMismatch(rest)) => rest,
-        };
-    };
 }
 
 /// Opt-in per-request server-side timing (`ROCK_LSP_TIMING=1`). Emitted at
@@ -392,189 +365,100 @@ impl LspServer {
             panic!("deliberate test panic ($/rockDebugPanic)");
         }
 
-        dispatch_request!(
-            req,
-            out,
-            self.workspace,
-            GotoDefinition,
-            "lsp_goto_definition",
-            go_to_definition_workspace
-        );
-        dispatch_request!(
-            req,
-            out,
-            self.workspace,
-            GotoTypeDefinition,
-            "lsp_goto_type_definition",
-            go_to_type_definition_workspace
-        );
-        dispatch_request!(
-            req,
-            out,
-            self.workspace,
-            References,
-            "lsp_references",
-            find_references_workspace
-        );
-        dispatch_request!(
-            req,
-            out,
-            self.workspace,
-            HoverRequest,
-            "lsp_hover",
-            do_hover_workspace
-        );
-
-        dispatch_request!(
-            req,
-            out,
-            self.workspace,
-            SignatureHelpRequest,
-            "lsp_signature_help",
-            do_signature_help_workspace
-        );
-        dispatch_request!(
-            req,
-            out,
-            self.workspace,
-            InlayHintRequest,
-            "lsp_inlay_hints",
-            do_inlay_hints_workspace
-        );
-        dispatch_request!(
-            req,
-            out,
-            self.workspace,
-            Completion,
-            "lsp_completion",
-            do_completion_workspace
-        );
-        dispatch_request!(
-            req,
-            out,
-            self.workspace,
-            PrepareRenameRequest,
-            "lsp_prepare_rename",
-            prepare_rename_workspace
-        );
-        dispatch_request!(
-            req,
-            out,
-            self.workspace,
-            Rename,
-            "lsp_rename",
-            do_rename_workspace
-        );
-        dispatch_request!(
-            req,
-            out,
-            self.workspace,
-            DocumentSymbolRequest,
-            "lsp_document_symbols",
-            do_document_symbols_workspace
-        );
-        dispatch_request!(
-            req,
-            out,
-            self.workspace,
-            WorkspaceSymbolRequest,
-            "lsp_workspace_symbols",
-            do_workspace_symbols_workspace
-        );
-        dispatch_request!(
-            req,
-            out,
-            self.workspace,
-            DocumentHighlightRequest,
-            "lsp_document_highlight",
-            do_document_highlight_workspace
-        );
-
-        dispatch_request!(
-            req,
-            out,
-            self.workspace,
-            SemanticTokensFullRequest,
-            "lsp_semantic_tokens",
-            semantic_tokens::full_semantic_tokens
-        );
-        dispatch_request!(
-            req,
-            out,
-            self.workspace,
-            SemanticTokensFullDeltaRequest,
-            "lsp_semantic_tokens_delta",
-            semantic_tokens::delta_semantic_tokens
-        );
-        dispatch_request!(
-            req,
-            out,
-            self.workspace,
-            SemanticTokensRangeRequest,
-            "lsp_semantic_tokens_range",
-            semantic_tokens::range_semantic_tokens
-        );
-
-        dispatch_request!(
-            req,
-            out,
-            self.workspace,
-            CodeActionRequest,
-            "lsp_code_actions",
-            compute_code_actions_workspace
-        );
-
-        // Custom introspection requests for the rock.nvim panel. Bone
-        // ports of the old checker's endpoints (rock/consistency was
-        // dropped in the port -- it had no bone equivalent worth the
-        // surface).
-        if req.method == "rock/stats" {
-            let loaded = self
-                .workspace
-                .bone
-                .projects_summary()
-                .iter()
-                .map(|(_, m)| m.len())
-                .sum();
-            send_response(out, req.id, Ok(request_stats_json(loaded)))?;
-            return Ok(());
-        }
-        if req.method == "rock/modules" {
-            let snapshot = modules_json(self.workspace.bone.projects_summary());
-            send_response(out, req.id, Ok(snapshot))?;
-            return Ok(());
-        }
-
-        // `rock.completionAccepted`: the corpus recorder's accept signal,
-        // run by the client after inserting a tagged completion item
-        // (ROCK_LSP_RECORD).
-        if req.method == "workspace/executeCommand" {
-            let parsed =
-                serde_json::from_value::<lsp_types::ExecuteCommandParams>(req.params.clone())
+        let ws = &mut self.workspace;
+        match req.method.as_str() {
+            GotoDefinition::METHOD => {
+                answer::<GotoDefinition>(req, out, ws, go_to_definition_workspace)
+            }
+            GotoTypeDefinition::METHOD => {
+                answer::<GotoTypeDefinition>(req, out, ws, go_to_type_definition_workspace)
+            }
+            References::METHOD => answer::<References>(req, out, ws, find_references_workspace),
+            HoverRequest::METHOD => answer::<HoverRequest>(req, out, ws, do_hover_workspace),
+            SignatureHelpRequest::METHOD => {
+                answer::<SignatureHelpRequest>(req, out, ws, do_signature_help_workspace)
+            }
+            InlayHintRequest::METHOD => {
+                answer::<InlayHintRequest>(req, out, ws, do_inlay_hints_workspace)
+            }
+            Completion::METHOD => answer::<Completion>(req, out, ws, do_completion_workspace),
+            PrepareRenameRequest::METHOD => {
+                answer::<PrepareRenameRequest>(req, out, ws, prepare_rename_workspace)
+            }
+            Rename::METHOD => answer::<Rename>(req, out, ws, do_rename_workspace),
+            DocumentSymbolRequest::METHOD => {
+                answer::<DocumentSymbolRequest>(req, out, ws, do_document_symbols_workspace)
+            }
+            WorkspaceSymbolRequest::METHOD => {
+                answer::<WorkspaceSymbolRequest>(req, out, ws, do_workspace_symbols_workspace)
+            }
+            DocumentHighlightRequest::METHOD => {
+                answer::<DocumentHighlightRequest>(req, out, ws, do_document_highlight_workspace)
+            }
+            SemanticTokensFullRequest::METHOD => answer::<SemanticTokensFullRequest>(
+                req,
+                out,
+                ws,
+                semantic_tokens::full_semantic_tokens,
+            ),
+            SemanticTokensFullDeltaRequest::METHOD => answer::<SemanticTokensFullDeltaRequest>(
+                req,
+                out,
+                ws,
+                semantic_tokens::delta_semantic_tokens,
+            ),
+            SemanticTokensRangeRequest::METHOD => answer::<SemanticTokensRangeRequest>(
+                req,
+                out,
+                ws,
+                semantic_tokens::range_semantic_tokens,
+            ),
+            CodeActionRequest::METHOD => {
+                answer::<CodeActionRequest>(req, out, ws, compute_code_actions_workspace)
+            }
+            // Introspection requests for the rock.nvim panel.
+            "rock/stats" => {
+                let loaded = ws
+                    .bone
+                    .projects_summary()
+                    .iter()
+                    .map(|(_, m)| m.len())
+                    .sum();
+                send_response(out, req.id, Ok(request_stats_json(loaded)));
+            }
+            "rock/modules" => {
+                let snapshot = modules_json(ws.bone.projects_summary());
+                send_response(out, req.id, Ok(snapshot));
+            }
+            // `rock.completionAccepted`: the corpus recorder's accept signal,
+            // run by the client after inserting a tagged completion item
+            // (ROCK_LSP_RECORD).
+            "workspace/executeCommand" => {
+                let parsed = serde_json::from_value::<lsp_types::ExecuteCommandParams>(req.params)
                     .map_err(|e| format!("malformed executeCommand params: {e}"))
                     .and_then(|p| completion_record::handle_execute_command(&p));
-            match parsed {
-                Ok(v) => send_response(out, req.id, Ok(v))?,
-                Err(detail) => {
-                    log::warn!("workspace/executeCommand rejected: {detail}");
-                    out.push(failed_request(
-                        req.id,
-                        lsp_server::ErrorCode::InvalidParams,
-                        detail,
-                    ));
+                match parsed {
+                    Ok(v) => send_response(out, req.id, Ok(v)),
+                    Err(detail) => {
+                        log::warn!("workspace/executeCommand rejected: {detail}");
+                        out.push(failed_request(
+                            req.id,
+                            lsp_server::ErrorCode::InvalidParams,
+                            detail,
+                        ));
+                    }
                 }
             }
-            return Ok(());
+            method => {
+                log::warn!("Unhandled request method: {method}");
+                let message = format!("Method '{method}' not found");
+                out.push(failed_request(
+                    req.id,
+                    lsp_server::ErrorCode::MethodNotFound,
+                    message,
+                ));
+            }
         }
-
-        // No arm claimed this request.
-        log::warn!("Unhandled request method: {}", req.method);
-        let name = req.method.clone();
-        out.push(failed_request(
-            req.id,
-            lsp_server::ErrorCode::MethodNotFound,
-            format!("Method '{name}' not found"),
-        ));
         Ok(())
     }
 
@@ -629,13 +513,14 @@ impl LspServer {
     /// rather than waiting for the first save.
     fn on_open(&mut self, note: &lsp_server::Notification, out: &mut Vec<Message>) -> Result<()> {
         let _span = tracing::debug_span!("lsp_did_open_notification").entered();
-        let opened = opened_doc(note)?;
-        let Some(path) = notification_path(out, &opened.uri, "didOpen")? else {
+        let at = doc_uri(note)?;
+        let text = doc_text(note, "/textDocument/text")?;
+        let Some(path) = notification_path(out, &at, "didOpen")? else {
             return Ok(());
         };
         self.workspace
-            .update_document_version(&opened.uri.to_string(), opened.version);
-        bone_reload_and_publish(out, &path, opened.text, &mut self.workspace)?;
+            .update_document_version(&at.to_string(), doc_version(note));
+        bone_reload_and_publish(out, &path, text, &mut self.workspace)?;
         regenerate_ctags(&self.workspace, &path, "open");
         Ok(())
     }
@@ -648,20 +533,13 @@ impl LspServer {
         let Some(path) = notification_path(out, &at, "didChange")? else {
             return Ok(());
         };
-        let body = note.params.as_object().ok_or_else(|| {
-            anyhow::anyhow!("Invalid didChange notification: params is not an object")
-        })?;
-        let edited = changed_doc(body)?;
+        // FULL sync sends the whole buffer as the first content change.
+        let text = doc_text(note, "/contentChanges/0/text")?;
         self.workspace
-            .update_document_version(&at.to_string(), edited.version);
+            .update_document_version(&at.to_string(), doc_version(note));
         // The refresh makes the client re-request hints for the edited text.
-        out.push(lsp_server::Message::Notification(
-            lsp_server::Notification {
-                method: "workspace/inlayHint/refresh".to_string(),
-                params: serde_json::Value::Null,
-            },
-        ));
-        bone_reload_and_publish(out, &path, edited.text, &mut self.workspace)?;
+        notify(out, "workspace/inlayHint/refresh", serde_json::Value::Null);
+        bone_reload_and_publish(out, &path, text, &mut self.workspace)?;
         Ok(())
     }
 
@@ -776,108 +654,65 @@ fn bone_reload_and_publish(
             uri: file_uri,
             diagnostics,
         };
-        out.push(lsp_server::Message::Notification(
-            lsp_server::Notification {
-                method: "textDocument/publishDiagnostics".to_string(),
-                params: serde_json::to_value(notice)?,
-            },
-        ));
+        notify(
+            out,
+            "textDocument/publishDiagnostics",
+            serde_json::to_value(notice)?,
+        );
     }
     Ok(())
 }
 
-/// Pull the typed params out of a request when its method matches.
-///
-/// Returns the untouched request on a method mismatch so dispatch can try
-/// the next arm; a JSON shape error is reported to the caller instead.
-fn take<R>(seen: Request) -> Result<(RequestId, R::Params), ExtractError<Request>>
-where
-    R: lsp_types::request::Request,
-    R::Params: serde::de::DeserializeOwned,
-{
-    seen.extract(R::METHOD)
+/// Answer an `R` request with `handler`. The handler's answer must have the
+/// request's declared result type, so it cannot send a shape the protocol
+/// does not allow.
+fn answer<R: lsp_types::request::Request>(
+    req: Request,
+    out: &mut Vec<Message>,
+    workspace: &mut LspWorkspace,
+    handler: fn(&mut LspWorkspace, &R::Params) -> Result<R::Result>,
+) {
+    let _span =
+        tracing::info_span!("lsp_request", method = R::METHOD, request_id = %req.id).entered();
+    match serde_json::from_value::<R::Params>(req.params) {
+        Ok(params) => send_response(out, req.id, handler(workspace, &params)),
+        Err(error) => log::error!("JSON error in {} request: {error}", R::METHOD),
+    }
+}
+
+fn notify(out: &mut Vec<Message>, method: &str, params: serde_json::Value) {
+    out.push(Message::Notification(lsp_server::Notification {
+        method: method.to_string(),
+        params,
+    }));
 }
 
 /// An error response message for a request that cannot be answered.
 fn failed_request(id: RequestId, code: lsp_server::ErrorCode, text: String) -> Message {
-    Message::Response(Response {
-        id,
-        result: None,
-        error: Some(lsp_server::ResponseError {
-            code: code as i32,
-            message: text,
-            data: None,
-        }),
-    })
+    Response::new_err(id, code as i32, text).into()
 }
 
 /// The document a notification talks about, read from its `textDocument.uri`.
 fn doc_uri(note: &lsp_server::Notification) -> Result<Uri> {
+    note.params["textDocument"]["uri"]
+        .as_str()
+        .and_then(|text| Uri::from_str(text).ok())
+        .ok_or_else(|| anyhow::anyhow!("{} has no textDocument.uri", note.method))
+}
+
+fn doc_version(note: &lsp_server::Notification) -> Option<i32> {
+    note.params["textDocument"]["version"]
+        .as_i64()
+        .map(|v| v as i32)
+}
+
+/// The full text a notification carries at `text`, a JSON pointer.
+fn doc_text(note: &lsp_server::Notification, text: &str) -> Result<String> {
     note.params
-        .get("textDocument")
-        .and_then(|doc| doc.get("uri"))
+        .pointer(text)
         .and_then(|raw| raw.as_str())
-        .and_then(|text| Uri::from_str(text).ok())
-        .ok_or_else(|| anyhow::anyhow!("notification has no textDocument.uri"))
-}
-
-/// The versioned text a didOpen carries.
-struct OpenedDoc {
-    uri: Uri,
-    version: Option<i32>,
-    text: String,
-}
-
-fn opened_doc(note: &lsp_server::Notification) -> Result<OpenedDoc> {
-    let at = note
-        .params
-        .get("textDocument")
-        .and_then(|doc| doc.get("uri"))
-        .and_then(|raw| raw.as_str())
-        .and_then(|text| Uri::from_str(text).ok())
-        .ok_or_else(|| anyhow::anyhow!("Failed to get uri from didOpen notification"))?;
-    let version = note
-        .params
-        .get("textDocument")
-        .and_then(|doc| doc.get("version"))
-        .and_then(|raw| raw.as_i64())
-        .map(|v| v as i32);
-    let text = note
-        .params
-        .get("textDocument")
-        .and_then(|doc| doc.get("text"))
-        .and_then(|raw| raw.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| anyhow::anyhow!("Failed to get contents from didOpen notification"))?;
-    Ok(OpenedDoc {
-        uri: at,
-        version,
-        text,
-    })
-}
-
-/// The new version and full text a didChange carries (FULL sync sends the
-/// whole buffer as the first content change).
-struct ChangedDoc {
-    version: Option<i32>,
-    text: String,
-}
-
-fn changed_doc(body: &serde_json::Map<String, serde_json::Value>) -> Result<ChangedDoc> {
-    let version = body
-        .get("textDocument")
-        .and_then(|doc| doc.get("version"))
-        .and_then(|raw| raw.as_i64())
-        .map(|v| v as i32);
-    let text = body
-        .get("contentChanges")
-        .and_then(|edits| edits.as_array())
-        .and_then(|edits| edits.first())
-        .and_then(|edit| edit.get("text"))
-        .and_then(|raw| raw.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| anyhow::anyhow!("Failed to get contents from notification"))?;
-    Ok(ChangedDoc { version, text })
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("{} has no {text}", note.method))
 }
 
 /// The file a document notification is about. A URI that names no local file
@@ -893,12 +728,7 @@ fn notification_path(out: &mut Vec<Message>, uri: &Uri, method: &str) -> Result<
                 typ: lsp_types::MessageType::WARNING,
                 message,
             };
-            out.push(lsp_server::Message::Notification(
-                lsp_server::Notification {
-                    method: "window/showMessage".to_string(),
-                    params: serde_json::to_value(params)?,
-                },
-            ));
+            notify(out, "window/showMessage", serde_json::to_value(params)?);
             Ok(None)
         }
     }
@@ -907,43 +737,24 @@ fn notification_path(out: &mut Vec<Message>, uri: &Uri, method: &str) -> Result<
 /// Answer a request: serialize the handler's value into a response, or the
 /// handler's failure into a `RequestFailed` error. A value that cannot
 /// serialize becomes `InternalError`.
-fn send_response<T>(
-    out: &mut Vec<Message>,
-    id: RequestId,
-    t: Result<T, anyhow::Error>,
-) -> Result<(), anyhow::Error>
-where
-    T: serde::Serialize,
-{
-    let made = match t {
-        Ok(done) => serde_json::to_value(&done).map_err(|e| {
-            let detail = format!("failed to serialize response: {e}");
-            error!("{detail}");
-            (lsp_server::ErrorCode::InternalError, detail)
-        }),
-        Err(fault) => {
-            log::error!("error: {fault}");
-            Err((lsp_server::ErrorCode::RequestFailed, fault.to_string()))
-        }
-    };
-    let answer = match made {
-        Ok(payload) => Response {
+fn send_response<T: serde::Serialize>(out: &mut Vec<Message>, id: RequestId, t: Result<T>) {
+    let answer = match t.map(|done| serde_json::to_value(&done)) {
+        Ok(Ok(payload)) => Message::Response(Response {
             id,
             result: Some(payload),
             error: None,
-        },
-        Err((code, detail)) => Response {
-            id,
-            result: None,
-            error: Some(lsp_server::ResponseError {
-                code: code as i32,
-                message: detail,
-                data: None,
-            }),
-        },
+        }),
+        Ok(Err(e)) => {
+            let detail = format!("failed to serialize response: {e}");
+            error!("{detail}");
+            failed_request(id, lsp_server::ErrorCode::InternalError, detail)
+        }
+        Err(fault) => {
+            log::error!("error: {fault}");
+            failed_request(id, lsp_server::ErrorCode::RequestFailed, fault.to_string())
+        }
     };
-    out.push(Message::Response(answer));
-    Ok(())
+    out.push(answer);
 }
 
 #[cfg(test)]
@@ -961,7 +772,7 @@ mod response_tests {
     #[test]
     fn unserializable_result_is_an_internal_error_response() {
         let mut out = Vec::new();
-        send_response(&mut out, RequestId::from(7), Ok(Unserializable)).unwrap();
+        send_response(&mut out, RequestId::from(7), Ok(Unserializable));
         let Some(Message::Response(resp)) = out.pop() else {
             panic!("expected a response");
         };
