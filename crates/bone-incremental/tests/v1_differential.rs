@@ -464,24 +464,6 @@ fn per_file(list: &[(&str, usize)]) -> BTreeMap<String, usize> {
     list.iter().map(|(f, n)| (f.to_string(), *n)).collect()
 }
 
-fn check_scope_edit(
-    mut h: V1Harness,
-    path: &str,
-    text: &str,
-    tier: UpdateTier,
-    expected: (usize, usize, &[(&str, usize)]),
-) -> (V1Harness, UpdateResult) {
-    let result = h.edit(path, text).expect("accepted");
-    assert_eq!(result.tier, tier);
-    assert_eq!(h.reinferred_body_count(), expected.0);
-    assert_eq!(h.relowered_body_count(), expected.1);
-    assert_eq!(
-        h.functions_per_file(&result.relowered),
-        per_file(expected.2)
-    );
-    (h, result)
-}
-
 fn key(path: &str) -> String {
     format!("{PACKAGE}::{path}")
 }
@@ -591,33 +573,37 @@ fn the_full_rebuild_reinfers_no_warm_body() {
 fn control_a_body_edit_on_a_gate_fixture_reads_narrow() {
     let c = "mod c;\n\nuse super::b::*;\n\nfn pick() -> int {\n    bump(1)\n}\n\nfn other() -> int {\n    2\n}\n";
     let d1 = "mod d;\n\nfn far() -> int {\n    20\n}\n\nfn farther() -> int {\n    3\n}\n";
-    let h = V1Harness::new(vec![
+    let mut h = V1Harness::new(vec![
         v1("a.rock", A_BUMP),
         v1("b.rock", B_BUMP),
         v1("c.rock", c),
         v1("d.rock", UNRELATED),
     ]);
-    check_scope_edit(
-        h,
-        "d.rock",
-        d1,
-        UpdateTier::BodyOnly,
-        (1, 1, &[("d.rock", 1)]),
+
+    let r = h.edit("d.rock", d1).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::BodyOnly);
+    assert_eq!(h.reinferred_body_count(), 1);
+    assert_eq!(h.relowered_body_count(), 1);
+    assert_eq!(
+        h.functions_per_file(&r.relowered),
+        per_file(&[("d.rock", 1)])
     );
 }
 
 /// Gate (a): an explicit `use` added to one fragment joins the glob family
 /// it used to resolve through, and wins the exact tie (tier 3 is
-/// nearer than tier 4).
+/// nearer than tier 4). Gate (b): the same `use` removed, leaving the
+/// lower-tier glob candidate (removing an import removes its callables from
+/// every family it contributed to).
 ///
-/// c's 2 bodies re-lower and re-infer, nothing else: the import is
+/// Each way, c's 2 bodies re-lower and re-infer, nothing else: the import is
 /// fragment-local, so only c's own fragment scope changed.
 /// Per-body: only `pick`, the one body with a bare lookup of `bump`.
 #[test]
-fn gate_a_use_added_to_one_fragment() {
+fn gate_a_b_use_added_to_and_removed_from_one_fragment() {
     let c0 = "mod c;\n\nuse super::b::*;\n\nfn pick() -> int {\n    bump(1)\n}\n\nfn other() -> int {\n    2\n}\n";
     let c1 = "mod c;\n\nuse super::b::*;\nuse super::a::bump;\n\nfn pick() -> int {\n    bump(1)\n}\n\nfn other() -> int {\n    2\n}\n";
-    let h = V1Harness::new(vec![
+    let mut h = V1Harness::new(vec![
         v1("a.rock", A_BUMP),
         v1("b.rock", B_BUMP),
         v1("c.rock", c0),
@@ -625,33 +611,27 @@ fn gate_a_use_added_to_one_fragment() {
     ]);
     assert_eq!(h.call_keys("c.rock"), vec![(key("b::bump"), None)]);
 
-    let (h, _) = check_scope_edit(h, "c.rock", c1, UpdateTier::Scope, (2, 2, &[("c.rock", 2)]));
+    let r = h.edit("c.rock", c1).expect("accepted");
     let both = family(&[(&key("a::bump"), "Imports"), (&key("b::bump"), "Globs")]);
     assert_eq!(h.call_keys("c.rock"), vec![("bump".to_string(), both)]);
     assert_eq!(h.selected("c.rock"), vec![key("a::bump")]);
-}
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.reinferred_body_count(), 2);
+    assert_eq!(h.relowered_body_count(), 2);
+    assert_eq!(
+        h.functions_per_file(&r.relowered),
+        per_file(&[("c.rock", 2)])
+    );
 
-/// Gate (b): the same `use` removed, leaving the lower-tier glob candidate
-/// that lost the exact tie to it (removing an import removes its
-/// callables from every family it contributed to).
-///
-/// c's 2 bodies re-lower and re-infer, nothing else. Per-body: `pick` only.
-#[test]
-fn gate_b_use_removed_from_one_fragment() {
-    let c0 = "mod c;\n\nuse super::b::*;\nuse super::a::bump;\n\nfn pick() -> int {\n    bump(1)\n}\n\nfn other() -> int {\n    2\n}\n";
-    let c1 = "mod c;\n\nuse super::b::*;\n\nfn pick() -> int {\n    bump(1)\n}\n\nfn other() -> int {\n    2\n}\n";
-    let h = V1Harness::new(vec![
-        v1("a.rock", A_BUMP),
-        v1("b.rock", B_BUMP),
-        v1("c.rock", c0),
-        v1("d.rock", UNRELATED),
-    ]);
-    let both = family(&[(&key("a::bump"), "Imports"), (&key("b::bump"), "Globs")]);
-    assert_eq!(h.call_keys("c.rock"), vec![("bump".to_string(), both)]);
-    assert_eq!(h.selected("c.rock"), vec![key("a::bump")]);
-
-    let (h, _) = check_scope_edit(h, "c.rock", c1, UpdateTier::Scope, (2, 2, &[("c.rock", 2)]));
+    let r = h.edit("c.rock", c0).expect("accepted");
     assert_eq!(h.call_keys("c.rock"), vec![(key("b::bump"), None)]);
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.reinferred_body_count(), 2);
+    assert_eq!(h.relowered_body_count(), 2);
+    assert_eq!(
+        h.functions_per_file(&r.relowered),
+        per_file(&[("c.rock", 2)])
+    );
 }
 
 /// Gate (c): a `pub fn` added to a module another fragment globs. Here the
@@ -661,32 +641,39 @@ fn gate_b_use_removed_from_one_fragment() {
 ///
 /// b (edited, 2 bodies after the edit) and c (its bare lookup of `warm_one`
 /// probed b through the glob and missed) -- 3; d and the warm stdlib 0.
-/// Per-body: b's new `warm_one` plus c's `pick`.
+/// Per-body: b's new `warm_one` plus c's `pick`. Removing the member again
+/// leaves the globber's family the std one alone.
 #[test]
-fn gate_c_glob_member_added() {
+fn gate_c_glob_member_added_and_removed() {
     let b0 = "mod b;\n\npub fn depth() -> int {\n    1\n}\n";
     let b1 =
         "mod b;\n\npub fn depth() -> int {\n    1\n}\n\npub fn warm_one() -> int {\n    5\n}\n";
     let c = "mod c;\n\nuse super::b::*;\n\nfn pick() -> int {\n    warm_one()\n}\n";
-    let h = V1Harness::new(vec![
+    let mut h = V1Harness::new(vec![
         v1("b.rock", b0),
         v1("c.rock", c),
         v1("d.rock", UNRELATED),
     ]);
     assert_eq!(h.call_keys("c.rock"), vec![("warm_one".to_string(), None)]);
 
-    let (h, _) = check_scope_edit(
-        h,
-        "b.rock",
-        b1,
-        UpdateTier::Scope,
-        (3, 3, &[("b.rock", 2), ("c.rock", 1)]),
-    );
+    let r = h.edit("b.rock", b1).expect("accepted");
     assert_eq!(
         h.call_keys("c.rock"),
         vec![("warm_one".to_string(), warm_one_family())]
     );
     assert_eq!(h.selected("c.rock"), vec![key("b::warm_one")]);
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.reinferred_body_count(), 3);
+    assert_eq!(h.relowered_body_count(), 3);
+    assert_eq!(
+        h.functions_per_file(&r.relowered),
+        per_file(&[("b.rock", 2), ("c.rock", 1)])
+    );
+
+    let r = h.edit("b.rock", b0).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.call_keys("c.rock"), vec![("warm_one".to_string(), None)]);
+    assert_eq!(h.relowered_body_count(), 2, "b's depth and c's pick");
 }
 
 /// A lower-tier overload added and removed: c's own
@@ -736,13 +723,20 @@ fn a_lower_tier_overload_added_joins_the_callers_family() {
 fn gate_d_private_helper_added_in_an_unrelated_module() {
     let c = "mod c;\n\nfn pick() -> int {\n    super::a::bump(1)\n}\n";
     let d1 = "mod d;\n\nfn far() -> int {\n    2\n}\n\nfn farther() -> int {\n    3\n}\n\nfn helper() -> int {\n    4\n}\n";
-    let h = V1Harness::new(vec![
+    let mut h = V1Harness::new(vec![
         v1("a.rock", A_BUMP),
         v1("c.rock", c),
         v1("d.rock", UNRELATED),
     ]);
 
-    check_scope_edit(h, "d.rock", d1, UpdateTier::Scope, (3, 3, &[("d.rock", 3)]));
+    let r = h.edit("d.rock", d1).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.reinferred_body_count(), 3);
+    assert_eq!(h.relowered_body_count(), 3);
+    assert_eq!(
+        h.functions_per_file(&r.relowered),
+        per_file(&[("d.rock", 3)])
+    );
 }
 
 /// Gate (e): a module header renamed. b's definitions change DefKey, and the
@@ -751,21 +745,34 @@ fn gate_d_private_helper_added_in_an_unrelated_module() {
 /// b (its keys moved, 1 body) and c (its path walked node `b`; it must
 /// re-lower to report the miss) re-lower -- 2 lowered, 1 re-inferred, since
 /// c's `pick` now fails to LOWER and so is in neither the re-inferred count
-/// nor the `relowered` list; d and the warm stdlib 0.
+/// nor the `relowered` list; d and the warm stdlib 0. Renaming it back
+/// restores the path.
 #[test]
-fn gate_e_module_header_changed() {
+fn gate_e_module_header_changed_and_restored() {
     let b0 = "mod b;\n\npub fn depth() -> int {\n    1\n}\n";
     let b1 = "mod bee;\n\npub fn depth() -> int {\n    1\n}\n";
     let c = "mod c;\n\nfn pick() -> int {\n    super::b::depth()\n}\n";
-    let h = V1Harness::new(vec![
+    let mut h = V1Harness::new(vec![
         v1("b.rock", b0),
         v1("c.rock", c),
         v1("d.rock", UNRELATED),
     ]);
     assert_eq!(h.call_keys("c.rock"), vec![(key("b::depth"), None)]);
 
-    let (h, _) = check_scope_edit(h, "b.rock", b1, UpdateTier::Scope, (1, 2, &[("b.rock", 1)]));
+    let r = h.edit("b.rock", b1).expect("accepted");
     h.assert_diagnostic("did not resolve");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.reinferred_body_count(), 1);
+    assert_eq!(h.relowered_body_count(), 2);
+    assert_eq!(
+        h.functions_per_file(&r.relowered),
+        per_file(&[("b.rock", 1)])
+    );
+
+    let r = h.edit("b.rock", b0).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    h.assert_no_diagnostics();
+    assert_eq!(h.call_keys("c.rock"), vec![(key("b::depth"), None)]);
 }
 
 /// Gate (f): a `pub use` re-export edited in `facade`, reaching `user`
@@ -782,7 +789,7 @@ fn gate_f_reexport_edit_reaches_a_globber_through_a_glob_chain() {
     let facade1 = "mod facade;\n\npub use super::b::bump;\n";
     let hub = "mod hub;\n\npub use super::facade::*;\n";
     let user = "mod user;\n\nuse super::hub::*;\n\nfn pick() -> int {\n    bump(1)\n}\n";
-    let h = V1Harness::new(vec![
+    let mut h = V1Harness::new(vec![
         v1("a.rock", A_BUMP),
         v1("b.rock", B_BUMP),
         v1("facade.rock", facade0),
@@ -793,14 +800,15 @@ fn gate_f_reexport_edit_reaches_a_globber_through_a_glob_chain() {
     h.assert_no_diagnostics();
     assert_eq!(h.call_keys("user.rock"), vec![(key("a::bump"), None)]);
 
-    let (h, _) = check_scope_edit(
-        h,
-        "facade.rock",
-        facade1,
-        UpdateTier::Scope,
-        (1, 1, &[("user.rock", 1)]),
-    );
+    let r = h.edit("facade.rock", facade1).expect("accepted");
     assert_eq!(h.call_keys("user.rock"), vec![(key("b::bump"), None)]);
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.reinferred_body_count(), 1);
+    assert_eq!(h.relowered_body_count(), 1);
+    assert_eq!(
+        h.functions_per_file(&r.relowered),
+        per_file(&[("user.rock", 1)])
+    );
 }
 
 /// A glob re-export of a module that binds the name through a NAMED
@@ -840,20 +848,34 @@ fn a_glob_reexport_of_a_named_reexport_resolves() {
 ///
 /// a (edited, 1 body) and c (its path resolved `a::bump`; it must re-lower)
 /// re-lower -- 2 lowered, 1 re-inferred, since c's `pick` now fails to LOWER
-/// with the access error; d and the warm stdlib 0.
+/// with the access error; d and the warm stdlib 0. Widening it back
+/// re-lowers the user clean.
 #[test]
-fn gate_g_visibility_narrowed_on_a_path_used_item() {
+fn gate_g_visibility_narrowed_and_widened_on_a_path_used_item() {
     let a1 = "mod a;\n\nfn bump(n: int) -> int {\n    n\n}\n";
     let c = "mod c;\n\nfn pick() -> int {\n    super::a::bump(1)\n}\n";
-    let h = V1Harness::new(vec![
+    let mut h = V1Harness::new(vec![
         v1("a.rock", A_BUMP),
         v1("c.rock", c),
         v1("d.rock", UNRELATED),
     ]);
     h.assert_no_diagnostics();
 
-    let (h, _) = check_scope_edit(h, "a.rock", a1, UpdateTier::Scope, (1, 2, &[("a.rock", 1)]));
+    let r = h.edit("a.rock", a1).expect("accepted");
     h.assert_diagnostic("`bump` is not accessible from this module");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.reinferred_body_count(), 1);
+    assert_eq!(h.relowered_body_count(), 2);
+    assert_eq!(
+        h.functions_per_file(&r.relowered),
+        per_file(&[("a.rock", 1)])
+    );
+
+    let r = h.edit("a.rock", A_BUMP).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    h.assert_no_diagnostics();
+    assert_eq!(h.call_keys("c.rock"), vec![(key("a::bump"), None)]);
+    assert_eq!(h.relowered_body_count(), 2, "a's bump and c's pick");
 }
 
 // ---------------------------------------------------------------------------
@@ -870,30 +892,6 @@ fn warm_one_family() -> Option<String> {
         key("b::warm_one"),
         bone_core::modules::STD_PACKAGE_ID
     ))
-}
-
-/// A glob member that won an exact tie against a std name is removed again:
-/// the globber's family is the std one alone.
-#[test]
-fn a_glob_member_that_shadowed_std_is_removed() {
-    let b0 =
-        "mod b;\n\npub fn depth() -> int {\n    1\n}\n\npub fn warm_one() -> int {\n    5\n}\n";
-    let b1 = "mod b;\n\npub fn depth() -> int {\n    1\n}\n";
-    let c = "mod c;\n\nuse super::b::*;\n\nfn pick() -> int {\n    warm_one()\n}\n";
-    let mut h = V1Harness::new(vec![
-        v1("b.rock", b0),
-        v1("c.rock", c),
-        v1("d.rock", UNRELATED),
-    ]);
-    assert_eq!(
-        h.call_keys("c.rock"),
-        vec![("warm_one".to_string(), warm_one_family())]
-    );
-
-    let r = h.edit("b.rock", b1).expect("accepted");
-    assert_eq!(r.tier, UpdateTier::Scope);
-    assert_eq!(h.call_keys("c.rock"), vec![("warm_one".to_string(), None)]);
-    assert_eq!(h.relowered_body_count(), 2, "b's depth and c's pick");
 }
 
 /// A legacy file that starts defining a std-named function does not join the
@@ -942,26 +940,6 @@ fn a_private_member_added_to_a_globbed_module_keeps_the_std_answer() {
     assert_eq!(r.tier, UpdateTier::Scope);
     assert_eq!(h.call_keys("c.rock"), vec![("warm_one".to_string(), None)]);
     assert_eq!(h.relowered_body_count(), 3, "b's two bodies and c's pick");
-}
-
-/// Visibility widened on an item another module names by path: the user's
-/// body failed to lower with the access error and must re-lower clean.
-#[test]
-fn visibility_widened_on_a_path_used_item() {
-    let a0 = "mod a;\n\nfn bump(n: int) -> int {\n    n\n}\n";
-    let c = "mod c;\n\nfn pick() -> int {\n    super::a::bump(1)\n}\n";
-    let mut h = V1Harness::new(vec![
-        v1("a.rock", a0),
-        v1("c.rock", c),
-        v1("d.rock", UNRELATED),
-    ]);
-    h.assert_diagnostic("not accessible");
-
-    let r = h.edit("a.rock", A_BUMP).expect("accepted");
-    assert_eq!(r.tier, UpdateTier::Scope);
-    h.assert_no_diagnostics();
-    assert_eq!(h.call_keys("c.rock"), vec![(key("a::bump"), None)]);
-    assert_eq!(h.relowered_body_count(), 2, "a's bump and c's pick");
 }
 
 /// A visibility-only edit to one member of an overload family invalidates the
@@ -1090,24 +1068,6 @@ fn a_use_added_makes_an_unresolved_name_resolve() {
     assert_eq!(r.tier, UpdateTier::Scope);
     h.assert_no_diagnostics();
     assert_eq!(h.relowered_body_count(), 1, "c's pick alone");
-}
-
-/// A module header renamed away and back: the path user recovers.
-#[test]
-fn a_module_header_renamed_back_restores_the_path() {
-    let b0 = "mod b;\n\npub fn depth() -> int {\n    1\n}\n";
-    let b1 = "mod bee;\n\npub fn depth() -> int {\n    1\n}\n";
-    let c = "mod c;\n\nfn pick() -> int {\n    super::b::depth()\n}\n";
-    let mut h = V1Harness::new(vec![
-        v1("b.rock", b0),
-        v1("c.rock", c),
-        v1("d.rock", UNRELATED),
-    ]);
-    h.edit("b.rock", b1).expect("accepted");
-    let r = h.edit("b.rock", b0).expect("accepted");
-    assert_eq!(r.tier, UpdateTier::Scope);
-    h.assert_no_diagnostics();
-    assert_eq!(h.call_keys("c.rock"), vec![(key("b::depth"), None)]);
 }
 
 /// Two fragments of one logical module: a definition renamed in one moves

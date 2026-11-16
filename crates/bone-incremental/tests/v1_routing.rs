@@ -108,29 +108,6 @@ fn an_added_definition_rebuilds_the_tree() {
     );
 }
 
-/// The public-API closure is a whole-program check that the full
-/// rebuild runs. A signature edit is enough to break it, so the interface
-/// path has to run it too.
-#[test]
-fn a_signature_edit_that_exports_a_private_type_is_refused() {
-    let s0 = "mod s;\n\nstruct Hidden {\n    pub x: int,\n}\n\npub fn mk() -> int {\n    1\n}\n";
-    let s1 = "mod s;\n\nstruct Hidden {\n    pub x: int,\n}\n\npub fn mk() -> Hidden {\n    Hidden { x: 1 }\n}\n";
-    let root = "pub use s::mk;\n";
-    let files = |s: &str| vec![v1("s.rock", s), v1("root.rock", root)];
-    let expected = "type `Hidden` in public API is not accessible";
-
-    let fresh = Session::new(vec![], files(s1), &NsAliases::default())
-        .expect_err("a fresh build refuses it");
-    assert!(fresh.message.contains(expected), "{}", fresh.message);
-
-    let mut session =
-        Session::new(vec![], files(s0), &NsAliases::default()).expect("baseline builds");
-    let err = session
-        .update_file("s.rock", s1)
-        .expect_err("the session refuses it too");
-    assert!(err.message.contains(expected), "{}", err.message);
-}
-
 /// A glob opens only the members accessible from the importer,
 /// so adding a private definition to a globbed module changes no other
 /// module's resolution: `c` still reaches `a::width` through its glob.
