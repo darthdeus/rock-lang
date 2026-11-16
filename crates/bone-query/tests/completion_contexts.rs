@@ -2650,3 +2650,46 @@ fn reach_insert_does_not_duplicate_an_existing_member_tail() {
     let it = item(src, 6, 16, "PANEL.rect() -> UiRect");
     assert_insert(&it, "PANEL");
 }
+
+#[test]
+fn member_receiver_resolves_in_broken_statements() {
+    // Each receiver sits where inference cannot type it: an argument of an
+    // unknown call, or a binding whose own initializer fails. Completion must
+    // still offer `Corpse`'s fields from the binding's type.
+    let decls = "struct Corpse { items: int, name: string }\n\
+                 enum Slot { Full(Corpse), Empty }\n\
+                 global LAST: Corpse = Corpse { items: 0, name: \"\" }\n";
+    let cases: &[(&str, &str)] = &[
+        ("param", "fn r(c: Corpse) {\n  foo(c.na<|>\n}\n"),
+        (
+            "struct-literal let",
+            "fn r() {\n  let c = Corpse { items: 1, name: \"\" }\n  foo(c.na<|>\n}\n",
+        ),
+        (
+            "for var",
+            "fn r(cs: [Corpse]) {\n  for c in cs {\n    foo(c.na<|>\n  }\n}\n",
+        ),
+        (
+            "match binding",
+            "fn r(s: Slot) {\n  match s {\n    Slot::Full(c) => { foo(c.na<|> }\n    _ => {}\n  }\n}\n",
+        ),
+        (
+            "annotated let, failed init",
+            "fn r() {\n  let c: Corpse = nope()\n  foo(c.na<|>\n}\n",
+        ),
+        (
+            "annotated let, failed init, plain statement",
+            "fn r() {\n  let c: Corpse = nope()\n  let n = c.na<|>\n}\n",
+        ),
+        ("global", "fn r() {\n  foo(LAST.na<|>\n}\n"),
+    ];
+    for (what, body) in cases {
+        let marked = format!("{decls}{body}");
+        let at = marked.find("<|>").unwrap();
+        let src = marked.replacen("<|>", "", 1);
+        let line = src[..at].matches('\n').count() as u32;
+        let col = (at - src[..at].rfind('\n').map_or(0, |i| i + 1)) as u32;
+        let l = labels(&src, line, col);
+        assert!(l.iter().any(|x| x == "name: string"), "{what}: {l:?}");
+    }
+}
