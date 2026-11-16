@@ -115,18 +115,6 @@ fn print_root_program(runtime: &[&str], defs: &str, root: &str) -> String {
     format!("{}\n{defs}\nconsole.log({root}());", runtime.concat())
 }
 
-/// Define a local `eval_int` that runs `<root>()` under the listed
-/// `skull_codegen_js` runtime pieces, in order. Each file names only the pieces
-/// it needs, so a missing dependency between them still fails.
-#[macro_export]
-macro_rules! runtime_eval {
-    (eval_int: $($piece:ident),+ $(,)?) => {
-        fn eval_int(defs: &str, root: &str, expect: i64) {
-            $crate::common::eval_int(&[$(skull_codegen_js::$piece),+], defs, root, expect);
-        }
-    };
-}
-
 /// Evaluate `<root>()` under node and check it prints the integer `expect`.
 pub fn eval_int(runtime: &[&str], defs: &str, root: &str, expect: i64) {
     if !require_node() {

@@ -140,7 +140,7 @@ fn table_entries_are_distinct_keys() {
 }
 
 // Every JS table key must have a matching declaration in the stdlib or the
-// real test-local put/try_call fixtures. A source rename or arity drift fails here.
+// corpus put/try_call declarations. A source rename or arity drift fails here.
 #[test]
 fn every_js_entry_is_backed_by_a_declared_intrinsic() {
     let modules: Vec<skull_parser::Ast> = rock_stdlib::stdlib_files()
@@ -153,14 +153,14 @@ fn every_js_entry_is_backed_by_a_declared_intrinsic() {
     let mut modules = modules;
     modules.push(
         skull_parser::parse_module_clean(
-            include_str!("fixtures/js_put.rock"),
+            include_str!("../../../tests/library/js_put.rock"),
             ustr::Ustr::from("<test>"),
         )
         .expect("parse"),
     );
     modules.push(
         skull_parser::parse_module_clean(
-            include_str!("fixtures/js_try_call.rock"),
+            include_str!("../../../tests/library/js_try_call.rock"),
             ustr::Ustr::from("<try-call>"),
         )
         .expect("parse try_call fixture"),

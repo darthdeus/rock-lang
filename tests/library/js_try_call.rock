@@ -3,8 +3,7 @@
 // wraps `__rock_call(f)` in try/catch. Critically this pins the checked-index
 // side-effect rule: an UNUSED `xs[oob]` read must still be emitted (its bounds
 // check throws), so `try_call(|| { let _ = xs[oob] })` reports the error luajit
-// raises -- dropping the dead read as pure would silently diverge. Pins
-// crates/skull-codegen-js/tests/try_call.rs.
+// raises -- dropping the dead read as pure would silently diverge.
 
 @intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
     local ok, err = pcall(f)
