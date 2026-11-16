@@ -15,7 +15,7 @@
 use crate::common::ws_of_files;
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::support::graph_snapshot::{canonical, CanonicalGraph};
+use crate::support::graph_snapshot::{CanonicalGraph, canonical};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::Span;
 use skull::instance_graph::{
