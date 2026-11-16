@@ -4186,7 +4186,14 @@ fn lint_name_items(typed: &str) -> Vec<CompletionItem> {
         .map(|(i, name)| CompletionItem {
             label: name.to_string(),
             kind: Some(CompletionItemKind::ENUM_MEMBER),
-            sort_text: Some(format!("{i:03}")),
+            // Catalog order, which lists the everyday lints first.
+            sort_text: Some(
+                RankKey {
+                    fine: i as u16,
+                    ..RankKey::default()
+                }
+                .encode(name),
+            ),
             ..Default::default()
         })
         .collect()
@@ -4201,7 +4208,7 @@ fn directive_verb_items(typed: &str) -> Vec<CompletionItem> {
             label: verb.to_string(),
             kind: Some(CompletionItemKind::KEYWORD),
             insert_text: Some(format!("{verb}(")),
-            sort_text: Some("000".to_string()),
+            sort_text: Some(RankKey::default().encode(verb)),
             ..Default::default()
         })
         .collect()

@@ -604,8 +604,6 @@ fn comments_strings_and_numbers_offer_nothing() {
 
 #[test]
 fn magic_comment_completes_directives_only() {
-    // Magic-comment items carry their own sort texts, so these responses skip
-    // the RankKey invariants.
     let cases: &[(&str, &str, &[&str])] = &[
         (
             "directive verb",
@@ -629,10 +627,7 @@ fn magic_comment_completes_directives_only() {
         ),
     ];
     for (case, src, patterns) in cases {
-        let (src, pos) = cursor(src);
-        let mut bone = BoneWorkspace::new();
-        bone.update(PATH, src);
-        assert_labels(case, &labels_of(&bone.completion(PATH, pos)), patterns);
+        assert_labels(case, &labels(src), patterns);
     }
 }
 
