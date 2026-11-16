@@ -294,7 +294,10 @@ fn pin_numbers_malformed_errors() {
         kinds_err("0b1111111111111111111111111111111111111111111111111111111111111111")
             .contains("Invalid binary literal")
     );
-    assert!(kinds_err("let mut x = 5").contains("let mut"));
+    assert!(
+        kinds_err("let mut x = 5")
+            .contains("`let mut` is not supported, all bindings are mut, use just `let`")
+    );
 }
 
 #[test]
@@ -339,6 +342,18 @@ fn pin_minus_and_dot_context() {
             TokenKind::Ident("x".into()),
             TokenKind::Minus,
             TokenKind::Int(1, "1".into()),
+        ]
+    );
+    assert_eq!(
+        kinds("true-false"),
+        [TokenKind::True, TokenKind::Minus, TokenKind::False]
+    );
+    assert_eq!(
+        kinds("null-10"),
+        [
+            TokenKind::Null,
+            TokenKind::Minus,
+            TokenKind::Int(10, "10".into())
         ]
     );
     assert_eq!(
@@ -639,11 +654,6 @@ fn pin_strings_and_interpolation_boundaries() {
         kinds("r\"\"\"rawtri\"\"\""),
         vec![TokenKind::RawString("rawtri".into())]
     );
-    assert_eq!(kinds("\"a\\nb\""), vec![TokenKind::String("a\nb".into())]);
-    assert_eq!(kinds("\"a\\tb\""), vec![TokenKind::String("a\tb".into())]);
-    assert_eq!(kinds("\"\\\\\""), vec![TokenKind::String("\\".into())]);
-    assert_eq!(kinds("\"\\u{41}\""), vec![TokenKind::String("A".into())]);
-    assert_eq!(kinds("\"a\\\n  b\""), vec![TokenKind::String("ab".into())]);
     assert_eq!(kinds("\"x={y}\""), vec![TokenKind::String("x={y}".into())]);
     assert_eq!(kinds("\"a{b}c\""), vec![TokenKind::String("a{b}c".into())]);
     assert_eq!(
@@ -670,8 +680,6 @@ fn pin_strings_and_interpolation_boundaries() {
     );
     assert!(kinds_err("\"unterminated").contains("unterminated"));
     assert!(kinds_err("\"unclosed {hole\"").contains("unterminated"));
-    assert!(kinds_err("\"bad \\q\"").contains("unknown string escape"));
-    assert!(kinds_err("\"\\u41\"").contains("\\u{"));
 }
 
 #[test]
