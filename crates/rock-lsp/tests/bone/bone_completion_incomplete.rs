@@ -2,7 +2,7 @@
 //! result `isIncomplete = true`. Bone's completion does prefix-sensitive
 //! FILTERING and match-quality RANKING, so a popup-open (often empty-prefix)
 //! response is not a superset the client can correctly re-filter -- the client
-//! must re-request per keystroke. Returning a plain `CompletionResponse::Array`
+//! must re-request per keystroke. Returning a complete list
 //! (isIncomplete = false) made nvim-cmp cache the empty-prefix list and
 //! client-filter it, freezing the empty-prefix order (`tile_center(pg|` showed
 //! dist-1 `prop.image_dims()` above dist-2 `player.movable.grid`). Driven
@@ -43,13 +43,8 @@ fn bone_completion_is_marked_incomplete() {
     let resp = do_completion_workspace(&mut ws, &params)
         .unwrap()
         .expect("completion response");
-    match resp {
-        CompletionResponse::List(list) => assert!(
-            list.is_incomplete,
-            "bone completion list must be incomplete so the client re-requests per keystroke"
-        ),
-        CompletionResponse::Array(_) => {
-            panic!("bone completion must return a List (isIncomplete=true), not a plain Array")
-        }
-    }
+    assert!(
+        resp.is_incomplete,
+        "bone completion list must be incomplete so the client re-requests per keystroke"
+    );
 }

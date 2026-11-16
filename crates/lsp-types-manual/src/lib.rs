@@ -142,9 +142,6 @@ pub use hover::*;
 mod inlay_hint;
 pub use inlay_hint::*;
 
-mod references;
-pub use references::*;
-
 mod rename;
 pub use rename::*;
 
@@ -156,9 +153,6 @@ pub use signature_help::*;
 
 mod window;
 pub use window::*;
-
-mod workspace_symbols;
-pub use workspace_symbols::*;
 
 /* ----------------- Auxiliary types ----------------- */
 
@@ -396,6 +390,36 @@ impl_lsp_struct!(
     optional {}
 );
 
+/// Params of a request about a whole text document.
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub struct TextDocumentParams {
+    pub text_document: TextDocumentIdentifier,
+}
+
+impl_lsp_struct!(
+    TextDocumentParams,
+    required {
+        text_document: TextDocumentIdentifier = "textDocument"
+    },
+    optional {}
+);
+
+/// Params of a request about a range of a text document.
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub struct TextDocumentRangeParams {
+    pub text_document: TextDocumentIdentifier,
+    pub range: Range,
+}
+
+impl_lsp_struct!(
+    TextDocumentRangeParams,
+    required {
+        text_document: TextDocumentIdentifier = "textDocument",
+        range: Range = "range",
+    },
+    optional {}
+);
+
 /// A parameter literal used in requests to pass a text document and a position inside that document.
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct TextDocumentPositionParams {
@@ -515,27 +539,6 @@ impl_lsp_struct!(
     },
     optional {}
 );
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct GotoDefinitionParams {
-    pub text_document_position_params: TextDocumentPositionParams,
-}
-
-impl_lsp_struct!(
-    GotoDefinitionParams,
-    flatten {
-        text_document_position_params: TextDocumentPositionParams,
-    }
-);
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum GotoDefinitionResponse {
-    Array(Vec<Location>),
-}
-
-impl_untagged_enum!(GotoDefinitionResponse {
-    Array(Vec<Location>),
-});
 
 #[derive(Debug, PartialEq, Clone, Default)]
 pub struct ExecuteCommandParams {

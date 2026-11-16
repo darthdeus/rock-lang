@@ -7,12 +7,12 @@ fn workspace_names(ws: &mut rock_lsp::LspWorkspace, query: &str) -> Vec<String> 
     let params = WorkspaceSymbolParams {
         query: query.to_string(),
     };
-    match do_workspace_symbols_workspace(ws, &params).unwrap() {
-        Some(WorkspaceSymbolResponse::Flat(symbols)) => {
-            symbols.into_iter().map(|symbol| symbol.name).collect()
-        }
-        other => panic!("expected flat workspace symbols, got {other:?}"),
-    }
+    do_workspace_symbols_workspace(ws, &params)
+        .unwrap()
+        .expect("workspace symbols")
+        .into_iter()
+        .map(|symbol| symbol.name)
+        .collect()
 }
 
 fn package_workspace() -> (tempfile::TempDir, rock_lsp::LspWorkspace) {

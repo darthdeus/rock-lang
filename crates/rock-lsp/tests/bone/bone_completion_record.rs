@@ -30,13 +30,10 @@ fn completion_items(ws: &mut LspWorkspace, path: &std::path::Path) -> Vec<Comple
         },
         context: None,
     };
-    match do_completion_workspace(ws, &params)
+    do_completion_workspace(ws, &params)
         .unwrap()
         .expect("completion response")
-    {
-        CompletionResponse::List(list) => list.items,
-        CompletionResponse::Array(items) => items,
-    }
+        .items
 }
 
 #[test]

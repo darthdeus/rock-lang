@@ -17,14 +17,12 @@ use lsp_server::{Connection, ExtractError, Message, Request, RequestId, Response
 use lsp_types::notification::Notification;
 use lsp_types::request::{
     CodeActionRequest, Completion, DocumentHighlightRequest, DocumentSymbolRequest, GotoDefinition,
-    GotoTypeDefinition, GotoTypeDefinitionParams, HoverRequest, InlayHintRequest,
-    PrepareRenameRequest, References, Rename, SemanticTokensFullDeltaRequest,
-    SemanticTokensFullRequest, SemanticTokensRangeRequest, SignatureHelpRequest,
-    WorkspaceSymbolRequest,
+    GotoTypeDefinition, HoverRequest, InlayHintRequest, PrepareRenameRequest, References, Rename,
+    SemanticTokensFullDeltaRequest, SemanticTokensFullRequest, SemanticTokensRangeRequest,
+    SignatureHelpRequest, WorkspaceSymbolRequest,
 };
 use lsp_types::{
-    CompletionResponse, GotoDefinitionResponse, Hover, InlayHint, SignatureHelp,
-    TextDocumentPositionParams, Uri,
+    CompletionList, Hover, InlayHint, Location, SignatureHelp, TextDocumentPositionParams, Uri,
 };
 
 #[cfg(not(target_family = "wasm"))]

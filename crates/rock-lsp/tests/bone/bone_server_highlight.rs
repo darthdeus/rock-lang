@@ -24,13 +24,11 @@ fn highlight_at(
     line: u32,
     ch: u32,
 ) -> Vec<DocumentHighlight> {
-    let params = DocumentHighlightParams {
-        text_document_position_params: TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier {
-                uri: Uri::from_file_path(path.to_str().unwrap()).unwrap(),
-            },
-            position: Position::new(line, ch),
+    let params = TextDocumentPositionParams {
+        text_document: TextDocumentIdentifier {
+            uri: Uri::from_file_path(path.to_str().unwrap()).unwrap(),
         },
+        position: Position::new(line, ch),
     };
     do_document_highlight_workspace(ws, &params)
         .unwrap()

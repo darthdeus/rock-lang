@@ -10,40 +10,40 @@ fn get_file_path_from_params(params: &TextDocumentPositionParams) -> Result<Stri
 /// Workspace-aware go to definition
 pub(crate) fn go_to_definition_workspace(
     workspace: &mut LspWorkspace,
-    params: &GotoDefinitionParams,
-) -> Result<Option<GotoDefinitionResponse>> {
+    params: &TextDocumentPositionParams,
+) -> Result<Option<Vec<Location>>> {
     crate::scope!("go_to_definition_workspace");
-    let file_path = get_file_path_from_params(&params.text_document_position_params)?;
-    let pos = params.text_document_position_params.position;
+    let file_path = get_file_path_from_params(params)?;
+    let pos = params.position;
     Ok(workspace
         .bone
         .definition(&file_path, pos)
-        .map(|loc| GotoDefinitionResponse::Array(vec![loc])))
+        .map(|loc| vec![loc]))
 }
 
 /// Workspace-aware go to type definition (LSP `textDocument/typeDefinition`):
 /// jump to the declaration of the *type* of the value under the cursor.
 pub(crate) fn go_to_type_definition_workspace(
     workspace: &mut LspWorkspace,
-    params: &GotoTypeDefinitionParams,
-) -> Result<Option<GotoDefinitionResponse>> {
+    params: &TextDocumentPositionParams,
+) -> Result<Option<Vec<Location>>> {
     crate::scope!("go_to_type_definition_workspace");
-    let file_path = get_file_path_from_params(&params.text_document_position_params)?;
-    let pos = params.text_document_position_params.position;
+    let file_path = get_file_path_from_params(params)?;
+    let pos = params.position;
     Ok(workspace
         .bone
         .type_definition(&file_path, pos)
-        .map(|loc| GotoDefinitionResponse::Array(vec![loc])))
+        .map(|loc| vec![loc]))
 }
 
 /// Workspace-aware find references
 pub(crate) fn find_references_workspace(
     workspace: &mut LspWorkspace,
-    params: &ReferenceParams,
+    params: &TextDocumentPositionParams,
 ) -> Result<Option<Vec<Location>>> {
     crate::scope!("find_references_workspace");
-    let file_path = get_file_path_from_params(&params.text_document_position)?;
-    let pos = params.text_document_position.position;
+    let file_path = get_file_path_from_params(params)?;
+    let pos = params.position;
     let locs = workspace.bone.references(&file_path, pos);
     Ok(if locs.is_empty() { None } else { Some(locs) })
 }
@@ -53,15 +53,11 @@ pub(crate) fn find_references_workspace(
 /// filtered to this file).
 pub fn do_document_highlight_workspace(
     workspace: &mut LspWorkspace,
-    params: &DocumentHighlightParams,
+    params: &TextDocumentPositionParams,
 ) -> Result<Option<Vec<DocumentHighlight>>> {
     crate::scope!("do_document_highlight_workspace");
-    let file_path = params
-        .text_document_position_params
-        .text_document
-        .uri
-        .to_file_path()?;
-    let pos = params.text_document_position_params.position;
+    let file_path = get_file_path_from_params(params)?;
+    let pos = params.position;
     let hl = workspace.bone.document_highlight(&file_path, pos);
     Ok((!hl.is_empty()).then_some(hl))
 }
@@ -69,34 +65,33 @@ pub fn do_document_highlight_workspace(
 /// Workspace-aware hover
 pub(crate) fn do_hover_workspace(
     workspace: &mut LspWorkspace,
-    params: &HoverParams,
+    params: &TextDocumentPositionParams,
 ) -> Result<Option<Hover>> {
     crate::scope!("do_hover_workspace");
-    let file_path = get_file_path_from_params(&params.text_document_position_params)?;
-    let pos = params.text_document_position_params.position;
+    let file_path = get_file_path_from_params(params)?;
+    let pos = params.position;
     Ok(workspace.bone.hover(&file_path, pos))
 }
 
 /// Workspace-aware signature help
 pub(crate) fn do_signature_help_workspace(
     workspace: &mut LspWorkspace,
-    params: &SignatureHelpParams,
+    params: &TextDocumentPositionParams,
 ) -> Result<Option<SignatureHelp>> {
     crate::scope!("do_signature_help_workspace");
-    let file_path = get_file_path_from_params(&params.text_document_position_params)?;
-    let pos = params.text_document_position_params.position;
+    let file_path = get_file_path_from_params(params)?;
+    let pos = params.position;
     Ok(workspace.bone.signature_help(&file_path, pos))
 }
 
 /// Workspace-aware document symbols.
 pub fn do_document_symbols_workspace(
     workspace: &mut LspWorkspace,
-    params: &DocumentSymbolParams,
-) -> Result<Option<DocumentSymbolResponse>> {
+    params: &TextDocumentParams,
+) -> Result<Option<Vec<DocumentSymbol>>> {
     crate::scope!("do_document_symbols_workspace");
     let file_path = params.text_document.uri.to_file_path()?;
-    let symbols = workspace.bone.document_symbols(&file_path);
-    Ok(Some(DocumentSymbolResponse::Nested(symbols)))
+    Ok(Some(workspace.bone.document_symbols(&file_path)))
 }
 
 /// Workspace-aware workspace symbols (project-wide, matched against the query).
@@ -104,16 +99,15 @@ pub fn do_document_symbols_workspace(
 pub fn do_workspace_symbols_workspace(
     workspace: &mut LspWorkspace,
     params: &WorkspaceSymbolParams,
-) -> Result<Option<WorkspaceSymbolResponse>> {
+) -> Result<Option<Vec<SymbolInformation>>> {
     crate::scope!("do_workspace_symbols_workspace");
-    let symbols = workspace.bone.workspace_symbols(&params.query);
-    Ok(Some(WorkspaceSymbolResponse::Flat(symbols)))
+    Ok(Some(workspace.bone.workspace_symbols(&params.query)))
 }
 
 /// Workspace-aware inlay hints
 pub(crate) fn do_inlay_hints_workspace(
     workspace: &mut LspWorkspace,
-    params: &InlayHintParams,
+    params: &TextDocumentRangeParams,
 ) -> Result<Option<Vec<InlayHint>>> {
     crate::scope!("do_inlay_hints_workspace");
     let _span = tracing::debug_span!("do_inlay_hints_workspace").entered();
@@ -125,7 +119,7 @@ pub(crate) fn do_inlay_hints_workspace(
 pub fn do_completion_workspace(
     workspace: &mut LspWorkspace,
     params: &CompletionParams,
-) -> Result<Option<CompletionResponse>> {
+) -> Result<Option<CompletionList>> {
     crate::scope!("do_completion_workspace");
     let _span = tracing::debug_span!("do_completion_workspace").entered();
     let file_path = get_file_path_from_params(&params.text_document_position)?;
@@ -152,23 +146,20 @@ pub fn do_completion_workspace(
     // because cmp client-filters the cached list instead of re-asking. Mark
     // the list incomplete so the client re-requests per keystroke and the
     // server re-scores against the actual typed prefix.
-    Ok(Some(CompletionResponse::List(CompletionList {
+    Ok(Some(CompletionList {
         is_incomplete: true,
         items,
-    })))
+    }))
 }
 
 /// Workspace-aware prepare rename
 pub(crate) fn prepare_rename_workspace(
     workspace: &mut LspWorkspace,
     params: &TextDocumentPositionParams,
-) -> Result<Option<PrepareRenameResponse>> {
+) -> Result<Option<Range>> {
     let file_path = get_file_path_from_params(params)?;
     // A refusal becomes the request's error, which editors show as the reason.
-    Ok(workspace
-        .bone
-        .prepare_rename(&file_path, params.position)?
-        .map(PrepareRenameResponse::Range))
+    Ok(workspace.bone.prepare_rename(&file_path, params.position)?)
 }
 
 /// Workspace-aware rename

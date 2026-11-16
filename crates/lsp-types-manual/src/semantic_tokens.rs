@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use serde::Deserialize;
 
-use crate::{Range, TextDocumentIdentifier};
+use crate::TextDocumentIdentifier;
 /// A set of predefined token types. This set is not fixed
 /// and clients can specify additional token types via the
 /// corresponding client capabilities.
@@ -349,20 +349,6 @@ impl_lsp_struct!(SemanticTokensDelta,
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
-pub struct SemanticTokensParams {
-    /// The text document.
-    pub text_document: TextDocumentIdentifier,
-}
-
-impl_lsp_struct!(
-    SemanticTokensParams,
-    required {
-        text_document: TextDocumentIdentifier = "textDocument"
-    },
-    optional {}
-);
-
-#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct SemanticTokensDeltaParams {
     /// The text document.
     pub text_document: TextDocumentIdentifier,
@@ -376,24 +362,6 @@ impl_lsp_struct!(
     required {
         text_document: TextDocumentIdentifier = "textDocument",
         previous_result_id: String = "previousResultId",
-    },
-    optional {}
-);
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct SemanticTokensRangeParams {
-    /// The text document.
-    pub text_document: TextDocumentIdentifier,
-
-    /// The range the semantic tokens are requested for.
-    pub range: Range,
-}
-
-impl_lsp_struct!(
-    SemanticTokensRangeParams,
-    required {
-        text_document: TextDocumentIdentifier = "textDocument",
-        range: Range = "range",
     },
     optional {}
 );

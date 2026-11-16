@@ -1,16 +1,4 @@
-use crate::{Documentation, TextDocumentPositionParams};
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct SignatureHelpParams {
-    pub text_document_position_params: TextDocumentPositionParams,
-}
-
-impl_lsp_struct!(
-    SignatureHelpParams,
-    flatten {
-        text_document_position_params: TextDocumentPositionParams,
-    }
-);
+use crate::Documentation;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct SignatureHelp {

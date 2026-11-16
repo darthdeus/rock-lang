@@ -1,27 +1,4 @@
-use crate::{
-    Command, LSPAny, Location, MarkupContent, Position, Range, TextDocumentIdentifier, TextEdit,
-};
-
-/// A parameter literal used in inlay hint requests.
-///
-/// @since 3.17.0
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct InlayHintParams {
-    /// The text document.
-    pub text_document: TextDocumentIdentifier,
-
-    /// The visible document range for which inlay hints should be computed.
-    pub range: Range,
-}
-
-impl_lsp_struct!(
-    InlayHintParams,
-    required {
-        text_document: TextDocumentIdentifier = "textDocument",
-        range: Range = "range",
-    },
-    optional {}
-);
+use crate::{Command, LSPAny, Location, MarkupContent, Position, TextEdit};
 
 /// Inlay hint information.
 ///

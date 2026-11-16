@@ -1,7 +1,7 @@
 use lsp_types::{
     SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensDelta,
     SemanticTokensDeltaParams, SemanticTokensFullDeltaResult, SemanticTokensLegend,
-    SemanticTokensParams, SemanticTokensRangeParams, Uri,
+    TextDocumentParams, TextDocumentRangeParams, Uri,
 };
 
 use crate::LspWorkspace;
@@ -146,7 +146,7 @@ pub fn semantic_tokens_delta_edits(
 /// advertised legend.
 pub(crate) fn range_semantic_tokens(
     workspace: &mut LspWorkspace,
-    params: &SemanticTokensRangeParams,
+    params: &TextDocumentRangeParams,
 ) -> anyhow::Result<Option<SemanticTokens>> {
     let file_path = params.text_document.uri.to_file_path()?;
     let mut tokens = workspace
@@ -174,7 +174,7 @@ pub fn compute_semantic_tokens_workspace(
 /// highlighting does not disappear while an edit is being recompiled.
 pub(crate) fn full_semantic_tokens(
     workspace: &mut LspWorkspace,
-    params: &SemanticTokensParams,
+    params: &TextDocumentParams,
 ) -> anyhow::Result<Option<SemanticTokens>> {
     let uri = params.text_document.uri.to_string();
     let version = workspace.get_document_version(&uri);

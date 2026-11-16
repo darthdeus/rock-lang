@@ -18,12 +18,8 @@ fn tokens(src: &str) -> Vec<SemanticToken> {
     std::fs::write(&path, src).unwrap();
     let mut ws = LspWorkspace::new();
     ws.bone.update(path.to_str().unwrap(), src.to_string());
-    let params = SemanticTokensParams {
-        text_document: TextDocumentIdentifier {
-            uri: Uri::from_file_path(path.to_str().unwrap()).unwrap(),
-        },
-    };
-    compute_semantic_tokens_workspace(&mut ws, &params.text_document.uri)
+    let uri = Uri::from_file_path(path.to_str().unwrap()).unwrap();
+    compute_semantic_tokens_workspace(&mut ws, &uri)
         .unwrap()
         .data
 }

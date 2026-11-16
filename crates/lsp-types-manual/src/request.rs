@@ -23,7 +23,7 @@ pub enum Completion {}
 
 impl Request for Completion {
     type Params = CompletionParams;
-    type Result = Option<CompletionResponse>;
+    type Result = Option<CompletionList>;
     const METHOD: &'static str = "textDocument/completion";
 }
 
@@ -33,7 +33,7 @@ impl Request for Completion {
 pub enum HoverRequest {}
 
 impl Request for HoverRequest {
-    type Params = HoverParams;
+    type Params = TextDocumentPositionParams;
     type Result = Option<Hover>;
     const METHOD: &'static str = "textDocument/hover";
 }
@@ -44,7 +44,7 @@ impl Request for HoverRequest {
 pub enum SignatureHelpRequest {}
 
 impl Request for SignatureHelpRequest {
-    type Params = SignatureHelpParams;
+    type Params = TextDocumentPositionParams;
     type Result = Option<SignatureHelp>;
     const METHOD: &'static str = "textDocument/signatureHelp";
 }
@@ -55,8 +55,8 @@ impl Request for SignatureHelpRequest {
 pub enum GotoDefinition {}
 
 impl Request for GotoDefinition {
-    type Params = GotoDefinitionParams;
-    type Result = Option<GotoDefinitionResponse>;
+    type Params = TextDocumentPositionParams;
+    type Result = Option<Vec<Location>>;
     const METHOD: &'static str = "textDocument/definition";
 }
 
@@ -66,7 +66,7 @@ impl Request for GotoDefinition {
 pub enum References {}
 
 impl Request for References {
-    type Params = ReferenceParams;
+    type Params = TextDocumentPositionParams;
     type Result = Option<Vec<Location>>;
     const METHOD: &'static str = "textDocument/references";
 }
@@ -77,11 +77,9 @@ impl Request for References {
 #[derive(Debug)]
 pub enum GotoTypeDefinition {}
 
-pub type GotoTypeDefinitionParams = GotoDefinitionParams;
-
 impl Request for GotoTypeDefinition {
-    type Params = GotoTypeDefinitionParams;
-    type Result = Option<GotoDefinitionResponse>;
+    type Params = TextDocumentPositionParams;
+    type Result = Option<Vec<Location>>;
     const METHOD: &'static str = "textDocument/typeDefinition";
 }
 
@@ -96,7 +94,7 @@ impl Request for GotoTypeDefinition {
 pub enum DocumentHighlightRequest {}
 
 impl Request for DocumentHighlightRequest {
-    type Params = DocumentHighlightParams;
+    type Params = TextDocumentPositionParams;
     type Result = Option<Vec<DocumentHighlight>>;
     const METHOD: &'static str = "textDocument/documentHighlight";
 }
@@ -107,8 +105,8 @@ impl Request for DocumentHighlightRequest {
 pub enum DocumentSymbolRequest {}
 
 impl Request for DocumentSymbolRequest {
-    type Params = DocumentSymbolParams;
-    type Result = Option<DocumentSymbolResponse>;
+    type Params = TextDocumentParams;
+    type Result = Option<Vec<DocumentSymbol>>;
     const METHOD: &'static str = "textDocument/documentSymbol";
 }
 
@@ -119,7 +117,7 @@ pub enum WorkspaceSymbolRequest {}
 
 impl Request for WorkspaceSymbolRequest {
     type Params = WorkspaceSymbolParams;
-    type Result = Option<WorkspaceSymbolResponse>;
+    type Result = Option<Vec<SymbolInformation>>;
     const METHOD: &'static str = "workspace/symbol";
 }
 
@@ -152,14 +150,14 @@ pub enum PrepareRenameRequest {}
 
 impl Request for PrepareRenameRequest {
     type Params = TextDocumentPositionParams;
-    type Result = Option<PrepareRenameResponse>;
+    type Result = Option<Range>;
     const METHOD: &'static str = "textDocument/prepareRename";
 }
 
 pub enum SemanticTokensFullRequest {}
 
 impl Request for SemanticTokensFullRequest {
-    type Params = SemanticTokensParams;
+    type Params = TextDocumentParams;
     type Result = Option<SemanticTokens>;
     const METHOD: &'static str = "textDocument/semanticTokens/full";
 }
@@ -175,7 +173,7 @@ impl Request for SemanticTokensFullDeltaRequest {
 pub enum SemanticTokensRangeRequest {}
 
 impl Request for SemanticTokensRangeRequest {
-    type Params = SemanticTokensRangeParams;
+    type Params = TextDocumentRangeParams;
     type Result = Option<SemanticTokens>;
     const METHOD: &'static str = "textDocument/semanticTokens/range";
 }
@@ -185,7 +183,7 @@ impl Request for SemanticTokensRangeRequest {
 pub enum InlayHintRequest {}
 
 impl Request for InlayHintRequest {
-    type Params = InlayHintParams;
+    type Params = TextDocumentRangeParams;
     type Result = Option<Vec<InlayHint>>;
     const METHOD: &'static str = "textDocument/inlayHint";
 }

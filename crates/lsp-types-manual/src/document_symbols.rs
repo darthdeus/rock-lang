@@ -1,27 +1,4 @@
-use crate::{Location, Range, SymbolKind, SymbolTag, TextDocumentIdentifier};
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum DocumentSymbolResponse {
-    Nested(Vec<DocumentSymbol>),
-}
-
-impl_untagged_enum!(DocumentSymbolResponse {
-    Nested(Vec<DocumentSymbol>),
-});
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct DocumentSymbolParams {
-    /// The text document.
-    pub text_document: TextDocumentIdentifier,
-}
-
-impl_lsp_struct!(
-    DocumentSymbolParams,
-    required {
-        text_document: TextDocumentIdentifier = "textDocument"
-    },
-    optional {}
-);
+use crate::{Location, Range, SymbolKind, SymbolTag};
 
 /// Represents programming constructs like variables, classes, interfaces etc.
 /// that appear in a document. Document symbols can be hierarchical and they have two ranges:
@@ -79,4 +56,19 @@ impl_lsp_struct!(SymbolInformation,
         deprecated: bool = "deprecated",
         container_name: String = "containerName",
     }
+);
+
+/// The parameters of a Workspace Symbol Request.
+#[derive(Debug, Eq, PartialEq, Clone, Default)]
+pub struct WorkspaceSymbolParams {
+    /// A non-empty query string
+    pub query: String,
+}
+
+impl_lsp_struct!(
+    WorkspaceSymbolParams,
+    required {
+        query: String = "query"
+    },
+    optional {}
 );

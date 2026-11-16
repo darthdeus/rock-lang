@@ -47,29 +47,6 @@ impl CompletionItemKind {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum CompletionResponse {
-    Array(Vec<CompletionItem>),
-    List(CompletionList),
-}
-
-impl_untagged_enum!(CompletionResponse {
-    Array(Vec<CompletionItem>),
-    List(CompletionList),
-});
-
-impl From<Vec<CompletionItem>> for CompletionResponse {
-    fn from(items: Vec<CompletionItem>) -> Self {
-        CompletionResponse::Array(items)
-    }
-}
-
-impl From<CompletionList> for CompletionResponse {
-    fn from(list: CompletionList) -> Self {
-        CompletionResponse::List(list)
-    }
-}
-
-#[derive(Debug, PartialEq, Clone)]
 pub struct CompletionParams {
     pub text_document_position: TextDocumentPositionParams,
     pub context: Option<CompletionContext>,

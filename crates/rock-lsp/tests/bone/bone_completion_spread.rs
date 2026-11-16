@@ -31,13 +31,10 @@ fn labels_at(line: u32, ch: u32) -> Vec<String> {
         context: None,
     };
 
-    let resp = do_completion_workspace(&mut ws, &params)
+    let items = do_completion_workspace(&mut ws, &params)
         .unwrap()
-        .expect("completion response");
-    let items = match resp {
-        CompletionResponse::List(list) => list.items,
-        CompletionResponse::Array(items) => items,
-    };
+        .expect("completion response")
+        .items;
     items.into_iter().map(|i| i.label).collect()
 }
 

@@ -1,16 +1,4 @@
-use crate::{Range, TextDocumentPositionParams};
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct DocumentHighlightParams {
-    pub text_document_position_params: TextDocumentPositionParams,
-}
-
-impl_lsp_struct!(
-    DocumentHighlightParams,
-    flatten {
-        text_document_position_params: TextDocumentPositionParams,
-    }
-);
+use crate::Range;
 
 /// A document highlight is a range inside a text document which deserves
 /// special attention. Usually a document highlight is visualized by changing

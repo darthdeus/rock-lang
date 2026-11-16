@@ -28,8 +28,8 @@ fn spaced_project() -> (tempfile::TempDir, std::path::PathBuf, Uri, LspWorkspace
     (dir, path, uri, ws)
 }
 
-fn symbol_params(uri: Uri) -> DocumentSymbolParams {
-    DocumentSymbolParams {
+fn symbol_params(uri: Uri) -> TextDocumentParams {
+    TextDocumentParams {
         text_document: TextDocumentIdentifier { uri },
     }
 }
@@ -37,22 +37,18 @@ fn symbol_params(uri: Uri) -> DocumentSymbolParams {
 #[test]
 fn encoded_document_uri_resolves_to_the_file() {
     let (_dir, _path, uri, mut ws) = spaced_project();
-    let names: Vec<String> =
-        match do_document_symbols_workspace(&mut ws, &symbol_params(uri.clone())).unwrap() {
-            Some(DocumentSymbolResponse::Nested(syms)) => {
-                syms.into_iter().map(|s| s.name).collect()
-            }
-            other => panic!("expected nested document symbols, got {other:?}"),
-        };
+    let names: Vec<String> = do_document_symbols_workspace(&mut ws, &symbol_params(uri.clone()))
+        .unwrap()
+        .expect("document symbols")
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
     assert!(
         names.iter().any(|n| n == "heal_all"),
         "symbols of the decoded file: {names:?}"
     );
 
-    let params = SemanticTokensParams {
-        text_document: TextDocumentIdentifier { uri },
-    };
-    let t = compute_semantic_tokens_workspace(&mut ws, &params.text_document.uri).unwrap();
+    let t = compute_semantic_tokens_workspace(&mut ws, &uri).unwrap();
     assert!(!t.data.is_empty(), "no tokens for decoded file");
 }
 
@@ -62,10 +58,9 @@ fn returned_locations_encode_the_path() {
     let params = WorkspaceSymbolParams {
         query: "heal_all".to_string(),
     };
-    let hits = match do_workspace_symbols_workspace(&mut ws, &params).unwrap() {
-        Some(WorkspaceSymbolResponse::Flat(syms)) => syms,
-        other => panic!("expected flat workspace symbols, got {other:?}"),
-    };
+    let hits = do_workspace_symbols_workspace(&mut ws, &params)
+        .unwrap()
+        .expect("workspace symbols");
     assert_eq!(hits.len(), 1, "{hits:?}");
     // Returned locations use canonical paths; keep the expected escaping
     // handwritten so this still checks the URI encoder independently.

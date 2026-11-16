@@ -1,16 +1,4 @@
-use crate::{MarkedString, MarkupContent, Range, TextDocumentPositionParams};
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct HoverParams {
-    pub text_document_position_params: TextDocumentPositionParams,
-}
-
-impl_lsp_struct!(
-    HoverParams,
-    flatten {
-        text_document_position_params: TextDocumentPositionParams,
-    }
-);
+use crate::{MarkedString, MarkupContent, Range};
 
 /// The result of a hover request.
 #[derive(Debug, Eq, PartialEq, Clone)]
