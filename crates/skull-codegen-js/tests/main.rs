@@ -35,8 +35,6 @@ mod inspect;
 mod lambda;
 #[path = "loops.rs"]
 mod loops;
-#[path = "map_iter.rs"]
-mod map_iter;
 #[path = "map_key_admission.rs"]
 mod map_key_admission;
 #[path = "misc_intrinsics.rs"]
@@ -85,8 +83,6 @@ mod polymorphic_recursion;
 mod program;
 #[path = "ret_bank_sizing.rs"]
 mod ret_bank_sizing;
-#[path = "rng.rs"]
-mod rng;
 #[path = "shader_register.rs"]
 mod shader_register;
 #[path = "snippets.rs"]

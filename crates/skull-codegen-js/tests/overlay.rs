@@ -1,4 +1,4 @@
-use crate::common::ws_with;
+use crate::common::{run_node, ws_with};
 use bone_core::hir::BodyOwner;
 
 fn global(
@@ -16,19 +16,6 @@ fn global(
         .find(|(_, global)| global.name.as_str() == name)
         .expect("global");
     (mid, gid)
-}
-
-fn node(source: &str) -> String {
-    let output = crate::common::node()
-        .args(["-e", source])
-        .output()
-        .expect("node");
-    assert!(
-        output.status.success(),
-        "node failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap()
 }
 
 fn js_runtime() -> String {
@@ -69,7 +56,7 @@ if (!(__rock_lifecycle_take_wire("stable") && __rock_lifecycle_take_wire("added"
 console.log("PASS");
 "#
     );
-    let output = node(&source);
+    let output = run_node(&source);
     assert_eq!(output.trim(), "PASS");
 }
 
@@ -172,7 +159,7 @@ console.log("transitive:" + state("PLAIN_RUNS") + ":" + state("DIRECT_RUNS") + "
         overlay_transitive,
         driver
     );
-    let output = node(&source);
+    let output = run_node(&source);
     assert_eq!(
         output.trim(),
         "initial:1:1:1:10:2\nunrelated:2:1:1:8:1\ndirect:3:2:1:11:1\ntransitive:4:2:2:5:1"
@@ -181,7 +168,7 @@ console.log("transitive:" + state("PLAIN_RUNS") + ":" + state("DIRECT_RUNS") + "
 
 #[test]
 fn definition_plan_publishes_and_aborts_with_the_code_slot_transaction() {
-    let output = node(&format!(
+    let output = run_node(&format!(
         "{}\nvar __G = {{}};\n\
          __rock_code_slot_begin();\n\
          __rock_code_slot_stage_one(\"probe\", function() {{ return 1; }}, \"abi\");\n\
@@ -227,7 +214,7 @@ console.log(ok && __rock_definition_plan_pending === null
   && oldPlan.widgets._data[0].definition.key === "old"
   && __rock_code_slot_ref("probe").current_body() === 1);
 "#;
-    let output = node(&source);
+    let output = run_node(&source);
     assert_eq!(output.trim(), "true");
 }
 
@@ -239,7 +226,7 @@ fn programs_without_definition_roles_do_not_stage_an_empty_plan() {
         .expect("emit program")
         .program;
     assert!(!program.contains("__rock_definition_plan_stage("));
-    let output = node(&format!(
+    let output = run_node(&format!(
         "{}\nvar __G = {{}};\n{}\nconsole.log('PASS');",
         js_runtime(),
         program
@@ -320,7 +307,7 @@ fn const_value_overlay_redefines_users_without_reinitializing_state() {
     .unwrap()
     .expect_overlay();
 
-    let output = node(&format!(
+    let output = run_node(&format!(
         "{}\nvar __G = {{}};\n{}\n__rock_globals[\"global:<test>::STATE::value\"] = 99;\n{}\nconsole.log(__rock_globals[\"global:<test>::STATE::value\"] + ':' + hot());",
         js_runtime(),
         program.program,
@@ -355,7 +342,7 @@ fn const_value_overlay_reinitializes_dependent_constants() {
     .unwrap()
     .expect_overlay();
 
-    let output = node(&format!(
+    let output = run_node(&format!(
         "{}\nvar __G = {{}};\n{}\n{}\nconsole.log(hot());",
         js_runtime(),
         program.program,
@@ -382,7 +369,7 @@ fn overlay_redefines_a_function_without_reinitializing_global_state() {
     let overlay = crate::common::overlay_of_fn(&after, mid, &mut cache, hot);
 
     assert!(!overlay.contains("__rock_globals[\"global:<test>::STATE::value\"] = "));
-    let output = node(&format!(
+    let output = run_node(&format!(
         "{}\n{}\n__rock_globals[\"global:<test>::STATE::value\"] = 99;\n{}\nconsole.log(__rock_globals[\"global:<test>::STATE::value\"] + ':' + hot());",
         js_runtime(),
         program.program,
@@ -429,7 +416,7 @@ fn retained_named_and_capture_free_values_refresh_through_slots() {
     )
     .unwrap()
     .expect_overlay();
-    let output = node(&format!(
+    let output = run_node(&format!(
         "{}\nvar __G = {{}};\n{}\nstart();\nconsole.log(invoke());\n(0, eval)({:?});\nconsole.log(invoke());",
         js_runtime(),
         program.program,
@@ -463,7 +450,7 @@ fn retained_capturing_value_refreshes_while_keeping_mutable_capture() {
     let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let make = crate::common::test_fn_ref(&after, "make");
     let overlay = crate::common::overlay_of_fn(&after, mid, &mut cache, make);
-    let output = node(&format!(
+    let output = run_node(&format!(
         "{}\nvar __G = {{}};\n{}\nstart();\nconsole.log(invoke());\n(0, eval)({:?});\nconsole.log(invoke());",
         js_runtime(),
         program.program,
@@ -473,7 +460,7 @@ fn retained_capturing_value_refreshes_while_keeping_mutable_capture() {
     assert!(overlay.contains("__rock_code_slot_stage_one"));
 
     let (fresh, _) = skull_codegen_js::emit::emit_program_cached(&after, mid).unwrap();
-    let fresh_output = node(&format!(
+    let fresh_output = run_node(&format!(
         "{}\nvar __G = {{}};\n{}\nstart();\nconsole.log(invoke());",
         js_runtime(),
         fresh.program
@@ -515,7 +502,7 @@ fn wire_failure_after_publication_keeps_the_candidate_code_ref_live() {
         "overlay must contain the later top-level hook:\n{overlay}"
     );
 
-    let output = node(&format!(
+    let output = run_node(&format!(
         "{}\nvar __G = {{}};\n{}\nstart();\ntry {{ (0, eval)({:?}); }} catch (e) {{ console.log(false); }}\nconsole.log(__rock_code_slot_stage === null);\nconsole.log(__rock_call(__rock_globals[\"global:<test>::CALLBACK::value\"]));",
         js_runtime(),
         program.program,
@@ -548,7 +535,7 @@ fn successive_overlays_accumulate_changed_function_definitions() {
     let second = crate::common::test_fn_ref(&v2, "second");
     let overlay = crate::common::overlay_of_fn(&v2, mid, &mut cache, second);
 
-    let output = node(&format!(
+    let output = run_node(&format!(
         "{}\n{}\nconsole.log(first() + ':' + second());",
         js_runtime(),
         overlay
@@ -579,7 +566,7 @@ fn changed_static_initializer_resets_only_its_live_cell() {
     let hot = crate::common::test_fn_ref(&after, "hot");
     let overlay = crate::common::overlay_of_fn(&after, mid, &mut cache, hot);
 
-    let output = node(&format!(
+    let output = run_node(&format!(
         "{}\n{}\nhot(); hot();\n{}\nconsole.log(hot());",
         js_runtime(),
         program.program,
@@ -604,7 +591,7 @@ fn a_body_edit_that_removes_a_static_drops_its_cells() {
     let hot = crate::common::test_fn_ref(&after, "hot");
     let overlay = crate::common::overlay_of_fn(&after, mid, &mut cache, hot);
 
-    let output = node(&format!(
+    let output = run_node(&format!(
         "{}\n{}\nhot();\n\
          function cells() {{ return Object.keys(__rock_globals).filter(k => k.includes('::count#')).length; }}\n\
          let live = cells();\n{}\nconsole.log(live + ':' + cells() + ':' + hot());",
@@ -640,7 +627,7 @@ fn decorated_function_overlay_refreshes_the_registered_code_ref() {
         "CodeRef overlays must not emit a registry repair"
     );
 
-    let output = node(&format!(
+    let output = run_node(&format!(
         "var output = [];\n\
          function print(value) {{ output.push(value); }}\n\
          {}\n\
@@ -685,7 +672,7 @@ fn unrelated_body_overlay_restages_unchanged_generic_callback_with_concrete_abi(
         !staged[0].contains("unresolved-named-value"),
         "stage must carry the concrete ABI"
     );
-    let output = node(&format!(
+    let output = run_node(&format!(
         "{}\nvar __G = {{}};\n{}\nconsole.log(invoke(), edited());\n(0, eval)({:?});\nconsole.log(invoke(), edited());",
         js_runtime(),
         program.program,

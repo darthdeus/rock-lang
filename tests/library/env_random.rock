@@ -238,3 +238,29 @@ fn rng_seed_wraps_to_32_bits() {
     assert_eq(random_get_state(), -2147483648, "state wraps on set")
     assert_eq(random(), 0.8164801069069654, "draw after a wrapped state")
 }
+
+@test
+fn presentation_draws_leave_the_gameplay_stream_alone() {
+    random_seed(42)
+    let first = random()
+    let second = random()
+    random_seed(42)
+    presentation_random_seed(42)
+    assert_eq(random(), first)
+    assert_eq(presentation_random(), first)
+    assert_eq(presentation_random(), second)
+    assert_eq(random(), second)
+}
+
+// The single-word state is the replay serialization surface.
+@test
+fn rng_state_round_trip_replays_the_stream() {
+    random_seed(7)
+    let _ = random()
+    let state = random_get_state()
+    let a = random_int(0, 1000000)
+    let b = random()
+    random_set_state(state)
+    assert_eq(random_int(0, 1000000), a)
+    assert_eq(random(), b)
+}
