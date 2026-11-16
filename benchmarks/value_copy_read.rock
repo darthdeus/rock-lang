@@ -1,0 +1,113 @@
+// Copying a `value` element out of a Vec and reading one of its fields: run
+// the emitted Lua with LuaJIT, with the JIT enabled. Each case warms an empty
+// trace cache before measuring and reports ns per element. Interpreter time
+// is diagnostic.
+
+@nomangle inline(lua) fn bench_clock() -> float = "return os.clock()"
+
+@nomangle inline(lua) fn bench_jit(on: bool) = """
+    local jit = require("jit")
+    if on then jit.on() else jit.off() end
+    jit.flush()
+"""
+
+@nomangle inline(lua) fn bench_reset() = """
+    local jit = require("jit")
+    jit.flush()
+    _G.__bench = { start = 0, stop = 0, abort = 0 }
+    _G.__bench_cb = function(what, tr, fn, pc, otr, oex)
+      local b = _G.__bench
+      if what == "start" then
+        b.start = b.start + 1
+      elseif what == "stop" then
+        b.stop = b.stop + 1
+      elseif what == "abort" then
+        b.abort = b.abort + 1
+      end
+    end
+    jit.attach(_G.__bench_cb, "trace")
+"""
+
+@nomangle inline(lua) fn bench_counts() -> string = """
+    local jit = require("jit")
+    jit.attach(_G.__bench_cb)
+    local util = require("jit.util")
+    local b = _G.__bench
+    local traces, mc = 0, 0
+    for tr = 1, 32000 do
+      local mcode = util.tracemc(tr)
+      if mcode then
+        traces = traces + 1
+        mc = mc + #mcode
+      end
+    end
+    collectgarbage("collect")
+    return string.format("traces=%d stops=%d aborts=%d mcode_bytes=%d",
+      traces, b.stop, b.abort, mc)
+"""
+
+
+value Layer { volume: float, speed: float, offset: float, name: string }
+value Voice { gain: float, pan: float, layer: Layer, id: int }
+
+fn layers(n: int) -> [Layer] {
+    let out: [Layer] = []
+    for i in 0..n { out.push(Layer { volume: i as float, speed: 1.0, offset: 0.5, name: "l{i % 7}" }) }
+    return out
+}
+fn voices(n: int) -> [Voice] {
+    let out: [Voice] = []
+    for i in 0..n {
+        let layer = Layer { volume: 1.0, speed: 2.0, offset: 0.0, name: "v" }
+        out.push(Voice { gain: 0.5, pan: 0.0, layer, id: i })
+    }
+    return out
+}
+fn name_lengths(ls: [Layer]) -> int {
+    let n = 0
+    for layer in ls { n += layer.name.len() }
+    return n
+}
+fn speeds(ls: [Layer]) -> float {
+    let t = 0.0
+    for layer in ls { t += layer.speed }
+    return t
+}
+fn voice_ids(vs: [Voice]) -> int {
+    let n = 0
+    for voice in vs { n += voice.id + voice.layer.name.len() }
+    return n
+}
+
+fn report(name: string, counts: string, elems: int, jit_s: float, interp_elems: int, interp_s: float, sink: float) {
+    let ns = jit_s * 1000000000.0 / (elems as float)
+    let interp_ns = interp_s * 1000000000.0 / (interp_elems as float)
+    print("workload={name} {counts} ns_per_elem={ns} interp_ns_per_elem={interp_ns} sink={sink}")
+}
+
+// `reps` timed passes of `pass`, each over `n` elements; one twentieth of
+// them again with the JIT off.
+fn drive(name: string, n: int, reps: int, pass: fn() -> float) {
+    bench_reset()
+    let sink = 0.0
+    for r in 0..200 { sink += pass() }
+    let counts = bench_counts()
+    let t0 = bench_clock()
+    for r in 0..reps { sink += pass() }
+    let jit_s = bench_clock() - t0
+    bench_jit(false)
+    let interp_reps = reps ./ 20 + 1
+    let t1 = bench_clock()
+    for r in 0..interp_reps { sink += pass() }
+    let interp_s = bench_clock() - t1
+    bench_jit(true)
+    report(name, counts, n * reps, jit_s, n * interp_reps, interp_s, sink)
+}
+
+fn main() {
+    let ls = layers(1000)
+    let vs = voices(1000)
+    drive("layer_name", 1000, 20000, () => name_lengths(ls) as float)
+    drive("layer_speed", 1000, 20000, () => speeds(ls))
+    drive("voice_id", 1000, 20000, () => voice_ids(vs) as float)
+}
