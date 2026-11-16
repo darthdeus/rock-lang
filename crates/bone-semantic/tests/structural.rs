@@ -1598,3 +1598,134 @@ fn main() {
         .count();
     assert_eq!(vars, 1, "losing candidates left their types behind");
 }
+
+// Enum variant uses carry the spans of their qualifier and variant name
+// tokens, so LSP rename rewrites exactly the name at every use.
+#[test]
+fn enum_variant_uses_carry_name_token_spans() {
+    use bone_semantic::hir::{Expr, Pattern};
+
+    let src = "\
+enum Color { Red, Green }
+enum Shape { Rect { w: int }, Circle(int) }
+fn f(c: Color, s: Shape) -> int {
+    let x = Color::Red
+    let a = match c {
+        Color::Red => 1,
+        Color::Green => 2,
+    }
+    return match s {
+        Shape::Rect { w } => w,
+        Shape::Circle(r) => r,
+    }
+}";
+    let ws = check(src).expect("semantic_pass");
+    let body = fn_body(&ws, "f");
+
+    let (enum_name_span, variant_span) = body
+        .expr_arena
+        .values()
+        .find_map(|e| match e {
+            Expr::EnumVariant {
+                variant,
+                enum_name_span,
+                variant_span,
+                ..
+            } if variant.as_str() == "Red" => Some((*enum_name_span, *variant_span)),
+            _ => None,
+        })
+        .expect("an Expr::EnumVariant for Color::Red");
+    assert_eq!(text(src, &body.name_spans[enum_name_span]), "Color");
+    assert_eq!(text(src, &body.name_spans[variant_span]), "Red");
+
+    let pattern_spans = |want: &str| {
+        body.pattern_arena
+            .values()
+            .find_map(|p| match p {
+                Pattern::EnumVariant {
+                    variant,
+                    enum_name_span,
+                    variant_span,
+                    ..
+                } if variant.as_str() == want => Some((*enum_name_span, Some(*variant_span))),
+                Pattern::Record {
+                    name: Some(name),
+                    enum_name_span,
+                    name_span,
+                    ..
+                } if name.as_str() == want => Some((*enum_name_span, *name_span)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("a pattern for {want}"))
+    };
+    for (variant, qualifier) in [("Green", "Color"), ("Circle", "Shape"), ("Rect", "Shape")] {
+        let (qualifier_span, variant_span) = pattern_spans(variant);
+        assert_eq!(text(src, &qualifier_span.unwrap()), qualifier);
+        assert_eq!(text(src, &variant_span.unwrap()), variant);
+    }
+}
+
+// A v1 macro is expansion-owned: it is not a callable family member nor a
+// definition, while ordinary overloads beside it stay one callable family.
+#[test]
+fn expanded_macros_are_not_callable_definitions() {
+    use bone_core::modules::DefKind;
+    use bone_semantic::semantic_passes::build_namespaces;
+
+    const SOURCE: &str = include_str!("fixtures/cw7_macro_namespace_kind.rock");
+    let provider = parse_in(SOURCE, "provider.rock", Dialect::V1, (1, "provider"));
+    assert!(
+        provider.recovery_errors.is_empty(),
+        "{:?}",
+        provider.recovery_errors
+    );
+    let ordinary_count = provider
+        .items
+        .iter()
+        .filter(|item| {
+            matches!(&item.kind, skull_parser::ItemKind::Function(f) if f.name.name == ustr("ordinary"))
+        })
+        .count();
+    assert!(
+        ordinary_count > 1,
+        "fixture must exercise an overload family"
+    );
+    let aliases = aliases(&[(1, "provider", &[])]);
+    let mut modules = vec![provider];
+    let mut ws = Workspace::default();
+    build_namespaces(&mut ws, &modules, &aliases).expect("build namespace");
+    let root = ws
+        .ns
+        .package(1)
+        .and_then(|pkg| pkg.node(ustr("")))
+        .expect("provider namespace root");
+    assert!(!root.owned_callables.contains_key(&ustr("identity_value")));
+    assert!(!root.callable_members.contains_key(&ustr("identity_value")));
+    assert!(
+        !ws.defs
+            .values()
+            .any(|meta| meta.name == ustr("identity_value"))
+    );
+    let ordinary = root.owned_callables[&ustr("ordinary")];
+    assert_eq!(ws.defs[&ordinary].kind, DefKind::Callable);
+    assert_eq!(
+        root.callable_members[&ustr("ordinary")].len(),
+        ordinary_count
+    );
+    let checked = semantic_pass_with_aliases(&mut modules, &aliases)
+        .expect("macro expansion and ordinary overloads still lower");
+    let errors = error_messages(&checked);
+    assert!(errors.is_empty(), "{errors:?}");
+
+    let stdlib = skull_parser::parse_module_with_dialect(
+        SOURCE,
+        ustr("<stdlib>/macro_provider.rock"),
+        Dialect::Legacy,
+    )
+    .expect("parse stdlib provider");
+    let mut ws = Workspace::default();
+    build_namespaces(&mut ws, &[stdlib], &NsAliases::default()).expect("stdlib namespace");
+    let root = ws.ns.std_root().expect("stdlib root");
+    assert!(!root.owned_callables.contains_key(&ustr("identity_value")));
+    assert!(root.owned_callables.contains_key(&ustr("ordinary")));
+}

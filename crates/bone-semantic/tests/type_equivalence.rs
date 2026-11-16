@@ -14,23 +14,27 @@ fn workspace(files: &[(&str, &str)]) -> Workspace {
     bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic pass")
 }
 
-fn function<'a>(ws: &'a Workspace, file: &str, name: &str) -> (ModuleId, &'a hir::Function) {
+fn function<'a>(
+    ws: &'a Workspace,
+    file: &str,
+    name: &str,
+) -> (ModuleId, hir::BodyOwner, &'a hir::Function) {
     let mid = ws.module_ids[&Ustr::from(file)];
-    let (_, f) = ws
+    let (idx, f) = ws
         .module(mid)
         .functions
         .iter()
         .find(|(_, f)| f.name.as_str() == name)
         .unwrap_or_else(|| panic!("fn `{name}` in `{file}`"));
-    (mid, f)
+    (mid, hir::BodyOwner::Function(idx), f)
 }
 
 fn param(ws: &Workspace, file: &str, name: &str) -> TyRef<'static> {
-    TyRef::of_static(function(ws, file, name).1.param_decls[0].ty)
+    TyRef::of_static(function(ws, file, name).2.param_decls[0].ty)
 }
 
 fn ret(ws: &Workspace, file: &str, name: &str) -> TyRef<'static> {
-    TyRef::of_static(function(ws, file, name).1.return_ty.expect("return type"))
+    TyRef::of_static(function(ws, file, name).2.return_ty.expect("return type"))
 }
 
 fn same_render(ws: &Workspace, a: TyRef<'_>, b: TyRef<'_>) -> bool {
@@ -126,16 +130,9 @@ fn body_types_compare_through_their_inference() {
              take(xs)\n\
          }",
     )]);
-    let (mid, _) = function(&ws, "a", "main");
-    let main_idx = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == "main")
-        .map(|(idx, _)| idx)
-        .unwrap();
-    let bi = &ws.inference(mid).unwrap().per_fn[&hir::BodyOwner::Function(main_idx)];
-    let body = &ws.module(mid).bodies[&hir::BodyOwner::Function(main_idx)];
+    let (mid, main, _) = function(&ws, "a", "main");
+    let bi = &ws.inference(mid).unwrap().per_fn[&main];
+    let body = &ws.module(mid).bodies[&main];
     let (b_idx, _) = body
         .binding_arena
         .iter()
