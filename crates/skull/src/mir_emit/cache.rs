@@ -201,9 +201,6 @@ pub struct IncrementalRepairStats {
     pub artifact_index_rows_examined: usize,
     pub artifact_scalar_context_builds: usize,
     pub artifact_realize_invocations: usize,
-    pub root_hole_names_examined: usize,
-    pub root_hole_rows_examined: usize,
-    pub root_hole_decls_examined: usize,
     pub graph_update_ns: u64,
     pub concrete_update_ns: u64,
     pub artifact_update_ns: u64,
@@ -1011,9 +1008,6 @@ impl SkullEmitCache {
         cache.repair_stats.graph_contributions_retracted = update.retracted_owners.len();
         cache.repair_stats.graph_contributions_installed = update.revisited_owners.len();
         cache.repair_stats.broad_owner_scans = update.broad_scans;
-        cache.repair_stats.root_hole_names_examined = update.census.root_hole_names_examined;
-        cache.repair_stats.root_hole_rows_examined = update.census.root_hole_rows_examined;
-        cache.repair_stats.root_hole_decls_examined = update.census.root_hole_decls_examined;
         cache.repair_stats.root_instances_checked = update.census.root_instances_checked;
         let concrete_builds_before = crate::concrete_body::build_invocations();
         let t_concrete = Instant::now();
