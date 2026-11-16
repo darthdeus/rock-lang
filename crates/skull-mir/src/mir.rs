@@ -48,26 +48,10 @@ pub const VEC_STRIDED_REPR: &str = "strided";
 pub(crate) const VEC_COLUMN_PRESENCE_FIELD: &str = "@p";
 
 /// Every element type `mf` builds a column-stored `Vec` of, nested fns included,
-/// together with the planner's no-box guarantee. The fact is carried by both
-/// column-producing instructions, including a header rebuilt from an input Vec.
-pub fn column_elem_plans(mf: &MirFunc, out: &mut std::collections::BTreeMap<Ustr, bool>) {
-    for inst in mf.insts.values() {
-        match inst {
-            Inst::MakeVecColumns { elem, nobox, .. }
-            | Inst::MakeVecColumnHeader { elem, nobox, .. } => {
-                out.insert(*elem, *nobox);
-            }
-            _ => {}
-        }
-    }
-    for nf in &mf.nested_fns {
-        column_elem_plans(nf, out);
-    }
-}
-
-/// The same census with the build-owned representation identity retained for
-/// consumers that emit or inspect the physical columns.
-pub(crate) fn column_elem_rep_plans(
+/// with the planner's no-box guarantee and the build-owned representation. The
+/// fact is carried by both column-producing instructions, including a header
+/// rebuilt from an input Vec.
+pub fn column_elem_rep_plans(
     mf: &MirFunc,
     out: &mut std::collections::BTreeMap<Ustr, (bool, crate::lower::RepId)>,
 ) {

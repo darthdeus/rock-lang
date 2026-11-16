@@ -80,50 +80,6 @@ pub struct BoundCtx<'a> {
     pub interner: &'a MonoInterner,
 }
 
-/// Every reached specialization's tree, keyed by the body that will be emitted.
-///
-/// The design rests on the tree being a function of the INSTANTIATION rather
-/// than of the caller, so this CHECKS that instead of assuming it: two sites
-/// demanding one emitted body must carry the same tree, or one definition would
-/// have to serve two resolutions and whichever demand arrived first would
-/// silently win. The instance graph measures the same property from the other
-/// side (0 disagreements over 2,934 re-reach comparisons); this is emission's
-/// own check, on the map emission actually reads.
-///
-/// One of these, not one per backend: both emitters keep their own worklist,
-/// and a check written twice is free to be weaker on one of them.
-#[derive(Default)]
-pub struct DemandMap {
-    trees: std::collections::HashMap<Instance, ResolvedBoundTree>,
-}
-
-impl DemandMap {
-    /// File `demands`, returning the bodies whose tree DISAGREED with one
-    /// already filed. An agreeing repeat is silent, and a first sighting wins.
-    pub fn record(&mut self, demands: &[SpecDemand]) -> Vec<Instance> {
-        let mut clashes = Vec::new();
-        for d in demands {
-            let body = d.inst.clone();
-            match self.trees.get(&body) {
-                Some(prev) if *prev != d.tree => clashes.push(body),
-                Some(_) => {}
-                None => {
-                    self.trees.insert(body, d.tree.clone());
-                }
-            }
-        }
-        clashes
-    }
-
-    /// The tree a body was demanded with. An absent one is the EMPTY tree, which
-    /// is correct for every body that has no placeholders and is a REJECTION for
-    /// one that does -- `skull_transform::bound::resolve_standalone_bound_calls`
-    /// refuses a placeholder it cannot resolve rather than emitting it.
-    pub fn tree_of(&self, body: &Instance) -> ResolvedBoundTree {
-        self.trees.get(body).cloned().unwrap_or_default()
-    }
-}
-
 pub fn concrete_body_ctx<'a>(
     ws: &'a Workspace,
     mid: bone_core::prelude::ModuleId,

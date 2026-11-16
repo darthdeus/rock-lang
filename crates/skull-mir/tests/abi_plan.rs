@@ -324,11 +324,6 @@ fn main() {
             "call and callee entry must consume one owned representation for {name}"
         );
         assert_eq!(
-            owned.representation().result(),
-            owned.representation().publisher_result(),
-            "return lowering and the backend publisher must read the same result plan for {name}"
-        );
-        assert_eq!(
             owned.representation().return_lanes(),
             owned.result_lanes(),
             "publisher lane sizing must be derived from the owned result plan for {name}"
@@ -705,8 +700,10 @@ fn leaf_places_carry_the_container_element_representation() {
         .into_iter()
         .next()
         .expect("V2 has a nonzero leaf population");
-    let place = plan.place(address).expect("leaf storage owns the place");
-    assert_eq!(place.representation(), plan.element_rep());
+    let place = plan
+        .place(address.clone())
+        .expect("leaf storage owns the place");
+    assert_eq!(place, address);
 }
 
 #[test]
@@ -997,9 +994,9 @@ fn main() {
     let (scx, bodies) = lower_test_roots(&ws, &[main]);
     let mir = lower_test_root(&ws, &scx, &bodies, main);
     let mut plans = std::collections::BTreeMap::new();
-    skull_mir::mir::column_elem_plans(&mir, &mut plans);
-    assert_eq!(plans.get(&Ustr::from("V2")), Some(&false));
-    assert_eq!(plans.get(&Ustr::from("NV2")), Some(&true));
+    skull_mir::mir::column_elem_rep_plans(&mir, &mut plans);
+    assert_eq!(plans.get(&Ustr::from("V2")).map(|p| p.0), Some(false));
+    assert_eq!(plans.get(&Ustr::from("NV2")).map(|p| p.0), Some(true));
     assert!(
         plans.len() >= 2,
         "the column plan population must be nonzero"

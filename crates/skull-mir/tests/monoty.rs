@@ -238,7 +238,7 @@ fn same_shape_nominals_stay_distinct() {
         "two same-layout nominals must not share a MonoTyId"
     );
     assert_ne!(a.render(vec2), a.render(point));
-    assert_ne!(a.structural_hash(vec2), a.structural_hash(point));
+    assert_ne!(a.canonical(vec2), a.canonical(point));
 
     // ...and the container over each stays distinct too.
     let v1 = a.app(MonoCtor::Array, &[vec2]);
@@ -339,11 +339,6 @@ fn distinct_types_cannot_share_a_cross_process_identity() {
             a.canonical(y),
             "{what}: two distinct types share one canonical identity"
         );
-        assert_ne!(
-            a.structural_hash(x),
-            a.structural_hash(y),
-            "{what}: two distinct types share one structural hash"
-        );
     }
 }
 
@@ -378,7 +373,7 @@ fn insertion_order_does_not_affect_identity() {
         "the test is vacuous unless the integer ids actually differ"
     );
     assert_eq!(a.render(acomposite), b.render(bcomposite));
-    assert_eq!(a.structural_hash(acomposite), b.structural_hash(bcomposite));
+    assert_eq!(a.canonical(acomposite), b.canonical(bcomposite));
 }
 
 // -- generated composition (S 20g.3 / S 15a) -------------------------------

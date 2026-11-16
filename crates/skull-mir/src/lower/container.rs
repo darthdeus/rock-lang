@@ -17,25 +17,6 @@ pub enum ContainerStorage {
     LeafAddressed { element: RepId },
 }
 
-/// An address-bearing place whose element representation was selected by the
-/// owning [`ContainerPlan`]. `LeafAddr` supplies operational offsets; the
-/// RepId supplies the static identity those offsets conform to.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PlaceBundle {
-    representation: RepId,
-    address: LeafAddr,
-}
-
-impl PlaceBundle {
-    pub fn representation(&self) -> RepId {
-        self.representation
-    }
-
-    pub fn address(&self) -> &LeafAddr {
-        &self.address
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContainerPlan {
     target: bone_core::hir::FnBackend,
@@ -344,16 +325,14 @@ impl ContainerPlan {
         matches!(self.storage, ContainerStorage::LeafAddressed { .. })
     }
 
-    pub fn place(&self, address: LeafAddr) -> Result<PlaceBundle, RepError> {
+    /// `address` as a place in this container, which must be leaf-addressed.
+    pub fn place(&self, address: LeafAddr) -> Result<LeafAddr, RepError> {
         if !self.is_leaf_addressed() {
             return Err(RepError {
                 span: None,
                 message: "a non-leaf-addressed container cannot produce a leaf place".into(),
             });
         }
-        Ok(PlaceBundle {
-            representation: self.element_rep(),
-            address,
-        })
+        Ok(address)
     }
 }

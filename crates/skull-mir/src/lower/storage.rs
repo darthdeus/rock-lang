@@ -641,7 +641,7 @@ impl<'a> Builder<'a> {
             .leaf_addresses()
             .ok_or_else(|| gap("NativeBuffer element has no owned leaf address plan"))?;
         let dot = format!("{path}.");
-        let hit: Vec<PlaceBundle> = plan
+        let hit: Vec<LeafAddr> = plan
             .iter()
             .filter(|a| a.path.as_str() == path || a.path.as_str().starts_with(&dot))
             .cloned()
@@ -657,7 +657,7 @@ impl<'a> Builder<'a> {
         // `<path>.<leaf>` -- so discriminating on hit COUNT lowers that field's
         // aggregate RHS as a scalar and writes the whole cdata through a
         // primitive view. Everything that is not an exact leaf is an aggregate.
-        let leaves = if hit.len() == 1 && hit[0].address().path.as_str() == path {
+        let leaves = if hit.len() == 1 && hit[0].path.as_str() == path {
             vec![self.lower_expr(value)?]
         } else {
             let sub = match self.value_aggregate_of(value) {
@@ -680,8 +680,7 @@ impl<'a> Builder<'a> {
             )));
         }
         let mut views = HashMap::default();
-        for (place, leaf) in hit.iter().zip(leaves) {
-            let a = place.address();
+        for (a, leaf) in hit.iter().zip(leaves) {
             let at = self.leaf_index(checked, a);
             let view = self.leaf_view(buf, a.view_field, &mut views);
             self.emit_cur(Inst::StoreIndex {
@@ -733,7 +732,7 @@ impl<'a> Builder<'a> {
     pub(crate) fn nb_leaf_rmw_place(
         &mut self,
         target: Idx<Expr>,
-    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, Ustr, PlaceBundle)>, CompilerError> {
+    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, Ustr, LeafAddr)>, CompilerError> {
         if self.scx.target != bone_core::hir::FnBackend::Js {
             return Ok(None);
         }
@@ -760,9 +759,8 @@ impl<'a> Builder<'a> {
         &mut self,
         buf: Idx<Inst>,
         checked: Idx<Inst>,
-        place: &PlaceBundle,
+        addr: &LeafAddr,
     ) -> Idx<Inst> {
-        let addr = place.address();
         let at = self.leaf_index(checked, addr);
         let view = self.leaf_view(buf, addr.view_field, &mut HashMap::default());
         self.emit_cur(Inst::Index {
@@ -777,10 +775,9 @@ impl<'a> Builder<'a> {
         &mut self,
         buf: Idx<Inst>,
         checked: Idx<Inst>,
-        place: &PlaceBundle,
+        addr: &LeafAddr,
         value: Idx<Inst>,
     ) {
-        let addr = place.address();
         let at = self.leaf_index(checked, addr);
         let view = self.leaf_view(buf, addr.view_field, &mut HashMap::default());
         self.emit_cur(Inst::StoreIndex {
@@ -806,7 +803,7 @@ impl<'a> Builder<'a> {
         let shape = container
             .element_shape(self.scx.rep_arena())
             .ok_or_else(|| gap("leaf-addressed element is not a value struct"))?;
-        let plan: Vec<PlaceBundle> = container
+        let plan: Vec<LeafAddr> = container
             .leaf_addresses()
             .ok_or_else(|| gap("leaf-addressed element has no owned leaf address plan"))?
             .iter()
@@ -817,8 +814,7 @@ impl<'a> Builder<'a> {
         let mut views = HashMap::default();
         let leaves: Vec<Idx<Inst>> = plan
             .iter()
-            .map(|place| {
-                let a = place.address();
+            .map(|a| {
                 let at = self.leaf_index(checked, a);
                 let view = self.leaf_view(buf, a.view_field, &mut views);
                 self.emit_cur(Inst::Index {
@@ -846,7 +842,7 @@ impl<'a> Builder<'a> {
         elem: Ustr,
     ) -> Result<(), CompilerError> {
         let container = self.native_buffer_plan(elem)?;
-        let plan: Vec<PlaceBundle> = container
+        let plan: Vec<LeafAddr> = container
             .leaf_addresses()
             .ok_or_else(|| gap("leaf-addressed element has no owned leaf address plan"))?
             .iter()
@@ -869,8 +865,7 @@ impl<'a> Builder<'a> {
         // out-of-bounds writes happen first.
         let checked = self.nb_checked_index(buf, index)?;
         let mut views = HashMap::default();
-        for (place, leaf) in plan.iter().zip(leaves) {
-            let a = place.address();
+        for (a, leaf) in plan.iter().zip(leaves) {
             let at = self.leaf_index(checked, a);
             let view = self.leaf_view(buf, a.view_field, &mut views);
             self.emit_cur(Inst::StoreIndex {

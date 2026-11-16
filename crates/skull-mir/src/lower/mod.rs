@@ -182,7 +182,7 @@ pub use coroutine::CoroutinePlan;
 /// widening to make the split.
 mod call;
 mod container;
-pub use container::{ContainerFamily, ContainerPlan, ContainerStorage, PlaceBundle};
+pub use container::{ContainerFamily, ContainerPlan, ContainerStorage};
 mod control;
 mod dispatch;
 pub use dispatch::{

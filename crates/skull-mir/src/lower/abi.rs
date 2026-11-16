@@ -372,10 +372,6 @@ impl FunctionRepPlan {
         self.result
     }
 
-    pub fn publisher_result(&self) -> Option<RepId> {
-        self.result
-    }
-
     pub fn return_lanes(&self) -> usize {
         self.return_lanes
     }
@@ -2722,11 +2718,6 @@ impl BackendFnAbiPlan {
             })
             .map(|(i, _)| i)
             .collect()
-    }
-
-    /// Body edits can change this direct-call layout even when it is currently full.
-    pub fn body_dependent_parameters(&self) -> bool {
-        self.parameter_demand.is_some()
     }
 
     /// See [`crate::lower::parameter_demand_key`].

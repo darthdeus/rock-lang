@@ -22,7 +22,7 @@
 //!    identical leaves stay distinct.
 //! 3. **Order-independent.** Arena insertion order and the process hash seed
 //!    change the numeric ids, and nothing else. Cross-process identity is
-//!    [`MonoTy::canonical`] / [`MonoTy::structural_hash`], never the integer --
+//!    [`MonoTy::canonical`], never the integer --
 //!    and never [`MonoTy::render`], which is a display spelling and ambiguous.
 //!
 //! The API takes NO target. Lua, JS and any later projection consume the same
@@ -41,8 +41,7 @@ use rustc_hash::FxHashMap;
 use ustr::Ustr;
 
 /// Index into a [`MonoArena`]. Equality is type-equality WITHIN one arena; it
-/// carries no meaning across arenas, which is what `render`/`structural_hash`
-/// are for.
+/// carries no meaning across arenas, which is what `canonical` is for.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct MonoTyId(u32);
 
@@ -300,18 +299,6 @@ impl MonoTy {
                 out.push_str("_z");
             }
         }
-    }
-
-    /// FNV-1a over [`Self::canonical`]. Stable across processes, unlike
-    /// anything derived from an arena id or from a `FxHashMap` iteration, and
-    /// unambiguous, unlike anything derived from the display rendering.
-    pub fn structural_hash(&self) -> u64 {
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for b in self.canonical().bytes() {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        h
     }
 
     /// The bound NOMINAL, and `None` for a nullable binding on purpose: every
@@ -656,11 +643,6 @@ impl MonoArena {
     /// The canonical identity string of an interned type.
     pub fn canonical(&self, id: MonoTyId) -> String {
         self.get(id).canonical()
-    }
-
-    /// FNV-1a over the canonical encoding of an interned type.
-    pub fn structural_hash(&self, id: MonoTyId) -> u64 {
-        self.get(id).structural_hash()
     }
 
     /// Intern `Nullable` over an already-interned child.

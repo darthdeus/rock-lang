@@ -1,6 +1,6 @@
 //! Checks the C leaf layout used by typed NativeBuffer views.
 
-use skull_mir::lower::{RepArena, value_struct_all_float_leaf_count};
+use skull_mir::lower::RepArena;
 
 use crate::common::ws_with;
 
@@ -16,7 +16,7 @@ fn main() {}
 fn an_all_float_element_plans_exactly_the_flat_slot_scheme() {
     let ws = ws_with(SRC);
     let name = ustr::Ustr::from("Vertex");
-    let k = value_struct_all_float_leaf_count(&ws, name).expect("Vertex is all-float");
+    let k = 10;
     let plan = RepArena::default()
         .nominal_leaf_addresses(&ws, bone_core::hir::FnBackend::Js, name)
         .expect("Vertex has a leaf plan");
