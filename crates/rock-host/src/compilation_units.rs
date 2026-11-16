@@ -401,18 +401,10 @@ mod no_check_tests {
     use super::has_no_check_pragma;
 
     #[test]
-    fn pragma_first_line() {
+    fn pragma_must_be_the_first_non_blank_line() {
         assert!(has_no_check_pragma("//! @no_check\n//- foo\n"));
         assert!(has_no_check_pragma("   //! @no_check   \n"));
-    }
-
-    #[test]
-    fn pragma_after_blank_lines() {
         assert!(has_no_check_pragma("\n\n//! @no_check\n"));
-    }
-
-    #[test]
-    fn pragma_absent() {
         assert!(!has_no_check_pragma("fn f() {}\n"));
         assert!(!has_no_check_pragma("// regular comment\n//! @no_check\n"));
         assert!(!has_no_check_pragma("//! @other_pragma\n"));

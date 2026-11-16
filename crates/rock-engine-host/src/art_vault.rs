@@ -63,34 +63,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn env_names_the_vault() {
+    fn the_vault_root_is_an_existing_absolute_env_path() {
         let vault = tempfile::tempdir().unwrap();
-        let root = root_from(Some(vault.path().as_os_str())).unwrap();
-        assert_eq!(root, vault.path());
-    }
-
-    #[test]
-    fn unset_or_empty_env_is_an_error() {
-        assert!(root_from(None).is_err());
-        assert!(root_from(Some(OsStr::new(""))).is_err());
-    }
-
-    #[test]
-    fn missing_vault_is_an_error_naming_the_setting() {
-        let err = root_from(None).unwrap_err().to_string();
-        assert!(err.contains("GAME_ART_VAULT"), "{err}");
-        let err = root_from(Some(OsStr::new("/nonexistent/vault")))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("/nonexistent/vault"), "{err}");
-    }
-
-    #[test]
-    fn relative_env_is_rejected() {
-        let err = root_from(Some(OsStr::new("relative-vault")))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("absolute"), "{err}");
+        assert_eq!(
+            root_from(Some(vault.path().as_os_str())).unwrap(),
+            vault.path()
+        );
+        for (env, want) in [
+            (None, "GAME_ART_VAULT"),
+            (Some(""), "GAME_ART_VAULT"),
+            (Some("/nonexistent/vault"), "/nonexistent/vault"),
+            (Some("relative-vault"), "absolute"),
+        ] {
+            let err = root_from(env.map(OsStr::new)).unwrap_err().to_string();
+            assert!(err.contains(want), "{env:?}: {err}");
+        }
     }
 
     #[test]
@@ -107,10 +94,6 @@ mod tests {
         let untouched = || -> Result<PathBuf> { panic!("root must not be resolved") };
         assert_eq!(expand_token("$GAME_ART_VAULTS/a", untouched).unwrap(), None);
         assert_eq!(expand_token("~/projects/a", untouched).unwrap(), None);
-    }
-
-    #[test]
-    fn token_expansion_propagates_a_missing_vault() {
         let err =
             expand_token("$GAME_ART_VAULT/demo", || anyhow::bail!("vault not found")).unwrap_err();
         assert!(err.to_string().contains("vault not found"));

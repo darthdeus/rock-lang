@@ -156,52 +156,25 @@ mod tests {
         assert!(!is_game_project(&root.join("plain")).unwrap());
     }
 
+    /// A literal directory wins over expansion (so `.` stays the current
+    /// directory and a typed subpath passes through); only a bare name
+    /// expands against the parents.
     #[test]
-    fn resolve_project_dir_literal_path_wins() {
+    fn resolve_project_dir_prefers_the_literal_path() {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
-        // a top-level project dir (sample-game/demo-shaped) AND a games/ dir of
-        // the same name -- the literal path must win over expansion.
-        fs::create_dir_all(root.join("sample-game")).unwrap();
-        fs::create_dir_all(root.join("games/sample-game")).unwrap();
-
-        let got = resolve_project_dir_in(root, &["games"], "sample-game").unwrap();
-        assert_eq!(got, root.join("sample-game"));
-    }
-
-    #[test]
-    fn resolve_project_dir_bare_name_expands_to_games() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        fs::create_dir_all(root.join("games/match3")).unwrap();
-
-        let got = resolve_project_dir_in(root, &["games"], "match3").unwrap();
-        assert_eq!(got, root.join("games/match3"));
-    }
-
-    #[test]
-    fn resolve_project_dir_dot_stays_current() {
-        // The no-arg default (`.`) is a literal directory that always wins,
-        // so it means "current directory" and is never bare-name-expanded --
-        // even when a `games/.` would technically exist.
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        fs::create_dir_all(root.join("games")).unwrap();
-
-        let got = resolve_project_dir_in(root, &["games"], ".").unwrap();
-        assert_eq!(got, root.join("."));
-    }
-
-    #[test]
-    fn resolve_project_dir_explicit_subpath_passthrough() {
-        // A literal path a caller typed (with a separator) passes through
-        // unchanged -- the resolver only expands BARE names.
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        fs::create_dir_all(root.join("games/match3")).unwrap();
-
-        let got = resolve_project_dir_in(root, &["games"], "games/match3").unwrap();
-        assert_eq!(got, root.join("games/match3"));
+        for dir in ["sample-game", "games/sample-game", "games/puzzle"] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        for (arg, want) in [
+            ("sample-game", "sample-game"),
+            ("puzzle", "games/puzzle"),
+            (".", "."),
+            ("games/puzzle", "games/puzzle"),
+        ] {
+            let got = resolve_project_dir_in(root, &["games"], arg).unwrap();
+            assert_eq!(got, root.join(want), "{arg}");
+        }
     }
 
     #[test]
