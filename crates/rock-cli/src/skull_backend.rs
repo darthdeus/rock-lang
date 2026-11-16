@@ -1842,14 +1842,7 @@ pub(crate) fn skull_shader(
                     crate::invocation_log::exit(1);
                 }
             };
-            let session = match skull_codegen_glsl::shader_library_session(&ws, root_refs) {
-                Ok(session) => session,
-                Err(e) => {
-                    eprintln!("{}", render_file_errs(path, &src, &[e]));
-                    crate::invocation_log::exit(1);
-                }
-            };
-            skull_codegen_glsl::emit_shader_library_with_view(&ws, &session.scx, &session.view)
+            skull_codegen_glsl::emit_shader_library(&ws, root_refs)
         };
         match glsl {
             Ok(g) => g,

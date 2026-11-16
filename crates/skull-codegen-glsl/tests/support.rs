@@ -43,10 +43,7 @@ fn library(ws: &Workspace, mid: ModuleId, roots: &[&str]) -> Result<String, Stri
         .map(|root| skull_codegen_glsl::resolve_root(ws, mid, root))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.message)?;
-    let session =
-        skull_codegen_glsl::shader_library_session(ws, root_refs).map_err(|e| e.message)?;
-    skull_codegen_glsl::emit_shader_library_with_view(ws, &session.scx, &session.view)
-        .map_err(|e| e.message)
+    skull_codegen_glsl::emit_shader_library(ws, root_refs).map_err(|e| e.message)
 }
 
 pub fn emit_library_unchecked(src: &str, roots: &[&str]) -> Result<String, String> {

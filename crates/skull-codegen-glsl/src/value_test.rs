@@ -88,7 +88,7 @@ pub fn emit_value_test(
 
     // The fn library runs the strict tier-0 profile pass; a body outside the
     // subset rejects here (the SKIP reason -- the A1 fn-emission work list).
-    let defs = emit_shader_library(ws, mid, std::slice::from_ref(&root.to_string()))?;
+    let defs = emit_shader_library(ws, vec![fref])?;
     let call = mangle_fn(ws, f);
 
     let version = profile_header(profile);

@@ -203,10 +203,9 @@ pub(crate) fn realize_shader_library_view(
     })
 }
 
-/// The graph, lowering context and explicit-root population kept together so
-/// every route that emits a function library reads one interner.
+/// The lowering context and explicit-root population kept together so every
+/// route that emits a function library reads one interner.
 pub struct ShaderLibrarySession {
-    pub graph: InstanceGraph,
     pub scx: ScalarCtx,
     pub view: ShaderLibraryView,
 }
@@ -220,7 +219,7 @@ pub fn shader_library_session(
         skull_graph::instance_graph::build_in(ws, roots.clone(), false, Arc::clone(&interner));
     let scx = ScalarCtx::new_values_first_class(ws).sharing(interner);
     let view = realize_shader_library_view(ws, &graph, &roots)?;
-    Ok(ShaderLibrarySession { graph, scx, view })
+    Ok(ShaderLibrarySession { scx, view })
 }
 
 fn checked_library_callees(
@@ -353,18 +352,9 @@ pub fn emit_shader_library_with_view(
     Ok(out)
 }
 
-/// Compatibility wrapper for callers that have not yet retained a graph. The
-/// route itself is still graph-backed; production and tests that own a session
-/// should call [`emit_shader_library_with_view`] directly.
-pub(crate) fn emit_shader_library(
-    ws: &Workspace,
-    mid: ModuleId,
-    roots: &[String],
-) -> Result<String, CompilerError> {
-    let root_refs: Vec<_> = roots
-        .iter()
-        .map(|root| resolve_root(ws, mid, root))
-        .collect::<Result<_, _>>()?;
-    let session = shader_library_session(ws, root_refs)?;
+/// Emit the no-`#version` function library for `roots` and their reachable
+/// helpers, realized from a fresh instance graph.
+pub fn emit_shader_library(ws: &Workspace, roots: Vec<FuncRef>) -> Result<String, CompilerError> {
+    let session = shader_library_session(ws, roots)?;
     emit_shader_library_with_view(ws, &session.scx, &session.view)
 }
