@@ -2165,7 +2165,7 @@ impl Session {
         let mut result = self.rebuild_or_revert(
             "update",
             path,
-            move |s| s.commit_body_relower(mid, owner, fid, mini, at, byte_delta, line_delta),
+            move |s| s.commit_body_relower(mid, fid, &mini, 0, at, byte_delta, line_delta),
             restore,
         )?;
         result.body_update = BodyUpdate {
@@ -2176,20 +2176,20 @@ impl Session {
         Ok(Some(result))
     }
 
-    /// The mutating half of a fast body edit: span-shift the kept bodies, relower
-    /// the one edited function from `mini` (a single-item Ast), re-infer, patch
-    /// deps. Mirrors `rebuild_body_incremental`'s commit half but fed the mini-Ast
-    /// rather than a cooked whole-module clone.
+    /// The mutating half of a single-body edit: span-shift the kept bodies,
+    /// relower the edited function from `ast.items[item]` (cooked), re-infer,
+    /// patch deps.
     fn commit_body_relower(
         &mut self,
         mid: ModuleId,
-        owner: BodyOwner,
         fid: Idx<Function>,
-        mini: Ast,
+        ast: &Ast,
+        item: usize,
         at: usize,
         byte_delta: isize,
         line_delta: isize,
     ) -> Result<UpdateResult, CompilerError> {
+        let owner = BodyOwner::Function(fid);
         let old_gen = self
             .ws
             .module(mid)
@@ -2198,11 +2198,11 @@ impl Session {
             .map(|b| b.generation)
             .unwrap_or(0);
 
-        let item = &mini.items[0];
+        let item = &ast.items[item];
         let ItemKind::Function(f) = &item.kind else {
             comp_error!(
                 Span::unknown(),
-                "skull incremental: mini-Ast item is not a function"
+                "skull incremental: edited item is not a function"
             );
         };
         let annotations = item.annotations.as_slice();
@@ -2224,7 +2224,7 @@ impl Session {
         let installed = bone_semantic::lower::relower_function_in_place(
             &self.ws,
             &mut module,
-            &mini,
+            ast,
             f,
             annotations,
             fid,
@@ -2286,13 +2286,6 @@ impl Session {
         };
 
         let old_fn_span = self.ws.module(mid).functions[fid].span;
-        let old_gen = self
-            .ws
-            .module(mid)
-            .bodies
-            .get(&owner)
-            .map(|b| b.generation)
-            .unwrap_or(0);
 
         // Extract the new fn span as an owned value so the borrow into `ast`
         // ends before the fallback may move `ast` into `rebuild_module`.
@@ -2309,12 +2302,9 @@ impl Session {
             None => return self.rebuild_module(path, ast, &[changed_idx]),
         };
 
-        // The threaded full-module AST is cooked in place -- no clone (the AST is
-        // not persisted, so this owned copy is ours to consume). Timed as before.
-        let t_clone = Instant::now();
+        // The threaded full-module AST is not persisted, so it is cooked in
+        // place.
         let mut edited = ast;
-        let clone_dur = t_clone.elapsed();
-
         let t_cook = Instant::now();
         cook_one(&mut edited, &self.registry)?;
         let cook_dur = t_cook.elapsed();
@@ -2324,88 +2314,23 @@ impl Session {
         // so re-parse the stored text for a fresh un-cooked module to hand to the
         // whole-module path. Effectively unreachable for a classify-confirmed
         // body edit.
-        let item = match edited
-            .items
-            .iter()
-            .find(|it| it.span.offset_range().0 == new_start)
-        {
-            Some(it) => it,
-            None => {
-                let m = self.parse_stored(ustr(path))?;
-                return self.rebuild_module(path, m, &[changed_idx]);
-            }
-        };
-
-        let ItemKind::Function(f) = &item.kind else {
+        let item = edited.items.iter().position(|it| {
+            it.span.offset_range().0 == new_start && matches!(it.kind, ItemKind::Function(_))
+        });
+        let Some(item) = item else {
             let m = self.parse_stored(ustr(path))?;
             return self.rebuild_module(path, m, &[changed_idx]);
         };
-
-        let annotations = item.annotations.as_slice();
 
         let at = old_fn_span.offset_range().1;
         let byte_delta =
             new_fn_span.offset_range().1 as isize - old_fn_span.offset_range().1 as isize;
         let line_delta = new_fn_span.line_range().1 as isize - old_fn_span.line_range().1 as isize;
 
-        let old_inf = self
-            .ws
-            .inferences
-            .get_mut(mid.index())
-            .and_then(|s| s.take());
-        self.ws.phase_timings.clear();
-        self.ws.phase_timings.push(("clone ast", clone_dur));
+        let result =
+            self.commit_body_relower(mid, fid, &edited, item, at, byte_delta, line_delta)?;
         self.ws.phase_timings.push(("cook one", cook_dur));
-
-        let mut module = std::mem::take(self.ws.module_mut(mid));
-
-        let shift_timer = Instant::now();
-        span_shift::shift_module_after_edit(&mut module, owner, at, byte_delta, line_delta);
-        self.ws.log_time("shift spans", shift_timer);
-
-        let lower_timer = Instant::now();
-
-        let installed = bone_semantic::lower::relower_function_in_place(
-            &self.ws,
-            &mut module,
-            &edited,
-            f,
-            annotations,
-            fid,
-        )?;
-
-        if installed {
-            if let Some(b) = module.bodies.get_mut(&owner) {
-                b.generation = old_gen + 1;
-            }
-        }
-
-        *self.ws.module_mut(mid) = module;
-        self.ws.index_param_signature(mid, fid);
-        self.ws.log_time("lower functions", lower_timer);
-
-        let infer_timer = Instant::now();
-        let result = check_module_incremental(
-            &self.ws,
-            mid,
-            self.ws.module(mid),
-            old_inf.unwrap_or_default(),
-        )?;
-        self.ws.set_inference(mid, result);
-        self.ws.log_time("infer functions", infer_timer);
-
-        let deps_timer = Instant::now();
-        self.update_dependents_for(mid);
-        self.ws.log_time("rebuild dependents", deps_timer);
-
-        let body = vec![(mid, owner)];
-
-        Ok(UpdateResult {
-            tier: UpdateTier::BodyOnly,
-            reinferred: body.clone(),
-            relowered: body,
-            ..UpdateResult::default()
-        })
+        Ok(result)
     }
 
     /// The module's whole type arena as a seed for its next lowering, or `None`
