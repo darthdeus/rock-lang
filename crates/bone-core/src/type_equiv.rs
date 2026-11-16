@@ -122,24 +122,11 @@ impl Workspace {
 
     /// The node behind `t`, following solved inference variables (a solution
     /// may live in another arena).
-    fn resolve_infer<'a>(&self, mut t: TyRef<'a>) -> (TyRef<'a>, TypeExpr) {
-        loop {
-            let e = match t.ty {
-                TyId::Static(mid, idx) => self.module(mid).ty_arena[idx],
-                TyId::Local(idx) => {
-                    t.body
-                        .expect("a Local type needs its BodyInference")
-                        .ty_arena[idx]
-                }
-            };
-            match e {
-                TypeExpr::Infer(v, _) => match t.body.and_then(|b| b.substitutions.get(v)) {
-                    Some(sub) => t.ty = sub,
-                    None => return (t, e),
-                },
-                _ => return (t, e),
-            }
-        }
+    fn resolve_infer<'a>(&self, t: TyRef<'a>) -> (TyRef<'a>, TypeExpr) {
+        let (ty, expr) = self
+            .resolve_ty(t.body, t.ty)
+            .expect("a Local type needs its BodyInference");
+        (TyRef { ty, ..t }, expr)
     }
 }
 

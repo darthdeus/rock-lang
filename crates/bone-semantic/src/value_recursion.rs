@@ -128,18 +128,11 @@ fn collect_nominals(ws: &Workspace) -> FxHashMap<Ustr, Nominal> {
 fn generic_vars(ws: &Workspace, generics: &[TyId]) -> Vec<VarId> {
     generics
         .iter()
-        .filter_map(|&g| match static_expr(ws, g) {
+        .filter_map(|&g| match ws.resolve_ty(None, g) {
             Some((_, TypeExpr::Generic(var, _))) => Some(var),
             _ => None,
         })
         .collect()
-}
-
-fn static_expr(ws: &Workspace, ty: TyId) -> Option<(ModuleId, TypeExpr)> {
-    match ty {
-        TyId::Static(mid, idx) => Some((mid, ws.module(mid).ty_arena[idx])),
-        TyId::Local(_) => None,
-    }
 }
 
 /// Per nominal, which of its type params it holds by value, to a fixpoint:
@@ -179,17 +172,15 @@ fn by_value_params(
     ty: TyId,
     out: &mut Vec<VarId>,
 ) {
-    let Some((mid, te)) = static_expr(ws, ty) else {
+    let Some((ty, te)) = ws.resolve_ty(None, ty) else {
         return;
     };
     match te {
         TypeExpr::Generic(var, _) => out.push(var),
-        TypeExpr::Nullable(inner) => {
-            by_value_params(ws, nominals, stored, TyId::Static(mid, inner), out)
-        }
+        TypeExpr::Nullable(inner) => by_value_params(ws, nominals, stored, ty.with_idx(inner), out),
         TypeExpr::Tuple { elements } => {
             for idx in elements {
-                by_value_params(ws, nominals, stored, TyId::Static(mid, idx), out);
+                by_value_params(ws, nominals, stored, ty.with_idx(idx), out);
             }
         }
         TypeExpr::App {
@@ -199,7 +190,7 @@ fn by_value_params(
             let Some(held) = stored.get(&n) else { return };
             for (i, idx) in params.into_iter().enumerate() {
                 if held.contains(&i) {
-                    by_value_params(ws, nominals, stored, TyId::Static(mid, idx), out);
+                    by_value_params(ws, nominals, stored, ty.with_idx(idx), out);
                 }
             }
         }
@@ -224,16 +215,14 @@ fn by_value_targets(
         via: Option<&str>,
         sink: &mut dyn FnMut(Ustr, Option<String>),
     ) {
-        let Some((mid, te)) = static_expr(ws, ty) else {
+        let Some((ty, te)) = ws.resolve_ty(None, ty) else {
             return;
         };
         match te {
-            TypeExpr::Nullable(inner) => {
-                walk(ws, nominals, stored, TyId::Static(mid, inner), via, sink)
-            }
+            TypeExpr::Nullable(inner) => walk(ws, nominals, stored, ty.with_idx(inner), via, sink),
             TypeExpr::Tuple { elements } => {
                 for idx in elements {
-                    walk(ws, nominals, stored, TyId::Static(mid, idx), via, sink);
+                    walk(ws, nominals, stored, ty.with_idx(idx), via, sink);
                 }
             }
             TypeExpr::App {
@@ -252,14 +241,7 @@ fn by_value_targets(
                 };
                 for (i, idx) in params.into_iter().enumerate() {
                     if held.contains(&i) {
-                        walk(
-                            ws,
-                            nominals,
-                            stored,
-                            TyId::Static(mid, idx),
-                            Some(via),
-                            sink,
-                        );
+                        walk(ws, nominals, stored, ty.with_idx(idx), Some(via), sink);
                     }
                 }
             }

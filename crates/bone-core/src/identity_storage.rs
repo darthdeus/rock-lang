@@ -344,10 +344,7 @@ struct ParamClasses {
 /// A declaration type. Constructor parameter classes are read from
 /// declarations only.
 fn static_expr(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
-    match ty {
-        TyId::Static(mid, idx) => Some(ws.module(mid).ty_arena[idx]),
-        TyId::Local(_) => None,
-    }
+    ws.resolve_ty(None, ty).map(|(_, expr)| expr)
 }
 
 fn visit<V: IdentityTypes>(
