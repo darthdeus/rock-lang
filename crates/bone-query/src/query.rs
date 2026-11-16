@@ -3424,20 +3424,14 @@ fn enum_def_for_variant(
     enum_name: Option<Ustr>,
     variant: Ustr,
 ) -> Option<&hir::EnumDef> {
-    for m in ws.modules.iter() {
-        if let Some(name) = enum_name {
-            if let Some(idx) = m.enums_by_name.get(&name) {
-                return Some(&m.enums[*idx]);
-            }
-        } else if let Some((_, e)) = m
-            .enums
-            .iter()
-            .find(|(_, e)| e.variants.iter().any(|v| v.name == variant))
-        {
-            return Some(e);
-        }
+    if let Some(name) = enum_name {
+        return enum_def_by_name(ws, name);
     }
-    None
+    ws.modules.iter().find_map(|m| {
+        m.enums
+            .values()
+            .find(|e| e.variants.iter().any(|v| v.name == variant))
+    })
 }
 
 /// Type of a named field in a record-variant payload.
@@ -3490,17 +3484,12 @@ pub(crate) fn enum_variants_with_shape(
     ws: &Workspace,
     enum_name: &str,
 ) -> Vec<(String, VariantShape)> {
-    let name = Ustr::from(enum_name);
-    for m in ws.modules.iter() {
-        if let Some(idx) = m.enums_by_name.get(&name) {
-            return m.enums[*idx]
-                .variants
-                .iter()
-                .map(|v| (v.name.to_string(), VariantShape::of(&v.payload)))
-                .collect();
-        }
-    }
-    Vec::new()
+    enum_def_by_name(ws, Ustr::from(enum_name)).map_or_else(Vec::new, |e| {
+        e.variants
+            .iter()
+            .map(|v| (v.name.to_string(), VariantShape::of(&v.payload)))
+            .collect()
+    })
 }
 
 /// Look up a newtype definition by name across all modules.
@@ -5368,19 +5357,13 @@ fn functions_named(
 
 /// `Name { f: T, .. }` constructor signature for struct literal `name`, or None.
 fn struct_ctor_sig(ws: &Workspace, name: Ustr) -> Option<SignatureEntry> {
-    for m in ws.modules.iter() {
-        if let Some(sid) = m.struct_by_name.get(&name) {
-            let sdef = &m.structs[*sid];
-            let params: Vec<String> = sdef
-                .fields
-                .iter()
-                .map(|f| format!("{}: {}", f.name, ws.render(None, f.ty)))
-                .collect();
-            let label = format!("{} {{ {} }}", name, params.join(", "));
-            return Some(SignatureEntry { label, params });
-        }
-    }
-    None
+    let params: Vec<String> = struct_def_by_name(ws, name)?
+        .fields
+        .iter()
+        .map(|f| format!("{}: {}", f.name, ws.render(None, f.ty)))
+        .collect();
+    let label = format!("{} {{ {} }}", name, params.join(", "));
+    Some(SignatureEntry { label, params })
 }
 
 // ---------------------------------------------------------------------------
