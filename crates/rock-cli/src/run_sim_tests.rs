@@ -503,8 +503,8 @@ fn the_classed_pool_caps_live_capped_tasks_and_runs_everything_once() {
     assert!(peak.load(Ordering::SeqCst) >= 1);
 }
 
-/// Both pools the lane runs beside: the plain one and the worker-mode
-/// pool with a capped class.
+/// Both pools the lane runs beside: the plain one and the one with a capped
+/// class.
 #[test]
 fn the_pool_takes_the_reload_lanes_slot_back_when_the_lane_finishes() {
     let capped: Vec<bool> = (0..60).map(|i| i % 4 == 0).collect();
@@ -860,12 +860,6 @@ fn an_unusable_frame_count_is_rejected_not_defaulted() {
             "`FRAME_COUNT={bad}` must reject rather than silently become the default"
         );
     }
-}
-
-#[test]
-fn buffered_runs_never_write_live() {
-    assert!(writes_live(false));
-    assert!(!writes_live(true));
 }
 
 fn lines(raw: &[&str]) -> Vec<String> {
@@ -1592,66 +1586,40 @@ fn prefix_with_site_keeps_origin_in_message() {
 }
 
 #[test]
-fn reload_completion_is_terminal_after_publication() {
+fn reload_ledger_classifies_every_request() {
+    let summary = |requests: usize, applied, pending, rejected, failed| ReloadLedgerSummary {
+        requests,
+        applied,
+        pending,
+        rejected,
+        failed,
+    };
     let mut ledger = ReloadLedger::default();
     ledger.book(7).expect("request books once");
     ledger.publish(7).expect("artifact publishes once");
     ledger
         .complete(7, ReloadTerminal::Applied)
         .expect("watcher completion follows publication");
-    assert_eq!(
-        ledger.summary(),
-        ReloadLedgerSummary {
-            requests: 1,
-            applied: 1,
-            pending: 0,
-            rejected: 0,
-            failed: 0
-        }
-    );
-}
+    assert_eq!(ledger.summary(), summary(1, 1, 0, 0, 0));
 
-#[test]
-fn reload_ledger_distinguishes_booked_and_published_pending() {
+    // Booked and published-but-unconsumed requests are both pending.
     let mut ledger = ReloadLedger::default();
     ledger.book(1).unwrap();
     ledger.book(2).unwrap();
     ledger.publish(2).unwrap();
-    assert_eq!(ledger.summary().requests, 2);
-    assert_eq!(ledger.summary().pending, 2);
-    assert_eq!(ledger.validate().unwrap().pending, 2);
-}
+    assert_eq!(ledger.summary(), summary(2, 0, 2, 0, 0));
 
-#[test]
-fn reload_ledger_accounts_rejection_and_failed_publication() {
     let mut ledger = ReloadLedger::default();
     ledger.book(1).unwrap();
     ledger.reject(1).unwrap();
     ledger.book(2).unwrap();
     ledger.publish(2).unwrap();
     ledger.complete(2, ReloadTerminal::Failed).unwrap();
-    assert_eq!(
-        ledger.validate().unwrap(),
-        ReloadLedgerSummary {
-            requests: 2,
-            applied: 0,
-            pending: 0,
-            rejected: 1,
-            failed: 1
-        }
-    );
+    assert_eq!(ledger.summary(), summary(2, 0, 0, 1, 1));
 }
 
 #[test]
-fn reload_ledger_rejects_drop_duplicate_and_early_completion() {
-    let mut dropped = ReloadLedger::default();
-    dropped.book(1).unwrap();
-    assert_eq!(
-        dropped.summary().pending,
-        1,
-        "a dropped request cannot disappear from accounting"
-    );
-
+fn reload_ledger_rejects_duplicate_and_early_completion() {
     let mut duplicate = ReloadLedger::default();
     duplicate.book(1).unwrap();
     assert!(duplicate.complete(1, ReloadTerminal::Applied).is_err());

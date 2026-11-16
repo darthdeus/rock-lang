@@ -1821,33 +1821,10 @@ fn sim_outcome(summary: &SimSummary, sim_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Run one named entry into a fresh tempdir, returning its name and summary.
-/// Shared by the single-run path (`do_run_sim_opts_with_request`) and the multi-run path
-/// (`do_run_named_sims`) so the tempdir / cleanup handling can't drift
-/// between them. The tempdir is exposed to the child as `OUT`.
-struct SimArtifacts {
-    out_dir: TempDir,
-}
-
-impl SimArtifacts {
-    fn new() -> Result<Self> {
-        Ok(Self {
-            out_dir: TempDir::new().context("creating sim tempdir")?,
-        })
-    }
-
-    fn path(&self) -> &Path {
-        self.out_dir.path()
-    }
-
-    /// The sim's `cleanup_path` removals, then `$OUT` itself.
-    fn finish(self, summary: &mut SimSummary) {
-        for path in std::mem::take(&mut summary.cleanup_paths) {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
+/// Run one named entry into a fresh tempdir, exposed to the child as `OUT`,
+/// returning its name and summary. Shared by the single-run path and
+/// `run_fresh_entries` so the tempdir / cleanup handling can't drift between
+/// them.
 fn run_named_entry(
     name: &str,
     quiet: bool,
@@ -1861,8 +1838,7 @@ fn run_named_entry(
     recorder: Option<&SimRunRecorder>,
     occurrence_id: Option<u64>,
 ) -> Result<(String, SimSummary)> {
-    let artifacts = SimArtifacts::new()?;
-    let out_path = artifacts.path().to_path_buf();
+    let out_dir = TempDir::new().context("creating sim tempdir")?;
 
     if name.is_empty() {
         return Err(anyhow!("sim got an empty sim name"));
@@ -1876,7 +1852,7 @@ fn run_named_entry(
     };
     let part = WorkerPart {
         name: name.to_string(),
-        out_dir: out_path,
+        out_dir: out_dir.path().to_path_buf(),
         frame_budget: frame_budget_for(name, &env_pairs)?,
         timeout: timeout_for(name, &env_pairs)?,
         source_file: source_files.get(name).cloned(),
@@ -1897,7 +1873,10 @@ fn run_named_entry(
     if let (Some(recorder), Some(occurrence_id)) = (recorder, occurrence_id) {
         recorder.artifact_check_start(occurrence_id);
     }
-    artifacts.finish(&mut summary);
+    // The sim's `cleanup_path` removals; `$OUT` itself goes with `out_dir`.
+    for path in std::mem::take(&mut summary.cleanup_paths) {
+        let _ = std::fs::remove_file(path);
+    }
     if let (Some(recorder), Some(occurrence_id)) = (recorder, occurrence_id) {
         recorder.artifact_check_end(occurrence_id, !summary.has_failures());
         recorder.entry_result(
@@ -2325,20 +2304,11 @@ fn print_record(display_name: &str, summary: &SimSummary, streamed: bool) {
     summary.print(display_name, streamed);
 }
 
-/// Run every `@sim` in `project` (the no-name form `rock sim <project>`).
-/// Compiles once, then spawns each sim as its own luajit child with a
-/// fresh tempdir, prints each sim's pass/fail line, and a final suite
-/// tally. Returns Err (non-zero exit) if any sim failed. Each sim gets its
-/// own `OUT`.
 /// The one bounded scheduler. `task` is claimed by index off a shared cursor,
 /// so a task runs exactly once on at most `jobs` OS threads at a time, and the
 /// serial path is the same call with `jobs == 1` rather than a second code path
 /// that could drift from it. Results come back keyed by index; the CALLER
 /// decides the reporting order, because completion order is not deterministic.
-///
-/// Both fan-outs go through here: Phase A's fresh-process children
-/// ([`do_run_all_sims`]) and Phase B's boot-checkpoint worker lanes
-/// ([`run_specs_worker_mode`]).
 fn run_bounded<T, F>(width: &PoolWidth, n: usize, task: F) -> Vec<(usize, Result<T>)>
 where
     F: Fn(usize) -> Result<T> + Sync,
@@ -3274,19 +3244,6 @@ impl ReloadLedger {
         }
         summary
     }
-
-    fn validate(&self) -> Result<ReloadLedgerSummary> {
-        let summary = self.summary();
-        let classified = summary.applied + summary.pending + summary.rejected + summary.failed;
-        if classified != summary.requests {
-            return Err(anyhow!(
-                "reload ledger conservation violated: requests={} classified={}",
-                summary.requests,
-                classified
-            ));
-        }
-        Ok(summary)
-    }
 }
 
 /// Apply one `reload_edit`: in-memory find/replace on the file's CURRENT
@@ -3342,6 +3299,34 @@ fn book_reload_request(ledger: &mut ReloadLedger, req: &ReloadEditReq) -> Result
         .ok_or_else(|| anyhow!("reload_edit omitted request_id"))?;
     ledger.book(request_id)?;
     Ok(request_id)
+}
+
+/// Account every completion the watcher has reported so far. True when one
+/// broke the ledger protocol.
+fn drain_reload_completions(
+    completions: &mpsc::Receiver<ReloadCompletion>,
+    ledger: &mut ReloadLedger,
+    errors: &mut Vec<SiteMessage>,
+) -> bool {
+    let mut protocol_error = false;
+    while let Ok(completion) = completions.try_recv() {
+        let failed = completion.terminal == ReloadTerminal::Failed;
+        if let Err(e) = consume_reload_completion(ledger, completion) {
+            errors.push(SiteMessage {
+                message: format!("reload completion: {e}"),
+                site: String::new(),
+            });
+            protocol_error = true;
+        } else if failed {
+            errors.push(SiteMessage {
+                message:
+                    "reload watcher reported failed publication; last-good artifact remains active"
+                        .into(),
+                site: String::new(),
+            });
+        }
+    }
+    protocol_error
 }
 
 fn consume_reload_completion(
@@ -3719,10 +3704,6 @@ pub(crate) fn is_reload_lane(env_pairs: &[(String, String)]) -> bool {
     env_pairs
         .iter()
         .any(|(k, v)| k == "STONE_HOT_RELOAD" && v != "0")
-}
-
-fn writes_live(buffered: bool) -> bool {
-    !buffered
 }
 
 /// Fixed values the runner publishes to EVERY sim child, layered BEFORE
@@ -4469,7 +4450,7 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
                 }
                 if let Some(event) = marker {
                     let rest = &event;
-                    if writes_live(buffered) {
+                    if !buffered {
                         if let Some((prefix, _)) = line
                             .split_once("__SIM__")
                             .filter(|(prefix, _)| !prefix.is_empty())
@@ -4508,7 +4489,7 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
                     if !quiet {
                         print_progress(rest);
                     }
-                } else if writes_live(buffered) {
+                } else if !buffered {
                     // Result output, NOT logging: verbatim passthrough of
                     // the child game's own stderr (non-`__SIM__` lines) —
                     // the game's output stream, not run_sim's diagnostics.
@@ -4547,23 +4528,11 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
     let mut reload_ledger = ReloadLedger::default();
     let mut stone = stone;
     let (status, timed_out) = 'child: loop {
-        let mut completion_protocol_error = false;
-        while let Ok(completion) = reload_completion_rx.try_recv() {
-            let failed = completion.terminal == ReloadTerminal::Failed;
-            if let Err(e) = consume_reload_completion(&mut reload_ledger, completion) {
-                reload_errors.push(SiteMessage {
-                    message: format!("reload completion: {e}"),
-                    site: String::new(),
-                });
-                completion_protocol_error = true;
-            } else if failed {
-                reload_errors.push(SiteMessage {
-                    message: "reload watcher reported failed publication; last-good artifact remains active".into(),
-                    site: String::new(),
-                });
-            }
-        }
-        if completion_protocol_error {
+        if drain_reload_completions(
+            &reload_completion_rx,
+            &mut reload_ledger,
+            &mut reload_errors,
+        ) {
             runner_killed = true;
             break (terminate_reload_child(&mut child)?, false);
         }
@@ -4657,7 +4626,7 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
                                 let site = compress_site(&req.site);
                                 // Stream now for a single run; buffered callers emit
                                 // the retained error under their record lock.
-                                if writes_live(buffered) {
+                                if !buffered {
                                     eprintln!(
                                         "{}{} reload_edit: {e}",
                                         format!("[{}] ", site).bright_black(),
@@ -4671,22 +4640,11 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
                                 break 'child (terminate_reload_child(&mut child)?, false);
                             }
                         }
-                        while let Ok(completion) = reload_completion_rx.try_recv() {
-                            let failed = completion.terminal == ReloadTerminal::Failed;
-                            if let Err(e) =
-                                consume_reload_completion(&mut reload_ledger, completion)
-                            {
-                                reload_errors.push(SiteMessage {
-                                    message: format!("reload completion: {e}"),
-                                    site: String::new(),
-                                });
-                            } else if failed {
-                                reload_errors.push(SiteMessage {
-                                    message: "reload watcher reported failed publication; last-good artifact remains active".into(),
-                                    site: String::new(),
-                                });
-                            }
-                        }
+                        drain_reload_completions(
+                            &reload_completion_rx,
+                            &mut reload_ledger,
+                            &mut reload_errors,
+                        );
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -4760,30 +4718,13 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
             "rock sim `{label}`: stdout reader thread panicked; game stdout may be incomplete: {panic:?}"
         )),
     }
-    while let Ok(completion) = reload_completion_rx.try_recv() {
-        let failed = completion.terminal == ReloadTerminal::Failed;
-        if let Err(e) = consume_reload_completion(&mut reload_ledger, completion) {
-            reload_errors.push(SiteMessage {
-                message: format!("reload completion: {e}"),
-                site: String::new(),
-            });
-        } else if failed {
-            reload_errors.push(SiteMessage {
-                message:
-                    "reload watcher reported failed publication; last-good artifact remains active"
-                        .into(),
-                site: String::new(),
-            });
-        }
-    }
-    if let Err(e) = reload_ledger.validate() {
-        reload_errors.push(SiteMessage {
-            message: format!("reload ledger: {e}"),
-            site: String::new(),
-        });
-    }
+    drain_reload_completions(
+        &reload_completion_rx,
+        &mut reload_ledger,
+        &mut reload_errors,
+    );
     let reload_summary = reload_ledger.summary();
-    if reload_summary.requests > 0 && reload_summary.pending > 0 {
+    if reload_summary.pending > 0 {
         reload_errors.push(SiteMessage {
             message: format!(
                 "reload completion ledger has {} pending request(s): requests={} applied={} pending={} rejected={} failed={}",
@@ -4797,7 +4738,7 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
             site: String::new(),
         });
     }
-    if writes_live(buffered) {
+    if !buffered {
         for message in &reader_diagnostics {
             log::warn!(target: "SIM", "{message}");
         }
@@ -4940,7 +4881,7 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
         });
     }
 
-    if !quiet && writes_live(buffered) {
+    if !quiet && !buffered {
         if (summary.has_failures() || summary.timed_out || summary.process_failure_code.is_some())
             && !stdout_str.trim().is_empty()
         {
@@ -4955,9 +4896,6 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
     Ok(summary)
 }
 
-/// Run `entry_specs` (each its own child and `$OUT`) and return a
-/// record per entry. Every entry's `$OUT` stays live until its child has
-/// exited and its deferred artifacts have been processed.
 /// How a worker process ended, for the entries it never started: its exit
 /// status (code or signal), whether the runner killed it and why, and the last
 /// lines of game stderr outside the `__SIM__` channel.
@@ -5297,8 +5235,6 @@ struct SimSummary {
     /// log or artifacts. Without it, an entry with no check fails.
     no_checks: Option<String>,
 }
-
-impl SimSummary {}
 
 struct ImageSnapshotOp {
     name: String,
