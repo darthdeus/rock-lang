@@ -261,61 +261,55 @@ fn global_reinferred_of(
     panic!("no global named {name}");
 }
 
-const INCR_SRC: &str = r#"
-fn tag() -> string {
-    return build_var("SHA")
-}
-fn other() -> int {
-    return 1
-}
-"#;
-
-#[test]
-fn build_var_change_reaches_incremental_and_overlay() {
+/// Full builds at `before`, then `move_input` changes the input under an
+/// unrelated body edit, so only stale-input detection can re-emit its
+/// `consumers` readers. The incremental build must equal a fresh one, and the
+/// overlay must redefine every reader, the const `TAG` initializer included.
+fn assert_input_change_reaches_every_consumer(
+    src: &str,
+    before: (ComptimeInputs, &str),
+    after: (ComptimeInputs, &str),
+    move_input: impl FnOnce(),
+    consumers: usize,
+) {
     use skull::mir_emit::{emit_full, emit_incremental, emit_overlay};
 
-    let ws1 = ws_with_inputs(INCR_SRC, inputs_with_var("SHA", "first-sha-value"));
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (full1, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
-    assert!(
-        full1.lua.contains("first-sha-value"),
-        "control: full build inlines v1"
-    );
+    let ws1 = ws_with_inputs(src, before.0);
+    let (full, mut incremental_cache) = emit_full_of(&ws1, "emit_full v1");
+    let (_, mut overlay_cache) = emit_full_of(&ws1, "emit_full v1");
+    assert_eq!(full.lua.matches(before.1).count(), consumers);
 
-    // Same source; only the resolved value moved. The edit the session saw is
-    // an unrelated body, so only stale-input detection can re-emit `tag`.
-    let ws2 = ws_with_inputs(INCR_SRC, inputs_with_var("SHA", "second-sha-value"));
-    let edit = vec![body_id(&ws2, "other")];
-    let incremental = emit_incremental(&ws2, &mut cache, &edit).expect("emit_incremental");
-    assert!(
-        incremental.lua.contains("second-sha-value")
-            && !incremental.lua.contains("first-sha-value"),
-        "incremental assembly must carry the new value"
-    );
+    move_input();
+    let ws2 = ws_with_inputs(src, after.0);
+    let edit = [body_id(&ws2, "other")];
+    let incremental =
+        emit_incremental(&ws2, &mut incremental_cache, &edit).expect("emit_incremental");
+    assert_eq!(incremental.lua.matches(after.1).count(), consumers);
+    assert!(!incremental.lua.contains(before.1));
     let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap())
         .expect("fresh")
         .0;
     assert_eq!(
         incremental.lua, fresh.lua,
-        "incremental != fresh after a var change"
+        "incremental != fresh after an input change"
     );
 
-    // Overlay from a fresh cache: full at v1, overlay after the value moved.
-    let ws1b = ws_with_inputs(INCR_SRC, inputs_with_var("SHA", "first-sha-value"));
-    let (_, mut cache2) = emit_full(&ws1b, mid).expect("emit_full v1b");
-    let ws3 = ws_with_inputs(INCR_SRC, inputs_with_var("SHA", "third-sha-value"));
-    let overlay = emit_overlay(&ws3, &mut cache2, &[body_id(&ws3, "other")]).expect("emit_overlay");
+    let overlay = emit_overlay(&ws2, &mut overlay_cache, &edit).expect("emit_overlay");
+    assert_eq!(
+        overlay.lua.matches(after.1).count(),
+        consumers,
+        "the overlay must redefine every reader of the changed input:\n{}",
+        overlay.lua
+    );
     assert!(
-        overlay.lua.contains("third-sha-value"),
-        "the overlay must redefine the body reading the changed var:\n{}",
+        overlay.lua.contains("TAG = "),
+        "the overlay must re-run the const's init line:\n{}",
         overlay.lua
     );
 }
 
 #[test]
-fn a_comptime_input_change_reaches_every_recorded_consumer() {
-    use skull::mir_emit::{emit_full, emit_incremental};
-
+fn a_build_var_change_reaches_every_recorded_consumer() {
     let src = r#"
 fn first() -> string {
     return build_var("SHA")
@@ -333,95 +327,43 @@ fn main() {
     print(TAG)
 }
 "#;
-    let ws1 = ws_with_inputs(src, inputs_with_var("SHA", "all-first"));
-    let (full1, mut cache) = emit_full_of(&ws1, "emit_full v1");
-    assert_eq!(full1.lua.matches("all-first").count(), 3);
-
-    let ws2 = ws_with_inputs(src, inputs_with_var("SHA", "all-second"));
-    let incremental =
-        emit_incremental(&ws2, &mut cache, &[body_id(&ws2, "other")]).expect("emit_incremental");
-    assert_eq!(incremental.lua.matches("all-second").count(), 3);
-    assert!(!incremental.lua.contains("all-first"));
-    let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap())
-        .expect("fresh")
-        .0;
-    assert_eq!(
-        incremental.lua, fresh.lua,
-        "incremental != fresh for all consumers"
+    assert_input_change_reaches_every_consumer(
+        src,
+        (inputs_with_var("SHA", "all-first"), "all-first"),
+        (inputs_with_var("SHA", "all-second"), "all-second"),
+        || {},
+        3,
     );
 }
 
 #[test]
-fn embed_file_change_reaches_incremental() {
-    use skull::mir_emit::{emit_full, emit_incremental};
-
+fn an_embedded_file_change_reaches_every_recorded_consumer() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("data.txt"), "embed-v1").unwrap();
+    let data = dir.path().join("data.txt");
+    std::fs::write(&data, "embed-v1").unwrap();
     let src = r#"
-fn data() -> string {
+fn first() -> string {
     return embed_string("data.txt")
 }
+const TAG: string = embed_string("data.txt")
 fn other() -> int {
     return 1
+}
+fn main() {
+    print(first())
+    print(TAG)
 }
 "#;
     let inputs = ComptimeInputs {
         embed_root: Some(dir.path().to_path_buf()),
         ..ComptimeInputs::default()
     };
-
-    let ws1 = ws_with_inputs(src, inputs.clone());
-    let (full1, mut cache) = emit_full_of(&ws1, "emit_full v1");
-    assert!(
-        full1.lua.contains("embed-v1"),
-        "control: full build embeds v1"
-    );
-
-    std::fs::write(dir.path().join("data.txt"), "embed-v2").unwrap();
-    let ws2 = ws_with_inputs(src, inputs);
-    let edit = vec![body_id(&ws2, "other")];
-    let incremental = emit_incremental(&ws2, &mut cache, &edit).expect("emit_incremental");
-    assert!(
-        incremental.lua.contains("embed-v2") && !incremental.lua.contains("embed-v1"),
-        "incremental assembly must carry the edited file's bytes"
-    );
-    let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap())
-        .expect("fresh")
-        .0;
-    assert_eq!(
-        incremental.lua, fresh.lua,
-        "incremental != fresh after a file edit"
-    );
-}
-
-#[test]
-fn embed_file_change_reaches_the_overlay() {
-    use skull::mir_emit::emit_overlay;
-
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("data.txt"), "fn-embed-v1").unwrap();
-    let src = r#"
-fn data() -> string {
-    return embed_string("data.txt")
-}
-fn other() -> int {
-    return 1
-}
-"#;
-    let inputs = ComptimeInputs {
-        embed_root: Some(dir.path().to_path_buf()),
-        ..ComptimeInputs::default()
-    };
-    let ws1 = ws_with_inputs(src, inputs.clone());
-    let (_, mut cache) = emit_full_of(&ws1, "emit_full v1");
-
-    std::fs::write(dir.path().join("data.txt"), "fn-embed-v2").unwrap();
-    let ws2 = ws_with_inputs(src, inputs);
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "other")]).expect("emit_overlay");
-    assert!(
-        overlay.lua.contains("fn-embed-v2"),
-        "the overlay must redefine the body embedding the edited file:\n{}",
-        overlay.lua
+    assert_input_change_reaches_every_consumer(
+        src,
+        (inputs.clone(), "embed-v1"),
+        (inputs, "embed-v2"),
+        || std::fs::write(&data, "embed-v2").unwrap(),
+        2,
     );
 }
 
@@ -468,59 +410,6 @@ fn main() {
             .iter()
             .any(|f| std::path::Path::new(f.as_str()) == canonical),
         "a global initializer's embed must join the watch set, got {files:?}"
-    );
-}
-
-const GLOBAL_VAR_SRC: &str = r#"
-const TAG: string = build_var("SHA")
-fn other() -> int {
-    return 1
-}
-fn main() {
-    print(TAG)
-}
-"#;
-
-#[test]
-fn global_const_build_var_change_reaches_incremental() {
-    use skull::mir_emit::emit_incremental;
-
-    let ws1 = ws_with_inputs(GLOBAL_VAR_SRC, inputs_with_var("SHA", "first-sha-value"));
-    let (full1, mut cache) = emit_full_of(&ws1, "emit_full v1");
-    assert!(
-        full1.lua.contains("first-sha-value"),
-        "control: full build inlines v1"
-    );
-
-    let ws2 = ws_with_inputs(GLOBAL_VAR_SRC, inputs_with_var("SHA", "second-sha-value"));
-    let edit = vec![body_id(&ws2, "other")];
-    let incremental = emit_incremental(&ws2, &mut cache, &edit).expect("emit_incremental");
-    assert!(
-        incremental.lua.contains("second-sha-value")
-            && !incremental.lua.contains("first-sha-value"),
-        "incremental reassembly re-lowers globals, so the new value must land"
-    );
-}
-
-#[test]
-fn global_const_build_var_change_reaches_the_overlay() {
-    use skull::mir_emit::emit_overlay;
-
-    let ws1 = ws_with_inputs(GLOBAL_VAR_SRC, inputs_with_var("SHA", "first-sha-value"));
-    let (_, mut cache) = emit_full_of(&ws1, "emit_full v1");
-
-    // The session saw only an unrelated body edit; the var moved underneath.
-    let ws2 = ws_with_inputs(GLOBAL_VAR_SRC, inputs_with_var("SHA", "second-sha-value"));
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "other")]).expect("emit_overlay");
-    assert!(
-        overlay.lua.contains("second-sha-value"),
-        "the overlay must re-emit a const init whose build var moved:\n{}",
-        overlay.lua
-    );
-    assert!(
-        overlay.lua.contains("TAG = "),
-        "the overlay must re-run the const's init line:\n{}",
-        overlay.lua
     );
 }
 
@@ -583,38 +472,6 @@ fn main() {
         second.lua.contains("second-v2"),
         "a later change to the newly recorded input must reach the global initializer: {}",
         second.lua
-    );
-}
-
-#[test]
-fn global_const_embed_change_reaches_the_overlay() {
-    use skull::mir_emit::emit_overlay;
-
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("data.txt"), "overlay-embed-v1").unwrap();
-    let src = r#"
-const DATA: string = embed_string("data.txt")
-fn other() -> int {
-    return 1
-}
-fn main() {
-    print(DATA)
-}
-"#;
-    let inputs = ComptimeInputs {
-        embed_root: Some(dir.path().to_path_buf()),
-        ..ComptimeInputs::default()
-    };
-    let ws1 = ws_with_inputs(src, inputs.clone());
-    let (_, mut cache) = emit_full_of(&ws1, "emit_full v1");
-
-    std::fs::write(dir.path().join("data.txt"), "overlay-embed-v2").unwrap();
-    let ws2 = ws_with_inputs(src, inputs);
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "other")]).expect("emit_overlay");
-    assert!(
-        overlay.lua.contains("overlay-embed-v2"),
-        "the overlay must re-emit a const init whose embedded file changed:\n{}",
-        overlay.lua
     );
 }
 
