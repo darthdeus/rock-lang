@@ -79,19 +79,6 @@ pub(crate) fn do_fmt(paths: &[String], in_place: bool, check: bool) -> Result<()
                     // Default: format in-place
                     let original = fs::read_to_string(file_path)?;
                     if original != formatted {
-                        // Debug: print what's different
-                        if std::env::var("DEBUG_FMT").is_ok() {
-                            eprintln!(
-                                "Original has {} chars, {} trailing newlines",
-                                original.len(),
-                                original.chars().rev().take_while(|&c| c == '\n').count()
-                            );
-                            eprintln!(
-                                "Formatted has {} chars, {} trailing newlines",
-                                formatted.len(),
-                                formatted.chars().rev().take_while(|&c| c == '\n').count()
-                            );
-                        }
                         fs::write(file_path, &formatted)?;
                         println!("Formatted '{}'", file_path);
                         formatted_count += 1;
