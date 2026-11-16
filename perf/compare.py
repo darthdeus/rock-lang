@@ -52,7 +52,9 @@ def timed(argv, env):
     proc.returncode = os.waitstatus_to_exitcode(status)
     if proc.returncode:
         sys.exit(f"{' '.join(argv)} failed ({proc.returncode}):\n{stderr.decode()[-2000:]}")
-    return wall, usage.ru_maxrss * 1024
+    # macOS reports bytes; other supported hosts report KiB.
+    rss_bytes = usage.ru_maxrss if sys.platform == "darwin" else usage.ru_maxrss * 1024
+    return wall, rss_bytes
 
 
 def quartiles(values):
