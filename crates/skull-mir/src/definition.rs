@@ -42,14 +42,6 @@ pub struct DefinitionEntry {
     pub declaration_ordinal: usize,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct DefinitionCensus {
-    pub declarations: usize,
-    pub accessors: usize,
-    pub applications: usize,
-    pub admitted: usize,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DefinitionCatalog {
     pub catalog: Ustr,
@@ -61,7 +53,6 @@ pub struct DefinitionCatalog {
 pub struct DefinitionPlan {
     pub catalogs: Vec<DefinitionCatalog>,
     pub entries: Vec<DefinitionEntry>,
-    pub census: DefinitionCensus,
 }
 
 impl DefinitionPlan {
@@ -214,27 +205,13 @@ fn role_for(
     Ok(Role { catalog, key_param })
 }
 
-/// [`collect`], refusing a plan that did not admit every application.
-pub fn collect_complete(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
-    let plan = collect(ws)?;
-    if plan.census.applications != plan.census.admitted {
-        return Err(CompilerError::new_no_location(format!(
-            "incomplete DefinitionPlan census: {:?}",
-            plan.census
-        )));
-    }
-    Ok(plan)
-}
-
 pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
     let mut roles = std::collections::HashMap::new();
-    let mut census = DefinitionCensus::default();
     for module in ws.source_modules() {
         for (_, decorator) in module.decorators.iter() {
             let Some(ann) = metadata(decorator)? else {
                 continue;
             };
-            census.declarations += 1;
             let role = role_for(ws, decorator, ann)?;
             if roles.insert(decorator.def_key, role).is_some() {
                 return Err(CompilerError::new_with_label(
@@ -264,7 +241,6 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
             let Some(ann) = annotation(&function.annotations, "artifact_catalog")? else {
                 continue;
             };
-            census.accessors += 1;
             let Some(catalog) = string_arg(ann, "catalog") else {
                 return Err(CompilerError::new_with_label(
                     ann.span,
@@ -366,7 +342,6 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
                 let Some(role) = roles.get(&application_key) else {
                     continue;
                 };
-                census.applications += 1;
                 if !function.generics.is_empty() || !function.param_decls.is_empty() {
                     return Err(CompilerError::new_with_label(
                         function.span,
@@ -476,18 +451,13 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
                     declaration_ordinal: ordinal,
                 });
                 ordinal += 1;
-                census.admitted += 1;
             }
         }
     }
     entries.sort_by_key(|entry| (entry.catalog, entry.declaration_ordinal));
     let mut catalogs = catalogs.into_values().collect::<Vec<_>>();
     catalogs.sort_by_key(|catalog| catalog.catalog);
-    Ok(DefinitionPlan {
-        catalogs,
-        entries,
-        census,
-    })
+    Ok(DefinitionPlan { catalogs, entries })
 }
 
 #[cfg(test)]
@@ -519,10 +489,6 @@ mod tests {
         )]);
 
         let plan = collect(&ws).expect("definition plan");
-        assert_eq!(plan.census.declarations, 1);
-        assert_eq!(plan.census.applications, 2);
-        assert_eq!(plan.census.admitted, 2);
-        assert_eq!(plan.entries.len(), plan.census.admitted);
         assert_eq!(
             plan.entries
                 .iter()
@@ -592,10 +558,9 @@ mod tests {
             ),
         )]);
         let plan = collect(&ws).expect("typed definition plan");
-        assert_eq!(plan.census.accessors, 1);
         assert_eq!(plan.catalogs.len(), 1);
+        assert!(plan.catalogs[0].accessor.is_some());
         assert_eq!(plan.entries.len(), 1);
-        assert_eq!(plan.entries.len(), plan.census.admitted);
     }
 
     #[test]
@@ -612,7 +577,6 @@ mod tests {
         let plan = collect(&ws).expect("declared empty definition plan");
         assert_eq!(plan.catalogs.len(), 1);
         assert_eq!(plan.entries.len(), 0);
-        assert_eq!(plan.census.admitted, 0);
     }
 
     #[test]

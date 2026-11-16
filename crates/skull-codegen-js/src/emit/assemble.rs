@@ -290,13 +290,13 @@ pub(super) fn assemble_program_core(
         SimValues::All,
         &mut code_artifact,
     );
-    let definition_plan = skull_mir::definition::collect_complete(ws)?;
+    let definition_plan = skull_mir::definition::collect(ws)?;
     let lifecycle_plan = skull_mir::lifecycle::attach_artifact(lifecycle_skeleton, &code_artifact)?;
     let has_definition_plan = !definition_plan.catalogs.is_empty();
     let code_slot_stage = code_slot_registration_js(ws, scx.interner(), &code_artifact)?;
     out.push_str(&code_slot_stage);
     if code_artifact
-        .publication(has_definition_plan, lifecycle_plan.census.declarations > 0)
+        .publication(has_definition_plan, lifecycle_plan.declarations > 0)
         .explicit_begin
     {
         out.push_str("__rock_code_slot_begin();\n");
@@ -320,7 +320,7 @@ pub(super) fn assemble_program_core(
     out.push_str(code_slot_publish_js(
         &code_artifact,
         has_definition_plan,
-        lifecycle_plan.census.declarations > 0,
+        lifecycle_plan.declarations > 0,
     ));
     let global_layout = skull_mir::global_storage::global_layout_id(ws, scx).map_err(err)?;
     let program = format!(

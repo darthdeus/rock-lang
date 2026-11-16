@@ -279,7 +279,7 @@ pub fn emit_overlay_with_span_edits(
     let code_slot_stage =
         code_slot_registration_js(ws, cache.scx.interner(), &current.code_artifact)?;
     out.push_str(&code_slot_stage);
-    if !has_code_slots && current.lifecycle_plan.census.declarations > 0 {
+    if !has_code_slots && current.lifecycle_plan.declarations > 0 {
         out.push_str("__rock_code_slot_begin();\n");
     }
     out.push_str(&lifecycle_plan_stage_js(
@@ -290,7 +290,7 @@ pub fn emit_overlay_with_span_edits(
     out.push_str(code_slot_publish_js(
         &current.code_artifact,
         false,
-        current.lifecycle_plan.census.declarations > 0,
+        current.lifecycle_plan.declarations > 0,
     ));
     out.push_str("} catch (e) {\n");
     out.push_str("  __rock_code_slot_abort();\n");

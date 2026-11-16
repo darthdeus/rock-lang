@@ -340,7 +340,7 @@ fn assemble_overlay(
     let t_lifecycle = Instant::now();
     let lifecycle_plan = skull_mir::lifecycle::collect_with_artifact(ws, &candidate_code_artifact)?;
     let d_lifecycle = t_lifecycle.elapsed();
-    if !has_code_slots && lifecycle_plan.census.declarations > 0 {
+    if !has_code_slots && lifecycle_plan.declarations > 0 {
         out.push_str("__rock_code_slot_begin()\n");
     }
     let t_publication = Instant::now();
@@ -349,7 +349,7 @@ fn assemble_overlay(
     out.push_str(code_slot_publish_lua(
         &candidate_code_artifact,
         false,
-        lifecycle_plan.census.declarations > 0,
+        lifecycle_plan.declarations > 0,
     ));
     let d_publication = t_publication.elapsed();
     let t_metadata = Instant::now();

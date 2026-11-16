@@ -98,14 +98,7 @@ fn compute_inner(
     renderer: &str,
     code_rows: Option<&CodeRows>,
 ) -> Result<String, FingerprintError> {
-    validate_inputs(
-        ws,
-        artifact,
-        lifecycle,
-        definitions,
-        comptime_reads,
-        volatile_vars,
-    )?;
+    validate_inputs(ws, artifact, comptime_reads, volatile_vars)?;
 
     let mut h = CanonicalHasher::default();
     h.string(FINGERPRINT_VERSION);
@@ -123,22 +116,6 @@ fn compute_inner(
         h.string(name);
     }
 
-    h.census(
-        "code",
-        &[
-            artifact.census.examined as u64,
-            artifact.census.assigned as u64,
-            artifact.census.missing_identity as u64,
-            artifact.census.duplicate_identity as u64,
-            artifact.census.duplicate_body as u64,
-            artifact.census.unresolved_body as u64,
-            artifact.census.direct_call_only as u64,
-            artifact.census.named_values as u64,
-            artifact.census.lambda_values as u64,
-            artifact.census.capturing_lambdas as u64,
-            artifact.census.capture_free_lambdas as u64,
-        ],
-    );
     if let Some(rows) = code_rows {
         if rows.len() != artifact.entries.len() {
             return Err(FingerprintError(
@@ -160,19 +137,8 @@ fn compute_inner(
         }
     }
 
-    h.census(
-        "lifecycle",
-        &[
-            lifecycle.census.declarations as u64,
-            lifecycle.census.applications as u64,
-            lifecycle.census.admitted as u64,
-            lifecycle.census.process_owned as u64,
-            lifecycle.census.scene_owned as u64,
-            lifecycle.census.plain as u64,
-            lifecycle.census.gated as u64,
-            lifecycle.census.dependency_edges as u64,
-        ],
-    );
+    h.string("lifecycle");
+    h.len(lifecycle.declarations);
     h.len(lifecycle.entries.len());
     for entry in &lifecycle.entries {
         h.string(entry.phase.as_str());
@@ -196,15 +162,6 @@ fn compute_inner(
         h.u64(entry.body_fingerprint);
     }
 
-    h.census(
-        "definition",
-        &[
-            definitions.census.declarations as u64,
-            definitions.census.accessors as u64,
-            definitions.census.applications as u64,
-            definitions.census.admitted as u64,
-        ],
-    );
     h.len(definitions.catalogs.len());
     for catalog in &definitions.catalogs {
         h.string(catalog.catalog.as_str());
@@ -511,12 +468,10 @@ impl CodeRows {
 fn validate_inputs(
     ws: &Workspace,
     artifact: &CodeArtifact,
-    lifecycle: &LifecyclePlan,
-    definitions: &DefinitionPlan,
     reads: &[ComptimeRead],
     volatile_vars: &FxHashSet<Ustr>,
 ) -> Result<(), FingerprintError> {
-    if !artifact.census.is_total() {
+    if !artifact.is_total() {
         return Err(FingerprintError(format!(
             "incomplete CodeArtifact census: {:?}",
             artifact.census
@@ -529,22 +484,6 @@ fn validate_inputs(
                 entry.identity
             )));
         }
-    }
-    if lifecycle.census.applications != lifecycle.census.admitted
-        || lifecycle.entries.len() != lifecycle.census.admitted
-    {
-        return Err(FingerprintError(format!(
-            "incomplete LifecyclePlan census: {:?}",
-            lifecycle.census
-        )));
-    }
-    if definitions.census.applications != definitions.census.admitted
-        || definitions.entries.len() != definitions.census.admitted
-    {
-        return Err(FingerprintError(format!(
-            "incomplete DefinitionPlan census: {:?}",
-            definitions.census
-        )));
     }
     for name in volatile_vars {
         if name.is_empty() || !ws.comptime_inputs.vars.contains_key(name) {
@@ -676,14 +615,6 @@ impl CanonicalHasher {
 
     fn boolean(&mut self, value: bool) {
         self.byte(value as u8);
-    }
-
-    fn census(&mut self, name: &str, values: &[u64]) {
-        self.string(name);
-        self.len(values.len());
-        for value in values {
-            self.u64(*value);
-        }
     }
 
     fn byte(&mut self, value: u8) {

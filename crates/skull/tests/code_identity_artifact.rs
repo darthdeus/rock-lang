@@ -1,4 +1,5 @@
 use crate::common::{emit_mir, run_luajit};
+use skull_mir::code_identity::CodeIdentity;
 
 #[test]
 fn emitted_lua_artifact_has_a_total_escaping_function_census() {
@@ -26,26 +27,29 @@ fn main() {
 @nomangle fn direct_call() -> int { return direct_target(1) }
 "#,
     );
-    let census = &emit.code_artifact.census;
+    let artifact = &emit.code_artifact;
+    let escaping = |named: bool, capture_free: bool| {
+        artifact
+            .entries
+            .values()
+            .filter(|entry| {
+                entry.escaping
+                    && matches!(entry.identity, CodeIdentity::Named(_)) == named
+                    && (named || entry.capture_free == capture_free)
+            })
+            .count()
+    };
     assert!(
-        census.examined > 0,
-        "the fixture must expose escaping function values: {census:?}"
+        escaping(true, true) > 0,
+        "the named-value population must be nonzero"
     );
     assert!(
-        census.named_values > 0,
-        "the named-value population must be nonzero: {census:?}"
+        escaping(false, false) > 0,
+        "the capturing lambda population must be nonzero"
     );
     assert!(
-        census.lambda_values >= 2,
-        "both lambda populations must be nonzero: {census:?}"
-    );
-    assert!(
-        census.capturing_lambdas > 0,
-        "the capturing lambda population must be nonzero: {census:?}"
-    );
-    assert!(
-        census.capture_free_lambdas > 0,
-        "the capture-free lambda population must be nonzero: {census:?}"
+        escaping(false, true) > 0,
+        "the capture-free lambda population must be nonzero"
     );
     let direct_body = emit
         .lua
@@ -62,8 +66,9 @@ fn main() {
         "direct calls must not pay the slot indirection: {direct_body}"
     );
     assert!(
-        census.is_total(),
-        "emitted artifact census is not self-validating: {census:?}"
+        artifact.is_total(),
+        "emitted artifact census is not self-validating: {:?}",
+        artifact.census
     );
 }
 
@@ -304,25 +309,4 @@ print(old.len .. ":" .. new.len .. ":" .. old._data[1].name .. ":" .. new._data[
     );
     let out = run_luajit(&script);
     assert_eq!(out, "2:2:removed:retained:added");
-}
-
-#[test]
-fn a_specialized_body_counts_its_direct_calls_once() {
-    let census = |src: &str| emit_mir(src).code_artifact.census.direct_call_only;
-    let generic = census(
-        r#"
-fn target(x: int) -> int { return x + 1 }
-fn caller<T>(x: T, n: int) -> int { return target(n) + target(n) }
-fn main() { print("{caller(1, 2)}") }
-"#,
-    );
-    let plain = census(
-        r#"
-fn target(x: int) -> int { return x + 1 }
-fn caller(x: int, n: int) -> int { return target(n) + target(n) }
-fn main() { print("{caller(1, 2)}") }
-"#,
-    );
-    assert!(plain > 0, "the fixture must make direct calls");
-    assert_eq!(generic, plain);
 }

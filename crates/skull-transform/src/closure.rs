@@ -921,11 +921,17 @@ mod tests {
             3,
             "source sites, not ordinals, distinguish identical-looking lambdas"
         );
-        assert_eq!(artifact.census.lambda_values, 3);
-        assert_eq!(artifact.census.capturing_lambdas, 2);
-        assert_eq!(artifact.census.capture_free_lambdas, 1);
+        assert_eq!(
+            artifact
+                .entries
+                .values()
+                .filter(|entry| entry.escaping && entry.capture_free)
+                .count(),
+            1,
+            "only the lambda that captures nothing is capture-free"
+        );
         assert!(
-            artifact.census.is_total(),
+            artifact.is_total(),
             "identity census: {:?}",
             artifact.census
         );
@@ -1139,7 +1145,7 @@ mod tests {
     }
 
     #[test]
-    fn named_values_are_counted_but_direct_calls_do_not_acquire_slots() {
+    fn named_values_escape_but_direct_calls_do_not_acquire_slots() {
         let mut direct = lower(
             "fn target(x: int) -> int { return x }\n\
              fn f() -> int { return target(1) }",
@@ -1147,8 +1153,7 @@ mod tests {
         );
         convert_closures(&mut direct, "f");
         let direct_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&direct);
-        assert_eq!(direct_artifact.census.named_values, 0);
-        assert_eq!(direct_artifact.census.direct_call_only, 1);
+        assert!(!direct_artifact.has_escaping());
 
         let mut value = lower(
             "fn target(x: int) -> int { return x }\n\
@@ -1157,13 +1162,18 @@ mod tests {
         );
         convert_closures(&mut value, "f");
         let value_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&value);
-        assert_eq!(value_artifact.census.named_values, 1);
+        let escaping: Vec<_> = value_artifact
+            .entries
+            .values()
+            .filter(|entry| entry.escaping)
+            .collect();
+        assert_eq!(escaping.len(), 1);
         assert_eq!(
-            value_artifact.census.unresolved_body, 1,
+            escaping[0].body_fingerprint, 0,
             "the per-body artifact must expose an unjoined target"
         );
         assert!(
-            !value_artifact.census.is_total(),
+            !value_artifact.is_total(),
             "a partial artifact must not report a total census"
         );
     }

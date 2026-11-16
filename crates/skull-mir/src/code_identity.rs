@@ -331,30 +331,12 @@ pub struct CodeEntry {
     pub capture_free: bool,
 }
 
-/// Self-validating counts for the escaping-value population.
+/// Escaping values the table could not key: a function value without a code
+/// identity, or one identity reached with two different bodies.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct CodeIdentityCensus {
-    pub examined: usize,
-    pub assigned: usize,
     pub missing_identity: usize,
     pub duplicate_identity: usize,
-    pub duplicate_body: usize,
-    pub unresolved_body: usize,
-    pub direct_call_only: usize,
-    pub named_values: usize,
-    pub lambda_values: usize,
-    pub capturing_lambdas: usize,
-    pub capture_free_lambdas: usize,
-}
-
-impl CodeIdentityCensus {
-    pub fn is_total(&self) -> bool {
-        self.examined == self.assigned
-            && self.missing_identity == 0
-            && self.duplicate_identity == 0
-            && self.duplicate_body == 0
-            && self.unresolved_body == 0
-    }
 }
 
 /// Artifact-owned logical callable table. Backends may attach physical bodies
@@ -454,9 +436,19 @@ impl CodeArtifact {
         }
     }
 
+    /// Every escaping value has one identity and one resolved body.
+    pub fn is_total(&self) -> bool {
+        self.census.missing_identity == 0
+            && self.census.duplicate_identity == 0
+            && !self
+                .entries
+                .values()
+                .any(|entry| entry.escaping && entry.body_fingerprint == 0)
+    }
+
     /// The census must be total before any slot is staged.
     pub fn check_stageable(&self) -> Result<(), String> {
-        if self.census.is_total() {
+        if self.is_total() {
             Ok(())
         } else {
             Err(format!(
@@ -472,21 +464,20 @@ impl CodeArtifact {
             .map(|entry| entry.body_fingerprint)
     }
 
+    fn add_census(&mut self, other: &CodeIdentityCensus) {
+        self.census.missing_identity += other.missing_identity;
+        self.census.duplicate_identity += other.duplicate_identity;
+    }
+
     pub fn merge(&mut self, other: Self) {
-        self.census.direct_call_only += other.census.direct_call_only;
-        self.census.missing_identity += other.census.missing_identity;
-        self.census.duplicate_identity += other.census.duplicate_identity;
-        self.census.duplicate_body += other.census.duplicate_body;
+        self.add_census(&other.census);
         for entry in other.entries.into_values() {
             self.insert(entry);
         }
     }
 
     pub fn merge_body(&mut self, body: &BodyCodeArtifact) {
-        self.census.direct_call_only += body.census.direct_call_only;
-        self.census.missing_identity += body.census.missing_identity;
-        self.census.duplicate_identity += body.census.duplicate_identity;
-        self.census.duplicate_body += body.census.duplicate_body;
+        self.add_census(&body.census);
         for entry in body.entries() {
             self.insert(entry.clone());
         }
@@ -502,10 +493,7 @@ impl CodeArtifact {
         use bone_core::prelude::*;
         let mut incoming: Vec<&CodeEntry> = Vec::new();
         for body in bodies {
-            self.census.direct_call_only += body.census.direct_call_only;
-            self.census.missing_identity += body.census.missing_identity;
-            self.census.duplicate_identity += body.census.duplicate_identity;
-            self.census.duplicate_body += body.census.duplicate_body;
+            self.add_census(&body.census);
             incoming.extend(body.entries());
         }
         // Stable, so the entries of one identity stay in merge order.
@@ -516,14 +504,6 @@ impl CodeArtifact {
             match group {
                 [entry] if !self.entries.contains_key(&entry.identity) => once.push(entry),
                 _ => repeated.extend(group),
-            }
-        }
-        for entry in once.iter().filter(|entry| entry.escaping) {
-            self.census.examined += 1;
-            self.census.assigned += 1;
-            Self::count_kind(&mut self.census, &entry.identity, entry.capture_free);
-            if entry.body_fingerprint == 0 {
-                self.census.unresolved_body += 1;
             }
         }
         let once: Vec<(CodeIdentity, CodeEntry)> = once
@@ -636,34 +616,11 @@ impl CodeArtifact {
                 escaping,
                 capture_free: compatibility.capture.fields.is_empty(),
             }),
-            _ if escaping => self.record_missing(false),
+            _ if escaping => self.record_missing(),
             _ => {}
         }
         for identity in mf.code_value_identities.values() {
             self.mark_value(identity.clone());
-        }
-        let value_targets: FxHashSet<_> = mf
-            .code_value_identities
-            .values()
-            .filter_map(|identity| match identity {
-                CodeIdentity::Named(instance) => Some(instance.func),
-                CodeIdentity::Artifact(_)
-                | CodeIdentity::Lambda { .. }
-                | CodeIdentity::Nested { .. }
-                | CodeIdentity::Generated { .. } => None,
-            })
-            .collect();
-        for block in crate::cfg::reachable_blocks_from(mf, mf.entry) {
-            for inst in &mf.blocks[block].insts {
-                let target = match mf.insts[*inst] {
-                    crate::mir::Inst::Call { func, .. }
-                    | crate::mir::Inst::CallMulti { func, .. } => Some(func),
-                    _ => None,
-                };
-                if target.is_some_and(|target| !value_targets.contains(&target)) {
-                    self.census.direct_call_only += 1;
-                }
-            }
         }
         for nested in &mf.nested_fns {
             self.visit_mir(nested, true, volatile_vars);
@@ -682,22 +639,6 @@ impl CodeArtifact {
                 return;
             }
             entry.escaping = true;
-            self.census.examined += 1;
-            self.census.assigned += 1;
-            match &entry.identity {
-                CodeIdentity::Named(_)
-                | CodeIdentity::Artifact(_)
-                | CodeIdentity::Nested { .. }
-                | CodeIdentity::Generated { .. } => self.census.named_values += 1,
-                CodeIdentity::Lambda { .. } => {
-                    self.census.lambda_values += 1;
-                    if entry.capture_free {
-                        self.census.capture_free_lambdas += 1;
-                    } else {
-                        self.census.capturing_lambdas += 1;
-                    }
-                }
-            }
             return;
         }
         self.insert(CodeEntry {
@@ -740,102 +681,26 @@ impl CodeArtifact {
         use std::collections::btree_map::Entry;
         // One search of the table: assembly inserts every emitted body's
         // entries, tens of thousands on a large program.
-        let slot = match self.entries.entry(entry.identity.clone()) {
+        let old = match self.entries.entry(entry.identity.clone()) {
             Entry::Vacant(slot) => {
-                if entry.escaping {
-                    self.census.examined += 1;
-                    self.census.assigned += 1;
-                    Self::count_kind(&mut self.census, &entry.identity, entry.capture_free);
-                    if entry.body_fingerprint == 0 {
-                        self.census.unresolved_body += 1;
-                    }
-                }
                 slot.insert(entry);
                 return;
             }
-            Entry::Occupied(slot) => slot,
+            Entry::Occupied(slot) => slot.into_mut(),
         };
-        let mut newly_counted = None;
-        let mut resolved = false;
-        let mut duplicate = false;
-        let mut capture_kind_change = None;
-        {
-            let old = slot.into_mut();
-            if old.body_fingerprint == 0 && entry.body_fingerprint != 0 {
-                resolved = old.escaping;
-                let was_escaping = old.escaping;
-                if old.escaping
-                    && matches!(old.identity, CodeIdentity::Lambda { .. })
-                    && old.capture_free != entry.capture_free
-                {
-                    capture_kind_change = Some((old.capture_free, entry.capture_free));
-                }
-                let escaping = old.escaping || entry.escaping;
-                *old = entry;
-                old.escaping = escaping;
-                if escaping && !was_escaping {
-                    newly_counted = Some((old.identity.clone(), old.capture_free));
-                }
-            } else if old.body_fingerprint != 0 && entry.body_fingerprint == 0 {
-                if entry.escaping && !old.escaping {
-                    old.escaping = true;
-                    newly_counted = Some((old.identity.clone(), old.capture_free));
-                }
-            } else if old.body_fingerprint != entry.body_fingerprint {
-                duplicate = true;
-            }
-        }
-        if duplicate {
+        if old.body_fingerprint == 0 && entry.body_fingerprint != 0 {
+            let escaping = old.escaping || entry.escaping;
+            *old = entry;
+            old.escaping = escaping;
+        } else if old.body_fingerprint != 0 && entry.body_fingerprint == 0 {
+            old.escaping |= entry.escaping;
+        } else if old.body_fingerprint != entry.body_fingerprint {
             self.census.duplicate_identity += 1;
-            self.census.duplicate_body += 1;
-        }
-        if resolved {
-            self.census.unresolved_body = self.census.unresolved_body.saturating_sub(1);
-        }
-        if let Some((was_free, is_free)) = capture_kind_change {
-            if was_free {
-                self.census.capture_free_lambdas =
-                    self.census.capture_free_lambdas.saturating_sub(1);
-            } else {
-                self.census.capturing_lambdas = self.census.capturing_lambdas.saturating_sub(1);
-            }
-            if is_free {
-                self.census.capture_free_lambdas += 1;
-            } else {
-                self.census.capturing_lambdas += 1;
-            }
-        }
-        if let Some((identity, capture_free)) = newly_counted {
-            self.census.examined += 1;
-            self.census.assigned += 1;
-            Self::count_kind(&mut self.census, &identity, capture_free);
         }
     }
 
-    fn count_kind(census: &mut CodeIdentityCensus, identity: &CodeIdentity, capture_free: bool) {
-        match identity {
-            CodeIdentity::Named(_)
-            | CodeIdentity::Artifact(_)
-            | CodeIdentity::Nested { .. }
-            | CodeIdentity::Generated { .. } => census.named_values += 1,
-            CodeIdentity::Lambda { .. } => {
-                census.lambda_values += 1;
-                if capture_free {
-                    census.capture_free_lambdas += 1;
-                } else {
-                    census.capturing_lambdas += 1;
-                }
-            }
-        }
-    }
-
-    pub(crate) fn record_missing(&mut self, direct_call_only: bool) {
-        if direct_call_only {
-            self.census.direct_call_only += 1;
-        } else {
-            self.census.examined += 1;
-            self.census.missing_identity += 1;
-        }
+    pub(crate) fn record_missing(&mut self) {
+        self.census.missing_identity += 1;
     }
 
     fn named_frames(&self) -> BTreeMap<&CodeIdentity, &FrameSchema> {
@@ -922,36 +787,7 @@ impl CodeArtifact {
                     .escaping = true;
             }
         }
-        let direct_call_only = self.census.direct_call_only;
-        let mut census = CodeIdentityCensus {
-            direct_call_only,
-            ..Default::default()
-        };
-        for entry in next.entries.values() {
-            if !entry.escaping {
-                continue;
-            }
-            census.examined += 1;
-            census.assigned += 1;
-            match &entry.identity {
-                CodeIdentity::Named(_)
-                | CodeIdentity::Artifact(_)
-                | CodeIdentity::Nested { .. }
-                | CodeIdentity::Generated { .. } => census.named_values += 1,
-                CodeIdentity::Lambda { .. } => {
-                    census.lambda_values += 1;
-                    if entry.capture_free {
-                        census.capture_free_lambdas += 1;
-                    } else {
-                        census.capturing_lambdas += 1;
-                    }
-                }
-            }
-            if entry.body_fingerprint == 0 {
-                census.unresolved_body += 1;
-            }
-        }
-        next.census = census;
+        next.census = CodeIdentityCensus::default();
         next
     }
 }
@@ -1784,8 +1620,7 @@ mod tests {
         artifact.insert(entry(1));
         artifact.insert(entry(2));
         assert_eq!(artifact.census.duplicate_identity, 1);
-        assert_eq!(artifact.census.duplicate_body, 1);
-        assert!(!artifact.census.is_total());
+        assert!(!artifact.is_total());
     }
 
     #[test]
@@ -1811,7 +1646,7 @@ mod tests {
         let incoming = CodeArtifact {
             entries: [(entry.identity.clone(), entry)].into_iter().collect(),
             census: CodeIdentityCensus {
-                duplicate_body: 1,
+                duplicate_identity: 1,
                 ..CodeIdentityCensus::default()
             },
         };
@@ -1856,7 +1691,7 @@ mod tests {
             for entry in entries {
                 artifact.insert(entry);
             }
-            artifact.record_missing(true);
+            artifact.record_missing();
             BodyCodeArtifact::from(artifact)
         };
         let (resolved_later, clash, promoted, held) = (lambda(1), named(40), named(41), named(42));

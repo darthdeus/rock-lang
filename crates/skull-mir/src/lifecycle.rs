@@ -51,21 +51,10 @@ pub struct LifecycleEntry {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct LifecycleCensus {
-    pub declarations: usize,
-    pub applications: usize,
-    pub admitted: usize,
-    pub process_owned: usize,
-    pub scene_owned: usize,
-    pub plain: usize,
-    pub gated: usize,
-    pub dependency_edges: usize,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LifecyclePlan {
     pub entries: Vec<LifecycleEntry>,
-    pub census: LifecycleCensus,
+    /// Lifecycle decorators declared, whether or not anything applies them.
+    pub declarations: usize,
 }
 
 impl LifecyclePlan {
@@ -551,13 +540,13 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
         })
         .collect::<std::collections::HashMap<_, _>>();
     let mut roles = std::collections::HashMap::new();
-    let mut census = LifecycleCensus::default();
+    let mut declarations = 0;
     for module in ws.source_modules() {
         for (did, deco) in module.decorators.iter() {
             let Some(meta) = deco.annotations.iter().find(|a| a.is_builtin("lifecycle")) else {
                 continue;
             };
-            census.declarations += 1;
+            declarations += 1;
             let phase = string_arg(meta, "phase").expect("validated lifecycle phase");
             if phase_rank(phase).is_none() {
                 return Err(CompilerError::new_with_label(
@@ -620,7 +609,6 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                 if !seen.insert((identity.clone(), app_key)) {
                     continue;
                 }
-                census.applications += 1;
                 let root_type = match owner.as_str() {
                     "process" => {
                         if !f.generics.is_empty()
@@ -635,7 +623,6 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                                 ),
                             ));
                         }
-                        census.process_owned += 1;
                         None
                     }
                     "scene" => {
@@ -709,7 +696,6 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                                 ),
                             ));
                         }
-                        census.scene_owned += 1;
                         Some(root)
                     }
                     _ => unreachable!("validated lifecycle owner"),
@@ -761,12 +747,6 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                     0
                 };
                 let qualification = wire_qualification(ws, app, phase)?;
-                if qualification.is_gated() {
-                    census.gated += 1;
-                    census.dependency_edges += qualification.dependencies().len();
-                } else {
-                    census.plain += 1;
-                }
                 entries.push(LifecycleEntry {
                     phase,
                     owner,
@@ -787,7 +767,6 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                     body_fingerprint: 0,
                 });
                 ordinal += 1;
-                census.admitted += 1;
             }
         }
     }
@@ -798,7 +777,10 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
             e.declaration_ordinal,
         )
     });
-    Ok(LifecyclePlan { entries, census })
+    Ok(LifecyclePlan {
+        entries,
+        declarations,
+    })
 }
 
 #[cfg(test)]
@@ -844,9 +826,7 @@ mod tests {
         "#,
         )]);
         let plan = collect(&ws).expect("plan");
-        assert_eq!(plan.census.declarations, 1);
-        assert_eq!(plan.census.applications, 4);
-        assert_eq!(plan.census.admitted, 4);
+        assert_eq!(plan.declarations, 1);
         assert_eq!(
             plan.entries
                 .iter()
@@ -931,8 +911,6 @@ mod tests {
             .find(|entry| entry.diagnostic_name.as_str() == "apply_game_config")
             .expect("qualified wire entry");
         assert!(entry.qualification.is_gated());
-        assert_eq!(plan.census.gated, 1);
-        assert_eq!(plan.census.plain, 0);
         assert_eq!(entry.qualification.dependencies().len(), 2);
     }
 
@@ -1096,8 +1074,6 @@ mod tests {
         assert_eq!(plan.entries.len(), 1);
         assert_eq!(plan.entries[0].owner.as_str(), "scene");
         assert_eq!(plan.entries[0].diagnostic_name.as_str(), "tick_dungeon");
-        assert_eq!(plan.census.process_owned, 0);
-        assert_eq!(plan.census.scene_owned, 1);
         assert_eq!(
             plan.entries[0].root_type,
             Some(MonoTy::App {
@@ -1170,8 +1146,6 @@ mod tests {
             "#,
         )]);
         let plan = collect(&ws).expect("mixed lifecycle plan");
-        assert_eq!(plan.census.process_owned, 1);
-        assert_eq!(plan.census.scene_owned, 2);
         assert_eq!(
             plan.entries
                 .iter()
@@ -1197,9 +1171,7 @@ mod tests {
         "#,
         )]);
         let plan = collect(&ws).expect("post_imgui_draw must be collected");
-        assert_eq!(plan.census.declarations, 1);
-        assert_eq!(plan.census.applications, 2);
-        assert_eq!(plan.census.admitted, 2);
+        assert_eq!(plan.declarations, 1);
         assert_eq!(
             plan.entries
                 .iter()

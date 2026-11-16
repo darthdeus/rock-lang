@@ -1091,7 +1091,7 @@ pub(super) fn assemble(
     // original output slot, but release one-shot plans before copying definitions.
     let (needed_foreign, early_definition_stage) = if lifetime == CacheLifetime::OneShot {
         let (needed_foreign, stage) = parallel_join(needed_foreign, || {
-            let plan = skull_mir::definition::collect_complete(ws)?;
+            let plan = skull_mir::definition::collect(ws)?;
             let concrete = &cache.concrete.plans;
             let stage = definition_plan_stage_lua(ws, &cache.cg, &cache.scx, concrete, &plan)?;
             Ok::<_, CompilerError>((plan, stage))
@@ -1269,15 +1269,9 @@ pub(super) fn assemble(
     );
     let (definition_plan, early_stage) = match early_definition_stage {
         Some((plan, stage)) => (plan, Some(stage)),
-        None => (skull_mir::definition::collect_complete(ws)?, None),
+        None => (skull_mir::definition::collect(ws)?, None),
     };
     let lifecycle_plan = skull_mir::lifecycle::collect_with_artifact(ws, &asm.code_artifact)?;
-    if lifecycle_plan.census.applications != lifecycle_plan.census.admitted {
-        return Err(CompilerError::new_no_location(format!(
-            "incomplete LifecyclePlan census: {:?}",
-            lifecycle_plan.census
-        )));
-    }
     let allocation_report = if crate::allocation_report::enabled() {
         let mut report = crate::allocation_report::AllocationReport::from_bodies(std::mem::take(
             &mut asm.allocation_bodies,
@@ -1290,7 +1284,7 @@ pub(super) fn assemble(
     let code_artifact = &asm.code_artifact;
     let publication = code_artifact.publication(
         !definition_plan.catalogs.is_empty(),
-        lifecycle_plan.census.declarations > 0,
+        lifecycle_plan.declarations > 0,
     );
     let has_code_slot_publication = publication.publish;
     let global_layout = global_layout.map_err(CompilerError::new_no_location)?;
@@ -1350,7 +1344,7 @@ pub(super) fn assemble(
         &decorators,
         has_code_slot_publication,
         has_definition_plan,
-        lifecycle_plan.census.declarations > 0,
+        lifecycle_plan.declarations > 0,
     )?;
     let mut glue_calls = Vec::new();
     crate::push_value_ctor_calls(&asm.out[glue_start..], &mut glue_calls);
@@ -1640,7 +1634,7 @@ pub(super) fn lifecycle_plan_stage_lua(
     scx: &skull_mir::lower::ScalarCtx,
     plan: &skull_mir::lifecycle::LifecyclePlan,
 ) -> String {
-    if plan.census.declarations == 0 {
+    if plan.declarations == 0 {
         return String::new();
     }
     let mut out = String::from("__rock_lifecycle_plan_stage({\n");

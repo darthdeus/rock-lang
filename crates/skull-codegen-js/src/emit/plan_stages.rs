@@ -164,7 +164,7 @@ pub(super) fn lifecycle_plan_stage_js(
     interner: &skull_mir::monoty::MonoInterner,
     plan: &skull_mir::lifecycle::LifecyclePlan,
 ) -> Result<String, CompilerError> {
-    if plan.census.declarations == 0 {
+    if plan.declarations == 0 {
         return Ok(String::new());
     }
     let mut out = String::from("__rock_lifecycle_plan_stage({\n");

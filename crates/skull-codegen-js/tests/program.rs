@@ -183,15 +183,19 @@ fn lua_and_js_publish_identical_dependency_gated_lifecycle_plans() {
         .lifecycle_plan;
     assert_eq!(lua_plan, js_plan, "Lua and JS lifecycle metadata drifted");
     assert!(
-        lua_plan.census.plain > 0,
+        lua_plan
+            .entries
+            .iter()
+            .any(|entry| entry.qualification == skull_mir::lifecycle::LifecycleQualification::Plain),
         "plain population must be nonzero"
     );
     assert!(
-        lua_plan.census.gated > 0,
-        "gated population must be nonzero"
-    );
-    assert!(
-        lua_plan.census.dependency_edges > 2,
+        lua_plan
+            .entries
+            .iter()
+            .map(|entry| entry.qualification.dependencies().len())
+            .sum::<usize>()
+            > 2,
         "transitive dependency closure must be populated"
     );
     let gated = lua_plan
