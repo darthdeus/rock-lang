@@ -315,43 +315,20 @@ fn main() {
         }
     }
 
-    fn workspace() -> Workspace {
-        let mut modules = vec![
-            skull_parser::parse_module_clean(SRC, Ustr::from("<missing-owner-test>"))
-                .expect("parse"),
-        ];
-        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
-    }
-
-    fn census_workspace() -> Workspace {
-        let mut modules = vec![
-            skull_parser::parse_module_clean(CENSUS_SRC, Ustr::from("<inline-census-test>"))
-                .expect("parse"),
-        ];
-        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
-    }
-
-    fn cross_block_workspace() -> Workspace {
-        let mut modules = vec![
-            skull_parser::parse_module_clean(
-                CROSS_BLOCK_SRC,
-                Ustr::from("<inline-cross-block-test>"),
-            )
-            .expect("parse"),
-        ];
+    /// `src` parsed as `file`, after the stdlib when `stdlib` is set.
+    fn workspace_of(src: &str, file: &str, stdlib: bool) -> Workspace {
+        let mut modules = if stdlib { STDLIB.clone() } else { Vec::new() };
+        modules.push(skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse"));
         bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
     }
 
     #[test]
     fn global_init_target_rejects_an_unresolved_storage_plan() {
-        let mut modules = vec![
-            skull_parser::parse_module_clean(
-                "global G: int = 0\nfn main() {}",
-                Ustr::from("<global-plan-test>"),
-            )
-            .expect("parse"),
-        ];
-        let mut ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let mut ws = workspace_of(
+            "global G: int = 0\nfn main() {}",
+            "<global-plan-test>",
+            false,
+        );
         let mid = ws.source_modules().next().expect("test module").id;
         let gid = ws
             .module(mid)
@@ -374,54 +351,6 @@ fn main() {
             err.message.contains("global type cannot be planned"),
             "{err}"
         );
-    }
-
-    fn bounded_workspace() -> Workspace {
-        let mut modules = STDLIB.clone();
-        modules.push(
-            skull_parser::parse_module_clean(BOUNDED_SRC, Ustr::from("<bound-plan-test>"))
-                .expect("parse"),
-        );
-        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
-    }
-
-    fn coroutine_workspace() -> Workspace {
-        let mut modules = STDLIB.clone();
-        modules.push(
-            skull_parser::parse_module_clean(
-                COROUTINE_PLAN_SRC,
-                Ustr::from("<coroutine-plan-test>"),
-            )
-            .expect("parse"),
-        );
-        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
-    }
-
-    fn closure_workspace() -> Workspace {
-        let mut modules = STDLIB.clone();
-        modules.push(
-            skull_parser::parse_module_clean(CLOSURE_SRC, Ustr::from("<closure-test>"))
-                .expect("parse"),
-        );
-        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
-    }
-
-    fn specialized_workspace() -> Workspace {
-        let mut modules = STDLIB.clone();
-        modules.push(
-            skull_parser::parse_module_clean(SPECIALIZED_SRC, Ustr::from("<specialized-test>"))
-                .expect("parse"),
-        );
-        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
-    }
-
-    fn setup_workspace() -> Workspace {
-        let mut modules = STDLIB.clone();
-        modules.push(
-            skull_parser::parse_module_clean(SETUP_SRC, Ustr::from("<setup-lane-test>"))
-                .expect("parse"),
-        );
-        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
     }
 
     #[test]
@@ -514,7 +443,7 @@ fn main() {
     }
 
     fn emit_intact() -> (SkullEmitCache, MirEmit) {
-        let ws = workspace();
+        let ws = workspace_of(SRC, "<missing-owner-test>", false);
         let mid = ws.source_modules().next().expect("test module").id;
         let (emit, cache) = emit_full(&ws, mid).expect("intact emission");
         (cache, emit)
@@ -571,7 +500,7 @@ fn main() {
 
     #[test]
     fn a_specialized_call_without_an_agreeing_owner_rejects() {
-        let ws = workspace();
+        let ws = workspace_of(SRC, "<missing-owner-test>", false);
         let mid = ws.source_modules().next().expect("test module").id;
         let caller = ref_for(&ws, "top");
         let callee = ref_for(&ws, "wrap");
@@ -632,7 +561,7 @@ fn main() {
     #[test]
     fn emission_rejects_a_poisoned_concrete_bound_plan() {
         let _inline = InlineOff::on();
-        let ws = bounded_workspace();
+        let ws = workspace_of(BOUNDED_SRC, "<bound-plan-test>", true);
         let mid = module_id(&ws, "<bound-plan-test>");
         let body = ref_for(&ws, "total");
         let (_, mut cache) = emit_full(&ws, mid).expect("intact emission");
@@ -652,7 +581,7 @@ fn main() {
 
     #[test]
     fn emission_consumes_a_concrete_coroutine_result_plan() {
-        let ws = coroutine_workspace();
+        let ws = workspace_of(COROUTINE_PLAN_SRC, "<coroutine-plan-test>", true);
         let mid = module_id(&ws, "<coroutine-plan-test>");
         let body = ref_for(&ws, "worker");
         let (intact, mut cache) = emit_full(&ws, mid).expect("intact emission");
@@ -677,7 +606,7 @@ fn main() {
     #[test]
     fn emission_rejects_a_missing_concrete_iterator_witness_instance() {
         let _inline = InlineOff::on();
-        let ws = bounded_workspace();
+        let ws = workspace_of(BOUNDED_SRC, "<bound-plan-test>", true);
         let mid = module_id(&ws, "<bound-plan-test>");
         let body = ref_for(&ws, "total");
         let (_, mut cache) = emit_full(&ws, mid).expect("intact emission");
@@ -716,11 +645,7 @@ fn first() -> int { return helper(1) }
 fn second() -> int { return helper(2) }
 fn main() { let result = first() }
 "#;
-        let mut modules = vec![
-            skull_parser::parse_module_clean(DEDUP_SRC, Ustr::from("<abi-dedup-test>"))
-                .expect("parse"),
-        ];
-        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let ws = workspace_of(DEDUP_SRC, "<abi-dedup-test>", false);
         let mid = ws.source_modules().next().expect("test module").id;
         let (emit, cache) = emit_full(&ws, mid).expect("intact emission");
         let stats = cache.scx.abi_plan_stats();
@@ -746,7 +671,7 @@ fn main() { let result = first() }
 
     #[test]
     fn body_attribution_is_folded_only_when_requested() {
-        let ws = workspace();
+        let ws = workspace_of(SRC, "<missing-owner-test>", false);
         let mid = ws.source_modules().next().expect("test module").id;
         let (plain, _) = FullEmit::program().run(&ws, mid).expect("plain emission");
         assert_eq!(plain.attribution.bodies_examined, 0);
@@ -761,7 +686,7 @@ fn main() { let result = first() }
     #[test]
     fn chunks_keep_body_attribution_only_when_requested() {
         let _inline = InlineOn::on();
-        let ws = specialized_workspace();
+        let ws = workspace_of(SPECIALIZED_SRC, "<specialized-test>", true);
         let mid = module_id(&ws, "<specialized-test>");
         let records = |cache: &SkullEmitCache| {
             let chunks = cache.chunks.values().flatten();
@@ -784,7 +709,7 @@ fn main() { let result = first() }
     #[test]
     fn chunks_hold_their_lua_without_spare_capacity() {
         let _inline = InlineOn::on();
-        let ws = specialized_workspace();
+        let ws = workspace_of(SPECIALIZED_SRC, "<specialized-test>", true);
         let mid = module_id(&ws, "<specialized-test>");
         let (_, cache) = FullEmit::program().run(&ws, mid).expect("emission");
         let chunks: Vec<_> = cache.chunks.values().flatten().collect();
@@ -797,7 +722,7 @@ fn main() { let result = first() }
     #[test]
     fn attribution_keeps_one_cost_record_per_emitted_body() {
         let _inline = InlineOn::on();
-        let ws = specialized_workspace();
+        let ws = workspace_of(SPECIALIZED_SRC, "<specialized-test>", true);
         let mid = module_id(&ws, "<specialized-test>");
         let func = |name: &str| FuncRef {
             module: mid,
@@ -848,7 +773,7 @@ fn main() { let result = first() }
     #[test]
     fn emitted_lua_is_identical_across_worker_counts() {
         let _inline = InlineOn::on();
-        let ws = workspace();
+        let ws = workspace_of(SRC, "<missing-owner-test>", false);
         let mid = ws.source_modules().next().expect("test module").id;
         let emit_with = |threads| {
             rayon::ThreadPoolBuilder::new()
@@ -950,7 +875,7 @@ fn main() { let result = first() }
     fn inline_census_has_a_nonzero_production_population() {
         let _inline = InlineOn::on();
         let _census = InlineCensusOn::on();
-        let ws = census_workspace();
+        let ws = workspace_of(CENSUS_SRC, "<inline-census-test>", false);
         let mid = module_id(&ws, "<inline-census-test>");
         let (emit, _) = emit_full(&ws, mid).expect("intact emission");
         let census = &emit.attribution.inline.census;
@@ -1136,11 +1061,7 @@ fn main() { let result = run(4) }
             src.push_str("    return wide(seed * 2)\n}\n");
         }
         src.push_str("\nfn main() { let result = run(4) }\n");
-        let mut modules = STDLIB.clone();
-        modules.push(
-            skull_parser::parse_module_clean(&src, Ustr::from("<budget-shape>")).expect("parse"),
-        );
-        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let ws = workspace_of(&src, "<budget-shape>", true);
         let mid = module_id(&ws, "<budget-shape>");
         let (emit, _) = emit_full(&ws, mid).expect("intact emission");
         emit.attribution.inline.ordinary_splices
@@ -1173,12 +1094,7 @@ fn main() { let result = run(4) }
         use skull_mir::mir::CellProducer;
         let _inline = InlineOn::on();
         let _census = InlineCensusOn::on();
-        let mut modules = STDLIB.clone();
-        modules.push(
-            skull_parser::parse_module_clean(LOAD_STORE_SRC, Ustr::from("<load-store-census>"))
-                .expect("parse"),
-        );
-        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let ws = workspace_of(LOAD_STORE_SRC, "<load-store-census>", true);
         let mid = module_id(&ws, "<load-store-census>");
         let (emit, _) = emit_full(&ws, mid).expect("intact emission");
         let census = &emit.attribution.inline.census.load_store;
@@ -1262,12 +1178,7 @@ fn main() {
         use skull_mir::mir::CellProducer;
         let _inline = InlineOn::on();
         let _census = InlineCensusOn::on();
-        let mut modules = STDLIB.clone();
-        modules.push(
-            skull_parser::parse_module_clean(PARAM_FORWARD_SRC, Ustr::from("<param-forward>"))
-                .expect("parse"),
-        );
-        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let ws = workspace_of(PARAM_FORWARD_SRC, "<param-forward>", true);
         let mid = module_id(&ws, "<param-forward>");
         let (emit, _) = emit_full(&ws, mid).expect("intact emission");
         let census = &emit.attribution.inline.census.load_store;
@@ -1283,7 +1194,7 @@ fn main() {
     fn inline_population_census_proves_each_lowering_route_and_conserves_keys() {
         let _inline = InlineOn::on();
         let _census = InlineCensusOn::on();
-        let ws = census_workspace();
+        let ws = workspace_of(CENSUS_SRC, "<inline-census-test>", false);
         let mid = module_id(&ws, "<inline-census-test>");
         let (emit, _) = emit_full(&ws, mid).expect("intact emission");
         let population = &emit.attribution.inline.population;
@@ -1361,7 +1272,7 @@ fn main() {
             "a production inline lookup must use the published candidate table: {population:?}"
         );
 
-        let specialized = specialized_workspace();
+        let specialized = workspace_of(SPECIALIZED_SRC, "<specialized-test>", true);
         let specialized_mid = module_id(&specialized, "<specialized-test>");
         let (specialized_emit, _) =
             emit_full(&specialized, specialized_mid).expect("specialized emission");
@@ -1487,7 +1398,7 @@ fn main() {
     fn straight_cross_block_results_use_a_targeted_binding() {
         let _inline = InlineOn::on();
         let _census = InlineCensusOn::on();
-        let ws = cross_block_workspace();
+        let ws = workspace_of(CROSS_BLOCK_SRC, "<inline-cross-block-test>", false);
         let mid = module_id(&ws, "<inline-cross-block-test>");
         let (emit, _) = emit_full(&ws, mid).expect("cross-block emission");
         assert!(
@@ -1504,7 +1415,7 @@ fn main() {
     #[test]
     fn body_attribution_reports_transform_populations() {
         let _inline = InlineOn::on();
-        let bounded = bounded_workspace();
+        let bounded = workspace_of(BOUNDED_SRC, "<bound-plan-test>", true);
         let bounded_mid = module_id(&bounded, "<bound-plan-test>");
         let (bounded_emit, _) = emit_full(&bounded, bounded_mid).expect("bounded emission");
         assert!(
@@ -1523,7 +1434,7 @@ fn main() {
             bounded_emit.attribution.inline
         );
 
-        let closure = closure_workspace();
+        let closure = workspace_of(CLOSURE_SRC, "<closure-test>", true);
         let closure_mid = module_id(&closure, "<closure-test>");
         let (closure_emit, _) = emit_full(&closure, closure_mid).expect("closure emission");
         assert!(
@@ -1537,7 +1448,7 @@ fn main() {
             closure_emit.attribution
         );
 
-        let specialized = specialized_workspace();
+        let specialized = workspace_of(SPECIALIZED_SRC, "<specialized-test>", true);
         let specialized_mid = module_id(&specialized, "<specialized-test>");
         let (specialized_emit, _) =
             emit_full(&specialized, specialized_mid).expect("specialized emission");
@@ -1557,11 +1468,7 @@ fn outer(x: int) -> int {
 }
 fn main() { let result = outer(1) }
 "#;
-        let mut modules = vec![
-            skull_parser::parse_module_clean(NESTED_SRC, Ustr::from("<nested-lower-test>"))
-                .expect("parse"),
-        ];
-        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let ws = workspace_of(NESTED_SRC, "<nested-lower-test>", false);
         let mid = ws.source_modules().next().expect("test module").id;
         let (emit, _) = emit_full(&ws, mid).expect("nested emission");
         assert!(
@@ -1575,7 +1482,7 @@ fn main() { let result = outer(1) }
     #[test]
     fn setup_lanes_produce_identical_artifacts_across_worker_counts() {
         let _inline = InlineOn::on();
-        let ws = setup_workspace();
+        let ws = workspace_of(SETUP_SRC, "<setup-lane-test>", true);
         let mid = module_id(&ws, "<setup-lane-test>");
         let emit_with = |threads| {
             rayon::ThreadPoolBuilder::new()
