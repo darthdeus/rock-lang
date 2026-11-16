@@ -393,13 +393,13 @@ fn runner_sim_advance(frame: int) -> bool {
     for record in logged_error_records() {
         sim_emit("{{\"op\":\"error\",\"message\":\"logged error: "
             + sim_json_escape(record) + "\"}}")
+        let _ = take_logged_error(record)
     }
     let overflow = logged_error_overflow()
     if overflow > 0 {
         sim_emit("{{\"op\":\"error\",\"message\":\"logged error: "
             + to_string(overflow) + " more record(s) past the collection cap\"}}")
     }
-    clear_logged_errors()
     sim_teardown_procs()
     sim_emit("{{\"op\":\"entry_end\",\"name\":\"" + SIM_NAME
         + "\",\"frame_count\":" + to_string(frame_count)

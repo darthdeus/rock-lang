@@ -73,8 +73,3 @@ pub inline(lua) fn take_logged_error(record: string) -> bool = """
     local log = _G.__rock_logged_errors
     return log ~= nil and log.take(record)
 """
-
-inline(lua) fn clear_logged_errors() = """
-    local log = _G.__rock_logged_errors
-    if log then log.truncate(0) end
-"""

@@ -171,6 +171,7 @@ pub inline(lua) fn native_identity_new() -> int = """
 // Checked headless hosts and the engine use the same native record collector.
 inline(lua) fn __stone_register_error_collector() -> bool = """
     _G.__rock_collect_logged_errors = function()
+        if _G.__rock_native_errors_collected then return end
         stone_native_load()
         if not _G.__rock_log_sink then
             _G.__rock_log_sink = function(level, category, message, wall_clock)
@@ -196,6 +197,14 @@ inline(lua) fn __stone_register_error_collector() -> bool = """
             take = function(record) return stone.stone_log_take_collected_error(record, #record) ~= 0 end,
             truncate = function(count) stone.stone_log_truncate_collected_errors(count) end,
         }
+        _G.__rock_native_errors_collected = true
+    end
+    -- Start before user initializers and main; runner entry must not erase
+    -- boot errors. Interactive processes keep lazy native loading.
+    if _G.__rock_test_mode or (tonumber(os.getenv("FRAME_COUNT")) or 0) > 0
+        or (tonumber(os.getenv("PERF_SECONDS")) or 0) > 0
+        or (os.getenv("ROCK_RUN_SIM") or "") ~= "" then
+        _G.__rock_collect_logged_errors()
     end
     return true
 """

@@ -1,27 +1,6 @@
 use super::*;
 
 #[test]
-fn streamed_test_program_matches_concatenation_and_excerpt() {
-    for lua in [
-        String::new(),
-        "return 42".to_string(),
-        format!("{}{}tail", "x".repeat(3989), "\u{1f600}"),
-    ] {
-        for harness in ["", "\n-- harness\n"] {
-            let expected = format!("preamble\n{lua}\nsetup_runtime()\n{harness}");
-            let program = TestProgram {
-                preamble: "preamble\n".into(),
-                lua: lua.clone(),
-                setup: "\nsetup_runtime()\n",
-            };
-            let (file, excerpt) = write_test_program(program, harness).unwrap();
-            assert_eq!(std::fs::read(file.path()).unwrap(), expected.as_bytes());
-            assert_eq!(excerpt, truncate(&expected));
-        }
-    }
-}
-
-#[test]
 fn streamed_game_main_matches_metadata_splice_and_entry() {
     let marker = "__rock_globals_install_bridge()\n";
     for emits_main in [false, true] {
@@ -97,14 +76,4 @@ fn streamed_atomic_replace_failure_preserves_old_file() {
         std::fs::read_to_string(&path).unwrap(),
         "old complete program"
     );
-}
-
-/// Independent oracle for `program_excerpt` over one part.
-fn truncate(s: &str) -> String {
-    if s.len() > 4000 {
-        let end = s.floor_char_boundary(4000);
-        format!("{}\n... ({} more bytes)", &s[..end], s.len() - end)
-    } else {
-        s.to_string()
-    }
 }

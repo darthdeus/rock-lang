@@ -85,6 +85,110 @@ fn native_overflow_failure() {
 }
 
 #[test]
+fn package_tests_reject_errors_outside_test_bodies() {
+    for dependency in [None, Some("stone-native")] {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut manifest =
+            "[package]\nname = \"outside-errors\"\n[language]\nmodules = \"v1\"\n".to_string();
+        if let Some(dependency) = dependency {
+            manifest +=
+                &format!("[dependencies]\n{dependency} = {{ package = \"{dependency}\" }}\n");
+        }
+        std::fs::write(fixture.path().join("stick.toml"), manifest).unwrap();
+        let import = if dependency.is_some() {
+            "use stone_native::*;"
+        } else {
+            ""
+        };
+        let source = r#"
+inline(lua) fn probe_phase() -> string = "return os.getenv(\"PROBE_PHASE\") or \"\""
+fn initialize() -> bool {
+    if probe_phase() == "init" {
+        log_error("PROBE", "initialization failure")
+        initializer_native_error()
+    }
+    return true
+}
+const READY: bool = initialize()
+inline(lua) fn late_error() = """
+    local guard = newproxy(true)
+    getmetatable(guard).__gc = function()
+        __rock_log(0, "PROBE", "finalizer failure")
+    end
+"""
+@test
+fn checked_body() {
+    assert(READY)
+    if probe_phase() == "gc" { late_error() }
+}
+"#;
+        std::fs::write(
+            fixture.path().join("main.rock"),
+            format!("{import}\n{source}{}", if dependency.is_some() {
+                r#"inline(lua) fn initializer_native_error() = "ffi.cdef('void stone_gpu_scope_begin(const char* name);'); stone.stone_gpu_scope_begin(nil)""#
+            } else { "fn initializer_native_error() {}" }),
+        )
+        .unwrap();
+        for phase in ["init", "gc", "clean", "load-only"] {
+            if phase == "load-only" {
+                let path = fixture.path().join("main.rock");
+                let source = std::fs::read_to_string(&path)
+                    .unwrap()
+                    .replace("@test\n", "");
+                std::fs::write(path, source).unwrap();
+            }
+            let output = std::process::Command::new(env!("CARGO_BIN_EXE_rock"))
+                .arg("test")
+                .arg(fixture.path())
+                .current_dir(fixture.path())
+                .env(
+                    "ROCK_DIR",
+                    Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+                )
+                .env("ROCK_TEST_SHARDS", "1")
+                .env("ROCK_TEST_GC_COLLECT_MB", "0.000001")
+                .env(
+                    "PROBE_PHASE",
+                    if phase == "load-only" { "init" } else { phase },
+                )
+                .env("STONE_HEADLESS", "1")
+                .env_remove("ROCK_PREBUILT_GAME")
+                .env_remove("ROCK_ENGINE_BUILD_RECEIPT")
+                .output()
+                .unwrap();
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                output.status.success(),
+                phase == "clean",
+                "{dependency:?}/{phase}: {text}"
+            );
+            if phase != "clean" {
+                let record = if phase != "gc" {
+                    "initialization failure"
+                } else {
+                    "finalizer failure"
+                };
+                assert!(text.contains(&format!("[PROBE] {record}")), "{text}");
+                assert!(
+                    text.contains("logged error(s) outside test bodies"),
+                    "{text}"
+                );
+                if phase == "init" && dependency.is_some() {
+                    assert!(
+                        text.contains("[STONE] stone_gpu_scope_begin: null name"),
+                        "{text}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn an_external_project_rebuilds_its_native_library_with_a_prebuilt_toolchain() {
     let fixture = tempfile::tempdir().unwrap();
     let game = fixture.path().join("game");
@@ -875,13 +979,30 @@ fn sim_commands_run_and_report_an_external_stone_project() {
     std::fs::create_dir_all(game.join("tests/sims")).unwrap();
     std::fs::write(game.join("stick.toml"),
         "[package]\nname = \"sim-probe\"\n[language]\nmodules = \"v1\"\n[dependencies]\nstone = { package = \"stone\" }\nstone-core = { package = \"stone-core\" }\n[build.vars]\nGIT_SHA = \"probe\"\nBUILD_UNIX = \"0\"\nBUILD_DATE = \"test\"\nCHANNEL = { builtin = \"channel\" }\nPLATFORM = { builtin = \"platform\" }\n").unwrap();
-    std::fs::write(game.join("main.rock"),
-        "use stone::*;\nfn main() { stone_run_game(GameConfig { title: \"sim-probe\", width: 64, height: 64, vsync: 0 }) }\n").unwrap();
+    std::fs::write(
+        game.join("main.rock"),
+        r#"use stone::*;
+fn main() {
+    if os_getenv("SIM_PROBE_EARLY") == "1" {
+        log_error("PROBE", "startup failure")
+    }
+    stone_run_game(GameConfig { title: "sim-probe", width: 64, height: 64, vsync: 0 })
+}
+"#,
+    )
+    .unwrap();
     std::fs::write(
         game.join("tests/sims/probe.rock"),
         r#"
 use stone::*;
 use stone_core::*;
+
+@shutdown fn probe_shutdown() {
+    if os_getenv("SIM_PROBE_LATE") == "1" {
+        log_error("PROBE", "shutdown failure")
+        probe_native_error()
+    }
+}
 
 // The engine logs a null scope name at error level from Rust.
 inline(lua) fn probe_native_error() = "stone.stone_gpu_scope_begin(nil)"
@@ -960,6 +1081,37 @@ co fn portable_sim() -> Coroutine<Wait> {
     assert!(plan.status.success(), "{text}");
     let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
     assert_eq!(plan["entries"].as_array().unwrap().len(), 1);
+    for phase in ["startup", "shutdown"] {
+        let late = std::process::Command::new(&rock)
+            .args(["sim", project, "portable_sim", "--jobs", "1"])
+            .current_dir(fixture.path())
+            .env(
+                "ROCK_DIR",
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+            )
+            .env("ROCK_SIM_LOG_DIR", fixture.path().join(phase))
+            .env(
+                if phase == "startup" {
+                    "SIM_PROBE_EARLY"
+                } else {
+                    "SIM_PROBE_LATE"
+                },
+                "1",
+            )
+            .env_remove("STONE_HOT_RELOAD")
+            .output()
+            .unwrap();
+        let late_text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&late.stdout),
+            String::from_utf8_lossy(&late.stderr)
+        );
+        assert!(!late.status.success(), "{phase} errors passed: {late_text}");
+        assert!(
+            late_text.contains(&format!("{phase} failure")),
+            "{late_text}"
+        );
+    }
     for fail in [false, true] {
         let (run, text) = invoke(&["sim", project, "portable_sim", "--jobs", "1"], fail);
         assert_eq!(run.status.success(), !fail, "{text}");
