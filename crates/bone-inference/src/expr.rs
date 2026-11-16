@@ -1,5 +1,92 @@
 use super::*;
 
+/// A `return`, CHECKED against the declared return rather than inferred and
+/// then coerced: a returned lambda has to record the type of the hole it
+/// fills, or the body and every indirect call site derive different fn-value
+/// ABIs from it. Same rule `let` follows.
+fn infer_return(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    e: Option<Idx<Expr>>,
+    span: Span,
+) -> Result<(), CompilerError> {
+    if let (Some(e), Some(returns)) = (e, gamma.lambda_returns.as_mut()) {
+        returns.push(e);
+    }
+    match (e, gamma.declared_ret_ty) {
+        (Some(e), Some(declared)) => {
+            check_expr(c, gamma, e, declared, span)?;
+            validate_frame_ref_return(c, gamma, e, declared)?;
+        }
+        (Some(e), None) => {
+            infer_expr(c, gamma, e)?;
+        }
+        (None, Some(declared)) => {
+            let unit = gamma.workspace.builtins.unit();
+            coerce(gamma, unit, declared, span)?;
+        }
+        (None, None) => {}
+    }
+    Ok(())
+}
+
+/// The type of a `let` or `static` binding initialized by `value`: its
+/// annotation, which `value` is checked against, or else `value`'s type.
+fn infer_initialized_binding(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    name: Idx<BindingInfo>,
+    value: Idx<Expr>,
+) -> Result<TyId, CompilerError> {
+    match c.body.binding_arena[name].declared_ty {
+        Some(ann) => {
+            let span = c
+                .body
+                .expr_spans
+                .get(value)
+                .copied()
+                .unwrap_or(Span::unknown());
+            // Bind to the annotation in case RHS fails, helps LSP
+            gamma.assign_named_type(name, ann)?;
+            check_expr(c, gamma, value, ann, span)?;
+            Ok(ann)
+        }
+        None => match infer_expr(c, gamma, value) {
+            Ok(ty) => Ok(ty),
+            Err(e) => {
+                // RHS failed, position name with "error" so downstream can still do something
+                let poison = gamma.workspace.builtins.error();
+                gamma.assign_named_type(name, poison)?;
+                Err(e)
+            }
+        },
+    }
+}
+
+/// The checks every write to `target` passes: a `const` global is read-only
+/// (field and index writes through it are out of scope and fall through), and
+/// a field write must name a writable, non-swizzle field.
+fn check_write_target(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    target: Idx<Expr>,
+    span: Span,
+) -> Result<(), CompilerError> {
+    match c.body.expr_arena[target] {
+        Expr::Global(name) if gamma.workspace.const_globals.contains(&name) => comp_error!(
+            span,
+            "cannot assign to const `{}`; consts are read-only",
+            name
+        ),
+        Expr::FieldAccess { base, field } => {
+            reject_swizzle_write(c, gamma, base, field, span)?;
+            reject_value_struct_field_write(c, gamma, base, span)?;
+            check_field_write_access(c, gamma, base, field, span)
+        }
+        _ => Ok(()),
+    }
+}
+
 pub(crate) fn infer_statement(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -8,68 +95,14 @@ pub(crate) fn infer_statement(
     let span = c.body.statement_spans[s];
 
     match &c.body.statement_arena[s] {
-        Statement::Expr(e) => {
+        Statement::Expr(e) | Statement::Defer(e) => {
             infer_expr_used(c, gamma, *e, Use::Discard)?;
         }
 
-        Statement::Defer(e) => {
-            infer_expr_used(c, gamma, *e, Use::Discard)?;
-        }
-
-        Statement::Return(e) => {
-            // CHECKED against the declared return, not inferred-then-coerced: a
-            // returned lambda has to record the type of the hole it fills, or the
-            // body and every indirect call site derive different fn-value ABIs
-            // from it. Same rule the `let` arm below already follows.
-            if let (Some(e), Some(returns)) = (e, gamma.lambda_returns.as_mut()) {
-                returns.push(*e);
-            }
-            match (e, gamma.declared_ret_ty) {
-                (Some(e), Some(declared)) => {
-                    check_expr(c, gamma, *e, declared, c.body.statement_spans[s])?;
-                    validate_frame_ref_return(c, gamma, *e, declared)?;
-                }
-                (Some(e), None) => {
-                    infer_expr(c, gamma, *e)?;
-                }
-                (None, Some(declared)) => {
-                    let unit = gamma.workspace.builtins.unit();
-                    coerce(gamma, unit, declared, c.body.statement_spans[s])?;
-                }
-                (None, None) => {}
-            }
-        }
+        Statement::Return(e) => infer_return(c, gamma, *e, span)?,
 
         Statement::Let { name, value } => {
-            let declared = c.body.binding_arena[*name].declared_ty;
-
-            let binding_ty = match declared {
-                Some(ann) => {
-                    let span = c
-                        .body
-                        .expr_spans
-                        .get(*value)
-                        .copied()
-                        .unwrap_or(Span::unknown());
-
-                    // Bind to the annotation in case RHS fails, helps LSP
-                    gamma.assign_named_type(*name, ann)?;
-                    check_expr(c, gamma, *value, ann, span)?;
-
-                    ann
-                }
-
-                None => match infer_expr(c, gamma, *value) {
-                    Ok(ty) => ty,
-                    Err(e) => {
-                        // RHS failed, position name with "error" so downstream can still do something
-                        let poison = gamma.workspace.builtins.error();
-                        gamma.assign_named_type(*name, poison)?;
-                        return Err(e);
-                    }
-                },
-            };
-
+            let binding_ty = infer_initialized_binding(c, gamma, *name, *value)?;
             gamma.assign_named_type(*name, binding_ty)?;
 
             if contains_frame_ref(gamma, binding_ty) {
@@ -89,29 +122,7 @@ pub(crate) fn infer_statement(
                 );
             }
 
-            let declared = c.body.binding_arena[*name].declared_ty;
-            let binding_ty = match declared {
-                Some(ann) => {
-                    let vspan = c
-                        .body
-                        .expr_spans
-                        .get(*value)
-                        .copied()
-                        .unwrap_or(Span::unknown());
-                    gamma.assign_named_type(*name, ann)?;
-                    check_expr(c, gamma, *value, ann, vspan)?;
-                    ann
-                }
-
-                None => match infer_expr(c, gamma, *value) {
-                    Ok(ty) => ty,
-                    Err(e) => {
-                        let poison = gamma.workspace.builtins.error();
-                        gamma.assign_named_type(*name, poison)?;
-                        return Err(e);
-                    }
-                },
-            };
+            let binding_ty = infer_initialized_binding(c, gamma, *name, *value)?;
 
             if contains_frame_ref(gamma, binding_ty) {
                 comp_error!(
@@ -506,22 +517,8 @@ pub(crate) fn infer_expr_used(
                 ),
                 _ => comp_error!(expr_span, "`{}` needs a variable, field, or element", op),
             }
-            if let Expr::FieldAccess { base, field } = c.body.expr_arena[*target] {
-                reject_swizzle_write(c, gamma, base, field, expr_span)?;
-                reject_value_struct_field_write(c, gamma, base, expr_span)?;
-                check_field_write_access(c, gamma, base, field, expr_span)?;
-            }
-            // Same const-rebind rejection as Expr::Assign/CompoundAssign;
             // `CONST++` is a write with extra steps.
-            if let Expr::Global(name) = c.body.expr_arena[*target] {
-                if gamma.workspace.const_globals.contains(&name) {
-                    comp_error!(
-                        expr_span,
-                        "cannot assign to const `{}`; consts are read-only",
-                        name
-                    );
-                }
-            }
+            check_write_target(c, gamma, *target, expr_span)?;
             let inner_ty = infer_expr(c, gamma, *target)?;
             let inner_ty = resolve(gamma, inner_ty, c.body.expr_spans[*target]);
             if !may_be_numeric(gamma, inner_ty, expr_span) {
@@ -760,23 +757,7 @@ pub(crate) fn infer_expr_used(
 
         Expr::BinOp { op, lhs, rhs } => match op {
             hir::BinOp::Eq | hir::BinOp::NotEq => {
-                let lhs_ty = infer_expr(c, gamma, *lhs)?;
-                let rhs_ty = infer_expr(c, gamma, *rhs)?;
-                let mut lhs_ty = resolve(gamma, lhs_ty, c.body.expr_spans[*lhs]);
-                let mut rhs_ty = resolve(gamma, rhs_ty, c.body.expr_spans[*rhs]);
-                if matches!(gamma.get(lhs_ty), TypeExpr::Builtin(BuiltinTy::Uint))
-                    && matches!(gamma.get(rhs_ty), TypeExpr::Builtin(BuiltinTy::Int))
-                    && matches!(c.body.expr_arena[*rhs], Expr::Int(_))
-                {
-                    check_expr(c, gamma, *rhs, lhs_ty, c.body.expr_spans[*rhs])?;
-                    rhs_ty = lhs_ty;
-                } else if matches!(gamma.get(rhs_ty), TypeExpr::Builtin(BuiltinTy::Uint))
-                    && matches!(gamma.get(lhs_ty), TypeExpr::Builtin(BuiltinTy::Int))
-                    && matches!(c.body.expr_arena[*lhs], Expr::Int(_))
-                {
-                    check_expr(c, gamma, *lhs, rhs_ty, c.body.expr_spans[*lhs])?;
-                    lhs_ty = rhs_ty;
-                }
+                let (lhs_ty, rhs_ty) = infer_uint_aware_operands(c, gamma, *lhs, *rhs)?;
 
                 // Comparing a value KNOWN to be non-null against `null` is a
                 // category error: `null` can't inhabit it, so the check is dead.
@@ -830,23 +811,7 @@ pub(crate) fn infer_expr_used(
             | hir::BinOp::Shl
             | hir::BinOp::Shr => {
                 let int_ty = gamma.workspace.builtins.int();
-                let lhs_ty = infer_expr(c, gamma, *lhs)?;
-                let rhs_ty = infer_expr(c, gamma, *rhs)?;
-                let mut lhs_ty = resolve(gamma, lhs_ty, c.body.expr_spans[*lhs]);
-                let mut rhs_ty = resolve(gamma, rhs_ty, c.body.expr_spans[*rhs]);
-                if matches!(gamma.get(lhs_ty), TypeExpr::Builtin(BuiltinTy::Uint))
-                    && matches!(gamma.get(rhs_ty), TypeExpr::Builtin(BuiltinTy::Int))
-                    && matches!(c.body.expr_arena[*rhs], Expr::Int(_))
-                {
-                    check_expr(c, gamma, *rhs, lhs_ty, c.body.expr_spans[*rhs])?;
-                    rhs_ty = lhs_ty;
-                } else if matches!(gamma.get(rhs_ty), TypeExpr::Builtin(BuiltinTy::Uint))
-                    && matches!(gamma.get(lhs_ty), TypeExpr::Builtin(BuiltinTy::Int))
-                    && matches!(c.body.expr_arena[*lhs], Expr::Int(_))
-                {
-                    check_expr(c, gamma, *lhs, rhs_ty, c.body.expr_spans[*lhs])?;
-                    lhs_ty = rhs_ty;
-                }
+                let (lhs_ty, rhs_ty) = infer_uint_aware_operands(c, gamma, *lhs, *rhs)?;
                 if matches!(gamma.get(lhs_ty), TypeExpr::Builtin(BuiltinTy::Uint))
                     || matches!(gamma.get(rhs_ty), TypeExpr::Builtin(BuiltinTy::Uint))
                 {
@@ -872,23 +837,7 @@ pub(crate) fn infer_expr_used(
             }
 
             hir::BinOp::Lt | hir::BinOp::Leq | hir::BinOp::Gt | hir::BinOp::Geq => {
-                let lhs_ty = infer_expr(c, gamma, *lhs)?;
-                let rhs_ty = infer_expr(c, gamma, *rhs)?;
-                let mut lhs_ty = resolve(gamma, lhs_ty, c.body.expr_spans[*lhs]);
-                let mut rhs_ty = resolve(gamma, rhs_ty, c.body.expr_spans[*rhs]);
-                if matches!(gamma.get(lhs_ty), TypeExpr::Builtin(BuiltinTy::Uint))
-                    && matches!(gamma.get(rhs_ty), TypeExpr::Builtin(BuiltinTy::Int))
-                    && matches!(c.body.expr_arena[*rhs], Expr::Int(_))
-                {
-                    check_expr(c, gamma, *rhs, lhs_ty, c.body.expr_spans[*rhs])?;
-                    rhs_ty = lhs_ty;
-                } else if matches!(gamma.get(rhs_ty), TypeExpr::Builtin(BuiltinTy::Uint))
-                    && matches!(gamma.get(lhs_ty), TypeExpr::Builtin(BuiltinTy::Int))
-                    && matches!(c.body.expr_arena[*lhs], Expr::Int(_))
-                {
-                    check_expr(c, gamma, *lhs, rhs_ty, c.body.expr_spans[*lhs])?;
-                    lhs_ty = rhs_ty;
-                }
+                let (lhs_ty, rhs_ty) = infer_uint_aware_operands(c, gamma, *lhs, *rhs)?;
 
                 let joined = join(gamma, lhs_ty, rhs_ty, expr_span)?;
 
@@ -1395,23 +1344,7 @@ pub(crate) fn infer_expr_used(
                     "cannot assign to this expression: it is not a variable, field, or element",
                 );
             }
-            // A `const` global is read-only: reject a whole-global rebind. Field/
-            // index writes through it (`Expr::Field`/`Expr::Index` target) are out
-            // of scope and fall through.
-            if let Expr::Global(name) = c.body.expr_arena[target] {
-                if gamma.workspace.const_globals.contains(&name) {
-                    comp_error!(
-                        expr_span,
-                        "cannot assign to const `{}`; consts are read-only",
-                        name
-                    );
-                }
-            }
-            if let Expr::FieldAccess { base, field } = c.body.expr_arena[target] {
-                reject_swizzle_write(c, gamma, base, field, expr_span)?;
-                reject_value_struct_field_write(c, gamma, base, expr_span)?;
-                check_field_write_access(c, gamma, base, field, expr_span)?;
-            }
+            check_write_target(c, gamma, target, expr_span)?;
             // Writing any refined path (local field, global, or global field)
             // drops its refinement; re-established below if the stored value is
             // non-null. A whole local is handled via `binding_types` instead.
@@ -1581,22 +1514,7 @@ pub(crate) fn infer_expr_used(
         } => {
             let (target, op_fn, value, family) = (*target, *op_fn, *value, *family);
 
-            // `const` globals are read-only (mirrors the `Expr::Assign` check).
-            if let Expr::Global(name) = c.body.expr_arena[target] {
-                if gamma.workspace.const_globals.contains(&name) {
-                    comp_error!(
-                        expr_span,
-                        "cannot assign to const `{}`; consts are read-only",
-                        name
-                    );
-                }
-            }
-
-            if let Expr::FieldAccess { base, field } = c.body.expr_arena[target] {
-                reject_swizzle_write(c, gamma, base, field, expr_span)?;
-                reject_value_struct_field_write(c, gamma, base, expr_span)?;
-                check_field_write_access(c, gamma, base, field, expr_span)?;
-            }
+            check_write_target(c, gamma, target, expr_span)?;
 
             let target_ty = infer_expr(c, gamma, target)?;
             let unwrapped = peel_nullable(gamma, target_ty, expr_span);
@@ -1652,25 +1570,7 @@ pub(crate) fn infer_expr_used(
         }
 
         Expr::Return(e) => {
-            // Checked, not inferred-then-coerced -- see `Statement::Return`.
-            if let (Some(e), Some(returns)) = (e, gamma.lambda_returns.as_mut()) {
-                returns.push(*e);
-            }
-            match (e, gamma.declared_ret_ty) {
-                (Some(e), Some(declared)) => {
-                    check_expr(c, gamma, *e, declared, expr_span)?;
-                    validate_frame_ref_return(c, gamma, *e, declared)?;
-                }
-                (Some(e), None) => {
-                    infer_expr(c, gamma, *e)?;
-                }
-                (None, Some(declared)) => {
-                    let unit = gamma.workspace.builtins.unit();
-                    coerce(gamma, unit, declared, expr_span)?;
-                }
-                (None, None) => {}
-            }
-
+            infer_return(c, gamma, *e, expr_span)?;
             gamma.workspace.builtins.never()
         }
 
@@ -1688,6 +1588,34 @@ pub(crate) fn infer_expr_used(
     gamma.assign_expr_type(c, e, ty)?;
 
     Ok(ty)
+}
+
+/// Infers and resolves both operands of a binary operator. An integer literal
+/// facing a `uint` operand is checked as `uint` rather than left an `int`.
+fn infer_uint_aware_operands(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    lhs: Idx<Expr>,
+    rhs: Idx<Expr>,
+) -> Result<(TyId, TyId), CompilerError> {
+    let lhs_ty = infer_expr(c, gamma, lhs)?;
+    let rhs_ty = infer_expr(c, gamma, rhs)?;
+    let mut lhs_ty = resolve(gamma, lhs_ty, c.body.expr_spans[lhs]);
+    let mut rhs_ty = resolve(gamma, rhs_ty, c.body.expr_spans[rhs]);
+    if matches!(gamma.get(lhs_ty), TypeExpr::Builtin(BuiltinTy::Uint))
+        && matches!(gamma.get(rhs_ty), TypeExpr::Builtin(BuiltinTy::Int))
+        && matches!(c.body.expr_arena[rhs], Expr::Int(_))
+    {
+        check_expr(c, gamma, rhs, lhs_ty, c.body.expr_spans[rhs])?;
+        rhs_ty = lhs_ty;
+    } else if matches!(gamma.get(rhs_ty), TypeExpr::Builtin(BuiltinTy::Uint))
+        && matches!(gamma.get(lhs_ty), TypeExpr::Builtin(BuiltinTy::Int))
+        && matches!(c.body.expr_arena[lhs], Expr::Int(_))
+    {
+        check_expr(c, gamma, lhs, rhs_ty, c.body.expr_spans[lhs])?;
+        lhs_ty = rhs_ty;
+    }
+    Ok((lhs_ty, rhs_ty))
 }
 
 pub(crate) fn infer_expr(
