@@ -1547,25 +1547,6 @@ fn substitute_expr(ast: &mut Ast, e: Idx<ExprData>, subs: &UstrMap<Idx<ExprData>
             return;
         }
     }
-    // A lambda shadows any macro param with the same name as one of its params.
-    if let ExprKind::Lambda { params, body, .. } = &ast.exprs[e].kind {
-        let shadowed: Vec<Ustr> = params
-            .iter()
-            .map(|p| p.name.name)
-            .filter(|n| subs.contains_key(n))
-            .collect();
-        let body = *body;
-        if shadowed.is_empty() {
-            substitute_block(ast, body, subs);
-        } else {
-            let mut inner = subs.clone();
-            for n in shadowed {
-                inner.remove(&n);
-            }
-            substitute_block(ast, body, &inner);
-        }
-        return;
-    }
     // An `ident` fragment in constructor position: `Name { .. }` / `Name::V`.
     // The bound arg is an `Ident` expr; lift its name into the ctor.
     let ctor_name = match &ast.exprs[e].kind {
@@ -1717,6 +1698,16 @@ fn rename_stmt(
                 rename_binding(&mut l.binding, callsite, counter, top);
             }
         }
+        StatementKind::Static(st) => {
+            let value = st.value;
+            rename_expr(ast, value, callsite, counter, stack);
+            let top = stack.last_mut().expect("rename_stmt: block scope present");
+            if let StatementKind::Static(st) = &mut ast.stmts[s].kind {
+                let fresh = fresh_local(st.name.name, callsite, counter);
+                top.insert(st.name.name, fresh);
+                st.name.name = fresh;
+            }
+        }
         StatementKind::For(f) => {
             let iter = f.iter;
             let body = f.body;
@@ -1857,6 +1848,22 @@ fn rename_expr(
                 rename_block(ast, body, callsite, counter, stack);
                 stack.pop();
             }
+            return;
+        }
+        ExprKind::Lambda { .. } => {
+            let mut scope = RenameScope::default();
+            let ExprKind::Lambda { params, body, .. } = &mut ast.exprs[e].kind else {
+                unreachable!()
+            };
+            for p in params.iter_mut() {
+                let fresh = fresh_local(p.name.name, callsite, counter);
+                scope.insert(p.name.name, fresh);
+                p.name.name = fresh;
+            }
+            let body = *body;
+            stack.push(scope);
+            rename_block(ast, body, callsite, counter, stack);
+            stack.pop();
             return;
         }
         ExprKind::SafeNavigationLet { .. } => {

@@ -212,3 +212,29 @@ fn test_hyg_lambda_param_shadows_macro_arg() {
     // would compute 100 * 10 = 1000 instead.
     assert(hyg_lambda_param_shadow(x) == 130, "30 + 100 = 130")
 }
+
+// --- (12) lambda param must not capture a caller expr ------------------------
+
+macro hyg_lambda_param_capture(arg: expr) -> int {
+    let f = (x: int) => arg + x
+    f(1)
+}
+
+@test
+fn test_hyg_lambda_param_does_not_capture_arg() {
+    let x = 100
+    assert(hyg_lambda_param_capture(x) == 101, "100 + 1 = 101")
+}
+
+// --- (13) static must not capture a caller expr ------------------------------
+
+macro hyg_static_capture(arg: expr) -> int {
+    static x = 7
+    arg + x
+}
+
+@test
+fn test_hyg_static_does_not_capture_arg() {
+    let x = 100
+    assert(hyg_static_capture(x) == 107, "100 + 7 = 107")
+}
