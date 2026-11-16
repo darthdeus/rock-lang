@@ -2361,6 +2361,28 @@ fn ambiguous_annotation_does_not_select_builtin() {
 }
 
 #[test]
+fn custom_decorator_named_frame_ref_source_does_not_pin_a_call_result() {
+    let errors = annotation_resolution_errors(&[(
+        "main.rock",
+        "deco init frame_ref_source {}
+        value Position { x: int }
+        @frame_ref_source
+        fn same(position: ref Position) -> ref Position { return position }
+        fn main() {
+            let positions = [Position { x: 1 }]
+            let position: ref Position = same(positions[0])
+            position.x = 3
+        }",
+    )]);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("relocatable Vec or Map storage")),
+        "{errors:?}"
+    );
+}
+
+#[test]
 fn annotation_wire_onchange_references_must_resolve() {
     for (name, diagnostic) in [
         ("missing", "did not resolve"),

@@ -1657,7 +1657,7 @@ fn resolved_call_is_frame_source(gamma: &Gamma, e: Idx<Expr>) -> bool {
     gamma.workspace.module(mid).functions[fid]
         .annotations
         .iter()
-        .any(|annotation| annotation.name.name.as_str() == "frame_ref_source")
+        .any(|annotation| annotation.is_builtin("frame_ref_source"))
 }
 
 fn call_ref_provenance(c: BodyCtx, gamma: &mut Gamma, e: Idx<Expr>) -> RefProvenance {
