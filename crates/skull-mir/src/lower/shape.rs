@@ -1726,7 +1726,7 @@ pub(crate) fn mono_nobox_value_shape(ws: &Workspace, ty: &MonoTy) -> Option<Valu
     })?
 }
 
-fn peel_nullable_layers(mut ty: &MonoTy) -> (&MonoTy, bool) {
+pub(super) fn peel_nullable_layers(mut ty: &MonoTy) -> (&MonoTy, bool) {
     let mut nullable = false;
     while let MonoTy::Nullable(inner) = ty {
         nullable = true;

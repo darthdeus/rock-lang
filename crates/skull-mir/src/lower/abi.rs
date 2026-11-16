@@ -759,30 +759,14 @@ impl PartialEq for RepArena {
 
 impl Eq for RepArena {}
 
-fn value_shape_facts(
-    ws: &Workspace,
-    ty: &crate::monoty::MonoTy,
-    shape: &ValueShape,
-) -> (Option<ValueStorage>, bool, bool) {
-    let (payload, _) = ty.peel_nullable();
-    let crate::monoty::MonoTy::App {
-        ctor: crate::monoty::MonoCtor::Nominal(name),
-        ..
-    } = payload
-    else {
+fn value_shape_facts(ws: &Workspace, name: Ustr) -> (Option<ValueStorage>, bool, bool) {
+    let Some(plan) = super::shape::planned_value(ws, name) else {
         return (None, false, true);
     };
-    assert_eq!(
-        *name, shape.name,
-        "value shape must describe its nominal type"
-    );
-    let Some(plan) = super::shape::planned_value(ws, *name) else {
-        return (None, false, true);
-    };
-    let column_eligible = ws.struct_by_name.get(name).is_some_and(|sid| {
+    let column_eligible = ws.struct_by_name.get(&name).is_some_and(|sid| {
         super::shape::has_value_plan(&ws.modules[sid.module.index()].structs[sid.def])
     }) && (plan.shape.is_some()
-        || (declared_nobox(ws, ty) && plan.gc_shape.is_some()));
+        || (crate::lower::is_nobox_nominal(ws, name) && plan.gc_shape.is_some()));
     (
         Some(plan.storage),
         column_eligible,
@@ -855,16 +839,8 @@ fn payload_leaf_count(shape: &ValueShape) -> usize {
 /// The ABI cut therefore leaves a GC-tier value carrying a `nobox` descendant
 /// on the scalar wire. Its bodies keep today's frame cost and today's spanned
 /// frame-limit diagnostic; what they do not get is the new wire.
-fn box_would_materialize_nobox(ws: &Workspace, ty: &crate::monoty::MonoTy) -> bool {
-    let crate::monoty::MonoTy::App {
-        ctor: crate::monoty::MonoCtor::Nominal(name),
-        ..
-    } = ty.peel_nullable().0
-    else {
-        return false;
-    };
-    super::shape::planned_value(ws, *name)
-        .is_some_and(|plan| plan_box_materializes_nobox(ws, &plan))
+fn box_would_materialize_nobox(ws: &Workspace, name: Ustr) -> bool {
+    super::shape::planned_value(ws, name).is_some_and(|plan| plan_box_materializes_nobox(ws, &plan))
 }
 
 fn plan_box_materializes_nobox(ws: &Workspace, plan: &super::shape::PlannedValue) -> bool {
@@ -910,7 +886,7 @@ fn wire_value_shape(
     let shape = crate::lower::mono_value_shape(ws, ty)?;
     if matches!(use_context, RepUse::Parameter | RepUse::Return)
         && payload_leaf_count(&shape) > WIDE_VALUE_PAYLOAD_LEAF_CUT
-        && !box_would_materialize_nobox(ws, ty)
+        && !box_would_materialize_nobox(ws, shape.name)
     {
         return None;
     }
@@ -918,7 +894,7 @@ fn wire_value_shape(
 }
 
 fn declared_nobox(ws: &Workspace, ty: &crate::monoty::MonoTy) -> bool {
-    let (payload, _) = ty.peel_nullable();
+    let (payload, _) = super::shape::peel_nullable_layers(ty);
     let crate::monoty::MonoTy::App {
         ctor: crate::monoty::MonoCtor::Nominal(name),
         ..
@@ -1093,19 +1069,17 @@ impl RepArena {
         ws: &Workspace,
         target: FnBackend,
         use_context: RepUse,
-        ty: &crate::monoty::MonoTy,
         shape: ValueShape,
     ) -> RepId {
         let key = RepKey::ValueShape(target, use_context, shape.clone());
         if let Some(id) = self.lookup_key(&key) {
             return id;
         }
-        let (storage, column_eligible, boxable) = value_shape_facts(ws, ty, &shape);
-        let nobox = declared_nobox(ws, ty);
-        // Boxing legality is a function of the interned layout: a `Leaves`
-        // shape names its nominal type (`value_shape_facts` asserts it), and
-        // this predicate reads only that name and the workspace, so the plan
-        // needs no extra key slot to keep two answers apart.
+        // The facts read only the shape's nominal name, never the planned
+        // type: `V?` and `V??` share this key, and the first worker to plan
+        // either must record the answer the other would have.
+        let (storage, column_eligible, boxable) = value_shape_facts(ws, shape.name);
+        let nobox = crate::lower::is_nobox_nominal(ws, shape.name);
         let id = self.intern_with_facts(
             target,
             use_context,
@@ -1125,11 +1099,7 @@ impl RepArena {
             let FieldShape::Nested(child) = field else {
                 continue;
             };
-            let child_ty = crate::monoty::MonoTy::App {
-                ctor: crate::monoty::MonoCtor::Nominal(child.name),
-                params: Vec::new(),
-            };
-            self.intern_value_shape_plan(ws, target, RepUse::Value, &child_ty, child.clone());
+            self.intern_value_shape_plan(ws, target, RepUse::Value, child.clone());
         }
     }
 
@@ -1535,13 +1505,7 @@ impl RepArena {
                     let shape =
                         wire_value_shape(ws, ty, use_context, guarantees, tuple_element_shape);
                     if let Some(shape) = shape {
-                        return Ok(self.intern_value_shape_plan(
-                            ws,
-                            target,
-                            use_context,
-                            ty,
-                            shape,
-                        ));
+                        return Ok(self.intern_value_shape_plan(ws, target, use_context, shape));
                     }
                     if guarantees.nobox && !guarantees.allow_opaque {
                         return Err(reject(format!(
@@ -1584,7 +1548,7 @@ impl RepArena {
             } => {
                 let shape = wire_value_shape(ws, ty, use_context, guarantees, tuple_element_shape);
                 if let Some(shape) = shape {
-                    return Ok(self.intern_value_shape_plan(ws, target, use_context, ty, shape));
+                    return Ok(self.intern_value_shape_plan(ws, target, use_context, shape));
                 }
                 if guarantees.nobox && !guarantees.allow_opaque {
                     return Err(reject(format!(
