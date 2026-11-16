@@ -1,6 +1,7 @@
 //! Shader program discovery, realization and registration.
 
 use super::*;
+use crate::instance_graph::Edge;
 
 /// A Lua long-bracket string literal (`[==[ ... ]==]`) holding `s`, at the
 /// smallest `=` level whose closing bracket does not occur in `s` (never does
@@ -32,21 +33,15 @@ pub(super) fn shader_programs(
 }
 
 /// Every function's call-graph strongly connected component, read off the
-/// whole-program instance graph and projected onto declarations. Every edge
-/// kind counts, `EdgeKind::FnValue` included: a function taken as a value is
+/// whole-program instance graph and projected onto declarations. A function
+/// taken as a value is
 /// reached by a call the direct-call edges cannot see. Projecting MERGES nodes, which can only merge
 /// components, so a callee this reports as separate from its caller really is:
 /// the binding pass never orders a capture after the closure that needs it.
 pub(super) fn call_sccs(
     graph: &crate::instance_graph::InstanceGraph,
 ) -> bone_semantic::prelude::FxHashMap<skull_mir::mir::FuncRef, u32> {
-    skull_codegen_lua::call_sccs(
-        graph
-            .contributions
-            .values()
-            .flat_map(|contribution| contribution.edges.iter())
-            .map(|edge| (edge.from.func, edge.to.func)),
-    )
+    skull_codegen_lua::call_sccs(graph.edges().map(|(from, edge)| (from.func, edge.to.func)))
 }
 
 pub(super) fn realize_shader_view(
@@ -100,7 +95,7 @@ pub(super) fn graph_rejection_error(
     None
 }
 
-fn identity_storage_exempt(ws: &Workspace, instance: &crate::instance_graph::Instance) -> bool {
+fn identity_storage_exempt(ws: &Workspace, instance: &Instance) -> bool {
     bone_semantic::identity_storage::identity_storage_exempt(ws, ws.module(instance.func.module))
 }
 
@@ -112,13 +107,13 @@ fn identity_storage_exempt(ws: &Workspace, instance: &crate::instance_graph::Ins
 /// fatal when that caller's package is not exempt.
 struct IdentityRejectionWalk<'g> {
     /// The instances that only forward an identity to their callees.
-    forwarders: FxHashSet<&'g crate::instance_graph::Instance>,
+    forwarders: FxHashSet<&'g Instance>,
     /// The edges into every rejected instance and every forwarder, in owner
     /// order. No walk asks for the callers of anything else.
-    callers: FxHashMap<&'g crate::instance_graph::Instance, Vec<&'g crate::instance_graph::Edge>>,
+    callers: FxHashMap<&'g Instance, Vec<(&'g Instance, &'g Edge)>>,
     /// Instances a walk already went through without finding an introducing
     /// caller. A later rejection reaching one has nothing left to find there.
-    cleared: FxHashSet<&'g crate::instance_graph::Instance>,
+    cleared: FxHashSet<&'g Instance>,
 }
 
 impl<'g> IdentityRejectionWalk<'g> {
@@ -139,7 +134,7 @@ impl<'g> IdentityRejectionWalk<'g> {
             .iter()
             .map(|(owner, c)| (owner, &**c))
             .collect();
-        let forwarders: FxHashSet<&crate::instance_graph::Instance> = owners
+        let forwarders: FxHashSet<&Instance> = owners
             .par_iter()
             .filter_map(|(owner, _)| owner.instance())
             .filter(|caller| {
@@ -152,7 +147,7 @@ impl<'g> IdentityRejectionWalk<'g> {
                     })
             })
             .collect();
-        let rejected: FxHashSet<&crate::instance_graph::Instance> = rejections
+        let rejected: FxHashSet<&Instance> = rejections
             .iter()
             .filter(|rejection| {
                 rejection.kind == crate::instance_graph::RejectionKind::IdentityInOrdinaryStorage
@@ -162,21 +157,22 @@ impl<'g> IdentityRejectionWalk<'g> {
         // Nearly every edge targets a plain instance, which is ruled out
         // without hashing it when no plain instance was rejected.
         let plain = rejected.iter().any(|instance| instance.args.is_empty());
-        let into: Vec<Vec<&crate::instance_graph::Edge>> = owners
+        let into: Vec<Vec<(&Instance, &Edge)>> = owners
             .par_iter()
-            .map(|(_, c)| {
+            .map(|(owner, c)| {
                 c.edges
                     .iter()
                     .filter(|edge| {
                         (plain || !edge.to.args.is_empty())
                             && (rejected.contains(&edge.to) || forwarders.contains(&edge.to))
                     })
+                    .map(|edge| (owner.instance().expect("edge owner is an instance"), edge))
                     .collect()
             })
             .collect();
         let mut callers: FxHashMap<_, Vec<_>> = FxHashMap::default();
-        for edge in into.into_iter().flatten() {
-            callers.entry(&edge.to).or_default().push(edge);
+        for (from, edge) in into.into_iter().flatten() {
+            callers.entry(&edge.to).or_default().push((from, edge));
         }
         IdentityRejectionWalk {
             forwarders,
@@ -195,10 +191,10 @@ impl<'g> IdentityRejectionWalk<'g> {
             if !self.cleared.insert(instance) {
                 continue;
             }
-            for edge in self.callers.get(instance).into_iter().flatten() {
-                if self.forwarders.contains(&edge.from) {
-                    work.push(&edge.from);
-                } else if !identity_storage_exempt(ws, &edge.from) {
+            for (from, edge) in self.callers.get(instance).into_iter().flatten() {
+                if self.forwarders.contains(from) {
+                    work.push(from);
+                } else if !identity_storage_exempt(ws, from) {
                     let callee =
                         &ws.module(rejection.at.func.module).functions[rejection.at.func.func];
                     return Some(

@@ -53,62 +53,6 @@ use skull_mir::monoty::{MonoInterner, MonoSubst, MonoTyId, MonoTyReason};
 /// index into; only the type's placement moved.
 pub use skull_mir::instance::{DeclKey, Instance};
 
-/// Why one instance depends on another. The plan's edge kinds; the histogram of
-/// these is what makes an absent edge class visible.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub enum EdgeKind {
-    /// A statically resolved direct call.
-    DirectCall,
-    /// A direct call whose callee is generic and whose instantiation came from
-    /// the caller's substitution rather than from the call site alone. The
-    /// transitive-instantiation edge.
-    GenericCall,
-    /// The `iter()` half of a desugared `for`.
-    IteratorIter,
-    /// The `next()` witness of a desugared `for`, resolved at instantiation
-    /// (plan S 12).
-    IteratorNext,
-    /// A Rock function taken as a VALUE rather than called (`let f = adder`, a
-    /// callback argument, a `func:` struct field).
-    ///
-    /// The discriminant is skull's OWN, not bone's: `lower/expr.rs:75` lowers a
-    /// fn value from `Expr::Global(name)` where `ws.functions_by_name` has the
-    /// name, and resolves the symbol with `fn_value_symbol`. bone records
-    /// nothing in `resolved_overload_calls` for it unless the name is
-    /// overloaded, so scanning that map finds none -- measured, and the reason
-    /// `bbc06d767` withdrew the first attempt at this edge. `bone-lints`'
-    /// `body_edges` reaches the same conclusion independently and states it:
-    /// "never a call and never in the inference maps... the two nets are
-    /// complementary".
-    FnValue,
-    /// An iterable argument coerced through its `iter()` at an
-    /// `Iterator`-bounded param (`v.map(f)` with no explicit `.iter()`), from
-    /// `implicit_iter_args`. The call-argument analog of [`Self::IteratorIter`].
-    ImplicitIter,
-    /// The `next` witness of a call to a BOUNDED generic fn, from the call
-    /// site's conformance tree (`bound_call_trees`). Distinct from
-    /// [`Self::IteratorNext`], which is the `for` desugar's witness.
-    BoundNextWitness,
-    /// A call no source expression names: a conditional dispatch arm
-    /// (interpolation, `==`) or an `@preflight` helper.
-    CompilerGenerated,
-}
-
-impl EdgeKind {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::DirectCall => "direct-call",
-            Self::GenericCall => "generic-call",
-            Self::IteratorIter => "iterator-iter",
-            Self::IteratorNext => "iterator-next",
-            Self::FnValue => "fn-value",
-            Self::ImplicitIter => "implicit-iter",
-            Self::BoundNextWitness => "bound-next-witness",
-            Self::CompilerGenerated => "compiler-generated",
-        }
-    }
-}
-
 /// The boundary classifier lives below the graph, so artifact projection and
 /// lowering-side rejection cannot drift into separate vocabularies.
 pub use skull_mir::lower::BoundaryClass;
@@ -148,9 +92,7 @@ pub struct CoroutineHelper {
 
 #[derive(Clone, Debug)]
 pub struct Edge {
-    pub from: Instance,
     pub to: Instance,
-    pub kind: EdgeKind,
     pub span: Span,
 }
 
@@ -3697,14 +3639,12 @@ impl InstanceGraph {
             .filter(|m| !m.is_empty())
     }
 
-    /// Every edge in the graph, in owner order.
-    ///
-    /// An ITERATOR rather than a field: the rows already exist, once, in the
-    /// contributions. Materializing a second copy cost 32k `Edge` clones per
-    /// update on a large corpus and served no production consumer -- `artifact` says in
-    /// its own comment that it deliberately works from sites, not edges.
-    pub fn edges(&self) -> impl Iterator<Item = &Edge> {
-        self.contributions.values().flat_map(|c| c.edges.iter())
+    /// Every edge and its source instance, in owner order.
+    pub fn edges(&self) -> impl Iterator<Item = (&Instance, &Edge)> {
+        self.contributions
+            .iter()
+            .filter_map(|(owner, c)| owner.instance().map(|i| (i, c)))
+            .flat_map(|(i, c)| c.edges.iter().map(move |edge| (i, edge)))
     }
 
     /// Calls the walk could not turn into an instance, in owner order.
@@ -4666,11 +4606,6 @@ fn walk_body_edges(
         let span = body
             .and_then(|b| b.expr_spans.get(e).copied())
             .unwrap_or_else(Span::unknown);
-        let kind = if bindings.is_some() {
-            EdgeKind::GenericCall
-        } else {
-            EdgeKind::DirectCall
-        };
         if let Some(to) = record_call(
             w,
             ws,
@@ -4679,7 +4614,6 @@ fn walk_body_edges(
             subst,
             callee,
             bindings,
-            kind,
             span,
             Site {
                 domain: domain.clone(),
@@ -4724,7 +4658,6 @@ fn walk_body_edges(
                             func: *helper_id,
                         },
                         None,
-                        EdgeKind::CompilerGenerated,
                         span,
                         Site {
                             domain: domain.clone(),
@@ -4756,7 +4689,6 @@ fn walk_body_edges(
                     subst,
                     callee,
                     None,
-                    EdgeKind::FnValue,
                     span,
                     Site {
                         domain: domain.clone(),
@@ -4813,18 +4745,7 @@ fn walk_body_edges(
                 .unwrap_or_else(Span::unknown);
             match skull_mir::lower::dispatched_callee_decl(ws, name) {
                 Some(callee) => {
-                    record_call(
-                        w,
-                        ws,
-                        inf,
-                        from,
-                        subst,
-                        callee,
-                        None,
-                        EdgeKind::CompilerGenerated,
-                        span,
-                        site,
-                    );
+                    record_call(w, ws, inf, from, subst, callee, None, span, site);
                 }
                 None => {
                     w.record_site(
@@ -4864,7 +4785,6 @@ fn walk_body_edges(
             subst,
             witness,
             span,
-            EdgeKind::ImplicitIter,
             Site {
                 domain: domain.clone(),
                 expr: e,
@@ -4927,11 +4847,9 @@ fn walk_body_edges(
             );
             continue;
         };
-        if let Some(from) = from {
+        if from.is_some() {
             w.push_edge(Edge {
-                from: from.clone(),
                 to: resolved.callee.clone(),
-                kind: EdgeKind::BoundNextWitness,
                 span,
             });
         }
@@ -4957,7 +4875,6 @@ fn walk_body_edges(
                 subst,
                 witness,
                 span,
-                EdgeKind::IteratorIter,
                 Site {
                     domain: domain.clone(),
                     expr: e,
@@ -4973,7 +4890,6 @@ fn walk_body_edges(
             subst,
             &info.next,
             span,
-            EdgeKind::IteratorNext,
             e,
             BoundRoot::For,
             domain,
@@ -4991,12 +4907,11 @@ fn record_call(
     subst: &MonoSubst,
     callee: FuncRef,
     bindings: Option<&Vec<bone_core::prelude::TyId>>,
-    kind: EdgeKind,
     span: Span,
     site: Site,
 ) -> Option<Instance> {
     let started = w.timer();
-    let result = record_call_impl(w, ws, inf, from, subst, callee, bindings, kind, span, site);
+    let result = record_call_impl(w, ws, inf, from, subst, callee, bindings, span, site);
     add_elapsed(&mut w.out.timing.call_site_resolution_ns, started);
     result
 }
@@ -5010,7 +4925,6 @@ fn record_call_impl(
     subst: &MonoSubst,
     callee: FuncRef,
     bindings: Option<&Vec<bone_core::prelude::TyId>>,
-    kind: EdgeKind,
     span: Span,
     site: Site,
 ) -> Option<Instance> {
@@ -5089,10 +5003,8 @@ fn record_call_impl(
     };
     let to = Instance { func: callee, args };
     match from {
-        Some(from) => w.push_edge(Edge {
-            from: from.clone(),
+        Some(_) => w.push_edge(Edge {
             to: to.clone(),
-            kind,
             span,
         }),
         // No `from`, so no edge and no site: an always-emitted body's callee is
@@ -5284,7 +5196,6 @@ fn record_witness(
     subst: &MonoSubst,
     witness: &IterWitness,
     span: Span,
-    kind: EdgeKind,
     site: Site,
 ) {
     let started = w.timer();
@@ -5309,10 +5220,8 @@ fn record_witness(
         Ok((args, callee_subst)) => {
             let to = Instance { func: callee, args };
             match from {
-                Some(from) => w.push_edge(Edge {
-                    from: from.clone(),
+                Some(_) => w.push_edge(Edge {
                     to: to.clone(),
-                    kind,
                     span,
                 }),
                 // See `record_call`: an always-emitted body's callee is a root.
@@ -5573,7 +5482,6 @@ fn record_bound_next(
     subst: &MonoSubst,
     next: &BoundNext,
     span: Span,
-    kind: EdgeKind,
     expr: Idx<bone_core::hir::Expr>,
     root: BoundRoot,
     domain: &SiteDomain,
@@ -5595,11 +5503,9 @@ fn record_bound_next(
             );
             return None;
         };
-        if let Some(from) = from {
+        if from.is_some() {
             w.push_edge(Edge {
-                from: from.clone(),
                 to: resolved.callee.clone(),
-                kind,
                 span,
             });
         }
@@ -5641,10 +5547,8 @@ fn record_bound_next(
         Ok((args, callee_subst)) => {
             let to = Instance { func: callee, args };
             match from {
-                Some(from) => w.push_edge(Edge {
-                    from: from.clone(),
+                Some(_) => w.push_edge(Edge {
                     to: to.clone(),
-                    kind,
                     span,
                 }),
                 // See `record_call`: an always-emitted body's callee is a root.
@@ -5751,7 +5655,6 @@ fn walk_bound_tree(
             subst,
             &tree.next[k],
             span,
-            EdgeKind::BoundNextWitness,
             expr,
             root,
             domain,
@@ -6562,9 +6465,7 @@ mod recursion_search_tests {
             let mut contribution = Contribution::default();
             if let Some(to) = to {
                 contribution.edges.push(Edge {
-                    from: instances[from].clone(),
                     to: instances[to].clone(),
-                    kind: EdgeKind::GenericCall,
                     span: Span::unknown(),
                 });
             }

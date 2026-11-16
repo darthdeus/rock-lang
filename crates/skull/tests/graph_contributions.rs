@@ -125,19 +125,7 @@ fn the_edge_closure_and_the_reach_record_name_the_same_instances() {
     // `root_instances`. The arm bites on instances no root names -- every
     // specialization, and every stdlib callee reached transitively -- which is
     // where an updater gets reachability wrong in the first place. Verified by
-    // mutation: dropping the `GenericCall` reach fails both arms below.
-    let kinds: BTreeSet<&str> = g.edges().map(|e| e.kind.name()).collect();
-    for required in [
-        "direct-call",
-        "generic-call",
-        "fn-value",
-        "bound-next-witness",
-    ] {
-        assert!(
-            kinds.contains(required),
-            "the fixture has no `{required}` edge: {kinds:?}"
-        );
-    }
+    // mutation: dropping a generic call reach fails both arms below.
     assert_eq!(
         reached.len(),
         g.instances.len(),

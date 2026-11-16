@@ -15,13 +15,13 @@
 use crate::common::ws_of_files;
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::support::graph_snapshot::{CanonicalGraph, canonical};
+use crate::support::graph_snapshot::{canonical, CanonicalGraph};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::Span;
 use skull::instance_graph::{
     self, Agreed, AlwaysEmittedFailure, AlwaysEmittedOutcome, Boundary, BoundaryClass, DeclKey,
-    EdgeKind, Instance, InstanceBoundNext, InstanceBoundTree, InstanceGraph, Owner, Rejection,
-    RejectionKind, RootHole, Site, SiteDomain, SiteOp, SiteOutcome, SiteRecord, Unresolved,
+    Instance, InstanceBoundNext, InstanceBoundTree, InstanceGraph, Owner, Rejection, RejectionKind,
+    RootHole, Site, SiteDomain, SiteOp, SiteOutcome, SiteRecord, Unresolved,
 };
 use skull_mir::monoty::{MonoSubst, MonoTy};
 use ustr::Ustr;
@@ -254,7 +254,7 @@ fn inst(g: &InstanceGraph, n: usize) -> Instance {
 /// `<unknown>` sentinel.
 fn real_span(g: &InstanceGraph) -> Span {
     g.edges()
-        .map(|e| e.span)
+        .map(|(_, e)| e.span)
         .find(|s| !instance_graph::is_spanless(s))
         .expect("the fixture has a spanned edge")
 }
@@ -512,16 +512,6 @@ fn arms() -> Vec<Arm> {
     }));
 
     // --- edges: every field ---
-    v.push(arm(
-        "edges.kind",
-        "edges",
-        |g| first_edge_owner(g).edges[0].kind = EdgeKind::DirectCall,
-        |g| first_edge_owner(g).edges[0].kind = EdgeKind::FnValue,
-    ));
-    v.push(arm("edges.from", "edges", noop, |g| {
-        let to = inst(g, 1);
-        first_edge_owner(g).edges[0].from = to;
-    }));
     v.push(arm("edges.to", "edges", noop, |g| {
         let to = inst(g, 1);
         first_edge_owner(g).edges[0].to = to;

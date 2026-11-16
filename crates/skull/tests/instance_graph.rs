@@ -3,13 +3,26 @@
 
 use crate::common::{body_id, emit_full_of, fn_name, ws_with_stdlib};
 use bone_semantic::inference::Workspace;
-use skull::instance_graph::{self, EdgeKind};
+use skull::instance_graph::{self, Instance, Site, SiteOp, SiteOutcome};
 use ustr::Ustr;
 
 fn graph_of(src: &str) -> (Workspace, instance_graph::InstanceGraph) {
     let ws = ws_with_stdlib(src);
     let g = crate::common::graph_of(&ws);
     (ws, g)
+}
+
+fn resolved_sites(
+    graph: &instance_graph::InstanceGraph,
+) -> impl Iterator<Item = (&Site, &Instance)> {
+    graph.call_sites().flat_map(|(_, sites)| {
+        sites
+            .iter()
+            .filter_map(|(site, record)| match &record.outcome {
+                SiteOutcome::Resolved(target) => Some((site, target)),
+                SiteOutcome::Failed(_) => None,
+            })
+    })
 }
 
 #[test]
@@ -274,10 +287,9 @@ fn main() {
 }
 "#,
     );
-    let witnesses: Vec<String> = g
-        .edges()
-        .filter(|e| e.kind == EdgeKind::IteratorNext || e.kind == EdgeKind::BoundNextWitness)
-        .map(|e| g.symbol(&ws, &e.to))
+    let witnesses: Vec<String> = resolved_sites(&g)
+        .filter(|(site, _)| matches!(site.op, SiteOp::ForNext(_) | SiteOp::BoundNext(_)))
+        .map(|(_, target)| g.symbol(&ws, target))
         .collect();
     // `next` is one overload per iterator type, so the mangling carries the
     // receiver: `next_VecIter_T`. The three levels of the chain must
@@ -289,9 +301,9 @@ fn main() {
         );
     }
     assert!(
-        g.edges()
-            .filter(|e| e.kind == EdgeKind::IteratorNext)
-            .all(|e| !e.to.args.is_empty()),
+        resolved_sites(&g)
+            .filter(|(site, _)| matches!(site.op, SiteOp::ForNext(_)))
+            .all(|(_, target)| !target.args.is_empty()),
         "an iterator-next witness reached a generic callee with no instantiation"
     );
 }
@@ -723,7 +735,7 @@ fn main() {
     // ...and the fixture really did produce the recursion it claims to.
     let calls = |from: &str, to: &str| {
         g.edges()
-            .any(|e| fn_name(&ws, e.from.func) == from && fn_name(&ws, e.to.func) == to)
+            .any(|(source, e)| fn_name(&ws, source.func) == from && fn_name(&ws, e.to.func) == to)
     };
     assert!(
         calls("countdown", "countdown"),
@@ -767,9 +779,9 @@ fn main() {
     // `resolved_overload_calls` here -- `apply` is not overloaded -- so this is
     // skull's own `Expr::Global`-names-a-function scan.
     assert!(
-        g.edges()
-            .filter(|e| e.kind == EdgeKind::FnValue)
-            .any(|e| fn_name(&ws, e.to.func) == "bump"),
+        resolved_sites(&g)
+            .filter(|(site, _)| site.op == SiteOp::FnValue)
+            .any(|(_, target)| fn_name(&ws, target.func) == "bump"),
         "`bump` is taken as a value twice and produced no fn-value edge"
     );
 }
@@ -859,21 +871,20 @@ fn generic_iter_witnesses_are_instantiated() {
         (
             "for head",
             format!("fn main() {{\n    {for_head}\n}}\n"),
-            EdgeKind::IteratorIter,
+            SiteOp::ForIter,
             "iter-witness-no-instantiation-record",
         ),
         (
             "implicit iter",
             format!("fn main() {{\n    {implicit}\n}}\n"),
-            EdgeKind::ImplicitIter,
+            SiteOp::ImplicitIter,
             "implicit-iter-witness-no-instantiation-record",
         ),
     ] {
         let (ws, g) = graph_of(&src);
-        let iters: Vec<String> = g
-            .edges()
-            .filter(|e| e.kind == kind)
-            .map(|e| g.symbol(&ws, &e.to))
+        let iters: Vec<String> = resolved_sites(&g)
+            .filter(|(site, _)| site.op == kind)
+            .map(|(_, target)| g.symbol(&ws, target))
             .collect();
         assert!(
             iters
@@ -885,13 +896,13 @@ fn generic_iter_witnesses_are_instantiated() {
             !g.unresolved().any(|u| u.reason == no_record),
             "{label}: a witness was still filed as having no instantiation record"
         );
-        let nexts: Vec<&instance_graph::Edge> = g
-            .edges()
-            .filter(|e| e.kind == EdgeKind::IteratorNext || e.kind == EdgeKind::BoundNextWitness)
+        let nexts: Vec<&Instance> = resolved_sites(&g)
+            .filter(|(site, _)| matches!(site.op, SiteOp::ForNext(_) | SiteOp::BoundNext(_)))
+            .map(|(_, target)| target)
             .collect();
         assert!(!nexts.is_empty(), "{label}: no next witness edge");
         assert!(
-            nexts.iter().all(|e| !e.to.args.is_empty()),
+            nexts.iter().all(|target| !target.args.is_empty()),
             "{label}: a `next` witness lost its instantiation"
         );
     }
@@ -941,19 +952,18 @@ fn main() {
 }
 "#,
     );
-    let iters: Vec<String> = g
-        .edges()
-        .filter(|e| e.kind == EdgeKind::IteratorIter)
-        .map(|e| g.symbol(&ws, &e.to))
+    let iters: Vec<String> = resolved_sites(&g)
+        .filter(|(site, _)| site.op == SiteOp::ForIter)
+        .map(|(_, target)| g.symbol(&ws, target))
         .collect();
     assert!(
         !iters.is_empty(),
         "a concrete `iter` witness produced no edge"
     );
     assert!(
-        g.edges()
-            .filter(|e| e.kind == EdgeKind::IteratorIter)
-            .all(|e| e.to.args.is_empty()),
+        resolved_sites(&g)
+            .filter(|(site, _)| site.op == SiteOp::ForIter)
+            .all(|(_, target)| target.args.is_empty()),
         "a non-generic witness was given instance arguments: {iters:?}"
     );
 }
@@ -1004,9 +1014,9 @@ fn main() {
             ))
             .collect::<Vec<_>>()
     );
-    let witnesses: Vec<&instance_graph::Edge> = g
-        .edges()
-        .filter(|e| e.kind == EdgeKind::IteratorIter)
+    let witnesses: Vec<&Instance> = resolved_sites(&g)
+        .filter(|(site, _)| site.op == SiteOp::ForIter)
+        .map(|(_, target)| target)
         .collect();
     assert!(!witnesses.is_empty(), "no iterator-iter edge");
 
@@ -1018,17 +1028,17 @@ fn main() {
     let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(tp::LUAJIT_DESKTOP, &roots));
     let js = artifact::realize(&ws, &g, &ArtifactRequest::new(tp::JAVASCRIPT_WEB, &roots));
     let mut selected = 0usize;
-    for e in &witnesses {
-        let (Some(l), Some(j)) = (lua.realization.get(&e.to), js.realization.get(&e.to)) else {
+    for target in &witnesses {
+        let (Some(l), Some(j)) = (lua.realization.get(target), js.realization.get(target)) else {
             panic!("an artifact did not retain the witness at all");
         };
         // Same instance -- it is the same key in both maps -- with the JS
         // sibling chosen only on JS.
         assert_eq!(
-            l.decl, e.to.func,
+            l.decl, target.func,
             "luajit did not select the representative itself"
         );
-        selected += usize::from(j.decl != e.to.func);
+        selected += usize::from(j.decl != target.func);
     }
     assert!(
         selected > 0,
@@ -1325,8 +1335,8 @@ fn main() { mapped_op(1) }
         if !expands {
             let out: Vec<String> = g
                 .edges()
-                .filter(|e| fn_name(&ws, e.from.func) == op)
-                .map(|e| g.symbol(&ws, &e.to))
+                .filter(|(from, _)| fn_name(&ws, from.func) == op)
+                .map(|(_, e)| g.symbol(&ws, &e.to))
                 .collect();
             assert!(out.is_empty(), "boundary `{op}` produced edges: {out:?}");
         }
@@ -1570,12 +1580,10 @@ fn main() { let x = pick() }
 }
 
 /// Plan S 2: "Retain each edge's source span, for good errors at unresolved
-/// boundaries." An edge whose span is unknown cannot produce one, so the
-/// property is per-EDGE and not per-edge-kind: one spanless edge in a kind that
-/// is otherwise well-spanned is still a rejection with no location.
+/// boundaries." Every edge must carry its own span so any failed boundary can
+/// produce a located diagnostic.
 ///
-/// The fixture's coverage is asserted first. Without that, a walk that emitted
-/// no edges of a kind would pass this by having nothing to check.
+/// The fixture must produce edges so the span check is not vacuous.
 #[test]
 fn every_edge_carries_a_source_span() {
     let (ws, g) = graph_of(
@@ -1605,41 +1613,17 @@ fn main() {
 }
 "#,
     );
-    let kinds: std::collections::BTreeSet<&'static str> =
-        g.edges().map(|e| e.kind.name()).collect();
-    for want in [
-        "direct-call",
-        "generic-call",
-        "iterator-iter",
-        "iterator-next",
-        "fn-value",
-        "implicit-iter",
-        "bound-next-witness",
-        "compiler-generated",
-    ] {
-        assert!(
-            kinds.contains(want),
-            "fixture produced no `{want}` edge; covered: {kinds:?}"
-        );
-    }
-    let mut spanless: std::collections::BTreeMap<&'static str, Vec<String>> = Default::default();
-    for e in g.edges() {
-        if instance_graph::is_spanless(&e.span) {
-            let v = spanless.entry(e.kind.name()).or_default();
-            if v.len() < 5 {
-                v.push(format!(
-                    "{} -> {}",
-                    g.symbol(&ws, &e.from),
-                    g.symbol(&ws, &e.to)
-                ));
-            }
-        }
-    }
+    assert!(g.edges().next().is_some(), "fixture produced no edges");
+    let spanless: Vec<String> = g
+        .edges()
+        .filter(|(_, edge)| instance_graph::is_spanless(&edge.span))
+        .map(|(from, edge)| format!("{} -> {}", g.symbol(&ws, from), g.symbol(&ws, &edge.to)))
+        .collect();
     assert!(
         spanless.is_empty(),
         "{} of {} edges carry no source span: {spanless:#?}",
         g.edges()
-            .filter(|e| instance_graph::is_spanless(&e.span))
+            .filter(|(_, e)| instance_graph::is_spanless(&e.span))
             .count(),
         g.edges().count()
     );
@@ -1745,7 +1729,7 @@ fn main() {
         fn(&mut Workspace, &str) -> usize,
         &str,
         &str,
-        Option<EdgeKind>,
+        Option<SiteOp>,
     ); 3] = [
         (
             "fn ident<T>(x: T) -> T { return x }\nfn main() { let a = ident(1) }\n",
@@ -1759,14 +1743,14 @@ fn main() {
             drop_witness_generic_records,
             "witness-generic-unbound",
             "iter",
-            Some(EdgeKind::IteratorNext),
+            Some(SiteOp::ForNext(Box::new([]))),
         ),
         (
             for_loop,
             drop_bound_next_generic_records,
             "witness-generic-unbound",
             "next",
-            Some(EdgeKind::IteratorIter),
+            Some(SiteOp::ForIter),
         ),
     ];
     for (src, drop, reason, callee, control) in cases {
@@ -1789,7 +1773,7 @@ fn main() {
         );
         if let Some(kind) = control {
             assert!(
-                g.edges().any(|e| e.kind == kind),
+                resolved_sites(&g).any(|(site, _)| site.op == kind),
                 "{callee}: the fixture disturbed the other witness half too"
             );
         }

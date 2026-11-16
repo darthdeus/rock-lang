@@ -208,15 +208,7 @@ pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
     put(
         "edges",
         g.edges()
-            .map(|e| {
-                format!(
-                    "{} -{:?}-> {} @{}",
-                    key(&e.from),
-                    e.kind,
-                    key(&e.to),
-                    span_key(&e.span)
-                )
-            })
+            .map(|(from, e)| format!("{} -> {} @{}", key(from), key(&e.to), span_key(&e.span)))
             .collect(),
     );
     put(

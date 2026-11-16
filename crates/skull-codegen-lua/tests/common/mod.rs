@@ -63,11 +63,5 @@ pub fn lower_test_ref_with_graph(
 pub fn call_sccs(
     graph: &instance_graph::InstanceGraph,
 ) -> bone_core::prelude::FxHashMap<FuncRef, u32> {
-    skull_codegen_lua::call_sccs(
-        graph
-            .contributions
-            .values()
-            .flat_map(|contribution| contribution.edges.iter())
-            .map(|edge| (edge.from.func, edge.to.func)),
-    )
+    skull_codegen_lua::call_sccs(graph.edges().map(|(from, edge)| (from.func, edge.to.func)))
 }
