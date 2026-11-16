@@ -153,12 +153,9 @@ pub(crate) fn type_definition_at(
     let body = module.bodies.get(&owner)?;
     let bi = inf.per_fn.get(&owner)?;
 
-    let iv = body
-        .node_index()
-        .find(offset, offset + 1)
-        .min_by_key(|x| x.stop - x.start)?;
+    let node = node_at(body, offset)?;
 
-    let ty = match iv.val {
+    let ty = match node {
         NodeRef::Binding(b) => *bi.binding_types.get(b)?,
         NodeRef::Expr(e) => *bi.expr_types.get(e)?,
         _ => return None,
@@ -1563,11 +1560,8 @@ fn global_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Ustr> {
 
     let owner = module.body_at(offset)?;
     let body = module.bodies.get(&owner)?;
-    let iv = body
-        .node_index()
-        .find(offset, offset + 1)
-        .min_by_key(|x| x.stop - x.start)?;
-    if let NodeRef::Expr(e) = iv.val {
+    let node = node_at(body, offset)?;
+    if let NodeRef::Expr(e) = node {
         if let hir::Expr::Global(n) = &body.expr_arena[e] {
             if is_declared(n) {
                 return Some(*n);
@@ -1642,11 +1636,8 @@ fn struct_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Ustr> {
     // Body node: a type-annotation ctor or a struct-literal head.
     let owner = module.body_at(offset)?;
     let body = module.bodies.get(&owner)?;
-    let iv = body
-        .node_index()
-        .find(offset, offset + 1)
-        .min_by_key(|x| x.stop - x.start)?;
-    match iv.val {
+    let node = node_at(body, offset)?;
+    match node {
         NodeRef::StaticTy { mid: tmid, idx } => {
             let m = ws.modules.get(tmid.index())?;
             ctor_name_if_on(&m.ty_arena[idx], m.ty_spans.get(idx), offset)
@@ -1707,12 +1698,9 @@ fn struct_field_at(
 
     let owner = module.body_at(offset)?;
     let body = module.bodies.get(&owner)?;
-    let iv = body
-        .node_index()
-        .find(offset, offset + 1)
-        .min_by_key(|x| x.stop - x.start)?;
+    let node = node_at(body, offset)?;
 
-    let NodeRef::Expr(e) = iv.val else {
+    let NodeRef::Expr(e) = node else {
         return None;
     };
     match &body.expr_arena[e] {
@@ -2183,11 +2171,8 @@ fn generic_param_at(
 
     let owner = module.body_at(offset)?;
     let body = module.bodies.get(&owner)?;
-    let iv = body
-        .node_index()
-        .find(offset, offset + 1)
-        .min_by_key(|x| x.stop - x.start)?;
-    let NodeRef::StaticTy { mid: tmid, idx } = iv.val else {
+    let node = node_at(body, offset)?;
+    let NodeRef::StaticTy { mid: tmid, idx } = node else {
         return None;
     };
     let m = ws.modules.get(tmid.index())?;
@@ -2483,22 +2468,27 @@ pub(crate) fn named_arg_param_at<'t>(
 /// The binding the cursor is on in `body`: its declaration name token, a
 /// `Var` use, or a local-callee use. The innermost-node resolution
 /// `local_references` uses.
-fn binding_at(body: &hir::Body, offset: usize) -> Option<Idx<hir::BindingInfo>> {
+/// The innermost HIR node of `body` covering `offset`.
+fn node_at(body: &hir::Body, offset: usize) -> Option<NodeRef> {
     body.node_index()
         .find(offset, offset + 1)
         .min_by_key(|x| x.stop - x.start)
-        .and_then(|iv| match iv.val {
-            NodeRef::Binding(b) => Some(b),
-            NodeRef::Expr(e) => match &body.expr_arena[e] {
-                hir::Expr::Var(b) => Some(*b),
-                hir::Expr::Call {
-                    callee: hir::Callee::Local(b),
-                    ..
-                } => Some(*b),
-                _ => None,
-            },
+        .map(|iv| iv.val)
+}
+
+fn binding_at(body: &hir::Body, offset: usize) -> Option<Idx<hir::BindingInfo>> {
+    match node_at(body, offset)? {
+        NodeRef::Binding(b) => Some(b),
+        NodeRef::Expr(e) => match &body.expr_arena[e] {
+            hir::Expr::Var(b) => Some(*b),
+            hir::Expr::Call {
+                callee: hir::Callee::Local(b),
+                ..
+            } => Some(*b),
             _ => None,
-        })
+        },
+        _ => None,
+    }
 }
 
 /// The `label:` token directly before an arg value starting at `value_start`:
@@ -2589,12 +2579,7 @@ fn function_target(
 
     if let Some(owner) = module.body_at(offset) {
         if let Some(body) = module.bodies.get(&owner) {
-            if let Some(NodeRef::Expr(e)) = body
-                .node_index()
-                .find(offset, offset + 1)
-                .min_by_key(|x| x.stop - x.start)
-                .map(|iv| iv.val)
-            {
+            if let Some(NodeRef::Expr(e)) = node_at(body, offset) {
                 if let Some((cmid, fid)) = inf
                     .per_fn
                     .get(&owner)
@@ -5587,11 +5572,8 @@ fn type_at_offset(
     let owner = module.body_at(offset)?;
     let body = module.bodies.get(&owner)?;
     let bi = inf.per_fn.get(&owner)?;
-    let iv = body
-        .node_index()
-        .find(offset, offset + 1)
-        .min_by_key(|x| x.stop - x.start)?;
-    let ty = match iv.val {
+    let node = node_at(body, offset)?;
+    let ty = match node {
         NodeRef::LocalTy(idx) => TyId::Local(idx),
         NodeRef::StaticTy { mid, idx } => TyId::Static(mid, idx),
         NodeRef::Expr(e) => *bi.expr_types.get(e)?,
