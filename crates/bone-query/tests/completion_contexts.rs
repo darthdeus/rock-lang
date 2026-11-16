@@ -2312,6 +2312,29 @@ fn slot_context_orders_candidates() {
             "scores",
             "apples",
         ),
+        // FlatVec is a builtin collection the `for` head accepts.
+        (
+            "for_in_slot_ranks_flat_vec_local_first",
+            "struct Mob { hp: int }\n\
+               fn r() {\n  let scores: FlatVec<Mob> = flat_vec_new()\n  let apples = 0\n  for m in \n}\n",
+            4,
+            11,
+            "scores",
+            "apples",
+        ),
+        // A user collection iterates through the `iter` / `next` protocol.
+        (
+            "for_in_slot_ranks_protocol_iterable_local_first",
+            "struct Bag { n: int }\n\
+               struct BagIter { i: int }\n\
+               fn Bag.iter(b) -> BagIter { return BagIter { i: b.n } }\n\
+               fn BagIter.next(it) -> (bool, int) { return (it.i <= 0, it.i) }\n\
+               fn r() {\n  let scores = Bag { n: 3 }\n  let apples = 0\n  for m in \n}\n",
+            7,
+            11,
+            "scores",
+            "apples",
+        ),
         // A fn RETURNING an iterable rides rung 1: above wrong-type values
         // (rung 2), below direct iterable values (rung 0).
         (

@@ -736,9 +736,9 @@ struct GeneralRanker<'a, 'w> {
     pattern_enum: Option<&'a str>,
     /// `for x in |`: an iterable is the expected operand.
     for_in: bool,
-    /// Local candidate TyIds may index the cursor body's BodyInference, so
-    /// the ForIn `is_iterable_ty` checks resolve it once.
-    cursor_bi: Option<&'w BodyInference>,
+    /// Inference's `for`-head judgment over the cursor body (Local candidate
+    /// TyIds index its BodyInference); `Some` only in a ForIn slot.
+    for_in_oracle: Option<ForInOracle<'w>>,
     /// The module's fragment scope, for fn return-type lookups.
     module_frag: Option<&'w bone_core::modules::FragmentScope>,
     /// After `yield`/`await`, coroutine-returning fns rank first (the
@@ -765,14 +765,9 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
         freq: &'a HashMap<Ustr, u32>,
     ) -> Self {
         let ws = g.ws;
-        let cursor_bi = cx
+        let for_in_oracle = cx
             .for_in
-            .then(|| {
-                ws.modules
-                    .get(g.mid.index())
-                    .and_then(|m| m.body_at(rq.offset))
-                    .and_then(|o| g.inf.per_fn.get(&o))
-            })
+            .then(|| ForInOracle::new(ws, g.mid, g.inf, rq.offset))
             .flatten();
         GeneralRanker {
             g,
@@ -781,7 +776,7 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
             q_raw: rq.prefix_raw.as_bytes(),
             pattern_enum,
             for_in: cx.for_in,
-            cursor_bi,
+            for_in_oracle,
             module_frag: crate::modules_scope::fragment(ws, ws.module(g.mid).file),
             after_yield: cx.after_yield,
             demote_tests: !crate::query::is_test_path(rq.path),
@@ -920,19 +915,21 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
             };
         }
         if self.for_in {
-            // ForIn slot: an ITERABLE value (bone's `for_elem_ty` judgment,
-            // mirrored in `is_iterable_ty`) rides rung 0, a fn returning one
+            // ForIn slot: an ITERABLE value rides rung 0, a fn returning one
             // rung 1 -- the expected-type ladder with a type PREDICATE
             // instead of a single slot type.
+            let Some(oracle) = self.for_in_oracle.as_mut() else {
+                return 2;
+            };
             return match c.kind {
                 SymCat::Local | SymCat::Param | SymCat::Global
-                    if c.ty.is_some_and(|t| is_iterable_ty(ws, self.cursor_bi, t)) =>
+                    if c.ty.is_some_and(|t| oracle.iterable(t)) =>
                 {
                     0
                 }
                 SymCat::Function
                     if fn_unique_return_ty_in_scope(ws, c.name.as_str(), self.module_frag)
-                        .is_some_and(|t| is_iterable_ty(ws, None, t)) =>
+                        .is_some_and(|t| oracle.iterable(t)) =>
                 {
                     1
                 }

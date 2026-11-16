@@ -84,6 +84,53 @@ pub(crate) fn for_elem_ty(
     })
 }
 
+/// The element a `for` head binds for a value of `ty`, or `None` when the
+/// loop would not type-check: a builtin collection, else the user iterator
+/// protocol. Records nothing; a protocol hit may leave bindings the caller
+/// rolls back.
+pub fn iterable_elem(gamma: &mut Gamma, ty: TyId, span: Span) -> Option<TyId> {
+    gamma.trial(|g| {
+        let ty = resolve(g, ty, span);
+        if let TypeExpr::Generic(v, _) = *g.get(ty) {
+            return g.fn_bound_for(v).map(|(_, elem)| elem);
+        }
+        if let Ok(elem) = for_elem_ty(g, ty, span) {
+            return Some(elem);
+        }
+        let next_ret = protocol_next_ret(g, ty, span)?;
+        for_iter_next_elem(g, next_ret, span).ok()
+    })
+}
+
+/// `next`'s return type for the protocol rule `resolve_for_iter_protocol`
+/// applies: through an unbounded `iter(ty)` when one resolves, else on `ty`
+/// itself.
+fn protocol_next_ret(gamma: &mut Gamma, ty: TyId, span: Span) -> Option<TyId> {
+    // An unresolved or failed type would bind to whatever `next` takes.
+    if matches!(
+        *gamma.get(ty),
+        TypeExpr::Infer(..) | TypeExpr::Builtin(BuiltinTy::Error)
+    ) {
+        return None;
+    }
+    let c = gamma.body_ctx();
+    let it = match resolve_unary_by_recv(c, gamma, Ustr::from("iter"), ty, span) {
+        Ok(((m, f), _, _))
+            if gamma.workspace.module(m).functions[f]
+                .generic_bounds
+                .iter()
+                .any(Option::is_some) =>
+        {
+            return None;
+        }
+        Ok((_, ret, _)) => ret,
+        Err(_) => ty,
+    };
+    resolve_unary_by_recv(c, gamma, Ustr::from("next"), it, span)
+        .ok()
+        .map(|(_, ret, _)| ret)
+}
+
 /// Whether `enumerate(coll)` in for-position keeps its builtin template
 /// lowering (the types `for_elem_ty` knows). Everything else routes through
 /// the stdlib `EnumIter` combinator.

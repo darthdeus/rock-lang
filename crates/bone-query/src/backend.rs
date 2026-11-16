@@ -34,7 +34,7 @@ use bone_incremental::session::{Session, SessionFile, UpdateTier};
 use bone_semantic::inference::{self, Gamma};
 use bone_semantic::prelude::{
     BodyInference, FxHashMap, FxHashSet, InferenceResult, ModuleId, Span, TyId, Workspace,
-    is_field_ref_former, is_intrinsic_key_in,
+    is_field_ref_former,
 };
 use skull_parser::CompilerError;
 use ustr::Ustr;
@@ -3469,24 +3469,59 @@ pub(crate) struct ExpectedArg<'a> {
     ret_memo: HashMap<TyId, bool>,
 }
 
-impl<'a> ExpectedArg<'a> {
-    /// Throwaway Gamma over the cursor body's cached inference. None when the
-    /// body is broken enough to have no cached inference -- the caller falls
-    /// back to the rendered-string rung.
-    fn scratch(
+/// Throwaway Gamma over the cursor body's cached inference, so a query asks
+/// inference itself and `TyId::Local`s of that body resolve. None when the
+/// body is broken enough to have no cached inference.
+pub(crate) fn query_gamma<'a>(
+    ws: &'a Workspace,
+    mid: ModuleId,
+    inf: &InferenceResult,
+    offset: usize,
+) -> Option<(Gamma<'a>, Span)> {
+    let module = ws.modules.get(mid.index())?;
+    let owner = module.body_at(offset)?;
+    let body = module.bodies.get(&owner)?;
+    let seed = inf.per_fn.get(&owner)?;
+    let span = Span::new(module.file, (0, 0), (0, 0), (0, 0));
+    Some((Gamma::for_query(ws, body, mid, seed), span))
+}
+
+/// Inference's `for`-head judgment for the ForIn completion rung, memoized
+/// per candidate TyId and rolled back per probe.
+pub(crate) struct ForInOracle<'a> {
+    gamma: Gamma<'a>,
+    span: Span,
+    memo: HashMap<TyId, bool>,
+}
+
+impl<'a> ForInOracle<'a> {
+    pub(crate) fn new(
         ws: &'a Workspace,
         mid: ModuleId,
         inf: &InferenceResult,
         offset: usize,
-    ) -> Option<(Gamma<'a>, Span)> {
-        let module = ws.modules.get(mid.index())?;
-        let owner = module.body_at(offset)?;
-        let body = module.bodies.get(&owner)?;
-        let seed = inf.per_fn.get(&owner)?;
-        let span = Span::new(module.file, (0, 0), (0, 0), (0, 0));
-        Some((Gamma::for_query(ws, body, mid, seed), span))
+    ) -> Option<Self> {
+        let (gamma, span) = query_gamma(ws, mid, inf, offset)?;
+        Some(ForInOracle {
+            gamma,
+            span,
+            memo: HashMap::new(),
+        })
     }
 
+    pub(crate) fn iterable(&mut self, ty: TyId) -> bool {
+        if let Some(&b) = self.memo.get(&ty) {
+            return b;
+        }
+        let cp = self.gamma.out.checkpoint();
+        let ok = inference::iterable_elem(&mut self.gamma, ty, self.span).is_some();
+        self.gamma.out.rollback_to(cp);
+        self.memo.insert(ty, ok);
+        ok
+    }
+}
+
+impl<'a> ExpectedArg<'a> {
     /// Session for `callee(.. <arg_idx> ..)`; `recv` is the UFCS receiver's
     /// type when the call is `recv.callee(..)`.
     pub(crate) fn for_call(
@@ -3498,7 +3533,7 @@ impl<'a> ExpectedArg<'a> {
         arg_idx: usize,
         recv: Option<TyId>,
     ) -> Option<ExpectedArg<'a>> {
-        let (mut gamma, span) = Self::scratch(ws, mid, inf, offset)?;
+        let (mut gamma, span) = query_gamma(ws, mid, inf, offset)?;
         let name = Ustr::from(callee);
         let frag = crate::modules_scope::fragment(ws, ws.module(mid).file);
         let mut slots = Vec::new();
@@ -3559,7 +3594,7 @@ impl<'a> ExpectedArg<'a> {
         offset: usize,
         slot: TyId,
     ) -> Option<ExpectedArg<'a>> {
-        let (gamma, span) = Self::scratch(ws, mid, inf, offset)?;
+        let (gamma, span) = query_gamma(ws, mid, inf, offset)?;
         let rendered = match slot {
             TyId::Static(..) => vec![ws.render(None, slot)],
             TyId::Local(_) => Vec::new(),
@@ -3840,40 +3875,6 @@ pub(crate) fn bind_generic(
             _ => None,
         },
         _ => None,
-    }
-}
-
-/// Structural mirror of bone-inference's `for_elem_ty` ITERABLE judgment
-/// (keep the shape list in sync): `[T]`, `Map<K, V>`, `Arena<T>`, and the
-/// native buffer nominals. Drives the ForIn completion rung.
-pub(crate) fn is_iterable_ty(ws: &Workspace, body: Option<&BodyInference>, ty: TyId) -> bool {
-    use bone_semantic::hir::{TypeCtor, TypeExpr};
-    match ty_of(ws, body, ty) {
-        TypeExpr::App {
-            ctor: TypeCtor::Array,
-            ..
-        }
-        | TypeExpr::App {
-            ctor: TypeCtor::Map,
-            ..
-        } => true,
-        TypeExpr::App {
-            ctor: TypeCtor::Nominal(n),
-            ..
-        } => is_intrinsic_key_in(
-            n,
-            &[
-                "Arena",
-                "NativeBuffer",
-                "NativeBufferU8",
-                "NativeBufferI8",
-                "NativeBufferU16",
-                "NativeBufferI16",
-                "NativeBufferU32",
-                "NativeBufferI32",
-            ],
-        ),
-        _ => false,
     }
 }
 
