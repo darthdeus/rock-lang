@@ -40,17 +40,25 @@ fn weak_cache_misses_hits_counts_and_invalidates() {
 }
 
 @test
-fn weak_cache_keeps_two_live_owners_independent() {
+fn weak_cache_keeps_owners_and_cache_names_independent() {
     let rows: Arena<WeakCacheOwner> = arena_new()
     let a = rows.insert(WeakCacheOwner { tag: 1 })
     let b = rows.insert(WeakCacheOwner { tag: 2 })
     weak_cache_put(WC_OWNERS, a, WeakCacheValue { tag: 100 })
     weak_cache_put(WC_OWNERS, b, WeakCacheValue { tag: 200 })
+    weak_cache_put(WC_LEFT, a, WeakCacheValue { tag: 11 })
+    weak_cache_put(WC_RIGHT, a, WeakCacheValue { tag: 22 })
 
     let got_a: WeakCacheValue? = weak_cache_get(WC_OWNERS, a)
     let got_b: WeakCacheValue? = weak_cache_get(WC_OWNERS, b)
     assert_eq(got_a.unwrap().tag, 100, "the first owner keeps its own value")
     assert_eq(got_b.unwrap().tag, 200, "the second owner keeps its own value")
+    let left: WeakCacheValue? = weak_cache_get(WC_LEFT, a)
+    let right: WeakCacheValue? = weak_cache_get(WC_RIGHT, a)
+    assert_eq(left.unwrap().tag, 11, "each named cache answers with its own value")
+    assert_eq(right.unwrap().tag, 22, "each named cache answers with its own value")
+    assert_eq(weak_cache_builds(WC_LEFT), 1, "each named cache counts its own builds")
+    assert_eq(weak_cache_builds(WC_RIGHT), 1, "each named cache counts its own builds")
 
     weak_cache_drop(WC_OWNERS, a)
     let after_a: WeakCacheValue? = weak_cache_get(WC_OWNERS, a)
@@ -58,25 +66,10 @@ fn weak_cache_keeps_two_live_owners_independent() {
     assert(after_a == null, "invalidating one owner clears that owner")
     assert_eq(after_b.unwrap().tag, 200, "invalidating one owner leaves the other alone")
     assert_eq(weak_cache_live(WC_OWNERS), 1, "one entry remains")
-}
 
-@test
-fn weak_cache_keeps_two_caches_over_one_owner_independent() {
-    let rows: Arena<WeakCacheOwner> = arena_new()
-    let owner = rows.insert(WeakCacheOwner { tag: 1 })
-    weak_cache_put(WC_LEFT, owner, WeakCacheValue { tag: 11 })
-    weak_cache_put(WC_RIGHT, owner, WeakCacheValue { tag: 22 })
-
-    let left: WeakCacheValue? = weak_cache_get(WC_LEFT, owner)
-    let right: WeakCacheValue? = weak_cache_get(WC_RIGHT, owner)
-    assert_eq(left.unwrap().tag, 11, "each named cache answers with its own value")
-    assert_eq(right.unwrap().tag, 22, "each named cache answers with its own value")
-    assert_eq(weak_cache_builds(WC_LEFT), 1, "each named cache counts its own builds")
-    assert_eq(weak_cache_builds(WC_RIGHT), 1, "each named cache counts its own builds")
-
-    weak_cache_drop(WC_LEFT, owner)
-    let cleared: WeakCacheValue? = weak_cache_get(WC_LEFT, owner)
-    let kept: WeakCacheValue? = weak_cache_get(WC_RIGHT, owner)
+    weak_cache_drop(WC_LEFT, a)
+    let cleared: WeakCacheValue? = weak_cache_get(WC_LEFT, a)
+    let kept: WeakCacheValue? = weak_cache_get(WC_RIGHT, a)
     assert(cleared == null, "invalidating one cache clears that cache")
     assert_eq(kept.unwrap().tag, 22, "invalidating one cache leaves the other alone")
 }

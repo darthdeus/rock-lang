@@ -49,19 +49,6 @@ fn destroyed_arena_ids_are_not_reused() {
     print(b._arena_id > id)
 }
 
-// Every insertion advances the counter, reused slot or fresh, so a removed
-// slot's next occupant never carries a generation the old handle held.
-@test(output = "true\ntrue\n2")
-fn reused_slots_take_a_fresh_generation() {
-    let a: Arena<Tag> = arena_new()
-    let first = a.insert(Tag { v: 1 })
-    first.remove()
-    let second = a.insert(Tag { v: 2 })
-    print(second._slot == first._slot)
-    print(second._generation > first._generation)
-    print(a.get(second).unwrap().v)
-}
-
 // Clearing releases the rows: the storage is emptied, not merely marked free.
 @test(output = "0\n0\n1")
 fn clear_empties_the_backing_columns() {

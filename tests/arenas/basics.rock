@@ -8,22 +8,6 @@ fn arena_insert_and_lookup() {
     print(v.x + v.y)
 }
 
-@test(output = "0")
-fn empty_arena_len_is_zero() {
-    let a: Arena<int> = arena_new()
-    print(a.len())
-}
-
-struct P { x: int, y: int }
-
-@test(output = "3")
-fn insert_get_roundtrip() {
-    let a: Arena<P> = arena_new()
-    let e = a.insert(P { x: 1, y: 2 })
-    let p = a.get(e).unwrap()
-    print(p.x + p.y)
-}
-
 @test(output = "true\nfoo\nfalse")
 fn contains_and_remove() {
     let m: Arena<string> = arena_new()
@@ -36,9 +20,10 @@ fn contains_and_remove() {
     print(m.contains(e))
 }
 
-@test(output = "2\n1\n0")
+@test(output = "0\n2\n1\n0")
 fn len_tracks_inserts_and_remove() {
     let a: Arena<int> = arena_new()
+    print(a.len())
     let e1 = a.insert(1)
     let e2 = a.insert(2)
 
@@ -72,37 +57,32 @@ fn nullable_get_when_missing() {
     print(v == null)
 }
 
-@test(output = "true")
-fn arena_random_empty() {
-    let a: Arena<int> = arena_new()
-    let result = a.random()
-    print(result == null)
-}
+@test(output = "true\ntrue\ntrue\ntrue")
+fn arena_random() {
+    let empty: Arena<int> = arena_new()
+    print(empty.random() == null)
 
-@test(output = "true")
-fn arena_random_single_item() {
-    let a: Arena<string> = arena_new()
-    a.insert("hello")
-    let result = a.random()
-
-    let (_, data) = result.unwrap()
+    let single: Arena<string> = arena_new()
+    single.insert("hello")
+    let (_, data) = single.random().unwrap()
     print(data == "hello")
-}
 
-@test(output = "true\ntrue\ntrue")
-fn arena_random_multiple_items() {
     let a: Arena<int> = arena_new()
     a.insert(10)
-    a.insert(20)
+    let middle = a.insert(20)
     a.insert(30)
-
     for _ in 0..3 {
-        let result = a.random()
-        let (entity, data) = result.unwrap()
-
-        let fetched = a.get(entity).unwrap()
-        print(fetched == data)
+        let (entity, value) = a.random().unwrap()
+        assert(a.get(entity).unwrap() == value, "random entity resolves its value")
     }
+    a.remove(middle)
+    print(a.random() != null)
+    for _ in 0..8 {
+        let (_, value) = a.random().unwrap()
+        assert(value != 20, "a removed row is never chosen")
+    }
+    a.clear()
+    print(a.random() == null)
 }
 
 // Regression: `random` used to call `random_int(0, len - 1)` which
@@ -127,23 +107,6 @@ fn arena_random_covers_all_items() {
         if data == 30 { saw_30 = true }
     }
     print(saw_10 && saw_20 && saw_30)
-}
-
-@test(output = "true\nfalse")
-fn arena_random_after_removal() {
-    let a: Arena<int> = arena_new()
-    let e1 = a.insert(100)
-    let e2 = a.insert(200)
-    let e3 = a.insert(300)
-
-    a.remove(e2)
-
-    let result = a.random()
-    print(result != null)
-
-    a.clear()
-    let empty_result = a.random()
-    print(empty_result != null)
 }
 
 // -- Slot reuse tests (verify free_indices works) --

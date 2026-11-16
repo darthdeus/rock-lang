@@ -10,17 +10,11 @@
 struct Node { v: int }
 
 @test
-fn eq_is_structural_on_reference_structs() {
-    let a = Node { v: 1 }
-    let b = Node { v: 1 }
-    assert(a == b, "two distinct structs with equal fields compare EQUAL under ==")
-}
-
-@test
-fn same_ref_is_identity_on_reference_structs() {
+fn eq_is_structural_and_same_ref_is_identity_on_reference_structs() {
     let a = Node { v: 1 }
     let b = Node { v: 1 }
     let alias = a
+    assert(a == b, "two distinct structs with equal fields compare EQUAL under ==")
     assert(same_ref(a, alias), "an alias is the same instance")
     assert(!same_ref(a, b), "distinct-but-equal-looking structs are NOT the same instance")
 }

@@ -3,6 +3,7 @@ struct ReusedSlot { x: int, y: int }
 @test(output = "true 7 9")
 fn arena_reuse_reactivates_the_retained_payload() {
     let a: Arena<ReusedSlot> = arena_new()
+    assert(a.reuse_retained() == null, "an empty free list reuses nothing")
     a.insert(ReusedSlot { x: 1, y: 2 }).remove()
 
     let payload = a.reuse_retained().unwrap()
@@ -16,12 +17,6 @@ fn arena_reuse_reactivates_the_retained_payload() {
         got_y = got.y
     }
     print("{a.len() == 1} {got_x} {got_y}")
-}
-
-@test(output = "true")
-fn arena_reuse_reports_an_empty_free_list() {
-    let a: Arena<ReusedSlot> = arena_new()
-    print("{a.reuse_retained() == null}")
 }
 
 @test(output = "true true 11 13")
