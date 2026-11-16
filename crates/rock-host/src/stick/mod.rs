@@ -896,6 +896,25 @@ impl<'de> serde::Deserialize<'de> for Package {
 
 impl<'de> serde::Deserialize<'de> for StickConfig {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct KeySeed;
+        impl<'de> serde::de::DeserializeSeed<'de> for KeySeed {
+            type Value = String;
+
+            fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<String, D::Error> {
+                let key = <String as serde::Deserialize>::deserialize(d)?;
+                match key.as_str() {
+                    "package" | "build" | "release" | "assets" | "sound" | "sim" | "lint"
+                    | "engine" | "native" | "language" | "dependencies" | "source_groups" => {
+                        Ok(key)
+                    }
+                    other => Err(serde::de::Error::custom(format!(
+                        "unknown key `{other}` at top level; known keys: package, build, release, \
+                         assets, sound, sim, lint, engine, native, language, dependencies, source_groups"
+                    ))),
+                }
+            }
+        }
+
         struct Vis;
         impl<'de> serde::de::Visitor<'de> for Vis {
             type Value = StickConfig;
@@ -918,7 +937,8 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                 let mut language: Option<LanguageConfig> = None;
                 let mut dependencies: HashMap<String, Dependency> = HashMap::new();
                 let mut source_groups: HashMap<String, SourceGroupConfig> = HashMap::new();
-                while let Some(key) = map.next_key::<String>()? {
+                // Reject keys during deserialization so the parser attaches the key span.
+                while let Some(key) = map.next_key_seed(KeySeed)? {
                     match key.as_str() {
                         "package" => {
                             package = Some(map.next_value()?);
@@ -956,12 +976,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                         "source_groups" => {
                             source_groups = map.next_value()?;
                         }
-                        other => {
-                            return Err(serde::de::Error::custom(format!(
-                                "unknown key `{other}` at top level; known keys: package, build, release, \
-                                 assets, sound, sim, lint, engine, native, language, dependencies, source_groups"
-                            )));
-                        }
+                        _ => unreachable!("validated top-level key"),
                     }
                 }
                 let package = package.ok_or_else(|| serde::de::Error::missing_field("package"))?;
@@ -1009,8 +1024,7 @@ impl StickConfig {
     }
 
     pub fn new_from_str(content: &str) -> Result<Self> {
-        basic_toml::from_str(content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse stick.toml: {}", e))
+        toml::from_str(content).map_err(|e| anyhow::anyhow!("Failed to parse stick.toml: {}", e))
     }
 
     /// Reject a malformed `[build]` section at load time: a var with zero or
@@ -1168,6 +1182,27 @@ mod tests {
 
     fn manifest(body: &str) -> Result<StickConfig> {
         StickConfig::new_from_str(&format!("[package]\nname = \"x\"\n{body}"))
+    }
+
+    #[test]
+    fn unknown_top_level_key_reports_its_own_location() {
+        for (prefix, line, column) in [
+            ("unknown_probe = true\n\n", 1, 1),
+            (
+                "# comment\r\n\r\n  \"unknown_\\u0070robe\" = true\r\n\r\n",
+                3,
+                3,
+            ),
+        ] {
+            let content = format!("{prefix}[package]\nname = \"probe\"\n");
+            let error = StickConfig::new_from_str(&content).unwrap_err().to_string();
+            assert!(
+                error.contains("unknown key `unknown_probe` at top level"),
+                "{error}"
+            );
+            assert!(error.contains(&format!("line {line}")), "{error}");
+            assert!(error.contains(&format!("column {column}")), "{error}");
+        }
     }
 
     #[test]

@@ -22,7 +22,7 @@ rock-stdlib = { workspace = true }
 anyhow = { workspace = true }
 fs-err = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-basic-toml = "0.1"
+toml = { version = "0.8.23", default-features = false, features = ["parse"] }
 walkdir = { workspace = true }
 log = { workspace = true }
 sysinfo = { workspace = true }
