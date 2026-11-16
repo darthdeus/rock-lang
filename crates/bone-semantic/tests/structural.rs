@@ -2008,6 +2008,23 @@ fn identity_storage_capability_is_the_arena_files_alone() {
 }
 
 #[test]
+fn type_holes_are_rejected_in_declarations() {
+    for src in [
+        "fn mk() -> fn(int) -> _ { return x => x }\nfn main() { let y = mk()(4) }",
+        "fn apply(f: fn(?) -> int) -> int { return f(1) }",
+        "struct S { f: fn(int) -> _ }",
+        "global G: fn(int) -> ? = x => x",
+    ] {
+        let messages = rejection_messages(src);
+        assert!(
+            messages.contains("a type hole is only allowed in a local annotation"),
+            "{src}: {messages}"
+        );
+    }
+    assert_eq!(rejection_messages("fn main() { let count: ? = 42 }"), "");
+}
+
+#[test]
 fn identity_storage_map_field_reports_only_the_capability() {
     let errors = identity_storage_errors(
         "<stdlib>/arena.rock",

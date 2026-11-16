@@ -363,7 +363,7 @@ pub(crate) fn resolve(gamma: &mut Gamma, ty: TyId, span: Span) -> TyId {
             if new_params.is_none() && resolved_ret == ret_ty {
                 ty
             } else {
-                let params = new_params.unwrap_or(params);
+                let params = new_params.unwrap_or_else(|| reify_range(gamma, ty, params, span));
                 let ret_idx = reify(gamma, resolved_ret, span);
 
                 let idx = gamma.out.ty_arena.alloc(TypeExpr::Function {

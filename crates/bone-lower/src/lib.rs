@@ -941,6 +941,25 @@ fn unresolved_type_name(
     })
 }
 
+fn type_hole(ctx: &mut LowerCtx, body: &mut Body, pos: TyPos, span: Span, hint: Ustr) -> TyId {
+    match pos {
+        TyPos::Iface => {
+            ctx.module
+                .interface_errors
+                .push(CompilerError::new_with_label(
+                    span,
+                    "a type hole is only allowed in a local annotation; write the declared type"
+                        .to_string(),
+                ));
+            ctx.workspace.builtins.error()
+        }
+        TyPos::Body => {
+            let var = ctx.next_var_id();
+            alloc_ty(ctx, body, pos, TypeExpr::Infer(var, hint))
+        }
+    }
+}
+
 pub(crate) fn lower_type_expr_in(
     ctx: &mut LowerCtx,
     a: &Ast,
@@ -995,8 +1014,7 @@ pub(crate) fn lower_type_expr_in(
 
         TypeExprKind::Ident(name) => {
             if name.name.as_str() == "_" {
-                let var = ctx.next_var_id();
-                alloc_ty(ctx, body, pos, TypeExpr::Infer(var, name.name))
+                type_hole(ctx, body, pos, te.span, name.name)
             } else if let Some(g) = ctx.generics_in_scope.get(&name.name) {
                 *g
             } else {
@@ -1064,9 +1082,7 @@ pub(crate) fn lower_type_expr_in(
         }
 
         TypeExprKind::Hole(_, name) => {
-            let hint = name.unwrap_or_else(|| ustr("_"));
-            let var = ctx.next_var_id();
-            alloc_ty(ctx, body, pos, TypeExpr::Infer(var, hint))
+            type_hole(ctx, body, pos, te.span, name.unwrap_or_else(|| ustr("_")))
         }
     };
 
