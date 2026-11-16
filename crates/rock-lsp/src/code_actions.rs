@@ -184,8 +184,5 @@ fn bone_multi_edit_action(
         kind: Some(kind),
         diagnostics: None,
         edit: Some(WorkspaceEdit::new(changes)),
-        command: None,
-        is_preferred: None,
-        data: None,
     }
 }

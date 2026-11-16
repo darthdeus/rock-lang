@@ -1,5 +1,4 @@
-use crate::{Command, Diagnostic, Range, TextDocumentIdentifier, WorkspaceEdit};
-use serde_json::Value;
+use crate::{Diagnostic, Range, TextDocumentIdentifier, WorkspaceEdit};
 
 /// Params for the CodeActionRequest
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -34,25 +33,8 @@ impl serde::Serialize for CodeActionKind {
 }
 
 impl CodeActionKind {
-    /// Empty kind.
-    pub const EMPTY: CodeActionKind = CodeActionKind::new("");
-
     /// Base kind for quickfix actions: 'quickfix'
     pub const QUICKFIX: CodeActionKind = CodeActionKind::new("quickfix");
-
-    /// Base kind for refactoring actions: 'refactor'
-    pub const REFACTOR: CodeActionKind = CodeActionKind::new("refactor");
-
-    /// Base kind for refactoring extraction actions: 'refactor.extract'
-    ///
-    /// Example extract actions:
-    ///
-    /// - Extract method
-    /// - Extract function
-    /// - Extract variable
-    /// - Extract interface from class
-    /// - ...
-    pub const REFACTOR_EXTRACT: CodeActionKind = CodeActionKind::new("refactor.extract");
 
     /// Base kind for refactoring inline actions: 'refactor.inline'
     ///
@@ -63,36 +45,6 @@ impl CodeActionKind {
     /// - Inline constant
     /// - ...
     pub const REFACTOR_INLINE: CodeActionKind = CodeActionKind::new("refactor.inline");
-
-    /// Base kind for refactoring rewrite actions: 'refactor.rewrite'
-    ///
-    /// Example rewrite actions:
-    ///
-    /// - Convert JavaScript function to class
-    /// - Add or remove parameter
-    /// - Encapsulate field
-    /// - Make method static
-    /// - Move method to base class
-    /// - ...
-    pub const REFACTOR_REWRITE: CodeActionKind = CodeActionKind::new("refactor.rewrite");
-
-    /// Base kind for source actions: `source`
-    ///
-    /// Source code actions apply to the entire file.
-    pub const SOURCE: CodeActionKind = CodeActionKind::new("source");
-
-    /// Base kind for an organize imports source action: `source.organizeImports`
-    pub const SOURCE_ORGANIZE_IMPORTS: CodeActionKind =
-        CodeActionKind::new("source.organizeImports");
-
-    /// Base kind for a 'fix all' source action: `source.fixAll`.
-    ///
-    /// 'Fix all' actions automatically fix errors that have a clear fix that
-    /// do not require user input. They should not suppress errors or perform
-    /// unsafe fixes such as generating new types or classes.
-    ///
-    /// @since 3.17.0
-    pub const SOURCE_FIX_ALL: CodeActionKind = CodeActionKind::new("source.fixAll");
 
     pub const fn new(tag: &'static str) -> Self {
         CodeActionKind(tag)
@@ -109,9 +61,6 @@ pub struct CodeAction {
     pub kind: Option<CodeActionKind>,
     pub diagnostics: Option<Vec<Diagnostic>>,
     pub edit: Option<WorkspaceEdit>,
-    pub command: Option<Command>,
-    pub is_preferred: Option<bool>,
-    pub data: Option<Value>,
 }
 
 impl_lsp_struct!(out CodeAction,
@@ -120,9 +69,6 @@ impl_lsp_struct!(out CodeAction,
         kind: CodeActionKind = "kind",
         diagnostics: Vec<Diagnostic> = "diagnostics",
         edit: WorkspaceEdit = "edit",
-        command: Command = "command",
-        is_preferred: bool = "isPreferred",
-        data: Value = "data",
     }
 );
 

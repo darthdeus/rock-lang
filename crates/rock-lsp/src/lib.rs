@@ -774,7 +774,6 @@ fn bone_reload_and_publish(
         };
         let notice = lsp_types::PublishDiagnosticsParams {
             uri: file_uri,
-            version: None,
             diagnostics,
         };
         out.push(lsp_server::Message::Notification(

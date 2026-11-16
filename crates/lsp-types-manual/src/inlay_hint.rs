@@ -1,4 +1,4 @@
-use crate::{Command, LSPAny, Location, MarkupContent, Position, TextEdit};
+use crate::{LSPAny, MarkupContent, Position, TextEdit};
 
 /// Inlay hint information.
 ///
@@ -38,20 +38,6 @@ pub enum InlayHintLabel {
 
 impl_untagged_enum!(InlayHintLabel { LabelParts, String });
 
-impl From<String> for InlayHintLabel {
-    #[inline]
-    fn from(from: String) -> Self {
-        Self::String(from)
-    }
-}
-
-impl From<Vec<InlayHintLabelPart>> for InlayHintLabel {
-    #[inline]
-    fn from(from: Vec<InlayHintLabelPart>) -> Self {
-        Self::LabelParts(from)
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum InlayHintTooltip {
     String(String),
@@ -63,28 +49,11 @@ impl_untagged_enum!(InlayHintTooltip {
     String,
 });
 
-impl From<String> for InlayHintTooltip {
-    #[inline]
-    fn from(from: String) -> Self {
-        Self::String(from)
-    }
-}
-
-impl From<MarkupContent> for InlayHintTooltip {
-    #[inline]
-    fn from(from: MarkupContent) -> Self {
-        Self::MarkupContent(from)
-    }
-}
-
 /// An inlay hint label part allows for interactive and composite labels
 /// of inlay hints.
 #[derive(Debug, Clone, Default)]
 pub struct InlayHintLabelPart {
     pub value: String,
-    pub tooltip: Option<InlayHintLabelPartTooltip>,
-    pub location: Option<Location>,
-    pub command: Option<Command>,
 }
 
 impl_lsp_struct!(
@@ -92,37 +61,8 @@ impl_lsp_struct!(
     required {
         value: String = "value"
     },
-    optional {
-        tooltip: InlayHintLabelPartTooltip = "tooltip",
-        location: Location = "location",
-        command: Command = "command",
-    }
+    optional {}
 );
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub enum InlayHintLabelPartTooltip {
-    String(String),
-    MarkupContent(MarkupContent),
-}
-
-impl_untagged_enum!(InlayHintLabelPartTooltip {
-    MarkupContent,
-    String,
-});
-
-impl From<String> for InlayHintLabelPartTooltip {
-    #[inline]
-    fn from(from: String) -> Self {
-        Self::String(from)
-    }
-}
-
-impl From<MarkupContent> for InlayHintLabelPartTooltip {
-    #[inline]
-    fn from(from: MarkupContent) -> Self {
-        Self::MarkupContent(from)
-    }
-}
 
 /// Inlay hint kinds.
 ///

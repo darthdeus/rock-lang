@@ -1,14 +1,10 @@
-use crate::{Command, Documentation, Position, TextDocumentIdentifier, TextEdit};
-
-use serde_json::Value;
-use std::fmt::Debug;
+use crate::{Command, Position, TextDocumentIdentifier, TextEdit};
 
 /// Defines how to interpret the insert text in a completion item
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
 pub struct InsertTextFormat(i32);
 lsp_enum! {
 impl InsertTextFormat {
-    pub const PLAIN_TEXT: InsertTextFormat = InsertTextFormat(1);
     pub const SNIPPET: InsertTextFormat = InsertTextFormat(2);
 }
 }
@@ -18,31 +14,17 @@ impl InsertTextFormat {
 pub struct CompletionItemKind(i32);
 lsp_enum! {
 impl CompletionItemKind {
-    pub const TEXT: CompletionItemKind = CompletionItemKind(1);
     pub const METHOD: CompletionItemKind = CompletionItemKind(2);
     pub const FUNCTION: CompletionItemKind = CompletionItemKind(3);
-    pub const CONSTRUCTOR: CompletionItemKind = CompletionItemKind(4);
     pub const FIELD: CompletionItemKind = CompletionItemKind(5);
     pub const VARIABLE: CompletionItemKind = CompletionItemKind(6);
     pub const CLASS: CompletionItemKind = CompletionItemKind(7);
-    pub const INTERFACE: CompletionItemKind = CompletionItemKind(8);
     pub const MODULE: CompletionItemKind = CompletionItemKind(9);
-    pub const PROPERTY: CompletionItemKind = CompletionItemKind(10);
-    pub const UNIT: CompletionItemKind = CompletionItemKind(11);
-    pub const VALUE: CompletionItemKind = CompletionItemKind(12);
     pub const ENUM: CompletionItemKind = CompletionItemKind(13);
     pub const KEYWORD: CompletionItemKind = CompletionItemKind(14);
     pub const SNIPPET: CompletionItemKind = CompletionItemKind(15);
-    pub const COLOR: CompletionItemKind = CompletionItemKind(16);
-    pub const FILE: CompletionItemKind = CompletionItemKind(17);
-    pub const REFERENCE: CompletionItemKind = CompletionItemKind(18);
-    pub const FOLDER: CompletionItemKind = CompletionItemKind(19);
     pub const ENUM_MEMBER: CompletionItemKind = CompletionItemKind(20);
-    pub const CONSTANT: CompletionItemKind = CompletionItemKind(21);
     pub const STRUCT: CompletionItemKind = CompletionItemKind(22);
-    pub const EVENT: CompletionItemKind = CompletionItemKind(23);
-    pub const OPERATOR: CompletionItemKind = CompletionItemKind(24);
-    pub const TYPE_PARAMETER: CompletionItemKind = CompletionItemKind(25);
 }
 }
 
@@ -89,9 +71,7 @@ impl_lsp_struct!(
 pub struct CompletionTriggerKind(i32);
 lsp_enum! {
 impl CompletionTriggerKind {
-    pub const INVOKED: CompletionTriggerKind = CompletionTriggerKind(1);
     pub const TRIGGER_CHARACTER: CompletionTriggerKind = CompletionTriggerKind(2);
-    pub const TRIGGER_FOR_INCOMPLETE_COMPLETIONS: CompletionTriggerKind = CompletionTriggerKind(3);
 }
 }
 
@@ -135,12 +115,6 @@ pub struct CompletionItem {
     /// about this item, like type or symbol information.
     pub detail: Option<String>,
 
-    /// A human-readable string that represents a doc-comment.
-    pub documentation: Option<Documentation>,
-
-    /// Indicates if this item is deprecated.
-    pub deprecated: Option<bool>,
-
     /// A string that should be used when comparing this item
     /// with other items. When `falsy` the label is used
     /// as the sort text for this item.
@@ -169,10 +143,6 @@ pub struct CompletionItem {
 
     /// An optional command that is executed *after* inserting this completion.
     pub command: Option<Command>,
-
-    /// An data entry field that is preserved on a completion item between
-    /// a completion and a completion resolve request.
-    pub data: Option<Value>,
 }
 
 impl_lsp_struct!(out CompletionItem,
@@ -181,15 +151,12 @@ impl_lsp_struct!(out CompletionItem,
         label_details: CompletionItemLabelDetails = "labelDetails",
         kind: CompletionItemKind = "kind",
         detail: String = "detail",
-        documentation: Documentation = "documentation",
-        deprecated: bool = "deprecated",
         sort_text: String = "sortText",
         filter_text: String = "filterText",
         insert_text: String = "insertText",
         insert_text_format: InsertTextFormat = "insertTextFormat",
         additional_text_edits: Vec<TextEdit> = "additionalTextEdits",
         command: Command = "command",
-        data: Value = "data",
     }
 );
 

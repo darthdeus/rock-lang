@@ -190,12 +190,6 @@ pub struct Diagnostic {
 
     /// The diagnostic's message.
     pub message: String,
-
-    /// A data entry field that is preserved between a `textDocument/publishDiagnostics`
-    /// notification and `textDocument/codeAction` request.
-    ///
-    /// @since 3.16.0
-    pub data: Option<serde_json::Value>,
 }
 
 impl_lsp_struct!(
@@ -208,7 +202,6 @@ impl_lsp_struct!(
         severity: DiagnosticSeverity = "severity",
         code: NumberOrString = "code",
         source: String = "source",
-        data: serde_json::Value = "data",
     }
 );
 
@@ -221,8 +214,6 @@ impl DiagnosticSeverity {
     pub const ERROR: DiagnosticSeverity = DiagnosticSeverity(1);
     /// Reports a warning.
     pub const WARNING: DiagnosticSeverity = DiagnosticSeverity(2);
-    /// Reports an information.
-    pub const INFORMATION: DiagnosticSeverity = DiagnosticSeverity(3);
     /// Reports a hint.
     pub const HINT: DiagnosticSeverity = DiagnosticSeverity(4);
 }
@@ -368,32 +359,14 @@ impl_lsp_struct!(
 pub struct SymbolKind(i32);
 lsp_enum! {
 impl SymbolKind {
-    pub const FILE: SymbolKind = SymbolKind(1);
-    pub const MODULE: SymbolKind = SymbolKind(2);
-    pub const NAMESPACE: SymbolKind = SymbolKind(3);
-    pub const PACKAGE: SymbolKind = SymbolKind(4);
     pub const CLASS: SymbolKind = SymbolKind(5);
-    pub const METHOD: SymbolKind = SymbolKind(6);
-    pub const PROPERTY: SymbolKind = SymbolKind(7);
-    pub const FIELD: SymbolKind = SymbolKind(8);
-    pub const CONSTRUCTOR: SymbolKind = SymbolKind(9);
     pub const ENUM: SymbolKind = SymbolKind(10);
-    pub const INTERFACE: SymbolKind = SymbolKind(11);
     pub const FUNCTION: SymbolKind = SymbolKind(12);
     pub const VARIABLE: SymbolKind = SymbolKind(13);
     pub const CONSTANT: SymbolKind = SymbolKind(14);
-    pub const STRING: SymbolKind = SymbolKind(15);
-    pub const NUMBER: SymbolKind = SymbolKind(16);
-    pub const BOOLEAN: SymbolKind = SymbolKind(17);
-    pub const ARRAY: SymbolKind = SymbolKind(18);
-    pub const OBJECT: SymbolKind = SymbolKind(19);
     pub const KEY: SymbolKind = SymbolKind(20);
-    pub const NULL: SymbolKind = SymbolKind(21);
     pub const ENUM_MEMBER: SymbolKind = SymbolKind(22);
     pub const STRUCT: SymbolKind = SymbolKind(23);
-    pub const EVENT: SymbolKind = SymbolKind(24);
-    pub const OPERATOR: SymbolKind = SymbolKind(25);
-    pub const TYPE_PARAMETER: SymbolKind = SymbolKind(26);
 }
 }
 
@@ -404,9 +377,6 @@ pub struct PublishDiagnosticsParams {
 
     /// An array of diagnostic information items.
     pub diagnostics: Vec<Diagnostic>,
-
-    /// Optional the version number of the document the diagnostics are published for.
-    pub version: Option<i32>,
 }
 
 impl_lsp_struct!(out PublishDiagnosticsParams,
@@ -414,7 +384,7 @@ impl_lsp_struct!(out PublishDiagnosticsParams,
         uri: Uri = "uri",
         diagnostics: Vec<Diagnostic> = "diagnostics",
     },
-    optional { version: i32 = "version" }
+    optional {}
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -547,8 +517,6 @@ impl_lsp_struct!(
 pub struct SymbolTag(i32);
 lsp_enum! {
 impl SymbolTag {
-    /// Render a symbol as obsolete, usually using a strike-out.
-    pub const DEPRECATED: SymbolTag = SymbolTag(1);
 }
 }
 
