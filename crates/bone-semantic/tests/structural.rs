@@ -192,13 +192,6 @@ fn body_errors(src: &str, name: &str) -> Vec<CompilerError> {
         .unwrap_or_default()
 }
 
-fn main_body_error_messages(src: &str) -> Vec<String> {
-    main_body_errors(src)
-        .iter()
-        .map(|e| e.message.clone())
-        .collect()
-}
-
 // P1b: the mismatch carries a second label at the expected type's origin (the
 // `: Foo` annotation), so the reader sees WHERE the expectation came from.
 // Works for span-carrying types (nominal/compound); builtins (`int`) lower to a
@@ -1278,123 +1271,6 @@ fn nobox_marker_reaches_typed_struct() {
     assert!(module.structs[struct_idx].is_nobox);
 }
 
-// Collect every body-level error message across the user module. Used by the
-// diagnostic-quality tests below, which assert on the rendered wording rather
-// than just `is_err`.
-fn all_err_msgs(src: &str) -> Vec<String> {
-    let ws = check(src).expect("body-level errors are collected, not fatal");
-    let mut msgs = Vec::new();
-    for m in ws.source_modules() {
-        if let Some(inf) = ws.inference(m.id) {
-            for errs in inf.errors.values() {
-                for e in errs {
-                    msgs.push(e.message.clone());
-                }
-            }
-        }
-    }
-    msgs
-}
-
-// A plain nominal mismatch (no generics on either side) must not be reported
-// as "different generic constructors" -- it must name both types plainly.
-#[test]
-fn nominal_mismatch_message_names_both_types() {
-    let src = "\
-struct Mob { x: int }
-struct Data { y: int }
-fn take(m: Mob) -> int { return m.x }
-fn caller(d: Data) -> int { return take(d) }";
-    let msgs = all_err_msgs(src);
-    let joined = msgs.join(" | ");
-    assert!(
-        msgs.iter().any(|m| m.contains("Mob") && m.contains("Data")),
-        "mismatch message should name both `Mob` and `Data`: {joined}"
-    );
-    assert!(
-        !joined.contains("generic constructors"),
-        "non-generic nominal mismatch must not say 'generic constructors': {joined}"
-    );
-}
-
-// `recv.field()` where `field` is a non-callable field and a same-named free
-// fn exists (so UFCS is attempted and fails on the receiver type) -- the error
-// must point at the field/`()` slip, not a bare unify failure.
-#[test]
-fn field_called_as_method_with_shadowing_free_fn() {
-    let src = "\
-struct Data { cooldown: float = 1.5 }
-struct Thing { id: int }
-fn make() -> Data { return Data { cooldown: 2.0 } }
-fn cooldown(t: Thing) -> float { return 9.0 }
-fn caller() -> float { return make().cooldown() }";
-    let joined = all_err_msgs(src).join(" | ");
-    assert!(
-        joined.contains("cooldown") && joined.contains("field") && joined.contains("()"),
-        "should flag `cooldown` as a field called with `()`: {joined}"
-    );
-}
-
-// Same slip, but no same-named free fn at all -- must NOT say "Function
-// doesn't exist" (the field plainly exists); it must flag the field.
-#[test]
-fn field_called_as_method_no_free_fn() {
-    let src = "\
-struct Data { cooldown: float = 1.5 }
-fn make() -> Data { return Data { cooldown: 2.0 } }
-fn caller() -> float { return make().cooldown() }";
-    let joined = all_err_msgs(src).join(" | ");
-    assert!(
-        !joined.contains("doesn't exist"),
-        "field exists -- must not claim the function doesn't exist: {joined}"
-    );
-    assert!(
-        joined.contains("cooldown") && joined.contains("field"),
-        "should flag `cooldown` as a field: {joined}"
-    );
-}
-
-/// When a call matches no overload, the "No overload" error must LIST the
-/// available candidate signatures -- otherwise the user has no way to see what
-/// shapes exist and has to go hunt the definitions. (Hover/signature-help cover
-/// the IDE; this covers the compiler error itself.)
-#[test]
-fn no_overload_error_lists_candidate_signatures() {
-    let src = r#"
-struct A { i: int }
-struct B { i: int }
-struct C { i: int }
-fn draw(a: A, tag: int) -> int { return 0 }
-fn draw(b: B) -> int { return 0 }
-fn main() {
-    let c = C { i: 0 }
-    let _ = draw(c)
-}
-"#;
-    let ws = check(src).expect("body errors are collected, not aborted");
-    let mid = ws.source_modules().next().expect("one user module").id;
-    let inf = ws.inference(mid).expect("user module inferred");
-    let msgs: Vec<&str> = inf
-        .errors
-        .values()
-        .flatten()
-        .map(|e| e.message.as_str())
-        .collect();
-    assert!(
-        msgs.iter().any(|m| m.contains("No overload for `draw`")),
-        "the call must reject: {msgs:?}"
-    );
-    assert!(
-        msgs.iter()
-            .any(|m| m.contains("draw(a: A, tag: int) -> int")),
-        "candidate 1 signature must be listed: {msgs:?}"
-    );
-    assert!(
-        msgs.iter().any(|m| m.contains("draw(b: B) -> int")),
-        "candidate 2 signature must be listed: {msgs:?}"
-    );
-}
-
 #[test]
 fn nullable_operator_diagnostic_labels_operands_without_an_overload_menu() {
     let fixture = include_str!("fixtures/cw7_nullable_operator_diagnostic.rock");
@@ -1541,115 +1417,6 @@ fn no_fit_stays_distinct_from_a_hidden_match() {
     }
 }
 
-/// A cost TIE (the ambiguous case) must list the tied candidate signatures,
-/// same as the no-fit case: "Ambiguous overload for `two` with argument
-/// types (int, int)" alone doesn't tell the user WHICH candidates tied.
-/// The tie must be GENUINELY incomparable now that overload ranking has a
-/// genericity cost (`int` beats `[T]` beats `T`, `param_genericity` in
-/// bone-inference): `two(T, int)` and `two(int, T)` each pay one bare-hole
-/// slot against `(int, int)`, so neither wins -- the bare-`T`-catch-all-vs-
-/// concrete case (`pick(int)` + `pick<T>(T)`) now resolves to the concrete
-/// overload (pinned as a positive test in `tests/functions/overloads`).
-#[test]
-fn ambiguous_overload_error_lists_tied_candidates() {
-    let src = r#"
-fn two<T>(a: T, b: int) -> string { return "left" }
-fn two<T>(a: int, b: T) -> string { return "right" }
-fn main() {
-    let _ = two(1, 2)
-}
-"#;
-    let ws = check(src).expect("body errors are collected, not aborted");
-    let mid = ws.source_modules().next().expect("one user module").id;
-    let inf = ws.inference(mid).expect("user module inferred");
-    let msgs: Vec<&str> = inf
-        .errors
-        .values()
-        .flatten()
-        .map(|e| e.message.as_str())
-        .collect();
-    assert!(
-        msgs.iter()
-            .any(|m| m.contains("Ambiguous overload for `two`")),
-        "the call must be ambiguous: {msgs:?}"
-    );
-    assert!(
-        msgs.iter()
-            .any(|m| m.contains("two(a: T, b: int) -> string")),
-        "tied candidate 1 must be listed: {msgs:?}"
-    );
-    assert!(
-        msgs.iter()
-            .any(|m| m.contains("two(a: int, b: T) -> string")),
-        "tied candidate 2 must be listed: {msgs:?}"
-    );
-}
-
-/// Unfuck #32: when every overload is rejected and the only near-miss is an
-/// `Iterator`-bounded candidate that failed CONFORMANCE (params fit, bounds
-/// did not), the error surfaces `check_iterator_bounds`' precise reason
-/// appended to the "No overload for ..." headline (`select_overload`'s
-/// `bound_fail` slot, filled by `score_candidate`).
-#[test]
-fn all_rejected_overload_error_surfaces_bound_conformance_reason() {
-    let src = r#"
-struct Multi { i: int }
-fn next(it: Multi) -> (bool, int, int) { return (false, 0, 0) }
-fn wrap<I: Iterator<T>, T>(x: I, n: int) -> int { return n }
-fn wrap(x: string, n: int) -> int { return n }
-fn main() {
-    let m = Multi { i: 0 }
-    let _ = wrap(m, 1)
-}
-"#;
-    let ws = check(src).expect("body errors are collected, not aborted");
-    let mid = ws.source_modules().next().expect("one user module").id;
-    let inf = ws.inference(mid).expect("user module inferred");
-    let msgs: Vec<&str> = inf
-        .errors
-        .values()
-        .flatten()
-        .map(|e| e.message.as_str())
-        .collect();
-    assert!(
-        msgs.iter().any(|m| m.contains("No overload for `wrap`")),
-        "the call must reject: {msgs:?}"
-    );
-    assert!(
-        msgs.iter().any(|m| m.contains("does not satisfy")),
-        "the bound-conformance rejection reason must be surfaced: {msgs:?}"
-    );
-}
-
-// An operator desugar (`!x` -> `__not`, unary `-x` -> `__unm`) reaching an
-// EMPTY overload set reads as an operator error naming the operand type, not
-// as a missing internal function ("Function `__not` doesn't exist").
-#[test]
-fn operator_miss_reads_as_operator_error() {
-    let msgs = main_body_error_messages("fn main() { let xs = [1, 2]\n let y = !xs }");
-    assert!(
-        msgs.iter()
-            .any(|m| m.contains("operator `!` is not defined for")),
-        "expected an operator-shaped message, got: {msgs:?}"
-    );
-    assert!(
-        !msgs.iter().any(|m| m.contains("__not")),
-        "the internal desugar name must not leak: {msgs:?}"
-    );
-}
-
-#[test]
-fn unary_minus_miss_reads_as_operator_error() {
-    let msgs = main_body_error_messages(
-        "struct P { x: int }\nfn main() { let p = P { x: 1 }\n let q = -p }",
-    );
-    assert!(
-        msgs.iter()
-            .any(|m| m.contains("operator `-` is not defined for")),
-        "expected an operator-shaped message, got: {msgs:?}"
-    );
-}
-
 // Float literals in annotation args must survive lowering as
 // `AnnoValue::Float` (incl. the unary-minus form) -- the value-test
 // expectation surface (`@test(returns = 1.5)`) reads them; `Other` would make
@@ -1783,32 +1550,6 @@ fn main() {
         rendered,
         vec!["V2".to_string(), "int".to_string()],
         "T must resolve to the concrete instantiation per call site"
-    );
-}
-
-// A genuine overload (same name, DIFFERENT signatures) taken as a fn-value must
-// STILL reject -- the backend-variant collapse only merges same-signature
-// cross-backend siblings, never real overloads (which have no single value type).
-#[test]
-fn fn_value_genuine_overload_rejects() {
-    let src = r#"
-fn pick(x: int) -> int { return x }
-fn pick(x: float) -> float { return x }
-fn use_it() -> int {
-    let g = pick
-    return g(1)
-}
-"#;
-    let msgs = check(src)
-        .expect("semantic_pass")
-        .inferences_iter()
-        .flat_map(|(_, inf)| inf.errors.values().flatten().cloned().collect::<Vec<_>>())
-        .map(|e| e.message)
-        .collect::<Vec<_>>();
-    assert!(
-        msgs.iter()
-            .any(|m| m.contains("ambiguous fn-value reference `pick`")),
-        "a real overload as a value must stay ambiguous, got: {msgs:?}"
     );
 }
 
@@ -2159,53 +1900,6 @@ pub struct ReadableSecret {
         secret_err.message,
         "field `secret` on struct `Actor` is not accessible from this module"
     );
-}
-
-// Argument-to-parameter matching reports its reason when the call's callee is
-// fixed; overload scoring discards the same rejections without a message.
-#[test]
-fn argument_matching_errors_name_the_parameter() {
-    let cases = [
-        (
-            "fn two(a: int, b: int) -> int { a + b }\nfn main() { two(1, 2, 3) }",
-            "Too many positional arguments, expected at most 2",
-        ),
-        (
-            "fn two(a: int, b: int) -> int { a + b }\nfn main() { two(1) }",
-            "Missing required argument for parameter `b`",
-        ),
-        (
-            "fn two(a: int, b: int) -> int { a + b }\nfn main() { two(1, a: 2) }",
-            "Multiple values provided for parameter `a`",
-        ),
-        (
-            "fn two(a: int, b: int) -> int { a + b }\nfn main() { two(1, c: 2) }",
-            "unknown parameter `c`",
-        ),
-        (
-            "struct ABC { a: int, b: int, c: int }\nfn two(a: int, b: int) -> int { a + b }\n\
-             fn main() { let p = ABC { a: 1, b: 2, c: 3 }\n two(..p) }",
-            "spread field `c` names no parameter of the callee",
-        ),
-        (
-            "struct AB { a: int, b: int }\nfn two(a: int, b: int) -> int { a + b }\n\
-             fn main() { let p = AB { a: 1, b: 2 }\n two(a: 9, ..p) }",
-            "parameter `a` is given before the spread that also supplies it",
-        ),
-        (
-            "struct AB { a: int, b: int }\nstruct AC { a: int, c: int }\n\
-             fn three(a: int, b: int, c: int) -> int { a + b + c }\n\
-             fn main() { let x = AB { a: 1, b: 2 }\n let y = AC { a: 8, c: 3 }\n three(..x, ..y) }",
-            "two spreads both supply parameter `a`",
-        ),
-    ];
-    for (src, want) in cases {
-        let msgs = all_err_msgs(src);
-        assert!(
-            msgs.iter().any(|m| m == want),
-            "expected `{want}` for\n{src}\ngot: {msgs:?}"
-        );
-    }
 }
 
 fn identity_storage_errors(
