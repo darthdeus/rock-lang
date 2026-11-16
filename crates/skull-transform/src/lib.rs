@@ -24,28 +24,25 @@ mod sroa;
 mod test_support;
 mod visit;
 
-pub use cleanup::{cleanup, dce, fold_const_branches};
-pub use closure::{FrameInfo, convert_closures, convert_closures_framed};
+pub use cleanup::cleanup;
+use cleanup::dce;
+pub use closure::convert_closures;
+use closure::convert_closures_framed;
 pub(crate) use copy_prop::resolve_subst;
-pub use coroutine::{
-    CoroLowered, CoroutineFramePlan, STATE, transform_coroutine,
-    transform_coroutine_with_nonescaping_lambdas,
-};
-pub use coroutine_prepare::{
-    CoroutineKeys, PreparedCoroutine, convert_named_nested_closures, prepare_coroutine,
-};
+pub use coroutine::{CoroLowered, STATE, transform_coroutine};
+use coroutine_prepare::convert_named_nested_closures;
+pub use coroutine_prepare::{PreparedCoroutine, prepare_coroutine};
 pub(crate) use detached::{erase_detached_lambdas, lower_detached_region};
 pub use forl::recover_counted_loops;
-pub use frame::{materialize_frame, materialize_frame_cells};
+pub use frame::materialize_frame;
 pub use in_bounds::elide_bounds_checks_for_target;
+use inline::inline_functions_with_plans;
 pub use inline::{
-    InlineCache, InlineCandidateProfile, InlineCandidateTable, InlineCandidateTableStats,
-    InlineCandidateWarm, InlineOffGuard, InlineScanStats, SpliceRecord, fn_has_bounds,
-    inline_functions_with_plans, inline_mode_guard, inline_off_active, inline_off_guard,
+    InlineCache, InlineCandidateTable, InlineCandidateWarm, InlineOffGuard, InlineScanStats,
+    SpliceRecord, inline_mode_guard, inline_off_active, inline_off_guard,
     validate_no_residual_bound_calls,
 };
-pub use load_store_census::{
-    LoadStoreCensus, LoadStoreRow, cleanup_with_nobox_census, observe_cleanup,
-};
+pub use load_store_census::LoadStoreCensus;
+use load_store_census::cleanup_with_nobox_census;
 pub use nobox::{cleanup_with_nobox, flatten_nobox_nested_ctors, nobox_materialization_violations};
 pub(crate) use visit::top_level_blocks;

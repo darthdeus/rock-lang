@@ -3765,7 +3765,7 @@ fn inline_functions_inner(
 
 /// Whether the fn declares any `Iterator` bound on its generics -- such a fn has
 /// no standalone emission (it exists only inlined at its call sites).
-pub fn fn_has_bounds(f: &bone_core::hir::Function) -> bool {
+fn fn_has_bounds(f: &bone_core::hir::Function) -> bool {
     f.generic_bounds.iter().any(Option::is_some)
 }
 
@@ -4099,7 +4099,7 @@ mod tests {
             .forced_cell_blocks
             .push(dead_block_id);
 
-        assert!(crate::fold_const_branches(&mut func));
+        assert!(crate::cleanup::fold_const_branches(&mut func));
         assert!(func.emit_ids.as_ref().unwrap().forced_cells.is_empty());
         assert!(
             func.emit_ids

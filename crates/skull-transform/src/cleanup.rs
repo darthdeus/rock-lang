@@ -18,7 +18,7 @@ use skull_mir::mir::*;
 /// named trigger of skull's trace-cache thrash. Scans ALL blocks (incl. closure
 /// sub-CFGs in the same arena), so a value/cell used only inside a lambda body
 /// is correctly seen as live.
-pub fn dce(func: &mut MirFunc) {
+pub(crate) fn dce(func: &mut MirFunc) {
     dce_core(func, None);
 }
 
@@ -474,7 +474,7 @@ fn fold_never_nil_compares(func: &mut MirFunc) -> bool {
 /// head from the FORL matcher's goto-chase (the filter combinator's skip loop)
 /// and leaves a dead exit arm in the emitted Lua. Returns whether anything
 /// changed (the dead `Const` conditions are left for a DCE round).
-pub fn fold_const_branches(func: &mut MirFunc) -> bool {
+pub(crate) fn fold_const_branches(func: &mut MirFunc) -> bool {
     let bids: Vec<Idx<Block>> = func.blocks.iter().map(|(b, _)| b).collect();
     let mut changed = false;
     for b in &bids {

@@ -472,24 +472,6 @@ pub fn transform_coroutine(
     channel: Option<&skull_mir::lower::EnumFlatShape>,
     has_return_value: bool,
 ) -> CoroLowered {
-    transform_coroutine_with_nonescaping_lambdas(
-        func,
-        channel,
-        has_return_value,
-        &HashSet::default(),
-    )
-}
-
-/// Transform a coroutine while excluding captures proven to be consumed by a
-/// synchronous callback call from the persistent frame. The proof is supplied
-/// by the backend that owns the callable ABI; an empty set preserves the
-/// conservative frame pin for backends without that proof.
-pub fn transform_coroutine_with_nonescaping_lambdas(
-    func: &MirFunc,
-    channel: Option<&skull_mir::lower::EnumFlatShape>,
-    has_return_value: bool,
-    nonescaping_lambdas: &HashSet<Idx<Inst>>,
-) -> CoroLowered {
     let frame_slot_channel = channel.is_some();
     let mut step = func.clone();
     let resume_arg = func.resume_arg.expect("co fn must carry a resume-arg cell");
@@ -564,9 +546,7 @@ pub fn transform_coroutine_with_nonescaping_lambdas(
             .enumerate()
             .filter(|(scope, _)| {
                 tree.scopes[*scope].lambda.is_none_or(|lambda| {
-                    !nonescaping_lambdas.contains(&lambda)
-                        && !lambda_site(&step, lambda)
-                            .is_some_and(|site| detached_sites.contains(&site))
+                    !lambda_site(&step, lambda).is_some_and(|site| detached_sites.contains(&site))
                 })
             })
             .flat_map(|(_, cells)| cells.iter().copied())
