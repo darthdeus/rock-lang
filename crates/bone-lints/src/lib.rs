@@ -1660,7 +1660,11 @@ impl IncrementalLintCache {
             if let Some(raw) = self.global_raw.get(&file) {
                 self.global.insert(
                     file,
-                    filter_suppressed_findings_timed(raw.clone(), source, stats),
+                    filter_suppressed_findings_with_entries_timed(
+                        raw.clone(),
+                        &cached.suppressions,
+                        stats,
+                    ),
                 );
             } else {
                 self.global.remove(&file);
@@ -2399,9 +2403,10 @@ impl IncrementalLintCache {
             let Some(source) = sources.get(&file).copied() else {
                 continue;
             };
+            let allow = suppression_entries(source);
             self.global.insert(
                 file,
-                filter_suppressed_findings_timed(raw.clone(), source, stats),
+                filter_suppressed_findings_with_entries_timed(raw.clone(), &allow, stats),
             );
         }
         self.action_population_file = self
@@ -2894,21 +2899,6 @@ pub fn filter_suppressed_findings(findings: Vec<Finding>, source: &str) -> Vec<F
         return findings;
     }
     filter_suppressed_findings_with_entries(findings, &suppression_entries(source))
-}
-
-fn filter_suppressed_findings_timed(
-    findings: Vec<Finding>,
-    source: &str,
-    stats: &mut LintCacheStats,
-) -> Vec<Finding> {
-    if !stats.timed {
-        return filter_suppressed_findings(findings, source);
-    }
-    let started = Instant::now();
-    let filtered = filter_suppressed_findings(findings, source);
-    stats.suppression_filtering_ns += started.elapsed().as_nanos();
-    stats.suppression_filter_calls += 1;
-    filtered
 }
 
 fn filter_suppressed_findings_with_entries_timed(
