@@ -134,23 +134,12 @@ pub fn value_leaf_paths(shape: &ValueShape) -> Vec<Ustr> {
 /// touched, or a `false` bool field would erase itself.
 pub fn value_leaf_presence_flags(shape: &ValueShape) -> Vec<bool> {
     let mut out = Vec::new();
-    presence_flags_rec(shape, false, &mut out);
+    for_each_leaf(shape, &mut String::new(), "", &mut |_, presence| {
+        out.push(presence)
+    });
     out
 }
 
-pub(crate) fn presence_flags_rec(shape: &ValueShape, nested: bool, out: &mut Vec<bool>) {
-    if shape.nullable && nested {
-        out.push(true);
-    }
-    for (_, fs) in &shape.fields {
-        match fs {
-            FieldShape::Prim => out.push(false),
-            FieldShape::Nested(sub) => presence_flags_rec(sub, true, out),
-        }
-    }
-}
-
-/// [`value_leaf_presence_flags`] by type name.
 /// THE leaf traversal: every primitive leaf of `shape` in declaration order,
 /// each named by joining its ancestor field names with `sep` under `prefix`.
 /// `sep = "."` yields the column keys / dotted source paths, `sep = "__"` the
@@ -160,19 +149,30 @@ pub(crate) fn presence_flags_rec(shape: &ValueShape, nested: bool, out: &mut Vec
 /// only the spelling is per-caller.
 pub(crate) fn leaf_names(shape: &ValueShape, prefix: &str, sep: &str) -> Vec<String> {
     let mut out = Vec::new();
-    leaf_names_rec(shape, prefix, sep, &mut out);
+    for_each_leaf(shape, &mut prefix.to_owned(), sep, &mut |path, _| {
+        out.push(path.to_owned())
+    });
     out
 }
 
-pub(crate) fn leaf_names_rec(shape: &ValueShape, prefix: &str, sep: &str, out: &mut Vec<String>) {
-    let mut path = String::with_capacity(prefix.len() + 32);
-    path.push_str(prefix);
-    leaf_names_under(shape, &mut path, sep, out);
+/// [`leaf_names`] under `prefix` with `.`, each flagged when it is a nested
+/// nullable child's presence tag rather than a data leaf.
+pub(crate) fn leaf_keys(shape: &ValueShape, prefix: &str) -> Vec<(Ustr, bool)> {
+    let mut out = Vec::new();
+    for_each_leaf(shape, &mut prefix.to_owned(), ".", &mut |path, presence| {
+        out.push((crate::names::ustr(path), presence))
+    });
+    out
 }
 
-/// [`leaf_names_rec`] with the prefix in a buffer every level extends and
-/// restores, so only the leaves themselves are allocated.
-fn leaf_names_under(shape: &ValueShape, path: &mut String, sep: &str, out: &mut Vec<String>) {
+/// Visit every leaf with its path and whether it is a presence tag. The prefix
+/// lives in a buffer every level extends and restores.
+fn for_each_leaf(
+    shape: &ValueShape,
+    path: &mut String,
+    sep: &str,
+    visit: &mut impl FnMut(&str, bool),
+) {
     // A NULLABLE nested shape leads with its presence leaf, matching
     // `repr_to_leaves` (which pushes presence before the fields) and `leaf_count`
     // (which counts it). Its key is the field's own name with no child appended
@@ -186,7 +186,7 @@ fn leaf_names_under(shape: &ValueShape, path: &mut String, sep: &str, out: &mut 
     // on, and no column path reaches one today (a column element is
     // non-nullable), so that case is deliberately left as it was.
     if shape.nullable && !path.is_empty() {
-        out.push(path.clone());
+        visit(path, true);
     }
     let prefix = path.len();
     for (fname, fs) in &shape.fields {
@@ -200,8 +200,8 @@ fn leaf_names_under(shape: &ValueShape, path: &mut String, sep: &str, out: &mut 
         }
         path.push_str(fname);
         match fs {
-            FieldShape::Prim => out.push(path.clone()),
-            FieldShape::Nested(sub) => leaf_names_under(sub, path, sep, out),
+            FieldShape::Prim => visit(path, false),
+            FieldShape::Nested(sub) => for_each_leaf(sub, path, sep, visit),
         }
         path.truncate(prefix);
     }
@@ -516,12 +516,18 @@ impl ValueShape {
     pub(crate) fn leaf_count(&self) -> usize {
         self.fields
             .iter()
-            .map(|(_, fs)| match fs {
-                FieldShape::Prim => 1,
-                FieldShape::Nested(s) => s.leaf_count(),
-            })
+            .map(|(_, fs)| fs.leaf_count())
             .sum::<usize>()
             + usize::from(self.nullable)
+    }
+}
+
+impl FieldShape {
+    pub(crate) fn leaf_count(&self) -> usize {
+        match self {
+            FieldShape::Prim => 1,
+            FieldShape::Nested(s) => s.leaf_count(),
+        }
     }
 }
 

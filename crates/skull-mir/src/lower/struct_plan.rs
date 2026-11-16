@@ -351,13 +351,7 @@ impl GcTableField {
         let Some(sub) = &self.inline else {
             return vec![(self.name, false)];
         };
-        let mut presence = Vec::new();
-        super::shape::presence_flags_rec(sub, true, &mut presence);
-        super::shape::leaf_names(sub, self.name.as_str(), ".")
-            .into_iter()
-            .map(|key| crate::names::ustr(&key))
-            .zip(presence)
-            .collect()
+        super::shape::leaf_keys(sub, self.name.as_str())
     }
 
     pub fn is_inline(&self) -> bool {

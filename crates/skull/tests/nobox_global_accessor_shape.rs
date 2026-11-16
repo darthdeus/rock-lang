@@ -10,7 +10,7 @@
 //!
 //! A `nobox` value with NO data leaves is where the proxies and the oracles
 //! disagree: it contributes exactly ONE leaf, keyed on the field's own name with
-//! nothing below it (`leaf_names_rec`), so no path is dotted and no path is a
+//! nothing below it (`leaf_names`), so no path is dotted and no path is a
 //! prefix of another. The same shape is pinned for the Lua ctor site by
 //! `tests/nobox/zero_leaf_child.rock`, where picking by punctuation was a live
 //! `attempt to call global 'Tagged_vt' (a nil value)`.

@@ -2604,10 +2604,7 @@ impl BackendFnAbiPlan {
                     narrowed.fields.clear();
                     let mut leaf = offset;
                     for (name, field) in &shape.fields {
-                        let n = match field {
-                            FieldShape::Prim => 1,
-                            FieldShape::Nested(s) => s.leaf_count(),
-                        };
+                        let n = field.leaf_count();
                         if fields.contains(name) {
                             narrowed.fields.push((*name, field.clone()));
                             lanes.extend(leaf..leaf + n);
