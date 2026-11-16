@@ -15,7 +15,7 @@ use anyhow::{Context, Result, anyhow};
 use colored::Colorize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
@@ -366,12 +366,6 @@ fn resolve_sim_name(wire_names: &[String], name: &str) -> std::result::Result<St
     }
 }
 
-/// Test-only barrier between compiling the sim build and spawning the first
-/// child. `ROCK_SIM_SPAWN_BARRIER=<path>` makes an invocation park here until
-/// `<path>` exists, so a test can deterministically interleave a second
-/// invocation's compile against this one's spawn. Bounded so a mistaken set
-/// cannot wedge a run forever. Env-gated and once per invocation, never in a
-/// per-frame or per-sim path.
 /// A sim invocation's private directory for `main.lua` + its `incremental.lua`
 /// overlay.
 ///
@@ -492,44 +486,6 @@ fn timed_sim_compile_phase<T>(
     let result = action();
     record_sim_compile_phase(operation, phase, project, output, started, result.is_ok());
     result
-}
-
-fn sim_spawn_barrier() {
-    let Some(gate) = std::env::var_os("ROCK_SIM_SPAWN_BARRIER") else {
-        return;
-    };
-    let gate = PathBuf::from(gate);
-    let deadline = rock_core::clock::Instant::now() + Duration::from_secs(120);
-    while !gate.exists() {
-        if rock_core::clock::Instant::now() > deadline {
-            log::warn!(target: "SIM",
-                "ROCK_SIM_SPAWN_BARRIER `{}` never appeared; proceeding", gate.display());
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-/// Parent-side child lifecycle trace, enabled by `ROCK_SIM_LIFECYCLE_LOG`.
-///
-/// `start`/`end` bracket an entry and `proc_start`/`proc_end` its process; with
-/// one entry per child both pairs are written at spawn and at exit.
-fn record_sim_lifecycle(event: &str, sim_name: &str) {
-    let Some(path) = std::env::var_os("ROCK_SIM_LIFECYCLE_LOG") else {
-        return;
-    };
-    static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
-    let Ok(_guard) = LOCK.get_or_init(|| Mutex::new(())).lock() else {
-        return;
-    };
-    let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    else {
-        return;
-    };
-    let _ = writeln!(file, "{event}\t{sim_name}");
 }
 
 /// Compile `project` into `output_path` and walk the `@sim` registry
@@ -1738,16 +1694,6 @@ pub fn do_plan_sims(
     Ok(())
 }
 
-pub fn do_run_sim_opts(
-    backend: crate::Backend,
-    project: &str,
-    sim_name: &str,
-    quiet: bool,
-    update_snapshots: bool,
-) -> Result<()> {
-    do_run_sim_opts_with_request(backend, project, sim_name, quiet, update_snapshots, Some(1))
-}
-
 fn do_run_sim_opts_with_request(
     backend: crate::Backend,
     project: &str,
@@ -1837,7 +1783,6 @@ fn do_run_sim_opts_recorded(
         &prepared.source_files,
     );
     emit_bytecode_image(Path::new(&output));
-    sim_spawn_barrier();
 
     let sim_sources = resolve_sim_sources(&project_path, &prepared.source_files)?;
     let (display_name, summary) = run_named_entry(
@@ -1912,7 +1857,7 @@ fn sim_outcome(summary: &SimSummary, sim_name: &str) -> Result<()> {
 }
 
 /// Run one named entry into a fresh tempdir, returning its name and summary.
-/// Shared by the single-run path (`do_run_sim_opts`) and the multi-run path
+/// Shared by the single-run path (`do_run_sim_opts_with_request`) and the multi-run path
 /// (`do_run_named_sims`) so the tempdir / cleanup handling can't drift
 /// between them. The tempdir is exposed to the child as `OUT`.
 struct SimArtifacts {
@@ -2054,7 +1999,7 @@ fn verdict_word(summary: &SimSummary) -> &'static str {
 }
 
 /// Run a specific list of named sims (the `rock sim <project> a b c` form).
-/// A single name delegates to `do_run_sim_opts` and streams full per-expect
+/// A single name delegates to `do_run_sim_opts_with_request` and streams full per-expect
 /// detail. Multiple names run concise: no live log, just each sim's verdict
 /// (with its failing assertions) plus a final tally. Compiles once; each
 /// named entry gets its own tempdir. Returns Err (non-zero exit) if any
@@ -2139,7 +2084,6 @@ fn do_run_named_sims_recorded(
     let names = &resolve_sim_specs(&wire_names, names)?;
     emit_bytecode_image(Path::new(&output));
     let entry_ids = recorder.plan_entries(names);
-    sim_spawn_barrier();
     // Records print whole once every sim is done, so a run of several says
     // where to follow it live.
     if names.len() > 1 && !quiet {
@@ -2521,36 +2465,15 @@ where
         return (pool(&PoolWidth::fixed(jobs)), lane());
     }
     let width = PoolWidth::starting_at(jobs, jobs.saturating_sub(1));
-    // The test gate holds the pool until lane dispatch, so a drain barrier deadlocks there.
-    let test_barrier = std::env::var_os("ROCK_SIM_RELOAD_LANE_TEST_BARRIER").map(PathBuf::from);
     std::thread::scope(|scope| {
-        let pool = scope.spawn(|| {
-            if let Some(dir) = &test_barrier {
-                while !dir.join("lane_dispatched").exists() {
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-            }
-            let result = pool(&width);
-            if test_barrier.is_some() {
-                record_sim_lifecycle("pool_finished", "");
-            }
-            result
-        });
-        let lane = dispatch_reload_lane(lane, test_barrier.as_deref());
+        let pool = scope.spawn(|| pool(&width));
+        let lane = lane();
         width.widen_to_jobs();
         let pool = pool
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
         (pool, lane)
     })
-}
-
-fn dispatch_reload_lane<B>(lane: impl FnOnce() -> B, test_barrier: Option<&Path>) -> B {
-    if let Some(dir) = test_barrier {
-        record_sim_lifecycle("reload_lane_dispatched", "");
-        std::fs::write(dir.join("lane_dispatched"), b"").expect("write reload lane test barrier");
-    }
-    lane()
 }
 
 /// Each reload entry at `indices`, one at a time through the lane's session.
@@ -2714,7 +2637,6 @@ fn do_run_all_sims_recorded(
     let source_files = prepared.source_files;
     let sim_sources = resolve_sim_sources(&project_path, &source_files)?;
     emit_bytecode_image(Path::new(&output));
-    sim_spawn_barrier();
     if wire_names.is_empty() {
         return Err(anyhow!("no @sim coroutines found in project `{project}`"));
     }
@@ -2971,7 +2893,6 @@ pub fn do_run_allocation_census(
         compile_sims(backend, project_path.clone(), PathBuf::from(&output))?;
     let sim_sources = resolve_sim_sources(&project_path, &source_files)?;
     emit_bytecode_image(Path::new(&output));
-    sim_spawn_barrier();
 
     let selected = if names.is_empty() {
         wire_names.clone()
@@ -3265,7 +3186,6 @@ pub fn do_run_allocation_sites(
     )?;
     let manifest = fs_err::read_to_string(&manifest_path)?;
     let generated_lua = fs_err::read_to_string(&generated_lua_path)?;
-    sim_spawn_barrier();
 
     let selected = if names.is_empty() {
         wire_names.clone()
@@ -4650,8 +4570,6 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
     if let Some(recorder) = recorder {
         recorder.worker_started(worker_attempt, process_id);
     }
-    record_sim_lifecycle("proc_start", &label);
-    record_sim_lifecycle("start", &part.name);
     let stderr_handle = child.stderr.take().expect("piped");
     let stdout_handle = child.stdout.take().expect("piped");
 
@@ -5075,8 +4993,6 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
             site: String::new(),
         });
     }
-    record_sim_lifecycle("end", &part.name);
-    record_sim_lifecycle("proc_end", &label);
     if writes_live(buffered) {
         for message in &reader_diagnostics {
             log::warn!(target: "SIM", "{message}");
