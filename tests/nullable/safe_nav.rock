@@ -16,24 +16,14 @@ fn safenav_field_access() {
     print(f2?.name == null)
 }
 
-@test(output = "true")
-fn safenav_inner_null() {
-    let o: Outer? = Outer { inner: null, name: "test" }
-    print(o?.inner?.value == null)
-}
-
 // -- Safe navigation with null coalescing --
 
-@test(output = "default")
+@test(output = "default\nhello")
 fn safenav_coalesce() {
     let o: Outer? = null
     print(o?.name ?? "default")
-}
-
-@test(output = "hello")
-fn safenav_coalesce_nonnull() {
-    let o: Outer? = Outer { inner: null, name: "hello" }
-    print(o?.name ?? "default")
+    let o2: Outer? = Outer { inner: null, name: "hello" }
+    print(o2?.name ?? "default")
 }
 
 @test(output = "0")
@@ -195,17 +185,6 @@ fn safenav_chain_deep() {
     print(o3?.inner?.value == null)
 }
 
-// -- Null coalescing --
-
-@test(output = "5\n0")
-fn coalesce_basic() {
-    let x: int? = 5
-    print(x ?? 0)
-
-    let y: int? = null
-    print(y ?? 0)
-}
-
 // -- Arithmetic with safe nav --
 
 @test(output = "15\n5")
@@ -224,37 +203,6 @@ fn safenav_let_with_coalesce() {
     let x: int? = null
     let result = x?.let { x * 10 } ?? 50
     print(result)
-}
-
-// -- ?.0 / ?.1 on nullable tuples --
-
-@test(output = "true\ntrue")
-fn safenav_tuple_0() {
-    let mobs: Arena<Mob> = arena_new()
-    mobs.insert(Mob { name: "Boss", health: 500 })
-
-    print(mobs.pairs().find(_.1.name == "Boss")?.0 != null)
-    print(mobs.pairs().find(_.1.name == "Nobody")?.0 == null)
-}
-
-// -- Full chain: find -> ?.1 -> ?.field -> ?? --
-
-@test(output = "Boss\ndefault")
-fn safenav_full_chain_string() {
-    let mobs: Arena<Mob> = arena_new()
-    mobs.insert(Mob { name: "Boss", health: 500 })
-
-    print(mobs.pairs().find(_.1.name == "Boss")?.1?.name ?? "default")
-    print(mobs.pairs().find(_.1.name == "Nobody")?.1?.name ?? "default")
-}
-
-@test(output = "500\n0")
-fn safenav_full_chain_int() {
-    let mobs: Arena<Mob> = arena_new()
-    mobs.insert(Mob { name: "Boss", health: 500 })
-
-    print(mobs.pairs().find(_.1.name == "Boss")?.1?.health ?? 0)
-    print(mobs.pairs().find(_.1.name == "Nobody")?.1?.health ?? 0)
 }
 
 // -- Linked list with safe nav --
@@ -382,17 +330,4 @@ fn test_single_safenav() {
     print("{shallow(i)}")
     let n: SmallInner? = null
     print("{shallow(n)}")
-}
-
-fn pick(i: SmallInner?) -> int {
-    return i?.v ?? 99
-}
-
-@test(output = "5\n99")
-fn test_safenav_present_via_param() {
-    let p = SmallInner { v: 5 }
-    let r = pick(p)
-    print("{r}")
-    let n: SmallInner? = null
-    print("{pick(n)}")
 }

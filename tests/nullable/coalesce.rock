@@ -3,34 +3,27 @@
 // Typing: T? ?? T -> T and T? ?? T? -> T? (inner types must match;
 // mismatches are compile errors).
 
-// ============================================
-// Valid uses
-// ============================================
-
-@test(output = "5")
-fn coalesce_int_with_int_default() {
-    let x: int? = 5
-    print(x ?? 0)
-}
-
-@test(output = "0")
-fn coalesce_null_with_int_default() {
-    let x: int? = null
-    print(x ?? 0)
-}
-
-@test(output = "hello")
-fn coalesce_string_with_string_default() {
-    let s: string? = null
-    print(s ?? "hello")
-}
-
-@test(output = "3")
-fn coalesce_chain_all_matching() {
-    let a: int? = null
-    let b: int? = null
-    let c: int? = 3
-    print(a ?? b ?? c ?? 99)
+@test(output = "5\n0\n0\n42\nhello\n\n3.14\nfalse\ntrue\ntrue")
+fn coalesce_keeps_present_values_including_falsy_ones() {
+    let present: int? = 5
+    let absent: int? = null
+    let zero: int? = 0
+    print(present ?? 0)
+    print(absent ?? 0)
+    print(zero ?? 42)
+    print(absent ?? 42)
+    let no_string: string? = null
+    let empty: string? = ""
+    print(no_string ?? "hello")
+    print(empty ?? "default")
+    let no_float: float? = null
+    print(no_float ?? 3.14)
+    let falsy: bool? = false
+    let no_bool: bool? = null
+    let truthy: bool? = true
+    print(falsy ?? true)
+    print(no_bool ?? true)
+    print(truthy ?? false)
 }
 
 @test(output = "10")
@@ -41,89 +34,24 @@ fn coalesce_nullable_nullable() {
     print(result ?? -1)
 }
 
-@test(output = "3.14")
-fn coalesce_float_float() {
-    // float? ?? float works fine
-    let x: float? = null
-    let result = x ?? 3.14
-    print(result)
-}
-
-// ============================================
-// Falsy values, chaining, side effects, edge cases
-// ============================================
-
-// --- 1.1: ?? with falsy non-nil values ---
-
-@test(output = "false")
-fn test_bool_coalesce_false_value() {
-    let x: bool? = false
-    let result = x ?? true
-    print(result)
-}
-
-@test(output = "true")
-fn test_bool_coalesce_null_value() {
-    let x: bool? = null
-    let result = x ?? true
-    print(result)
-}
-
-@test(output = "true")
-fn test_bool_coalesce_true_value() {
-    let x: bool? = true
-    let result = x ?? false
-    print(result)
-}
-
-@test(output = "0")
-fn test_int_coalesce_zero() {
-    let x: int? = 0
-    let result = x ?? 42
-    print(result)
-}
-
-@test(output = "42")
-fn test_int_coalesce_null() {
-    let x: int? = null
-    let result = x ?? 42
-    print(result)
-}
-
-@test(output = "")
-fn test_string_coalesce_empty() {
-    let x: string? = ""
-    let result = x ?? "default"
-    print(result)
-}
-
-// --- Chained coalescing with falsy values ---
-
-@test(output = "false")
-fn test_chained_bool_coalesce() {
+@test(output = "false\ntrue\n0\n99\n3")
+fn coalesce_chains() {
     let a: bool? = null
     let b: bool? = false
-    let result = a ?? b ?? true
-    print(result)
+    let c: bool? = null
+    print(a ?? b ?? true)
+    print(a ?? c ?? true)
+    let n1: int? = null
+    let n2: int? = 0
+    let n3: int? = null
+    let n4: int? = null
+    let n5: int? = null
+    let n6: int? = null
+    let three: int? = 3
+    print(n1 ?? n2 ?? 99)
+    print(n1 ?? n3 ?? n4 ?? n5 ?? n6 ?? 99)
+    print(n1 ?? n3 ?? three ?? n4 ?? n5 ?? 99)
 }
-
-@test(output = "true")
-fn test_chained_bool_coalesce_all_null() {
-    let a: bool? = null
-    let b: bool? = null
-    let result = a ?? b ?? true
-    print(result)
-}
-
-@test(output = "0")
-fn test_chained_int_coalesce_zero() {
-    let a: int? = null
-    let b: int? = 0
-    let result = a ?? b ?? 99
-    print(result)
-}
-
-// --- Side effects ---
 
 global side_effect_count: int = 0
 
@@ -132,106 +60,26 @@ fn side_effect_int() -> int {
     return 999
 }
 
-@test(output = "false 0")
-fn test_bool_coalesce_no_side_effect_when_present() {
-    side_effect_count = 0
-    let x: bool? = false
-    let result = x ?? true
-    print("{result} {side_effect_count}")
-}
-
-@test(output = "42 0")
-fn test_int_coalesce_no_rhs_eval_when_present() {
+@test(output = "42 0\n999 1")
+fn coalesce_evaluates_rhs_only_when_null() {
     side_effect_count = 0
     let x: int? = 42
-    let result = x ?? side_effect_int()
-    print("{result} {side_effect_count}")
+    let kept = x ?? side_effect_int()
+    print("{kept} {side_effect_count}")
+    let y: int? = null
+    let fallback = y ?? side_effect_int()
+    print("{fallback} {side_effect_count}")
 }
 
-@test(output = "999 1")
-fn test_int_coalesce_rhs_eval_when_null() {
-    side_effect_count = 0
+@test(output = "3\nhello world\n5")
+fn coalesce_in_expression_positions() {
     let x: int? = null
-    let result = x ?? side_effect_int()
-    print("{result} {side_effect_count}")
-}
-
-// --- ?? in various expression positions ---
-
-@test(output = "3")
-fn test_coalesce_in_arithmetic() {
-    let x: int? = null
-    let result = (x ?? 1) + 2
-    print(result)
-}
-
-@test(output = "hello world")
-fn test_coalesce_in_interpolation() {
+    print((x ?? 1) + 2)
     let name: string? = null
     print("{name ?? "hello"} world")
-}
-
-@test(output = "5")
-fn test_coalesce_as_function_arg() {
-    let x: int? = null
     let arr: [int] = []
     arr.push(x ?? 5)
     print(arr[0])
-}
-
-// --- Deep chaining (5+ levels) ---
-
-@test(output = "99")
-fn test_deep_chain_coalesce() {
-    let a: int? = null
-    let b: int? = null
-    let c: int? = null
-    let d: int? = null
-    let e: int? = null
-    let result = a ?? b ?? c ?? d ?? e ?? 99
-    print(result)
-}
-
-@test(output = "3")
-fn test_deep_chain_coalesce_middle_value() {
-    let a: int? = null
-    let b: int? = null
-    let c: int? = 3
-    let d: int? = null
-    let e: int? = null
-    let result = a ?? b ?? c ?? d ?? e ?? 99
-    print(result)
-}
-
-// --- ?? combined with ?.  ---
-
-struct Inner {
-    value: int,
-}
-
-struct Outer {
-    inner: Inner?,
-}
-
-@test(output = "42")
-fn test_safenav_then_coalesce() {
-    let o: Outer? = Outer { inner: Inner { value: 42 } }
-    let result = o?.inner?.value ?? 0
-    print(result)
-}
-
-@test(output = "0")
-fn test_safenav_null_then_coalesce() {
-    let o: Outer? = null
-    let result = o?.inner?.value ?? 0
-    print(result)
-}
-
-@test(output = "0")
-fn test_safenav_inner_null_then_coalesce() {
-    let o: Outer? = Outer { inner: null }
-    let result = o?.inner?.value ?? 0
-    print(result)
 }
 
 // ============================================
@@ -287,40 +135,26 @@ fn co_none() -> int? { return null }
 struct CoS { v: int }
 
 @test
-fn coalesce_over_global_assign() {
+fn coalesce_binds_tighter_than_every_assignment_form() {
     CO_G = co_some() ?? 0
     assert_eq(CO_G, 5)
-
     CO_G = co_none() ?? 7
     assert_eq(CO_G, 7)
-}
 
-@test
-fn coalesce_over_local_assign() {
     let x = 0
     x = co_some() ?? 0
     assert_eq(x, 5)
-
     x = co_none() ?? 7
     assert_eq(x, 7)
-}
 
-@test
-fn coalesce_over_field_assign() {
     let s = CoS { v: 0 }
     s.v = co_some() ?? 0
     assert_eq(s.v, 5)
-}
 
-@test
-fn coalesce_over_index_assign() {
     let a = [1, 2]
     a[0] = co_some() ?? 0
     assert_eq(a[0], 5)
-}
 
-@test
-fn coalesce_over_compound_assign() {
     CO_G = 1
     CO_G += co_some() ?? 0
     assert_eq(CO_G, 6)

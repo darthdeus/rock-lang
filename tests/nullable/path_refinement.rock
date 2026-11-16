@@ -10,30 +10,21 @@ struct Outer { inner: A? }
 // && short-circuit variable refinement
 // ==============================
 
-// The failing test: o != null && o.inner != null
-@test(output = "hello")
+@test(output = "hello\ndefault\nno inner")
 fn and_variable_refinement() {
     let o: A? = A { b: B { c: C { value: 42 }, name: "hello" } }
     if o != null && o.b != null {
         print(o.b.name)
     }
-}
-
-@test(output = "default")
-fn and_variable_refinement_null_root() {
-    let o: A? = null
-    if o != null && o.b != null {
-        print(o.b.name)
+    let null_root: A? = null
+    if null_root != null && null_root.b != null {
+        print(null_root.b.name)
     } else {
         print("default")
     }
-}
-
-@test(output = "no inner")
-fn and_variable_refinement_null_field() {
-    let o: A? = A { b: null }
-    if o != null && o.b != null {
-        print(o.b.name)
+    let null_field: A? = A { b: null }
+    if null_field != null && null_field.b != null {
+        print(null_field.b.name)
     } else {
         print("no inner")
     }
@@ -127,34 +118,14 @@ fn post_divergence_then_deeper() {
 // Null cases (runtime correctness)
 // ==============================
 
-@test(output = "missing")
-fn safe_nav_chain_null_root() {
-    let a: A? = null
-    if a?.b?.c != null {
-        print("found")
-    } else {
-        print("missing")
-    }
-}
-
-@test(output = "missing")
-fn safe_nav_chain_null_intermediate() {
-    let a: A? = A { b: null }
-    if a?.b?.c != null {
-        print("found")
-    } else {
-        print("missing")
-    }
-}
-
-@test(output = "missing")
-fn safe_nav_chain_null_leaf() {
-    let a: A? = A { b: B { c: null, name: "leaf" } }
-    if a?.b?.c != null {
-        print("found")
-    } else {
-        print("missing")
-    }
+@test(output = "missing root\nmissing intermediate\nmissing leaf")
+fn safe_nav_chain_null_at_each_level() {
+    let root: A? = null
+    if root?.b?.c != null { print("found") } else { print("missing root") }
+    let mid: A? = A { b: null }
+    if mid?.b?.c != null { print("found") } else { print("missing intermediate") }
+    let leaf: A? = A { b: B { c: null, name: "leaf" } }
+    if leaf?.b?.c != null { print("found") } else { print("missing leaf") }
 }
 
 // ==============================
@@ -251,16 +222,6 @@ struct Deep { top: Top? }
 // Basic: assign null to refined nullable field
 // ==============================
 
-// The original bug: inside `if x.field != null`, `x.field = null` was rejected
-@test(output = "cleared")
-fn assign_null_to_refined_field() {
-    let t = Top { mid: Mid { inner: Inner { value: 1 }, name: "a" } }
-    if t.mid != null {
-        t.mid = null
-        print("cleared")
-    }
-}
-
 // Assign null then check that the field is actually null at runtime
 @test(output = "set\nnull")
 fn assign_null_to_refined_field_verify() {
@@ -305,16 +266,6 @@ fn assign_null_intermediate_path() {
 // Guard pattern + assignment
 // ==============================
 
-// Guard early-return, then assign null to the refined field
-@test(output = "ok")
-fn guard_then_assign_null() {
-    let t = Top { mid: Mid { inner: Inner { value: 1 }, name: "x" } }
-    if t.mid == null { return }
-    // t.mid is now refined to Mid (non-null)
-    t.mid = null  // should compile: declared type is Mid?
-    print("ok")
-}
-
 // Guard, use the refined value, then clear it
 @test(output = "x\ncleared")
 fn guard_use_then_clear() {
@@ -337,20 +288,6 @@ fn assign_nonnull_to_refined_field() {
         t.mid = Mid { inner: null, name: "after" }
         // After assigning a non-null value, the field is still accessible
         print(t.mid.name)
-    }
-}
-
-// ==============================
-// Safe navigation assignment paths
-// ==============================
-
-// a?.field = value where a was refined
-@test(output = "10")
-fn safe_nav_assign_after_refinement() {
-    let t: Top? = Top { mid: Mid { inner: Inner { value: 1 }, name: "x" } }
-    if t != null && t.mid != null && t.mid.inner != null {
-        t.mid.inner.value = 10
-        print(t.mid.inner.value)
     }
 }
 

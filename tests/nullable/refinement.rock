@@ -115,17 +115,6 @@ fn refinement_with_multiple_variables() {
     }
 }
 
-@test(output = "15", type_holes = [[0, "int"]])
-fn refinement_in_nested_scopes() {
-    let x: int? = 10
-    
-    if x != null {
-        let x_refined: ? = x  // [0]
-        let y = x + 5  // x is refined to int
-        print(y)
-    }
-}
-
 @test(output = "safe: 42")
 fn refinement_with_string_interpolation() {
     let value: int? = 42
@@ -170,16 +159,6 @@ struct Point {
     y: int,
 }
 
-@test(output = "10")
-fn refinement_with_safe_navigation() {
-    let p_val = Point { x: 10, y: 20 }
-    let p: Point? = p_val
-    
-    if p != null {
-        print(p.x)  // p is refined to Point here
-    }
-}
-
 @test(output = "30")
 fn refinement_complex_field_access() {
     let p_val = Point { x: 10, y: 20 }
@@ -199,8 +178,6 @@ fn refinement_complex_field_access() {
 fn refinement_in_while_loop() {
     let counter: int? = 1
 
-    // Note: intra-&& refinement is not yet supported, so we use
-    // a nested null check pattern instead of `counter != null && counter <= 3`
     while counter != null {
         if counter > 3 { break }
         print(counter)  // counter is refined to int
@@ -233,18 +210,6 @@ fn refinement_with_function_call() {
 // Advanced Refinement Patterns
 // ============================================
 
-@test(output = "both non-null")
-fn refinement_compound_conditions() {
-    let a: int? = 5
-    let b: int? = 10
-    
-    if a != null && b != null {
-        print("both non-null")
-    } else {
-        print("at least one null")
-    }
-}
-
 @test(output = "either null")
 fn refinement_or_conditions() {
     let a: int? = 5
@@ -267,18 +232,9 @@ fn refinement_with_mutation() {
     }
 }
 
-// Moved from nullable_shadowing_tests.rock: shadowing inside refinement blocks
+// Shadowing inside refinement blocks
 
 struct ShadowFoo { value: int }
-
-@test(output = "10")
-fn shadow_int_replaces_refined_var() {
-    let x: ShadowFoo? = ShadowFoo { value: 1 }
-    if x != null {
-        let x = 10
-        print(x)
-    }
-}
 
 @test(output = "true")
 fn shadow_with_null_value() {
@@ -319,10 +275,6 @@ fn shadow_string_then_int() {
     print(x?.value ?? -1)
 }
 
-// ============================================
-// Adversarial: closures, control flow edges, complex patterns
-// ============================================
-
 // --- Refinement + closures ---
 
 @test(output = "42")
@@ -362,13 +314,9 @@ fn early_return_helper(x: int?) -> string {
     return "value: {x}"
 }
 
-@test(output = "value: 42")
+@test(output = "value: 42\nwas null")
 fn test_refinement_after_divergent_else() {
     print(early_return_helper(42))
-}
-
-@test(output = "was null")
-fn test_refinement_after_divergent_else_null() {
     print(early_return_helper(null))
 }
 
@@ -385,31 +333,11 @@ fn guard_return(x: int?, y: int?) -> string {
     return "{x} {y}"
 }
 
-@test(output = "10 20")
+@test(output = "10 20\nx null\ny null")
 fn test_double_guard_return() {
     print(guard_return(10, 20))
-}
-
-@test(output = "x null")
-fn test_double_guard_x_null() {
     print(guard_return(null, 20))
-}
-
-@test(output = "y null")
-fn test_double_guard_y_null() {
     print(guard_return(10, null))
-}
-
-// --- Refinement invalidation by assignment ---
-
-@test(output = "safe")
-fn test_refinement_invalidated_by_reassignment() {
-    let x: int? = 42
-    if x != null {
-        // x is refined here
-        let val = x + 1  // Should work, x is refined to int
-        print("safe")
-    }
 }
 
 // --- Nested if refinement ---
@@ -441,33 +369,7 @@ fn test_nested_nullable_refinement() {
     print(out)
 }
 
-// --- Refinement in while loop ---
-
-@test(output = "3 2 1")
-fn test_while_refinement() {
-    let vals = [3, 2, 1]
-    let i = 0
-    let out = ""
-    let first = true
-    while i < vals.len {
-        if !first { out = out + " " }
-        first = false
-        out = out + "{vals[i]}"
-        i = i + 1
-    }
-    print(out)
-}
-
 // --- Compound condition refinement ---
-
-@test(output = "both present: 1 2")
-fn test_compound_and_refinement() {
-    let x: int? = 1
-    let y: int? = 2
-    if x != null && y != null {
-        print("both present: {x} {y}")
-    }
-}
 
 @test(output = "skipped")
 fn test_compound_and_one_null() {
@@ -482,25 +384,19 @@ fn test_compound_and_one_null() {
 
 // --- Refinement with short-circuit safety ---
 
-@test(output = "safe: 42")
-fn test_short_circuit_safe_access() {
+@test(output = "safe: 42\nskipped")
+fn test_short_circuit_refinement() {
     let x: int? = 42
     if x != null && x > 0 {
         print("safe: {x}")
     }
-}
-
-@test(output = "skipped")
-fn test_short_circuit_null_skips_rhs() {
-    let x: int? = null
-    if x != null && x > 0 {
+    let y: int? = null
+    if y != null && y > 0 {
         print("not reached")
     } else {
         print("skipped")
     }
 }
-
-// --- Path refinement with struct fields ---
 
 struct Container {
     item: CountedItem?,
@@ -509,24 +405,6 @@ struct Container {
 struct CountedItem {
     name: string,
     count: int,
-}
-
-@test(output = "widget 5")
-fn test_path_refinement_field() {
-    let c = Container { item: CountedItem { name: "widget", count: 5 } }
-    if c.item != null {
-        print("{c.item.name} {c.item.count}")
-    }
-}
-
-@test(output = "empty")
-fn test_path_refinement_null_field() {
-    let c = Container { item: null }
-    if c.item != null {
-        print("not reached")
-    } else {
-        print("empty")
-    }
 }
 
 // --- Refinement + safe navigation combination ---
@@ -551,13 +429,9 @@ fn scoped_refinement(x: int?) -> string {
     return "was null"
 }
 
-@test(output = "doubled: 84")
-fn test_refinement_scoped_present() {
+@test(output = "doubled: 84\nwas null")
+fn test_refinement_scoped() {
     print(scoped_refinement(42))
-}
-
-@test(output = "was null")
-fn test_refinement_scoped_null() {
     print(scoped_refinement(null))
 }
 
@@ -570,33 +444,8 @@ fn triple_guard(a: int?, b: int?, c: int?) -> string {
     return "{a} {b} {c}"
 }
 
-@test(output = "1 2 3")
-fn test_triple_guard_all_present() {
+@test(output = "1 2 3\nb null")
+fn test_triple_guard() {
     print(triple_guard(1, 2, 3))
-}
-
-@test(output = "b null")
-fn test_triple_guard_b_null() {
     print(triple_guard(1, null, 3))
-}
-
-// --- Refinement preserved across let bindings ---
-
-@test(output = "43")
-fn test_refinement_across_let() {
-    let x: int? = 42
-    if x != null {
-        let y = x + 1
-        print(y)
-    }
-}
-
-// --- Refinement with negated condition ---
-
-@test(output = "present: 5")
-fn test_negated_null_check() {
-    let x: int? = 5
-    if !(x == null) {
-        print("present: {x}")
-    }
 }

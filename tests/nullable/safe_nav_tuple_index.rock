@@ -1,8 +1,5 @@
-// H1: nullable-base `.0` unwrap via the safe-nav nil guard.
-// `id?.0` on nullable newtype/tuple is `if id == nil then nil else
-// id[idx+1]`, byte-behavior-identical to live exprs.rs:218-223.
-// Pinned via behavioral output assertions; the oracle gates byte
-// identity.
+// `?.0` on a nullable newtype or tuple yields the element when present and
+// null when absent.
 
 newtype UserId(int)
 
@@ -10,34 +7,26 @@ fn maybe_user(have: bool) -> UserId? {
     if have { UserId(42) } else { null }
 }
 
-@test(output = "42")
-fn test_nullable_newtype_dot0_some() {
+@test(output = "42\n-1")
+fn test_nullable_newtype_dot0() {
     let u = maybe_user(true)
     let v = u?.0
     print(v ?? -1)
-}
-
-@test(output = "-1")
-fn test_nullable_newtype_dot0_none() {
-    let u = maybe_user(false)
-    let v = u?.0
-    print(v ?? -1)
+    let none = maybe_user(false)
+    let w = none?.0
+    print(w ?? -1)
 }
 
 fn maybe_pair(have: bool) -> (int, string)? {
     if have { (7, "hi") } else { null }
 }
 
-@test(output = "7")
-fn test_nullable_tuple_dot0_some() {
+@test(output = "7\n-1")
+fn test_nullable_tuple_dot0() {
     let p = maybe_pair(true)
     let v = p?.0
     print(v ?? -1)
-}
-
-@test(output = "-1")
-fn test_nullable_tuple_dot0_none() {
-    let p = maybe_pair(false)
-    let v = p?.0
-    print(v ?? -1)
+    let none = maybe_pair(false)
+    let w = none?.0
+    print(w ?? -1)
 }

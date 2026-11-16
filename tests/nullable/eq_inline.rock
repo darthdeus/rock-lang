@@ -12,30 +12,24 @@ enum Shape {
 struct Point { x: int, y: int }
 
 @test
-fn test_nullable_unit_enum_both_null() {
-    let a: Color? = null
-    let b: Color? = null
-    assert_eq(a == b, true)
-    assert_eq(a != b, false)
-}
+fn test_nullable_unit_enum() {
+    let n1: Color? = null
+    let n2: Color? = null
+    assert_eq(n1 == n2, true)
+    assert_eq(n1 != n2, false)
 
-@test
-fn test_nullable_unit_enum_one_null() {
     let a: Color? = null
     let b: Color? = Color::Red
     assert_eq(a == b, false)
     assert_eq(a != b, true)
     assert_eq(b == a, false)
     assert_eq(b != a, true)
-}
 
-@test
-fn test_nullable_unit_enum_both_set() {
-    let a: Color? = Color::Red
-    let b: Color? = Color::Red
-    let c: Color? = Color::Green
-    assert_eq(a == b, true)
-    assert_eq(a == c, false)
+    let r1: Color? = Color::Red
+    let r2: Color? = Color::Red
+    let g: Color? = Color::Green
+    assert_eq(r1 == r2, true)
+    assert_eq(r1 == g, false)
 }
 
 @test
@@ -48,34 +42,23 @@ fn test_nullable_enum_vs_literal() {
 }
 
 @test
-fn test_nullable_payloaded_enum_both_null() {
-    let a: Shape? = null
-    let b: Shape? = null
-    assert_eq(a == b, true)
-    assert_eq(a != b, false)
-}
+fn test_nullable_payloaded_enum() {
+    let n1: Shape? = null
+    let n2: Shape? = null
+    assert_eq(n1 == n2, true)
+    assert_eq(n1 != n2, false)
 
-@test
-fn test_nullable_payloaded_enum_one_null() {
     let a: Shape? = null
     let b: Shape? = Shape::Dot(5)
     assert_eq(a == b, false)
     assert_eq(a != b, true)
-}
 
-@test
-fn test_nullable_payloaded_enum_both_set_equal() {
-    let a: Shape? = Shape::Dot(5)
-    let b: Shape? = Shape::Dot(5)
-    assert_eq(a == b, true)
-}
+    let same: Shape? = Shape::Dot(5)
+    assert_eq(b == same, true)
 
-@test
-fn test_nullable_payloaded_enum_both_set_diff() {
-    let a: Shape? = Shape::Dot(5)
-    let b: Shape? = Shape::Dot(6)
-    assert_eq(a == b, false)
-    assert_eq(a != b, true)
+    let other: Shape? = Shape::Dot(6)
+    assert_eq(b == other, false)
+    assert_eq(b != other, true)
 }
 
 @test
@@ -90,33 +73,22 @@ fn test_nullable_vs_non_nullable_payloaded() {
 }
 
 @test
-fn test_nullable_struct_both_null() {
-    let a: Point? = null
-    let b: Point? = null
-    assert_eq(a == b, true)
-}
+fn test_nullable_struct() {
+    let n1: Point? = null
+    let n2: Point? = null
+    assert_eq(n1 == n2, true)
 
-@test
-fn test_nullable_struct_one_null() {
     let a: Point? = null
     let b: Point? = Point { x: 1, y: 2 }
     assert_eq(a == b, false)
     assert_eq(a != b, true)
-}
 
-@test
-fn test_nullable_struct_both_set_equal() {
-    let a: Point? = Point { x: 1, y: 2 }
-    let b: Point? = Point { x: 1, y: 2 }
-    assert_eq(a == b, true)
-}
+    let same: Point? = Point { x: 1, y: 2 }
+    assert_eq(b == same, true)
 
-@test
-fn test_nullable_struct_both_set_diff() {
-    let a: Point? = Point { x: 1, y: 2 }
-    let b: Point? = Point { x: 1, y: 3 }
-    assert_eq(a == b, false)
-    assert_eq(a != b, true)
+    let other: Point? = Point { x: 1, y: 3 }
+    assert_eq(b == other, false)
+    assert_eq(b != other, true)
 }
 
 @test

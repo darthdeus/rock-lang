@@ -14,58 +14,46 @@ fn identity<T>(x: T?) -> T? {
     return x
 }
 
-@test(output = "42")
-fn test_generic_nullable_identity_present() {
+@test(output = "42\nnull")
+fn test_generic_nullable_identity() {
     let x: int? = 42
     let result = identity(x)
     if result != null {
         print(result)
     }
-}
-
-@test(output = "null")
-fn test_generic_nullable_identity_null() {
-    let x: int? = null
-    let result = identity(x)
-    if result == null {
+    let y: int? = null
+    let absent = identity(y)
+    if absent == null {
         print("null")
     }
 }
 
 // --- Generic struct with nullable field ---
 
-@test(output = "42")
-fn test_nullable_box_present() {
+@test(output = "42\nnull")
+fn test_nullable_box() {
     let b: NullableBox<int> = NullableBox { val: 42 }
     if b.val != null {
         print(b.val)
     }
-}
-
-@test(output = "null")
-fn test_nullable_box_null() {
-    let b: NullableBox<int> = NullableBox { val: null }
-    if b.val == null {
+    let n: NullableBox<int> = NullableBox { val: null }
+    if n.val == null {
         print("null")
     }
 }
 
 // --- What happens when T is already nullable? ---
 
-@test(output = "42")
-fn test_nullable_box_of_nullable_present() {
-    // T = int?, so val: T? = int??  -- does this flatten?
+// T = int?, so val: T? is int?? and must flatten to int?.
+@test(output = "42\nnull")
+fn test_nullable_box_of_nullable() {
     let b: NullableBox<int?> = NullableBox { val: 42 }
     let v = b.val
     if v != null {
         print(v)
     }
-}
-
-@test(output = "null")
-fn test_nullable_box_of_nullable_null() {
-    let b: NullableBox<int?> = NullableBox { val: null }
-    if b.val == null {
+    let n: NullableBox<int?> = NullableBox { val: null }
+    if n.val == null {
         print("null")
     }
 }
@@ -146,24 +134,6 @@ fn test_describe_generic_nullable_field_of_nullable() {
     print("{describe_box(a)} {describe_box(b)}")
 }
 
-// --- Vec of nullable elements ---
-
-// --- Nullable Vec vs Vec of nullable ---
-
-@test(output = "0")
-fn test_nullable_vec_coalesce() {
-    let v: [int]? = null
-    let len = v?.len() ?? 0
-    print(len)
-}
-
-@test(output = "3")
-fn test_non_null_vec_len() {
-    let v: [int]? = [1, 2, 3]
-    let len = v?.len() ?? 0
-    print(len)
-}
-
 // --- Generic function returning non-nullable from nullable ---
 
 fn my_unwrap_or<T>(x: T?, fallback: T) -> T {
@@ -173,16 +143,12 @@ fn my_unwrap_or<T>(x: T?, fallback: T) -> T {
     return fallback
 }
 
-@test(output = "42")
-fn test_generic_my_unwrap_or_present() {
+@test(output = "42\n0")
+fn test_generic_my_unwrap_or() {
     let x: int? = 42
     print(my_unwrap_or(x, 0))
-}
-
-@test(output = "0")
-fn test_generic_my_unwrap_or_null() {
-    let x: int? = null
-    print(my_unwrap_or(x, 0))
+    let y: int? = null
+    print(my_unwrap_or(y, 0))
 }
 
 // --- Generic nullable with struct fields ---
@@ -192,20 +158,16 @@ struct Pair<A, B> {
     second: B?,
 }
 
-@test(output = "hello 42")
-fn test_generic_pair_both_present() {
+@test(output = "hello 42\nnone 0")
+fn test_generic_pair() {
     let p: Pair<string, int> = Pair { first: "hello", second: 42 }
     let a = p.first ?? "none"
     let b = p.second ?? 0
     print("{a} {b}")
-}
-
-@test(output = "none 0")
-fn test_generic_pair_both_null() {
-    let p: Pair<string, int> = Pair { first: null, second: null }
-    let a = p.first ?? "none"
-    let b = p.second ?? 0
-    print("{a} {b}")
+    let n: Pair<string, int> = Pair { first: null, second: null }
+    let c = n.first ?? "none"
+    let d = n.second ?? 0
+    print("{c} {d}")
 }
 
 // --- Nested generic + nullable ---
@@ -214,16 +176,10 @@ struct Wrapper<T> {
     inner: Box<T>?,
 }
 
-@test(output = "42")
+@test(output = "42\n0")
 fn test_nested_generic_nullable() {
     let w: Wrapper<int> = Wrapper { inner: Box { val: 42 } }
-    let result = w.inner?.val ?? 0
-    print(result)
-}
-
-@test(output = "0")
-fn test_nested_generic_null_inner() {
-    let w: Wrapper<int> = Wrapper { inner: null }
-    let result = w.inner?.val ?? 0
-    print(result)
+    print(w.inner?.val ?? 0)
+    let n: Wrapper<int> = Wrapper { inner: null }
+    print(n.inner?.val ?? 0)
 }

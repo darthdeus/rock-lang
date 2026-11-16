@@ -34,40 +34,34 @@ fn seeded() -> Map<int, NV2> {
     return m
 }
 
-@test(returns = 1.0)
-fn safe_nav_field_hits() -> float { return by_field(seeded(), 1) }
+@test
+fn safe_nav_field_hits_and_misses() {
+    assert_eq(by_field(seeded(), 1), 1.0)
+    assert_eq(by_field(seeded(), 9), -1.0)
+}
 
-@test(returns = -1.0)
-fn safe_nav_field_misses() -> float { return by_field(seeded(), 9) }
+// The miss used to crash: the method ran on the miss path with nil leaves.
+@test
+fn safe_nav_method_hits_and_misses() {
+    assert_eq(by_method(seeded(), 1), 3.0)
+    assert_eq(by_method(seeded(), 9), -1.0)
+}
 
-@test(returns = 3.0)
-fn safe_nav_method_hits() -> float { return by_method(seeded(), 1) }
-
-// Was a runtime CRASH: the method ran on the miss path with nil leaves.
-@test(returns = -1.0)
-fn safe_nav_method_misses() -> float { return by_method(seeded(), 9) }
-
-@test(returns = 5.0)
-fn safe_nav_let_hits() -> float { return by_let(seeded(), 1) }
-
-// Was `5` -- the hit value on a miss.
-@test(returns = -1.0)
-fn safe_nav_let_misses() -> float { return by_let(seeded(), 9) }
+// The miss used to return 5, the hit value.
+@test
+fn safe_nav_let_hits_and_misses() {
+    assert_eq(by_let(seeded(), 1), 5.0)
+    assert_eq(by_let(seeded(), 9), -1.0)
+}
 
 // The control: a reference struct receiver is a real box, so `== nil` was always
 // the right test for it. It must stay that way.
-@test(returns = 3.0)
-fn a_struct_receiver_hits() -> float {
+@test
+fn a_struct_receiver_hits_and_misses() {
     let m: Map<int, SV2> = map_new()
     m[1] = SV2 { x: 1.0, y: 2.0 }
-    return s_by_method(m, 1)
-}
-
-@test(returns = -1.0)
-fn a_struct_receiver_misses() -> float {
-    let m: Map<int, SV2> = map_new()
-    m[1] = SV2 { x: 1.0, y: 2.0 }
-    return s_by_method(m, 9)
+    assert_eq(s_by_method(m, 1), 3.0)
+    assert_eq(s_by_method(m, 9), -1.0)
 }
 
 // A nullable value local as the receiver of a UFCS `?.method()` whose self
@@ -81,15 +75,11 @@ fn sum(self: V2) -> int {
 }
 
 @test
-fn test_safenav_ufcs_value_receiver_some() {
+fn test_safenav_ufcs_value_receiver() {
     let v: V2? = V2 { x: 7, y: 9 }
     let s = v?.sum() ?? -1
     assert_eq(s, 16)
-}
-
-@test
-fn test_safenav_ufcs_value_receiver_none() {
-    let v: V2? = null
-    let s = v?.sum() ?? -1
-    assert_eq(s, -1)
+    let none: V2? = null
+    let t = none?.sum() ?? -1
+    assert_eq(t, -1)
 }

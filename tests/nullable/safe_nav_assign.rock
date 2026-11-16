@@ -44,32 +44,20 @@ fn test_safenav_assign_present_calls_rhs() {
     print("{call_count} {result}")
 }
 
-// --- Compound assignment through safe nav ---
-
-@test(output = "15")
-fn test_safenav_compound_add() {
+@test(output = "15\n0\n5")
+fn test_safenav_compound_assign() {
     let o = Outer { middle: Middle { inner: Inner { value: 10, name: "x" } } }
     o.middle?.inner?.value += 5
     print(o.middle?.inner?.value ?? 0)
+    let n = Outer { middle: null }
+    n.middle?.inner?.value += 5
+    print(n.middle?.inner?.value ?? 0)
+    let s = Outer { middle: Middle { inner: Inner { value: 10, name: "x" } } }
+    s.middle?.inner?.value -= 5
+    print(s.middle?.inner?.value ?? 0)
 }
 
-@test(output = "0")
-fn test_safenav_compound_add_null() {
-    let o = Outer { middle: null }
-    o.middle?.inner?.value += 5
-    print(o.middle?.inner?.value ?? 0)
-}
-
-@test(output = "5")
-fn test_safenav_compound_subtract() {
-    let o = Outer { middle: Middle { inner: Inner { value: 10, name: "x" } } }
-    o.middle?.inner?.value -= 5
-    print(o.middle?.inner?.value ?? 0)
-}
-
-// --- 4-level deep assignment ---
-
-@test(output = "42")
+@test(output = "42\n0\n0")
 fn test_deep_4_level_assign() {
     let d = Deep {
         outer: Outer {
@@ -80,58 +68,36 @@ fn test_deep_4_level_assign() {
     }
     d.outer?.middle?.inner?.value = 42
     print(d.outer?.middle?.inner?.value ?? 0)
+    let null_outer = Deep { outer: null }
+    null_outer.outer?.middle?.inner?.value = 42
+    print(null_outer.outer?.middle?.inner?.value ?? 0)
+    let null_middle = Deep { outer: Outer { middle: null } }
+    null_middle.outer?.middle?.inner?.value = 42
+    print(null_middle.outer?.middle?.inner?.value ?? 0)
 }
 
-@test(output = "0")
-fn test_deep_4_level_assign_null_outer() {
-    let d = Deep { outer: null }
-    d.outer?.middle?.inner?.value = 42
-    print(d.outer?.middle?.inner?.value ?? 0)
-}
-
-@test(output = "0")
-fn test_deep_4_level_assign_null_middle() {
-    let d = Deep {
-        outer: Outer { middle: null },
-    }
-    d.outer?.middle?.inner?.value = 42
-    print(d.outer?.middle?.inner?.value ?? 0)
-}
-
-// --- String field through safe nav ---
-
-@test(output = "updated")
+@test(output = "updated\nnull")
 fn test_safenav_string_assign() {
     let o = Outer { middle: Middle { inner: Inner { value: 0, name: "original" } } }
     o.middle?.inner?.name = "updated"
     print(o.middle?.inner?.name ?? "null")
+    let n = Outer { middle: null }
+    n.middle?.inner?.name = "updated"
+    print(n.middle?.inner?.name ?? "null")
 }
 
-@test(output = "null")
-fn test_safenav_string_assign_null_path() {
-    let o = Outer { middle: null }
-    o.middle?.inner?.name = "updated"
-    print(o.middle?.inner?.name ?? "null")
-}
-
-// --- Mixed safe nav on both sides ---
-
-@test(output = "10")
+@test(output = "10\n0")
 fn test_safenav_both_sides() {
     let src = Outer { middle: Middle { inner: Inner { value: 10, name: "x" } } }
     let dst = Outer { middle: Middle { inner: Inner { value: 0, name: "y" } } }
     let val = src.middle?.inner?.value ?? 0
     dst.middle?.inner?.value = val
     print(dst.middle?.inner?.value ?? -1)
-}
-
-@test(output = "0")
-fn test_safenav_both_sides_src_null() {
-    let src = Outer { middle: null }
-    let dst = Outer { middle: Middle { inner: Inner { value: 0, name: "y" } } }
-    let val2 = src.middle?.inner?.value ?? 0
-    dst.middle?.inner?.value = val2
-    print(dst.middle?.inner?.value ?? -1)
+    let null_src = Outer { middle: null }
+    let dst2 = Outer { middle: Middle { inner: Inner { value: 0, name: "y" } } }
+    let val2 = null_src.middle?.inner?.value ?? 0
+    dst2.middle?.inner?.value = val2
+    print(dst2.middle?.inner?.value ?? -1)
 }
 
 // -- Chains 3 and 4 levels deep --
@@ -178,34 +144,18 @@ fn compound_assign_4_levels_deep() {
     print(a?.b?.c?.d?.e?.value ?? -1)
 }
 
-// ============================================
-// Null at each position is always a no-op
-// ============================================
-
-@test(output = "-1")
-fn assign_noop_when_outermost_null() {
-    let a: A? = null
-    a?.b?.c?.d?.e?.value = 99
-    print(a?.b?.c?.d?.e?.value ?? -1)
-}
-
-@test(output = "-1")
-fn assign_noop_when_second_null() {
-    let a: A? = A { b: null }
-    a?.b?.c?.d?.e?.value = 99
-    print(a?.b?.c?.d?.e?.value ?? -1)
-}
-
-@test(output = "-1")
-fn assign_noop_when_third_null() {
-    let a: A? = A { b: B { c: null } }
-    a?.b?.c?.d?.e?.value = 99
-    print(a?.b?.c?.d?.e?.value ?? -1)
-}
-
-@test(output = "-1")
-fn assign_noop_when_fourth_null() {
-    let a: A? = A { b: B { c: C { d: null } } }
-    a?.b?.c?.d?.e?.value = 99
-    print(a?.b?.c?.d?.e?.value ?? -1)
+@test(output = "-1\n-1\n-1\n-1")
+fn assign_noop_when_any_link_is_null() {
+    let first: A? = null
+    first?.b?.c?.d?.e?.value = 99
+    print(first?.b?.c?.d?.e?.value ?? -1)
+    let second: A? = A { b: null }
+    second?.b?.c?.d?.e?.value = 99
+    print(second?.b?.c?.d?.e?.value ?? -1)
+    let third: A? = A { b: B { c: null } }
+    third?.b?.c?.d?.e?.value = 99
+    print(third?.b?.c?.d?.e?.value ?? -1)
+    let fourth: A? = A { b: B { c: C { d: null } } }
+    fourth?.b?.c?.d?.e?.value = 99
+    print(fourth?.b?.c?.d?.e?.value ?? -1)
 }

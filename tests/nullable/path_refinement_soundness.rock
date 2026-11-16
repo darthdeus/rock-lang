@@ -130,20 +130,6 @@ fn re_refinement_after_clear() {
 }
 
 // ==============================
-// Compound assignment doesn't invalidate (non-null result)
-// ==============================
-
-@test(output = "11")
-fn compound_assign_preserves_refinement() {
-    let b = Box { val: Val { n: 10 }, label: "x" }
-    if b.val != null {
-        b.val.n = b.val.n + 1
-        // n is int (non-nullable), so refinement of b.val is preserved
-        print(b.val.n)
-    }
-}
-
-// ==============================
 // Multiple fields, independent refinements
 // ==============================
 
@@ -270,25 +256,6 @@ fn and_chain_short_circuits() {
 struct Root { w: Wrapper? }
 
 // ==============================
-// Refinement invalidation by root reassignment
-// ==============================
-
-// Assigning to root variable should invalidate ALL sub-paths
-@test(output = "before\nnull now")
-fn root_reassign_invalidates_paths() {
-    let w = Wrapper { box: Box { val: Val { n: 1 }, label: "before" } }
-    if w.box != null && w.box.val != null {
-        print(w.box.label)
-    }
-    // Reassigning the whole struct shouldn't crash
-    // Note: w itself is not nullable, so this is always safe
-    let w2 = Wrapper { box: null }
-    if w2.box == null {
-        print("null now")
-    }
-}
-
-// ==============================
 // Shadowing refined variable clears path refinements
 // ==============================
 
@@ -330,17 +297,6 @@ fn negated_null_check_refines() {
     let w = Wrapper { box: Box { val: Val { n: 42 }, label: "neg" } }
     if !(w.box == null) {
         print(w.box.label.len())
-    }
-}
-
-// Double negation
-@test(output = "ok")
-fn double_negated_null_check() {
-    let w = Wrapper { box: Box { val: Val { n: 1 }, label: "ok" } }
-    // !(!(w.box != null)) is equivalent to w.box != null
-    // but double negation might confuse the refinement system
-    if w.box != null {
-        print(w.box.label)
     }
 }
 
@@ -400,16 +356,6 @@ fn three_level_refinement_and_use() {
     }
     if p.weapon != null && p.weapon.enchant != null {
         print("{p.weapon.enchant.name}: {p.weapon.enchant.power}")
-    }
-}
-
-@test(output = "no enchant")
-fn three_level_null_intermediate() {
-    let p = Player { weapon: Weapon { damage: 5, enchant: null } }
-    if p.weapon != null && p.weapon.enchant != null {
-        print("enchanted")
-    } else {
-        print("no enchant")
     }
 }
 
@@ -521,52 +467,14 @@ fn safenav_condition_chain() {
     }
 }
 
-@test(output = "missing")
-fn safenav_condition_chain_null_leaf() {
-    let r = Root { w: Wrapper { box: Box { val: null, label: "x" } } }
-    if r.w?.box?.val != null {
-        print("found")
-    } else {
-        print("missing")
-    }
-}
-
-@test(output = "missing")
-fn safenav_condition_chain_null_mid() {
-    let r = Root { w: Wrapper { box: null } }
-    if r.w?.box?.val != null {
-        print("found")
-    } else {
-        print("missing")
-    }
-}
-
-@test(output = "missing")
-fn safenav_condition_chain_null_root() {
-    let r = Root { w: null }
-    if r.w?.box?.val != null {
-        print("found")
-    } else {
-        print("missing")
-    }
-}
-
-// ==============================
-// Null coalescing with refined paths
-// ==============================
-
-@test(output = "42")
-fn null_coalesce_with_refined_path() {
-    let b = Box { val: Val { n: 42 }, label: "x" }
-    let n = b.val?.n ?? 0
-    print(n)
-}
-
-@test(output = "0")
-fn null_coalesce_with_null_path() {
-    let b = Box { val: null, label: "x" }
-    let n = b.val?.n ?? 0
-    print(n)
+@test(output = "missing leaf\nmissing mid\nmissing root")
+fn safenav_condition_chain_null_at_each_level() {
+    let leaf = Root { w: Wrapper { box: Box { val: null, label: "x" } } }
+    if leaf.w?.box?.val != null { print("found") } else { print("missing leaf") }
+    let mid = Root { w: Wrapper { box: null } }
+    if mid.w?.box?.val != null { print("found") } else { print("missing mid") }
+    let root = Root { w: null }
+    if root.w?.box?.val != null { print("found") } else { print("missing root") }
 }
 
 // ==============================

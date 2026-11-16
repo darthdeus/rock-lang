@@ -1,14 +1,5 @@
-// H2 Shapes 1/2/3 + H3 R3: nullable value struct (`V2?`) routing.
-//
-// A nullable value is one Lua value at runtime (cdata-or-nil), never
-// scalarized. ANF previously rejected this at R2 (`is_value_typed`
-// peels `Nullable`), forcing the whole fn to live for these shapes.
-//
-// Per-shape intercepts via `lower_nullable_value_obj` helper:
-//   - SafeNavigation base: obj?.field where obj: V2?
-//   - Null-coalesce LHS: maybe_v2() ?? fallback
-//   - Scalar-ABI call arg: sum2(v) where v: V2?
-//   - Nullable value return: fn -> V2? body returns a value or null
+// A nullable value struct (`V2?`) as a safe-nav base, a `??` left-hand side,
+// a refined scalar-ABI argument and a nullable return.
 
 value V2 { x: int, y: int }
 
@@ -25,32 +16,24 @@ fn maybe_v2(on: bool) -> V2? {
     return null
 }
 
-@test(output = "3")
-fn test_h2_safenav_some() {
+@test(output = "3\n-1")
+fn test_safenav_base() {
     let a = maybe_v2(true)?.x ?? -1
     print(a)
+    let b = maybe_v2(false)?.x ?? -1
+    print(b)
 }
 
-@test(output = "-1")
-fn test_h2_safenav_none() {
-    let a = maybe_v2(false)?.x ?? -1
-    print(a)
-}
-
-@test(output = "10")
-fn test_h2_coalesce_lhs_some() {
+@test(output = "10\n300")
+fn test_coalesce_lhs() {
     let v = maybe_v2(true) ?? make_v2(100, 200)
     print(sum2(v))
-}
-
-@test(output = "300")
-fn test_h2_coalesce_lhs_none() {
-    let v = maybe_v2(false) ?? make_v2(100, 200)
-    print(sum2(v))
+    let w = maybe_v2(false) ?? make_v2(100, 200)
+    print(sum2(w))
 }
 
 @test(output = "3")
-fn test_h2_scalar_arg_some() {
+fn test_scalar_arg() {
     let v: V2? = make_v2(1, 2)
     if v != null {
         print(sum2(v))
@@ -58,7 +41,7 @@ fn test_h2_scalar_arg_some() {
 }
 
 @test(output = "10")
-fn test_h3_nullable_value_return() {
+fn test_nullable_value_return() {
     let v = maybe_v2(true)
     if v != null {
         print(sum2(v))
@@ -70,7 +53,7 @@ fn test_h3_nullable_value_return() {
 // A BOXED tuple slot can be observed for nil-ness, so an absent nullable value
 // element has to land there as `nil` rather than as the ctor `pack` builds
 // regardless of presence. The reference-struct twin was always correct and
-// bounds the class; see `tests/nullable/value_in_tuple.rock`.
+// bounds the class.
 value TupV2 { x: float, y: float }
 struct TupS2 { x: float, y: float }
 

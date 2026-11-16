@@ -7,32 +7,26 @@ struct Mob { name: string, health: int }
 // Vec<T>? - nullable vector
 // ============================================
 
-@test(output = "present")
-fn nullable_vec_non_null() {
+@test(output = "present\nabsent")
+fn nullable_vec_null_check() {
     let mobs: [Mob]? = [Mob { name: "a", health: 10 }]
     if mobs != null {
         print("present")
     }
-}
-
-@test(output = "absent")
-fn nullable_vec_null() {
-    let mobs: [Mob]? = null
-    if mobs == null {
+    let none: [Mob]? = null
+    if none == null {
         print("absent")
     }
 }
 
-@test(output = "1")
+@test(output = "1\n0\n3")
 fn nullable_vec_safe_nav_len() {
     let mobs: [Mob]? = [Mob { name: "a", health: 10 }]
     print(mobs?.len() ?? 0)
-}
-
-@test(output = "0")
-fn nullable_vec_null_safe_nav() {
-    let mobs: [Mob]? = null
-    print(mobs?.len() ?? 0)
+    let none: [Mob]? = null
+    print(none?.len() ?? 0)
+    let ints: [int]? = [1, 2, 3]
+    print(ints?.len() ?? 0)
 }
 
 @test(output = "a")
@@ -47,11 +41,12 @@ fn nullable_vec_index_after_unwrap() {
 // Vec<T?> - vector of nullable elements
 // ============================================
 
-@test(output = "present\nskipped")
+@test(output = "2\npresent\nskipped")
 fn vec_of_nullable_basic() {
     let mobs: [Mob?] = []
     vec_push(mobs, Mob { name: "a", health: 10 })
     vec_push(mobs, null)
+    print(mobs.len())
     for mob in mobs {
         if mob != null {
             print("present")
@@ -59,14 +54,6 @@ fn vec_of_nullable_basic() {
             print("skipped")
         }
     }
-}
-
-@test(output = "2")
-fn vec_of_nullable_len_includes_nulls() {
-    let mobs: [Mob?] = []
-    vec_push(mobs, Mob { name: "a", health: 10 })
-    vec_push(mobs, null)
-    print(mobs.len())
 }
 
 @test(output = "a\nc")

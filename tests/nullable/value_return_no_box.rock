@@ -71,12 +71,6 @@ fn nullable_return_entity_handle() -> int {
 @test(returns = true)
 fn nullable_return_entity_absent() -> bool { return return_entity(false, 20) == null }
 
-fn main() {
-    print(nullable_return_present())
-    print(nullable_return_gc_payload_and_false_leaf())
-    print(nullable_return_entity_handle())
-}
-
 @test(returns = 41)
 fn nullable_return_local_reassignment() -> int {
     let pair = return_pair(false, 20)
