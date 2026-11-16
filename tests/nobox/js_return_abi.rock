@@ -203,8 +203,7 @@ fn with_defer(a: int) -> NV {
     assert_eq(v.y, 8)
 }
 
-// A multi-value call inside a conditional arm, so the capture sits in a branch
-// the trampoline printer may lay out as a separate switch case.
+// A multi-value call and its scratch-bank capture inside a conditional arm.
 @test fn call_inside_a_branch() {
     let n = 3
     let v = if n > 0 { mk(n) } else { mk(0) }
@@ -476,7 +475,7 @@ co fn op_in_coroutine(seed: IV) -> Coroutine<int> {
     assert_eq(__order_trace_read(), "12")
 }
 
-// --- bound calls, nullable phis, changed widths and trampolined captures ------
+// --- bound calls, nullable phis, changed widths and shared-tail captures ------
 //
 // Each case below goes RED under the capture-before-call mutation. Asserted
 // values are distinct from every other wire in this file.
@@ -550,11 +549,9 @@ fn maybe_phi(a: int) -> NV? {
     assert_eq(w2.c, 7302)
 }
 
-// A CALLER shaped for the block trampoline (a nested loop in an or-pattern
-// arm): one capture happens before the arm and is read after it, the other
-// inside the arm. `a_trampolined_caller_reads_the_scratch_bank` in
-// skull-codegen-js/tests/trampoline_fallback.rs pins that the fallback fires.
-fn trampolined_caller(sel: int) -> int {
+// A nested loop in a shared or-pattern arm: one capture happens before the
+// arm and is read after it, the other inside the arm.
+fn shared_tail_caller(sel: int) -> int {
     let v = mk(6400 + sel)
     let out = match sel {
         1 | 2 | 3 => {
@@ -569,6 +566,6 @@ fn trampolined_caller(sel: int) -> int {
     return out * 100000 + v.y
 }
 
-@test fn trampoline_cross_case_capture() {
-    assert_eq(trampolined_caller(2), 612804)
+@test fn shared_tail_capture() {
+    assert_eq(shared_tail_caller(2), 612804)
 }

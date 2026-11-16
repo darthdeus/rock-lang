@@ -56,7 +56,8 @@ impl Shape {
         raises: impl Fn(Idx<Block>) -> bool,
     ) -> Option<Shape> {
         let n = func.blocks.len();
-        let forward = thread_forwarders(func, rpo, counted, forwarder);
+        let forward =
+            placement::thread_forwarders(func, rpo, |b| !counted.contains_key(&b) && forwarder(b));
         if rpo
             .iter()
             .any(|&b| matches!(func.blocks[b].term, Term::Yield { .. }))
@@ -123,101 +124,29 @@ impl Shape {
     }
 }
 
-/// Where each block's edges really lead: an edge into a chain of empty
-/// forwarding blocks reaches the chain's end, so the chain never becomes a
-/// merge of its own (an `else if` ladder joins once, not once per rung).
-fn thread_forwarders(
-    func: &MirFunc,
-    rpo: &[Idx<Block>],
-    counted: &HashMap<Idx<Block>, ForLoop>,
-    forwarder: impl Fn(Idx<Block>) -> bool,
-) -> Vec<u32> {
-    let n = func.blocks.len();
-    let next = |b: Idx<Block>| -> Option<Idx<Block>> {
-        match func.blocks[b].term {
-            Term::Goto(t) if t != b && !counted.contains_key(&b) && forwarder(b) => Some(t),
-            _ => None,
-        }
-    };
-    let mut forward: Vec<u32> = (0..n as u32).collect();
-    // 0 = unresolved, 1 = on the current chain, 2 = resolved.
-    let mut state = vec![0u8; n];
-    let mut chain = Vec::new();
-    for &b in rpo {
-        if state[bx(b)] != 0 {
-            continue;
-        }
-        chain.clear();
-        let mut cur = b;
-        let end = loop {
-            match state[bx(cur)] {
-                2 => break forward[bx(cur)],
-                // A cycle of forwarders: stop at the block that closes it.
-                1 => break raw(cur),
-                _ => {}
-            }
-            state[bx(cur)] = 1;
-            chain.push(cur);
-            match next(cur) {
-                Some(t) => cur = t,
-                None => break raw(cur),
-            }
-        };
-        for &c in &chain {
-            state[bx(c)] = 2;
-            forward[bx(c)] = end;
-        }
-    }
-    forward
-}
+use skull_mir::cfg::placement::{self, BlockFlow, NativeLoop, PlacementEmit};
+use std::convert::Infallible;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Follow {
-    /// The code after this construct is block `b`.
-    Block(Idx<Block>),
-    /// The code after this construct is the end of loop `h`'s body.
-    Cont(Idx<Block>),
-    /// Nothing follows: the function ends.
-    End,
-}
-
-#[derive(Clone, Copy)]
-enum Inner {
-    Node(Idx<Block>),
-    Tree(Idx<Block>),
-    Loop(Idx<Block>),
-}
-
-struct Walk<'w, 'e> {
+struct Printer<'w, 'e> {
     em: &'w mut Emitter<'e>,
     sh: &'w Shape,
     out: &'w mut String,
-    /// Followers some edge reaches by `goto`, and loops some edge continues
-    /// by `goto`; each is set before its label is printed.
-    goto_ref: Vec<bool>,
-    cont_ref: Vec<bool>,
-    visited: Vec<bool>,
-    /// Whether some edge falls through to the end of the innermost loop's
-    /// body.
-    reaches_end: std::cell::Cell<bool>,
-    /// Open loops, innermost last, with where each one's `break`s start in
-    /// `breaks`.
-    loops: Vec<(Idx<Block>, usize)>,
     breaks: Vec<u32>,
     escapes: Vec<u32>,
 }
 
-/// An open `if`/`elseif` ladder: the conditional jump still waiting for the
-/// next rung, and where its rungs' escape jumps start in `escapes`.
 struct Ladder {
     first: bool,
     pending: Option<(u32, u8)>,
     escapes: usize,
 }
 
-impl Walk<'_, '_> {
-    /// Write a control line that compiles to `instructions` jumps or loop
-    /// instructions at least; returns its index in `control`.
+struct LoopLines {
+    head: Option<u32>,
+    breaks: usize,
+}
+
+impl Printer<'_, '_> {
     fn line(&mut self, s: &str, instructions: u8) -> u32 {
         let at = self.em.control.line(self.out.len(), instructions);
         self.out.push(' ');
@@ -230,28 +159,6 @@ impl Walk<'_, '_> {
         self.em.control.jump(from, to);
     }
 
-    fn goto(&mut self, kind: Label, b: Idx<Block>) {
-        match kind {
-            Label::Follower => self.goto_ref[bx(b)] = true,
-            Label::Continue => self.cont_ref[bx(b)] = true,
-            Label::Header => {}
-            Label::Block => unreachable!("flat labels are not structured targets"),
-        }
-        self.em.write_goto(self.out, kind, b);
-    }
-
-    fn ladder(&self) -> Ladder {
-        Ladder {
-            first: true,
-            pending: None,
-            escapes: self.escapes.len(),
-        }
-    }
-
-    /// The next rung's `if`/`elseif` line, which compiles to an escape jump
-    /// out of the rung above (an `elseif`), then the test of `cond` and its
-    /// conditional jump. A test of a constant folds away; any other is a
-    /// compare or truth test followed by the jump.
     fn rung(&mut self, lad: &mut Ladder, cond: Idx<Inst>) {
         let escape = u8::from(!lad.first);
         let test = if matches!(self.em.func.insts[cond], Inst::Const(_)) {
@@ -289,316 +196,238 @@ impl Walk<'_, '_> {
         }
         self.escapes.truncate(lad.escapes);
     }
+}
 
-    fn falls_to(&self, t: Idx<Block>, follow: Follow) -> bool {
-        let t = self.sh.thread(t);
-        match follow {
-            Follow::Block(b) => b == t,
-            Follow::Cont(h) => {
-                let reaches = t == h || self.sh.counted_latch(h) == Some(t);
-                if reaches {
-                    self.reaches_end.set(true);
-                }
-                reaches
-            }
-            Follow::End => false,
-        }
+impl PlacementEmit for Printer<'_, '_> {
+    type Error = Infallible;
+    type Ladder = Ladder;
+    type Loop = LoopLines;
+
+    fn thread(&self, block: Idx<Block>) -> Idx<Block> {
+        self.sh.thread(block)
     }
 
-    fn tree(&mut self, x: Idx<Block>, follow: Follow) {
-        let sh = self.sh;
-        let fs = sh.placement.followers(x);
-        if sh.placement.is_header(x) {
-            // Followers inside the loop are placed inside its body.
-            let outside: Vec<Idx<Block>> = fs
+    fn native_loop(&self, header: Idx<Block>) -> Option<NativeLoop> {
+        let latch = self.sh.counted_latch(header)?;
+        let lp = &self.em.loops[&header];
+        Some(NativeLoop {
+            latch,
+            body: lp.body_entry,
+            exit: lp.exit,
+        })
+    }
+
+    fn block(&mut self, block: Idx<Block>) -> Result<BlockFlow, Infallible> {
+        if self.em.emit_block_statements(self.out, block) {
+            return Ok(BlockFlow::Done);
+        }
+        if let Term::Branch {
+            cond,
+            then_bb,
+            else_bb,
+        } = self.em.func.blocks[block].term
+            && let Some((target, value)) = self.em.selection(block, cond, then_bb, else_bb)
+        {
+            self.em.mark_inline_operand(self.out, cond);
+            self.em.write_selection(self.out, block, target, value);
+            return Ok(match target {
+                SelectionTarget::Cell { join, .. } => BlockFlow::Next(join),
+                SelectionTarget::Return => BlockFlow::Done,
+            });
+        }
+        Ok(BlockFlow::Terminator)
+    }
+
+    fn terminal(&mut self, block: Idx<Block>, term: &Term) -> Result<(), Infallible> {
+        self.em.emit_term(self.out, term, block);
+        Ok(())
+    }
+
+    fn chainable(&self, block: Idx<Block>) -> bool {
+        if self.em.tail_forwards[bx(block)].is_some()
+            || !self.em.kills.at_entry(block).is_empty()
+            || self.em.func.blocks[block]
+                .insts
                 .iter()
-                .copied()
-                .filter(|f| !sh.placement.in_loop(x, *f))
-                .collect();
-            self.with_followers(&outside, follow, Inner::Loop(x));
+                .any(|&id| self.em.emits_statement(id) || self.em.suppressed[raw(id) as usize])
+        {
+            return false;
+        }
+        match self.em.func.blocks[block].term {
+            Term::Branch {
+                cond,
+                then_bb,
+                else_bb,
+            } => self.em.selection(block, cond, then_bb, else_bb).is_none(),
+            _ => false,
+        }
+    }
+
+    fn condition_effect(&self, cond: Idx<Inst>) -> bool {
+        self.em.folds_effect(cond)
+    }
+
+    fn ladder(&mut self) -> Ladder {
+        Ladder {
+            first: true,
+            pending: None,
+            escapes: self.escapes.len(),
+        }
+    }
+
+    fn condition(
+        &mut self,
+        ladder: &mut Ladder,
+        cond: Idx<Inst>,
+        negate: bool,
+    ) -> Result<(), Infallible> {
+        self.em.mark_inline_operand(self.out, cond);
+        let keyword = if ladder.first { "if" } else { "elseif" };
+        self.rung(ladder, cond);
+        self.out.push(' ');
+        self.out.push_str(keyword);
+        self.out.push_str(if negate { " not " } else { " " });
+        self.em.write_opnd(self.out, cond);
+        self.out.push_str(" then\n");
+        Ok(())
+    }
+
+    fn switch_case(
+        &mut self,
+        ladder: &mut Ladder,
+        discr: Idx<Inst>,
+        value: &Lit,
+    ) -> Result<(), Infallible> {
+        let first = ladder.first;
+        if first {
+            self.em.mark_inline_operand(self.out, discr);
+        }
+        self.rung(ladder, discr);
+        self.out.push_str(if first { " if " } else { " elseif " });
+        self.em.write_opnd(self.out, discr);
+        self.out.push_str(" == ");
+        write_lit(self.out, value);
+        self.out.push_str(" then\n");
+        Ok(())
+    }
+
+    fn otherwise(&mut self, ladder: &mut Ladder) -> Result<(), Infallible> {
+        self.ladder_else(ladder);
+        Ok(())
+    }
+
+    fn end_ladder(&mut self, ladder: Ladder) -> Result<(), Infallible> {
+        self.ladder_end(ladder);
+        Ok(())
+    }
+
+    fn open_follower(&mut self, _block: Idx<Block>) -> Result<(), Infallible> {
+        Ok(())
+    }
+
+    fn close_follower(&mut self, block: Idx<Block>, referenced: bool) -> Result<(), Infallible> {
+        if referenced {
+            self.em.write_label(self.out, Label::Follower, block);
+        }
+        Ok(())
+    }
+
+    fn follower_jump(&mut self, block: Idx<Block>) -> Result<(), Infallible> {
+        self.em.write_goto(self.out, Label::Follower, block);
+        Ok(())
+    }
+
+    fn begin_loop(
+        &mut self,
+        header: Idx<Block>,
+        native: Option<NativeLoop>,
+    ) -> Result<LoopLines, Infallible> {
+        let head = if native.is_some() {
+            self.em
+                .write_kills(self.out, self.em.kills.at_entry(header));
+            let at = self.em.control.line(self.out.len(), 1);
+            self.em.write_for_head(self.out, header);
+            Some(at)
         } else {
-            self.with_followers(fs, follow, Inner::Node(x));
-        }
+            self.em.write_label(self.out, Label::Header, header);
+            None
+        };
+        Ok(LoopLines {
+            head,
+            breaks: self.breaks.len(),
+        })
     }
 
-    fn with_followers(&mut self, fs: &[Idx<Block>], follow: Follow, inner: Inner) {
-        match fs.split_last() {
-            None => match inner {
-                Inner::Node(x) => self.node(x, follow),
-                Inner::Tree(x) => self.tree(x, follow),
-                Inner::Loop(h) => self.loop_construct(h, follow),
-            },
-            Some((&last, rest)) => {
-                self.with_followers(rest, Follow::Block(last), inner);
-                if self.goto_ref[bx(last)] {
-                    self.em.write_label(self.out, Label::Follower, last);
-                }
-                self.tree(last, follow);
+    fn end_loop(
+        &mut self,
+        header: Idx<Block>,
+        native: Option<NativeLoop>,
+        token: LoopLines,
+        reaches_end: bool,
+        continued: bool,
+    ) -> Result<(), Infallible> {
+        let end = if let Some(lp) = native {
+            if continued {
+                self.em.write_label(self.out, Label::Continue, header);
             }
-        }
-    }
-
-    fn loop_construct(&mut self, h: Idx<Block>, after: Follow) {
-        let sh = self.sh;
-        let inside: Vec<Idx<Block>> = sh
-            .placement
-            .followers(h)
-            .iter()
-            .copied()
-            .filter(|f| sh.placement.in_loop(h, *f))
-            .collect();
-        self.loops.push((h, self.breaks.len()));
-        // Over-approximated (a fall-through test can pass for an edge printed
-        // another way), which at worst leaves a dead `goto`.
-        let outer = self.reaches_end.replace(false);
-        let end = if let Some(latch) = sh.counted_latch(h) {
-            self.visited[bx(h)] = true;
-            self.visited[bx(latch)] = true;
-            let body_entry = self.em.loops[&h].body_entry;
-            let em = &mut *self.em;
-            // Dead on entry to the header is dead for the whole loop unless
-            // redefined, so the header's kills go once, above it.
-            em.write_kills(self.out, em.kills.at_entry(h));
-            let head = em.control.line(self.out.len(), 1);
-            em.write_for_head(self.out, h);
-            self.with_followers(&inside, Follow::Cont(h), Inner::Tree(body_entry));
-            if self.cont_ref[bx(h)] {
-                self.em.write_label(self.out, Label::Continue, h);
+            if lp.latch != header {
+                self.em
+                    .write_kills(self.out, self.em.kills.at_entry(lp.latch));
             }
-            let em = &*self.em;
-            if latch != h {
-                em.write_kills(self.out, em.kills.at_entry(latch));
-            }
-            // FORI skips past FORL; FORL loops back into the body.
             let end = self.line("end", 1);
-            scope_guard::close(self.em.func, h);
+            scope_guard::close(self.em.func, header);
+            let head = token.head.expect("native loop header");
             self.jump((head, 0), (end, 1));
             self.jump((end, 0), (head, 1));
             end
         } else {
-            self.em.write_label(self.out, Label::Header, h);
-            self.with_followers(&inside, Follow::Cont(h), Inner::Node(h));
-            if self.cont_ref[bx(h)] {
-                self.em.write_label(self.out, Label::Continue, h);
+            if continued {
+                self.em.write_label(self.out, Label::Continue, header);
             }
-            if self.reaches_end.get() || self.cont_ref[bx(h)] {
-                self.goto(Label::Header, h);
+            if reaches_end || continued {
+                self.em.write_goto(self.out, Label::Header, header);
             }
             0
         };
-        self.reaches_end.set(outer);
-        let (_, first) = self.loops.pop().expect("open loop");
-        for i in first..self.breaks.len() {
-            let from = self.breaks[i];
-            self.jump((from, 0), (end, 1));
+        for i in token.breaks..self.breaks.len() {
+            self.jump((self.breaks[i], 0), (end, 1));
         }
-        self.breaks.truncate(first);
-        if sh.counted_latch(h).is_some() {
-            // A `for` falls out of its `end` to its exit, which need not be
-            // the code printed next.
-            let exit = self.em.loops[&h].exit;
-            self.branch_to(exit, after);
-        }
+        self.breaks.truncate(token.breaks);
+        Ok(())
     }
 
-    fn node(&mut self, x: Idx<Block>, follow: Follow) {
-        let seen = std::mem::replace(&mut self.visited[bx(x)], true);
-        debug_assert!(!seen, "placement prints each block once");
-        if self.em.emit_block_statements(self.out, x) {
-            return;
-        }
-        let func = self.em.func;
-        match &func.blocks[x].term {
-            Term::Return(_) | Term::Unreachable => {
-                self.em.emit_term(self.out, &func.blocks[x].term, x);
-            }
-            &Term::Goto(t) => self.branch_to(t, follow),
-            &Term::Branch {
-                cond,
-                then_bb,
-                else_bb,
-            } => {
-                if let Some((target, value)) = self.em.selection(x, cond, then_bb, else_bb) {
-                    self.em.mark_inline_operand(self.out, cond);
-                    self.em.write_selection(self.out, x, target, value);
-                    if let SelectionTarget::Cell { join, .. } = target {
-                        self.branch_to(join, follow);
-                    }
-                    return;
-                }
-                self.emit_if(cond, then_bb, else_bb, follow);
-            }
-            Term::Switch {
-                discr,
-                cases,
-                default,
-            } => {
-                if cases.is_empty() {
-                    self.branch_to(*default, follow);
-                    return;
-                }
-                let mut lad = self.ladder();
-                for (i, (lit, b)) in cases.iter().enumerate() {
-                    if i == 0 {
-                        self.em.mark_inline_operand(self.out, *discr);
-                    }
-                    self.rung(&mut lad, *discr);
-                    self.out.push_str(if i == 0 { " if " } else { " elseif " });
-                    self.em.write_opnd(self.out, *discr);
-                    self.out.push_str(" == ");
-                    write_lit(self.out, lit);
-                    self.out.push_str(" then\n");
-                    self.branch_to(*b, follow);
-                }
-                if !self.falls_to(*default, follow) {
-                    self.ladder_else(&mut lad);
-                    self.branch_to(*default, follow);
-                }
-                self.ladder_end(lad);
-            }
-            Term::Yield { .. } => unreachable!("a body that yields prints flat"),
-        }
-    }
-
-    /// `b` can continue an `elseif` ladder: it prints nothing of its own and
-    /// ends in a plain two-way branch.
-    fn chainable(&self, b: Idx<Block>) -> Option<(Idx<Inst>, Idx<Block>, Idx<Block>)> {
-        let b = self.sh.thread(b);
-        let p = &self.sh.placement;
-        if p.is_follower(b)
-            || p.is_header(b)
-            || !p.followers(b).is_empty()
-            || self.visited[bx(b)]
-            || self.em.tail_forwards[bx(b)].is_some()
-            || !self.em.kills.at_entry(b).is_empty()
-        {
-            return None;
-        }
-        let Term::Branch {
-            cond,
-            then_bb,
-            else_bb,
-        } = self.em.func.blocks[b].term
-        else {
-            return None;
-        };
-        if self.em.func.blocks[b]
-            .insts
-            .iter()
-            .any(|&id| self.em.emits_statement(id) || self.em.suppressed[raw(id) as usize])
-        {
-            return None;
-        }
-        if self.em.selection(b, cond, then_bb, else_bb).is_some() {
-            return None;
-        }
-        Some((cond, then_bb, else_bb))
-    }
-
-    /// An `if`/`elseif` line on `cond`, opening the next rung of `lad`.
-    fn write_cond(&mut self, lad: &mut Ladder, keyword: &str, cond: Idx<Inst>, negate: bool) {
-        self.em.mark_inline_operand(self.out, cond);
-        self.rung(lad, cond);
-        self.out.push(' ');
-        self.out.push_str(keyword);
-        // Operands render as bare names or parenthesized expressions, so a
-        // prefix `not` binds to the whole condition.
-        self.out.push_str(if negate { " not " } else { " " });
-        self.em.write_opnd(self.out, cond);
-        self.out.push_str(" then\n");
-    }
-
-    fn emit_if(
+    fn continue_loop(
         &mut self,
-        cond: Idx<Inst>,
-        then_bb: Idx<Block>,
-        else_bb: Idx<Block>,
-        follow: Follow,
-    ) {
-        let then_empty = self.falls_to(then_bb, follow);
-        let else_empty = self.falls_to(else_bb, follow);
-        if then_empty && else_empty {
-            if self.em.folds_effect(cond) {
-                let mut lad = self.ladder();
-                self.write_cond(&mut lad, "if", cond, false);
-                self.ladder_end(lad);
-            }
-            return;
-        }
-        let mut lad = self.ladder();
-        if then_empty {
-            self.write_cond(&mut lad, "if", cond, true);
-            self.branch_to(else_bb, follow);
-            self.ladder_end(lad);
-            return;
-        }
-        self.write_cond(&mut lad, "if", cond, false);
-        self.branch_to(then_bb, follow);
-        let mut e = else_bb;
-        while !self.falls_to(e, follow) {
-            if let Some((c, t, next)) = self.chainable(e)
-                && !self.falls_to(t, follow)
-            {
-                let rung = self.sh.thread(e);
-                self.visited[bx(rung)] = true;
-                self.write_cond(&mut lad, "elseif", c, false);
-                self.branch_to(t, follow);
-                e = next;
-                continue;
-            }
-            self.ladder_else(&mut lad);
-            self.branch_to(e, follow);
-            break;
-        }
-        self.ladder_end(lad);
+        header: Idx<Block>,
+        _native: Option<NativeLoop>,
+        _innermost: bool,
+    ) -> Result<(), Infallible> {
+        self.em.write_goto(self.out, Label::Continue, header);
+        Ok(())
     }
 
-    fn branch_to(&mut self, t: Idx<Block>, follow: Follow) {
-        let t = self.sh.thread(t);
-        if self.falls_to(t, follow) {
-            return;
+    fn break_loop(&mut self, _header: Idx<Block>, innermost: bool) -> Result<bool, Infallible> {
+        if !innermost {
+            return Ok(false);
         }
-        let depth = self.loops.len();
-        for i in (0..depth).rev() {
-            let (h, _) = self.loops[i];
-            let counted = self.sh.counted_latch(h).is_some();
-            // A `break` lands where the `for` falls out to its exit.
-            if i + 1 == depth && counted && self.sh.thread(self.em.loops[&h].exit) == t {
-                let at = self.line("break", 1);
-                self.em.control.names += 1;
-                self.breaks.push(at);
-                return;
-            }
-            if t == h || self.sh.counted_latch(h) == Some(t) {
-                self.goto(Label::Continue, h);
-                return;
-            }
-        }
-        if self.sh.placement.is_follower(t) {
-            self.goto(Label::Follower, t);
-            return;
-        }
-        self.tree(t, follow);
+        let at = self.line("break", 1);
+        self.em.control.names += 1;
+        self.breaks.push(at);
+        Ok(true)
     }
 }
 
-/// Print the structured body of `em`'s function from `entry` into `out`,
-/// recording its control lines for the jump-length model.
 pub(crate) fn emit_body(em: &mut Emitter<'_>, shape: &Shape, entry: Idx<Block>, out: &mut String) {
-    let n = em.func.blocks.len();
-    let mut walk = Walk {
+    let func = em.func;
+    let mut printer = Printer {
         em,
         sh: shape,
         out,
-        goto_ref: vec![false; n],
-        cont_ref: vec![false; n],
-        visited: vec![false; n],
-        reaches_end: std::cell::Cell::new(false),
-        loops: Vec::new(),
         breaks: Vec::new(),
         escapes: Vec::new(),
     };
-    walk.tree(entry, Follow::End);
+    placement::emit(func, &shape.placement, entry, &mut printer)
+        .unwrap_or_else(|error| match error {});
 }
 
 #[cfg(test)]

@@ -77,7 +77,7 @@ fn unreachable_is_terminal_in_structured_and_trampoline_output() {
             else_bb: right,
         },
     );
-    // Both arms share the trap: the second visit uses tail duplication.
+    // Both arms share one terminal block; placement should emit it once.
     for block in [left, right] {
         let condition = mf.emit(block, Inst::Load(second));
         mf.set_term(
@@ -104,9 +104,20 @@ fn unreachable_is_terminal_in_structured_and_trampoline_output() {
         true,
     )
     .expect("trampoline emit");
+    let unreachable = "throw new Error(\"rock: reached an unreachable block\");";
+    assert_eq!(
+        structured.matches(unreachable).count(),
+        1,
+        "shared unreachable block should be emitted once in structured output:\n{structured}"
+    );
+    assert!(
+        trampoline.contains("switch (__bb"),
+        "forced fallback should still use the trampoline:\n{trampoline}"
+    );
+    assert_eq!(trampoline.matches(unreachable).count(), 1, "{trampoline}");
     assert!(
         !structured.contains("switch (__bb"),
-        "expected tail duplication:\n{structured}"
+        "expected structured placement:\n{structured}"
     );
     for js in [structured, trampoline] {
         let program = format!(

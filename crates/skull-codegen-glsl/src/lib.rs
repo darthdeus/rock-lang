@@ -30,9 +30,7 @@ pub use skull_graph::shader::ShaderLibraryView;
 use skull_graph::shader::{ShaderProgramView, ShaderStageView};
 use skull_mir::cfg::relooper::{LoopCtx, LoopTest, StructuredEmit};
 use skull_mir::cfg::reverse_postorder;
-use skull_mir::cfg::structure::{
-    self, CountedBound, CountedLoop, LoopRegion, LoopShapes, Structure,
-};
+use skull_mir::cfg::structure::{self, CountedBound, CountedLoop, LoopRegion, Structure};
 use skull_mir::concrete::{ConcreteBodyPlan, ConcretePlans, ConcreteSignature};
 use skull_mir::gpu_layout::{
     ArrayMemberDecl, AttrKind, SamplerKind, UniformArrayBlockPlan, UniformBlockPlan, WireKind,

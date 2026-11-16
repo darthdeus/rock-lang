@@ -3,9 +3,6 @@
 use super::*;
 
 impl StructuredEmit for FnEmit<'_> {
-    const BREAK_ON_EXIT_ENTRY: bool = false;
-    const STRICT_EMPTY_FORWARD: bool = false;
-
     fn mir(&self) -> &MirFunc {
         self.f
     }
@@ -114,18 +111,17 @@ impl StructuredEmit for FnEmit<'_> {
 
     /// The loop's condition test: the `Branch` in the body with a direct
     /// successor to the exit.
-    fn loop_test(&mut self, region: &LoopRegion) -> Result<Option<LoopTest>, CompilerError> {
+    fn loop_test(&mut self, region: &LoopRegion) -> Result<LoopTest, CompilerError> {
         let test = region
             .body
             .iter()
             .find_map(|&b| LoopTest::with_exit_arm(self.f, b, region.exit));
-        if test.is_some() {
-            return Ok(test);
-        }
-        Err(err(
-            self.span(),
-            "shader profile: unstructured loop (no single condition test)",
-        ))
+        test.ok_or_else(|| {
+            err(
+                self.span(),
+                "shader profile: unstructured loop (no single condition test)",
+            )
+        })
     }
 
     fn counted_slot_bound(&mut self, li: &CountedLoop) -> Result<(String, String), CompilerError> {

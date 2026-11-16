@@ -87,21 +87,9 @@ co fn gen_from(start: int) -> Coroutine<int> {\n\
     }\n\
 }\n";
 
-// An ordinary body the structurer rejects (nested-loop shared tail) -> the T8h
-// block-trampoline fallback: NAMED `function <name>(` + `for (;;) switch`.
-const TRAMPOLINE_BODY: &str = "\
-fn nested_loop_tail(sel: int) -> int {\n\
-    let out = match sel {\n\
-        1 | 2 | 3 => {\n\
-            let acc = 0\n\
-            let i = 0\n\
-            while i < 5 { acc = acc + i; i = i + 1 }\n\
-            acc\n\
-        }\n\
-        _ => 100\n\
-    }\n\
-    return out + sel\n\
-}\n";
+// Reuse the nested-loop shared-tail body covered by the cross-backend corpus.
+const NESTED_LOOP_BODY: &str =
+    include_str!("../../../tests/control_flow/js_trampoline_fallback.rock");
 
 #[test]
 fn discipline_shapes_emit_no_inline_function() {
@@ -109,7 +97,7 @@ fn discipline_shapes_emit_no_inline_function() {
         ("caps_lambda", CAPS_LAMBDA, "caps_lambda"),
         ("nested_fn", NESTED_FN, "with_nested"),
         ("co_fn", CO_FN, "gen_from"),
-        ("trampoline_body", TRAMPOLINE_BODY, "nested_loop_tail"),
+        ("nested_loop_tail", NESTED_LOOP_BODY, "nested_loop_tail"),
     ] {
         let ws = ws_with(src);
         let js = emit(&ws, root);

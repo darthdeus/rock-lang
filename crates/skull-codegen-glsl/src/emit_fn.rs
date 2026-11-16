@@ -183,7 +183,7 @@ pub(crate) fn emit_fn_def_with(
 
     // GLSL emits every loop as `while (true) { <test>; if (!c) break; .. }`, so
     // a test-less `loop {}` stays unregistered and rejects in the walker.
-    let st = structure::analyze(mf, LoopShapes::TestedOnly);
+    let st = structure::analyze(mf);
     let (counted, general) = structure::split_loops(mf, &st, CountedBound::Any);
 
     let mut e = FnEmit {

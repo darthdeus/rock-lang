@@ -32,16 +32,12 @@ pub(crate) fn emit_fn_with_callees(
         return Err(err("JS subset: coroutine fn not supported"));
     }
     let (use_count, inlinable) = compute_inlinable(mf);
-    let st = structure::analyze(mf, LoopShapes::AllowHeaderless);
-    // A range-`for` (`loop_binding` slot + pure-increment latch) emits as a real
-    // JS `for (; slot < bound; slot = slot + 1)`: `continue` there re-runs the
-    // increment, which a `while (true)` shape cannot express (a bare `continue`
-    // would skip it) -- and multiple `continue`s share the latch, so a while
-    // shape would walk into it repeatedly. Every other natural loop takes the
-    // general `while (true)` path, whose header effects re-materialize through
-    // the value model so a cell read+written across the back-edge does not fold.
-    let (counted, general) = structure::split_loops(mf, &st, CountedBound::InlineOnly);
-    let unwind = mf.registers_defer_cleanup(&reachable_blocks(mf));
+    // Range-`for` loops retain a native increment clause so JS `continue`
+    // reaches the latch. Other natural loops use `while (true)` and keep their
+    // header test in the walked body.
+    let region = reachable_blocks(mf);
+    let hoisted_temps = cross_block_temps(mf, &region, &use_count, &inlinable);
+    let unwind = mf.registers_defer_cleanup(&region);
     let mut em = Emitter {
         ws,
         mf,
@@ -49,23 +45,16 @@ pub(crate) fn emit_fn_with_callees(
         hoisted,
         globals,
         use_count,
-        nesting: 0,
-        nesting_costs: Vec::new(),
-        next_branch_chained: false,
         inlinable,
-        structure: st,
-        counted,
-        general,
-        active: HashSet::new(),
-        visited: HashSet::new(),
-        loop_stack: Vec::new(),
-        loop_markers: Vec::new(),
-        labels_used: HashSet::new(),
-        shared_tail_reject: false,
         pack_multi_return: false,
-        hoisted_temps: HashSet::new(),
+        hoisted_temps,
         out: String::new(),
         indent: if unwind { 2 } else { 1 },
+    };
+    let Some(shape) = placement::Shape::analyze(&em, mf.entry) else {
+        return emit_fn_trampoline(
+            ws, mf, js_name, callees, hoisted, globals, mf.entry, &mf.params, true,
+        );
     };
 
     let params: Vec<String> = mf.params.iter().map(|&c| cell_name(mf, c)).collect();
@@ -80,15 +69,13 @@ pub(crate) fn emit_fn_with_callees(
         }
     }
 
-    // Hoist declarations for every stored cell that is not a param (JS block
-    // scope would otherwise not carry a cell written in one arm and read in the
-    // merge -- the `sign` shape).
+    // Hoist declarations for stored cells and materialized values that cross
+    // block scopes. Follower labels add scopes outside the branch that defines
+    // some of those values, so they must live at the function level.
     let param_set: HashSet<Idx<Cell>> = mf.params.iter().copied().collect();
     let mut declared: Vec<u32> = Vec::new();
     let mut seen = HashSet::new();
-    // Only cells stored in REACHABLE blocks -- a dead block's `store` never
-    // emits, so declaring its cell would leave an unused `let`.
-    for &b in &reachable_blocks(mf) {
+    for &b in &region {
         for &iid in &mf.blocks[b].insts {
             mf.insts[iid].cell_writes_each(&mut |cell| {
                 if !param_set.contains(&cell) && seen.insert(cell) {
@@ -97,30 +84,27 @@ pub(crate) fn emit_fn_with_callees(
             });
         }
     }
-    if !declared.is_empty() {
-        // Declare in cell-id order (stable, traversal-independent output).
+    let mut hoisted_names: Vec<u32> = em
+        .hoisted_temps
+        .iter()
+        .map(|&id| mf.emit_inst_id(Idx::from_raw(RawIdx::from_u32(id))))
+        .collect();
+    hoisted_names.sort_unstable();
+    if !declared.is_empty() || !hoisted_names.is_empty() {
         declared.sort_unstable();
-        let names: Vec<String> = declared.iter().map(|id| format!("c{id}")).collect();
+        let names: Vec<String> = declared
+            .iter()
+            .map(|id| format!("c{id}"))
+            .chain(hoisted_names.iter().map(|id| format!("v{id}")))
+            .collect();
         header.push_str(&format!("  let {};\n", names.join(", ")));
     }
 
-    match em.emit_seq(mf.entry, None, LoopCtx::default()) {
-        Ok(()) => {
-            let body = format!("{header}{}}}\n", defer_unwind_wrap(unwind, &em.out));
-            Ok(finalize_labels(body, mf, &em.loop_markers, &em.labels_used))
-        }
-        // The structured relooper cannot express this CFG (a shared branch tail
-        // holding a nested loop, or one over the tail-dup cap). Re-emit the SAME
-        // body through the block trampoline, which accepts arbitrary (incl.
-        // irreducible) CFGs. Emission is pure/idempotent per call, so the
-        // discarded structured attempt leaves no residue. Every OTHER reject
-        // rides `?` out untouched (`shared_tail_reject` is set only at the one
-        // reject site), and a trampoline reject surfaces its own reason.
-        Err(_) if em.shared_tail_reject => emit_fn_trampoline(
-            ws, mf, js_name, callees, hoisted, globals, mf.entry, &mf.params, true,
-        ),
-        Err(e) => Err(e),
-    }
+    placement::emit_body(&mut em, &shape, mf.entry)?;
+    Ok(format!(
+        "{header}{}}}\n",
+        defer_unwind_wrap(unwind, &em.out)
+    ))
 }
 
 /// Emit a region of `mf` as a block trampoline `for(;;) switch(__bb)` -- the
@@ -152,19 +136,7 @@ pub fn emit_fn_trampoline(
         hoisted,
         globals,
         use_count,
-        nesting: 0,
-        nesting_costs: Vec::new(),
-        next_branch_chained: false,
         inlinable,
-        structure: Structure::empty(mf.blocks.len()),
-        counted: Default::default(),
-        general: Default::default(),
-        active: HashSet::new(),
-        visited: HashSet::new(),
-        loop_stack: Vec::new(),
-        loop_markers: Vec::new(),
-        labels_used: HashSet::new(),
-        shared_tail_reject: false,
         pack_multi_return,
         hoisted_temps,
         out: String::new(),
@@ -245,33 +217,6 @@ pub(super) fn is_runtime_global(name: &str) -> bool {
     name == skull_mir::mir::DEFER_PUSH
         || name == skull_mir::mir::DEFER_POP
         || name == skull_mir::mir::CORO_KILL
-}
-
-/// A unique, JS-invalid sentinel a loop emits in place of its label; resolved by
-/// [`finalize_labels`] to `L<h>: ` if a multi-level jump targeted it, else stripped.
-/// `\x01` cannot appear in emitted JS source, so the replace is unambiguous.
-pub(super) fn loop_marker(mf: &MirFunc, h: Idx<Block>) -> String {
-    format!("\u{1}L{}\u{1}", mf.emit_block_id(h))
-}
-
-/// Resolve loop-label sentinels: a targeted loop's marker becomes `L<h>: `; the
-/// rest are stripped, keeping single-level loops byte-identical.
-pub(super) fn finalize_labels(
-    mut s: String,
-    mf: &MirFunc,
-    markers: &[Idx<Block>],
-    used: &HashSet<Idx<Block>>,
-) -> String {
-    for &h in markers {
-        let m = loop_marker(mf, h);
-        let repl = if used.contains(&h) {
-            format!("L{}: ", mf.emit_block_id(h))
-        } else {
-            String::new()
-        };
-        s = s.replace(&m, &repl);
-    }
-    s
 }
 
 /// Deterministic JS name for a co-emitted callee -- the SHARED mangle keyed on

@@ -182,5 +182,5 @@ fn else_if_chain(arms: usize) -> String {
 fn an_else_if_chain_does_not_nest_blocks() {
     let js = emitted_function(&else_if_chain(8), "f").expect("emits");
     assert!(!js.contains("} else {"), "chain nested blocks:\n{js}");
-    assert_eq!(js.matches("} else\n").count(), 7, "{js}");
+    assert_eq!(js.matches("else if (").count(), 7, "{js}");
 }

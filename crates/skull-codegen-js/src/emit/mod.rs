@@ -12,10 +12,6 @@ use std::fmt::Write as _;
 
 use bone_core::workspace::Workspace;
 use comfy_la_arena::{Idx, RawIdx};
-use skull_mir::cfg::relooper::{LoopCtx, LoopFrame, LoopTest, NestingKind, StructuredEmit};
-use skull_mir::cfg::structure::{
-    self, CountedBound, CountedLoop, LoopRegion, LoopShapes, Structure,
-};
 use skull_mir::code_identity::{CodeArtifact, CodeIdentity};
 use skull_mir::decorator::{DecoratorTable, SimValues, decorator_symbol};
 use skull_mir::global_storage::StaticBaseline;
@@ -45,6 +41,7 @@ mod inst;
 mod json_types;
 mod lanes;
 mod overlay;
+mod placement;
 mod plan_stages;
 mod session;
 mod structured;
@@ -397,11 +394,6 @@ struct Emitter<'a> {
     /// Times each inst is used as an operand (by an inst or terminator), dense
     /// by raw inst id. 0 == statement-position (an effectful `Call`) or dead.
     use_count: Vec<u32>,
-    /// Parse-stack units used by the control flow enclosing the emit position,
-    /// one entry per open level, and whether the next branch is an `else if`.
-    nesting: u32,
-    nesting_costs: Vec<u32>,
-    next_branch_chained: bool,
     /// Whether each inst folds into its single use site (dense by raw id):
     /// pure, single-use, same-block. A non-inlinable USED value inst is bound to
     /// a `v<raw>` temp at its program position instead -- so a cell read (`Load`)
@@ -409,42 +401,14 @@ struct Emitter<'a> {
     /// effectful `Call` keeps its order (the defer/increment miscompiles the
     /// all-inline model produced). Mirrors codegen-lua's `compute_inlinable`.
     inlinable: Vec<bool>,
-    /// Dominators / immediate post-dominators / natural loops.
-    structure: Structure,
-    /// Range-`for` headers -> their counted-loop info (the `for (;;)` fast path).
-    counted: rustc_hash::FxHashMap<Idx<Block>, CountedLoop>,
-    /// Other natural-loop headers -> their region (general `while (true)` path).
-    general: rustc_hash::FxHashMap<Idx<Block>, LoopRegion>,
-    /// Loop headers currently being emitted, so the header-region walk (a
-    /// compound `while a && b` condition) does not re-wrap the header as a fresh
-    /// loop.
-    active: HashSet<Idx<Block>>,
-    visited: HashSet<Idx<Block>>,
-    /// The stack of enclosing loops (innermost last), for multi-level `continue`/
-    /// `break` to a non-innermost loop (`labeled_jump`).
-    loop_stack: Vec<LoopFrame>,
-    /// Every loop that emitted a `loop_marker` prefix, in emission order.
-    loop_markers: Vec<Idx<Block>>,
-    /// Loop headers a `labeled_jump` actually targeted -- these get a real
-    /// `L<header>:` label at finalization; the rest have their marker stripped, so
-    /// single-level loops stay byte-identical. Discovered DURING emission (the
-    /// runtime `loop_stack` nesting), avoiding a fragile static pre-pass.
-    labels_used: HashSet<Idx<Block>>,
-    /// Set when [`Self::emit_seq`] raises the shared-branch-tail reject (the ONE
-    /// reject the per-body trampoline fallback retries -- every other reject rides
-    /// `?` out untouched). A typed signal, not a message-string compare.
-    shared_tail_reject: bool,
     /// Whether a multi-value `Term::Return` in the trampoline printer packs an
     /// array (the ordinary-body fallback ABI, mirroring the structured
     /// `emit_return`) or rejects. A coroutine step's multi-value return keeps the
     /// reject -- its return channels through the step protocol, not a raw array.
     pack_multi_return: bool,
     /// Materialized `v<N>` temps (raw inst ids) whose use crosses their defining
-    /// block: the flat trampoline switch puts each block in a SIBLING case, so a
-    /// per-case `let v<N>` would be out of scope at a cross-case use. These are
-    /// hoist-declared at the fn top and ASSIGNED in-case; block-local temps keep
-    /// their per-case `let`. Empty for the structured path (block nesting keeps a
-    /// temp in scope) and the spilled coroutine step (no cross-block temps).
+    /// block. They are hoist-declared at the fn top and assigned at their MIR
+    /// position so follower scopes and trampoline cases both see the same value.
     hoisted_temps: HashSet<u32>,
     /// Value-element NativeBuffer slot refs (raw inst ids) whose EVERY use is a
     /// `Field`/`StoreField` base: those consumers render flat-slot access from

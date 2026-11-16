@@ -359,12 +359,12 @@ pub fn dominates(idom: &Dominators, a: Idx<Block>, b: Idx<Block>) -> bool {
     idom.dominates(a, b)
 }
 
+pub mod placement;
 pub mod relooper;
 pub mod structure;
 
-/// Dense-index CFG primitives for the relooper backends (JS, GLSL), which need
-/// structured goto-free output and work over `usize` node indices rather than
-/// arena ids. [`structure`] builds the relooper analysis on top of these.
+/// CFG primitives over dense `usize` node indices, used by control-flow
+/// structuring and dataflow analysis.
 pub mod dense {
     use super::successors;
     use crate::mir::{Block, MirFunc};

@@ -1,29 +1,14 @@
-//! CFG structuring analysis. For the relooper backends (GLSL, JS): immediate
-//! post-dominators, natural loops, and range-`for` recognition. Both backends
-//! need structured goto-free output and see the same reducible CFGs skull-mir
-//! lowers for a tier-0 fn, so the simple iterative algorithms suffice (tens of
-//! blocks). What differs per target is passed in as [`LoopShapes`] and
-//! [`CountedBound`]; the structured walk over this analysis is
+//! CFG analysis for GLSL's structured emitter: immediate post-dominators,
+//! tested natural loops, and range-`for` recognition. The structured walk is
 //! [`relooper`](super::relooper).
 //!
-//! For the Lua printer, which keeps forward `goto` and so can structure every
-//! reducible CFG: [`place`], the dominator-tree placement of each block.
+//! For the Lua and JS printers, which keep forward jumps and so can structure
+//! every reducible CFG: [`place`], the shared dominator-tree placement of blocks.
 
 use super::dense::{bi, bx, collect_loop_body, dominates, idoms, pred_list, rpo, succ_list};
 use crate::mir::{Block, Cell, Inst, Lit, MirFunc, Term};
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
-
-/// Which natural loops a backend can structure.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum LoopShapes {
-    /// Only loops with a header-condition test (`while cond`/`for`). A test-less
-    /// loop is left unregistered, so the walker rejects it as unstructured.
-    TestedOnly,
-    /// Also `loop {}` shapes with no dominating test, emitted as a bare
-    /// `while (true) { <body> }` whose exits are inline `break`s.
-    AllowHeaderless,
-}
 
 /// Which range-`for` bounds a backend can render in its loop header.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -36,20 +21,14 @@ pub enum CountedBound {
     InlineOnly,
 }
 
-/// One natural loop: its header (back-edge target), the set of blocks in the
-/// loop body, and its single exit (the block outside the loop that a body block
-/// branches to). Tier-0 `while`/`for` loops are single-exit by construction.
+/// One tested natural loop: its header (back-edge target), the set of blocks
+/// in the loop body, and its single exit (the block outside the loop that a body
+/// block branches to). Tier-0 `while`/`for` loops are single-exit by construction.
 #[derive(Clone)]
 pub struct LoopRegion {
     pub header: Idx<Block>,
     pub body: HashSet<Idx<Block>>,
     pub exit: Idx<Block>,
-    /// The header-condition test block of a `while cond`/`for` shape: the body
-    /// block that dominates every latch and has a lone out-of-loop successor.
-    /// `None` for a `loop {}` whose exits are inline `break`s (no test dominates
-    /// the back edges, e.g. a `continue` precedes the `break`); registered only
-    /// under [`LoopShapes::AllowHeaderless`].
-    pub test: Option<Idx<Block>>,
 }
 
 pub struct Structure {
@@ -63,19 +42,9 @@ impl Structure {
     pub fn ipdom(&self, b: Idx<Block>) -> Option<Idx<Block>> {
         self.ipdom[bx(b)]
     }
-
-    /// A no-analysis placeholder for a walker that never consults ipdoms or
-    /// loops (JS trampoline mode: the post-coroutine-transform CFG is
-    /// irreducible by construction, so these analyses don't apply).
-    pub fn empty(n: usize) -> Structure {
-        Structure {
-            ipdom: vec![None; n],
-            loops: HashMap::default(),
-        }
-    }
 }
 
-pub fn analyze(f: &MirFunc, shapes: LoopShapes) -> Structure {
+pub fn analyze(f: &MirFunc) -> Structure {
     let n = f.blocks.len();
     let succ = succ_list(f);
     let preds = pred_list(n, &succ);
@@ -84,7 +53,7 @@ pub fn analyze(f: &MirFunc, shapes: LoopShapes) -> Structure {
     let idom = idoms(n, bx(f.entry), &preds, &fwd_rpo);
 
     let ipdom = post_idoms(f, n, &succ);
-    let loops = natural_loops(f, n, &succ, &preds, &idom, shapes);
+    let loops = natural_loops(f, n, &succ, &preds, &idom);
 
     Structure { ipdom, loops }
 }
@@ -134,7 +103,6 @@ fn natural_loops(
     succ: &[Vec<usize>],
     preds: &[Vec<usize>],
     idom: &[Option<usize>],
-    shapes: LoopShapes,
 ) -> HashMap<Idx<Block>, LoopRegion> {
     // Back edges grouped by header, keeping each latch (back-edge source).
     let mut latches: HashMap<usize, Vec<usize>> = HashMap::default();
@@ -177,24 +145,8 @@ fn natural_loops(
                 let e = exits.next()?;
                 exits.next().is_none().then_some((test, e))
             });
-        let (exit, test) = match (single_test, shapes) {
-            (Some((test, exit)), _) => (exit, Some(bi(test))),
-            (None, LoopShapes::TestedOnly) => continue, // the walker rejects
-            (None, LoopShapes::AllowHeaderless) => {
-                // Structurable only if every out-of-loop edge across the body
-                // targets ONE exit block; a multi-exit loop is dropped so the
-                // walker rejects cleanly.
-                let mut exit_targets: Vec<usize> = body
-                    .iter()
-                    .flat_map(|&b| succ[b].iter().copied().filter(|s| !body.contains(s)))
-                    .collect();
-                exit_targets.sort_unstable();
-                exit_targets.dedup();
-                let [exit] = exit_targets[..] else {
-                    continue;
-                };
-                (exit, None)
-            }
+        let Some((_, exit)) = single_test else {
+            continue; // the GLSL walker rejects untested loops
         };
         out.insert(
             bi(h),
@@ -202,7 +154,6 @@ fn natural_loops(
                 header: bi(h),
                 body: body.iter().map(|&x| bi(x)).collect(),
                 exit: bi(exit),
-                test,
             },
         );
     }
@@ -236,7 +187,7 @@ pub fn split_loops(
     let mut counted = HashMap::default();
     let mut general = HashMap::default();
     for (&h, region) in &st.loops {
-        match match_counted_loop(f, h, bound) {
+        match counted_loop(f, h, bound) {
             Some(li) if li.exit == region.exit && region.body.contains(&li.latch) => {
                 counted.insert(h, li);
             }
@@ -254,7 +205,7 @@ pub fn split_loops(
 /// `loop_binding` -- desugar provenance that only `lower_for_range` sets, so a
 /// `while i < n { ..; i = i + 1 }` (manual counter) is NOT mistaken for a
 /// range-for and takes the general path instead.
-fn match_counted_loop(f: &MirFunc, h: Idx<Block>, bound_rule: CountedBound) -> Option<CountedLoop> {
+pub fn counted_loop(f: &MirFunc, h: Idx<Block>, bound_rule: CountedBound) -> Option<CountedLoop> {
     let Term::Branch {
         cond,
         then_bb,
@@ -806,7 +757,7 @@ mod tests {
                 Term::Return(vec![]),
             ],
         );
-        let s = analyze(&f, LoopShapes::TestedOnly);
+        let s = analyze(&f);
         assert_eq!(s.ipdom(bi(0)), Some(bi(3)));
         assert_eq!(s.ipdom(bi(1)), Some(bi(3)));
         assert_eq!(s.ipdom(bi(2)), Some(bi(3)));
@@ -826,7 +777,7 @@ mod tests {
                 Term::Return(vec![]),
             ],
         );
-        let s = analyze(&f, LoopShapes::TestedOnly);
+        let s = analyze(&f);
         assert_eq!(s.ipdom(bi(0)), None);
         assert_eq!(s.ipdom(bi(2)), Some(bi(3)));
         assert!(s.loops.is_empty());
@@ -854,7 +805,7 @@ mod tests {
                 Term::Return(vec![]),
             ],
         );
-        let s = analyze(&f, LoopShapes::TestedOnly);
+        let s = analyze(&f);
         assert_eq!(s.ipdom(bi(0)), Some(bi(5)));
         assert_eq!(s.ipdom(bi(1)), Some(bi(5)));
         assert_eq!(s.ipdom(bi(2)), Some(bi(3)));
@@ -879,27 +830,23 @@ mod tests {
                 Term::Return(vec![]),
             ],
         );
-        for shapes in [LoopShapes::TestedOnly, LoopShapes::AllowHeaderless] {
-            let s = analyze(&f, shapes);
-            let outer = s.loops.get(&bi(1)).expect("outer loop");
-            assert_eq!(outer.exit, bi(6));
-            assert_eq!(outer.test, Some(bi(1)));
-            assert!(
-                outer.body.contains(&bi(1))
-                    && outer.body.contains(&bi(5))
-                    && outer.body.contains(&bi(2))
-            );
-            assert!(!outer.body.contains(&bi(6)));
-            let inner = s.loops.get(&bi(2)).expect("inner loop");
-            assert_eq!(inner.exit, bi(5));
-            assert_eq!(inner.test, Some(bi(2)));
-            assert!(inner.body.contains(&bi(2)) && inner.body.contains(&bi(4)));
-            assert!(!inner.body.contains(&bi(1)) && !inner.body.contains(&bi(5)));
-        }
+        let s = analyze(&f);
+        let outer = s.loops.get(&bi(1)).expect("outer loop");
+        assert_eq!(outer.exit, bi(6));
+        assert!(
+            outer.body.contains(&bi(1))
+                && outer.body.contains(&bi(5))
+                && outer.body.contains(&bi(2))
+        );
+        assert!(!outer.body.contains(&bi(6)));
+        let inner = s.loops.get(&bi(2)).expect("inner loop");
+        assert_eq!(inner.exit, bi(5));
+        assert!(inner.body.contains(&bi(2)) && inner.body.contains(&bi(4)));
+        assert!(!inner.body.contains(&bi(1)) && !inner.body.contains(&bi(5)));
     }
 
     #[test]
-    fn headerless_loop_registers_only_when_allowed() {
+    fn headerless_loop_is_rejected_but_placement_recognizes_it() {
         // `loop { if c { continue } ; if d { break } }`:
         // 0 -> 1(header); 1 -> {1(continue), 2}; 2 -> {3(exit), 1}; 3 returns.
         // Two latches (1 and 2), and no block dominating both leaves the loop
@@ -913,11 +860,11 @@ mod tests {
                 Term::Return(vec![]),
             ],
         );
-        assert!(analyze(&f, LoopShapes::TestedOnly).loops.is_empty());
-        let s = analyze(&f, LoopShapes::AllowHeaderless);
-        let l = s.loops.get(&bi(1)).expect("headerless loop");
-        assert_eq!(l.exit, bi(3));
-        assert_eq!(l.test, None);
+        assert!(analyze(&f).loops.is_empty());
+        let p = place(bi(0), &dense_succ(&f), &[], &[]).expect("reducible");
+        assert!(p.is_header(bi(1)));
+        assert_eq!(p.latches(bi(1)).collect::<Vec<_>>(), vec![bi(1), bi(2)]);
+        assert_eq!(p.followers(bi(1)), &[bi(3)]);
     }
 
     fn dense_succ(f: &MirFunc) -> Succ {
