@@ -1444,22 +1444,6 @@ impl ArtifactView {
                 self.index.inline_by_owner.remove(owner);
                 continue;
             }
-            for entry in entries {
-                rows_examined += 1;
-                if let Some(rep) = instance_graph::stdlib_entry_representative(ws, entry) {
-                    let dependency = DeclKey(rep);
-                    self.index
-                        .inline_consumers
-                        .entry(dependency)
-                        .or_default()
-                        .insert(*owner);
-                    self.index
-                        .inline_dependencies_by_owner
-                        .entry(*owner)
-                        .or_default()
-                        .insert(dependency);
-                }
-            }
             let mut inline = Vec::new();
             let mut unresolved = Vec::new();
             for entry in entries {
@@ -1472,6 +1456,17 @@ impl ArtifactView {
                     });
                     continue;
                 };
+                let dependency = DeclKey(rep);
+                self.index
+                    .inline_consumers
+                    .entry(dependency)
+                    .or_default()
+                    .insert(*owner);
+                self.index
+                    .inline_dependencies_by_owner
+                    .entry(*owner)
+                    .or_default()
+                    .insert(dependency);
                 let Some(instances) = self.index.instances_by_decl.get(&rep) else {
                     unresolved.push(UnresolvedInlineDep {
                         owner: owner.0,
@@ -2354,7 +2349,18 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     for (owner, entries) in &g.inline_body_deps {
         let owner_retained = retained_decls.contains(owner);
         for entry in entries {
+            // The REPRESENTATIVE, because that is what an instance is keyed by.
+            // Which declaration serves this artifact was already decided by
+            // `realize_decl`, and asking a target-specific lookup here would be
+            // a second selector answering the same question.
             let Some(rep) = instance_graph::stdlib_entry_representative(ws, entry) else {
+                if owner_retained {
+                    unresolved_inline_deps.push(UnresolvedInlineDep {
+                        owner: owner.0,
+                        entry,
+                        reason: "no single declaration supplies this entry",
+                    });
+                }
                 continue;
             };
             let dependency = DeclKey(rep);
@@ -2368,25 +2374,11 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
                 .entry(*owner)
                 .or_default()
                 .insert(dependency);
-        }
-        // An owner this artifact dropped carries no obligation: its text is
-        // never emitted here.
-        if !owner_retained {
-            continue;
-        }
-        for entry in entries {
-            // The REPRESENTATIVE, because that is what an instance is keyed by.
-            // Which declaration serves this artifact was already decided by
-            // `realize_decl`, and asking a target-specific lookup here would be
-            // a second selector answering the same question.
-            let Some(rep) = instance_graph::stdlib_entry_representative(ws, entry) else {
-                unresolved_inline_deps.push(UnresolvedInlineDep {
-                    owner: owner.0,
-                    entry,
-                    reason: "no single declaration supplies this entry",
-                });
+            // An owner this artifact dropped carries no obligation: its text is
+            // never emitted here. Keep its reverse rows for future local updates.
+            if !owner_retained {
                 continue;
-            };
+            }
             // WHICH instance, not merely which declaration. A runtime entry is
             // non-generic so one instance is expected, but picking the first of
             // several would silently choose.
