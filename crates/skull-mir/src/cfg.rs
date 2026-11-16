@@ -212,68 +212,32 @@ impl Dominators {
 /// maps to itself.
 pub fn dominators(func: &MirFunc, entry: Idx<Block>) -> Dominators {
     let n = func.blocks.len();
-    let rpo = reverse_postorder(func, entry);
-    let mut order = vec![u32::MAX; n];
-    for (i, &b) in rpo.iter().enumerate() {
-        order[dense::bx(b)] = i as u32;
-    }
+    let rpo: Vec<usize> = reverse_postorder(func, entry)
+        .into_iter()
+        .map(dense::bx)
+        .collect();
     // Predecessors in CSR form, counting only edges from reachable blocks.
-    let mut pred_n = vec![0u32; n + 1];
+    let mut pred_n = vec![0usize; n + 1];
     for &b in &rpo {
-        successors(&func.blocks[b].term, |s| pred_n[dense::bx(s) + 1] += 1);
+        successors(&func.blocks[dense::bi(b)].term, |s| {
+            pred_n[dense::bx(s) + 1] += 1
+        });
     }
     for i in 0..n {
         pred_n[i + 1] += pred_n[i];
     }
-    let mut preds = vec![0u32; pred_n[n] as usize];
+    let mut preds = vec![0usize; pred_n[n]];
     let mut fill = pred_n.clone();
     for &b in &rpo {
-        successors(&func.blocks[b].term, |s| {
+        successors(&func.blocks[dense::bi(b)].term, |s| {
             let k = dense::bx(s);
-            preds[fill[k] as usize] = dense::bx(b) as u32;
+            preds[fill[k]] = b;
             fill[k] += 1;
         });
     }
-    let mut idom: Vec<Option<u32>> = vec![None; n];
-    let entry_ix = dense::bx(entry);
-    idom[entry_ix] = Some(entry_ix as u32);
-    let intersect = |idom: &[Option<u32>], mut a: u32, mut b: u32| {
-        while a != b {
-            while order[a as usize] > order[b as usize] {
-                a = idom[a as usize].expect("a processed block has an idom");
-            }
-            while order[b as usize] > order[a as usize] {
-                b = idom[b as usize].expect("a processed block has an idom");
-            }
-        }
-        a
-    };
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &b in rpo.iter().skip(1) {
-            let bx = dense::bx(b);
-            let mut new_idom: Option<u32> = None;
-            for &p in &preds[pred_n[bx] as usize..pred_n[bx + 1] as usize] {
-                if idom[p as usize].is_none() {
-                    continue; // not yet processed
-                }
-                new_idom = Some(match new_idom {
-                    None => p,
-                    Some(cur) => intersect(&idom, p, cur),
-                });
-            }
-            if new_idom.is_some() && idom[bx] != new_idom {
-                idom[bx] = new_idom;
-                changed = true;
-            }
-        }
-    }
+    let idom = dense::chk_idoms(n, &rpo, |b| &preds[pred_n[b]..pred_n[b + 1]]);
     Dominators {
-        idom: idom
-            .into_iter()
-            .map(|d| d.map(|d| dense::bi(d as usize)))
-            .collect(),
+        idom: idom.into_iter().map(|d| d.map(dense::bi)).collect(),
     }
 }
 
@@ -429,49 +393,57 @@ pub mod dense {
         preds: &[Vec<usize>],
         rpo_order: &[usize],
     ) -> Vec<Option<usize>> {
-        let mut rpo_index = vec![usize::MAX; n];
-        for (i, &b) in rpo_order.iter().enumerate() {
-            rpo_index[b] = i;
+        let mut idom = chk_idoms(n, rpo_order, |b| &preds[b]);
+        idom[entry] = None;
+        idom
+    }
+
+    /// Cooper-Harvey-Kennedy iterative dominators over `rpo` (entry first).
+    /// The entry maps to itself and a node missing from `rpo` to `None`.
+    pub(crate) fn chk_idoms<'p>(
+        n: usize,
+        rpo: &[usize],
+        preds: impl Fn(usize) -> &'p [usize],
+    ) -> Vec<Option<usize>> {
+        let mut order = vec![usize::MAX; n];
+        for (i, &b) in rpo.iter().enumerate() {
+            order[b] = i;
         }
         let mut idom = vec![None; n];
+        let Some(&entry) = rpo.first() else {
+            return idom;
+        };
         idom[entry] = Some(entry);
-
-        let intersect =
-            |mut a: usize, mut b: usize, idom: &[Option<usize>], ri: &[usize]| -> usize {
-                while a != b {
-                    while ri[a] > ri[b] {
-                        a = idom[a].unwrap();
-                    }
-                    while ri[b] > ri[a] {
-                        b = idom[b].unwrap();
-                    }
+        let intersect = |idom: &[Option<usize>], mut a: usize, mut b: usize| {
+            while a != b {
+                while order[a] > order[b] {
+                    a = idom[a].expect("a processed block has an idom");
                 }
-                a
-            };
-
+                while order[b] > order[a] {
+                    b = idom[b].expect("a processed block has an idom");
+                }
+            }
+            a
+        };
         let mut changed = true;
         while changed {
             changed = false;
-            for &b in rpo_order {
-                if b == entry {
-                    continue;
-                }
+            for &b in &rpo[1..] {
                 let mut new_idom: Option<usize> = None;
-                for &p in &preds[b] {
+                for &p in preds(b) {
                     if idom[p].is_some() {
                         new_idom = Some(match new_idom {
                             None => p,
-                            Some(ni) => intersect(p, ni, &idom, &rpo_index),
+                            Some(cur) => intersect(&idom, p, cur),
                         });
                     }
                 }
-                if idom[b] != new_idom {
+                if new_idom.is_some() && idom[b] != new_idom {
                     idom[b] = new_idom;
                     changed = true;
                 }
             }
         }
-        idom[entry] = None;
         idom
     }
 
