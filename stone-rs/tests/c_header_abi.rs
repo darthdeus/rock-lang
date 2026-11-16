@@ -1,38 +1,58 @@
-use std::path::Path;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 
-fn compile(source: &Path, output: &Path, extra: &[&Path]) {
-    let include = Path::new(env!("CARGO_MANIFEST_DIR")).join("include");
+// Every fixture can check a declaration with `ABI(stone_fn, ret (*)(args));`.
+const ABI_MACRO: &str = "-DABI(name,signature)=_Static_assert(\
+__builtin_types_compatible_p(__typeof__(&name), signature), #name \" ABI\")";
+
+fn clang(dir: &Path, name: &str, source: &str, compile_only: bool, objects: &[PathBuf]) -> PathBuf {
+    let source_path = dir.join(format!("{name}.c"));
+    std::fs::write(&source_path, source).expect("write C fixture");
+    let output = dir.join(name);
     let result = Command::new("clang")
-        .args(["-std=c11", "-O0", "-Wall", "-Wextra", "-Werror"])
+        .args(["-std=c11", "-O0", "-Wall", "-Wextra", "-Werror", ABI_MACRO])
         .arg("-I")
-        .arg(include)
-        .arg(source)
-        .args(extra)
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("include"))
+        .args(compile_only.then_some("-c"))
+        .arg(&source_path)
+        .args(objects)
         .arg("-o")
-        .arg(output)
+        .arg(&output)
         .output()
         .expect("run clang");
     assert!(
         result.status.success(),
-        "clang failed:\n{}",
+        "clang failed on {name}:\n{}",
         String::from_utf8_lossy(&result.stderr)
+    );
+    output
+}
+
+/// Builds `consumer` against stone.h, links each provider compiled on its own,
+/// and runs it.
+fn run_c(consumer: &str, providers: &[&str]) -> Output {
+    let dir = tempfile::tempdir().expect("temporary C fixture directory");
+    let objects: Vec<PathBuf> = providers
+        .iter()
+        .enumerate()
+        .map(|(i, source)| clang(dir.path(), &format!("provider{i}"), source, true, &[]))
+        .collect();
+    let binary = clang(dir.path(), "consumer", consumer, false, &objects);
+    Command::new(binary).output().expect("run C fixture")
+}
+
+fn assert_c_passes(consumer: &str, providers: &[&str], what: &str) {
+    let output = run_c(consumer, providers);
+    assert!(
+        output.status.success(),
+        "{what}\n{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
 #[test]
 fn stone_header_preserves_native_smoke_abi_types() {
-    let dir = tempfile::tempdir().expect("temporary C fixture directory");
-    let provider = dir.path().join("provider.c");
-    let provider_object = dir.path().join("provider.o");
-    let header_consumer = dir.path().join("header_consumer.c");
-    let guessed_consumer = dir.path().join("guessed_consumer.c");
-    let header_binary = dir.path().join("header_consumer");
-    let guessed_binary = dir.path().join("guessed_consumer");
-
-    std::fs::write(
-        &provider,
-        r#"
+    let provider = r#"
 #include <stone.h>
 
 static float captured;
@@ -63,26 +83,8 @@ double captured_clear_sum(void) {
 int captured_title_seen(void) {
     return title_seen && show_seen && activate_seen;
 }
-"#,
-    )
-    .expect("write C ABI provider");
-    let result = Command::new("clang")
-        .args(["-std=c11", "-O0", "-Wall", "-Wextra", "-Werror", "-c"])
-        .arg("-I")
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("include"))
-        .arg(&provider)
-        .arg("-o")
-        .arg(&provider_object)
-        .output()
-        .expect("compile C ABI provider");
-    assert!(
-        result.status.success(),
-        "provider compile failed:\n{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-
-    std::fs::write(
-        &header_consumer,
+"#;
+    assert_c_passes(
         r#"
 #include <stone.h>
 
@@ -98,20 +100,12 @@ int main(void) {
     return captured_clear_sum() == 1.0 && captured_title_seen() ? 0 : 1;
 }
 "#,
-    )
-    .expect("write header C consumer");
-    compile(&header_consumer, &header_binary, &[&provider_object]);
-    assert!(
-        Command::new(&header_binary)
-            .status()
-            .expect("run header C consumer")
-            .success(),
-        "stone.h did not convert Rock's double-width float to Stone's C float ABI"
+        &[provider],
+        "stone.h did not convert Rock's double-width float to Stone's C float ABI",
     );
-
-    std::fs::write(
-        &guessed_consumer,
-        r#"
+    assert!(
+        !run_c(
+            r#"
 extern void stone_clear_canvas(double r, double g, double b, double a);
 extern double captured_clear_sum(void);
 
@@ -121,26 +115,17 @@ int main(void) {
     return captured_clear_sum() == 1.0 ? 0 : 1;
 }
 "#,
-    )
-    .expect("write guessed C consumer");
-    compile(&guessed_consumer, &guessed_binary, &[&provider_object]);
-    assert!(
-        !Command::new(&guessed_binary)
-            .status()
-            .expect("run guessed C consumer")
-            .success(),
+            &[provider],
+        )
+        .status
+        .success(),
         "the witness no longer distinguishes a guessed Rock-width prototype"
     );
 }
 
 #[test]
 fn stone_header_exposes_native_game_loop_abi_types() {
-    let dir = tempfile::tempdir().expect("temporary C fixture directory");
-    let source = dir.path().join("game_loop_abi.c");
-    let binary = dir.path().join("game_loop_abi");
-
-    std::fs::write(
-        &source,
+    assert_c_passes(
         r#"
 #include <stone.h>
 
@@ -172,33 +157,18 @@ int main(void) {
         && x == 12 && y == 34 ? 0 : 1;
 }
 "#,
-    )
-    .expect("write native game-loop ABI fixture");
-
-    compile(&source, &binary, &[]);
-    assert!(
-        Command::new(&binary)
-            .status()
-            .expect("run native game-loop ABI fixture")
-            .success(),
-        "stone.h native game-loop declarations disagree with their consumer"
+        &[],
+        "stone.h native game-loop declarations disagree with their consumer",
     );
 }
 
 #[test]
 fn stone_header_exposes_fullscreen_uv_scale_abi() {
-    let dir = tempfile::tempdir().expect("temporary fullscreen UV ABI directory");
-    let source = dir.path().join("fullscreen_uv_scale_abi.c");
-    let binary = dir.path().join("fullscreen_uv_scale_abi");
-
-    std::fs::write(
-        &source,
+    assert_c_passes(
         r#"
 #include <stone.h>
 
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_set_fullscreen_uv_scale),
-    void (*)(float, float)), "stone_set_fullscreen_uv_scale ABI");
+ABI(stone_set_fullscreen_uv_scale, void (*)(float, float));
 
 static float seen_x;
 static float seen_y;
@@ -213,33 +183,18 @@ int main(void) {
     return seen_x == 0.25f && seen_y == 0.75f ? 0 : 1;
 }
 "#,
-    )
-    .expect("write fullscreen UV scale ABI fixture");
-
-    compile(&source, &binary, &[]);
-    assert!(
-        Command::new(&binary)
-            .status()
-            .expect("run fullscreen UV scale ABI fixture")
-            .success(),
-        "stone.h fullscreen UV scale declaration did not match the provider ABI"
+        &[],
+        "stone.h fullscreen UV scale declaration did not match the provider ABI",
     );
 }
 
 #[test]
 fn stone_header_exposes_fullscreen_quad_abi() {
-    let dir = tempfile::tempdir().expect("temporary fullscreen quad ABI directory");
-    let source = dir.path().join("fullscreen_quad_abi.c");
-    let binary = dir.path().join("fullscreen_quad_abi");
-
-    std::fs::write(
-        &source,
+    assert_c_passes(
         r#"
 #include <stone.h>
 
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_draw_fullscreen_quad),
-    void (*)(void)), "stone_draw_fullscreen_quad ABI");
+ABI(stone_draw_fullscreen_quad, void (*)(void));
 
 static int called;
 
@@ -252,235 +207,80 @@ int main(void) {
     return called ? 0 : 1;
 }
 "#,
-    )
-    .expect("write fullscreen quad ABI fixture");
-
-    compile(&source, &binary, &[]);
-    assert!(
-        Command::new(&binary)
-            .status()
-            .expect("run fullscreen quad ABI fixture")
-            .success(),
-        "stone.h fullscreen quad declaration did not match the provider ABI"
+        &[],
+        "stone.h fullscreen quad declaration did not match the provider ABI",
     );
 }
 
 #[test]
 fn stone_header_exposes_imgui_widget_abi_types() {
-    let dir = tempfile::tempdir().expect("temporary C fixture directory");
-    let source = dir.path().join("imgui_mouse_abi.c");
-    let binary = dir.path().join("imgui_mouse_abi");
-
-    std::fs::write(
-        &source,
+    assert_c_passes(
         r#"
 #include <stone.h>
 #include <string.h>
 
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_using_mouse),
-    bool (*)(void)), "stone_imgui_using_mouse ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_wants_mouse),
-    bool (*)(void)), "stone_imgui_wants_mouse ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_wants_text_input),
-    bool (*)(void)), "stone_imgui_wants_text_input ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_button),
-    bool (*)(const char *)), "stone_imgui_button ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_begin_combo),
-    bool (*)(const char *, const char *)),
-    "stone_imgui_begin_combo ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_end_combo),
-    void (*)(void)),
-    "stone_imgui_end_combo ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_set_item_default_focus),
-    void (*)(void)),
-    "stone_imgui_set_item_default_focus ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_open_popup),
-    void (*)(const char *)),
-    "stone_imgui_open_popup ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_begin_popup),
-    bool (*)(const char *)),
-    "stone_imgui_begin_popup ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_end_popup),
-    void (*)(void)),
-    "stone_imgui_end_popup ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_menu_item),
-    bool (*)(const char *, bool)),
-    "stone_imgui_menu_item ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_combo_str),
-    void (*)(const char *, int, StoneString, bool *, int *)),
-    "stone_imgui_combo_str ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_input_text),
-    bool (*)(const char *, char *, size_t, int)),
-    "stone_imgui_input_text ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_input_text_multiline),
-    bool (*)(const char *, char *, size_t, float, float, int)),
-    "stone_imgui_input_text_multiline ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_begin_table),
-    bool (*)(const char *, int, int)), "stone_imgui_begin_table ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_end_table),
-    void (*)(void)), "stone_imgui_end_table ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_table_headers_row),
-    void (*)(void)), "stone_imgui_table_headers_row ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_table_next_row),
-    void (*)(void)), "stone_imgui_table_next_row ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_table_next_column),
-    bool (*)(void)), "stone_imgui_table_next_column ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_table_setup_column_fixed),
-    void (*)(const char *, float)), "stone_imgui_table_setup_column_fixed ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_table_setup_column_stretch),
-    void (*)(const char *)), "stone_imgui_table_setup_column_stretch ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_begin_disabled),
-    void (*)(bool)), "stone_imgui_begin_disabled ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_end_disabled),
-    void (*)(void)), "stone_imgui_end_disabled ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_indent),
-    void (*)(float)), "stone_imgui_indent ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_unindent),
-    void (*)(float)), "stone_imgui_unindent ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_collapsing_header_closed),
-    bool (*)(const char *)), "stone_imgui_collapsing_header_closed ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_invisible_button),
-    bool (*)(const char *, float, float)), "stone_imgui_invisible_button ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_selectable),
-    bool (*)(const char *, bool)), "stone_imgui_selectable ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_get_mouse_pos),
-    void (*)(float *, float *)), "stone_imgui_get_mouse_pos ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_get_content_region_avail),
-    void (*)(float *, float *)), "stone_imgui_get_content_region_avail ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_get_window_pos),
-    void (*)(float *, float *)), "stone_imgui_get_window_pos ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_get_window_size),
-    void (*)(float *, float *)), "stone_imgui_get_window_size ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_is_any_item_active),
-    bool (*)(void)), "stone_imgui_is_any_item_active ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_is_item_active),
-    bool (*)(void)), "stone_imgui_is_item_active ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_is_item_hovered),
-    bool (*)(int)), "stone_imgui_is_item_hovered ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_is_item_activated),
-    bool (*)(void)), "stone_imgui_is_item_activated ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_is_item_deactivated),
-    bool (*)(void)), "stone_imgui_is_item_deactivated ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_is_item_deactivated_after_edit),
-    bool (*)(void)), "stone_imgui_is_item_deactivated_after_edit ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_is_item_visible),
-    bool (*)(void)), "stone_imgui_is_item_visible ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_is_window_docked),
-    bool (*)(void)), "stone_imgui_is_window_docked ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_same_line),
-    void (*)(void)), "stone_imgui_same_line ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_get_cursor_screen_pos),
-    void (*)(float *, float *)), "stone_imgui_get_cursor_screen_pos ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_get_item_rect_min),
-    void (*)(float *, float *)), "stone_imgui_get_item_rect_min ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_get_item_rect_max),
-    void (*)(float *, float *)), "stone_imgui_get_item_rect_max ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_dummy),
-    void (*)(float, float)), "stone_imgui_dummy ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_end_child),
-    void (*)(void)), "stone_imgui_end_child ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_set_cursor_screen_pos),
-    void (*)(float, float)), "stone_imgui_set_cursor_screen_pos ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_push_style_color),
-    void (*)(int, uint32_t)), "stone_imgui_push_style_color ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_pop_style_color),
-    void (*)(int)), "stone_imgui_pop_style_color ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_set_next_item_width),
-    void (*)(float)), "stone_imgui_set_next_item_width ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_slider_float),
-    void (*)(const char *, float, float, float, bool *, float *)),
-    "stone_imgui_slider_float ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_slider_int),
-    void (*)(const char *, int, int, int, bool *, int *)),
-    "stone_imgui_slider_int ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_checkbox),
-    void (*)(const char *, bool, bool *, bool *)),
-    "stone_imgui_checkbox ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_color_edit4),
-    void (*)(const char *, float, float, float, float,
-             bool *, float *, float *, float *, float *)),
-    "stone_imgui_color_edit4 ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_set_scroll_here_y),
-    void (*)(float)), "stone_imgui_set_scroll_here_y ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_window_add_line),
-    void (*)(float, float, float, float, uint32_t, float)),
-    "stone_imgui_window_add_line ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_end),
-    void (*)(void)), "stone_imgui_end ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_text),
-    void (*)(const char *)), "stone_imgui_text ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_set_tooltip),
-    void (*)(const char *)), "stone_imgui_set_tooltip ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_text_colored),
-    void (*)(const char *, float, float, float, float)),
-    "stone_imgui_text_colored ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_window_add_rect_filled),
-    void (*)(float, float, float, float, uint32_t)),
-    "stone_imgui_window_add_rect_filled ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_separator),
-    void (*)(void)), "stone_imgui_separator ABI");
+ABI(stone_imgui_using_mouse, bool (*)(void));
+ABI(stone_imgui_wants_mouse, bool (*)(void));
+ABI(stone_imgui_wants_text_input, bool (*)(void));
+ABI(stone_imgui_button, bool (*)(const char *));
+ABI(stone_imgui_begin_combo, bool (*)(const char *, const char *));
+ABI(stone_imgui_end_combo, void (*)(void));
+ABI(stone_imgui_set_item_default_focus, void (*)(void));
+ABI(stone_imgui_open_popup, void (*)(const char *));
+ABI(stone_imgui_begin_popup, bool (*)(const char *));
+ABI(stone_imgui_end_popup, void (*)(void));
+ABI(stone_imgui_menu_item, bool (*)(const char *, bool));
+ABI(stone_imgui_combo_str, void (*)(const char *, int, StoneString, bool *, int *));
+ABI(stone_imgui_input_text, bool (*)(const char *, char *, size_t, int));
+ABI(stone_imgui_input_text_multiline, bool (*)(const char *, char *, size_t, float, float, int));
+ABI(stone_imgui_begin_table, bool (*)(const char *, int, int));
+ABI(stone_imgui_end_table, void (*)(void));
+ABI(stone_imgui_table_headers_row, void (*)(void));
+ABI(stone_imgui_table_next_row, void (*)(void));
+ABI(stone_imgui_table_next_column, bool (*)(void));
+ABI(stone_imgui_table_setup_column_fixed, void (*)(const char *, float));
+ABI(stone_imgui_table_setup_column_stretch, void (*)(const char *));
+ABI(stone_imgui_begin_disabled, void (*)(bool));
+ABI(stone_imgui_end_disabled, void (*)(void));
+ABI(stone_imgui_indent, void (*)(float));
+ABI(stone_imgui_unindent, void (*)(float));
+ABI(stone_imgui_collapsing_header_closed, bool (*)(const char *));
+ABI(stone_imgui_invisible_button, bool (*)(const char *, float, float));
+ABI(stone_imgui_selectable, bool (*)(const char *, bool));
+ABI(stone_imgui_get_mouse_pos, void (*)(float *, float *));
+ABI(stone_imgui_get_content_region_avail, void (*)(float *, float *));
+ABI(stone_imgui_get_window_pos, void (*)(float *, float *));
+ABI(stone_imgui_get_window_size, void (*)(float *, float *));
+ABI(stone_imgui_is_any_item_active, bool (*)(void));
+ABI(stone_imgui_is_item_active, bool (*)(void));
+ABI(stone_imgui_is_item_hovered, bool (*)(int));
+ABI(stone_imgui_is_item_activated, bool (*)(void));
+ABI(stone_imgui_is_item_deactivated, bool (*)(void));
+ABI(stone_imgui_is_item_deactivated_after_edit, bool (*)(void));
+ABI(stone_imgui_is_item_visible, bool (*)(void));
+ABI(stone_imgui_is_window_docked, bool (*)(void));
+ABI(stone_imgui_same_line, void (*)(void));
+ABI(stone_imgui_get_cursor_screen_pos, void (*)(float *, float *));
+ABI(stone_imgui_get_item_rect_min, void (*)(float *, float *));
+ABI(stone_imgui_get_item_rect_max, void (*)(float *, float *));
+ABI(stone_imgui_dummy, void (*)(float, float));
+ABI(stone_imgui_end_child, void (*)(void));
+ABI(stone_imgui_set_cursor_screen_pos, void (*)(float, float));
+ABI(stone_imgui_push_style_color, void (*)(int, uint32_t));
+ABI(stone_imgui_pop_style_color, void (*)(int));
+ABI(stone_imgui_set_next_item_width, void (*)(float));
+ABI(stone_imgui_slider_float, void (*)(const char *, float, float, float, bool *, float *));
+ABI(stone_imgui_slider_int, void (*)(const char *, int, int, int, bool *, int *));
+ABI(stone_imgui_checkbox, void (*)(const char *, bool, bool *, bool *));
+ABI(stone_imgui_color_edit4, void (*)(const char *, float, float, float, float, bool *, float *, float *, float *, float *));
+ABI(stone_imgui_set_scroll_here_y, void (*)(float));
+ABI(stone_imgui_window_add_line, void (*)(float, float, float, float, uint32_t, float));
+ABI(stone_imgui_end, void (*)(void));
+ABI(stone_imgui_text, void (*)(const char *));
+ABI(stone_imgui_set_tooltip, void (*)(const char *));
+ABI(stone_imgui_text_colored, void (*)(const char *, float, float, float, float));
+ABI(stone_imgui_window_add_rect_filled, void (*)(float, float, float, float, uint32_t));
+ABI(stone_imgui_separator, void (*)(void));
 
 bool stone_imgui_using_mouse(void) { return true; }
 bool stone_imgui_wants_mouse(void) { return true; }
@@ -732,183 +532,73 @@ int main(void) {
         && cursor_x == 7.0f && cursor_y == 11.0f ? 0 : 1;
 }
 "#,
-    )
-    .expect("write ImGui mouse ABI fixture");
-
-    compile(&source, &binary, &[]);
-    assert!(
-        Command::new(&binary)
-            .status()
-            .expect("run ImGui mouse ABI fixture")
-            .success(),
-        "stone.h ImGui mouse declaration did not match the provider ABI"
+        &[],
+        "stone.h ImGui mouse declaration did not match the provider ABI",
     );
 }
 
 #[test]
 fn stone_header_exposes_native_rendering_state_abi_types() {
-    let dir = tempfile::tempdir().expect("temporary C fixture directory");
-    let source = dir.path().join("rendering_state_abi.c");
-    let binary = dir.path().join("rendering_state_abi");
-
-    std::fs::write(
-        &source,
+    assert_c_passes(
         r#"
 #include <stone.h>
 
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_set_blend_mode_i),
-    void (*)(int)), "stone_set_blend_mode_i ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_bind_sampler),
-    void (*)(int, int, uint64_t)), "stone_bind_sampler ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_set_canvas),
-    void (*)(uint64_t)), "stone_set_canvas ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_bind_canvas_texture_to_unit),
-    bool (*)(uint64_t, int)), "stone_bind_canvas_texture_to_unit ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_set_shader),
-    void (*)(uint64_t)), "stone_set_shader ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_shader_upload_uniform_block),
-    bool (*)(uint64_t, const uint8_t *, int, uint64_t)),
-    "stone_shader_upload_uniform_block ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_bind_image_texture_to_unit),
-    bool (*)(uint64_t, int)), "stone_bind_image_texture_to_unit ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_image_exists),
-    bool (*)(uint64_t)), "stone_image_exists ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_create_canvas),
-    uint64_t (*)(int, int, int, bool)), "stone_create_canvas ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_pixel_readback_consume),
-    float (*)(uint64_t)), "stone_pixel_readback_consume ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_set_depth_mode),
-    void (*)(const char *, bool)), "stone_set_depth_mode ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_clear_depth),
-    void (*)(float)), "stone_clear_depth ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_set_color_mask),
-    void (*)(bool, bool, bool, bool)), "stone_set_color_mask ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_set_draw_buffer_mask),
-    void (*)(int)), "stone_set_draw_buffer_mask ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_current_target_width),
-    float (*)(void)), "stone_current_target_width ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_current_target_height),
-    float (*)(void)), "stone_current_target_height ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_set_canvas_active),
-    void (*)(uint64_t, int, int)), "stone_set_canvas_active ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_set_gl_viewport),
-    void (*)(int, int, int, int)), "stone_set_gl_viewport ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_set_present_viewport),
-    void (*)(bool, int, int, int, int)), "stone_set_present_viewport ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_draw_fullscreen_rect),
-    void (*)(float, float, float, float)), "stone_draw_fullscreen_rect ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_current_shader_bound),
-    bool (*)(void)), "stone_current_shader_bound ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_create_image_data),
-    uint64_t (*)(int, int)), "stone_create_image_data ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_image_data_size),
-    bool (*)(uint64_t, int *, int *)), "stone_image_data_size ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_destroy_image_data),
-    void (*)(uint64_t)), "stone_destroy_image_data ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_image_data_set_pixel),
-    void (*)(uint64_t, int, int, float, float, float, float)),
-    "stone_image_data_set_pixel ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_image_update_from_data),
-    bool (*)(uint64_t, uint64_t)), "stone_image_update_from_data ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_new_image_from_data),
-    uint64_t (*)(uint64_t, int)), "stone_new_image_from_data ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_pixel_readback_new),
-    uint64_t (*)(int)), "stone_pixel_readback_new ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_pixel_readback_area_new),
-    uint64_t (*)(int)), "stone_pixel_readback_area_new ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_load_sound_deferred),
-    uint64_t (*)(const char *, int64_t, int64_t, int64_t)), "stone_load_sound_deferred ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_load_sound_stream),
-    uint64_t (*)(const char *, int64_t, int64_t, int64_t)), "stone_load_sound_stream ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_sound_playable),
-    bool (*)(uint64_t)), "stone_sound_playable ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_sound_stream_bytes),
-    int64_t (*)(uint64_t)), "stone_sound_stream_bytes ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_unload_sound),
-    bool (*)(uint64_t)), "stone_unload_sound ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_load_music),
-    uint64_t (*)(const char *)), "stone_load_music ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_play_music),
-    void (*)(uint64_t)), "stone_play_music ABI");
+ABI(stone_set_blend_mode_i, void (*)(int));
+ABI(stone_bind_sampler, void (*)(int, int, uint64_t));
+ABI(stone_set_canvas, void (*)(uint64_t));
+ABI(stone_bind_canvas_texture_to_unit, bool (*)(uint64_t, int));
+ABI(stone_set_shader, void (*)(uint64_t));
+ABI(stone_shader_upload_uniform_block, bool (*)(uint64_t, const uint8_t *, int, uint64_t));
+ABI(stone_bind_image_texture_to_unit, bool (*)(uint64_t, int));
+ABI(stone_image_exists, bool (*)(uint64_t));
+ABI(stone_create_canvas, uint64_t (*)(int, int, int, bool));
+ABI(stone_pixel_readback_consume, float (*)(uint64_t));
+ABI(stone_set_depth_mode, void (*)(const char *, bool));
+ABI(stone_clear_depth, void (*)(float));
+ABI(stone_set_color_mask, void (*)(bool, bool, bool, bool));
+ABI(stone_set_draw_buffer_mask, void (*)(int));
+ABI(stone_current_target_width, float (*)(void));
+ABI(stone_current_target_height, float (*)(void));
+ABI(stone_set_canvas_active, void (*)(uint64_t, int, int));
+ABI(stone_set_gl_viewport, void (*)(int, int, int, int));
+ABI(stone_set_present_viewport, void (*)(bool, int, int, int, int));
+ABI(stone_draw_fullscreen_rect, void (*)(float, float, float, float));
+ABI(stone_current_shader_bound, bool (*)(void));
+ABI(stone_create_image_data, uint64_t (*)(int, int));
+ABI(stone_image_data_size, bool (*)(uint64_t, int *, int *));
+ABI(stone_destroy_image_data, void (*)(uint64_t));
+ABI(stone_image_data_set_pixel, void (*)(uint64_t, int, int, float, float, float, float));
+ABI(stone_image_update_from_data, bool (*)(uint64_t, uint64_t));
+ABI(stone_new_image_from_data, uint64_t (*)(uint64_t, int));
+ABI(stone_pixel_readback_new, uint64_t (*)(int));
+ABI(stone_pixel_readback_area_new, uint64_t (*)(int));
+ABI(stone_load_sound_deferred, uint64_t (*)(const char *, int64_t, int64_t, int64_t));
+ABI(stone_load_sound_stream, uint64_t (*)(const char *, int64_t, int64_t, int64_t));
+ABI(stone_sound_playable, bool (*)(uint64_t));
+ABI(stone_sound_stream_bytes, int64_t (*)(uint64_t));
+ABI(stone_unload_sound, bool (*)(uint64_t));
+ABI(stone_load_music, uint64_t (*)(const char *));
+ABI(stone_play_music, void (*)(uint64_t));
 
 int main(void) { return 0; }
 "#,
-    )
-    .expect("write native rendering-state ABI fixture");
-
-    compile(&source, &binary, &[]);
-    assert!(
-        Command::new(&binary)
-            .status()
-            .expect("run native rendering-state ABI fixture")
-            .success(),
-        "stone.h rendering-state declarations did not match the provider ABI"
+        &[],
+        "stone.h rendering-state declarations did not match the provider ABI",
     );
 }
 
 #[test]
 fn stone_header_exposes_scancode_lookup_abi_types() {
-    let dir = tempfile::tempdir().expect("temporary C fixture directory");
-    let source = dir.path().join("scancode_abi.c");
-    let binary = dir.path().join("scancode_abi");
-
-    std::fs::write(
-        &source,
+    assert_c_passes(
         r#"
 #include <stone.h>
 #include <string.h>
 
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_scancode_count),
-    int (*)(void)), "stone_scancode_count ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_scancode_token_at),
-    const char *(*)(int)), "stone_scancode_token_at ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_scancode_token_for),
-    const char *(*)(int)), "stone_scancode_token_for ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_scancode_value),
-    int (*)(const char *)), "stone_scancode_value ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_scancode_label),
-    const char *(*)(const char *)), "stone_scancode_label ABI");
+ABI(stone_scancode_count, int (*)(void));
+ABI(stone_scancode_token_at, const char *(*)(int));
+ABI(stone_scancode_token_for, const char *(*)(int));
+ABI(stone_scancode_value, int (*)(const char *));
+ABI(stone_scancode_label, const char *(*)(const char *));
 
 int stone_scancode_count(void) { return 1; }
 const char *stone_scancode_token_at(int index) { return index == 0 ? "left" : NULL; }
@@ -924,71 +614,51 @@ int main(void) {
         && strcmp(stone_scancode_label("left"), "Left") == 0 ? 0 : 1;
 }
 "#,
-    )
-    .expect("write scancode ABI fixture");
-
-    compile(&source, &binary, &[]);
-    assert!(
-        Command::new(&binary)
-            .status()
-            .expect("run scancode ABI fixture")
-            .success(),
-        "stone.h scancode declarations did not match the exported provider ABI"
+        &[],
+        "stone.h scancode declarations did not match the exported provider ABI",
     );
 }
 
 #[test]
 fn stone_header_exposes_length_aware_file_abi_types() {
-    let dir = tempfile::tempdir().expect("temporary C fixture directory");
-    let source = dir.path().join("file_abi.c");
-    let binary = dir.path().join("file_abi");
-
-    std::fs::write(
-        &source,
+    assert_c_passes(
         r#"
 #include <stone.h>
 
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_file_write),
-    bool (*)(const char *, const char *, size_t)), "stone_file_write ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_file_append),
-    bool (*)(const char *, const char *, size_t)), "stone_file_append ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_file_read),
-    char *(*)(const char *, size_t *)), "stone_file_read ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_free),
-    void (*)(void *)), "stone_free ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_file_exists_status),
-    int32_t (*)(const char *)), "stone_file_exists_status ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_list_directory),
-    bool (*)(const char *, char ***, int *)), "stone_list_directory ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_free_string_array),
-    void (*)(char **, int)), "stone_free_string_array ABI");
+ABI(stone_file_write, bool (*)(const char *, const char *, size_t));
+ABI(stone_file_append, bool (*)(const char *, const char *, size_t));
+ABI(stone_file_read, char *(*)(const char *, size_t *));
+ABI(stone_free, void (*)(void *));
+ABI(stone_file_exists_status, int32_t (*)(const char *));
+ABI(stone_list_directory, bool (*)(const char *, char ***, int *));
+ABI(stone_free_string_array, void (*)(char **, int));
 
 int main(void) { return 0; }
 "#,
-    )
-    .expect("write file ABI fixture");
-
-    compile(&source, &binary, &[]);
+        &[],
+        "stone.h file declarations disagree with their exported ABI",
+    );
 }
 
 #[test]
 fn stone_header_declares_file_read_release_and_append_with_the_exported_abi() {
-    let dir = tempfile::tempdir().expect("temporary C fixture directory");
-    let provider = dir.path().join("provider.c");
-    let provider_object = dir.path().join("provider.o");
-    let consumer = dir.path().join("consumer.c");
-    let binary = dir.path().join("consumer");
-
-    std::fs::write(
-        &provider,
+    assert_c_passes(
         r#"
+#include <stone.h>
+#include <string.h>
+
+int main(void) {
+    size_t len = 0;
+    char *(*read_fn)(const char *, size_t *) = stone_file_read;
+    void (*free_fn)(void *) = stone_free;
+    char *data = read_fn("asset.bin", &len);
+    int ok = data != NULL && len == 4 && memcmp(data, "DATA", len) == 0;
+    free_fn(data);
+    bool (*append_fn)(const char *, const char *, size_t) = stone_file_append;
+    return ok && append_fn("asset.bin", "DATA", 4) ? 0 : 1;
+}
+"#,
+        &[r#"
 #include <stone.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1009,61 +679,14 @@ bool stone_file_append(const char *path, const char *data, size_t len) {
     return path != NULL && data != NULL && strcmp(path, "asset.bin") == 0
         && len == 4 && memcmp(data, "DATA", len) == 0;
 }
-"#,
-    )
-    .expect("write file-read ABI provider");
-    let result = Command::new("clang")
-        .args(["-std=c11", "-O0", "-Wall", "-Wextra", "-Werror", "-c"])
-        .arg("-I")
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("include"))
-        .arg(&provider)
-        .arg("-o")
-        .arg(&provider_object)
-        .output()
-        .expect("compile file-read ABI provider");
-    assert!(
-        result.status.success(),
-        "provider compile failed:\n{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-
-    std::fs::write(
-        &consumer,
-        r#"
-#include <stone.h>
-#include <string.h>
-
-int main(void) {
-    size_t len = 0;
-    char *(*read_fn)(const char *, size_t *) = stone_file_read;
-    void (*free_fn)(void *) = stone_free;
-    char *data = read_fn("asset.bin", &len);
-    int ok = data != NULL && len == 4 && memcmp(data, "DATA", len) == 0;
-    free_fn(data);
-    bool (*append_fn)(const char *, const char *, size_t) = stone_file_append;
-    return ok && append_fn("asset.bin", "DATA", 4) ? 0 : 1;
-}
-"#,
-    )
-    .expect("write file-read ABI consumer");
-    compile(&consumer, &binary, &[&provider_object]);
-    assert!(
-        Command::new(&binary)
-            .status()
-            .expect("run file-read ABI consumer")
-            .success(),
-        "stone.h file-read declarations did not match the exported provider ABI"
+"#],
+        "stone.h file-read declarations did not match the exported provider ABI",
     );
 }
 
 #[test]
 fn stone_event_header_layout_matches_rust_abi() {
-    let dir = tempfile::tempdir().expect("temporary C fixture directory");
-    let source = dir.path().join("event_layout.c");
-    let binary = dir.path().join("event_layout");
-
-    std::fs::write(
-        &source,
+    let output = run_c(
         r#"
 #include <stddef.h>
 #include <stdio.h>
@@ -1083,13 +706,8 @@ int main(void) {
     return 0;
 }
 "#,
-    )
-    .expect("write StoneEvent layout fixture");
-    compile(&source, &binary, &[]);
-
-    let output = Command::new(&binary)
-        .output()
-        .expect("run StoneEvent layout fixture");
+        &[],
+    );
     assert!(output.status.success());
     let c_layout = String::from_utf8(output.stdout)
         .expect("layout output must be UTF-8")
@@ -1116,40 +734,7 @@ int main(void) {
 
 #[test]
 fn stone_header_declares_font_instance_image_with_its_exported_abi() {
-    let dir = tempfile::tempdir().expect("temporary C fixture directory");
-    let provider = dir.path().join("provider.c");
-    let provider_object = dir.path().join("provider.o");
-    let consumer = dir.path().join("consumer.c");
-    let binary = dir.path().join("consumer");
-
-    std::fs::write(
-        &provider,
-        r#"
-#include <stone.h>
-
-uint64_t stone_get_font_instance_image(uint64_t instance_id) {
-    return instance_id + UINT64_C(5);
-}
-"#,
-    )
-    .expect("write font ABI provider");
-    let result = Command::new("clang")
-        .args(["-std=c11", "-O0", "-Wall", "-Wextra", "-Werror", "-c"])
-        .arg("-I")
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("include"))
-        .arg(&provider)
-        .arg("-o")
-        .arg(&provider_object)
-        .output()
-        .expect("compile font ABI provider");
-    assert!(
-        result.status.success(),
-        "provider compile failed:\n{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-
-    std::fs::write(
-        &consumer,
+    assert_c_passes(
         r#"
 #include <stone.h>
 
@@ -1157,252 +742,122 @@ int main(void) {
     return stone_get_font_instance_image(UINT64_C(7)) == UINT64_C(12) ? 0 : 1;
 }
 "#,
-    )
-    .expect("write font ABI consumer");
-    compile(&consumer, &binary, &[&provider_object]);
-    assert!(
-        Command::new(&binary)
-            .status()
-            .expect("run font ABI consumer")
-            .success(),
-        "stone.h font declaration did not match the exported provider ABI"
+        &[r#"
+#include <stone.h>
+
+uint64_t stone_get_font_instance_image(uint64_t instance_id) {
+    return instance_id + UINT64_C(5);
+}
+"#],
+        "stone.h font declaration did not match the exported provider ABI",
     );
 }
 
 #[test]
-fn stone_header_declares_native_mag_ffi_with_exported_abis() {
-    let dir = tempfile::tempdir().expect("temporary C fixture directory");
-    let source = dir.path().join("mag_ffi_abi.c");
-    let binary = dir.path().join("mag_ffi_abi");
-
-    std::fs::write(
-        &source,
+fn stone_header_declares_engine_ffi_with_exported_abis() {
+    assert_c_passes(
         r#"
 #include <stone.h>
 
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_bus_duck),
-    bool (*)(uint32_t, float, float, float)), "stone_bus_duck ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_bus_set_gain),
-    bool (*)(uint32_t, float)), "stone_bus_set_gain ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_bus_set_lowpass),
-    bool (*)(uint32_t, float, float)), "stone_bus_set_lowpass ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_canvas_exists),
-    bool (*)(uint64_t)), "stone_canvas_exists ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_window_size),
-    void (*)(int *, int *)), "stone_get_window_size ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_drawable_size),
-    void (*)(int *, int *)), "stone_get_drawable_size ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_dpi_scale),
-    float (*)(void)), "stone_get_dpi_scale ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_config_imgui_scale),
-    float (*)(void)), "stone_get_config_imgui_scale ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_canvas_attach_id_target),
-    bool (*)(uint64_t, uint64_t)), "stone_canvas_attach_id_target ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_clear_canvas_int),
-    void (*)(int, int)), "stone_clear_canvas_int ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_white_image),
-    uint64_t (*)(void)), "stone_get_white_image ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_destroy_canvas),
-    void (*)(uint64_t)), "stone_destroy_canvas ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_ensure_font_atlas_instance),
-    uint64_t (*)(uint32_t, int)), "stone_ensure_font_atlas_instance ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_file_sync),
-    bool (*)(const char *)), "stone_file_sync ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_font_atlas_instance_count),
-    int (*)(uint32_t)), "stone_font_atlas_instance_count ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_display_count),
-    int (*)(void)), "stone_get_display_count ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_proc_reset),
-    int (*)(void)), "stone_proc_reset ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_font_instance_byte_len),
-    uint64_t (*)(uint64_t)), "stone_get_font_instance_byte_len ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_font_instance_glyph_info),
-    bool (*)(uint64_t, int, int, float *)), "stone_get_font_instance_glyph_info ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_font_instance_pixel_size),
-    int (*)(uint64_t)), "stone_get_font_instance_pixel_size ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_font_instance_size),
-    bool (*)(uint64_t, int *, int *)), "stone_get_font_instance_size ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_font_slot_codepoint),
-    int (*)(uint32_t, int)), "stone_get_font_slot_codepoint ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_font_slot_count),
-    int (*)(uint32_t)), "stone_get_font_slot_count ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_font_unit_metrics),
-    bool (*)(uint32_t, float *)), "stone_get_font_unit_metrics ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_glyph_unit_metrics),
-    bool (*)(uint32_t, int, int, float *)), "stone_get_glyph_unit_metrics ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_image_size),
-    void (*)(uint64_t, int *, int *)), "stone_get_image_size ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_flush_image_uploads),
-    void (*)(void)), "stone_flush_image_uploads ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_graphics_stats),
-    void (*)(StoneGraphicsStats *)), "stone_get_graphics_stats ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_track_text_draw_call),
-    void (*)(void)), "stone_track_text_draw_call ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_image_frame_stats),
-    void (*)(StoneImageLoadStats *)), "stone_get_image_frame_stats ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_image_profile_stats),
-    void (*)(StoneImageLoadStats *)), "stone_get_image_profile_stats ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_sound_duration),
-    float (*)(uint64_t)), "stone_get_sound_duration ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_reload_sound),
-    bool (*)(uint64_t, const char *)), "stone_reload_sound ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_image_set_wrap),
-    bool (*)(uint64_t, bool)), "stone_image_set_wrap ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_is_directory_status),
-    int32_t (*)(const char *)), "stone_is_directory_status ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_create_directory),
-    bool (*)(const char *)), "stone_create_directory ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_load_image),
-    uint64_t (*)(const char *, int, int, int, int)), "stone_load_image ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_reload_image),
-    bool (*)(uint64_t, const char *)), "stone_reload_image ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_mesh_free),
-    void (*)(uint64_t)), "stone_mesh_free ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_pixel_readback_submit),
-    void (*)(uint64_t, uint64_t, int, int)), "stone_pixel_readback_submit ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_play_sound),
-    uint64_t (*)(uint64_t, uint32_t, float, float, float, bool, bool, float)), "stone_play_sound ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_read_canvas_nearest_id),
-    int (*)(uint64_t, int, int, int)), "stone_read_canvas_nearest_id ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_read_canvas_pixel),
-    float (*)(uint64_t, int, int)), "stone_read_canvas_pixel ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_remove_file),
-    bool (*)(const char *)), "stone_remove_file ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_remove_dir),
-    bool (*)(const char *)), "stone_remove_dir ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_rename),
-    bool (*)(const char *, const char *)), "stone_rename ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_set_cursor),
-    void (*)(uint64_t)), "stone_set_cursor ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_show_cursor),
-    void (*)(bool)), "stone_show_cursor ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_is_cursor_visible),
-    bool (*)(void)), "stone_is_cursor_visible ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_create_cursor),
-    uint64_t (*)(const char *, int, int)), "stone_create_cursor ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_create_cursor_from_image_data),
-    uint64_t (*)(uint64_t, int, int)), "stone_create_cursor_from_image_data ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_set_system_cursor),
-    uint64_t (*)(int)), "stone_set_system_cursor ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_reset_cursor),
-    void (*)(void)), "stone_reset_cursor ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_free_cursor),
-    void (*)(uint64_t)), "stone_free_cursor ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_active_cursor),
-    uint64_t (*)(void)), "stone_active_cursor ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_unload_image),
-    void (*)(uint64_t)), "stone_unload_image ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_voice_active),
-    bool (*)(uint64_t)), "stone_voice_active ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_voice_stream_frames),
-    int64_t (*)(uint64_t)), "stone_voice_stream_frames ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_voice_set_gain),
-    bool (*)(uint64_t, float)), "stone_voice_set_gain ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_voice_stop),
-    bool (*)(uint64_t)), "stone_voice_stop ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_watch_asset),
-    void (*)(const char *)), "stone_watch_asset ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_poll_changed_assets),
-    int (*)(void)), "stone_poll_changed_assets ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_create_shader_from_combined),
-    uint64_t (*)(const char *)), "stone_create_shader_from_combined ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_destroy_shader),
-    void (*)(uint64_t)), "stone_destroy_shader ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_shader_bind_uniform_block),
-    bool (*)(uint64_t, const char *, const char *, int, int, uint64_t)),
-    "stone_shader_bind_uniform_block ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_shader_check_uniform_block_layout),
-    bool (*)(uint64_t, const char *, const char *, int, const int *, int, int)),
-    "stone_shader_check_uniform_block_layout ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_imgui_begin_window),
-    bool (*)(const char *, int)),
-    "stone_imgui_begin_window ABI");
+ABI(stone_bus_duck, bool (*)(uint32_t, float, float, float));
+ABI(stone_bus_set_gain, bool (*)(uint32_t, float));
+ABI(stone_bus_set_lowpass, bool (*)(uint32_t, float, float));
+ABI(stone_canvas_exists, bool (*)(uint64_t));
+ABI(stone_get_window_size, void (*)(int *, int *));
+ABI(stone_get_drawable_size, void (*)(int *, int *));
+ABI(stone_get_dpi_scale, float (*)(void));
+ABI(stone_get_config_imgui_scale, float (*)(void));
+ABI(stone_canvas_attach_id_target, bool (*)(uint64_t, uint64_t));
+ABI(stone_clear_canvas_int, void (*)(int, int));
+ABI(stone_get_white_image, uint64_t (*)(void));
+ABI(stone_destroy_canvas, void (*)(uint64_t));
+ABI(stone_ensure_font_atlas_instance, uint64_t (*)(uint32_t, int));
+ABI(stone_file_sync, bool (*)(const char *));
+ABI(stone_font_atlas_instance_count, int (*)(uint32_t));
+ABI(stone_get_display_count, int (*)(void));
+ABI(stone_proc_reset, int (*)(void));
+ABI(stone_get_font_instance_byte_len, uint64_t (*)(uint64_t));
+ABI(stone_get_font_instance_glyph_info, bool (*)(uint64_t, int, int, float *));
+ABI(stone_get_font_instance_pixel_size, int (*)(uint64_t));
+ABI(stone_get_font_instance_size, bool (*)(uint64_t, int *, int *));
+ABI(stone_get_font_slot_codepoint, int (*)(uint32_t, int));
+ABI(stone_get_font_slot_count, int (*)(uint32_t));
+ABI(stone_get_font_unit_metrics, bool (*)(uint32_t, float *));
+ABI(stone_get_glyph_unit_metrics, bool (*)(uint32_t, int, int, float *));
+ABI(stone_get_image_size, void (*)(uint64_t, int *, int *));
+ABI(stone_flush_image_uploads, void (*)(void));
+ABI(stone_get_graphics_stats, void (*)(StoneGraphicsStats *));
+ABI(stone_track_text_draw_call, void (*)(void));
+ABI(stone_get_image_frame_stats, void (*)(StoneImageLoadStats *));
+ABI(stone_get_image_profile_stats, void (*)(StoneImageLoadStats *));
+ABI(stone_get_sound_duration, float (*)(uint64_t));
+ABI(stone_reload_sound, bool (*)(uint64_t, const char *));
+ABI(stone_image_set_wrap, bool (*)(uint64_t, bool));
+ABI(stone_is_directory_status, int32_t (*)(const char *));
+ABI(stone_create_directory, bool (*)(const char *));
+ABI(stone_load_image, uint64_t (*)(const char *, int, int, int, int));
+ABI(stone_reload_image, bool (*)(uint64_t, const char *));
+ABI(stone_mesh_free, void (*)(uint64_t));
+ABI(stone_pixel_readback_submit, void (*)(uint64_t, uint64_t, int, int));
+ABI(stone_play_sound, uint64_t (*)(uint64_t, uint32_t, float, float, float, bool, bool, float));
+ABI(stone_read_canvas_nearest_id, int (*)(uint64_t, int, int, int));
+ABI(stone_read_canvas_pixel, float (*)(uint64_t, int, int));
+ABI(stone_remove_file, bool (*)(const char *));
+ABI(stone_remove_dir, bool (*)(const char *));
+ABI(stone_rename, bool (*)(const char *, const char *));
+ABI(stone_set_cursor, void (*)(uint64_t));
+ABI(stone_show_cursor, void (*)(bool));
+ABI(stone_is_cursor_visible, bool (*)(void));
+ABI(stone_create_cursor, uint64_t (*)(const char *, int, int));
+ABI(stone_create_cursor_from_image_data, uint64_t (*)(uint64_t, int, int));
+ABI(stone_set_system_cursor, uint64_t (*)(int));
+ABI(stone_reset_cursor, void (*)(void));
+ABI(stone_free_cursor, void (*)(uint64_t));
+ABI(stone_active_cursor, uint64_t (*)(void));
+ABI(stone_unload_image, void (*)(uint64_t));
+ABI(stone_voice_active, bool (*)(uint64_t));
+ABI(stone_voice_stream_frames, int64_t (*)(uint64_t));
+ABI(stone_voice_set_gain, bool (*)(uint64_t, float));
+ABI(stone_voice_stop, bool (*)(uint64_t));
+ABI(stone_watch_asset, void (*)(const char *));
+ABI(stone_poll_changed_assets, int (*)(void));
+ABI(stone_create_shader_from_combined, uint64_t (*)(const char *));
+ABI(stone_destroy_shader, void (*)(uint64_t));
+ABI(stone_shader_bind_uniform_block, bool (*)(uint64_t, const char *, const char *, int, int, uint64_t));
+ABI(stone_shader_check_uniform_block_layout, bool (*)(uint64_t, const char *, const char *, int, const int *, int, int));
+ABI(stone_imgui_begin_window, bool (*)(const char *, int));
 
 int main(void) { return 0; }
 "#,
-    )
-    .expect("write native MAG FFI ABI fixture");
-    compile(&source, &binary, &[]);
+        &[],
+        "stone.h engine FFI declarations disagree with their exported ABI",
+    );
 }
 
 #[test]
 fn stone_header_declares_font_lifecycle_with_its_exported_abi() {
-    let dir = tempfile::tempdir().expect("temporary C fixture directory");
-    let provider = dir.path().join("provider.c");
-    let provider_object = dir.path().join("provider.o");
-    let consumer = dir.path().join("consumer.c");
-    let binary = dir.path().join("consumer");
-
-    std::fs::write(
-        &provider,
+    assert_c_passes(
         r#"
+#include <stone.h>
+
+ABI(stone_load_font, uint32_t (*)(const char *, int, int, const char *));
+ABI(stone_unload_font, bool (*)(uint32_t));
+ABI(stone_font_release_coverage, bool (*)(uint32_t));
+ABI(stone_reload_font, bool (*)(uint32_t, const char *, int));
+ABI(stone_resize_font, bool (*)(uint32_t, int));
+ABI(stone_get_font_pixel_size, int (*)(uint32_t));
+
+int main(void) {
+    uint32_t id = stone_load_font("font.ttf", 16, 3, "x");
+    return id == UINT32_C(7)
+        && stone_reload_font(id, "font.ttf", 24)
+        && stone_resize_font(id, 32)
+        && stone_get_font_pixel_size(id) == 24
+        && stone_font_release_coverage(id)
+        && stone_unload_font(id) ? 0 : 1;
+}
+"#,
+        &[r#"
 #include <stone.h>
 
 uint32_t stone_load_font(const char *path, int pixel_size, int face_mask, const char *extra_chars) {
@@ -1419,84 +874,18 @@ bool stone_resize_font(uint32_t font_id, int pixel_size) {
 int stone_get_font_pixel_size(uint32_t font_id) {
     return font_id == UINT32_C(7) ? 24 : 0;
 }
-"#,
-    )
-    .expect("write font lifecycle ABI provider");
-    let result = Command::new("clang")
-        .args(["-std=c11", "-O0", "-Wall", "-Wextra", "-Werror", "-c"])
-        .arg("-I")
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("include"))
-        .arg(&provider)
-        .arg("-o")
-        .arg(&provider_object)
-        .output()
-        .expect("compile font lifecycle ABI provider");
-    assert!(
-        result.status.success(),
-        "provider compile failed:\n{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-
-    std::fs::write(
-        &consumer,
-        r#"
-#include <stone.h>
-
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_load_font),
-    uint32_t (*)(const char *, int, int, const char *)), "stone_load_font ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_unload_font),
-    bool (*)(uint32_t)), "stone_unload_font ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_font_release_coverage),
-    bool (*)(uint32_t)), "stone_font_release_coverage ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_reload_font),
-    bool (*)(uint32_t, const char *, int)), "stone_reload_font ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_resize_font),
-    bool (*)(uint32_t, int)), "stone_resize_font ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_font_pixel_size),
-    int (*)(uint32_t)), "stone_get_font_pixel_size ABI");
-
-int main(void) {
-    uint32_t id = stone_load_font("font.ttf", 16, 3, "x");
-    return id == UINT32_C(7)
-        && stone_reload_font(id, "font.ttf", 24)
-        && stone_resize_font(id, 32)
-        && stone_get_font_pixel_size(id) == 24
-        && stone_font_release_coverage(id)
-        && stone_unload_font(id) ? 0 : 1;
-}
-"#,
-    )
-    .expect("write font lifecycle ABI consumer");
-    compile(&consumer, &binary, &[&provider_object]);
-    assert!(
-        Command::new(&binary)
-            .status()
-            .expect("run font lifecycle ABI consumer")
-            .success(),
-        "stone.h font lifecycle declarations did not match the exported provider ABI"
+"#],
+        "stone.h font lifecycle declarations did not match the exported provider ABI",
     );
 }
 
 #[test]
 fn stone_header_declares_font_glyph_info_with_its_exported_abi() {
-    let dir = tempfile::tempdir().expect("temporary C fixture directory");
-    let source = dir.path().join("font_glyph_info_abi.c");
-    let binary = dir.path().join("font_glyph_info_abi");
-
-    std::fs::write(
-        &source,
+    assert_c_passes(
         r#"
 #include <stone.h>
 
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_glyph_info),
-    bool (*)(uint32_t, int, int, float *)), "stone_get_glyph_info ABI");
+ABI(stone_get_glyph_info, bool (*)(uint32_t, int, int, float *));
 
 bool stone_get_glyph_info(uint32_t font_id, int face, int char_code, float *out) {
     if (font_id != UINT32_C(7) || face != 1 || char_code != 2 || out == NULL) return false;
@@ -1510,35 +899,19 @@ int main(void) {
         && out[0] == 1.5f ? 0 : 1;
 }
 "#,
-    )
-    .expect("write font glyph-info ABI fixture");
-    compile(&source, &binary, &[]);
-    assert!(
-        Command::new(&binary)
-            .status()
-            .expect("run font glyph-info ABI fixture")
-            .success(),
-        "stone.h glyph-info declaration did not match the exported provider ABI"
+        &[],
+        "stone.h glyph-info declaration did not match the exported provider ABI",
     );
 }
 
 #[test]
 fn stone_header_declares_font_atlas_images_with_their_exported_abi() {
-    let dir = tempfile::tempdir().expect("temporary C fixture directory");
-    let source = dir.path().join("font_atlas_images_abi.c");
-    let binary = dir.path().join("font_atlas_images_abi");
-
-    std::fs::write(
-        &source,
+    assert_c_passes(
         r#"
 #include <stone.h>
 
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_font_atlas_image),
-    uint64_t (*)(uint32_t)), "stone_get_font_atlas_image ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_font_atlas_image_cached),
-    uint64_t (*)(uint32_t)), "stone_get_font_atlas_image_cached ABI");
+ABI(stone_get_font_atlas_image, uint64_t (*)(uint32_t));
+ABI(stone_get_font_atlas_image_cached, uint64_t (*)(uint32_t));
 
 uint64_t stone_get_font_atlas_image(uint32_t font_id) {
     return font_id == UINT32_C(7) ? UINT64_C(10) : 0;
@@ -1552,32 +925,18 @@ int main(void) {
         && stone_get_font_atlas_image_cached(UINT32_C(7)) == UINT64_C(11) ? 0 : 1;
 }
 "#,
-    )
-    .expect("write font atlas image ABI fixture");
-    compile(&source, &binary, &[]);
-    assert!(
-        Command::new(&binary)
-            .status()
-            .expect("run font atlas image ABI fixture")
-            .success(),
-        "stone.h font atlas image declarations did not match the exported provider ABI"
+        &[],
+        "stone.h font atlas image declarations did not match the exported provider ABI",
     );
 }
 
 #[test]
 fn stone_header_declares_hostname_with_its_exported_abi() {
-    let dir = tempfile::tempdir().expect("temporary C fixture directory");
-    let source = dir.path().join("hostname_abi.c");
-    let binary = dir.path().join("hostname_abi");
-
-    std::fs::write(
-        &source,
+    assert_c_passes(
         r#"
 #include <stone.h>
 
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_hostname),
-    const char *(*)(void)), "stone_get_hostname ABI");
+ABI(stone_get_hostname, const char *(*)(void));
 
 const char *stone_get_hostname(void) { return "native-host"; }
 
@@ -1586,38 +945,20 @@ int main(void) {
     return host != NULL && host[0] == 'n' && host[10] == 't' ? 0 : 1;
 }
 "#,
-    )
-    .expect("write hostname ABI fixture");
-    compile(&source, &binary, &[]);
-    assert!(
-        Command::new(&binary)
-            .status()
-            .expect("run hostname ABI fixture")
-            .success(),
-        "stone.h hostname declaration did not match the exported provider ABI"
+        &[],
+        "stone.h hostname declaration did not match the exported provider ABI",
     );
 }
 
 #[test]
 fn stone_header_declares_native_path_reads_with_their_exported_abi() {
-    let dir = tempfile::tempdir().expect("temporary C fixture directory");
-    let source = dir.path().join("path_abi.c");
-    let binary = dir.path().join("path_abi");
-
-    std::fs::write(
-        &source,
+    assert_c_passes(
         r#"
 #include <stone.h>
 
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_working_directory),
-    const char *(*)(void)), "stone_get_working_directory ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_get_executable_path),
-    const char *(*)(void)), "stone_get_executable_path ABI");
-_Static_assert(__builtin_types_compatible_p(
-    __typeof__(&stone_changed_asset_path),
-    const char *(*)(int)), "stone_changed_asset_path ABI");
+ABI(stone_get_working_directory, const char *(*)(void));
+ABI(stone_get_executable_path, const char *(*)(void));
+ABI(stone_changed_asset_path, const char *(*)(int));
 
 const char *stone_get_working_directory(void) { return "native-cwd"; }
 const char *stone_get_executable_path(void) { return "native-bin"; }
@@ -1630,54 +971,14 @@ int main(void) {
     return cwd[0] == 'n' && exe[0] == 'n' && changed[0] == 'c' ? 0 : 1;
 }
 "#,
-    )
-    .expect("write native path ABI fixture");
-    compile(&source, &binary, &[]);
-    assert!(
-        Command::new(&binary)
-            .status()
-            .expect("run native path ABI fixture")
-            .success(),
-        "stone.h native path declarations did not match the exported provider ABI"
+        &[],
+        "stone.h native path declarations did not match the exported provider ABI",
     );
 }
 
 #[test]
 fn stone_header_declares_pref_path_with_its_exported_abi() {
-    let dir = tempfile::tempdir().expect("temporary C fixture directory");
-    let provider = dir.path().join("provider.c");
-    let provider_object = dir.path().join("provider.o");
-    let consumer = dir.path().join("consumer.c");
-    let binary = dir.path().join("consumer");
-
-    std::fs::write(
-        &provider,
-        r#"
-#include <stone.h>
-
-const char *stone_get_pref_path(const char *organization, const char *application) {
-    return organization[0] == 'o' && application[0] == 'a' ? "prefs/" : NULL;
-}
-"#,
-    )
-    .expect("write preference path ABI provider");
-    let result = Command::new("clang")
-        .args(["-std=c11", "-O0", "-Wall", "-Wextra", "-Werror", "-c"])
-        .arg("-I")
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("include"))
-        .arg(&provider)
-        .arg("-o")
-        .arg(&provider_object)
-        .output()
-        .expect("compile preference path ABI provider");
-    assert!(
-        result.status.success(),
-        "provider compile failed:\n{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-
-    std::fs::write(
-        &consumer,
+    assert_c_passes(
         r#"
 #include <stone.h>
 
@@ -1686,50 +987,20 @@ int main(void) {
     return path != NULL && path[0] == 'p' && path[5] == '/' ? 0 : 1;
 }
 "#,
-    )
-    .expect("write preference path ABI consumer");
-    compile(&consumer, &binary, &[&provider_object]);
-    assert!(
-        Command::new(&binary)
-            .status()
-            .expect("run preference path ABI consumer")
-            .success(),
-        "stone.h preference path declaration did not match the exported provider ABI"
+        &[r#"
+#include <stone.h>
+
+const char *stone_get_pref_path(const char *organization, const char *application) {
+    return organization[0] == 'o' && application[0] == 'a' ? "prefs/" : NULL;
+}
+"#],
+        "stone.h preference path declaration did not match the exported provider ABI",
     );
 }
 
 #[test]
 fn stone_header_declares_telemetry_close_with_its_exported_abi() {
-    let dir = tempfile::tempdir().expect("temporary C fixture directory");
-    let provider = dir.path().join("provider.c");
-    let provider_object = dir.path().join("provider.o");
-    let consumer = dir.path().join("consumer.c");
-    let binary = dir.path().join("consumer");
-
-    std::fs::write(
-        &provider,
-        r#"
-static int closed;
-void stone_telemetry_close(void) { closed = 1; }
-int telemetry_was_closed(void) { return closed; }
-"#,
-    )
-    .expect("write telemetry ABI provider");
-    let result = Command::new("clang")
-        .args(["-std=c11", "-O0", "-Wall", "-Wextra", "-Werror", "-c"])
-        .arg(&provider)
-        .arg("-o")
-        .arg(&provider_object)
-        .output()
-        .expect("compile telemetry ABI provider");
-    assert!(
-        result.status.success(),
-        "provider compile failed:\n{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-
-    std::fs::write(
-        &consumer,
+    assert_c_passes(
         r#"
 #include <stone.h>
 
@@ -1741,54 +1012,18 @@ int main(void) {
     return telemetry_was_closed() ? 0 : 1;
 }
 "#,
-    )
-    .expect("write telemetry ABI consumer");
-    compile(&consumer, &binary, &[&provider_object]);
-    assert!(
-        Command::new(&binary)
-            .status()
-            .expect("run telemetry ABI consumer")
-            .success(),
-        "stone.h telemetry close declaration did not match its exported ABI"
+        &[r#"
+static int closed;
+void stone_telemetry_close(void) { closed = 1; }
+int telemetry_was_closed(void) { return closed; }
+"#],
+        "stone.h telemetry close declaration did not match its exported ABI",
     );
 }
 
 #[test]
 fn stone_header_declares_telemetry_clear_with_its_exported_abi() {
-    let dir = tempfile::tempdir().expect("temporary C directory");
-    let provider = dir.path().join("provider.c");
-    let provider_object = dir.path().join("provider.o");
-    let consumer = dir.path().join("consumer.c");
-    let binary = dir.path().join("consumer");
-
-    std::fs::write(
-        &provider,
-        r#"
-#include <stone.h>
-
-bool stone_telemetry_clear(const char *root) {
-    return root != 0 && root[0] == 'r';
-}
-"#,
-    )
-    .expect("write telemetry clear ABI provider");
-    let result = Command::new("clang")
-        .args(["-std=c11", "-O0", "-Wall", "-Wextra", "-Werror", "-c"])
-        .arg("-I")
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("include"))
-        .arg(&provider)
-        .arg("-o")
-        .arg(&provider_object)
-        .output()
-        .expect("compile telemetry clear ABI provider");
-    assert!(
-        result.status.success(),
-        "provider compile failed:\n{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-
-    std::fs::write(
-        &consumer,
+    assert_c_passes(
         r#"
 #include <stone.h>
 
@@ -1797,29 +1032,32 @@ int main(void) {
     return clear_fn("root") ? 0 : 1;
 }
 "#,
-    )
-    .expect("write telemetry clear ABI consumer");
-    compile(&consumer, &binary, &[&provider_object]);
-    assert!(
-        Command::new(&binary)
-            .status()
-            .expect("run telemetry clear ABI consumer")
-            .success(),
-        "stone.h telemetry clear declaration did not match its exported ABI"
+        &[r#"
+#include <stone.h>
+
+bool stone_telemetry_clear(const char *root) {
+    return root != 0 && root[0] == 'r';
+}
+"#],
+        "stone.h telemetry clear declaration did not match its exported ABI",
     );
 }
 
 #[test]
 fn stone_header_declares_telemetry_configure_with_its_exported_abi() {
-    let dir = tempfile::tempdir().expect("temporary C directory");
-    let provider = dir.path().join("provider.c");
-    let provider_object = dir.path().join("provider.o");
-    let consumer = dir.path().join("consumer.c");
-    let binary = dir.path().join("consumer");
-
-    std::fs::write(
-        &provider,
+    assert_c_passes(
         r#"
+#include <stone.h>
+
+int main(void) {
+    bool (*configure_fn)(
+        const char *, const char *, const char *, const char *,
+        const char *, const char *, const char *, bool) = stone_telemetry_configure;
+    return configure_fn("root", "game", "build", "platform", "channel", "endpoint", "token", true)
+        ? 0 : 1;
+}
+"#,
+        &[r#"
 #include <stone.h>
 
 bool stone_telemetry_configure(
@@ -1834,57 +1072,14 @@ bool stone_telemetry_configure(
     (void)token;
     return explicit_reconsent;
 }
-"#,
-    )
-    .expect("write telemetry configure ABI provider");
-    let result = Command::new("clang")
-        .args(["-std=c11", "-O0", "-Wall", "-Wextra", "-Werror", "-c"])
-        .arg("-I")
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("include"))
-        .arg(&provider)
-        .arg("-o")
-        .arg(&provider_object)
-        .output()
-        .expect("compile telemetry configure ABI provider");
-    assert!(
-        result.status.success(),
-        "provider compile failed:\n{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-
-    std::fs::write(
-        &consumer,
-        r#"
-#include <stone.h>
-
-int main(void) {
-    bool (*configure_fn)(
-        const char *, const char *, const char *, const char *,
-        const char *, const char *, const char *, bool) = stone_telemetry_configure;
-    return configure_fn("root", "game", "build", "platform", "channel", "endpoint", "token", true)
-        ? 0 : 1;
-}
-"#,
-    )
-    .expect("write telemetry configure ABI consumer");
-    compile(&consumer, &binary, &[&provider_object]);
-    assert!(
-        Command::new(&binary)
-            .status()
-            .expect("run telemetry configure ABI consumer")
-            .success(),
-        "stone.h telemetry configure declaration did not match its exported ABI"
+"#],
+        "stone.h telemetry configure declaration did not match its exported ABI",
     );
 }
 
 #[test]
 fn stone_header_declares_length_aware_logging_with_its_exported_abi() {
-    let dir = tempfile::tempdir().expect("temporary C fixture directory");
-    let source = dir.path().join("logging_abi.c");
-    let binary = dir.path().join("logging_abi");
-
-    std::fs::write(
-        &source,
+    assert_c_passes(
         r#"
 #include <stone.h>
 
@@ -1921,18 +1116,15 @@ int main(void) {
     return 0;
 }
 "#,
-    )
-    .expect("write logging ABI consumer");
-    compile(&source, &binary, &[]);
+        &[],
+        "stone.h logging declarations disagree with their exported ABI",
+    );
 }
 
 #[test]
 fn stone_header_imgui_frontier_uses_typed_native_transport() {
-    let dir = tempfile::tempdir().unwrap();
-    let source = dir.path().join("imgui_frontier.c");
-    let binary = dir.path().join("imgui_frontier");
-    std::fs::write(&source, r#"#include <stone.h>
-#define ABI(name, signature) _Static_assert(__builtin_types_compatible_p(__typeof__(&name), signature), #name " ABI")
+    assert_c_passes(
+        r#"#include <stone.h>
 ABI(stone_imgui_is_rect_visible, bool (*)(float, float));
 ABI(stone_imgui_is_item_fully_visible, bool (*)(void));
 ABI(stone_imgui_set_next_window_pos, void (*)(float, float));
@@ -1945,7 +1137,8 @@ ABI(stone_imgui_window_add_image_quad, void (*)(uint64_t, float, float, float, f
 ABI(stone_imgui_image_raw, void (*)(uint64_t, float, float, float, float, float, float, float, float, float, float, float, float, float, float));
 ABI(stone_imgui_image_button_raw, bool (*)(const char *, uint64_t, float, float, float, float, float, float, float, float, float, float, float, float, float, float));
 int main(void) { return 0; }
-"#).unwrap();
-    compile(&source, &binary, &[]);
-    assert!(Command::new(binary).status().unwrap().success());
+"#,
+        &[],
+        "stone.h ImGui frontier declarations disagree with their exported ABI",
+    );
 }
