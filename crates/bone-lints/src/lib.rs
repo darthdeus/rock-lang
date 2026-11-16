@@ -1164,22 +1164,6 @@ impl LintDependencyIndex {
         affected
     }
 
-    fn action_declarations_changed(&self, ws: &Workspace, changed_files: &FxHashSet<Ustr>) -> bool {
-        changed_files.iter().any(|file| {
-            let current = ws.modules.iter().find(|module| module.file == *file);
-            match current {
-                Some(module) => {
-                    self.action_declaration_fingerprints.get(file)
-                        != Some(&action_declaration_fingerprint(
-                            module,
-                            self.action_policy.as_deref(),
-                        ))
-                }
-                None => self.action_declaration_fingerprints.contains_key(file),
-            }
-        })
-    }
-
     fn update_action_declarations(
         &mut self,
         ws: &Workspace,
@@ -1193,31 +1177,32 @@ impl LintDependencyIndex {
                 invalidation.locations.insert((file, span.offset_range().0));
             }
         }
-        for module in ws.user_modules(&FxHashSet::default()) {
-            if !changed_files.contains(&module.file)
-                || !is_production_action_module(module.file, self.action_policy.as_deref())
-            {
-                continue;
-            }
-            for (_, global) in module
-                .globals
-                .iter()
-                .filter(|(_, global)| is_action_name(global.name, self.action_policy.as_deref()))
-            {
-                invalidation.names.insert(global.name);
-                invalidation
-                    .locations
-                    .insert((module.file, global.name_span.offset_range().0));
-            }
+        let policy = self.action_policy.as_deref();
+        let declared_now: Vec<(Ustr, Ustr, Span)> = ws
+            .user_modules(&FxHashSet::default())
+            .filter(|module| {
+                changed_files.contains(&module.file)
+                    && is_production_action_module(module.file, policy)
+            })
+            .flat_map(|module| {
+                module
+                    .globals
+                    .values()
+                    .filter(|global| is_action_name(global.name, policy))
+                    .map(|global| (global.name, module.file, global.name_span))
+            })
+            .collect();
+        for &(action, file, span) in &declared_now {
+            invalidation.names.insert(action);
+            invalidation.locations.insert((file, span.offset_range().0));
         }
+        refresh_fingerprints(
+            &mut self.action_declaration_fingerprints,
+            ws,
+            changed_files,
+            |module| action_declaration_fingerprint(module, policy),
+        );
         if invalidation.names.is_empty() {
-            let policy = self.action_policy.as_deref();
-            refresh_fingerprints(
-                &mut self.action_declaration_fingerprints,
-                ws,
-                changed_files,
-                |module| action_declaration_fingerprint(module, policy),
-            );
             return invalidation;
         }
 
@@ -1231,61 +1216,36 @@ impl LintDependencyIndex {
         for action in removed {
             self.action_declarations.remove(&action);
         }
-        for module in ws.user_modules(&FxHashSet::default()) {
-            if !changed_files.contains(&module.file)
-                || !is_production_action_module(module.file, self.action_policy.as_deref())
-            {
-                continue;
-            }
-            for (_, global) in module
-                .globals
-                .iter()
-                .filter(|(_, global)| is_action_name(global.name, self.action_policy.as_deref()))
-            {
-                self.action_declarations
-                    .insert(global.name, (module.file, global.name_span));
-            }
+        for (action, file, span) in declared_now {
+            self.action_declarations.insert(action, (file, span));
         }
         let declared: FxHashSet<Ustr> = self.action_declarations.keys().copied().collect();
-        let old_edges: Vec<(BodyKey, FxHashSet<Ustr>)> = self
-            .action_body_edges
-            .iter()
-            .map(|(&body, edges)| (body, edges.clone()))
-            .collect();
-        for (body, mut edges) in old_edges {
-            let removed_edges: Vec<Ustr> = edges
-                .iter()
-                .copied()
-                .filter(|action| !declared.contains(action))
-                .collect();
-            for action in removed_edges {
-                edges.remove(&action);
-                remove_from_set(&mut self.action_callers, &action, &body);
-            }
-            self.action_body_edges.insert(body, edges);
+        for (body, edges) in &mut self.action_body_edges {
+            edges.retain(|action| {
+                let keep = declared.contains(action);
+                if !keep {
+                    remove_from_set(&mut self.action_callers, action, body);
+                }
+                keep
+            });
         }
-        let policy = self.action_policy.as_deref();
-        refresh_fingerprints(
-            &mut self.action_declaration_fingerprints,
-            ws,
-            changed_files,
-            |module| action_declaration_fingerprint(module, policy),
-        );
         invalidation
     }
+}
 
-    fn declarations_changed(&self, ws: &Workspace, changed_files: &FxHashSet<Ustr>) -> bool {
-        changed_files.iter().any(|file| {
-            let current = ws.modules.iter().find(|module| module.file == *file);
-            match current {
-                Some(module) => {
-                    self.declaration_fingerprints.get(file)
-                        != Some(&declaration_fingerprint(ws, module))
-                }
-                None => self.declaration_fingerprints.contains_key(file),
-            }
-        })
-    }
+/// Whether any of `files` now fingerprints differently from `fingerprints`.
+fn fingerprints_changed(
+    fingerprints: &FxHashMap<Ustr, String>,
+    ws: &Workspace,
+    files: &FxHashSet<Ustr>,
+    fingerprint: impl Fn(&Module) -> String,
+) -> bool {
+    files.iter().any(
+        |file| match ws.modules.iter().find(|module| module.file == *file) {
+            Some(module) => fingerprints.get(file) != Some(&fingerprint(module)),
+            None => fingerprints.contains_key(file),
+        },
+    )
 }
 
 fn refresh_fingerprints(
@@ -1865,9 +1825,12 @@ impl IncrementalLintCache {
         // Relowering moves every declaration span in the file without a delta,
         // so its declarations are treated as changed even when they look equal.
         let declarations_changed = change.relowered
-            || self
-                .dependency
-                .declarations_changed(ws, &change.changed_files);
+            || fingerprints_changed(
+                &self.dependency.declaration_fingerprints,
+                ws,
+                &change.changed_files,
+                |module| declaration_fingerprint(ws, module),
+            );
         let sibling_invalidation = if declarations_changed && sel.enabled(BACKEND_SIBLING_MISMATCH)
         {
             Some(
@@ -1878,10 +1841,14 @@ impl IncrementalLintCache {
             None
         };
         let action_invalidation = if sel.enabled(ACTION_CALLERS)
-            && self
-                .dependency
-                .action_declarations_changed(ws, &change.changed_files)
-        {
+            && fingerprints_changed(
+                &self.dependency.action_declaration_fingerprints,
+                ws,
+                &change.changed_files,
+                |module| {
+                    action_declaration_fingerprint(module, self.dependency.action_policy.as_deref())
+                },
+            ) {
             Some(
                 self.dependency
                     .update_action_declarations(ws, &change.changed_files, &mut stats),
