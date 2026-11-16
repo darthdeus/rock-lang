@@ -1,21 +1,22 @@
 //! Controls for the MIR-call -> `ConcreteBody` join
-//! (`crate::support::site_join`, plan S 9 / Stage 3).
-//!
-//! The join's value is that a call instruction selects the RIGHT concrete body.
-//! Every property below is therefore about DISTINGUISHABILITY -- two things
-//! that must not collapse onto one key -- plus the mutation arms proving each
-//! half of the identity is load-bearing rather than decorative.
+//! (`crate::support::site_join`). The join's value is that a call instruction
+//! selects the RIGHT concrete body, so the properties are about two things
+//! that must not collapse onto one key, plus mutation arms proving each half
+//! of the identity is load-bearing.
 
 use crate::common::{
-    census_of, census_of_graph, fn_name, graph_of as graph_of_ws, module_id, scalar_ctx,
-    ws_with_stdlib,
+    census_of, census_of_graph, fn_name, fn_ref, graph_of as graph_of_ws, prepared_body,
+    scalar_ctx, unjoined, ws_with_stdlib,
 };
-use crate::support::site_join::{self, Unjoined};
+use crate::support::site_join::{self, CalleeCheck, SiteJoinCensus, Unjoined, check_callee};
 use bone_semantic::inference::Workspace;
-use skull::instance_graph::InstanceGraph;
-use skull_mir::mir::{Inst, MirFunc};
+use skull::concrete_body::ConcreteBodies;
+use skull::instance_graph::{Instance, InstanceGraph};
+use skull_mir::lower::ScalarCtx;
+use skull_mir::mir::{FuncRef, Inst, MirFunc};
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use skull_mir::site::{Site, SiteDomain, SiteOp};
+use std::collections::BTreeMap;
 use ustr::Ustr;
 
 /// The backend the census lowers for; `check_callee` asks the emitter's own
@@ -24,49 +25,86 @@ const LUA: bone_semantic::hir::FnBackend = bone_semantic::hir::FnBackend::Lua;
 
 fn graph_of(src: &str) -> (Workspace, InstanceGraph) {
     let ws = ws_with_stdlib(src);
-    let g = crate::common::graph_of(&ws);
+    let g = graph_of_ws(&ws);
     (ws, g)
 }
 
-/// A `Callee::Rock` over `inst`, the arm an ordinary Rock call resolves to.
-fn rock(inst: &skull::instance_graph::Instance) -> skull::concrete_body::Callee {
+fn concrete(ws: &Workspace) -> (InstanceGraph, ConcreteBodies, ScalarCtx) {
+    let g = graph_of_ws(ws);
+    let bodies = skull::concrete_body::build(ws, &g);
+    let scx = scalar_ctx(ws, &g);
+    (g, bodies, scx)
+}
+
+fn rock(inst: &Instance) -> skull::concrete_body::Callee {
     skull::concrete_body::Callee::Rock(inst.clone())
 }
 
-/// Lower the `<test>` module's fn named `name` and run the SAME transform
-/// sequence emission runs, so a test inspects the body emission renders.
-fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
-    let mid = module_id(ws, "<test>");
-    let (fid, f) = ws
-        .module(mid)
-        .functions
+fn instance_of(ws: &Workspace, g: &InstanceGraph, name: &str) -> Instance {
+    g.substitutions()
+        .map(|(i, _)| i)
+        .find(|i| fn_name(ws, i.func) == name)
+        .unwrap_or_else(|| panic!("no `{name}` instance"))
+        .clone()
+}
+
+fn by_op(m: &BTreeMap<&'static str, usize>, op: &str) -> usize {
+    m.get(op).copied().unwrap_or(0)
+}
+
+/// `name`'s base instance, lowered but not yet prepared.
+fn lowered(ws: &Workspace, bodies: &ConcreteBodies, scx: &ScalarCtx, name: &str) -> MirFunc {
+    let plan = bodies
+        .plans
+        .get(&skull_mir::instance::Instance::base(fn_ref(ws, name)))
+        .expect("concrete plan");
+    skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &bodies.plans).expect("lower")
+}
+
+/// The concrete (non-empty substitution) instance of the generic `name`,
+/// lowered but not yet prepared.
+fn lowered_concrete_generic(
+    ws: &Workspace,
+    bodies: &ConcreteBodies,
+    scx: &ScalarCtx,
+    name: &str,
+) -> MirFunc {
+    let fref = fn_ref(ws, name);
+    let (_, plan) = bodies
+        .plans
         .iter()
-        .find(|(_, f)| f.name.as_str() == name)
-        .expect("fn not found");
-    let fref = skull_mir::mir::FuncRef {
-        module: mid,
-        func: fid,
-    };
-    let graph = graph_of_ws(ws);
-    let bodies = skull::concrete_body::build(ws, &graph);
-    let scx = scalar_ctx(ws, &graph);
-    let instance = skull_mir::instance::Instance::base(fref);
-    let plan = bodies.plans.get(&instance).expect("concrete plan");
-    let mut mf =
-        skull_mir::lower::lower_instance_with_plans(ws, &scx, plan, &bodies.plans).expect("lower");
-    let mangled = skull_mir::mangle::mangle_fn(ws, f);
+        .find(|(inst, _)| inst.func == fref && !inst.args.is_empty())
+        .expect("concrete generic instance");
+    skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &bodies.plans).expect("lower")
+}
+
+/// Run emission's transform sequence over `name`'s lowered body.
+fn prepare(ws: &Workspace, scx: &ScalarCtx, bodies: &ConcreteBodies, name: &str, mf: &mut MirFunc) {
+    let fref = fn_ref(ws, name);
+    let mangled = skull_mir::mangle::mangle_fn(ws, &ws.module(fref.module).functions[fref.func]);
     let mut cache = skull_transform::InlineCache::default();
     skull::mir_emit::prepare_instance_body_with_plans(
         ws,
-        &scx,
+        scx,
         fref,
         &mangled,
-        &mut mf,
+        mf,
         &mut cache,
         &bodies.plans,
     )
     .expect("prepare");
-    mf
+}
+
+/// Reachable-arena direct calls to the declaration named `name`.
+fn calls_to(ws: &Workspace, mf: &MirFunc, name: &str) -> usize {
+    mf.blocks
+        .iter()
+        .flat_map(|(_, block)| block.insts.iter())
+        .filter(|id| {
+            matches!(&mf.insts[**id], Inst::Call { func, .. } | Inst::CallMulti { func, .. }
+                if fn_name(ws, *func) == name)
+        })
+        .count()
 }
 
 /// Every recorded site in `mf`, including hoisted nested bodies.
@@ -78,53 +116,29 @@ fn sites(mf: &MirFunc) -> Vec<Site> {
     out
 }
 
-/// Reachable `CallBoundMulti`s -- the call form `emit_cur` does not stamp.
-fn count_bound_multi(mf: &MirFunc) -> usize {
-    mf.insts
-        .iter()
-        .filter(|(_, i)| matches!(i, Inst::CallBoundMulti { .. }))
-        .count()
-        + mf.nested_fns.iter().map(count_bound_multi).sum::<usize>()
+fn count_insts(mf: &MirFunc, pred: fn(&Inst) -> bool) -> usize {
+    mf.insts.iter().filter(|(_, i)| pred(i)).count()
+        + mf.nested_fns
+            .iter()
+            .map(|nf| count_insts(nf, pred))
+            .sum::<usize>()
 }
 
-fn call_count(mf: &MirFunc) -> usize {
-    mf.insts
-        .iter()
-        .filter(|(_, i)| {
-            matches!(
-                i,
-                Inst::Call { .. }
-                    | Inst::CallMulti { .. }
-                    | Inst::CallValue { .. }
-                    | Inst::CallValueMulti { .. }
-            )
-        })
-        .count()
-        + mf.nested_fns.iter().map(call_count).sum::<usize>()
+fn count_bound_multi(mf: &MirFunc) -> usize {
+    count_insts(mf, |i| matches!(i, Inst::CallBoundMulti { .. }))
+}
+
+fn count_bound_splits(mf: &MirFunc) -> usize {
+    mf.bound_next_split.len() + mf.nested_fns.iter().map(count_bound_splits).sum::<usize>()
 }
 
 // ---------------------------------------------------------------------------
 // Distinguishability
 // ---------------------------------------------------------------------------
 
-/// A bounded loop's `next` witness reaches MIR RECORDED, on the caller-generic
-/// path as well as the concrete one.
-///
-/// A `for` head's `iter` and `next` are the canonical same-span pair: two callee
-/// obligations at ONE expression carrying ONE span. That they stay distinct is
-/// proved at the KEY level by
-/// [`one_expression_under_different_operations_stays_distinct`]. This is the
-/// RECORDING half.
-///
-/// It used to be a pinned gap. `Inst::CallBoundMulti` was not one of the call
-/// forms `Builder::emit_cur` stamps, so the SAME source construct was recorded
-/// or invisible depending on which arm of `BoundNext` it took -- concrete
-/// (recorded) or caller-generic (not). The form is stamped now.
-///
-/// The placeholder names no callee by construction: the concrete `next` is known
-/// only per instantiation and the inliner substitutes it from the site's
-/// `BoundTree` at the splice. So it carries a SITE and no TARGET, and the census
-/// admits it under `bound-placeholder`.
+/// A bounded loop's `next` witness (`CallBoundMulti`) reaches MIR with a
+/// `for-next` site on the caller-generic path as well as the concrete one,
+/// keyed on the `for` head's expression. It carries a site but no target.
 #[test]
 fn a_bounded_loops_witness_reaches_mir_recorded() {
     let ws = ws_with_stdlib(
@@ -146,40 +160,10 @@ fn sum_all<I: Iterator<int>>(it: I) -> int {
 fn main() { print("{sum_all(Counter { n: 0 })}") }
 "#,
     );
-    let mid = module_id(&ws, "<test>");
-    let (sum_fid, _) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == "sum_all")
-        .expect("sum_all");
-    let graph = graph_of_ws(&ws);
-    let bodies = skull::concrete_body::build(&ws, &graph);
-    let scx = scalar_ctx(&ws, &graph);
-    let sum_ref = skull_mir::mir::FuncRef {
-        module: mid,
-        func: sum_fid,
-    };
-    let inst = bodies
-        .plans
-        .keys()
-        .find(|inst| inst.func == sum_ref && !inst.args.is_empty())
-        .cloned()
-        .expect("concrete bounded sum_all instance");
-    let mf = skull_mir::lower::lower_instance_with_plans(
-        &ws,
-        &scx,
-        bodies.plans.get(&inst).expect("bounded plan"),
-        &bodies.plans,
-    )
-    .expect("lower bounded concrete body");
-    // The fixture must actually CONTAIN the form. Without this the assertion
-    // below is satisfied by any body with no bounded loop at all.
+    let (_, bodies, scx) = concrete(&ws);
+    let mf = lowered_concrete_generic(&ws, &bodies, &scx, "sum_all");
     let bound_calls = count_bound_multi(&mf);
-    assert!(
-        bound_calls > 0,
-        "fixture emitted no `CallBoundMulti`, so it does not exercise the recording it proves"
-    );
+    assert!(bound_calls > 0, "fixture emitted no `CallBoundMulti`");
     let s = sites(&mf);
     let witnesses: Vec<&Site> = s
         .iter()
@@ -190,8 +174,6 @@ fn main() { print("{sum_all(Counter { n: 0 })}") }
         bound_calls,
         "every `CallBoundMulti` must carry a `for-next` site: {witnesses:?}"
     );
-    // And it is the `for` HEAD's expression -- the same one an `iter` witness
-    // would key on -- rather than an expression of its own.
     let heads: std::collections::BTreeSet<_> = witnesses.iter().map(|w| w.expr).collect();
     assert_eq!(
         heads.len(),
@@ -200,106 +182,55 @@ fn main() { print("{sum_all(Counter { n: 0 })}") }
     );
 }
 
-/// The same expression reached under different operations stays distinct even
-/// when the operations are the SAME variant with different conformance paths --
-/// `ForNext(vec![])` and `ForNext(vec![0])` are two witnesses of one tree.
-/// Asserted directly on the type, because no corpus fixture is guaranteed to
-/// produce a nested tree and a control that might not fire proves nothing.
+/// One expression reached under different operations stays distinct, even
+/// for one variant with different conformance paths, and `ForNext` stays
+/// distinct from `BoundNext` at the same path (a `for` over a bounded call
+/// carries both). Asserted on the type: no fixture is guaranteed to produce a
+/// nested tree.
 #[test]
 fn one_expression_under_different_operations_stays_distinct() {
     let ws = ws_with_stdlib("fn main() { print(\"x\") }");
     let mf = prepared_body(&ws, "main");
-    let e = mf
+    let expr = mf
         .call_sites
         .values()
         .next()
         .expect("main calls something")
         .site
         .expr;
-    let variants = [
-        Site {
-            domain: SiteDomain::Own,
-            expr: e,
-            op: SiteOp::DirectCall,
-        },
-        Site {
-            domain: SiteDomain::Own,
-            expr: e,
-            op: SiteOp::FnValue,
-        },
-        Site {
-            domain: SiteDomain::Own,
-            expr: e,
-            op: SiteOp::ForIter,
-        },
-        Site {
-            domain: SiteDomain::Own,
-            expr: e,
-            op: SiteOp::ForNext(vec![].into()),
-        },
-        Site {
-            domain: SiteDomain::Own,
-            expr: e,
-            op: SiteOp::ForNext(vec![0].into()),
-        },
-        Site {
-            domain: SiteDomain::Own,
-            expr: e,
-            op: SiteOp::BoundNext(vec![].into()),
-        },
-        Site {
-            domain: SiteDomain::Own,
-            expr: e,
-            op: SiteOp::BoundNext(vec![0].into()),
-        },
-        Site {
-            domain: SiteDomain::Own,
-            expr: e,
-            op: SiteOp::ImplicitIter,
-        },
-        Site {
-            domain: SiteDomain::Own,
-            expr: e,
-            op: SiteOp::Synthesized("__map_col_slot"),
-        },
-        Site {
-            domain: SiteDomain::Own,
-            expr: e,
-            op: SiteOp::Synthesized("__map_col_free"),
-        },
+    let ops = [
+        SiteOp::DirectCall,
+        SiteOp::FnValue,
+        SiteOp::ForIter,
+        SiteOp::ForNext(vec![].into()),
+        SiteOp::ForNext(vec![0].into()),
+        SiteOp::BoundNext(vec![].into()),
+        SiteOp::BoundNext(vec![0].into()),
+        SiteOp::ImplicitIter,
+        SiteOp::Synthesized("__map_col_slot"),
+        SiteOp::Synthesized("__map_col_free"),
     ];
-    let mut set: std::collections::BTreeSet<&Site> = std::collections::BTreeSet::new();
-    for v in &variants {
+    let mut set = std::collections::BTreeSet::new();
+    for op in ops {
+        let site = Site {
+            domain: SiteDomain::Own,
+            expr,
+            op,
+        };
         assert!(
-            set.insert(v),
-            "two operations at one expression collapsed: {v:?}"
+            set.insert(site.clone()),
+            "two operations at one expression collapsed: {site:?}"
         );
     }
-    assert_eq!(set.len(), variants.len());
-    // `ForNext` and `BoundNext` at the same path are deliberately different
-    // arms: a `for` over a bounded call carries both, at one expression and
-    // with the same path.
-    assert_ne!(
-        Site {
-            domain: SiteDomain::Own,
-            expr: e,
-            op: SiteOp::ForNext(vec![0].into())
-        },
-        Site {
-            domain: SiteDomain::Own,
-            expr: e,
-            op: SiteOp::BoundNext(vec![0].into())
-        },
-    );
 }
 
 // ---------------------------------------------------------------------------
 // Survival through remapping and inlining
 // ---------------------------------------------------------------------------
 
-/// Inlining clones a callee's instructions into the caller under a new `Idx`
-/// space. The site entries must be remapped with them -- and their OWNER
-/// re-interned into the caller's table, since index 0 there is the CALLER.
+/// Inlining clones a callee's instructions under a new `Idx` space. Their
+/// sites are remapped with them, and their OWNER re-interned into the
+/// caller's table, where index 0 is the caller.
 #[test]
 fn sites_survive_inlining_and_carry_the_callee_owner() {
     let ws = ws_with_stdlib(
@@ -313,22 +244,15 @@ fn main() { print("{top(3)}") }
 "#,
     );
     let mf = prepared_body(&ws, "top");
-    // `leaf` inlined, so `top` now contains the call to `double` that `leaf`
-    // owned. Its site must name `leaf` as owner, not `top`.
     let owners: Vec<&str> = mf
         .call_sites
         .values()
-        .map(|cs| {
-            let o = &mf.site_owners[cs.owner.0 as usize];
-            fn_name(&ws, o.func)
-        })
+        .map(|cs| fn_name(&ws, mf.site_owners[cs.owner.0 as usize].func))
         .collect();
     assert!(
         owners.contains(&"leaf"),
         "no spliced call attributed to `leaf`; owners = {owners:?}"
     );
-    // Every entry indexes a real owner slot -- a stale `OwnerRef` would be a
-    // silent misattribution rather than a lookup failure.
     for cs in mf.call_sites.values() {
         assert!(
             (cs.owner.0 as usize) < mf.site_owners.len(),
@@ -367,10 +291,6 @@ fn main() { print("{top([1, 2, 3])}") }
     }
 }
 
-fn count_bound_splits(mf: &MirFunc) -> usize {
-    mf.bound_next_split.len() + mf.nested_fns.iter().map(count_bound_splits).sum::<usize>()
-}
-
 #[test]
 fn cloned_bounded_value_calls_consume_split_placeholders() {
     let ws = ws_with_stdlib(
@@ -387,35 +307,10 @@ fn main() {
     let xs = [Pair { x: 1, y: 2 }, Pair { x: 3, y: 4 }]
     print("{sum_all(xs.iter())}")
 }
-        "#,
+"#,
     );
-    let mid = module_id(&ws, "<test>");
-    let (sum_fid, _) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == "sum_all")
-        .expect("sum_all");
-    let graph = graph_of_ws(&ws);
-    let bodies = skull::concrete_body::build(&ws, &graph);
-    let scx = scalar_ctx(&ws, &graph);
-    let sum_ref = skull_mir::mir::FuncRef {
-        module: mid,
-        func: sum_fid,
-    };
-    let inst = bodies
-        .plans
-        .keys()
-        .find(|inst| inst.func == sum_ref && !inst.args.is_empty())
-        .cloned()
-        .expect("concrete bounded sum_all instance");
-    let raw = skull_mir::lower::lower_instance_with_plans(
-        &ws,
-        &scx,
-        bodies.plans.get(&inst).expect("bounded plan"),
-        &bodies.plans,
-    )
-    .expect("lower sum_all");
+    let (_, bodies, scx) = concrete(&ws);
+    let raw = lowered_concrete_generic(&ws, &bodies, &scx, "sum_all");
     assert!(
         count_bound_multi(&raw) > 0,
         "fixture has no bounded placeholder"
@@ -425,9 +320,9 @@ fn main() {
         "fixture has no split placeholder"
     );
     let mf = prepared_body(&ws, "main");
-    let bound_calls = count_bound_multi(&mf);
     assert_eq!(
-        bound_calls, 0,
+        count_bound_multi(&mf),
+        0,
         "a concrete bounded call survived splicing: {mf:?}"
     );
     assert_eq!(
@@ -439,7 +334,7 @@ fn main() {
 
 #[test]
 fn concrete_lowering_carries_the_callee_bound_plan_to_the_call() {
-    let (ws, g) = graph_of(
+    let ws = ws_with_stdlib(
         r#"
 fn sum_all<I: Iterator<int>>(it: I) -> int {
     let total = 0
@@ -450,14 +345,9 @@ fn sum_all<I: Iterator<int>>(it: I) -> int {
 fn main() { print("{sum_all([1, 2, 3].iter())}") }
 "#,
     );
-    let bodies = skull::concrete_body::build(&ws, &g);
-    let main = bodies
-        .plans
-        .iter()
-        .find(|(inst, _)| inst.args.is_empty() && fn_name(&ws, inst.func) == "main")
-        .expect("main has no concrete plan");
-    let callee_plan = main
-        .1
+    let (_, bodies, scx) = concrete(&ws);
+    let main_plan = &bodies.plans[&skull_mir::instance::Instance::base(fn_ref(&ws, "main"))];
+    let callee_plan = main_plan
         .callees
         .values()
         .find_map(|inst| {
@@ -467,10 +357,7 @@ fn main() { print("{sum_all([1, 2, 3].iter())}") }
                 .filter(|plan| !plan.bound_tree.is_empty())
         })
         .expect("main does not retain a bounded callee plan");
-    let bodies = skull::concrete_body::build(&ws, &g);
-    let scx = scalar_ctx(&ws, &g);
-    let mf = skull_mir::lower::lower_instance_with_plans(&ws, &scx, main.1, &bodies.plans)
-        .expect("lower main with concrete plans");
+    let mf = lowered(&ws, &bodies, &scx, "main");
     assert!(
         !mf.resolved_bound_trees.is_empty(),
         "the concrete call lost its bound plan"
@@ -485,7 +372,8 @@ fn main() { print("{sum_all([1, 2, 3].iter())}") }
 
 #[test]
 fn standalone_bounded_resolution_records_a_nonempty_resolved_tree() {
-    let src = r#"
+    let (ws, g) = graph_of(
+        r#"
 struct Item { id: int, p: float }
 
 fn main() {
@@ -493,41 +381,28 @@ fn main() {
     let ids = xs.map(_.id).collect()
     print("{ids[0]}")
 }
-"#;
-    let (ws, g) = graph_of(src);
+"#,
+    );
     let bodies = skull::concrete_body::build(&ws, &g);
     let scx = scalar_ctx(&ws, &g);
-    let mut picked = None;
-    for (candidate, candidate_tree) in g.bound_trees() {
-        if candidate_tree.next.is_empty()
-            || !candidate_tree.next.values().any(|w| !w.sub.next.is_empty())
-            || !ws.module(candidate.func.module).functions[candidate.func.func]
-                .generic_bounds
-                .iter()
-                .any(Option::is_some)
-        {
-            continue;
-        }
-        let Some(plan) = bodies.plans.get(candidate) else {
-            continue;
-        };
-        let Ok(mf) = skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &bodies.plans)
-        else {
-            continue;
-        };
-        if count_bound_multi(&mf) > 0 {
-            picked = Some((candidate.clone(), candidate_tree.to_resolved()));
-            break;
-        }
-    }
-    let (inst, tree) = picked.expect("the fixture has no prepared bounded body with a tree");
-    let mut mf = skull_mir::lower::lower_instance_with_plans(
-        &ws,
-        &scx,
-        bodies.plans.get(&inst).expect("bounded plan"),
-        &bodies.plans,
-    )
-    .expect("lower bounded instance");
+    let lower = |inst: &Instance| {
+        let plan = bodies.plans.get(inst)?;
+        skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &bodies.plans).ok()
+    };
+    let (mut mf, tree) = g
+        .bound_trees()
+        .filter(|(candidate, tree)| {
+            tree.next.values().any(|w| !w.sub.next.is_empty())
+                && ws.module(candidate.func.module).functions[candidate.func.func]
+                    .generic_bounds
+                    .iter()
+                    .any(Option::is_some)
+        })
+        .find_map(|(candidate, tree)| {
+            let mf = lower(candidate)?;
+            (count_bound_multi(&mf) > 0).then(|| (mf, tree.to_resolved()))
+        })
+        .expect("the fixture has no prepared bounded body with a tree");
     assert!(
         !tree.is_empty(),
         "the prepared bounded fixture has no incoming tree"
@@ -564,8 +439,7 @@ fn main() {
 
 #[test]
 fn named_nested_functions_in_a_spliced_body_are_preserved() {
-    let ws = ws_with_stdlib(
-        r#"
+    let src = r#"
 @inline
 fn outer(x: int) -> int {
     fn inner(y: int) -> int {
@@ -576,10 +450,9 @@ fn outer(x: int) -> int {
 }
 
 fn top(x: int) -> int { return outer(x) + outer(x) }
-fn main() { print("{top(2)}") }
-"#,
-    );
-    let mf = prepared_body(&ws, "top");
+fn main() { print("{top(2)} {top(3)}") }
+"#;
+    let mf = prepared_body(&ws_with_stdlib(src), "top");
     assert!(
         !mf.nested_fns.is_empty(),
         "the spliced named nested body was dropped"
@@ -607,97 +480,17 @@ fn main() { print("{top(2)}") }
             .any(|name| names.contains(name)),
         "the spliced body kept no reference to its preserved nested symbol"
     );
-    let lua = crate::common::try_emit_module(
-        r#"
-@inline
-fn outer(x: int) -> int {
-    fn inner(y: int) -> int {
-        fn child(z: int) -> int { return z + 1 }
-        return child(y)
-    }
-    return inner(x)
-}
-
-fn top(x: int) -> int { return outer(x) + outer(x) }
-fn main() { print("{top(2)} {top(3)}") }
-"#,
-    )
-    .expect("a spliced named nested body must emit");
+    let lua = crate::common::try_emit_module(src).expect("a spliced named nested body must emit");
     assert_eq!(crate::common::run_main(&lua), "6 8");
 }
 
-/// A synthesized column-storage call joins ONLY under its own operation.
-///
-/// A column-stored `Map` rewrites `m[k] = v` and `table_unset` into runtime
-/// entries (`__map_col_slot`, `__map_col_free`). Those calls live at the SAME
-/// expression as the source operation, so stamping them `DirectCall` makes them
-/// collide with that expression's real callee -- and the callee check then
-/// reports a mismatch rather than a join.
-///
-/// This is the control that dies when `SiteOp` is discarded: without the
-/// operation half these sites resolve to the source call's callee and disagree
-/// with the runtime entry they actually target.
-#[test]
-fn a_synthesized_column_call_joins_under_its_own_operation() {
-    let c = census_of(
-        r#"
-value Tile { a: float, b: float }
-
-fn build() -> int {
-    let m: Map<string, Tile> = map_new()
-    m["x"] = Tile { a: 1, b: 2 }
-    m["y"] = Tile { a: 3, b: 4 }
-    let n = len(m)
-    clear(m)
-    return n
-}
-fn main() { print("{build()}") }
-"#,
-    );
-    assert!(
-        c.accounts(),
-        "accounting broken: {:?}",
-        c.accounting_failures()
-    );
-    // THE DENOMINATOR: the fixture must actually produce synthesized sites, and
-    // they must actually JOIN. Without both, `mismatches == 0` below is
-    // satisfied by a body with no column operation in it at all.
-    let synth_examined = c.examined_by_op.get("synthesized").copied().unwrap_or(0);
-    let synth_joined = c.joined_by_op.get("synthesized").copied().unwrap_or(0);
-    assert!(
-        synth_examined > 0,
-        "no synthesized site examined, so this proves nothing about the operation half: {c:?}"
-    );
-    assert!(
-        synth_joined > 0,
-        "synthesized sites were examined ({synth_examined}) but none joined: {c:?}"
-    );
-    // No call may resolve to a callee it does not target. That is the exact
-    // symptom of the operation being dropped: a runtime entry stamped
-    // `DirectCall` matches its source expression's callee instead.
-    let decl_mismatch = c
-        .unjoined
-        .get(&Unjoined::CalleeMismatch)
-        .copied()
-        .unwrap_or(0);
-    assert_eq!(
-        decl_mismatch, 0,
-        "a call resolved to a callee it does not target -- the site operation is not \
-         distinguishing synthesized runtime entries from their source call \
-         (synthesized examined = {synth_examined}, joined = {synth_joined}): {c:?}"
-    );
-}
-
-/// Pointwise operation accounting: a call filed under the WRONG operation must
-/// be caught, even though every global total still balances.
-///
-/// Built by hand rather than from a fixture, because the census is correct on
-/// real input -- the defect being guarded against is a future miscount, and the
-/// only way to test the guard is to hand it one.
+/// Accounting must catch a call filed under the WRONG operation although every
+/// global total balances, and an operation that vanishes from every
+/// histogram, which leaves no key for the pointwise check. Built by hand: the
+/// census is correct on real input, so only a hand-made miscount tests the
+/// guard.
 #[test]
 fn a_call_filed_under_the_wrong_operation_fails_accounting() {
-    use crate::support::site_join::{SiteJoinCensus, Unjoined};
-
     let mut c = SiteJoinCensus {
         obligations_examined: 2,
         joined: 1,
@@ -712,16 +505,11 @@ fn a_call_filed_under_the_wrong_operation_fails_accounting() {
     c.unjoined_by_op.insert("synthesized", 1);
     assert!(
         c.accounting_failures().is_empty(),
-        "the consistent census must pass, or the failure below proves nothing: {:?}",
+        "the consistent census must pass: {:?}",
         c.accounting_failures()
     );
 
-    // Now MISFILE one call, on ONE side only: the join is recorded under
-    // `synthesized` though it was examined under `direct-call`. Every global
-    // total is unchanged -- examined 2, joined 1, unjoined 1, and all three
-    // histograms still sum to their populations -- so only a pointwise check
-    // can see it. (Swapping BOTH sides is a consistent relabel, not a
-    // miscount, and correctly passes.)
+    // Misfile the join on one side only; every global total is unchanged.
     let mut bad = c.clone();
     bad.joined_by_op.clear();
     bad.joined_by_op.insert("synthesized", 1);
@@ -735,39 +523,29 @@ fn a_call_filed_under_the_wrong_operation_fails_accounting() {
         bad.unjoined_total()
     );
     let failures = bad.accounting_failures();
-    assert!(
-        failures
-            .iter()
-            .any(|f| f.contains("operation `direct-call`")),
-        "a call filed under the wrong operation passed accounting: {failures:?}"
-    );
-    assert!(
-        failures
-            .iter()
-            .any(|f| f.contains("operation `synthesized`")),
-        "only one side of the misfiling was reported: {failures:?}"
-    );
+    for op in ["direct-call", "synthesized"] {
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.contains(&format!("operation `{op}`"))),
+            "misfiling not reported for `{op}`: {failures:?}"
+        );
+    }
 
-    // An operation that DISAPPEARS from every histogram leaves the pointwise
-    // union with no key for it, so pointwise alone cannot see it. The global
-    // sums are what catch it, which is why both are kept.
     let mut vanished = c.clone();
     vanished.examined_by_op.remove("synthesized");
     vanished.joined_by_op.remove("synthesized");
     vanished.unjoined_by_op.remove("synthesized");
     vanished.admitted_indirect_by_op.remove("synthesized");
     let vf = vanished.accounting_failures();
-    assert!(
-        vf.iter().any(|f| f.contains("examined-by-op")),
-        "an operation vanished from every histogram and accounting passed: {vf:?}"
-    );
-    assert!(
-        vf.iter().any(|f| f.contains("unjoined-by-op")),
-        "only the examined side of the vanishing was reported: {vf:?}"
-    );
+    for sum in ["examined-by-op", "unjoined-by-op"] {
+        assert!(
+            vf.iter().any(|f| f.contains(sum)),
+            "a vanished operation passed the `{sum}` check: {vf:?}"
+        );
+    }
 
-    // And the CONSISTENT relabel (both sides moved) is not a miscount, so it
-    // must pass -- otherwise this arm would fire on any renaming.
+    // Moving both sides is a consistent relabel, not a miscount.
     let mut relabelled = c.clone();
     relabelled.joined_by_op.clear();
     relabelled.joined_by_op.insert("synthesized", 1);
@@ -780,14 +558,13 @@ fn a_call_filed_under_the_wrong_operation_fails_accounting() {
     );
 }
 
-/// PREMISE TEST for the callee comparison, and the control that DIES if the
-/// comparison is weakened back to declaration equality.
-///
-/// One generic declaration instantiated at two concrete types gives two
-/// instances with the SAME `FuncRef`. Feeding each instance the OTHER's key --
-/// FuncRef unchanged, generic arguments swapped -- must be an
-/// `InstanceMismatch`. Under a declaration-only comparison both would be
-/// accepted, which is exactly the defect this arm exists to catch.
+// ---------------------------------------------------------------------------
+// The callee comparison
+// ---------------------------------------------------------------------------
+
+/// Two instances of one generic share a `FuncRef`; feeding each the OTHER's
+/// claim must be an `InstanceMismatch`, which a declaration-only comparison
+/// would accept.
 #[test]
 fn swapping_two_generic_keys_is_an_instance_mismatch() {
     let (ws, g) = graph_of(
@@ -800,8 +577,7 @@ fn main() {
 }
 "#,
     );
-    // The two `ident` instances, and the key that names each.
-    let insts: Vec<&skull::instance_graph::Instance> = g
+    let insts: Vec<&Instance> = g
         .substitutions()
         .map(|(i, _)| i)
         .filter(|i| fn_name(&ws, i.func) == "ident")
@@ -809,52 +585,32 @@ fn main() {
     assert_eq!(
         insts.len(),
         2,
-        "fixture must produce TWO instances of one declaration: {insts:?}"
+        "fixture must produce TWO instances: {insts:?}"
     );
     let fref = insts[0].func;
     assert_eq!(
         insts[1].func, fref,
-        "the two instances must share a FuncRef to be a control"
+        "the two instances must share a FuncRef"
     );
+    let (c0, c1) = (insts[0].clone(), insts[1].clone());
+    assert_eq!((c0.args.len(), c1.args.len()), (1, 1));
+    assert_ne!(c0.args, c1.args, "the two claims must differ");
 
-    // Each claim comes from its instance's OWN recorded substitution, never from
-    // asking the oracle under test which candidate it likes.
-    let c0 = insts[0].clone();
-    let c1 = insts[1].clone();
-    assert_eq!(c0.args.len(), 1, "fixture has one generic: {c0:?}");
-    assert_eq!(c1.args.len(), 1, "fixture has one generic: {c1:?}");
-    assert_ne!(
-        c0.args, c1.args,
-        "the two claims must differ, or the swap below is a no-op"
-    );
-
-    // Matched: the instance and its OWN claim.
+    let check = |inst: &Instance, claim: &Instance| {
+        check_callee(&ws, &g, &rock(inst), fref, Some(claim), LUA)
+    };
+    assert_eq!(check(insts[0], &c0), CalleeCheck::Instance);
+    assert_eq!(check(insts[1], &c1), CalleeCheck::Instance);
     assert_eq!(
-        crate::support::site_join::check_callee(&ws, &g, &rock(insts[0]), fref, Some(&c0), LUA),
-        crate::support::site_join::CalleeCheck::Instance,
-        "an instance did not verify against its own claim"
+        check(insts[0], &c1),
+        CalleeCheck::InstanceMismatch,
+        "two instantiations of one declaration compared equal"
     );
-    assert_eq!(
-        crate::support::site_join::check_callee(&ws, &g, &rock(insts[1]), fref, Some(&c1), LUA),
-        crate::support::site_join::CalleeCheck::Instance
-    );
-    // SWAPPED: same FuncRef, other instantiation. A declaration-only comparison
-    // returns agreement here; the instance comparison must not.
-    assert_eq!(
-        crate::support::site_join::check_callee(&ws, &g, &rock(insts[0]), fref, Some(&c1), LUA),
-        crate::support::site_join::CalleeCheck::InstanceMismatch,
-        "two instantiations of one declaration compared equal -- the comparison is \
-         declaration-level, not instance-level"
-    );
-    assert_eq!(
-        crate::support::site_join::check_callee(&ws, &g, &rock(insts[1]), fref, Some(&c0), LUA),
-        crate::support::site_join::CalleeCheck::InstanceMismatch
-    );
+    assert_eq!(check(insts[1], &c0), CalleeCheck::InstanceMismatch);
 }
 
-/// The DECLARATION half of the comparison, with the same shape: a callee
-/// instance whose FuncRef is not the call's target must be a `DeclMismatch`.
-/// Deleting the declaration check leaves this red.
+/// A callee instance whose declaration is not the call's target is a
+/// `DeclMismatch`; against its own declaration a non-generic callee verifies.
 #[test]
 fn a_different_declaration_is_a_decl_mismatch() {
     let (ws, g) = graph_of(
@@ -864,34 +620,23 @@ fn two(x: int) -> int { return x + 1 }
 fn main() { print("{one(1)} {two(2)}") }
 "#,
     );
-    let find = |name: &str| -> skull::instance_graph::Instance {
-        g.substitutions()
-            .map(|(i, _)| i)
-            .find(|i| fn_name(&ws, i.func) == name)
-            .expect("instance")
-            .clone()
-    };
-    let one = find("one");
-    let two = find("two");
-    assert_ne!(one.func, two.func, "the fixture must give two declarations");
+    let one = instance_of(&ws, &g, "one");
+    let two = instance_of(&ws, &g, "two");
+    assert_ne!(one.func, two.func);
     assert_eq!(
-        crate::support::site_join::check_callee(&ws, &g, &rock(&one), one.func, None, LUA),
-        crate::support::site_join::CalleeCheck::NonGeneric,
-        "a non-generic callee against its own declaration must verify"
+        check_callee(&ws, &g, &rock(&one), one.func, None, LUA),
+        CalleeCheck::NonGeneric
     );
     assert_eq!(
-        crate::support::site_join::check_callee(&ws, &g, &rock(&one), two.func, None, LUA),
-        crate::support::site_join::CalleeCheck::DeclMismatch,
+        check_callee(&ws, &g, &rock(&one), two.func, None, LUA),
+        CalleeCheck::DeclMismatch,
         "a callee resolved to another declaration was accepted"
     );
 }
 
-/// A generic callee whose call recorded NO concrete instance is UNVERIFIED, and
-/// one whose record names another declaration is an invariant break -- kept
-/// apart because only the first can be a consequence of policy.
-///
-/// The admission control is built INDEPENDENTLY, from the graph's own recorded
-/// substitution, so the rejections are not circular.
+/// A generic callee with no recorded instance is unverified; a record naming
+/// another declaration is a recorder bug; a partial substitution names no
+/// instance. The admission control is the graph's own substitution.
 #[test]
 fn a_generic_callee_without_a_recorded_instance_is_unverified() {
     let (ws, g) = graph_of(
@@ -901,73 +646,27 @@ fn other<A, B>(a: A, b: B) -> B { return b }
 fn main() { print("{pair(1, 2.0)} {other(1, 2.0)}") }
 "#,
     );
-    let find = |n: &str| {
-        g.substitutions()
-            .map(|(i, _)| i)
-            .find(|i| fn_name(&ws, i.func) == n)
-            .unwrap_or_else(|| panic!("no `{n}` instance"))
-            .clone()
-    };
-    let inst = find("pair");
-    let alien = find("other");
-    assert_ne!(inst.func, alien.func, "the two declarations must differ");
-    assert_eq!(
-        ws.module(inst.func.module).functions[inst.func.func]
-            .generics
-            .len(),
-        2,
-        "fixture must declare two generics"
-    );
+    let inst = instance_of(&ws, &g, "pair");
+    let alien = instance_of(&ws, &g, "other");
+    assert_ne!(inst.func, alien.func);
+    assert_eq!(inst.args.len(), 2, "fixture must declare two generics");
+    let check = |c: Option<&Instance>| check_callee(&ws, &g, &rock(&inst), inst.func, c, LUA);
 
-    let check = |c: Option<&skull::instance_graph::Instance>| {
-        crate::support::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, c, LUA)
-    };
-
-    // ADMISSION CONTROL: the instance's own recorded substitution verifies.
-    let good = inst.clone();
-    assert_eq!(good.args.len(), 2, "one entry per generic: {good:?}");
-    assert_eq!(
-        check(Some(&good)),
-        crate::support::site_join::CalleeCheck::Instance,
-        "the independently-built correct claim did not verify, so the rejections below \
-         prove nothing"
-    );
-
-    // No record at all -- a concrete call without an owner is an invariant
-    // failure, not an optional specialization result.
-    assert_eq!(
-        check(None),
-        crate::support::site_join::CalleeCheck::NoInstance
-    );
-
-    // A record naming ANOTHER declaration. Not a policy outcome: the record is
-    // written beside the call it belongs to, so this can only be a recorder bug.
-    let wrong_decl = skull::instance_graph::Instance {
+    assert_eq!(check(Some(&inst)), CalleeCheck::Instance);
+    assert_eq!(check(None), CalleeCheck::NoInstance);
+    let wrong_decl = Instance {
         func: alien.func,
-        args: good.args.clone(),
+        args: inst.args.clone(),
     };
-    assert_eq!(
-        check(Some(&wrong_decl)),
-        crate::support::site_join::CalleeCheck::ClaimDeclMismatch
-    );
-
-    // Right declaration, WRONG substitution: a partial one names no instance.
-    let mut partial = good.clone();
+    assert_eq!(check(Some(&wrong_decl)), CalleeCheck::ClaimDeclMismatch);
+    let mut partial = inst.clone();
     partial.args.pop();
-    assert_eq!(
-        check(Some(&partial)),
-        crate::support::site_join::CalleeCheck::InstanceMismatch
-    );
+    assert_eq!(check(Some(&partial)), CalleeCheck::InstanceMismatch);
 }
 
-/// A BOUNDARY callee is verified as a boundary, not by reconstructing a Rock
-/// instantiation it does not have. An opaque body is emitted once per
-/// declaration and target, so its generic arguments do not participate in the
-/// symbol emission spells -- and demanding a Rock instance record for one
-/// reported the absence as an unverified call (application: 215 sites).
-///
-/// The control is the Rock arm over the SAME instance: it still demands the
-/// record, so this is not a blanket exemption for generic callees.
+/// A generic BOUNDARY callee verifies as a boundary, not by a Rock
+/// instantiation it does not have; the same instance as a Rock callee still
+/// demands the record.
 #[test]
 fn a_generic_boundary_callee_verifies_as_a_boundary() {
     let (ws, g) = graph_of(
@@ -980,9 +679,6 @@ fn main() {
 "#,
     );
     let bodies = skull::concrete_body::build(&ws, &g);
-    // Taken from the CALLEE TABLES rather than from a name: what makes this a
-    // boundary is how the walk resolved it, and a generic declaration is what
-    // makes the fixture non-vacuous.
     let (inst, class) = bodies
         .bodies
         .values()
@@ -997,28 +693,21 @@ fn main() {
             }
             _ => None,
         })
-        .expect("the fixture must reach a GENERIC boundary, or it proves nothing");
-
+        .expect("the fixture must reach a GENERIC boundary");
     let boundary = skull::concrete_body::Callee::Boundary(inst.clone(), class);
     assert_eq!(
-        crate::support::site_join::check_callee(&ws, &g, &boundary, inst.func, None, LUA),
-        crate::support::site_join::CalleeCheck::Boundary(class),
-        "a generic boundary was asked for a Rock instantiation it cannot have"
+        check_callee(&ws, &g, &boundary, inst.func, None, LUA),
+        CalleeCheck::Boundary(class)
     );
-    // CONTROL: the same generic instance as a ROCK callee still demands the
-    // record. Without this the arm above would read as "generic callees are
-    // exempt", which is the opposite of what it says.
     assert_eq!(
-        crate::support::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, None, LUA),
-        crate::support::site_join::CalleeCheck::NoInstance,
+        check_callee(&ws, &g, &rock(&inst), inst.func, None, LUA),
+        CalleeCheck::NoInstance,
         "the boundary exemption leaked to the Rock arm"
     );
 }
 
-/// `callee-resolved-unrecorded` is 0 over the corpus, and a zero is only
-/// evidence if the bucket CAN become non-zero. Drop the resolved instance's
-/// substitution from a cloned graph and the correct key must stop verifying --
-/// there is nothing left to compare it against.
+/// Dropping the resolved instance's substitution from the graph must stop the
+/// correct claim from verifying: there is nothing left to compare it with.
 #[test]
 fn a_resolved_instance_without_a_substitution_is_unrecorded() {
     let (ws, mut g) = graph_of(
@@ -1027,52 +716,28 @@ fn ident<T>(x: T) -> T { return x }
 fn main() { print("{ident(1)}") }
 "#,
     );
-    let inst = g
-        .substitutions()
-        .map(|(i, _)| i)
-        .find(|i| fn_name(&ws, i.func) == "ident")
-        .expect("instance")
-        .clone();
-    let claim = inst.clone();
-    // Control: with the substitution present, the claim verifies.
+    let inst = instance_of(&ws, &g, "ident");
     assert_eq!(
-        crate::support::site_join::check_callee(
-            &ws,
-            &g,
-            &rock(&inst),
-            inst.func,
-            Some(&claim),
-            LUA
-        ),
-        crate::support::site_join::CalleeCheck::Instance
+        check_callee(&ws, &g, &rock(&inst), inst.func, Some(&inst), LUA),
+        CalleeCheck::Instance
     );
-    // Remove ONLY the resolved instance's record -- the call still carries the
-    // same complete claim, so nothing about the CALL changed.
-    // Through the INDEX, which is where the record lives: removing the
-    // instance's entry is removing every owner's opinion of it.
-    let removed = g.index.subst.remove(&inst);
+    assert!(g.index.subst.remove(&inst).is_some(), "nothing was removed");
     g.root_instances.remove(&inst);
-    assert!(
-        removed.is_some(),
-        "nothing was removed, so the arm below is untested"
-    );
     assert_eq!(
-        crate::support::site_join::check_callee(
-            &ws,
-            &g,
-            &rock(&inst),
-            inst.func,
-            Some(&claim),
-            LUA
-        ),
-        crate::support::site_join::CalleeCheck::ResolvedUnrecorded,
+        check_callee(&ws, &g, &rock(&inst), inst.func, Some(&inst), LUA),
+        CalleeCheck::ResolvedUnrecorded,
         "a resolved instance with no recorded substitution was treated as agreement"
     );
 }
 
+/// Generic calls at two concrete types, called directly or spliced through
+/// an inlined generic wrapper, each verify their own concrete instance.
 #[test]
-fn generic_calls_join_two_concrete_instances() {
-    let src = r#"
+fn generic_calls_join_distinct_concrete_instances() {
+    for (generic, src) in [
+        (
+            "wrap",
+            r#"
 @inline
 fn wrap<T>(x: T) -> T { return id2(x) }
 fn id2<T>(x: T) -> T { return x }
@@ -1083,36 +748,48 @@ fn top() -> int {
     return a + int(b.x)
 }
 fn main() { print("{top()}") }
-"#;
-    let (ws, g) = graph_of(src);
-    let wraps: Vec<_> = g
-        .substitutions()
-        .filter(|(i, _)| fn_name(&ws, i.func) == "wrap")
-        .collect();
-    assert_eq!(
-        wraps.len(),
-        2,
-        "the fixture must reach both concrete `wrap` instances: {wraps:?}"
-    );
-    assert_eq!(
-        wraps.iter().filter(|(_, subst)| !subst.is_empty()).count(),
-        2,
-        "a generic declaration must not use an empty specialization identity: {wraps:?}"
-    );
-    let c = census_of_graph(&ws, &g);
-    assert!(c.joined_instance_verified >= 2, "{c:?}");
-    assert_eq!(c.unjoined.get(&Unjoined::OwnerNotAnInstance), None, "{c:?}");
-    assert_eq!(c.unjoined.get(&Unjoined::OwnerNotInTable), None, "{c:?}");
+"#,
+        ),
+        (
+            "ident",
+            r#"
+fn ident<T>(x: T) -> T { return x }
+fn use_both() -> int {
+    let a = ident(1)
+    let b = ident(2.0)
+    return a + int(b)
+}
+fn main() { print("{use_both()}") }
+"#,
+        ),
+    ] {
+        let (ws, g) = graph_of(src);
+        let instances: Vec<_> = g
+            .substitutions()
+            .filter(|(i, _)| fn_name(&ws, i.func) == generic)
+            .collect();
+        assert_eq!(instances.len(), 2, "{generic}: {instances:?}");
+        assert!(
+            instances.iter().all(|(_, subst)| !subst.is_empty()),
+            "{generic}: a generic declaration used an empty identity: {instances:?}"
+        );
+        let c = census_of_graph(&ws, &g);
+        assert!(c.joined_instance_verified >= 2, "{generic}: {c:?}");
+        assert!(c.accounts(), "{generic}: {c:?}");
+        assert_eq!(
+            unjoined(&c, Unjoined::OwnerNotAnInstance),
+            0,
+            "{generic}: {c:?}"
+        );
+        assert_eq!(
+            unjoined(&c, Unjoined::OwnerNotInTable),
+            0,
+            "{generic}: {c:?}"
+        );
+    }
 }
 
-/// Candidate identity comes from `callee_instances`, not from the optional
-/// standalone-delivery entry. Removing delivery from a concrete value call must
-/// still splice that instance, and the spliced site's owner must remain the
-/// callee declaration rather than the caller's slot.
-#[test]
-fn concrete_inline_uses_owner_when_delivery_is_absent() {
-    let ws = ws_with_stdlib(
-        r#"
+const WRAP_VEC2: &str = r#"
 @inline
 fn wrap<T>(x: T) -> T { return id2(x) }
 fn id2<T>(x: T) -> T { return x }
@@ -1121,89 +798,52 @@ fn top() -> float {
     return b.x
 }
 fn main() { print("{top()}") }
-"#,
-    );
-    let mid = module_id(&ws, "<test>");
-    let (fid, f) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == "top")
-        .expect("top");
-    let fref = skull_mir::mir::FuncRef {
-        module: mid,
-        func: fid,
-    };
-    let graph = graph_of_ws(&ws);
-    let bodies = skull::concrete_body::build(&ws, &graph);
-    let scx = scalar_ctx(&ws, &graph);
-    let top = skull_mir::instance::Instance::base(fref);
-    let top_plan = bodies.plans.get(&top).expect("top concrete plan");
-    let mut mf = skull_mir::lower::lower_instance_with_plans(&ws, &scx, top_plan, &bodies.plans)
-        .expect("lower top");
-    let (call, owner): (_, skull::instance_graph::Instance) = mf
+"#;
+
+/// Candidate identity comes from `callee_instances`, not from the optional
+/// delivery entry: with delivery removed the concrete call still splices,
+/// and the spliced sites keep the callee as owner.
+#[test]
+fn concrete_inline_uses_owner_when_delivery_is_absent() {
+    let ws = ws_with_stdlib(WRAP_VEC2);
+    let (_, bodies, scx) = concrete(&ws);
+    let mut mf = lowered(&ws, &bodies, &scx, "top");
+    let call = mf
         .insts
         .iter()
         .find_map(|(id, inst)| match inst {
             Inst::Call { func, .. } | Inst::CallMulti { func, .. }
-                if ws.module(func.module).functions[func.func].name.as_str() == "wrap" =>
+                if fn_name(&ws, *func) == "wrap" =>
             {
-                Some((
-                    id,
-                    mf.callee_instances.get(&id).cloned().expect("wrap owner"),
-                ))
+                Some(id)
             }
             _ => None,
         })
         .expect("concrete wrap call");
     assert!(
-        !owner.args.is_empty(),
-        "the fixture must have a concrete wrap owner: {owner:?}"
+        !mf.callee_instances[&call].args.is_empty(),
+        "the fixture must have a concrete wrap owner"
     );
     assert!(
         mf.spec_bindings.remove(&call).is_some(),
         "the fixture must have delivery to remove"
     );
-
-    let mangled = skull_mir::mangle::mangle_fn(&ws, f);
-    let mut cache = skull_transform::InlineCache::default();
-    skull::mir_emit::prepare_instance_body_with_plans(
-        &ws,
-        &scx,
-        fref,
-        &mangled,
-        &mut mf,
-        &mut cache,
-        &bodies.plans,
-    )
-    .expect("prepare");
-
-    let residual_wrap = mf
-        .blocks
-        .iter()
-        .flat_map(|(_, block)| block.insts.iter())
-        .filter(|id| {
-            matches!(&mf.insts[**id], Inst::Call { func, .. } | Inst::CallMulti { func, .. }
-            if ws.module(func.module).functions[func.func].name.as_str() == "wrap")
-        })
-        .count();
+    prepare(&ws, &scx, &bodies, "top", &mut mf);
     assert_eq!(
-        residual_wrap, 0,
+        calls_to(&ws, &mf, "wrap"),
+        0,
         "the concrete owner did not admit the splice"
     );
     assert!(
-        mf.call_sites.values().any(|cs| {
-            let owner = &mf.site_owners[cs.owner.0 as usize];
-            fn_name(&ws, owner.func) == "wrap"
-        }),
+        mf.call_sites
+            .values()
+            .any(|cs| fn_name(&ws, mf.site_owners[cs.owner.0 as usize].func) == "wrap"),
         "the spliced body lost its concrete callee owner"
     );
 }
 
-/// Same-width value instances are still different ABIs. Repointing the call's
-/// owner from `Vec2` to a two-int `Pair` must decline the splice even though the
-/// result lane count and call form match; otherwise a plausible scalar shape
-/// hides a semantically different concrete body.
+/// Same-width value instances are still different ABIs: repointing the call's
+/// owner from `Vec2` to a two-int `Pair` must decline the splice.
 #[test]
 fn concrete_inline_declines_same_width_incompatible_abi() {
     let ws = ws_with_stdlib(
@@ -1218,40 +858,19 @@ fn top() -> float {
 fn main() { print("{top()}") }
 "#,
     );
-    let mid = module_id(&ws, "<test>");
-    let (fid, f) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == "top")
-        .expect("top");
-    let fref = skull_mir::mir::FuncRef {
-        module: mid,
-        func: fid,
-    };
-    let graph = graph_of_ws(&ws);
-    let bodies = skull::concrete_body::build(&ws, &graph);
-    let scx = scalar_ctx(&ws, &graph);
-    let top = skull_mir::instance::Instance::base(fref);
-    let top_plan = bodies.plans.get(&top).expect("top concrete plan");
-    let mut mf = skull_mir::lower::lower_instance_with_plans(&ws, &scx, top_plan, &bodies.plans)
-        .expect("lower top");
+    let (_, bodies, scx) = concrete(&ws);
+    let mut mf = lowered(&ws, &bodies, &scx, "top");
     let call = mf
         .insts
         .iter()
         .find_map(|(id, inst)| match inst {
-            Inst::CallMulti { func, .. }
-                if ws.module(func.module).functions[func.func].name.as_str() == "wrap" =>
-            {
-                Some(id)
-            }
+            Inst::CallMulti { func, .. } if fn_name(&ws, *func) == "wrap" => Some(id),
             _ => None,
         })
         .expect("value call must use the multi-lane ABI");
-    let wrap = mf.callee_instances[&call].func;
     let pair = skull_mir::instance::Instance::intern(
         scx.interner(),
-        wrap,
+        mf.callee_instances[&call].func,
         vec![MonoTy::App {
             ctor: MonoCtor::Nominal(Ustr::from("Pair")),
             params: Vec::new(),
@@ -1262,38 +881,15 @@ fn main() { print("{top()}") }
         mf.spec_bindings.remove(&call).is_some(),
         "the negative arm must remove delivery"
     );
-
-    let mangled = skull_mir::mangle::mangle_fn(&ws, f);
-    let mut cache = skull_transform::InlineCache::default();
-    skull::mir_emit::prepare_instance_body_with_plans(
-        &ws,
-        &scx,
-        fref,
-        &mangled,
-        &mut mf,
-        &mut cache,
-        &bodies.plans,
-    )
-    .expect("an ABI mismatch declines rather than corrupting MIR");
-    let residual_wrap = mf
-        .blocks
-        .iter()
-        .flat_map(|(_, block)| block.insts.iter())
-        .filter(|id| {
-            matches!(&mf.insts[**id], Inst::CallMulti { func, .. }
-            if ws.module(func.module).functions[func.func].name.as_str() == "wrap")
-        })
-        .count();
+    prepare(&ws, &scx, &bodies, "top", &mut mf);
     assert_eq!(
-        residual_wrap, 1,
+        calls_to(&ws, &mf, "wrap"),
+        1,
         "an incompatible same-width owner was spliced"
     );
 }
 
-/// Every call instruction that survives to the emitted body carries a site.
-/// Stated over this fixture's own population rather than as a general claim:
-/// the corpus census reports a real `no-site` bucket, so "always" would be
-/// false.
+/// Every call that survives to this simple emitted body carries a site.
 #[test]
 fn every_call_in_a_simple_prepared_body_carries_a_site() {
     let ws = ws_with_stdlib(
@@ -1304,7 +900,15 @@ fn main() { print("{b(2)}") }
 "#,
     );
     let mf = prepared_body(&ws, "b");
-    let calls = call_count(&mf);
+    let calls = count_insts(&mf, |i| {
+        matches!(
+            i,
+            Inst::Call { .. }
+                | Inst::CallMulti { .. }
+                | Inst::CallValue { .. }
+                | Inst::CallValueMulti { .. }
+        )
+    });
     assert!(calls > 0, "fixture emitted no calls at all");
     assert_eq!(
         sites(&mf).len(),
@@ -1317,32 +921,28 @@ fn main() { print("{b(2)}") }
 // The census population
 // ---------------------------------------------------------------------------
 
-/// A non-generic direct call joins, and so does a boundary call. Both arms are
-/// asserted non-zero: a join satisfied entirely by one arm says nothing about
-/// the other, and `print` is a boundary while `helper` is Rock.
+/// Census fixtures, each with the property it must show. Every census must
+/// also satisfy every accounting identity. Each property pairs a zero bucket
+/// with a population, so the zero cannot pass over a fixture that never
+/// exercised it.
 #[test]
-fn non_generic_and_boundary_calls_both_join() {
-    let c = census_of(
-        r#"
+fn census_fixtures_join_their_calls() {
+    let cases: [(&str, &str, fn(&SiteJoinCensus) -> bool); 11] = [
+        (
+            // `print` is a boundary while `helper` is Rock.
+            "non-generic Rock and boundary calls both join",
+            r#"
 fn helper(x: int) -> int { return x * 2 }
 fn main() {
     let v = helper(21)
     print("{v}")
 }
 "#,
-    );
-    assert!(c.bodies_measured > 0, "nothing measured");
-    assert!(c.joined_rock > 0, "no Rock callee joined: {c:?}");
-    assert!(c.joined_boundary > 0, "no boundary callee joined: {c:?}");
-    assert!(c.accounts(), "accounting identity broken: {c:?}");
-}
-
-/// The census accounts for every examined call on a fixture that exercises
-/// generics, inlining and iteration together.
-#[test]
-fn the_census_accounts_for_every_examined_call() {
-    let c = census_of(
-        r#"
+            |c| c.bodies_measured > 0 && c.joined_rock > 0 && c.joined_boundary > 0,
+        ),
+        (
+            "generics, inlining and iteration: every call joined or given a cause",
+            r#"
 fn ident<T>(x: T) -> T { return x }
 @inline
 fn twice(x: int) -> int { return x + x }
@@ -1357,182 +957,39 @@ fn main() {
     print("{b} {t} {sum}")
 }
 "#,
-    );
-    assert!(c.obligations_examined > 0, "no calls examined");
-    assert!(c.accounts(), "accounting identity broken: {c:?}");
-    assert_eq!(
-        c.joined + c.unjoined_total(),
-        c.obligations_examined,
-        "a call is neither joined nor given a cause"
-    );
+            |c| {
+                c.obligations_examined > 0
+                    && c.joined + c.unjoined_total() == c.obligations_examined
+            },
+        ),
+        (
+            // Column-Map runtime entries sit at the source operation's
+            // expression; without the operation half of the site they would
+            // resolve to that expression's callee.
+            "synthesized column calls join under their own operation",
+            r#"
+value Tile { a: float, b: float }
+
+fn build() -> int {
+    let m: Map<string, Tile> = map_new()
+    m["x"] = Tile { a: 1, b: 2 }
+    m["y"] = Tile { a: 3, b: 4 }
+    let n = len(m)
+    clear(m)
+    return n
 }
-
-/// The join FAILS CLOSED on an owner the graph does not have, proved WITHOUT
-/// depending on a defect being present.
-///
-/// Its sibling below witnesses a concrete-owner population. This arm removes an
-/// instance's substitution from a cloned graph instead, so the rejection stays
-/// load-bearing even after concrete planning is total.
-#[test]
-fn an_owner_the_graph_does_not_have_is_refused() {
-    // The callee must be one that SPLICES with a concrete owner today, or there
-    // is no resolvable owner for the mutation to take away. `wrap<Vec2>` is
-    // that: `@inline` plus a value-struct instantiation, which specializes.
-    let src = r#"
-@inline
-fn wrap<T>(x: T) -> T { return id2(x) }
-fn id2<T>(x: T) -> T { return x }
-fn top() -> float {
-    let b = wrap(Vec2 { x: 1, y: 2 })
-    return b.x
-}
-fn main() { print("{top()}") }
-"#;
-    let (ws, mut g) = graph_of(src);
-    let bodies = skull::concrete_body::build(&ws, &g);
-    let scx = scalar_ctx(&ws, &g);
-    // CONTROL: with every substitution present, nothing is refused for want of
-    // an owner. Without this the refusal below could be any other failure.
-    // CONTROL: the calls `main` owns all join before the mutation. The fixture's
-    // baseline is NOT zero -- the stdlib splices its own shared generics -- so
-    // the claim is about the DELTA, measured on one instance, not about the
-    // total.
-    let before = site_join::census(&ws, &scx, &g, &bodies);
-    assert!(
-        before.joined > 0,
-        "the control fixture joined nothing: {before:?}"
-    );
-    let refused_before = before
-        .unjoined
-        .get(&Unjoined::OwnerNotAnInstance)
-        .copied()
-        .unwrap_or(0);
-
-    assert!(
-        before.joined_spliced > 0,
-        "nothing spliced, so no owner is at stake: {before:?}"
-    );
-
-    // Remove the SPLICED CALLEE's substitution -- one side only. `top`'s body is
-    // still lowered under its own unchanged substitution and still stamps the
-    // same owner on the spliced sites; all that is gone is the graph's ability
-    // to name that owner. Perturbing the MEASURED instance instead would move
-    // the recorded owner too, and a mutation applied to both sides of a
-    // comparison cannot fail it.
-    let victim = g
-        .substitutions()
-        .map(|(i, _)| i)
-        .find(|i| {
-            fn_name(&ws, i.func) == "wrap" && g.substitution(i).is_some_and(|s| !s.is_empty())
-        })
-        .expect("`wrap` instance with a concrete substitution")
-        .clone();
-    let removed = g.index.subst.remove(&victim);
-    g.root_instances.remove(&victim);
-    assert!(
-        removed.is_some(),
-        "nothing was removed, so the arm below is untested"
-    );
-    let after = site_join::census(&ws, &scx, &g, &bodies);
-    let refused_after = after
-        .unjoined
-        .get(&Unjoined::OwnerNotAnInstance)
-        .copied()
-        .unwrap_or(0);
-    assert!(
-        refused_after > refused_before,
-        "removing the spliced callee's substitution refused nothing new ({refused_before} -> \
-         {refused_after}), so its calls were matched to something the graph cannot name"
-    );
-    assert!(
-        after.joined < before.joined,
-        "nothing stopped joining: {after:?}"
-    );
-    // The denominator DOES shrink -- the victim's own body can no longer be
-    // lowered -- and that shrink is REPORTED rather than silent, which is the
-    // property that keeps a falling denominator from flattering the ratio.
-    assert!(
-        after
-            .bodies_skipped
-            .contains_key(&crate::support::site_join::BodySkip::NoSubstitution),
-        "the victim's body vanished from the space without a recorded cause: {after:?}"
-    );
-    assert!(
-        after.accounts(),
-        "accounting identity broken under the mutation: {after:?}"
-    );
-    // And it REFUSED rather than reaching past the owner table.
-    assert_eq!(
-        after
-            .unjoined
-            .get(&Unjoined::OwnerNotInTable)
-            .copied()
-            .unwrap_or(0),
-        0,
-        "an owner index escaped its table: {after:?}"
-    );
-}
-
-#[test]
-fn generic_calls_join_distinct_concrete_instances() {
-    let src = r#"
-fn ident<T>(x: T) -> T { return x }
-fn use_both() -> int {
-    let a = ident(1)
-    let b = ident(2.0)
-    return a + int(b)
-}
-fn main() { print("{use_both()}") }
-"#;
-    let (ws, g) = graph_of(src);
-    let idents: Vec<_> = g
-        .substitutions()
-        .filter(|(i, _)| fn_name(&ws, i.func) == "ident")
-        .collect();
-    assert_eq!(
-        idents.len(),
-        2,
-        "expected two `ident` instances: {idents:?}"
-    );
-    assert!(
-        idents.iter().all(|(_, subst)| !subst.is_empty()),
-        "{idents:?}"
-    );
-
-    let c = census_of_graph(&ws, &g);
-    assert!(
-        c.obligations_examined > 0,
-        "fixture examined no calls: {c:?}"
-    );
-    assert!(
-        c.joined_instance_verified >= 2,
-        "the two generic calls did not verify concrete instances: {c:?}"
-    );
-    assert!(c.accounts(), "accounting identity broken: {c:?}");
-    assert_eq!(c.unjoined.get(&Unjoined::OwnerNotAnInstance), None, "{c:?}");
-    assert_eq!(c.unjoined.get(&Unjoined::OwnerNotInTable), None, "{c:?}");
-}
-
-// ---------------------------------------------------------------------------
-// The site cursor, at both entries into expression lowering
-// ---------------------------------------------------------------------------
-
-/// A call in a SCALARIZED argument position carries its OWN expression.
-///
-/// `lower_expr_repr` is a second entry into expression lowering -- the value
-/// route the scalar ABI takes -- and it did not narrow the site cursor. Every
-/// call under an unboxed argument was therefore stamped with the ENCLOSING
-/// expression, so it selected the enclosing expression's callee: application filed
-/// 138 calls as `callee-decl-mismatch` this way, `outer(inner(..))` naming
-/// `outer` from the `inner` call and the reverse.
-///
-/// The fixture uses a value struct so the argument takes the unboxed route --
-/// the boxed route already went through `lower_expr` and would pass either way.
-/// The control is the boxed sibling below.
-#[test]
-fn a_call_under_a_scalarized_argument_carries_its_own_expression() {
-    let c = census_of(
-        r#"
+fn main() { print("{build()}") }
+"#,
+            |c| {
+                by_op(&c.joined_by_op, "synthesized") > 0
+                    && unjoined(c, Unjoined::CalleeMismatch) == 0
+            },
+        ),
+        (
+            // `lower_expr_repr`, the scalar ABI's entry into expression
+            // lowering, must narrow the site cursor to the nested call.
+            "a call under a scalarized argument carries its own expression",
+            r#"
 value Pt { x: float, y: float }
 
 fn pt(x: float, y: float) -> Pt { return Pt { x: x, y: y } }
@@ -1542,34 +999,11 @@ fn main() {
     print("{len2(pt(1.0, 2.0))}")
 }
 "#,
-    );
-    assert!(c.accounts(), "accounting identity broken: {c:?}");
-    // Both calls exist and both joined: `pt` must not be filed under `len2`'s
-    // expression, nor the reverse.
-    assert_eq!(
-        c.unjoined
-            .get(&Unjoined::CalleeMismatch)
-            .copied()
-            .unwrap_or(0),
-        0,
-        "a nested call selected the enclosing expression's callee: {c:?}"
-    );
-    // A declaration mismatch of ZERO proves nothing if no nested call was
-    // examined at all, so the population is asserted in the same run.
-    assert!(
-        c.joined >= 2,
-        "the fixture examined too few joined calls to have exercised nesting: {c:?}"
-    );
-}
-
-/// The nearest valid admission control: the same nesting through a BOXED
-/// argument, which reaches lowering through `lower_expr` and always carried its
-/// own expression. Without this, the test above could pass because nesting
-/// stopped being lowered at all.
-#[test]
-fn a_call_under_a_boxed_argument_also_carries_its_own_expression() {
-    let c = census_of(
-        r#"
+            |c| c.joined >= 2 && unjoined(c, Unjoined::CalleeMismatch) == 0,
+        ),
+        (
+            "a call under a boxed argument carries its own expression",
+            r#"
 fn inner(x: int) -> int { return x + 1 }
 fn outer(x: int) -> int { return x * 2 }
 
@@ -1577,78 +1011,31 @@ fn main() {
     print("{outer(inner(3))}")
 }
 "#,
-    );
-    assert!(c.accounts(), "accounting identity broken: {c:?}");
-    assert_eq!(
-        c.unjoined
-            .get(&Unjoined::CalleeMismatch)
-            .copied()
-            .unwrap_or(0),
-        0,
-        "a nested call selected the enclosing expression's callee: {c:?}"
-    );
-    assert!(
-        c.joined >= 2,
-        "too few joined calls to have exercised nesting: {c:?}"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// The indirect class
-// ---------------------------------------------------------------------------
-
-/// An indirect call through a RUNTIME VALUE is the permanent non-direct class,
-/// and it is admitted for a structural reason rather than by exhaustion:
-/// emission renders the callee OPERAND (`__rock_call(f, ..)` on JS, `f(..)` on
-/// Lua), so the call spells no symbol and has no target it could name wrongly.
-///
-/// The arm that keeps this from being a licence is
-/// `indirect_unrecorded_symbol`: it reads the emitted NAME rather than the
-/// records, so an operand that DOES spell a function is a finding here even
-/// though the classifier would have called it a runtime value.
-#[test]
-fn an_indirect_call_through_a_value_is_the_permanent_non_direct_class() {
-    let c = census_of(
-        r#"
+            |c| c.joined >= 2 && unjoined(c, Unjoined::CalleeMismatch) == 0,
+        ),
+        (
+            // An indirect call renders its operand, so it spells no symbol;
+            // the name-based check keeps that from being a licence.
+            "an indirect call through a value is admitted and spells no symbol",
+            r#"
 fn add_one(x: int) -> int { return x + 1 }
 
 fn apply(f: fn(int) -> int, x: int) -> int { return f(x) }
 
 fn main() { print("{apply(add_one, 3)}") }
 "#,
-    );
-    assert!(c.accounts(), "accounting identity broken: {c:?}");
-    let runtime = c
-        .indirect_forms_by_producer
-        .get(&crate::support::site_join::IndirectProducer::RuntimeValue)
-        .copied()
-        .unwrap_or(0);
-    assert!(
-        runtime > 0,
-        "no indirect call through a value was examined: {c:?}"
-    );
-    assert_eq!(
-        c.indirect_unrecorded_symbol, 0,
-        "an admitted indirect operand spells a workspace function symbol: {c:?}"
-    );
-}
-
-/// A fn-value SYMBOL MINT joins against `ConcreteBody::fn_values`, including
-/// when it is PASSED or STORED rather than called in place.
-///
-/// The mint is the one place a callee declaration becomes a spelled value, so it
-/// is the only thing an indirect call through it could name wrongly. Verifying
-/// it only where the minted `Inst::Global` is directly the operand of a
-/// `CallValue` leaves every passed or stored mint verified NOWHERE -- it is
-/// classified as a runtime value at the call and never compared with the graph's
-/// `FnValue` obligation at the mint.
-///
-/// Three shapes in one fixture, each reaching the mint by a different route:
-/// called in place, passed as an argument, stored in a local.
-#[test]
-fn a_fn_value_symbol_mint_joins_against_the_graphs_obligation() {
-    let c = census_of(
-        r#"
+            |c| {
+                let runtime = c
+                    .indirect_forms_by_producer
+                    .get(&site_join::IndirectProducer::RuntimeValue);
+                runtime.is_some_and(|n| *n > 0) && c.indirect_unrecorded_symbol == 0
+            },
+        ),
+        (
+            // A mint passed or stored rather than called in place is verified
+            // only as its own `fn-value` obligation.
+            "fn-value mints passed, stored and called through a local all join",
+            r#"
 fn add_one(x: int) -> int { return x + 1 }
 fn add_two(x: int) -> int { return x + 2 }
 fn add_three(x: int) -> int { return x + 3 }
@@ -1656,172 +1043,26 @@ fn add_three(x: int) -> int { return x + 3 }
 fn apply(f: fn(int) -> int, x: int) -> int { return f(x) }
 
 fn main() {
-    // PASSED as an argument: the mint never becomes a CallValue operand here.
     let a = apply(add_one, 1)
-    // STORED in a local first, then called through the cell.
     let g = add_two
     let b = g(2)
-    // Called through a local bound directly from the mint.
     let h = add_three
     let d = apply(h, 3)
     print("{a} {b} {d}")
 }
 "#,
-    );
-    assert!(c.accounts(), "accounting identity broken: {c:?}");
-    // The DENOMINATOR must contain them, or every assertion below is vacuous.
-    assert!(
-        c.symbol_mints >= 3,
-        "the fixture minted fewer than its three fn values, so the join is untested: {c:?}"
-    );
-    // Every mint joined: none fell into an unjoined cause.
-    let mint_op_examined = c.examined_by_op.get("fn-value").copied().unwrap_or(0);
-    let mint_op_joined = c.joined_by_op.get("fn-value").copied().unwrap_or(0);
-    assert_eq!(
-        mint_op_examined, c.symbol_mints,
-        "a mint was examined under an operation other than `fn-value`: {c:?}"
-    );
-    assert_eq!(
-        mint_op_joined, mint_op_examined,
-        "a fn-value mint did not join against the graph's `FnValue` obligation: {c:?}"
-    );
-}
-
-/// The mint's RECORD is compared BY THE CENSUS, not merely present: a record
-/// naming a different function becomes a `callee-decl-mismatch` in the bucket,
-/// while the mint stays in the denominator.
-///
-/// Asserted through `measure_prepared_body`, the same classifier production
-/// runs, rather than by calling `check_callee` directly -- that would prove the
-/// declaration comparison (already covered by
-/// [`a_different_declaration_is_a_decl_mismatch`]) and NOT that a corrupted
-/// record travels through `reachable_call_rows` into a census bucket.
-///
-/// One side only: the recorded declaration is perturbed while the emitted
-/// instruction, its site and the graph are untouched, so the graph still
-/// resolves the mint to the function the source named. Perturbing the source
-/// instead would move both sides and could not fail.
-#[test]
-fn a_mint_recording_the_wrong_function_is_a_census_mismatch() {
-    let src = r#"
-fn add_one(x: int) -> int { return x + 1 }
-fn add_two(x: int) -> int { return x + 2 }
-fn apply(f: fn(int) -> int, x: int) -> int { return f(x) }
-fn main() { print("{apply(add_one, 1)}") }
-"#;
-    let (ws, g) = graph_of(src);
-    let bodies = skull::concrete_body::build(&ws, &g);
-    let main_inst = g
-        .expanded()
-        .find(|i| fn_name(&ws, i.func) == "main")
-        .expect("`main` instance")
-        .clone();
-
-    let mut mf = prepared_body(&ws, "main");
-    let mint = *mf
-        .fn_value_symbols
-        .keys()
-        .next()
-        .expect("`add_one` used as a value minted no recorded symbol");
-    let recorded = mf.fn_value_symbols[&mint];
-    assert_eq!(
-        ws.module(recorded.module).functions[recorded.func]
-            .name
-            .as_str(),
-        "add_one",
-        "the fixture recorded the wrong function before any mutation"
-    );
-
-    // CONTROL: unmodified, the mint is in the denominator and it JOINS.
-    let scx = scalar_ctx(&ws, &g);
-    let before =
-        crate::support::site_join::measure_prepared_body(&ws, &scx, &g, &bodies, &main_inst, &mf);
-    assert_eq!(
-        before.symbol_mints, 1,
-        "the mint left the denominator: {before:?}"
-    );
-    assert_eq!(
-        before.joined_by_op.get("fn-value").copied().unwrap_or(0),
-        1,
-        "the correct record did not join, so the mismatch below proves nothing: {before:?}"
-    );
-    assert_eq!(
-        before
-            .unjoined
-            .get(&Unjoined::CalleeMismatch)
-            .copied()
-            .unwrap_or(0),
-        0,
-        "the control already mismatches: {before:?}"
-    );
-
-    // The ALIEN declaration, taken from the workspace rather than invented.
-    let mid = module_id(&ws, "<test>");
-    let (fid, _) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == "add_two")
-        .expect("`add_two`");
-    let alien = skull_mir::mir::FuncRef {
-        module: mid,
-        func: fid,
-    };
-    assert_ne!(
-        alien, recorded,
-        "the alien must differ, or the swap is a no-op"
-    );
-    mf.fn_value_symbols.insert(mint, alien);
-
-    let after =
-        crate::support::site_join::measure_prepared_body(&ws, &scx, &g, &bodies, &main_inst, &mf);
-    // The mint is still EXAMINED -- a corrupted record must not drop out of the
-    // denominator, which would look like agreement.
-    assert_eq!(
-        after.symbol_mints, before.symbol_mints,
-        "the corrupted mint left the denominator instead of failing: {after:?}"
-    );
-    assert_eq!(
-        after.examined_by_op.get("fn-value").copied().unwrap_or(0),
-        1,
-        "the corrupted mint was examined under another operation: {after:?}"
-    );
-    assert_eq!(
-        after
-            .unjoined
-            .get(&Unjoined::CalleeMismatch)
-            .copied()
-            .unwrap_or(0),
-        1,
-        "a mint recording another function was accepted by the census: {after:?}"
-    );
-    assert_eq!(
-        after.joined_by_op.get("fn-value").copied().unwrap_or(0),
-        0,
-        "the corrupted mint still joined: {after:?}"
-    );
-    assert!(after.accounts(), "accounting identity broken: {after:?}");
-}
-
-// ---------------------------------------------------------------------------
-// Place expressions
-// ---------------------------------------------------------------------------
-
-/// A synthesized call under an INDEX WRITE carries the `Expr::Index` node.
-///
-/// A place expression is never lowered as a value -- `lower_assign_effect`
-/// dispatches on `expr_arena[target]` directly -- so nothing installed the site
-/// cursor for it: in statement position the cursor was absent entirely and in
-/// value position it named the enclosing assignment. The bounds check the write
-/// synthesizes was therefore siteless (application: 61 `__nb_checked_index`), while
-/// the walk keys that obligation on the `Expr::Index` node itself.
-///
-/// The READ side is the control: it goes through `lower_expr_repr` and always
-/// carried its site, so a fixture that only read would pass either way.
-#[test]
-fn a_bounds_check_under_an_index_write_carries_the_index_expression() {
-    let c = census_of(
-        r#"
+            |c| {
+                let examined = by_op(&c.examined_by_op, "fn-value");
+                c.symbol_mints >= 3
+                    && examined == c.symbol_mints
+                    && by_op(&c.joined_by_op, "fn-value") == examined
+            },
+        ),
+        (
+            // A place expression is never lowered as a value, so the bounds
+            // check an index write synthesizes needs the `Expr::Index` site.
+            "a bounds check under an index write carries the index expression",
+            r#"
 value V2 { x: float, y: float }
 
 fn fill(buf: NativeBuffer<V2>, n: int) {
@@ -1838,43 +1079,17 @@ fn main() {
     print("{b[0].x}")
 }
 "#,
-    );
-    assert!(c.accounts(), "accounting identity broken: {c:?}");
-    assert_eq!(
-        c.unjoined.get(&Unjoined::NoSite).copied().unwrap_or(0),
-        0,
-        "a call under an index write carries no site: {c:?}"
-    );
-    assert_eq!(
-        c.unjoined
-            .get(&Unjoined::SiteNotInBody)
-            .copied()
-            .unwrap_or(0),
-        0,
-        "a call under an index write was stamped with an expression the body has no \
-         obligation at -- the enclosing assignment rather than the index: {c:?}"
-    );
-    // The write must actually have happened, or neither zero means anything.
-    assert!(c.joined > 0, "the fixture joined nothing: {c:?}");
-}
-
-/// A call inside a STRUCT-DEFAULT initializer JOINS, through its own arena.
-///
-/// `with_struct_default` installs the declaring struct's
-/// `BodyOwner::StructDefaults` arena while `site_owner` still names the
-/// enclosing function, so the call's `Idx<Expr>` is only meaningful against
-/// THAT arena. `SiteDomain` is what states which one; before it existed the
-/// stamp was withheld entirely, because an index read against the owner's arena
-/// joins through whatever expression sits there -- a plausible wrong answer,
-/// which is worse than a hole.
-///
-/// Both halves are asserted: the default's call joins, and the enclosing body's
-/// own calls still do. A domain that swallowed the whole function would satisfy
-/// neither.
-#[test]
-fn a_call_in_a_struct_default_joins_through_its_own_arena() {
-    let c = census_of(
-        r#"
+            |c| {
+                c.joined > 0
+                    && unjoined(c, Unjoined::NoSite) == 0
+                    && unjoined(c, Unjoined::SiteNotInBody) == 0
+            },
+        ),
+        (
+            // The default's call indexes the struct-defaults arena, which
+            // `SiteDomain` names; the enclosing body's calls still join.
+            "a call in a struct default joins through its own arena",
+            r#"
 fn seed() -> int { return 7 }
 
 struct Cfg {
@@ -1887,37 +1102,17 @@ fn main() {
     print("{c.n + c.m}")
 }
 "#,
-    );
-    assert!(c.accounts(), "accounting identity broken: {c:?}");
-    assert_eq!(
-        c.unjoined
-            .get(&Unjoined::SiteNotInBody)
-            .copied()
-            .unwrap_or(0),
-        0,
-        "the struct-default call reached MIR with no obligation recorded: {c:?}"
-    );
-    assert_eq!(
-        c.unjoined.get(&Unjoined::NoSite).copied().unwrap_or(0),
-        0,
-        "the struct-default call carries no site at all: {c:?}"
-    );
-    // CONTROL: the enclosing body's own calls are unaffected.
-    assert!(
-        c.joined > 0,
-        "the domain leaked to the enclosing body: {c:?}"
-    );
-}
-
-/// A column-Map store whose value cannot be null has no absent arm, whatever
-/// representation the value arrives in: a null-checked binding keeps its
-/// presence lane, and a boxed return is a scalar. The graph decides the store's
-/// entries from the value's type, so lowering must too, or the absent arm's
-/// `__map_col_free` call has no site.
-#[test]
-fn a_non_null_column_map_store_synthesizes_no_free() {
-    let c = census_of(
-        r#"
+            |c| {
+                c.joined > 0
+                    && unjoined(c, Unjoined::NoSite) == 0
+                    && unjoined(c, Unjoined::SiteNotInBody) == 0
+            },
+        ),
+        (
+            // A non-null value has no absent arm, so lowering must not
+            // synthesize the `__map_col_free` call the graph never models.
+            "a non-null column map store synthesizes no free",
+            r#"
 value P { x: float, y: float }
 fn make(a: float) -> P { return P { x: a, y: a } }
 fn retain(m: Map<string, P>, v: P?) {
@@ -1931,29 +1126,11 @@ fn main() {
     print("{len(m)}")
 }
 "#,
-    );
-    assert!(
-        c.accounts(),
-        "accounting broken: {:?}",
-        c.accounting_failures()
-    );
-    assert_eq!(
-        c.unjoined
-            .get(&Unjoined::SiteNotInBody)
-            .copied()
-            .unwrap_or(0),
-        0,
-        "a synthesized call has no graph site: {c:?}"
-    );
-}
-
-/// A descriptor field write copies the descriptor through `__descriptor_with`.
-/// The call takes the write's target as its site, and the graph models it
-/// there, so it joins even in statement position.
-#[test]
-fn a_descriptor_field_write_joins_its_copy_on_write_call() {
-    let c = census_of(
-        r#"
+            |c| c.joined > 0 && unjoined(c, Unjoined::SiteNotInBody) == 0,
+        ),
+        (
+            "descriptor field writes join their copy-on-write calls",
+            r#"
 struct Owner { nb: NativeBuffer<float> }
 global OWNED: NativeBuffer<float> = native_buffer_float(4)
 fn shrink(o: Owner) {
@@ -1965,13 +1142,123 @@ fn main() {
     print("{OWNED.len}")
 }
 "#,
+            |c| by_op(&c.joined_by_op, "synthesized") >= 2 && c.unjoined.is_empty(),
+        ),
+    ];
+    for (property, src, holds) in cases {
+        let c = census_of(src);
+        assert!(
+            c.accounts(),
+            "{property}: accounting broken: {:?}",
+            c.accounting_failures()
+        );
+        assert!(holds(&c), "{property}: {c:?}");
+    }
+}
+
+/// The join fails closed on an owner the graph does not have. Removing the
+/// spliced callee's substitution (one side only: the measured body still
+/// stamps the same owner) must refuse new calls as `owner-not-an-instance`,
+/// record the victim's lost body by cause, and never reach past the owner
+/// table.
+#[test]
+fn an_owner_the_graph_does_not_have_is_refused() {
+    let (ws, mut g) = graph_of(WRAP_VEC2);
+    let bodies = skull::concrete_body::build(&ws, &g);
+    let scx = scalar_ctx(&ws, &g);
+    // The stdlib splices its own generics, so the claim is about the delta.
+    let before = site_join::census(&ws, &scx, &g, &bodies);
+    assert!(before.joined > 0, "the control joined nothing: {before:?}");
+    assert!(before.joined_spliced > 0, "nothing spliced: {before:?}");
+    let victim = g
+        .substitutions()
+        .map(|(i, _)| i)
+        .find(|i| {
+            fn_name(&ws, i.func) == "wrap" && g.substitution(i).is_some_and(|s| !s.is_empty())
+        })
+        .expect("`wrap` instance with a concrete substitution")
+        .clone();
+    assert!(
+        g.index.subst.remove(&victim).is_some(),
+        "nothing was removed"
+    );
+    g.root_instances.remove(&victim);
+    let after = site_join::census(&ws, &scx, &g, &bodies);
+    assert!(
+        unjoined(&after, Unjoined::OwnerNotAnInstance)
+            > unjoined(&before, Unjoined::OwnerNotAnInstance),
+        "removing the spliced callee's substitution refused nothing new: {after:?}"
     );
     assert!(
-        c.accounts(),
-        "accounting broken: {:?}",
-        c.accounting_failures()
+        after.joined < before.joined,
+        "nothing stopped joining: {after:?}"
     );
-    let synth_joined = c.joined_by_op.get("synthesized").copied().unwrap_or(0);
-    assert!(synth_joined >= 2, "the two writes did not join: {c:?}");
-    assert!(c.unjoined.is_empty(), "a call did not join: {c:?}");
+    assert!(
+        after
+            .bodies_skipped
+            .contains_key(&site_join::BodySkip::NoSubstitution),
+        "the victim's body vanished without a recorded cause: {after:?}"
+    );
+    assert!(
+        after.accounts(),
+        "accounting broken under the mutation: {after:?}"
+    );
+    assert_eq!(
+        unjoined(&after, Unjoined::OwnerNotInTable),
+        0,
+        "an owner index escaped its table: {after:?}"
+    );
+}
+
+/// The census compares a mint's RECORD, not merely its presence: recording
+/// another function must move the mint from joined to `callee-decl-mismatch`
+/// while it stays in the denominator. Only the record is perturbed, so the
+/// graph still resolves the mint to the function the source named.
+#[test]
+fn a_mint_recording_the_wrong_function_is_a_census_mismatch() {
+    let (ws, g) = graph_of(
+        r#"
+fn add_one(x: int) -> int { return x + 1 }
+fn add_two(x: int) -> int { return x + 2 }
+fn apply(f: fn(int) -> int, x: int) -> int { return f(x) }
+fn main() { print("{apply(add_one, 1)}") }
+"#,
+    );
+    let bodies = skull::concrete_body::build(&ws, &g);
+    let scx = scalar_ctx(&ws, &g);
+    let main_inst = g
+        .expanded()
+        .find(|i| fn_name(&ws, i.func) == "main")
+        .expect("`main` instance")
+        .clone();
+    let mut mf = prepared_body(&ws, "main");
+    let mint = *mf
+        .fn_value_symbols
+        .keys()
+        .next()
+        .expect("`add_one` used as a value minted no recorded symbol");
+    assert_eq!(fn_name(&ws, mf.fn_value_symbols[&mint]), "add_one");
+    let measure =
+        |mf: &MirFunc| site_join::measure_prepared_body(&ws, &scx, &g, &bodies, &main_inst, mf);
+
+    let before = measure(&mf);
+    assert_eq!(before.symbol_mints, 1, "{before:?}");
+    assert_eq!(by_op(&before.joined_by_op, "fn-value"), 1, "{before:?}");
+    assert_eq!(unjoined(&before, Unjoined::CalleeMismatch), 0, "{before:?}");
+
+    let alien: FuncRef = fn_ref(&ws, "add_two");
+    mf.fn_value_symbols.insert(mint, alien);
+    let after = measure(&mf);
+    assert_eq!(
+        after.symbol_mints, 1,
+        "the corrupted mint left the denominator: {after:?}"
+    );
+    assert_eq!(by_op(&after.examined_by_op, "fn-value"), 1, "{after:?}");
+    assert_eq!(
+        unjoined(&after, Unjoined::CalleeMismatch),
+        1,
+        "a mint recording another function was accepted by the census: {after:?}"
+    );
+    assert_eq!(by_op(&after.joined_by_op, "fn-value"), 0, "{after:?}");
+    assert!(after.accounts(), "accounting broken: {after:?}");
 }
