@@ -270,7 +270,10 @@
 // prelude: __scene_type_population_length
 // prelude: __slot_alloc
 // prelude: __slot_release
+// prelude: __sort_key_lt
+// prelude: __sort_key_wide
 // prelude: __sort_map_keys
+// prelude: __sort_rows
 // prelude: __sort_string_map_keys
 // prelude: __unm
 // prelude: __unwrap_failed
@@ -286,6 +289,7 @@
 // prelude: __vec_data_set
 // prelude: __vec_data_sort
 // prelude: __vec_data_unset
+// prelude: __vec_sort_by_key_leaves
 // prelude: __weak_cache_delete
 // prelude: __weak_cache_entity_get
 // prelude: __weak_cache_entity_put

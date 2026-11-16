@@ -537,6 +537,13 @@ impl<'a> Builder<'a> {
         then_branch: Idx<Expr>,
         else_branch: Option<Idx<Expr>>,
     ) -> Result<(), CompilerError> {
+        if let Some(take_then) = self.static_sort_key_condition(cond)? {
+            return match (take_then, else_branch) {
+                (true, _) => self.lower_stmt_expr(then_branch),
+                (false, Some(eb)) => self.lower_stmt_expr(eb),
+                (false, None) => Ok(()),
+            };
+        }
         let then_bb = self.f.new_block();
         let else_bb = self.f.new_block();
         let join = self.f.new_block();

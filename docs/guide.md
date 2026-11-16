@@ -503,6 +503,14 @@ Other methods include `set`, `swap_remove` and `rev`. (Despite the
 name, the `Vec2`/`Vec3`/`Vec4` math types are unrelated fixed-size
 value types, not vectors.)
 
+`v.sort(key)` sorts in place, ascending by `key(element)`. A number or
+string key compares with `<`. A struct or tuple key compares its fields in
+order, nested values flattened, and the first unequal field decides:
+`cells.sort(c => (c.row, c.col))` sorts by row, then by column. Such a key
+may hold only `int`, `uint`, `float` and `string` fields; an optional or
+`bool` field is a compile error. The sort is not stable, so elements with
+equal keys can end up in any order.
+
 ## Maps
 
 `Map<K, V>` is a hash map, made with `map_new()`. Like vectors, `m[k]`

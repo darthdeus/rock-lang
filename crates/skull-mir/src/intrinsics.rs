@@ -76,6 +76,13 @@ pub enum ExpandKind {
     /// `@uniform_values fn f<T>(u: T) -> SemanticUniformBlock` -> one
     /// compiler-owned canonical scalar leaf per logical uniform leaf.
     UniformValues,
+    /// `@sort_key_wide fn f<T, K>(key_fn: fn(T) -> K) -> bool` -> whether `K`
+    /// has more than one leaf, as a bool const. An `if` on it lowers only the
+    /// selected arm, so the other arm's callees are never emitted.
+    SortKeyWide,
+    /// `@sort_key_lt fn f<T, K>(key_fn: fn(T) -> K, a: T, b: T) -> bool` ->
+    /// `key_fn(a) < key_fn(b)` compared leaf by leaf, first leaf first.
+    SortKeyLt,
 }
 
 /// True iff `f` is an intrinsic in the mechanism's sense: declared `@intrinsic`,
@@ -115,6 +122,12 @@ pub fn expand_kind(f: &Function) -> Option<ExpandKind> {
     }
     if has_anno(f, "uniform_values") {
         return Some(ExpandKind::UniformValues);
+    }
+    if has_anno(f, "sort_key_wide") {
+        return Some(ExpandKind::SortKeyWide);
+    }
+    if has_anno(f, "sort_key_lt") {
+        return Some(ExpandKind::SortKeyLt);
     }
     None
 }

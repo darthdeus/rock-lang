@@ -3814,9 +3814,41 @@ fn Vec<T>.clone(vec) -> [T] {
     return __vec_data_clone(vec)
 }
 
+// A struct or tuple key compares its leaves in order (lexicographic); a scalar
+// key compares with one `<`. The `if` is decided at compile time, so a scalar
+// key never reaches the leaf sort.
 fn Vec<T>.sort<K>(vec, key_fn: fn(T) -> K) {
-    __vec_data_sort(vec, key_fn)
+    if __sort_key_wide(key_fn) {
+        __vec_sort_by_key_leaves(vec, key_fn)
+    } else {
+        __vec_data_sort(vec, key_fn)
+    }
 }
+
+@sort_key_wide inline(lua) fn __sort_key_wide<T, K>(key_fn: fn(T) -> K) -> bool = """
+    error("__sort_key_wide must be compiler-expanded")
+"""
+
+@sort_key_lt inline(lua) fn __sort_key_lt<T, K>(key_fn: fn(T) -> K, a: T, b: T) -> bool = """
+    error("__sort_key_lt must be compiler-expanded")
+"""
+
+// Sorts row indices, then moves the rows, so one body serves every storage.
+fn __vec_sort_by_key_leaves<T, K>(vec: [T], key_fn: fn(T) -> K) {
+    let order = __sort_rows(vec.len, (i: int, j: int) => __sort_key_lt(key_fn, vec[i], vec[j]))
+    let rows = vec.clone()
+    for r in 0..vec.len {
+        vec[r] = rows[order[r]]
+    }
+}
+
+// `0..n` ordered by `lt`, as a Vec of 0-based row indices.
+inline(lua) fn __sort_rows(n: int, lt: fn(int, int) -> bool) -> [int] = """
+    local order = {}
+    for i = 1, n do order[i] = i - 1 end
+    table.sort(order, function(a, b) return lt(a, b) end)
+    return { _data = order, len = n, __ty = "Vec" }
+"""
 
 fn Vec<T>.sample(vec) -> T? {
     let len = vec_len(vec)

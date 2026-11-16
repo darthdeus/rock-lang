@@ -1,70 +1,179 @@
-// SENTINEL -- pins what `Vec<T>.sort<K>` does when the key `K` is WIDER than one
-// leaf. `K` is unconstrained (`fn Vec<T>.sort<K>(vec, key_fn: fn(T) -> K)`), so a
-// multi-leaf key type-checks, and the comparator is `key(a) < key(b)` in every
-// implementation: `__vec_data_sort`/`__rock_col_sort`/`__rock_col_sort_leaves` on
-// luajit, and their JS siblings.
+// `Vec<T>.sort<K>` with a key `K` WIDER than one leaf compares the leaves in
+// order: leaf 0, then leaf 1 on a tie, and so on (lexicographic). A value
+// struct's leaves are its fields in declaration order, nested values flattened
+// in place; a tuple's are its elements.
 //
-// CURRENT (WRONG) BEHAVIOR, identical on BOTH backends: only LEAF 0 is compared.
-// A multi-value return sends leaf 0 as the ordinary return value, so `<` sees the
-// first leaf and the rest are silently discarded. `xs.sort(_.p)` on `Vec2` sorts
-// by `p.x` and ignores `p.y`, with no diagnostic.
-//
-// CORRECT would be either a compile-time rejection of a non-comparable key, or a
-// lexicographic compare across all leaves. That is a language-design call (the
-// unconstrained `K` is the root cause), not a codegen fix.
-//
-// WHEN THIS GOES RED the behavior changed. If the key became a compile error,
-// delete this file and add the case to `tests/errors/`. If it became
-// lexicographic, flip the expectations to 3,2,1 / 3,2,1 and drop the sentinel
-// framing.
-//
-// NOT a return-bank defect: the three JS sort comparators invoke the key twice in
-// one statement, which cannot corrupt anything because none of them READS the
-// bank. Both backends agree here, which is what rules the ABI out.
+// `sort` is not stable (luajit's `table.sort` is not), so every case either has
+// no full-key ties or prints only the keys, whose sorted order is the same
+// whichever tied element lands first.
 
 struct Item { id: int, p: Vec2 }
+struct Item3 { id: int, p: Vec3 }
+value Inner { b: int, c: float }
+value Outer { a: int, inner: Inner }
+struct Nested { id: int, key: Outer }
+struct Named { id: int, rank: int, name: string }
 
-// Leaf 0 distinct and ordered opposite to leaf 1: the multi-leaf key does order
-// by leaf 0. No ties, so sort stability (JS stable, luajit's table.sort not)
-// cannot explain the result.
+fn ids(xs: [Item]) -> string {
+    let parts: [string] = []
+    for x in xs { parts.push(tostring(x.id)) }
+    return join(parts, ",")
+}
+
+// Leaf 0 distinct and ordered opposite to leaf 1, so a leaf-0-only compare and
+// a later-leaf compare would give different answers.
 @test(output = "order=3,2,1")
-fn sort_by_multi_leaf_key_uses_leaf_zero() {
+fn leaf_zero_decides_when_distinct() {
     let xs = [
         Item { id: 1, p: v(3.0, 1.0) },
         Item { id: 2, p: v(2.0, 2.0) },
         Item { id: 3, p: v(1.0, 3.0) },
     ]
     xs.sort(_.p)
-    let ids = xs.map(_.id).collect()
-    print("order={ids[0]},{ids[1]},{ids[2]}")
+    print("order={ids(xs)}")
 }
 
-// The discriminating case: leaf 0 CONSTANT, leaf 1 distinct and descending. A
-// leaf-0-only compare ties every pair and preserves input order; a lexicographic
-// compare would yield 3,2,1. Input order is the sentinel value.
-@test(output = "order=1,2,3")
-fn sort_by_multi_leaf_key_ignores_later_leaves() {
+// Leaf 0 constant: leaf 1 alone orders the elements.
+@test(output = "order=3,2,1")
+fn leaf_one_breaks_a_leaf_zero_tie() {
     let xs = [
         Item { id: 1, p: v(5.0, 3.0) },
         Item { id: 2, p: v(5.0, 2.0) },
         Item { id: 3, p: v(5.0, 1.0) },
     ]
     xs.sort(_.p)
-    let ids = xs.map(_.id).collect()
-    print("order={ids[0]},{ids[1]},{ids[2]}")
+    print("order={ids(xs)}")
 }
 
-// CONTROL: a scalar key on the same data sorts correctly, so the two sentinels
-// above are about the key's WIDTH and not about `sort`, the item struct, or the
-// placeholder lambda.
+@test(output = "order=4,2,3,1")
+fn mixed_ties_across_two_leaves() {
+    let xs = [
+        Item { id: 1, p: v(2.0, 9.0) },
+        Item { id: 2, p: v(1.0, 5.0) },
+        Item { id: 3, p: v(2.0, -1.0) },
+        Item { id: 4, p: v(1.0, 4.0) },
+    ]
+    xs.sort(_.p)
+    print("order={ids(xs)}")
+}
+
+@test(output = "order=4,3,2,1")
+fn three_leaf_key_reaches_the_last_leaf() {
+    let xs = [
+        Item3 { id: 1, p: v(1.0, 1.0, 4.0) },
+        Item3 { id: 2, p: v(1.0, 1.0, 3.0) },
+        Item3 { id: 3, p: v(1.0, 0.0, 9.0) },
+        Item3 { id: 4, p: v(0.0, 7.0, 7.0) },
+    ]
+    xs.sort(_.p)
+    let parts: [string] = []
+    for x in xs { parts.push(tostring(x.id)) }
+    print("order={join(parts, ",")}")
+}
+
+@test(output = "order=4,3,2,1")
+fn nested_value_leaves_flatten_in_declaration_order() {
+    let xs = [
+        Nested { id: 1, key: Outer { a: 1, inner: Inner { b: 2, c: 0.5 } } },
+        Nested { id: 2, key: Outer { a: 1, inner: Inner { b: 2, c: 0.25 } } },
+        Nested { id: 3, key: Outer { a: 1, inner: Inner { b: 1, c: 9.0 } } },
+        Nested { id: 4, key: Outer { a: 0, inner: Inner { b: 5, c: 9.0 } } },
+    ]
+    xs.sort(_.key)
+    let parts: [string] = []
+    for x in xs { parts.push(tostring(x.id)) }
+    print("order={join(parts, ",")}")
+}
+
+@test(output = "order=3,1,4,2")
+fn tuple_key_with_a_string_leaf() {
+    let xs = [
+        Named { id: 1, rank: 1, name: "b" },
+        Named { id: 2, rank: 2, name: "a" },
+        Named { id: 3, rank: 1, name: "a" },
+        Named { id: 4, rank: 1, name: "c" },
+    ]
+    xs.sort(x => (x.rank, x.name))
+    let parts: [string] = []
+    for x in xs { parts.push(tostring(x.id)) }
+    print("order={join(parts, ",")}")
+}
+
+// Full-key ties: only the keys are printed, so the unstable sort cannot change
+// the output.
+@test(output = "1,1 1,1 1,2 2,0 2,0")
+fn full_key_ties_print_order_independent_keys() {
+    let xs = [
+        Item { id: 1, p: v(2.0, 0.0) },
+        Item { id: 2, p: v(1.0, 1.0) },
+        Item { id: 3, p: v(1.0, 2.0) },
+        Item { id: 4, p: v(2.0, 0.0) },
+        Item { id: 5, p: v(1.0, 1.0) },
+    ]
+    xs.sort(_.p)
+    let parts: [string] = []
+    for x in xs { parts.push("{int(x.p.x)},{int(x.p.y)}") }
+    print(join(parts, " "))
+}
+
+// The whole element as the key, over each storage a value vector can take.
+value V2 { x: float, y: float }
+nobox value NP { x: float, y: float }
+
+@test(output = "1,3 1,4 2,0 2,5")
+fn column_value_elements_sort_by_both_leaves() {
+    let xs = [V2 { x: 2.0, y: 5.0 }, V2 { x: 1.0, y: 4.0 }, V2 { x: 2.0, y: 0.0 }, V2 { x: 1.0, y: 3.0 }]
+    xs.sort(p => p)
+    let parts: [string] = []
+    for p in xs { parts.push("{int(p.x)},{int(p.y)}") }
+    print(join(parts, " "))
+}
+
+@test(output = "1,3 1,4 2,0 2,5")
+fn nobox_column_elements_sort_by_both_leaves() {
+    let xs = [NP { x: 2.0, y: 5.0 }, NP { x: 1.0, y: 4.0 }, NP { x: 2.0, y: 0.0 }, NP { x: 1.0, y: 3.0 }]
+    xs.sort(p => p)
+    let parts: [string] = []
+    for p in xs { parts.push("{int(p.x)},{int(p.y)}") }
+    print(join(parts, " "))
+}
+
+// A flat enum of a wide payload is stored strided.
+nobox value Quad { a: int, b: int, c: int, d: int }
+enum Slot { Entry(Quad), Overflow(int) }
+
+fn slot_key(slot: Slot) -> (int, int) {
+    return match slot {
+        Slot::Entry(q) => (q.a, q.d),
+        Slot::Overflow(n) => (n, 0),
+    }
+}
+
+@test(output = "1,2 1,5 3,0 4,1")
+fn strided_elements_sort_by_both_leaves() {
+    let slots: [Slot] = [
+        Slot::Entry(Quad { a: 4, b: 0, c: 0, d: 1 }),
+        Slot::Entry(Quad { a: 1, b: 0, c: 0, d: 5 }),
+        Slot::Overflow(3),
+        Slot::Entry(Quad { a: 1, b: 0, c: 0, d: 2 }),
+    ]
+    slots.sort(slot_key)
+    let parts: [string] = []
+    for s in slots {
+        let (a, d) = slot_key(s)
+        parts.push("{a},{d}")
+    }
+    print(join(parts, " "))
+}
+
+// CONTROL: a one-leaf key on the same data.
 @test(output = "order=3,2,1")
-fn sort_by_scalar_key_control() {
+fn scalar_key_control() {
     let xs = [
         Item { id: 1, p: v(3.0, 1.0) },
         Item { id: 2, p: v(2.0, 2.0) },
         Item { id: 3, p: v(1.0, 3.0) },
     ]
     xs.sort(_.p.x)
-    let ids = xs.map(_.id).collect()
-    print("order={ids[0]},{ids[1]},{ids[2]}")
+    print("order={ids(xs)}")
 }

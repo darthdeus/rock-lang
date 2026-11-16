@@ -1442,6 +1442,8 @@ impl<'a> Builder<'a> {
                             self.expand_struct_pairs(e, func, &arg_idxs)
                         }
                         Some(ExpandKind::Materialize) => self.expand_materialize(&arg_idxs),
+                        Some(ExpandKind::SortKeyWide) => self.expand_sort_key_wide(&arg_idxs),
+                        Some(ExpandKind::SortKeyLt) => self.expand_sort_key_lt(e, &arg_idxs),
                         Some(ExpandKind::ShaderPipeline) => {
                             self.expand_shader_pipeline(e, &arg_idxs)
                         }

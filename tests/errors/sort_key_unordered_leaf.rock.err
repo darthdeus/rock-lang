@@ -1,0 +1,16 @@
+//=== TEST CASE: sort_key_nullable_value_Generic ===
+// A struct or tuple sort key compares its leaves with `<`. An absent value has
+// no place in that order.
+//! expect: cannot sort by a key of type `Vec2?`: `Vec2?` may be absent
+struct It { id: int, p: Vec2? }
+fn main() {
+    let xs = [It { id: 1, p: null }, It { id: 2, p: v(1.0, 2.0) }]
+    xs.sort(x => x.p)
+}
+
+//=== TEST CASE: sort_key_bool_leaf_Generic ===
+//! expect: cannot sort by a key of type `(bool, int)`: `bool` has no order
+fn main() {
+    let ys = [1, 2]
+    ys.sort(y => (y > 1, y))
+}

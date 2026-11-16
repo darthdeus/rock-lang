@@ -152,6 +152,7 @@ pub fn parameter_demand_key(ws: &Workspace, func: FuncRef) -> u64 {
 /// like, as opposed to how a body lowers. Re-exported flat so the ~168 external
 /// `skull_mir::lower::*` call sites keep their paths.
 mod shape;
+mod sort_key;
 pub use shape::*;
 
 /// The backend ABI of one emitted body. The scalar-ABI POLICY lives inside and
@@ -4534,7 +4535,7 @@ impl ExpansionRejections {
             ExpandKind::UniformValues => &mut self.uniform_values,
             ExpandKind::SceneTypeKey => return,
             ExpandKind::BuildVar | ExpandKind::EmbedString => return,
-            ExpandKind::Materialize => return,
+            ExpandKind::Materialize | ExpandKind::SortKeyWide | ExpandKind::SortKeyLt => return,
         };
         if slot.is_none() {
             *slot = Some(rejection);
@@ -4602,7 +4603,7 @@ pub fn expansion_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerErro
                 }
                 ExpandKind::SceneTypeKey => None,
                 ExpandKind::BuildVar | ExpandKind::EmbedString => None,
-                ExpandKind::Materialize => None,
+                ExpandKind::Materialize | ExpandKind::SortKeyWide | ExpandKind::SortKeyLt => None,
             };
             rejections.record(kind, rejection);
         }
