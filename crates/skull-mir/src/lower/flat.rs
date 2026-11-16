@@ -302,14 +302,7 @@ impl<'a> Builder<'a> {
         let done_bb = self.f.new_block();
         let live_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: done,
-                then_bb: done_bb,
-                else_bb: live_bb,
-            },
-        );
+        self.branch_to(done, done_bb, live_bb);
         // Terminal: all-nil leaves (tag = nil => `== null`).
         self.cur = done_bb;
         for c in &cells {
@@ -492,14 +485,7 @@ impl<'a> Builder<'a> {
             let is_unit = self.emit_cur(Inst::Eq(tag, known_tag));
             let unit_bb = self.f.new_block();
             let next_bb = self.f.new_block();
-            self.f.set_term(
-                self.cur,
-                Term::Branch {
-                    cond: is_unit,
-                    then_bb: unit_bb,
-                    else_bb: next_bb,
-                },
-            );
+            self.branch_to(is_unit, unit_bb, next_bb);
             self.cur = unit_bb;
             let global = crate::mangle::enum_singleton_global(self.ws, shape.name, variant);
             let singleton = self.emit_cur(Inst::Global(global));

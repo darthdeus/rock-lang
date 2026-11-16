@@ -96,14 +96,7 @@ impl<'a> Builder<'a> {
                     } else {
                         self.lower_expr(e)?
                     };
-                    self.f.set_term(
-                        self.cur,
-                        Term::Branch {
-                            cond,
-                            then_bb,
-                            else_bb,
-                        },
-                    );
+                    self.branch_to(cond, then_bb, else_bb);
                     Ok(())
                 }
             }
@@ -1138,14 +1131,7 @@ impl<'a> Builder<'a> {
         for &leaf in guards {
             let flag = self.read_leaf(leaf);
             let present = self.f.new_block();
-            self.f.set_term(
-                self.cur,
-                Term::Branch {
-                    cond: flag,
-                    then_bb: present,
-                    else_bb: absent,
-                },
-            );
+            self.branch_to(flag, present, absent);
             self.cur = present;
         }
     }
@@ -2378,14 +2364,7 @@ impl<'a> Builder<'a> {
             Some(_) => (val_bb, nil_bb),
             None => (nil_bb, val_bb),
         };
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond,
-                then_bb,
-                else_bb,
-            },
-        );
+        self.branch_to(cond, then_bb, else_bb);
 
         self.cur = nil_bb;
         let n = self.emit_cur(Inst::Const(Lit::Nil));
@@ -2879,14 +2858,7 @@ impl<'a> Builder<'a> {
         self.cur = header;
         let i = self.emit_cur(Inst::Load(i_cell));
         let cmp = self.emit_cur(Inst::IntLt(i, n));
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: cmp,
-                then_bb: body,
-                else_bb: exit,
-            },
-        );
+        self.branch_to(cmp, body, exit);
 
         self.cur = body;
         let i_now = self.emit_cur(Inst::Load(i_cell));

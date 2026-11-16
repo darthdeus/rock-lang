@@ -63,14 +63,7 @@ impl<'a> Builder<'a> {
             let absent = self.f.new_block();
             let present = self.f.new_block();
             let join = self.f.new_block();
-            self.f.set_term(
-                self.cur,
-                Term::Branch {
-                    cond: left_absent,
-                    then_bb: absent,
-                    else_bb: present,
-                },
-            );
+            self.branch_to(left_absent, absent, present);
             self.cur = absent;
             self.store_and_join(result, right_absent, join);
             self.cur = present;
@@ -594,14 +587,7 @@ impl<'a> Builder<'a> {
         let nil_bb = self.f.new_block();
         let val_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: is_nil,
-                then_bb: nil_bb,
-                else_bb: val_bb,
-            },
-        );
+        self.branch_to(is_nil, nil_bb, val_bb);
 
         self.cur = val_bb;
         let recv_v = self.safe_nav_present_value(recv)?;
@@ -693,14 +679,7 @@ impl<'a> Builder<'a> {
         let rhs_bb = self.f.new_block();
         let else_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: lv,
-                then_bb: rhs_bb,
-                else_bb,
-            },
-        );
+        self.branch_to(lv, rhs_bb, else_bb);
         self.cur = rhs_bb;
         let rv = if condition {
             self.lower_condition(rhs)?
@@ -729,14 +708,7 @@ impl<'a> Builder<'a> {
         let then_bb = self.f.new_block();
         let rhs_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: lv,
-                then_bb,
-                else_bb: rhs_bb,
-            },
-        );
+        self.branch_to(lv, then_bb, rhs_bb);
         self.cur = then_bb;
         let t = self.emit_cur(Inst::Const(Lit::Bool(true)));
         self.store_and_join(result, t, join);

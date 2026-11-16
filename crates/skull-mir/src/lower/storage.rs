@@ -518,14 +518,7 @@ impl<'a> Builder<'a> {
         self.cur = header;
         let i = self.emit_cur(Inst::Load(cell));
         let more = self.emit_cur(Inst::IntLt(i, len));
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: more,
-                then_bb: body,
-                else_bb: exit,
-            },
-        );
+        self.branch_to(more, body, exit);
         self.cur = body;
         let i = self.emit_cur(Inst::Load(cell));
         let raw_index = if self.column_base_is_one() {
@@ -1019,14 +1012,7 @@ impl<'a> Builder<'a> {
         let present = self.emit_cur(Inst::IntGeq(slot, zero));
         let hit = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: present,
-                then_bb: hit,
-                else_bb: join,
-            },
-        );
+        self.branch_to(present, hit, join);
         self.cur = hit;
         let data = self.map_col_data(map);
         self.column_unset(data, slot, elem)?;
@@ -1057,14 +1043,7 @@ impl<'a> Builder<'a> {
         self.cur = head;
         let i = self.emit_cur(Inst::Load(cell));
         let more = self.emit_cur(Inst::IntLt(i, len));
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: more,
-                then_bb: body,
-                else_bb: exit,
-            },
-        );
+        self.branch_to(more, body, exit);
         self.cur = body;
         self.column_unset(vec, i, elem)?;
         let next = self.int_plus_one(i);
@@ -1414,14 +1393,7 @@ impl<'a> Builder<'a> {
         self.cur = header;
         let i = self.emit_cur(Inst::Load(i_cell));
         let cmp = self.emit_cur(Inst::IntLt(i, len));
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: cmp,
-                then_bb: body,
-                else_bb: exit,
-            },
-        );
+        self.branch_to(cmp, body, exit);
 
         self.cur = body;
         let i_now = self.emit_cur(Inst::Load(i_cell));
@@ -1883,14 +1855,7 @@ impl<'a> Builder<'a> {
         let set_bb = self.f.new_block();
         let del_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: present,
-                then_bb: set_bb,
-                else_bb: del_bb,
-            },
-        );
+        self.branch_to(present, set_bb, del_bb);
         self.cur = set_bb;
         let stored = match boxed {
             Some(s) => ValueBundle::new(
@@ -1958,14 +1923,7 @@ impl<'a> Builder<'a> {
         let hit = self.f.new_block();
         let miss = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: present,
-                then_bb: hit,
-                else_bb: miss,
-            },
-        );
+        self.branch_to(present, hit, miss);
         self.cur = hit;
         let data = self.map_col_data(m);
         let found = self.column_element_repr(data, slot, elem)?;

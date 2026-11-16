@@ -2503,15 +2503,19 @@ impl<'a> Builder<'a> {
     ) -> Idx<Inst> {
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
         let cond = self.emit_cur(Inst::Eq(v, nil));
+        self.branch_to(cond, nil_bb, value_bb);
+        cond
+    }
+
+    fn branch_to(&mut self, cond: Idx<Inst>, then_bb: Idx<Block>, else_bb: Idx<Block>) {
         self.f.set_term(
             self.cur,
             Term::Branch {
                 cond,
-                then_bb: nil_bb,
-                else_bb: value_bb,
+                then_bb,
+                else_bb,
             },
         );
-        cond
     }
 
     fn rep_error(&self, error: RepError) -> CompilerError {
@@ -3216,14 +3220,7 @@ impl<'a> Builder<'a> {
                 self.f.param_default_guards.insert(is_nil, i);
                 let then_bb = self.f.new_block();
                 let join = self.f.new_block();
-                self.f.set_term(
-                    self.cur,
-                    Term::Branch {
-                        cond: is_nil,
-                        then_bb,
-                        else_bb: join,
-                    },
-                );
+                self.branch_to(is_nil, then_bb, join);
                 self.cur = then_bb;
                 let r = self.lower_expr_repr(*def)?;
                 let leaves = self.repr_to_storage_leaves(&r, &shape, "struct default")?;
@@ -3254,14 +3251,7 @@ impl<'a> Builder<'a> {
             self.f.param_default_guards.insert(is_omitted, i);
             let then_bb = self.f.new_block();
             let join = self.f.new_block();
-            self.f.set_term(
-                self.cur,
-                Term::Branch {
-                    cond: is_omitted,
-                    then_bb,
-                    else_bb: join,
-                },
-            );
+            self.branch_to(is_omitted, then_bb, join);
             self.cur = then_bb;
             let expected = self.binding_ty(pb).and_then(|ty| self.concrete_ty_id(ty));
             let dv = self.lower_expr_with_expected(*def, expected)?;

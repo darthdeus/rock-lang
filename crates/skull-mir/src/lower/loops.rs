@@ -376,14 +376,7 @@ impl<'a> Builder<'a> {
             }
         }
         let ok = self.emit_cur(Inst::Load(dests[0]));
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: ok,
-                then_bb: body_bb,
-                else_bb: exit,
-            },
-        );
+        self.branch_to(ok, body_bb, exit);
 
         // body: bind the pattern to the element slots. One element binds
         // directly (its leaves, if it splats); multiple (`next -> (bool, A, B)`)
@@ -446,14 +439,7 @@ impl<'a> Builder<'a> {
         let b_done = self.f.new_block();
         self.cur = entry;
         let fv = self.emit_cur(Inst::Load(flag));
-        self.f.set_term(
-            entry,
-            Term::Branch {
-                cond: fv,
-                then_bb: b_kill,
-                else_bb: b_done,
-            },
-        );
+        self.branch_to(fv, b_kill, b_done);
         self.cur = b_kill;
         let off = self.emit_cur(Inst::Const(Lit::Bool(false)));
         self.emit_cur(Inst::Store {
@@ -640,14 +626,7 @@ impl<'a> Builder<'a> {
         self.cur = header;
         let i = self.emit_cur(Inst::Load(i_cell));
         let c = self.emit_cur(Inst::IntLt(i, n));
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: c,
-                then_bb: body_bb,
-                else_bb: exit,
-            },
-        );
+        self.branch_to(c, body_bb, exit);
 
         // body: nothing to skip before the occupancy read -- the walk is bounded
         // by the occupancy column's own length, and a `[bool]` column has no
@@ -663,14 +642,7 @@ impl<'a> Builder<'a> {
             index: idx,
             kind: occupied_kind,
         });
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: occ,
-                then_bb: do_bb,
-                else_bb: latch,
-            },
-        );
+        self.branch_to(occ, do_bb, latch);
 
         // do: build Entity, bind, run body.
         self.cur = do_bb;
@@ -1077,14 +1049,7 @@ impl<'a> Builder<'a> {
         self.cur = header;
         let i = self.emit_cur(Inst::Load(i_cell));
         let cmp = self.emit_cur(Inst::IntLt(i, len_v));
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: cmp,
-                then_bb: body_bb,
-                else_bb: exit,
-            },
-        );
+        self.branch_to(cmp, body_bb, exit);
 
         self.cur = body_bb;
         let i_now = self.emit_cur(Inst::Load(i_cell));
@@ -1207,14 +1172,7 @@ impl<'a> Builder<'a> {
         self.cur = header;
         let i = self.emit_cur(Inst::Load(i_cell));
         let cmp = self.emit_cur(Inst::IntLt(i, len_v));
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: cmp,
-                then_bb: body_bb,
-                else_bb: exit,
-            },
-        );
+        self.branch_to(cmp, body_bb, exit);
 
         self.cur = body_bb;
         let i_now = self.emit_cur(Inst::Load(i_cell));

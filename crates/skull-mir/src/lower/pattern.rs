@@ -774,14 +774,7 @@ impl<'a> Builder<'a> {
     /// `fail`.
     pub(crate) fn branch_or_fail(&mut self, cond: Idx<Inst>, fail: Idx<Block>) {
         let cont = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond,
-                then_bb: cont,
-                else_bb: fail,
-            },
-        );
+        self.branch_to(cond, cont, fail);
         self.cur = cont;
     }
 
@@ -1025,14 +1018,7 @@ impl<'a> Builder<'a> {
     }
 
     fn branch_present_let(&mut self, present: Idx<Inst>, then_bb: Idx<Block>, miss: Idx<Block>) {
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: present,
-                then_bb,
-                else_bb: miss,
-            },
-        );
+        self.branch_to(present, then_bb, miss);
         self.cur = then_bb;
     }
 
@@ -1259,14 +1245,7 @@ impl<'a> Builder<'a> {
         } else {
             self.emit_cur(Inst::IntLt(i_v, h_v))
         };
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: cmp,
-                then_bb: body_bb,
-                else_bb: exit,
-            },
-        );
+        self.branch_to(cmp, body_bb, exit);
 
         self.cur = body_bb;
         self.loop_targets.push((latch, exit, self.defers.len())); // continue -> latch (runs the step)

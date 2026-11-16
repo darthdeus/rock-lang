@@ -99,14 +99,7 @@ impl<'a> Builder<'a> {
         let done_v = self.emit_cur(Inst::Global(done_flag));
         let init_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: done_v,
-                then_bb: join,
-                else_bb: init_bb,
-            },
-        );
+        self.branch_to(done_v, join, init_bb);
         self.cur = init_bb;
         let expected = self.binding_ty(name).and_then(|ty| self.concrete_ty_id(ty));
         let v = self.lower_expr_with_expected(value, expected)?;
@@ -708,14 +701,7 @@ impl<'a> Builder<'a> {
                 let b_body = self.f.new_block();
                 let b_done = self.f.new_block();
                 let fv = self.emit_cur(Inst::Load(f));
-                self.f.set_term(
-                    self.cur,
-                    Term::Branch {
-                        cond: fv,
-                        then_bb: b_body,
-                        else_bb: b_done,
-                    },
-                );
+                self.branch_to(fv, b_body, b_done);
                 self.cur = b_body;
                 let off = self.emit_cur(Inst::Const(Lit::Bool(false)));
                 self.emit_cur(Inst::Store {
@@ -821,14 +807,7 @@ impl<'a> Builder<'a> {
         self.cur = entry;
         if let (Some(flag), Some(b_body)) = (flag, b_body) {
             let fv = self.emit_cur(Inst::Load(flag));
-            self.f.set_term(
-                entry,
-                Term::Branch {
-                    cond: fv,
-                    then_bb: b_body,
-                    else_bb: b_done,
-                },
-            );
+            self.branch_to(fv, b_body, b_done);
             self.cur = b_body;
             let off = self.emit_cur(Inst::Const(Lit::Bool(false)));
             self.emit_cur(Inst::Store {

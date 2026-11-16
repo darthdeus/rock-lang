@@ -769,14 +769,7 @@ impl<'a> Builder<'a> {
         for (&a, &b) in lhs.iter().zip(rhs) {
             let equal = self.emit_cur(Inst::Eq(a, b));
             let next = self.f.new_block();
-            self.f.set_term(
-                self.cur,
-                Term::Branch {
-                    cond: equal,
-                    then_bb: next,
-                    else_bb: fail,
-                },
-            );
+            self.branch_to(equal, next, fail);
             self.cur = next;
         }
         let yes = self.emit_cur(Inst::Const(Lit::Bool(true)));

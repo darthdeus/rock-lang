@@ -1077,14 +1077,7 @@ impl<'a> Builder<'a> {
         let lhs_bb = self.f.new_block();
         let rhs_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: present,
-                then_bb: lhs_bb,
-                else_bb: rhs_bb,
-            },
-        );
+        self.branch_to(present, lhs_bb, rhs_bb);
 
         self.cur = rhs_bb;
         let rhs_bundle = self.lower_expr_repr(rhs)?;
@@ -1138,14 +1131,7 @@ impl<'a> Builder<'a> {
         let lhs_bb = self.f.new_block();
         let rhs_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: present,
-                then_bb: lhs_bb,
-                else_bb: rhs_bb,
-            },
-        );
+        self.branch_to(present, lhs_bb, rhs_bb);
 
         self.cur = rhs_bb;
         let rhs_bundle = self.lower_expr_repr(rhs)?;
@@ -1465,14 +1451,7 @@ impl<'a> Builder<'a> {
         let has_err = self.emit_cur(Inst::NotEq(inner_err, nil2));
         let raise = self.f.new_block();
         let cont = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: has_err,
-                then_bb: raise,
-                else_bb: cont,
-            },
-        );
+        self.branch_to(has_err, raise, cont);
         self.cur = raise;
         // `error` is the Lua builtin (a global), NOT a rock fn — read it as a
         // global and call indirectly, so re-raise works with no stdlib present.
@@ -1525,14 +1504,7 @@ impl<'a> Builder<'a> {
         });
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
         let done = self.emit_cur(Inst::IntLt(state, zero));
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: done,
-                then_bb: exit,
-                else_bb: body,
-            },
-        );
+        self.branch_to(done, exit, body);
 
         // body: re-yield the inner's current leaves, then advance it with our arg.
         self.cur = body;

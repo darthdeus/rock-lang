@@ -2631,14 +2631,7 @@ impl<'a> Builder<'a> {
         let absent_bb = self.f.new_block();
         let present_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: present,
-                then_bb: present_bb,
-                else_bb: absent_bb,
-            },
-        );
+        self.branch_to(present, present_bb, absent_bb);
 
         self.cur = absent_bb;
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
@@ -2731,14 +2724,7 @@ impl<'a> Builder<'a> {
         let absent_bb = self.f.new_block();
         let present_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: present,
-                then_bb: present_bb,
-                else_bb: absent_bb,
-            },
-        );
+        self.branch_to(present, present_bb, absent_bb);
 
         self.cur = absent_bb;
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
@@ -2973,14 +2959,7 @@ impl<'a> Builder<'a> {
                 let nil_bb = self.f.new_block();
                 let value_bb = self.f.new_block();
                 let join = self.f.new_block();
-                self.f.set_term(
-                    self.cur,
-                    Term::Branch {
-                        cond: present,
-                        then_bb: value_bb,
-                        else_bb: nil_bb,
-                    },
-                );
+                self.branch_to(present, value_bb, nil_bb);
 
                 self.cur = nil_bb;
                 for cell in &cells {
@@ -3454,14 +3433,7 @@ impl<'a> Builder<'a> {
         let nil_bb = self.f.new_block();
         let value_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: present,
-                then_bb: value_bb,
-                else_bb: nil_bb,
-            },
-        );
+        self.branch_to(present, value_bb, nil_bb);
         self.cur = nil_bb;
         for c in &cells {
             let z = self.emit_cur(Inst::Const(Lit::Nil));

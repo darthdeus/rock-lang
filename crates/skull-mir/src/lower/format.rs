@@ -458,14 +458,7 @@ impl<'a> Builder<'a> {
         } else {
             (null_bb, value_bb)
         };
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond,
-                then_bb,
-                else_bb,
-            },
-        );
+        self.branch_to(cond, then_bb, else_bb);
 
         self.cur = null_bb;
         let null = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(null_text))));
