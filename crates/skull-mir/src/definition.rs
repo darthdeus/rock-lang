@@ -563,153 +563,87 @@ mod tests {
     }
 
     #[test]
-    fn wrong_factory_definition_type_rejects() {
-        let err = collect(&workspace(&[(
-            "wrong_factory.rock",
-            &typed_source(
-                r#"
-                @artifact_catalog(catalog="widgets")
-                @intrinsic extern(lua) fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
-                @widget(key="alpha") fn make_alpha() -> int { return 1 }
-                "#,
+    fn invalid_catalogs_roles_and_factories_reject() {
+        let accessor = r#"
+            @artifact_catalog(catalog="widgets")
+            @intrinsic extern(lua) fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+        "#;
+        let cases: Vec<(String, &[&str])> = vec![
+            (
+                typed_source(&format!(
+                    "{accessor} @widget(key=\"alpha\") fn make_alpha() -> int {{ return 1 }}"
+                )),
+                &["definition type"],
             ),
-        )]))
-        .expect_err("factory definition type must be checked");
-        assert!(err.message.contains("definition type"), "{err:?}");
-    }
-
-    #[test]
-    fn semantically_distinct_same_rendering_factory_type_rejects() {
-        let err = collect(&workspace(&[(
-            "same_rendering.rock",
-            &typed_source(
-                r#"
-                @artifact_catalog(catalog="widgets")
-                @intrinsic extern(lua) fn widget_definition_plan() -> [ArtifactDefinition<fn(int) -> int?>]
-                @widget(key="collision") fn make_collision() -> (fn(int) -> int)? { return null }
-                "#,
+            // Equal display spellings must not hide a semantic type mismatch.
+            (
+                typed_source(
+                    r#"
+                    @artifact_catalog(catalog="widgets")
+                    @intrinsic extern(lua) fn widget_definition_plan() -> [ArtifactDefinition<fn(int) -> int?>]
+                    @widget(key="collision") fn make_collision() -> (fn(int) -> int)? { return null }
+                    "#,
+                ),
+                &["identity", "definition type"],
             ),
-        )]))
-        .expect_err("semantic type mismatch must reject despite equal display spellings");
-        assert!(err.message.contains("identity"), "{err:?}");
-        assert!(err.message.contains("definition type"), "{err:?}");
-    }
-
-    #[test]
-    fn wrong_accessor_definition_type_rejects() {
-        let err = collect(&workspace(&[(
-            "wrong_accessor.rock",
-            &typed_source(
-                r#"
-                @artifact_catalog(catalog="widgets")
-                @intrinsic extern(lua) fn widget_definition_plan() -> [int]
-                @widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
-                "#,
+            (
+                typed_source(
+                    r#"
+                    @artifact_catalog(catalog="widgets")
+                    @intrinsic extern(lua) fn widget_definition_plan() -> [int]
+                    "#,
+                ),
+                &["ArtifactDefinition"],
             ),
-        )]))
-        .expect_err("accessor definition type must be checked");
-        assert!(err.message.contains("ArtifactDefinition"), "{err:?}");
-    }
-
-    #[test]
-    fn unknown_catalog_accessor_rejects() {
-        let err = collect(&workspace(&[(
-            "unknown_accessor.rock",
-            &format!(
-                r#"{TYPED_PREFIX}
+            (
+                format!(
+                    r#"{TYPED_PREFIX}
                     @artifact_catalog(catalog="missing")
                     @intrinsic extern(lua) fn missing_definition_plan() -> [ArtifactDefinition<WidgetDef>]
-                    fn main() {{}}
-                "#
+                    "#
+                ),
+                &["unknown catalog"],
             ),
-        )]))
-        .expect_err("unknown catalog accessor must reject");
-        assert!(err.message.contains("unknown catalog"), "{err:?}");
-    }
-
-    #[test]
-    fn duplicate_typed_accessors_reject_instead_of_picking_one() {
-        let err = collect(&workspace(&[(
-            "duplicate_accessor.rock",
-            &typed_source(
+            (
+                typed_source(&format!("{accessor}{accessor}")),
+                &["more than one"],
+            ),
+            (
+                typed_source("@widget fn missing() -> int { return 1 }"),
+                &["named literal"],
+            ),
+            (
+                typed_source(
+                    r#"
+                    const KEY: string = "not-a-literal-at-the-application"
+                    @widget(key=KEY) fn nonliteral() -> int { return 1 }
+                    "#,
+                ),
+                &["string literal"],
+            ),
+            (
                 r#"
-                @artifact_catalog(catalog="widgets")
-                @intrinsic extern(lua) fn first_plan() -> [ArtifactDefinition<WidgetDef>]
-                @artifact_catalog(catalog="widgets")
-                @intrinsic extern(lua) fn second_plan() -> [ArtifactDefinition<WidgetDef>]
-                "#,
-            ),
-        )]))
-        .expect_err("duplicate typed accessors must reject");
-        assert!(
-            err.message.contains("more than one") || err.message.contains("duplicate"),
-            "{err:?}"
-        );
-    }
-
-    #[test]
-    fn missing_and_nonliteral_keys_reject_before_plan_emission() {
-        let missing = collect_error(
-            r#"
-                @artifact_definition(catalog="widgets", key_param="key")
-                deco init widget(key: string) {}
-                @widget fn missing() -> int { return 1 }
-                fn main() {}
-            "#,
-        );
-        assert!(missing.message.contains("named literal"), "{missing:?}");
-
-        let nonliteral = collect_error(
-            r#"
-                @artifact_definition(catalog="widgets", key_param="key")
-                deco init widget(key: string) {}
-                const KEY: string = "not-a-literal-at-the-application"
-                @widget(key=KEY) fn nonliteral() -> int { return 1 }
-                fn main() {}
-            "#,
-        );
-        assert!(
-            nonliteral.message.contains("string literal"),
-            "{nonliteral:?}"
-        );
-    }
-
-    #[test]
-    fn role_and_factory_shapes_reject() {
-        let extra_param = collect_error(
-            r#"
                 @artifact_definition(catalog="widgets", key_param="key")
                 deco init widget(key: string, version: int) {}
                 @widget(key="x") fn extra() -> int { return 1 }
-                fn main() {}
-            "#,
-        );
-        assert!(
-            extra_param.message.contains("exactly the required string"),
-            "{extra_param:?}"
-        );
-
-        let unit = collect_error(
-            r#"
-                @artifact_definition(catalog="widgets", key_param="key")
-                deco init widget(key: string) {}
-                @widget(key="x") fn unit() {}
-                fn main() {}
-            "#,
-        );
-        assert!(
-            unit.message.contains("return a concrete definition"),
-            "{unit:?}"
-        );
-
-        let backend = collect_error(
-            r#"
-                @artifact_definition(catalog="widgets", key_param="key")
-                deco init widget(key: string) {}
-                @widget(key="x") inline(lua) fn backend() -> int = "return 1"
-                fn main() {}
-            "#,
-        );
-        assert!(backend.message.contains("backend-neutral"), "{backend:?}");
+                "#
+                .to_string(),
+                &["exactly the required string"],
+            ),
+            (
+                typed_source(r#"@widget(key="x") fn unit() {}"#),
+                &["return a concrete definition"],
+            ),
+            (
+                typed_source(r#"@widget(key="x") inline(lua) fn backend() -> int = "return 1""#),
+                &["backend-neutral"],
+            ),
+        ];
+        for (source, expected) in cases {
+            let err = collect_error(&source);
+            for fragment in expected {
+                assert!(err.message.contains(fragment), "{fragment}: {err:?}");
+            }
+        }
     }
 }
