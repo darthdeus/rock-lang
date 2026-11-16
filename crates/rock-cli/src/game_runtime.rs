@@ -2,13 +2,6 @@ use crate::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// A backend's incremental game compiler. Owns all cross-reload state and the
-/// output paths; `compile` writes `<out>/main.lua` (+ optional
-/// `<out>/incremental.lua` overlay) that the running engine hot-reloads. The
-/// caller picks `<out>`: `tmp/` for run/frame/perf, a private
-/// `tmp/stone/<game>-<pid>/` per `rock stone` session
-/// . Everything around it (watch loop,
-/// process, engine/compiler builds, sims) is the backend-agnostic runtime.
 /// What a successful (re)compile asks of the runtime beyond hot-reloading.
 #[derive(Default)]
 pub struct CompileOutcome {
@@ -18,6 +11,11 @@ pub struct CompileOutcome {
     pub restart_reasons: Vec<String>,
 }
 
+/// A backend's incremental game compiler. Owns all cross-reload state and the
+/// output paths; `compile` writes `<out>/main.lua` (+ optional
+/// `<out>/incremental.lua` overlay) that the running engine hot-reloads. The
+/// caller picks `<out>`: `tmp/` for run/frame/perf, a private
+/// `tmp/stone/<game>-<pid>/` per `rock stone` session.
 pub trait GameCompiler {
     /// (Re)compile the project. `changed` = game source paths the watcher saw
     /// since the last call (empty on the initial build). `force_full` forces a
@@ -53,11 +51,6 @@ pub trait GameCompiler {
     /// launch boundary; callers must not invent a development identity.
     fn artifact_fingerprint(&self) -> Result<String> {
         anyhow::bail!("compiler did not publish an Artifact fingerprint")
-    }
-
-    /// The `[build.vars]` selection the current program was compiled with.
-    fn comptime_inputs(&self) -> Option<&bone_semantic::inference::ComptimeInputs> {
-        None
     }
 }
 
@@ -184,10 +177,6 @@ impl GameCompiler for SkullGameCompiler {
             .as_ref()
             .map(|stone| stone.artifact_fingerprint().to_string())
             .ok_or_else(|| anyhow::anyhow!("compiler did not publish an Artifact fingerprint"))
-    }
-
-    fn comptime_inputs(&self) -> Option<&bone_semantic::inference::ComptimeInputs> {
-        self.stone.as_ref().map(|stone| stone.comptime_inputs())
     }
 }
 

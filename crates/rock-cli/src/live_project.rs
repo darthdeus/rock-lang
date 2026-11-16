@@ -205,34 +205,40 @@ impl LiveProject {
         &mut self,
         changed: &[PathBuf],
     ) -> Result<(LiveUpdate, LiveProjectSnapshot)> {
+        self.transaction(changed, "compile error", |project| {
+            project.recompile_inner(changed)
+        })
+    }
+
+    /// Run `change` against a snapshot of `touched`, restoring the snapshot
+    /// when it fails.
+    fn transaction(
+        &mut self,
+        touched: &[PathBuf],
+        failure: &str,
+        change: impl FnOnce(&mut Self) -> Result<LiveUpdate>,
+    ) -> Result<(LiveUpdate, LiveProjectSnapshot)> {
         self.last_route_timing = LiveRouteTiming::default();
-        let snapshot = self.snapshot(changed);
+        let snapshot = self.snapshot(touched);
         let started = self.route_profile_enabled.then(Instant::now);
-        match self.recompile_inner(changed) {
-            Ok(update) => {
-                if let Some(started) = started {
-                    self.last_route_timing.live_update_ns += started.elapsed().as_nanos();
-                }
-                Ok((update, snapshot))
-            }
-            Err(error) => {
-                if let Some(started) = started {
-                    self.last_route_timing.live_update_ns += started.elapsed().as_nanos();
-                }
-                let rollback_started = self.route_profile_enabled.then(Instant::now);
-                if let Err(restore) = self.restore(snapshot) {
-                    if let Some(started) = rollback_started {
-                        self.last_route_timing.rollback_ns += started.elapsed().as_nanos();
-                    }
-                    return Err(anyhow::anyhow!(
-                        "live project rollback failed after compile error: {restore}; original error: {error}"
-                    ));
-                }
-                if let Some(started) = rollback_started {
-                    self.last_route_timing.rollback_ns += started.elapsed().as_nanos();
-                }
-                Err(error)
-            }
+        let result = change(self);
+        if let Some(started) = started {
+            self.last_route_timing.live_update_ns += started.elapsed().as_nanos();
+        }
+        let error = match result {
+            Ok(update) => return Ok((update, snapshot)),
+            Err(error) => error,
+        };
+        let rollback_started = self.route_profile_enabled.then(Instant::now);
+        let restored = self.restore(snapshot);
+        if let Some(started) = rollback_started {
+            self.last_route_timing.rollback_ns += started.elapsed().as_nanos();
+        }
+        match restored {
+            Ok(()) => Err(error),
+            Err(restore) => Err(anyhow::anyhow!(
+                "live project rollback failed after {failure}: {restore}; original error: {error}"
+            )),
         }
     }
 
@@ -278,7 +284,8 @@ impl LiveProject {
         self.update(&feed, started)
     }
 
-    pub fn apply_edit(&mut self, path: &Path, new_text: &str) -> Result<LiveUpdate> {
+    #[cfg(test)]
+    pub(crate) fn apply_edit(&mut self, path: &Path, new_text: &str) -> Result<LiveUpdate> {
         self.apply_edit_for_publication(path, new_text)
             .map(|(update, _snapshot)| update)
     }
@@ -288,35 +295,9 @@ impl LiveProject {
         path: &Path,
         new_text: &str,
     ) -> Result<(LiveUpdate, LiveProjectSnapshot)> {
-        self.last_route_timing = LiveRouteTiming::default();
-        let snapshot = self.snapshot(&[path.to_path_buf()]);
-        let started = self.route_profile_enabled.then(Instant::now);
-        match self.apply_edit_inner(path, new_text) {
-            Ok(update) => {
-                if let Some(started) = started {
-                    self.last_route_timing.live_update_ns += started.elapsed().as_nanos();
-                }
-                Ok((update, snapshot))
-            }
-            Err(error) => {
-                if let Some(started) = started {
-                    self.last_route_timing.live_update_ns += started.elapsed().as_nanos();
-                }
-                let rollback_started = self.route_profile_enabled.then(Instant::now);
-                if let Err(restore) = self.restore(snapshot) {
-                    if let Some(started) = rollback_started {
-                        self.last_route_timing.rollback_ns += started.elapsed().as_nanos();
-                    }
-                    return Err(anyhow::anyhow!(
-                        "live project rollback failed after in-memory edit error: {restore}; original error: {error}"
-                    ));
-                }
-                if let Some(started) = rollback_started {
-                    self.last_route_timing.rollback_ns += started.elapsed().as_nanos();
-                }
-                Err(error)
-            }
-        }
+        self.transaction(&[path.to_path_buf()], "in-memory edit error", |project| {
+            project.apply_edit_inner(path, new_text)
+        })
     }
 
     fn apply_edit_inner(&mut self, path: &Path, new_text: &str) -> Result<LiveUpdate> {
