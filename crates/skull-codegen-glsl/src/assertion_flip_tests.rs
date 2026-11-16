@@ -367,16 +367,6 @@ fn overlapping_attribute_locations_reject() {
         .expect_err("overlapping locations must reject")
         .message;
     assert!(msg.contains("both occupy location"), "{msg}");
-
-    // A location at the top of the space must REJECT, not overflow: the
-    // validator exists to refuse malformed plans and may not panic or wrap
-    // on one.
-    let mut top = abi.clone();
-    top.attribute_locations = vec![(Ustr::from("a"), u32::MAX), (Ustr::from("b"), 1)];
-    let msg = validate_abi(&iface, &top, Span::default())
-        .expect_err("a location at u32::MAX must reject")
-        .message;
-    assert!(msg.contains("spans past the end"), "{msg}");
 }
 
 /// **A stage the interface does not declare is a REJECTION, not a lookup

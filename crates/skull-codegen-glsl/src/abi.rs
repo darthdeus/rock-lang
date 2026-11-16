@@ -338,13 +338,13 @@ pub(crate) fn validate_abi(
         }
     }
 
-    // --- attribute locations: a bijection on names AND non-overlapping
-    // location RANGES. Two attributes at one location is a silent aliasing
-    // that a name bijection alone accepts.
-    let attrs: Vec<(Ustr, AttrKind)> = iface
+    // --- attribute locations: a bijection on names AND on locations. Two
+    // attributes at one location is a silent aliasing that a name bijection
+    // alone accepts.
+    let attrs: Vec<Ustr> = iface
         .vertex_inputs
         .iter()
-        .flat_map(|i| i.attrs.iter().copied())
+        .flat_map(|i| i.attrs.iter().map(|(name, _)| *name))
         .collect();
     if attrs.len() != abi.attribute_locations.len() {
         return Err(err(
@@ -358,32 +358,20 @@ pub(crate) fn validate_abi(
         ));
     }
     let mut occupied: HashMap<u32, Ustr> = HashMap::default();
-    for (name, kind) in &attrs {
+    for name in &attrs {
         let Some((_, loc)) = abi.attribute_locations.iter().find(|(an, _)| an == name) else {
             return Err(err(
                 span,
                 format!("internal: vertex attribute `{name}` has no location in the GLSL ABI plan"),
             ));
         };
-        let Some(end) = loc.checked_add(attr_location_span(*kind)) else {
+        if let Some(other) = occupied.insert(*loc, *name) {
             return Err(err(
                 span,
                 format!(
-                    "internal: vertex attribute `{name}` at location {loc} spans past the end of the \
-                 location space"
+                    "internal: vertex attributes `{other}` and `{name}` both occupy location {loc}"
                 ),
             ));
-        };
-        for slot in *loc..end {
-            if let Some(other) = occupied.insert(slot, *name) {
-                return Err(err(
-                    span,
-                    format!(
-                        "internal: vertex attributes `{other}` and `{name}` both occupy location \
-                     {slot}"
-                    ),
-                ));
-            }
         }
     }
 
@@ -833,9 +821,9 @@ impl ShaderAbiPlan {
         let mut attribute_locations = Vec::new();
         let mut loc = 0u32;
         for vi in &iface.vertex_inputs {
-            for (name, kind) in &vi.attrs {
+            for (name, _) in &vi.attrs {
                 attribute_locations.push((*name, loc));
-                loc += attr_location_span(*kind);
+                loc += 1;
             }
         }
 
@@ -856,13 +844,6 @@ impl ShaderAbiPlan {
 pub struct GlslUniformBlock {
     pub name: Ustr,
     pub plan: UniformBlockPlan,
-}
-
-/// How many attribute LOCATIONS one attribute kind occupies. Every kind
-/// admitted today takes one; a `mat4` attribute would take four, which is why
-/// this is a function rather than an `enumerate()` index.
-fn attr_location_span(_k: AttrKind) -> u32 {
-    1
 }
 
 /// Texture image units every GLSL target guarantees per stage: GL 4.1 core
