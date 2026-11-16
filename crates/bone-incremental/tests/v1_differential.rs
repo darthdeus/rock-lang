@@ -427,6 +427,22 @@ impl V1Harness {
         );
     }
 
+    /// Apply an accepted edit and assert its tier, how many bodies re-infer
+    /// and re-lower, and the re-lowered functions per file.
+    pub(crate) fn edit_reads(
+        &mut self,
+        path: &str,
+        text: &str,
+        tier: UpdateTier,
+        (reinferred, relowered, files): (usize, usize, &[(&str, usize)]),
+    ) {
+        let result = self.edit(path, text).expect("accepted");
+        assert_eq!(result.tier, tier);
+        assert_eq!(self.reinferred_body_count(), reinferred);
+        assert_eq!(self.relowered_body_count(), relowered);
+        assert_eq!(self.functions_per_file(&result.relowered), per_file(files));
+    }
+
     pub(crate) fn diagnostics(&self) -> Vec<String> {
         self.session
             .diagnostics()
@@ -580,14 +596,7 @@ fn control_a_body_edit_on_a_gate_fixture_reads_narrow() {
         v1("d.rock", UNRELATED),
     ]);
 
-    let r = h.edit("d.rock", d1).expect("accepted");
-    assert_eq!(r.tier, UpdateTier::BodyOnly);
-    assert_eq!(h.reinferred_body_count(), 1);
-    assert_eq!(h.relowered_body_count(), 1);
-    assert_eq!(
-        h.functions_per_file(&r.relowered),
-        per_file(&[("d.rock", 1)])
-    );
+    h.edit_reads("d.rock", d1, UpdateTier::BodyOnly, (1, 1, &[("d.rock", 1)]));
 }
 
 /// Gate (a): an explicit `use` added to one fragment joins the glob family
@@ -611,27 +620,13 @@ fn gate_a_b_use_added_to_and_removed_from_one_fragment() {
     ]);
     assert_eq!(h.call_keys("c.rock"), vec![(key("b::bump"), None)]);
 
-    let r = h.edit("c.rock", c1).expect("accepted");
+    h.edit_reads("c.rock", c1, UpdateTier::Scope, (2, 2, &[("c.rock", 2)]));
     let both = family(&[(&key("a::bump"), "Imports"), (&key("b::bump"), "Globs")]);
     assert_eq!(h.call_keys("c.rock"), vec![("bump".to_string(), both)]);
     assert_eq!(h.selected("c.rock"), vec![key("a::bump")]);
-    assert_eq!(r.tier, UpdateTier::Scope);
-    assert_eq!(h.reinferred_body_count(), 2);
-    assert_eq!(h.relowered_body_count(), 2);
-    assert_eq!(
-        h.functions_per_file(&r.relowered),
-        per_file(&[("c.rock", 2)])
-    );
 
-    let r = h.edit("c.rock", c0).expect("accepted");
+    h.edit_reads("c.rock", c0, UpdateTier::Scope, (2, 2, &[("c.rock", 2)]));
     assert_eq!(h.call_keys("c.rock"), vec![(key("b::bump"), None)]);
-    assert_eq!(r.tier, UpdateTier::Scope);
-    assert_eq!(h.reinferred_body_count(), 2);
-    assert_eq!(h.relowered_body_count(), 2);
-    assert_eq!(
-        h.functions_per_file(&r.relowered),
-        per_file(&[("c.rock", 2)])
-    );
 }
 
 /// Gate (c): a `pub fn` added to a module another fragment globs. Here the
@@ -656,19 +651,17 @@ fn gate_c_glob_member_added_and_removed() {
     ]);
     assert_eq!(h.call_keys("c.rock"), vec![("warm_one".to_string(), None)]);
 
-    let r = h.edit("b.rock", b1).expect("accepted");
+    h.edit_reads(
+        "b.rock",
+        b1,
+        UpdateTier::Scope,
+        (3, 3, &[("b.rock", 2), ("c.rock", 1)]),
+    );
     assert_eq!(
         h.call_keys("c.rock"),
         vec![("warm_one".to_string(), warm_one_family())]
     );
     assert_eq!(h.selected("c.rock"), vec![key("b::warm_one")]);
-    assert_eq!(r.tier, UpdateTier::Scope);
-    assert_eq!(h.reinferred_body_count(), 3);
-    assert_eq!(h.relowered_body_count(), 3);
-    assert_eq!(
-        h.functions_per_file(&r.relowered),
-        per_file(&[("b.rock", 2), ("c.rock", 1)])
-    );
 
     let r = h.edit("b.rock", b0).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
@@ -729,14 +722,7 @@ fn gate_d_private_helper_added_in_an_unrelated_module() {
         v1("d.rock", UNRELATED),
     ]);
 
-    let r = h.edit("d.rock", d1).expect("accepted");
-    assert_eq!(r.tier, UpdateTier::Scope);
-    assert_eq!(h.reinferred_body_count(), 3);
-    assert_eq!(h.relowered_body_count(), 3);
-    assert_eq!(
-        h.functions_per_file(&r.relowered),
-        per_file(&[("d.rock", 3)])
-    );
+    h.edit_reads("d.rock", d1, UpdateTier::Scope, (3, 3, &[("d.rock", 3)]));
 }
 
 /// Gate (e): a module header renamed. b's definitions change DefKey, and the
@@ -759,15 +745,8 @@ fn gate_e_module_header_changed_and_restored() {
     ]);
     assert_eq!(h.call_keys("c.rock"), vec![(key("b::depth"), None)]);
 
-    let r = h.edit("b.rock", b1).expect("accepted");
+    h.edit_reads("b.rock", b1, UpdateTier::Scope, (1, 2, &[("b.rock", 1)]));
     h.assert_diagnostic("did not resolve");
-    assert_eq!(r.tier, UpdateTier::Scope);
-    assert_eq!(h.reinferred_body_count(), 1);
-    assert_eq!(h.relowered_body_count(), 2);
-    assert_eq!(
-        h.functions_per_file(&r.relowered),
-        per_file(&[("b.rock", 1)])
-    );
 
     let r = h.edit("b.rock", b0).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
@@ -800,15 +779,13 @@ fn gate_f_reexport_edit_reaches_a_globber_through_a_glob_chain() {
     h.assert_no_diagnostics();
     assert_eq!(h.call_keys("user.rock"), vec![(key("a::bump"), None)]);
 
-    let r = h.edit("facade.rock", facade1).expect("accepted");
-    assert_eq!(h.call_keys("user.rock"), vec![(key("b::bump"), None)]);
-    assert_eq!(r.tier, UpdateTier::Scope);
-    assert_eq!(h.reinferred_body_count(), 1);
-    assert_eq!(h.relowered_body_count(), 1);
-    assert_eq!(
-        h.functions_per_file(&r.relowered),
-        per_file(&[("user.rock", 1)])
+    h.edit_reads(
+        "facade.rock",
+        facade1,
+        UpdateTier::Scope,
+        (1, 1, &[("user.rock", 1)]),
     );
+    assert_eq!(h.call_keys("user.rock"), vec![(key("b::bump"), None)]);
 }
 
 /// A glob re-export of a module that binds the name through a NAMED
@@ -861,15 +838,8 @@ fn gate_g_visibility_narrowed_and_widened_on_a_path_used_item() {
     ]);
     h.assert_no_diagnostics();
 
-    let r = h.edit("a.rock", a1).expect("accepted");
+    h.edit_reads("a.rock", a1, UpdateTier::Scope, (1, 2, &[("a.rock", 1)]));
     h.assert_diagnostic("`bump` is not accessible from this module");
-    assert_eq!(r.tier, UpdateTier::Scope);
-    assert_eq!(h.reinferred_body_count(), 1);
-    assert_eq!(h.relowered_body_count(), 2);
-    assert_eq!(
-        h.functions_per_file(&r.relowered),
-        per_file(&[("a.rock", 1)])
-    );
 
     let r = h.edit("a.rock", A_BUMP).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
