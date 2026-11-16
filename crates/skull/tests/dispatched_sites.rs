@@ -11,7 +11,7 @@
 //! an obligation for every hole.
 
 use crate::common::{
-    census_of, graph_of, module_id, prepared_body, unjoined, ws_of_files, ws_with_stdlib,
+    census_of, fn_ref, graph_of, prepared_body, unjoined, ws_of_files, ws_with_stdlib,
 };
 use crate::support::site_join::{SiteJoinCensus, Unjoined};
 use bone_semantic::inference::Workspace;
@@ -25,17 +25,6 @@ fn check_with_dependency(src: &str, dependency: &str) -> Workspace {
 }
 
 fn lowered_body_in_mode(ws: &Workspace, name: &str, values_first_class: bool) -> MirFunc {
-    let mid = module_id(ws, "<test>");
-    let (fid, _) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == name)
-        .expect("fn not found");
-    let fref = skull_mir::mir::FuncRef {
-        module: mid,
-        func: fid,
-    };
     let graph = graph_of(ws);
     let bodies = skull::concrete_body::build(ws, &graph);
     let scx = if values_first_class {
@@ -44,9 +33,7 @@ fn lowered_body_in_mode(ws: &Workspace, name: &str, values_first_class: bool) ->
         ScalarCtx::new(ws)
     }
     .sharing(graph.interner().clone());
-    let instance = skull_mir::instance::Instance::base(fref);
-    let plan = bodies.plans.get(&instance).expect("concrete plan");
-    skull_mir::lower::lower_instance_with_plans(ws, &scx, plan, &bodies.plans).expect("lower")
+    crate::common::lowered_body(ws, &bodies, &scx, name)
 }
 
 fn lowered_body(ws: &Workspace, name: &str) -> MirFunc {
@@ -98,17 +85,7 @@ fn dispatched_instance_names_in(ws: &Workspace, name: &str) -> Vec<(String, Stri
 /// instance -- the other half of the cross-view check.
 fn walk_dispatched_in(ws: &Workspace, name: &str) -> Vec<&'static str> {
     let g = graph_of(ws);
-    let mid = module_id(ws, "<test>");
-    let (fid, _) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == name)
-        .expect("fn not found");
-    let fref = skull_mir::mir::FuncRef {
-        module: mid,
-        func: fid,
-    };
+    let fref = fn_ref(ws, name);
     let mut out: Vec<&'static str> = Vec::new();
     for (inst, sites) in g.call_sites() {
         if inst.func != fref {

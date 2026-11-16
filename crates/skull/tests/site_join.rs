@@ -5,8 +5,8 @@
 //! of the identity is load-bearing.
 
 use crate::common::{
-    census_of, census_of_graph, fn_name, fn_ref, graph_of as graph_of_ws, prepared_body,
-    scalar_ctx, unjoined, ws_with_stdlib,
+    census_of, census_of_graph, fn_name, fn_ref, graph_of as graph_of_ws, lowered_body,
+    prepare_body, prepared_body, scalar_ctx, unjoined, ws_and_graph, ws_with_stdlib,
 };
 use crate::support::site_join::{self, CalleeCheck, SiteJoinCensus, Unjoined, check_callee};
 use bone_semantic::inference::Workspace;
@@ -22,12 +22,6 @@ use ustr::Ustr;
 /// The backend the census lowers for; `check_callee` asks the emitter's own
 /// declaration selection, so the comparison needs to know which target.
 const LUA: bone_semantic::hir::FnBackend = bone_semantic::hir::FnBackend::Lua;
-
-fn graph_of(src: &str) -> (Workspace, InstanceGraph) {
-    let ws = ws_with_stdlib(src);
-    let g = graph_of_ws(&ws);
-    (ws, g)
-}
 
 fn concrete(ws: &Workspace) -> (InstanceGraph, ConcreteBodies, ScalarCtx) {
     let g = graph_of_ws(ws);
@@ -48,15 +42,6 @@ fn by_op(m: &BTreeMap<&'static str, usize>, op: &str) -> usize {
     m.get(op).copied().unwrap_or(0)
 }
 
-/// `name`'s base instance, lowered but not yet prepared.
-fn lowered(ws: &Workspace, bodies: &ConcreteBodies, scx: &ScalarCtx, name: &str) -> MirFunc {
-    let plan = bodies
-        .plans
-        .get(&skull_mir::instance::Instance::base(fn_ref(ws, name)))
-        .expect("concrete plan");
-    skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &bodies.plans).expect("lower")
-}
-
 /// The concrete (non-empty substitution) instance of the generic `name`,
 /// lowered but not yet prepared.
 fn lowered_concrete_generic(
@@ -72,23 +57,6 @@ fn lowered_concrete_generic(
         .find(|(inst, _)| inst.func == fref && !inst.args.is_empty())
         .expect("concrete generic instance");
     skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &bodies.plans).expect("lower")
-}
-
-/// Run emission's transform sequence over `name`'s lowered body.
-fn prepare(ws: &Workspace, scx: &ScalarCtx, bodies: &ConcreteBodies, name: &str, mf: &mut MirFunc) {
-    let fref = fn_ref(ws, name);
-    let mangled = skull_mir::mangle::mangle_fn(ws, &ws.module(fref.module).functions[fref.func]);
-    let mut cache = skull_transform::InlineCache::default();
-    skull::mir_emit::prepare_instance_body_with_plans(
-        ws,
-        scx,
-        fref,
-        &mangled,
-        mf,
-        &mut cache,
-        &bodies.plans,
-    )
-    .expect("prepare");
 }
 
 /// Reachable-arena direct calls to the declaration named `name`.
@@ -353,7 +321,7 @@ fn main() { print("{sum_all([1, 2, 3].iter())}") }
                 .filter(|plan| !plan.bound_tree.is_empty())
         })
         .expect("main does not retain a bounded callee plan");
-    let mf = lowered(&ws, &bodies, &scx, "main");
+    let mf = lowered_body(&ws, &bodies, &scx, "main");
     assert!(
         !mf.resolved_bound_trees.is_empty(),
         "the concrete call lost its bound plan"
@@ -368,7 +336,7 @@ fn main() { print("{sum_all([1, 2, 3].iter())}") }
 
 #[test]
 fn standalone_bounded_resolution_records_a_nonempty_resolved_tree() {
-    let (ws, g) = graph_of(
+    let (ws, g) = ws_and_graph(
         r#"
 struct Item { id: int, p: float }
 
@@ -563,7 +531,7 @@ fn a_call_filed_under_the_wrong_operation_fails_accounting() {
 /// would accept.
 #[test]
 fn swapping_two_generic_keys_is_an_instance_mismatch() {
-    let (ws, g) = graph_of(
+    let (ws, g) = ws_and_graph(
         r#"
 fn ident<T>(x: T) -> T { return x }
 fn main() {
@@ -608,7 +576,7 @@ fn main() {
 /// `DeclMismatch`; against its own declaration a non-generic callee verifies.
 #[test]
 fn a_different_declaration_is_a_decl_mismatch() {
-    let (ws, g) = graph_of(
+    let (ws, g) = ws_and_graph(
         r#"
 fn one(x: int) -> int { return x }
 fn two(x: int) -> int { return x + 1 }
@@ -634,7 +602,7 @@ fn main() { print("{one(1)} {two(2)}") }
 /// instance. The admission control is the graph's own substitution.
 #[test]
 fn a_generic_callee_without_a_recorded_instance_is_unverified() {
-    let (ws, g) = graph_of(
+    let (ws, g) = ws_and_graph(
         r#"
 fn pair<A, B>(a: A, b: B) -> A { return a }
 fn other<A, B>(a: A, b: B) -> B { return b }
@@ -662,7 +630,7 @@ fn main() { print("{pair(1, 2.0)} {other(1, 2.0)}") }
 /// A generic boundary callee verifies by its declaration and class.
 #[test]
 fn a_generic_boundary_callee_verifies_as_a_boundary() {
-    let (ws, g) = graph_of(
+    let (ws, g) = ws_and_graph(
         r#"
 fn main() {
     let v: [int] = []
@@ -695,7 +663,7 @@ fn main() {
 /// correct claim from verifying: there is nothing left to compare it with.
 #[test]
 fn a_resolved_instance_without_a_substitution_is_unrecorded() {
-    let (ws, mut g) = graph_of(
+    let (ws, mut g) = ws_and_graph(
         r#"
 fn ident<T>(x: T) -> T { return x }
 fn main() { print("{ident(1)}") }
@@ -748,7 +716,7 @@ fn main() { print("{use_both()}") }
 "#,
         ),
     ] {
-        let (ws, g) = graph_of(src);
+        let (ws, g) = ws_and_graph(src);
         let instances: Vec<_> = g
             .substitutions()
             .filter(|(i, _)| fn_name(&ws, i.func) == generic)
@@ -792,7 +760,7 @@ fn main() { print("{top()}") }
 fn concrete_inline_uses_owner_when_delivery_is_absent() {
     let ws = ws_with_stdlib(WRAP_VEC2);
     let (_, bodies, scx) = concrete(&ws);
-    let mut mf = lowered(&ws, &bodies, &scx, "top");
+    let mut mf = lowered_body(&ws, &bodies, &scx, "top");
     let call = mf
         .insts
         .iter()
@@ -813,7 +781,7 @@ fn concrete_inline_uses_owner_when_delivery_is_absent() {
         mf.spec_bindings.remove(&call).is_some(),
         "the fixture must have delivery to remove"
     );
-    prepare(&ws, &scx, &bodies, "top", &mut mf);
+    prepare_body(&ws, &scx, &bodies, "top", &mut mf);
     assert_eq!(
         calls_to(&ws, &mf, "wrap"),
         0,
@@ -844,7 +812,7 @@ fn main() { print("{top()}") }
 "#,
     );
     let (_, bodies, scx) = concrete(&ws);
-    let mut mf = lowered(&ws, &bodies, &scx, "top");
+    let mut mf = lowered_body(&ws, &bodies, &scx, "top");
     let call = mf
         .insts
         .iter()
@@ -866,7 +834,7 @@ fn main() { print("{top()}") }
         mf.spec_bindings.remove(&call).is_some(),
         "the negative arm must remove delivery"
     );
-    prepare(&ws, &scx, &bodies, "top", &mut mf);
+    prepare_body(&ws, &scx, &bodies, "top", &mut mf);
     assert_eq!(
         calls_to(&ws, &mf, "wrap"),
         1,
@@ -1148,7 +1116,7 @@ fn main() {
 /// table.
 #[test]
 fn an_owner_the_graph_does_not_have_is_refused() {
-    let (ws, mut g) = graph_of(WRAP_VEC2);
+    let (ws, mut g) = ws_and_graph(WRAP_VEC2);
     let bodies = skull::concrete_body::build(&ws, &g);
     let scx = scalar_ctx(&ws, &g);
     // The stdlib splices its own generics, so the claim is about the delta.
@@ -1201,7 +1169,7 @@ fn an_owner_the_graph_does_not_have_is_refused() {
 /// graph still resolves the mint to the function the source named.
 #[test]
 fn a_mint_recording_the_wrong_function_is_a_census_mismatch() {
-    let (ws, g) = graph_of(
+    let (ws, g) = ws_and_graph(
         r#"
 fn add_one(x: int) -> int { return x + 1 }
 fn add_two(x: int) -> int { return x + 2 }

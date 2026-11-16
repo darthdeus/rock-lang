@@ -1,16 +1,10 @@
 //! Stage 0d properties for the shadow instance graph
 //!.
 
-use crate::common::{body_id, emit_full_of, fn_name, ws_with_stdlib};
+use crate::common::{body_id, emit_full_of, fn_name, fn_ref, ws_and_graph, ws_of, ws_with_stdlib};
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::{self, Instance, Site, SiteOp, SiteOutcome};
 use ustr::Ustr;
-
-fn graph_of(src: &str) -> (Workspace, instance_graph::InstanceGraph) {
-    let ws = ws_with_stdlib(src);
-    let g = crate::common::graph_of(&ws);
-    (ws, g)
-}
 
 fn resolved_sites(
     graph: &instance_graph::InstanceGraph,
@@ -108,7 +102,7 @@ fn main() {
         ),
     ];
     for (label, src, name, args) in cases {
-        let (ws, g) = graph_of(src);
+        let (ws, g) = ws_and_graph(src);
         let rejected: Vec<String> = g.rejections().map(|r| r.message.clone()).collect();
         assert!(
             rejected.is_empty(),
@@ -185,7 +179,7 @@ fn every_concrete_call_identity_appears_in_the_instance_graph() {
     use skull_mir::monoty::{MonoTyReason, convert};
     use std::collections::HashSet;
 
-    let (ws, g) = graph_of(
+    let (ws, g) = ws_and_graph(
         r#"
 value P { x: float, y: float }
 @inline fn ident<T>(v: T) -> T { return v }
@@ -285,7 +279,7 @@ fn main() {
 /// iterator edges over the whole corpus while looking healthy.
 #[test]
 fn a_chained_iterator_reaches_each_next_instance() {
-    let (ws, g) = graph_of(
+    let (ws, g) = ws_and_graph(
         r#"
 fn main() {
     let xs: [int] = [1, 2, 3]
@@ -452,7 +446,7 @@ fn main() { let c = ticker(); let _ = c.resume() }
         ),
     ];
     for (src, required) in cases {
-        let (ws, g) = graph_of(src);
+        let (ws, g) = ws_and_graph(src);
         let bodies = skull::concrete_body::build(&ws, &g);
         let mut compared = 0;
         for (inst, concrete) in bodies.plans.iter() {
@@ -577,7 +571,7 @@ fn rejections_of(
 /// a deliberate language-surface rejection, not a bug fix.
 #[test]
 fn changing_instance_recursion_is_rejected() {
-    let (ws, g) = graph_of(
+    let (ws, g) = ws_and_graph(
         r#"
 fn depth<T>(x: T, n: int) -> int {
     if n <= 0 { return 0 }
@@ -700,7 +694,7 @@ fn main() {
         ),
     ];
     for (src, kind, names) in cases {
-        let (ws, g) = graph_of(src);
+        let (ws, g) = ws_and_graph(src);
         let r = rejections_of(&ws, &g, kind);
         assert_eq!(r.len(), names.len(), "{kind:?}: {r:?}");
         for name in names {
@@ -713,7 +707,7 @@ fn main() {
 /// mutual), so a gate that rejected it would reject every real program.
 #[test]
 fn same_instance_recursion_is_not_rejected() {
-    let (ws, g) = graph_of(
+    let (ws, g) = ws_and_graph(
         r#"
 fn countdown(n: int) -> int {
     if n <= 0 { return 0 }
@@ -768,7 +762,7 @@ fn main() {
 /// CONTROL: a concrete function taken as a value is ordinary and must survive.
 #[test]
 fn a_concrete_fn_value_is_not_rejected() {
-    let (ws, g) = graph_of(
+    let (ws, g) = ws_and_graph(
         r#"
 fn bump(x: int) -> int { return x + 1 }
 fn apply(f: fn(int) -> int, v: int) -> int { return f(v) }
@@ -799,7 +793,7 @@ fn main() {
 /// constrained by the call's own arguments".
 #[test]
 fn a_body_constrained_type_variable_is_not_rejected() {
-    let (ws, g) = graph_of(
+    let (ws, g) = ws_and_graph(
         r#"
 fn make<T>() -> [T] { return [] }
 fn main() {
@@ -865,7 +859,7 @@ fn generic_iter_witnesses_are_instantiated() {
             "implicit-iter-witness-no-instantiation-record",
         ),
     ] {
-        let (ws, g) = graph_of(&src);
+        let (ws, g) = ws_and_graph(&src);
         let iters: Vec<String> = resolved_sites(&g)
             .filter(|(site, _)| site.op == kind)
             .map(|(_, target)| g.symbol(&ws, target))
@@ -902,7 +896,7 @@ fn generic_iter_witnesses_are_instantiated() {
             &["count", "iter", "next"][..],
         ),
     ] {
-        let (ws, g) = graph_of(&format!(
+        let (ws, g) = ws_and_graph(&format!(
             "global TOTAL: int = {{\n    {body}\n}}\nfn main() {{ print(\"{{TOTAL}}\") }}\n"
         ));
         let symbols: Vec<String> = g.instances.iter().map(|i| g.symbol(&ws, i)).collect();
@@ -920,7 +914,7 @@ fn generic_iter_witnesses_are_instantiated() {
 /// through the empty-substitution path.
 #[test]
 fn a_concrete_iter_witness_still_resolves() {
-    let (ws, g) = graph_of(
+    let (ws, g) = ws_and_graph(
         r#"
 struct Counter { i: int, n: int }
 fn iter(c: Counter) -> Counter { return c }
@@ -1046,7 +1040,7 @@ fn main() {
 /// `changing_instance_recursion_is_rejected`.
 #[test]
 fn every_instance_is_expanded_or_a_boundary() {
-    let (ws, g) = graph_of(
+    let (ws, g) = ws_and_graph(
         r#"
 value P { x: float, y: float }
 fn ident<T>(x: T) -> T { return x }
@@ -1124,7 +1118,7 @@ fn main() {
 /// artifact-ABI-plan property (plan S 0h) and is not what this asserts.
 #[test]
 fn instances_that_render_alike_get_distinct_logical_symbols() {
-    let (ws, g) = graph_of(
+    let (ws, g) = ws_and_graph(
         r#"
 fn twice(n: int) -> int { return n * 2 }
 fn maybe(n: int) -> int? { return n * 2 }
@@ -1182,7 +1176,7 @@ fn main() {
 /// every function the moment instances exist.
 #[test]
 fn a_non_generic_instance_keeps_its_base_symbol() {
-    let (ws, g) = graph_of(
+    let (ws, g) = ws_and_graph(
         r#"
 fn bump(x: int) -> int { return x + 1 }
 fn main() { bump(1) }
@@ -1208,7 +1202,7 @@ fn main() { bump(1) }
 /// collection over the caller's own generic rather than the generic itself.
 #[test]
 fn a_callee_binding_inside_a_generic_body_is_concrete() {
-    let (ws, g) = graph_of(
+    let (ws, g) = ws_and_graph(
         r#"
 fn hold<T>(x: T) -> int {
     let xs: [T] = [x]
@@ -1297,7 +1291,7 @@ fn main() { mapped_op(1) }
         ),
     ];
     for (src, op, expands, helper) in cases {
-        let (ws, g) = graph_of(src);
+        let (ws, g) = ws_and_graph(src);
         assert_eq!(
             g.expanded().any(|i| fn_name(&ws, i.func) == op),
             expands,
@@ -1344,7 +1338,7 @@ fn main() { mapped_op(1) }
 /// under it.
 #[test]
 fn a_root_with_instances_reports_them_and_stays_a_hole() {
-    let (ws, g) = graph_of(
+    let (ws, g) = ws_and_graph(
         r#"
 @nomangle fn keep<T>(x: T) -> T { return x }
 fn main() {
@@ -1393,14 +1387,14 @@ fn main() {{ let a = keep(1) }}
 "#
         )
     };
-    let (_, bare) = graph_of(&src("@nomangle"));
+    let (_, bare) = ws_and_graph(&src("@nomangle"));
     assert!(
         bare.uninstantiated_roots.contains_key("keep"),
         "a `@nomangle` generic root IS a bare-name obligation: {:?}",
         bare.uninstantiated_roots.keys()
     );
 
-    let (_, mangled) = graph_of(&src(""));
+    let (_, mangled) = ws_and_graph(&src(""));
     let excused: Vec<&String> = mangled
         .excused_generic_roots
         .get("mangled")
@@ -1420,16 +1414,6 @@ fn main() {{ let a = keep(1) }}
     );
 }
 
-/// A graph over `src` alone, with no stdlib, so a fixture can supply the one
-/// declaration of a runtime-entry name itself.
-fn graph_of_without_stdlib(src: &str) -> instance_graph::InstanceGraph {
-    let mut modules =
-        vec![skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse")];
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let roots = skull::mir_emit::emission_roots(&ws, None);
-    instance_graph::build(&ws, roots, false)
-}
-
 /// The `stdlib-funcref` excusal is a DECLARATION property, never a name one.
 /// `ERASED_RUNTIME_ENTRIES` holds NAMES, and membership alone is a proxy for
 /// "this is the entry `stdlib_funcref` resolves to" -- a weaker question. A
@@ -1445,7 +1429,7 @@ fn graph_of_without_stdlib(src: &str) -> instance_graph::InstanceGraph {
 #[test]
 fn the_funcref_excusal_follows_the_declaration_not_the_name() {
     let entry = "@nomangle fn __rock_col_sort<T>(x: T) -> int { return 1 }\nfn main() { }\n";
-    let plain = graph_of_without_stdlib(entry);
+    let plain = crate::common::graph_of(&ws_of(entry));
     assert!(
         plain
             .excused_generic_roots
@@ -1461,9 +1445,9 @@ fn the_funcref_excusal_follows_the_declaration_not_the_name() {
         plain.uninstantiated_roots.keys()
     );
 
-    let shadowed = graph_of_without_stdlib(&format!(
+    let shadowed = crate::common::graph_of(&ws_of(&format!(
         "{entry}@nomangle fn __rock_col_sort<T>(x: T, y: T) -> int {{ return 2 }}\n"
-    ));
+    )));
     assert!(
         shadowed
             .uninstantiated_roots
@@ -1544,7 +1528,7 @@ fn main() { let x = G }
     );
     // CONTROL: the same failure from an INSTANTIATED body is the stronger
     // classification -- a rejection with a span -- and must not be filed here.
-    let (_ws2, g2) = graph_of(
+    let (_ws2, g2) = ws_and_graph(
         r#"
 fn pick<T>() -> int {
     let unused: T = 1
@@ -1570,7 +1554,7 @@ fn main() { let x = pick() }
 /// The fixture must produce edges so the span check is not vacuous.
 #[test]
 fn every_edge_carries_a_source_span() {
-    let (ws, g) = graph_of(
+    let (ws, g) = ws_and_graph(
         r#"
 value P { x: float, y: float }
 struct Hold<T> { v: T }
@@ -1621,7 +1605,7 @@ fn main() {
 /// over-approximation stopped covering for it.
 #[test]
 fn an_opaque_body_declares_its_runtime_dependency() {
-    let (ws, g) = graph_of(
+    let (ws, g) = ws_and_graph(
         r#"
 @nomangle inline(lua) fn opaque_caller(v: any) -> any = """
     return __rock_vec_column_elements(v)
@@ -1775,7 +1759,7 @@ fn main() {
 /// agreement, so a zero over recorded substitutions would say nothing.
 #[test]
 fn an_instance_substitution_does_not_depend_on_which_caller_reached_it() {
-    let (ws, g) = graph_of(
+    let (ws, g) = ws_and_graph(
         r#"
 fn ident<T>(x: T) -> T { return x }
 fn hold<T>(v: T) -> T { return ident(v) }
@@ -1841,28 +1825,12 @@ fn main() { a(); b(); c(); d() }
     );
     assert!(
         g.substitution(&instance_graph::Instance {
-            func: main_ref(&ws),
+            func: fn_ref(&ws, "main"),
             args: Vec::new(),
         })
         .is_some(),
         "`main`, a non-generic root, has no recorded substitution"
     );
-}
-
-/// `main`'s `FuncRef`. Named directly so the assertion above is about the root
-/// seeding path and not about whichever instance happens to sort first.
-fn main_ref(ws: &Workspace) -> skull_mir::mir::FuncRef {
-    for module in ws.modules.iter() {
-        for (fid, f) in module.functions.iter() {
-            if f.name.as_str() == "main" {
-                return skull_mir::mir::FuncRef {
-                    module: module.id,
-                    func: fid,
-                };
-            }
-        }
-    }
-    panic!("no `main`");
 }
 
 /// Run `f` over exactly one body's inference record.

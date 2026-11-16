@@ -645,6 +645,13 @@ pub fn graph_of(ws: &Workspace) -> InstanceGraph {
     graph_for(ws).0
 }
 
+/// `src` over the real stdlib, and its default-root instance graph.
+pub fn ws_and_graph(src: &str) -> (Workspace, InstanceGraph) {
+    let ws = ws_with_stdlib(src);
+    let g = graph_of(&ws);
+    (ws, g)
+}
+
 /// The site-join census of `src`'s whole program.
 pub fn census_of(src: &str) -> SiteJoinCensus {
     let ws = ws_with_stdlib(src);
@@ -663,38 +670,50 @@ pub fn unjoined(c: &SiteJoinCensus, cause: Unjoined) -> usize {
     c.unjoined.get(&cause).copied().unwrap_or(0)
 }
 
-/// `name`'s base instance in `<test>`, lowered and prepared as emission would.
-pub fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
-    let mid = module_id(ws, "<test>");
-    let (fid, f) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == name)
-        .expect("fn not found");
-    let fref = skull_mir::mir::FuncRef {
-        module: mid,
-        func: fid,
-    };
-    let graph = graph_of(ws);
-    let bodies = skull::concrete_body::build(ws, &graph);
-    let scx = scalar_ctx(ws, &graph);
-    let instance = skull_mir::instance::Instance::base(fref);
-    let plan = bodies.plans.get(&instance).expect("concrete plan");
-    let mut mf =
-        skull_mir::lower::lower_instance_with_plans(ws, &scx, plan, &bodies.plans).expect("lower");
-    let mangled = skull_mir::mangle::mangle_fn(ws, f);
+/// `name`'s base instance, lowered over `scx` but not yet prepared.
+pub fn lowered_body(
+    ws: &Workspace,
+    bodies: &skull::concrete_body::ConcreteBodies,
+    scx: &ScalarCtx,
+    name: &str,
+) -> MirFunc {
+    let plan = bodies
+        .plans
+        .get(&skull_mir::instance::Instance::base(fn_ref(ws, name)))
+        .expect("concrete plan");
+    skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &bodies.plans).expect("lower")
+}
+
+/// Run emission's transform sequence over `name`'s lowered body.
+pub fn prepare_body(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    bodies: &skull::concrete_body::ConcreteBodies,
+    name: &str,
+    mf: &mut MirFunc,
+) {
+    let fref = fn_ref(ws, name);
+    let mangled = skull_mir::mangle::mangle_fn(ws, &ws.module(fref.module).functions[fref.func]);
     let mut cache = skull_transform::InlineCache::default();
     skull::mir_emit::prepare_instance_body_with_plans(
         ws,
-        &scx,
+        scx,
         fref,
         &mangled,
-        &mut mf,
+        mf,
         &mut cache,
         &bodies.plans,
     )
     .expect("prepare");
+}
+
+/// `name`'s base instance, lowered and prepared as emission would.
+pub fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
+    let graph = graph_of(ws);
+    let bodies = skull::concrete_body::build(ws, &graph);
+    let scx = scalar_ctx(ws, &graph);
+    let mut mf = lowered_body(ws, &bodies, &scx, name);
+    prepare_body(ws, &scx, &bodies, name, &mut mf);
     mf
 }
 
