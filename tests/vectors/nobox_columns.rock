@@ -1,0 +1,28 @@
+// A Vec of a `nobox` value keeps one column per leaf: push, a literal and a
+// leaf write each touch only the columns they name.
+
+nobox value NV2 { x: float, y: float }
+
+@test
+fn push_then_read_each_leaf() {
+    let xs: [NV2] = []
+    xs.push(NV2 { x: 1.0, y: 2.0 })
+    xs.push(NV2 { x: 30.0, y: 40.0 })
+    assert_eq(xs[1].x, 30.0)
+    assert_eq(xs[0].y, 2.0)
+    assert_eq(xs.len, 2)
+}
+
+@test
+fn a_literal_fills_every_column() {
+    let xs: [NV2] = [NV2 { x: 5.0, y: 6.0 }, NV2 { x: 7.0, y: 8.0 }]
+    assert_eq(xs[1].y, 8.0)
+    assert_eq(xs.len, 2)
+}
+
+@test
+fn a_leaf_write_spares_its_sibling_column() {
+    let xs: [NV2] = [NV2 { x: 1.0, y: 2.0 }]
+    xs[0].x = 9.0
+    assert_eq(xs[0], NV2 { x: 9.0, y: 2.0 })
+}

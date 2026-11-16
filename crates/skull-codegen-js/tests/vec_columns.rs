@@ -4,8 +4,8 @@
 //! targets column now, so the `nobox` half here is about the GUARANTEE (no
 //! materializer exists at all), not about reaching the column path.
 //!
-//! Emitted-shape assertions alone cannot tell "flat" from "boxed and unboxed
-//! again", so the round-trips below RUN under node.
+//! tests/vectors/nobox_columns.rock and nobox/nullable_column.rock run the
+//! round trips on both backends; these pin that no element object is built.
 
 use crate::common::{lower_test_ref, ws_with};
 
@@ -30,27 +30,6 @@ fn marked() -> int {
     xs.push(NV2 { x: 1.0, y: 2.0 })
     xs.push(NV2 { x: 30.0, y: 40.0 })
     return int(xs[1].x) * 100 + int(xs[0].y) * 10 + xs.len
-}
-
-fn literal() -> int {
-    let xs: [NV2] = [NV2 { x: 5.0, y: 6.0 }, NV2 { x: 7.0, y: 8.0 }]
-    return int(xs[1].y) * 10 + xs.len
-}
-
-fn written() -> int {
-    let xs: [NV2] = [NV2 { x: 1.0, y: 2.0 }]
-    xs[0].x = 9.0
-    return int(xs[0].x) * 10 + int(xs[0].y)
-}
-
-nobox value NP { x: float, y: float }
-
-fn insert_at_presence() -> int {
-    let a: [NP?] = [NP { x: 1.0, y: 2.0 }, NP { x: 3.0, y: 4.0 }]
-    a.insert_at(1, null)
-    let present = 0
-    if a[1] == null { present = 1 }
-    return a.len * 1000 + int(a[0]?.y ?? 0.0) * 100 + present * 10 + int(a[2]?.y ?? 0.0)
 }
 
 fn main() { let _ = unmarked() }
@@ -88,21 +67,6 @@ fn fn_body<'a>(js: &'a str, name: &str) -> &'a str {
     let rest = &js[start..];
     let end = rest.find("\n}").map(|e| e + 2).unwrap_or(rest.len());
     &rest[..end]
-}
-
-fn eval_int(name: &str, expect: i64) {
-    let defs = emit_js(name).unwrap_or_else(|e| panic!("emit `{name}`: {e}"));
-    crate::common::eval_int(
-        &[
-            skull_codegen_js::JS_NB_CHECK_SHIMS,
-            skull_codegen_js::JS_VEC_CHECK_SHIMS,
-            skull_codegen_js::JS_TABLE_PRIM,
-            skull_codegen_js::JS_STRUCTURAL_EQ,
-        ],
-        &defs,
-        name,
-        expect,
-    );
 }
 
 /// The control: the same source still columns for luajit. Without it every
@@ -200,27 +164,6 @@ fn a_nobox_element_never_builds_an_element_object() {
     );
 }
 
-/// Push then read back, under node. `marked` pushes two elements and reads a
-/// leaf from each plus `len`, so a desynced column or an off-by-one index shows
-/// up as a wrong number rather than a crash.
-#[test]
-fn a_nobox_element_round_trips_through_push_and_read() {
-    eval_int("marked", 30 * 100 + 2 * 10 + 2);
-}
-
-/// The literal path (`MakeVecColumns`) rather than the push path.
-#[test]
-fn a_column_vec_literal_round_trips() {
-    eval_int("literal", 8 * 10 + 2);
-}
-
-/// Leaf place-WRITE through an element index: `xs[0].x = 9.0` must reach one
-/// column and leave the sibling column alone.
-#[test]
-fn a_leaf_write_hits_one_column_and_spares_its_sibling() {
-    eval_int("written", 9 * 10 + 2);
-}
-
 /// The index is 0-based on JS and 1-based on Lua, because each follows its own
 /// `_data`. That difference lives in exactly one place; pin it there so a
 /// "parity" edit cannot quietly move it and shift every column read by one.
@@ -235,13 +178,4 @@ fn the_checked_index_is_zero_based_on_js() {
         js.contains("__vec_checked_index("),
         "column element access must go through the checked index:\n{js}"
     );
-}
-
-/// `insert_at` inserts the VALUE into each column, not the `len` it is sized by.
-/// The digits are `len`, `a[0].y`, `a[1] == null`, `a[2].y`; a JS sibling that
-/// drops a param binds `value` to whatever sits at its position and splices that
-/// in, which reads back through the presence column as a present element.
-#[test]
-fn nullable_column_insert_at_presence() {
-    eval_int("insert_at_presence", 3214);
 }
