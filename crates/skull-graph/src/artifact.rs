@@ -44,7 +44,7 @@ use crate::concrete_body::BoundaryId;
 use crate::instance_graph::{
     self, BoundaryClass, Concreteness, DeclKey, Instance, InstanceGraph, Site, SiteOutcome,
 };
-use crate::target_projection::{supports, CpuTargetSpec, TargetSpec};
+use crate::target_projection::{CpuTargetSpec, TargetSpec, supports};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 thread_local! {
@@ -138,7 +138,7 @@ impl<'a> ArtifactMappings<'a> {
 /// that renames deliberately is what keeps the two apart.
 pub trait SymbolPlanner: Sync {
     fn symbol(&self, ws: &Workspace, g: &InstanceGraph, i: &Instance, realized: Realized)
-        -> String;
+    -> String;
     fn describe(&self) -> &'static str;
 }
 
