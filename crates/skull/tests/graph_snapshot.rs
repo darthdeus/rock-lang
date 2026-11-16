@@ -756,10 +756,13 @@ fn arms() -> Vec<Arm> {
             "subst_disagreements.kept",
             "subst_disagreements",
             split,
-            |g, (_, s, o)| {
-                *s = subst_with(g, MonoTy::Unit);
-                *o = Some(subst_with(g, MonoTy::Never));
-            },
+            |g, (_, s, _)| *s = subst_with(g, MonoTy::Bool),
+        ),
+        (
+            "subst_disagreements.discarded",
+            "subst_disagreements",
+            split,
+            |g, (_, _, o)| *o = Some(subst_with(g, MonoTy::Bool)),
         ),
     ] {
         v.push(variant(name, section, base, alter, |g, (i, s, o)| {
