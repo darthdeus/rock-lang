@@ -1,0 +1,103 @@
+//! A `ref T` is a frame reference: it may not outlive the frame, be stored
+//! persistently, cross an opaque boundary, or address relocatable storage.
+
+//=== TEST CASE: temporary_ref_argument_Generic ===
+//! expect: a `ref` can only borrow a stable place (a local, field, or indexed slot)
+struct Player { hp: int }
+fn read_hp(player: ref Player) -> int { player.hp }
+fn main() { print(read_hp(Player { hp: 1 })) }
+
+//=== TEST CASE: closure_captures_ref_Generic ===
+//! expect: closure cannot capture frame reference `player`; capture an `Entity<T>` and resolve it inside the
+struct Player { hp: int }
+fn bad(player: ref Player) -> () -> int { return () => player.hp }
+
+//=== TEST CASE: return_local_place_Generic ===
+//! expect: cannot return a frame reference to a local place; return an input reference or a reference obtained
+struct Player { hp: int }
+fn bad() -> ref Player { let player = Player { hp: 1 }  return player }
+
+//=== TEST CASE: return_local_place_nested_fn_Generic ===
+//! expect: `bad` cannot store a frame reference in a persistent container or closure type
+struct Player { hp: int }
+fn outer() { fn bad() -> ref Player { let player = Player { hp: 1 }  player } }
+
+//=== TEST CASE: return_local_place_lambda_Generic ===
+//! expect: type mismatch: expected `ref Player`, found `Player` (different type constructors)
+struct Player { hp: int }
+fn bad() -> () -> ref Player { return () => { let player = Player { hp: 1 }  player } }
+
+//=== TEST CASE: frame_ref_source_marker_Generic ===
+//! expect: `@frame_ref_source` is reserved for the standard arena storage primitive
+@frame_ref_source fn bad() {}
+
+//=== TEST CASE: ref_erased_to_any_Generic ===
+//! expect: a frame reference cannot be erased to `any`
+struct Player { hp: int }
+fn main(player: ref Player) { let erased: any = player }
+
+//=== TEST CASE: ref_foreign_parameter_Generic ===
+//! expect: foreign or inline function `host` cannot carry a frame reference across an opaque boundary
+struct Player { hp: int }
+extern(lua) fn host(player: ref Player)
+
+//=== TEST CASE: ref_in_array_Generic ===
+//! expect: `retained` cannot store a frame reference in a persistent container or closure type
+struct Player { hp: int }
+fn main(player: ref Player) { let retained = [player] }
+
+//=== TEST CASE: ref_struct_field_Generic ===
+//! expect: field `player` cannot store a frame reference; store an `Entity<T>` or a value instead
+struct Player { hp: int }
+struct Holder { player: ref Player }
+
+//=== TEST CASE: ref_value_field_Generic ===
+//! expect: field `player` cannot store a frame reference; store an `Entity<T>` or a value instead
+struct Player { hp: int }
+value Holder { player: ref Player }
+
+//=== TEST CASE: ref_enum_payload_Generic ===
+//! expect: enum variant `Player` cannot store a frame reference; store an `Entity<T>` or a value instead
+struct Player { hp: int }
+enum Event { Player(ref Player) }
+
+//=== TEST CASE: ref_global_Generic ===
+//! expect: global `PLAYER` cannot store a frame reference; store an `Entity<T>` or a value instead
+struct Player { hp: int }
+global PLAYER: (ref Player)? = null
+
+//=== TEST CASE: ref_container_element_Generic ===
+//! expect: global `PLAYERS` cannot store a frame reference; store an `Entity<T>` or a value instead
+struct Player { hp: int }
+global PLAYERS: [ref Player]
+
+//=== TEST CASE: ref_static_local_Generic ===
+//! expect: a `static` local cannot store a frame reference; store an `Entity<T>` or a value instead
+struct Player { hp: int }
+fn keep() { static PLAYER: (ref Player)? = null }
+
+//=== TEST CASE: retained_vec_element_ref_Generic ===
+//! expect: cannot retain a reference into relocatable Vec or Map storage; pass the element directly to a `ref
+value Position { x: int }
+fn main() {
+    let positions = [Position { x: 1 }]
+    let position: ref Position = positions[0]
+    positions.push(Position { x: 2 })
+    position.x = 3
+}
+
+//=== TEST CASE: ref_helper_keeps_vec_element_origin_Generic ===
+//! expect: cannot retain a reference into relocatable Vec or Map storage; pass the element directly to a `ref
+value Position { x: int }
+fn same(position: ref Position) -> ref Position { return position }
+fn main() {
+    let positions = [Position { x: 1 }]
+    let position: ref Position = same(positions[0])
+    positions.push(Position { x: 2 })
+    position.x = 3
+}
+
+//=== TEST CASE: vec_header_does_not_pin_elements_Generic ===
+//! expect: cannot retain a reference into relocatable Vec or Map storage; pass the element directly to a `ref
+value Position { x: int }
+fn first(positions: [Position]) -> ref Position { return positions[0] }

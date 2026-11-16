@@ -36,6 +36,7 @@ fn main() {
 }
 
 //=== TEST CASE: null_to_bare_any_NullAssignmentToNonNullable ===
+//! expect: `null` cannot be assigned to bare `any` (which excludes null) -- use `any?`
 fn main() {
     let x: any = null
 }

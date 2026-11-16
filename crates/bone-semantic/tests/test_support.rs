@@ -2,8 +2,6 @@
 //!
 //! - `check_types(src)` runs the bone pipeline and asserts every `//^ ty`
 //!   marker in the source resolves to the expected type via `query::type_at`.
-//! - `ExpectPretty` renders any `Result<T, CompilerError>` failure through
-//!   rock's ariadne pipeline before panicking.
 
 // Both test harnesses include this module and each uses part of it.
 #![allow(dead_code)]
@@ -22,16 +20,6 @@ pub fn render_err(sources: &[(&str, &str)], e: &CompilerError) -> String {
         ));
     }
     e.render(&sf)
-}
-
-pub trait ExpectPretty<T> {
-    fn expect_pretty(self, stage: &str, sources: &[(&str, &str)]) -> T;
-}
-
-impl<T> ExpectPretty<T> for Result<T, CompilerError> {
-    fn expect_pretty(self, stage: &str, sources: &[(&str, &str)]) -> T {
-        self.unwrap_or_else(|e| panic!("{stage} failed\n{}", render_err(sources, &e)))
-    }
 }
 
 /// Parse `//^ ty` markers out of `src`, run the bone pipeline once,

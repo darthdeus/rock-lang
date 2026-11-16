@@ -21,6 +21,7 @@ fn main() {
 }
 
 //=== TEST CASE: destructure_struct_with_newtype_Generic ===
+//! expect: cannot destructure this value with newtype pattern `UserId` - the value is not a newtype `UserId`
 newtype UserId(int)
 
 struct User {
@@ -35,6 +36,7 @@ fn main() {
 }
 
 //=== TEST CASE: destructure_int_with_newtype_Generic ===
+//! expect: cannot destructure this value with newtype pattern `UserId` - the value is not a newtype `UserId`
 newtype UserId(int)
 
 fn main() {

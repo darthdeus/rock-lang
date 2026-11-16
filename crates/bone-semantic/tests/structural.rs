@@ -3,7 +3,6 @@
 // cross-module wiring). Type-level behavior belongs in tests/fixtures/*.rock
 // instead.
 
-use crate::test_support::ExpectPretty;
 use bone_semantic::prelude::*;
 
 /// Parse a source string into a raw (uncooked) skull `Ast`. Shims rock's old
@@ -171,35 +170,6 @@ fn legacy_only_workspace_keeps_the_std_namespace() {
     assert!(ws.fragment_scopes.is_empty());
 }
 
-// `+` is declared inline so the add tests need no stdlib.
-const INT_ADD: &str = "@pure @inline operator(lua) +(a: int, b: int) -> int = \"return a + b\"\n";
-
-#[test]
-fn lower_and_check_add() {
-    let src = format!("{INT_ADD}fn add(x: int, y: int) -> int {{ return x + y }}");
-    let srcs: &[(&str, &str)] = &[("<parse_rock>", &src)];
-    let module = parse_rock(&src).expect_pretty("parse_rock", srcs);
-    semantic_pass(&mut [module]).expect_pretty("semantic_pass", srcs);
-    let messages: Vec<String> = body_errors(&src, "add")
-        .into_iter()
-        .map(|e| e.message)
-        .collect();
-    assert!(messages.is_empty(), "{messages:?}");
-}
-
-#[test]
-fn check_add_mismatch_records_a_body_error() {
-    let src = format!("{INT_ADD}fn add(x: int, y: int) -> bool {{ return x + y }}");
-    let messages: Vec<String> = body_errors(&src, "add")
-        .into_iter()
-        .map(|e| e.message)
-        .collect();
-    assert!(
-        messages.iter().any(|m| m.contains("expected `bool`")),
-        "{messages:?}"
-    );
-}
-
 // The per-body errors recorded for `fn main` in a self-contained source
 // (semantic_pass returns Ok; type errors live per-body).
 fn main_body_errors(src: &str) -> Vec<CompilerError> {
@@ -229,46 +199,6 @@ fn main_body_error_messages(src: &str) -> Vec<String> {
         .collect()
 }
 
-// P1a: a leaf type mismatch reads "expected `X`, found `Y`", not the bare
-// jargon "Failed to unify Y and X".
-#[test]
-fn leaf_type_mismatch_says_expected_found() {
-    let msgs = main_body_error_messages(r#"fn main() { let a: int = "hello" }"#);
-    assert!(
-        msgs.iter()
-            .any(|m| m.contains("expected `int`, found `string`")),
-        "expected an expected/found message, got: {msgs:?}"
-    );
-}
-
-// Overload scoring and `coerce` try unifications quietly and discard the
-// failures; a unify that can be reported must still name both types. Here the
-// nullable-target coerce fails a quiet trial before the reported unify.
-#[test]
-fn nominal_mismatch_after_a_quiet_trial_names_both_types() {
-    let msgs = main_body_error_messages(
-        "struct Foo { x: int }\nstruct Bar { x: int }\nfn main() { let a: Foo? = Bar { x: 1 } }",
-    );
-    assert!(
-        msgs.iter()
-            .any(|m| m == "type mismatch: expected `Foo`, found `Bar`"),
-        "expected the nominal mismatch message, got: {msgs:?}"
-    );
-}
-
-#[test]
-fn generic_constructor_mismatch_names_both_types() {
-    let msgs = main_body_error_messages(
-        "struct Foo { x: int }\nfn main() { let a: [int] = Foo { x: 1 } }",
-    );
-    assert!(
-        msgs.iter()
-            .any(|m| m
-                == "type mismatch: expected `[int]`, found `Foo` (different type constructors)"),
-        "expected the constructor mismatch message, got: {msgs:?}"
-    );
-}
-
 // P1b: the mismatch carries a second label at the expected type's origin (the
 // `: Foo` annotation), so the reader sees WHERE the expectation came from.
 // Works for span-carrying types (nominal/compound); builtins (`int`) lower to a
@@ -292,101 +222,6 @@ fn type_mismatch_labels_the_expected_type_origin() {
             .map(|l| (l.span.offset_range(), l.message.clone()))
             .collect::<Vec<_>>()
     );
-}
-
-#[test]
-fn body_error_messages_explain_the_mistake() {
-    let cases: &[(&str, &str)] = &[
-        // `/` is float division; its `float` result in
-        // an int-shaped hole is rejected with a hint to use `./`. Self-contained (the
-        // float operators are declared inline) so it needs no stdlib.
-        (
-            r#"
-@pure @inline operator(lua) /(a: float, b: float) -> float = "return a / b"
-fn foo(x: int) {}
-fn main() { foo(3 / 4) }
-"#,
-            "./",
-        ),
-        // The `./` hint also fires when the `/` is buried in the mismatched expression,
-        // reached through arithmetic operators (`__op_mul`) rather than being the
-        // top-level node.
-        (
-            r#"
-@pure @inline operator(lua) /(a: float, b: float) -> float = "return a / b"
-@pure @inline operator(lua) *(a: float, b: float) -> float = "return a * b"
-fn main() { let x: int = 2.0 * (3 / 4) }
-"#,
-            "./",
-        ),
-        // ...and through unary minus (`-(a / b)`), the other float-propagating shape.
-        (
-            r#"
-@pure @inline operator(lua) /(a: float, b: float) -> float = "return a / b"
-fn main() { let x: int = -(3 / 4) }
-"#,
-            "./",
-        ),
-        // The walk follows a local binding back to its `let` initializer: a `float`
-        // that entered via `let h = a / b` and only mismatches an `int` later
-        // (`2 * h`) still points at the `/`. Regression for a computed frame height
-        // `let frame_h = dims.y / N ... p.dir * frame_h` into an int field.
-        (
-            r#"
-@pure @inline operator(lua) /(a: float, b: float) -> float = "return a / b"
-@pure @inline operator(lua) *(a: float, b: float) -> float = "return a * b"
-fn main() {
-    let h = 8 / 3
-    let x: int = 2 * h
-}
-"#,
-            "./",
-        ),
-        // a retained Vec-element ref would dangle when growth relocates the buffer
-        (
-            r#"
-value Position { x: int }
-fn vec_push(values: [Position], value: Position) {}
-fn main() {
-    let positions = [Position { x: 1 }]
-    let position: ref Position = positions[0]
-    vec_push(positions, Position { x: 2 })
-    position.x = 3
-}
-"#,
-            "relocatable Vec or Map storage",
-        ),
-        // a ref-returning helper must preserve its Vec-element argument's ephemeral origin
-        (
-            r#"
-value Position { x: int }
-fn same(position: ref Position) -> ref Position { return position }
-fn vec_push(values: [Position], value: Position) {}
-fn main() {
-    let positions = [Position { x: 1 }]
-    let position: ref Position = same(positions[0])
-    vec_push(positions, Position { x: 2 })
-    position.x = 3
-}
-"#,
-            "relocatable Vec or Map storage",
-        ),
-        // borrowing the Vec header does not pin its relocatable element buffer
-        (
-            r#"
-value Position { x: int }
-fn main(positions: [Position]) -> ref Position { return positions[0] }
-"#,
-            "relocatable Vec or Map storage",
-        ),
-    ];
-    for (src, needle) in cases {
-        let msgs = main_body_error_messages(src);
-        assert!(
-            msgs.iter().any(|m| m.contains(*needle)),
-            "expected {needle}, got: {msgs:?}"
-        );
-    }
 }
 
 // The hint's label points at the offending `/` subexpression, not the whole
@@ -423,26 +258,6 @@ fn main() { let x: int = 2.0 * (3 / 4) }
         &src[lo..hi],
         "(3 / 4)",
         "label should cover just the division"
-    );
-}
-
-// A `/` flowing into a re-bindable numeric var (`min(1, ...)`, where `1`
-// provisionally fixes `T=int` and the float arg widens `T` back to float) is
-// NOT a mismatch -- coerce widens it. The hint must defer to that: no error at
-// all. Regression for numeric widening in `min(1, (a/b)*1.6)` (a first cut fired
-// the hint before coerce got to widen).
-#[test]
-fn float_div_into_widening_numeric_var_is_not_an_error() {
-    let src = r#"
-@pure @inline operator(lua) /(a: float, b: float) -> float = "return a / b"
-@pure @inline operator(lua) *(a: float, b: float) -> float = "return a * b"
-fn min<T>(a: T, b: T) -> T { return a }
-fn main() { let env = min(1, (3.0 / 4.0) * 1.6) }
-"#;
-    let msgs = main_body_error_messages(src);
-    assert!(
-        msgs.is_empty(),
-        "expected no error (coerce widens), got: {msgs:?}"
     );
 }
 
@@ -1254,275 +1069,6 @@ fn holey(x: _) -> _ {
     );
 }
 
-// ─── @pure verification (RED until bone grows a purity pass) ─────────────────
-//
-// rock rejects all of these via its `@pure` verifier; bone is a strict port, so
-// it must too. They are `backend-diff tests/errors` LEADs today (rock rejects,
-// bone accepts) -- ported from `tests/errors/pure_verification.rock.err`. Each
-// assertion FAILS now (genuine RED -- verified bone accepts each) and goes green
-// when the author lands purity verification.
-//
-// SCOPE: only the 7 genuine-side-effect cases are pinned here. rock's verifier
-// ALSO rejects 6 cases its own fixture calls "accepted limitations" of the scope
-// walker (match-with-binding, self-recursion, returning a lambda, heap
-// struct/array literal, param collection-index read). Those are pure in
-// principle, so per "bone implements the intended rule where rock's is an
-// accident" they are design decisions for the author -- match rock's
-// conservatism or implement the precise rule -- NOT pinned as required
-// rejections here.
-
-/// True iff bone records ANY rejection for `src`: a top-level error (parse /
-/// semantic_pass / annotation registration), or a per-body inference error on a
-/// user module. The `@pure` programs below are otherwise well-typed, so the only
-/// thing that flips this to `true` is a purity pass rejecting the body.
-fn bone_rejects(src: &str) -> bool {
-    let ws = match check(src) {
-        Ok(ws) => ws,
-        Err(_) => return true,
-    };
-    // "Rejected" = any error diagnostic. Lowering is total (it collects errors
-    // and returns Ok rather than fail-fasting), so an interface / lowering error
-    // is a rejection just as much as an inference error or a hard `Err`.
-    ws.modules.iter().any(|m| {
-        !m.id.is_builtin()
-            && (!m.interface_errors.is_empty()
-                || !m.lowering_errors.is_empty()
-                || ws
-                    .inference(m.id)
-                    .map_or(false, |inf| !inf.errors.is_empty()))
-    })
-}
-
-#[test]
-fn rejected_programs() {
-    let cases: &[&str] = &[
-        // Reads a mutable global -- not referentially transparent.
-        "global G: int = 0\n@pure\nfn f() -> int { return G }",
-        // Assigns to a mutable global -- a mutation side effect.
-        "global G: int = 0\n@pure\nfn f() -> int { G = 5  return 0 }",
-        // Calls a fn whose body is not provably pure -> transitively impure.
-        // (operator-free: `TICK = 9` not `TICK + 1`, so the no-stdlib harness
-        // doesn't reject for an unresolved `+` instead of for purity.)
-        "\
-global TICK: int = 0
-fn bump() -> int { TICK = 9  return TICK }
-@pure
-fn f() -> int { return bump() }",
-        // Mutation through a parameter -- observable at the call site.
-        "\
-struct P { x: int, y: int }
-@pure
-fn f(p: P) -> int { p.x = 99  return p.x }",
-        // Purity must walk into loop bodies. (operator-free: `while true { C = 5 }`
-        // so the no-stdlib harness rejects for the global write, not an unresolved
-        // operator in the condition/increment.)
-        "\
-global C: int = 0
-@pure
-fn f() -> int { while true { C = 5 }  return C }",
-        // `@pure` (no side effects) and `@debug_impure` (debug-only side effect) on
-        // one fn is a contradiction -- rock rejects at annotation registration,
-        // before the purity walk. (May surface as a top-level error, not a body
-        // error -- bone_rejects covers both.)
-        "@pure\n@debug_impure\nfn f() -> int { return 1 }",
-        // redefining an enum must be rejected
-        "enum E { A }\nenum E { B }",
-        // redefining a struct must be rejected
-        "struct S { x: int }\nstruct S { y: int }",
-        // redefining a newtype must be rejected
-        "newtype N(int)\nnewtype N(string)",
-        // `continue` with no enclosing loop must be rejected
-        "fn f() { continue }",
-        // `break` with no enclosing loop must be rejected
-        "fn f() { break }",
-        // `return` inside a tuple/multi-assign RHS sub-expression.
-        "fn f() { let (x, y) = (1, if true { return } else { 2 }) }",
-        // `yield` inside a non-coroutine lambda must be rejected
-        "co fn g() -> Coroutine<int> { let f = () => yield 5  yield 0 }",
-        // destructuring a struct with a newtype pattern must be rejected
-        "\
-newtype Uid(int)
-struct U { id: int }
-fn f(u: U) -> int { let Uid(x) = u  return x }",
-        // destructuring a bare int with a newtype pattern must be rejected
-        "\
-newtype Uid(int)
-fn f() -> int { let x = 42  let Uid(y) = x  return y }",
-        // a duplicate wildcard `_` match arm must be rejected
-        "fn f() -> int { let t = 1  return match t { 0 => 10  _ => 20  _ => 30 } }",
-        // a generic type used without type args in a param position must be rejected
-        "\
-struct G<T> { v: T }
-fn f(x: G) -> int { return 0 }",
-        // Non-`value` struct literal allocates a fresh heap object (identity).
-        "\
-struct S { n: int }
-@pure
-fn f() -> S { return S { n: 0 } }",
-        // @pure building an array literal must be rejected
-        "\
-@pure
-fn f() -> [int] { return [0] }",
-        // @pure creating a lambda must be rejected
-        "\
-@pure
-fn f() -> (int) -> int { return x => x }",
-        // @pure indexing a collection must be rejected
-        "\
-@pure
-fn f(v: [int]) -> int { return v[0] }",
-        // a temporary has no stable place for a ref to address
-        "struct Player { hp: int }\nfn read(player: ref Player) -> int { player.hp }\nfn main() -> int { read(Player { hp: 1 }) }",
-        // a persistent closure environment cannot contain a ref
-        "struct Player { hp: int }\nfn bad(player: ref Player) -> () -> int { return () => player.hp }",
-    ];
-    for src in cases {
-        assert!(bone_rejects(src), "must be rejected: {src}");
-    }
-}
-
-// (Compound-assign `G += 1` is the same purity violation as the plain
-// `pure_writes_global` case -- a global mutation -- but `+=` desugars through
-// `+`, which this no-stdlib harness can't resolve, so it can't be pinned here
-// without false-greening on the operator. The purity pass handles all
-// assignment forms uniformly; writing `=` covers the class.)
-
-// ─── Duplicate-symbol detection (RED until bone rejects redefinitions) ───────
-//
-// rock rejects redefining a type name (enum/struct/newtype), within a module
-// and across modules. bone accepts today (backend-diff tests/errors LEADs),
-// which is a soundness hole: a duplicate definition makes "which def wins"
-// ambiguous. Ported from tests/errors/symbols/duplicate_symbols.rock.err.
-// RED now (verified bone accepts each); green when the author lands a
-// duplicate-definition check at symbol collection. Single-module dups surface
-// as a top-level semantic_pass error; `bone_rejects` (check() Err) covers that.
-
-// (The cross-module case -- `struct Foo` in two files -- is NOT pinned here: a
-// real 2-module workspace needs the intern/insert dance the single-shot
-// `check()` harness doesn't do, and a naive `semantic_pass(&mut [a, b])`
-// false-greens on a spurious collision rather than a real duplicate-symbol
-// diagnostic. `backend-diff tests/errors` covers that case as the live oracle.)
-
-// ─── Control-flow placement (RED until bone validates it) ────────────────────
-//
-// `break`/`continue` are only meaningful inside a loop; `return` only in
-// statement position (not a sub-expression). rock rejects these; bone accepts
-// (backend-diff LEADs). Statement-position forms below isolate the placement
-// rule from the value-position-if branch-type join (which bone already checks
-// and would false-green on). Ported from tests/errors/control_flow/.
-
-// ─── yield outside a coroutine (RED) ─────────────────────────────────────────
-//
-// A `yield` in a plain lambda has no enclosing coroutine to suspend -- the
-// lambda is its own non-`co` fn. rock rejects; bone propagates the enclosing
-// `co fn`'s yield type into the lambda and accepts (LEAD). One case pins the
-// rule (bare `() => yield` is the same violation). Ported from
-// tests/errors/yield_in_plain_lambda.rock.err.
-
-// ─── Newtype destructuring vs scrutinee type (RED) ───────────────────────────
-//
-// A newtype pattern `Uid(x)` may only destructure a value of that newtype. rock
-// rejects destructuring a struct or a bare int with a newtype pattern; bone
-// checks the pattern's ARITY (already rejects too-many/too-few) but not that the
-// pattern's newtype matches the scrutinee type (LEAD). Ported from
-// tests/errors/newtypes/destructuring_errors.rock.err.
-
-// ─── Duplicate match patterns (RED) ──────────────────────────────────────────
-//
-// A second wildcard `_` arm is dead -- rock rejects it; bone accepts (LEAD). One
-// case pins the rule (3+ wildcards is the same violation). Ported from
-// tests/errors/patterns/duplicate_patterns.rock.err.
-
-// ─── Generic arity in parameter type position (RED) ──────────────────────────
-//
-// A generic type used without its type args (`x: G` for `struct G<T>`) is
-// rejected by rock. bone catches this in `let` annotations already but misses it
-// in function PARAMETER positions (LEAD). Ported from
-// tests/errors/generics/generic_validation.rock.err
-// (function_param_missing_type_args).
-
-// ─── @pure identity-pure split (decided: identity-pure, not value-pure) ───────
-//
-// bone's `@pure` verifier rejects constructs that break dup-safety (observable
-// heap identity / reads of mutable state) but ACCEPTS constructs that are
-// referentially transparent even though rock's scope-walker rejects them as a
-// limitation. Reject: heap struct literal, array literal, lambda, collection
-// index. Accept (divergence from rock, by design): match-with-binding and
-// self-recursion. Ported from tests/errors/pure_verification.rock.err.
-
-#[test]
-fn accepted_programs() {
-    let cases: &[&str] = &[
-        // DIVERGENCE from rock: a match with a binding pattern is referentially
-        // transparent. rock rejects it as a scope-walker limitation; bone accepts.
-        "\
-enum E { A(int) }
-@pure
-fn f(e: E) -> int { return match e { A(x) => x } }",
-        // DIVERGENCE from rock: a @pure fn calling itself is pure (the callee is
-        // @pure). rock rejects self-recursion without fixpoint analysis; bone accepts.
-        "\
-@pure
-fn f(n: int) -> int { return f(n) }",
-        // a reference-struct place can form a temporary ref argument
-        "struct Player { hp: int }\nfn set_hp(player: ref Player) { player.hp = 2 }\nfn main() { let player = Player { hp: 1 }  set_hp(player) }",
-        // a Vec element stays live through the immediate ref-parameter call
-        r#"
-value Position { x: int }
-fn vec_push(values: [Position], value: Position) {}
-fn move(position: ref Position) { position.x = 2 }
-fn main() {
-    let positions = [Position { x: 1 }]
-    move(positions[0])
-    vec_push(positions, Position { x: 2 })
-}
-"#,
-        // frame-stable input subfields and globals remain retainable
-        r#"
-value Position { x: int }
-struct Player { position: Position }
-global ORIGIN: Position = Position { x: 0 }
-fn position(player: ref Player) -> ref Position { return player.position }
-fn same(position: ref Position) -> ref Position { return position }
-fn main(player: ref Player) {
-    let from_player: ref Position = same(player.position)
-    let from_global: ref Position = ORIGIN
-    from_player.x = from_global.x
-}
-"#,
-        // last use before yield does not retain the identity borrow
-        "struct Player { hp: int }\nfn make_player() -> Player { return Player { hp: 1 } }\nco fn fine() -> Coroutine<int> { let player = make_player()  player.hp = 2  yield 1 }",
-    ];
-    for src in cases {
-        assert!(!bone_rejects(src), "must be accepted: {src}");
-    }
-}
-
-#[test]
-fn retired_forms_are_rejected_next_to_their_canonical_form() {
-    let cases: &[(&str, &str)] = &[
-        // `@value struct` is retired; only the `value Foo { ... }` keyword is
-        // canonical. Ported from tests/errors/types/value_annotation_rejected.rock.err.
-        // The canonical keyword form is still accepted.
-        ("@value\nstruct Foo { x: int }", "value Foo { x: int }"),
-        // `??` on a non-nullable LHS is dead. Ported from
-        // tests/errors/types/null_checks.rock.err.
-        (
-            "fn f() { let x: int = 5  let y = x ?? 0 }",
-            "fn f() { let x: int? = 5  let y = x ?? 0 }",
-        ),
-        // `?.` on a non-nullable receiver is dead.
-        (
-            "struct Bar { val: int }\nfn f(b: Bar) -> int { return b?.val }",
-            "struct Bar { val: int }\nfn f(b: Bar?) -> int? { return b?.val }",
-        ),
-    ];
-    for (rejected, accepted) in cases {
-        assert!(bone_rejects(rejected), "must be rejected: {rejected}");
-        assert!(!bone_rejects(accepted), "must be accepted: {accepted}");
-    }
-}
-
 #[test]
 fn ref_type_survives_lowering_and_inference() {
     let ws = check(
@@ -1539,54 +1085,6 @@ fn ref_type_survives_lowering_and_inference() {
     assert_eq!(
         ws.render(None, identity.return_ty.expect("return type")),
         "ref Player"
-    );
-}
-
-#[test]
-fn ref_supports_direct_field_access_and_mutation() {
-    let src = "struct Player { hp: int }\nfn main(player: ref Player) { player.hp = 1 }";
-    let errors = main_body_error_messages(src);
-    assert!(
-        errors.is_empty(),
-        "a ref must expose the target struct's fields: {errors:?}"
-    );
-}
-
-#[test]
-fn local_place_cannot_be_returned_as_a_frame_reference() {
-    for (label, src) in [
-        (
-            "top-level function",
-            "struct Player { hp: int }\nfn bad() -> ref Player { let player = Player { hp: 1 }  return player }",
-        ),
-        (
-            "nested function tail",
-            "struct Player { hp: int }\nfn outer() { fn bad() -> ref Player { let player = Player { hp: 1 }  player } }",
-        ),
-        (
-            "lambda tail",
-            "struct Player { hp: int }\nfn bad() -> () -> ref Player { return () => { let player = Player { hp: 1 }  player } }",
-        ),
-    ] {
-        assert!(
-            bone_rejects(src),
-            "{label} cannot return a ref to a local place"
-        );
-    }
-}
-
-#[test]
-fn returned_frame_reference_must_propagate_a_valid_origin() {
-    let propagated = "value Stats { hp: int }\nstruct Player { stats: Stats }\nfn stats(player: ref Player) -> ref Stats { return player.stats }";
-    assert!(
-        !bone_rejects(propagated),
-        "a returned field ref may inherit an input ref's lifetime"
-    );
-
-    let forged = "@frame_ref_source fn bad() {}";
-    assert!(
-        bone_rejects(forged),
-        "the privileged storage-origin marker is unavailable to ordinary source"
     );
 }
 
@@ -1721,58 +1219,6 @@ fn probe(ha: Entity<OuterA>, hb: Entity<OuterB>, flag: bool) {
     }
 }
 
-#[test]
-fn ref_cannot_cross_opaque_or_persistent_boundaries() {
-    for (label, src) in [
-        (
-            "any erasure",
-            "struct Player { hp: int }\nfn main(player: ref Player) { let erased: any = player }",
-        ),
-        (
-            "foreign parameter",
-            "struct Player { hp: int }\nextern(lua) fn host(player: ref Player)",
-        ),
-        (
-            "ordinary array",
-            "struct Player { hp: int }\nfn main(player: ref Player) { let retained = [player] }",
-        ),
-    ] {
-        assert!(bone_rejects(src), "{label} must reject a frame reference");
-    }
-}
-
-#[test]
-fn ref_types_are_rejected_in_persistent_declarations() {
-    for (label, src) in [
-        (
-            "reference struct field",
-            "struct Player { hp: int }\nstruct Holder { player: ref Player }",
-        ),
-        (
-            "value field",
-            "struct Player { hp: int }\nvalue Holder { player: ref Player }",
-        ),
-        (
-            "enum payload",
-            "struct Player { hp: int }\nenum Event { Player(ref Player) }",
-        ),
-        (
-            "global",
-            "struct Player { hp: int }\nglobal PLAYER: (ref Player)? = null",
-        ),
-        (
-            "container element",
-            "struct Player { hp: int }\nglobal PLAYERS: [ref Player]",
-        ),
-        (
-            "static local",
-            "struct Player { hp: int }\nfn keep() { static PLAYER: (ref Player)? = null }",
-        ),
-    ] {
-        assert!(bone_rejects(src), "{label} must reject frame-bound storage");
-    }
-}
-
 // IDENTITY BORROW ACROSS SUSPENSION: an
 // identity parameter is an implicit borrow that coroutine construction would
 // retain before the first resume, so a `co fn` cannot take one at all.
@@ -1798,6 +1244,8 @@ fn identity_local_cannot_live_across_a_coroutine_suspension() {
         err.contains("identity borrow `player` is used after a coroutine suspension"),
         "a coroutine frame cannot retain an identity across yield, got: {err}"
     );
+    let last_use_before_yield = "struct Player { hp: int }\nfn make_player() -> Player { return Player { hp: 1 } }\nco fn fine() -> Coroutine<int> { let player = make_player()  player.hp = 2  yield 1 }";
+    assert_eq!(rejection_messages(last_use_before_yield), "");
 }
 
 #[test]
@@ -1829,31 +1277,6 @@ fn nobox_marker_reaches_typed_struct() {
     assert!(module.structs[struct_idx].is_value);
     assert!(module.structs[struct_idx].is_nobox);
 }
-
-#[test]
-fn null_to_bare_any_rejected() {
-    // Bare `any` excludes null; the null literal needs `any?`. A nullable VALUE
-    // (concrete inner) is still allowed -- only the literal is rejected (rock
-    // parity). Ported from tests/errors/types/nullable_assignment.rock.err.
-    assert!(
-        bone_rejects("fn f() { let x: any = null }"),
-        "null literal assigned to bare `any` must be rejected"
-    );
-    assert!(
-        !bone_rejects("fn f() { let x: any? = null }"),
-        "null assigned to `any?` must be accepted"
-    );
-    assert!(
-        !bone_rejects("fn f() { let y: int? = 5  let x: any = y }"),
-        "a nullable VALUE assigned to `any` is allowed (rock parity)"
-    );
-}
-
-// NOTE: int-division-to-float (the check_expr `__op_div` guard) can't be pinned
-// in this no-stdlib harness -- the `/` operator (`__op_div`) lives in stdlib, so
-// any `a / b` here fails to resolve and false-reds. Oracle for that rule:
-// `rock backend-diff tests/errors/types/int_division_promotion.rock.err` (0
-// LEADs) + the full tests/ sweep under bone.
 
 // Collect every body-level error message across the user module. Used by the
 // diagnostic-quality tests below, which assert on the rendered wording rather

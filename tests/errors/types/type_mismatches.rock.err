@@ -25,3 +25,15 @@ fn bad_func(x: int = "hello") {
 fn main() {
     bad_func()
 }
+
+//=== TEST CASE: nominal_mismatch_after_quiet_trial_Generic ===
+// A quiet failed trial (the nullable coerce) does not lose the reported types.
+//! expect: type mismatch: expected `Foo`, found `Bar`
+struct Foo { x: int }
+struct Bar { x: int }
+fn main() { let a: Foo? = Bar { x: 1 } }
+
+//=== TEST CASE: constructor_mismatch_Generic ===
+//! expect: type mismatch: expected `[int]`, found `Foo` (different type constructors)
+struct Foo { x: int }
+fn main() { let a: [int] = Foo { x: 1 } }

@@ -470,3 +470,48 @@ fn direct_whole_nobox_field_write_on_a_cdata_parent() {
     assert_eq(rows[0].plain.live.value, 9)
     assert_eq(cur.value, 8)
 }
+
+// -- Frame-reference uses the borrow rules accept --
+
+value RefRulePosition { x: int }
+struct RefRulePlayer { position: RefRulePosition, hp: int }
+global REF_RULE_ORIGIN: RefRulePosition = RefRulePosition { x: 5 }
+
+fn ref_rule_move(position: ref RefRulePosition) { position.x = 2 }
+fn ref_rule_same(position: ref RefRulePosition) -> ref RefRulePosition { return position }
+fn ref_rule_damage(player: RefRulePlayer) { player.hp = 1 }
+
+// A Vec element lives through the immediate ref-parameter call; the push after
+// it is no hazard.
+@test(output = "2\n2")
+fn vec_element_lives_through_an_immediate_ref_call() {
+    let positions = [RefRulePosition { x: 1 }]
+    ref_rule_move(positions[0])
+    positions.push(RefRulePosition { x: 3 })
+    print(positions[0].x)
+    print(positions.len())
+}
+
+fn ref_rule_retain(player: ref RefRulePlayer) {
+    let from_player: ref RefRulePosition = ref_rule_same(player.position)
+    let from_global: ref RefRulePosition = REF_RULE_ORIGIN
+    from_player.x = from_global.x
+}
+
+// Subfields of a ref input and globals are frame-stable, so they can be retained.
+@test(output = "5")
+fn frame_stable_subfields_and_globals_are_retainable() {
+    let player = RefRulePlayer { position: RefRulePosition { x: 0 }, hp: 3 }
+    ref_rule_retain(player)
+    print(player.position.x)
+}
+
+fn ref_rule_damage_through(player: ref RefRulePlayer) { ref_rule_damage(player) }
+
+// An explicit ref to an identity struct is the borrow an identity parameter takes.
+@test(output = "1")
+fn explicit_ref_fills_an_identity_parameter() {
+    let player = RefRulePlayer { position: RefRulePosition { x: 0 }, hp: 3 }
+    ref_rule_damage_through(player)
+    print(player.hp)
+}

@@ -103,3 +103,13 @@ fn nullable_promotion_mixed_types() {
     print(process_mixed(x, y))
     print(process_mixed(x, z))
 }
+
+// Bare `any` excludes the null literal, but a nullable value may flow into it.
+@test(output = "true\n5")
+fn nullable_values_and_any() {
+    let none: any? = null
+    let some: int? = 5
+    let erased: any = some
+    print(none == null)
+    print(cast<int>(erased))
+}

@@ -2,6 +2,7 @@
 //! Tags: patterns, match, duplicates
 
 //=== TEST CASE: duplicate_wildcard_DuplicatePattern ===
+//! expect: duplicate wildcard pattern in match expression - only one unguarded `_` arm is allowed
 fn test() -> int {
     let t = 1
     match t {
@@ -17,6 +18,7 @@ fn main() {
 }
 
 //=== TEST CASE: multiple_duplicate_wildcards_DuplicatePattern ===
+//! expect: duplicate wildcard pattern in match expression - only one unguarded `_` arm is allowed
 fn test() -> int {
     let t = 3
     match t {
