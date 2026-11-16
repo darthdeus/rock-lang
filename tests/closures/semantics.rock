@@ -1,16 +1,8 @@
-// S0 conformance corpus for the shared closure-conversion MIR pass.
-// Pins the capture behaviors the
-// future pass must preserve on BOTH backends. This file holds only the GAPS
-// the pre-existing corpus did not cover; the behaviors it RELIES ON (per-
-// iteration loop capture, shared-box both directions, reassigned-param box,
-// nested transitive capture, capture-free identity) are pinned elsewhere and
-// listed in the plan's S0 entry. Every @test here runs green on luajit AND
-// `--backend js`.
+// Capture behaviors not pinned elsewhere in tests/closures: value-struct
+// captures and lambdas calling captured lambda values.
 
 value Pt2 { x: float, y: float }
 
-// GAP: a capturing lambda over a value-struct leaf. The lambda captures a
-// value struct (C-layout cdata on luajit, object on JS) and reads its fields.
 @test(output = "7")
 fn test_capture_value_struct_leaf() {
     let p = Pt2 { x: 3.0, y: 4.0 }
@@ -18,9 +10,7 @@ fn test_capture_value_struct_leaf() {
     print(f())
 }
 
-// GAP + combination: a value struct captured PER-ITERATION from a vec iterator.
-// Each closure snapshots its iteration's struct (vec-iter is the JS-supported
-// per-iteration loop shape; range/Map counters stay JS-skip -- see plan S0).
+// Each closure snapshots its iteration's struct.
 @test(output = "3\n5\n7")
 fn test_capture_value_struct_per_iteration() {
     let pts = [Pt2 { x: 1.0, y: 2.0 }, Pt2 { x: 2.0, y: 3.0 }, Pt2 { x: 3.0, y: 4.0 }]
@@ -31,9 +21,8 @@ fn test_capture_value_struct_per_iteration() {
     for f in fns { print(f()) }
 }
 
-// GAP: a lambda calling another lambda VALUE through a higher-order lambda. The
-// outer lambda captures `inc`, passes it to `apply_twice` (itself a lambda),
-// which invokes it twice via a fn-typed param.
+// The outer lambda captures `inc` and passes it to `apply_twice`, itself a
+// lambda, which invokes it through a fn-typed param.
 @test(output = "11")
 fn test_lambda_calls_lambda_hof() {
     let inc = (x: int) => x + 1
@@ -42,7 +31,6 @@ fn test_lambda_calls_lambda_hof() {
     print(outer())
 }
 
-// GAP: a lambda whose body directly invokes a captured lambda value.
 @test(output = "20")
 fn test_lambda_calls_captured_lambda() {
     let dbl = (x: int) => x * 2
@@ -50,9 +38,8 @@ fn test_lambda_calls_captured_lambda() {
     print(run())
 }
 
-// GAP + combination: a lambda calls another lambda; both close over ONE shared
-// box. The mutation `bump` performs is visible through the call and to the
-// enclosing scope -- lambda-calls-lambda over the box class from both sides.
+// Both lambdas close over one shared box; `bump`'s mutation is visible through
+// the call and to the enclosing scope.
 @test(output = "1\n2\n2")
 fn test_lambda_calls_lambda_shared_box() {
     let n = 0

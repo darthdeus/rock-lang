@@ -9,19 +9,15 @@
 
 fn add_one(x: int) -> int { return x + 1 }
 
-@test(output = "yes\n6")
-fn test_optional_fn_null_check_refines() {
+@test(output = "yes\n6\nnone")
+fn test_optional_fn_null_checks_refine() {
     let f: (fn(int) -> int)? = add_one
     if f != null {
         print("yes")
         print("{f(5)}")
     }
-}
-
-@test(output = "none")
-fn test_optional_fn_eq_null() {
-    let f: (fn(int) -> int)? = null
-    if f == null {
+    let g: (fn(int) -> int)? = null
+    if g == null {
         print("none")
     }
 }
@@ -107,29 +103,14 @@ fn same<T>(a: T, b: T) -> bool { return a == b }
 struct P { x: int }
 value V { n: int }
 
-@test(output = "true")
-fn test_same_int_through_generic() {
-    print("{same(1, 1)}")
-}
-
-@test(output = "false")
-fn test_same_string_through_generic() {
-    print("{same(\"a\", \"b\")}")
-}
-
-@test(output = "true")
-fn test_same_struct_through_generic() {
-    // the point is only that the generic compiles for a struct type param;
-    // structs compare by identity, so the same binding compared to itself is true.
+@test(output = "true false true true")
+fn test_same_non_fn_types_through_generic() {
+    // Structs compare by identity, so `p` compared with itself is true; the
+    // point is only that the generic compiles for a struct type param.
     let p = P { x: 1 }
-    print("{same(p, p)}")
-}
-
-@test(output = "true")
-fn test_same_value_through_generic() {
     let a = V { n: 3 }
     let b = V { n: 3 }
-    print("{same(a, b)}")
+    print("{same(1, 1)} {same(\"a\", \"b\")} {same(p, p)} {same(a, b)}")
 }
 
 // Forwarding a generic into a `==`-comparing callee is fine for non-fn types:

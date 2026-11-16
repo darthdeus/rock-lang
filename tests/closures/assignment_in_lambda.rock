@@ -16,75 +16,45 @@ struct Container {
 }
 
 @test
-fn test_single_expr_lambda_basic_assignment() {
+fn test_single_expr_lambda_field_assignments() {
     let obj = Mutable {}
-    let assign_lambda = (v: int) => obj.value = v
-
-    let result = assign_lambda(42)
-
-    // Assignment should have happened
-    assert_eq(obj.value, 42)
-    // Assignment expressions return unit
-}
-
-@test
-fn test_single_expr_lambda_multiple_calls() {
-    let obj = Mutable {}
-    let assign = (v: int) => obj.value = v
-
-    assign(1)
-    assert_eq(obj.value, 1)
-
-    assign(2)
-    assert_eq(obj.value, 2)
-
-    assign(3)
-    assert_eq(obj.value, 3)
-}
-
-@test
-fn test_single_expr_lambda_different_fields() {
-    let obj = Mutable {}
-
     let assign_value = (v: int) => obj.value = v
     let assign_flag = (f: bool) => obj.flag = f
     let assign_name = (n: string) => obj.name = n
+    let set_none = () => obj.value = null
 
+    assign_value(1)
+    assert_eq(obj.value, 1)
     assign_value(99)
     assign_flag(true)
     assign_name("test")
-
     assert_eq(obj.value, 99)
     assert_eq(obj.flag, true)
     assert_eq(obj.name, "test")
+    set_none()
+    assert_eq(obj.value, null)
+
+    let assign_from_tuple = (t: (int, bool)) => obj.value = t.0
+    assign_from_tuple((999, false))
+    assert_eq(obj.value, 999)
 }
 
 @test
-fn test_single_expr_lambda_nested_assignment() {
-    let container = Container { item: Mutable {} }
+fn test_single_expr_lambda_nested_and_operator_assignment() {
+    let container = Container { item: Mutable {}, count: 10 }
 
     let assign_nested = (v: int) => container.item.value = v
-    let assign_count = (c: int) => container.count = c
+    let increment = (n: int) => container.count = container.count + n
+    let multiply = (n: int) => container.count = container.count * n
 
     assign_nested(123)
-    assign_count(456)
-
     assert_eq(container.item.value, 123)
-    assert_eq(container.count, 456)
+    increment(5)
+    assert_eq(container.count, 15)
+    multiply(2)
+    assert_eq(container.count, 30)
 }
 
-@test
-fn test_single_expr_lambda_closure() {
-    let obj = Mutable {}
-
-    // Lambda captures obj from outer scope
-    let setter = (x: int) => obj.value = x
-
-    setter(777)
-    assert_eq(obj.value, 777)
-}
-
-// Test assignment lambdas stored in data structures
 @test
 fn test_single_expr_lambda_in_array() {
     let obj1 = Mutable {}
@@ -97,7 +67,6 @@ fn test_single_expr_lambda_in_array() {
         (v: int) => obj3.value = v,
     ]
 
-    // Call each setter with index * 10
     for (i, setter) in enumerate(setters) {
         setter(i * 10)
     }
@@ -105,29 +74,6 @@ fn test_single_expr_lambda_in_array() {
     assert_eq(obj1.value, 0)
     assert_eq(obj2.value, 10)
     assert_eq(obj3.value, 20)
-}
-
-@test
-fn test_single_expr_lambda_tuple_param() {
-    let obj = Mutable {}
-
-    let assign_from_tuple = (t: (int, bool)) => obj.value = t.0
-
-    assign_from_tuple((999, false))
-    assert_eq(obj.value, 999)
-}
-
-// Test that multi-line lambdas still work correctly
-@test
-fn test_multi_line_lambda_assignment() {
-    let obj = Mutable {}
-
-    let assign_multi = (v: int) => {
-        obj.value = v
-    }
-
-    let result = assign_multi(42)
-    assert_eq(obj.value, 42)
 }
 
 @test
@@ -146,34 +92,23 @@ fn test_mixed_lambda_styles() {
     assert_eq(obj.value, 200)
 }
 
-// Test assignment in higher-order functions
-fn apply_setter(setter: (int) -> (), value: int) {
-    setter(value)
+fn conditional_set(cond: bool, setter: (int) -> (), value: int) {
+    if cond {
+        setter(value)
+    }
 }
 
 @test
-fn test_single_expr_lambda_higher_order() {
+fn test_single_expr_lambda_passed_as_argument() {
     let obj = Mutable {}
 
-    apply_setter((v: int) => obj.value = v, 333)
-    assert_eq(obj.value, 333)
+    conditional_set(true, (v: int) => obj.value = v, 100)
+    assert_eq(obj.value, 100)
+
+    conditional_set(false, (v: int) => obj.value = v, 200)
+    assert_eq(obj.value, 100)
 }
 
-@test
-fn test_single_expr_lambda_with_operators() {
-    let counter = Container { item: Mutable {}, count: 10 }
-
-    let increment = (n: int) => counter.count = counter.count + n
-    let multiply = (n: int) => counter.count = counter.count * n
-
-    increment(5)
-    assert_eq(counter.count, 15)
-
-    multiply(2)
-    assert_eq(counter.count, 30)
-}
-
-// Test assignment returning from function
 fn make_setter(target: Mutable) -> (int) -> () {
     return (v: int) => target.value = v
 }
@@ -192,60 +127,14 @@ fn test_single_expr_lambda_array_assignment() {
     let values = [0, 0, 0]
 
     let set_first = (v: int) => values[0] = v
-    let set_second = (v: int) => values[1] = v
     let set_third = (v: int) => values[2] = v
 
     set_first(10)
-    set_second(20)
     set_third(30)
 
     assert_eq(values[0], 10)
-    assert_eq(values[1], 20)
+    assert_eq(values[1], 0)
     assert_eq(values[2], 30)
-}
-
-@test
-fn test_single_expr_lambda_nullable_assignment() {
-    let obj = Mutable { value: null }
-
-    let set_some = (v: int) => obj.value = v
-    let set_none = () => obj.value = null
-
-    set_some(42)
-    assert_eq(obj.value, 42)
-
-    set_none()
-    assert_eq(obj.value, null)
-}
-
-// Test assignment in conditional context
-fn conditional_set(cond: bool, setter: (int) -> (), value: int) {
-    if cond {
-        setter(value)
-    }
-}
-
-@test
-fn test_single_expr_lambda_conditional() {
-    let obj = Mutable {}
-
-    conditional_set(true, (v: int) => obj.value = v, 100)
-    assert_eq(obj.value, 100)
-
-    conditional_set(false, (v: int) => obj.value = v, 200)
-    assert_eq(obj.value, 100) // Should not have changed
-}
-
-@test
-fn test_single_expr_lambda_non_assignment() {
-    // These should still work as before
-    let add = (a: int, b: int) => a + b
-    let multiply = (x: int) => x * 2
-    let compare = (a: int, b: int) => a > b
-
-    assert_eq(add(2, 3), 5)
-    assert_eq(multiply(4), 8)
-    assert_eq(compare(5, 3), true)
 }
 
 @test
@@ -253,8 +142,6 @@ fn test_single_expr_lambda_side_effects() {
     let counter = Container { item: Mutable {}, count: 0 }
     let obj = Mutable {}
 
-    // This lambda has a side effect (incrementing counter)
-    // while doing the assignment
     let assign_with_count = (v: int) => obj.value = {
         counter.count = counter.count + 1
         v
@@ -282,25 +169,24 @@ struct NestedData {
     count: int,
 }
 
-// Test 1: Assignment operators in lambdas
 @test
 fn test_assignment_operators_in_lambdas() {
     let counter = 10
-    
+
     let add_assign = (v: int) => counter += v
     let sub_assign = (v: int) => counter -= v
     let mul_assign = (v: int) => counter *= v
     let div_assign = (v: int) => counter = counter ./ v
-    
+
     add_assign(5)     // 10 + 5 = 15
     assert_eq(counter, 15)
-    
+
     sub_assign(3)     // 15 - 3 = 12
     assert_eq(counter, 12)
-    
+
     mul_assign(2)     // 12 * 2 = 24
     assert_eq(counter, 24)
-    
+
     div_assign(4)     // 24 / 4 = 6
     assert_eq(counter, 6)
 }
@@ -311,28 +197,26 @@ enum Action {
     Reset,
 }
 
-// Test 2: Assignments in match expressions
 @test
 fn test_match_expression_assignments() {
     let state = 0
-    
+
     let process = (action: Action) => match action {
         Action::Set(v) => state = v,
         Action::Increment(n) => state += n,
         Action::Reset => state = 0,
     }
-    
+
     process(Action::Set(42))
     assert_eq(state, 42)
-    
+
     process(Action::Increment(8))
     assert_eq(state, 50)
-    
+
     process(Action::Reset)
     assert_eq(state, 0)
 }
 
-// Test 3: Conditional assignments in if expressions
 @test
 fn test_conditional_assignments() {
     let data = TestData {
@@ -340,41 +224,39 @@ fn test_conditional_assignments() {
         array: [1, 2, 3],
         nested: NestedData { flag: false, count: 0 },
     }
-    
-    let conditional_assign = (condition: bool, v: int) => 
-        if condition { 
-            data.value = v 
-        } else { 
-            data.nested.count = v 
+
+    let conditional_assign = (condition: bool, v: int) =>
+        if condition {
+            data.value = v
+        } else {
+            data.nested.count = v
         }
-    
+
     conditional_assign(true, 100)
     assert_eq(data.value, 100)
     assert_eq(data.nested.count, 0)
-    
+
     conditional_assign(false, 200)
     assert_eq(data.value, 100)
     assert_eq(data.nested.count, 200)
 }
 
-// Test 4: Assignment to dynamically computed indices
 @test
 fn test_dynamic_index_assignment() {
     let matrix = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
-    
+
     let get_row = (n: int) => n % 3
     let get_col = (n: int) => int(n / 3.0) % 3
-    
+
     let assign_computed = (n: int, val: int) => matrix[get_row(n)][get_col(n)] = val
-    
+
     assign_computed(4, 99)  // n=4: row=1, col=1 -> matrix[1][1] = 99
     assert_eq(matrix[1][1], 99)
-    
+
     assign_computed(8, 88)  // n=8: row=2, col=2 -> matrix[2][2] = 88
     assert_eq(matrix[2][2], 88)
 }
 
-// Test 5: Multiple lambdas modifying shared state
 @test
 fn test_concurrent_lambda_modifications() {
     let shared = TestData {
@@ -382,11 +264,11 @@ fn test_concurrent_lambda_modifications() {
         array: [0, 0, 0],
         nested: NestedData { flag: false, count: 0 },
     }
-    
+
     let inc_value = () => shared.value += 1
     let inc_count = () => shared.nested.count += 1
     let inc_array = (idx: int) => shared.array[idx] += 1
-    
+
     // Simulate interleaved execution
     inc_value()
     inc_count()
@@ -396,7 +278,7 @@ fn test_concurrent_lambda_modifications() {
     inc_count()
     inc_array(2)
     inc_value()
-    
+
     assert_eq(shared.value, 3)
     assert_eq(shared.nested.count, 2)
     assert_eq(shared.array[0], 1)
@@ -404,66 +286,62 @@ fn test_concurrent_lambda_modifications() {
     assert_eq(shared.array[2], 1)
 }
 
-// Test 6: Assignment with implicit type conversions
 @test
 fn test_type_conversion_assignments() {
     let int_val = 0
     let float_val = 0.0
-    
+
     // These should handle type conversions properly
     let assign_int_from_float = (f: float) => int_val = int(f)
     let assign_float_from_int = (i: int) => float_val = i as float
-    
+
     assign_int_from_float(3.7)
     assert_eq(int_val, 3)
-    
+
     assign_float_from_int(42)
     assert_eq(float_val, 42.0)
 }
 
-// Test 7: Assignment result is unit
 @test
 fn test_assignment_returns_unit() {
     let x = 0
-    
+
     // Assignment returns unit - we can verify this by checking the type
     let assign = (v: int) => x = v
-    
+
     assign(42)
     assert_eq(x, 42)
-    
+
     // The fact that this compiles proves assignment returns unit
     let unit_result: () = assign(99)
     assert_eq(x, 99)
 }
 
-// Test 8: Nested lambda assignments
 @test
 fn test_nested_lambda_assignments() {
     let outer_val = 0
     let inner_val = 0
-    
+
     let outer = (x: int) => {
         outer_val = x
         let inner = (y: int) => inner_val = y
         return inner
     }
-    
+
     let inner_func = outer(10)
     assert_eq(outer_val, 10)
     assert_eq(inner_val, 0)
-    
+
     inner_func(20)
     assert_eq(inner_val, 20)
 }
 
-// Test 9: Assignment in while loop condition (edge case)
-@test 
+@test
 fn test_assignment_in_loop_edge_case() {
     let values = [1, 2, 3, 4, 5]
     let sum = 0
     let idx = 0
-    
+
     // Lambda that assigns and returns whether to continue
     let process_next = () => {
         if idx < values.len() {
@@ -473,37 +351,13 @@ fn test_assignment_in_loop_edge_case() {
         }
         return false
     }
-    
+
     while process_next() {
         // Empty body - work is done in condition
     }
-    
+
     assert_eq(sum, 15)  // 1+2+3+4+5
     assert_eq(idx, 5)
-}
-
-struct Builder {
-    value: int,
-    name: string,
-}
-
-// Test 10: Assignment with method chaining
-@test
-fn test_assignment_with_method_chaining() {
-    let builder = Builder { value: 0, name: "" }
-    
-    let set_value = (v: int) => builder.value = v
-    let set_name = (n: string) => builder.name = n
-    
-    // Can't chain because assignments return unit, but we can sequence
-    let build = (v: int, n: string) => {
-        set_value(v)
-        set_name(n)
-    }
-    
-    build(42, "test")
-    assert_eq(builder.value, 42)
-    assert_eq(builder.name, "test")
 }
 
 // --- Stress cases: deep arrays, linked chains, counters ---
@@ -518,7 +372,6 @@ struct Chain {
     next: Chain? = null,
 }
 
-// Test 1: Triple nested array assignment
 @test
 fn test_triple_nested_array_assignment() {
     let obj = TestArray {
@@ -532,7 +385,6 @@ fn test_triple_nested_array_assignment() {
     assert_eq(obj.data[1][0][1], 999)
 }
 
-// Test 2: Assignment with function call in index
 fn get_index(base: int, offset: int, arr_len: int) -> int {
     return (base + offset) % arr_len
 }
@@ -547,7 +399,6 @@ fn test_assignment_with_function_call_index() {
     assert_eq(arr[3], 777)
 }
 
-// Test 3: Assignment with side effects in both LHS and RHS
 global global_index_counter: int = 0
 global global_value_counter: int = 0
 
@@ -575,7 +426,6 @@ fn test_assignment_with_dual_side_effects() {
     assert_eq(global_value_counter, 1)
 }
 
-// Test 4: Deeply nested struct field assignment
 @test
 fn test_deeply_nested_struct_assignment() {
     let chain = Chain {
@@ -595,7 +445,6 @@ fn test_deeply_nested_struct_assignment() {
     assert_eq(chain.next.unwrap().next.unwrap().next.unwrap().value, 555)
 }
 
-// Test 5: Assignment through lambda returned from function
 global global_target: [int] = [0, 0, 0]
 
 fn make_assigner(index: int) -> (int) -> () {
@@ -616,7 +465,6 @@ fn test_assignment_through_returned_lambda() {
     assert_eq(global_target[2], 333)
 }
 
-// Test 6: Assignment with computed expressions in nested structure
 @test
 fn test_computed_nested_assignment() {
     let obj = TestArray { counters: [1, 2, 3] }
@@ -629,7 +477,6 @@ fn test_computed_nested_assignment() {
     assert_eq(obj.counters[2], 40)
 }
 
-// Test 7: Multiple assignments in single lambda
 @test
 fn test_multiple_assignments_single_lambda() {
     let arr1 = [0, 0, 0]
@@ -646,7 +493,6 @@ fn test_multiple_assignments_single_lambda() {
     assert_eq(arr2[1], 150)
 }
 
-// Test 8: Assignment with complex conditional logic
 @test
 fn test_conditional_assignment_logic() {
     let data = [10, 20, 30, 40, 50]
@@ -662,7 +508,6 @@ fn test_conditional_assignment_logic() {
     assert_eq(data[2], 50)
 }
 
-// Test 10: Recursive lambda assignments
 global global_recursive_data: [[int]] = [[0, 0], [0, 0], [0, 0]]
 
 fn make_recursive_assigner(depth: int) -> (int, int) -> () {

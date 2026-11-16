@@ -2,32 +2,40 @@
 // a field call is told apart from a free function of the same name.
 
 struct FunctionHolder {
+    value: int,
     func: fn() -> int,
+    unary: fn(int) -> int,
     func_with_args: fn(int, int) -> int,
 }
 
-fn adder() -> int { 
-    return 42 
+fn adder() -> int {
+    return 42
 }
 
-fn multiplier(a: int, b: int) -> int { 
-    return a * b 
+fn multiplier(a: int, b: int) -> int {
+    return a * b
+}
+
+fn triple(x: int) -> int {
+    return x * 3
 }
 
 @test fn test_function_field_call() {
     let holder = FunctionHolder {
+        value: 7,
         func: adder,
+        unary: triple,
         func_with_args: multiplier,
     }
-    
-    // Direct field access and call
+
+    assert_eq(holder.value, 7)
     assert_eq(holder.func(), 42)
+    assert_eq(holder.unary(4), 12)
     assert_eq(holder.func_with_args(3, 4), 12)
-    
-    // With intermediate variable
+
     let f = holder.func
     assert_eq(f(), 42)
-    
+
     let f2 = holder.func_with_args
     assert_eq(f2(5, 6), 30)
 }
@@ -41,8 +49,8 @@ struct Inner {
     callback: fn() -> string,
 }
 
-fn nested_callback() -> string { 
-    return "nested" 
+fn nested_callback() -> string {
+    return "nested"
 }
 
 @test fn test_nested_function_field_call() {
@@ -51,7 +59,7 @@ fn nested_callback() -> string {
             callback: nested_callback
         }
     }
-    
+
     // Nested field access and call
     assert_eq(obj.inner.callback(), "nested")
 }
@@ -61,15 +69,15 @@ struct NullableHolder {
     maybe_func: (fn() -> int)?,
 }
 
-fn nullable_func() -> int { 
-    return 99 
+fn nullable_func() -> int {
+    return 99
 }
 
 @test fn test_nullable_function_field_call() {
     let holder = NullableHolder {
         maybe_func: nullable_func
     }
-    
+
     if holder.maybe_func != null {
         assert_eq((holder.maybe_func)(), 99)
     }
@@ -92,7 +100,7 @@ fn double_int(x: int) -> int {
         data: 5,
         processor: double_int,
     }
-    
+
     // This should work with generic structs
     assert_eq(container.processor(10), 20)
 }
@@ -111,7 +119,7 @@ fn get_message() -> string {
         callback: get_message
     }
     let holder: CallbackHolder? = holder_value
-    
+
     // This should work with nullable types
     if holder != null {
         assert_eq(holder.callback(), "hello")
@@ -130,53 +138,9 @@ struct Wrapper<T> {
             processor: double_int,
         }
     }
-    
+
     // This should work with nested generic structs
     assert_eq(wrapper.inner.processor(7), 14)
-}
-
-// Multiple function fields
-struct MultiFunc {
-    f1: fn() -> int,
-    f2: fn(int) -> int,
-    f3: fn(int, int) -> int,
-}
-
-fn ret_one() -> int { return 1 }
-fn add_one(x: int) -> int { return x + 1 }
-fn add_two(x: int, y: int) -> int { return x + y }
-
-@test fn test_multiple_function_fields() {
-    let multi = MultiFunc {
-        f1: ret_one,
-        f2: add_one,
-        f3: add_two,
-    }
-    
-    assert_eq(multi.f1(), 1)
-    assert_eq(multi.f2(5), 6)
-    assert_eq(multi.f3(3, 4), 7)
-}
-
-// Function field accessing another field (to ensure we don't break normal field access)
-struct DataHolder {
-    value: int,
-    transformer: fn(int) -> int,
-}
-
-fn triple(x: int) -> int {
-    return x * 3
-}
-
-@test fn test_function_field_with_data_field() {
-    let holder = DataHolder {
-        value: 7,
-        transformer: triple,
-    }
-    
-    // Both field accesses should work
-    assert_eq(holder.value, 7)
-    assert_eq(holder.transformer(4), 12)
 }
 
 // --- Field call next to a free function ---

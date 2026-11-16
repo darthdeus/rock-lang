@@ -2,7 +2,7 @@
 // mangled name of a function used as a value, so any cross-module fn-ref
 // fell through to the unmangled name and became a nil-call at runtime.
 // Reproduced via stdlib inline(lua) fns referenced from a user module.
-// Fix: use `fn_id.0.module_id()` (defining module) — see exprs.rs Ident
+// Fix: use `fn_id.0.module_id()` (defining module) -- see exprs.rs Ident
 // and FunctionRef arms.
 
 struct FnBox {

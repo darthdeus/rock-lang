@@ -32,26 +32,13 @@ fn test_defer_mul_pinned_by_struct_call() {
 }
 
 @test
-fn test_defer_placeholder_mul() {
+fn test_defer_other_shapes() {
     let d = _ * 2
     assert_eq(d(21), 42)
-}
-
-@test
-fn test_defer_chained_ops() {
-    let f = x => x * 2 + 1
-    assert_eq(f(5), 11)
-}
-
-@test
-fn test_defer_field_projection() {
+    let chained = x => x * 2 + 1
+    assert_eq(chained(5), 11)
     let get_x = _.x
-    let p = DeferP { x: 3 }
-    assert_eq(get_x(p), 3)
-}
-
-@test
-fn test_defer_two_params() {
+    assert_eq(get_x(DeferP { x: 3 }), 3)
     let m = (a, b) => a * b
     assert_eq(m(6, 7), 42)
 }

@@ -2,13 +2,11 @@
 // parameters called through `f(args)`, higher-order functions, composition,
 // and lambdas taking or returning fn types.
 
-// Shared struct definition
 struct Point {
     x: int,
     y: int,
 }
 
-// Basic function definitions
 fn simple_function() -> int {
     return 42
 }
@@ -27,18 +25,6 @@ fn multiply(a: int, b: int) -> int {
 
 fn float_add(a: float, b: float) -> float {
     return a + b
-}
-
-fn get_answer() -> int {
-    return 42
-}
-
-fn add_five(x: int) -> int {
-    return x + 5
-}
-
-fn multiply_two(x: int) -> int {
-    return x * 2
 }
 
 fn subtract_one(x: int) -> int {
@@ -69,7 +55,6 @@ fn distance_from_origin(p: Point) -> int {
     return p.x * p.x + p.y * p.y
 }
 
-// Higher-order functions
 fn apply_twice(f: fn(int) -> int, x: int) -> int {
     return f(f(x))
 }
@@ -82,7 +67,6 @@ fn compose(f: fn(int) -> int, g: fn(int) -> int, x: int) -> int {
     return f(g(x))
 }
 
-// Functions for shadowing tests
 fn test_func() -> int {
     return 42
 }
@@ -97,65 +81,35 @@ fn global_func() -> int {
 
 fn test() {
     let test_func = 10
-    print(test_func) // Should print 10, not call function
+    print(test_func)
 }
 
 fn test_ref() {
-    let func_ref = &helper  // Get function reference first
-    let helper = 50        // Shadow the function name
-    print(func_ref())      // Should still work with function
-    print(helper)          // Should print the variable value
+    let func_ref = &helper
+    let helper = 50
+    print(func_ref())
+    print(helper)
 }
 
 fn test_param(global_func: int) {
-    print(global_func) // Should use parameter, not function
+    print(global_func)
 }
 
-// Basic function pointer tests
-@test(output = "42")
-fn function_reference_simple() {
-    let func_ref = simple_function
-    print(func_ref())
-}
+@test(output = "42\n6\n12\n5.6\n15\n25")
+fn function_references() {
+    let no_args = simple_function
+    let one_arg = add_one
+    let two_args = multiply
+    let floats = float_add
+    let array_arg = sum_array
+    let struct_arg = distance_from_origin
 
-@test(output = "6")
-fn function_reference_with_params() {
-    let func_ref = add_one
-    print(func_ref(5))
-}
-
-@test(output = "10")
-fn function_reference_type_inference() {
-    let func_ref = double
-    print(func_ref(5))
-}
-
-@test(output = "12")
-fn function_reference_multiple_params() {
-    let func_ref = multiply
-    print(func_ref(3, 4))
-}
-
-@test(output = "5.6")
-fn function_reference_different_types() {
-    let func_ref = float_add
-    print(func_ref(3.5, 2.1))
-}
-
-// Function pointer assignment tests
-@test(output = "42")
-fn assign_to_variable() {
-    let my_func = get_answer
-    print(my_func())
-}
-
-@test(output = "15\n20")
-fn assign_multiple_functions() {
-    let func1 = add_five
-    let func2 = multiply_two
-
-    print(func1(10))
-    print(func2(10))
+    print(no_args())
+    print(one_arg(5))
+    print(two_args(3, 4))
+    print(floats(3.5, 2.1))
+    print(array_arg([1, 2, 3, 4, 5]))
+    print(struct_arg(Point { x: 3, y: 4 }))
 }
 
 @test(output = "6\n4")
@@ -167,61 +121,20 @@ fn reassign_function_pointer() {
     print(func(5))
 }
 
-// Function pointer as parameter tests
-@test(output = "7")
-fn pass_function_as_parameter() {
+@test(output = "7\n10\n25\n14")
+fn functions_as_parameters() {
     print(apply_twice(add_one, 5))
-}
-
-@test(output = "10\n25")
-fn higher_order_function_with_different_functions() {
     print(transform(double, 5))
     print(transform(square, 5))
-}
-
-@test(output = "14")
-fn function_composition() {
     print(compose(add_two, multiply_three, 4))
 }
 
-// Function pointer shadowing tests
-@test(output = "10")
-fn variable_shadows_function() {
+@test(output = "10\n100\n50\n42")
+fn locals_and_params_shadow_functions() {
     test()
-}
-
-@test(output = "100\n50")
-fn function_reference_before_shadowing() {
     test_ref()
-}
-
-@test(output = "42")
-fn parameter_shadows_function_name() {
     test_param(42)
 }
-
-// Complex type tests
-@test(output = "15")
-fn function_with_array_parameters() {
-    let func_ref = sum_array
-    print(func_ref([1, 2, 3, 4, 5]))
-}
-
-@test(output = "25")
-fn function_with_struct_parameters() {
-    let func_ref = distance_from_origin
-
-    let point = Point { x: 3, y: 4 }
-    print(func_ref(point))
-}
-
-// NOTE: The following tests from the original file are not migrated because:
-// 1. Nested function definitions are not supported in Rock
-// 2. Function pointers as return values require nested functions
-// 3. Arrays of function pointers not fully supported
-// 4. Struct fields with function pointers not fully supported
-// 5. Overloaded function reference errors can't be tested with @test
-// 6. Type mismatch and parameter count errors are compile-time errors
 
 // --- Calling fn-typed locals and parameters (`(int) -> int` syntax) ---
 
@@ -229,37 +142,28 @@ fn apply_int(f: (int) -> int, x: int) -> int {
     return f(x)
 }
 
-@test(output = "6")
-fn test_hof_apply() {
-    print(apply_int(add_one, 5))
+fn apply_twice_arrow(f: (int) -> int, x: int) -> int {
+    return f(f(x))
 }
 
-@test(output = "100")
+@test(output = "6\n12\n15")
+fn arrow_typed_parameters() {
+    print(apply_int(add_one, 5))
+    print(apply_twice_arrow(add_one, 10))
+    print(apply_int((x: int) => x * 3, 5))
+}
+
+@test
 fn test_let_bound_fn_call() {
     let inc = (x: int) => x + 1
     let total = 0
     let i = 0
     while i < 100 {
-        // Lambda call through let-bound fn-typed local.
         let _ = inc(i)
+        total = total + inc(i)
         i = i + 1
     }
-    print(100)
-}
-
-fn apply_twice_arrow(f: (int) -> int, x: int) -> int {
-    return f(f(x))
-}
-
-@test(output = "12")
-fn test_hof_apply_twice() {
-    print(apply_twice_arrow(add_one, 10))
-}
-
-@test(output = "15")
-fn test_lambda_arg() {
-    let r = apply_int((x: int) => x * 3, 5)
-    print(r)
+    assert_eq(total, 5050)
 }
 
 // --- Lambdas with fn-typed parameters and results ---
@@ -268,32 +172,21 @@ fn is_even(n: int) -> bool {
     return n % 2 == 0
 }
 
-@test(output = "42 is even")
-fn test_lambda_with_function_type_param() {
-    // Lambda with function type parameter
+@test(output = "42 is even\n12")
+fn test_lambda_with_function_type_params() {
     let handler = (callback: fn(int) -> bool) => {
         return callback(42)
     }
+    print(if handler(is_even) { "42 is even" } else { "42 is odd" })
 
-    // Use the handler
-    let result = handler(is_even)
-    print(if result { "42 is even" } else { "42 is odd" })
-}
-
-@test(output = "12")
-fn test_lambda_with_multiple_function_type_params() {
-    // Lambda with multiple function type parameters
     let combiner = (f: fn(int) -> int, g: fn(int) -> int, x: int) => {
         return f(g(x))
     }
-
-    // (5 + 1) * 2 = 12
     print(combiner(double, add_one, 5))
 }
 
 @test(output = "15\n30")
 fn test_lambda_returning_function() {
-    // Lambda that returns a function
     let make_adder = (n: int) => {
         return (x: int) => x + n
     }
@@ -307,7 +200,6 @@ fn test_lambda_returning_function() {
 
 @test(output = "18")
 fn test_nested_lambda_with_function_types() {
-    // Nested lambdas with function types
     let outer = (transform: fn(int) -> int) => {
         return (value: int) => {
             return transform(value) * 2
@@ -315,5 +207,5 @@ fn test_nested_lambda_with_function_types() {
     }
 
     let inner = outer(square)
-    print(inner(3))  // (3 * 3) * 2 = 18
+    print(inner(3))
 }
