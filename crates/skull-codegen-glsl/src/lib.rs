@@ -69,8 +69,6 @@ mod pipeline;
 mod profile;
 mod structured;
 mod value_test;
-#[cfg(test)]
-mod value_test_shader;
 
 pub use abi::*;
 use classify::*;

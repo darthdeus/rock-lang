@@ -13,3 +13,4 @@ mod reserved_locals;
 mod shader_pipeline;
 mod uniform_array_block_decl;
 mod uniform_shadow;
+mod value_test;
