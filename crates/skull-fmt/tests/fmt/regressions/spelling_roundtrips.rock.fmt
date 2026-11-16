@@ -96,6 +96,15 @@ fn f() {
 }
 //=== NO CHANGE ===
 
+//=== TEST CASE: comment_after_the_last_argument_of_an_at_head_survives ===
+fn f() {
+    g(
+        a,
+        // why
+    ) @ print(1)
+}
+//=== NO CHANGE ===
+
 //=== TEST CASE: comment_after_an_at_survives ===
 fn f() {
     g(

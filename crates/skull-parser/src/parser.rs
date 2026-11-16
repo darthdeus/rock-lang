@@ -1270,6 +1270,9 @@ impl<'a> Parser<'a> {
                 self.delimiter_depth += 1;
                 while self.kind() != TokenKind::CloseParen && !self.at_end() {
                     self.skip_comments();
+                    if self.kind() == TokenKind::CloseParen {
+                        break;
+                    }
                     // Named arg `name = value`.
                     let arg_name = if matches!(self.kind(), TokenKind::Ident(_))
                         && self.peek_kind() == TokenKind::Assign
@@ -1761,6 +1764,9 @@ impl<'a> Parser<'a> {
             && !self.at_end()
         {
             self.skip_comments();
+            if matches!(self.kind(), TokenKind::GreaterThan | TokenKind::RightShift) {
+                break;
+            }
             let name = self.expect_ident()?;
             let bound = if self.eat(TokenKind::Colon) {
                 Some(self.parse_type()?)
@@ -2004,6 +2010,9 @@ impl<'a> Parser<'a> {
                 let mut tys = Vec::new();
                 while self.kind() != TokenKind::CloseParen && !self.at_end() {
                     self.skip_comments();
+                    if self.kind() == TokenKind::CloseParen {
+                        break;
+                    }
                     if matches!(self.kind(), TokenKind::Ident(_))
                         && self.peek_kind() == TokenKind::Colon
                     {
@@ -3283,6 +3292,9 @@ impl<'a> Parser<'a> {
         let mut seen_named = false;
         while self.kind() != TokenKind::CloseParen && !self.at_end() {
             self.skip_comments();
+            if self.kind() == TokenKind::CloseParen {
+                break;
+            }
             // Struct spread `..expr` — the operand's fields expand into named
             // args at this position (resolved in bone). A spread carries no
             // name and may legally follow a named arg, so it's detected before
@@ -3419,6 +3431,10 @@ impl<'a> Parser<'a> {
             self.advance(); // `(`
             let mut params = Vec::new();
             while self.kind() != TokenKind::CloseParen && !self.at_end() {
+                self.skip_comments();
+                if self.kind() == TokenKind::CloseParen {
+                    break;
+                }
                 let name = self.expect_ident()?;
                 let ty = if self.eat(TokenKind::Colon) {
                     Some(self.parse_type()?)
@@ -3427,6 +3443,7 @@ impl<'a> Parser<'a> {
                 };
                 let span = self.span_from(name.span);
                 params.push(LambdaParam { span, name, ty });
+                self.skip_comments();
                 if !self.eat(TokenKind::Comma) {
                     break;
                 }
@@ -3710,6 +3727,7 @@ impl<'a> Parser<'a> {
                 if self.kind() == TokenKind::Comma {
                     let mut items = vec![first];
                     while self.eat(TokenKind::Comma) {
+                        self.skip_comments();
                         if self.kind() == TokenKind::CloseParen {
                             break;
                         }

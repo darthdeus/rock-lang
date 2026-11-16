@@ -1075,3 +1075,19 @@ fn call_spreads_and_struct_bases_keep_source_order() {
         TypeExprKind::Uint
     ));
 }
+
+#[test]
+fn a_comment_may_close_a_delimited_list() {
+    for src in [
+        "fn f() {\n    g(\n        a,\n        // c\n    )\n}\n",
+        "fn f() {\n    g(\n        x: a,\n        // c\n    )\n}\n",
+        "fn f() {\n    x.g<int>(\n        a,\n        // c\n    )\n}\n",
+        "fn f() {\n    let v = (\n        a,\n        b,\n        // c\n    )\n}\n",
+        "@a(\n    1,\n    // c\n)\nfn f() {}\n",
+        "fn f<\n    T,\n    // c\n>() {}\n",
+        "enum E {\n    A(\n        int,\n        // c\n    ),\n}\n",
+        "fn f() {\n    let l = (\n        // c\n        a: int,\n        // c\n    ) => a\n}\n",
+    ] {
+        parse(src, Dialect::Legacy);
+    }
+}
