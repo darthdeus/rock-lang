@@ -525,7 +525,7 @@ impl<'a> Verifier<'a> {
                 .iter()
                 .map(|(field, _)| *field)
                 .collect::<Vec<_>>(),
-            crate::mir::ValueCtorForm::Leaves => crate::lower::value_leaf_paths(&shape),
+            crate::mir::ValueCtorForm::Leaves => crate::lower::value_leaf_paths(shape),
         };
         let actual = fields.iter().map(|(field, _)| *field).collect::<Vec<_>>();
         if actual != expected {
