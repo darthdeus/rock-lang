@@ -1549,48 +1549,7 @@ pub(crate) fn lower_expr_value(
                         }
                     }
 
-                    // A local fn-typed binding is called through its value, everything else
-                    // resolves at a top-level by name. A v1 fragment resolves the
-                    // name through the namespace tiers.
-                    // A local is called through its value, and inference never asks
-                    // its family for a name, so a local resolves nothing further.
-                    let local = lookup_local(body, scope, name.name);
-                    let (callee_key, family) = if local.is_none() && name.name.as_str() != "_" {
-                        match ctx.resolve_callee_family(name.name, name.span) {
-                            Ok(resolved) => resolved,
-                            Err(e) => {
-                                ctx.recover_name(e)?;
-                                return Ok(Expr::Hole(None));
-                            }
-                        }
-                    } else if ctx.v1_scope().is_some() {
-                        (name.name, hir::CallFamily::resolved(name.name, None))
-                    } else {
-                        (name.name, hir::CallFamily::from_name(name.name))
-                    };
-                    let callee = match local {
-                        Some(binding) => hir::Callee::Local(binding),
-                        None if name.name.as_str() == "_" => {
-                            match lookup_in_scope(ctx, body, scope, name)? {
-                                Expr::Var(binding) => hir::Callee::Local(binding),
-                                _ => hir::Callee::Unresolved {
-                                    name: callee_key,
-                                    name_span: body.name_spans.alloc(name.span),
-                                },
-                            }
-                        }
-                        None => hir::Callee::Unresolved {
-                            name: callee_key,
-                            name_span: body.name_spans.alloc(name.span),
-                        },
-                    };
-
-                    Expr::Call {
-                        callee,
-                        args: args_range,
-                        generic_args,
-                        family,
-                    }
+                    lower_named_call(ctx, body, scope, name, args_range, generic_args)?
                 }
 
                 ExprKind::FieldAccess(receiver, method) => {
@@ -1893,8 +1852,25 @@ pub(crate) fn lower_expr_value(
         }
 
         ExprKind::BinOp {
-            left, op, right, ..
+            left,
+            op,
+            op_span,
+            right,
         } => {
+            if let Some(op_fn) = op.overloadable_binop_fn() {
+                let args = lower_exprs(ctx, a, body, scope, [left, right].into_iter())?;
+                return lower_named_call(
+                    ctx,
+                    body,
+                    scope,
+                    &skull_parser::Ident {
+                        name: ustr(op_fn),
+                        span: *op_span,
+                    },
+                    args,
+                    IdxRange::new_empty(),
+                );
+            }
             use skull_parser::TokenKind;
 
             let bin_op = match op {
@@ -2313,20 +2289,6 @@ pub(crate) fn lower_expr_value(
 
         ExprKind::YieldDelegate(inner) => {
             Expr::YieldDelegate(lower_expr(ctx, a, body, scope, a.e(inner))?)
-        }
-
-        ExprKind::IfLet {
-            pattern,
-            value,
-            then_block,
-            else_block,
-        } => {
-            let clauses = [IfLetClause::Binding {
-                pattern: pattern.clone(),
-                value: *value,
-            }];
-            let idx = lower_if_let_clauses(ctx, a, body, scope, &clauses, then_block, else_block)?;
-            body.expr_arena[idx]
         }
 
         ExprKind::IfLetChain {
@@ -4353,6 +4315,56 @@ fn compound_place_temps(a: &Ast, place: &Idx<ExprData>) -> Vec<Idx<ExprData>> {
     parts
 }
 
+fn lower_named_call(
+    ctx: &mut LowerCtx,
+    body: &mut Body,
+    scope: Idx<Scope>,
+    name: &skull_parser::Ident,
+    args_range: IdxRange<Expr>,
+    generic_args: IdxRange<TypeExpr>,
+) -> Result<Expr, CompilerError> {
+    // A local fn-typed binding is called through its value, everything else
+    // resolves at a top-level by name. A v1 fragment resolves the
+    // name through the namespace tiers.
+    // A local is called through its value, and inference never asks
+    // its family for a name, so a local resolves nothing further.
+    let local = lookup_local(body, scope, name.name);
+    let (callee_key, family) = if local.is_none() && name.name.as_str() != "_" {
+        match ctx.resolve_callee_family(name.name, name.span) {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                ctx.recover_name(e)?;
+                return Ok(Expr::Hole(None));
+            }
+        }
+    } else if ctx.v1_scope().is_some() {
+        (name.name, hir::CallFamily::resolved(name.name, None))
+    } else {
+        (name.name, hir::CallFamily::from_name(name.name))
+    };
+    let callee = match local {
+        Some(binding) => hir::Callee::Local(binding),
+        None if name.name.as_str() == "_" => match lookup_in_scope(ctx, body, scope, name)? {
+            Expr::Var(binding) => hir::Callee::Local(binding),
+            _ => hir::Callee::Unresolved {
+                name: callee_key,
+                name_span: body.name_spans.alloc(name.span),
+            },
+        },
+        None => hir::Callee::Unresolved {
+            name: callee_key,
+            name_span: body.name_spans.alloc(name.span),
+        },
+    };
+
+    Ok(Expr::Call {
+        callee,
+        args: args_range,
+        generic_args,
+        family,
+    })
+}
+
 fn expr_is_literal(a: &Ast, e: &Idx<ExprData>) -> bool {
     use skull_parser::ExprKind;
 
@@ -4383,7 +4395,9 @@ fn expr_is_pure(a: &Ast, e: &Idx<ExprData>) -> bool {
         | ExprKind::BitNot(o)
         | ExprKind::UnaryMinus(o) => expr_is_pure(a, o),
         ExprKind::Index(o, i) => expr_is_pure(a, o) && expr_is_pure(a, i),
-        ExprKind::BinOp { left, op, right } => {
+        ExprKind::BinOp {
+            left, op, right, ..
+        } => {
             !matches!(
                 op,
                 TokenKind::Assign
@@ -4394,11 +4408,6 @@ fn expr_is_pure(a: &Ast, e: &Idx<ExprData>) -> bool {
             ) && expr_is_pure(a, left)
                 && expr_is_pure(a, right)
         }
-        ExprKind::FunctionCall {
-            args,
-            syntax: skull_parser::CallSyntax::Binary(_),
-            ..
-        } => args.iter().all(|arg| expr_is_pure(a, &arg.value)),
         _ => false,
     }
 }
@@ -4527,15 +4536,7 @@ fn pl_chain(a: &Ast, e: &Idx<ExprData>) -> bool {
 
         ExprKind::BinOp { left, right, .. } => pl_chain(a, left) || pl_chain(a, right),
 
-        ExprKind::FunctionCall {
-            func, args, syntax, ..
-        } => {
-            if matches!(syntax, skull_parser::CallSyntax::Binary(_)) {
-                args.iter().any(|x| pl_chain(a, &x.value))
-            } else {
-                pl_chain(a, func)
-            }
-        }
+        ExprKind::FunctionCall { func, .. } => pl_chain(a, func),
 
         ExprKind::Index(o, _) => pl_chain(a, o),
         _ => false,
@@ -4551,14 +4552,8 @@ fn is_placeholder_lambda(a: &Ast, e: &ExprData) -> bool {
 
         ExprKind::Index(o, i) => pl_is_us(a, o) || pl_is_us(a, i),
 
-        ExprKind::FunctionCall {
-            func, args, syntax, ..
-        } => {
-            if matches!(syntax, skull_parser::CallSyntax::Binary(_)) {
-                args.iter().any(|x| pl_chain(a, &x.value))
-            } else {
-                pl_chain(a, func) || args.iter().any(|x| pl_is_us(a, &x.value))
-            }
+        ExprKind::FunctionCall { func, args, .. } => {
+            pl_chain(a, func) || args.iter().any(|x| pl_is_us(a, &x.value))
         }
 
         ExprKind::Paren(i) => is_placeholder_lambda(a, a.e(i)),

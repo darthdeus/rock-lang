@@ -1,12 +1,4 @@
-//! Recursive-descent + Pratt parser producing the arena AST.
-//!
-//! Precedence comes from `rock-tokenizer`'s binding-power tables
-//! (`TokenKind::{prefix,infix,postfix}_bp`) — the same source rock's
-//! parser uses, so the A/B isolates allocation strategy, not grammar.
-//! This is the walking-skeleton subset (plan milestone 1): functions,
-//! `let`/`return`/expression statements, and the common expression
-//! forms. Unsupported constructs return an error so the A/B harness
-//! reports coverage honestly rather than silently parsing less.
+//! Recursive-descent and Pratt parser producing the arena AST.
 
 use crate::ast::*;
 use rock_core::nesting::MAX_NESTING_DEPTH;
@@ -41,10 +33,7 @@ pub(crate) struct Parser<'a> {
     /// Set by `parse_operator` so `parse_item` can replicate rock's implicit
     /// `@inline` on block-bodied operator overloads (the `@_transparent` model).
     last_was_operator: bool,
-    /// Per-module counter for `?` holes, bumped on every type AND expr hole in
-    /// parse order — the mirror of rock's `AstBuilder::gen_hole_id`. Only
-    /// expr-hole ids surface in the s-expr (`?{id}`), but type holes must still
-    /// advance it so the numbering stays in lockstep with rock.
+    /// Shared counter for expression and type holes.
     hole_counter: u32,
     /// Source-language dialect. Legacy is today's grammar;
     /// V1 enables `(expr : Type)` ascription, `::` paths, and the module-item
@@ -254,15 +243,8 @@ impl<'a> Parser<'a> {
     /// Parse the whole token stream as a module, consuming the parser and
     /// returning the populated arena AST.
     ///
-    /// Item-level recovery: top-level constructs the skeleton subset does
-    /// not yet handle (struct/enum/global/annotations/...) are skipped to
-    /// the next `fn`, so the `fn`s skull *does* understand still get parsed.
-    /// Within a `fn`, `parse_block` recovers at statement level (see
-    /// `recover_to_next_statement`): a broken statement drops only itself, so
-    /// the surrounding body survives and scope-based LSP features keep working
-    /// on broken code. An item whose *header* (signature) fails to parse is
-    /// still dropped whole. Valid input never enters either recovery path, so
-    /// the A/B parse oracle stays byte-faithful.
+    /// Invalid item headers drop the item; invalid statements recover within
+    /// their block so editor queries can use the surrounding scope.
     pub fn parse_module(mut self) -> PResult<Ast> {
         let mut seen_item = false;
         loop {
@@ -899,9 +881,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_item(&mut self) -> PResult<Item> {
-        // Leading `@name[(args)]` annotations are captured and attached to the
-        // parsed item (rendered in the s-expr, matching rock). rock's item span
-        // covers the annotations too, so anchor the start at the first `@`.
+        // The item span includes its leading annotations.
         let item_start = self.span();
         // v1 visibility modifiers lead the item (`pub fn`, `private(set)` is
         // field-only and rejected below). Contextual: parse_vis_mods commits
@@ -945,7 +925,7 @@ impl<'a> Parser<'a> {
         let mut item = self.parse_item_inner()?;
         item.vis = mods.vis;
         // rock injects `@inline` on block-bodied operator overloads (no source
-        // form) unless one is already present — replicate it so the A/B matches.
+        // form) unless one is already present.
         if self.last_was_operator
             && matches!(&item.kind, ItemKind::Function(f) if f.body.rock_block().is_some())
             && !annotations.iter().any(|a| a.name.name.as_str() == "inline")
@@ -2029,7 +2009,7 @@ impl<'a> Parser<'a> {
             let vname = self.expect_ident()?;
             let kind = if self.kind() == TokenKind::OpenParen {
                 // Tuple variant — fields may be `name: T` (named positional) or
-                // bare `T`; only the type matters for the s-expr.
+                // bare `T`; positional names are discarded.
                 self.advance();
                 self.delimiter_depth += 1;
                 let mut tys = Vec::new();
@@ -3221,44 +3201,15 @@ impl<'a> Parser<'a> {
                 },
             );
         }
-        // Overloadable arithmetic ops desugar to `__op_*(a, b)` calls with a
-        // `Binary` render hint — exactly as rock's parser does.
-        if let Some(op_fn) = op.overloadable_binop_fn() {
-            let callee = self.ast.expr(
+        self.ast.expr(
+            span,
+            ExprKind::BinOp {
+                left,
+                op,
                 op_span,
-                ExprKind::Ident(Ident {
-                    span: op_span,
-                    name: Ustr::from(op_fn),
-                }),
-            );
-            return self.ast.expr(
-                span,
-                ExprKind::FunctionCall {
-                    func: callee,
-                    generic_args: Vec::new(),
-                    args: vec![
-                        FunctionCallArg {
-                            name: None,
-                            value: left,
-                            is_splat: false,
-                            is_spread: false,
-                        },
-                        FunctionCallArg {
-                            name: None,
-                            value: right,
-                            is_splat: false,
-                            is_spread: false,
-                        },
-                    ],
-                    syntax: CallSyntax::Binary(op),
-                },
-            );
-        }
-        // Plain BinOp (comparisons, logic, bitwise, ranges, and compound
-        // assignment — all render `(op left right)` via to_code). Compound
-        // assignment is NOT a cook desugar site: bone `lower.rs` consumes the
-        // raw `BinOp { op: AddAssign, .. }` directly.
-        self.ast.expr(span, ExprKind::BinOp { left, op, right })
+                right,
+            },
+        )
     }
 
     fn parse_dot(&mut self, left: Idx<ExprData>) -> PResult<Idx<ExprData>> {
@@ -3885,11 +3836,7 @@ impl<'a> Parser<'a> {
         Ok(items)
     }
 
-    /// Split a string literal into literal/expr parts on `{...}`, mirroring
-    /// rock's algorithm: `{{`/`}}` are escaped braces; `{expr:fmt}` embeds an
-    /// expression (the format spec is parsed-and-discarded — it does not
-    /// affect s-exprs); a `{...}` whose body fails to parse falls back to
-    /// literal text. A lone literal collapses to `ExprKind::String`.
+    /// Parse interpolation holes and format specs; collapse doubled literal braces.
     fn parse_interpolated(&mut self, span: Span) -> PResult<Idx<ExprData>> {
         let file = span.file;
         let lit_start = span.offset_range().0;
@@ -4582,11 +4529,7 @@ impl<'a> Parser<'a> {
         let body = if self.kind() == TokenKind::OpenCurly {
             self.parse_block()?
         } else {
-            // Arrow body `=> expr` becomes a block with a single `return expr`
-            // (rock's parse_lambda_body), so the s-expr matches. The synthetic
-            // stmt + block span the WHOLE body expr (`x * 2`), not just its
-            // first token — `self.span()` here is the first token, so take the
-            // parsed expr's span after the fact (as the `@`-lambda path does).
+            // The synthetic return and block span the entire body expression.
             let e = self.with_allow_literals(true, |p| p.parse_expr(0))?;
             let body_span = self.ast.exprs[e].span;
             let stmt = self.ast.stmt(
@@ -4669,8 +4612,7 @@ impl<'a> Parser<'a> {
     }
 
     /// `if [let pat = value | cond] [&& ..]* { .. } [else { .. }]`. Entered with
-    /// the current token on the first `let`. A single binding renders as
-    /// `IfLet`; multiple clauses as `IfLetChain` (mirrors rock).
+    /// the current token on the first `let`.
     fn parse_if_let(&mut self, start: Span) -> PResult<Idx<ExprData>> {
         let mut clauses: Vec<IfLetClause> = Vec::new();
         loop {
@@ -4703,20 +4645,6 @@ impl<'a> Parser<'a> {
         };
 
         let span = self.span_from(start);
-        // Single binding -> plain IfLet (rock does the same, no desugar).
-        if clauses.len() == 1 {
-            if let IfLetClause::Binding { pattern, value } = clauses.remove(0) {
-                return Ok(self.ast.expr(
-                    span,
-                    ExprKind::IfLet {
-                        pattern,
-                        value,
-                        then_block,
-                        else_block,
-                    },
-                ));
-            }
-        }
         Ok(self.ast.expr(
             span,
             ExprKind::IfLetChain {
@@ -4891,6 +4819,30 @@ fn no_parens_breaks_on_op(op: TokenKind) -> bool {
 
 #[cfg(test)]
 mod release_tests {
+
+    #[test]
+    fn operators_and_single_if_let_have_uniform_shapes() {
+        let ast = crate::parse_module_clean(
+            "fn f() { let n = 1 + 2 * 3; if let x = n { x } }",
+            "<normalization>".into(),
+        )
+        .unwrap();
+        assert_eq!(
+            ast.exprs
+                .iter()
+                .filter(|(_, e)| matches!(e.kind, crate::ExprKind::BinOp { .. }))
+                .count(),
+            2
+        );
+        let source = "fn f() { let n = 1 + 2 * 3; if let x = n { x } }";
+        for (_, expr) in ast.exprs.iter() {
+            if let crate::ExprKind::BinOp { op, op_span, .. } = &expr.kind {
+                let (start, end) = op_span.offset_range();
+                assert_eq!(&source[start..end], op.to_code());
+            }
+        }
+        assert!(ast.exprs.iter().any(|(_, e)| matches!(&e.kind, crate::ExprKind::IfLetChain { clauses, .. } if clauses.len() == 1)));
+    }
 
     #[test]
     fn malformed_generic_types_are_diagnosed() {

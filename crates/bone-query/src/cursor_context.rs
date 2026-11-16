@@ -341,7 +341,6 @@ impl CursorAst {
                         walk(&arm.pattern, f);
                     }
                 }
-                ExprKind::IfLet { pattern, .. } => walk(pattern, f),
                 ExprKind::IfLetChain { clauses, .. } => {
                     for c in clauses {
                         if let IfLetClause::Binding { pattern, .. } = c {
@@ -587,7 +586,10 @@ impl CursorAst {
     /// bottom-up, so the first hit is the innermost enclosing BinOp.
     pub(crate) fn comparison_lhs(&self) -> Option<usize> {
         for (_, e) in self.ast.exprs.iter() {
-            let ExprKind::BinOp { left, op, right } = &e.kind else {
+            let ExprKind::BinOp {
+                left, op, right, ..
+            } = &e.kind
+            else {
                 continue;
             };
             if !matches!(

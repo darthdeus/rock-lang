@@ -38,8 +38,7 @@ pub fn desugar(ast: &mut Ast) {
 /// `synth_newtype_operator_items`. Newtypes are runtime-transparent, so each body
 /// is the raw Lua op over the unwrapped `a`/`b`. Self-returning arithmetic ops
 /// declare the newtype as their return; comparisons declare `bool`. Generic or
-/// non-primitive-wrapped newtypes derive nothing. Marked `is_synthetic` so the
-/// cook oracle compares user surface only.
+/// non-primitive-wrapped newtypes derive nothing.
 fn synth_newtype_operators(ast: &mut Ast) {
     // (op stem, lua body over raw a/b, returns Self else bool)
     let int_specs: &[(&str, &str, bool)] = &[
@@ -259,7 +258,6 @@ pub(crate) fn child_exprs(ast: &Ast, e: Idx<ExprData>) -> ExprEdges {
         }
         ExprKind::ReturnExpr(o) | ExprKind::Yield(o) => out.extend(o.iter().copied()),
         ExprKind::SafeNavigationLet { receiver, .. } => out.push(*receiver),
-        ExprKind::IfLet { value, .. } => out.push(*value),
         ExprKind::Match { scrutinee, arms } => {
             out.push(*scrutinee);
             out.extend(arms.iter().filter_map(|a| a.guard));
@@ -305,12 +303,7 @@ pub(crate) fn child_blocks(ast: &Ast, e: Idx<ExprData>) -> BlockEdges {
             out.extend(branches.iter().map(|(_, b)| *b));
             out.extend(else_branch.iter().copied());
         }
-        ExprKind::IfLet {
-            then_block,
-            else_block,
-            ..
-        }
-        | ExprKind::IfLetChain {
+        ExprKind::IfLetChain {
             then_block,
             else_block,
             ..
@@ -512,56 +505,5 @@ fn json_field_factory(
             macro_items: Vec::new(),
             receiver_surface: None,
         }),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::parse_module;
-    use ustr::Ustr;
-
-    /// Parse `src`, cook it, and return the first function body's s-expr.
-    fn cooked_body(src: &str) -> String {
-        let mut ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
-        super::desugar(&mut ast);
-        let crate::ast::ItemKind::Function(f) = &ast.items[0].kind else {
-            panic!("expected fn");
-        };
-        ast.block_sexp(f.body.rock_block().expect("rock body"))
-    }
-
-    fn check(body: &str, expected: &str) {
-        let src = format!("fn f() {{ {} }}", body);
-        assert_eq!(cooked_body(&src), expected, "source: {src:?}");
-    }
-
-    #[test]
-    fn type_hole_and_range_and_dollar() {
-        // `?` type hole, `..=` inclusive range pattern, `$` low-prec application
-        // — additional surface syntax forms.
-        check("let x: ? = 42", "(block (let x ? 42))");
-        check(
-            "match x { 1..=10 => \"s\", _ => \"o\" }",
-            "(block (match x (arm (range 1 ..= 10) (block \"s\")) (arm _ (block \"o\"))))",
-        );
-        // `f $ a == b` -> `f(a == b)` ($ is the lowest-binding operator).
-        check("assert $ a == b", "(block (call assert (== a b)))");
-        // `recv?.let { body }` — binding is the receiver ident; body excluded
-        // from the s-expr (rock parity).
-        check("x?.let { x * 2 }", "(block (?.let x x))");
-        // `^name` anaphoric ident renders bare; `&name` function ref keeps `&`.
-        check("^x + 1", "(block (+ x 1))");
-        check("let f = &helper", "(block (let f () &helper))");
-    }
-
-    #[test]
-    fn non_placeholder_untouched() {
-        // skull parses `=> expr` lambda bodies as a `return` block (same shape
-        // the placeholder path builds), so an explicit lambda is byte-identical
-        // before and after cook — proof the driver doesn't touch it.
-        check(
-            "xs.map(y => y.health)",
-            "(block (call (. xs map) (lambda (None) None (block (return (. y health))))))",
-        );
     }
 }

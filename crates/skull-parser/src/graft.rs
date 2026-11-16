@@ -587,9 +587,15 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
                 args: self.call_args(args),
                 syntax: syntax.clone(),
             },
-            ExprKind::BinOp { left, op, right } => ExprKind::BinOp {
+            ExprKind::BinOp {
+                left,
+                op,
+                op_span,
+                right,
+            } => ExprKind::BinOp {
                 left: self.expr(*left),
                 op: *op,
+                op_span: *op_span,
                 right: self.expr(*right),
             },
             ExprKind::Assign {
@@ -682,21 +688,6 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
                     .collect(),
                 else_branch: else_branch.map(|b| self.block(b)),
             },
-            ExprKind::IfLet {
-                pattern,
-                value,
-                then_block,
-                else_block,
-            } => {
-                let mut pattern = self.pattern(pattern);
-                let value = self.expr(*value);
-                ExprKind::IfLet {
-                    then_block: self.scoped(*then_block, |rw| rw.bind_pattern(&mut pattern)),
-                    pattern,
-                    value,
-                    else_block: else_block.map(|b| self.block(b)),
-                }
-            }
             ExprKind::IfLetChain {
                 clauses,
                 then_block,

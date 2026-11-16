@@ -1380,7 +1380,6 @@ impl<'a> Printer<'a> {
                 ExprKind::If { .. }
                     | ExprKind::Match { .. }
                     | ExprKind::Block(_)
-                    | ExprKind::IfLet { .. }
                     | ExprKind::IfLetChain { .. }
                     | ExprKind::SafeNavigationLet { .. }
             ),
@@ -1665,7 +1664,9 @@ impl<'a> Printer<'a> {
             // leading or trailing -- and column alignment), NOT collapsed to one
             // line regardless of width and NOT restructured (a leading `-`/`+`
             // would reparse as unary). A single-line one renders structurally.
-            ExprKind::BinOp { left, op, right } => {
+            ExprKind::BinOp {
+                left, op, right, ..
+            } => {
                 if data.span.line_range().0 != data.span.line_range().1 {
                     self.raw(data.span)
                 } else {
@@ -1683,20 +1684,6 @@ impl<'a> Printer<'a> {
                 syntax,
                 generic_args,
             } => match syntax {
-                // Overloadable operators (`+ - * / %` ...) are parsed as calls
-                // with binary syntax -- render them infix. A multi-line binary is
-                // kept verbatim (see ExprKind::BinOp above).
-                CallSyntax::Binary(op) if args.len() == 2 => {
-                    if data.span.line_range().0 != data.span.line_range().1 {
-                        self.raw(data.span)
-                    } else {
-                        Doc::concat([
-                            self.expr(args[0].value),
-                            self.binop_sep(op, args[0].value, args[1].value),
-                            self.expr(args[1].value),
-                        ])
-                    }
-                }
                 CallSyntax::At | CallSyntax::AtMacro | CallSyntax::AtMethodMacro => {
                     self.at_call(*func, generic_args, args, syntax, data.span)
                 }
@@ -1812,8 +1799,7 @@ impl<'a> Printer<'a> {
 
             // Forms not yet built structurally -- slice verbatim so output is
             // never corrupt. Refined in later phases.
-            ExprKind::IfLet { .. }
-            | ExprKind::IfLetChain { .. }
+            ExprKind::IfLetChain { .. }
             | ExprKind::SafeNavigationLet { .. }
             | ExprKind::YieldDelegate(_) => self.raw(data.span),
         }

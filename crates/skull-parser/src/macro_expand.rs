@@ -762,30 +762,6 @@ fn expand_expr(
             stack.pop();
             return;
         }
-        ExprKind::IfLet { .. } => {
-            let (value, then_b, else_b, mut scope) = match &ast.exprs[e].kind {
-                ExprKind::IfLet {
-                    value,
-                    then_block,
-                    else_block,
-                    pattern,
-                    ..
-                } => {
-                    let mut scope = ShadowScope::default();
-                    shadow_pattern(pattern, &mut scope);
-                    (*value, *then_block, *else_block, scope)
-                }
-                _ => unreachable!(),
-            };
-            expand_expr(ast, value, reg, depth, stack);
-            stack.push(std::mem::take(&mut scope));
-            expand_block(ast, then_b, reg, depth, stack);
-            stack.pop();
-            if let Some(eb) = else_b {
-                expand_block(ast, eb, reg, depth, stack);
-            }
-            return;
-        }
         ExprKind::IfLetChain { .. } => {
             let (n_clauses, then_b, else_b) = match &ast.exprs[e].kind {
                 ExprKind::IfLetChain {
@@ -1518,11 +1494,43 @@ fn refs_in_expr(ast: &Ast, e: Idx<ExprData>, names: &UstrSet, occ: &mut Vec<(Ust
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse_module;
+    use crate::parse_module_clean;
     use ustr::Ustr;
 
     fn parse(src: &str, file: &str) -> Ast {
-        parse_module(src, Ustr::from(file)).expect("parse failed")
+        parse_module_clean(src, Ustr::from(file)).expect("parse failed")
+    }
+
+    fn assert_same_ast(left: &Ast, right: &Ast) {
+        assert_eq!(left.items, right.items);
+        assert_eq!(
+            left.exprs.values().collect::<Vec<_>>(),
+            right.exprs.values().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            left.stmts.values().collect::<Vec<_>>(),
+            right.stmts.values().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            left.blocks.values().collect::<Vec<_>>(),
+            right.blocks.values().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            left.types.values().collect::<Vec<_>>(),
+            right.types.values().collect::<Vec<_>>()
+        );
+    }
+
+    fn count_calls(ast: &Ast, name: &str) -> usize {
+        body_nodes(ast)
+            .0
+            .iter()
+            .filter(|&&e| match &ast.exprs[e].kind {
+                ExprKind::FunctionCall { func, .. } => matches!(&ast.exprs[*func].kind,
+                ExprKind::Ident(id) if id.name == name),
+                _ => false,
+            })
+            .count()
     }
 
     #[test]
@@ -1559,7 +1567,6 @@ mod tests {
         // Batch: expand both together, read the user module's result.
         let mut batch = vec![parse(defs, "defs.rock"), parse(user, "user.rock")];
         expand_macros(&mut batch);
-        let batch_user = batch[1].module_sexp();
 
         // Incremental: registry from the un-expanded pair, then expand ONLY the
         // user module against it.
@@ -1568,38 +1575,30 @@ mod tests {
         let mut user_only = parse(user, "user.rock");
         expand_one(&mut user_only, &reg);
 
-        assert_eq!(
-            user_only.module_sexp(),
-            batch_user,
-            "expand_one against the shared registry must match the batch result"
-        );
-        // The macro actually expanded (not left as a call).
-        assert!(
-            user_only.module_sexp().contains("(+ 21 21)"),
-            "macro should have expanded: {}",
-            user_only.module_sexp()
-        );
+        assert_same_ast(&user_only, &batch[1]);
+        assert_eq!(count_calls(&user_only, "twice"), 0);
+        let nodes = body_nodes(&user_only).0;
+        assert!(nodes.iter().any(|&e| matches!(&user_only.exprs[e].kind,
+            ExprKind::BinOp { left, right, .. }
+                if matches!(user_only.exprs[*left].kind, ExprKind::Int(21, _))
+                && matches!(user_only.exprs[*right].kind, ExprKind::Int(21, _)))));
     }
 
-    /// Expand `user` against a workspace that also defines `macro key(x: expr) { x }`,
-    /// returning the user module's s-expr. The macro body is the identity, so a
-    /// CAPTURED call `key(a)` collapses to `a` (the call vanishes), while a
-    /// correctly-shadowed call keeps its `(call key ...)` shape.
-    fn expand_with_key_macro(user: &str) -> String {
+    fn expand_with_key_macro(user: &str) -> Ast {
         let mut mods = vec![
             parse("macro key(x: expr) { x }", "defs.rock"),
             parse(user, "user.rock"),
         ];
         expand_macros(&mut mods);
-        mods[1].module_sexp()
+        mods.pop().unwrap()
     }
 
     #[track_caller]
     fn assert_call_survives(user: &str) {
-        let sexp = expand_with_key_macro(user);
+        let ast = expand_with_key_macro(user);
         assert!(
-            sexp.contains("key"),
-            "shadowed callee `key` must not expand as a macro: {sexp}"
+            count_calls(&ast, "key") > 0,
+            "shadowed call must survive: {user}"
         );
     }
 
@@ -1637,16 +1636,16 @@ mod tests {
     #[test]
     fn unshadowed_callee_still_expands() {
         // No binding anywhere: the identity macro erases the call.
-        let sexp = expand_with_key_macro("fn f() -> int { return key(1) }");
-        assert!(!sexp.contains("key"), "unshadowed call must expand: {sexp}");
+        let ast = expand_with_key_macro("fn f() -> int { return key(1) }");
+        assert_eq!(count_calls(&ast, "key"), 0);
         // Call before the `let` refers to the macro; only the later call is the local.
-        let sexp = expand_with_key_macro(
+        let ast = expand_with_key_macro(
             "fn f() -> int { let a = key(1)\n let key = (v: int) => v + v\n return a + key(2) }",
         );
         assert_eq!(
-            sexp.matches("(call key").count(),
+            count_calls(&ast, "key"),
             1,
-            "pre-let call expands, post-let call survives: {sexp}"
+            "pre-let call expands, post-let call survives"
         );
     }
 
@@ -1675,16 +1674,14 @@ mod tests {
         let expand = |registry: &MacroRegistry| {
             let mut ast = parse(caller, "c.rock");
             expand_one(&mut ast, registry);
-            ast.module_sexp()
+            ast
         };
         let both = collect_registry([&lib, &user]);
         let extended = collect_registry([&lib]).extended([&user]);
-        assert_eq!(expand(&both), expand(&extended));
+        assert_same_ast(&expand(&both), &expand(&extended));
     }
 
-    /// Every expr and block reachable from the body of the user module's first
-    /// fn, after expanding it against `defs`.
-    fn expanded_nodes(defs: &str, user: &str) -> (Ast, Vec<Idx<ExprData>>, Vec<Idx<BlockData>>) {
+    fn body_nodes(ast: &Ast) -> (Vec<Idx<ExprData>>, Vec<Idx<BlockData>>) {
         fn walk_block(
             ast: &Ast,
             b: Idx<BlockData>,
@@ -1715,9 +1712,6 @@ mod tests {
                 walk_block(ast, bl, es, bs);
             }
         }
-        let mut mods = vec![parse(defs, "defs.rock"), parse(user, "user.rock")];
-        expand_macros(&mut mods);
-        let ast = mods.pop().unwrap();
         let body = ast
             .items
             .iter()
@@ -1727,7 +1721,15 @@ mod tests {
             })
             .expect("user fn");
         let (mut es, mut bs) = (Vec::new(), Vec::new());
-        walk_block(&ast, body, &mut es, &mut bs);
+        walk_block(ast, body, &mut es, &mut bs);
+        (es, bs)
+    }
+
+    fn expanded_nodes(defs: &str, user: &str) -> (Ast, Vec<Idx<ExprData>>, Vec<Idx<BlockData>>) {
+        let mut mods = vec![parse(defs, "defs.rock"), parse(user, "user.rock")];
+        expand_macros(&mut mods);
+        let ast = mods.pop().unwrap();
+        let (es, bs) = body_nodes(&ast);
         (ast, es, bs)
     }
 
@@ -1821,8 +1823,8 @@ mod tests {
 
         let mut m = parse(user, "user.rock");
         expand_one(&mut m, &reg);
-        let once = m.module_sexp();
+        let once = m.clone();
         expand_one(&mut m, &reg);
-        assert_eq!(m.module_sexp(), once, "second expand_one must be a no-op");
+        assert_same_ast(&m, &once);
     }
 }

@@ -1,14 +1,11 @@
-//! skull-parser: an arena-allocated reimplementation of Rock's surface
-//! AST + parser, built on `rock-tokenizer` (lexer) and `rock-core`
-//! (spans, diagnostics). Goal: A/B the arena allocation strategy against
-//! rock's `Box`-based parser.
+//! Arena-allocated surface AST and parser, built on `rock-tokenizer`
+//! (lexer) and `rock-core` (spans, diagnostics).
 
 pub mod ast;
 pub mod desugar;
 pub(crate) mod graft;
 pub mod macro_expand;
 pub mod parser;
-pub(crate) mod sexp;
 pub mod stdlib;
 
 pub use ast::*;
@@ -132,22 +129,6 @@ mod tests {
         }
     }
 
-    /// Parse a single-function source and return its body block's s-expr.
-    /// The s-expr format is byte-compatible with rock's `Block::to_sexp`,
-    /// so these expectations double as the cross-parser contract.
-    fn body_sexp(src: &str) -> String {
-        let ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
-        match &ast.items[0].kind {
-            ItemKind::Function(f) => ast.block_sexp(f.body.rock_block().unwrap()),
-            other => panic!("expected function item, got {:?}", other),
-        }
-    }
-
-    fn check(body: &str, expected: &str) {
-        let src = format!("fn f() {{ {} }}", body);
-        assert_eq!(body_sexp(&src), expected, "source: {src:?}");
-    }
-
     /// Parse `fn f() { let x = <body> }` and return the AST + the let's value.
     fn let_value(body: &str) -> (Ast, Idx<ExprData>) {
         let src = format!("fn f() {{ let x = {} }}", body);
@@ -167,9 +148,8 @@ mod tests {
     #[test]
     fn parse_one_item_matches_in_context() {
         // Re-parsing a single item from its text slice (with its absolute
-        // offset/line/col) must reproduce EXACTLY what the whole-module parse
-        // produced for that item -- same item span, same body-block span, same
-        // body s-expr -- so the incremental driver can swap it in. The middle
+        // offset/line/col) must preserve the item and body spans so the
+        // incremental driver can swap it in. The middle
         // item is multi-line and indented so a wrong base offset/line/col shows.
         let src = "fn a() -> int { 1 }\n\
                    fn b(x: int) -> int {\n    \
@@ -218,7 +198,10 @@ mod tests {
             full.b(&fb).span.offset_range(),
             "body block span"
         );
-        assert_eq!(mini.block_sexp(mb), full.block_sexp(fb), "body s-expr");
+        assert_eq!(
+            mini.blocks[mb].statements.len(),
+            full.blocks[fb].statements.len()
+        );
     }
 
     #[test]
@@ -522,8 +505,7 @@ mod tests {
     #[test]
     fn interpolation_keeps_dynamic_width_and_precision_exprs() {
         // `{v:{w}.{p}f}` — the embedded width/precision exprs must survive as
-        // real arena nodes (this is the data rock keeps and the cook oracle
-        // cannot see).
+        // real arena nodes.
         let (ast, v) = let_value(r#""{v:{w}.{p}f}""#);
         let ExprKind::InterpolatedString(parts) = &ast.exprs[v].kind else {
             panic!("expected interpolated string");
@@ -537,92 +519,6 @@ mod tests {
         assert!(matches!(&ast.exprs[we].kind, ExprKind::Ident(id) if id.name == "w"));
         assert!(matches!(&ast.exprs[pe].kind, ExprKind::Ident(id) if id.name == "p"));
         assert_eq!(spec.format_type, Some('f'));
-    }
-
-    #[test]
-    fn match_arm_guard_does_not_swallow_the_arrow() {
-        // A bare-ident guard `if x` must not parse as a `x => {}` lambda and eat
-        // the arm's `=>`. Before the `arrow_lambda_blocked` fix this collapsed the
-        // whole match (recovered to a stray `E::B {}`).
-        let s = body_sexp("fn f(e: E, x: bool) { match e { E::A if x => {} E::B => {} } }");
-        assert_eq!(
-            s, "(block (match e (arm E::A (if x) (block )) (arm E::B (block ))))",
-            "guarded arm must parse as a guard, not a lambda"
-        );
-        // Paren-form guard `(x)` and binop guards stay guards too (the arm's `=>`
-        // survives, the match isn't collapsed).
-        let p = body_sexp("fn f(e: E, x: bool) { match e { E::A if (x) => {} _ => {} } }");
-        assert!(
-            p.contains("(arm E::A (if") && p.contains("(arm _"),
-            "paren-form guard: {p}"
-        );
-        let b = body_sexp("fn f(e: E, x: bool) { match e { E::A if x && x => {} _ => {} } }");
-        assert!(b.contains("(arm E::A (if (and x x))"), "binop guard: {b}");
-    }
-
-    #[test]
-    fn match_arm_body_allows_a_struct_literal() {
-        // `=> S { .. }` in a match arm is a struct literal (Rust parity), not the
-        // ident `S` then a block. Pre-fix `with_allow_literals(false)` on the arm
-        // body stopped the expr at `S`, leaving `{ x: 1.0 }` to mis-parse as a new
-        // arm pattern ("unsupported pattern: OpenCurly").
-        let s =
-            body_sexp("fn f(k: K) -> S { match k { K::A => S { x: 1.0 } K::B => S { x: 2.0 } } }");
-        assert!(
-            s.contains("(arm K::A (block (struct S"),
-            "arm body must parse as a struct literal, not stop at the ident: {s}"
-        );
-    }
-
-    #[test]
-    fn struct_literal_recovers_a_missing_comma_between_fields() {
-        // A field value not followed by `,` but by another `field:` is a
-        // missing-comma typo, not the end of the literal -- recover (record the
-        // error, keep parsing) so the whole literal survives. This is what lets
-        // completion inside an unterminated value above the next field see the
-        // literal at all (`z: st.<cursor>`).
-        let s = body_sexp("fn f() { let p = P { a: 1 b: 2 } }");
-        assert!(
-            s.contains("(struct P") && s.contains("a 1") && s.contains("b 2"),
-            "both fields must survive a missing comma: {s}"
-        );
-    }
-
-    #[test]
-    fn parse_static_local_inferred() {
-        // `static count = 0` -> `(static <name> <ty-or-()> <value>)`, mirroring
-        // the `(let ...)` shape. Name is a plain ident (no destructuring); the
-        // initializer is mandatory.
-        check("static count = 0", "(block (static count () 0))");
-    }
-
-    #[test]
-    fn parse_static_local_annotated() {
-        check(
-            "static scratch: [FixVec2] = []",
-            "(block (static scratch [FixVec2] []))",
-        );
-    }
-
-    #[test]
-    fn parse_static_is_not_a_hard_keyword() {
-        // `static` used as an ordinary ident (a call arg) stays an ident -- the
-        // contextual keyword only fires at statement start followed by an ident.
-        let s = body_sexp(r#"fn f() { load_audio("a.wav", static) }"#);
-        assert!(
-            s.contains("static"),
-            "static usable as an ordinary ident: {s}"
-        );
-    }
-
-    #[test]
-    fn lambda_still_parses_outside_a_guard() {
-        // The block must not leak into normal lambda parsing.
-        let s = body_sexp("fn f() { let g = x => x + 1 }");
-        assert!(
-            s.contains("lambda") || s.contains("=>"),
-            "bare-ident lambda still parses: {s}"
-        );
     }
 
     #[test]
@@ -682,124 +578,6 @@ mod tests {
         };
         let ty = l.ty.expect("no type annotation");
         assert!(matches!(&ast.types[ty].kind, TypeExprKind::Hole(_, Some(n)) if n == "foo"));
-    }
-
-    #[test]
-    fn block_recovers_after_empty_rhs_let() {
-        // `let invalid_syntax =` with no RHS must not drop the whole fn body:
-        // statement-level recovery keeps the lets before AND after the error so
-        // scope-based features (completion) still see the locals. Mirrors
-        // tests/lsp/completion/basic.rock.lsp::complete_local_vars_with_syntax_error.
-        let src = "fn calculate() {\n\
-            \x20   let first_value = 10\n\
-            \x20   let second_value = 20\n\
-            \x20   let invalid_syntax = \n\
-            \n\
-            \x20   let result = fi\n\
-            }";
-        // Total parse: the malformed `let invalid_syntax =` does NOT make
-        // `parse_module` fail -- the best-effort tree comes back `Ok`, with the
-        // dropped span recorded in `recovery_errors` (a downstream compile gate
-        // turns that into a rejection; IDE features keep the tree). Not swallowed.
-        let ast = parse_module(src, Ustr::from("test.rock")).expect("parse is total");
-        assert!(
-            !ast.recovery_errors.is_empty(),
-            "the dropped `let` must be recorded in recovery_errors",
-        );
-        let block = match &ast.items[0].kind {
-            ItemKind::Function(f) => f.body.rock_block().unwrap(),
-            other => panic!("expected fn, got {other:?}"),
-        };
-        // The malformed `let invalid_syntax =` is dropped (its RHS never parsed),
-        // but the three well-formed lets around it survive in order.
-        assert_eq!(
-            ast.block_sexp(block),
-            "(block (let first_value () 10) (let second_value () 20) (let result () fi))",
-        );
-    }
-
-    #[test]
-    fn format_spec_is_invisible_to_the_sexp_oracle() {
-        // The captured spec must NEVER leak into the s-expr — a spec-bearing
-        // interpolation renders byte-identically to its spec-less form, so
-        // cook-diff parity with rock is preserved.
-        assert_eq!(
-            body_sexp(r#"fn f() { let x = "{v:.3}" }"#),
-            body_sexp(r#"fn f() { let x = "{v}" }"#),
-        );
-        assert_eq!(
-            body_sexp(r#"fn f() { let x = "a {v:>10} b" }"#),
-            body_sexp(r#"fn f() { let x = "a {v} b" }"#),
-        );
-        // Dynamic width/precision: the `{w}`/`{p}` exprs are stored on the spec,
-        // not rendered as separate parts.
-        assert_eq!(
-            body_sexp(r#"fn f() { let x = "{v:{w}.{p}f}" }"#),
-            body_sexp(r#"fn f() { let x = "{v}" }"#),
-        );
-    }
-
-    #[test]
-    fn interpolation_hole_colon_inside_brackets_is_not_a_format_spec() {
-        // A `:` nested inside `()`/`{}`/`[]` in the hole belongs to the
-        // expression, not the `:spec` split -- named args, struct literals,
-        // etc. must survive. The split only fires at bracket-depth 0.
-        // Named-arg call:
-        assert_eq!(
-            body_sexp(r#"fn f() { let x = "{add2(2, b: 5)}" }"#),
-            r#"(block (let x () "(call add2 2 b: 5)"))"#,
-        );
-        // Struct literal (colon AND the closing `}` are both depth>0):
-        assert_eq!(
-            body_sexp(r#"fn f() { let x = "{P { v: 1 }}" }"#),
-            r#"(block (let x () "(struct P (data v 1))"))"#,
-        );
-        // Nested-call named arg deeper in:
-        assert_eq!(
-            body_sexp(r#"fn f() { let x = "{g(h(a: 1), b: 2)}" }"#),
-            r#"(block (let x () "(call g (call h a: 1) b: 2)"))"#,
-        );
-    }
-
-    #[test]
-    fn interpolation_hole_string_literal_brackets_and_colons_are_opaque() {
-        // A string literal inside the hole is opaque: its brackets must not move
-        // the bracket-depth counter and its `:` must not trigger the spec split.
-        // Regression guard -- a naive char-level depth counter miscounts `(`/`[`
-        // inside inner strings (broke tests/strings/characterization split cases).
-        assert_eq!(
-            body_sexp(r#"fn f() { let x = "{join("a[b]c".split("["), "|")}" }"#),
-            r#"(block (let x () "(call join (call (. "a[b]c" split) "[") "|")"))"#,
-        );
-        // A `:` inside an inner string is text, not a format-spec separator.
-        assert_eq!(
-            body_sexp(r#"fn f() { let x = "{greet("a:b")}" }"#),
-            r#"(block (let x () "(call greet "a:b")"))"#,
-        );
-    }
-
-    #[test]
-    fn interpolation_depth0_colon_is_still_a_format_spec() {
-        // The fix must NOT break real format specs: a `:` at bracket-depth 0
-        // still splits expr from spec, and a bracketed expr followed by a
-        // depth-0 spec keeps both.
-        assert_eq!(
-            body_sexp(r#"fn f() { let x = "{v:.3}" }"#),
-            body_sexp(r#"fn f() { let x = "{v}" }"#),
-        );
-        // `xs[0]` closes its bracket, THEN `:3` is a genuine width spec.
-        let (ast, v) = let_value(r#""{xs[0]:3}""#);
-        let ExprKind::InterpolatedString(parts) = &ast.exprs[v].kind else {
-            panic!("expected interpolated string, got {:?}", ast.exprs[v].kind);
-        };
-        let InterpolatedPart::Expr(e, spec) = &parts[0] else {
-            panic!("expected embedded expr part");
-        };
-        assert!(
-            matches!(&ast.exprs[*e].kind, ExprKind::Index(..)),
-            "expr is the index, not truncated"
-        );
-        assert_eq!(spec.as_ref().expect("width spec dropped").width, Some(3));
     }
 
     #[test]
@@ -871,36 +649,8 @@ mod tests {
     }
 
     #[test]
-    fn expr_hole_sexp_matches_rock_numbering() {
-        // Bare anonymous hole renders `?0`; a named one renders `?name`.
-        assert_eq!(body_sexp("fn f() { let x = ? }"), "(block (let x () ?0))");
-        assert_eq!(
-            body_sexp("fn f() { let x = ?foo }"),
-            "(block (let x () ?foo))"
-        );
-        // A type hole bumps the shared counter, so the following expr hole is ?1.
-        assert_eq!(
-            body_sexp("fn f() { let a: ? = 1\nlet b = ? }"),
-            "(block (let a ? 1) (let b () ?1))"
-        );
-    }
-
-    #[test]
-    fn arithmetic_precedence() {
-        check("1 + 2 * 3", "(block (+ 1 (* 2 3)))");
-        check("1 * 2 + 3", "(block (+ (* 1 2) 3))");
-        check("-x + 1", "(block (+ (- x) 1))");
-    }
-
-    #[test]
-    fn comparisons_and_logic() {
-        check("a == b", "(block (== a b))");
-        check("a < b && c > d", "(block (and (< a b) (> c d)))");
-    }
-
-    #[test]
     fn keyword_spans_and_dropped_fields_are_captured() {
-        // Data rock carries that the s-expr can't show — must survive parse.
+        // Keyword spans and explicit types must survive parse.
         let ast = parse_module(
             "global G: int = 0\nfn f() {\nfor x: int in xs {\nreturn x\n}\n}",
             Ustr::from("t.rock"),
@@ -953,9 +703,7 @@ mod tests {
 
     #[test]
     fn sibling_field_ref_in_default() {
-        // `field: T = .sibling` — leading-dot sibling ref. No corpus file
-        // exercises this, so the cook oracle can't catch a parser gap here;
-        // renders `.name`.
+        // Leading-dot sibling references retain their own expression kind.
         let ast = parse_module(
             "struct HealthBar { max: int, current: int = .max }",
             Ustr::from("t.rock"),
@@ -966,43 +714,6 @@ mod tests {
         };
         let def = s.fields[1].default.expect("current has a default");
         assert!(matches!(&ast.exprs[def].kind, ExprKind::SiblingFieldRef(id) if id.name == "max"));
-        assert_eq!(ast.expr_sexp(def), ".max");
-    }
-
-    #[test]
-    fn calls_fields_index() {
-        check("foo(1, 2)", "(block (call foo 1 2))");
-        check("a.b.c", "(block (. (. a b) c))");
-        check("a.b(c)", "(block (call (. a b) c))");
-        check("xs[0]", "(block (index xs 0))");
-        check("foo()", "(block (call foo))");
-        check("draw(x: 1, y: 2)", "(block (call draw x: 1 y: 2))");
-    }
-
-    #[test]
-    fn struct_spread_call_and_update() {
-        // (A) call-site spread `..expr` -- renders `..operand` in the arg list,
-        // may follow positional args and precede named overrides.
-        check("draw(img, ..props)", "(block (call draw img ..props))");
-        check(
-            "draw(img, ..props, color: c)",
-            "(block (call draw img ..props color: c))",
-        );
-        // Multiple disjoint spreads.
-        check("draw(..a, ..b)", "(block (call draw ..a ..b))");
-        // A spread after a named arg is legal (bone rejects only on collision).
-        check("draw(x: 1, ..props)", "(block (call draw x: 1 ..props))");
-
-        // (B) functional update -- bases render before fields.
-        check(
-            "let x = UiRect { ..r, z: 2 }",
-            "(block (let x () (struct UiRect (bases ..r) (data z 2))))",
-        );
-        // Multiple bases.
-        check(
-            "let x = P { ..a, ..b, c: 1 }",
-            "(block (let x () (struct P (bases ..a ..b) (data c 1))))",
-        );
     }
 
     #[test]
@@ -1023,326 +734,6 @@ mod tests {
     }
 
     #[test]
-    fn literals_and_arrays() {
-        check("[1, 2, 3]", "(block [1 2 3])");
-        check("\"hi\"", "(block \"hi\")");
-        check("true", "(block true)");
-        check("null", "(block null)");
-        check("Color::Red", "(block Color::Red)");
-    }
-
-    #[test]
-    fn statements() {
-        check("let x = 5", "(block (let x () 5))");
-        check("let x: int = 5", "(block (let x int 5))");
-        check("let xs: [IVec2] = a", "(block (let xs [IVec2] a))");
-        check("return a + b", "(block (return (+ a b)))");
-        check("x = y", "(block (= x y))");
-        check("x += 1", "(block (+= x 1))");
-    }
-
-    #[test]
-    fn if_expression() {
-        check(
-            "if a { 1 } else { 2 }",
-            "(block (if (cond a (block 1)) (else (block 2))))",
-        );
-        check(
-            "if a { 1 } else if b { 2 }",
-            "(block (if (cond a (block 1)) (cond b (block 2)) ))",
-        );
-    }
-
-    #[test]
-    fn if_let() {
-        check(
-            "if let x = foo() { 1 }",
-            "(block (if-let x (call foo) (block 1)))",
-        );
-        check(
-            "if let Some(v) = lookup(k) { v } else { 0 }",
-            "(block (if-let (Some v) (call lookup k) (block v) (else (block 0))))",
-        );
-    }
-
-    #[test]
-    fn while_let_statement() {
-        check(
-            "while let x = next() { use(x) }",
-            "(block (while-let x (call next) (block (call use x))))",
-        );
-    }
-
-    #[test]
-    fn at_operator() {
-        // `f(args) @ rhs` -> `f(args, () => rhs)`, rendered as a normal call.
-        check(
-            "profile(\"x\") @ bar()",
-            "(block (call profile \"x\" (lambda () None (block (call bar)))))",
-        );
-        check(
-            "with_scope(s) @ { foo() }",
-            "(block (call with_scope s (lambda () None (block (call foo)))))",
-        );
-        // Non-call left becomes a call with the lambda as its only arg.
-        check(
-            "guard @ work()",
-            "(block (call guard (lambda () None (block (call work)))))",
-        );
-    }
-
-    #[test]
-    fn fn_type_optional_arrow() {
-        // `fn()` param type has an implicit unit return; `(fn())?` is a nullable
-        // parenthesized fn type (single-paren unwrap).
-        check("let f: fn() = g", "(block (let f (fn () unit) g))");
-        check("let f: (fn())? = g", "(block (let f (fn () unit)? g))");
-    }
-
-    #[test]
-    fn nested_generic_close() {
-        // `>>` tokenizes as RightShift; the inner generic close must split it.
-        check(
-            "let m: Map<int, Vec<int>> = a",
-            "(block (let m (Map int (Vec int)) a))",
-        );
-    }
-
-    #[test]
-    fn explicit_generic_call_preserves_type_arguments() {
-        assert_eq!(
-            body_sexp("fn f() { workgroup_array<uint>(64) }"),
-            "(block (call (generic workgroup_array uint) 64))",
-        );
-    }
-
-    #[test]
-    fn leading_operator_continues_across_newline() {
-        // A binary op on a fresh line continues the expression, even inside a
-        // `{ }` block. Minus follows the same rule as plus once there is a
-        // left operand.
-        let src = "fn f() {\n    foo(a\n        + b\n        + c)\n}";
-        let ast = parse_module_clean(src, Ustr::from("test.rock")).unwrap();
-        let ItemKind::Function(f) = &ast.items[0].kind else {
-            panic!()
-        };
-        assert_eq!(
-            ast.block_sexp(f.body.rock_block().unwrap()),
-            "(block (call foo (+ (+ a b) c)))"
-        );
-
-        let src = "fn f() {\n    let x = 10.0\n        - 1.0\n    return x\n        - 2.0\n}";
-        let ast = parse_module_clean(src, Ustr::from("test.rock")).unwrap();
-        let ItemKind::Function(f) = &ast.items[0].kind else {
-            panic!()
-        };
-        assert_eq!(
-            ast.block_sexp(f.body.rock_block().unwrap()),
-            "(block (let x () (- 10 1)) (return (- x 2)))"
-        );
-
-        let src = "fn f() {\n    abs(a\n        - b)\n    pair(a,\n        -b)\n}";
-        let ast = parse_module_clean(src, Ustr::from("test.rock")).unwrap();
-        let ItemKind::Function(f) = &ast.items[0].kind else {
-            panic!()
-        };
-        assert_eq!(
-            ast.block_sexp(f.body.rock_block().unwrap()),
-            "(block (call abs (- a b)) (call pair a (- b)))"
-        );
-    }
-
-    /// Parse a single-item module and return (item-0 fn name, body s-expr).
-    fn item0(src: &str) -> (String, String) {
-        let ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
-        match &ast.items[0].kind {
-            ItemKind::Function(f) => (
-                f.name.name.to_string(),
-                ast.block_sexp(f.body.rock_block().unwrap()),
-            ),
-            other => panic!("expected function item, got {:?}", other),
-        }
-    }
-
-    /// Whole-item s-expr of the first item (any kind), via `item_sexp`.
-    fn item_sexp(src: &str) -> String {
-        let ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
-        ast.item_sexp(&ast.items[0])
-    }
-
-    /// Cook a self-contained module and return its non-macro items' s-expr.
-    fn cooked_items(src: &str) -> String {
-        let mut ast = parse_module(src, Ustr::from("t.rock")).expect("parse failed");
-        cook(std::slice::from_mut(&mut ast));
-        ast.items
-            .iter()
-            .filter(|it| !matches!(&it.kind, ItemKind::Function(f) if f.is_macro))
-            .map(|it| ast.item_sexp(it))
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-
-    #[test]
-    fn parse_nested_fn_basic() {
-        // `fn inc(x: int) -> int { x + 1 }` inside a body -> a `(fn ...)` statement.
-        check(
-            "fn inc(x: int) -> int { x + 1 }",
-            "(block (fn inc ((x int)) int (block (+ x 1))))",
-        );
-    }
-
-    #[test]
-    fn parse_nested_fn_no_return_type() {
-        check(
-            "fn bump() { n = n + 1 }",
-            "(block (fn bump () () (block (= n (+ n 1)))))",
-        );
-    }
-
-    #[test]
-    fn parse_fn_is_not_a_hard_local_keyword() {
-        // `fn` as a call arg / value context stays whatever the expression parser
-        // makes of it; the nested-fn form only fires at statement start.
-        let s = body_sexp("fn outer() { fn inner() -> int { 7 }  let r = inner() }");
-        assert!(s.contains("(fn inner"), "nested fn parsed: {s}");
-    }
-
-    #[test]
-    fn item_macro_splice() {
-        // A macro body's items splice into the module at the invocation site.
-        assert_eq!(
-            cooked_items("macro emit() { fn made() -> int { 42 } }\nemit()"),
-            "(fn made () int (block 42))"
-        );
-    }
-
-    #[test]
-    fn item_macro_ty_fragment() {
-        // `ty` fragment substitutes into a field type position.
-        assert_eq!(
-            cooked_items("macro hold(E: ty) { struct H { v: E } }\nhold(int)"),
-            "(struct H (field v int))"
-        );
-    }
-
-    #[test]
-    fn sigil_item_macro_type_shaped_arg() {
-        // Sigil `!(...)` lets `Box<int>` / `[int]` pass as `ty` fragments;
-        // `ident` fragment renames the emitted struct.
-        assert_eq!(
-            cooked_items(
-                "macro mk(N: ident, E: ty) { struct N { v: E } }\nmk!(WrapBox, Box<int>)\nmk!(WrapArr, [int])"
-            ),
-            "(struct WrapBox (field v (Box int))) (struct WrapArr (field v [int]))"
-        );
-    }
-
-    #[test]
-    fn stdlib_surface_forms() {
-        // Additional forms used by the standard library:
-        // Leading-variadic param `...any` (stdlib spelling) + extern(lua) body.
-        assert_eq!(
-            item_sexp("extern(lua) fn print(args: ...any)"),
-            "(fn print ((args any ...)) () (extern-lua))"
-        );
-        // `operator(lua)` with a `= \"..\"` body keeps the Lua body kind (the
-        // specifier overrides the default), not an empty Rock block.
-        assert_eq!(
-            item_sexp("@pure @inline operator(lua) ==(a: int, b: int) -> bool = \"return a == b\""),
-            "(@pure) (@inline) (fn __op_eq ((a int) (b int)) bool (lua))"
-        );
-        // Operator symbols only stdlib defines: `~` `<<` `>>`.
-        assert_eq!(
-            item_sexp("operator(lua) ~(a: int) -> int = \"return bit.bnot(a)\"")
-                .split(' ')
-                .nth(1)
-                .unwrap(),
-            "__op_bitnot"
-        );
-        assert_eq!(
-            item_sexp("operator(lua) <<(a: int, b: int) -> int = \"x\"")
-                .split(' ')
-                .nth(1)
-                .unwrap(),
-            "__op_shl"
-        );
-        assert_eq!(
-            item_sexp("operator(lua) >>(a: int, b: int) -> int = \"x\"")
-                .split(' ')
-                .nth(1)
-                .unwrap(),
-            "__op_shr"
-        );
-    }
-
-    #[test]
-    fn declarations() {
-        assert_eq!(
-            item_sexp("fn f<T>(x: int, ys: T... , z: int = 3) -> int { x }"),
-            "(fn f <T> ((x int) (ys T ...) (z int = 3)) int (block x))"
-        );
-        assert_eq!(
-            item_sexp("value FixVec2 { x: float, y: float }"),
-            "(value-struct FixVec2 (field x float) (field y float))"
-        );
-        assert_eq!(
-            item_sexp("struct Foo<T> { a: T, b: int = 0 }"),
-            "(struct Foo <T> (field a T) (field b int 0))"
-        );
-        assert_eq!(
-            item_sexp("enum E { A, B(int, float), C { x: int } }"),
-            "(enum E (variant A) (variant B (tuple int float)) (variant C (record (field x int))))"
-        );
-        assert_eq!(item_sexp("newtype Id(int)"), "(newtype Id int)");
-        assert_eq!(item_sexp("global N: int = 5"), "(global N int 5)");
-        assert_eq!(item_sexp("const PI: float = 3.14"), "(const PI float 3.14)");
-        assert_eq!(
-            item_sexp("deco init early_init { run() }"),
-            "(decorator early_init () (block (call run)))"
-        );
-        assert_eq!(item_sexp("#if debug"), "(#if \"debug\")");
-        // Non-Rock bodies render as a marker.
-        assert_eq!(
-            item_sexp("extern(ffi, \"native\") fn s(x: int)"),
-            "(fn s ((x int)) () (ffi \"native\"))"
-        );
-    }
-
-    #[test]
-    fn annotations_rendered() {
-        // Plain + arg'd + named-arg annotations prefix the item.
-        assert_eq!(
-            item_sexp("@pure @test(output = \"hi\") fn f() { 1 }"),
-            "(@pure) (@test output=\"hi\") (fn f () () (block 1))"
-        );
-        assert_eq!(
-            item_sexp("@sim_env(\"K\", \"V\") fn g() { 1 }"),
-            "(@sim_env \"K\" \"V\") (fn g () () (block 1))"
-        );
-        // Block-bodied operators get an implicit `@inline` (rock parity).
-        assert_eq!(
-            item_sexp("@pure operator +(a: int, b: int) -> int { a + b }"),
-            "(@pure) (@inline) (fn __op_add ((a int) (b int)) int (block (+ a b)))"
-        );
-    }
-
-    #[test]
-    fn operator_def() {
-        // `operator +` folds to `fn __op_add`; a leading annotation is skipped.
-        assert_eq!(
-            item0("@pure operator +(a: int, b: int) -> int { a + b }"),
-            ("__op_add".to_string(), "(block (+ a b))".to_string())
-        );
-        assert_eq!(
-            item0("operator(lua) ==(a: int, b: int) -> bool { a == b }").0,
-            "__op_eq"
-        );
-        assert_eq!(item0("operator -(a: int) -> int { -a }").0, "__unm");
-        assert_eq!(item0("operator !(a: bool) -> bool { !a }").0, "__not");
-        assert_eq!(item0("operator ~(a: int) -> int { ~a }").0, "__op_bitnot");
-    }
-
-    #[test]
     fn one_parameter_binary_operator_is_rejected() {
         let err = parse_module_clean(
             "struct P { x: int }\noperator +(a: P) -> P { a }",
@@ -1357,52 +748,9 @@ mod tests {
     }
 
     #[test]
-    fn annotated_and_macro_items() {
-        // Multiple annotations skipped; fn parses normally.
-        assert_eq!(
-            item0("@pure @test fn g() { 1 }"),
-            ("g".to_string(), "(block 1)".to_string())
-        );
-        // `macro` folds to a function named like the macro; `__SITE__` is an
-        // ordinary ident here.
-        assert_eq!(
-            item0("macro emit(x: expr) { _emit_impl(x, __SITE__) }"),
-            (
-                "emit".to_string(),
-                "(block (call _emit_impl x __SITE__))".to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn no_parens_calls() {
-        check(
-            "start_task \"batch\"",
-            "(block (call start_task \"batch\"))",
-        );
-        check("place_player 20 20", "(block (call place_player 20 20))");
-        // Operators (bp >= 15) fold into the argument: `foo(a + b)`, matching
-        // rock's `arg_min_bp = 15`.
-        check("foo a + b", "(block (call foo (+ a b)))");
-    }
-
-    #[test]
-    fn multi_statement_block_newline_separated() {
-        let src = "fn f() {\n    let x = 1\n    let y = x + 2\n    return y\n}";
-        let ast = parse_module(src, Ustr::from("test.rock")).unwrap();
-        let ItemKind::Function(f) = &ast.items[0].kind else {
-            panic!()
-        };
-        assert_eq!(
-            ast.block_sexp(f.body.rock_block().unwrap()),
-            "(block (let x () 1) (let y () (+ x 2)) (return y))"
-        );
-    }
-
-    #[test]
     fn inline_lua_body_captures_source() {
         // `inline(lua) fn` must keep the raw Lua source verbatim (codegen emits
-        // it). The s-expr still renders a bare `(lua)`, so cook-diff is unaffected.
+        // it).
         let ast = parse_module(
             "inline(lua) fn add(a: int, b: int) -> int = \"\"\"return a + b\"\"\"",
             Ustr::from("test.rock"),
@@ -1595,55 +943,7 @@ mod modules_grammar_tests {
         parse_module_clean_with_dialect(src, Ustr::from("test.rock"), Dialect::V1)
     }
 
-    fn body_first_expr(src: &str, dialect: Dialect) -> String {
-        let ast =
-            parse_module_with_dialect(src, Ustr::from("test.rock"), dialect).expect("parse failed");
-        let err_count = ast.recovery_errors.len();
-        assert_eq!(
-            err_count, 0,
-            "clean fixture must not recover: {:?}",
-            ast.recovery_errors
-        );
-        match &ast.items[0].kind {
-            ItemKind::Function(f) => {
-                let block = f.body.rock_block().unwrap();
-                match &ast.blocks[block].statements[..] {
-                    [stmt] => match &ast.stmts[*stmt].kind {
-                        StatementKind::Let(l) => {
-                            let v = l.value.expect("let has a value");
-
-                            ast.expr_sexp(v)
-                        }
-                        other => panic!("expected let, got {other:?}"),
-                    },
-                    other => panic!("expected one statement, got {}", other.len()),
-                }
-            }
-            other => panic!("expected fn, got {other:?}"),
-        }
-    }
-
     // --- contextual ascription ----------------------------------------------
-
-    #[test]
-    fn paren_ascription_parses_in_v1() {
-        let sexp = body_first_expr("fn f() { let x = (5 : int) }", Dialect::V1);
-        assert_eq!(sexp, "(ascribe 5 int)");
-    }
-
-    #[test]
-    fn paren_ascription_is_additive_in_legacy() {
-        // The form was a parse error in legacy before this branch (probe:
-        // "Unsupported binary operator Colon"), so accepting it is additive.
-        let sexp = body_first_expr("fn f() { let x = (5 : int) }", Dialect::Legacy);
-        assert_eq!(sexp, "(ascribe 5 int)");
-    }
-
-    #[test]
-    fn legacy_keeps_infix_double_colon_ascription() {
-        let sexp = body_first_expr("fn f(x: float) { let y = x :: float }", Dialect::Legacy);
-        assert_eq!(sexp, "(:: x float)");
-    }
 
     #[test]
     fn v1_ident_colon_ident_parses_as_a_path_not_ascription() {
@@ -1688,26 +988,6 @@ mod modules_grammar_tests {
     }
 
     #[test]
-    fn typed_lambda_is_not_an_ascription_in_v1() {
-        // `(x : int) => x` — the lambda lookahead wins; `(x : int)` ascription
-        // requires the paren group to END the expression.
-        let sexp = body_first_expr("fn f() { let g = (x : int) => x }", Dialect::V1);
-        assert!(sexp.starts_with("(lambda"), "got: {sexp}");
-    }
-
-    #[test]
-    fn ascription_of_lambda_value_works_in_v1() {
-        let sexp = body_first_expr(
-            "fn f() { let cb = ((x => x + 1) : fn(int) -> int) }",
-            Dialect::V1,
-        );
-        assert_eq!(
-            sexp,
-            "(ascribe (paren (lambda (None) None (block (return (+ x 1))))) (fn (int) int))"
-        );
-    }
-
-    #[test]
     fn ascription_is_not_a_typed_tuple_in_v1() {
         // `(a : int, b : int)` is not a new typed-tuple literal.
         let err = parse_v1("fn f() { let t = (a : int, b : int) }")
@@ -1730,26 +1010,6 @@ mod modules_grammar_tests {
             err.message
         );
     }
-
-    #[test]
-    fn nested_tuple_ascription_in_v1() {
-        let sexp = body_first_expr(
-            "fn f(a: int, b: int) { let t = ((a, b) : (int, int)) }",
-            Dialect::V1,
-        );
-        assert_eq!(sexp, "(ascribe (tuple a b) (tuple int int))");
-    }
-
-    #[test]
-    fn ascription_groups_tighter_than_operators_in_v1() {
-        // `j : float / k : float` without parens is NOT ascription (bare form
-        // is un-added); the parenthesized form keeps its existing grouping.
-        let sexp = body_first_expr(
-            "fn f(j: int, k: int) { let d = (j : float) / (k : float) }",
-            Dialect::V1,
-        );
-        assert_eq!(sexp, "(/ (ascribe j float) (ascribe k float))");
-    }
 }
 
 #[cfg(test)]
@@ -1758,84 +1018,6 @@ mod modules_path_tests {
 
     fn parse_v1(src: &str) -> Result<Ast, CompilerError> {
         parse_module_clean_with_dialect(src, Ustr::from("test.rock"), Dialect::V1)
-    }
-
-    fn let_type(src: &str) -> String {
-        let ast = parse_v1(src).expect("parse failed");
-        assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);
-        let ItemKind::Function(f) = &ast.items[0].kind else {
-            panic!("expected fn")
-        };
-        let block = f.body.rock_block().unwrap();
-        let StatementKind::Let(l) = &ast.stmts[ast.blocks[block].statements[0]].kind else {
-            panic!("expected let");
-        };
-        let ty = l.ty.expect("let has a type annotation");
-        ast.type_sexp(ty)
-    }
-
-    fn let_value(src: &str) -> String {
-        let ast = parse_v1(src).expect("parse failed");
-        assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);
-        let ItemKind::Function(f) = &ast.items[0].kind else {
-            panic!("expected fn")
-        };
-        let block = f.body.rock_block().unwrap();
-        let StatementKind::Let(l) = &ast.stmts[ast.blocks[block].statements[0]].kind else {
-            panic!("expected let");
-        };
-        ast.expr_sexp(l.value.expect("value"))
-    }
-
-    #[test]
-    fn qualified_type_path_parses_in_v1() {
-        assert_eq!(
-            let_type("fn f() { let x: sample::combat::Actor = x }"),
-            "sample::combat::Actor"
-        );
-    }
-
-    #[test]
-    fn generic_type_path_parses_in_v1() {
-        assert_eq!(
-            let_type("fn f() { let x: native::collections::Vec<int> = x }"),
-            "(native::collections::Vec int)"
-        );
-    }
-
-    #[test]
-    fn root_anchored_and_self_super_type_paths_parse_in_v1() {
-        assert_eq!(
-            let_type("fn f() { let x: ::app::Actor = x }"),
-            "::app::Actor"
-        );
-        assert_eq!(let_type("fn f() { let x: self::Actor = x }"), "self::Actor");
-        assert_eq!(
-            let_type("fn f() { let x: super::shared::T = x }"),
-            "super::shared::T"
-        );
-        assert_eq!(
-            let_type("fn f() { let x: super::super::T = x }"),
-            "super::super::T"
-        );
-    }
-
-    #[test]
-    fn value_path_parses_in_v1() {
-        assert_eq!(
-            let_value("fn f() { let h = sample::combat::heal }"),
-            "sample::combat::heal"
-        );
-    }
-
-    #[test]
-    fn lowercase_member_is_a_path_in_v1_no_case_guess() {
-        // Legacy requires the member to be uppercase for a qualified ident;
-        // v1 has no case rule (the resolver decides).
-        assert_eq!(
-            let_value("fn f() { let v = mod_u::helper }"),
-            "mod_u::helper"
-        );
     }
 
     #[test]
@@ -1876,17 +1058,6 @@ mod modules_path_tests {
     }
 
     #[test]
-    fn qualified_enum_variant_is_an_ordinary_path_in_v1() {
-        // In v1 `Enum::Variant` is a plain path: the case of the second
-        // segment must not decide anything at parse time.
-        assert_eq!(let_value("fn f() { let c = Color::Red }"), "Color::Red");
-        assert_eq!(
-            let_value("fn f() { let c = colors::Color::Red }"),
-            "colors::Color::Red"
-        );
-    }
-
-    #[test]
     fn qualified_struct_literal_parses_in_v1() {
         let ast =
             parse_v1("fn f() { let a = lib::Actor { hp: 100 }\nprint(a) }").expect("parse failed");
@@ -1904,35 +1075,6 @@ mod modules_path_tests {
         };
         assert_eq!(path.segments.len(), 2);
         assert_eq!(fields.len(), 1);
-    }
-
-    #[test]
-    fn qualified_pattern_parses_in_v1() {
-        let ast = parse_v1(
-            "fn f(msg: Message) { let x = match msg { msg_kind::Ping => 1, other => 0 }\nprint(x) }",
-        )
-        .expect("parse failed");
-        assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);
-        // The arm pattern is a PathVariant.
-        let found = ast.blocks.iter().any(|_| true);
-        assert!(found);
-        // Depth-check via sexp: match arms render patterns.
-        let ItemKind::Function(f) = &ast.items[0].kind else {
-            panic!("expected fn")
-        };
-        let block = f.body.rock_block().unwrap();
-        let sexp = ast.block_sexp(block);
-        assert!(
-            sexp.contains("msg_kind::Ping"),
-            "pattern should render as a path: {sexp}"
-        );
-    }
-
-    #[test]
-    fn v1_still_parses_unqualified_single_segment_idents() {
-        // A bare `Foo` in v1 stays a plain ident (one-segment resolution is
-        // the common case); it must not become a Path node.
-        assert_eq!(let_value("fn f() { let v = helper }"), "helper");
     }
 
     #[test]
@@ -2291,13 +1433,341 @@ mod modules_items_tests {
 }
 
 #[cfg(test)]
-mod vis_probe_tests {
+mod surface_ast_tests {
     use super::*;
+
+    fn parse(src: &str, dialect: Dialect) -> Ast {
+        parse_module_clean_with_dialect(src, Ustr::from("test.rock"), dialect).unwrap()
+    }
+
+    fn body(ast: &Ast) -> &BlockData {
+        let ItemKind::Function(f) = &ast.items[0].kind else {
+            panic!("expected function")
+        };
+        &ast.blocks[f.body.rock_block().unwrap()]
+    }
+
+    fn value(ast: &Ast) -> Idx<ExprData> {
+        let StatementKind::Let(l) = &ast.stmts[body(ast).statements[0]].kind else {
+            panic!("expected let")
+        };
+        l.value.unwrap()
+    }
+
+    fn expression(src: &str, dialect: Dialect) -> (Ast, Idx<ExprData>) {
+        let ast = parse(&format!("fn f() {{ let result = {src} }}"), dialect);
+        let id = value(&ast);
+        (ast, id)
+    }
+
+    fn binary(ast: &Ast, id: Idx<ExprData>, expected: TokenKind) -> (Idx<ExprData>, Idx<ExprData>) {
+        let ExprKind::BinOp {
+            left, op, right, ..
+        } = &ast.exprs[id].kind
+        else {
+            panic!("expected binary expression: {:?}", ast.exprs[id].kind)
+        };
+        assert_eq!(*op, expected);
+        (*left, *right)
+    }
+
     #[test]
-    fn probe_vis_debug() {
-        let src = "struct S {\n    private(set) health: float = 100,\n}";
-        let ast = parse_module(src, Ustr::from("p.rock")).expect("parse");
-        // legacy: vis not parsed; private(set) must FAIL parse or be a field named private
-        let _ = ast;
+    fn operators_preserve_precedence_and_left_associativity() {
+        let (ast, id) = expression("1 + 2 * 3 - 4", Dialect::Legacy);
+        let (left, right) = binary(&ast, id, TokenKind::Minus);
+        assert!(matches!(ast.exprs[right].kind, ExprKind::Int(4, _)));
+        let (_, product) = binary(&ast, left, TokenKind::Plus);
+        binary(&ast, product, TokenKind::Mul);
+        let (ast, id) = expression("a < b && c > d", Dialect::Legacy);
+        let (left, right) = binary(&ast, id, TokenKind::And);
+        binary(&ast, left, TokenKind::LessThan);
+        binary(&ast, right, TokenKind::GreaterThan);
+    }
+
+    #[test]
+    fn leading_operator_continues_across_newline() {
+        let (ast, id) = expression("10\n - 1\n - 2", Dialect::Legacy);
+        let (left, _) = binary(&ast, id, TokenKind::Minus);
+        binary(&ast, left, TokenKind::Minus);
+    }
+
+    #[test]
+    fn guarded_match_keeps_all_arms_and_struct_bodies() {
+        for guard in ["x", "(x)", "x && x"] {
+            let (ast, id) = expression(
+                &format!("match e {{ E::A if {guard} => S {{ x: 1 }} E::B => S {{ x: 2 }} }}"),
+                Dialect::Legacy,
+            );
+            let ExprKind::Match { arms, .. } = &ast.exprs[id].kind else {
+                panic!("expected match")
+            };
+            assert_eq!(arms.len(), 2);
+            assert!(arms[0].guard.is_some());
+            assert!(arms[1].guard.is_none());
+            for arm in arms {
+                let StatementKind::Expression(e) =
+                    ast.stmts[ast.blocks[arm.body].statements[0]].kind
+                else {
+                    panic!("expected expression")
+                };
+                assert!(matches!(ast.exprs[e].kind, ExprKind::StructLiteral { .. }));
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_preserves_fields_and_following_bindings() {
+        let ast = parse_module(
+            "fn f() { let p = P { a: 1 b: 2 }\nlet broken =\nlet kept = 3 }",
+            Ustr::from("test.rock"),
+        )
+        .unwrap();
+        assert!(!ast.recovery_errors.is_empty());
+        let ExprKind::StructLiteral { fields, .. } = &ast.exprs[value(&ast)].kind else {
+            panic!("expected struct")
+        };
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].0[0].name, "a");
+        assert_eq!(fields[1].0[0].name, "b");
+        assert_eq!(body(&ast).statements.len(), 2);
+        let StatementKind::Let(l) = &ast.stmts[body(&ast).statements[1]].kind else {
+            panic!("expected let")
+        };
+        assert!(matches!(&l.binding, Binding::Ident(i) if i.name == "kept"));
+    }
+
+    #[test]
+    fn interpolation_nested_colons_and_strings_stay_in_the_expression() {
+        for source in [
+            r#""{add2(2, b: 5)}""#,
+            r#""{P { v: 1 }}""#,
+            r#""{g(h(a: 1), b: 2)}""#,
+            r#""{join("a[b]c".split("["), "|")}""#,
+            r#""{greet("a:b")}""#,
+        ] {
+            let (ast, id) = expression(source, Dialect::Legacy);
+            let ExprKind::InterpolatedString(parts) = &ast.exprs[id].kind else {
+                panic!("expected interpolation")
+            };
+            let [InterpolatedPart::Expr(e, None)] = parts.as_slice() else {
+                panic!("colon became a format spec: {parts:?}")
+            };
+            assert!(matches!(
+                ast.exprs[*e].kind,
+                ExprKind::FunctionCall { .. } | ExprKind::StructLiteral { .. }
+            ));
+        }
+        let (ast, id) = expression(r#""{xs[0]:3}""#, Dialect::Legacy);
+        let ExprKind::InterpolatedString(parts) = &ast.exprs[id].kind else {
+            panic!("expected interpolation")
+        };
+        let InterpolatedPart::Expr(e, Some(spec)) = &parts[0] else {
+            panic!("expected format spec")
+        };
+        assert!(matches!(ast.exprs[*e].kind, ExprKind::Index(..)));
+        assert_eq!(spec.width, Some(3));
+    }
+
+    #[test]
+    fn ascription_and_lambda_disambiguation() {
+        for dialect in [Dialect::Legacy, Dialect::V1] {
+            let (ast, id) = expression("(5 : int)", dialect);
+            let ExprKind::ParenAscription(e, ty) = ast.exprs[id].kind else {
+                panic!("expected ascription")
+            };
+            assert!(matches!(ast.exprs[e].kind, ExprKind::Int(5, _)));
+            assert!(matches!(ast.types[ty].kind, TypeExprKind::Int));
+        }
+        let (ast, id) = expression("x :: float", Dialect::Legacy);
+        assert!(matches!(ast.exprs[id].kind, ExprKind::TypeAscription(..)));
+        let (ast, id) = expression("(x : int) => x", Dialect::V1);
+        assert!(matches!(ast.exprs[id].kind, ExprKind::Lambda { .. }));
+        let (ast, id) = expression("(j : float) / (k : float)", Dialect::V1);
+        let (left, right) = binary(&ast, id, TokenKind::Div);
+        assert!(matches!(
+            ast.exprs[left].kind,
+            ExprKind::ParenAscription(..)
+        ));
+        assert!(matches!(
+            ast.exprs[right].kind,
+            ExprKind::ParenAscription(..)
+        ));
+    }
+
+    #[test]
+    fn paths_keep_segments_root_and_generic_arguments() {
+        for (source, root, names) in [
+            ("::app::Actor", true, vec!["app", "Actor"]),
+            ("self::Actor", false, vec!["self", "Actor"]),
+            ("super::super::T", false, vec!["super", "super", "T"]),
+            ("mod_u::helper", false, vec!["mod_u", "helper"]),
+        ] {
+            let (ast, id) = expression(source, Dialect::V1);
+            let ExprKind::Path { path, .. } = &ast.exprs[id].kind else {
+                panic!("expected path")
+            };
+            assert_eq!(path.from_root, root);
+            assert_eq!(
+                path.segments
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<_>>(),
+                names
+            );
+        }
+        let ast = parse(
+            "fn f() { let x: native::collections::Vec<int> = x }",
+            Dialect::V1,
+        );
+        let StatementKind::Let(l) = &ast.stmts[body(&ast).statements[0]].kind else {
+            panic!("expected let")
+        };
+        let TypeExprKind::AppPath { ctor, args } = &ast.types[l.ty.unwrap()].kind else {
+            panic!("expected generic path")
+        };
+        assert_eq!(ctor.segments.len(), 3);
+        assert_eq!(args.len(), 1);
+        assert!(matches!(ast.types[args[0]].kind, TypeExprKind::Int));
+        let (ast, id) = expression("match msg { msg_kind::Ping => 1, other => 0 }", Dialect::V1);
+        let ExprKind::Match { arms, .. } = &ast.exprs[id].kind else {
+            panic!("expected match")
+        };
+        assert!(
+            matches!(&arms[0].pattern, Pattern::PathVariant { path, .. } if path.segments[0].name == "msg_kind" && path.segments[1].name == "Ping")
+        );
+    }
+
+    #[test]
+    fn single_and_multiple_if_let_bindings_use_chains() {
+        for (source, count) in [
+            ("if let x = foo() { x } else { 0 }", 1),
+            ("if let x = foo() && let y = bar() { y }", 2),
+        ] {
+            let (ast, id) = expression(source, Dialect::Legacy);
+            let ExprKind::IfLetChain { clauses, .. } = &ast.exprs[id].kind else {
+                panic!("expected binding chain")
+            };
+            assert_eq!(clauses.len(), count);
+            assert!(
+                clauses
+                    .iter()
+                    .all(|c| matches!(c, IfLetClause::Binding { .. }))
+            );
+        }
+    }
+
+    #[test]
+    fn item_macros_splice_and_substitute_type_fragments() {
+        let mut ast = parse(
+            "macro mk(N: ident, E: ty) { struct N { v: E } }\nmk!(WrapBox, Box<int>)\nmk!(WrapArr, [int])",
+            Dialect::Legacy,
+        );
+        macro_expand::expand_macros(std::slice::from_mut(&mut ast));
+        desugar::desugar(&mut ast);
+        let structs: Vec<_> = ast
+            .items
+            .iter()
+            .filter_map(|i| match &i.kind {
+                ItemKind::Struct(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(structs.len(), 2);
+        assert_eq!(structs[0].name.name, "WrapBox");
+        assert_eq!(structs[1].name.name, "WrapArr");
+        assert!(matches!(
+            ast.types[structs[0].fields[0].ty].kind,
+            TypeExprKind::App { .. }
+        ));
+        assert!(matches!(
+            ast.types[structs[1].fields[0].ty].kind,
+            TypeExprKind::Array(_)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod statement_shape_tests {
+    use super::*;
+
+    #[test]
+    fn local_declarations_preserve_storage_types_and_nested_functions() {
+        let ast = parse_module_clean("fn f() { static count = 0\nstatic scratch: [int] = []\nfn inner(x: int) -> int { x }\nlet m: Map<int, Vec<int>> = a }", Ustr::from("test.rock")).unwrap();
+        let ItemKind::Function(f) = &ast.items[0].kind else {
+            panic!("expected function")
+        };
+        let stmts = &ast.blocks[f.body.rock_block().unwrap()].statements;
+        assert_eq!(stmts.len(), 4);
+        let StatementKind::Static(s) = &ast.stmts[stmts[0]].kind else {
+            panic!("expected static")
+        };
+        assert_eq!(s.name.name, "count");
+        assert!(s.ty.is_none());
+        assert!(matches!(ast.exprs[s.value].kind, ExprKind::Int(0, _)));
+        let StatementKind::Static(s) = &ast.stmts[stmts[1]].kind else {
+            panic!("expected static")
+        };
+        assert!(matches!(
+            ast.types[s.ty.unwrap()].kind,
+            TypeExprKind::Array(_)
+        ));
+        let StatementKind::NestedFn(n) = &ast.stmts[stmts[2]].kind else {
+            panic!("expected nested function")
+        };
+        assert_eq!(n.name.name, "inner");
+        assert_eq!(n.params.len(), 1);
+        assert!(matches!(
+            ast.types[n.return_ty.unwrap()].kind,
+            TypeExprKind::Int
+        ));
+        let StatementKind::Let(l) = &ast.stmts[stmts[3]].kind else {
+            panic!("expected let")
+        };
+        let TypeExprKind::App { args, .. } = &ast.types[l.ty.unwrap()].kind else {
+            panic!("expected generic type")
+        };
+        assert_eq!(args.len(), 2);
+        assert!(matches!(ast.types[args[1]].kind, TypeExprKind::App { .. }));
+    }
+
+    #[test]
+    fn call_spreads_and_struct_bases_keep_source_order() {
+        let ast = parse_module_clean("fn f() { draw(img, ..props, color: c)\nlet p = P { ..a, ..b, c: 1 }\nworkgroup_array<uint>(64) }", Ustr::from("test.rock")).unwrap();
+        let ItemKind::Function(f) = &ast.items[0].kind else {
+            panic!("expected function")
+        };
+        let stmts = &ast.blocks[f.body.rock_block().unwrap()].statements;
+        let StatementKind::Expression(call) = ast.stmts[stmts[0]].kind else {
+            panic!("expected call")
+        };
+        let ExprKind::FunctionCall { args, .. } = &ast.exprs[call].kind else {
+            panic!("expected call")
+        };
+        assert_eq!(args.len(), 3);
+        assert!(!args[0].is_spread);
+        assert!(args[1].is_spread);
+        assert_eq!(args[2].name.as_ref().unwrap().name, "color");
+        let StatementKind::Let(l) = &ast.stmts[stmts[1]].kind else {
+            panic!("expected let")
+        };
+        let ExprKind::StructLiteral { bases, fields, .. } = &ast.exprs[l.value.unwrap()].kind
+        else {
+            panic!("expected struct")
+        };
+        assert_eq!(bases.len(), 2);
+        assert!(matches!(&ast.exprs[bases[0]].kind, ExprKind::Ident(i) if i.name == "a"));
+        assert!(matches!(&ast.exprs[bases[1]].kind, ExprKind::Ident(i) if i.name == "b"));
+        assert_eq!(fields.len(), 1);
+        let StatementKind::Expression(call) = ast.stmts[stmts[2]].kind else {
+            panic!("expected call")
+        };
+        let ExprKind::FunctionCall { generic_args, .. } = &ast.exprs[call].kind else {
+            panic!("expected call")
+        };
+        assert_eq!(generic_args.len(), 1);
+        assert!(matches!(
+            ast.types[generic_args[0]].kind,
+            TypeExprKind::Uint
+        ));
     }
 }

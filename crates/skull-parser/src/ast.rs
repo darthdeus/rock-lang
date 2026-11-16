@@ -38,7 +38,6 @@ impl Ident {
 pub enum CallSyntax {
     Normal,
     At,
-    Binary(TokenKind),
     /// rock's no-parens call surface form (`foo a b` == `foo(a, b)`). Semantically
     /// identical to `Normal` -- every consumer that cares about call semantics
     /// treats it the same -- but kept distinct so the formatter can re-emit the
@@ -72,11 +71,7 @@ pub struct FunctionCallArg {
     pub is_spread: bool,
 }
 
-/// Mirror of rock's `FormatSpecifier`. Carries the static spec fields *and*
-/// the dynamic width/precision sub-expressions (`{v:{w}.{p}f}`) so no embedded
-/// expression is dropped. rock's `to_sexp` ignores the spec, so this data is
-/// invisible to the cook oracle — but bone / skull codegen need it to emit the
-/// correct formatting and to type-check the embedded width/precision exprs.
+/// Formatting options, including dynamic width and precision expressions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FormatSpec {
     pub precision: Option<usize>,
@@ -117,7 +112,7 @@ impl FormatSpec {
 pub enum InterpolatedPart {
     Literal(Ustr),
     /// An embedded `{expr[:spec]}`. The spec is `Some` only when a `:` format
-    /// specifier was written; it never affects the s-expr (rock parity).
+    /// specifier was written.
     Expr(Idx<ExprData>, Option<FormatSpec>),
 }
 
@@ -179,7 +174,7 @@ pub enum ExprKind {
     Float(OrderedFloat<f64>),
     String(Ustr),
     /// `"text {expr} more"` — literal runs interleaved with embedded
-    /// expressions. The format-spec is dropped (it does not affect s-exprs).
+    /// expressions and their format specifications.
     InterpolatedString(Vec<InterpolatedPart>),
     Bool(bool),
 
@@ -203,8 +198,7 @@ pub enum ExprKind {
     FieldAccess(Idx<ExprData>, Ident),
     SafeNavigation(Idx<ExprData>, Ident),
     /// `recv?.let { body }` — runs `body` with the unwrapped receiver bound to
-    /// `binding` (the receiver's ident name, else `value`). The body is not part
-    /// of the s-expr (rock parity).
+    /// `binding` (the receiver's ident name, else `value`).
     SafeNavigationLet {
         receiver: Idx<ExprData>,
         binding: Ident,
@@ -230,12 +224,11 @@ pub enum ExprKind {
 
     ArrayLiteral(Vec<Idx<ExprData>>),
 
-    /// Non-overloadable infix operators (`== < && ?? ::` ...). Overloadable
-    /// ops (`+ - * / %`) are lowered to a `FunctionCall` with
-    /// `CallSyntax::Binary`, exactly as rock's parser does.
+    /// Infix operators. Overloadable operators resolve during lowering.
     BinOp {
         left: Idx<ExprData>,
         op: TokenKind,
+        op_span: Span,
         right: Idx<ExprData>,
     },
 
@@ -270,17 +263,7 @@ pub enum ExprKind {
         else_branch: Option<Idx<BlockData>>,
     },
 
-    /// `if let pat = value { .. } [else { .. }]` (single binding).
-    IfLet {
-        pattern: Pattern,
-        value: Idx<ExprData>,
-        then_block: Idx<BlockData>,
-        else_block: Option<Idx<BlockData>>,
-    },
-
-    /// `if [cond &&]* let pat = value [&& (let .. | cond)]* { .. }` — a binding
-    /// chain. rock keeps single bindings as `IfLet` and only uses this when
-    /// there is more than one clause.
+    /// Binding and condition clauses, including a single binding.
     IfLetChain {
         clauses: Vec<IfLetClause>,
         then_block: Idx<BlockData>,
@@ -315,10 +298,7 @@ pub enum ExprKind {
     /// `&name` — function reference (renders `&name`).
     FunctionRef(Ident),
 
-    /// `^name` — anaphoric ident (explicit caller-scope reference in a macro
-    /// body). Renders as the bare `name` (rock side-tables the `^`, so the
-    /// s-expr is a plain ident), but kept distinct so bone can resolve it to
-    /// caller scope rather than hygienically.
+    /// `^name` resolves in the macro caller scope, bypassing hygiene.
     AnaphoricIdent(Ident),
 }
 
@@ -336,8 +316,6 @@ pub struct MatchArm {
     pub body: Idx<BlockData>,
 }
 
-/// Match pattern. Mirror of rock's `PatternKind` (span dropped — s-exprs
-/// don't use it). Sub-patterns nest via `Vec` (no `Box` needed).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Pattern {
     Wildcard,
@@ -557,11 +535,7 @@ pub enum TypeExprKind {
         params: Vec<Idx<TypeExprData>>,
         ret: Idx<TypeExprData>,
     },
-    /// `?` / `?name` type hole (`let x: ? = 42`) — inferred. `(positional id,
-    /// optional name)`, mirroring rock. The s-expr renders a bare `?`
-    /// regardless of payload, but bone needs the name and the id keeps the
-    /// shared hole counter in lockstep with rock (so value-position `?{id}`
-    /// holes render identically).
+    /// Inferred type hole: per-module id and optional name.
     Hole(u32, Option<Ustr>),
 }
 
@@ -653,9 +627,7 @@ pub struct FunctionDef {
     pub body: FunctionBody,
     pub is_macro: bool,
     pub is_coroutine: bool,
-    /// Parser-synthesized, not user-written: the `@pure @inline fn __op_*(a: NT,
-    /// b: NT)` operators derived for a newtype over a primitive (rock parity).
-    /// Filtered out of the cook s-expr (the oracle compares user surface only).
+    /// Compiler-generated declaration.
     pub is_synthetic: bool,
     /// A generated default or omission function for one JSON field.
     pub json_field_for: Option<(Ident, Ustr, JsonFieldOperation)>,
@@ -936,7 +908,7 @@ pub struct Ast {
     /// it finishes a macro definition (`finish_fn_def` -> `index_macro_param_refs`),
     /// since the parser is the one phase that sees the template with its source
     /// spans (expansion retags clones onto the call site). Drives IDE
-    /// references/rename for macro params. Pure metadata: not in the s-expr.
+    /// references/rename for macro params.
     pub macro_param_refs: Vec<MacroParamRef>,
 }
 
@@ -1020,5 +992,88 @@ impl Ast {
             kind,
             is_nullable,
         })
+    }
+}
+
+impl Ast {
+    /// Render a type for documentation and editor signatures.
+    pub fn type_surface(&self, t: Idx<TypeExprData>) -> String {
+        let td = &self.types[t];
+        let base = match &td.kind {
+            TypeExprKind::Any => "any".to_string(),
+            TypeExprKind::Unit => "()".to_string(),
+            TypeExprKind::String => "string".to_string(),
+            TypeExprKind::Int => "int".to_string(),
+            TypeExprKind::Uint => "uint".to_string(),
+            TypeExprKind::Float => "float".to_string(),
+            TypeExprKind::F64 => "f64".to_string(),
+            TypeExprKind::F32 => "f32".to_string(),
+            TypeExprKind::Bool => "bool".to_string(),
+            TypeExprKind::Ref(inner) => format!("ref {}", self.type_surface(*inner)),
+            TypeExprKind::Hole(..) => "?".to_string(),
+            TypeExprKind::Ident(id) => id.name.to_string(),
+            TypeExprKind::Path(path) => {
+                let root = if path.from_root { "::" } else { "" };
+                format!(
+                    "{root}{}",
+                    path.segments
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("::")
+                )
+            }
+            TypeExprKind::Array(inner) => format!("[{}]", self.type_surface(*inner)),
+            TypeExprKind::AppPath { ctor, args } => {
+                let root = if ctor.from_root { "::" } else { "" };
+                format!(
+                    "{}{}<{}>",
+                    root,
+                    ctor.segments
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("::"),
+                    args.iter()
+                        .map(|&a| self.type_surface(a))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+            TypeExprKind::Tuple(ts) => format!(
+                "({})",
+                ts.iter()
+                    .map(|&t| self.type_surface(t))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            TypeExprKind::App { ctor, args } if args.is_empty() => ctor.name.to_string(),
+            TypeExprKind::App { ctor, args } => format!(
+                "{}<{}>",
+                ctor.name,
+                args.iter()
+                    .map(|&a| self.type_surface(a))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            TypeExprKind::Function { params, ret } => format!(
+                "({}) -> {}",
+                params
+                    .iter()
+                    .map(|&p| self.type_surface(p))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                self.type_surface(*ret)
+            ),
+        };
+        if td.is_nullable {
+            if matches!(td.kind, TypeExprKind::Ref(_)) {
+                format!("({base})?")
+            } else {
+                format!("{base}?")
+            }
+        } else {
+            base
+        }
     }
 }
