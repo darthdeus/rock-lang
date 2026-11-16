@@ -273,8 +273,6 @@ pub enum ExprKind {
     Assign {
         target: Idx<ExprData>,
         value: Idx<ExprData>,
-        /// `None` for `=`; `Some(op)` for compound `+= -= *= /=`.
-        compound_op: Option<TokenKind>,
     },
 
     /// `return [expr]` / `break` / `continue` / `yield [expr]` in value

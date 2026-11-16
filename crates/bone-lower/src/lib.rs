@@ -2135,33 +2135,10 @@ pub(crate) fn lower_expr_value(
             }
         }
 
-        ExprKind::Assign {
-            target,
-            value,
-            compound_op,
-            ..
-        } => {
+        ExprKind::Assign { target, value } => {
             let target = lower_expr(ctx, a, body, scope, a.e(target))?;
             let value = lower_expr(ctx, a, body, scope, a.e(value))?;
-
-            if let Some(op_tok) = compound_op {
-                let op_fn = op_tok.overloadable_binop_fn().ok_or_else(|| {
-                    CompilerError::new_with_label(
-                        e.span,
-                        format!("Unsupported compound assignment operator `{}`", op_tok),
-                    )
-                })?;
-
-                let (_, family) = ctx.resolve_callee_family(ustr(op_fn), e.span)?;
-                Expr::CompoundAssign {
-                    target,
-                    op_fn: ustr(op_fn),
-                    value,
-                    family,
-                }
-            } else {
-                Expr::Assign { target, value }
-            }
+            Expr::Assign { target, value }
         }
 
         ExprKind::Match { scrutinee, arms } => {

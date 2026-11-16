@@ -3165,7 +3165,6 @@ impl<'a> Parser<'a> {
                 ExprKind::Assign {
                     target: left,
                     value: right,
-                    compound_op: None,
                 },
             );
         }

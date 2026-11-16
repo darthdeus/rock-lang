@@ -1773,20 +1773,8 @@ impl<'a> Printer<'a> {
                 None => Doc::text("yield"),
             },
 
-            ExprKind::Assign {
-                target,
-                value,
-                compound_op,
-            } => {
-                let sym = match compound_op {
-                    Some(o) => binop_str(o),
-                    None => "=".to_string(),
-                };
-                Doc::concat([
-                    self.expr(*target),
-                    Doc::text(format!(" {sym} ")),
-                    self.expr(*value),
-                ])
+            ExprKind::Assign { target, value } => {
+                Doc::concat([self.expr(*target), Doc::text(" = "), self.expr(*value)])
             }
 
             ExprKind::Match { scrutinee, arms } => self.match_expr(*scrutinee, arms, data.span),

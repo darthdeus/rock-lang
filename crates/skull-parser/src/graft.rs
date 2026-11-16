@@ -598,14 +598,9 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
                 op_span: *op_span,
                 right: self.expr(*right),
             },
-            ExprKind::Assign {
-                target,
-                value,
-                compound_op,
-            } => ExprKind::Assign {
+            ExprKind::Assign { target, value } => ExprKind::Assign {
                 target: self.expr(*target),
                 value: self.expr(*value),
-                compound_op: *compound_op,
             },
             ExprKind::ArrayLiteral(xs) => {
                 ExprKind::ArrayLiteral(xs.iter().map(|x| self.expr(*x)).collect())
