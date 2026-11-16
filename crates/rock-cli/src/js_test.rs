@@ -510,7 +510,7 @@ fn js_run_applicable_tests(
         .collect();
 
     let program = build_node_program(&shared_defs, &meta, shared_has_code_refs);
-    let timeout = Some(std::time::Duration::from_secs(15));
+    let timeout = std::time::Duration::from_secs(15);
     let run = match crate::js_runner::run_node_code_with_timeout(&program, timeout) {
         Ok(r) => r,
         Err(e) => {
