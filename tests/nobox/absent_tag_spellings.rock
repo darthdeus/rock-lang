@@ -27,6 +27,16 @@ global H: Opt = Opt { pos: NV2 { x: 1.0, y: 2.0 }, a: 3.0 }
     assert(a == b)
 }
 
+// A map stores its value's leaves in columns as they arrive, so the read-back
+// tags keep their spelling and the comparison has to agree on absence.
+@test fn map_column_reads_compare_equal_across_spellings() {
+    let m: Map<string, Opt> = map_new()
+    m.insert("call", Opt { pos: absent(), a: 3.0 })
+    m.insert("global", G)
+    assert(m.get("call") == m.get("global"))
+    assert(m.get("call") == G)
+}
+
 // GC-table storage: an opaque field keeps the box from flattening.
 value Named { pos: NV2?, name: string }
 global NG: Named = Named { pos: null, name: "n" }

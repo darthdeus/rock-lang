@@ -39,11 +39,23 @@ impl<'a> Builder<'a> {
         shape: &ValueShape,
     ) -> Result<Idx<Inst>, CompilerError> {
         let lhs_repr = self.lower_expr_repr(lhs)?;
-        let lhs_leaves =
+        let mut lhs_leaves =
             self.repr_to_storage_leaves(&lhs_repr, shape, "value equality left operand")?;
         let rhs_repr = self.lower_expr_repr(rhs)?;
-        let rhs_leaves =
+        let mut rhs_leaves =
             self.repr_to_storage_leaves(&rhs_repr, shape, "value equality right operand")?;
+        // A nested child's presence tag spells absence `false` on the scalar ABI
+        // and `nil` once read back from storage, so tags compare by truth.
+        let top = usize::from(shape.nullable);
+        for (i, tag) in super::shape::value_leaf_presence_flags(shape)
+            .into_iter()
+            .enumerate()
+        {
+            if tag {
+                lhs_leaves[top + i] = self.emit_cur(Inst::Not(lhs_leaves[top + i]));
+                rhs_leaves[top + i] = self.emit_cur(Inst::Not(rhs_leaves[top + i]));
+            }
+        }
         let equal = if shape.nullable && self.scx.target() == bone_core::hir::FnBackend::Lua {
             let left_absent = self.emit_cur(Inst::Not(lhs_leaves[0]));
             let right_absent = self.emit_cur(Inst::Not(rhs_leaves[0]));
