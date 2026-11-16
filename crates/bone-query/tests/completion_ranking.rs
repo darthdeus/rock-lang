@@ -108,11 +108,18 @@ fn expected_type_orders_candidates() {
              fn probe() {\n  run(PassX { blend: repl<|> })\n}\n",
             "BlendModeX::Replace < replace",
         ),
+        // The shorter plain fn wins without `await`; `await` flips the pair.
+        (
+            "shorter plain fn first without await",
+            "co fn frame_co() -> Coroutine<int> {\n  yield 1\n}\nfn frag() -> int { 0 }\n\
+             co fn t() -> Coroutine<int> {\n  let x = fr<|>\n  yield 1\n}\n",
+            "frag < frame_co",
+        ),
         (
             "coroutine fn first after await",
-            "co fn frame_co() -> Coroutine<int> {\n  yield 1\n}\nfn frame() {}\n\
+            "co fn frame_co() -> Coroutine<int> {\n  yield 1\n}\nfn frag() -> int { 0 }\n\
              co fn t() -> Coroutine<int> {\n  await fr<|>\n}\n",
-            "frame_co < frame",
+            "frame_co < frag",
         ),
         // Ranking runs bone's `coerce`, so call-compatible types with different
         // renders still take the expected-type bucket.

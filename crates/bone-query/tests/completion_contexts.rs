@@ -1329,12 +1329,6 @@ fn contexts_order_candidates() {
             "E::NotGround < event_log",
         ),
         (
-            "coroutine fn first after await",
-            "co fn frame(n: int) -> Coroutine<int> {\n  yield 0\n}\n\
-             fn fragment(n: int) -> int { n }\nco fn g() -> Coroutine<int> {\n  await fr<|>\n}\n",
-            "frame < fragment",
-        ),
-        (
             "concrete Entity payload above the bare Entity",
             "struct Mob { health: int }\nco fn mob_attack_co(e: <|>) -> Coroutine<int> {\n  yield 1\n}\n",
             "Entity<Mob> < Entity",
