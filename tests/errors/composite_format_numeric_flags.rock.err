@@ -6,6 +6,7 @@
 //! Tags: interpolation, format-specifier, composite
 
 //=== TEST CASE: composite_explicit_sign_Rejected ===
+//! expect: skull-mir: lowering gap: interpolation format specifier (grouping / fill / center)
 struct P { x: int }
 
 fn main() {
@@ -14,6 +15,7 @@ fn main() {
 }
 
 //=== TEST CASE: composite_zero_pad_Rejected ===
+//! expect: skull-mir: lowering gap: interpolation format specifier (grouping / fill / center)
 struct P { x: int }
 
 fn main() {
@@ -22,6 +24,7 @@ fn main() {
 }
 
 //=== TEST CASE: composite_grouping_Rejected ===
+//! expect: skull-mir: lowering gap: interpolation format specifier (grouping / fill / center)
 struct P { x: int }
 
 fn main() {
@@ -30,6 +33,7 @@ fn main() {
 }
 
 //=== TEST CASE: array_zero_pad_Rejected ===
+//! expect: skull-mir: lowering gap: interpolation format specifier (grouping / fill / center)
 fn main() {
     let xs = [1, 2]
     print("{xs:08}")   // ERROR: zero-pad is meaningless on a structural rendering

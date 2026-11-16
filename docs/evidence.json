@@ -1209,5 +1209,262 @@
       "output": "2/2 @tests passed \\(0 failed, 0 skipped, 0 not for js\\)"
     }
   ]
+},
+{
+  "id": "annotation-position-rejection-reasons",
+  "statement": "Thirteen annotation-position cases assert registry reasons for unknown names, wrong positions and invalid arguments; accepted controls execute on LuaJIT and JS.",
+  "kind": "test strength",
+  "limit": "CPU marker admission does not verify shader semantics. Two ignored tests are excluded from executed counts; this is not a complete annotation registry audit.",
+  "sources": [
+    {
+      "path": "crates/bone-core/src/annotations.rs",
+      "anchor": "fn validate_one("
+    },
+    {
+      "path": "docs/annotation-position-rejections.md",
+      "anchor": "Thirteen existing cases"
+    }
+  ],
+  "checks": [
+    {
+      "command": [
+        "python3",
+        "perf/evidence/check_operator_rejections.py",
+        "--fixture",
+        "tests/errors/annotations/field_position.rock.err",
+        "--cases",
+        "4"
+      ],
+      "exit": 0,
+      "output": "original: 4 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 4 failed; 0 todo\\nvalid-programs: 0 passed; 4 failed; 0 todo"
+    },
+    {
+      "command": [
+        "python3",
+        "perf/evidence/check_operator_rejections.py",
+        "--fixture",
+        "tests/errors/annotations/item_position.rock.err",
+        "--cases",
+        "5"
+      ],
+      "exit": 0,
+      "output": "original: 5 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 5 failed; 0 todo\\nvalid-programs: 0 passed; 5 failed; 0 todo"
+    },
+    {
+      "command": [
+        "python3",
+        "perf/evidence/check_operator_rejections.py",
+        "--fixture",
+        "tests/errors/annotations/param_position.rock.err",
+        "--cases",
+        "4"
+      ],
+      "exit": 0,
+      "output": "original: 4 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 4 failed; 0 todo\\nvalid-programs: 0 passed; 4 failed; 0 todo"
+    },
+    {
+      "command": [
+        "cargo",
+        "run",
+        "--quiet",
+        "--locked",
+        "-p",
+        "rock-cli",
+        "--bin",
+        "rock",
+        "--",
+        "test",
+        "tests/annotations/rejection_controls.rock",
+        "tests/annotations/registration.rock",
+        "tests/annotations/ignore.rock"
+      ],
+      "exit": 0,
+      "output": "11/11 @tests passed \\(0 failed\\)"
+    },
+    {
+      "command": [
+        "cargo",
+        "run",
+        "--quiet",
+        "--locked",
+        "-p",
+        "rock-cli",
+        "--bin",
+        "rock",
+        "--",
+        "test",
+        "tests/annotations/rejection_controls.rock",
+        "tests/annotations/registration.rock",
+        "tests/annotations/ignore.rock",
+        "--backend",
+        "js"
+      ],
+      "exit": 0,
+      "output": "11/11 @tests passed \\(0 failed, 0 skipped, 0 not for js\\)"
+    }
+  ]
+},
+{
+  "id": "duplicate-declaration-rejection-reasons",
+  "statement": "Nine duplicate member and type-name cases assert the colliding name and owner; distinct declarations and repeated names in separate owners execute on LuaJIT and JS.",
+  "kind": "test strength",
+  "limit": "Legacy syntax only, not v1 module/package scoping, cross-kind collisions or exhaustive namespace enforcement. The only cross-file rejection checks structs.",
+  "sources": [
+    {
+      "path": "crates/bone-semantic/src/semantic_passes.rs",
+      "anchor": "pub(crate) fn pass_register_forward_decls("
+    },
+    {
+      "path": "docs/duplicate-declaration-rejections.md",
+      "anchor": "Nine existing cases"
+    }
+  ],
+  "checks": [
+    {
+      "command": [
+        "python3",
+        "perf/evidence/check_operator_rejections.py",
+        "--fixture",
+        "tests/errors/symbols/duplicate_members.rock.err",
+        "--cases",
+        "5"
+      ],
+      "exit": 0,
+      "output": "original: 5 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 5 failed; 0 todo\\nvalid-programs: 0 passed; 5 failed; 0 todo"
+    },
+    {
+      "command": [
+        "python3",
+        "perf/evidence/check_operator_rejections.py",
+        "--fixture",
+        "tests/errors/symbols/duplicate_symbols.rock.err",
+        "--cases",
+        "4"
+      ],
+      "exit": 0,
+      "output": "original: 4 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 4 failed; 0 todo\\nvalid-programs: 0 passed; 4 failed; 0 todo"
+    },
+    {
+      "command": [
+        "cargo",
+        "run",
+        "--quiet",
+        "--locked",
+        "-p",
+        "rock-cli",
+        "--bin",
+        "rock",
+        "--",
+        "test",
+        "tests/symbols/rejection_controls.rock",
+        "tests/patterns/enum_record_variants.rock",
+        "tests/newtypes/basics.rock"
+      ],
+      "exit": 0,
+      "output": "56/56 @tests passed \\(0 failed\\)"
+    },
+    {
+      "command": [
+        "cargo",
+        "run",
+        "--quiet",
+        "--locked",
+        "-p",
+        "rock-cli",
+        "--bin",
+        "rock",
+        "--",
+        "test",
+        "tests/symbols/rejection_controls.rock",
+        "tests/patterns/enum_record_variants.rock",
+        "tests/newtypes/basics.rock",
+        "--backend",
+        "js"
+      ],
+      "exit": 0,
+      "output": "56/56 @tests passed \\(0 failed, 0 skipped, 0 not for js\\)"
+    }
+  ]
+},
+{
+  "id": "format-rejection-reasons",
+  "statement": "Nine composite flag and unsupported structural-payload cases assert their observed rejection reasons; nearby accepted formatting controls execute on LuaJIT and JS.",
+  "kind": "test strength",
+  "limit": "The four numeric-flag cases share a broad lowering-gap diagnostic. Removing only the offending flag was checked during the audit; these checks do not establish all format rules or improve that diagnostic.",
+  "sources": [
+    {"path": "docs/format-rejections.md", "anchor": "Nine existing cases"},
+    {
+      "path": "crates/skull-mir/src/lower/interp.rs",
+      "anchor": "pub(crate) fn unprintable_error("
+    }
+  ],
+  "checks": [
+    {
+      "command": [
+        "python3",
+        "perf/evidence/check_operator_rejections.py",
+        "--fixture",
+        "tests/errors/composite_format_numeric_flags.rock.err",
+        "--cases",
+        "4"
+      ],
+      "exit": 0,
+      "output": "original: 4 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 4 failed; 0 todo\\nvalid-programs: 0 passed; 4 failed; 0 todo"
+    },
+    {
+      "command": [
+        "python3",
+        "perf/evidence/check_operator_rejections.py",
+        "--fixture",
+        "tests/errors/enum_format_unsupported_payload.rock.err",
+        "--cases",
+        "5"
+      ],
+      "exit": 0,
+      "output": "original: 5 passed; 0 failed; 0 todo\\nwrong-diagnostic: 0 passed; 5 failed; 0 todo\\nvalid-programs: 0 passed; 5 failed; 0 todo"
+    },
+    {
+      "command": [
+        "cargo",
+        "run",
+        "--quiet",
+        "--locked",
+        "-p",
+        "rock-cli",
+        "--bin",
+        "rock",
+        "--",
+        "test",
+        "tests/strings/format_specifier_adversarial.rock",
+        "tests/strings/enum_format.rock",
+        "tests/strings/format_rejection_controls.rock",
+        "tests/strings/format_grouping.rock"
+      ],
+      "exit": 0,
+      "output": "84/84 @tests passed \\(0 failed\\)"
+    },
+    {
+      "command": [
+        "cargo",
+        "run",
+        "--quiet",
+        "--locked",
+        "-p",
+        "rock-cli",
+        "--bin",
+        "rock",
+        "--",
+        "test",
+        "tests/strings/format_specifier_adversarial.rock",
+        "tests/strings/enum_format.rock",
+        "tests/strings/format_rejection_controls.rock",
+        "tests/strings/format_grouping.rock",
+        "--backend",
+        "js"
+      ],
+      "exit": 0,
+      "output": "84/84 @tests passed \\(0 failed, 0 skipped, 0 not for js\\)"
+    }
+  ]
 }
 ]

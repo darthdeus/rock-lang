@@ -5,6 +5,7 @@
 //! Tags: annotations, registry, field
 
 //=== TEST CASE: unknown_annotation_name_on_field_Generic ===
+//! expect: unknown annotation `@totally_unknown_anno`
 // Unknown name on a struct field -> reject.
 struct Widget {
     @totally_unknown_anno
@@ -14,7 +15,8 @@ struct Widget {
 fn main() { print("{Widget { width: 4 }.width}") }
 
 //=== TEST CASE: disallowed_position_on_field_Generic ===
-// `@nomangle` is a fn-item annotation; on a field it is a
+//! expect: annotation `@nomangle` is not allowed on a struct field -- it applies to a fn or a struct
+// `@nomangle` applies to fn and struct items; on a field it is a
 // disallowed-position violation.
 struct Panel {
     @nomangle
@@ -24,6 +26,7 @@ struct Panel {
 fn main() { print("{Panel { height: 5 }.height}") }
 
 //=== TEST CASE: bad_arity_on_field_Generic ===
+//! expect: annotation `@flat` takes no arguments
 // `@flat` is a nullary varying marker; supplying an arg is an arity
 // violation.
 value Vertex {
@@ -34,6 +37,7 @@ value Vertex {
 fn main() { print("{Vertex { layer: 6 }.layer}") }
 
 //=== TEST CASE: attr_on_field_Generic ===
+//! expect: annotation `@attr` is not allowed on a struct field -- it applies to a fn parameter
 // `@attr` is a param-only role marker; on a struct field it is a
 // disallowed-position violation.
 value Quad {

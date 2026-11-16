@@ -1,0 +1,21 @@
+// Accepted neighbors of composite flag and structural-payload rejections.
+
+struct P { x: int }
+value ScalarBag { x: int, n: int }
+
+@test
+fn composite_without_numeric_flags() {
+    let p = P { x: 1 }
+    // These keep the widths from the rejected sign and zero-pad cases.
+    assert_eq("{p:12}", " P {{ x = 1 }}")
+    assert_eq("{p:}", "P {{ x = 1 }}")
+    let xs = [1, 2]
+    assert_eq("{xs:8}", "Vec {{ 1, 2 }}")
+}
+
+@test
+fn top_level_value_record_with_scalar_fields() {
+    let b = ScalarBag { x: 1, n: 5 }
+    assert_eq("{b}", "ScalarBag {{ x: 1, n: 5 }}")
+    assert_eq(tostring(b), "ScalarBag {{ x: 1, n: 5 }}")
+}

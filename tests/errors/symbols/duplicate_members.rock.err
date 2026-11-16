@@ -2,6 +2,7 @@
 //! Tags: symbols, duplicates, structs, enums
 
 //=== TEST CASE: duplicate_struct_field_Generic ===
+//! expect: Duplicate field `x` in struct `Foo`
 struct Foo {
     x: int,
     x: float
@@ -12,6 +13,7 @@ fn main() {
 }
 
 //=== TEST CASE: duplicate_value_struct_field_Generic ===
+//! expect: Duplicate field `x` in struct `P`
 value P {
     x: int,
     x: int
@@ -22,6 +24,7 @@ fn main() {
 }
 
 //=== TEST CASE: duplicate_enum_variant_Generic ===
+//! expect: Duplicate variant `Tick` in enum `Ev`
 enum Ev {
     Tick,
     Tick
@@ -32,6 +35,7 @@ fn main() {
 }
 
 //=== TEST CASE: duplicate_enum_variant_mixed_payload_Generic ===
+//! expect: Duplicate variant `Tick` in enum `Ev`
 enum Ev {
     Tick(int),
     Tick
@@ -42,6 +46,7 @@ fn main() {
 }
 
 //=== TEST CASE: duplicate_record_payload_field_Generic ===
+//! expect: Duplicate field `w` in variant `Rect` of enum `Shape`
 enum Shape {
     Rect { w: int, w: int },
     Dot

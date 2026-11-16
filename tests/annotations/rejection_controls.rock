@@ -1,0 +1,35 @@
+// Accepted positions and argument shapes adjacent to registry rejections.
+
+@nomangle
+struct NamedRecord {
+    count: int
+}
+
+@nomangle
+fn named_helper(x: int) -> int { x + 1 }
+
+@test
+fn test_nomangle_on_function_and_struct() {
+    let record = NamedRecord { count: named_helper(4) }
+    assert(record.count == 5)
+}
+
+value FlatRecord {
+    @flat
+    layer: int
+}
+
+@test
+fn test_nullary_flat_on_field() {
+    let record = FlatRecord { layer: 6 }
+    assert(record.layer == 6)
+}
+
+fn role_params(@attr a: int, @uniform b: int, @instance c: int, @size(32) d: int) -> int {
+    a + b + c + d
+}
+
+@test
+fn test_role_and_integer_size_params() {
+    assert(role_params(1, 2, 3, 4) == 10)
+}

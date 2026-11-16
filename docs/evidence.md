@@ -290,6 +290,28 @@ and bone-semantic suites pass 284 tests combined, and the existing 14 default
 and method rejection assertions still detect both mutations. The rejection
 inventory remains **255 unpinned of 527 cases**.
 
+## Annotation positions, duplicate declarations and formatting
+
+Three independent audits pin 31 existing cases:
+
+| Family | Cases strengthened | Accepted runtime controls |
+|---|---|---|
+| [Annotation positions](annotation-position-rejections.md) | 13: names, positions and argument shapes | 11 per backend; two ignored tests excluded from totals |
+| [Duplicate declarations](duplicate-declaration-rejections.md) | 9: member names and type names | 56 per backend; names can repeat under separate owners |
+| [Formatting](format-rejections.md) | 9: composite numeric flags and unsupported structural payloads | 84 per backend, including flag-free neighbors |
+
+All originals reject for their stated reasons. Wrong-diagnostic and valid-program
+mutations fail every assertion. Removing the offending annotation admits all 13
+annotation programs; removing only the numeric flag admits all four composite
+format programs. The numeric-flag diagnostic remains a broad lowering-gap
+message, so the controls and source review matter to its interpretation.
+
+The full error scan passes 521 with six existing TODOs. The inventory is now
+**224 unpinned of 527 cases**. JS reports no skipped or not-for-JS cases in these
+runtime controls. Annotation admission does not establish shader semantics,
+and legacy duplicate-name examples do not establish v1 module scoping. No
+production compiler code changed.
+
 ## Useful measurements
 
 | Measure | Use | Interpretation boundary |
@@ -316,8 +338,8 @@ audited by this work.
 
 The breadth survey also found a stale LSP fixture warning: the parser already
 rejects unknown expectation lines. Its existing malformed-block regression
-passes; the documentation now matches that behavior. The ledger contains 32
-bounded records, not 32 comprehensively verified subsystems.
+passes; the documentation now matches that behavior. The ledger contains 35
+bounded records, not 35 comprehensively verified subsystems.
 
 Extend the evidence ledger alongside concrete repairs. Its checks establish
 bounded claims, not a percentage of language coverage or a launch certificate.

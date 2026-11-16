@@ -4,6 +4,7 @@
 //! Tags: interpolation, enum, formatting
 
 //=== TEST CASE: enum_identity_struct_payload_interp_Generic ===
+//! expect: cannot format this value: `Body` is an identity struct
 struct Body { hp: int }
 enum Owner { Of(Body), Nobody }
 
@@ -13,6 +14,7 @@ fn main() {
 }
 
 //=== TEST CASE: enum_vec_payload_tostring_Generic ===
+//! expect: cannot format this value: `[int]` is a container
 enum Bag { Items([int]), Empty }
 
 fn main() {
@@ -20,6 +22,7 @@ fn main() {
 }
 
 //=== TEST CASE: enum_callback_payload_interp_Generic ===
+//! expect: cannot format this value: `fn() -> int` is a callback
 enum Hook { Call(fn() -> int), Idle }
 
 fn main() {
@@ -28,6 +31,7 @@ fn main() {
 }
 
 //=== TEST CASE: value_record_with_vec_field_in_enum_Generic ===
+//! expect: cannot format this value: `[int]` is a container
 value Wrap { xs: [int] }
 enum Holder { W(Wrap) }
 
@@ -36,6 +40,7 @@ fn main() {
 }
 
 //=== TEST CASE: value_record_with_vec_field_top_level_Generic ===
+//! expect: cannot format this value: `[int]` is a container
 value Bag { xs: [int], n: int }
 
 fn main() {

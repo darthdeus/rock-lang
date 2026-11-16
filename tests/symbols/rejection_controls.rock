@@ -1,0 +1,54 @@
+// Duplicate names are checked within their declaration owner.
+struct MemberControl { x: int, y: float }
+value ValueMemberControl { x: int, y: int }
+
+enum MemberEvents {
+    Tick,
+    Ticks(int),
+    Rect { w: int, h: int },
+    OtherRect { w: int },
+}
+
+enum OtherMemberEvents { Tick(int) }
+
+newtype SymbolId(int)
+newtype SymbolIds(string)
+
+@test
+fn distinct_fields_and_shared_names_in_separate_structs() {
+    let record = MemberControl { x: 2, y: 3.5 }
+    let value = ValueMemberControl { x: 5, y: 7 }
+    assert_eq(record.x, 2)
+    assert_eq(record.y, 3.5)
+    assert_eq(value.x + value.y, 12)
+}
+
+@test
+fn distinct_variants_and_shared_names_in_separate_owners() {
+    assert(MemberEvents::Tick == MemberEvents::Tick)
+    match MemberEvents::Ticks(11) {
+        MemberEvents::Ticks(n) => assert_eq(n, 11),
+        _ => assert(false),
+    }
+    let rect = MemberEvents::Rect { w: 13, h: 17 }
+    match rect {
+        MemberEvents::Rect { w, h } => assert_eq(w + h, 30),
+        _ => assert(false),
+    }
+    let other_rect = MemberEvents::OtherRect { w: 19 }
+    match other_rect {
+        MemberEvents::OtherRect { w } => assert_eq(w, 19),
+        _ => assert(false),
+    }
+    match OtherMemberEvents::Tick(23) {
+        OtherMemberEvents::Tick(n) => assert_eq(n, 23),
+    }
+}
+
+@test
+fn distinct_nearby_newtype_names() {
+    let id = SymbolId(29)
+    let ids = SymbolIds("many")
+    assert_eq(id.0, 29)
+    assert_eq(ids.0, "many")
+}
