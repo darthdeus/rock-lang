@@ -125,6 +125,7 @@ mod intrinsics;
 mod lambda_static;
 mod leaf_form_invariant;
 mod line_directives;
+mod loop_bytecode;
 mod loop_scoped_locals;
 mod mangle_rename_hot_reload;
 mod modules_lifecycle;

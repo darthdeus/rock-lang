@@ -1,0 +1,82 @@
+// Loops whose every back edge must reach LuaJIT's LOOP instruction.
+
+// A continue nested under code that follows it.
+fn nested_continue(n: int) -> int {
+    let s = 0
+    let i = 0
+    while i < n {
+        i = i + 1
+        if i % 3 != 0 {
+            if i % 5 != 0 {
+                s = s + 2
+                continue
+            }
+        }
+        s = s + 1
+    }
+    return s
+}
+
+// An outer continue from inside an inner loop.
+fn outer_continue(n: int) -> int {
+    let s = 0
+    let i = 0
+    while i < n {
+        i = i + 1
+        let j = 0
+        while j < i {
+            j = j + 1
+            if j * 2 > i {
+                s = s + j
+                continue
+            }
+            if (i + j) % 4 == 0 { break }
+        }
+        s = s + 1
+    }
+    return s
+}
+
+// A loop inside a coroutine step that does not cross a yield.
+co fn sum_then_yield(n: int) -> Coroutine<int> {
+    let s = 0
+    let i = 0
+    while i < n {
+        i = i + 1
+        if i % 3 != 0 {
+            if i % 5 == 0 { continue }
+        }
+        s = s + i
+    }
+    yield s
+    yield s + 1
+}
+
+// A conditional yield whose resume lands mid-iteration: the loop has a
+// second entry, so the step stays a flat goto graph.
+co fn sometimes(n: int) -> Coroutine<int> {
+    let s = 0
+    let i = 0
+    while i < n {
+        i = i + 1
+        if i % 3 == 0 { continue }
+        s = s + i % 7
+        if i % 10 == 0 { yield s }
+        s = s % 1000003
+    }
+}
+
+fn main() {
+    print(nested_continue(100))
+    print(outer_continue(30))
+    let a = sum_then_yield(100)
+    print(a.resume() ?? -1)
+    print(a.resume() ?? -1)
+    print(a.resume() ?? -1)
+    let b = sometimes(35)
+    let v: int? = b.resume()
+    while v != null {
+        print(v)
+        v = b.resume()
+    }
+}

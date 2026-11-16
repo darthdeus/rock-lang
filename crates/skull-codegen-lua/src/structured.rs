@@ -9,15 +9,16 @@
 //! the follower. Every local but a `for` loop's is declared at the top of the
 //! body, so no such jump enters the scope of one.
 //!
-//! Any other loop stays a label at its header and a backward `goto` per
-//! back edge: LuaJIT starts recording at the instruction a backward `goto`
+//! Any other loop stays a label at its header and one backward `goto` ending
+//! its body: LuaJIT starts recording at the instruction a backward `goto`
 //! compiles to, and a `while true do` header instead records from the top,
-//! which aborts several times more traces while they warm up. An edge back
-//! to a `for` header from deeper than its last statement is a `goto` to a
-//! label ending the loop body.
+//! which aborts several times more traces while they warm up. LuaJIT emits
+//! that LOOP instruction only for a `goto` in the label's own block, so a
+//! back edge from deeper than the body's last statement is a `goto` to a
+//! label ending the body, as it is for a `for` loop.
 //!
 //! One pass prints the body: every `goto` to a follower or to the end of a
-//! `for` body is forward, so whether its label is needed is known by the
+//! loop body is forward, so whether its label is needed is known by the
 //! time the label would be printed.
 
 use super::*;
@@ -377,7 +378,10 @@ impl Walk<'_, '_> {
         } else {
             self.em.write_label(self.out, Label::Header, h);
             self.with_followers(&inside, Follow::Cont(h), Inner::Node(h));
-            if self.reaches_end.get() {
+            if self.cont_ref[bx(h)] {
+                self.em.write_label(self.out, Label::Continue, h);
+            }
+            if self.reaches_end.get() || self.cont_ref[bx(h)] {
                 self.goto(Label::Header, h);
             }
             0
@@ -566,12 +570,7 @@ impl Walk<'_, '_> {
                 return;
             }
             if t == h || self.sh.counted_latch(h) == Some(t) {
-                let kind = if counted {
-                    Label::Continue
-                } else {
-                    Label::Header
-                };
-                self.goto(kind, h);
+                self.goto(Label::Continue, h);
                 return;
             }
         }
