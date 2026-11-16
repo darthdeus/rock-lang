@@ -2017,21 +2017,18 @@ pub(crate) fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
         let files = crate::bone_backend::session_files(&sources);
 
         let t = Instant::now();
-        let mut reinferred: Vec<(
-            bone_semantic::prelude::ModuleId,
-            bone_semantic::hir::BodyOwner,
-        )> = Vec::new();
-        let mut full = false; // interface/structural change -> rebuild cache
-        let mut update_failed = false;
-
-        match session {
+        let sync = match session {
             None => match crate::bone_backend::bone_session_for_emission(
                 files.clone(),
                 std::path::Path::new(path),
             ) {
                 Ok(s) => {
                     *session = Some(s);
-                    full = true; // first build: populate the cache
+                    // First build: populate the cache.
+                    crate::bone_backend::SessionSync {
+                        structural: true,
+                        ..Default::default()
+                    }
                 }
                 Err(e) => {
                     eprintln!("{}", e.render(&sources));
@@ -2039,41 +2036,13 @@ pub(crate) fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
                     return;
                 }
             },
-            Some(s) => {
-                for f in &files {
-                    match s.update_file(&f.path, &f.text) {
-                        Ok(result) => {
-                            if matches!(
-                                result.tier,
-                                bone_incremental::session::UpdateTier::Interface
-                                    | bone_incremental::session::UpdateTier::Scope
-                                    | bone_incremental::session::UpdateTier::FullUser
-                            ) {
-                                full = true;
-                            }
-                            reinferred.extend(result.reinferred);
-                        }
-                        Err(e) => {
-                            update_failed = true;
-                            eprintln!("{}", e.render(&sources));
-                        }
-                    }
-                }
-                let gone: Vec<String> = s
-                    .tracked_paths()
-                    .into_iter()
-                    .filter(|p| !files.iter().any(|f| f.path == *p))
-                    .map(|p| p.to_string())
-                    .collect();
-                for file_path in gone {
-                    full = true; // removed file shifts module ids
-                    if let Err(e) = s.remove_file(&file_path) {
-                        update_failed = true;
-                        eprintln!("{}", e.render(&sources));
-                    }
-                }
-            }
-        }
+            Some(s) => crate::bone_backend::sync_session(s, &files, &sources),
+        };
+        let crate::bone_backend::SessionSync {
+            reinferred,
+            structural: full,
+            failed: update_failed,
+        } = sync;
         let check_ms = t.elapsed().as_secs_f64() * 1000.0;
 
         let Some(s) = session else { return };
