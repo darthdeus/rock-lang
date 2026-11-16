@@ -1,68 +1,45 @@
 // Typed ptr fields: NativeBuffer<T>.ptr is Ptr<T>, sized variants use
-// distinct PtrU8/PtrI8/PtrU16/PtrI16/PtrU32. Closes the Rock-side FFI hole
-// where .ptr was previously just `any`. Passing the wrong typed pointer to
-// an extern is a compile error — proven out-of-band, this file covers the
-// happy path + roundtrip.
+// distinct PtrU8/PtrI8/PtrU16/PtrI16/PtrU32. Passing the wrong typed pointer
+// to an extern is a compile error; this file covers the happy path.
 
 @test
-fn ptr_float_is_typed() {
-    let buf = native_buffer_float(4)
-    let p: Ptr<float> = buf.ptr
-    buf[0] = 3.14
-    assert(buf[0] > 3.13 && buf[0] < 3.15)
+fn ptr_fields_are_typed() {
+    let f = native_buffer_float(4)
+    let pf: Ptr<float> = f.ptr
+    f[0] = 3.14
+    assert(f[0] > 3.13 && f[0] < 3.15)
+
+    let i = native_buffer_int(4)
+    let pi: Ptr<int> = i.ptr
+    i[0] = 42
+    assert(i[0] == 42)
+
+    let u8 = native_buffer_u8(4)
+    let pu8: PtrU8 = u8.ptr
+    u8[0] = 200
+    assert(u8[0] == 200)
+
+    let i8 = native_buffer_i8(4)
+    let pi8: PtrI8 = i8.ptr
+    i8[0] = -100
+    assert(i8[0] == -100)
+
+    let u16 = native_buffer_u16(4)
+    let pu16: PtrU16 = u16.ptr
+    u16[0] = 65000
+    assert(u16[0] == 65000)
+
+    let i16 = native_buffer_i16(4)
+    let pi16: PtrI16 = i16.ptr
+    i16[0] = -32000
+    assert(i16[0] == -32000)
+
+    let u32 = native_buffer_u32(4)
+    let pu32: PtrU32 = u32.ptr
+    u32[0] = 4000000000
+    assert(u32[0] == 4000000000)
 }
 
-@test
-fn ptr_int_is_typed() {
-    let buf = native_buffer_int(4)
-    let p: Ptr<int> = buf.ptr
-    buf[0] = 42
-    assert(buf[0] == 42)
-}
-
-@test
-fn ptr_u8_is_typed() {
-    let buf = native_buffer_u8(4)
-    let p: PtrU8 = buf.ptr
-    buf[0] = 200
-    assert(buf[0] == 200)
-}
-
-@test
-fn ptr_i8_is_typed() {
-    let buf = native_buffer_i8(4)
-    let p: PtrI8 = buf.ptr
-    buf[0] = -100
-    assert(buf[0] == -100)
-}
-
-@test
-fn ptr_u16_is_typed() {
-    let buf = native_buffer_u16(4)
-    let p: PtrU16 = buf.ptr
-    buf[0] = 65000
-    assert(buf[0] == 65000)
-}
-
-@test
-fn ptr_i16_is_typed() {
-    let buf = native_buffer_i16(4)
-    let p: PtrI16 = buf.ptr
-    buf[0] = -32000
-    assert(buf[0] == -32000)
-}
-
-@test
-fn ptr_u32_is_typed() {
-    let buf = native_buffer_u32(4)
-    let p: PtrU32 = buf.ptr
-    buf[0] = 4000000000
-    assert(buf[0] == 4000000000)
-}
-
-// Function parameter typing: a helper that accepts a Ptr<float> should
-// accept NativeBuffer<float>.ptr but reject Ptr<int> / PtrU8 / etc.
-// The positive case is tested here; rejection is compile-time.
 fn len_float(p: Ptr<float>, n: int) -> int { return n }
 
 @test

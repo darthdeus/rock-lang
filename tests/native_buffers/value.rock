@@ -4,8 +4,6 @@
 // takes many shapes (calls, field reads, `if`, defaults, side effects,
 // aliasing reads of the slot being written).
 
-@intrinsic @inline inline(lua) fn put(s: string) = "io.write(s)"
-
 value V2 {
     x: float,
     y: float,
@@ -45,19 +43,17 @@ fn make_v2(a: float, b: float) -> V2 {
 inline(lua) fn nb_get(b: NativeBuffer<V2>, i: int) -> V2 = "return b.ptr[i]"
 inline(lua) fn nb_set(b: NativeBuffer<V2>, i: int, v: V2) = "b.ptr[i] = v"
 
-@test(output = "3\n7\n11\n13", backends = "lua")
+@test(output = "3 7\n11 13", backends = "lua")
 fn test_native_buffer_value() {
     let buf = nb_v2_user(4)
     nb_set(buf, 0, V2 { x: 3, y: 7 })
     nb_set(buf, 1, V2 { x: 11, y: 13 })
 
     let a = nb_get(buf, 0)
-    print("{a.x.floor()}")
-    print("{a.y.floor()}")
+    print("{a.x.floor()} {a.y.floor()}")
 
     let b = nb_get(buf, 1)
-    print("{b.x.floor()}")
-    print("{b.y.floor()}")
+    print("{b.x.floor()} {b.y.floor()}")
 }
 
 // -- RHS shapes --
@@ -66,19 +62,17 @@ fn test_native_buffer_value() {
 // scalar ABI. The scalarized multi-return `(3, 7)` was truncated to its
 // first scalar at the cdata-write site (`buf.ptr[i] = 3`), crashing with
 // "cannot convert 'number' to 'struct N'".
-@test(output = "3\n7\n11\n13")
+@test(output = "3 7\n11 13")
 fn test_native_buffer_value_scalar_rhs() {
     let buf = nb_v2(2)
     buf[0] = make_v2(3.0, 7.0)
     buf[1] = make_v2(11.0, 13.0)
 
     let a = buf[0]
-    print("{a.x.floor()}")
-    print("{a.y.floor()}")
+    print("{a.x.floor()} {a.y.floor()}")
 
     let b = buf[1]
-    print("{b.x.floor()}")
-    print("{b.y.floor()}")
+    print("{b.x.floor()} {b.y.floor()}")
 }
 
 // A Rock fn call returning a value struct used as a nested field RHS.
@@ -87,18 +81,7 @@ fn test_call_value_rhs() {
     let buf = nb_pair(1)
     buf[0] = Pair { first: make_v2(1.0, 2.0), second: make_v2(3.0, 4.0) }
     let p = buf[0]
-    put("f.x=")
-    put("{p.first.x}")
-    put("\n")
-    put("f.y=")
-    put("{p.first.y}")
-    put("\n")
-    put("s.x=")
-    put("{p.second.x}")
-    put("\n")
-    put("s.y=")
-    put("{p.second.y}")
-    put("\n")
+    print("f.x={p.first.x}\nf.y={p.first.y}\ns.x={p.second.x}\ns.y={p.second.y}")
 }
 
 // The nested-value field RHS is a field access on a value-cdata local.
@@ -109,18 +92,7 @@ fn test_field_access_rhs() {
     // RHS reads both halves of `p`; each is a FieldAccess of a value-cdata local.
     buf[0] = Pair { first: p.first, second: p.first }
     let r = buf[0]
-    put("f.x=")
-    put("{r.first.x}")
-    put("\n")
-    put("f.y=")
-    put("{r.first.y}")
-    put("\n")
-    put("s.x=")
-    put("{r.second.x}")
-    put("\n")
-    put("s.y=")
-    put("{r.second.y}")
-    put("\n")
+    print("f.x={r.first.x}\nf.y={r.first.y}\ns.x={r.second.x}\ns.y={r.second.y}")
 }
 
 // A let-bound cdata local of value-struct type used as a field inside a
@@ -131,18 +103,7 @@ fn test_local_observed_at_eval_time() {
     let v = V2 { x: 1.0, y: 2.0 }
     buf[0] = Pair { first: v, second: V2 { x: 10.0, y: 20.0 } }
     let p = buf[0]
-    put("f.x=")
-    put("{p.first.x}")
-    put("\n")
-    put("f.y=")
-    put("{p.first.y}")
-    put("\n")
-    put("s.x=")
-    put("{p.second.x}")
-    put("\n")
-    put("s.y=")
-    put("{p.second.y}")
-    put("\n")
+    print("f.x={p.first.x}\nf.y={p.first.y}\ns.x={p.second.x}\ns.y={p.second.y}")
 }
 
 // An `if` expression as a scalar field RHS.
@@ -155,11 +116,7 @@ fn test_if_in_field_rhs() {
         y: if flag { 99.0 } else { -1.0 },
     }
     let v = buf[0]
-    put("x=")
-    put("{v.x}")
-    put("\n")
-    put("y=")
-    put("{v.y}")
+    print("x={v.x}\ny={v.y}")
 }
 
 // An `if` expression returning a value struct as a nested field RHS.
@@ -172,18 +129,7 @@ fn test_if_nested_value_field() {
         second: if cond { V2 { x: 99.0, y: 99.0 } } else { V2 { x: 0.0, y: 0.0 } },
     }
     let r = buf[0]
-    put("f.x=")
-    put("{r.first.x}")
-    put("\n")
-    put("f.y=")
-    put("{r.first.y}")
-    put("\n")
-    put("s.x=")
-    put("{r.second.x}")
-    put("\n")
-    put("s.y=")
-    put("{r.second.y}")
-    put("\n")
+    print("f.x={r.first.x}\nf.y={r.first.y}\ns.x={r.second.x}\ns.y={r.second.y}")
 }
 
 // -- Nesting --
@@ -210,14 +156,7 @@ fn test_three_level_nest() {
         },
     }
     let q = buf[0]
-    put("{q.lo.a.x}"); put(",")
-    put("{q.lo.a.y}"); put(",")
-    put("{q.lo.b.x}"); put(",")
-    put("{q.lo.b.y}"); put(",")
-    put("{q.hi.a.x}"); put(",")
-    put("{q.hi.a.y}"); put(",")
-    put("{q.hi.b.x}"); put(",")
-    put("{q.hi.b.y}")
+    print("{q.lo.a.x},{q.lo.a.y},{q.lo.b.x},{q.lo.b.y},{q.hi.a.x},{q.hi.a.y},{q.hi.b.x},{q.hi.b.y}")
 }
 
 // -- Aliasing --
@@ -232,12 +171,7 @@ fn test_aliasing_swap() {
     buf[0] = V2 { x: buf[0].y, y: buf[0].x }
 
     let v = buf[0]
-    put("x=")
-    put("{v.x}")
-    put("\n")
-    put("y=")
-    put("{v.y}")
-    put("\n")
+    print("x={v.x}\ny={v.y}")
 }
 
 // A nested literal field reads from the slot being written; all leaves
@@ -251,18 +185,7 @@ fn test_swap_via_nested() {
         second: V2 { x: buf[0].first.x, y: buf[0].first.y },
     }
     let r = buf[0]
-    put("f.x=")
-    put("{r.first.x}")
-    put("\n")
-    put("f.y=")
-    put("{r.first.y}")
-    put("\n")
-    put("s.x=")
-    put("{r.second.x}")
-    put("\n")
-    put("s.y=")
-    put("{r.second.y}")
-    put("\n")
+    print("f.x={r.first.x}\nf.y={r.first.y}\ns.x={r.second.x}\ns.y={r.second.y}")
 }
 
 // RHS reads from a different buffer's slot.
@@ -274,12 +197,7 @@ fn test_cross_buffer() {
     b[0] = V2 { x: 5.0, y: 8.0 }
     a[0] = V2 { x: b[0].y, y: b[0].x }
     let v = a[0]
-    put("x=")
-    put("{v.x}")
-    put("\n")
-    put("y=")
-    put("{v.y}")
-    put("\n")
+    print("x={v.x}\ny={v.y}")
 }
 
 // -- Generic and closure writers --
@@ -295,12 +213,7 @@ fn test_generic_buffer_write() {
     let buf = nb_v2(1)
     write_first(buf, V2 { x: 7.0, y: 11.0 })
     let r = buf[0]
-    put("x=")
-    put("{r.x}")
-    put("\n")
-    put("y=")
-    put("{r.y}")
-    put("\n")
+    print("x={r.x}\ny={r.y}")
 }
 
 // The slot write happens inside a lambda that captures the buffer.
@@ -312,12 +225,7 @@ fn test_slot_write_in_lambda() {
     }
     writer()
     let r = buf[0]
-    put("x=")
-    put("{r.x}")
-    put("\n")
-    put("y=")
-    put("{r.y}")
-    put("\n")
+    print("x={r.x}\ny={r.y}")
 }
 
 // -- Evaluation order and side effects --
@@ -329,25 +237,17 @@ fn record_call(tag: string) -> float {
     return 1.0
 }
 
-fn init_record() {
-    REC = ""
-}
-
-fn dump_record() -> string {
-    return REC
-}
-
 // Struct-literal field RHS evaluation follows source order, not
 // declaration order.
 @test(output = "y_first,x_second")
 fn test_source_order() {
-    init_record()
+    REC = ""
     let buf = nb_v2(1)
     buf[0] = V2 {
         y: record_call("y_first"),
         x: record_call("x_second"),
     }
-    put(dump_record())
+    print(REC)
 }
 
 global SEQ: int = 0
@@ -367,21 +267,7 @@ fn test_nested_literal_side_effect_order() {
         second: V2 { x: next_seq(), y: next_seq() },
     }
     let r = buf[0]
-    put("f.x=")
-    put("{r.first.x}")
-    put("\n")
-    put("f.y=")
-    put("{r.first.y}")
-    put("\n")
-    put("s.x=")
-    put("{r.second.x}")
-    put("\n")
-    put("s.y=")
-    put("{r.second.y}")
-    put("\n")
-    put("total=")
-    put("{SEQ}")
-    put("\n")
+    print("f.x={r.first.x}\nf.y={r.first.y}\ns.x={r.second.x}\ns.y={r.second.y}\ntotal={SEQ}")
 }
 
 global GROUP_ID: float = 0.0
@@ -391,49 +277,16 @@ fn next_group_id() -> float {
     return GROUP_ID
 }
 
-fn init_group_id() {
-    GROUP_ID = 0.0
-}
-
 // A multi-field group `V { x + y: expr }` evaluates the shared RHS once
 // and assigns the same value to every named field. If it ran twice,
 // x = 1 and y = 2.
-@test(output = "x=1\ny=1")
+@test(output = "x=1\ny=1\ncount=1")
 fn test_multi_field_group_evaluates_once() {
-    init_group_id()
+    GROUP_ID = 0.0
     let buf = nb_v2(1)
     buf[0] = V2 { x + y: next_group_id() }
     let v = buf[0]
-    put("x=")
-    put("{v.x}")
-    put("\n")
-    put("y=")
-    put("{v.y}")
-}
-
-global SE_COUNT: float = 0.0
-
-fn bump_counter() -> float {
-    SE_COUNT = SE_COUNT + 1.0
-    return SE_COUNT
-}
-
-fn init_counter() {
-    SE_COUNT = 0.0
-}
-
-fn read_counter() -> float {
-    return SE_COUNT
-}
-
-// The same multi-field group, counting RHS evaluations directly.
-@test(output = "count=1")
-fn test_multi_field_group_single_eval() {
-    init_counter()
-    let buf = nb_v2(1)
-    buf[0] = V2 { x + y: bump_counter() }
-    put("count=")
-    put("{read_counter()}")
+    print("x={v.x}\ny={v.y}\ncount={GROUP_ID}")
 }
 
 // -- Field defaults --
@@ -454,14 +307,7 @@ fn test_default_struct_literal() {
     let buf = nb_holder(1)
     buf[0] = Holder { b: 99.0 }
     let h = buf[0]
-    put("a.x=")
-    put("{h.a.x}")
-    put("\n")
-    put("a.y=")
-    put("{h.a.y}")
-    put("\n")
-    put("b=")
-    put("{h.b}")
+    print("a.x={h.a.x}\na.y={h.a.y}\nb={h.b}")
 }
 
 global COUNTER: int = 0
@@ -488,15 +334,7 @@ fn test_default_side_effect() {
     let buf = nb_tagged(1)
     buf[0] = Tagged { a: 42 }
     let v = buf[0]
-    put("a=")
-    put("{v.a}")
-    put("\n")
-    put("b=")
-    put("{v.b}")
-    put("\n")
-    put("c=")
-    put("{v.c}")
-    put("\n")
+    print("a={v.a}\nb={v.b}\nc={v.c}")
 }
 
 global TICK: int = 0
@@ -523,24 +361,13 @@ fn test_nested_default_side_effect() {
     let buf = nb_boxed(1)
     buf[0] = Boxed { n: 42 }
     let v = buf[0]
-    put("n=")
-    put("{v.n}")
-    put("\n")
-    put("px=")
-    put("{v.pos.x}")
-    put("\n")
-    put("py=")
-    put("{v.pos.y}")
-    put("\n")
-    put("tick=")
-    put("{TICK}")
-    put("\n")
+    print("n={v.n}\npx={v.pos.x}\npy={v.pos.y}\ntick={TICK}")
 }
 
 // -- Storing a value-struct local copies the cdata once, without re-packing it
 // field by field --
 
-@test(output = "3\n7\n3\n7")
+@test(output = "3 7\n3 7")
 fn test_native_buffer_cdata_local_write() {
     let buf = nb_v2(2)
     let v = make_v2(3.0, 7.0)
@@ -550,12 +377,10 @@ fn test_native_buffer_cdata_local_write() {
     buf[1] = v
 
     let a = buf[0]
-    print("{a.x.floor()}")
-    print("{a.y.floor()}")
+    print("{a.x.floor()} {a.y.floor()}")
 
     let b = buf[1]
-    print("{b.x.floor()}")
-    print("{b.y.floor()}")
+    print("{b.x.floor()} {b.y.floor()}")
 }
 
 // -- Nested value element --
@@ -581,7 +406,7 @@ fn make_rect(a: float, b: float, c: float, d: float) -> Rect {
     return Rect { tl: V2 { x: a, y: b }, br: V2 { x: c, y: d } }
 }
 
-@test(output = "1\n2\n3\n4\n5\n6\n7\n8")
+@test(output = "1 2 3 4\n5 6 7 8")
 fn test_native_buffer_nested_value() {
     let buf = native_buffer_rect(2)
     // Literal RHS (nested value literal).
@@ -590,16 +415,10 @@ fn test_native_buffer_nested_value() {
     buf[1] = make_rect(5.0, 6.0, 7.0, 8.0)
 
     let a = buf[0]
-    print("{a.tl.x.floor()}")
-    print("{a.tl.y.floor()}")
-    print("{a.br.x.floor()}")
-    print("{a.br.y.floor()}")
+    print("{a.tl.x.floor()} {a.tl.y.floor()} {a.br.x.floor()} {a.br.y.floor()}")
 
     let b = buf[1]
-    print("{b.tl.x.floor()}")
-    print("{b.tl.y.floor()}")
-    print("{b.br.x.floor()}")
-    print("{b.br.y.floor()}")
+    print("{b.tl.x.floor()} {b.tl.y.floor()} {b.br.x.floor()} {b.br.y.floor()}")
 }
 
 // -- A function-returned value written into a nested element field --

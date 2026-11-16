@@ -16,29 +16,26 @@ struct VertexBatch {
 }
 
 @test
-fn float_buffer_roundtrip() {
+fn scalar_buffer_roundtrip() {
     let buf = native_buffer_float(4)
     assert(buf.len == 4)
     nb_set(buf, 0, 1.5)
     nb_set(buf, 1, -2.25)
-    nb_set(buf, 2, 0.0)
     nb_set(buf, 3, 3.75)
     assert(nb_get(buf, 0) == 1.5)
     assert(nb_get(buf, 1) == -2.25)
-    assert(nb_get(buf, 2) == 0.0)
     assert(nb_get(buf, 3) == 3.75)
-}
+    // An unwritten slot reads zero (ffi.new zero-initializes).
+    assert(nb_get(buf, 2) == 0.0)
 
-@test
-fn int_buffer_roundtrip() {
-    let buf = native_buffer_int(3)
-    assert(buf.len == 3)
-    nb_set(buf, 0, 10)
-    nb_set(buf, 1, -7)
-    nb_set(buf, 2, 2026)
-    assert(nb_get(buf, 0) == 10)
-    assert(nb_get(buf, 1) == -7)
-    assert(nb_get(buf, 2) == 2026)
+    let ints = native_buffer_int(3)
+    assert(ints.len == 3)
+    nb_set(ints, 0, 10)
+    nb_set(ints, 1, -7)
+    nb_set(ints, 2, 2026)
+    assert(nb_get(ints, 0) == 10)
+    assert(nb_get(ints, 1) == -7)
+    assert(nb_get(ints, 2) == 2026)
 }
 
 @test
@@ -58,18 +55,6 @@ fn float_buffer_tight_loop() {
     }
     // sum of 0,2,4,...,126 = 2 * (0+1+...+63) = 2 * 63*64/2 = 4032
     assert(sum == 4032.0)
-}
-
-@test
-fn boundary_indices() {
-    let buf = native_buffer_float(3)
-    // First and last index must read what we wrote.
-    nb_set(buf, 0, 11.0)
-    nb_set(buf, 2, 33.0)
-    assert(nb_get(buf, 0) == 11.0)
-    assert(nb_get(buf, 2) == 33.0)
-    // Middle slot defaults to 0 (ffi.new zero-initializes).
-    assert(nb_get(buf, 1) == 0.0)
 }
 
 @test

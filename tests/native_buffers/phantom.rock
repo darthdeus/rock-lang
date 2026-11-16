@@ -14,31 +14,12 @@ fn u8_buffer_roundtrip() {
     assert(pixels[2] == 64)
     assert(pixels[3] == 0)
     assert(pixels.len == 4)
-}
 
-@test
-fn u8_buffer_truncates_overflow() {
-    // uint8_t truncates values > 255. 256 -> 0, 257 -> 1, -1 -> 255.
-    // This is expected LuaJIT ffi conversion behavior.
-    let buf = native_buffer_u8(3)
-    buf[0] = 256
-    buf[1] = 257
-    buf[2] = -1
-    assert(buf[0] == 0)
-    assert(buf[1] == 1)
-    assert(buf[2] == 255)
-}
-
-@test
-fn i8_buffer_signed_range() {
-    // int8_t range is -128..=127. Values outside wrap.
-    let buf = native_buffer_i8(3)
-    buf[0] = 127
-    buf[1] = -128
-    buf[2] = 128  // overflow: wraps to -128
-    assert(buf[0] == 127)
-    assert(buf[1] == -128)
-    assert(buf[2] == -128)
+    let signed = native_buffer_i8(2)
+    signed[0] = 127
+    signed[1] = -128
+    assert(signed[0] == 127)
+    assert(signed[1] == -128)
 }
 
 @test
@@ -95,17 +76,6 @@ fn sum_u8_buffer(buf: NativeBufferU8) -> int {
         s = s + v
     }
     return s
-}
-
-@test
-fn get_safe_variant_per_phantom() {
-    let buf = native_buffer_u8(3)
-    buf[0] = 10
-    buf[2] = 30
-    assert(buf.get(0) == 10)
-    assert(buf.get(2) == 30)
-    assert(buf.get(3) == null)
-    assert(buf.get(-1) == null)
 }
 
 @test

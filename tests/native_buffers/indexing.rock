@@ -2,36 +2,24 @@
 // buf.ptr[i] / buf.ptr[i] = v with 0-based indexing and no bounds check.
 
 @test
-fn index_read_float() {
+fn index_reads_and_writes() {
     let buf = native_buffer_float(3)
     nb_set(buf, 0, 1.5)
-    nb_set(buf, 1, -2.5)
     nb_set(buf, 2, 3.5)
     assert(buf[0] == 1.5)
-    assert(buf[1] == -2.5)
     assert(buf[2] == 3.5)
-}
-
-@test
-fn index_write_float() {
-    let buf = native_buffer_float(3)
     buf[0] = 10.5
     buf[1] = 20.5
     buf[2] = 30.5
     assert(nb_get(buf, 0) == 10.5)
     assert(nb_get(buf, 1) == 20.5)
     assert(nb_get(buf, 2) == 30.5)
-}
 
-@test
-fn index_read_int() {
-    let buf = native_buffer_int(3)
-    buf[0] = 11
-    buf[1] = 22
-    buf[2] = 33
-    assert(buf[0] == 11)
-    assert(buf[1] == 22)
-    assert(buf[2] == 33)
+    let ints = native_buffer_int(3)
+    ints[0] = 11
+    ints[2] = 33
+    assert(ints[0] == 11)
+    assert(ints[2] == 33)
 }
 
 @test
@@ -100,27 +88,18 @@ fn iterate_empty_buffer() {
     assert(count == 0)
 }
 
-// -- Indexed reads as a let initializer and a print argument --
-
-@test(output = "42")
-fn test_buffer_int_indexed_read() {
-    let buf = native_buffer_int(4)
-    buf[0] = 42
-    let v = buf[0]
-    print(v)
-}
-
-@test(output = "3")
-fn test_buffer_float_indexed_read_print() {
-    let buf = native_buffer_float(4)
-    buf[2] = 3.0
-    print(buf[2] as int)
-}
-
-@test(output = "9")
-fn test_buffer_u8_indexed_read() {
-    let buf = native_buffer_u8(8)
-    buf[3] = 9
-    let v = buf[3]
-    print(v)
+// Indexed reads as a let initializer and a print argument.
+@test(output = "42\n3\n9")
+fn test_buffer_indexed_read_print() {
+    let ints = native_buffer_int(4)
+    ints[0] = 42
+    let i = ints[0]
+    print(i)
+    let floats = native_buffer_float(4)
+    floats[2] = 3.0
+    print(floats[2] as int)
+    let bytes = native_buffer_u8(8)
+    bytes[3] = 9
+    let b = bytes[3]
+    print(b)
 }

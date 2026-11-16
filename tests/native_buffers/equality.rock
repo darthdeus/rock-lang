@@ -2,7 +2,7 @@
 // the underlying element bytes and must respect the element width.
 
 @test
-fn int_native_buffer_equality() {
+fn scalar_native_buffer_equality() {
     let a = native_buffer_int(2)
     let b = native_buffer_int(2)
     nb_set(a, 0, 7)
@@ -12,19 +12,16 @@ fn int_native_buffer_equality() {
     assert_eq(a == b, true)
     nb_set(b, 1, -8)
     assert_eq(a == b, false)
-}
 
-@test
-fn float_native_buffer_equality() {
-    let a = native_buffer_float(2)
-    let b = native_buffer_float(2)
-    nb_set(a, 0, 1.5)
-    nb_set(a, 1, -2.25)
-    nb_set(b, 0, 1.5)
-    nb_set(b, 1, -2.25)
-    assert_eq(a == b, true)
-    nb_set(b, 1, -2.5)
-    assert_eq(a == b, false)
+    let fa = native_buffer_float(2)
+    let fb = native_buffer_float(2)
+    nb_set(fa, 0, 1.5)
+    nb_set(fa, 1, -2.25)
+    nb_set(fb, 0, 1.5)
+    nb_set(fb, 1, -2.25)
+    assert_eq(fa == fb, true)
+    nb_set(fb, 1, -2.5)
+    assert_eq(fa == fb, false)
 }
 
 @test

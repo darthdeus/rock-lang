@@ -18,41 +18,18 @@ fn in_bounds_works() {
 }
 
 @test
-fn oob_read_errors() {
+fn out_of_bounds_access_errors() {
     let buf = native_buffer_float(3)
     buf[0] = 10.0
-    let errored = try_call(() => {
-        let _x = buf[5]
-    })
-    assert(errored)
-}
+    assert(try_call(() => { let _x = buf[5] }), "read past the end")
+    assert(try_call(() => { buf[10] = 99.0 }), "write past the end")
 
-@test
-fn oob_write_errors() {
-    let buf = native_buffer_float(3)
-    let errored = try_call(() => {
-        buf[10] = 99.0
-    })
-    assert(errored)
-}
+    let ints = native_buffer_int(5)
+    assert(try_call(() => { let _x = ints[-1] }), "negative read")
 
-@test
-fn negative_index_errors() {
-    let buf = native_buffer_int(5)
-    let errored = try_call(() => {
-        let _x = buf[-1]
-    })
-    assert(errored)
-}
-
-@test
-fn boundary_at_len_errors() {
     // len-1 is valid; len is out of bounds (half-open).
-    let buf = native_buffer_int(4)
-    buf[3] = 42
-    assert(buf[3] == 42)
-    let errored = try_call(() => {
-        let _x = buf[4]
-    })
-    assert(errored)
+    let edge = native_buffer_int(4)
+    edge[3] = 42
+    assert(edge[3] == 42)
+    assert(try_call(() => { let _x = edge[4] }), "read at len")
 }
