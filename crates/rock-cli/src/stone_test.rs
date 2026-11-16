@@ -105,7 +105,8 @@ pub(crate) fn run_stone_test(root: &Path) -> Result<()> {
     // Watcher thread: forwards FileChangeEvents into ctl_rx.
     let _debouncer = {
         let (fc_tx, fc_rx) = channel::<crate::file_watcher::FileChangeEvent>();
-        let watcher = crate::file_watcher::FileWatcher::new()
+        // Same debounce as `rock stone`, so a burst of saves is one reload.
+        let watcher = crate::file_watcher::FileWatcher::default_for_rock_sources()
             .with_metadata_filter(true)
             // "toml" mirrors `rock stone`: a stick.toml edit is a session
             // rebuild (declared inputs re-resolve), not a dropped event.

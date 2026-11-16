@@ -13,7 +13,7 @@ const SETTLE_TIMEOUT: Duration = Duration::from_secs(180);
 /// single complete change.
 ///
 /// A direct write of a new file emits CREATE then MODIFY kernel events; under
-/// load those can straddle the watcher's 5ms debounce window and surface as
+/// load those can straddle the watcher's 100 ms debounce window and surface as
 /// two reloads (an empty-file compile plus the content compile) for one
 /// logical write. Staging outside the watched extensions and renaming keeps
 /// the "exactly one reload" property deterministic.
@@ -41,14 +41,15 @@ fn smoke_initial_write_triggers_one_reload() {
 
 #[test]
 fn rapid_burst_coalesces() {
-    // 2j: 10 writes within ~1ms each, should coalesce into a single reload
-    // (or at most a small handful, depending on the watcher's debounce window).
-    // We assert the *settled* count is much smaller than the write count --
-    // exact matching is host-dependent.
+    // Coalescing assumes consecutive writes land within the watcher's 100 ms
+    // debounce window. Writes 10 ms apart model a writer that the scheduler
+    // or the file-event stream delays between saves; splitting the burst
+    // takes a further 90 ms stall, and the bound of 3 tolerates two of them.
     let h = StoneHarness::spawn(&[]);
     let baseline = h.event_count();
     for i in 0..10 {
         h.write_file("a.rock", &format!("fn main() {{ let x = {} }}\n", i));
+        std::thread::sleep(Duration::from_millis(10));
     }
     let log = h.await_settled_after(baseline, QUIESCENT, SETTLE_TIMEOUT);
     assert!(
@@ -67,7 +68,7 @@ fn separated_writes_each_reload() {
     // `== 3` because the underlying FS layer (FSEvents on macOS, inotify
     // on Linux) is allowed to emit multiple kernel events for one
     // `std::fs::write`, and under workspace-wide nextest load they can
-    // straddle the 5ms debounce window. The meaningful property is
+    // straddle the 100 ms debounce window. The meaningful property is
     // "each separated write fires at least once"; over-firing is a
     // host artifact, under-firing would be a real bug.
     let h = StoneHarness::spawn(&[]);
