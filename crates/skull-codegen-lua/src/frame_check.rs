@@ -62,17 +62,8 @@ pub(crate) fn check_frame_limits(
     }
 
     let mut emits_nothing = vec![false; func.insts.len()];
-    for id in hoist.keys() {
-        emits_nothing[raw(*id) as usize] = true;
-    }
-    for (header, cl) in loops.iter() {
-        for &id in func.blocks[*header]
-            .insts
-            .iter()
-            .chain(func.blocks[cl.latch].insts.iter())
-        {
-            emits_nothing[raw(id) as usize] = true;
-        }
+    for id in hoist.keys().copied().chain(for_control_insts(func, loops)) {
+        emits_nothing[raw(id) as usize] = true;
     }
     let mut results_unassigned = vec![false; func.insts.len()];
     let mut return_replaced = vec![false; func.blocks.len()];

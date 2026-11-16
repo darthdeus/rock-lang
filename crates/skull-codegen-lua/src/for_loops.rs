@@ -43,6 +43,20 @@ impl ForLoop {
     }
 }
 
+/// Instructions replaced by a native Lua `for`'s head and increment.
+pub(crate) fn for_control_insts<'a>(
+    func: &'a MirFunc,
+    loops: &'a HashMap<Idx<Block>, ForLoop>,
+) -> impl Iterator<Item = Idx<Inst>> + 'a {
+    loops.iter().flat_map(move |(&header, cl)| {
+        func.blocks[header]
+            .insts
+            .iter()
+            .chain(&func.blocks[cl.latch].insts)
+            .copied()
+    })
+}
+
 /// Every recognized loop in `func`, keyed by header block. Coroutine cursors
 /// stay in frame cells, since native Lua `for` state cannot survive a yield.
 pub(crate) fn recognize_for_loops(

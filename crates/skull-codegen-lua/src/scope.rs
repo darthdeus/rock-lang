@@ -88,19 +88,10 @@ pub(crate) fn render_scope(
             for id in hoist.keys() {
                 quiet[raw(*id) as usize] = true;
             }
-            // A counted loop's header (compare) and latch (increment) are
-            // subsumed by the `for` line; their instructions never run as
-            // statements.
-            for (h, cl) in loops.iter() {
-                for &id in func.blocks[*h]
-                    .insts
-                    .iter()
-                    .chain(func.blocks[cl.latch].insts.iter())
-                {
-                    // MapNext still supplies the generic-for head's table
-                    // read and cursor definitions to kill liveness.
-                    quiet[raw(id) as usize] = !matches!(func.insts[id], Inst::MapNext { .. });
-                }
+            for id in for_control_insts(func, &loops) {
+                // MapNext still supplies the generic-for head's table
+                // read and cursor definitions to kill liveness.
+                quiet[raw(id) as usize] = !matches!(func.insts[id], Inst::MapNext { .. });
             }
             quiet
         });

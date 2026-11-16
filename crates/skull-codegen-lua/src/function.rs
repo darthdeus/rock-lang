@@ -363,15 +363,8 @@ fn emit_body(
                 movable[raw(id) as usize] = false;
             }
         }
-        for cl in loops.values() {
-            for &id in func.blocks[cl.latch].insts.iter() {
-                movable[raw(id) as usize] = false;
-            }
-        }
-        for &h in loops.keys() {
-            for &id in func.blocks[h].insts.iter() {
-                movable[raw(id) as usize] = false;
-            }
+        for id in for_control_insts(func, &loops) {
+            movable[raw(id) as usize] = false;
         }
         regalloc::store_targets(func, &rpo, &flow, &inlinable, &pinned, &reads, |v, cell| {
             movable[raw(v) as usize]
