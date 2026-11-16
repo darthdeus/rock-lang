@@ -716,19 +716,6 @@ impl MonoArena {
     ) -> Result<MonoTyId, MonoTyReason> {
         Ok(self.intern(convert_decl(ws, ty, subst)?))
     }
-
-    /// [`convert`], interned, reporting how many declared generics the
-    /// conversion resolved THROUGH `subst`.
-    pub fn convert_counting(
-        &mut self,
-        ws: &Workspace,
-        inf: &BodyInference,
-        ty: TyId,
-        subst: &MonoSubst,
-        bound: &mut usize,
-    ) -> Result<MonoTyId, MonoTyReason> {
-        Ok(self.intern(convert_counting(ws, inf, ty, subst, bound)?))
-    }
 }
 
 /// **The one arena a whole build shares**, behind the interior mutability that
@@ -957,18 +944,6 @@ impl MonoInterner {
         Ok(self.intern(convert_decl(ws, ty, subst)?))
     }
 
-    /// [`MonoArena::convert_counting`] through [`Self::intern`].
-    pub fn convert_counting(
-        &self,
-        ws: &Workspace,
-        inf: &BodyInference,
-        ty: TyId,
-        subst: &MonoSubst,
-        bound: &mut usize,
-    ) -> Result<MonoTyId, MonoTyReason> {
-        Ok(self.intern(convert_counting(ws, inf, ty, subst, bound)?))
-    }
-
     /// The type an id names, borrowed from the arena without a lock.
     pub fn get_ref(&self, id: MonoTyId) -> &MonoTy {
         &self.types[id.index()]
@@ -1025,7 +1000,7 @@ pub fn convert<S: std::hash::BuildHasher>(
     ty: TyId,
     subst: &std::collections::HashMap<VarId, MonoTy, S>,
 ) -> Result<MonoTy, MonoTyReason> {
-    convert_at(ws, TyEnv::Body(inf), ty, subst, 0, &mut 0)
+    convert_at(ws, TyEnv::Body(inf), ty, subst, 0)
 }
 
 /// Convert a type written in a DECLARATION -- a signature, a `newtype`'s
@@ -1035,23 +1010,7 @@ pub fn convert_decl<S: std::hash::BuildHasher>(
     ty: TyId,
     subst: &std::collections::HashMap<VarId, MonoTy, S>,
 ) -> Result<MonoTy, MonoTyReason> {
-    convert_at(ws, TyEnv::Decl, ty, subst, 0, &mut 0)
-}
-
-/// [`convert`], reporting how many declared generics it resolved THROUGH
-/// `subst`.
-///
-/// A census over converted types cannot otherwise tell "every slot was already
-/// concrete" from "the substitution supplied every generic": both report zero
-/// failures, and only one of them exercises the substitution at all.
-pub fn convert_counting<S: std::hash::BuildHasher>(
-    ws: &Workspace,
-    inf: &BodyInference,
-    ty: TyId,
-    subst: &std::collections::HashMap<VarId, MonoTy, S>,
-    bound: &mut usize,
-) -> Result<MonoTy, MonoTyReason> {
-    convert_at(ws, TyEnv::Body(inf), ty, subst, 0, bound)
+    convert_at(ws, TyEnv::Decl, ty, subst, 0)
 }
 
 fn convert_at<S: std::hash::BuildHasher>(
@@ -1060,7 +1019,6 @@ fn convert_at<S: std::hash::BuildHasher>(
     ty: TyId,
     subst: &std::collections::HashMap<VarId, MonoTy, S>,
     depth: u32,
-    bound: &mut usize,
 ) -> Result<MonoTy, MonoTyReason> {
     if depth > MAX_DEPTH {
         return Err(MonoTyReason::DepthLimit);
@@ -1090,13 +1048,12 @@ fn convert_at<S: std::hash::BuildHasher>(
             // vars from `lower_var_high_water` up, so a `VarId` is a declared
             // generic or an inference var, never both.
             match env.solved(var)? {
-                Some(next) => return convert_at(ws, env, next, subst, depth + 1, bound),
+                Some(next) => return convert_at(ws, env, next, subst, depth + 1),
                 None => {
                     let bound_to = subst
                         .get(&var)
                         .cloned()
                         .ok_or(MonoTyReason::UnresolvedInfer(name))?;
-                    *bound += 1;
                     return Ok(bound_to);
                 }
             }
@@ -1106,28 +1063,15 @@ fn convert_at<S: std::hash::BuildHasher>(
                 .get(&var)
                 .cloned()
                 .ok_or(MonoTyReason::UnboundGeneric(name))?;
-            *bound += 1;
             return Ok(bound_to);
         }
-        TypeExpr::Nullable(inner) => MonoTy::nullable(convert_at(
-            ws,
-            env,
-            ty.with_idx(inner),
-            subst,
-            depth + 1,
-            bound,
-        )?),
+        TypeExpr::Nullable(inner) => {
+            MonoTy::nullable(convert_at(ws, env, ty.with_idx(inner), subst, depth + 1)?)
+        }
         TypeExpr::Tuple { elements } => {
             let mut parts = Vec::new();
             for el in elements {
-                parts.push(convert_at(
-                    ws,
-                    env,
-                    ty.with_idx(el),
-                    subst,
-                    depth + 1,
-                    bound,
-                )?);
+                parts.push(convert_at(ws, env, ty.with_idx(el), subst, depth + 1)?);
             }
             MonoTy::Tuple(parts)
         }
@@ -1140,30 +1084,16 @@ fn convert_at<S: std::hash::BuildHasher>(
             };
             let mut ps = Vec::new();
             for p in params {
-                ps.push(convert_at(
-                    ws,
-                    env,
-                    ty.with_idx(p),
-                    subst,
-                    depth + 1,
-                    bound,
-                )?);
+                ps.push(convert_at(ws, env, ty.with_idx(p), subst, depth + 1)?);
             }
             MonoTy::App { ctor, params: ps }
         }
         TypeExpr::Function { params, ret } => {
             let mut ps = Vec::new();
             for p in params {
-                ps.push(convert_at(
-                    ws,
-                    env,
-                    ty.with_idx(p),
-                    subst,
-                    depth + 1,
-                    bound,
-                )?);
+                ps.push(convert_at(ws, env, ty.with_idx(p), subst, depth + 1)?);
             }
-            let ret = convert_at(ws, env, ty.with_idx(ret), subst, depth + 1, bound)?;
+            let ret = convert_at(ws, env, ty.with_idx(ret), subst, depth + 1)?;
             MonoTy::Function {
                 params: ps,
                 ret: Box::new(ret),

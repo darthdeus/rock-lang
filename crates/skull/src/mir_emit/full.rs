@@ -794,10 +794,10 @@ pub(super) fn emit_full_build(
     } else {
         crate::concrete_body::ConcreteBuildStats::default()
     };
-    // The owner facts serve incremental repair and the census above; a
-    // one-shot build has neither past this point.
+    // The per-owner build statistics serve incremental repair and the snapshot
+    // above; a one-shot build has neither past this point.
     if build.lifetime() == CacheLifetime::OneShot {
-        drop_in_background(concrete.take_owner_facts());
+        drop_in_background(concrete.take_build_stats());
     }
     let graph_records = (build.lifetime() == CacheLifetime::OneShot).then(|| graph.take_records());
     let released_graph_instances = graph_records.as_ref().map_or(0, |r| r.instances.len());

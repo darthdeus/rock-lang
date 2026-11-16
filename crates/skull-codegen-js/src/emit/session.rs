@@ -183,13 +183,12 @@ pub(super) fn update_js_session(
         session
             .graph
             .update_bodies_with_root_delta(ws, &root_added, &root_removed, changed, edits);
-    session.concrete.update_local_with_span_edits(
+    session.concrete.update_local(
         ws,
         &session.graph,
         &update.revisited,
         &update.removed,
         &update.revisited_owners,
-        edits,
     );
     let mappings = artifact::ArtifactMappings::for_backend(bone_core::hir::FnBackend::Js)
         .with_supply(&crate::JsBackendRealization);

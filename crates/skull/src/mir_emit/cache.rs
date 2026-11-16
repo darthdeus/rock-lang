@@ -975,13 +975,12 @@ impl SkullEmitCache {
         cache.repair_stats.full_graph_rebuilds =
             crate::instance_graph::build_invocations().saturating_sub(graph_builds_before) as usize;
         let t_concrete = Instant::now();
-        let concrete_update = cache.concrete.update_local_with_span_edits(
+        let concrete_update = cache.concrete.update_local(
             ws,
             &cache.graph,
             &update.revisited,
             &update.removed,
             &update.revisited_owners,
-            edits,
         );
         cache.repair_stats.concrete_update_ns = t_concrete.elapsed().as_nanos() as u64;
 

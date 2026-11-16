@@ -1,10 +1,10 @@
-//! Concrete lowering plans and request-time owner diagnostics.
+//! Concrete lowering plans and build statistics.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use bone_core::hir::{BindingInfo, Body, BodyOwner, Expr, TypeExpr};
-use bone_core::prelude::{Span, TyId};
+use bone_core::prelude::TyId;
 use bone_core::workspace::{BodyInference, Workspace};
 use comfy_la_arena::{ArenaMap, Idx};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -17,26 +17,16 @@ use skull_mir::monoty::{MonoCtor, MonoInterner, MonoSubst, MonoTy, MonoTyId, Mon
 use ustr::Ustr;
 
 use crate::instance_graph::{
-    boundary_class_for, function_body, is_spanless, BoundaryClass, FunctionBody, Instance,
-    InstanceGraph, Owner, Site, SiteDomain, SiteOp, SiteOutcome, TextEditDelta,
+    function_body, BoundaryClass, FunctionBody, Instance, InstanceGraph, Owner, Site, SiteDomain,
+    SiteOp, SiteOutcome,
 };
 use crate::target_projection::CpuTargetSpec;
 
-/// Which table a slot belongs to. Kept apart in the census because the two have
-/// independent denominators: a body with no locals still has expressions.
+/// An inferred expression or binding slot.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Slot {
     Expr(Idx<Expr>),
     Binding(Idx<BindingInfo>),
-}
-
-impl Slot {
-    pub fn kind(self) -> &'static str {
-        match self {
-            Self::Expr(_) => "expr",
-            Self::Binding(_) => "binding",
-        }
-    }
 }
 
 /// A callee whose body skull does not lower. The declaration preserves its
@@ -50,76 +40,24 @@ pub struct BoundaryId {
     pub symbol: String,
 }
 
-type TypeConversionMemo = FxHashMap<TyId, Result<(MonoTyId, usize), MonoTyReason>>;
+type TypeConversionMemo = FxHashMap<TyId, Result<MonoTyId, MonoTyReason>>;
 
-/// A site the walk could not resolve to any callee. The span is where the
-/// Stage-3 compile error goes.
-#[derive(Clone, Debug)]
-pub struct CalleeHole {
-    pub instance: Instance,
-    pub site: Site,
-    pub reason: &'static str,
-    pub span: Span,
-}
-
-/// A slot whose inferred type did not convert under the instance's
-/// substitution. The reason is the bucket, the span is where the compile error
-/// goes at the Stage-3 cutover.
+/// A slot whose inferred type did not convert under the substitution.
 #[derive(Clone, Debug)]
 pub struct FreeType {
     pub slot: Slot,
     pub reason: MonoTyReason,
-    pub span: Span,
 }
 
-/// Why an expanded instance got no tables at all. Each is a defect, not a
-/// tolerated absence: the walk expanded the body, so it had one, and it
-/// recorded a substitution for every instance it reached.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum BodyGap {
-    /// No entry in [`InstanceGraph::substitutions`]. Building under an empty
-    /// map instead would silently give a generic body a shared body's types.
-    NoSubstitution,
-    /// The module has no `BodyInference` for this function.
-    NoInference,
-    /// The module has no `Body` for this function.
-    NoBody,
-    /// The body was relowered after this inference was recorded.
-    StaleInference,
-    /// The same logical instance was reached with two different conformance
-    /// witness trees, so its bounded calls have no discovery-order-free answer.
-    InconsistentBounds,
-}
-
-impl BodyGap {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::NoSubstitution => "no-substitution",
-            Self::NoInference => "no-inference",
-            Self::NoBody => "no-body",
-            Self::StaleInference => "stale-inference",
-            Self::InconsistentBounds => "inconsistent-bounds",
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct MissingBody {
-    pub instance: Instance,
-    pub gap: BodyGap,
-}
-
-/// The tables for one graph, plus everything that did not convert.
+/// Lowering plans, failure indexes, and per-owner build statistics.
 #[derive(Clone, Default)]
 pub struct ConcreteBodies {
     pub plans: Arc<ConcretePlans>,
     pub always_plans: ConcreteAlwaysPlans,
-    /// Signatures derived during full-build publication.
-    pub signature_derivations: usize,
-    instance_facts: FxHashMap<Instance, OwnerFacts>,
-    always_facts: FxHashMap<ConcreteOwner, OwnerFacts>,
+    instance_stats: FxHashMap<Instance, ConcreteBuildStats>,
+    always_stats: FxHashMap<ConcreteOwner, ConcreteBuildStats>,
     /// Foreign-domain publication is a shared full-build contribution. It is
-    /// kept separately because it has no single owner; local body facts never
+    /// kept separately because it has no single owner; local body stats never
     /// mutate it or fold a second copy into the aggregate.
     global_build_stats: ConcreteBuildStats,
     plan_failure_index: BTreeMap<Instance, MonoTyReason>,
@@ -207,19 +145,6 @@ impl ConcreteBuildStats {
 }
 
 impl ConcreteBodies {
-    fn aggregate_facts(&self) -> OwnerFacts {
-        let mut facts = OwnerFacts::default();
-        for owner in self.instance_facts.values() {
-            owner.accumulate_into(&mut facts);
-        }
-        for owner in self.always_facts.values() {
-            owner.accumulate_into(&mut facts);
-        }
-        facts.build_stats.add(self.global_build_stats);
-        facts.sort_for_output();
-        facts
-    }
-
     pub fn plan_for(&self, instance: &Instance) -> Option<&ConcreteBodyPlan> {
         self.plans.get(instance).map(|plan| &**plan)
     }
@@ -270,25 +195,23 @@ impl ConcreteBodies {
         })
     }
 
-    /// Fold the authoritative owner records for an explicit census request.
-    /// The repair path does not call this method.
-    /// Release the per-owner facts, for a build that will neither repair
-    /// these plans incrementally nor ask for their census.
-    pub fn take_owner_facts(&mut self) -> impl Send + 'static {
+    /// Release the per-owner stats, for a build that will neither repair
+    /// these plans incrementally nor inspect their build statistics.
+    pub fn take_build_stats(&mut self) -> impl Send + 'static {
         (
-            std::mem::take(&mut self.instance_facts),
-            std::mem::take(&mut self.always_facts),
+            std::mem::take(&mut self.instance_stats),
+            std::mem::take(&mut self.always_stats),
         )
     }
 
     pub fn snapshot_build_stats(&self) -> ConcreteBuildStats {
         let mut stats = self.global_build_stats;
-        for facts in self
-            .instance_facts
+        for owner_stats in self
+            .instance_stats
             .values()
-            .chain(self.always_facts.values())
+            .chain(self.always_stats.values())
         {
-            stats.add(facts.build_stats);
+            stats.add(*owner_stats);
         }
         stats
     }
@@ -311,27 +234,14 @@ impl ConcreteBodies {
         removed: &BTreeSet<Instance>,
         revisited_owners: &BTreeSet<Owner>,
     ) -> ConcreteUpdateStats {
-        self.update_local_with_span_edits(ws, g, revisited, removed, revisited_owners, &[])
-    }
-
-    pub fn update_local_with_span_edits(
-        &mut self,
-        ws: &Workspace,
-        g: &InstanceGraph,
-        revisited: &BTreeSet<Instance>,
-        removed: &BTreeSet<Instance>,
-        revisited_owners: &BTreeSet<Owner>,
-        edits: &[TextEditDelta],
-    ) -> ConcreteUpdateStats {
-        self.shift_fact_spans(edits);
-        let before = self.instance_facts.len() + self.always_facts.len();
+        let before = self.instance_stats.len() + self.always_stats.len();
         let mut instance_subjects = revisited.clone();
         instance_subjects.extend(removed.iter().cloned());
         let mut retracted = 0;
         let mut candidate_keys_added = BTreeSet::new();
         let mut candidate_keys_removed = BTreeSet::new();
         for instance in &instance_subjects {
-            if self.instance_facts.contains_key(instance) || self.plans.get(instance).is_some() {
+            if self.instance_stats.contains_key(instance) || self.plans.get(instance).is_some() {
                 retracted += 1;
             }
             let (removed_candidates, _scans) = self.remove_instance(instance);
@@ -345,15 +255,18 @@ impl ConcreteBodies {
         let mut derived = results.len();
         for result in results {
             match result {
-                InstanceResult::Gap(gap) => {
-                    let mut facts = OwnerFacts::default();
-                    facts.gaps.push(gap.clone());
-                    self.instance_facts.insert(gap.instance, facts);
+                InstanceResult::Skipped(gap) => {
+                    self.instance_stats
+                        .insert(gap, ConcreteBuildStats::default());
                 }
                 InstanceResult::Built(built) => {
                     let instance = built.instance.clone();
-                    let facts = built.facts;
+                    let stats = built.stats;
                     let candidate_refs = built.candidate_refs;
+                    if let Err(reason) = &built.plan {
+                        self.plan_failure_index
+                            .insert(instance.clone(), reason.clone());
+                    }
                     if let Ok(plan) = built.plan {
                         candidate_keys_added
                             .extend(self.install_candidate_refs_owned(&instance, candidate_refs));
@@ -361,8 +274,8 @@ impl ConcreteBodies {
                             .expect("local concrete update lost its unique plan store")
                             .insert(instance.clone(), Arc::new(plan));
                     }
-                    self.install_failure_index(&facts);
-                    self.instance_facts.insert(instance, facts);
+
+                    self.instance_stats.insert(instance, stats);
                 }
             }
         }
@@ -377,7 +290,7 @@ impl ConcreteBodies {
             always_subjects.push((*module, *body_owner, owner));
         }
         for (_, _, owner) in &always_subjects {
-            if self.always_facts.remove(owner).is_some() {
+            if self.always_stats.remove(owner).is_some() {
                 retracted += 1;
             }
             self.always_plan_failure_index.remove(owner);
@@ -429,13 +342,11 @@ impl ConcreteBodies {
             results.sort_by_key(|result| result.order);
             for result in results {
                 let owner = result.owner.clone();
-                let mut raw_facts = result.facts;
+                let stats = result.stats;
                 if let (Some(owner), Err(reason)) = (&owner, &result.plan) {
-                    raw_facts
-                        .always_plan_failures
-                        .push((owner.clone(), reason.clone()));
+                    self.always_plan_failure_index
+                        .insert(owner.clone(), reason.clone());
                 }
-                let facts = raw_facts;
                 match result.plan {
                     Ok(Some(plan)) => {
                         self.always_plans.insert(plan.owner.clone(), plan);
@@ -444,8 +355,7 @@ impl ConcreteBodies {
                     Err(_) => {}
                 }
                 if let Some(owner) = owner {
-                    self.install_failure_index(&facts);
-                    self.always_facts.insert(owner, facts);
+                    self.always_stats.insert(owner, stats);
                 }
             }
             derived += always_subjects.len();
@@ -457,17 +367,6 @@ impl ConcreteBodies {
             before,
             candidate_keys_added,
             candidate_keys_removed,
-        }
-    }
-
-    fn shift_fact_spans(&mut self, edits: &[TextEditDelta]) {
-        for edit in edits {
-            for facts in self.instance_facts.values_mut() {
-                facts.shift_spans(edit);
-            }
-            for facts in self.always_facts.values_mut() {
-                facts.shift_spans(edit);
-            }
         }
     }
 
@@ -497,23 +396,12 @@ impl ConcreteBodies {
                 }
             }
         }
-        self.instance_facts.remove(instance);
+        self.instance_stats.remove(instance);
         self.plan_failure_index.remove(instance);
         Arc::get_mut(&mut self.plans)
             .expect("local concrete update lost its unique plan store")
             .remove(instance);
         (removed, 0)
-    }
-
-    fn install_failure_index(&mut self, facts: &OwnerFacts) {
-        for (instance, reason) in &facts.plan_failures {
-            self.plan_failure_index
-                .insert(instance.clone(), reason.clone());
-        }
-        for (owner, reason) in &facts.always_plan_failures {
-            self.always_plan_failure_index
-                .insert(owner.clone(), reason.clone());
-        }
     }
 
     fn install_candidate_refs_owned(
@@ -549,257 +437,6 @@ impl ConcreteBodies {
         self.owner_candidates.insert(owner.clone(), refs);
         added
     }
-
-    pub fn census(&self) -> BodyCensus {
-        let facts = self.aggregate_facts();
-        let mut c = BodyCensus {
-            signature_requests: facts.signature_requests,
-            signature_derivations: self.signature_derivations,
-            slot_conversions: facts.slot_conversions,
-            bodies: facts.callee_summary.bodies,
-            expr_examined: facts.expr_examined,
-            binding_examined: facts.binding_examined,
-            generics_bound: facts.generics_bound,
-            generic_bodies: facts.generic_bodies,
-            untyped_exprs: facts.untyped.len(),
-            untyped_bindings: facts.untyped_bindings,
-            expr_slots: facts.expr_slots,
-            binding_slots: facts.binding_slots,
-            sites_examined: facts.sites_examined,
-            unknown_rock_callees: facts.unknown_rock_callees.len(),
-            untyped_as_callee_key: facts.untyped_as_callee_key.clone(),
-            type_nodes_examined: facts.build_stats.type_nodes_examined,
-            type_node_memo_hits: facts.build_stats.type_node_memo_hits,
-            type_node_conversion_attempts: facts.build_stats.type_node_conversion_attempts,
-            type_node_unresolved: facts.build_stats.type_node_unresolved,
-            struct_literals_examined: facts.build_stats.struct_literals_examined,
-            struct_field_conversion_attempts: facts.build_stats.struct_field_conversion_attempts,
-            foreign_domain_requests: facts.build_stats.foreign_domain_requests,
-            foreign_domain_unique: facts.build_stats.foreign_domain_unique,
-            ..Default::default()
-        };
-        c.direct_calls = facts.callee_summary.direct_calls;
-        c.fn_values = facts.callee_summary.fn_values;
-        c.synthesized_calls = facts.callee_summary.synthesized_calls;
-        c.iterator_ops = facts.callee_summary.iterator_ops.clone();
-        c.rock_callees = facts.callee_summary.rock_callees;
-        c.boundary_callees = facts.callee_summary.boundary_callees;
-        for h in &facts.callee_holes {
-            let k = c.callee_holes.entry(h.reason).or_default();
-            k.0 += 1;
-            k.1 += usize::from(is_spanless(&h.span));
-        }
-        for (_, f) in &facts.free_types {
-            *c.free_by_reason.entry(f.reason.bucket()).or_insert(0) += 1;
-            *c.free_by_slot.entry(f.slot.kind()).or_insert(0) += 1;
-            c.spanless += usize::from(is_spanless(&f.span));
-        }
-        for (_, u) in &facts.untyped {
-            *c.untyped_by_kind.entry(u.kind).or_insert(0) += 1;
-        }
-        for g in &facts.gaps {
-            *c.gaps.entry(g.gap.label()).or_insert(0) += 1;
-        }
-        c
-    }
-
-    /// Untyped slots as `<instance> <expr kind> at <file>:<line>`.
-    pub(crate) fn render_untyped(&self, ws: &Workspace, g: &InstanceGraph) -> Vec<String> {
-        let rows: Vec<String> = self
-            .aggregate_facts()
-            .untyped
-            .iter()
-            .map(|(i, u)| {
-                format!(
-                    "{} {} at {}:{}",
-                    g.identity(ws, i),
-                    u.kind,
-                    u.span.file,
-                    u.span.line_range().0 + 1
-                )
-            })
-            .collect();
-        rows
-    }
-
-    /// Callee holes as `<instance> <op> <reason> at <file>:<line>`.
-    pub fn render_callee_holes(&self, ws: &Workspace, g: &InstanceGraph) -> Vec<String> {
-        let rows: Vec<String> = self
-            .aggregate_facts()
-            .callee_holes
-            .iter()
-            .map(|h| {
-                format!(
-                    "{} {} {} at {}:{}",
-                    g.identity(ws, &h.instance),
-                    h.site.op.name(),
-                    h.reason,
-                    h.span.file,
-                    h.span.line_range().0 + 1
-                )
-            })
-            .collect();
-        rows
-    }
-
-    /// Free types as `<instance> <slot-kind> <bucket> at <file>:<line>`, for a
-    /// report or a failing assertion.
-    pub fn render_free_types(&self, ws: &Workspace, g: &InstanceGraph) -> Vec<String> {
-        let rows: Vec<String> = self
-            .aggregate_facts()
-            .free_types
-            .iter()
-            .map(|(i, f)| {
-                format!(
-                    "{} {} {} at {}:{}",
-                    g.identity(ws, i),
-                    f.slot.kind(),
-                    f.reason.bucket(),
-                    f.span.file,
-                    f.span.line_range().0 + 1
-                )
-            })
-            .collect();
-        rows
-    }
-
-    /// Stable, complete diagnostic identity for comparing a local update with
-    /// a fresh build. This is intentionally a request-time census over the
-    /// authoritative owner records, not a mutation-maintained global vector.
-    pub fn diagnostic_snapshot(&self, ws: &Workspace, g: &InstanceGraph) -> Vec<String> {
-        let facts = self.aggregate_facts();
-        let mut rows = Vec::new();
-        rows.extend(facts.plan_failures.iter().map(|(instance, reason)| {
-            format!(
-                "plan-failure:{}:{}",
-                g.identity(ws, instance),
-                reason.bucket()
-            )
-        }));
-        rows.extend(
-            facts.always_plan_failures.iter().map(|(owner, reason)| {
-                format!("always-plan-failure:{owner:?}:{}", reason.bucket())
-            }),
-        );
-        rows.extend(
-            self.render_free_types(ws, g)
-                .into_iter()
-                .map(|row| format!("free-type:{row}")),
-        );
-        rows.extend(
-            self.render_untyped(ws, g)
-                .into_iter()
-                .map(|row| format!("untyped:{row}")),
-        );
-        rows.extend(
-            self.render_callee_holes(ws, g)
-                .into_iter()
-                .map(|row| format!("callee-hole:{row}")),
-        );
-        rows.extend(
-            facts
-                .gaps
-                .iter()
-                .map(|gap| format!("gap:{}:{}", g.identity(ws, &gap.instance), gap.gap.label())),
-        );
-        rows.extend(facts.unknown_rock_callees.iter().map(|(instance, site)| {
-            format!(
-                "unknown-callee:{}:{}",
-                g.identity(ws, instance),
-                site.op.name()
-            )
-        }));
-        rows.sort();
-        rows
-    }
-}
-
-#[derive(Default, Debug)]
-pub struct BodyCensus {
-    pub signature_requests: usize,
-    pub signature_derivations: usize,
-    pub slot_conversions: usize,
-    pub bodies: usize,
-    pub expr_examined: usize,
-    pub binding_examined: usize,
-    pub generics_bound: usize,
-    pub generic_bodies: usize,
-    pub untyped_exprs: usize,
-    pub untyped_bindings: usize,
-    pub untyped_by_kind: BTreeMap<&'static str, usize>,
-    pub expr_slots: usize,
-    pub binding_slots: usize,
-    pub free_by_reason: BTreeMap<&'static str, usize>,
-    pub free_by_slot: BTreeMap<&'static str, usize>,
-    pub spanless: usize,
-    pub gaps: BTreeMap<&'static str, usize>,
-    /// Sites the walk recorded for the instances that got a body. Every callee
-    /// count below is measured against this.
-    pub sites_examined: usize,
-    pub direct_calls: usize,
-    pub fn_values: usize,
-    pub synthesized_calls: usize,
-    pub iterator_ops: BTreeMap<&'static str, usize>,
-    pub rock_callees: usize,
-    pub boundary_callees: usize,
-    /// Reason -> (holes, of those with no span).
-    pub callee_holes: BTreeMap<&'static str, (usize, usize)>,
-    pub unknown_rock_callees: usize,
-    pub untyped_as_callee_key: BTreeMap<&'static str, usize>,
-    pub type_nodes_examined: usize,
-    pub type_node_memo_hits: usize,
-    pub type_node_conversion_attempts: usize,
-    pub type_node_unresolved: usize,
-    pub struct_literals_examined: usize,
-    pub struct_field_conversion_attempts: usize,
-    pub foreign_domain_requests: usize,
-    pub foreign_domain_unique: usize,
-}
-
-impl BodyCensus {
-    /// Resolved callee obligations across all operation kinds.
-    pub fn callee_entries(&self) -> usize {
-        self.direct_calls
-            + self.fn_values
-            + self.synthesized_calls
-            + self.iterator_ops.values().sum::<usize>()
-    }
-
-    pub fn callee_hole_total(&self) -> usize {
-        self.callee_holes.values().map(|(n, _)| n).sum()
-    }
-}
-
-/// An expression the body's arena holds and inference recorded no type for.
-/// The kind is what makes the population diagnosable: "3,446 slots" is a
-/// number, "3,446 `Block` tails" is a class.
-#[derive(Clone, Debug)]
-pub struct UntypedExpr {
-    pub expr: Idx<Expr>,
-    pub kind: &'static str,
-    pub span: Span,
-}
-
-/// The expression's constructor name. `Debug`'s leading token, because the HIR
-/// exposes no discriminant name and a hand-written match would drift from the
-/// enum silently.
-fn expr_kind(e: &Expr) -> &'static str {
-    let d = format!("{e:?}");
-    let head = d
-        .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .next()
-        .unwrap_or("?");
-    // Leaked once per DISTINCT kind, not per slot: the set is the enum's
-    // variants, so this is bounded by the enum and not by the corpus.
-    static KINDS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<&'static str>>> =
-        std::sync::LazyLock::new(Default::default);
-    let mut set = KINDS.lock().expect("expr-kind interner");
-    if let Some(k) = set.get(head) {
-        return k;
-    }
-    let leaked: &'static str = Box::leak(head.to_string().into_boxed_str());
-    set.insert(leaked);
-    leaked
 }
 
 /// One body's tables under one substitution.
@@ -814,33 +451,12 @@ pub struct Converted {
     /// for bindings. The tables can only be total over what inference recorded,
     /// so the arena is the denominator that says whether that population is the
     /// whole body.
-    pub untyped_exprs: Vec<UntypedExpr>,
+    pub untyped_exprs: Vec<Idx<Expr>>,
     pub untyped_bindings: Vec<Idx<BindingInfo>>,
-    /// Declared generics the conversions resolved THROUGH the substitution.
-    /// Zero failures over a body that never consulted `subst` is a zero
-    /// measured over the wrong space -- both a body that was already concrete
-    /// and one whose generics were all supplied report no failures.
-    pub generics_bound: usize,
-    /// Conversions the per-body TyId memo actually RAN (misses). Examined
-    /// counts stay per-slot; this strictly below them is the memo's
-    /// effectiveness witness.
-    pub conversions: usize,
     pub(crate) type_memo: TypeConversionMemo,
 }
 
-impl Converted {
-    /// Slots the conversion actually ran over -- the denominator for
-    /// [`Self::failures`].
-    pub fn examined(&self) -> usize {
-        self.expr_examined + self.binding_examined
-    }
-}
-
 /// Convert one body's inferred types under `subst`.
-///
-/// Public because the substitution is the load-bearing input: a caller can pass
-/// a different one and watch the generic slots go unbound, which is the only
-/// perturbation that moves this arm without moving the walk that produced it.
 pub fn convert_body(
     arena: &MonoInterner,
     ws: &Workspace,
@@ -849,61 +465,28 @@ pub fn convert_body(
     subst: &MonoSubst,
 ) -> Converted {
     let mut c = Converted::default();
-    // Slots repeat inferred TyIds ~4x within a body (measured on a large corpus:
-    // 139,559 slots over 34,237 unique ids), so the conversion is memoized per
-    // body. The `generics_bound` census counts PER SLOT exactly as before --
-    // each hit replays the cached delta -- and an error replays its reason, so
-    // per-slot failure entries are unchanged.
     let mut memo: TypeConversionMemo = FxHashMap::default();
-    let mut conversions = 0usize;
-    let conversions_ref = &mut conversions;
-    let mut convert_memo =
-        |arena: &MonoInterner, ty: TyId, generics_bound: &mut usize| match memo.entry(ty) {
-            std::collections::hash_map::Entry::Occupied(hit) => match hit.get() {
-                Ok((id, delta)) => {
-                    *generics_bound += delta;
-                    Ok(*id)
-                }
-                Err(reason) => Err(reason.clone()),
-            },
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                *conversions_ref += 1;
-                let mut delta = 0usize;
-                let converted = arena.convert_counting(ws, inf, ty, subst, &mut delta);
-                *generics_bound += delta;
-                slot.insert(converted.clone().map(|id| (id, delta)));
-                converted
-            }
-        };
+    let mut convert_memo = |ty: TyId| {
+        memo.entry(ty)
+            .or_insert_with(|| arena.convert(ws, inf, ty, subst))
+            .clone()
+    };
     for (e, ty) in inf.expr_types.iter() {
         c.expr_examined += 1;
-        match convert_memo(arena, *ty, &mut c.generics_bound) {
+        match convert_memo(*ty) {
             Ok(id) => {
                 c.expr_types.insert(e, id);
             }
             Err(reason) => c.failures.push(FreeType {
                 slot: Slot::Expr(e),
                 reason,
-                span: body
-                    .expr_spans
-                    .get(e)
-                    .copied()
-                    .unwrap_or_else(Span::unknown),
             }),
         }
     }
 
-    for (e, expr) in body.expr_arena.iter() {
+    for (e, _) in body.expr_arena.iter() {
         if inf.expr_types.get(e).is_none() {
-            c.untyped_exprs.push(UntypedExpr {
-                expr: e,
-                kind: expr_kind(expr),
-                span: body
-                    .expr_spans
-                    .get(e)
-                    .copied()
-                    .unwrap_or_else(Span::unknown),
-            });
+            c.untyped_exprs.push(e);
         }
     }
     for (b, _) in body.binding_arena.iter() {
@@ -914,22 +497,16 @@ pub fn convert_body(
 
     for (b, ty) in inf.binding_types.iter() {
         c.binding_examined += 1;
-        match convert_memo(arena, *ty, &mut c.generics_bound) {
+        match convert_memo(*ty) {
             Ok(id) => {
                 c.binding_types.insert(b, id);
             }
             Err(reason) => c.failures.push(FreeType {
                 slot: Slot::Binding(b),
                 reason,
-                span: body
-                    .binding_spans
-                    .get(b)
-                    .copied()
-                    .unwrap_or_else(Span::unknown),
             }),
         }
     }
-    c.conversions = conversions;
     c.type_memo = memo;
     c
 }
@@ -1021,7 +598,7 @@ fn concrete_tables(
     )?;
     let struct_field_types =
         concrete_struct_field_types(ws, g, body, &converted.expr_types, stats, timing_enabled)?;
-    let mut untyped_exprs: FxHashSet<_> = converted.untyped_exprs.iter().map(|u| u.expr).collect();
+    let mut untyped_exprs: FxHashSet<_> = converted.untyped_exprs.iter().copied().collect();
     let mut untyped_bindings: FxHashSet<_> = converted.untyped_bindings.iter().copied().collect();
     for failure in &converted.failures {
         match (&failure.slot, &failure.reason) {
@@ -1151,11 +728,11 @@ fn concrete_ty_types(
                 } else {
                     stats.type_node_conversion_attempts += 1;
                     let converted = arena.convert(ws, inf, ty, subst);
-                    memo.insert(ty, converted.clone().map(|id| (id, 0)));
-                    converted.map(|id| (id, 0))
+                    memo.insert(ty, converted.clone());
+                    converted
                 };
                 match converted {
-                    Ok((id, _)) => Some(Ok((ty, id))),
+                    Ok(id) => Some(Ok((ty, id))),
                     Err(MonoTyReason::UnresolvedInfer(_)) => {
                         stats.type_node_unresolved += 1;
                         None
@@ -1211,7 +788,7 @@ struct BuiltInstance {
     instance: Instance,
     plan: Result<ConcreteBodyPlan, MonoTyReason>,
     candidate_refs: FxHashSet<Instance>,
-    facts: OwnerFacts,
+    stats: ConcreteBuildStats,
     convert_time: std::time::Duration,
     callee_time: std::time::Duration,
     plan_time: std::time::Duration,
@@ -1225,86 +802,17 @@ struct BuiltInstance {
     reason = "Keep successful results inline rather than adding a per-instance allocation"
 )]
 enum InstanceResult {
-    Gap(MissingBody),
+    Skipped(Instance),
     Built(BuiltInstance),
 }
 
 impl InstanceResult {
     fn instance(&self) -> &Instance {
         match self {
-            Self::Gap(gap) => &gap.instance,
+            Self::Skipped(instance) => instance,
             Self::Built(built) => &built.instance,
         }
     }
-}
-
-/// Compact per-owner callee census with exact incremental retraction.
-#[derive(Clone, Default)]
-struct CalleeSummary {
-    bodies: usize,
-    direct_calls: usize,
-    fn_values: usize,
-    synthesized_calls: usize,
-    iterator_ops: BTreeMap<&'static str, usize>,
-    rock_callees: usize,
-    boundary_callees: usize,
-}
-
-impl CalleeSummary {
-    fn record_classified(&mut self, site: &Site, boundary: bool) {
-        match &site.op {
-            SiteOp::DirectCall => self.direct_calls += 1,
-            SiteOp::FnValue => self.fn_values += 1,
-            SiteOp::Synthesized(_) | SiteOp::Dispatched { .. } => {
-                self.synthesized_calls += 1;
-            }
-            SiteOp::ForIter => *self.iterator_ops.entry("iter").or_insert(0) += 1,
-            SiteOp::ForNext(_) => *self.iterator_ops.entry("next").or_insert(0) += 1,
-            SiteOp::ImplicitIter => *self.iterator_ops.entry("implicit-iter").or_insert(0) += 1,
-            SiteOp::BoundNext(_) => *self.iterator_ops.entry("bound-next").or_insert(0) += 1,
-        }
-        if boundary {
-            self.boundary_callees += 1;
-        } else {
-            self.rock_callees += 1;
-        }
-    }
-
-    fn add(&mut self, other: &Self) {
-        self.bodies += other.bodies;
-        self.direct_calls += other.direct_calls;
-        self.fn_values += other.fn_values;
-        self.synthesized_calls += other.synthesized_calls;
-        for (kind, count) in &other.iterator_ops {
-            *self.iterator_ops.entry(kind).or_insert(0) += count;
-        }
-        self.rock_callees += other.rock_callees;
-        self.boundary_callees += other.boundary_callees;
-    }
-}
-
-#[derive(Clone, Default)]
-struct OwnerFacts {
-    plan_failures: Vec<(Instance, MonoTyReason)>,
-    always_plan_failures: Vec<(ConcreteOwner, MonoTyReason)>,
-    free_types: Vec<(Instance, FreeType)>,
-    gaps: Vec<MissingBody>,
-    expr_examined: usize,
-    binding_examined: usize,
-    generics_bound: usize,
-    untyped: Vec<(Instance, UntypedExpr)>,
-    untyped_bindings: usize,
-    expr_slots: usize,
-    binding_slots: usize,
-    generic_bodies: usize,
-    sites_examined: usize,
-    callee_holes: Vec<CalleeHole>,
-    unknown_rock_callees: Vec<(Instance, Site)>,
-    untyped_as_callee_key: BTreeMap<&'static str, usize>,
-    signature_requests: usize,
-    slot_conversions: usize,
-    callee_summary: CalleeSummary,
-    build_stats: ConcreteBuildStats,
 }
 
 fn concrete_owner_order(left: &ConcreteOwner, right: &ConcreteOwner) -> std::cmp::Ordering {
@@ -1343,66 +851,6 @@ fn concrete_owner_order(left: &ConcreteOwner, right: &ConcreteOwner) -> std::cmp
                 .then(left_index.cmp(right_index)),
             _ => Ordering::Equal,
         })
-}
-
-impl OwnerFacts {
-    fn shift_spans(&mut self, edit: &TextEditDelta) {
-        for (_, failure) in &mut self.free_types {
-            edit.shift_span(&mut failure.span);
-        }
-        for (_, untyped) in &mut self.untyped {
-            edit.shift_span(&mut untyped.span);
-        }
-        for hole in &mut self.callee_holes {
-            edit.shift_span(&mut hole.span);
-        }
-    }
-
-    fn accumulate_into(&self, out: &mut OwnerFacts) {
-        out.plan_failures.extend(self.plan_failures.iter().cloned());
-        out.always_plan_failures
-            .extend(self.always_plan_failures.iter().cloned());
-        out.free_types.extend(self.free_types.iter().cloned());
-        out.gaps.extend(self.gaps.iter().cloned());
-        out.expr_examined += self.expr_examined;
-        out.binding_examined += self.binding_examined;
-        out.generics_bound += self.generics_bound;
-        out.untyped.extend(self.untyped.iter().cloned());
-        out.untyped_bindings += self.untyped_bindings;
-        out.expr_slots += self.expr_slots;
-        out.binding_slots += self.binding_slots;
-        out.generic_bodies += self.generic_bodies;
-        out.sites_examined += self.sites_examined;
-        out.callee_holes.extend(self.callee_holes.iter().cloned());
-        out.unknown_rock_callees
-            .extend(self.unknown_rock_callees.iter().cloned());
-        for (kind, count) in &self.untyped_as_callee_key {
-            *out.untyped_as_callee_key.entry(kind).or_insert(0) += count;
-        }
-        out.signature_requests += self.signature_requests;
-        out.slot_conversions += self.slot_conversions;
-        out.callee_summary.add(&self.callee_summary);
-        out.build_stats.add(self.build_stats);
-    }
-
-    fn sort_for_output(&mut self) {
-        self.free_types.sort_by(|left, right| left.0.cmp(&right.0));
-        self.gaps
-            .sort_by(|left, right| left.instance.cmp(&right.instance));
-        self.plan_failures
-            .sort_by(|left, right| left.0.cmp(&right.0));
-        self.always_plan_failures
-            .sort_by(|left, right| concrete_owner_order(&left.0, &right.0));
-        self.untyped.sort_by(|left, right| left.0.cmp(&right.0));
-        self.callee_holes.sort_by(|left, right| {
-            left.instance
-                .cmp(&right.instance)
-                .then_with(|| left.site.cmp(&right.site))
-                .then_with(|| left.reason.cmp(right.reason))
-        });
-        self.unknown_rock_callees
-            .sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-    }
 }
 
 type PublishedSignatures = FxHashMap<Instance, Result<ConcreteSignatureHandle, MonoTyReason>>;
@@ -1517,7 +965,7 @@ fn publish_signatures(
     ws: &Workspace,
     g: &InstanceGraph,
     instances: Vec<&Instance>,
-) -> (PublishedSignatures, usize, std::time::Duration) {
+) -> (PublishedSignatures, std::time::Duration) {
     let started = bone_core::prelude::Instant::now();
     // Each signature converts one declaration's types against the shared
     // interner, which locks only for a type it has not seen; the table is
@@ -1540,14 +988,12 @@ fn publish_signatures(
             .collect()
     };
     let elapsed = started.elapsed();
-    let derivations = published.len();
-    (published, derivations, elapsed)
+    (published, elapsed)
 }
 
 /// What a fresh build publishes for every body plan to read.
 struct Publication {
     signatures: PublishedSignatures,
-    signature_derivations: usize,
     domains: PublishedDomains,
     stats: ConcreteBuildStats,
     signature_time: std::time::Duration,
@@ -1557,7 +1003,7 @@ struct Publication {
 fn publish(ws: &Workspace, g: &InstanceGraph, timing_enabled: bool) -> Publication {
     let started = bone_core::prelude::Instant::now();
     let PublicationInputs { instances, domains } = collect_publication_inputs(g);
-    let (signatures, signature_derivations, signature_cpu) = publish_signatures(ws, g, instances);
+    let (signatures, signature_cpu) = publish_signatures(ws, g, instances);
     let signature_time = started.elapsed();
     let mut stats = ConcreteBuildStats::default();
     let started = bone_core::prelude::Instant::now();
@@ -1565,7 +1011,6 @@ fn publish(ws: &Workspace, g: &InstanceGraph, timing_enabled: bool) -> Publicati
     stats.signature_ns += signature_cpu.as_nanos() as u64;
     Publication {
         signatures,
-        signature_derivations,
         domains,
         stats,
         signature_time,
@@ -1661,9 +1106,8 @@ fn build_instance_delta(
         .cloned()
         .map(
             |instance| match prepare_instance(ws, g, instance, timing_enabled) {
-                PreparedInstanceResult::Gap(gap) => InstanceResult::Gap(gap),
+                PreparedInstanceResult::Skipped(gap) => InstanceResult::Skipped(gap),
                 PreparedInstanceResult::Ready(prepared) => InstanceResult::Built(produce_instance(
-                    ws,
                     g,
                     prepared,
                     &signatures,
@@ -1750,9 +1194,8 @@ fn publish_foreign_domains(
 struct PreparedInstance {
     instance: Instance,
     types: ConcreteTypeTables,
-    untyped: Vec<UntypedExpr>,
     type_error: Option<MonoTyReason>,
-    facts: OwnerFacts,
+    stats: ConcreteBuildStats,
     convert_time: std::time::Duration,
     elapsed: std::time::Duration,
     slot_tyids: usize,
@@ -1764,7 +1207,7 @@ struct PreparedInstance {
     reason = "Keep successful results inline rather than adding a per-instance allocation"
 )]
 enum PreparedInstanceResult {
-    Gap(MissingBody),
+    Skipped(Instance),
     Ready(PreparedInstance),
 }
 
@@ -1776,40 +1219,25 @@ fn prepare_instance(
 ) -> PreparedInstanceResult {
     let t_inst = bone_core::prelude::Instant::now();
     if g.has_bound_tree_disagreement(&inst) {
-        return PreparedInstanceResult::Gap(MissingBody {
-            instance: inst,
-            gap: BodyGap::InconsistentBounds,
-        });
+        return PreparedInstanceResult::Skipped(inst);
     }
     let Some(subst) = g.substitution(&inst).cloned() else {
-        return PreparedInstanceResult::Gap(MissingBody {
-            instance: inst,
-            gap: BodyGap::NoSubstitution,
-        });
+        return PreparedInstanceResult::Skipped(inst);
     };
     let (inf, body) = match function_body(ws, inst.func) {
         FunctionBody::Ready { inf, body } => (inf, body),
         FunctionBody::NoInference => {
-            return PreparedInstanceResult::Gap(MissingBody {
-                instance: inst,
-                gap: BodyGap::NoInference,
-            });
+            return PreparedInstanceResult::Skipped(inst);
         }
         FunctionBody::NoBody => {
-            return PreparedInstanceResult::Gap(MissingBody {
-                instance: inst,
-                gap: BodyGap::NoBody,
-            });
+            return PreparedInstanceResult::Skipped(inst);
         }
         FunctionBody::StaleInference => {
-            return PreparedInstanceResult::Gap(MissingBody {
-                instance: inst,
-                gap: BodyGap::StaleInference,
-            });
+            return PreparedInstanceResult::Skipped(inst);
         }
     };
 
-    let mut facts = OwnerFacts::default();
+    let mut stats = ConcreteBuildStats::default();
     let (slot_tyids, unique_slot_tyids) = if timing_enabled {
         let tyids: FxHashSet<TyId> = inf
             .expr_types
@@ -1830,27 +1258,14 @@ fn prepare_instance(
     let started = bone_core::prelude::Instant::now();
     let converted = convert_body(g.interner(), ws, inf, body, &subst);
     let convert_time = started.elapsed();
-    facts.expr_examined = converted.expr_examined;
-    facts.binding_examined = converted.binding_examined;
-    facts.build_stats.source_expr_slots = converted.expr_examined;
-    facts.build_stats.source_binding_slots = converted.binding_examined;
-    facts.generics_bound = converted.generics_bound;
-    facts.slot_conversions = converted.conversions;
-    facts.generic_bodies = usize::from(!subst.is_empty());
+    stats.source_expr_slots = converted.expr_examined;
+    stats.source_binding_slots = converted.binding_examined;
     let untyped = converted.untyped_exprs;
-    facts.untyped_bindings = converted.untyped_bindings.len();
-    facts.expr_slots = body.expr_arena.len();
-    facts.binding_slots = body.binding_arena.len();
     let failures = converted.failures;
-    facts.free_types = failures
-        .iter()
-        .cloned()
-        .map(|failure| (inst.clone(), failure))
-        .collect();
     let mut types = ConcreteTypeTables {
         expr_types: converted.expr_types,
         binding_types: converted.binding_types,
-        untyped_exprs: untyped.iter().map(|u| u.expr).collect(),
+        untyped_exprs: untyped.iter().copied().collect(),
         untyped_bindings: converted.untyped_bindings.iter().copied().collect(),
         ..Default::default()
     };
@@ -1880,7 +1295,7 @@ fn prepare_instance(
         &subst,
         declared_types,
         &mut memo,
-        &mut facts.build_stats,
+        &mut stats,
         timing_enabled,
     ) {
         Ok(ty_types) => match concrete_struct_field_types(
@@ -1888,7 +1303,7 @@ fn prepare_instance(
             g,
             body,
             &types.expr_types,
-            &mut facts.build_stats,
+            &mut stats,
             timing_enabled,
         ) {
             Ok(struct_field_types) => {
@@ -1903,9 +1318,8 @@ fn prepare_instance(
     PreparedInstanceResult::Ready(PreparedInstance {
         instance: inst,
         types,
-        untyped,
         type_error,
-        facts,
+        stats,
         convert_time,
         elapsed: t_inst.elapsed(),
         slot_tyids,
@@ -1921,7 +1335,7 @@ struct PreparedAlways {
     types: Option<ConcreteTypeTables>,
     type_error: Option<MonoTyReason>,
     skip: bool,
-    facts: OwnerFacts,
+    stats: ConcreteBuildStats,
 }
 
 fn concrete_owner_for(
@@ -1962,7 +1376,7 @@ fn prepare_always(
             types: None,
             type_error: Some(MonoTyReason::NoNode),
             skip: false,
-            facts: OwnerFacts::default(),
+            stats: ConcreteBuildStats::default(),
         };
     };
     if matches!(body_owner, BodyOwner::Global(_)) && body.root.is_none() {
@@ -1974,7 +1388,7 @@ fn prepare_always(
             types: None,
             type_error: None,
             skip: true,
-            facts: OwnerFacts::default(),
+            stats: ConcreteBuildStats::default(),
         };
     }
     let Some(inf) = ws
@@ -1989,10 +1403,10 @@ fn prepare_always(
             types: None,
             type_error: Some(MonoTyReason::NoNode),
             skip: false,
-            facts: OwnerFacts::default(),
+            stats: ConcreteBuildStats::default(),
         };
     };
-    let mut facts = OwnerFacts::default();
+    let mut stats = ConcreteBuildStats::default();
     let declared_types = match body_owner {
         BodyOwner::Global(index) => std::iter::once(ws.module(module).globals[index].ty)
             .collect::<Vec<_>>()
@@ -2010,7 +1424,7 @@ fn prepare_always(
         body,
         &MonoSubst::default(),
         declared_types,
-        &mut facts.build_stats,
+        &mut stats,
         timing_enabled,
     );
     let (types, type_error) = match result {
@@ -2025,7 +1439,7 @@ fn prepare_always(
         types,
         type_error,
         skip: false,
-        facts,
+        stats,
     }
 }
 
@@ -2063,15 +1477,13 @@ where
     Ok(out)
 }
 
-/// Project recorded graph sites into lowering plans and compact owner facts.
+/// Project recorded graph sites into lowering plans.
 fn concrete_plan_from_sites(
-    ws: &Workspace,
     g: &InstanceGraph,
     inst: &Instance,
     types: ConcreteTypeTables,
     type_error: Option<MonoTyReason>,
-    untyped: &[UntypedExpr],
-    facts: &mut OwnerFacts,
+    stats: &mut ConcreteBuildStats,
     signatures: &PublishedSignatures,
     domains: &PublishedDomains,
     timing_enabled: bool,
@@ -2080,40 +1492,18 @@ fn concrete_plan_from_sites(
     let mut candidate_refs = FxHashSet::default();
     let mut failed_sites = Vec::new();
     let mut site_domains = Vec::new();
-    let untyped_exprs: FxHashSet<Idx<Expr>> = untyped.iter().map(|expr| expr.expr).collect();
-    let mut untyped_callee_exprs = FxHashSet::default();
     let mut callee_signature_error: Option<(u8, Site, MonoTyReason)> = None;
     let signature_started = timing_enabled.then(bone_core::prelude::Instant::now);
 
-    facts.build_stats.callee_scans += 1;
+    stats.callee_scans += 1;
     if let Some(sites) = g.sites_of(inst) {
-        facts.build_stats.callee_rows_visited += sites.len();
+        stats.callee_rows_visited += sites.len();
         for (site, record) in sites {
-            facts.sites_examined += 1;
             match &record.outcome {
                 SiteOutcome::Failed(reason) => {
-                    facts.callee_holes.push(CalleeHole {
-                        instance: inst.clone(),
-                        site: site.clone(),
-                        reason,
-                        span: record.span,
-                    });
                     failed_sites.push((site.clone(), *reason));
                 }
                 SiteOutcome::Resolved(target) => {
-                    let function = &ws.module(target.func.module).functions[target.func.func];
-                    let class = boundary_class_for(function);
-                    let boundary = class.is_some();
-                    facts.callee_summary.record_classified(site, boundary);
-                    if !boundary && !g.instances.contains(target) {
-                        facts
-                            .unknown_rock_callees
-                            .push((inst.clone(), site.clone()));
-                    }
-                    if untyped_exprs.contains(&site.expr) {
-                        untyped_callee_exprs.insert(site.expr);
-                    }
-
                     let callee_instance = target.clone();
                     candidate_refs.insert(target.clone());
                     match signatures.get(target) {
@@ -2156,27 +1546,13 @@ fn concrete_plan_from_sites(
         }
     }
 
-    for expression in untyped {
-        if untyped_callee_exprs.contains(&expression.expr) {
-            *facts
-                .untyped_as_callee_key
-                .entry(expression.kind)
-                .or_insert(0) += 1;
-        }
-    }
-    facts.signature_requests += facts.callee_summary.direct_calls
-        + facts.callee_summary.fn_values
-        + facts.callee_summary.synthesized_calls
-        + facts.callee_summary.iterator_ops.values().sum::<usize>()
-        + 1;
-
     let owner_signature = match signatures.get(inst) {
         Some(Ok(signature)) => Ok(signature.clone()),
         Some(Err(reason)) => Err(reason.clone()),
         None => Err(MonoTyReason::NoNode),
     };
     if let Some(started) = signature_started {
-        facts.build_stats.signature_ns += started.elapsed().as_nanos() as u64;
+        stats.signature_ns += started.elapsed().as_nanos() as u64;
     }
     if let Some((_, _, reason)) = callee_signature_error {
         return Err(reason);
@@ -2194,11 +1570,11 @@ fn concrete_plan_from_sites(
     let foreign_domains = foreign_domains_from_publication(
         default_domains.chain(site_domains),
         domains,
-        &mut facts.build_stats,
+        stats,
         timing_enabled,
     )?;
-    facts.build_stats.plan_callee_map_inserts += callees.len();
-    facts.build_stats.plan_callee_signature_inserts += callees.len();
+    stats.plan_callee_map_inserts += callees.len();
+    stats.plan_callee_signature_inserts += callees.len();
     Ok((
         ConcreteBodyPlan {
             owner: ConcreteOwner::Function(inst.clone()),
@@ -2227,7 +1603,6 @@ fn callee_table_rank(site: &Site) -> u8 {
 }
 
 fn produce_instance(
-    ws: &Workspace,
     g: &InstanceGraph,
     prepared: PreparedInstance,
     signatures: &PublishedSignatures,
@@ -2238,26 +1613,22 @@ fn produce_instance(
     let PreparedInstance {
         instance: inst,
         types,
-        untyped,
         type_error,
-        mut facts,
+        mut stats,
         convert_time,
         elapsed: preparation_time,
         slot_tyids,
         unique_slot_tyids,
     } = prepared;
-    facts.callee_summary.bodies = 1;
     let callee_time = std::time::Duration::ZERO;
     let started = bone_core::prelude::Instant::now();
-    facts.build_stats.plan_attempts += 1;
+    stats.plan_attempts += 1;
     let plan_result = concrete_plan_from_sites(
-        ws,
         g,
         &inst,
         types,
         type_error,
-        &untyped,
-        &mut facts,
+        &mut stats,
         signatures,
         domains,
         timing_enabled,
@@ -2266,23 +1637,17 @@ fn produce_instance(
         Ok((plan, candidate_refs)) => (Ok(plan), candidate_refs),
         Err(reason) => (Err(reason), FxHashSet::default()),
     };
-    facts.untyped.extend(
-        untyped
-            .into_iter()
-            .map(|untyped_expr| (inst.clone(), untyped_expr)),
-    );
     let plan_time = started.elapsed();
-    if let Err(reason) = &plan {
-        facts.build_stats.plan_failures += 1;
-        facts.plan_failures.push((inst.clone(), reason.clone()));
+    if plan.is_err() {
+        stats.plan_failures += 1;
     } else {
-        facts.build_stats.plan_successes += 1;
+        stats.plan_successes += 1;
     }
     BuiltInstance {
         instance: inst,
         plan,
         candidate_refs,
-        facts,
+        stats,
         convert_time,
         callee_time,
         plan_time,
@@ -2296,7 +1661,7 @@ struct BuiltAlways {
     order: usize,
     owner: Option<ConcreteOwner>,
     plan: Result<Option<ConcreteBodyPlan>, MonoTyReason>,
-    facts: OwnerFacts,
+    stats: ConcreteBuildStats,
 }
 
 fn produce_always(
@@ -2315,15 +1680,15 @@ fn produce_always(
         types,
         type_error,
         skip,
-        mut facts,
+        mut stats,
     } = prepared;
-    facts.build_stats.always_plan_attempts += 1;
+    stats.always_plan_attempts += 1;
     if skip {
         return BuiltAlways {
             order,
             owner,
             plan: Ok(None),
-            facts,
+            stats,
         };
     }
     let Some(types) = types else {
@@ -2331,7 +1696,7 @@ fn produce_always(
             order,
             owner,
             plan: Err(type_error.unwrap_or(MonoTyReason::NoNode)),
-            facts,
+            stats,
         };
     };
     if let Some(reason) = type_error {
@@ -2339,7 +1704,7 @@ fn produce_always(
             order,
             owner,
             plan: Err(reason),
-            facts,
+            stats,
         };
     }
     let contribution = match g
@@ -2352,7 +1717,7 @@ fn produce_always(
                 order,
                 owner,
                 plan: Err(MonoTyReason::NoNode),
-                facts,
+                stats,
             };
         }
     };
@@ -2362,7 +1727,6 @@ fn produce_always(
     for (site, record) in &contribution.always_call_sites {
         match &record.outcome {
             SiteOutcome::Resolved(instance) => {
-                facts.signature_requests += 1;
                 let signature = match signatures.get(instance) {
                     Some(Ok(signature)) => signature.clone(),
                     Some(Err(reason)) => {
@@ -2370,7 +1734,7 @@ fn produce_always(
                             order,
                             owner,
                             plan: Err(reason.clone()),
-                            facts,
+                            stats,
                         };
                     }
                     None => {
@@ -2378,7 +1742,7 @@ fn produce_always(
                             order,
                             owner,
                             plan: Err(MonoTyReason::NoNode),
-                            facts,
+                            stats,
                         };
                     }
                 };
@@ -2403,7 +1767,7 @@ fn produce_always(
     let foreign_domains = match foreign_domains_from_publication(
         default_domains.chain(site_domains),
         domains,
-        &mut facts.build_stats,
+        &mut stats,
         timing_enabled,
     ) {
         Ok(foreign_domains) => foreign_domains,
@@ -2412,7 +1776,7 @@ fn produce_always(
                 order,
                 owner,
                 plan: Err(reason),
-                facts,
+                stats,
             };
         }
     };
@@ -2426,7 +1790,7 @@ fn produce_always(
                         order,
                         owner,
                         plan: Err(MonoTyReason::NoNode),
-                        facts,
+                        stats,
                     };
                 }
             };
@@ -2444,7 +1808,7 @@ fn produce_always(
                         order,
                         owner,
                         plan: Err(MonoTyReason::NoNode),
-                        facts,
+                        stats,
                     };
                 }
             };
@@ -2455,7 +1819,7 @@ fn produce_always(
                         order,
                         owner,
                         plan: Err(MonoTyReason::NoNode),
-                        facts,
+                        stats,
                     };
                 };
                 params.push(ty);
@@ -2466,7 +1830,7 @@ fn produce_always(
                         order,
                         owner,
                         plan: Err(MonoTyReason::NoNode),
-                        facts,
+                        stats,
                     };
                 };
                 params.push(ty);
@@ -2485,12 +1849,12 @@ fn produce_always(
                 order,
                 owner,
                 plan: Ok(None),
-                facts,
+                stats,
             }
         }
     };
     if let Some(started) = signature_started {
-        facts.build_stats.signature_ns += started.elapsed().as_nanos() as u64;
+        stats.signature_ns += started.elapsed().as_nanos() as u64;
     }
     let plan = ConcreteBodyPlan {
         owner: owner
@@ -2504,12 +1868,12 @@ fn produce_always(
         failed_sites,
         bound_tree: Default::default(),
     };
-    facts.build_stats.always_plan_successes += 1;
+    stats.always_plan_successes += 1;
     BuiltAlways {
         order,
         owner,
         plan: Ok(Some(plan)),
-        facts,
+        stats,
     }
 }
 
@@ -2528,7 +1892,6 @@ where
 /// values copied into a ready list first cost more serial time than the copy
 /// suggests.
 fn produce_instances(
-    ws: &Workspace,
     g: &InstanceGraph,
     prepared: Vec<PreparedInstanceResult>,
     signatures: &PublishedSignatures,
@@ -2536,9 +1899,8 @@ fn produce_instances(
     timing_enabled: bool,
 ) -> Vec<InstanceResult> {
     concrete_map(prepared, |prepared| match prepared {
-        PreparedInstanceResult::Gap(gap) => InstanceResult::Gap(gap),
+        PreparedInstanceResult::Skipped(gap) => InstanceResult::Skipped(gap),
         PreparedInstanceResult::Ready(instance) => InstanceResult::Built(produce_instance(
-            ws,
             g,
             instance,
             signatures,
@@ -2613,7 +1975,6 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
     let preparation_time = t_preparation.elapsed();
     let Publication {
         signatures,
-        signature_derivations,
         domains: published_domains,
         stats: publication_stats,
         signature_time: signature_publication_time,
@@ -2626,7 +1987,6 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
     let partition_time = t_partition.elapsed();
     let t_ordinary_parallel = bone_core::prelude::Instant::now();
     let mut results = produce_instances(
-        ws,
         g,
         prepared,
         signatures.as_ref(),
@@ -2641,7 +2001,7 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
         global_build_stats: publication_stats,
         ..ConcreteBodies::default()
     };
-    out.instance_facts.reserve(results.len());
+    out.instance_stats.reserve(results.len());
     let mut candidate_ref_rows = 0usize;
     let mut owner_candidates: FxHashMap<Instance, FxHashSet<Instance>> = FxHashMap::default();
     owner_candidates.reserve(results.len());
@@ -2677,7 +2037,7 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
     let mut t_plan = std::time::Duration::ZERO;
     let mut plan_insert_time = std::time::Duration::ZERO;
     let mut failure_index_time = std::time::Duration::ZERO;
-    let mut owner_fact_insert_time = std::time::Duration::ZERO;
+    let mut owner_stats_insert_time = std::time::Duration::ZERO;
     let mut slot_tyids = 0usize;
     let mut unique_slot_tyids = 0usize;
     // The candidate keys read only the rows taken above, so they are
@@ -2686,10 +2046,9 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
         bone_core::prelude::join_in_place(collect_candidate_keys, || {
             for result in results {
                 match result {
-                    InstanceResult::Gap(gap) => {
-                        let mut facts = OwnerFacts::default();
-                        facts.gaps.push(gap.clone());
-                        out.instance_facts.insert(gap.instance, facts);
+                    InstanceResult::Skipped(gap) => {
+                        out.instance_stats
+                            .insert(gap, ConcreteBuildStats::default());
                     }
                     InstanceResult::Built(built) => {
                         let instance = built.instance.clone();
@@ -2699,7 +2058,15 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
                         per_inst.push((instance.clone(), built.elapsed));
                         slot_tyids += built.slot_tyids;
                         unique_slot_tyids += built.unique_slot_tyids;
-                        let facts = built.facts;
+                        let stats = built.stats;
+                        let started = timing_enabled.then(bone_core::prelude::Instant::now);
+                        if let Err(reason) = &built.plan {
+                            out.plan_failure_index
+                                .insert(instance.clone(), reason.clone());
+                        }
+                        if let Some(started) = started {
+                            failure_index_time += started.elapsed();
+                        }
                         if let Ok(plan) = built.plan {
                             let started = timing_enabled.then(bone_core::prelude::Instant::now);
                             plan_rows.push((instance.clone(), Arc::new(plan)));
@@ -2708,14 +2075,9 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
                             }
                         }
                         let started = timing_enabled.then(bone_core::prelude::Instant::now);
-                        out.install_failure_index(&facts);
+                        out.instance_stats.insert(instance, stats);
                         if let Some(started) = started {
-                            failure_index_time += started.elapsed();
-                        }
-                        let started = timing_enabled.then(bone_core::prelude::Instant::now);
-                        out.instance_facts.insert(instance, facts);
-                        if let Some(started) = started {
-                            owner_fact_insert_time += started.elapsed();
+                            owner_stats_insert_time += started.elapsed();
                         }
                     }
                 }
@@ -2746,13 +2108,11 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
     always_results.sort_by_key(|result| result.order);
     for result in always_results {
         let owner = result.owner.clone();
-        let mut raw_facts = result.facts;
+        let stats = result.stats;
         if let (Some(owner), Err(reason)) = (&owner, &result.plan) {
-            raw_facts
-                .always_plan_failures
-                .push((owner.clone(), reason.clone()));
+            out.always_plan_failure_index
+                .insert(owner.clone(), reason.clone());
         }
-        let facts = raw_facts;
         match result.plan {
             Ok(Some(plan)) => {
                 out.always_plans.insert(plan.owner.clone(), plan);
@@ -2761,13 +2121,11 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
             Err(_) => {}
         }
         if let Some(owner) = owner {
-            out.install_failure_index(&facts);
-            out.always_facts.insert(owner, facts);
+            out.always_stats.insert(owner, stats);
         }
     }
     let always_merge_time = t_always_merge.elapsed();
     out.plans = std::sync::Arc::new(plans);
-    out.signature_derivations = signature_derivations;
     if log::log_enabled!(log::Level::Debug) {
         let intern_after = g.interner().stats();
         let total_time = t_build.elapsed();
@@ -2786,7 +2144,7 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
                 .get((per_inst.len().saturating_sub(1)) * p / 100)
                 .map_or(std::time::Duration::ZERO, |(_, duration)| *duration)
         };
-        let totals = out.aggregate_facts();
+        let totals = out.snapshot_build_stats();
         let top: Vec<String> = per_inst
             .iter()
             .rev()
@@ -2800,7 +2158,7 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
             })
             .collect();
         log::debug!(
-            "concrete build: {} expanded over {} decls ({} generic bodies), {} plans, {} gaps; \
+            "concrete build: {} expanded over {} decls, {} plans; \
              slots {} expr + {} binding; convert {:?}, callee tables {:?}, plans {:?}, \
              total {:?}; phases expansion {:?}, preparation {:?}, signature publication {:?}, \
              foreign publication {:?}, dispatch {:?}, ordinary fanout {:?}, ordinary merge {:?}, \
@@ -2808,14 +2166,12 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
              per-instance p50 {:?} p95 {:?} max {:?}, top [{}]; \
              slot tyids {} / {} unique per-body; mono interns {} attempts -> {} new during build; \
              type nodes {}/{} ({} memo hits, {} unresolved, {:?}), struct literals {} fields {} ({:?}), \
-             foreign domains {}/{} ({:?}), signatures {}/{} ({:?})",
+             foreign domains {}/{} ({:?}), signatures ({:?})",
             per_inst.len(),
             unique_decls.len(),
-            totals.generic_bodies,
             out.plans.len(),
-            totals.gaps.len(),
-            totals.expr_examined,
-            totals.binding_examined,
+            totals.source_expr_slots,
+            totals.source_binding_slots,
             t_convert,
             t_callee,
             t_plan,
@@ -2838,29 +2194,27 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
             unique_slot_tyids,
             intern_after.intern_attempts - intern_before.intern_attempts,
             intern_after.intern_new - intern_before.intern_new,
-            totals.build_stats.type_nodes_examined,
-            totals.build_stats.type_node_conversion_attempts,
-            totals.build_stats.type_node_memo_hits,
-            totals.build_stats.type_node_unresolved,
-            std::time::Duration::from_nanos(totals.build_stats.type_nodes_ns),
-            totals.build_stats.struct_literals_examined,
-            totals.build_stats.struct_field_conversion_attempts,
-            std::time::Duration::from_nanos(totals.build_stats.struct_fields_ns),
-            totals.build_stats.foreign_domain_requests,
-            totals.build_stats.foreign_domain_unique,
-            std::time::Duration::from_nanos(totals.build_stats.foreign_domains_ns),
-            totals.signature_requests,
-            out.signature_derivations,
-            std::time::Duration::from_nanos(totals.build_stats.signature_ns),
+            totals.type_nodes_examined,
+            totals.type_node_conversion_attempts,
+            totals.type_node_memo_hits,
+            totals.type_node_unresolved,
+            std::time::Duration::from_nanos(totals.type_nodes_ns),
+            totals.struct_literals_examined,
+            totals.struct_field_conversion_attempts,
+            std::time::Duration::from_nanos(totals.struct_fields_ns),
+            totals.foreign_domain_requests,
+            totals.foreign_domain_unique,
+            std::time::Duration::from_nanos(totals.foreign_domains_ns),
+            std::time::Duration::from_nanos(totals.signature_ns),
         );
         log::debug!(
             "concrete merge detail: candidate refs {} rows {:?}, plans {:?}, \
-             failures {:?}, owner facts {:?}",
+             failures {:?}, owner stats {:?}",
             candidate_ref_rows,
             candidate_install_time,
             plan_insert_time,
             failure_index_time,
-            owner_fact_insert_time,
+            owner_stats_insert_time,
         );
     }
     out

@@ -6,7 +6,7 @@
 //! generic. A table built under an empty substitution would fail every generic
 //! slot instead, which is what the mutation arm at the bottom asserts.
 
-use crate::common::{body_id, fn_name, fn_ref, graph_of, module_id, scalar_ctx, ws_with_stdlib};
+use crate::common::{body_id, fn_name, graph_of, module_id, scalar_ctx, ws_with_stdlib};
 use bone_semantic::hir::{BodyOwner, Expr, TypeExpr};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{ModuleId, TyId};
@@ -17,7 +17,6 @@ use skull_mir::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcretePlans};
 use skull_mir::mir::{Inst, MirFunc, Term};
 use skull_mir::monoty::{MonoTy, MonoTyReason};
 use skull_parser::CompilerError;
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use ustr::Ustr;
 
@@ -911,13 +910,7 @@ fn main() { let x = G }
     );
 }
 
-/// Every instance the walk EXPANDED gets a body, and every one of its slots is
-/// concrete. The denominator is stated: zero free types over zero examined
-/// slots would be no evidence at all.
-///
-/// The tables are per-INSTANCE. `ident<int>` and `ident<string>` share one HIR
-/// body, so the same `Idx<Expr>` must map to two different `MonoTyId`s -- if the
-/// tables were built once per FUNCTION this is the assertion that fails.
+/// One generic HIR body needs different concrete type tables for each instance.
 #[test]
 fn every_expanded_instance_has_a_fully_concrete_per_instance_body() {
     let (ws, g, bodies) = bodies_of(
@@ -929,47 +922,6 @@ fn main() {
 }
 "#,
     );
-    let c = bodies.census();
-    assert!(
-        c.expr_examined > 0,
-        "no expression slots were converted: {c:?}"
-    );
-    assert!(
-        c.binding_examined > 0,
-        "no binding slots were converted: {c:?}"
-    );
-    assert_eq!(
-        c.free_by_reason.values().sum::<usize>(),
-        0,
-        "free types in supposedly concrete bodies, over {} expr and {} binding slots: {:?}",
-        c.expr_examined,
-        c.binding_examined,
-        bodies
-            .render_free_types(&ws, &g)
-            .iter()
-            .take(10)
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        c.gaps.values().sum::<usize>(),
-        0,
-        "expanded instances with no body: {:?}",
-        c.gaps
-    );
-    // The zero above is only as strong as the space it was measured over: a
-    // body that never consults its substitution reports no free types for the
-    // trivial reason. These say the substitution was actually load-bearing.
-    assert!(
-        c.generic_bodies > 0,
-        "no body was built under a non-empty substitution: {c:?}"
-    );
-    assert!(
-        c.generics_bound > 0,
-        "no slot resolved a declared generic through the substitution, so zero \
-         free types says nothing: {c:?}"
-    );
-    // Every expanded instance, generic or not (`main` has an empty
-    // substitution, not an absent one).
     for i in g.expanded() {
         assert!(
             bodies.plans.contains_key(i),
@@ -1045,19 +997,12 @@ fn main() { let a = plain(1) }
         !bodies.plans.contains_key(&inst),
         "stale inference produced a ConcreteBody"
     );
-    let census = bodies.census();
-    assert!(
-        census.gaps.contains_key("stale-inference"),
-        "stale inference was not classified: {:?}",
-        census.gaps
-    );
 }
 
-/// The failure arm fires, and says WHERE. Perturbing only the CONSUMER's
+/// Perturbing only the CONSUMER's
 /// substitution -- the table builder's, never the walk's -- leaves a generic
-/// body's slots unbound, which is exactly the condition the corpus census
-/// reports zero of. A symmetric perturbation could not distinguish this arm
-/// from a dead one.
+/// body's slots unbound. A symmetric perturbation could not distinguish this
+/// arm from a dead one.
 #[test]
 fn an_empty_substitution_leaves_the_generic_slots_unbound() {
     let ws = ws_with_stdlib(
@@ -1086,7 +1031,7 @@ fn main() { let a = ident(1) }
         "the real substitution left slots unbound: {:?}",
         with.failures
     );
-    assert!(with.examined() > 0);
+    assert!(with.expr_types.values().next().is_some());
 
     let without = concrete_body::convert_body(g.interner(), &ws, inf, body, &Default::default());
     assert!(
@@ -1106,14 +1051,6 @@ fn main() { let a = ident(1) }
             .map(|f| f.reason.bucket())
             .collect::<Vec<_>>()
     );
-    // A failure with no location cannot become a compile error at the cutover.
-    for f in &without.failures {
-        assert!(
-            !instance_graph::is_spanless(&f.span),
-            "a free-type failure at {:?} carries no span",
-            f.slot
-        );
-    }
     assert!(
         without
             .failures
@@ -1123,136 +1060,6 @@ fn main() { let a = ident(1) }
     );
 }
 
-/// Inference omits types for these four expression kinds. The annotated and
-/// inferred assignment controls show that the fixture distinguishes typed and
-/// untyped targets; none of its untyped expressions may key a callee. If
-/// inference starts typing a kind, revisit this pinned set.
-#[test]
-fn untyped_expression_slots_are_pinned() {
-    const PINNED: [&str; 4] = ["Call", "IfLet", "Range", "Var"];
-    let (ws, g, bodies) = bodies_of(
-        r#"
-fn body(v: [int]) -> int {
-    let total = 0
-    for i in 0..3 { total = total + i }
-    for (i, x) in enumerate(v) { total = total + i + x }
-    let m: int? = 1
-    if let y = m { total = total + y }
-    // An ANNOTATED binding: assigning to an inferred one records a type for the
-    // target, so the annotation is the discriminant, not the assignment.
-    let annotated: int = 0
-    if v.len() > 0 { annotated = 1 } else { annotated = 2 }
-    let inferred = 0
-    if v.len() > 0 { inferred = 1 } else { inferred = 2 }
-    return total + annotated + inferred
-}
-fn main() { let a = body([1, 2]) }
-"#,
-    );
-    let body_inst = bodies
-        .plans
-        .keys()
-        .find(|i| g.identity(&ws, i).starts_with("body"))
-        .expect("`body` has no concrete plan");
-    let hir_body = ws
-        .module(body_inst.func.module)
-        .bodies
-        .get(&bone_semantic::hir::BodyOwner::Function(
-            body_inst.func.func,
-        ))
-        .expect("`body` has no HIR body");
-    let body_types = &bodies.plans[body_inst].types;
-    let kinds = body_types
-        .untyped_exprs
-        .iter()
-        .map(|expr| match hir_body.expr_arena[*expr] {
-            Expr::Call { .. } => "Call",
-            Expr::IfLet { .. } => "IfLet",
-            Expr::Range { .. } => "Range",
-            Expr::Var(..) => "Var",
-            ref other => panic!("unexpected untyped expression: {other:?}"),
-        })
-        .collect::<BTreeSet<_>>();
-    assert_eq!(kinds.iter().copied().collect::<Vec<_>>(), PINNED);
-    let mut annotated_targets = Vec::new();
-    let mut inferred_targets = Vec::new();
-    for (_, expr) in hir_body.expr_arena.iter() {
-        let Expr::Assign { target, .. } = expr else {
-            continue;
-        };
-        let Expr::Var(binding) = hir_body.expr_arena[*target] else {
-            continue;
-        };
-        match hir_body.binding_arena[binding].name.as_str() {
-            "annotated" => annotated_targets.push(*target),
-            "inferred" => inferred_targets.push(*target),
-            _ => {}
-        }
-    }
-    assert_eq!(
-        annotated_targets.len(),
-        2,
-        "fixture has the wrong annotated targets"
-    );
-    assert_eq!(
-        inferred_targets.len(),
-        2,
-        "fixture has the wrong inferred targets"
-    );
-    assert!(
-        annotated_targets
-            .iter()
-            .all(|target| !body_types.expr_types.contains_idx(*target)),
-        "annotated assignment targets are no longer untyped; flip this sentinel"
-    );
-    assert!(
-        inferred_targets
-            .iter()
-            .all(|target| body_types.expr_types.contains_idx(*target)),
-        "the inferred assignment control became untyped"
-    );
-    assert!(
-        body_types.expr_types.values().count() > 20,
-        "almost nothing in `body` was typed, so the pinned kinds are not what is special"
-    );
-    let sites = g
-        .call_sites()
-        .find(|(instance, _)| *instance == body_inst)
-        .map(|(_, sites)| sites)
-        .expect("body has no graph sites");
-    assert!(
-        sites
-            .keys()
-            .any(|site| matches!(site.op, SiteOp::DirectCall))
-    );
-    let census = bodies.census();
-    assert!(census.untyped_as_callee_key.is_empty());
-    for header in body_types
-        .untyped_exprs
-        .iter()
-        .filter(|expr| matches!(hir_body.expr_arena[**expr], Expr::Call { .. }))
-    {
-        assert!(
-            sites.keys().all(|site| site.expr != *header),
-            "the template-lowered for header has a callee entry"
-        );
-    }
-    assert_eq!(census.free_by_reason.values().sum::<usize>(), 0);
-}
-
-// ---------------------------------------------------------------------------
-// Callee tables (plan S 9): `direct_calls`, `fn_values`, `iterator_ops`,
-// `synthesized_calls`, and the `Callee::{Rock, Boundary}` split.
-//
-// The property is not "a callee was found". It is that EVERY operation the walk
-// resolved for an instance becomes exactly one of an entry, a located hole, or a
-// located invalid-boundary rejection -- and that the entries name the walk's own
-// instances, so no consumer downstream needs a substitution to read them.
-// ---------------------------------------------------------------------------
-
-/// A fixture exercising all four tables at once: direct and generic calls, a
-/// function value, a `for` protocol, a bounded iterator chain, an operator
-/// boundary and a synthesized column-Map entry.
 const RICH: &str = r#"
 value P { x: float, y: float }
 fn ident<T>(x: T) -> T { return x }
@@ -1275,8 +1082,8 @@ fn main() {
 "#;
 
 /// Workers finish in whatever order the scheduler hands them, so the published
-/// tables must not depend on it: a build on one worker and builds on several
-/// agree on every plan, failure and its rendered order.
+/// plans must not depend on it: a build on one worker and builds on several
+/// agree on every ordinary and always-emitted plan.
 #[test]
 fn concrete_tables_are_identical_across_worker_counts() {
     let src = r#"
@@ -1316,105 +1123,12 @@ fn main() {
             !serial.always_plans.is_empty(),
             "fixture exposed no always-emitted plans"
         );
-        let timeless = |bodies: &ConcreteBodies| {
-            let mut stats = bodies.snapshot_build_stats();
-            stats.signature_ns = 0;
-            stats.type_nodes_ns = 0;
-            stats.struct_fields_ns = 0;
-            stats.foreign_domains_ns = 0;
-            stats
-        };
         for threads in [2, 8] {
             let parallel = build_with(threads);
-            assert_eq!(timeless(&serial), timeless(&parallel), "{threads} workers");
             assert_eq!(*serial.plans, *parallel.plans, "{threads} workers");
             assert_eq!(serial.always_plans, parallel.always_plans);
-            assert_eq!(
-                serial.diagnostic_snapshot(&ws, &graph),
-                parallel.diagnostic_snapshot(&ws, &graph)
-            );
-            assert_eq!(
-                format!("{:?}", serial.census()),
-                format!("{:?}", parallel.census())
-            );
-            assert_eq!(
-                serial.render_free_types(&ws, &graph),
-                parallel.render_free_types(&ws, &graph)
-            );
-            assert_eq!(
-                serial.render_callee_holes(&ws, &graph),
-                parallel.render_callee_holes(&ws, &graph)
-            );
         }
     }
-}
-
-/// Every recorded site is accounted for EXACTLY once, and the accounting is
-/// stated as an identity rather than as four independent non-zero counts: a
-/// site that silently reached no table would leave the totals short while every
-/// individual count still looked healthy.
-#[test]
-fn every_recorded_operation_becomes_one_entry_a_hole_or_a_rejection() {
-    let (_ws, g, bodies) = bodies_of(RICH);
-    let c = bodies.census();
-    assert!(
-        c.sites_examined > 0,
-        "no callee sites were examined at all: {c:?}"
-    );
-    assert_eq!(
-        c.callee_entries() + c.callee_hole_total(),
-        c.sites_examined,
-        "sites went missing between the walk and the tables: {c:?}"
-    );
-    // Cross-structure, so it cannot be satisfied by both sides moving
-    // together: the walk pushes one EDGE per resolved callee, and the sites are
-    // a separate table written by the same recorders. A recorder that stopped
-    // recording sites would keep the identity above (its denominator is the
-    // sites) and break this one.
-    let resolved = g
-        .call_sites()
-        .flat_map(|(_, m)| m.values())
-        .filter(|r| matches!(r.outcome, SiteOutcome::Resolved(_)))
-        .count();
-    assert_eq!(
-        resolved,
-        g.edges().count(),
-        "the walk recorded {} edges but {resolved} resolved sites",
-        g.edges().count()
-    );
-    assert!(
-        c.gaps.is_empty(),
-        "an expanded instance got no body: {:?}",
-        c.gaps
-    );
-    // Each table has a population, so the identity above is not satisfied by
-    // one table carrying everything.
-    assert!(c.direct_calls > 0, "no direct call was tabulated: {c:?}");
-    assert!(c.fn_values > 0, "no function value was tabulated: {c:?}");
-    assert!(
-        c.synthesized_calls > 0,
-        "no synthesized call was tabulated: {c:?}"
-    );
-    for kind in ["iter", "next", "bound-next"] {
-        assert!(
-            c.iterator_ops.contains_key(kind),
-            "no `{kind}` iterator op was tabulated: {:?}",
-            c.iterator_ops
-        );
-    }
-    assert!(c.rock_callees > 0, "no Rock callee: {c:?}");
-    assert!(c.boundary_callees > 0, "no boundary callee: {c:?}");
-    assert_eq!(
-        c.unknown_rock_callees, 0,
-        "a Rock callee names an instance the graph does not have: {:?}",
-        c.unknown_rock_callees
-    );
-    assert!(
-        g.duplicate_sites().next().is_none(),
-        "two operations collapsed onto one site key: {:?}",
-        g.duplicate_sites().collect::<Vec<_>>()
-    );
-    assert!(c.callee_holes.values().all(|(_, spanless)| *spanless == 0));
 }
 
 #[test]
@@ -1436,131 +1150,6 @@ fn fresh_publication_publishes_the_authoritative_candidate_index() {
         bodies.candidate_keys_by_func(),
         &rebuilt,
         "fresh construction did not publish the candidate index from its producer"
-    );
-}
-
-#[test]
-fn local_owner_diagnostic_records_retract_and_reinstall_exactly() {
-    let source_v1 = r#"
-fn changing() -> int {
-    let unresolved = null
-    return 1
-}
-fn main() {
-    let a = changing()
-    let b = stable()
-    let c = vanishing()
-    print("{a}{b}{c}")
-}
-fn stable() -> int {
-    let unresolved = null
-    return 2
-}
-fn vanishing() -> int {
-    let unresolved = null
-    return 3
-}
-"#;
-    let source_v2 = r#"
-fn changing() -> int {
-    let unresolved = null
-    return 1
-}
-fn main() {
-    let b = stable()
-    print("{b}")
-}
-fn stable() -> int {
-    let unresolved = null
-    return 2
-}
-fn vanishing() -> int {
-    let unresolved = null
-    return 3
-}
-"#;
-    let ws1 = ws_with_stdlib(source_v1);
-    let roots = skull::mir_emit::emission_roots(&ws1, Some("/project"));
-    let mut graph = instance_graph::build(&ws1, roots.clone(), false);
-    let mut local = concrete_body::build(&ws1, &graph);
-    let before = local.diagnostic_snapshot(&ws1, &graph);
-    assert!(!before.is_empty(), "fixture exposed no diagnostic rows");
-    assert!(
-        before
-            .iter()
-            .any(|row| row.starts_with("free-type:") || row.starts_with("untyped:")),
-        "fixture exposed neither free-type nor untyped rows: {before:?}"
-    );
-    let stable_identity = graph
-        .expanded()
-        .find(|instance| fn_name(&ws1, instance.func) == "stable")
-        .map(|instance| graph.identity(&ws1, instance))
-        .expect("stable instance was not expanded");
-
-    let ws2 = ws_with_stdlib(source_v2);
-    let old_main = fn_ref(&ws1, "main");
-    let old_main_span = ws1.module(old_main.module).functions[old_main.func].span;
-    let new_main = fn_ref(&ws2, "main");
-    let new_main_span = ws2.module(new_main.module).functions[new_main.func].span;
-    let main = body_id(&ws2, "main");
-    let span_edit = instance_graph::TextEditDelta {
-        file: Ustr::from("<test>"),
-        at: old_main_span.offset_range().1,
-        byte_delta: new_main_span.offset_range().1 as isize
-            - old_main_span.offset_range().1 as isize,
-        line_delta: new_main_span.line_range().1 as isize - old_main_span.line_range().1 as isize,
-    };
-    let update = graph.update_bodies_with_root_delta(&ws2, &[], &[], &[main], &[span_edit]);
-    assert!(
-        !update.removed.is_empty(),
-        "the changed main body did not remove a live edge: {update:?}"
-    );
-    let _stats = local.update_local_with_span_edits(
-        &ws2,
-        &graph,
-        &update.revisited,
-        &update.removed,
-        &update.revisited_owners,
-        &[span_edit],
-    );
-    let fresh_roots = skull::mir_emit::emission_roots(&ws2, Some("/project"));
-    let fresh_graph = instance_graph::build(&ws2, fresh_roots, false);
-    let fresh = concrete_body::build(&ws2, &fresh_graph);
-    assert_eq!(
-        local.diagnostic_snapshot(&ws2, &graph),
-        fresh.diagnostic_snapshot(&ws2, &fresh_graph),
-        "local owner records diverged from fresh diagnostics"
-    );
-    let local_stats = local.snapshot_build_stats();
-    let fresh_stats = fresh.snapshot_build_stats();
-    assert_eq!(local_stats.plan_attempts, fresh_stats.plan_attempts);
-    assert_eq!(local_stats.plan_successes, fresh_stats.plan_successes);
-    assert_eq!(local_stats.plan_failures, fresh_stats.plan_failures);
-    assert_eq!(
-        local_stats.always_plan_attempts,
-        fresh_stats.always_plan_attempts
-    );
-    assert_eq!(
-        local_stats.type_nodes_examined,
-        fresh_stats.type_nodes_examined
-    );
-    assert_eq!(
-        local_stats.foreign_domain_unique,
-        fresh_stats.foreign_domain_unique
-    );
-    assert!(
-        local
-            .diagnostic_snapshot(&ws2, &graph)
-            .iter()
-            .any(|row| row.contains(&stable_identity)),
-        "the unrelated populated owner was lost during local replacement"
-    );
-    assert!(
-        !local
-            .diagnostic_snapshot(&ws2, &graph)
-            .iter()
-            .any(|row| row.contains("changing") || row.contains("vanishing")),
-        "removed owner findings were retained"
     );
 }
 
@@ -1604,13 +1193,9 @@ fn main() {
         "fixture did not expose bad's substitution"
     );
     let mut local = concrete_body::build(&ws1, &graph);
-    let before = local.diagnostic_snapshot(&ws1, &graph);
-    assert!(before.iter().any(|row| row.starts_with("plan-failure:")));
-    assert!(
-        before
-            .iter()
-            .any(|row| row.starts_with("always-plan-failure:"))
-    );
+    assert!(local.first_plan_failure().is_some());
+    assert!(!local.plans.contains_key(&bad));
+    assert!(local.first_always_plan_failure().is_some());
 
     let ws2 = ws_with_stdlib(source_v2);
     let main = body_id(&ws2, "main");
@@ -1630,21 +1215,13 @@ fn main() {
         &update.removed,
         &update.revisited_owners,
     );
-    let fresh_roots = skull::mir_emit::emission_roots(&ws2, Some("<project>"));
-    let fresh_graph = instance_graph::build(&ws2, fresh_roots, false);
-    let fresh = concrete_body::build(&ws2, &fresh_graph);
-    assert_eq!(
-        local.diagnostic_snapshot(&ws2, &graph),
-        fresh.diagnostic_snapshot(&ws2, &fresh_graph),
-        "local failure records diverged after the last edge disappeared"
-    );
-    assert!(
-        local.diagnostic_snapshot(&ws2, &graph).iter().all(
-            |row| !row.starts_with("plan-failure:") && !row.starts_with("always-plan-failure:")
-        ),
-        "stale plan failure survived owner retraction: {:?}",
-        local.diagnostic_snapshot(&ws2, &graph)
-    );
+    let fresh = concrete_body::build(&ws2, &graph);
+    assert_eq!(local.plans, fresh.plans);
+    assert_eq!(local.always_plans, fresh.always_plans);
+    assert!(local.first_plan_failure().is_none());
+    assert!(local.first_always_plan_failure().is_none());
+    assert!(fresh.first_plan_failure().is_none());
+    assert!(fresh.first_always_plan_failure().is_none());
 }
 
 #[test]
@@ -1834,12 +1411,6 @@ fn main() { let n = sum_it([1, 2].iter()) }
     assert!(
         !bodies.plans.contains_key(&inst),
         "an ambiguous body was still built"
-    );
-    let census = bodies.census();
-    assert!(
-        census.gaps.contains_key("inconsistent-bounds"),
-        "the disagreement was not classified: {:?}",
-        census.gaps
     );
 }
 
