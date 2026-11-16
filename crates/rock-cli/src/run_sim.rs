@@ -1577,7 +1577,7 @@ fn compile_sims_with_allocation(
 
 /// The reload lane owns the live compile session and an isolated copy of the
 /// emitted chunk, so its edits cannot change what ordinary workers boot.
-pub struct ReloadLaneSession {
+pub(crate) struct ReloadLaneSession {
     stone: crate::skull_backend::IncrementalProject,
     output: String,
     _dir: TempDir,
@@ -1637,7 +1637,7 @@ fn any_reload_lane_selected(
 /// Compile the project and print each `@sim` wire name on stdout, one
 /// per line, sorted by source span. Lets scripts enumerate the suite without
 /// hardcoding names.
-pub fn do_list_sims(backend: crate::Backend, project: &str) -> Result<()> {
+pub(crate) fn do_list_sims(backend: crate::Backend, project: &str) -> Result<()> {
     let project_path = rock_engine_host::project::resolve_project_dir(project)?;
 
     let out_dir = sim_output_dir()?;
@@ -1653,7 +1653,7 @@ pub fn do_list_sims(backend: crate::Backend, project: &str) -> Result<()> {
 
 /// Compile/discover and report the run plan without building engines
 /// or spawning children. Explicit names retain their occurrence semantics.
-pub fn do_plan_sims(
+pub(crate) fn do_plan_sims(
     backend: crate::Backend,
     project: &str,
     names: &[String],
@@ -2004,7 +2004,7 @@ fn verdict_word(summary: &SimSummary) -> &'static str {
 /// (with its failing assertions) plus a final tally. Compiles once; each
 /// named entry gets its own tempdir. Returns Err (non-zero exit) if any
 /// named entry failed.
-pub fn do_run_named_sims(
+pub(crate) fn do_run_named_sims(
     backend: crate::Backend,
     project: &str,
     names: &[String],
@@ -2578,7 +2578,7 @@ where
         .expect("no lane panicked while holding the results lock")
 }
 
-pub fn do_run_all_sims(
+pub(crate) fn do_run_all_sims(
     backend: crate::Backend,
     project: &str,
     quiet: bool,
@@ -2870,7 +2870,7 @@ fn census_rankings(
 /// Run each selected sim in its own process with the allocator census enabled.
 /// This is deliberately separate from ordinary `rock sim`: the sensor is a
 /// discovery instrument, not a default test-suite cost or a regression gate.
-pub fn do_run_allocation_census(
+pub(crate) fn do_run_allocation_census(
     backend: crate::Backend,
     project: &str,
     names: &[String],
@@ -3135,7 +3135,7 @@ fn allocation_activation_population(text: &str) -> Result<(usize, usize)> {
     Ok((frames, sites))
 }
 
-pub fn do_run_allocation_sites(
+pub(crate) fn do_run_allocation_sites(
     backend: crate::Backend,
     project: &str,
     names: &[String],
@@ -3911,7 +3911,7 @@ fn worker_chunk_path(output: &Path, reload: bool) -> PathBuf {
 /// child. Opting in is `@sim_env("STONE_HOT_RELOAD", "1")` -- the same switch
 /// that makes the child's watcher poll the overlay at all, so a sim that could
 /// observe a reload is exactly a sim that declares this.
-pub fn is_reload_lane(env_pairs: &[(String, String)]) -> bool {
+pub(crate) fn is_reload_lane(env_pairs: &[(String, String)]) -> bool {
     env_pairs
         .iter()
         .any(|(k, v)| k == "STONE_HOT_RELOAD" && v != "0")
@@ -4319,7 +4319,7 @@ fn envelope_name_matches(rest: &serde_json::Value, expected: &str, line: &str) -
 }
 
 /// Admission namespace used by the physical worker spawn.
-pub fn sim_worker_slot_directory() -> Result<PathBuf> {
+pub(crate) fn sim_worker_slot_directory() -> Result<PathBuf> {
     let root = match std::env::var_os("ROCK_SIM_WORKER_SLOT_DIR") {
         Some(path) if !path.is_empty() => PathBuf::from(path),
         Some(_) => anyhow::bail!("ROCK_SIM_WORKER_SLOT_DIR must not be empty"),
@@ -5452,7 +5452,7 @@ fn handle_image_snapshot(
 /// `@call_site` in the sim runtime helpers. Empty `site` for messages
 /// the runner synthesizes itself (e.g. process failure / timeout).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SiteMessage {
+pub(crate) struct SiteMessage {
     pub message: String,
     pub site: String,
 }

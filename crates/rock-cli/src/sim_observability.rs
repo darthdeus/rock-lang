@@ -47,7 +47,7 @@ impl SimRunRecorder {
     /// Start a recording under the configured history root. Relative roots
     /// are resolved against the caller's current directory; discovering the
     /// workspace does not change that directory.
-    pub fn begin(
+    pub(crate) fn begin(
         project: &str,
         selection: &str,
         quiet: bool,
@@ -137,7 +137,7 @@ impl SimRunRecorder {
         recorder
     }
 
-    pub fn events_path(&self) -> Option<PathBuf> {
+    pub(crate) fn events_path(&self) -> Option<PathBuf> {
         self.inner
             .lock()
             .ok()
@@ -175,7 +175,7 @@ impl SimRunRecorder {
         ids
     }
 
-    pub fn configure(
+    pub(crate) fn configure(
         &self,
         project_path: &Path,
         resolved_entries: &[String],
@@ -211,7 +211,7 @@ impl SimRunRecorder {
         self.event("phase_end", json!({ "phase": phase, "success": success }));
     }
 
-    pub fn phase<T>(
+    pub(crate) fn phase<T>(
         &self,
         name: &str,
         operation: impl FnOnce() -> anyhow::Result<T>,
@@ -439,7 +439,7 @@ impl SimRunRecorder {
     /// Write the terminal record. A missing terminal event is intentionally
     /// meaningful: it identifies a process that stopped before the runner
     /// could account for it.
-    pub fn finish(&self, success: bool, error: Option<&str>) {
+    pub(crate) fn finish(&self, success: bool, error: Option<&str>) {
         let (planned, finalized, passed, run_id, already_finished) = match self.inner.lock() {
             Ok(mut state) => {
                 let already_finished = state.finished;

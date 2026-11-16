@@ -34,7 +34,7 @@ const SCHEMA_VERSION: i64 = 1;
 
 /// The history root: the explicit flag, then `ROCK_SIM_LOG_DIR`, then
 /// `.sim-runs` -- the same order `SimRunRecorder::begin` resolves.
-pub fn resolve_root(explicit: Option<&str>) -> PathBuf {
+pub(crate) fn resolve_root(explicit: Option<&str>) -> PathBuf {
     if let Some(dir) = explicit {
         return PathBuf::from(dir);
     }
@@ -125,7 +125,7 @@ pub(crate) struct RunRecord {
 }
 
 impl RunRecord {
-    pub fn load(run_id: &str, dir: &Path) -> Result<Self> {
+    pub(crate) fn load(run_id: &str, dir: &Path) -> Result<Self> {
         let path = dir.join("events.jsonl");
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading `{}`", path.display()))?;
@@ -629,7 +629,7 @@ struct TimingsView {
     missing_from_events: usize,
 }
 
-pub fn analyze(record: &RunRecord, top: usize) -> SimRunAnalysis {
+pub(crate) fn analyze(record: &RunRecord, top: usize) -> SimRunAnalysis {
     let observed_span_ms = record.events.iter().map(ms).max().unwrap_or(0);
 
     // Header ---------------------------------------------------------------
@@ -1148,7 +1148,7 @@ impl SimRunAnalysis {
         }))?)
     }
 
-    pub fn render_text(&self) -> String {
+    pub(crate) fn render_text(&self) -> String {
         let mut out = String::new();
         let push = |out: &mut String, line: String| {
             out.push_str(&line);
@@ -1730,7 +1730,7 @@ fn render_cross_run(
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub fn run(
+pub(crate) fn run(
     log_dir: Option<&str>,
     run_id: Option<&str>,
     entry_name: Option<&str>,

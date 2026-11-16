@@ -394,12 +394,12 @@ pub(crate) mod stone_runtime;
 mod stone_test;
 pub(crate) mod stone_watch;
 
-pub mod run_sim;
+mod run_sim;
 mod sim_arguments;
 mod sim_command;
 mod sim_environment;
-pub(crate) mod sim_observability;
-pub(crate) mod sim_report;
+mod sim_observability;
+mod sim_report;
 
 mod sdk_check;
 
