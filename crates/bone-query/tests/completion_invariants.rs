@@ -1,6 +1,6 @@
 //! Context-AWARE completion invariants:
 //! fixtures that know their slot assert the typed-slot properties the
-//! position-blind checker (`bone_query::invariants`, hooked into every
+//! position-blind checker (`tests/support/response_invariants.rs`, hooked into every
 //! corpus helper) cannot see.
 
 use crate::label_asserts::{assert_lacks, assert_offers};

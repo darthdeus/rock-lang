@@ -4,6 +4,8 @@
 
 #[path = "support/label_asserts.rs"]
 mod label_asserts;
+#[path = "support/response_invariants.rs"]
+mod response_invariants;
 
 #[path = "completion_blank_line.rs"]
 mod completion_blank_line;

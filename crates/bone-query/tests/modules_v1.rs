@@ -561,7 +561,7 @@ fn complete_in_main(typed: &str) -> Vec<lsp_types::CompletionItem> {
         .into_iter()
         .rev()
         .collect();
-    let violations = bone_query::invariants::completion_response_violations(&items, &prefix);
+    let violations = crate::response_invariants::completion_response_violations(&items, &prefix);
     assert!(
         violations.is_empty(),
         "response invariants violated after `{typed}`: {violations:?}"

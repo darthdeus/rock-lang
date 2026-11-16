@@ -31,7 +31,7 @@ fn labels_at(src: &str) -> Vec<String> {
     // the position-blind response
     // invariants must hold wherever a ranking decision is pinned.
     let prefix = typed_prefix(src);
-    let violations = bone_query::invariants::completion_response_violations(&items, &prefix);
+    let violations = crate::response_invariants::completion_response_violations(&items, &prefix);
     assert!(
         violations.is_empty(),
         "response invariants violated (prefix {prefix:?}): {violations:?}"

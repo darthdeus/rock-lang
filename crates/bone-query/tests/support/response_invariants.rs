@@ -1,6 +1,6 @@
 //! Position-blind completion-response invariants: the
 //! properties that hold for EVERY completion response regardless of cursor
-//! context, checked over the ranking corpus (test helpers). One invariant
+//! context, checked over the ranking corpus. One invariant
 //! catches a bug class across all contexts where a per-case guard pins a
 //! single decision.
 //!
@@ -30,7 +30,7 @@ pub fn completion_response_violations(items: &[CompletionItem], typed_prefix: &s
         match it.sort_text.as_deref() {
             None => violations.push(format!("`{}` has no sort_text", it.label)),
             Some(st) => {
-                if crate::rank_key::explain_sort_text(st).is_none() {
+                if bone_query::explain_sort_text(st).is_none() {
                     violations.push(format!(
                         "`{}` sort_text does not decode as a RankKey: {st:?}",
                         it.label
@@ -90,7 +90,6 @@ pub fn completion_response_violations(items: &[CompletionItem], typed_prefix: &s
     violations
 }
 
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -102,9 +101,14 @@ mod tests {
         }
     }
 
-    /// A well-formed sort_text for tests: the real encoder's output.
+    /// A sort_text in the RankKey layout: `exact`, `type_rank` and `band`
+    /// lead, the other fifteen digits are zero, and the name breaks ties.
+    fn key(exact: u8, type_rank: u8, band: u8, name: &str) -> String {
+        format!("{exact}{type_rank}{band}{:015}{name}", 0)
+    }
+
     fn st(name: &str) -> String {
-        crate::rank_key::RankKey::default().encode(name)
+        key(0, 0, 0, name)
     }
 
     #[test]
@@ -140,13 +144,8 @@ mod tests {
 
     #[test]
     fn array_order_disagreeing_with_sort_text_reported() {
-        use crate::rank_key::RankKey;
-        let first = RankKey {
-            band: 2,
-            ..Default::default()
-        }
-        .encode("zeta");
-        let second = RankKey::default().encode("alpha");
+        let first = key(0, 0, 2, "zeta");
+        let second = st("alpha");
         // `zeta` (worse key) placed before `alpha` (better key) in the array.
         let items = [item("zeta", Some(&first)), item("alpha", Some(&second))];
         let v = completion_response_violations(&items, "");
@@ -161,21 +160,11 @@ mod tests {
 
     #[test]
     fn non_exact_ranking_above_exact_reported() {
-        use crate::rank_key::RankKey;
         // The failure mode: a path fails to put the exact-label item in the
         // exact tier (its own key leads with 1), so a non-exact item can
         // sort below it -- the invariant flags the non-exact item above.
-        let above = RankKey {
-            exact: 1,
-            ..Default::default()
-        }
-        .encode("weapon");
-        let missed_exact = RankKey {
-            exact: 1,
-            type_rank: 2,
-            ..Default::default()
-        }
-        .encode("wea");
+        let above = key(1, 0, 0, "weapon");
+        let missed_exact = key(1, 2, 0, "wea");
         let items = [
             item("weapon", Some(&above)),
             item("wea", Some(&missed_exact)),
@@ -190,16 +179,11 @@ mod tests {
 
     #[test]
     fn exact_tier_item_above_exact_match_is_clean() {
-        use crate::rank_key::RankKey;
         // A named-arg style item (`wea:`) whose RANK name is exactly the
         // prefix legitimately outranks the exact-label item on type_rank --
         // both are exact-tier.
-        let named = RankKey::default().encode("wea");
-        let local = RankKey {
-            type_rank: 2,
-            ..Default::default()
-        }
-        .encode("wea");
+        let named = st("wea");
+        let local = key(0, 2, 0, "wea");
         let items = [item("wea:", Some(&named)), item("wea", Some(&local))];
         assert!(completion_response_violations(&items, "wea").is_empty());
     }

@@ -66,7 +66,7 @@ fn check_invariants(src: &str, line: u32, ch: u32, items: &[CompletionItem]) {
         .rposition(|b| !(b.is_ascii_alphanumeric() || *b == b'_'))
         .map_or(0, |i| i + 1);
     let prefix = String::from_utf8_lossy(&head[start..]).into_owned();
-    let violations = bone_query::invariants::completion_response_violations(items, &prefix);
+    let violations = crate::response_invariants::completion_response_violations(items, &prefix);
     assert!(
         violations.is_empty(),
         "response invariants violated at {line}:{ch} (prefix {prefix:?}): {violations:?}"
