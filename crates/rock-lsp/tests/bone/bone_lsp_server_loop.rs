@@ -3,8 +3,7 @@
 //! Drives the transport-free server (`new` / `initialize` / `handle` /
 //! `exited`) through initialize, didOpen/didChange diagnostics, hover,
 //! definition, shutdown/exit and unknown messages, asserting the exact
-//! outgoing messages. The rewrite of the server plumbing must keep every
-//! expectation here green without touching this file.
+//! outgoing messages.
 
 use lsp_server::{Message, Notification, Request, RequestId};
 use rock_lsp::LspServer;
@@ -239,18 +238,80 @@ fn did_open_publishes_the_type_error_and_change_clears_it() {
         "the error is on line 2 (0-based 1): {errors:?}"
     );
 
-    // didChange also asks the client to refresh inlay hints.
     let out = roundtrip(&mut server, did_change(&uri, FIXED));
-    assert!(
-        out.iter().any(|m| matches!(m,
-            Message::Notification(n) if n.method == "workspace/inlayHint/refresh")),
-        "didChange must emit workspace/inlayHint/refresh, got {out:?}"
-    );
     let diags = diagnostics_for(&out, &uri);
     assert!(
         diags.iter().all(|d| d["severity"] != 1),
         "valid source clears the error, got {diags:?}"
     );
+}
+
+#[test]
+fn inlay_hint_refresh_is_a_request_with_unique_ids_and_ignored_replies() {
+    let (mut server, _) = LspServer::initialize(Request {
+        id: RequestId::from(1),
+        method: "initialize".to_string(),
+        params: json!({ "capabilities": {
+            "workspace": { "inlayHint": { "refreshSupport": true } }
+        } }),
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let uri = uri_of(&dir.path().join("main.rock"));
+    roundtrip(&mut server, did_open(&uri, FIXED));
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let out = roundtrip(&mut server, did_change(&uri, FIXED));
+        let refreshes: Vec<_> = out
+            .iter()
+            .filter(|m| match m {
+                Message::Request(r) => r.method == "workspace/inlayHint/refresh",
+                Message::Notification(n) => n.method == "workspace/inlayHint/refresh",
+                _ => false,
+            })
+            .collect();
+        assert_eq!(refreshes.len(), 1, "one refresh per edit: {out:?}");
+        let Message::Request(refresh) = refreshes[0] else {
+            panic!("refresh must be a request with an id: {refreshes:?}");
+        };
+        let wire = serde_json::to_value(refresh).unwrap();
+        assert!(wire.get("id").is_some(), "refresh carries an id: {wire}");
+        assert!(refresh.params.is_null());
+        ids.push(refresh.id.clone());
+        let reply = lsp_server::Response::new_ok(refresh.id.clone(), Value::Null);
+        assert!(roundtrip(&mut server, reply.into()).is_empty());
+    }
+    assert_ne!(ids[0], ids[1]);
+}
+
+#[test]
+fn inlay_hint_refresh_requires_advertised_support() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = uri_of(&dir.path().join("main.rock"));
+    for params in [
+        json!({}),
+        init_params(),
+        json!({ "capabilities": { "workspace": {} } }),
+        json!({ "capabilities": { "workspace": { "inlayHint": {} } } }),
+        json!({ "capabilities": {
+            "workspace": { "inlayHint": { "refreshSupport": false } }
+        } }),
+    ] {
+        let (mut server, _) = LspServer::initialize(Request {
+            id: RequestId::from(1),
+            method: "initialize".to_string(),
+            params,
+        });
+        roundtrip(&mut server, did_open(&uri, FIXED));
+        let out = roundtrip(&mut server, did_change(&uri, FIXED));
+        assert!(
+            out.iter().all(|m| match m {
+                Message::Request(r) => r.method != "workspace/inlayHint/refresh",
+                Message::Notification(n) => n.method != "workspace/inlayHint/refresh",
+                _ => true,
+            }),
+            "unsupported refresh must not be sent: {out:?}"
+        );
+    }
 }
 
 #[test]

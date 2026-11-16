@@ -230,14 +230,19 @@ pub fn run_lsp_server() -> Result<()> {
 
     let (link, threads) = Connection::stdio();
 
-    if let Err(broken) = link.initialize(server_capabilities()) {
-        if broken.channel_is_disconnected() {
-            threads.join()?;
+    let params = match link.initialize(server_capabilities()) {
+        Ok(params) => params,
+        Err(broken) => {
+            if broken.channel_is_disconnected() {
+                threads.join()?;
+            }
+            return Err(anyhow::Error::from(broken));
         }
-        return Err(anyhow::Error::from(broken));
-    }
+    };
 
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| main_loop(link)));
+    let server = LspServer::from_initialize_params(&params);
+    let outcome =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| main_loop(link, server)));
 
     match outcome {
         Ok(Ok(_)) => {
@@ -272,8 +277,7 @@ pub fn run_lsp_server() -> Result<()> {
     Ok(())
 }
 
-fn main_loop(link: Connection) -> Result<()> {
-    let mut server = LspServer::new();
+fn main_loop(link: Connection, mut server: LspServer) -> Result<()> {
     let mut pending: Vec<Message> = Vec::new();
     for incoming in &link.receiver {
         let done = server.handle(incoming, &mut pending);
@@ -295,15 +299,29 @@ pub struct LspServer {
     workspace: LspWorkspace,
     shutdown_mode: bool,
     exited: bool,
+    inlay_hint_refresh_support: bool,
+    next_request_id: u64,
 }
 
 impl LspServer {
-    /// The server reads nothing from the client's `initialize` params.
+    /// Start without optional client capabilities.
     pub fn new() -> Self {
         Self {
             workspace: LspWorkspace::new(),
             shutdown_mode: false,
             exited: false,
+            inlay_hint_refresh_support: false,
+            next_request_id: 0,
+        }
+    }
+
+    fn from_initialize_params(params: &serde_json::Value) -> Self {
+        Self {
+            inlay_hint_refresh_support: params
+                .pointer("/capabilities/workspace/inlayHint/refreshSupport")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            ..Self::new()
         }
     }
 
@@ -311,7 +329,10 @@ impl LspServer {
     /// hosts that pass JSON-RPC messages through directly.
     pub fn initialize(req: Request) -> (Self, Message) {
         let payload = serde_json::json!({ "capabilities": server_capabilities() });
-        (Self::new(), Response::new_ok(req.id, payload).into())
+        (
+            Self::from_initialize_params(&req.params),
+            Response::new_ok(req.id, payload).into(),
+        )
     }
 
     /// Whether the client has sent `exit`.
@@ -525,8 +546,7 @@ impl LspServer {
         Ok(())
     }
 
-    /// Apply an edit: bump the version, drop cached inlay hints (and nudge
-    /// the client to re-ask via `workspace/inlayHint/refresh`), recompile,
+    /// Apply an edit, request an inlay hint refresh if supported, recompile,
     /// and publish whatever diagnostics moved.
     fn on_change(&mut self, note: &lsp_server::Notification, out: &mut Vec<Message>) -> Result<()> {
         let at = doc_uri(note)?;
@@ -537,8 +557,18 @@ impl LspServer {
         let text = doc_text(note, "/contentChanges/0/text")?;
         self.workspace
             .update_document_version(&at.to_string(), doc_version(note));
-        // The refresh makes the client re-request hints for the edited text.
-        notify(out, "workspace/inlayHint/refresh", serde_json::Value::Null);
+        if self.inlay_hint_refresh_support {
+            let id = format!("inlay-hint-refresh-{}", self.next_request_id);
+            self.next_request_id += 1;
+            out.push(
+                Request {
+                    id: id.into(),
+                    method: "workspace/inlayHint/refresh".to_string(),
+                    params: serde_json::Value::Null,
+                }
+                .into(),
+            );
+        }
         bone_reload_and_publish(out, &path, text, &mut self.workspace)?;
         Ok(())
     }
