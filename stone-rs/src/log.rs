@@ -86,8 +86,17 @@ pub extern "C" fn stone_log_collect_errors() {
 /// thread.
 #[no_mangle]
 pub extern "C" fn stone_log_collected_errors(len: *mut usize) -> *const std::os::raw::c_char {
+    collected_error_reply(rock_log::collected_errors(), len)
+}
+
+#[no_mangle]
+pub extern "C" fn stone_log_scoped_errors(len: *mut usize) -> *const std::os::raw::c_char {
+    collected_error_reply(rock_log::scoped_errors(), len)
+}
+
+fn collected_error_reply(records: Vec<String>, len: *mut usize) -> *const std::os::raw::c_char {
     let mut out = String::new();
-    for record in rock_log::collected_errors() {
+    for record in records {
         out.push_str(&record.replace('\0', " "));
         out.push('\0');
     }
@@ -109,11 +118,27 @@ pub extern "C" fn stone_log_take_collected_error(
     record: *const u8,
     len: usize,
 ) -> std::os::raw::c_int {
+    take_collected_error(record, len, rock_log::take_collected_error)
+}
+
+#[no_mangle]
+pub extern "C" fn stone_log_take_scoped_error(
+    record: *const u8,
+    len: usize,
+) -> std::os::raw::c_int {
+    take_collected_error(record, len, rock_log::take_scoped_error)
+}
+
+fn take_collected_error(
+    record: *const u8,
+    len: usize,
+    take: fn(&str) -> bool,
+) -> std::os::raw::c_int {
     if record.is_null() {
         return 0;
     }
     let record = unsafe { std::slice::from_raw_parts(record, len) };
-    rock_log::take_collected_error(&String::from_utf8_lossy(record)) as std::os::raw::c_int
+    take(&String::from_utf8_lossy(record)) as std::os::raw::c_int
 }
 
 /// Drop every collected record after the first `len`.

@@ -36,6 +36,8 @@ pub @nomangle inline(lua) fn stone_native_load() = """
         void stone_log(int level, const char* category, const char* message, int wall_clock);
         void stone_log_collect_errors(void);
         const char* stone_log_collected_errors(size_t* len);
+        const char* stone_log_scoped_errors(size_t* len);
+        int stone_log_take_scoped_error(const uint8_t* record, size_t len);
         int stone_log_take_collected_error(const uint8_t* record, size_t len);
         void stone_log_truncate_collected_errors(int len);
         uint8_t stone_actor_query_rect(const int* records, int64_t len, const int* candidates, int64_t candidate_len, int min_x, int min_y, int max_x, int max_y, uint8_t include_uninstalled, int* output, int64_t output_len);
@@ -182,20 +184,21 @@ inline(lua) fn __stone_register_error_collector() -> bool = """
         stone.stone_log_get_level()
         stone.stone_log_collect_errors()
         local len = ffi.new("size_t[1]")
+        local function records(read)
+            local text = ffi.string(read(len), len[0])
+            local records, start = {}, 1
+            while true do
+                local stop = text:find("\0", start, true)
+                if not stop then return records, tonumber(text:sub(start)) end
+                records[#records + 1] = text:sub(start, stop - 1)
+                start = stop + 1
+            end
+        end
         _G.__rock_logged_errors = {
-            -- The records in emission order, then how many the cap dropped.
-            records = function()
-                local text = ffi.string(stone.stone_log_collected_errors(len), len[0])
-                local records, start = {}, 1
-                while true do
-                    local stop = text:find("\0", start, true)
-                    if not stop then return records, tonumber(text:sub(start)) end
-                    records[#records + 1] = text:sub(start, stop - 1)
-                    start = stop + 1
-                end
-            end,
+            records = function() return records(stone.stone_log_collected_errors) end,
+            scope_records = function() return records(stone.stone_log_scoped_errors) end,
             take = function(record) return stone.stone_log_take_collected_error(record, #record) ~= 0 end,
-            truncate = function(count) stone.stone_log_truncate_collected_errors(count) end,
+            scope_take = function(record) return stone.stone_log_take_scoped_error(record, #record) ~= 0 end,
             finish = function()
                 local records, overflow = _G.__rock_logged_errors.records()
                 if #records > 0 or overflow > 0 then

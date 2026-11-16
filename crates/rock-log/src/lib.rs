@@ -457,9 +457,14 @@ pub fn records(level: log::Level) -> Vec<LogRecord> {
 /// verifies them. Past it records are dropped and counted, and the run fails.
 pub const COLLECTED_ERROR_CAP: usize = 256;
 
+struct CollectedError {
+    message: String,
+    thread: std::thread::ThreadId,
+}
+
 #[derive(Default)]
 struct CollectedErrors {
-    records: Vec<String>,
+    records: Vec<CollectedError>,
     overflow: u64,
 }
 
@@ -474,7 +479,10 @@ fn collect_error(target: &str, args: &std::fmt::Arguments) {
     if collected.records.len() >= COLLECTED_ERROR_CAP {
         collected.overflow += 1;
     } else {
-        collected.records.push(fmt_body(target, args));
+        collected.records.push(CollectedError {
+            message: fmt_body(target, args),
+            thread: std::thread::current().id(),
+        });
     }
 }
 
@@ -486,11 +494,26 @@ pub fn collect_errors() {
 
 /// The collected records in emission order; empty when collection is off.
 pub fn collected_errors() -> Vec<String> {
+    collected_errors_for(None)
+}
+
+/// Synchronous scopes observe their own thread; worker errors stay pending.
+pub fn scoped_errors() -> Vec<String> {
+    collected_errors_for(Some(std::thread::current().id()))
+}
+
+fn collected_errors_for(thread: Option<std::thread::ThreadId>) -> Vec<String> {
     COLLECTED_ERRORS
         .lock()
         .unwrap()
         .as_ref()
-        .map_or_else(Vec::new, |c| c.records.clone())
+        .map_or_else(Vec::new, |c| {
+            c.records
+                .iter()
+                .filter(|record| thread.is_none_or(|thread| record.thread == thread))
+                .map(|record| record.message.clone())
+                .collect()
+        })
 }
 
 /// Records dropped past [`COLLECTED_ERROR_CAP`].
@@ -504,11 +527,23 @@ pub fn collected_error_overflow() -> u64 {
 
 /// Remove the first collected record equal to `record`; false when none is.
 pub fn take_collected_error(record: &str) -> bool {
+    take_collected_error_for(record, None)
+}
+
+/// Consume one matching synchronous record, never an equal worker record.
+pub fn take_scoped_error(record: &str) -> bool {
+    take_collected_error_for(record, Some(std::thread::current().id()))
+}
+
+fn take_collected_error_for(record: &str, thread: Option<std::thread::ThreadId>) -> bool {
     let mut collected = COLLECTED_ERRORS.lock().unwrap();
     let Some(records) = collected.as_mut().map(|c| &mut c.records) else {
         return false;
     };
-    match records.iter().position(|r| r == record) {
+    match records
+        .iter()
+        .position(|r| r.message == record && thread.is_none_or(|thread| r.thread == thread))
+    {
         Some(index) => {
             records.remove(index);
             true
@@ -761,6 +796,17 @@ mod tests {
         assert_eq!(collected_errors(), ["[COLLECT] first", "[COLLECT] second"]);
         assert!(take_collected_error("[COLLECT] second"));
         assert!(!take_collected_error("[COLLECT] second"));
+        std::thread::spawn(|| log::error!(target: "COLLECT", "first"))
+            .join()
+            .unwrap();
+        assert_eq!(scoped_errors(), ["[COLLECT] first"]);
+        assert!(take_scoped_error("[COLLECT] first"));
+        assert!(!take_scoped_error("[COLLECT] first"));
+        assert_eq!(
+            collected_errors(),
+            ["[COLLECT] first"],
+            "the equal worker record remains unverified"
+        );
         for i in 0..COLLECTED_ERROR_CAP {
             log::error!(target: "COLLECT", "filler {i}");
         }

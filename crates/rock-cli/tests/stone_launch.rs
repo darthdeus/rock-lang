@@ -16,6 +16,29 @@ fn package_tests_observe_native_errors_and_scoped_mixed_records() {
         let source = r#"
 inline(lua) fn native_error() = "ffi.cdef('void stone_gpu_scope_begin(const char* name);'); stone.stone_gpu_scope_begin(nil)"
 inline(lua) fn continued() = "local f = assert(io.open('continued', 'w')); f:write('yes'); f:close()"
+inline(lua) fn background_error() -> string = """
+    ffi.cdef[[
+        int stone_file_transaction_begin(void);
+        bool stone_file_transaction_write(int transaction, const char* path, const char* data, size_t len, bool append);
+        int stone_file_transaction_commit(int transaction);
+        int stone_file_transaction_poll(int job, bool wait);
+    ]]
+    local blocker = assert(io.open("blocked-output", "w")); blocker:write("x"); blocker:close()
+    local transaction = stone.stone_file_transaction_begin()
+    assert(transaction > 0)
+    assert(stone.stone_file_transaction_write(transaction, "blocked-output/out", "x", 1, false))
+    local job = stone.stone_file_transaction_commit(transaction)
+    assert(job > 0)
+    assert(stone.stone_file_transaction_poll(job, true) < 0)
+    for _, record in ipairs(_G.__rock_logged_errors.records()) do
+        if record:find("[FILE] file transaction write failed for blocked-output/out: ", 1, true) == 1 then
+            return record
+        end
+    end
+    error("worker did not report its failed write")
+"""
+inline(lua) fn consume_background_error(record: string) = "assert(_G.__rock_logged_errors.take(record))"
+inline(lua) fn background_scope_completed() = "local f = assert(io.open('background-continued', 'w')); f:write('yes'); f:close()"
 @test
 fn native_failure() {
     native_error()
@@ -36,6 +59,23 @@ fn extra_native_failure() {
         log_error("PROBE", "expected")
         native_error()
     })
+}
+@test
+fn scoped_background_control() {
+    let worker_record = ""
+    assert_error_logs(["[PROBE] expected"], () => {
+        log_error("PROBE", "expected")
+        worker_record = background_error()
+    })
+    consume_background_error(worker_record)
+}
+@test
+fn unverified_background_failure() {
+    assert_error_logs(["[PROBE] expected"], () => {
+        log_error("PROBE", "expected")
+        let _ = background_error()
+    })
+    background_scope_completed()
 }
 @test
 fn native_overflow_failure() {
@@ -72,7 +112,8 @@ fn native_overflow_failure() {
             "native_errors::native_failure: error:",
             "native_errors::extra_native_failure: error:",
             "native_errors::native_overflow_failure: error:",
-            "2/5 @tests passed (3 failed)",
+            "native_errors::unverified_background_failure: error:",
+            "3/7 @tests passed (4 failed)",
             "1 additional error record(s) dropped",
         ] {
             assert!(text.contains(expected), "missing {expected:?}: {text}");
@@ -80,6 +121,11 @@ fn native_overflow_failure() {
         assert_eq!(
             std::fs::read_to_string(fixture.path().join("continued")).unwrap(),
             "yes"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.path().join("background-continued")).unwrap(),
+            "yes",
+            "background errors fail the run after the synchronous scope completes"
         );
     }
 }
