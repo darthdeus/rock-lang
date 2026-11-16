@@ -442,7 +442,7 @@ impl<'a> Builder<'a> {
                 let slot = (|| {
                     let (base, kind) = self.lower_index_base(base)?;
                     let index = self.lower_expr(index)?;
-                    Ok::<_, CompilerError>(self.emit_cur(Inst::Index { base, index, kind }))
+                    Ok::<_, CompilerError>(self.read_index(base, index, kind))
                 })();
                 self.cur_span = outer;
                 self.cur_expr = outer_expr;
@@ -542,11 +542,7 @@ impl<'a> Builder<'a> {
             None
         };
         let value = if let Some(name) = name {
-            let slot = self.emit_cur(Inst::Index {
-                base: b,
-                index: i,
-                kind,
-            });
+            let slot = self.read_index(b, i, kind);
             if self.value_struct_of(e).is_none() {
                 ValueRepr::Scalar(self.nullable_boxed_value_copy(
                     slot,
@@ -557,11 +553,7 @@ impl<'a> Builder<'a> {
                 self.boxed_value_copy_repr(slot, name, self.concrete_expr_ty(e))?
             }
         } else {
-            let slot = self.emit_cur(Inst::Index {
-                base: b,
-                index: i,
-                kind,
-            });
+            let slot = self.read_index(b, i, kind);
             match self.expr_tuple_shape(e)?.filter(TupleRetShape::splats) {
                 Some(shape) => {
                     let slots: Vec<Idx<Inst>> = (0..shape.slot_count())

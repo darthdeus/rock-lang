@@ -604,11 +604,7 @@ impl<'a> Builder<'a> {
 
         // occ: skip unoccupied.
         self.cur = occ_bb;
-        let occ = self.emit_cur(Inst::Index {
-            base: occupied,
-            index: idx,
-            kind: occupied_kind,
-        });
+        let occ = self.read_index(occupied, idx, occupied_kind);
         self.branch_to(occ, do_bb, latch);
 
         // do: build Entity, bind, run body.
@@ -624,11 +620,7 @@ impl<'a> Builder<'a> {
         // whose `==` silently mis-compares (arena-scan entities not equal to
         // pairs-scan entities).
         let entity = if let Some(generations) = generations {
-            let e_gen = self.emit_cur(Inst::Index {
-                base: generations,
-                index: idx,
-                kind: self.boxed_vec_kind(Some(&MonoTy::Int)),
-            });
+            let e_gen = self.read_index(generations, idx, self.boxed_vec_kind(Some(&MonoTy::Int)));
             let entity_representation =
                 self.nominal_value_representation(crate::names::ustr("Entity"))?;
             Some(self.emit_cur(Inst::MakeValueStruct {
@@ -664,11 +656,7 @@ impl<'a> Builder<'a> {
                         }
                         _ => None,
                     };
-                    let stored = self.emit_cur(Inst::Index {
-                        base: data,
-                        index: idx,
-                        kind: self.boxed_vec_kind(elem),
-                    });
+                    let stored = self.read_index(data, idx, self.boxed_vec_kind(elem));
                     let ty = match &pat {
                         BindingPattern::Tuple(subs) if subs.len() == 2 => {
                             self.loop_binder_ty(&subs[1], None)

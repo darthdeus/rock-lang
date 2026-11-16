@@ -2519,6 +2519,25 @@ impl<'a> Builder<'a> {
         self.emit_cur(Inst::StoreField { base, field, value })
     }
 
+    fn read_index(&mut self, base: Idx<Inst>, index: Idx<Inst>, kind: ContainerKind) -> Idx<Inst> {
+        self.emit_cur(Inst::Index { base, index, kind })
+    }
+
+    fn write_index(
+        &mut self,
+        base: Idx<Inst>,
+        index: Idx<Inst>,
+        value: Idx<Inst>,
+        kind: ContainerKind,
+    ) -> Idx<Inst> {
+        self.emit_cur(Inst::StoreIndex {
+            base,
+            index,
+            value,
+            kind,
+        })
+    }
+
     fn store_cell(&mut self, cell: Idx<Cell>, value: Idx<Inst>) -> Idx<Inst> {
         self.emit_cur(Inst::Store { cell, value })
     }

@@ -1100,12 +1100,7 @@ impl<'a> Builder<'a> {
             crate::gpu_layout::WireView::Uint => self.emit_cur(Inst::UintBitcastInt(leaf)),
             _ => leaf,
         };
-        self.emit_cur(Inst::StoreIndex {
-            base,
-            index: idx,
-            value: leaf,
-            kind: ContainerKind::NativeBufferLeaf,
-        });
+        self.write_index(base, idx, leaf, ContainerKind::NativeBufferLeaf);
     }
 
     /// `u` as a global place the packer can read leaf by leaf, or `None` when

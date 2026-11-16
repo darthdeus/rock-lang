@@ -546,11 +546,7 @@ impl<'a> Builder<'a> {
                 }
                 let (b, kind) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
-                Ok(self.emit_cur(Inst::Index {
-                    base: b,
-                    index: i,
-                    kind,
-                }))
+                Ok(self.read_index(b, i, kind))
             }
             // Route through the repr layer: a field read on a scalarized value
             // projects a leaf directly (no intermediate cdata); a boxed base
@@ -1281,11 +1277,7 @@ impl<'a> Builder<'a> {
             Expr::Index { base, index } => {
                 let (b, kind) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
-                Ok(self.emit_cur(Inst::Index {
-                    base: b,
-                    index: i,
-                    kind,
-                }))
+                Ok(self.read_index(b, i, kind))
             }
             // A `nobox` global has no single slot -- `Inst::Global(name)` would
             // read a nil global and the write would land on nothing. Every
@@ -1760,12 +1752,7 @@ impl<'a> Builder<'a> {
                     }
                 }
                 let v = s.lower_expr(value)?;
-                s.emit_cur(Inst::StoreIndex {
-                    base: b,
-                    index: i,
-                    value: v,
-                    kind,
-                });
+                s.write_index(b, i, v, kind);
                 Ok(())
             })?,
             Expr::Global(_) if nobox_global_place.is_some() => {
@@ -2071,18 +2058,9 @@ impl<'a> Builder<'a> {
             Expr::Index { base, index } => {
                 let (b, kind) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
-                let old = self.emit_cur(Inst::Index {
-                    base: b,
-                    index: i,
-                    kind,
-                });
+                let old = self.read_index(b, i, kind);
                 let new = update(self, old)?;
-                self.emit_cur(Inst::StoreIndex {
-                    base: b,
-                    index: i,
-                    value: new,
-                    kind,
-                });
+                self.write_index(b, i, new, kind);
                 Ok(pick(old, new))
             }
             _ => Err(gap("read-modify-write of a non-assignable target")),

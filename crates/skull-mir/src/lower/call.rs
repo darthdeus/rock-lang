@@ -614,21 +614,13 @@ impl<'a> Builder<'a> {
             return Err(self.gap_here("field_get requires an owner and selector"));
         };
         // The field's own key is presence; its dotted keys hold the payload.
-        let mut leaves = vec![self.emit_cur(Inst::Index {
-            base: *owner,
-            index: *selector,
-            kind: ContainerKind::Map,
-        })];
+        let mut leaves = vec![self.read_index(*owner, *selector, ContainerKind::Map)];
         for path in value_leaf_paths(shape) {
             let suffix = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(&format!(
                 ".{path}"
             )))));
             let index = self.emit_cur(Inst::StringConcat(*selector, suffix));
-            leaves.push(self.emit_cur(Inst::Index {
-                base: *owner,
-                index,
-                kind: ContainerKind::Map,
-            }));
+            leaves.push(self.read_index(*owner, index, ContainerKind::Map));
         }
         Ok(Some(self.rebuild_from_leaves(shape, &leaves, &mut 0)))
     }
@@ -4053,11 +4045,7 @@ impl<'a> Builder<'a> {
             ContainerKind::NativeBufferValue(elem) if self.is_leaf_addressed(elem)? => self
                 .nb_leaf_element_repr(arr, index, elem)
                 .map(ValueBundle::into_value),
-            _ => Ok(ValueRepr::Scalar(self.emit_cur(Inst::Index {
-                base: arr,
-                index,
-                kind,
-            }))),
+            _ => Ok(ValueRepr::Scalar(self.read_index(arr, index, kind))),
         }
     }
 

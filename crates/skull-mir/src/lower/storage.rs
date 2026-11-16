@@ -120,11 +120,7 @@ impl<'a> Builder<'a> {
         range
             .map(|offset| {
                 let at = self.strided_slot_index(slot, stride, offset);
-                let stored = self.emit_cur(Inst::Index {
-                    base: data,
-                    index: at,
-                    kind: ContainerKind::VecStrideSlot,
-                });
+                let stored = self.read_index(data, at, ContainerKind::VecStrideSlot);
                 if raw {
                     stored
                 } else {
@@ -201,12 +197,7 @@ impl<'a> Builder<'a> {
             } else {
                 self.emit_cur(Inst::VecStrideNilToFalse(leaf))
             };
-            self.emit_cur(Inst::StoreIndex {
-                base: data,
-                index: at,
-                value,
-                kind: ContainerKind::VecStrideSlot,
-            });
+            self.write_index(data, at, value, ContainerKind::VecStrideSlot);
         }
     }
 
@@ -480,11 +471,7 @@ impl<'a> Builder<'a> {
         } else {
             i
         };
-        let value = self.emit_cur(Inst::Index {
-            base: raw,
-            index: raw_index,
-            kind: ContainerKind::VecStrideSlot,
-        });
+        let value = self.read_index(raw, raw_index, ContainerKind::VecStrideSlot);
         let bundle = if self.strided_stores_raw(elem) {
             ValueBundle::new(elem.representation(), ValueRepr::Scalar(value))
         } else {
@@ -612,12 +599,7 @@ impl<'a> Builder<'a> {
         for (a, leaf) in hit.iter().zip(leaves) {
             let at = self.leaf_index(checked, a);
             let view = self.leaf_view(buf, a.view_field, &mut views);
-            self.emit_cur(Inst::StoreIndex {
-                base: view,
-                index: at,
-                value: leaf,
-                kind: ContainerKind::NativeBufferLeaf,
-            });
+            self.write_index(view, at, leaf, ContainerKind::NativeBufferLeaf);
         }
         Ok(())
     }
@@ -692,11 +674,7 @@ impl<'a> Builder<'a> {
     ) -> Idx<Inst> {
         let at = self.leaf_index(checked, addr);
         let view = self.leaf_view(buf, addr.view_field, &mut HashMap::default());
-        self.emit_cur(Inst::Index {
-            base: view,
-            index: at,
-            kind: ContainerKind::NativeBufferLeaf,
-        })
+        self.read_index(view, at, ContainerKind::NativeBufferLeaf)
     }
 
     /// The store half of [`Self::nb_leaf_rmw_place`].
@@ -709,12 +687,7 @@ impl<'a> Builder<'a> {
     ) {
         let at = self.leaf_index(checked, addr);
         let view = self.leaf_view(buf, addr.view_field, &mut HashMap::default());
-        self.emit_cur(Inst::StoreIndex {
-            base: view,
-            index: at,
-            value,
-            kind: ContainerKind::NativeBufferLeaf,
-        });
+        self.write_index(view, at, value, ContainerKind::NativeBufferLeaf);
     }
 
     /// `buf[i]` on a leaf-addressed NativeBuffer: bounds-check the ELEMENT once,
@@ -746,11 +719,7 @@ impl<'a> Builder<'a> {
             .map(|a| {
                 let at = self.leaf_index(checked, a);
                 let view = self.leaf_view(buf, a.view_field, &mut views);
-                self.emit_cur(Inst::Index {
-                    base: view,
-                    index: at,
-                    kind: ContainerKind::NativeBufferLeaf,
-                })
+                self.read_index(view, at, ContainerKind::NativeBufferLeaf)
             })
             .collect();
         let mut idx = 0;
@@ -797,12 +766,7 @@ impl<'a> Builder<'a> {
         for (a, leaf) in plan.iter().zip(leaves) {
             let at = self.leaf_index(checked, a);
             let view = self.leaf_view(buf, a.view_field, &mut views);
-            self.emit_cur(Inst::StoreIndex {
-                base: view,
-                index: at,
-                value: leaf,
-                kind: ContainerKind::NativeBufferLeaf,
-            });
+            self.write_index(view, at, leaf, ContainerKind::NativeBufferLeaf);
         }
         Ok(())
     }
@@ -866,11 +830,7 @@ impl<'a> Builder<'a> {
             .into_iter()
             .map(|path| {
                 let col = self.read_field(vec, path);
-                self.emit_cur(Inst::Index {
-                    base: col,
-                    index: slot,
-                    kind: ContainerKind::VecColumn,
-                })
+                self.read_index(col, slot, ContainerKind::VecColumn)
             })
             .collect();
         let mut idx = 0;
@@ -936,12 +896,7 @@ impl<'a> Builder<'a> {
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
         for path in column_leaf_paths(&shape) {
             let col = self.read_field(vec, path);
-            self.emit_cur(Inst::StoreIndex {
-                base: col,
-                index: slot,
-                value: nil,
-                kind: ContainerKind::VecColumn,
-            });
+            self.write_index(col, slot, nil, ContainerKind::VecColumn);
         }
         Ok(())
     }
@@ -1320,11 +1275,7 @@ impl<'a> Builder<'a> {
         let i_now = self.emit_cur(Inst::Load(i_cell));
         let one = self.emit_cur(Inst::Const(Lit::Int(1)));
         let one_based = self.emit_cur(Inst::IntAdd(i_now, one));
-        let value = self.emit_cur(Inst::Index {
-            base: raw,
-            index: one_based,
-            kind: ContainerKind::VecColumn,
-        });
+        let value = self.read_index(raw, one_based, ContainerKind::VecColumn);
         let bundle = ValueBundle::new(elem.representation(), ValueRepr::Scalar(value));
         self.column_append_bundle(vec, &bundle, elem)?;
         let next = self.emit_cur(Inst::IntAdd(i_now, one));
@@ -1579,12 +1530,7 @@ impl<'a> Builder<'a> {
                 self.emit_cur(Inst::VecStrideNilToFalse(v))
             };
             let at = self.strided_slot_index(slot, shape.leaf_count(), offset);
-            self.emit_cur(Inst::StoreIndex {
-                base: data,
-                index: at,
-                value: v,
-                kind: ContainerKind::VecStrideSlot,
-            });
+            self.write_index(data, at, v, ContainerKind::VecStrideSlot);
         }
         Ok(())
     }
@@ -1627,12 +1573,7 @@ impl<'a> Builder<'a> {
         };
         for (path, leaf) in paths.into_iter().zip(leaves) {
             let col = self.read_field(vec, path);
-            self.emit_cur(Inst::StoreIndex {
-                base: col,
-                index: slot,
-                value: leaf,
-                kind: ContainerKind::VecColumn,
-            });
+            self.write_index(col, slot, leaf, ContainerKind::VecColumn);
         }
         Ok(())
     }
@@ -1896,12 +1837,7 @@ impl<'a> Builder<'a> {
     ) {
         for (path, leaf) in paths.into_iter().zip(leaves) {
             let col = self.read_field(vec, path);
-            self.emit_cur(Inst::StoreIndex {
-                base: col,
-                index: slot,
-                value: leaf,
-                kind: ContainerKind::VecColumn,
-            });
+            self.write_index(col, slot, leaf, ContainerKind::VecColumn);
         }
     }
 

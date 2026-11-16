@@ -257,11 +257,7 @@ impl<'a> Builder<'a> {
                 let names = self.emit_cur(Inst::Global(crate::mangle::enum_names_global(
                     self.ws, *name,
                 )));
-                Ok(self.emit_cur(Inst::Index {
-                    base: names,
-                    index: v,
-                    kind: ContainerKind::Map,
-                }))
+                Ok(self.read_index(names, v, ContainerKind::Map))
             }
             StringifyRoute::Inspect => self.dispatched_call("inspect", path, vec![v]),
             StringifyRoute::EscapedString => {

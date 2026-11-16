@@ -1054,19 +1054,11 @@ impl<'a> Builder<'a> {
         match storage {
             FlatStorage::Columns => {
                 let col = self.read_field(vec, path);
-                Ok(self.emit_cur(Inst::Index {
-                    base: col,
-                    index: slot,
-                    kind: ContainerKind::VecColumn,
-                }))
+                Ok(self.read_index(col, slot, ContainerKind::VecColumn))
             }
             FlatStorage::Strided => {
                 let (at, data) = self.flat_strided_slot(vec, slot, elem, path)?;
-                let stored = self.emit_cur(Inst::Index {
-                    base: data,
-                    index: at,
-                    kind: ContainerKind::VecStrideSlot,
-                });
+                let stored = self.read_index(data, at, ContainerKind::VecStrideSlot);
                 Ok(if self.strided_stores_raw(elem) {
                     stored
                 } else {
@@ -1088,12 +1080,7 @@ impl<'a> Builder<'a> {
         match storage {
             FlatStorage::Columns => {
                 let col = self.read_field(vec, path);
-                self.emit_cur(Inst::StoreIndex {
-                    base: col,
-                    index: slot,
-                    value,
-                    kind: ContainerKind::VecColumn,
-                });
+                self.write_index(col, slot, value, ContainerKind::VecColumn);
             }
             FlatStorage::Strided => {
                 let (at, data) = self.flat_strided_slot(vec, slot, elem, path)?;
@@ -1102,12 +1089,7 @@ impl<'a> Builder<'a> {
                 } else {
                     self.emit_cur(Inst::VecStrideNilToFalse(value))
                 };
-                self.emit_cur(Inst::StoreIndex {
-                    base: data,
-                    index: at,
-                    value,
-                    kind: ContainerKind::VecStrideSlot,
-                });
+                self.write_index(data, at, value, ContainerKind::VecStrideSlot);
             }
         }
         Ok(())
