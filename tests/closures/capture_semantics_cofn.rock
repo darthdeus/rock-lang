@@ -1,7 +1,5 @@
-// P0: runtime semantic contract for
-// lambdas inside `co fn` bodies, written BEFORE the frame-lambda hoist (P1)
-// so the swap from inline-closure-over-frame-fields to env records is held
-// to these outputs. Non-co siblings: closures/capture_semantics.rock.
+// Capture behavior inside coroutine bodies. Non-coroutine sibling:
+// closures/capture_semantics.rock.
 
 enum CEv { Tick(int) }
 
@@ -22,14 +20,8 @@ fn test_cofn_named_nested_function() {
     print("R={R_NAMED_NESTED}")
 }
 
-// Yield-inside-the-loop per-iteration regression guard (D4(b)):
-// a captured loop binding snapshots
-// per-iteration at record creation -- the counter is a frame field (it
-// survives the suspension) but the snapshot is taken eagerly, so the yield
-// between the two pushes changes nothing: both pushes of one iteration
-// capture that iteration's value. Same rule as the non-co
-// test_range_counter_capture_per_iteration; a via-`s` (call-time) capture
-// would regress this to the counter's exit value ("3" x6).
+// Read-only loop captures snapshot each iteration, even when a yield separates
+// closure creation. Both closures created in one iteration see the same value.
 co fn push_around_yield() -> Coroutine<CEv> {
     for i in 0..3 {
         CFS.push(() => i)
@@ -39,7 +31,7 @@ co fn push_around_yield() -> Coroutine<CEv> {
 }
 
 @test(output = "0\n0\n1\n1\n2\n2")
-fn test_cofn_counter_capture_across_yield_sentinel() {
+fn test_cofn_counter_capture_across_yield() {
     let c = push_around_yield()
     let _ = c.resume()
     let _ = c.resume()
@@ -48,17 +40,12 @@ fn test_cofn_counter_capture_across_yield_sentinel() {
     for f in CFS { print(f()) }
 }
 
-// ---- Lambdas WITH params: the param is the argument, never a frame field ----
-// A hoisted co-fn lambda's own params/locals are plain locals of its hoisted
-// body; only captured co-fn state reads through the frame (via the record's `s`
-// capture). Formerly sentinels pinning the nil-param death (the transform swept
-// param cells into the frame; __resume's pcall swallowed the error and the -1
-// default never updated).
+// Lambda parameters and locals belong to the lambda; captured coroutine state
+// is read through its closure environment.
 
 global R_PARAM_CAP: int = -1
 
-// Case 1: param + captured FRAME cell -- `(n) => n + counter` where counter is a
-// co-fn local read through `s` at call time.
+// The parameter is passed as an argument, while counter is captured state.
 co fn worker_param_capture() -> Coroutine<CEv> {
     let counter = 100
     let add = (n: int) => n + counter
@@ -67,7 +54,7 @@ co fn worker_param_capture() -> Coroutine<CEv> {
 }
 
 @test(output = "R=105")
-fn test_cofn_param_plus_capture_broken_sentinel() {
+fn test_cofn_param_plus_capture() {
     let c = worker_param_capture()
     let _ = c.resume()
     print("R={R_PARAM_CAP}")
@@ -75,8 +62,7 @@ fn test_cofn_param_plus_capture_broken_sentinel() {
 
 global R_OWN_LOCAL: int = -1
 
-// Case 2: lambda-own local behind a param -- `(n) => { let y = n * 2; y }`; both
-// the param and `y` are locals of the hoisted body, not frame fields.
+// The parameter and lambda-local y are not coroutine state.
 co fn worker_own_local() -> Coroutine<CEv> {
     let f = (n: int) => { let y = n * 2; y }
     R_OWN_LOCAL = f(21)
@@ -84,7 +70,7 @@ co fn worker_own_local() -> Coroutine<CEv> {
 }
 
 @test(output = "R=42")
-fn test_cofn_lambda_own_local_with_param_broken_sentinel() {
+fn test_cofn_lambda_own_local_with_param() {
     let c = worker_own_local()
     let _ = c.resume()
     print("R={R_OWN_LOCAL}")
@@ -92,9 +78,7 @@ fn test_cofn_lambda_own_local_with_param_broken_sentinel() {
 
 global R_NESTED: int = -1
 
-// Case 3: nested lambda -- inner captures the OUTER lambda's param `n` (a
-// by-value env field) AND the frame cell `base` (via `s`, redirected through the
-// outer's env: `__rock_env.c<S>.c<base>`).
+// The nested lambda captures the outer parameter and coroutine local base.
 co fn worker_nested() -> Coroutine<CEv> {
     let base = 10
     let outer = (n: int) => {
@@ -106,7 +90,7 @@ co fn worker_nested() -> Coroutine<CEv> {
 }
 
 @test(output = "R=15")
-fn test_cofn_nested_lambda_broken_sentinel() {
+fn test_cofn_nested_lambda_captures() {
     let c = worker_nested()
     let _ = c.resume()
     print("R={R_NESTED}")
@@ -114,15 +98,12 @@ fn test_cofn_nested_lambda_broken_sentinel() {
 
 global R_MAP: int = -1
 
-// Iterator chains inside co fn bodies silently drop the co fn from emission
-// (skull bug), so the chain lives in this top-level HOF.
+// The top-level helper keeps the iterator chain outside the coroutine body.
 fn map_ints(xs: [int], f: fn(int) -> int) -> [int] {
     return xs.iter().map(f).collect()
 }
 
-// Case 7: HOF with a placeholder lambda -- `map_ints(xs, _ * 2)`. `_ * 2`
-// desugars to a lambda WITH a param (the everyday shape); its param is a plain
-// local of the hoisted body, so the HOF's per-element call binds correctly.
+// The placeholder lambda receives each element and doubles it.
 co fn worker_map() -> Coroutine<CEv> {
     let xs = [1, 2, 3]
     let ys = map_ints(xs, _ * 2)
@@ -131,22 +112,19 @@ co fn worker_map() -> Coroutine<CEv> {
 }
 
 @test(output = "R=12")
-fn test_cofn_placeholder_map_broken_sentinel() {
+fn test_cofn_placeholder_map() {
     let c = worker_map()
     let _ = c.resume()
     print("R={R_MAP}")
 }
 
-// ---- CORRECT today: no-param captures and capture-free lambdas ----
-// A lambda with no params reads/writes ONLY frame fields, which IS the shared
-// coroutine-state semantics, so these already behave. They are the regression
-// floor for P1: the hoist must not break them.
+// No-parameter lambdas share captured coroutine state. Capture-free lambdas
+// need no captured state.
 
 global R_MUT_A: int = -1
 global R_MUT_B: int = -1
 
-// Case 4: mutation through a no-param capture, observed after the call AND across
-// a yield boundary -- frame-field read/write is the shared mechanism.
+// A captured mutable local is shared across calls and across a yield.
 co fn worker_mutate() -> Coroutine<CEv> {
     let x = 1
     let bump = () => { x = x + 10 }
@@ -168,9 +146,8 @@ fn test_cofn_mutation_through_capture_across_yield() {
 
 global R_STORED: int = -1
 
-// Case 5: a capture-only lambda created BEFORE a yield, stored in a co-fn local,
-// called AFTER resume -- the record (and its captured frame field) survives
-// suspension (the record itself lives in a frame field).
+// A closure created before suspension retains access to coroutine state after
+// resume.
 co fn worker_stored() -> Coroutine<CEv> {
     let v = 7
     let f = () => v
@@ -188,8 +165,7 @@ fn test_cofn_lambda_stored_across_yield_called_after_resume() {
 
 global R_FREE: int = -1
 
-// Case 6: a capture-free `() => 42` created and called inside a co fn hoists to
-// a bare top-level name (zero alloc, no record).
+// A capture-free lambda can be called inside a coroutine body.
 co fn worker_free() -> Coroutine<CEv> {
     let f = () => 42
     R_FREE = f()
@@ -205,14 +181,8 @@ fn test_cofn_capture_free_lambda() {
 
 global WFS: [fn() -> int] = []
 
-// Case 9: the R2 edge under a frame -- a lambda that WRITES the loop binding
-// (`() => { i = i + 1; i }`). R2 says a WRITTEN
-// loop binding is one shared box, NOT a per-iteration snapshot. Today all three
-// closures share the frame's `i` cell (exit value 3), so successive calls read
-// 4, 5, 6. This is the TARGET behavior too: under D4(b) a written loop binding
-// stays SHARED via `s` (only READ-ONLY loop bindings snapshot per-iteration --
-// contrast test_cofn_counter_capture_across_yield_sentinel). Normal regression
-// pin, not a sentinel: the value must stay "4\n5\n6" after P1 + D4(b).
+// Closures that write the loop binding share it, so successive calls observe
+// each preceding write.
 co fn worker_writes_binding() -> Coroutine<CEv> {
     for i in 0..3 {
         WFS.push(() => { i = i + 1; i })
@@ -221,19 +191,17 @@ co fn worker_writes_binding() -> Coroutine<CEv> {
 }
 
 @test(output = "4\n5\n6")
-fn test_cofn_lambda_writes_loop_binding_shares_via_s() {
+fn test_cofn_lambda_writes_loop_binding_shares_mutable_binding() {
     let c = worker_writes_binding()
     let _ = c.resume()
     for f in WFS { print(f()) }
 }
 
-// ---- CORRECT today: hook / defer regression pins (guard D1/D5) ----
+// Hook and defer behavior.
 
 global HLOG: [string] = []
 
-// Case 10a: an on_killed hook whose body has its own `let`. Hooks are ALREADY
-// hoisted (mechanism 3, emit_coroutine); D5 rationalizes them without reshaping.
-// This pins that a hook-local binding still emits/runs correctly.
+// The hook body uses a local binding when the coroutine is killed.
 co fn hook_local_worker() -> Coroutine<CEv> {
     on_killed {
         let msg = "killed-hook"
@@ -243,8 +211,7 @@ co fn hook_local_worker() -> Coroutine<CEv> {
     yield CEv::Tick(2)
 }
 
-// Case 10b: a defer touching frame state (`state` is a co-fn local). Terminal
-// defers fire on kill(); the interpolation reads the frame field. Guards D1/D5.
+// The defer reads coroutine state when the coroutine is killed.
 co fn defer_frame_state_worker() -> Coroutine<CEv> {
     let state = 5
     defer { HLOG.push("state={state}") }
@@ -264,19 +231,15 @@ fn test_cofn_hook_local_and_defer_frame_state() {
     for s in HLOG { print(s) }
 }
 
-// ---- Defer + lambda in a co fn (the fixed defer-lowering bug) ----
-// A lambda body is its own fn scope; its `return` must run only the lambda's
-// own defers, never the enclosing co fn's still-pending ones. Pre-fix the
-// shared `defers` stack in lower.rs spliced the co-fn defer into the lambda
-// (miscompile) and, when the defer body created the lambda, recursed forever
-// during lowering (compiler stack overflow). Plain-fn siblings: control_flow/defer_lambda.rock.
+// A lambda has its own scope; returning from it leaves the coroutine's defer
+// pending until coroutine completion. Plain-function sibling:
+// control_flow/defer.rock.
 
 global CR_MIS: int = 0
 global CR_SUM: int = 0
 
-// Miscompile pin: a lambda created after a `defer` in the co-fn body. Pre-fix
-// each `f()` ran the spliced co-fn defer, so CR_MIS == 3 (two calls + terminal);
-// now the defer runs once at terminal exit.
+// Calling the lambda does not run the enclosing defer; it runs once at
+// coroutine completion.
 co fn cofn_defer_then_lambda() -> Coroutine<CEv> {
     defer { CR_MIS = CR_MIS + 1 }
     let f = () => 42
@@ -294,10 +257,7 @@ fn test_cofn_defer_then_lambda_runs_defer_once() {
 
 global RC_DEFER_LAMBDA: int = -1
 
-// D5's original shape: a PARAM lambda INSIDE a defer body in a co fn -- pre-fix
-// a compiler stack overflow. Observed via the -1-default global (P0 pattern):
-// the terminal defer fires on the co fn's completion, so a stuck-at-(-1) read
-// would mean the defer never ran.
+// A parameterized lambda can be created and called from a terminal defer.
 co fn cofn_lambda_in_defer_body() -> Coroutine<CEv> {
     defer {
         let add = (n: int) => n + 1

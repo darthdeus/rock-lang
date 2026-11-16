@@ -1,7 +1,7 @@
 //! The JS backend: intrinsic table, emitter and runtime prelude. The THIRD
 //! [`IntrinsicTable`] shape after luajit (in-source `inline(lua)` bodies) and
 //! GLSL. Covers the eight scalar fallback+mapping intrinsics of the conformance
-//! differential (`tests/intrinsics/fallback_reference.rock`), the base math
+//! differential (`tests/intrinsics/scalar_reference.rock`), the base math
 //! set, and the `@native_required` NativeBuffer four-fn surface
 //! (TypedArrays as `Ptr<T>`,
 //! cross-backend-verified by `tests/nb_differential.rs`). The [`emit`] module

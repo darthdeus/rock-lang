@@ -200,10 +200,7 @@ fn gc_tier_plain_value_store_twice_copies() {
     assert_eq(h.b.n, 1, "gc-tier value stores alias")
 }
 
-value GcAliasLabel { text: string, n: int }
-struct GcAliasHolder { a: GcAliasLabel, b: GcAliasLabel }
-
-fn gc_alias_store_twice(e: GcAliasLabel?, h: GcAliasHolder) {
+fn gc_alias_store_twice(e: AliasLabel?, h: AliasLabelHolder) {
     if let v = e {
         h.a = v
         h.b = v
@@ -212,8 +209,178 @@ fn gc_alias_store_twice(e: GcAliasLabel?, h: GcAliasHolder) {
 
 @test
 fn storing_one_gc_value_twice_copies() {
-    let h = GcAliasHolder { a: GcAliasLabel { text: "a", n: 0 }, b: GcAliasLabel { text: "b", n: 0 } }
-    gc_alias_store_twice(GcAliasLabel { text: "x", n: 1 }, h)
+    let h = AliasLabelHolder { a: AliasLabel { text: "a", n: 0 }, b: AliasLabel { text: "b", n: 0 } }
+    gc_alias_store_twice(AliasLabel { text: "x", n: 1 }, h)
     h.a.n = 5
     assert_eq(h.b.n, 1, "GC value stores copy independently")
+}
+
+// Whole-value reads of a `value` struct must COPY -- the invariant the
+// mutable-place model rests on. Binding, argument, return and boxed-storage
+// uses copy the value. Nullability is not
+// observable: a `V?` read out of a mutable place copies its leaves when the
+// value is present and stays null when it is absent.
+//
+// The absent cases also check that copying does not read leaves from null.
+
+struct NonNull1 { p: AliasPoint }
+struct NonNull2 { p: AliasPoint }
+struct Nullable1 { p: AliasPoint? }
+struct Nullable2 { p: AliasPoint? }
+
+fn nullable_identity(a: Nullable1) -> Nullable1 { return a }
+
+// A whole-value read of a non-nullable field copies, so the write through
+// `b` leaves `a` alone.
+@test(output = "b=99 a=1")
+fn non_nullable_value_field_read_copies() {
+    let a = NonNull1 { p: AliasPoint { x: 1, y: 2 } }
+    let b = NonNull2 { p: a.p }
+    b.p.x = 99
+    print("b={b.p.x} a={a.p.x}")
+}
+
+// Nullability is the only difference from the control above, and the output is
+// the same.
+@test(output = "b=99 a=1")
+fn nullable_value_field_read_copies() {
+    let a = Nullable1 { p: AliasPoint { x: 1, y: 2 } }
+    let b = Nullable2 { p: nullable_identity(a).p }
+    if b.p != null && a.p != null {
+        b.p.x = 99
+        print("b={b.p.x} a={a.p.x}")
+    }
+}
+
+// A `V?` whole-value read out of a mutable place copies its leaves when the
+// value is present and stays null when it is absent -- at every place root, not
+// just the struct field pinned above.
+// The absent cases are load-bearing: an absent value has no leaves, so an
+// unconditional split would index nil.
+@test(output = "null")
+fn absent_field_read_stays_null() {
+    let a = Nullable1 { p: null }
+    let b = Nullable2 { p: a.p }
+    if b.p == null { print("null") } else { print("boxed") }
+}
+
+@test(output = "c=1 a=99")
+fn let_bound_nullable_field_copies() {
+    let a = Nullable1 { p: AliasPoint { x: 1, y: 2 } }
+    let c = a.p
+    if a.p != null { a.p.x = 99 }
+    if c != null && a.p != null { print("c={c.x} a={a.p.x}") }
+}
+
+fn read_out_of_param(a: Nullable1) {
+    let b = Nullable2 { p: a.p }
+    if b.p != null && a.p != null {
+        b.p.x = 99
+        print("b={b.p.x} a={a.p.x}")
+    }
+}
+
+@test(output = "b=99 a=1")
+fn param_root_copies() {
+    read_out_of_param(Nullable1 { p: AliasPoint { x: 1, y: 2 } })
+}
+
+global G_PT: AliasPoint? = null
+
+// Through a fn so the read site sees the declared `AliasPoint?`, not a refinement.
+fn set_g_pt(v: AliasPoint?) {
+    G_PT = v
+}
+
+@test(output = "b=99 g=1")
+fn global_root_copies() {
+    set_g_pt(AliasPoint { x: 1, y: 2 })
+    let b = Nullable2 { p: G_PT }
+    if b.p != null {
+        b.p.x = 99
+        if G_PT != null { print("b={b.p.x} g={G_PT.x}") }
+    }
+}
+
+@test(output = "null")
+fn absent_global_read_stays_null() {
+    set_g_pt(null)
+    let b = Nullable2 { p: G_PT }
+    if b.p == null { print("null") } else { print("boxed") }
+}
+
+@test(output = "b=99 e=1")
+fn vec_element_root_copies() {
+    let xs: [AliasPoint?] = [AliasPoint { x: 1, y: 2 }]
+    let b = Nullable2 { p: xs[0] }
+    if b.p != null {
+        b.p.x = 99
+        let e = xs[0]
+        if e != null { print("b={b.p.x} e={e.x}") }
+    }
+}
+
+@test(output = "b=99 m=1")
+fn map_value_root_copies() {
+    let m: Map<int, AliasPoint?> = map_new()
+    m[7] = AliasPoint { x: 1, y: 2 }
+    let b = Nullable2 { p: m[7] }
+    if b.p != null {
+        b.p.x = 99
+        let mv = m[7]
+        if mv != null { print("b={b.p.x} m={mv.x}") }
+    }
+}
+
+struct Owner { inner: Nullable1? }
+
+@test(output = "b=99 a=1")
+fn safenav_nullable_field_copies() {
+    let o = Owner { inner: Nullable1 { p: AliasPoint { x: 1, y: 2 } } }
+    let b = Nullable2 { p: o.inner?.p }
+    if b.p != null && o.inner != null && o.inner.p != null {
+        b.p.x = 99
+        print("b={b.p.x} a={o.inner.p.x}")
+    }
+}
+
+@test(output = "null")
+fn safenav_absent_field_stays_null() {
+    let o = Owner { inner: Nullable1 { p: null } }
+    let b = Nullable2 { p: o.inner?.p }
+    if b.p == null { print("null") } else { print("boxed") }
+}
+
+@test(output = "null")
+fn safenav_absent_base_stays_null() {
+    let o = Owner { inner: null }
+    let b = Nullable2 { p: o.inner?.p }
+    if b.p == null { print("null") } else { print("boxed") }
+}
+
+struct NNB { p: AliasPoint }
+struct OwnerNN { inner: NNB? }
+
+@test(output = "b=99 a=1")
+fn safenav_nonnullable_field_copies() {
+    let o = OwnerNN { inner: NNB { p: AliasPoint { x: 1, y: 2 } } }
+    let b = Nullable2 { p: o.inner?.p }
+    if b.p != null && o.inner != null {
+        b.p.x = 99
+        print("b={b.p.x} a={o.inner.p.x}")
+    }
+}
+
+// A non-nullable field read through an owner already refined to non-null: the
+// non-nullable copy-out arm, the control for the arms above.
+@test(output = "b=99 a=1")
+fn nonnullable_field_of_refined_owner_copies() {
+    let o = OwnerNN { inner: NNB { p: AliasPoint { x: 1, y: 2 } } }
+    if o.inner != null {
+        let b = Nullable2 { p: o.inner.p }
+        if b.p != null {
+            b.p.x = 99
+            print("b={b.p.x} a={o.inner.p.x}")
+        }
+    }
 }

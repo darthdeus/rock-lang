@@ -92,3 +92,22 @@ fn test_tuples_from_containers() {
     assert_eq(value.name, "map_test")
     assert_eq(value.value, 789)
 }
+
+// Test that parentheses work correctly for grouping
+@test(output = "42")
+fn test_parenthesized_expressions_not_tuples() {
+    // Single item in parentheses should not create a tuple
+    let x = (42)
+    print(x)
+}
+
+fn get_string() -> string {
+    "hello"
+}
+
+@test(output = "hello")
+fn test_parenthesized_function_call() {
+    // Function call result in parentheses should not create a tuple
+    let s = (get_string())
+    print(s)
+}

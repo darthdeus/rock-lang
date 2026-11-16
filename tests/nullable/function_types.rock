@@ -51,22 +51,3 @@ fn test_nullable_function_null_case() {
         f()
     }
 }
-
-// Test that parentheses work correctly for grouping
-@test(output = "42")
-fn test_parenthesized_expressions_not_tuples() {
-    // Single item in parentheses should not create a tuple
-    let x = (42)
-    print(x)
-}
-
-fn get_string() -> string { 
-    "hello" 
-}
-
-@test(output = "hello")
-fn test_parenthesized_function_call() {
-    // Function call result in parentheses should not create a tuple
-    let s = (get_string())
-    print(s)
-}

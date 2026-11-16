@@ -1,16 +1,8 @@
-//! Conformance harness skeleton: the
-//! DIFFERENTIAL precondition for the intrinsics that have BOTH a portable Rock
-//! fallback AND a backend native mapping.
-//!
-//! A real differential run executes each backend twice -- native mappings vs
-//! fallbacks-forced -- and diffs the outputs against the portable reference. On
-//! luajit (the only backend that executes today) an intrinsic has exactly ONE
-//! body, so numeric differencing is degenerate; the executable reference values
-//! live in `tests/intrinsics/fallback_reference.rock`. What this harness pins is
-//! the STRUCTURAL precondition a second executing backend (JS, C) will diff
-//! against: for each fallback+mapping intrinsic, a portable Rock fallback body
-//! exists (a new backend inherits it) AND GLSL maps it natively. It goes red if
-//! a fallback is deleted or a GLSL mapping drops.
+//! Structural preconditions for intrinsics with both a portable Rock fallback
+//! and a backend native mapping. Runtime reference tests live in
+//! `tests/intrinsics/scalar_reference.rock`; its scalar-returning tests also run
+//! on GLSL. This harness checks that each fallback body exists and GLSL maps it
+//! natively, so a backend cannot silently drop either side of that contract.
 
 use skull_codegen_glsl::GlslIntrinsics;
 use skull_mir::intrinsics::{
@@ -21,9 +13,7 @@ fn stdlib_ws() -> bone_core::workspace::Workspace {
     crate::support::workspace("fn main() {}").0
 }
 
-// Each has a portable Rock fallback (the reference impl) AND a GLSL native
-// mapping -- the differential precondition. The Rock fallback runs on luajit;
-// GLSL supplies a native `min`/`clamp`/... a future backend must match.
+// Each has a portable Rock fallback and a GLSL native mapping.
 const FALLBACK_AND_MAPPING: &[(&str, usize)] = &[
     ("min", 2),
     ("max", 2),
