@@ -326,15 +326,12 @@ pub(crate) fn arg_matches_residual(q: &[u8], k: usize, arg: &str) -> bool {
     qi == q.len()
 }
 
-/// One call-through-eligible function: its canonical key and legacy name, the
-/// first-param type (rendered), and whether it has more than one param. A
-/// request builds scoped spellings and their lowercase forms at read time.
+/// One call-through-eligible function: its canonical key (also its legacy
+/// spelling), the first-param type (rendered), and whether it has more than
+/// one param. A v1 request builds scoped spellings and their lowercase forms
+/// at read time.
 pub(crate) struct CtFn {
-    /// Canonical workspace key used for HIR lookup and type ranking.
     pub(crate) key: ustr::Ustr,
-    /// Canonical name retained for the legacy view; v1 requests render a
-    /// fragment-visible spelling at query time.
-    pub(crate) name: ustr::Ustr,
     pub(crate) mid: ModuleId,
     pub(crate) fid: Idx<bone_semantic::hir::Function>,
     pub(crate) first_param_ty: String,
@@ -367,10 +364,10 @@ pub(crate) struct CtArg {
 }
 
 impl CtArg {
-    pub(crate) fn direct(text: String, payload: ArgPayload) -> Self {
+    pub(crate) fn direct(root_key: Option<Ustr>, text: String, payload: ArgPayload) -> Self {
         CtArg {
             text,
-            root_key: None,
+            root_key,
             reach_suffix: None,
             reach_is_method: false,
             payload,
@@ -380,20 +377,11 @@ impl CtArg {
         }
     }
 
-    pub(crate) fn keyed(key: ustr::Ustr, text: String, payload: ArgPayload) -> Self {
-        CtArg {
-            text,
-            root_key: Some(key),
-            reach_suffix: None,
-            reach_is_method: false,
-            payload,
-            method: false,
-            method_members: Vec::new(),
-            field_members: Vec::new(),
-        }
-    }
-
-    pub(crate) fn reach(key: ustr::Ustr, root: &str, p: &crate::reachability::ReachPath) -> Self {
+    pub(crate) fn reach(
+        root_key: Option<Ustr>,
+        root: &str,
+        p: &crate::reachability::ReachPath,
+    ) -> Self {
         let text = if p.is_method {
             format!("{root}.{}()", p.suffix)
         } else {
@@ -401,25 +389,7 @@ impl CtArg {
         };
         CtArg {
             text,
-            root_key: Some(key),
-            reach_suffix: Some(p.suffix.clone()),
-            reach_is_method: p.is_method,
-            payload: ArgPayload::None,
-            method: p.via_call,
-            method_members: p.method_members.clone(),
-            field_members: p.field_members.clone(),
-        }
-    }
-
-    pub(crate) fn reach_local(root: &str, p: &crate::reachability::ReachPath) -> Self {
-        let text = if p.is_method {
-            format!("{root}.{}()", p.suffix)
-        } else {
-            format!("{root}.{}", p.suffix)
-        };
-        CtArg {
-            text,
-            root_key: None,
+            root_key,
             reach_suffix: Some(p.suffix.clone()),
             reach_is_method: p.is_method,
             payload: ArgPayload::None,
@@ -461,7 +431,6 @@ pub(crate) fn build_call_through(
             };
             fns.push(CtFn {
                 key: f.name,
-                name: f.name,
                 mid: m.id,
                 fid,
                 first_param_ty: ws.render(None, p0.ty),
@@ -491,7 +460,7 @@ pub(crate) fn build_call_through(
         let mut vals: Vec<CtArg> = groots
             .iter()
             .filter(|(_, _, rt)| rt == t)
-            .map(|(key, n, _)| CtArg::keyed(*key, n.clone(), ArgPayload::None))
+            .map(|(key, n, _)| CtArg::direct(Some(*key), n.clone(), ArgPayload::None))
             .collect();
         for (vname, shape) in crate::query::enum_variants_with_shape(ws, t) {
             let payload = match shape {
@@ -499,8 +468,8 @@ pub(crate) fn build_call_through(
                 crate::query::VariantShape::Tuple => ArgPayload::Tuple,
                 crate::query::VariantShape::Record => ArgPayload::Record,
             };
-            vals.push(CtArg::keyed(
-                Ustr::from(t),
+            vals.push(CtArg::direct(
+                Some(Ustr::from(t)),
                 format!("{t}::{vname}"),
                 payload,
             ));
@@ -515,12 +484,12 @@ pub(crate) fn build_call_through(
             let Some(vals) = global_type_args.get_mut(p.final_ty.as_str()) else {
                 continue; // not a first-param type any fn needs
             };
-            vals.push(CtArg::reach(*rkey, rn, p));
+            vals.push(CtArg::reach(Some(*rkey), rn, p));
         }
     }
     let mut fns_by_first_char: HashMap<u8, Vec<usize>> = HashMap::new();
     for (index, cf) in fns.iter().enumerate() {
-        if let Some(&first) = cf.name.as_bytes().first() {
+        if let Some(&first) = cf.key.as_bytes().first() {
             fns_by_first_char
                 .entry(first.to_ascii_lowercase())
                 .or_default()
@@ -700,7 +669,7 @@ pub(crate) fn call_through_param_completions(
             .into_iter()
             .flatten()
             .map(|&fn_index| {
-                let name = index.fns[fn_index].name;
+                let name = index.fns[fn_index].key;
                 ScopedCtFn {
                     index: fn_index,
                     name,
@@ -751,7 +720,7 @@ pub(crate) fn call_through_param_completions(
         local_args
             .entry(lt.clone())
             .or_default()
-            .push(CtArg::direct(ln.clone(), ArgPayload::None));
+            .push(CtArg::direct(None, ln.clone(), ArgPayload::None));
         let paths = frag
             .map(|frag| reach.arg_paths_in_scope(ws, frag, lt))
             .unwrap_or_else(|| reach.arg_paths_from(lt).iter().collect());
@@ -762,7 +731,7 @@ pub(crate) fn call_through_param_completions(
             local_args
                 .entry(p.final_ty.clone())
                 .or_default()
-                .push(CtArg::reach_local(ln, p));
+                .push(CtArg::reach(None, ln, p));
         }
     }
     if let Some(callable_names) = callable_spellings {
