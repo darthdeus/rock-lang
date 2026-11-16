@@ -1,8 +1,7 @@
 // T3 loop value-model conformance. Each
 // @test returns a scalar the HOST compares against the pinned literal, run on
 // both luajit and the JS backend -- so a cell written in iteration N and read in
-// N+1 that folded across the back-edge would diverge here. Behavioral companion
-// to the structure pins in crates/skull-codegen-js/tests/loops.rs.
+// N+1 that folded across the back-edge would diverge here.
 
 fn sum_while(n: int) -> int {
     let acc = 0

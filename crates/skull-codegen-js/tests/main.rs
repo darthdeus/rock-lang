@@ -33,8 +33,6 @@ mod inline_pipeline;
 mod inspect;
 #[path = "lambda.rs"]
 mod lambda;
-#[path = "loops.rs"]
-mod loops;
 #[path = "map_key_admission.rs"]
 mod map_key_admission;
 #[path = "misc_intrinsics.rs"]
