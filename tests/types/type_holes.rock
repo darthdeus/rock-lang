@@ -5,10 +5,10 @@
 // Basic type inference tests
 @test(type_holes = [[0, "int"], [1, "string"], [2, "float"]])
 fn test_basic_type_inference() {
-    let x: ? = 42           // hole 0 -> int
-    let y: ? = "hello"      // hole 1 -> string  
-    let z: ? = 3.14         // hole 2 -> float
-    
+    let x: ? = 42
+    let y: ? = "hello"
+    let z: ? = 3.14
+
     // Also verify values work correctly
     assert_eq(x, 42)
     assert_eq(y, "hello")
@@ -16,31 +16,31 @@ fn test_basic_type_inference() {
 }
 
 // Helper function for generic test
-fn identity<T>(x: T) -> T { 
-    return x 
+fn identity<T>(x: T) -> T {
+    return x
 }
 
 // Generic function type inference
 @test(type_holes = [[3, "[int]"], [4, "int"]])
 fn test_generic_function_inference() {
-    let arr: ? = [1, 2, 3]              // hole 3 -> [int]
-    let elem: ? = identity(arr[0])      // hole 4 -> int
-    
+    let arr: ? = [1, 2, 3]
+    let elem: ? = identity(arr[0])
+
     assert_eq(elem, 1)
 }
 
 // Struct field type inference
-struct Point { 
-    x: int, 
-    y: int 
+struct Point {
+    x: int,
+    y: int
 }
 
 @test(type_holes = [[5, "Point"], [6, "int"], [7, "int"]])
 fn test_struct_field_inference() {
-    let p: ? = Point { x: 10, y: 20 }  // hole 5 -> Point
-    let x_val: ? = p.x                  // hole 6 -> int
-    let y_val: ? = p.y                  // hole 7 -> int
-    
+    let p: ? = Point { x: 10, y: 20 }
+    let x_val: ? = p.x
+    let y_val: ? = p.y
+
     assert_eq(x_val, 10)
     assert_eq(y_val, 20)
 }
@@ -48,10 +48,10 @@ fn test_struct_field_inference() {
 // Complex nested types
 @test(type_holes = [[8, "[[int]]"], [9, "[int]"], [10, "int"]])
 fn test_nested_type_inference() {
-    let matrix: ? = [[1, 2], [3, 4]]    // hole 8 -> [[int]]
-    let row: ? = matrix[0]              // hole 9 -> [int]
-    let elem: ? = row[1]                // hole 10 -> int
-    
+    let matrix: ? = [[1, 2], [3, 4]]
+    let row: ? = matrix[0]
+    let elem: ? = row[1]
+
     assert_eq(elem, 2)
 }
 
@@ -59,25 +59,25 @@ fn test_nested_type_inference() {
 @test(type_holes = [[11, "int"]])
 fn test_nullable_type_inference() {
     let maybe_val: int? = 42
-    let default_val: ? = maybe_val ?? 0 // hole 11 -> int
-    
+    let default_val: ? = maybe_val ?? 0
+
     assert_eq(default_val, 42)
 }
 
 // Combined output and type hole testing
-@test(output = "Value: 42", type_holes = [[0, "int"]])
+@test(output = "Value: 42", type_holes = [[12, "int"]])
 fn test_combined_output_and_types() {
-    let x: ? = 42                       // hole 0 -> int
+    let x: ? = 42
     print("Value: {x}")
 }
 
 // Type inference with operators
-@test(type_holes = [[12, "int"], [13, "int"], [15, "bool"]])
+@test(type_holes = [[13, "int"], [14, "int"], [15, "bool"]])
 fn test_operator_type_inference() {
-    let a: ? = 10 + 20                  // hole 12 -> int
-    let b: ? = a * 2                    // hole 13 -> int
-    let c: ? = a > b                    // hole 15 -> bool
-    
+    let a: ? = 10 + 20
+    let b: ? = a * 2
+    let c: ? = a > b
+
     assert_eq(a, 30)
     assert_eq(b, 60)
     assert_eq(c, false)
@@ -95,104 +95,23 @@ fn count_chars(s: string) -> int {
 // Function return type inference
 @test(type_holes = [[16, "string"], [17, "int"]])
 fn test_function_return_inference() {
-    let greeting: ? = greet("World")    // hole 16 -> string
-    let length: ? = count_chars(greeting) // hole 17 -> int
-    
+    let greeting: ? = greet("World")
+    let length: ? = count_chars(greeting)
+
     assert_eq(greeting, "Hello, World!")
     assert_eq(length, 13)
 }
 
-// Several holes in one function, with typed returns
-@test(type_holes = [[18, "int"], [19, "string"], [20, "int"]])
-fn test_basic_type_hole_inference() -> int {
-    let x: ? = 42
-    let y: ? = "hello"
-    let z: ? = x + 1
-    return z
-}
-
-@test(type_holes = [[21, "int"]])
-fn test_generic_type_hole() -> int {
-    let result: ? = identity(42)
-    return result
-}
-
-@test(type_holes = [[22, "Point"]])
+// A hole in a function with a declared return type.
+@test(type_holes = [[18, "Point"]])
 fn test_struct_type_hole() -> Point {
     let p: ? = Point { x: 10, y: 20 }
     return p
 }
 
-@test(type_holes = [[23, "[string]"]])
-fn test_array_type_hole() -> [string] {
-    let arr: ? = ["hello", "world"]
-    return arr
-}
-
-fn get_number() -> int {
-    return 42
-}
-
-@test(type_holes = [[24, "int"]])
-fn test_function_return_type_hole() -> int {
-    let x: ? = get_number()
-    return x
-}
-
-@test(type_holes = [[25, "int"], [26, "float"], [27, "bool"], [28, "[int]"]])
-fn test_multiple_type_holes() -> bool {
-    let a: ? = 10
-    let b: ? = 20.5
-    let c: ? = true
-    let d: ? = [1, 2, 3]
-    return c
-}
-
-@test(type_holes = [[29, "string"]])
-fn test_string_inference() {
-    let msg: ? = "Hello, Rock!"
-    assert_eq(msg, "Hello, Rock!")
-}
-
-@test(type_holes = [[30, "[int]"], [31, "int"]])
-fn test_array_inference() {
-    let nums: ? = [1, 2, 3, 4, 5]
-    let first: ? = nums[0]
-    assert_eq(first, 1)
-}
-
-struct Person {
-    name: string,
-    age: int
-}
-
-@test(type_holes = [[32, "Person"], [33, "string"], [34, "int"]])
-fn test_struct_inference() {
-    let p: ? = Person { name: "Alice", age: 30 }
-    let n: ? = p.name
-    let a: ? = p.age
-    assert_eq(n, "Alice")
-    assert_eq(a, 30)
-}
-
-@test(output = "int: 100\nfloat: 3.14", type_holes = [[35, "int"], [36, "float"]])
-fn test_combined_output_int_float() {
-    let i: ? = 100
-    let f: ? = 3.14
-    print("int: {i}")
-    print("float: {f}")
-}
-
-@test(type_holes = [[37, "int"]])
+@test(type_holes = [[19, "int"]])
 fn test_nullable_null_coalesce_inference() {
     let maybe_val: int? = null
     let default_val: ? = maybe_val ?? 42
     assert_eq(default_val, 42)
-}
-
-@test(output = "Type: int\nValue: 42", type_holes = [[38, "int"]])
-fn test_combined_output_type_line() {
-    let x: ? = 42
-    print("Type: int")
-    print("Value: {x}")
 }

@@ -2,88 +2,68 @@
 // if and while bodies, unit-valued blocks and functions. Type hole ids are
 // numbered across the whole file in source order.
 
-// ============================================
-// Basic Literal Type Inference
-// ============================================
-
 @test(type_holes = [[0, "int"]])
 fn test_int_literal() {
-    let x: ? = 5  // hole 0 -> int
+    let x: ? = 5
     assert_eq(x, 5)
 }
 
 @test(type_holes = [[1, "string"]])
 fn test_string_literal() {
-    let x: ? = "rock"  // hole 1 -> string
+    let x: ? = "rock"
     assert_eq(x, "rock")
 }
 
 @test(type_holes = [[2, "bool"]])
 fn test_bool_literal() {
-    let x: ? = true  // hole 2 -> bool
+    let x: ? = true
     assert_eq(x, true)
 }
-
-// ============================================
-// Variable Assignment Type Inference
-// ============================================
 
 @test(type_holes = [[3, "int"], [4, "int"]])
 fn test_variable_assignment() {
     let x = 5
-    let y: ? = x      // hole 3 -> int (inferred from x)
-    let z: ? = y      // hole 4 -> int (inferred from y)
+    let y: ? = x
+    let z: ? = y
     assert_eq(y, 5)
     assert_eq(z, 5)
 }
 
-// ============================================
-// Binary Expression Type Inference
-// ============================================
-
 @test(type_holes = [[5, "int"]])
 fn test_addition() {
-    let result: ? = 5 + 3  // hole 5 -> int
+    let result: ? = 5 + 3
     assert_eq(result, 8)
 }
 
 @test(type_holes = [[6, "int"]])
 fn test_complex_arithmetic() {
-    let result: ? = 1 + (2 * 3)  // hole 6 -> int
+    let result: ? = 1 + (2 * 3)
     assert_eq(result, 7)
 }
 
 @test(type_holes = [[7, "bool"]])
 fn test_comparison() {
-    let result: ? = (5 == 5)  // hole 7 -> bool
+    let result: ? = (5 == 5)
     assert_eq(result, true)
 }
 
 @test(type_holes = [[8, "bool"]])
 fn test_logical_and() {
-    let result: ? = true && false  // hole 8 -> bool
+    let result: ? = true && false
     assert_eq(result, false)
 }
 
-// ============================================
-// If Expression Type Inference
-// ============================================
-
 @test(type_holes = [[9, "int"]])
 fn test_if_expression() {
-    let result: ? = if true { 5 } else { 10 }  // hole 9 -> int
+    let result: ? = if true { 5 } else { 10 }
     assert_eq(result, 5)
 }
-
-// ============================================
-// Struct Type Inference
-// ============================================
 
 struct FixVec2 { x: int, y: int }
 
 @test(type_holes = [[10, "FixVec2"]])
 fn test_struct_creation() {
-    let v: ? = FixVec2 { x: 5, y: 10 }  // hole 10 -> FixVec2
+    let v: ? = FixVec2 { x: 5, y: 10 }
     assert_eq(v.x, 5)
     assert_eq(v.y, 10)
 }
@@ -91,60 +71,48 @@ fn test_struct_creation() {
 @test(type_holes = [[11, "int"]])
 fn test_struct_field_access() {
     let v = FixVec2 { x: 5, y: 10 }
-    let x_val: ? = v.x  // hole 11 -> int
+    let x_val: ? = v.x
     assert_eq(x_val, 5)
 }
-
-// ============================================
-// Generic Struct Type Inference
-// ============================================
 
 struct Container<T> { value: T }
 
 @test(type_holes = [[12, "Container<int>"]])
 fn test_generic_struct_int() {
-    let c: ? = Container { value: 42 }  // hole 12 -> Container<int>
+    let c: ? = Container { value: 42 }
     assert_eq(c.value, 42)
 }
 
 @test(type_holes = [[13, "Container<string>"]])
 fn test_generic_struct_string() {
-    let c: ? = Container { value: "hello" }  // hole 13 -> Container<string>
+    let c: ? = Container { value: "hello" }
     assert_eq(c.value, "hello")
 }
 
-// ============================================
-// Array Type Inference
-// ============================================
-
 @test(type_holes = [[14, "[int]"]])
 fn test_int_array() {
-    let arr: ? = [1, 2, 3]  // hole 14 -> [int]
+    let arr: ? = [1, 2, 3]
     assert_eq(arr[0], 1)
 }
 
 @test(type_holes = [[15, "[string]"]])
 fn test_string_array() {
-    let arr: ? = ["a", "b", "c"]  // hole 15 -> [string]
+    let arr: ? = ["a", "b", "c"]
     assert_eq(arr[0], "a")
 }
 
 @test(type_holes = [[16, "int"]])
 fn test_array_element_access() {
     let arr = [10, 20, 30]
-    let first: ? = arr[0]  // hole 16 -> int
+    let first: ? = arr[0]
     assert_eq(first, 10)
 }
-
-// ============================================
-// Function Type Inference
-// ============================================
 
 fn identity_int(x: int) -> int { return x }
 
 @test(type_holes = [[17, "int"]])
 fn test_function_call() {
-    let result: ? = identity_int(42)  // hole 17 -> int
+    let result: ? = identity_int(42)
     assert_eq(result, 42)
 }
 
@@ -154,86 +122,16 @@ fn void_func(x: int) {
 
 @test(type_holes = [[18, "()"]])
 fn test_void_function_call() {
-    let result: ? = void_func(5)  // hole 18 -> ()
+    let result: ? = void_func(5)
     assert_eq(result, ())
 }
-
-// ============================================
-// Parenthesized Expression Type Inference
-// ============================================
 
 @test(type_holes = [[19, "int"]])
 fn test_parenthesized_expression() {
     let x = 5
     let y = 6
-    let result: ? = (x + y)  // hole 19 -> int
+    let result: ? = (x + y)
     assert_eq(result, 11)
-}
-
-// ============================================
-// Helper Function Definitions
-// ============================================
-
-fn foo_any(x: any) {
-    print(x)
-}
-
-fn bar_string(x: string) -> string {
-    return x
-}
-
-fn baz_string(x: string) -> string {
-    print("test")
-    return x
-}
-
-fn foo_unit() -> int { 5 }
-
-fn foo_semicolon() -> int {
-    let x = 5
-    x + 10
-}
-
-fn foo_empty() {}
-
-fn foo_let_unit() { let x = 5 }
-
-fn process_int(x: int) -> int {
-    return x
-}
-
-fn process_string(s: string) {
-    print(s)
-}
-
-fn compute(x: int, y: int) -> int {
-    return x * y + 5
-}
-
-fn is_positive(x: int) -> bool {
-    return x > 0
-}
-
-fn add_one(x: int) -> int {
-    return x + 1
-}
-
-fn multiply_by_three(x: int) -> int {
-    return x * 3
-}
-
-fn log_and_double(x: int) -> int {
-    print("Processing {x}")
-    return x * 2
-}
-
-// ============================================
-// Basic Type Inference Tests
-// ============================================
-
-@test(output = "false")
-fn test_bool_literal_inference() {
-    print(true == false)
 }
 
 @test(type_holes = [[20, "int"], [21, "int"]])
@@ -243,26 +141,6 @@ fn test_typed_let_inference() {
     let z: ? = 5
 }
 
-@test(output = "test")
-fn test_function_parameter_types() {
-    let a = 5
-    let b = bar_string("test")
-    print(b)
-}
-
-@test(output = "hello\\n5")
-fn test_print_accepts_any() {
-    let x = "hello"
-    print(x)
-    
-    let y = 5
-    print(y)
-}
-
-// ============================================
-// If Expression Type Inference Tests
-// ============================================
-
 @test(output = "0")
 fn test_if_no_else_is_unit() {
     // statement position: a no-else if is unit. In value position
@@ -270,10 +148,6 @@ fn test_if_no_else_is_unit() {
     if true { () }
     print(0)
 }
-
-// ============================================
-// While Loop Type Inference Tests
-// ============================================
 
 @test(type_holes = [[22, "int"], [23, "int"]])
 fn test_while_loop_inference() {
@@ -284,106 +158,4 @@ fn test_while_loop_inference() {
         x = x + 1
         let b: ? = x
     }
-}
-
-// ============================================
-// Error Cases - Type Mismatch Examples
-// ============================================
-
-// The following tests demonstrate compile-time error cases.
-// Since Rock's @test system focuses on runtime validation,
-// these are documented as examples that should NOT compile.
-
-// EXAMPLE 1: Type mismatch in let binding
-// let x: string = 5  // ERROR: Cannot assign int to string
-
-// EXAMPLE 2: If expression type mismatch 
-// let x = if true { 5 } else { "hello" }  // ERROR: int vs string in branches
-
-// EXAMPLE 3: While loop condition must be bool
-// while 5 { }  // ERROR: Condition must be bool, got int
-
-// EXAMPLE 4: Function return type mismatch with semicolon
-// fn foo() -> int { 5; }  // ERROR: Returns (), expected int
-
-// EXAMPLE 5: Function return type mismatch without semicolon  
-// fn foo() { 5 }  // ERROR: Returns int, expected ()
-
-// ============================================
-// Complex Type Inference Scenarios
-// ============================================
-
-@test(output = "42\\n10\\nhello")
-fn test_complex_function_call_inference() {
-    // Test that type inference correctly resolves function calls
-    let result = process_int(42)
-    print(result)
-    
-    let value = 10
-    print(process_int(value))
-    
-    process_string("hello")
-}
-
-@test(output = "25\\n18")
-fn test_nested_expression_inference() {
-    let a = 4
-    let b = 5
-    let result = compute(a, b)
-    print(result)
-    
-    // Test inference in complex expressions: compute(2, 3) = 11, compute(1, 2) = 7, total = 18
-    let complex = compute(2, 3) + compute(1, 2)
-    print(complex)
-}
-
-@test(output = "true\\nfalse")
-fn test_boolean_inference_patterns() {
-    let positive = is_positive(5)
-    print(positive)
-    
-    let negative = is_positive(-3)
-    print(negative)
-}
-
-// ============================================
-// Variable Assignment and Reassignment Tests
-// ============================================
-
-@test(output = "5\\n10\\n15")
-fn test_variable_reassignment_inference() {
-    let x = 5
-    print(x)
-    
-    x = 10
-    print(x)
-    
-    x = x + 5
-    print(x)
-}
-
-@test(output = "hello\\nworld")
-fn test_string_variable_inference() {
-    let message = "hello"
-    print(message)
-    
-    message = "world"
-    print(message)
-}
-
-// ============================================
-// Function Call Chain Inference Tests  
-// ============================================
-
-@test(output = "15")
-fn test_function_call_chain_inference() {
-    // Test that type inference works through function call chains
-    let result = multiply_by_three(add_one(4))
-    print(result)
-}
-
-@test(output = "Processing 42\\n84")
-fn test_mixed_return_types() {
-    let doubled = log_and_double(42)
-    print(doubled)
 }

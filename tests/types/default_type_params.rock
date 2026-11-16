@@ -86,3 +86,44 @@ fn test_explicit_array_argument_and_inferred_fn_generic() {
     let values = identity_without_default(p.b)
     print(values.len)
 }
+
+// Numeric defaults keep their numeric semantics.
+struct UnsignedHolder<T = uint> { value: T }
+enum UnsignedChoice<T = uint> { Value(T), Empty }
+newtype UnsignedWrapped<T = uint>(T)
+
+fn read_unsigned(h: UnsignedHolder, c: UnsignedChoice, w: UnsignedWrapped) -> uint {
+    let choice = match c {
+        UnsignedChoice::Value(v) => v,
+        UnsignedChoice::Empty => (0 as uint),
+    }
+    return h.value + choice + w.0
+}
+
+@test
+fn uint_defaults_preserve_unsigned_values() {
+    let h: UnsignedHolder = UnsignedHolder { value: (2147483648 as uint) }
+    let c: UnsignedChoice = UnsignedChoice::Value((1 as uint))
+    let w: UnsignedWrapped = UnsignedWrapped((2 as uint))
+    assert_eq(read_unsigned(h, c, w), (2147483651 as uint))
+}
+
+struct FloatHolder<T = f64> { value: T }
+enum FloatChoice<T = f64> { Value(T), Empty }
+newtype FloatWrapped<T = f64>(T)
+
+fn read_float_defaults(h: FloatHolder, c: FloatChoice, w: FloatWrapped) -> float {
+    let choice = match c {
+        FloatChoice::Value(v) => v,
+        FloatChoice::Empty => 0.0,
+    }
+    return h.value + choice + w.0
+}
+
+@test
+fn f64_defaults_use_float_semantics() {
+    let h: FloatHolder = FloatHolder { value: 1.5 }
+    let c: FloatChoice = FloatChoice::Value(2.25)
+    let w: FloatWrapped = FloatWrapped(0.125)
+    assert_eq(read_float_defaults(h, c, w), 3.875)
+}

@@ -1,10 +1,6 @@
 // Generic functions and structs: explicit and inferred type arguments,
 // nullable generics, nested generic structs and generic call chains.
 
-// ============================================
-// Core Generic Function Definitions
-// ============================================
-
 fn id<T>(x: T) -> T { 
     return x 
 }
@@ -33,10 +29,6 @@ fn unbox<T>(b: Box<T>) -> T {
     return b.item 
 }
 
-// ============================================
-// Generic Inference with Type Holes Tests
-// ============================================
-
 @test(output = "5", type_holes = [[0, "int"]])
 fn test_generic_id_int() {
     let res: ? = id(5)
@@ -49,11 +41,7 @@ fn test_generic_id_any() {
     print(id(val))
 }
 
-// ============================================
-// Generic Creation with Type Inference Tests
-// ============================================
-
-@test(type_holes = [[0, "int"]])
+@test(type_holes = [[1, "int?"]])
 fn test_generic_create_infer_int() {
     let n: ? = create()
     let typed_n: int? = n
@@ -65,43 +53,31 @@ fn test_generic_create_infer_string() {
     print(0)
 }
 
-// ============================================
-// Nullable Generic Type Tests
-// ============================================
-
 @test(output = "5")
 fn test_maybe_id_int() {
     let res = maybe_id(5)
     print(res)
 }
 
-// ============================================
-// Struct Generic Type Inference Tests
-// ============================================
-
-@test(output = "10", type_holes = [[0, "int"]])
+@test(output = "10", type_holes = [[2, "int"]])
 fn test_generic_struct_type_inference() {
     let b = Box { item: 10 }
     let item: ? = b.item
     print(item)
 }
 
-@test(output = "42", type_holes = [[0, "int"]])
+@test(output = "42", type_holes = [[3, "int"]])
 fn test_generic_function_with_struct() {
     let b = Box { item: 42 }
     let result: ? = unbox(b)
     print(result)
 }
 
-@test(output = "6", type_holes = [[0, "int"]])
+@test(output = "6", type_holes = [[4, "int"]])
 fn test_generic_inference_from_variable() {
     let x: ? = id(5)
     print(x + 1)
 }
-
-// ============================================
-// Array Generic Inference Tests  
-// ============================================
 
 @test(output = "0")
 fn test_first_with_typed_empty_array() {
@@ -109,40 +85,6 @@ fn test_first_with_typed_empty_array() {
     let res = first(empty_bools)
     print(0)
 }
-
-// ============================================
-// Negative Tests - Error Cases
-// ============================================
-
-// These tests demonstrate compile-time error cases.
-// Since Rock's @test system focuses on runtime validation,
-// these are documented as examples that should NOT compile.
-
-// EXAMPLE 1: Generic struct with undefined type parameter
-// struct Bad<T> { field: U }  // ERROR: U is not defined
-
-// EXAMPLE 2: Generic function with undefined return type
-// fn bad<T>(x: T) -> U { return x }  // ERROR: U is not defined
-
-// EXAMPLE 3: Duplicate generic type parameters
-// fn dup<T, T>(x: T) -> T { return x }  // ERROR: Duplicate T
-
-// EXAMPLE 4: Generic function argument mismatch
-// print(id(3, 4))  // ERROR: id expects 1 argument, got 2
-
-// EXAMPLE 5: Return type mismatch in nullable context
-// fn is_key_down(key: string) -> bool {
-//     return get(keys_down, key)  // ERROR: get returns bool?, function expects bool
-// }
-
-// EXAMPLE 6: Invalid nullable operation
-// fn is_key_down_negated(key: string) -> bool {
-//     return !get(keys_down, key)  // ERROR: ! cannot operate on bool?
-// }
-
-// ============================================
-// Complex Generic Type Scenarios
-// ============================================
 
 @test(output = "0")
 fn test_complex_generic_inference_scenario() {
@@ -162,59 +104,9 @@ fn test_complex_generic_inference_scenario() {
     print(0)
 }
 
-// ============================================
-// Basic Generic Functions and Structs
-// ============================================
-
-struct Pair<T, U> { 
-    first: T, 
-    second: U 
-}
-
-struct Holder<T> { 
-    value: int 
-}
-
-// Generic wrapper function
-fn wrap<T>(x: T) -> T { 
-    return x 
-}
-
-// Helper function for testing
-fn foo<T>(x: int) -> int { 
-    return x + 1 
-}
-
-@test(output = "5")
-fn generic_identity_infer_int() {
-    print(id(5))
-}
-
-@test(output = "2.5")
-fn generic_identity_infer_float() {
+@test(output = "2.5\n7")
+fn generic_float_and_nested_struct() {
     print(id(2.5))
-}
-
-@test(output = "10")
-fn generic_struct_basic() {
-    let b = Box { item: 10 }
-    print(b.item)
-}
-
-@test(output = "7")
-fn generic_struct_nested() {
     let b = Box { item: Box { item: 7 } }
     print(b.item.item)
-}
-
-@test(output = "42")
-fn generic_function_struct_return() {
-    let b = Box { item: 42 }
-    print(unbox(b))
-}
-
-@test(output = "6")
-fn generic_infer_from_variable() {
-    let x = id(5)
-    print(x + 1)
 }

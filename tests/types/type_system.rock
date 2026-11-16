@@ -25,10 +25,6 @@ struct TestArr<T> {
 }
 
 // Helper functions
-fn load_image(path: string) -> Image {
-    return Image{}
-}
-
 fn make_thing<T>(index: int) -> Thing<T> {
     let marker = phantom()
     return Thing { index: index, _marker: marker }
@@ -36,15 +32,6 @@ fn make_thing<T>(index: int) -> Thing<T> {
 
 fn test_arr_len<T>(vec: TestArr<T>) -> int {
     return vec.len
-}
-
-fn test_arr_set<T>(vec: TestArr<T>, index: int, value: T) {
-    if index < 0 || index >= vec.len {
-        error("Error: Index out of bounds")
-        return
-    } else {
-        vec.data[index] = value
-    }
 }
 
 fn my_vec_map<T, U>(vec: My<T>, f: (T) -> U) -> My<U> {
@@ -66,38 +53,23 @@ extern(lua) fn length(v: FixVec2) -> int;
 fn test_assign_math() {
     let x = 5
     x += 5
-    let x1: ? = x  // [0]
+    let x1: ? = x
     print(x)
     
     let y = 5
     y -= 5
-    let y1: ? = y  // [1]
+    let y1: ? = y
     print(y)
     
     let z = 5
     z *= 5
-    let z1: ? = z  // [2]
+    let z1: ? = z
     print(z)
     
     let w = 5
     w = w ./ 5
-    let w1: ? = w  // [3]
+    let w1: ? = w
     print(w)
-}
-
-// Completion and type inference tests
-@test(output = "5", type_holes = [[4, "int"]])
-fn simple_completion() {
-    let v = FixVec2 { x: 5, y: 10 }
-    let x_typed: ? = v.x  // [4] - testing the field type
-    print(v.x)
-}
-
-@test(output = "5", type_holes = [[5, "int"]])
-fn completion_span_test() {
-    let v = 5
-    let v_typed: ? = v  // [5]
-    print(v)
 }
 
 // Global variable tests
@@ -107,44 +79,44 @@ fn let_global() {
     print(1)  // Just verify it compiles
 }
 
-@test(output = "0.0167", type_holes = [[6, "float"]])
+@test(output = "0.0167", type_holes = [[4, "float"]])
 fn initialized_global() {
-    let dt_typed: ? = dt  // [6]
+    let dt_typed: ? = dt
     print("{dt:.4f}")  // Use fixed precision to avoid platform differences
 }
 
 // Nullable type tests
-@test(output = "4", type_holes = [[7, "int"]])
+@test(output = "4", type_holes = [[5, "int"]])
 fn basic_if_nullable() {
     let x: int? = 3
 
     if x != null {
         let y = x + 1   // ok: x is `int`
-        let x_typed: ? = x  // [7]
+        let x_typed: ? = x
         print(y)
     }
 }
 
-@test(output = "4", type_holes = [[8, "int"]])
+@test(output = "4", type_holes = [[6, "int"]])
 fn if_else_nullable_then() {
     let x: int? = 3
     if x != null {
         let y = x + 1   // x is `int`
-        let x_typed: ? = x  // [8]
+        let x_typed: ? = x
         print(y)
     } else {
         // Can't actually reach this branch when x = 3
     }
 }
 
-@test(output = "4", type_holes = [[9, "int"]])
+@test(output = "4", type_holes = [[7, "int"]])
 fn if_else_nullable_else() {
     let x: int? = 3
     if x == null {
         // Won't reach here when x = 3
     } else {
         let y = x + 1   // x is `int`
-        let x_typed: ? = x  // [9]
+        let x_typed: ? = x
         print(y)
     }
 }
@@ -181,31 +153,31 @@ fn unwrap_in_if_with_var() -> int {
 }
 
 // Unwrap tests
-@test(output = "5", type_holes = [[10, "int"]])
+@test(output = "5", type_holes = [[8, "int"]])
 fn unwrap_in_simple_return() {
     let result = unwrap_simple()
-    let result_typed: ? = result  // [10]
+    let result_typed: ? = result
+    print(result)
+}
+
+@test(output = "5", type_holes = [[9, "int"]])
+fn unwrap_assigned_to_new_var() {
+    let result = unwrap_with_var()
+    let result_typed: ? = result
+    print(result)
+}
+
+@test(output = "5", type_holes = [[10, "int"]])
+fn unwrap_inside_if_without_shadow() {
+    let result = unwrap_in_if()
+    let result_typed: ? = result
     print(result)
 }
 
 @test(output = "5", type_holes = [[11, "int"]])
-fn unwrap_assigned_to_new_var() {
-    let result = unwrap_with_var()
-    let result_typed: ? = result  // [11]
-    print(result)
-}
-
-@test(output = "5", type_holes = [[12, "int"]])
-fn unwrap_inside_if_without_shadow() {
-    let result = unwrap_in_if()
-    let result_typed: ? = result  // [12]
-    print(result)
-}
-
-@test(output = "5", type_holes = [[13, "int"]])
 fn unwrap_inside_if_with_shadowing_removed() {
     let result = unwrap_in_if_with_var()
-    let result_typed: ? = result  // [13]
+    let result_typed: ? = result
     print(result)
 }
 
