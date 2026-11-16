@@ -252,8 +252,7 @@ fn cached_findings_match_fresh_after_body_edit_and_span_shift() {
         &LintOptions::default(),
         &LintCacheUpdate::full(),
     );
-    assert_eq!(initial_stats.full_lint_workspace_passes, 1);
-    assert_eq!(initial_stats.full_cache_reconstructions, 1);
+    assert_eq!(initial_stats.full_rebuilds, 1);
     assert!(initial_stats.declarations_revisited > 0);
 
     let (mid, owner) = function_owner(&new_ws, "first");
@@ -294,8 +293,6 @@ fn cached_findings_match_fresh_after_body_edit_and_span_shift() {
     assert_eq!(debug(&cached), debug(&fresh));
     assert!(stats.body_updates > 0);
     assert_eq!(stats.full_rebuilds, 0);
-    assert_eq!(stats.full_lint_workspace_passes, 0);
-    assert_eq!(stats.full_cache_reconstructions, 0);
     assert!(stats.declarations_reused > 0);
     assert!(stats.flat_body_requests > 0);
     assert!(stats.flat_bodies_reused > 0);

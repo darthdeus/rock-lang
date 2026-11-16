@@ -381,15 +381,9 @@ pub struct LintCacheStats {
     pub flat_body_requests: usize,
     pub inference_body_requests: usize,
     pub flat_bodies_reused: usize,
-    pub inference_bodies_reused: usize,
-    pub flat_findings_derived: usize,
-    pub inference_findings_derived: usize,
-    pub flat_findings_reused: usize,
-    pub inference_findings_reused: usize,
     pub span_shifts: usize,
     pub suppression_invalidations: usize,
     pub global_passes: usize,
-    pub global_findings_derived: usize,
     pub changed_declarations: usize,
     pub call_edges_retracted: usize,
     pub call_edges_installed: usize,
@@ -398,74 +392,14 @@ pub struct LintCacheStats {
     pub declarations_reused: usize,
     pub sibling_groups_requested: usize,
     pub sibling_groups_revisited: usize,
-    pub action_declarations_requested: usize,
-    pub action_declarations_revisited: usize,
-    pub action_callers_requested: usize,
-    pub action_callers_revisited: usize,
-    pub suppression_files_requested: usize,
     pub suppression_files_refiltered: usize,
-    pub full_lint_workspace_passes: usize,
-    pub full_cache_reconstructions: usize,
-    pub reuse_totals_reads: usize,
-    pub output_refresh_requests: usize,
-    pub output_files_refreshed: usize,
-    pub output_owner_entries_visited: usize,
-    pub output_file_rows_read: usize,
     pub local_lint_derivation_ns: u128,
     pub global_lint_dependency_ns: u128,
     pub global_lint_derivation_ns: u128,
     pub suppression_filtering_ns: u128,
     pub suppression_filter_calls: usize,
-    pub suppression_source_scans: usize,
     pub suppression_entry_parses: usize,
     timed: bool,
-}
-
-impl LintCacheStats {
-    pub fn merge(&mut self, other: &Self) {
-        self.full_rebuilds += other.full_rebuilds;
-        self.body_updates += other.body_updates;
-        self.flat_body_requests += other.flat_body_requests;
-        self.inference_body_requests += other.inference_body_requests;
-        self.flat_bodies_reused += other.flat_bodies_reused;
-        self.inference_bodies_reused += other.inference_bodies_reused;
-        self.flat_findings_derived += other.flat_findings_derived;
-        self.inference_findings_derived += other.inference_findings_derived;
-        self.flat_findings_reused += other.flat_findings_reused;
-        self.inference_findings_reused += other.inference_findings_reused;
-        self.span_shifts += other.span_shifts;
-        self.suppression_invalidations += other.suppression_invalidations;
-        self.global_passes += other.global_passes;
-        self.global_findings_derived += other.global_findings_derived;
-        self.changed_declarations += other.changed_declarations;
-        self.call_edges_retracted += other.call_edges_retracted;
-        self.call_edges_installed += other.call_edges_installed;
-        self.reachability_components_visited += other.reachability_components_visited;
-        self.declarations_revisited += other.declarations_revisited;
-        self.declarations_reused += other.declarations_reused;
-        self.sibling_groups_requested += other.sibling_groups_requested;
-        self.sibling_groups_revisited += other.sibling_groups_revisited;
-        self.action_declarations_requested += other.action_declarations_requested;
-        self.action_declarations_revisited += other.action_declarations_revisited;
-        self.action_callers_requested += other.action_callers_requested;
-        self.action_callers_revisited += other.action_callers_revisited;
-        self.suppression_files_requested += other.suppression_files_requested;
-        self.suppression_files_refiltered += other.suppression_files_refiltered;
-        self.full_lint_workspace_passes += other.full_lint_workspace_passes;
-        self.full_cache_reconstructions += other.full_cache_reconstructions;
-        self.reuse_totals_reads += other.reuse_totals_reads;
-        self.output_refresh_requests += other.output_refresh_requests;
-        self.output_files_refreshed += other.output_files_refreshed;
-        self.output_owner_entries_visited += other.output_owner_entries_visited;
-        self.output_file_rows_read += other.output_file_rows_read;
-        self.local_lint_derivation_ns += other.local_lint_derivation_ns;
-        self.global_lint_dependency_ns += other.global_lint_dependency_ns;
-        self.global_lint_derivation_ns += other.global_lint_derivation_ns;
-        self.suppression_filtering_ns += other.suppression_filtering_ns;
-        self.suppression_filter_calls += other.suppression_filter_calls;
-        self.suppression_source_scans += other.suppression_source_scans;
-        self.suppression_entry_parses += other.suppression_entry_parses;
-    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1176,12 +1110,10 @@ impl LintDependencyIndex {
         &mut self,
         ws: &Workspace,
         bodies: &[(ModuleId, BodyOwner)],
-        stats: &mut LintCacheStats,
     ) -> FxHashSet<Ustr> {
         let declared: FxHashSet<Ustr> = self.action_declarations.keys().copied().collect();
         let mut affected = FxHashSet::default();
         for &(mid, owner) in bodies {
-            stats.action_callers_requested += 1;
             let body_key = (mid, owner);
             let old = self
                 .action_body_edges
@@ -1218,7 +1150,6 @@ impl LintDependencyIndex {
             affected.extend(new.iter().copied());
             self.install_action_edges(body_key, new);
         }
-        stats.action_callers_revisited += affected.len();
         affected
     }
 
@@ -1282,7 +1213,6 @@ impl LintDependencyIndex {
             return invalidation;
         }
 
-        stats.action_declarations_requested += invalidation.names.len();
         stats.changed_declarations += invalidation.names.len();
         let removed: Vec<Ustr> = self
             .action_declarations
@@ -1331,7 +1261,6 @@ impl LintDependencyIndex {
             }
             self.action_body_edges.insert(body, edges);
         }
-        stats.action_declarations_revisited += self.action_declarations.len();
         for &file in changed_files {
             if let Some(module) = ws.modules.iter().find(|module| module.file == file) {
                 self.action_declaration_fingerprints.insert(
@@ -1457,10 +1386,6 @@ pub struct IncrementalLintCache {
     global_raw: FxHashMap<Ustr, Vec<Finding>>,
     global: FxHashMap<Ustr, Vec<Finding>>,
     last_by_file: FxHashMap<Ustr, Vec<Finding>>,
-    flat_body_entries: usize,
-    inference_body_entries: usize,
-    flat_finding_entries: usize,
-    inference_finding_entries: usize,
     action_population_file: Option<Ustr>,
     global_span_owners: FxHashMap<Ustr, FxHashSet<Ustr>>,
     global_referenced_files: FxHashMap<Ustr, FxHashSet<Ustr>>,
@@ -1544,18 +1469,7 @@ impl IncrementalLintCache {
     }
 
     pub fn invalidate_file(&mut self, file: Ustr) {
-        if let Some(cached) = self.files.remove(&file) {
-            self.flat_body_entries = self.flat_body_entries.saturating_sub(cached.flat.len());
-            self.inference_body_entries = self
-                .inference_body_entries
-                .saturating_sub(cached.inference.len());
-            self.flat_finding_entries = self
-                .flat_finding_entries
-                .saturating_sub(cached.flat.values().map(Vec::len).sum());
-            self.inference_finding_entries = self
-                .inference_finding_entries
-                .saturating_sub(cached.inference.values().map(Vec::len).sum());
-        }
+        self.files.remove(&file);
         self.global.remove(&file);
         self.last_by_file.remove(&file);
         if let Some(rank) = self.report_rank.get(&file) {
@@ -1710,7 +1624,6 @@ impl IncrementalLintCache {
                 .entry(module.file)
                 .or_default()
                 .push(raw.clone());
-            stats.global_findings_derived += kept.len();
             derived.entry(module.file).or_default().extend(kept);
         }
         for findings in derived.values_mut() {
@@ -1801,10 +1714,7 @@ impl IncrementalLintCache {
         invalidation: Option<&ActionInvalidation>,
         stats: &mut LintCacheStats,
     ) {
-        if invalidation.is_none() {
-            stats.action_declarations_requested += affected.len();
-            stats.action_declarations_revisited += affected.len();
-        }
+        if invalidation.is_none() {}
         let mut locations: FxHashSet<(Ustr, usize)> = affected
             .iter()
             .filter_map(|action| self.dependency.action_declarations.get(action))
@@ -1860,7 +1770,6 @@ impl IncrementalLintCache {
                         });
                         let kept = self.filter_cached_suppressions(file, vec![raw.clone()], stats);
                         self.global_raw.entry(file).or_default().push(raw.clone());
-                        stats.global_findings_derived += kept.len();
                         self.global.entry(file).or_default().extend(kept);
                         self.action_population_file = Some(file);
                         files.insert(file);
@@ -1899,7 +1808,6 @@ impl IncrementalLintCache {
             });
             let kept = self.filter_cached_suppressions(file, vec![raw.clone()], stats);
             self.global_raw.entry(file).or_default().push(raw.clone());
-            stats.global_findings_derived += kept.len();
             self.global.entry(file).or_default().extend(kept);
             files.insert(file);
         }
@@ -1957,7 +1865,6 @@ impl IncrementalLintCache {
                 let kept = self.filter_cached_suppressions(file, vec![raw.clone()], stats);
                 files.insert(file);
                 self.global_raw.entry(file).or_default().push(raw.clone());
-                stats.global_findings_derived += kept.len();
                 self.global.entry(file).or_default().extend(kept);
             }
         }
@@ -2063,7 +1970,6 @@ impl IncrementalLintCache {
             })
             .collect();
         stats.suppression_invalidations = suppression_changed_files.len();
-        stats.suppression_files_requested = suppression_changed_files.len();
 
         // A relowered file's body owners may all differ, so its local entries
         // are derived again whole, the way a rebuild derives them.
@@ -2089,7 +1995,7 @@ impl IncrementalLintCache {
             && change.reinferred.is_empty()
             && change.edits.is_empty()
         {
-            let findings = self.current_output(sources, &mut stats);
+            let findings = self.current_output(sources);
             self.mark_body_transaction_applied();
             return (findings, stats);
         }
@@ -2184,8 +2090,7 @@ impl IncrementalLintCache {
             stats.declarations_reused += declaration_count;
         }
         let mut affected_actions = if !declarations_changed && sel.enabled(ACTION_CALLERS) {
-            self.dependency
-                .update_action_bodies(ws, &change.reinferred, &mut stats)
+            self.dependency.update_action_bodies(ws, &change.reinferred)
         } else {
             FxHashSet::default()
         };
@@ -2271,24 +2176,7 @@ impl IncrementalLintCache {
         }
         dirty_output_files.extend(suppression_changed_files.iter().copied());
 
-        let total_flat_bodies = self.flat_body_entries;
-        let total_inference_bodies = self.inference_body_entries;
-        let total_flat_findings = self.flat_finding_entries;
-        let total_inference_findings = self.inference_finding_entries;
-        stats.reuse_totals_reads += 4;
-        let targeted_flat_findings = flat_targets
-            .iter()
-            .filter_map(|(mid, owner)| self.files.get(&ws.module(*mid).file)?.flat.get(owner))
-            .map(Vec::len)
-            .sum::<usize>();
-        let targeted_inference_findings = inference_targets
-            .iter()
-            .filter_map(|(mid, owner)| self.files.get(&ws.module(*mid).file)?.inference.get(owner))
-            .map(Vec::len)
-            .sum::<usize>();
-        let mut flat_bodies_added = 0;
-        let mut flat_findings_removed = 0;
-        let mut flat_findings_added = 0;
+        let total_flat_bodies: usize = self.files.values().map(|file| file.flat.len()).sum();
         for (mid, owner) in flat_targets {
             let file = ws.module(mid).file;
             if !self.report_files.contains(&file) {
@@ -2314,7 +2202,6 @@ impl IncrementalLintCache {
                 );
             }
             stats.flat_body_requests += 1;
-            stats.flat_findings_derived += raw.len();
             let filtered = {
                 let suppressions = &self.files.entry(file).or_default().suppressions;
                 filter_suppressed_findings_with_entries_timed(raw.clone(), suppressions, &mut stats)
@@ -2325,11 +2212,6 @@ impl IncrementalLintCache {
                 cached.owner_order.push(owner);
             }
             cached.flat_raw.insert(owner, raw);
-            if !cached.flat.contains_key(&owner) {
-                flat_bodies_added += 1;
-            }
-            flat_findings_removed += cached.flat.get(&owner).map_or(0, Vec::len);
-            flat_findings_added += filtered.len();
             cached.flat.insert(owner, filtered);
             let rank = cached.owner_rank[&owner];
             if cached.flat[&owner].is_empty() {
@@ -2338,14 +2220,6 @@ impl IncrementalLintCache {
                 cached.active_flat_ranks.insert(rank);
             }
         }
-        self.flat_body_entries += flat_bodies_added;
-        self.flat_finding_entries = self
-            .flat_finding_entries
-            .saturating_sub(flat_findings_removed)
-            + flat_findings_added;
-        let mut inference_bodies_added = 0;
-        let mut inference_findings_removed = 0;
-        let mut inference_findings_added = 0;
         for (mid, owner) in inference_targets {
             let file = ws.module(mid).file;
             if !self.report_files.contains(&file) {
@@ -2380,7 +2254,6 @@ impl IncrementalLintCache {
                 );
             }
             stats.inference_body_requests += 1;
-            stats.inference_findings_derived += raw.len();
             let filtered = {
                 let suppressions = &self.files.entry(file).or_default().suppressions;
                 filter_suppressed_findings_with_entries_timed(raw.clone(), suppressions, &mut stats)
@@ -2391,11 +2264,6 @@ impl IncrementalLintCache {
                 cached.owner_order.push(owner);
             }
             cached.inference_raw.insert(owner, raw);
-            if !cached.inference.contains_key(&owner) {
-                inference_bodies_added += 1;
-            }
-            inference_findings_removed += cached.inference.get(&owner).map_or(0, Vec::len);
-            inference_findings_added += filtered.len();
             cached.inference.insert(owner, filtered);
             let rank = cached.owner_rank[&owner];
             if cached.inference[&owner].is_empty() {
@@ -2404,11 +2272,6 @@ impl IncrementalLintCache {
                 cached.active_inference_ranks.insert(rank);
             }
         }
-        self.inference_body_entries += inference_bodies_added;
-        self.inference_finding_entries = self
-            .inference_finding_entries
-            .saturating_sub(inference_findings_removed)
-            + inference_findings_added;
         if let Some(started) = local_started {
             let suppression = stats
                 .suppression_filtering_ns
@@ -2424,11 +2287,6 @@ impl IncrementalLintCache {
             }
         }
         stats.flat_bodies_reused += total_flat_bodies.saturating_sub(flat_target_owners.len());
-        stats.flat_findings_reused += total_flat_findings.saturating_sub(targeted_flat_findings);
-        stats.inference_bodies_reused +=
-            total_inference_bodies.saturating_sub(inference_target_owners.len());
-        stats.inference_findings_reused +=
-            total_inference_findings.saturating_sub(targeted_inference_findings);
 
         for edit in &change.edits {
             self.dependency.shift_declarations(edit);
@@ -2559,33 +2417,7 @@ impl IncrementalLintCache {
                 started.elapsed().as_nanos().saturating_sub(suppression);
         }
         if !suppression_changed_files.is_empty() {
-            let before_flat = suppression_changed_files
-                .iter()
-                .filter_map(|file| self.files.get(file))
-                .map(|file| file.flat.values().map(Vec::len).sum::<usize>())
-                .sum::<usize>();
-            let before_inference = suppression_changed_files
-                .iter()
-                .filter_map(|file| self.files.get(file))
-                .map(|file| file.inference.values().map(Vec::len).sum::<usize>())
-                .sum::<usize>();
             self.refilter_suppression_files(&suppression_changed_files, sources, &mut stats);
-            let after_flat = suppression_changed_files
-                .iter()
-                .filter_map(|file| self.files.get(file))
-                .map(|file| file.flat.values().map(Vec::len).sum::<usize>())
-                .sum::<usize>();
-            let after_inference = suppression_changed_files
-                .iter()
-                .filter_map(|file| self.files.get(file))
-                .map(|file| file.inference.values().map(Vec::len).sum::<usize>())
-                .sum::<usize>();
-            self.flat_finding_entries =
-                self.flat_finding_entries.saturating_sub(before_flat) + after_flat;
-            self.inference_finding_entries = self
-                .inference_finding_entries
-                .saturating_sub(before_inference)
-                + after_inference;
         }
         for file in &dirty_output_files {
             if let Some(findings) = self.global.get_mut(file) {
@@ -2596,8 +2428,8 @@ impl IncrementalLintCache {
             }
         }
         self.refresh_global_span_index(&dirty_output_files);
-        self.refresh_output_files(&dirty_output_files, sources, &mut stats);
-        let findings = self.current_output(sources, &mut stats);
+        self.refresh_output_files(&dirty_output_files, sources);
+        let findings = self.current_output(sources);
         self.mark_body_transaction_applied();
         (findings, stats)
     }
@@ -2641,18 +2473,7 @@ impl IncrementalLintCache {
         sel: &LintOptions,
         stats: &mut LintCacheStats,
     ) {
-        if let Some(old) = self.files.remove(&file) {
-            self.flat_body_entries = self.flat_body_entries.saturating_sub(old.flat.len());
-            self.inference_body_entries = self
-                .inference_body_entries
-                .saturating_sub(old.inference.len());
-            self.flat_finding_entries = self
-                .flat_finding_entries
-                .saturating_sub(old.flat.values().map(Vec::len).sum());
-            self.inference_finding_entries = self
-                .inference_finding_entries
-                .saturating_sub(old.inference.values().map(Vec::len).sum());
-        }
+        self.files.remove(&file);
         let mut cached = CachedFileFindings {
             suppression_fingerprint: suppression_fingerprint(source),
             suppressions: suppression_entries_for_cache(source, stats),
@@ -2719,10 +2540,6 @@ impl IncrementalLintCache {
             stats.flat_body_requests += module.bodies.len();
             stats.inference_body_requests += module.bodies.len();
         }
-        self.flat_body_entries += cached.flat.len();
-        self.inference_body_entries += cached.inference.len();
-        self.flat_finding_entries += cached.flat.values().map(Vec::len).sum::<usize>();
-        self.inference_finding_entries += cached.inference.values().map(Vec::len).sum::<usize>();
         self.files.insert(file, cached);
     }
 
@@ -2779,10 +2596,6 @@ impl IncrementalLintCache {
         stats.declarations_revisited += self.dependency.function_nodes.len();
         stats.sibling_groups_requested += self.dependency.sibling_groups.len();
         stats.sibling_groups_revisited += self.dependency.sibling_groups.len();
-        stats.action_declarations_requested += self.dependency.action_declarations.len();
-        stats.action_declarations_revisited += self.dependency.action_declarations.len();
-        stats.action_callers_requested += self.dependency.action_body_edges.len();
-        stats.action_callers_revisited += self.dependency.action_body_edges.len();
         for (&file, source) in sources {
             self.files.insert(
                 file,
@@ -2893,18 +2706,6 @@ impl IncrementalLintCache {
             .flatten();
         let global_files = self.global_raw.keys().copied().collect();
         self.refresh_global_span_index(&global_files);
-        self.flat_body_entries = self.files.values().map(|file| file.flat.len()).sum();
-        self.inference_body_entries = self.files.values().map(|file| file.inference.len()).sum();
-        self.flat_finding_entries = self
-            .files
-            .values()
-            .map(|file| file.flat.values().map(Vec::len).sum::<usize>())
-            .sum();
-        self.inference_finding_entries = self
-            .files
-            .values()
-            .map(|file| file.inference.values().map(Vec::len).sum::<usize>())
-            .sum();
         self.last_by_file = by_file_from_findings(&findings);
         self.active_output_ranks = self
             .last_by_file
@@ -2912,18 +2713,10 @@ impl IncrementalLintCache {
             .filter_map(|file| self.report_rank.get(file).copied())
             .collect();
         stats.full_rebuilds = 1;
-        stats.full_lint_workspace_passes = 1;
-        stats.full_cache_reconstructions = 1;
         findings
     }
 
-    fn refresh_output_files(
-        &mut self,
-        files: &FxHashSet<Ustr>,
-        sources: &FxHashMap<Ustr, &str>,
-        stats: &mut LintCacheStats,
-    ) {
-        stats.output_refresh_requests += 1;
+    fn refresh_output_files(&mut self, files: &FxHashSet<Ustr>, sources: &FxHashMap<Ustr, &str>) {
         for &file in files {
             let rank = self.report_rank.get(&file).copied();
             if !sources.contains_key(&file) {
@@ -2940,15 +2733,12 @@ impl IncrementalLintCache {
                 }
                 continue;
             };
-            stats.output_files_refreshed += 1;
             let mut findings = Vec::new();
             for rank in &cached.active_flat_ranks {
-                stats.output_owner_entries_visited += 1;
                 let owner = &cached.owner_order[*rank];
                 findings.extend(cached.flat.get(owner).cloned().unwrap_or_default());
             }
             for rank in &cached.active_inference_ranks {
-                stats.output_owner_entries_visited += 1;
                 let owner = &cached.owner_order[*rank];
                 findings.extend(cached.inference.get(owner).cloned().unwrap_or_default());
             }
@@ -2968,14 +2758,9 @@ impl IncrementalLintCache {
         }
     }
 
-    fn current_output(
-        &self,
-        sources: &FxHashMap<Ustr, &str>,
-        stats: &mut LintCacheStats,
-    ) -> Vec<Finding> {
+    fn current_output(&self, sources: &FxHashMap<Ustr, &str>) -> Vec<Finding> {
         let mut out = Vec::new();
         for rank in &self.active_output_ranks {
-            stats.output_file_rows_read += 1;
             let file = &self.report_order[*rank];
             if !sources.contains_key(file) {
                 continue;
@@ -3390,7 +3175,6 @@ fn filter_suppressed_findings_timed(
     source: &str,
     stats: &mut LintCacheStats,
 ) -> Vec<Finding> {
-    stats.suppression_source_scans += 1;
     if !stats.timed {
         return filter_suppressed_findings(findings, source);
     }
