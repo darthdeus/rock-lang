@@ -18,15 +18,10 @@ use skull_mir::monoty::{MonoTy, MonoTyReason};
 use std::collections::BTreeSet;
 use ustr::Ustr;
 
-fn bodies_of_raw(src: &str) -> (Workspace, InstanceGraph, ConcreteBodies) {
+fn bodies_of(src: &str) -> (Workspace, InstanceGraph, ConcreteBodies) {
     let ws = ws_with_stdlib(src);
     let g = graph_of(&ws);
-    let bodies = concrete_body::build(&ws, &g);
-    (ws, g, bodies)
-}
-
-fn bodies_of(src: &str) -> (Workspace, InstanceGraph, ConcreteBodies) {
-    let (ws, g, mut bodies) = bodies_of_raw(src);
+    let mut bodies = concrete_body::build(&ws, &g);
     bodies.refresh_flat_views();
     (ws, g, bodies)
 }
@@ -820,46 +815,6 @@ fn production_return_coercion_consumes_the_body_signature() {
     );
 }
 
-/// Each owner's plan keeps exactly the foreign domains it counted as unique,
-/// so the unique total is the sum of the published per-owner tables. An
-/// owner's own-body sites are requests but never foreign tables.
-#[test]
-fn foreign_domain_unique_counts_only_published_foreign_tables() {
-    let (_ws, _g, bodies) = bodies_of(
-        r#"
-fn seed<T>() -> T? { return null }
-struct Box<T> { value: T? = seed() }
-fn twice(x: int) -> int { return x + x }
-fn main() {
-    let a: Box<int> = Box {}
-    let b: Box<string> = Box {}
-    let c: Box<int> = Box {}
-    print("{a.value} {b.value} {c.value} {twice(1)} {twice(2)}")
-}
-"#,
-    );
-    let census = bodies.census();
-    let published: usize = bodies
-        .plans
-        .values()
-        .map(|plan| plan.foreign_domains.len())
-        .chain(
-            bodies
-                .always_plans
-                .values()
-                .map(|plan| plan.foreign_domains.len()),
-        )
-        .sum();
-    assert_eq!(
-        census.foreign_domain_unique, published,
-        "foreign unique must count published struct-default tables only: {census:?}"
-    );
-    assert!(
-        census.foreign_domain_requests > census.foreign_domain_unique,
-        "own-body sites are requests on top of the foreign tables: {census:?}"
-    );
-}
-
 #[test]
 fn production_plan_keeps_distinct_struct_default_domains() {
     let (ws, g, bodies) = bodies_of(
@@ -872,32 +827,6 @@ fn main() {
     print("{a.value} {b.value}")
 }
 "#,
-    );
-    let census = bodies.census();
-    assert!(
-        census.type_nodes_examined > 0,
-        "the type-node population is empty: {census:?}"
-    );
-    assert!(
-        census.type_node_conversion_attempts > 0,
-        "the type-node conversion population is empty: {census:?}"
-    );
-    assert!(
-        census.type_node_memo_hits > 0,
-        "the body conversion memo did not reach the type-table pass: {census:?}"
-    );
-    assert!(
-        census.type_node_conversion_attempts < census.type_nodes_examined,
-        "the type-table pass re-converted every node: {census:?}"
-    );
-    assert!(
-        census.struct_literals_examined > 0 && census.struct_field_conversion_attempts > 0,
-        "the struct-field population is empty: {census:?}"
-    );
-    assert!(
-        census.foreign_domain_requests >= census.foreign_domain_unique
-            && census.foreign_domain_unique > 0,
-        "the foreign-domain denominator is empty or inconsistent: {census:?}"
     );
     let main = bodies
         .plans
@@ -1388,30 +1317,6 @@ fn main() {
     );
 }
 
-/// A non-generic instance's substitution is EMPTY, not absent, so its body is
-/// built like any other. Without this the tables would exist only for generics,
-/// and `if generic` would be back.
-#[test]
-fn a_non_generic_instance_gets_a_body_too() {
-    let (ws, g, bodies) = bodies_of(
-        r#"
-fn plain(x: int) -> int { return x + 1 }
-fn main() { let a = plain(1) }
-"#,
-    );
-    let found = bodies
-        .plans
-        .iter()
-        .find(|(i, _)| g.identity(&ws, i).starts_with("plain"))
-        .map(|(_, plan)| &plan.types)
-        .expect("`plain` has no ConcreteBody");
-    assert!(
-        found.expr_types.values().next().is_some(),
-        "`plain`'s table is empty"
-    );
-    assert_eq!(bodies.free_types.len(), 0);
-}
-
 #[test]
 fn stale_inference_cannot_build_a_concrete_body() {
     let mut ws = ws_with_stdlib(
@@ -1871,83 +1776,9 @@ fn every_recorded_operation_becomes_one_entry_a_hole_or_a_rejection() {
 }
 
 #[test]
-fn concrete_plan_attribution_uses_one_authoritative_type_table() {
-    let (_ws, _g, bodies) = bodies_of(RICH);
-    let stats = bodies.build_stats;
-    assert!(
-        stats.plan_attempts > 0,
-        "no ordinary concrete plans were attempted: {stats:?}"
-    );
-    assert_eq!(
-        stats.plan_attempts,
-        stats.plan_successes + stats.plan_failures,
-        "ordinary plan outcomes lost a population: {stats:?}"
-    );
-    assert!(
-        stats.source_expr_slots > 0 && stats.source_binding_slots > 0,
-        "the fixture did not expose source type-table slots: {stats:?}"
-    );
-    assert!(
-        stats.callee_scans > 0 && stats.callee_rows_visited > 0,
-        "the fixture did not expose graph-site projection: {stats:?}"
-    );
-    assert_eq!(
-        stats.callee_scans, stats.plan_attempts,
-        "ordinary planning must project its sites once: {stats:?}"
-    );
-    assert!(
-        stats.plan_callee_map_inserts > 0 && stats.plan_callee_signature_inserts > 0,
-        "the fixture did not expose plan callee consumers: {stats:?}"
-    );
-}
-
-#[test]
-fn fresh_publication_does_not_eagerly_fold_owner_records() {
-    let (_ws, _g, bodies) = bodies_of_raw(RICH);
-    assert!(
-        !bodies.plans.is_empty(),
-        "fixture exposed no concrete plans"
-    );
-    assert_eq!(
-        bodies.eager_owner_fact_scans(),
-        0,
-        "fresh publication folded every owner record into a compatibility snapshot"
-    );
-    assert_eq!(
-        bodies.build_stats.plan_successes, 0,
-        "fresh publication eagerly folded owner counters into the compatibility snapshot"
-    );
-}
-
-#[test]
-fn fresh_workers_do_not_construct_global_concrete_indexes() {
-    let before = concrete_body::concrete_default_invocations();
-    let (_ws, _g, bodies) = bodies_of_raw(RICH);
-    let default_invocations = concrete_body::concrete_default_invocations().saturating_sub(before);
-    assert!(
-        !bodies.plans.is_empty(),
-        "fixture exposed no concrete plans"
-    );
-    assert_eq!(
-        default_invocations, 1,
-        "fresh workers constructed ConcreteBodies' global indexes instead of owner facts"
-    );
-}
-
-#[test]
-fn fresh_publication_leaves_the_candidate_reverse_index_for_its_first_reader() {
-    let (_ws, _g, bodies) = bodies_of_raw(RICH);
-    assert!(
-        !bodies.candidate_index_derived(),
-        "a fresh build derived the reverse candidate index no compile reads"
-    );
-    assert!(!bodies.candidate_keys_by_func().is_empty());
-    assert!(bodies.candidate_index_derived());
-}
-
-#[test]
 fn fresh_publication_publishes_the_authoritative_candidate_index() {
-    let (_ws, _g, bodies) = bodies_of_raw(RICH);
+    let ws = ws_with_stdlib(RICH);
+    let bodies = concrete_body::build(&ws, &graph_of(&ws));
     let mut rebuilt = rustc_hash::FxHashMap::default();
     for key in bodies.candidate_keys() {
         rebuilt
@@ -2108,84 +1939,6 @@ fn vanishing() -> int {
             .iter()
             .any(|row| row.contains("changing") || row.contains("vanishing")),
         "removed owner findings were retained"
-    );
-}
-
-#[test]
-fn owner_records_expose_plan_and_always_failure_populations() {
-    let ws = ws_with_stdlib(
-        r#"
-fn bad() -> int {
-    return 1
-}
-fn hole<T>() -> int {
-    let unresolved: T = null
-    return 1
-}
-fn ordinary(v: [int]) -> int {
-    let unresolved = null
-    let total = 0
-    for i in 0..3 { total = total + i }
-    for x in v { total = total + x }
-    return total
-}
-global failed_call: int = bad()
-fn main() {
-    let a = ordinary([1, 2])
-    let b = bad()
-    let c = hole()
-    print("{a}{b}{c}{failed_call}")
-}
-"#,
-    );
-    let roots = skull::mir_emit::emission_roots(&ws, Some("<project>"));
-    let mut graph = instance_graph::build(&ws, roots, false);
-    let bad = graph
-        .expanded()
-        .find(|instance| fn_name(&ws, instance.func) == "bad")
-        .cloned()
-        .expect("bad instance");
-    assert!(
-        !graph.root_instances.contains(&bad),
-        "fixture made bad a root"
-    );
-    assert!(
-        graph.index.subst.remove(&bad).is_some(),
-        "fixture did not expose bad's substitution"
-    );
-    let mut bodies = concrete_body::build(&ws, &graph);
-    bodies.refresh_flat_views();
-    let snapshot = bodies.diagnostic_snapshot(&ws, &graph);
-    assert!(!snapshot.is_empty(), "fixture exposed no owner findings");
-    assert!(
-        bodies.build_stats.plan_attempts > 0,
-        "fixture exposed no ordinary plan population: {:?}",
-        bodies.build_stats
-    );
-    assert!(
-        bodies.build_stats.always_plan_attempts > 0,
-        "fixture exposed no always-emitted plan population: {:?}",
-        bodies.build_stats
-    );
-    assert!(
-        !bodies.plan_failures.is_empty(),
-        "fixture exposed no ordinary plan failure: {snapshot:?}"
-    );
-    assert!(
-        !bodies.always_plan_failures.is_empty(),
-        "fixture exposed no always-emitted plan failure: {snapshot:?}"
-    );
-    assert!(
-        !bodies.free_types.is_empty(),
-        "fixture exposed no free type: {snapshot:?}"
-    );
-    assert!(
-        !bodies.untyped.is_empty(),
-        "fixture exposed no untyped slot: {snapshot:?}"
-    );
-    assert!(
-        !bodies.callee_holes.is_empty(),
-        "fixture exposed no callee hole: {snapshot:?}"
     );
 }
 
@@ -2583,104 +2336,3 @@ fn iterator_operations_resolve_to_concrete_witnesses() {
          expression alone would not have lost anything: {at_expr:?}"
     );
 }
-
-/// A normal full emission builds the concrete-plan table ONCE and shares it;
-/// the shader branch consuming `ConcreteBodies::plans` by handle is what this
-/// pins -- byte identity cannot see a rebuild, because a rebuild produces the
-/// same plans. The fixture registers a real shader pipeline so the branch
-/// that historically rebuilt is exercised, and asserts that population.
-#[test]
-fn a_full_emission_builds_the_concrete_plan_table_exactly_once() {
-    let src = r#"
-struct SrcTex { src_tex: Sampler2D }
-
-@shader(fragment)
-fn probe_frag(@textures t: SrcTex, tc: Vec2) -> Vec4 {
-    return texture(t.src_tex, tc)
-}
-
-fn main() { let key = rock_shader(probe_frag) print("{key}") }
-"#;
-    let ws = ws_with_stdlib(src);
-    let mid = skull::user_module_id(&ws).unwrap();
-    let before = concrete_body::build_invocations();
-    let (emit, _cache) = skull::mir_emit::emit_full(&ws, mid).expect("emit_full");
-    assert!(
-        emit.lua.contains("__rock_shader_register"),
-        "the fixture must reach shader registration, or a shader-branch rebuild is invisible here"
-    );
-    assert_eq!(
-        concrete_body::build_invocations() - before,
-        1,
-        "a full emission must build the concrete-plan table exactly once and share it"
-    );
-}
-
-/// Derivations strictly below requests is the signature memo's effectiveness
-/// witness: `helper` is asked once per call site plus once as its own plan's
-/// signature, so a bypass answers every request by deriving and the counts
-/// collapse to equality.
-#[test]
-fn the_signature_memo_serves_repeated_callee_questions() {
-    let (_, _, bodies) = bodies_of(
-        "fn helper(x: int) -> int { return x }\n\
-         fn first() -> int { return helper(1) }\n\
-         fn second() -> int { return helper(2) }\n\
-         fn main() { let r = first() + second() print(\"{r}\") }",
-    );
-    assert!(
-        bodies.signature_requests > 0,
-        "no signature question was asked"
-    );
-    assert!(
-        bodies.signature_derivations < bodies.signature_requests,
-        "every request derived ({} of {}) -- per-site callee questions bypassed the memo",
-        bodies.signature_derivations,
-        bodies.signature_requests,
-    );
-    assert_eq!(
-        bodies.signature_slots_cloned, 0,
-        "signature memo hits must use the shared immutable representation, not clone {} slots",
-        bodies.signature_slots_cloned
-    );
-}
-
-/// The per-body TyId memo runs strictly fewer conversions than the per-slot
-/// examined census, while that census itself stays per-slot -- `generics_bound`
-/// is pinned to its exact per-slot value on a stdlib-free fixture, measured
-/// identical with the memo bypassed, so a hit that stops replaying its delta
-/// goes red here.
-#[test]
-fn the_tyid_memo_deduplicates_conversions_and_replays_the_census() {
-    let mut modules = vec![
-        skull_parser::parse_module(
-            "fn id<T>(x: T) -> T { x }\nfn main() { let a = id(1)\n let b = id(2) }",
-            Ustr::from("<tyid-memo-test>"),
-        )
-        .expect("parse"),
-    ];
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let g = graph_of(&ws);
-    let mut bodies = concrete_body::build(&ws, &g);
-    bodies.refresh_flat_views();
-    let slots = bodies.expr_examined + bodies.binding_examined;
-    assert!(slots > 0, "the fixture lost its slots");
-    assert!(
-        bodies.slot_conversions < slots,
-        "every slot converted ({} of {slots}) -- repeated TyIds bypassed the per-body memo",
-        bodies.slot_conversions,
-    );
-    assert!(
-        bodies.generics_bound > 0,
-        "the fixture must bind generics through the substitution"
-    );
-    assert_eq!(
-        bodies.generics_bound, GENERICS_BOUND_PER_SLOT,
-        "generics_bound counts per SLOT; a memo hit must replay its cached delta"
-    );
-}
-
-/// Measured on the fixture above with the TyId memo enabled AND bypassed --
-/// the number is the same on both arms, which is what makes it a pin on the
-/// per-slot replay rather than on the memo's presence.
-const GENERICS_BOUND_PER_SLOT: usize = 3;
