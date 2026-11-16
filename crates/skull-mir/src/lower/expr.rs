@@ -1802,7 +1802,9 @@ impl<'a> Builder<'a> {
     /// overload (bone records it on the CompoundAssign expr).
     /// Whether `target` is a field declared `f32`, so a write rounds.
     pub(crate) fn assign_target_is_f32(&self, target: Idx<Expr>) -> bool {
-        let Expr::FieldAccess { base, field } = self.body.expr_arena[target] else {
+        let (Expr::FieldAccess { base, field } | Expr::SafeNav { base, field }) =
+            self.body.expr_arena[target]
+        else {
             return false;
         };
         let Some(TypeExpr::App {
@@ -1939,6 +1941,7 @@ impl<'a> Builder<'a> {
         postfix: bool,
     ) -> Result<Idx<Inst>, CompilerError> {
         let nobox_global_place = self.nobox_global_place(target)?;
+        let f32_target = self.assign_target_is_f32(target);
         let ty = self
             .arith_ty(target)
             .filter(|t| matches!(t, ArithTy::Int | ArithTy::Uint | ArithTy::Float))
@@ -1959,7 +1962,12 @@ impl<'a> Builder<'a> {
                 (ArithTy::Int, _) => Inst::IntAdd(old, d),
                 (ArithTy::Str, _) => unreachable!("inc/dec scalar filter admitted a string"),
             };
-            s.emit_cur(inst)
+            let bumped = s.emit_cur(inst);
+            if f32_target {
+                s.emit_cur(Inst::FloatToF32(bumped))
+            } else {
+                bumped
+            }
         };
         let result =
             self.lower_read_modify_write(target, nobox_global_place, Some(postfix), |s, old| {
