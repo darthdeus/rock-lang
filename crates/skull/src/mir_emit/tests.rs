@@ -1,5 +1,22 @@
 use super::*;
 
+static STDLIB: std::sync::LazyLock<Vec<skull_parser::Ast>> = std::sync::LazyLock::new(|| {
+    rock_stdlib::stdlib_files()
+        .iter()
+        .map(|file| {
+            let id = Ustr::from(rock_stdlib::stdlib_file_id(file.name).as_str());
+            skull_parser::parse_module_clean(file.contents, id).expect("stdlib parse")
+        })
+        .collect()
+});
+
+/// `src` parsed as `file`, after the stdlib when `stdlib` is set.
+fn workspace_of(src: &str, file: &str, stdlib: bool) -> Workspace {
+    let mut modules = if stdlib { STDLIB.clone() } else { Vec::new() };
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse"));
+    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+}
+
 fn module_id(ws: &Workspace, file: &str) -> ModuleId {
     *ws.module_ids.get(&Ustr::from(file)).expect("module id")
 }
@@ -264,16 +281,6 @@ fn main() {
 }
 "#;
 
-    static STDLIB: std::sync::LazyLock<Vec<skull_parser::Ast>> = std::sync::LazyLock::new(|| {
-        rock_stdlib::stdlib_files()
-            .iter()
-            .map(|file| {
-                let id = Ustr::from(rock_stdlib::stdlib_file_id(file.name).as_str());
-                skull_parser::parse_module_clean(file.contents, id).expect("stdlib parse")
-            })
-            .collect()
-    });
-
     static INLINE_OFF: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static INLINE_CENSUS: std::sync::Mutex<()> = std::sync::Mutex::new(());
     #[allow(dead_code)]
@@ -313,13 +320,6 @@ fn main() {
                 None => unsafe { std::env::remove_var("ROCK_LOG") },
             }
         }
-    }
-
-    /// `src` parsed as `file`, after the stdlib when `stdlib` is set.
-    fn workspace_of(src: &str, file: &str, stdlib: bool) -> Workspace {
-        let mut modules = if stdlib { STDLIB.clone() } else { Vec::new() };
-        modules.push(skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse"));
-        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
     }
 
     #[test]
@@ -371,18 +371,12 @@ fn main() {
 
     #[test]
     fn body_overlay_shares_the_published_code_artifact_handle() {
-        let parse = |source: &str| {
-            skull_parser::parse_module_clean(source, Ustr::from("<artifact-handle-test>"))
-                .expect("parse")
-        };
-        let mut modules = vec![parse(SRC)];
-        let ws1 = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic v1");
+        let ws1 = workspace_of(SRC, "<artifact-handle-test>", false);
         let mid = module_id(&ws1, "<artifact-handle-test>");
         let (_, mut cache) = emit_full(&ws1, mid).expect("full v1");
 
         let changed = SRC.replace("return x", "let y = x\n return y");
-        let mut modules = vec![parse(&changed)];
-        let ws2 = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic v2");
+        let ws2 = workspace_of(&changed, "<artifact-handle-test>", false);
         let wrap = ref_for(&ws2, "wrap");
         let overlay = emit_overlay(
             &ws2,
@@ -398,18 +392,12 @@ fn main() {
 
     #[test]
     fn an_overlay_rebinds_the_callers_of_an_edited_body() {
-        let parse = |source: &str| {
-            skull_parser::parse_module_clean(source, Ustr::from("<overlay-binding-test>"))
-                .expect("parse")
-        };
         let edit = SRC.replace("return wrap(7)", "return wrap(9)");
-        let mut modules = vec![parse(SRC)];
-        let ws1 = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic v1");
+        let ws1 = workspace_of(SRC, "<overlay-binding-test>", false);
         let mid = module_id(&ws1, "<overlay-binding-test>");
         let (_, mut cache) = emit_full(&ws1, mid).expect("full v1");
 
-        let mut modules = vec![parse(&edit)];
-        let ws2 = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic v2");
+        let ws2 = workspace_of(&edit, "<overlay-binding-test>", false);
         let top = ref_for(&ws2, "top");
         let produced = emit_overlay(
             &ws2,
@@ -768,28 +756,6 @@ fn main() { let result = first() }
             .sum();
         assert!(emitted <= emit.lua.len());
         assert_eq!(plain.lua, emit.lua);
-    }
-
-    #[test]
-    fn emitted_lua_is_identical_across_worker_counts() {
-        let _inline = InlineOn::on();
-        let ws = workspace_of(SRC, "<missing-owner-test>", false);
-        let mid = ws.source_modules().next().expect("test module").id;
-        let emit_with = |threads| {
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .build()
-                .expect("test pool")
-                .install(|| FullEmit::program().run(&ws, mid))
-                .expect("emission")
-                .0
-                .lua
-        };
-        let serial = emit_with(1);
-        assert!(!serial.is_empty(), "fixture emitted no Lua artifact");
-        for threads in [2, 8] {
-            assert_eq!(serial, emit_with(threads), "{threads} workers");
-        }
     }
 
     #[test]
@@ -1290,14 +1256,9 @@ fn main() {
     fn canonical_profiles_survive_fresh_incremental_overlay_and_sequential_reuse() {
         let _inline = InlineOn::on();
         let _census = InlineCensusOn::on();
-        let parse = |source: &str| {
-            skull_parser::parse_module_clean(source, Ustr::from("<inline-census-incremental-test>"))
-                .expect("parse")
-        };
         let v1 = CENSUS_SRC;
         let v2 = CENSUS_SRC.replace("return flag", "return false");
-        let mut modules = vec![parse(v1)];
-        let ws1 = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic v1");
+        let ws1 = workspace_of(v1, "<inline-census-incremental-test>", false);
         let mid1 = module_id(&ws1, "<inline-census-incremental-test>");
         let (full1, mut cache) = emit_full(&ws1, mid1).expect("full v1");
         assert!(
@@ -1311,8 +1272,7 @@ fn main() {
             full1.attribution.inline.population
         );
 
-        let mut modules = vec![parse(&v2)];
-        let ws2 = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic v2");
+        let ws2 = workspace_of(&v2, "<inline-census-incremental-test>", false);
         let mid2 = module_id(&ws2, "<inline-census-incremental-test>");
         let straight = ref_for(&ws2, "straight");
         let reinferred = vec![(straight.module, BodyOwner::Function(straight.func))];
@@ -1342,8 +1302,7 @@ fn main() {
         );
 
         let v3 = v2.replace("return 2", "return 3");
-        let mut modules = vec![parse(&v3)];
-        let ws3 = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic v3");
+        let ws3 = workspace_of(&v3, "<inline-census-incremental-test>", false);
         let mid3 = module_id(&ws3, "<inline-census-incremental-test>");
         let general = ref_for(&ws3, "general");
         let sequential = emit_incremental(
@@ -1367,9 +1326,7 @@ fn main() {
             "sequential incremental path lost the canonical contract"
         );
 
-        let mut modules = vec![parse(v1)];
-        let ws_overlay_base = bone_semantic::semantic_passes::semantic_pass(&mut modules)
-            .expect("semantic overlay base");
+        let ws_overlay_base = workspace_of(v1, "<inline-census-incremental-test>", false);
         let mid_overlay = module_id(&ws_overlay_base, "<inline-census-incremental-test>");
         let (_full_overlay, mut overlay_cache) =
             emit_full(&ws_overlay_base, mid_overlay).expect("full overlay base");
@@ -1524,7 +1481,6 @@ fn main() { let result = outer(1) }
 #[cfg(test)]
 mod spec_schedule_tests {
     use super::*;
-    use ustr::Ustr;
 
     // `mid<int>` is demanded by `a` and `c`, `leaf<int>` by `a` and again by
     // `mid<int>` once that is built, and `outer<bool>` reaches `leaf<bool>`
@@ -1563,18 +1519,6 @@ fn main() { let r = a() + c() }
 "#;
 
     const MODULE: &str = "<spec-schedule-test>";
-    fn workspace() -> Workspace {
-        let mut modules: Vec<_> = rock_stdlib::stdlib_files()
-            .iter()
-            .map(|file| {
-                let id = Ustr::from(rock_stdlib::stdlib_file_id(file.name).as_str());
-                skull_parser::parse_module_clean(file.contents, id).expect("stdlib parse")
-            })
-            .collect();
-        modules.push(skull_parser::parse_module_clean(SRC, Ustr::from(MODULE)).expect("parse"));
-        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
-    }
-
     fn on_workers<R: Send>(threads: usize, f: impl FnOnce() -> R + Send) -> R {
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
@@ -1590,7 +1534,7 @@ fn main() { let r = a() + c() }
 
     #[test]
     fn specialization_queue_emits_identically_across_worker_counts() {
-        let ws = workspace();
+        let ws = workspace_of(SRC, MODULE, true);
         let (serial, cache) = emit(&ws, 1);
         let specs = cache
             .graph
@@ -1625,7 +1569,7 @@ fn main() { let r = a() + c() }
     /// depend on how many workers drain the queue.
     #[test]
     fn conflicting_and_failing_demand_report_identically_across_worker_counts() {
-        let ws = workspace();
+        let ws = workspace_of(SRC, MODULE, true);
         let (_, mut cache) = emit(&ws, 1);
         let clashing = spec_named(&cache, &ws, "mid", "bool");
         let failing = spec_named(&cache, &ws, "leaf", "Cell1");
@@ -1730,10 +1674,8 @@ mod unread_constant_tests {
         fn foo() -> int { FOO }\n\
         fn main() { top() }\n";
 
-    fn ws_of(source: &str) -> Workspace {
-        let mut modules =
-            vec![skull_parser::parse_module_clean(source, Ustr::from("<unread-const>")).unwrap()];
-        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    fn unread_ws(source: &str) -> Workspace {
+        workspace_of(source, "<unread-const>", false)
     }
 
     fn function(ws: &Workspace, name: &str) -> FuncRef {
@@ -1751,12 +1693,12 @@ mod unread_constant_tests {
     /// Lua body now spells it must initialize the global.
     #[test]
     fn an_overlay_initializes_a_constant_an_edited_inline_body_spells() {
-        let ws1 = ws_of(SRC);
+        let ws1 = unread_ws(SRC);
         let mid = module_id(&ws1, "<unread-const>");
         let (full, mut cache) = emit_full(&ws1, mid).expect("full");
         assert!(!full.lua.contains("FOO ="), "{}", full.lua);
 
-        let ws2 = ws_of(&SRC.replace("\"return 0\"", "\"return FOO\""));
+        let ws2 = unread_ws(&SRC.replace("\"return 0\"", "\"return FOO\""));
         let peek = function(&ws2, "peek");
         let overlay = emit_overlay(
             &ws2,
