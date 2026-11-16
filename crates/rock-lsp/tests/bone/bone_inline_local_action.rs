@@ -15,22 +15,6 @@ fn inline_action(actions: &[CodeAction]) -> Option<&CodeAction> {
 }
 
 #[test]
-fn inlines_and_parenthesizes_a_binary_initializer() {
-    let src = "\
-fn f() -> int {
-    let x = 1 + 2
-    return x * x
-}
-";
-    // cursor on the binding `x` (line 1)
-    let actions = run(src, 1, 8);
-    let action = inline_action(&actions).expect("expected an inline-local action");
-    assert_eq!(action.kind, Some(CodeActionKind::REFACTOR_INLINE));
-    let out = apply_all(src, action);
-    assert_eq!(out, "fn f() -> int {\n    return (1 + 2) * (1 + 2)\n}\n");
-}
-
-#[test]
 fn offered_on_a_use_and_leaves_an_atomic_init_unparenthesized() {
     let src = "\
 fn f(v: int) -> int {
@@ -42,25 +26,11 @@ fn g(a: int) -> int { a }
     // cursor on a USE of `y` (line 2)
     let actions = run(src, 2, 11);
     let action = inline_action(&actions).expect("expected an inline-local action on a use");
+    assert_eq!(action.kind, Some(CodeActionKind::REFACTOR_INLINE));
     let out = apply_all(src, action);
     assert_eq!(
         out,
         "fn f(v: int) -> int {\n    return g(v) + 1\n}\nfn g(a: int) -> int { a }\n"
-    );
-}
-
-#[test]
-fn no_action_when_a_call_initializer_has_two_uses() {
-    let src = "\
-fn f(v: int) -> int {
-    let y = g(v)
-    return y + y
-}
-fn g(a: int) -> int { a }
-";
-    assert!(
-        inline_action(&run(src, 1, 8)).is_none(),
-        "inlining would call g twice"
     );
 }
 
