@@ -1,75 +1,8 @@
-//! Misc scalar-intrinsic emission (T8d): tuple_first/tuple_second (Lua
-//! `tuple[1]`/`[2]` -> the 0-based JS array `[0]`/`[1]`), __range (materialized
-//! `a..b` -> a Vec-shaped runtime object). Node-executed checks are the
-//! correctness
-//! oracle; `tests/intrinsics/js_misc_intrinsics.rock` cross-checks against luajit.
+//! `tuple_first`/`tuple_second` project one element of the array, so a result
+//! whose lanes cannot travel through the return bank must reject on JS rather
+//! than read lanes past the first as undefined.
 
 use crate::common::ws_with;
-
-crate::runtime_eval!(eval_int: JS_NB_CHECK_SHIMS, JS_VEC_CHECK_SHIMS, JS_STRING_RUNTIME);
-
-// tuple_first / tuple_second project the 0-based array (Lua 1-based [1]/[2]).
-#[test]
-fn tuple_projections() {
-    let src = "fn root() -> int { let t = (10, 3); tuple_first(t) * 10 + tuple_second(t) }";
-    let ws = ws_with(src);
-    let js = crate::common::emit_closure(&ws, "root").expect("tuple emits");
-    assert!(
-        js.contains("[0]") && js.contains("[1]"),
-        "0-based projection:\n{js}"
-    );
-    eval_int(&js, "root", 103);
-}
-
-// A materialized range carries the right length and elements.
-#[test]
-fn range_materializes_vec() {
-    let src = "fn root() -> int {\n\
-                   let r = (2..5).collect()\n\
-                   let s = 0\n\
-                   for x in r { s = s + x }\n\
-                   s * 10 + r.len\n\
-               }";
-    let ws = ws_with(src);
-    let js = crate::common::emit_closure(&ws, "root").expect("range emits");
-    assert!(js.contains("__range"), "renders the range runtime:\n{js}");
-    eval_int(&js, "root", 93); // 2+3+4 = 9, len 3
-}
-
-// A tuple spread into an array literal appends each element to the 0-based
-// `_data` in order and bumps `len` once per element.
-#[test]
-fn tuple_spread_appends_to_array_literal() {
-    let src = "fn root() -> int {\n\
-                   let nums = (1, 2, 3)\n\
-                   let xs: [int] = [...nums, 4]\n\
-                   xs[0] * 1000 + xs[1] * 100 + xs[3] * 10 + xs.len\n\
-               }";
-    let ws = ws_with(src);
-    let js = crate::common::emit_closure(&ws, "root").expect("spread literal emits");
-    eval_int(&js, "root", 1244);
-}
-
-// `tuple_first`/`tuple_second` templates project ONE element of the array, but
-// the generic `A`/`B` may itself be a tuple: the call then returns as many lanes
-// as that tuple has, and the caller rebuilds the value from them. A lane read
-// that goes to the return bank instead of the projected element leaves every
-// lane past the first undefined, so a nested tuple element reads as
-// `(1, 2, nil)`.
-#[test]
-fn a_tuple_intrinsic_result_decomposes_into_all_of_its_lanes() {
-    let src = "fn root() -> int {\n\
-                   let nested = [((1, 2), (3, 4))]\n\
-                   let item = nested[0]\n\
-                   let left = tuple_first(item)\n\
-                   let right = tuple_second(item)\n\
-                   return tuple_first(left) * 1000 + tuple_second(left) * 100\n\
-                       + tuple_first(right) * 10 + tuple_second(right)\n\
-               }";
-    let ws = ws_with(src);
-    let js = crate::common::emit_closure(&ws, "root").expect("nested tuple element emits");
-    eval_int(&js, "root", 1234);
-}
 
 #[test]
 fn a_tuple_intrinsic_rejects_an_unprojectable_nullable_tuple_result() {

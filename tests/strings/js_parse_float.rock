@@ -1,8 +1,7 @@
 // `string.parse_float` is LuaJIT `tonumber(s)` on both backends: a strict
 // whole-string numeric parse returning `float?` (null on failure). JS
 // `__parse_float` reproduces it rather than deferring to `Number`, which reads
-// "" as 0 and disagrees on hex, inf/nan spellings and prefixes. Pins
-// crates/skull-codegen-js/tests/parse_float.rs.
+// "" as 0 and disagrees on hex, inf/nan spellings and prefixes.
 
 fn show(s: string) -> string {
     let r = s.parse_float()

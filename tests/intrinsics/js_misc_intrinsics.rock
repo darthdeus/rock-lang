@@ -1,8 +1,7 @@
 // Misc scalar-intrinsic corpus for the `--backend js` ratchet (T8d). Four
 // trivial host-bodied intrinsics: tuple_first/tuple_second (Lua `tuple[1]`/`[2]`
 // -> the 0-based JS array `[0]`/`[1]`), __range (materialized `a..b` -> a
-// Vec-shaped object via a runtime helper). Pins
-// crates/skull-codegen-js/tests/misc_intrinsics.rs.
+// Vec-shaped object via a runtime helper).
 
 @test(output = "1 2")
 fn test_tuple_projections() {

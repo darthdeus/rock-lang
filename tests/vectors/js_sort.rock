@@ -4,7 +4,7 @@
 // key_fn invoked through `__rock_call`. luajit's table.sort is unstable and JS's
 // is stable, so tie-break order can differ between backends -- these tests
 // assert only order-invariant properties (the sorted key sequence), never a
-// specific tie order. Pins crates/skull-codegen-js/tests/sort.rs.
+// specific tie order.
 
 fn show_ints(xs: [int]) -> string {
     let parts: [string] = []

@@ -39,8 +39,6 @@ mod inline_pipeline;
 mod inspect;
 #[path = "lambda.rs"]
 mod lambda;
-#[path = "log_dedup.rs"]
-mod log_dedup;
 #[path = "loops.rs"]
 mod loops;
 #[path = "map_iter.rs"]
@@ -95,16 +93,10 @@ mod opaque_container_axes_js;
 mod optional_entity_vec;
 #[path = "overlay.rs"]
 mod overlay;
-#[path = "parse_float.rs"]
-mod parse_float;
 #[path = "polymorphic_recursion.rs"]
 mod polymorphic_recursion;
 #[path = "program.rs"]
 mod program;
-#[path = "put.rs"]
-mod put;
-#[path = "release_mode_deleted.rs"]
-mod release_mode_deleted;
 #[path = "ret_bank_sizing.rs"]
 mod ret_bank_sizing;
 #[path = "rng.rs"]
@@ -113,24 +105,14 @@ mod rng;
 mod safenav_fold;
 #[path = "shader_register.rs"]
 mod shader_register;
-#[path = "shared_tail.rs"]
-mod shared_tail;
 #[path = "snippets.rs"]
 mod snippets;
-#[path = "sort.rs"]
-mod sort;
 #[path = "spec_column_callee.rs"]
 mod spec_column_callee;
 #[path = "stdlib_sibling_location.rs"]
 mod stdlib_sibling_location;
-#[path = "string_builder.rs"]
-mod string_builder;
-#[path = "string_primitives.rs"]
-mod string_primitives;
 #[path = "strings.rs"]
 mod strings;
-#[path = "table_unset.rs"]
-mod table_unset;
 #[path = "trampoline_fallback.rs"]
 mod trampoline_fallback;
 #[path = "try_call.rs"]

@@ -3,8 +3,7 @@
 // Vec drain ops (pop / remove_at / swap_remove / clear). On JS it dispatches on
 // `instanceof Map` -- `map.delete(k)` vs `delete arr[k]` -- so a removed Map key
 // reads back as nil and a popped Vec slot becomes a hole the tracked `.len`
-// skips. Pins the node runtime `__table_unset` (crates/skull-codegen-js/tests/
-// table_unset.rs). Map iteration (MapNext) stays out of scope, so no test here
+// skips. Map iteration (MapNext) stays out of scope, so no test here
 // iterates a Map.
 
 // A removed Map key reads back as nil; siblings survive.

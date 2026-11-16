@@ -4,8 +4,7 @@
 // / toUpperCase / toLowerCase / fromCharCode. ASCII only -- unit_at is a UTF-16
 // unit on JS, a byte on luajit, equal in the ASCII range. The Layer-2 string
 // algorithms (split / replace / contains / starts_with / ends_with / trim) are
-// pure Rock over these primitives and co-emit. Pins
-// crates/skull-codegen-js/tests/string_primitives.rs.
+// pure Rock over these primitives and co-emit.
 
 // find returns the 0-based index of the first match, or -1.
 @test(output = "1")

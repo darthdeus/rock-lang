@@ -1,8 +1,7 @@
 // StringBuilder corpus for the `--backend js` ratchet (T8d). The three
 // `@intrinsic inline(lua)` accumulator ops (sb_new / sb_push / sb_build) map to
 // a JS array: `[]`, `.push(s)`, `.join("")`. `join` (stdlib/strings.rock) is
-// pure Rock over them and co-emits. Pins the node templates
-// (crates/skull-codegen-js/tests/string_builder.rs).
+// pure Rock over them and co-emits.
 
 // Direct StringBuilder: new, push several fragments, build.
 @test(output = "foobarbaz")
