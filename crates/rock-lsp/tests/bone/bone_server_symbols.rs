@@ -30,8 +30,6 @@ fn uri_of(path: &std::path::Path) -> Uri {
 fn workspace_names(ws: &mut rock_lsp::LspWorkspace, query: &str) -> Vec<String> {
     let params = WorkspaceSymbolParams {
         query: query.to_string(),
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
     };
     match do_workspace_symbols_workspace(ws, &params).unwrap() {
         Some(WorkspaceSymbolResponse::Flat(symbols)) => {
@@ -95,8 +93,6 @@ fn document_symbols_returns_top_level_decls() {
 
     let params = DocumentSymbolParams {
         text_document: TextDocumentIdentifier { uri: uri_of(&path) },
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
     };
     let resp = do_document_symbols_workspace(&mut ws, &params).unwrap();
     let names: Vec<String> = match resp {
@@ -119,8 +115,6 @@ fn workspace_symbols_filters_by_query() {
 
     let params = WorkspaceSymbolParams {
         query: "heal".to_string(),
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
     };
     let resp = do_workspace_symbols_workspace(&mut ws, &params).unwrap();
     let hits: Vec<(String, SymbolKind)> = match resp {

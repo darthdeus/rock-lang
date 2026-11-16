@@ -8,18 +8,6 @@ pub trait Request {
     const METHOD: &'static str;
 }
 
-/// The shutdown request is sent from the client to the server. It asks the server to shut down,
-/// but to not exit (otherwise the response might not be delivered correctly to the client).
-/// There is a separate exit notification that asks the server to exit.
-#[derive(Debug)]
-pub enum Shutdown {}
-
-impl Request for Shutdown {
-    type Params = ();
-    type Result = ();
-    const METHOD: &'static str = "shutdown";
-}
-
 /// The Completion request is sent from the client to the server to compute completion items at a given cursor position.
 /// Completion items are presented in the IntelliSense user interface. If computing full completion items is expensive,
 /// servers can additionally provide a handler for the completion item resolve request ('completionItem/resolve').
@@ -90,11 +78,10 @@ impl Request for References {
 pub enum GotoTypeDefinition {}
 
 pub type GotoTypeDefinitionParams = GotoDefinitionParams;
-pub(crate) type GotoTypeDefinitionResponse = GotoDefinitionResponse;
 
 impl Request for GotoTypeDefinition {
     type Params = GotoTypeDefinitionParams;
-    type Result = Option<GotoTypeDefinitionResponse>;
+    type Result = Option<GotoDefinitionResponse>;
     const METHOD: &'static str = "textDocument/typeDefinition";
 }
 
@@ -144,7 +131,7 @@ pub enum CodeActionRequest {}
 
 impl Request for CodeActionRequest {
     type Params = CodeActionParams;
-    type Result = Option<CodeActionResponse>;
+    type Result = Option<Vec<CodeAction>>;
     const METHOD: &'static str = "textDocument/codeAction";
 }
 
@@ -173,7 +160,7 @@ pub enum SemanticTokensFullRequest {}
 
 impl Request for SemanticTokensFullRequest {
     type Params = SemanticTokensParams;
-    type Result = Option<SemanticTokensResult>;
+    type Result = Option<SemanticTokens>;
     const METHOD: &'static str = "textDocument/semanticTokens/full";
 }
 
@@ -189,7 +176,7 @@ pub enum SemanticTokensRangeRequest {}
 
 impl Request for SemanticTokensRangeRequest {
     type Params = SemanticTokensRangeParams;
-    type Result = Option<SemanticTokensRangeResult>;
+    type Result = Option<SemanticTokens>;
     const METHOD: &'static str = "textDocument/semanticTokens/range";
 }
 

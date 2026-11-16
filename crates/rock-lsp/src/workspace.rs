@@ -10,31 +10,22 @@ fn generate_result_id() -> String {
     format!("semantic_tokens_{}", id)
 }
 
-/// Returns true if a SemanticTokensResult has no token data.
-///
-/// Empty results must not be cached: the presence of a cache entry (even
-/// an empty one) short-circuits the `cached_is_current` path and returns
-/// whatever is in the cache. A transient empty result thus locks in empty
-/// highlighting until the document version changes or the LSP restarts.
-pub(crate) fn semantic_tokens_result_is_empty(result: &lsp_types::SemanticTokensResult) -> bool {
-    match result {
-        lsp_types::SemanticTokensResult::Tokens(t) => t.data.is_empty(),
-        lsp_types::SemanticTokensResult::Partial(p) => p.data.is_empty(),
-    }
-}
-
 /// Semantic token cache entry with version tracking
 #[derive(Clone, Debug)]
 pub(crate) struct SemanticTokenCache {
     pub result_id: String,
-    pub tokens: lsp_types::SemanticTokensResult,
+    pub tokens: lsp_types::SemanticTokens,
     pub document_version: Option<i32>,
 }
 
-/// Document version tracker
-#[derive(Default)]
-pub(crate) struct DocumentVersionTracker {
-    pub versions: HashMap<String, i32>,
+impl SemanticTokenCache {
+    /// The cached tokens under the id the client knows them by.
+    pub(crate) fn labelled(&self) -> lsp_types::SemanticTokens {
+        lsp_types::SemanticTokens {
+            result_id: Some(self.result_id.clone()),
+            data: self.tokens.data.clone(),
+        }
+    }
 }
 
 /// Workspace managing the bone session plus per-document LSP caches.
@@ -45,8 +36,7 @@ pub struct LspWorkspace {
     /// Semantic token cache with document version tracking
     semantic_token_cache: HashMap<String, SemanticTokenCache>,
 
-    /// Document version tracker
-    document_versions: DocumentVersionTracker,
+    document_versions: HashMap<String, i32>,
 
     /// Last diagnostics published per file path, so the bone publish path can
     /// skip re-sending unchanged files. `bone.update` returns diagnostics for
@@ -61,7 +51,7 @@ impl LspWorkspace {
         Self {
             bone: bone_query::BoneWorkspace::new(),
             semantic_token_cache: HashMap::new(),
-            document_versions: DocumentVersionTracker::default(),
+            document_versions: HashMap::new(),
             published_diagnostics: HashMap::new(),
         }
     }
@@ -99,8 +89,7 @@ impl LspWorkspace {
     /// Update document version and invalidate caches
     pub(crate) fn update_document_version(&mut self, uri: &str, version: Option<i32>) {
         if let Some(v) = version {
-            // Update version tracker
-            self.document_versions.versions.insert(uri.to_string(), v);
+            self.document_versions.insert(uri.to_string(), v);
 
             // SMART CACHE INVALIDATION: Don't remove semantic tokens immediately
             // They will be replaced when new tokens are successfully computed
@@ -108,26 +97,17 @@ impl LspWorkspace {
         }
     }
 
-    /// Get cached semantic tokens if valid for the current document version
-    pub(crate) fn get_cached_semantic_tokens(
-        &self,
-        uri: &str,
-        current_version: Option<i32>,
-    ) -> Option<&SemanticTokenCache> {
-        let cache_entry = self.semantic_token_cache.get(uri)?;
-        // SMART CACHE: Return stale tokens if we have them. The cache will be
-        // updated when new tokens are successfully computed, so tokens don't
-        // disappear during edits. (We return the entry whether or not its
-        // version matches `current_version`.)
-        let _ = current_version;
-        Some(cache_entry)
+    /// The last non-empty tokens computed for `uri`, whatever version they
+    /// were computed for.
+    pub(crate) fn cached_semantic_tokens(&self, uri: &str) -> Option<&SemanticTokenCache> {
+        self.semantic_token_cache.get(uri)
     }
 
     /// Cache semantic tokens for a document version
     pub(crate) fn cache_semantic_tokens(
         &mut self,
         uri: &str,
-        tokens: lsp_types::SemanticTokensResult,
+        tokens: lsp_types::SemanticTokens,
         document_version: Option<i32>,
     ) -> String {
         // Defense in depth: never cache an empty SemanticTokensResult.
@@ -143,7 +123,7 @@ impl LspWorkspace {
         //
         // Refusing to cache empty results forces the handler to recompute
         // on the next request, giving the system a chance to recover.
-        if semantic_tokens_result_is_empty(&tokens) {
+        if tokens.data.is_empty() {
             if let Some(existing) = self.semantic_token_cache.get(uri) {
                 log::warn!(
                     "Rejected empty semantic tokens update for {} (version {:?}); \
@@ -181,13 +161,13 @@ impl LspWorkspace {
 
     /// Get current document version
     pub(crate) fn get_document_version(&self, uri: &str) -> Option<i32> {
-        self.document_versions.versions.get(uri).copied()
+        self.document_versions.get(uri).copied()
     }
 
     /// Drop all per-document caches for a URI the editor has closed.
     /// Called after the `textDocument/didClose` handler reconciles disk contents.
     pub(crate) fn close_document(&mut self, uri: &str) {
-        self.document_versions.versions.remove(uri);
+        self.document_versions.remove(uri);
         self.semantic_token_cache.remove(uri);
     }
 }

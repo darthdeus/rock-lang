@@ -19,9 +19,6 @@ keywords = [
 license = "MIT"
 repository.workspace = true
 
-[dependencies.bitflags]
-version = "1.0.1"
-
 [dependencies.fluent-uri]
 version = "0.1.4"
 
@@ -30,7 +27,3 @@ version = "1.0.34"
 
 [dependencies.serde_json]
 version = "1.0.50"
-
-[features]
-default = []
-proposed = []

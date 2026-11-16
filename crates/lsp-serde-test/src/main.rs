@@ -5,105 +5,19 @@ use clap::{Arg, Command};
 use generators::*;
 use harness::{print_results, TypeTest};
 
-type OrigTagSupport = lsp_types::TagSupport<lsp_types::CompletionItemTag>;
-type ForkTagSupport = lsp_types_manual::TagSupport<lsp_types_manual::CompletionItemTag>;
-
-type_test!(
-    HoverClientCapabilitiesTest,
-    HoverClientCapabilities,
-    gen_hover_client_capabilities
-);
 type_test!(HoverTest, Hover, gen_hover);
-type_test!(
-    SemanticTokensFullOptionsTest,
-    SemanticTokensFullOptions,
-    gen_semantic_tokens_full_options
-);
-type_test!(
-    SemanticTokensOptionsTest,
-    SemanticTokensOptions,
-    gen_semantic_tokens_options
-);
-type_test!(
-    SemanticTokensServerCapabilitiesTest,
-    SemanticTokensServerCapabilities,
-    gen_semantic_tokens_server_capabilities
-);
-type_test!(
-    CompletionOptionsTest,
-    CompletionOptions,
-    gen_completion_options
-);
-type_test!(
-    InitializeParamsTest,
-    InitializeParams,
-    gen_initialize_params
-);
-type_test!(
-    CompletionItemCapabilityTest,
-    CompletionItemCapability,
-    gen_completion_item_capability
-);
-type_test!(
-    DocumentSymbolClientCapabilitiesTest,
-    DocumentSymbolClientCapabilities,
-    gen_document_symbol_client_capabilities
-);
-type_test!(
-    WorkspaceSymbolClientCapabilitiesTest,
-    WorkspaceSymbolClientCapabilities,
-    gen_workspace_symbol_client_capabilities
-);
 type_test!(DiagnosticTest, Diagnostic, gen_diagnostic);
 type_test!(InlayHintTest, InlayHint, gen_inlay_hint);
-type_test!(WorkspaceSymbolTest, WorkspaceSymbol, gen_workspace_symbol);
-type_test!(
-    InitializeResultTest,
-    InitializeResult,
-    gen_initialize_result
-);
-type_test!(
-    CodeActionOrCommandTest,
-    CodeActionOrCommand,
-    gen_code_action_or_command
-);
+type_test!(CodeActionTest, CodeAction, gen_code_action);
 type_test!(SymbolKindTest, SymbolKind, gen_int_newtype);
 type_test!(DiagnosticSeverityTest, DiagnosticSeverity, gen_int_newtype);
 type_test!(CompletionItemKindTest, CompletionItemKind, gen_int_newtype);
-type_test!(
-    FormattingOptionsTest,
-    FormattingOptions,
-    gen_formatting_options
-);
-type_test!(
-    DocumentOnTypeFormattingRegistrationOptionsTest,
-    DocumentOnTypeFormattingRegistrationOptions,
-    gen_document_on_type_formatting_registration_options
-);
-type_test!(
-    MessageActionItemTest,
-    MessageActionItem,
-    gen_message_action_item
-);
 type_test!(
     PrepareRenameResponseTest,
     PrepareRenameResponse,
     gen_prepare_rename_response
 );
-type_test!(WatchKindTest, WatchKind, gen_watch_kind);
-type_test!(
-    PositionEncodingKindTest,
-    PositionEncodingKind,
-    gen_position_encoding_kind
-);
 type_test!(SemanticTokensTest, SemanticTokens, gen_semantic_tokens);
-type_test!(
-    TagSupportTest,
-    TagSupport,
-    OrigTagSupport,
-    ForkTagSupport,
-    gen_tag_support
-);
 
 type_test!(
     RequestIdTest,
@@ -150,32 +64,15 @@ type_test!(
 
 fn all_tests() -> Vec<Box<dyn TypeTest>> {
     vec![
-        Box::new(HoverClientCapabilitiesTest),
         Box::new(HoverTest),
-        Box::new(SemanticTokensFullOptionsTest),
-        Box::new(SemanticTokensOptionsTest),
-        Box::new(SemanticTokensServerCapabilitiesTest),
-        Box::new(CompletionOptionsTest),
-        Box::new(InitializeParamsTest),
-        Box::new(CompletionItemCapabilityTest),
-        Box::new(DocumentSymbolClientCapabilitiesTest),
-        Box::new(WorkspaceSymbolClientCapabilitiesTest),
         Box::new(DiagnosticTest),
         Box::new(InlayHintTest),
-        Box::new(WorkspaceSymbolTest),
-        Box::new(InitializeResultTest),
-        Box::new(CodeActionOrCommandTest),
+        Box::new(CodeActionTest),
         Box::new(SymbolKindTest),
         Box::new(DiagnosticSeverityTest),
         Box::new(CompletionItemKindTest),
-        Box::new(FormattingOptionsTest),
-        Box::new(DocumentOnTypeFormattingRegistrationOptionsTest),
-        Box::new(MessageActionItemTest),
         Box::new(PrepareRenameResponseTest),
-        Box::new(WatchKindTest),
-        Box::new(PositionEncodingKindTest),
         Box::new(SemanticTokensTest),
-        Box::new(TagSupportTest),
         Box::new(RequestIdTest),
         Box::new(ResponseErrorTest),
         Box::new(LspRequestTest),

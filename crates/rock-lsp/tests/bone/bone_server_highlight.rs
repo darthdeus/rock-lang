@@ -31,8 +31,6 @@ fn highlight_at(
             },
             position: Position::new(line, ch),
         },
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
     };
     do_document_highlight_workspace(ws, &params)
         .unwrap()

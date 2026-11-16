@@ -31,8 +31,6 @@ fn spaced_project() -> (tempfile::TempDir, std::path::PathBuf, Uri, LspWorkspace
 fn symbol_params(uri: Uri) -> DocumentSymbolParams {
     DocumentSymbolParams {
         text_document: TextDocumentIdentifier { uri },
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
     }
 }
 
@@ -53,15 +51,9 @@ fn encoded_document_uri_resolves_to_the_file() {
 
     let params = SemanticTokensParams {
         text_document: TextDocumentIdentifier { uri },
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
     };
-    match compute_semantic_tokens_workspace(&mut ws, params).unwrap() {
-        Some(SemanticTokensResult::Tokens(t)) => {
-            assert!(!t.data.is_empty(), "no tokens for decoded file")
-        }
-        other => panic!("expected token data, got {other:?}"),
-    }
+    let t = compute_semantic_tokens_workspace(&mut ws, &params.text_document.uri).unwrap();
+    assert!(!t.data.is_empty(), "no tokens for decoded file");
 }
 
 #[test]
@@ -69,8 +61,6 @@ fn returned_locations_encode_the_path() {
     let (dir, path, _uri, mut ws) = spaced_project();
     let params = WorkspaceSymbolParams {
         query: "heal_all".to_string(),
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
     };
     let hits = match do_workspace_symbols_workspace(&mut ws, &params).unwrap() {
         Some(WorkspaceSymbolResponse::Flat(syms)) => syms,

@@ -1,8 +1,10 @@
 use lsp_types::{
-    SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokensFullOptions,
-    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensRangeParams,
-    SemanticTokensRangeResult, SemanticTokensResult, SemanticTokensServerCapabilities,
+    SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensDelta,
+    SemanticTokensDeltaParams, SemanticTokensFullDeltaResult, SemanticTokensLegend,
+    SemanticTokensParams, SemanticTokensRangeParams, Uri,
 };
+
+use crate::LspWorkspace;
 
 /// Translate bone's token-type AND token-modifier indices (into bone's own
 /// legends, `bone_query::semantic_tokens_legend` / `_modifiers_legend`) to
@@ -109,21 +111,6 @@ pub fn get_semantic_tokens_legend() -> SemanticTokensLegend {
     }
 }
 
-/// Get semantic tokens server capabilities
-pub(crate) fn get_semantic_tokens_capabilities() -> SemanticTokensServerCapabilities {
-    SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
-        work_done_progress_options: Default::default(),
-        legend: get_semantic_tokens_legend(),
-        // nvim requests range for the initial paint / scroll (confirmed by
-        // driving the real client); the handler classifies only viewport bodies.
-        range: Some(true),
-        // Advertise delta: on a re-request the client sends the previous
-        // result_id and we reply with just the changed token span instead of the
-        // whole array -- on a 12k-line file that's ~20ms -> ~the compute floor.
-        full: Some(SemanticTokensFullOptions::Delta { delta: Some(true) }),
-    })
-}
-
 /// Minimal `SemanticTokensEdit` list turning `old` into `new`: the common
 /// prefix/suffix is unchanged, so one splice replaces the differing middle.
 /// `start`/`delete_count` are in FLAT integer units (5 per token), per the LSP
@@ -157,27 +144,98 @@ pub fn semantic_tokens_delta_edits(
 
 /// Range semantic tokens: bone's viewport classifier, remapped to the
 /// advertised legend.
-pub(crate) fn compute_semantic_tokens_range_workspace(
-    workspace: &mut crate::LspWorkspace,
-    params: SemanticTokensRangeParams,
-) -> anyhow::Result<Option<SemanticTokensRangeResult>> {
+pub(crate) fn range_semantic_tokens(
+    workspace: &mut LspWorkspace,
+    params: &SemanticTokensRangeParams,
+) -> anyhow::Result<Option<SemanticTokens>> {
     let file_path = params.text_document.uri.to_file_path()?;
     let mut tokens = workspace
         .bone
         .semantic_tokens_range(&file_path, params.range);
     remap_bone_token_types(&mut tokens);
-    Ok(Some(SemanticTokensRangeResult::Tokens(tokens)))
+    Ok(Some(tokens))
 }
 
 /// Full-document semantic tokens: bone's tokenizer-based classifier (same one
 /// the `--backend bone` CLI uses), remapped to the advertised legend.
-/// `file_path` matches the key `bone.update` registers on didChange.
+/// `uri` decodes to the key `bone.update` registers on didChange.
 pub fn compute_semantic_tokens_workspace(
-    workspace: &mut crate::LspWorkspace,
-    params: SemanticTokensParams,
-) -> anyhow::Result<Option<SemanticTokensResult>> {
-    let file_path = params.text_document.uri.to_file_path()?;
+    workspace: &mut LspWorkspace,
+    uri: &Uri,
+) -> anyhow::Result<SemanticTokens> {
+    let file_path = uri.to_file_path()?;
     let mut tokens = workspace.bone.semantic_tokens(&file_path);
     remap_bone_token_types(&mut tokens);
-    Ok(Some(SemanticTokensResult::Tokens(tokens)))
+    Ok(tokens)
+}
+
+/// Full-document tokens, served from the cache while the document version is
+/// unchanged. A failed or empty recompute falls back to the cached tokens, so
+/// highlighting does not disappear while an edit is being recompiled.
+pub(crate) fn full_semantic_tokens(
+    workspace: &mut LspWorkspace,
+    params: &SemanticTokensParams,
+) -> anyhow::Result<Option<SemanticTokens>> {
+    let uri = params.text_document.uri.to_string();
+    let version = workspace.get_document_version(&uri);
+    let cached = workspace
+        .cached_semantic_tokens(&uri)
+        .map(|c| (c.document_version == version, c.labelled()));
+    if let Some((true, tokens)) = cached {
+        return Ok(Some(tokens));
+    }
+    let stale = cached.map(|(_, tokens)| tokens);
+    match compute_semantic_tokens_workspace(workspace, &params.text_document.uri) {
+        Ok(tokens) if !tokens.data.is_empty() || stale.is_none() => {
+            let result_id = workspace.cache_semantic_tokens(&uri, tokens.clone(), version);
+            Ok(Some(SemanticTokens {
+                result_id: Some(result_id),
+                ..tokens
+            }))
+        }
+        Ok(_) => {
+            log::warn!(
+                "compute_semantic_tokens returned empty for {uri}; \
+                 returning stale non-empty cache to preserve highlighting."
+            );
+            Ok(stale)
+        }
+        Err(e) if stale.is_none() => Err(e),
+        Err(_) => Ok(stale),
+    }
+}
+
+/// Answers with edits against the array the client holds when its previous
+/// result id matches the cache, otherwise with the full array.
+pub(crate) fn delta_semantic_tokens(
+    workspace: &mut LspWorkspace,
+    params: &SemanticTokensDeltaParams,
+) -> anyhow::Result<Option<SemanticTokensFullDeltaResult>> {
+    let uri = params.text_document.uri.to_string();
+    let version = workspace.get_document_version(&uri);
+    let prev = workspace.cached_semantic_tokens(&uri).cloned();
+    match compute_semantic_tokens_workspace(workspace, &params.text_document.uri) {
+        Ok(new) if !new.data.is_empty() => {
+            let result_id = Some(workspace.cache_semantic_tokens(&uri, new.clone(), version));
+            Ok(Some(match prev {
+                Some(old)
+                    if old.result_id == params.previous_result_id
+                        && !old.tokens.data.is_empty() =>
+                {
+                    SemanticTokensFullDeltaResult::TokensDelta(SemanticTokensDelta {
+                        result_id,
+                        edits: semantic_tokens_delta_edits(&old.tokens.data, &new.data),
+                    })
+                }
+                _ => SemanticTokensFullDeltaResult::Tokens(SemanticTokens { result_id, ..new }),
+            }))
+        }
+        // Empty or failed: resend the stale cache rather than wipe highlighting.
+        other => {
+            if let Err(e) = other {
+                log::warn!("semantic tokens delta compute failed for {uri}: {e:?}");
+            }
+            Ok(prev.map(|c| SemanticTokensFullDeltaResult::Tokens(c.labelled())))
+        }
+    }
 }

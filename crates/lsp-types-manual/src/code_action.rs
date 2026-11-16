@@ -1,90 +1,7 @@
-use crate::{
-    Command, Diagnostic, PartialResultParams, Range, TextDocumentIdentifier,
-    WorkDoneProgressOptions, WorkDoneProgressParams, WorkspaceEdit,
-};
+use crate::{Command, Diagnostic, Range, TextDocumentIdentifier, WorkspaceEdit};
 use serde_json::Value;
 
 use std::borrow::Cow;
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub enum CodeActionProviderCapability {
-    Simple(bool),
-    Options(CodeActionOptions),
-}
-
-impl_untagged_enum!(CodeActionProviderCapability {
-    Simple(bool),
-    Options(CodeActionOptions),
-});
-
-impl From<CodeActionOptions> for CodeActionProviderCapability {
-    fn from(from: CodeActionOptions) -> Self {
-        Self::Options(from)
-    }
-}
-
-impl From<bool> for CodeActionProviderCapability {
-    fn from(from: bool) -> Self {
-        Self::Simple(from)
-    }
-}
-
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct CodeActionClientCapabilities {
-    pub dynamic_registration: Option<bool>,
-    pub code_action_literal_support: Option<CodeActionLiteralSupport>,
-    pub is_preferred_support: Option<bool>,
-    pub disabled_support: Option<bool>,
-    pub data_support: Option<bool>,
-    pub resolve_support: Option<CodeActionCapabilityResolveSupport>,
-    pub honors_change_annotations: Option<bool>,
-}
-
-impl_lsp_struct!(
-    CodeActionClientCapabilities,
-    required {},
-    optional {
-        dynamic_registration: bool = "dynamicRegistration",
-        code_action_literal_support: CodeActionLiteralSupport = "codeActionLiteralSupport",
-        is_preferred_support: bool = "isPreferredSupport",
-        disabled_support: bool = "disabledSupport",
-        data_support: bool = "dataSupport",
-        resolve_support: CodeActionCapabilityResolveSupport = "resolveSupport",
-        honors_change_annotations: bool = "honorsChangeAnnotations",
-    }
-);
-
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct CodeActionCapabilityResolveSupport {
-    pub properties: Vec<String>,
-}
-
-impl_lsp_struct!(CodeActionCapabilityResolveSupport,
-    required { properties: Vec<String> = "properties" },
-    optional {}
-);
-
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct CodeActionLiteralSupport {
-    pub code_action_kind: CodeActionKindLiteralSupport,
-}
-
-impl_lsp_struct!(
-    CodeActionLiteralSupport,
-    required {
-        code_action_kind: CodeActionKindLiteralSupport = "codeActionKind"
-    },
-    optional {}
-);
-
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct CodeActionKindLiteralSupport {
-    pub value_set: Vec<String>,
-}
-
-impl_lsp_struct!(CodeActionKindLiteralSupport,
-    required { value_set: Vec<String> = "valueSet" },
-    optional {}
-);
 
 /// Params for the CodeActionRequest
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -97,9 +14,6 @@ pub struct CodeActionParams {
 
     /// Context carrying additional information.
     pub context: CodeActionContext,
-
-    pub work_done_progress_params: WorkDoneProgressParams,
-    pub partial_result_params: PartialResultParams,
 }
 
 impl_lsp_struct!(
@@ -109,39 +23,8 @@ impl_lsp_struct!(
         range: Range = "range",
         context: CodeActionContext = "context",
     },
-    optional {},
-    flatten {
-        work_done_progress_params: WorkDoneProgressParams,
-        partial_result_params: PartialResultParams,
-    }
+    optional {}
 );
-
-/// response for CodeActionRequest
-pub(crate) type CodeActionResponse = Vec<CodeActionOrCommand>;
-
-#[derive(Debug, Clone, PartialEq)]
-#[allow(clippy::large_enum_variant)]
-pub enum CodeActionOrCommand {
-    Command(Command),
-    CodeAction(CodeAction),
-}
-
-impl_untagged_enum!(CodeActionOrCommand {
-    Command(Command),
-    CodeAction(CodeAction),
-});
-
-impl From<Command> for CodeActionOrCommand {
-    fn from(command: Command) -> Self {
-        CodeActionOrCommand::Command(command)
-    }
-}
-
-impl From<CodeAction> for CodeActionOrCommand {
-    fn from(action: CodeAction) -> Self {
-        CodeActionOrCommand::CodeAction(action)
-    }
-}
 
 #[derive(Debug, Eq, PartialEq, Hash, PartialOrd, Clone)]
 pub struct CodeActionKind(Cow<'static, str>);
@@ -248,7 +131,6 @@ pub struct CodeAction {
     pub edit: Option<WorkspaceEdit>,
     pub command: Option<Command>,
     pub is_preferred: Option<bool>,
-    pub disabled: Option<CodeActionDisabled>,
     pub data: Option<Value>,
 }
 
@@ -260,82 +142,20 @@ impl_lsp_struct!(CodeAction,
         edit: WorkspaceEdit = "edit",
         command: Command = "command",
         is_preferred: bool = "isPreferred",
-        disabled: CodeActionDisabled = "disabled",
         data: Value = "data",
     }
 );
-
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct CodeActionDisabled {
-    pub reason: String,
-}
-
-impl_lsp_struct!(
-    CodeActionDisabled,
-    required {
-        reason: String = "reason"
-    },
-    optional {}
-);
-
-/// The reason why code actions were requested.
-///
-/// @since 3.17.0
-#[derive(Eq, PartialEq, Clone, Copy)]
-pub struct CodeActionTriggerKind(i32);
-lsp_enum! {
-impl CodeActionTriggerKind {
-    /// Code actions were explicitly requested by the user or by an extension.
-    pub const INVOKED: CodeActionTriggerKind = CodeActionTriggerKind(1);
-
-    /// Code actions were requested automatically.
-    ///
-    /// This typically happens when current selection in a file changes, but can
-    /// also be triggered when file content changes.
-    pub const AUTOMATIC: CodeActionTriggerKind = CodeActionTriggerKind(2);
-}
-}
 
 /// Contains additional diagnostic information about the context in which
 /// a code action is run.
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
 pub struct CodeActionContext {
     pub diagnostics: Vec<Diagnostic>,
-    pub only: Option<Vec<CodeActionKind>>,
-    pub trigger_kind: Option<CodeActionTriggerKind>,
 }
 
 impl_lsp_struct!(CodeActionContext,
     required { diagnostics: Vec<Diagnostic> = "diagnostics" },
-    optional {
-        only: Vec<CodeActionKind> = "only",
-        trigger_kind: CodeActionTriggerKind = "triggerKind",
-    }
-);
-
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct CodeActionOptions {
-    /// CodeActionKinds that this server may return.
-    ///
-    /// The list of kinds may be generic, such as `CodeActionKind.Refactor`, or the server
-    /// may list out every specific kind they provide.
-    pub code_action_kinds: Option<Vec<CodeActionKind>>,
-
-    pub work_done_progress_options: WorkDoneProgressOptions,
-
-    /// The server provides support to resolve additional
-    /// information for a code action.
-    ///
-    /// @since 3.16.0
-    pub resolve_provider: Option<bool>,
-}
-
-impl_lsp_struct!(CodeActionOptions,
-    optional {
-        code_action_kinds: Vec<CodeActionKind> = "codeActionKinds",
-        resolve_provider: bool = "resolveProvider",
-    },
-    flatten { work_done_progress_options: WorkDoneProgressOptions }
+    optional {}
 );
 
 #[cfg(test)]
@@ -346,23 +166,12 @@ mod tests {
     #[test]
     fn test_code_action_response() {
         test_serialization(
-            &vec![
-                CodeActionOrCommand::Command(Command {
-                    title: "title".to_string(),
-                    command: "command".to_string(),
-                    arguments: None,
-                }),
-                CodeActionOrCommand::CodeAction(CodeAction {
-                    title: "title".to_string(),
-                    kind: Some(CodeActionKind::QUICKFIX),
-                    command: None,
-                    diagnostics: None,
-                    edit: None,
-                    is_preferred: None,
-                    ..CodeAction::default()
-                }),
-            ],
-            r#"[{"title":"title","command":"command"},{"title":"title","kind":"quickfix"}]"#,
+            &vec![CodeAction {
+                title: "title".to_string(),
+                kind: Some(CodeActionKind::QUICKFIX),
+                ..CodeAction::default()
+            }],
+            r#"[{"title":"title","kind":"quickfix"}]"#,
         )
     }
 }

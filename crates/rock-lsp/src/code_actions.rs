@@ -186,7 +186,6 @@ fn bone_multi_edit_action(
         edit: Some(WorkspaceEdit::new(changes)),
         command: None,
         is_preferred: None,
-        disabled: None,
         data: None,
     }
 }

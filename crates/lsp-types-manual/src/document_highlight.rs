@@ -1,23 +1,14 @@
-use crate::{
-    DynamicRegistrationClientCapabilities, PartialResultParams, Range, TextDocumentPositionParams,
-    WorkDoneProgressParams,
-};
-
-pub(crate) type DocumentHighlightClientCapabilities = DynamicRegistrationClientCapabilities;
+use crate::{Range, TextDocumentPositionParams};
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct DocumentHighlightParams {
     pub text_document_position_params: TextDocumentPositionParams,
-    pub work_done_progress_params: WorkDoneProgressParams,
-    pub partial_result_params: PartialResultParams,
 }
 
 impl_lsp_struct!(
     DocumentHighlightParams,
     flatten {
         text_document_position_params: TextDocumentPositionParams,
-        work_done_progress_params: WorkDoneProgressParams,
-        partial_result_params: PartialResultParams,
     }
 );
 

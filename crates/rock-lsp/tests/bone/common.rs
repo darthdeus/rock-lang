@@ -25,11 +25,7 @@ pub fn params_at(path: &std::path::Path, line: u32, ch: u32) -> CodeActionParams
         },
         context: CodeActionContext {
             diagnostics: vec![],
-            only: None,
-            trigger_kind: None,
         },
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
     }
 }
 

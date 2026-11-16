@@ -28,8 +28,6 @@ fn labels_at(line: u32, ch: u32) -> Vec<String> {
             },
             position: Position::new(line, ch),
         },
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
         context: None,
     };
 

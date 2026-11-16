@@ -1,86 +1,12 @@
 use crate::{
-    Command, LSPAny, Location, MarkupContent, Position, Range, StaticRegistrationOptions,
-    TextDocumentIdentifier, TextDocumentRegistrationOptions, TextEdit, WorkDoneProgressOptions,
-    WorkDoneProgressParams,
+    Command, LSPAny, Location, MarkupContent, Position, Range, TextDocumentIdentifier, TextEdit,
 };
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub enum InlayHintServerCapabilities {
-    Options(InlayHintOptions),
-    RegistrationOptions(InlayHintRegistrationOptions),
-}
-
-impl_untagged_enum!(InlayHintServerCapabilities {
-    Options(InlayHintOptions),
-    RegistrationOptions(InlayHintRegistrationOptions),
-});
-
-/// Inlay hint client capabilities.
-///
-/// @since 3.17.0
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct InlayHintClientCapabilities {
-    pub dynamic_registration: Option<bool>,
-    pub resolve_support: Option<InlayHintResolveClientCapabilities>,
-}
-
-impl_lsp_struct!(
-    InlayHintClientCapabilities,
-    required {},
-    optional {
-        dynamic_registration: bool = "dynamicRegistration",
-        resolve_support: InlayHintResolveClientCapabilities = "resolveSupport",
-    }
-);
-
-/// Inlay hint options used during static registration.
-///
-/// @since 3.17.0
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct InlayHintOptions {
-    pub work_done_progress_options: WorkDoneProgressOptions,
-
-    /// The server provides support to resolve additional
-    /// information for an inlay hint item.
-    pub resolve_provider: Option<bool>,
-}
-
-impl_lsp_struct!(
-    InlayHintOptions,
-    optional {
-        resolve_provider: bool = "resolveProvider"
-    },
-    flatten {
-        work_done_progress_options: WorkDoneProgressOptions
-    }
-);
-
-/// Inlay hint options used during static or dynamic registration.
-///
-/// @since 3.17.0
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct InlayHintRegistrationOptions {
-    pub inlay_hint_options: InlayHintOptions,
-    pub text_document_registration_options: TextDocumentRegistrationOptions,
-    pub static_registration_options: StaticRegistrationOptions,
-}
-
-impl_lsp_struct!(
-    InlayHintRegistrationOptions,
-    flatten {
-        inlay_hint_options: InlayHintOptions,
-        text_document_registration_options: TextDocumentRegistrationOptions,
-        static_registration_options: StaticRegistrationOptions,
-    }
-);
 
 /// A parameter literal used in inlay hint requests.
 ///
 /// @since 3.17.0
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct InlayHintParams {
-    pub work_done_progress_params: WorkDoneProgressParams,
-
     /// The text document.
     pub text_document: TextDocumentIdentifier,
 
@@ -94,10 +20,7 @@ impl_lsp_struct!(
         text_document: TextDocumentIdentifier = "textDocument",
         range: Range = "range",
     },
-    optional {},
-    flatten {
-        work_done_progress_params: WorkDoneProgressParams
-    }
+    optional {}
 );
 
 /// Inlay hint information.
@@ -241,32 +164,3 @@ impl InlayHintKind {
     pub const PARAMETER: InlayHintKind = InlayHintKind(2);
 }
 }
-
-/// Inlay hint client capabilities.
-///
-/// @since 3.17.0
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct InlayHintResolveClientCapabilities {
-    pub properties: Vec<String>,
-}
-
-impl_lsp_struct!(InlayHintResolveClientCapabilities,
-    required { properties: Vec<String> = "properties" },
-    optional {}
-);
-
-/// Client workspace capabilities specific to inlay hints.
-///
-/// @since 3.17.0
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct InlayHintWorkspaceClientCapabilities {
-    pub refresh_support: Option<bool>,
-}
-
-impl_lsp_struct!(
-    InlayHintWorkspaceClientCapabilities,
-    required {},
-    optional {
-        refresh_support: bool = "refreshSupport"
-    }
-);

@@ -23,12 +23,8 @@ use lsp_types::request::{
     WorkspaceSymbolRequest,
 };
 use lsp_types::{
-    CodeActionKind, CodeActionOptions, CodeActionProviderCapability, CompletionOptions,
-    CompletionResponse, GotoDefinitionResponse, Hover, HoverProviderCapability, InlayHint,
-    InlayHintServerCapabilities, OneOf, RenameOptions, SaveOptions, ServerCapabilities,
-    SignatureHelp, SignatureHelpOptions, TextDocumentPositionParams, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
-    WorkDoneProgressOptions,
+    CompletionResponse, GotoDefinitionResponse, Hover, InlayHint, SignatureHelp,
+    TextDocumentPositionParams, Uri,
 };
 
 #[cfg(not(target_family = "wasm"))]
@@ -76,15 +72,16 @@ macro_rules! debug_log {
 
 /// Answer one ordinary LSP request inside `handle_request` and return early.
 ///
-/// Runs the common take-params -> run-workspace-query -> respond flow for a
-/// typed request. Handlers with extra steps (the SemanticTokens cache, the
-/// SignatureHelp shutdown check) spell out their own `match take::<T>`.
+/// Takes the typed params, runs the workspace query and responds. The
+/// handler's answer must have the request's declared result type, so a
+/// handler cannot send a shape the protocol does not allow.
 macro_rules! dispatch_request {
     ($req:ident, $out:expr, $ws:expr, $ReqType:ty, $span:literal, $handler:expr) => {
         let $req = match take::<$ReqType>($req) {
             Ok((req_id, args)) => {
                 let _span = tracing::info_span!($span, request_id = %req_id).entered();
-                let outcome = $handler(&mut $ws, &args);
+                let outcome: Result<<$ReqType as lsp_types::request::Request>::Result> =
+                    $handler(&mut $ws, &args);
                 send_response($out, req_id, outcome)?;
                 return Ok(());
             }
@@ -212,93 +209,60 @@ fn modules_json(summary: Vec<(String, Vec<bone_query::ModuleRecency>)>) -> serde
 /// The set below is load-bearing for editors: entries gate whether requests
 /// are even issued, so additions or removals change visible behaviour. Keep it
 /// in sync with the dispatch in `handle_request`.
-pub fn server_capabilities() -> ServerCapabilities {
-    ServerCapabilities {
-        position_encoding: Some(lsp_types::PositionEncodingKind::UTF16),
-        definition_provider: Some(OneOf::Left(true)),
-        type_definition_provider: Some(lsp_types::TypeDefinitionProviderCapability::Simple(true)),
-        references_provider: Some(OneOf::Left(true)),
-        hover_provider: Some(HoverProviderCapability::Simple(true)),
-        signature_help_provider: Some(signature_options()),
-        inlay_hint_provider: Some(lsp_types::OneOf::Right(
-            InlayHintServerCapabilities::Options(lsp_types::InlayHintOptions {
-                work_done_progress_options: Default::default(),
-                resolve_provider: Some(false),
-            }),
-        )),
-        workspace: Some(lsp_types::WorkspaceServerCapabilities {
-            workspace_folders: Some(lsp_types::WorkspaceFoldersServerCapabilities {
-                supported: Some(true),
-                change_notifications: Some(lsp_types::OneOf::Left(true)),
-            }),
-        }),
+pub fn server_capabilities() -> serde_json::Value {
+    serde_json::json!({
+        "positionEncoding": "utf-16",
+        // Whole-document sync: the client sends full text on open and change.
+        "textDocumentSync": {
+            "openClose": true,
+            "change": 1,
+            "willSave": false,
+            "willSaveWaitUntil": false,
+            "save": { "includeText": false },
+        },
+        "hoverProvider": true,
+        "completionProvider": {
+            "completionItem": { "labelDetailsSupport": false },
+            "resolveProvider": false,
+            // `:` is listed so the second char of `::` pops enum variants for
+            // `Foo::|`; the first char alone has no scope yet and simply falls
+            // back to plain identifiers. Without it nvim never auto-opens on
+            // `::`. `" "` opens the popup on a bare space (`let x = |`) with an
+            // `isIncomplete` empty-prefix list that re-scores while typing.
+            // See `extract_scope_resolution`.
+            "triggerCharacters": [".", ":", " "],
+            "workDoneProgress": false,
+        },
+        "signatureHelpProvider": { "triggerCharacters": ["(", ","] },
+        "definitionProvider": true,
+        "typeDefinitionProvider": true,
+        "referencesProvider": true,
+        "documentHighlightProvider": true,
+        "documentSymbolProvider": true,
+        "workspaceSymbolProvider": true,
+        "codeActionProvider": {
+            "codeActionKinds": [lsp_types::CodeActionKind::REFACTOR_INLINE],
+            "resolveProvider": false,
+        },
+        "renameProvider": { "prepareProvider": true },
         // Always listed (nvim will not send a command the server left
         // undeclared); completions only bear the command while
         // ROCK_LSP_RECORD records, so this is inert the rest of the time.
-        execute_command_provider: Some(lsp_types::ExecuteCommandOptions {
-            commands: vec![completion_record::ACCEPT_COMMAND.to_string()],
-            work_done_progress_options: WorkDoneProgressOptions::default(),
-        }),
-        completion_provider: Some(completion_options()),
-        text_document_sync: Some(TextDocumentSyncCapability::Options(sync_options())),
-        rename_provider: Some(OneOf::Right(RenameOptions {
-            prepare_provider: Some(true),
-            work_done_progress_options: WorkDoneProgressOptions::default(),
-        })),
-        code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
-            code_action_kinds: Some(vec![CodeActionKind::REFACTOR_INLINE]),
-            work_done_progress_options: WorkDoneProgressOptions::default(),
-            resolve_provider: Some(false),
-        })),
-        semantic_tokens_provider: Some(semantic_tokens::get_semantic_tokens_capabilities()),
-        document_symbol_provider: Some(OneOf::Left(true)),
-        workspace_symbol_provider: Some(OneOf::Left(true)),
-        document_highlight_provider: Some(OneOf::Left(true)),
-        ..Default::default()
-    }
-}
-
-/// Signature help fires after `(` and after each `,`.
-fn signature_options() -> SignatureHelpOptions {
-    SignatureHelpOptions {
-        trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
-        retrigger_characters: None,
-        work_done_progress_options: WorkDoneProgressOptions::default(),
-    }
-}
-
-/// Completion popup configuration.
-fn completion_options() -> CompletionOptions {
-    CompletionOptions {
-        resolve_provider: Some(false),
-        // `:` is listed so the second char of `::` pops enum variants for
-        // `Foo::|`; the first char alone has no scope yet and simply falls
-        // back to plain identifiers. Without it nvim never auto-opens on
-        // `::`. `" "` opens the popup on a bare space (`let x = |`) with an
-        // `isIncomplete` empty-prefix list that re-scores while typing.
-        // See `extract_scope_resolution`.
-        trigger_characters: Some(vec![".".to_string(), ":".to_string(), " ".to_string()]),
-        work_done_progress_options: WorkDoneProgressOptions {
-            work_done_progress: Some(false),
+        "executeCommandProvider": { "commands": [completion_record::ACCEPT_COMMAND] },
+        "workspace": {
+            "workspaceFolders": { "supported": true, "changeNotifications": true },
         },
-        completion_item: Some(lsp_types::CompletionOptionsCompletionItem {
-            label_details_support: Some(false),
-        }),
-        ..CompletionOptions::default()
-    }
-}
-
-/// Whole-document sync: the client sends full text on open and change.
-fn sync_options() -> TextDocumentSyncOptions {
-    TextDocumentSyncOptions {
-        open_close: Some(true),
-        change: Some(TextDocumentSyncKind::FULL),
-        will_save: Some(false),
-        will_save_wait_until: Some(false),
-        save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
-            include_text: Some(false),
-        })),
-    }
+        "semanticTokensProvider": {
+            // Delta: on a re-request the client sends the previous result_id
+            // and gets just the changed token span instead of the whole array.
+            "full": { "delta": true },
+            "legend": semantic_tokens::get_semantic_tokens_legend(),
+            // nvim requests range for the initial paint / scroll; the handler
+            // classifies only viewport bodies.
+            "range": true,
+        },
+        "inlayHintProvider": { "resolveProvider": false },
+    })
 }
 
 pub fn run_lsp_server() -> Result<()> {
@@ -307,9 +271,7 @@ pub fn run_lsp_server() -> Result<()> {
 
     let (link, threads) = Connection::stdio();
 
-    let advertised = serde_json::to_value(server_capabilities())?;
-
-    if let Err(broken) = link.initialize(advertised) {
+    if let Err(broken) = link.initialize(server_capabilities()) {
         if broken.channel_is_disconnected() {
             threads.join()?;
         }
@@ -479,32 +441,14 @@ impl LspServer {
             do_hover_workspace
         );
 
-        let req = match take::<SignatureHelpRequest>(req) {
-            Ok((req_id, args)) => {
-                let _span =
-                    tracing::info_span!("lsp_signature_help", request_id = %req_id).entered();
-
-                // Shutting down: fail instead of computing.
-                if self.shutdown_mode {
-                    out.push(failed_request(
-                        req_id,
-                        lsp_server::ErrorCode::InvalidRequest,
-                        "Server is shutting down".to_string(),
-                    ));
-                    return Ok(());
-                }
-
-                let found = do_signature_help_workspace(&mut self.workspace, &args);
-                send_response(out, req_id, found)?;
-                return Ok(());
-            }
-            Err(fault @ ExtractError::JsonError { .. }) => {
-                log::error!("JSON error in SignatureHelp request: {fault:?}");
-                return Ok(());
-            }
-            Err(ExtractError::MethodMismatch(rest)) => rest,
-        };
-
+        dispatch_request!(
+            req,
+            out,
+            self.workspace,
+            SignatureHelpRequest,
+            "lsp_signature_help",
+            do_signature_help_workspace
+        );
         dispatch_request!(
             req,
             out,
@@ -541,14 +485,6 @@ impl LspServer {
             req,
             out,
             self.workspace,
-            lsp_types::request::References,
-            "lsp_references_alt",
-            find_references_workspace
-        );
-        dispatch_request!(
-            req,
-            out,
-            self.workspace,
             DocumentSymbolRequest,
             "lsp_document_symbols",
             do_document_symbols_workspace
@@ -570,249 +506,30 @@ impl LspServer {
             do_document_highlight_workspace
         );
 
-        let req = match take::<SemanticTokensFullRequest>(req) {
-            Ok((req_id, args)) => {
-                let _span =
-                    tracing::info_span!("lsp_semantic_tokens", request_id = %req_id).entered();
-
-                let uri = args.text_document.uri.to_string();
-                let current_version = self.workspace.get_document_version(&uri);
-
-                // debug_log!("SEMANTIC_TOKENS_REQUEST: id={}, uri={}, version={:?}", id, uri, current_version);
-
-                // Check if we have valid cached tokens and clone the data we need
-                let (has_cache, cached_is_current, cached_tokens, cached_result_id) = {
-                    let _span = tracing::debug_span!("check_semantic_tokens_cache").entered();
-                    if let Some(cached) = self
-                        .workspace
-                        .get_cached_semantic_tokens(&uri, current_version)
-                    {
-                        let is_current = cached.document_version == current_version;
-                        (
-                            true,
-                            is_current,
-                            Some(cached.tokens.clone()),
-                            Some(cached.result_id.clone()),
-                        )
-                    } else {
-                        (false, false, None, None)
-                    }
-                };
-
-                let result = if cached_is_current {
-                    // We have current tokens, return them
-                    // debug_log!("SEMANTIC_TOKENS_CACHE_HIT (current): id={}, uri={}, result_id={}", id, uri, cached_result_id.as_ref().unwrap());
-                    let mut result = cached_tokens.unwrap();
-                    // Update the result ID to the current cached one
-                    if let lsp_types::SemanticTokensResult::Tokens(ref mut tokens) = result {
-                        tokens.result_id = cached_result_id;
-                    }
-                    Ok(Some(result))
-                } else {
-                    // Try to compute new tokens
-                    // debug_log!("SEMANTIC_TOKENS_CACHE_MISS or STALE: id={}, uri={} - computing new tokens", id, uri);
-
-                    let res = {
-                        let _span =
-                            tracing::debug_span!("compute_semantic_tokens_workspace").entered();
-                        semantic_tokens::compute_semantic_tokens_workspace(
-                            &mut self.workspace,
-                            args.clone(),
-                        )
-                    };
-                    match res {
-                        Ok(Some(tokens)) => {
-                            // Defense in depth: if compute_semantic_tokens
-                            // returned an empty result but we have a
-                            // previously-cached non-empty value, return
-                            // the stale cache instead of empty tokens.
-                            // Together with the cache_semantic_tokens guard,
-                            // this ensures a transient empty result cannot
-                            // cause highlighting to disappear in the editor.
-                            let new_is_empty = semantic_tokens_result_is_empty(&tokens);
-                            let cache_is_nonempty = cached_tokens
-                                .as_ref()
-                                .map(|c| !semantic_tokens_result_is_empty(c))
-                                .unwrap_or(false);
-
-                            if new_is_empty && cache_is_nonempty {
-                                log::warn!(
-                                    "compute_semantic_tokens returned empty for {}; \
-                                     returning stale non-empty cache to preserve highlighting.",
-                                    uri
-                                );
-                                let mut result = cached_tokens.unwrap();
-                                if let lsp_types::SemanticTokensResult::Tokens(ref mut t) = result {
-                                    t.result_id = cached_result_id;
-                                }
-                                Ok(Some(result))
-                            } else {
-                                // Successfully computed new tokens, cache them
-                                let result_id = self.workspace.cache_semantic_tokens(
-                                    &uri,
-                                    tokens.clone(),
-                                    current_version,
-                                );
-                                let mut result = tokens;
-                                // Update the result ID
-                                if let lsp_types::SemanticTokensResult::Tokens(ref mut t) = result {
-                                    t.result_id = Some(result_id.clone());
-                                }
-                                Ok(Some(result))
-                            }
-                        }
-                        Ok(None) => {
-                            // Computation returned no tokens (likely no semantic result in context)
-                            // This often happens when switching buffers to a different context
-                            // Return stale cache if available to prevent tokens from disappearing
-                            if has_cache {
-                                // debug_log!("SEMANTIC_TOKENS_NO_RESULT_IN_CONTEXT: returning stale cache for {} to prevent token loss on buffer switch", uri);
-                                let mut result = cached_tokens.unwrap();
-                                if let lsp_types::SemanticTokensResult::Tokens(ref mut tokens) =
-                                    result
-                                {
-                                    tokens.result_id = cached_result_id;
-                                }
-                                Ok(Some(result))
-                            } else {
-                                // debug_log!("SEMANTIC_TOKENS_NO_RESULT_AND_NO_CACHE: {} - likely switching to uncomplied context", uri);
-                                Ok(None)
-                            }
-                        }
-                        Err(e) => {
-                            // Computation failed, return stale cache if available
-                            if has_cache {
-                                // debug_log!("SEMANTIC_TOKENS_COMPUTE_ERROR: returning stale cache for {}, error: {:?}", uri, e);
-                                let mut result = cached_tokens.unwrap();
-                                if let lsp_types::SemanticTokensResult::Tokens(ref mut tokens) =
-                                    result
-                                {
-                                    tokens.result_id = cached_result_id;
-                                }
-                                Ok(Some(result))
-                            } else {
-                                Err(e)
-                            }
-                        }
-                    }
-                };
-
-                send_response(out, req_id, result)?;
-                return Ok(());
-            }
-            Err(fault @ ExtractError::JsonError { .. }) => {
-                log::error!("JSON error in SemanticTokens request: {fault:?}");
-                return Ok(());
-            }
-            Err(ExtractError::MethodMismatch(rest)) => rest,
-        };
-
-        let req = match take::<SemanticTokensFullDeltaRequest>(req) {
-            Ok((req_id, args)) => {
-                let _span = tracing::info_span!("lsp_semantic_tokens_delta", request_id = %req_id)
-                    .entered();
-                let uri = args.text_document.uri.to_string();
-                let current_version = self.workspace.get_document_version(&uri);
-                let prev_id = args.previous_result_id.clone();
-
-                // Snapshot what the client currently holds (the array it
-                // got under `prev_id`), then compute the new tokens.
-                let prev = self
-                    .workspace
-                    .get_cached_semantic_tokens(&uri, current_version)
-                    .map(|c| (c.result_id.clone(), c.tokens.clone()));
-
-                let full_params = lsp_types::SemanticTokensParams {
-                    work_done_progress_params: args.work_done_progress_params.clone(),
-                    partial_result_params: args.partial_result_params.clone(),
-                    text_document: args.text_document.clone(),
-                };
-                let computed = semantic_tokens::compute_semantic_tokens_workspace(
-                    &mut self.workspace,
-                    full_params,
-                );
-
-                let result = match computed {
-                    Ok(Some(new_result)) if !semantic_tokens_result_is_empty(&new_result) => {
-                        let new_id = self.workspace.cache_semantic_tokens(
-                            &uri,
-                            new_result.clone(),
-                            current_version,
-                        );
-                        // Delta only when the client's array matches what
-                        // we cached under `prev_id`; otherwise send full.
-                        match (&prev, &new_result) {
-                            (
-                                Some((old_id, lsp_types::SemanticTokensResult::Tokens(old))),
-                                lsp_types::SemanticTokensResult::Tokens(new_t),
-                            ) if *old_id == prev_id && !old.data.is_empty() => {
-                                let edits = semantic_tokens::semantic_tokens_delta_edits(
-                                    &old.data,
-                                    &new_t.data,
-                                );
-                                Ok(Some(lsp_types::SemanticTokensFullDeltaResult::TokensDelta(
-                                    lsp_types::SemanticTokensDelta {
-                                        result_id: Some(new_id),
-                                        edits,
-                                    },
-                                )))
-                            }
-                            _ => {
-                                // Cache miss / id mismatch: full refresh.
-                                let mut full = match new_result {
-                                    lsp_types::SemanticTokensResult::Tokens(t) => t,
-                                    lsp_types::SemanticTokensResult::Partial(_) => {
-                                        Default::default()
-                                    }
-                                };
-                                full.result_id = Some(new_id);
-                                Ok(Some(lsp_types::SemanticTokensFullDeltaResult::Tokens(full)))
-                            }
-                        }
-                    }
-                    // Empty/None/Err: don't wipe highlighting -- resend the
-                    // stale cache as a full result if we have one, else nothing.
-                    other => {
-                        if let Err(e) = other {
-                            log::warn!("semantic tokens delta compute failed for {uri}: {e:?}");
-                        }
-                        match prev {
-                            Some((old, lsp_types::SemanticTokensResult::Tokens(mut t))) => {
-                                t.result_id = Some(old);
-                                Ok(Some(lsp_types::SemanticTokensFullDeltaResult::Tokens(t)))
-                            }
-                            _ => Ok(None),
-                        }
-                    }
-                };
-
-                send_response(out, req_id, result)?;
-                return Ok(());
-            }
-            Err(fault @ ExtractError::JsonError { .. }) => {
-                log::error!("JSON error in SemanticTokens delta request: {fault:?}");
-                return Ok(());
-            }
-            Err(ExtractError::MethodMismatch(rest)) => rest,
-        };
-
-        let req = match take::<SemanticTokensRangeRequest>(req) {
-            Ok((req_id, args)) => {
-                let _span = tracing::info_span!("lsp_semantic_tokens_range", request_id = %req_id)
-                    .entered();
-                let found = semantic_tokens::compute_semantic_tokens_range_workspace(
-                    &mut self.workspace,
-                    args,
-                );
-                send_response(out, req_id, found)?;
-                return Ok(());
-            }
-            Err(fault @ ExtractError::JsonError { .. }) => {
-                log::error!("JSON error in SemanticTokens range request: {fault:?}");
-                return Ok(());
-            }
-            Err(ExtractError::MethodMismatch(rest)) => rest,
-        };
+        dispatch_request!(
+            req,
+            out,
+            self.workspace,
+            SemanticTokensFullRequest,
+            "lsp_semantic_tokens",
+            semantic_tokens::full_semantic_tokens
+        );
+        dispatch_request!(
+            req,
+            out,
+            self.workspace,
+            SemanticTokensFullDeltaRequest,
+            "lsp_semantic_tokens_delta",
+            semantic_tokens::delta_semantic_tokens
+        );
+        dispatch_request!(
+            req,
+            out,
+            self.workspace,
+            SemanticTokensRangeRequest,
+            "lsp_semantic_tokens_range",
+            semantic_tokens::range_semantic_tokens
+        );
 
         dispatch_request!(
             req,

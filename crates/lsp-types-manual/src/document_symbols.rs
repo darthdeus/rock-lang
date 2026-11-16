@@ -1,91 +1,18 @@
-use crate::{
-    Location, PartialResultParams, Range, SymbolKind, SymbolKindCapability, TextDocumentIdentifier,
-    WorkDoneProgressParams,
-};
-
-use crate::{SymbolTag, TagSupport};
-
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct DocumentSymbolClientCapabilities {
-    pub dynamic_registration: Option<bool>,
-    pub symbol_kind: Option<SymbolKindCapability>,
-    pub hierarchical_document_symbol_support: Option<bool>,
-    pub tag_support: Option<TagSupport<SymbolTag>>,
-}
-
-impl serde::Serialize for DocumentSymbolClientCapabilities {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let mut st = s.serialize_struct("DocumentSymbolClientCapabilities", 4)?;
-        if let Some(ref v) = self.dynamic_registration {
-            st.serialize_field("dynamicRegistration", v)?;
-        }
-        if let Some(ref v) = self.symbol_kind {
-            st.serialize_field("symbolKind", v)?;
-        }
-        if let Some(ref v) = self.hierarchical_document_symbol_support {
-            st.serialize_field("hierarchicalDocumentSymbolSupport", v)?;
-        }
-        if let Some(ref v) = self.tag_support {
-            st.serialize_field("tagSupport", v)?;
-        }
-        st.end()
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for DocumentSymbolClientCapabilities {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let mut map = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
-        let dynamic_registration = crate::deserialize_optional(map.remove("dynamicRegistration"))?;
-        let symbol_kind = crate::deserialize_optional(map.remove("symbolKind"))?;
-        let hierarchical_document_symbol_support =
-            crate::deserialize_optional(map.remove("hierarchicalDocumentSymbolSupport"))?;
-        let tag_support = match map.remove("tagSupport") {
-            Some(value) => TagSupport::<SymbolTag>::deserialize_compat(
-                serde::de::IntoDeserializer::into_deserializer(value),
-            )
-            .map_err(serde::de::Error::custom)?,
-            None => None,
-        };
-        Ok(DocumentSymbolClientCapabilities {
-            dynamic_registration,
-            symbol_kind,
-            hierarchical_document_symbol_support,
-            tag_support,
-        })
-    }
-}
+use crate::{Location, Range, SymbolKind, SymbolTag, TextDocumentIdentifier};
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum DocumentSymbolResponse {
-    Flat(Vec<SymbolInformation>),
     Nested(Vec<DocumentSymbol>),
 }
 
 impl_untagged_enum!(DocumentSymbolResponse {
-    Flat(Vec<SymbolInformation>),
     Nested(Vec<DocumentSymbol>),
 });
-
-impl From<Vec<SymbolInformation>> for DocumentSymbolResponse {
-    fn from(info: Vec<SymbolInformation>) -> Self {
-        DocumentSymbolResponse::Flat(info)
-    }
-}
-
-impl From<Vec<DocumentSymbol>> for DocumentSymbolResponse {
-    fn from(symbols: Vec<DocumentSymbol>) -> Self {
-        DocumentSymbolResponse::Nested(symbols)
-    }
-}
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct DocumentSymbolParams {
     /// The text document.
     pub text_document: TextDocumentIdentifier,
-
-    pub work_done_progress_params: WorkDoneProgressParams,
-    pub partial_result_params: PartialResultParams,
 }
 
 impl_lsp_struct!(
@@ -93,11 +20,7 @@ impl_lsp_struct!(
     required {
         text_document: TextDocumentIdentifier = "textDocument"
     },
-    optional {},
-    flatten {
-        work_done_progress_params: WorkDoneProgressParams,
-        partial_result_params: PartialResultParams,
-    }
+    optional {}
 );
 
 /// Represents programming constructs like variables, classes, interfaces etc.

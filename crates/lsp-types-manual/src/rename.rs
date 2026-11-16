@@ -1,4 +1,4 @@
-use crate::{Range, TextDocumentPositionParams, WorkDoneProgressOptions, WorkDoneProgressParams};
+use crate::{Range, TextDocumentPositionParams};
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct RenameParams {
@@ -9,8 +9,6 @@ pub struct RenameParams {
     /// request must return a [ResponseError](#ResponseError) with an
     /// appropriate message set.
     pub new_name: String,
-
-    pub work_done_progress_params: WorkDoneProgressParams,
 }
 
 impl_lsp_struct!(
@@ -21,57 +19,8 @@ impl_lsp_struct!(
     optional {},
     flatten {
         text_document_position: TextDocumentPositionParams,
-        work_done_progress_params: WorkDoneProgressParams,
     }
 );
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct RenameOptions {
-    /// Renames should be checked and tested before being executed.
-    pub prepare_provider: Option<bool>,
-
-    pub work_done_progress_options: WorkDoneProgressOptions,
-}
-
-impl_lsp_struct!(
-    RenameOptions,
-    optional {
-        prepare_provider: bool = "prepareProvider"
-    },
-    flatten {
-        work_done_progress_options: WorkDoneProgressOptions
-    }
-);
-
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct RenameClientCapabilities {
-    pub dynamic_registration: Option<bool>,
-    pub prepare_support: Option<bool>,
-    pub prepare_support_default_behavior: Option<PrepareSupportDefaultBehavior>,
-    pub honors_change_annotations: Option<bool>,
-}
-
-impl_lsp_struct!(
-    RenameClientCapabilities,
-    required {},
-    optional {
-        dynamic_registration: bool = "dynamicRegistration",
-        prepare_support: bool = "prepareSupport",
-        prepare_support_default_behavior: PrepareSupportDefaultBehavior =
-            "prepareSupportDefaultBehavior",
-        honors_change_annotations: bool = "honorsChangeAnnotations",
-    }
-);
-
-#[derive(Eq, PartialEq, Copy, Clone)]
-pub struct PrepareSupportDefaultBehavior(i32);
-lsp_enum! {
-impl PrepareSupportDefaultBehavior {
-    /// The client's default behavior is to select the identifier
-    /// according the to language's syntax rule
-    pub const IDENTIFIER: PrepareSupportDefaultBehavior = PrepareSupportDefaultBehavior(1);
-}
-}
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum PrepareRenameResponse {

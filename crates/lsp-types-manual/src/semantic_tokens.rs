@@ -2,10 +2,7 @@ use std::borrow::Cow;
 
 use serde::Deserialize;
 
-use crate::{
-    PartialResultParams, Range, StaticRegistrationOptions, TextDocumentIdentifier,
-    TextDocumentRegistrationOptions, WorkDoneProgressOptions, WorkDoneProgressParams,
-};
+use crate::{Range, TextDocumentIdentifier};
 /// A set of predefined token types. This set is not fixed
 /// and clients can specify additional token types via the
 /// corresponding client capabilities.
@@ -125,44 +122,6 @@ impl From<&'static str> for SemanticTokenModifier {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Hash, PartialOrd, Clone)]
-pub struct TokenFormat(Cow<'static, str>);
-
-impl serde::Serialize for TokenFormat {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&self.0)
-    }
-}
-impl<'de> serde::Deserialize<'de> for TokenFormat {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Ok(TokenFormat(Cow::Owned(String::deserialize(d)?)))
-    }
-}
-
-impl TokenFormat {
-    pub const RELATIVE: TokenFormat = TokenFormat::new("relative");
-
-    pub const fn new(tag: &'static str) -> Self {
-        TokenFormat(Cow::Borrowed(tag))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<String> for TokenFormat {
-    fn from(from: String) -> Self {
-        TokenFormat(Cow::from(from))
-    }
-}
-
-impl From<&'static str> for TokenFormat {
-    fn from(from: &'static str) -> Self {
-        TokenFormat::new(from)
-    }
-}
-
 /// @since 3.16.0
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
 pub struct SemanticTokensLegend {
@@ -270,68 +229,6 @@ impl<'de> serde::Deserialize<'de> for SemanticTokens {
 
 /// @since 3.16.0
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct SemanticTokensPartialResult {
-    pub data: Vec<SemanticToken>,
-}
-
-impl serde::Serialize for SemanticTokensPartialResult {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let flat: Vec<u32> = self
-            .data
-            .iter()
-            .flat_map(|t| {
-                [
-                    t.delta_line,
-                    t.delta_start,
-                    t.length,
-                    t.token_type,
-                    t.token_modifiers_bitset,
-                ]
-            })
-            .collect();
-        let mut st = s.serialize_struct("SemanticTokensPartialResult", 1)?;
-        st.serialize_field("data", &flat)?;
-        st.end()
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for SemanticTokensPartialResult {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let mut map = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
-        let data_val = map
-            .remove("data")
-            .ok_or_else(|| serde::de::Error::missing_field("data"))?;
-        let data = SemanticToken::deserialize_tokens(data_val).map_err(serde::de::Error::custom)?;
-        Ok(SemanticTokensPartialResult { data })
-    }
-}
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub enum SemanticTokensResult {
-    Tokens(SemanticTokens),
-    Partial(SemanticTokensPartialResult),
-}
-
-impl_untagged_enum!(SemanticTokensResult {
-    Tokens(SemanticTokens),
-    Partial(SemanticTokensPartialResult),
-});
-
-impl From<SemanticTokens> for SemanticTokensResult {
-    fn from(from: SemanticTokens) -> Self {
-        SemanticTokensResult::Tokens(from)
-    }
-}
-
-impl From<SemanticTokensPartialResult> for SemanticTokensResult {
-    fn from(from: SemanticTokensPartialResult) -> Self {
-        SemanticTokensResult::Partial(from)
-    }
-}
-
-/// @since 3.16.0
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
 pub struct SemanticTokensEdit {
     pub start: u32,
     pub delete_count: u32,
@@ -393,7 +290,6 @@ impl<'de> serde::Deserialize<'de> for SemanticTokensEdit {
 pub enum SemanticTokensFullDeltaResult {
     Tokens(SemanticTokens),
     TokensDelta(SemanticTokensDelta),
-    PartialTokensDelta { edits: Vec<SemanticTokensEdit> },
 }
 
 impl serde::Serialize for SemanticTokensFullDeltaResult {
@@ -401,18 +297,9 @@ impl serde::Serialize for SemanticTokensFullDeltaResult {
     where
         S: serde::Serializer,
     {
-        use serde::ser::Error as _;
         match self {
             Self::Tokens(v) => v.serialize(s),
             Self::TokensDelta(v) => v.serialize(s),
-            Self::PartialTokensDelta { edits } => {
-                let mut map = serde_json::Map::new();
-                map.insert(
-                    "edits".to_string(),
-                    serde_json::to_value(edits).map_err(S::Error::custom)?,
-                );
-                serde_json::Value::Object(map).serialize(s)
-            }
         }
     }
 }
@@ -428,11 +315,6 @@ impl<'de> serde::Deserialize<'de> for SemanticTokensFullDeltaResult {
         }
         if let Ok(v) = serde_json::from_value::<SemanticTokensDelta>(val.clone()) {
             return Ok(Self::TokensDelta(v));
-        }
-        if let Some(edits) = val.get("edits") {
-            if let Ok(edits) = serde_json::from_value::<Vec<SemanticTokensEdit>>(edits.clone()) {
-                return Ok(Self::PartialTokensDelta { edits });
-            }
         }
         Err(serde::de::Error::custom(
             "data did not match any variant of SemanticTokensFullDeltaResult",
@@ -466,191 +348,8 @@ impl_lsp_struct!(SemanticTokensDelta,
     optional { result_id: String = "resultId" }
 );
 
-/// Capabilities specific to the `textDocument/semanticTokens/*` requests.
-///
-/// @since 3.16.0
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct SemanticTokensClientCapabilities {
-    pub dynamic_registration: Option<bool>,
-    pub requests: SemanticTokensClientCapabilitiesRequests,
-    pub token_types: Vec<SemanticTokenType>,
-    pub token_modifiers: Vec<SemanticTokenModifier>,
-    pub formats: Vec<TokenFormat>,
-    pub overlapping_token_support: Option<bool>,
-    pub multiline_token_support: Option<bool>,
-    /// @since 3.17.0
-    pub server_cancel_support: Option<bool>,
-    /// @since 3.17.0
-    pub augments_syntax_tokens: Option<bool>,
-}
-
-impl_lsp_struct!(SemanticTokensClientCapabilities,
-    required {
-        requests: SemanticTokensClientCapabilitiesRequests = "requests",
-        token_types: Vec<SemanticTokenType> = "tokenTypes",
-        token_modifiers: Vec<SemanticTokenModifier> = "tokenModifiers",
-        formats: Vec<TokenFormat> = "formats",
-    },
-    optional {
-        dynamic_registration: bool = "dynamicRegistration",
-        overlapping_token_support: bool = "overlappingTokenSupport",
-        multiline_token_support: bool = "multilineTokenSupport",
-        server_cancel_support: bool = "serverCancelSupport",
-        augments_syntax_tokens: bool = "augmentsSyntaxTokens",
-    }
-);
-
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct SemanticTokensClientCapabilitiesRequests {
-    pub range: Option<bool>,
-    pub full: Option<SemanticTokensFullOptions>,
-}
-
-impl_lsp_struct!(
-    SemanticTokensClientCapabilitiesRequests,
-    required {},
-    optional {
-        range: bool = "range",
-        full: SemanticTokensFullOptions = "full",
-    }
-);
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub enum SemanticTokensFullOptions {
-    Bool(bool),
-    Delta {
-        /// The client will send the `textDocument/semanticTokens/full/delta` request if the server provides a corresponding handler.
-        /// The server supports deltas for full documents.
-        delta: Option<bool>,
-    },
-}
-
-impl serde::Serialize for SemanticTokensFullOptions {
-    fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match self {
-            Self::Bool(v) => v.serialize(s),
-            Self::Delta { delta } => {
-                let mut map = serde_json::Map::new();
-                if let Some(d) = delta {
-                    map.insert("delta".to_string(), serde_json::Value::Bool(*d));
-                }
-                serde_json::Value::Object(map).serialize(s)
-            }
-        }
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for SemanticTokensFullOptions {
-    fn deserialize<D>(d: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let val = serde_json::Value::deserialize(d)?;
-        if let serde_json::Value::Bool(b) = &val {
-            return Ok(Self::Bool(*b));
-        }
-        if val.is_object() {
-            let delta = val.get("delta").and_then(|v| v.as_bool());
-            return Ok(Self::Delta { delta });
-        }
-        Err(serde::de::Error::custom(
-            "invalid SemanticTokensFullOptions",
-        ))
-    }
-}
-
-/// @since 3.16.0
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct SemanticTokensOptions {
-    pub work_done_progress_options: WorkDoneProgressOptions,
-
-    /// The legend used by the server
-    pub legend: SemanticTokensLegend,
-
-    /// Server supports providing semantic tokens for a specific range
-    /// of a document.
-    pub range: Option<bool>,
-
-    /// Server supports providing semantic tokens for a full document.
-    pub full: Option<SemanticTokensFullOptions>,
-}
-
-impl_lsp_struct!(
-    SemanticTokensOptions,
-    required {
-        legend: SemanticTokensLegend = "legend"
-    },
-    optional {
-        range: bool = "range",
-        full: SemanticTokensFullOptions = "full",
-    },
-    flatten {
-        work_done_progress_options: WorkDoneProgressOptions
-    }
-);
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct SemanticTokensRegistrationOptions {
-    pub text_document_registration_options: TextDocumentRegistrationOptions,
-    pub semantic_tokens_options: SemanticTokensOptions,
-    pub static_registration_options: StaticRegistrationOptions,
-}
-
-impl_lsp_struct!(
-    SemanticTokensRegistrationOptions,
-    flatten {
-        text_document_registration_options: TextDocumentRegistrationOptions,
-        semantic_tokens_options: SemanticTokensOptions,
-        static_registration_options: StaticRegistrationOptions,
-    }
-);
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub enum SemanticTokensServerCapabilities {
-    SemanticTokensOptions(SemanticTokensOptions),
-    SemanticTokensRegistrationOptions(SemanticTokensRegistrationOptions),
-}
-
-impl_untagged_enum!(SemanticTokensServerCapabilities {
-    SemanticTokensOptions(SemanticTokensOptions),
-    SemanticTokensRegistrationOptions(SemanticTokensRegistrationOptions),
-});
-
-impl From<SemanticTokensOptions> for SemanticTokensServerCapabilities {
-    fn from(from: SemanticTokensOptions) -> Self {
-        SemanticTokensServerCapabilities::SemanticTokensOptions(from)
-    }
-}
-
-impl From<SemanticTokensRegistrationOptions> for SemanticTokensServerCapabilities {
-    fn from(from: SemanticTokensRegistrationOptions) -> Self {
-        SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(from)
-    }
-}
-
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct SemanticTokensWorkspaceClientCapabilities {
-    /// Whether the client implementation supports a refresh request sent from
-    /// the server to the client.
-    pub refresh_support: Option<bool>,
-}
-
-impl_lsp_struct!(
-    SemanticTokensWorkspaceClientCapabilities,
-    required {},
-    optional {
-        refresh_support: bool = "refreshSupport"
-    }
-);
-
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct SemanticTokensParams {
-    pub work_done_progress_params: WorkDoneProgressParams,
-    pub partial_result_params: PartialResultParams,
-
     /// The text document.
     pub text_document: TextDocumentIdentifier,
 }
@@ -660,18 +359,11 @@ impl_lsp_struct!(
     required {
         text_document: TextDocumentIdentifier = "textDocument"
     },
-    optional {},
-    flatten {
-        work_done_progress_params: WorkDoneProgressParams,
-        partial_result_params: PartialResultParams,
-    }
+    optional {}
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct SemanticTokensDeltaParams {
-    pub work_done_progress_params: WorkDoneProgressParams,
-    pub partial_result_params: PartialResultParams,
-
     /// The text document.
     pub text_document: TextDocumentIdentifier,
 
@@ -685,18 +377,11 @@ impl_lsp_struct!(
         text_document: TextDocumentIdentifier = "textDocument",
         previous_result_id: String = "previousResultId",
     },
-    optional {},
-    flatten {
-        work_done_progress_params: WorkDoneProgressParams,
-        partial_result_params: PartialResultParams,
-    }
+    optional {}
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct SemanticTokensRangeParams {
-    pub work_done_progress_params: WorkDoneProgressParams,
-    pub partial_result_params: PartialResultParams,
-
     /// The text document.
     pub text_document: TextDocumentIdentifier,
 
@@ -710,35 +395,8 @@ impl_lsp_struct!(
         text_document: TextDocumentIdentifier = "textDocument",
         range: Range = "range",
     },
-    optional {},
-    flatten {
-        work_done_progress_params: WorkDoneProgressParams,
-        partial_result_params: PartialResultParams,
-    }
+    optional {}
 );
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub enum SemanticTokensRangeResult {
-    Tokens(SemanticTokens),
-    Partial(SemanticTokensPartialResult),
-}
-
-impl_untagged_enum!(SemanticTokensRangeResult {
-    Tokens(SemanticTokens),
-    Partial(SemanticTokensPartialResult),
-});
-
-impl From<SemanticTokens> for SemanticTokensRangeResult {
-    fn from(tokens: SemanticTokens) -> Self {
-        SemanticTokensRangeResult::Tokens(tokens)
-    }
-}
-
-impl From<SemanticTokensPartialResult> for SemanticTokensRangeResult {
-    fn from(partial: SemanticTokensPartialResult) -> Self {
-        SemanticTokensRangeResult::Partial(partial)
-    }
-}
 
 #[cfg(test)]
 mod tests {

@@ -37,8 +37,6 @@ fn bone_completion_is_marked_incomplete() {
             // cursor after `pg` inside `sfx(...)` (line 5, char 8).
             position: Position::new(5, 8),
         },
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
         context: None,
     };
 

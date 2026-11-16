@@ -235,11 +235,11 @@ pub(crate) fn stash_and_tag(
         timings,
     );
     for (i, it) in items.iter_mut().enumerate() {
-        it.command = Some(Command::new(
-            String::new(),
-            ACCEPT_COMMAND.to_string(),
-            Some(vec![json!(record_id), json!(i), json!(it.label)]),
-        ));
+        it.command = Some(Command {
+            title: String::new(),
+            command: ACCEPT_COMMAND.to_string(),
+            arguments: Some(vec![json!(record_id), json!(i), json!(it.label)]),
+        });
     }
 }
 

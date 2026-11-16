@@ -22,13 +22,10 @@ fn tokens(src: &str) -> Vec<SemanticToken> {
         text_document: TextDocumentIdentifier {
             uri: Uri::from_file_path(path.to_str().unwrap()).unwrap(),
         },
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
     };
-    match compute_semantic_tokens_workspace(&mut ws, params).unwrap() {
-        Some(SemanticTokensResult::Tokens(t)) => t.data,
-        other => panic!("expected token data, got {other:?}"),
-    }
+    compute_semantic_tokens_workspace(&mut ws, &params.text_document.uri)
+        .unwrap()
+        .data
 }
 
 /// The `SemanticTokenType` a token decodes to under the advertised legend --

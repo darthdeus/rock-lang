@@ -1930,7 +1930,6 @@ impl BoneWorkspace {
         }
         Ok(Some(WorkspaceEdit {
             changes: Some(changes),
-            ..Default::default()
         }))
     }
 
