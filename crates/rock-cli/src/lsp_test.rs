@@ -1,4 +1,3 @@
-use super::parallel_runner::{self, FileTestResult};
 use anyhow::Result;
 use std::io::{BufRead, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -141,90 +140,6 @@ enum EditStepOperation {
         line: usize,
         character: usize,
     },
-}
-
-/// Check if the given path contains LSP tests
-pub(crate) fn has_lsp_tests(path: &Path) -> bool {
-    if path.is_file() {
-        return path
-            .extension()
-            .and_then(|s| s.to_str())
-            .map(|s| s == "lsp")
-            .unwrap_or(false);
-    }
-
-    // Check if it's the lsp test directory
-    if path.ends_with("tests/lsp") {
-        return true;
-    }
-
-    // Check if any parent is tests/lsp
-    let mut current = path;
-    while let Some(parent) = current.parent() {
-        if parent.ends_with("tests/lsp") {
-            return true;
-        }
-        current = parent;
-    }
-
-    // Check if directory contains .lsp files or has an lsp subdirectory
-    if path.is_dir() {
-        // First check for .lsp files directly in this directory
-        if let Ok(entries) = fs_err::read_dir(path) {
-            for entry in entries.flatten() {
-                let entry_path = entry.path();
-                if let Some(ext) = entry_path.extension() {
-                    if ext == "lsp" {
-                        return true;
-                    }
-                }
-                // Also check if there's an 'lsp' subdirectory with .lsp files (recursively)
-                if entry_path.is_dir()
-                    && entry_path.file_name().and_then(|s| s.to_str()) == Some("lsp")
-                {
-                    // Recursively check if the lsp subdirectory contains .lsp files
-                    for entry in walkdir::WalkDir::new(&entry_path).into_iter().flatten() {
-                        if entry.file_type().is_file() {
-                            if let Some(ext) = entry.path().extension() {
-                                if ext == "lsp" {
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    false
-}
-
-/// Find the LSP test directory from a given path
-pub(crate) fn find_lsp_test_dir(path: &Path) -> Option<PathBuf> {
-    if path.ends_with("tests/lsp") && path.is_dir() {
-        return Some(path.to_path_buf());
-    }
-
-    // If path is tests/lsp/something, return tests/lsp
-    if let Some(parent) = path.parent() {
-        if parent.ends_with("tests/lsp") && parent.is_dir() {
-            return Some(parent.to_path_buf());
-        }
-    }
-
-    // If path is tests/, check for tests/lsp
-    let lsp_subdir = path.join("lsp");
-    if lsp_subdir.exists() && lsp_subdir.is_dir() {
-        return Some(lsp_subdir);
-    }
-
-    // If this is an LSP test file, use its parent directory
-    if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("lsp") {
-        return path.parent().map(|p| p.to_path_buf());
-    }
-
-    None
 }
 
 /// Strip `«cursor»`, `«start»`, and `«end»` markers from a raw line.
@@ -1128,17 +1043,6 @@ fn parse_position(line: &str) -> Result<(usize, usize)> {
         .parse::<usize>()?;
 
     Ok((line, character))
-}
-
-/// The binary every fixture request runs: the executable that is running this
-/// suite, so a fixture always tests the build under test. Probing a working
-/// directory for `target/debug/rock` (and falling back to `cargo run`) used to
-/// pick a different build than the one running, and `cargo run` also made the
-/// suite slow and flaky under parallel load.
-fn lsp_server_bin() -> Result<PathBuf> {
-    std::env::current_exe().map_err(|e| {
-        anyhow::anyhow!("cannot find the running executable to use as the LSP server: {e}")
-    })
 }
 
 /// The server binary a fixture talks to. Tests pass a stub binary here.
@@ -2079,98 +1983,17 @@ fn check_rename_reply(test: &LspTest, request: &str, stdout: &str) -> Result<boo
     Ok(all_found)
 }
 
-/// Apply a single-file rename's `changes` to `code`, each file's edits from
-/// the last position to the first.
+/// Apply a single-file rename's `changes` to `code`.
 fn apply_rename_changes(
     code: &str,
     changes: &serde_json::Map<String, serde_json::Value>,
 ) -> String {
-    let mut result_code = code.to_string();
-    for (_file_uri, edits) in changes {
-        if let Some(edits_array) = edits.as_array() {
-            // Sort edits by position in reverse order (so we apply from end to start)
-            let mut edits_sorted: Vec<_> = edits_array.iter().collect();
-            edits_sorted.sort_by(|a, b| {
-                let start_a = a
-                    .get("range")
-                    .and_then(|r| r.get("start"))
-                    .map(|s| {
-                        let line = s.get("line").and_then(|l| l.as_u64()).unwrap_or(0);
-                        let char = s.get("character").and_then(|c| c.as_u64()).unwrap_or(0);
-                        (line, char)
-                    })
-                    .unwrap_or((0, 0));
-                let start_b = b
-                    .get("range")
-                    .and_then(|r| r.get("start"))
-                    .map(|s| {
-                        let line = s.get("line").and_then(|l| l.as_u64()).unwrap_or(0);
-                        let char = s.get("character").and_then(|c| c.as_u64()).unwrap_or(0);
-                        (line, char)
-                    })
-                    .unwrap_or((0, 0));
-                // Reverse order - apply from end to start
-                start_b.cmp(&start_a)
-            });
-
-            // Apply edits in reverse order
-            for edit in edits_sorted {
-                if let (Some(new_text), Some(range)) = (
-                    edit.get("new_text").and_then(|t| t.as_str()),
-                    edit.get("range"),
-                ) {
-                    let start_line = range
-                        .get("start")
-                        .and_then(|s| s.get("line"))
-                        .and_then(|l| l.as_u64())
-                        .unwrap_or(0) as usize;
-                    let start_char = range
-                        .get("start")
-                        .and_then(|s| s.get("character"))
-                        .and_then(|c| c.as_u64())
-                        .unwrap_or(0) as usize;
-                    let end_line = range
-                        .get("end")
-                        .and_then(|e| e.get("line"))
-                        .and_then(|l| l.as_u64())
-                        .unwrap_or(0) as usize;
-                    let end_char = range
-                        .get("end")
-                        .and_then(|e| e.get("character"))
-                        .and_then(|c| c.as_u64())
-                        .unwrap_or(0) as usize;
-
-                    // Apply the edit
-                    let lines: Vec<&str> = result_code.lines().collect();
-                    let mut new_lines: Vec<String> = Vec::new();
-
-                    for (i, line) in lines.iter().enumerate() {
-                        if i < start_line || i > end_line {
-                            new_lines.push(line.to_string());
-                        } else if i == start_line && i == end_line {
-                            // Edit is on a single line
-                            let before = &line[..start_char.min(line.len())];
-                            let after = &line[end_char.min(line.len())..];
-                            new_lines.push(format!("{}{}{}", before, new_text, after));
-                        } else if i == start_line {
-                            let before = &line[..start_char.min(line.len())];
-                            new_lines.push(format!("{}{}", before, new_text));
-                        } else if i == end_line {
-                            let after = &line[end_char.min(line.len())..];
-                            // Append to the last line
-                            if let Some(last) = new_lines.last_mut() {
-                                last.push_str(after);
-                            }
-                        }
-                        // Lines between start and end are removed
-                    }
-
-                    result_code = new_lines.join("\n");
-                }
-            }
-        }
-    }
-    result_code
+    changes
+        .values()
+        .filter_map(|edits| edits.as_array())
+        .fold(code.to_string(), |code, edits| {
+            apply_text_edits(&code, &edits.iter().collect::<Vec<_>>())
+        })
 }
 
 // ── Code Action Test Runner (JSON-RPC over stdio) ───────────────────────────
@@ -2194,12 +2017,12 @@ fn run_code_action_test(
     let reply = request_code_actions(&mut server, &uri, &test.code, line, character);
     // Shut down before looking at the reply, so a failed request still stops
     // the child.
-    server.shutdown(3)?;
+    server.shutdown()?;
     check_code_action_reply(test, &uri, &reply?)
 }
 
-/// Open `code` as `uri` and send `textDocument/codeAction` (request id 2) for
-/// an empty range at the position, returning the whole JSON-RPC response.
+/// Open `code` as `uri` and send `textDocument/codeAction` for an empty range
+/// at the position, returning the whole JSON-RPC response.
 fn request_code_actions(
     server: &mut LspServer,
     uri: &str,
@@ -2207,28 +2030,21 @@ fn request_code_actions(
     line: usize,
     character: usize,
 ) -> Result<serde_json::Value> {
-    let did_open = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "textDocument/didOpen",
-        "params": {
+    server.notify(
+        "textDocument/didOpen",
+        serde_json::json!({
             "textDocument": { "uri": uri, "languageId": "rock", "version": 1, "text": code }
-        }
-    });
-    server.stdin.write_all(&encode_jsonrpc(&did_open))?;
+        }),
+    )?;
     let position = serde_json::json!({ "line": line, "character": character });
-    let request = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "textDocument/codeAction",
-        "params": {
+    server.request(
+        "textDocument/codeAction",
+        serde_json::json!({
             "textDocument": { "uri": uri },
             "range": { "start": position, "end": position },
             "context": { "diagnostics": [] }
-        }
-    });
-    server.stdin.write_all(&encode_jsonrpc(&request))?;
-    server.stdin.flush()?;
-    read_response_from_chan(&server.rx, 2)
+        }),
+    )
 }
 
 /// Check a `textDocument/codeAction` response against the fixture: the action
@@ -2506,37 +2322,34 @@ struct LspServer {
     stdin: std::process::ChildStdin,
     rx: std::sync::mpsc::Receiver<serde_json::Value>,
     done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    next_id: i64,
 }
 
 impl LspServer {
-    /// Send `shutdown` (as request `id`) and `exit`, wait for the child, and
-    /// stop the watchdog.
-    fn shutdown(mut self, id: i64) -> Result<()> {
-        let shutdown_id = id;
-        let shutdown_request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": shutdown_id,
-            "method": "shutdown",
-            "params": null
-        });
-        self.stdin.write_all(&encode_jsonrpc(&shutdown_request))?;
+    fn notify(&mut self, method: &str, params: serde_json::Value) -> Result<()> {
+        let message = serde_json::json!({ "jsonrpc": "2.0", "method": method, "params": params });
+        self.stdin.write_all(&encode_jsonrpc(&message))?;
         self.stdin.flush()?;
+        Ok(())
+    }
 
-        // Try to read shutdown response, but don't fail if the server is slow
-        let _ = read_response_from_chan(&self.rx, shutdown_id);
-
-        let exit_notification = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "exit",
-            "params": null
-        });
-        self.stdin.write_all(&encode_jsonrpc(&exit_notification))?;
+    /// Send a request under the next id and wait for its response.
+    fn request(&mut self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let message =
+            serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        self.stdin.write_all(&encode_jsonrpc(&message))?;
         self.stdin.flush()?;
+        read_response_from_chan(&self.rx, id)
+    }
 
-        // Wait for process to exit
+    /// Send `shutdown` and `exit`, wait for the child, and stop the watchdog.
+    fn shutdown(mut self) -> Result<()> {
+        // A slow server may not answer `shutdown`; `exit` still ends it.
+        let _ = self.request("shutdown", serde_json::Value::Null);
+        self.notify("exit", serde_json::Value::Null)?;
         let _ = self.child.wait();
-
-        // Stop the watchdog (we exited cleanly).
         self.done.store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
@@ -2567,7 +2380,7 @@ fn start_lsp_server(server: LspServerCmd, root_dir: &Path, name: &str) -> Result
         .stderr(stderr_for()?)
         .spawn()?;
 
-    let mut stdin = child
+    let stdin = child
         .stdin
         .take()
         .ok_or_else(|| anyhow::anyhow!("Failed to open stdin"))?;
@@ -2636,13 +2449,16 @@ fn start_lsp_server(server: LspServerCmd, root_dir: &Path, name: &str) -> Result
         }
     });
 
-    // --- Initialize ---
-    let init_id = 1;
-    let init_request = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": init_id,
-        "method": "initialize",
-        "params": {
+    let mut server = LspServer {
+        child,
+        stdin,
+        rx: msg_rx,
+        done: test_done,
+        next_id: 1,
+    };
+    server.request(
+        "initialize",
+        serde_json::json!({
             "processId": std::process::id(),
             "capabilities": {
                 "textDocument": {
@@ -2655,40 +2471,50 @@ fn start_lsp_server(server: LspServerCmd, root_dir: &Path, name: &str) -> Result
             },
             "rootUri": file_uri(&std::fs::canonicalize(root_dir)?)?,
             "workspaceFolders": null
-        }
-    });
-    stdin.write_all(&encode_jsonrpc(&init_request))?;
-    stdin.flush()?;
-
-    let _init_response = read_response_from_chan(&msg_rx, init_id)?;
-
-    // Send initialized notification
-    let initialized = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "initialized",
-        "params": {}
-    });
-    stdin.write_all(&encode_jsonrpc(&initialized))?;
-    stdin.flush()?;
-
-    Ok(LspServer {
-        child,
-        stdin,
-        rx: msg_rx,
-        done: test_done,
-    })
+        }),
+    )?;
+    server.notify("initialized", serde_json::json!({}))?;
+    Ok(server)
 }
 
-fn run_edit_sequence_test(
-    test: &EditSequenceTest,
-    server: LspServerCmd,
-) -> Result<(usize, usize, Vec<String>)> {
+/// Insert `ch` at (line, col) of `doc`.
+fn insert_char_at(doc: &str, line: usize, col: usize, ch: char) -> String {
+    let mut lines: Vec<String> = doc.lines().map(|l| l.to_string()).collect();
+    while lines.len() <= line {
+        lines.push(String::new());
+    }
+    let target_line = &mut lines[line];
+    let col = col.min(target_line.len());
+    target_line.insert(col, ch);
+    lines.join("\n")
+}
+
+/// Backspace at (line, col) of `doc`; returns the document and new cursor.
+fn delete_char_at(doc: &str, line: usize, col: usize) -> (String, usize, usize) {
+    let mut lines: Vec<String> = doc.lines().map(|l| l.to_string()).collect();
+    if col > 0 && line < lines.len() {
+        let col = col.min(lines[line].len());
+        if col > 0 {
+            lines[line].remove(col - 1);
+            return (lines.join("\n"), line, col - 1);
+        }
+    }
+    // Backspace at col 0: join with previous line
+    if line > 0 && line < lines.len() {
+        let prev_len = lines[line - 1].len();
+        let current = lines.remove(line);
+        lines[line - 1].push_str(&current);
+        return (lines.join("\n"), line - 1, prev_len);
+    }
+    (lines.join("\n"), line, col)
+}
+
+/// Drive one edit sequence against a persistent server. Returns a label for
+/// every failed check.
+fn run_edit_sequence_test(test: &EditSequenceTest, server: LspServerCmd) -> Result<Vec<String>> {
     let verbose = std::env::var("ROCK_TEST_VERBOSE").is_ok();
-    let mut passed = 0;
-    let mut failed = 0;
     let mut failures = Vec::new();
 
-    // Create temp file for the test
     let test_dir = PathBuf::from(".lsp-test-tmp");
     std::fs::create_dir_all(&test_dir)?;
     let test_file = test_dir.join(format!(
@@ -2701,123 +2527,48 @@ fn run_edit_sequence_test(
     let test_uri =
         file_uri(&std::fs::canonicalize(&test_dir)?.join(test_file.file_name().unwrap()))?;
 
-    // Write initial content so the LSP can find it
-    let initial_code = match &test.steps[0].mode {
-        StepMode::FullReplace { code } => code.clone(),
-        StepMode::TypeAt { .. } | StepMode::DeleteAt { .. } => {
-            // First step must be FullReplace to establish the initial document
-            return Err(anyhow::anyhow!(
-                "First step in edit_sequence must be a full document (STEP N:), not a typing/delete step"
-            ));
-        }
+    let StepMode::FullReplace { code: initial_code } = &test.steps[0].mode else {
+        return Err(anyhow::anyhow!(
+            "First step in edit_sequence must be a full document (STEP N:), not a typing/delete step"
+        ));
     };
-    std::fs::write(&test_file, &initial_code)?;
+    std::fs::write(&test_file, initial_code)?;
 
-    let LspServer {
-        child,
-        mut stdin,
-        rx: msg_rx,
-        done: test_done,
-    } = start_lsp_server(server, &test_dir, &test.name)?;
-    // `start_lsp_server` used id 1 for `initialize`.
-    let mut next_id: i64 = 2;
+    let mut server = start_lsp_server(server, &test_dir, &test.name)?;
     let mut version: i64 = 1;
-
-    // --- Open document ---
     let mut current_doc = initial_code.clone();
-
-    let did_open = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "textDocument/didOpen",
-        "params": {
+    server.notify(
+        "textDocument/didOpen",
+        serde_json::json!({
             "textDocument": {
                 "uri": test_uri,
                 "languageId": "rock",
                 "version": version,
                 "text": current_doc
             }
-        }
-    });
-    stdin.write_all(&encode_jsonrpc(&did_open))?;
-    stdin.flush()?;
+        }),
+    )?;
 
-    // No sleep needed: the LSP server compiles synchronously inside didChange/didOpen
-    // (see reload_sources_on_change_workspace in compile.rs). The next request we send
-    // won't be read until compilation finishes, so read_response is the sync point.
-    //
-    // If compilation ever becomes async, this will need a sync mechanism — either a
-    // "compilation finished" notification from the server, or a poll loop that retries
-    // the query until the result stabilizes.
+    // The server compiles synchronously inside didOpen/didChange, so the
+    // next request's response is the sync point; no sleeps are needed.
+    let did_change = |server: &mut LspServer, version: i64, text: &str| {
+        server.notify(
+            "textDocument/didChange",
+            serde_json::json!({
+                "textDocument": { "uri": test_uri, "version": version },
+                "contentChanges": [ { "text": text } ]
+            }),
+        )
+    };
 
-    /// Helper: send a didChange with full document text
-    fn send_did_change(
-        stdin: &mut std::process::ChildStdin,
-        uri: &str,
-        version: i64,
-        text: &str,
-    ) -> Result<()> {
-        let did_change = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "textDocument/didChange",
-            "params": {
-                "textDocument": {
-                    "uri": uri,
-                    "version": version
-                },
-                "contentChanges": [
-                    { "text": text }
-                ]
-            }
-        });
-        stdin.write_all(&encode_jsonrpc(&did_change))?;
-        stdin.flush()?;
-        Ok(())
-    }
-
-    /// Helper: insert a character at (line, col) in a document string
-    fn insert_char_at(doc: &str, line: usize, col: usize, ch: char) -> String {
-        let mut lines: Vec<String> = doc.lines().map(|l| l.to_string()).collect();
-        // Ensure enough lines exist
-        while lines.len() <= line {
-            lines.push(String::new());
-        }
-        let target_line = &mut lines[line];
-        // Clamp col to line length
-        let col = col.min(target_line.len());
-        target_line.insert(col, ch);
-        lines.join("\n")
-    }
-
-    /// Helper: delete a character at (line, col-1) in a document string (backspace)
-    fn delete_char_at(doc: &str, line: usize, col: usize) -> (String, usize, usize) {
-        let mut lines: Vec<String> = doc.lines().map(|l| l.to_string()).collect();
-        if col > 0 && line < lines.len() {
-            let col = col.min(lines[line].len());
-            if col > 0 {
-                lines[line].remove(col - 1);
-                return (lines.join("\n"), line, col - 1);
-            }
-        }
-        // Backspace at col 0: join with previous line
-        if line > 0 && line < lines.len() {
-            let prev_len = lines[line - 1].len();
-            let current = lines.remove(line);
-            lines[line - 1].push_str(&current);
-            return (lines.join("\n"), line - 1, prev_len);
-        }
-        (lines.join("\n"), line, col)
-    }
-
-    // --- Walk through each step ---
     for (step_idx, step) in test.steps.iter().enumerate() {
-        // Apply the step's edit to the document
         if step_idx > 0 {
             match &step.mode {
                 StepMode::FullReplace { code } => {
                     version += 1;
                     current_doc = code.clone();
                     std::fs::write(&test_file, &current_doc)?;
-                    send_did_change(&mut stdin, &test_uri, version, &current_doc)?;
+                    did_change(&mut server, version, &current_doc)?;
                 }
                 StepMode::TypeAt { line, col, text } => {
                     let mut cursor_line = *line;
@@ -2853,9 +2604,8 @@ fn run_edit_sequence_test(
                             current_doc = insert_char_at(&current_doc, cursor_line, cursor_col, ch);
                             cursor_col += ch.len_utf8();
                         }
-                        send_did_change(&mut stdin, &test_uri, version, &current_doc)?;
+                        did_change(&mut server, version, &current_doc)?;
                     }
-
                     std::fs::write(&test_file, &current_doc)?;
                 }
                 StepMode::DeleteAt { line, col, count } => {
@@ -2879,32 +2629,26 @@ fn run_edit_sequence_test(
                         current_doc = new_doc;
                         cursor_line = new_line;
                         cursor_col = new_col;
-                        send_did_change(&mut stdin, &test_uri, version, &current_doc)?;
+                        did_change(&mut server, version, &current_doc)?;
                     }
-
                     std::fs::write(&test_file, &current_doc)?;
                 }
             }
         }
 
-        // Run checks for this step
         for check in &step.checks {
+            let at = |line: &usize, character: &usize| {
+                serde_json::json!({
+                    "textDocument": { "uri": test_uri },
+                    "position": { "line": line, "character": character }
+                })
+            };
             let check_passed = match &check.operation {
                 EditStepOperation::SemanticTokens => {
-                    let req_id = next_id;
-                    next_id += 1;
-                    let request = serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": req_id,
-                        "method": "textDocument/semanticTokens/full",
-                        "params": {
-                            "textDocument": { "uri": test_uri }
-                        }
-                    });
-                    stdin.write_all(&encode_jsonrpc(&request))?;
-                    stdin.flush()?;
-
-                    let response = read_response_from_chan(&msg_rx, req_id)?;
+                    let response = server.request(
+                        "textDocument/semanticTokens/full",
+                        serde_json::json!({ "textDocument": { "uri": test_uri } }),
+                    )?;
                     check_semantic_tokens_response(&response, &check.expected, step_idx, verbose)
                 }
                 EditStepOperation::Diagnostics => {
@@ -2919,83 +2663,30 @@ fn run_edit_sequence_test(
                     true
                 }
                 EditStepOperation::Completion { line, character } => {
-                    let req_id = next_id;
-                    next_id += 1;
-                    let request = serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": req_id,
-                        "method": "textDocument/completion",
-                        "params": {
-                            "textDocument": { "uri": test_uri },
-                            "position": { "line": line, "character": character }
-                        }
-                    });
-                    stdin.write_all(&encode_jsonrpc(&request))?;
-                    stdin.flush()?;
-
-                    let response = read_response_from_chan(&msg_rx, req_id)?;
+                    let response =
+                        server.request("textDocument/completion", at(line, character))?;
                     check_completion_response(&response, &check.expected, step_idx, verbose)
                 }
                 EditStepOperation::Hover { line, character } => {
-                    let req_id = next_id;
-                    next_id += 1;
-                    let request = serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": req_id,
-                        "method": "textDocument/hover",
-                        "params": {
-                            "textDocument": { "uri": test_uri },
-                            "position": { "line": line, "character": character }
-                        }
-                    });
-                    stdin.write_all(&encode_jsonrpc(&request))?;
-                    stdin.flush()?;
-
-                    let response = read_response_from_chan(&msg_rx, req_id)?;
+                    let response = server.request("textDocument/hover", at(line, character))?;
                     check_hover_response(&response, &check.expected, step_idx, verbose)
                 }
                 EditStepOperation::References { line, character } => {
-                    let req_id = next_id;
-                    next_id += 1;
-                    let request = serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": req_id,
-                        "method": "textDocument/references",
-                        "params": {
-                            "textDocument": { "uri": test_uri },
-                            "position": { "line": line, "character": character },
-                            "context": { "includeDeclaration": true }
-                        }
-                    });
-                    stdin.write_all(&encode_jsonrpc(&request))?;
-                    stdin.flush()?;
-
-                    let response = read_response_from_chan(&msg_rx, req_id)?;
+                    let mut params = at(line, character);
+                    params["context"] = serde_json::json!({ "includeDeclaration": true });
+                    let response = server.request("textDocument/references", params)?;
                     check_references_response(&response, &check.expected, step_idx, verbose)
                 }
             };
-
-            if check_passed {
-                passed += 1;
-            } else {
-                failed += 1;
+            if !check_passed {
                 failures.push(format!("step {} {:?}", step_idx + 1, check.operation));
             }
         }
     }
 
-    LspServer {
-        child,
-        stdin,
-        rx: msg_rx,
-        done: test_done,
-    }
-    .shutdown(next_id)?;
-
-    // Clean up test file
+    server.shutdown()?;
     let _ = std::fs::remove_file(&test_file);
-
-    Ok((passed, failed, failures))
+    Ok(failures)
 }
 
 /// Check semantic tokens in an LSP response
@@ -3202,162 +2893,163 @@ fn check_hover_response(
     all_ok
 }
 
-/// Run all tests (single-shot + edit_sequence) in a single .rock.lsp file.
-/// Returns a `FileTestResult` for the shared parallel runner.
-fn run_lsp_file(file: &Path, display_name: &str, server: LspServerCmd) -> FileTestResult {
-    let start_time = bone_core::prelude::Instant::now();
+/// Result of running every fixture in one `.rock.lsp` file.
+#[derive(Debug, Clone)]
+struct FileTestResult {
+    file_name: String,
+    passed: usize,
+    failed: usize,
+    duration: std::time::Duration,
+    /// (fixture label, error detail) for each failed fixture.
+    failed_test_details: Vec<(String, String)>,
+}
 
-    let tests = match parse_lsp_test_file(file) {
-        Ok(t) => t,
-        Err(e) => {
-            return FileTestResult {
-                file_name: display_name.to_string(),
-                passed: 0,
-                failed: 1,
-                ignored: 0,
-                duration: start_time.elapsed(),
-                compilation_time: None,
-                failed_test_details: vec![("parse".to_string(), e.to_string())],
-            };
-        }
+/// Print one file's result as `name ...... ok (10/12 tests, 45ms)`, then its
+/// failures.
+fn print_file_result(r: &FileTestResult) {
+    use colored::Colorize;
+    let total = r.passed + r.failed;
+    let total_ms = r.duration.as_secs_f64() * 1000.0;
+    let dots = ".".repeat(60_usize.saturating_sub(r.file_name.len().min(50)));
+    let status = if r.failed == 0 {
+        "ok".green()
+    } else {
+        "FAILED".red()
     };
-
-    let edit_seq_tests = match parse_edit_sequence_tests(file) {
-        Ok(t) => t,
-        Err(e) => {
-            return FileTestResult {
-                file_name: display_name.to_string(),
-                passed: 0,
-                failed: 1,
-                ignored: 0,
-                duration: start_time.elapsed(),
-                compilation_time: None,
-                failed_test_details: vec![("parse".to_string(), e.to_string())],
-            };
-        }
-    };
-
-    let mut file_passed = 0;
-    let mut file_failed = 0;
-    let mut failed_details = Vec::new();
-
-    // Run regular single-shot tests
-    for test in tests.iter() {
-        match run_lsp_test(test, server) {
-            Ok(true) => {
-                file_passed += 1;
-            }
-            Ok(false) => {
-                file_failed += 1;
-                failed_details.push((format!("{} ({})", test.name, test.test_type), String::new()));
-            }
-            Err(e) => {
-                file_failed += 1;
-                failed_details.push((format!("{} ({})", test.name, test.test_type), e.to_string()));
-            }
-        }
+    if std::env::var("ROCK_VERBOSE_TIMING").is_ok() {
+        println!(
+            "{} {} {} ({}/{} tests, {:.2}ms)",
+            r.file_name, dots, status, r.passed, total, total_ms,
+        );
+    } else {
+        println!(
+            "{} {} {} ({}/{} tests, {:.0}ms)",
+            r.file_name, dots, status, r.passed, total, total_ms,
+        );
     }
-
-    // Run edit sequence tests (persistent LSP server per test)
-    for seq_test in edit_seq_tests.iter() {
-        match run_edit_sequence_test(seq_test, server) {
-            Ok((_p, f, failure_details)) => {
-                if f == 0 {
-                    file_passed += 1;
-                } else {
-                    let desc = format!("{} (edit_sequence)", seq_test.name);
-                    failed_details.push((desc, failure_details.join(", ")));
-                    file_failed += 1;
-                }
-            }
-            Err(e) => {
-                file_failed += 1;
-                let desc = format!("{} (edit_sequence)", seq_test.name);
-                failed_details.push((desc, e.to_string()));
-            }
+    for (test_name, error) in &r.failed_test_details {
+        println!("  {} ... {}", test_name, "FAILED".red());
+        for line in error.lines() {
+            println!("    {}", line);
         }
-    }
-
-    FileTestResult {
-        file_name: display_name.to_string(),
-        passed: file_passed,
-        failed: file_failed,
-        ignored: 0,
-        duration: start_time.elapsed(),
-        compilation_time: None,
-        failed_test_details: failed_details,
     }
 }
 
-/// Compute a display name for a test file relative to the test root.
-/// e.g. `tests/lsp/completion/basic.rock.lsp` relative to `tests/lsp/`
-/// becomes `completion/basic.rock`. Files directly in the root become
-/// just `basic.rock`.
-fn display_name_for_lsp_file(file: &Path, root: &Path) -> String {
-    let relative = file.strip_prefix(root).unwrap_or(file);
-    // Strip the trailing .lsp extension (keeping .rock)
-    let s = relative.to_string_lossy();
-    s.strip_suffix(".lsp").unwrap_or(&s).to_string()
+/// Run all tests (single-shot + edit_sequence) in a single .rock.lsp file.
+fn run_lsp_file(file: &Path, display_name: &str, server: LspServerCmd) -> FileTestResult {
+    let start_time = bone_core::prelude::Instant::now();
+    let mut result = FileTestResult {
+        file_name: display_name.to_string(),
+        passed: 0,
+        failed: 0,
+        duration: std::time::Duration::ZERO,
+        failed_test_details: Vec::new(),
+    };
+    let parsed =
+        parse_lsp_test_file(file).and_then(|tests| Ok((tests, parse_edit_sequence_tests(file)?)));
+    let (tests, edit_seq_tests) = match parsed {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            result.failed = 1;
+            result
+                .failed_test_details
+                .push(("parse".to_string(), e.to_string()));
+            result.duration = start_time.elapsed();
+            return result;
+        }
+    };
+
+    for test in &tests {
+        let detail = match run_lsp_test(test, server) {
+            Ok(true) => None,
+            Ok(false) => Some(String::new()),
+            Err(e) => Some(e.to_string()),
+        };
+        match detail {
+            None => result.passed += 1,
+            Some(detail) => {
+                result.failed += 1;
+                result
+                    .failed_test_details
+                    .push((format!("{} ({})", test.name, test.test_type), detail));
+            }
+        }
+    }
+
+    // Each edit sequence drives its own persistent server.
+    for seq_test in &edit_seq_tests {
+        let detail = match run_edit_sequence_test(seq_test, server) {
+            Ok(failures) if failures.is_empty() => None,
+            Ok(failures) => Some(failures.join(", ")),
+            Err(e) => Some(e.to_string()),
+        };
+        match detail {
+            None => result.passed += 1,
+            Some(detail) => {
+                result.failed += 1;
+                result
+                    .failed_test_details
+                    .push((format!("{} (edit_sequence)", seq_test.name), detail));
+            }
+        }
+    }
+
+    result.duration = start_time.elapsed();
+    result
+}
+
+/// The fixture root `path` selects, if any: a `.lsp` file, a `tests/lsp`
+/// directory or a direct child of one (which selects the whole directory), or
+/// a directory whose `lsp` subdirectory holds fixtures.
+fn lsp_suite_root(path: &Path) -> Option<PathBuf> {
+    if path.is_file() {
+        return (path.extension().and_then(|s| s.to_str()) == Some("lsp"))
+            .then(|| path.to_path_buf());
+    }
+    if path.ends_with("tests/lsp") && path.is_dir() {
+        return Some(path.to_path_buf());
+    }
+    if let Some(parent) = path.parent().filter(|p| p.ends_with("tests/lsp")) {
+        return parent.is_dir().then(|| parent.to_path_buf());
+    }
+    let subdir = path.join("lsp");
+    (subdir.is_dir() && !lsp_files_under(&subdir).is_empty()).then_some(subdir)
+}
+
+fn lsp_files_under(dir: &Path) -> Vec<PathBuf> {
+    walkdir::WalkDir::new(dir)
+        .into_iter()
+        .flatten()
+        .filter(|e| {
+            e.file_type().is_file() && e.path().extension().and_then(|s| s.to_str()) == Some("lsp")
+        })
+        .map(|e| e.into_path())
+        .collect()
 }
 
 /// Run the `.rock.lsp` suite under `path` (a file or a tree containing
 /// `tests/lsp`) if present. Returns `(total, passed, failed, ignored)`; zeros
 /// when there are no fixtures.
 pub(crate) fn run_lsp_suite(path: &Path) -> Result<(usize, usize, usize, usize)> {
-    if !has_lsp_tests(path) {
+    let Some(root) = lsp_suite_root(path) else {
         return Ok((0, 0, 0, 0));
-    }
-    if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("lsp") {
-        println!("\nRunning LSP test file {}...", path.display());
-        run_lsp_tests(path)
-    } else if let Some(lsp_dir) = find_lsp_test_dir(path) {
-        println!("\nRunning LSP tests in {}...", lsp_dir.display());
-        run_lsp_tests(&lsp_dir)
+    };
+    let (mut lsp_files, display_root) = if root.is_file() {
+        println!("\nRunning LSP test file {}...", root.display());
+        let parent = root.parent().unwrap_or(&root).to_path_buf();
+        (vec![root], parent)
     } else {
-        Ok((0, 0, 0, 0))
-    }
-}
-
-fn run_lsp_tests(dir: &Path) -> Result<(usize, usize, usize, usize)> {
-    // Find all .lsp files in the directory
-    let mut lsp_files = Vec::new();
-    let root_dir = if dir.is_file() {
-        dir.parent().unwrap_or(dir).to_path_buf()
-    } else {
-        dir.to_path_buf()
+        println!("\nRunning LSP tests in {}...", root.display());
+        (lsp_files_under(&root), root)
     };
 
-    if dir.is_file() && dir.extension().and_then(|s| s.to_str()) == Some("lsp") {
-        lsp_files.push(dir.to_path_buf());
-    } else if dir.is_dir() {
-        for entry in walkdir::WalkDir::new(dir) {
-            let entry = entry?;
-            if entry.file_type().is_file() {
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("lsp") {
-                    lsp_files.push(path.to_path_buf());
-                }
-            }
-        }
-    }
-
-    // Skip files flagged as stress / slow unless explicitly enabled.
-    // `*_stress.rock.lsp` is the convention. Currently the only entry,
-    // `edit_sequence_stress.rock.lsp`, runs deterministically in ~3.3s
-    // — fast enough that it could go in the default suite, but the rest
-    // of the LSP suite finishes in ~2.8s so doubling that for one stress
-    // file isn't worth the inner-loop cost. Set ROCK_LSP_RUN_STRESS=1
-    // to opt in. (The historical non-determinism — 3s/90s wedges —
-    // was a pipe-buffer deadlock in this test client; see the comment
-    // at the reader-thread spawn in `run_edit_sequence_test`.)
-    let run_stress = std::env::var("ROCK_LSP_RUN_STRESS").is_ok();
-    if !run_stress {
+    // `*_stress.rock.lsp` files are slow; they run only on request.
+    if std::env::var("ROCK_LSP_RUN_STRESS").is_err() {
         let before = lsp_files.len();
         lsp_files.retain(|p| {
             !p.file_name()
                 .and_then(|n| n.to_str())
-                .map(|s| s.ends_with("_stress.rock.lsp"))
-                .unwrap_or(false)
+                .is_some_and(|s| s.ends_with("_stress.rock.lsp"))
         });
         let skipped = before - lsp_files.len();
         if skipped > 0 {
@@ -3367,24 +3059,35 @@ fn run_lsp_tests(dir: &Path) -> Result<(usize, usize, usize, usize)> {
             );
         }
     }
-
     lsp_files.sort();
-
     if lsp_files.is_empty() {
         return Ok((0, 0, 0, 0));
     }
 
     let start_time = bone_core::prelude::Instant::now();
-    let bin = lsp_server_bin()?;
+    // Fixtures run the executable running this suite, so they always test the
+    // build under test.
+    let bin = std::env::current_exe().map_err(|e| {
+        anyhow::anyhow!("cannot find the running executable to use as the LSP server: {e}")
+    })?;
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let results = crate::parallel_runner::map_in_order(&lsp_files, threads, |file| {
+        // Relative to the suite root, minus `.lsp`: `completion/basic.rock`.
+        let relative = file.strip_prefix(&display_root).unwrap_or(file);
+        let relative = relative.to_string_lossy();
+        let display_name = relative.strip_suffix(".lsp").unwrap_or(&relative);
+        run_lsp_file(file, display_name, LspServerCmd { bin: &bin })
+    });
+    let (mut passed, mut failed) = (0, 0);
+    for r in &results {
+        passed += r.passed;
+        failed += r.failed;
+        if r.passed + r.failed > 0 {
+            print_file_result(r);
+        }
+    }
+    let total = passed + failed;
 
-    let (total, passed, failed, ignored) =
-        parallel_runner::run_files_parallel(lsp_files, None, move |file| {
-            let display_name = display_name_for_lsp_file(file, &root_dir);
-            let server = LspServerCmd { bin: &bin };
-            run_lsp_file(file, &display_name, server)
-        });
-
-    // Print section summary (matches formatter/error test pattern)
     if total > 0 {
         use colored::Colorize;
         let result_text = if failed == 0 {
@@ -3397,12 +3100,12 @@ fn run_lsp_tests(dir: &Path) -> Result<(usize, usize, usize, usize)> {
             result_text,
             passed,
             failed,
-            ignored,
+            0,
             start_time.elapsed().as_secs_f64()
         );
     }
 
-    Ok((total, passed, failed, ignored))
+    Ok((total, passed, failed, 0))
 }
 #[cfg(test)]
 mod stderr_log_tests {
@@ -3474,15 +3177,6 @@ mod runner_tests {
             .map(|log| log.lines().count())
             .unwrap_or(0);
         (result, invocations)
-    }
-
-    #[test]
-    fn the_lsp_server_is_the_running_executable() {
-        assert_eq!(
-            lsp_server_bin().unwrap(),
-            std::env::current_exe().unwrap(),
-            "a fixture must run the executable that is running it"
-        );
     }
 
     // --- Reply strictness ---------------------------------------------------
