@@ -180,9 +180,10 @@ let pair: Pair<string> = Pair { first: "one", second: 1 }
 
 `Pair<string>` means `Pair<string, int>`. If every parameter has a default,
 the type name can be used without arguments. Defaults must follow all required
-parameters and must be builtin types or bare type names. They cannot refer to
-another parameter, be nullable or be generic applications. Function type
-parameters do not support defaults.
+parameters and must be builtin types or bare type names. Builtin defaults
+include `uint` and `f64` (the alias of `float`); `f32` remains field-storage-only.
+Defaults cannot refer to another parameter, be nullable or be generic
+applications. Function type parameters do not support defaults.
 
 A newtype wraps exactly one type. To wrap several values, use a tuple such as
 `newtype PairId((int, string))` or define a struct.

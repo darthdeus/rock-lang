@@ -275,10 +275,20 @@ Wrong-diagnostic and valid-program mutations fail all 14 assertions. The two
 runtime files pass 18 tests on each backend, including a new explicit-array
 argument control; JS reports no skips. The inventory is **255 unpinned of 527
 cases**; the full error scan passes 521 with six existing TODOs. No production
-compiler code changed. The audit also reproduced a follow-up discrepancy:
-`uint` and `f64` defaults are classified by the semantic prepass but rejected
-by the authoritative validator. The audit records this without adopting the
-rejection as the intended rule.
+compiler code changed. The audit also reproduced a discrepancy: `uint` and
+`f64` defaults were classified by the semantic prepass but rejected by the authoritative validator.
+The follow-up below resolves it.
+
+## Builtin generic default repair
+
+The [declaration follow-up](declaration-rejections.md#resolved-builtin-default-disagreement)
+adds `uint` and `f64` to the authoritative default validator, matching the
+reference rule, prepass and normal type lowering. Two semantic regressions
+failed before the fix and now pass across structs, enums, newtypes and both
+module orders. Two runtime controls pass on each backend. The full bone-lower
+and bone-semantic suites pass 284 tests combined, and the existing 14 default
+and method rejection assertions still detect both mutations. The rejection
+inventory remains **255 unpinned of 527 cases**.
 
 ## Useful measurements
 
@@ -306,8 +316,8 @@ audited by this work.
 
 The breadth survey also found a stale LSP fixture warning: the parser already
 rejects unknown expectation lines. Its existing malformed-block regression
-passes; the documentation now matches that behavior. The ledger contains 31
-bounded records, not 31 comprehensively verified subsystems.
+passes; the documentation now matches that behavior. The ledger contains 32
+bounded records, not 32 comprehensively verified subsystems.
 
 Extend the evidence ledger alongside concrete repairs. Its checks establish
 bounded claims, not a percentage of language coverage or a launch certificate.

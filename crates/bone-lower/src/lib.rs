@@ -2813,7 +2813,9 @@ fn validate_generic_defaults(
         use skull_parser::TypeExprKind as K;
         let ok = !te.is_nullable
             && match &te.kind {
-                K::Int | K::Float | K::Bool | K::String | K::Unit | K::Any => true,
+                K::Int | K::Uint | K::Float | K::F64 | K::Bool | K::String | K::Unit | K::Any => {
+                    true
+                }
                 K::Ident(n) => {
                     if generics.iter().any(|s| s.name.name == n.name) {
                         comp_error!(

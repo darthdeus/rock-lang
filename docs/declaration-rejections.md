@@ -59,14 +59,25 @@ JS, with zero JS skips or not-for-JS cases. These examples do not cover every
 default shape, declaration kind, module-qualified receiver or parser recovery
 path. No production compiler code changed.
 
-## Follow-up: builtin default disagreement
+## Resolved: builtin default disagreement
 
-Source review found a separate disagreement: `trailing_generic_defaults` in
-[semantic passes](../crates/bone-semantic/src/semantic_passes.rs) classifies
+The audit found that `trailing_generic_defaults` in
+[semantic passes](../crates/bone-semantic/src/semantic_passes.rs) classified
 `uint` and `f64` as builtin defaults, but the authoritative lowerer whitelist
-omits both. Checking `struct Defaulted<T = uint> { value: T }` followed by
-`fn main() {}` rejects with `unsupported default`; replacing `uint` with `f64`
-also rejects. Both probes exited 1 during this audit. This is an observed
-classification/validation mismatch, not a newly adopted restriction. It needs
-a focused regression and reconciliation of the intended builtin-default rule;
-the 14 rejection assertions above do not settle it.
+omitted both. Checking `struct Defaulted<T = uint> { value: T }` followed by
+`fn main() {}` rejected with `unsupported default`; the `f64` form did too.
+
+The reference's builtin-default rule and normal type lowering agree with the
+prepass: `uint` is unsigned and `f64` aliases `float`. The validator now admits
+both spellings. `f32` remains restricted to field storage, and nullable,
+compound, sibling-reference and function defaults retain their restrictions.
+
+Two new [semantic regressions](../crates/bone-semantic/tests/default_type_params.rs)
+failed on the original validator and pass after the repair. Each checks struct,
+enum and newtype defaults, explicit result types and both module orders. Two
+[runtime tests](../tests/types/numeric_default_type_params.rock) pass on LuaJIT
+and JS, checking unsigned values above the signed 32-bit range and fractional
+float results through all three declaration forms. The existing 14 diagnostic
+assertions and mutation controls still pass. The full bone-lower and
+bone-semantic suites pass (284 tests combined). This is a correctness repair;
+no performance claim is made.

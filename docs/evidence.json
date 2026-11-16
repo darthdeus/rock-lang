@@ -1137,5 +1137,77 @@
       "output": "18/18 @tests passed \\(0 failed, 0 skipped, 0 not for js\\)"
     }
   ]
+},
+{
+  "id": "numeric-builtin-generic-defaults",
+  "statement": "uint and f64 generic defaults are accepted consistently across structs, enums and newtypes, with both module orders and matching runtime results on LuaJIT and JS.",
+  "kind": "intended rule",
+  "limit": "Two semantic regressions and two runtime cases; not all default shapes or module graphs. f32 remains restricted to field storage.",
+  "sources": [
+    {
+      "path": "crates/bone-lower/src/lib.rs",
+      "anchor": "K::Int | K::Uint | K::Float | K::F64"
+    },
+    {
+      "path": "crates/bone-semantic/tests/default_type_params.rs",
+      "anchor": "fn uint_defaults_across_declarations_and_module_orders()"
+    },
+    {
+      "path": "tests/types/numeric_default_type_params.rock",
+      "anchor": "fn uint_defaults_preserve_unsigned_values()"
+    }
+  ],
+  "checks": [
+    {
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "bone-semantic",
+        "--test",
+        "bone_semantic_tests",
+        "default_type_params::"
+      ],
+      "exit": 0,
+      "output": "test result: ok\\. 4 passed; 0 failed;"
+    },
+    {
+      "command": [
+        "cargo",
+        "run",
+        "--quiet",
+        "--locked",
+        "-p",
+        "rock-cli",
+        "--bin",
+        "rock",
+        "--",
+        "test",
+        "tests/types/numeric_default_type_params.rock"
+      ],
+      "exit": 0,
+      "output": "2/2 @tests passed \\(0 failed\\)"
+    },
+    {
+      "command": [
+        "cargo",
+        "run",
+        "--quiet",
+        "--locked",
+        "-p",
+        "rock-cli",
+        "--bin",
+        "rock",
+        "--",
+        "test",
+        "tests/types/numeric_default_type_params.rock",
+        "--backend",
+        "js"
+      ],
+      "exit": 0,
+      "output": "2/2 @tests passed \\(0 failed, 0 skipped, 0 not for js\\)"
+    }
+  ]
 }
 ]
