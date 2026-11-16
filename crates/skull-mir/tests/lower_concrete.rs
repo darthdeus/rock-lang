@@ -1,9 +1,13 @@
 use std::sync::Arc;
 
+use comfy_la_arena::Idx;
 use skull_graph::instance_graph;
 use skull_mir::instance::Instance;
-use skull_mir::lower::{ScalarCtx, lower_instance_with_plans};
-use skull_mir::monoty::MonoInterner;
+use skull_mir::lower::{
+    RepArena, RepGuarantees, RepId, RepUse, RepUseFacts, ScalarCtx, lower_instance_with_plans,
+};
+use skull_mir::mir::{Inst, MirFunc, ValueCtorForm};
+use skull_mir::monoty::{MonoInterner, MonoTy};
 
 fn lower_test_root(
     ws: &bone_core::workspace::Workspace,
@@ -22,6 +26,21 @@ fn lower_test_root(
         skull_parser::CompilerError::new_no_location("no concrete plan for test root")
     })?;
     lower_instance_with_plans(ws, &scx, plan, &concrete.plans)
+}
+
+fn value_constructor(mir: &MirFunc, name: &str) -> Idx<Inst> {
+    mir.insts
+        .iter()
+        .find_map(|(id, inst)| match inst {
+            Inst::MakeValueStruct { name: found, .. }
+            | Inst::MaterializeValueStruct { name: found, .. }
+                if found.as_str() == name =>
+            {
+                Some(id)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("missing `{name}` value constructor"))
 }
 
 /// Lower `fn_name` from `modules` (last = the user `<test>` module) and
@@ -79,9 +98,12 @@ fn scalar_abi_call_widens_an_int_argument_for_a_float_parameter() {
 #[test]
 fn value_constructors_carry_the_owned_representation() {
     let ast = skull_parser::parse_module(
-        "value V2 { x: float, y: float }\n\
-         struct Holder { value: V2 }\n\
-         fn make() -> Holder { Holder { value: V2 { x: 1.0, y: 2.0 } } }",
+        "value Inner { x: float }\n\
+         value Outer { inner: Inner, y: float }\n\
+         struct Holder { value: Outer }\n\
+         fn make(seed: Outer) -> Holder {\n\
+             Holder { value: Outer { inner: Inner { x: 1.0 }, y: 2.0 } }\n\
+         }",
         ustr::Ustr::from("<test>"),
     )
     .expect("parse");
@@ -98,56 +120,165 @@ fn value_constructors_carry_the_owned_representation() {
         .find(|(_, f)| f.name.as_str() == "make")
         .map(|(fid, _)| fid)
         .expect("make function");
-    let mir = lower_test_root(&ws, mid, fid).expect("lower");
+    let mut mir = lower_test_root(&ws, mid, fid).expect("lower");
+
+    let outer = value_constructor(&mir, "Outer");
+    let inner = value_constructor(&mir, "Inner");
+    let Inst::MakeValueStruct {
+        name,
+        representation: outer_representation,
+        form,
+        fields,
+    } = mir.insts[outer].clone()
+    else {
+        panic!("fixture must lower Outer as MakeValueStruct");
+    };
+    let materialized = Inst::MaterializeValueStruct {
+        name,
+        representation: outer_representation,
+        form,
+        fields,
+    };
+    let owner = mir
+        .blocks
+        .iter()
+        .find_map(|(id, block)| block.insts.contains(&outer).then_some(id))
+        .expect("Outer constructor block");
+    let materialized = mir.emit(owner, materialized);
 
     let arena = mir
         .rep_arena
         .as_ref()
         .expect("lowered MIR must retain its representation arena");
-    let mut constructors = 0;
-    for (_, inst) in mir.insts.iter() {
-        if let skull_mir::mir::Inst::MakeValueStruct {
-            name,
-            representation,
-            form,
-            fields,
-        }
-        | skull_mir::mir::Inst::MaterializeValueStruct {
-            name,
-            representation,
-            form,
-            fields,
-        } = inst
-        {
-            constructors += 1;
-            let plan = arena
-                .try_get(*representation)
-                .expect("value constructor RepId must belong to its function arena");
-            assert_eq!(
-                plan.use_context(),
-                skull_mir::lower::RepUse::Value,
-                "value construction must retain the value-use plan"
-            );
-            let shape = match plan.layout() {
-                skull_mir::lower::RepLayout::Leaves(shape) => shape.clone(),
-                other => panic!("value constructor must carry a leaf plan, got {other:?}"),
-            };
-            let expected = match form {
-                skull_mir::mir::ValueCtorForm::Declared => {
-                    skull_mir::lower::struct_field_names(&ws, *name)
+    let verify = |mir: &MirFunc| skull_mir::verify::verify(mir, skull_mir::verify::Stage::LOWERED);
+    assert!(verify(&mir).is_empty(), "valid constructors must verify");
+
+    let x = match &mir.insts[inner] {
+        Inst::MakeValueStruct { fields, .. } => fields[0].1,
+        _ => panic!("fixture must lower Inner as MakeValueStruct"),
+    };
+    let y = match &mir.insts[outer] {
+        Inst::MakeValueStruct { fields, .. } => fields[1].1,
+        _ => unreachable!("Outer is MakeValueStruct"),
+    };
+    let mut leaf_form = mir.clone();
+    let Inst::MakeValueStruct { form, fields, .. } = &mut leaf_form.insts[outer] else {
+        unreachable!("Outer is MakeValueStruct");
+    };
+    *form = ValueCtorForm::Leaves;
+    *fields = vec![(ustr::Ustr::from("inner.x"), x), (ustr::Ustr::from("y"), y)];
+    assert!(
+        verify(&leaf_form).is_empty(),
+        "valid leaf paths must verify"
+    );
+
+    let foreign_arena = RepArena::new(Arc::new(MonoInterner::new()));
+    let foreign_representation = foreign_arena
+        .plan_nominal_value(
+            &ws,
+            bone_core::hir::FnBackend::Lua,
+            ustr::Ustr::from("Outer"),
+        )
+        .expect("foreign Outer plan");
+    let abi = mir.abi_plan.as_ref().expect("function ABI plan");
+    let parameter_representation = abi.representation().params()[0];
+    let opaque_representation = arena
+        .plan(
+            &ws,
+            bone_core::hir::FnBackend::Lua,
+            &MonoTy::Any,
+            RepUse::Value,
+            &RepUseFacts::default(),
+            RepGuarantees::default(),
+        )
+        .expect("opaque value-use plan");
+
+    #[derive(Clone, Copy)]
+    enum Fault {
+        MissingArena,
+        Rep(RepId),
+        Name(&'static str),
+        Order,
+        Form(ValueCtorForm),
+    }
+    let faults = [
+        (
+            outer,
+            Fault::MissingArena,
+            "requires a representation arena",
+        ),
+        (
+            outer,
+            Fault::Rep(foreign_representation),
+            "does not belong to this function's representation arena",
+        ),
+        (
+            outer,
+            Fault::Rep(parameter_representation),
+            "not a value-use plan",
+        ),
+        (
+            outer,
+            Fault::Rep(opaque_representation),
+            "no value leaf layout",
+        ),
+        (
+            materialized,
+            Fault::Name("Other"),
+            "representation is for `Outer`, not `Other`",
+        ),
+        (
+            outer,
+            Fault::Order,
+            "fields do not match its Declared representation",
+        ),
+        (
+            outer,
+            Fault::Form(ValueCtorForm::Leaves),
+            "fields do not match its Leaves representation",
+        ),
+        (
+            inner,
+            Fault::Name("Other"),
+            "representation is for `Inner`, not `Other`",
+        ),
+    ];
+    let mut missed = Vec::new();
+    for (target, fault, expected) in faults {
+        let mut bad = mir.clone();
+        if let Fault::MissingArena = fault {
+            bad.rep_arena = None;
+        } else {
+            let (name, representation, form, fields) = match &mut bad.insts[target] {
+                Inst::MakeValueStruct {
+                    name,
+                    representation,
+                    form,
+                    fields,
                 }
-                skull_mir::mir::ValueCtorForm::Leaves => skull_mir::lower::value_leaf_paths(&shape),
+                | Inst::MaterializeValueStruct {
+                    name,
+                    representation,
+                    form,
+                    fields,
+                } => (name, representation, form, fields),
+                _ => unreachable!("selected value constructor"),
             };
-            let actual = fields.iter().map(|(field, _)| *field).collect::<Vec<_>>();
-            assert_eq!(
-                actual, expected,
-                "constructor `{name}` fields must match its selected form"
-            );
+            match fault {
+                Fault::Rep(id) => *representation = id,
+                Fault::Name(value) => *name = ustr::Ustr::from(value),
+                Fault::Order => fields.swap(0, 1),
+                Fault::Form(value) => *form = value,
+                Fault::MissingArena => unreachable!(),
+            }
+        }
+        if !verify(&bad).iter().any(|v| v.message.contains(expected)) {
+            missed.push(expected);
         }
     }
     assert!(
-        constructors > 0,
-        "fixture must exercise a value constructor"
+        missed.is_empty(),
+        "missed representation faults: {missed:?}"
     );
 }
 

@@ -458,7 +458,80 @@ impl<'a> Verifier<'a> {
                     "placeholder bound call reached emission".into(),
                 );
             }
+            Inst::MakeValueStruct {
+                name,
+                representation,
+                form,
+                fields,
+            }
+            | Inst::MaterializeValueStruct {
+                name,
+                representation,
+                form,
+                fields,
+            } => self.check_value_constructor(bid, iid, *name, *representation, *form, fields),
             _ => self.check_literal_kinds(bid, iid, inst),
+        }
+    }
+
+    fn check_value_constructor(
+        &mut self,
+        bid: Idx<Block>,
+        iid: Idx<Inst>,
+        name: Ustr,
+        representation: crate::lower::RepId,
+        form: crate::mir::ValueCtorForm,
+        fields: &[(Ustr, Idx<Inst>)],
+    ) {
+        let mf = self.mf;
+        let mut report = |message: String| self.report(Some(bid), Some(iid), message);
+        let Some(arena) = mf.rep_arena.as_ref() else {
+            report("value constructor requires a representation arena".into());
+            return;
+        };
+        let Some(plan) = arena.try_get(representation) else {
+            report(
+                "value constructor representation does not belong to this function's representation arena"
+                    .into(),
+            );
+            return;
+        };
+
+        if plan.use_context() != crate::lower::RepUse::Value {
+            report("value constructor representation is not a value-use plan".into());
+        }
+
+        let crate::lower::RepLayout::Leaves(shape) = plan.layout() else {
+            report("value constructor representation has no value leaf layout".into());
+            return;
+        };
+        if shape.name != name {
+            report(format!(
+                "value constructor representation is for `{}`, not `{name}`",
+                shape.name
+            ));
+        }
+
+        if form == crate::mir::ValueCtorForm::Declared
+            && plan.value_storage() == Some(crate::lower::ValueStorage::GcTable)
+        {
+            // GC-table boxing flattens inline children into keys absent from ValueShape.
+            return;
+        }
+
+        let expected = match form {
+            crate::mir::ValueCtorForm::Declared => shape
+                .fields
+                .iter()
+                .map(|(field, _)| *field)
+                .collect::<Vec<_>>(),
+            crate::mir::ValueCtorForm::Leaves => crate::lower::value_leaf_paths(&shape),
+        };
+        let actual = fields.iter().map(|(field, _)| *field).collect::<Vec<_>>();
+        if actual != expected {
+            report(format!(
+                "value constructor fields do not match its {form:?} representation"
+            ));
         }
     }
 
