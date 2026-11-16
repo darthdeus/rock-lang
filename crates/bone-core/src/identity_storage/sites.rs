@@ -4,10 +4,9 @@
 
 use super::{
     IDENTITY_ERASURE_ANNOTATION, IDENTITY_STORAGE_ANNOTATION, IdentityPosition, IdentityStorageVia,
-    IdentityStorageViolation, identity_body_storage_violation, identity_body_violation,
-    identity_local_storage_violation, identity_root_storage_violation, identity_storage_exemption,
-    identity_storage_field_violation, identity_storage_violation, is_identity_storage_edge,
-    is_identity_storage_field,
+    IdentityStorageViolation, identity_body_violation, identity_root_storage_violation,
+    identity_storage_exemption, identity_storage_field_violation, identity_storage_violation,
+    is_identity_storage_edge, is_identity_storage_field,
 };
 use crate::escape::lambda_is_nonescaping;
 use crate::hir::{
@@ -167,10 +166,10 @@ struct InferredSlotTypes<'a> {
 
 impl BodySlotTypes for InferredSlotTypes<'_> {
     fn local(&self, ty: TyId) -> Option<IdentityStorageViolation> {
-        identity_local_storage_violation(self.ws, self.bi, ty)
+        identity_body_violation(self.ws, self.bi, ty, IdentityPosition::Borrow)
     }
     fn stored(&self, ty: TyId) -> Option<IdentityStorageViolation> {
-        identity_body_storage_violation(self.ws, Some(self.bi), ty)
+        identity_body_violation(self.ws, self.bi, ty, IdentityPosition::Stored)
     }
     fn row(&self, ty: TyId) -> Option<IdentityStorageViolation> {
         identity_body_violation(self.ws, self.bi, ty, IdentityPosition::Row)

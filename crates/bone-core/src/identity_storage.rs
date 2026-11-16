@@ -50,25 +50,7 @@ pub(crate) fn identity_storage_violation(
     ws: &Workspace,
     ty: TyId,
 ) -> Option<IdentityStorageViolation> {
-    identity_body_storage_violation(ws, None, ty)
-}
-
-/// [`identity_storage_violation`] for a type that may be local to a body
-/// (`bi` owns its `TyId::Local` arena and substitutions): a closure capture or
-/// a `co fn` parameter, which the closure or coroutine frame stores.
-pub(crate) fn identity_body_storage_violation(
-    ws: &Workspace,
-    bi: Option<&BodyInference>,
-    ty: TyId,
-) -> Option<IdentityStorageViolation> {
-    visit(
-        ws,
-        Types { ws, bi },
-        ty,
-        Top::Stored,
-        IdentityStorageVia::Direct,
-        &mut ParamClasses::default(),
-    )
+    identity_violation_in(ws, Types { ws, bi: None }, ty, IdentityPosition::Stored)
 }
 
 /// [`identity_storage_violation`] for a root position (a global's type): the
@@ -78,32 +60,7 @@ pub(crate) fn identity_root_storage_violation(
     ws: &Workspace,
     ty: TyId,
 ) -> Option<IdentityStorageViolation> {
-    visit(
-        ws,
-        Types { ws, bi: None },
-        ty,
-        Top::Root,
-        IdentityStorageVia::Direct,
-        &mut ParamClasses::default(),
-    )
-}
-
-/// [`identity_storage_violation`] for a body's local, parameter or temporary:
-/// an identity at the top, under a nullable, or as a tuple element is a
-/// borrow; one stored by a Vec, Map or constructor type argument is storage.
-pub(crate) fn identity_local_storage_violation(
-    ws: &Workspace,
-    bi: &BodyInference,
-    ty: TyId,
-) -> Option<IdentityStorageViolation> {
-    visit(
-        ws,
-        Types { ws, bi: Some(bi) },
-        ty,
-        Top::Borrow,
-        IdentityStorageVia::Direct,
-        &mut ParamClasses::default(),
-    )
+    visit_top(ws, Types { ws, bi: None }, ty, Top::Root)
 }
 
 /// [`identity_violation_in`] at [`IdentityPosition::Row`] for the declared
@@ -153,8 +110,9 @@ pub trait IdentityTypes: Copy {
 pub enum IdentityPosition {
     /// Ordinary storage: the identity itself is a violation.
     Stored,
-    /// A body's local, parameter or temporary: see
-    /// [`identity_local_storage_violation`].
+    /// A body's local, parameter or temporary: an identity at the top, under
+    /// a nullable, or as a tuple element is a borrow; one stored by a Vec, Map
+    /// or constructor type argument is storage.
     Borrow,
     /// The Vec written to an `@identity_storage` field: its direct elements
     /// are rows, and everything below them is ordinary storage.
@@ -168,13 +126,13 @@ pub fn identity_violation_in<V: IdentityTypes>(
     ty: V::Ty,
     position: IdentityPosition,
 ) -> Option<IdentityStorageViolation> {
-    let top = match position {
-        IdentityPosition::Stored => Top::Stored,
-        IdentityPosition::Borrow => Top::Borrow,
-        IdentityPosition::Row => {
-            let mut classes = ParamClasses::default();
-            return match types.node(ty)? {
-                IdentityNode::Collection(mut params) => params.find_map(|p| {
+    match position {
+        IdentityPosition::Stored => visit_top(ws, types, ty, Top::Stored),
+        IdentityPosition::Borrow => visit_top(ws, types, ty, Top::Borrow),
+        IdentityPosition::Row => match types.node(ty)? {
+            IdentityNode::Collection(mut params) => {
+                let mut classes = ParamClasses::default();
+                params.find_map(|p| {
                     visit(
                         ws,
                         types,
@@ -183,26 +141,11 @@ pub fn identity_violation_in<V: IdentityTypes>(
                         IdentityStorageVia::Container,
                         &mut classes,
                     )
-                }),
-                _ => visit(
-                    ws,
-                    types,
-                    ty,
-                    Top::Stored,
-                    IdentityStorageVia::Direct,
-                    &mut classes,
-                ),
-            };
-        }
-    };
-    visit(
-        ws,
-        types,
-        ty,
-        top,
-        IdentityStorageVia::Direct,
-        &mut ParamClasses::default(),
-    )
+                })
+            }
+            _ => visit_top(ws, types, ty, Top::Stored),
+        },
+    }
 }
 
 /// [`identity_violation_in`] over one body's inferred types.
@@ -315,6 +258,22 @@ struct ParamClasses {
 /// declarations only.
 fn static_expr(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
     ws.resolve_ty(None, ty).map(|(_, expr)| expr)
+}
+
+fn visit_top<V: IdentityTypes>(
+    ws: &Workspace,
+    types: V,
+    ty: V::Ty,
+    top: Top,
+) -> Option<IdentityStorageViolation> {
+    visit(
+        ws,
+        types,
+        ty,
+        top,
+        IdentityStorageVia::Direct,
+        &mut ParamClasses::default(),
+    )
 }
 
 fn visit<V: IdentityTypes>(
