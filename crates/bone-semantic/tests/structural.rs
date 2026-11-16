@@ -26,6 +26,22 @@ fn check(src: &str) -> Result<Workspace, CompilerError> {
     )
 }
 
+#[test]
+fn standalone_inline_module_paths_have_an_implicit_package() {
+    let mut module = parse_module_with_dialect(
+        "mod helpers { pub fn answer() -> int { 42 } } fn main() -> int { helpers::answer() }",
+        Ustr::from("standalone.rock"),
+        Dialect::V1,
+    )
+    .unwrap();
+    let ws = bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(
+        std::slice::from_mut(&mut module),
+    )
+    .expect("standalone module has an implicit package");
+    assert!(ws.fragment_scopes.contains_key(&module.file));
+    assert!(ws.inferences_iter().all(|(_, inf)| inf.errors.is_empty()));
+}
+
 fn stdlib_modules() -> Vec<skull_parser::Ast> {
     rock_stdlib::stdlib_files()
         .iter()
