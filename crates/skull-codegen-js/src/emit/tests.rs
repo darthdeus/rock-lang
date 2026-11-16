@@ -12,24 +12,25 @@ fn workspace(src: &str) -> Workspace {
     bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic pass")
 }
 
-#[test]
-fn a_missing_graph_root_does_not_mint_a_base_instance() {
-    let ws = workspace("fn root() {}\n");
-    let mid = *ws
+fn test_fn(ws: &Workspace, name: &str) -> FuncRef {
+    let module = *ws
         .module_ids
         .get(&Ustr::from("<test>"))
         .expect("test module");
-    let fid = ws
-        .module(mid)
+    let func = ws
+        .module(module)
         .functions
         .iter()
-        .find(|(_, f)| f.name.as_str() == "root")
-        .map(|(fid, _)| fid)
-        .expect("root");
-    let root = FuncRef {
-        module: mid,
-        func: fid,
-    };
+        .find(|(_, f)| f.name.as_str() == name)
+        .map(|(func, _)| func)
+        .expect("test function");
+    FuncRef { module, func }
+}
+
+#[test]
+fn a_missing_graph_root_does_not_mint_a_base_instance() {
+    let ws = workspace("fn root() {}\n");
+    let root = test_fn(&ws, "root");
     let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
     let scx = js_scx(&ws);
     let graph = skull_graph::instance_graph::build_in(&ws, Vec::new(), false, interner.clone());
@@ -79,17 +80,7 @@ fn main() {
 }
 "#,
     );
-    let mid = *ws
-        .module_ids
-        .get(&Ustr::from("<test>"))
-        .expect("test module");
-    let main = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == "main")
-        .map(|(func, _)| FuncRef { module: mid, func })
-        .expect("main");
+    let main = test_fn(&ws, "main");
     let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
     let mut graph = skull_graph::instance_graph::build_in(&ws, vec![main], false, interner);
     let before = artifact::realize(
@@ -147,21 +138,7 @@ fn main() {
 /// top-level function so a shared helper's own `else {` cannot match.
 fn emitted_function(src: &str, name: &str) -> Result<String, CompilerError> {
     let ws = workspace(src);
-    let mid = *ws
-        .module_ids
-        .get(&Ustr::from("<test>"))
-        .expect("test module");
-    let fid = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == name)
-        .map(|(fid, _)| fid)
-        .expect("root");
-    let root = FuncRef {
-        module: mid,
-        func: fid,
-    };
+    let root = test_fn(&ws, name);
     let js = emit_with_closure(&ws, &[(root, "root_fn".to_string())])?;
     let start = js.find("function root_fn").expect("root emitted");
     let rest = &js[start..];
