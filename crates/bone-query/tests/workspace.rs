@@ -2,7 +2,7 @@
 //! file in, query it, assert the LSP-shaped result.
 
 use crate::fixture::{PATH, Project, diagnostics_in, hover_markup, workspace};
-use crate::label_asserts::{assert_lacks, assert_offers};
+use crate::label_asserts::assert_offers;
 use bone_query::BoneWorkspace;
 use lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
 
@@ -603,8 +603,18 @@ fn completion_cases() {
     ];
     for (case, src, (line, ch), wanted, unwanted) in cases {
         let labels = completion_labels(src, *line, *ch);
-        assert_offers(&labels, wanted);
-        assert_lacks(&labels, unwanted);
+        for w in *wanted {
+            assert!(
+                labels.contains(&w.to_string()),
+                "{case}: no `{w}` in {labels:?}"
+            );
+        }
+        for u in *unwanted {
+            assert!(
+                !labels.contains(&u.to_string()),
+                "{case}: `{u}` in {labels:?}"
+            );
+        }
     }
 }
 
