@@ -85,9 +85,7 @@ impl<'a> Builder<'a> {
                 self.cur = kept;
             }
             self.lower_stmt_expr(arm.body)?;
-            if self.is_open() {
-                self.f.set_term(self.cur, Term::Goto(join));
-            }
+            self.goto_if_open(join);
             self.cur = next;
         }
         self.f.set_term(self.cur, Term::Unreachable);
@@ -380,9 +378,7 @@ impl<'a> Builder<'a> {
                     // `scrut_enum` (nested alternatives carry `None` anyway).
                     self.match_pattern(scrut, alt, next_alt, variants, top, scrut_enum)?;
                     // success path of this alternative -> the shared continuation.
-                    if self.is_open() {
-                        self.f.set_term(self.cur, Term::Goto(matched));
-                    }
+                    self.goto_if_open(matched);
                     if !is_last {
                         self.cur = next_alt;
                     }
@@ -844,16 +840,12 @@ impl<'a> Builder<'a> {
 
         if statement {
             self.lower_stmt_expr(then_branch)?;
-            if self.is_open() {
-                self.f.set_term(self.cur, Term::Goto(join));
-            }
+            self.goto_if_open(join);
             self.cur = else_bb;
             if let Some(else_branch) = else_branch {
                 self.lower_stmt_expr(else_branch)?;
             }
-            if self.is_open() {
-                self.f.set_term(self.cur, Term::Goto(join));
-            }
+            self.goto_if_open(join);
             self.cur = join;
             Ok(None)
         } else if use_repr {
@@ -1178,9 +1170,7 @@ impl<'a> Builder<'a> {
         self.loop_targets.push((header, exit, self.defers.len()));
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
-        if self.is_open() {
-            self.f.set_term(self.cur, Term::Goto(header));
-        }
+        self.goto_if_open(header);
 
         self.cur = exit;
         Ok(())
@@ -1232,9 +1222,7 @@ impl<'a> Builder<'a> {
         self.loop_targets.push((latch, exit, self.defers.len())); // continue -> latch (runs the step)
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
-        if self.is_open() {
-            self.f.set_term(self.cur, Term::Goto(latch));
-        }
+        self.goto_if_open(latch);
 
         self.cur = latch;
         let i_v2 = self.emit_cur(Inst::Load(i_cell));

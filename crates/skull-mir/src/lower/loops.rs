@@ -393,9 +393,7 @@ impl<'a> Builder<'a> {
         self.loop_targets.push((header, exit, self.defers.len()));
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
-        if self.is_open() {
-            self.f.set_term(self.cur, Term::Goto(header));
-        }
+        self.goto_if_open(header);
         self.cur = exit;
         if let Some(flag) = owned_flag {
             let off = self.emit_cur(Inst::Const(Lit::Bool(false)));
@@ -708,9 +706,7 @@ impl<'a> Builder<'a> {
         self.loop_targets.push((latch, exit, self.defers.len()));
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
-        if self.is_open() {
-            self.f.set_term(self.cur, Term::Goto(latch));
-        }
+        self.goto_if_open(latch);
 
         // latch: i += 1.
         self.cur = latch;
@@ -800,9 +796,7 @@ impl<'a> Builder<'a> {
         self.loop_targets.push((latch, exit, self.defers.len()));
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
-        if self.is_open() {
-            self.f.set_term(self.cur, Term::Goto(latch));
-        }
+        self.goto_if_open(latch);
 
         if let Some(i_cell) = i_cell {
             self.cur = latch;
@@ -1044,9 +1038,7 @@ impl<'a> Builder<'a> {
         self.loop_targets.push((latch, exit, self.defers.len()));
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
-        if self.is_open() {
-            self.f.set_term(self.cur, Term::Goto(latch));
-        }
+        self.goto_if_open(latch);
 
         self.cur = latch;
         self.increment_cell(i_cell);
@@ -1112,9 +1104,7 @@ impl<'a> Builder<'a> {
         self.loop_targets.push((latch, exit, self.defers.len()));
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
-        if self.is_open() {
-            self.f.set_term(self.cur, Term::Goto(latch));
-        }
+        self.goto_if_open(latch);
 
         self.cur = latch;
         self.increment_cell(i_cell);

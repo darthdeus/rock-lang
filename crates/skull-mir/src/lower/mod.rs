@@ -2542,6 +2542,12 @@ impl<'a> Builder<'a> {
         self.emit_cur(Inst::Store { cell, value })
     }
 
+    fn goto_if_open(&mut self, target: Idx<Block>) {
+        if self.is_open() {
+            self.f.set_term(self.cur, Term::Goto(target));
+        }
+    }
+
     fn branch_to(&mut self, cond: Idx<Inst>, then_bb: Idx<Block>, else_bb: Idx<Block>) {
         self.f.set_term(
             self.cur,
@@ -3262,9 +3268,7 @@ impl<'a> Builder<'a> {
                 for (c, v) in cells.iter().zip(leaves) {
                     self.store_cell(*c, v);
                 }
-                if self.is_open() {
-                    self.f.set_term(self.cur, Term::Goto(join));
-                }
+                self.goto_if_open(join);
                 self.cur = join;
                 continue;
             }

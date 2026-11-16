@@ -562,17 +562,13 @@ impl<'a> Builder<'a> {
             let n = self.emit_cur(Inst::Const(Lit::Nil));
             self.store_cell(c, n);
         }
-        if self.is_open() {
-            self.f.set_term(self.cur, Term::Goto(join));
-        }
+        self.goto_if_open(join);
 
         self.cur = present_bb;
         for (&c, (_, lv)) in cells.iter().zip(self.embed_leaf_reads(cname, v)?) {
             self.store_cell(c, lv);
         }
-        if self.is_open() {
-            self.f.set_term(self.cur, Term::Goto(join));
-        }
+        self.goto_if_open(join);
 
         self.cur = join;
         let leaves = paths

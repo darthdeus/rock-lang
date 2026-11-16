@@ -544,17 +544,13 @@ impl<'a> Builder<'a> {
 
         self.cur = then_bb;
         self.lower_stmt_expr(then_branch)?;
-        if self.is_open() {
-            self.f.set_term(self.cur, Term::Goto(join));
-        }
+        self.goto_if_open(join);
 
         self.cur = else_bb;
         if let Some(eb) = else_branch {
             self.lower_stmt_expr(eb)?;
         }
-        if self.is_open() {
-            self.f.set_term(self.cur, Term::Goto(join));
-        }
+        self.goto_if_open(join);
 
         self.cur = join;
         Ok(())
