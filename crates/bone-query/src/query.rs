@@ -5046,6 +5046,25 @@ fn enclosing_is_coroutine(ws: &Workspace, mid: ModuleId, offset: usize) -> bool 
     )
 }
 
+/// `name: T` for each declared param (static types).
+pub(crate) fn rendered_params(ws: &Workspace, params: &[hir::ParamDecl]) -> Vec<String> {
+    params
+        .iter()
+        .map(|p| format!("{}: {}", p.name, ws.render(None, p.ty)))
+        .collect()
+}
+
+/// `name: T` (`name: ...T` when variadic) for each macro param.
+pub(crate) fn rendered_macro_params(md: &bone_incremental::session::MacroDef) -> Vec<String> {
+    md.params
+        .iter()
+        .map(|p| {
+            let variadic = if p.is_variadic { "..." } else { "" };
+            format!("{}: {}{}", p.name, variadic, p.ty)
+        })
+        .collect()
+}
+
 /// Render `fn name(p: T, ...) -> R` from a HIR function (static types, no body
 /// inference context needed).
 pub(crate) fn render_fn_signature(
@@ -5053,11 +5072,7 @@ pub(crate) fn render_fn_signature(
     name: ustr::Ustr,
     f: &bone_semantic::hir::Function,
 ) -> String {
-    let params: Vec<String> = f
-        .param_decls
-        .iter()
-        .map(|p| format!("{}: {}", p.name, ws.render(None, p.ty)))
-        .collect();
+    let params = rendered_params(ws, &f.param_decls);
     let ret = f
         .return_ty
         .map(|t| format!(" -> {}", ws.render(None, t)))
@@ -5166,11 +5181,7 @@ pub(crate) fn fn_ctags_signatures(
         return out;
     };
     for (_, f) in m.functions.iter() {
-        let params: Vec<String> = f
-            .param_decls
-            .iter()
-            .map(|p| format!("{}: {}", p.name, ws.render(None, p.ty)))
-            .collect();
+        let params = rendered_params(ws, &f.param_decls);
         let returns = f.return_ty.map(|t| ws.render(None, t));
         out.insert(
             f.span.offset_range().0,
@@ -5313,11 +5324,7 @@ fn fn_sig_entry(
     sources: Option<&SourceMap>,
 ) -> SignatureEntry {
     let f = &ws.modules[fmid.index()].functions[fid];
-    let params = f
-        .param_decls
-        .iter()
-        .map(|p| format!("{}: {}", p.name, ws.render(None, p.ty)))
-        .collect();
+    let params = rendered_params(ws, &f.param_decls);
     SignatureEntry {
         label: render_fn_signature_with_defaults(ws, fmid, fid, sources),
         params,

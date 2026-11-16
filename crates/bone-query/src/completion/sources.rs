@@ -1136,11 +1136,7 @@ pub(crate) fn decorator_completions(ws: &Workspace, prefix: &str) -> Vec<Complet
             if !admit(name.as_bytes(), prefix.as_bytes()) || !seen.insert(name.to_string()) {
                 continue;
             }
-            let params: Vec<String> = dec
-                .param_decls
-                .iter()
-                .map(|p| format!("{}: {}", p.name, ws.render(None, p.ty)))
-                .collect();
+            let params = crate::query::rendered_params(ws, &dec.param_decls);
             let (ex, bd) = match_band_exact(name, prefix.as_bytes(), prefix.as_bytes());
             let key = RankKey {
                 exact: ex,
@@ -1463,7 +1459,6 @@ pub(crate) fn member_ty_match(
 /// completion. `Some(items)` means it DID resolve; `items` may be empty when the
 /// prefix matched no member, and the caller must then SUPPRESS general
 /// completion (offering globals after `recv.` would be invalid UFCS suggestions).
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn member_completions_by_receiver(
     session: &mut Session,
     path: &str,
@@ -1508,7 +1503,6 @@ pub(crate) fn member_completions_by_receiver(
     resolved_empty.then(Vec::new)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn member_completion_items(
     ws: &Workspace,
     path: &str,
@@ -1674,7 +1668,6 @@ fn field_ref_methods<'a>(
 /// Shared item-builder for both receiver-resolution strategies (receiver
 /// expression and name path): UFCS methods, type-directed
 /// field/method ordering, Entity `get` boost, arg-position transitive reach.
-#[allow(clippy::too_many_arguments)]
 fn build_member_items(
     ws: &Workspace,
     mid: ModuleId,

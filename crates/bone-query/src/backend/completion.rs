@@ -626,14 +626,7 @@ fn push_macro_candidates(
         if !already.insert(name) {
             continue;
         }
-        let params: Vec<String> = md
-            .params
-            .iter()
-            .map(|p| {
-                let variadic = if p.is_variadic { "..." } else { "" };
-                format!("{}: {}{}", p.name, variadic, p.ty)
-            })
-            .collect();
+        let params = crate::query::rendered_macro_params(md);
         let ret = md
             .ret
             .as_ref()

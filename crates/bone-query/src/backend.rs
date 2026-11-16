@@ -2182,11 +2182,7 @@ impl BoneWorkspace {
             // `deco` definitions (kind `d`), with their parameter signature
             // rendered the same way as functions.
             for (_, dec) in m.decorators.iter() {
-                let params: Vec<String> = dec
-                    .param_decls
-                    .iter()
-                    .map(|p| format!("{}: {}", p.name, ws.render(None, p.ty)))
-                    .collect();
+                let params = crate::query::rendered_params(ws, &dec.param_decls);
                 entries.push(crate::ctags::CtagsEntry {
                     name: dec.name.to_string(),
                     file: file.clone(),
@@ -2203,14 +2199,7 @@ impl BoneWorkspace {
             // incremental edits, so the lines stay accurate.
             if let Some(uf) = proj.session.files.get(m.file.as_str()) {
                 for md in &uf.macros {
-                    let params: Vec<String> = md
-                        .params
-                        .iter()
-                        .map(|p| {
-                            let variadic = if p.is_variadic { "..." } else { "" };
-                            format!("{}: {}{}", p.name, variadic, p.ty)
-                        })
-                        .collect();
+                    let params = crate::query::rendered_macro_params(md);
                     let mut fields =
                         vec![("signature".to_string(), format!("({})", params.join(", ")))];
                     if let Some(ret) = &md.ret {
