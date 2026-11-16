@@ -145,3 +145,37 @@ fn test_nullable_side_effect_once() {
     // IIFE guard must evaluate side_effect_pt() exactly once.
     assert_eq(__call_count, 1)
 }
+
+// A flat enum (a payload no cdata slot holds) compares leaf by leaf; an absent
+// one must still differ from every present one, wherever it was cleared.
+
+enum Label {
+    Named(string),
+    Counted(int),
+    Blank,
+}
+
+struct LabelHolder { label: Label? }
+
+fn labels_equal(a: Label?, b: Label?) -> bool { return a == b }
+
+@test
+fn test_nullable_flat_enum_params() {
+    assert_eq(labels_equal(null, null), true)
+    assert_eq(labels_equal(null, Label::Blank), false)
+    assert_eq(labels_equal(Label::Blank, null), false)
+    assert_eq(labels_equal(Label::Named("a"), Label::Named("a")), true)
+}
+
+@test
+fn test_nullable_flat_enum_cleared_places() {
+    let h = LabelHolder { label: Label::Blank }
+    h.label = null
+    let xs: [Label?] = [Label::Counted(1)]
+    xs[0] = null
+    let local: Label? = Label::Blank
+    local = null
+    assert_eq(h.label == Label::Blank, false)
+    assert_eq(xs[0] != Label::Counted(1), true)
+    assert_eq(local == Label::Blank, false)
+}
