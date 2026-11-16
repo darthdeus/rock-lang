@@ -21,7 +21,7 @@ fn main() {
     print("Product: " + product.to_string())
 }
 ---
-FILE: project.toml
+FILE: stick.toml
 ---
 [package]
 name = "test"
@@ -49,7 +49,7 @@ fn main() {
     print("Product: " + product.to_string())
 }
 ---
-FILE: project.toml
+FILE: stick.toml
 ---
 [package]
 name = "test"
@@ -99,7 +99,7 @@ fn main() {
     }
 }
 ---
-FILE: project.toml
+FILE: stick.toml
 ---
 [package]
 name = "test"
@@ -148,7 +148,7 @@ fn main() {
     }
 }
 ---
-FILE: project.toml
+FILE: stick.toml
 ---
 [package]
 name = "test"

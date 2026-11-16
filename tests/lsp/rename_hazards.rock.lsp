@@ -457,7 +457,7 @@ fn main() {
     print(peek())
 }
 ---
-FILE: project.toml
+FILE: stick.toml
 ---
 [package]
 name = "test"
@@ -486,7 +486,7 @@ fn main() {
     print(peek())
 }
 ---
-FILE: project.toml
+FILE: stick.toml
 ---
 [package]
 name = "test"
@@ -508,7 +508,7 @@ fn main() {
     print(peek())
 }
 ---
-FILE: project.toml
+FILE: stick.toml
 ---
 [package]
 name = "test"
