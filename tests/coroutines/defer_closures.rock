@@ -15,16 +15,12 @@ co fn defer_local_mutation() -> Coroutine<int> {
     yield 1
 }
 
-@test(output = "1\n6")
+@test(output = "1\n6\n1\n6")
 fn test_defer_closure_mutates_defer_local() {
     let c = defer_local_mutation()
     print(c.resume() ?? -1)
     c.resume()
-}
 
-// ---- Killed before completion: the detached copy runs ----
-@test(output = "1\n6")
-fn test_killed_defer_closure_mutates_defer_local() {
     let c = defer_local_mutation()
     print(c.resume() ?? -1)
     c.kill()
@@ -63,16 +59,13 @@ co fn defer_mixed_capture() -> Coroutine<int> {
     yield base
 }
 
-@test(output = "100\n110\n226\n112")
+@test(output = "100\n110\n226\n112\n100\n206\n102")
 fn test_defer_closure_mixed_capture() {
     let c = defer_mixed_capture()
     print(c.resume() ?? -1)
     print(c.resume() ?? -1)
     c.resume()
-}
 
-@test(output = "100\n206\n102")
-fn test_killed_defer_closure_mixed_capture() {
     let c = defer_mixed_capture()
     print(c.resume() ?? -1)
     c.kill()
@@ -163,15 +156,12 @@ co fn two_defers() -> Coroutine<int> {
     yield 1
 }
 
-@test(output = "1\n2\n3")
+@test(output = "1\n2\n3\n1\n2\n3")
 fn test_two_defers_closures() {
     let c = two_defers()
     print(c.resume() ?? -1)
     c.resume()
-}
 
-@test(output = "1\n2\n3")
-fn test_killed_two_defers_closures() {
     let c = two_defers()
     print(c.resume() ?? -1)
     c.kill()
@@ -200,15 +190,12 @@ co fn loop_in_defer() -> Coroutine<int> {
     yield 1
 }
 
-@test(output = "1\n66")
+@test(output = "1\n66\n1\n66")
 fn test_loop_in_defer_closure() {
     let c = loop_in_defer()
     print(c.resume() ?? -1)
     c.resume()
-}
 
-@test(output = "1\n66")
-fn test_killed_loop_in_defer_closure() {
     let c = loop_in_defer()
     print(c.resume() ?? -1)
     c.kill()
@@ -249,15 +236,12 @@ co fn lambda_defer_in_defer() -> Coroutine<int> {
     yield 1
 }
 
-@test(output = "1\n102")
+@test(output = "1\n102\n1\n102")
 fn test_lambda_defer_in_defer() {
     let c = lambda_defer_in_defer()
     print(c.resume() ?? -1)
     c.resume()
-}
 
-@test(output = "1\n102")
-fn test_killed_lambda_defer_in_defer() {
     let c = lambda_defer_in_defer()
     print(c.resume() ?? -1)
     c.kill()
@@ -280,20 +264,16 @@ co fn nested_defer() -> Coroutine<int> {
     yield 1
 }
 
-@test(output = "1\n2\n12")
+@test(output = "1\n2\n12\n1\n2\n12")
 fn test_nested_defer_closures() {
     let c = nested_defer()
     print(c.resume() ?? -1)
     c.resume()
-}
 
-@test(output = "1\n2\n12")
-fn test_killed_nested_defer_closures() {
     let c = nested_defer()
     print(c.resume() ?? -1)
     c.kill()
 }
-
 
 // ---- A defer nested in an on_killed hook ----
 co fn hook_with_defer() -> Coroutine<int> {

@@ -1,6 +1,5 @@
-// Coroutine basics: yield/resume and several independent instances.
+// Coroutine basics: yield/resume and independent instances held in a vec.
 
-// Coroutine definitions at top level
 co fn echo() -> Coroutine<string> {
     print("started")
     yield "hello"
@@ -8,14 +7,6 @@ co fn echo() -> Coroutine<string> {
 }
 
 co fn gen(start: int) -> Coroutine<int> {
-    let i = start
-    loop {
-        yield i
-        i = i + 1
-    }
-}
-
-co fn counter(start: int) -> Coroutine<int> {
     let i = start
     loop {
         yield i
@@ -37,17 +28,6 @@ fn test_coroutine_basic_yield_int() {
     print(c.resume())
     print(c.resume())
     print(c.resume())
-}
-
-@test(output = "0\n100\n1\n101")
-fn test_coroutine_multiple_instances_int() {
-    let a = counter(0)
-    let b = counter(100)
-
-    print(a.resume())
-    print(b.resume())
-    print(a.resume())
-    print(b.resume())
 }
 
 @test(output = "10\n20\n11\n21")

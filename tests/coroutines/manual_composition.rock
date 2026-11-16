@@ -1,10 +1,5 @@
-// Phase 5: manual coroutine composition.
-//
-// Outer holds a reference to inner's handle and drives it via .resume().
-// This requires hoisting inner's handle (a struct with closures) as a
-// state-struct field in outer. Fails until Phase 5 hoists inner-handle
-// locals correctly AND until conditionals (Phase 2) land for the
-// pump_until_null test.
+// Manual composition: an outer co fn holds an inner coroutine's handle in
+// its frame and drives it with `.resume()`.
 
 co fn inner_source() -> Coroutine<int> {
     yield 1

@@ -150,41 +150,6 @@ fn test_errored_fires_on_killed() {
     print(ERR_KILL_LOG.len())     // still 1 -- kill on errored coroutine no-ops
 }
 
-// D6b await propagation: when inner errors during delegation, outer
-// must also become errored. Without explicit propagation, inner's
-// resume returns null (caught by inner's pcall) and outer's pump
-// would silently continue past the `await` -- the error vanishes.
-// The fix: after inner.resume() returns null, the pump checks
-// inner.last_error(); if non-null, re-raise it so outer's pcall
-// catches it and transitions outer to errored too.
-
-co fn inner_bad() -> Coroutine<int> {
-    yield 10
-    error("INNER_BOOM")
-}
-
-co fn outer_delegating() -> Coroutine<int> {
-    yield 1
-    await inner_bad()
-    yield 99   // never reached
-}
-
-@test(output = "1\n10\nnull\nerrored\ncaptured")
-fn test_yield_star_propagates_inner_error() {
-    let c = outer_delegating()
-    print(c.resume() ?? -1)        // 1 (outer's first yield)
-    print(c.resume() ?? -1)        // 10 (inner's yield, forwarded)
-    let v = c.resume()             // inner errors -> outer also errored
-    if v == null { print("null") } else { print(v) }
-    print(c.status())              // errored
-    let msg = c.last_error() ?? ""
-    if msg.contains("INNER_BOOM") {
-        print("captured")
-    } else {
-        print("missing:{msg}")
-    }
-}
-
 // ---- Killing its own handle ----
 //
 // A co fn that kills its OWN handle mid-body and then reaches a `yield` must

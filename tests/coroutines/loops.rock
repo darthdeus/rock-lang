@@ -1,9 +1,17 @@
-// Phase 3: yield inside loops.
-//
-// loop/while/for with yield, break, continue. Fails on Phase 1/2 lowering;
-// greens when Phase 3 lands.
+// Yields inside loop/while with break and continue, nested loops and zero
+// iterations.
 
-// ---- loop with conditional break and yield ----
+fn drain(c: Coroutine<int>) {
+    loop {
+        let r = c.resume()
+        if r == null {
+            print("null")
+            return
+        }
+        print(r)
+    }
+}
+
 co fn yield_in_loop(limit: int) -> Coroutine<int> {
     let i = 0
     loop {
@@ -13,25 +21,12 @@ co fn yield_in_loop(limit: int) -> Coroutine<int> {
     }
 }
 
-@test(output = "0\n1\n2\nnull")
+@test(output = "0\n1\n2\nnull\nnull")
 fn test_loop_with_break() {
-    let c = yield_in_loop(3)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-    let r = c.resume()
-    if r == null { print("null") } else { print(r) }
+    drain(yield_in_loop(3))
+    drain(yield_in_loop(0))
 }
 
-// ---- Loop with zero iterations ----
-@test(output = "null")
-fn test_loop_zero_iterations() {
-    let c = yield_in_loop(0)
-    let r = c.resume()
-    if r == null { print("null") } else { print(r) }
-}
-
-// ---- while with yield ----
 co fn yield_in_while(limit: int) -> Coroutine<int> {
     let i = 0
     while i < limit {
@@ -40,15 +35,11 @@ co fn yield_in_while(limit: int) -> Coroutine<int> {
     }
 }
 
-@test(output = "0\n1\n2")
+@test(output = "0\n1\n2\nnull")
 fn test_yield_in_while() {
-    let c = yield_in_while(3)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
+    drain(yield_in_while(3))
 }
 
-// ---- Nested loops with yield ----
 co fn nested_loops(rows: int, cols: int) -> Coroutine<int> {
     let r = 0
     while r < rows {
@@ -61,16 +52,11 @@ co fn nested_loops(rows: int, cols: int) -> Coroutine<int> {
     }
 }
 
-@test(output = "0\n1\n10\n11")
+@test(output = "0\n1\n10\n11\nnull")
 fn test_nested_loops_yield() {
-    let c = nested_loops(2, 2)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
+    drain(nested_loops(2, 2))
 }
 
-// ---- continue inside loop with yield ----
 co fn yield_with_continue(n: int) -> Coroutine<int> {
     let i = 0
     while i < n {
@@ -80,10 +66,7 @@ co fn yield_with_continue(n: int) -> Coroutine<int> {
     }
 }
 
-@test(output = "1\n3\n4")
+@test(output = "1\n3\n4\nnull")
 fn test_yield_with_continue() {
-    let c = yield_with_continue(4)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
+    drain(yield_with_continue(4))
 }

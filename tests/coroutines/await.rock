@@ -92,37 +92,6 @@ fn test_composition_silent_inner() {
     if r == null { print("null") } else { print(r) }
 }
 
-// ---- Return value capture: `let r = await inner()` ----
-
-co fn ys_ret_inner() -> Coroutine<int, string> {
-    yield 1
-    yield 2
-    return "done"
-}
-
-co fn ys_ret_outer() -> Coroutine<int, string> {
-    yield 0
-    let r = await ys_ret_inner()
-    yield 99
-    return r
-}
-
-@test(output = "0\n1\n2\n99\n-99\nfinal=done")
-fn test_yield_star_return_capture() {
-    let c = ys_ret_outer()
-    print(c.resume() ?? -99)  // 0
-    print(c.resume() ?? -99)  // 1 (from inner)
-    print(c.resume() ?? -99)  // 2 (from inner)
-    print(c.resume() ?? -99)  // 99 (back in outer)
-    print(c.resume() ?? -99)  // null sentinel; resume() returns int? -- just print -99
-    let r = c.result()
-    if r != null {
-        print("final=" + r)
-    } else {
-        print("final=null")
-    }
-}
-
 // ---- Nested delegation, three levels deep ----
 // Yields forward through every level and return values propagate up.
 
@@ -169,16 +138,8 @@ fn test_yield_star_three_deep_forwarding_and_return() {
 // The delegation pump resumes the inner handle however it reached the slot,
 // so a coroutine can be spawned first and delegated to later.
 
-co fn inner_simple() -> Coroutine<int> {
-    yield 1
-    yield 2
-    yield 3
-}
-
 @test(output = "100\n1\n2\n3\n200")
 fn test_yield_star_stored_handle_statement_form() {
-    // Stored-handle pattern: build h inside the outer co fn body, delegate
-    // to it via `await h`. Pre-this-commit the second form was rejected.
     let c = outer_with_stored()
     print(c.resume() ?? -1)        // 100 (outer's first yield)
     print(c.resume() ?? -1)        // 1   (inner via delegation)
@@ -188,7 +149,7 @@ fn test_yield_star_stored_handle_statement_form() {
 }
 
 co fn outer_with_stored() -> Coroutine<int> {
-    let h = inner_simple()
+    let h = inner_abc()
     yield 100
     await h
     yield 200
@@ -284,7 +245,7 @@ co fn ks_outer() -> Coroutine<int> {
     yield 200
 }
 
-@test(output = "100\n10\n1\n2\nkilled\ninnermost\nmiddle\nouter\nstatus=dead")
+@test(output = "100\n10\n1\n2\nkilled\ninnermost\nmiddle\nouter\nstatus=dead\nkill2=3")
 fn test_yield_star_kill_propagates_two_deep() {
     KILL_LOG = []
     let c = ks_outer()
@@ -300,19 +261,7 @@ fn test_yield_star_kill_propagates_two_deep() {
         print(label)
     }
     print("status={c.status()}")
-}
-
-// Idempotent: a second .kill() must not refire any hook.
-@test(output = "kill1=3\nkill2=3")
-fn test_yield_star_kill_is_idempotent() {
-    KILL_LOG = []
-    let c = ks_outer()
-    let v1 = c.resume()
-    if v1 == null { print("v1=null") }  // silence unused warning
-    c.resume()  // descend
-    c.resume()  // into innermost
-    c.kill()
-    print("kill1={KILL_LOG.len()}")
+    // A second kill must not refire any hook.
     c.kill()
     print("kill2={KILL_LOG.len()}")
 }

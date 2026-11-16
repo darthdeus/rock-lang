@@ -22,23 +22,14 @@ co fn outer() -> Coroutine<int> {
     }
 }
 
-@test(output = "10 inner-defer,inner-killed,outer-defer")
+@test(output = "10 inner-defer,inner-killed,outer-defer n:3")
 fn test_kill_outer_mid_for_kills_the_generator() {
     LOG = []
     let c = outer()
     let v = c.resume() ?? -1
     kill(c)
-    print("{v} {LOG.join(",")}")
-}
-
-@test(output = "inner-defer,inner-killed,outer-defer n:3")
-fn test_kill_is_idempotent() {
-    LOG = []
-    let c = outer()
-    c.resume()
     kill(c)
-    kill(c)
-    print("{LOG.join(",")} n:{LOG.len()}")
+    print("{v} {LOG.join(",")} n:{LOG.len()}")
 }
 
 co fn outer_raises() -> Coroutine<int> {

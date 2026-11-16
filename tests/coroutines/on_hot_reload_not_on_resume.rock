@@ -1,10 +1,6 @@
-// on_hot_reload fires ONLY via fire_hot_reload(), never on a normal
-// resume(). Regression: skull lowered `on_hot_reload { body }` as a plain
-// body call (it only recognized on_killed/on_resume as lifecycle hooks),
-// so the hook ran on every resume -- in mag this cleared a mob's attack
-// flag each frame and respawned the swing coroutine endlessly. rock was
-// the oracle (correct). Sibling: on_killed coverage in
-// yield_star_kill.rock.
+// on_hot_reload fires only via fire_hot_reload(), never on a normal
+// resume(). Regression: the hook body was lowered as a plain call, so it ran
+// on every resume.
 
 global HR_LOG: [string] = []
 

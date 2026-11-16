@@ -1,9 +1,9 @@
-// Probe: macro + co fn + __SITE__. Validates the migration pattern
-// for sim.rock's `co fn key/click/etc.` wrappers — each becomes a
-// macro forwarding to a renamed `_impl` co fn.
+// A macro forwarding to a co fn with `__SITE__` records the caller's site,
+// not the macro body's: the pattern for wrapping co fns such as sim input
+// helpers in macros.
 //
-// Coroutine signature here: `Coroutine<Y, R, A>` = yield Y, return R,
-// resume arg A. Following tests/coroutines/resume_with_value_yield_star.rock.
+// `Coroutine<Y, R, A>` = yield Y, return R, resume arg A. The assertions
+// below pin line numbers, so keep this header six lines long.
 
 global SITES_SEEN: [string] = []
 

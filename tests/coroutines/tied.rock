@@ -7,9 +7,7 @@
 // poller-level guarantee so coroutine bodies can assume their entity
 // is alive whenever they run.
 //
-// Standalone mini-poller (follows the smoke/engine_systems.rock pattern)
-// — the real integration lands in stone/engine/systems/coroutines.rock
-// once these tests go green.
+// A standalone mini-poller stands in for the engine one.
 
 struct TiedEntry {
     coroutine: Coroutine<int>,
@@ -93,7 +91,7 @@ fn alive_entity_resumes_and_cleans_up_on_completion() {
     tied_poller_update(poller)
     tied_poller_update(poller)
 
-    // Fourth resume hits natural completion — entry should be removed.
+    // Fourth resume hits natural completion -- entry should be removed.
     tied_poller_update(poller)
     assert_eq(poller.entries.len(), 0)
 }
@@ -130,7 +128,7 @@ fn stale_entity_handle_kills_coroutine() {
     let poller = TiedPoller {}
     spawn_tied(poller, mobs, e1, with_on_killed())
 
-    // Remove then reinsert — e1 must now be stale even if slot reused.
+    // Remove then reinsert -- e1 must now be stale even if slot reused.
     mobs.remove(e1)
     let e2 = mobs.insert(Mob { hp: 99 })
 

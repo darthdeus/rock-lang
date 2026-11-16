@@ -1,8 +1,5 @@
-// Yield-channel threading (Parts 1-4). A `co fn` that yields a flat enum should
-// thread the yield value as scalars through yield -> resume -> consumer, with no
-// re-box at the yield point. `resume()` returns `Ev?` (nil = done), which threads
-// via the tag=nil sentinel from Part 0. Behavior identical to boxed; holds BEFORE
-// and AFTER the yield-channel arc.
+// A co fn yielding a flat enum threads the value through yield -> resume ->
+// consumer; `resume()` returns `Ev?` with null meaning done.
 
 enum Ev {
     Tick(int),

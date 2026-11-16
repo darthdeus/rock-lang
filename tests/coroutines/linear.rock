@@ -1,7 +1,4 @@
-// Phase 1: linear coroutine bodies.
-//
-// Top-level yield statements only. No control flow inside co fn bodies.
-// All tests must pass with the stackless state-machine lowering active.
+// Straight-line coroutine bodies: yields with no control flow.
 
 // ---- Linear yield chain ----
 co fn linear() -> Coroutine<int> {
@@ -86,26 +83,20 @@ fn test_independent_instances() {
     print(b.resume() ?? -1)
 }
 
-// ---- Zero yields ----
+// ---- No yields: the first resume runs the body and exhausts ----
 co fn no_yields() -> Coroutine<int> {
-    // empty body
 }
 
-@test(output = "null")
-fn test_zero_yields_returns_null_immediately() {
-    let c = no_yields()
-    let r = c.resume()
-    if r == null { print("null") } else { print(r) }
-}
-
-// ---- Body with side effects but no yield ----
 co fn side_effect_only() -> Coroutine<int> {
     print("ran")
 }
 
-@test(output = "ran\nnull")
-fn test_side_effects_no_yield() {
-    let c = side_effect_only()
+@test(output = "null\nran\nnull")
+fn test_bodies_without_yields_exhaust_immediately() {
+    let c = no_yields()
     let r = c.resume()
     if r == null { print("null") } else { print(r) }
+    let d = side_effect_only()
+    let s = d.resume()
+    if s == null { print("null") } else { print(s) }
 }

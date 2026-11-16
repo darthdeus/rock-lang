@@ -1,10 +1,15 @@
-// Phase 2: yield inside `if`/`else` branches.
-//
-// These tests will FAIL COMPILATION on the Phase 1 lowering (which
-// rejects any control flow inside co fn). They turn green when Phase 2
-// (conditional-yield lowering) lands.
+// Yields inside `if`/`else` branches, including nested ifs.
 
-// ---- yield in if-arm only (not else) ----
+fn drain(c: Coroutine<int>) {
+    loop {
+        let r = c.resume()
+        if r == null {
+            return
+        }
+        print(r)
+    }
+}
+
 co fn yield_in_if_only(flag: bool) -> Coroutine<int> {
     if flag {
         yield 1
@@ -12,20 +17,12 @@ co fn yield_in_if_only(flag: bool) -> Coroutine<int> {
     yield 2
 }
 
-@test(output = "1\n2")
-fn test_yield_in_if_only_true() {
-    let c = yield_in_if_only(true)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
+@test(output = "1\n2\n2")
+fn test_yield_in_if_only() {
+    drain(yield_in_if_only(true))
+    drain(yield_in_if_only(false))
 }
 
-@test(output = "2")
-fn test_yield_in_if_only_false() {
-    let c = yield_in_if_only(false)
-    print(c.resume() ?? -1)
-}
-
-// ---- yield in both arms of if/else ----
 co fn yield_in_both(flag: bool) -> Coroutine<int> {
     if flag {
         yield 100
@@ -35,21 +32,12 @@ co fn yield_in_both(flag: bool) -> Coroutine<int> {
     yield 999
 }
 
-@test(output = "100\n999")
-fn test_yield_both_arms_true() {
-    let c = yield_in_both(true)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
+@test(output = "100\n999\n200\n999")
+fn test_yield_both_arms() {
+    drain(yield_in_both(true))
+    drain(yield_in_both(false))
 }
 
-@test(output = "200\n999")
-fn test_yield_both_arms_false() {
-    let c = yield_in_both(false)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-}
-
-// ---- Multiple yields per arm ----
 co fn multi_yield_per_arm(flag: bool) -> Coroutine<int> {
     if flag {
         yield 1
@@ -60,21 +48,12 @@ co fn multi_yield_per_arm(flag: bool) -> Coroutine<int> {
     }
 }
 
-@test(output = "1\n2")
-fn test_multi_yield_per_arm_true() {
-    let c = multi_yield_per_arm(true)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
+@test(output = "1\n2\n10\n20")
+fn test_multi_yield_per_arm() {
+    drain(multi_yield_per_arm(true))
+    drain(multi_yield_per_arm(false))
 }
 
-@test(output = "10\n20")
-fn test_multi_yield_per_arm_false() {
-    let c = multi_yield_per_arm(false)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-}
-
-// ---- Nested if with yields at multiple depths ----
 co fn nested_if(a: int, b: int) -> Coroutine<int> {
     if a > 0 {
         yield 1
@@ -88,26 +67,9 @@ co fn nested_if(a: int, b: int) -> Coroutine<int> {
     yield 5
 }
 
-@test(output = "1\n2\n4\n5")
-fn test_nested_if_both_positive() {
-    let c = nested_if(1, 1)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-}
-
-@test(output = "1\n3\n4\n5")
-fn test_nested_if_only_a_positive() {
-    let c = nested_if(1, 0)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-}
-
-@test(output = "5")
-fn test_nested_if_neither_positive() {
-    let c = nested_if(0, 0)
-    print(c.resume() ?? -1)
+@test(output = "1\n2\n4\n5\n1\n3\n4\n5\n5")
+fn test_nested_if() {
+    drain(nested_if(1, 1))
+    drain(nested_if(1, 0))
+    drain(nested_if(0, 0))
 }

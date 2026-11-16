@@ -51,16 +51,13 @@ fn a_coroutine_that_is_never_resumed_is_untouched() {
 // `kill` is a terminal state distinct from completion: status reports
 // `dead` and `completed()` stays false (terminal_states.rock owns that
 // contract; this only checks an unresumed frame reaches it).
-@test(output = "dead\nfalse")
+@test(output = "dead\nfalse\nnone")
 fn an_unresumed_coroutine_can_be_killed() {
     let c = pulse()
     c.kill()
     print(c.status())
     print(c.completed())
-}
 
-@test(output = "none")
-fn resuming_a_killed_unresumed_coroutine_yields_nothing() {
     let c = pulse()
     c.kill()
     let ev = c.resume()
@@ -100,19 +97,11 @@ fn a_cleared_payload_slot_stays_invisible() {
 
 // --- values survive every width ---
 
-@test(output = "a1\nidle\nb2\ndone")
+@test(output = "a1\nidle\nb2\nnone")
 fn payload_and_empty_variants_alternate_correctly() {
     let c = pulse()
     for i in 0..4 {
-        let ev = c.resume()
-        if ev == null {
-            print("done")
-        } else {
-            match ev {
-                Signal::Note(s, n) => { print("{s}{n}") }
-                Signal::Idle => { print("idle") }
-            }
-        }
+        show(c.resume())
     }
 }
 
@@ -134,22 +123,6 @@ fn a_wide_frame_keeps_every_slot() {
     }
 }
 
-@test(output = "idle\nnone")
-fn a_narrow_frame_completes() {
-    let c = narrow()
-    let first = c.resume()
-    if first == null {
-        print("none")
-    } else {
-        match first {
-            Signal::Idle => { print("idle") }
-            Signal::Note(_, _) => { print("note") }
-        }
-    }
-    let second = c.resume()
-    if second == null { print("none") } else { print("yielded") }
-}
-
 fn show(ev: Signal?) {
     if ev == null {
         print("none")
@@ -159,6 +132,13 @@ fn show(ev: Signal?) {
             Signal::Idle => { print("idle") }
         }
     }
+}
+
+@test(output = "idle\nnone")
+fn a_narrow_frame_completes() {
+    let c = narrow()
+    show(c.resume())
+    show(c.resume())
 }
 
 @test(output = "lamp3\noff\ndone")

@@ -1,16 +1,8 @@
-// Premise oracle for coroutine-slot instance identity.
-//
-// Compare-before-write needs per-instance identity: a coroutine that replaces
-// its own slot with a fresh instance of the SAME co fn must not compare equal,
-// or the stale completion clears the new registration. Today that identity is
-// `rawequal` on the Task table. Stage 3 removes the Task box and keeps
-// the frame as the `coroutine` leaf, so the identity moves onto the FRAME --
-// sound only while the frame is one fresh table per creation.
-//
-// That is what this pins. If frames ever become pooled, interned, or otherwise
-// shared, stage 3 loses its identity source and the explicit instance token
-// stops being a stage-4 concern -- these tests go red at that moment, which is
-// the point.
+// Coroutine instance identity lives on the frame: a coroutine that replaces
+// its own slot with a fresh instance of the same co fn must not compare
+// equal, or a stale completion clears the new registration. This holds only
+// while every creation allocates a fresh frame; pooling or interning frames
+// would break these tests.
 
 co fn ticker() -> Coroutine<int> {
     yield 1
