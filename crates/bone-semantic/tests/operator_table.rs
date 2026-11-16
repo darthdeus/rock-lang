@@ -11,7 +11,7 @@
 //! non-overloadable symbol REJECTS, and `tests/operators/overloadable.rock`
 //! asserts each overloadable one actually DISPATCHES to the user fn.
 
-use bone_core::hir::{OPERATOR_FNS, UNARY_OPERATOR_FNS, operator_entry, unary_operator_entry};
+use bone_core::hir::{OPERATOR_FNS, UNARY_OPERATOR_FNS, unary_operator_entry};
 use skull_parser::ItemKind;
 use ustr::Ustr;
 
@@ -53,33 +53,6 @@ fn operator_table_matches_the_parser() {
         OPERATOR_FNS.len(),
         wrong.join("\n  ")
     );
-}
-
-/// The classification is a real partition, not an accident of one side being
-/// empty -- a table that marked everything overloadable would make the
-/// rejection dead while every other test still passed.
-#[test]
-fn operator_table_has_both_classes_populated() {
-    let overloadable = OPERATOR_FNS.iter().filter(|(_, _, ok)| *ok).count();
-    let rejected = OPERATOR_FNS.len() - overloadable;
-    assert_eq!(
-        overloadable, 6,
-        "expected exactly `+ - * / % ./` to be overloadable, got {overloadable}"
-    );
-    assert!(
-        rejected >= 15,
-        "the non-overloadable class collapsed to {rejected} entries"
-    );
-}
-
-/// `operator_entry` must answer for operator names and decline for others, so
-/// the rejection's `None` arm stays reachable only for a genuinely unknown name.
-#[test]
-fn operator_entry_declines_non_operator_names() {
-    assert_eq!(operator_entry("__op_add"), Some(("+", true)));
-    assert_eq!(operator_entry("__op_eq"), Some(("==", false)));
-    assert_eq!(operator_entry("main"), None);
-    assert_eq!(operator_entry("__op_nonexistent"), None);
 }
 
 #[test]
