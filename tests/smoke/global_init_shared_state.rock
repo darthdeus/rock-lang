@@ -1,0 +1,19 @@
+// Globals derived from shared mutable state run their initializers once per
+// program, so the second global reads the counter after the first one bumped
+// it. The JS test executor once emitted each test with its own initializers.
+
+global SHARED_COUNTER: int = 0
+
+fn sentinel_next_id() -> int {
+    SHARED_COUNTER = SHARED_COUNTER + 1
+    return SHARED_COUNTER
+}
+
+global sentinel_g1: int = sentinel_next_id()
+global sentinel_g2: int = sentinel_next_id()
+
+@test(output = "1")
+fn first_global() { print(sentinel_g1) }
+
+@test(output = "2")
+fn second_global() { print(sentinel_g2) }

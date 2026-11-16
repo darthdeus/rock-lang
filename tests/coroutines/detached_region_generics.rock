@@ -1,0 +1,57 @@
+// A generic call from a `co fn`'s detached regions still files its
+// specialization demand. Each case uses its own element type so no other
+// site in the file can supply the specialization it needs.
+
+global HOOK_LOG: [string] = []
+
+co fn hook_worker() -> Coroutine<int> {
+    on_killed {
+        HOOK_LOG.push("killed")
+    }
+    yield 1
+    yield 2
+}
+
+@test(output = "1 killed")
+fn a_generic_call_from_a_kill_hook() {
+    let c = hook_worker()
+    let _ = c.resume()
+    c.kill()
+    print("{HOOK_LOG.len()} {HOOK_LOG[0]}")
+}
+
+global DEFER_LOG: [int] = []
+
+co fn defer_worker() -> Coroutine<int> {
+    defer {
+        DEFER_LOG.push(7)
+    }
+    yield 1
+    yield 2
+}
+
+@test(output = "1 7")
+fn a_generic_call_from_a_defer() {
+    let c = defer_worker()
+    let _ = c.resume()
+    c.kill()
+    print("{DEFER_LOG.len()} {DEFER_LOG[0]}")
+}
+
+global HOOK_CALLS: int = 0
+
+fn bump_hook_calls() { HOOK_CALLS = HOOK_CALLS + 1 }
+
+co fn plain_hook_worker() -> Coroutine<int> {
+    on_killed { bump_hook_calls() }
+    yield 1
+    yield 2
+}
+
+@test(output = "1")
+fn a_non_generic_call_from_a_kill_hook() {
+    let c = plain_hook_worker()
+    let _ = c.resume()
+    c.kill()
+    print("{HOOK_CALLS}")
+}

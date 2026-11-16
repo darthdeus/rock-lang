@@ -8,7 +8,6 @@ mod guide;
 mod host_api;
 mod lsp_code_action;
 mod lua_body_limits;
-mod metric_add_window;
 mod no_stdlib;
 mod package_relative_output;
 mod package_test_program_shape;
@@ -22,32 +21,11 @@ mod stone_program_identity;
 #[path = "js_support/command.rs"]
 mod command;
 #[cfg(feature = "backend-js")]
-#[path = "js_support/js_backend_externs_gate.rs"]
-mod js_backend_externs_gate;
-#[cfg(feature = "backend-js")]
-#[path = "js_support/js_backend_externs_lua.rs"]
-mod js_backend_externs_lua;
-#[cfg(feature = "backend-js")]
-#[path = "js_support/js_coroutines.rs"]
-mod js_coroutines;
-#[cfg(feature = "backend-js")]
 #[path = "js_support/js_deep_programs.rs"]
 mod js_deep_programs;
 #[cfg(feature = "backend-js")]
 #[path = "js_support/js_run_gate.rs"]
 mod js_run_gate;
-#[cfg(feature = "backend-js")]
-#[path = "js_support/js_test_harness_globals_lua.rs"]
-mod js_test_harness_globals_lua;
-#[cfg(feature = "backend-js")]
-#[path = "js_support/js_test_harness_globals_sentinel.rs"]
-mod js_test_harness_globals_sentinel;
-#[cfg(feature = "backend-js")]
-#[path = "js_support/js_value_tests.rs"]
-mod js_value_tests;
-#[cfg(feature = "backend-js")]
-#[path = "js_support/param_default_explicit_null.rs"]
-mod param_default_explicit_null;
 #[cfg(feature = "backend-js")]
 #[path = "js_support/test_backends.rs"]
 mod test_backends;

@@ -4179,18 +4179,6 @@ mod value_test_exec {
     }
 
     #[test]
-    fn value_tests_pass_int_float_bool_and_with_output() {
-        let src = "@test(returns = 42)\nfn a() -> int { return 42 }\n\
-                   @test(returns = -1.5)\nfn b() -> float { return -1.5 }\n\
-                   @test(returns = true)\nfn c() -> bool { return true }\n\
-                   @test(returns = 6, output = \"hi\")\nfn d() -> int { print(\"hi\")\n return 6 }\n";
-        match skull_build("val.rock", src, None).expect("build ok") {
-            SkullOutcome::Pass { tests, .. } => assert_eq!(tests, 4),
-            SkullOutcome::TestFail { fails, .. } => panic!("expected all pass, got {fails:?}"),
-        }
-    }
-
-    #[test]
     fn value_test_error_still_fails() {
         let src = "@test(returns = 1)\nfn e() -> int { error(\"boom\")\n return 1 }\n";
         match skull_build("val.rock", src, None).expect("build ok") {

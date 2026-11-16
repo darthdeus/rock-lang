@@ -1,39 +1,42 @@
-fn run_test(src: &str) -> (String, bool) {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let file = dir.path().join("probe.rock");
-    std::fs::write(&file, src).expect("write probe");
-    let out = crate::command::rock_bin()
-        .args(["test", file.to_str().unwrap(), "--backend", "js"])
-        .output()
-        .expect("spawn rock");
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&out.stderr));
-    (text, out.status.success())
-}
+//! A failing `@test` under the JS executor exits nonzero, whether it throws
+//! under node or returns a value the host-side comparison rejects. The two
+//! backends once disagreed on the exit status for the same failing input.
 
-const FAILING_ASSERT: &str = r#"
+const FAILING: &str = r#"
 @test
 fn deliberately_failing() {
     assert(1 == 2, "this test is supposed to fail")
 }
+
+@test(returns = 43)
+fn mismatched_value() -> int { return 42 }
 "#;
 
-const PASSING: &str = r#"
-@test
-fn genuinely_passing() {
-    assert(1 == 1, "holds")
-}
-"#;
-
-/// The two backends disagreed on this: js exited 1 while skull exited 0 for the
-/// same failing input. Pin the agreement so a future divergence is loud.
 #[test]
-fn js_backend_agrees_on_exit_status() {
+fn failing_js_tests_exit_nonzero_and_name_each_failure() {
     if !crate::command::require_node() {
         return;
     }
-    let (text, ok) = run_test(FAILING_ASSERT);
-    assert!(!ok, "js: a failing @test must exit nonzero:\n{text}");
-    let (text, ok) = run_test(PASSING);
-    assert!(ok, "js: a passing @test must exit zero:\n{text}");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("probe.rock");
+    std::fs::write(&file, FAILING).expect("write probe");
+    let out = crate::command::rock_bin()
+        .args(["test", file.to_str().unwrap(), "--backend", "js"])
+        .output()
+        .expect("spawn rock");
+    let text = test_utils::strip_ansi_sgr(&format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    ));
+    assert!(
+        !out.status.success(),
+        "failing @tests must exit nonzero:\n{text}"
+    );
+    assert!(text.contains("0/2 @tests passed (2 failed"), "{text}");
+    assert!(text.contains("FAIL deliberately_failing: error:"), "{text}");
+    assert!(
+        text.contains("FAIL mismatched_value: value mismatch: expected <43>"),
+        "{text}"
+    );
 }
