@@ -21,10 +21,6 @@ fn double_string(x: string, suffix: string) -> string {
     return "{x}{x}{suffix}"
 }
 
-fn string_double(x: string, suffix: string) -> string {
-    return "{x}{x}{suffix}"
-}
-
 struct Point { x: int, y: int }
 
 struct Rectangle { width: int, height: int }
@@ -43,121 +39,74 @@ enum Color { Red, Green, Blue }
 enum Option<T> { Some(T), None }
 
 // ============================================
-// Basic codegen tests
+// Basic codegen, interpolation, methods, loops
 // ============================================
 
-@test(output = "4")
-fn simple_codegen_arithmetic() {
+@test(output = "4\n5\n7\n37")
+fn simple_codegen_arithmetic_and_increment() {
     print(1 + 3)
-}
-
-@test(output = "5\n7")
-fn simple_codegen_increment() {
     let x = 5
     print(x++)
     print(++x)
-}
-
-// ============================================
-// String interpolation tests
-// ============================================
-
-@test(output = "a1b2c7")
-fn string_interpolation_multiple() {
-    print("a{1}b{2}c{3+4}")
-}
-
-@test(output = "x=42\nx = 42")
-fn string_interpolation_variable() {
-    let x = 42
-    print("x={x}")
-    print("x = {x}")
-}
-
-@test(output = "calc=9")
-fn string_interpolation_arithmetic() {
-    print("calc={(1+2)*3}")
-}
-
-@test(output = "truth: true, lie: false")
-fn string_interpolation_booleans() {
-    print("truth: {true}, lie: {false}")
-}
-
-@test(output = "nothing: nil")
-fn string_interpolation_null() {
-    print("nothing: {null}")
-}
-
-@test(output = "say hi!")
-fn string_interpolation_nested_string() {
-    print("say {\"hi\"}!")
-}
-
-// ============================================
-// Method tests
-// ============================================
-
-@test(output = "hihiho\nhihiho")
-fn simple_method_codegen() {
-    print("hi".double_string("ho"))
-    print("hi".string_double("ho"))
-}
-
-@test(output = "5")
-fn more_method_codegen() {
-    let v = FixVec2 { x: 3, y: 4 }
-    print(v.length())
-}
-
-// ============================================
-// Let and var tests
-// ============================================
-
-@test(output = "37")
-fn let_reassignment() {
-    let x = 5
     x = 37
     print(x)
 }
 
-// ============================================
-// Loop tests
-// ============================================
+@test(output = "a1b2c7\nx=42\nx = 42\ncalc=9\ntruth: true, lie: false\nnothing: nil\nsay hi!")
+fn string_interpolation_shapes() {
+    print("a{1}b{2}c{3+4}")
+    let x = 42
+    print("x={x}")
+    print("x = {x}")
+    print("calc={(1+2)*3}")
+    print("truth: {true}, lie: {false}")
+    print("nothing: {null}")
+    print("say {\"hi\"}!")
+}
 
-@test(output = "0\n1\n2\n3\n4")
-fn loop_with_index() {
+@test(output = "hihiho\n5\n15\n15")
+fn method_and_struct_codegen() {
+    print("hi".double_string("ho"))
+    let v = FixVec2 { x: 3, y: 4 }
+    print(v.length())
+    let p = Point { x: 5, y: 10 }
+    print(p.x + p.y)
+    let rect = Rectangle { width: 3, height: 5 }
+    print(rect.area())
+}
+
+@test(output = "0\n1\n2\n0 \n1 \n2 \n1 \n2 \n3")
+fn loops() {
     let i = 0
-    while i < 5 {
+    while i < 3 {
         print(i)
         i += 1
     }
-}
-
-@test(output = "0 \n1 \n2 \n3 \n4")
-fn for_range_space() {
-    for i in 0..5 {
-        print("{i} ")
+    for j in 0..3 {
+        print("{j} ")
+    }
+    let arr = [1, 2, 3]
+    for x in arr {
+        print("{x} ")
     }
 }
 
-// ============================================
-// Tuple tests
-// ============================================
-
-@test(output = "4\n2")
-fn tuple_access() {
+@test(output = "4\n2\n8")
+fn tuple_access_and_closure_capture() {
     let t = (4, 2)
     print(t.0)
     print(t.1)
+    let x = 3
+    let add = y => x + y
+    print(add(5))
 }
 
 // ============================================
 // Enum tests
 // ============================================
 
-@test
-fn enum_basic() {
+@test(output = "42")
+fn enum_compare_and_payload_match() {
     let c1 = Color::Red
     let c2 = Color::Green
     let c3 = Color::Blue
@@ -166,14 +115,9 @@ fn enum_basic() {
     assert_eq(c2 == Color::Green, true)
     assert_eq(c3 == Color::Blue, true)
     assert_eq(c1 == c2, false)
-}
 
-@test(output = "42")
-fn enum_with_data() {
     let a = Option::Some(42)
     let _b: Option<int> = Option::None
-    
-    // Test pattern matching instead
     match a {
         Option::Some(val) => print(val),
         Option::None => print(0)
@@ -181,121 +125,45 @@ fn enum_with_data() {
 }
 
 // ============================================
-// Struct tests
+// Safe navigation, casts, maps, nullables
 // ============================================
 
-@test(output = "15")
-fn struct_field_sum() {
-    let p = Point { x: 5, y: 10 }
-    print(p.x + p.y)
-}
-
-@test(output = "15")
-fn struct_method() {
-    let rect = Rectangle { width: 3, height: 5 }
-    print(rect.area())
-}
-
-// ============================================
-// Closure tests
-// ============================================
-
-@test(output = "8")
-fn closure_capture() {
-    let x = 3
-    let add = y => x + y
-    print(add(5))
-}
-
-// ============================================
-// Safe navigation tests
-// ============================================
-
-@test(output = "5\nnil")
-fn safe_navigation_basic() {
+@test(output = "5\nnil\n10\nnil")
+fn safe_navigation() {
     let f_val = Foo { value: 5 }
     let f: Foo? = f_val
     print(f?.value)
-    
     let g: Foo? = null
     print(g?.value)
-}
 
-@test(output = "10\nnil")
-fn safe_navigation_chain() {
     let o1 = Outer { inner: Inner { value: 10 } }
     print(o1.inner?.value)
-    
     let o2 = Outer { inner: null }
     print(o2.inner?.value)
 }
 
-// ============================================
-// Type casting tests
-// ============================================
-
-@test(output = "42\n42")
+@test(output = "42")
 fn type_casting() {
-    let x = 42
     let y = 42.0
-    
-    print(x)
     print(float_to_int(y))
-}
 
-@test
-fn float_int_casting() {
     let f: float = 3.14
     let i: int = f as int
     let round_trip: float = i as float
-
     assert_eq(i, 3)
     assert_eq(round_trip, 3.0)
 }
 
-// ============================================
-// Array/Vec tests
-// ============================================
-
-@test(output = "1 \n2 \n3")
-fn array_iteration() {
-    let arr = [1, 2, 3]
-    for x in arr {
-        print("{x} ")
-    }
-}
-
-// ============================================
-// Map tests
-// ============================================
-
-@test(output = "100")
-fn map_basic() {
+@test(output = "100\nnil\nValue: 42\nDefault: 0")
+fn maps_and_nullables() {
     let m: Map<string, int> = map_new()
     insert(m, "hp", 100)
     print(get(m, "hp"))
-}
-
-@test(output = "nil")
-fn map_missing_key() {
-    let m: Map<string, int> = map_new()
     print(get(m, "missing"))
-}
-
-// ============================================
-// Error handling tests
-// ============================================
-
-@test(output = "Value: 42")
-fn nullable_unwrap() {
     let x: int? = 42
     print("Value: {unwrap(x)}")
-}
-
-@test(output = "Default: 0")
-fn nullable_unwrap_or() {
-    let x: int? = null
-    print("Default: {unwrap_or(x, 0)}")
+    let n: int? = null
+    print("Default: {unwrap_or(n, 0)}")
 }
 
 // ============================================
@@ -313,11 +181,9 @@ co fn evens(max: int) -> Coroutine<int> {
 @test(output = "0\n2\n4\n6\n8")
 fn coroutine_with_loop() {
     let coro = evens(10)
-    print(coro.resume())
-    print(coro.resume())
-    print(coro.resume())
-    print(coro.resume())
-    print(coro.resume())
+    for _i in 0..5 {
+        print(coro.resume())
+    }
 }
 
 // ============================================
@@ -358,11 +224,11 @@ struct Player {
 global global_counter: int = 100
 
 // ============================================
-// Compound Assignment Tests - Basic
+// Compound assignment
 // ============================================
 
-@test(output = "15\n10\n30\n3")
-fn compound_assign_basic() {
+@test(output = "15\n10\n30\n3\n17\n15\n90\n16")
+fn compound_assign() {
     let a = 5
     let b = 20
     let c = 6
@@ -379,49 +245,26 @@ fn compound_assign_basic() {
 
     d = d ./ 4
     print(d)
-}
 
-@test(output = "17")
-fn compound_assign_precedence() {
     let x = 5
     x += 3 * 4  // Should be 5 + (3 * 4) = 17
     print(x)
-}
 
-// ============================================
-// Compound Assignment with Struct Fields
-// ============================================
-
-@test(output = "15\n90")
-fn compound_assign_with_nested_fields() {
     let player = Player {
         position: AdvPoint { x: 10, y: 20 },
         health: 100
     }
-
     player.position.x += 5
     player.health -= 10
-
     print(player.position.x)
     print(player.health)
-}
 
-// ============================================
-// Compound Assignment in Control Flow
-// ============================================
-
-@test(output = "16")
-fn compound_assign_in_while() {
-    let x = 1
-    while x < 10 {
-        x *= 2
+    let w = 1
+    while w < 10 {
+        w *= 2
     }
-    print(x)
+    print(w)
 }
-
-// ============================================
-// Compound Assignment with Globals
-// ============================================
 
 @test(output = "150")
 fn compound_assign_with_globals() {
@@ -453,41 +296,17 @@ fn complex_operator_overloading() {
 }
 
 // ============================================
-// Array/Vec Creation and Access
+// Arrays and vecs
 // ============================================
 
-@test(output = "1\n2\n3")
-fn array_literal_creation_and_access() {
-    let arr = [1, 2, 3]
-    print(arr[0])
-    print(arr[1])
-    print(arr[2])
-}
-
-@test(output = "20\n30")
-fn array_indexing_with_variables_and_expressions() {
-    let arr = [10, 20, 30, 40]
-    let i = 1
-    print(arr[i])
-
-    let j = i + 1
-    print(arr[j])
-}
-
-// ============================================
-// Array/Vec Assignment (Mutation)
-// ============================================
-
-@test(output = "0\n1\n2\n10\n11\n12")
-fn zero_based_indexing_comprehensive() {
+@test(output = "0\n1\n2\n10\n11\n12\n20\n30")
+fn array_index_read_write() {
     let arr = [0, 1, 2]
 
-    // Basic indexing
     print(arr[0])
     print(arr[1])
     print(arr[2])
 
-    // Modify via indexing
     arr[0] = 10
     arr[1] = 11
     arr[2] = 12
@@ -495,34 +314,23 @@ fn zero_based_indexing_comprehensive() {
     print(arr[0])
     print(arr[1])
     print(arr[2])
+
+    let wide = [10, 20, 30, 40]
+    let i = 1
+    print(wide[i])
+    let j = i + 1
+    print(wide[j])
 }
 
-@test(output = "4")
-fn vec_indexing_read_write() {
-    let v = [1, 2, 3]
-    vec_push(v, 4)
-    let last_index = vec_len(v) - 1
-    print(v[last_index])
-}
-
-// ============================================
-// Array Operations
-// ============================================
-
-@test(output = "4\n40\n30")
-fn array_literal_desugaring() {
+@test(output = "4\n40\n30\n40")
+fn array_literal_push() {
     let v = [10, 20, 30]
     vec_push(v, 40)
     print(vec_len(v))
     print(vec_get(v, 3))
     print(vec_get(v, 2))
-}
-
-@test(output = "3\n20")
-fn arrays_in_functions() {
-    let arr = [10, 20, 30]
-    print(get_array_length(arr))
-    print(get_second_element(arr))
+    let last_index = vec_len(v) - 1
+    print(v[last_index])
 }
 
 fn get_array_length(arr: [int]) -> int {
@@ -533,8 +341,17 @@ fn get_second_element(arr: [int]) -> int {
     return arr[1]
 }
 
-@test(output = "3\n1\n2\n3")
-fn arrays_in_functions_complex() {
+fn create_and_process_array() -> [int] {
+    let arr = [1, 2]
+    vec_push(arr, 3)
+    return arr
+}
+
+@test(output = "3\n20\n3\n1\n2\n3")
+fn arrays_in_functions() {
+    let arr = [10, 20, 30]
+    print(get_array_length(arr))
+    print(get_second_element(arr))
     let result = create_and_process_array()
     print(vec_len(result))
     print(result[0])
@@ -542,21 +359,9 @@ fn arrays_in_functions_complex() {
     print(result[2])
 }
 
-fn create_and_process_array() -> [int] {
-    let arr = [1, 2]
-    vec_push(arr, 3)
-    return arr
-}
-
 // ============================================
 // Block Return Semantics
 // ============================================
-
-@test(output = "early")
-fn nested_if_with_return_branches() {
-    let result = test_nested_returns(true)
-    print(result)
-}
 
 fn test_nested_returns(flag: bool) -> string {
     if flag {
@@ -568,12 +373,6 @@ fn test_nested_returns(flag: bool) -> string {
     return "late"
 }
 
-@test(output = "then")
-fn nested_if_with_return_in_both_branches() {
-    let result = test_both_branches(true)
-    print(result)
-}
-
 fn test_both_branches(condition: bool) -> string {
     if condition {
         return "then"
@@ -582,22 +381,16 @@ fn test_both_branches(condition: bool) -> string {
     }
 }
 
-@test(output = "42")
-fn bare_expression_last() {
-    print(get_value_implicit())
-}
-
 fn get_value_implicit() -> int {
     let x = 40
     x + 2  // Implicit return
 }
 
-// ============================================
-// Advanced Let Binding
-// ============================================
-
-@test(output = "42")
-fn let_binding_with_if_else() {
+@test(output = "early\nthen\n42\n42")
+fn block_return_semantics() {
+    print(test_nested_returns(true))
+    print(test_both_branches(true))
+    print(get_value_implicit())
     let condition = true
     let value = if condition { 42 } else { 0 }
     print(value)

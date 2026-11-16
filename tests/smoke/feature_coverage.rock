@@ -52,15 +52,11 @@ fn nullable_tuple_dot_all_cases() {
 
 // -- projecting tuple fields out of a vec via .map(_.N) --
 
-@test(output = "1\n2\na\nb")
+@test(output = "1\n2\na\nb\n0\n0")
 fn vec_tuple_dot_both() {
     let pairs: [(int, string)] = [(1, "a"), (2, "b")]
     for x in pairs.iter().map(_.0).collect() { print(x) }
     for x in pairs.iter().map(_.1).collect() { print(x) }
-}
-
-@test(output = "0\n0")
-fn vec_tuple_dot_empty() {
     let empty: [(int, string)] = []
     print(vec_len(empty.iter().map(_.0).collect()))
     print(vec_len(empty.iter().map(_.1).collect()))
@@ -84,16 +80,12 @@ fn vec_tuple_dot0_from_map() {
 
 // -- ?.method() --
 
-@test(output = "100\ntrue")
-fn safenav_method_struct() {
+@test(output = "100\ntrue\n0")
+fn safenav_method() {
     let mob: Mob? = Mob { name: "Orc", health: 100 }
     print(mob?.get_hp())
     let mob2: Mob? = null
     print(mob2?.get_hp() == null)
-}
-
-@test(output = "0")
-fn safenav_method_coalesce() {
     let x: int? = null
     print(x?.double() ?? 0)
 }
@@ -117,16 +109,6 @@ fn safenav_let_basic() {
     print(x?.let { x * 2 })
     let y: int? = null
     print(y?.let { y * 2 } == null)
-}
-
-// -- ?.0 / ?.1 --
-
-@test(output = "Orc\ntrue")
-fn safenav_tuple_index() {
-    let mobs: Arena<Mob> = arena_new()
-    mobs.insert(Mob { name: "Orc", health: 100 })
-    print(mobs.pairs().find(_.1.name == "Orc")?.1.unwrap().name)
-    print(mobs.pairs().find(_.1.name == "Ghost")?.1 == null)
 }
 
 // -- Full chain: find -> ?.1 -> ?.field -> ?? --

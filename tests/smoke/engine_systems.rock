@@ -128,25 +128,20 @@ fn reset_world() {
 // ============================================================================
 
 @test
-fn test_init_systems_registered() {
+fn test_systems_registered() {
     assert_eq(vec_len(INIT_SYSTEMS), 2)
-}
-
-@test
-fn test_update_systems_registered() {
     assert_eq(vec_len(UPDATE_SYSTEMS), 4)
-}
-
-@test
-fn test_reset_systems_registered() {
     assert_eq(vec_len(RESET_SYSTEMS), 2)
 }
 
 @test
-fn test_init_systems_run() {
+fn test_init_and_reset_systems_run() {
     clear(INIT_LOG)
     run_init_systems()
     assert_eq(vec_len(INIT_LOG), 2)
+    clear(RESET_LOG)
+    run_reset_systems()
+    assert_eq(vec_len(RESET_LOG), 2)
 }
 
 @test
@@ -160,11 +155,4 @@ fn test_update_systems_run_in_stage_order() {
     assert_eq(UPDATE_LOG[1], "physics")
     assert_eq(UPDATE_LOG[2], "ai")
     assert_eq(UPDATE_LOG[3], "render")
-}
-
-@test
-fn test_reset_systems_run() {
-    clear(RESET_LOG)
-    run_reset_systems()
-    assert_eq(vec_len(RESET_LOG), 2)
 }

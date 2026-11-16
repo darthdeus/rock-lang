@@ -3,49 +3,20 @@
 // ---------------------------------------------------------------------------
 // Encoder
 
+// Whole-valued floats lose the trailing .0 -- keeps round-trips compact.
+// Non-finite floats encoding as null is pinned in number_exact.rock.
 @test
-fn test_encode_null() {
+fn test_encode_scalars() {
     assert_eq(json_encode(json_null()), "null")
-}
-
-@test
-fn test_encode_bool() {
     assert_eq(json_encode(json_bool(true)), "true")
     assert_eq(json_encode(json_bool(false)), "false")
-}
-
-@test
-fn test_encode_int() {
     assert_eq(json_encode(json_int(0)), "0")
     assert_eq(json_encode(json_int(42)), "42")
     assert_eq(json_encode(json_int(-7)), "-7")
-}
-
-@test
-fn test_encode_float_whole_renders_as_int() {
-    // Whole-valued floats lose the trailing .0 — keeps round-trips compact.
     assert_eq(json_encode(json_float(1.0)), "1")
     assert_eq(json_encode(json_float(-3.0)), "-3")
-}
-
-@test
-fn test_encode_float_fractional() {
     assert_eq(json_encode(json_float(1.5)), "1.5")
     assert_eq(json_encode(json_float(-2.25)), "-2.25")
-}
-
-@test
-fn test_encode_float_nan_inf_become_null() {
-    let nan = 0.0 / 0.0
-    let inf = 1.0 / 0.0
-    let ninf = -1.0 / 0.0
-    assert_eq(json_encode(json_float(nan)), "null")
-    assert_eq(json_encode(json_float(inf)), "null")
-    assert_eq(json_encode(json_float(ninf)), "null")
-}
-
-@test
-fn test_encode_string_basic() {
     assert_eq(json_encode(json_str("hello")), "\"hello\"")
     assert_eq(json_encode(json_str("")), "\"\"")
 }
@@ -66,6 +37,8 @@ fn test_encode_string_escapes() {
     assert_eq(json_encode(json_str("a\nb")), "\"a\\nb\"")
     assert_eq(json_encode(json_str("a\tb")), "\"a\\tb\"")
     assert_eq(json_encode(json_str("a\rb")), "\"a\\rb\"")
+    // 0x01 -> \u0001
+    assert_eq(json_encode(json_str(string_char(1))), "\"\\u0001\"")
 }
 
 fn json_decode_str(src: string) -> string {
@@ -88,38 +61,15 @@ fn test_decode_string_escape_units() {
 }
 
 @test
-fn test_encode_string_control_char() {
-    // 0x01 -> 
-    let s = string_char(1)
-    assert_eq(json_encode(json_str(s)), "\"\\u0001\"")
-}
-
-@test
-fn test_encode_array_empty() {
-    let a: [JsonValue] = []
-    assert_eq(json_encode(json_array(a)), "[]")
-}
-
-@test
-fn test_encode_array_simple() {
-    let a: [JsonValue] = [json_int(1), json_int(2), json_int(3)]
-    assert_eq(json_encode(json_array(a)), "[1,2,3]")
-}
-
-@test
-fn test_encode_array_mixed() {
-    let a: [JsonValue] = [json_int(1), json_str("x"), json_bool(true), json_null()]
-    assert_eq(json_encode(json_array(a)), "[1,\"x\",true,null]")
-}
-
-@test
-fn test_encode_object_empty() {
-    let m: Map<string, JsonValue> = map_new()
-    assert_eq(json_encode(json_object(m)), "{{}}")
-}
-
-@test
-fn test_encode_object_sorted_keys() {
+fn test_encode_arrays_and_objects() {
+    let empty: [JsonValue] = []
+    assert_eq(json_encode(json_array(empty)), "[]")
+    let ints: [JsonValue] = [json_int(1), json_int(2), json_int(3)]
+    assert_eq(json_encode(json_array(ints)), "[1,2,3]")
+    let mixed: [JsonValue] = [json_int(1), json_str("x"), json_bool(true), json_null()]
+    assert_eq(json_encode(json_array(mixed)), "[1,\"x\",true,null]")
+    let none: Map<string, JsonValue> = map_new()
+    assert_eq(json_encode(json_object(none)), "{{}}")
     // Encoder sorts keys for deterministic output.
     let m: Map<string, JsonValue> = map_new()
     insert(m, "b", json_int(2))
@@ -142,68 +92,34 @@ fn test_encode_nested() {
 // Decoder
 
 @test
-fn test_decode_null() {
+fn test_decode_scalars() {
     let v = json_decode("null")
     assert(v != null, "decode null")
     assert(json_is_null(v.unwrap()), "is null")
-}
-
-@test
-fn test_decode_bool() {
     let t = json_decode("true")
     assert(t != null, "decode true")
     assert_eq(json_as_bool(t.unwrap()) ?? false, true)
     let f = json_decode("false")
     assert(f != null, "decode false")
     assert_eq(json_as_bool(f.unwrap()) ?? true, false)
+    let i = json_decode("42")
+    assert(i != null, "decode int")
+    assert_eq(json_as_int(i.unwrap()) ?? 0, 42)
+    assert_eq(json_as_int(json_decode("-7").unwrap()) ?? 0, -7)
+    let pi = json_as_float(json_decode("3.14").unwrap()) ?? 0.0
+    assert(pi > 3.13 && pi < 3.15, "float ~ 3.14")
+    assert_eq(json_as_float(json_decode("1e3").unwrap()) ?? 0.0, 1000.0)
+    let small = json_as_float(json_decode("-2.5e-2").unwrap()) ?? 0.0
+    assert(small > -0.0251 && small < -0.0249, "approx -0.025")
 }
 
 @test
-fn test_decode_int() {
-    let v = json_decode("42")
-    assert(v != null, "decode int")
-    assert_eq(json_as_int(v.unwrap()) ?? 0, 42)
-    let n = json_decode("-7")
-    assert_eq(json_as_int(n.unwrap()) ?? 0, -7)
-}
-
-@test
-fn test_decode_float() {
-    let v = json_decode("3.14")
-    assert(v != null, "decode float")
-    let f = json_as_float(v.unwrap()) ?? 0.0
-    assert(f > 3.13 && f < 3.15, "float ~ 3.14")
-}
-
-@test
-fn test_decode_float_exponent() {
-    let v = json_decode("1e3")
-    assert(v != null, "decode 1e3")
-    assert_eq(json_as_float(v.unwrap()) ?? 0.0, 1000.0)
-    let n = json_decode("-2.5e-2")
-    let f = json_as_float(n.unwrap()) ?? 0.0
-    assert(f > -0.0251 && f < -0.0249, "approx -0.025")
-}
-
-@test
-fn test_decode_string_basic() {
-    let v = json_decode("\"hello\"")
-    assert(v != null, "decode string")
-    assert_eq(json_as_str(v.unwrap()) ?? "", "hello")
-}
-
-@test
-fn test_decode_string_escapes() {
-    let v = json_decode("\"a\\\"b\\nc\\\\d\"")
-    assert(v != null, "decode escapes")
-    assert_eq(json_as_str(v.unwrap()) ?? "", "a\"b\nc\\d")
-}
-
-@test
-fn test_decode_string_escaped_quotes() {
-    let v = json_decode("\"a\\\"b\\\"c\\\"d\"")
-    assert(v != null, "decode escaped quotes")
-    assert_eq(json_as_str(v.unwrap()) ?? "", "a\"b\"c\"d")
+fn test_decode_strings() {
+    assert_eq(json_decode_str("\"hello\""), "hello")
+    assert_eq(json_decode_str("\"a\\\"b\\nc\\\\d\""), "a\"b\nc\\d")
+    assert_eq(json_decode_str("\"a\\\"b\\\"c\\\"d\""), "a\"b\"c\"d")
+    // \u0041 = "A"
+    assert_eq(json_decode_str("\"\\u0041\""), "A")
 }
 
 @test
@@ -214,23 +130,10 @@ fn test_decode_string_mixed_escaped_runs() {
 }
 
 @test
-fn test_decode_string_unicode_escape() {
-    // A = "A"
-    let v = json_decode("\"\\u0041\"")
-    assert(v != null, "decode unicode")
-    assert_eq(json_as_str(v.unwrap()) ?? "", "A")
-}
-
-@test
-fn test_decode_array_empty() {
-    let v = json_decode("[]")
-    assert(v != null, "decode []")
-    let arr = json_as_array(v.unwrap()) ?? []
-    assert_eq(arr.len(), 0)
-}
-
-@test
-fn test_decode_array_simple() {
+fn test_decode_arrays() {
+    let empty = json_decode("[]")
+    assert(empty != null, "decode []")
+    assert_eq((json_as_array(empty.unwrap()) ?? []).len(), 0)
     let v = json_decode("[1, 2, 3]")
     assert(v != null, "decode array")
     let arr = json_as_array(v.unwrap()) ?? []
@@ -299,26 +202,14 @@ fn test_decode_nested() {
 // Errors
 
 @test
-fn test_decode_empty_string_fails() {
+fn test_decode_malformed_fails() {
     assert(json_decode("") == null, "empty input fails")
-}
-
-@test
-fn test_decode_garbage_fails() {
     assert(json_decode("xyz") == null, "garbage fails")
     assert(json_decode("[1,") == null, "unterminated array fails")
     assert(json_decode("{{\"a\":") == null, "unterminated object fails")
     assert(json_decode("\"unterminated") == null, "unterminated string fails")
-}
-
-@test
-fn test_decode_trailing_garbage_fails() {
     assert(json_decode("1 2") == null, "trailing token fails")
     assert(json_decode("[1,2]xyz") == null, "trailing garbage after array fails")
-}
-
-@test
-fn test_decode_truncated_unicode_fails() {
     assert(json_decode("\"\\u00\"") == null, "short unicode escape fails")
     assert(json_decode("\"\\uZZZZ\"") == null, "non-hex unicode fails")
 }
@@ -327,35 +218,22 @@ fn test_decode_truncated_unicode_fails() {
 // Roundtrip
 
 @test
-fn test_roundtrip_scalar() {
+fn test_roundtrip() {
     roundtrip_assert(json_int(123))
     roundtrip_assert(json_float(1.5))
     roundtrip_assert(json_str("hello world"))
     roundtrip_assert(json_bool(true))
     roundtrip_assert(json_null())
-}
-
-@test
-fn test_roundtrip_array() {
-    let v = json_array([json_int(1), json_str("x"), json_null()])
-    roundtrip_assert(v)
-}
-
-@test
-fn test_roundtrip_object() {
+    roundtrip_assert(json_str(""))
+    roundtrip_assert(json_str("with \"quotes\" inside"))
+    roundtrip_assert(json_str("line1\nline2\tindented"))
+    roundtrip_assert(json_str("backslash: \\ end"))
+    roundtrip_assert(json_array([json_int(1), json_str("x"), json_null()]))
     let m: Map<string, JsonValue> = map_new()
     insert(m, "a", json_int(1))
     insert(m, "name", json_str("rock"))
     insert(m, "ok", json_bool(true))
     roundtrip_assert(json_object(m))
-}
-
-@test
-fn test_roundtrip_special_strings() {
-    roundtrip_assert(json_str(""))
-    roundtrip_assert(json_str("with \"quotes\" inside"))
-    roundtrip_assert(json_str("line1\nline2\tindented"))
-    roundtrip_assert(json_str("backslash: \\ end"))
 }
 
 fn roundtrip_assert(v: JsonValue) {

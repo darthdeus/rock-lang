@@ -13,71 +13,27 @@ fn test_json_surrogate_pair_is_one_code_point() {
 // The byte layouts below are luajit's string representation (UTF-8 bytes).
 // JS strings are UTF-16; tests/strings/code_points.rock covers both backends.
 
-// Surrogate pair for the emoji at U+1F600 must decode to a 4-byte UTF-8 sequence.
+fn assert_units(s: string, units: [int]) {
+    assert_eq(s.len(), units.len())
+    for i in 0..units.len() { assert_eq(s.unit_at(i), units[i]) }
+}
+
+// Surrogate pair for the emoji at U+1F600 must decode to a 4-byte UTF-8
+// sequence, and from_codepoint must encode each width boundary.
 @test(backends = "lua")
-fn test_json_surrogate_pair_emoji() {
+fn test_utf8_byte_layouts() {
     let decoded = json_decode("\"\\ud83d\\ude00\"")
     assert(decoded != null)
     let s = json_as_str(decoded.unwrap())
     assert(s != null)
-    let result = s.unwrap()
-    assert_eq(result.len(), 4)
-    assert_eq(result.unit_at(0), 0xF0)
-    assert_eq(result.unit_at(1), 0x9F)
-    assert_eq(result.unit_at(2), 0x98)
-    assert_eq(result.unit_at(3), 0x80)
-}
-
-@test(backends = "lua")
-fn test_from_codepoint_1byte_boundary() {
-    let a = from_codepoint(0x7F)
-    assert_eq(a.len(), 1)
-    assert_eq(a.unit_at(0), 0x7F)
-
-    let b = from_codepoint(0x80)
-    assert_eq(b.len(), 2)
-    assert_eq(b.unit_at(0), 0xC2)
-    assert_eq(b.unit_at(1), 0x80)
-}
-
-@test(backends = "lua")
-fn test_from_codepoint_2byte_boundary() {
-    let a = from_codepoint(0x7FF)
-    assert_eq(a.len(), 2)
-    assert_eq(a.unit_at(0), 0xDF)
-    assert_eq(a.unit_at(1), 0xBF)
-
-    let b = from_codepoint(0x800)
-    assert_eq(b.len(), 3)
-    assert_eq(b.unit_at(0), 0xE0)
-    assert_eq(b.unit_at(1), 0xA0)
-    assert_eq(b.unit_at(2), 0x80)
-}
-
-@test(backends = "lua")
-fn test_from_codepoint_3byte_boundary() {
-    let a = from_codepoint(0xFFFF)
-    assert_eq(a.len(), 3)
-    assert_eq(a.unit_at(0), 0xEF)
-    assert_eq(a.unit_at(1), 0xBF)
-    assert_eq(a.unit_at(2), 0xBF)
-
-    let b = from_codepoint(0x10000)
-    assert_eq(b.len(), 4)
-    assert_eq(b.unit_at(0), 0xF0)
-    assert_eq(b.unit_at(1), 0x90)
-    assert_eq(b.unit_at(2), 0x80)
-    assert_eq(b.unit_at(3), 0x80)
-}
-
-@test(backends = "lua")
-fn test_from_codepoint_max() {
-    let a = from_codepoint(0x10FFFF)
-    assert_eq(a.len(), 4)
-    assert_eq(a.unit_at(0), 0xF4)
-    assert_eq(a.unit_at(1), 0x8F)
-    assert_eq(a.unit_at(2), 0xBF)
-    assert_eq(a.unit_at(3), 0xBF)
+    assert_units(s.unwrap(), [0xF0, 0x9F, 0x98, 0x80])
+    assert_units(from_codepoint(0x7F), [0x7F])
+    assert_units(from_codepoint(0x80), [0xC2, 0x80])
+    assert_units(from_codepoint(0x7FF), [0xDF, 0xBF])
+    assert_units(from_codepoint(0x800), [0xE0, 0xA0, 0x80])
+    assert_units(from_codepoint(0xFFFF), [0xEF, 0xBF, 0xBF])
+    assert_units(from_codepoint(0x10000), [0xF0, 0x90, 0x80, 0x80])
+    assert_units(from_codepoint(0x10FFFF), [0xF4, 0x8F, 0xBF, 0xBF])
 }
 
 @intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
@@ -86,17 +42,9 @@ fn test_from_codepoint_max() {
 """
 
 @test
-fn test_from_codepoint_negative_errors() {
+fn test_from_codepoint_invalid_errors() {
     assert(try_call(() => { let _x = from_codepoint(-1) }))
-}
-
-@test
-fn test_from_codepoint_above_max_errors() {
     assert(try_call(() => { let _x = from_codepoint(0x110000) }))
-}
-
-@test
-fn test_from_codepoint_surrogate_errors() {
     assert(try_call(() => { let _x = from_codepoint(0xD800) }))
     assert(try_call(() => { let _x = from_codepoint(0xDFFF) }))
 }
