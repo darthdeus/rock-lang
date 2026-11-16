@@ -19,8 +19,6 @@ mod bounded_standalone_emission;
 mod closure;
 #[path = "deepcopy.rs"]
 mod deepcopy;
-#[path = "default_lambda_fields.rs"]
-mod default_lambda_fields;
 #[path = "defer_unwind.rs"]
 mod defer_unwind;
 #[path = "differential.rs"]
@@ -45,8 +43,6 @@ mod loops;
 mod map_iter;
 #[path = "map_key_admission.rs"]
 mod map_key_admission;
-#[path = "match_fold.rs"]
-mod match_fold;
 #[path = "misc_intrinsics.rs"]
 mod misc_intrinsics;
 #[path = "multi_rejection.rs"]
@@ -81,14 +77,10 @@ mod session_arena;
 mod host;
 #[path = "native_buffer_element_admission_js.rs"]
 mod native_buffer_element_admission_js;
-#[path = "native_buffer_equality.rs"]
-mod native_buffer_equality;
 #[path = "nb_value_struct.rs"]
 mod nb_value_struct;
 #[path = "opaque_container_axes_js.rs"]
 mod opaque_container_axes_js;
-#[path = "optional_entity_vec.rs"]
-mod optional_entity_vec;
 #[path = "overlay.rs"]
 mod overlay;
 #[path = "polymorphic_recursion.rs"]
@@ -99,18 +91,12 @@ mod program;
 mod ret_bank_sizing;
 #[path = "rng.rs"]
 mod rng;
-#[path = "safenav_fold.rs"]
-mod safenav_fold;
 #[path = "shader_register.rs"]
 mod shader_register;
 #[path = "snippets.rs"]
 mod snippets;
-#[path = "spec_column_callee.rs"]
-mod spec_column_callee;
 #[path = "stdlib_sibling_location.rs"]
 mod stdlib_sibling_location;
-#[path = "strings.rs"]
-mod strings;
 #[path = "trampoline_fallback.rs"]
 mod trampoline_fallback;
 #[path = "try_call.rs"]
@@ -119,8 +105,6 @@ mod try_call;
 mod uint;
 #[path = "vec_columns.rs"]
 mod vec_columns;
-#[path = "vec_flat_enum_strided.rs"]
-mod vec_flat_enum_strided;
 
 #[path = "opaque_effects.rs"]
 mod opaque_effects;

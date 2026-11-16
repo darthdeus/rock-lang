@@ -1,0 +1,52 @@
+// A `[Entity<T>?]` field keeps its boxed representation through its default,
+// a literal assignment and a push, while a value-element Vec beside it still
+// uses column storage.
+
+struct Mob { hp: int }
+
+struct EntitySlots {
+    slots: [Entity<Mob>?] = [null, null, null, null]
+}
+
+value ColumnCell { x: int, y: int }
+
+fn nullable_get(slots: EntitySlots, index: int) -> bool {
+    let entity = slots.slots.get(index) ?? return false
+    return entity.get() != null
+}
+
+fn nullable_hp(slots: EntitySlots) -> int {
+    let total = 0
+    for entity in slots.slots {
+        if entity != null {
+            let mob = entity.get() ?? return -3
+            total += mob.hp
+        }
+    }
+    return total
+}
+
+@test
+fn nullable_entity_vec_field_round_trips() {
+    let arena: Arena<Mob> = arena_new()
+    let first = arena.insert(Mob { hp: 7 })
+    let second = arena.insert(Mob { hp: 9 })
+    let slots = EntitySlots {}
+    assert_eq(slots.slots.len, 4)
+    assert(slots.slots[0] == null, "default slot is null")
+
+    let typed: [Entity<Mob>?] = [first, second]
+    let literal_slots = EntitySlots { slots: [first, second] }
+    slots.slots = [first, second]
+    slots.slots.push(first)
+    assert_eq(typed.len * 10 + literal_slots.slots.len, 22)
+    assert_eq(slots.slots.len, 3)
+    assert(nullable_get(slots, 0) && nullable_get(slots, 1), "live entities")
+    assert_eq(nullable_hp(slots), 23)
+
+    let columns: [ColumnCell] = [ColumnCell { x: 2, y: 3 }]
+    columns.push(ColumnCell { x: 4, y: 5 })
+    let total = 0
+    for cell in columns { total += cell.x + cell.y }
+    assert_eq(total, 14)
+}

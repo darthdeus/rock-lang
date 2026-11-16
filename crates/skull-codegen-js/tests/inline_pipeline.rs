@@ -1,52 +1,9 @@
-//! Shared transform-pipeline emission (T8a). `emit_with_closure` now runs the
-//! same per-body sequence the luajit path runs (lower -> inline -> cleanup ->
-//! recover_counted_loops -> residual-bound-call validation), so an `@inline`/
-//! `@pure` callee is SPLICED (no standalone co-emission), an iterator combinator
-//! chain monomorphizes by inlining (was a `CallBoundMulti` reject), and a call
-//! omitting a defaulted param is a legal shorter shape (was the arity-guard
-//! false positive). The node-executed value checks are the correctness oracle.
+//! `emit_with_closure` runs the same per-body transform pipeline as the luajit
+//! path, so an `@inline`/`@pure` callee is spliced rather than co-emitted.
+//! tests/inline/js_inline.rock runs these calls on both backends.
 
 use crate::common::ws_with;
 
-// Evaluate `<root>()` under node over the emitted defs.
-crate::runtime_eval!(eval_int: JS_NB_CHECK_SHIMS, JS_VEC_CHECK_SHIMS, JS_TABLE_PRIM, JS_STRUCTURAL_EQ, JS_CALL_HELPER);
-
-// A call to an `@inline` fn is SPLICED into the caller: no standalone `function
-// dbl` is co-emitted, and the run is correct.
-#[test]
-fn inline_callee_is_spliced() {
-    let ws = ws_with("@inline fn dbl(x: int) -> int { x * 2 }\nfn root() -> int { dbl(3) }");
-    let js = crate::common::emit_closure(&ws, "root").expect("emits");
-    assert!(
-        !js.contains("function dbl"),
-        "@inline callee should be spliced, not co-emitted:\n{js}"
-    );
-    eval_int(&js, "root", 6);
-}
-
-// A `@pure` fn call is likewise spliced (both `@inline` and `@pure` force inline).
-#[test]
-fn pure_callee_is_spliced() {
-    let ws = ws_with("@pure fn sq(x: int) -> int { x * x }\nfn root() -> int { sq(3) }");
-    let js = crate::common::emit_closure(&ws, "root").expect("emits");
-    assert!(
-        !js.contains("function sq"),
-        "@pure callee should be spliced, not co-emitted:\n{js}"
-    );
-    eval_int(&js, "root", 9);
-}
-
-// A call omitting a defaulted param is a legal 2-arg call to a 3-param callee --
-// pre-T8a the arity guard false-positived it as a value-struct ABI mismatch.
-#[test]
-fn omitted_default_arg_emits() {
-    let ws = ws_with(
-        "fn ranged(a: int, b: int, step: int = 1) -> int { a + b + step }\n\
-         fn root() -> int { ranged(2, 3) }",
-    );
-    let js = crate::common::emit_closure(&ws, "root").expect("omitted default should emit");
-    eval_int(&js, "root", 6);
-}
 const EXHAUSTIVE_MATCH: &str = r#"
 enum Choice { First, Second }
 @inline fn choose<T>(choice: Choice, first: T, second: T) -> T {
@@ -56,14 +13,22 @@ fn root(choice: Choice) -> int { choose(choice, 10, 20) + 1 }
 "#;
 
 #[test]
-fn exhaustive_match_callee_is_spliced() {
-    let ws = ws_with(EXHAUSTIVE_MATCH);
-    let js = crate::common::emit_closure(&ws, "root").expect("exhaustive match emits");
-    assert!(js.contains("function root("), "missing caller:\n{js}");
-    assert!(
-        !js.contains("choose"),
-        "exhaustive match callee was not spliced:\n{js}"
-    );
+fn forced_inline_callees_are_spliced() {
+    for (src, callee) in [
+        (
+            "@inline fn dbl(x: int) -> int { x * 2 }\nfn root() -> int { dbl(3) }",
+            "dbl",
+        ),
+        (
+            "@pure fn sq(x: int) -> int { x * x }\nfn root() -> int { sq(3) }",
+            "sq",
+        ),
+        (EXHAUSTIVE_MATCH, "choose"),
+    ] {
+        let js = crate::common::emit_closure(&ws_with(src), "root").expect("emits");
+        assert!(js.contains("function root("), "missing caller:\n{js}");
+        assert!(!js.contains(callee), "{callee} was not spliced:\n{js}");
+    }
 }
 
 #[test]

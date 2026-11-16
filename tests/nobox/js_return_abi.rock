@@ -552,7 +552,7 @@ fn maybe_phi(a: int) -> NV? {
 
 // A CALLER shaped for the block trampoline (a nested loop in an or-pattern
 // arm): one capture happens before the arm and is read after it, the other
-// inside the arm. `multi_value_capture_inside_a_trampolined_caller` in
+// inside the arm. `a_trampolined_caller_reads_the_scratch_bank` in
 // skull-codegen-js/tests/trampoline_fallback.rs pins that the fallback fires.
 fn trampolined_caller(sel: int) -> int {
     let v = mk(6400 + sel)

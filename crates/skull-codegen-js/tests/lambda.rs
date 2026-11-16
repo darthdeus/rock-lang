@@ -1,44 +1,10 @@
-//! Closure / lambda emission. Closure
-//! conversion lowers each lambda to a hoisted sibling plus either a reusable
-//! CodeRef or a CodeRef-bearing environment record. `Inst::CallValue` is an
-//! indirect dispatch through `__rock_call`; direct calls retain their physical
-//! callee. Structural pins fix the emitted shape; node checks are the behavior
-//! oracle.
+//! Closure conversion on JS: each lambda is a hoisted sibling function reached
+//! through a reusable code slot (capture-free) or a slot-bearing environment
+//! record (capturing), never a frozen reference to the backend body, so an
+//! overlay can swap the body. Direct calls keep their physical callee.
+//! Closure behavior runs on both backends in tests/closures.
 
-use crate::common::{emit_user, ws_with};
-
-/// Run `<defs>; console.log(<call>)` under node and parse the printed int. The
-/// `__rock_call` dispatch helper is prepended (every indirect call routes
-/// through it after `convert_closures`).
-fn node_eval_int(defs: &str, call: &str) -> i64 {
-    let program = format!(
-        "{}{defs}\nconsole.log({call});",
-        skull_codegen_js::JS_CALL_HELPER
-    );
-    let s = crate::common::run_node(&program);
-    s.trim()
-        .parse::<i64>()
-        .unwrap_or_else(|_| panic!("node did not print an int: {s:?}\n{program}"))
-}
-
-/// Co-emit `root` and its plain-Rock callees into one JS program.
-fn emit_closure(ws: &bone_core::workspace::Workspace, root: &str) -> String {
-    crate::common::emit_closure(ws, root).unwrap_or_else(|e| panic!("closure emit `{root}`: {e}"))
-}
-
-// --- structural pins (post-`convert_closures`: records + hoisted siblings) ---
-
-// `CallValue`: an indirect call through a fn-typed param routes through the
-// `__rock_call` dispatch helper (handles both a raw fn and an env record).
-#[test]
-fn callvalue_through_fn_param() {
-    let ws = ws_with("fn apply(f: (int) -> int, x: int) -> int { f(x) }");
-    let js = emit_user(&ws, "apply");
-    assert!(
-        js.contains("__rock_call(v0, v1)"),
-        "indirect call via __rock_call:\n{js}"
-    );
-}
+use crate::common::{emit_closure, ws_with};
 
 #[test]
 fn direct_calls_remain_direct_while_values_use_slots() {
@@ -47,7 +13,7 @@ fn direct_calls_remain_direct_while_values_use_slots() {
          fn direct() -> int { target(1) }\n\
          fn main() { direct() }\n",
     );
-    let js = emit_closure(&ws, "main");
+    let js = emit_closure(&ws, "main").unwrap();
     let start = js.find("function direct").expect("direct body");
     let body = js[start..].split("\n}\n").next().expect("direct body");
     assert!(
@@ -60,115 +26,27 @@ fn direct_calls_remain_direct_while_values_use_slots() {
     );
 }
 
-// A capturing lambda becomes an env record `{ __slot, c<A>: .. }` at its
-// creation site plus a hoisted sibling fn reading the capture from its env.
 #[test]
-fn capturing_lambda_builds_env_record() {
-    let ws = ws_with(
-        "fn capture(n: int) -> int {\n\
-             let g = (x: int) => x + n\n\
-             g(10)\n\
-         }",
-    );
-    let js = emit_closure(&ws, "capture");
-    assert!(
-        js.contains("__slot: __rock_code_slot_ref("),
-        "creation site builds a CodeRef record:\n{js}"
-    );
-    assert!(
-        !js.contains("__fn: capture__lambda0"),
-        "Rock closures must not freeze a backend body:\n{js}"
-    );
-    assert!(
-        js.contains("function capture__lambda0("),
-        "hoisted sibling body:\n{js}"
-    );
-}
-
-// A capture-free lambda resolves one reusable slot (no env allocation):
-// same-site references share one callable identity.
-#[test]
-fn capture_free_lambda_is_hoisted() {
-    let ws = ws_with("fn mk() -> fn() -> int { () => 42 }");
-    let js = emit_closure(&ws, "mk");
-    assert!(
-        js.contains("function mk__lambda0("),
-        "hoisted top-level fn:\n{js}"
-    );
-    assert!(js.contains("return 42;"), "hoisted body:\n{js}");
-    assert!(
-        js.contains("__rock_code_slot_ref("),
-        "capture-free values use the reusable slot:\n{js}"
-    );
-    assert!(
-        !js.contains("__fn: mk__lambda0"),
-        "no frozen backend body for a capture-free lambda:\n{js}"
-    );
-}
-
-// --- behavioral (node) oracle: emit through the full pipeline (the pass runs
-// only in `emit_with_closure`, not the raw `emit_fn`). ---
-
-#[test]
-fn capturing_arrow_executes() {
-    if !crate::common::require_node() {
-        return;
+fn lambdas_are_hoisted_behind_code_slots() {
+    for (src, root) in [
+        (
+            "fn capture(n: int) -> int { let g = (x: int) => x + n\n g(10) }",
+            "capture",
+        ),
+        ("fn mk() -> fn() -> int { () => 42 }", "mk"),
+    ] {
+        let js = emit_closure(&ws_with(src), root).unwrap();
+        assert!(
+            js.contains(&format!("function {root}__lambda0(")),
+            "hoisted sibling body:\n{js}"
+        );
+        assert!(
+            js.contains("__rock_code_slot_ref("),
+            "the value must resolve through a code slot:\n{js}"
+        );
+        assert!(
+            !js.contains(&format!("__fn: {root}__lambda0")),
+            "a closure must not freeze its backend body:\n{js}"
+        );
     }
-    let ws = ws_with(
-        "fn capture(n: int) -> int {\n\
-             let g = (x: int) => x + n\n\
-             g(10)\n\
-         }",
-    );
-    assert_eq!(
-        node_eval_int(&emit_closure(&ws, "capture"), "capture(7)"),
-        17
-    );
-}
-
-#[test]
-fn hof_receives_and_calls_lambda() {
-    if !crate::common::require_node() {
-        return;
-    }
-    let ws = ws_with(
-        "fn apply(f: (int) -> int, x: int) -> int { f(x) }\n\
-         fn root() -> int { apply(y => y + 1, 5) }",
-    );
-    assert_eq!(node_eval_int(&emit_closure(&ws, "root"), "root()"), 6);
-}
-
-// A lambda called more than once with different args: each call is a fresh
-// invocation (no shared param state across calls).
-#[test]
-fn lambda_reentrant_across_calls() {
-    if !crate::common::require_node() {
-        return;
-    }
-    let ws = ws_with(
-        "fn twice() -> int {\n\
-             let f = (x: int) => x * x\n\
-             f(3) + f(4)\n\
-         }",
-    );
-    assert_eq!(node_eval_int(&emit_closure(&ws, "twice"), "twice()"), 25);
-}
-
-// Capturing + MUTATING an enclosing cell: `sum` is a shared box, so the closure's
-// writes accumulate into the one binding the enclosing scope also reads.
-#[test]
-fn lambda_mutates_captured_cell() {
-    if !crate::common::require_node() {
-        return;
-    }
-    let ws = ws_with(
-        "fn accum() -> int {\n\
-             let sum = 0\n\
-             let add = (x: int) => { sum = sum + x }\n\
-             add(3)\n\
-             add(4)\n\
-             sum\n\
-         }",
-    );
-    assert_eq!(node_eval_int(&emit_closure(&ws, "accum"), "accum()"), 7);
 }

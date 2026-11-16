@@ -29,3 +29,12 @@ fn test_range_len() -> int {
     let r = (2..5).collect()
     r.len
 }
+
+// A user fn sharing an intrinsic's name and arity is its own function: the
+// `Math.abs` template belongs to the stdlib declaration only.
+fn abs(b: bool) -> int { if b { 5 } else { 7 } }
+
+@test(returns = 57)
+fn test_user_fn_shadowing_an_intrinsic_name() -> int {
+    abs(true) * 10 + abs(false)
+}
