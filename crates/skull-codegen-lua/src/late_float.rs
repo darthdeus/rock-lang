@@ -33,11 +33,11 @@ pub(crate) fn defer_wide_float_math(func: &MirFunc) -> Option<(MirFunc, Vec<Idx<
     let mut term_used = vec![false; func.insts.len()];
     for (_, block) in func.blocks.iter() {
         for &id in &block.insts {
-            regalloc::inst_uses(&func.insts[id], &mut |operand| {
+            func.insts[id].uses_each(&mut |operand| {
                 users[raw(operand) as usize].push(id);
             });
         }
-        regalloc::term_uses(&block.term, &mut |operand| {
+        block.term.uses_each(&mut |operand| {
             term_used[raw(operand) as usize] = true;
         });
     }
@@ -69,7 +69,7 @@ pub(crate) fn defer_wide_float_math(func: &MirFunc) -> Option<(MirFunc, Vec<Idx<
             // user's dependency to its earlier operands in one walk.
             for &id in insts[..=call_at].iter().rev() {
                 if !move_it.contains(&id) {
-                    regalloc::inst_uses(&func.insts[id], &mut |operand| {
+                    func.insts[id].uses_each(&mut |operand| {
                         move_it.remove(&operand);
                     });
                 }
@@ -88,7 +88,7 @@ pub(crate) fn defer_wide_float_math(func: &MirFunc) -> Option<(MirFunc, Vec<Idx<
                 {
                     outputs += 1;
                 }
-                regalloc::inst_uses(&func.insts[id], &mut |operand| {
+                func.insts[id].uses_each(&mut |operand| {
                     if !move_it.contains(&operand) && !matches!(func.insts[operand], Inst::Const(_))
                     {
                         inputs.insert(operand);

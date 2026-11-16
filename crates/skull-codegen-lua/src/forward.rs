@@ -19,24 +19,10 @@ pub(crate) fn referenced_cells_in_region(
             if tail.is_some_and(|tail| position >= tail.first_suppressed) {
                 continue;
             }
-            if suppressed[raw(iid) as usize] {
+            if suppressed[raw(iid) as usize] || matches!(func.insts[iid], Inst::Lambda { .. }) {
                 continue;
             }
-            let mut mark = |c: Idx<Cell>| cells[raw(c) as usize] = true;
-            match &func.insts[iid] {
-                Inst::Load(c) => mark(*c),
-                Inst::Store { cell, .. } => mark(*cell),
-                Inst::MapNext {
-                    key_cell, val_cell, ..
-                } => {
-                    mark(*key_cell);
-                    mark(*val_cell);
-                }
-                Inst::CallMulti { dests, .. }
-                | Inst::CallValueMulti { dests, .. }
-                | Inst::CallBoundMulti { dests, .. } => dests.iter().copied().for_each(mark),
-                _ => {}
-            }
+            func.insts[iid].cells_each(&mut |c| cells[raw(c) as usize] = true);
         }
     }
     cells
@@ -88,28 +74,7 @@ fn cell_reference_counts(func: &MirFunc) -> Vec<u32> {
     let mut counts = vec![0; func.cells.len()];
     for (_, block) in func.blocks.iter() {
         for &id in &block.insts {
-            match &func.insts[id] {
-                Inst::Load(cell) | Inst::Store { cell, .. } => counts[raw(*cell) as usize] += 1,
-                Inst::CallMulti { dests, .. }
-                | Inst::CallValueMulti { dests, .. }
-                | Inst::CallBoundMulti { dests, .. } => {
-                    for cell in dests {
-                        counts[raw(*cell) as usize] += 1;
-                    }
-                }
-                Inst::MapNext {
-                    key_cell, val_cell, ..
-                } => {
-                    counts[raw(*key_cell) as usize] += 1;
-                    counts[raw(*val_cell) as usize] += 1;
-                }
-                Inst::Lambda { params, .. } => {
-                    for cell in params {
-                        counts[raw(*cell) as usize] += 1;
-                    }
-                }
-                _ => {}
-            }
+            func.insts[id].cells_each(&mut |cell| counts[raw(cell) as usize] += 1);
         }
     }
     counts
@@ -119,11 +84,11 @@ fn instruction_reference_counts(func: &MirFunc) -> Vec<u32> {
     let mut counts = vec![0; func.insts.len()];
     for (_, block) in func.blocks.iter() {
         for &id in &block.insts {
-            regalloc::inst_uses(&func.insts[id], &mut |used| {
+            func.insts[id].uses_each(&mut |used| {
                 counts[raw(used) as usize] += 1;
             });
         }
-        regalloc::term_uses(&block.term, &mut |used| {
+        block.term.uses_each(&mut |used| {
             counts[raw(used) as usize] += 1;
         });
     }

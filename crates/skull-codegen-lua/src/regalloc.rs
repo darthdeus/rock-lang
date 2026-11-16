@@ -373,11 +373,6 @@ fn raw<T>(i: Idx<T>) -> usize {
     u32::from(i.into_raw()) as usize
 }
 
-/// Value operands an instruction READS (not the value it defines).
-pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
-    inst.uses_each(push);
-}
-
 /// Value operands a terminator reads, seeing THROUGH inlined operands: if an
 /// operand is tree-inlined (emitted at this use site, not as a register), its own
 /// effective uses are yielded recursively so the colorer keeps the registers the
@@ -388,18 +383,13 @@ pub(crate) fn effective_uses(
     inst: &Inst,
     push: &mut impl FnMut(Idx<Inst>),
 ) {
-    inst_uses(inst, &mut |u| {
+    inst.uses_each(&mut |u| {
         if inline[raw(u)] {
             effective_uses(func, inline, &func.insts[u], push);
         } else {
             push(u);
         }
     });
-}
-
-/// Value operands a terminator reads.
-pub(crate) fn term_uses(term: &Term, push: &mut impl FnMut(Idx<Inst>)) {
-    term.uses_each(push);
 }
 
 /// A counted loop the emitter renders as a Lua `for ... do .. end` block:
@@ -569,7 +559,7 @@ impl Reads {
             }
             match &func.insts[v] {
                 Inst::Load(c) => leaves.push(raw(*c) as u32 | CELL_LEAF),
-                nested => inst_uses(nested, &mut |u| operand(func, inline, u, leaves)),
+                nested => nested.uses_each(&mut |u| operand(func, inline, u, leaves)),
             }
         }
         let mut reads = Reads {
@@ -586,13 +576,13 @@ impl Reads {
                 let start = reads.leaves.len() as u32;
                 let inst = &func.insts[id];
                 cell_uses(inst, &mut |c| reads.leaves.push(raw(c) as u32 | CELL_LEAF));
-                inst_uses(inst, &mut |u| operand(func, inline, u, &mut reads.leaves));
+                inst.uses_each(&mut |u| operand(func, inline, u, &mut reads.leaves));
                 reads.stmt[raw(id)] = (start, reads.leaves.len() as u32);
             }
             let start = reads.leaves.len() as u32;
-            term_uses(&block.term, &mut |u| {
-                operand(func, inline, u, &mut reads.leaves)
-            });
+            block
+                .term
+                .uses_each(&mut |u| operand(func, inline, u, &mut reads.leaves));
             reads.term[raw(b)] = (start, reads.leaves.len() as u32);
         }
         reads
@@ -913,17 +903,9 @@ pub(crate) struct ValueAlloc {
 
 /// Cells an instruction DEFINES (writes).
 pub(crate) fn cell_defs(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
-    match inst {
-        Inst::Store { cell, .. } => push(*cell),
-        Inst::CallMulti { dests, .. } => dests.iter().for_each(|d| push(*d)),
-        Inst::CallValueMulti { dests, .. } => dests.iter().for_each(|d| push(*d)),
-        Inst::MapNext {
-            key_cell, val_cell, ..
-        } => {
-            push(*key_cell);
-            push(*val_cell);
-        }
-        _ => {}
+    // Residual bound-call destinations are placeholders, not emitted locals.
+    if !matches!(inst, Inst::CallBoundMulti { .. }) {
+        inst.cell_writes_each(push);
     }
 }
 
@@ -950,7 +932,7 @@ fn inlined_operand_cell_uses(
     inst: &Inst,
     push: &mut impl FnMut(Idx<Cell>),
 ) {
-    inst_uses(inst, &mut |value| {
+    inst.uses_each(&mut |value| {
         if let Some(cell) = alias_at(alias, value) {
             push(cell);
             return;
@@ -1823,7 +1805,7 @@ pub(crate) fn statement_is_pure(func: &MirFunc, inline: &[bool], id: Idx<Inst>) 
         return false;
     }
     let mut pure = true;
-    inst_uses(inst, &mut |u| {
+    inst.uses_each(&mut |u| {
         if inline[raw(u)] && !statement_is_pure(func, inline, u) {
             pure = false;
         }

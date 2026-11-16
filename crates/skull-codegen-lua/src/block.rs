@@ -27,7 +27,7 @@ impl Emitter<'_> {
         }
         let inst = &self.func.insts[id];
         let mut effect = skull_mir::sinking::may_throw(inst);
-        regalloc::inst_uses(inst, &mut |u| effect = effect || self.folds_effect(u));
+        inst.uses_each(&mut |u| effect = effect || self.folds_effect(u));
         effect
     }
 
@@ -43,7 +43,7 @@ impl Emitter<'_> {
         }
         let mut pure =
             skull_mir::sinking::always_inlinable(inst) && !skull_mir::sinking::may_throw(inst);
-        regalloc::inst_uses(inst, &mut |u| pure = pure && self.folds_pure(u));
+        inst.uses_each(&mut |u| pure = pure && self.folds_pure(u));
         pure
     }
 
@@ -65,7 +65,7 @@ impl Emitter<'_> {
             return false;
         }
         let mut no_call = true;
-        regalloc::inst_uses(inst, &mut |u| no_call = no_call && self.folds_no_call(u));
+        inst.uses_each(&mut |u| no_call = no_call && self.folds_no_call(u));
         no_call
     }
 

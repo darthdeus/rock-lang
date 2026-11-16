@@ -138,7 +138,7 @@ pub(crate) fn compute_inlinable(
             if inst.produces_value() {
                 def_block[raw(id) as usize] = br;
             }
-            regalloc::inst_uses(inst, &mut |u| {
+            inst.uses_each(&mut |u| {
                 let k = raw(u) as usize;
                 uses.count[k] += 1;
                 uses.block[k] = br;
@@ -161,7 +161,7 @@ pub(crate) fn compute_inlinable(
                 _ => {}
             }
         }
-        regalloc::term_uses(&func.blocks[b].term, &mut |u| {
+        func.blocks[b].term.uses_each(&mut |u| {
             let k = raw(u) as usize;
             uses.count[k] += 1;
             uses.block[k] = br;
@@ -382,11 +382,11 @@ pub(crate) fn keep_reads_ordered(
     for &b in scope {
         let insts = &func.blocks[b].insts;
         for &id in insts {
-            regalloc::inst_uses(&func.insts[id], &mut |u| user[raw(u) as usize] = raw(id));
+            func.insts[id].uses_each(&mut |u| user[raw(u) as usize] = raw(id));
         }
-        regalloc::term_uses(&func.blocks[b].term, &mut |u| {
-            user[raw(u) as usize] = u32::MAX
-        });
+        func.blocks[b]
+            .term
+            .uses_each(&mut |u| user[raw(u) as usize] = u32::MAX);
         for (pos, &id) in insts.iter().enumerate().rev() {
             let k = raw(id) as usize;
             eval[k] = if inlinable[k] {
@@ -491,7 +491,7 @@ fn fold_operand_levels(
     } else {
         0
     };
-    let mut uniform = |levels: u32| regalloc::inst_uses(inst, &mut |u| each(u, levels));
+    let mut uniform = |levels: u32| inst.uses_each(&mut |u| each(u, levels));
     match *inst {
         Inst::StringConcat(a, b) => {
             let mut run = Vec::new();

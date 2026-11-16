@@ -82,7 +82,7 @@ fn const_hoist_uses_are_read_only(func: &MirFunc, cand: Idx<Inst>) -> bool {
             continue;
         }
         let mut reads = false;
-        regalloc::inst_uses(inst, &mut |u| reads |= u == cand);
+        inst.uses_each(&mut |u| reads |= u == cand);
         if reads {
             return false;
         }
