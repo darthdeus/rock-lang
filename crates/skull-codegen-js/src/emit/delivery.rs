@@ -39,7 +39,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
                 return Ok(());
             }
         };
-        let mut mf = match skull_mir::lower::lower_function_with_plans(
+        let mut mf = match skull_mir::lower::lower_instance_with_plans(
             self.ws,
             self.scx,
             plan,

@@ -274,7 +274,7 @@ pub(super) fn emit_body_chunk_with_mutation(
     let canonical_reused = canonical_body.is_some();
     let mut mf = match canonical_body {
         Some(body) => (*body).clone(),
-        None => skull_mir::lower::lower_function_with_plans(ws, scx, plan, &concrete.plans)?,
+        None => skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &concrete.plans)?,
     };
     times.lower = tl.elapsed();
     times.lower_work = mf.insts.len() > 0;

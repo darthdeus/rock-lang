@@ -1406,16 +1406,7 @@ fn hash_init_pattern(
     }
 }
 
-pub fn lower_function_with_plans(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    plan: &ConcreteBodyPlan,
-    concrete_plans: &ConcretePlans,
-) -> Result<MirFunc, CompilerError> {
-    lower_instance_with_plans(ws, scx, plan, concrete_plans)
-}
-
-/// Lower an ordinary function while resolving every concrete callee ABI from
+/// Lower one concrete body plan while resolving every concrete callee ABI from
 /// the same graph-owned plan set. A missing selected callee is an error rather
 /// than a fallback to declaration-shaped ABI facts.
 pub fn lower_instance_with_plans(
