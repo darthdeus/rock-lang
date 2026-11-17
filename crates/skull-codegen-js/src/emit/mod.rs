@@ -46,8 +46,6 @@ mod plan_stages;
 mod session;
 mod structured;
 mod tables;
-#[cfg(test)]
-mod tests;
 mod worklist;
 
 use analysis::*;

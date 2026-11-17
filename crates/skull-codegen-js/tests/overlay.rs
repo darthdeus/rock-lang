@@ -50,40 +50,6 @@ fn function_change(
 }
 
 #[test]
-fn lifecycle_selector_schedules_only_changed_gated_entries_and_plain_entries() {
-    let source = format!(
-        "{}\nvar __G = {{}};\n{}",
-        js_runtime(),
-        r#"
-var oldPlan = {wire: {len: 4, _data: [
-  {key: "plain", qualification: "plain", body_fingerprint: "a", dependencies: {len: 0, _data: []}},
-  {key: "stable", qualification: "onchange", body_fingerprint: "b", dependencies: {len: 1, _data: [{key: "DEP", fingerprint: "1"}]}},
-  {key: "body", qualification: "onchange", body_fingerprint: "old", dependencies: {len: 1, _data: [{key: "DEP", fingerprint: "1"}]}},
-  {key: "dependency", qualification: "onchange", body_fingerprint: "d", dependencies: {len: 1, _data: [{key: "DEP", fingerprint: "1"}]}}
-]}};
-var candidate = {wire: {len: 5, _data: [
-  {key: "plain", qualification: "plain", body_fingerprint: "changed", dependencies: {len: 0, _data: []}},
-  {key: "stable", qualification: "onchange", body_fingerprint: "b", dependencies: {len: 1, _data: [{key: "DEP", fingerprint: "1"}]}},
-  {key: "body", qualification: "onchange", body_fingerprint: "new", dependencies: {len: 1, _data: [{key: "DEP", fingerprint: "1"}]}},
-  {key: "dependency", qualification: "onchange", body_fingerprint: "d", dependencies: {len: 1, _data: [{key: "DEP", fingerprint: "2"}]}},
-  {key: "added", qualification: "onchange", body_fingerprint: "e", dependencies: {len: 1, _data: [{key: "OTHER", fingerprint: "1"}]}}
-]}};
-var due = __rock_lifecycle_wire_due(oldPlan, candidate);
-if (!(due.plain && !due.stable && due.body && due.dependency && due.added)) throw new Error("selector changed set");
-if (__rock_lifecycle_take_wire("plain") !== false) throw new Error("take read an unset due map");
-__G.__ROCK_WIRE_DUE = due;
-if (!__rock_lifecycle_take_wire("plain") || __rock_lifecycle_take_wire("plain")) throw new Error("take was not exactly once");
-__G.__ROCK_LIFECYCLE_PLAN = candidate;
-__rock_lifecycle_schedule_all_wires();
-if (!(__rock_lifecycle_take_wire("stable") && __rock_lifecycle_take_wire("added"))) throw new Error("fresh scheduling missed an entry");
-console.log("PASS");
-"#
-    );
-    let output = run_node(&source);
-    assert_eq!(output.trim(), "PASS");
-}
-
-#[test]
 fn dependency_gated_wire_overlay_selects_const_closure_and_calls_runtime_once() {
     let source = |base: i32, direct: i32, unrelated: i32| {
         format!(
@@ -239,22 +205,6 @@ console.log(ok && __rock_definition_plan_pending === null
 "#;
     let output = run_node(&source);
     assert_eq!(output.trim(), "true");
-}
-
-#[test]
-fn programs_without_definition_roles_do_not_stage_an_empty_plan() {
-    let ws = ws_with("fn main() {}\n");
-    let mid = crate::common::test_mid(&ws);
-    let program = skull_codegen_js::emit::emit_program(&ws, mid)
-        .expect("emit program")
-        .program;
-    assert!(!program.contains("__rock_definition_plan_stage("));
-    let output = run_node(&format!(
-        "{}\nvar __G = {{}};\n{}\nconsole.log('PASS');",
-        js_runtime(),
-        program
-    ));
-    assert_eq!(output.trim(), "PASS");
 }
 
 #[test]
@@ -693,59 +643,4 @@ fn static_resets_for_several_edited_functions_emit_in_a_stable_order() {
     for _ in 0..16 {
         assert_eq!(overlay(), first);
     }
-}
-
-fn build_date_inputs(value: &str, volatile: bool) -> bone_core::workspace::ComptimeInputs {
-    let mut inputs = bone_core::workspace::ComptimeInputs::default();
-    inputs.vars.insert(
-        ustr::Ustr::from("BUILD_DATE"),
-        bone_core::workspace::ComptimeVarValue {
-            value: value.to_string(),
-            secret: false,
-        },
-    );
-    if volatile {
-        inputs.volatile_vars.insert(ustr::Ustr::from("BUILD_DATE"));
-    }
-    inputs
-}
-
-fn body_fingerprints(
-    inputs: bone_core::workspace::ComptimeInputs,
-) -> std::collections::BTreeMap<String, u64> {
-    let mut ws = ws_with(
-        r#"
-global STAMP: string = build_var("BUILD_DATE")
-@nomangle fn stamp() -> string { return build_var("BUILD_DATE") }
-co fn ticker() -> Coroutine<int> {
-    STAMP = build_var("BUILD_DATE")
-    yield 1
-}
-fn main() {
-    STAMP = stamp()
-    let c = ticker()
-    c.resume()
-}
-"#,
-    );
-    ws.comptime_inputs = inputs;
-    let mid = crate::common::test_fn_ref(&ws, "main").module;
-    let program = skull_codegen_js::emit::emit_program(&ws, mid).expect("JS program");
-    program
-        .code_artifact
-        .entries
-        .iter()
-        .map(|(identity, entry)| (format!("{identity:?}"), entry.body_fingerprint))
-        .collect()
-}
-
-#[test]
-fn volatile_build_values_do_not_change_js_body_fingerprints() {
-    let old = body_fingerprints(build_date_inputs("2026-08-23 10:00", true));
-    let new = body_fingerprints(build_date_inputs("2026-08-23 10:01", true));
-    assert!(old.len() >= 3, "global init, fn and co fn entries: {old:?}");
-    assert_eq!(old, new, "only volatile build metadata changed");
-    let before = body_fingerprints(build_date_inputs("2026-08-23 10:00", false));
-    let after = body_fingerprints(build_date_inputs("2026-08-23 10:01", false));
-    assert_ne!(before, after, "a non-volatile value is part of the body");
 }

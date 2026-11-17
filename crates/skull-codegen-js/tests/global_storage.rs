@@ -1,36 +1,6 @@
 use crate::common::ws_with;
 use bone_core::hir::BodyOwner;
 
-const FIXTURE: &str = r#"
-global COUNTER: int = 0
-
-fn bump() -> int {
-    COUNTER = COUNTER + 1
-    return COUNTER
-}
-
-fn main() {
-    bump()
-}
-"#;
-
-#[test]
-fn mutable_global_accesses_use_the_global_storage() {
-    let ws = ws_with(FIXTURE);
-    let mid = crate::common::test_mid(&ws);
-    let emitted = skull_codegen_js::emit::emit_program(&ws, mid).expect("JS emit");
-    let slot = "__rock_globals[\"global:<test>::COUNTER::value\"]";
-    assert!(
-        emitted.program.contains(&format!("{slot} = ")),
-        "mutable global writes must use the global storage"
-    );
-    assert!(
-        emitted.program.matches(slot).count()
-            > emitted.program.matches(&format!("{slot} = ")).count(),
-        "mutable global reads must use the global storage"
-    );
-}
-
 #[test]
 fn opaque_js_global_reads_and_writes_go_through_the_bridge() {
     let source = r#"

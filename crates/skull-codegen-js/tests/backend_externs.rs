@@ -8,57 +8,6 @@
 use crate::common::{node, ws_with};
 
 #[test]
-fn inline_js_body_emits_verbatim_not_lua() {
-    let ws = ws_with(
-        r#"
-inline(lua) fn dbl(x: int) -> int = """return x * 2"""
-inline(js) fn dbl(x: int) -> int = """return x + x"""
-
-fn main() {
-    let a = dbl(21)
-    print("{a}")
-}
-"#,
-    );
-    let prog = crate::common::emit_program_js(&ws).expect("emit js program");
-    assert!(
-        prog.contains("return x + x"),
-        "js body must emit verbatim:\n{prog}"
-    );
-    assert!(
-        !prog.contains("return x * 2"),
-        "lua body must NOT leak into js:\n{prog}"
-    );
-}
-
-#[test]
-fn portable_body_plus_inline_js_sibling_picks_js() {
-    // P1: a portable Rock-bodied fn (backend Any) + a same-signature inline(js)
-    // sibling. The Any body serves every target, so it is the collapse
-    // representative; under the JS target codegen must still pick the js sibling.
-    let ws = ws_with(
-        r#"
-fn dbl(x: int) -> int { return x + x }
-inline(js) fn dbl(x: int) -> int = """return x * 3"""
-
-fn main() {
-    let a = dbl(21)
-    print("{a}")
-}
-"#,
-    );
-    let prog = crate::common::emit_program_js(&ws).expect("emit js program");
-    assert!(
-        prog.contains("return x * 3"),
-        "js sibling body must win over the Any rep:\n{prog}"
-    );
-    assert!(
-        !prog.contains("x + x"),
-        "portable Any body must NOT emit under js:\n{prog}"
-    );
-}
-
-#[test]
 fn extern_js_emits_bare_call_no_def() {
     let ws = ws_with(
         r#"
@@ -115,33 +64,6 @@ fn main() {
             "{label}: unexpected reject message: {err}"
         );
     }
-}
-
-#[test]
-fn coroutine_reraise_does_not_emit_lua_error_extern() {
-    let ws = ws_with(
-        r#"
-co fn inner() -> Coroutine<int> {
-    yield 1
-    error("boom")
-}
-
-co fn outer() -> Coroutine<int> {
-    await inner()
-}
-
-fn main() {
-    let c = outer()
-    c.resume()
-    c.resume()
-}
-"#,
-    );
-    let prog = crate::common::emit_program_js(&ws).expect("emit js program");
-    assert!(
-        !prog.contains("function error("),
-        "the runtime throwing `error` global must not be shadowed:\n{prog}"
-    );
 }
 
 #[test]

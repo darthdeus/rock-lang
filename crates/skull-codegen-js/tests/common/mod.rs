@@ -9,14 +9,6 @@ use skull_mir::lower::{ScalarCtx, lower_instance_with_plans};
 use skull_mir::mir::{FuncRef, MirFunc};
 use skull_mir::monoty::MonoInterner;
 
-pub struct InlineOffGuard(#[allow(dead_code)] skull_transform::InlineOffGuard);
-
-impl InlineOffGuard {
-    pub fn on() -> Self {
-        InlineOffGuard(skull_transform::inline_off_guard())
-    }
-}
-
 /// Every `node` spawn in this crate's tests goes through here.
 ///
 /// `console.log` of a NUMBER is formatted by `util.inspect`, which colours it,
@@ -192,14 +184,4 @@ pub fn emit_user(ws: &bone_core::workspace::Workspace, name: &str) -> String {
     let mf = lower_test_fn(ws, name);
     skull_codegen_js::emit::emit_fn(ws, &mf, name)
         .unwrap_or_else(|e| panic!("emit `{name}`: {}", e.message))
-}
-
-/// [`emit_user`] but returns the reject message instead of panicking (for
-/// red-first observation and reject-shape pins).
-pub fn emit_user_err(ws: &bone_core::workspace::Workspace, name: &str) -> String {
-    let mf = lower_test_fn(ws, name);
-    match skull_codegen_js::emit::emit_fn(ws, &mf, name) {
-        Ok(js) => panic!("expected `{name}` to reject, got:\n{js}"),
-        Err(e) => e.message,
-    }
 }
