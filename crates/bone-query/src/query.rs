@@ -307,14 +307,7 @@ fn record_pat_field_at(
             .into_iter()
             .map(|fidx| &body.record_pat_field_arena[fidx])
             .find(|f| span_contains(&f.name_span, offset))?;
-        let shorthand = match &body.pattern_arena[f.pat] {
-            hir::Pattern::Bind(b) => body
-                .binding_spans
-                .get(*b)
-                .is_some_and(|bs| bs.offset_range() == f.name_span.offset_range()),
-            _ => false,
-        };
-        (!shorthand).then_some((*enum_name, *name, f))
+        (!pattern_field_is_shorthand(body, f)).then_some((*enum_name, *name, f))
     })
 }
 
@@ -1131,8 +1124,7 @@ enum RefTarget {
     Enum(Ustr),
     Newtype(Ustr),
     Struct(Ustr),
-    Field(Ustr, Ustr),
-    VariantField(Ustr, Ustr, Ustr),
+    Field(RecordType, Ustr),
     Function(ModuleId, Idx<hir::Function>),
     Global(Ustr),
     Decorator(Ustr),
@@ -1173,10 +1165,10 @@ fn ref_target_at<'t>(
         });
     }
     if let Some((sname, field)) = struct_field_at(ws, mid, inf, offset) {
-        return Some(RefTarget::Field(sname, field));
+        return Some(RefTarget::Field(RecordType::Struct(sname), field));
     }
     if let Some((ename, variant, field)) = variant_field_at(ws, mid, offset) {
-        return Some(RefTarget::VariantField(ename, variant, field));
+        return Some(RefTarget::Field(RecordType::Variant(ename, variant), field));
     }
     if let Some((fmid, fid)) = function_target(ws, mid, inf, offset) {
         return Some(RefTarget::Function(fmid, fid));
@@ -1216,10 +1208,7 @@ pub fn references<'t>(
         Some(RefTarget::Enum(name)) => plain(enum_references(ws, name)),
         Some(RefTarget::Newtype(name)) => plain(newtype_references(ws, name, text_of)),
         Some(RefTarget::Struct(name)) => plain(struct_references(ws, name)),
-        Some(RefTarget::Field(sname, field)) => field_references(ws, sname, field),
-        Some(RefTarget::VariantField(ename, variant, field)) => {
-            variant_field_references(ws, ename, variant, field)
-        }
+        Some(RefTarget::Field(record, field)) => field_references(ws, record, field),
         Some(RefTarget::Function(fmid, fid)) => {
             let name = ws.module(fmid).functions[fid].name;
             // Find-usages scopes to this overload; rename keeps the shared
@@ -1279,7 +1268,7 @@ pub(crate) fn rename_subject<'t>(
             RenameSubject::Function(ws.module(fmid).functions[fid].name)
         }
         Some(RefTarget::Global(name)) => RenameSubject::Global(name),
-        Some(RefTarget::Field(..)) => RenameSubject::Field,
+        Some(RefTarget::Field(RecordType::Struct(_), _)) => RenameSubject::Field,
         Some(RefTarget::Enum(_)) => RenameSubject::Type(None),
         Some(RefTarget::Struct(name)) => RenameSubject::Type(Some(name)),
         _ => RenameSubject::Other,
@@ -1404,92 +1393,6 @@ fn variant_field_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<(Ust
     }
 
     None
-}
-
-/// Every reference to record-variant payload field `ename::variant.field`:
-/// the declaration, literal field names, and record-pattern field names --
-/// shorthand sites expand keeping the binding, mirroring struct fields.
-fn variant_field_references(
-    ws: &Workspace,
-    ename: Ustr,
-    variant: Ustr,
-    field: Ustr,
-) -> Vec<RefSite> {
-    let mut out: Vec<RefSite> = Vec::new();
-
-    for m in ws.modules.iter() {
-        if let Some(idx) = m.enums_by_name.get(&ename) {
-            if let Some(v) = m.enums[*idx].variants.iter().find(|v| v.name == variant) {
-                if let hir::VariantPayload::Record(fields) = &v.payload {
-                    if let Some(f) = fields.iter().find(|f| f.name == field) {
-                        out.push(RefSite::plain(f.span));
-                    }
-                }
-            }
-        }
-
-        for body in m.bodies.values() {
-            for (_, expr) in body.expr_arena.iter() {
-                if let hir::Expr::EnumVariant {
-                    enum_name,
-                    variant: v,
-                    args: hir::VariantArgs::Record(fields),
-                    ..
-                } = expr
-                {
-                    if !(*enum_name == ename && *v == variant) {
-                        continue;
-                    }
-                    for fidx in *fields {
-                        let f = &body.struct_lit_field_arena[fidx];
-                        if f.name == field {
-                            let is_shorthand = body
-                                .expr_spans
-                                .get(f.value)
-                                .is_some_and(|vs| vs.offset_range() == f.name_span.offset_range());
-                            out.push(RefSite {
-                                span: f.name_span,
-                                shorthand: is_shorthand.then_some(Shorthand::KeepBinding(f.name)),
-                            });
-                        }
-                    }
-                }
-            }
-
-            for pat in body.pattern_arena.values() {
-                if let hir::Pattern::Record {
-                    enum_name: Some(en),
-                    name: Some(v),
-                    fields,
-                    ..
-                } = pat
-                {
-                    if !(*en == ename && *v == variant) {
-                        continue;
-                    }
-                    for fidx in *fields {
-                        let f = &body.record_pat_field_arena[fidx];
-                        if f.name == field {
-                            let is_shorthand = match body.pattern_arena[f.pat] {
-                                hir::Pattern::Bind(b) => {
-                                    body.binding_spans.get(b).is_some_and(|bs| {
-                                        bs.offset_range() == f.name_span.offset_range()
-                                    })
-                                }
-                                _ => false,
-                            };
-                            out.push(RefSite {
-                                span: f.name_span,
-                                shorthand: is_shorthand.then_some(Shorthand::KeepBinding(f.name)),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    out
 }
 
 /// The DECLARED decorator the cursor is on: its name token inside the
@@ -1760,126 +1663,147 @@ fn struct_field_at(
     }
 }
 
-/// Every reference to struct field `sname.field` across all modules: the field
-/// declaration, every `recv.field` access whose receiver is a `sname` (inferred,
-/// so a same-named field on a different struct is excluded), every `sname { field:
-/// .. }` literal field name, and every `sname { field }` record-pattern field.
-fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
-    let flen = field.as_str().len();
-    let mut out: Vec<RefSite> = Vec::new();
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecordType {
+    Struct(Ustr),
+    Variant(Ustr, Ustr),
+}
 
-    for m in ws.modules.iter() {
-        // Declaration.
-        if let Some(idx) = m.struct_by_name.get(&sname) {
-            if let Some(f) = m.structs[*idx].fields.iter().find(|f| f.name == field) {
-                out.push(RefSite::plain(f.span));
+impl RecordType {
+    fn fields(self, module: &hir::Module) -> Option<&[hir::StructFieldDef]> {
+        match self {
+            Self::Struct(name) => Some(&module.structs[*module.struct_by_name.get(&name)?].fields),
+            Self::Variant(name, variant) => {
+                let def = &module.enums[*module.enums_by_name.get(&name)?];
+                let v = def.variants.iter().find(|v| v.name == variant)?;
+                match &v.payload {
+                    hir::VariantPayload::Record(fields) => Some(fields),
+                    _ => None,
+                }
             }
         }
+    }
+}
 
-        let module_inf = ws.inference(m.id);
-        for (owner, body) in m.bodies.iter() {
-            let bi = module_inf.and_then(|inf| inf.per_fn.get(owner));
+fn pattern_field_is_shorthand(body: &Body, field: &hir::RecordPatField) -> bool {
+    match body.pattern_arena[field.pat] {
+        hir::Pattern::Bind(b) => body
+            .binding_spans
+            .get(b)
+            .is_some_and(|span| span.offset_range() == field.name_span.offset_range()),
+        _ => false,
+    }
+}
 
+fn field_references(ws: &Workspace, record: RecordType, field: Ustr) -> Vec<RefSite> {
+    let mut out = Vec::new();
+    let field_site = |span, shorthand: bool| RefSite {
+        span,
+        shorthand: shorthand.then_some(Shorthand::KeepBinding(field)),
+    };
+
+    for m in &ws.modules {
+        if let Some(f) = record
+            .fields(m)
+            .and_then(|fields| fields.iter().find(|f| f.name == field))
+        {
+            out.push(RefSite::plain(f.span));
+        }
+        let inf = ws.inference(m.id);
+        for (owner, body) in &m.bodies {
+            let bi = inf.and_then(|inf| inf.per_fn.get(owner));
             for (e, expr) in body.expr_arena.iter() {
-                match expr {
-                    // `sname { field: .. }` literal field. Shorthand (`{ x }`,
-                    // where the value token IS the name token) expands on
-                    // rename, keeping the binding: `{ <new>: x }`.
-                    hir::Expr::StructLiteral { name, fields, .. } if *name == sname => {
-                        for fidx in *fields {
-                            let f = &body.struct_lit_field_arena[fidx];
-                            if f.name == field {
-                                let is_shorthand = body.expr_spans.get(f.value).is_some_and(|vs| {
-                                    vs.offset_range() == f.name_span.offset_range()
-                                });
-                                out.push(RefSite {
-                                    span: f.name_span,
-                                    shorthand: is_shorthand
-                                        .then_some(Shorthand::KeepBinding(f.name)),
-                                });
-                            }
-                        }
-                    }
-                    // `recv.field` where recv is a `sname` (type-checked).
-                    // `recv?.field` resolves identically: the base's nullable
-                    // is peeled.
-                    hir::Expr::FieldAccess { base, field: fname }
-                    | hir::Expr::SafeNav { base, field: fname }
-                        if *fname == field =>
+                let fields = match expr {
+                    hir::Expr::StructLiteral { name, fields, .. }
+                        if record == RecordType::Struct(*name) =>
                     {
-                        let resolves = bi
-                            .zip(bi.and_then(|bi| bi.expr_types.get(*base).copied()))
-                            .and_then(|(bi, t)| types::nominal_name(ws, Some(bi), t))
-                            .is_some_and(|n| n == sname);
-                        if resolves {
-                            if let Some(sp) = body.expr_spans.get(e) {
-                                let end = sp.offset_range().1;
-                                out.push(RefSite::plain(sp.with_offset_range((end - flen, end))));
+                        *fields
+                    }
+                    hir::Expr::EnumVariant {
+                        enum_name,
+                        variant,
+                        args: hir::VariantArgs::Record(fields),
+                        ..
+                    } if record == RecordType::Variant(*enum_name, *variant) => *fields,
+                    _ => {
+                        if let RecordType::Struct(name) = record {
+                            if field_access_matches(ws, m, *owner, bi, e, expr, name, field) {
+                                if let Some(span) = body.expr_spans.get(e) {
+                                    let end = span.offset_range().1;
+                                    out.push(RefSite::plain(
+                                        span.with_offset_range((end - field.len(), end)),
+                                    ));
+                                }
                             }
                         }
+                        continue;
                     }
-                    // `.field` sibling ref: a default body of THIS struct
-                    // (`boosted: int = .power`), or a `FieldRef<sname, V>`-typed
-                    // key-path arg. Span ends at the name (leading dot stays).
-                    hir::Expr::SiblingRef(n) if *n == field => {
-                        let of_struct = match owner {
-                            hir::BodyOwner::StructDefaults(sidx) => m.structs[*sidx].name == sname,
-                            _ => bi.is_some_and(|bi| {
-                                bi.expr_types
-                                    .get(e)
-                                    .copied()
-                                    .and_then(|t| field_ref_struct(ws, bi, t))
-                                    .is_some_and(|sn| sn == sname)
-                            }),
-                        };
-                        if of_struct {
-                            if let Some(sp) = body.expr_spans.get(e) {
-                                let end = sp.offset_range().1;
-                                out.push(RefSite::plain(sp.with_offset_range((end - flen, end))));
-                            }
-                        }
-                    }
-                    _ => {}
+                };
+                for f in fields
+                    .map(|idx| &body.struct_lit_field_arena[idx])
+                    .filter(|f| f.name == field)
+                {
+                    let shorthand = body
+                        .expr_spans
+                        .get(f.value)
+                        .is_some_and(|span| span.offset_range() == f.name_span.offset_range());
+                    out.push(field_site(f.name_span, shorthand));
                 }
             }
 
-            // `sname { field }` record-pattern field (struct patterns only).
-            // Shorthand (the sub-pattern's binding token IS the name token)
-            // expands on rename, keeping the binding.
             for pat in body.pattern_arena.values() {
-                if let hir::Pattern::Record {
-                    enum_name: None,
-                    name: Some(n),
+                let hir::Pattern::Record {
+                    enum_name,
+                    name: Some(name),
                     fields,
                     ..
                 } = pat
+                else {
+                    continue;
+                };
+                if record
+                    == enum_name.map_or(RecordType::Struct(*name), |en| {
+                        RecordType::Variant(en, *name)
+                    })
                 {
-                    if *n == sname {
-                        for fidx in *fields {
-                            let f = &body.record_pat_field_arena[fidx];
-                            if f.name == field {
-                                let is_shorthand = match body.pattern_arena[f.pat] {
-                                    hir::Pattern::Bind(b) => {
-                                        body.binding_spans.get(b).is_some_and(|bs| {
-                                            bs.offset_range() == f.name_span.offset_range()
-                                        })
-                                    }
-                                    _ => false,
-                                };
-                                out.push(RefSite {
-                                    span: f.name_span,
-                                    shorthand: is_shorthand
-                                        .then_some(Shorthand::KeepBinding(f.name)),
-                                });
-                            }
-                        }
+                    for f in fields
+                        .into_iter()
+                        .map(|idx| &body.record_pat_field_arena[idx])
+                        .filter(|f| f.name == field)
+                    {
+                        out.push(field_site(f.name_span, pattern_field_is_shorthand(body, f)));
                     }
                 }
             }
         }
     }
-
     out
+}
+
+fn field_access_matches(
+    ws: &Workspace,
+    module: &hir::Module,
+    owner: hir::BodyOwner,
+    bi: Option<&BodyInference>,
+    e: Idx<hir::Expr>,
+    expr: &hir::Expr,
+    name: Ustr,
+    field: Ustr,
+) -> bool {
+    match expr {
+        hir::Expr::FieldAccess { base, field: fname }
+        | hir::Expr::SafeNav { base, field: fname }
+            if *fname == field =>
+        {
+            bi.and_then(|bi| types::nominal_name(ws, Some(bi), *bi.expr_types.get(*base)?))
+                == Some(name)
+        }
+        hir::Expr::SiblingRef(n) if *n == field => match owner {
+            hir::BodyOwner::StructDefaults(sidx) => module.structs[sidx].name == name,
+            _ => bi.and_then(|bi| field_ref_struct(ws, bi, *bi.expr_types.get(e)?)) == Some(name),
+        },
+        _ => false,
+    }
 }
 
 /// Every reference to struct `name` across all modules: the declaration name,
