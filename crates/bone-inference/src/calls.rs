@@ -216,10 +216,17 @@ pub(crate) fn fit_cost(gamma: &mut Gamma, arg: TyId, param: TyId, span: Span) ->
                 _ => false,
             };
 
-            if p_is_iface || p_is_single_cap_from_fieldref {
+            let p_is_frame_ref = frame_ref_target(gamma, p).is_some();
+            if p_is_iface || p_is_single_cap_from_fieldref || p_is_frame_ref {
                 let snap = gamma.out.checkpoint();
                 if gamma.trial(|g| coerce(g, a, p, span).is_ok()) {
-                    return Some(if p_is_iface { 3 } else { 1 });
+                    return Some(if p_is_iface {
+                        3
+                    } else if p_is_frame_ref {
+                        1 + penalty
+                    } else {
+                        1
+                    });
                 }
 
                 gamma.out.rollback_to(snap);
@@ -889,6 +896,11 @@ fn fit_candidate(
 
                 let db = declared_is_bounded_generic(gamma, declared[offset + i], &bounded_vars);
                 let pty_r = resolve(gamma, pty, span);
+                if matches!(fill, SlotFill::SpreadField(..))
+                    && frame_ref_target(gamma, pty_r).is_some()
+                {
+                    return None;
+                }
                 let contextual_uint = matches!(fill, SlotFill::Direct(arg)
                     if matches!(c.body.expr_arena[*arg], Expr::Int(value)
                         if (0..=u32::MAX as i64).contains(&value))
@@ -1837,8 +1849,10 @@ pub(crate) fn commit_selected_call(
                 }
                 if !coerced {
                     match preinferred.get(&arg) {
-                        Some(&aty) => coerce(gamma, aty, pty, c.body.expr_spans[arg])?,
-                        None => check_expr(c, gamma, arg, pty, c.body.expr_spans[arg])?,
+                        Some(&aty) if frame_ref_target(gamma, pty).is_none() => {
+                            coerce(gamma, aty, pty, c.body.expr_spans[arg])?
+                        }
+                        _ => check_expr(c, gamma, arg, pty, c.body.expr_spans[arg])?,
                     }
                 }
                 gamma.iter_result_lambda = None;
@@ -1857,7 +1871,15 @@ pub(crate) fn commit_selected_call(
                 }
             }
             // A spread-supplied field: check the field's type against the param.
-            SlotFill::SpreadField(op, fty) => coerce(gamma, fty, pty, c.body.expr_spans[op])?,
+            SlotFill::SpreadField(op, fty) => {
+                if frame_ref_target(gamma, pty).is_some() {
+                    comp_error!(
+                        c.body.expr_spans[op],
+                        "a `ref` argument must be passed directly; call spreads supply copied fields"
+                    );
+                }
+                coerce(gamma, fty, pty, c.body.expr_spans[op])?;
+            }
         }
     }
 

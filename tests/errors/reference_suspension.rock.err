@@ -10,6 +10,30 @@ co fn tick(player: ref Player) -> Coroutine<int> {
 }
 fn main() {}
 
+//=== TEST CASE: coroutine_cannot_borrow_a_temporary_Generic ===
+//! expect: a `ref` can only borrow a stable place (a local, field, or indexed slot)
+value Cell { hp: int }
+co fn read(cell: ref Cell) -> Coroutine<int> { yield cell.hp }
+fn main() { let task = read(Cell { hp: 1 }) }
+
+//=== TEST CASE: overloaded_coroutine_cannot_borrow_a_temporary_Generic ===
+//! expect: a `ref` can only borrow a stable place (a local, field, or indexed slot)
+value Cell { hp: int }
+value Other { hp: int }
+co fn read(cell: ref Cell) -> Coroutine<int> { yield cell.hp }
+co fn read(other: ref Other) -> Coroutine<int> { yield other.hp }
+fn main() { let task = read(Cell { hp: 1 }) }
+
+//=== TEST CASE: coroutine_cannot_borrow_a_copied_spread_field_Generic ===
+//! expect: a `ref` argument must be passed directly; call spreads supply copied fields
+value Cell { hp: int }
+value Wrapper { cell: Cell }
+co fn deferred_read(cell: ref Cell) -> Coroutine<int> { yield cell.hp }
+fn main() {
+    let wrapper = Wrapper { cell: Cell { hp: 1 } }
+    let task = deferred_read(..wrapper)
+}
+
 //=== TEST CASE: local_ref_used_after_yield_Generic ===
 //! expect: frame borrow is used after a coroutine suspension
 value Cell { hp: int }

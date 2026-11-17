@@ -47,7 +47,9 @@ do not rely on it. See [numeric edge tests](../tests/operators/numeric_edges.roc
 to that place. A function can return a reference derived from a valid input
 reference or its field, but not to a local place. The compiler rejects refs
 in persistent storage, across opaque boundaries, or live across coroutine
-suspension. A relocatable collection element can be borrowed for an immediate
+suspension. A coroutine may retain a reference argument between construction
+and first resume; see [coroutine reference lifetimes](coroutines.md).
+A relocatable collection element can be borrowed for an immediate
 call but cannot be retained. See [reference fixtures](../tests/values/refs.rock)
 and [admission tests](../crates/bone-semantic/tests/structural.rs).
 

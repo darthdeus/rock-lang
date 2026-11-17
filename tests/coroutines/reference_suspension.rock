@@ -2,7 +2,64 @@
 // reference in each resume segment.
 
 value SuspensionCell { hp: int }
+value SuspensionWrapper { cell: SuspensionCell }
 struct SuspensionPlayer { hp: int }
+
+co fn deferred_value_read(cell: ref SuspensionCell) -> Coroutine<int> {
+    yield cell.hp
+}
+
+co fn deferred_identity_read(player: ref SuspensionPlayer) -> Coroutine<int> {
+    yield player.hp
+}
+
+fn deferred_value_read(n: int) -> int { n }
+fn deferred_value_read(cell: any) -> int { 23 }
+fn deferred_identity_read(n: int) -> int { n }
+
+@test
+fn call_spread_selects_a_value_overload() {
+    let wrapper = SuspensionWrapper { cell: SuspensionCell { hp: 1 } }
+    assert_eq(deferred_value_read(..wrapper), 23)
+}
+
+@test
+fn retained_explicit_value_ref_observes_write_before_first_resume() {
+    let cell = SuspensionCell { hp: 1 }
+    let borrowed: ref SuspensionCell = cell
+    let task = deferred_value_read(borrowed)
+    cell.hp = 19
+    assert_eq(task.resume() ?? -1, 19)
+    assert_eq(task.resume(), null)
+}
+
+@test
+fn retained_direct_value_place_observes_write_before_first_resume() {
+    let cell = SuspensionCell { hp: 1 }
+    let task = deferred_value_read(cell)
+    cell.hp = 19
+    assert_eq(task.resume() ?? -1, 19)
+    assert_eq(task.resume(), null)
+}
+
+@test
+fn retained_explicit_identity_ref_observes_write_before_first_resume() {
+    let player = SuspensionPlayer { hp: 1 }
+    let borrowed: ref SuspensionPlayer = player
+    let task = deferred_identity_read(borrowed)
+    player.hp = 19
+    assert_eq(task.resume() ?? -1, 19)
+    assert_eq(task.resume(), null)
+}
+
+@test
+fn retained_direct_identity_place_observes_write_before_first_resume() {
+    let player = SuspensionPlayer { hp: 1 }
+    let task = deferred_identity_read(player)
+    player.hp = 19
+    assert_eq(task.resume() ?? -1, 19)
+    assert_eq(task.resume(), null)
+}
 
 co fn copied_value_survives() -> Coroutine<int> {
     let cell = SuspensionCell { hp: 1 }

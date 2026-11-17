@@ -4,8 +4,17 @@ A `co fn` creates a resumable computation. Calling it creates a handle; the
 body runs when the handle is resumed. `yield` suspends the body and produces a
 value for the caller. A later resume continues after that yield.
 
-The lifetime rule for explicit references retained between construction and first
-resume is unresolved; see [#346](https://github.com/darthdeus/rock-lang/issues/346).
+A `ref T` argument is retained from construction until the first resume. Passing
+a direct place and passing an explicit `ref T` binding to that place follow the
+same rule: neither takes a snapshot, so reads in the body observe writes made
+before the first resume. The place must remain valid until the reference is
+used; removing its Arena row or resetting that Arena invalidates the reference.
+Temporaries and relocatable Vec/Map element references cannot be retained.
+Pass ref arguments directly: call spreads supply copied fields, not places.
+
+The reference is usable in the first resume segment, but cannot be used after a
+`yield` or `await` suspension. Later segments must acquire a fresh reference;
+retain an `Entity<T>` and resolve it again when access spans multiple resumes.
 
 ```rock
 co fn counter() -> Coroutine<int, string> {

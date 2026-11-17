@@ -2,6 +2,27 @@
 //! A frame ref may be used in the segment where it was acquired. A path
 //! that suspends must refresh the ref before using it again.
 
+//- direct_place_and_explicit_ref_coroutine_arguments
+value Cell { hp: int }
+struct Player { hp: int }
+co fn read(cell: ref Cell) -> Coroutine<int> { yield cell.hp }
+co fn read(player: ref Player) -> Coroutine<int> { yield player.hp }
+fn construct() {
+    let cell = Cell { hp: 1 }
+    let borrowed_cell: ref Cell = cell
+    let explicit_cell = read(borrowed_cell)
+    let direct_cell = read(cell)
+    let player = Player { hp: 1 }
+    let borrowed_player: ref Player = player
+    let explicit_player = read(borrowed_player)
+    let direct_player = read(player)
+}
+
+fn marker() -> int {
+    5
+  //^ int
+}
+
 //- parameter_finished_before_yield
 struct Player { hp: int }
 co fn tick(player: ref Player) -> Coroutine<int> {
