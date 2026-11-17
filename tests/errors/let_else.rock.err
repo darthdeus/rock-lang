@@ -30,7 +30,7 @@ fn f(v: int) -> int {
 }
 
 //=== TEST CASE: else_does_not_see_bindings_Scope ===
-//! expect: Undefined
+//! expect: `x` did not resolve to any definition
 fn f(v: int?) -> int {
     let x = v else {
         return x

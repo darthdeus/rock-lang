@@ -14,12 +14,17 @@ const TICKET: &str = "@consume struct Ticket { id: int }
 fn spend(t: Ticket) -> int { return t.id }
 fn next(t: Ticket) -> int { return t.id }
 struct Holder { ticket: Ticket }
+fn iter(xs: [Ticket]) -> Holder { return Holder { ticket: xs[0] } }
+fn next(it: Holder) -> (bool, Ticket) { return (false, it.ticket) }
 ";
 
 #[test]
 fn rejects_consumed_bindings_with_both_use_sites() {
     for body in [
         "let t = Ticket { id: 1 }; let _ = spend(t); let _ = spend(t)",
+        "let (t, _) = (Ticket { id: 1 }, 0); let _ = spend(t); let _ = spend(t)",
+        "let candidate: Ticket? = Ticket { id: 1 }; let t = candidate else { return }; let _ = spend(t); let _ = spend(t)",
+        "for t in [Ticket { id: 1 }] { let _ = spend(t); let _ = spend(t) }",
         "let t = Ticket { id: 1 }; let alias = t; let _ = spend(t)",
         "let t = Ticket { id: 1 }; if true { let _ = spend(t) }; let _ = spend(t)",
         "let t = Ticket { id: 1 }; if true { let _ = spend(t) } else { let _ = spend(t) }; let _ = spend(t)",
@@ -54,6 +59,10 @@ fn admits_single_use_exclusive_branches_and_fresh_bindings() {
         "let t = Ticket { id: 1 }; let _ = spend(t); t = Ticket { id: 2 }; let _ = spend(t)",
         "let t = Ticket { id: 1 }; let _ = spend(t); let t = Ticket { id: 2 }; let _ = spend(t)",
         "while false { let t = Ticket { id: 1 }; let _ = spend(t) }",
+        "for t in [Ticket { id: 1 }] { let _ = spend(t) }",
+        "let (t, _) = (Ticket { id: 1 }, 0); let _ = spend(t)",
+        "let t = Ticket { id: 1 }; let candidate: int? = 1; let n = candidate else { let _ = spend(t); return }; let _ = spend(t)",
+        "while false { let candidate: Ticket? = Ticket { id: 1 }; let t = candidate else { break }; let _ = spend(t) }",
         "let t = Ticket { id: 1 }; let _ = next(t); let _ = t.next(); let _ = t.id; let _ = spend(t)",
         "let t = Ticket { id: 1 }; let alias = t; let _ = spend(alias)",
         "let t = Ticket { id: 1 }; let _ = next((t: Ticket)); let _ = (t: Ticket).id; let _ = spend(t)",

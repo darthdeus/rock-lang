@@ -222,7 +222,6 @@ impl Walk<'_> {
     fn loop_body(
         &mut self,
         cond: Option<Idx<Expr>>,
-        vars: &[Idx<BindingInfo>],
         pattern: Option<Idx<Pattern>>,
         body: Idx<Expr>,
         flow: &mut Flow,
@@ -238,9 +237,6 @@ impl Walk<'_> {
             self.expr(cond, false, flow);
         }
         let mut pass = flow.clone();
-        for &binding in vars {
-            self.bind(binding, &mut pass);
-        }
         if let Some(pattern) = pattern {
             self.node(HirChild::Pattern(pattern), &mut pass);
         }
@@ -252,34 +248,32 @@ impl Walk<'_> {
 
     fn stmt(&mut self, at: Idx<Statement>, flow: &mut Flow) {
         match self.body.statement_arena[at] {
-            Statement::Let { name, value }
-            | Statement::LetNewtype {
-                var: name, value, ..
+            Statement::Let {
+                pattern,
+                value,
+                else_block,
+            } => {
+                self.expr(value, false, flow);
+                if let Some(else_block) = else_block {
+                    let mut miss = flow.clone();
+                    self.expr(else_block, false, &mut miss);
+                    flow.merge(miss);
+                }
+                self.node(HirChild::Pattern(pattern), flow);
             }
-            | Statement::Static { name, value } => {
+            Statement::Static { name, value } => {
                 self.expr(value, false, flow);
                 self.bind(name, flow);
             }
-            Statement::LetTuple { ref vars, value } => {
-                self.expr(value, false, flow);
-                for binding in vars.leaves() {
-                    self.bind(binding, flow);
-                }
-            }
             Statement::For {
-                ref vars,
+                pattern,
                 iter,
                 body,
             } => {
                 self.expr(iter, false, flow);
-                self.loop_body(None, &vars.leaves(), None, body, flow);
+                self.loop_body(None, Some(pattern), body, flow);
             }
-            Statement::While { cond, body } => self.loop_body(Some(cond), &[], None, body, flow),
-            Statement::WhileLet {
-                pattern,
-                value,
-                body,
-            } => self.loop_body(Some(value), &[], Some(pattern), body, flow),
+            Statement::While { cond, body } => self.loop_body(Some(cond), None, body, flow),
             Statement::Fn { params, body, .. } => self.region(body, params, &[]),
             Statement::Defer(expr) => self.defers.last_mut().unwrap().push(expr),
             Statement::Return(value) => {
