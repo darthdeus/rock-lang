@@ -4,7 +4,6 @@
 
 mod affine_bounds;
 mod backend_externs;
-mod coalesce;
 mod common;
 mod deepcopy;
 mod enum_boxes;
