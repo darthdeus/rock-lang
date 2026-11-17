@@ -502,11 +502,12 @@ fn value_slots_offer() {
     ]);
 }
 
+const HELPER: &str = "fn helper_thing() {}\nfn main() {\n";
+const MOB: &str = "struct Mob { health: int }\nfn helper_thing() {}\n\
+                   fn main() {\n    let mob = Mob { health: 1 }\n";
+
 #[test]
 fn code_around_comments_and_strings_completes() {
-    const HELPER: &str = "fn helper_thing() {}\nfn main() {\n";
-    const MOB: &str = "struct Mob { health: int }\nfn helper_thing() {}\n\
-                       fn main() {\n    let mob = Mob { health: 1 }\n";
     let cases: &[(&str, &str, &str)] = &[
         (
             HELPER,
@@ -543,9 +544,6 @@ fn code_around_comments_and_strings_completes() {
 
 #[test]
 fn comments_strings_and_numbers_offer_nothing() {
-    const HELPER: &str = "fn helper_thing() {}\nfn main() {\n";
-    const MOB: &str = "struct Mob { health: int }\nfn helper_thing() {}\n\
-                       fn main() {\n    let mob = Mob { health: 1 }\n";
     let bodies: &[(&str, &str)] = &[
         (HELPER, "    // plain hel<|>\n}\n"),
         (HELPER, "    /// docs hel<|>\n}\n"),
@@ -790,6 +788,14 @@ fn entity_param_hints_offer() {
 
 #[test]
 fn accepting_a_member_inserts() {
+    let counters = complete(
+        "struct Counter { value: int }\nfn reset(c: Counter) -> int { 0 }\n\
+             fn add(c: Counter, n: int) -> int { 0 }\nfn run(c: Counter) {\n  c.<|>\n}\n",
+    );
+    for (label, want) in [("reset", Plain("reset()")), ("add", Snippet("add($0)"))] {
+        assert_insert("UFCS argument cursor", find(&counters, label), want);
+    }
+
     check_inserts(&[
         (
             "field inserts only its name",
@@ -818,20 +824,6 @@ fn accepting_a_member_inserts() {
             Text("movable.to_ivec()"),
         ),
         (
-            "no-arg UFCS method parks the cursor after `()`",
-            "struct Counter { value: int }\nfn reset(c: Counter) -> int { 0 }\n\
-             fn add(c: Counter, n: int) -> int { 0 }\nfn run(c: Counter) {\n  c.<|>\n}\n",
-            "reset",
-            Plain("reset()"),
-        ),
-        (
-            "UFCS method with an arg left snippets into it",
-            "struct Counter { value: int }\nfn reset(c: Counter) -> int { 0 }\n\
-             fn add(c: Counter, n: int) -> int { 0 }\nfn run(c: Counter) {\n  c.<|>\n}\n",
-            "add",
-            Snippet("add($0)"),
-        ),
-        (
             "UFCS method reuses a following `(`",
             "struct Mob { hp: int }\nfn poke(m: Mob, n: int) -> int { n }\n\
              fn r(mob: Mob) {\n  mob.pok<|>(3)\n}\n",
@@ -851,24 +843,6 @@ fn accepting_a_member_inserts() {
              fn r(c: Corpse) {\n  let n = c.items.le<|>\n}\n",
             "len",
             Text("len()"),
-        ),
-        (
-            "enum call receiver takes UFCS methods",
-            "enum Dir { N, S }\nnewtype Meters(float)\nfn flip(d: Dir) -> Dir { return d }\n\
-             fn halve(m: Meters) -> Meters { return m }\nfn dir() -> Dir { return Dir::N }\n\
-             fn dist() -> Meters { return Meters(1.0) }\n\
-             fn r() {\n  let a = dir().fl<|>\n  let b = dist().ha\n}\n",
-            "flip",
-            Text("flip()"),
-        ),
-        (
-            "newtype call receiver takes UFCS methods",
-            "enum Dir { N, S }\nnewtype Meters(float)\nfn flip(d: Dir) -> Dir { return d }\n\
-             fn halve(m: Meters) -> Meters { return m }\nfn dir() -> Dir { return Dir::N }\n\
-             fn dist() -> Meters { return Meters(1.0) }\n\
-             fn r() {\n  let a = dir().fl\n  let b = dist().ha<|>\n}\n",
-            "halve",
-            Text("halve()"),
         ),
         (
             "Entity get().unwrap() chain",
@@ -938,6 +912,25 @@ fn accepting_a_member_inserts() {
             Text("late_draw"),
         ),
     ]);
+}
+
+#[test]
+fn enum_and_newtype_call_receivers_take_ufcs_methods() {
+    let source = "enum Dir { N, S }\nnewtype Meters(float)\nfn flip(d: Dir) -> Dir { return d }\n\
+             fn halve(m: Meters) -> Meters { return m }\nfn dir() -> Dir { return Dir::N }\n\
+             fn dist() -> Meters { return Meters(1.0) }\n\
+             fn r() {\n  let a = dir().fl\n  let b = dist().ha\n}\n";
+    let mut bone = crate::fixture::workspace_at(PATH, source);
+    for (receiver, label, want) in [
+        ("dir().fl", "flip", Text("flip()")),
+        ("dist().ha", "halve", Text("halve()")),
+    ] {
+        let marked = source.replace(receiver, &format!("{receiver}<|>"));
+        let position = crate::fixture::pos(source, receiver, receiver.len());
+        let items = bone.completion(PATH, position);
+        assert_invariants(&marked, &items);
+        assert_insert(receiver, find(&items, label), want);
+    }
 }
 
 #[test]
@@ -1168,42 +1161,40 @@ fn accepting_a_type_inserts() {
             Text("Entity<Mob>"),
         ),
         (
-            "Entity payload right after the colon",
-            "struct Mob { health: int }\nco fn mob_attack_co(e:<|>   ) -> Coroutine<int> {\n  yield 1\n}\n",
-            "Entity<Mob>",
-            Text("Entity<Mob>"),
-        ),
-        (
-            "Entity payload after one space",
-            "struct Mob { health: int }\nco fn mob_attack_co(e: <|>  ) -> Coroutine<int> {\n  yield 1\n}\n",
-            "Entity<Mob>",
-            Text("Entity<Mob>"),
-        ),
-        (
-            "Entity payload after two spaces",
-            "struct Mob { health: int }\nco fn mob_attack_co(e:  <|> ) -> Coroutine<int> {\n  yield 1\n}\n",
-            "Entity<Mob>",
-            Text("Entity<Mob>"),
-        ),
-        (
             "Entity snippet without a payload struct",
             "co fn render_thing(e: <|>) -> Coroutine<int> {\n  yield 1\n}\n",
             "Entity<>",
             Snippet("Entity<$0>"),
         ),
-        (
-            "Entity snippet in a plain fn, at the colon",
-            "fn clear_attack(e:<|> ) {\n}\n",
-            "Entity<>",
-            Text("Entity<$0>"),
-        ),
-        (
-            "Entity snippet in a plain fn, after the space",
-            "fn clear_attack(e: <|>) {\n}\n",
-            "Entity<>",
-            Text("Entity<$0>"),
-        ),
     ]);
+}
+
+#[test]
+fn entity_type_hints_resolve_at_each_space_after_the_colon() {
+    for (source, columns, label, want) in [
+        (
+            "struct Mob { health: int }\nco fn mob_attack_co(e:   ) -> Coroutine<int> {\n  yield 1\n}\n",
+            &[2, 3, 4][..],
+            "Entity<Mob>",
+            Text("Entity<Mob>"),
+        ),
+        (
+            "fn clear_attack(e: ) {\n}\n",
+            &[2, 3][..],
+            "Entity<>",
+            Text("Entity<$0>"),
+        ),
+    ] {
+        let mut bone = crate::fixture::workspace_at(PATH, source);
+        for column in columns {
+            let offset = source.find("e:").unwrap() + column;
+            let marked = format!("{}<|>{}", &source[..offset], &source[offset..]);
+            let position = crate::fixture::position_of_offset(source, offset);
+            let items = bone.completion(PATH, position);
+            assert_invariants(&marked, &items);
+            assert_insert(&marked, find(&items, label), want);
+        }
+    }
 }
 
 #[test]

@@ -6,7 +6,7 @@
 //! nodes (callee names, enum variants, literal and pattern field names) live
 //! outside the shifted side tables that locals read, so each carrier is pinned.
 
-use crate::fixture::PATH;
+use crate::fixture::{PATH, workspace};
 use bone_query::BoneWorkspace;
 use lsp_types::Position;
 
@@ -142,8 +142,7 @@ fn references_track_line_shifts_from_another_fn_edit() {
 
 #[test]
 fn document_highlight_tracks_line_shift_from_other_fn_edit() {
-    let mut bone = BoneWorkspace::new();
-    bone.update(PATH, LOCALS.to_string());
+    let mut bone = workspace(LOCALS);
     bone.update(PATH, lengthened(LOCALS));
     let mut starts: Vec<(u32, u32)> = bone
         .document_highlight(PATH, Position::new(6, 8))
@@ -158,8 +157,7 @@ fn document_highlight_tracks_line_shift_from_other_fn_edit() {
 /// and revert to last-good before the final valid text arrives.
 #[test]
 fn references_track_line_shift_typed_char_by_char() {
-    let mut bone = BoneWorkspace::new();
-    bone.update(PATH, LOCALS.to_string());
+    let mut bone = workspace(LOCALS);
     let (head, tail) = LOCALS.split_at(LOCALS.find("    return 1").unwrap() + 12);
     let typed = "\n    let pad = 0";
     for i in 1..=typed.len() {
@@ -180,16 +178,23 @@ fn references_track_line_shift_typed_char_by_char() {
 /// For every cursor position in `text`, the sorted `query` results there.
 /// Empty results are dropped so a divergence report shows only the positions
 /// that actually resolve to something.
-fn nav_profile(
+fn nav_profile<I>(
     bone: &BoneWorkspace,
     text: &str,
-    query: impl Fn(&BoneWorkspace, Position) -> Vec<String>,
-) -> Vec<((u32, u32), Vec<String>)> {
+    query: impl Fn(&BoneWorkspace, Position) -> I,
+) -> Vec<((u32, u32), Vec<String>)>
+where
+    I: IntoIterator,
+    I::Item: std::fmt::Debug,
+{
     let mut out = Vec::new();
     for (line, line_text) in text.lines().enumerate() {
         for ch in 0..=line_text.chars().count() {
             let pos = Position::new(line as u32, ch as u32);
-            let mut r = query(bone, pos);
+            let mut r: Vec<_> = query(bone, pos)
+                .into_iter()
+                .map(|r| format!("{r:?}"))
+                .collect();
             r.sort();
             if !r.is_empty() {
                 out.push(((line as u32, ch as u32), r));
@@ -203,31 +208,12 @@ fn nav_profile(
 /// and definition at every offset against a fresh workspace built from `after`
 /// alone. All three read inline node spans, so each is an independent net.
 fn assert_incremental_nav_matches_scratch(before: &str, after: &str) {
-    let mut inc = BoneWorkspace::new();
-    inc.update(PATH, before.to_string());
+    let mut inc = workspace(before);
     inc.update(PATH, after.to_string());
-
-    let mut scratch = BoneWorkspace::new();
-    scratch.update(PATH, after.to_string());
-
-    let refs = |b: &BoneWorkspace, p| {
-        b.references(PATH, p)
-            .into_iter()
-            .map(|l| format!("{:?}", l.range))
-            .collect::<Vec<_>>()
-    };
-    let hover = |b: &BoneWorkspace, p| {
-        b.hover(PATH, p)
-            .into_iter()
-            .map(|h| format!("{h:?}"))
-            .collect::<Vec<_>>()
-    };
-    let def = |b: &BoneWorkspace, p| {
-        b.definition(PATH, p)
-            .into_iter()
-            .map(|l| format!("{l:?}"))
-            .collect::<Vec<_>>()
-    };
+    let scratch = workspace(after);
+    let refs = |b: &BoneWorkspace, p| b.references(PATH, p).into_iter().map(|l| l.range);
+    let hover = |b: &BoneWorkspace, p| b.hover(PATH, p);
+    let def = |b: &BoneWorkspace, p| b.definition(PATH, p);
 
     assert_eq!(
         nav_profile(&inc, after, refs),

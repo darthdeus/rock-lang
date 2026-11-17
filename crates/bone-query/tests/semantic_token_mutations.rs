@@ -237,8 +237,6 @@ fn check_stream(bone: &BoneWorkspace, source: &str, require_tokens: bool, contex
     let line_count = source.split('\n').count() as u32;
     let whole = Range::new(Position::new(0, 0), Position::new(line_count, 0));
     let ranged = bone.semantic_tokens_range(PATH, whole).data;
-    validate(source, &ranged, require_tokens)
-        .unwrap_or_else(|e| panic!("{context}: whole range: {e}"));
     assert_eq!(
         ranged, full,
         "{context}: whole-file range diverged from full"
@@ -304,6 +302,18 @@ fn update_and_check(
             resume_unwind(payload)
         }
     }
+}
+
+fn baseline(case: &Case, label: &str) -> (BoneWorkspace, Vec<SemanticToken>) {
+    let mut bone = BoneWorkspace::new();
+    update_and_check(
+        &mut bone,
+        case.source,
+        case.valid,
+        &replay(case, label, &[], case.source),
+    );
+    let tokens = bone.semantic_tokens(PATH).data;
+    (bone, tokens)
 }
 
 fn tok(
@@ -387,14 +397,8 @@ fn validator_rejects_corrupt_streams_before_production_controls() {
 fn seeded_mutations_and_repairs_keep_token_spans_valid() {
     let mut checked = 0;
     for case in CASES {
-        let mut bone = BoneWorkspace::new();
-        checked += update_and_check(
-            &mut bone,
-            case.source,
-            case.valid,
-            &replay(case, "seed", &[], case.source),
-        );
-        let baseline = bone.semantic_tokens(PATH).data;
+        let (mut bone, baseline) = baseline(case, "seed");
+        checked += baseline.len();
         let mut source = case.source.to_string();
         let mut rng = Rng(case.seed);
         let mut edits = Vec::new();
@@ -429,14 +433,7 @@ fn seeded_mutations_and_repairs_keep_token_spans_valid() {
 #[test]
 fn targeted_boundary_edits_keep_spans_valid_and_repair() {
     for case in CASES {
-        let mut bone = BoneWorkspace::new();
-        update_and_check(
-            &mut bone,
-            case.source,
-            case.valid,
-            &replay(case, "seed", &[], case.source),
-        );
-        let baseline = bone.semantic_tokens(PATH).data;
+        let (mut bone, baseline) = baseline(case, "seed");
         let chars: Vec<char> = case.source.chars().collect();
         let mut edits_checked = 0;
         for (at, ch) in chars.iter().enumerate() {
@@ -473,14 +470,7 @@ fn targeted_boundary_edits_keep_spans_valid_and_repair() {
 #[test]
 fn targeted_malformed_buffers_repair_and_failure_cleanup() {
     let case = &CASES[0];
-    let mut bone = BoneWorkspace::new();
-    update_and_check(
-        &mut bone,
-        case.source,
-        true,
-        &replay(case, "seed", &[], case.source),
-    );
-    let baseline = bone.semantic_tokens(PATH).data;
+    let (mut bone, baseline) = baseline(case, "seed");
     for malformed in [
         "",
         " \n\t",
@@ -521,13 +511,7 @@ fn targeted_malformed_buffers_repair_and_failure_cleanup() {
 #[test]
 fn non_bmp_control_pins_utf16_columns_after_multibyte_text() {
     let case = &CASES[2];
-    let mut bone = BoneWorkspace::new();
-    update_and_check(
-        &mut bone,
-        case.source,
-        true,
-        &replay(case, "utf-16 control", &[], case.source),
-    );
+    let (bone, _) = baseline(case, "utf-16 control");
     // Locate an identifier independently, after both a multibyte BMP scalar
     // and a supplementary scalar. Byte and scalar columns both differ here.
     let offset = case.source.find("marker").unwrap();
