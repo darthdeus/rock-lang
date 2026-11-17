@@ -397,3 +397,23 @@ fn chain_mixes_enum_pattern_condition_and_nullable() {
     print(probe(Shape::Circle(-5), m))
     print(probe(Shape::Square(1, 2), m))
 }
+
+fn chain_miss_source(m: Map<int, int>, x: int?) -> string {
+    // The shared else is reached from the pattern clause's miss AND from the
+    // condition clause's miss; both must behave identically.
+    if let a = m.get(1) && x == null {
+        return "both:{a}"
+    } else {
+        return "miss:{x ?? -1}"
+    }
+}
+
+@test(output = "both:7\nmiss:3\nmiss:-1")
+fn chain_else_is_shared_by_every_miss() {
+    let m = map_new<int, int>()
+    m.insert(1, 7)
+    print(chain_miss_source(m, null))
+    print(chain_miss_source(m, 3))
+    let empty = map_new<int, int>()
+    print(chain_miss_source(empty, null))
+}

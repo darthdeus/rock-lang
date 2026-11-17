@@ -56,3 +56,17 @@ fn test() {
 fn test() {
     if true { break } else { 42 }
 }
+
+//=== TEST CASE: chain_else_keeps_no_clause_narrowing_Generic ===
+//! expect: expects operands (int, int)
+// Every clause's miss lands in the same `else`, so a refinement proved by
+// one clause failing (here `x == null` being false) must NOT be assumed
+// there: the first clause missing can arrive with `x` still null.
+fn probe(m: Map<int, int>, x: int?) -> int {
+    if let a = m.get(1) && x == null {
+        return 1
+    } else {
+        return x + 100
+    }
+}
+fn main() {}

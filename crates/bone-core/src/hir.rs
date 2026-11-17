@@ -200,6 +200,11 @@ pub struct Body {
     // TODO: make this IdxMap instead and A/B benchmark?
     pub arg_names: FxHashMap<Idx<Expr>, Ustr>,
     pub method_call_recvs: FxHashSet<Idx<Expr>>,
+    /// Branch targets reachable from MORE THAN ONE point: an `if let` chain's
+    /// else block, shared by every clause's miss arm. A branch-local
+    /// refinement (the narrowing a condition clause's `else` would get) does
+    /// NOT hold on the other arrivals, so narrowing skips these.
+    pub shared_branch_targets: FxHashSet<Idx<Expr>>,
     /// The method name as written at `recv.name(..)` / `recv?.name(..)`,
     /// keyed by the receiver expr. A fn-typed FIELD of that name wins over the
     /// callee family, and in v1 the family's key is a DefKey or an
@@ -294,6 +299,7 @@ impl Default for Body {
 
             arg_names: Default::default(),
             method_call_recvs: Default::default(),
+            shared_branch_targets: Default::default(),
             method_names: Default::default(),
             spread_args: Default::default(),
 

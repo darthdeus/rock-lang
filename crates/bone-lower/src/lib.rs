@@ -3702,7 +3702,13 @@ fn lower_if_let_clauses(
     let else_branch = match else_block {
         Some(blk) => {
             let e = lower_block(ctx, a, body, scope, blk)?;
-            Some(ctx.alloc_block_expr(body, e, a.b(blk)))
+            let e = ctx.alloc_block_expr(body, e, a.b(blk));
+            // Every clause's miss arm lands here, so no clause's branch-local
+            // narrowing may be applied to it.
+            if clauses.len() > 1 {
+                body.shared_branch_targets.insert(e);
+            }
+            Some(e)
         }
         None => None,
     };

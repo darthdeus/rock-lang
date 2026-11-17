@@ -394,6 +394,17 @@ pub(crate) fn infer_statement(
     Ok(())
 }
 
+/// The refinements that may be applied when entering `branch`. A branch
+/// target reachable from several points (an `if let` chain's shared else)
+/// gets NONE: a refinement proved on one arrival does not hold on the others.
+fn branch_narrows<'n>(c: BodyCtx, branch: Idx<Expr>, narrows: &'n [Narrow]) -> &'n [Narrow] {
+    if c.body.shared_branch_targets.contains(&branch) {
+        &[]
+    } else {
+        narrows
+    }
+}
+
 /// Whether a statement list ends in a loop/function exit (`return`/`break`/
 /// `continue`), ignoring trailing comments. The one syntactic divergence test,
 /// shared by block `never` inference and guard narrowing.
@@ -1015,14 +1026,8 @@ pub(crate) fn infer_expr_used(
                     )?;
 
                     if let Some(else_branch) = else_branch {
-                        infer_branch(
-                            c,
-                            gamma,
-                            *else_branch,
-                            &narrow_else,
-                            expr_span,
-                            Use::Discard,
-                        )?;
+                        let narrow_else = branch_narrows(c, *else_branch, &narrow_else);
+                        infer_branch(c, gamma, *else_branch, narrow_else, expr_span, Use::Discard)?;
                     }
 
                     gamma.workspace.builtins.unit()
@@ -1039,8 +1044,9 @@ pub(crate) fn infer_expr_used(
                         );
                     };
 
+                    let narrow_else = branch_narrows(c, *else_branch, &narrow_else);
                     let else_ty =
-                        infer_branch(c, gamma, *else_branch, &narrow_else, expr_span, Use::Value)?;
+                        infer_branch(c, gamma, *else_branch, narrow_else, expr_span, Use::Value)?;
                     join(gamma, then_ty, else_ty, expr_span)?
                 }
             }
