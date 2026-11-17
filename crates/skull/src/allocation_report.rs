@@ -190,16 +190,6 @@ impl AllocationReport {
         report
     }
 
-    pub fn trace_from_diagnostic_names(&self, name: &str, roots: &[&str]) -> AllocationRoute {
-        let emitted: Vec<String> = self
-            .bodies
-            .values()
-            .filter(|body| roots.iter().any(|root| body.diagnostic_name == *root))
-            .map(|body| body.emitted_name.clone())
-            .collect();
-        self.trace_from_emitted_names(name, emitted)
-    }
-
     fn trace_from_emitted_names(&self, name: &str, mut roots: Vec<String>) -> AllocationRoute {
         roots.sort();
         roots.dedup();
@@ -830,5 +820,75 @@ impl Fnv64 {
 
     fn finish(self) -> u64 {
         self.0
+    }
+}
+
+#[cfg(test)]
+mod report_behavior_tests {
+    use super::*;
+
+    #[test]
+    fn full_emission_reports_live_aggregate_uses_and_stable_shared_routes() {
+        let file = ustr::Ustr::from("<allocation-report>");
+        let source = r#"
+struct Pair { x: int, y: int }
+global RETAINED: Pair = Pair { x: 0, y: 0 }
+@lifecycle(phase="update", owner="process") deco init tick {}
+fn projected(seed: int) -> int {
+    let pair = Pair { x: seed, y: seed + 1 }
+    return pair.x
+}
+fn consume(pair: Pair) -> int { return pair.x }
+fn passed(seed: int) -> int { return consume(Pair { x: seed, y: seed + 1 }) }
+fn returned(seed: int) -> Pair { return Pair { x: seed, y: seed + 1 } }
+fn retained(seed: int) { RETAINED = Pair { x: seed, y: seed + 1 } }
+fn shared(seed: int) -> [int] { return [seed] }
+fn zebra(seed: int) -> int { return shared(seed).len() }
+fn alpha(seed: int) -> int { return shared(seed).len() }
+@tick fn update_system() {
+    let _ = projected(1)
+    let _ = passed(6)
+    let _ = returned(2)
+    retained(3)
+    let _ = zebra(4) + alpha(5)
+}
+fn main() { update_system() }
+"#;
+        let user = skull_parser::parse_module_clean(source, file).expect("parse");
+        let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib([user]).expect("stdlib");
+        let ws = crate::pipeline::semantic_pass(&mut modules, &Default::default())
+            .expect("semantic pass");
+        let mid = *ws.module_ids.get(&file).expect("user module");
+        let _report = scope(true);
+        let (emit, _) = crate::mir_emit::emit_full(&ws, mid).expect("full emission");
+        let report = emit.allocation_report.render_text();
+
+        let has_use = |body: &str, kind: &str| {
+            report
+                .lines()
+                .any(|line| line.contains(body) && line.contains(&format!("\t{kind}\t1\t")))
+        };
+        assert!(has_use("passed", "direct-call"));
+        assert!(has_use("returned", "returned"));
+        assert!(has_use("retained", "global-store"));
+        assert!(
+            !report.contains("field-only"),
+            "the projected temporary is scalarized"
+        );
+        let shared = report
+            .lines()
+            .find(|line| line.contains("shared") && line.contains("callers\t"))
+            .expect("shared leaf route");
+        assert!(
+            shared.contains("callers\talpha_int | zebra_int"),
+            "{shared}"
+        );
+        assert!(
+            shared.split(" via ").nth(1).is_some_and(|path| {
+                let path = path.split("\tloop_depth").next().unwrap_or(path);
+                path.contains("alpha_int") && !path.contains("zebra_int")
+            }),
+            "{shared}"
+        );
     }
 }

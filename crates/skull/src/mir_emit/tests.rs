@@ -123,3 +123,140 @@ mod unread_constant_tests {
         assert!(overlay.lua.contains("FOO = "), "{}", overlay.lua);
     }
 }
+
+#[cfg(test)]
+mod incremental_output_equality_tests {
+    use super::*;
+
+    #[derive(Clone, Copy)]
+    enum EditedBody {
+        Function(&'static str),
+        Global(&'static str),
+    }
+
+    fn assert_sequence(file: &str, sources: &[String], edited: EditedBody) {
+        let ws = workspace_of(&sources[0], file, true);
+        let mid = module_id(&ws, file);
+        let (_, mut cache) = emit_full(&ws, mid).expect("initial full emit");
+
+        for (step, source) in sources.iter().enumerate().skip(1) {
+            let ws = workspace_of(source, file, true);
+            let mid = module_id(&ws, file);
+            let owner = match edited {
+                EditedBody::Function(name) => BodyOwner::Function(
+                    ws.module(mid)
+                        .functions
+                        .iter()
+                        .find(|(_, f)| source_name_matches(f.name, name))
+                        .expect("edited function")
+                        .0,
+                ),
+                EditedBody::Global(name) => BodyOwner::Global(
+                    ws.module(mid)
+                        .globals
+                        .iter()
+                        .find(|(_, g)| source_name_matches(g.name, name))
+                        .expect("edited global")
+                        .0,
+                ),
+            };
+            let incremental =
+                emit_incremental(&ws, &mut cache, &[(mid, owner)]).expect("incremental emit");
+            let fresh = emit_full(&ws, mid).expect("fresh full emit").0;
+            assert_eq!(incremental.lua, fresh.lua, "{file}, edit {step}");
+        }
+    }
+
+    fn shader_source(body: &str) -> String {
+        format!(
+            r#"
+value QuadVert {{ aPos: Vec2, aTexCoord: Vec2 }}
+value UiVertU {{ uProjection: Mat4, uView: Mat4, uTransform: Mat4 }}
+value UiVary {{ position: Vec4, TexCoord: Vec2 }}
+@shader(vertex)
+fn shared_vertex(@attr a: QuadVert, @uniform u: UiVertU) -> UiVary {{
+    let clip = u.uProjection * u.uView * u.uTransform * Vec4 {{ x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }}
+    return UiVary {{ position: clip, TexCoord: a.aTexCoord }}
+}}
+@shader(fragment)
+fn first_fragment(v: UiVary) -> Vec4 {{ return Vec4 {{ x: 1.0, y: 0.0, z: 0.0, w: 1.0 }} }}
+@shader(fragment)
+fn second_fragment(v: UiVary) -> Vec4 {{ return Vec4 {{ x: 0.0, y: 1.0, z: 0.0, w: 1.0 }} }}
+fn choose() -> string {{ {body} }}
+fn main() {{ let _ = choose() }}
+"#
+        )
+    }
+
+    #[test]
+    fn incremental_edits_match_fresh_output_after_roots_and_inline_dependencies_change() {
+        assert_sequence(
+            "<shader-edit>",
+            &[
+                shader_source("return rock_shader(shared_vertex, first_fragment)"),
+                shader_source("return rock_shader(shared_vertex, second_fragment)"),
+                shader_source("return \"none\""),
+            ],
+            EditedBody::Function("choose"),
+        );
+
+        let global_source = |target: &str| {
+            format!(
+                "fn edit_inc(x: int) -> int {{ return x + 1 }}\n\
+                 fn edit_dec(x: int) -> int {{ return x - 1 }}\n\
+                 global CALLBACK: fn(int) -> int = {target}\n\
+                 fn invoke(x: int) -> int {{ return CALLBACK(x) }}\n\
+                 fn main() {{ let _ = invoke(2) }}"
+            )
+        };
+        assert_sequence(
+            "<fn-value-global-edit>",
+            &[
+                global_source("edit_inc"),
+                global_source("edit_dec"),
+                global_source("edit_inc"),
+            ],
+            EditedBody::Global("CALLBACK"),
+        );
+
+        let inspect_source = |inspect: bool| {
+            let body = if inspect {
+                "return inspect(xs)"
+            } else {
+                "return \"\""
+            };
+            format!(
+                "value V2 {{ x: int, y: int }}\n\
+                 fn caller(xs: [V2]) -> string {{ {body} }}\n\
+                 fn main() {{ let xs = [V2 {{ x: 1, y: 2 }}]; let _ = caller(xs) }}"
+            )
+        };
+        assert_sequence(
+            "<inline-dependency-edit>",
+            &[
+                inspect_source(true),
+                inspect_source(false),
+                inspect_source(true),
+            ],
+            EditedBody::Function("caller"),
+        );
+
+        let generic_source = |call: bool| {
+            let result = if call { "identity(7)" } else { "0" };
+            format!(
+                "fn identity<T>(x: T) -> T {{ return x }}\n\
+                 fn caller() -> int {{ return {result} }}\n\
+                 fn main() {{ let _ = caller() }}"
+            )
+        };
+        assert_sequence(
+            "<generic-last-call-edit>",
+            &[
+                generic_source(true),
+                generic_source(false),
+                generic_source(true),
+            ],
+            EditedBody::Function("caller"),
+        );
+    }
+}
