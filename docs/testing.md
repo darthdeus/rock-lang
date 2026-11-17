@@ -46,6 +46,38 @@ errors live under `tests/errors/`; editor fixtures live under `tests/lsp/`.
 Test labels use only the parent directory and filename, so avoid deeper topic
 nesting. A path component named `errors` or `lsp` selects a special runner.
 
+## Differential testing
+
+The CLI integration tests generate function bodies from a small typed grammar.
+A typed environment tracks locals through nested blocks, so declarations,
+assignments and expressions are well-typed by construction. Random statements
+cover value copies and refs, mutable captures, bounded loops, enums with generated payload schemas,
+collections, interpolation, coroutines, overloads and generic calls. Each program
+prints a deterministic trace frequently. The runner compares LuaJIT and Node
+stdout with MIR checks both off and on, and treats compile failures, runtime errors and hangs as failures.
+Programs repeat their probes with the JIT enabled to exercise hot code too.
+Map lookups use a fixed order. Numeric traces normalize signed zero, which differs
+between LuaJIT platforms; signed bitwise inputs stay below the documented
+platform-dependent conversion range. Integer leaves stay within signed 32 bits
+to avoid the known boxed-field narrowing in [#399](https://github.com/darthdeus/rock-lang/issues/399);
+uint covers its full range.
+
+```sh
+cargo test --locked -p rock-cli --test rock_cli_tests differential::smoke
+ROCK_DIFF_SEEDS=5000 cargo test --locked -p rock-cli --test rock_cli_tests differential::campaign -- --ignored --nocapture
+ROCK_DIFF_START=81 ROCK_DIFF_SEEDS=1 cargo test --locked -p rock-cli --test rock_cli_tests differential::campaign -- --ignored --nocapture
+```
+
+The ordinary cargo test run covers a fixed smoke seed set. Campaigns start at
+seed zero by default. A failure reports the seed, source and first differing
+trace line; set `ROCK_DIFF_OUTPUT` to a scratch directory to keep the generated
+`.rock` files for replay with `rock run`. On failure the runner repeatedly drops
+functions and statements, then simplifies expressions while preserving the failure
+mode and diagnostic. It prints and saves the reduced source. Set
+`ROCK_DIFF_SHRINK_STEPS` (default 150) to change the reduction probe budget. Each
+compiler/runtime invocation has a 15-second timeout. Install LuaJIT and Node to
+run both backends.
+
 ## Expected errors
 
 An `.rock.err` file contains independent invalid programs:
