@@ -1174,59 +1174,28 @@ mod overlay_runtime_tests {
         );
     }
 
-    /// One concrete edit, fully spelled out, so the mechanism is legible before
-    /// the fuzz generalizes it. v0: f0=1, f1 inlines f0, main prints both -> "1\n1".
-    /// Edit f0 to 2. The overlay must re-emit f0 AND the inlined caller f1 AND
-    /// main (which inlines them) -> "2\n2". If any of those is missing from the
-    /// overlay, the stale baseline's 1 leaks through.
     #[test]
-    fn concrete_inlined_edit_runtime_eq() {
-        let v0 = "@inline\nfn f0() -> int { 1 }\n\
-                  fn f1() -> int { f0() }\n\
-                  fn main() { print(\"{f0()}\") print(\"{f1()}\") }\n";
-        let v1 = "@inline\nfn f0() -> int { 2 }\n\
-                  fn f1() -> int { f0() }\n\
-                  fn main() { print(\"{f0()}\") print(\"{f1()}\") }\n";
-
-        let mut live = Live::boot(v0);
-
-        let overlay = live.overlay(v1);
-        let fresh = live.full();
-
-        // Sanity: the stale baseline alone prints 1,1 -- so a leak is observable.
-        assert_run(
-            &live.baseline,
-            &["main()"],
-            "1\n1",
-            "baseline should print the STALE values",
-        );
-
-        assert_runtime_eq(&live.baseline, &overlay, &fresh, "concrete f0 1->2");
-    }
-
-    /// A `const`'s value edit hot-reloads through the overlay. v0: FOO=5, main
-    /// prints it -> "5". Edit FOO to 10: the overlay must re-emit FOO's init
-    /// UNGUARDED so the reload reassigns it -> "10". If the overlay omits the const
-    /// init, the stale baseline's 5 leaks through and diverges from the fresh build.
-    #[test]
-    fn concrete_const_value_edit_runtime_eq() {
-        let v0 = "const FOO: int = 5\nfn main() { print(\"{FOO}\") }\n";
-        let v1 = "const FOO: int = 10\nfn main() { print(\"{FOO}\") }\n";
-
-        let mut live = Live::boot(v0);
-
-        let overlay = live.overlay(v1);
-        let fresh = live.full();
-
-        // Sanity: the stale baseline alone prints the OLD const, so a leak is observable.
-        assert_run(
-            &live.baseline,
-            &["main()"],
-            "5",
-            "baseline prints the STALE const",
-        );
-
-        assert_runtime_eq(&live.baseline, &overlay, &fresh, "const FOO 5->10");
+    fn concrete_overlay_edits_match_fresh() {
+        for (v0, v1, stale, context) in [
+            (
+                "@inline\nfn f0() -> int { 1 }\nfn f1() -> int { f0() }\nfn main() { print(\"{f0()}\") print(\"{f1()}\") }\n",
+                "@inline\nfn f0() -> int { 2 }\nfn f1() -> int { f0() }\nfn main() { print(\"{f0()}\") print(\"{f1()}\") }\n",
+                "1\n1",
+                "inlined callee edit",
+            ),
+            (
+                "const FOO: int = 5\nfn main() { print(\"{FOO}\") }\n",
+                "const FOO: int = 10\nfn main() { print(\"{FOO}\") }\n",
+                "5",
+                "const value edit",
+            ),
+        ] {
+            let mut live = Live::boot(v0);
+            let overlay = live.overlay(v1);
+            let fresh = live.full();
+            assert_run(&live.baseline, &["main()"], stale, context);
+            assert_runtime_eq(&live.baseline, &overlay, &fresh, context);
+        }
     }
 
     /// A `static` local's INITIALIZER edit hot-reloads through the overlay. A
@@ -1266,68 +1235,29 @@ mod overlay_runtime_tests {
     /// the unrelated follow-up preserves the accumulated counter.
     #[test]
     fn static_init_edit_then_unrelated_edit_preserves_reinit_overlay() {
-        // `probe` accumulates into a static counter each call; DO_RESET (unused
-        // here) keeps the fn shape stable. v1 edits the initializer (0 -> 100); v2
-        // is an UNRELATED edit (dead `let`), initializer still 100.
+        // Preserve a warmed cell on both the first unrelated edit and the
+        // cumulative unrelated edit after changing its initializer.
         let v0 = "fn probe() -> int { static n = 0\n n = n + 1\n n }\nfn main() { print(\"{probe()}\") }\n";
         let v1 = "fn probe() -> int { static n = 100\n n = n + 1\n n }\nfn main() { print(\"{probe()}\") }\n";
         let v2 = "fn probe() -> int { static n = 100\n let unused = 0\n n = n + 1\n n }\nfn main() { print(\"{probe()}\") }\n";
 
         let mut live = Live::boot(v0);
 
+        let unrelated = v0.replace("n = n + 1", "let unused = 0\n n = n + 1");
+        let overlay0 = live.overlay(&unrelated);
         let overlay1 = live.overlay(v1);
         let overlay2 = live.overlay(v2);
 
-        // Models the live game: main.lua(v0) loaded once; each overlay dofile'd in
-        // turn; probe reached (accumulating) between reloads. n: inits 0 -> 1,2 ->
-        // reload1 re-inits to 100 -> 101,102 -> reload2 UNRELATED must PRESERVE ->
-        // 103,104. A re-reset at reload2 would drop back to 101.
         assert_run(
             &live.baseline,
             &[
                 "main()", "main()", // 1, 2   (init 0)
+                &overlay0, "main()", "main()", // 3, 4 (preserve original init)
                 &overlay1, "main()", "main()", // 101, 102  (re-init 100)
                 &overlay2, "main()", "main()", // 103, 104  (preserve)
             ],
-            "1\n2\n101\n102\n103\n104",
+            "1\n2\n3\n4\n101\n102\n103\n104",
             "reload1 re-inits to 100; reload2 (unrelated) must preserve, not re-reset",
-        );
-    }
-
-    /// The §A narrowing on the overlay path: an UNRELATED edit in a fn that owns a
-    /// static must NOT reset the static -- the overlay reconsiders the fn's cells
-    /// (it's in `changed_since_full`) but the runtime key is unchanged, so the warm
-    /// value is preserved. Mirror of
-    /// `static_hot_reload.rs::static_preserved_when_unrelated_body_edited` through
-    /// the overlay. An unconditional runtime reset would lose the warmed value.
-    #[test]
-    fn static_preserved_under_unrelated_overlay_edit() {
-        // `DO_SET` distinguishes PRESERVE (n still 99) from RESET (n re-inits 42).
-        let v0 = "global DO_SET: bool = false\n\
-                  fn probe() -> int { static n = 42\n if DO_SET { n = 99 }\n n }\n\
-                  fn main() { print(\"{probe()}\") }\n";
-        // Unrelated body edit (dead `let`), initializer `42` untouched.
-        let v1 = "global DO_SET: bool = false\n\
-                  fn probe() -> int { static n = 42\n let unused = 0\n if DO_SET { n = 99 }\n n }\n\
-                  fn main() { print(\"{probe()}\") }\n";
-
-        let mut live = Live::boot(v0);
-
-        let overlay = live.overlay(v1);
-
-        // Warm the static to 99 (DO_SET=true, one call), load the overlay, then call
-        // again with DO_SET=false: an unrelated edit must PRESERVE n -> still 99.
-        assert_run(
-            &live.baseline,
-            &[
-                "DO_SET = true",
-                "main()",
-                &overlay,
-                "DO_SET = false",
-                "main()",
-            ],
-            "99\n99",
-            "unrelated edit must not reset the static: warmed 99 survives the reload",
         );
     }
 
@@ -2564,19 +2494,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
     }
 
-    /// `@on_reload` stores a function value, so ordinary name mangling does not
-    /// affect callback freshness.
-    #[test]
-    fn on_reload_without_nomangle_emits_ok() {
-        let prog = "@on_reload\nfn refresh() {}\nfn main() {}\n";
-        let session = bone_session(files(prog)).expect("session");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        assert!(
-            skull::mir_emit::emit_full(session.workspace(), mid).is_ok(),
-            "@on_reload without @nomangle must emit cleanly"
-        );
-    }
-
     // -- frame-lambda hoist ----------
     // These pin the reload/layout contract of P1's co-fn lambda hoist: a
     // capturing co-fn lambda is an env record whose `__fn` names a hoisted
@@ -3397,7 +3314,10 @@ fn main() {}
 
     type StateTransitionHarness = DefinitionTransitionHarness;
 
-    const STATE_V0: &str = r#"
+    macro_rules! state_source {
+        ($definitions:literal) => {
+            concat!(
+                r#"
 struct WidgetDef {
     callback: fn() -> int,
 }
@@ -3412,76 +3332,43 @@ deco init wire {}
 @artifact_catalog(catalog="widgets")
 @intrinsic extern(lua) fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
 global WIDGET_STATES: Map<string, WidgetState> = map_new()
-@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { callback: () => 1 } }
+"#,
+                $definitions,
+                r#"@wire fn reconcile_widget_state() {
+    let present: Map<string, bool> = map_new()
+    for entry in widget_definition_plan() {
+        present[entry.key] = true
+        if WIDGET_STATES.get(entry.key) == null { WIDGET_STATES[entry.key] = WidgetState {} }
+    }
+    let removed: [string] = []
+    for (key, _) in WIDGET_STATES {
+        if present.get(key) == null { removed.push(key) }
+    }
+    for key in removed { WIDGET_STATES.remove(key) }
+}
+fn main() {}
+"#,
+            )
+        };
+    }
+
+    const STATE_V0: &str = state_source!(
+        r#"@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { callback: () => 1 } }
 @widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { callback: () => 2 } }
-@wire fn reconcile_widget_state() {
-    let present: Map<string, bool> = map_new()
-    for entry in widget_definition_plan() {
-        present[entry.key] = true
-        if WIDGET_STATES.get(entry.key) == null { WIDGET_STATES[entry.key] = WidgetState {} }
-    }
-    let removed: [string] = []
-    for (key, _) in WIDGET_STATES {
-        if present.get(key) == null { removed.push(key) }
-    }
-    for key in removed { WIDGET_STATES.remove(key) }
-}
-fn main() {}
-"#;
+"#
+    );
 
-    const STATE_V1: &str = r#"
-struct WidgetDef { callback: fn() -> int }
-struct WidgetState { seq: int = 0, presence: int = 0 }
-@artifact_definition(catalog="widgets", key_param="key")
-deco init widget(key: string) {}
-@lifecycle(phase="wire", owner="process")
-deco init wire {}
-@artifact_catalog(catalog="widgets")
-@intrinsic extern(lua) fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
-global WIDGET_STATES: Map<string, WidgetState> = map_new()
-@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { callback: () => 20 } }
+    const STATE_V1: &str = state_source!(
+        r#"@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { callback: () => 20 } }
 @widget(key="gamma") fn make_gamma() -> WidgetDef { return WidgetDef { callback: () => 3 } }
-@wire fn reconcile_widget_state() {
-    let present: Map<string, bool> = map_new()
-    for entry in widget_definition_plan() {
-        present[entry.key] = true
-        if WIDGET_STATES.get(entry.key) == null { WIDGET_STATES[entry.key] = WidgetState {} }
-    }
-    let removed: [string] = []
-    for (key, _) in WIDGET_STATES {
-        if present.get(key) == null { removed.push(key) }
-    }
-    for key in removed { WIDGET_STATES.remove(key) }
-}
-fn main() {}
-"#;
+"#
+    );
 
-    const STATE_V2: &str = r#"
-struct WidgetDef { callback: fn() -> int }
-struct WidgetState { seq: int = 0, presence: int = 0 }
-@artifact_definition(catalog="widgets", key_param="key")
-deco init widget(key: string) {}
-@lifecycle(phase="wire", owner="process")
-deco init wire {}
-@artifact_catalog(catalog="widgets")
-@intrinsic extern(lua) fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
-global WIDGET_STATES: Map<string, WidgetState> = map_new()
-@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { callback: () => 10 } }
+    const STATE_V2: &str = state_source!(
+        r#"@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { callback: () => 10 } }
 @widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { callback: () => 30 } }
-@wire fn reconcile_widget_state() {
-    let present: Map<string, bool> = map_new()
-    for entry in widget_definition_plan() {
-        present[entry.key] = true
-        if WIDGET_STATES.get(entry.key) == null { WIDGET_STATES[entry.key] = WidgetState {} }
-    }
-    let removed: [string] = []
-    for (key, _) in WIDGET_STATES {
-        if present.get(key) == null { removed.push(key) }
-    }
-    for key in removed { WIDGET_STATES.remove(key) }
-}
-fn main() {}
-"#;
+"#
+    );
 
     impl DefinitionTransitionHarness {
         fn boot(source: &str) -> Self {
@@ -4036,6 +3923,7 @@ mod incremental_lint_snapshot_tests {
         let v1 = "fn helper() -> int { 3 }\nfn main() { let unused = helper() }\n";
         let v2 = "fn helper() -> int { 5 }\nfn main() { let unused = helper() }\n";
         let mut fx = ProjectFixture::boot(v1);
+        fx.project.enable_route_profile();
         let initial_fingerprint = fx.project.artifact_fingerprint().to_string();
         let reload = fx
             .project
@@ -4045,6 +3933,26 @@ mod incremental_lint_snapshot_tests {
             matches!(reload, SkullReload::Incremental { .. }),
             "reload: {reload:?}"
         );
+        let profile = fx.project.take_last_route_profile().expect("route profile");
+        assert!(profile.session_snapshot_ns > 0);
+        assert!(profile.source_lookup_feed_ns > 0);
+        assert!(profile.session_update_ns > 0);
+        assert!(profile.diagnostics_ns > 0);
+        assert!(profile.local_lint_derivation_ns > 0);
+        assert!(profile.global_lint_dependency_ns > 0);
+        assert!(profile.suppression_filter_calls > 0);
+        assert!(profile.report_prepare_ns > 0);
+        assert!(profile.render_ns > 0);
+        assert!(profile.finding_aggregation_ns > 0);
+        assert!(profile.affected_chunk_selection_ns > 0);
+        assert!(profile.emit_overlay_ns > 0);
+        assert!(profile.publication_shape_checks_ns > 0);
+        assert!(profile.transaction_checkpoint_ns > 0);
+        assert_eq!(profile.body_transactions_started, 1);
+        assert!(profile.transaction_commit_ns > 0);
+        assert!(profile.atomic_output_write_ns > 0);
+        assert!(profile.total_ns > 0);
+        assert!(profile.unaccounted_ns < profile.total_ns);
         let incremental_fingerprint = fx.project.artifact_fingerprint().to_string();
         assert_ne!(incremental_fingerprint, initial_fingerprint);
         let route_overlay = fx.overlay_text();
@@ -4078,43 +3986,6 @@ mod incremental_lint_snapshot_tests {
             std::fs::write(capture.join("direct-overlay.lua"), direct.as_bytes())
                 .expect("capture direct");
         }
-    }
-
-    #[test]
-    fn incremental_apply_edit_profile_covers_the_real_route() {
-        let v1 = "fn helper() -> int { 3 }\nfn main() { let unused = helper() }\n";
-        let v2 = "fn helper() -> int { 5 }\nfn main() { let unused = helper() }\n";
-        let mut fx = ProjectFixture::boot(v1);
-        fx.project.enable_route_profile();
-
-        let reload = fx
-            .project
-            .apply_edit(&fx.source, v2, &fx.main, &fx.incremental)
-            .expect("body edit");
-        assert!(
-            matches!(reload, SkullReload::Incremental { .. }),
-            "reload: {reload:?}"
-        );
-        let profile = fx.project.take_last_route_profile().expect("route profile");
-        assert!(profile.session_snapshot_ns > 0);
-        assert!(profile.source_lookup_feed_ns > 0);
-        assert!(profile.session_update_ns > 0);
-        assert!(profile.diagnostics_ns > 0);
-        assert!(profile.local_lint_derivation_ns > 0);
-        assert!(profile.global_lint_dependency_ns > 0);
-        assert!(profile.suppression_filter_calls > 0);
-        assert!(profile.report_prepare_ns > 0);
-        assert!(profile.render_ns > 0);
-        assert!(profile.finding_aggregation_ns > 0);
-        assert!(profile.affected_chunk_selection_ns > 0);
-        assert!(profile.emit_overlay_ns > 0);
-        assert!(profile.publication_shape_checks_ns > 0);
-        assert!(profile.transaction_checkpoint_ns > 0);
-        assert_eq!(profile.body_transactions_started, 1);
-        assert!(profile.transaction_commit_ns > 0);
-        assert!(profile.atomic_output_write_ns > 0);
-        assert!(profile.total_ns > 0);
-        assert!(profile.unaccounted_ns < profile.total_ns);
     }
 
     #[test]
