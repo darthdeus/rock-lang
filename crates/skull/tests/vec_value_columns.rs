@@ -129,28 +129,8 @@ fn binding_a_whole_element_loads_leaves_not_an_element() {
     );
 }
 
-// --- separately-emitted callable bodies ------------------------------------
-//
-// A lambda body, a nested `fn`, a `co fn`'s state machine and a global
-// initializer are each their own emitted callable, and the inliner scans only
-// TOP-LEVEL CFG blocks (a cell used in a lambda body is an upvalue, so splicing
-// there piles onto LuaJIT's 60-upvalue cap). So a `for` over a column-stored Vec
-// inside one reaches the SHARED generic `VecIter<T>.next`, which reads the
-// `_data` that column storage does not have.
-//
-// All four now work, by two different routes. A lambda and a nested fn are
-// SPLICED: `convert_closures` splits them into standalone functions with their
-// own top-level CFG, at which point the upvalue reason expires and the inliner
-// runs over them. A `co fn`'s `__step` and a global initializer never run an
-// inliner at all, so they CALL a standalone specialized copy of the callee
-// (`next_..._spec_a_n2_V2_0_z`) emitted once for the program.
-//
-// The ordinary-call guard (`in_unspliced_ctx` -> keep the shared boxed ABI) is
-// still not the fix: for a boxed value the shared body is CORRECT and the guard
-// merely forgoes an optimization, whereas for columns the shared body is WRONG.
-// `unspliceable_iteration_of_boxed_elements_still_emits` guards that from the
-// other side -- specialization is forced for column-eligible elements ONLY, so
-// an ABI-only instantiation still rides the shared body.
+// These contexts emit separate callable bodies. Check the selected body because
+// the shared VecIter template remains in the module either way.
 
 const VEC_IN_LAMBDA: &str = r#"
 value V2 { x: float, y: float }
@@ -176,73 +156,7 @@ fn go() -> float {
 fn main() { print("{go()}") }
 "#;
 
-/// Iterating a column-stored Vec inside a LAMBDA. Real engine code hits it
-/// (`draw_glow_lights`, a `for` over `GLOW_LIGHTS` inside a
-/// `with_blend_mode(..., () => ..)` callback).
-///
-/// Scoped to the LAMBDA's own body: the stdlib always emits `_data`, so a
-/// module-wide assertion could never go green even after a correct fix.
-#[test]
-fn column_vec_iterated_inside_a_lambda() {
-    let lua = crate::common::try_emit_module(VEC_IN_LAMBDA)
-        .expect("column [V2] iterated in a lambda must emit");
-    let body = crate::common::body_of_synthetic(&lua, "__lambda");
-    assert!(
-        !body.contains("_data"),
-        "lambda body read the single `_data` backing of a column-stored [V2]:\n{body}"
-    );
-    // Columns were actually CHOSEN here: the column path takes the element
-    // index once (the bare `(i + 1)` slot, since the loop proves it) then
-    // reads each leaf array raw, where the boxed path fetches the whole
-    // element with `__vec_checked_get`. Without this the test survives column
-    // storage being switched off entirely -- the `_data` absence above is
-    // equally true of a boxed element read that lives in the stdlib.
-    assert!(
-        body.contains(".x)[(c") && !body.contains("__vec_checked_get"),
-        "lambda body must iterate COLUMN storage (one index + per-leaf reads):\n{body}"
-    );
-    assert_eq!(
-        crate::common::run_main(&lua),
-        "4",
-        "lambda over column storage computed the wrong sum"
-    );
-}
-
-/// The same shape in a NESTED FN, which becomes its own top-level function whose
-/// loop calls the UNSPECIALIZED `next_VecIter_T_..`.
-///
-/// Scoped to the nested fn's own body: the SHARED generic `next` stays emitted
-/// module-wide even when this call site correctly splices a specialized one.
-#[test]
-fn column_vec_iterated_inside_a_nested_fn() {
-    let lua = crate::common::try_emit_module(VEC_IN_NESTED_FN)
-        .expect("column [V2] iterated in a nested fn must emit");
-    let body = crate::common::body_of_synthetic(&lua, "_inner_");
-    assert!(
-        !body.contains("next_VecIter_T("),
-        "nested fn called the UNSPECIALIZED VecIter `next` over column storage \
-         (the specialized copy is `..._spec_a_n2_V2_0_z`):\n{body}"
-    );
-    // As in the lambda case: pin that columns were CHOSEN, not merely that the
-    // unspecialized `next` is absent -- the loop inlines to a FORL with no `next`
-    // call at all, so the negative above holds under boxed storage too.
-    assert!(
-        body.contains(".x)[(c") && !body.contains("__vec_checked_get"),
-        "nested fn must iterate COLUMN storage (one index + per-leaf reads):\n{body}"
-    );
-    assert_eq!(
-        crate::common::run_main(&lua),
-        "4",
-        "nested fn over column storage computed the wrong sum"
-    );
-}
-
-/// An indexed loop over a column-stored Vec inside a lambda of a SPECIALIZED
-/// body proves its index in range, as the same loop in an ordinary body's
-/// lambda does, so the read carries no per-iteration bounds check.
-#[test]
-fn indexed_column_loop_in_a_specialized_lambda_elides_its_bounds_check() {
-    let src = r#"
+const VEC_IN_SPECIALIZED_LAMBDA: &str = r#"
 value V2 { x: float, y: float }
 
 fn go<T>(_tag: T) -> float {
@@ -253,14 +167,6 @@ fn go<T>(_tag: T) -> float {
 
 fn main() { print("{go(1)}") }
 "#;
-    let lua = crate::common::try_emit_module(src).expect("must emit");
-    let body = crate::common::body_of_synthetic(&lua, "__lambda");
-    assert!(
-        body.contains(".x)[(c") && !body.contains("__vec_checked_index"),
-        "lambda body must read the column with a proven index:\n{body}"
-    );
-    assert_eq!(crate::common::run_main(&lua), "4");
-}
 
 const VEC_IN_CO_FN: &str = r#"
 value V2 { x: float, y: float }
@@ -282,34 +188,6 @@ fn go() -> float {
 fn main() { print("{go()}") }
 "#;
 
-/// The same shape in a `co fn` -- the state-machine `__step` is its own emitted
-/// top-level function, so it is the nested-fn case again.
-///
-/// A coroutine is why this context must reject at COMPILE time and cannot be
-/// left to fail loudly at runtime: `__resume` wraps `__step` in a `pcall` and, on
-/// error, parks the error in `s.__error`, sets `__state = -2` and returns nil. An
-/// unspecialized `next` therefore raises `attempt to index field '_data' (a nil
-/// value)` that never reaches stderr -- the caller reads an exhausted coroutine
-/// and computes a wrong answer (`go()` yielded 0, not 4).
-///
-/// Scoped to `__step`'s own body for the same reason as the nested-fn case.
-#[test]
-fn column_vec_iterated_inside_a_co_fn() {
-    let lua = crate::common::try_emit_module(VEC_IN_CO_FN)
-        .expect("column [V2] iterated in a co fn must emit");
-    let body = crate::common::body_of_synthetic(&lua, "__step");
-    assert!(
-        !body.contains("next_VecIter_T("),
-        "co fn `__step` called the UNSPECIALIZED VecIter `next` over column \
-         storage (the raised error is swallowed by `__resume`'s pcall):\n{body}"
-    );
-    assert_eq!(
-        crate::common::run_main(&lua),
-        "4",
-        "co fn over column storage computed the wrong sum"
-    );
-}
-
 const VEC_IN_GLOBAL_INIT: &str = r#"
 value V2 { x: float, y: float }
 
@@ -323,19 +201,57 @@ global TOTAL: float = {
 fn main() { print("{TOTAL}") }
 "#;
 
-/// A global initializer is the fourth separately-emitted body: `__skull_ginit_*`
-/// is lowered and emitted by its own unit, which the inliner never enters.
 #[test]
-fn column_vec_iterated_in_a_global_initializer() {
-    let lua = crate::common::try_emit_module(VEC_IN_GLOBAL_INIT)
-        .expect("column [V2] iterated in a global initializer must emit");
-    let body = crate::common::body_of_synthetic(&lua, "ginit_TOTAL");
-    assert!(
-        !body.contains("next_VecIter_T("),
-        "global initializer called the UNSPECIALIZED VecIter `next` over column \
-         storage:\n{body}"
-    );
-    assert_eq!(crate::common::run_main(&lua), "4");
+fn column_vec_iteration_works_in_separately_emitted_contexts() {
+    for (name, source, selector, required, forbidden) in [
+        (
+            "lambda",
+            VEC_IN_LAMBDA,
+            "__lambda",
+            &[".x)[(c"] as &[_],
+            &["_data", "__vec_checked_get"] as &[_],
+        ),
+        (
+            "nested fn",
+            VEC_IN_NESTED_FN,
+            "_inner_",
+            &[".x)[(c"],
+            &["next_VecIter_T(", "__vec_checked_get"],
+        ),
+        (
+            "specialized lambda",
+            VEC_IN_SPECIALIZED_LAMBDA,
+            "__lambda",
+            &[".x)[(c"],
+            &["__vec_checked_index"],
+        ),
+        ("co fn", VEC_IN_CO_FN, "__step", &[], &["next_VecIter_T("]),
+        (
+            "global initializer",
+            VEC_IN_GLOBAL_INIT,
+            "ginit_TOTAL",
+            &[],
+            &["next_VecIter_T("],
+        ),
+    ] {
+        let lua = emit_module(source);
+        let body = crate::common::body_of_synthetic(&lua, selector);
+        // A positive column read distinguishes flat storage from a boxed loop
+        // that also avoids the unspecialized VecIter template.
+        for needle in required {
+            assert!(
+                body.contains(needle),
+                "{name} body is missing `{needle}`:\n{body}"
+            );
+        }
+        for needle in forbidden {
+            assert!(
+                !body.contains(needle),
+                "{name} body still contains `{needle}`:\n{body}"
+            );
+        }
+        assert_eq!(crate::common::run_main(&lua), "4", "{name}");
+    }
 }
 
 const VEC_STDLIB_SURFACE: &str = r#"

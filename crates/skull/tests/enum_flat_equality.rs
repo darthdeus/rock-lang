@@ -1,4 +1,4 @@
-use crate::common::{emit_module, function_body, require_luajit, run_luajit};
+use crate::common::{emit_module, function_body, run_luajit};
 
 const SRC: &str = r#"
 nobox value Pos { x: int, y: int }
@@ -34,7 +34,7 @@ fn maybe_target(kind: int, x: int, y: int) -> Target? {
 
 #[test]
 fn flat_enum_equality_compares_threaded_cells_without_boxes() {
-    let lua = emit_module(SRC);
+    let mut lua = emit_module(SRC);
     for name in ["equal_tag", "not_equal_tag", "equal_targets", "equal_maybe"] {
         let body = function_body(&lua, name);
         assert!(
@@ -46,12 +46,6 @@ fn flat_enum_equality_compares_threaded_cells_without_boxes() {
             "`{name}` called structural equality:\n{body}"
         );
     }
-}
-
-#[test]
-fn flat_enum_equality_preserves_variant_and_payload_semantics() {
-    require_luajit();
-    let mut lua = emit_module(SRC);
     lua.push_str("\nprint(equal_tag(1, 3, 4), equal_tag(1, 3, 5), equal_tag(0, 3, 4), equal_tag(2, 3, 4), not_equal_tag(1, 3, 4), not_equal_tag(1, 3, 5), equal_targets(1, 3, 4, 1, 3, 4), equal_targets(1, 3, 4, 1, 3, 5), equal_targets(0, 0, 0, 0, 9, 9), equal_targets(0, 0, 0, 2, 0, 0), equal_maybe(-1, -1), equal_maybe(-1, 1), equal_maybe(1, 1))\n");
     assert_eq!(
         run_luajit(&lua),

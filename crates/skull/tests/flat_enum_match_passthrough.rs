@@ -1,4 +1,4 @@
-use crate::common::{emit_module, function_body, mangled_name, require_luajit, run_luajit};
+use crate::common::{emit_module, function_body, mangled_name, run_luajit};
 
 // A `match` over a flat enum whose catch-all arm returns the scrutinee
 // (`other => other`) joins in the enum's leaves. The bind used to box the
@@ -48,7 +48,7 @@ fn maybe_join(src: Src?, s: string) -> Src? {
 
 #[test]
 fn a_flat_enum_match_returning_its_scrutinee_does_not_box() {
-    let lua = emit_module(SRC);
+    let mut lua = emit_module(SRC);
     for name in ["field_join", "let_join", "param_join"] {
         let body = function_body(&lua, &mangled_name(&lua, name));
         assert!(
@@ -62,12 +62,6 @@ fn a_flat_enum_match_returning_its_scrutinee_does_not_box() {
             "`{name}` rebuilds the scrutinee for its catch-all bind:\n{body}"
         );
     }
-}
-
-#[test]
-fn a_flat_enum_match_returning_its_scrutinee_keeps_every_variant() {
-    require_luajit();
-    let mut lua = emit_module(SRC);
     lua.push_str("\nprint(probe())\n");
     assert_eq!(run_luajit(&lua), "mob 1 2 3|qx 4|player|mob 5 6|true");
 }

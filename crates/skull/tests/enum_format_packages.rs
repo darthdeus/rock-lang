@@ -86,49 +86,24 @@ fn package() -> skull::mir_emit::MirEmit {
     )
 }
 
-fn lines() -> Vec<String> {
+#[test]
+fn packaged_types_print_their_paths() {
     let emitted = package();
-    run_main(&emitted.lua).lines().map(str::to_string).collect()
-}
-
-#[test]
-fn packaged_payload_free_enum_prints_its_path() {
-    let out = lines();
-    assert_eq!(out[0], "pkgenum::MobKind::Skeleton");
-    assert_eq!(out[1], "pkgenum::status::PoisonLevel::Rotting");
-}
-
-#[test]
-fn packaged_nested_enum_prints_each_path() {
-    let out = lines();
-    assert_eq!(
-        out[2],
-        "pkgenum::ScenarioMoveAdmission::Movement(pkgenum::movement::MovementStepAdmission::Blocked)"
-    );
-}
-
-#[test]
-fn packaged_value_record_payload_prints_its_path() {
-    let out = lines();
+    let output = run_main(&emitted.lua);
+    let out: Vec<_> = output.lines().collect();
     let id =
         "pkgenum::actor_identity::MobId { scene_id: 11, arena_id: 23, slot: 4, generation: 7 }";
-    assert_eq!(out[3], format!("pkgenum::DamageSource::Mob({id})"));
-    assert_eq!(out[4], id);
-}
-
-#[test]
-fn packaged_generic_enum_prints_its_path() {
-    let out = lines();
-    assert_eq!(
-        out[5],
-        "pkgenum::status::StatusEffect::Paralyzed { remaining: 1.5, duration: 2 }"
-    );
-}
-
-#[test]
-fn packaged_handle_names_its_target_path() {
-    let out = lines();
-    let text = &out[6];
+    for (line, expected) in [
+        "pkgenum::MobKind::Skeleton".to_string(),
+        "pkgenum::status::PoisonLevel::Rotting".to_string(),
+        "pkgenum::ScenarioMoveAdmission::Movement(pkgenum::movement::MovementStepAdmission::Blocked)".to_string(),
+        format!("pkgenum::DamageSource::Mob({id})"),
+        id.to_string(),
+        "pkgenum::status::StatusEffect::Paralyzed { remaining: 1.5, duration: 2 }".to_string(),
+    ].iter().enumerate() {
+        assert_eq!(out[line], expected, "line {line}");
+    }
+    let text = out[6];
     assert!(
         text.starts_with("Entity<pkgenum::"),
         "handle target is package-qualified: {text}"

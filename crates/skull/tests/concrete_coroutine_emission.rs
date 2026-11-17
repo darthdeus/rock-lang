@@ -17,7 +17,6 @@
 //! no shared generic body to fall back to.
 
 use crate::common;
-use crate::common::compile_and_run;
 use std::collections::BTreeSet;
 
 /// One generic `co fn`, two column-stored instantiations with different element
@@ -157,8 +156,8 @@ fn defined_and_referenced(lua: &str, prefix: &str) -> (BTreeSet<String>, BTreeSe
 /// break it.
 #[test]
 fn a_generic_coroutine_over_boxed_elements_owns_a_family_per_instance() {
-    assert_eq!(compile_and_run(GENERIC_CO_BOXED), "2 3");
     let lua = common::try_emit_module(GENERIC_CO_BOXED).expect("must emit");
+    assert_eq!(common::run_main(&lua), "2 3");
 
     let (defined, referenced) = defined_and_referenced(&lua, "walk_");
     // Non-empty and EXACT: a zero-over-zero equality is the vacuous pass this

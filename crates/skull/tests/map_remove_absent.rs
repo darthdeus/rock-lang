@@ -35,8 +35,7 @@ fn main() {}
 
 /// Stores to absent keys of `keyed(m)` while removing 100 absent keys and then
 /// one present key twice.
-fn absent_key_stores(build: &str, remove: &str, keyed: &str) -> String {
-    let lua = emit_module(SOURCE);
+fn absent_key_stores(lua: &str, build: &str, remove: &str, keyed: &str) -> String {
     run_luajit(&format!(
         r#"{lua}
 local m = {build}(511)
@@ -56,19 +55,17 @@ print(stores)
 }
 
 #[test]
-fn boxed_map_absent_remove_does_not_store() {
-    assert_eq!(absent_key_stores("boxed_map", "boxed_remove", "m"), "0");
-}
-
-#[test]
-fn scalar_map_absent_remove_does_not_store() {
-    assert_eq!(absent_key_stores("int_map", "int_remove", "m"), "0");
-}
-
-#[test]
-fn column_map_absent_remove_does_not_store() {
-    assert_eq!(
-        absent_key_stores("column_map", "column_remove", "m.spine"),
-        "0"
-    );
+fn map_absent_remove_does_not_store() {
+    let lua = emit_module(SOURCE);
+    for (build, remove, keyed) in [
+        ("boxed_map", "boxed_remove", "m"),
+        ("int_map", "int_remove", "m"),
+        ("column_map", "column_remove", "m.spine"),
+    ] {
+        assert_eq!(
+            absent_key_stores(&lua, build, remove, keyed),
+            "0",
+            "{build}"
+        );
+    }
 }

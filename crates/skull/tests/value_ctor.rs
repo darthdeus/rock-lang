@@ -59,7 +59,7 @@ fn construction_sites(lua: &str, needle: &str) -> usize {
 }
 
 #[test]
-fn gc_table_and_cdata_constructions_call_their_ctors() {
+fn gc_table_and_cdata_constructions_use_their_tier_ctors() {
     let lua = emit();
     assert!(
         construction_sites(&lua, "Bag_vt(") > 0,
@@ -77,16 +77,7 @@ fn gc_table_and_cdata_constructions_call_their_ctors() {
         );
     }
     assert_eq!(run_main(&lua), "3\n2\ntrue\ntrue\ntrue\ntrue");
-}
-
-/// The ctor DEFINITION binds its table to a local and returns that: a
-/// `return setmetatable(..)` body is a `CALLT` into C, which a root trace
-/// started at the ctor's entry cannot leave through (`rec_ret` needs a real
-/// `RET`), so every such root aborted `leaving loop in root trace`. Measured
-/// 166 -> 0 on the shipped LuaJIT.
-#[test]
-fn the_ctor_definition_returns_through_a_local_not_a_tail_call() {
-    let lua = emit();
+    // Returning through a local lets LuaJIT root traces leave the constructor.
     let def_start = lua.find("Bag_vt = function(").expect("Bag_vt definition");
     let def = &lua[def_start..];
     let def = &def[..def.find("\nend\n").expect("ctor end") + 5];

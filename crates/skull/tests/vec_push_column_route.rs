@@ -78,6 +78,16 @@ fn a_boxed_receiver_does_reach_the_boxed_body() {
         reaches_boxed_body(&lua),
         "a boxed push is exactly the case the boxed body serves"
     );
+    let defs: Vec<&str> = lua
+        .match_indices("function vec_push")
+        .filter_map(|(i, _)| lua[i..].lines().next())
+        .collect();
+    assert_eq!(
+        defs.len(),
+        1,
+        "an opaque boundary has one definition, so exactly one `vec_push` definition \
+         may exist: {defs:?}"
+    );
     assert_eq!(run_main(&lua), "7");
 }
 
@@ -89,27 +99,4 @@ fn a_column_payload_reaches_the_boxed_body_and_is_correct() {
         "the OUTER vec is boxed, so its push is the ordinary `_data` splice"
     );
     assert_eq!(run_main(&lua), "1");
-}
-
-/// An opaque body has one declaration-owned boundary plan, so retyping the
-/// payload `T` -> `any` cannot produce a second Rock body.
-///
-/// Stated over the definition COUNT, not the spelling. `vec_push` is not
-/// `@nomangle` -- no opaque body names it, so it carries no bare-name obligation
-/// -- and asserting a bare spelling would
-/// pin the mangling exemption rather than the no-specialization property this
-/// test is about.
-#[test]
-fn the_boxed_body_has_exactly_one_definition() {
-    let lua = emit_module(BOXED_RECEIVER);
-    let defs: Vec<&str> = lua
-        .match_indices("function vec_push")
-        .filter_map(|(i, _)| lua[i..].lines().next())
-        .collect();
-    assert_eq!(
-        defs.len(),
-        1,
-        "an opaque boundary has one definition, so exactly one `vec_push` definition \
-         may exist: {defs:?}"
-    );
 }

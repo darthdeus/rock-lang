@@ -4,7 +4,7 @@
 //! reads at most once moves to that read. A parameter the body
 //! assigns, declares again or captures keeps its own local.
 
-use crate::common::{compile_and_run, emit_module, function_body};
+use crate::common::{compile_and_run, emit_module, function_body, run_main};
 
 const SRC: &str = r#"
 struct Box { n: int }
@@ -43,7 +43,7 @@ fn read_only_parameters_take_the_callers_local() {
     assert!(!body.contains("local v = "), "{body}");
     assert!(body.contains("(c1 + (1)) * 2"), "{body}");
     assert!(body.contains("local x = (c0.n)"), "{body}");
-    assert_eq!(compile_and_run(SRC), "66 5 4 12 4 x4 10");
+    assert_eq!(run_main(&lua), "66 5 4 12 4 x4 10");
 }
 
 const ORDER_SRC: &str = r#"
@@ -67,7 +67,7 @@ fn main() {
 "#;
 
 #[test]
-fn a_splice_with_nothing_to_declare_opens_no_block() {
+fn a_splice_preserves_read_order_without_empty_blocks() {
     let lua = emit_module(ORDER_SRC);
     let body = function_body(&lua, "run");
     assert!(!body.contains("local v = "), "{body}");
@@ -75,18 +75,9 @@ fn a_splice_with_nothing_to_declare_opens_no_block() {
     // A discarded call result needs no local to bind it.
     assert!(body.contains("tostring("), "{body}");
     assert!(!body.contains("local _"), "{body}");
-    assert_eq!(compile_and_run(ORDER_SRC), "16 3 2");
-}
-
-#[test]
-fn a_field_read_is_snapshotted_before_the_spliced_body() {
-    let lua = emit_module(ORDER_SRC);
-    let body = function_body(&lua, "run");
     assert!(body.contains("local b = (c0.b)"), "{body}");
     assert!(!body.contains(".b).n + 1"), "{body}");
-    // A call passed after it could change what it reads, so `h.n` is read
-    // before `tick` runs.
-    assert_eq!(compile_and_run(ORDER_SRC), "16 3 2");
+    assert_eq!(run_main(&lua), "16 3 2");
 }
 
 #[test]
