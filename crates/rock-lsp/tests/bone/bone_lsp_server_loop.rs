@@ -192,66 +192,36 @@ fn initialize_ignores_client_capabilities_it_does_not_read() {
 #[test]
 fn capability_set_stays_identical() {
     let caps = serde_json::to_value(rock_lsp::server_capabilities()).unwrap();
-    let map = caps.as_object().expect("capabilities is an object");
-    // Pin the full key set: adding or dropping a provider changes editors'
-    // behaviour, so the rewrite must reproduce this list exactly.
-    let mut keys: Vec<&str> = map.keys().map(|k| k.as_str()).collect();
-    keys.sort();
+    assert!(caps["semanticTokensProvider"].is_object());
+    // The key set is exact; pin the provider options editors depend on.
     assert_eq!(
-        keys,
-        vec![
-            "codeActionProvider",
-            "completionProvider",
-            "definitionProvider",
-            "documentHighlightProvider",
-            "documentSymbolProvider",
-            "executeCommandProvider",
-            "hoverProvider",
-            "inlayHintProvider",
-            "positionEncoding",
-            "referencesProvider",
-            "renameProvider",
-            "semanticTokensProvider",
-            "signatureHelpProvider",
-            "textDocumentSync",
-            "typeDefinitionProvider",
-            "workspaceSymbolProvider",
-        ],
-        "capability keys: {keys:?}"
-    );
-    assert_eq!(caps["definitionProvider"], json!(true));
-    assert_eq!(caps["hoverProvider"], json!(true));
-    assert_eq!(caps["referencesProvider"], json!(true));
-    assert_eq!(caps["typeDefinitionProvider"], json!(true));
-    assert_eq!(caps["documentHighlightProvider"], json!(true));
-    assert_eq!(caps["documentSymbolProvider"], json!(true));
-    assert_eq!(caps["workspaceSymbolProvider"], json!(true));
-    assert_eq!(caps["completionProvider"]["resolveProvider"], json!(false));
-    assert_eq!(
-        caps["completionProvider"]["triggerCharacters"],
-        json!([".", ":", " "])
-    );
-    assert_eq!(
-        caps["textDocumentSync"],
-        json!({ "openClose": true, "change": 1, "willSave": false,
-                 "willSaveWaitUntil": false, "save": { "includeText": false } })
-    );
-    assert_eq!(caps["renameProvider"]["prepareProvider"], json!(true));
-    assert_eq!(
-        caps["codeActionProvider"]["codeActionKinds"],
-        json!(["refactor.inline"])
-    );
-    assert_eq!(
-        caps["signatureHelpProvider"]["triggerCharacters"],
-        json!(["(", ","])
-    );
-    assert_eq!(
-        caps["executeCommandProvider"]["commands"],
-        json!(["rock.completionAccepted"])
-    );
-    assert!(
-        caps["semanticTokensProvider"].is_object(),
-        "semantic tokens stay advertised"
+        caps,
+        json!({
+            "positionEncoding": caps["positionEncoding"],
+            "inlayHintProvider": caps["inlayHintProvider"],
+            "semanticTokensProvider": caps["semanticTokensProvider"],
+            "definitionProvider": true,
+            "hoverProvider": true,
+            "referencesProvider": true,
+            "typeDefinitionProvider": true,
+            "documentHighlightProvider": true,
+            "documentSymbolProvider": true,
+            "workspaceSymbolProvider": true,
+            "completionProvider": {
+                "completionItem": { "labelDetailsSupport": false },
+                "resolveProvider": false,
+                "triggerCharacters": [".", ":", " "],
+                "workDoneProgress": false,
+            },
+            "textDocumentSync": {
+                "openClose": true, "change": 1, "willSave": false,
+                "willSaveWaitUntil": false, "save": { "includeText": false },
+            },
+            "renameProvider": { "prepareProvider": true },
+            "codeActionProvider": { "codeActionKinds": ["refactor.inline"], "resolveProvider": false },
+            "signatureHelpProvider": { "triggerCharacters": ["(", ","] },
+            "executeCommandProvider": { "commands": ["rock.completionAccepted"] },
+        })
     );
 }
 

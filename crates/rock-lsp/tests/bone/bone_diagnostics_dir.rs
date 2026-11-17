@@ -1,6 +1,7 @@
 //! `rock lsp diagnostics <dir>`: whole-project diagnostics over every `.rock`
 //! under a directory, exercising the directory branch of `diagnostics_report`.
 
+use crate::fixture::Project;
 use rock_lsp::cli::bone_lsp::{diagnostics_report, lint_report};
 
 fn messages(report: &serde_json::Value) -> Vec<String> {
@@ -15,23 +16,14 @@ fn messages(report: &serde_json::Value) -> Vec<String> {
 
 #[test]
 fn dir_reports_diagnostics_across_files() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        dir.path().join("stick.toml"),
-        "[package]\nname = \"g\"\ntype = \"bin\"\n",
-    )
-    .unwrap();
-    // a.rock: an uncalled non-root fn -> whole-project unused_fn (needs the
-    // directory load to see there's no caller anywhere).
-    std::fs::write(dir.path().join("a.rock"), "fn main() {}\nfn orphan() {}\n").unwrap();
-    // b.rock: a plain type error, file-local.
-    std::fs::write(
-        dir.path().join("b.rock"),
-        "fn b() -> int {\n  \"nope\"\n}\n",
-    )
-    .unwrap();
-
-    let report = diagnostics_report(dir.path().to_str().unwrap()).unwrap();
+    // The orphan needs whole-project reachability; b also has a type error.
+    let project = Project::new(&[
+        ("stick.toml", "[package]\nname = \"g\"\ntype = \"bin\"\n"),
+        ("a.rock", "fn main() {}\nfn orphan() {}\n"),
+        ("b.rock", "fn b() -> int {\n  \"nope\"\n}\n"),
+    ]);
+    let dir = project.dir.path().to_str().unwrap();
+    let report = diagnostics_report(dir).unwrap();
 
     assert!(report["dir"].is_string(), "dir report shape");
     assert_eq!(
@@ -50,27 +42,9 @@ fn dir_reports_diagnostics_across_files() {
             .any(|m| m.to_lowercase().contains("int") || m.to_lowercase().contains("type")),
         "b.rock's type error must appear: {msgs:?}"
     );
-}
-
-#[test]
-fn lint_report_excludes_typecheck_errors() {
-    // `rock lsp lint` reports only lints -- the type error that `diagnostics`
-    // surfaces must NOT appear, but the unused_fn/unused_var findings must.
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        dir.path().join("stick.toml"),
-        "[package]\nname = \"g\"\ntype = \"bin\"\n",
-    )
-    .unwrap();
-    std::fs::write(dir.path().join("a.rock"), "fn main() {}\nfn orphan() {}\n").unwrap();
-    std::fs::write(
-        dir.path().join("b.rock"),
-        "fn b() -> int {\n  \"nope\"\n}\n",
-    )
-    .unwrap();
-
-    let diag_msgs = messages(&diagnostics_report(dir.path().to_str().unwrap()).unwrap());
-    let lint_msgs = messages(&lint_report(dir.path().to_str().unwrap()).unwrap());
+    // The same project reports lints separately from its type errors.
+    let diag_msgs = messages(&report);
+    let lint_msgs = messages(&lint_report(dir).unwrap());
 
     // Sanity: diagnostics DOES carry the type error.
     assert!(
@@ -94,15 +68,11 @@ fn lint_report_excludes_typecheck_errors() {
 
 #[test]
 fn dir_stays_silent_for_lib() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        dir.path().join("stick.toml"),
-        "[package]\nname = \"l\"\ntype = \"lib\"\n",
-    )
-    .unwrap();
-    std::fs::write(dir.path().join("a.rock"), "fn public_api() {}\n").unwrap();
-
-    let report = diagnostics_report(dir.path().to_str().unwrap()).unwrap();
+    let project = Project::new(&[
+        ("stick.toml", "[package]\nname = \"l\"\ntype = \"lib\"\n"),
+        ("a.rock", "fn public_api() {}\n"),
+    ]);
+    let report = diagnostics_report(project.dir.path().to_str().unwrap()).unwrap();
     let msgs = messages(&report);
     assert!(
         !msgs.iter().any(|m| m.contains("unused function")),

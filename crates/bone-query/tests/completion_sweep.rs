@@ -33,108 +33,92 @@ fn report(what: &str, fails: Vec<String>) {
 
 #[test]
 fn completion_context_sweep() {
-    // (name, body appended to PREAMBLE, a label containing this must be offered)
-    let cases: &[(&str, &str, &str)] = &[
-        // -- expression contexts (expect the MARKER global) --
-        ("statement", "fn f() {\n  mar<|>\n}\n", "MARKER"),
-        (
-            "return value",
-            "fn f() -> int {\n  return mar<|>\n}\n",
-            "MARKER",
-        ),
-        ("let value", "fn f() {\n  let a = mar<|>\n}\n", "MARKER"),
-        ("if condition", "fn f() {\n  if mar<|> {}\n}\n", "MARKER"),
-        (
-            "while condition",
-            "fn f() {\n  while mar<|> {}\n}\n",
-            "MARKER",
-        ),
-        (
-            "binary operand",
-            "fn f() {\n  let a = 1 + mar<|>\n}\n",
-            "MARKER",
-        ),
-        (
-            "call arg",
-            "fn g(x: int) {}\nfn f() {\n  g(mar<|>)\n}\n",
-            "MARKER",
-        ),
+    // Expression contexts share the same global; type/member contexts below
+    // select the symbol appropriate to that slot.
+    let expressions = [
+        ("statement", "fn f() {\n  mar<|>\n}\n"),
+        ("return value", "fn f() -> int {\n  return mar<|>\n}\n"),
+        ("let value", "fn f() {\n  let a = mar<|>\n}\n"),
+        ("if condition", "fn f() {\n  if mar<|> {}\n}\n"),
+        ("while condition", "fn f() {\n  while mar<|> {}\n}\n"),
+        ("binary operand", "fn f() {\n  let a = 1 + mar<|>\n}\n"),
+        ("call arg", "fn g(x: int) {}\nfn f() {\n  g(mar<|>)\n}\n"),
         (
             "second call arg",
             "fn g(x: int, y: int) {}\nfn f() {\n  g(1, mar<|>)\n}\n",
-            "MARKER",
         ),
         (
             "nested call arg",
             "fn g(x: int) -> int { x }\nfn f() {\n  let a = g(g(mar<|>))\n}\n",
-            "MARKER",
         ),
-        (
-            "array element",
-            "fn f() {\n  let xs = [mar<|>]\n}\n",
-            "MARKER",
-        ),
+        ("array element", "fn f() {\n  let xs = [mar<|>]\n}\n"),
         (
             "array element after comma",
             "fn f() {\n  let xs = [1, mar<|>]\n}\n",
-            "MARKER",
         ),
-        (
-            "array in global init",
-            "global XS: [int] = [mar<|>]\n",
-            "MARKER",
-        ),
+        ("array in global init", "global XS: [int] = [mar<|>]\n"),
         (
             "struct field value",
             "fn f() {\n  let s = MarkerS { f: mar<|> }\n}\n",
-            "MARKER",
         ),
         (
             "nested struct field value",
             "struct Outer { inner: MarkerS }\nfn f() {\n  let o = Outer { inner: MarkerS { f: mar<|> } }\n}\n",
-            "MARKER",
         ),
         (
             "struct value in array global init",
             "global XS: [MarkerS] = [\n  MarkerS { f: mar<|> }\n]\n",
-            "MARKER",
         ),
         (
             "match arm body",
             "fn f(e: MarkerE) {\n  match e {\n    MarkerE::AAA => mar<|>\n  }\n}\n",
-            "MARKER",
         ),
-        (
-            "match scrutinee",
-            "fn f() {\n  match mar<|> {}\n}\n",
-            "MARKER",
-        ),
-        (
-            "for iterable",
-            "fn f() {\n  for x in mar<|> {}\n}\n",
-            "MARKER",
-        ),
-        (
-            "index expr",
-            "fn f(xs: [int]) {\n  let a = xs[mar<|>]\n}\n",
-            "MARKER",
-        ),
-        (
-            "lambda body",
-            "fn f() {\n  let g = () => mar<|>\n}\n",
-            "MARKER",
-        ),
+        ("match scrutinee", "fn f() {\n  match mar<|> {}\n}\n"),
+        ("for iterable", "fn f() {\n  for x in mar<|> {}\n}\n"),
+        ("index expr", "fn f(xs: [int]) {\n  let a = xs[mar<|>]\n}\n"),
+        ("lambda body", "fn f() {\n  let g = () => mar<|>\n}\n"),
         (
             "if-expr branch value",
             "fn f() {\n  let a = if true { mar<|> } else { 0 }\n}\n",
-            "MARKER",
         ),
         (
             "nullable coalesce rhs",
             "fn f(a: int?) {\n  let b = a ?? mar<|>\n}\n",
-            "MARKER",
         ),
-        // -- type contexts (expect the MarkerS struct) --
+        (
+            "lambda in struct-lit in array global-init",
+            "struct P { is_open: fn() -> bool }\nglobal PANELS: [P] = [\n  P { is_open: () => mar<|> }\n]\n",
+        ),
+        (
+            "lambda in struct-lit, later sibling entry present",
+            "struct P { is_open: fn() -> bool }\nglobal PANELS: [P] = [\n  P { is_open: () => mar<|> },\n  P { is_open: () => true }\n]\n",
+        ),
+        (
+            "call arg with method-chain receiver",
+            "fn scale(x: int) -> int { x }\nfn f(s: MarkerS) {\n  let a = scale(s.f).<|>\n}\n",
+        ),
+        (
+            "unbalanced call arg",
+            "fn g(x: int) {}\nfn f() {\n  g(mar<|>\n}\n",
+        ),
+        (
+            "unbalanced struct value",
+            "fn f() {\n  let s = MarkerS { f: mar<|>\n",
+        ),
+        (
+            "unbalanced array element",
+            "fn f() {\n  let xs = [1, mar<|>\n",
+        ),
+        (
+            "unbalanced lambda in struct in array",
+            "struct P { is_open: fn() -> bool }\nglobal PANELS: [P] = [\n  P { is_open: () => mar<|>\n",
+        ),
+        (
+            "unbalanced nested call",
+            "fn g(x: int) -> int { x }\nfn f() {\n  let a = g(g(mar<|>\n}\n",
+        ),
+    ];
+    let other_contexts = [
         (
             "let type annotation",
             "fn f() {\n  let a: Mar<|> = todo()\n}\n",
@@ -150,7 +134,6 @@ fn completion_context_sweep() {
             "fn f(a: Map<int, Mar<|>>) {}\n",
             "MarkerS",
         ),
-        // -- qualified / member --
         (
             "enum qualifier",
             "fn f() {\n  let e = MarkerE::<|>\n}\n",
@@ -161,52 +144,10 @@ fn completion_context_sweep() {
             "fn f(s: MarkerS) {\n  let a = s.<|>\n}\n",
             "f: int",
         ),
-        // -- deep nesting (the class that actually broke) --
-        (
-            "lambda in struct-lit in array global-init",
-            "struct P { is_open: fn() -> bool }\nglobal PANELS: [P] = [\n  P { is_open: () => mar<|> }\n]\n",
-            "MARKER",
-        ),
-        (
-            "lambda in struct-lit, later sibling entry present",
-            "struct P { is_open: fn() -> bool }\nglobal PANELS: [P] = [\n  P { is_open: () => mar<|> },\n  P { is_open: () => true }\n]\n",
-            "MARKER",
-        ),
         (
             "method-chain arg inside lambda in field",
             "struct P { r: fn() -> int }\nfn scale(x: int) -> int { x }\nfn f(s: MarkerS) {\n  let p = P { r: () => scale(s.<|>) }\n}\n",
             "f: int",
-        ),
-        (
-            "call arg with method-chain receiver",
-            "fn scale(x: int) -> int { x }\nfn f(s: MarkerS) {\n  let a = scale(s.f).<|>\n}\n",
-            "MARKER",
-        ),
-        // -- mid-edit, unbalanced buffers (completion fires while typing) --
-        (
-            "unbalanced call arg",
-            "fn g(x: int) {}\nfn f() {\n  g(mar<|>\n}\n",
-            "MARKER",
-        ),
-        (
-            "unbalanced struct value",
-            "fn f() {\n  let s = MarkerS { f: mar<|>\n",
-            "MARKER",
-        ),
-        (
-            "unbalanced array element",
-            "fn f() {\n  let xs = [1, mar<|>\n",
-            "MARKER",
-        ),
-        (
-            "unbalanced lambda in struct in array",
-            "struct P { is_open: fn() -> bool }\nglobal PANELS: [P] = [\n  P { is_open: () => mar<|>\n",
-            "MARKER",
-        ),
-        (
-            "unbalanced nested call",
-            "fn g(x: int) -> int { x }\nfn f() {\n  let a = g(g(mar<|>\n}\n",
-            "MARKER",
         ),
         (
             "incomplete member then more code",
@@ -215,7 +156,11 @@ fn completion_context_sweep() {
         ),
     ];
     let mut fails = Vec::new();
-    for (name, body, expected) in cases {
+    for (name, body, expected) in expressions
+        .into_iter()
+        .map(|(name, body)| (name, body, "MARKER"))
+        .chain(other_contexts)
+    {
         let labels = labels_of(&complete_in(PATH, &format!("{PREAMBLE}{body}")));
         if !labels
             .iter()

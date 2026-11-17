@@ -39,68 +39,23 @@ pub fn run(src: &str, line: u32, ch: u32) -> Vec<CodeAction> {
         .unwrap_or_default()
 }
 
-/// Apply a code action's single-file edit to `src` and return the result.
+/// The edits a code action applies to its single file.
+fn action_edits(action: &CodeAction) -> &[TextEdit] {
+    let edit = action.edit.as_ref().expect("action carries an edit");
+    #[expect(
+        clippy::mutable_key_type,
+        reason = "WorkspaceEdit Uri keys use immutable text for equality and hashing"
+    )]
+    let changes = edit.changes.as_ref().expect("edit has changes");
+    changes.values().next().expect("one file's edits")
+}
+
+/// Apply a code action's first single-file edit.
 pub fn apply(src: &str, action: &CodeAction) -> String {
-    let edit = action.edit.as_ref().expect("action carries an edit");
-    #[expect(
-        clippy::mutable_key_type,
-        reason = "WorkspaceEdit Uri keys use immutable text for equality and hashing"
-    )]
-    let changes = edit.changes.as_ref().expect("edit has changes");
-    let edits = changes.values().next().expect("one file's edits");
-    let te = &edits[0];
-    let s = pos_to_offset(src, te.range.start);
-    let e = pos_to_offset(src, te.range.end);
-    format!("{}{}{}", &src[..s], te.new_text, &src[e..])
+    crate::fixture::apply_edits(src, vec![action_edits(action)[0].clone()])
 }
 
-/// Apply ALL of a code action's single-file edits (descending by start, so
-/// earlier offsets stay valid) and return the result. For multi-edit actions.
+/// Apply all single-file edits, descending by start so offsets stay valid.
 pub fn apply_all(src: &str, action: &CodeAction) -> String {
-    let edit = action.edit.as_ref().expect("action carries an edit");
-    #[expect(
-        clippy::mutable_key_type,
-        reason = "WorkspaceEdit Uri keys use immutable text for equality and hashing"
-    )]
-    let changes = edit.changes.as_ref().expect("edit has changes");
-    let edits = changes.values().next().expect("one file's edits");
-    let mut spans: Vec<(usize, usize, &str)> = edits
-        .iter()
-        .map(|te| {
-            (
-                pos_to_offset(src, te.range.start),
-                pos_to_offset(src, te.range.end),
-                te.new_text.as_str(),
-            )
-        })
-        .collect();
-    spans.sort_by_key(|x| std::cmp::Reverse(x.0));
-    let mut s = src.to_string();
-    for (start, end, text) in spans {
-        s.replace_range(start..end, text);
-    }
-    s
-}
-
-/// Byte offset in `src` of an LSP `(line, character)` position.
-#[expect(
-    clippy::explicit_counter_loop,
-    reason = "Preserve the u32 coordinate counter and its overflow behavior"
-)]
-pub fn pos_to_offset(src: &str, pos: Position) -> usize {
-    let mut off = 0usize;
-    for (l, line) in src.split_inclusive('\n').enumerate() {
-        if l as u32 == pos.line {
-            let mut c = 0u32;
-            for (b, _) in line.char_indices() {
-                if c == pos.character {
-                    return off + b;
-                }
-                c += 1;
-            }
-            return off + line.len();
-        }
-        off += line.len();
-    }
-    off
+    crate::fixture::apply_edits(src, action_edits(action).to_vec())
 }

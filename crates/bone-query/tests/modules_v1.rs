@@ -3,6 +3,8 @@
 //! follows what the resolver recorded -- module paths, aliases, globs and
 //! re-exports -- to the defining item.
 
+use crate::completion::{assert_invariants, find, labels_of};
+use crate::fixture::{Project, covered, position_of_offset};
 use crate::label_asserts::{assert_lacks, assert_offers};
 use bone_query::BoneWorkspace;
 use lsp_types::Position;
@@ -10,8 +12,14 @@ use lsp_types::Position;
 /// A v1 `bin` package `app` on disk. The root fragment reaches the child
 /// module `shapes` by a qualified path, an aliased import, a glob and a
 /// re-export through `facade`.
-pub struct V1Project {
-    pub dir: tempfile::TempDir,
+pub struct V1Project(Project);
+
+impl std::ops::Deref for V1Project {
+    type Target = Project;
+
+    fn deref(&self) -> &Project {
+        &self.0
+    }
 }
 
 pub const MAIN: &str = "\
@@ -102,25 +110,16 @@ pub use super::shapes::inner::depth;
 
 impl V1Project {
     pub fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("stick.toml"),
-            "[package]\nname = \"app\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n",
-        )
-        .unwrap();
-        for (name, text) in [
+        Self(Project::new(&[
+            (
+                "stick.toml",
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n",
+            ),
             ("main.rock", MAIN),
             ("shapes.rock", SHAPES),
             ("shapes_inner.rock", INNER),
             ("facade.rock", FACADE),
-        ] {
-            std::fs::write(dir.path().join(name), text).unwrap();
-        }
-        Self { dir }
-    }
-
-    pub fn path(&self, name: &str) -> String {
-        bone_query::canonicalize_lenient(&self.dir.path().join(name).to_string_lossy())
+        ]))
     }
 
     /// A workspace with the package loaded through the editor route
@@ -128,18 +127,13 @@ impl V1Project {
     /// package builds clean -- a test below that sees a diagnostic reads a
     /// real regression, not a broken fixture.
     pub fn open(&self) -> BoneWorkspace {
-        let mut bone = BoneWorkspace::new();
-        let main = self.path("main.rock");
-        let diags = bone.update(&main, MAIN.to_string());
-        let errors: Vec<_> = diags
-            .iter()
-            .flat_map(|(p, d)| d.iter().map(move |d| (p, d)))
-            .collect();
+        let (bone, diags) = self.0.open("main.rock");
         assert!(
-            errors
+            diags
                 .iter()
-                .all(|(_, d)| d.severity != Some(lsp_types::DiagnosticSeverity::ERROR)),
-            "the fixture package must build clean: {errors:#?}"
+                .flat_map(|(_, ds)| ds)
+                .all(|d| { d.severity != Some(lsp_types::DiagnosticSeverity::ERROR) }),
+            "the fixture package must build clean: {diags:#?}"
         );
         bone
     }
@@ -154,31 +148,14 @@ pub fn pos_of(text: &str, needle: &str, nth: usize, into: usize) -> Position {
         .unwrap_or_else(|| panic!("`{needle}` #{nth} not in text"))
         .0
         + into;
-    let before = &text[..offset];
-    let line = before.matches('\n').count() as u32;
-    let col = before.rsplit('\n').next().unwrap().chars().count() as u32;
-    Position::new(line, col)
+    position_of_offset(text, offset)
 }
 
 /// The text a location's range covers, read from disk.
 fn located_text(loc: &lsp_types::Location) -> (String, String) {
     let path = loc.uri.to_file_path().unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
-    let lines: Vec<&str> = text.split('\n').collect();
-    let r = loc.range;
-    let covered = if r.start.line == r.end.line {
-        lines[r.start.line as usize]
-            .chars()
-            .skip(r.start.character as usize)
-            .take((r.end.character - r.start.character) as usize)
-            .collect()
-    } else {
-        lines[r.start.line as usize]
-            .chars()
-            .skip(r.start.character as usize)
-            .collect()
-    };
-    (path, covered)
+    (path, covered(&text, loc.range).to_string())
 }
 
 fn file_name(path: &str) -> &str {
@@ -229,17 +206,16 @@ fn a_file_created_after_the_load_is_read_as_its_package_reads_it() {
 
 // -- go-to-definition ---------------------------------------------------------
 
-fn definition_in_main(
+fn definition_at(
     bone: &BoneWorkspace,
-    project: &V1Project,
+    path: &str,
+    text: &str,
     needle: &str,
-    nth: usize,
     into: usize,
 ) -> (String, String) {
-    let main = project.path("main.rock");
     let loc = bone
-        .definition(&main, pos_of(MAIN, needle, nth, into))
-        .unwrap_or_else(|| panic!("no definition for `{needle}` #{nth}"));
+        .definition(path, pos_of(text, needle, 0, into))
+        .unwrap_or_else(|| panic!("no definition for `{needle}`"));
     let (path, covered) = located_text(&loc);
     (file_name(&path).to_string(), covered)
 }
@@ -270,21 +246,23 @@ fn definition_cases() {
     let project = V1Project::new();
     let bone = project.open();
 
-    let (file, covered) = definition_in_main(&bone, &project, "depth()", 0, 1);
+    let (file, covered) = definition_at(&bone, &project.path("main.rock"), MAIN, "depth()", 1);
     assert_eq!(file, "shapes_inner.rock");
     assert_eq!(covered, "depth");
 
-    let items: &[(&str, usize, usize, &str, &str)] = &[
-        ("surface(2)", 0, 2, "shapes.rock", "area"),
-        ("perimeter(3)", 0, 2, "shapes.rock", "perimeter"),
-        ("Box, c", 0, 1, "shapes.rock", "Box"),
-        ("Crate)", 0, 1, "shapes.rock", "Box"),
-        ("LIMIT", 0, 1, "shapes.rock", "LIMIT"),
-        ("depth()", 1, 1, "shapes_inner.rock", "depth"),
-        ("area as surface", 0, 1, "shapes.rock", "area"),
+    let items: &[(&str, usize, &str, &str)] = &[
+        ("Round", 1, "shapes.rock", "Round"),
+        ("Kind::Round", 1, "shapes.rock", "Kind"),
+        ("surface(2)", 2, "shapes.rock", "area"),
+        ("perimeter(3)", 2, "shapes.rock", "perimeter"),
+        ("Box, c", 1, "shapes.rock", "Box"),
+        ("Crate)", 1, "shapes.rock", "Box"),
+        ("LIMIT", 1, "shapes.rock", "LIMIT"),
+        ("facade::depth()", 9, "shapes_inner.rock", "depth"),
+        ("area as surface", 1, "shapes.rock", "area"),
     ];
-    for (needle, nth, into, expected_file, item) in items {
-        let (file, covered) = definition_in_main(&bone, &project, needle, *nth, *into);
+    for (needle, into, expected_file, item) in items {
+        let (file, covered) = definition_at(&bone, &project.path("main.rock"), MAIN, needle, *into);
         assert_eq!(file, *expected_file, "{needle}");
         assert!(covered.contains(item), "{needle} landed on {covered:?}");
     }
@@ -353,26 +331,11 @@ fn an_inline_module_use_item_records_each_path_segment() {
          }}\n"
     );
     bone.update(&main, text.clone());
-    let loc = bone
-        .definition(&main, pos_of(&text, "::shapes::area as", 0, 11))
-        .expect("inline use path resolves");
-    let (path, covered) = located_text(&loc);
-    let file = file_name(&path).to_string();
-    assert_eq!(file, "shapes.rock");
-    assert!(
-        covered.contains("area"),
-        "inline import landed on {covered:?}"
-    );
-    let loc = bone
-        .definition(&main, pos_of(&text, "local_area;", 0, 1))
-        .expect("inline use alias resolves");
-    let (path, covered) = located_text(&loc);
-    let file = file_name(&path).to_string();
-    assert_eq!(file, "shapes.rock");
-    assert!(
-        covered.contains("area"),
-        "inline alias landed on {covered:?}"
-    );
+    for (needle, into) in [("::shapes::area as", 11), ("local_area;", 1)] {
+        let (file, covered) = definition_at(&bone, &main, &text, needle, into);
+        assert_eq!(file, "shapes.rock");
+        assert!(covered.contains("area"), "{needle} landed on {covered:?}");
+    }
 }
 
 #[test]
@@ -397,34 +360,14 @@ fn hover_on_v1_signature_types_records_each_nominal_spelling() {
     let alias_hover = hover_at(pos_of(&text, "first: Crate", 0, 8));
     let qualified_hover = hover_at(pos_of(&text, "-> shapes::Box", 0, 11));
 
-    let alias_text = match alias_hover.contents {
-        lsp_types::HoverContents::Markup(markup) => markup.value,
-    };
-    let qualified_text = match qualified_hover.contents {
-        lsp_types::HoverContents::Markup(markup) => markup.value,
-    };
-
-    assert!(
-        alias_text.contains("struct app::shapes::Box"),
-        "aliased hover: {alias_text}"
-    );
-    assert!(
-        qualified_text.contains("struct app::shapes::Box"),
-        "qualified hover: {qualified_text}"
-    );
+    for hover in [&alias_hover, &qualified_hover] {
+        let lsp_types::HoverContents::Markup(markup) = &hover.contents;
+        assert!(
+            markup.value.contains("struct app::shapes::Box"),
+            "{markup:?}"
+        );
+    }
     assert_ne!(alias_hover.range, qualified_hover.range);
-}
-
-#[test]
-fn a_qualified_variant_lands_on_the_variant_and_its_enum() {
-    let project = V1Project::new();
-    let bone = project.open();
-    let (file, covered) = definition_in_main(&bone, &project, "Round", 0, 1);
-    assert_eq!(file, "shapes.rock");
-    assert!(covered.contains("Round"), "landed on {covered:?}");
-    let (file, covered) = definition_in_main(&bone, &project, "Kind::Round", 0, 1);
-    assert_eq!(file, "shapes.rock");
-    assert!(covered.contains("Kind"), "landed on {covered:?}");
 }
 
 /// A body edit keeps the other bodies' and the signatures' recorded
@@ -439,102 +382,83 @@ fn segments_after_a_body_edit_still_navigate() {
         "    let a = shapes::inner::depth()\n    let z = 1\n",
     );
     bone.update(&main, edited.clone());
-    let at = |needle: &str, into: usize| {
-        let loc = bone
-            .definition(&main, pos_of(&edited, needle, 0, into))
-            .unwrap_or_else(|| panic!("no definition for `{needle}`"));
-        let (path, covered) = located_text(&loc);
-        (file_name(&path).to_string(), covered)
-    };
-    let (file, covered) = at("Kind::Round", 1);
-    assert_eq!(file, "shapes.rock");
-    assert!(covered.contains("Kind"), "landed on {covered:?}");
-    let (file, covered) = at("Box, c", 1);
-    assert_eq!(file, "shapes.rock");
-    assert!(covered.contains("Box"), "landed on {covered:?}");
+    for (needle, item) in [("Kind::Round", "Kind"), ("Box, c", "Box")] {
+        let (file, covered) = definition_at(&bone, &main, &edited, needle, 1);
+        assert_eq!(file, "shapes.rock");
+        assert!(covered.contains(item), "{needle} landed on {covered:?}");
+    }
 }
 
 // -- completion ---------------------------------------------------------------
 
 /// Completion items at the end of `typed`, typed as a new line inside
 /// `main`'s body (the line after `let a = ...`).
+const MAIN_ANCHOR: &str = "    let a = shapes::inner::depth()\n";
+const SIZES_ANCHOR: &str = "    let width = box_width(b)\n";
+
+fn with_completion(typed: &str, anchor: &str) -> String {
+    MAIN.replace(anchor, &format!("{anchor}    {typed}\n"))
+}
+
+fn complete_at(
+    bone: &mut BoneWorkspace,
+    main: &str,
+    text: &str,
+    marker: &str,
+) -> Vec<lsp_types::CompletionItem> {
+    bone.completion(main, pos_of(text, marker, 0, marker.len()))
+}
+
 fn complete_in_main(typed: &str) -> Vec<lsp_types::CompletionItem> {
-    let project = V1Project::new();
-    let mut bone = project.open();
-    let main = project.path("main.rock");
-    let anchor = "    let a = shapes::inner::depth()\n";
-    let text = MAIN.replace(anchor, &format!("{anchor}    {typed}\n"));
-    bone.update(&main, text.clone());
-    let pos = pos_of(&text, typed, 0, typed.len());
-    let items = bone.completion(&main, pos);
-    let prefix: String = typed
-        .chars()
-        .rev()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    let violations = crate::response_invariants::completion_response_violations(&items, &prefix);
-    assert!(
-        violations.is_empty(),
-        "response invariants violated after `{typed}`: {violations:?}"
-    );
-    items
+    complete_at_anchor(typed, MAIN_ANCHOR)
 }
 
 fn complete_in_sizes(typed: &str) -> Vec<lsp_types::CompletionItem> {
+    complete_at_anchor(&format!("let q = {typed}"), SIZES_ANCHOR)
+}
+
+fn complete_at_anchor(typed: &str, anchor: &str) -> Vec<lsp_types::CompletionItem> {
     let project = V1Project::new();
     let mut bone = project.open();
     let main = project.path("main.rock");
-    let anchor = "    let width = box_width(b)\n";
-    let text = MAIN.replace(anchor, &format!("{anchor}    let q = {typed}\n"));
+    let text = with_completion(typed, anchor);
     bone.update(&main, text.clone());
-    let marker = format!("let q = {typed}");
-    let pos = pos_of(&text, &marker, 0, marker.len());
-    bone.completion(&main, pos)
+    let items = complete_at(&mut bone, &main, &text, typed);
+    assert_invariants(&format!("{typed}<|>"), &items);
+    items
 }
 
 fn labels(items: &[lsp_types::CompletionItem]) -> Vec<String> {
-    let mut out: Vec<String> = items.iter().map(|c| c.label.clone()).collect();
+    let mut out = labels_of(items);
     out.sort();
     out.dedup();
     out
 }
 
 #[test]
-fn completion_after_a_module_path_offers_its_accessible_members() {
-    let items = complete_in_main("shapes::");
-    assert_eq!(
-        labels(&items),
-        [
-            "BOX",
-            "Box",
-            "Kind",
-            "LIMIT",
-            "area",
-            "box_area",
-            "box_width",
-            "inner",
-            "perimeter",
-            "width_value"
-        ]
-    );
-}
-
-#[test]
-fn completion_after_a_nested_module_path_offers_its_members() {
-    assert_eq!(labels(&complete_in_main("shapes::inner::")), ["depth"]);
-}
-
-#[test]
-fn completion_after_a_facade_offers_its_re_exports() {
-    assert_eq!(labels(&complete_in_main("facade::")), ["depth"]);
-}
-
-#[test]
-fn completion_after_a_module_path_filters_by_the_typed_prefix() {
-    assert_eq!(labels(&complete_in_main("shapes::per")), ["perimeter"]);
+fn module_path_completions() {
+    for (typed, expected) in [
+        (
+            "shapes::",
+            &[
+                "BOX",
+                "Box",
+                "Kind",
+                "LIMIT",
+                "area",
+                "box_area",
+                "box_width",
+                "inner",
+                "perimeter",
+                "width_value",
+            ][..],
+        ),
+        ("shapes::inner::", &["depth"]),
+        ("facade::", &["depth"]),
+        ("shapes::per", &["perimeter"]),
+    ] {
+        assert_eq!(labels(&complete_in_main(typed)), expected, "{typed}");
+    }
 }
 
 #[test]
@@ -598,10 +522,7 @@ fn bare_completion_of_an_unimported_accessible_name_carries_an_import_edit() {
 #[test]
 fn bare_completion_of_a_bound_name_carries_no_import_edit() {
     let items = complete_in_main("let q = perim");
-    let perimeter = items
-        .iter()
-        .find(|c| c.label == "perimeter")
-        .expect("globbed name offered");
+    let perimeter = find(&items, "perimeter");
     assert!(
         perimeter.additional_text_edits.is_none(),
         "a glob already binds it"
@@ -657,45 +578,39 @@ fn v1_call_through_hides_inaccessible_callable_members() {
 }
 
 #[test]
-fn changing_v1_visibility_invalidates_synthesis_cache() {
-    let project = V1Project::new();
-    let mut bone = project.open();
-    let main = project.path("main.rock");
-    let shapes = project.path("shapes.rock");
-    let anchor = "    let a = shapes::inner::depth()\n";
-    let text = MAIN.replace(anchor, &format!("{anchor}    let q = boxwidthb\n"));
-    bone.update(&main, text.clone());
-    let pos = pos_of(&text, "let q = boxwidthb", 0, "let q = boxwidthb".len());
-    let before = labels(&bone.completion(&main, pos));
-    // fixture did not seed cache
-    assert_offers(&before, &["box_width(BOX)"]);
-
-    let changed = SHAPES.replace("pub global BOX", "global BOX");
-    bone.update(&shapes, changed);
-    let after = labels(&bone.completion(&main, pos));
-    // private global survived synthesis cache
-    assert_lacks(&after, &["box_width(BOX)"]);
-}
-
-#[test]
-fn changing_v1_visibility_invalidates_bound_completion_cache() {
-    let project = V1Project::new();
-    let mut bone = project.open();
-    let main = project.path("main.rock");
-    let shapes = project.path("shapes.rock");
-    let anchor = "    let a = shapes::inner::depth()\n";
-    let text = MAIN.replace(anchor, &format!("{anchor}    let q = perim\n"));
-    bone.update(&main, text.clone());
-    let pos = pos_of(&text, "let q = perim", 0, "let q = perim".len());
-    let before = labels(&bone.completion(&main, pos));
-    // fixture did not seed cache
-    assert_offers(&before, &["perimeter"]);
-
-    let changed = SHAPES.replace("pub fn perimeter", "fn perimeter");
-    bone.update(&shapes, changed);
-    let after = labels(&bone.completion(&main, pos));
-    // private glob member survived bound cache
-    assert_lacks(&after, &["perimeter"]);
+fn changing_v1_visibility_invalidates_completion_caches() {
+    for (typed, label, public, private) in [
+        (
+            "let q = boxwidthb",
+            "box_width(BOX)",
+            "pub global BOX",
+            "global BOX",
+        ),
+        (
+            "let q = perim",
+            "perimeter",
+            "pub fn perimeter",
+            "fn perimeter",
+        ),
+    ] {
+        let project = V1Project::new();
+        let mut bone = project.open();
+        let main = project.path("main.rock");
+        let text = with_completion(typed, MAIN_ANCHOR);
+        bone.update(&main, text.clone());
+        assert_offers(
+            &labels(&complete_at(&mut bone, &main, &text, typed)),
+            &[label],
+        );
+        bone.update(
+            &project.path("shapes.rock"),
+            SHAPES.replace(public, private),
+        );
+        assert_lacks(
+            &labels(&complete_at(&mut bone, &main, &text, typed)),
+            &[label],
+        );
+    }
 }
 
 #[test]
@@ -703,8 +618,7 @@ fn changing_v1_import_alias_invalidates_bound_completion_cache() {
     let project = V1Project::new();
     let mut bone = project.open();
     let main = project.path("main.rock");
-    let anchor = "    let a = shapes::inner::depth()\n";
-    let text = MAIN.replace(anchor, &format!("{anchor}    let q = surf\n"));
+    let text = with_completion("let q = surf", MAIN_ANCHOR);
     bone.update(&main, text.clone());
     let pos = pos_of(&text, "let q = surf", 0, "let q = surf".len());
     let before = bone.completion(&main, pos);
@@ -746,10 +660,7 @@ fn changing_v1_import_alias_invalidates_bound_completion_cache() {
 #[test]
 fn aliased_callable_completion_carries_signature_detail() {
     let items = complete_in_main("let q = surf");
-    let surface = items
-        .iter()
-        .find(|item| item.label == "surface")
-        .expect("the aliased callable is offered");
+    let surface = find(&items, "surface");
     let detail = surface.detail.as_deref().unwrap_or("");
     assert!(
         detail.starts_with("fn "),
@@ -766,15 +677,11 @@ fn v1_global_completion_detail_survives_body_updates() {
     let project = V1Project::new();
     let mut bone = project.open();
     let main = project.path("main.rock");
-    let anchor = "    let a = shapes::inner::depth()\n";
-    let text = MAIN.replace(anchor, &format!("{anchor}    let q = LIM\n"));
+    let text = with_completion("let q = LIM", MAIN_ANCHOR);
     bone.update(&main, text.clone());
     let marker = "let q = LIM";
-    let before = bone.completion(&main, pos_of(&text, marker, 0, marker.len()));
-    let limit = before
-        .iter()
-        .find(|item| item.label == "LIMIT")
-        .expect("the public global is offered");
+    let before = complete_at(&mut bone, &main, &text, marker);
+    let limit = find(&before, "LIMIT");
     assert_eq!(limit.detail.as_deref(), Some("int"));
     assert_eq!(
         limit
@@ -786,22 +693,10 @@ fn v1_global_completion_detail_survives_body_updates() {
 
     let body_changed = text.replace("surface(2)", "surface(3)");
     bone.update(&main, body_changed.clone());
-    let after = bone.completion(&main, pos_of(&body_changed, marker, 0, marker.len()));
+    let after = complete_at(&mut bone, &main, &body_changed, marker);
     assert_eq!(
         after, before,
         "body-only edit changed global completion details"
-    );
-    let limit = after
-        .iter()
-        .find(|item| item.label == "LIMIT")
-        .expect("the public global remains offered");
-    assert_eq!(limit.detail.as_deref(), Some("int"));
-    assert_eq!(
-        limit
-            .label_details
-            .as_ref()
-            .and_then(|details| details.detail.as_deref()),
-        Some(": int")
     );
 }
 
@@ -816,13 +711,12 @@ fn callable_completion_uses_the_accessible_overload_not_the_family_first() {
     let mut bone = project.open();
     let main = project.path("main.rock");
     let shapes_path = project.path("shapes.rock");
-    let anchor = "    let a = shapes::inner::depth()\n";
     let text = MAIN
         .replace(
             "use shapes::*;",
             "use shapes::*;\nuse shapes::family as fam;",
         )
-        .replace(anchor, &format!("{anchor}    let q = fam\n"));
+        .replace(MAIN_ANCHOR, &format!("{MAIN_ANCHOR}    let q = fam\n"));
     bone.update(&main, text.clone());
     let marker = "let q = fam";
     let completion = |bone: &mut BoneWorkspace, text: &str| {
@@ -932,19 +826,13 @@ fn rename_edits(
     for (uri, edits) in edit.changes.unwrap_or_default() {
         let file = uri.to_file_path().unwrap();
         let text = std::fs::read_to_string(&file).unwrap();
-        let lines: Vec<&str> = text.split('\n').collect();
         for e in edits {
             let r = e.range;
             assert_eq!(r.start.line, r.end.line);
-            let covered: String = lines[r.start.line as usize]
-                .chars()
-                .skip(r.start.character as usize)
-                .take((r.end.character - r.start.character) as usize)
-                .collect();
             out.push((
                 file_name(&file).to_string(),
                 r.start.line,
-                covered,
+                covered(&text, r).to_string(),
                 e.new_text,
             ));
         }
@@ -1105,20 +993,16 @@ fn an_import_edit_goes_in_sorted_position_among_the_uses() {
     let main = project.path("main.rock");
     let head = "use shapes::area as surface;\nuse shapes::*;\nuse shapes::Box as Crate;\n";
     let sorted = "use shapes::*;\nuse shapes::Box as Crate;\nuse shapes::area as surface;\nuse shapes::perimeter;\n";
-    let anchor = "    let a = shapes::inner::depth()\n";
     assert!(MAIN.contains(head));
     let text = MAIN
         .replacen(head, sorted, 1)
-        .replace(anchor, &format!("{anchor}    let q = dept\n"));
+        .replace(MAIN_ANCHOR, &format!("{MAIN_ANCHOR}    let q = dept\n"));
     bone.update(&main, text.clone());
     let items = bone.completion(
         &main,
         pos_of(&text, "let q = dept", 0, "let q = dept".len()),
     );
-    let depth = items
-        .iter()
-        .find(|c| c.label == "depth")
-        .expect("`depth` is offered with an import");
+    let depth = find(&items, "depth");
     let edits = depth
         .additional_text_edits
         .as_ref()

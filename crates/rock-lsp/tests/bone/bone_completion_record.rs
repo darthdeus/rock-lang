@@ -53,12 +53,10 @@ fn recording_round_trip_tags_items_and_writes_corpus_row() {
     }
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("main.rock");
-    std::fs::write(&path, SRC).unwrap();
     let corpus = dir.path().join("corpus.jsonl");
     completion_record::init_recorder_at(corpus.clone());
 
-    let mut ws = LspWorkspace::new();
-    ws.bone.update(path.to_str().unwrap(), SRC.to_string());
+    let mut ws = crate::common::bone_ws(&path, SRC);
     let items = completion_items(&mut ws, &path);
     assert!(
         !items.is_empty(),
@@ -161,9 +159,7 @@ fn recording_off_leaves_items_untagged() {
     );
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("main.rock");
-    std::fs::write(&path, SRC).unwrap();
-    let mut ws = LspWorkspace::new();
-    ws.bone.update(path.to_str().unwrap(), SRC.to_string());
+    let mut ws = crate::common::bone_ws(&path, SRC);
     let items = completion_items(&mut ws, &path);
     assert!(!items.is_empty());
     for it in &items {

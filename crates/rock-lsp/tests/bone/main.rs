@@ -1,3 +1,6 @@
+#[path = "../../../bone-query/tests/support/fixture.rs"]
+mod fixture;
+
 mod common;
 
 mod bone_completion;

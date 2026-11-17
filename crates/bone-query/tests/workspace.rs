@@ -913,7 +913,6 @@ fn inlay_labels(src: &str, range: Range) -> Vec<String> {
         .into_iter()
         .map(|h| match h.label {
             lsp_types::InlayHintLabel::String(s) => s,
-            other => panic!("expected string label, got {other:?}"),
         })
         .collect()
 }

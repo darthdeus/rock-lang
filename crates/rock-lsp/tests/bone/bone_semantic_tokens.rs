@@ -9,15 +9,12 @@
 //! bone's own legend; only the live server hits the mismatch.
 
 use lsp_types::*;
-use rock_lsp::LspWorkspace;
 use rock_lsp::semantic_tokens::{compute_semantic_tokens_workspace, get_semantic_tokens_legend};
 
 fn tokens(src: &str) -> Vec<SemanticToken> {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("main.rock");
-    std::fs::write(&path, src).unwrap();
-    let mut ws = LspWorkspace::new();
-    ws.bone.update(path.to_str().unwrap(), src.to_string());
+    let mut ws = crate::common::bone_ws(&path, src);
     let uri = Uri::from_file_path(path.to_str().unwrap()).unwrap();
     compute_semantic_tokens_workspace(&mut ws, &uri)
         .unwrap()
@@ -44,90 +41,42 @@ fn decoded_mods(tok: &SemanticToken) -> Vec<SemanticTokenModifier> {
         .collect()
 }
 
-/// Decode tokens to absolute `(line, col)` so a modifier assertion can target a
-/// specific identifier.
-fn abs(toks: &[SemanticToken]) -> Vec<(u32, u32, SemanticToken)> {
-    let (mut line, mut col) = (0u32, 0u32);
-    toks.iter()
-        .map(|t| {
-            if t.delta_line != 0 {
-                line += t.delta_line;
-                col = t.delta_start;
-            } else {
-                col += t.delta_start;
-            }
-            (line, col, *t)
-        })
-        .collect()
+#[test]
+fn modifiers_remap_to_the_advertised_legend() {
+    for (source, line, col, modifier) in [
+        (
+            "fn f(x: int?) -> int {\n  log(x)\n  return 0\n}\n",
+            0,
+            5,
+            "nullable",
+        ),
+        (
+            "fn f(x: int?) -> int {\n  if x != null {\n    return x\n  }\n  return 0\n}\n",
+            2,
+            11,
+            "refined",
+        ),
+    ] {
+        let tokens = crate::fixture::decode_tokens(&tokens(source));
+        let (_, _, token) = tokens
+            .iter()
+            .find(|(l, c, _)| (*l, *c) == (line, col))
+            .expect("target token");
+        assert_eq!(decoded_mods(token), [SemanticTokenModifier::new(modifier)]);
+    }
 }
 
 #[test]
-fn nullable_modifier_remaps_to_advertised_legend() {
-    // bone emits nullable on bit 0 of ITS legend; the server must remap it to the
-    // advertised `nullable` modifier so the editor decodes it correctly.
-    let toks = abs(&tokens("fn f(x: int?) -> int {\n  log(x)\n  return 0\n}\n"));
-    let (_, _, decl) = toks
-        .iter()
-        .find(|(l, c, _)| *l == 0 && *c == 5)
-        .expect("param decl token at 0:5");
-    assert_eq!(
-        decoded_mods(decl),
-        vec![SemanticTokenModifier::new("nullable")],
-        "nullable param decl must decode as `nullable` under the advertised legend"
-    );
-}
-
-#[test]
-fn refined_modifier_remaps_to_advertised_legend() {
-    // Inside `if x != null`, the use is narrowed -> `refined`, remapped to the
-    // advertised legend's `refined` modifier.
-    let toks = abs(&tokens(
-        "fn f(x: int?) -> int {\n  if x != null {\n    return x\n  }\n  return 0\n}\n",
-    ));
-    let (_, _, use_tok) = toks
-        .iter()
-        .find(|(l, c, _)| *l == 2 && *c == 11)
-        .expect("narrowed use token at 2:11");
-    assert_eq!(
-        decoded_mods(use_tok),
-        vec![SemanticTokenModifier::new("refined")],
-        "narrowed nullable use must decode as `refined` under the advertised legend"
-    );
-}
-
-#[test]
-fn keyword_decodes_as_keyword_via_advertised_legend() {
-    let toks = tokens("fn foo() {}\n");
-    assert!(!toks.is_empty(), "expected tokens for `fn foo() {{}}`");
-    // first token is the `fn` keyword
-    assert_eq!(
-        decoded(&toks[0]),
-        SemanticTokenType::KEYWORD,
-        "`fn` must decode as KEYWORD under the advertised legend"
-    );
-}
-
-#[test]
-fn function_name_decodes_as_function() {
-    let toks = tokens("fn foo() {}\n");
-    // second classified token is the function name `foo`
-    assert_eq!(
-        decoded(&toks[1]),
-        SemanticTokenType::FUNCTION,
-        "`foo` must decode as FUNCTION under the advertised legend"
-    );
-}
-
-#[test]
-fn struct_name_decodes_as_struct() {
-    let toks = tokens("struct Pt { x: int }\n");
-    // `struct` keyword then `Pt`
-    assert_eq!(decoded(&toks[0]), SemanticTokenType::KEYWORD);
-    assert_eq!(
-        decoded(&toks[1]),
-        SemanticTokenType::STRUCT,
-        "`Pt` must decode as STRUCT under the advertised legend"
-    );
+fn token_types_decode_against_the_advertised_legend() {
+    for (source, kind) in [
+        ("fn foo() {}\n", SemanticTokenType::FUNCTION),
+        ("struct Pt { x: int }\n", SemanticTokenType::STRUCT),
+    ] {
+        let tokens = tokens(source);
+        assert!(!tokens.is_empty(), "expected tokens for {source}");
+        assert_eq!(decoded(&tokens[0]), SemanticTokenType::KEYWORD);
+        assert_eq!(decoded(&tokens[1]), kind);
+    }
 }
 
 /// A delta must reproduce the new array when applied the way a client does,
