@@ -209,7 +209,6 @@ const char *stone_scancode_token_at(int index);
 const char *stone_scancode_token_for(int scancode);
 int stone_scancode_value(const char *token);
 const char *stone_scancode_label(const char *token);
-bool stone_is_key_pressed(int scancode);
 bool stone_is_mouse_button_down(int button);
 void stone_get_mouse_position(int *x, int *y);
 void stone_set_scissor(bool enabled, int x, int y, int w, int h);
@@ -327,18 +326,10 @@ bool stone_get_glyph_unit_metrics(uint32_t font_id, int face, int char_code, flo
 uint64_t stone_get_font_atlas_image(uint32_t font_id);
 uint64_t stone_get_font_atlas_image_cached(uint32_t font_id);
 const char *stone_get_hostname(void);
-void stone_log_init(void);
 void stone_log_set_level(int level);
 int stone_log_get_level(void);
 int stone_log_record_total(int level);
 const char *stone_log_records_text(int level, int max_rows);
-void stone_log_bytes(
-    int level,
-    const unsigned char *category,
-    size_t category_len,
-    const unsigned char *message,
-    size_t message_len,
-    int wall_clock);
 
 
 bool stone_bus_set_gain(uint32_t bus, float gain);
@@ -346,7 +337,6 @@ bool stone_bus_set_lowpass(uint32_t bus, float cutoff_hz, float q);
 bool stone_bus_duck(uint32_t bus, float depth, float attack_secs, float release_secs);
 bool stone_audio_quiet_env(void);
 bool stone_voice_active(uint64_t voice);
-int64_t stone_voice_stream_frames(uint64_t voice);
 bool stone_voice_stop(uint64_t voice);
 bool stone_voice_set_gain(uint64_t voice, float gain);
 uint64_t stone_load_sound_deferred(const char *path, int64_t frames, int64_t rate, int64_t channels);
@@ -357,7 +347,6 @@ int64_t stone_sound_decode_sync(uint64_t handle);
 bool stone_sound_resident(uint64_t handle);
 bool stone_sound_playable(uint64_t handle);
 int64_t stone_sound_stream_bytes(uint64_t handle);
-int64_t stone_sound_pcm_bytes(uint64_t handle);
 bool stone_unload_sound(uint64_t handle);
 uint64_t stone_load_music(const char *path);
 void stone_play_music(uint64_t handle);
@@ -442,7 +431,6 @@ void stone_mesh_set_instances(
     const int* attr_sizes, int attr_count);
 int stone_mesh_draw(uint64_t handle, uint64_t texture, int count);
 void stone_mesh_free(uint64_t handle);
-int stone_mesh_instance_count(uint64_t handle);
 
 void stone_destroy_canvas(uint64_t handle);
 bool stone_canvas_exists(uint64_t handle);
@@ -534,14 +522,12 @@ void stone_imgui_inject_key(int id);
 void stone_imgui_release_key(int id);
 
 void stone_show_cursor(bool show);
-bool stone_is_cursor_visible(void);
 uint64_t stone_create_cursor(const char *path, int hot_x, int hot_y);
 uint64_t stone_create_cursor_from_image_data(uint64_t image_data_handle, int hot_x, int hot_y);
 uint64_t stone_set_system_cursor(int cursor_type);
 void stone_set_cursor(uint64_t cursor_id);
 void stone_reset_cursor(void);
 void stone_free_cursor(uint64_t cursor_id);
-uint64_t stone_active_cursor(void);
 void stone_watch_asset(const char *path);
 int stone_poll_changed_assets(void);
 const char *stone_changed_asset_path(int index);

@@ -262,50 +262,6 @@ pub extern "C" fn stone_set_present_viewport(active: bool, x: c_int, y: c_int, w
     });
 }
 
-thread_local! {
-    static PRESENT_VIEWPORT_REPLY: RefCell<Option<std::ffi::CString>> = const { RefCell::new(None) };
-    static GL_VIEWPORT_REPLY: RefCell<Option<std::ffi::CString>> = const { RefCell::new(None) };
-}
-
-/// The letterbox present rect as `x,y,w,h`, or `none` when there is none. A
-/// diagnostic reader; the rect has no other way out of this crate.
-#[no_mangle]
-pub extern "C" fn stone_present_viewport() -> *const c_char {
-    let s = match PRESENT_VIEWPORT.with(|p| *p.borrow()) {
-        Some((x, y, w, h)) => format!("{x},{y},{w},{h}"),
-        None => "none".to_string(),
-    };
-    PRESENT_VIEWPORT_REPLY.with(|b| {
-        let Ok(c) = std::ffi::CString::new(s) else {
-            return std::ptr::null();
-        };
-        let ptr = c.as_ptr();
-        *b.borrow_mut() = Some(c);
-        ptr
-    })
-}
-
-/// GL's own viewport as `x,y,w,h`. The CONSEQUENCE of the rect above: binding
-/// canvas 0 applies one or the other, so this is what a successor's draws
-/// actually land in.
-#[no_mangle]
-pub extern "C" fn stone_gl_viewport() -> *const c_char {
-    let s = with_gl(|gl| unsafe {
-        let mut v = [0i32; 4];
-        gl.get_parameter_i32_slice(glow::VIEWPORT, &mut v);
-        format!("{},{},{},{}", v[0], v[1], v[2], v[3])
-    })
-    .unwrap_or_else(|| "no-gl".to_string());
-    GL_VIEWPORT_REPLY.with(|b| {
-        let Ok(c) = std::ffi::CString::new(s) else {
-            return std::ptr::null();
-        };
-        let ptr = c.as_ptr();
-        *b.borrow_mut() = Some(c);
-        ptr
-    })
-}
-
 /// Set a canvas's active rectangle: the live image inside its allocated
 /// capacity, anchored at the GL origin. Clamped into [1, capacity]. Takes
 /// effect at the next bind of that canvas.
@@ -1522,23 +1478,6 @@ fn read_canvas_region_rgba32f(
     .unwrap_or(false)
 }
 
-/// Read the active image as top-to-bottom RGBA floats; capacity and result count components.
-#[no_mangle]
-pub extern "C" fn stone_canvas_read_rgba32f(handle: u64, out: *mut f32, capacity: c_int) -> c_int {
-    let Some(canvas) = lookup_canvas(handle) else {
-        return -1;
-    };
-    stone_canvas_read_region_rgba32f(
-        handle,
-        0,
-        0,
-        canvas.active_w,
-        canvas.active_h,
-        out,
-        capacity,
-    )
-}
-
 /// Read the rect (x, y, w, h) of the active image, top-left origin, as
 /// top-to-bottom RGBA floats in one readback. The rect must lie inside the
 /// active extent; capacity and result count components.
@@ -1757,39 +1696,6 @@ pub unsafe extern "C" fn stone_canvas_upload_rgba32f(
         with_canvas_mut(handle, |canvas| canvas.bound_as_target = true);
     }
     uploaded
-}
-
-/// Save a caller-supplied RGBA8 buffer as a PNG. Pixels are top-to-bottom
-/// (no flip). Returns false on null path or save failure.
-#[no_mangle]
-pub extern "C" fn stone_save_png_rgba8(
-    path: *const c_char,
-    width: c_int,
-    height: c_int,
-    pixels: *const u8,
-) -> bool {
-    if path.is_null() || pixels.is_null() || width <= 0 || height <= 0 {
-        return false;
-    }
-    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
-        Ok(s) if !s.is_empty() => s,
-        _ => return false,
-    };
-    let len = (width as usize) * (height as usize) * 4;
-    let slice = unsafe { std::slice::from_raw_parts(pixels, len) };
-    match image::save_buffer(
-        path_str,
-        slice,
-        width as u32,
-        height as u32,
-        image::ExtendedColorType::Rgba8,
-    ) {
-        Ok(_) => true,
-        Err(e) => {
-            eprintln!("stone_save_png_rgba8: failed to save {}: {}", path_str, e);
-            false
-        }
-    }
 }
 
 /// Read the entire color buffer of an RGBA8 canvas and save it as a PNG.

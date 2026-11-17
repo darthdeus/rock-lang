@@ -319,30 +319,19 @@ enum StreamDecoder {
 /// Incremental decode of a stream source's encoded bytes. A looped decoder
 /// rebuilds from the first byte at end of data, so every pass yields exactly
 /// the samples a full decode yields and the seam is the authored loop point.
-/// `position` counts samples taken, for `stone_voice_stream_frames`.
 struct StreamSource {
     decoder: StreamDecoder,
-    taken: u64,
-    position: Arc<AtomicU64>,
 }
 
 impl StreamSource {
-    fn new(
-        encoded: Arc<[u8]>,
-        looped: bool,
-        position: Arc<AtomicU64>,
-    ) -> Result<Self, rodio::decoder::DecoderError> {
+    fn new(encoded: Arc<[u8]>, looped: bool) -> Result<Self, rodio::decoder::DecoderError> {
         let cursor = std::io::Cursor::new(encoded);
         let decoder = if looped {
             StreamDecoder::Looped(Decoder::new_looped(cursor)?)
         } else {
             StreamDecoder::Once(Decoder::new(cursor)?)
         };
-        Ok(Self {
-            decoder,
-            taken: 0,
-            position,
-        })
+        Ok(Self { decoder })
     }
 }
 
@@ -350,13 +339,10 @@ impl Iterator for StreamSource {
     type Item = f32;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let sample = match &mut self.decoder {
+        match &mut self.decoder {
             StreamDecoder::Once(decoder) => decoder.next(),
             StreamDecoder::Looped(decoder) => decoder.next(),
-        }?;
-        self.taken += 1;
-        self.position.store(self.taken, Ordering::Relaxed);
-        Some(sample)
+        }
     }
 }
 
@@ -566,25 +552,6 @@ enum DuckPhase {
 /// Bus tree today: every bus feeds `master`, and `master` is the single child
 /// of the device sink's mixer. Nesting means no rodio fork patch is needed to
 /// get post-mix master effects -- `master` IS the post-mix stage.
-/// One bus's game-thread-written state, as one value.
-#[derive(Clone, Copy)]
-struct BusAmbient {
-    gain: f32,
-    cutoff: f32,
-    q: f32,
-    drive: f32,
-    mix: f32,
-    reverb_enabled: bool,
-    room: f32,
-    damping: f32,
-    wet: f32,
-    dry: f32,
-    width: f32,
-    duck_depth: f32,
-    duck_attack: f32,
-    duck_release: f32,
-}
-
 struct Bus {
     mixer: rodio::mixer::Mixer,
     source: RefCell<Option<BusSource>>,
@@ -698,27 +665,6 @@ impl Bus {
         store_f32(&p.reverb_width, width.clamp(0.0, 1.0));
         // Release: everything above must be visible before the generation is.
         p.reverb_gen.fetch_add(1, Ordering::Release);
-    }
-
-    /// Every value the game thread has written into this bus.
-    fn ambient(&self) -> BusAmbient {
-        let p = &self.params;
-        BusAmbient {
-            gain: f32_at(&p.gain),
-            cutoff: f32_at(&p.cutoff),
-            q: f32_at(&p.q),
-            drive: f32_at(&p.distortion_drive),
-            mix: f32_at(&p.distortion_mix),
-            reverb_enabled: p.reverb_enabled.load(Ordering::Relaxed),
-            room: f32_at(&p.reverb_room),
-            damping: f32_at(&p.reverb_damping),
-            wet: f32_at(&p.reverb_wet),
-            dry: f32_at(&p.reverb_dry),
-            width: f32_at(&p.reverb_width),
-            duck_depth: f32_at(&p.duck_depth),
-            duck_attack: f32_at(&p.duck_attack),
-            duck_release: f32_at(&p.duck_release),
-        }
     }
 
     /// Duck to `depth` over `attack` seconds, then back to unity over
@@ -939,8 +885,6 @@ struct Voice {
     sound: u64,
     player: Player,
     pan: Option<Arc<AtomicU32>>,
-    /// Samples a stream voice has decoded, and its channel count.
-    stream_position: Option<(Arc<AtomicU64>, u16)>,
 }
 
 struct MusicPlayback {
@@ -1617,20 +1561,6 @@ pub extern "C" fn stone_sound_stream_bytes(handle: u64) -> i64 {
     .unwrap_or(-1)
 }
 
-/// Decoded PCM size: resident samples, else the recipe's estimate. A stream
-/// source never holds PCM, so it always reports the estimate.
-#[no_mangle]
-pub extern "C" fn stone_sound_pcm_bytes(handle: u64) -> i64 {
-    with_sound(handle, |sound| {
-        let bytes = sound.samples.as_ref().map_or_else(
-            || sound.estimated_bytes(),
-            |samples| (samples.len() * std::mem::size_of::<f32>()) as u64,
-        );
-        bytes.min(i64::MAX as u64) as i64
-    })
-    .unwrap_or(-1)
-}
-
 /// Re-decode `path` into the same sound `handle` in place. Stops in-flight
 /// players first; keeps the old recipe and samples on unknown handle or decode
 /// failure, so a corrupt/missing file never wipes a working sound.
@@ -2080,13 +2010,11 @@ pub extern "C" fn stone_play_sound(
                 // with a slowed sample -- the reverb sits downstream of the
                 // speed, so the room keeps its own character.
                 let pan_control = spatial.then(|| Arc::new(AtomicU32::new(pan.to_bits())));
-                let mut stream_position = None;
                 let input = if sound_data.stream {
                     let Some(encoded) = sound_data.encoded.clone() else {
                         return 0;
                     };
-                    let position = Arc::new(AtomicU64::new(0));
-                    let source = match StreamSource::new(encoded, looped, position.clone()) {
+                    let source = match StreamSource::new(encoded, looped) {
                         Ok(source) => source,
                         Err(e) => {
                             crate::log_once!(
@@ -2098,7 +2026,6 @@ pub extern "C" fn stone_play_sound(
                             return 0;
                         }
                     };
-                    stream_position = Some((position, source.channels().get()));
                     voice_source(source, ratio, decay, pan_control.clone())
                 } else {
                     let Some(source) = sound_data.as_source(looped) else {
@@ -2126,7 +2053,6 @@ pub extern "C" fn stone_play_sound(
                         sound: handle,
                         player,
                         pan: pan_control,
-                        stream_position,
                     },
                 );
                 return voice_id;
@@ -2206,21 +2132,6 @@ pub extern "C" fn stone_stop_sound(handle: u64) {
     });
 }
 
-/// Source frames a stream voice has decoded since it started, counting every
-/// loop pass; -1 for an unknown voice or one playing resident PCM.
-#[no_mangle]
-pub extern "C" fn stone_voice_stream_frames(voice: u64) -> i64 {
-    with_voice(voice, |voice| {
-        voice
-            .stream_position
-            .as_ref()
-            .map_or(-1, |(position, channels)| {
-                (position.load(Ordering::Relaxed) / u64::from((*channels).max(1))) as i64
-            })
-    })
-    .unwrap_or(-1)
-}
-
 /// True while `voice` is addressable. This is MAP MEMBERSHIP, not
 /// `Player::empty()`: rodio's `stop()` only sets an atomic, and the player's
 /// sound_count doesn't drop until the audio thread next drains the source, so
@@ -2284,7 +2195,7 @@ pub extern "C" fn stone_play_music(handle: u64) {
                 crate::log_once!("AUDIO", "stone_play_music: unknown music handle {}", handle);
                 return;
             };
-            let source = match StreamSource::new(bytes, true, Arc::new(AtomicU64::new(0))) {
+            let source = match StreamSource::new(bytes, true) {
                 Ok(source) => source,
                 Err(e) => {
                     crate::log_once!(
@@ -2309,105 +2220,6 @@ pub extern "C" fn stone_play_music(handle: u64) {
             audio.music_playback = Some(MusicPlayback { handle, player });
         }
     });
-}
-
-#[no_mangle]
-pub extern "C" fn stone_stop_music() {
-    AUDIO_STATE.with(|state| {
-        if let Some(ref mut audio) = *state.borrow_mut() {
-            stop_music_playback(&mut audio.music_playback);
-        }
-    });
-}
-
-const BUS_IDS: [u32; 6] = [
-    BUS_MASTER,
-    BUS_SFX,
-    BUS_MUSIC,
-    BUS_AMBIENCE,
-    BUS_UI,
-    BUS_FOLEY,
-];
-
-thread_local! {
-    static AUDIO_AMBIENT_REPLY: RefCell<Option<std::ffi::CString>> = const { RefCell::new(None) };
-}
-
-/// Every bus's parameters: all the audio state that belongs to no handle.
-/// There is no master/music volume alongside the buses -- `mixer.rock` is the
-/// only caller of `bus_set_gain`, so a bus's own gain already is the level.
-#[derive(Clone, Copy)]
-struct AudioAmbient {
-    buses: [BusAmbient; BUS_IDS.len()],
-}
-
-fn audio_ambient_now(audio: &AudioState) -> Option<AudioAmbient> {
-    let mut buses = [audio.buses.get(BUS_MASTER)?.ambient(); BUS_IDS.len()];
-    for (slot, id) in buses.iter_mut().zip(BUS_IDS) {
-        *slot = audio.buses.get(id)?.ambient();
-    }
-    Some(AudioAmbient { buses })
-}
-
-/// The audio ambient as one line, or `absent` when this process has no audio
-/// state. A diagnostic reader: none of these values has a getter of its own.
-///
-/// The trailing `output=` field is not bus state: it is whether anything this
-/// process mixes can be heard, which is a property of the process rather than
-/// of a bus. It rides here because this is already the one place Rock reads
-/// native audio state that has no getter of its own.
-#[no_mangle]
-pub extern "C" fn stone_audio_ambient_report() -> *const c_char {
-    let s = AUDIO_STATE.with(|state| {
-        let borrowed = state.borrow();
-        let Some(a) = borrowed.as_ref().and_then(audio_ambient_now) else {
-            return "absent".to_string();
-        };
-        // A stubbed run has no device at all, so its output is silent for a
-        // different reason than the latch; the field answers the one question.
-        let no_device = borrowed
-            .as_ref()
-            .is_some_and(|audio| audio._stream.is_none());
-        let muted = output_muted() || no_device;
-        let mut out = String::new();
-        for (b, id) in a.buses.iter().zip(BUS_IDS) {
-            if !out.is_empty() {
-                out.push_str("; ");
-            }
-            out.push_str(&format!(
-                "bus{id}:gain={:.4},cutoff={:.2},q={:.4},drive={:.4},mix={:.4},\
-                 reverb={},{:.4},{:.4},{:.4},{:.4},{:.4},duck={:.4},{:.4},{:.4}",
-                b.gain,
-                b.cutoff,
-                b.q,
-                b.drive,
-                b.mix,
-                u8::from(b.reverb_enabled),
-                b.room,
-                b.damping,
-                b.wet,
-                b.dry,
-                b.width,
-                b.duck_depth,
-                b.duck_attack,
-                b.duck_release,
-            ));
-        }
-        out.push_str(if muted {
-            "; output=muted"
-        } else {
-            "; output=live"
-        });
-        out
-    });
-    AUDIO_AMBIENT_REPLY.with(|r| {
-        let Ok(c) = std::ffi::CString::new(s) else {
-            return std::ptr::null();
-        };
-        let ptr = c.as_ptr();
-        *r.borrow_mut() = Some(c);
-        ptr
-    })
 }
 
 /// Target gain for a bus. Slewed sample-side over ~10ms, so a per-frame
@@ -3405,9 +3217,7 @@ mod tests {
             (FRAMES * 2, 2),
             "the full decode holds exactly the authored loop"
         );
-        let position = Arc::new(AtomicU64::new(0));
-        let stream = StreamSource::new(Arc::from(wav), true, position.clone())
-            .expect("the synthetic loop streams");
+        let stream = StreamSource::new(Arc::from(wav), true).expect("the synthetic loop streams");
         let passes = 3;
         let streamed: Vec<f32> = stream.take(decoded.len() * passes + 6).collect();
         assert_eq!(
@@ -3432,11 +3242,6 @@ mod tests {
                     "loop seam {pass} channel {channel} steps {step}, over the waveform's {max_step}");
             }
         }
-        assert_eq!(
-            position.load(Ordering::Relaxed),
-            streamed.len() as u64,
-            "the stream position counts every sample taken across passes"
-        );
     }
 
     #[test]
@@ -3444,8 +3249,8 @@ mod tests {
         let bytes = include_bytes!("../../packages/stone/tests/fixtures/tone.ogg").to_vec();
         let (decoded, _, _) = decode_sound_bytes(bytes.clone(), "tone.ogg")
             .expect("the shipped Vorbis fixture decodes");
-        let stream = StreamSource::new(Arc::from(bytes), true, Arc::new(AtomicU64::new(0)))
-            .expect("the shipped Vorbis fixture streams");
+        let stream =
+            StreamSource::new(Arc::from(bytes), true).expect("the shipped Vorbis fixture streams");
         let streamed: Vec<f32> = stream.take(decoded.len() * 2 + 64).collect();
         assert_eq!(
             streamed.len(),

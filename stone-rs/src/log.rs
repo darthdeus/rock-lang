@@ -10,16 +10,6 @@
 //! `rock_log` and emit via `log::` at `warn` level (spam-guard =
 //! recoverable failure; visible at the default `info`).
 
-/// How many distinct suppression records the RUST logger currently holds.
-///
-/// The oracle for the boundary's `log_dedup` row. A fixture reads it around a
-/// call site it knows warns: the delta is 1 the first time and 0 afterwards, so
-/// a successor entry seeing 1 again is the site having been un-suppressed.
-#[no_mangle]
-pub extern "C" fn stone_log_dedup_count() -> std::os::raw::c_int {
-    rock_log::dedup_count() as std::os::raw::c_int
-}
-
 /// Rock's level numbering (0 error, 1 warn); only those two keep records.
 fn record_level(level: std::os::raw::c_int) -> Option<::log::Level> {
     match level {

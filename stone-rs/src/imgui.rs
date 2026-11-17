@@ -292,7 +292,6 @@ extern "C" {
     fn igIsItemActive() -> bool;
     fn igIsItemActivated() -> bool;
     fn igIsItemDeactivated() -> bool;
-    fn igShowDemoWindow(p_open: *mut bool);
 
     // SDL2 backend
     fn cImGui_ImplSDL2_InitForOpenGL(window: *mut c_void, gl_context: *mut c_void) -> bool;
@@ -310,9 +309,6 @@ extern "C" {
 static IMGUI_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static IMGUI_PLATFORM_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static IMGUI_GL_BACKEND_INITIALIZED: AtomicBool = AtomicBool::new(false);
-static LAST_FRAME_RENDERED: AtomicBool = AtomicBool::new(false);
-static LAST_CMD_LISTS_COUNT: AtomicI32 = AtomicI32::new(0);
-static LAST_IDX_COUNT: AtomicI32 = AtomicI32::new(0);
 
 /// Vertices in the last frame `stone_imgui_render` submitted; -1 before the
 /// first one. Read from Rock through `stone_imgui_last_vtx_count` -- see the
@@ -325,9 +321,6 @@ pub extern "C" fn stone_imgui_init(_window: *mut StoneWindow) -> bool {
     IMGUI_INITIALIZED.store(false, Ordering::SeqCst);
     IMGUI_PLATFORM_INITIALIZED.store(false, Ordering::SeqCst);
     IMGUI_GL_BACKEND_INITIALIZED.store(false, Ordering::SeqCst);
-    LAST_FRAME_RENDERED.store(false, Ordering::SeqCst);
-    LAST_CMD_LISTS_COUNT.store(0, Ordering::SeqCst);
-    LAST_IDX_COUNT.store(0, Ordering::SeqCst);
     LAST_VTX_COUNT.store(-1, Ordering::SeqCst);
     let result = with_window(|window: &StoneWindow| {
         unsafe {
@@ -1353,9 +1346,6 @@ unsafe fn record_draw_data(draw_data: *mut ImDrawData) {
             crate::ui_submission_probe::imgui_prepared(draw_data);
         }
     }
-    LAST_FRAME_RENDERED.store(true, Ordering::SeqCst);
-    LAST_CMD_LISTS_COUNT.store((*draw_data).cmd_lists_count, Ordering::SeqCst);
-    LAST_IDX_COUNT.store((*draw_data).total_idx_count, Ordering::SeqCst);
     LAST_VTX_COUNT.store((*draw_data).total_vtx_count, Ordering::SeqCst);
 }
 
@@ -1375,49 +1365,12 @@ pub extern "C" fn stone_imgui_initialized() -> bool {
     IMGUI_INITIALIZED.load(Ordering::SeqCst)
 }
 
-#[no_mangle]
-pub extern "C" fn stone_imgui_platform_initialized() -> bool {
-    IMGUI_PLATFORM_INITIALIZED.load(Ordering::SeqCst)
-}
-
-#[no_mangle]
-pub extern "C" fn stone_imgui_gl_backend_initialized() -> bool {
-    IMGUI_GL_BACKEND_INITIALIZED.load(Ordering::SeqCst)
-}
-
-#[no_mangle]
-pub extern "C" fn stone_imgui_last_frame_rendered() -> bool {
-    LAST_FRAME_RENDERED.load(Ordering::SeqCst)
-}
-
-#[no_mangle]
-pub extern "C" fn stone_imgui_last_cmd_lists_count() -> c_int {
-    LAST_CMD_LISTS_COUNT.load(Ordering::SeqCst)
-}
-
-#[no_mangle]
-pub extern "C" fn stone_imgui_last_idx_count() -> c_int {
-    LAST_IDX_COUNT.load(Ordering::SeqCst)
-}
-
-#[no_mangle]
-pub extern "C" fn stone_imgui_process_event(sdl_event: *mut c_void) -> bool {
+pub(crate) fn process_event(sdl_event: *mut c_void) -> bool {
     if !IMGUI_INITIALIZED.load(Ordering::SeqCst) || sdl_event.is_null() {
         return false;
     }
 
     unsafe { cImGui_ImplSDL2_ProcessEvent(sdl_event) }
-}
-
-#[no_mangle]
-pub extern "C" fn stone_imgui_show_demo() {
-    if !IMGUI_INITIALIZED.load(Ordering::SeqCst) {
-        return;
-    }
-
-    unsafe {
-        igShowDemoWindow(ptr::null_mut());
-    }
 }
 
 const IMGUI_KEY_NAMED_BEGIN: c_int = 512;

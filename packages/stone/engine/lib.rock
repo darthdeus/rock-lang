@@ -320,14 +320,12 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
 
         // Cursor functions
         void stone_show_cursor(bool show);
-        uint8_t stone_is_cursor_visible(void);
         uint64_t stone_create_cursor(const char* path, int hot_x, int hot_y);
         uint64_t stone_create_cursor_from_image_data(uint64_t image_data_handle, int hot_x, int hot_y);
         uint64_t stone_set_system_cursor(int cursor_type);
         void stone_set_cursor(uint64_t cursor_id);
         void stone_reset_cursor(void);
         void stone_free_cursor(uint64_t cursor_id);
-        uint64_t stone_active_cursor(void);
 
         // Window functions
         void stone_set_window_title(StoneWindow* window, const char* title);
@@ -363,8 +361,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         bool stone_file_transaction_write(int transaction, const char* path, const char* data, size_t len, bool append);
         bool stone_file_transaction_publish(int transaction, const char* path, const char* data, size_t len, bool append);
         uint8_t stone_file_transaction_write_png(int transaction, const char* path, const uint8_t* pixels, int width, int height);
-        uint8_t stone_file_transaction_sync(int transaction, const char* path);
-        uint8_t stone_file_transaction_rename(int transaction, const char* source, const char* target);
         uint8_t stone_file_transaction_cleanup(int transaction, const char* path, bool on_success);
         uint8_t stone_file_transaction_cleanup_directory(int transaction, const char* directory);
         uint8_t stone_file_transaction_keep(int transaction, const char* directory, const char* filename);
@@ -381,7 +377,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         uint8_t stone_remove_file(const char* path);
         uint8_t stone_remove_dir(const char* path);
         uint8_t stone_file_sync(const char* path);
-        uint8_t stone_files_sync(const char* paths_json);
         char* stone_file_read(const char* path, size_t* out_len);
         const char* stone_get_hostname(void);
         int stone_file_exists_status(const char* path);
@@ -389,7 +384,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         int64_t stone_file_size(const char* path);
         uint8_t stone_create_directory(const char* path);
         uint8_t stone_copy_file(const char* src, const char* dst);
-        uint8_t stone_copy_recursive(const char* src, const char* dst);
         uint8_t stone_rename(const char* src, const char* dst);
 
         bool stone_telemetry_configure(const char* root, const char* game, const char* build, const char* platform, const char* channel, const char* endpoint, const char* token, bool explicit_reconsent);
@@ -432,7 +426,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         void stone_gpu_pass_scope_begin(const char* shader_name);
         void stone_gpu_scope_end(void);
         void stone_gpu_label_shader(uint64_t handle, const char* name);
-        const char* stone_gpu_shader_label(uint64_t handle);
         void stone_gpu_scopes_reset_stats(void);
         const char* stone_gpu_scopes_json(void);
         void stone_set_vsync(int enabled);
@@ -449,12 +442,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         void* stone_imgui_prepare_render(void);
         int stone_imgui_last_vtx_count(void);
         uint8_t stone_imgui_initialized(void);
-        uint8_t stone_imgui_platform_initialized(void);
-        uint8_t stone_imgui_gl_backend_initialized(void);
-        uint8_t stone_imgui_last_frame_rendered(void);
-        int stone_imgui_last_cmd_lists_count(void);
-        int stone_imgui_last_idx_count(void);
-        void stone_imgui_show_demo(void);
 
         typedef uint64_t StoneImageHandle;
         typedef uint64_t StoneImageDataHandle;
@@ -470,9 +457,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         uint8_t stone_image_exists(StoneImageHandle handle);
         uint32_t stone_get_image_texture(StoneImageHandle handle);
         uint8_t stone_image_set_wrap(StoneImageHandle handle, bool repeat);
-        const char* stone_asset_watcher_state(void);
-        uint8_t stone_asset_watcher_inject_change(const char* path);
-        int stone_log_dedup_count(void);
         int stone_log_record_total(int level);
         const char* stone_log_records_text(int level, int max_rows);
         void stone_log_collect_errors(void);
@@ -480,11 +464,8 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         int stone_log_take_collected_error(const uint8_t* record, size_t len);
         void stone_log_truncate_collected_errors(int len);
         int64_t stone_image_read_texel(StoneImageHandle handle, int x, int y);
-        int stone_image_wrap_state(StoneImageHandle handle);
-        int stone_image_gl_wrap_state(StoneImageHandle handle);
         void stone_bind_sampler(int unit, int mode, StoneImageHandle image);
         uint8_t stone_sampler_bound(int unit);
-        int stone_max_texture_units(void);
         void stone_unload_image(StoneImageHandle handle);
         uint8_t stone_reload_image(StoneImageHandle handle, const char* path);
         void stone_flush_image_uploads(void);
@@ -498,7 +479,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         uint8_t stone_image_decode_failed(StoneImageHandle handle);
         uint64_t stone_image_decode_failed_count(void);
         int stone_service_image_uploads(void);
-        void stone_image_publication_hold(bool hold);
 
         // Decode-only handoff: the selected renderer's image registry lives in
         // a separate cdylib the native one cannot reach, so a selected load
@@ -513,9 +493,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         StoneImageDataHandle stone_create_image_data(int width, int height);
         uint8_t stone_image_data_size(StoneImageDataHandle handle, int* width, int* height);
         int stone_get_image_data_count(void);
-        StoneImageDataHandle stone_image_data_clone(StoneImageDataHandle src);
-        uint8_t stone_image_data_copy_into(StoneImageDataHandle dst, StoneImageDataHandle src);
-        uint8_t stone_image_data_blit(StoneImageDataHandle dst, StoneImageDataHandle src, int sx, int sy, int w, int h, int dx, int dy, float r, float g, float b, float a);
         void stone_destroy_image_data(StoneImageDataHandle handle);
         void stone_image_data_set_pixel(StoneImageDataHandle handle, int x, int y, float r, float g, float b, float a);
         void stone_image_data_get_pixel(StoneImageDataHandle handle, int x, int y, float* r, float* g, float* b, float* a);
@@ -544,7 +521,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         uint8_t stone_sound_resident(StoneSoundHandle handle);
         uint8_t stone_sound_playable(StoneSoundHandle handle);
         int64_t stone_sound_stream_bytes(StoneSoundHandle handle);
-        int64_t stone_sound_pcm_bytes(StoneSoundHandle handle);
         uint8_t stone_unload_sound(StoneSoundHandle handle);
         uint8_t stone_reload_sound(StoneSoundHandle handle, const char* path);
         StoneSoundHandle stone_load_music(const char* path);
@@ -568,19 +544,15 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         uint8_t stone_bus_set_reverb(uint32_t bus, bool enabled, float room_size, float damping, float wet, float dry, float width);
         uint8_t stone_bus_duck(uint32_t bus, float depth, float attack_secs, float release_secs);
         uint8_t stone_voice_active(StoneVoiceHandle voice);
-        int64_t stone_voice_stream_frames(StoneVoiceHandle voice);
         uint8_t stone_voice_stop(StoneVoiceHandle voice);
         uint8_t stone_voice_set_gain(StoneVoiceHandle voice, float gain);
         uint8_t stone_voice_set_pan(StoneVoiceHandle voice, float pan);
         uint8_t stone_voice_set_speed(StoneVoiceHandle voice, float speed);
         void stone_play_music(StoneSoundHandle handle);
-        void stone_stop_music(void);
-        const char* stone_audio_ambient_report(void);
         void stone_set_reverb(bool enabled, float room_size, float damping, float wet, float dry, float width);
 
         // Input system. Mouse and window queries are declared once, in the
         // "Input query functions" and "Window functions" groups above.
-        uint8_t stone_is_key_pressed(int scancode);
         double stone_get_time(void);
         double stone_wall_time(void);
 
@@ -634,7 +606,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
             const int* attr_sizes, int attr_count);
         int stone_mesh_draw(uint64_t handle, StoneImageHandle texture, int count);
         void stone_mesh_free(uint64_t handle);
-        int stone_mesh_instance_count(uint64_t handle);
         int stone_get_live_mesh_count(void);
         uint64_t stone_get_live_mesh_handle(int index);
         uint64_t stone_mesh_bytes(uint64_t handle);
@@ -673,8 +644,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         void stone_clear_canvas(float r, float g, float b, float a);
         void stone_clear_canvas_int(int draw_buffer, int value);
         void stone_set_present_viewport(bool active, int x, int y, int w, int h);
-        const char* stone_present_viewport(void);
-        const char* stone_gl_viewport(void);
         uint8_t stone_canvas_save_png(StoneCanvasHandle handle, const char* path);
         int  stone_canvas_read_rgba8(StoneCanvasHandle handle, uint8_t* out, int capacity);
         uint64_t stone_canvas_capture_begin(uint64_t handle);
@@ -682,12 +651,10 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         uint8_t stone_canvas_capture_release(uint64_t id);
         uint8_t stone_canvas_capture_cancel(uint64_t id);
         int stone_canvas_capture_cancel_all(void);
-        int  stone_canvas_read_rgba32f(StoneCanvasHandle handle, float* out, int capacity);
         uint8_t stone_canvas_upload_rgba32f(StoneCanvasHandle handle, const float* pixels, int count);
         int  stone_canvas_read_region_rgba32f(StoneCanvasHandle handle, int x, int y, int w, int h, float* out, int capacity);
         int stone_canvas_read_region_i32(StoneCanvasHandle handle, int x, int y, int w, int h, int32_t* out, int capacity);
         uint8_t stone_canvas_upload_rgba8(StoneCanvasHandle handle, const uint8_t* pixels, int byte_len);
-        uint8_t stone_save_png_rgba8(const char* path, int width, int height, const uint8_t* pixels);
         float stone_read_canvas_pixel(StoneCanvasHandle handle, int x, int y);
         float stone_read_canvas_pixel_channel(StoneCanvasHandle handle, int x, int y, int channel);
         int stone_read_canvas_nearest_id(StoneCanvasHandle handle, int x, int y, int side);
@@ -726,7 +693,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         uint8_t stone_gl_depth_write_enabled(void);
         const char* stone_gl_blend_state(void);
         const char* stone_gl_write_state(void);
-        int stone_gl_sampler_on_unit(int unit);
         uint8_t stone_canvas_active_is_creation(StoneCanvasHandle handle);
         int stone_canvas_active_w(StoneCanvasHandle handle);
         int stone_canvas_active_h(StoneCanvasHandle handle);
@@ -751,7 +717,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         void stone_get_graphics_stats(GraphicsStats* stats);
         void stone_get_image_frame_stats(ImageLoadStats* stats);
         void stone_get_image_profile_stats(ImageLoadStats* stats);
-        int stone_image_frame_activity(void);
         void stone_reset_image_profile_stats(void);
         void stone_reset_image_profile_stats_to_frame(void);
         uint64_t stone_get_live_texture_bytes(void);
@@ -816,7 +781,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         uint64_t stone_get_font_atlas_image(uint32_t font_id);
         uint64_t stone_get_font_atlas_image_cached(uint32_t font_id);
         uint8_t stone_get_font_atlas_size(uint32_t font_id, int* width, int* height);
-        uint64_t stone_get_font_cpu_byte_len(uint32_t font_id);
         int stone_get_font_pixel_size(uint32_t font_id);
         int64_t stone_font_data_len(uint32_t font_id);
         uint8_t stone_font_release_coverage(uint32_t font_id);
@@ -1022,7 +986,6 @@ pub fn stone_get_global_mouse_position() -> IVec2 {
 
 // Cursor functions
 pub extern(ffi, "stone") fn stone_show_cursor(show: bool)
-pub extern(ffi, "stone") fn stone_is_cursor_visible() -> bool
 
 pub inline(lua) fn stone_create_cursor(path: string, hot_x: int, hot_y: int) -> int =
     "return tonumber(stone.stone_create_cursor(path, hot_x, hot_y))"
@@ -1036,7 +999,6 @@ pub inline(lua) fn stone_set_system_cursor(cursor_type: int) -> int =
 pub extern(ffi, "stone") fn stone_set_cursor(cursor_id: int)
 extern(ffi, "stone") fn stone_reset_cursor()
 pub extern(ffi, "stone") fn stone_free_cursor(cursor_id: int)
-pub extern(ffi, "stone") fn stone_active_cursor() -> int
 
 // Window functions
 pub extern(ffi, "stone") fn stone_set_window_title(window: StoneWindow, title: string)
@@ -1151,8 +1113,6 @@ pub extern(ffi, "stone") fn stone_file_write_poll(id: int, wait: bool = false) -
 pub extern(ffi, "stone") fn stone_file_rename_async(source: string, target: string) -> int
 pub extern(ffi, "stone") fn stone_file_transaction_begin() -> int
 pub extern(ffi, "stone") fn stone_file_transaction_write_png(transaction: int, path: string, pixels: PtrU8, width: int, height: int) -> bool
-extern(ffi, "stone") fn stone_file_transaction_sync(transaction: int, path: string) -> bool
-extern(ffi, "stone") fn stone_file_transaction_rename(transaction: int, source: string, target: string) -> bool
 pub extern(ffi, "stone") fn stone_file_transaction_cleanup(transaction: int, path: string, on_success: bool) -> bool
 pub extern(ffi, "stone") fn stone_file_transaction_cleanup_directory(transaction: int, directory: string) -> bool
 pub extern(ffi, "stone") fn stone_file_transaction_keep(transaction: int, directory: string, filename: string) -> bool
@@ -1242,12 +1202,10 @@ pub extern(ffi, "stone") fn stone_file_size(path: string) -> int
 
 pub extern(ffi, "stone") fn stone_create_directory(path: string) -> bool
 pub extern(ffi, "stone") fn stone_copy_file(src: string, dst: string) -> bool
-pub extern(ffi, "stone") fn stone_copy_recursive(src: string, dst: string) -> bool
 pub extern(ffi, "stone") fn stone_rename(src: string, dst: string) -> bool
 extern(ffi, "stone") fn stone_remove_file(path: string) -> bool
 extern(ffi, "stone") fn stone_remove_dir(path: string) -> bool
 extern(ffi, "stone") fn stone_file_sync(path: string) -> bool
-pub extern(ffi, "stone") fn stone_files_sync(paths_json: string) -> bool
 
 pub @nomangle inline(lua) fn stone_list_directory(path: string) -> [string]? = """
     local files_ptr = ffi.new("char**[1]")
@@ -1303,14 +1261,6 @@ pub fn stone_gl_blend_state() -> string {
 // The `gpu_scopes` perf-JSON object.
 @inline inline(lua) fn stone_gpu_scopes_json_ptr() -> any = "stone.stone_gpu_scopes_json()"
 
-@inline inline(lua) fn stone_gpu_shader_label_ptr(handle: int) -> any = "stone.stone_gpu_shader_label(handle)"
-
-pub fn stone_gpu_shader_label(handle: int) -> string {
-    let p = stone_gpu_shader_label_ptr(handle)
-    if __stone_ptr_is_null(p) { return "" }
-    return ffi_string(p, null)
-}
-
 pub fn stone_gpu_scopes_json() -> string {
     let p = stone_gpu_scopes_json_ptr()
     if __stone_ptr_is_null(p) {
@@ -1331,11 +1281,6 @@ pub fn stone_gl_write_state() -> string {
     if __stone_ptr_is_null(p) { return "<null>" }
     return ffi_string(p, null)
 }
-
-// The sampler GL has bound on one texture unit, or -1 for a unit outside the
-// range the `sampler_units` row tracks. 0 is "no sampler", a different state
-// from "not tracked".
-pub extern(ffi, "stone") fn stone_gl_sampler_on_unit(unit: int) -> int
 
 // Whether a canvas's ACTIVE RECT is still the one creation established. The
 // half of a canvas's contents `stone_canvas_bound_as_target` cannot see:
@@ -1437,12 +1382,6 @@ extern(ffi, "stone") fn stone_imgui_render()
 extern(ffi, "stone") fn stone_imgui_prepare_render() -> PtrU8
 extern(ffi, "stone") fn stone_imgui_last_vtx_count() -> int
 pub extern(ffi, "stone") fn stone_imgui_initialized() -> bool
-pub extern(ffi, "stone") fn stone_imgui_platform_initialized() -> bool
-pub extern(ffi, "stone") fn stone_imgui_gl_backend_initialized() -> bool
-pub extern(ffi, "stone") fn stone_imgui_last_frame_rendered() -> bool
-pub extern(ffi, "stone") fn stone_imgui_last_cmd_lists_count() -> int
-pub extern(ffi, "stone") fn stone_imgui_last_idx_count() -> int
-pub extern(ffi, "stone") fn stone_imgui_show_demo()
 
 
 // ============================================================================
@@ -1488,8 +1427,6 @@ extern(ffi, "stone") fn stone_mesh_set_instances(
 )
 extern(ffi, "stone") fn stone_mesh_draw(handle: int, texture: int, count: int) -> int
 extern(ffi, "stone") fn stone_mesh_free(handle: int)
-// -2 unknown handle, -1 no instance buffer, otherwise the instance count.
-pub extern(ffi, "stone") fn stone_mesh_instance_count(handle: int) -> int
 // Asset-report census over retained meshes: population, one handle per index
 // in id order, and the uploaded bytes a handle holds (0 when unknown).
 pub extern(ffi, "stone") fn stone_get_live_mesh_count() -> int
@@ -1575,25 +1512,6 @@ pub extern(ffi, "stone") fn stone_get_image_texture(handle: int) -> int
 pub extern(ffi, "stone") fn stone_image_set_wrap(handle: int, repeat: bool) -> bool
 
 
-// Distinct suppression records the RUST logger holds (log_once! sites plus
-// their subject-keyed half). The oracle for the boundary's `log_dedup` row.
-// The asset watcher's three stores as `registered,changed,dirs`. The
-// `asset_watcher` ambient row's own denominator.
-@inline inline(lua) fn stone_asset_watcher_state_ptr() -> any = "stone.stone_asset_watcher_state()"
-
-pub fn stone_asset_watcher_state() -> string? {
-    let p = stone_asset_watcher_state_ptr()
-    if __stone_ptr_is_null(p) { return null }
-    return ffi_string(p, null)
-}
-
-// Queue a change for a REGISTERED asset exactly as the debouncer's background
-// thread would, without touching the filesystem. A probe: false when the path
-// is not registered, so a fixture cannot queue something `poll` would drop.
-pub extern(ffi, "stone") fn stone_asset_watcher_inject_change(path: string) -> bool
-
-pub extern(ffi, "stone") fn stone_log_dedup_count() -> int
-
 // Every record at `level` (0 error, 1 warn) this process emitted, Rust and
 // Rock alike. Other levels keep no records and read as zero.
 pub extern(ffi, "stone") fn stone_log_record_total(level: int) -> int
@@ -1612,23 +1530,12 @@ pub fn stone_log_records_text(level: int, max_rows: int) -> string {
 // which GLES does not have, and nothing in the engine calls it.
 pub extern(ffi, "stone") fn stone_image_read_texel(handle: int, x: int, y: int) -> int
 
-// The CPU mirror's wrap mode: 1 repeat, 0 clamp, -1 no such handle.
-pub extern(ffi, "stone") fn stone_image_wrap_state(handle: int) -> int
-
-// The wrap mode GL itself holds, as the second independent view: 1 repeat, 0
-// clamp, -1 unknown handle or the two axes disagree.
-pub extern(ffi, "stone") fn stone_image_gl_wrap_state(handle: int) -> int
-
 // Bind the immutable sampler for `mode` on texture `unit`; mode < 0 releases
 // that unit. `image` picks the matching wrap -- a sampler overrides the
 // texture's own -- and is 0 for a canvas, which is always clamped.
 pub extern(ffi, "stone") fn stone_bind_sampler(unit: int, mode: int, image: int)
 
 pub extern(ffi, "stone") fn stone_sampler_bound(unit: int) -> bool
-
-// Every unit that can carry sampler state, which is the denominator for a leak
-// scan: a compiler slot count covers only the units a `@textures` group owns.
-pub extern(ffi, "stone") fn stone_max_texture_units() -> int
 
 pub extern(ffi, "stone") fn stone_unload_image(handle: int)
 
@@ -1687,15 +1594,6 @@ pub fn image_data_size(handle: int) -> (int, int) {
 }
 
 pub extern(ffi, "stone") fn stone_get_image_data_count() -> int
-
-extern(ffi, "stone") fn stone_image_data_clone(src: int) -> int
-
-extern(ffi, "stone") fn stone_image_data_copy_into(dst: int, src: int) -> bool
-
-// Copies a rectangle of `src` into `dst`, each channel scaled by its factor
-// (1.0 copies the bytes exactly). False for a bad handle or rectangle.
-pub extern(ffi, "stone") fn stone_image_data_blit(dst: int, src: int, sx: int, sy: int, w: int, h: int,
-                                                  dx: int, dy: int, r: float, g: float, b: float, a: float) -> bool
 
 pub extern(ffi, "stone") fn stone_destroy_image_data(handle: int)
 
@@ -1775,7 +1673,6 @@ pub extern(ffi, "stone") fn stone_sound_playable(handle: int) -> bool
 // Encoded bytes a stream source holds (0 before admission); -1 when the handle
 // is not a live stream source.
 pub extern(ffi, "stone") fn stone_sound_stream_bytes(handle: int) -> int
-pub extern(ffi, "stone") fn stone_sound_pcm_bytes(handle: int) -> int
 pub extern(ffi, "stone") fn stone_unload_sound(handle: int) -> bool
 pub extern(ffi, "stone") fn stone_reload_sound(handle: int, path: string) -> bool
 pub extern(ffi, "stone") fn stone_load_music(path: string) -> int
@@ -1805,25 +1702,11 @@ pub extern(ffi, "stone") fn stone_bus_set_distortion(bus: int, drive: float, mix
 pub extern(ffi, "stone") fn stone_bus_set_reverb(bus: int, enabled: bool, room_size: float, damping: float, wet: float, dry: float, width: float) -> bool
 pub extern(ffi, "stone") fn stone_bus_duck(bus: int, depth: float, attack_secs: float, release_secs: float) -> bool
 pub extern(ffi, "stone") fn stone_voice_active(voice: int) -> bool
-// Source frames a stream voice has decoded across loop passes; -1 for an
-// unknown voice or one playing resident PCM.
-pub extern(ffi, "stone") fn stone_voice_stream_frames(voice: int) -> int
 pub extern(ffi, "stone") fn stone_voice_stop(voice: int) -> bool
 pub extern(ffi, "stone") fn stone_voice_set_gain(voice: int, gain: float) -> bool
 pub extern(ffi, "stone") fn stone_voice_set_pan(voice: int, pan: float) -> bool
 pub extern(ffi, "stone") fn stone_voice_set_speed(voice: int, speed: float) -> bool
 pub extern(ffi, "stone") fn stone_play_music(handle: int)
-pub extern(ffi, "stone") fn stone_stop_music()
-// The audio ambient -- every bus's parameters -- as one line, or `absent` in a
-// process with no audio state. None of these values has a getter of its own.
-@inline inline(lua) fn stone_audio_ambient_report_ptr() -> any = "stone.stone_audio_ambient_report()"
-
-pub fn stone_audio_ambient_report() -> string {
-    let p = stone_audio_ambient_report_ptr()
-    if __stone_ptr_is_null(p) { return "<null>" }
-    return ffi_string(p, null)
-}
-
 // Freeverb effect
 // room_size, damping, wet, dry, width: all 0.0-1.0
 pub extern(ffi, "stone") fn stone_set_reverb(enabled: bool, room_size: float, damping: float, wet: float, dry: float, width: float)
@@ -1832,7 +1715,6 @@ pub extern(ffi, "stone") fn stone_set_reverb(enabled: bool, room_size: float, da
 // Input API (moved to top with other Stone wrappers)
 // ============================================================================
 
-extern(ffi, "stone") fn stone_is_key_pressed(scancode: int) -> bool
 pub extern(ffi, "stone") fn stone_get_time() -> float
 pub extern(ffi, "stone") fn stone_wall_time() -> float
 
@@ -1956,26 +1838,6 @@ pub extern(ffi, "stone") fn stone_clear_canvas(r: float, g: float, b: float, a: 
 pub extern(ffi, "stone") fn stone_clear_canvas_int(draw_buffer: int, value: int)
 
 pub extern(ffi, "stone") fn stone_set_present_viewport(active: bool, x: int, y: int, w: int, h: int)
-// The letterbox present rect as `x,y,w,h`, or `none`. Read-only; the rect has no
-// other way out of stone-rs.
-@inline inline(lua) fn stone_present_viewport_ptr() -> any = "stone.stone_present_viewport()"
-
-pub fn stone_present_viewport() -> string {
-    let p = stone_present_viewport_ptr()
-    if __stone_ptr_is_null(p) { return "<null>" }
-    return ffi_string(p, null)
-}
-
-// GL's own viewport as `x,y,w,h` -- the CONSEQUENCE of the rect above, since
-// binding canvas 0 applies one or the other.
-@inline inline(lua) fn stone_gl_viewport_ptr() -> any = "stone.stone_gl_viewport()"
-
-pub fn stone_gl_viewport() -> string {
-    let p = stone_gl_viewport_ptr()
-    if __stone_ptr_is_null(p) { return "<null>" }
-    return ffi_string(p, null)
-}
-
 pub extern(ffi, "stone") fn stone_canvas_save_png(handle: int, path: string) -> bool
 extern(ffi, "stone") fn stone_canvas_read_rgba8(handle: int, out: PtrU8, capacity: int) -> int
 pub extern(ffi, "stone") fn stone_canvas_capture_begin(handle: int) -> int
@@ -1983,12 +1845,10 @@ pub extern(ffi, "stone") fn stone_canvas_capture_poll(id: int, out: PtrU8, capac
 pub extern(ffi, "stone") fn stone_canvas_capture_release(id: int) -> bool
 pub extern(ffi, "stone") fn stone_canvas_capture_cancel(id: int) -> bool
 extern(ffi, "stone") fn stone_canvas_capture_cancel_all() -> int
-pub extern(ffi, "stone") fn stone_canvas_read_rgba32f(handle: int, out: Ptr<float>, capacity: int) -> int
 pub extern(ffi, "stone") fn stone_canvas_upload_rgba32f(handle: int, pixels: Ptr<float>, count: int) -> bool
 pub extern(ffi, "stone") fn stone_canvas_read_region_rgba32f(handle: int, x: int, y: int, w: int, h: int, out: Ptr<float>, capacity: int) -> int
 extern(ffi, "stone") fn stone_canvas_read_region_i32(handle: int, x: int, y: int, w: int, h: int, out: Ptr<int>, capacity: int) -> int
 extern(ffi, "stone") fn stone_canvas_upload_rgba8(handle: int, pixels: PtrU8, byte_len: int) -> bool
-pub extern(ffi, "stone") fn stone_save_png_rgba8(path: string, width: int, height: int, pixels: PtrU8) -> bool
 
 pub extern(ffi, "stone") fn stone_read_canvas_pixel(handle: int, x: int, y: int) -> float
 pub extern(ffi, "stone") fn stone_read_canvas_pixel_channel(handle: int, x: int, y: int, channel: int) -> float
@@ -2258,7 +2118,6 @@ pub @nomangle value ImageLoadStats {
 pub extern(ffi, "stone") fn stone_get_graphics_stats() -> GraphicsStats
 pub extern(ffi, "stone") fn stone_get_image_frame_stats() -> ImageLoadStats
 pub extern(ffi, "stone") fn stone_get_image_profile_stats() -> ImageLoadStats
-extern(ffi, "stone") fn stone_image_frame_activity() -> int
 extern(ffi, "stone") fn stone_reset_image_profile_stats()
 extern(ffi, "stone") fn stone_reset_image_profile_stats_to_frame()
 
@@ -2503,9 +2362,6 @@ extern(ffi, "stone") fn stone_get_font_slot_count(font_id: int) -> int
 extern(ffi, "stone") fn stone_get_font_slot_codepoint(font_id: int, slot: int) -> int
 extern(ffi, "stone") fn stone_get_font_atlas_size(font_id: int, width: Ptr<int>, height: Ptr<int>) -> bool
 
-// Retained CPU raster bytes for a font's atlases: the census CPU row.
-// Zero: no CPU copy survives the upload.
-pub extern(ffi, "stone") fn stone_get_font_cpu_byte_len(font_id: int) -> int
 pub @inline inline(lua) fn stone_ensure_font_atlas_instance_ffi(font_id: int, pixel_size: int) -> int = "tonumber(stone.stone_ensure_font_atlas_instance(font_id, pixel_size))"
 pub @inline inline(lua) fn stone_get_font_instance_image_ffi(instance_id: int) -> int = "tonumber(stone.stone_get_font_instance_image(instance_id))"
 @inline inline(lua) fn stone_get_font_atlas_instance_pixel_size_ffi(font_id: int, index: int) -> int = "stone.stone_get_font_atlas_instance_pixel_size(font_id, index)"

@@ -407,21 +407,6 @@ pub(crate) fn live_mesh_ids() -> Vec<u64> {
     MESHES.with(|m| m.borrow().keys().copied().collect())
 }
 
-/// Instances attached to a mesh: -2 for an unknown handle, -1 for a mesh with
-/// no instance buffer, otherwise the count.
-///
-/// Three states because `set_instances` accepts a count of 0, so "never
-/// latched" and "latched with nothing in it" are different mesh states that a
-/// two-state answer would merge.
-#[no_mangle]
-pub extern "C" fn stone_mesh_instance_count(handle: u64) -> c_int {
-    MESHES.with(|m| match m.borrow().get(&handle) {
-        Some(mesh) if mesh.inst_vbo.is_some() => mesh.inst_count,
-        Some(_) => -1,
-        None => -2,
-    })
-}
-
 /// Asset-report census over the retained-mesh registry: population, one
 /// handle per index in id order (the `stone_get_live_image_handle` shape),
 /// and the uploaded bytes a handle holds. 0 for an unknown handle: it holds

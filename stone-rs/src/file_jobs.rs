@@ -257,8 +257,6 @@ enum TransactionOp {
     Write(AtomicWrite),
     Png(PngWrite),
     Publish(AtomicWrite),
-    Sync(PathBuf),
-    Rename { source: PathBuf, target: PathBuf },
 }
 
 struct PngWrite {
@@ -510,23 +508,6 @@ impl TransactionBuilder {
             return false;
         }
         write.fragments.push(bytes);
-        true
-    }
-
-    fn add_sync(&mut self, path: PathBuf, max_ops: usize) -> bool {
-        if self.published || self.operations.len() >= max_ops {
-            return false;
-        }
-        self.operations.push(TransactionOp::Sync(path));
-        true
-    }
-
-    fn add_rename(&mut self, source: PathBuf, target: PathBuf, max_ops: usize) -> bool {
-        if self.published || self.operations.len() >= max_ops {
-            return false;
-        }
-        self.operations
-            .push(TransactionOp::Rename { source, target });
         true
     }
 
@@ -817,20 +798,6 @@ impl Jobs {
         transaction.bytes += length;
         transaction.fragments += 1;
         true
-    }
-
-    fn add_transaction_sync(&mut self, id: i32, path: PathBuf) -> bool {
-        let Some(transaction) = self.transactions.get_mut(&id) else {
-            return false;
-        };
-        transaction.add_sync(path, self.limits.max_transaction_ops)
-    }
-
-    fn add_transaction_rename(&mut self, id: i32, source: PathBuf, target: PathBuf) -> bool {
-        let Some(transaction) = self.transactions.get_mut(&id) else {
-            return false;
-        };
-        transaction.add_rename(source, target, self.limits.max_transaction_ops)
     }
 
     fn add_transaction_cleanup(&mut self, id: i32, path: PathBuf, on_success: bool) -> bool {
@@ -1462,40 +1429,6 @@ fn execute_transaction(
                     return JobResult::Failure;
                 }
             }
-            TransactionOp::Sync(path) => {
-                if cancellation.is_cancelled() {
-                    cleanup(&transaction.cleanup_failure);
-                    cancellation.complete();
-                    return JobResult::Cancelled;
-                }
-                if let Err(error) = sync_file(path) {
-                    log_io_error("sync", path, &error);
-                    cleanup(&transaction.cleanup_failure);
-                    cancellation.complete();
-                    return JobResult::Failure;
-                }
-            }
-            TransactionOp::Rename { source, target } => {
-                if cancellation.is_cancelled() {
-                    cleanup(&transaction.cleanup_failure);
-                    cancellation.complete();
-                    return JobResult::Cancelled;
-                }
-                if let Err(error) = ensure_parent(target, &mut barriers) {
-                    log_io_error("rename prepare", target, &error);
-                    cleanup(&transaction.cleanup_failure);
-                    cancellation.complete();
-                    return JobResult::Failure;
-                }
-                if let Err(error) = std::fs::rename(source, target) {
-                    log_io_error("rename", target, &error);
-                    cleanup(&transaction.cleanup_failure);
-                    cancellation.complete();
-                    return JobResult::Failure;
-                }
-                barriers.record_parent(target);
-                barriers.record_parent(source);
-            }
         }
     }
     if cancellation.is_cancelled() {
@@ -1580,11 +1513,6 @@ fn cleanup_directories(directories: &[CleanupDirectory]) {
             }
         }
     }
-}
-
-fn sync_file(path: &Path) -> std::io::Result<()> {
-    let file = std::fs::OpenOptions::new().write(true).open(path)?;
-    file.sync_all()
 }
 
 fn jobs() -> &'static Mutex<Jobs> {
@@ -1846,35 +1774,6 @@ pub extern "C" fn stone_file_transaction_write_png(
     };
     let mut job_queue = jobs().lock().unwrap();
     job_queue.add_transaction_png_reserved(transaction, path, pixels, width as u32, height as u32)
-}
-
-#[no_mangle]
-pub extern "C" fn stone_file_transaction_sync(transaction: i32, path: *const c_char) -> bool {
-    let Some(path) = parse_path(path) else {
-        return false;
-    };
-    jobs()
-        .lock()
-        .unwrap()
-        .add_transaction_sync(transaction, path)
-}
-
-#[no_mangle]
-pub extern "C" fn stone_file_transaction_rename(
-    transaction: i32,
-    source: *const c_char,
-    target: *const c_char,
-) -> bool {
-    let Some(source) = parse_path(source) else {
-        return false;
-    };
-    let Some(target) = parse_path(target) else {
-        return false;
-    };
-    jobs()
-        .lock()
-        .unwrap()
-        .add_transaction_rename(transaction, source, target)
 }
 
 #[no_mangle]
@@ -2671,10 +2570,12 @@ mod tests {
         let manifest = root.join("manifest.json");
         std::fs::write(&manifest, b"old").unwrap();
         let transaction_id = queue.lock().unwrap().begin_transaction().unwrap();
-        assert!(queue.lock().unwrap().add_transaction_rename(
+        assert!(queue.lock().unwrap().add_transaction_fragment_owned(
             transaction_id,
-            root.join("missing"),
-            root.join("unused")
+            snapshots.clone(),
+            b"bad write".to_vec(),
+            false,
+            false
         ));
         assert!(queue.lock().unwrap().add_transaction_fragment_owned(
             transaction_id,
@@ -2891,11 +2792,15 @@ mod tests {
 
         let failure_cleanup = root.join("failure.tmp");
         std::fs::write(&failure_cleanup, b"stale").unwrap();
+        let blocked = root.join("blocked");
+        std::fs::create_dir(&blocked).unwrap();
         let failure_id = queue.lock().unwrap().begin_transaction().unwrap();
-        assert!(queue.lock().unwrap().add_transaction_rename(
+        assert!(queue.lock().unwrap().add_transaction_fragment_owned(
             failure_id,
-            root.join("missing"),
-            root.join("unused")
+            blocked,
+            b"bad write".to_vec(),
+            false,
+            false
         ));
         assert!(queue.lock().unwrap().add_transaction_cleanup(
             failure_id,
@@ -2918,6 +2823,8 @@ mod tests {
         let queue = Mutex::new(Jobs::new(limits(4, 64)));
         let manifest = root.join("manifest.json");
         std::fs::write(&manifest, b"old").unwrap();
+        let blocked = root.join("blocked");
+        std::fs::create_dir(&blocked).unwrap();
         let transaction_id = queue.lock().unwrap().begin_transaction().unwrap();
         assert!(queue.lock().unwrap().add_transaction_fragment_owned(
             transaction_id,
@@ -2926,10 +2833,12 @@ mod tests {
             false,
             false
         ));
-        assert!(queue.lock().unwrap().add_transaction_rename(
+        assert!(queue.lock().unwrap().add_transaction_fragment_owned(
             transaction_id,
-            root.join("missing"),
-            root.join("unused")
+            blocked,
+            b"bad write".to_vec(),
+            false,
+            false
         ));
         assert!(queue.lock().unwrap().add_transaction_fragment_owned(
             transaction_id,

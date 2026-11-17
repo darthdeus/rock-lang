@@ -32,7 +32,6 @@ const TIMED_PASSES: usize = 16;
 
 /// One timed pass: a timestamp pair and the caller's tag for it.
 struct TimedPass {
-    frame: u64,
     tag: u32,
     begin: glow::Query,
     end: glow::Query,
@@ -52,7 +51,6 @@ struct Entry {
 }
 
 struct FrameSlot {
-    frame: u64,
     state: SlotState,
     /// Pooled query objects; `used` of them belong to this frame.
     queries: Vec<glow::Query>,
@@ -66,7 +64,6 @@ struct FrameSlot {
 impl FrameSlot {
     fn new() -> Self {
         Self {
-            frame: 0,
             state: SlotState::Empty,
             queries: Vec::new(),
             used: 0,
@@ -159,7 +156,7 @@ pub struct GpuTimer {
     unbalanced_logged: bool,
     /// Timed passes in submission order, oldest first.
     timed: VecDeque<TimedPass>,
-    timed_open: Option<(glow::Query, u64)>,
+    timed_open: Option<glow::Query>,
     timed_free: Vec<glow::Query>,
     timed_tag: u32,
 }
@@ -297,7 +294,6 @@ impl GpuTimer {
         let scopes_requested = self.scopes_requested();
         let slot = &mut self.slots[self.write];
         if slot.state == SlotState::Pending {
-            crate::frame_timing::event("gpu_drop", slot.frame);
             // Readback fell a whole ring behind; this sample is lost.
             if scopes_requested {
                 self.aggregate.drop_frame();
@@ -306,7 +302,6 @@ impl GpuTimer {
                 self.read = (self.read + 1) % RING;
             }
         }
-        slot.frame = crate::stone_gl_swap_count() + 1;
         slot.state = SlotState::Recording;
         slot.used = 0;
         slot.entries.clear();
@@ -454,7 +449,6 @@ impl GpuTimer {
         let frame_ns = timestamps
             .map(|(begin, end)| end.saturating_sub(begin))
             .unwrap_or(0);
-        crate::frame_timing::gpu("gpu_result", slot.frame, timestamps, None);
         if self.scopes_requested() {
             if slot.unbalanced {
                 self.aggregate.drop_frame();
@@ -596,14 +590,12 @@ impl GpuTimer {
         {
             return;
         }
-        self.timed_open = self
-            .timed_query(gl)
-            .map(|query| (query, crate::stone_gl_swap_count() + 1));
+        self.timed_open = self.timed_query(gl);
     }
 
     /// Close the open timed pass and queue it for readback under `tag`.
     pub fn timed_end(&mut self, gl: &DebugGl, tag: u32) {
-        let Some((begin, frame)) = self.timed_open.take() else {
+        let Some(begin) = self.timed_open.take() else {
             return;
         };
         let Some(end) = self.timed_query(gl) else {
@@ -613,12 +605,7 @@ impl GpuTimer {
         // As for scopes: unflushed, the end timestamp waits in the driver's
         // command buffer and bills later CPU time to the pass.
         unsafe { gl.flush() };
-        self.timed.push_back(TimedPass {
-            frame,
-            tag,
-            begin,
-            end,
-        });
+        self.timed.push_back(TimedPass { tag, begin, end });
     }
 
     /// Non-blocking read of the oldest timed pass. Returns its GPU ms
@@ -639,25 +626,10 @@ impl GpuTimer {
         let read = |q: glow::Query| unsafe { gl.get_query_parameter_u64(q, glow::QUERY_RESULT) };
         let timestamps = (read(pass.begin), read(pass.end));
         let ns = timestamps.1.saturating_sub(timestamps.0);
-        crate::frame_timing::gpu("pass_result", pass.frame, Some(timestamps), Some(pass.tag));
         self.timed_free.push(pass.begin);
         self.timed_free.push(pass.end);
         self.timed_tag = pass.tag;
         ns as f32 / 1_000_000.0
-    }
-
-    pub fn record_pending(&self) {
-        for slot in &self.slots {
-            if slot.state != SlotState::Empty {
-                crate::frame_timing::event("gpu_pending", slot.frame);
-            }
-        }
-        for pass in &self.timed {
-            crate::frame_timing::gpu("pass_pending", pass.frame, None, Some(pass.tag));
-        }
-        if let Some((_, frame)) = self.timed_open {
-            crate::frame_timing::event("pass_open", frame);
-        }
     }
 
     /// The tag of the pass `timed_poll_ms` last returned.

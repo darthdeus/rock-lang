@@ -24,10 +24,7 @@ fn from_u8(v: u8) -> StoneLogLevel {
     }
 }
 
-/// Called at engine startup (FFI). Installs the one logger and parses
-/// `ROCK_LOG`. Idempotent.
-#[no_mangle]
-pub extern "C" fn stone_log_init() {
+pub(crate) fn init() {
     rock_log::init();
 }
 
@@ -76,36 +73,6 @@ pub extern "C" fn stone_log(
         unsafe { std::ffi::CStr::from_ptr(msg) }.to_string_lossy()
     };
     emit_log(level, cat, &m, wall_clock);
-}
-
-#[no_mangle]
-pub extern "C" fn stone_log_bytes(
-    level: std::os::raw::c_int,
-    category: *const u8,
-    category_len: usize,
-    message: *const u8,
-    message_len: usize,
-    wall_clock: std::os::raw::c_int,
-) {
-    let Some(category) = ffi_bytes(category, category_len) else {
-        return;
-    };
-    let Some(message) = ffi_bytes(message, message_len) else {
-        return;
-    };
-    let category = std::str::from_utf8(category).unwrap_or("");
-    let message = String::from_utf8_lossy(message);
-    emit_log(level, category, &message, wall_clock);
-}
-
-fn ffi_bytes<'a>(data: *const u8, len: usize) -> Option<&'a [u8]> {
-    if len == 0 {
-        return Some(&[]);
-    }
-    if data.is_null() {
-        return None;
-    }
-    Some(unsafe { std::slice::from_raw_parts(data, len) })
 }
 
 fn emit_log(level: std::os::raw::c_int, cat: &str, message: &str, wall_clock: std::os::raw::c_int) {

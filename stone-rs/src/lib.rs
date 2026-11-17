@@ -344,7 +344,6 @@ mod canvas;
 mod clipboard;
 #[cfg(target_os = "macos")]
 mod display_pacer;
-mod frame_timing;
 mod gl_state;
 mod glyph_raster;
 mod gpu_timer;
@@ -1319,7 +1318,7 @@ where
 /// Initialize Stone
 #[no_mangle]
 pub extern "C" fn stone_init() -> bool {
-    logging::stone_log_init();
+    logging::init();
     crate::renderdoc::init();
     QUIT_REQUESTED.store(false, Ordering::SeqCst);
     INITIALIZED.store(true, Ordering::SeqCst);
@@ -1361,7 +1360,7 @@ pub extern "C" fn stone_quit_requested() -> bool {
 /// Idempotent: safe to call when already torn down or never initialized.
 #[no_mangle]
 pub extern "C" fn stone_teardown() -> bool {
-    crate::flow_jobs::stone_flow_shutdown();
+    crate::flow_jobs::shutdown();
     crate::relight_jobs::shutdown();
     crate::nav::shutdown();
     crate::renderdoc::on_teardown();
@@ -1373,8 +1372,8 @@ pub extern "C" fn stone_teardown() -> bool {
     // An SDL_Cursor must be freed before SDL_Quit, and dropping WINDOW drops
     // the sdl2::Sdl context.
     crate::cursor::free_all_cursors();
-    text::stone_text_shutdown();
-    sprite::stone_sprite_shutdown();
+    text::shutdown();
+    sprite::shutdown();
     with_gl(stream_buffer::release_all);
     shader::destroy_all();
     canvas::destroy_all();
@@ -1382,10 +1381,8 @@ pub extern "C" fn stone_teardown() -> bool {
     gl_state::forget_samplers();
     mesh::clear_all();
     GPU_TIMER.with(|timer| {
-        timer.borrow().record_pending();
         *timer.borrow_mut() = gpu_timer::GpuTimer::new();
     });
-    frame_timing::finish();
     release_native_window();
     INITIALIZED.store(false, Ordering::SeqCst);
     QUIT_REQUESTED.store(false, Ordering::SeqCst);
@@ -2189,7 +2186,7 @@ pub extern "C" fn stone_poll_event(event: *mut StoneEvent) -> bool {
         // Forward to ImGui first. The handler early-returns if
         // imgui hasn't been initialized yet, so the call is safe
         // before stone_imgui_init too.
-        let _ = crate::imgui::stone_imgui_process_event(&raw as *const _ as *mut std::ffi::c_void);
+        let _ = crate::imgui::process_event(&raw as *const _ as *mut std::ffi::c_void);
         let controller_event = {
             let mut manager = window.controller_manager.borrow_mut();
             let events = manager.handle_sdl_event(&sdl_event);
@@ -2351,18 +2348,14 @@ pub extern "C" fn stone_test_push_key_event(token: *const c_char, down: bool) ->
 #[no_mangle]
 pub extern "C" fn stone_swap_window(_window: *mut StoneWindow) {
     let completed = GL_SWAP_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
-    frame_timing::event("presentation_begin", completed);
     // RenderDoc frame auto-trigger; one branch when STONE_RENDERDOC is unset.
     crate::renderdoc::on_swap(completed);
     with_window(|window| {
         if !window.runtime_hidden && window.pending_show.is_none() {
             canvas::present_headless_screen(&window.window);
         }
-        frame_timing::event("pace_begin", completed);
         pace_swap(&window.window);
-        frame_timing::event("swap_begin", completed);
         window.window.gl_swap_window();
-        frame_timing::event("swap_end", completed);
 
         // Re-check borders once after the first present: on X11
         // _NET_FRAME_EXTENTS can read 0 until the window is mapped
@@ -2708,7 +2701,6 @@ pub extern "C" fn stone_shader_error_count() -> u32 {
 /// GL context, or if timer queries are unsupported on this platform.
 #[no_mangle]
 pub extern "C" fn stone_gpu_timer_begin() {
-    frame_timing::event("frame_begin", stone_gl_swap_count() + 1);
     with_gl(|gl| GPU_TIMER.with(|t| t.borrow_mut().begin(gl)));
 }
 
@@ -2716,7 +2708,6 @@ pub extern "C" fn stone_gpu_timer_begin() {
 #[no_mangle]
 pub extern "C" fn stone_gpu_timer_end() {
     with_gl(|gl| GPU_TIMER.with(|t| t.borrow_mut().end(gl)));
-    frame_timing::event("frame_end", stone_gl_swap_count() + 1);
 }
 
 /// Non-blocking read of the oldest ready GPU timer result. Returns elapsed GPU
@@ -2829,39 +2820,6 @@ pub unsafe extern "C" fn stone_gpu_label_shader(handle: u64, name: *const c_char
             gl.object_label(glow::PROGRAM, program.0.get(), &name);
         }
     });
-}
-
-thread_local! {
-    static GPU_SHADER_LABEL: RefCell<Option<std::ffi::CString>> = const { RefCell::new(None) };
-}
-
-/// The debug label GL holds for a shader program, or "" when none or when the
-/// context has no `KHR_debug`. The oracle for `stone_gpu_label_shader`.
-#[no_mangle]
-pub extern "C" fn stone_gpu_shader_label(handle: u64) -> *const c_char {
-    let label = SHADERS
-        .with(|s| s.borrow().get(&handle).map(|sh| sh.program))
-        .and_then(|program| {
-            with_gl(|gl| unsafe {
-                if gl.supports_debug_groups() {
-                    gl.get_object_label(glow::PROGRAM, program.0.get())
-                } else {
-                    String::new()
-                }
-            })
-        })
-        .unwrap_or_default();
-    GPU_SHADER_LABEL.with(|slot| match std::ffi::CString::new(label) {
-        Ok(c) => {
-            let ptr = c.as_ptr();
-            *slot.borrow_mut() = Some(c);
-            ptr
-        }
-        Err(e) => {
-            ::log::error!(target: "STONE", "stone_gpu_shader_label: {e}");
-            std::ptr::null()
-        }
-    })
 }
 
 /// Clear aggregated scope samples (the profiler's warmup transition).

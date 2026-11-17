@@ -735,8 +735,7 @@ pub extern "C" fn stone_flow_cancel_all() {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn stone_flow_shutdown() {
+pub(crate) fn shutdown() {
     let service = flow_service_slot().lock().unwrap().take();
     if let Some(service) = service {
         service.shutdown();
@@ -914,7 +913,7 @@ mod tests {
     #[test]
     fn ffi_copies_caller_owned_snapshot_and_consumes_result() {
         let _guard = FLOW_TEST_LOCK.lock().unwrap();
-        stone_flow_shutdown();
+        shutdown();
         let width = 3;
         let height = 1;
         let mut walkable = padded_snapshot(width, height, false);
@@ -942,13 +941,13 @@ mod tests {
         );
         assert_eq!(output, vec![0.0, 1.0, 2.0]);
         assert_eq!(stone_flow_poll(handle), -1);
-        stone_flow_shutdown();
+        shutdown();
     }
 
     #[test]
     fn ffi_cancel_all_expires_pending_handle() {
         let _guard = FLOW_TEST_LOCK.lock().unwrap();
-        stone_flow_shutdown();
+        shutdown();
         let width = 129;
         let height = 129;
         let walkable = interior_snapshot(width, height);
@@ -965,13 +964,13 @@ mod tests {
         stone_flow_cancel_all();
         assert_eq!(stone_flow_wait(handle), -1);
         assert_eq!(stone_flow_poll(handle), -1);
-        stone_flow_shutdown();
+        shutdown();
     }
 
     #[test]
     fn ffi_cancel_makes_pending_handle_missing_immediately() {
         let _guard = FLOW_TEST_LOCK.lock().unwrap();
-        stone_flow_shutdown();
+        shutdown();
         let width = 129;
         let height = 129;
         let walkable = interior_snapshot(width, height);
@@ -988,6 +987,6 @@ mod tests {
         stone_flow_cancel(handle);
         assert_eq!(stone_flow_poll(handle), -1);
         assert_eq!(stone_flow_wait(handle), -1);
-        stone_flow_shutdown();
+        shutdown();
     }
 }

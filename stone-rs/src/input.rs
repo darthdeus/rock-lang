@@ -1174,21 +1174,6 @@ pub(crate) fn canonical_scancode(name: &str) -> Option<sdl2::keyboard::Scancode>
 }
 
 #[no_mangle]
-pub extern "C" fn stone_is_key_pressed(scancode: c_int) -> bool {
-    with_window(|window: &StoneWindow| {
-        let pump = window.event_pump.borrow();
-        let keyboard = pump.keyboard_state();
-
-        // Convert integer scancode to SDL2 Scancode
-        if let Some(sc) = sdl2::keyboard::Scancode::from_i32(scancode) {
-            return keyboard.is_scancode_pressed(sc);
-        }
-        false
-    })
-    .unwrap_or(false)
-}
-
-#[no_mangle]
 pub extern "C" fn stone_is_mouse_button_down(button: c_int) -> bool {
     with_window(|window: &StoneWindow| {
         let pump = window.event_pump.borrow();

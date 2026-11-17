@@ -141,18 +141,6 @@ pub extern "C" fn stone_sampler_bound(unit: c_int) -> bool {
     .unwrap_or(false)
 }
 
-/// How many texture units `glActiveTexture` can select, i.e. every unit that
-/// can carry sampler state. The denominator for a sampler-leak scan: a slot
-/// count only covers the units a compiler `@textures` group owns, while
-/// `Pass.inputs` is caller-unit-addressed by design, so a hand-authored-GLSL
-/// pass may pick any legal unit. 0 when there is no GL context, which fails the
-/// scan's denominator assertion rather than emptying its loop silently.
-#[no_mangle]
-pub extern "C" fn stone_max_texture_units() -> c_int {
-    with_gl(|gl| unsafe { gl.get_parameter_i32(glow::MAX_COMBINED_TEXTURE_IMAGE_UNITS) })
-        .unwrap_or(0)
-}
-
 /// Bind the sampler for `mode` (0 = nearest, 1 = linear, 2 = stable bilinear mip) on texture `unit`.
 /// `image` selects the wrap half of the pair: a sampler overrides the texture's
 /// own wrap, so binding one that disagrees would silently clamp a REPEAT
@@ -449,48 +437,6 @@ fn write_state_reply(s: String) -> *const c_char {
         *b.borrow_mut() = Some(c);
         ptr
     })
-}
-
-// =============================================================================
-// Sampler bindings on units >= 2
-// =============================================================================
-
-/// The first texture unit the sampler probe reports.
-///
-/// Units 0 and 1 are LAUNDERED every frame -- the present pass rewrites unit 0
-/// and the tonemap rewrites unit 1 -- so a violation on either is erased before
-/// any end-of-frame reading can attribute it. Units 2 and up have no such
-/// writer, so they are where a leaked binding both survives and can be seen.
-const SAMPLER_FIRST_TRACKED_UNIT: u32 = 2;
-
-/// How many units the probe covers.
-fn tracked_sampler_units(gl: &stone_gl::DebugGl) -> u32 {
-    let max = unsafe { gl.get_parameter_i32(glow::MAX_COMBINED_TEXTURE_IMAGE_UNITS) };
-    u32::try_from(max)
-        .unwrap_or(0)
-        .saturating_sub(SAMPLER_FIRST_TRACKED_UNIT)
-}
-
-/// The sampler GL has bound on `unit`, or -1 for a unit outside the range the
-/// probe covers. 0 means no sampler, which is a different state from "not tracked".
-#[no_mangle]
-pub extern "C" fn stone_gl_sampler_on_unit(unit: c_int) -> c_int {
-    let Ok(unit) = u32::try_from(unit) else {
-        return -1;
-    };
-    if unit < SAMPLER_FIRST_TRACKED_UNIT {
-        return -1;
-    }
-    with_gl(|gl| unsafe {
-        if unit >= SAMPLER_FIRST_TRACKED_UNIT + tracked_sampler_units(gl) {
-            return -1;
-        }
-        gl.active_texture(glow::TEXTURE0 + unit);
-        let bound = gl.get_parameter_i32(glow::SAMPLER_BINDING);
-        gl.active_texture(glow::TEXTURE0);
-        bound
-    })
-    .unwrap_or(-1)
 }
 
 thread_local! {

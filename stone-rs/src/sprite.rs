@@ -340,8 +340,7 @@ unsafe fn destroy_geometry(gl: &DebugGl, state: SpriteState) {
     gl.delete_buffer(state.fs_quad_identity_vbo);
 }
 
-#[no_mangle]
-pub extern "C" fn stone_sprite_shutdown() {
+pub(crate) fn shutdown() {
     SPRITE_STATE.with(|s| {
         if let Some(state) = s.borrow_mut().take() {
             with_gl(|gl| unsafe {

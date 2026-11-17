@@ -325,8 +325,7 @@ unsafe fn init_geometry(gl: &crate::DebugGl) -> bool {
     true
 }
 
-#[no_mangle]
-pub extern "C" fn stone_text_shutdown() {
+pub(crate) fn shutdown() {
     TEXT_PIPELINE.with(|tp| {
         if let Some(pipeline) = tp.borrow_mut().take() {
             with_gl(|gl| unsafe {
@@ -1719,23 +1718,7 @@ pub extern "C" fn stone_get_font_atlas_size(
     })
 }
 
-/// Retained CPU raster bytes for this font's atlases: the reader for the
-/// census CPU row. Zero, because no CPU copy of any atlas survives the
-/// upload and there is nothing resident to count.
-///
-/// Do not rebuild this row from `stone_get_font_instance_byte_len`: that is
-/// the GL texture's own GPU-side bytes.
-#[no_mangle]
-pub extern "C" fn stone_get_font_cpu_byte_len(font_id: c_uint) -> u64 {
-    if font_index(font_id).is_none() {
-        return 0;
-    }
-    0
-}
-
-// Counting rule for the residency census: R8 coverage aliases count 1 byte
-// per texel on the GPU side, and the CPU font row counts retained raster
-// buffers only (zero: no CPU copy survives the upload).
+// R8 coverage aliases count one byte per texel in the residency census.
 #[cfg(test)]
 mod font_census_tests {
     use super::*;
@@ -1905,31 +1888,6 @@ mod font_census_tests {
             crate::image_texture::stone_get_image_byte_len(extra_image),
             extra_texels,
             "the per-image census agrees per bucket"
-        );
-    }
-
-    /// The CPU font row counts retained raster buffers only. None survives
-    /// the upload, so it is zero -- beside nonzero neighbors proving the
-    /// font holds real bytes on the GPU side.
-    #[test]
-    fn font_cpu_row_counts_retained_rasters_only() {
-        let _guard = CensusFonts::capture();
-        let font = install_census_font();
-        let texels = oracle_texels(CENSUS_MAIN_PX);
-        assert!(
-            texels > 0,
-            "the oracle bake is a real atlas, not an empty fixture"
-        );
-
-        assert_eq!(
-            stone_get_font_instance_byte_len(atlas_instance_id(font, 0)),
-            texels,
-            "the GPU side holds the raster bytes"
-        );
-        assert_eq!(
-            stone_get_font_cpu_byte_len(font),
-            0,
-            "no CPU raster is retained after upload"
         );
     }
 
@@ -2644,7 +2602,7 @@ pub(crate) fn forget_atlas_image(image_id: u64) -> bool {
 /// gets one right.
 ///
 /// The two whole-subsystem teardowns -- `text_init`'s hot-reload re-entry and
-/// `stone_text_shutdown` -- delete every font's atlas texture, so every cached
+/// `shutdown` -- delete every font's atlas texture, so every cached
 /// `IMAGES` entry pointing at one is dangling the moment they run. Clearing
 /// `FONT_ATLAS_IMAGES` alone left those entries LIVE in the registry, naming
 /// deleted textures: an image leak the id census sees as `live`.
@@ -3078,7 +3036,7 @@ mod atlas_image_teardown_tests {
     /// `IMAGES`, rather than clearing the cache slots and leaving live handles
     /// naming deleted textures.
     ///
-    /// `text_init`'s hot-reload re-entry and `stone_text_shutdown` both delete
+    /// `text_init`'s hot-reload re-entry and `shutdown` both delete
     /// every font's atlas texture; an `IMAGES` entry that outlives that is a
     /// dangling handle the id census counts as live.
     ///

@@ -136,7 +136,6 @@ bool stone_poll_event(StoneEvent *event) {
 
 double stone_get_time(void) { return 1.25; }
 int stone_scancode_value(const char *token) { return token[0]; }
-bool stone_is_key_pressed(int scancode) { return scancode == 'a'; }
 bool stone_is_mouse_button_down(int button) { return button == 1; }
 void stone_get_mouse_position(int *x, int *y) { *x = 12; *y = 34; }
 void stone_set_scissor(bool enabled, int x, int y, int w, int h) {
@@ -152,7 +151,7 @@ int main(void) {
     return stone_poll_event(&event)
         && event.event_type == STONE_EVENT_QUIT
         && stone_get_time() == 1.25
-        && stone_is_key_pressed(stone_scancode_value("a"))
+        && stone_scancode_value("a") == 'a'
         && stone_is_mouse_button_down(1)
         && x == 12 && y == 34 ? 0 : 1;
 }
@@ -807,16 +806,13 @@ ABI(stone_remove_dir, bool (*)(const char *));
 ABI(stone_rename, bool (*)(const char *, const char *));
 ABI(stone_set_cursor, void (*)(uint64_t));
 ABI(stone_show_cursor, void (*)(bool));
-ABI(stone_is_cursor_visible, bool (*)(void));
 ABI(stone_create_cursor, uint64_t (*)(const char *, int, int));
 ABI(stone_create_cursor_from_image_data, uint64_t (*)(uint64_t, int, int));
 ABI(stone_set_system_cursor, uint64_t (*)(int));
 ABI(stone_reset_cursor, void (*)(void));
 ABI(stone_free_cursor, void (*)(uint64_t));
-ABI(stone_active_cursor, uint64_t (*)(void));
 ABI(stone_unload_image, void (*)(uint64_t));
 ABI(stone_voice_active, bool (*)(uint64_t));
-ABI(stone_voice_stream_frames, int64_t (*)(uint64_t));
 ABI(stone_voice_set_gain, bool (*)(uint64_t, float));
 ABI(stone_voice_stop, bool (*)(uint64_t));
 ABI(stone_watch_asset, void (*)(const char *));
@@ -1074,50 +1070,6 @@ bool stone_telemetry_configure(
 }
 "#],
         "stone.h telemetry configure declaration did not match its exported ABI",
-    );
-}
-
-#[test]
-fn stone_header_declares_length_aware_logging_with_its_exported_abi() {
-    assert_c_passes(
-        r#"
-#include <stone.h>
-
-static int active_level = 2;
-void stone_log_init(void) {}
-void stone_log_set_level(int level) { active_level = level; }
-int stone_log_get_level(void) { return active_level; }
-
-void stone_log_bytes(
-    int level,
-    const unsigned char *category,
-    size_t category_len,
-    const unsigned char *message,
-    size_t message_len,
-    int wall_clock) {
-    (void)level;
-    (void)category;
-    (void)category_len;
-    (void)message;
-    (void)message_len;
-    (void)wall_clock;
-}
-
-int main(void) {
-    void (*init_fn)(void) = stone_log_init;
-    void (*set_level_fn)(int) = stone_log_set_level;
-    int (*get_level_fn)(void) = stone_log_get_level;
-    void (*log_fn)(int, const unsigned char *, size_t, const unsigned char *, size_t, int)
-        = stone_log_bytes;
-    init_fn();
-    set_level_fn(3);
-    if (get_level_fn() != 3) return 1;
-    log_fn(2, (const unsigned char *)"C", 1, (const unsigned char *)"native", 6, 0);
-    return 0;
-}
-"#,
-        &[],
-        "stone.h logging declarations disagree with their exported ABI",
     );
 }
 

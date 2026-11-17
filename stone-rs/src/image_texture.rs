@@ -131,18 +131,6 @@ pub extern "C" fn stone_reset_image_profile_stats_to_frame() {
 }
 
 #[no_mangle]
-pub extern "C" fn stone_image_frame_activity() -> c_int {
-    FRAME_IMAGE_LOAD_STATS.with(|stats| {
-        let stats = stats.borrow();
-        if image_stats_active(&stats) {
-            1
-        } else {
-            0
-        }
-    })
-}
-
-#[no_mangle]
 pub extern "C" fn stone_get_image_frame_stats(out: *mut ImageLoadStats) {
     if out.is_null() {
         return;
@@ -184,7 +172,6 @@ mod image_load_stats_tests {
 
         reset_image_frame_stats();
         record_image_upload(0, 0, 17, 0);
-        assert_eq!(stone_image_frame_activity(), 1);
         stone_reset_image_profile_stats_to_frame();
         stone_get_image_profile_stats(&mut profile);
         assert_eq!(profile.wait_us, 17);
@@ -1425,13 +1412,6 @@ pub extern "C" fn stone_image_read_texel(handle: u64, x: c_int, y: c_int) -> i64
         | i64::from(pixels[i + 3])
 }
 
-/// Whether an image samples with GL_REPEAT, as the CPU mirror holds it: 1
-/// repeat, 0 clamp, -1 no such handle.
-#[no_mangle]
-pub extern "C" fn stone_image_wrap_state(handle: u64) -> c_int {
-    with_image(handle, |img| c_int::from(img.repeat)).unwrap_or(-1)
-}
-
 #[no_mangle]
 pub extern "C" fn stone_image_exists(handle: u64) -> bool {
     if handle == 0 {
@@ -1452,30 +1432,6 @@ pub extern "C" fn stone_image_decode_failed(handle: u64) -> bool {
 #[no_mangle]
 pub extern "C" fn stone_image_decode_failed_count() -> u64 {
     FAILED_DECODE_COUNT.with(|c| *c.borrow())
-}
-
-/// The wrap mode GL itself holds for an image's texture: 1 repeat, 0 clamp, -1
-/// unknown handle or unreadable. The second, independent view of the row above
-/// -- a restore that put the mirror back and left the texture parameters is a
-/// state the CPU-side reading cannot see.
-#[no_mangle]
-pub extern "C" fn stone_image_gl_wrap_state(handle: u64) -> c_int {
-    let Some(texture) = with_image(handle, |i| i.texture) else {
-        return -1;
-    };
-    with_gl(|gl| unsafe {
-        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-        let s = gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S);
-        let t = gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T);
-        // The two axes are read separately and disagreement refuses, for the
-        // reason the blend row reads its RGB and ALPHA halves apart: the setter
-        // can only express one mode, so it could not describe what it read.
-        if s != t {
-            return -1;
-        }
-        c_int::from(s == glow::REPEAT as i32)
-    })
-    .unwrap_or(-1)
 }
 
 // Immutable sampler objects, one per (filter, wrap) pair, created once and

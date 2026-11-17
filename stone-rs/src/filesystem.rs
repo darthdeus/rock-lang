@@ -218,28 +218,6 @@ fn sync_file(path: &str) -> bool {
     }
 }
 
-fn sync_paths_with(paths: &[String], sync: impl Fn(&str) -> bool + Sync) -> bool {
-    use rayon::prelude::*;
-    // Join every operation before the caller can remove an aborted transaction.
-    paths
-        .par_iter()
-        .map(|path| sync(path))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .all(|ok| ok)
-}
-
-#[no_mangle]
-pub extern "C" fn stone_files_sync(paths_json: *const c_char) -> bool {
-    let Some(input) = (unsafe { cstr(paths_json) }) else {
-        return false;
-    };
-    let Ok(paths) = serde_json::from_str::<Vec<String>>(input) else {
-        return false;
-    };
-    sync_paths_with(&paths, sync_file)
-}
-
 /// Read entire file into a malloc'd buffer.
 /// Checks the in-memory asset registry first, falls back to disk.
 /// Caller must free the returned buffer with libc::free.
@@ -471,18 +449,6 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Recursively copy `src` (file or whole directory tree) to `dst`.
-/// `dst` must not already exist (caller's overwrite guard). Symlinks
-/// are copied shallowly, never recursed into (cycle-safe -- see
-/// copy_tree). Returns false on any failure (partial tree left as-is).
-#[no_mangle]
-pub extern "C" fn stone_copy_recursive(src: *const c_char, dst: *const c_char) -> bool {
-    let (Some(src_str), Some(dst_str)) = (unsafe { (cstr(src), cstr(dst)) }) else {
-        return false;
-    };
-    copy_tree(Path::new(src_str), Path::new(dst_str)).is_ok()
-}
-
 /// Move/rename a path (file or directory tree). Tries an atomic
 /// same-filesystem rename first; on a cross-device failure (EXDEV)
 /// falls back to a recursive copy + delete so moves across mount
@@ -711,62 +677,6 @@ mod xfer_tests {
     }
 
     #[test]
-    fn snapshot_sync_overlaps_independent_files_and_joins_failures() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::time::{Duration, Instant};
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(2)
-            .build()
-            .unwrap();
-        let entered = AtomicUsize::new(0);
-        let completed = AtomicUsize::new(0);
-        let paths = vec!["first".to_string(), "second".to_string()];
-        let result = pool.install(|| {
-            sync_paths_with(&paths, |_| {
-                entered.fetch_add(1, Ordering::SeqCst);
-                let deadline = Instant::now() + Duration::from_secs(2);
-                while entered.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                let overlapped = entered.load(Ordering::SeqCst) == 2;
-                completed.fetch_add(1, Ordering::SeqCst);
-                overlapped
-            })
-        });
-        assert!(
-            result,
-            "durability waits must overlap rather than serialize"
-        );
-        assert_eq!(completed.load(Ordering::SeqCst), 2);
-        completed.store(0, Ordering::SeqCst);
-        assert!(!pool.install(|| sync_paths_with(&paths, |path| {
-            completed.fetch_add(1, Ordering::SeqCst);
-            path != "first"
-        })));
-        assert_eq!(
-            completed.load(Ordering::SeqCst),
-            2,
-            "failure must join every file operation"
-        );
-    }
-
-    #[test]
-    fn snapshot_sync_reports_missing_files_and_preserves_contents() {
-        let root = fresh_root();
-        let path = root.join("snapshot.png");
-        fs::write(&path, b"snapshot payload").unwrap();
-        let input = CString::new(serde_json::to_string(&vec![&path]).unwrap()).unwrap();
-        assert!(stone_files_sync(input.as_ptr()));
-        assert_eq!(fs::read(&path).unwrap(), b"snapshot payload");
-        let missing = root.join("missing.png");
-        let input = CString::new(serde_json::to_string(&vec![&path, &missing]).unwrap()).unwrap();
-        assert!(!stone_files_sync(input.as_ptr()));
-        assert!(!stone_files_sync(c"{}".as_ptr()));
-        assert!(!stone_files_sync(std::ptr::null()));
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn pref_path_returns_an_existing_absolute_directory() {
         let org = CString::new("rock-pref-path-test").unwrap();
         let app = CString::new(format!("stone-rs-{}", std::process::id())).unwrap();
@@ -860,22 +770,21 @@ mod xfer_tests {
     }
 
     #[test]
-    fn copy_recursive_ffi_copies_file_and_tree() {
+    fn copy_tree_copies_file_and_tree() {
         let root = fresh_root();
         // File case.
-        fs::write(root.join("one.wav"), b"1").unwrap();
-        assert!(stone_copy_recursive(
-            cs(&root.join("one.wav")).as_ptr(),
-            cs(&root.join("one_copy.wav")).as_ptr()
-        ));
-        assert_eq!(fs::read(root.join("one_copy.wav")).unwrap(), b"1");
+        let file = root.join("one.wav");
+        let file_copy = root.join("one_copy.wav");
+        fs::write(&file, b"1").unwrap();
+        copy_tree(&file, &file_copy).unwrap();
+        assert_eq!(fs::read(&file_copy).unwrap(), b"1");
         // Tree case.
         let pack = root.join("Pack");
         fs::create_dir_all(pack.join("Sub")).unwrap();
         fs::write(pack.join("k.wav"), b"k").unwrap();
         fs::write(pack.join("Sub").join("s.wav"), b"s").unwrap();
         let dst = root.join("PackCopy");
-        assert!(stone_copy_recursive(cs(&pack).as_ptr(), cs(&dst).as_ptr()));
+        copy_tree(&pack, &dst).unwrap();
         assert_eq!(fs::read(dst.join("k.wav")).unwrap(), b"k");
         assert_eq!(fs::read(dst.join("Sub").join("s.wav")).unwrap(), b"s");
         assert!(pack.exists(), "copy must not remove the source");

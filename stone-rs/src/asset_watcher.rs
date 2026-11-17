@@ -251,49 +251,6 @@ pub extern "C" fn stone_poll_changed_assets() -> i32 {
     len
 }
 
-/// How many paths the watcher currently has registered, and how many changes
-/// are pending, as `registered,changed,dirs`.
-#[no_mangle]
-pub extern "C" fn stone_asset_watcher_state() -> *const c_char {
-    let dirs = watcher()
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|inner| inner.watched_dirs.len())
-        .unwrap_or(0);
-    crate::native_ledger::watcher_reply(format!(
-        "{},{},{}",
-        registered().lock().unwrap().len(),
-        changed().lock().unwrap().len(),
-        dirs
-    ))
-}
-
-/// Queue a change for `path` exactly as the debouncer's thread would.
-///
-/// A PROBE. Driving the real filesystem from a sim would make the fixture
-/// depend on inotify latency and on a writable asset directory; this reaches
-/// the queue through the same store the background thread writes. Returns false
-/// when the path is not a registered asset, so a fixture cannot queue something
-/// `poll` would drop anyway.
-#[no_mangle]
-pub extern "C" fn stone_asset_watcher_inject_change(path: *const c_char) -> bool {
-    if path.is_null() {
-        return false;
-    }
-    let Ok(path_str) = (unsafe { CStr::from_ptr(path) }).to_str() else {
-        return false;
-    };
-    let Some(key) = asset_key(Path::new(path_str)) else {
-        return false;
-    };
-    if !registered().lock().unwrap().contains_key(&key) {
-        return false;
-    }
-    changed().lock().unwrap().insert(key);
-    true
-}
-
 #[no_mangle]
 pub extern "C" fn stone_changed_asset_path(index: i32) -> *const c_char {
     if index < 0 {
@@ -350,13 +307,20 @@ mod tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         let path = CString::new(path.to_str().unwrap()).unwrap();
         stone_watch_asset(path.as_ptr());
-        let state = unsafe { CStr::from_ptr(stone_asset_watcher_state()) }
-            .to_str()
-            .unwrap();
+        let dirs = watcher()
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(0, |inner| inner.watched_dirs.len());
+        let state = (
+            registered().lock().unwrap().len(),
+            changed().lock().unwrap().len(),
+            dirs,
+        );
         let enabled = std::env::var_os("STONE_HOT_RELOAD").is_some_and(|value| value != "0");
         assert_eq!(
             state,
-            if enabled { "1,0,1" } else { "0,0,0" },
+            if enabled { (1, 0, 1) } else { (0, 0, 0) },
             "disabled hot reload must create neither registrations nor OS watches"
         );
     }

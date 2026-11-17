@@ -41,7 +41,6 @@ struct Publications {
     // statistics or changing the configured cap must not refund it.
     frame_uploaded_bytes: usize,
     frame_upload_time: Duration,
-    hold: usize,
 }
 
 thread_local! {
@@ -166,9 +165,6 @@ impl Publications {
         mut publish: impl FnMut(Arc<Decoded>) -> Duration,
     ) -> Result<(), String> {
         self.selection_wait_us = 0;
-        if self.hold > 0 {
-            return Ok(());
-        }
         let budget = self.pending.budget;
         if site == "flush" || (site == "pump" && budget == 0) {
             return self.stream(site, budget, &exists, &mut publish);
@@ -345,23 +341,6 @@ pub extern "C" fn stone_image_ready(handle: u64) -> bool {
 #[no_mangle]
 pub extern "C" fn stone_image_pending_bytes() -> i64 {
     PUBLICATIONS.with(|p| i64::try_from(p.borrow().pending_bytes()).unwrap_or(i64::MAX))
-}
-
-// Stop publishing decoded images while held, so a request submitted under a
-// hold stays PENDING. Balanced: an unmatched release panics.
-#[no_mangle]
-pub extern "C" fn stone_image_publication_hold(hold: bool) {
-    PUBLICATIONS.with(|p| {
-        let mut p = p.borrow_mut();
-        if hold {
-            p.hold += 1;
-        } else {
-            p.hold = p
-                .hold
-                .checked_sub(1)
-                .expect("balanced image publication hold");
-        }
-    });
 }
 
 #[cfg(test)]
@@ -655,13 +634,6 @@ mod tests {
         ]);
         p.receive(result(1, 4));
         p.receive(result(2, 4));
-        p.hold = 1;
-        assert!(
-            p.select("flush", |_| true).unwrap().is_empty(),
-            "a publication hold also blocks Required flushes"
-        );
-        assert_eq!(p.frame_uploaded_bytes, 0);
-        p.hold = 0;
         let tx = image_decode::test_completions(2);
         let mut order = Vec::new();
         p.select_with(

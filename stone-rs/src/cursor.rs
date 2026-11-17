@@ -15,12 +15,7 @@ use crate::image_data::with_image_data;
 static CURSOR_VISIBLE: AtomicBool = AtomicBool::new(true);
 
 thread_local! {
-    static CURSORS: RefCell<HashMap<u64, StoredCursor>> = RefCell::new(HashMap::new());
-}
-
-struct StoredCursor {
-    cursor: Cursor,
-    raw: usize,
+    static CURSORS: RefCell<HashMap<u64, Cursor>> = RefCell::new(HashMap::new());
 }
 
 /// Which cursor id the game wants active. ImGui may temporarily replace SDL's
@@ -43,10 +38,9 @@ fn set_default_cursor() {
 fn store_cursor(cursor: Cursor) -> u64 {
     let id = crate::handles::mint(Class::Cursor);
     cursor.set();
-    let raw = unsafe { sdl2::sys::SDL_GetCursor() as usize };
     set_desired_cursor(id);
     CURSORS.with(|c| {
-        c.borrow_mut().insert(id, StoredCursor { cursor, raw });
+        c.borrow_mut().insert(id, cursor);
     });
     id
 }
@@ -67,12 +61,7 @@ pub fn reapply_cursor_state() {
     if desired == 0 {
         set_default_cursor();
     } else {
-        let found = CURSORS.with(|c| {
-            c.borrow()
-                .get(&desired)
-                .map(|stored| stored.cursor.set())
-                .is_some()
-        });
+        let found = CURSORS.with(|c| c.borrow().get(&desired).map(Cursor::set).is_some());
         if !found {
             ::log::error!(target: "CURSOR",
                 "reapply_cursor_state: desired cursor {} is no longer live", desired);
@@ -85,12 +74,6 @@ pub fn reapply_cursor_state() {
     unsafe {
         sdl2::sys::SDL_ShowCursor(visible as i32);
     }
-}
-
-/// Returns whether the OS cursor is currently visible.
-#[no_mangle]
-pub extern "C" fn stone_is_cursor_visible() -> bool {
-    unsafe { sdl2::sys::SDL_ShowCursor(-1) == 1 }
 }
 
 /// Create a cursor from an asset path or image file. Returns cursor_id (0 = error).
@@ -168,8 +151,8 @@ pub extern "C" fn stone_set_system_cursor(cursor_type: c_int) -> u64 {
 #[no_mangle]
 pub extern "C" fn stone_set_cursor(cursor_id: u64) {
     CURSORS.with(|c| {
-        if let Some(stored) = c.borrow().get(&cursor_id) {
-            stored.cursor.set();
+        if let Some(cursor) = c.borrow().get(&cursor_id) {
+            cursor.set();
             set_desired_cursor(cursor_id);
         } else {
             ::log::warn!(target: "CURSOR", "stone_set_cursor: invalid cursor id {}", cursor_id);
@@ -182,19 +165,6 @@ pub extern "C" fn stone_set_cursor(cursor_id: u64) {
 pub extern "C" fn stone_reset_cursor() {
     set_default_cursor();
     set_desired_cursor(0);
-}
-
-/// Which registered cursor SDL is actually displaying, 0 for the default or
-/// an unregistered cursor installed by another subsystem.
-#[no_mangle]
-pub extern "C" fn stone_active_cursor() -> u64 {
-    let raw = unsafe { sdl2::sys::SDL_GetCursor() as usize };
-    CURSORS.with(|c| {
-        c.borrow()
-            .iter()
-            .find_map(|(id, stored)| (stored.raw == raw).then_some(*id))
-            .unwrap_or(0)
-    })
 }
 
 /// Live custom-cursor ids (`native_ledger`).

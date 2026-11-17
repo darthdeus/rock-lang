@@ -314,11 +314,6 @@ thread_local! {
     static REPLY: RefCell<Option<CString>> = const { RefCell::new(None) };
 }
 
-/// The shared reply buffer, for a sibling module publishing a string reading.
-pub(crate) fn watcher_reply(s: String) -> *const c_char {
-    reply(s)
-}
-
 fn reply(s: String) -> *const c_char {
     REPLY.with(|b| {
         let c = match CString::new(s) {

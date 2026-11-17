@@ -1574,14 +1574,6 @@ impl DebugGl {
         self.gl.object_label(identifier, name, Some(label));
         self.check_error("object_label");
     }
-
-    /// # Safety
-    /// Requires the [OpenGL call contract](Self#safety).
-    pub unsafe fn get_object_label(&self, identifier: u32, name: u32) -> String {
-        let label = self.gl.get_object_label(identifier, name);
-        self.check_error("get_object_label");
-        label
-    }
 }
 
 /// Compile a single GL shader stage. Context-free helper: caller passes the
