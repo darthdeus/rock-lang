@@ -41,35 +41,13 @@ fn highlights_all_occurrences_of_a_local() {
     let path = dir.path().join("main.rock");
     let mut ws = bone_ws(&path, SRC);
 
-    // Cursor on the `count` declaration (line 1, the `c` at char 8).
-    let hl = highlight_at(&mut ws, &path, 1, 8);
-
-    let mut lines: Vec<u32> = hl.iter().map(|h| h.range.start.line).collect();
-    lines.sort();
-    assert_eq!(
-        lines,
-        vec![1, 2, 3],
-        "expected `count` highlighted on lines 1/2/3, got {hl:?}"
-    );
-    // Each highlight covers the 5-char identifier `count`.
-    for h in &hl {
-        assert_eq!(
-            h.range.end.character - h.range.start.character,
-            5,
-            "range: {h:?}"
-        );
+    for (line, column) in [(1, 8), (3, 10)] {
+        let highlights = highlight_at(&mut ws, &path, line, column);
+        let mut lines: Vec<_> = highlights.iter().map(|h| h.range.start.line).collect();
+        lines.sort();
+        assert_eq!(lines, [1, 2, 3], "cursor at {line}:{column}");
+        for h in &highlights {
+            assert_eq!(h.range.end.character - h.range.start.character, 5, "{h:?}");
+        }
     }
-}
-
-#[test]
-fn highlight_from_a_use_site_finds_the_same_set() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("main.rock");
-    let mut ws = bone_ws(&path, SRC);
-
-    // Cursor on the `count` use inside print() (line 3, char 10).
-    let hl = highlight_at(&mut ws, &path, 3, 10);
-    let mut lines: Vec<u32> = hl.iter().map(|h| h.range.start.line).collect();
-    lines.sort();
-    assert_eq!(lines, vec![1, 2, 3], "from a use site, got {hl:?}");
 }
