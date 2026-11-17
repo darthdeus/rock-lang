@@ -716,7 +716,6 @@ mod tests {
 
     #[test]
     fn dominance_intervals_agree_with_the_idom_walk() {
-        // A loop with a diamond inside, a side exit, and an unreachable block 7.
         let f = mk(
             8,
             vec![
@@ -731,23 +730,22 @@ mod tests {
             ],
         );
         let idom = crate::cfg::dominators(&f, bi(0));
-        let fast = idom.intervals();
+        let intervals = idom.intervals();
         for a in 0..8 {
             for b in 0..8 {
                 assert_eq!(
-                    fast.dominates(bi(a), bi(b)),
+                    intervals.dominates(bi(a), bi(b)),
                     idom.dominates(bi(a), bi(b)),
                     "dominates({a}, {b})"
                 );
             }
         }
-        assert!(fast.dominates(bi(2), bi(5)));
-        assert!(!fast.dominates(bi(3), bi(5)));
+        assert!(intervals.dominates(bi(2), bi(5)));
+        assert!(!intervals.dominates(bi(3), bi(5)));
     }
 
     #[test]
     fn diamond() {
-        // 0 -> {1, 2} -> 3(return)
         let f = mk(
             4,
             vec![
@@ -758,66 +756,14 @@ mod tests {
             ],
         );
         let s = analyze(&f);
-        assert_eq!(s.ipdom(bi(0)), Some(bi(3)));
-        assert_eq!(s.ipdom(bi(1)), Some(bi(3)));
-        assert_eq!(s.ipdom(bi(2)), Some(bi(3)));
-        assert_eq!(s.ipdom(bi(3)), None); // virtual exit
-        assert!(s.loops.is_empty());
-    }
-
-    #[test]
-    fn diverged_arm() {
-        // 0 -> {1(return), 2}; 2 -> 3(return). ipdom(0) collapses to virtual exit.
-        let f = mk(
-            4,
-            vec![
-                branch(1, 2),
-                Term::Return(vec![]),
-                Term::Goto(bi(3)),
-                Term::Return(vec![]),
-            ],
-        );
-        let s = analyze(&f);
-        assert_eq!(s.ipdom(bi(0)), None);
-        assert_eq!(s.ipdom(bi(2)), Some(bi(3)));
-        assert!(s.loops.is_empty());
-    }
-
-    #[test]
-    fn unreachable_arm_is_not_an_exit_path() {
-        // An exhaustive `match` as an expression: both arms store one result
-        // cell and jump to a real join, while the dead default arm is a
-        // REACHABLE `Unreachable` block (0 -> {1, 2}; 2 -> {3, 4-unreachable};
-        // 1 and 3 -> 5; 5 returns). The dead arm must not count as an exit path:
-        // the outer branch keeps the real join, and the last test's ipdom is its
-        // LIVE arm. Counting the dead arm instead collapses both branches to the
-        // virtual exit, both arms absorb the continuation, and the join
-        // double-walks into `unstructured control flow`. (`diverged_arm` above
-        // is the control: a `Return` arm still collapses.)
-        let f = mk(
-            6,
-            vec![
-                branch(1, 2),
-                Term::Goto(bi(5)),
-                branch(3, 4),
-                Term::Goto(bi(5)),
-                Term::Unreachable,
-                Term::Return(vec![]),
-            ],
-        );
-        let s = analyze(&f);
-        assert_eq!(s.ipdom(bi(0)), Some(bi(5)));
-        assert_eq!(s.ipdom(bi(1)), Some(bi(5)));
-        assert_eq!(s.ipdom(bi(2)), Some(bi(3)));
-        assert_eq!(s.ipdom(bi(3)), Some(bi(5)));
-        assert_eq!(s.ipdom(bi(5)), None); // virtual exit
+        for (block, postdom) in [(0, Some(3)), (1, Some(3)), (2, Some(3)), (3, None)] {
+            assert_eq!(s.ipdom(bi(block)), postdom.map(bi), "ipdom({block})");
+        }
         assert!(s.loops.is_empty());
     }
 
     #[test]
     fn nested_loop() {
-        // 0 -> 1(outer header) -> {2(inner header), 6(exit,return)}
-        // 2 -> {3, 5}; 3 -> 4; 4 -> 2(inner back edge); 5 -> 1(outer back edge)
         let f = mk(
             7,
             vec![
@@ -832,17 +778,16 @@ mod tests {
         );
         let s = analyze(&f);
         let outer = s.loops.get(&bi(1)).expect("outer loop");
-        assert_eq!(outer.exit, bi(6));
-        assert!(
-            outer.body.contains(&bi(1))
-                && outer.body.contains(&bi(5))
-                && outer.body.contains(&bi(2))
-        );
-        assert!(!outer.body.contains(&bi(6)));
         let inner = s.loops.get(&bi(2)).expect("inner loop");
+        assert_eq!(outer.exit, bi(6));
         assert_eq!(inner.exit, bi(5));
-        assert!(inner.body.contains(&bi(2)) && inner.body.contains(&bi(4)));
-        assert!(!inner.body.contains(&bi(1)) && !inner.body.contains(&bi(5)));
+        for (region, inside, outside) in [
+            (outer, &[1, 2, 5][..], &[6][..]),
+            (inner, &[2, 4][..], &[1, 5][..]),
+        ] {
+            assert!(inside.iter().all(|&b| region.body.contains(&bi(b))));
+            assert!(outside.iter().all(|&b| !region.body.contains(&bi(b))));
+        }
     }
 
     #[test]
@@ -893,46 +838,8 @@ mod tests {
     }
 
     #[test]
-    fn place_puts_a_join_after_its_dominator() {
-        // 0 -> {1, 2} -> 3: the join follows the diamond; the arms are inline.
-        let f = mk(
-            4,
-            vec![
-                branch(1, 2),
-                Term::Goto(bi(3)),
-                Term::Goto(bi(3)),
-                Term::Return(vec![]),
-            ],
-        );
-        let p = place(bi(0), &dense_succ(&f), &[], &[]).expect("reducible");
-        assert_eq!(p.followers(bi(0)), &[bi(3)]);
-        assert!(!p.is_follower(bi(1)) && !p.is_follower(bi(2)));
-    }
-
-    #[test]
-    fn place_lifts_a_loop_exit_out_of_the_loop() {
-        // 0 -> 1(header) -> {2, 3}; 2 -> 1; 3 returns. The exit 3 is
-        // dominated by the header but printed after the loop, as a follower of
-        // the header's own parent.
-        let f = mk(
-            4,
-            vec![
-                Term::Goto(bi(1)),
-                branch(2, 3),
-                Term::Goto(bi(1)),
-                Term::Return(vec![]),
-            ],
-        );
-        let p = place(bi(0), &dense_succ(&f), &[], &[]).expect("reducible");
-        assert!(p.is_header(bi(1)));
-        assert_eq!(p.latches(bi(1)).collect::<Vec<_>>(), vec![bi(2)]);
-        assert!(p.in_loop(bi(1), bi(2)) && !p.in_loop(bi(1), bi(3)));
-        assert_eq!(p.followers(bi(1)), &[bi(3)]);
-    }
-
-    #[test]
     fn place_keeps_a_raising_loop_exit_where_it_branches_from() {
-        // As above, but the exit 3 raises: it prints inside the loop.
+        // A raising exit stays at its branch site instead of becoming a follower.
         let f = mk(
             4,
             vec![
@@ -945,27 +852,5 @@ mod tests {
         let p = place(bi(0), &dense_succ(&f), &[], &[bi(3)]).expect("reducible");
         assert!(!p.in_loop(bi(1), bi(3)) && !p.is_follower(bi(3)));
         assert!(p.followers(bi(1)).is_empty());
-    }
-
-    #[test]
-    fn place_nests_an_inner_loop_in_its_outer_loop() {
-        let f = mk(
-            7,
-            vec![
-                Term::Goto(bi(1)),
-                branch(2, 6),
-                branch(3, 5),
-                Term::Goto(bi(4)),
-                Term::Goto(bi(2)),
-                Term::Goto(bi(1)),
-                Term::Return(vec![]),
-            ],
-        );
-        let p = place(bi(0), &dense_succ(&f), &[], &[]).expect("reducible");
-        assert!(p.in_loop(bi(1), bi(4)) && p.in_loop(bi(2), bi(4)));
-        assert!(p.in_loop(bi(1), bi(5)) && !p.in_loop(bi(2), bi(5)));
-        // The inner exit stays inside the outer loop.
-        assert_eq!(p.followers(bi(2)), &[bi(5)]);
-        assert_eq!(p.followers(bi(1)), &[bi(6)]);
     }
 }

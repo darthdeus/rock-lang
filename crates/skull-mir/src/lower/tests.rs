@@ -93,12 +93,12 @@ fn uniform_values_rejects_missing_and_unresolved_inference_records() {
     );
 }
 
+const REFERENCE_CONTEXT_SRC: &str =
+    "fn target(x: int) -> int { x }\nfn holder() { let f = target }\n";
+
 #[test]
 fn first_class_context_skips_value_ref_facts_and_updates() {
-    let (ws, mid) = spec_ws(
-        "fn target(x: int) -> int { x }\n\
-         fn holder() { let f = target }\n",
-    );
+    let (ws, mid) = spec_ws(REFERENCE_CONTEXT_SRC);
     let target = spec_fn(&ws, mid, "target");
     let holder = spec_fn(&ws, mid, "holder");
     let owner = BodyOwner::Function(holder.func);
@@ -126,10 +126,7 @@ fn first_class_context_skips_value_ref_facts_and_updates() {
 
 #[test]
 fn updating_one_shared_reference_context_uses_copy_on_write() {
-    let (mut ws, mid) = spec_ws(
-        "fn target(x: int) -> int { x }\n\
-         fn holder() { let f = target }\n",
-    );
+    let (mut ws, mid) = spec_ws(REFERENCE_CONTEXT_SRC);
     let target = spec_fn(&ws, mid, "target");
     let holder = spec_fn(&ws, mid, "holder");
     let owner = BodyOwner::Function(holder.func);

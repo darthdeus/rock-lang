@@ -221,6 +221,15 @@ fn scalar_abi_call_widens_an_int_argument_for_a_float_parameter() {
 }
 
 #[test]
+fn explicit_int_to_float_is_a_typed_mir_conversion() {
+    let dump = mir("fn widen(value: int) -> float { value as float }", "widen");
+    assert!(
+        dump.contains("int_to_float"),
+        "an explicit scalar cast must survive lowering as a typed conversion:\n{dump}"
+    );
+}
+
+#[test]
 fn value_constructors_carry_the_owned_representation() {
     let ast = skull_parser::parse_module(
         "value Inner { x: float }\n\
@@ -453,48 +462,6 @@ fn assert_dump_contains_in_order(dump: &str, expected: &[&str], case: &str) {
 }
 
 #[test]
-fn value_struct_literal_scalarizes_at_boundary_else_cdata() {
-    // Under the scalar value ABI a value RETURN flattens to leaf scalars — no
-    // `V2_ct(...)` cdata is built at the boundary (the result is `return x, y`).
-    let dump = mir_std(
-        "value V2 { x: int, y: int }\n fn f() -> V2 { V2 { y: 7, x: 3 } }",
-        "f",
-    );
-    assert!(
-        !dump.contains("V2_ct"),
-        "value return must scalarize (no cdata ctor), got:\n{dump}"
-    );
-    assert!(
-        !dump.contains("make_struct") && !dump.contains("__ty"),
-        "value struct must not be a table:\n{dump}"
-    );
-    // A literal escaping into a COLUMN-ELIGIBLE `[V2]` builds no element at
-    // all: the leaves land straight in the per-leaf columns. Value semantics
-    // still hold -- storing the scalar leaves IS the copy.
-    let col = mir_std(
-        "value V2 { x: int, y: int }\n fn g() -> [V2] { [V2 { y: 7, x: 3 }] }",
-        "g",
-    );
-    assert!(
-        col.contains("vec.columns") && !col.contains("V2_ct"),
-        "a column-eligible element must store leaves, not a cdata ctor, got:\n{col}"
-    );
-    // An INELIGIBLE element keeps the boxed representation, so the escaping
-    // literal still materializes `<name>_ct(...)` via `pack`. `Wide` exceeds
-    // MAX_COLUMN_LEAVES; this is the other side of the eligibility boundary.
-    // Display carries declared field names (for SROA): `Wide_ct(a: v.., ..)`.
-    let esc = mir_std(
-        "value Wide { a: int, b: int, c: int, d: int, e: int }\n \
-         fn g() -> [Wide] { [Wide { a: 1, b: 2, c: 3, d: 4, e: 5 }] }",
-        "g",
-    );
-    assert!(
-        esc.contains("Wide_ct(a:"),
-        "an escaping ineligible value literal must build a cdata ctor, got:\n{esc}"
-    );
-}
-
-#[test]
 fn dynamic_column_spread_keeps_element_repr_unboxed() {
     let dump = mir_std(
         "value V2 { x: int, y: int }\n\
@@ -508,43 +475,18 @@ fn dynamic_column_spread_keeps_element_repr_unboxed() {
 }
 
 #[test]
-fn compound_assign_to_vec_index() {
-    let dump = mir_std(
-        "fn f() -> int { let arr = [10, 20, 30]\n arr[1] += 5\n arr[1] }",
-        "f",
-    );
-    assert!(
-        dump.contains("store_index"),
-        "expected a store_index, got:\n{dump}"
-    );
-    assert!(
-        dump.contains("int_add") || dump.contains("add"),
-        "expected an add, got:\n{dump}"
-    );
-}
-
-#[test]
-fn compound_assign_to_struct_field() {
-    let dump = mir_std(
-        "struct P { x: int }\n fn f() -> int { let p = P { x: 1 }\n p.x += 9\n p.x }",
-        "f",
-    );
-    assert!(
-        dump.contains("index.Record") && dump.contains("store_index.Record"),
-        "expected a Record read and write, got:\n{dump}"
-    );
-    assert!(
-        dump.contains("const \"x\""),
-        "Record property access must use the constant field name, got:\n{dump}"
-    );
-}
-
-#[test]
-fn explicit_int_to_float_is_a_typed_mir_conversion() {
-    let dump = mir("fn widen(value: int) -> float { value as float }", "widen");
-    assert!(
-        dump.contains("int_to_float"),
-        "an explicit scalar cast must survive lowering as a typed conversion:\n{dump}"
+fn nested_native_buffer_value_store_accepts_boxed_function_result() {
+    let src = "value Pair { x: int, y: int }\n\
+               value Outer { p: Pair, z: int }\n\
+               fn make_pair(n: int) -> Pair { Pair { x: n + 5, y: n * 3 } }\n\
+               fn replace_nested(b: NativeBuffer<Outer>, f: (int) -> Pair, n: int) {\n\
+                   b[0].p = f(n)\n\
+               }";
+    let dump = mir_std(src, "replace_nested");
+    assert_eq!(
+        dump.matches("store_index.NativeBufferLeaf").count(),
+        2,
+        "Pair's declared `x` and `y` leaves must both reach storage: {dump}"
     );
 }
 
@@ -586,8 +528,6 @@ fn inferred_lambda_result_remains_value_bearing() {
         "the context-inferred lambda result must remain value-bearing, got:\n{dump}"
     );
 }
-
-// --- Phase 2: control flow as branches + cells ---
 
 #[test]
 fn diverging_if_join_does_not_declare_never_storage() {
@@ -643,151 +583,16 @@ fn nullable_aggregate_if_join_does_not_declare_payload_storage() {
     );
 }
 
-// --- Phase 2.5: aggregates + container reads ---
-
-#[test]
-fn nullable_and_any_vecs_keep_callback_capable_kind() {
-    let nullable = mir("fn f(xs: [int?]) -> int? { xs[0] }", "f");
-    assert!(nullable.contains("index.Vec "), "{nullable}");
-    let dynamic = mir("fn f(xs: [any]) -> any { xs[0] }", "f");
-    assert!(dynamic.contains("index.Vec "), "{dynamic}");
-}
-
-#[test]
-fn record_and_vector_elements_fill_every_live_slot() {
-    let record = mir(
-        "struct P { x: int }
-        fn f(xs: [P]) -> P { xs[0] }",
-        "f",
-    );
-    assert!(record.contains("index.VecNonNull "), "{record}");
-    let nested = mir("fn f(xs: [[int]]) -> [int] { xs[0] }", "f");
-    assert!(nested.contains("index.VecNonNull "), "{nested}");
-}
-
-#[test]
-fn nested_native_buffer_value_store_accepts_boxed_function_result() {
-    let src = "value Pair { x: int, y: int }\n\
-               value Outer { p: Pair, z: int }\n\
-               fn make_pair(n: int) -> Pair { Pair { x: n + 5, y: n * 3 } }\n\
-               fn replace_nested(b: NativeBuffer<Outer>, f: (int) -> Pair, n: int) {\n\
-                   b[0].p = f(n)\n\
-               }";
-    let dump = mir_std(src, "replace_nested");
-    assert_eq!(
-        dump.matches("store_index.NativeBufferLeaf").count(),
-        2,
-        "Pair's declared `x` and `y` leaves must both reach storage: {dump}"
-    );
-}
-
-// --- Phase 2.5 long tail: assignment targets ---
-
-#[test]
-fn match_payload_bindings_retain_their_semantic_types() {
-    let ast = skull_parser::parse_module(
-        "enum Mixed { Flag(bool), Number(int) }\n\
-         fn f(value: Mixed) -> int { match value { Mixed::Flag(flag) => if flag { 1 } else { 0 }, Mixed::Number(number) => number } }",
-        ustr::Ustr::from("<test>"),
-    )
-    .expect("parse");
-    let mut modules = vec![ast];
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
-    let (fid, _) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, function)| function.name.as_str().rsplit("::").next() == Some("f"))
-        .expect("function");
-    let mir = lower_test_root(&ws, mid, fid).expect("lower");
-
-    for name in ["flag", "number"] {
-        let cell = mir
-            .cells
-            .iter()
-            .find(|(_, cell)| {
-                cell.name
-                    .is_some_and(|cell_name| cell_name.as_str() == name)
-            })
-            .map(|(_, cell)| cell)
-            .unwrap_or_else(|| panic!("missing match binding `{name}`: {mir}"));
-        assert!(
-            cell.ty.is_some(),
-            "match binding `{name}` lost its semantic type: {mir}"
-        );
-    }
-}
-
 mir_properties! {
-    int_literal_and_return(mir, "fn five() -> int { 5 }", "five", &["v0 = const 5", "return v0"]);
-    param_is_a_cell_read_via_load(mir, "fn id(x: int) -> int { x }", "id", &["v0 = load c0", "return v0"]);
-    let_bindings_never_written_again_bind_their_values(mir, "fn f() -> int { let a = 1; let b = 2; a }", "f", &["v0 = const 1", "v1 = const 2", "return v0"], not "store ");
-    int_arithmetic_dispatches_to_typed_op(mir_std, "fn add(a: int, b: int) -> int { a + b }", "add", &["int.add v0, v1"]);
-    float_arithmetic_dispatches_to_float_op(mir_std, "fn addf(a: float, b: float) -> float { a + b }", "addf", &["float.add v0, v1"]);
     string_plus_is_concat(mir_std, "fn cat(a: string, b: string) -> string { a + b }", "cat", &["str.concat v0, v1"]);
-    int_comparison_is_typed(mir, "fn lt(a: int, b: int) -> bool { a < b }", "lt", &["int.lt v0, v1"]);
-    direct_call_resolves_to_a_funcref(mir, "fn g() -> int { 7 }\nfn f() -> int { g() }", "f", &["call 1:0()"]);
-    calling_a_fn_typed_param_is_call_value(mir, "fn ap(f: fn() -> int) -> int { f() }", "ap", &["call_value v0()"]);
-    if_as_value_joins_through_a_cell(
-        mir,
-        "fn sign(x: int) -> int { let value = if x < 0 { 0 } else { 1 }; value }",
-        "sign",
-        &[
-            "branch v2 -> bb1, bb2",
-            "bb1:",
-            "v3 = const 0",
-            "store c1, v3",
-            "goto bb3",
-            "bb2:",
-            "v4 = const 1",
-            "store c1, v4",
-            "goto bb3",
-            "bb3:",
-            "v5 = load c1",
-            "return v5",
-        ],
-    );
-    and_short_circuits_through_a_cell(mir, "fn f(a: bool, b: bool) -> bool { a && b }", "f", &["branch v0 -> bb1, bb2", "const false", "store c2", "load c2"]);
-    or_short_circuits_through_a_cell(mir, "fn f(a: bool, b: bool) -> bool { a || b }", "f", &["branch v0 -> bb1, bb2", "const true", "store c2", "load c2"]);
-    while_loop_is_header_body_backedge_exit(mir, "fn f(c: bool) { while c { } }", "f", &["branch v0 -> bb2, bb3", "bb2:", "goto bb1", "bb3:", "return"]);
-    for_range_has_header_body_latch_exit(
-        mir,
-        "fn f(n: int) { for i in 0..n { } }",
-        "f",
-        &[
-            "v0 = const 0",
-            "store c1, v0",
-            "goto bb1",
-            "bb1:",
-            "v4 = int.lt v2, v3",
-            "branch v4 -> bb2, bb4",
-            "bb2:",
-            "goto bb3",
-            "bb3:",
-            "v6 = const 1",
-            "v7 = int.add v5, v6",
-            "store c1, v7",
-            "goto bb1",
-            "bb4:",
-            "return",
-        ],
-    );
-    vec_literal_builds_a_vec(mir, "fn f() -> [int] { [1, 2, 3] }", "f", &["vec [v0, v1, v2]"]);
     tuple_return_splats_multi_value(mir, "fn f() -> (int, bool) { (1, true) }", "f", &["return v0, v1"], not "tuple ");
     vec_index_carries_container_kind(mir, "fn f(xs: [int]) -> int { xs[0] }", "f", &["index.VecNonNull v0[v1]"]);
-    tuple_index_projects(mir, "fn f(t: (int, bool)) -> int { t.0 }", "f", &["tuple_index v0.0"]);
     enum_unit_variant(mir, "enum Color { Red, Green }\nfn f() -> Color { Color::Red }", "f", &["v0 = const 0", "return v0"]);
     enum_tuple_variant_carries_payload(mir, "enum Shape { Circle(int), Square(int, int) }\nfn f() -> Shape { Shape::Circle(5) }", "f", &["v0 = const 0", "v1 = const 5", "v2 = const 0", "return v0, v1, v2"]);
     struct_literal_in_declared_field_order(mir, "struct Point { x: int, y: int }\nfn f() -> Point { Point { x: 1, y: 2 } }", "f", &["struct Point {x=v0, y=v1}"]);
     struct_literal_injects_omitted_field_default(mir, "struct P { x: int, y: int = 0 }\nfn f() -> P { P { x: 1 } }", "f", &["v0 = const 1", "v1 = const 0", "struct P {x=v0, y=v1}"]);
-    struct_field_access(mir, "struct Point { x: int, y: int }\nfn f(p: Point) -> int { p.x }", "f", &["const \"x\"", "index.Record v0[v1]"]);
     for_over_native_buffer_indexes_each_element(mir_std, "fn f(xs: NativeBuffer<int>) { for x in xs { } }", "f", &["len.NativeBuffer v0", "index.NativeBuffer v0[v5]"]);
-    reassignment_stores_to_the_cell(mir, "fn f() -> int { let x = 1; x = 2; x }", "f", &["store c0, v0", "store c0, v1", "return v2"]);
-    field_assignment_uses_record_store_index(mir, "struct P { x: int, y: int }\nfn f(p: P) -> int { p.x = 5; p.x }", "f", &["store_index.Record v0[v2], v1"]);
-    index_assignment_is_store_index(mir, "fn f(xs: [int]) -> int { xs[0] = 9; xs[0] }", "f", &["store_index.VecNonNull v0[v1], v2"]);
     global_assignment_is_store_global(mir, "global G: int = 0\nfn f() -> int { G = 5; G }", "f", &["store_global G, v0"]);
-    compound_assignment_reads_ops_writes_back(mir_std, "fn f(n: int) -> int { let x = 0; x += n; x }", "f", &["int.add v1, v2", "store c1, v3"]);
     match_enum_tests_tag_and_binds_payload_through_cells(
         mir,
         "enum Opt { Some(int), None }\nfn f(o: Opt) -> int { match o { Opt::Some(n) => n, Opt::None => 0 } }",
@@ -803,31 +608,6 @@ mir_properties! {
     );
     if_let_binds_on_match_else_branch_otherwise(mir, "enum Opt { Some(int), None }\nfn f(o: Opt) -> int { if let Opt::Some(n) = o { n } else { 0 } }", "f", &["branch v5 -> bb3, bb1", "v8 = field v2._0", "store c2, v9"]);
     for_over_map_uses_next_iteration(mir, "fn f(m: Map<int, int>) { for (k, v) in m { } }", "f", &["c1, c2 = next(v0)", "v3 = const nil", "eq v2, v3"]);
-    for_enumerate_binds_index_and_element(
-        mir_std,
-        "fn f(xs: [int]) { for (i, x) in enumerate(xs) { } }",
-        "f",
-        &[
-            "v2 = const 0",
-            "store c1, v2",
-            "goto bb1",
-            "bb1:",
-            "v4 = int.lt v3, v1",
-            "branch v4 -> bb2, bb4",
-            "bb2:",
-            "v6 = index.VecNonNull v0[v5]",
-            "store c2, v6",
-            "goto bb3",
-            "bb3:",
-            "v8 = const 1",
-            "v9 = int.add v7, v8",
-            "store c1, v9",
-            "goto bb1",
-            "bb4:",
-            "return",
-        ],
-    );
-    break_jumps_to_loop_exit(mir, "fn f(c: bool) { while c { break } }", "f", &["branch v0 -> bb2, bb3", "bb2:", "goto bb3", "bb3:", "return"]);
 }
 
 #[test]

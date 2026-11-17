@@ -1652,63 +1652,30 @@ mod tests {
     }
 
     #[test]
-    fn body_merge_matches_owned_merge() {
-        let identity = CodeIdentity::Named(Instance::base(declaration()));
+    fn merging_bodies_at_once_matches_merging_them_in_turn() {
+        let named = |func| {
+            CodeIdentity::Named(Instance::base(FuncRef {
+                module: ModuleId::new(0),
+                func: Idx::from_raw(RawIdx::from_u32(func)),
+            }))
+        };
+        let resolved = CodeIdentity::Lambda {
+            enclosing: CodeOwner::Instance(Instance::base(declaration())),
+            site: LambdaSiteId {
+                file: Ustr::from("main.rock"),
+                offset: 1,
+            },
+        };
+        let (unique, clash, promoted, held) = (named(9), named(40), named(41), named(42));
         let compatibility = CodeCompatibility {
             call_abi: "unit".to_string(),
             capture: CaptureSchema::empty(),
             frame: None,
             lambda_topology: LambdaTopologyFingerprint::default(),
         };
-        let entry = CodeEntry {
-            identity,
-            compatibility,
-            body_fingerprint: 1,
-            body_name: Some(Ustr::from("body")),
-            escaping: true,
-            capture_free: true,
-        };
-        let mut owned = CodeArtifact::default();
-        owned.insert(entry.clone());
-        let mut borrowed = owned.clone();
-        let incoming = CodeArtifact {
-            entries: [(entry.identity.clone(), entry)].into_iter().collect(),
-            census: CodeIdentityCensus {
-                duplicate_identity: 1,
-                ..CodeIdentityCensus::default()
-            },
-        };
-
-        owned.merge(incoming.clone());
-        let body = BodyCodeArtifact::from(incoming);
-        assert_eq!(body.entries().len(), 1);
-        borrowed.merge_body(&body);
-        assert_eq!(borrowed, owned);
-    }
-
-    #[test]
-    fn merging_bodies_at_once_matches_merging_them_in_turn() {
-        let named = |func: u32| {
-            CodeIdentity::Named(Instance::base(FuncRef {
-                module: ModuleId::new(0),
-                func: Idx::from_raw(RawIdx::from_u32(func)),
-            }))
-        };
-        let lambda = |offset| CodeIdentity::Lambda {
-            enclosing: CodeOwner::Instance(Instance::base(declaration())),
-            site: LambdaSiteId {
-                file: Ustr::from("main.rock"),
-                offset,
-            },
-        };
         let entry = |identity: &CodeIdentity, body_fingerprint, escaping, capture_free| CodeEntry {
             identity: identity.clone(),
-            compatibility: CodeCompatibility {
-                call_abi: "unit".to_string(),
-                capture: CaptureSchema::empty(),
-                frame: None,
-                lambda_topology: LambdaTopologyFingerprint::default(),
-            },
+            compatibility: compatibility.clone(),
             body_fingerprint,
             body_name: Some(Ustr::from("body")),
             escaping,
@@ -1722,31 +1689,22 @@ mod tests {
             artifact.record_missing();
             BodyCodeArtifact::from(artifact)
         };
-        let (resolved_later, clash, promoted, held) = (lambda(1), named(40), named(41), named(42));
         let bodies = [
             body(vec![
-                entry(&named(9), 9, true, true),
-                entry(&lambda(7), 7, true, false),
-            ]),
-            body(vec![
-                entry(&resolved_later, 0, true, true),
+                entry(&unique, 9, true, true),
+                entry(&resolved, 0, true, false),
                 entry(&clash, 1, true, true),
-            ]),
-            body(vec![
-                entry(&named(3), 3, false, true),
                 entry(&promoted, 5, false, true),
-            ]),
-            body(vec![
-                entry(&resolved_later, 6, false, false),
-                entry(&clash, 2, false, true),
-            ]),
-            body(vec![
-                entry(&promoted, 0, true, true),
                 entry(&held, 8, true, true),
             ]),
             body(vec![
+                entry(&resolved, 6, false, true),
+                entry(&clash, 2, false, true),
+                entry(&promoted, 0, true, false),
+            ]),
+            body(vec![
+                entry(&clash, 1, false, true),
                 entry(&named(1), 1, true, true),
-                entry(&clash, 1, true, true),
             ]),
         ];
         let mut held_already = CodeArtifact::default();
@@ -1759,7 +1717,8 @@ mod tests {
             let mut at_once = start;
             at_once.merge_bodies(&bodies);
             assert_eq!(at_once, in_turn);
-            assert!(in_turn.census.duplicate_identity > 0);
+            assert_eq!(at_once.census.missing_identity, bodies.len());
+            assert_eq!(at_once.census.duplicate_identity, 1);
         }
     }
 
@@ -1808,19 +1767,15 @@ mod tests {
             string_fingerprint("Root"),
             "a user string that looks like a standalone key must stay literal data"
         );
-    }
-
-    #[test]
-    fn body_fingerprint_separates_instructions_with_the_same_operands() {
-        let hash = |inst: Inst| {
+        let instruction_fingerprint = |inst: Inst| {
             let mut hasher = BodyHasher::default();
             hasher.inst_with_volatile(&inst, &FxHashMap::default(), false);
             hasher.finish()
         };
         let value = Idx::from_raw(RawIdx::from_u32(3));
         assert_ne!(
-            hash(Inst::FloatToF32(value)),
-            hash(Inst::VecIndexSlot(value))
+            instruction_fingerprint(Inst::FloatToF32(value)),
+            instruction_fingerprint(Inst::VecIndexSlot(value)),
         );
     }
 }

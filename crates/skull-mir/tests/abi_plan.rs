@@ -81,10 +81,10 @@ fn main() {
 }
 ";
 
-/// A generic call is planned from the concrete instance that the graph retained;
-/// there is no declaration-shaped shared body left to supply a second ABI.
+/// Concrete generic and declaration-shaped bodies each own the ABI used by
+/// their callers.
 #[test]
-fn a_concrete_generic_body_states_its_owned_abi() {
+fn concrete_and_base_bodies_state_their_owned_abi() {
     let ws = checked_ws_of(SRC);
     let ident = func_ref(&ws, "ident");
     let main = func_ref(&ws, "main");
@@ -115,17 +115,7 @@ fn a_concrete_generic_body_states_its_owned_abi() {
         &spec,
         "the generic call must consume ident<V2>'s owned plan"
     );
-}
-
-/// The control: a non-generic declaration has exactly one emitted body, and the
-/// base plan already states its scalarized ABI. Without this arm the test
-/// above could pass on an oracle that answers only for generics.
-#[test]
-fn a_non_generic_body_states_its_abi_on_its_base_instance() {
-    let ws = checked_ws_of(SRC);
     let shift = func_ref(&ws, "shift");
-
-    let (scx, bodies) = lower_test_roots(&ws, &[shift]);
     let concrete = bodies
         .plans
         .get(&Instance::base(shift))
@@ -435,13 +425,12 @@ fn a_representation_id_cannot_cross_build_arenas() {
 }
 
 #[test]
-fn container_storage_uses_the_element_representation_plan() {
-    let ws = checked_ws_of("nobox value V2 { x: float, y: float }");
+fn container_storage_uses_the_owned_element_representation() {
+    let ws = checked_ws_of("value V2 { x: float, y: float }\nenum E { A(int), B(int), None }\n");
     let arena = RepArena::default();
-    let element = nominal(&ws, "V2");
     let ty = MonoTy::App {
         ctor: MonoCtor::Array,
-        params: vec![element],
+        params: vec![nominal(&ws, "V2")],
     };
     let plan = ContainerPlan::for_type(
         &ws,
@@ -459,47 +448,12 @@ fn container_storage_uses_the_element_representation_plan() {
     assert_eq!(elem.name, key(&ws, "V2"));
     assert!(!elem.nullable);
     assert_eq!(elem.representation(), plan.element_rep());
-}
-
-#[test]
-fn container_columns_carry_owned_element_identity() {
-    let ws = checked_ws_of("value V2 { x: float, y: float }\nfn main() { print(\"ok\") }\n");
-    let scx = ScalarCtx::new(&ws);
-    let arena = RepArena::default();
-    let ty = MonoTy::App {
-        ctor: MonoCtor::Array,
-        params: vec![nominal(&ws, "V2")],
-    };
-    let plan = ContainerPlan::for_type(&ws, scx.target(), &arena, ContainerFamily::Vec, &ty)
-        .expect("value vector must have a container plan");
-    let elem = plan
-        .column_elem(&arena)
-        .expect("V2 vector must use columns");
-    assert_eq!(elem.representation(), plan.element_rep());
     assert!(
         plan.element_shape(&arena).is_some(),
         "the owned element plan must expose its shape"
     );
-}
-
-#[test]
-fn element_rep_plan_owns_ffi_column_admission() {
-    let ws = checked_ws_of("value V2 { x: float, y: float }\nenum E { A(int), B(int), None }\n");
-    let arena = RepArena::default();
-    let vec_ty = MonoTy::App {
-        ctor: MonoCtor::Array,
-        params: vec![nominal(&ws, "V2")],
-    };
-    let vec = ContainerPlan::for_type(
-        &ws,
-        bone_core::hir::FnBackend::Lua,
-        &arena,
-        ContainerFamily::Vec,
-        &vec_ty,
-    )
-    .expect("V2 vector must have a container plan");
     assert!(
-        arena.get(vec.element_rep()).column_eligible(),
+        arena.get(plan.element_rep()).column_eligible(),
         "the owned V2 plan must admit a nonzero column population"
     );
 
@@ -922,10 +876,15 @@ fn nominal_value_storage_is_owned_by_the_rep_plan() {
 }
 
 #[test]
-fn nominal_value_leaf_paths_are_owned_by_the_rep_plan() {
+fn nominal_value_paths_and_addresses_are_owned_by_the_rep_plan() {
     let ws =
         checked_ws_of("value V2 { x: float, y: float }\nvalue Boxed { child: V2, tag: int }\n");
     let arena = RepArena::default();
+    let expected = vec![
+        Ustr::from("child.x"),
+        Ustr::from("child.y"),
+        Ustr::from("tag"),
+    ];
     assert_eq!(
         arena
             .nominal_value_leaf_paths_required(
@@ -934,12 +893,19 @@ fn nominal_value_leaf_paths_are_owned_by_the_rep_plan() {
                 key(&ws, "Boxed"),
             )
             .expect("the required leaf-path plan must exist"),
-        vec![
-            Ustr::from("child.x"),
-            Ustr::from("child.y"),
-            Ustr::from("tag")
-        ]
+        expected
     );
+    let addresses = arena
+        .nominal_leaf_addresses(&ws, bone_core::hir::FnBackend::Lua, key(&ws, "Boxed"))
+        .expect("the concrete value plan must own nonzero leaf addresses");
+    assert_eq!(
+        addresses
+            .iter()
+            .map(|address| address.path)
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert!(addresses.iter().all(|address| address.stride > 0));
 }
 
 #[test]
@@ -958,23 +924,6 @@ fn nominal_value_presence_flags_are_owned_by_the_rep_plan() {
             .expect("the required presence plan must exist"),
         vec![true, false, false, false]
     );
-}
-
-#[test]
-fn nominal_leaf_addresses_are_owned_by_the_rep_plan() {
-    let ws = checked_ws_of("value V2 { x: float, y: float }\nvalue Boxed { pos: V2, tag: int }\n");
-    let arena = RepArena::default();
-    let addresses = arena
-        .nominal_leaf_addresses(&ws, bone_core::hir::FnBackend::Lua, key(&ws, "Boxed"))
-        .expect("the concrete value plan must own nonzero leaf addresses");
-    assert_eq!(
-        addresses
-            .iter()
-            .map(|address| address.path)
-            .collect::<Vec<_>>(),
-        vec![Ustr::from("pos.x"), Ustr::from("pos.y"), Ustr::from("tag")]
-    );
-    assert!(addresses.iter().all(|address| address.stride > 0));
 }
 
 #[test]
