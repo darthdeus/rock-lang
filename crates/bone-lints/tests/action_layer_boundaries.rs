@@ -8,39 +8,6 @@ fn findings(file: &str, src: &str, lint: &str) -> Vec<Finding> {
     crate::lint(&[(file, src)], &options, true)
 }
 
-fn quoted_after(line: &str, marker: &str) -> Option<String> {
-    let start = line.find(marker)? + marker.len();
-    let end = line[start..].find('"')?;
-    Some(line[start..start + end].to_owned())
-}
-
-/// One ACT declaration line as its lowercased bare name and registered key.
-fn action_declaration(line: &str) -> Option<(String, String)> {
-    let rest = ["global ", "const "]
-        .iter()
-        .find_map(|keyword| line.strip_prefix(keyword))?;
-    let name = rest.strip_prefix("ACT_")?.split_once(':')?.0.to_lowercase();
-    Some((name, quoted_after(line, "= app_action(\"")?))
-}
-
-#[test]
-fn the_action_census_reads_both_declaration_spellings() {
-    assert_eq!(
-        action_declaration("global ACT_MOVE: AppAction = app_action(\"move\")"),
-        Some(("move".to_owned(), "move".to_owned()))
-    );
-    assert_eq!(
-        action_declaration("const ACT_MOVE: AppAction = app_action(\"move\")"),
-        Some(("move".to_owned(), "move".to_owned())),
-        "a const ACT_* declaration is still an action declaration"
-    );
-    assert_eq!(action_declaration("global OTHER: int = 1"), None);
-    assert_eq!(
-        action_declaration("    global ACT_MOVE: AppAction = app_action(\"move\")"),
-        None
-    );
-}
-
 #[test]
 fn action_caller_census_has_a_nonzero_population_and_exact_zero_names() {
     let src = r#"
