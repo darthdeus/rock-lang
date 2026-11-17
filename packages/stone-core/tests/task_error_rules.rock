@@ -140,3 +140,46 @@ fn poller_wait_callback_error_kills_the_task_before_abandoning_it() {
     assert(task.state.get() == null, "the failed task is abandoned")
     assert_eq(poller.entry_count, 0)
 }
+
+struct TaskResumeErrorProbe {
+    resumes: int = 0,
+    defers: int = 0,
+    killed: int = 0,
+}
+
+co fn task_resume_error_child(probe: TaskResumeErrorProbe) -> Coroutine<Wait> {
+    defer { probe.defers += 1 }
+    on_killed { probe.killed += 1 }
+    while true { yield wait_frame() }
+}
+
+co fn task_resume_error_parent(probe: TaskResumeErrorProbe) -> Coroutine<Wait> {
+    on_resume {
+        probe.resumes += 1
+        if probe.resumes == 2 { error("task parent resume failed") }
+    }
+    await task_resume_error_child(probe)
+}
+
+@test
+fn poller_parent_resume_error_cancels_child_exactly_once() {
+    let probe = TaskResumeErrorProbe {}
+    let poller = CoroutinePoller { clock: task_clock_new() }
+    let task = run(poller, task_resume_error_parent(probe))
+    assert_eq(probe.resumes, 1)
+
+    task_error_logs_begin()
+    task_clock_advance(poller.clock, 1.0 / 60.0)
+    coroutine_poller_update(poller)
+    let logs = task_error_logs_end()
+
+    assert(logs.contains("task parent resume failed"))
+    assert_eq(probe.defers, 1)
+    assert_eq(probe.killed, 1)
+    assert(task.state.get() == null)
+    assert_eq(poller.entry_count, 0)
+    coroutine_poller_update(poller)
+    kill(task.coroutine)
+    assert_eq(probe.defers, 1)
+    assert_eq(probe.killed, 1)
+}

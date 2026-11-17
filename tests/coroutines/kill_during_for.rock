@@ -1,9 +1,8 @@
 // A co fn suspended inside `for v in gen()` holds the only reference to the
 // generator the loop constructed. Killing (or erroring) the outer coroutine
 // there must run the generator's cleanup too -- its defers and on_killed --
-// the same way an `await`ed inner is killed with its outer. Leaving the loop
-// does not kill the generator, and a loop over an existing handle does not
-// own it.
+// the same way an `await`ed inner is killed with its outer. Early exits
+// also kill the generator; a loop over an existing handle does not own it.
 
 @intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
     local ok = pcall(f)
@@ -80,8 +79,7 @@ fn test_exhausted_generator_is_not_killed_again() {
     print("{last} {LOG.join(",")}")
 }
 
-// `break` leaves the generator suspended, as it does in a plain fn; a later
-// kill of the outer does not reach it either.
+// `break` cancels the temporary immediately, before the next yield.
 co fn outer_breaks() -> Coroutine<int> {
     for v in gen() {
         break
@@ -89,8 +87,8 @@ co fn outer_breaks() -> Coroutine<int> {
     yield 7
 }
 
-@test(output = "7 []")
-fn test_break_leaves_the_generator_alone() {
+@test(output = "7 [inner-defer,inner-killed]")
+fn test_break_kills_the_generator() {
     LOG = []
     let c = outer_breaks()
     let v = c.resume() ?? -1
@@ -114,4 +112,92 @@ fn test_named_handle_is_not_owned_by_the_loop() {
     let v = c.resume() ?? -1
     kill(c)
     print("{v} [{LOG.join(",")}]")
+}
+
+fn return_from_loop() -> int {
+    defer { LOG.push("outer-defer") }
+    for v in gen() {
+        defer { LOG.push("body-defer") }
+        return v
+    }
+    return -1
+}
+
+@test
+fn test_plain_return_cleans_up_in_scope_order() {
+    LOG = []
+    assert_eq(return_from_loop(), 1)
+    assert_eq(LOG.join(","), "body-defer,inner-defer,inner-killed,outer-defer")
+}
+
+co fn return_from_co_loop() -> Coroutine<int, int> {
+    defer { LOG.push("outer-defer") }
+    for v in gen() {
+        yield v
+        return 42
+    }
+    return -1
+}
+
+@test
+fn test_coroutine_return_cancels_once() {
+    LOG = []
+    let c = return_from_co_loop()
+    c.resume()
+    c.resume()
+    assert_eq(c.result(), 42)
+    kill(c)
+    assert_eq(LOG.join(","), "inner-defer,inner-killed,outer-defer")
+}
+
+@test
+fn test_plain_break_kills_but_named_break_and_return_leave_handle_live() {
+    LOG = []
+    for v in gen() { break }
+    assert_eq(LOG.join(","), "inner-defer,inner-killed")
+    LOG = []
+    let g = gen()
+    for v in g { break }
+    assert_eq(g.resume(), 2)
+    assert_eq(named_return(g), 3)
+    assert_eq(g.status(), "suspended")
+    assert_eq(LOG.len(), 0)
+    kill(g)
+    assert_eq(LOG.len(), 2)
+}
+
+fn named_return(g: Coroutine<int>) -> int {
+    for v in g { return v }
+    return -1
+}
+
+@test
+fn test_continue_and_inner_break_leave_outer_generator_live() {
+    LOG = []
+    let sum = 0
+    for v in gen() {
+        for w in gen() { break }
+        sum += v
+        continue
+    }
+    assert_eq(sum, 6)
+    assert_eq(LOG.join(","), "inner-defer,inner-killed,inner-defer,inner-killed,inner-defer,inner-killed,inner-defer")
+}
+
+fn return_from_nested_loops() -> int {
+    for v in gen() {
+        defer { LOG.push("outer-body-defer") }
+        for w in gen() {
+            defer { LOG.push("inner-body-defer") }
+            return v + w
+        }
+    }
+    return -1
+}
+
+@test
+fn test_nested_return_cleans_every_owned_loop_in_order() {
+    LOG = []
+    assert_eq(return_from_nested_loops(), 2)
+    assert_eq(LOG.join(","), "inner-body-defer,inner-defer,inner-killed,outer-body-defer,inner-defer,inner-killed")
 }

@@ -273,7 +273,7 @@ impl ContainerKind {
     }
 }
 
-/// Which `co fn` lifecycle hook a [`Inst::CoroHook`] registers. All three
+/// Which `co fn` lifecycle hook a [`Inst::CoroHook`] registers. The hooks
 /// relocate to the constructor as `s.__on_<kind> = function() .. end`; they
 /// differ only in WHEN the runtime fires them — `on_resume` at the top of each
 /// `resume()`, `on_killed` from `kill()`, `on_hot_reload` from
@@ -284,6 +284,8 @@ pub enum CoroHookKind {
     OnResume,
     OnKilled,
     OnHotReload,
+    /// Compiler-generated walk of generators owned by active for-loops.
+    OnOwnedHotReload,
 }
 
 impl CoroHookKind {
@@ -293,6 +295,7 @@ impl CoroHookKind {
             CoroHookKind::OnResume => "__on_resume",
             CoroHookKind::OnKilled => "__on_killed",
             CoroHookKind::OnHotReload => "__on_hot_reload",
+            CoroHookKind::OnOwnedHotReload => "__on_owned_hot_reload",
         }
     }
 }
@@ -1528,6 +1531,7 @@ pub const DEFER_CALL: &str = "__rock_defer_call";
 /// The coroutine runtime's kill (stdlib `__rock_coroutine_kill`, and its JS
 /// port), called as a global by cleanup the lowering synthesizes.
 pub const CORO_KILL: &str = "__rock_coroutine_kill";
+pub const CORO_HOT_RELOAD: &str = "__rock_coroutine_fire_hot_reload";
 
 impl MirFunc {
     /// Decode a field-read location, without establishing purity or ownership.

@@ -1,0 +1,105 @@
+global RELOADS: [string] = []
+global GENERATOR: Coroutine<int>? = null
+
+co fn reload_generator() -> Coroutine<int> {
+    on_hot_reload { RELOADS.push("generator") }
+    yield 1
+    yield 2
+}
+
+co fn reload_loop() -> Coroutine<int> {
+    on_hot_reload { RELOADS.push("outer") }
+    for v in reload_generator() { yield v }
+    yield 3
+}
+
+@test
+fn owned_generator_hears_reload_only_while_active() {
+    RELOADS = []
+    let c = reload_loop()
+    c.resume()
+    fire_hot_reload(c)
+    assert_eq(RELOADS.join(","), "outer,generator")
+    c.resume()
+    c.resume()
+    RELOADS = []
+    fire_hot_reload(c)
+    assert_eq(RELOADS.join(","), "outer")
+    kill(c)
+}
+
+co fn reload_nested() -> Coroutine<int> {
+    on_hot_reload { RELOADS.push("nested") }
+    for v in reload_generator() {
+        for w in reload_generator() { yield v + w }
+    }
+}
+
+co fn reload_await_loop() -> Coroutine<int> {
+    on_hot_reload { RELOADS.push("await") }
+    await reload_nested()
+}
+
+@test
+fn reload_walks_awaits_and_nested_owned_loops() {
+    RELOADS = []
+    let c = reload_await_loop()
+    c.resume()
+    fire_hot_reload(c)
+    assert_eq(RELOADS.join(","), "await,nested,generator,generator")
+    kill(c)
+}
+
+co fn reload_named(g: Coroutine<int>) -> Coroutine<int> {
+    for v in g { yield v }
+}
+
+@test
+fn named_generator_does_not_hear_owners_reload() {
+    RELOADS = []
+    let g = reload_generator()
+    let c = reload_named(g)
+    c.resume()
+    fire_hot_reload(c)
+    assert_eq(RELOADS.len(), 0)
+    kill(c)
+    kill(g)
+}
+
+co fn reload_kills_owner() -> Coroutine<int> {
+    on_hot_reload {
+        RELOADS.push("outer")
+        if let c = GENERATOR { kill(c) }
+    }
+    for v in reload_generator() { yield v }
+}
+
+@test
+fn outer_reload_hook_cancelling_owner_stops_generator_notification() {
+    RELOADS = []
+    let c = reload_kills_owner()
+    GENERATOR = c
+    c.resume()
+    fire_hot_reload(c)
+    assert_eq(RELOADS.join(","), "outer")
+    assert_eq(c.status(), "dead")
+}
+
+co fn reload_before_and_after_loop() -> Coroutine<int> {
+    yield 0
+    for v in reload_generator() { break }
+    yield 3
+}
+
+@test
+fn reload_ignores_unstarted_and_broken_loop_generators() {
+    RELOADS = []
+    let c = reload_before_and_after_loop()
+    fire_hot_reload(c)
+    c.resume()
+    fire_hot_reload(c)
+    c.resume()
+    fire_hot_reload(c)
+    assert_eq(RELOADS.len(), 0)
+    kill(c)
+}

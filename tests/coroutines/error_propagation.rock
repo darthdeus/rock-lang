@@ -70,3 +70,59 @@ fn error_after_self_cancellation_does_not_repeat_cleanup() {
     assert_eq(c.status(), "dead")
     assert(!c.completed())
 }
+
+global RESUMES: int = 0
+
+co fn awaited_cleanup() -> Coroutine<int> {
+    defer { CLEANUP += "child-defer;" }
+    on_killed { CLEANUP += "child-killed;" }
+    yield 1
+    yield 2
+}
+
+co fn failing_parent_resume() -> Coroutine<int> {
+    on_resume {
+        RESUMES += 1
+        if RESUMES == 2 { error("parent resume failure") }
+    }
+    await awaited_cleanup()
+}
+
+co fn failing_parent_resume_with_cleanup() -> Coroutine<int> {
+    defer { CLEANUP += "parent-defer;" }
+    on_killed { CLEANUP += "parent-killed;" }
+    on_resume {
+        RESUMES += 1
+        if RESUMES == 2 { error("parent resume failure") }
+    }
+    await awaited_cleanup()
+}
+
+@test
+fn parent_resume_error_cancels_awaited_child_without_parent_cleanup() {
+    CLEANUP = ""
+    RESUMES = 0
+    let c = failing_parent_resume()
+    assert_eq(c.resume(), 1)
+    let message = caught(() => { let _ = c.resume() })
+    assert(message.contains("parent resume failure"))
+    assert_eq(CLEANUP, "child-defer;child-killed;")
+    assert_eq(c.status(), "dead")
+    assert(!c.completed())
+    assert(c.resume() == null)
+    kill(c)
+    assert_eq(CLEANUP, "child-defer;child-killed;")
+}
+
+@test
+fn parent_resume_error_cleans_up_child_before_parent_once() {
+    CLEANUP = ""
+    RESUMES = 0
+    let c = failing_parent_resume_with_cleanup()
+    c.resume()
+    let message = caught(() => { let _ = c.resume() })
+    assert(message.contains("parent resume failure"))
+    assert_eq(CLEANUP, "child-defer;child-killed;parent-defer;parent-killed;")
+    kill(c)
+    assert_eq(CLEANUP, "child-defer;child-killed;parent-defer;parent-killed;")
+}

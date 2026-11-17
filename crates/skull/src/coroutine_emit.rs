@@ -252,12 +252,7 @@ fn emit_constructor(
         ));
     }
 
-    let step_call = if !defer_keys.is_empty()
-        || lowered
-            .hooks
-            .iter()
-            .any(|(kind, _)| *kind == CoroHookKind::OnKilled)
-    {
+    let step_call = if lowered.needs_protected_resume {
         format!("__rock_coroutine_resume({step_name}, s, arg)")
     } else {
         format!("{step_name}(s, arg)")

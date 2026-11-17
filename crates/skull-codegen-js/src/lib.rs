@@ -360,9 +360,7 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
     (
         "fire_hot_reload",
         1,
-        Emission::Template(
-            "(function(c){ while (c && c.__state >= 0) { if (c.__on_hot_reload) __rock_call(c.__on_hot_reload,c); c = c.__inner; } })($1)",
-        ),
+        Emission::Template("__rock_coroutine_fire_hot_reload($1)"),
     ),
     (
         "error",
@@ -1498,6 +1496,13 @@ function __rock_coroutine_resume(f, s, arg) {
     s.__inner = null;
     if (inner) __rock_defer_push(() => __rock_coroutine_kill(inner));
     __rock_defer_unwind(base, e);
+  }
+}
+function __rock_coroutine_fire_hot_reload(c) {
+  while (c && c.__state >= 0) {
+    if (c.__on_hot_reload) __rock_call(c.__on_hot_reload, c);
+    if (c.__on_owned_hot_reload) __rock_call(c.__on_owned_hot_reload, c);
+    c = c.__inner;
   }
 }
 function __rock_coroutine_kill(c) {

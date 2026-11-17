@@ -1518,7 +1518,7 @@ impl<'a> Builder<'a> {
         self.branch_to(cmp, body_bb, exit);
 
         self.cur = body_bb;
-        self.loop_targets.push((latch, exit, self.defers.len())); // continue -> latch (runs the step)
+        self.push_loop_target(latch, exit, self.defers.len()); // continue -> latch (runs the step)
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
         self.goto_if_open(latch);

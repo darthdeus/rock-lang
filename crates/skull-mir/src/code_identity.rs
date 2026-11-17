@@ -1078,6 +1078,7 @@ impl BodyHasher {
             CoroHookKind::OnResume => 0,
             CoroHookKind::OnKilled => 1,
             CoroHookKind::OnHotReload => 2,
+            CoroHookKind::OnOwnedHotReload => 3,
         });
     }
 

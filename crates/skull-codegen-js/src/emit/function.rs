@@ -201,6 +201,7 @@ pub(super) fn is_runtime_global(name: &str) -> bool {
     name == skull_mir::mir::DEFER_PUSH
         || name == skull_mir::mir::DEFER_POP
         || name == skull_mir::mir::CORO_KILL
+        || name == skull_mir::mir::CORO_HOT_RELOAD
 }
 
 /// Deterministic JS name for a co-emitted callee -- the SHARED mangle keyed on

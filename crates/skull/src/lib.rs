@@ -647,9 +647,8 @@ function __rock_defer_call(f, ...)
 end
 -- Only coroutines with terminal cleanup protect their step. On failure,
 -- feed their pending cleanup into the ordinary function defer unwinder.
-function __rock_coroutine_resume(f, s, arg)
-  local ok, val = xpcall(f, __rock_defer_mark, s, arg)
-  if ok then return val end
+-- Keep cleanup closures off the successful resume path: UCLO aborts traces.
+local function __rock_coroutine_failed(s, val)
   local base = __rock_defer_top
   if s.__state == -1 then return __rock_defer_finish(base, false, val) end
   s.__state = -1
@@ -666,6 +665,18 @@ function __rock_coroutine_resume(f, s, arg)
   s.__inner = nil
   if inner then __rock_defer_push(function() __rock_coroutine_kill(inner) end) end
   return __rock_defer_finish(base, false, val)
+end
+function __rock_coroutine_resume(f, s, arg)
+  local ok, val = xpcall(f, __rock_defer_mark, s, arg)
+  if ok then return val end
+  return __rock_coroutine_failed(s, val)
+end
+function __rock_coroutine_fire_hot_reload(c)
+  while c and c.__state >= 0 do
+    if c.__on_hot_reload then c.__on_hot_reload(c) end
+    if c.__on_owned_hot_reload then c.__on_owned_hot_reload(c) end
+    c = c.__inner
+  end
 end
 -- An xpcall message handler: the raise-site traceback of an error that was
 -- unwound through a defer, else the current one.

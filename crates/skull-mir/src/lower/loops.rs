@@ -4,15 +4,35 @@
 use super::*;
 
 impl<'a> Builder<'a> {
-    /// The innermost `(continue_target, break_target, defer depth)`.
+    /// The innermost targets and the defer depth left by this exit.
     pub(crate) fn loop_target(
         &self,
         what: &str,
     ) -> Result<(Idx<Block>, Idx<Block>, usize), CompilerError> {
         self.loop_targets
             .last()
-            .copied()
+            .map(|&(cont, brk, cont_depth, break_depth)| {
+                (
+                    cont,
+                    brk,
+                    if what == "break" {
+                        break_depth
+                    } else {
+                        cont_depth
+                    },
+                )
+            })
             .ok_or_else(|| gap(format!("`{what}` outside a loop")))
+    }
+
+    pub(crate) fn push_loop_target(
+        &mut self,
+        cont: Idx<Block>,
+        brk: Idx<Block>,
+        break_depth: usize,
+    ) {
+        self.loop_targets
+            .push((cont, brk, self.defers.len(), break_depth));
     }
 
     /// `while cond { body }`: header (test) -> body -> back-edge to header; exit
@@ -42,7 +62,7 @@ impl<'a> Builder<'a> {
         }
 
         self.cur = body_bb;
-        self.loop_targets.push((header, exit, self.defers.len()));
+        self.push_loop_target(header, exit, self.defers.len());
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
         if self.is_open() {
@@ -264,7 +284,17 @@ impl<'a> Builder<'a> {
         };
         let it_cell = self.f.new_cell(Some(crate::names::ustr("__it")));
         self.store_cell(it_cell, it_val);
+        let owned = self.head_constructs_coroutine(iter_expr);
         let owned_flag = self.own_loop_coroutine(iter_expr, it_cell);
+        if owned {
+            self.defers.push(vec![(
+                iter_expr,
+                stmt::PendingDefer::LoopCoroutine {
+                    iterator: it_cell,
+                    flag: owned_flag,
+                },
+            )]);
+        }
 
         // next returns `(bool, E)` / `(bool, A, B, ...)`. The shape is read under
         // the concrete callee the emitted call will carry, not the caller's own:
@@ -390,10 +420,13 @@ impl<'a> Builder<'a> {
         };
         let mut idx = 0;
         self.bind_pattern_slot(vars, &elem_slot, &loads, &mut idx)?;
-        self.loop_targets.push((header, exit, self.defers.len()));
+        self.push_loop_target(header, exit, self.defers.len() - usize::from(owned));
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
         self.goto_if_open(header);
+        if owned {
+            self.defers.pop();
+        }
         self.cur = exit;
         if let Some(flag) = owned_flag {
             let off = self.emit_cur(Inst::Const(Lit::Bool(false)));
@@ -402,14 +435,8 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// A co fn `for` whose head constructs a coroutine (`for v in gen()`)
-    /// holds the only reference to it, so a kill or error of the enclosing
-    /// coroutine while it is suspended in the loop must take the generator
-    /// down too, or the generator's defers and `on_killed` never run. That is
-    /// registered as a terminal cleanup guarded by a frame flag, which is
-    /// cleared on every path out of the loop. Leaving the loop (break,
-    /// exhaustion) does not kill: a plain fn does not either. A head that
-    /// names an existing handle is not owned by the loop and is left alone.
+    /// Retain an owned generator's cleanup while its coroutine is suspended.
+    /// The same flag is cleared by early-exit cleanup and natural exhaustion.
     fn own_loop_coroutine(
         &mut self,
         iter_expr: Idx<Expr>,
@@ -424,25 +451,71 @@ impl<'a> Builder<'a> {
         self.store_cell(flag, on);
         let saved_cur = self.cur;
         let entry = self.f.new_block();
-        let b_kill = self.f.new_block();
-        let b_done = self.f.new_block();
         self.cur = entry;
-        let fv = self.emit_cur(Inst::Load(flag));
-        self.branch_to(fv, b_kill, b_done);
-        self.cur = b_kill;
-        let off = self.emit_cur(Inst::Const(Lit::Bool(false)));
-        self.store_cell(flag, off);
-        let it = self.emit_cur(Inst::Load(it_cell));
+        self.kill_loop_coroutine(it_cell, Some(flag));
+        self.f.set_term(self.cur, Term::Return(Vec::new()));
+        self.cur = saved_cur;
+        self.f.coro_defers.push((flag, entry));
+        self.register_owned_reload(flag, it_cell);
+        Some(flag)
+    }
+
+    fn register_owned_reload(&mut self, flag: Idx<Cell>, iterator: Idx<Cell>) {
+        let saved = self.cur;
+        let entry = self.f.new_block();
+        let reload = self.f.new_block();
+        let done = self.f.new_block();
+        self.cur = entry;
+        let active = self.emit_cur(Inst::Load(flag));
+        self.branch_to(active, reload, done);
+        self.cur = reload;
+        let it = self.emit_cur(Inst::Load(iterator));
+        let fire = self.emit_cur(Inst::Global(crate::names::ustr(
+            crate::mir::CORO_HOT_RELOAD,
+        )));
+        self.emit_cur(Inst::CallValue {
+            callee: fire,
+            args: vec![it],
+        });
+        self.f.set_term(self.cur, Term::Goto(done));
+        self.f.set_term(done, Term::Return(Vec::new()));
+        self.cur = saved;
+        if let Some(tail) = self.owned_reload_tail {
+            self.f.set_term(tail, Term::Goto(entry));
+        } else {
+            let lambda = self.emit_cur(Inst::Lambda {
+                params: Vec::new(),
+                entry,
+            });
+            self.emit_cur(Inst::CoroHook {
+                kind: CoroHookKind::OnOwnedHotReload,
+                lambda,
+            });
+        }
+        self.owned_reload_tail = Some(done);
+    }
+
+    pub(crate) fn kill_loop_coroutine(&mut self, iterator: Idx<Cell>, flag: Option<Idx<Cell>>) {
+        let done = flag.map(|flag| {
+            let kill = self.f.new_block();
+            let done = self.f.new_block();
+            let active = self.emit_cur(Inst::Load(flag));
+            self.branch_to(active, kill, done);
+            self.cur = kill;
+            let off = self.emit_cur(Inst::Const(Lit::Bool(false)));
+            self.store_cell(flag, off);
+            done
+        });
+        let it = self.emit_cur(Inst::Load(iterator));
         let kill = self.emit_cur(Inst::Global(crate::names::ustr(crate::mir::CORO_KILL)));
         self.emit_cur(Inst::CallValue {
             callee: kill,
             args: vec![it],
         });
-        self.f.set_term(b_kill, Term::Goto(b_done));
-        self.f.set_term(b_done, Term::Return(Vec::new()));
-        self.cur = saved_cur;
-        self.f.coro_defers.push((flag, entry));
-        Some(flag)
+        if let Some(done) = done {
+            self.f.set_term(self.cur, Term::Goto(done));
+            self.cur = done;
+        }
     }
 
     /// Whether `e` is a direct call of a `co fn`, i.e. a fresh coroutine.
@@ -703,7 +776,7 @@ impl<'a> Builder<'a> {
             let inc = self.int_plus_one(cur);
             self.store_cell(ec, inc);
         }
-        self.loop_targets.push((latch, exit, self.defers.len()));
+        self.push_loop_target(latch, exit, self.defers.len());
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
         self.goto_if_open(latch);
@@ -793,7 +866,7 @@ impl<'a> Builder<'a> {
             None => None,
         };
         self.bind_map_entry(vars, key_cell, val_cell, vv)?;
-        self.loop_targets.push((latch, exit, self.defers.len()));
+        self.push_loop_target(latch, exit, self.defers.len());
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
         self.goto_if_open(latch);
@@ -1035,7 +1108,7 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        self.loop_targets.push((latch, exit, self.defers.len()));
+        self.push_loop_target(latch, exit, self.defers.len());
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
         self.goto_if_open(latch);
@@ -1101,7 +1174,7 @@ impl<'a> Builder<'a> {
         let repr = self.loop_element_snapshot(ty, repr)?;
         let elem = self.pack(repr)?;
         self.bind_for_pattern(&vars, elem);
-        self.loop_targets.push((latch, exit, self.defers.len()));
+        self.push_loop_target(latch, exit, self.defers.len());
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
         self.goto_if_open(latch);

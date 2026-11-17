@@ -1636,6 +1636,7 @@ fn lower_body(
         defers: Vec::new(),
         defer_mode: stmt::DeferMode::for_body(func.is_coroutine, scx.target),
         in_defer_body: false,
+        owned_reload_tail: None,
         resume_arg,
         // A coroutine body emits via `emit_coroutine` before `inline_functions`
         // runs, so it is never spliced -- box value args (see field docs).
@@ -2165,10 +2166,9 @@ struct Builder<'a> {
     cur: Idx<Block>,
     /// raw binding index -> the variable cell it maps to.
     binds: HashMap<u32, Idx<Cell>>,
-    /// Innermost-last stack of `(continue_target, break_target, defer depth)`:
-    /// the depth is `defers.len()` at loop entry, so `break`/`continue` splice
-    /// the defers of every scope they leave.
-    loop_targets: Vec<(Idx<Block>, Idx<Block>, usize)>,
+    /// Innermost-last `(continue target, break target, continue depth, break depth)`.
+    /// A break also leaves the scope owning a temporary loop generator.
+    loop_targets: Vec<(Idx<Block>, Idx<Block>, usize, usize)>,
     /// Break targets some `break` actually jumped to. A `while true` whose exit
     /// was never targeted terminates the statement list (its fall-through is
     /// unreachable), which is what lets a `while true { ... return ... }` co fn
@@ -2187,6 +2187,8 @@ struct Builder<'a> {
     /// True while lowering a `defer` body (inline splice or terminal copy) --
     /// `yield`/`await` inside a defer body is a compile error.
     in_defer_body: bool,
+    /// Last block of the detached walk of active loop-owned generators.
+    owned_reload_tail: Option<Idx<Block>>,
     /// In a `co fn`, the cell that `yield e` evaluates to (the value passed to
     /// the next `resume(arg)`). `None` outside a coroutine.
     resume_arg: Option<Idx<Cell>>,
@@ -2373,6 +2375,7 @@ impl<'a> Builder<'a> {
             defers: Vec::new(),
             defer_mode: stmt::DeferMode::Inline,
             in_defer_body: false,
+            owned_reload_tail: None,
             resume_arg: None,
             // Generated/init bodies never run `inline_functions` -- box value args.
             param_reps: Vec::new(),

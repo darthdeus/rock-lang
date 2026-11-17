@@ -87,6 +87,8 @@ pub struct CoroLowered {
     /// Declared param cells (constructor seeds a state-table field for each).
     pub params: Vec<Idx<Cell>>,
     pub num_states: usize,
+    /// Whether the step needs a terminal-cleanup error boundary.
+    pub needs_protected_resume: bool,
     /// `on_killed`/`on_resume`/`on_hot_reload` hooks peeled to the constructor:
     /// `(kind, detached body entry)`. The body is emitted as its own ordinary
     /// `MirFunc`, just like a closure sibling.
@@ -488,6 +490,20 @@ pub fn transform_coroutine(
             });
         }
     }
+
+    let needs_protected_resume = !step.coro_defers.is_empty()
+        || hooks
+            .iter()
+            .any(|(kind, _)| *kind == CoroHookKind::OnKilled)
+        || (hooks
+            .iter()
+            .any(|(kind, _)| *kind == CoroHookKind::OnResume)
+            && orig_blocks.iter().any(|&bid| {
+                step.blocks[bid]
+                    .insts
+                    .iter()
+                    .any(|&id| matches!(step.insts[id], Inst::CoroSetInner(_)))
+            }));
 
     // 0b. Frame membership is liveness-based with ownership pins (P1):
     // root cells live at a resume point
@@ -945,6 +961,7 @@ pub fn transform_coroutine(
         frame_plan: CoroutineFramePlan::new(frame_cells, frame_slots, spill_values, layout_hash),
         params,
         num_states,
+        needs_protected_resume,
         hooks,
         step_tree: tree,
         step_own: own,

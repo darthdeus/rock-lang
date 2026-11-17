@@ -9,6 +9,11 @@ pub(crate) enum PendingDefer {
     /// Spliced at scope exit only: a global initializer or decorator, or a
     /// backend without unwind support.
     Inline,
+    /// A temporary generator owned by a `for` scope.
+    LoopCoroutine {
+        iterator: Idx<Cell>,
+        flag: Option<Idx<Cell>>,
+    },
     /// A co fn defer: its frame flag guards the splice and the terminal
     /// cleanup copy (`MirFunc::coro_defers`).
     CoFlag(Idx<Cell>),
@@ -236,6 +241,7 @@ impl<'a> Builder<'a> {
             defers: Vec::new(),
             defer_mode: DeferMode::for_body(false, self.call_scx.target),
             in_defer_body: false,
+            owned_reload_tail: None,
             resume_arg: None,
             // A hoisted nested fn is emitted via `emit_nested_fns`, which never
             // runs `inline_functions` -- box value args.
@@ -748,6 +754,9 @@ impl<'a> Builder<'a> {
         pending: PendingDefer,
     ) -> Result<(), CompilerError> {
         match pending {
+            PendingDefer::LoopCoroutine { iterator, flag } => {
+                self.kill_loop_coroutine(iterator, flag);
+            }
             PendingDefer::CoFlag(f) => {
                 let b_body = self.f.new_block();
                 let b_done = self.f.new_block();
