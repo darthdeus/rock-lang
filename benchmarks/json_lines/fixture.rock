@@ -1,0 +1,155 @@
+struct JsonLineLocation {
+    x: float,
+    y: float,
+    z: float,
+    unit: string,
+}
+
+struct JsonLineMeta {
+    source: string,
+    attempt: int,
+    verified: bool,
+    labels: [string],
+}
+
+struct JsonLineRecord {
+    id: int,
+    kind: string,
+    title: string,
+    timestamp: int,
+    enabled: bool,
+    count: int,
+    score: float,
+    ratio: float,
+    location: JsonLineLocation,
+    meta: JsonLineMeta,
+    tags: [string],
+    note: string,
+    samples: [float]?,
+    state: string,
+    source_id: int,
+}
+
+fn required_int(reader: JsonReader, key: string) -> int {
+    return json_reader_field_as_int(reader, key).unwrap()
+}
+
+fn required_float(reader: JsonReader, key: string) -> float {
+    return json_reader_field_as_float(reader, key).unwrap()
+}
+
+fn required_bool(reader: JsonReader, key: string) -> bool {
+    return json_reader_field_as_bool(reader, key).unwrap()
+}
+
+fn required_string(reader: JsonReader, key: string) -> string {
+    return json_reader_field_as_str(reader, key).unwrap()
+}
+
+fn required_reader(reader: JsonReader, key: string) -> JsonReader {
+    return json_reader_field(reader, key).unwrap()
+}
+
+fn read_strings(reader: JsonReader) -> [string] {
+    let array = json_reader_as_array(reader).unwrap()
+    let values: [string] = []
+    for item in array {
+        values.push(json_reader_as_str(item).unwrap())
+    }
+    return values
+}
+
+fn checksum_string(value: string) -> float {
+    return value.len() as float
+}
+
+fn checksum_strings(values: [string]) -> float {
+    let result = 0.0
+    for value in values {
+        result = result + checksum_string(value)
+    }
+    return result
+}
+
+fn decode_record(reader: JsonReader) -> JsonLineRecord {
+    let location_reader = required_reader(reader, "location")
+    let location = JsonLineLocation {
+        x: required_float(location_reader, "x"),
+        y: required_float(location_reader, "y"),
+        z: required_float(location_reader, "z"),
+        unit: required_string(location_reader, "unit"),
+    }
+
+    let meta_reader = required_reader(reader, "meta")
+    let meta = JsonLineMeta {
+        source: required_string(meta_reader, "source"),
+        attempt: required_int(meta_reader, "attempt"),
+        verified: required_bool(meta_reader, "verified"),
+        labels: read_strings(required_reader(meta_reader, "labels")),
+    }
+
+    let samples: [float]? = null
+    if let sample_reader = json_reader_field(reader, "samples") {
+        let array = json_reader_as_array(sample_reader).unwrap()
+        let values: [float] = []
+        for item in array {
+            values.push(json_reader_as_float(item).unwrap())
+        }
+        samples = values
+    }
+
+    return JsonLineRecord {
+        id: required_int(reader, "id"),
+        kind: required_string(reader, "kind"),
+        title: required_string(reader, "title"),
+        timestamp: required_int(reader, "timestamp"),
+        enabled: required_bool(reader, "enabled"),
+        count: required_int(reader, "count"),
+        score: required_float(reader, "score"),
+        ratio: required_float(reader, "ratio"),
+        location,
+        meta,
+        tags: read_strings(required_reader(reader, "tags")),
+        note: required_string(reader, "note"),
+        samples,
+        state: required_string(reader, "state"),
+        source_id: required_int(reader, "source_id"),
+    }
+}
+
+fn checksum_record(record: JsonLineRecord) -> float {
+    let checksum = record.id as float + checksum_string(record.kind) + checksum_string(record.title)
+        + record.timestamp as float + (if record.enabled { 1.0 } else { 0.0 })
+        + record.count as float + record.score + record.ratio
+        + record.location.x + record.location.y + record.location.z
+        + checksum_string(record.location.unit)
+        + checksum_string(record.meta.source) + record.meta.attempt as float
+        + (if record.meta.verified { 1.0 } else { 0.0 })
+        + checksum_strings(record.meta.labels) + checksum_strings(record.tags)
+        + checksum_string(record.note) + checksum_string(record.state)
+        + record.source_id as float
+    if let samples = record.samples {
+        for sample in samples { checksum = checksum + sample }
+    }
+    return checksum
+}
+
+@nomangle fn json_lines_validate(lines: [string]) -> int {
+    let checksum = 0
+    for line in lines {
+        let reader = json_reader_decode(line).unwrap()
+        checksum = checksum + json_reader_field_as_int(reader, "id").unwrap()
+    }
+    return checksum
+}
+
+@nomangle fn json_lines_records(lines: [string]) -> float {
+    let checksum = 0.0
+    for line in lines {
+        let reader = json_reader_decode(line).unwrap()
+        checksum = checksum + checksum_record(decode_record(reader))
+    }
+    return checksum
+}
+
+fn main() {}

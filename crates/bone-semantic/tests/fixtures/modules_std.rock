@@ -32,6 +32,7 @@
 // prelude: JsonReaderArrayIter
 // prelude: JsonReaderFieldIter
 // prelude: JsonReaderOffsets
+// prelude: JsonReaderPath
 // prelude: JsonReaderValidation
 // prelude: JsonRecordAdapter
 // prelude: JsonRecordCodec
@@ -511,7 +512,6 @@
 // prelude: json_reader_str
 // prelude: json_reader_strict_int
 // prelude: json_reader_validate
-// prelude: json_reader_validate_string
 // prelude: json_reader_value
 // prelude: json_record_adapter
 // prelude: json_record_adapter_result

@@ -829,12 +829,16 @@ value JsonReaderArray {
     index: int = 0,
 }
 
-struct JsonReaderValidation {
+struct JsonReaderPath {
     keys: [string] = [],
     indices: [int] = [],
+    next_indices: [int] = [],
+}
+
+struct JsonReaderValidation {
+    path: JsonReaderPath? = null,
     problem: string = "invalid JSON",
     root_fields: Map<string, int> = map_new(),
-    track_path: bool = false,
     index_min_bytes: int = 0,
     offsets: Map<int, JsonReaderOffsets> = map_new(),
 }
@@ -847,81 +851,78 @@ struct JsonReaderValidation {
 @inline fn json_reader_empty_array() -> JsonReaderArray { return JsonReaderArray { reader: json_reader_null() } }
 
 fn json_reader_error_path(validation: JsonReaderValidation) -> string {
+    let tracked = validation.path ?? return "$"
     let path = "$"
-    for i in 0..validation.keys.len() {
-        if validation.indices[i] >= 0 { path += "[{validation.indices[i]}]" }
-        else { path += "[" + encode_string(validation.keys[i]) + "]" }
+    for i in 0..tracked.keys.len() {
+        if tracked.indices[i] >= 0 { path += "[{tracked.indices[i]}]" }
+        else { path += "[" + encode_string(tracked.keys[i]) + "]" }
     }
     return path
 }
 
-fn json_reader_close_container(p: JsonParser, validation: JsonReaderValidation, start: int) {
-    p.pos += 1
-    p.depth -= 1
-    if validation.index_min_bytes > 0 && p.pos - start >= validation.index_min_bytes {
-        validation.offsets[start] = JsonReaderOffsets { end: p.pos }
+fn json_reader_close_container(validation: JsonReaderValidation, start: int, end: int) {
+    if validation.index_min_bytes > 0 && end - start >= validation.index_min_bytes {
+        validation.offsets[start] = JsonReaderOffsets { end }
     }
 }
 
-fn json_reader_validate_string(p: JsonParser) {
-    let (value, end) = parse_string_raw_at(p.src, p.pos, false)
-    p.pos = end
-    if value == null { p.ok = false }
-}
-
-fn json_reader_validate(p: JsonParser, validation: JsonReaderValidation) {
+fn json_reader_validate(src: string, at: int, validation: JsonReaderValidation) -> (int, bool) {
+    let pos = at
+    let len = src.len()
+    let depth = 0
     let starts: [int] = []
-    let kinds: [int] = []
-    let indices: [int] = []
+    let path = validation.path
     // 0: value or empty array, 1: separator, 2: key or empty object,
     // 3: key after comma, 4: value after comma.
     let state = 0
     let kind = 0
     while true {
         if state == 1 {
-            if validation.track_path && validation.keys.len() == p.depth && p.depth > 0 {
-                let _ = validation.keys.pop()
-                let _ = validation.indices.pop()
+            if path != null && path.keys.len() == depth && depth > 0 {
+                let _ = path.keys.pop()
+                let _ = path.indices.pop()
             }
-            if p.depth == 0 { return }
+            if depth == 0 { return (pos, true) }
         }
-        p.pos = parse_skip_ws_inline_at(p.src, p.pos)
-        if p.pos >= p.len { p.ok = false; return }
-        let b = p.src.unit_at(p.pos)
+        pos = parse_skip_ws_inline_at(src, pos)
+        if pos >= len { return (pos, false) }
+        let b = src.unit_at(pos)
         if state == 1 {
             if b == 44 {
-                p.pos += 1
+                pos += 1
                 state = if kind == 91 { 4 } else { 3 }
                 continue
             }
-            if b != (if kind == 91 { 93 } else { 125 }) { p.ok = false; return }
+            if b != (if kind == 91 { 93 } else { 125 }) { return (pos, false) }
             let start = starts.pop().unwrap()
-            let _ = kinds.pop()
-            let _ = indices.pop()
-            json_reader_close_container(p, validation, start)
-            kind = if p.depth > 0 { kinds[p.depth - 1] } else { 0 }
+            if path != null { let _ = path.next_indices.pop() }
+            pos += 1
+            depth -= 1
+            json_reader_close_container(validation, start, pos)
+            kind = if depth > 0 { src.unit_at(starts[depth - 1]) } else { 0 }
             continue
         }
         if state == 2 || state == 3 {
             if state == 2 && b == 125 {
                 let start = starts.pop().unwrap()
-                let _ = kinds.pop()
-                let _ = indices.pop()
-                json_reader_close_container(p, validation, start)
-                kind = if p.depth > 0 { kinds[p.depth - 1] } else { 0 }
+                if path != null { let _ = path.next_indices.pop() }
+                pos += 1
+                depth -= 1
+                json_reader_close_container(validation, start, pos)
+                kind = if depth > 0 { src.unit_at(starts[depth - 1]) } else { 0 }
                 state = 1
                 continue
             }
-            let key = ""
-            if p.depth == 1 || validation.track_path { key = parse_string_raw(p) ?? return }
-            else { json_reader_validate_string(p); if !p.ok { return } }
-            p.pos = parse_skip_ws_inline_at(p.src, p.pos)
-            if p.pos >= p.len || p.src.unit_at(p.pos) != 58 { p.ok = false; return }
-            p.pos = parse_skip_ws_inline_at(p.src, p.pos + 1)
-            if p.depth == 1 { validation.root_fields[key] = p.pos }
-            if validation.track_path {
-                validation.keys.push(key)
-                validation.indices.push(-1)
+            let (value, end) = parse_string_raw_at(src, pos, depth == 1 || path != null)
+            pos = end
+            let key = value ?? return (pos, false)
+            pos = parse_skip_ws_inline_at(src, pos)
+            if pos >= len || src.unit_at(pos) != 58 { return (pos, false) }
+            pos = parse_skip_ws_inline_at(src, pos + 1)
+            if depth == 1 { validation.root_fields[key] = pos }
+            if path != null {
+                path.keys.push(key)
+                path.indices.push(-1)
             }
             state = 0
             continue
@@ -929,60 +930,68 @@ fn json_reader_validate(p: JsonParser, validation: JsonReaderValidation) {
         if kind == 91 {
             if state == 0 && b == 93 {
                 let start = starts.pop().unwrap()
-                let _ = kinds.pop()
-                let _ = indices.pop()
-                json_reader_close_container(p, validation, start)
-                kind = if p.depth > 0 { kinds[p.depth - 1] } else { 0 }
+                if path != null { let _ = path.next_indices.pop() }
+                pos += 1
+                depth -= 1
+                json_reader_close_container(validation, start, pos)
+                kind = if depth > 0 { src.unit_at(starts[depth - 1]) } else { 0 }
                 state = 1
                 continue
             }
-            if validation.track_path {
-                validation.keys.push("")
-                validation.indices.push(indices[p.depth - 1])
-                indices[p.depth - 1] += 1
+            if path != null {
+                path.keys.push("")
+                path.indices.push(path.next_indices[depth - 1])
+                path.next_indices[depth - 1] += 1
             }
         }
         state = 1
-        if b == 34 { json_reader_validate_string(p); if !p.ok { return }; continue }
+        if b == 34 {
+            let (value, end) = parse_string_raw_at(src, pos, false)
+            pos = end
+            if value == null { return (pos, false) }
+            continue
+        }
         if b == 110 || b == 116 || b == 102 {
             let keyword = if b == 110 { "null" } else if b == 116 { "true" } else { "false" }
-            if p.pos + keyword.len() > p.len { p.ok = false; return }
+            if pos + keyword.len() > len { return (pos, false) }
             for i in 0..keyword.len() {
-                if p.src.unit_at(p.pos + i) != keyword.unit_at(i) { p.ok = false; return }
+                if src.unit_at(pos + i) != keyword.unit_at(i) { return (pos, false) }
             }
-            p.pos += keyword.len()
+            pos += keyword.len()
             continue
         }
         if b == 45 || (b >= 48 && b <= 57) {
-            let start = p.pos
-            let is_float = parse_number_scan(p) ?? return
-            if !is_float && p.pos - start >= 19 && p.src.substring(start, p.pos).parse_int() == null { p.ok = false; return }
+            let start = pos
+            let (end, is_float, ok) = parse_number_scan_at(src, pos)
+            pos = end
+            if !ok { return (pos, false) }
+            if !is_float && pos - start >= 19 && src.substring(start, pos).parse_int() == null { return (pos, false) }
             continue
         }
-        if b != 91 && b != 123 { p.ok = false; return }
-        starts.push(p.pos)
-        kinds.push(b)
+        if b != 91 && b != 123 { return (pos, false) }
+        starts.push(pos)
         kind = b
-        indices.push(0)
-        p.depth += 1
-        if p.depth > json_max_depth() { p.ok = false; validation.problem = "maximum JSON depth exceeded"; return }
-        p.pos += 1
+        if path != null { path.next_indices.push(0) }
+        depth += 1
+        if depth > json_max_depth() { validation.problem = "maximum JSON depth exceeded"; return (pos, false) }
+        pos += 1
         state = if b == 91 { 0 } else { 2 }
     }
+    return (pos, false)
 }
 
 fn json_reader_decode(src: string, rejected: fn(string, int, string)? = null, index_min_bytes: int = 0) -> JsonReader? {
-    let p = JsonParser { src, pos: 0, len: src.len(), ok: true, depth: 0 }
-    let validation = JsonReaderValidation { track_path: rejected != null, index_min_bytes }
-    p.pos = parse_skip_ws_inline_at(p.src, p.pos)
-    let at = p.pos
-    json_reader_validate(p, validation)
-    p.pos = parse_skip_ws_inline_at(p.src, p.pos)
-    if !p.ok || p.pos != p.len {
-        if let report = rejected { report(json_reader_error_path(validation), p.pos, validation.problem) }
+    let validation = JsonReaderValidation {
+        path: if rejected != null { JsonReaderPath {} } else { null }, index_min_bytes,
+    }
+    let at = parse_skip_ws_inline_at(src, 0)
+    let (end, ok) = json_reader_validate(src, at, validation)
+    let pos = parse_skip_ws_inline_at(src, end)
+    if !ok || pos != src.len() {
+        if let report = rejected { report(json_reader_error_path(validation), pos, validation.problem) }
         return null
     }
-    if p.src.unit_at(at) == 123 {
+    if src.unit_at(at) == 123 {
         let root_offsets = validation.offsets.get(at) ?? JsonReaderOffsets {}
         validation.offsets[at] = JsonReaderOffsets { fields: validation.root_fields, end: root_offsets.end }
     }
