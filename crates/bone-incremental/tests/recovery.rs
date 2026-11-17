@@ -1,11 +1,5 @@
-//! Error recovery. Lowering is total: an unresolved type name in any position
-//! lowers to `BuiltinTy::Error` with a diagnostic, and `semantic_pass` returns
-//! a coherent workspace. Inference keeps what it inferred around a failing
-//! statement, so hover and completion keep working in a body with one bad
-//! line. A binding whose value failed is poisoned to `<error>`, so one root
-//! cause yields one diagnostic instead of a cascade at every use, and a nested
-//! body under a failed scrutinee is still analyzed. Session-side cascade and
-//! convergence across files: `incremental.rs`.
+//! Error recovery. Lowering is total: an unresolved type name in any position lowers to
+//! `BuiltinTy::Error` with a diagnostic, and `semantic_pass` returns a coherent workspace.
 
 use crate::common;
 use bone_semantic::prelude::*;
@@ -29,8 +23,6 @@ fn has_fn(ws: &Workspace, mid: ModuleId, name: &str) -> bool {
         .any(|key| key.as_str().rsplit("::").next() == Some(name))
 }
 
-/// Rendered type at byte `offset`, read through the `type_at` path hover and
-/// member completion use.
 fn type_at(src: &str, offset: usize) -> Option<String> {
     let (ws, mid) = check(src);
     let inf = ws.inference(mid).expect("inference for user module");
@@ -38,7 +30,6 @@ fn type_at(src: &str, offset: usize) -> Option<String> {
     Some(ws.render(at.body, at.ty))
 }
 
-/// Lowering, interface and inference diagnostics of a batch check.
 fn workspace_diags(ws: &Workspace) -> Vec<String> {
     ws.inferences_iter()
         .flat_map(|(_, inf)| inf.errors.values().flatten())
@@ -58,9 +49,6 @@ fn session_diags(src: &str) -> Vec<String> {
     s.diagnostics().iter().map(|e| e.message.clone()).collect()
 }
 
-/// Every binding form poisons its pattern when its value fails: exactly the
-/// root error surfaces, the poisoned names render as `<error>`, and a body
-/// nested under the failed value is still inferred (`z` is `int`).
 #[test]
 fn a_failed_value_poisons_its_bindings_without_a_cascade() {
     let cases: &[(&str, &[(&str, &str)])] = &[
@@ -109,8 +97,6 @@ fn a_failed_value_poisons_its_bindings_without_a_cascade() {
     }
 }
 
-/// A type error in a body, signature, field or global lowers to `Error`: the
-/// item keeps its signature, its sibling survives, and the error surfaces.
 #[test]
 fn type_errors_in_any_position_recover_and_keep_siblings() {
     let cases: &[(&str, &[&str])] = &[
@@ -138,8 +124,6 @@ fn type_errors_in_any_position_recover_and_keep_siblings() {
     }
 }
 
-/// A session commits a recovered error (the function stays present), surfaces
-/// it, and leaves no stale diagnostic once the text is fixed.
 #[test]
 fn recovered_errors_commit_and_clear_on_fix() {
     let cases = [
@@ -171,8 +155,6 @@ fn recovered_errors_commit_and_clear_on_fix() {
     }
 }
 
-/// `p` keeps its substituted type whether it is bound before or after a
-/// statement that fails to type-check, and the failure is still recorded.
 #[test]
 fn inference_keeps_bindings_around_a_failed_statement() {
     let pair = "struct Pair<A, B> {\n    first: A,\n    second: B,\n}\n\n";
@@ -196,7 +178,6 @@ fn inference_keeps_bindings_around_a_failed_statement() {
     }
 }
 
-/// Two independent type errors in one body both surface.
 #[test]
 fn two_inference_errors_in_one_body_both_surface() {
     let diags = session_diags(

@@ -1,23 +1,15 @@
-//! Comparator pieces shared by the incremental oracle and the modules-v1
-//! differential harness (`v1_differential.rs`). Both compare an
-//! incrementally updated workspace with a fresh one over the same texts, so
-//! the text-anchored reading lives here once.
+//! Comparator pieces shared by the incremental oracle and the modules-v1 differential harness
+//! (`v1_differential.rs`). Both compare an incrementally updated workspace with a fresh one
+//! over the same texts, so the text-anchored reading lives here once.
 
 use bone_semantic::prelude::*;
 
-/// `ModuleId` for a file checked through a harness. The id is an opaque dense
-/// index assigned by the workspace's `module_ids` interner, so it is recovered
-/// by looking the file path up in `ws` (fixtures are parsed with the path as
-/// their file id).
+/// `ModuleId` for a file checked through a harness.
 pub fn mid_for(ws: &Workspace, path: &str) -> ModuleId {
     ws.module_ids[&Ustr::from(path)]
 }
 
-/// Rendered type at every `stride`-th byte offset of `path` (None where
-/// `type_at` has no node). Text-anchored so it survives arena-index
-/// divergence between an incrementally updated workspace and a fresh batch
-/// one. Stride 1 = every offset; the real-project fuzz uses a coarser stride
-/// to keep wall time sane (files are tens of KB).
+/// Rendered type at every `stride`-th byte offset of `path` (None where `type_at` has no node).
 pub fn type_profile(ws: &Workspace, path: &str, text: &str, stride: usize) -> Vec<Option<String>> {
     let mid = mid_for(ws, path);
     let Some(inf) = ws.inference(mid) else {
@@ -69,4 +61,21 @@ pub fn files(list: &[(&str, &str)]) -> Vec<bone_incremental::session::SessionFil
 pub fn session(list: &[(&str, &str)]) -> bone_incremental::Session {
     bone_incremental::Session::new(vec![], files(list), &Default::default())
         .expect("session builds")
+}
+
+#[track_caller]
+pub fn with_warm(
+    warm: Vec<skull_parser::Ast>,
+    files: Vec<bone_incremental::session::SessionFile>,
+) -> bone_incremental::Session {
+    bone_incremental::Session::new(warm, files, &Default::default()).expect("session builds")
+}
+
+#[track_caller]
+pub fn assert_clean(session: &bone_incremental::Session) {
+    assert!(
+        session.diagnostics().is_empty(),
+        "unexpected diagnostics: {:?}",
+        session.diagnostics()
+    );
 }

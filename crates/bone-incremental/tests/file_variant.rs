@@ -1,19 +1,14 @@
-// `Session::with_file_variant` -- the speculative-analysis primitive for IDE
-// paths (completion munges): apply a text variant of one tracked file through
-// the normal update tiers, run a query closure against the workspace, restore.
-// Contract: (1) the closure observes the variant, (2) the session afterwards is
-// equivalent to never having applied it (text restored, variant items gone,
-// re-applying the original text is a NoChange).
+// `Session::with_file_variant` -- the speculative-analysis primitive for IDE paths (completion
+// munges): apply a text variant of one tracked file through the normal update tiers, run a
+// query closure against the workspace, restore.
 
-use bone_incremental::session::{Session, SessionFile, UpdateTier};
+use bone_incremental::session::{Session, UpdateTier};
 use bone_semantic::prelude::*;
 
 use crate::common;
 
-use common::files;
-
-fn fixture() -> Vec<SessionFile> {
-    files(&[
+fn session() -> Session {
+    common::session(&[
         (
             "a.rock",
             "struct Foo { bar: int }\nfn make_foo() -> Foo { return Foo { bar: 1 } }\n",
@@ -36,8 +31,7 @@ fn has_fn(ws: &Workspace, name: &str) -> bool {
 
 #[test]
 fn variant_visible_inside_and_gone_after() {
-    let mut session = Session::new(vec![], fixture(), &bone_core::modules::NsAliases::default())
-        .expect("session init");
+    let mut session = session();
     let original = session.files["b.rock"].text.clone();
 
     let variant = format!("{original}fn __variant_probe() -> int {{ return 2 }}\n");
@@ -69,8 +63,7 @@ fn broken_member_munge_still_infers_cross_file() {
     // The munge shape completion feeds: a mid-edit `f.<sentinel>` member access.
     // The variant module must still lower + infer (recovery), and the receiver's
     // cross-file type (Foo from a.rock) must be resolvable inside the closure.
-    let mut session = Session::new(vec![], fixture(), &bone_core::modules::NsAliases::default())
-        .expect("session init");
+    let mut session = session();
     let original = session.files["b.rock"].text.clone();
 
     let variant = "fn use_foo() -> int {\n    let f = make_foo()\n    let x = f.__rock_completion__\n    return f.bar\n}\n";
@@ -92,8 +85,7 @@ fn untracked_path_is_added_then_removed() {
     // A file the session REFUSED (its live text never lowered clean) is still
     // completable: the variant is speculatively tracked, analyzed, and removed
     // again -- the session ends as untracked as it started.
-    let mut session = Session::new(vec![], fixture(), &bone_core::modules::NsAliases::default())
-        .expect("session init");
+    let mut session = session();
     let seen = session
         .with_file_variant(
             "c.rock",

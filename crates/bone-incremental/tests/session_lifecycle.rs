@@ -1,9 +1,5 @@
-//! Workspace invariants through a production session lifecycle.
-//! `Workspace::new` puts the synthetic `$builtin` module, owner of every
-//! builtin type node, in the ordinary module table. Editing, re-lowering,
-//! rebuilding and evicting must keep it, and source-module counts and user
-//! iteration must leave it out. A failed full rebuild keeps the last-good
-//! workspace.
+//! Workspace invariants through a production session lifecycle. `Workspace::new` puts the
+//! synthetic `$builtin` module, owner of every builtin type node, in the ordinary module table.
 
 use bone_incremental::session::{Session, UpdateTier};
 use bone_semantic::prelude::*;
@@ -21,7 +17,7 @@ fn session() -> Session {
         common::v1("a.rock", "struct S { v: int }\nfn f() -> int { 1 }\n"),
         common::v1("b.rock", "fn use_s(s: S) -> int { s.v }\n"),
     ];
-    Session::new(warm, files, &bone_core::modules::NsAliases::default()).expect("session builds")
+    common::with_warm(warm, files)
 }
 
 fn user_files(session: &Session) -> Vec<String> {
@@ -34,7 +30,6 @@ fn user_files(session: &Session) -> Vec<String> {
     files
 }
 
-/// The builtin module is still the type owner every builtin `TyId` points at.
 fn assert_builtins_valid(session: &Session, stage: &str) {
     let ws = &session.ws;
     let builtin = ws.builtin_module();
@@ -79,21 +74,18 @@ fn builtin_module_survives_the_session_lifecycle() {
     // Warm stdlib plus two user files, never the builtin module.
     assert_eq!(s.ws.source_module_count(), 3);
 
-    let body = s
-        .update_file("a.rock", "struct S { v: int }\nfn f() -> int { 2 }\n")
-        .expect("body edit");
-    assert_ne!(body.tier, UpdateTier::NoChange);
-    assert_builtins_valid(&s, "body edit");
-    assert_counts(&s, "body edit");
-
-    s.update_file(
-        "a.rock",
-        "struct S { v: int, w: float }\nfn f() -> int { 2 }\n",
-    )
-    .expect("interface edit");
-    assert_builtins_valid(&s, "interface edit");
-    assert_counts(&s, "interface edit");
-
+    for (stage, text) in [
+        ("body edit", "struct S { v: int }\nfn f() -> int { 2 }\n"),
+        (
+            "interface edit",
+            "struct S { v: int, w: float }\nfn f() -> int { 2 }\n",
+        ),
+    ] {
+        let result = s.update_file("a.rock", text).expect(stage);
+        assert_ne!(result.tier, UpdateTier::NoChange);
+        assert_builtins_valid(&s, stage);
+        assert_counts(&s, stage);
+    }
     s.rebuild_users().expect("full rebuild");
     assert_builtins_valid(&s, "rebuild_users");
     assert_counts(&s, "rebuild_users");
@@ -112,11 +104,6 @@ fn eviction_keeps_the_builtin_module() {
     );
 }
 
-/// A failed `rebuild_users` leaves the last-good workspace. Modules are
-/// interned into `module_ids` before `insert_module` grows `modules`, so a
-/// mid-build error once left `module_ids` ahead of `modules` and the next
-/// `ws.module(mid)` panicked out of bounds. A duplicate global fails in
-/// `register_globals`, after interning and before insertion.
 #[test]
 fn failed_rebuild_users_keeps_workspace_consistent() {
     let mut s = session();
@@ -137,13 +124,50 @@ fn failed_rebuild_users_keeps_workspace_consistent() {
     }
 }
 
-/// The host resolves build variables once onto the session's workspace
-/// (`bone_session_for_emission`); a full rebuild replaces that workspace and
-/// has to carry them over.
 #[test]
 fn rebuild_users_keeps_the_comptime_inputs() {
     let mut s = session();
     s.ws.comptime_inputs.channel = "dev".to_string();
     s.rebuild_users().expect("an unchanged program rebuilds");
     assert_eq!(s.ws.comptime_inputs.channel, "dev");
+}
+
+#[test]
+fn failed_file_changes_restore_text_and_tracking_order() {
+    let mut session = common::session(&[
+        ("a.rock", "pub mod a;\npub fn f() -> int { 1 }\n"),
+        ("b.rock", "pub use a::f;\n"),
+        ("c.rock", "fn c() -> int { f() }\n"),
+    ]);
+    let paths = session.paths.clone();
+    let texts: FxHashMap<_, _> = session
+        .files
+        .iter()
+        .map(|(path, file)| (path.clone(), file.text.clone()))
+        .collect();
+    let diagnostics = session.diagnostics();
+    assert!(session.remove_file("a.rock").is_err());
+    assert!(
+        session
+            .update_file("b.rock", "pub use missing::f;\n")
+            .is_err()
+    );
+    assert!(
+        session
+            .update_file("new.rock", "use missing::f;\n")
+            .is_err()
+    );
+    assert_eq!(session.paths, paths);
+    assert_eq!(session.files.len(), texts.len());
+    for (path, text) in texts {
+        assert_eq!(session.files[&path].text, text);
+        assert_eq!(
+            session.update_file(&path, &text).unwrap().tier,
+            UpdateTier::NoChange
+        );
+    }
+    assert_eq!(
+        format!("{:?}", session.diagnostics()),
+        format!("{diagnostics:?}")
+    );
 }

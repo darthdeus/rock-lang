@@ -1,14 +1,6 @@
-// Incremental == fresh oracle for `bone_semantic::Session` (see
-// incremental compiler invariants): apply an edit script to a session, batch `semantic_pass` the final
-// texts, and assert the two workspaces are equivalent. The comparator itself is
-// validated batch-vs-batch below (equal programs compare equal, injected
-// divergences are detected) so a green oracle run is evidence, not vacuous.
-//
-// Equivalence is text-anchored, not index-anchored: diagnostics compare as
-// (file, offset, message) sets, and types compare via `query::type_at` at every
-// byte offset of every file. This keeps the oracle valid even when the
-// narrowing reuses bodies whose arena indices no longer match a fresh batch
-// lowering.
+// Incremental == fresh oracle for `bone_semantic::Session` (see incremental compiler
+// invariants): apply an edit script to a session, batch `semantic_pass` the final texts, and
+// assert the two workspaces are equivalent.
 
 use bone_incremental::session::{Session, UpdateResult, UpdateTier};
 use bone_semantic::prelude::*;
@@ -26,16 +18,10 @@ fn warm_prelude() -> skull_parser::Ast {
     warm
 }
 
-// ---------------------------------------------------------------------------
-// Harness: parse + batch check
-// ---------------------------------------------------------------------------
-
 type Files = Vec<bone_incremental::session::SessionFile>;
 
 use common::files;
 
-/// True if `mid` is a warm stdlib module. With an opaque id, stdlib-ness is
-/// read off the module's file, not the id.
 fn is_stdlib_mid(ws: &Workspace, mid: ModuleId) -> bool {
     ws.modules
         .get(mid.index())
@@ -61,10 +47,6 @@ fn parse_files(files: &Files) -> Result<Vec<skull_parser::Ast>, CompilerError> {
     Ok(modules)
 }
 
-/// Fresh whole-workspace check of warm ++ `files` — the oracle's ground
-/// truth. `warm` are the same parsed modules the session under test was
-/// built with, in the same (first) position. `aliases` is the host graph's
-/// table for real-project sets, default (empty) for single-package fixtures.
 fn batch_check(
     warm: &[skull_parser::Ast],
     files: &Files,
@@ -75,11 +57,6 @@ fn batch_check(
     semantic_pass_with_aliases(&mut modules, aliases)
 }
 
-// ---------------------------------------------------------------------------
-// Comparator
-// ---------------------------------------------------------------------------
-
-/// All body-level diagnostics as comparable, deterministically ordered keys.
 fn diag_keys(ws: &Workspace) -> Vec<(String, usize, String)> {
     let mut keys: Vec<_> = ws
         .inferences_iter()
@@ -96,8 +73,6 @@ fn diag_keys(ws: &Workspace) -> Vec<(String, usize, String)> {
     keys
 }
 
-/// Structural equivalence of two checked workspaces over the same file set.
-/// Returns the first divergence as a human-readable description.
 fn ws_equiv(
     left: &Workspace,
     right: &Workspace,
@@ -128,12 +103,6 @@ fn ws_equiv(
 
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Comparator self-tests (batch vs batch — no Session involved). These prove
-// the comparator can actually see divergence; without them a green oracle
-// could be green because the comparator is blind.
-// ---------------------------------------------------------------------------
 
 const CROSS_FILE_A: &str = "
 struct Point {
@@ -184,16 +153,6 @@ fn comparator_sees_equal_and_divergent_programs() {
     assert!(err.contains("diagnostics diverge"), "{err}");
 }
 
-// ---------------------------------------------------------------------------
-// Edit-script harness: every session mutation is immediately followed by a
-// fresh batch check of the same texts and a full equivalence assertion.
-// ---------------------------------------------------------------------------
-
-/// Minimal warm module standing in for the stdlib: arithmetic desugars to
-/// `__op_*` calls, so stdlib-free fixtures need these to type-check. Living
-/// in the WARM set means every oracle test also exercises warm-module
-/// retention across updates; the batch side gets the same text as a plain
-/// first file, which checks to an equivalent workspace.
 const WARM_PRELUDE_PATH: &str = "<warm-prelude>";
 const WARM_PRELUDE: &str = "
 fn __op_add(a: int, b: int) -> int { 0 }
@@ -203,16 +162,10 @@ fn __op_mul(a: int, b: int) -> int { 0 }
 
 struct Harness {
     session: Session,
-    /// The session's warm modules, replayed as the first batch modules.
     warm: Vec<skull_parser::Ast>,
-    /// Ground-truth user texts in the session's tracking order.
     texts: Files,
-    /// Offset stride for the per-offset type comparison.
     stride: usize,
-    /// The host graph's alias tables (default/empty for this single package).
     aliases: bone_core::modules::NsAliases,
-    /// The language server's lint cache, fed the change each update implies;
-    /// it must agree with a fresh lint pass after every step.
     lints: bone_lints::IncrementalLintCache,
 }
 
@@ -231,8 +184,6 @@ impl Harness {
         )
     }
 
-    /// [`with_warm`] for real-project sets, whose v1 `use` paths resolve
-    /// through the host graph's alias tables.
     fn with_warm_aliases(
         warm: Vec<skull_parser::Ast>,
         texts: Files,
@@ -277,6 +228,13 @@ impl Harness {
         result
     }
 
+    #[track_caller]
+    fn update_tier(&mut self, path: &str, text: &str, tier: UpdateTier) -> UpdateResult {
+        let result = self.update(path, text);
+        assert_eq!(result.tier, tier);
+        result
+    }
+
     fn remove(&mut self, path: &str) -> UpdateResult {
         let result = self
             .session
@@ -289,8 +247,6 @@ impl Harness {
         result
     }
 
-    /// Apply `change` to the lint cache and compare its findings with a fresh
-    /// whole-workspace lint pass over the same session workspace.
     fn assert_lints_match(&mut self, change: &bone_lints::LintCacheUpdate) {
         let sources: FxHashMap<Ustr, &str> = self
             .texts
@@ -323,12 +279,10 @@ impl Harness {
             .unwrap_or_else(|d| panic!("incremental != fresh: {d}"));
     }
 
-    /// Distinct user modules named in `reinferred`.
     fn reinferred_mids(result: &UpdateResult) -> FxHashSet<ModuleId> {
         result.reinferred.iter().map(|(mid, _)| *mid).collect()
     }
 
-    /// Names of the distinct functions among `ids`, sorted.
     fn function_names(&self, ids: &[(ModuleId, bone_semantic::hir::BodyOwner)]) -> Vec<String> {
         let ws = self.session.workspace();
         let mut names: Vec<String> = ids
@@ -365,32 +319,16 @@ impl Harness {
         );
     }
 
-    /// The dense `ModuleId` for a tracked file, resolved via the session's
-    /// interner (the id is opaque now, so it can't be fabricated from the path).
     fn mid(&self, path: &str) -> ModuleId {
         mid_for(self.session.workspace(), path)
     }
 
     #[track_caller]
     fn assert_clean(&self) {
-        let diags: Vec<_> = self
-            .session
-            .diagnostics()
-            .iter()
-            .map(|e| format!("{}:{} {}", e.location.file, e.location.offset, e.message))
-            .collect();
-        assert!(diags.is_empty(), "unexpected diagnostics: {diags:#?}");
+        common::assert_clean(&self.session);
     }
 }
 
-// ---------------------------------------------------------------------------
-// Oracle tests: session == batch after every step of each script.
-// ---------------------------------------------------------------------------
-
-/// A macro's recorded def-span (used by ctags) must stay line-accurate across a
-/// fast body edit that shifts it. Editing a function body ABOVE the macro and
-/// adding a line takes the BodyOnly fast path, which span-shifts the kept items
-/// in place rather than reparsing -- the macro def-line must move with them.
 #[test]
 fn macro_def_span_shifts_on_fast_body_edit() {
     // macro `m` is on line 5 (0-based 4): fn(1-3), blank(4), macro(5).
@@ -423,11 +361,6 @@ fn macro_def_span_shifts_on_fast_body_edit() {
     );
 }
 
-/// A `co fn` body edit stays a coroutine and is reported in `reinferred`
-/// (the overlay re-emits exactly those bodies). The parser consumes `co`
-/// before `parse_fn`, so the function span starts at `fn` while the item span
-/// starts at `co`: the fast-path reparse sees a plain `fn`, and a body locator
-/// keyed on the item offset misses the body unless the footprint covers `co`.
 #[test]
 fn coroutine_body_edit_stays_a_coroutine_and_is_reported() {
     let v = |n: u32| {
@@ -437,8 +370,7 @@ fn coroutine_body_edit_stays_a_coroutine_and_is_reported() {
     };
     let mut h = Harness::new(&[("c.rock", &v(1))]);
     h.assert_clean();
-    let result = h.update("c.rock", &v(10));
-    assert_eq!(result.tier, UpdateTier::BodyOnly);
+    let result = h.update_tier("c.rock", &v(10), UpdateTier::BodyOnly);
     assert_eq!(result.reinferred.len(), 1);
     assert_eq!(h.function_names(&result.reinferred), ["counter"]);
     h.assert_clean();
@@ -453,30 +385,15 @@ fn coroutine_body_edit_stays_a_coroutine_and_is_reported() {
     assert!(ws.module(fmid).functions[fid].is_coroutine);
 }
 
-/// Editing the BODY of a DECORATED function must report that body in
-/// `reinferred`, same as a non-decorated edit (`oracle_body_edit`). Regression
-/// guard for the body-locator fix (`lower.rs`: the `item_index` interval covers
-/// the whole item footprint, decorators included, so `rebuild_module`'s
-/// `body_at(item.offset)` resolves the decorated body instead of missing the
-/// gap left by `@deco`).
-///
-/// Why it matters: skull's hot-reload overlay re-emits only what `reinferred`
-/// reports; if a decorated `@update`/`@draw`/`@init` system body were dropped,
-/// the overlay would carry the rebind but not the new body and the running game
-/// would keep the stale code. Exercised downstream in `rock-cli`
-/// `overlay_runtime_tests::sim_overlay_rebind_runs_new_system_body`.
 #[test]
 fn decorated_body_edit_reinfers_the_body() {
     let v0 = "global G: int = 0\ndeco init upd { }\n@upd\nfn tick() { G = 1 }";
     let v1 = "global G: int = 0\ndeco init upd { }\n@upd\nfn tick() { G = 2 }";
     let mut h = Harness::new(&[("m.rock", v0)]);
-    let result = h.update("m.rock", v1);
-    assert_eq!(result.tier, UpdateTier::BodyOnly);
+    let result = h.update_tier("m.rock", v1, UpdateTier::BodyOnly);
     assert_eq!(h.function_names(&result.reinferred), ["tick"]);
 }
 
-/// Generations are keyed by function identity, not name: editing `foo(int)`
-/// twice drives its generation to 2 while the `foo(float)` overload stays at 0.
 #[test]
 fn overloaded_body_edit_bumps_only_the_edited_overload() {
     let gens_in_order = |h: &Harness| -> Vec<u64> {
@@ -502,10 +419,8 @@ fn overloaded_body_edit_bumps_only_the_edited_overload() {
         "fresh module starts at gen 0"
     );
     // Edit only foo(int)'s body, twice.
-    let r1 = h.update("m.rock", &prog(2));
-    assert_eq!(r1.tier, UpdateTier::BodyOnly);
-    let r2 = h.update("m.rock", &prog(3));
-    assert_eq!(r2.tier, UpdateTier::BodyOnly);
+    h.update_tier("m.rock", &prog(2), UpdateTier::BodyOnly);
+    h.update_tier("m.rock", &prog(3), UpdateTier::BodyOnly);
     assert_eq!(
         gens_in_order(&h),
         vec![2, 0],
@@ -526,8 +441,6 @@ fn cook_premise_module(n: usize, c0: i64) -> String {
     s
 }
 
-/// A body edit re-infers exactly one body regardless of module size, read from
-/// `reinferred_body_count` (the number of `check_function` calls).
 #[test]
 fn body_edit_reinfers_only_the_changed_body() {
     use std::sync::atomic::Ordering;
@@ -579,25 +492,10 @@ fn oracle_signature_edit_breaks_then_fixes_cross_file_caller() {
     h.assert_clean();
 }
 
-/// REGRESSION (a 0-byte source file): an item-less user file
-/// interned BEFORE another user file must not corrupt module-id alignment.
-///
-/// `Session::new` interns every file, but `combined_unexpanded` omits item-less
-/// modules (`!items.is_empty()`). The resulting module-id gap made
-/// `insert_module` -- which `push`es when `idx >= len`, unlike the resize-based
-/// `set_inference` -- misplace every module after the hole. `module(mid)` then
-/// returned the wrong `Module` (or went OOB), so inference / overload resolution
-/// indexed the wrong `functions` arena and panicked (`score_candidate`, the
-/// `ws.module(*id)` in pass 4). The batch `semantic_pass` path is immune: it
-/// interns exactly the modules it inserts, so no gap forms.
-///
-/// Driven through `Session` directly -- the `Harness` batch oracle (`parse_files`)
-/// rejects empty files, so it can't express this. `later.rock` lands after the
-/// hole and its self-call drives resolution through the misaligned id.
 #[test]
 fn itemless_file_before_others_keeps_module_ids_aligned() {
     let warm = warm_prelude();
-    let session = Session::new(
+    let session = common::with_warm(
         vec![warm],
         files(&[
             ("empty.rock", ""),
@@ -606,9 +504,7 @@ fn itemless_file_before_others_keeps_module_ids_aligned() {
                 "fn foo() -> int { 1 }\nfn use_foo() -> int { foo() }",
             ),
         ]),
-        &bone_core::modules::NsAliases::default(),
-    )
-    .expect("session init must not crash on an item-less file");
+    );
 
     let diags: Vec<_> = session
         .diagnostics()
@@ -646,36 +542,30 @@ fn sum_xy(p: Point) -> int {
 }
 
 #[test]
-fn oracle_delete_defining_file_breaks_body_dependent_then_restore_recovers() {
-    // d.rock depends on a.rock only from a BODY (its signature is
-    // stdlib-free), so deleting a.rock degrades to a per-body error and the
-    // session keeps running.
-    let body_dependent = "
-fn count_points() -> int {
-    let p = make_point(1, 2)
-    p.x
-}
-";
-    let mut h = Harness::new(&[("a.rock", CROSS_FILE_A), ("d.rock", body_dependent)]);
-    h.assert_clean();
-
-    h.remove("a.rock");
-    assert!(
-        !h.session.diagnostics().is_empty(),
-        "d.rock calls make_point from its body and must error once a.rock is gone"
-    );
-
-    h.update("a.rock", CROSS_FILE_A);
-    h.assert_clean();
+fn deleting_a_definition_breaks_body_and_signature_users_then_recovers() {
+    for (path, source, diagnostic) in [
+        (
+            "d.rock",
+            "\nfn count_points() -> int {\n    let p = make_point(1, 2)\n    p.x\n}\n",
+            "",
+        ),
+        ("b.rock", CROSS_FILE_B, "Point"),
+    ] {
+        let mut h = Harness::new(&[("a.rock", CROSS_FILE_A), (path, source)]);
+        h.assert_clean();
+        h.remove("a.rock");
+        assert!(!h.session.diagnostics().is_empty());
+        h.assert_diagnostic(diagnostic);
+        assert!(!h.session.is_tracked("a.rock"));
+        h.update("a.rock", CROSS_FILE_A);
+        h.assert_clean();
+    }
 }
 
 #[test]
 fn oracle_for_iter_protocol_invalidates_on_next_edit() {
-    // `for x in <user type>` resolves the iter/next protocol (bone records the
-    // fns in `for_iter_protocol`). Removing `next` must re-typecheck the loop and
-    // surface the error; restoring recovers. `assert_matches_batch` (inside
-    // `update`) also proves the side-table is recomputed identically to a fresh
-    // batch check after each edit.
+    // `for x in <user type>` resolves the iter/next protocol (bone records the fns in
+    // `for_iter_protocol`).
     let with_next = "\
 struct R { hi: int }
 struct RIt { cur: int, hi: int }
@@ -704,27 +594,6 @@ fn total() -> int { let s = 0; for x in (R { hi: 3 }) { s = s + x } s }
 }
 
 #[test]
-fn delete_of_signature_dependency_surfaces_dependent_error() {
-    // b.rock names `Point` in a SIGNATURE. With total lowering, removing a.rock
-    // (Point's definition) is a normal remove via the full rebuild: b.rock's
-    // now-unresolved signature recovers to `Error` and the diagnostic surfaces,
-    // instead of fail-fasting + reverting (the plan-C behavior this replaces).
-    // `remove`/`update` assert incremental == fresh batch at every step.
-    let mut h = Harness::new(&[("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)]);
-    h.assert_clean();
-
-    h.remove("a.rock");
-    h.assert_diagnostic("Point");
-    assert!(
-        !h.session.is_tracked("a.rock"),
-        "the remove commits (no revert)"
-    );
-
-    h.update("a.rock", CROSS_FILE_A);
-    h.assert_clean();
-}
-
-#[test]
 fn oracle_introduce_and_fix_type_error() {
     let mut h = Harness::new(&[("a.rock", "fn f() -> int { 1 }")]);
     h.assert_clean();
@@ -739,74 +608,63 @@ fn oracle_introduce_and_fix_type_error() {
 #[test]
 fn oracle_noop_update_short_circuits() {
     let mut h = Harness::new(&[("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)]);
-    let result = h.update("a.rock", CROSS_FILE_A);
-    assert_eq!(result.tier, UpdateTier::NoChange);
+    let result = h.update_tier("a.rock", CROSS_FILE_A, UpdateTier::NoChange);
     assert!(result.reinferred.is_empty());
 }
 
 #[test]
-fn update_with_unlowerable_signature_recovers_and_surfaces() {
-    // Parses fine, fails interface lowering (unknown signature type). With total
-    // lowering the param type recovers to `Error`, the edit COMMITS (no revert),
-    // and the diagnostic surfaces. The edited module is re-lowered, so the
-    // oracle (incremental == fresh) holds; fixing it converges to clean.
-    let mut h = Harness::new(&[("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)]);
-    h.update("b.rock", "fn f(p: Nonexistent) -> int { 1 }");
-    h.assert_diagnostic("Nonexistent");
-
-    h.update("b.rock", CROSS_FILE_B);
-    h.assert_clean();
-}
-
-#[test]
-fn oracle_broken_type_definer_cascades_to_dependent() {
-    // Editing a.rock (Point's definition) to a broken state must propagate to
-    // b.rock, which names `Point` in a SIGNATURE: the incremental session must
-    // match a fresh batch build (the oracle), which means b.rock is re-LOWERED,
-    // not just re-inferred. This is the interface-change cascade; a narrow
-    // rebuild_interface would re-infer b.rock against a stale signature and the
-    // oracle would catch the divergence.
-    let mut h = Harness::new(&[("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)]);
-    h.assert_clean();
-
-    // Drop Point entirely from a.rock (its only items are Point + make_point).
-    h.update("a.rock", "fn unrelated() -> int { 1 }");
-    h.assert_diagnostic("Point");
-
-    h.update("a.rock", CROSS_FILE_A);
-    h.assert_clean();
-}
-
-#[test]
-fn oracle_transitive_interface_cascade() {
-    // a defines T; b wraps it in a struct field (interface-position ref) AND a
-    // body reads through it; c reads b's Wrap in a body. Removing T must ripple
-    // a -> b (re-lower: Wrap.inner T->Error) -> c (re-infer: the body type it
-    // reads shifts). The oracle (asserted at every step) is the judge -- the
-    // expression types must match a fresh batch build across all three files.
-    let a = "value T { v: int }";
-    let b = "struct Wrap { inner: T }\nfn unwrap(w: Wrap) -> int { w.inner.v }";
-    let c = "fn use_wrap(w: Wrap) -> int { unwrap(w) }";
-    let mut h = Harness::new(&[("a.rock", a), ("b.rock", b), ("c.rock", c)]);
-    h.assert_clean();
-
-    h.update("a.rock", "fn nothing() -> int { 0 }"); // drop T
-    assert!(
-        !h.session.diagnostics().is_empty(),
-        "removing T must surface an error somewhere downstream"
-    );
-
-    h.update("a.rock", a); // restore -- must converge clean
-    h.assert_clean();
+fn oracle_cascades_commit_errors_and_recover() {
+    for (initial, path, broken, diagnostic) in [
+        (
+            vec![("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)],
+            "b.rock",
+            "fn f(p: Nonexistent) -> int { 1 }",
+            "Nonexistent",
+        ),
+        (
+            vec![("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)],
+            "a.rock",
+            "fn unrelated() -> int { 1 }",
+            "Point",
+        ),
+        (
+            vec![
+                ("a.rock", "value T { v: int }"),
+                (
+                    "b.rock",
+                    "struct Wrap { inner: T }\nfn unwrap(w: Wrap) -> int { w.inner.v }",
+                ),
+                ("c.rock", "fn use_wrap(w: Wrap) -> int { unwrap(w) }"),
+            ],
+            "a.rock",
+            "fn nothing() -> int { 0 }",
+            "",
+        ),
+        (
+            vec![
+                ("a.rock", "struct Foo { v: int }"),
+                ("b.rock", "fn sig(f: Foo) -> int { let x: Foo = f\n x.v }"),
+            ],
+            "a.rock",
+            "fn nothing() -> int { 0 }",
+            "",
+        ),
+    ] {
+        let mut h = Harness::new(&initial);
+        h.assert_clean();
+        let original = h.session.files[path].text.clone();
+        h.update(path, broken);
+        assert!(!h.session.diagnostics().is_empty(), "{broken}");
+        h.assert_diagnostic(diagnostic);
+        h.update(path, &original);
+        h.assert_clean();
+    }
 }
 
 #[test]
 fn shape_change_relowers_only_the_edited_module() {
-    // Adding a field keeps the struct's NAME, so dependents' signatures still
-    // resolve it -- they need only re-inference, not re-lowering. The cascade must
-    // re-lower ONLY the edited module; regressing to the conservative closure
-    // would re-lower every interface dependent (a shared type touched 22
-    // modules vs 1). Deterministic guard via `relowered`.
+    // Adding a field keeps the struct's NAME, so dependents' signatures still resolve it --
+    // they need only re-inference, not re-lowering.
     let a = "struct P { x: int }";
     let b = "fn read(p: P) -> int { p.x }"; // P in signature (interface dep) AND body
     let mut h = Harness::new(&[("a.rock", a), ("b.rock", b)]);
@@ -820,29 +678,6 @@ fn shape_change_relowers_only_the_edited_module() {
         "a field add must re-lower only the edited module, not its dependents; got {relowered_mods:?}"
     );
     h.assert_clean(); // oracle held in h.update; defaulted field keeps b valid
-}
-
-#[test]
-fn oracle_dependent_body_type_ref_recovers_not_reverts() {
-    // A re-lowered dependent runs FULL body lowering. A body-position type ref to
-    // the removed type (`let x: Foo`) hits the fail-fast `TyPos::Body` arm -- but
-    // body recovery must catch it (the function keeps its signature, the body
-    // error is recorded), so `lower_modules` returns Ok and the edit COMMITS. If
-    // it instead `?`-aborted, rebuild_or_revert would revert and the oracle (which
-    // expects the broken, committed state) would diverge.
-    let a = "struct Foo { v: int }";
-    let b = "fn sig(f: Foo) -> int { let x: Foo = f\n x.v }"; // Foo in BOTH signature and body
-    let mut h = Harness::new(&[("a.rock", a), ("b.rock", b)]);
-    h.assert_clean();
-
-    h.update("a.rock", "fn nothing() -> int { 0 }"); // drop Foo
-    assert!(
-        !h.session.diagnostics().is_empty(),
-        "removing Foo must surface b's dangling references"
-    );
-
-    h.update("a.rock", a);
-    h.assert_clean();
 }
 
 #[test]
@@ -861,9 +696,6 @@ fn oracle_type_rename_cascades_both_directions() {
     h.assert_clean();
 }
 
-/// A body edit of a macro user takes `BodyOnly` and re-cooks just that file
-/// against the cached registry; an edit of the macro definition rebuilds the
-/// registry, and the user sees the new expansion.
 #[test]
 fn oracle_add_and_remove_macro_definition() {
     let plain = "fn f() -> int { 1 }";
@@ -891,20 +723,17 @@ fn oracle_macro_user_body_edit_and_macro_def_edit() {
     ]);
     h.assert_clean();
 
-    let r = h.update("use.rock", "fn quad() -> int { twice(base()) + 1 }");
-    assert_eq!(r.tier, UpdateTier::BodyOnly);
+    h.update_tier(
+        "use.rock",
+        "fn quad() -> int { twice(base()) + 1 }",
+        UpdateTier::BodyOnly,
+    );
     h.assert_clean();
 
     h.update("m.rock", &macro_def("(e) + (e) + (e)"));
     h.assert_clean();
 }
 
-/// Registry freshness across the cache boundary: after a macro-DEF change
-/// rebuilds the registry (`rebuild_users`), a later BODY edit of the user must
-/// cook against the NEW registry. Here the new macro produces a `string` while
-/// the user still annotates `-> int`, so a stale cached registry (old identity
-/// macro) would let the body edit type-check clean -- the fresh batch rejects
-/// it, and the Harness's incremental==fresh assertion catches the divergence.
 #[test]
 fn oracle_macro_def_retype_then_user_body_edit_sees_new_registry() {
     let mut h = Harness::new(&[
@@ -925,11 +754,10 @@ fn oracle_macro_def_retype_then_user_body_edit_sees_new_registry() {
 
 #[test]
 fn oracle_globals_survive_repeated_updates() {
-    // Regression: globals_by_name maps name -> TyId whose module is the
-    // TYPE's home (builtin int for `global G: int`), not the defining module,
-    // so a purge keyed on the ty's module left stale user globals behind and
-    // every rebuild after the first died with "duplicate global". Found by
-    // hand-running `rock watch example`.
+    // Regression: globals_by_name maps name -> TyId whose module is the TYPE's home (builtin
+    // int for `global G: int`), not the defining module, so a purge keyed on the ty's module
+    // left stale user globals behind and every rebuild after the first died with "duplicate
+    // global".
     let with_global = "
 global GRID_W: int = 8
 
@@ -960,11 +788,11 @@ fn session_body_update_metadata_separates_semantics_from_span_relocation() {
         "fn first() -> int {\n    1\n}\n\nfn second() -> int {\n    2\n}\n",
     )]);
 
-    let semantic = h.update(
+    let semantic = h.update_tier(
         "meta.rock",
         "fn first() -> int {\n    1\n}\n\nfn second() -> int {\n    222\n}\n",
+        UpdateTier::BodyOnly,
     );
-    assert_eq!(semantic.tier, UpdateTier::BodyOnly);
     assert!(!semantic.body_update.span_only);
     assert_eq!(semantic.body_update.semantic_bodies, semantic.reinferred);
     let edit = semantic.body_update.edit.expect("body edit metadata");
@@ -972,11 +800,9 @@ fn session_body_update_metadata_separates_semantics_from_span_relocation() {
     assert!(edit.byte_delta > 0, "the fixture must move later spans");
     assert!(edit.line_delta == 0);
 
-    let span_only = h.update(
+    let span_only = h.update_tier(
         "meta.rock",
-        "fn first() -> int {\n    1\n}\n\n// moved without a body change\n\nfn second() -> int {\n    222\n}\n",
-    );
-    assert_eq!(span_only.tier, UpdateTier::BodyOnly);
+        "fn first() -> int {\n    1\n}\n\n// moved without a body change\n\nfn second() -> int {\n    222\n}\n", UpdateTier::BodyOnly);
     assert!(span_only.body_update.span_only);
     assert!(span_only.body_update.semantic_bodies.is_empty());
     assert!(span_only.reinferred.is_empty());
@@ -995,12 +821,6 @@ fn session_interface_update_does_not_publish_body_metadata() {
     assert_ne!(result.tier, UpdateTier::BodyOnly);
     assert_eq!(result.body_update, Default::default());
 }
-
-// ---------------------------------------------------------------------------
-// Per-body eviction hazard fixtures: green under the current module rebuild,
-// these become the real guards once single-body eviction lands. Each targets
-// one failure mode of partial re-lowering.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn per_body_hazard_edit_above_shifts_sibling_spans() {
@@ -1047,7 +867,6 @@ fn body_edits_preserve_sibling_inference() {
     }
 }
 
-/// `type_at` at `offset` in `path` as `(rendered type, span.offset_range())`.
 fn type_and_span_at(h: &Harness, path: &str, offset: usize) -> Option<(String, (usize, usize))> {
     let ws = h.session.workspace();
     let mid = mid_for(ws, path);
@@ -1056,10 +875,6 @@ fn type_and_span_at(h: &Harness, path: &str, offset: usize) -> Option<(String, (
     Some((ws.render(ta.body, ta.ty), ta.span.offset_range()))
 }
 
-/// A length-changing edit to an earlier body shifts every later node. The kept
-/// bodies' stored spans must move by exactly the delta: a span off by the
-/// delta can still land inside a node of the same type, which the per-offset
-/// type profile cannot see, so this reads the span itself.
 #[test]
 fn body_edit_above_keeps_later_node_spans_exact() {
     let v0 = "\
@@ -1119,11 +934,6 @@ fn booly() -> bool {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Warm-module behavior: the stdlib is lowered + inferred once at
-// Session::new and never again.
-// ---------------------------------------------------------------------------
-
 fn stdlib_warm_modules() -> Vec<skull_parser::Ast> {
     rock_stdlib::stdlib_files()
         .iter()
@@ -1139,15 +949,13 @@ fn stdlib_warm_modules() -> Vec<skull_parser::Ast> {
 fn warm_stdlib_is_never_reinferred_by_updates() {
     let warm = stdlib_warm_modules();
     let warm_count = warm.len();
-    let mut session = Session::new(
+    let mut session = common::with_warm(
         warm,
         files(&[(
             "main.rock",
             "fn main() { let xs = vec_new() \n xs.push(1) \n print(\"{xs[0]}\") }",
         )]),
-        &bone_core::modules::NsAliases::default(),
-    )
-    .expect("session with warm stdlib");
+    );
     assert!(
         session.diagnostics().is_empty(),
         "stdlib-using program must check clean: {:?}",
@@ -1184,13 +992,6 @@ fn warm_stdlib_is_never_reinferred_by_updates() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Eviction-precision tests: a body edit re-infers only the edited module; an
-// interface edit re-infers only the edited module + its name-dependents.
-// ---------------------------------------------------------------------------
-
-/// A body edit re-lowers and re-infers only the edited body: not its
-/// siblings in the module, and not a caller in another file.
 #[test]
 fn body_edit_reinfers_and_relowers_only_the_edited_body() {
     let mut h = Harness::new(&[
@@ -1200,34 +1001,29 @@ fn body_edit_reinfers_and_relowers_only_the_edited_body() {
         ),
         ("n.rock", "fn d() -> int { c() }"),
     ]);
-    let result = h.update(
+    let result = h.update_tier(
         "m.rock",
         "fn a() -> int { 1 }\nfn b() -> int { 2 }\nfn c() -> int { 30 }",
+        UpdateTier::BodyOnly,
     );
-    assert_eq!(result.tier, UpdateTier::BodyOnly);
     assert_eq!(h.function_names(&result.reinferred), ["c"]);
     assert_eq!(h.function_names(&result.relowered), ["c"]);
     assert_eq!(result.reinferred.len(), 1);
 }
 
-/// A body edit drops the dependency it removed, while a remaining field access
-/// still invalidates its caller when the field type changes. The harness checks
-/// the session against a fresh batch build after every edit.
 #[test]
 fn body_edit_dependency_removal_preserves_field_dependency() {
     let mut h = Harness::new(&[("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)]);
     let b_mid = h.mid("b.rock");
     let no_factory_call = CROSS_FILE_B.replace("double_x(make_point(0, 0))", "42");
-    let body_edit = h.update("b.rock", &no_factory_call);
-    assert_eq!(body_edit.tier, UpdateTier::BodyOnly);
+    h.update_tier("b.rock", &no_factory_call, UpdateTier::BodyOnly);
     h.assert_clean();
 
     let changed_factory = CROSS_FILE_A.replace(
         "fn make_point(x: int, y: int) -> Point {",
         "fn make_point(x: int, y: int, z: int) -> Point {",
     );
-    let factory_edit = h.update("a.rock", &changed_factory);
-    assert_eq!(factory_edit.tier, UpdateTier::Interface);
+    let factory_edit = h.update_tier("a.rock", &changed_factory, UpdateTier::Interface);
     assert!(
         !Harness::reinferred_mids(&factory_edit).contains(&b_mid),
         "b.rock no longer depends on make_point"
@@ -1235,8 +1031,7 @@ fn body_edit_dependency_removal_preserves_field_dependency() {
     h.assert_clean();
 
     let changed_field = changed_factory.replace("x: int,", "x: string,");
-    let field_edit = h.update("a.rock", &changed_field);
-    assert_eq!(field_edit.tier, UpdateTier::Interface);
+    let field_edit = h.update_tier("a.rock", &changed_field, UpdateTier::Interface);
     assert!(
         Harness::reinferred_mids(&field_edit).contains(&b_mid),
         "b.rock still depends on Point through double_x's field access"
@@ -1247,8 +1042,6 @@ fn body_edit_dependency_removal_preserves_field_dependency() {
     h.assert_clean();
 }
 
-/// A signature or field-shape edit to a.rock re-infers b.rock, which calls
-/// `make_point` and reads `Point.x`, and leaves c.rock, which names neither.
 #[test]
 fn interface_edit_reinfers_only_dependents() {
     let edits = [
@@ -1277,8 +1070,7 @@ fn consume_annotation_edit_rechecks_dependent_bodies() {
     let mut h = Harness::new(&[("a.rock", without_consume), ("b.rock", consumer)]);
     h.assert_clean();
 
-    let result = h.update("a.rock", with_consume);
-    assert_eq!(result.tier, UpdateTier::Interface);
+    let result = h.update_tier("a.rock", with_consume, UpdateTier::Interface);
     assert!(
         result
             .reinferred
@@ -1291,10 +1083,8 @@ fn consume_annotation_edit_rechecks_dependent_bodies() {
     h.assert_diagnostic("consum");
 }
 
-// A parameter added to `shifted` moves every later entry of the module's type
-// arena, and `b.rock` holds inferred types that point into it. Those callers
-// must stay cached (they read nothing the edit changed) and still read valid
-// types, through repeated edits and the whole-module path a later edit takes.
+// A parameter added to `shifted` moves every later entry of the module's type arena, and
+// `b.rock` holds inferred types that point into it.
 #[test]
 fn signature_edit_reinfers_only_the_callers_of_the_edited_function() {
     let a = |extra: &str, body: &str| {
@@ -1315,33 +1105,27 @@ fn signature_edit_reinfers_only_the_callers_of_the_edited_function() {
         ("d.rock", d),
     ]);
 
-    let result = h.update("a.rock", &a(", y: int = 0", "v.a"));
-    assert_eq!(result.tier, UpdateTier::Interface);
+    let result = h.update_tier("a.rock", &a(", y: int = 0", "v.a"), UpdateTier::Interface);
     let mids = Harness::reinferred_mids(&result);
     assert!(mids.contains(&h.mid("c.rock")), "c.rock calls shifted");
     assert!(
         !mids.contains(&h.mid("b.rock")),
         "b.rock reads only `stable` and `Pair`, which the edit left alone"
     );
-    h.assert_matches_batch();
 
     let result = h.update("a.rock", &a(", y: int = 0, z: int = 1", "v.a"));
     assert!(!Harness::reinferred_mids(&result).contains(&h.mid("b.rock")));
-    h.assert_matches_batch();
 
     // Two bodies at once: the whole-module path re-lowers the file while b.rock
     // keeps its inference.
     let two_bodies = a(", y: int = 0, z: int = 1", "v.a + 1").replace("{ x }", "{ x + 1 }");
-    let result = h.update("a.rock", &two_bodies);
-    assert_eq!(result.tier, UpdateTier::BodyOnly);
-    h.assert_matches_batch();
+    h.update_tier("a.rock", &two_bodies, UpdateTier::BodyOnly);
 
-    let result = h.update(
+    h.update_tier(
         "b.rock",
         "fn calls_stable(p: Pair<int>) -> int { let q = stable(p)\n q.a + 1 }",
+        UpdateTier::BodyOnly,
     );
-    assert_eq!(result.tier, UpdateTier::BodyOnly);
-    h.assert_matches_batch();
     h.assert_clean();
 }
 
@@ -1360,7 +1144,6 @@ fn signature_edit_reports_only_the_bodies_it_rechecked() {
     let b = h.mid("b.rock");
     let in_b: Vec<_> = result.reinferred.iter().filter(|(m, _)| *m == b).collect();
     assert_eq!(in_b.len(), 1, "only calls_edited was re-checked: {in_b:?}");
-    h.assert_matches_batch();
 }
 
 // A signature edit that adds a function renumbers the later functions, and a
@@ -1374,17 +1157,10 @@ fn signature_edit_that_adds_a_function_reinfers_callers_of_the_later_ones() {
         ("b.rock", "fn use_later() -> int { later() }"),
     ]);
 
-    let result = h.update("a.rock", with);
-    assert_eq!(result.tier, UpdateTier::Scope);
+    let result = h.update_tier("a.rock", with, UpdateTier::Scope);
     assert!(Harness::reinferred_mids(&result).contains(&h.mid("b.rock")));
-    h.assert_matches_batch();
 }
 
-/// An edit that changes what a cross-file user reads -- a global's type, a
-/// macro's expansion, a newtype's wrapped type -- must reach that user, which
-/// now errors. A missed dependency keeps its stale clean inference and the
-/// oracle inside `update` diverges. A macro error is reported at the call
-/// site, since expansion retags expanded spans to the invocation.
 #[test]
 fn interface_edit_reaches_cross_file_users() {
     let cases = [
@@ -1411,15 +1187,6 @@ fn interface_edit_reaches_cross_file_users() {
         h.assert_diagnostic("user.rock: ");
     }
 }
-
-// ---------------------------------------------------------------------------
-// Fuzz oracle: random body / signature / delete / restore mutations over a
-// generated multi-file model, incremental==fresh checked after EVERY step
-// (the rock lesson: synthetic single-shot tests missed the deletion bug;
-// only the per-step comparison catches a missed invalidation). Runs under
-// debug assertions, so the generation tripwires double as a detector once
-// the narrowing starts bumping generations.
-// ---------------------------------------------------------------------------
 
 struct Rng(u64);
 
@@ -1452,9 +1219,6 @@ enum FuzzBody {
     Const(i64),
     Param,
     AddConst(i64),
-    /// Call `f<file>_<slot>` with the arg count the TARGET had at generation
-    /// time; later signature mutations may break the call — a legitimate
-    /// state whose diagnostics both sides must agree on.
     Call {
         file: usize,
         slot: usize,
@@ -1465,7 +1229,6 @@ enum FuzzBody {
 
 #[derive(Clone)]
 struct FuzzFn {
-    /// 1 or 2 int params; param 1 is `a`.
     arity: usize,
     body: FuzzBody,
 }
@@ -1474,8 +1237,6 @@ struct FuzzFn {
 struct FuzzFile {
     present: bool,
     global: Option<i64>,
-    /// Slot -> fn (None = deleted). At least one fn stays present per
-    /// present file so the file never renders item-less.
     fns: Vec<Option<FuzzFn>>,
 }
 
@@ -1555,8 +1316,6 @@ impl FuzzModel {
     }
 }
 
-/// One mutation step: pick something, change it, and return a description
-/// (used in the panic message so a failing seed/step is reproducible).
 fn fuzz_step(model: &mut FuzzModel, rng: &mut Rng, h: &mut Harness) -> String {
     let file = rng.pick(model.files.len());
     let kind = rng.pick(10);
@@ -1635,12 +1394,12 @@ fn fuzz_step(model: &mut FuzzModel, rng: &mut Rng, h: &mut Harness) -> String {
         _ => {
             // Body edit (most common, mirrors real editing).
             let body = model.random_body(rng);
-            match &mut model.files[file].fns[slot] {
-                Some(f) => f.body = body,
-                None => {
-                    model.files[file].fns[slot] = Some(FuzzFn { arity: 1, body });
-                }
-            }
+            model.files[file].fns[slot]
+                .get_or_insert(FuzzFn {
+                    arity: 1,
+                    body: FuzzBody::Param,
+                })
+                .body = body;
             desc = format!("edit body of f{file}_{slot}");
         }
     }
@@ -1650,9 +1409,6 @@ fn fuzz_step(model: &mut FuzzModel, rng: &mut Rng, h: &mut Harness) -> String {
     desc
 }
 
-/// One seeded fuzz run: generate a 3-file model, apply `steps` random
-/// mutations, and assert incremental == fresh after EVERY step (inside
-/// `h.update`/`h.remove`). Panics with the seed + last mutations on divergence.
 fn run_fuzz_session(seed: u64, steps: usize) {
     let mut rng = Rng::new(seed);
 
@@ -1661,20 +1417,13 @@ fn run_fuzz_session(seed: u64, steps: usize) {
             .map(|_| FuzzFile {
                 present: true,
                 global: Some(5),
-                fns: vec![
-                    Some(FuzzFn {
-                        arity: 1,
-                        body: FuzzBody::Param,
-                    }),
-                    Some(FuzzFn {
-                        arity: 1,
-                        body: FuzzBody::Const(1),
-                    }),
-                    Some(FuzzFn {
-                        arity: 2,
-                        body: FuzzBody::AddConst(2),
-                    }),
-                ],
+                fns: [
+                    (1, FuzzBody::Param),
+                    (1, FuzzBody::Const(1)),
+                    (2, FuzzBody::AddConst(2)),
+                ]
+                .map(|(arity, body)| Some(FuzzFn { arity, body }))
+                .into(),
             })
             .collect(),
     };
@@ -1704,54 +1453,13 @@ fn run_fuzz_session(seed: u64, steps: usize) {
     }
 }
 
-// Sweep many seeds for op-sequence breadth (add/remove/edit interleavings
-// exercise module-id reassignment, the soundness surface the module-arena
-// migration touches). One test per seed so the harness runs them in parallel.
-macro_rules! fuzz_session_synthetic_seeds {
-    ($($name:ident = $seed:literal),* $(,)?) => {$(
-        #[test]
-        fn $name() {
-            run_fuzz_session($seed, 120);
-        }
-    )*};
+#[test]
+fn fuzz_session_synthetic_seeds() {
+    (1..=32)
+        .into_par_iter()
+        .for_each(|seed| run_fuzz_session(seed, 120));
 }
 
-fuzz_session_synthetic_seeds! {
-    fuzz_session_synthetic_seed1 = 1,
-    fuzz_session_synthetic_seed2 = 2,
-    fuzz_session_synthetic_seed3 = 3,
-    fuzz_session_synthetic_seed4 = 4,
-    fuzz_session_synthetic_seed5 = 5,
-    fuzz_session_synthetic_seed6 = 6,
-    fuzz_session_synthetic_seed7 = 7,
-    fuzz_session_synthetic_seed8 = 8,
-    fuzz_session_synthetic_seed9 = 9,
-    fuzz_session_synthetic_seed10 = 10,
-    fuzz_session_synthetic_seed11 = 11,
-    fuzz_session_synthetic_seed12 = 12,
-    fuzz_session_synthetic_seed13 = 13,
-    fuzz_session_synthetic_seed14 = 14,
-    fuzz_session_synthetic_seed15 = 15,
-    fuzz_session_synthetic_seed16 = 16,
-    fuzz_session_synthetic_seed17 = 17,
-    fuzz_session_synthetic_seed18 = 18,
-    fuzz_session_synthetic_seed19 = 19,
-    fuzz_session_synthetic_seed20 = 20,
-    fuzz_session_synthetic_seed21 = 21,
-    fuzz_session_synthetic_seed22 = 22,
-    fuzz_session_synthetic_seed23 = 23,
-    fuzz_session_synthetic_seed24 = 24,
-    fuzz_session_synthetic_seed25 = 25,
-    fuzz_session_synthetic_seed26 = 26,
-    fuzz_session_synthetic_seed27 = 27,
-    fuzz_session_synthetic_seed28 = 28,
-    fuzz_session_synthetic_seed29 = 29,
-    fuzz_session_synthetic_seed30 = 30,
-    fuzz_session_synthetic_seed31 = 31,
-    fuzz_session_synthetic_seed32 = 32,
-}
-
-/// Reproduce one seed outside the default sweep: `ROCK_TEST_SEED=<n>`.
 #[test]
 #[ignore = "set ROCK_TEST_SEED=<n> and run with --ignored"]
 fn fuzz_session_synthetic_env_seed() {
@@ -1762,15 +1470,6 @@ fn fuzz_session_synthetic_env_seed() {
     run_fuzz_session(seed, 120);
 }
 
-/// Package-graph fuzz with the full warm stdlib, gated like the rock-side real
-/// fuzz: ROCK_FUZZ_REAL=1. Append/edit/revert text mutations only (no file
-/// deletion - real signatures cross files, and bone's interface lowering
-/// fail-fasts on those; the synthetic fuzz owns deletion). Coarse profile
-/// stride keeps wall time reasonable.
-///
-/// `true` when `text` carries a `#script` directive line, the files
-/// production dependency discovery skips. A line scan, not the preprocessor
-/// lexer; close enough for a tripwire (the fixture graph has none today).
 fn is_script_source(text: &str) -> bool {
     text.lines().any(|l| {
         let t = l.trim_start();
@@ -1872,17 +1571,7 @@ fn fuzz_session_fixture_package_graph() {
     }
 }
 
-// Repro for the LSP crash at rebuild_module's interface self-check
-// (session.rs:720). The body-edit FAST PATH (`relower_function_in_place`)
-// re-lowers the edited fn's SIGNATURE, appending its nominal param/return types
-// to the module `ty_arena` and orphaning the old entries -- so a re-lowered fn's
-// param `Idx<TypeExpr>` shifts and the arena grows even though the signature is
-// textually unchanged. A later MULTI-item body edit takes `rebuild_module`,
-// whose `debug_assert_eq!` compared the now-bloated cached interface against a
-// fresh clean lowering via raw Debug (indices + the whole arena) and panicked.
-// The self-check must compare type SHAPES, not arena indices. Nominal-typed
-// params (`P`) are required: builtin (`int`) params don't allocate into the
-// module arena, so they never trigger the drift.
+// Repro for the LSP crash at rebuild_module's interface self-check (session.rs:720).
 #[test]
 fn fastpath_arena_drift_is_not_an_interface_change() {
     let v = |fb: &str, gb: &str| {
@@ -1904,27 +1593,16 @@ fn g(p: P) -> int {{
     let mut h = Harness::new(&[("a.rock", &v(" ", " "))]);
 
     // 1) Single-fn body edit -> fast path -> `relower_function_in_place` bloats
-    //    `ty_arena` (appends `f`'s `P` param, orphans the old idx).
-    let r1 = h.update("a.rock", &v("  ", " "));
-    assert_eq!(r1.tier, UpdateTier::BodyOnly);
+    // `ty_arena` (appends `f`'s `P` param, orphans the old idx).
+    h.update_tier("a.rock", &v("  ", " "), UpdateTier::BodyOnly);
 
     // 2) Multi-fn body edit (both f and g change vs the stored edit-1 state) ->
-    //    `rebuild_module`, which runs the interface self-check against the
-    //    bloated cached arena. Must NOT report an interface change.
-    let r2 = h.update("a.rock", &v(" ", "  "));
-    assert_eq!(r2.tier, UpdateTier::BodyOnly);
+    // `rebuild_module`, which runs the interface self-check against the
+    // bloated cached arena. Must NOT report an interface change.
+    h.update_tier("a.rock", &v(" ", "  "), UpdateTier::BodyOnly);
 }
 
-// A body-only edit must NOT grow the module `ty_arena`. The fast path
-// (`rebuild_body_incremental` -> `bone-lower`'s `relower_function_in_place`)
-// reuses the unchanged signature's interface types (`lower_fn_body_into` only
-// allocates into the fresh `Body`) instead of re-lowering the signature -- which
-// would append fresh entries to `module.ty_arena` and orphan the old ones,
-// leaking one slot per edit and shifting the re-lowered fn's param
-// `Idx<TypeExpr>`. Nominal-typed params (`P`) are required: builtin (`int`)
-// params resolve to a shared builtin `TyId` and never allocate into the module
-// arena, so they wouldn't exercise the leak. Was a sentinel for the leak; flipped
-// to the correct assertion when the bone-lower reuse landed.
+// A body-only edit must NOT grow the module `ty_arena`.
 #[test]
 fn body_edit_does_not_grow_module_ty_arena() {
     let v = |fb: &str| {
@@ -1954,11 +1632,7 @@ fn f(p: P) -> int {{
     );
 }
 
-// STRESS (gated; `--ignored`). Empirical backstop for "memory does not grow with
-// edits": 100k single-function body edits must leave every per-module collection
-// flat. Arenas are the deterministic oracle (RSS is allocator-noisy). Covers the
-// leak-prone shape (nominal-typed signatures across several fns). The cheap
-// `body_edit_does_not_grow_module_ty_arena` is the always-on version.
+// STRESS (gated; `--ignored`).
 #[test]
 #[ignore = "stress test: 100k edits take minutes; run with --ignored"]
 fn stress_100k_edits_arena_flat() {
@@ -2020,13 +1694,7 @@ fn stress_100k_edits_arena_flat() {
     );
 }
 
-// Regression for the lower-error-path leak + stale-diagnostic bug. A body-only
-// relower mutates the module in place; the old flat `lowering_errors` Vec was
-// append-only, so toggling a body through a LOWERING error (unknown type
-// annotation) accumulated errors AND left them stale after the body was fixed.
-// Now keyed by body and REPLACED on each relower. The `Harness` oracle compares
-// incremental vs fresh diagnostics after every edit, so a stale/duplicate error
-// diverges; the explicit assertion pins the no-accumulation + clear-on-fix.
+// Regression for the lower-error-path leak + stale-diagnostic bug.
 #[test]
 fn body_lower_errors_are_replaced_not_accumulated() {
     let v = |b: &str| format!("struct P {{ x: int }}\nfn f(p: P) -> int {{\n{b}\n}}\n");
@@ -2063,10 +1731,8 @@ fn body_lower_errors_are_replaced_not_accumulated() {
     }
 }
 
-// A global's INIT VALUE is its body: editing it (same type) is a BodyOnly edit,
-// so a `const` hot-reloads through the cheap overlay instead of a full rebuild.
-// The global's whole-item text was previously the iface_hash (no body_hash), so
-// any value edit mis-classified as Interface (full `main.lua` rebuild).
+// A global's INIT VALUE is its body: editing it (same type) is a BodyOnly edit, so a `const`
+// hot-reloads through the cheap overlay instead of a full rebuild.
 #[test]
 fn const_value_edit_is_body_only() {
     use bone_semantic::hir::BodyOwner;
@@ -2118,8 +1784,6 @@ fn value_and_keyword_edits_on_globals_are_interface() {
     }
 }
 
-/// ALIASING is whole-program: editing only the callee's file must change the
-/// verdict at the unchanged caller's element-reference call, both ways.
 #[test]
 fn relocation_verdict_follows_an_edit_to_the_callee() {
     let clean_callee =
@@ -2133,12 +1797,10 @@ fn relocation_verdict_follows_an_edit_to_the_callee() {
             .filter(|e| e.message.contains("relocatable Vec or Map element"))
             .count()
     };
-    let mut session = Session::new(
+    let mut session = common::with_warm(
         stdlib_warm_modules(),
         files(&[("cell.rock", clean_callee), ("main.rock", caller)]),
-        &bone_core::modules::NsAliases::default(),
-    )
-    .expect("session");
+    );
     assert_eq!(relocations(&session), 0, "{:?}", session.diagnostics());
 
     session
@@ -2152,11 +1814,6 @@ fn relocation_verdict_follows_an_edit_to_the_callee() {
     assert_eq!(relocations(&session), 0, "{:?}", session.diagnostics());
 }
 
-/// A diff that starts and ends inside one body can still add an item: the
-/// common suffix of `return 0\n}` and `return 2\n}` puts the whole insertion
-/// inside `lonely`'s old body. The single-item reparse stops after `lonely`,
-/// so the fast path must notice the unparsed `trailing` and take the full
-/// route instead of dropping it.
 #[test]
 fn oracle_body_edit_that_appends_an_item_is_not_body_only() {
     let v1 = "fn added(q: int) -> int {\n    return lonely(q)\n}\n\nfn lonely(z: int) -> int {\n    let idle = z\n    return 0\n}\n";
