@@ -19,7 +19,6 @@ enum Complex {
     Mixed(int, name: string, active: bool),
 }
 
-// Test wildcard patterns
 @test
 fn test_wildcard_pattern() {
     let opt: Option<int> = Option::Some(42)
@@ -31,7 +30,6 @@ fn test_wildcard_pattern() {
     assert_eq(result, "matched wildcard")
 }
 
-// Test literal patterns
 @test
 fn test_literal_patterns() {
     let num = 42
@@ -63,31 +61,24 @@ fn test_literal_patterns() {
     assert_eq(status, "on")
 }
 
-// Test nested enum patterns
 @test
 fn test_nested_enum_patterns() {
-    let result: Result<Option<int>, string> = Result::Ok(Option::Some(42))
-    
-    let value = match result {
-        Result::Ok(Option::Some(n)) => n,
-        Result::Ok(Option::None) => 0,
-        Result::Err(e) => -1,
+    let cases: [(Result<Option<int>, string>, int)] = [
+        (Result::Ok(Option::Some(42)), 42),
+        (Result::Ok(Option::None), 0),
+        (Result::Err("failure"), -1),
+    ]
+
+    for (result, expected) in cases {
+        let value = match result {
+            Result::Ok(Option::Some(n)) => n,
+            Result::Ok(Option::None) => 0,
+            Result::Err(e) => -1,
+        }
+        assert_eq(value, expected)
     }
-    
-    assert_eq(value, 42)
-    
-    // Test with None
-    let none_opt: Option<int> = Option::None
-    let result2: Result<Option<int>, string> = Result::Ok(none_opt)
-    let value2 = match result2 {
-        Result::Ok(Option::Some(n)) => n,
-        Result::Ok(Option::None) => 0,
-        Result::Err(e) => -1,
-    }
-    assert_eq(value2, 0)
 }
 
-// Test pattern variable binding
 @test
 fn test_pattern_variable_binding() {
     let complex = Complex::Tuple(42, "test")
@@ -122,7 +113,6 @@ enum Toggle {
     Off,
 }
 
-// Test exhaustiveness edge cases
 @test
 fn test_exhaustiveness_edge_cases() {
     // Single variant enum should be exhaustive with just that variant
@@ -141,7 +131,6 @@ fn test_exhaustiveness_edge_cases() {
     assert(state)
 }
 
-// Test pattern matching with different types
 @test
 fn test_pattern_type_checking() {
     let opt_int: Option<int> = Option::Some(42)
@@ -161,7 +150,6 @@ fn test_pattern_type_checking() {
     assert_eq(string_result, "hello")
 }
 
-// Test enum equality with complex variants
 @test
 fn test_complex_enum_equality() {
     let c1 = Complex::Tuple(42, "test")
@@ -188,7 +176,6 @@ enum Tree<T> {
     Branch(Tree<T>, Tree<T>),
 }
 
-// Test deeply nested patterns
 @test
 fn test_deeply_nested_patterns() {
     let tree: Tree<int> = Tree::Branch(
@@ -218,7 +205,6 @@ fn extract_or_default(opt: Option<int>) -> int {
     }
 }
 
-// Test pattern matching in different contexts
 @test
 fn test_pattern_contexts() {
     let values = [Option::Some(1), Option::None, Option::Some(2)]
@@ -242,8 +228,6 @@ fn test_pattern_contexts() {
 fn test_if_let_enum_workaround() {
     let opt = Option::Some(42)
     
-    // Since we can't do pattern matching in if-let yet,
-    // let's use match expression instead
     let result = match opt {
         Some(value) => value * 2,
         None => 0,

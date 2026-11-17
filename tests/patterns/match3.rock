@@ -227,9 +227,6 @@ fn test_cross_match() {
 fn test_gravity_simple() {
     setup_empty_board()
     // Column 3: tile at top, empties below, tiles at bottom
-    for y in 0..GRID_H {
-        grid_set(3, y, -1) // clear column
-    }
     grid_set(3, 0, 5)  // tile at top
     grid_set(3, 7, 2)  // tile at bottom
     apply_gravity()
@@ -241,9 +238,6 @@ fn test_gravity_simple() {
 @test
 fn test_gravity_preserves_order() {
     setup_empty_board()
-    for y in 0..GRID_H {
-        grid_set(0, y, -1)
-    }
     grid_set(0, 0, 1) // top
     grid_set(0, 2, 2) // middle (with gap)
     grid_set(0, 4, 3) // lower (with gap)
