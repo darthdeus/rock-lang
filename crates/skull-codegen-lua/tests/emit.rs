@@ -41,6 +41,10 @@ fn stdlib_workspace(src: &str) -> (Workspace, ModuleId) {
     (ws, mid)
 }
 
+fn declared_name_matches(name: ustr::Ustr, expected: &str) -> bool {
+    skull_mir::mangle::declared_name(name.as_str()) == expected
+}
+
 fn test_fn(
     ws: &Workspace,
     mid: ModuleId,
@@ -49,7 +53,7 @@ fn test_fn(
     ws.module(mid)
         .functions
         .iter()
-        .find(|(_, f)| f.name.as_str() == name)
+        .find(|(_, f)| declared_name_matches(f.name, name))
         .expect("function by name")
         .0
 }
@@ -128,7 +132,7 @@ fn emit_dump_with(
     let (fid, _) = m
         .functions
         .iter()
-        .find(|(_, f)| f.name.as_str() == fn_name)
+        .find(|(_, f)| declared_name_matches(f.name, fn_name))
         .expect("function by name");
     let (func, interner) = common::lower_test_ref(&ws, mid, fid)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
@@ -479,7 +483,7 @@ fn numeric_selection_clamp_keeps_mutable_frame_bounds() {
         .module(mid)
         .functions
         .iter()
-        .find(|(_, f)| f.name == "choose")
+        .find(|(_, f)| declared_name_matches(f.name, "choose"))
         .unwrap()
         .0;
     let (mut func, interner) = common::lower_test_ref(&ws, mid, fid).expect("lower");
@@ -1756,7 +1760,10 @@ fn callee_binding_ignores_calls_removed_by_cleanup() {
         let is_discarded = |inst: &Inst| {
             matches!(inst,
                 Inst::Call { func: callee, .. }
-                    if ws.module(callee.module).functions[callee.func].name.as_str() == "discarded"
+                    if declared_name_matches(
+                        ws.module(callee.module).functions[callee.func].name,
+                        "discarded",
+                    )
             )
         };
         assert!(
@@ -2923,7 +2930,7 @@ fn emit_framed_let(src: &str, fn_name: &str, field: &str) -> String {
         .module(mid)
         .functions
         .iter()
-        .find(|(_, f)| f.name.as_str() == fn_name)
+        .find(|(_, f)| declared_name_matches(f.name, fn_name))
         .unwrap()
         .0;
     let (mut func, interner) = common::lower_test_ref(&ws, mid, fid).expect("lower");
