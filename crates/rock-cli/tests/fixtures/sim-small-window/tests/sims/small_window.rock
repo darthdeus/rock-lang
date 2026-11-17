@@ -10,7 +10,7 @@ fn small_window_capture_helper() {
 }
 
 fn small_window_recursive_helper() {
-    small_window_capture_helper()
+    let _callback = small_window_capture_helper
 }
 
 @sim
