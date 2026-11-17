@@ -13,3 +13,30 @@ fn f() -> int {
     5
 }
 
+
+//=== TEST CASE: break_inside_lambda_in_loop_Generic ===
+//! expect: only valid inside a loop body
+// A lambda body is not the enclosing loop's body: it runs when called. The
+// enclosing loop must not make `break`/`continue` legal inside it (this used
+// to type-check and then crash the compiler).
+fn main() {
+    for i in [1, 2] {
+        let g = () => {
+            break
+        }
+        g()
+    }
+}
+
+//=== TEST CASE: continue_inside_lambda_in_loop_Generic ===
+//! expect: only valid inside a loop body
+fn main() {
+    let x: int? = null
+    for i in [1, 2] {
+        let g = () => {
+            let v = x else { continue }
+            v
+        }
+        print(g())
+    }
+}

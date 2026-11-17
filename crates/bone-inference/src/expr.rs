@@ -205,7 +205,7 @@ pub(crate) fn infer_statement(
                             comp_error!(
                                 c.body.expr_spans[else_e],
                                 "the `else` block of `let ... else` must diverge: end it with \
-                                 `return`, `break`, `continue`, or a call that never returns"
+                                 `return`, `break` or `continue`"
                             );
                         }
                     }

@@ -81,6 +81,9 @@ pub(crate) fn infer_lambda(
         matches!(*gamma.get(r), TypeExpr::Builtin(BuiltinTy::Unit))
     });
 
+    // A lambda body is not the enclosing loop's body -- it runs when the
+    // lambda is CALLED -- so `break`/`continue` inside it is out of any loop.
+    let saved_loop_depth = std::mem::replace(&mut gamma.loop_depth, 0);
     let saved_ret = gamma.declared_ret_ty.replace(ret_var);
     let saved_returns = gamma.lambda_returns.replace(Vec::new());
     let saved_coro = gamma.coroutine_ret.take();
@@ -104,6 +107,7 @@ pub(crate) fn infer_lambda(
         infer_expr(c, gamma, body)
     };
     gamma.refined_nonnull.extend(saved_globals);
+    gamma.loop_depth = saved_loop_depth;
     gamma.coroutine_ret = saved_coro;
     gamma.declared_ret_ty = saved_ret;
     let returns = std::mem::replace(&mut gamma.lambda_returns, saved_returns).unwrap_or_default();
