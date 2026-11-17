@@ -3,7 +3,7 @@
 //! solution everywhere.
 
 use bone_semantic::hir::{BuiltinTy, TypeCtor, TypeExpr};
-use bone_semantic::prelude::{BodyInference, TyId, Workspace};
+use bone_semantic::prelude::{Arena, BodyInference, Idx, TyId, Workspace};
 use ustr::Ustr;
 
 /// The node behind `ty`; `Error` for a `Local` type without its body.
@@ -94,5 +94,19 @@ pub(crate) fn sole_arg_name(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId
     match (args.next(), args.next()) {
         (Some(arg), None) => nominal_name(ws, bi, arg),
         _ => None,
+    }
+}
+
+/// A lowered annotation's nominal constructor, before inference substitution.
+pub(crate) fn annotation_nominal(arena: &Arena<TypeExpr>, mut idx: Idx<TypeExpr>) -> Option<Ustr> {
+    loop {
+        match arena[idx] {
+            TypeExpr::Nullable(inner) => idx = inner,
+            TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                ..
+            } => return Some(name),
+            _ => return None,
+        }
     }
 }

@@ -299,20 +299,9 @@ pub(crate) fn materialize_cand(
                 CompletionSymbol::Function { .. } | CompletionSymbol::Macro { .. } => {
                     (Some(format!("{name}()")), None)
                 }
-                CompletionSymbol::Variant { .. } if pattern => (None, None),
-                CompletionSymbol::Variant { shape, .. } => match shape {
-                    crate::query::VariantShape::Tuple if strip_call => {
-                        (Some(name.to_string()), None)
-                    }
-                    crate::query::VariantShape::Tuple => {
-                        (Some(format!("{name}($0)")), Some(InsertTextFormat::SNIPPET))
-                    }
-                    crate::query::VariantShape::Record => (
-                        Some(format!("{name} {{ $0 }}")),
-                        Some(InsertTextFormat::SNIPPET),
-                    ),
-                    _ => (None, None),
-                },
+                CompletionSymbol::Variant { shape, .. } => {
+                    variant_insert(name, shape, pattern, strip_call)
+                }
                 _ => (None, None),
             };
             CompletionItem {
@@ -326,24 +315,12 @@ pub(crate) fn materialize_cand(
                 ..Default::default()
             }
         }
-        CandShape::EntitySynth { payload } => {
-            let (label, insert, fmt) = match payload {
-                Some(p) => (format!("Entity<{p}>"), format!("Entity<{p}>"), None),
-                None => (
-                    "Entity<>".to_string(),
-                    "Entity<$0>".to_string(),
-                    Some(InsertTextFormat::SNIPPET),
-                ),
-            };
-            CompletionItem {
-                label,
-                kind: Some(CompletionItemKind::STRUCT),
-                insert_text: Some(insert),
-                insert_text_format: fmt,
-                sort_text,
-                ..Default::default()
-            }
-        }
+        CandShape::EntitySynth { payload } => type_template(
+            "Entity",
+            payload.as_ref().map(|name| name.as_str()),
+            CompletionItemKind::STRUCT,
+            sort_text,
+        ),
         CandShape::NamedArg { pname, pty } => CompletionItem {
             label: format!("{pname}:"),
             kind: Some(CompletionItemKind::FIELD),
@@ -358,44 +335,18 @@ pub(crate) fn materialize_cand(
             sort_text,
             ..Default::default()
         },
-        CandShape::Coroutine { with_wait } => {
-            let (label, insert, fmt) = if with_wait {
-                ("Coroutine<Wait>", "Coroutine<Wait>", None)
-            } else {
-                (
-                    "Coroutine<>",
-                    "Coroutine<$0>",
-                    Some(InsertTextFormat::SNIPPET),
-                )
-            };
-            CompletionItem {
-                label: label.to_string(),
-                kind: Some(CompletionItemKind::STRUCT),
-                insert_text: Some(insert.to_string()),
-                insert_text_format: fmt,
-                sort_text,
-                ..Default::default()
-            }
-        }
-        CandShape::CoReturn { has_wait } => {
-            let (label, insert, fmt) = if has_wait {
-                ("-> Coroutine<Wait>", "-> Coroutine<Wait>", None)
-            } else {
-                (
-                    "-> Coroutine<>",
-                    "-> Coroutine<$0>",
-                    Some(InsertTextFormat::SNIPPET),
-                )
-            };
-            CompletionItem {
-                label: label.to_string(),
-                kind: Some(CompletionItemKind::SNIPPET),
-                insert_text: Some(insert.to_string()),
-                insert_text_format: fmt,
-                sort_text,
-                ..Default::default()
-            }
-        }
+        CandShape::Coroutine { with_wait } => type_template(
+            "Coroutine",
+            with_wait.then_some("Wait"),
+            CompletionItemKind::STRUCT,
+            sort_text,
+        ),
+        CandShape::CoReturn { has_wait } => type_template(
+            "-> Coroutine",
+            has_wait.then_some("Wait"),
+            CompletionItemKind::SNIPPET,
+            sort_text,
+        ),
         CandShape::Reach {
             final_ty,
             is_method,
@@ -476,6 +427,42 @@ pub(crate) fn materialize_cand(
             sort_text,
             ..Default::default()
         },
+    }
+}
+
+fn type_template(
+    ctor: &str,
+    payload: Option<&str>,
+    kind: CompletionItemKind,
+    sort_text: Option<String>,
+) -> CompletionItem {
+    CompletionItem {
+        label: format!("{ctor}<{}>", payload.unwrap_or("")),
+        kind: Some(kind),
+        insert_text: Some(format!("{ctor}<{}>", payload.unwrap_or("$0"))),
+        insert_text_format: payload.is_none().then_some(InsertTextFormat::SNIPPET),
+        sort_text,
+        ..Default::default()
+    }
+}
+
+pub(crate) fn variant_insert(
+    name: &str,
+    shape: crate::query::VariantShape,
+    pattern: bool,
+    strip_call: bool,
+) -> (Option<String>, Option<InsertTextFormat>) {
+    use crate::query::VariantShape;
+    match (pattern, shape) {
+        (false, VariantShape::Tuple) if strip_call => (Some(name.to_string()), None),
+        (false, VariantShape::Tuple) => {
+            (Some(format!("{name}($0)")), Some(InsertTextFormat::SNIPPET))
+        }
+        (false, VariantShape::Record) => (
+            Some(format!("{name} {{ $0 }}")),
+            Some(InsertTextFormat::SNIPPET),
+        ),
+        _ => (None, None),
     }
 }
 

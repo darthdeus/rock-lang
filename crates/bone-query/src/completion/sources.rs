@@ -1129,17 +1129,8 @@ pub(crate) fn enum_qualified_completions(
         .enumerate()
         .filter(|(_, (v, _))| none_match || matches_prefix(v))
         .map(|(i, (v, shape))| {
-            use crate::query::VariantShape;
-            let (insert_text, insert_text_format) = match (pattern, shape) {
-                (false, VariantShape::Tuple) => {
-                    (Some(format!("{v}($0)")), Some(InsertTextFormat::SNIPPET))
-                }
-                (false, VariantShape::Record) => (
-                    Some(format!("{v} {{ $0 }}")),
-                    Some(InsertTextFormat::SNIPPET),
-                ),
-                _ => (None, None),
-            };
+            let (insert_text, insert_text_format) =
+                super::select::variant_insert(&v, shape, pattern, false);
             CompletionItem {
                 sort_text: Some(closed_set_sort_text(&v, prefix.as_bytes(), 0, i)),
                 label: v,

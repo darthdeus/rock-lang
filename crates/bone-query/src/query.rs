@@ -28,7 +28,7 @@ struct ResolvedPosition<'a> {
     owner: Option<hir::BodyOwner>,
     body: Option<&'a Body>,
     bi: Option<&'a BodyInference>,
-    nodes: [Option<NodeRef>; 3],
+    node: Option<NodeRef>,
 }
 
 impl<'a> ResolvedPosition<'a> {
@@ -37,34 +37,29 @@ impl<'a> ResolvedPosition<'a> {
         mid: ModuleId,
         inf: Option<&'a InferenceResult>,
         offset: usize,
+        policy: NodePolicy,
     ) -> Option<Self> {
         let module = ws.modules.get(mid.index())?;
         let owner = module.body_at(offset);
         let body = owner.and_then(|owner| module.bodies.get(&owner));
         let bi = owner.and_then(|owner| inf?.per_fn.get(&owner));
-        let mut nodes = [None; 3];
-        if let Some(body) = body {
-            let mut ranks = [None; 3];
-            for iv in body.node_index().find(offset, offset + 1) {
-                let width = iv.stop - iv.start;
-                let uninformative = bi.map_or(0, |bi| node_ty_uninformative(ws, bi, iv.val));
-                let keys = [
-                    (false, 0, width),
-                    (false, uninformative, width),
-                    (
-                        !definition_node_name_contains(body, iv.val, offset),
-                        uninformative,
-                        width,
-                    ),
-                ];
-                for (i, key) in keys.into_iter().enumerate() {
-                    if ranks[i].is_none_or(|rank| key < rank) {
-                        ranks[i] = Some(key);
-                        nodes[i] = Some(iv.val);
-                    }
-                }
-            }
-        }
+        let node = body.and_then(|body| {
+            body.node_index()
+                .find(offset, offset + 1)
+                .min_by_key(|iv| {
+                    let uninformative = || bi.map_or(0, |bi| node_ty_uninformative(ws, bi, iv.val));
+                    let (outside_name, uninformative) = match policy {
+                        NodePolicy::Narrowest => (false, 0),
+                        NodePolicy::Hover => (false, uninformative()),
+                        NodePolicy::Definition => (
+                            !definition_node_name_contains(body, iv.val, offset),
+                            uninformative(),
+                        ),
+                    };
+                    (outside_name, uninformative, iv.stop - iv.start)
+                })
+                .map(|iv| iv.val)
+        });
         Some(Self {
             ws,
             mid,
@@ -73,16 +68,12 @@ impl<'a> ResolvedPosition<'a> {
             owner,
             body,
             bi,
-            nodes,
+            node,
         })
     }
 
-    fn node(&self, policy: NodePolicy) -> Option<NodeRef> {
-        self.nodes[policy as usize]
-    }
-
     fn binding(&self) -> Option<Idx<hir::BindingInfo>> {
-        binding_of_node(self.body?, self.node(NodePolicy::Narrowest)?)
+        binding_of_node(self.body?, self.node?)
     }
 }
 
@@ -92,14 +83,14 @@ pub fn definition_at(
     inf: &InferenceResult,
     offset: usize,
 ) -> Option<Span> {
-    let at = ResolvedPosition::new(ws, mid, Some(inf), offset)?;
+    let at = ResolvedPosition::new(ws, mid, Some(inf), offset, NodePolicy::Definition)?;
     let body = at.body?;
     if let Some(span) = pattern_field_def(ws, body, offset) {
         return Some(span);
     }
     let def_bi = at.bi;
     let owner = at.owner?;
-    match at.node(NodePolicy::Definition)? {
+    match at.node? {
         // Cursor on a decl itself
         NodeRef::Binding(b) => body.binding_spans.get(b).copied(),
 
@@ -396,14 +387,14 @@ pub fn hover_at(
     offset: usize,
     sources: Option<&SourceMap>,
 ) -> Option<(String, Span)> {
-    let at = ResolvedPosition::new(ws, mid, Some(inf), offset)?;
+    let at = ResolvedPosition::new(ws, mid, Some(inf), offset, NodePolicy::Hover)?;
     let module = at.module;
     let frag = crate::modules_scope::fragment(ws, module.file)?;
     if let (Some(body), Some(bi)) = (at.body, at.bi) {
         if let Some(hit) = hover_record_pat(ws, body, offset) {
             return Some(hit);
         }
-        if let Some(node) = at.node(NodePolicy::Hover) {
+        if let Some(node) = at.node {
             match node {
                 NodeRef::Expr(e) => {
                     let span = *body.expr_spans.get(e)?;
@@ -1145,7 +1136,7 @@ impl ResolvedPosition<'_> {
                 }
             }
         }
-        let NodeRef::StaticTy { mid, idx } = self.node(NodePolicy::Narrowest)? else {
+        let NodeRef::StaticTy { mid, idx } = self.node? else {
             return None;
         };
         let arena = &self.ws.modules.get(mid.index())?.ty_arena;
@@ -1253,7 +1244,7 @@ impl ResolvedPosition<'_> {
             }
         }
         if let Some(body) = self.body {
-            let selected = self.node(NodePolicy::Narrowest);
+            let selected = self.node;
             let nominal = match selected {
                 Some(NodeRef::StaticTy { mid, idx }) => {
                     let module = ws.modules.get(mid.index())?;
@@ -1446,7 +1437,7 @@ pub fn references<'t>(
     text_of: TextOf<'_, 't>,
     fn_scope: FnRefScope,
 ) -> Vec<RefSite> {
-    let mut sites = ResolvedPosition::new(ws, mid, Some(inf), offset)
+    let mut sites = ResolvedPosition::new(ws, mid, Some(inf), offset, NodePolicy::Narrowest)
         .and_then(|at| at.symbol(text_of))
         .map_or_else(Vec::new, |symbol| {
             symbol.sites(ws, mid, offset, text_of, fn_scope)
@@ -1485,7 +1476,9 @@ pub(crate) fn rename_subject<'t>(
     offset: usize,
     text_of: TextOf<'_, 't>,
 ) -> RenameSubject {
-    match ResolvedPosition::new(ws, mid, Some(inf), offset).and_then(|at| at.symbol(text_of)) {
+    match ResolvedPosition::new(ws, mid, Some(inf), offset, NodePolicy::Narrowest)
+        .and_then(|at| at.symbol(text_of))
+    {
         Some(RefTarget::Binding(..)) => RenameSubject::Binding,
         Some(RefTarget::Function(fmid, fid)) => {
             RenameSubject::Function(ws.module(fmid).functions[fid].name)
@@ -1939,31 +1932,16 @@ fn for_each_nominal_annotation(
     name: Ustr,
     f: &mut impl FnMut(&Span),
 ) {
-    let on_nominal = |te: &hir::TypeExpr| matches!(te, hir::TypeExpr::App { ctor: hir::TypeCtor::Nominal(n), .. } if *n == name);
     for iv in body.node_index().iter() {
-        // A `Mob?` annotation is ONE node whose TypeExpr is Nullable(inner)
-        // with no separate node for the inner nominal -- unwrap before the
-        // match so nullable forms rename too (the name still leads the span,
-        // so the leading-name clip below lands on the identifier).
-        let hit = match iv.val {
-            NodeRef::StaticTy { mid: tmid, idx } => {
-                ws.modules.get(tmid.index()).is_some_and(|tm| {
-                    let mut te = &tm.ty_arena[idx];
-                    while let hir::TypeExpr::Nullable(i) = te {
-                        te = &tm.ty_arena[*i];
-                    }
-                    on_nominal(te)
-                })
-            }
-            NodeRef::LocalTy(idx) => {
-                let mut te = &body.lowered_tys[idx];
-                while let hir::TypeExpr::Nullable(i) = te {
-                    te = &body.lowered_tys[*i];
-                }
-                on_nominal(te)
-            }
-            _ => false,
+        let nominal = match iv.val {
+            NodeRef::StaticTy { mid, idx } => ws
+                .modules
+                .get(mid.index())
+                .and_then(|module| types::annotation_nominal(&module.ty_arena, idx)),
+            NodeRef::LocalTy(idx) => types::annotation_nominal(&body.lowered_tys, idx),
+            _ => None,
         };
+        let hit = nominal == Some(name);
         if hit {
             f(&Span::new(file, (0, 0), (0, 0), (iv.start, iv.stop)));
         }
@@ -1977,7 +1955,7 @@ fn span_contains(span: &Span, offset: usize) -> bool {
 }
 
 /// Every generic parameter a module declares on its fns, structs and enums.
-fn declared_generics(module: &hir::Module) -> impl Iterator<Item = &TyId> {
+pub(crate) fn declared_generics(module: &hir::Module) -> impl Iterator<Item = &TyId> {
     module
         .functions
         .values()
@@ -2006,7 +1984,8 @@ fn generic_decl_span(ws: &Workspace, gmid: ModuleId, gidx: Idx<hir::TypeExpr>) -
 
 /// The declaration of the generic parameter the cursor is on.
 pub(crate) fn generic_param_def(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Span> {
-    let (gmid, gidx) = ResolvedPosition::new(ws, mid, None, offset)?.generic()?;
+    let (gmid, gidx) =
+        ResolvedPosition::new(ws, mid, None, offset, NodePolicy::Narrowest)?.generic()?;
     generic_decl_span(ws, gmid, gidx)
 }
 
@@ -4183,20 +4162,6 @@ impl CompletionEntry {
         match self.symbol {
             CompletionSymbol::Function { key, .. } => key,
             _ => self.name,
-        }
-    }
-
-    pub(crate) fn ty(&self) -> Option<TyId> {
-        match self.symbol {
-            CompletionSymbol::Variable { ty, .. } => ty,
-            _ => None,
-        }
-    }
-
-    pub(crate) fn variant_enum(&self) -> Option<Ustr> {
-        match self.symbol {
-            CompletionSymbol::Variant { enum_key, .. } => Some(enum_key),
-            _ => None,
         }
     }
 

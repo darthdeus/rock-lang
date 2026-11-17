@@ -809,65 +809,42 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
     /// The typed ladder: 0 = a value (or variant) of the expected type, 1 = a
     /// fn returning it, 2 = else; all 0 when no type is inferable.
     fn type_rank(&mut self, c: &crate::query::CompletionEntry) -> u8 {
+        use crate::query::CompletionSymbol;
         let ws = self.g.ws;
-        if let Some(pe) = self.pattern_enum {
-            // Pattern slot: only a variant of the scrutinee's enum IS a
-            // pattern of the expected type (locals/fns don't pattern-match;
-            // they stay offered but below, fail-open). The variant carries
-            // its canonical enum key separately from its display detail.
-            return match c.kind() {
-                SymCat::Variant if c.variant_enum().is_some_and(|key| key.as_str() == pe) => 0,
+        if let Some(expected) = self.pattern_enum {
+            return match c.symbol {
+                CompletionSymbol::Variant { enum_key, .. } if enum_key.as_str() == expected => 0,
                 _ => 2,
             };
         }
         if self.for_in {
-            // ForIn slot: an ITERABLE value rides rung 0, a fn returning one
-            // rung 1 -- the expected-type ladder with a type PREDICATE
-            // instead of a single slot type.
             let Some(oracle) = self.for_in_oracle.as_mut() else {
                 return 2;
             };
-            return match c.kind() {
-                SymCat::Local | SymCat::Param | SymCat::Global
-                    if c.ty().is_some_and(|t| oracle.iterable(t)) =>
-                {
-                    0
-                }
-                SymCat::Function
-                    if fn_unique_return_ty_in_scope(ws, c.key().as_str(), self.g.frag)
-                        .is_some_and(|t| oracle.iterable(t)) =>
+            return match c.symbol {
+                CompletionSymbol::Variable { ty: Some(ty), .. } if oracle.iterable(ty) => 0,
+                CompletionSymbol::Function { key, .. }
+                    if fn_unique_return_ty_in_scope(ws, key.as_str(), self.g.frag)
+                        .is_some_and(|ty| oracle.iterable(ty)) =>
                 {
                     1
                 }
                 _ => 2,
             };
         }
-        let Some(exp) = self.expected.as_deref_mut() else {
-            // No expected type: the kind ladder is the whole bucket.
+        let Some(expected) = self.expected.as_deref_mut() else {
             return 0;
         };
-        let def_key = c.key();
-        match c.kind() {
-            // A local/param/global whose type COERCES into the expected slot
-            // (bone's real relation: generics instantiate, `int` fits
-            // `int?`/`float`/`any`), OR an enum variant whose enum is the
-            // slot's nominal head (`reject_target(nog)` wanting a
-            // TargetError -> `TargetError::NotGround`; the variant carries
-            // its enum name in `detail`).
-            SymCat::Local | SymCat::Param | SymCat::Global
-                if c.ty().is_some_and(|t| exp.accepts(t)) =>
+        match c.symbol {
+            CompletionSymbol::Variable { ty: Some(ty), .. } if expected.accepts(ty) => 0,
+            CompletionSymbol::Variant { enum_key, .. }
+                if expected.expects_nominal(enum_key.as_str()) =>
             {
                 0
             }
-            SymCat::Variant
-                if c.variant_enum()
-                    .is_some_and(|key| exp.expects_nominal(key.as_str())) =>
-            {
-                0
-            }
-            SymCat::Function
-                if self.g.enclosing_fn.as_deref() != Some(def_key.as_str())
-                    && exp.accepts_fn_returning(ws, def_key.as_str()) =>
+            CompletionSymbol::Function { key, .. }
+                if self.g.enclosing_fn.as_deref() != Some(key.as_str())
+                    && expected.accepts_fn_returning(ws, key.as_str()) =>
             {
                 1
             }

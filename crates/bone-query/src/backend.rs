@@ -22,10 +22,11 @@ use lsp_types::{
 
 use bone_core::type_equiv::TyRef;
 use bone_incremental::session::{Session, SessionFile, UpdateTier};
+use bone_semantic::hir::TypeExpr;
 use bone_semantic::inference::{self, Gamma};
 use bone_semantic::prelude::{
-    BodyInference, FxHashMap, FxHashSet, InferenceResult, ModuleId, Span, TyId, Workspace,
-    is_field_ref_former,
+    Arena, ArenaMap, BodyInference, FxHashMap, FxHashSet, Idx, InferenceResult, ModuleId, Span,
+    TyId, Workspace, is_field_ref_former,
 };
 use skull_parser::CompilerError;
 use ustr::Ustr;
@@ -1330,9 +1331,7 @@ impl BoneWorkspace {
         self.references(path, pos)
             .into_iter()
             .filter(|loc| loc.uri == want)
-            .map(|loc| DocumentHighlight {
-                range: loc.range,
-            })
+            .map(|loc| DocumentHighlight { range: loc.range })
             .collect()
     }
 
@@ -2718,24 +2717,7 @@ fn semantic_classifications(
     }
     // Interface type spans retain the resolved canonical type, including
     // standalone definitions whose source spelling is only a bare identifier.
-    for (ty, span) in module.ty_spans.iter() {
-        let mut node = module.ty_arena[ty];
-        loop {
-            match node {
-                bone_semantic::hir::TypeExpr::Nullable(inner) => node = module.ty_arena[inner],
-                bone_semantic::hir::TypeExpr::App {
-                    ctor: bone_semantic::hir::TypeCtor::Nominal(key),
-                    ..
-                } => {
-                    if let Some(token_type) = semantic_symbol_token(ws, key) {
-                        map.insert(span.offset_range().0, (token_type, 0));
-                    }
-                    break;
-                }
-                _ => break,
-            }
-        }
-    }
+    mark_semantic_types(ws, &mut map, &module.ty_arena, &module.ty_spans);
     // Enum variant declaration names -> enum member.
     for en in module.enums.values() {
         for v in &en.variants {
@@ -2752,13 +2734,7 @@ fn semantic_classifications(
     // Generic param declarations (`fn id<T>`, `struct Box<T>`): the decl's
     // `TypeExpr::Generic` node keeps its `<T>` name span in ty_spans
     // (span_recordable excludes generics, so uses never clobber it).
-    let generic_decls = module
-        .functions
-        .values()
-        .flat_map(|f| &f.generics)
-        .chain(module.structs.values().flat_map(|s| &s.generics))
-        .chain(module.enums.values().flat_map(|e| &e.generics));
-    for g in generic_decls {
+    for g in crate::query::declared_generics(module) {
         if let bone_semantic::prelude::TyId::Static(gmid, idx) = g {
             if *gmid == mid {
                 if let Some(sp) = module.ty_spans.get(*idx) {
@@ -2801,24 +2777,7 @@ fn semantic_classifications(
         }
         let bi = inf.and_then(|i| i.per_fn.get(owner));
         // Body-local type spans retain the resolved canonical key too.
-        for (ty, span) in body.lowered_ty_spans.iter() {
-            let mut node = body.lowered_tys[ty];
-            loop {
-                match node {
-                    bone_semantic::hir::TypeExpr::Nullable(inner) => node = body.lowered_tys[inner],
-                    bone_semantic::hir::TypeExpr::App {
-                        ctor: bone_semantic::hir::TypeCtor::Nominal(key),
-                        ..
-                    } => {
-                        if let Some(token_type) = semantic_symbol_token(ws, key) {
-                            map.insert(span.offset_range().0, (token_type, 0));
-                        }
-                        break;
-                    }
-                    _ => break,
-                }
-            }
-        }
+        mark_semantic_types(ws, &mut map, &body.lowered_tys, &body.lowered_ty_spans);
         // Binding declarations: params vs locals. A `T?` binding carries
         // `nullable` at its declaration -- no flow narrowing applies at a decl.
         for (b, info) in body.binding_arena.iter() {
@@ -2839,20 +2798,12 @@ fn semantic_classifications(
                 Expr::Var(b) => {
                     if let Some(sp) = body.expr_spans.get(e) {
                         let tt = binding_tt(body.binding_arena[*b].kind);
-                        let decl_nullable = bi
-                            .and_then(|bi| bi.binding_types.get(*b))
-                            .is_some_and(|&ty| crate::types::is_nullable(ws, bi, ty));
-                        let mods = if decl_nullable {
-                            match bi.and_then(|bi| bi.expr_types.get(e)) {
-                                Some(&use_ty) if crate::types::is_nullable(ws, bi, use_ty) => {
-                                    MOD_NULLABLE
-                                }
-                                Some(_) => MOD_REFINED,
-                                None => MOD_NULLABLE,
-                            }
-                        } else {
-                            0
-                        };
+                        let mods = semantic_flow_modifiers(
+                            ws,
+                            bi,
+                            bi.and_then(|bi| bi.binding_types.get(*b).copied()),
+                            bi.and_then(|bi| bi.expr_types.get(e).copied()),
+                        );
                         map.insert(sp.offset_range().0, (tt, mods));
                     }
                 }
@@ -2917,19 +2868,12 @@ fn semantic_classifications(
                         }
                         if let Some(&(decl_ty, is_const)) = global_tys.get(name) {
                             let mods = global_mod(is_const)
-                                | if crate::types::is_nullable(ws, bi, decl_ty) {
-                                    match bi.and_then(|bi| bi.expr_types.get(e)) {
-                                        Some(&use_ty)
-                                            if crate::types::is_nullable(ws, bi, use_ty) =>
-                                        {
-                                            MOD_NULLABLE
-                                        }
-                                        Some(_) => MOD_REFINED,
-                                        None => MOD_NULLABLE,
-                                    }
-                                } else {
-                                    0
-                                };
+                                | semantic_flow_modifiers(
+                                    ws,
+                                    bi,
+                                    Some(decl_ty),
+                                    bi.and_then(|bi| bi.expr_types.get(e).copied()),
+                                );
                             map.insert(sp.offset_range().0, (TT_VARIABLE, mods));
                         }
                     }
@@ -3001,6 +2945,36 @@ fn semantic_classifications(
     SemanticClassifications {
         by_offset: map,
         interp_holes: holes,
+    }
+}
+
+fn mark_semantic_types(
+    ws: &Workspace,
+    map: &mut HashMap<usize, (u32, u32)>,
+    arena: &Arena<TypeExpr>,
+    spans: &ArenaMap<Idx<TypeExpr>, Span>,
+) {
+    for (ty, span) in spans.iter() {
+        if let Some(token) = crate::types::annotation_nominal(arena, ty)
+            .and_then(|key| semantic_symbol_token(ws, key))
+        {
+            map.insert(span.offset_range().0, (token, 0));
+        }
+    }
+}
+
+fn semantic_flow_modifiers(
+    ws: &Workspace,
+    bi: Option<&BodyInference>,
+    declared: Option<TyId>,
+    used: Option<TyId>,
+) -> u32 {
+    if !declared.is_some_and(|ty| crate::types::is_nullable(ws, bi, ty)) {
+        return 0;
+    }
+    match used {
+        Some(ty) if !crate::types::is_nullable(ws, bi, ty) => MOD_REFINED,
+        _ => MOD_NULLABLE,
     }
 }
 
