@@ -2486,10 +2486,20 @@ impl<'a> Parser<'a> {
         // statement and is followed by an identifier (the binding name), so
         // `static` stays usable as an ordinary ident (`load_audio(p, static)`).
         if matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "static")
-            && matches!(self.peek_kind(), TokenKind::Ident(_))
+            && matches!(self.peek_kind(), TokenKind::Ident(_) | TokenKind::OpenParen)
         {
             self.advance(); // `static`
+            if self.kind() == TokenKind::OpenParen {
+                return Err(self.err(
+                    "a `static` takes a plain name, not a pattern: give it one name and                      destructure from it".to_string(),
+                ));
+            }
             let name = self.expect_ident()?;
+            if matches!(self.kind(), TokenKind::OpenCurly | TokenKind::OpenParen) {
+                return Err(self.err(
+                    "a `static` takes a plain name, not a pattern: give it one name and                      destructure from it".to_string(),
+                ));
+            }
             let ty = if self.eat(TokenKind::Colon) {
                 Some(self.parse_type()?)
             } else {
@@ -4154,7 +4164,19 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// The formatter cannot round-trip a comment inside a pattern, so the
+    /// grammar does not take one: say that, rather than leaking the token.
+    fn reject_pattern_comment(&mut self) -> PResult<()> {
+        if matches!(self.kind(), TokenKind::Comment(_)) {
+            return Err(self.err(
+                "a comment cannot appear inside a pattern; put it above the statement".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     fn parse_pattern(&mut self) -> PResult<Pattern> {
+        self.reject_pattern_comment()?;
         // Literal patterns (and ranges starting with a literal).
         // Open-ended range with no start: `..N` / `..=N`.
         if matches!(self.kind(), TokenKind::DoubleDot) {
@@ -4248,6 +4270,7 @@ impl<'a> Parser<'a> {
         let mut fields = Vec::new();
         let mut rest = false;
         while self.kind() != TokenKind::CloseCurly && !self.at_end() {
+            self.reject_pattern_comment()?;
             if self.kind() == TokenKind::DoubleDot {
                 self.advance();
                 rest = true;
@@ -4260,6 +4283,7 @@ impl<'a> Parser<'a> {
                 Pattern::Ident(field.clone())
             };
             fields.push((field, pat));
+            self.reject_pattern_comment()?;
             if !self.eat(TokenKind::Comma) {
                 break;
             }

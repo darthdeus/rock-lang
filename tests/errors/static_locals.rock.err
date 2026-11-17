@@ -72,3 +72,20 @@ fn f() -> int {
     return __static_f_n
 }
 fn main() { let _ = f() }
+
+//=== TEST CASE: static_tuple_pattern_Generic ===
+//! expect: a `static` takes a plain name
+fn f() {
+    static (a, b) = (1, 2)
+    print(a + b)
+}
+fn main() { f() }
+
+//=== TEST CASE: static_record_pattern_Generic ===
+//! expect: a `static` takes a plain name
+struct P { x: int, y: int }
+fn f() {
+    static P { x, y } = P { x: 1, y: 2 }
+    print(x + y)
+}
+fn main() { f() }

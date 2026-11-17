@@ -44,3 +44,12 @@ fn f(c: Color) -> int {
     1
 }
 fn main() {}
+
+//=== TEST CASE: comment_inside_pattern_Parse ===
+//! expect: a comment cannot appear inside a pattern
+struct P { x: int, y: int }
+fn main() {
+    let p = P { x: 1, y: 2 }
+    let P { x, /* mid */ y } = p
+    print(x + y)
+}
