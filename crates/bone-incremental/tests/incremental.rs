@@ -301,6 +301,19 @@ fn overloaded_body_edit_reports_the_changed_overload_error() {
 }
 
 #[test]
+fn multi_function_edit_keeps_types_after_a_single_body_edit() {
+    let source = |left, right| {
+        format!(
+            "struct P {{ x: int }}\nfn f(p: P) -> int {{ return{left}p.x }}\nfn g(p: P) -> int {{ return{right}p.x }}"
+        )
+    };
+    let mut h = Harness::new(&[("a.rock", &source(" ", " "))]);
+    h.update("a.rock", &source("  ", " "));
+    h.update("a.rock", &source(" ", "  "));
+    h.assert_clean();
+}
+
+#[test]
 fn oracle_signature_edit_breaks_then_fixes_cross_file_caller() {
     let mut h = Harness::new(&[("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)]);
 

@@ -13,6 +13,22 @@ fn has_tag(tags: &str, name: &str) -> bool {
 }
 
 #[test]
+fn macro_tag_line_follows_a_body_edit_above_it() {
+    let before = "fn helper() -> int {\n  1\n}\n\nmacro twice(x: expr) -> int { x + x }\n";
+    let after = before.replace("  1\n", "  let n = 2\n  n\n");
+    let project = Project::new(&[("input.rock", before)]);
+    let path = project.path("input.rock");
+    let mut bone = BoneWorkspace::new();
+    for (source, line) in [(before, "5;\""), (&after, "6;\"")] {
+        bone.update(&path, source.into());
+        bone.write_ctags(&path).unwrap();
+        let tags = tags_in(&project, "");
+        let tag = tags.lines().find(|l| l.starts_with("twice\t")).unwrap();
+        assert_eq!(tag.split('\t').nth(2), Some(line));
+    }
+}
+
+#[test]
 fn write_ctags_emits_every_symbol_kind_with_its_fields() {
     let src = "fn add(a: int, b: int) -> int {\n  a + b\n}\n\nstruct Point {\n  x: int,\n  y: int,\n}\n\nenum Color {\n  Red,\n  Blue,\n}\n\nglobal MAX_HP: int = 100\ndeco init my_system(stage: int = 100) {\n}\nmacro twice(x: expr, rest: ...expr) -> string {\n  x\n}\n";
     let project = Project::new(&[("game.rock", src)]);
