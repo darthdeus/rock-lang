@@ -10,7 +10,7 @@ use bone_semantic::hir;
 use bone_semantic::prelude::{Span, Workspace};
 use skull_parser::ast::FnBackend;
 
-use crate::query::{RefSite, RenameSubject, TextOf, is_read_only_source};
+use crate::query::{RefSite, RenameSubject, TextOf, is_read_only_source, source_ident};
 
 /// A rename the server declines, with the reason shown to the user.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -238,7 +238,7 @@ pub(super) fn check_opaque<'t>(
             return Err(RenameRefusal(format!(
                 "cannot rename `{old}`: the opaque inline({lang}) body of `{}` ({}) \
                  names it, and rename cannot rewrite inline code",
-                bone_core::modules::display_name(f.name.as_str()),
+                source_ident(f.name),
                 label(&f.name_span)
             )));
         }

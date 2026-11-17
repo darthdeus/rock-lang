@@ -2,7 +2,7 @@
 //! Tags: symbols, duplicates
 
 //=== TEST CASE: duplicate_enum_DuplicateSymbol ===
-//! expect: duplicate definition `DrawCommand` in module `<root>`
+//! expect: duplicate definition `DrawCommand`
 enum DrawCommand {
     Rect { x: int, y: int, width: int, height: int },
     Circle { x: int, y: int, radius: int }
@@ -18,7 +18,7 @@ fn main() {
 }
 
 //=== TEST CASE: duplicate_struct_DuplicateSymbol ===
-//! expect: duplicate definition `Player` in module `<root>`
+//! expect: duplicate definition `Player`
 struct Player {
     x: int,
     y: int,
@@ -36,7 +36,7 @@ fn main() {
 }
 
 //=== TEST CASE: duplicate_newtype_DuplicateSymbol ===
-//! expect: duplicate definition `UserId` in module `<root>`
+//! expect: duplicate definition `UserId`
 newtype UserId(int)
 
 // Duplicate newtype
@@ -47,7 +47,7 @@ fn main() {
 }
 
 //=== TEST CASE: duplicate_struct_across_modules_DuplicateSymbol ===
-//! expect: duplicate definition `Foo` in module `error_test`
+//! expect: duplicate definition `Foo`
 //--- FILE: a.rock ---
 struct Foo { x: int }
 //--- FILE: b.rock ---
@@ -58,7 +58,7 @@ fn main() {
 }
 
 //=== TEST CASE: function_and_global_across_modules_DuplicateSymbol ===
-//! expect: duplicate definition `foo` in module `error_test`
+//! expect: duplicate definition `foo`
 //--- FILE: a.rock ---
 fn foo() -> int { 1 }
 //--- FILE: b.rock ---
@@ -69,7 +69,7 @@ fn main() {
 }
 
 //=== TEST CASE: function_and_global_same_module_DuplicateSymbol ===
-//! expect: duplicate definition `foo` in module `<root>`
+//! expect: duplicate definition `foo`
 fn foo() -> int { 1 }
 global foo: int = 2
 

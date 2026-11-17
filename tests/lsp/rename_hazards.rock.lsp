@@ -466,7 +466,7 @@ OPERATION: rename
 NEW_NAME: POINTS
 ---
 EXPECTED:
-REFUSED: the opaque inline(lua) body of `lsp_test::peek` (main.rock:1)
+REFUSED: the opaque inline(lua) body of `peek` (main.rock:1)
 ===
 
 TEST: rename_global_across_files_without_inline_reader

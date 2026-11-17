@@ -96,7 +96,7 @@ fn duplicate_decorator_diagnostic_is_unique_and_clears_after_an_edit() {
         diagnostics[0]["message"]
             .as_str()
             .unwrap()
-            .contains("duplicate definition `reg` in module `<root>`"),
+            .contains("duplicate definition of decorator `reg`"),
         "{diagnostics:?}"
     );
     assert_eq!(diagnostics[0]["range"]["start"]["line"], 1);
@@ -107,6 +107,42 @@ fn duplicate_decorator_diagnostic_is_unique_and_clears_after_an_edit() {
     );
     let diagnostics = diagnostics_for(&out, &uri);
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn standalone_duplicate_diagnostics_do_not_expose_package_identity() {
+    for source in [
+        "struct Item {}\nstruct Item {}\n",
+        "fn item() {}\nglobal item: int = 0\n",
+        "struct item {}\nmod item {}\n",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let uri = uri_of(&dir.path().join("main.rock"));
+        let out = roundtrip(&mut started(), did_open(&uri, source));
+        let diagnostics = diagnostics_for(&out, &uri);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        let message = diagnostics[0]["message"].as_str().unwrap();
+        assert!(message.starts_with("duplicate definition"), "{message}");
+        assert!(
+            !message.contains("<root>") && !message.contains("@/"),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn standalone_root_module_diagnostic_uses_the_source_anchor() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = uri_of(&dir.path().join("main.rock"));
+    let out = roundtrip(
+        &mut started(),
+        did_open(&uri, "mod child {}\nuse self as child;\n"),
+    );
+    let diagnostics = diagnostics_for(&out, &uri);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    let message = diagnostics[0]["message"].as_str().unwrap();
+    assert!(message.contains("module `::`"), "{message}");
+    assert!(!message.contains("@/"), "{message}");
 }
 
 #[test]

@@ -7,7 +7,7 @@ use skull_parser::Ast;
 
 use crate::types;
 
-fn source_ident(name: Ustr) -> &'static str {
+pub(crate) fn source_ident(name: Ustr) -> &'static str {
     name.as_str().rsplit("::").next().unwrap_or(name.as_str())
 }
 

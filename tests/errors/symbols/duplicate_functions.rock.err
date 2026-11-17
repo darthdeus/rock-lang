@@ -60,21 +60,21 @@ fn main() {
 }
 
 //=== TEST CASE: struct_and_enum_same_name_DuplicateSymbol ===
-//! expect: duplicate definition `Shape` in module `<root>`
+//! expect: duplicate definition `Shape`
 struct Shape { x: int }
 enum Shape { Circle }
 
 fn main() {}
 
 //=== TEST CASE: enum_and_newtype_same_name_DuplicateSymbol ===
-//! expect: duplicate definition `Id` in module `<root>`
+//! expect: duplicate definition `Id`
 enum Id { A }
 newtype Id(int)
 
 fn main() {}
 
 //=== TEST CASE: struct_and_newtype_across_files_DuplicateSymbol ===
-//! expect: duplicate definition `Meters` in module `error_test`
+//! expect: duplicate definition `Meters`
 //--- FILE: a.rock ---
 struct Meters { v: float }
 //--- FILE: b.rock ---
@@ -83,14 +83,14 @@ newtype Meters(float)
 fn main() {}
 
 //=== TEST CASE: same_decorator_twice_DuplicateSymbol ===
-//! expect: duplicate definition `reg` in module `<root>`
+//! expect: duplicate definition of decorator `reg`: already defined at test.rock:1
 deco init reg {}
 deco init reg {}
 
 fn main() {}
 
 //=== TEST CASE: same_decorator_across_files_DuplicateSymbol ===
-//! expect: duplicate definition `reg` in module `error_test`
+//! expect: duplicate definition of decorator `reg`: already defined at a.rock:1
 //--- FILE: a.rock ---
 deco init reg {}
 //--- FILE: b.rock ---
@@ -99,7 +99,7 @@ deco init reg {}
 fn main() {}
 
 //=== TEST CASE: decorator_params_do_not_distinguish_DuplicateSymbol ===
-//! expect: duplicate definition `reg` in module `<root>`
+//! expect: duplicate definition of decorator `reg`: already defined at test.rock:1
 deco init reg {}
 deco init reg(x: int) {}
 

@@ -1752,19 +1752,20 @@ fn collect_use_leaves(
 /// recursing into inline mod blocks. `scope` collects the fragment's own
 /// imports; shared (`pub`/`private`-prefixed) use declarations become node
 /// exports.
-fn source_module_name(scope: &FragmentScope, path: &[ustr::Ustr]) -> String {
-    if path.is_empty() {
-        if scope
+fn source_module_context(scope: &FragmentScope, path: &[ustr::Ustr]) -> String {
+    if path.is_empty()
+        && scope
             .package_name
             .starts_with(bone_core::modules::STANDALONE_PACKAGE_PREFIX)
-        {
-            "<root>".to_string()
-        } else {
-            scope.package_name.to_string()
-        }
+    {
+        return String::new();
+    }
+    let name = if path.is_empty() {
+        scope.package_name.to_string()
     } else {
         path.iter().map(|segment| segment.as_str()).join("::")
-    }
+    };
+    format!(" in module `{name}`")
 }
 
 fn register_items(
@@ -1845,9 +1846,8 @@ fn register_items(
                         errs.push(CompilerError::new_with_label(
                             *item_span,
                             format!(
-                                "duplicate definition `{}` in module `{}`",
-                                block_name,
-                                source_module_name(scope, path)
+                                "duplicate definition `{block_name}`{}",
+                                source_module_context(scope, path)
                             ),
                         ));
                     } else {
@@ -1914,6 +1914,10 @@ fn register_items(
                 def_key_buf.truncate(def_key_prefix);
                 def_key_buf.push_str(&bare);
                 let def_key = ustr::Ustr::from(&def_key_buf);
+                // The definition check reports duplicate decorators with their first location.
+                if kind == "decorator" && node.owned_decorators.contains_key(&bare) {
+                    continue;
+                }
                 let callable_overload =
                     kind == "callable" && node.owned_callables.contains_key(&bare);
                 let taken = node.owned_types.contains_key(&bare)
@@ -1925,8 +1929,8 @@ fn register_items(
                     errs.push(CompilerError::new_with_label(
                         *item_span,
                         format!(
-                            "duplicate definition `{bare}` in module `{}`",
-                            source_module_name(scope, path)
+                            "duplicate definition `{bare}`{}",
+                            source_module_context(scope, path)
                         ),
                     ));
                     continue;

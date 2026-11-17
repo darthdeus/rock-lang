@@ -2,6 +2,7 @@ use anyhow::{Result, anyhow};
 use bone_core::prelude::Instant;
 use colored::Colorize;
 use fs_err as fs;
+use rock_core::source_code::STANDALONE_PACKAGE_PREFIX;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -200,7 +201,7 @@ fn bone_check_case(
                 if files.len() > 1 {
                     m.package = Some(skull_parser::PackageTag {
                         id: 1,
-                        self_name: "error_test".to_string(),
+                        self_name: format!("{STANDALONE_PACKAGE_PREFIX}error-test"),
                         identity_storage: Default::default(),
                         root: String::new(),
                     });

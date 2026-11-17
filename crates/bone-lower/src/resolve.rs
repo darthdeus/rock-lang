@@ -1174,6 +1174,9 @@ fn module_display(ws: &Workspace, (package, path): &(u32, Vec<Ustr>)) -> String 
         .ns
         .package(*package)
         .map_or_else(|| package.to_string(), |pkg| pkg.self_name.to_string());
+    if root.starts_with(bone_core::modules::STANDALONE_PACKAGE_PREFIX) {
+        return format!("::{}", NsPackage::path_key(path));
+    }
     std::iter::once(root)
         .chain(path.iter().map(|s| s.to_string()))
         .collect::<Vec<_>>()
