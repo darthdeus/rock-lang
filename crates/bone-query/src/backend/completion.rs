@@ -526,7 +526,7 @@ fn scope_candidates(
         rq.offset,
         &rq.prefix,
         expr_position,
-        Some(visible),
+        visible,
     )
 }
 
@@ -561,18 +561,11 @@ fn push_macro_candidates(
             .as_ref()
             .map_or_else(String::new, |r| format!(" -> {r}"));
         cands.push(crate::query::CompletionEntry {
-            name,
-            kind: SymCat::Macro,
             detail: Some(format!("macro {name}({}){ret}", params.join(", "))),
-            signature_key: None,
-            variant_enum_key: None,
-            ty: None,
             takes_params: !md.params.is_empty(),
-            variant_shape: None,
             test_scoped: crate::query::is_test_path(def_file.as_str())
                 || name.as_str().starts_with("test_"),
-            def_file,
-            rec: 0,
+            ..crate::query::CompletionEntry::new(name, SymCat::Macro, def_file)
         });
     }
 }
@@ -613,7 +606,6 @@ fn push_import_candidates(
             expr_position,
             pfx,
             show_private,
-            None,
             &mut entries,
             &mut test_path_cache,
         );
