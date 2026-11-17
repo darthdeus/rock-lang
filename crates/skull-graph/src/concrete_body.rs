@@ -278,18 +278,11 @@ impl ConcreteBodies {
             self.always_plan_failure_index.remove(owner);
             self.always_plans.remove(owner);
         }
+        let timing_enabled = log::log_enabled!(log::Level::Debug);
         let always_inputs: Vec<_> = always_subjects
             .iter()
-            .enumerate()
-            .map(|(order, (module, body_owner, _))| {
-                prepare_always(
-                    ws,
-                    g,
-                    order,
-                    *module,
-                    *body_owner,
-                    log::log_enabled!(log::Level::Debug),
-                )
+            .map(|(module, body_owner, _)| {
+                prepare_always(ws, g, *module, *body_owner, timing_enabled)
             })
             .collect();
         if !always_inputs.is_empty() {
@@ -307,42 +300,37 @@ impl ConcreteBodies {
                 &mut publication_stats,
                 log::log_enabled!(log::Level::Debug),
             );
-            let mut results: Vec<_> = always_inputs
-                .into_iter()
-                .map(|prepared| {
-                    produce_always(
-                        ws,
-                        g,
-                        prepared,
-                        &signatures,
-                        &published_domains,
-                        log::log_enabled!(log::Level::Debug),
-                    )
-                })
-                .collect();
-            results.sort_by_key(|result| result.order);
-            for result in results {
-                let owner = result.owner.clone();
-                let stats = result.stats;
-                if let (Some(owner), Err(reason)) = (&owner, &result.plan) {
-                    self.always_plan_failure_index
-                        .insert(owner.clone(), reason.clone());
-                }
-                match result.plan {
-                    Ok(Some(plan)) => {
-                        self.always_plans.insert(plan.owner.clone(), plan);
-                    }
-                    Ok(None) => {}
-                    Err(_) => {}
-                }
-                if let Some(owner) = owner {
-                    self.always_stats.insert(owner, stats);
-                }
+            for prepared in always_inputs {
+                self.install_always(produce_always(
+                    ws,
+                    g,
+                    prepared,
+                    &signatures,
+                    &published_domains,
+                    timing_enabled,
+                ));
             }
         }
         ConcreteUpdateStats {
             candidate_keys_added,
             candidate_keys_removed,
+        }
+    }
+
+    fn install_always(&mut self, result: BuiltAlways) {
+        match result.plan {
+            Ok(Some(plan)) => {
+                self.always_plans.insert(plan.owner.clone(), plan);
+            }
+            Err(reason) => {
+                if let Some(owner) = &result.owner {
+                    self.always_plan_failure_index.insert(owner.clone(), reason);
+                }
+            }
+            Ok(None) => {}
+        }
+        if let Some(owner) = result.owner {
+            self.always_stats.insert(owner, result.stats);
         }
     }
 
@@ -1304,13 +1292,9 @@ fn prepare_instance(
 }
 
 struct PreparedAlways {
-    order: usize,
     module: bone_core::prelude::ModuleId,
     body_owner: BodyOwner,
-    owner: Option<ConcreteOwner>,
-    types: Option<ConcreteTypeTables>,
-    type_error: Option<MonoTyReason>,
-    skip: bool,
+    types: Result<Option<ConcreteTypeTables>, MonoTyReason>,
     stats: ConcreteBuildStats,
 }
 
@@ -1337,67 +1321,44 @@ fn concrete_owner_for(
 fn prepare_always(
     ws: &Workspace,
     g: &InstanceGraph,
-    order: usize,
     module: bone_core::prelude::ModuleId,
     body_owner: BodyOwner,
     timing_enabled: bool,
 ) -> PreparedAlways {
-    let owner = concrete_owner_for(module, body_owner);
-    let unplanned = |type_error, skip| PreparedAlways {
-        order,
-        module,
-        body_owner,
-        owner: owner.clone(),
-        types: None,
-        type_error,
-        skip,
-        stats: ConcreteBuildStats::default(),
-    };
-    let Some(body) = ws.module(module).bodies.get(&body_owner) else {
-        return unplanned(Some(MonoTyReason::NoNode), false);
-    };
-    if matches!(body_owner, BodyOwner::Global(_)) && body.root.is_none() {
-        return unplanned(None, true);
-    }
-    let Some(inf) = ws
-        .inference(module)
-        .and_then(|ir| ir.per_fn.get(&body_owner))
-    else {
-        return unplanned(Some(MonoTyReason::NoNode), false);
-    };
     let mut stats = ConcreteBuildStats::default();
-    let declared_types = match body_owner {
-        BodyOwner::Global(index) => std::iter::once(ws.module(module).globals[index].ty)
-            .collect::<Vec<_>>()
-            .into_iter(),
-        BodyOwner::Decorator(_)
-        | BodyOwner::Function(_)
-        | BodyOwner::StructDefaults(_)
-        | BodyOwner::Enum(_)
-        | BodyOwner::Newtype(_) => Vec::new().into_iter(),
-    };
-    let result = concrete_tables(
-        ws,
-        g,
-        inf,
-        body,
-        &MonoSubst::default(),
-        declared_types,
-        &mut stats,
-        timing_enabled,
-    );
-    let (types, type_error) = match result {
-        Ok(types) => (Some(types), None),
-        Err(reason) => (None, Some(reason)),
-    };
+    let types = (|| {
+        let module_data = ws.module(module);
+        let body = module_data
+            .bodies
+            .get(&body_owner)
+            .ok_or(MonoTyReason::NoNode)?;
+        if matches!(body_owner, BodyOwner::Global(_)) && body.root.is_none() {
+            return Ok(None);
+        }
+        let inf = ws
+            .inference(module)
+            .and_then(|ir| ir.per_fn.get(&body_owner))
+            .ok_or(MonoTyReason::NoNode)?;
+        let declared_type = match body_owner {
+            BodyOwner::Global(index) => Some(module_data.globals[index].ty),
+            _ => None,
+        };
+        concrete_tables(
+            ws,
+            g,
+            inf,
+            body,
+            &MonoSubst::default(),
+            declared_type,
+            &mut stats,
+            timing_enabled,
+        )
+        .map(Some)
+    })();
     PreparedAlways {
-        order,
         module,
         body_owner,
-        owner,
         types,
-        type_error,
-        skip: false,
         stats,
     }
 }
@@ -1465,37 +1426,24 @@ fn concrete_plan_from_sites(
                 SiteOutcome::Resolved(target) => {
                     let callee_instance = target.clone();
                     candidate_refs.insert(target.clone());
-                    match signatures.get(target) {
-                        Some(Ok(signature)) => {
+                    match published_signature(signatures, target) {
+                        Ok(signature) => {
                             callees.insert(
                                 site.clone(),
                                 ConcreteCallee {
                                     instance: callee_instance,
-                                    signature: signature.clone(),
+                                    signature,
                                 },
                             );
                         }
-                        Some(Err(reason)) => {
-                            let candidate = (callee_table_rank(site), site.clone(), reason.clone());
-                            let replace = callee_signature_error.as_ref().is_none_or(
-                                |(rank, previous_site, _)| {
-                                    (candidate.0, &candidate.1) < (*rank, previous_site)
+                        Err(reason) => {
+                            let rank = callee_table_rank(site);
+                            if callee_signature_error.as_ref().is_none_or(
+                                |(previous_rank, previous_site, _)| {
+                                    (rank, site) < (*previous_rank, previous_site)
                                 },
-                            );
-                            if replace {
-                                callee_signature_error = Some(candidate);
-                            }
-                        }
-                        None => {
-                            let candidate =
-                                (callee_table_rank(site), site.clone(), MonoTyReason::NoNode);
-                            let replace = callee_signature_error.as_ref().is_none_or(
-                                |(rank, previous_site, _)| {
-                                    (candidate.0, &candidate.1) < (*rank, previous_site)
-                                },
-                            );
-                            if replace {
-                                callee_signature_error = Some(candidate);
+                            ) {
+                                callee_signature_error = Some((rank, site.clone(), reason));
                             }
                         }
                     }
@@ -1505,11 +1453,7 @@ fn concrete_plan_from_sites(
         }
     }
 
-    let owner_signature = match signatures.get(inst) {
-        Some(Ok(signature)) => Ok(signature.clone()),
-        Some(Err(reason)) => Err(reason.clone()),
-        None => Err(MonoTyReason::NoNode),
-    };
+    let owner_signature = published_signature(signatures, inst);
     if let Some(started) = signature_started {
         stats.signature_ns += started.elapsed().as_nanos() as u64;
     }
@@ -1549,6 +1493,16 @@ fn concrete_plan_from_sites(
         },
         candidate_refs,
     ))
+}
+
+fn published_signature(
+    signatures: &PublishedSignatures,
+    instance: &Instance,
+) -> Result<ConcreteSignatureHandle, MonoTyReason> {
+    signatures
+        .get(instance)
+        .cloned()
+        .ok_or(MonoTyReason::NoNode)?
 }
 
 /// Preserve diagnostic precedence when several callee signatures fail.
@@ -1617,7 +1571,6 @@ fn produce_instance(
 }
 
 struct BuiltAlways {
-    order: usize,
     owner: Option<ConcreteOwner>,
     plan: Result<Option<ConcreteBodyPlan>, MonoTyReason>,
     stats: ConcreteBuildStats,
@@ -1632,208 +1585,106 @@ fn produce_always(
     timing_enabled: bool,
 ) -> BuiltAlways {
     let PreparedAlways {
-        order,
         module,
         body_owner,
-        owner,
         types,
-        type_error,
-        skip,
         mut stats,
     } = prepared;
+    let owner = concrete_owner_for(module, body_owner);
     stats.always_plan_attempts += 1;
-    if skip {
-        return BuiltAlways {
-            order,
-            owner,
-            plan: Ok(None),
-            stats,
+    let plan = (|| {
+        let Some(types) = types? else {
+            return Ok(None);
         };
-    }
-    let Some(types) = types else {
-        return BuiltAlways {
-            order,
-            owner,
-            plan: Err(type_error.unwrap_or(MonoTyReason::NoNode)),
-            stats,
-        };
-    };
-    if let Some(reason) = type_error {
-        return BuiltAlways {
-            order,
-            owner,
-            plan: Err(reason),
-            stats,
-        };
-    }
-    let contribution = match g
-        .contributions
-        .get(&Owner::AlwaysEmitted(module, body_owner))
-    {
-        Some(contribution) => contribution,
-        None => {
-            return BuiltAlways {
-                order,
-                owner,
-                plan: Err(MonoTyReason::NoNode),
-                stats,
-            };
-        }
-    };
-    let mut callees = BTreeMap::new();
-    let mut failed_sites = BTreeMap::new();
-    let signature_started = timing_enabled.then(bone_core::prelude::Instant::now);
-    for (site, record) in &contribution.always_call_sites {
-        match &record.outcome {
-            SiteOutcome::Resolved(instance) => {
-                let signature = match signatures.get(instance) {
-                    Some(Ok(signature)) => signature.clone(),
-                    Some(Err(reason)) => {
-                        return BuiltAlways {
-                            order,
-                            owner,
-                            plan: Err(reason.clone()),
-                            stats,
-                        };
-                    }
-                    None => {
-                        return BuiltAlways {
-                            order,
-                            owner,
-                            plan: Err(MonoTyReason::NoNode),
-                            stats,
-                        };
-                    }
-                };
-                callees.insert(
-                    site.clone(),
-                    ConcreteCallee {
-                        instance: instance.clone(),
-                        signature,
-                    },
-                );
-            }
-            SiteOutcome::Failed(reason) => {
-                failed_sites.insert(site.clone(), *reason);
-            }
-        }
-    }
-    let default_domains = contribution.struct_default_domains.iter().cloned();
-    let site_domains = contribution
-        .always_call_sites
-        .keys()
-        .map(|site| site.domain.clone());
-    let foreign_domains = match foreign_domains_from_publication(
-        default_domains.chain(site_domains),
-        domains,
-        &mut stats,
-        timing_enabled,
-    ) {
-        Ok(foreign_domains) => foreign_domains,
-        Err(reason) => {
-            return BuiltAlways {
-                order,
-                owner,
-                plan: Err(reason),
-                stats,
-            };
-        }
-    };
-    let signature = match body_owner {
-        BodyOwner::Global(gid) => {
-            let ty = ws.module(module).globals[gid].ty;
-            let result = match types.ty_types.get(&ty).copied() {
-                Some(result) => result,
-                None => {
-                    return BuiltAlways {
-                        order,
-                        owner,
-                        plan: Err(MonoTyReason::NoNode),
-                        stats,
-                    };
+        let contribution = g
+            .contributions
+            .get(&Owner::AlwaysEmitted(module, body_owner))
+            .ok_or(MonoTyReason::NoNode)?;
+        let mut callees = BTreeMap::new();
+        let mut failed_sites = BTreeMap::new();
+        let signature_started = timing_enabled.then(bone_core::prelude::Instant::now);
+        for (site, record) in &contribution.always_call_sites {
+            match &record.outcome {
+                SiteOutcome::Resolved(instance) => {
+                    callees.insert(
+                        site.clone(),
+                        ConcreteCallee {
+                            instance: instance.clone(),
+                            signature: published_signature(signatures, instance)?,
+                        },
+                    );
                 }
-            };
-            std::sync::Arc::new(ConcreteSignature {
-                params: Vec::new(),
-                param_tuple_spelled: Vec::new(),
-                result: Some(result),
-            })
-        }
-        BodyOwner::Decorator(_) => {
-            let body = match ws.module(module).bodies.get(&body_owner) {
-                Some(body) => body,
-                None => {
-                    return BuiltAlways {
-                        order,
-                        owner,
-                        plan: Err(MonoTyReason::NoNode),
-                        stats,
-                    };
+                SiteOutcome::Failed(reason) => {
+                    failed_sites.insert(site.clone(), *reason);
                 }
-            };
-            let mut params = Vec::new();
-            if let Some(target) = body.deco_target {
-                let Some(ty) = types.binding_types.get(target).copied() else {
-                    return BuiltAlways {
-                        order,
-                        owner,
-                        plan: Err(MonoTyReason::NoNode),
-                        stats,
-                    };
-                };
-                params.push(ty);
-            }
-            for binding in body.param_bindings {
-                let Some(ty) = types.binding_types.get(binding).copied() else {
-                    return BuiltAlways {
-                        order,
-                        owner,
-                        plan: Err(MonoTyReason::NoNode),
-                        stats,
-                    };
-                };
-                params.push(ty);
-            }
-            std::sync::Arc::new(ConcreteSignature {
-                param_tuple_spelled: vec![false; params.len()],
-                params,
-                result: None,
-            })
-        }
-        BodyOwner::Function(_)
-        | BodyOwner::StructDefaults(_)
-        | BodyOwner::Enum(_)
-        | BodyOwner::Newtype(_) => {
-            return BuiltAlways {
-                order,
-                owner,
-                plan: Ok(None),
-                stats,
             }
         }
-    };
-    if let Some(started) = signature_started {
-        stats.signature_ns += started.elapsed().as_nanos() as u64;
-    }
-    let plan = ConcreteBodyPlan {
-        owner: owner
-            .clone()
-            .expect("always-emitted owner was not global or decorator"),
-        code_identity: None,
-        types,
-        foreign_domains,
-        signature,
-        callees,
-        failed_sites,
-        bound_tree: Default::default(),
-    };
-    stats.always_plan_successes += 1;
-    BuiltAlways {
-        order,
-        owner,
-        plan: Ok(Some(plan)),
-        stats,
-    }
+        let default_domains = contribution.struct_default_domains.iter().cloned();
+        let site_domains = contribution
+            .always_call_sites
+            .keys()
+            .map(|site| site.domain.clone());
+        let foreign_domains = foreign_domains_from_publication(
+            default_domains.chain(site_domains),
+            domains,
+            &mut stats,
+            timing_enabled,
+        )?;
+        let module_data = ws.module(module);
+        let (params, result) = match body_owner {
+            BodyOwner::Global(gid) => {
+                let ty = module_data.globals[gid].ty;
+                let result = types
+                    .ty_types
+                    .get(&ty)
+                    .copied()
+                    .ok_or(MonoTyReason::NoNode)?;
+                (Vec::new(), Some(result))
+            }
+            BodyOwner::Decorator(_) => {
+                let body = module_data
+                    .bodies
+                    .get(&body_owner)
+                    .ok_or(MonoTyReason::NoNode)?;
+                let params = body
+                    .deco_target
+                    .into_iter()
+                    .chain(body.param_bindings)
+                    .map(|binding| {
+                        types
+                            .binding_types
+                            .get(binding)
+                            .copied()
+                            .ok_or(MonoTyReason::NoNode)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                (params, None)
+            }
+            _ => return Ok(None),
+        };
+        let signature = Arc::new(ConcreteSignature {
+            param_tuple_spelled: vec![false; params.len()],
+            params,
+            result,
+        });
+        if let Some(started) = signature_started {
+            stats.signature_ns += started.elapsed().as_nanos() as u64;
+        }
+        stats.always_plan_successes += 1;
+        Ok(Some(ConcreteBodyPlan {
+            owner: owner
+                .clone()
+                .expect("always-emitted owner was not global or decorator"),
+            code_identity: None,
+            types,
+            foreign_domains,
+            signature,
+            callees,
+            failed_sites,
+            bound_tree: Default::default(),
+        }))
+    })();
+    BuiltAlways { owner, plan, stats }
 }
 
 fn concrete_map<T, U, F>(items: Vec<T>, f: F) -> Vec<U>
@@ -1893,9 +1744,8 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
     let always_owners = g
         .contributions
         .keys()
-        .enumerate()
-        .filter_map(|(order, owner)| match owner {
-            Owner::AlwaysEmitted(module, body_owner) => Some((order, *module, *body_owner)),
+        .filter_map(|owner| match owner {
+            Owner::AlwaysEmitted(module, body_owner) => Some((*module, *body_owner)),
             Owner::Instance(_) => None,
         })
         .collect::<Vec<_>>();
@@ -1911,8 +1761,8 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
                 .collect::<Vec<_>>();
             let always_inputs = always_owners
                 .into_par_iter()
-                .map(|(order, module, body_owner)| {
-                    prepare_always(ws, g, order, module, body_owner, timing_enabled)
+                .map(|(module, body_owner)| {
+                    prepare_always(ws, g, module, body_owner, timing_enabled)
                 })
                 .collect::<Vec<_>>();
             (prepared, always_inputs)
@@ -2039,7 +1889,7 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
     let ordinary_merge_time = t_ordinary_merge.elapsed();
 
     let t_always_parallel = bone_core::prelude::Instant::now();
-    let mut always_results = concrete_map(always_inputs, |prepared| {
+    let always_results = concrete_map(always_inputs, |prepared| {
         produce_always(
             ws,
             g,
@@ -2051,24 +1901,8 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
     });
     let always_parallel_time = t_always_parallel.elapsed();
     let t_always_merge = bone_core::prelude::Instant::now();
-    always_results.sort_by_key(|result| result.order);
     for result in always_results {
-        let owner = result.owner.clone();
-        let stats = result.stats;
-        if let (Some(owner), Err(reason)) = (&owner, &result.plan) {
-            out.always_plan_failure_index
-                .insert(owner.clone(), reason.clone());
-        }
-        match result.plan {
-            Ok(Some(plan)) => {
-                out.always_plans.insert(plan.owner.clone(), plan);
-            }
-            Ok(None) => {}
-            Err(_) => {}
-        }
-        if let Some(owner) = owner {
-            out.always_stats.insert(owner, stats);
-        }
+        out.install_always(result);
     }
     let always_merge_time = t_always_merge.elapsed();
     out.plans = std::sync::Arc::new(plans);
