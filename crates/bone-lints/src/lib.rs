@@ -457,7 +457,6 @@ struct LintCacheTransaction {
 
 type FunctionKey = (ModuleId, Idx<Function>);
 type BodyKey = (ModuleId, BodyOwner);
-type SiblingGroupKey = (Ustr, String);
 
 #[derive(Clone, Debug, Default)]
 struct NamedInvalidation {
@@ -478,24 +477,25 @@ struct UnusedInvalidation {
 #[derive(Clone, Debug, Default)]
 struct LintDependencyIndex {
     function_names: FxHashMap<Ustr, Vec<FunctionKey>>,
-    function_nodes: FxHashSet<FunctionKey>,
     body_edges: FxHashMap<BodyKey, FxHashSet<FunctionKey>>,
     reverse_callers: FxHashMap<FunctionKey, FxHashSet<BodyKey>>,
-    root_functions: FxHashSet<FunctionKey>,
     always_live_bodies: FxHashSet<BodyKey>,
     reachable: FxHashSet<FunctionKey>,
-    declaration_files: FxHashMap<FunctionKey, Ustr>,
-    declaration_names: FxHashMap<FunctionKey, Ustr>,
-    declaration_spans: FxHashMap<FunctionKey, Span>,
+    declarations: FxHashMap<FunctionKey, Declaration>,
     declaration_fingerprints: FxHashMap<Ustr, String>,
     action_policy: Option<std::sync::Arc<ActionLayerPolicy>>,
     action_declarations: FxHashMap<Ustr, (Ustr, Span)>,
     action_body_edges: FxHashMap<BodyKey, FxHashSet<Ustr>>,
     action_callers: FxHashMap<Ustr, FxHashSet<BodyKey>>,
-    sibling_groups: FxHashMap<SiblingGroupKey, FxHashSet<FunctionKey>>,
-    sibling_names: FxHashMap<Ustr, FxHashSet<FunctionKey>>,
     sibling_declarations: FxHashMap<FunctionKey, SiblingDecl>,
     action_declaration_fingerprints: FxHashMap<Ustr, String>,
+}
+
+#[derive(Clone, Debug)]
+struct Declaration {
+    file: Ustr,
+    span: Span,
+    root: bool,
 }
 
 impl LintDependencyIndex {
@@ -545,7 +545,7 @@ impl LintDependencyIndex {
         if sibling_enabled {
             index.build_sibling_rows(ws);
         }
-        let nodes = index.all_nodes();
+        let nodes = index.body_edges.keys().copied().collect();
         index.recompute_component(&nodes);
         index
     }
@@ -557,13 +557,14 @@ impl LintDependencyIndex {
             .entry(function.name)
             .or_default()
             .push(key);
-        self.function_nodes.insert(key);
-        self.declaration_files.insert(key, module.file);
-        self.declaration_names.insert(key, function.name);
-        self.declaration_spans.insert(key, function.name_span);
-        if is_root(function) {
-            self.root_functions.insert(key);
-        }
+        self.declarations.insert(
+            key,
+            Declaration {
+                file: module.file,
+                span: function.name_span,
+                root: is_root(function),
+            },
+        );
         self.body_edges
             .entry((module.id, BodyOwner::Function(fid)))
             .or_default();
@@ -608,22 +609,18 @@ impl LintDependencyIndex {
     fn build_sibling_rows(&mut self, ws: &Workspace) {
         for decls in ws.functions_by_name.values() {
             for &(mid, fid) in decls {
-                self.insert_sibling((mid, fid), sibling_decl(ws, mid, fid));
+                self.sibling_declarations
+                    .insert((mid, fid), sibling_decl(ws, mid, fid));
             }
         }
     }
 
-    fn insert_sibling(&mut self, function: FunctionKey, declaration: SiblingDecl) {
-        let group = (declaration.name, declaration.signature.clone());
-        self.sibling_groups
-            .entry(group)
-            .or_default()
-            .insert(function);
-        self.sibling_names
-            .entry(declaration.name)
-            .or_default()
-            .insert(function);
-        self.sibling_declarations.insert(function, declaration);
+    fn sibling_group_count(&self) -> usize {
+        self.sibling_declarations
+            .values()
+            .map(|decl| (decl.name, decl.signature.as_str()))
+            .collect::<FxHashSet<_>>()
+            .len()
     }
 
     fn update_sibling_declarations(
@@ -663,43 +660,31 @@ impl LintDependencyIndex {
             }
         }
 
-        let old_groups: FxHashSet<SiblingGroupKey> = self
-            .sibling_groups
-            .keys()
-            .filter(|(name, _)| invalidation.names.contains(name))
-            .cloned()
-            .collect();
-        stats.sibling_groups_requested += old_groups.len();
-
-        let old_functions: Vec<FunctionKey> = self
-            .sibling_declarations
-            .iter()
-            .filter(|(_, declaration)| changed_files.contains(&declaration.file))
-            .map(|(&function, _)| function)
-            .collect();
-        for function in old_functions {
-            if let Some(declaration) = self.sibling_declarations.remove(&function) {
-                let group = (declaration.name, declaration.signature.clone());
-                remove_from_set(&mut self.sibling_groups, &group, &function);
-                remove_from_set(&mut self.sibling_names, &declaration.name, &function);
-            }
-        }
+        let groups = |declarations: &FxHashMap<FunctionKey, SiblingDecl>| {
+            declarations
+                .values()
+                .filter(|decl| invalidation.names.contains(&decl.name))
+                .map(|decl| (decl.name, decl.signature.clone()))
+                .collect::<FxHashSet<_>>()
+        };
+        let old_groups = groups(&self.sibling_declarations);
+        self.sibling_declarations
+            .retain(|_, declaration| !changed_files.contains(&declaration.file));
         for module in ws.user_modules(&FxHashSet::default()) {
-            if !changed_files.contains(&module.file) {
-                continue;
-            }
-            for (fid, _) in module.functions.iter() {
-                self.insert_sibling((module.id, fid), sibling_decl(ws, module.id, fid));
+            if changed_files.contains(&module.file) {
+                self.sibling_declarations.extend(
+                    module
+                        .functions
+                        .iter()
+                        .map(|(fid, _)| ((module.id, fid), sibling_decl(ws, module.id, fid))),
+                );
             }
         }
-        let new_groups: FxHashSet<SiblingGroupKey> = self
-            .sibling_groups
-            .keys()
-            .filter(|(name, _)| invalidation.names.contains(name))
-            .cloned()
-            .collect();
-        stats.sibling_groups_requested += new_groups.difference(&old_groups).count();
-        stats.sibling_groups_revisited += old_groups.union(&new_groups).count();
+        let group_count = old_groups
+            .union(&groups(&self.sibling_declarations))
+            .count();
+        stats.sibling_groups_requested += group_count;
+        stats.sibling_groups_revisited += group_count;
         refresh_fingerprints(
             &mut self.declaration_fingerprints,
             ws,
@@ -712,8 +697,8 @@ impl LintDependencyIndex {
     /// Keep stored declaration spans in step with a body edit, so a later
     /// declaration change removes findings at their current offsets.
     fn shift_declarations(&mut self, edit: &TextEditDelta) {
-        for span in self.declaration_spans.values_mut() {
-            edit.shift_span(span);
+        for declaration in self.declarations.values_mut() {
+            edit.shift_span(&mut declaration.span);
         }
         for declaration in self.sibling_declarations.values_mut() {
             edit.shift_span(&mut declaration.span);
@@ -721,16 +706,6 @@ impl LintDependencyIndex {
         for (_, span) in self.action_declarations.values_mut() {
             edit.shift_span(span);
         }
-    }
-
-    fn all_nodes(&self) -> FxHashSet<BodyKey> {
-        let mut nodes = self.body_edges.keys().copied().collect::<FxHashSet<_>>();
-        nodes.extend(
-            self.function_nodes
-                .iter()
-                .map(|&(mid, fid)| (mid, BodyOwner::Function(fid))),
-        );
-        nodes
     }
 
     fn collect_component(&self, seed: BodyKey) -> FxHashSet<BodyKey> {
@@ -765,7 +740,10 @@ impl LintDependencyIndex {
         let mut stack = Vec::new();
         for &node in component {
             let root = match node.1 {
-                BodyOwner::Function(fid) => self.root_functions.contains(&(node.0, fid)),
+                BodyOwner::Function(fid) => self
+                    .declarations
+                    .get(&(node.0, fid))
+                    .is_some_and(|decl| decl.root),
                 _ => self.always_live_bodies.contains(&node),
             };
             if root {
@@ -826,26 +804,7 @@ impl LintDependencyIndex {
             self.install_edges(body_key, new);
         }
 
-        let mut covered = FxHashSet::default();
-        let mut affected = FxHashSet::default();
-        for seed in seeds {
-            if covered.contains(&seed) {
-                continue;
-            }
-            let component = self.collect_component(seed);
-            covered.extend(component.iter().copied());
-            stats.reachability_components_visited += 1;
-            self.recompute_component(&component);
-            affected.extend(
-                component
-                    .into_iter()
-                    .filter_map(|(mid, owner)| match owner {
-                        BodyOwner::Function(fid) => Some((mid, fid)),
-                        _ => None,
-                    }),
-            );
-        }
-        affected
+        self.recompute_seed_components(&seeds, false, stats)
     }
 
     fn update_declarations(
@@ -857,9 +816,9 @@ impl LintDependencyIndex {
     ) -> UnusedInvalidation {
         let mut invalidation = UnusedInvalidation::default();
         let old_functions: Vec<FunctionKey> = self
-            .declaration_files
+            .declarations
             .iter()
-            .filter(|(_, file)| changed_files.contains(file))
+            .filter(|(_, decl)| changed_files.contains(&decl.file))
             .map(|(&function, _)| function)
             .collect();
         for &function in &old_functions {
@@ -867,10 +826,10 @@ impl LintDependencyIndex {
             invalidation
                 .seeds
                 .insert((function.0, BodyOwner::Function(function.1)));
-            if let Some(&span) = self.declaration_spans.get(&function) {
-                let file = self.declaration_files[&function];
-                invalidation.locations.insert((file, span.offset_range().0));
-            }
+            let decl = &self.declarations[&function];
+            invalidation
+                .locations
+                .insert((decl.file, decl.span.offset_range().0));
             if let Some(callers) = self.reverse_callers.get(&function) {
                 invalidation.seeds.extend(callers.iter().copied());
                 invalidation.callers.extend(callers.iter().copied());
@@ -916,11 +875,7 @@ impl LintDependencyIndex {
                 (function.0, BodyOwner::Function(function.1)),
             );
             stats.call_edges_retracted += old_edges.len();
-            self.function_nodes.remove(&function);
-            self.declaration_files.remove(&function);
-            self.declaration_names.remove(&function);
-            self.declaration_spans.remove(&function);
-            self.root_functions.remove(&function);
+            self.declarations.remove(&function);
             self.reachable.remove(&function);
         }
         // Current functions are pushed again below; stable ids may repeat old ones.
@@ -1022,14 +977,14 @@ impl LintDependencyIndex {
     fn recompute_seed_components(
         &mut self,
         seeds: &FxHashSet<BodyKey>,
+        declarations_only: bool,
         stats: &mut LintCacheStats,
     ) -> FxHashSet<FunctionKey> {
         let mut covered = FxHashSet::default();
         let mut affected = FxHashSet::default();
         for &seed in seeds {
             if covered.contains(&seed)
-                || (!self.body_edges.contains_key(&seed)
-                    && !matches!(seed.1, BodyOwner::Function(fid) if self.function_nodes.contains(&(seed.0, fid))))
+                || (declarations_only && !self.body_edges.contains_key(&seed))
             {
                 continue;
             }
@@ -1041,7 +996,10 @@ impl LintDependencyIndex {
                 component
                     .into_iter()
                     .filter_map(|(mid, owner)| match owner {
-                        BodyOwner::Function(fid) if self.function_nodes.contains(&(mid, fid)) => {
+                        BodyOwner::Function(fid)
+                            if !declarations_only
+                                || self.declarations.contains_key(&(mid, fid)) =>
+                        {
                             Some((mid, fid))
                         }
                         _ => None,
@@ -1761,24 +1719,20 @@ impl IncrementalLintCache {
         } else if declarations_changed {
             stats.changed_declarations += change.changed_files.len();
         }
-        if let Some(invalidation) = &unused_invalidation {
-            affected_unused.extend(
-                self.dependency
-                    .recompute_seed_components(&invalidation.seeds, &mut stats),
-            );
-        }
-        let declaration_count = self.dependency.function_nodes.len();
-        if let Some(invalidation) = &unused_invalidation {
-            stats.declarations_revisited += invalidation.functions.len();
-            stats.declarations_reused +=
-                declaration_count.saturating_sub(invalidation.functions.len());
+        let revisited = if let Some(invalidation) = &unused_invalidation {
+            affected_unused.extend(self.dependency.recompute_seed_components(
+                &invalidation.seeds,
+                true,
+                &mut stats,
+            ));
+            invalidation.functions.len()
         } else if declarations_changed {
-            stats.declarations_revisited += change.changed_files.len();
-            stats.declarations_reused +=
-                declaration_count.saturating_sub(change.changed_files.len());
+            change.changed_files.len()
         } else {
-            stats.declarations_reused += declaration_count;
-        }
+            0
+        };
+        stats.declarations_revisited += revisited;
+        stats.declarations_reused += self.dependency.declarations.len().saturating_sub(revisited);
         let mut affected_actions = if !declarations_changed && sel.enabled(ACTION_CALLERS) {
             self.dependency.update_action_bodies(ws, &change.reinferred)
         } else {
@@ -1812,20 +1766,18 @@ impl IncrementalLintCache {
             let Some(module) = ws.modules.iter().find(|m| m.file == *file) else {
                 continue;
             };
-            let owners: Vec<BodyOwner> = module.bodies.keys().copied().collect();
-            if flat_enabled
-                && !suppression_only
-                && (missing_cache_files.contains(file)
-                    || !change.reinferred.iter().any(|(mid, _)| *mid == module.id))
+            if suppression_only
+                || (!missing_cache_files.contains(file)
+                    && change.reinferred.iter().any(|(mid, _)| *mid == module.id))
             {
-                flat_targets.extend(owners.iter().copied().map(|owner| (module.id, owner)));
+                continue;
             }
-            if inference_enabled
-                && !suppression_only
-                && (missing_cache_files.contains(file)
-                    || !change.reinferred.iter().any(|(mid, _)| *mid == module.id))
-            {
-                inference_targets.extend(owners.into_iter().map(|owner| (module.id, owner)));
+            let owners = || module.bodies.keys().map(|&owner| (module.id, owner));
+            if flat_enabled {
+                flat_targets.extend(owners());
+            }
+            if inference_enabled {
+                inference_targets.extend(owners());
             }
         }
         if flat_enabled {
@@ -1959,8 +1911,7 @@ impl IncrementalLintCache {
                 .unwrap_or_default();
             self.replace_unused_findings(ws, warm, sources, &affected_unused, &extra_locations);
         }
-        if stats.global_passes == 0
-            && sel.enabled(ACTION_CALLERS)
+        if sel.enabled(ACTION_CALLERS)
             && (!affected_actions.is_empty() || action_invalidation.is_some())
         {
             self.replace_action_findings(
@@ -1972,10 +1923,8 @@ impl IncrementalLintCache {
             );
             dirty_output_files.extend(self.action_population_file);
         }
-        if stats.global_passes == 0 {
-            if let Some(invalidation) = sibling_invalidation {
-                self.replace_sibling_findings(ws, sources, &invalidation);
-            }
+        if let Some(invalidation) = sibling_invalidation {
+            self.replace_sibling_findings(ws, sources, &invalidation);
         }
         if !suppression_changed_files.is_empty() {
             self.refilter_suppression_files(&suppression_changed_files, sources, &mut stats);
@@ -2008,9 +1957,9 @@ impl IncrementalLintCache {
                 .find(|module| module.file == *file)
                 .map(|module| module.id);
             self.dependency
-                .declaration_files
+                .declarations
                 .iter()
-                .filter(|(_, declared)| *declared == file)
+                .filter(|(_, declaration)| declaration.file == *file)
                 .all(|((mid, _), _)| Some(*mid) == current)
         })
     }
@@ -2111,9 +2060,10 @@ impl IncrementalLintCache {
         self.global.clear();
         self.global_span_owners.clear();
         self.global_referenced_files.clear();
-        stats.declarations_revisited += self.dependency.function_nodes.len();
-        stats.sibling_groups_requested += self.dependency.sibling_groups.len();
-        stats.sibling_groups_revisited += self.dependency.sibling_groups.len();
+        stats.declarations_revisited += self.dependency.declarations.len();
+        let group_count = self.dependency.sibling_group_count();
+        stats.sibling_groups_requested += group_count;
+        stats.sibling_groups_revisited += group_count;
         for (&file, source) in sources {
             self.files
                 .insert(file, CachedFileFindings::new(source, stats));
