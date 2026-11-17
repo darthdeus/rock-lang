@@ -946,24 +946,30 @@ fn queue_ordered_geometry_row(pool: RenderBatchPool, z_layer: int, blend: BlendM
     return batch
 }
 
-// Borrows bindings and packed blocks until the world flush. Slot 0 is white;
+// Borrows the mesh, bindings and packed blocks until the world flush. Mesh
+// updates before flush affect every queued use. Slot 0 is white;
 // the shader must declare ID, material and normal outputs.
 pub fn queue_world_surface_geometry(mesh: GpuMesh, pipeline: Pipeline, bindings: [GpuBinding],
     vertex: OwnedUniformBlock?, fragment: OwnedUniformBlock?, outputs: WorldSurfaceOutputs,
-    z_layer: int, blend: BlendMode, depth: DepthMode) {
+    z_layer: int, blend: BlendMode, depth: DepthMode, order: int = 0) {
     assert(mesh.handle.0 != 0 && mesh.vert_count > 0, "world surface geometry requires a live nonempty mesh")
     assert(!CURRENT_RENDER_POOL.active() && !pipeline.after_scene,
         "GPU geometry requires the main world pool")
     assert(sprite_pipeline_has_id_output(pipeline) && sprite_pipeline_has_material_output(pipeline)
         && sprite_pipeline_has_output(pipeline, 3, 3), "GPU geometry requires ID, material and normal outputs")
-    assert(vertex != null && fragment != null, "GPU geometry requires vertex and fragment blocks")
+    if let blocks = SHADER_UNIFORM_BLOCKS.get(pipeline.shader_name) {
+        assert(vertex != null || blocks.by_binding.get(UNIFORM_BLOCK_BINDING_VERTEX) == null,
+            "GPU geometry requires its declared vertex block")
+        assert(fragment != null || blocks.by_binding.get(UNIFORM_BLOCK_BINDING_FRAGMENT) == null,
+            "GPU geometry requires its declared fragment block")
+    }
     assert(bindings.len() == shader_texture_slot_count(pipeline.shader_name) - 1,
         "GPU geometry must provide every nonzero texture slot")
     for (i, binding) in enumerate(bindings) {
         assert(binding.slot == i + 1 && !binding.wrap_repeat && sampled_texture_is_live(binding.resource),
             "GPU geometry has an invalid texture binding")
     }
-    let batch = queue_ordered_geometry_row(RENDER_BATCHES, z_layer, blend, depth, 0, pipeline)
+    let batch = queue_ordered_geometry_row(RENDER_BATCHES, z_layer, blend, depth, order, pipeline)
     batch.retained_mesh = mesh.handle
     batch.count = mesh.vert_count
     batch.geometry_bindings = bindings

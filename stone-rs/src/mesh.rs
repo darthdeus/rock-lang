@@ -1,6 +1,6 @@
 // Retained mesh objects -- the ONE GPU-side geometry primitive, with optional
 // instancing. A mesh owns a VAO plus
-// a STATIC_DRAW vertex VBO; an optional instance VBO continues the
+// a STATIC_DRAW vertex VBO; an optional mutable instance VBO continues the
 // sequential attribute-location numbering with divisor 1. Contrast with
 // stone_draw_mesh (sprite.rs): that path re-uploads STREAM_DRAW every call
 // with the caller-supplied attribute layout.
@@ -21,10 +21,9 @@ struct RetainedMesh {
     // Base attrib count = the first instance attrib's location.
     attr_count: i32,
     inst_count: i32,
-    // Instance attrib locations in use, so detaching can put the VAO back.
-    inst_attr_count: i32,
-    // Bytes uploaded to each buffer, recorded at upload: the layout that
-    // sizes them is not retained, so the census reads these, not a formula.
+    inst_layout: Option<ValidatedLayout>,
+    inst_stride_floats: i32,
+    // Allocated bytes, including spare capacity retained after shrinking.
     vbo_bytes: u64,
     inst_vbo_bytes: u64,
 }
@@ -204,7 +203,8 @@ pub extern "C" fn stone_mesh_create(
                     vert_count,
                     attr_count,
                     inst_count: 0,
-                    inst_attr_count: 0,
+                    inst_layout: None,
+                    inst_stride_floats: 0,
                     vbo_bytes: byte_len as u64,
                     inst_vbo_bytes: 0,
                 },
@@ -220,7 +220,7 @@ pub extern "C" fn stone_mesh_create(
 
 /// Attach per-instance data (attribs continue after the base attribs,
 /// divisor 1). count 0 is valid (draws nothing). Calling twice on one mesh
-/// is a reject at v0 -- no re-upload semantics exist yet.
+/// is rejected; subsequent uploads use stone_mesh_update_instances.
 #[no_mangle]
 pub extern "C" fn stone_mesh_set_instances(
     handle: u64,
@@ -229,22 +229,18 @@ pub extern "C" fn stone_mesh_set_instances(
     stride_floats: c_int,
     attr_sizes: *const c_int,
     attr_count: c_int,
-) {
-    if data.is_null() || !(0..=10_000_000).contains(&count) {
-        crate::log_once!(
-            "MESH",
-            "stone_mesh_set_instances: invalid data ({} instances)",
-            count
-        );
-        return;
-    }
+) -> c_int {
     let Some(sizes) = validate_layout(
         "stone_mesh_set_instances",
         stride_floats,
         attr_sizes,
         attr_count,
     ) else {
-        return;
+        return 0;
+    };
+    let Some(byte_len) = instance_byte_len("stone_mesh_set_instances", data, count, stride_floats)
+    else {
+        return 0;
     };
 
     MESHES.with(|m| {
@@ -255,15 +251,15 @@ pub extern "C" fn stone_mesh_set_instances(
                 "stone_mesh_set_instances: unknown mesh handle {}",
                 handle
             );
-            return;
+            return 0;
         };
         if mesh.inst_vbo.is_some() {
             crate::log_once!(
                 "MESH",
-                "stone_mesh_set_instances: instances already set on mesh {} (no re-upload in v0)",
+                "stone_mesh_set_instances: instances already set on mesh {}",
                 handle
             );
-            return;
+            return 0;
         }
         if mesh.attr_count + attr_count > 16 {
             crate::log_once!(
@@ -272,7 +268,7 @@ pub extern "C" fn stone_mesh_set_instances(
                 mesh.attr_count,
                 attr_count
             );
-            return;
+            return 0;
         }
         with_gl(|gl| unsafe {
             let inst_vbo = match gl.create_buffer() {
@@ -283,20 +279,23 @@ pub extern "C" fn stone_mesh_set_instances(
                         "stone_mesh_set_instances: buffer creation failed ({})",
                         e
                     );
-                    return;
+                    return 0;
                 }
             };
             gl.bind_vertex_array(Some(mesh.vao));
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(inst_vbo));
-            let byte_len = count as usize * stride_floats as usize * std::mem::size_of::<f32>();
-            let bytes = std::slice::from_raw_parts(data as *const u8, byte_len);
+            let bytes = if byte_len == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(data as *const u8, byte_len)
+            };
             if gl
                 .buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STATIC_DRAW)
                 .is_err()
             {
                 gl.bind_vertex_array(None);
                 gl.delete_buffer(inst_vbo);
-                return;
+                return 0;
             }
             crate::track_retained_upload(0, byte_len);
             setup_attribs(
@@ -310,10 +309,135 @@ pub extern "C" fn stone_mesh_set_instances(
             gl.bind_vertex_array(None);
             mesh.inst_vbo = Some(inst_vbo);
             mesh.inst_count = count;
-            mesh.inst_attr_count = attr_count;
+            mesh.inst_layout = Some(sizes);
+            mesh.inst_stride_floats = stride_floats;
             mesh.inst_vbo_bytes = byte_len as u64;
-        });
-    });
+            1
+        })
+        .unwrap_or_else(|| {
+            crate::log_once!("MESH", "stone_mesh_set_instances: no GL context");
+            0
+        })
+    })
+}
+
+fn instance_byte_len(
+    what: &str,
+    data: *const c_float,
+    count: c_int,
+    stride_floats: c_int,
+) -> Option<usize> {
+    let bytes = (count as usize)
+        .checked_mul(stride_floats as usize)
+        .and_then(|floats| floats.checked_mul(std::mem::size_of::<f32>()));
+    if !(0..=10_000_000).contains(&count)
+        || (count > 0 && data.is_null())
+        || !matches!(bytes, Some(n) if n <= i32::MAX as usize)
+    {
+        crate::log_once!("MESH", "{}: invalid data ({} instances)", what, count);
+        return None;
+    }
+    bytes
+}
+
+/// Replace the live instance prefix, keeping its layout and allocation until
+/// growth is needed. Returns 1 on success, 0 on rejection or upload failure.
+#[no_mangle]
+pub extern "C" fn stone_mesh_update_instances(
+    handle: u64,
+    data: *const c_float,
+    count: c_int,
+) -> c_int {
+    MESHES.with(|m| {
+        let mut meshes = m.borrow_mut();
+        let Some(mesh) = meshes.get_mut(&handle) else {
+            crate::log_once!(
+                "MESH",
+                "stone_mesh_update_instances: unknown mesh handle {}",
+                handle
+            );
+            return 0;
+        };
+        let (Some(inst_vbo), Some(layout)) = (mesh.inst_vbo, mesh.inst_layout.as_ref()) else {
+            crate::log_once!(
+                "MESH",
+                "stone_mesh_update_instances: mesh {} has no instance layout",
+                handle
+            );
+            return 0;
+        };
+        let Some(byte_len) = instance_byte_len(
+            "stone_mesh_update_instances",
+            data,
+            count,
+            mesh.inst_stride_floats,
+        ) else {
+            return 0;
+        };
+        if byte_len == 0 {
+            mesh.inst_count = 0;
+            return 1;
+        }
+        with_gl(|gl| unsafe {
+            let bytes = std::slice::from_raw_parts(data as *const u8, byte_len);
+            if byte_len as u64 > mesh.inst_vbo_bytes {
+                // Allocate separately so a failed growth leaves the live buffer intact.
+                let capacity = byte_len
+                    .max((mesh.inst_vbo_bytes as usize).saturating_mul(2))
+                    .min(i32::MAX as usize);
+                let replacement = match gl.create_buffer() {
+                    Ok(buffer) => buffer,
+                    Err(e) => {
+                        crate::log_once!(
+                            "MESH",
+                            "stone_mesh_update_instances: buffer creation failed ({})",
+                            e
+                        );
+                        return 0;
+                    }
+                };
+                gl.bind_buffer(glow::ARRAY_BUFFER, Some(replacement));
+                if gl
+                    .buffer_data_size(glow::ARRAY_BUFFER, capacity as i32, glow::DYNAMIC_DRAW)
+                    .is_err()
+                    || gl
+                        .buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes)
+                        .is_err()
+                {
+                    gl.delete_buffer(replacement);
+                    return 0;
+                }
+                gl.bind_vertex_array(Some(mesh.vao));
+                setup_attribs(
+                    gl,
+                    mesh.attr_count as u32,
+                    layout.as_slice(),
+                    mesh.inst_stride_floats,
+                    1,
+                    0,
+                );
+                gl.bind_vertex_array(None);
+                mesh.inst_vbo = Some(replacement);
+                mesh.inst_vbo_bytes = capacity as u64;
+                gl.delete_buffer(inst_vbo);
+            } else {
+                gl.bind_buffer(glow::ARRAY_BUFFER, Some(inst_vbo));
+                if gl
+                    .buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes)
+                    .is_err()
+                {
+                    return 0;
+                }
+            }
+            mesh.inst_count = count;
+            crate::track_retained_upload(0, byte_len);
+            1
+        })
+        .unwrap_or_else(|| {
+            crate::log_once!("MESH", "stone_mesh_update_instances: no GL context");
+            0
+        })
+    })
 }
 
 /// Draws under CURRENT_SHADER; a mesh's custom attribute layout has no
@@ -469,7 +593,72 @@ pub(crate) fn clear_all() {
 
 #[cfg(test)]
 mod layout_tests {
-    use super::validate_layout;
+    use super::*;
+
+    #[test]
+    fn instance_updates_reject_invalid_state_without_changing_live_count() {
+        let handle = u64::MAX;
+        let data = [0.0f32; 2];
+        assert_eq!(stone_mesh_update_instances(handle, data.as_ptr(), 1), 0);
+        assert_eq!(stone_mesh_update_instances(handle, std::ptr::null(), 0), 0);
+        let object = std::num::NonZeroU32::new(1).unwrap();
+        struct Cleanup(u64);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                MESHES.with(|meshes| meshes.borrow_mut().remove(&self.0));
+            }
+        }
+        let _cleanup = Cleanup(handle);
+        let instance_count =
+            |handle: u64| MESHES.with(|meshes| meshes.borrow()[&handle].inst_count);
+        MESHES.with(|meshes| {
+            meshes.borrow_mut().insert(
+                handle,
+                RetainedMesh {
+                    vao: glow::NativeVertexArray(object),
+                    vbo: glow::NativeBuffer(object),
+                    inst_vbo: None,
+                    gl_mode: glow::TRIANGLES,
+                    vert_count: 3,
+                    attr_count: 1,
+                    inst_count: 0,
+                    inst_layout: None,
+                    inst_stride_floats: 0,
+                    vbo_bytes: 24,
+                    inst_vbo_bytes: 0,
+                },
+            );
+        });
+        assert_eq!(stone_mesh_update_instances(handle, data.as_ptr(), 1), 0);
+        assert_eq!(stone_mesh_update_instances(handle, std::ptr::null(), 0), 0);
+        MESHES.with(|meshes| {
+            let mut meshes = meshes.borrow_mut();
+            let mesh = meshes.get_mut(&handle).unwrap();
+            mesh.inst_vbo = Some(glow::NativeBuffer(object));
+            mesh.inst_layout = validate_layout("test", 2, [2].as_ptr(), 1);
+            mesh.inst_stride_floats = 2;
+            mesh.inst_count = 1;
+            mesh.inst_vbo_bytes = 8;
+        });
+        for (ptr, count) in [
+            (data.as_ptr(), -1),
+            (std::ptr::null(), 1),
+            (data.as_ptr(), 10_000_001),
+        ] {
+            assert_eq!(stone_mesh_update_instances(handle, ptr, count), 0);
+            assert_eq!(instance_count(handle), 1);
+            assert_eq!(stone_mesh_bytes(handle), 32);
+        }
+        // Zero needs no source allocation or GL call, and retains the instance layout.
+        assert_eq!(stone_mesh_update_instances(handle, std::ptr::null(), 0), 1);
+        assert_eq!(instance_count(handle), 0);
+        assert_eq!(stone_mesh_bytes(handle), 32);
+        MESHES.with(|meshes| {
+            meshes.borrow_mut().remove(&handle);
+        });
+        assert_eq!(stone_mesh_update_instances(handle, data.as_ptr(), 1), 0);
+        assert_eq!(stone_mesh_update_instances(handle, std::ptr::null(), 0), 0);
+    }
 
     #[test]
     fn validate_layout_does_not_allocate_for_maximum_attribute_count() {

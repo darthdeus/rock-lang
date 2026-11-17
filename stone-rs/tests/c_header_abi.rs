@@ -796,6 +796,8 @@ ABI(stone_is_directory_status, int32_t (*)(const char *));
 ABI(stone_create_directory, bool (*)(const char *));
 ABI(stone_load_image, uint64_t (*)(const char *, int, int, int, int));
 ABI(stone_reload_image, bool (*)(uint64_t, const char *));
+ABI(stone_mesh_set_instances, int (*)(uint64_t, const float *, int, int, const int *, int));
+ABI(stone_mesh_update_instances, int (*)(uint64_t, const float *, int));
 ABI(stone_mesh_free, void (*)(uint64_t));
 ABI(stone_pixel_readback_submit, void (*)(uint64_t, uint64_t, int, int));
 ABI(stone_play_sound, uint64_t (*)(uint64_t, uint32_t, float, float, float, bool, bool, float));

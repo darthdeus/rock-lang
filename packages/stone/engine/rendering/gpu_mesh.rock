@@ -1,6 +1,6 @@
 // Retained GPU mesh objects, instancing optional -- Rock wrapper over the
 // stone_mesh_* C API. Base verts
-// and optional per-instance data are STATIC_DRAW uploads at creation time;
+// are STATIC_DRAW uploads; optional per-instance data can be updated in place;
 // draw runs under the currently bound shader (with_shader), so use it for
 // custom-shader geometry, not the sprite path.
 
@@ -84,7 +84,7 @@ pub fn gpu_mesh_new(
 }
 
 // Instance attribs continue after the base attribs, divisor 1. count 0 is
-// valid (draws nothing); calling twice on one mesh is a v0 reject C-side.
+// valid (draws nothing); initialize once, then use gpu_mesh_update_instances.
 pub fn gpu_mesh_set_instances(
     m: GpuMesh,
     data: Ptr<float>,
@@ -94,8 +94,17 @@ pub fn gpu_mesh_set_instances(
 ) {
     static sizes = native_buffer_int(16)
     __gpu_mesh_sizes(attr_sizes, sizes)
-    stone_mesh_set_instances(m.handle.0, data, count, stride, sizes.ptr, attr_sizes.len())
+    if stone_mesh_set_instances(m.handle.0, data, count, stride, sizes.ptr, attr_sizes.len()) != 0 {
+        m.inst_count = count
+    }
+}
+
+// Replace the live prefix, retaining the initialized layout and spare capacity.
+// Failure leaves the previous live count intact. count 0 draws nothing.
+pub fn gpu_mesh_update_instances(m: GpuMesh, data: Ptr<float>, count: int) -> bool {
+    if stone_mesh_update_instances(m.handle.0, data, count) == 0 { return false }
     m.inst_count = count
+    return true
 }
 
 // count < 0 = all instances; ignored for non-instanced meshes.

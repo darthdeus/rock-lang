@@ -119,7 +119,7 @@ fn default_occluded_fade(c: Color) -> Color {
 // Called for every draw with a non-null Outline. Records per-entity color data
 // so `apply_outline_overlay` can upload it
 // to the shader. Picking ids are sparse scene identities, not uniform slots.
-fn register_outline_entry(entity_id: int, outline: Outline) {
+pub fn register_outline_entry(entity_id: int, outline: Outline) {
     if entity_id <= 0 { return }
     if OUTLINE_ENTRIES.len() >= OUTLINE_MAX_ENTRIES - 1 && OUTLINE_ENTRIES.get(entity_id) == null {
         log_warn("OUTLINE", "outline style capacity exceeded; entity {entity_id} uses fallback")

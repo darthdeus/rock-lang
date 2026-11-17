@@ -600,10 +600,11 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
             int mode,
             const float* verts, int vert_count, int stride_floats,
             const int* attr_sizes, int attr_count);
-        void stone_mesh_set_instances(
+        int stone_mesh_set_instances(
             uint64_t handle,
             const float* data, int count, int stride_floats,
             const int* attr_sizes, int attr_count);
+        int stone_mesh_update_instances(uint64_t handle, const float* data, int count);
         int stone_mesh_draw(uint64_t handle, StoneImageHandle texture, int count);
         void stone_mesh_free(uint64_t handle);
         int stone_get_live_mesh_count(void);
@@ -1424,7 +1425,8 @@ extern(ffi, "stone") fn stone_mesh_set_instances(
     stride_floats: int,
     attr_sizes: Ptr<int>,
     attr_count: int,
-)
+) -> int
+extern(ffi, "stone") fn stone_mesh_update_instances(handle: int, data: Ptr<float>, count: int) -> int
 extern(ffi, "stone") fn stone_mesh_draw(handle: int, texture: int, count: int) -> int
 extern(ffi, "stone") fn stone_mesh_free(handle: int)
 // Asset-report census over retained meshes: population, one handle per index
