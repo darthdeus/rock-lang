@@ -308,7 +308,6 @@
 // prelude: any
 // prelude: arena
 // prelude: arena_destroy
-// prelude: arena_generation_snapshot
 // prelude: arena_live_count
 // prelude: arena_new
 // prelude: arena_registry_storage_bound
@@ -492,7 +491,6 @@
 // prelude: json_reader_field_as_strict_int
 // prelude: json_reader_field_offset
 // prelude: json_reader_fields
-// prelude: json_reader_float
 // prelude: json_reader_float_components
 // prelude: json_reader_float_components_end
 // prelude: json_reader_index
@@ -508,7 +506,6 @@
 // prelude: json_reader_read_int
 // prelude: json_reader_read_int_at
 // prelude: json_reader_skip
-// prelude: json_reader_str
 // prelude: json_reader_strict_int
 // prelude: json_reader_validate
 // prelude: json_reader_value
@@ -524,7 +521,6 @@
 // prelude: jv_int
 // prelude: jv_int_pair
 // prelude: jv_str
-// prelude: jv_str_arr
 // prelude: keys
 // prelude: keys_into
 // prelude: kill
@@ -604,7 +600,6 @@
 // prelude: parse_array_value
 // prelude: parse_float
 // prelude: parse_float_at
-// prelude: parse_hex4
 // prelude: parse_hex4_at
 // prelude: parse_int
 // prelude: parse_keyword

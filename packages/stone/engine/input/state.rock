@@ -188,60 +188,6 @@ pub fn input_end_frame() {
     mouse_released_this_frame.clear()
 }
 
-// Clears the game/synthetic input lane; SDL state stays process-owned.
-pub fn input_reset_game_lane() {
-    mouse_down.clear()
-    mouse_down_last.clear()
-    keys_down.clear()
-    keys_down_last.clear()
-    scancodes_down.clear()
-    scancodes_down_last.clear()
-    scancode_modifier_state.clear()
-    scancodes_pressed_this_frame.clear()
-    scancodes_repeated_this_frame.clear()
-    keys_pressed_this_frame.clear()
-    keys_repeated_this_frame.clear()
-    mouse_pressed_this_frame.clear()
-    mouse_released_this_frame.clear()
-    pad_down.clear()
-    pad_down_last.clear()
-    pad_axes.clear()
-    pad_axes_last.clear()
-    pad_axis_motion_this_frame.clear()
-    pad_pressed_this_frame.clear()
-    pad_released_this_frame.clear()
-
-    synthetic_mouse_down.clear()
-    synthetic_mouse_released_this_frame.clear()
-    synthetic_keys_down.clear()
-    synthetic_scancodes_down.clear()
-    synthetic_scancode_modifiers.clear()
-    synthetic_scancodes_pressed_this_frame.clear()
-    synthetic_scancodes_repeated_this_frame.clear()
-    synthetic_keys_pressed_this_frame.clear()
-    synthetic_text_input_this_frame = ""
-    synthetic_keys_repeated_this_frame.clear()
-    synthetic_pad_down.clear()
-    synthetic_pad_axes.clear()
-    synthetic_pad_axis_motion_this_frame.clear()
-    synthetic_pad_pressed_this_frame.clear()
-    synthetic_pad_released_this_frame.clear()
-
-    // Action bindings and rebind capture are engine-owned process state, so
-    // the lane reset clears them here rather than from a game hook. An armed
-    // capture keeps `action_allowed` false for every non-UI action.
-    action_reset_all_bindings()
-    REBIND_CAPTURE = false
-    REBIND_CAPTURE_CANCELLED = false
-    REBIND_INPUT_CONSUMED = false
-    input_capture_clear_snapshot()
-
-    mouse_wheel_delta = 0
-    sim_mouse_override = null
-    IMGUI_MOUSE_CAPTURE_OVERRIDE = null
-    LAST_INPUT_DEVICE = InputDevice::KeyboardMouse
-}
-
 pub fn input_copy_keys(dst: Map<string, bool>, src: Map<string, bool>) {
     dst.clear()
     for (key, is_down) in src {

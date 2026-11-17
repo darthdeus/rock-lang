@@ -115,12 +115,6 @@ global DS_APPLIED_VSYNC: int = -1
 global DS_APPLIED_RES: IVec2 = iv(-1, -1)
 global DS_APPLIED_FRAME_CAP: int = -1
 
-// The swap interval last requested of the driver: 1 on, 0 off, -1 before the
-// first push. The driver may still decline it (engine_vsync_active).
-pub fn display_settings_applied_vsync() -> int {
-    return DS_APPLIED_VSYNC
-}
-
 // Queue DISPLAY_SETTINGS -> runtime for the next frame boundary.
 pub fn apply_display_settings(s: DisplaySettings) {
     DISPLAY_SETTINGS = s

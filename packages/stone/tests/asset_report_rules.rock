@@ -321,27 +321,6 @@ fn asset_report_rows_cover_every_loaded_kind() {
 }
 
 @test
-fn asset_report_kind_totals_equal_the_residency_census() {
-    asset_report_test_host()
-    let path = asset_report_test_object("d", "soil")
-    let soil = acquire_image_asset(path, watch: false)
-    assert(soil.0 != 0)
-    let totals = asset_report_totals()
-    let census = residency_census()
-    let found = false
-    for total in totals {
-        if total.kind != "source_texture" { continue }
-        found = true
-        assert_eq(total.gpu_bytes, census.bytes,
-            "the image-kind total is the census over the same rows")
-        assert_eq(total.rows, census.handles)
-    }
-    assert(found, "the dump totals its source textures")
-    assert(release_image_asset(path))
-    assert(remove_file(path))
-}
-
-@test
 fn asset_report_json_is_a_valid_stable_document() {
     asset_report_test_host()
     let path = asset_report_test_object("e", "soil")
@@ -374,10 +353,8 @@ fn asset_report_writer_records_events_and_an_index() {
     asset_report_test_host()
     let dir = (env_var("TMPDIR") ?? "/tmp") + "/rock-asset-report-writer"
     let _ = create_directory(dir)
-    assert(!asset_report_armed(), "reporting is off by default")
     assert(!asset_report_event("nope"), "an event with no sink writes nothing")
     asset_report_configure(dir, 2)
-    assert(asset_report_armed())
     let path = asset_report_test_object("f", "soil")
     let _ = acquire_image_asset(path, watch: false)
     assert(asset_report_event("arrival"))
@@ -393,8 +370,7 @@ fn asset_report_writer_records_events_and_an_index() {
     let periodic = io_read_text_file("{dir}/{frame}-periodic.json")
     assert(periodic != null, "the interval tick writes a periodic dump")
     assert(periodic.unwrap().contains(identity))
-    asset_report_disarm()
-    assert(!asset_report_armed(), "disarming restores the default")
+    asset_report_configure("", 2)
     assert(!asset_report_event("nope"), "a disarmed event writes nothing")
     assert(release_image_asset(path))
     assert(remove_file(path))

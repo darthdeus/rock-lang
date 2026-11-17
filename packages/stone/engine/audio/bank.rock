@@ -268,8 +268,6 @@ pub fn sound_bank_clear_pending() {
     sound_bank_reset_pending_order_if_idle()
 }
 
-pub fn sound_bank_pending_count() -> int { return SOUND_BANK_PENDING.len() }
-
 fn sound_bank_queue_layer(layer: SoundBankLayer, volume: float, speed: float,
                           decay: float, bus: int, pitch_jitter: float,
                           spatial: bool, pan: float, site: string) {

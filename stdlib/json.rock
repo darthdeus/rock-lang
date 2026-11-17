@@ -536,11 +536,6 @@ fn parse_string_raw_at(src: string, at: int, materialize: bool = true) -> (strin
     return value
 }
 
-fn parse_hex4(s: string) -> int? {
-    if s.len() != 4 { return null }
-    return parse_hex4_at(s, 0)
-}
-
 fn parse_hex4_at(s: string, at: int) -> int? {
     let result = 0
     let i = 0
@@ -772,17 +767,6 @@ fn jv_float_arr(v: JsonValue?, default_val: [float]) -> [float] {
     return out
 }
 
-fn jv_str_arr(v: JsonValue?, default_val: [string]) -> [string] {
-    let vv = v ?? return default_val
-    let arr = json_as_array(vv) ?? return default_val
-    let out: [string] = []
-    for e in arr {
-        if let s = json_as_str(e) { out.push(s) }
-    }
-    if out.len() == 0 { return default_val }
-    return out
-}
-
 fn jv_int_pair(v: JsonValue?, def_w: int, def_h: int) -> (int, int) {
     if v == null { return (def_w, def_h) }
     let arr_opt = json_as_array(v) ?? return (def_w, def_h)
@@ -846,8 +830,6 @@ struct JsonReaderValidation {
 @inline fn json_reader_value(value: JsonValue) -> JsonReader { return JsonReader { value } }
 @inline fn json_reader_null() -> JsonReader { return JsonReader {} }
 @inline fn json_reader_int(value: int) -> JsonReader { return json_reader_value(json_int(value)) }
-@inline fn json_reader_float(value: float) -> JsonReader { return json_reader_value(json_float(value)) }
-@inline fn json_reader_str(value: string) -> JsonReader { return json_reader_value(json_str(value)) }
 @inline fn json_reader_empty_array() -> JsonReaderArray { return JsonReaderArray { reader: json_reader_null() } }
 
 fn json_reader_error_path(validation: JsonReaderValidation) -> string {

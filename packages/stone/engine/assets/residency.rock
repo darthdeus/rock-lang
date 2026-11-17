@@ -54,9 +54,6 @@ global RESIDENCY_PROFILE_EVICTIONS: int = 0
 global RESIDENCY_FRAME_EVICTED_BYTES: int = 0
 global RESIDENCY_PROFILE_EVICTED_BYTES: int = 0
 
-pub fn residency_set_budget(bytes: int) { RESIDENCY_BUDGET = max(0, bytes) }
-pub fn residency_budget_bytes() -> int { return RESIDENCY_BUDGET }
-
 fn residency_cache_remove(identity: string) {
     let entry = RESIDENCY_CACHE.entries.remove(identity) ?? return
     if let previous = entry.previous {
@@ -72,13 +69,6 @@ fn residency_touch(identity: string) {
     residency_cache_remove(identity)
     RESIDENCY_CACHE.touch += 1
     RESIDENCY_CACHE.touches.insert(identity, RESIDENCY_CACHE.touch)
-}
-
-// Monotonic residency touches served. Every load_image_cached hit or fresh
-// load advances it exactly once, so a delta across a draw pass counts that
-// pass's residency lookups.
-pub fn residency_touch_count() -> int {
-    return RESIDENCY_CACHE.touch
 }
 
 // Appends an unreferenced cached image as the LRU's most recently used entry.
@@ -355,19 +345,6 @@ pub fn residency_reset_profile_stats_to_frame() {
     RESIDENCY_PROFILE_COLD_MISS_BYTES = RESIDENCY_FRAME_COLD_MISS_BYTES
 }
 
-pub fn residency_frame_stats() -> ResidencyStats {
-    return ResidencyStats {
-        misses: RESIDENCY_FRAME_MISSES,
-        miss_bytes: RESIDENCY_FRAME_MISS_BYTES,
-        cold_misses: RESIDENCY_FRAME_COLD_MISSES,
-        cold_miss_bytes: RESIDENCY_FRAME_COLD_MISS_BYTES,
-        miss_wait_us: RESIDENCY_FRAME_MISS_WAIT_US,
-        decode_failures: stone_image_decode_failed_count() - RESIDENCY_FRAME_DECODE_FAILED_BASE,
-        evictions: RESIDENCY_FRAME_EVICTIONS,
-        evicted_bytes: RESIDENCY_FRAME_EVICTED_BYTES,
-    }
-}
-
 pub fn residency_record_sound_decode(path: string, waited_us: int) {
     if waited_us <= 0 { return }
     RESIDENCY_FRAME_WAIT_PATHS.push("sound:{path}")
@@ -388,18 +365,6 @@ pub fn residency_profile_stats() -> ResidencyStats {
     }
 }
 
-// An explicit scope for a caller that brackets its own frames (sims, tools).
-pub fn residency_cold_arrival_begin() {
-    RESIDENCY_COLD_DEPTH = RESIDENCY_COLD_DEPTH + 1
-}
-
-pub fn residency_cold_arrival_end() {
-    if RESIDENCY_COLD_DEPTH <= 0 {
-        error("residency_cold_arrival_end without a matching begin")
-    }
-    RESIDENCY_COLD_DEPTH = RESIDENCY_COLD_DEPTH - 1
-}
-
 // A jump the residency set could not anticipate (blink, procgen entry,
 // recovery expiry, seek, editor jump). Its misses count as cold until the
 // first world render that began after the jump has finished: the arrival's
@@ -411,8 +376,6 @@ pub fn residency_cold_arrival() {
     RESIDENCY_COLD_ARRIVAL_OPEN = true
     RESIDENCY_COLD_ARRIVAL_RENDERING = false
 }
-
-pub fn residency_cold_arrival_pending() -> bool { return RESIDENCY_COLD_ARRIVAL_OPEN }
 
 // frame_core_render_frame brackets every world render with these two.
 pub fn residency_cold_arrival_render_begin() {
@@ -825,10 +788,6 @@ fn asset_report_sum(rows: [AssetReportRow]) -> [AssetKindTotal] {
     return totals
 }
 
-pub fn asset_report_totals() -> [AssetKindTotal] {
-    return asset_report_sum(asset_report_rows())
-}
-
 fn asset_report_row_json(row: AssetReportRow) -> JsonValue {
     let paths: [JsonValue] = vec_new()
     for path in row.paths { paths.push(json_str(path)) }
@@ -914,22 +873,12 @@ value AssetReportIndexEntry {
 
 global ASSET_REPORT_INDEX: [AssetReportIndexEntry] = vec_new()
 
-pub fn asset_report_armed() -> bool {
-    return ASSET_REPORT_ARMED
-}
-
 pub fn asset_report_configure(dir: string, interval_frames: int) {
     ASSET_REPORT_DIR = dir
     ASSET_REPORT_INTERVAL = if interval_frames > 0 { interval_frames } else { 600 }
     ASSET_REPORT_ARMED = dir != ""
     ASSET_REPORT_ENV_CHECKED = true
     ASSET_REPORT_LAST_FRAME = 0 - ASSET_REPORT_INTERVAL
-    ASSET_REPORT_INDEX.clear()
-}
-
-pub fn asset_report_disarm() {
-    ASSET_REPORT_ARMED = false
-    ASSET_REPORT_DIR = ""
     ASSET_REPORT_INDEX.clear()
 }
 

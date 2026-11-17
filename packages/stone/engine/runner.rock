@@ -63,11 +63,6 @@ pub fn engine_vsync_active() -> bool {
     return VSYNC_ACTIVE
 }
 
-// Whether the game's vsync request is being held off for a hidden window.
-pub fn engine_vsync_held_for_hidden_window() -> bool {
-    return VSYNC_HELD_FOR_HIDDEN_WINDOW
-}
-
 // Re-applies the game's vsync request after the window was shown or hidden.
 pub fn engine_window_visibility_changed() {
     engine_set_vsync(VSYNC_REQUESTED)
@@ -92,11 +87,6 @@ const FRAME_PACE_SPIN_SECONDS: float = 0.002
 pub fn engine_set_frame_cap(fps: int) {
     FRAME_CAP_REQUESTED = max(0, fps)
     FRAME_PACE_DEADLINE = -1.0
-}
-
-// The cap as the game asked for it.
-pub fn engine_frame_cap_requested() -> int {
-    return FRAME_CAP_REQUESTED
 }
 
 // The cap the loop applies: none in a bounded run.

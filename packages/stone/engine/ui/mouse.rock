@@ -148,16 +148,6 @@ pub global UI_ID_DEBUG: UiIdDebug = UiIdDebug {
     last_dupe_name: "",
 }
 
-pub fn ui_id_debug_set_enabled(enabled: bool) {
-    let d = UI_ID_DEBUG
-    if !enabled {
-        d.scopes.clear()
-        d.labels.clear()
-        d.seen.clear()
-    }
-    d.enabled = enabled
-}
-
 pub const UI_ID_JOIN_FORMATS: int = 0
 
 // djb2 over "scope/label", masked to positive 31-bit (h*33 stays well
@@ -285,15 +275,6 @@ pub fn ui_alpha_mask_from_image(data: ImageData, linear: bool = false,
         for x in 0..width { pixels[y * width + x] = rgba[source_row + x * 4 + 3] }
     }
     return UiAlphaMask { width, height, pixels, linear }
-}
-
-// The mask's rows from `first` down, for a widget drawn with its top cropped.
-pub fn ui_alpha_mask_rows(mask: UiAlphaMask, first: int) -> UiAlphaMask {
-    let start = clamp(first, 0, mask.height - 1) as int
-    let height = mask.height - start
-    let pixels = native_buffer_u8(mask.width * height)
-    for index in 0..mask.width * height { pixels[index] = mask.pixels[start * mask.width + index] }
-    return UiAlphaMask { width: mask.width, height, pixels, linear: mask.linear }
 }
 
 pub fn ui_alpha_mask_contains(mask: UiAlphaMask, uv: Vec2) -> bool {

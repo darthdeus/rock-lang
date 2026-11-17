@@ -11,11 +11,6 @@ pub value SoundRecipe {
     digest: string,
 }
 
-pub value SoundResidencyMetrics {
-    sync_decodes: int,
-    sync_decode_us: int,
-}
-
 global SOUND_RESIDENCY_RECIPES: Map<int, SoundRecipe> = map_new()
 value SoundResidencySharedSource {
     sound: Sound,
@@ -25,18 +20,6 @@ global SOUND_RESIDENCY_SHARED_SOURCES: Map<string, SoundResidencySharedSource> =
 global SOUND_RESIDENCY_SHARED_KEYS: Map<int, string> = map_new()
 global SOUND_RESIDENCY_SYNC_DECODES: int = 0
 global SOUND_RESIDENCY_SYNC_DECODE_US: int = 0
-
-pub fn sound_residency_metrics() -> SoundResidencyMetrics {
-    return SoundResidencyMetrics {
-        sync_decodes: SOUND_RESIDENCY_SYNC_DECODES,
-        sync_decode_us: SOUND_RESIDENCY_SYNC_DECODE_US,
-    }
-}
-
-pub fn sound_residency_restore_metrics(metrics: SoundResidencyMetrics) {
-    SOUND_RESIDENCY_SYNC_DECODES = metrics.sync_decodes
-    SOUND_RESIDENCY_SYNC_DECODE_US = metrics.sync_decode_us
-}
 
 pub fn sound_residency_register_recipe(handle: int, recipe: SoundRecipe) {
     if handle == 0 { return }
@@ -87,11 +70,6 @@ fn sound_residency_release_shared(sound: Sound) {
     SOUND_RESIDENCY_SHARED_SOURCES.remove(key)
     SOUND_RESIDENCY_SHARED_KEYS.remove(data.backend_id)
     sound_residency_unload(sound)
-}
-
-pub fn sound_residency_recipe(sound: Sound) -> SoundRecipe? {
-    let data = sound.data() ?? return null
-    return SOUND_RESIDENCY_RECIPES.get(data.backend_id)
 }
 
 pub fn sound_residency_admit(sound: Sound) -> bool {

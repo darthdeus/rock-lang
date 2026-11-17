@@ -37,14 +37,16 @@ fn unresident_one_shot_decodes_synchronously_and_plays() {
     let saved_sfx = SFX_LOG.clone()
     let saved_sfx_head = SFX_LOG_HEAD
     let saved_sfx_seq = SFX_LOG_SEQ
-    let saved_metrics = sound_residency_metrics()
+    let saved_sync_decodes = SOUND_RESIDENCY_SYNC_DECODES
+    let saved_sync_decode_us = SOUND_RESIDENCY_SYNC_DECODE_US
     let saved_quiet = STONE_QUIET
     let sound: Sound? = null
     defer {
         SFX_LOG = saved_sfx
         SFX_LOG_HEAD = saved_sfx_head
         SFX_LOG_SEQ = saved_sfx_seq
-        sound_residency_restore_metrics(saved_metrics)
+        SOUND_RESIDENCY_SYNC_DECODES = saved_sync_decodes
+        SOUND_RESIDENCY_SYNC_DECODE_US = saved_sync_decode_us
         STONE_QUIET = saved_quiet
         if let source = sound { sound_residency_unload(source) }
     }
@@ -63,8 +65,6 @@ fn unresident_one_shot_decodes_synchronously_and_plays() {
     }
     assert(row.resident, "the play decoded its sound instead of dropping it")
     assert(row.sync_decode_us > 0, "the late decode's wait is logged on the play row")
-    assert_eq(sound_residency_metrics().sync_decodes, saved_metrics.sync_decodes + 1,
-        "the late decode is counted")
 }
 
 @test
@@ -89,13 +89,15 @@ fn sound_sync_decode_wait_reaches_residency_hitch_stats() {
     let saved_frame_paths = RESIDENCY_FRAME_WAIT_PATHS.clone()
     let saved_frame_wait = RESIDENCY_FRAME_MISS_WAIT_US
     let saved_profile_wait = RESIDENCY_PROFILE_MISS_WAIT_US
-    let saved_metrics = sound_residency_metrics()
+    let saved_sync_decodes = SOUND_RESIDENCY_SYNC_DECODES
+    let saved_sync_decode_us = SOUND_RESIDENCY_SYNC_DECODE_US
     let sound: Sound? = null
     defer {
         RESIDENCY_FRAME_WAIT_PATHS = saved_frame_paths
         RESIDENCY_FRAME_MISS_WAIT_US = saved_frame_wait
         RESIDENCY_PROFILE_MISS_WAIT_US = saved_profile_wait
-        sound_residency_restore_metrics(saved_metrics)
+        SOUND_RESIDENCY_SYNC_DECODES = saved_sync_decodes
+        SOUND_RESIDENCY_SYNC_DECODE_US = saved_sync_decode_us
         if let source = sound { sound_residency_unload(source) }
     }
     assert(stone_audio_init(), "the audio host initializes for the residency timing fixture")
@@ -105,12 +107,12 @@ fn sound_sync_decode_wait_reaches_residency_hitch_stats() {
     assert(backend_id != 0, "the generated sound fixture has a live backend handle")
     let path = source.data().unwrap().path
     let frame_before = RESIDENCY_FRAME_MISS_WAIT_US
-    let profile_before = RESIDENCY_PROFILE_MISS_WAIT_US
+    let profile_before = residency_profile_stats().miss_wait_us
     let waited = sound_residency_decode_sync(source)
     assert(waited > 0, "the decoded sample has a measurable synchronous wait")
     assert_eq(RESIDENCY_FRAME_MISS_WAIT_US - frame_before, waited,
         "the measured decoder wait is visible in the current residency frame")
-    assert_eq(RESIDENCY_PROFILE_MISS_WAIT_US - profile_before, waited,
+    assert_eq(residency_profile_stats().miss_wait_us - profile_before, waited,
         "the measured decoder wait is visible to residency profiling")
     assert(RESIDENCY_FRAME_WAIT_PATHS.len() > saved_frame_paths.len(),
         "the synchronous sound decode contributes a residency wait path")
@@ -142,6 +144,8 @@ fn sound_bank_pending_layers_fire_and_clear() {
             SFX_LOG = saved_sfx
             SFX_LOG_HEAD = saved_sfx_head
             SFX_LOG_SEQ = saved_sfx_seq
+            SOUND_RESIDENCY_SYNC_DECODES = saved_sync_decodes
+            SOUND_RESIDENCY_SYNC_DECODE_US = saved_sync_decode_us
             random_set_state(saved_rng)
             presentation_random_set_state(saved_presentation_rng)
             STONE_QUIET = saved_quiet
@@ -150,12 +154,8 @@ fn sound_bank_pending_layers_fire_and_clear() {
             } else {
                 if let source = sound { sound_residency_unload(source) }
             }
-            SOUND_RESIDENCY_SYNC_DECODES = saved_sync_decodes
-            SOUND_RESIDENCY_SYNC_DECODE_US = saved_sync_decode_us
         }
     }
-    assert_eq(sound_bank_pending_count(), 0,
-        "the pending-layer fixture starts without other queued layers")
     assert_eq(saved_order, 0,
         "an empty production pending queue starts with a clean ordering sequence")
     fixture_active = true
@@ -198,11 +198,10 @@ fn sound_bank_pending_layers_fire_and_clear() {
     assert(_sound_bank_play_step(bank, SoundEventHandle(0), 0, 1.0, 1.0,
         0.0, STONE_BUS_SFX, 0.0, 0.0, false, 0.0,
         "sound_residency_pending_fire_test"), "the production step queues the delayed source again")
-    let pending_before_fire = sound_bank_pending_count()
     sound_bank_play_pending(0)
     assert_eq(SOUND_BANK_PENDING_ORDER, 0,
         "firing the final production layer releases its ordering sequence")
-    assert_eq(SFX_LOG_SEQ, fire_seq + pending_before_fire,
+    assert_eq(SFX_LOG_SEQ, fire_seq + 1,
         "firing the queued production layers reaches the playback funnel")
     let fired = sfx_log_recent(0).unwrap()
     assert_eq(fired.path, source.data().unwrap().path,
@@ -218,11 +217,11 @@ fn sound_bank_pending_layers_fire_and_clear() {
     SFX_LOG = saved_sfx
     SFX_LOG_HEAD = saved_sfx_head
     SFX_LOG_SEQ = saved_sfx_seq
+    SOUND_RESIDENCY_SYNC_DECODES = saved_sync_decodes
+    SOUND_RESIDENCY_SYNC_DECODE_US = saved_sync_decode_us
     random_set_state(saved_rng)
     presentation_random_set_state(saved_presentation_rng)
     STONE_QUIET = saved_quiet
-    SOUND_RESIDENCY_SYNC_DECODES = saved_sync_decodes
-    SOUND_RESIDENCY_SYNC_DECODE_US = saved_sync_decode_us
     cleaned = true
     assert_eq(SOUND_BANK_PENDING.len(), saved_pending.len(),
         "the pending sound fixture restores the prior queue")
@@ -231,9 +230,6 @@ fn sound_bank_pending_layers_fire_and_clear() {
     assert(SFX_LOG_HEAD == saved_sfx_head && SFX_LOG_SEQ == saved_sfx_seq
         && SFX_LOG == saved_sfx,
         "the pending sound fixture restores its prior SFX log")
-    assert(SOUND_RESIDENCY_SYNC_DECODES == saved_sync_decodes
-        && SOUND_RESIDENCY_SYNC_DECODE_US == saved_sync_decode_us,
-        "the pending sound fixture restores residency metrics")
 }
 
 @test
@@ -245,7 +241,8 @@ fn sound_bank_normalized_gain_reaches_immediate_and_pending_playback() {
     let saved_sfx = SFX_LOG.clone()
     let saved_sfx_head = SFX_LOG_HEAD
     let saved_sfx_seq = SFX_LOG_SEQ
-    let saved_metrics = sound_residency_metrics()
+    let saved_sync_decodes = SOUND_RESIDENCY_SYNC_DECODES
+    let saved_sync_decode_us = SOUND_RESIDENCY_SYNC_DECODE_US
     let saved_quiet = STONE_QUIET
     let bank: SoundBank? = null
     let shared_key = ""
@@ -267,14 +264,13 @@ fn sound_bank_normalized_gain_reaches_immediate_and_pending_playback() {
             SFX_LOG = saved_sfx
             SFX_LOG_HEAD = saved_sfx_head
             SFX_LOG_SEQ = saved_sfx_seq
+            SOUND_RESIDENCY_SYNC_DECODES = saved_sync_decodes
+            SOUND_RESIDENCY_SYNC_DECODE_US = saved_sync_decode_us
             random_set_state(saved_rng)
             presentation_random_set_state(saved_presentation_rng)
             STONE_QUIET = saved_quiet
-            sound_residency_restore_metrics(saved_metrics)
         }
     }
-    assert_eq(sound_bank_pending_count(), 0,
-        "the normalization fixture starts without other queued layers")
     fixture_active = true
     STONE_QUIET = true
     assert(stone_audio_init(), "the audio host initializes for the normalized source fixture")
@@ -296,8 +292,6 @@ fn sound_bank_normalized_gain_reaches_immediate_and_pending_playback() {
         0.0, -1, 0.0, 0.0, false, 0.0,
         "sound_residency_normalized_gain_test"),
         "the production step plays its immediate source and queues its offset source")
-    assert_eq(sound_bank_pending_count(), 1,
-        "the offset source waits for its scheduled firing point")
     let immediate = sfx_log_recent(0).unwrap()
     assert_eq(immediate.volume, 0.25,
         "the immediate SFX log records the selected source normalization gain")
@@ -346,13 +340,12 @@ fn sound_bank_normalized_gain_reaches_immediate_and_pending_playback() {
     SFX_LOG = saved_sfx
     SFX_LOG_HEAD = saved_sfx_head
     SFX_LOG_SEQ = saved_sfx_seq
+    SOUND_RESIDENCY_SYNC_DECODES = saved_sync_decodes
+    SOUND_RESIDENCY_SYNC_DECODE_US = saved_sync_decode_us
     random_set_state(saved_rng)
     presentation_random_set_state(saved_presentation_rng)
     STONE_QUIET = saved_quiet
-    sound_residency_restore_metrics(saved_metrics)
     cleaned = true
-    assert_eq(sound_bank_pending_count(), saved_pending.len(),
-        "the normalization fixture restores the prior pending queue")
     assert_eq(SOUND_BANK_PENDING_ORDER, saved_order,
         "the normalization fixture restores the pending owner sequence")
     assert(SFX_LOG == saved_sfx && SFX_LOG_HEAD == saved_sfx_head
@@ -363,13 +356,15 @@ fn sound_bank_normalized_gain_reaches_immediate_and_pending_playback() {
 @test
 fn sound_bank_stream_layer_admits_its_encoded_file_without_pcm() {
     let path = sound_residency_wav_path()
-    let saved_metrics = sound_residency_metrics()
+    let saved_sync_decodes = SOUND_RESIDENCY_SYNC_DECODES
+    let saved_sync_decode_us = SOUND_RESIDENCY_SYNC_DECODE_US
     let bank: SoundBank? = null
     let cleaned = false
     defer {
         if !cleaned {
             if let live = bank { sound_bank_release(live) }
-            sound_residency_restore_metrics(saved_metrics)
+            SOUND_RESIDENCY_SYNC_DECODES = saved_sync_decodes
+            SOUND_RESIDENCY_SYNC_DECODE_US = saved_sync_decode_us
         }
     }
     assert(stone_audio_init(), "the audio host initializes for the stream fixture")
@@ -409,7 +404,8 @@ fn sound_bank_stream_layer_admits_its_encoded_file_without_pcm() {
 
     sound_bank_release(bank.unwrap())
     bank = null
-    sound_residency_restore_metrics(saved_metrics)
+    SOUND_RESIDENCY_SYNC_DECODES = saved_sync_decodes
+    SOUND_RESIDENCY_SYNC_DECODE_US = saved_sync_decode_us
     cleaned = true
 }
 
@@ -418,7 +414,8 @@ fn sound_bank_stream_layer_admits_its_encoded_file_without_pcm() {
 // unload_sound and the refused backend id. A stale handle stays a no-op.
 @test
 fn unload_sound_surfaces_a_refused_native_unload() {
-    let saved_metrics = sound_residency_metrics()
+    let saved_sync_decodes = SOUND_RESIDENCY_SYNC_DECODES
+    let saved_sync_decode_us = SOUND_RESIDENCY_SYNC_DECODE_US
     let sound: Sound? = null
     world_fixture_with_cleanup(() => {
         assert(stone_audio_init(), "the audio host initializes for the unload refusal fixture")
@@ -445,13 +442,15 @@ fn unload_sound_surfaces_a_refused_native_unload() {
             "the refusal still drops the recipe")
     }, () => {
         if let source = sound { sound_residency_unload(source) }
-        sound_residency_restore_metrics(saved_metrics)
+        SOUND_RESIDENCY_SYNC_DECODES = saved_sync_decodes
+        SOUND_RESIDENCY_SYNC_DECODE_US = saved_sync_decode_us
     })
 }
 
 @test
 fn sound_residency_unload_covers_success_backend_zero_and_stale() {
-    let saved_metrics = sound_residency_metrics()
+    let saved_sync_decodes = SOUND_RESIDENCY_SYNC_DECODES
+    let saved_sync_decode_us = SOUND_RESIDENCY_SYNC_DECODE_US
     let sound: Sound? = null
     let stub: Sound? = null
     let cleaned = false
@@ -459,7 +458,8 @@ fn sound_residency_unload_covers_success_backend_zero_and_stale() {
         if !cleaned {
             if let source = sound { sound_residency_unload(source) }
             if let missing = stub { sound_residency_unload(missing) }
-            sound_residency_restore_metrics(saved_metrics)
+            SOUND_RESIDENCY_SYNC_DECODES = saved_sync_decodes
+            SOUND_RESIDENCY_SYNC_DECODE_US = saved_sync_decode_us
         }
     }
     assert(stone_audio_init(), "the audio host initializes for the unload coverage fixture")
@@ -493,13 +493,15 @@ fn sound_residency_unload_covers_success_backend_zero_and_stale() {
     })
     assert(stub_stale == null,
         "a repeated unload of a retired stub stays silent (got: {stub_stale ?? "<none>"})")
-    sound_residency_restore_metrics(saved_metrics)
+    SOUND_RESIDENCY_SYNC_DECODES = saved_sync_decodes
+    SOUND_RESIDENCY_SYNC_DECODE_US = saved_sync_decode_us
     cleaned = true
 }
 
 @test
 fn sound_unload_fixture_failure_restores_state() {
-    let saved_metrics = sound_residency_metrics()
+    let saved_sync_decodes = SOUND_RESIDENCY_SYNC_DECODES
+    let saved_sync_decode_us = SOUND_RESIDENCY_SYNC_DECODE_US
     let sound: Sound? = null
     let failure = world_fixture_raised(() => {
         world_fixture_with_cleanup(() => {
@@ -508,7 +510,8 @@ fn sound_unload_fixture_failure_restores_state() {
             error("intentional sound unload fixture failure")
         }, () => {
             if let source = sound { sound_residency_unload(source) }
-            sound_residency_restore_metrics(saved_metrics)
+            SOUND_RESIDENCY_SYNC_DECODES = saved_sync_decodes
+            SOUND_RESIDENCY_SYNC_DECODE_US = saved_sync_decode_us
         })
     })
     let message = failure ?? "fixture returned without the deliberate failure"

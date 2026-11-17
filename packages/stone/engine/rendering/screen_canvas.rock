@@ -35,8 +35,6 @@
 // `screen_canvas_clear(sc)` to wipe (drops queued-but-not-yet-
 // flushed stamps too).
 //
-pub @intrinsic fn screen_canvas_supported() -> bool { return true }
-
 pub struct ScreenCanvas {
     batch: RectBatch,
     canvas_id: string,

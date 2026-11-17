@@ -105,11 +105,11 @@ fn residency_prefetch_required_acquire_submits_a_waiter() {
         residency_set_prefetch_budget(0)
         let _ = residency_prefetch(ResidencyRequest { path: paths[0] })
         let loads = stone_get_image_profile_stats().load_calls
-        let misses = residency_frame_stats().misses
+        let misses = residency_profile_stats().misses
         let image = acquire_image_asset(paths[0], watch: false)
         assert(image.0 != 0, "a Required acquire of a waiter submits at once")
         assert_eq(residency_state(paths[0]), ResidencyState::Loading, "the waiter is loading")
-        assert_eq(residency_frame_stats().misses, misses + 1,
+        assert_eq(residency_profile_stats().misses, misses + 1,
             "a prefetch that never submitted is a genuine miss")
         residency_set_prefetch_budget(512 * 1024 * 1024)
         residency_prefetch_advance()

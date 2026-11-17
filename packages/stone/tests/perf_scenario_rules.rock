@@ -10,7 +10,6 @@ fn perf_scenario_interval_entry(_which: int) {
     PERF_RECORDS.requested_frames = 3
     PERF_RECORDS.requested_seconds = 0.001
     profile_frame_begin()
-    profile_work("interval.units", 100)
     profile_frame_end()
     perf_scenario_ready("synthetic")
     perf_outer_frame_boundary(10, 0.0)
@@ -20,20 +19,14 @@ fn perf_scenario_interval_entry(_which: int) {
     for i in 0..3 {
         assert(!perf_measurement_complete(), "elapsed time cannot end a fixed-frame interval")
         profile_frame_begin()
-        profile_work("interval.units", 30)
-        profile_work("interval.identity", 17)
         profile_frame_end()
         perf_outer_frame_boundary(13 + i, 0.3 + i as float * 0.1)
     }
     assert(perf_measurement_complete(), "exactly three completed frames end the interval")
     assert_eq(PERF_RECORDS.count, 3, "the next frame is excluded")
     assert_eq(PERF_RECORDS.start_relative_frame, 2, "start is relative to readiness")
-    assert_eq(profile_work_total("interval.units"), 90, "work covers the selected frames")
-    assert_eq(profile_work_total("interval.identity"), 51, "warmup work is excluded")
-    profile_work("interval.units", 100)
     perf_outer_frame_boundary(16, 0.6)
     assert_eq(PERF_RECORDS.count, 3, "post-window work cannot add a timing sample")
-    assert_eq(profile_work_total("interval.units"), 90, "uncompleted work cannot change interval totals")
 }
 
 

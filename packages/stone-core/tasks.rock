@@ -332,10 +332,6 @@ pub fn coroutine_poller_update(poller: CoroutinePoller) {
     coroutine_poller_step(poller, null)
 }
 
-pub fn coroutine_poller_update_task(poller: CoroutinePoller, selected: Task?) {
-    if selected != null { coroutine_poller_step(poller, selected) }
-}
-
 fn coroutine_poller_step(poller: CoroutinePoller, selected: Task?) {
     if poller.scope.disposed { return }
     let clock = poller.clock.state()

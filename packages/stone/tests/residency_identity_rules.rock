@@ -46,7 +46,7 @@ fn residency_two_files_of_one_object_keep_two_handles() {
     assert(albedo != normal, "a sheet's channel files are separate images")
     assert(release_image_asset(paths[0]))
     assert(release_image_asset(paths[1]))
-    residency_set_budget(0)
+    RESIDENCY_BUDGET = 0
     residency_trim()
     }, aliases: false)
 }
@@ -78,7 +78,7 @@ fn residency_one_digest_one_filter_shares_one_handle() {
     let cached = residency_census()
     assert_eq((cached.handles, cached.bytes, cached.referenced_bytes, cached.cached_bytes), (1, 32, 0, 32))
     assert_eq((cached.shared_paths, cached.shared_bytes), (2, 64), "released aliases still share cached storage")
-    residency_set_budget(0)
+    RESIDENCY_BUDGET = 0
     residency_trim()
     assert_eq(stone_native_handle_state("image", soil.0), 0)
     assert(image_asset_cached(paths[0]) == null)
@@ -101,7 +101,7 @@ fn residency_one_digest_two_filters_keeps_two_handles() {
     }) != null))
     assert(release_image_asset(paths[0]))
     assert(release_image_asset(paths[1]))
-    residency_set_budget(0)
+    RESIDENCY_BUDGET = 0
     residency_trim()
     assert_eq(stone_native_handle_state("image", soil.0), 0)
     assert_eq(stone_native_handle_state("image", trail.0), 0)
@@ -117,16 +117,16 @@ fn residency_hit_on_a_cached_identity_counts_no_miss() {
     assert_eq(residency_image_bytes(paths[0] + ".unavailable", ImageAssetFormat::R8, declared), 8)
     assert_eq(residency_image_bytes(paths[0] + ".unavailable", ImageAssetFormat::DepthRg8, declared), 16)
     assert_eq(residency_image_bytes(paths[0] + ".unavailable", ImageAssetFormat::MaterialRg8, declared), 16)
-    let before = residency_frame_stats()
+    let before = residency_profile_stats()
     let soil = acquire_image_asset(paths[0], watch: false)
     assert_eq(residency_image_bytes(paths[0], logical_size: iv(999)), image_storage_bytes(soil),
         "a loaded image is priced by its storage rather than declared logical dimensions")
-    let loaded = residency_frame_stats()
+    let loaded = residency_profile_stats()
     assert_eq(loaded.misses, before.misses + 1, "the first load is a miss")
     assert_eq(loaded.miss_bytes, before.miss_bytes + 4 * 2 * 4)
     assert_eq(acquire_image_asset(paths[0], watch: false), soil)
     assert_eq(acquire_image_asset(paths[1], watch: false), soil)
-    let after = residency_frame_stats()
+    let after = residency_profile_stats()
     assert_eq(after.misses, loaded.misses, "repeat and alias acquires are hits")
     assert_eq(after.cold_misses, loaded.cold_misses)
 
@@ -147,7 +147,7 @@ fn residency_hit_on_a_cached_identity_counts_no_miss() {
     assert(release_image_asset(paths[0]))
     assert(release_image_asset(paths[1]))
     assert_eq(residency_state(paths[1]), ResidencyState::Resident, "released identity remains cached")
-    residency_set_budget(0)
+    RESIDENCY_BUDGET = 0
     residency_trim()
     assert_eq(residency_state(paths[1]), ResidencyState::Absent)
     assert_eq(residency_image_bytes(paths[1]), 4 * 2 * 4, "an absent image is priced by its header")
@@ -168,7 +168,7 @@ fn residency_reloading_an_old_identity_keeps_newer_live_associations() {
     assert(release_image_asset(paths[0]), "the live Linear reference must release")
     assert(release_image_asset(paths[1]))
     assert(release_image_asset(paths[2]))
-    residency_set_budget(0)
+    RESIDENCY_BUDGET = 0
     residency_trim()
     assert_eq(stone_native_handle_state("image", old.0), 0)
     assert_eq(stone_native_handle_state("image", current.0), 0)
@@ -189,7 +189,7 @@ fn residency_a_released_alias_can_choose_a_new_filter_while_its_neighbor_is_live
     assert_eq(image_asset_cached(paths[0]).unwrap(), changed)
     assert(release_image_asset(paths[0]))
     assert(release_image_asset(paths[1]))
-    residency_set_budget(0)
+    RESIDENCY_BUDGET = 0
     residency_trim()
     assert_eq(stone_native_handle_state("image", changed.0), 0)
     assert_eq(stone_native_handle_state("image", neighbor.0), 0)
@@ -229,12 +229,12 @@ fn residency_census_is_captured_when_the_measured_window_opens() {
 @test
 fn residency_a_mip_stable_image_counts_its_full_mip_chain() {
     residency_identity_fixture("1", ["soil"], paths => {
-    let before = residency_frame_stats()
+    let before = residency_profile_stats()
     let soil = acquire_image_asset(paths[0], TextureFilter::MipStable, watch: false)
     assert(soil.0 != 0)
     // A 4x2 MipStable upload holds 4x2 + 2x1 + 1x1 RGBA8 texels.
     let chain_bytes = (8 + 2 + 1) * 4
-    let loaded = residency_frame_stats()
+    let loaded = residency_profile_stats()
     assert_eq(loaded.miss_bytes, before.miss_bytes + chain_bytes)
     let rows = 0
     for row in residency_dump() {
@@ -247,22 +247,6 @@ fn residency_a_mip_stable_image_counts_its_full_mip_chain() {
     })
 }
 
-@test
-fn residency_miss_inside_a_cold_arrival_counts_as_cold() {
-    residency_identity_fixture("d", ["soil"], paths => {
-    let before = residency_frame_stats()
-    residency_cold_arrival_begin()
-    let soil = acquire_image_asset(paths[0], watch: false)
-    residency_cold_arrival_end()
-    let after = residency_frame_stats()
-    assert(soil.0 != 0)
-    assert_eq(after.misses, before.misses, "a cold miss is not a residency miss")
-    assert_eq(after.cold_misses, before.cold_misses + 1)
-    assert((world_fixture_raised(() => { residency_cold_arrival_end() }) != null))
-    assert(release_image_asset(paths[0]))
-    })
-}
-
 // A cold arrival's window: every miss from the jump through the first world
 // render that began after it is cold, and nothing after that render is.
 @test
@@ -270,39 +254,36 @@ fn residency_cold_arrival_window_closes_after_its_first_render() {
     // One Eat object per image: a shared digest would be one identity.
     residency_test_host()
     let paths: [string] = vec_new()
-    for digest in ["1", "2", "3", "4", "5", "6"] {
+    for digest in ["1", "2", "3", "4", "5", "6", "7"] {
         for path in residency_test_object(digest, ["arrival"]) { paths.push(path) }
     }
     residency_owner_test_isolated(() => {
     let classify = (path: string) => {
-        let before = residency_frame_stats()
+        let before = residency_profile_stats()
         let image = acquire_image_asset(path, watch: false)
         assert(image.0 != 0, "{path} loads")
-        let after = residency_frame_stats()
+        let after = residency_profile_stats()
         assert_eq(after.misses + after.cold_misses, before.misses + before.cold_misses + 1,
             "{path} is one miss")
         return after.cold_misses > before.cold_misses
     }
-    assert(!residency_cold_arrival_pending(), "no window is open at fixture entry")
     residency_cold_arrival()
     assert(classify(paths[0]), "the jump's own update misses are cold")
     assert(classify(paths[1]), "a frame that renders nothing leaves the window open")
     residency_cold_arrival_render_begin()
     assert(classify(paths[2]), "the arrival's first render is cold")
     residency_cold_arrival_render_end()
-    assert(!residency_cold_arrival_pending(), "that render closes the window")
     assert(!classify(paths[3]), "a miss after the arrival renders is a plain miss")
 
     // A jump made while a render is already running is presented by the next one.
     residency_cold_arrival_render_begin()
     residency_cold_arrival()
     residency_cold_arrival_render_end()
-    assert(residency_cold_arrival_pending(), "a render that began before the jump keeps it open")
     assert(classify(paths[4]), "so the next frame's misses are cold")
     residency_cold_arrival_render_begin()
     assert(classify(paths[5]), "through the next render")
     residency_cold_arrival_render_end()
-    assert(!residency_cold_arrival_pending(), "which closes it")
+    assert(!classify(paths[6]), "a miss after the second arrival renders is plain")
     for path in paths { assert(release_image_asset(path)) }
     }, () => { residency_owner_test_cleanup(paths) })
 }
@@ -313,6 +294,14 @@ fn residency_cold_arrival_window_closes_after_its_first_render() {
 fn residency_cold_arrival_runner_entry(_which: int) {
     let (window, config) = native_runner_test_boot("cold-arrival-test")
     defer { let _ = stone_teardown() }
+    let paths: [string] = vec_new()
+    for digest in ["8", "9", "a"] {
+        for path in residency_test_object(digest, ["arrival"]) { paths.push(path) }
+    }
+    defer {
+        for path in paths { assert(release_image_asset(path)) }
+        residency_owner_test_cleanup(paths)
+    }
     let frame = (n: int) => {
         stone_begin_frame()
         let (running, _) = run_one_frame(n, stone_get_time(), window, config)
@@ -320,14 +309,30 @@ fn residency_cold_arrival_runner_entry(_which: int) {
         stone_end_frame()
     }
     frame(0)
-    assert(!residency_cold_arrival_pending(), "a booted runner has no cold arrival open")
+    let before = residency_profile_stats()
+    let warm = acquire_image_asset(paths[0], watch: false)
+    assert(warm.0 != 0)
+    let after_warm = residency_profile_stats()
+    assert_eq(after_warm.cold_misses, before.cold_misses,
+        "a booted runner starts without a cold arrival")
     residency_cold_arrival()
     SIM_SKIP_RENDER = true
     frame(1)
-    assert(residency_cold_arrival_pending(), "a frame that skips the draw keeps the window open")
+    let before_skipped = residency_profile_stats()
+    let skipped = acquire_image_asset(paths[1], watch: false)
+    assert(skipped.0 != 0)
+    let after_skipped = residency_profile_stats()
+    assert_eq(after_skipped.cold_misses, before_skipped.cold_misses + 1,
+        "a frame that skips the draw keeps the arrival open")
     SIM_SKIP_RENDER = false
     frame(2)
-    assert(!residency_cold_arrival_pending(), "the runner's first drawn frame closes the window")
+    let before_drawn = residency_profile_stats()
+    let drawn = acquire_image_asset(paths[2], watch: false)
+    assert(drawn.0 != 0)
+    let after_drawn = residency_profile_stats()
+    assert_eq(after_drawn.cold_misses, before_drawn.cold_misses,
+        "the runner's first drawn frame closes the window")
+    assert_eq(after_drawn.misses, before_drawn.misses + 1)
 }
 
 @test

@@ -91,8 +91,6 @@ fn residency_decode_failure_draws_placeholder_counts_and_logs() {
             "a failed decode never reads Resident")
         assert_eq(stone_image_decode_failed_count() - fails_before, 1,
             "the failure counts once")
-        assert_eq(residency_frame_stats().decode_failures, 1,
-            "the frame stats count the failure")
         assert_eq(residency_profile_stats().decode_failures, 1,
             "the profile stats count the failure")
         assert_eq(stone_image_read_texel(image.0, 0, 0),
@@ -116,7 +114,7 @@ fn residency_decode_failure_draws_placeholder_counts_and_logs() {
         assert_eq(again, image, "reacquiring the failed identity hits the cache")
         assert_eq(stone_get_image_profile_stats().load_calls, loads,
             "reacquiring submits no decode")
-        assert_eq(residency_frame_stats().decode_failures, 1,
+        assert_eq(residency_profile_stats().decode_failures, 1,
             "reacquiring counts no second failure")
         assert(release_image_asset(good))
         assert(release_image_asset(bad))
@@ -139,8 +137,8 @@ fn residency_decode_failure_prefetch_counts_without_require() {
         assert_eq(stone_image_uploads_pending(), 0, "the corrupt prefetch publishes")
         assert_eq(stone_image_decode_failed_count() - fails_before, 1,
             "a never-required prefetch failure still counts")
-        assert_eq(residency_frame_stats().decode_failures, 1,
-            "the frame stats count the prefetch failure")
+        assert_eq(residency_profile_stats().decode_failures, 1,
+            "the profile stats count the prefetch failure")
         assert_eq(residency_state(bad), ResidencyState::Loading,
             "the failed prefetch never reads Resident")
     })
@@ -206,13 +204,13 @@ fn residency_decode_failure_fixture_restores_after_failure() {
 fn residency_miss_counts_without_info_log() {
     residency_decode_failure_fixture("c", false, paths => {
         let good = paths[0]
-        let misses_before = residency_frame_stats().misses
+        let misses_before = residency_profile_stats().misses
         residency_miss_log_probe_begin()
         let image = acquire_image_asset(good, watch: false)
         residency_flush_required()
         let messages = residency_miss_log_probe_end()
         assert(image.0 != 0, "the cold load mints a handle")
-        assert_eq(residency_frame_stats().misses - misses_before, 1, "the stats count the miss")
+        assert_eq(residency_profile_stats().misses - misses_before, 1, "the stats count the miss")
         assert_eq(messages, "", "a miss writes no info-level RESIDENCY record")
         assert(release_image_asset(good))
     })

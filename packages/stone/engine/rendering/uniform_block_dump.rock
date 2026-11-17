@@ -90,8 +90,6 @@ pub fn uniform_block_dump_take() -> string? {
     return out
 }
 
-pub fn uniform_block_dump_pending() -> bool { return UNIFORM_BLOCK_DUMP_ON }
-
 pub fn uniform_block_dump_cancel() {
     stone_graphics_capture_cancel()
     UNIFORM_BLOCK_DUMP_ON = false

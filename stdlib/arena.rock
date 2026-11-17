@@ -12,8 +12,8 @@
 //
 // A vacant slot keeps its last generation complemented (`-1 - g`), so a live
 // slot is exactly one whose generation equals the handle's, which is always
-// >= 0 (`entity_new`). The complement keeps that generation recoverable for
-// `arena_generation_snapshot`; `occupied` stays for the walks that skip holes.
+// >= 0 (`entity_new`). The complement keeps the last generation recoverable;
+// `occupied` stays for the walks that skip holes.
 //
 // `next_generation` is the per-Arena monotonic issuance counter: EVERY
 // insertion takes the next value and advances it, reused slot or fresh. That is
@@ -397,29 +397,6 @@ fn arena_slot_count<T>(arena: Arena<T>) -> int {
     let found = __arena_store(arena)
     if found == null { return 0 }
     return vec_len(found.occupied)
-}
-
-// Copy allocator history for deterministic observers without exposing the
-// mutable backing store or omitting generations left in vacant slots.
-fn arena_generation_snapshot<T>(arena: Arena<T>) -> ArenaGenerationSnapshot {
-    let found = __arena_store(arena)
-    if found == null {
-        return ArenaGenerationSnapshot {
-            generations: [], free_indices: [], next_generation: 0,
-        }
-    }
-    let store = found
-    let generations: [int] = []
-    for generation in store.generations {
-        if generation < 0 { generations.push(-1 - generation) } else { generations.push(generation) }
-    }
-    let free_indices: [int] = []
-    for slot in store.free_indices { free_indices.push(slot) }
-    return ArenaGenerationSnapshot {
-        generations,
-        free_indices,
-        next_generation: store.next_generation,
-    }
 }
 
 // Releases the payload graph while keeping the incarnation: same Arena ID, so

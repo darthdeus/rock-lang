@@ -421,18 +421,6 @@ pub fn sim_mode_active() -> bool {
     return name != ""
 }
 
-// A sim is a bounded run, so vsync is latched off at boot. Lifting the latch
-// and replaying the boot request lets a sim see vsync as an interactive window
-// starts.
-pub fn sim_lift_vsync_latch(boot_vsync: int) {
-    stone_force_vsync_off(0)
-    engine_set_vsync(boot_vsync)
-}
-
-pub fn sim_restore_vsync_latch() {
-    engine_latch_vsync_off()
-}
-
 // --- side-channel protocol -------------------------------------------------
 
 // Emit a complete record in one write; foreign stderr writers may still leave

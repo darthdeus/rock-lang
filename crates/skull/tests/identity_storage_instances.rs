@@ -180,7 +180,6 @@ fn main() {
     let by_entity = e.get()
     let has = units.contains(e)
     let count = units.len() + arena_slot_count(units)
-    let snapshot = arena_generation_snapshot(units)
     let picked = units.random()
     for unit in values(units) { count += unit.hp }
     for (entity, unit) in pairs(units) { count += unit.hp }

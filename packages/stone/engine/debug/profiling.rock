@@ -2106,13 +2106,6 @@ pub fn profile_work(name: string, units: int) {
     SECTION_WINDOWS[id].pending_work_observations += 1
 }
 
-// Completed-frame work since the last profiler reset; pending work closes at frame end.
-pub fn profile_work_total(name: string) -> int {
-    let id = section_lookup(name)
-    if id < 0 { return 0 }
-    return SECTION_WINDOWS[id].work_units
-}
-
 // Record a bounded product observation in milliseconds. This is for event and
 // operation boundaries that cannot be represented by a same-frame section.
 pub fn profile_observation(name: string, value_ms: float) {

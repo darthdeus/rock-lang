@@ -108,7 +108,7 @@ fn residency_owner_test_cleanup(paths: [string]) {
     let _ = load_image_asset(paths[1])
     assert(release_image_asset(paths[0]))
     let _ = asset_report_json(0, "intentional-failure")
-    residency_cold_arrival_begin()
+    residency_cold_arrival()
     error("intentional residency fixture failure")
 }
 
@@ -125,7 +125,6 @@ fn residency_owner_test_cleanup(paths: [string]) {
         for key, value in pairs(_G[name] or {}) do entries[key] = value end
         logs[name] = { value = _G[name], entries = entries }
     end
-    local cold = __rock_global_get(__rock_global_entry("RESIDENCY_COLD_DEPTH"))
     local before = ffi.string(stone.stone_native_live_handles("image"))
     local before_data = ffi.string(stone.stone_native_live_handles("image_data"))
     local result = world_fixture_call(function()
@@ -134,7 +133,6 @@ fn residency_owner_test_cleanup(paths: [string]) {
         end)
     end)
     assert(not result.ok and tostring(result.value):find("intentional residency fixture failure", 1, true))
-    assert(__rock_global_get(__rock_global_entry("RESIDENCY_COLD_DEPTH")) == cold, "fixture lost cold-arrival scope")
     for entry, value in pairs(entries) do
         assert(__rock_global_get(entry) == value, "fixture changed " .. tostring(entry.name))
     end

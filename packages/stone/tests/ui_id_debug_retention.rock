@@ -82,7 +82,7 @@ fn ui_id_retention_restore(saved: UiIdRetentionSnapshot) {
 fn ui_id_debug_maps_hold_one_frame_of_mints() {
     let saved = ui_id_retention_isolate()
     defer { ui_id_retention_restore(saved) }
-    ui_id_debug_set_enabled(true)
+    UI_ID_DEBUG.enabled = true
 
     // Thirty frames of twenty entity-keyed mints, every label fresh:
     // production clears the debug maps each frame before systems re-mint.
@@ -107,7 +107,7 @@ fn ui_id_debug_maps_hold_one_frame_of_mints() {
 fn ui_id_debug_detector_reports_enabled_rules() {
     let saved = ui_id_retention_isolate()
     defer { ui_id_retention_restore(saved) }
-    ui_id_debug_set_enabled(true)
+    UI_ID_DEBUG.enabled = true
 
     let dupes = UI_ID_DEBUG.dupes
     let hash_collisions = UI_ID_DEBUG.hash_collisions
@@ -148,19 +148,12 @@ fn ui_id_debug_detector_reports_enabled_rules() {
     assert_eq(h1, h2, "ui_id_collision: the production hash returns the colliding id")
     assert_eq(UI_ID_DEBUG.hash_collisions, hash_collisions + 1,
         "ui_id_collision: distinct strings with one id are reported")
-
-    ui_id_debug_set_enabled(false)
-    assert_eq(UI_ID_DEBUG.scopes.len(), 0, "disabling recording releases scope entries")
-    assert_eq(UI_ID_DEBUG.labels.len(), 0, "disabling recording releases label entries")
-    assert_eq(UI_ID_DEBUG.seen.len(), 0, "disabling recording releases list entries")
 }
 
 @test
 fn ui_id_debug_flag_disables_map_recording() {
     let saved = ui_id_retention_isolate()
     defer { ui_id_retention_restore(saved) }
-    ui_id_debug_set_enabled(false)
-
     let dupes = UI_ID_DEBUG.dupes
     let hash_collisions = UI_ID_DEBUG.hash_collisions
     let mouse_id = ui_id("debug_off", "same")
