@@ -453,23 +453,41 @@ impl Walk<'_> {
         span: Span,
     ) {
         self.saw(span);
-        if from.is_none() {
-            let prev = self
-                .out
-                .always_call_sites
-                .insert(site.clone(), SiteRecord { outcome, span });
-            if prev.is_some() {
-                self.out.duplicate_sites.push(site);
-            }
-            return;
-        }
-        let prev = self
-            .out
-            .call_sites
-            .insert(site.clone(), SiteRecord { outcome, span });
+        let sites = if from.is_some() {
+            &mut self.out.call_sites
+        } else {
+            &mut self.out.always_call_sites
+        };
+        let prev = sites.insert(site.clone(), SiteRecord { outcome, span });
         if prev.is_some() {
             self.out.duplicate_sites.push(site);
         }
+    }
+
+    fn record_caller_witness(
+        &mut self,
+        from: Option<&Instance>,
+        generic: usize,
+        site: Site,
+        span: Span,
+    ) -> Option<InstanceBoundNext> {
+        let resolved = from
+            .and(self.owner_tree)
+            .and_then(|tree| tree.next.get(&generic))
+            .cloned();
+        let outcome = match &resolved {
+            Some(resolved) => {
+                let callee = resolved.callee.clone();
+                self.push_edge(Edge {
+                    to: callee.clone(),
+                    span,
+                });
+                SiteOutcome::Resolved(callee)
+            }
+            None => SiteOutcome::Failed("caller-generic-witness-unbound"),
+        };
+        self.record_site(from, site, outcome, span);
+        resolved
     }
 
     /// Reach `to` at `subst`.
@@ -4345,27 +4363,7 @@ fn walk_body_edges(
             expr: e,
             op: SiteOp::DirectCall,
         };
-        let owner_tree = w.owner_tree;
-        let resolved = from
-            .and(owner_tree)
-            .and_then(|tree| tree.next.get(&gidx))
-            .cloned();
-        let Some(resolved) = resolved else {
-            w.record_site(
-                from,
-                site,
-                SiteOutcome::Failed("caller-generic-witness-unbound"),
-                span,
-            );
-            continue;
-        };
-        if from.is_some() {
-            w.push_edge(Edge {
-                to: resolved.callee.clone(),
-                span,
-            });
-        }
-        w.record_site(from, site, SiteOutcome::Resolved(resolved.callee), span);
+        w.record_caller_witness(from, gidx, site, span);
     }
 
     let mut iters: Vec<(Idx<bone_core::hir::Expr>, &bone_core::prelude::ForIterInfo)> = inf
@@ -4426,81 +4424,95 @@ fn record_call(
     let instantiated = w.with_interner(|a| {
         instantiate(a, ws, inf, callee.module, callee.func, cf, bindings, subst)
     });
-    let (args, callee_subst) = match instantiated {
-        Ok(v) => v,
-        // An always-emitted body has no `from` to file against, but the
-        // CLASSIFICATION is the same one an instantiated body's call gets:
-        // `Unconstrained` is the decided `UnconstrainedTypeVar` rejection
-        // either way. Ordered before the classifying arms so these guards win.
-        Err(Fail::Unconstrained(_)) if from.is_none() => {
-            w.record_always_emitted_hole(
-                mangle_fn(ws, cf),
-                callee,
-                AlwaysEmittedOutcome::Rejection(RejectionKind::UnconstrainedTypeVar),
-                span,
-            );
-            w.record_site(
-                from,
-                site,
-                SiteOutcome::Failed("unconstrained-type-var"),
-                span,
-            );
-            return None;
+    record_instantiation(
+        w,
+        ws,
+        from,
+        callee,
+        instantiated,
+        span,
+        site,
+        CallKind::Direct,
+    )
+}
+
+enum CallKind {
+    Direct,
+    Iter,
+    Next,
+}
+
+impl CallKind {
+    fn unconstrained_message(self, name: &str) -> String {
+        match self {
+            Self::Direct => format!(
+                "`{name}` is called with a type argument no constraint reaches, so there is \
+                 no concrete type to instantiate it at"
+            ),
+            Self::Iter => {
+                format!("the `iter` witness `{name}` binds a type argument no constraint reaches")
+            }
+            Self::Next => {
+                format!("the `next` witness `{name}` binds a type argument no constraint reaches")
+            }
         }
-        Err(fail) if from.is_none() => {
-            w.record_always_emitted_hole(
-                mangle_fn(ws, cf),
-                callee,
-                AlwaysEmittedOutcome::Unresolved(fail.reason()),
-                span,
-            );
-            w.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
-            return None;
-        }
-        Err(Fail::Unconstrained(_)) => {
-            let name = mangle_fn(ws, cf);
-            w.push_rejection(Rejection {
-                kind: RejectionKind::UnconstrainedTypeVar,
-                at: from.expect("guarded above").clone(),
-                span,
-                message: format!(
-                    "`{name}` is called with a type argument no constraint reaches, so there is \
-                     no concrete type to instantiate it at"
-                ),
-            });
-            w.record_site(
-                from,
-                site,
-                SiteOutcome::Failed("unconstrained-type-var"),
-                span,
-            );
-            return None;
-        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_instantiation(
+    w: &mut Walk,
+    ws: &Workspace,
+    from: Option<&Instance>,
+    callee: FuncRef,
+    instantiated: Result<(Vec<MonoTyId>, MonoSubst), Fail>,
+    span: Span,
+    site: Site,
+    kind: CallKind,
+) -> Option<Instance> {
+    let (args, subst) = match instantiated {
+        Ok(result) => result,
         Err(fail) => {
-            w.push_unresolved(Unresolved {
-                from: from.expect("guarded above").clone(),
-                callee,
-                reason: fail.reason(),
-                span,
-            });
-            w.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
+            let reason = fail.reason();
+            let name = || mangle_fn(ws, &ws.module(callee.module).functions[callee.func]);
+            match (from, fail) {
+                (None, fail) => {
+                    let outcome = match fail {
+                        Fail::Unconstrained => {
+                            AlwaysEmittedOutcome::Rejection(RejectionKind::UnconstrainedTypeVar)
+                        }
+                        Fail::Unresolved(reason) => AlwaysEmittedOutcome::Unresolved(reason),
+                    };
+                    w.record_always_emitted_hole(name(), callee, outcome, span);
+                }
+                (Some(from), Fail::Unconstrained) => w.push_rejection(Rejection {
+                    kind: RejectionKind::UnconstrainedTypeVar,
+                    at: from.clone(),
+                    span,
+                    message: kind.unconstrained_message(&name()),
+                }),
+                (Some(from), Fail::Unresolved(_)) => w.push_unresolved(Unresolved {
+                    from: from.clone(),
+                    callee,
+                    reason,
+                    span,
+                }),
+            }
+            w.record_site(from, site, SiteOutcome::Failed(reason), span);
             return None;
         }
     };
     let to = Instance { func: callee, args };
-    match from {
-        Some(_) => w.push_edge(Edge {
+    if from.is_some() {
+        w.push_edge(Edge {
             to: to.clone(),
             span,
-        }),
-        // No `from`, so no edge and no site: an always-emitted body's callee is
-        // a ROOT, and only this record says so.
-        None => {
-            w.out.always_emitted_targets.insert(to.clone());
-        }
+        });
+    } else {
+        w.out.always_emitted_targets.insert(to.clone());
     }
     w.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
-    w.reach(to.clone(), callee_subst);
+    w.reach(to.clone(), subst);
     Some(to)
 }
 
@@ -4679,83 +4691,23 @@ fn record_witness(
     span: Span,
     site: Site,
 ) {
-    let rep = FuncRef {
+    let callee = FuncRef {
         module: witness.func.0,
         func: witness.func.1,
     };
-    let resolved = &ws.module(rep.module).functions[rep.func];
-    let callee = rep;
     let cf = &ws.module(callee.module).functions[callee.func];
-    let instantiated = w
-        .with_interner(|a| instantiate_witness(a, ws, inf, resolved, cf, &witness.generics, subst));
-    match instantiated {
-        Ok((args, callee_subst)) => {
-            let to = Instance { func: callee, args };
-            match from {
-                Some(_) => w.push_edge(Edge {
-                    to: to.clone(),
-                    span,
-                }),
-                // See `record_call`: an always-emitted body's callee is a root.
-                None => {
-                    w.out.always_emitted_targets.insert(to.clone());
-                }
-            }
-            w.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
-            w.reach(to, callee_subst);
-        }
-        // See `record_call`: the classification survives the absence of a
-        // `from` instance.
-        Err(Fail::Unconstrained(_)) if from.is_none() => {
-            w.record_always_emitted_hole(
-                mangle_fn(ws, cf),
-                callee,
-                AlwaysEmittedOutcome::Rejection(RejectionKind::UnconstrainedTypeVar),
-                span,
-            );
-            w.record_site(
-                from,
-                site,
-                SiteOutcome::Failed("unconstrained-type-var"),
-                span,
-            );
-        }
-        Err(fail) if from.is_none() => {
-            w.record_always_emitted_hole(
-                mangle_fn(ws, cf),
-                callee,
-                AlwaysEmittedOutcome::Unresolved(fail.reason()),
-                span,
-            );
-            w.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
-        }
-        Err(Fail::Unconstrained(_)) => {
-            w.push_rejection(Rejection {
-                kind: RejectionKind::UnconstrainedTypeVar,
-                at: from.expect("guarded above").clone(),
-                span,
-                message: format!(
-                    "the `iter` witness `{}` binds a type argument no constraint reaches",
-                    mangle_fn(ws, cf)
-                ),
-            });
-            w.record_site(
-                from,
-                site,
-                SiteOutcome::Failed("unconstrained-type-var"),
-                span,
-            );
-        }
-        Err(fail) => {
-            w.push_unresolved(Unresolved {
-                from: from.expect("guarded above").clone(),
-                callee,
-                reason: fail.reason(),
-                span,
-            });
-            w.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
-        }
-    }
+    let instantiated =
+        w.with_interner(|a| instantiate_witness(a, ws, inf, cf, &witness.generics, subst));
+    record_instantiation(
+        w,
+        ws,
+        from,
+        callee,
+        instantiated,
+        span,
+        site,
+        CallKind::Iter,
+    );
 }
 
 /// The callee obligations an instance picks up from the field DEFAULTS of the
@@ -4959,132 +4911,41 @@ fn record_bound_next(
     path: &[usize],
 ) -> Option<InstanceBoundNext> {
     let site = root.site(domain.clone(), expr, path.to_vec());
-    if let BoundNext::CallerGeneric(gidx) = next {
-        let owner_tree = w.owner_tree;
-        let resolved = from
-            .and(owner_tree)
-            .and_then(|tree| tree.next.get(gidx))
-            .cloned();
-        let Some(resolved) = resolved else {
-            w.record_site(
-                from,
-                site,
-                SiteOutcome::Failed("caller-generic-witness-unbound"),
-                span,
-            );
-            return None;
-        };
-        if from.is_some() {
-            w.push_edge(Edge {
-                to: resolved.callee.clone(),
-                span,
-            });
-        }
-        w.record_site(
-            from,
-            site,
-            SiteOutcome::Resolved(resolved.callee.clone()),
-            span,
-        );
-        return Some(resolved);
-    }
-
-    let BoundNext::Concrete {
-        func: (m, f),
-        next_generics,
-        sub,
-    } = next
-    else {
-        unreachable!("CallerGeneric handled above")
+    let (callee, next_generics, sub) = match next {
+        BoundNext::CallerGeneric(gidx) => return w.record_caller_witness(from, *gidx, site, span),
+        BoundNext::Concrete {
+            func: (module, func),
+            next_generics,
+            sub,
+        } => (
+            FuncRef {
+                module: *module,
+                func: *func,
+            },
+            next_generics,
+            sub,
+        ),
     };
-    let rep = FuncRef {
-        module: *m,
-        func: *f,
-    };
-    let resolved = &ws.module(rep.module).functions[rep.func];
-    let callee = rep;
     let cf = &ws.module(callee.module).functions[callee.func];
     let instantiated =
-        w.with_interner(|a| instantiate_witness(a, ws, inf, resolved, cf, next_generics, subst));
-    match instantiated {
-        Ok((args, callee_subst)) => {
-            let to = Instance { func: callee, args };
-            match from {
-                Some(_) => w.push_edge(Edge {
-                    to: to.clone(),
-                    span,
-                }),
-                // See `record_call`: an always-emitted body's callee is a root.
-                None => {
-                    w.out.always_emitted_targets.insert(to.clone());
-                }
-            }
-            w.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
-            w.reach(to.clone(), callee_subst);
-            let concrete_sub =
-                walk_bound_tree(w, ws, inf, from, subst, sub, span, expr, root, domain, path);
-            w.record_bound_tree(&to, concrete_sub.clone());
-            Some(InstanceBoundNext {
-                callee: to,
-                sub: concrete_sub,
-            })
-        }
-        // See `record_call`: the classification survives the absence of a
-        // `from` instance.
-        Err(Fail::Unconstrained(_)) if from.is_none() => {
-            w.record_always_emitted_hole(
-                mangle_fn(ws, cf),
-                callee,
-                AlwaysEmittedOutcome::Rejection(RejectionKind::UnconstrainedTypeVar),
-                span,
-            );
-            w.record_site(
-                from,
-                site,
-                SiteOutcome::Failed("unconstrained-type-var"),
-                span,
-            );
-            None
-        }
-        Err(fail) if from.is_none() => {
-            w.record_always_emitted_hole(
-                mangle_fn(ws, cf),
-                callee,
-                AlwaysEmittedOutcome::Unresolved(fail.reason()),
-                span,
-            );
-            w.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
-            None
-        }
-        Err(Fail::Unconstrained(_)) => {
-            w.push_rejection(Rejection {
-                kind: RejectionKind::UnconstrainedTypeVar,
-                at: from.expect("guarded above").clone(),
-                span,
-                message: format!(
-                    "the `next` witness `{}` binds a type argument no constraint reaches",
-                    mangle_fn(ws, cf)
-                ),
-            });
-            w.record_site(
-                from,
-                site,
-                SiteOutcome::Failed("unconstrained-type-var"),
-                span,
-            );
-            None
-        }
-        Err(fail) => {
-            w.push_unresolved(Unresolved {
-                from: from.expect("guarded above").clone(),
-                callee,
-                reason: fail.reason(),
-                span,
-            });
-            w.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
-            None
-        }
-    }
+        w.with_interner(|a| instantiate_witness(a, ws, inf, cf, next_generics, subst));
+    let to = record_instantiation(
+        w,
+        ws,
+        from,
+        callee,
+        instantiated,
+        span,
+        site,
+        CallKind::Next,
+    )?;
+    let concrete_sub =
+        walk_bound_tree(w, ws, inf, from, subst, sub, span, expr, root, domain, path);
+    w.record_bound_tree(&to, concrete_sub.clone());
+    Some(InstanceBoundNext {
+        callee: to,
+        sub: concrete_sub,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5281,7 +5142,6 @@ fn instantiate_witness(
     interner: &MonoInterner,
     ws: &Workspace,
     inf: &BodyInference,
-    resolved: &Function,
     callee: &Function,
     record: &FxHashMap<bone_core::hir::VarId, bone_core::prelude::TyId>,
     caller_subst: &MonoSubst,
@@ -5289,30 +5149,18 @@ fn instantiate_witness(
     if callee.generics.is_empty() {
         return Ok((Vec::new(), MonoSubst::default()));
     }
-    // The record is keyed by the RESOLVED declaration's `VarId`s; the walk
-    // instantiates the declaration the TARGET selected. Backend siblings are
-    // separate functions with separate `VarId`s, so the two are read
-    // POSITIONALLY -- generic `i` of the resolved decl supplies generic `i` of
-    // the variant. Keying the lookup on the variant instead silently degrades a
-    // generic witness to unbound on the non-default target alone.
-    if resolved.generics.len() != callee.generics.len() {
-        return Err(Fail::Unresolved("variant-generic-arity-mismatch"));
-    }
     let mut args = Vec::with_capacity(callee.generics.len());
     let mut callee_subst = MonoSubst::default();
-    for (rg, cg) in resolved.generics.iter().zip(&callee.generics) {
-        let (Some(rvar), Some(cvar)) = (
-            skull_mir::monoty::generic_var_of(ws, inf, *rg),
-            skull_mir::monoty::generic_var_of(ws, inf, *cg),
-        ) else {
+    for generic in &callee.generics {
+        let Some(var) = skull_mir::monoty::generic_var_of(ws, inf, *generic) else {
             return Err(Fail::Unresolved("declared-generic-not-generic"));
         };
-        let Some(bound) = record.get(&rvar) else {
+        let Some(bound) = record.get(&var) else {
             return Err(Fail::Unresolved("witness-generic-unbound"));
         };
         let ty = skull_mir::monoty::convert(ws, inf, *bound, caller_subst).map_err(convert_fail)?;
         args.push(interner.intern(ty.clone()));
-        callee_subst.insert(cvar, ty);
+        callee_subst.insert(var, ty);
     }
     Ok((args, callee_subst))
 }
@@ -5332,24 +5180,21 @@ fn instantiate_witness(
 /// legacy lowering, where shared snapshots actually exist.
 enum Fail {
     Unresolved(&'static str),
-    Unconstrained(&'static str),
+    Unconstrained,
 }
 
 impl Fail {
     fn reason(&self) -> &'static str {
         match self {
-            Self::Unresolved(r) | Self::Unconstrained(r) => r,
+            Self::Unresolved(r) => r,
+            Self::Unconstrained => "unconstrained-type-var",
         }
     }
 }
 
 fn convert_fail(r: MonoTyReason) -> Fail {
     match r {
-        // Inference never bound the variable, so there is no type to
-        // instantiate at -- not a missing record, an absent constraint.
-        MonoTyReason::UnresolvedInfer(_) => Fail::Unconstrained(r.bucket()),
-        // An incomplete substitution in an instantiated body. See [`Fail`].
-        MonoTyReason::UnboundGeneric(_) => Fail::Unconstrained(r.bucket()),
+        MonoTyReason::UnresolvedInfer(_) | MonoTyReason::UnboundGeneric(_) => Fail::Unconstrained,
         _ => Fail::Unresolved(r.bucket()),
     }
 }
