@@ -934,8 +934,8 @@ function __rock_inspect_key_lt(a, b) {
   var sa = lua_tostring(a), sb = lua_tostring(b);
   return sa < sb ? -1 : (sa > sb ? 1 : 0);
 }
-// Reference-struct tier: declared fields (already sorted), plus any own key the
-// declaration does not name -- minus the compiler-minted PHYSICAL slots, which
+// Named struct renderer: declared fields, plus any own key the declaration
+// does not name -- minus the compiler-minted PHYSICAL slots, which
 // are exactly the dotted keys (`embed` leaves, a flattened enum's `.#`/`.0`).
 function __rock_inspect_struct(header, t, declared, indent, path, visited, precision) {
   var pairs = declared.slice();
@@ -962,14 +962,6 @@ function __rock_inspect_struct(header, t, declared, indent, path, visited, preci
     return indent + "  " + kv[0] + " = " + __rock_inspect_value(kv[1], indent + "  ", path + "." + kv[0], visited, precision);
   });
   return header + " {\n" + lines.join(",\n") + "\n" + indent + "}";
-}
-// FFI-clean `value` struct tier: luajit renders those from `__ROCK_C_STRUCT`
-// (a cdata, not a table), which is a different renderer -- `: ` separators,
-// declaration order, always one line, children through the top-level `inspect`.
-function __rock_inspect_value_struct(header, pairs) {
-  if (pairs.length === 0) return header + " { }";
-  var parts = pairs.map(function(kv) { return kv[0] + ": " + inspect(kv[1]); });
-  return header + " { " + parts.join(", ") + " }";
 }
 // Recover names for a tuple payload widened from a direct value-record leaf
 // group. Keep this exact: a missing, extra, sparse, or colliding key makes the

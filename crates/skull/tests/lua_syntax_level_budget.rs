@@ -65,10 +65,17 @@ fn display_tiers_expected(n: usize) -> String {
     let join = |f: &dyn Fn(usize) -> String| (0..n).map(f).collect::<Vec<_>>().join(", ");
     let floats = join(&|i| format!("f{i}: {i}.5"));
     let cdata = format!("CdataWide {{ {floats} }}");
+    let mut inspect_fields: Vec<String> = (0..n).map(|i| format!("f{i} = {i}.5")).collect();
+    inspect_fields.sort_unstable();
+    let cdata_inspect = if n <= 2 {
+        format!("CdataWide {{ {} }}", inspect_fields.join(", "))
+    } else {
+        format!("CdataWide {{\n  {}\n}}", inspect_fields.join(",\n  "))
+    };
     let inline = format!("InlineWide {{ {floats} }}");
     [
         cdata.clone(),
-        cdata,
+        cdata_inspect,
         format!("GcWide {{ {} }}", join(&|i| format!("g{i}: s{i}"))),
         format!(
             "LeafWide {{ pos: true, pos.x: 1, pos.y: 2, {} }}",
@@ -87,11 +94,11 @@ fn display_tiers_expected(n: usize) -> String {
 
 /// The rendering of narrow values is a contract: pinned literally, not derived.
 #[test]
-fn narrow_display_helpers_render_unchanged() {
+fn narrow_display_helpers_render_expected_formats() {
     require_luajit();
     let lua = try_emit_module(&display_tiers(2)).expect("emits");
     let expected = "CdataWide { f0: 0.5, f1: 1.5 }\n\
-                    CdataWide { f0: 0.5, f1: 1.5 }\n\
+                    CdataWide { f0 = 0.5, f1 = 1.5 }\n\
                     GcWide { g0: s0, g1: s1 }\n\
                     LeafWide { pos: true, pos.x: 1, pos.y: 2, l0: 0.25, l1: 1.25 }\n\
                     Holder { tag: t, inner: InlineWide { f0: 0.5, f1: 1.5 } }\n\

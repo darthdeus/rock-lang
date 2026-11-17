@@ -787,58 +787,89 @@ impl Emitter<'_> {
         }
     }
 
-    /// Colon-format render of a GC-free value struct `inspect` arg, matching the
-    /// luajit cdata `__tostring` (`Name { f: v }`, declaration field order). Nested
-    /// value-struct fields recurse; primitive leaves defer to the generic `inspect`.
+    /// Render a known GC-free value struct without an inspect-only object.
     fn render_value_struct_inspect(
         &self,
+        name: ustr::Ustr,
         id: Idx<Inst>,
         cyc: &str,
         prec: &str,
+        indent: &str,
     ) -> Result<String, CompilerError> {
-        // `MaterializeValueStruct` is the same box, explicitly authorized -- it
-        // inspects identically.
-        if let Inst::MakeValueStruct { name, fields, .. }
-        | Inst::MaterializeValueStruct { name, fields, .. } = &self.mf.insts[id]
+        if let Inst::MakeValueStruct {
+            name: actual,
+            fields,
+            ..
+        }
+        | Inst::MaterializeValueStruct {
+            name: actual,
+            fields,
+            ..
+        } = &self.mf.insts[id]
         {
-            if skull_mir::lower::gc_free_value_struct_field_order(self.ws, *name).is_some() {
-                return self.render_value_struct_inspect_fields(*name, fields, cyc, prec);
+            if *actual == name
+                && skull_mir::lower::gc_free_value_struct_field_order(self.ws, *actual).is_some()
+            {
+                return self.render_value_struct_inspect_fields(*actual, fields, cyc, prec, indent);
             }
         }
-        Ok(format!("inspect({}, {cyc}, {prec})", self.render_val(id)?))
+        let value = self.render_val(id)?;
+        Ok(format!(
+            "__rock_inspect_value({value}, {}, \"root\", null, {prec})",
+            js_string_lit(indent)?
+        ))
     }
 
-    /// `Name { f: v, .. }` in DECLARED field order, from a field list that may be
-    /// the flattened leaf form. A nested `nobox` field arrives as dotted leaves
-    /// (`pos.x`, `pos.y`) with no `pos` entry, so a lookup by declared name alone
-    /// misses it -- and a missed lookup here is an emit REJECTION, which turns
-    /// every print of such a struct into a skip rather than a diagnosis.
     fn render_value_struct_inspect_fields(
         &self,
         name: ustr::Ustr,
         fields: &[(ustr::Ustr, Idx<Inst>)],
         cyc: &str,
         prec: &str,
+        indent: &str,
     ) -> Result<String, CompilerError> {
-        let order = skull_mir::lower::gc_free_value_struct_field_order(self.ws, name)
+        let mut order = skull_mir::lower::gc_free_value_struct_field_order(self.ws, name)
             .ok_or_else(|| err(format!("`{name}` is not a GC-free value struct")))?;
+        order.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         let (exact, groups) = split_leaf_paths(fields.iter().copied());
         let display_name = bone_core::modules::display_name(name.as_str());
-        let mut expr = js_string_lit(&format!("{display_name} {{ "))?;
+        let multiline = order.len() > 2;
+        let mut expr = if multiline {
+            js_string_lit(&format!("{display_name} {{\n"))?
+        } else {
+            js_string_lit(&format!("{display_name} {{ "))?
+        };
+        let child_indent = if multiline {
+            format!("{indent}  ")
+        } else {
+            indent.to_string()
+        };
         for (i, fname) in order.iter().enumerate() {
             if i > 0 {
-                expr.push_str(&format!(" + {}", js_string_lit(", ")?));
+                expr.push_str(&format!(
+                    " + {}",
+                    js_string_lit(if multiline { ",\n" } else { ", " })?
+                ));
             }
-            expr.push_str(&format!(" + {}", js_string_lit(&format!("{fname}: "))?));
+            let label = if multiline {
+                format!("{child_indent}{fname} = ")
+            } else {
+                format!("{fname} = ")
+            };
+            expr.push_str(&format!(" + {}", js_string_lit(&label)?));
             let rendered = if let Some((_, vid)) = exact.iter().find(|(f, _)| f == fname) {
-                self.render_value_struct_inspect(*vid, cyc, prec)?
+                if let Some(child_name) = nested_field_struct_name(self.ws, name, fname)? {
+                    self.render_value_struct_inspect(child_name, *vid, cyc, prec, &child_indent)?
+                } else {
+                    format!("inspect({}, {cyc}, {prec})", self.render_val(*vid)?)
+                }
             } else if let Some((_, sub)) = groups.iter().find(|(h, _)| h == fname) {
                 let sub_name = nested_field_struct_name(self.ws, name, fname)?.ok_or_else(|| {
-                        err(format!(
-                            "value struct `{name}` field `{fname}` arrives as leaves but is not a value struct"
-                        ))
-                    })?;
-                self.render_value_struct_inspect_fields(sub_name, sub, cyc, prec)?
+                    err(format!(
+                        "value struct `{name}` field `{fname}` arrives as leaves but is not a value struct"
+                    ))
+                })?;
+                self.render_value_struct_inspect_fields(sub_name, sub, cyc, prec, &child_indent)?
             } else {
                 return Err(err(format!(
                     "value struct `{name}` field `{fname}` absent at inspect boundary"
@@ -846,7 +877,12 @@ impl Emitter<'_> {
             };
             expr.push_str(&format!(" + {rendered}"));
         }
-        expr.push_str(&format!(" + {}", js_string_lit(" }")?));
+        let close = if multiline {
+            format!("\n{indent}}}")
+        } else {
+            " }".to_string()
+        };
+        expr.push_str(&format!(" + {}", js_string_lit(&close)?));
         Ok(format!("({expr})"))
     }
 
@@ -872,26 +908,14 @@ impl Emitter<'_> {
         args: &[Idx<Inst>],
     ) -> Result<String, CompilerError> {
         let cf = &self.ws.module(func.module).functions[func.func];
-        // Resolve once so typed inspection also obeys declaration supply.
         let supply = js_supply(self.ws, cf);
-        // `inspect`/`inspect_formatted` of a GC-FREE value struct still diverges:
-        // it is cdata on luajit, rendered `Name { f: v }` (colon, via the cdata
-        // `__tostring`) where the JS `{__ty,..}`-object walker emits `f = v`
-        // (equals) -- reject at the box boundary. A GC-CARRYING value struct is a
-        // `_vt` TABLE on luajit; `inspect` walks it via the SAME generic
-        // equals-format walker as the JS object (NOT the `_vt.__tostring`, which it
-        // never calls -- oracle-verified: luajit renders `Bag { n = 5, xs = Vec {..} }`),
-        // so it inspects faithfully. A boxed ENUM likewise renders faithfully (T8e).
-        // `inspect` of a GC-FREE value struct: luajit renders it via the cdata
-        // `__tostring` as `Name { f: v }` (COLON, declaration field order), where the
-        // generic `{__ty,..}`-object walker would emit `f = v` (equals, sorted keys).
-        // A GC-free value struct's fields are bounded to primitives + nested value
-        // structs (no strings/GC by the C-layout rule), so an emit-time recursive
-        // colon renderer is exact -- primitive leaves go through the generic
-        // `inspect` (lua_tostring / precision parity), nested value structs recurse.
+        // The inline path avoids an inspect-only object while matching the
+        // runtime's sorted equals format and nested indentation.
         if supply.is_some() && matches!(cf.name.as_str(), "inspect" | "inspect_formatted") {
             if let Some(&arg0) = args.first() {
-                if let Inst::MakeValueStruct { name, .. } = &self.mf.insts[arg0] {
+                if let Inst::MakeValueStruct { name, .. }
+                | Inst::MaterializeValueStruct { name, .. } = &self.mf.insts[arg0]
+                {
                     if skull_mir::lower::gc_free_value_struct_field_order(self.ws, *name).is_some()
                     {
                         let (cyc, prec) = if cf.name.as_str() == "inspect_formatted" {
@@ -908,7 +932,7 @@ impl Emitter<'_> {
                                     .unwrap_or_else(|| "(-1)".to_string()),
                             )
                         };
-                        return self.render_value_struct_inspect(arg0, &cyc, &prec);
+                        return self.render_value_struct_inspect(*name, arg0, &cyc, &prec, "");
                     }
                 }
             }

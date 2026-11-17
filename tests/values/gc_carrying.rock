@@ -262,11 +262,9 @@ fn generic_pair_eq() {
     print("{a == b} {a == c}")
 }
 
-// ----- inspect: a GC-carrying value struct is a `_vt` TABLE on luajit,
-// walked by the generic equals-format walker (NOT the colon `_vt.__tostring`,
-// which inspect never calls) -- byte-agreeing with the JS `{__ty,..}`-object
-// render. `assert_eq(inspect(..), "..")` byte-checks on BOTH backends. (A
-// GC-FREE value struct stays gated: it is cdata, rendered colon via __tostring.)
+// Inspect uses the same sorted equals-format for GC-free and GC-carrying values.
+// The cdata tostring representation remains covered by print_composites.rock.
+// These byte pins run on both backends.
 
 @test
 fn inspect_gc_carrying_values() {

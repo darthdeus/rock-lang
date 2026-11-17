@@ -8,6 +8,8 @@
 struct Person { name: string, age: int }
 struct Point { x: int, y: int }
 struct Triple { a: int, b: int, c: int }
+struct EmptyRef {}
+value EmptyValue {}
 
 // A capturing lambda / fn value renders as an opaque `function: ..` leaf, never
 // leaking its capture internals.
@@ -22,21 +24,35 @@ fn fn_record_render() -> bool {
 // Byte-exact renders, through `assert_eq` so braces can be escaped.
 @test
 fn exact_struct_renders() {
+    assert_eq(inspect(EmptyRef {}), "EmptyRef {{  }}")
     assert_eq(inspect(Person { name: "Alice", age: 30 }), "Person {{ age = 30, name = \"Alice\" }}")
     assert_eq(inspect(Triple { a: 1, b: 2, c: 3 }), "Triple {{\n  a = 1,\n  b = 2,\n  c = 3\n}}")
     assert_eq(inspect([10, 20, 30]), "Vec {{ 10, 20, 30 }}")
 }
 
-// A GC-free value struct renders colon-format in declaration order (the luajit
-// cdata `__tostring`), recursing into nested value structs.
+// GC-free value structs use the same sorted equals-format as table-backed
+// structs. Wide nested values follow the generic multiline indentation too.
 value V2 { y: int, x: int }
 value IV { x: int, y: int }
 value NestedV { a: IV, b: int }
+value V3 { z: int, x: int, y: int }
+value V3Holder { item: V3, tag: int, extra: int }
+
+fn inspect_any(value: any) -> string { return inspect(value) }
+fn inspect_dynamic_v3_holder(item: V3) -> string {
+    return inspect(V3Holder { item: item, tag: 9, extra: 4 })
+}
 
 @test
-fn value_struct_colon_render() {
-    assert_eq(inspect(V2 { y: 5, x: 3 }), "V2 {{ y: 5, x: 3 }}")
-    assert_eq(inspect(NestedV { a: IV { x: 1, y: 2 }, b: 9 }), "NestedV {{ a: IV {{ x: 1, y: 2 }}, b: 9 }}")
+fn value_struct_render() {
+    assert_eq(inspect(EmptyValue {}), "EmptyValue {{  }}")
+    assert_eq(inspect(V2 { y: 5, x: 3 }), "V2 {{ x = 3, y = 5 }}")
+    assert_eq(inspect(NestedV { a: IV { x: 1, y: 2 }, b: 9 }), "NestedV {{ a = IV {{ x = 1, y = 2 }}, b = 9 }}")
+    assert_eq(inspect(V3 { y: 5, z: 7, x: 3 }), "V3 {{\n  x = 3,\n  y = 5,\n  z = 7\n}}")
+    assert_eq(inspect(V3Holder { item: V3 { y: 5, z: 7, x: 3 }, tag: 9, extra: 4 }), "V3Holder {{\n  extra = 4,\n  item = V3 {{\n    x = 3,\n    y = 5,\n    z = 7\n  }},\n  tag = 9\n}}")
+    assert_eq(inspect_dynamic_v3_holder(V3 { y: 5, z: 7, x: 3 }), "V3Holder {{\n  extra = 4,\n  item = V3 {{\n    x = 3,\n    y = 5,\n    z = 7\n  }},\n  tag = 9\n}}")
+    assert_eq(inspect_any(V3 { y: 5, z: 7, x: 3 }), "V3 {{\n  x = 3,\n  y = 5,\n  z = 7\n}}")
+    assert_eq(inspect_any(EmptyValue {}), "EmptyValue {{  }}")
 }
 
 // An embedded child is physically inline; inspect rebuilds the logical child.

@@ -1871,7 +1871,7 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
 /// Register an `inspect`/`copy`/`name` closure into `_G.__ROCK_C_STRUCT` for
 /// every value cdata the compiler mints. That registry is what a consumer asks
 /// "what is this cdata, and how do I copy it": the stdlib `inspect` renders it
-/// structurally (`ffi.istype(info.name, obj)` -> `info.inspect(obj)`) instead of
+/// structurally through the registered inspect renderer instead of
 /// printing an address, `deepcopy` copies it instead of SHARING it, and the sim
 /// checkpoint census classifies it as `value_cdata` instead of refusing it as
 /// unmodelled.
@@ -1919,22 +1919,45 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
             let n = s.name;
             let sym = skull_mir::mangle::type_symbol(ws, n);
             let n = display_name(n.as_str());
+            let mut fields: Vec<_> = s.fields.iter().collect();
+            fields.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
             out.push_str(&format!(
-                "_G.__ROCK_C_STRUCT[\"{sym}\"] = {{ inspect = function(v)\n"
+                "_G.__ROCK_C_STRUCT[\"{sym}\"] = {{ inspect = function(v, indent, path, visited, precision)\n"
             ));
-            if s.fields.is_empty() {
-                out.push_str(&format!("  return \"{n} {{ }}\"\n"));
-            } else {
+            if fields.is_empty() {
+                out.push_str(&format!("  return \"{n} {{  }}\"\n"));
+            } else if fields.len() <= 2 {
                 let parts = display_record(
                     &format!("{n} {{ "),
-                    s.fields.iter().map(|f| {
+                    fields.iter().map(|f| {
                         (
-                            format!("{}: ", f.name),
-                            vec![LuaDisplayPart::Expr(format!("inspect(v.{})", f.name))],
+                            format!("{} = ", f.name),
+                            vec![LuaDisplayPart::Expr(format!(
+                                "__rock_inspect_value(v.{0}, indent, path .. \".{0}\", visited, precision)",
+                                f.name
+                            ))],
                         )
                     }),
                     " }",
                 );
+                out.push_str(&display_return(&parts, "  "));
+            } else {
+                out.push_str("  local child_indent = indent .. \"  \"\n");
+                let mut parts = vec![LuaDisplayPart::literal(&format!("{n} {{\\n"))];
+                for (i, f) in fields.iter().enumerate() {
+                    if i > 0 {
+                        parts.push(LuaDisplayPart::literal(",\\n"));
+                    }
+                    parts.push(LuaDisplayPart::Expr("indent".to_string()));
+                    parts.push(LuaDisplayPart::literal(&format!("  {} = ", f.name)));
+                    parts.push(LuaDisplayPart::Expr(format!(
+                        "__rock_inspect_value(v.{0}, child_indent, path .. \".{0}\", visited, precision)",
+                        f.name
+                    )));
+                }
+                parts.push(LuaDisplayPart::literal("\\n"));
+                parts.push(LuaDisplayPart::Expr("indent".to_string()));
+                parts.push(LuaDisplayPart::literal("}"));
                 out.push_str(&display_return(&parts, "  "));
             }
             let copy_args: Vec<String> = s.fields.iter().map(|f| format!("v.{}", f.name)).collect();

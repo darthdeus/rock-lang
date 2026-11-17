@@ -96,7 +96,7 @@ fn interpolate_value_structs() {
     print("i {p} {q} {n} {id}")
 }
 
-@test(output = "R {{ a = 1, p = P2 {{ x: 5, y: 6 }} }}\nVec {{ P2 {{ x: 1, y: 2 }}, P2 {{ x: 7, y: 8 }} }}\nE::B(3)")
+@test(output = "R {{ a = 1, p = P2 {{ x = 5, y = 6 }} }}\nVec {{ P2 {{ x = 1, y = 2 }}, P2 {{ x = 7, y = 8 }} }}\nE::B(3)")
 fn interpolate_containers_of_value_structs() {
     let r = R { a: 1, p: P2 { x: 5, y: 6 } }
     let xs = [P2 { x: 1, y: 2 }, P2 { x: 7, y: 8 }]

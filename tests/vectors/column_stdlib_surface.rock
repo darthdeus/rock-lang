@@ -131,7 +131,7 @@ fn test_to_lua_array_materializes_nested_cdata_enum() {
     print(raw_payload_first_is_cdata(raw))
 }
 
-@test(output = "Vec {{ V2 {{ x: 1, y: 2 }} }}")
+@test(output = "Vec {{ V2 {{ x = 1, y = 2 }} }}")
 fn test_inspect_renders_logical_elements() {
     // Without the column branch this renders the PHYSICAL layout --
     // `Vec { _data = nil, len = 1, x = { 1 }, y = { 2 } }`.
@@ -139,7 +139,7 @@ fn test_inspect_renders_logical_elements() {
     print(inspect(a))
 }
 
-@test(output = "columns\nDataField\nVec {{ DataField {{ _data: 4, x: 9 }} }}", backends = "lua")
+@test(output = "columns\nDataField\nVec {{ DataField {{ _data = 4, x = 9 }} }}", backends = "lua")
 fn test_value_data_field_does_not_collide_with_vec_representation() {
     let a: [DataField] = [DataField { _data: 4.0, x: 9.0 }]
     print(column_header_repr(a))

@@ -110,7 +110,7 @@ fn test_inspect_nested_compact() {
 nobox value InspNV { x: float, y: float }
 value InspE5 { pos: InspNV, a: float, b: float, c: float }
 
-@test(output = "InspE5 {{ pos: InspNV {{ x: 1, y: 2 }}, a: 3, b: 4, c: 5 }}")
+@test(output = "InspE5 {{\n  a = 3,\n  b = 4,\n  c = 5,\n  pos = InspNV {{ x = 1, y = 2 }}\n}}")
 fn test_inspect_flattened_nobox_value_struct() {
     let xs: [InspE5] = []
     xs.push(InspE5 { pos: InspNV { x: 1.0, y: 2.0 }, a: 3.0, b: 4.0, c: 5.0 })

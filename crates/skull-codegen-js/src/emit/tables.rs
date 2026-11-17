@@ -706,14 +706,9 @@ fn inline_view_expr(
     )))
 }
 
-/// Emit the `__rock_inspect_ty["<N>"] = function(t, ..) {...}` entries: the
-/// per-type half of `inspect` that luajit reads out of `_G.__ROCK_TYPE_TABLE`
-/// (the declared field list) and `_G.__ROCK_C_STRUCT` (the value-struct
-/// renderer). Two tiers, exactly as luajit splits them: an FFI-clean `value`
-/// struct is a cdata there, rendered `N { f: v, .. }` in declaration order;
-/// everything else (reference structs, GC-carrying `value` structs, which are
-/// plain tables on luajit too) renders `N { f = v, .. }` with sorted keys and
-/// the compact/multiline threshold.
+/// Emit per-type inspect dispatch functions for realized structs.
+/// Declared fields supply null and embedded children; one shared renderer
+/// formats every struct representation with the same sorted-key rules.
 fn build_inspect_ty_defs(
     ws: &Workspace,
     arena: &skull_mir::lower::RepArena,
@@ -754,12 +749,13 @@ fn build_inspect_ty_defs(
         } else {
             None
         };
+        let mut fields: Vec<&bone_core::hir::StructFieldDef> = s.fields.iter().collect();
+        fields.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
         if value_plan
             .as_ref()
             .is_some_and(|plan| plan.value_storage() == Some(skull_mir::lower::ValueStorage::CData))
         {
-            let pairs: Vec<String> = s
-                .fields
+            let pairs: Vec<String> = fields
                 .iter()
                 .map(|f| {
                     let plan = skull_mir::lower::struct_field_plan(
@@ -782,13 +778,11 @@ fn build_inspect_ty_defs(
                 .collect::<Result<_, CompilerError>>()?;
             out.push_str(&format!(
                 "__rock_inspect_ty[{header}] = function(t, indent, path, visited, precision) {{ \
-                 return __rock_inspect_value_struct({display_header}, [{}]); }};\n",
+                 return __rock_inspect_struct({display_header}, t, [{}], indent, path, visited, precision); }};\n",
                 pairs.join(", ")
             ));
             continue;
         }
-        let mut fields: Vec<&bone_core::hir::StructFieldDef> = s.fields.iter().collect();
-        fields.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
         let pairs: Vec<String> = fields
             .iter()
             .map(|f| {
