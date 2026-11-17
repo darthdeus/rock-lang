@@ -46,9 +46,7 @@ impl<'a> Builder<'a> {
         // (correct eval count, and grouped fields share the same instance), in
         // source order. A flattened enum field evaluates to (tag, payload slots)
         // instead of one boxed value.
-        let mut lit_box: Vec<(Ustr, Idx<Inst>)> = Vec::new();
-        let mut lit_flat: Vec<(Ustr, FlatCells)> = Vec::new();
-        let mut lit_embed: Vec<(Ustr, Vec<(Ustr, Idx<Inst>)>)> = Vec::new();
+        let mut literal = Vec::new();
         let mut by_value: HashMap<u32, Idx<Inst>> = HashMap::default();
         let mut flat_by_value: HashMap<u32, FlatCells> = HashMap::default();
         let mut embed_by_value: HashMap<u32, (Option<Idx<Inst>>, Vec<(Ustr, Idx<Inst>)>)> =
@@ -66,7 +64,7 @@ impl<'a> Builder<'a> {
                         c
                     }
                 };
-                lit_flat.push((lf.name, cells));
+                literal.push((lf.name, self.flat_literal_slots(lf.name, cells)));
             } else if let Some((cname, nullable)) = field_plan.embed() {
                 // An embedded field's leaves ARE this parent's keys, so its
                 // value is spliced rather than lowered to a child box. Keyed by
@@ -79,7 +77,7 @@ impl<'a> Builder<'a> {
                         l
                     }
                 };
-                lit_embed.push((lf.name, Self::embed_field_slots(lf.name, leaves)));
+                literal.push((lf.name, Self::embed_field_slots(lf.name, leaves)));
             } else {
                 let expected = self.concrete_struct_field_ty(e, lf.name);
                 let v = match by_value.get(&key) {
@@ -96,75 +94,63 @@ impl<'a> Builder<'a> {
                     }
                 };
                 let v = self.round_f32_field(name, lf.name, v);
-                lit_box.push((lf.name, v));
+                literal.push((lf.name, vec![(lf.name, v)]));
             }
         }
-        let out = match self.struct_field_names(name) {
-            Some(decl) => {
-                let mut fs = Vec::new();
-                for fname in decl {
-                    if let Some((_, cells)) = lit_flat.iter().find(|(n, _)| *n == fname) {
-                        fs.extend(self.flat_literal_slots(fname, cells.clone()));
-                    } else if let Some((_, slots)) = lit_embed.iter().find(|(n, _)| *n == fname) {
-                        fs.extend(slots.clone());
-                    } else if let Some(&(_, v)) = lit_box.iter().find(|(n, _)| *n == fname) {
-                        fs.push((fname, v));
-                    } else if let Some((cname, nullable)) =
-                        self.struct_field_plan(name, fname, false)?.embed()
-                    {
-                        // Unwritten embed field: copy the base's leaves through
-                        // (including its presence slot), else the struct default.
-                        match base_inst {
-                            Some(bi) => {
-                                for k in self.embed_leaf_paths(cname)? {
-                                    let key = crate::names::ustr(&format!("{fname}.{k}"));
-                                    let v = self.read_field(bi, key);
-                                    fs.push((key, v));
-                                }
-                                if nullable {
-                                    let p = self.read_field(bi, fname);
-                                    fs.push((fname, p));
-                                }
+        let out = self
+            .collect_literal_fields(name, literal, |s, fname| {
+                if let Some((cname, nullable)) = s.struct_field_plan(name, fname, false)?.embed() {
+                    // Unwritten embed field: copy the base's leaves through
+                    // (including its presence slot), else the struct default.
+                    match base_inst {
+                        Some(bi) => {
+                            let mut slots = Vec::new();
+                            for k in s.embed_leaf_paths(cname)? {
+                                let key = crate::names::ustr(&format!("{fname}.{k}"));
+                                let v = s.read_field(bi, key);
+                                slots.push((key, v));
                             }
-                            None => {
-                                let slots = self.with_struct_default(name, fname, |s, def| {
-                                    s.embed_value_leaves(nullable, cname, def)
-                                })?;
-                                fs.extend(Self::embed_field_slots(fname, slots));
+                            if nullable {
+                                let p = s.read_field(bi, fname);
+                                slots.push((fname, p));
+                            }
+                            Ok(slots)
+                        }
+                        None => {
+                            let slots = s.with_struct_default(name, fname, |s, def| {
+                                s.embed_value_leaves(nullable, cname, def)
+                            })?;
+                            Ok(Self::embed_field_slots(fname, slots))
+                        }
+                    }
+                } else if let Some(shape) = s.struct_field_plan(name, fname, false)?.flat_shape() {
+                    // A base stores the field in physical dotted slots, while the
+                    // default is still a boxed enum.
+                    let cells = match base_inst {
+                        Some(bi) => s.load_flat_cells(bi, fname, &shape),
+                        None => s.with_struct_default(name, fname, |s, def| {
+                            s.lower_flat_value(&shape, def)
+                        })?,
+                    };
+                    Ok(s.flat_literal_slots(fname, cells))
+                } else {
+                    let v = match base_inst {
+                        // The base keeps its own value fields.
+                        Some(bi) => {
+                            let v = s.read_field(bi, fname);
+                            match s.concrete_struct_field_ty(e, fname) {
+                                Some(ty) => s.copied_value_box(ty, v)?,
+                                None => v,
                             }
                         }
-                    } else if let Some(shape) =
-                        self.struct_field_plan(name, fname, false)?.flat_shape()
-                    {
-                        // Unwritten flat field: from the base if present, else the
-                        // struct default. A base stores the field in physical
-                        // dotted slots, while the default is still a boxed enum.
-                        let cells = match base_inst {
-                            Some(bi) => self.load_flat_cells(bi, fname, &shape),
-                            None => self.with_struct_default(name, fname, |s, def| {
-                                s.lower_flat_value(&shape, def)
-                            })?,
-                        };
-                        fs.extend(self.flat_literal_slots(fname, cells));
-                    } else {
-                        let v = match base_inst {
-                            // The base keeps its own value fields.
-                            Some(bi) => {
-                                let v = self.read_field(bi, fname);
-                                match self.concrete_struct_field_ty(e, fname) {
-                                    Some(ty) => self.copied_value_box(ty, v)?,
-                                    None => v,
-                                }
-                            }
-                            None => self.lower_struct_default(name, fname)?,
-                        };
-                        fs.push((fname, v));
-                    }
+                        None => s.lower_struct_default(name, fname)?,
+                    };
+                    Ok(vec![(fname, v)])
                 }
-                fs
-            }
-            None => lit_box, // unknown nominal (foreign module): emit as-given
-        };
+            })?
+            .into_iter()
+            .flatten()
+            .collect();
         // A hand-built `NativeBuffer { ptr: .., len: .. }` must carry the same
         // leaf views the `native_buffer_alloc` intrinsic attaches -- element
         // access decides on the TYPE, so a buffer of a leaf-addressed element
@@ -179,6 +165,26 @@ impl<'a> Builder<'a> {
             ty: Some(name),
             fields: out,
         }))
+    }
+
+    pub(crate) fn collect_literal_fields<T: Clone>(
+        &mut self,
+        name: Ustr,
+        literal: Vec<(Ustr, T)>,
+        mut missing: impl FnMut(&mut Self, Ustr) -> Result<T, CompilerError>,
+    ) -> Result<Vec<T>, CompilerError> {
+        let Some(fields) = self.struct_field_names(name) else {
+            return Ok(literal.into_iter().map(|(_, value)| value).collect());
+        };
+        fields
+            .into_iter()
+            .map(
+                |field| match literal.iter().find(|(name, _)| *name == field) {
+                    Some((_, value)) => Ok(value.clone()),
+                    None => missing(self, field),
+                },
+            )
+            .collect()
     }
 
     /// Append the leaf-view fields to a hand-written `NativeBuffer` literal's

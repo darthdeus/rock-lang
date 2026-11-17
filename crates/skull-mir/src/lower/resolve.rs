@@ -1178,21 +1178,9 @@ impl<'a> Builder<'a> {
             let r = self.coerce_field_repr(r, lf.value, name, lf.name)?;
             litmap.push((lf.name, r));
         }
-        let parts: Vec<ValueRepr> = match self.struct_field_names(name) {
-            Some(decl) => {
-                let mut fs = Vec::new();
-                for fname in decl {
-                    match litmap.iter().find(|(n, _)| *n == fname) {
-                        Some((_, r)) => fs.push(r.clone()),
-                        None => fs.push(
-                            self.spread_base_field_repr(&base_repr, base_boxed, name, fname, base)?,
-                        ),
-                    }
-                }
-                fs
-            }
-            None => litmap.into_iter().map(|(_, r)| r).collect(),
-        };
+        let parts = self.collect_literal_fields(name, litmap, |s, fname| {
+            s.spread_base_field_repr(&base_repr, base_boxed, name, fname, base)
+        })?;
         Ok(ValueRepr::Group {
             name,
             parts,
