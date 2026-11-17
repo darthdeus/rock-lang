@@ -1,4 +1,4 @@
-use crate::common::{compile_and_run, emit_module, fn_name, run_luajit, run_main, scalar_ctx};
+use crate::common::{compile_and_run, emit_module, run_luajit, run_main};
 
 #[test]
 fn immediate_nullable_enum_projection_reads_only_selected_field() {
@@ -185,48 +185,17 @@ fn main() {
 }
 
 #[test]
-fn indexed_strided_projection_lowers_only_selected_lanes() {
-    use skull_mir::mir::{ContainerKind, Inst};
-    let ws = crate::common::ws_with_stdlib(
+fn indexed_strided_projection_reads_one_lane_and_checks_once() {
+    let lua = emit_module(
         r#"
 nobox value Row { a: int, b: int, c: int, d: int, e: int, f: int }
 fn selected(rows: [Row], index: int) -> int { rows[index].b }
 fn main() { print(selected([Row { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6 }], 0)) }
 "#,
     );
-    let roots = skull::mir_emit::emission_roots(&ws, None);
-    let graph = skull::instance_graph::build(&ws, roots, false);
-    let bodies = skull::concrete_body::build(&ws, &graph);
-    let plan = bodies
-        .plans
-        .iter()
-        .find(|(inst, _)| fn_name(&ws, inst.func) == "selected")
-        .expect("selected has no plan")
-        .1;
-    let scx = scalar_ctx(&ws, &graph);
-    let mir = skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &bodies.plans)
-        .expect("lower selected");
-    let reads = mir
-        .insts
-        .iter()
-        .filter(|(_, inst)| {
-            matches!(
-                inst,
-                Inst::Index {
-                    kind: ContainerKind::VecStrideSlot,
-                    ..
-                }
-            )
-        })
-        .count();
-    assert_eq!(reads, 1);
-    assert_eq!(
-        mir.insts
-            .iter()
-            .filter(|(_, inst)| matches!(inst, Inst::VecCheckedIndex { .. }))
-            .count(),
-        1
-    );
+    let body = crate::common::function_body(&lua, "selected");
+    assert_eq!(body.matches("_data").count(), 1);
+    assert_eq!(body.matches("__vec_checked_index(").count(), 1);
 }
 
 #[test]

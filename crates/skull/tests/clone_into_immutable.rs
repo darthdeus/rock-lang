@@ -1,4 +1,4 @@
-use crate::common::{emit_module, function_body, require_luajit, run_luajit};
+use crate::common::{emit_module, function_body, run_luajit};
 
 const SRC: &str = r#"
 enum Mood { Calm, Angry }
@@ -94,7 +94,6 @@ fn clone_into_is_the_argument_for_values_without_mutable_storage() {
 
 #[test]
 fn clone_into_keeps_values_and_deep_copies_mutable_storage() {
-    require_luajit();
     let mut lua = emit_module(SRC);
     lua.push_str(
         "\nprint(clone_string(\"s\"), clone_int(7), clone_maybe(nil), clone_maybe(\"m\"), \
@@ -105,7 +104,6 @@ fn clone_into_keeps_values_and_deep_copies_mutable_storage() {
 
 #[test]
 fn clone_into_strided_copies_only_live_rows() {
-    require_luajit();
     let lua = emit_module(SRC);
     assert_eq!(
         run_luajit(&format!("{lua}\nprint(clone_wide())\n")),
@@ -115,7 +113,6 @@ fn clone_into_strided_copies_only_live_rows() {
 
 #[test]
 fn clone_into_strided_edges_and_mutable_fallback() {
-    require_luajit();
     let lua = emit_module(SRC);
     assert!(function_body(&lua, "copy_wide").contains("__rock_stride_copy"));
     assert!(function_body(&lua, "copy_mixed").contains("__rock_stride_copy"));

@@ -2,7 +2,6 @@ use crate::common;
 use std::collections::HashMap;
 
 fn run(src: &str, driver: &str) -> String {
-    common::require_luajit();
     let ws = common::ws_with_stdlib(src);
     let mid = common::module_id(&ws, "<test>");
     let lua = skull::mir_emit::emit_workspace_mir(&ws, mid)

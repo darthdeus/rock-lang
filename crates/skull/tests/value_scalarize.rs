@@ -1,4 +1,4 @@
-use crate::common::{emit_module, function_body, require_luajit, run_main};
+use crate::common::{emit_module, function_body, run_main};
 
 const VALUE_FIELD_LOOP: &str = r#"
 value FixVec2 { x: float, y: float }
@@ -77,7 +77,7 @@ fn value_struct_with_whole_use_keeps_cdata() {
     assert!(!body.contains(".r"));
     // Runtime guard against a BAD fold (e.g. an uninitialized-cell read): the value
     // must be exactly 33.
-    require_luajit();
+
     assert_eq!(run_main(&lua), "33");
 }
 

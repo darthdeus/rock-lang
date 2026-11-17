@@ -1,6 +1,5 @@
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::{self, InstanceGraph};
-use skull_mir::lower::ScalarCtx;
 use ustr::Ustr;
 
 fn with_stdlib(src: &str, file: &str) -> skull_parser::stdlib::ModuleSet {
@@ -522,14 +521,6 @@ pub fn body_id(
     (f.module, bone_semantic::hir::BodyOwner::Function(f.func))
 }
 
-pub fn fn_name(ws: &Workspace, f: skull_mir::mir::FuncRef) -> &str {
-    bone_core::modules::display_name(ws.module(f.module).functions[f.func].name.as_str())
-}
-
-pub fn scalar_ctx(ws: &Workspace, g: &InstanceGraph) -> ScalarCtx {
-    ScalarCtx::new(ws).sharing(g.interner().clone())
-}
-
 pub fn emit_full_of(
     ws: &Workspace,
     what: &str,
@@ -541,10 +532,6 @@ pub fn emit_full_of(
 pub fn graph_for(ws: &Workspace) -> (InstanceGraph, Vec<skull_mir::mir::FuncRef>) {
     let roots = skull::mir_emit::emission_roots(ws, None);
     (instance_graph::build(ws, roots.clone(), false), roots)
-}
-
-pub fn graph_of(ws: &Workspace) -> InstanceGraph {
-    graph_for(ws).0
 }
 
 pub fn body_calls(body: &str, symbol: &str) -> bool {
@@ -591,16 +578,6 @@ pub fn emit_without_stdlib(src: &str) -> String {
     skull::mir_emit::emit_workspace_mir(&ws, mid)
         .expect("emit")
         .lua
-}
-
-pub fn require_luajit() {
-    if std::process::Command::new("luajit")
-        .arg("-v")
-        .output()
-        .is_err()
-    {
-        panic!("luajit is required for this execution test but was not found on PATH");
-    }
 }
 
 fn luajit_output(prog: &str) -> std::process::Output {

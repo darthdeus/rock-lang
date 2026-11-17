@@ -1,26 +1,4 @@
-use crate::common::{
-    graph_of, try_emit_module, try_emit_module_enforcing_identity_storage, ws_with_stdlib,
-    ws_with_stdlib_module,
-};
-use bone_semantic::inference::Workspace;
-use skull::instance_graph;
-
-const IDENTITY_STORAGE: &str = "identity-in-ordinary-storage";
-
-fn identity_rejections(src: &str) -> Vec<String> {
-    rejections_in(&ws_with_stdlib(src))
-}
-
-fn rejections_in(ws: &Workspace) -> Vec<String> {
-    let g = graph_of(ws);
-    g.rejections()
-        .filter(|r| r.kind.name() == IDENTITY_STORAGE)
-        .map(|r| {
-            assert!(!instance_graph::is_spanless(&r.span));
-            format!("{}: {}", g.identity(ws, &r.at), r.message)
-        })
-        .collect()
-}
+use crate::common::{try_emit_module, try_emit_module_enforcing_identity_storage};
 
 const STASH: &str = r#"
 struct Unit { hp: int }
@@ -33,112 +11,6 @@ fn main() {
     print("{stash(u)}")
 }
 "#;
-
-#[test]
-fn substituted_identity_in_a_vec_is_rejected() {
-    let r = identity_rejections(STASH);
-    assert_eq!(r.len(), 1);
-    assert!(r[0].contains("stash") && r[0].contains("`@/<test>::Unit`"));
-}
-
-#[test]
-fn identity_forwarded_through_a_generic_is_rejected_where_stored() {
-    let r = identity_rejections(
-        r#"
-struct Unit { hp: int }
-fn stash<T>(x: T) -> int {
-    let v = [x]
-    return v.len()
-}
-fn outer<T>(x: T) -> int { return stash(x) }
-fn main() {
-    let u = Unit { hp: 1 }
-    print("{outer(u)}")
-}
-"#,
-    );
-    assert_eq!(r.len(), 1);
-    assert!(r[0].contains("stash"));
-}
-
-#[test]
-fn substituted_values_handles_and_borrows_are_not_rejected() {
-    let r = identity_rejections(
-        r#"
-struct Unit { hp: int }
-value Point { x: int }
-fn stash<T>(x: T) -> int {
-    let v = [x]
-    return v.len()
-}
-fn keep<T>(x: T) -> T {
-    let y = x
-    return y
-}
-fn main() {
-    let rows: Arena<Unit> = arena_new()
-    let e = rows.insert(Unit { hp: 1 })
-    let u = Unit { hp: 2 }
-    print("{stash(1)} {stash(Point { x: 1 })} {stash(e)} {keep(u).hp}")
-}
-"#,
-    );
-    assert!(r.is_empty());
-}
-
-#[test]
-fn substitution_only_identity_storage_is_fatal_for_an_enforced_package() {
-    let err =
-        try_emit_module_enforcing_identity_storage(STASH).expect_err("stash<Unit> must reject");
-    assert!(err.message.contains("cannot store identity struct `Unit`"));
-}
-
-#[test]
-fn substitution_only_identity_storage_is_counted_not_fatal_for_an_exempt_package() {
-    try_emit_module(STASH).expect("unpackaged programs are exempt");
-}
-
-#[test]
-fn substituted_identity_erased_to_any_is_rejected() {
-    let r = identity_rejections(
-        r#"
-struct Unit { hp: int }
-fn keep(x: any) -> int { return 0 }
-fn erase<T>(x: T) -> int { return keep(x) }
-fn main() {
-    let u = Unit { hp: 1 }
-    print("{erase(u)}")
-}
-"#,
-    );
-    assert_eq!(r.len(), 1);
-    assert!(
-        r[0].contains("erase") && r[0].contains("cannot erase identity struct `@/<test>::Unit`")
-    );
-}
-
-#[test]
-fn substituted_identity_erased_to_any_in_a_stdlib_body_is_rejected() {
-    let ws = ws_with_stdlib_module(
-        r#"
-fn __probe_keep(x: any) -> int { return 0 }
-fn __probe_erase<T>(x: T) -> int { return __probe_keep(x) }
-"#,
-        r#"
-struct Unit { hp: int }
-fn main() {
-    let u = Unit { hp: 1 }
-    print("{__probe_erase(u)}")
-}
-"#,
-    );
-    let r = rejections_in(&ws);
-    assert_eq!(r.len(), 1);
-    assert!(
-        r[0].contains("__probe_erase")
-            && r[0].contains("cannot erase identity struct `@/<test>::Unit`")
-    );
-}
 
 const ARENA_AND_SCENE_ROWS: &str = r#"
 struct Unit { hp: int }
@@ -174,9 +46,28 @@ fn main() {
 "#;
 
 #[test]
-fn arena_rows_and_scene_roots_of_an_identity_are_not_rejected() {
-    let r = identity_rejections(ARENA_AND_SCENE_ROWS);
-    assert!(r.is_empty());
-    try_emit_module_enforcing_identity_storage(ARENA_AND_SCENE_ROWS)
-        .expect("Arena rows and Scene roots are identity storage");
+fn concrete_identity_storage_is_enforced_at_emission() {
+    try_emit_module(STASH).unwrap();
+    for source in [
+        STASH.to_string(),
+        STASH
+            .replace(
+                "fn main()",
+                "fn outer<T>(x: T) -> int { return stash(x) }\nfn main()",
+            )
+            .replace("{stash(u)}", "{outer(u)}"),
+        STASH
+            .replace("let v = [x]\n    return v.len()", "return keep(x)")
+            .replace(
+                "fn main()",
+                "fn keep(x: any) -> int { return 0 }\nfn main()",
+            ),
+    ] {
+        let error = try_emit_module_enforcing_identity_storage(&source).unwrap_err();
+        assert!(error.message.contains("identity struct"), "{error:?}");
+        assert!(!error.labels.is_empty());
+    }
+    try_emit_module_enforcing_identity_storage(ARENA_AND_SCENE_ROWS).unwrap();
+    let values = STASH.replace("struct Unit", "value Unit");
+    try_emit_module_enforcing_identity_storage(&values).unwrap();
 }

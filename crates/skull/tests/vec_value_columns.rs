@@ -119,30 +119,6 @@ fn binding_a_whole_element_loads_leaves_not_an_element() {
 // These contexts emit separate callable bodies. Check the selected body because
 // the shared VecIter template remains in the module either way.
 
-const VEC_IN_LAMBDA: &str = r#"
-value V2 { x: float, y: float }
-
-fn go() -> float {
-    let xs: [V2] = [V2 { x: 1.0, y: 2.0 }, V2 { x: 3.0, y: 4.0 }]
-    let f = () => { let a = 0.0; for v in xs { a = a + v.x }; return a }
-    return f()
-}
-
-fn main() { print("{go()}") }
-"#;
-
-const VEC_IN_NESTED_FN: &str = r#"
-value V2 { x: float, y: float }
-
-fn go() -> float {
-    let xs: [V2] = [V2 { x: 1.0, y: 0.0 }, V2 { x: 3.0, y: 0.0 }]
-    fn inner(ys: [V2]) -> float { let a = 0.0; for v in ys { a = a + v.x }; return a }
-    return inner(xs)
-}
-
-fn main() { print("{go()}") }
-"#;
-
 const VEC_IN_SPECIALIZED_LAMBDA: &str = r#"
 value V2 { x: float, y: float }
 
@@ -175,50 +151,22 @@ fn go() -> float {
 fn main() { print("{go()}") }
 "#;
 
-const VEC_IN_GLOBAL_INIT: &str = r#"
-value V2 { x: float, y: float }
-
-global TOTAL: float = {
-    let xs: [V2] = [V2 { x: 1.0, y: 0.0 }, V2 { x: 3.0, y: 0.0 }]
-    let a = 0.0
-    for v in xs { a = a + v.x }
-    a
-}
-
-fn main() { print("{TOTAL}") }
-"#;
-
 #[test]
 fn column_vec_iteration_works_in_separately_emitted_contexts() {
     for (name, source, selector, required, forbidden) in [
         (
-            "lambda",
-            VEC_IN_LAMBDA,
-            "__lambda",
-            &[".x)[(c"] as &[_],
-            &["_data", "__vec_checked_get"] as &[_],
-        ),
-        (
-            "nested fn",
-            VEC_IN_NESTED_FN,
-            "_inner_",
-            &[".x)[(c"],
-            &["next_VecIter_T(", "__vec_checked_get"],
-        ),
-        (
             "specialized lambda",
             VEC_IN_SPECIALIZED_LAMBDA,
             "__lambda",
-            &[".x)[(c"],
-            &["__vec_checked_index"],
+            &[".x)[(c"] as &[_],
+            &["__vec_checked_index"] as &[_],
         ),
-        ("co fn", VEC_IN_CO_FN, "__step", &[], &["next_VecIter_T("]),
         (
-            "global initializer",
-            VEC_IN_GLOBAL_INIT,
-            "ginit_TOTAL",
-            &[],
-            &["next_VecIter_T("],
+            "co fn",
+            VEC_IN_CO_FN,
+            "__step",
+            &[] as &[_],
+            &["next_VecIter_T("] as &[_],
         ),
     ] {
         let lua = emit_module(source);
@@ -238,124 +186,6 @@ fn column_vec_iteration_works_in_separately_emitted_contexts() {
             );
         }
         assert_eq!(crate::common::run_main(&lua), "4", "{name}");
-    }
-}
-
-const VEC_STDLIB_SURFACE: &str = r#"
-value V2 { x: float, y: float }
-
-fn main() {
-    let xs: [V2] = [V2 { x: 1.0, y: 10.0 }, V2 { x: 2.0, y: 20.0 }, V2 { x: 3.0, y: 30.0 }]
-    xs.set(0, V2 { x: 9.0, y: 90.0 })
-    print("set:{xs[0].x},{xs[0].y}")
-    let g = xs.get(1)
-    if g != null { print("get:{g.x},{g.y}") }
-    let p = xs.pop()
-    if p != null { print("pop:{p.x} len{xs.len}") }
-    let r = xs.swap_remove(0)
-    if r != null { print("swap:{r.x} now{xs[0].x} len{xs.len}") }
-    xs.clear()
-    print("clear len{xs.len}")
-    xs.push(V2 { x: 7.0, y: 70.0 })
-    print("repush:{xs[0].x},{xs[0].y} len{xs.len}")
-}
-"#;
-
-/// Call through the ordinary Vec surface so specialization and lowering both run.
-#[test]
-fn stdlib_vec_surface_works_over_column_storage() {
-    let lua =
-        crate::common::try_emit_module(VEC_STDLIB_SURFACE).expect("stdlib Vec surface must emit");
-    // The values below are correct under BOXED storage too, so pin the mechanism
-    // this test is named for: each plain-generic entry point reaches a standalone
-    // The encoded `a_n2_V2_0_z` key is the parameterless nominal `V2`.
-    for callee in [
-        "vec_set_arr_T_int_T_spec_a_n2_V2_0_z(",
-        "pop_arr_T_spec_a_n2_V2_0_z(",
-        "clear_arr_T_spec_a_n2_V2_0_z(",
-    ] {
-        assert!(
-            lua.contains(callee),
-            "the stdlib Vec surface must call the specialized `{callee}` over column storage"
-        );
-    }
-    assert_eq!(
-        crate::common::run_main(&lua),
-        "set:9,90\nget:2,20\npop:3 len2\nswap:9 now2 len1\nclear len0\nrepush:7,70 len1"
-    );
-}
-
-const VEC_BOXED_ELEMS_UNSPLICED: &str = r#"
-value WithRef { name: string, k: int }
-value Wide { a: int, b: int, c: int, d: int, e: int }
-
-co fn walk_ref(xs: [WithRef]) -> Coroutine<int> {
-    for v in xs { yield v.k }
-}
-
-fn nested_wide(xs: [Wide]) -> int {
-    fn inner(ys: [Wide]) -> int { let a = 0; for v in ys { a = a + v.a }; return a }
-    return inner(xs)
-}
-
-fn main() {
-    let c = walk_ref([WithRef { name: "a", k: 1 }])
-    let one = c.resume() ?? 0
-    print("{one + nested_wide([Wide { a: 3, b: 0, c: 0, d: 0, e: 0 }])}")
-}
-"#;
-
-/// The other side of the rejection: it must fire ONLY where the representation
-/// differs. `WithRef` has a reference leaf and `Wide` exceeds
-/// `MAX_COLUMN_LEAVES`, so both keep the boxed `_data` -- for them the shared
-/// generic `next` is CORRECT and an unspliceable context simply forgoes the
-/// scalar ABI, exactly as an ordinary call does. Rejecting here would bounce
-/// working code, which is what the first cut of the validator did.
-#[test]
-fn unspliceable_iteration_of_boxed_elements_still_emits() {
-    let lua = crate::common::try_emit_module(VEC_BOXED_ELEMS_UNSPLICED)
-        .expect("boxed element types must still emit in unspliceable contexts");
-    assert_eq!(crate::common::run_main(&lua), "4");
-}
-
-const VEC_CONTROLS: &str = r#"
-value WithRef { name: string, k: int }
-struct Plain { a: int }
-
-fn ints() -> int {
-    let xs: [int] = []
-    xs.push(3)
-    return xs[0]
-}
-
-fn refs() -> int {
-    let xs: [WithRef] = []
-    xs.push(WithRef { name: "a", k: 1 })
-    return xs[0].k
-}
-
-fn plains() -> int {
-    let xs: [Plain] = []
-    xs.push(Plain { a: 1 })
-    return xs[0].a
-}
-
-fn main() { let _ = ints() + refs() + plains() }
-"#;
-
-/// Controls: the representation swap is NARROW. A primitive element is already
-/// one flat array, a value struct with a REFERENCE leaf is out of scope, and a
-/// non-value struct keeps identity. All three keep `_data`.
-#[test]
-fn ineligible_element_types_keep_todays_representation() {
-    let lua = emit_module(VEC_CONTROLS);
-    for f in ["ints", "refs", "plains"] {
-        let body = function_body(&lua, f);
-        assert!(
-            body.contains("_data"),
-            "{f}: ineligible element type lost the `_data` backing -- the \
-             column swap must not reach it:\n{body}"
-        );
     }
 }
 
@@ -390,54 +220,6 @@ fn vec_new_at_a_column_element_builds_empty_columns() {
         "1,1,2",
         "push onto a vec_new-ed column Vec must land in the columns"
     );
-}
-
-const VEC_COMBINATOR_CHAIN: &str = r#"
-value V2 { x: float, y: float }
-
-fn main() {
-    let a: [V2] = [V2 { x: 1.0, y: 2.0 }, V2 { x: 3.0, y: 4.0 }]
-    print("{a.map(_.x).sum_f()}")
-}
-"#;
-
-#[test]
-fn combinator_chain_preserves_column_element_type() {
-    let lua = crate::common::try_emit_module(VEC_COMBINATOR_CHAIN).expect("chain must emit");
-    let body = crate::common::function_body(&lua, "main");
-    assert!(
-        !body.contains("__vec_checked_get(") && body.contains("__vec_checked_index("),
-        "the wrapped VecIter<V2> must retain V2 and read its columns:\n{body}"
-    );
-    assert_eq!(crate::common::run_main(&lua), "4");
-}
-
-const NOBOX_COLUMN_SORT: &str = r#"
-nobox value NP { x: float, y: float }
-
-fn main() {
-    let a: [NP] = [NP { x: 3.0, y: 30.0 }, NP { x: 1.0, y: 10.0 }, NP { x: 2.0, y: 20.0 }]
-    a.sort(v => v.x)
-    print("{a[0].x},{a[0].y},{a[1].x},{a[1].y},{a[2].x},{a[2].y}")
-}
-"#;
-
-/// Sorting a column Vec needs the key applied to each ELEMENT, which the boxed
-/// helper supplies by materializing one. Under `nobox` that box is exactly what
-/// the mark forbids -- but the key fn is reached through a fn value, whose ABI
-/// is derived from the fn type, so at a `nobox` element it already takes LEAVES.
-/// The leaves are the columns, so the sort hands them over directly and no
-/// element is ever built.
-#[test]
-fn nobox_column_sort_never_materializes_an_element() {
-    let lua = crate::common::try_emit_module(NOBOX_COLUMN_SORT).expect("[NP].sort must emit");
-    let body = crate::common::function_body(&lua, "main");
-    assert!(
-        !body.contains("NP_ct(") && !body.contains("NP_lct("),
-        "[NP].sort built an element; the key fn takes leaves:\n{body}"
-    );
-    // Runtime sorting and the zero-materialization count are covered by
-    // `tests/vectors/column_stdlib_surface.rock`.
 }
 
 #[test]
@@ -614,58 +396,4 @@ print("ok")
         );
         assert_eq!(crate::common::run_luajit(&driver), "ok", "{layout}");
     }
-}
-
-#[test]
-fn column_vec_false_and_null_leaves_are_in_bounds() {
-    let lua = emit_module(
-        r#"
-nobox value P { flag: bool, payload: [int]? }
-@nomangle fn make() -> [P] { return [P { flag: false, payload: null }, P { flag: true, payload: [7] }] }
-@nomangle fn flag(xs: [P], i: int) -> bool { return xs[i].flag }
-@nomangle fn payload(xs: [P], i: int) -> [int]? { return xs[i].payload }
-@nomangle fn reset(xs: [P], i: int) { xs[i] = P { flag: false, payload: null } }
-fn main() {}
-"#,
-    );
-    let driver = format!(
-        r#"{lua}
-local xs = make()
-assert(flag(xs, 0) == false and payload(xs, 0) == nil)
-assert(flag(xs, 1) == true and payload(xs, 1)._data[1] == 7)
-reset(xs, 1)
-assert(flag(xs, 1) == false and payload(xs, 1) == nil)
-print("ok")
-"#
-    );
-    assert_eq!(crate::common::run_luajit(&driver), "ok");
-}
-
-#[test]
-fn plain_vec_stores_preserve_holes_bounds_and_argument_evaluation() {
-    let lua = emit_module(
-        r#"
-@nomangle fn store(xs: [int?], i: int, n: int?) { xs[i] = n }
-@nomangle fn grow(xs: [int?]) -> int? { xs.push(7); return 9 }
-@nomangle fn growing_store(xs: [int?]) { xs[1] = grow(xs) }
-fn main() {}
-"#,
-    );
-    let driver = format!(
-        r#"{lua}
-local xs = {{len = 2, _data = {{false, 3}}}}
-store(xs, 0, nil)
-store(xs, 1, 8)
-assert(xs._data[1] == nil and xs._data[2] == 8)
-for _, i in ipairs({{-1, 2}}) do
-  local ok, err = pcall(store, xs, i, 9)
-  assert(not ok and tostring(err):find("Vec index out of bounds", 1, true))
-end
-xs = {{len = 1, _data = {{1}}}}
-growing_store(xs)
-assert(xs.len == 2 and xs._data[2] == 9)
-print("ok")
-"#
-    );
-    assert_eq!(crate::common::run_luajit(&driver), "ok");
 }

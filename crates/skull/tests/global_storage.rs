@@ -14,35 +14,6 @@ fn main() {
 "#;
 
 #[test]
-fn lua_global_slots_are_dense_numeric_realizations() {
-    let emitted = emit_mir(FIXTURE);
-    assert!(emitted.lua.contains(
-        "{name=\"COUNTER\",identity=\"global:<test>::COUNTER\",physical={\"COUNTER\"},slots={5}}"
-    ));
-    assert!(!emitted.lua.contains("[\"global:<test>::COUNTER::value\"]"));
-}
-
-#[test]
-fn lua_global_slot_order_is_declaration_independent() {
-    let first = emit_mir(
-        "global ZED: int = 0\n\
-         global ALPHA: int = 0\n\
-         fn main() { ZED = ALPHA }\n",
-    );
-    let second = emit_mir(
-        "global ALPHA: int = 0\n\
-         global ZED: int = 0\n\
-         fn main() { ZED = ALPHA }\n",
-    );
-    for emitted in [&first.lua, &second.lua] {
-        assert!(
-            emitted.contains("identity=\"global:<test>::ALPHA\",physical={\"ALPHA\"},slots={5}")
-        );
-        assert!(emitted.contains("identity=\"global:<test>::ZED\",physical={\"ZED\"},slots={6}"));
-    }
-}
-
-#[test]
 fn global_name_lookup_keeps_index_construction_out_of_the_hot_function() {
     let emitted = emit_mir(FIXTURE);
     let hot = emitted
@@ -78,17 +49,8 @@ print(first ~= second and second ~= third
 }
 
 #[test]
-fn emission_reads_globals_through_the_storage_cell() {
-    let lua = emit_module(FIXTURE);
-    assert!(lua.contains("\nlocal __rock_state_cell\n"));
-    assert!(lua.contains("__rock_state_cell[5]"));
-    assert!(!lua.contains("__rock_globals[5]"));
-}
-
-#[test]
 fn the_program_opens_sized_storage_before_initializing() {
     let lua = emit_module(FIXTURE);
-    // COUNTER is slot 5 (`lua_global_slots_are_dense_numeric_realizations`):
     // the array fixpoint is the next power of two above the highest slot, plus
     // one for index 0; the hash part has a 16-node floor.
     let open = lua

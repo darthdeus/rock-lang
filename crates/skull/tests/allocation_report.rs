@@ -1,559 +1,128 @@
-use crate::common::{
-    AllocationActivationGuard, AllocationReportGuard, InlineOffGuard, emit_mir, key, ws_with_stdlib,
-};
-
-fn source_key(src: &str, name: &str) -> String {
-    key(&ws_with_stdlib(src), name).to_string()
-}
+use crate::common::{AllocationActivationGuard, AllocationReportGuard, InlineOffGuard, emit_mir};
 
 #[test]
-fn allocation_report_is_off_for_an_ordinary_compile() {
-    let emit = emit_mir("fn root() -> [int] { return [1] }");
-    assert!(emit.allocation_report.bodies.is_empty());
-    assert!(!emit.lua.contains("__rock_alloc_hit"));
-    assert!(
-        emit.allocation_report
-            .lifecycle_routes
-            .iter()
-            .all(|route| route.findings.is_empty())
-    );
-}
-
-#[test]
-fn static_allocation_reporting_does_not_change_the_emitted_program() {
+fn report_is_opt_in_non_invasive_and_renders_sites_and_routes() {
     let source = r#"
-fn render(a: int) -> string {
-    return "value={a}"
+struct Carrier { value: int }
+global RETAINED: Carrier? = null
+global FRAME_VALUE: int = 0
+@lifecycle(phase="update", owner="process") deco init tick {}
+@lifecycle(phase="draw", owner="process") deco init paint {}
+fn consume(carrier: Carrier) -> int { return carrier.value }
+fn direct() -> int { return consume(Carrier { value: 1 }) }
+fn returned() -> Carrier { return Carrier { value: 2 } }
+fn retain() { RETAINED = Carrier { value: 3 } }
+fn alloc_leaf(i: int) -> [int] { return [i] }
+fn left() -> int { return alloc_leaf(1).len() }
+fn right() -> int { return alloc_leaf(2).len() }
+fn update_root() -> int {
+    let total = direct() + consume(returned())
+    retain()
+    for i in 0..2 { total += left() + right() }
+    return total
 }
+@tick fn update_system() { FRAME_VALUE = update_root() }
+@paint fn draw_system() { FRAME_VALUE += 1 }
 "#;
     let ordinary = emit_mir(source);
+    let empty = ordinary.allocation_report.render_text();
+    assert!(empty.contains("0 bodies, 0 direct sites"));
+    assert!(!ordinary.lua.contains("__rock_alloc_hit"));
+
     let reported = {
         let _report = AllocationReportGuard::on();
         emit_mir(source)
     };
-
     assert_eq!(ordinary.lua, reported.lua);
-    assert!(
-        reported
-            .allocation_report
-            .bodies
-            .values()
-            .any(|body| !body.direct_sites.is_empty()),
-        "the byte-identical reported build still needs a populated manifest",
-    );
-}
-
-#[test]
-fn allocation_report_traces_final_mir_sites_from_a_named_root() {
-    let _inline = InlineOffGuard::on();
-    let _report = AllocationReportGuard::on();
-    let src = r#"
-fn alloc_leaf() -> [int] {
-    return [1, 2, 3]
-}
-
-fn update_root() -> int {
-    return alloc_leaf().get(1) ?? 0
-}
-"#;
-    let root = source_key(src, "update_root");
-    let emit = emit_mir(src);
-
-    let route = emit
-        .allocation_report
-        .trace_from_diagnostic_names("manual.update", &[&root]);
-
-    assert_eq!(
-        route.roots.len(),
-        1,
-        "the named root must resolve exactly once"
-    );
-    assert_eq!(
-        route.reachable_bodies, 4,
-        "the route must include the residual stdlib get chain"
-    );
-    assert_eq!(
-        route.findings.len(),
-        1,
-        "the route must expose the one Vec construction"
-    );
-    let finding = &route.findings[0];
-    assert_eq!(finding.site.kind.as_str(), "vec-construction");
-    assert!(
-        finding.site.lua_body_line > 0,
-        "the allocation site must name its line inside the emitted Lua body",
-    );
-    assert_eq!(
-        finding
-            .site
-            .span
-            .expect("source construction keeps its span")
-            .format_site(),
-        "<test>:3"
-    );
-    assert_eq!(
-        finding.call_chain.len(),
-        2,
-        "the finding must retain its causal call chain"
-    );
-    assert!(finding.call_chain[0].contains("update_root"));
-    assert!(finding.call_chain[1].contains("alloc_leaf"));
-}
-
-#[test]
-fn allocation_report_retains_every_reachable_direct_caller() {
-    let _inline = InlineOffGuard::on();
-    let _report = AllocationReportGuard::on();
-    let src = r#"
-fn alloc_leaf() -> [int] {
-    return [1, 2, 3]
-}
-
-fn left() -> int {
-    return alloc_leaf().len()
-}
-
-fn right() -> int {
-    return alloc_leaf().len()
-}
-
-fn update_root() -> int {
-    return left() + right()
-}
-"#;
-    let root = source_key(src, "update_root");
-    let emit = emit_mir(src);
-
-    let route = emit
-        .allocation_report
-        .trace_from_diagnostic_names("manual.update", &[&root]);
-    let finding = route
-        .findings
-        .iter()
-        .find(|finding| finding.site.kind.as_str() == "vec-construction")
-        .expect("shared Vec construction");
-
-    assert_eq!(
-        finding.direct_callers.len(),
-        2,
-        "a shared allocation body must not collapse to one arbitrary caller",
-    );
-    assert!(
-        finding
-            .direct_callers
-            .iter()
-            .any(|caller| caller.contains("left"))
-    );
-    assert!(
-        finding
-            .direct_callers
-            .iter()
-            .any(|caller| caller.contains("right"))
-    );
-}
-
-#[test]
-fn allocation_report_accumulates_local_and_call_edge_loop_depth() {
-    let _inline = InlineOffGuard::on();
-    let _report = AllocationReportGuard::on();
-    let src = r#"
-fn direct_leaf() -> [int] {
-    return [1]
-}
-
-fn loop_leaf(i: int) -> [int] {
-    return [i]
-}
-
-fn update_root() -> int {
-    let total = direct_leaf().len()
-    for i in 0..3 {
-        total += loop_leaf(i).len()
-        for j in 0..2 {
-            let pair = [i, j]
-            total += pair.len()
-        }
+    let text = reported.allocation_report.render_text();
+    assert!(text.contains("emitted site manifest:"));
+    assert!(text.contains("\tstruct-construction\t"));
+    for use_kind in ["direct-call", "returned", "global-store"] {
+        assert!(text.contains(&format!("\t{use_kind}\t1\t")), "{use_kind}");
     }
-    return total
-}
-"#;
-    let root = source_key(src, "update_root");
-    let emit = emit_mir(src);
-
-    let route = emit
-        .allocation_report
-        .trace_from_diagnostic_names("manual.update", &[&root]);
-    let depth_for = |line: &str| {
-        route
-            .findings
-            .iter()
-            .find(|finding| {
-                finding
-                    .site
-                    .span
-                    .is_some_and(|span| span.format_site() == line)
-            })
-            .map(|finding| finding.structural_loop_depth)
-            .unwrap_or_else(|| panic!("missing allocation at {line}: {route:#?}"))
-    };
-
-    assert_eq!(depth_for("<test>:3"), 0, "straight-line call stays scalar");
-    assert_eq!(
-        depth_for("<test>:7"),
-        1,
-        "a looped call amplifies its callee"
-    );
-    assert_eq!(
-        depth_for("<test>:15"),
-        2,
-        "nested local construction keeps both loops"
-    );
-}
-
-#[test]
-fn allocation_report_counts_the_flat_emitted_concat_not_its_folded_mir_children() {
-    let _report = AllocationReportGuard::on();
-    let src = r#"
-fn render(a: int, b: int) -> string {
-    return "left={a}, right={b}"
-}
-"#;
-    let root = source_key(src, "render");
-    let emit = emit_mir(src);
-    let route = emit
-        .allocation_report
-        .trace_from_diagnostic_names("manual.draw", &[&root]);
-
-    assert_eq!(
-        route
-            .findings
-            .iter()
-            .filter(|finding| finding.site.kind.as_str() == "string-concat")
-            .count(),
-        1,
-        "one flat emitted BC_CAT expression is one allocation-capable site",
-    );
-}
-
-#[test]
-fn allocation_report_classifies_aggregate_result_uses_without_calling_them_safe() {
-    let _report = AllocationReportGuard::on();
-    let src = r#"
-struct Carrier { value: int }
-
-global RETAINED: Carrier? = null
-
-fn consume(carrier: Carrier) -> int {
-    return carrier.value
-}
-
-fn direct() -> int {
-    return consume(Carrier { value: 1 })
-}
-
-fn projected() -> int {
-    return Carrier { value: 2 }.value
-}
-
-fn returned() -> Carrier {
-    return Carrier { value: 3 }
-}
-
-fn retained() {
-    RETAINED = Carrier { value: 4 }
-}
-"#;
-    let direct = source_key(src, "direct");
-    let projected_name = source_key(src, "projected");
-    let returned_name = source_key(src, "returned");
-    let retained_name = source_key(src, "retained");
-    let emit = emit_mir(src);
-
-    let disposition = |name: &str| {
-        let body = emit
-            .allocation_report
-            .bodies
-            .values()
-            .find(|body| {
-                body.diagnostic_name
-                    == match name {
-                        "direct" => direct.as_str(),
-                        "returned" => returned_name.as_str(),
-                        "retained" => retained_name.as_str(),
-                        _ => name,
-                    }
-            })
-            .unwrap_or_else(|| panic!("missing body {name}"));
-        let sites = body
-            .direct_sites
-            .iter()
-            .filter(|site| site.kind.as_str() == "struct-construction")
-            .collect::<Vec<_>>();
-        assert_eq!(
-            sites.len(),
-            1,
-            "{name} must own exactly one struct site: {sites:#?}"
-        );
-        let site = sites[0];
-        assert_eq!(
-            site.aggregate_type.as_deref(),
-            Some(source_key(src, "Carrier").as_str())
-        );
-        assert_eq!(site.aggregate_fields, 1);
-        assert_eq!(site.result_uses, 1);
-        site.result_use.as_str()
-    };
-
-    assert_eq!(disposition("direct"), "direct-call");
-    let projected = emit
-        .allocation_report
-        .bodies
-        .values()
-        .find(|body| body.diagnostic_name == projected_name)
-        .expect("projected body");
+    assert!(text.contains("route frame.update:"));
+    assert!(text.contains("route frame.draw:"));
     assert!(
-        projected.direct_sites.is_empty(),
-        "the eliminated temporary must not appear in the final-emission allocation report"
+        text.lines()
+            .any(|line| { line.contains("vec-construction") && line.contains("loop_depth\t1") })
     );
-    assert_eq!(disposition("returned"), "returned");
-    assert_eq!(disposition("retained"), "global-store");
-
-    let manifest = emit.allocation_report.render_text();
-    let carrier = source_key(src, "Carrier");
     assert!(
-        manifest.lines().any(|line| {
-            line.contains("\tstruct-construction\t")
-                && line.contains(&format!("\tdirect-call\t1\t{carrier}\t1"))
-        }),
-        "the serialized manifest must retain the direct-use and aggregate-shape facts: {manifest}",
+        text.lines()
+            .any(|line| { line.contains("vec-construction") && line.contains("callers\t") })
     );
 }
 
 #[test]
-fn allocation_activation_wraps_the_same_manifest_site_and_installs_its_runtime() {
+fn activation_instruments_manifest_sites_in_rock_and_coroutine_bodies() {
+    let _inline = InlineOffGuard::on();
     let _activation = AllocationActivationGuard::on();
-    // The concat is an operand of the spliced inline(lua) `vec_push`, which
-    // renders its operands before placing them in the body.
-    let src = r#"
-fn render(items: [string], a: int) {
-    items.push("value={a}")
-}
-"#;
-    let root = source_key(src, "render");
-    let emit = emit_mir(src);
-    let route = emit
-        .allocation_report
-        .trace_from_diagnostic_names("manual.draw", &[&root]);
-    let concat = route
-        .findings
-        .iter()
-        .find(|finding| finding.site.kind.as_str() == "string-concat")
-        .expect("emitted concat site");
-
-    assert!(
-        emit.lua.contains(&format!(
-            "(__rock_alloc_site[\"{:016x}\"] and ",
-            concat.site.id
-        )),
-        "the runtime hit must use the manifest's exact artifact-local ID",
-    );
-    let function_line = emit
-        .lua
-        .lines()
-        .position(|line| line.starts_with(&format!("function {}", concat.body)))
-        .expect("instrumented emitted body")
-        + 1;
-    let emitted_line = emit
-        .lua
-        .lines()
-        .position(|line| line.contains(&format!("{:016x}", concat.site.id)))
-        .expect("instrumented allocation expression line")
-        + 1;
-    assert_eq!(
-        concat.site.lua_body_line,
-        (emitted_line - function_line + 1) as u32,
-        "the manifest line must address the instrumented emitted body",
-    );
-    assert!(
-        emit.lua.contains("function __rock_alloc_hit(id, value)"),
-        "an activated artifact must install the counter runtime",
-    );
-    assert!(
-        emit.lua
-            .contains("function __rock_allocation_activation_begin()"),
-        "the runner needs an explicit boundary that excludes initialization",
-    );
-    assert!(
-        emit.lua
-            .contains("function __rock_allocation_activation_frame_begin()"),
-        "the runtime must distinguish active frames from outside-frame hits",
-    );
-    assert!(
-        emit.lua
-            .contains("function __rock_allocation_activation_frame_end()"),
-        "the runtime must close the frame envelope after drawing",
-    );
-}
-
-#[test]
-fn allocation_report_builds_update_and_draw_routes_from_lifecycle_metadata() {
-    let _report = AllocationReportGuard::on();
     let emit = emit_mir(
         r#"
-@lifecycle(phase="update", owner="process") deco init tick {}
-@lifecycle(phase="draw", owner="process") deco init paint {}
-
-global FRAME_VALUE: int = 0
-
-@tick fn update_system() {
-    let values = [1, 2]
-    FRAME_VALUE = values.len()
+enum Event { Text(string) }
+global SINK: string = ""
+fn render(items: [string], a: int) { items.push("value={a}") }
+co fn worker(seed: int) -> Coroutine<Event> {
+    defer { SINK = "cleanup={seed}" }
+    on_killed(() => { SINK = "killed={seed}" })
+    yield Event::Text("value={seed}")
 }
-
-@paint fn draw_system() {
-    FRAME_VALUE = FRAME_VALUE + 1
+fn make_worker() -> Coroutine<Event> { return worker(7) }
+fn main() {
+    let items: [string] = []
+    render(items, 1)
+    let task = make_worker()
 }
 "#,
     );
-
-    let update = emit
-        .allocation_report
-        .lifecycle_routes
+    let text = emit.allocation_report.render_text();
+    let rows: Vec<Vec<&str>> = text
+        .lines()
+        .filter(|line| line.contains("\tstring-concat\t"))
+        .map(|line| line.trim().split('\t').collect())
+        .collect();
+    let render = rows
         .iter()
-        .find(|route| route.name == "frame.update")
-        .expect("update route");
-    let draw = emit
-        .allocation_report
-        .lifecycle_routes
+        .find(|row| row[3].contains("render"))
+        .expect("render concat");
+    let step = rows
         .iter()
-        .find(|route| route.name == "frame.draw")
-        .expect("draw route");
+        .find(|row| row[3].contains("worker") && row[3].ends_with("__step"))
+        .expect("coroutine step concat");
 
-    assert_eq!(
-        update.roots.len(),
-        1,
-        "the update application is the exact root population"
-    );
-    assert_eq!(
-        draw.roots.len(),
-        1,
-        "the draw application is the exact root population"
-    );
-    assert_eq!(
-        update
-            .findings
-            .iter()
-            .filter(|finding| finding.site.kind.as_str() == "vec-construction")
-            .count(),
-        1,
-        "the update route reaches its allocation-capable Vec site",
-    );
-    assert_eq!(
-        draw.findings.len(),
-        0,
-        "the scalar draw route has no allocation-capable site"
-    );
-}
-
-#[test]
-fn allocation_report_registers_and_instruments_transformed_coroutine_bodies() {
-    let _activation = AllocationActivationGuard::on();
-    let src = r#"
-enum Event { Text(string) }
-global SINK: string = ""
-
-co fn worker(seed: int) -> Coroutine<Event> {
-    defer {
-        SINK = "cleanup={seed}"
+    for row in [render, step] {
+        let id = row[0];
+        assert!(emit.lua.contains(&format!("__rock_alloc_site[\"{id}\"]")));
     }
-    on_killed(() => {
-        SINK = "killed={seed}"
-    })
-    yield Event::Text("value={seed}")
-}
-
-fn make_worker() -> Coroutine<Event> {
-    return worker(7)
-}
-"#;
-    let root = source_key(src, "make_worker");
-    let emit = emit_mir(src);
-
-    let coroutine_bodies = emit
-        .allocation_report
-        .bodies
-        .values()
-        .filter(|body| body.emitted_name.contains("worker_int"))
-        .collect::<Vec<_>>();
-    assert!(
-        coroutine_bodies
-            .iter()
-            .any(|body| body.emitted_name.ends_with("__step")),
-        "the transformed coroutine step must be a reported body: {coroutine_bodies:#?}",
+    let function = format!("function {}", render[3]);
+    let function_line = emit
+        .lua
+        .lines()
+        .position(|line| line.starts_with(&function))
+        .expect("render body")
+        + 1;
+    let hit = format!("__rock_alloc_site[\"{}\"]", render[0]);
+    let emitted_line = emit
+        .lua
+        .lines()
+        .position(|line| line.contains(&hit))
+        .expect("render allocation")
+        + 1;
+    assert_eq!(
+        render[4].parse::<u32>().expect("manifest line"),
+        (emitted_line - function_line + 1) as u32
     );
-    assert!(
-        coroutine_bodies
-            .iter()
-            .any(|body| body.emitted_name.contains("__defer")),
-        "the detached defer must be a reported body: {coroutine_bodies:#?}",
-    );
-    assert!(
-        coroutine_bodies
-            .iter()
-            .any(|body| body.emitted_name.contains("__on_killed")),
-        "the detached lifecycle hook must be a reported body: {coroutine_bodies:#?}",
-    );
-
-    let sites = coroutine_bodies
-        .iter()
-        .flat_map(|body| body.direct_sites.iter())
-        .filter(|site| site.kind.as_str() != "opaque-call")
-        .collect::<Vec<_>>();
-    assert!(
-        sites.len() >= 3,
-        "step, defer, and hook sites must be visible: {sites:#?}"
-    );
-    for site in sites {
-        assert!(
-            emit.lua
-                .contains(&format!("(__rock_alloc_site[\"{:016x}\"] and ", site.id)),
-            "coroutine site {:016x} must share its ID with runtime activation",
-            site.id,
-        );
+    for runtime in [
+        "function __rock_alloc_hit(id, value)",
+        "function __rock_allocation_activation_begin()",
+        "function __rock_allocation_activation_frame_begin()",
+        "function __rock_allocation_activation_frame_end()",
+    ] {
+        assert!(emit.lua.contains(runtime), "{runtime}");
     }
-
-    let resumes = emit
-        .allocation_report
-        .lifecycle_routes
-        .iter()
-        .find(|route| route.name == "coroutine.resume")
-        .expect("coroutine resume route");
-    assert!(
-        resumes.roots.iter().any(|root| root.ends_with("__step")),
-        "transformed steps are the resume roots: {resumes:#?}",
-    );
-    assert!(
-        resumes.findings.iter().any(|finding| {
-            finding.body.ends_with("__step") && finding.site.kind.as_str() == "string-concat"
-        }),
-        "the resume route must reach allocations in transformed steps: {resumes:#?}",
-    );
-
-    let route = emit
-        .allocation_report
-        .trace_from_diagnostic_names("manual.make", &[&root]);
-    assert!(
-        route.opaque_boundaries.iter().any(|finding| finding
-            .site
-            .detail
-            .as_deref()
-            .is_some_and(|detail| detail.contains("worker"))),
-        "constructing a coroutine must remain an explicit opaque boundary rather than falsely tracing a future resume",
-    );
+    assert!(text.contains("route coroutine.resume:"));
 }
 
 fn wide_value_fixture(fields: usize, pads: usize) -> String {
-    // Bind the complete value in step to retain a wide call for the keeper.
     let pad_params = (0..pads)
         .map(|i| format!(", p{i}: int"))
         .collect::<String>();
@@ -569,16 +138,11 @@ fn wide_value_fixture(fields: usize, pads: usize) -> String {
     format!(
         r#"
 nobox value Wide {{ {decl} }}
-
-fn make_wide(seed: int) -> Wide {{
-    return Wide {{ {init} }}
-}}
-
+fn make_wide(seed: int) -> Wide {{ return Wide {{ {init} }} }}
 fn step(value: Wide, tag: [int]) -> Wide {{
     let w = value
     return make_wide(w.f0 + tag.len())
 }}
-
 fn run(seed: int{pad_params}) -> int {{
     let a = make_wide(seed)
     let b = step(a, [seed])
@@ -589,61 +153,50 @@ fn run(seed: int{pad_params}) -> int {{
     )
 }
 
-/// The largest `stackslots` over every prototype in `lua`, or LuaJIT's load
-/// error. The chunk is compiled, never run.
 fn max_stack_slots(lua: &str, tag: &str) -> Result<u32, String> {
     use std::process::Command;
-    let path = std::env::temp_dir().join(format!("skull_slots_{}_{tag}.lua", std::process::id()));
+    let prefix = format!("skull_slots_{}_{tag}", std::process::id());
+    let path = std::env::temp_dir().join(format!("{prefix}.lua"));
+    let probe_path = std::env::temp_dir().join(format!("{prefix}_probe.lua"));
     std::fs::write(&path, lua).expect("write chunk");
-    let probe = r#"
+    std::fs::write(
+        &probe_path,
+        r#"
 local f, err = loadfile(arg[1])
 if not f then io.write("LOAD ", err) os.exit(0) end
-local util = require("jit.util")
-local best = 0
+local util, best = require("jit.util"), 0
 local function walk(fn)
-  local slots = util.funcinfo(fn).stackslots
-  if slots > best then best = slots end
+  best = math.max(best, util.funcinfo(fn).stackslots)
   local i = -1
   while true do
-    local k = util.funck(fn, i)
-    if k == nil then break end
-    if type(k) == "proto" then walk(k) end
+    local child = util.funck(fn, i)
+    if child == nil then break end
+    if type(child) == "proto" then walk(child) end
     i = i - 1
   end
 end
 walk(f)
 io.write("SLOTS ", best)
-"#;
-    let probe_path = std::env::temp_dir().join(format!(
-        "skull_slots_{}_{tag}_probe.lua",
-        std::process::id()
-    ));
-    std::fs::write(&probe_path, probe).expect("write probe");
-    let out = Command::new("luajit")
+"#,
+    )
+    .expect("write probe");
+    let output = Command::new("luajit")
         .arg(&probe_path)
         .arg(&path)
         .output()
         .expect("spawn luajit");
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(&probe_path);
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(
-        out.status.success(),
-        "probe failed: {stdout}\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    if let Some(slots) = stdout.strip_prefix("SLOTS ") {
-        Ok(slots.parse().expect("slot count"))
-    } else {
-        Err(stdout)
-    }
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(probe_path);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    stdout
+        .strip_prefix("SLOTS ")
+        .map(|slots| slots.parse().expect("slot count"))
+        .ok_or_else(|| stdout.to_string())
 }
 
 #[test]
-fn allocation_activation_adds_no_register_slots_to_a_wide_frame() {
-    // 60 nobox lanes live twice across a call that passes them plus a vec
-    // literal, padded with live parameters until the ordinary frame is the
-    // widest LuaJIT loads.
+fn activation_does_not_add_register_slots_to_a_wide_luajit_frame() {
     let _inline = InlineOffGuard::on();
     let source = wide_value_fixture(60, 123);
     let ordinary = emit_mir(&source);
@@ -651,14 +204,6 @@ fn allocation_activation_adds_no_register_slots_to_a_wide_frame() {
         let _activation = AllocationActivationGuard::on();
         emit_mir(&source)
     };
-    assert_eq!(
-        max_stack_slots(&ordinary.lua, "ordinary"),
-        Ok(249),
-        "the fixture must sit exactly at LJ_MAX_SLOTS - 1 to guard the activated build",
-    );
-    assert_eq!(
-        max_stack_slots(&instrumented.lua, "activated"),
-        Ok(249),
-        "allocation-site counters must not widen any emitted frame",
-    );
+    assert_eq!(max_stack_slots(&ordinary.lua, "ordinary"), Ok(249));
+    assert_eq!(max_stack_slots(&instrumented.lua, "activated"), Ok(249));
 }

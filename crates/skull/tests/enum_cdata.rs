@@ -1,4 +1,4 @@
-use crate::common::{emit_module, require_luajit, run_fn};
+use crate::common::{emit_module, run_fn};
 
 const SRC: &str = r#"
 enum Shape { Circle(int), Square(int), Point }
@@ -74,7 +74,7 @@ fn cdata_enum_as_value_struct_field() {
     // The host `Cmd` cdef must exist (it was SKIPPED before -- a payload-enum field
     // disqualified the value layout). The enum field nests `Blend` inline.
     assert!(lua.contains("} Cmd;") && lua.contains("Blend blend;"));
-    require_luajit();
+
     let prog = lua;
     assert_eq!(run_fn(&prog, "t"), "15 30");
 }
@@ -102,7 +102,7 @@ fn main() { t() }
 fn cdata_enum_multi_field_tuple() {
     let lua = emit_module(MULTI_SRC);
     assert!(lua.contains("int _0; int _1; } Shape;"));
-    require_luajit();
+
     let prog = lua;
     assert_eq!(run_fn(&prog, "t"), "15 12 0");
 }
@@ -132,7 +132,7 @@ fn cdata_enum_record_payload() {
     let lua = emit_module(RECORD_SRC);
     // Mixed tuple `_0` (Circle) + record `_w`/`_h` (Box) slots in one cdef.
     assert!(lua.contains("int _0; int _w; int _h; } Shape;"));
-    require_luajit();
+
     let prog = lua;
     // Record fields sorted alphabetically (h before w) -- matches rock's inspect.
     assert_eq!(run_fn(&prog, "t"), "15 12 0 | Shape::Box { h = 4, w = 3 }");
@@ -164,7 +164,6 @@ fn matched_scalar_abi_enum_param_does_not_repack() {
 
 #[test]
 fn cdata_enum_runs_correctly() {
-    require_luajit();
     let prog = emit_module(SRC);
     assert_eq!(run_fn(&prog, "t"), "1 4 7 4 | 10");
 }

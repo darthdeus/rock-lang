@@ -44,7 +44,7 @@ fn shared_prefix_dependency_retains_only_reached_bodies() {
             .iter()
             .any(|s| s.starts_with("reached_dependency_body"))
     );
-    common::require_luajit();
+
     assert_eq!(common::run_main(&emit.lua), "9");
 
     let edited = ws_with_dependency_module(

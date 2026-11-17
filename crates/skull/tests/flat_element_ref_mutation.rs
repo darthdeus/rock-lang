@@ -1,8 +1,7 @@
-use crate::common::{require_luajit, run_luajit, try_emit_module};
+use crate::common::{run_luajit, try_emit_module};
 
 #[test]
 fn ref_to_a_missing_map_key_raises_on_lua() {
-    require_luajit();
     let lua = try_emit_module(
         r#"
 value Cell { v: int }

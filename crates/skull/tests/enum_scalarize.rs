@@ -1,10 +1,8 @@
-use crate::common::{emit_mir, emit_module, key, require_luajit, run_fn};
+use crate::common::{emit_mir, emit_module, run_fn};
 
 #[test]
 fn widened_enum_record_match_rejects_a_field_missing_from_its_variant() {
-    use crate::common::{try_emit_module, ws_with_stdlib};
-    use bone_semantic::hir::VariantPayload;
-    use ustr::Ustr;
+    use crate::common::try_emit_module;
 
     const SRC: &str = r#"
 enum Choice { A { left: int, shared: int }, B { right: string, shared: string } }
@@ -18,25 +16,6 @@ fn read() -> int {
 }
 fn main() { print(read()) }
 "#;
-
-    let ws = ws_with_stdlib(SRC);
-    assert!(
-        skull_mir::lower::EnumPlan::for_name(&ws, key(&ws, "Choice"))
-            .unwrap()
-            .flat()
-            .is_some()
-    );
-    let enum_id = ws.enums_by_name[&key(&ws, "Choice")];
-    let choice = &ws.modules[enum_id.module.index()].enums[enum_id.def];
-    let variant = choice
-        .variants
-        .iter()
-        .find(|variant| variant.name == "A")
-        .unwrap();
-    let VariantPayload::Record(fields) = &variant.payload else {
-        panic!("Choice::A declaration must be a record variant");
-    };
-    assert!(fields.iter().all(|field| field.name != Ustr::from("ghost")));
 
     let emitted = try_emit_module(SRC);
     assert!(emitted.is_err());
@@ -83,7 +62,6 @@ fn value_struct_with_enum_field_has_cdef_int_not_table() {
 }
 
 fn run_skull_test(src: &str, fn_name: &str) -> String {
-    require_luajit();
     run_fn(&emit_mir(src).lua, fn_name)
 }
 

@@ -1,4 +1,4 @@
-use crate::common::{fn_ref, require_luajit, run_luajit, ws_with_stdlib};
+use crate::common::{fn_ref, run_luajit, ws_with_stdlib};
 use skull::mir_emit::{emit_full, emit_overlay};
 
 const STRUCT_ROWS: &str = r#"
@@ -21,7 +21,6 @@ fn nested_nobox_struct_rows_reject_materialization_in_overlay() {
 }
 
 fn check_struct_rows(use_overlay: bool) {
-    require_luajit();
     let gc_rows = STRUCT_ROWS
         .replace("c: int", "c: string")
         .replace("c: 3", "c: \"tag\"");
@@ -55,7 +54,6 @@ print("rejected")
 
 #[test]
 fn nested_strided_enum_rows_still_inspect_payloads_and_units() {
-    require_luajit();
     let source = r#"
 nobox value Point { a: int, b: int, c: int, d: int }
 enum Entry { Empty, Data(Point), Count(int) }

@@ -1,4 +1,4 @@
-use crate::common::{fn_ref, require_luajit, run_luajit, ws_with_stdlib};
+use crate::common::{fn_ref, run_luajit, ws_with_stdlib};
 use skull::mir_emit::{emit_full, emit_overlay};
 
 const SOURCE: &str = r#"
@@ -48,7 +48,6 @@ fn copied_callbacks_follow_overlay_reload_with_independent_captures() {
 }
 
 fn check_reload(use_overlay: bool) {
-    require_luajit();
     let before = ws_with_stdlib(SOURCE);
     let mid = skull::user_module_id(&before).unwrap();
     let (full, mut cache) = emit_full(&before, mid).unwrap();
@@ -78,7 +77,6 @@ fn check_reload(use_overlay: bool) {
 
 #[test]
 fn copied_callback_graph_preserves_cycles_aliases_and_native_storage() {
-    require_luajit();
     let source = r#"
 struct Node { value: int, next: Node? = null }
 value Dot { x: int, y: int }

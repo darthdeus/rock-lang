@@ -37,7 +37,7 @@ fn a_program_does_not_define_own_functions_nothing_calls() {
             .retains(&Instance::base(fn_ref(&ws, "own_unused")))
     );
     assert!(!defines(&emit.lua, "own_unused"));
-    common::require_luajit();
+
     assert_eq!(common::run_main(&emit.lua), "9");
 }
 
@@ -68,7 +68,7 @@ fn an_edit_that_starts_calling_an_own_function_defines_it() {
     )
     .expect("incremental");
     assert!(defines(&incremental.lua, "own_later"));
-    common::require_luajit();
+
     assert_eq!(common::run_main(&incremental.lua), "5");
 }
 

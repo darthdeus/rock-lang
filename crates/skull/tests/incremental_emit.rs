@@ -998,7 +998,6 @@ fn repeated_body_overlays_keep_the_fingerprint_of_a_full_emit() {
 
 #[test]
 fn flat_ref_callee_body_overlay_updates_its_callers() {
-    crate::common::require_luajit();
     let prelude = r#"
 value Cell { v: int }
 global xs: [Cell] = []

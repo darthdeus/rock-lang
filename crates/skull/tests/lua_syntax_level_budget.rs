@@ -1,4 +1,4 @@
-use crate::common::{function_body, luajit_loads, require_luajit, run_main, try_emit_module};
+use crate::common::{function_body, luajit_loads, run_main, try_emit_module};
 
 fn display_tiers(n: usize) -> String {
     let list = |f: &dyn Fn(usize) -> String| (0..n).map(f).collect::<Vec<_>>().join(", ");
@@ -74,7 +74,6 @@ fn display_tiers_expected(n: usize) -> String {
 
 #[test]
 fn narrow_display_helpers_render_expected_formats() {
-    require_luajit();
     let lua = try_emit_module(&display_tiers(2)).expect("emits");
     let expected = "CdataWide { f0: 0.5, f1: 1.5 }\n\
                     CdataWide { f0 = 0.5, f1 = 1.5 }\n\
@@ -90,7 +89,6 @@ fn narrow_display_helpers_render_expected_formats() {
 
 #[test]
 fn wide_display_helpers_load_and_render() {
-    require_luajit();
     let n = 100;
     let lua = try_emit_module(&display_tiers(n)).expect("emits");
     luajit_loads(&lua).expect("the emitted chunk must load");
@@ -99,7 +97,6 @@ fn wide_display_helpers_load_and_render() {
 
 #[test]
 fn wide_value_interpolation_loads_and_renders() {
-    require_luajit();
     let n = 70;
     let fields = (0..n)
         .map(|i| format!("f{i}: int = {i}"))
@@ -136,7 +133,6 @@ fn accumulation(statements: usize) -> String {
 
 #[test]
 fn long_accumulation_loads_and_runs() {
-    require_luajit();
     let lua = try_emit_module(&accumulation(300)).expect("emits");
     luajit_loads(&lua).expect("the emitted chunk must load");
     assert_eq!(run_main(&lua), "1650");
