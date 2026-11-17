@@ -1905,19 +1905,3 @@ fn json_record_decode<T>(codec: JsonRecordCodec, value: JsonValue, prototype: T)
 fn json_record_decode<T>(codec: JsonRecordCodec, value: JsonValue) -> T? {
     return __json_record_decode<T>(__json_record_type(phantom<T>()), codec, value)
 }
-
-// Omitted record fields inherit from defaults; supplied arrays and maps replace
-// their baseline. Invalid supplied values never fall back. Returned defaults
-// are copied so editing the result cannot mutate the baseline.
-inline(lua) fn __json_record_decode_with_defaults<T>(name: string, codec: JsonRecordCodec,
-    value: JsonValue, defaults: T) -> T? = """
-    local ok, result = __json_record_visit(__json_record_context(codec),
-        { k = 'nom', name = name }, value, true, {}, 0, defaults)
-    if ok then return result end
-    if codec.on_error then codec.on_error(result) end
-    return nil
-"""
-
-fn json_record_decode_with_defaults<T>(codec: JsonRecordCodec, value: JsonValue, defaults: T) -> T? {
-    return __json_record_decode_with_defaults(__json_record_type(defaults), codec, value, defaults)
-}

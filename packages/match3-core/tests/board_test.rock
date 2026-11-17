@@ -44,7 +44,6 @@ fn first_move_finds_a_swap() {
                          1, 0, 1])
     let mv = m3_first_move(b)
     assert(mv != null, "a one-swap-to-match board yields a move")
-    assert(m3_has_legal_move(b), "has_legal_move agrees with first_move")
 }
 
 @test
@@ -54,7 +53,6 @@ fn dead_board_has_no_move() {
                          0, 1, 2, 0, 1, 2,
                          0, 1, 2, 0, 1, 2,
                          0, 1, 2, 0, 1, 2])
-    assert(!m3_has_legal_move(b), "striped board is a deadlock")
     assert(m3_first_move(b) == null, "first_move returns null on a dead board")
 }
 
@@ -71,10 +69,3 @@ fn collapse_fills_every_cell() {
     assert(holes == 0, "collapse refills every cleared cell")
     assert(cx.spawns.len() == 3, "three cleared cells -> three spawns")
 }
-
-// ─── Spawn distribution ──────────────────────────────────────────────────────
-
-// The compatibility guarantee, checked directly rather than assumed. A uniform
-// distribution has to consume the RNG stream exactly as the bare `random_int`
-// call it replaced, or every recorded board snapshot in every consumer changes
-// for no behavioural reason.

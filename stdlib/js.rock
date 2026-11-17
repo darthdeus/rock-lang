@@ -1078,8 +1078,3 @@ inline(js) fn __json_record_encode<T>(name: string, codec: JsonRecordCodec, valu
 inline(js) fn __json_record_decode<T>(name: string, codec: JsonRecordCodec, value: JsonValue) -> T? = """
     return __json_record_js_decode(codec, __json_record_js_context(codec, __rock_json_types), name, value, null);
 """
-
-inline(js) fn __json_record_decode_with_defaults<T>(name: string, codec: JsonRecordCodec,
-    value: JsonValue, defaults: T) -> T? = """
-    return __json_record_js_decode(codec, __json_record_js_context(codec, __rock_json_types), name, value, defaults);
-"""

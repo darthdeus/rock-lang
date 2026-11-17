@@ -35,14 +35,6 @@ pub fn m3_empty_board(w: int, h: int) -> M3Board {
     return M3Board { w: w, h: h, cells: cells }
 }
 
-pub fn m3_copy(b: M3Board) -> M3Board {
-    let cells: [int] = []
-    for t in b.cells {
-        cells.push(t)
-    }
-    return M3Board { w: b.w, h: b.h, cells: cells }
-}
-
 pub fn m3_swap(b: M3Board, ax: int, ay: int, bx: int, by: int) {
     let ia = ay * b.w + ax
     let ib = by * b.w + bx
@@ -125,57 +117,6 @@ pub fn m3_find_matches(b: M3Board) -> [(int, int)] {
 
 pub fn m3_has_matches(b: M3Board) -> bool {
     return m3_find_matches(b).len() > 0
-}
-
-// Group matched cells into connected blobs (4-neighbour BFS). Each blob is
-// one match group -- one scoring event for the game. `matching` is the cell
-// list from m3_find_matches; w/h are the board dimensions.
-pub fn m3_components(matching: [(int, int)], w: int, h: int) -> [[(int, int)]] {
-    let size = w * h
-    let in_match: [bool] = []
-    let visited: [bool] = []
-    let i = 0
-    while i < size {
-        in_match.push(false)
-        visited.push(false)
-        i = i + 1
-    }
-    for (mx, my) in matching {
-        in_match[my * w + mx] = true
-    }
-
-    let groups: [[(int, int)]] = []
-    let k = 0
-    while k < size {
-        let cx = k % w
-        let cy = k ./ w
-        if in_match[k] && !visited[k] {
-            let group: [(int, int)] = []
-            let queue: [(int, int)] = []
-            queue.push((cx, cy))
-            visited[k] = true
-            while queue.len() > 0 {
-                let (qx, qy) = queue[0]
-                let _ = queue.remove_at(0)
-                group.push((qx, qy))
-                let dirs: [(int, int)] = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-                for (ddx, ddy) in dirs {
-                    let nx = qx + ddx
-                    let ny = qy + ddy
-                    if nx >= 0 && nx < w && ny >= 0 && ny < h {
-                        let ni = ny * w + nx
-                        if in_match[ni] && !visited[ni] {
-                            visited[ni] = true
-                            queue.push((nx, ny))
-                        }
-                    }
-                }
-            }
-            groups.push(group)
-        }
-        k = k + 1
-    }
-    return groups
 }
 
 // ─── Run length through a cell ──────────────────────────────────────────────
@@ -372,39 +313,4 @@ pub fn m3_collapse_with(b: M3Board, matched: [(int, int)], types: M3Types, refil
     }
 
     return M3Collapse { falls: falls, spawns: spawns }
-}
-
-// ─── Gravity (no refill) ─────────────────────────────────────────────────────
-// Clear the current matches and compact each column downward, leaving holes
-// at the top (no new spawns). Returns cells cleared this round. This is the
-// RNG-free cascade proxy the interestingness metric uses.
-fn m3_clear_and_settle(b: M3Board) -> int {
-    let m = m3_find_matches(b)
-    if m.len() == 0 { return 0 }
-    for (mx, my) in m {
-        m3_set(b, mx, my, M3_EMPTY)
-    }
-    let col = 0
-    while col < b.w {
-        let stack: [int] = []
-        let row = b.h - 1
-        while row >= 0 {
-            let t = m3_at(b, col, row)
-            if t != M3_EMPTY { stack.push(t) }
-            row = row - 1
-        }
-        let dest = b.h - 1
-        let k = 0
-        while k < stack.len() {
-            m3_set(b, col, dest, stack[k])
-            dest = dest - 1
-            k = k + 1
-        }
-        while dest >= 0 {
-            m3_set(b, col, dest, M3_EMPTY)
-            dest = dest - 1
-        }
-        col = col + 1
-    }
-    return m.len()
 }
