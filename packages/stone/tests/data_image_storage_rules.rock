@@ -7,6 +7,48 @@ value ImageVert {
     id: int,
 }
 
+value ImageLeafViews {
+    x: f32,
+    id: int,
+    active: bool,
+}
+
+inline(lua) fn image_leaf_views_are_omitted(buffer: NativeBuffer<ImageLeafViews>) -> bool = """
+    __stone_install_data_image()
+    for _, field in ipairs({ "__vf", "__vi", "__vb" }) do
+        assert(type(buffer[field]) == "cdata", "fixture must have " .. field)
+    end
+    for _, mode in ipairs({ "json", "inspect" }) do
+        local keys = __rock_field_keys(buffer, mode)
+        local selected = {}
+        for _, key in ipairs(keys) do
+            selected[key] = true
+            assert(key ~= "__vf" and key ~= "__vi" and key ~= "__vb", mode .. " includes a leaf view")
+        end
+        assert(selected.ptr and selected.len, mode .. " must retain the buffer descriptor")
+    end
+    local capture = { image_mode = "capture", global = "test", storage = {}, storage_records = {} }
+    local image = __stone_data_image(buffer, {}, capture)
+    local materialize = { image_mode = "materialize", global = "test", storage = {},
+        image_storage = capture.storage_records }
+    local copy = __stone_data_image(image, {}, materialize)
+    for _, field in ipairs({ "__vf", "__vi", "__vb" }) do
+        assert(image[field] == nil, "image includes " .. field)
+        assert(copy[field] == nil, "materialization restored " .. field)
+    end
+    assert(copy.len == buffer.len)
+    assert(copy.ptr[0].x == 1.5 and copy.ptr[0].id == 7 and copy.ptr[0].active)
+    assert(copy.ptr ~= buffer.ptr, "materialization must own fresh storage")
+    return true
+"""
+
+@test
+fn data_image_omits_native_buffer_leaf_views() {
+    let buffer: NativeBuffer<ImageLeafViews> = native_buffer_alloc(2)
+    buffer[0] = ImageLeafViews { x: 1.5, id: 7, active: true }
+    assert(image_leaf_views_are_omitted(buffer))
+}
+
 struct ImageStorageHolder {
     small: NativeBufferU8,
     large: NativeBufferU8,

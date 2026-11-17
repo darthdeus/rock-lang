@@ -515,6 +515,30 @@ unsafe fn establish_blank_contents(gl: &crate::DebugGl, int_format: bool, has_de
     gl.clear_depth_f32(saved_clear_depth[0]);
 }
 
+fn canvas_dimensions_fit(width: i32, height: i32, limit: i32) -> bool {
+    limit > 0 && width > 0 && height > 0 && width <= limit && height <= limit
+}
+
+fn canvas_dimensions_supported(gl: &crate::DebugGl, width: i32, height: i32) -> bool {
+    let limit = unsafe { gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE) };
+    if canvas_dimensions_fit(width, height, limit) {
+        return true;
+    }
+    ::log::error!(target: "CANVAS", "canvas {}x{} is outside GL texture size range 1..={}; refusing allocation/resize", width, height, limit);
+    false
+}
+
+#[test]
+fn canvas_dimensions_respect_both_device_axes() {
+    assert!(canvas_dimensions_fit(16384, 1, 16384));
+    assert!(canvas_dimensions_fit(1, 16384, 16384));
+    assert!(!canvas_dimensions_fit(16385, 1, 16384));
+    assert!(!canvas_dimensions_fit(1, 16385, 16384));
+    assert!(!canvas_dimensions_fit(1, 1, 0));
+    assert!(!canvas_dimensions_fit(0, 1, 16384));
+    assert!(!canvas_dimensions_fit(1, -1, 16384));
+}
+
 #[no_mangle]
 pub extern "C" fn stone_create_canvas(
     width: c_int,
@@ -523,6 +547,9 @@ pub extern "C" fn stone_create_canvas(
     with_depth: bool,
 ) -> u64 {
     with_gl(|gl| unsafe {
+        if !canvas_dimensions_supported(gl, width, height) {
+            return 0;
+        }
         // Create FBO
         let fbo = match gl.create_framebuffer() {
             Ok(fbo) => fbo,
@@ -914,6 +941,9 @@ pub extern "C" fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) 
     }
 
     let resized = with_gl(|gl| unsafe {
+        if !canvas_dimensions_supported(gl, width, height) {
+            return false;
+        }
         let spec = resolve_texture_format(format);
         let previous = CURRENT_FBO.with(|c| *c.borrow());
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
