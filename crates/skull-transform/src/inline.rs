@@ -1435,9 +1435,7 @@ fn map_forced_cells(
     cell_base: u32,
     block_base: u32,
 ) -> Vec<(u32, u32)> {
-    let Some(source) = callee.emit_ids.as_ref() else {
-        return Vec::new();
-    };
+    let source = callee.emit_ids.as_ref().expect("compacted inline template");
     source
         .forced_cells
         .iter()
@@ -2014,11 +2012,8 @@ fn clone_body(
     scratch: &mut InlineScratch,
     kind: Kind,
 ) -> CloneMapStats {
-    let track_emit_ids = caller.emit_ids.is_some() || callee.emit_ids.is_some();
-    if track_emit_ids {
-        caller.ensure_emit_ids();
-    }
-    let (inst_base, cell_base, block_base) = caller.emit_nexts().unwrap_or_default();
+    caller.ensure_emit_ids();
+    let (inst_base, cell_base, block_base) = caller.emit_nexts().unwrap();
     caller.insts.reserve(callee.insts.len());
     caller
         .cells
@@ -2031,11 +2026,9 @@ fn clone_body(
         let mapped = if let Some(&mapped) = scratch.overrides.get(&cid) {
             skipped_cells += 1;
             mapped
-        } else if track_emit_ids {
+        } else {
             let emit_id = cell_base + callee.emit_cell_id(cid) - skipped_cells;
             caller.alloc_cell_with_emit_id(cell.clone(), emit_id)
-        } else {
-            caller.cells.alloc(cell.clone())
         };
         scratch.cell_map.insert(cid, mapped);
     }
@@ -2044,23 +2037,16 @@ fn clone_body(
     scratch.block_map.clear();
     if kind == Kind::General {
         import_cleanup_load_cells(caller, callee, &scratch.cell_map);
-        if track_emit_ids {
-            let forced =
-                map_forced_cells(caller, callee, &scratch.overrides, cell_base, block_base);
-            let ids = caller.emit_ids.as_mut().unwrap();
-            for (cell, block) in forced {
-                ids.forced_cells.push(cell);
-                ids.forced_cell_blocks.push(block);
-            }
+        let forced = map_forced_cells(caller, callee, &scratch.overrides, cell_base, block_base);
+        let ids = caller.emit_ids.as_mut().unwrap();
+        for (cell, block) in forced {
+            ids.forced_cells.push(cell);
+            ids.forced_cell_blocks.push(block);
         }
         caller.blocks.reserve(callee.blocks.len());
         scratch.block_map.reserve(callee.blocks.len());
         for (bid, _) in callee.blocks.iter() {
-            let nbid = if track_emit_ids {
-                caller.alloc_block_with_emit_id(block_base + callee.emit_block_id(bid))
-            } else {
-                caller.blocks.alloc(Block::new())
-            };
+            let nbid = caller.alloc_block_with_emit_id(block_base + callee.emit_block_id(bid));
             scratch.block_map.insert(bid, nbid);
         }
     }
@@ -2070,11 +2056,8 @@ fn clone_body(
     scratch.inst_ids.clear();
     scratch.inst_ids.reserve(callee.insts.len());
     for (iid, inst) in callee.insts.iter() {
-        let nid = if track_emit_ids {
-            caller.alloc_inst_with_emit_id(inst.clone(), inst_base + callee.emit_inst_id(iid))
-        } else {
-            caller.insts.alloc(inst.clone())
-        };
+        let nid =
+            caller.alloc_inst_with_emit_id(inst.clone(), inst_base + callee.emit_inst_id(iid));
         scratch.inst_map.insert(iid, nid);
         scratch.inst_ids.push(nid);
     }
@@ -2101,17 +2084,15 @@ fn clone_body(
                 .map(|header| scratch.block_map[header]),
         );
     }
-    if track_emit_ids {
-        caller.set_emit_nexts((
-            inst_base + callee.emit_inst_span(),
-            cell_base + callee.emit_cell_span() - skipped_cells,
-            if kind == Kind::General {
-                block_base + callee.emit_block_span()
-            } else {
-                block_base
-            },
-        ));
-    }
+    caller.set_emit_nexts((
+        inst_base + callee.emit_inst_span(),
+        cell_base + callee.emit_cell_span() - skipped_cells,
+        if kind == Kind::General {
+            block_base + callee.emit_block_span()
+        } else {
+            block_base
+        },
+    ));
 
     CloneMapStats {
         inst_entries: scratch.inst_map.len(),
