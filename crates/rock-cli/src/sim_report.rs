@@ -213,8 +213,6 @@ struct Envelope {
     frame_count: Option<i64>,
     frame_timing: Option<FrameTiming>,
     frame_timing_invalid: bool,
-    boundary_timing: Option<BoundaryTiming>,
-    boundary_timing_invalid: bool,
 }
 
 impl Envelope {
@@ -298,58 +296,6 @@ impl FrameTiming {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BoundaryTiming {
-    native_reset_us: i64,
-    teardown_us: i64,
-    boot_restore_us: Option<i64>,
-}
-
-impl BoundaryTiming {
-    fn parse(value: Option<&Value>) -> (Option<Self>, bool) {
-        let Some(value) = value.filter(|value| !value.is_null()) else {
-            return (None, false);
-        };
-        let Some(native_reset_us) = value.get("native_reset_us").and_then(Value::as_i64) else {
-            return (None, true);
-        };
-        let Some(teardown_us) = value.get("teardown_us").and_then(Value::as_i64) else {
-            return (None, true);
-        };
-        let Some(restore) = value.get("boot_restore_us") else {
-            return (None, true);
-        };
-        let boot_restore_us = if restore.is_null() {
-            None
-        } else {
-            let Some(value) = restore.as_i64() else {
-                return (None, true);
-            };
-            Some(value)
-        };
-        if native_reset_us < 0 || teardown_us < 0 || boot_restore_us.is_some_and(|value| value < 0)
-        {
-            return (None, true);
-        }
-        (
-            Some(Self {
-                native_reset_us,
-                teardown_us,
-                boot_restore_us,
-            }),
-            false,
-        )
-    }
-
-    fn value(&self) -> Value {
-        json!({
-            "native_reset_us": self.native_reset_us,
-            "teardown_us": self.teardown_us,
-            "boot_restore_us": self.boot_restore_us,
-        })
-    }
-}
-
 struct FrameTimingStats {
     known: usize,
     missing: usize,
@@ -360,48 +306,6 @@ struct FrameTimingStats {
     logic_us: i64,
     render_cpu_us: i64,
     present_us: i64,
-}
-
-struct BoundaryTimingStats {
-    known: usize,
-    missing: usize,
-    invalid: usize,
-    restore_missing: usize,
-    native_reset_us: i64,
-    teardown_us: i64,
-    boot_restore_us: i64,
-}
-
-impl BoundaryTimingStats {
-    fn from_envelopes(envelopes: &[Envelope]) -> Self {
-        let mut stats = Self {
-            known: 0,
-            missing: 0,
-            invalid: 0,
-            restore_missing: 0,
-            native_reset_us: 0,
-            teardown_us: 0,
-            boot_restore_us: 0,
-        };
-        for envelope in envelopes {
-            if envelope.boundary_timing_invalid {
-                stats.invalid += 1;
-            } else if let Some(timing) = &envelope.boundary_timing {
-                stats.known += 1;
-                stats.native_reset_us =
-                    stats.native_reset_us.saturating_add(timing.native_reset_us);
-                stats.teardown_us = stats.teardown_us.saturating_add(timing.teardown_us);
-                if let Some(restore_us) = timing.boot_restore_us {
-                    stats.boot_restore_us = stats.boot_restore_us.saturating_add(restore_us);
-                } else {
-                    stats.restore_missing += 1;
-                }
-            } else {
-                stats.missing += 1;
-            }
-        }
-        stats
-    }
 }
 
 impl FrameTimingStats {
@@ -593,7 +497,6 @@ pub(crate) struct SimRunAnalysis {
     occupancy: Occupancy,
     frame_counts: FrameCountStats,
     frame_timing: FrameTimingStats,
-    boundary_timing: BoundaryTimingStats,
     timings: Option<TimingsView>,
 }
 
@@ -707,8 +610,6 @@ pub(crate) fn analyze(record: &RunRecord) -> SimRunAnalysis {
         let frame_count = int(end, "frame_count");
         let (frame_timing, frame_timing_invalid) =
             FrameTiming::parse(end.get("frame_timing"), frame_count);
-        let (boundary_timing, boundary_timing_invalid) =
-            BoundaryTiming::parse(end.get("boundary_timing"));
         envelopes.push(Envelope {
             name: text(end, "name")
                 .or_else(|| text(start, "name"))
@@ -721,8 +622,6 @@ pub(crate) fn analyze(record: &RunRecord) -> SimRunAnalysis {
             frame_count,
             frame_timing,
             frame_timing_invalid,
-            boundary_timing,
-            boundary_timing_invalid,
         });
     }
     envelopes.sort_by_key(|envelope| (envelope.start_ms, envelope.occurrence_id));
@@ -825,7 +724,6 @@ pub(crate) fn analyze(record: &RunRecord) -> SimRunAnalysis {
     let occupancy = occupancy(&workers, base_ms, jobs);
     let frame_counts = FrameCountStats::from_envelopes(&envelopes);
     let frame_timing = FrameTimingStats::from_envelopes(&envelopes);
-    let boundary_timing = BoundaryTimingStats::from_envelopes(&envelopes);
 
     // timings.json ---------------------------------------------------------
     let envelope_by_key: HashMap<i64, i64> = envelopes
@@ -915,7 +813,6 @@ pub(crate) fn analyze(record: &RunRecord) -> SimRunAnalysis {
         occupancy,
         frame_counts,
         frame_timing,
-        boundary_timing,
         timings,
         envelopes,
         workers,
@@ -1023,15 +920,6 @@ impl SimRunAnalysis {
                 "render_cpu_us": self.frame_timing.render_cpu_us,
                 "present_us": self.frame_timing.present_us,
             },
-            "boundary_timing": {
-                "known_entries": self.boundary_timing.known,
-                "missing_entries": self.boundary_timing.missing,
-                "invalid_entries": self.boundary_timing.invalid,
-                "restore_missing_entries": self.boundary_timing.restore_missing,
-                "native_reset_us": self.boundary_timing.native_reset_us,
-                "teardown_us": self.boundary_timing.teardown_us,
-                "boot_restore_us": self.boundary_timing.boot_restore_us,
-            },
         });
 
         let slowest: Vec<Value> = self
@@ -1047,10 +935,6 @@ impl SimRunAnalysis {
                     "duration_ms": envelope.duration_ms(),
                     "frame_count": envelope.frame_count,
                     "frame_timing": envelope.frame_timing.as_ref().map(FrameTiming::value),
-                    "boundary_timing": envelope
-                        .boundary_timing
-                        .as_ref()
-                        .map(BoundaryTiming::value),
                 })
             })
             .collect();
@@ -1362,36 +1246,6 @@ impl SimRunAnalysis {
             "  note: render CPU ends before swap; it is not GPU time, and present may include sync wait."
                 .to_string(),
         );
-        let boundary_timing_entries = self.boundary_timing.known
-            + self.boundary_timing.missing
-            + self.boundary_timing.invalid;
-        push(
-            &mut out,
-            format!(
-                "  boundaries      {}/{} known; native reset {:.3}s, boot restore {:.3}s",
-                self.boundary_timing.known,
-                boundary_timing_entries,
-                self.boundary_timing.native_reset_us as f64 / 1_000_000.0,
-                self.boundary_timing.boot_restore_us as f64 / 1_000_000.0,
-            ),
-        );
-        push(
-            &mut out,
-            format!(
-                "  boundaries      subprocess teardown {:.3}s; stop finalization remains in envelope residual",
-                self.boundary_timing.teardown_us as f64 / 1_000_000.0,
-            ),
-        );
-        if self.boundary_timing.restore_missing > 0 || self.boundary_timing.invalid > 0 {
-            push(
-                &mut out,
-                format!(
-                    "  boundaries      {} restore(s) unavailable, {} invalid record(s)",
-                    self.boundary_timing.restore_missing, self.boundary_timing.invalid
-                ),
-            );
-        }
-
         push(&mut out, String::new());
         push(
             &mut out,
@@ -1617,11 +1471,6 @@ mod tests {
                         "frames": 3, "draw_frames": 2, "submitted_frames": 1,
                         "logic_us": 1000, "render_cpu_us": 2000,
                         "present_us": 300
-                    },
-                    "boundary_timing": {
-                        "native_reset_us": 400,
-                        "teardown_us": 50,
-                        "boot_restore_us": 500
                     } }),
                 json!({ "event": "entry_result", "elapsed_ms": 11,
                     "worker_attempt": 1, "occurrence_id": 1,
@@ -1642,11 +1491,6 @@ mod tests {
         assert_eq!(
             rendered["slowest_entries"][0]["frame_timing"]["present_us"],
             300
-        );
-        assert_eq!(rendered["time"]["boundary_timing"]["native_reset_us"], 400);
-        assert_eq!(
-            rendered["slowest_entries"][0]["boundary_timing"]["teardown_us"],
-            50
         );
     }
 
@@ -1671,7 +1515,5 @@ mod tests {
         assert_eq!(rendered["time"]["frame_timing"]["known_entries"], 0);
         assert_eq!(rendered["time"]["frame_timing"]["missing_entries"], 1);
         assert_eq!(rendered["time"]["frame_timing"]["invalid_entries"], 0);
-        assert_eq!(rendered["time"]["boundary_timing"]["known_entries"], 0);
-        assert_eq!(rendered["time"]["boundary_timing"]["missing_entries"], 1);
     }
 }
