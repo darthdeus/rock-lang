@@ -55,11 +55,8 @@ pub(crate) fn lower_profiled_body(
     for (iid, inst) in body.insts.iter() {
         let construct = match inst {
             Inst::Call { func, .. } => {
-                callees.push(if stage_globals.is_some() {
-                    stage_callee_instance(ws, &body, iid, *func, span, scx.interner())?
-                } else {
-                    callee_inst_at(ws, &body, iid, *func, span)?
-                });
+                let interner = stage_globals.is_some().then(|| scx.interner());
+                callees.push(callee_inst_at(ws, &body, iid, *func, span, interner)?);
                 continue;
             }
             Inst::Global(name) => {
@@ -321,58 +318,6 @@ pub(crate) fn inst_kind(inst: &Inst) -> &'static str {
         }
         _ => "unsupported instruction",
     }
-}
-
-fn stage_callee_instance(
-    ws: &Workspace,
-    body: &MirFunc,
-    instruction_id: Idx<Inst>,
-    function: FuncRef,
-    span: Span,
-    interner: &MonoInterner,
-) -> Result<ShaderInstance, CompilerError> {
-    let callee = &ws.module(function.module).functions[function.func];
-    let instance = match body.callee_instances.get(&instruction_id).cloned() {
-        Some(instance) => instance,
-        None => {
-            let base = Instance::base(function);
-            if callee.generics.is_empty() || renders_inline_instance(ws, callee, &base, interner) {
-                base
-            } else {
-                return Err(err(
-                    span,
-                    format!(
-                        "shader profile: the call to generic `{}` has no recorded instantiation, so GLSL has no concrete shape to emit",
-                        callee.name
-                    ),
-                ));
-            }
-        }
-    };
-    if renders_inline_instance(ws, callee, &instance, interner) || callee.generics.is_empty() {
-        return Ok(ShaderInstance::new(instance));
-    }
-    if instance.args.is_empty() {
-        return Err(err(
-            span,
-            format!(
-                "shader profile: the call to generic `{}` has no recorded instantiation, so GLSL has no concrete shape to emit",
-                callee.name
-            ),
-        ));
-    }
-    if instance.args.len() != callee.generics.len() {
-        return Err(err(
-            span,
-            format!(
-                "shader profile: the call to generic `{}` recorded {} type argument(s) for {} declared generic(s)",
-                callee.name,
-                instance.args.len(),
-                callee.generics.len()
-            ),
-        ));
-    }
-    Ok(ShaderInstance::new(instance))
 }
 
 pub(crate) fn reject_stage_violations<'a>(

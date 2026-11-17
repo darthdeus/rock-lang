@@ -416,48 +416,6 @@ impl StageAbi<'_> {
     }
 }
 
-/// The one block the interface says exists at `binding`, or a rejection.
-///
-/// `want` is whether the INTERFACE has the group, so `None` means "not
-/// declared" and never "declared but not found". Missing, extra and duplicate
-/// are each their own error: "the ABI omitted it", "the ABI invented it" and
-/// "the ABI has it twice" are different defects and a count comparison alone
-/// cannot tell the second from the third.
-fn require_block<'a, T>(
-    blocks: &'a [(u32, T)],
-    binding: u32,
-    want: bool,
-    what: &str,
-    span: Span,
-) -> Result<Option<&'a T>, CompilerError> {
-    let mut found = blocks.iter().filter(|(b, _)| *b == binding);
-    let first = found.next();
-    if found.next().is_some() {
-        return Err(err(
-            span,
-            format!("internal: the GLSL ABI plan holds more than one {what} at binding {binding}"),
-        ));
-    }
-    match (want, first) {
-        (true, Some((_, p))) => Ok(Some(p)),
-        (false, None) => Ok(None),
-        (true, None) => Err(err(
-            span,
-            format!(
-                "internal: the interface declares a {what} but the GLSL ABI plan has none at \
-             binding {binding} -- its members would be referenced without being declared"
-            ),
-        )),
-        (false, Some(_)) => Err(err(
-            span,
-            format!(
-                "internal: the GLSL ABI plan holds a {what} at binding {binding} that the interface \
-             does not declare"
-            ),
-        )),
-    }
-}
-
 /// The samplers ONE STAGE declares, in unit order, then its bare ones.
 ///
 /// [`ShaderInterfacePlan::stage_samplers`] is the source; this adds the target's
@@ -524,7 +482,7 @@ impl<'a> ProgramAbi<'a> {
                     ),
                 ));
             }
-            stages.push((stage, project_stage_abi(iface, abi, stage, span)?));
+            stages.push((stage, project_stage_abi(iface, abi, stage)));
         }
         Ok(ProgramAbi {
             stages,
@@ -550,44 +508,27 @@ impl<'a> ProgramAbi<'a> {
     }
 }
 
-/// One stage's slice of an already-validated plan.
-///
-/// [`validate_abi`] has established that every group the interface declares
-/// has exactly one matching block, so these lookups should not fail -- and
-/// "should not" is why each one REJECTS instead of resolving to `None`. An
-/// absence that the interface did not ask for is the same defect as a missing
-/// declaration, and turning it back into `None` here would reintroduce it
-/// downstream of the check that exists to catch it.
+fn block_at<T>(blocks: &[(u32, T)], binding: u32) -> Option<&T> {
+    blocks.iter().find(|(b, _)| *b == binding).map(|(_, p)| p)
+}
+
 fn project_stage_abi<'a>(
     iface: &ShaderInterfacePlan,
     abi: &'a ShaderAbiPlan,
     stage: IrStage,
-    span: Span,
-) -> Result<StageAbi<'a>, CompilerError> {
-    Ok(StageAbi {
-        uniform_block: require_block(
+) -> StageAbi<'a> {
+    StageAbi {
+        uniform_block: block_at(
             &abi.uniform_blocks,
             ShaderAbiPlan::binding_of(UniformRole::Stage(stage)),
-            iface.uniform_group(UniformRole::Stage(stage)).is_some(),
-            "uniform block",
-            span,
-        )?,
-        engine_block: require_block(
-            &abi.uniform_blocks,
-            UNIFORM_BLOCK_BINDING_ENGINE,
-            iface.uniform_group(UniformRole::Engine).is_some(),
-            "@engine block",
-            span,
-        )?,
-        array_block: require_block(
+        ),
+        engine_block: block_at(&abi.uniform_blocks, UNIFORM_BLOCK_BINDING_ENGINE),
+        array_block: block_at(
             &abi.uniform_array_blocks,
             ShaderAbiPlan::array_binding_of(stage),
-            iface.array_group(stage).is_some(),
-            "uniform array block",
-            span,
-        )?,
+        ),
         samplers: stage_samplers_in_unit_order(iface, abi, stage),
-    })
+    }
 }
 
 /// Every vertex attribute's emitted declaration: its name and neutral kind from

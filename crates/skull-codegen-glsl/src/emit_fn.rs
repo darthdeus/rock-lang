@@ -68,57 +68,44 @@ pub(crate) fn callee_inst_at(
     iid: Idx<Inst>,
     func: FuncRef,
     span: Span,
+    stage_interner: Option<&MonoInterner>,
 ) -> Result<ShaderInstance, CompilerError> {
     let cf = &ws.module(func.module).functions[func.func];
-    // Absent is not "the declaration": a callee with no generics HAS no
-    // instantiation to record, and one that is generic and recorded nothing is
-    // the rejection below.
-    let recorded = mf.callee_instances.get(&iid).cloned();
-    if renders_inline(cf) || cf.generics.is_empty() {
-        return Ok(ShaderInstance::new(
-            recorded.unwrap_or_else(|| Instance::base(func)),
-        ));
+    let instance = mf
+        .callee_instances
+        .get(&iid)
+        .cloned()
+        .unwrap_or_else(|| Instance::base(func));
+    let inline = match stage_interner {
+        Some(interner) => renders_inline_instance(ws, cf, &instance, interner),
+        None => renders_inline(cf),
+    };
+    let count = instance.args.len();
+    let expected = cf.generics.len();
+    if inline || expected == 0 || count == expected {
+        return Ok(ShaderInstance::new(instance));
     }
-    let key = recorded
-        .as_ref()
-        .map(|i| i.args.clone())
-        .unwrap_or_default();
-    // Covers both shapes: a call that recorded nothing, and one whose key the
-    // producer declined to build because a type parameter did not reify. Those
-    // used to be two arms, the second scanning for a `None` slot; a key is
-    // total now, so that state is unrepresentable rather than merely unreached,
-    // and its message is folded in here.
-    if key.is_empty() {
-        return Err(err(
-            span,
-            format!(
-                "shader profile: the call to generic `{}` has no recorded instantiation -- either \
-                 none was recorded, or a type parameter was left uninstantiated -- so GLSL has no \
-                 concrete shape to emit it at. A GPU has no boxed representation for an unreified \
-                 generic, so this cannot fall back to the declaration",
-                cf.name
-            ),
-        ));
-    }
-    // The key is POSITIONAL against the declared generics, so a different
-    // length names another function's instantiation. `spec_subst_from_key` zips
-    // the two and would silently drop the tail or substitute a prefix.
-    if key.len() != cf.generics.len() {
-        return Err(err(
-            span,
-            format!(
-                "shader profile: the call to generic `{}` recorded {} type argument(s) for {} \
-                 declared generic(s) -- the instantiation is positional, so a key of another \
-                 length is not this callee's",
-                cf.name,
-                key.len(),
-                cf.generics.len()
-            ),
-        ));
-    }
-    Ok(ShaderInstance::new(
-        recorded.expect("a non-empty key implies a recorded instance"),
-    ))
+    let name = cf.name;
+    let message = match (stage_interner.is_some(), count) {
+        (true, 0) => format!(
+            "shader profile: the call to generic `{name}` has no recorded instantiation, so GLSL has no concrete shape to emit"
+        ),
+        (false, 0) => format!(
+            "shader profile: the call to generic `{name}` has no recorded instantiation -- either \
+             none was recorded, or a type parameter was left uninstantiated -- so GLSL has no \
+             concrete shape to emit it at. A GPU has no boxed representation for an unreified \
+             generic, so this cannot fall back to the declaration"
+        ),
+        (true, _) => format!(
+            "shader profile: the call to generic `{name}` recorded {count} type argument(s) for {expected} declared generic(s)"
+        ),
+        (false, _) => format!(
+            "shader profile: the call to generic `{name}` recorded {count} type argument(s) for {expected} \
+             declared generic(s) -- the instantiation is positional, so a key of another \
+             length is not this callee's"
+        ),
+    };
+    Err(err(span, message))
 }
 
 /// A `void main()` entry that destructures its terminal `return <struct
@@ -177,7 +164,7 @@ pub(crate) fn emit_fn_def_with(
     let mut callee_insts: HashMap<Idx<Inst>, ShaderInstance> = HashMap::default();
     for (iid, inst) in mf.insts.iter() {
         if let Inst::Call { func, .. } = inst {
-            callee_insts.insert(iid, callee_inst_at(ws, mf, iid, *func, f.name_span)?);
+            callee_insts.insert(iid, callee_inst_at(ws, mf, iid, *func, f.name_span, None)?);
         }
     }
 
