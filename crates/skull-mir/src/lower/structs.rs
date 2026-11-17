@@ -403,7 +403,12 @@ impl<'a> Builder<'a> {
                     .statement_arena
                     .iter()
                     .filter_map(|(_, st)| match st {
-                        Statement::Let { name, value } if self.binding_is_ref(*name) => {
+                        Statement::Let { pattern, value, .. }
+                            if self
+                                .body
+                                .pattern_single_bind(*pattern)
+                                .is_some_and(|name| self.binding_is_ref(name)) =>
+                        {
                             Some(*value)
                         }
                         _ => None,

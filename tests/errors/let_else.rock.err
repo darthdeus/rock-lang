@@ -1,0 +1,39 @@
+//! Error: `let ... else` rejections
+//! Tags: patterns, let
+
+//=== TEST CASE: else_must_diverge_NonDiverging ===
+//! expect: must diverge
+fn main() {
+    let v: int? = 5
+    let x = v else {
+        print("missing")
+    }
+    print(x)
+}
+
+//=== TEST CASE: else_value_tail_NonDiverging ===
+//! expect: must diverge
+fn f(v: int?) -> int {
+    let x = v else {
+        0
+    }
+    x
+}
+
+//=== TEST CASE: irrefutable_else_never_runs_Useless ===
+//! expect: never runs
+fn f(v: int) -> int {
+    let x = v else {
+        return 0
+    }
+    x
+}
+
+//=== TEST CASE: else_does_not_see_bindings_Scope ===
+//! expect: Undefined global `x`
+fn f(v: int?) -> int {
+    let x = v else {
+        return x
+    }
+    x
+}

@@ -1462,7 +1462,7 @@ impl<'a> Printer<'a> {
     }
 
     fn let_stmt(&self, l: &Let) -> Doc {
-        let mut parts = vec![Doc::text("let "), self.binding(&l.binding)];
+        let mut parts = vec![Doc::text("let "), self.pattern(&l.pattern)];
         if let Some(ty) = l.ty {
             parts.push(Doc::text(": "));
             parts.push(self.type_expr(ty));
@@ -1470,6 +1470,10 @@ impl<'a> Printer<'a> {
         if let Some(v) = l.value {
             parts.push(Doc::text(" = "));
             parts.push(self.expr(v));
+        }
+        if let Some(b) = l.else_block {
+            parts.push(Doc::text(" else "));
+            parts.push(self.flow_block(b));
         }
         Doc::concat(parts)
     }
@@ -1536,7 +1540,7 @@ impl<'a> Printer<'a> {
     }
 
     fn for_stmt(&self, f: &For) -> Doc {
-        let mut parts = vec![Doc::text("for "), self.binding(&f.var)];
+        let mut parts = vec![Doc::text("for "), self.pattern(&f.pattern)];
         if let Some(ty) = f.ty {
             parts.push(Doc::text(": "));
             parts.push(self.type_expr(ty));
@@ -1546,20 +1550,6 @@ impl<'a> Printer<'a> {
         parts.push(Doc::text(" "));
         parts.push(self.flow_block(f.body));
         Doc::concat(parts)
-    }
-
-    fn binding(&self, b: &Binding) -> Doc {
-        match b {
-            Binding::Ident(id) => Doc::text(kw(id.name)),
-            Binding::Tuple(items) => Doc::concat([
-                Doc::text("("),
-                Doc::join(Doc::text(", "), items.iter().map(|b| self.binding(b))),
-                Doc::text(")"),
-            ]),
-            Binding::Newtype { name, binding } => {
-                Doc::text(format!("{}({})", kw(name.name), kw(binding.name)))
-            }
-        }
     }
 
     // ---- expressions ------------------------------------------------------

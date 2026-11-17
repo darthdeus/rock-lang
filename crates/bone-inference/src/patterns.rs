@@ -256,6 +256,42 @@ pub(crate) fn check_pattern(
             Ok(())
         }
 
+        Pattern::Newtype {
+            name,
+            name_span,
+            sub,
+        } => {
+            let er = resolve(gamma, expected, span);
+
+            let params = match *gamma.get(er) {
+                TypeExpr::App {
+                    ctor: TypeCtor::Nominal(n),
+                    params,
+                } if n == name => Some(params),
+                // An unresolved or generic scrutinee cannot be checked yet;
+                // mirror the old newtype-let behavior and trust the pattern.
+                TypeExpr::Infer(..) | TypeExpr::Generic(..) => None,
+                _ => comp_error!(
+                    name_span,
+                    "cannot destructure this value with newtype pattern `{}` - the value is not a newtype `{}`",
+                    name,
+                    name
+                ),
+            };
+
+            let NewtypeId { module: ntm, def } = resolve_newtype(gamma, name).ok_or_else(|| {
+                CompilerError::new_with_label(name_span, format!("unknown newtype `{}`", name))
+            })?;
+            let nt = &gamma.workspace.module(ntm).newtypes[def];
+
+            let subs = match params {
+                Some(params) => generic_arg_subs(gamma, &nt.generics, er, params),
+                None => FxHashMap::default(),
+            };
+            let wt = substitute(gamma, nt.wrapped, &subs, span)?;
+            check_pattern(c, gamma, sub, wt, span)
+        }
+
         Pattern::Tuple { elements } => {
             let expected = resolve(gamma, expected, span);
 
@@ -288,61 +324,6 @@ pub(crate) fn check_pattern(
     }
 }
 
-pub(crate) fn destructure_pattern(
-    gamma: &mut Gamma,
-    pat: &BindingPattern,
-    ty: TyId,
-    span: Span,
-) -> Result<(), CompilerError> {
-    // A poisoned scrutinee has no tuple/nominal shape.
-    // Bind every slot to `error` so a failed RHS doesn't force a shape error
-    // or leave vars unbound
-    let r = resolve(gamma, ty, span);
-    if matches!(gamma.get(r), TypeExpr::Builtin(BuiltinTy::Error)) {
-        return match pat {
-            BindingPattern::Leaf(b) => gamma.assign_named_type(*b, r),
-            BindingPattern::Tuple(subs) => {
-                for sub in subs {
-                    destructure_pattern(gamma, sub, r, span)?;
-                }
-
-                Ok(())
-            }
-        };
-    }
-
-    match pat {
-        BindingPattern::Leaf(b) => gamma.assign_named_type(*b, ty),
-
-        BindingPattern::Tuple(subs) => {
-            let resolved = resolve(gamma, ty, span);
-
-            match *gamma.get(resolved) {
-                TypeExpr::Tuple { elements } => {
-                    if elements.len() != subs.len() {
-                        comp_error!(
-                            span,
-                            "tuple binding count mismatch: expected {}, got {}",
-                            subs.len(),
-                            elements.len()
-                        );
-                    }
-
-                    for (sub, e) in subs.iter().zip(elements) {
-                        let et = resolve(gamma, resolved.with_idx(e), span);
-                        // recurse
-                        destructure_pattern(gamma, sub, et, span)?;
-                    }
-
-                    Ok(())
-                }
-
-                _ => comp_error!(span, "expected tuple type, got {}", gamma.render(resolved)),
-            }
-        }
-    }
-}
-
 pub(crate) fn pattern_binds(c: BodyCtx, pat: Idx<Pattern>) -> bool {
     match c.body.pattern_arena[pat] {
         Pattern::Bind(_) => true,
@@ -353,6 +334,7 @@ pub(crate) fn pattern_binds(c: BodyCtx, pat: Idx<Pattern>) -> bool {
 
         Pattern::Or { alternatives } => alternatives.into_iter().any(|p| pattern_binds(c, p)),
         Pattern::Tuple { elements } => elements.into_iter().any(|p| pattern_binds(c, p)),
+        Pattern::Newtype { sub, .. } => pattern_binds(c, sub),
 
         _ => false,
     }
@@ -391,8 +373,53 @@ pub(crate) fn bind_pattern_leaves_to(
             }
         }
 
+        Pattern::Newtype { sub, .. } => bind_pattern_leaves_to(c, gamma, sub, ty)?,
+
         Pattern::Wildcard | Pattern::Literal(..) | Pattern::Range { .. } => {}
     }
 
     Ok(())
+}
+
+/// Whether `pat` alone covers every value of `scrut_ty`. Reuses the match
+/// exhaustiveness engine on a one-row matrix; coverage is under-approximated
+/// there, so `false` can mean "cannot prove it", never the reverse.
+pub(crate) fn pattern_is_irrefutable(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    pat: Idx<Pattern>,
+    scrut_ty: TyId,
+    span: Span,
+) -> bool {
+    let arms = [exhaustive::ArmPattern {
+        pattern: pat,
+        tag: None,
+    }];
+    exhaustive::missing_match_patterns(c, gamma, scrut_ty, &arms, span).is_empty()
+}
+
+/// Reject a `let`/`for` pattern that can fail. `suggestion` finishes the
+/// diagnostic with the construct-appropriate way out.
+pub(crate) fn require_irrefutable(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    pat: Idx<Pattern>,
+    scrut_ty: TyId,
+    span: Span,
+    suggestion: &str,
+) -> Result<(), CompilerError> {
+    let arms = [exhaustive::ArmPattern {
+        pattern: pat,
+        tag: None,
+    }];
+    let missing = exhaustive::missing_match_patterns(c, gamma, scrut_ty, &arms, span);
+    if missing.is_empty() {
+        return Ok(());
+    }
+    comp_error!(
+        span,
+        "this pattern can fail: `{}` is not matched; {}",
+        missing.join("`, `"),
+        suggestion
+    )
 }

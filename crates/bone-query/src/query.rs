@@ -2970,9 +2970,7 @@ pub(crate) fn locals_in_scope(
     let mut init_end: std::collections::HashMap<Idx<hir::BindingInfo>, usize> = Default::default();
     for (_, stmt) in body.statement_arena.iter() {
         let (leaves, value) = match stmt {
-            hir::Statement::Let { name, value } => (vec![*name], *value),
-            hir::Statement::LetNewtype { var, value, .. } => (vec![*var], *value),
-            hir::Statement::LetTuple { vars, value } => (vars.leaves(), *value),
+            hir::Statement::Let { pattern, value, .. } => (body.pattern_bindings(*pattern), *value),
             _ => continue,
         };
         if let Some(end) = body.expr_spans.get(value).map(|s| s.offset_range().1) {
@@ -4017,9 +4015,13 @@ pub fn inline_local(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Inli
     let b = binding_at(body, offset)?;
 
     // The binding must come from a plain `let x = init` (not a param, `for` var,
-    // tuple/newtype let); those have no single `Statement::Let` naming `b`.
+    // destructuring let); those have no single `Statement::Let` naming `b`.
     let (let_idx, value) = body.statement_arena.iter().find_map(|(i, s)| match s {
-        hir::Statement::Let { name, value } if *name == b => Some((i, *value)),
+        hir::Statement::Let { pattern, value, .. }
+            if body.pattern_single_bind(*pattern) == Some(b) =>
+        {
+            Some((i, *value))
+        }
         _ => None,
     })?;
     let let_span = *body.statement_spans.get(let_idx)?;
@@ -4403,15 +4405,23 @@ fn arg_param_type(ws: &Workspace, bi: &BodyInference, body: &Body, arg: Idx<hir:
     }
 }
 
-/// The binding a `let`/`let-newtype` statement assigns `value` to, if `value` is
-/// that statement's direct RHS. Lets the generator read the use-site annotation
-/// for a call's return type.
+/// The binding a single-name or newtype `let` assigns `value` to, if `value`
+/// is that statement's direct RHS. Lets the generator read the use-site
+/// annotation for a call's return type.
 fn binding_for_value(body: &Body, value: Idx<hir::Expr>) -> Option<Idx<hir::BindingInfo>> {
     for (_, st) in body.statement_arena.iter() {
-        match st {
-            hir::Statement::Let { name, value: v } if *v == value => return Some(*name),
-            hir::Statement::LetNewtype { var, value: v, .. } if *v == value => return Some(*var),
-            _ => {}
+        if let hir::Statement::Let {
+            pattern, value: v, ..
+        } = st
+            && *v == value
+        {
+            let pat = match body.pattern_arena[*pattern] {
+                hir::Pattern::Newtype { sub, .. } => sub,
+                _ => *pattern,
+            };
+            if let hir::Pattern::Bind(b) = body.pattern_arena[pat] {
+                return Some(b);
+            }
         }
     }
     None

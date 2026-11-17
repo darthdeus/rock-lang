@@ -114,6 +114,10 @@ impl<'a> Builder<'a> {
     ) -> Result<(), CompilerError> {
         match self.body.pattern_arena[pat] {
             Pattern::Wildcard => Ok(()),
+            // A newtype is transparent: its inner pattern tests the same value.
+            Pattern::Newtype { sub, .. } => {
+                self.match_pattern(scrut, sub, fail, &HashSet::default(), false, None)
+            }
             Pattern::Bind(b) => {
                 let name = self.body.binding_arena[b].name;
                 // `match c { Red => .. }` — bone lowers an unqualified nullary
@@ -420,6 +424,7 @@ impl<'a> Builder<'a> {
             Pattern::Or { alternatives } => alternatives
                 .into_iter()
                 .any(|p| self.pattern_binds(p, variants, top)),
+            Pattern::Newtype { sub, .. } => self.pattern_binds(sub, variants, false),
         }
     }
 
@@ -949,6 +954,55 @@ impl<'a> Builder<'a> {
 
     /// A nullable scrutinee misses on nil before its pattern is matched;
     /// otherwise a plain binding would always match and bind nil.
+    /// `let <pattern> = value` with a pattern beyond names and tuples: run the
+    /// general match machinery with an unreachable miss block (bone proved the
+    /// pattern irrefutable).
+    pub(crate) fn lower_let_match(
+        &mut self,
+        pattern: Idx<Pattern>,
+        value: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        let variants = self.scrut_variants(value);
+        let scrut_enum = self.scrut_enum_name(value);
+        let scrut = self.lower_scrut(value)?;
+        let miss = self.f.new_block();
+        self.match_pattern(&scrut, pattern, miss, &variants, true, scrut_enum)?;
+        // `miss` keeps its default Unreachable terminator: no value escapes it.
+        Ok(())
+    }
+
+    /// `let <pattern> = value else { .. }`: test and bind exactly like
+    /// `if let`, but the bindings live on in the ENCLOSING block and the else
+    /// block diverges (checked in bone), so there is no join to build.
+    pub(crate) fn lower_let_else(
+        &mut self,
+        pattern: Idx<Pattern>,
+        value: Idx<Expr>,
+        else_block: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        let kind = self.let_scrutinee(pattern, value)?;
+        let else_bb = if let LetScrutinee::Generic = kind {
+            let scrut = self.lower_scrut(value)?;
+            let else_bb = self.f.new_block();
+            self.match_let(pattern, value, &scrut, else_bb)?;
+            else_bb
+        } else {
+            let (present, values) = self.lower_present_let(value, &kind)?;
+            let then_bb = self.f.new_block();
+            let else_bb = self.f.new_block();
+            self.branch_present_let(present, then_bb, else_bb);
+            self.bind_present_let(pattern, kind, &values)?;
+            else_bb
+        };
+        let cont = self.cur;
+        self.cur = else_bb;
+        self.lower_stmt_expr(else_block)?;
+        // The else end is unreachable (it diverges); fall back to the match
+        // path, where the statement list continues with the bindings live.
+        self.cur = cont;
+        Ok(())
+    }
+
     fn match_let(
         &mut self,
         pattern: Idx<Pattern>,

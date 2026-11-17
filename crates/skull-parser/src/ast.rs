@@ -385,21 +385,17 @@ pub enum IfLetClause {
     Condition(Idx<ExprData>),
 }
 
-/// A `let` / `for` binding target. Mirrors rock's `VariableBindingKind`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Binding {
-    Ident(Ident),
-    Tuple(Vec<Binding>),
-    Newtype { name: Ident, binding: Ident },
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Let {
     pub span: Span,
     pub keyword_span: Option<Span>,
-    pub binding: Binding,
+    /// Any pattern parses here; bone rejects refutable ones without `else`.
+    pub pattern: Pattern,
     pub ty: Option<Idx<TypeExprData>>,
     pub value: Option<Idx<ExprData>>,
+    /// `let pat = value else { .. }` — taken when the pattern misses; must
+    /// diverge (checked in bone-inference).
+    pub else_block: Option<Idx<BlockData>>,
 }
 
 /// `static <name>[: T] = <init>` -- a local with private module-level storage
@@ -436,7 +432,8 @@ pub struct NestedFn {
 pub struct For {
     pub span: Span,
     pub keyword_span: Option<Span>,
-    pub var: Binding,
+    /// Any pattern parses here; bone rejects refutable ones.
+    pub pattern: Pattern,
     /// Optional element-type annotation: `for x: T in xs`.
     pub ty: Option<Idx<TypeExprData>>,
     pub iter: Idx<ExprData>,

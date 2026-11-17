@@ -396,9 +396,10 @@ fn json_field_factory(
                 StatementKind::Let(Let {
                     span: sp,
                     keyword_span: None,
-                    binding: Binding::Ident(local.clone()),
+                    pattern: Pattern::Ident(local.clone()),
                     ty: Some(field_ty),
                     value: Some(default),
+                    else_block: None,
                 }),
             );
             let value = ast.expr(sp, ExprKind::Ident(local));

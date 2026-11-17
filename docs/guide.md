@@ -339,6 +339,60 @@ fn main() {
 }
 ```
 
+## Destructuring and let else
+
+`let` and `for` take the same patterns `match` does, as long as the
+pattern cannot fail: struct fields, tuples, newtypes, and their
+nestings. A pattern that can fail -- an enum variant, or any `let` over
+a nullable value -- takes an `else` block, which runs on a miss and
+must diverge (`return`, `break`, or `continue`). The bindings live on
+in the enclosing scope, unlike `if let`.
+
+```rock
+// `let` and `for` accept patterns, not just names: destructure structs,
+// tuples and newtypes in place. `let ... else` handles the refutable cases.
+struct Point {
+    x: int,
+    y: int,
+}
+
+enum Shape {
+    Circle(int),
+    Square(int, int),
+}
+
+fn radius(s: Shape) -> int {
+    // A pattern that can fail needs an `else` block, which runs on a miss
+    // and must leave the function (or loop): `return`, `break`, `continue`.
+    let Shape::Circle(r) = s else {
+        return 0
+    }
+    return r // `r` stays in scope for the rest of the function
+}
+
+fn main() {
+    let p = Point { x: 3, y: 4 }
+    let Point { x, y } = p // fields by name; `Point { x, .. }` skips the rest
+    print(x + y) // 7
+
+    let pts = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]
+    for Point { x, .. } in pts {
+        print(x) // 1, then 3
+    }
+
+    print(radius(Shape::Circle(5))) // 5
+    print(radius(Shape::Square(2, 3))) // 0
+
+    // `let ... else` also unwraps optionals: the else path runs on null.
+    let m = map_new<string, int>()
+    m.insert("a", 7)
+    let v = m.get("a") else {
+        return
+    }
+    print(v) // 7
+}
+```
+
 ## Generics
 
 Functions and structs take type parameters in angle brackets. Each use

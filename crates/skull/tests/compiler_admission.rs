@@ -6,7 +6,7 @@ use bone_semantic::prelude::ModuleId;
 use skull::mir_emit::MirEmit;
 use skull::pipeline::{self, CompileHost, EmitTarget, Phase, Stage};
 use skull_parser::stdlib::ModuleSet;
-use skull_parser::{Binding, CompilerError, ItemKind, StatementKind};
+use skull_parser::{CompilerError, ItemKind, Pattern, StatementKind};
 use ustr::Ustr;
 
 #[derive(Default)]
@@ -83,7 +83,7 @@ fn recovered_statement_preserves_the_tree_but_stops_before_aliases() {
     let StatementKind::Let(binding) = &ast.stmts[body.statements[0]].kind else {
         panic!("the valid binding survives recovery");
     };
-    assert!(matches!(&binding.binding, Binding::Ident(name) if name.name == "kept"));
+    assert!(matches!(&binding.pattern, Pattern::Ident(name) if name.name == "kept"));
     rejected(src, &ast.recovery_errors[0].message, &["parsed"]);
 }
 

@@ -110,6 +110,11 @@ pub fn shift_module_after_edit(
                         sh.span(s);
                     }
                 }
+                Pattern::Newtype {
+                    name: _,
+                    name_span,
+                    sub: _,
+                } => sh.span(name_span),
                 Pattern::Wildcard
                 | Pattern::Bind(_)
                 | Pattern::Literal(_)

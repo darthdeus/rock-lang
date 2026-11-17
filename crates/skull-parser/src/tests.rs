@@ -302,7 +302,7 @@ fn recovery_preserves_fields_and_following_bindings() {
     let StatementKind::Let(l) = &ast.stmts[body(&ast).statements[1]].kind else {
         panic!("expected let")
     };
-    assert!(matches!(&l.binding, Binding::Ident(i) if i.name == "kept"));
+    assert!(matches!(&l.pattern, Pattern::Ident(i) if i.name == "kept"));
 }
 
 #[test]

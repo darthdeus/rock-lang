@@ -101,16 +101,92 @@ pub(crate) fn infer_statement(
 
         Statement::Return(e) => infer_return(c, gamma, *e, span)?,
 
-        Statement::Let { name, value } => {
-            let binding_ty = infer_initialized_binding(c, gamma, *name, *value)?;
-            gamma.assign_named_type(*name, binding_ty)?;
+        Statement::Let {
+            pattern,
+            value,
+            else_block,
+        } => {
+            let (pattern, value, else_block) = (*pattern, *value, *else_block);
 
-            if contains_frame_ref(gamma, binding_ty) {
-                let provenance = frame_ref_provenance(c, gamma, *value);
-                if !provenance.retainable() {
-                    reject_unstable_frame_ref(c.body.expr_spans[*value], provenance)?;
+            // The plain `let name = value` fast path keeps annotation-directed
+            // inference of the initializer and frame-ref provenance tracking.
+            if let Some(name) = c.body.pattern_single_bind(pattern)
+                && else_block.is_none()
+            {
+                let binding_ty = infer_initialized_binding(c, gamma, name, value)?;
+                gamma.assign_named_type(name, binding_ty)?;
+
+                if contains_frame_ref(gamma, binding_ty) {
+                    let provenance = frame_ref_provenance(c, gamma, value);
+                    if !provenance.retainable() {
+                        reject_unstable_frame_ref(c.body.expr_spans[value], provenance)?;
+                    }
+                    gamma.ref_binding_provenance.insert(name, provenance);
                 }
-                gamma.ref_binding_provenance.insert(*name, provenance);
+            } else {
+                reject_cf_in_destructure_rhs(c, value)?;
+                let (value_ty, deferred) = match infer_expr(c, gamma, value) {
+                    Ok(t) => (t, None),
+                    Err(e) => (gamma.workspace.builtins.error(), Some(e)),
+                };
+
+                // With an `else`, a nullable scrutinee unwraps on the match
+                // path, exactly like `if let` / `while let`.
+                let scrut_ty = if else_block.is_some() {
+                    peel_nullable(gamma, value_ty, span)
+                } else {
+                    value_ty
+                };
+
+                // A single annotated binding (`let x: T = v else ..`) checks
+                // the unwrapped value against its annotation.
+                let mut expected = scrut_ty;
+                if let Some(b) = c.body.pattern_single_bind(pattern)
+                    && let Some(ann) = c.body.binding_arena[b].declared_ty
+                {
+                    coerce(gamma, scrut_ty, ann, span)?;
+                    expected = ann;
+                }
+
+                check_pattern(c, gamma, pattern, expected, span)?;
+
+                match else_block {
+                    None => require_irrefutable(
+                        c,
+                        gamma,
+                        pattern,
+                        scrut_ty,
+                        span,
+                        "a pattern that can fail needs `match`, `if let`, or `let ... else`",
+                    )?,
+                    Some(else_e) => {
+                        let vt = resolve(gamma, value_ty, span);
+                        let peeled = resolve(gamma, scrut_ty, span);
+                        let nullable = !types_equal(gamma, vt, peeled);
+                        if !nullable && pattern_is_irrefutable(c, gamma, pattern, scrut_ty, span) {
+                            comp_error!(
+                                span,
+                                "the `else` of this `let` never runs: the pattern always matches"
+                            );
+                        }
+                        let ety = infer_expr(c, gamma, else_e)?;
+                        let ety = resolve(gamma, ety, span);
+                        if !matches!(
+                            gamma.get(ety),
+                            TypeExpr::Builtin(BuiltinTy::Never | BuiltinTy::Error)
+                        ) {
+                            comp_error!(
+                                c.body.expr_spans[else_e],
+                                "the `else` block of `let ... else` must diverge: end it with \
+                                 `return`, `break`, `continue`, or a call that never returns"
+                            );
+                        }
+                    }
+                }
+
+                if let Some(err) = deferred {
+                    return Err(err);
+                }
             }
         }
 
@@ -224,15 +300,27 @@ pub(crate) fn infer_statement(
 
         Statement::Comment(_) => (),
 
-        Statement::For { vars, iter, body } => {
-            let (iter, body) = (*iter, *body);
+        Statement::For {
+            pattern,
+            iter,
+            body,
+        } => {
+            let (pattern, iter, body) = (*pattern, *iter, *body);
 
             let (elem_ty, deferred) = match infer_for_elem(c, gamma, iter, span) {
                 Ok(t) => (t, None),
                 Err(e) => (gamma.workspace.builtins.error(), Some(e)),
             };
 
-            destructure_pattern(gamma, vars, elem_ty, span)?;
+            check_pattern(c, gamma, pattern, elem_ty, span)?;
+            require_irrefutable(
+                c,
+                gamma,
+                pattern,
+                elem_ty,
+                span,
+                "a `for` pattern must match every element; use `match` or `if let` in the body",
+            )?;
             gamma.loop_depth += 1;
             let body_res = infer_expr_used(c, gamma, body, Use::Discard);
             gamma.loop_depth -= 1;
@@ -283,66 +371,6 @@ pub(crate) fn infer_statement(
             if gamma.loop_depth == 0 {
                 comp_error!(span, "`break`/`continue` is only valid inside a loop body");
             }
-        }
-
-        Statement::LetTuple { vars, value } => {
-            reject_cf_in_destructure_rhs(c, *value)?;
-            match infer_expr(c, gamma, *value) {
-                Ok(t) => destructure_pattern(gamma, vars, t, span)?,
-                Err(e) => {
-                    destructure_pattern(gamma, vars, gamma.workspace.builtins.error(), span)?;
-                    return Err(e);
-                }
-            }
-        }
-
-        Statement::LetNewtype {
-            newtype_name,
-            var,
-            value,
-        } => {
-            reject_cf_in_destructure_rhs(c, *value)?;
-            let value_ty = infer_expr(c, gamma, *value)?;
-            let resolved = resolve(gamma, value_ty, span);
-
-            match *gamma.get(resolved) {
-                TypeExpr::App {
-                    ctor: TypeCtor::Nominal(name),
-                    ..
-                } if name == *newtype_name => {}
-
-                TypeExpr::Infer(..) | TypeExpr::Generic(..) => {}
-
-                _ => {
-                    comp_error!(
-                        span,
-                        "cannot destructure this value with newtype pattern `{}` - the value is not a newtype `{}`",
-                        newtype_name,
-                        newtype_name
-                    )
-                }
-            };
-
-            let NewtypeId { module: ntm, def } =
-                resolve_newtype(gamma, *newtype_name).ok_or_else(|| {
-                    CompilerError::new_with_label(
-                        span,
-                        format!("unknown newtype `{}`", newtype_name),
-                    )
-                })?;
-
-            let nt = &gamma.workspace.module(ntm).newtypes[def];
-
-            let subs = match *gamma.get(resolved) {
-                TypeExpr::App {
-                    ctor: TypeCtor::Nominal(_),
-                    params,
-                } => generic_arg_subs(gamma, &nt.generics, resolved, params),
-                _ => FxHashMap::default(),
-            };
-
-            let wt = substitute(gamma, nt.wrapped, &subs, span)?;
-            gamma.assign_named_type(*var, wt)?;
         }
     };
 
@@ -2504,11 +2532,12 @@ pub(crate) fn binding_initializer(c: BodyCtx, b: Idx<BindingInfo>) -> Option<Idx
         .statement_arena
         .iter()
         .find_map(|(_, stmt)| match stmt {
-            Statement::Let { name, value }
-            | Statement::Static { name, value }
-            | Statement::LetNewtype {
-                var: name, value, ..
-            } if *name == b => Some(*value),
+            Statement::Let { pattern, value, .. }
+                if c.body.pattern_single_bind(*pattern) == Some(b) =>
+            {
+                Some(*value)
+            }
+            Statement::Static { name, value } if *name == b => Some(*value),
             _ => None,
         })
 }

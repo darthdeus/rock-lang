@@ -61,6 +61,11 @@ enum Shape {
         name: Ustr,
         fields: Vec<(Ustr, TyId)>,
     },
+    /// A transparent newtype: one constructor over the wrapped type.
+    Newtype {
+        name: Ustr,
+        field: TyId,
+    },
     Enum {
         name: Ustr,
         variants: Vec<VariantShape>,
@@ -222,6 +227,19 @@ impl Checker<'_, '_, '_> {
                         name: def.name,
                         fields,
                     }
+                } else if let Some(nid) = resolve_newtype(self.gamma, name) {
+                    let def = &self.gamma.workspace.module(nid.module).newtypes[nid.def];
+                    let subs = generic_arg_subs(self.gamma, &def.generics, ty, params);
+                    match substitute(self.gamma, def.wrapped, &subs, span) {
+                        Ok(field) => Shape::Newtype {
+                            name: def.name,
+                            field,
+                        },
+                        Err(_) => {
+                            self.poisoned = true;
+                            Shape::Opaque
+                        }
+                    }
                 } else {
                     Shape::Opaque
                 }
@@ -239,6 +257,7 @@ impl Checker<'_, '_, '_> {
                 fields.iter().map(|(_, t)| *t).collect()
             }
             (Shape::Enum { variants, .. }, Ctor::Variant(i)) => variants[i].fields.clone(),
+            (Shape::Newtype { field, .. }, Ctor::Single) => vec![*field],
             (Shape::Nullable(inner), Ctor::NonNull) => vec![*inner],
             _ => Vec::new(),
         }
@@ -356,6 +375,10 @@ impl Checker<'_, '_, '_> {
                 let tys = variants[i].fields.clone();
                 let out = self.lower_record_fields(fields, &names, &tys);
                 Pat::Ctor(Ctor::Variant(i), out)
+            }
+            (Pattern::Newtype { sub, .. }, Shape::Newtype { field, .. }) => {
+                let field = *field;
+                Pat::Ctor(Ctor::Single, vec![self.lower(sub, field)])
             }
             (Pattern::Record { fields, .. }, Shape::Struct { fields: defs, .. }) => {
                 let names: Vec<Ustr> = defs.iter().map(|(n, _)| *n).collect();
@@ -520,6 +543,10 @@ impl Checker<'_, '_, '_> {
                 let names: Vec<Ustr> = defs.iter().map(|(n, _)| *n).collect();
                 render_record(name.as_str(), &names, fields, &parts)
             }
+            (Shape::Newtype { name, .. }, _) => format!(
+                "{name}({})",
+                parts.into_iter().next().unwrap_or_else(|| "_".into())
+            ),
             (Shape::Enum { name, variants }, Ctor::Variant(i)) => {
                 let v = &variants[i];
                 let qual = format!("{name}::{}", v.name);
@@ -568,7 +595,9 @@ fn all_ctors(shape: &Shape, heads: &[Ctor]) -> Vec<Ctor> {
     match shape {
         Shape::Bool => vec![Ctor::Bool(false), Ctor::Bool(true)],
         Shape::Nullable(_) => vec![Ctor::Null, Ctor::NonNull],
-        Shape::Unit | Shape::Tuple(_) | Shape::Struct { .. } => vec![Ctor::Single],
+        Shape::Unit | Shape::Tuple(_) | Shape::Struct { .. } | Shape::Newtype { .. } => {
+            vec![Ctor::Single]
+        }
         Shape::Enum { variants, .. } => (0..variants.len()).map(Ctor::Variant).collect(),
         Shape::Int => {
             let mut cuts = vec![INT_MIN];

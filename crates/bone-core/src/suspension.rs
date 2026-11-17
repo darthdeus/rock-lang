@@ -209,18 +209,22 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
 
     fn stmt(&mut self, stmt: Idx<Statement>, flow: &mut Flow) {
         match &self.body.statement_arena[stmt] {
-            Statement::Let { name, value } => {
+            Statement::Let {
+                pattern,
+                value,
+                else_block,
+            } => {
                 self.expr(*value, flow);
-                self.bind(*name, Some(*value), flow);
-            }
-            Statement::LetNewtype { var, value, .. } => {
-                self.expr(*value, flow);
-                self.bind(*var, Some(*value), flow);
-            }
-            Statement::LetTuple { vars, value } => {
-                self.expr(*value, flow);
-                for binding in vars.leaves() {
-                    self.bind(binding, None, flow);
+                if let Some(e) = else_block {
+                    self.expr(*e, flow);
+                }
+                match self.body.pattern_single_bind(*pattern) {
+                    Some(b) => self.bind(b, Some(*value), flow),
+                    None => {
+                        for binding in self.body.pattern_bindings(*pattern) {
+                            self.bind(binding, None, flow);
+                        }
+                    }
                 }
             }
             Statement::Static { name, value } => {
@@ -236,10 +240,15 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
             }
             Statement::Expr(expr) => self.expr(*expr, flow),
             Statement::Defer(_) => {}
-            Statement::For { vars, iter, body } => {
+            Statement::For {
+                pattern,
+                iter,
+                body,
+            } => {
                 self.expr(*iter, flow);
-                let vars: Vec<_> = vars
-                    .leaves()
+                let vars: Vec<_> = self
+                    .body
+                    .pattern_bindings(*pattern)
                     .into_iter()
                     .map(|binding| (binding, None))
                     .collect();

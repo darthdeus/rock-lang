@@ -1,0 +1,173 @@
+// `let <pattern> = value else { .. }`: bind through a refutable pattern or a
+// nullable value; on a miss the else block runs and must diverge. The
+// bindings live in the enclosing scope, unlike `if let`.
+
+enum Shape {
+    Circle(int),
+    Square(int, int),
+}
+
+struct Point {
+    x: int,
+    y: int,
+}
+
+newtype Id(int)
+
+fn find(m: Map<string, int>, k: string) -> int {
+    let v = m.get(k) else {
+        return -1
+    }
+    v * 10
+}
+
+@test(output = "70\n-1")
+fn nullable_unwrap() {
+    let m = map_new<string, int>()
+    m.insert("a", 7)
+    print(find(m, "a"))
+    print(find(m, "zzz"))
+}
+
+fn radius(s: Shape) -> int {
+    let Shape::Circle(r) = s else {
+        return 0
+    }
+    r
+}
+
+@test(output = "5\n0")
+fn enum_variant_miss_returns() {
+    print(radius(Shape::Circle(5)))
+    print(radius(Shape::Square(2, 3)))
+}
+
+fn first_pair(xs: [(int, int)]) -> int {
+    let (a, b) = xs.get(0) else {
+        return -1
+    }
+    a + b
+}
+
+@test(output = "30\n-1")
+fn nullable_tuple_destructure() {
+    print(first_pair([(10, 20)]))
+    print(first_pair([]))
+}
+
+@test(output = "1\n3\nskipped 1")
+fn break_and_continue_in_else() {
+    let xs = [Shape::Circle(1), Shape::Square(9, 9), Shape::Circle(3)]
+    let skipped = 0
+    for s in xs {
+        let Shape::Circle(r) = s else {
+            skipped = skipped + 1
+            continue
+        }
+        print(r)
+    }
+    print("skipped {skipped}")
+}
+
+fn sum_sides(s: Shape) -> int {
+    let Shape::Square(w, h) = s else {
+        return -1
+    }
+    w + h
+}
+
+@test(output = "7")
+fn multi_payload_bindings() {
+    print(sum_sides(Shape::Square(3, 4)))
+}
+
+fn id_or(v: Id?, fallback: int) -> int {
+    let Id(n) = v else {
+        return fallback
+    }
+    n
+}
+
+@test(output = "4\n9")
+fn nullable_newtype_pattern() {
+    print(id_or(Id(4), 9))
+    let none: Id? = null
+    print(id_or(none, 9))
+}
+
+fn x_of(p: Point?) -> int {
+    let Point { x, .. } = p else {
+        return -1
+    }
+    x
+}
+
+@test(output = "11\n-1")
+fn nullable_struct_pattern() {
+    print(x_of(Point { x: 11, y: 2 }))
+    print(x_of(null))
+}
+
+@test(output = "cleanup\ndone")
+fn defer_runs_on_else_return() {
+    print(run_with_defer())
+}
+
+fn run_with_defer() -> string {
+    defer print("cleanup")
+    let v: int? = null
+    let x = v else {
+        return "done"
+    }
+    "got {x}"
+}
+
+fn chained(m: Map<string, int>) -> int {
+    // Bindings from an earlier let-else are visible to the next statement.
+    let a = m.get("a") else {
+        return -1
+    }
+    let b = m.get("b") else {
+        return a
+    }
+    a + b
+}
+
+@test(output = "30\n10\n-1")
+fn bindings_escape_to_enclosing_scope() {
+    let m = map_new<string, int>()
+    m.insert("a", 10)
+    m.insert("b", 20)
+    print(chained(m))
+    m.remove("b")
+    print(chained(m))
+    m.remove("a")
+    print(chained(m))
+}
+
+co fn take_circles(shapes: [Shape]) -> Coroutine<int> {
+    for s in shapes {
+        // A let-else miss inside a co fn body: `continue` skips the yield.
+        let Shape::Circle(r) = s else {
+            continue
+        }
+        yield r
+    }
+}
+
+@test(output = "1\n3")
+fn let_else_in_coroutine() {
+    let c = take_circles([Shape::Circle(1), Shape::Square(2, 2), Shape::Circle(3)])
+    while let r = c.resume() {
+        print(r)
+    }
+}
+
+@test(output = "8")
+fn annotated_let_else() {
+    let v: int? = 8
+    let x: int = v else {
+        return
+    }
+    print(x)
+}

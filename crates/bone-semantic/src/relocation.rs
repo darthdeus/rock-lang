@@ -206,7 +206,9 @@ impl<'a> BodyCtx<'a> {
         let mut fresh = FxHashSet::default();
         let mut stale = FxHashSet::default();
         for (_, statement) in self.body.statement_arena.iter() {
-            if let Statement::Let { name, value } = *statement {
+            if let Statement::Let { pattern, value, .. } = *statement
+                && let Some(name) = self.body.pattern_single_bind(pattern)
+            {
                 if self
                     .bi
                     .binding_types

@@ -143,7 +143,11 @@ fn scan_returns(
         },
         HirChild::Statement(s) => match body.statement_arena[s] {
             Statement::Fn { .. } => return,
-            Statement::Let { name, value } => lets.push((name, value)),
+            Statement::Let { pattern, value, .. } => {
+                if let bone_core::hir::Pattern::Bind(name) = body.pattern_arena[pattern] {
+                    lets.push((name, value));
+                }
+            }
             Statement::Return(Some(value)) => returns.push(value),
             _ => {}
         },

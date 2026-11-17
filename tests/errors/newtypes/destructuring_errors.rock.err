@@ -2,7 +2,7 @@
 //! Tags: newtypes, destructuring, patterns
 
 //=== TEST CASE: arity_mismatch_too_many_Generic ===
-//! expect: expected CloseParen, got Comma
+//! expect: newtype pattern `UserId` takes exactly one argument
 newtype UserId(int)
 
 fn main() {

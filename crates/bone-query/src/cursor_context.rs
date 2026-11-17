@@ -11,8 +11,7 @@
 use rock_tokenizer::TokenKind;
 use skull_parser::Idx;
 use skull_parser::ast::{
-    Binding, BlockData, CallSyntax, ExprData, ExprKind, IfLetClause, ItemKind, Path, Pattern,
-    StatementKind,
+    BlockData, CallSyntax, ExprData, ExprKind, IfLetClause, ItemKind, Path, Pattern, StatementKind,
 };
 use ustr::Ustr;
 
@@ -602,7 +601,7 @@ impl CursorAst {
             };
             let (vs, ve) = self.expr(v).span.offset_range();
             if vs <= self.probe && self.probe <= ve {
-                let Binding::Ident(id) = &l.binding else {
+                let Pattern::Ident(id) = &l.pattern else {
                     return None;
                 };
                 return id.span.offset_range().1.checked_sub(1);

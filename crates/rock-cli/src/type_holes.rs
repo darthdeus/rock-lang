@@ -7,7 +7,7 @@ use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{Idx, ModuleId};
 use rock_core::{CompilerError, SourceFiles, Span};
 use skull_parser::{
-    Ast, Binding, ExprData, ExprKind, Item, ItemKind, Let, StatementKind, TypeExprKind,
+    Ast, ExprData, ExprKind, Item, ItemKind, Let, Pattern, StatementKind, TypeExprKind,
 };
 
 /// The `@test` fns of `mid` (see [`skull::module_tests_with_ids`]), rejected
@@ -61,7 +61,7 @@ fn check(ws: &Workspace, mid: ModuleId, sources: &SourceFiles) -> Result<(), Com
     // through the `let` binding it annotates.
     for (_, stmt) in ast.stmts.iter() {
         if let StatementKind::Let(Let {
-            binding: Binding::Ident(name),
+            pattern: Pattern::Ident(name),
             ty: Some(ty),
             ..
         }) = &stmt.kind

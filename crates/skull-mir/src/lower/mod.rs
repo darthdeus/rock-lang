@@ -25,8 +25,8 @@ use std::rc::Rc;
 use std::sync::OnceLock;
 
 use bone_core::hir::{
-    BinOp, BindingInfo, BindingPattern, Body, BodyOwner, BuiltinTy, Callee, Expr, Function,
-    MatchArm, Pattern, Statement, TyId, TypeCtor, TypeExpr, VariantArgs, VariantPayload,
+    BinOp, BindingInfo, Body, BodyOwner, BuiltinTy, Callee, Expr, Function, MatchArm, Pattern,
+    Statement, TyId, TypeCtor, TypeExpr, VariantArgs, VariantPayload,
 };
 use bone_core::prelude::{BoundNext, ForIterInfo, ModuleId, Span};
 use bone_core::workspace::{BodyInference, Workspace};
@@ -1274,10 +1274,19 @@ fn hash_init_stmt(
         };
     }
     match body.statement_arena[s] {
-        Statement::Let { value, .. }
-        | Statement::LetTuple { value, .. }
-        | Statement::LetNewtype { value, .. }
-        | Statement::Expr(value)
+        Statement::Let {
+            pattern,
+            value,
+            else_block,
+        } => {
+            go!(value);
+            hash_init_pattern(body, pattern, h);
+            else_block.is_some().hash(h);
+            if let Some(e) = else_block {
+                go!(e);
+            }
+        }
+        Statement::Expr(value)
         | Statement::Defer(value)
         | Statement::Return(Some(value))
         | Statement::Static { value, .. } => go!(value),
@@ -1415,12 +1424,56 @@ fn hash_init_pattern(
                 hash_init_pattern(body, s, h);
             }
         }
+        Pattern::Newtype { name, sub, .. } => {
+            58u16.hash(h);
+            name.hash(h);
+            hash_init_pattern(body, sub, h);
+        }
     }
 }
 
 /// Lower one concrete body plan while resolving every concrete callee ABI from
 /// the same graph-owned plan set. A missing selected callee is an error rather
 /// than a fallback to declaration-shaped ABI facts.
+/// Names-and-tuples view of an irrefutable `let`/`for` pattern -- the shapes
+/// loop and tuple codegen bind directly, with no match tests. A newtype is
+/// transparent at runtime, so its pattern views as its inner. `None` means the
+/// pattern needs the general match machinery.
+#[derive(Clone, Debug)]
+pub(crate) enum BindingPattern {
+    Leaf(Idx<BindingInfo>),
+    Tuple(Vec<BindingPattern>),
+}
+
+impl BindingPattern {
+    pub(crate) fn leaves(&self) -> Vec<Idx<BindingInfo>> {
+        let mut out = Vec::new();
+
+        fn go(p: &BindingPattern, out: &mut Vec<Idx<BindingInfo>>) {
+            match p {
+                BindingPattern::Leaf(b) => out.push(*b),
+                BindingPattern::Tuple(subs) => subs.iter().for_each(|s| go(s, out)),
+            }
+        }
+
+        go(self, &mut out);
+        out
+    }
+}
+
+pub(crate) fn binding_view(body: &Body, p: Idx<Pattern>) -> Option<BindingPattern> {
+    match body.pattern_arena[p] {
+        Pattern::Bind(b) => Some(BindingPattern::Leaf(b)),
+        Pattern::Newtype { sub, .. } => binding_view(body, sub),
+        Pattern::Tuple { elements } => elements
+            .into_iter()
+            .map(|e| binding_view(body, e))
+            .collect::<Option<Vec<_>>>()
+            .map(BindingPattern::Tuple),
+        _ => None,
+    }
+}
+
 pub fn lower_instance_with_plans(
     ws: &Workspace,
     scx: &ScalarCtx,

@@ -1,0 +1,116 @@
+// `let` and `for` bind through full irrefutable patterns: struct records,
+// newtypes, tuples, and their nestings. Refutable patterns in `let`/`for`
+// are rejected (tests/errors/let_refutable.rock.err).
+
+struct Point {
+    x: int,
+    y: int,
+}
+
+struct Wrapper {
+    inner: Point,
+    tag: int,
+}
+
+newtype Id(int)
+
+@test(output = "30")
+fn let_struct_shorthand() {
+    let p = Point { x: 10, y: 20 }
+    let Point { x, y } = p
+    print(x + y)
+}
+
+@test(output = "10")
+fn let_struct_rest() {
+    let p = Point { x: 10, y: 20 }
+    let Point { x, .. } = p
+    print(x)
+}
+
+@test(output = "7\n9")
+fn let_struct_renamed_fields() {
+    let p = Point { x: 7, y: 9 }
+    let Point { x: a, y: b } = p
+    print(a)
+    print(b)
+}
+
+@test(output = "42")
+fn let_nested_struct() {
+    let w = Wrapper { inner: Point { x: 5, y: 7 }, tag: 30 }
+    let Wrapper { inner: Point { x, y }, tag } = w
+    print(x + y + tag)
+}
+
+@test(output = "3")
+fn let_newtype_in_tuple() {
+    let pair = (Id(1), 2)
+    let (Id(a), b) = pair
+    print(a + b)
+}
+
+@test(output = "5")
+fn let_tuple_with_wildcard() {
+    let (a, _) = (5, 99)
+    print(a)
+}
+
+@test(output = "11")
+fn let_struct_in_tuple() {
+    let (Point { x, y }, one) = (Point { x: 4, y: 6 }, 1)
+    print(x + y + one)
+}
+
+@test(output = "60")
+fn for_struct_pattern() {
+    let pts = [Point { x: 10, y: 20 }, Point { x: 10, y: 20 }]
+    let sum = 0
+    for Point { x, y } in pts {
+        sum = sum + x + y
+    }
+    print(sum)
+}
+
+@test(output = "6")
+fn for_newtype_pattern() {
+    let ids = [Id(1), Id(2), Id(3)]
+    let sum = 0
+    for Id(n) in ids {
+        sum = sum + n
+    }
+    print(sum)
+}
+
+@test(output = "3")
+fn for_wildcard() {
+    let n = 0
+    for _ in [10, 20, 30] {
+        n = n + 1
+    }
+    print(n)
+}
+
+@test(output = "9")
+fn match_newtype_pattern() {
+    let v = Id(9)
+    let n = match v {
+        Id(n) => n,
+    }
+    print(n)
+}
+
+@test(output = "4")
+fn while_let_newtype_pattern() {
+    let xs = [Id(4)]
+    while let Id(n) = xs.pop() {
+        print(n)
+    }
+}
+
+@test(output = "3")
+fn annotated_tuple_let() {
+    // The annotation describes the whole value and is checked against it.
+    let (a, b): (int, int) = (1, 2)
+    print(a + b)
+}

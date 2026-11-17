@@ -3,9 +3,9 @@ use bone_core::suspension::{SuspensionPolicy, uses_after_suspension};
 
 use bone_core::{
     hir::{
-        AsKind, BindingInfo, BindingKind, BindingPattern, BuiltinTy, CallFamily, Callee,
-        DecoratorDef, Function, GlobalDef, InterpPart, Pattern, StructDef, StructFieldDef, TyId,
-        TypeCtor, TypeExpr, VarId, VariantArgs, VariantPayload,
+        AsKind, BindingInfo, BindingKind, BuiltinTy, CallFamily, Callee, DecoratorDef, Function,
+        GlobalDef, InterpPart, Pattern, StructDef, StructFieldDef, TyId, TypeCtor, TypeExpr, VarId,
+        VariantArgs, VariantPayload,
     },
     prelude::*,
 };

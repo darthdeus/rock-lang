@@ -343,7 +343,55 @@ impl<'a> Builder<'a> {
             // narrows it wherever a real expression is in hand.
             self.cur_span = self.body.statement_spans.get(sidx).copied();
             match self.body.statement_arena[sidx].clone() {
-                Statement::Let { name, value } => {
+                Statement::Let {
+                    pattern,
+                    value,
+                    else_block,
+                } => {
+                    if let Some(else_e) = else_block {
+                        self.lower_let_else(pattern, value, else_e)?;
+                        continue;
+                    }
+                    // `let Wrapper(x) = e` — a transparent newtype's runtime
+                    // value IS the inner, so `x` binds directly to the value.
+                    if let Pattern::Newtype { sub, .. } = self.body.pattern_arena[pattern]
+                        && let Pattern::Bind(var) = self.body.pattern_arena[sub]
+                    {
+                        let v = self.lower_expr(value)?;
+                        let cell = self.new_binding_cell(
+                            var,
+                            self.body.binding_arena[var].name,
+                            self.binding_ty(var),
+                            crate::names::ustr(""),
+                        );
+                        self.store_cell(cell, v);
+                        self.binds.insert(raw(var), cell);
+                        continue;
+                    }
+                    let name = match binding_view(self.body, pattern) {
+                        Some(BindingPattern::Leaf(name)) => name,
+                        // `let (a, b) = e` — destructure via TupleIndex into a
+                        // cell per leaf (the same machinery `for (k,v)` uses).
+                        Some(vars @ BindingPattern::Tuple(_)) => {
+                            match self.expr_tuple_shape(value)?.filter(TupleRetShape::splats) {
+                                Some(shape) => {
+                                    let r = self.lower_expr_repr(value)?.into_value();
+                                    self.bind_tuple_repr(&vars, &shape, r)?;
+                                }
+                                None => {
+                                    let v = self.lower_expr(value)?;
+                                    self.bind_for_pattern(&vars, v);
+                                }
+                            }
+                            continue;
+                        }
+                        // A record or nested pattern destructures through the
+                        // match machinery; bone proved it irrefutable.
+                        None => {
+                            self.lower_let_match(pattern, value)?;
+                            continue;
+                        }
+                    };
                     if self.lower_flat_let(name, value)? {
                         continue;
                     }
@@ -575,33 +623,6 @@ impl<'a> Builder<'a> {
                         frame.push((body, pending));
                     }
                 }
-                // `let (a, b) = e` — destructure via TupleIndex into a cell per
-                // leaf (the same machinery `for (k,v)` uses).
-                Statement::LetTuple { vars, value } => {
-                    match self.expr_tuple_shape(value)?.filter(TupleRetShape::splats) {
-                        Some(shape) => {
-                            let r = self.lower_expr_repr(value)?.into_value();
-                            self.bind_tuple_repr(&vars, &shape, r)?;
-                        }
-                        None => {
-                            let v = self.lower_expr(value)?;
-                            self.bind_for_pattern(&vars, v);
-                        }
-                    }
-                }
-                // `let Wrapper(x) = e` — a transparent newtype's runtime value IS
-                // the inner, so `x` binds directly to the value.
-                Statement::LetNewtype { var, value, .. } => {
-                    let v = self.lower_expr(value)?;
-                    let cell = self.new_binding_cell(
-                        var,
-                        self.body.binding_arena[var].name,
-                        self.binding_ty(var),
-                        crate::names::ustr(""),
-                    );
-                    self.store_cell(cell, v);
-                    self.binds.insert(raw(var), cell);
-                }
                 Statement::Static { name, value } => {
                     self.lower_static(name, value)?;
                 }
@@ -616,7 +637,14 @@ impl<'a> Builder<'a> {
                         return Ok(true);
                     }
                 }
-                Statement::For { vars, iter, body } => {
+                Statement::For {
+                    pattern,
+                    iter,
+                    body,
+                } => {
+                    let vars = binding_view(self.body, pattern).ok_or_else(|| {
+                        gap("a `for` pattern beyond names (bone-lower desugars these)")
+                    })?;
                     self.lower_for(vars, iter, body)?;
                 }
                 Statement::WhileLet {

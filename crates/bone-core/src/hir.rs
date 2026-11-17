@@ -677,24 +677,37 @@ pub struct ParamDecl {
     pub annotations: Vec<Annotation>,
 }
 
-#[derive(Clone, Debug)]
-pub enum BindingPattern {
-    Leaf(Idx<BindingInfo>),
-    Tuple(Vec<BindingPattern>),
-}
+impl Body {
+    /// The binding of a plain single-name pattern (`let x = ..`), if that is
+    /// what `p` is.
+    pub fn pattern_single_bind(&self, p: Idx<Pattern>) -> Option<Idx<BindingInfo>> {
+        match self.pattern_arena[p] {
+            Pattern::Bind(b) => Some(b),
+            _ => None,
+        }
+    }
 
-impl BindingPattern {
-    pub fn leaves(&self) -> Vec<Idx<BindingInfo>> {
+    /// Every binding a pattern introduces, in source order.
+    pub fn pattern_bindings(&self, p: Idx<Pattern>) -> Vec<Idx<BindingInfo>> {
         let mut out = Vec::new();
 
-        fn go(p: &BindingPattern, out: &mut Vec<Idx<BindingInfo>>) {
-            match p {
-                BindingPattern::Leaf(b) => out.push(*b),
-                BindingPattern::Tuple(subs) => subs.iter().for_each(|s| go(s, out)),
+        fn go(body: &Body, p: Idx<Pattern>, out: &mut Vec<Idx<BindingInfo>>) {
+            match body.pattern_arena[p] {
+                Pattern::Bind(b) => out.push(b),
+                Pattern::Wildcard | Pattern::Literal(_) | Pattern::Range { .. } => {}
+                Pattern::EnumVariant { sub, .. } => sub.into_iter().for_each(|s| go(body, s, out)),
+                Pattern::Newtype { sub, .. } => go(body, sub, out),
+                Pattern::Record { fields, .. } => fields
+                    .into_iter()
+                    .for_each(|f| go(body, body.record_pat_field_arena[f].pat, out)),
+                Pattern::Tuple { elements }
+                | Pattern::Or {
+                    alternatives: elements,
+                } => elements.into_iter().for_each(|s| go(body, s, out)),
             }
         }
 
-        go(self, &mut out);
+        go(self, p, &mut out);
         out
     }
 }
@@ -1064,20 +1077,13 @@ pub fn overloadable_operator_symbols() -> String {
 
 #[derive(Clone, Debug)]
 pub enum Statement {
+    /// `let pattern = value [else { .. }]`. Without `else` the pattern must
+    /// be irrefutable (checked in bone-inference); with `else` the block runs
+    /// on a miss and must diverge.
     Let {
-        name: Idx<BindingInfo>,
+        pattern: Idx<Pattern>,
         value: Idx<Expr>,
-    },
-
-    LetTuple {
-        vars: BindingPattern,
-        value: Idx<Expr>,
-    },
-
-    LetNewtype {
-        newtype_name: Ustr,
-        var: Idx<BindingInfo>,
-        value: Idx<Expr>,
+        else_block: Option<Idx<Expr>>,
     },
 
     Static {
@@ -1101,8 +1107,11 @@ pub enum Statement {
 
     Defer(Idx<Expr>),
 
+    /// `for pattern in iter { body }`. The pattern must be irrefutable; a
+    /// pattern beyond names and tuples is desugared in bone-lower to a hidden
+    /// element binding plus a destructuring `let` at the body's head.
     For {
-        vars: BindingPattern,
+        pattern: Idx<Pattern>,
         iter: Idx<Expr>,
         body: Idx<Expr>,
     },
@@ -1254,6 +1263,14 @@ pub enum Pattern {
 
     Or {
         alternatives: IdxRange<Pattern>,
+    },
+
+    /// `Name(sub)` where `Name` is a transparent newtype: the runtime value IS
+    /// the wrapped value, so matching binds straight through with no test.
+    Newtype {
+        name: Ustr,
+        name_span: Span,
+        sub: Idx<Pattern>,
     },
 }
 

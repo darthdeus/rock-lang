@@ -1,0 +1,44 @@
+//! Error: refutable patterns in `let`/`for` are rejected
+//! Tags: patterns, let
+
+// A `let` or `for` pattern must match every value of its type; a pattern
+// that can fail belongs in `match`, `if let`, or `let ... else`.
+
+//=== TEST CASE: let_enum_variant_Refutable ===
+//! expect: can fail
+enum Opt { None, Some(int) }
+fn main() {
+    let v = Opt::Some(1)
+    let Opt::Some(x) = v
+    print(x)
+}
+
+//=== TEST CASE: let_literal_Refutable ===
+//! expect: can fail
+fn main() {
+    let 5 = 5
+}
+
+//=== TEST CASE: let_tuple_literal_elem_Refutable ===
+//! expect: can fail
+fn main() {
+    let (a, 3) = (1, 3)
+    print(a)
+}
+
+//=== TEST CASE: for_enum_variant_Refutable ===
+//! expect: can fail
+enum Opt { None, Some(int) }
+fn main() {
+    let xs = [Opt::Some(1)]
+    for Opt::Some(x) in xs {
+        print(x)
+    }
+}
+
+//=== TEST CASE: annotated_tuple_mismatch_TypeMismatch ===
+//! expect: mismatch
+fn main() {
+    let (a, b): (int, string) = (1, 2)
+    print(a)
+}

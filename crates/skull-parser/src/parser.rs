@@ -2532,7 +2532,7 @@ impl<'a> Parser<'a> {
         match self.kind() {
             TokenKind::Let => {
                 self.advance();
-                let binding = self.parse_binding()?;
+                let pattern = self.parse_pattern()?;
                 let ty = if self.eat(TokenKind::Colon) {
                     Some(self.parse_type()?)
                 } else {
@@ -2543,15 +2543,24 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
+                // `let pat = value else { .. }`. `parse_expr` never consumes a
+                // bare `else`, so this is unambiguous.
+                let else_block = if value.is_some() && self.kind() == TokenKind::Else {
+                    self.advance();
+                    Some(self.parse_block()?)
+                } else {
+                    None
+                };
                 let span = self.span_from(start);
                 Ok(self.ast.stmt(
                     span,
                     StatementKind::Let(Let {
                         span,
                         keyword_span: Some(start),
-                        binding,
+                        pattern,
                         ty,
                         value,
+                        else_block,
                     }),
                 ))
             }
@@ -2593,7 +2602,7 @@ impl<'a> Parser<'a> {
             TokenKind::For => {
                 self.advance();
                 self.skip_comments(); // `for /* c */ v in /* c */ arr`
-                let var = self.parse_binding()?;
+                let pattern = self.parse_pattern()?;
                 // Optional `: T` element type annotation.
                 let ty = if self.eat(TokenKind::Colon) {
                     Some(self.parse_type()?)
@@ -2611,7 +2620,7 @@ impl<'a> Parser<'a> {
                     StatementKind::For(For {
                         span,
                         keyword_span: Some(start),
-                        var,
+                        pattern,
                         ty,
                         iter,
                         body,
@@ -2727,35 +2736,6 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse a `let` / `for` binding target: `x`, `(a, b)`, or `Name(x)`.
-    fn parse_binding(&mut self) -> PResult<Binding> {
-        if self.kind() == TokenKind::OpenParen {
-            self.advance();
-            let mut parts = Vec::new();
-            while self.kind() != TokenKind::CloseParen && !self.at_end() {
-                parts.push(self.parse_binding()?);
-                if !self.eat(TokenKind::Comma) {
-                    break;
-                }
-            }
-            self.expect(TokenKind::CloseParen)?;
-            Ok(Binding::Tuple(parts))
-        } else {
-            let ident = self.expect_ident()?;
-            if self.kind() == TokenKind::OpenParen {
-                // newtype binding `Name(inner)`
-                self.advance();
-                let binding = self.expect_ident()?;
-                self.expect(TokenKind::CloseParen)?;
-                Ok(Binding::Newtype {
-                    name: ident,
-                    binding,
-                })
-            } else {
-                Ok(Binding::Ident(ident))
-            }
-        }
-    }
-
     /// True when the current position ends a statement (closing brace,
     /// semicolon, EOF, a same-line trailing comment, or a preceding newline).
     fn stmt_terminator(&self) -> bool {

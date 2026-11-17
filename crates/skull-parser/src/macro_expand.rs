@@ -598,23 +598,6 @@ fn is_shadowed(stack: &[ShadowScope], name: Ustr) -> bool {
     stack.iter().any(|s| s.contains(&name))
 }
 
-/// Collect the names a `let`/`for` target binds.
-fn shadow_binding(b: &Binding, scope: &mut ShadowScope) {
-    match b {
-        Binding::Ident(id) => {
-            scope.insert(id.name);
-        }
-        Binding::Tuple(bs) => {
-            for b in bs {
-                shadow_binding(b, scope);
-            }
-        }
-        Binding::Newtype { binding, .. } => {
-            scope.insert(binding.name);
-        }
-    }
-}
-
 /// Collect the names a match/if-let/while-let pattern binds.
 fn shadow_pattern(p: &Pattern, scope: &mut ShadowScope) {
     match p {
@@ -675,12 +658,17 @@ fn expand_stmt(
         StatementKind::Let(l) => {
             // RHS sees the outer scope; the binding shadows for the rest of the
             // current block (the top scope frame).
-            let (value, binding) = (l.value, l.binding.clone());
+            let (value, else_block, pattern) = (l.value, l.else_block, l.pattern.clone());
             if let Some(v) = value {
                 expand_expr(ast, v, reg, depth, stack);
             }
+            if let Some(b) = else_block {
+                stack.push(ShadowScope::default());
+                expand_block(ast, b, reg, depth, stack);
+                stack.pop();
+            }
             let top = stack.last_mut().expect("expand_stmt: block scope present");
-            shadow_binding(&binding, top);
+            shadow_pattern(&pattern, top);
         }
         StatementKind::Static(st) => {
             let (value, name) = (st.value, st.name.name);
@@ -689,10 +677,10 @@ fn expand_stmt(
             top.insert(name);
         }
         StatementKind::For(f) => {
-            let (iter, body, var) = (f.iter, f.body, f.var.clone());
+            let (iter, body, pattern) = (f.iter, f.body, f.pattern.clone());
             expand_expr(ast, iter, reg, depth, stack);
             let mut scope = ShadowScope::default();
-            shadow_binding(&var, &mut scope);
+            shadow_pattern(&pattern, &mut scope);
             stack.push(scope);
             expand_block(ast, body, reg, depth, stack);
             stack.pop();
@@ -1257,13 +1245,6 @@ impl Rewrite for Instantiation {
         let scope = self.scopes.last_mut().expect("binder outside a scope");
         scope.insert(*name, fresh);
         *name = fresh;
-    }
-
-    fn bind_binding(&mut self, b: &mut Binding) {
-        match b {
-            Binding::Ident(id) | Binding::Newtype { binding: id, .. } => self.bind(&mut id.name),
-            Binding::Tuple(bs) => bs.iter_mut().for_each(|b| self.bind_binding(b)),
-        }
     }
 
     fn bind_pattern(&mut self, p: &mut Pattern) {

@@ -221,10 +221,18 @@ impl Body {
     ) -> Result<(), E> {
         let mut ex = |x: Idx<Expr>| f(HirChild::Expr(x));
         match self.statement_arena[s] {
-            Statement::Let { value, .. }
-            | Statement::LetTuple { value, .. }
-            | Statement::LetNewtype { value, .. }
-            | Statement::Static { value, .. }
+            Statement::Let {
+                pattern,
+                value,
+                else_block,
+            } => {
+                f(HirChild::Expr(value))?;
+                f(HirChild::Pattern(pattern))?;
+                if let Some(e) = else_block {
+                    f(HirChild::Expr(e))?;
+                }
+            }
+            Statement::Static { value, .. }
             | Statement::Expr(value)
             | Statement::Defer(value)
             | Statement::Return(Some(value))
@@ -279,6 +287,7 @@ impl Body {
                     f(HirChild::Pattern(self.record_pat_field_arena[fld].pat))?;
                 }
             }
+            Pattern::Newtype { sub, .. } => f(HirChild::Pattern(sub))?,
         }
         Ok(())
     }

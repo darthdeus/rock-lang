@@ -150,13 +150,13 @@ impl Rows {
     /// one rule -- an `Entity<T>` leaf is the handle, never the row.
     fn seed_loops(&mut self, ws: &Workspace, bi: &BodyInference, body: &Body) {
         for (_, stmt) in body.statement_arena.iter() {
-            let Statement::For { vars, iter, .. } = stmt else {
+            let Statement::For { pattern, iter, .. } = stmt else {
                 continue;
             };
             if !iterates_an_arena(ws, bi, body, *iter) {
                 continue;
             }
-            for leaf in vars.leaves() {
+            for leaf in body.pattern_bindings(*pattern) {
                 if !is_handle(ws, bi, bi.binding_types.get(leaf).copied()) {
                     self.bindings.insert(leaf);
                 }
@@ -210,17 +210,25 @@ impl Rows {
 
         for (_, stmt) in body.statement_arena.iter() {
             match stmt {
-                Statement::Let { name, value } | Statement::Static { name, value } => {
+                Statement::Static { name, value } => {
                     if self.exprs.contains(value) {
                         self.bindings.insert(*name);
                     }
                 }
-                Statement::LetTuple { vars, value } => {
-                    if let Some(&i) = self.tuples.get(value) {
-                        let leaves = vars.leaves();
-                        if let Some(&leaf) = leaves.get(i) {
-                            self.bindings.insert(leaf);
-                        }
+                Statement::Let { pattern, value, .. } => {
+                    if self.exprs.contains(value)
+                        && let Some(name) = body.pattern_single_bind(*pattern)
+                    {
+                        self.bindings.insert(name);
+                    }
+                    // A tuple-let picks out the aliased element.
+                    if let Some(&i) = self.tuples.get(value)
+                        && let bone_core::hir::Pattern::Tuple { elements } =
+                            body.pattern_arena[*pattern]
+                        && let Some(ep) = elements.into_iter().nth(i)
+                        && let bone_core::hir::Pattern::Bind(leaf) = body.pattern_arena[ep]
+                    {
+                        self.bindings.insert(leaf);
                     }
                 }
                 _ => {}

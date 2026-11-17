@@ -201,6 +201,23 @@ applications. Function type parameters do not support defaults.
 A newtype wraps exactly one type. To wrap several values, use a tuple such as
 `newtype PairId((int, string))` or define a struct.
 
+## Patterns in `let` and `for`
+
+`let` and `for` bind through the same patterns `match` uses. Without an
+`else` the pattern must be irrefutable -- provably matching every value of
+its type: names, `_`, tuples, struct records (`let Point { x, .. } = p`),
+newtypes (`let Id(n) = id`), and their nestings. Refutability is decided by
+the match exhaustiveness checker on the one-pattern matrix, so a
+single-variant enum pattern is irrefutable too.
+
+`let <pattern> = value else { ... }` accepts refutable patterns and
+nullable scrutinees: a nullable value unwraps exactly as in `if let`, the
+`else` block runs on a miss and must diverge (its type must be `never`:
+end with `return`, `break`, `continue`, or a never-returning call), and
+the bindings join the enclosing scope. An `else` that can never run (an
+irrefutable pattern over a non-nullable value) is rejected. `let ... else`
+is a statement; in expression position use `if let` or `match`.
+
 ## Iterators
 
 A collection can define `iter(collection)` to return an iterator. An iterator

@@ -73,7 +73,6 @@ pub(crate) trait Rewrite {
     fn enter(&mut self) {}
     fn exit(&mut self) {}
     fn bind(&mut self, _name: &mut Ustr) {}
-    fn bind_binding(&mut self, _b: &mut Binding) {}
     fn bind_pattern(&mut self, _p: &mut Pattern) {}
     /// The name a reference to `name` takes.
     fn resolve(&self, name: Ustr) -> Ustr {
@@ -297,14 +296,16 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
             StatementKind::Let(l) => {
                 let ty = l.ty.map(|t| self.ty(t));
                 let value = l.value.map(|e| self.expr(e));
-                let mut binding = l.binding.clone();
-                self.rw.bind_binding(&mut binding);
+                let mut pattern = self.pattern(&l.pattern);
+                self.rw.bind_pattern(&mut pattern);
+                let else_block = l.else_block.map(|b| self.block(b));
                 StatementKind::Let(Let {
                     span: l.span,
                     keyword_span: l.keyword_span,
-                    binding,
+                    pattern,
                     ty,
                     value,
+                    else_block,
                 })
             }
             StatementKind::Static(st) => {
@@ -345,12 +346,12 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
             StatementKind::For(f) => {
                 let ty = f.ty.map(|t| self.ty(t));
                 let iter = self.expr(f.iter);
-                let mut var = f.var.clone();
+                let mut pattern = self.pattern(&f.pattern);
                 StatementKind::For(For {
                     span: f.span,
                     keyword_span: f.keyword_span,
-                    body: self.scoped(f.body, |rw| rw.bind_binding(&mut var)),
-                    var,
+                    body: self.scoped(f.body, |rw| rw.bind_pattern(&mut pattern)),
+                    pattern,
                     ty,
                     iter,
                 })

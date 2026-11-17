@@ -4,7 +4,7 @@
 //=== TEST CASE: for_tuple_arity_mismatch_Generic ===
 // Pattern arity must match the element's tuple arity. A `Map<K, V>` yields a
 // 2-tuple; a 3-binding pattern must be rejected.
-//! expect: tuple binding count mismatch: expected 3, got 2
+//! expect: tuple pattern expected 2 elements, but got 3
 fn f(m: Map<int, string>) -> int {
     for (a, b, c) in m {
         let p = a

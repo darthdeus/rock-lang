@@ -3,7 +3,7 @@ pub mod resolve;
 mod scope_probe_tests;
 
 use skull_parser::{
-    Annotation, Ast, Binding, BlockData, DeferKind, ExprData, ExprKind, FunctionDef, IfLetClause,
+    Annotation, Ast, BlockData, DeferKind, ExprData, ExprKind, FunctionDef, IfLetClause,
     StatementData, StatementKind, TokenKind, TypeExprData,
 };
 use ustr::ustr;
@@ -11,10 +11,9 @@ use ustr::ustr;
 use bone_core::{
     annotations::{AnnoPos, json_field_name, validate_annotations},
     hir::{
-        AsKind, BindingInfo, BindingKind, BindingPattern, Callee, DecoratorDef, EnumVariantDef,
-        Expr, Function, GlobalDef, InterpPart, InterpSpec, MatchArm, ParamDecl, Pattern,
-        RecordPatField, Scope, Statement, StructLitField, TyId, TypeCtor, TypeExpr, VarId,
-        VariantArgs, VariantPayload,
+        AsKind, BindingInfo, BindingKind, Callee, DecoratorDef, EnumVariantDef, Expr, Function,
+        GlobalDef, InterpPart, InterpSpec, MatchArm, ParamDecl, Pattern, RecordPatField, Scope,
+        Statement, StructLitField, TyId, TypeCtor, TypeExpr, VarId, VariantArgs, VariantPayload,
     },
     prelude::*,
 };
@@ -682,56 +681,6 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         idx
     }
 
-    pub(crate) fn bind_let(
-        &mut self,
-        body: &mut Body,
-        name: Ustr,
-        span: Span,
-        scope: Idx<Scope>,
-    ) -> Idx<BindingInfo> {
-        let var = self.alloc_binding(
-            body,
-            BindingInfo {
-                name,
-                kind: hir::BindingKind::Let,
-                declared_ty: None,
-                span,
-            },
-            span,
-        );
-
-        body.scope_arena[scope].bindings.insert(name, var);
-        var
-    }
-
-    pub(crate) fn lower_pattern_bindings(
-        &mut self,
-        body: &mut Body,
-        binding: &Binding,
-        scope: Idx<Scope>,
-    ) -> Result<BindingPattern, CompilerError> {
-        match &binding {
-            Binding::Ident(id) => Ok(BindingPattern::Leaf(
-                self.bind_let(body, id.name, id.span, scope),
-            )),
-
-            Binding::Tuple(t) => {
-                let mut subs = Vec::with_capacity(t.len());
-
-                for b in t.iter() {
-                    // recursion
-                    subs.push(self.lower_pattern_bindings(body, b, scope)?);
-                }
-
-                Ok(BindingPattern::Tuple(subs))
-            }
-
-            Binding::Newtype { binding: nb, .. } => Ok(BindingPattern::Leaf(
-                self.bind_let(body, nb.name, nb.span, scope),
-            )),
-        }
-    }
-
     pub(crate) fn lower_type_exprs_to_range(
         &mut self,
         a: &Ast,
@@ -1172,9 +1121,23 @@ pub(crate) fn lower_block(
     parent: Idx<Scope>,
     block: &Idx<BlockData>,
 ) -> Result<Expr, CompilerError> {
+    lower_block_with_prelude(ctx, a, body, parent, block, None)
+}
+
+/// [`lower_block`], with an already-lowered statement spliced in ahead of the
+/// block's own (the `for`-pattern destructure).
+pub(crate) fn lower_block_with_prelude(
+    ctx: &mut LowerCtx,
+    a: &Ast,
+    body: &mut Body,
+    parent: Idx<Scope>,
+    block: &Idx<BlockData>,
+    prelude: Option<(Statement, Span)>,
+) -> Result<Expr, CompilerError> {
     let scope = body.alloc_child_scope(parent);
 
-    let (statements, tail) = lower_statements(ctx, a, body, scope, &a.b(block).statements)?;
+    let (statements, tail) =
+        lower_statements(ctx, a, body, scope, &a.b(block).statements, prelude)?;
 
     Ok(Expr::Block { statements, tail })
 }
@@ -1236,43 +1199,44 @@ pub(crate) fn lower_statement_value(
                 None
             };
 
-            match &l.binding {
-                Binding::Ident(ident) => {
-                    let binding = BindingInfo {
-                        name: ident.name,
-                        kind: hir::BindingKind::Let,
-                        declared_ty,
-                        span: ident.span,
-                    };
+            // The else block runs on a pattern miss, so it must not see the
+            // pattern's bindings: lower it before the pattern binds `scope`.
+            let else_block = match &l.else_block {
+                Some(b) => {
+                    let e = lower_block(ctx, a, body, scope, b)?;
+                    Some(ctx.alloc_block_expr(body, e, a.b(b)))
+                }
+                None => None,
+            };
 
-                    let binding = ctx.alloc_binding(body, binding, ident.span);
+            let pat = lower_pattern_value(ctx, a, body, scope, &l.pattern)?;
+            let pattern = body.pattern_arena.alloc(pat);
+            normalize_binding_wildcards(ctx, body, pattern, l.span);
 
-                    body.scope_arena[scope].bindings.insert(ident.name, binding);
-
-                    Statement::Let {
-                        name: binding,
-                        value: value_idx,
+            let mut value_idx = value_idx;
+            if let Some(ty) = declared_ty {
+                match body.pattern_single_bind(pattern) {
+                    Some(b) => body.binding_arena[b].declared_ty = Some(ty),
+                    // `let (a, b): (int, int) = e` — the annotation describes
+                    // the whole value, so check it as an ascription.
+                    None => {
+                        value_idx = ctx.alloc_expr(
+                            body,
+                            Expr::As {
+                                value: value_idx,
+                                target: ty,
+                                kind: AsKind::Ascribe,
+                            },
+                            l.span,
+                        )
                     }
                 }
+            }
 
-                Binding::Tuple(..) => {
-                    let vars = ctx.lower_pattern_bindings(body, &l.binding, scope)?;
-                    Statement::LetTuple {
-                        vars,
-                        value: value_idx,
-                    }
-                }
-
-                Binding::Newtype { name, binding } => {
-                    let var = ctx.bind_let(body, binding.name, binding.span, scope);
-                    let key = ctx.resolve_bare_key(name.name, name.span)?;
-
-                    Statement::LetNewtype {
-                        newtype_name: key,
-                        var,
-                        value: value_idx,
-                    }
-                }
+            Statement::Let {
+                pattern,
+                value: value_idx,
+                else_block,
             }
         }
 
@@ -1371,11 +1335,53 @@ pub(crate) fn lower_statement_value(
 
             let loop_scope = body.alloc_child_scope(scope);
 
-            let vars = ctx.lower_pattern_bindings(body, &f.var, loop_scope)?;
-            let body_expr = lower_block(ctx, a, body, loop_scope, &f.body)?;
-            let body = ctx.alloc_block_expr(body, body_expr, a.b(&f.body));
+            let pat = lower_pattern_value(ctx, a, body, loop_scope, &f.pattern)?;
+            let pattern = body.pattern_arena.alloc(pat);
+            normalize_binding_wildcards(ctx, body, pattern, f.span);
 
-            Statement::For { vars, iter, body }
+            if pattern_is_names_only(body, pattern) {
+                let body_expr = lower_block(ctx, a, body, loop_scope, &f.body)?;
+                let body = ctx.alloc_block_expr(body, body_expr, a.b(&f.body));
+                Statement::For {
+                    pattern,
+                    iter,
+                    body,
+                }
+            } else {
+                // Loop codegen wants a plain element binding; anything richer
+                // destructures through a `let` at the body's head.
+                let elem = ctx.alloc_binding(
+                    body,
+                    BindingInfo {
+                        name: ustr::ustr("__for_elem"),
+                        kind: hir::BindingKind::Let,
+                        declared_ty: None,
+                        span: f.span,
+                    },
+                    f.span,
+                );
+                let elem_pat = body.pattern_arena.alloc(hir::Pattern::Bind(elem));
+                let elem_var = ctx.alloc_expr(body, Expr::Var(elem), f.span);
+                let destructure = Statement::Let {
+                    pattern,
+                    value: elem_var,
+                    else_block: None,
+                };
+                let body_expr = lower_block_with_prelude(
+                    ctx,
+                    a,
+                    body,
+                    loop_scope,
+                    &f.body,
+                    Some((destructure, f.span)),
+                )?;
+                let body = ctx.alloc_block_expr(body, body_expr, a.b(&f.body));
+                Statement::For {
+                    pattern: elem_pat,
+                    iter,
+                    body,
+                }
+            }
         }
 
         StatementKind::While(w) => {
@@ -3211,8 +3217,12 @@ fn lower_statements(
     body: &mut Body,
     scope: Idx<Scope>,
     statements: &[Idx<StatementData>],
+    prelude: Option<(Statement, Span)>,
 ) -> Result<(IdxRange<Statement>, Option<Idx<Expr>>), CompilerError> {
     let mut lowered = Vec::new();
+    if let Some((s, span)) = prelude {
+        lowered.push((s, span));
+    }
     let mut tail = None;
 
     let tail_pos = statements
@@ -3419,6 +3429,55 @@ fn resolve_pattern_path<'p>(
     }
 }
 
+/// Whether a lowered pattern is names and tuples of names only -- the shapes
+/// loop codegen binds directly (anything richer destructures via a `let`).
+fn pattern_is_names_only(body: &Body, p: Idx<Pattern>) -> bool {
+    match body.pattern_arena[p] {
+        Pattern::Bind(_) => true,
+        Pattern::Tuple { elements } => elements.into_iter().all(|e| pattern_is_names_only(body, e)),
+        _ => false,
+    }
+}
+
+/// Rewrite `_` holes in a `let`/`for` pattern into anonymous bindings, the
+/// form the single-binding and tuple fast paths expect. Or-patterns cannot
+/// bind, so their holes stay wildcards.
+fn normalize_binding_wildcards(ctx: &mut LowerCtx, body: &mut Body, p: Idx<Pattern>, span: Span) {
+    match body.pattern_arena[p] {
+        Pattern::Wildcard => {
+            let b = ctx.alloc_binding(
+                body,
+                BindingInfo {
+                    name: ustr::ustr("_"),
+                    kind: hir::BindingKind::Let,
+                    declared_ty: None,
+                    span,
+                },
+                span,
+            );
+            body.pattern_arena[p] = Pattern::Bind(b);
+        }
+        Pattern::Bind(_) | Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Or { .. } => {}
+        Pattern::EnumVariant { sub, .. } => {
+            for s in sub {
+                normalize_binding_wildcards(ctx, body, s, span);
+            }
+        }
+        Pattern::Newtype { sub, .. } => normalize_binding_wildcards(ctx, body, sub, span),
+        Pattern::Record { fields, .. } => {
+            for f in fields {
+                let sub = body.record_pat_field_arena[f].pat;
+                normalize_binding_wildcards(ctx, body, sub, span);
+            }
+        }
+        Pattern::Tuple { elements } => {
+            for e in elements {
+                normalize_binding_wildcards(ctx, body, e, span);
+            }
+        }
+    }
+}
+
 fn lower_pattern_value(
     ctx: &mut LowerCtx,
     a: &Ast,
@@ -3445,6 +3504,29 @@ fn lower_pattern_value(
             Pattern::Bind(b)
         }
         skull_parser::Pattern::PathVariant { path, args } => {
+            // A newtype name takes precedence over shorthand enum inference.
+            if path.segments.len() == 1
+                && !path.from_root
+                && let Some(subs) = args
+                && let segment = &path.segments[0]
+                && let Ok(key) = ctx.resolve_bare_key(segment.name, segment.span)
+                && ctx.workspace.newtypes_by_name.contains_key(&key)
+            {
+                if subs.len() != 1 {
+                    comp_error!(
+                        segment.span,
+                        "newtype pattern `{}` takes exactly one argument",
+                        segment.name
+                    );
+                }
+                let sub = lower_pattern_value(ctx, a, body, scope, &subs[0])?;
+                let sub = body.pattern_arena.alloc(sub);
+                return Ok(Pattern::Newtype {
+                    name: key,
+                    name_span: segment.span,
+                    sub,
+                });
+            }
             // A single unrooted segment preserves shorthand enum inference;
             // longer paths resolve the enum and variant through the package.
             let (enum_name, enum_name_span, variant, variant_span) =
@@ -3461,6 +3543,7 @@ fn lower_pattern_value(
                     let (enum_span, variant_span) = variant_path_spans(path);
                     (Some(enum_key), Some(enum_span), variant, variant_span)
                 };
+
             let sub = match args {
                 None => IdxRange::new_empty(),
                 Some(pats) => {
@@ -4116,10 +4199,12 @@ fn lower_compound_assign_with_temps(
                 span: part.span,
             });
             body.binding_spans.insert(binding, part.span);
+            let pattern = body.pattern_arena.alloc(Pattern::Bind(binding));
             statements.push((
                 Statement::Let {
-                    name: binding,
+                    pattern,
                     value,
+                    else_block: None,
                 },
                 part.span,
             ));
