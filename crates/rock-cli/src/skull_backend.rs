@@ -59,14 +59,17 @@ struct CliCompileHost<'a> {
     lint_scope: crate::lint_pass::Scope,
     comptime: CliComptime<'a>,
     prepare_timings: Vec<(&'static str, std::time::Duration)>,
-    accessors: AccessorPlanning,
+    emission: CliEmission<'a>,
 }
 
-/// Whether the host plans the global accessor metadata beside emission.
-enum AccessorPlanning {
-    Skip,
-    BesideEmit,
-    Planned(std::result::Result<String, CompilerError>),
+enum CliEmission<'a> {
+    Program,
+    WithAccessors,
+    Accessors(std::result::Result<String, CompilerError>),
+    PackageTests {
+        dir: &'a str,
+        tests: Vec<(skull_mir::mir::FuncRef, skull::SkullTest)>,
+    },
 }
 
 enum CliComptime<'a> {
@@ -92,6 +95,10 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
     }
 
     fn phase(&mut self, phase: skull::pipeline::Phase<'_>) {
+        // Package tests do not contribute to the invocation compile budget.
+        if matches!(self.emission, CliEmission::PackageTests { .. }) {
+            return;
+        }
         use skull::pipeline::Phase;
         match phase {
             Phase::Parsed => crate::compile_budget::phase("parse+stdlib"),
@@ -190,8 +197,16 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
         entry: bone_semantic::prelude::ModuleId,
         target: skull::pipeline::EmitTarget,
     ) -> std::result::Result<skull::mir_emit::MirEmit, CompilerError> {
-        if !matches!(self.accessors, AccessorPlanning::BesideEmit) {
-            return skull::pipeline::emit_program(ws, entry, target);
+        match &mut self.emission {
+            CliEmission::PackageTests { dir, tests } => {
+                *tests = collect_package_test_fns(ws, dir, self.sources)?;
+                let roots = tests.iter().map(|(func, _)| *func).collect::<Vec<_>>();
+                return skull::mir_emit::FullEmit::package_test(&roots)
+                    .run(ws, entry)
+                    .map(|(emit, _cache)| emit);
+            }
+            CliEmission::WithAccessors => {}
+            _ => return skull::pipeline::emit_program(ws, entry, target),
         }
         // Accessor planning reads only the checked workspace and runs on one
         // thread, so it overlaps emission instead of following it.
@@ -203,77 +218,12 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
                 .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
             (emit, metadata)
         });
-        self.accessors = AccessorPlanning::Planned(metadata);
+        self.emission = CliEmission::Accessors(metadata);
         emit
     }
 
     fn report_soft_findings(&mut self, soft: Vec<bone_lints::Finding>) {
         crate::lint_pass::report_soft(&soft, self.sources, self.lint_root);
-    }
-}
-
-/// A package test build's [`skull::pipeline::CompileHost`]: the command-line
-/// host with test-rooted emission. The lint scope stays whole-project: the
-/// sources still include the package's own tests.
-struct PackageTestHost<'a> {
-    inner: CliCompileHost<'a>,
-    test_dir: &'a str,
-    tests: Vec<(skull_mir::mir::FuncRef, skull::SkullTest)>,
-}
-
-impl skull::pipeline::CompileHost for PackageTestHost<'_> {
-    fn aliases(
-        &mut self,
-        modules: &skull_parser::stdlib::ModuleSet,
-    ) -> std::result::Result<bone_core::modules::NsAliases, CompilerError> {
-        self.inner.aliases(modules)
-    }
-
-    fn comptime_inputs(
-        &mut self,
-    ) -> std::result::Result<bone_semantic::inference::ComptimeInputs, CompilerError> {
-        self.inner.comptime_inputs()
-    }
-
-    fn checked_comptime_inputs(
-        &mut self,
-        ws: &bone_semantic::inference::Workspace,
-    ) -> std::result::Result<bone_semantic::inference::ComptimeInputs, CompilerError> {
-        self.inner.checked_comptime_inputs(ws)
-    }
-
-    fn lint_findings(
-        &mut self,
-        ws: &bone_semantic::inference::Workspace,
-    ) -> Vec<bone_lints::Finding> {
-        self.inner.lint_findings(ws)
-    }
-
-    fn checked_inputs_and_lints(
-        &mut self,
-        ws: &bone_semantic::inference::Workspace,
-    ) -> (
-        std::result::Result<bone_semantic::inference::ComptimeInputs, CompilerError>,
-        Vec<bone_lints::Finding>,
-    ) {
-        self.inner.checked_inputs_and_lints(ws)
-    }
-
-    fn report_soft_findings(&mut self, soft: Vec<bone_lints::Finding>) {
-        self.inner.report_soft_findings(soft);
-    }
-
-    fn emit(
-        &mut self,
-        ws: &bone_semantic::inference::Workspace,
-        entry: bone_semantic::prelude::ModuleId,
-        _target: skull::pipeline::EmitTarget,
-    ) -> std::result::Result<skull::mir_emit::MirEmit, CompilerError> {
-        self.tests = collect_package_test_fns(ws, self.test_dir, self.inner.sources)?;
-        let roots = self.tests.iter().map(|(func, _)| *func).collect::<Vec<_>>();
-        skull::mir_emit::FullEmit::package_test(&roots)
-            .run(ws, entry)
-            .map(|(emit, _cache)| emit)
     }
 }
 
@@ -296,7 +246,7 @@ fn skull_emit_full(
         lint_scope: crate::lint_pass::Scope::WholeProject,
         comptime: CliComptime::FromEntry(file),
         prepare_timings: Vec::new(),
-        accessors: AccessorPlanning::Skip,
+        emission: CliEmission::Program,
     };
     let skull::pipeline::Compiled {
         ws,
@@ -486,7 +436,7 @@ pub(crate) fn check_project(
 /// restricts a process to one shard's tests; start ordinals count within it.
 /// Capturing `io.write` too is required: tests that emit via `io.write` (raw,
 /// no trailing newline) would otherwise bypass the buffer and read as empty.
-fn build_test_harness(tests: &[skull::SkullTest], token: &str) -> String {
+fn build_test_harness(tests: &[&skull::SkullTest], token: &str) -> String {
     fn lua_str(s: &str) -> String {
         let mut o = String::from("\"");
         for c in s.chars() {
@@ -695,31 +645,13 @@ impl From<crate::registry::RuntimeFailure> for SkullFailure {
     }
 }
 
-/// Outcome of building + running one file. `Pass` means it emitted valid Lua
-/// AND every `@test` passed (or it had none). `TestFail` means it emitted valid
-/// Lua but some `@test` produced the wrong output or errored — these still count
-/// toward "emit valid Lua" but not toward execution. Both variants carry the
-/// number of individual `@test` functions involved so the runner can report
-/// per-`@test` totals, not just per-file ones.
-#[derive(Debug)]
-enum SkullOutcome {
-    /// All `@test`s passed (or the file had none). `tests` = number that ran
-    /// green (0 for a load-only file with no `@test`s).
-    Pass {
-        tests: usize,
-        skipped: usize,
-        timings: Vec<TestTiming>,
-    },
-    /// Some `@test`s failed. `passed` ran green; `fails` holds the rest's detail.
-    /// Abnormal shard stops also carry a concise diagnostic for the default CLI
-    /// summary, independent of `ROCK_TEST_VERBOSE`.
-    TestFail {
-        passed: usize,
-        fails: Vec<String>,
-        skipped: usize,
-        timings: Vec<TestTiming>,
-        diagnostics: Vec<String>,
-    },
+#[derive(Debug, Default)]
+struct SkullOutcome {
+    passed: usize,
+    fails: Vec<String>,
+    skipped: usize,
+    timings: Vec<TestTiming>,
+    diagnostics: Vec<String>,
 }
 
 /// Wall time of one `@test` that finished, for the slowest-tests report and
@@ -831,10 +763,10 @@ fn skull_build(
                     .iter()
                     .filter(|test| filter.is_none_or(|filter| filter.matches(&test.name, file)))
                     .count();
-                return Ok(SkullOutcome::Pass {
-                    tests: selected,
+                return Ok(SkullOutcome {
+                    passed: selected,
                     skipped: tests.len() - selected,
-                    timings: Vec::new(),
+                    ..SkullOutcome::default()
                 });
             }
             return Err(SkullFailure {
@@ -895,80 +827,65 @@ fn run_emitted_tests(
 ) -> std::result::Result<SkullOutcome, SkullFailure> {
     let lua = lua.into();
     assert_eq!(tests.len(), files.len());
-    // `@test(backends = ...)` without lua: not a test of this backend.
-    let (lua_tests, lua_files): (Vec<skull::SkullTest>, Vec<String>) = tests
+    let mut skipped = 0;
+    let (tests, files): (Vec<_>, Vec<_>) = tests
         .iter()
         .zip(files)
         .filter(|(test, _)| test.runs_on(bone_core::annotations::TestBackend::Lua))
-        .map(|(test, file)| (test.clone(), file.clone()))
+        .filter(|(test, file)| {
+            let selected = filter.is_none_or(|filter| filter.matches(&test.name, file));
+            skipped += usize::from(!selected);
+            selected
+        })
         .unzip();
-    let (tests, files) = (lua_tests.as_slice(), lua_files.as_slice());
-
-    let mut selected_tests = Vec::with_capacity(tests.len());
-    let mut selected_files = Vec::with_capacity(files.len());
-    for (test, file) in tests.iter().zip(files) {
-        if filter.map_or(true, |filter| filter.matches(&test.name, file)) {
-            selected_tests.push(test.clone());
-            selected_files.push(file.clone());
-        }
-    }
-    let skipped = tests.len() - selected_tests.len();
 
     // Failure reports quote the program's head; the whole text is not kept
     // while the test process runs (project's is about 170 MB).
     // Files without @tests still have a bounded load-only validity gate.
     if tests.is_empty() {
-        let (script, excerpt) = write_test_program(lua, "").map_err(|e| SkullFailure {
-            reason: "invalid lua emitted (skull bug)".to_string(),
-            rendered: e.to_string(),
-        })?;
-        let run = run_test_program(script.path(), limit, run_token(), 0, None).map_err(|e| {
-            SkullFailure {
+        if skipped == 0 {
+            let (script, excerpt) = write_test_program(lua, "").map_err(|e| SkullFailure {
                 reason: "invalid lua emitted (skull bug)".to_string(),
                 rendered: e.to_string(),
-            }
-        })?;
-        if run.timed_out || !run.output.status.success() {
-            return Err(SkullFailure {
-                reason: format!(
-                    "test program failed during module load: {}",
-                    if run.timed_out {
-                        format!("timed out after {}s", limit.as_secs_f64())
-                    } else {
-                        stderr_excerpt(&run.output.stderr)
+            })?;
+            let run =
+                run_test_program(script.path(), limit, run_token(), 0, None).map_err(|e| {
+                    SkullFailure {
+                        reason: "invalid lua emitted (skull bug)".to_string(),
+                        rendered: e.to_string(),
                     }
-                ),
-                rendered: if run.timed_out {
-                    format!(
-                        "loading emitted program: timed out after {}s",
-                        limit.as_secs_f64()
-                    )
-                } else {
-                    format!(
-                        "{}{}\n\n--- emitted lua (truncated) ---\n{}",
-                        String::from_utf8_lossy(&run.output.stdout),
-                        String::from_utf8_lossy(&run.output.stderr),
-                        excerpt
-                    )
-                },
-            });
+                })?;
+            if run.timed_out || !run.output.status.success() {
+                return Err(SkullFailure {
+                    reason: format!(
+                        "test program failed during module load: {}",
+                        if run.timed_out {
+                            format!("timed out after {}s", limit.as_secs_f64())
+                        } else {
+                            stderr_excerpt(&run.output.stderr)
+                        }
+                    ),
+                    rendered: if run.timed_out {
+                        format!(
+                            "loading emitted program: timed out after {}s",
+                            limit.as_secs_f64()
+                        )
+                    } else {
+                        format!(
+                            "{}{}\n\n--- emitted lua (truncated) ---\n{}",
+                            String::from_utf8_lossy(&run.output.stdout),
+                            String::from_utf8_lossy(&run.output.stderr),
+                            excerpt
+                        )
+                    },
+                });
+            }
         }
-        return Ok(SkullOutcome::Pass {
-            tests: 0,
-            skipped: 0,
-            timings: Vec::new(),
-        });
-    }
-    if selected_tests.is_empty() {
-        return Ok(SkullOutcome::Pass {
-            tests: 0,
+        return Ok(SkullOutcome {
             skipped,
-            timings: Vec::new(),
+            ..SkullOutcome::default()
         });
     }
-    // Only the selected tests exist from here on: the harness, the shard
-    // indices and the never-reported accounting all count them alone.
-    let (tests, files) = (selected_tests.as_slice(), selected_files.as_slice());
 
     // Run the @tests: emit + harness, capture each test's PASS/FAIL line.
     // A stable key keeps existing tests in place when declarations are inserted.
@@ -979,7 +896,7 @@ fn run_emitted_tests(
         lua.len(),
         std::env::var_os("ROCK_TEST_SHARDS").is_some(),
     );
-    let harness = build_test_harness(tests, &token);
+    let harness = build_test_harness(&tests, &token);
     let (script, excerpt) = write_test_program(lua, &harness).map_err(|e| SkullFailure {
         reason: "test run errored (skull bug)".to_string(),
         rendered: e.to_string(),
@@ -1182,21 +1099,13 @@ fn run_emitted_tests(
     timings.sort_by_key(|(index, _)| *index);
     let timings = timings.into_iter().map(|(_, timing)| timing).collect();
 
-    if fails.is_empty() {
-        Ok(SkullOutcome::Pass {
-            tests: passed,
-            skipped,
-            timings,
-        })
-    } else {
-        Ok(SkullOutcome::TestFail {
-            passed,
-            fails,
-            skipped,
-            timings,
-            diagnostics,
-        })
-    }
+    Ok(SkullOutcome {
+        passed,
+        fails,
+        skipped,
+        timings,
+        diagnostics,
+    })
 }
 
 /// Child CPU time one `@test` (or program loading) may use: a hang backstop,
@@ -1250,17 +1159,14 @@ fn run_shard(
             .filter(|_| runs.len() < SHARD_RESTARTS)
             .map(|position| position + 1)
             .filter(|&next| next < rest.len());
-        let Some(next) = resume_at else {
-            runs.push(ShardRun {
-                indices: rest.to_vec(),
-                run,
-            });
-            return Ok(runs);
-        };
+        let next = resume_at.unwrap_or(rest.len());
         runs.push(ShardRun {
             indices: rest[..next].to_vec(),
             run,
         });
+        if next == rest.len() {
+            return Ok(runs);
+        }
         rest = &rest[next..];
     }
 }
@@ -1527,17 +1433,16 @@ fn skull_build_package_with_limit(
         reason: categorize(&errs[0].message),
         rendered: render_project_errs(&sources, &errs),
     })?;
-    let mut host = PackageTestHost {
-        inner: CliCompileHost {
-            sources: &sources,
-            lint_root: std::path::Path::new(dir),
-            lint_scope: crate::lint_pass::Scope::WholeProject,
-            comptime: CliComptime::FromEntry(dir),
-            prepare_timings: Vec::new(),
-            accessors: AccessorPlanning::Skip,
+    let mut host = CliCompileHost {
+        sources: &sources,
+        lint_root: std::path::Path::new(dir),
+        lint_scope: crate::lint_pass::Scope::WholeProject,
+        comptime: CliComptime::FromEntry(dir),
+        prepare_timings: Vec::new(),
+        emission: CliEmission::PackageTests {
+            dir,
+            tests: Vec::new(),
         },
-        test_dir: dir,
-        tests: Vec::new(),
     };
     let target = skull::pipeline::EmitTarget {
         project_root: None,
@@ -1553,7 +1458,12 @@ fn skull_build_package_with_limit(
         },
     )?;
     let (lua, bridge_end) = (emit.lua, emit.globals_bridge_end);
-    let test_fns = host.tests;
+    let CliEmission::PackageTests {
+        tests: test_fns, ..
+    } = host.emission
+    else {
+        unreachable!("package test emission mode");
+    };
     let files = test_fns
         .iter()
         .map(|(func, _)| ws.modules[func.module.index()].file.as_str().to_owned())
@@ -2282,7 +2192,7 @@ fn skull_emit_project_with_inputs(
         lint_scope: crate::lint_pass::Scope::ProductionOnly,
         comptime: CliComptime::Project(Some(inputs)),
         prepare_timings: Vec::new(),
-        accessors: AccessorPlanning::BesideEmit,
+        emission: CliEmission::WithAccessors,
     };
     let body_costs = crate::body_costs::begin();
     let target = skull::pipeline::EmitTarget {
@@ -2331,8 +2241,8 @@ fn skull_emit_project_with_inputs(
     let compile = t.elapsed();
     crate::bone_backend::log_compile_stats(&sources, &ws, compile, compile, None);
 
-    let metadata = match std::mem::replace(&mut host.accessors, AccessorPlanning::Skip) {
-        AccessorPlanning::Planned(metadata) => metadata,
+    let metadata = match host.emission {
+        CliEmission::Accessors(metadata) => metadata,
         _ => global_accessor_metadata(&ws),
     };
     let bridge_end = emit.globals_bridge_end;
@@ -2866,22 +2776,7 @@ pub(crate) fn skull_test(
 
     for (label, outcome) in outcomes {
         match outcome {
-            Ok(Ok(SkullOutcome::Pass {
-                tests,
-                skipped,
-                timings: unit_timings,
-            })) => {
-                timings.extend(unit_timings.into_iter().map(|t| (label.clone(), t)));
-                emit_ok += 1;
-                exec_pass += 1;
-                tests_total += tests;
-                tests_passed += tests;
-                tests_skipped += skipped;
-                if verbose {
-                    println!("{:.<60} {}", label, "PASS".green());
-                }
-            }
-            Ok(Ok(SkullOutcome::TestFail {
+            Ok(Ok(SkullOutcome {
                 passed,
                 fails,
                 skipped,
@@ -2893,6 +2788,13 @@ pub(crate) fn skull_test(
                 tests_total += passed + fails.len();
                 tests_passed += passed;
                 tests_skipped += skipped;
+                if fails.is_empty() {
+                    exec_pass += 1;
+                    if verbose {
+                        println!("{:.<60} {}", label, "PASS".green());
+                    }
+                    continue;
+                }
                 println!(
                     "{:.<60} {}  {}",
                     label,
@@ -3241,12 +3143,27 @@ pub struct IncrementalProject {
     project: crate::live_project::LiveProject,
     cache: skull::mir_emit::SkullEmitCache,
     preamble: String,
-    renderer_target: skull::mir_emit::RendererTarget,
     /// Per-type layout hashes of the last program the game process could have
     /// loaded. A full recompile whose hashes drifted returns
     /// `SkullReload::ShapeChanged` (full-reconstruction request) instead of writing.
     shape_hashes: skull::ShapeHashes,
     artifact_fingerprint: String,
+}
+
+fn emit_live_full(
+    ws: &bone_semantic::inference::Workspace,
+    entry: bone_semantic::prelude::ModuleId,
+    project_dir: &str,
+    selected_sims: Option<&[String]>,
+) -> std::result::Result<(skull::mir_emit::MirEmit, skull::mir_emit::SkullEmitCache), CompilerError>
+{
+    let emit = match selected_sims {
+        Some(selected_sims) => skull::mir_emit::FullEmit::selected_sims(selected_sims),
+        None => skull::mir_emit::FullEmit::program(),
+    };
+    emit.project_root(Some(project_dir))
+        .renderer(skull::mir_emit::RendererTarget::Gl)
+        .run(ws, entry)
 }
 
 impl IncrementalProject {
@@ -3335,24 +3252,13 @@ impl IncrementalProject {
         explicit_allocation_report: Option<&std::path::Path>,
         select_sims: impl FnOnce(&bone_semantic::inference::Workspace) -> Result<Option<Vec<String>>>,
     ) -> Result<Self> {
-        let renderer_target = skull::mir_emit::RendererTarget::Gl;
         let (lua, cache, artifact_fingerprint, emits_main) = {
             let ws = project.workspace();
             let mid = skull::user_module_id(ws)
                 .map_err(|e| anyhow::anyhow!("no user module: {}", e.message))?;
             let selected = select_sims(ws)?;
-            let (emit, c) = if let Some(selected) = selected {
-                skull::mir_emit::FullEmit::selected_sims(&selected)
-                    .project_root(Some(dir))
-                    .renderer(renderer_target)
-                    .run(ws, mid)
-            } else {
-                skull::mir_emit::FullEmit::program()
-                    .project_root(Some(dir))
-                    .renderer(renderer_target)
-                    .run(ws, mid)
-            }
-            .map_err(|e| anyhow::anyhow!("{}", render_project_err(project.sources(), &e)))?;
+            let (emit, c) = emit_live_full(ws, mid, dir, selected.as_deref())
+                .map_err(|e| anyhow::anyhow!("{}", render_project_err(project.sources(), &e)))?;
             write_allocation_report(explicit_allocation_report, &emit.allocation_report)?;
             let artifact_fingerprint = emit.artifact_fingerprint.clone().ok_or_else(|| {
                 anyhow::anyhow!("compiler did not publish an Artifact fingerprint")
@@ -3370,7 +3276,6 @@ impl IncrementalProject {
             project,
             cache,
             preamble,
-            renderer_target,
             shape_hashes,
             artifact_fingerprint,
         })
@@ -3578,13 +3483,9 @@ impl IncrementalProject {
                 let ws = self.project.workspace();
                 let mid = skull::user_module_id(ws)
                     .map_err(|e| anyhow::anyhow!("no user module: {}", e.message))?;
-                let (emit, c) = skull::mir_emit::FullEmit::program()
-                    .project_root(Some(self.project.dir()))
-                    .renderer(self.renderer_target)
-                    .run(ws, mid)
-                    .map_err(|e| {
-                        anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e))
-                    })?;
+                let (emit, c) = emit_live_full(ws, mid, self.project.dir(), None).map_err(|e| {
+                    anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e))
+                })?;
                 if self
                     .cache
                     .global_layout()
@@ -3730,10 +3631,7 @@ impl IncrementalProject {
             let ws = self.project.workspace();
             let mid = skull::user_module_id(ws)
                 .map_err(|e| anyhow::anyhow!("no user module: {}", e.message))?;
-            let (emit, c) = skull::mir_emit::FullEmit::program()
-                .project_root(Some(self.project.dir()))
-                .renderer(self.renderer_target)
-                .run(ws, mid)
+            let (emit, c) = emit_live_full(ws, mid, self.project.dir(), None)
                 .map_err(|e| anyhow::anyhow!("skull force_full emit: {}", e.message))?;
             let artifact_fingerprint = emit.artifact_fingerprint.clone().ok_or_else(|| {
                 anyhow::anyhow!("compiler did not publish an Artifact fingerprint")

@@ -3947,27 +3947,19 @@ mod value_test_exec {
     #[test]
     fn value_mismatch_fails_with_detail() {
         let src = "@test(returns = 43)\nfn r() -> int { return 42 }\n";
-        match skull_build("val.rock", src, None).expect("build ok") {
-            SkullOutcome::TestFail { passed, fails, .. } => {
-                assert_eq!(passed, 0);
-                assert_eq!(
-                    fails,
-                    vec!["r: value mismatch: expected <43> got <42>".to_string()]
-                );
-            }
-            SkullOutcome::Pass { .. } => panic!("mismatching value test must FAIL"),
-        }
+        let outcome = skull_build("val.rock", src, None).expect("build ok");
+        assert_eq!(outcome.passed, 0);
+        assert_eq!(outcome.fails, ["r: value mismatch: expected <43> got <42>"]);
     }
 
     #[test]
     fn value_test_error_still_fails() {
         let src = "@test(returns = 1)\nfn e() -> int { error(\"boom\")\n return 1 }\n";
-        match skull_build("val.rock", src, None).expect("build ok") {
-            SkullOutcome::TestFail { fails, .. } => {
-                assert!(fails[0].contains("error:"), "got {fails:?}");
-            }
-            SkullOutcome::Pass { .. } => panic!("erroring value test must FAIL"),
-        }
+        let fails = skull_build("val.rock", src, None).expect("build ok").fails;
+        assert!(
+            fails.first().is_some_and(|fail| fail.contains("error:")),
+            "{fails:?}"
+        );
     }
 
     #[test]
@@ -4218,11 +4210,11 @@ fn build_with_limit(dir: &tempfile::TempDir, limit: Duration) -> LimitedBuild {
 #[track_caller]
 fn failures_after(result: LimitedBuild, passed: usize) -> Vec<String> {
     match result {
-        Ok(super::SkullOutcome::TestFail {
+        Ok(super::SkullOutcome {
             passed: actual,
             fails,
             ..
-        }) if actual == passed => fails,
+        }) if actual == passed && !fails.is_empty() => fails,
         other => panic!("expected {passed} passes and failures: {other:?}"),
     }
 }
@@ -4254,7 +4246,7 @@ fn test_limit_allows_two_files_over_total_budget() {
     // Four one-second tests exceed the total budget, with room between markers.
     let result = build_with_limit(&dir, Duration::from_secs(3));
     assert!(
-        matches!(result, Ok(super::SkullOutcome::Pass { tests: 4, .. })),
+        matches!(&result, Ok(run) if run.passed == 4 && run.fails.is_empty()),
         "{result:?}"
     );
 }
@@ -4325,7 +4317,7 @@ fn test_limit_resets_for_each_test() {
     );
     let result = build_with_limit(&dir, Duration::from_secs(1));
     assert!(
-        matches!(result, Ok(super::SkullOutcome::Pass { tests: 4, .. })),
+        matches!(&result, Ok(run) if run.passed == 4 && run.fails.is_empty()),
         "{result:?}"
     );
 }
@@ -4426,7 +4418,7 @@ fn test_limit_bounds_the_reruns_of_a_shard() {
     );
     let result = build_with_limit(&dir, Duration::from_millis(200));
     match result {
-        Ok(super::SkullOutcome::TestFail {
+        Ok(super::SkullOutcome {
             passed: 0,
             fails,
             diagnostics,
@@ -4664,7 +4656,7 @@ fn package_compile_holds_a_compile_slot_only_while_compiling() {
         super::skull_build_package_with_limit(&package, Duration::from_secs(10), 1, None)
     });
     assert!(
-        matches!(result, Ok(super::SkullOutcome::Pass { tests: 1, .. })),
+        matches!(&result, Ok(run) if run.passed == 1 && run.fails.is_empty()),
         "{result:?}"
     );
 }
