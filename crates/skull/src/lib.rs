@@ -957,13 +957,13 @@ fn is_value_struct(ws: &Workspace, name: ustr::Ustr) -> bool {
 /// Canonical (deduped, name-sorted) list of `value` structs in the workspace,
 /// via the same `struct_by_name` view name resolution uses. Sorted so the
 /// emitted Lua is deterministic across runs (module maps hash-iterate).
-fn canonical_value_structs(ws: &Workspace) -> Vec<bone_semantic::hir::StructDef> {
-    let mut v: Vec<bone_semantic::hir::StructDef> = ws
+fn canonical_value_structs(ws: &Workspace) -> Vec<&bone_semantic::hir::StructDef> {
+    let mut v: Vec<_> = ws
         .struct_by_name
         .values()
         .filter_map(|sid| {
             let s = &ws.modules.get(sid.module.index())?.structs[sid.def];
-            skull_mir::lower::has_value_plan(s).then(|| s.clone())
+            skull_mir::lower::has_value_plan(s).then_some(s)
         })
         .collect();
     v.sort_by(|a, b| display_name(a.name.as_str()).cmp(display_name(b.name.as_str())));
@@ -1054,6 +1054,7 @@ fn cdata_alias_fields(
 /// enters the cdef ordering (a table has no C layout to sequence).
 fn value_struct_defs(
     ws: &Workspace,
+    vstructs: &[&bone_semantic::hir::StructDef],
     rep_arena: &skull_mir::lower::RepArena,
     value_ctors: &mut ValueCtors,
 ) -> Result<
@@ -1064,7 +1065,6 @@ fn value_struct_defs(
     ),
     CompilerError,
 > {
-    let vstructs = canonical_value_structs(ws);
     let mut emitted: rustc_hash::FxHashSet<ustr::Ustr> = Default::default();
     let mut gc: rustc_hash::FxHashSet<ustr::Ustr> = Default::default();
     if vstructs.is_empty() {
@@ -1074,7 +1074,7 @@ fn value_struct_defs(
     // Partition by tier. GC-carrying value structs materialize as Lua tables
     // (`_vt`), never as cdef, so only FFI-clean structs enter the ordering.
     let mut ffi_structs = Vec::new();
-    for s in vstructs {
+    for &s in vstructs {
         let storage = rep_arena
             .nominal_value_storage_required(ws, bone_semantic::hir::FnBackend::Lua, s.name)
             .map_err(|e| CompilerError::new_no_location(e.message))?;
@@ -1315,12 +1315,13 @@ fn value_leaf_layout_checks(
 /// table), so no `__ROCK_C_STRUCT` (ffi.istype) entry is needed.
 fn value_struct_gc_defs(
     ws: &Workspace,
+    vstructs: &[&bone_semantic::hir::StructDef],
     gc: &rustc_hash::FxHashSet<ustr::Ustr>,
     rep_arena: &skull_mir::lower::RepArena,
     value_ctors: &mut ValueCtors,
 ) -> Result<String, CompilerError> {
     let mut out = String::new();
-    for s in canonical_value_structs(ws) {
+    for s in vstructs {
         if !gc.contains(&s.name) {
             continue;
         }
@@ -1631,14 +1632,18 @@ fn enum_cdata_metatypes(ws: &Workspace) -> String {
         }
         ts.push_str("    return \"?\"\n  end,\n}\n");
         out.push_str(&ts);
-        out.push_str(&format!(
+        push_cdata_metatype_trampoline(&mut out, &sym);
+    }
+    out
+}
+
+fn push_cdata_metatype_trampoline(out: &mut String, sym: &str) {
+    out.push_str(&format!(
             "pcall(ffi.metatype, \"{sym}\", {{\n\
              \x20 __eq = function(a, b) return _G.__ROCK_C_METATYPE[\"{sym}\"].__eq(a, b) end,\n\
              \x20 __tostring = function(v) return _G.__ROCK_C_METATYPE[\"{sym}\"].__tostring(v) end,\n\
              }})\n"
         ));
-    }
-    out
 }
 
 /// Attach an `ffi.metatype` to each value-struct ctype giving it value
@@ -1648,11 +1653,15 @@ fn enum_cdata_metatypes(ws: &Workspace) -> String {
 /// `_G.__ROCK_C_METATYPE[name]` impl table (metatypes seal once, so the
 /// trampoline indirection is what lets a reload update the impl). Gated by
 /// `emitted` — exactly the structs `value_struct_defs` declared a ctype for.
-fn value_struct_metatypes(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::Ustr>) -> String {
+fn value_struct_metatypes(
+    ws: &Workspace,
+    vstructs: &[&bone_semantic::hir::StructDef],
+    emitted: &rustc_hash::FxHashSet<ustr::Ustr>,
+) -> String {
     let mut out = String::new();
     let mut any = false;
     {
-        for s in canonical_value_structs(ws) {
+        for s in vstructs {
             if !emitted.contains(&s.name) {
                 continue;
             }
@@ -1695,12 +1704,7 @@ fn value_struct_metatypes(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::
                 out.push_str(&display_return(&parts, "    "));
             }
             out.push_str("  end,\n}\n");
-            out.push_str(&format!(
-                "pcall(ffi.metatype, \"{sym}\", {{\n\
-                 \x20 __eq = function(a, b) return _G.__ROCK_C_METATYPE[\"{sym}\"].__eq(a, b) end,\n\
-                 \x20 __tostring = function(v) return _G.__ROCK_C_METATYPE[\"{sym}\"].__tostring(v) end,\n\
-                 }})\n"
-            ));
+            push_cdata_metatype_trampoline(&mut out, &sym);
         }
     }
     out
@@ -1889,7 +1893,11 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
 /// copied through its own `<Enum>_ct`. Its `inspect` delegates to `tostring`,
 /// which reaches the metatype `__tostring` [`enum_cdata_metatypes`] emitted --
 /// the enum's rendering has one source, not two that can drift.
-fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::Ustr>) -> String {
+fn c_struct_inspect_defs(
+    ws: &Workspace,
+    vstructs: &[&bone_semantic::hir::StructDef],
+    emitted: &rustc_hash::FxHashSet<ustr::Ustr>,
+) -> String {
     let mut out = String::new();
     {
         let mut enums: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
@@ -1912,7 +1920,7 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
                 copy_args.join(", ")
             ));
         }
-        for s in canonical_value_structs(ws) {
+        for s in vstructs {
             if !emitted.contains(&s.name) {
                 continue;
             }
