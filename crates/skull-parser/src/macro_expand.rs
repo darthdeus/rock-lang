@@ -231,38 +231,24 @@ fn call_label_errors(m: &Ast, reg: &Registry) -> Vec<CompilerError> {
         return Vec::new();
     }
     let mut errs = Vec::new();
-    for (e, data) in m.exprs.iter() {
+    for data in m.exprs.values() {
         let ExprKind::FunctionCall { func, args, .. } = &data.kind else {
             continue;
         };
-        let (name, extra) = match &m.exprs[*func].kind {
-            ExprKind::Ident(id) => (id.name, 0),
-            ExprKind::FieldAccess(_, member) => (member.name, 1),
-            _ => continue,
+        let Some((name, receiver)) = macro_callee(m, *func) else {
+            continue;
         };
         let Some(cands) = reg.get(&name) else {
             continue;
         };
-        // Labels can only appear inside the parens, so a call with none
-        // binds positionally and cannot fail this check.
         if args.iter().all(|a| a.name.is_none()) {
             continue;
         }
-        let Some(tmpl) = select_overload(cands, args.len() + extra) else {
+        let Some(tmpl) = select_overload(cands, args.len() + usize::from(receiver.is_some()))
+        else {
             continue;
         };
-        let mut call_args: Vec<MacroArg> = Vec::with_capacity(args.len() + extra);
-        if extra == 1 {
-            call_args.push(MacroArg {
-                label: None,
-                value: e,
-            });
-        }
-        call_args.extend(args.iter().map(|a| MacroArg {
-            label: a.name.as_ref().map(|n| n.name),
-            value: a.value,
-        }));
-        let Err(err) = bind_macro_args(&tmpl.params, &call_args) else {
+        let Err(err) = bind_macro_args(&tmpl.params, &macro_args(receiver, args)) else {
             continue;
         };
         let names: Vec<String> = tmpl.params.iter().map(|p| p.name.to_string()).collect();
@@ -335,18 +321,32 @@ pub fn expand_macros(modules: &mut [Ast]) {
 /// `expand_in_ast` anyway), so the worst case is a redundant walk, never a
 /// missed expansion. Output stays byte-identical (gated by `skull-cook-diff`).
 fn module_calls_macro(ast: &Ast, reg: &Registry) -> bool {
-    ast.exprs.values().any(|ed| {
-        if let ExprKind::FunctionCall { func, .. } = &ed.kind {
-            return match &ast.exprs[*func].kind {
-                // plain `name(args)`
-                ExprKind::Ident(id) => reg.contains_key(&id.name),
-                // UFCS `recv.name(args)` -- the member names the macro
-                ExprKind::FieldAccess(_, member) => reg.contains_key(&member.name),
-                _ => false,
-            };
+    ast.exprs.values().any(|data| {
+        if let ExprKind::FunctionCall { func, .. } = &data.kind {
+            return macro_callee(ast, *func).is_some_and(|(name, _)| reg.contains_key(&name));
         }
         false
     })
+}
+
+fn macro_callee(ast: &Ast, func: Idx<ExprData>) -> Option<(Ustr, Option<Idx<ExprData>>)> {
+    match &ast.exprs[func].kind {
+        ExprKind::Ident(id) => Some((id.name, None)),
+        ExprKind::FieldAccess(receiver, member) => Some((member.name, Some(*receiver))),
+        _ => None,
+    }
+}
+
+fn macro_args(receiver: Option<Idx<ExprData>>, args: &[FunctionCallArg]) -> Vec<MacroArg> {
+    let mut values = Vec::with_capacity(args.len() + usize::from(receiver.is_some()));
+    if let Some(value) = receiver {
+        values.push(MacroArg { label: None, value });
+    }
+    values.extend(args.iter().map(|a| MacroArg {
+        label: a.name.as_ref().map(|n| n.name),
+        value: a.value,
+    }));
+    values
 }
 
 /// Fragment kind a macro param's declared type names (`x: ty`, `n: ident`, ...).
@@ -730,28 +730,19 @@ fn expand_expr(
     stack: &mut Vec<ShadowScope>,
 ) {
     match &ast.exprs[e].kind {
-        ExprKind::Lambda { .. } => {
-            let (params, body) = match &ast.exprs[e].kind {
-                ExprKind::Lambda { params, body, .. } => (
-                    params.iter().map(|p| p.name.name).collect::<ShadowScope>(),
-                    *body,
-                ),
-                _ => unreachable!(),
-            };
-            stack.push(params);
+        ExprKind::Lambda { params, body, .. } => {
+            let body = *body;
+            stack.push(params.iter().map(|p| p.name.name).collect());
             expand_block(ast, body, reg, depth, stack);
             stack.pop();
             return;
         }
-        ExprKind::IfLetChain { .. } => {
-            let (n_clauses, then_b, else_b) = match &ast.exprs[e].kind {
-                ExprKind::IfLetChain {
-                    clauses,
-                    then_block,
-                    else_block,
-                } => (clauses.len(), *then_block, *else_block),
-                _ => unreachable!(),
-            };
+        ExprKind::IfLetChain {
+            clauses,
+            then_block,
+            else_block,
+        } => {
+            let (n_clauses, then_b, else_b) = (clauses.len(), *then_block, *else_block);
             // Bindings accumulate left-to-right: a later clause's value sees the
             // earlier clauses' bindings.
             stack.push(ShadowScope::default());
@@ -780,14 +771,11 @@ fn expand_expr(
             }
             return;
         }
-        ExprKind::Match { .. } => {
-            let (scrutinee, n_arms) = match &ast.exprs[e].kind {
-                ExprKind::Match { scrutinee, arms } => (*scrutinee, arms.len()),
-                _ => unreachable!(),
-            };
+        ExprKind::Match { scrutinee, arms } => {
+            let (scrutinee, n_arms) = (*scrutinee, arms.len());
             expand_expr(ast, scrutinee, reg, depth, stack);
             for i in 0..n_arms {
-                let (guard, body, mut scope) = match &ast.exprs[e].kind {
+                let (guard, body, scope) = match &ast.exprs[e].kind {
                     ExprKind::Match { arms, .. } => {
                         let mut scope = ShadowScope::default();
                         shadow_pattern(&arms[i].pattern, &mut scope);
@@ -795,7 +783,7 @@ fn expand_expr(
                     }
                     _ => unreachable!(),
                 };
-                stack.push(std::mem::take(&mut scope));
+                stack.push(scope);
                 if let Some(g) = guard {
                     expand_expr(ast, g, reg, depth, stack);
                 }
@@ -804,16 +792,12 @@ fn expand_expr(
             }
             return;
         }
-        ExprKind::SafeNavigationLet { .. } => {
-            let (receiver, body, name) = match &ast.exprs[e].kind {
-                ExprKind::SafeNavigationLet {
-                    receiver,
-                    body,
-                    binding,
-                    ..
-                } => (*receiver, *body, binding.name),
-                _ => unreachable!(),
-            };
+        ExprKind::SafeNavigationLet {
+            receiver,
+            body,
+            binding,
+        } => {
+            let (receiver, body, name) = (*receiver, *body, binding.name);
             expand_expr(ast, receiver, reg, depth, stack);
             stack.push(ShadowScope::from_iter([name]));
             expand_block(ast, body, reg, depth, stack);
@@ -840,56 +824,19 @@ fn try_expand(
     depth: usize,
     stack: &mut Vec<ShadowScope>,
 ) {
-    // Two invocation shapes: a plain `name(args)` and a UFCS `recv.name(args)`
-    // (member-position macro -- the receiver becomes the first arg, so the slot
-    // macros read naturally in `player.cast_co.poll_co_slot()` form). A macro
-    // name is globally unique against fn/method names (`check_macro_name_
-    // uniqueness`), so the member form is unambiguously the macro when `name` is
-    // registered. Field/local shadowing only applies to the plain-ident form: a
-    // local can shadow a bare callee name, never a member name.
-    let (name, arg_values, is_ident) = {
-        let ExprKind::FunctionCall { func, args, .. } = &ast.exprs[e].kind else {
-            return;
-        };
-        let func = *func;
-        // The caller's labels ride along: binding is by NAME when one is given,
-        // by position otherwise (`bind_macro_args`).
-        let arg_idxs: Vec<MacroArg> = args
-            .iter()
-            .map(|a| MacroArg {
-                label: a.name.as_ref().map(|n| n.name),
-                value: a.value,
-            })
-            .collect();
-        match &ast.exprs[func].kind {
-            ExprKind::Ident(id) => (id.name, arg_idxs, true),
-            ExprKind::FieldAccess(recv, member) => {
-                // UFCS receiver takes the first slot positionally -- it is
-                // written before the parens, so it can carry no label.
-                let mut vs = Vec::with_capacity(arg_idxs.len() + 1);
-                vs.push(MacroArg {
-                    label: None,
-                    value: *recv,
-                });
-                vs.extend(arg_idxs);
-                (member.name, vs, false)
-            }
-            _ => return,
-        }
+    let ExprKind::FunctionCall { func, args, .. } = &ast.exprs[e].kind else {
+        return;
     };
-    if !reg.contains_key(&name) {
+    let Some((name, receiver)) = macro_callee(ast, *func) else {
+        return;
+    };
+    let Some(cands) = reg.get(&name) else {
+        return;
+    };
+    if (receiver.is_none() && is_shadowed(stack, name)) || depth >= MAX_MACRO_DEPTH {
         return;
     }
-    // A locally-bound callee (fn-typed param, local fn value, nested fn, loop
-    // binding) shadows any same-named macro — this is a real call.
-    if is_ident && is_shadowed(stack, name) {
-        return;
-    }
-    if depth >= MAX_MACRO_DEPTH {
-        return;
-    }
-
-    let Some(tmpl) = select_overload(&reg[&name], arg_values.len()) else {
+    let Some(tmpl) = select_overload(cands, args.len() + usize::from(receiver.is_some())) else {
         return;
     };
     // Item declarations only reach a module through a top-level invocation;
@@ -912,7 +859,7 @@ fn try_expand(
     // A binding error is reported by the expansion preflight, which runs the
     // same binder before the compile proceeds; leaving the call unexpanded here
     // is what makes that report the only thing the user sees.
-    let Ok(bound) = bind_macro_args(&tmpl.params, &arg_values) else {
+    let Ok(bound) = bind_macro_args(&tmpl.params, &macro_args(receiver, args)) else {
         return;
     };
     let mut inst = Instantiation {

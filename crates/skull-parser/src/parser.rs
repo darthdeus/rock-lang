@@ -2900,7 +2900,6 @@ impl<'a> Parser<'a> {
         }
 
         let allow = self.allow_literals;
-        let arg_min_bp = if min_bp >= 50 { 55 } else { 15 };
         self.in_no_parens_args = true;
         let mut args = Vec::new();
         while !self.at_end() {
@@ -2926,7 +2925,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             let is_splat = self.eat(TokenKind::TripleDot);
-            let value = self.with_allow_literals(allow, |p| p.parse_expr(arg_min_bp))?;
+            let value = self.with_allow_literals(allow, |p| p.parse_expr(15))?;
             args.push(FunctionCallArg {
                 name: None,
                 value,
