@@ -1299,15 +1299,6 @@ fn hash_init_stmt(
             go!(cond);
             go!(b);
         }
-        Statement::WhileLet {
-            pattern,
-            value,
-            body: b,
-        } => {
-            go!(value);
-            hash_init_pattern(body, pattern, h);
-            go!(b);
-        }
         Statement::Return(None)
         | Statement::Break
         | Statement::Continue

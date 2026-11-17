@@ -188,7 +188,8 @@ pub(crate) fn infer_statement(
                         {
                             comp_error!(
                                 span,
-                                "the `else` of this `let` never runs: the pattern always matches"
+                                "this pattern always matches a non-null value, so the miss path \
+                                 (the `else`, or the `while let` exit) never runs"
                             );
                         }
                         let ety = infer_expr(c, gamma, else_e)?;
@@ -373,30 +374,6 @@ pub(crate) fn infer_statement(
             let body_res = infer_branch(c, gamma, body, &narrow_then, span, Use::Discard);
             gamma.loop_depth -= 1;
             body_res?;
-        }
-
-        Statement::WhileLet {
-            pattern,
-            value,
-            body,
-        } => {
-            let (pattern, value, body) = (*pattern, *value, *body);
-
-            let (unwrapped, deferred) = match infer_expr(c, gamma, value) {
-                Ok(t) => (peel_nullable(gamma, t, span), None),
-                Err(e) => (gamma.workspace.builtins.error(), Some(e)),
-            };
-
-            unqualified_arm_variant(c, gamma, pattern, unwrapped, span)?;
-            check_pattern(c, gamma, pattern, unwrapped, span)?;
-            gamma.loop_depth += 1;
-            let body_res = infer_expr_used(c, gamma, body, Use::Discard);
-            gamma.loop_depth -= 1;
-            body_res?;
-
-            if let Some(err) = deferred {
-                return Err(err);
-            }
         }
 
         Statement::Break | Statement::Continue => {

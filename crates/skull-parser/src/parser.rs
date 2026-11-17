@@ -2635,7 +2635,9 @@ impl<'a> Parser<'a> {
                     self.advance();
                     let pattern = self.parse_pattern()?;
                     self.expect(TokenKind::Assign)?;
-                    let value = self.with_allow_literals(false, |p| p.parse_expr(0))?;
+                    // Same precedence as an if-let clause value: `&&` is never
+                    // silently part of the scrutinee.
+                    let value = self.with_allow_literals(false, |p| p.parse_expr(16))?;
                     let body = self.parse_block()?;
                     let span = self.span_from(start);
                     return Ok(self.ast.stmt(

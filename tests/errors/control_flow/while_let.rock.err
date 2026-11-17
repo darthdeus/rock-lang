@@ -1,0 +1,23 @@
+
+//=== TEST CASE: no_condition_chain_Parse ===
+//! expect: expected OpenCurly, got And
+// `while let` has no `&&` chains (unlike `if let`), so the scrutinee parses
+// at the same precedence as an if-let clause: the `&&` is a parse error,
+// never a silently bool-typed scrutinee.
+fn main() {
+    let v: int? = 1
+    while let x = v && x > 0 {
+        break
+    }
+}
+
+//=== TEST CASE: irrefutable_non_nullable_Useless ===
+//! expect: never runs
+// `while let` is `while true { let .. else { break } }`: a pattern that can
+// never miss over a non-nullable value is an infinite loop by construction.
+fn main() {
+    while let x = 5 {
+        print(x)
+        break
+    }
+}

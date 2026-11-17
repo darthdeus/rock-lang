@@ -1406,22 +1406,39 @@ pub(crate) fn lower_statement_value(
             }
         }
 
+        // `while let P = v { .. }` IS `while true { let P = v else { break } .. }`:
+        // one loop head, one pattern test, one binding rule -- the same
+        // let-else the body could have written itself.
         StatementKind::WhileLet(w) => {
-            let value = lower_expr(ctx, a, body, scope, a.e(&w.value))?;
-
             let body_scope = body.alloc_child_scope(scope);
 
+            let value = lower_expr(ctx, a, body, body_scope, a.e(&w.value))?;
             let pat = lower_pattern_value(ctx, a, body, body_scope, &w.pattern)?;
             let pattern = body.pattern_arena.alloc(pat);
+            normalize_binding_wildcards(ctx, body, pattern, w.span);
 
-            let body_expr = lower_block(ctx, a, body, body_scope, &w.body)?;
-            let body = ctx.alloc_block_expr(body, body_expr, a.b(&w.body));
-
-            Statement::WhileLet {
+            let brk = body.statement_arena.alloc(Statement::Break);
+            body.statement_spans.insert(brk, w.span);
+            let else_block = ctx.alloc_expr(
+                body,
+                Expr::Block {
+                    statements: IdxRange::new_inclusive(brk..=brk),
+                    tail: None,
+                },
+                w.span,
+            );
+            let test = Statement::Let {
                 pattern,
                 value,
-                body,
-            }
+                else_block: Some(else_block),
+            };
+
+            let body_expr =
+                lower_block_with_prelude(ctx, a, body, body_scope, &w.body, Some((test, w.span)))?;
+            let body_i = ctx.alloc_block_expr(body, body_expr, a.b(&w.body));
+            let cond = ctx.alloc_expr(body, Expr::Bool(true), w.span);
+
+            Statement::While { cond, body: body_i }
         }
 
         StatementKind::Defer(dk) => {

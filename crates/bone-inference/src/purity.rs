@@ -29,9 +29,7 @@ pub(crate) fn stmt_contains_cf(c: BodyCtx, s: Idx<Statement>) -> bool {
     match c.body.statement_arena[s] {
         Statement::Return(_) | Statement::Break | Statement::Continue => true,
         Statement::Expr(e) => expr_contains_cf(c, e),
-        Statement::For { body, .. }
-        | Statement::While { body, .. }
-        | Statement::WhileLet { body, .. } => expr_contains_cf(c, body),
+        Statement::For { body, .. } | Statement::While { body, .. } => expr_contains_cf(c, body),
         _ => false,
     }
 }

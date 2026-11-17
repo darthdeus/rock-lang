@@ -4179,10 +4179,7 @@ fn uses_rerun_outside_let(body: &hir::Body, let_span: Span, uses: &[Span]) -> bo
             } => {
                 regions.extend(body.expr_spans.get(*loop_body).copied());
             }
-            hir::Statement::While { .. }
-            | hir::Statement::WhileLet { .. }
-            | hir::Statement::Fn { .. }
-            | hir::Statement::Defer(_) => {
+            hir::Statement::While { .. } | hir::Statement::Fn { .. } | hir::Statement::Defer(_) => {
                 regions.extend(body.statement_spans.get(i).copied());
             }
             _ => {}

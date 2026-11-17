@@ -647,13 +647,6 @@ impl<'a> Builder<'a> {
                     })?;
                     self.lower_for(vars, iter, body)?;
                 }
-                Statement::WhileLet {
-                    pattern,
-                    value,
-                    body,
-                } => {
-                    self.lower_while_let(pattern, value, body)?;
-                }
                 Statement::Break => {
                     let (_, brk, depth) = self.loop_target("break")?;
                     self.used_break_targets.insert(brk);

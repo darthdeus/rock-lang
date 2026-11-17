@@ -1188,29 +1188,6 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// `while let pat = value { body }`: re-evaluate `value` each iteration in
-    /// the header, match it, run the body on success, exit on failure.
-    pub(crate) fn lower_while_let(
-        &mut self,
-        pattern: Idx<Pattern>,
-        value: Idx<Expr>,
-        body: Idx<Expr>,
-    ) -> Result<(), CompilerError> {
-        let header = self.f.new_block();
-        let exit = self.f.new_block();
-        self.f.set_term(self.cur, Term::Goto(header));
-
-        self.cur = header;
-        self.lower_let_test(pattern, value, exit)?;
-        self.loop_targets.push((header, exit, self.defers.len()));
-        self.lower_stmt_expr(body)?;
-        self.loop_targets.pop();
-        self.goto_if_open(header);
-
-        self.cur = exit;
-        Ok(())
-    }
-
     /// `for i in lo..hi { body }` (exclusive): a header testing `i < hi`, a body,
     /// a **latch** that increments `i` (so `continue` still steps), and an exit.
     /// The loop var and the loop bound are both cells.

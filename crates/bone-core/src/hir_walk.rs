@@ -244,15 +244,6 @@ impl Body {
                 ex(a)?;
                 ex(b)?;
             }
-            Statement::WhileLet {
-                pattern,
-                value,
-                body,
-            } => {
-                f(HirChild::Expr(value))?;
-                f(HirChild::Pattern(pattern))?;
-                f(HirChild::Expr(body))?;
-            }
             Statement::Return(None)
             | Statement::Comment(_)
             | Statement::Break

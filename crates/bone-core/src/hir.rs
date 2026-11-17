@@ -1121,12 +1121,6 @@ pub enum Statement {
         body: Idx<Expr>,
     },
 
-    WhileLet {
-        pattern: Idx<Pattern>,
-        value: Idx<Expr>,
-        body: Idx<Expr>,
-    },
-
     Comment(Ustr),
 
     Break,

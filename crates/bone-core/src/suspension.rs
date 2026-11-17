@@ -266,22 +266,6 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                 self.loop_body(None, &vars, *body, flow);
             }
             Statement::While { cond, body } => self.loop_body(Some(*cond), &[], *body, flow),
-            Statement::WhileLet {
-                pattern,
-                value,
-                body,
-            } => {
-                let vars: Vec<_> = match self.body.pattern_single_bind(*pattern) {
-                    Some(b) => vec![(b, Some(*value))],
-                    None => self
-                        .body
-                        .pattern_bindings(*pattern)
-                        .into_iter()
-                        .map(|b| (b, None))
-                        .collect(),
-                };
-                self.loop_body(Some(*value), &vars, *body, flow);
-            }
             Statement::Break => self.exit(Exit::Break, flow),
             Statement::Continue => self.exit(Exit::Continue, flow),
             Statement::Comment(_) => {}
