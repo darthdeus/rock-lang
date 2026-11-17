@@ -17,7 +17,8 @@ fn root(seed: int) -> int {
     assert_eq!(js.matches("__ty: \"P\"").count(), 1, "{js}");
     assert_eq!(
         run_node(&format!(
-            "{}{}{js}\nconsole.log(root(7));",
+            "{}{}{}{js}\nconsole.log(root(7));",
+            skull_codegen_js::JS_VALUE_INTEGER_CHECK,
             skull_codegen_js::JS_STRUCTURAL_EQ,
             skull_codegen_js::JS_TABLE_PRIM
         ))
