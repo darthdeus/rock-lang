@@ -234,6 +234,14 @@ look through `T?` everywhere, including `match`: `null` is its own
 pattern, and a variant/record/newtype/tuple pattern matches the
 unwrapped value.
 
+A `defer` body runs while its scope is already leaving, so it is outside
+any enclosing loop and cannot return from the function: `return` in a
+deferred block is rejected, and so are `break`/`continue` aimed at a loop
+outside it. Control flow that stays inside the body (a loop the block
+owns, a lambda returning from itself) is fine. A lambda body is likewise
+not the enclosing loop's body: `break`/`continue` inside a lambda are
+rejected even when the lambda is written inside a loop.
+
 ## Iterators
 
 A collection can define `iter(collection)` to return an iterator. An iterator
