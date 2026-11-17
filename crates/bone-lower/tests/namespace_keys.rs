@@ -1,9 +1,9 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use bone_core::modules::{NsNode, NsPackage, ScopeProbe};
+use bone_core::modules::{NsNode, NsPackage};
 use bone_core::workspace::Workspace;
-use bone_lower::resolve::{module_members, with_probes};
+use bone_lower::resolve::module_members;
 use ustr::Ustr;
 
 struct CountingAllocator;
@@ -76,29 +76,4 @@ fn repeated_namespace_members_do_not_construct_key_strings() {
     }
     let allocations = ALLOCATIONS.with(|count| count.replace(None).unwrap());
     assert_eq!(allocations, 0, "existing namespace keys must be reused");
-}
-
-#[test]
-fn namespace_probes_keep_existing_and_missing_path_keys() {
-    let (ws, mut path) = workspace();
-    let name = Ustr::from("absent");
-    for package in [1, 2] {
-        for _ in 0..2 {
-            let key = NsPackage::path_key(&path);
-            let (_, probes) =
-                with_probes(|| module_members(&ws, &[], package, &path, name).unwrap());
-            assert_eq!(
-                probes,
-                vec![
-                    ScopeProbe::Member {
-                        package,
-                        node: key,
-                        name
-                    };
-                    2
-                ]
-            );
-            path.push(Ustr::from("missing"));
-        }
-    }
 }

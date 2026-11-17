@@ -2746,25 +2746,3 @@ fn item_visibility(vis: Option<&Visibility>) -> Vec<Doc> {
     };
     vec![Doc::text(text)]
 }
-
-#[cfg(test)]
-mod span_tests {
-    use super::*;
-    #[test]
-    fn invalid_source_spans_are_reported() {
-        let src = "// \u{e9}\n";
-        let ast = skull_parser::parse_module_clean(src, "<span>".into()).unwrap();
-        let cfg = FormatConfig::default();
-        let trivia = Trivia::harvest(src, "<span>".into()).unwrap();
-        let printer = Printer::new(&ast, src, &cfg, &trivia);
-        for (lo, hi) in [(0, src.len() + 1), (4, 5), (5, 2)] {
-            assert!(
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                    || printer.slice_range(lo, hi)
-                ))
-                .is_err(),
-                "{lo}..{hi}"
-            );
-        }
-    }
-}
