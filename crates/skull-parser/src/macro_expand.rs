@@ -1301,6 +1301,7 @@ fn stmt_exprs(ast: &Ast, s: Idx<StatementData>) -> ExprEdges {
 
 fn stmt_blocks(ast: &Ast, s: Idx<StatementData>) -> BlockEdges {
     match &ast.stmts[s].kind {
+        StatementKind::Let(l) => l.else_block.into_iter().collect(),
         StatementKind::For(f) => smallvec![f.body],
         StatementKind::While(w) => smallvec![w.body],
         StatementKind::WhileLet(w) => smallvec![w.body],

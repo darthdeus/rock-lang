@@ -91,3 +91,17 @@ co fn tick() -> Coroutine<int> {
     yield 1
 }
 fn main() {}
+
+//=== TEST CASE: ref_used_after_yield_past_let_else_Generic ===
+//! expect: frame borrow is used after a coroutine suspension
+value Cell { hp: int }
+co fn tick(vals: Map<string, int>) -> Coroutine<int> {
+    let cell = Cell { hp: 1 }
+    let borrowed: ref Cell = cell
+    yield 1
+    let v = vals.get("a") else {
+        return
+    }
+    borrowed.hp = v
+}
+fn main() {}

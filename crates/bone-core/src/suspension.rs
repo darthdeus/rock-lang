@@ -207,6 +207,21 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
         }
     }
 
+    /// A pattern's bindings entering `flow`: a root `Bind` aliases the
+    /// scrutinee (one name for the same value); any richer pattern's bindings
+    /// are fresh projections with no single initializer. One rule for every
+    /// pattern position -- let, if let, while let, match arms.
+    fn bind_pattern_flow(&mut self, pattern: Idx<Pattern>, value: Idx<Expr>, flow: &mut Flow) {
+        match self.body.pattern_single_bind(pattern) {
+            Some(b) => self.bind(b, Some(value), flow),
+            None => {
+                for binding in self.body.pattern_bindings(pattern) {
+                    self.bind(binding, None, flow);
+                }
+            }
+        }
+    }
+
     fn stmt(&mut self, stmt: Idx<Statement>, flow: &mut Flow) {
         match &self.body.statement_arena[stmt] {
             Statement::Let {
@@ -216,16 +231,12 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
             } => {
                 self.expr(*value, flow);
                 if let Some(e) = else_block {
-                    self.expr(*e, flow);
+                    // The else diverges: it exits on its OWN path, which must
+                    // not drain the fall-through flow the bindings join.
+                    let mut miss = flow.clone();
+                    self.expr(*e, &mut miss);
                 }
-                match self.body.pattern_single_bind(*pattern) {
-                    Some(b) => self.bind(b, Some(*value), flow),
-                    None => {
-                        for binding in self.body.pattern_bindings(*pattern) {
-                            self.bind(binding, None, flow);
-                        }
-                    }
-                }
+                self.bind_pattern_flow(*pattern, *value, flow);
             }
             Statement::Static { name, value } => {
                 self.expr(*value, flow);
@@ -260,11 +271,16 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                 value,
                 body,
             } => {
-                let vars: &[_] = match self.body.pattern_arena[*pattern] {
-                    Pattern::Bind(binding) => &[(binding, Some(*value))],
-                    _ => &[],
+                let vars: Vec<_> = match self.body.pattern_single_bind(*pattern) {
+                    Some(b) => vec![(b, Some(*value))],
+                    None => self
+                        .body
+                        .pattern_bindings(*pattern)
+                        .into_iter()
+                        .map(|b| (b, None))
+                        .collect(),
                 };
-                self.loop_body(Some(*value), vars, *body, flow);
+                self.loop_body(Some(*value), &vars, *body, flow);
             }
             Statement::Break => self.exit(Exit::Break, flow),
             Statement::Continue => self.exit(Exit::Continue, flow),
@@ -318,9 +334,7 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
             } => {
                 self.expr(value, flow);
                 let mut entry = flow.clone();
-                if let Pattern::Bind(binding) = self.body.pattern_arena[pattern] {
-                    self.bind(binding, Some(value), &mut entry);
-                }
+                self.bind_pattern_flow(pattern, value, &mut entry);
                 let mut out = Flow::default();
                 self.branch(Some(then_branch), &entry, &mut out);
                 match else_branch {
@@ -339,9 +353,7 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                     if let Some(guard) = arm.guard {
                         self.expr(guard, &mut branch);
                     }
-                    if let Pattern::Bind(binding) = self.body.pattern_arena[arm.pattern] {
-                        self.bind(binding, Some(scrutinee), &mut branch);
-                    }
+                    self.bind_pattern_flow(arm.pattern, scrutinee, &mut branch);
                     self.expr(arm.body, &mut branch);
                     out.merge(branch);
                 }

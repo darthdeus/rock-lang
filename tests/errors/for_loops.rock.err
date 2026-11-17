@@ -27,3 +27,19 @@ fn f(xs: [int]) -> int {
     5
 }
 
+
+//=== TEST CASE: element_annotation_mismatch_TypeMismatch ===
+//! expect: mismatch
+fn main() {
+    for x: string in [1, 2, 3] {
+        print(x)
+    }
+}
+
+//=== TEST CASE: element_annotation_on_destructuring_Generic ===
+//! expect: plain name
+fn main() {
+    for (a, b): (int, int) in [(1, 2)] {
+        print(a + b)
+    }
+}

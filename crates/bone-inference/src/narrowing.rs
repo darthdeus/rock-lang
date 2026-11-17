@@ -14,6 +14,7 @@
 //! a callee or resumer can reassign globals or mutate local fields through an
 //! alias. Whole-local bindings survive because callees cannot reassign them.
 
+use crate::expr::block_ends_in_exit;
 use bone_core::hir;
 use bone_core::hir::{BinOp, BindingInfo, Callee, Expr, Statement};
 use bone_core::prelude::*;
@@ -353,22 +354,7 @@ pub(crate) fn stmt_guard_narrows(gamma: &Gamma, c: BodyCtx, stmt: Idx<Statement>
 /// statement is `return` / `break` / `continue` and it has no tail value).
 fn expr_diverges(c: BodyCtx, e: Idx<Expr>) -> bool {
     match c.body.expr_arena[e] {
-        Expr::Block { statements, tail } => {
-            if tail.is_some() {
-                return false;
-            }
-
-            statements
-                .into_iter()
-                .rfind(|&s| !matches!(c.body.statement_arena[s], Statement::Comment(_)))
-                .is_some_and(|s| {
-                    matches!(
-                        c.body.statement_arena[s],
-                        Statement::Return(_) | Statement::Break | Statement::Continue
-                    )
-                })
-        }
-
+        Expr::Block { statements, tail } => tail.is_none() && block_ends_in_exit(c, statements),
         _ => false,
     }
 }

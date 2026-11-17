@@ -297,8 +297,10 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
                 let ty = l.ty.map(|t| self.ty(t));
                 let value = l.value.map(|e| self.expr(e));
                 let mut pattern = self.pattern(&l.pattern);
-                self.rw.bind_pattern(&mut pattern);
+                // The else block must not see the pattern's binders: graft it
+                // before the pattern binds (hygiene order, as in bone-lower).
                 let else_block = l.else_block.map(|b| self.block(b));
+                self.rw.bind_pattern(&mut pattern);
                 StatementKind::Let(Let {
                     span: l.span,
                     keyword_span: l.keyword_span,

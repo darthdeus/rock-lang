@@ -116,6 +116,21 @@ pub(crate) fn infer_statement(
                 let binding_ty = infer_initialized_binding(c, gamma, name, value)?;
                 gamma.assign_named_type(name, binding_ty)?;
 
+                // `let Red = c` over an enum is a variant TAG TEST (match
+                // rule), which covers one variant -- refutable, so it needs an
+                // `else` unless the enum has only that variant.
+                if let Some(tag) = unqualified_arm_variant(c, gamma, pattern, binding_ty, span)? {
+                    require_irrefutable(
+                        c,
+                        gamma,
+                        pattern,
+                        binding_ty,
+                        Some(tag),
+                        span,
+                        "a pattern that can fail needs `match`, `if let`, or `let ... else`",
+                    )?;
+                }
+
                 if contains_frame_ref(gamma, binding_ty) {
                     let provenance = frame_ref_provenance(c, gamma, value);
                     if !provenance.retainable() {
@@ -148,6 +163,10 @@ pub(crate) fn infer_statement(
                     expected = ann;
                 }
 
+                // A bare uppercase name against an enum scrutinee is a variant
+                // tag test, exactly as in a match arm (and a typo'd one is an
+                // error, not a catch-all binding).
+                let tag = unqualified_arm_variant(c, gamma, pattern, scrut_ty, span)?;
                 check_pattern(c, gamma, pattern, expected, span)?;
 
                 match else_block {
@@ -156,6 +175,7 @@ pub(crate) fn infer_statement(
                         gamma,
                         pattern,
                         scrut_ty,
+                        tag,
                         span,
                         "a pattern that can fail needs `match`, `if let`, or `let ... else`",
                     )?,
@@ -163,7 +183,9 @@ pub(crate) fn infer_statement(
                         let vt = resolve(gamma, value_ty, span);
                         let peeled = resolve(gamma, scrut_ty, span);
                         let nullable = !types_equal(gamma, vt, peeled);
-                        if !nullable && pattern_is_irrefutable(c, gamma, pattern, scrut_ty, span) {
+                        if !nullable
+                            && pattern_is_irrefutable(c, gamma, pattern, scrut_ty, tag, span)
+                        {
                             comp_error!(
                                 span,
                                 "the `else` of this `let` never runs: the pattern always matches"
@@ -312,12 +334,21 @@ pub(crate) fn infer_statement(
                 Err(e) => (gamma.workspace.builtins.error(), Some(e)),
             };
 
-            check_pattern(c, gamma, pattern, elem_ty, span)?;
+            let mut expected = elem_ty;
+            if let Some(b) = c.body.pattern_single_bind(pattern)
+                && let Some(ann) = c.body.binding_arena[b].declared_ty
+            {
+                coerce(gamma, elem_ty, ann, span)?;
+                expected = ann;
+            }
+            let tag = unqualified_arm_variant(c, gamma, pattern, elem_ty, span)?;
+            check_pattern(c, gamma, pattern, expected, span)?;
             require_irrefutable(
                 c,
                 gamma,
                 pattern,
                 elem_ty,
+                tag,
                 span,
                 "a `for` pattern must match every element; use `match` or `if let` in the body",
             )?;
@@ -356,6 +387,7 @@ pub(crate) fn infer_statement(
                 Err(e) => (gamma.workspace.builtins.error(), Some(e)),
             };
 
+            unqualified_arm_variant(c, gamma, pattern, unwrapped, span)?;
             check_pattern(c, gamma, pattern, unwrapped, span)?;
             gamma.loop_depth += 1;
             let body_res = infer_expr_used(c, gamma, body, Use::Discard);
@@ -379,6 +411,21 @@ pub(crate) fn infer_statement(
     drain_ready_pendings(gamma)?;
 
     Ok(())
+}
+
+/// Whether a statement list ends in a loop/function exit (`return`/`break`/
+/// `continue`), ignoring trailing comments. The one syntactic divergence test,
+/// shared by block `never` inference and guard narrowing.
+pub(crate) fn block_ends_in_exit(c: BodyCtx, statements: IdxRange<Statement>) -> bool {
+    statements
+        .into_iter()
+        .rfind(|&s| !matches!(c.body.statement_arena[s], Statement::Comment(_)))
+        .is_some_and(|s| {
+            matches!(
+                c.body.statement_arena[s],
+                Statement::Return(_) | Statement::Break | Statement::Continue
+            )
+        })
 }
 
 pub(crate) fn infer_expr_used(
@@ -1496,6 +1543,7 @@ pub(crate) fn infer_expr_used(
                 Err(err) => (gamma.workspace.builtins.error(), Some(err)),
             };
 
+            unqualified_arm_variant(c, gamma, *pattern, unwrapped, expr_span)?;
             check_pattern(c, gamma, *pattern, unwrapped, expr_span)?;
 
             let result = match used {
@@ -1969,17 +2017,7 @@ fn infer_block(
             },
         },
         None => {
-            let diverges = (*statements)
-                .into_iter()
-                .rfind(|&s| !matches!(c.body.statement_arena[s], Statement::Comment(_)))
-                .is_some_and(|s| {
-                    matches!(
-                        c.body.statement_arena[s],
-                        Statement::Return(_) | Statement::Break | Statement::Continue
-                    )
-                });
-
-            if diverges {
+            if block_ends_in_exit(c, *statements) {
                 gamma.workspace.builtins.never()
             } else {
                 gamma.workspace.builtins.unit()

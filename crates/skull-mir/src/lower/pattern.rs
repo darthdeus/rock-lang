@@ -889,6 +889,11 @@ impl<'a> Builder<'a> {
         value: Idx<Expr>,
     ) -> Result<LetScrutinee, CompilerError> {
         if let Pattern::Bind(binding) = self.body.pattern_arena[pattern]
+            // A bind named like a scrutinee variant is a TAG TEST, not a
+            // binding -- it must go through the generic match machinery.
+            && !self
+                .scrut_variants(value)
+                .contains(&self.body.binding_arena[binding].name)
             && self.expr_is_nullable(value)
             && let Some(shape) = self.nobox_binding_shape(binding)?.or(self
                 .nullable_value_shape_of(value)?

@@ -1339,6 +1339,18 @@ pub(crate) fn lower_statement_value(
             let pattern = body.pattern_arena.alloc(pat);
             normalize_binding_wildcards(ctx, body, pattern, f.span);
 
+            // `for x: T in xs` — the element annotation rides the binding.
+            if let Some(te) = &f.ty {
+                let ty = lower_type_expr_local(ctx, a, body, a.te(te))?;
+                match body.pattern_single_bind(pattern) {
+                    Some(b) => body.binding_arena[b].declared_ty = Some(ty),
+                    None => comp_error!(
+                        f.span,
+                        "a `for` element type annotation requires a plain name binding"
+                    ),
+                }
+            }
+
             if pattern_is_names_only(body, pattern) {
                 let body_expr = lower_block(ctx, a, body, loop_scope, &f.body)?;
                 let body = ctx.alloc_block_expr(body, body_expr, a.b(&f.body));
@@ -3667,18 +3679,31 @@ fn lower_if_let_clauses(
     then_block: &Idx<BlockData>,
     else_block: &Option<Idx<BlockData>>,
 ) -> Result<Idx<Expr>, CompilerError> {
-    let Some((clause, rest)) = clauses.split_first() else {
-        let e = lower_block(ctx, a, body, scope, then_block)?;
-        return Ok(ctx.alloc_block_expr(body, e, a.b(then_block)));
-    };
-
+    // The else block is lowered ONCE and its Idx shared by every clause's miss
+    // arm: each clause failing lands on the same HIR, so its diagnostics and
+    // bindings exist once instead of once per clause.
     let else_branch = match else_block {
         Some(blk) => {
             let e = lower_block(ctx, a, body, scope, blk)?;
             Some(ctx.alloc_block_expr(body, e, a.b(blk)))
         }
-
         None => None,
+    };
+    lower_if_let_clauses_with(ctx, a, body, scope, clauses, then_block, else_branch)
+}
+
+fn lower_if_let_clauses_with(
+    ctx: &mut LowerCtx,
+    a: &Ast,
+    body: &mut Body,
+    scope: Idx<Scope>,
+    clauses: &[IfLetClause],
+    then_block: &Idx<BlockData>,
+    else_branch: Option<Idx<Expr>>,
+) -> Result<Idx<Expr>, CompilerError> {
+    let Some((clause, rest)) = clauses.split_first() else {
+        let e = lower_block(ctx, a, body, scope, then_block)?;
+        return Ok(ctx.alloc_block_expr(body, e, a.b(then_block)));
     };
 
     let node = match clause {
@@ -3690,7 +3715,7 @@ fn lower_if_let_clauses(
 
             let pattern = body.pattern_arena.alloc(pat);
             let then_branch =
-                lower_if_let_clauses(ctx, a, body, then_scope, rest, then_block, else_block)?;
+                lower_if_let_clauses_with(ctx, a, body, then_scope, rest, then_block, else_branch)?;
 
             Expr::IfLet {
                 pattern,
@@ -3703,7 +3728,7 @@ fn lower_if_let_clauses(
         IfLetClause::Condition(cond) => {
             let cond = lower_expr(ctx, a, body, scope, a.e(cond))?;
             let then_branch =
-                lower_if_let_clauses(ctx, a, body, scope, rest, then_block, else_block)?;
+                lower_if_let_clauses_with(ctx, a, body, scope, rest, then_block, else_branch)?;
 
             Expr::If {
                 cond,

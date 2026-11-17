@@ -324,60 +324,22 @@ pub(crate) fn check_pattern(
     }
 }
 
+/// Whether `pat` introduces any binding; one walker, `Body::pattern_bindings`.
 pub(crate) fn pattern_binds(c: BodyCtx, pat: Idx<Pattern>) -> bool {
-    match c.body.pattern_arena[pat] {
-        Pattern::Bind(_) => true,
-        Pattern::EnumVariant { sub, .. } => sub.into_iter().any(|p| pattern_binds(c, p)),
-        Pattern::Record { fields, .. } => fields
-            .into_iter()
-            .any(|f| pattern_binds(c, c.body.record_pat_field_arena[f].pat)),
-
-        Pattern::Or { alternatives } => alternatives.into_iter().any(|p| pattern_binds(c, p)),
-        Pattern::Tuple { elements } => elements.into_iter().any(|p| pattern_binds(c, p)),
-        Pattern::Newtype { sub, .. } => pattern_binds(c, sub),
-
-        _ => false,
-    }
+    !c.body.pattern_bindings(pat).is_empty()
 }
 
+/// Give every binding in `pat` the type `ty` -- the poisoned-scrutinee path,
+/// so a failed RHS leaves no binding unbound.
 pub(crate) fn bind_pattern_leaves_to(
     c: BodyCtx,
     gamma: &mut Gamma,
     pat: Idx<Pattern>,
     ty: TyId,
 ) -> Result<(), CompilerError> {
-    match c.body.pattern_arena[pat] {
-        Pattern::Bind(b) => gamma.assign_named_type(b, ty)?,
-
-        Pattern::EnumVariant { sub, .. } => {
-            for p in sub {
-                bind_pattern_leaves_to(c, gamma, p, ty)?;
-            }
-        }
-
-        Pattern::Record { fields, .. } => {
-            for f in fields {
-                bind_pattern_leaves_to(c, gamma, c.body.record_pat_field_arena[f].pat, ty)?;
-            }
-        }
-
-        Pattern::Tuple { elements } => {
-            for p in elements {
-                bind_pattern_leaves_to(c, gamma, p, ty)?;
-            }
-        }
-
-        Pattern::Or { alternatives } => {
-            for p in alternatives {
-                bind_pattern_leaves_to(c, gamma, p, ty)?;
-            }
-        }
-
-        Pattern::Newtype { sub, .. } => bind_pattern_leaves_to(c, gamma, sub, ty)?,
-
-        Pattern::Wildcard | Pattern::Literal(..) | Pattern::Range { .. } => {}
+    for b in c.body.pattern_bindings(pat) {
+        gamma.assign_named_type(b, ty)?;
     }
-
     Ok(())
 }
 
@@ -389,12 +351,10 @@ pub(crate) fn pattern_is_irrefutable(
     gamma: &mut Gamma,
     pat: Idx<Pattern>,
     scrut_ty: TyId,
+    tag: Option<Ustr>,
     span: Span,
 ) -> bool {
-    let arms = [exhaustive::ArmPattern {
-        pattern: pat,
-        tag: None,
-    }];
+    let arms = [exhaustive::ArmPattern { pattern: pat, tag }];
     exhaustive::missing_match_patterns(c, gamma, scrut_ty, &arms, span).is_empty()
 }
 
@@ -405,13 +365,11 @@ pub(crate) fn require_irrefutable(
     gamma: &mut Gamma,
     pat: Idx<Pattern>,
     scrut_ty: TyId,
+    tag: Option<Ustr>,
     span: Span,
     suggestion: &str,
 ) -> Result<(), CompilerError> {
-    let arms = [exhaustive::ArmPattern {
-        pattern: pat,
-        tag: None,
-    }];
+    let arms = [exhaustive::ArmPattern { pattern: pat, tag }];
     let missing = exhaustive::missing_match_patterns(c, gamma, scrut_ty, &arms, span);
     if missing.is_empty() {
         return Ok(());

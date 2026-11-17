@@ -171,3 +171,23 @@ fn annotated_let_else() {
     }
     print(x)
 }
+
+enum Signal {
+    Go,
+    Stop,
+}
+
+fn go_only(s: Signal) -> int {
+    // A bare variant name is a tag test (the `match` rule), so this is a
+    // legitimate refutable pattern.
+    let Go = s else {
+        return 0
+    }
+    1
+}
+
+@test(output = "1\n0")
+fn bare_variant_tag_let_else() {
+    print(go_only(Signal::Go))
+    print(go_only(Signal::Stop))
+}
