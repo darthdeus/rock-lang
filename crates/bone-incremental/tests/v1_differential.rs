@@ -1154,31 +1154,6 @@ fn a_type_removed_and_restored_relowers_its_users() {
     assert!(err.contains("did not resolve"), "{err}");
 }
 
-/// The probes a lowering recorded are readable per file: c's path walk
-/// entered node `a` and asked it for `bump`.
-#[test]
-fn scope_probes_record_the_path_walk() {
-    use bone_core::modules::ScopeProbe;
-    let c = "mod c;\n\nfn pick() -> int {\n    super::a::bump(1)\n}\n";
-    let h = V1Harness::new(vec![v1("a.rock", A_BUMP), v1("c.rock", c)]);
-    let probes = h.session.scope_probes("c.rock").expect("c is held");
-    assert!(
-        probes.contains(&ScopeProbe::Node {
-            package: 1,
-            node: Ustr::from("a")
-        }),
-        "{probes:?}"
-    );
-    assert!(
-        probes.contains(&ScopeProbe::Member {
-            package: 1,
-            node: Ustr::from("a"),
-            name: Ustr::from("bump")
-        }),
-        "{probes:?}"
-    );
-}
-
 /// A function added under a name a macro of another file already has: the
 /// whole-program macro/function collision check refuses it in a fresh
 /// session, so the session refuses the edit too rather than lowering it on a

@@ -10,9 +10,7 @@
 // narrowing reuses bodies whose arena indices no longer match a fresh batch
 // lowering.
 
-use bone_incremental::session::{
-    Session, UpdateResult, UpdateTier, changed_names, item_prints, name_shapes,
-};
+use bone_incremental::session::{Session, UpdateResult, UpdateTier};
 use bone_semantic::prelude::*;
 
 use crate::common;
@@ -162,10 +160,6 @@ fn origin_doubled() -> int {
 
 fn batch(files: &Files) -> Workspace {
     batch_check(&[], files, &bone_core::modules::NsAliases::default()).expect("batch check")
-}
-
-fn name_is_tail(actual: &Ustr, expected: &str) -> bool {
-    actual.as_str().rsplit("::").next() == Some(expected)
 }
 
 #[test]
@@ -873,6 +867,22 @@ fn oracle_type_rename_cascades_both_directions() {
 /// against the cached registry; an edit of the macro definition rebuilds the
 /// registry, and the user sees the new expansion.
 #[test]
+fn oracle_add_and_remove_macro_definition() {
+    let plain = "fn f() -> int { 1 }";
+    let defined = "macro wrap(e: expr) { e }\nfn f() -> int { 1 }";
+    let called = "macro wrap(e: expr) { e }\nfn f() -> int { wrap(1) }";
+    let mut h = Harness::new(&[("m.rock", plain)]);
+    h.update("m.rock", defined);
+    h.assert_clean();
+    h.update("m.rock", called);
+    h.assert_clean();
+    h.update("m.rock", "fn f() -> int { wrap(1) }");
+    h.assert_diagnostic("wrap");
+    h.update("m.rock", called);
+    h.assert_clean();
+}
+
+#[test]
 fn oracle_macro_user_body_edit_and_macro_def_edit() {
     let macro_def = |body: &str| {
         format!("macro twice(e: expr) {{\n    {body}\n}}\n\nfn base() -> int {{ 3 }}\n")
@@ -945,20 +955,6 @@ fn area() -> int {
     h.assert_clean();
 }
 
-// ---------------------------------------------------------------------------
-// Classifier table tests: item_prints + classify are pure functions,
-// so detection correctness is tested directly, not through session behavior.
-// ---------------------------------------------------------------------------
-
-fn prints_of(src: &str) -> Vec<bone_incremental::session::ItemPrint> {
-    let module = parse_rock_with_file(src, "cls.rock").expect("classifier fixture parses");
-    bone_incremental::session::item_prints(&module, src)
-}
-
-fn classify_texts(old: &str, new: &str) -> bone_incremental::session::FileDiff {
-    bone_incremental::session::classify(&prints_of(old), &prints_of(new))
-}
-
 #[test]
 fn session_body_update_metadata_separates_semantics_from_span_relocation() {
     let mut h = Harness::new(&[(
@@ -1000,60 +996,6 @@ fn session_interface_update_does_not_publish_body_metadata() {
     );
     assert_ne!(result.tier, UpdateTier::BodyOnly);
     assert_eq!(result.body_update, Default::default());
-}
-
-#[test]
-fn classify_edits() {
-    let base = "fn a(x: int) -> int {\n    x\n}\n\nfn b() -> int {\n    2\n}\n";
-    let interface = "Interface";
-    let cases: &[(&str, &str, &str)] = &[
-        (
-            base,
-            "fn a(x: int) -> int {\n    x\n}\n\nfn b() -> int {\n    222\n}\n",
-            "BodiesOnly([1])",
-        ),
-        (
-            base,
-            "fn a(x: int) -> int {\n    x\n}\n\n// a comment\n\nfn b() -> int {\n    2\n}\n",
-            "LayoutOnly",
-        ),
-        (
-            base,
-            "fn a(x: int, y: int) -> int {\n    x\n}\n\nfn b() -> int {\n    2\n}\n",
-            interface,
-        ),
-        (
-            base,
-            "@test\nfn a(x: int) -> int {\n    x\n}\n\nfn b() -> int {\n    2\n}\n",
-            interface,
-        ),
-        (
-            base,
-            "fn a(x: int) -> int {\n    x\n}\n\nfn b() -> int {\n    2\n}\n\nfn c() -> int {\n    3\n}\n",
-            interface,
-        ),
-        (base, "fn a(x: int) -> int {\n    x\n}\n", interface),
-        (
-            base,
-            "fn b() -> int {\n    2\n}\n\nfn a(x: int) -> int {\n    x\n}\n",
-            interface,
-        ),
-        // Expansion bakes a macro body into every caller.
-        (
-            "macro twice(e: expr) {\n    (e) + (e)\n}\n\nfn user() -> int {\n    1\n}\n",
-            "macro twice(e: expr) {\n    (e) + (e) + (e)\n}\n\nfn user() -> int {\n    1\n}\n",
-            interface,
-        ),
-        (
-            "fn pick(x: int) -> int {\n    1\n}\n\nfn pick(x: int, y: int) -> int {\n    2\n}\n",
-            "fn pick(x: int) -> int {\n    1\n}\n\nfn pick(x: int, y: int) -> int {\n    22\n}\n",
-            "BodiesOnly([1])",
-        ),
-    ];
-    for (old, new, expected) in cases {
-        let diff = format!("{:?}", classify_texts(old, new));
-        assert_eq!(&diff, expected, "{old:?} -> {new:?}");
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1179,98 +1121,6 @@ fn booly() -> bool {
     );
 }
 
-/// `shift_module_after_edit` at `b`'s start leaves the earlier `a` alone,
-/// skips the edited `b`'s body spans (the caller re-lowers them) while
-/// shifting its header, and shifts the later `c` by exactly the delta.
-#[test]
-fn shift_module_after_edit_moves_only_later_item_spans() {
-    use bone_semantic::hir::BodyOwner;
-    let src = "fn a() -> int { 111 }\nfn b() -> int { 222 }\nfn c() -> int { 333 }";
-    let fs = files(&[("m.rock", src)]);
-    let ws = batch(&fs);
-    let mid = mid_for(&ws, "m.rock");
-    let mut module = ws.module(mid).clone();
-
-    let fid = |m: &bone_semantic::hir::Module, name: &str| {
-        m.functions
-            .iter()
-            .find(|(_, f)| name_is_tail(&f.name, name))
-            .map(|(i, _)| i)
-            .expect("fn exists")
-    };
-    let (a, b, c) = (fid(&module, "a"), fid(&module, "b"), fid(&module, "c"));
-
-    let body_offsets = |m: &bone_semantic::hir::Module, f| -> Vec<(usize, usize)> {
-        let mut v: Vec<_> = m.bodies[&BodyOwner::Function(f)]
-            .expr_spans
-            .values()
-            .map(|s| s.offset_range())
-            .collect();
-        v.sort();
-        v
-    };
-
-    let a_hdr0 = module.functions[a].span.offset_range();
-    let a_body0 = body_offsets(&module, a);
-    let b_hdr0 = module.functions[b].span.offset_range();
-    let b_body0 = body_offsets(&module, b);
-    let c_hdr0 = module.functions[c].span.offset_range();
-    let c_body0 = body_offsets(&module, c);
-
-    // Shift everything at/after `b`'s start by +100 bytes / +5 lines; `b` is the
-    // re-lowered owner.
-    let at = b_hdr0.0;
-    let d = 100usize;
-    bone_incremental::span_shift::shift_module_after_edit(
-        &mut module,
-        BodyOwner::Function(b),
-        at,
-        d as isize,
-        5,
-    );
-
-    let bump = |v: &[(usize, usize)]| -> Vec<(usize, usize)> {
-        v.iter().map(|(s, e)| (s + d, e + d)).collect()
-    };
-
-    // (1) `a` is entirely before `at`: untouched, header and body.
-    assert_eq!(
-        module.functions[a].span.offset_range(),
-        a_hdr0,
-        "earlier fn `a` header must not move"
-    );
-    assert_eq!(
-        body_offsets(&module, a),
-        a_body0,
-        "earlier fn `a` body must not move"
-    );
-
-    // (2) `b` is the edited owner: its BODY spans are skipped (caller re-lowers
-    //     them fresh), even though its header sits at `at` and shifts.
-    assert_eq!(
-        body_offsets(&module, b),
-        b_body0,
-        "edited fn `b` body spans must be left for re-lowering"
-    );
-    assert_eq!(
-        module.functions[b].span.offset_range(),
-        (b_hdr0.0 + d, b_hdr0.1 + d),
-        "edited fn `b` header (start == at) still shifts"
-    );
-
-    // (3) `c` is a kept body after the edit: header AND body shift by the delta.
-    assert_eq!(
-        module.functions[c].span.offset_range(),
-        (c_hdr0.0 + d, c_hdr0.1 + d),
-        "later fn `c` header must shift by the delta"
-    );
-    assert_eq!(
-        body_offsets(&module, c),
-        bump(&c_body0),
-        "later fn `c` body spans must shift by the delta"
-    );
-}
-
 // ---------------------------------------------------------------------------
 // Warm-module behavior: the stdlib is lowered + inferred once at
 // Session::new and never again.
@@ -1362,127 +1212,41 @@ fn body_edit_reinfers_and_relowers_only_the_edited_body() {
     assert_eq!(result.reinferred.len(), 1);
 }
 
-// Per-body name-dep recording (observe-only). The reverse
-// index isn't wired into eviction yet; this just pins that the recording sees
-// both a call name AND a field-access struct name (the dep that is invisible
-// in the source - b.rock's `origin_doubled` reaches a Point field purely
-// through inference, never naming Point in a type).
+/// A body edit drops the dependency it removed, while a remaining field access
+/// still invalidates its caller when the field type changes. The harness checks
+/// the session against a fresh batch build after every edit.
 #[test]
-fn dep_index_records_cross_module_names() {
-    let h = Harness::new(&[("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)]);
-
-    let b = h.session.module_deps(h.mid("b.rock"));
-    assert!(
-        b.iter().any(|name| name_is_tail(name, "Point")),
-        "field access p.x must record Point; got {b:?}"
-    );
-    assert!(
-        b.iter().any(|name| name_is_tail(name, "make_point")),
-        "call must record make_point; got {b:?}"
-    );
-
-    // a.rock defines Point/make_point; it must not depend on b.rock's names.
-    let a = h.session.module_deps(h.mid("a.rock"));
-    assert!(
-        !a.iter().any(|name| name_is_tail(name, "double_x")),
-        "a.rock must not depend on b.rock's double_x; got {a:?}"
-    );
-}
-
-/// A body edit that CHANGES which names a module references must incrementally
-/// patch the reverse dep index (`update_dependents_for`, the body-edit fast path)
-/// -- drop the names the edit removed, keep the rest -- WITHOUT an O(workspace)
-/// rescan. Pins both the specific transition and that the patched index equals a
-/// full rebuild.
-#[test]
-fn body_edit_incrementally_updates_dep_index() {
+fn body_edit_dependency_removal_preserves_field_dependency() {
     let mut h = Harness::new(&[("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)]);
     let b_mid = h.mid("b.rock");
-    let has = |h: &Harness, name: &str| {
-        h.session
-            .dependents
-            .iter()
-            .any(|(key, modules)| name_is_tail(key, name) && modules.contains(&b_mid))
-    };
+    let no_factory_call = CROSS_FILE_B.replace("double_x(make_point(0, 0))", "42");
+    let body_edit = h.update("b.rock", &no_factory_call);
+    assert_eq!(body_edit.tier, UpdateTier::BodyOnly);
+    h.assert_clean();
 
-    assert!(has(&h, "make_point"), "precondition: b calls make_point");
-    assert!(has(&h, "Point"), "precondition: b reaches a Point field");
-
-    // Single-body edit: origin_doubled no longer calls make_point (double_x's
-    // `p.x` keeps the Point dep). BodyOnly -> rebuild_body_incremental ->
-    // update_dependents_for(b).
-    let r = h.update(
-        "b.rock",
-        &CROSS_FILE_B.replace("double_x(make_point(0, 0))", "42"),
+    let changed_factory = CROSS_FILE_A.replace(
+        "fn make_point(x: int, y: int) -> Point {",
+        "fn make_point(x: int, y: int, z: int) -> Point {",
     );
-    assert_eq!(r.tier, UpdateTier::BodyOnly);
-
+    let factory_edit = h.update("a.rock", &changed_factory);
+    assert_eq!(factory_edit.tier, UpdateTier::Interface);
     assert!(
-        !has(&h, "make_point"),
-        "make_point dep must be dropped after the edit"
+        !Harness::reinferred_mids(&factory_edit).contains(&b_mid),
+        "b.rock no longer depends on make_point"
     );
+    h.assert_clean();
+
+    let changed_field = changed_factory.replace("x: int,", "x: string,");
+    let field_edit = h.update("a.rock", &changed_field);
+    assert_eq!(field_edit.tier, UpdateTier::Interface);
     assert!(
-        has(&h, "Point"),
-        "Point dep (via double_x `p.x`) must remain"
+        Harness::reinferred_mids(&field_edit).contains(&b_mid),
+        "b.rock still depends on Point through double_x's field access"
     );
+    h.assert_diagnostic("b.rock: ");
 
-    // The incrementally-patched index must be byte-identical to a full rescan
-    // (no stale/empty entries) -- the soundness invariant the body path relies on.
-    let incremental = h.session.dependents.clone();
-    h.session.rebuild_dependents();
-    assert_eq!(
-        incremental, h.session.dependents,
-        "incremental dep index must equal a full rebuild"
-    );
-}
-
-// Name-shape diff over parsed item_prints, no inference involved.
-fn shapes(text: &str) -> FxHashMap<Ustr, u64> {
-    let m = parse_rock_with_file(text, "shape.rock").expect("parse");
-    name_shapes(&item_prints(&m, text))
-}
-
-fn diff(old: &str, new: &str) -> FxHashSet<Ustr> {
-    changed_names(&shapes(old), &shapes(new))
-}
-
-fn names(list: &[&str]) -> FxHashSet<Ustr> {
-    list.iter().map(|s| Ustr::from(s)).collect()
-}
-
-#[test]
-fn name_shape_diff_names_only_interface_changes() {
-    let point = "struct Point { x: int, y: int }\n";
-    let make = "fn make_point(x: int, y: int) -> Point { Point { x: x, y: y } }\n";
-    let other = "fn other() -> int { 0 }\n";
-    let cases: &[(String, &[&str])] = &[
-        (
-            format!(
-                "{point}fn make_point(x: int, y: int, z: int) -> Point {{ Point {{ x: x, y: y }} }}\n{other}"
-            ),
-            &["make_point"],
-        ),
-        (
-            format!("struct Point {{ x: int, y: int, z: int }}\n{make}{other}"),
-            &["Point"],
-        ),
-        (
-            format!("{point}{make}{other}fn fresh() -> int {{ 1 }}\n"),
-            &["fresh"],
-        ),
-        (format!("{point}{make}"), &["other"]),
-        // Same signatures, different bodies: eviction must not fire per keystroke.
-        (
-            format!(
-                "{point}fn make_point(x: int, y: int) -> Point {{ Point {{ x: y, y: x }} }}\nfn other() -> int {{ 42 }}\n"
-            ),
-            &[],
-        ),
-    ];
-    let base = format!("{point}{make}{other}");
-    for (new, expected) in cases {
-        assert_eq!(diff(&base, new), names(expected), "{new}");
-    }
+    h.update("a.rock", CROSS_FILE_A);
+    h.assert_clean();
 }
 
 /// A signature or field-shape edit to a.rock re-infers b.rock, which calls

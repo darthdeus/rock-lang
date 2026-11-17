@@ -1378,13 +1378,6 @@ impl Session {
             bone_semantic::stdlib_base::warm_names(&self.warm, &self.warm_contributions);
     }
 
-    /// The namespace facts `file`'s last lowering read, or `None`
-    /// for a file the session does not hold.
-    pub fn scope_probes(&self, file: &str) -> Option<&FxHashSet<ScopeProbe>> {
-        let mid = self.ws.module_ids.get(&ustr(file))?;
-        self.ws.modules.get(mid.index()).map(|m| &m.scope_probes)
-    }
-
     /// The scope path: re-assemble the namespace tree from the
     /// stored contributions (the edited file's is already the new one), diff
     /// it against the current tree, commit it, and run the interface cascade
