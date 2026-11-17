@@ -1,8 +1,4 @@
-//! Completion sources: the per-context candidate
-//! emitters -- member/struct-literal/enum paths, call-through, decorators,
-//! and their workspace-query helpers. Functions here take a `Session` only
-//! to run speculative variants through `backend::analyze_variant`; the
-//! variant plumbing itself stays in `backend.rs`.
+//! Candidates for contextual completion and whole-call synthesis.
 
 use std::collections::HashMap;
 
@@ -72,14 +68,7 @@ pub(crate) fn fields_of_type(ws: &Workspace, t_name: Ustr, v: TyId) -> Vec<Ustr>
     out
 }
 
-/// The generic var (if any) the receiver binds on overload `f`'s first param,
-/// plus the owner struct that var resolves to -- the shared owner-binding step
-/// for BOTH the arg-position field-ref path and the method-selection prefill.
-/// A bare-generic `o: T` receiver IS the owner (`recv_struct`); a wrapper
-/// `Ctor<T>` whose ctor is the receiver struct binds `T` to the receiver's sole
-/// type-arg element (`Entity<Glyph>` -> owner `Glyph`). `(None, recv_struct)`
-/// for a non-generic first param. Both `recv_struct`/`recv_elem` are `None` for
-/// a non-UFCS prefix call -- the FieldRef owner then binds from a sibling arg.
+/// Bind the FieldRef owner from a receiver of type T or Ctor<T>.
 fn receiver_owner_binding(
     ws: &Workspace,
     f: &bone_semantic::hir::Function,
@@ -106,14 +95,7 @@ fn receiver_owner_binding(
     }
 }
 
-/// Resolve the `FieldRef<owner, V>` at param `pi` of overload `f` to its owner
-/// struct + rendered V. The owner comes from: a literal nominal first arg; the
-/// receiver, when the FieldRef's generic matches the var the receiver bound
-/// (`recv_var`/`recv_owner` from `receiver_owner_binding`); or `sibling_owner`
-/// (a preceding-arg binding, the non-UFCS prefix-call path). `None` when the
-/// param isn't a `FieldRef`, or its generic owner can't be resolved. The shared
-/// FieldRef-slot resolver -- both the arg-completion path and the prefill synth
-/// consume it, so their owner/slot logic cannot drift.
+/// Resolve the owner from a nominal, receiver or preceding argument.
 fn fieldref_slot_owner(
     ws: &Workspace,
     f: &bone_semantic::hir::Function,
@@ -189,13 +171,7 @@ fn sibling_owner_bind(
     None
 }
 
-/// Field-ref completions for a call-arg slot. `None` if no overload's slot at
-/// `arg_idx` is a resolvable `FieldRef<Struct, V>` (caller falls through to
-/// normal completion); `Some(items)` when one is -- offering the struct's
-/// fields whose declared type is exactly V (the typechecker's invariance),
-/// whether or not the leading `.` is typed. ALL overloads are consulted; the
-/// FieldRef owner resolves from the UFCS receiver (`recv_end`), a literal
-/// nominal, or a preceding sibling arg (`fieldref_slot_owner`).
+/// Suggest fields compatible with at least one overload's FieldRef slot.
 pub(crate) fn field_ref_arg_completions(
     ws: &Workspace,
     path: &str,
@@ -270,15 +246,7 @@ pub(crate) struct CtCounts {
     pub(crate) survivors: usize,
 }
 
-/// Complete a whole call through its first parameter: typing `rejtanog` offers
-/// `reject_target(TargetError::NotGround)` when the fn name absorbs the start of
-/// the query and an arg value for its first param matches the rest. The
-/// candidate is `fn(arg)` -- the reachability idea one level up. v1 fills the
-/// arg from in-scope values of the param type and the type's enum UNIT variants
-/// (the motivating case); reach-path args and tuple/record payloads are TODO.
-/// Whether a call-through arg value needs a payload snippet: a tuple variant
-/// (`Damage::Fire($..)`), a record variant (`Cfg { $.. }`), or none (a direct
-/// value, unit variant, or reach path).
+/// Complete a prefix such as `drawr` to a call such as `draw(rect)`.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum ArgPayload {
     None,
@@ -286,19 +254,7 @@ pub(crate) enum ArgPayload {
     Record,
 }
 
-/// Does the virtual call `name(arg)` subsequence-contain the query `q` (already
-/// lowercased), GIVEN that the fn name already absorbs `q[..k]` (where `k =
-/// prefix_subseq_len(q, name_lc)` -- the same value the noise guard computes)?
-/// The residual `q[k..]` must subsequence-match `arg`, with the `(`/`)`
-/// punctuation matched exactly as a scan of the whole `name(arg)` would.
-///
-/// Because the name-scan always lands at `qi == k`, this is BEHAVIOR-IDENTICAL to
-/// scanning the full virtual `name(arg)` per fn -- but it depends only on
-/// `(q, k, arg)`, NOT the fn name. That lets the call-through path memoize the
-/// matching args per `(param_type, k)` and share the scan across every fn in the
-/// group instead of re-testing each (fn, arg) pair (lever (b)). Equivalent to
-/// `is_subsequence(q, format!("{name}({arg})").to_lowercase())` without building
-/// the string -- the fzf "match, don't build" idea.
+/// Filter the virtual call without constructing its text.
 pub(crate) fn arg_matches_residual(q: &[u8], k: usize, arg: &str) -> bool {
     let mut qi = k.min(q.len());
     if qi < q.len() && q[qi] == b'(' {
@@ -388,13 +344,7 @@ impl CtArg {
     }
 }
 
-/// Precomputed call-through index: the function table + the GLOBAL-derived arg
-/// values per param type (direct globals of the type, the type's enum variants,
-/// and reach paths from globals -- `g.movable.grid`). All a pure function of the
-/// type graph, so it is cached in `BoneProject::call_through` and rebuilt only on
-/// non-`BodyOnly` edits. The per-keystroke path adds only the (small) in-scope
-/// LOCAL args on top. Before this, `call_through_param_completions` rebuilt the
-/// whole O(types*globals) reach expansion on EVERY keystroke (20-50ms stall).
+/// Cache functions and global-derived arguments by type for call-through.
 pub(crate) struct CallThroughIndex {
     pub(crate) fns: Vec<CtFn>,
     pub(crate) global_type_args: HashMap<String, Vec<CtArg>>,
@@ -659,24 +609,13 @@ pub(crate) fn call_through_param_completions(
     // abbreviation -- arg completion needs a resolved callee to know the param
     // type, which `tilecen(` doesn't give -- so it must be browsable, not capped.
 
-    // Pass 1: walk only the first-char bucket (lever (a)) and keep the fns that
-    // clear the noise guard, recording `k` (how many leading query chars the
-    // name absorbs) and the set of distinct first-param types seen. NOISE GUARD:
-    // the name must begin at the query's first char (guaranteed by the bucket),
-    // absorb >= half of the query but NOT all of it, and land its chars cleanly
-    // (word boundaries / a run). `k` matters because the arg-side match tests the
-    // RESIDUAL `q[k..]`, which depends only on `(param_type, k)` -- NOT the name.
+    // Group by expected type and residual query after matching the function name.
     let mut passing: Vec<(usize, usize)> = Vec::new(); // (fn index, k)
     // Fns whose name FULLY covers the query (`k == q.len()`): normally suppressed
     // as fn-name browsing, but eligible for confident unique-arg autofill below.
     let mut committed: Vec<usize> = Vec::new();
 
-    // Local-derived args, keyed by the type each PRODUCES (a local's own type, or
-    // a reach path's final type), built BEFORE pass 1 so the noise guard can
-    // admit a fn whose name absorbs < half the query when the residual matches a
-    // local arg of its param type (`gmob` -> `give(mob)`). Owned keys: a reach
-    // path's `final_ty` is a temporary. Immutable after -- the per-`(type, k)`
-    // match memo borrows from it.
+    // Add local seeds once per request. The match memo borrows these entries.
     let mut local_args: HashMap<String, Vec<CtArg>> = HashMap::new();
     for (ln, _lt, node_ty) in &locals {
         local_args
@@ -729,32 +668,14 @@ pub(crate) fn call_through_param_completions(
         }
     }
 
-    // (b)+(A) Per `(param_type, k)` group, share BOTH the matching-arg set AND
-    // each arg's SUFFIX score vector (`fuzzy_suffix_scores`, a pure fn of
-    // `(arg, q)`): computed once, reused by every fn in the group. The arg-side
-    // subsequence match depends only on the residual `q[k..]` (not the fn name),
-    // so the group filter is exact (`arg_matches_residual`). The per-fn score is
-    // then the partition combine `max_s(prefix_name[s] + suffix_arg[s])` (lever
-    // A) -- a length-`|q|` max, not a full DP per (fn,arg) pair. This is byte-
-    // EXACT vs the old per-pair `fuzzy_score(name(arg), q)` (the `(` junction
-    // breaks any cross-half run, and the +1000 prefix bonus never applies to a
-    // passing call-through fn), just without re-scoring the shared arg set per fn.
+    // Share argument matches and scores across functions with the same residual query.
     let empty: Vec<CtArg> = Vec::new();
     // Per group: (arg, suffix_scores, path_penalty, local). suffix + penalty
     // both depend only on the arg (not the fn), so computed once and shared.
     let mut match_memo: HashMap<(&str, usize), Vec<(&CtArg, Vec<i32>, i32, bool)>> = HashMap::new();
     let mut prefix_scores: Vec<i32> = Vec::new(); // reused across fns
 
-    // Collect lightweight candidates (score, fn index, arg, payload) across all
-    // fns; materialize ONLY the global top `CALL_THROUGH_CAP`. Per fn we keep ALL simple args
-    // (browsable fields) so the candidate pool can be large at a short prefix, but
-    // we don't `format!` items we'll drop -- rank cheap, materialize survivors
-    // (same pattern as general completion).
-    // The trailing `u8` is the emit-time `type_rank`: 4 (bucketed last) for a
-    // global/partial-match synth, but a LOCAL-SEEDED confident autofill promotes
-    // to 0 -- a fn accepting a local of the right type is what the user reached
-    // for, so it ranks among the direct locals, not below every candidate
-    // (completion ranking contract, Divergence 3).
+    // Render call text only for candidates that survive the caps.
     let mut cands: Vec<(i32, usize, &CtArg, u8)> = Vec::new();
     for (si, k) in passing {
         let cf = &index.fns[scoped_fns[si].index];
@@ -815,13 +736,7 @@ pub(crate) fn call_through_param_completions(
             cands.push((score, si, a, if local { 1 } else { 4 }));
         }
     }
-    // CONFIDENT unique-arg autofill: for a committed (full-name-match) fn, the
-    // residual query is empty so any arg "matches" -- offer `f(arg)` ONLY when the
-    // first-param type has exactly ONE in-scope producer (a local/param of that
-    // type or a single clean field path), i.e. the arg is unambiguous. Common
-    // types (many producers) stay quiet; distinctive ones (`can_cast(s)`,
-    // `spell_hotkey_label(s.kind)`) autofill even though the name covers the whole
-    // query. Method-chain args are excluded (not "the obvious value").
+    // A fully typed name can prefill one unambiguous local argument.
     for si in committed {
         let cf = &index.fns[scoped_fns[si].index];
         let t = cf.first_param_ty.as_str();
@@ -831,11 +746,6 @@ pub(crate) fn call_through_param_completions(
             .map(|v| v.iter().filter(|a| !a.method).collect())
             .unwrap_or_default();
         if let [a] = confident.as_slice() {
-            // A full-name match with a unique, unambiguous LOCAL arg is the
-            // highest-confidence call-through: a fn accepting a local of the right
-            // type. type_rank 0 promotes it out of the bottom bucket to rank among
-            // the direct locals (method bit still demotes it just below a plain
-            // local), above coincidental partial (`passing`) matches.
             let score = fuzzy_score(scoped_fns[si].name.as_bytes(), q) + 5000;
             cands.push((score, si, a, 0));
         }
@@ -853,11 +763,7 @@ pub(crate) fn call_through_param_completions(
         let scoped = &scoped_fns[si];
         let cf = &index.fns[scoped.index];
         let fname = scoped.name;
-        // A local-seeded promotion (0/1) holds only when the synth PRODUCES the
-        // expected slot type -- a fn accepting your local but returning the
-        // wrong type must not outrank type-directed candidates
-        // (completion ranking contract, principle 3). No expected type ->
-        // promotion stands on the local seed alone.
+        // Promote a local seed only if the completed call also satisfies the slot.
         let type_rank = match expected.as_deref_mut() {
             Some(exp) if type_rank < 4 => {
                 if exp.accepts_fn_returning(ws, cf.key.as_str()) {
@@ -872,13 +778,7 @@ pub(crate) fn call_through_param_completions(
         if !sink.admit(&call) {
             continue;
         }
-        // Rank 4 = a synthesized whole-call, below every direct candidate;
-        // a LOCAL-SEEDED promotion (0/1) lifts it into the direct region.
-        // With an expected type the promotion IS type relevance
-        // (`type_rank`); with none it is only the coarse bucket, so the
-        // promoted rank rides the KIND rung instead (a confident autofill
-        // ranks with locals, a partial with globals) and `type_rank`
-        // carries just direct-vs-synth. Reuse the score computed above.
+        // Unpromoted synthesized calls rank below direct candidates.
         let (ex, bd) = match_band_exact(&call, q, q);
         let key = if score_leads {
             RankKey {
@@ -923,13 +823,7 @@ pub(crate) fn call_through_param_completions(
     counts
 }
 
-/// Workspace reference counts per NAME (one namespace -- overloads pool,
-/// matching rename semantics): call sites (incl. `?.` method calls), global
-/// reads/writes, struct literals, enum-variant qualifiers, and
-/// type-annotation ctors. Feeds the `freq` prior rung, log-bucketed via
-/// `FREQ_HOT`/`FREQ_WARM`. Cached on `BoneProject` and rebuilt with the
-/// other type caches on non-BodyOnly edits -- a body edit's +-1 ref can't
-/// realistically flip a log bucket.
+/// Pool overload references under one name to compute the frequency prior.
 pub(crate) fn build_freq_index(ws: &Workspace) -> HashMap<Ustr, u32> {
     use bone_semantic::hir::{self, TypeCtor, TypeExpr};
     let mut counts: HashMap<Ustr, u32> = HashMap::new();
@@ -1076,12 +970,7 @@ pub(crate) fn decorator_completions(
     out
 }
 
-/// Field completions for an enum record-variant literal. Reparses (the
-/// incomplete `{ }` breaks the live body) and lists the variant's record fields.
-/// `None` when the head doesn't resolve to a record variant (a unit/tuple variant
-/// block head like `if x == Enum::Variant { .. }` is not a record literal) -- the
-/// caller falls through to global completion. `Some(vec![])` only when the variant
-/// IS a record but the prefix filtered every field out.
+/// Return an empty list for a resolved record whose fields all fail the filter.
 pub(crate) fn enum_record_field_completions(
     session: &mut Session,
     path: &str,
@@ -1195,15 +1084,7 @@ pub(crate) fn struct_literal_field_completions(
     Some(items)
 }
 
-/// Variant completions for `EnumName::<variant>`. The trailing `::<partial>` is
-/// a hard error that aborts the whole module, so we truncate it back to the bare
-/// enum name (accepted as a value) and balance -- that keeps the enum *def* in
-/// the parse, which is all the variant list needs.
-///
-/// In a value position each payload-carrying variant is templated as a snippet
-/// so the caller doesn't hand-fill it: a tuple variant inserts `Variant($0)`, a
-/// record variant `Variant { $0 }`, with the cursor parked inside. Unit variants
-/// (and any variant in a match-arm pattern position) insert the bare name.
+/// Resolve the qualifier and insert the matching variant payload template.
 pub(crate) fn enum_qualified_completions(
     session: &mut Session,
     path: &str,
@@ -1239,13 +1120,7 @@ pub(crate) fn enum_qualified_completions(
 
     let pattern = in_pattern_position(src, offset);
     let matches_prefix = |v: &str| prefix.is_empty() || admit(v.as_bytes(), prefix.as_bytes());
-    // When the in-progress prefix matches NO variant (a typo like `TextAlign::top`),
-    // returning empty hands the popup to the client's buffer-word fallback -- the
-    // worst outcome, since an enum is a closed set. Show every variant instead, and
-    // force each past the CLIENT's own prefix filter via `filter_text = prefix` (cmp
-    // re-matches the typed text against each item; without this they vanish again).
-    // The response is `is_incomplete`, so the client re-requests each keystroke and
-    // the prefix stays fresh. A partial match keeps normal narrowing + default filter.
+    // Recover a mistyped qualifier suffix by offering every variant.
     let none_match = !prefix.is_empty() && !all.iter().any(|(v, _)| matches_prefix(v));
     let force_filter = none_match.then(|| prefix.to_string());
 
@@ -1280,13 +1155,7 @@ pub(crate) fn enum_qualified_completions(
     items
 }
 
-/// The enum a match-arm pattern HEAD expects: the scrutinee's nominal type,
-/// when it names an enum. A half-typed head (`match s { co`) breaks the live
-/// parse at the missing `=>`, so each attempt is analyzed as a speculative
-/// Session variant; the first munge COMPLETES the arm
-/// (`<head>__rock_completion__ => {}`) for a fresh head, the standard
-/// sentinel pair covers a head whose `=>` is already typed. The anchor sits
-/// before the cursor, so it resolves identically in every variant workspace.
+/// The scrutinee precedes the cursor and survives speculative insertions.
 pub(crate) fn pattern_scrutinee_enum(
     session: &mut Session,
     path: &str,
@@ -1350,16 +1219,8 @@ pub(crate) fn member_ty_match(
     }
 }
 
-/// Member completion for `recv.<cursor>`, with the receiver's members
-/// resolved by `members` in each completion munge's speculative Session
-/// variant (a receiver expr typed by inference, or a dotted name typed from
-/// its head binding).
-///
-/// `None` means the receiver did NOT resolve to a members-bearing type (a
-/// non-struct like `scale(x)` -> int) -- the caller may fall through to general
-/// completion. `Some(items)` means it DID resolve; `items` may be empty when the
-/// prefix matched no member, and the caller must then SUPPRESS general
-/// completion (offering globals after `recv.` would be invalid UFCS suggestions).
+/// Try speculative reparses. A resolved receiver with no matching members
+/// still suppresses general completion.
 pub(crate) fn member_completions(
     session: &mut Session,
     path: &str,
@@ -1404,16 +1265,7 @@ pub(crate) fn member_completions(
     resolved_empty.then(Vec::new)
 }
 
-/// If UFCS fn `f` has a `FieldRef<owner, V>` param and the owner struct has >=1
-/// field of type `V`, returns `(arg_idx, field names)` -- `arg_idx` is the
-/// FieldRef's position among the *non-receiver* args, so the pre-fill lands the
-/// field in the right slot (`set_co`'s FieldRef is arg 0 of `(field, next)`, not
-/// the trailing param). `None` otherwise (leave the item untouched). Two
-/// receiver shapes bind the owner: a bare-generic `o: T` is itself the owner
-/// (`stop<T>(o: T, f: FieldRef<T, V>)`, owner = `recv_struct`); a wrapper
-/// `e: Entity<T>` binds `T` to `recv_elem` (`Entity<Glyph>` -> owner `Glyph`),
-/// resolving the FieldRef through the ctor. The FieldRef's `T` is then that same
-/// generic var, or a literal `FieldRef<owner, V>` whose struct is the owner.
+/// Find a compatible field-reference argument after the receiver.
 fn field_ref_slot(
     ws: &Workspace,
     recv_struct: Ustr,
@@ -1474,17 +1326,8 @@ fn field_ref_insert(
     format!("{name}({})", parts.join(", "))
 }
 
-/// UFCS field-ref methods applicable to this receiver: a fn whose first param
-/// is either a bare generic `T` (owner = `recv_struct`) or a wrapper `Ctor<T>`
-/// whose ctor is `recv_struct` (owner = `recv_elem`, e.g. `Entity<Glyph>`), and
-/// which has a `FieldRef<T, V>` param where the owner has a field of type `V`.
-/// `mob.kill_co(.attack_co)` / `e.run_into(.co, ..)` are UFCS-legal; the generic
-/// receiver is never surfaced by `ufcs_methods` (nominal-match), so this fills
-/// that gap, while the wrapper overload IS surfaced there (caller suppresses the
-/// plain item and keeps this pre-filled one). Gated on a matching field, so a
-/// struct with no `Task?` field never sees the method (and generic helpers like
-/// `min`/`max`, which carry no FieldRef param, never leak in). Deduped by name,
-/// first-wins. Returns `(fn, arg_idx, field names)`.
+/// Find compatible methods even when a generic first parameter would
+/// keep them out of the nominal method list.
 fn field_ref_methods<'a>(
     ws: &'a Workspace,
     recv_struct: Ustr,
@@ -1575,13 +1418,7 @@ fn build_member_items(
         if fields.is_empty() && methods.is_empty() {
             return Vec::new();
         }
-        // Typed expected-arg session for the enclosing call, built against THIS
-        // (variant) workspace so its Gamma resolves the member TyIds the
-        // candidates carry. `coerce` decides
-        // the member type-match, not a rendered-string `==`; the receiver-
-        // filtered `.rendered` still feeds the string-keyed reach index. None
-        // when not in an arg slot or the body has no cached inference -- then
-        // there's no type direction (kind/name order), same as before.
+        // Use the variant workspace so inferred types and the oracle share an arena.
         let mut expected = arg_slot.and_then(|(callee, idx)| {
             ExpectedArg::for_call(ws, mid, ws.inference(mid)?, offset, callee, idx, None)
         });
@@ -1617,23 +1454,9 @@ fn build_member_items(
         // order consistently with -- and ahead of, by distance -- the transitive
         // reach paths added below (fuzzy score is the dominant term either way).
         let pfx = prefix.as_bytes();
-        // In an `if`/`while <chain>` condition, `bool` fields are the likely
-        // target -- soft-boost them (score-tie tiebreak only). Mutually exclusive
-        // with arg-position reach paths, so the bool-format sort_text is safe to
-        // mix only with the field/method items here.
-        // Call-arg position (a known expected param type) -- a direct field/method
-        // whose type matches that param ranks first. Mutually exclusive with
-        // `bool_ctx` (a condition chain isn't inside a call).
-        // `_`-prefixed fields are soft-private: hidden from member completion
-        // unless the user is explicitly typing an `_` prefix. Fields stay public
-        // (no type-check change) -- this is purely a display convention.
+        // Prefer bool fields in conditions and display nullable bool as an explicit comparison.
         let show_private = prefix.starts_with('_');
-        // Member fields get a small SCORE boost over methods (not a hard rung):
-        // typing `.` most often reaches for a field, so on a match tie the field
-        // leans first -- but a method that matches the prefix better still wins.
-        // Only with a real query: at empty prefix score is 0 and any bonus would
-        // spuriously trip the length tiebreak (empty-prefix browse stays
-        // alphabetical). Tunable; eyeball with `rock lsp completion <pos> --repl`.
+        // A small score bonus puts fields above equally matched methods.
         let field_boost = if prefix.is_empty() { 0 } else { 25 };
         // The type-relevance rung: a `bool` member in a bool context
         // (`if`/`while <chain>`), a member of the expected param type in a
@@ -1672,12 +1495,6 @@ fn build_member_items(
                         }
                     })
                 });
-        // FieldRef field-ref methods for this receiver, resolved once. Two shapes:
-        // a bare-generic receiver (`mob.stop`, never surfaced by `ufcs_methods`)
-        // and a wrapper `Entity<T>` overload (`e.run_into`, which the NOMINAL
-        // `ufcs_methods` DOES surface as a plain item). For the latter, suppress
-        // the plain method item below so the pre-filled version isn't doubled.
-        // Non-struct receivers have no FieldRef method candidates.
         let field_ref_matches = recv_struct
             .map(|rs| field_ref_methods(ws, rs, recv_elem, frag))
             .unwrap_or_default();
@@ -1695,11 +1512,7 @@ fn build_member_items(
                     return None;
                 }
                 (prefix.is_empty() || admit(m.name.as_bytes(), prefix.as_bytes())).then(|| {
-                    // Inline `(params) -> ret`. A method with args left after the
-                    // receiver accepts as a snippet `name($0)` (`recv.name()`, cursor
-                    // inside); one with no remaining args inserts `name()` as plain
-                    // text so the cursor lands after the `)`. When a `(` already
-                    // follows, insert the bare name -- the parens are already there.
+                    // Omit the receiver argument and reuse any existing call parentheses.
                     let (insert_text, insert_text_format) = if paren_follows {
                         (Some(m.name.clone()), None)
                     } else if m.takes_args {
@@ -1711,12 +1524,7 @@ fn build_member_items(
                         (Some(format!("{}()", m.name)), None)
                     };
                     CompletionItem {
-                        // `method` rung = 0 (same as fields): in member position the
-                        // `.` already means "give me a member", so a method is not
-                        // demoted below a field by a hard rung. Fields get only a soft
-                        // SCORE lean (MEMBER_FIELD_BOOST); methods take no bonus, so a
-                        // better-matching method still outranks a field. (In non-member
-                        // position fns are still down-ranked, by `kind`.)
+                        // Give fields and methods the same rank rung in a member slot.
                         sort_text: Some(arg_sort_text(
                             type_rank(false, rmatch),
                             0,
@@ -1740,11 +1548,7 @@ fn build_member_items(
                 })
             });
         let mut items: Vec<CompletionItem> = field_items.chain(method_items).collect();
-        // Field-ref methods (`mob.kill_co(.attack_co)`, `e.run_into(.co, ..)`):
-        // surface each with the field arg pre-filled. A bare-generic receiver is
-        // skipped by `ufcs_methods` (its receiver isn't nominal), so this is the
-        // only source; a wrapper `Entity<T>` overload was suppressed above, so
-        // this is its sole (pre-filled) item. Gated on a matching field existing.
+        // Replace the ordinary method candidate with its prefilled FieldRef form.
         {
             for (fdef, arg_idx, fields) in field_ref_matches {
                 let key = fdef.name;

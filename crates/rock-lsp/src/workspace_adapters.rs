@@ -1,4 +1,3 @@
-/// Adapter functions to make existing LSP operations work with the workspace model
 use crate::*;
 use anyhow::Result;
 use lsp_types::*;
@@ -7,7 +6,6 @@ fn doc_path(doc: &TextDocumentIdentifier) -> Result<String> {
     Ok(doc.uri.to_file_path()?)
 }
 
-/// Workspace-aware go to definition
 pub(crate) fn go_to_definition_workspace(
     workspace: &mut LspWorkspace,
     params: &TextDocumentPositionParams,
@@ -21,8 +19,6 @@ pub(crate) fn go_to_definition_workspace(
         .map(|loc| vec![loc]))
 }
 
-/// Workspace-aware go to type definition (LSP `textDocument/typeDefinition`):
-/// jump to the declaration of the *type* of the value under the cursor.
 pub(crate) fn go_to_type_definition_workspace(
     workspace: &mut LspWorkspace,
     params: &TextDocumentPositionParams,
@@ -36,7 +32,6 @@ pub(crate) fn go_to_type_definition_workspace(
         .map(|loc| vec![loc]))
 }
 
-/// Workspace-aware find references
 pub(crate) fn find_references_workspace(
     workspace: &mut LspWorkspace,
     params: &TextDocumentPositionParams,
@@ -48,9 +43,6 @@ pub(crate) fn find_references_workspace(
     Ok(if locs.is_empty() { None } else { Some(locs) })
 }
 
-/// Workspace-aware document highlight: occurrences of the symbol under the
-/// cursor within the current file (bone's symbol-aware references query,
-/// filtered to this file).
 pub fn do_document_highlight_workspace(
     workspace: &mut LspWorkspace,
     params: &TextDocumentPositionParams,
@@ -62,7 +54,6 @@ pub fn do_document_highlight_workspace(
     Ok((!hl.is_empty()).then_some(hl))
 }
 
-/// Workspace-aware hover
 pub(crate) fn do_hover_workspace(
     workspace: &mut LspWorkspace,
     params: &TextDocumentPositionParams,
@@ -73,7 +64,6 @@ pub(crate) fn do_hover_workspace(
     Ok(workspace.bone.hover(&file_path, pos))
 }
 
-/// Workspace-aware signature help
 pub(crate) fn do_signature_help_workspace(
     workspace: &mut LspWorkspace,
     params: &TextDocumentPositionParams,
@@ -84,7 +74,6 @@ pub(crate) fn do_signature_help_workspace(
     Ok(workspace.bone.signature_help(&file_path, pos))
 }
 
-/// Workspace-aware document symbols.
 pub fn do_document_symbols_workspace(
     workspace: &mut LspWorkspace,
     params: &TextDocumentParams,
@@ -94,8 +83,6 @@ pub fn do_document_symbols_workspace(
     Ok(Some(workspace.bone.document_symbols(&file_path)))
 }
 
-/// Workspace-aware workspace symbols (project-wide, matched against the query).
-/// The query spans every project the bone session has loaded.
 pub fn do_workspace_symbols_workspace(
     workspace: &mut LspWorkspace,
     params: &WorkspaceSymbolParams,
@@ -104,7 +91,6 @@ pub fn do_workspace_symbols_workspace(
     Ok(Some(workspace.bone.workspace_symbols(&params.query)))
 }
 
-/// Workspace-aware inlay hints
 pub(crate) fn do_inlay_hints_workspace(
     workspace: &mut LspWorkspace,
     params: &TextDocumentRangeParams,
@@ -115,7 +101,6 @@ pub(crate) fn do_inlay_hints_workspace(
     Ok(Some(workspace.bone.inlay_hints(&file_path, params.range)))
 }
 
-/// Workspace-aware completion
 pub fn do_completion_workspace(
     workspace: &mut LspWorkspace,
     params: &CompletionParams,
@@ -137,22 +122,13 @@ pub fn do_completion_workspace(
     // Corpus recorder (ROCK_LSP_RECORD): snapshot the request + tag items
     // with the accept command. No-op when recording is off.
     crate::completion_record::stash_and_tag(&workspace.bone, &file_path, pos, &mut items);
-    // Both the FILTERING and the match-quality RANKING are prefix-sensitive,
-    // so the result for an empty/short prefix is not a superset the client
-    // can correctly re-filter: the popup-open response (often empty-prefix,
-    // every item match_quality 0, ranked by distance) would freeze in place
-    // while the user types -- e.g. `tile_center(pg|` shows the empty-prefix
-    // order (dist-1 `prop.image_dims()` above dist-2 `player.movable.grid`)
-    // because cmp client-filters the cached list instead of re-asking. Mark
-    // the list incomplete so the client re-requests per keystroke and the
-    // server re-scores against the actual typed prefix.
+    // Re-request on each keystroke because ranking depends on the typed prefix.
     Ok(Some(CompletionList {
         is_incomplete: true,
         items,
     }))
 }
 
-/// Workspace-aware prepare rename
 pub(crate) fn prepare_rename_workspace(
     workspace: &mut LspWorkspace,
     params: &TextDocumentPositionParams,
@@ -162,7 +138,6 @@ pub(crate) fn prepare_rename_workspace(
     Ok(workspace.bone.prepare_rename(&file_path, params.position)?)
 }
 
-/// Workspace-aware rename
 pub(crate) fn do_rename_workspace(
     workspace: &mut LspWorkspace,
     params: &RenameParams,

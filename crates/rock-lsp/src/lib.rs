@@ -60,13 +60,7 @@ mod debug_path_tests {
     }
 }
 
-/// Opt-in per-request server-side timing (`ROCK_LSP_TIMING=1`). Emitted at
-/// `info` through the shared backend, so it lands on stderr / `:LspLog` with the
-/// standard `[<elapsed>s ...]` timestamp. Measures dequeue -> response-sent (the
-/// server's actual handle time). Compare against the client-observed round-trip
-/// (`:RockPanel`): a small handle time under a large round-trip localizes the
-/// latency to the queue / transport (head-of-line blocking or write
-/// backpressure), NOT to compute.
+/// Log handler time when `ROCK_LSP_TIMING` is set.
 fn lsp_timing_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("ROCK_LSP_TIMING").is_some())
@@ -94,9 +88,7 @@ impl Drop for ReqTiming {
     }
 }
 
-/// Per-method server-side handle-time samples (ms), for the `rock/stats`
-/// introspection request. Recorded unconditionally (a cheap capped ring per
-/// method) so `rock/stats` has data even without `ROCK_LSP_TIMING`.
+/// Bound each method's sample count for `rock/stats`.
 static REQUEST_STATS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, std::collections::VecDeque<f32>>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -132,11 +124,7 @@ fn request_stats_json(loaded_modules: usize) -> serde_json::Value {
     })
 }
 
-/// Snapshot for the `rock/modules` request, shaped for the modules floater:
-/// `{ total_modules, contexts: [{ kind, root, module_count, modules: [...] }] }`.
-/// `ago_ms` is how long ago each module last (re)inferred (null if never touched
-/// this session -- rendered `-`). bone tracks no per-module compile *duration*
-/// or dep-staleness, so `last_compile_us`/`stale` stay null/false.
+/// Populate module recency for `rock/modules`. Duration and staleness are unavailable.
 fn modules_json(summary: Vec<(String, Vec<bone_query::ModuleRecency>)>) -> serde_json::Value {
     let total: usize = summary.iter().map(|(_, ids)| ids.len()).sum();
     let contexts: Vec<serde_json::Value> = summary
@@ -167,11 +155,7 @@ fn modules_json(summary: Vec<(String, Vec<bone_query::ModuleRecency>)>) -> serde
     serde_json::json!({ "total_modules": total, "contexts": contexts })
 }
 
-/// What this server tells the client it can do, sent back with `initialize`.
-///
-/// The set below is load-bearing for editors: entries gate whether requests
-/// are even issued, so additions or removals change visible behaviour. Keep it
-/// in sync with the dispatch in `handle_request`.
+/// The server capabilities advertised during initialization.
 pub fn server_capabilities() -> serde_json::Value {
     serde_json::json!({
         "positionEncoding": "utf-16",
@@ -187,12 +171,7 @@ pub fn server_capabilities() -> serde_json::Value {
         "completionProvider": {
             "completionItem": { "labelDetailsSupport": false },
             "resolveProvider": false,
-            // `:` is listed so the second char of `::` pops enum variants for
-            // `Foo::|`; the first char alone has no scope yet and simply falls
-            // back to plain identifiers. Without it nvim never auto-opens on
-            // `::`. `" "` opens the popup on a bare space (`let x = |`) with an
-            // `isIncomplete` empty-prefix list that re-scores while typing.
-            // See `extract_scope_resolution`.
+            // Trigger on a qualifier or space so clients can request contextual completions.
             "triggerCharacters": [".", ":", " "],
             "workDoneProgress": false,
         },
@@ -261,11 +240,7 @@ pub fn run_lsp_server() -> Result<()> {
                 eprintln!("Panic with unknown payload type: {:?}", payload);
             }
             eprintln!("=== END PANIC INFO ===");
-            // Staying here to `threads.join()` would wedge: the reader
-            // thread waits on stdin for EOF the client never sends while it
-            // still believes the server is up, keeping a dead process with
-            // its whole compiled session in RAM and dropping every later
-            // request. Exit instead so the client notices and restarts.
+            // The reader blocks on stdin until the client sees the server exit.
             std::process::exit(1);
         }
     };
@@ -367,10 +342,6 @@ impl LspServer {
             return Ok(());
         }
 
-        // Handle timer for this request. It lives until the dispatch arm
-        // below returns, so it spans dequeue to response-sent for each
-        // request kind. Samples always land in REQUEST_STATS (backing
-        // rock/stats); the per-request log line needs ROCK_LSP_TIMING=1.
         let _timing = ReqTiming {
             method: req.method.clone(),
             id: req.id.clone(),
@@ -580,13 +551,7 @@ impl LspServer {
     }
 }
 
-/// Regenerate the `.rock.tags` for the project root containing `uri` from the
-/// live bone session. Used on didOpen: the first open batch-loads that root's
-/// whole compilation unit, so its tags are complete after this one write, and a
-/// restart (which re-opens every buffer) refreshes each open root exactly once
-/// via its own didOpen -- no cross-root fan-out here, which would rewrite every
-/// root once per reopened buffer. Best-effort: a failure is logged, never
-/// propagated -- ctags must not break editing.
+/// Refresh tags on didOpen after the project is loaded.
 fn regenerate_ctags(workspace: &LspWorkspace, file_path: &str, when: &str) {
     // A Wasm host has no filesystem to write `.rock.tags` into.
     if cfg!(target_family = "wasm") {
@@ -598,13 +563,7 @@ fn regenerate_ctags(workspace: &LspWorkspace, file_path: &str, when: &str) {
     }
 }
 
-/// Regenerate `.rock.tags` for EVERY open project root, not just the edited
-/// file's -- an editor with several packages open (e.g. an application and its library) must
-/// keep all their tag files fresh so a jump from one resolves the other, even
-/// while editing only one. Used on didSave: the save is the point a sibling
-/// root's stale tags should catch up. `write_tags_file` skips roots whose bytes
-/// are unchanged, so the untouched siblings cost a compare, not a rewrite.
-/// Best-effort: a failure is logged per root, never propagated.
+/// Refresh all open project tag files on didSave for cross-project navigation.
 fn regenerate_all_ctags(workspace: &LspWorkspace, when: &str) {
     // A Wasm host has no filesystem to write `.rock.tags` into.
     if cfg!(target_family = "wasm") {
@@ -621,19 +580,13 @@ fn regenerate_all_ctags(workspace: &LspWorkspace, when: &str) {
     }
 }
 
-/// bone-backend equivalent of `reload_sources_on_change_workspace`: feed the
-/// edit into the per-root bone session and publish diagnostics for every file
-/// the session reports on (so cross-file errors update and now-clean files get a
-/// clearing publish). Used on didOpen/didChange when `backend == Bone`.
+/// Compile the editor buffer and publish changed diagnostics across its project.
 fn bone_reload_and_publish(
     out: &mut Vec<Message>,
     file_path: &str,
     contents: String,
     workspace: &mut LspWorkspace,
 ) -> Result<()> {
-    // Compile-on-open/edit cost (ROCK_LSP_TIMING=1). This is the notification
-    // path (didOpen/didChange) that head-of-line-blocks every queued request
-    // behind it, so it's the number to watch when first-paint feels slow.
     let _t = bone_core::prelude::Instant::now();
     let per_file = workspace.bone.update(file_path, contents);
     if lsp_timing_enabled() {

@@ -1,12 +1,4 @@
-//! AST-based cursor classification for completion.
-//!
-//! Parses the MUNGED buffer (skull-parser is total: best-effort tree +
-//! recovered errors) and answers "what is the cursor, structurally" from the
-//! recovered AST -- replacing the backward byte-scanners one query at a
-//! time. Invariant relied on throughout: the sentinel is injected AT the
-//! cursor, so every span that STARTS before the cursor has identical offsets
-//! in the munged and live buffers -- receiver spans from here feed `type_at`
-//! on the LIVE workspace directly.
+//! Find completion contexts in the AST after inserting a probe at the cursor.
 
 use rock_tokenizer::TokenKind;
 use skull_parser::Idx;
@@ -138,12 +130,7 @@ fn is_paren_call(syntax: &CallSyntax) -> bool {
 }
 
 impl CursorAst {
-    /// Parse the best munge of `src` at `offset`. Ladder: the two insertion
-    /// munges, the token-replacement munge, then the raw buffer -- preferring
-    /// the first candidate whose parse actually KEEPS the cursor region (a
-    /// candidate can parse while recovery drops the cursor's statement).
-    /// None only when every rung fails to tokenize -- callers keep their byte
-    /// fallback there.
+    /// Try increasingly permissive parses around the completion probe.
     pub(crate) fn at(src: &str, offset: usize) -> Option<CursorAst> {
         let file = Ustr::from("<cursor>");
         let mut candidates: Vec<(String, usize)> =
@@ -176,14 +163,7 @@ impl CursorAst {
             candidates.push((crate::completion::classify::balance_delimiters(s), offset));
         }
         candidates.push((src.to_string(), offset));
-        // A candidate can parse while recovery mangles the cursor region:
-        // the sentinel ends up an ORPHAN with no parent expr (digit-glue), or
-        // attached to a hallucinated node (`<sentinel> (x) => ..` /
-        // `<sentinel> c: 3` parse as a call WITH THE SENTINEL AS CALLEE, plus
-        // recovery errors). Accept immediately only a CLEAN parse with the
-        // cursor attached; otherwise grade candidates (attached-with-errors >
-        // sentinel-as-callee > orphan > empty) in ladder order -- a file with
-        // unrelated pre-existing errors still classifies.
+        // Prefer a candidate that retains the probe region over a recovered shell.
         let mut attached: Option<CursorAst> = None;
         let mut hallucinated: Option<CursorAst> = None;
         let mut orphan: Option<CursorAst> = None;
@@ -521,11 +501,6 @@ impl CursorAst {
         }
     }
 
-    /// Cursor in the RHS of an assignment `lhs = <cursor>` (or a compound
-    /// `lhs += <cursor>`): the last byte offset of the LHS place expression, so
-    /// `type_at` resolves the slot's expected type (an enum-typed field
-    /// surfaces its variants type-directed, `mob.ai_state = Com|`). The LHS ends
-    /// before the cursor, so its offset is live-buffer-valid.
     pub(crate) fn assign_lhs(&self) -> Option<usize> {
         for (_, e) in self.ast.exprs.iter() {
             let ExprKind::Assign { target, value, .. } = &e.kind else {
@@ -539,11 +514,7 @@ impl CursorAst {
         None
     }
 
-    /// The bare-identifier target of an assignment whose RHS holds the cursor
-    /// (`dest = |` -> `"dest"`). `None` for a field/index target -- those resolve
-    /// through the byte anchor (their place expr is typed), whereas a bare
-    /// local/param place is typed `()`, so its slot type must be looked up from
-    /// the binding by name (see `binding_ty_by_name`).
+    /// Resolve by name when an assignment has no inferred left-hand type.
     pub(crate) fn assign_target_ident(&self) -> Option<String> {
         for (_, e) in self.ast.exprs.iter() {
             let ExprKind::Assign { target, value, .. } = &e.kind else {
@@ -560,11 +531,7 @@ impl CursorAst {
         None
     }
 
-    /// Cursor in the RHS of a comparison or null-coalesce BinOp (`lhs ==
-    /// <cursor>`, `lhs ?? <cursor>`): the last byte offset of the LHS, so
-    /// `type_at` resolves the compared-against type as the slot's expected
-    /// type (`expects_nominal` strips the `?` for `??`). Arena order is
-    /// bottom-up, so the first hit is the innermost enclosing BinOp.
+    /// Use the nearest enclosing comparison or coalesce expression.
     pub(crate) fn comparison_lhs(&self) -> Option<usize> {
         for (_, e) in self.ast.exprs.iter() {
             let ExprKind::BinOp {
@@ -631,11 +598,7 @@ impl CursorAst {
         })
     }
 
-    /// Cursor in the IMPLICIT tail value of the enclosing fn body -- the block's
-    /// last expression, propagating through match-arm bodies, if/else branches,
-    /// and nested blocks (`fn f() -> T { match k { P => <cursor> } }`). The slot
-    /// is the fn's declared return type, same anchor as `in_return_value` (which
-    /// covers only the explicit `return X`). Lambda bodies retarget, so excluded.
+    /// A lambda has its own return target, so exclude its tail from function slots.
     pub(crate) fn in_tail_return(&self) -> bool {
         if self.ast.exprs.iter().any(|(_, e)| {
             matches!(&e.kind, ExprKind::Lambda { .. }) && self.lambda_body_contains(e)
@@ -690,13 +653,7 @@ impl CursorAst {
         }
     }
 
-    /// Enclosing call with the cursor in an ARGUMENT slot: `(callee,
-    /// arg_index, receiver_end)`. The UFCS receiver counts as param 0 (so a
-    /// paren-arg position shifts by one) and `receiver_end` is the receiver
-    /// expr's end offset -- the anchor `method_receiver_ty` resolves the
-    /// receiver's type from. Argument position is STRUCTURAL (the arg node
-    /// the cursor sits in), so commas inside strings / nested calls / arrays
-    /// never miscount, unlike the byte scanner.
+    /// Use the AST argument list to count slots across nested expressions.
     pub(crate) fn call_arg(&self) -> Option<(String, u32, Option<usize>)> {
         let (call, _cursor_arg, pos) = self.enclosing_arg_call()?;
         let ExprKind::FunctionCall { func, .. } = &self.expr(call).kind else {
@@ -715,11 +672,6 @@ impl CursorAst {
         }
     }
 
-    /// The normal/`@` call the cursor sits in an arg slot of, plus the cursor's
-    /// OWN arg node (`None` when between args) and the positional slot index.
-    /// Shared by `call_arg` and `named_arg_slot`. `None` when the cursor isn't
-    /// in a paren-arg position (operator/no-parens call, callee region, or a
-    /// param-list declaration slot).
     fn enclosing_arg_call(&self) -> Option<(Idx<ExprData>, Option<Idx<ExprData>>, usize)> {
         let chain = self.expr_chain();
         for (ci, &node) in chain.iter().enumerate() {
@@ -745,13 +697,7 @@ impl CursorAst {
                 continue;
             }
             if ci == 0 {
-                // The call node ITSELF is the innermost expr at the cursor: a
-                // fresh arg is being typed between existing args (`f(a, k: v,|
-                // b: w)`). Every sentinel munge breaks there (juxtaposition /
-                // positional-after-named), the raw parse wins the ladder, and
-                // no arg node contains the cursor -- the slot is the count of
-                // args ending at or before the probe. Guard: the probe must
-                // sit past the arg list's `(`, not in the callee region.
+                // An empty argument list still puts the cursor inside the call node.
                 let func_end = self.expr(*func).span.offset_range().1;
                 let Some(paren) = self.text[func_end..].find('(').map(|i| func_end + i) else {
                     continue;
@@ -778,13 +724,7 @@ impl CursorAst {
         None
     }
 
-    /// Named-arg completion context (`greet(gr|)` -> callee `greet`, plus the
-    /// args already supplied). `positional` counts the leading unnamed args
-    /// (they bind params 0..positional by declaration order); `named` lists the
-    /// explicit `name:` args -- both EXCLUDING the slot being typed. `None` for
-    /// UFCS/method callees (the receiver occupies param 0, deferred) and outside
-    /// a direct call's arg list. The caller resolves the callee's param list and
-    /// offers the still-unsupplied ones.
+    /// Collect supplied labels and positional arguments from the enclosing call.
     pub(crate) fn named_arg_slot(&self) -> Option<NamedArgSlot> {
         let (call, cursor_arg, _pos) = self.enclosing_arg_call()?;
         let ExprKind::FunctionCall { func, args, .. } = &self.expr(call).kind else {
@@ -925,11 +865,7 @@ impl CursorAst {
                 .any(|(_, st)| matches!(&st.kind, StatementKind::While(w) if w.condition == top))
     }
 
-    /// The dotted receiver path when the cursor types a MEMBER
-    /// (`line.start.<cursor>` -> `["line", "start"]`). Mirrors the byte
-    /// scanner's contract: pure ident chains only (`?.` links included);
-    /// None for complex receivers (`foo().bar.|`), which the member-path
-    /// consumer can't express as segments anyway.
+    /// Extract a receiver path made of identifiers or tuple projections.
     pub(crate) fn member_path(&self) -> Option<Vec<String>> {
         let chain = self.expr_chain();
         let &node = chain.first()?;
@@ -960,14 +896,7 @@ impl CursorAst {
         Some(segs)
     }
 
-    /// The END offset of a member receiver (`recv.<cursor>`), whatever its shape
-    /// -- a name path (`line.start.|`), a call (`x.find().|`), an index
-    /// (`xs[i].|`). The receiver's TYPE resolves via inference (`type_at`) at
-    /// this offset. Set for name paths too (unlike before): `type_at` handles
-    /// generic-substituted fields and tuple/newtype projections the structural
-    /// name-walk can't, so completion tries it FIRST and falls back to the
-    /// name-walk (via `member_path`) when inference can't see the receiver.
-    /// None when the cursor is in the receiver rather than the member slot.
+    /// Find the receiver boundary for member completion, including call receivers.
     pub(crate) fn member_receiver_end(&self) -> Option<usize> {
         let chain = self.expr_chain();
         let &node = chain.first()?;

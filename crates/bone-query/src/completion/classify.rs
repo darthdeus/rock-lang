@@ -124,14 +124,7 @@ pub(crate) fn completion_munges(src: &str, offset: usize) -> [String; 2] {
     let off = offset.min(src.len());
     let (head, tail) = src.split_at(off);
 
-    // Inject a sentinel identifier at the cursor (rust-analyzer's technique) so
-    // the in-progress `recv.` / `Foo {` parses, then KEEP the rest of the file:
-    // items defined AFTER the cursor (e.g. a UFCS method later in the same file)
-    // must stay in the parse, or they're silently missing from completion.
-    // skull-parser recovers at item/statement granularity, so the partially
-    // sentinel-mangled current statement drops by itself without taking the tail
-    // with it. balance_delimiters runs over head+tail together, so a delimiter
-    // the tail already closes adds no spurious closer.
+    // Insert a probe so incomplete positions still produce an AST node.
     let mk = |inject: &str| {
         let mut s = String::with_capacity(src.len() + 32);
         s.push_str(head);
@@ -144,14 +137,7 @@ pub(crate) fn completion_munges(src: &str, offset: usize) -> [String; 2] {
     [mk(""), mk(" {}")]
 }
 
-/// Append a closer for every still-open `([{` in `s` (innermost first).
-///
-/// Brace counting skips `//` line comments and `"`-delimited strings, so a brace
-/// in trailing prose (`// missing }`) or a string literal isn't mistaken for real
-/// nesting. When the completion munge keeps the file tail, the tail often ends in
-/// a `// ...` comment with no trailing newline; the appended closers go on a fresh
-/// line so they aren't swallowed by that comment (which would leave the enclosing
-/// block unclosed and fail the whole parse). An unterminated string is closed too.
+/// Balance a partial buffer without changing comments or literal contents.
 pub(crate) fn balance_delimiters(mut s: String) -> String {
     // One stack models the whole nesting: code delimiters, strings, and the
     // interpolation braces that re-enter CODE inside a string (`"a {expr}"`)
@@ -240,21 +226,7 @@ pub(crate) fn balance_delimiters(mut s: String) -> String {
     s
 }
 
-/// True if the `Enum::Variant` being completed at `offset` sits in a match-arm
-/// **pattern** position rather than a value position. Two heuristics, in order:
-///
-/// 1. **Forward `=>` scan** -- for an arm whose body is already present, scan
-///    past the variant name and an optional balanced payload group (`(..)` /
-///    `{..}`); the next tokens being `=>` mark an arm pattern. A value position
-///    (`let x = ..`, `return ..`, a call argument) never leads to `=>`.
-/// 2. **Backward enclosing-`match` scan** -- a FRESH arm (`SpellState::Loa|`
-///    with no `=>` typed yet) leads to no `=>`, and is lexically indistinguishable
-///    from a value position by what precedes it (`{`/`,` open blocks AND args
-///    too). The reliable signal is that the nearest enclosing block is a
-///    `match <scrutinee> { .. }`, so walk out to that brace and check it.
-///
-/// Patterns bind, they don't construct -- so in either case no payload template
-/// is offered.
+/// Distinguish a match arm's pattern head from a qualified expression.
 pub(crate) fn in_pattern_position(src: &str, offset: usize) -> bool {
     let b = src.as_bytes();
     let mut i = offset.min(b.len());
@@ -308,11 +280,7 @@ pub(crate) fn match_arm_scrutinee(src: &str, offset: usize) -> Option<usize> {
     while start > 0 && (is_ident_byte(b[start - 1]) || b[start - 1] == b':') {
         start -= 1;
     }
-    // The significant byte just before the path. An arm HEAD is opened by the
-    // match `{`, an arm separator `,`, or a previous arm's block-body close `}`.
-    // An arm BODY (value position) is preceded by `=>`; `let`/call/index/struct
-    // contexts by `=`/`(`/`[`/`:` -- all rejected here. This excludes arm bodies
-    // so the enclosing-`match` test below only fires for actual arm heads.
+    // Only arm separators or the match opening brace precede a pattern head.
     let mut p = start;
     while p > 0 && b[p - 1].is_ascii_whitespace() {
         p -= 1;
@@ -323,14 +291,7 @@ pub(crate) fn match_arm_scrutinee(src: &str, offset: usize) -> Option<usize> {
     match_scrutinee_end(b, start)
 }
 
-/// When the innermost block enclosing byte `from` is the body of a `match`
-/// expression, the index of the scrutinee's LAST byte (the non-ws byte just
-/// before the match `{`); `None` otherwise. Walks backward to the nearest
-/// unmatched `{` (balancing `()[]{}`); a `(`/`[` reached first means we are
-/// inside a call/index, not a block, so not a match. From that `{`, scans the
-/// scrutinee back to the `match` keyword: only `()`/`[]`-balanced scrutinee
-/// tokens may intervene; a `{`/`}`/`;` boundary at depth 0 ends the search
-/// (the brace governs something else, e.g. a fn body or struct literal).
+/// Find whether the enclosing brace opens a match body.
 pub(crate) fn match_scrutinee_end(b: &[u8], from: usize) -> Option<usize> {
     let mut depth = 0i32;
     let mut i = from;
@@ -378,11 +339,6 @@ pub(crate) fn match_scrutinee_end(b: &[u8], from: usize) -> Option<usize> {
             }
             b'{' | b'}' | b';' if depth == 0 => return None,
             c if depth == 0 && is_ident_byte(c) => {
-                // Read this whole word. `match` -> the brace is a match body.
-                // Any other word is part of the scrutinee (`match foo.bar {`) or
-                // the head of some other construct (`fn r() {`); keep scanning
-                // back -- the `{`/`}`/`;` boundary arms above stop a non-match
-                // brace before a spurious earlier `match` can be reached.
                 let word_end = j + 1;
                 while j > 0 && is_ident_byte(b[j - 1]) {
                     j -= 1;
@@ -457,14 +413,7 @@ pub(crate) fn for_in_iterable_slot(src: &str, offset: usize) -> bool {
     &b[p..for_end] == b"for"
 }
 
-/// The cursor's completion classification, computed ONCE per request by
-/// [`classify`] -- every context consultation lives there, so a new syntax
-/// case is one field + one consultation + one dispatch arm.
-/// Field order below is the dispatch
-/// precedence. Classification is SYNTACTIC; handlers may still fall through
-/// at runtime (an `X {` head that isn't a struct, a call slot that isn't
-/// FieldRef), which is why the dispatcher (`contextual_completions`) keeps an
-/// ordered attempt chain rather than a single-winner match.
+/// Facts about the cursor, collected once before trying completion sources.
 pub(crate) struct CompletionCx {
     /// The recovered-AST classifier over the munge ladder; None only on the
     /// tokenize frontier (byte-scanner fallbacks own that).
@@ -524,14 +473,7 @@ pub(crate) fn classify(src: &str, offset: usize) -> CompletionCx {
     let ast = crate::cursor_context::CursorAst::at(src, offset);
     let cx = ast.as_ref();
     let field_value = cx.and_then(|c| c.struct_field_value());
-    // `struct_field_value` only fires inside a REAL record literal's `field:
-    // <cursor>` value slot (or a decl field default) -- structurally the
-    // innermost enclosing context, and strictly more specific than any
-    // call the record literal happens to sit inside as an argument
-    // (`run(Pass { blend: <cursor> })`: `call_arg` walks past the `Pass {
-    // .. }` literal to report `run`'s own param type, which is the WRONG,
-    // less specific slot). So field_value must win whenever it fires;
-    // arg_call is the fallback for a direct (non-record) call arg.
+    // An inner call slot can take precedence over the enclosing field value.
     let has_field_value = field_value.is_some();
     let arg_call = if has_field_value {
         None
@@ -555,12 +497,6 @@ pub(crate) fn classify(src: &str, offset: usize) -> CompletionCx {
         } else {
             cx.and_then(|c| c.param_type())
         },
-        // Same precedence as `arg_call` above: `named_arg_slot` is built on
-        // the same `enclosing_arg_call` walk, so it has the identical bug --
-        // typing a nested record literal's field VALUE (`run(Widget { x:
-        // <cursor> })`) reports the OUTER call's still-unsupplied params as
-        // `name:` candidates, leaking an unrelated arg-name suggestion into
-        // an unrelated struct's field-value slot.
         named_arg: if has_field_value {
             None
         } else {
@@ -576,11 +512,7 @@ pub(crate) fn classify(src: &str, offset: usize) -> CompletionCx {
 }
 
 impl CompletionCx {
-    /// The typed expected-slot session, resolved in context precedence:
-    /// call-arg slot (UFCS-receiver-filtered), struct-literal field value,
-    /// then the slot anchors. The ONE expected-type deriver for the general
-    /// path; the member path resolves the same `arg_call`/`anchor` inputs
-    /// against its variant workspace.
+    /// Resolve the expected type using the most specific slot first.
     pub(crate) fn expected<'a>(
         &self,
         ws: &'a Workspace,
@@ -641,14 +573,7 @@ impl CompletionCx {
     }
 }
 
-/// Where the expected type of the current slot comes from, beyond the
-/// call-arg / struct-field cases: a byte anchor whose `type_at` IS the slot
-/// type (assign LHS end, comparison LHS end, typed-`let` binding ident), or
-/// the enclosing fn's declared return type. Computed ONCE from the cursor
-/// classifier and consumed by BOTH the general and the member path, so the
-/// two cannot drift. Anchors END before the cursor, so they resolve
-/// identically against the live workspace and any completion-munge variant
-/// (the munges only rewrite at/after the cursor).
+/// Use anchors before the cursor so they also work in speculative reparses.
 #[derive(Clone, Copy)]
 pub(crate) enum SlotAnchor {
     TypeAt(usize),

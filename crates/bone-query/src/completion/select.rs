@@ -1,7 +1,3 @@
-//! Completion candidate selection + materialization: the fact-shaped
-//! `Cand`/`Sink`, the ONE candidate ordering, the diversity pass, and
-//! `materialize_cand` -- the only place display strings are built. Tuning
-//! constants live here with the pipeline they cap.
 
 use bone_semantic::prelude::Workspace;
 
@@ -13,12 +9,7 @@ use crate::rank_key::RankKey;
 use super::rank::ci_cmp;
 use super::sources::ArgPayload;
 
-/// Strip a trailing `name($0)` / `name()` CALL template to the bare name when
-/// the cursor is already directly before a `(` -- reusing the existing parens
-/// instead of doubling them (`world_to_design()(x)`). Only touches call
-/// templates: `{ $0 }` record/block and `<$0>` generic templates end in `}`/`>`
-/// and a filled call-through (`foo(a, b)`) ends in `)` preceded by an arg, so
-/// none of them match the exact `($0)`/`()` suffix.
+/// Reuse an existing call suffix by inserting only the callee.
 pub(crate) fn strip_call_template(items: &mut [CompletionItem]) {
     for it in items.iter_mut() {
         let Some(t) = it.insert_text.as_deref() else {
@@ -42,13 +33,8 @@ pub(crate) fn member_tail(src: &str, offset: usize) -> &str {
     &rest[..end]
 }
 
-/// Drop the part of each item's `insertText` that the buffer already has to the
-/// right of the cursor, so a dotted reach insert (`PANEL.rect()`) accepted over
-/// an existing `.rect()` tail doesn't double it (`PANEL.rect().rect()`). Strips
-/// the LONGEST leading run of `tail` that is a suffix of the insert text -- only
-/// when that run starts at a `.`/`(` structural boundary, so an identifier the
-/// cursor sits inside (`foo|bar`) is never coincidentally eaten. Snippet inserts
-/// are skipped: their `$0` placeholders aren't literal buffer text.
+/// Reuse a literal member or call suffix already in the buffer. Snippets
+/// are excluded because their placeholders are not literal text.
 pub(crate) fn reconcile_suffix(items: &mut [CompletionItem], tail: &str) {
     if !tail.starts_with(['.', '(']) {
         return;
@@ -76,17 +62,9 @@ pub(crate) fn reconcile_suffix(items: &mut [CompletionItem], tail: &str) {
 // score weights (FZ_*) live next to the DP above; the RankKey field order is
 // the ladder itself (rank_key.rs).
 
-/// Default cap on items returned by general (non-member) completion. Generous
-/// headroom over a screenful -- the client narrows within a keystroke and
-/// re-requests (every completion response is `isIncomplete`), so this exists
-/// only to stop serializing the whole workspace (thousands of items / hundreds of KB at
-/// empty prefix) when the client will throw nearly all of it away and ask again.
-/// Override at runtime with `ROCK_LSP_MAX_COMPLETIONS` (see `max_completion_items`).
+/// Cap general results because incomplete lists are re-requested per keystroke.
 pub(crate) const DEFAULT_MAX_COMPLETION_ITEMS: usize = 200;
 
-/// The effective general-completion cap: `ROCK_LSP_MAX_COMPLETIONS` if it parses
-/// to a positive integer, else `DEFAULT_MAX_COMPLETION_ITEMS`. Read once (the env
-/// is process-stable).
 pub(crate) fn max_completion_items() -> usize {
     static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     // An unset or non-Unicode optional tuning override selects the documented default.
@@ -95,9 +73,6 @@ pub(crate) fn max_completion_items() -> usize {
     })
 }
 
-/// Parse the `ROCK_LSP_MAX_COMPLETIONS` value: a positive integer wins, anything
-/// else (unset, empty, non-numeric, 0) falls back to the default. Pure so the
-/// override policy is testable without touching process env.
 fn parse_max_completions(v: Option<&str>) -> usize {
     // Invalid optional tuning values select the documented default cap.
     v.and_then(|s| s.trim().parse::<usize>().ok())
@@ -123,16 +98,7 @@ pub(crate) const PER_FN_METHOD_CAP: usize = 2;
 
 // === Completion candidate pipeline ===========================================
 //
-// Every general-path source emits fact-shaped
-// `Cand`s into a `Sink`; ONE select (RankKey order) runs on the facts;
-// `CompletionItem`s (labels, inserts, details) materialize in
-// `materialize_cand` for the post-cap survivors only. Sources never build
-// display strings for ranking, and no post-pass reverse-engineers structure
-// from labels. The response array is emitted in sort_text order (the
-// invariant every path upholds; `bone_query::invariants`) -- there is no
-// post-sort reordering pass (`diversify` was deleted: it reordered only the
-// array, which the real client sorts dead-last, so it was a live no-op --
-// unfuck-backlog #30 resolution, `cdac37939`).
+// Defer materializing completion items until after ranking and capping.
 
 /// The name a candidate ranks and sorts under -- the string `RankKey::encode`
 /// appends and the ci-alphabetical tiebreak compares. NOT always the display

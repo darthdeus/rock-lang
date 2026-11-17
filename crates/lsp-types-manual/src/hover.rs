@@ -5,9 +5,7 @@ lsp_struct! {
     /// The result of a hover request.
     #[derive(Debug, Eq, PartialEq, Clone)]
     pub struct Hover {
-        /// The hover's content
         required pub contents: HoverContents = "contents",
-        /// that is used to visualize a hover, e.g. by changing the background color.
         optional pub range: Range = "range",
     }
 }

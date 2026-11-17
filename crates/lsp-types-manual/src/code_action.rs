@@ -5,7 +5,6 @@ lsp_struct! {
     /// Params for the CodeActionRequest
     #[derive(Debug, Eq, PartialEq, Clone)]
     pub struct CodeActionParams {
-        /// The document in which the command was invoked.
         required pub text_document: TextDocumentIdentifier = "textDocument",
         required pub range: Range = "range",
         required pub context: CodeActionContext = "context",

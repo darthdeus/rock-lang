@@ -101,12 +101,9 @@ lsp_struct! {
     /// A position is between two characters like an 'insert' cursor in a editor.
     #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Copy, Clone, Default, Hash)]
     pub struct Position {
-        /// Line position in a document (zero-based).
         required pub line: u32 = "line",
-        /// offset is determined by the negotiated `PositionEncodingKind`.
-        ///
-        /// If the character value is greater than the line length it defaults back
-        /// to the line length.
+
+        /// UTF-16 offset for Rock LSP. Out-of-range columns clamp to the line.
         required pub character: u32 = "character",
     }
 }
@@ -123,8 +120,9 @@ lsp_struct! {
     /// A range is comparable to a selection in an editor. Therefore the end position is exclusive.
     #[derive(Debug, Eq, PartialEq, Copy, Clone, Default, Hash)]
     pub struct Range {
-        /// The range's start position.
         required pub start: Position = "start",
+
+        /// Exclusive end position.
         required pub end: Position = "end",
     }
 }
@@ -151,12 +149,11 @@ lsp_struct! {
     /// Diagnostic objects are only valid in the scope of a resource.
     #[derive(Debug, Eq, PartialEq, Clone, Default)]
     pub struct Diagnostic {
-        /// The range at which the message applies.
         required pub range: Range = "range",
-        /// client to interpret diagnostics as error, warning, info or hint.
         optional pub severity: DiagnosticSeverity = "severity",
+
+        /// Rock uses lint names so clients can ask to suppress a finding.
         optional pub code: NumberOrString = "code",
-        /// diagnostic, e.g. 'typescript' or 'super lint'.
         optional pub source: String = "source",
         required pub message: String = "message",
     }
@@ -185,10 +182,8 @@ lsp_struct! {
     /// The protocol currently doesn’t specify a set of well-known commands.
     #[derive(Debug, PartialEq, Clone, Default)]
     pub struct Command {
-        /// Title of the command, like `save`.
         required pub title: String = "title",
         required pub command: String = "command",
-        /// invoked with.
         optional pub arguments: Vec<Value> = "arguments",
     }
 }
@@ -202,10 +197,7 @@ lsp_struct! {
     /// are not supported.
     #[derive(Debug, Eq, PartialEq, Clone, Default)]
     pub struct TextEdit {
-        /// The range of the text document to be manipulated. To insert
-        /// text into a document create a range where start === end.
         required pub range: Range = "range",
-        /// empty string.
         required pub new_text: String = "newText",
     }
 }
@@ -215,7 +207,6 @@ lsp_struct! {
     /// A workspace edit represents changes to many resources managed in the workspace.
     #[derive(Debug, Eq, PartialEq, Clone, Default)]
     pub struct WorkspaceEdit {
-        /// Holds changes to existing resources.
         optional pub changes: HashMap<Uri, Vec<TextEdit>> = "changes",
     }
 }
@@ -234,7 +225,6 @@ lsp_struct! {
     /// Text documents are identified using a URI. On the protocol level, URIs are passed as strings.
     #[derive(Debug, Eq, PartialEq, Clone)]
     pub struct TextDocumentIdentifier {
-        /// The text document's URI.
         required pub uri: Uri = "uri",
     }
 }
@@ -263,7 +253,6 @@ lsp_struct! {
     /// A parameter literal used in requests to pass a text document and a position inside that document.
     #[derive(Debug, Eq, PartialEq, Clone)]
     pub struct TextDocumentPositionParams {
-        /// The text document.
         required pub text_document: TextDocumentIdentifier = "textDocument",
         required pub position: Position = "position",
     }
@@ -289,7 +278,6 @@ lsp_struct! {
     out
     #[derive(Debug, Eq, PartialEq, Clone)]
     pub struct PublishDiagnosticsParams {
-        /// The URI for which diagnostic information is reported.
         required pub uri: Uri = "uri",
         required pub diagnostics: Vec<Diagnostic> = "diagnostics",
     }
@@ -310,7 +298,6 @@ lsp_struct! {
     in
     #[derive(Debug, PartialEq, Clone, Default)]
     pub struct ExecuteCommandParams {
-        /// The identifier of the actual command handler.
         required pub command: String = "command",
         required pub arguments: Vec<Value> = "arguments",
     }

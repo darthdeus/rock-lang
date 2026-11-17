@@ -7,7 +7,6 @@ lsp_struct! {
     /// the background color of its range.
     #[derive(Debug, Eq, PartialEq, Clone)]
     pub struct DocumentHighlight {
-        /// The range this highlight applies to.
         required pub range: Range = "range",
         optional pub kind: DocumentHighlightKind = "kind",
     }

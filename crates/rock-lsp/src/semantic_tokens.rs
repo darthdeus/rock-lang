@@ -6,15 +6,7 @@ use lsp_types::{
 
 use crate::LspWorkspace;
 
-/// Translate bone's token-type AND token-modifier indices (into bone's own
-/// legends, `bone_query::semantic_tokens_legend` / `_modifiers_legend`) to
-/// indices into the legend THIS server advertises at initialize
-/// (`get_semantic_tokens_legend`). bone classifies into its own legend; without
-/// this remap the client decodes each token against the wrong legend (bone's
-/// `0`=KEYWORD reads as the advertised `0`=NAMESPACE; bone's modifier bit
-/// `0`=nullable reads as the advertised bit `0`=declaration), miscoloring the
-/// whole buffer. Every bone type/modifier exists in the advertised legend, so
-/// each lookup hits; the `unwrap_or(0)` is a defensive floor.
+/// Translate the classifier's indexes into the wire legend's stable order.
 fn remap_bone_token_types(tokens: &mut lsp_types::SemanticTokens) {
     fn index_map<T: PartialEq>(bone: &[T], advertised: &[T]) -> Vec<u32> {
         bone.iter()
@@ -86,20 +78,8 @@ pub fn get_semantic_tokens_legend() -> SemanticTokensLegend {
             SemanticTokenModifier::MODIFICATION,
             SemanticTokenModifier::DOCUMENTATION,
             SemanticTokenModifier::DEFAULT_LIBRARY,
-            // Custom Rock modifier — applied to type tokens where the AST
-            // TypeExpr has is_nullable=true (i.e. `Foo?`). Themes can style
-            // nullable types distinctly via `@lsp.mod.nullable.rock` or
-            // `@lsp.typemod.struct.nullable.rock` etc.
             SemanticTokenModifier::new("nullable"),
-            // Custom Rock modifier — applied to a variable / parameter /
-            // global / struct-field READ when the binding's declared
-            // type is `T?` but flow-sensitive analysis at this position
-            // has narrowed it to `T` (e.g. inside `if x != null { ... }`,
-            // after `?? default`, in match-arm null guards). Mutually
-            // exclusive with `nullable` on the same token — the server
-            // emits exactly one of the two for any read of a nullable
-            // binding. Declarations always carry `nullable` because no
-            // flow narrowing applies to a binding site.
+            // Use refined when flow analysis proves a nullable binding is non-null at this read.
             SemanticTokenModifier::new("refined"),
         ],
     }

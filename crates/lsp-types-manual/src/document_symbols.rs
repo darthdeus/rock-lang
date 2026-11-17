@@ -35,7 +35,6 @@ lsp_struct! {
     /// The parameters of a Workspace Symbol Request.
     #[derive(Debug, Eq, PartialEq, Clone, Default)]
     pub struct WorkspaceSymbolParams {
-        /// A non-empty query string
         required pub query: String = "query",
     }
 }
