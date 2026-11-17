@@ -96,7 +96,7 @@ fn duplicate_decorator_diagnostic_is_unique_and_clears_after_an_edit() {
         diagnostics[0]["message"]
             .as_str()
             .unwrap()
-            .contains("duplicate definition of decorator `reg`"),
+            .contains("duplicate definition `reg` in module `<root>`"),
         "{diagnostics:?}"
     );
     assert_eq!(diagnostics[0]["range"]["start"]["line"], 1);

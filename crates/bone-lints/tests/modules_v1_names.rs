@@ -42,11 +42,7 @@ fn v1_main_is_a_reachability_root() {
     let findings = lint(src, "main.rock", &options);
     let mut names: Vec<String> = findings.iter().map(support::quoted).collect();
     names.sort();
-    assert_eq!(
-        names,
-        vec!["lintv1::dead".to_string()],
-        "only `dead` is unused"
-    );
+    assert_eq!(names, vec!["dead".to_string()], "only `dead` is unused");
 }
 
 fn action_gaps(src: &str) -> Vec<String> {

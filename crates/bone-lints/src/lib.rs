@@ -2878,7 +2878,7 @@ impl LintFinding for UnusedFn {
         self.span
     }
     fn message(&self) -> String {
-        format!("unused function `{}`", self.name)
+        format!("unused function `{}`", declared_name(self.name.as_str()))
     }
 }
 
@@ -4323,7 +4323,7 @@ fn render_place(body: &Body, e: Idx<Expr>) -> Option<String> {
     })
 }
 
-/// The declared (last) segment of a DefKey; a legacy name is already bare.
+/// The declared (last) segment of a DefKey; compiler-owned names are bare.
 /// Classifiers that key on a spelling (`main`, `Task`) must read this.
 fn declared_name(name: &str) -> &str {
     name.rsplit("::").next().unwrap_or(name)

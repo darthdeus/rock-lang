@@ -124,14 +124,13 @@ fn identity_storage_diagnostics_follow_the_package_declaration() {
         let report = diagnostics_report(dir.path().to_str().unwrap()).unwrap();
         let in_report = messages(&report)
             .iter()
-            .any(|m| m.contains("cannot store identity struct `Actor`"));
+            .any(|m| m.contains("cannot store identity struct `example_lib::Actor`"));
         let mut server = rock_lsp::workspace::LspWorkspace::new();
         server.bone.update(path, source.to_owned());
-        let in_server = server
-            .bone
-            .diagnostics_for(path)
-            .iter()
-            .any(|d| d.message.contains("cannot store identity struct `Actor`"));
+        let in_server = server.bone.diagnostics_for(path).iter().any(|d| {
+            d.message
+                .contains("cannot store identity struct `example_lib::Actor`")
+        });
         assert_eq!(in_report, in_server, "{manifest}: {report}");
         in_report
     };
