@@ -272,9 +272,10 @@ pub(crate) fn emit_fn_def_with(
         let ty = concrete_glsl_ty(interner, id, f.name_span, "parameter")?;
         e.cell_ty.insert(c, ty);
     }
-    e.compute_cell_types()?;
-    e.compute_folds();
-    e.assign_names()?;
+    let rpo = reverse_postorder(mf, mf.entry);
+    e.compute_cell_types(&rpo)?;
+    e.compute_folds(&rpo);
+    e.assign_names(&rpo)?;
 
     // Parameter list (entry mode drops uniform-struct + sampler params).
     let params: Vec<String> = mf

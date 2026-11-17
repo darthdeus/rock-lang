@@ -14,7 +14,7 @@ impl FnEmit<'_> {
     /// cells (sampler/array params) claim their exact spellings first -- they
     /// ARE the global -- and every other cell dedups apart from the reserved
     /// globals, lexical keywords, builtin callables, and its siblings.
-    pub(crate) fn assign_names(&mut self) -> Result<(), CompilerError> {
+    pub(crate) fn assign_names(&mut self, rpo: &[Idx<Block>]) -> Result<(), CompilerError> {
         let mut used: HashSet<String> = HashSet::default();
         let claim = |used: &mut HashSet<String>, base: String| -> String {
             let mut name = base.clone();
@@ -47,7 +47,7 @@ impl FnEmit<'_> {
             self.cell_name.insert(cid, name);
         }
         let mut uses: HashMap<Idx<Inst>, usize> = HashMap::default();
-        for b in reverse_postorder(self.f, self.f.entry) {
+        for &b in rpo {
             for &iid in &self.f.blocks[b].insts {
                 self.f.insts[iid].uses_each(&mut |v| *uses.entry(v).or_default() += 1);
             }
@@ -162,7 +162,7 @@ impl FnEmit<'_> {
     /// it maps to a tier-0 GLSL type (fixes `let y: float = 0`, whose first store's
     /// rep is int); fall back to first-store inference (RPO) for compiler-minted
     /// temps (if-result, loop counter) that carry no binding type.
-    pub(crate) fn compute_cell_types(&mut self) -> Result<(), CompilerError> {
+    pub(crate) fn compute_cell_types(&mut self, rpo: &[Idx<Block>]) -> Result<(), CompilerError> {
         for (cid, cell) in self.f.cells.iter() {
             if self.cell_ty.contains_key(&cid) {
                 continue;
@@ -187,8 +187,7 @@ impl FnEmit<'_> {
                 self.cell_ty.insert(cid, g);
             }
         }
-        let rpo = reverse_postorder(self.f, self.f.entry);
-        for &b in &rpo {
+        for &b in rpo {
             for &iid in &self.f.blocks[b].insts {
                 if let Inst::Store { cell, value } = self.f.insts[iid] {
                     if !self.cell_ty.contains_key(&cell)
@@ -224,10 +223,8 @@ impl FnEmit<'_> {
 
     /// Detect the cosmetic-tier folds: `&&`/`||`
     /// short-circuit diamonds collapse back to infix boolean expressions.
-    pub(crate) fn compute_folds(&mut self) {
-        let reach: HashSet<Idx<Block>> = reverse_postorder(self.f, self.f.entry)
-            .into_iter()
-            .collect();
+    pub(crate) fn compute_folds(&mut self, rpo: &[Idx<Block>]) {
+        let reach: HashSet<Idx<Block>> = rpo.iter().copied().collect();
         // Cell load-counts over reachable code -- a fold is only sound when the
         // diamond's result cell has exactly one use.
         let mut load_count: HashMap<Idx<Cell>, usize> = HashMap::default();
