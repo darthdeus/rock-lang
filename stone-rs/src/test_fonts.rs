@@ -77,7 +77,11 @@ pub(crate) fn font_file(name: &str, bytes: &[u8]) -> PathBuf {
     std::fs::create_dir_all(&dir).expect("test font directory");
     let path = dir.join(format!("{name}-{digest:016x}.ttf"));
     if std::fs::read(&path).ok().as_deref() != Some(bytes) {
-        let staging = dir.join(format!("{name}-{digest:016x}.{}.tmp", std::process::id()));
+        let staging = dir.join(format!(
+            "{name}-{digest:016x}.{}.{:?}.tmp",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         std::fs::write(&staging, bytes).expect("write test font");
         std::fs::rename(&staging, &path).expect("publish test font");
     }
