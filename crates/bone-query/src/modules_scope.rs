@@ -334,17 +334,13 @@ fn bound_key(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Option<Ustr> {
 
 /// One member a qualified prefix offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Member {
+pub(crate) enum Member {
     Def(Ustr),
     Module,
-    Variant,
 }
 
-/// The members of what the qualified prefix `segments` names from `frag`:
-/// the module the resolver walks it to -- its accessible members and child
-/// modules -- or the enum it names, whose variants follow. `None` when the
-/// prefix names neither.
-pub(crate) fn path_members(
+/// Complete accessible definitions and child modules of a module path.
+pub(crate) fn module_members(
     ws: &Workspace,
     frag: &FragmentScope,
     from_root: bool,
@@ -354,57 +350,38 @@ pub(crate) fn path_members(
         from_root,
         segments: segments.to_vec(),
     };
-    // A prefix may name an enum instead of a module; probe that below on a module miss.
-    if let Ok((package, path)) = resolve::resolve_path_to_module(ws, frag, &prefix) {
-        let viewers = [frag];
-        let mut out = Vec::new();
-        // Broken re-exports are source diagnostics; still offer accessible child modules.
-        for name in resolve::module_member_names(ws, &viewers, package, &path).unwrap_or_default() {
-            // Ambiguous/inaccessible/broken bindings are not usable completion candidates.
-            if let Ok(members) = resolve::module_members(ws, &viewers, package, &path, name)
-                && let [hit] = members.found[..]
-            {
-                out.push((name, Member::Def(hit.key)));
-            }
+    let (package, path) = resolve::resolve_path_to_module(ws, frag, &prefix).ok()?;
+    let viewers = [frag];
+    let mut out = Vec::new();
+    // Broken re-exports are source diagnostics; still offer accessible child modules.
+    for name in resolve::module_member_names(ws, &viewers, package, &path).unwrap_or_default() {
+        // Ambiguous/inaccessible/broken bindings are not usable completion candidates.
+        if let Ok(members) = resolve::module_members(ws, &viewers, package, &path, name)
+            && let [hit] = members.found[..]
+        {
+            out.push((name, Member::Def(hit.key)));
         }
-        let children = ws
-            .ns
-            .package(package)
-            .and_then(|p| p.node(p.key_of(&path)))
-            .map(|node| node.children.keys().copied().collect::<Vec<_>>())
-            // No namespace node means no child modules to offer.
-            .unwrap_or_default();
-        for child in children {
-            let mut child_path = segments.to_vec();
-            child_path.push(child);
-            let child_path = UsePathRef {
-                from_root,
-                segments: child_path,
-            };
-            if resolve::resolve_path_to_module(ws, frag, &child_path).is_ok() {
-                out.push((child, Member::Module));
-            }
-        }
-        out.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
-        return Some(out);
     }
-    // `E::` and `p::E::` name an enum exactly as a value path's
-    // `Type::Variant` does (`resolve_member_path`): a one-segment prefix is
-    // a bare name, a longer one a path.
-    let enum_key = match segments {
-        // An unresolved bare prefix offers neither enum variants nor module members.
-        [only] if !from_root => resolve::resolve_bare(ws, frag, *only).ok().map(|r| r.key),
-        // An unresolved qualified prefix is an ordinary completion non-match.
-        _ => resolve::resolve_path(ws, frag, &prefix).ok().map(|r| r.key),
-    }?;
-    let e = ws.enums_by_name.get(&enum_key)?;
-    Some(
-        ws.module(e.module).enums[e.def]
-            .variants
-            .iter()
-            .map(|v| (v.name, Member::Variant))
-            .collect(),
-    )
+    let children = ws
+        .ns
+        .package(package)
+        .and_then(|p| p.node(p.key_of(&path)))
+        .map(|node| node.children.keys().copied().collect::<Vec<_>>())
+        // No namespace node means no child modules to offer.
+        .unwrap_or_default();
+    for child in children {
+        let mut child_path = segments.to_vec();
+        child_path.push(child);
+        let child_path = UsePathRef {
+            from_root,
+            segments: child_path,
+        };
+        if resolve::resolve_path_to_module(ws, frag, &child_path).is_ok() {
+            out.push((child, Member::Module));
+        }
+    }
+    out.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+    Some(out)
 }
 
 /// An accessible definition no tier of `frag` binds, with the `use` path

@@ -45,7 +45,7 @@ pub(crate) fn fuzzy_score(cand: &[u8], query: &[u8]) -> i32 {
     let boundary = |j: usize| fz_boundary(cand, j);
     // The two DP rows (`prev`/`cur`, each `n` wide) are reused from a thread-
     // local scratch -- `fuzzy_score` is called hundreds of times per keystroke
-    // (clean_match per candidate fn, arg_sort_text per survivor, the general
+    // (clean_match per candidate fn, arg_rank_key per survivor, the general
     // ranking), and a per-call `vec![MISS; n]` x2 was the dominant short-prefix
     // cost. `resize` reuses the existing capacity, so steady state is alloc-free.
     thread_local! {
@@ -264,35 +264,11 @@ pub(crate) fn arg_path_penalty(arg: &str) -> i32 {
     hops * HOP + calls * CALL
 }
 
-/// Build the arg-position / reach-path / member-default `sort_text`: a
-/// case- and kind-neutral `RankKey` with the caller's `type_rank` (0
-/// value-of-expected-type / 1 fn-returning-it / 2 other), `dist` (shorter
-/// paths first) and `method` (field/var before method/fn).
-pub(crate) fn arg_sort_text(
-    type_rank: u8,
-    kind: u8,
-    cand: &str,
-    query: &[u8],
-    dist: u16,
-    method: u8,
-    score_bonus: i32,
-) -> String {
-    arg_rank_key(type_rank, kind, cand, query, dist, method, score_bonus).encode(cand)
+/// Browse a closed set in declaration order within the same match and type tier.
+pub(crate) fn closed_set_rank(name: &str, prefix: &[u8], tier: u8, decl_idx: usize) -> RankKey {
+    arg_rank_key(tier, 0, name, prefix, decl_idx.min(99) as u16, 0, 0)
 }
 
-/// sort_text for a CLOSED-SET completion (struct-literal / record-variant
-/// field names, enum-qualified variants): match band + fine against the
-/// typed prefix lead, `tier` rides `type_rank` (struct-literal REQUIRED
-/// fields tier above defaulted ones; 0 where the set has no tiers), and the
-/// DECLARATION index rides `dist` -- for a closed set the author's
-/// declaration order is the browse order, so it breaks ties instead of the
-/// alphabetical name suffix.
-pub(crate) fn closed_set_sort_text(name: &str, prefix: &[u8], tier: u8, decl_idx: usize) -> String {
-    arg_sort_text(tier, 0, name, prefix, decl_idx.min(99) as u16, 0, 0)
-}
-
-/// The `RankKey` behind `arg_sort_text` -- the reach source emits it as a
-/// `Cand` fact and defers the encode to materialization.
 pub(crate) fn arg_rank_key(
     type_rank: u8,
     kind: u8,

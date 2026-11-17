@@ -277,61 +277,6 @@ fn qualified_prefix_before(src: &str, at: usize) -> Option<(bool, Vec<Ustr>)> {
     (!segments.is_empty()).then_some((false, segments))
 }
 
-/// Completion after a module path in a modules-v1 fragment
-/// (`modules_scope::path_members`). `None` for a synthetic module or a prefix
-/// that does not resolve to a module, leaving enum paths to their own source.
-fn v1_path_completions(
-    ws: &Workspace,
-    path: &str,
-    src: &str,
-    at: usize,
-    prefix: &str,
-) -> Option<Vec<CompletionItem>> {
-    let frag = crate::modules_scope::fragment(ws, Ustr::from(path))?;
-    let (from_root, segments) = qualified_prefix_before(src, at)?;
-    let module_path = bone_core::modules::UsePathRef {
-        from_root,
-        segments: segments.clone(),
-    };
-    bone_semantic::lower::resolve::resolve_path_to_module(ws, frag, &module_path).ok()?;
-    let members = crate::modules_scope::path_members(ws, frag, from_root, &segments)?;
-    let pfx = prefix.as_bytes();
-    let mut items: Vec<CompletionItem> = members
-        .into_iter()
-        .filter(|(name, _)| {
-            prefix.is_empty() || crate::completion::match_policy::admit(name.as_bytes(), pfx)
-        })
-        .enumerate()
-        .map(|(i, (name, member))| {
-            let kind = match member {
-                crate::modules_scope::Member::Module => CompletionItemKind::MODULE,
-                crate::modules_scope::Member::Variant => CompletionItemKind::ENUM_MEMBER,
-                crate::modules_scope::Member::Def(key) => {
-                    if ws.functions_by_name.contains_key(&key) {
-                        CompletionItemKind::FUNCTION
-                    } else if ws.struct_by_name.contains_key(&key) {
-                        CompletionItemKind::STRUCT
-                    } else if ws.enums_by_name.contains_key(&key) {
-                        CompletionItemKind::ENUM
-                    } else if ws.newtypes_by_name.contains_key(&key) {
-                        CompletionItemKind::STRUCT
-                    } else {
-                        CompletionItemKind::VARIABLE
-                    }
-                }
-            };
-            CompletionItem {
-                sort_text: Some(closed_set_sort_text(name.as_str(), pfx, 0, i)),
-                label: name.to_string(),
-                kind: Some(kind),
-                ..Default::default()
-            }
-        })
-        .collect();
-    items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
-    Some(items)
-}
-
 /// The identifier at or ending at `offset` in `src`.
 fn ident_around(src: &str, offset: usize) -> &str {
     let b = src.as_bytes();
@@ -1706,35 +1651,6 @@ impl BoneWorkspace {
                 })
                 .collect(),
         )
-    }
-
-    // completion (the request lives in `completion.rs`)
-
-    pub fn completion(&mut self, path: &str, pos: Position) -> Vec<CompletionItem> {
-        self.completion_with_trigger(path, pos, false)
-    }
-
-    /// Suppress space-triggered completion on auto-indent.
-    pub fn completion_with_trigger(
-        &mut self,
-        path: &str,
-        pos: Position,
-        space_triggered: bool,
-    ) -> Vec<CompletionItem> {
-        let mut items = self.completion_items(path, pos, space_triggered);
-        // Reconcile every insert with the buffer text after the cursor: a dotted
-        // reach insert (`PANEL.rect()`) accepted over an existing `.rect()` tail
-        // must not double it. Done once here so it covers every return path
-        // (member/enum/struct/reach), off the same canon path + offset the impl used.
-        let path_c = self.canon(path);
-        if let Some(proj) = self.projects.get(&Self::root_for(path_c.as_str())) {
-            if let Some(src) = proj.texts.get(path_c.as_str()) {
-                let offset = offset_at_line_col(src, pos.line, pos.character);
-                let tail = member_tail(src, offset);
-                reconcile_suffix(&mut items, tail);
-            }
-        }
-        items
     }
 
     // rename + prepare-rename

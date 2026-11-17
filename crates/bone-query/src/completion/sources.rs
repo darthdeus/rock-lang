@@ -2,8 +2,6 @@
 
 use std::collections::HashMap;
 
-use lsp_types::{CompletionItem, CompletionItemKind, InsertTextFormat};
-
 use bone_core::type_equiv::TyRef;
 use bone_incremental::session::Session;
 use bone_semantic::prelude::{
@@ -16,11 +14,11 @@ use crate::backend::{
     user_module_for_path,
 };
 use crate::completion::match_policy::admit;
-use crate::query::{SymCat, clean_match};
+use crate::query::clean_match;
 use crate::rank_key::RankKey;
 use crate::types::{self, ty_of};
 
-use super::classify::{SlotAnchor, balance_delimiters, completion_munges, in_pattern_position};
+use super::classify::{Record, SlotAnchor, balance_delimiters, completion_munges};
 use super::rank::*;
 use super::select::*;
 
@@ -172,7 +170,7 @@ fn sibling_owner_bind(
 }
 
 /// Suggest fields compatible with at least one overload's FieldRef slot.
-pub(crate) fn field_ref_arg_completions(
+pub(crate) fn field_ref_candidates(
     ws: &Workspace,
     path: &str,
     src: &str,
@@ -182,7 +180,7 @@ pub(crate) fn field_ref_arg_completions(
     prefix: &str,
     lead_dot: bool,
     recv_end: Option<usize>,
-) -> Option<Vec<CompletionItem>> {
+) -> Option<Vec<Cand>> {
     let name = Ustr::from(callee);
     let frag = crate::modules_scope::fragment(ws, Ustr::from(path))?;
     // UFCS receiver struct + sole-type-arg element (`Entity<Glyph>` ->
@@ -197,44 +195,33 @@ pub(crate) fn field_ref_arg_completions(
     let recv_offset = usize::from(recv_end.is_some());
 
     // First overload whose `arg_idx` slot resolves to a FieldRef with >=1 field.
-    let (t_name, v) =
-        crate::modules_scope::admitted_overloads(ws, frag, name).find_map(|(_fmid, _fid, f)| {
+    let (fields, v) =
+        crate::modules_scope::admitted_overloads(ws, frag, name).find_map(|(_, _, f)| {
             let (recv_var, recv_owner) = receiver_owner_binding(ws, f, recv_struct, recv_elem);
             let (owner, v) = fieldref_slot_owner(ws, f, arg_idx, recv_var, recv_owner, |gname| {
                 sibling_owner_bind(ws, path, src, offset, arg_idx, recv_offset, f, gname)
             })?;
-            (!fields_of_type(ws, owner, v).is_empty()).then_some((owner, v))
+            let fields = fields_of_type(ws, owner, v);
+            (!fields.is_empty()).then_some((fields, v))
         })?;
-
     let pfx = prefix.as_bytes();
-    let mut out = Vec::new();
-    let v_str = ws.render(None, v);
-    for fld_name in fields_of_type(ws, t_name, v) {
-        if !(prefix.is_empty() || admit(fld_name.as_bytes(), pfx)) {
-            continue;
-        }
-        // Dot already typed -> insert the bare name; otherwise add it.
-        let insert = if lead_dot {
-            fld_name.to_string()
-        } else {
-            format!(".{}", fld_name)
-        };
-        out.push(CompletionItem {
-            sort_text: Some(arg_sort_text(0, 0, fld_name.as_str(), pfx, 1, 0, 0)),
-            // The label carries the leading `.` -- a field ref IS `.co` (no
-            // receiver), unlike member completion where the `recv.` is
-            // already typed. `filter_text` stays the bare name so typing
-            // `co` (with or without the dot) still matches.
-            label: format!(".{}: {}", fld_name, v_str),
-            kind: Some(CompletionItemKind::FIELD),
-            detail: Some(v_str.clone()),
-            insert_text: Some(insert),
-            filter_text: Some(fld_name.to_string()),
-            ..Default::default()
-        });
-    }
-    out.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
-    Some(out)
+    let ty = ws.render(None, v);
+    Some(
+        fields
+            .into_iter()
+            .filter(|name| admit(name.as_bytes(), pfx))
+            .map(|name| {
+                Cand::new(
+                    arg_rank_key(0, 0, name.as_str(), pfx, 1, 0, 0),
+                    CandName::Sym(name),
+                    CandShape::FieldRef {
+                        ty: ty.clone(),
+                        add_dot: !lead_dot,
+                    },
+                )
+            })
+            .collect(),
+    )
 }
 
 /// Per-fn counters accumulated inside `call_through_param_completions`, returned
@@ -927,223 +914,122 @@ pub(crate) fn fn_prefix_struct(
         })
 }
 
-/// Completion candidates in decorator position: every `deco` declaration
-/// visible to the fragment, prefix-filtered.
-pub(crate) fn decorator_completions(
+pub(crate) fn decorator_candidates(
     ws: &Workspace,
     frag: &bone_core::modules::FragmentScope,
-    fragment_file: Ustr,
     prefix: &str,
-) -> Vec<CompletionItem> {
+) -> Vec<Cand> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     let names =
         crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Decorator);
-    for m in ws.modules.iter() {
+    let pfx = prefix.as_bytes();
+    for m in &ws.modules {
         for (_, dec) in m.decorators.iter() {
             for &name in names.get(&dec.def_key).into_iter().flatten() {
-                let name = name.as_str();
-                if !admit(name.as_bytes(), prefix.as_bytes()) || !seen.insert(name.to_string()) {
+                if !admit(name.as_bytes(), pfx) || !seen.insert(name) {
                     continue;
                 }
                 let params = crate::query::rendered_params(ws, &dec.param_decls);
-                let (ex, bd) = match_band_exact(name, prefix.as_bytes(), prefix.as_bytes());
-                let key = RankKey {
-                    exact: ex,
-                    band: bd,
-                    len: RankKey::len_key(9999, name.len()),
-                    ..Default::default()
-                };
-                let cand = Cand::new(
-                    key,
-                    CandName::Sym(Ustr::from(name)),
+                let (exact, band) = match_band_exact(name.as_str(), pfx, pfx);
+                out.push(Cand::new(
+                    RankKey {
+                        exact,
+                        band,
+                        len: RankKey::len_key(9999, name.len()),
+                        ..Default::default()
+                    },
+                    CandName::Sym(name),
                     CandShape::Decorator {
                         detail: (!params.is_empty())
                             .then(|| format!("deco ({})", params.join(", "))),
                     },
-                );
-                out.push(materialize_cand(cand, ws, fragment_file, false, false));
+                ));
             }
         }
     }
-    out.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
     out
 }
 
-/// Return an empty list for a resolved record whose fields all fail the filter.
-pub(crate) fn enum_record_field_completions(
-    session: &mut Session,
-    path: &str,
-    src: &str,
-    offset: usize,
-    enum_name: &str,
-    variant: &str,
-    prefix: &str,
-) -> Option<Vec<CompletionItem>> {
-    for munged in completion_munges(src, offset) {
-        let Some(fields) = analyze_variant(session, path, &munged, |ws| {
-            let Some(mid) = user_module_for_path(ws, path) else {
-                return Vec::new();
-            };
-            let Some(enum_key) =
-                crate::modules_scope::resolve_type_key_in_file(ws, ws.module(mid).file, enum_name)
-            else {
-                return Vec::new();
-            };
-            crate::query::variant_record_fields(ws, enum_key.as_str(), variant)
-        }) else {
-            continue;
-        };
-        if fields.is_empty() {
-            continue;
+pub(crate) fn record_candidates(
+    ws: &Workspace,
+    file: Ustr,
+    prefix: &[u8],
+    record: Record<'_>,
+    written: &str,
+) -> Option<Vec<Cand>> {
+    let key = crate::modules_scope::resolve_type_key_in_file(ws, file, record.name())?;
+    let fields = match record {
+        Record::Struct { .. } => crate::query::struct_fields_by_name(ws, key.as_str()),
+        Record::Variant { variant, .. } => {
+            crate::query::variant_record_fields(ws, key.as_str(), variant)
+                .into_iter()
+                .map(|(name, ty)| (name, ty, false))
+                .collect()
         }
-        let mut items: Vec<CompletionItem> = fields
+    };
+    // An empty field set may be a block head misparsed as a literal.
+    if fields.is_empty() {
+        return None;
+    }
+    let present: std::collections::HashSet<_> = written
+        .split([',', '{', '}'])
+        .filter_map(|seg| seg.split(':').next().map(str::trim))
+        .collect();
+    Some(
+        fields
             .into_iter()
             .enumerate()
-            .filter(|(_, (name, _))| prefix.is_empty() || admit(name.as_bytes(), prefix.as_bytes()))
-            .map(|(i, (name, ty))| CompletionItem {
-                label: format!("{name}: {ty}"),
-                kind: Some(CompletionItemKind::FIELD),
-                detail: Some(ty),
-                sort_text: Some(closed_set_sort_text(&name, prefix.as_bytes(), 0, i)),
-                insert_text: Some(name),
-                ..Default::default()
+            .filter(|(_, (name, _, _))| {
+                !present.contains(name.as_str()) && admit(name.as_bytes(), prefix)
             })
-            .collect();
-        items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
-        return Some(items);
-    }
-
-    None
+            .map(|(i, (name, ty, has_default))| {
+                Cand::new(
+                    closed_set_rank(&name, prefix, u8::from(has_default), i),
+                    CandName::Owned(name),
+                    CandShape::Reach {
+                        final_ty: ty,
+                        is_method: false,
+                        takes_args: false,
+                    },
+                )
+            })
+            .collect(),
+    )
 }
 
-/// Field completions for `Name { <field> }`. Offers the struct's fields not
-/// already written in the literal, filtered by the prefix. Returns None (so the
-/// caller falls through to the global namespace) when `name` isn't a struct.
-pub(crate) fn struct_literal_field_completions(
-    session: &mut Session,
-    path: &str,
-    src: &str,
-    offset: usize,
-    name: &str,
-    brace_open: usize,
-    prefix: &str,
-) -> Option<Vec<CompletionItem>> {
-    // Analyze a balanced/synthetic munge as a Session variant so the struct def
-    // survives the broken literal -- and so a struct defined in another file /
-    // dependency resolves.
-    let fields = completion_munges(src, offset)
-        .into_iter()
-        .find_map(|munged| {
-            let f = analyze_variant(session, path, &munged, |ws| {
-                let Some(mid) = user_module_for_path(ws, path) else {
-                    return Vec::new();
-                };
-                let Some(name) =
-                    crate::modules_scope::resolve_type_key_in_file(ws, ws.module(mid).file, name)
-                else {
-                    return Vec::new();
-                };
-                crate::query::struct_fields_by_name(ws, name.as_str())
-            })?;
-            (!f.is_empty()).then_some(f)
-        })?;
-
-    // Fields already written between the `{` and the cursor (`name :`), to skip.
-    let written = src.get(brace_open + 1..offset.min(src.len())).unwrap_or("");
-    let present: std::collections::HashSet<String> = written
-        .split([',', '{', '}'])
-        .filter_map(|seg| seg.split(':').next())
-        .map(|n| n.trim().to_string())
-        .filter(|n| !n.is_empty())
-        .collect();
-
-    let mut items: Vec<CompletionItem> = fields
-        .into_iter()
-        .enumerate()
-        .filter(|(_, (n, _, _))| !present.contains(n))
-        .filter(|(_, (n, _, _))| prefix.is_empty() || admit(n.as_bytes(), prefix.as_bytes()))
-        .map(|(i, (n, ty, has_default))| CompletionItem {
-            label: format!("{n}: {ty}"),
-            kind: Some(CompletionItemKind::FIELD),
-            detail: Some(ty),
-            // Required fields (no default) tier above defaulted ones -- the
-            // literal is incomplete until they're supplied; declaration
-            // order within each tier.
-            sort_text: Some(closed_set_sort_text(
-                &n,
-                prefix.as_bytes(),
-                u8::from(has_default),
-                i,
-            )),
-            insert_text: Some(n),
-            ..Default::default()
-        })
-        .collect();
-    items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
-    Some(items)
-}
-
-/// Resolve the qualifier and insert the matching variant payload template.
-pub(crate) fn enum_qualified_completions(
-    session: &mut Session,
-    path: &str,
-    src: &str,
-    offset: usize,
+pub(crate) fn variant_candidates(
+    ws: &Workspace,
+    file: Ustr,
     enum_name: &str,
     prefix: &str,
-) -> Vec<CompletionItem> {
-    // The query only needs the enum DEF resolvable, so the standard sentinel
-    // munges (body-local -- a cheap variant tier) serve it; a truncate-at-`::`
-    // munge would delete every item after the cursor and turn the variant into
-    // an interface-tier edit.
-    let mut all = Vec::new();
-    for munged in completion_munges(src, offset) {
-        let attempt = analyze_variant(session, path, &munged, |ws| {
-            let Some(mid) = user_module_for_path(ws, path) else {
-                return Vec::new();
-            };
-            let Some(enum_key) =
-                crate::modules_scope::resolve_type_key_in_file(ws, ws.module(mid).file, enum_name)
-            else {
-                return Vec::new();
-            };
-            crate::query::enum_variants_with_shape(ws, enum_key.as_str())
-        });
-        if let Some(v) = attempt {
-            if !v.is_empty() {
-                all = v;
-                break;
-            }
-        }
+) -> Option<Vec<Cand>> {
+    let key = crate::modules_scope::resolve_type_key_in_file(ws, file, enum_name)?;
+    let variants = crate::query::enum_variants_with_shape(ws, key.as_str());
+    if variants.is_empty() {
+        return None;
     }
-
-    let pattern = in_pattern_position(src, offset);
-    let matches_prefix = |v: &str| prefix.is_empty() || admit(v.as_bytes(), prefix.as_bytes());
+    let pfx = prefix.as_bytes();
+    let matches_prefix = |name: &str| admit(name.as_bytes(), pfx);
     // Recover a mistyped qualifier suffix by offering every variant.
-    let none_match = !prefix.is_empty() && !all.iter().any(|(v, _)| matches_prefix(v));
-    let force_filter = none_match.then(|| prefix.to_string());
-
-    let mut items: Vec<CompletionItem> = all
-        .into_iter()
-        .enumerate()
-        .filter(|(_, (v, _))| none_match || matches_prefix(v))
-        .map(|(i, (v, shape))| {
-            let (insert_text, insert_text_format) =
-                super::select::variant_insert(&v, shape, pattern, false);
-            CompletionItem {
-                sort_text: Some(closed_set_sort_text(&v, prefix.as_bytes(), 0, i)),
-                label: v,
-                kind: Some(CompletionItemKind::ENUM_MEMBER),
-                filter_text: force_filter.clone(),
-                insert_text,
-                insert_text_format,
-                ..Default::default()
-            }
-        })
-        .collect();
-    items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
-    items
+    let none_match = !variants.iter().any(|(name, _)| matches_prefix(name));
+    Some(
+        variants
+            .into_iter()
+            .enumerate()
+            .filter(|(_, (name, _))| none_match || matches_prefix(name))
+            .map(|(i, (name, shape))| {
+                Cand::new(
+                    closed_set_rank(&name, pfx, 0, i),
+                    CandName::Owned(name),
+                    CandShape::Variant {
+                        shape,
+                        filter_text: none_match.then(|| prefix.to_string()),
+                    },
+                )
+            })
+            .collect(),
+    )
 }
 
 /// The scrutinee precedes the cursor and survives speculative insertions.
@@ -1196,7 +1082,7 @@ pub(crate) fn open_paren_follows(src: &str, offset: usize) -> bool {
 /// field boosts in an `int?`/`float`/`any` slot); rendered-string equality when
 /// the member has no stored TyId (a generic-substituted field) or there's no
 /// session. False with no session at all.
-pub(crate) fn member_ty_match(
+fn member_ty_match(
     mut expected: Option<&mut ExpectedArg>,
     ty_id: Option<TyId>,
     ty_render: &str,
@@ -1208,52 +1094,6 @@ pub(crate) fn member_ty_match(
         Some(t) => exp.accepts(t),
         None => exp.rendered.iter().any(|e| e == ty_render),
     }
-}
-
-/// Try speculative reparses. A resolved receiver with no matching members
-/// still suppresses general completion.
-pub(crate) fn member_completions(
-    session: &mut Session,
-    path: &str,
-    src: &str,
-    offset: usize,
-    prefix: &str,
-    arg_slot: Option<(&str, usize)>,
-    anchor: Option<SlotAnchor>,
-    reach: &crate::reachability::ReachabilityIndex,
-    bool_ctx: bool,
-    members: impl Fn(&Workspace, ModuleId) -> Option<crate::query::Members<'_>>,
-) -> Option<Vec<CompletionItem>> {
-    let paren_follows = open_paren_follows(src, offset);
-    let mut resolved_empty = false;
-    for munged in completion_munges(src, offset) {
-        let attempt = analyze_variant(session, path, &munged, |ws| {
-            // The CURRENT file's module (where the receiver/offset live).
-            let mid = user_module_for_path(ws, path)?;
-            Some(build_member_items(
-                ws,
-                mid,
-                offset,
-                members(ws, mid)?,
-                prefix,
-                arg_slot,
-                anchor,
-                reach,
-                bool_ctx,
-                paren_follows,
-            ))
-        });
-        // `Some(Some(items))`: this variant resolved the receiver. Prefer the
-        // first non-empty result; remember a resolved-but-empty one so we still
-        // suppress general rather than leak globals.
-        if let Some(Some(items)) = attempt {
-            if !items.is_empty() {
-                return Some(items);
-            }
-            resolved_empty = true;
-        }
-    }
-    resolved_empty.then(Vec::new)
 }
 
 /// Find a compatible field-reference argument after the receiver.
@@ -1364,10 +1204,7 @@ fn field_ref_methods<'a>(
     out
 }
 
-/// Shared item-builder for both receiver-resolution strategies (receiver
-/// expression and name path): UFCS methods, type-directed
-/// field/method ordering, Entity `get` boost, arg-position transitive reach.
-fn build_member_items(
+pub(crate) fn member_candidates(
     ws: &Workspace,
     mid: ModuleId,
     offset: usize,
@@ -1377,304 +1214,158 @@ fn build_member_items(
     anchor: Option<SlotAnchor>,
     reach: &crate::reachability::ReachabilityIndex,
     bool_ctx: bool,
-    // A `(` already follows the cursor -- method items insert the bare name so
-    // accepting doesn't double the parens (`recv.le|()` -> `recv.len()`).
-    paren_follows: bool,
-) -> Vec<CompletionItem> {
+) -> Vec<Cand> {
     let crate::query::Members {
         fields,
         owner,
-        // A Vec receiver's element filters UFCS methods to matching elements.
         vec_elem,
-        // The FieldRef owner `T` binds through it on wrapper-receiver
-        // overloads (`e.run_into(.co)`).
-        sole_arg: recv_elem,
-        is_iter: recv_is_iter,
+        sole_arg,
+        is_iter,
     } = members;
-    let recv_struct = Some(owner);
-    {
-        let Some(frag) = crate::modules_scope::fragment(ws, ws.module(mid).file) else {
-            return Vec::new();
-        };
-        // UFCS methods: functions whose first param is the receiver's struct,
-        // callable as `recv.method(...)`. Surfaced alongside fields, as rock does.
-        // Non-struct receivers have no nominal UFCS methods.
-        let methods = recv_struct
-            .map(|name| crate::query::ufcs_methods_in_scope(ws, name, vec_elem, recv_is_iter, frag))
-            .unwrap_or_default();
-        let type_spellings =
-            crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Type);
-        let callable_spellings =
-            crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Callable);
-        if fields.is_empty() && methods.is_empty() {
-            return Vec::new();
-        }
-        // Use the variant workspace so inferred types and the oracle share an arena.
-        let mut expected = arg_slot.and_then(|(callee, idx)| {
-            ExpectedArg::for_call(ws, mid, ws.inference(mid)?, offset, callee, idx, None)
-        });
-        if expected.is_none() {
-            // Slot-anchored contexts (assignment/comparison RHS, typed-`let`,
-            // `return`): the anchor ends before the cursor, so it resolves
-            // against THIS variant workspace directly.
-            expected = anchor.and_then(|a| {
-                let inf = ws.inference(mid)?;
-                expected_for_anchor(ws, mid, inf, offset, a)
-            });
-        }
-        let arg_ctx = expected.is_some();
-        // Precompute the type-match decision per member (bone's `coerce` on the
-        // member's TyId; rendered-string equality only where a TyId is absent --
-        // e.g. a generic-substituted field). Sequential because `accepts` takes
-        // `&mut` (it memoizes / rolls back trial bindings).
-        let field_match: Vec<bool> = fields
-            .iter()
-            .map(|(_, ty, ty_id)| member_ty_match(expected.as_mut(), *ty_id, ty))
-            .collect();
-        let method_match: Vec<bool> = methods
-            .iter()
-            .map(|m| {
-                member_ty_match(
-                    expected.as_mut(),
-                    m.return_ty,
-                    m.returns.as_deref().unwrap_or(""),
-                )
-            })
-            .collect();
-        // Direct members are 1-hop (dist 1): they carry a sort_text too, so they
-        // order consistently with -- and ahead of, by distance -- the transitive
-        // reach paths added below (fuzzy score is the dominant term either way).
-        let pfx = prefix.as_bytes();
-        // Prefer bool fields in conditions and display nullable bool as an explicit comparison.
-        let show_private = prefix.starts_with('_');
-        // A small score bonus puts fields above equally matched methods.
-        let field_boost = if prefix.is_empty() { 0 } else { 25 };
-        // The type-relevance rung: a `bool` member in a bool context
-        // (`if`/`while <chain>`), a member of the expected param type in a
-        // call-arg slot.
-        let type_rank = |is_bool: bool, type_match: bool| {
-            u8::from(if bool_ctx {
-                !is_bool
-            } else {
-                arg_ctx && !type_match
-            })
-        };
-        let field_items =
-            fields
-                .into_iter()
-                .zip(field_match)
-                .filter_map(|((name, ty, _), tmatch)| {
-                    if name.starts_with('_') && !show_private {
-                        return None;
-                    }
-                    (prefix.is_empty() || admit(name.as_bytes(), prefix.as_bytes())).then(|| {
-                        CompletionItem {
-                            sort_text: Some(arg_sort_text(
-                                type_rank(ty == "bool", tmatch),
-                                0,
-                                &name,
-                                pfx,
-                                1,
-                                0,
-                                field_boost,
-                            )),
-                            label: format!("{name}: {ty}"),
-                            kind: Some(CompletionItemKind::FIELD),
-                            detail: Some(ty),
-                            insert_text: Some(name),
-                            ..Default::default()
-                        }
-                    })
-                });
-        let field_ref_matches = recv_struct
-            .map(|rs| field_ref_methods(ws, rs, recv_elem, frag))
-            .unwrap_or_default();
-        let mut field_ref_names = std::collections::HashSet::new();
-        for (f, _, _) in &field_ref_matches {
-            if let Some(names) = callable_spellings.get(&f.name) {
-                field_ref_names.extend(names.iter().copied());
-            }
-        }
-        let method_items = methods
-            .into_iter()
-            .zip(method_match)
-            .filter_map(|(m, rmatch)| {
-                if field_ref_names.contains(&Ustr::from(m.name.as_str())) {
-                    return None;
-                }
-                (prefix.is_empty() || admit(m.name.as_bytes(), prefix.as_bytes())).then(|| {
-                    // Omit the receiver argument and reuse any existing call parentheses.
-                    let (insert_text, insert_text_format) = if paren_follows {
-                        (Some(m.name.clone()), None)
-                    } else if m.takes_args {
-                        (
-                            Some(format!("{}($0)", m.name)),
-                            Some(InsertTextFormat::SNIPPET),
-                        )
-                    } else {
-                        (Some(format!("{}()", m.name)), None)
-                    };
-                    CompletionItem {
-                        // Give fields and methods the same rank rung in a member slot.
-                        sort_text: Some(arg_sort_text(
-                            type_rank(false, rmatch),
-                            0,
-                            &m.name,
-                            pfx,
-                            1,
-                            0,
-                            0,
-                        )),
-                        label: m.name.clone(),
-                        label_details: fn_or_type_label_details(
-                            SymCat::Function,
-                            Some(&m.signature),
-                        ),
-                        kind: Some(CompletionItemKind::METHOD),
-                        detail: Some(m.signature),
-                        insert_text,
-                        insert_text_format,
-                        ..Default::default()
-                    }
-                })
-            });
-        let mut items: Vec<CompletionItem> = field_items.chain(method_items).collect();
-        // Replace the ordinary method candidate with its prefilled FieldRef form.
-        {
-            for (fdef, arg_idx, fields) in field_ref_matches {
-                let key = fdef.name;
-                let name = bone_core::modules::display_name(key.as_str());
-                if !(prefix.is_empty() || admit(name.as_bytes(), pfx)) {
-                    continue;
-                }
-                let (insert_text, insert_text_format) = if paren_follows {
-                    (Some(name.to_string()), None)
-                } else {
-                    (
-                        Some(field_ref_insert(name, fdef, arg_idx, &fields)),
-                        Some(InsertTextFormat::SNIPPET),
-                    )
-                };
-                let sort_text = arg_sort_text(type_rank(false, false), 0, name, pfx, 1, 0, 0);
-                let signature = crate::query::render_fn_signature(ws, key, fdef);
-                items.push(CompletionItem {
-                    sort_text: Some(sort_text),
-                    label: name.to_string(),
-                    label_details: fn_or_type_label_details(SymCat::Function, Some(&signature)),
-                    kind: Some(CompletionItemKind::METHOD),
-                    detail: Some(signature),
-                    insert_text,
-                    insert_text_format,
-                    ..Default::default()
-                });
-            }
-        }
-        // Entity receiver: `.get()` (-> T?) is the dominant accessor, almost
-        // always followed by `.unwrap()`. Rank `get` first, and offer the whole
-        // `get().unwrap()` chain (matches a `getu`/`getunwrap` prefix, which the
-        // bare `get` method can't since it filters on `starts_with`).
-        if recv_struct.is_some_and(|s| is_intrinsic_key(s, "Entity")) {
-            for it in items.iter_mut() {
-                if it.label == "get" {
-                    it.sort_text = Some(
-                        RankKey {
-                            len: RankKey::len_key(9999, "get".len()),
-                            ..Default::default()
-                        }
-                        .encode("get"),
-                    );
-                }
-            }
-            if clean_match(b"get().unwrap()", prefix.as_bytes()) {
-                items.push(CompletionItem {
-                    label: "get().unwrap()".to_string(),
-                    kind: Some(CompletionItemKind::METHOD),
-                    detail: Some("unwrap the Entity's value (T)".to_string()),
-                    insert_text: Some("get().unwrap()".to_string()),
-                    sort_text: Some(
-                        RankKey {
-                            fine: RankKey::fine(9998),
-                            len: RankKey::len_key(9998, "get().unwrap()".len()),
-                            ..Default::default()
-                        }
-                        .encode("get().unwrap()"),
-                    ),
-                    ..Default::default()
-                });
-            }
-        }
-        // The live index uses type names, so it also serves the speculative workspace.
-        let reach_targets: &[String] = expected.as_ref().map_or(&[], |e| &e.rendered);
-        if !reach_targets.is_empty() {
-            if let Some(rs) = recv_struct {
-                let res = reach.paths_to(rs.as_str(), reach_targets, REACH_CAP, Some((ws, frag)));
-                let pfx = prefix.as_bytes();
-                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-                for p in res.paths {
-                    if p.dist <= 1 {
-                        continue; // 1-hop field/method, already offered above
-                    }
-                    let suffix = crate::modules_scope::display_method_suffix_with_names(
-                        &p.suffix,
-                        &p.method_members,
-                        &callable_spellings,
-                    );
-                    let Some(suffix) = suffix else {
-                        continue;
-                    };
-                    if !pfx.is_empty() && !clean_match(suffix.as_bytes(), pfx) {
-                        continue;
-                    }
-                    if !seen.insert(suffix.clone()) {
-                        continue;
-                    }
-                    let final_ty = crate::modules_scope::display_type_with_names(
-                        ws,
-                        &p.final_ty,
-                        &type_spellings,
-                    );
-                    let (label, kind, insert_text, insert_text_format) = if p.is_method {
-                        let call = format!("{}()", suffix);
-                        let (insert, fmt) = if paren_follows {
-                            (suffix.clone(), None)
-                        } else if p.takes_args {
-                            (format!("{}($0)", suffix), Some(InsertTextFormat::SNIPPET))
-                        } else {
-                            (call.clone(), None)
-                        };
-                        (
-                            format!("{call} -> {final_ty}"),
-                            CompletionItemKind::METHOD,
-                            insert,
-                            fmt,
-                        )
-                    } else {
-                        (
-                            format!("{suffix}: {final_ty}"),
-                            CompletionItemKind::FIELD,
-                            suffix.clone(),
-                            None,
-                        )
-                    };
-                    // Reach paths are type-matches by construction (paths TO the
-                    // expected type) -- prio 0, same format as the direct items.
-                    let sort_text =
-                        arg_sort_text(0, 0, &suffix, pfx, p.dist, u8::from(p.is_method), 0);
-                    items.push(CompletionItem {
-                        label,
-                        kind: Some(kind),
-                        detail: Some(final_ty),
-                        insert_text: Some(insert_text),
-                        insert_text_format,
-                        sort_text: Some(sort_text),
-                        ..Default::default()
-                    });
-                }
-            }
-        }
-        // Response arrays go out in rank order (array == sortText, the
-        // invariant every path upholds).
-        items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
-        items
+    let Some(frag) = crate::modules_scope::fragment(ws, ws.module(mid).file) else {
+        return Vec::new();
+    };
+    let methods = crate::query::ufcs_methods_in_scope(ws, owner, vec_elem, is_iter, frag);
+    if fields.is_empty() && methods.is_empty() {
+        return Vec::new();
     }
+
+    let mut expected = ws.inference(mid).and_then(|inf| {
+        arg_slot
+            .and_then(|(callee, idx)| {
+                ExpectedArg::for_call(ws, mid, inf, offset, callee, idx, None)
+            })
+            .or_else(|| expected_for_anchor(ws, mid, inf, offset, anchor?))
+    });
+    let arg_ctx = expected.is_some();
+    let type_rank = |is_bool: bool, type_match: bool| {
+        u8::from(if bool_ctx {
+            !is_bool
+        } else {
+            arg_ctx && !type_match
+        })
+    };
+
+    let pfx = prefix.as_bytes();
+    let mut out = Vec::new();
+    for (name, ty, id) in fields {
+        let matches = member_ty_match(expected.as_mut(), id, &ty);
+        if (name.starts_with('_') && !prefix.starts_with('_')) || !admit(name.as_bytes(), pfx) {
+            continue;
+        }
+        let boost = if pfx.is_empty() { 0 } else { 25 };
+        out.push(Cand::new(
+            arg_rank_key(type_rank(ty == "bool", matches), 0, &name, pfx, 1, 0, boost),
+            CandName::Owned(name),
+            CandShape::Reach {
+                final_ty: ty,
+                is_method: false,
+                takes_args: false,
+            },
+        ));
+    }
+    let callable_spellings =
+        crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Callable);
+    let field_ref_matches = field_ref_methods(ws, owner, sole_arg, frag);
+    let field_ref_names: std::collections::HashSet<_> = field_ref_matches
+        .iter()
+        .flat_map(|(f, _, _)| callable_spellings.get(&f.name).into_iter().flatten())
+        .copied()
+        .collect();
+    for m in methods {
+        let matches = member_ty_match(
+            expected.as_mut(),
+            m.return_ty,
+            m.returns.as_deref().unwrap_or(""),
+        );
+        if !admit(m.name.as_bytes(), pfx) || field_ref_names.contains(&Ustr::from(m.name.as_str()))
+        {
+            continue;
+        }
+        out.push(Cand::new(
+            arg_rank_key(type_rank(false, matches), 0, &m.name, pfx, 1, 0, 0),
+            CandName::Owned(m.name),
+            CandShape::Method {
+                signature: m.signature,
+                takes_args: m.takes_args,
+                snippet: None,
+            },
+        ));
+    }
+    for (f, idx, fields) in field_ref_matches {
+        let name = bone_core::modules::display_name(f.name.as_str());
+        if !admit(name.as_bytes(), pfx) {
+            continue;
+        }
+        out.push(Cand::new(
+            arg_rank_key(type_rank(false, false), 0, name, pfx, 1, 0, 0),
+            CandName::Owned(name.to_string()),
+            CandShape::Method {
+                signature: crate::query::render_fn_signature(ws, f.name, f),
+                takes_args: true,
+                snippet: Some(field_ref_insert(name, f, idx, &fields)),
+            },
+        ));
+    }
+    if is_intrinsic_key(owner, "Entity") {
+        for cand in &mut out {
+            if cand.name.as_str() == "get" && matches!(cand.shape, CandShape::Method { .. }) {
+                cand.key = RankKey {
+                    len: RankKey::len_key(9999, 3),
+                    ..Default::default()
+                };
+            }
+        }
+        let unwrap = "get().unwrap()";
+        if clean_match(unwrap.as_bytes(), pfx) {
+            out.push(Cand::new(
+                RankKey {
+                    fine: RankKey::fine(9998),
+                    len: RankKey::len_key(9998, unwrap.len()),
+                    ..Default::default()
+                },
+                CandName::Sym(Ustr::from(unwrap)),
+                CandShape::EntityUnwrap,
+            ));
+        }
+    }
+    let targets: &[String] = expected.as_ref().map_or(&[], |e| &e.rendered);
+    if targets.is_empty() {
+        return out;
+    }
+    let type_spellings =
+        crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Type);
+    let mut seen = std::collections::HashSet::new();
+    for p in reach
+        .paths_to(owner.as_str(), targets, REACH_CAP, Some((ws, frag)))
+        .paths
+    {
+        if p.dist <= 1 {
+            continue;
+        }
+        let Some(suffix) = crate::modules_scope::display_method_suffix_with_names(
+            &p.suffix,
+            &p.method_members,
+            &callable_spellings,
+        ) else {
+            continue;
+        };
+        if !clean_match(suffix.as_bytes(), pfx) || !seen.insert(suffix.clone()) {
+            continue;
+        }
+        out.push(Cand::new(
+            arg_rank_key(0, 0, &suffix, pfx, p.dist, u8::from(p.is_method), 0),
+            CandName::Owned(suffix),
+            CandShape::Reach {
+                final_ty: crate::modules_scope::display_type_with_names(
+                    ws,
+                    &p.final_ty,
+                    &type_spellings,
+                ),
+                is_method: p.is_method,
+                takes_args: p.takes_args,
+            },
+        ));
+    }
+    out
 }

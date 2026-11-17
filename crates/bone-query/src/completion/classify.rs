@@ -413,7 +413,37 @@ pub(crate) fn for_in_iterable_slot(src: &str, offset: usize) -> bool {
     &b[p..for_end] == b"for"
 }
 
-/// Facts about the cursor, collected once before trying completion sources.
+#[derive(Clone, Copy)]
+pub(crate) enum Record<'a> {
+    Struct { name: &'a str, brace_open: usize },
+    Variant { name: &'a str, variant: &'a str },
+}
+
+impl<'a> Record<'a> {
+    pub(crate) fn name(self) -> &'a str {
+        match self {
+            Self::Struct { name, .. } | Self::Variant { name, .. } => name,
+        }
+    }
+}
+
+pub(crate) enum Context<'a> {
+    Member {
+        receiver: usize,
+        path: Option<&'a [String]>,
+    },
+    FieldRef {
+        callee: &'a str,
+        index: usize,
+        receiver: Option<usize>,
+    },
+    Record(Record<'a>),
+    ModulePath,
+    Enum(&'a str),
+    Decorator,
+}
+
+/// Facts shared by contextual lookups and general completion.
 pub(crate) struct CompletionCx {
     /// The recovered-AST classifier over the munge ladder; None only on the
     /// tokenize frontier (byte-scanner fallbacks own that).
@@ -512,6 +542,36 @@ pub(crate) fn classify(src: &str, offset: usize) -> CompletionCx {
 }
 
 impl CompletionCx {
+    pub(crate) fn contexts(&self) -> impl Iterator<Item = Context<'_>> {
+        [
+            self.member_recv_end.map(|receiver| Context::Member {
+                receiver,
+                path: self.member.as_deref(),
+            }),
+            self.arg_call
+                .as_ref()
+                .map(|(callee, index, receiver)| Context::FieldRef {
+                    callee,
+                    index: *index as usize,
+                    receiver: *receiver,
+                }),
+            self.enum_record
+                .as_ref()
+                .map(|(name, variant)| Context::Record(Record::Variant { name, variant })),
+            Some(Context::ModulePath),
+            self.qualified.as_deref().map(Context::Enum),
+            self.struct_literal.as_ref().map(|(name, brace_open)| {
+                Context::Record(Record::Struct {
+                    name,
+                    brace_open: *brace_open,
+                })
+            }),
+            self.decorator.then_some(Context::Decorator),
+        ]
+        .into_iter()
+        .flatten()
+    }
+
     /// Resolve the expected type using the most specific slot first.
     pub(crate) fn expected<'a>(
         &self,

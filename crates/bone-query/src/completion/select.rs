@@ -125,15 +125,24 @@ pub(crate) enum CandShape {
     /// Param-name + fn-prefix `Entity<..>` type synth: a known payload
     /// renders concrete `Entity<Mob>`, an unknown one the `Entity<$0>`
     /// snippet.
-    EntitySynth { payload: Option<ustr::Ustr> },
+    EntitySynth {
+        payload: Option<ustr::Ustr>,
+    },
     /// A callee param offered as `name:` at a direct call-arg slot.
-    NamedArg { pname: ustr::Ustr, pty: String },
+    NamedArg {
+        pname: ustr::Ustr,
+        pty: String,
+    },
     /// `Wait` in the first generic slot of `Coroutine<..>`.
     Wait,
     /// `Coroutine<Wait>` / `Coroutine<$0>` replacing the bare type name.
-    Coroutine { with_wait: bool },
+    Coroutine {
+        with_wait: bool,
+    },
     /// `-> Coroutine<..>` return type offered after `co fn name()`.
-    CoReturn { has_wait: bool },
+    CoReturn {
+        has_wait: bool,
+    },
     /// A reachability path; the cand name is the access form `root.suffix`.
     Reach {
         final_ty: String,
@@ -147,8 +156,26 @@ pub(crate) enum CandShape {
         payload: ArgPayload,
         multiparam: bool,
     },
-    /// A `deco` declaration (decorator position).
-    Decorator { detail: Option<String> },
+    Decorator {
+        detail: Option<String>,
+    },
+    FieldRef {
+        ty: String,
+        add_dot: bool,
+    },
+    Method {
+        signature: String,
+        takes_args: bool,
+        snippet: Option<String>,
+    },
+    Variant {
+        shape: crate::query::VariantShape,
+        filter_text: Option<String>,
+    },
+    Label {
+        kind: CompletionItemKind,
+    },
+    EntityUnwrap,
 }
 
 /// A fact-shaped completion candidate: rank key + rank/tiebreak name +
@@ -285,19 +312,10 @@ pub(crate) fn materialize_cand(
                     Some(format!("{name} {{ $0 }}")),
                     Some(InsertTextFormat::SNIPPET),
                 ),
-                CompletionSymbol::Function { .. } | CompletionSymbol::Macro { .. }
-                    if strip_call =>
-                {
-                    (Some(name.to_string()), None)
-                }
-                CompletionSymbol::Function {
-                    takes_params: true, ..
-                }
-                | CompletionSymbol::Macro { takes_params: true } => {
-                    (Some(format!("{name}($0)")), Some(InsertTextFormat::SNIPPET))
-                }
-                CompletionSymbol::Function { .. } | CompletionSymbol::Macro { .. } => {
-                    (Some(format!("{name}()")), None)
+                CompletionSymbol::Function { takes_params, .. }
+                | CompletionSymbol::Macro { takes_params } => {
+                    let (text, format) = call_insert(name, strip_call, takes_params);
+                    (Some(text), format)
                 }
                 CompletionSymbol::Variant { shape, .. } => {
                     variant_insert(name, shape, pattern, strip_call)
@@ -354,13 +372,7 @@ pub(crate) fn materialize_cand(
         } => {
             let key = cand.name.as_str();
             let (label, kind, insert_text, insert_text_format) = if is_method {
-                let (insert, fmt) = if strip_call {
-                    (key.to_string(), None)
-                } else if takes_args {
-                    (format!("{key}($0)"), Some(InsertTextFormat::SNIPPET))
-                } else {
-                    (format!("{key}()"), None)
-                };
+                let (insert, fmt) = call_insert(key, strip_call, takes_args);
                 (
                     format!("{key}() -> {final_ty}"),
                     CompletionItemKind::METHOD,
@@ -427,6 +439,81 @@ pub(crate) fn materialize_cand(
             sort_text,
             ..Default::default()
         },
+        CandShape::FieldRef { ty, add_dot } => {
+            let name = cand.name.as_str();
+            CompletionItem {
+                label: format!(".{name}: {ty}"),
+                kind: Some(CompletionItemKind::FIELD),
+                detail: Some(ty),
+                sort_text,
+                filter_text: Some(name.to_string()),
+                insert_text: Some(if add_dot {
+                    format!(".{name}")
+                } else {
+                    name.to_string()
+                }),
+                ..Default::default()
+            }
+        }
+        CandShape::Method {
+            signature,
+            takes_args,
+            snippet,
+        } => {
+            let name = cand.name.as_str();
+            let (insert, format) = match snippet {
+                Some(s) if !strip_call => (s, Some(InsertTextFormat::SNIPPET)),
+                _ => call_insert(name, strip_call, takes_args),
+            };
+            CompletionItem {
+                label: name.to_string(),
+                label_details: fn_or_type_label_details(SymCat::Function, Some(&signature)),
+                kind: Some(CompletionItemKind::METHOD),
+                detail: Some(signature),
+                insert_text: Some(insert),
+                insert_text_format: format,
+                sort_text,
+                ..Default::default()
+            }
+        }
+        CandShape::Variant { shape, filter_text } => {
+            let name = cand.name.as_str();
+            let (insert_text, insert_text_format) =
+                variant_insert(name, shape, pattern, strip_call);
+            CompletionItem {
+                label: name.to_string(),
+                kind: Some(CompletionItemKind::ENUM_MEMBER),
+                filter_text,
+                insert_text,
+                insert_text_format,
+                sort_text,
+                ..Default::default()
+            }
+        }
+        CandShape::Label { kind } => CompletionItem {
+            label: cand.name.as_str().to_string(),
+            kind: Some(kind),
+            sort_text,
+            ..Default::default()
+        },
+        CandShape::EntityUnwrap => CompletionItem {
+            label: cand.name.as_str().to_string(),
+            kind: Some(CompletionItemKind::METHOD),
+            detail: Some("unwrap the Entity's value (T)".to_string()),
+            insert_text: Some(cand.name.as_str().to_string()),
+            sort_text,
+            ..Default::default()
+        },
+    }
+}
+
+fn call_insert(name: &str, strip: bool, takes_args: bool) -> (String, Option<InsertTextFormat>) {
+    if strip {
+        (name.to_string(), None)
+    } else if takes_args {
+        (format!("{name}($0)"), Some(InsertTextFormat::SNIPPET))
+    } else {
+        (format!("{name}()"), None)
     }
 }
 

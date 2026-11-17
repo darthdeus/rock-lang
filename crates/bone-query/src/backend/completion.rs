@@ -13,6 +13,24 @@ struct Request<'a> {
     prefix: String,
     /// Reuse existing call parentheses when inserting a completion.
     next_is_open_paren: bool,
+    munges: std::cell::OnceCell<[String; 2]>,
+}
+
+impl Request<'_> {
+    fn munges(&self) -> &[String; 2] {
+        self.munges
+            .get_or_init(|| completion_munges(self.src, self.offset))
+    }
+
+    fn speculate<T>(
+        &self,
+        session: &mut Session,
+        query: impl Fn(&Workspace) -> Option<T>,
+    ) -> Option<T> {
+        self.munges()
+            .iter()
+            .find_map(|text| analyze_variant(session, self.path, text, &query).flatten())
+    }
 }
 
 /// Project indexes shared across completion requests until the interface changes.
@@ -25,15 +43,16 @@ struct Caches<'a> {
 }
 
 impl BoneWorkspace {
-    pub(super) fn completion_items(
+    pub fn completion(&mut self, path: &str, pos: Position) -> Vec<CompletionItem> {
+        self.completion_with_trigger(path, pos, false)
+    }
+
+    pub fn completion_with_trigger(
         &mut self,
         path: &str,
         pos: Position,
         space_triggered: bool,
     ) -> Vec<CompletionItem> {
-        // `&mut self`: the context-triggered paths (member/enum/struct/field-ref)
-        // analyze the completion munge as a speculative Session variant
-        // (`with_file_variant`), which mutates and restores the live session.
         let path_c = self.canon(path);
         let path = path_c.as_str();
         let Some(proj) = self.projects.get_mut(&Self::root_for(path)) else {
@@ -55,39 +74,39 @@ impl BoneWorkspace {
         };
         let src = src.as_str();
         let offset = offset_at_line_col(src, pos.line, pos.character);
-        if let Some(items) = lexical_gate(src, offset, space_triggered) {
-            return items;
-        }
-        let prefix_raw = ident_prefix(src, offset);
-        let rq = Request {
-            path,
-            src,
-            offset,
-            prefix_raw,
-            prefix: prefix_raw.to_lowercase(),
-            next_is_open_paren: src.get(offset..).is_some_and(|s| s.starts_with('(')),
-        };
-        // The cursor classification, computed ONCE (CompletionCx: the AST
-        // classifier over the munge ladder plus every context consultation).
-        let cx = classify(src, offset);
-        // Dropped by interface edits; the first completion after one rebuilds.
-        let ws = session.workspace();
-        let reach =
-            &*reach.get_or_insert_with(|| crate::reachability::ReachabilityIndex::build(ws));
-        if let Some(items) = contextual_completions(session, reach, &rq, &cx) {
-            return items;
-        }
-        let ws = session.workspace();
-        let freq = &*freq.get_or_insert_with(|| build_freq_index(ws));
-        let call_through = &*call_through.get_or_insert_with(|| build_call_through(ws, reach));
-        let caches = Caches {
-            reach,
-            freq,
-            call_through,
-            scoped_call_through,
-            visible_bindings,
-        };
-        general_completions(session, fallbacks, caches, &rq, &cx)
+        let mut items = lexical_gate(src, offset, space_triggered).unwrap_or_else(|| {
+            let prefix_raw = ident_prefix(src, offset);
+            let rq = Request {
+                path,
+                src,
+                offset,
+                prefix_raw,
+                prefix: prefix_raw.to_lowercase(),
+                munges: Default::default(),
+                next_is_open_paren: src.get(offset..).is_some_and(|s| s.starts_with('(')),
+            };
+            let cx = classify(src, offset);
+            // Dropped by interface edits; the first completion after one rebuilds.
+            let ws = session.workspace();
+            let reach =
+                &*reach.get_or_insert_with(|| crate::reachability::ReachabilityIndex::build(ws));
+            if let Some(items) = contextual_completions(session, reach, &rq, &cx) {
+                return items;
+            }
+            let ws = session.workspace();
+            let freq = &*freq.get_or_insert_with(|| build_freq_index(ws));
+            let call_through = &*call_through.get_or_insert_with(|| build_call_through(ws, reach));
+            let caches = Caches {
+                reach,
+                freq,
+                call_through,
+                scoped_call_through,
+                visible_bindings,
+            };
+            general_completions(session, fallbacks, caches, &rq, &cx)
+        });
+        reconcile_suffix(&mut items, member_tail(src, offset));
+        items
     }
 }
 
@@ -120,175 +139,200 @@ fn lexical_gate(src: &str, offset: usize, space_triggered: bool) -> Option<Vec<C
     None
 }
 
-// -- Contextual sources -------------------------------------------------------
-
-/// Try speculative sources before requiring a live module. An incomplete
-/// receiver or qualifier may prevent the live file from lowering.
+// A contextual lookup may decline: an incomplete receiver or qualifier can
+// prevent the live file from lowering, and a block can parse as a record.
 fn contextual_completions(
     session: &mut Session,
     reach: &crate::reachability::ReachabilityIndex,
     rq: &Request,
     cx: &CompletionCx,
 ) -> Option<Vec<CompletionItem>> {
-    // A `recv.field` even inside a struct-literal field value is member
-    // completion.
-    if let Some(items) = member_access(session, reach, rq, cx) {
-        return Some(items);
-    }
-    if let Some(items) = field_ref_arg(session, rq, cx) {
-        return Some(items);
-    }
-    if let Some((enum_name, variant)) = cx.enum_record.as_ref() {
-        // Declines when the head isn't a record variant -- a unit/tuple
-        // variant as a block head (`if x == Enum::Variant { .. }`) is NOT a
-        // record literal, so the block still gets global completion.
-        if let Some(items) = enum_record_field_completions(
-            session, rq.path, rq.src, rq.offset, enum_name, variant, &rq.prefix,
-        ) {
+    let file = Ustr::from(rq.path);
+    let pfx = rq.prefix.as_bytes();
+    for target in cx.contexts() {
+        let (candidates, strip_call, pattern) = match target {
+            Context::Member { receiver, path } => (
+                member_candidates_at(session, reach, rq, cx, receiver, path),
+                open_paren_follows(rq.src, rq.offset),
+                false,
+            ),
+            Context::FieldRef {
+                callee,
+                index,
+                receiver,
+            } => {
+                let lead_dot = leading_dot(rq.src, rq.offset);
+                let ws = session.workspace();
+                let Some(frag) = crate::modules_scope::fragment(ws, file) else {
+                    continue;
+                };
+                if !lead_dot
+                    && callee_slot_is_field_of_in_scope(ws, frag, callee, index) == Some(false)
+                {
+                    continue;
+                }
+                let candidates = rq.speculate(session, |ws| {
+                    field_ref_candidates(
+                        ws, rq.path, rq.src, rq.offset, callee, index, &rq.prefix, lead_dot,
+                        receiver,
+                    )
+                });
+                (candidates, false, false)
+            }
+            Context::Record(record) => {
+                let written = match record {
+                    Record::Struct { brace_open, .. } => {
+                        rq.src.get(brace_open + 1..rq.offset).unwrap_or("")
+                    }
+                    Record::Variant { .. } => "",
+                };
+                let candidates = rq.speculate(session, |ws| {
+                    let mid = user_module_for_path(ws, rq.path)?;
+                    record_candidates(ws, ws.module(mid).file, pfx, record, written)
+                });
+                (candidates, false, false)
+            }
+            Context::ModulePath => (
+                module_path_candidates(
+                    session.workspace(),
+                    rq.path,
+                    rq.src,
+                    rq.offset - rq.prefix_raw.len(),
+                    &rq.prefix,
+                ),
+                false,
+                false,
+            ),
+            Context::Enum(name) => {
+                let candidates = rq.speculate(session, |ws| {
+                    let mid = user_module_for_path(ws, rq.path)?;
+                    variant_candidates(ws, ws.module(mid).file, name, &rq.prefix)
+                });
+                (
+                    Some(candidates.unwrap_or_default()),
+                    rq.next_is_open_paren,
+                    in_pattern_position(rq.src, rq.offset),
+                )
+            }
+            Context::Decorator => {
+                let ws = session.workspace();
+                let frag = crate::modules_scope::fragment(ws, file)?;
+                (
+                    Some(decorator_candidates(ws, frag, &rq.prefix)),
+                    false,
+                    false,
+                )
+            }
+        };
+        if let Some(candidates) = candidates {
+            let mut items: Vec<_> = candidates
+                .into_iter()
+                .map(|cand| materialize_cand(cand, session.workspace(), file, strip_call, pattern))
+                .collect();
+            if rq.next_is_open_paren && matches!(target, Context::Member { .. }) {
+                strip_call_template(&mut items);
+            }
+            items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
             return Some(items);
         }
-    }
-    // `a::b::|` in a modules-v1 fragment: what the path names, as the
-    // resolver walks it -- a module's accessible members and child modules.
-    // This source declines when the prefix names an enum, leaving its closed
-    // set and payload templates to the enum source below.
-    if let Some(items) = v1_path_completions(
-        session.workspace(),
-        rq.path,
-        rq.src,
-        rq.offset - rq.prefix_raw.len(),
-        &rq.prefix,
-    ) {
-        return Some(items);
-    }
-    if let Some(enum_name) = cx.qualified.as_ref() {
-        let mut items =
-            enum_qualified_completions(session, rq.path, rq.src, rq.offset, enum_name, &rq.prefix);
-        if rq.next_is_open_paren {
-            strip_call_template(&mut items);
-        }
-        return Some(items);
-    }
-    if let Some((struct_name, brace_open)) = cx.struct_literal.as_ref() {
-        // Declines when the head isn't actually a struct, so a `match X {` /
-        // `if Cond {` block still gets global completion.
-        if let Some(items) = struct_literal_field_completions(
-            session,
-            rq.path,
-            rq.src,
-            rq.offset,
-            struct_name,
-            *brace_open,
-            &rq.prefix,
-        ) {
-            return Some(items);
-        }
-    }
-    // Decorator position (`@late_dra|`): the candidates are visible `deco`
-    // declarations, not the fn/type namespace.
-    if cx.decorator {
-        let ws = session.workspace();
-        let frag = crate::modules_scope::fragment(ws, Ustr::from(rq.path))?;
-        return Some(decorator_completions(
-            ws,
-            frag,
-            Ustr::from(rq.path),
-            &rq.prefix,
-        ));
     }
     None
 }
 
-fn member_access(
+fn member_candidates_at(
     session: &mut Session,
     reach: &crate::reachability::ReachabilityIndex,
     rq: &Request,
     cx: &CompletionCx,
-) -> Option<Vec<CompletionItem>> {
-    let recv_end = cx.member_recv_end?;
+    receiver: usize,
+    path: Option<&[String]>,
+) -> Option<Vec<Cand>> {
     let arg_slot = cx
         .arg_call
         .as_ref()
         .map(|(callee, idx, _)| (callee.as_str(), *idx as usize));
-    // The receiver expression's inferred type. `None` means it isn't a
-    // members-bearing type (`scale(x)` -> int).
-    let by_recv = member_completions(
-        session,
-        rq.path,
-        rq.src,
-        rq.offset,
-        &rq.prefix,
-        arg_slot,
-        cx.anchor,
-        reach,
-        cx.bool_chain,
-        |ws, mid| crate::query::members_of_receiver_expr(ws, mid, recv_end),
-    );
-    let resolved = by_recv.is_some();
-    let mut items = by_recv.unwrap_or_default();
-    // A name receiver inference left untyped -- the enclosing call is to an
-    // unknown fn (`newHelper(thing.|`) -- is typed from its head binding.
-    if items.is_empty() {
-        if let Some(segments) = cx.member.as_ref() {
-            items = member_completions(
-                session,
-                rq.path,
-                rq.src,
-                rq.offset,
-                &rq.prefix,
-                arg_slot,
-                cx.anchor,
-                reach,
-                cx.bool_chain,
-                |ws, mid| crate::query::members_of_name_path(ws, mid, rq.offset, segments),
-            )
-            .unwrap_or_default();
+    let mut resolved = path.is_some();
+    // Try both repairs with inference before falling back to the named receiver.
+    for named in [false, true] {
+        if named && path.is_none() {
+            break;
+        }
+        for text in rq.munges() {
+            let candidates = analyze_variant(session, rq.path, text, |ws| {
+                let mid = user_module_for_path(ws, rq.path)?;
+                let members = if named {
+                    crate::query::members_of_name_path(ws, mid, rq.offset, path?)
+                } else {
+                    crate::query::members_of_receiver_expr(ws, mid, receiver)
+                }?;
+                Some(member_candidates(
+                    ws,
+                    mid,
+                    rq.offset,
+                    members,
+                    &rq.prefix,
+                    arg_slot,
+                    cx.anchor,
+                    reach,
+                    cx.bool_chain,
+                ))
+            })
+            .flatten();
+            if let Some(candidates) = candidates {
+                if !candidates.is_empty() {
+                    return Some(candidates);
+                }
+                resolved = true;
+            }
         }
     }
-    // A resolved member type or dotted name suppresses bare globals, even
-    // when the prefix matches no member.
-    if !resolved && cx.member.is_none() {
-        return None;
-    }
-    if rq.next_is_open_paren {
-        strip_call_template(&mut items);
-    }
-    Some(items)
+    resolved.then(Vec::new)
 }
 
-/// Complete fields compatible with the call slot's `FieldRef<Owner, Value>`.
-fn field_ref_arg(
-    session: &mut Session,
-    rq: &Request,
-    cx: &CompletionCx,
-) -> Option<Vec<CompletionItem>> {
-    let (callee, arg_idx, recv_end) = cx.arg_call.as_ref()?;
-    let arg_idx = *arg_idx as usize;
-    let lead_dot = leading_dot(rq.src, rq.offset);
-    // An unresolved live call may become a field reference after recovery.
-    let definitely_not_field_ref = matches!(
-        callee_slot_is_field_of_in_scope(
-            session.workspace(),
-            crate::modules_scope::fragment(session.workspace(), Ustr::from(rq.path))?,
-            callee,
-            arg_idx,
-        ),
-        Some(false)
-    );
-    if !lead_dot && definitely_not_field_ref {
-        return None;
-    }
-    for munged in completion_munges(rq.src, rq.offset) {
-        let attempt = analyze_variant(session, rq.path, &munged, |ws| {
-            field_ref_arg_completions(
-                ws, rq.path, rq.src, rq.offset, callee, arg_idx, &rq.prefix, lead_dot, *recv_end,
-            )
-        });
-        if let Some(Some(items)) = attempt {
-            return Some(items);
-        }
-    }
-    None
+/// Completion after a module path in a modules-v1 fragment
+/// (`modules_scope::path_members`). `None` for a synthetic module or a prefix
+/// that does not resolve to a module, leaving enum paths to their own source.
+fn module_path_candidates(
+    ws: &Workspace,
+    path: &str,
+    src: &str,
+    at: usize,
+    prefix: &str,
+) -> Option<Vec<Cand>> {
+    let frag = crate::modules_scope::fragment(ws, Ustr::from(path))?;
+    let (from_root, segments) = qualified_prefix_before(src, at)?;
+    let members = crate::modules_scope::module_members(ws, frag, from_root, &segments)?;
+    let pfx = prefix.as_bytes();
+    Some(
+        members
+            .into_iter()
+            .filter(|(name, _)| admit(name.as_bytes(), pfx))
+            .enumerate()
+            .map(|(i, (name, member))| {
+                let kind = match member {
+                    crate::modules_scope::Member::Module => CompletionItemKind::MODULE,
+                    crate::modules_scope::Member::Def(key) => {
+                        if ws.functions_by_name.contains_key(&key) {
+                            CompletionItemKind::FUNCTION
+                        } else if ws.struct_by_name.contains_key(&key) {
+                            CompletionItemKind::STRUCT
+                        } else if ws.enums_by_name.contains_key(&key) {
+                            CompletionItemKind::ENUM
+                        } else if ws.newtypes_by_name.contains_key(&key) {
+                            CompletionItemKind::STRUCT
+                        } else {
+                            CompletionItemKind::VARIABLE
+                        }
+                    }
+                };
+                Cand::new(
+                    closed_set_rank(name.as_str(), pfx, 0, i),
+                    CandName::Sym(name),
+                    CandShape::Label { kind },
+                )
+            })
+            .collect(),
+    )
 }
 
 // -- General pipeline ---------------------------------------------------------
