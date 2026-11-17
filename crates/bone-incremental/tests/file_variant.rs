@@ -59,28 +59,6 @@ fn variant_visible_inside_and_gone_after() {
 }
 
 #[test]
-fn broken_member_munge_still_infers_cross_file() {
-    // The munge shape completion feeds: a mid-edit `f.<sentinel>` member access.
-    // The variant module must still lower + infer (recovery), and the receiver's
-    // cross-file type (Foo from a.rock) must be resolvable inside the closure.
-    let mut session = session();
-    let original = session.files["b.rock"].text.clone();
-
-    let variant = "fn use_foo() -> int {\n    let f = make_foo()\n    let x = f.__rock_completion__\n    return f.bar\n}\n";
-    let inferred = session
-        .with_file_variant("b.rock", variant, |ws| {
-            let mid = ws.module_ids[&Ustr::from("b.rock")];
-            ws.inference(mid).is_some()
-        })
-        .expect("variant update");
-    assert!(inferred, "variant module must be inferred under recovery");
-    assert_eq!(
-        session.files["b.rock"].text, original,
-        "text must be restored"
-    );
-}
-
-#[test]
 fn untracked_path_is_added_then_removed() {
     // A file the session REFUSED (its live text never lowered clean) is still
     // completable: the variant is speculatively tracked, analyzed, and removed

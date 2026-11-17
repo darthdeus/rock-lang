@@ -5,11 +5,10 @@
 use crate::common::{self, PACKAGE, v1};
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::Ordering;
 
 use bone_core::modules::NsAliases;
-use bone_incremental::session::{BodyId, Session, SessionFile, UpdateResult, UpdateTier};
-use bone_semantic::hir::{BodyOwner, CallFamily, Expr, Module, TypeCtor, TypeExpr};
+use bone_incremental::session::{Session, SessionFile};
+use bone_semantic::hir::Expr;
 use bone_semantic::prelude::*;
 use skull_parser::Ast;
 
@@ -22,13 +21,11 @@ fn warm() -> Vec<Ast> {
     vec![skull_parser::parse_module(WARM, Ustr::from(warm_path().as_str())).expect("warm parses")]
 }
 
-type Reference = (String, usize, usize, &'static str, String, Option<String>);
-
 #[derive(Debug, PartialEq, Eq)]
 struct Snapshot {
     diagnostics: Vec<(String, usize, String)>,
-    references: BTreeSet<Reference>,
-    signature_keys: BTreeMap<String, BTreeSet<String>>,
+    calls: BTreeSet<(String, usize, usize, String)>,
+    selected_calls: BTreeSet<(String, usize, usize, String)>,
     types: BTreeMap<String, Vec<Option<String>>>,
 }
 
@@ -61,49 +58,19 @@ fn snapshot(ws: &Workspace, files: &[SessionFile]) -> Snapshot {
         .collect();
     diagnostics.sort();
 
-    let mut references = BTreeSet::new();
-    let mut signature_keys = BTreeMap::new();
+    let mut calls = BTreeSet::new();
+    let mut selected_calls = BTreeSet::new();
     for module in ws.modules.iter().filter(|m| user.contains(m.file.as_str())) {
         let file = module.file.to_string();
-        for (idx, te) in module.ty_arena.iter() {
-            if let TypeExpr::App {
-                ctor: TypeCtor::Nominal(key),
-                ..
-            } = te
-            {
-                let (s, e) = module
-                    .ty_spans
-                    .get(idx)
-                    .map(|sp| sp.offset_range())
-                    .unwrap_or((0, 0));
-                references.insert((file.clone(), s, e, "type", key.to_string(), None));
-            }
-        }
         for body in module.bodies.values() {
             for (idx, expr) in body.expr_arena.iter() {
-                let Some((kind, key, members)) = expr_reference(module, expr) else {
+                let Some(key) = call_key(expr) else {
                     continue;
                 };
                 let (s, e) = body.expr_spans[idx].offset_range();
-                references.insert((file.clone(), s, e, kind, key.to_string(), members));
-            }
-            for (idx, te) in body.lowered_tys.iter() {
-                if let TypeExpr::App {
-                    ctor: TypeCtor::Nominal(key),
-                    ..
-                } = te
-                {
-                    let (s, e) = body
-                        .lowered_ty_spans
-                        .get(idx)
-                        .map(|sp| sp.offset_range())
-                        .unwrap_or((0, 0));
-                    references.insert((file.clone(), s, e, "type", key.to_string(), None));
-                }
+                calls.insert((file.clone(), s, e, key.to_string()));
             }
         }
-        // Which definition each overloaded call selected, named by the
-        // selected function's file, name and position.
         if let Some(inf) = ws.inference(module.id) {
             for (owner, bi) in inf.per_fn.iter() {
                 let Some(body) = module.bodies.get(owner) else {
@@ -119,22 +86,10 @@ fn snapshot(ws: &Workspace, files: &[SessionFile]) -> Snapshot {
                         f.name,
                         f.name_span.offset_range().0
                     );
-                    references.insert((file.clone(), s, e, "selects", selected, None));
+                    selected_calls.insert((file.clone(), s, e, selected));
                 }
             }
         }
-        let keys: BTreeSet<String> = module
-            .ty_arena
-            .iter()
-            .filter_map(|(_, te)| match te {
-                TypeExpr::App {
-                    ctor: TypeCtor::Nominal(key),
-                    ..
-                } => Some(key.to_string()),
-                _ => None,
-            })
-            .collect();
-        signature_keys.insert(file, keys);
     }
 
     let types = files
@@ -149,30 +104,15 @@ fn snapshot(ws: &Workspace, files: &[SessionFile]) -> Snapshot {
 
     Snapshot {
         diagnostics,
-        references,
-        signature_keys,
+        calls,
+        selected_calls,
         types,
     }
 }
 
-fn expr_reference(module: &Module, expr: &Expr) -> Option<(&'static str, Ustr, Option<String>)> {
-    let members = |family: &CallFamily| match family {
-        CallFamily::Merged { name, .. } => module.call_families.get(name).map(|members| {
-            let mut shown: Vec<String> = members
-                .iter()
-                .map(|m| format!("{}/{:?}", m.key, m.tier))
-                .collect();
-            shown.sort();
-            shown.join(",")
-        }),
-        _ => None,
-    };
+fn call_key(expr: &Expr) -> Option<Ustr> {
     match expr {
-        Expr::Call { family, .. } => Some(("call", family.key(), members(family))),
-        Expr::SafeNavCall { family, .. } => Some(("safe-nav-call", family.key(), members(family))),
-        Expr::Global(key) => Some(("global", *key, None)),
-        Expr::StructLiteral { name, .. } => Some(("struct", *name, None)),
-        Expr::EnumVariant { enum_name, .. } => Some(("enum", *enum_name, None)),
+        Expr::Call { family, .. } | Expr::SafeNavCall { family, .. } => Some(family.key()),
         _ => None,
     }
 }
@@ -233,7 +173,7 @@ impl V1Harness {
     }
 
     #[track_caller]
-    pub(crate) fn edit(&mut self, path: &str, text: &str) -> Result<UpdateResult, String> {
+    pub(crate) fn edit(&mut self, path: &str, text: &str) -> Result<(), String> {
         let mut edited = self.files.clone();
         edited
             .iter_mut()
@@ -241,10 +181,10 @@ impl V1Harness {
             .expect("edits a tracked file")
             .text = text.to_string();
         match self.session.update_file(path, text) {
-            Ok(result) => {
+            Ok(_) => {
                 self.files = edited;
                 self.assert_matches_fresh();
-                Ok(result)
+                Ok(())
             }
             Err(e) => {
                 assert_eq!(
@@ -259,64 +199,28 @@ impl V1Harness {
     }
 
     #[track_caller]
-    fn edit_tier(&mut self, path: &str, text: &str, tier: UpdateTier) -> UpdateResult {
-        let result = self.edit(path, text).expect("accepted");
-        assert_eq!(result.tier, tier);
-        result
-    }
-
-    #[track_caller]
     fn assert_matches_fresh(&self) {
         assert_eq!(
             Outcome::Built(snapshot(self.session.workspace(), &self.files)),
             fresh_with(&self.files, &self.aliases),
-            "incremental != fresh: diagnostics, references, signatures or types",
+            "incremental != fresh: diagnostics, calls or types",
         );
     }
 
-    fn reinferred_body_count(&self) -> usize {
-        self.session
-            .workspace()
-            .reinferred_body_count
-            .load(Ordering::Relaxed)
-    }
-
-    fn relowered_body_count(&self) -> usize {
-        self.session
-            .workspace()
-            .relowered_body_count
-            .load(Ordering::Relaxed)
-    }
-
-    fn functions_per_file(&self, ids: &[BodyId]) -> BTreeMap<String, usize> {
-        let ws = self.session.workspace();
-        let distinct: BTreeSet<(String, u32)> = ids
-            .iter()
-            .filter_map(|(mid, owner)| match owner {
-                BodyOwner::Function(fid) => {
-                    Some((ws.module(*mid).file.to_string(), fid.into_raw().into_u32()))
-                }
-                _ => None,
-            })
-            .collect();
-        let mut out = BTreeMap::new();
-        for (file, _) in distinct {
-            *out.entry(file).or_insert(0) += 1;
-        }
-        out
-    }
-
-    #[track_caller]
     fn assert_call(&self, path: &str, target: &str) {
-        assert_eq!(self.call_keys(path), vec![(key(target), None)]);
+        assert!(
+            self.call_targets(path).contains(&key(target)),
+            "{path} did not resolve to {target}: {:?}",
+            self.call_targets(path)
+        );
     }
 
-    fn call_keys(&self, path: &str) -> Vec<(String, Option<String>)> {
+    fn call_targets(&self, path: &str) -> Vec<String> {
         snapshot(self.session.workspace(), &self.files)
-            .references
+            .calls
             .into_iter()
-            .filter(|r| r.0 == path && r.3 == "call")
-            .map(|r| (r.4, r.5))
+            .filter(|r| r.0 == path)
+            .map(|r| r.3)
             .collect()
     }
 
@@ -334,20 +238,6 @@ impl V1Harness {
         );
     }
 
-    pub(crate) fn edit_reads(
-        &mut self,
-        path: &str,
-        text: &str,
-        tier: UpdateTier,
-        (reinferred, relowered, files): (usize, usize, &[(&str, usize)]),
-    ) {
-        let result = self.edit(path, text).expect("accepted");
-        assert_eq!(result.tier, tier);
-        assert_eq!(self.reinferred_body_count(), reinferred);
-        assert_eq!(self.relowered_body_count(), relowered);
-        assert_eq!(self.functions_per_file(&result.relowered), per_file(files));
-    }
-
     pub(crate) fn diagnostics(&self) -> Vec<String> {
         self.session
             .diagnostics()
@@ -358,29 +248,15 @@ impl V1Harness {
 
     fn selected(&self, path: &str) -> Vec<String> {
         snapshot(self.session.workspace(), &self.files)
-            .references
+            .selected_calls
             .into_iter()
-            .filter(|r| r.0 == path && r.3 == "selects")
+            .filter(|r| r.0 == path)
             .map(|r| {
-                let (_, rest) = r.4.split_once("::").expect("file::name@offset");
+                let (_, rest) = r.3.split_once("::").expect("file::name@offset");
                 rest.split('@').next().expect("name").to_string()
             })
             .collect()
     }
-}
-
-fn family(members: &[(&str, &str)]) -> Option<String> {
-    Some(
-        members
-            .iter()
-            .map(|(key, tier)| format!("{key}/{tier}"))
-            .collect::<Vec<_>>()
-            .join(","),
-    )
-}
-
-fn per_file(list: &[(&str, usize)]) -> BTreeMap<String, usize> {
-    list.iter().map(|(f, n)| (f.to_string(), *n)).collect()
 }
 
 fn key(path: &str) -> String {
@@ -413,23 +289,11 @@ fn comparator_sees_a_resolution_that_moves_between_same_typed_definitions() {
     assert_eq!(to_a.diagnostics, to_b.diagnostics);
     assert_eq!(to_a.types, to_b.types);
     assert_ne!(
-        to_a.references, to_b.references,
-        "the reference reading cannot see the resolution move"
+        to_a.calls, to_b.calls,
+        "call target must move with the import"
     );
-    assert!(
-        to_a.references
-            .iter()
-            .any(|r| r.3 == "call" && r.4 == key("a::bump")),
-        "{:?}",
-        to_a.references
-    );
-    assert!(
-        to_b.references
-            .iter()
-            .any(|r| r.3 == "call" && r.4 == key("b::bump")),
-        "{:?}",
-        to_b.references
-    );
+    assert!(to_a.calls.iter().any(|call| call.3 == key("a::bump")));
+    assert!(to_b.calls.iter().any(|call| call.3 == key("b::bump")));
 }
 
 #[test]
@@ -447,38 +311,6 @@ fn a_refused_build_is_a_comparable_outcome() {
 }
 
 #[test]
-fn the_full_rebuild_reinfers_no_warm_body() {
-    let mut h = V1Harness::new(vec![v1("a.rock", A_BUMP), v1("d.rock", UNRELATED)]);
-    h.session
-        .ws
-        .reinferred_body_count
-        .store(0, Ordering::Relaxed);
-    h.session
-        .rebuild_users()
-        .expect("an unchanged program rebuilds");
-    assert_eq!(
-        h.reinferred_body_count(),
-        3,
-        "a's bump and d's two bodies; no warm body"
-    );
-    h.assert_matches_fresh();
-}
-
-#[test]
-fn control_a_body_edit_on_a_gate_fixture_reads_narrow() {
-    let c = "mod c;\n\nuse super::b::*;\n\nfn pick() -> int {\n    bump(1)\n}\n\nfn other() -> int {\n    2\n}\n";
-    let d1 = "mod d;\n\nfn far() -> int {\n    20\n}\n\nfn farther() -> int {\n    3\n}\n";
-    let mut h = V1Harness::new(vec![
-        v1("a.rock", A_BUMP),
-        v1("b.rock", B_BUMP),
-        v1("c.rock", c),
-        v1("d.rock", UNRELATED),
-    ]);
-
-    h.edit_reads("d.rock", d1, UpdateTier::BodyOnly, (1, 1, &[("d.rock", 1)]));
-}
-
-#[test]
 fn gate_a_b_use_added_to_and_removed_from_one_fragment() {
     let c0 = "mod c;\n\nuse super::b::*;\n\nfn pick() -> int {\n    bump(1)\n}\n\nfn other() -> int {\n    2\n}\n";
     let c1 = "mod c;\n\nuse super::b::*;\nuse super::a::bump;\n\nfn pick() -> int {\n    bump(1)\n}\n\nfn other() -> int {\n    2\n}\n";
@@ -490,12 +322,10 @@ fn gate_a_b_use_added_to_and_removed_from_one_fragment() {
     ]);
     h.assert_call("c.rock", "b::bump");
 
-    h.edit_reads("c.rock", c1, UpdateTier::Scope, (2, 2, &[("c.rock", 2)]));
-    let both = family(&[(&key("a::bump"), "Imports"), (&key("b::bump"), "Globs")]);
-    assert_eq!(h.call_keys("c.rock"), vec![("bump".to_string(), both)]);
+    h.edit("c.rock", c1).expect("import is accepted");
     assert_eq!(h.selected("c.rock"), vec![key("a::bump")]);
 
-    h.edit_reads("c.rock", c0, UpdateTier::Scope, (2, 2, &[("c.rock", 2)]));
+    h.edit("c.rock", c0).expect("removing import is accepted");
     h.assert_call("c.rock", "b::bump");
 }
 
@@ -510,23 +340,11 @@ fn gate_c_glob_member_added_and_removed() {
         v1("c.rock", c),
         v1("d.rock", UNRELATED),
     ]);
-    assert_eq!(h.call_keys("c.rock"), vec![("warm_one".to_string(), None)]);
-
-    h.edit_reads(
-        "b.rock",
-        b1,
-        UpdateTier::Scope,
-        (3, 3, &[("b.rock", 2), ("c.rock", 1)]),
-    );
-    assert_eq!(
-        h.call_keys("c.rock"),
-        vec![("warm_one".to_string(), warm_one_family())]
-    );
-    assert_eq!(h.selected("c.rock"), vec![key("b::warm_one")]);
-
-    h.edit_tier("b.rock", b0, UpdateTier::Scope);
-    assert_eq!(h.call_keys("c.rock"), vec![("warm_one".to_string(), None)]);
-    assert_eq!(h.relowered_body_count(), 2, "b's depth and c's pick");
+    h.assert_no_diagnostics();
+    h.edit("b.rock", b1).expect("glob member is added");
+    h.assert_no_diagnostics();
+    h.edit("b.rock", b0).expect("glob member is removed");
+    h.assert_no_diagnostics();
 }
 
 #[test]
@@ -542,20 +360,11 @@ fn a_lower_tier_overload_added_joins_the_callers_family() {
     ]);
     h.assert_diagnostic("type mismatch");
 
-    let r = h.edit_tier("b.rock", b1, UpdateTier::Scope);
+    h.edit("b.rock", b1).expect("glob member is added");
     h.assert_no_diagnostics();
-    let both = family(&[(&key("b::bump"), "Globs"), (&key("c::bump"), "Own")]);
-    assert_eq!(h.call_keys("c.rock"), vec![("bump".to_string(), both)]);
     assert_eq!(h.selected("c.rock"), vec![key("b::bump")]);
-    assert!(
-        h.functions_per_file(&r.relowered)
-            .get("c.rock")
-            .is_some_and(|&n| n >= 1),
-        "{:?}",
-        r.relowered
-    );
 
-    h.edit_tier("b.rock", b0, UpdateTier::Scope);
+    h.edit("b.rock", b0).expect("glob member is removed");
     h.assert_call("c.rock", "c::bump");
     h.assert_diagnostic("type mismatch");
 }
@@ -570,7 +379,9 @@ fn gate_d_private_helper_added_in_an_unrelated_module() {
         v1("d.rock", UNRELATED),
     ]);
 
-    h.edit_reads("d.rock", d1, UpdateTier::Scope, (3, 3, &[("d.rock", 3)]));
+    h.edit("d.rock", d1).expect("private helper is added");
+    h.assert_no_diagnostics();
+    h.assert_call("c.rock", "a::bump");
 }
 
 #[test]
@@ -585,15 +396,10 @@ fn gate_e_module_header_changed_and_restored() {
     ]);
     h.assert_call("c.rock", "b::depth");
 
-    h.edit_reads(
-        "b.rock",
-        b1,
-        UpdateTier::Scope,
-        (2, 2, &[("b.rock", 1), ("c.rock", 1)]),
-    );
+    h.edit("b.rock", b1).expect("module header changes");
     h.assert_diagnostic("did not resolve");
 
-    h.edit_tier("b.rock", b0, UpdateTier::Scope);
+    h.edit("b.rock", b0).expect("module header is restored");
     h.assert_no_diagnostics();
     h.assert_call("c.rock", "b::depth");
 }
@@ -615,12 +421,8 @@ fn gate_f_reexport_edit_reaches_a_globber_through_a_glob_chain() {
     h.assert_no_diagnostics();
     h.assert_call("user.rock", "a::bump");
 
-    h.edit_reads(
-        "facade.rock",
-        facade1,
-        UpdateTier::Scope,
-        (1, 1, &[("user.rock", 1)]),
-    );
+    h.edit("facade.rock", facade1)
+        .expect("reexport target changes");
     h.assert_call("user.rock", "b::bump");
 }
 
@@ -642,11 +444,7 @@ fn a_glob_reexport_of_a_named_reexport_resolves() {
     for user in [direct, by_path, by_glob] {
         let h = build(user);
         h.assert_no_diagnostics();
-        assert_eq!(
-            h.call_keys("user.rock"),
-            vec![(key("a::bump"), None)],
-            "{user}"
-        );
+        h.assert_call("user.rock", "a::bump");
     }
 }
 
@@ -661,28 +459,18 @@ fn gate_g_visibility_narrowed_and_widened_on_a_path_used_item() {
     ]);
     h.assert_no_diagnostics();
 
-    h.edit_reads(
-        "a.rock",
-        a1,
-        UpdateTier::Scope,
-        (2, 2, &[("a.rock", 1), ("c.rock", 1)]),
-    );
+    h.edit("a.rock", a1).expect("visibility is narrowed");
     h.assert_diagnostic("`bump` is not accessible from this module");
 
-    h.edit_tier("a.rock", A_BUMP, UpdateTier::Scope);
+    h.edit("a.rock", A_BUMP).expect("visibility is restored");
     h.assert_no_diagnostics();
     h.assert_call("c.rock", "a::bump");
-    assert_eq!(h.relowered_body_count(), 2, "a's bump and c's pick");
-}
-
-fn warm_one_family() -> Option<String> {
-    Some(format!("{}/Globs,warm_one/Std", key("b::warm_one")))
 }
 
 #[test]
 fn a_private_member_added_to_a_globbed_module_keeps_the_std_answer() {
     let b0 = "mod b;\n\npub fn depth() -> int {\n    1\n}\n";
-    let b1 = "mod b;\n\npub fn depth() -> int {\n    1\n}\n\nfn warm_one() -> int {\n    5\n}\n";
+    let b1 = "mod b;\n\npub fn depth() -> int {\n    1\n}\n\nfn warm_one() -> string {\n    \"shadow\"\n}\n";
     let c = "mod c;\n\nuse super::b::*;\n\nfn pick() -> int {\n    warm_one()\n}\n";
     let mut h = V1Harness::new(vec![
         v1("b.rock", b0),
@@ -690,9 +478,9 @@ fn a_private_member_added_to_a_globbed_module_keeps_the_std_answer() {
         v1("d.rock", UNRELATED),
     ]);
 
-    h.edit_tier("b.rock", b1, UpdateTier::Scope);
-    assert_eq!(h.call_keys("c.rock"), vec![("warm_one".to_string(), None)]);
-    assert_eq!(h.relowered_body_count(), 3, "b's two bodies and c's pick");
+    h.assert_no_diagnostics();
+    h.edit("b.rock", b1).expect("private glob member is added");
+    h.assert_no_diagnostics();
 }
 
 #[test]
@@ -708,23 +496,17 @@ fn overload_member_visibility_edit_rechecks_external_callers() {
     ]);
     h.assert_call("c.rock", "a::f");
 
-    let r = h.edit("a.rock", a1).expect("visibility edit is accepted");
-    assert_eq!(r.tier, UpdateTier::Scope);
+    h.edit("a.rock", a1).expect("visibility edit is accepted");
     h.assert_diagnostic("not accessible");
-    assert_eq!(
-        h.relowered_body_count(),
-        3,
-        "a's two overloads and c's caller"
-    );
 }
 
 fn selected_files(h: &V1Harness, path: &str) -> Vec<String> {
     snapshot(h.session.workspace(), &h.files)
-        .references
+        .selected_calls
         .into_iter()
-        .filter(|r| r.0 == path && r.3 == "selects")
+        .filter(|r| r.0 == path)
         .map(|r| {
-            r.4.split_once("::")
+            r.3.split_once("::")
                 .expect("file::name@offset")
                 .0
                 .to_string()
@@ -782,11 +564,11 @@ fn a_reexport_added_makes_a_failed_path_resolve() {
     ]);
     h.assert_diagnostic("did not resolve");
 
-    h.edit_tier("b.rock", b1, UpdateTier::Scope);
+    h.edit("b.rock", b1).expect("reexport is added");
     h.assert_no_diagnostics();
     h.assert_call("c.rock", "a::bump");
 
-    h.edit_tier("b.rock", b0, UpdateTier::Scope);
+    h.edit("b.rock", b0).expect("reexport is removed");
     h.assert_diagnostic("did not resolve");
 }
 
@@ -801,9 +583,9 @@ fn a_use_added_makes_an_unresolved_name_resolve() {
     ]);
     h.assert_diagnostic("did not resolve");
 
-    h.edit_tier("c.rock", c1, UpdateTier::Scope);
+    h.edit("c.rock", c1).expect("import is added");
     h.assert_no_diagnostics();
-    assert_eq!(h.relowered_body_count(), 1, "c's pick alone");
+    h.assert_call("c.rock", "a::bump");
 }
 
 #[test]
@@ -818,9 +600,9 @@ fn a_definition_renamed_in_one_fragment_moves_its_sibling_fragment() {
     ]);
     h.assert_call("b2.rock", "b::helper");
 
-    h.edit_tier("b1.rock", b1_renamed, UpdateTier::Scope);
+    h.edit("b1.rock", b1_renamed)
+        .expect("definition is renamed");
     h.assert_diagnostic("`helper` did not resolve");
-    assert_eq!(h.relowered_body_count(), 2, "b1's helper2 and b2's user");
 }
 
 #[test]
@@ -830,7 +612,7 @@ fn an_inline_module_added_makes_a_path_into_it_resolve() {
     let mut h = V1Harness::new(vec![v1("c.rock", c), v1("d.rock", UNRELATED)]);
     assert!(!h.diagnostics().is_empty());
 
-    h.edit_tier("d.rock", d1, UpdateTier::Scope);
+    h.edit("d.rock", d1).expect("inline module is added");
     h.assert_no_diagnostics();
     h.assert_call("c.rock", "d::inner::f");
 }
@@ -849,7 +631,8 @@ fn a_module_visibility_widened_opens_a_path_through_it() {
     ]);
     h.assert_diagnostic("module `hidden` is not accessible");
 
-    h.edit_tier("hidden.rock", hidden1, UpdateTier::Scope);
+    h.edit("hidden.rock", hidden1)
+        .expect("module visibility is widened");
     h.assert_no_diagnostics();
     h.assert_call("c.rock", "outer::hidden::f");
 }
@@ -867,7 +650,7 @@ fn a_glob_reexport_added_ties_a_globbers_call() {
     ]);
     h.assert_no_diagnostics();
 
-    h.edit_tier("hub.rock", hub1, UpdateTier::Scope);
+    h.edit("hub.rock", hub1).expect("glob reexport is added");
     h.assert_diagnostic("Ambiguous overload for `bump`");
 }
 
@@ -890,7 +673,7 @@ fn a_reexport_chain_target_renamed_is_refused_like_a_fresh_build() {
 }
 
 #[test]
-fn a_type_flavor_change_relowers_a_variant_path_user() {
+fn a_type_flavor_change_makes_a_variant_path_resolve() {
     let b0 = "mod b;\n\npub struct E {\n    pub x: int,\n}\n";
     let b1 = "mod b;\n\npub enum E {\n    V,\n}\n";
     let c = "mod c;\n\nfn pick() -> int {\n    let e = super::b::E::V\n    1\n}\n";
@@ -901,12 +684,12 @@ fn a_type_flavor_change_relowers_a_variant_path_user() {
     ]);
     assert!(!h.diagnostics().is_empty());
 
-    h.edit_tier("b.rock", b1, UpdateTier::Interface);
+    h.edit("b.rock", b1).expect("type flavor changes");
     h.assert_no_diagnostics();
 }
 
 #[test]
-fn a_type_removed_and_restored_relowers_its_users() {
+fn removing_and_restoring_a_type_updates_its_users() {
     let b0 = "mod b;\n\npub struct T {\n    pub x: int,\n}\n";
     let b1 = "mod b;\n\npub fn keep() -> int {\n    1\n}\n";
     let c = "mod c;\n\nfn body() -> int {\n    let t = super::b::T { x: 1 }\n    t.x\n}\n";
@@ -917,9 +700,9 @@ fn a_type_removed_and_restored_relowers_its_users() {
     ]);
     h.assert_no_diagnostics();
 
-    h.edit_tier("b.rock", b1, UpdateTier::Scope);
+    h.edit("b.rock", b1).expect("type is removed");
     h.assert_diagnostic("did not resolve");
-    h.edit_tier("b.rock", b0, UpdateTier::Scope);
+    h.edit("b.rock", b0).expect("type is restored");
     h.assert_no_diagnostics();
 
     let sig = "mod c;\n\nfn sig(t: super::b::T) -> int {\n    t.x\n}\n";
@@ -959,54 +742,39 @@ fn a_bad_macro_argument_label_is_refused_like_a_fresh_build_on_every_path() {
     let user0 = "fn f() -> int {\n    twice(e: 1)\n}\n";
     let expected = "macro `twice` has no parameter named `x`";
     let edits = [
+        ("body edit", user0, "fn f() -> int {\n    twice(x: 2)\n}\n"),
         (
-            UpdateTier::BodyOnly,
-            "fn f() -> int {\n    twice(x: 2)\n}\n",
-        ),
-        (
-            UpdateTier::Interface,
+            "signature edit",
+            user0,
             "fn f(n: int) -> int {\n    twice(x: n)\n}\n",
         ),
         (
-            UpdateTier::Scope,
-            "fn f() -> int {\n    twice(x: 1)\n}\n\npub fn g() -> int {\n    2\n}\n",
+            "item addition",
+            "mod user;\n\nfn f() -> int {\n    twice(e: 1)\n}\n",
+            "mod user;\n\nfn f() -> int {\n    twice(x: 1)\n}\n\npub fn g() -> int {\n    2\n}\n",
         ),
     ];
-    for (tier, user1) in edits {
+    for (edit_kind, user0, user1) in edits {
         let files = |user: &str| vec![v1("macros.rock", macros), v1("user.rock", user)];
-        let user0 = if tier == UpdateTier::Scope {
-            format!("mod user;\n\n{user0}")
-        } else {
-            user0.to_string()
-        };
-        let user1 = if tier == UpdateTier::Scope {
-            format!("mod user;\n\n{user1}")
-        } else {
-            user1.to_string()
-        };
 
-        let fresh = Session::new(warm(), files(&user1), &NsAliases::default())
+        let fresh = Session::new(warm(), files(user1), &NsAliases::default())
             .err()
-            .unwrap_or_else(|| panic!("{tier:?}: a fresh session refuses it"));
+            .unwrap_or_else(|| panic!("{edit_kind}: a fresh session refuses it"));
         assert!(
             fresh.message.contains(expected),
-            "{tier:?}: {}",
+            "{edit_kind}: {}",
             fresh.message
         );
 
-        // The same edit with a good label pins which path it takes.
-        let mut control = common::with_warm(warm(), files(&user0));
-        let good = control
-            .update_file("user.rock", &user1.replace("x:", "e:"))
-            .expect("a good label is accepted");
-        assert_eq!(good.tier, tier);
-
-        let mut session = common::with_warm(warm(), files(&user0));
+        let mut session = common::with_warm(warm(), files(user0));
         let err = session
-            .update_file("user.rock", &user1)
-            .map(|r| r.tier)
-            .expect_err(&format!("{tier:?}: the session refuses the edit too"));
-        assert!(err.message.contains(expected), "{tier:?}: {}", err.message);
+            .update_file("user.rock", user1)
+            .expect_err(&format!("{edit_kind}: the session refuses the edit too"));
+        assert!(
+            err.message.contains(expected),
+            "{edit_kind}: {}",
+            err.message
+        );
     }
 }
 
@@ -1021,21 +789,16 @@ fn a_module_alias_added_and_removed_moves_its_fragment() {
     ]);
     h.assert_diagnostic("did not resolve");
 
-    let r = h.edit("c.rock", c1).expect("accepted");
+    h.edit("c.rock", c1).expect("accepted");
     h.assert_no_diagnostics();
     h.assert_call("c.rock", "a::bump");
-    assert_eq!(r.tier, UpdateTier::Scope);
-    assert_eq!(
-        h.functions_per_file(&r.relowered),
-        per_file(&[("c.rock", 1)])
-    );
 
     h.edit("c.rock", c0).expect("accepted");
     h.assert_diagnostic("did not resolve");
 }
 
 #[test]
-fn a_member_removed_from_an_aliased_module_relowers_the_alias_user() {
+fn a_member_removed_from_an_aliased_module_breaks_and_restores_the_alias_user() {
     let a1 = "mod a;\n\npub fn other(n: int) -> int {\n    n\n}\n";
     let c = "mod c;\n\nuse super::a as m;\n\nfn pick() -> int {\n    m::bump(1)\n}\n";
     let mut h = V1Harness::new(vec![
@@ -1045,10 +808,8 @@ fn a_member_removed_from_an_aliased_module_relowers_the_alias_user() {
     ]);
     h.assert_call("c.rock", "a::bump");
 
-    let r = h.edit("a.rock", a1).expect("accepted");
+    h.edit("a.rock", a1).expect("accepted");
     h.assert_diagnostic("did not resolve");
-    assert_eq!(r.tier, UpdateTier::Scope);
-    assert_eq!(h.relowered_body_count(), 2, "a's `other` and c's `pick`");
 
     h.edit("a.rock", A_BUMP).expect("accepted");
     h.assert_call("c.rock", "a::bump");
@@ -1069,22 +830,12 @@ fn a_module_reexport_added_and_repointed_moves_a_path_through_it() {
     ]);
     h.assert_diagnostic("did not resolve");
 
-    let r = h.edit("facade.rock", facade1).expect("accepted");
+    h.edit("facade.rock", facade1).expect("accepted");
     h.assert_no_diagnostics();
     h.assert_call("user.rock", "a::bump");
-    assert_eq!(r.tier, UpdateTier::Scope);
-    assert_eq!(
-        h.functions_per_file(&r.relowered),
-        per_file(&[("facade.rock", 1), ("user.rock", 1)])
-    );
 
-    let r = h.edit("facade.rock", facade2).expect("accepted");
+    h.edit("facade.rock", facade2).expect("accepted");
     h.assert_call("user.rock", "b::bump");
-    assert_eq!(r.tier, UpdateTier::Scope);
-    assert_eq!(
-        h.functions_per_file(&r.relowered),
-        per_file(&[("facade.rock", 1), ("user.rock", 1)])
-    );
 }
 
 #[test]

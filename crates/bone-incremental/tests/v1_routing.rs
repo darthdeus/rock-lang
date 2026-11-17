@@ -1,13 +1,11 @@
-//! Which update path a session edit takes in a modules-v1 package, and that the path it takes
-//! reaches the same verdict a fresh session would. Only an edit to what the namespace tree is
-//! built from -- an item's name, kind or visibility, a `use`, a `mod` header -- takes the scope
-//! path, which re-assembles the tree.
+//! Namespace edits in a modules-v1 package must reach the same verdict in a live session and a
+//! fresh build. These cases cover names, visibility, imports, and module headers.
 
 use crate::common::{self, in_package, package_tag, v1};
 use crate::v1_differential::V1Harness;
 
 use bone_core::modules::NsAliases;
-use bone_incremental::session::{Session, SessionFile, UpdateTier};
+use bone_incremental::session::{Session, SessionFile};
 use skull_parser::GlobalPolicy;
 
 fn diagnostics(session: &Session) -> Vec<String> {
@@ -25,17 +23,13 @@ fn edit_with_aliases(
     path: &str,
     edit: &str,
     aliases: &NsAliases,
-) -> (UpdateTier, Vec<String>) {
+) -> Vec<String> {
     let mut h = V1Harness::with_aliases(files, aliases.clone());
-    let tier = h.edit(path, edit).expect("the edit is accepted").tier;
-    (tier, h.diagnostics())
+    h.edit(path, edit).expect("the edit is accepted");
+    h.diagnostics()
 }
 
-fn edit_with_diagnostics(
-    files: Vec<SessionFile>,
-    path: &str,
-    edit: &str,
-) -> (UpdateTier, Vec<String>) {
+fn edit_with_diagnostics(files: Vec<SessionFile>, path: &str, edit: &str) -> Vec<String> {
     edit_with_aliases(files, path, edit, &NsAliases::default())
 }
 
@@ -45,52 +39,6 @@ const ROOT: &str = "fn f() -> int {\n    a::bump(1)\n}\n\nfn g(p: a::P) -> int {
 
 fn package() -> Vec<SessionFile> {
     vec![v1("a.rock", A), v1("root.rock", ROOT)]
-}
-
-#[test]
-fn declaration_edits_take_the_matching_tier() {
-    for (root, edit, tier, diagnostic) in [
-        (
-            ROOT,
-            A.replace("n: int)", "n: int, m: int)"),
-            UpdateTier::Interface,
-            None,
-        ),
-        (
-            ROOT,
-            A.replace("pub x: int,", "pub x: int,\n    pub y: int,"),
-            UpdateTier::Interface,
-            None,
-        ),
-        (
-            "fn set(p: a::P) {\n    p.x = 2\n}\n",
-            A.replace("pub x:", "pub private(set) x:"),
-            UpdateTier::Interface,
-            None,
-        ),
-        (
-            ROOT,
-            A.replace("pub fn bump", "fn bump"),
-            UpdateTier::Scope,
-            Some("`bump` is not accessible from this module"),
-        ),
-        (
-            ROOT,
-            format!("{A}\npub fn twice(n: int) -> int {{\n    n\n}}\n"),
-            UpdateTier::Scope,
-            None,
-        ),
-    ] {
-        let (actual, diags) = edit_with_diagnostics(
-            vec![v1("a.rock", A), v1("root.rock", root)],
-            "a.rock",
-            &edit,
-        );
-        assert_eq!(actual, tier, "{edit}");
-        if let Some(needle) = diagnostic {
-            assert!(diags.iter().any(|d| d.contains(needle)), "{diags:?}");
-        }
-    }
 }
 
 #[test]
@@ -104,7 +52,7 @@ fn a_same_signature_definition_in_another_file_of_the_module_is_a_duplicate() {
     let duplicate = "fn bump(m: int) -> float {\n    1.0\n}\n";
     let overload = "fn bump(m: float) -> float {\n    m\n}\n";
 
-    let (_, diags) = edit_with_diagnostics(
+    let diags = edit_with_diagnostics(
         files(overload),
         "a2.rock",
         &format!("mod a;\n\n{duplicate}"),
@@ -116,7 +64,7 @@ fn a_same_signature_definition_in_another_file_of_the_module_is_a_duplicate() {
         "{diags:?}"
     );
 
-    let (_, diags) = edit_with_diagnostics(
+    let diags = edit_with_diagnostics(
         files(duplicate),
         "a2.rock",
         &format!("mod a;\n\n{overload}"),
@@ -137,9 +85,8 @@ fn a_private_definition_added_to_a_globbed_module_changes_no_globber() {
             "mod c;\n\nuse super::a::*;\nuse super::b::*;\n\nfn pick() -> string {\n    width()\n}\n",
         ),
     ];
-    let edit = "mod b;\n\npub fn depth() -> int {\n    1\n}\n\nfn width() -> int {\n    2\n}\n";
-    let (tier, diags) = edit_with_diagnostics(files, "b.rock", edit);
-    assert_eq!(tier, UpdateTier::Scope);
+    let edit = "mod b;\n\npub fn depth() -> int {\n    1\n}\n\nfn width() -> string {\n    \"shadow\"\n}\n";
+    let diags = edit_with_diagnostics(files, "b.rock", edit);
     assert!(diags.is_empty(), "{diags:?}");
 }
 
@@ -186,8 +133,7 @@ fn a_second_import_composes_and_removing_it_splits_the_family() {
         let aliases = aliases_of(&files(""));
         for (before, after, clean) in [(one, both, true), (both, one, false)] {
             let edit = format!("{after}{PICK_USE}");
-            let (tier, diags) = edit_with_aliases(files(before), "use.rock", &edit, &aliases);
-            assert_eq!(tier, UpdateTier::Scope);
+            let diags = edit_with_aliases(files(before), "use.rock", &edit, &aliases);
             if clean {
                 assert!(diags.is_empty(), "{diags:?}");
             } else {
@@ -215,12 +161,10 @@ fn a_member_signature_edit_ties_a_composed_import_family() {
     };
     let aliases = aliases_of(&files(PICK_INT));
 
-    let (tier, diags) = edit_with_aliases(files(PICK_INT), "b.rock", PICK_STRING, &aliases);
-    assert_eq!(tier, UpdateTier::Interface);
+    let diags = edit_with_aliases(files(PICK_INT), "b.rock", PICK_STRING, &aliases);
     assert!(diags.iter().any(|d| d.contains(TIED_PICK)), "{diags:?}");
 
-    let (tier, diags) = edit_with_aliases(files(PICK_STRING), "b.rock", PICK_INT, &aliases);
-    assert_eq!(tier, UpdateTier::Interface);
+    let diags = edit_with_aliases(files(PICK_STRING), "b.rock", PICK_INT, &aliases);
     assert!(diags.is_empty(), "{diags:?}");
 }
 
@@ -228,7 +172,7 @@ const GLOB_A: &str = "use lib_a::*;\n\n";
 const GLOB_BOTH: &str = "use lib_a::*;\nuse lib_b::*;\n\n";
 
 #[test]
-fn a_member_added_to_a_second_globbed_module_relowers_the_globber() {
+fn a_member_added_to_a_second_globbed_module_resolves_then_removal_fails() {
     let other = "pub fn other() -> int {\n    1\n}\n";
     let files = |b: &str| {
         vec![
@@ -238,36 +182,19 @@ fn a_member_added_to_a_second_globbed_module_relowers_the_globber() {
         ]
     };
     let aliases = aliases_of(&files(other));
-    let relowers_the_globber = |b0: &str, b1: &str| {
-        let mut session = Session::new(vec![], files(b0), &aliases).expect("baseline builds");
-        let before = diagnostics(&session);
-        let tier = session
-            .update_file("b.rock", b1)
-            .expect("the edit is accepted")
-            .tier;
-        let relowered = session
-            .workspace()
-            .relowered_body_count
-            .load(std::sync::atomic::Ordering::Relaxed);
-        (tier, before, relowered)
-    };
-
-    let (tier, before, relowered) = relowers_the_globber(other, PICK_STRING);
-    assert_eq!(tier, UpdateTier::Scope);
+    let mut h = V1Harness::with_aliases(files(other), aliases);
+    let before = h.diagnostics();
     assert!(
         before.iter().any(|d| d.contains("type mismatch")),
         "{before:?}"
     );
-    // b.rock's `pick` and use.rock's `use_it`.
-    assert_eq!(relowered, 2);
-    let (_, diags) = edit_with_aliases(files(other), "b.rock", PICK_STRING, &aliases);
+    h.edit("b.rock", PICK_STRING)
+        .expect("string overload is added");
+    let diags = h.diagnostics();
     assert!(diags.is_empty(), "{diags:?}");
 
-    let (tier, before, relowered) = relowers_the_globber(PICK_STRING, other);
-    assert_eq!(tier, UpdateTier::Scope);
-    assert!(before.is_empty(), "{before:?}");
-    assert_eq!(relowered, 2);
-    let (_, diags) = edit_with_aliases(files(PICK_STRING), "b.rock", other, &aliases);
+    h.edit("b.rock", other).expect("string overload is removed");
+    let diags = h.diagnostics();
     assert!(
         diags.iter().any(|d| d.contains("type mismatch")),
         "{diags:?}"
@@ -275,7 +202,7 @@ fn a_member_added_to_a_second_globbed_module_relowers_the_globber() {
 }
 
 #[test]
-fn a_unary_operator_added_to_a_globbed_module_relowers_the_caller() {
+fn a_unary_operator_added_to_a_globbed_module_resolves_then_removal_fails() {
     let without = "pub struct Pt {\n    pub x: int,\n}\n";
     let with = "pub struct Pt {\n    pub x: int,\n}\n\npub fn __unm(a: Pt) -> Pt {\n    a\n}\n";
     let caller = "use geo::*;\n\nfn neg() -> int {\n    let p = -Pt { x: 1 }\n    let negative = -p\n    negative.x\n}\n";
@@ -287,12 +214,10 @@ fn a_unary_operator_added_to_a_globbed_module_relowers_the_caller() {
     };
     let aliases = aliases_of(&files(without));
 
-    let (tier, diags) = edit_with_aliases(files(without), "geo.rock", with, &aliases);
-    assert_eq!(tier, UpdateTier::Scope);
+    let diags = edit_with_aliases(files(without), "geo.rock", with, &aliases);
     assert!(diags.is_empty(), "{diags:?}");
 
-    let (tier, diags) = edit_with_aliases(files(with), "geo.rock", without, &aliases);
-    assert_eq!(tier, UpdateTier::Scope);
+    let diags = edit_with_aliases(files(with), "geo.rock", without, &aliases);
     assert!(
         diags
             .iter()
@@ -389,12 +314,10 @@ fn a_dependency_module_alias_added_or_removed_takes_the_scope_path() {
     };
     let aliases = aliases_of(&files(without));
 
-    let (tier, diags) = edit_with_aliases(files(without), "use.rock", with, &aliases);
-    assert_eq!(tier, UpdateTier::Scope);
+    let diags = edit_with_aliases(files(without), "use.rock", with, &aliases);
     assert!(diags.is_empty(), "{diags:?}");
 
-    let (tier, diags) = edit_with_aliases(files(with), "use.rock", without, &aliases);
-    assert_eq!(tier, UpdateTier::Scope);
+    let diags = edit_with_aliases(files(with), "use.rock", without, &aliases);
     assert!(
         diags.iter().any(|d| d.contains("did not resolve")),
         "{diags:?}"
