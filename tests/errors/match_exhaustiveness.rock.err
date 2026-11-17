@@ -25,3 +25,14 @@ fn f(e: E, hot: bool) -> int {
     r
 }
 
+
+//=== TEST CASE: nullable_enum_missing_null_arm_Generic ===
+//! expect: null
+enum Sig { Idle, Num(int) }
+fn f(s: Sig?) -> int {
+    match s {
+        Sig::Idle => 0,
+        Sig::Num(x) => x,
+    }
+}
+fn main() {}

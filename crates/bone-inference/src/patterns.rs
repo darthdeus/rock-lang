@@ -75,6 +75,21 @@ pub(crate) fn check_pattern(
         return bind_pattern_leaves_to(c, gamma, pat, er);
     }
 
+    // A structural pattern looks through `T?`: `null` is its own pattern (and
+    // exhaustiveness its own constructor), so a variant/record/newtype/tuple
+    // pattern matches the unwrapped value -- in match exactly as in `if let`.
+    if let TypeExpr::Nullable(inner) = *gamma.get(er)
+        && matches!(
+            c.body.pattern_arena[pat],
+            Pattern::EnumVariant { .. }
+                | Pattern::Record { .. }
+                | Pattern::Newtype { .. }
+                | Pattern::Tuple { .. }
+        )
+    {
+        return check_pattern(c, gamma, pat, er.with_idx(inner), span);
+    }
+
     match c.body.pattern_arena[pat] {
         Pattern::Wildcard => Ok(()),
         Pattern::Bind(b) => gamma.assign_named_type(b, expected),

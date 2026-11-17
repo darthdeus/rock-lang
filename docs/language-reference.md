@@ -218,6 +218,21 @@ the bindings join the enclosing scope. An `else` that can never run (an
 irrefutable pattern over a non-nullable value) is rejected. `let ... else`
 is a statement; in expression position use `if let` or `match`.
 
+`while let P = v { body }` is exactly
+`while true { let P = v else { break } body }` and is compiled as that
+desugaring, so the two forms share every rule above. A `while let` whose
+pattern can never miss over a non-nullable value is rejected (an infinite
+loop by construction), and its scrutinee parses at the same precedence as
+an `if let` clause, so a trailing `&& cond` is a parse error.
+
+The `match` rule for a bare uppercase name holds in every pattern
+position: against an enum scrutinee it is a variant tag test that binds
+nothing (a misspelled variant is an error, never a catch-all), and
+against any other type it is an ordinary binding. Structural patterns
+look through `T?` everywhere, including `match`: `null` is its own
+pattern, and a variant/record/newtype/tuple pattern matches the
+unwrapped value.
+
 ## Iterators
 
 A collection can define `iter(collection)` to return an iterator. An iterator

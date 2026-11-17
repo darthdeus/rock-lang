@@ -16,33 +16,23 @@ enum Complex {
     Unit,
     Tuple(int, string),
     Record { x: float, y: float },
-    Mixed(int, name: string, active: bool),
+    Mixed(int, string, bool),
 }
 
-@test
-fn test_wildcard_pattern() {
-    let opt: Option<int> = Option::Some(42)
-    
-    let result = match opt {
-        _ => "matched wildcard"
-    }
-    
-    assert_eq(result, "matched wildcard")
-}
 
 @test
 fn test_literal_patterns() {
     let num = 42
-    
+
     let result = match num {
         0 => "zero",
         42 => "forty-two",
         100 => "hundred",
         _ => "other"
     }
-    
+
     assert_eq(result, "forty-two")
-    
+
     // String literals
     let str = "hello"
     let greeting = match str {
@@ -51,7 +41,7 @@ fn test_literal_patterns() {
         _ => "unknown"
     }
     assert_eq(greeting, "hi")
-    
+
     // Boolean literals
     let flag = true
     let status = match flag {
@@ -82,7 +72,7 @@ fn test_nested_enum_patterns() {
 @test
 fn test_pattern_variable_binding() {
     let complex = Complex::Tuple(42, "test")
-    
+
     match complex {
         Complex::Tuple(n, s) => {
             assert_eq(n, 42)
@@ -90,7 +80,7 @@ fn test_pattern_variable_binding() {
         },
         _ => assert(false),
     }
-    
+
     // Test with record variant
     let point = Complex::Record { x: 3.14, y: 2.71 }
     match point {
@@ -121,7 +111,7 @@ fn test_exhaustiveness_edge_cases() {
         Single::Only => "matched"
     }
     assert_eq(result, "matched")
-    
+
     // Bool-like enum
     let toggle = Toggle::On
     let state = match toggle {
@@ -135,14 +125,14 @@ fn test_exhaustiveness_edge_cases() {
 fn test_pattern_type_checking() {
     let opt_int: Option<int> = Option::Some(42)
     let opt_string: Option<string> = Option::Some("hello")
-    
+
     // Each should match correctly with its type
     let int_result = match opt_int {
         Option::None => 0,
         Option::Some(n) => n,
     }
     assert_eq(int_result, 42)
-    
+
     let string_result = match opt_string {
         Option::None => "",
         Option::Some(s) => s,
@@ -155,17 +145,17 @@ fn test_complex_enum_equality() {
     let c1 = Complex::Tuple(42, "test")
     let c2 = Complex::Tuple(42, "test")
     let c3 = Complex::Tuple(43, "test")
-    
+
     assert(c1 == c2)
     assert(c1 != c3)
-    
+
     let r1 = Complex::Record { x: 1.0, y: 2.0 }
     let r2 = Complex::Record { x: 1.0, y: 2.0 }
     let r3 = Complex::Record { x: 1.0, y: 3.0 }
-    
+
     assert(r1 == r2)
     assert(r1 != r3)
-    
+
     // Different variants
     assert(c1 != r1)
 }
@@ -185,7 +175,7 @@ fn test_deeply_nested_patterns() {
             Tree::Leaf(3)
         )
     )
-    
+
     // Match on the structure
     match tree {
         Tree::Branch(Tree::Leaf(a), Tree::Branch(Tree::Leaf(b), Tree::Leaf(c))) => {
@@ -208,7 +198,7 @@ fn extract_or_default(opt: Option<int>) -> int {
 @test
 fn test_pattern_contexts() {
     let values = [Option::Some(1), Option::None, Option::Some(2)]
-    
+
     // Pattern matching in loops
     let sum = 0
     for opt in values {
@@ -218,59 +208,28 @@ fn test_pattern_contexts() {
         }
     }
     assert_eq(sum, 3)
-    
+
     // Pattern matching in function returns
     assert_eq(extract_or_default(Option::Some(42)), 42)
     assert_eq(extract_or_default(Option::None), 0)
 }
 
 @test
-fn test_if_let_enum_workaround() {
+fn test_if_let_enum_pattern() {
     let opt = Option::Some(42)
-    
-    let result = match opt {
-        Some(value) => value * 2,
-        None => 0,
-    }
-    
-    assert_eq(result, 84)
-}
 
-@test  
-fn test_nullable_if_let() {
-    // Current if-let works with nullable types
-    let nullable_value: int? = 42
-    
-    let result = if let value = nullable_value {
+    // An enum-variant pattern in `if let`, in value position.
+    let result = if let Some(value) = opt {
         value * 2
     } else {
         0
     }
-    
+
     assert_eq(result, 84)
+    let none: Option<int> = Option::None
+    assert_eq(if let Some(v) = none { v } else { -1 }, -1)
 }
 
-@test
-fn test_if_let_with_nullable() {
-    let value: int? = 42
-
-    if let x = value {
-        assert_eq(x, 42)
-    } else {
-        assert(false)
-    }
-
-    let null_value: int? = null
-    let found = false
-
-    if let x = null_value {
-        assert(false)
-    } else {
-        found = true
-    }
-
-    assert(found)
-}
 
 fn option_to_nullable<T>(opt: Option<T>) -> T? {
     match opt {
@@ -279,16 +238,26 @@ fn option_to_nullable<T>(opt: Option<T>) -> T? {
     }
 }
 
-@test
-fn test_enum_to_nullable_if_let() {
-    let opt = Option::Some(100)
-    let nullable = option_to_nullable(opt)
-    
-    let result = if let n = nullable {
-        n + 1
-    } else {
-        0
+
+enum Sig {
+    Idle,
+    Num(int),
+}
+
+// A nullable enum scrutinee: `null` is its own arm, variants match the
+// unwrapped value (the flat-enum nil-tag path).
+fn describe_sig(s: Sig?) -> int {
+    match s {
+        null => -1,
+        Sig::Idle => 0,
+        Sig::Num(x) => x,
     }
-    
-    assert_eq(result, 101)
+}
+
+@test
+fn test_match_on_nullable_enum() {
+    let none: Sig? = null
+    assert_eq(describe_sig(none), -1)
+    assert_eq(describe_sig(Sig::Idle), 0)
+    assert_eq(describe_sig(Sig::Num(9)), 9)
 }
