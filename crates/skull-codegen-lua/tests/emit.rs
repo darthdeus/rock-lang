@@ -73,6 +73,15 @@ fn luajit_ok(driver: &str, context: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+fn emitted_symbol(lua: &str) -> &str {
+    lua.lines()
+        .find_map(|line| line.strip_prefix("function "))
+        .expect("function definition")
+        .split('(')
+        .next()
+        .unwrap()
+}
+
 fn luajit_loads(lua: &str) {
     let dir = std::env::temp_dir().join(format!(
         "skull_inline_body_limits_{}_{:?}",
@@ -94,7 +103,7 @@ fn luajit_loads(lua: &str) {
     );
 }
 
-fn emit_run(src: &str) -> (String, bool) {
+fn emit_run(src: &str) -> (String, Option<skull_parser::CompilerError>) {
     let (ws, mid) = stdlib_workspace(src);
     let fid = test_fn(&ws, mid, "run");
     let (func, interner) = common::lower_test_ref(&ws, mid, fid).expect("lower");
@@ -110,7 +119,7 @@ fn emit_run(src: &str) -> (String, bool) {
         &func,
         None,
     );
-    (lua, ctx.take_rejection().is_some())
+    (lua, ctx.take_rejection())
 }
 
 fn emit_dump(modules: Vec<skull_parser::Ast>, fn_name: &str) -> String {
@@ -128,12 +137,7 @@ fn emit_dump_with(
         .module_ids
         .get(&ustr::Ustr::from("<test>"))
         .expect("user module id");
-    let m = ws.module(mid);
-    let (fid, _) = m
-        .functions
-        .iter()
-        .find(|(_, f)| declared_name_matches(f.name, fn_name))
-        .expect("function by name");
+    let fid = test_fn(&ws, mid, fn_name);
     let (func, interner) = common::lower_test_ref(&ws, mid, fid)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
     let mut ctx = CodegenCtx::new(&ws);
@@ -168,7 +172,6 @@ fn has_store_guard(lua: &str) -> bool {
 
 #[test]
 fn absent_record_field_store_preserves_host_callbacks_and_clearing() {
-    common::require_luajit();
     let lua = emit_clean(
         "struct Row { payload: string? = null } fn update(row: Row, value: string?) { row.payload = value }",
         "update",
@@ -176,13 +179,7 @@ fn absent_record_field_store_preserves_host_callbacks_and_clearing() {
     assert!(has_store_guard(&lua), "{lua}");
     // A host record can observe even a nil store to an absent field.
     assert!(lua.contains("getmetatable("), "{lua}");
-    let symbol = lua
-        .lines()
-        .find_map(|line| line.strip_prefix("function "))
-        .expect("function definition")
-        .split('(')
-        .next()
-        .unwrap();
+    let symbol = emitted_symbol(&lua);
     let driver = format!(
         r#"{lua}
 local row = {{}}
@@ -220,45 +217,45 @@ fn non_nil_constant_field_store_keeps_direct_assignment() {
 }
 
 #[test]
-fn computed_field_store_keeps_direct_assignment() {
-    let lua = emit_clean(
-        "struct Acc { mean: float = 0.0 } \
-         fn update(acc: Acc, x: float) -> float { let m = acc.mean * 0.5 + x; acc.mean = m; return m }",
-        "update",
-    );
-    assert!(!has_store_guard(&lua), "{lua}");
-    let lua = emit_clean(
-        "struct Acc { mean: float = 0.0 } fn update(acc: Acc, x: float) { acc.mean = x }",
-        "update",
-    );
-    assert!(!has_store_guard(&lua), "{lua}");
-}
-
-#[test]
-fn stored_call_result_of_a_scalar_type_needs_no_nil_guard() {
-    let lua = emit_clean(
-        "struct Acc { n: int = 0, label: string = \"\" } \
-         fn weight(x: int) -> int { if x > 3 { return x * 2 } return x - 1 } \
-         fn name(x: int) -> string { if x > 3 { return \"big\" } return \"small\" } \
-         fn update(acc: Acc, x: int) { acc.n = weight(x); acc.label = name(x) }",
-        "update",
-    );
-    assert!(!has_store_guard(&lua), "{lua}");
-    let lua = emit_clean(
-        "struct Inner { v: int } struct Acc { inner: Inner? = null, xs: Vec<int>? = null } \
-         fn make(x: int) -> Inner { if x > 3 { return Inner { v: x } } return Inner { v: 0 } } \
-         fn list(x: int) -> Vec<int> { if x > 3 { return [x] } return [] } \
-         fn update(acc: Acc, x: int) { acc.inner = make(x); acc.xs = list(x) }",
-        "update",
-    );
-    assert!(!has_store_guard(&lua), "{lua}");
-    let lua = emit_clean(
-        "struct Acc { n: int? = null } \
-         fn weight(x: int) -> int? { if x > 3 { return x * 2 } return null } \
-         fn update(acc: Acc, x: int) { acc.n = weight(x) }",
-        "update",
-    );
-    assert!(has_store_guard(&lua), "{lua}");
+fn field_store_guards_follow_the_value_nullability() {
+    for (src, guarded) in [
+        (
+            "struct Acc { mean: float = 0.0 } fn update(acc: Acc, x: float) -> float { let m = acc.mean * 0.5 + x; acc.mean = m; return m }",
+            false,
+        ),
+        (
+            "struct Acc { mean: float = 0.0 } fn update(acc: Acc, x: float) { acc.mean = x }",
+            false,
+        ),
+        (
+            "struct Acc { n: int = 0, label: string = \"\" } \
+          fn weight(x: int) -> int { if x > 3 { return x * 2 } return x - 1 } \
+          fn name(x: int) -> string { if x > 3 { return \"big\" } return \"small\" } \
+          fn update(acc: Acc, x: int) { acc.n = weight(x); acc.label = name(x) }",
+            false,
+        ),
+        (
+            "struct Inner { v: int } struct Acc { inner: Inner? = null, xs: Vec<int>? = null } \
+          fn make(x: int) -> Inner { if x > 3 { return Inner { v: x } } return Inner { v: 0 } } \
+          fn list(x: int) -> Vec<int> { if x > 3 { return [x] } return [] } \
+          fn update(acc: Acc, x: int) { acc.inner = make(x); acc.xs = list(x) }",
+            false,
+        ),
+        (
+            "struct Acc { n: int? = null } \
+          fn weight(x: int) -> int? { if x > 3 { return x * 2 } return null } \
+          fn update(acc: Acc, x: int) { acc.n = weight(x) }",
+            true,
+        ),
+        (
+            "struct Acc { count: int = 0 } \
+          fn update(acc: Acc, a: int, b: int) { let n = if a > b { a } else { b }; acc.count = n }",
+            false,
+        ),
+    ] {
+        let lua = emit_clean(src, "update");
+        assert_eq!(has_store_guard(&lua), guarded, "{src}:\n{lua}");
+    }
 }
 
 #[test]
@@ -289,19 +286,6 @@ fn nullable_value_param_record_leaf_stores_preserve_callbacks() {
 }
 
 #[test]
-fn inferred_local_scalar_store_needs_no_nil_guard() {
-    // The store reads the cell the `if` joins into, which has no declared
-    // type of its own. Lowering marks it from the if-expression's concrete
-    // type, and `int` cannot be nil.
-    let lua = emit_clean(
-        "struct Acc { count: int = 0 } \
-         fn update(acc: Acc, a: int, b: int) { let n = if a > b { a } else { b }; acc.count = n }",
-        "update",
-    );
-    assert!(!has_store_guard(&lua), "{lua}");
-}
-
-#[test]
 fn nil_literal_record_store_keeps_guard_without_a_presence_read() {
     let lua = emit_clean(
         "struct Row { tag: int? = null } fn update(row: Row) { row.tag = null }",
@@ -313,7 +297,6 @@ fn nil_literal_record_store_keeps_guard_without_a_presence_read() {
 
 #[test]
 fn sinking_preserves_dynamic_format_error_order() {
-    common::require_luajit();
     for result in ["s", "\"[{s}]\""] {
         let lua = emit_clean(
             &format!(
@@ -357,7 +340,6 @@ end
 
 #[test]
 fn sinking_preserves_checked_numeric_error_order() {
-    common::require_luajit();
     for (ty, expr, bad) in [
         ("float", "x as uint", "-1"),
         ("uint", "(1 as uint) << x", "32"),
@@ -414,7 +396,7 @@ fn numeric_selection_through_local_copies_uses_native_minmax() {
     );
     assert!(
         lua.contains("math.min(") && lua.contains("math.max("),
-        "{lua}"
+        "nil needs no register even with readers in different blocks:\n{lua}"
     );
     check_selection_values(
         &lua,
@@ -451,7 +433,7 @@ fn numeric_selection_clamp_with_ordered_bounds_uses_native_minmax() {
         );
         assert!(
             lua.contains("math.max(") && lua.contains("math.min("),
-            "{lua}"
+            "filter chain must stay zero-alloc, fully inlined:\n{lua}"
         );
         check_selection_values(
             &lua,
@@ -479,13 +461,7 @@ fn numeric_selection_clamp_keeps_mutable_frame_bounds() {
     ).expect("parse");
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut [ast]).expect("semantic_pass");
     let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
-    let fid = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| declared_name_matches(f.name, "choose"))
-        .unwrap()
-        .0;
+    let fid = test_fn(&ws, mid, "choose");
     let (mut func, interner) = common::lower_test_ref(&ws, mid, fid).expect("lower");
     let lo = func
         .cells
@@ -526,7 +502,6 @@ fn numeric_selection_clamp_keeps_mutable_frame_bounds() {
         Some(&frame),
         None,
     );
-    common::require_luajit();
     let driver = format!(
         "local flushes = 0\njit.attach(function(what) if what == 'flush' then flushes = flushes + 1 end end, 'trace')\nfunction mutate(s) s.c0 = 0 end\n{lua}\nassert(choose({{}}, -0.5) == 0)\nprint('frame-ok flushes=' .. flushes)"
     );
@@ -534,7 +509,6 @@ fn numeric_selection_clamp_keeps_mutable_frame_bounds() {
 }
 
 fn check_selection_values(lua: &str, reference: &str) {
-    common::require_luajit();
     let driver = format!(
         r#"{lua}
 local flushes = 0
@@ -578,7 +552,7 @@ fn scalar_constants_are_literals_at_use_sites() {
         );
         assert!(
             !lua.contains("NUMBER") && !lua.contains("ORIGINAL"),
-            "{lua}"
+            "map+filter chain must stay zero-alloc and fully inlined:\n{lua}"
         );
         assert!(lua.contains(literal), "{lua}");
     }
@@ -621,20 +595,13 @@ fn derived_scalar_constants_fold_arithmetic_without_runtime_reads() {
 
 #[test]
 fn constant_bitwise_masks_fold_before_lua_emission() {
-    common::require_luajit();
     let lua = emit_clean(
         "const A: int = 1; const B: int = 2; const C: int = 4; const D: int = 8; fn masked(value: int) -> int { value & (A | B | C | D) }",
         "masked",
     );
     assert!(!lua.contains("bit.bor"), "{lua}");
     assert!(lua.contains("(15)"), "{lua}");
-    let symbol = lua
-        .lines()
-        .find_map(|line| line.strip_prefix("function "))
-        .unwrap()
-        .split('(')
-        .next()
-        .unwrap();
+    let symbol = emitted_symbol(&lua);
     luajit_ok(
         &format!("{lua}\nfor i = -10000, 10000 do assert({symbol}(i) == bit.band(i, 15)) end"),
         &lua,
@@ -643,7 +610,6 @@ fn constant_bitwise_masks_fold_before_lua_emission() {
 
 #[test]
 fn constant_bitwise_expressions_keep_signed_and_unsigned_results() {
-    common::require_luajit();
     for (ty, expr, expected) in [
         ("int", "1 | 2 | 4", "7"),
         ("int", "(2147483647 & 7) ^ 3", "4"),
@@ -661,13 +627,7 @@ fn constant_bitwise_expressions_keep_signed_and_unsigned_results() {
             "folded_mask",
         );
         assert!(!lua.contains("bit.b"), "{expr}: {lua}");
-        let symbol = lua
-            .lines()
-            .find_map(|line| line.strip_prefix("function "))
-            .unwrap()
-            .split('(')
-            .next()
-            .unwrap();
+        let symbol = emitted_symbol(&lua);
         luajit_ok(&format!("{lua}\nassert({symbol}() == {expected})"), &lua);
     }
     let lua = emit_clean("fn wide() -> int { 2147483648 | 1 }", "wide");
@@ -722,14 +682,13 @@ fn numeric_selection_rejects_effectful_and_inclusive_branches() {
         let lua = emit_clean(src, "choose");
         assert!(
             !lua.contains("math.min(") && !lua.contains("math.max("),
-            "{lua}"
+            "take_while chain must stay zero-alloc, fully inlined:\n{lua}"
         );
     }
 }
 
 #[test]
 fn numeric_selection_preserves_special_values_and_guarded_assignment() {
-    common::require_luajit();
     for (condition, yes, no, native) in [
         ("<", "a", "b", "min"),
         ("<", "b", "a", "max"),
@@ -776,7 +735,6 @@ print('selection-ok')
 
 #[test]
 fn numeric_selection_preserves_writes_before_the_comparison() {
-    common::require_luajit();
     let lua = emit_clean(
         r#"
 struct Probe { value: float, writes: int }
@@ -863,15 +821,11 @@ fn int_literal_and_return() {
     // register, no `local`).
     let lua = emit("fn five() -> int { 5 }", "five");
     assert!(lua.contains("do return (5) end"), "{lua}");
-    assert!(
-        !lua.contains("local "),
-        "a literal return needs no local:\n{lua}"
-    );
+    assert!(!lua.contains("local "), "{lua}");
 }
 
 #[test]
 fn repeated_nil_is_written_at_each_use_without_a_register() {
-    common::require_luajit();
     let lua = emit_clean(
         "struct Pair { a: int?, b: int? } fn absent(flag: bool) -> Pair { let value: int? = null; if flag { return Pair { a: value, b: value } } return Pair { a: value, b: null } }",
         "absent",
@@ -879,15 +833,9 @@ fn repeated_nil_is_written_at_each_use_without_a_register() {
     assert!(
         !lua.lines()
             .any(|line| line.trim_start().starts_with("local r")),
-        "nil needs no register even with readers in different blocks:\n{lua}"
+        "discarded validators must not create a factory:\n{lua}"
     );
-    let symbol = lua
-        .lines()
-        .find_map(|line| line.strip_prefix("function "))
-        .unwrap()
-        .split('(')
-        .next()
-        .unwrap();
+    let symbol = emitted_symbol(&lua);
     let driver = format!(
         "{lua}\nfor i = 1, 10000 do local p = {symbol}(i % 2 == 0); assert(p.a == nil and p.b == nil) end"
     );
@@ -938,10 +886,7 @@ fn inline_lua_with_inline_annotation_is_spliced() {
          fn use_it(n: int) -> int { return dbl(n) }",
         "use_it",
     );
-    assert!(
-        !body.contains("dbl_int("),
-        "@inline inline(lua) should be spliced, not called:\n{body}"
-    );
+    assert!(!body.contains("dbl_int("), "{body}");
     assert!(
         body.contains(" = c0 * 2\n") && !body.contains("local x"),
         "a read-only param should read the caller's local:\n{body}"
@@ -956,22 +901,8 @@ fn spliced_lua_control_counts_toward_the_body_limits() {
     }
     let src =
         format!("@inline inline(lua) fn many() = \"\"\"\n{body}\"\"\"\nfn run() {{ many() }}");
-    let (ws, mid) = stdlib_workspace(&src);
-    let fid = test_fn(&ws, mid, "run");
-    let (func, interner) = common::lower_test_ref(&ws, mid, fid).expect("lower");
-    let ctx = CodegenCtx::new(&ws);
-    emit_function(
-        &ws,
-        &ctx,
-        &interner,
-        FuncRef {
-            module: mid,
-            func: fid,
-        },
-        &func,
-        None,
-    );
-    let error = ctx.take_rejection().expect("Lua name-limit rejection");
+    let (_, rejection) = emit_run(&src);
+    let error = rejection.expect("Lua name-limit rejection");
     assert!(error.message.contains("LJ_MAX_VSTACK"), "{error:?}");
 }
 
@@ -984,7 +915,7 @@ fn fake_spliced_control_in_long_strings_and_comments_does_not_count() {
     );
     let (lua, rejected) = emit_run(&src);
     assert!(
-        !rejected,
+        rejected.is_none(),
         "inert long-string and comment text caused a rejection"
     );
     luajit_loads(&lua);
@@ -998,7 +929,10 @@ fn fake_spliced_assignments_in_a_long_string_do_not_extend_a_real_jump() {
          text = [=[\n{fake_assignments}]=]\n::bb0::\n\"\"\"\nfn run() {{ many() }}"
     );
     let (lua, rejected) = emit_run(&src);
-    assert!(!rejected, "inert assignments extended the emitted jump");
+    assert!(
+        rejected.is_none(),
+        "inert assignments extended the emitted jump"
+    );
     luajit_loads(&lua);
 }
 
@@ -1011,10 +945,7 @@ fn inline_lua_without_inline_annotation_is_called() {
          fn use_it(n: int) -> int { return dbl(n) }",
         "use_it",
     );
-    assert!(
-        body.contains("dbl_int("),
-        "plain inline(lua) should be called, not spliced:\n{body}"
-    );
+    assert!(body.contains("dbl_int("), "{body}");
 }
 
 // --- Call-site default fill --
@@ -1032,25 +963,16 @@ fn f(a: int, b: int = 7, c: float = 0.5, d: string = \"x\", e: bool = true) -> i
 fn go() -> int { f(1) }
 fn go_named() -> int { f(1, d: \"y\") }";
     let lua = emit_clean(src, "go");
-    assert!(
-        lua.contains("((1), (7), (0.5), (\"x\"), (true))"),
-        "trailing defaults must be passed:\n{lua}"
-    );
+    assert!(lua.contains("((1), (7), (0.5), (\"x\"), (true))"), "{lua}");
     let lua = emit_clean(src, "go_named");
-    assert!(
-        lua.contains("((1), (7), (0.5), (\"y\"), (true))"),
-        "a named-arg gap and the trailing default must both be passed:\n{lua}"
-    );
+    assert!(lua.contains("((1), (7), (0.5), (\"y\"), (true))"), "{lua}");
 }
 
 #[test]
 fn a_null_default_emits_no_callee_prologue_branch() {
     let src = "fn g(a: int, b: int? = null) -> int { a }";
     let lua = emit_clean(src, "g");
-    assert!(
-        !lua.contains("(nil)"),
-        "omitted IS null; no branch may test for it:\n{lua}"
-    );
+    assert!(!lua.contains("(nil)"), "{lua}");
 }
 
 #[test]
@@ -1060,10 +982,7 @@ global K: int = 3
 fn h(a: int, b: int = K) -> int { a + b }
 fn go() -> int { h(1) }";
     let lua = emit_clean(src, "go");
-    assert!(
-        lua.contains("((1))"),
-        "a global-valued default is the callee's to evaluate:\n{lua}"
-    );
+    assert!(lua.contains("((1))"), "{lua}");
     let callee = emit_clean(src, "h");
     assert!(
         callee.contains("(nil)"),
@@ -1072,26 +991,14 @@ fn go() -> int { h(1) }";
 }
 
 #[test]
-fn uint_checked_casts_emit_no_closure() {
-    for ty in ["int", "float"] {
-        let lua = emit(
-            &format!("fn cast(value: {ty}) -> uint {{ value as uint }}"),
-            "cast",
-        );
-        assert!(
-            !lua.lines().skip(1).any(|line| line.contains("function")),
-            "{lua}"
-        );
-    }
-}
-
-#[test]
-fn uint_checked_shifts_emit_no_closure() {
-    for op in ["<<", ">>"] {
-        let lua = emit(
-            &format!("fn shift(value: uint, count: uint) -> uint {{ value {op} count }}"),
-            "shift",
-        );
+fn uint_checks_emit_no_closures() {
+    for src in [
+        "fn checked(value: int) -> uint { value as uint }",
+        "fn checked(value: float) -> uint { value as uint }",
+        "fn checked(value: uint, count: uint) -> uint { value << count }",
+        "fn checked(value: uint, count: uint) -> uint { value >> count }",
+    ] {
+        let lua = emit(src, "checked");
         assert!(
             !lua.lines().skip(1).any(|line| line.contains("function")),
             "{lua}"
@@ -1145,14 +1052,8 @@ fn emits_interpolation_as_flat_concat() {
         "fn label(a: int, b: int) -> string { \"x={a}/{b} done\" }",
         "label",
     );
-    assert!(
-        !body.contains("((("),
-        "interpolation must emit a flat concat, not nested parens:\n{body}"
-    );
-    assert!(
-        body.matches(" .. ").count() >= 4,
-        "expected a flat 5-part concat (4 ` .. `):\n{body}"
-    );
+    assert!(!body.contains("((("), "{body}");
+    assert!(body.matches(" .. ").count() >= 4, "{body}");
 }
 
 // Enum match execution is covered end-to-end where the program-level enum
@@ -1166,46 +1067,19 @@ fn emits_interpolation_as_flat_concat() {
 // --- Multi-return ABI for tuple-returning fns ---
 
 #[test]
-fn tuple_return_callee_splats_multi_value() {
-    // A fn whose return type is a tuple returns N values, NOT `return ({a, b})`
-    // (one table alloc per call). The MakeTuple in return position is elided.
-    let body = emit_clean("fn pair() -> (bool, int) { return (true, 42) }", "pair");
-    assert!(
-        !body.contains("{"),
-        "tuple return must splat to multi-value, not build a table:\n{body}"
+fn tuple_return_and_destructure_use_multiple_values_without_tables() {
+    for expr in ["return (true, 42)", "(true, 42)"] {
+        let src = format!("fn pair() -> (bool, int) {{ {expr} }}");
+        let body = emit_clean(&src, "pair");
+        assert!(!body.contains('{'), "{body}");
+        assert!(body.contains("do return (true), (42) end"), "{body}");
+    }
+    let body = emit_clean(
+        "fn pair() -> (bool, int) { (true, 42) } \
+         fn use_it() -> int { let (ok, n) = pair(); if ok { n } else { 0 } }",
+        "use_it",
     );
-    assert!(
-        body.contains("do return (true), (42) end"),
-        "expected `do return (true), (42) end`:\n{body}"
-    );
-}
-
-#[test]
-fn tuple_return_tail_expr_splats() {
-    // Tail-position tuple (no explicit `return`) splats the same way.
-    let body = emit_clean("fn pair() -> (bool, int) { (true, 42) }", "pair");
-    assert!(
-        !body.contains("{"),
-        "tail tuple must not build a table:\n{body}"
-    );
-    assert!(
-        body.contains("do return (true), (42) end"),
-        "expected `do return (true), (42) end`:\n{body}"
-    );
-}
-
-#[test]
-fn tuple_destructure_caller_uses_multi_assign() {
-    // `let (a, b) = f()` where f returns a tuple emits a multi-assign
-    // `<a>, <b> = f(...)`, not a table build + `[1]`/`[2]` indexing. Zero alloc.
-    let src = "\
-fn pair() -> (bool, int) { (true, 42) }\n\
-fn use_it() -> int { let (ok, n) = pair(); if ok { n } else { 0 } }";
-    let body = emit_clean(src, "use_it");
-    assert!(
-        !body.contains("{"),
-        "destructure must be zero-alloc multi-assign, not a table build:\n{body}"
-    );
+    assert!(!body.contains('{'), "{body}");
     assert!(
         body.lines()
             .any(|l| l.contains(", ") && l.contains("= pair_0(")),
@@ -1223,14 +1097,8 @@ fn tuple_local_whole_store_scalarizes() {
 fn pair() -> (bool, int) { (true, 42) }\n\
 fn use_it() -> int { let t = pair(); t.1 }";
     let body = emit_clean(src, "use_it");
-    assert!(
-        !body.contains("[1]") && !body.contains("[2]"),
-        "non-escaping whole-stored tuple should scalarize, not pack:\n{body}"
-    );
-    assert!(
-        body.contains("= pair_0()"),
-        "multi-assign call expected:\n{body}"
-    );
+    assert!(!body.contains("[1]") && !body.contains("[2]"), "{body}");
+    assert!(body.contains("= pair_0()"), "{body}");
 }
 
 #[test]
@@ -1308,6 +1176,13 @@ fn emit_inlined(src: &str, fn_name: &str) -> String {
     emit_function(&ws, &ctx, scx.interner(), self_ref, &func, None)
 }
 
+fn assert_counted_zero_alloc(lua: &str) {
+    assert!(lua.contains("for "), "{lua}");
+    for forbidden in ["{", "__rock_create_struct", "next"] {
+        assert!(!lua.contains(forbidden), "unexpected {forbidden}:\n{lua}");
+    }
+}
+
 // --- An @inline user iterator driven by `for`
 // scalarizes its cursor struct to per-field locals; the loop allocates nothing.
 const ZERO_ALLOC_ITER_SRC: &str = "
@@ -1334,18 +1209,8 @@ fn sum_range(lo: int, hi: int) -> int {
 #[test]
 fn for_user_iter_inline_is_counted_and_zero_alloc() {
     let lua = emit_inlined(ZERO_ALLOC_ITER_SRC, "sum_range");
-    assert!(
-        !lua.contains("__rock_create_struct") && !lua.contains('{'),
-        "cursor struct must scalarize away without a table constructor:\n{lua}"
-    );
-    assert!(
-        lua.contains("for "),
-        "the loop must become a numeric `for`:\n{lua}"
-    );
-    assert!(
-        !lua.contains(">="),
-        "the slot exit-compare must be absorbed into the `for` header:\n{lua}"
-    );
+    assert_counted_zero_alloc(&lua);
+    assert!(!lua.contains(">="), "{lua}");
 }
 
 // A cursor whose field is a Vec (not just scalars) also scalarizes: the Vec ref
@@ -1376,18 +1241,8 @@ fn sum_myvec(v: MyVec) -> int {
 #[test]
 fn for_vec_backed_iter_inline_is_counted_and_zero_alloc() {
     let lua = emit_inlined(ZERO_ALLOC_VEC_BACKED_SRC, "sum_myvec");
-    assert!(
-        !lua.contains("__rock_create_struct") && !lua.contains('{'),
-        "vec-backed cursor must scalarize away without a table constructor:\n{lua}"
-    );
-    assert!(
-        lua.contains("for "),
-        "the loop must become a numeric `for`:\n{lua}"
-    );
-    assert!(
-        !lua.lines().any(|l| l.contains(">=")),
-        "the slot exit-compare must be absorbed into the `for` header:\n{lua}"
-    );
+    assert_counted_zero_alloc(&lua);
+    assert!(!lua.lines().any(|l| l.contains(">=")), "{lua}");
 }
 
 // --- A REAL `[T]` for-loop routes through the stdlib
@@ -1404,26 +1259,9 @@ fn for_real_vec_loop_is_forl_zero_alloc_with_raw_reads() {
         }",
         "sum_vec",
     );
-    assert!(
-        lua.contains("for "),
-        "real [T] loop must print as a numeric `for` via VecIter + FORL recovery:\n{lua}"
-    );
-    assert!(
-        !lua.contains('{') && !lua.contains("__rock_create_struct"),
-        "real [T] loop must not allocate (VecIter cursor scalarizes):\n{lua}"
-    );
-    assert!(
-        !lua.contains("next"),
-        "iter/next must be fully inlined:\n{lua}"
-    );
-    assert!(
-        lua.contains("._data["),
-        "the element read must use backing storage:\n{lua}"
-    );
-    assert!(
-        !lua.contains("__vec_checked_get("),
-        "a loop over a vector must not need a checked element read:\n{lua}"
-    );
+    assert_counted_zero_alloc(&lua);
+    assert!(lua.contains("._data["), "{lua}");
+    assert!(!lua.contains("__vec_checked_get("), "{lua}");
 }
 
 /// `[T]` loops of every common shape print as counted `for`s with no
@@ -1460,18 +1298,9 @@ fn find(xs: [int], key: int) -> int {
 fn vec_loop_shapes_are_counted_with_no_back_edges() {
     for name in ["sum_p", "skip_odd", "total_len", "find"] {
         let lua = emit_inlined(VEC_LOOP_SHAPES_SRC, name);
-        assert!(
-            lua.contains("for "),
-            "{name} must print as a numeric `for`:\n{lua}"
-        );
-        assert!(
-            !lua.contains("next"),
-            "{name} must leave no protocol call:\n{lua}"
-        );
-        assert!(
-            backward_gotos(&lua).is_empty(),
-            "{name} must leave no back edge:\n{lua}"
-        );
+        assert!(lua.contains("for "), "{lua}");
+        assert!(!lua.contains("next"), "{lua}");
+        assert!(backward_gotos(&lua).is_empty(), "{lua}");
     }
 }
 
@@ -1493,115 +1322,23 @@ fn vec_loop_is_counted_without_inlining() {
     assert!(!lua.contains("next") && !lua.contains("iter"), "{lua}");
 }
 
-// --- Combinator chains flatten. The bounded
-// `map`/`filter` `next` bodies inline via placeholder substitution (the
-// BoundTree), the cursors scalarize, and a map-only spine (counted structure
-// preserved) recovers FORL. filter keeps the goto skip loop -- its template
-// baseline anyway -- but still allocates nothing and leaves no protocol call.
 #[test]
-fn map_only_chain_is_forl_zero_alloc() {
-    let lua = emit_inlined(
-        "fn sum_mapped(xs: [int]) -> int {
-            let total = 0
-            for x in xs.iter().map(x => x * 2) { total += x }
-            return total
-        }",
-        "sum_mapped",
-    );
-    assert!(
-        lua.contains("for "),
-        "map-only chain must recover a numeric `for` (FORL):\n{lua}"
-    );
-    assert!(
-        !lua.contains('{') && !lua.contains("__rock_create_struct"),
-        "chain must not allocate (MapIter/VecIter cursors scalarize):\n{lua}"
-    );
-    assert!(
-        !lua.contains("next"),
-        "chain must fully inline, no residual `next` call:\n{lua}"
-    );
-}
-
-// --- Skip-loop FORL recovery: a filter/take_while layer's reject edge becomes
-// a `continue` (skip) or a jump to the loop exit (stop), so the whole chain
-// still rewrites into the codegen CountedLoop shape -- the doc-blessed flat
-// `for + skip-branch`. The goto
-// form of the same filter chain measured 1.82x a hand-fused loop
-// (benchmarks/iterator-zero-alloc/chain_parity.rock).
-#[test]
-fn filter_chain_is_forl_zero_alloc() {
-    let lua = emit_inlined(
-        "fn sum_kept(xs: [int]) -> int {
-            let total = 0
-            for x in xs.iter().filter(x => x > 2) { total += x }
-            return total
-        }",
-        "sum_kept",
-    );
-    assert!(
-        lua.contains("for "),
-        "filter chain must recover a numeric `for` (skip edge -> continue):\n{lua}"
-    );
-    assert!(
-        !lua.contains('{') && !lua.contains("__rock_create_struct") && !lua.contains("next"),
-        "filter chain must stay zero-alloc, fully inlined:\n{lua}"
-    );
-}
-
-#[test]
-fn map_filter_chain_is_forl() {
-    let lua = emit_inlined(
-        "fn sum_kept(xs: [int]) -> int {
-            let total = 0
-            for x in xs.iter().map(x => x * 2).filter(x => x > 2) { total += x }
-            return total
-        }",
-        "sum_kept",
-    );
-    assert!(
-        lua.contains("for "),
-        "map+filter chain must recover a numeric `for`:\n{lua}"
-    );
-    assert!(
-        !lua.contains('{') && !lua.contains("__rock_create_struct") && !lua.contains("next"),
-        "map+filter chain must stay zero-alloc and fully inlined:\n{lua}"
-    );
-}
-
-#[test]
-fn take_while_chain_is_forl_zero_alloc() {
-    let lua = emit_inlined(
-        "fn sum_prefix(xs: [int]) -> int {
-            let total = 0
-            for x in xs.iter().take_while(x => x < 10) { total += x }
-            return total
-        }",
-        "sum_prefix",
-    );
-    assert!(
-        lua.contains("for "),
-        "take_while chain must recover a numeric `for` (stop edge -> exit):\n{lua}"
-    );
-    assert!(
-        !lua.contains('{') && !lua.contains("__rock_create_struct") && !lua.contains("next"),
-        "take_while chain must stay zero-alloc, fully inlined:\n{lua}"
-    );
-}
-
-#[test]
-fn filter_take_while_mixed_chain_is_forl() {
-    let lua = emit_inlined(
-        "fn sum_mixed(xs: [int]) -> int {
-            let total = 0
-            for x in xs.iter().filter(x => x % 2 == 0).take_while(x => x < 100) { total += x }
-            return total
-        }",
-        "sum_mixed",
-    );
-    assert!(
-        lua.contains("for "),
-        "filter+take_while chain must recover a numeric `for`:\n{lua}"
-    );
+fn iterator_chains_are_counted_zero_alloc_and_fully_inlined() {
+    for chain in [
+        "map(x => x * 2)",
+        "filter(x => x > 2)",
+        "map(x => x * 2).filter(x => x > 2)",
+        "take_while(x => x < 10)",
+        "filter(x => x % 2 == 0).take_while(x => x < 100)",
+    ] {
+        let lua = emit_inlined(
+            &format!(
+                "fn sum(xs: [int]) -> int {{ let total = 0; for x in xs.iter().{chain} {{ total += x }}; return total }}"
+            ),
+            "sum",
+        );
+        assert_counted_zero_alloc(&lua);
+    }
 }
 
 /// A register or cell local is assigned `nil` right after its last use, so a
@@ -1633,10 +1370,7 @@ fn dead_locals_are_nil_killed_after_their_last_use() {
     let kill_b = at("c1 = nil");
     assert!(product < kill_b && kill_b < double, "{lua}");
     // `r0` is live across the branch (`t`): no kill between its def and the `if`.
-    assert!(
-        !lines[double..branch].contains(&"r0 = nil"),
-        "live register killed before the branch:\n{lua}"
-    );
+    assert!(!lines[double..branch].contains(&"r0 = nil"), "{lua}");
     // A kill immediately before a plain `return` buys nothing (RET drops the
     // frame): `t` is returned straight from its register with no kill before it.
     let ret = at("do return r0 end");
@@ -1658,10 +1392,7 @@ fn loop_scoped_registers_are_never_killed_outside_their_loop() {
         .position(|l| l.starts_with("for "))
         .unwrap_or_else(|| panic!("no for:\n{lua}"));
     let inner_decl = lines[for_line + 1];
-    assert!(
-        inner_decl.starts_with("local r"),
-        "loop-scoped registers expected right after the for:\n{lua}"
-    );
+    assert!(inner_decl.starts_with("local r"), "{lua}");
     let end_line = lines.iter().rposition(|l| *l == "end").unwrap();
     let end_line = lines[..end_line]
         .iter()
@@ -1672,17 +1403,11 @@ fn loop_scoped_registers_are_never_killed_outside_their_loop() {
         let kill = format!("{name} = nil");
         for (i, l) in lines.iter().enumerate() {
             if *l == kill {
-                assert!(
-                    for_line < i && i < end_line,
-                    "loop-scoped `{kill}` outside its for block at line {i}:\n{lua}"
-                );
+                assert!(for_line < i && i < end_line, "{lua}");
             }
         }
     }
-    assert!(
-        lines.iter().any(|l| l.ends_with(" = nil")),
-        "no kills emitted at all:\n{lua}"
-    );
+    assert!(lines.iter().any(|l| l.ends_with(" = nil")), "{lua}");
 }
 
 // -- Emitted tail calls -----------------------------------------------------
@@ -1694,20 +1419,14 @@ fn loop_scoped_registers_are_never_killed_outside_their_loop() {
 fn a_tail_call_is_forwarded() {
     let src = "fn leaf(a: int) -> int { a + 1 }\nfn forward(a: int) -> int { return leaf(a) }";
     let lua = emit_clean(src, "forward");
-    assert!(
-        lua.contains("do return leaf_int(c0) end"),
-        "expected the forwarded tail call:\n{lua}"
-    );
+    assert!(lua.contains("do return leaf_int(c0) end"), "{lua}");
 }
 
 #[test]
 fn a_self_recursive_tail_call_is_forwarded() {
     let src = "fn down(n: int, acc: int) -> int { if n == 0 { return acc }\n  return down(n - 1, acc + 1) }";
     let lua = emit_clean(src, "down");
-    assert!(
-        lua.contains("do return down_int_int("),
-        "expected the recursive tail call kept:\n{lua}"
-    );
+    assert!(lua.contains("do return down_int_int("), "{lua}");
 }
 
 // --- Callee binding as immutable upvalues ------------------
@@ -1780,12 +1499,9 @@ fn callee_binding_ignores_calls_removed_by_cleanup() {
     });
     assert!(
         lua.starts_with("__rock_mk_caller_int = function(b0) return function("),
-        "only the live callee should consume a binding slot:\n{lua}"
+        "{lua}"
     );
-    assert!(
-        !lua.contains("discarded_int"),
-        "discarded call must not be bound:\n{lua}"
-    );
+    assert!(!lua.contains("discarded_int"), "{lua}");
 }
 
 #[test]
@@ -1801,7 +1517,7 @@ fn callee_binding_ignores_discarded_uint_helpers() {
     });
     assert!(
         !lua.contains(skull_codegen_lua::CALLEE_FACTORY_PREFIX),
-        "discarded validators must not create a factory:\n{lua}"
+        "{lua}"
     );
 }
 
@@ -1842,10 +1558,7 @@ global METADATA: Map<string, SlotMetadata> = map_new()
     ] {
         let src = format!("{prelude}{body}");
         let lua = emit_clean_bound(&src, name);
-        assert!(
-            !lua.contains("SlotMetadata_vt("),
-            "{name} must not materialize a fresh wrapper:\n{lua}"
-        );
+        assert!(!lua.contains("SlotMetadata_vt("), "{lua}");
     }
 }
 
@@ -2091,14 +1804,8 @@ fn f(ds: [D]) -> int { for d in ds { for b in d.bindings { if b.slot < 0 { retur
         .lines()
         .filter(|l| l.trim_start().starts_with("for "))
         .count();
-    assert_eq!(
-        fors, 2,
-        "both iterator loops must print as counted `for`s:\n{lua}"
-    );
-    assert!(
-        backward_gotos(&lua).is_empty(),
-        "no back edge may remain:\n{lua}"
-    );
+    assert_eq!(fors, 2, "{lua}");
+    assert!(backward_gotos(&lua).is_empty(), "{lua}");
 }
 
 /// A `[T]` element read is the backing read itself. Only a slot that reads
@@ -2338,18 +2045,11 @@ fn reused_int_to_float_aliases_its_operand() {
 
 #[test]
 fn unreachable_block_traps_instead_of_returning() {
-    common::require_luajit();
     let lua = emit_clean(
         "enum Dir { Up, Down } fn pick(d: Dir) -> int { match d { Dir::Up => { return 1 } Dir::Down => { return 2 } } }",
         "pick",
     );
-    let symbol = lua
-        .lines()
-        .find_map(|line| line.strip_prefix("function "))
-        .expect("function definition")
-        .split('(')
-        .next()
-        .unwrap();
+    let symbol = emitted_symbol(&lua);
     // A value outside the enum reaches the arm chain's dead end; it must not
     // read as an early return of nil.
     let driver = format!(
@@ -2718,50 +2418,31 @@ fn column_access_in_a_counted_loop_drops_the_element_check() {
     assert!(lua.contains("(c0.x)[(c2 + 1)]"), "{lua}");
 }
 
-/// A nonempty guard proves index zero, but not a strict bound for `len - 1`.
 #[test]
-fn column_first_is_proven_but_length_offsets_need_a_strict_bound() {
-    let lua = emit_inlined(
-        "nobox value Mote { x: float, y: float, life: int }
-        fn first(ms: [Mote]) -> float {
-            if ms.len() > 0 { return ms[0].x }
-            return 0.0
-        }",
-        "first",
-    );
-    assert!(!lua.contains("__vec_checked_index("), "{lua}");
-    let lua = emit_inlined(
-        "nobox value Mote { x: float, y: float, life: int }
-        fn ends(ms: [Mote]) -> float {
-            if ms.len() > 0 { return ms[0].x + ms[ms.len() - 1].x }
-            return 0.0
-        }",
-        "ends",
-    );
-    assert!(lua.contains("__vec_checked_index("), "{lua}");
-    let lua = emit_inlined(
-        "nobox value Mote { x: float, y: float, life: int }
-        fn last(ms: [Mote]) -> float { return ms[ms.len() - 1].x }",
-        "last",
-    );
-    assert!(lua.contains("__vec_checked_index("), "{lua}");
-    // A ring index wraps below the length only when the length is positive;
-    // without the guard the check stays.
-    let lua = emit_inlined(
-        "nobox value Mote { x: float, y: float, life: int }
-        fn ring(ms: [Mote], k: int) -> float { return ms[k % ms.len()].x }",
-        "ring",
-    );
-    assert!(lua.contains("__vec_checked_index("), "{lua}");
-    let lua = emit_inlined(
-        "nobox value Mote { x: float, y: float, life: int }
-        fn ring(ms: [Mote], k: int) -> float {
-            if ms.len() > 0 { return ms[k % ms.len()].x }
-            return 0.0
-        }",
-        "ring",
-    );
-    assert!(!lua.contains("__vec_checked_index("), "{lua}");
+fn column_index_checks_require_a_strict_bound() {
+    for (params, body, checked) in [
+        ("", "if ms.len() > 0 { return ms[0].x }; return 0.0", false),
+        (
+            "",
+            "if ms.len() > 0 { return ms[0].x + ms[ms.len() - 1].x }; return 0.0",
+            true,
+        ),
+        ("", "return ms[ms.len() - 1].x", true),
+        (", k: int", "return ms[k % ms.len()].x", true),
+        (
+            ", k: int",
+            "if ms.len() > 0 { return ms[k % ms.len()].x }; return 0.0",
+            false,
+        ),
+    ] {
+        let lua = emit_inlined(
+            &format!(
+                "nobox value Mote {{ x: float, y: float, life: int }} fn get(ms: [Mote]{params}) -> float {{ {body} }}"
+            ),
+            "get",
+        );
+        assert_eq!(lua.contains("__vec_checked_index("), checked, "{lua}");
+    }
 }
 
 /// A call in the loop body keeps the proof when the whole-program effect
@@ -2926,13 +2607,7 @@ fn emit_framed_let(src: &str, fn_name: &str, field: &str) -> String {
     let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut [ast]).expect("semantic_pass");
     let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
-    let fid = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| declared_name_matches(f.name, fn_name))
-        .unwrap()
-        .0;
+    let fid = test_fn(&ws, mid, fn_name);
     let (mut func, interner) = common::lower_test_ref(&ws, mid, fid).expect("lower");
     let cell = func
         .cells
@@ -2959,26 +2634,21 @@ fn emit_framed_let(src: &str, fn_name: &str, field: &str) -> String {
 }
 
 #[test]
-fn frame_store_of_a_never_nil_value_assigns_directly() {
-    let lua = emit_framed_let(
-        "fn step(x: float) -> bool { let acc = true; acc = x > 1.0; return acc }",
-        "step",
-        "acc",
-    );
-    assert!(!lua.contains("do local"), "{lua}");
-    assert!(!lua.contains("~= nil"), "{lua}");
-    assert!(lua.contains(".c0 = "), "{lua}");
-}
-
-#[test]
-fn guarded_frame_store_of_a_plain_value_skips_the_temporary() {
-    // `x` can be nil, so the store keeps its guard; a plain operand needs no
-    // `do local v0` evaluation scope.
-    let lua = emit_framed_let(
-        "fn step(x: int?) -> int? { let acc: int? = 7; acc = x; return acc }",
-        "step",
-        "acc",
-    );
-    assert!(!lua.contains("do local"), "{lua}");
-    assert!(lua.contains("~= nil then"), "{lua}");
+fn frame_stores_skip_temporaries_and_guard_only_nullable_values() {
+    for (src, guarded) in [
+        (
+            "fn step(x: float) -> bool { let acc = true; acc = x > 1.0; return acc }",
+            false,
+        ),
+        (
+            "fn step(x: int?) -> int? { let acc: int? = 7; acc = x; return acc }",
+            true,
+        ),
+    ] {
+        let lua = emit_framed_let(src, "step", "acc");
+        assert!(!lua.contains("do local"), "{lua}");
+        let guard = if guarded { "~= nil then" } else { "~= nil" };
+        assert_eq!(lua.contains(guard), guarded, "{lua}");
+        assert!(lua.contains(".c0 = "), "{lua}");
+    }
 }
