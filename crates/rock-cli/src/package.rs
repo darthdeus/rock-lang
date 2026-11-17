@@ -119,13 +119,20 @@ pub(crate) fn sound_watch_inputs(project: &str) -> Result<SoundWatchInputs> {
 }
 
 pub(crate) fn check_project_assets(project: &Path) -> Result<()> {
-    let (project, config) = project_and_config(
+    let context = package_context(
         project
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("project path is not UTF-8"))?,
     )?;
-    let overlays = rock_engine_host::release::asset_overlay_roots(&project, config.as_ref())?;
-    let prepared = crate::asset_selection::prepare(&project, "game", config.as_ref(), &overlays)?;
+    let overlays =
+        rock_engine_host::release::asset_overlay_roots(&context.project, context.config.as_ref())?;
+    let prepared = crate::asset_selection::prepare(
+        &context.project,
+        &context.game_key,
+        context.config.as_ref(),
+        &overlays,
+    )?;
+    prepared.validate()?;
     for missing in prepared.assets.missing {
         log::warn!(target: "ASSETS", "release asset {} does not exist, skipping", missing.display());
     }
@@ -198,9 +205,7 @@ pub fn run_package(project: &str, output: &Path) -> Result<()> {
     let overlays = rock_engine_host::release::asset_overlay_roots(&project_abs, config.as_ref())?;
     let prepared =
         crate::asset_selection::prepare(&project_abs, &game_key, config.as_ref(), &overlays)?;
-    if let Some(visual) = &prepared.visual {
-        visual.verify(&prepared.assets)?;
-    }
+    prepared.validate()?;
     let selection = prepared.assets;
     let visual = prepared.visual;
     let sound = prepared
@@ -285,7 +290,7 @@ pub fn run_package(project: &str, output: &Path) -> Result<()> {
         &bytecode_path,
         &staged,
         sound.as_ref(),
-        visual.as_ref(),
+        &visual,
     )?;
     let bytes = serde_json::to_vec_pretty(&manifest)?;
     rock_host::project::write_atomic(&manifest_path, &bytes)?;
@@ -466,7 +471,7 @@ fn package_manifest(
     bytecode_path: &Path,
     staged: &rock_engine_host::release::StagedAssets,
     sound: Option<&CompiledSoundPackage>,
-    visual: Option<&crate::asset_selection::SelectedVisual>,
+    visual: &[crate::asset_selection::SelectedVisual],
 ) -> Result<Value> {
     let mut vars = Map::new();
     let declarations = config
@@ -545,7 +550,26 @@ fn package_manifest(
             }),
         );
     }
-    if let Some(visual) = visual {
+    if !visual.is_empty() {
+        artifacts.insert(
+            "visual_banks".to_string(),
+            Value::Array(
+                visual
+                    .iter()
+                    .map(|bank| {
+                        json!({
+                            "bank": bank.bank_key,
+                            "dependencies": bank.dependencies,
+                        })
+                    })
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(visual) = visual
+        .iter()
+        .find(|bank| bank.bank_key == format!("{game_key}/{}", rock_visual_bank::BANK_PATH))
+    {
         artifacts.insert(
             "visual".to_string(),
             json!({
@@ -1009,7 +1033,7 @@ mod tests {
             &bytecode_path,
             &staged,
             None,
-            None,
+            &[],
         )
         .unwrap();
 

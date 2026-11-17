@@ -13,7 +13,41 @@ use std::{
 pub(crate) struct PreparedAssets {
     pub assets: AssetSelection,
     pub sound: Option<SelectedSound>,
-    pub visual: Option<SelectedVisual>,
+    pub visual: Vec<SelectedVisual>,
+    game_prefix: String,
+}
+
+impl PreparedAssets {
+    pub fn validate(&self) -> Result<()> {
+        let sources: BTreeMap<_, _> = self
+            .assets
+            .assets
+            .iter()
+            .map(|asset| (asset.key.as_str(), asset.source.as_path()))
+            .collect();
+        for bank in &self.visual {
+            bank.verify(&sources)?;
+        }
+        for asset in &self.assets.assets {
+            if !asset.key.starts_with(&self.game_prefix)
+                || !asset.key.ends_with(".jsonl")
+                || self.visual.iter().any(|bank| bank.bank_key == asset.key)
+            {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&asset.source) else {
+                continue;
+            };
+            let (lines, errors) = rock_visual_bank::parse_bank(&text);
+            if lines.is_empty() || !errors.is_empty() {
+                continue;
+            }
+            log::warn!(target: "ASSETS", "visual bank {} is not declared in [release].visual_banks; declare it to include its sheet dependencies", asset.key);
+            SelectedVisual::new(asset.key.clone(), self.game_prefix.clone(), lines, errors)?
+                .verify(&sources)?;
+        }
+        Ok(())
+    }
 }
 
 pub(crate) struct SelectedSound {
@@ -26,47 +60,77 @@ pub(crate) struct SelectedVisual {
     pub bank_key: String,
     pub dependencies: Vec<String>,
     lines: Vec<rock_visual_bank::Line>,
+    game_prefix: String,
 }
 
 impl SelectedVisual {
-    pub fn verify(&self, selection: &AssetSelection) -> Result<()> {
-        let sources: BTreeMap<_, _> = selection
-            .assets
-            .iter()
-            .map(|asset| (asset.key.as_str(), &asset.source))
+    fn new(
+        bank_key: String,
+        game_prefix: String,
+        lines: Vec<rock_visual_bank::Line>,
+        mut errors: Vec<String>,
+    ) -> Result<Self> {
+        errors.extend(rock_visual_bank::resolve(&lines).1);
+        if !errors.is_empty() {
+            anyhow::bail!(
+                "package: visual bank {bank_key} has {} malformed or inconsistent lines:\n{}",
+                errors.len(),
+                errors.join("\n")
+            );
+        }
+        let dependencies = release::bank_files(&lines)
+            .keys()
+            .map(|file| format!("{game_prefix}{file}"))
             .collect();
-        let prefix = self
-            .bank_key
-            .strip_suffix(rock_visual_bank::BANK_PATH)
-            .expect("bank key");
-        self.lines.par_iter().try_for_each(|line| -> Result<()> {
-            let verify = || -> Result<()> {
-                let Some(spec) = rock_visual_bank::sheet_spec(line)? else {
-                    return Ok(());
-                };
-                let digest = line.dir().expect("sheet directory");
-                let mut directory = None;
-                for file in rock_visual_bank::sheet_files(line) {
-                    let key = format!("{prefix}assets/.eat/{digest}/{file}");
-                    let source = sources
-                        .get(key.as_str())
-                        .with_context(|| format!("missing selected file {key}"))?;
-                    let parent = source.parent().context("sheet file has no parent")?;
-                    if let Some(directory) = directory {
-                        anyhow::ensure!(
-                            directory == parent,
-                            "generation {digest} is split across asset roots"
-                        );
-                    }
-                    directory = Some(parent);
-                }
-                let hash = rock_visual_bank::check_sheet(directory.context("empty sheet")?, &spec)
-                    .map_err(|problems| anyhow::anyhow!("{}", problems.join("\n")))?;
-                anyhow::ensure!(hash == digest, "directory {digest} hashes to {hash}");
-                Ok(())
-            };
-            verify().map_err(|error| anyhow::anyhow!("{}: {error:#}", line.describe()))
+        Ok(Self {
+            bank_key,
+            game_prefix,
+            dependencies,
+            lines,
         })
+    }
+
+    fn verify(&self, sources: &BTreeMap<&str, &Path>) -> Result<()> {
+        let prefix = &self.game_prefix;
+        self.lines
+            .par_iter()
+            .map(|line| -> Result<()> {
+                let verify = || -> Result<()> {
+                    let Some(spec) = rock_visual_bank::sheet_spec(line)? else {
+                        return Ok(());
+                    };
+                    let digest = line.dir().expect("sheet directory");
+                    let mut directory = None;
+                    for file in rock_visual_bank::sheet_files(line) {
+                        let key = format!("{prefix}assets/.eat/{digest}/{file}");
+                        let source = sources
+                            .get(key.as_str())
+                            .with_context(|| format!("missing selected file {key}"))?;
+                        let parent = source.parent().context("sheet file has no parent")?;
+                        if let Some(directory) = directory {
+                            anyhow::ensure!(
+                                directory == parent,
+                                "generation {digest} is split across asset roots"
+                            );
+                        }
+                        directory = Some(parent);
+                    }
+                    let hash =
+                        rock_visual_bank::check_sheet(directory.context("empty sheet")?, &spec)
+                            .map_err(|problems| anyhow::anyhow!("{}", problems.join("\n")))?;
+                    anyhow::ensure!(hash == digest, "directory {digest} hashes to {hash}");
+                    Ok(())
+                };
+                verify().map_err(|error| {
+                    anyhow::anyhow!(
+                        "visual bank {}: {}: {error:#}",
+                        self.bank_key,
+                        line.describe()
+                    )
+                })
+            })
+            .find_first(Result::is_err)
+            .unwrap_or(Ok(()))
     }
 }
 
@@ -84,15 +148,27 @@ pub(crate) fn prepare(
         stone_dir.as_deref(),
         overlays,
     )?;
-    if project.join(rock_visual_bank::BANK_PATH).is_file() {
+    let bank_paths = release::visual_bank_paths(project, config)?;
+    if !bank_paths.is_empty() {
         assets.assets.retain(|asset| {
             !asset.key.contains("/assets/.eat/")
                 && !overlays.iter().any(|root| asset.source.starts_with(root))
         });
     }
     let sound = prepare_sound(project, game_key, config, overlays, &mut assets, true)?;
-    let visual = select_visual_bank(project, game_key, overlays, &mut assets)?;
-    include_declared_overlay_assets(project, game_key, config, overlays, &mut assets)?;
+    let main_bank = rock_visual_bank::BANK_PATH;
+    if !project.join(main_bank).is_file()
+        && release::resolve_asset_with_overlays(project, game_key, overlays, main_bank)?.is_some()
+    {
+        anyhow::bail!(
+            "package: worktree visual bank is missing: {main_bank}; refusing the overlay bank"
+        );
+    }
+    let visual = bank_paths
+        .iter()
+        .map(|path| select_visual_bank(project, game_key, path, overlays, &mut assets))
+        .collect::<Result<Vec<_>>>()?;
+    include_declared_overlay_assets(project, game_key, config, overlays, &visual, &mut assets)?;
     assets
         .assets
         .sort_by(|left, right| left.key.cmp(&right.key));
@@ -100,6 +176,7 @@ pub(crate) fn prepare(
         assets,
         sound,
         visual,
+        game_prefix: format!("{game_key}/"),
     })
 }
 
@@ -187,11 +264,30 @@ fn include_declared_overlay_assets(
     game_key: &str,
     config: Option<&rock_host::stick::StickConfig>,
     overlays: &[PathBuf],
+    banks: &[SelectedVisual],
     selection: &mut rock_engine_host::release::AssetSelection,
 ) -> Result<()> {
     let Some(config) = config else { return Ok(()) };
     let logical_keys = config.release_overlay_assets()?;
     for logical_key in logical_keys {
+        let key = format!("{game_key}/{logical_key}");
+        if Path::new(&logical_key) == Path::new(rock_visual_bank::BANK_PATH)
+            || banks
+                .iter()
+                .any(|bank| Path::new(&bank.bank_key) == Path::new(&key))
+        {
+            anyhow::bail!(
+                "package: overlay_assets entry targets visual bank {logical_key}; banks must come from the worktree"
+            );
+        }
+        if let Some(bank) = banks.iter().find(|bank| {
+            bank.dependencies
+                .iter()
+                .any(|dependency| Path::new(dependency) == Path::new(&key))
+        }) {
+            log::warn!(target: "ASSETS", "overlay_assets entry {logical_key} is already supplied by visual bank {}; remove the redundant entry from [release].overlay_assets", bank.bank_key);
+            continue;
+        }
         let asset = rock_engine_host::release::resolve_asset_with_overlays(
             project_dir,
             game_key,
@@ -217,71 +313,38 @@ fn include_declared_overlay_assets(
 fn select_visual_bank(
     project_dir: &Path,
     game_key: &str,
+    bank_logical_key: &str,
     overlays: &[PathBuf],
-    selection: &mut rock_engine_host::release::AssetSelection,
-) -> Result<Option<SelectedVisual>> {
-    let bank_logical_key = rock_visual_bank::BANK_PATH;
-    let Some(bank_asset) =
-        rock_engine_host::release::resolve_worktree_asset(project_dir, game_key, bank_logical_key)?
-    else {
-        let bank_key = format!("{game_key}/{bank_logical_key}");
-        selection.assets.retain(|asset| asset.key != bank_key);
-        if rock_engine_host::release::resolve_asset_with_overlays(
-            project_dir,
-            game_key,
-            overlays,
-            bank_logical_key,
-        )?
-        .is_some()
-        {
-            anyhow::bail!("package: worktree visual bank is missing; refusing the overlay bank");
-        }
-        return Ok(None);
-    };
-    let bank_path = bank_asset.source.display().to_string();
+    selection: &mut AssetSelection,
+) -> Result<SelectedVisual> {
+    let bank_asset = release::resolve_worktree_asset(project_dir, game_key, bank_logical_key)?
+        .with_context(|| format!("package: worktree visual bank is missing: {bank_logical_key}"))?;
     let text = std::fs::read_to_string(&bank_asset.source).map_err(|error| {
-        anyhow::anyhow!("package: visual bank {bank_path} could not be read: {error}")
+        anyhow::anyhow!("package: visual bank {bank_logical_key} could not be read: {error}")
     })?;
-    let (lines, mut errors) = rock_visual_bank::parse_bank(&text);
-    errors.extend(rock_visual_bank::resolve(&lines).1);
-    if !errors.is_empty() {
-        anyhow::bail!(
-            "package: visual bank {bank_path} has {} malformed or inconsistent lines:\n{}",
-            errors.len(),
-            errors.join("\n")
-        );
-    }
-
-    rock_engine_host::release::replace_release_asset(selection, bank_asset);
-    let files = rock_engine_host::release::bank_files(&lines);
-    let mut dependencies = Vec::with_capacity(files.len());
+    let (lines, errors) = rock_visual_bank::parse_bank(&text);
+    let bank = SelectedVisual::new(
+        bank_asset.key.clone(),
+        format!("{game_key}/"),
+        lines,
+        errors,
+    )?;
+    release::replace_release_asset(selection, bank_asset);
     let mut missing = Vec::new();
-    for (file, line) in &files {
-        match rock_engine_host::release::resolve_asset_with_overlays(
-            project_dir,
-            game_key,
-            overlays,
-            file,
-        )? {
-            Some(asset) => {
-                rock_engine_host::release::replace_release_asset(selection, asset);
-                dependencies.push(format!("{game_key}/{file}"));
-            }
+    for (file, line) in release::bank_files(&bank.lines) {
+        match release::resolve_asset_with_overlays(project_dir, game_key, overlays, &file)? {
+            Some(asset) => release::replace_release_asset(selection, asset),
             None => missing.push(format!("{}: {file}", line.describe())),
         }
     }
     if !missing.is_empty() {
         anyhow::bail!(
-            "package: {} files of visual bank {bank_path} are missing from the worktree and overlays:\n{}",
+            "package: {} files of visual bank {bank_logical_key} are missing from the worktree and overlays:\n{}",
             missing.len(),
             missing.join("\n")
         );
     }
-    Ok(Some(SelectedVisual {
-        bank_key: format!("{game_key}/{bank_logical_key}"),
-        dependencies,
-        lines,
-    }))
+    Ok(bank)
 }
 
 #[cfg(test)]

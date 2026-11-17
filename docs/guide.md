@@ -597,6 +597,40 @@ fn main() {
 }
 ```
 
+## Release packages
+
+`rock package` selects project files from `[release]` in `stick.toml`. If
+`assets` is omitted, it defaults to the `assets` root. The worktree bank
+`assets/visual_bank.jsonl` is included implicitly when present;
+`visual_banks` adds the listed bank files. Entries must be canonical
+`assets/...jsonl` paths, and each bank file must exist in the worktree; overlay
+banks are not accepted, including through `overlay_assets`. Globs, traversal,
+and noncanonical paths are rejected. Listing the main bank explicitly makes
+its absence an error. Repeated bank entries are harmless.
+
+```toml
+[release]
+assets = ["assets/audio", "saves"]
+visual_banks = ["assets/ui.jsonl", "assets/world.jsonl"]
+overlay_assets = ["assets/ui/cursor.png"]
+```
+
+Each declared bank is validated, and its referenced sheet files form the
+packaged dependency closure. Sheet files resolve from configured overlays in
+their listed order, then from the worktree. A generation split between roots
+or corrupt data in a higher-priority root fails validation. Shared dependencies
+are packaged once, but each bank reference is validated. `rock asset-check` and
+`rock package` perform the same validation before creating or changing package
+output.
+
+An `assets` root may already select files in a bank's dependency closure. If
+`overlay_assets` repeats one of those sheet files, both commands warn
+that the bank already supplies it; remove the redundant entry. Other listed
+overlay files, including loose files, are still packaged. A nonempty, valid
+JSONL bank selected by `assets` but not listed in `visual_banks` is packaged
+with a warning, without automatically selecting its dependencies; those
+dependencies must already be selected separately.
+
 ## Modules and use
 
 A project is a directory with a `stick.toml`. Its `.rock` files contribute

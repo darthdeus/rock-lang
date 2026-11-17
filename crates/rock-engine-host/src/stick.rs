@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 /// Private engine and asset policy; the public parser only supplies data.
 pub trait EngineConfigExt {
     fn release_assets(&self) -> Result<Vec<String>>;
+    fn release_visual_banks(&self) -> Result<Vec<String>>;
     fn release_overlay_assets(&self) -> Result<Vec<String>>;
     fn asset_overlay_defaults_with_vault(
         &self,
@@ -45,6 +46,28 @@ impl EngineConfigExt for StickConfig {
             }
         }
         Ok(assets)
+    }
+
+    fn release_visual_banks(&self) -> Result<Vec<String>> {
+        let mut banks = self
+            .release
+            .as_ref()
+            .and_then(|release| release.visual_banks.clone())
+            .unwrap_or_default();
+        for bank in &banks {
+            if !bank.starts_with("assets/")
+                || !bank.ends_with(".jsonl")
+                || bank.contains(['\\', '*', '?', '[', ']', '{', '}'])
+                || bank.split('/').any(|part| matches!(part, "" | "." | ".."))
+            {
+                anyhow::bail!(
+                    "stick.toml: [release].visual_banks entry {bank:?} must be a canonical project-relative assets/...jsonl file without globs or traversal"
+                );
+            }
+        }
+        banks.sort();
+        banks.dedup();
+        Ok(banks)
     }
 
     fn release_overlay_assets(&self) -> Result<Vec<String>> {

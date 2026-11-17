@@ -336,6 +336,7 @@ pub struct ReleaseConfig {
     pub assets: Option<Vec<String>>,
     pub predefined_levels: Option<Vec<String>>,
     pub overlay_assets: Option<Vec<String>>,
+    pub visual_banks: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -757,12 +758,15 @@ impl<'de> serde::Deserialize<'de> for ReleaseConfig {
                         "predefined_levels" => {
                             release.predefined_levels = Some(map.next_value()?);
                         }
+                        "visual_banks" => {
+                            release.visual_banks = Some(map.next_value()?);
+                        }
                         "overlay_assets" => {
                             release.overlay_assets = Some(map.next_value()?);
                         }
                         other => {
                             return Err(serde::de::Error::custom(format!(
-                                "unknown key `{other}` in [release]; known keys: assets, predefined_levels, overlay_assets"
+                                "unknown key `{other}` in [release]; known keys: assets, predefined_levels, overlay_assets, visual_banks"
                             )));
                         }
                     }

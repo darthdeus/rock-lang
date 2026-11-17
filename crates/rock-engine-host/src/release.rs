@@ -25,6 +25,20 @@ pub fn bank_files(lines: &[visual_bank::Line]) -> BTreeMap<String, &visual_bank:
     files
 }
 
+/// Worktree-owned visual roots, including the conventional main bank when present.
+pub fn visual_bank_paths(project: &Path, config: Option<&StickConfig>) -> Result<Vec<String>> {
+    let mut banks = config
+        .map(EngineConfigExt::release_visual_banks)
+        .transpose()?
+        .unwrap_or_default();
+    if project.join(visual_bank::BANK_PATH).is_file() {
+        banks.push(visual_bank::BANK_PATH.to_owned());
+    }
+    banks.sort();
+    banks.dedup();
+    Ok(banks)
+}
+
 #[derive(Debug, Clone)]
 pub struct ReleaseAsset {
     pub key: String,
@@ -184,12 +198,12 @@ pub fn select_assets_with_overlays(
         add_path(&mut by_key, game_key, &source, project_dir, &source, false)?;
     }
 
-    // A game with a compiled worktree visual bank admits overlay files
+    // A game with visual bank roots admits overlay files
     // exactly: sound and visual dependencies plus declared loose assets, each
     // resolved directly by key. Walking the whole shared overlay tree here
     // only to discard it in narrowing wastes tens of seconds on slow overlay
     // disks. Bankless games keep the legacy whole-overlay staging.
-    if !project_dir.join(visual_bank::BANK_PATH).is_file() {
+    if visual_bank_paths(project_dir, config)?.is_empty() {
         for overlay in overlays.iter().rev() {
             let source = overlay.join("assets");
             if !source.exists() {
