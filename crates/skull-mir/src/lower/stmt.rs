@@ -50,6 +50,108 @@ impl DeferMode {
 }
 
 impl<'a> Builder<'a> {
+    /// A local consumed only by projections needs no whole box. Read its
+    /// selected fields now, before later mutations, and retain their leaves.
+    fn lower_projected_value_let(
+        &mut self,
+        name: Idx<BindingInfo>,
+        value: Idx<Expr>,
+    ) -> Result<bool, CompilerError> {
+        if self.scx.values_first_class
+            || self.f.is_coroutine
+            || self.binding_is_ref(name)
+            || self.binding_ref_escapes(name)
+            || self.body_facts().may_capture
+        {
+            return Ok(false);
+        }
+        let Some(Some(fields)) = self.body_facts().projected.get(&raw(name)) else {
+            return Ok(false);
+        };
+        let fields = fields.clone();
+        let Some(nominal) = self.value_struct_of(value) else {
+            return Ok(false);
+        };
+        let shape = self.nominal_rep_shape_required(nominal, false)?;
+        if self.is_nobox_struct(nominal)
+            || self.shape_has_flat_enum(&shape)
+            || self
+                .scx
+                .rep_arena()
+                .nominal_value_storage_required(self.ws, self.scx.target, nominal)
+                .map_err(|e| self.gap_here(e.message))?
+                != ValueStorage::GcTable
+        {
+            return Ok(false);
+        }
+        // Constructors and control flow keep their normal eager evaluation.
+        // A source binding already held in leaves has no box to read.
+        let place = match self.body.expr_arena[value] {
+            Expr::Var(b) => !self.group_binds.contains_key(&raw(b)),
+            Expr::FieldAccess { .. } => {
+                let mut root = value;
+                while let Expr::FieldAccess { base, .. } = self.body.expr_arena[root] {
+                    root = base;
+                }
+                if matches!(self.body.expr_arena[root], Expr::Var(b) if self.group_binds.contains_key(&raw(b)))
+                {
+                    return Ok(false);
+                }
+                true
+            }
+            _ => return Ok(false),
+        };
+        if matches!(self.body.expr_arena[value], Expr::Var(_)) && !place {
+            return Ok(false);
+        }
+        let expanded = super::abi::expanded_nullable_parameter_shape(self.ws, &shape);
+        for (field, kind) in &expanded.fields {
+            if fields.contains(field)
+                && matches!(kind, FieldShape::Prim)
+                && self
+                    .opaque_value_child(nominal, self.concrete_expr_ty(value), *field)?
+                    .is_some()
+            {
+                return Ok(false);
+            }
+        }
+        let mut selected = expanded.clone();
+        selected.fields.retain(|(field, _)| fields.contains(field));
+        let demand: Vec<bool> = expanded
+            .fields
+            .iter()
+            .flat_map(|(field, shape)| {
+                std::iter::repeat_n(fields.contains(field), shape.leaf_count())
+            })
+            .collect();
+        let boxed = self.lower_place_base(value)?;
+        let leaves = self.cdata_leaf_demand(boxed, &expanded, &demand)?;
+        let repr = self.rebuild_from_leaves(&selected, &leaves, &mut 0);
+        self.mark_borrowed_value_children(&selected, &repr, self.concrete_expr_ty(value))?;
+        let repr = self.own_opaque_parameter_children(repr, &selected)?;
+        let leaves = self.repr_to_leaves_shape(&repr, &selected)?;
+        let unwritten = self.binding_stays_unwritten(name);
+        let mut stored = Vec::with_capacity(leaves.len());
+        for (i, value) in leaves.into_iter().enumerate() {
+            if unwritten {
+                stored.push(GroupLeaf::Value(value));
+            } else {
+                let cell = self.new_binding_cell(
+                    name,
+                    crate::names::ustr(&format!("{}__{i}", self.body.binding_arena[name].name)),
+                    None,
+                    crate::names::ustr(&i.to_string()),
+                );
+                self.store_cell(cell, value);
+                stored.push(GroupLeaf::Cell(cell));
+            }
+        }
+        self.f.value_lets += stored.len();
+        self.f.value_leaves += stored.len();
+        self.group_binds.insert(raw(name), (stored, selected));
+        Ok(true)
+    }
+
     /// Lower a statement sequence into the current block. Returns `true` if a
     /// `return` terminated the block (the rest is dead).
     /// `static name = init` -> a private global cell + done-flag, guarded so the
@@ -399,6 +501,9 @@ impl<'a> Builder<'a> {
                             continue;
                         }
                     };
+                    if self.lower_projected_value_let(name, value)? {
+                        continue;
+                    }
                     if self.lower_flat_let(name, value)? {
                         continue;
                     }

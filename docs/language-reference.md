@@ -43,6 +43,12 @@ Whether
 arithmetic such as `0.0 * -1.0` yields `-0` depends on LuaJIT's platform, so
 do not rely on it. See [numeric edge tests](../tests/operators/numeric_edges.rock).
 
+Reading a field of a non-nil Rock value cannot fail. The compiler may omit
+physical reads whose results are unused, including nullable-child reads after
+the child's nil check. Inline Lua that attaches metatables or getters to Rock
+values is unsupported. Value copies still snapshot the used fields before
+later mutations.
+
 `ref T` accesses a place without copying its value; field writes go through
 to that place. A function can return a reference derived from a valid input
 reference or its field, but not to a local place. The compiler rejects refs

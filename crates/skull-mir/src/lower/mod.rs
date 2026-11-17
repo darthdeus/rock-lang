@@ -2271,7 +2271,7 @@ struct Builder<'a> {
     owned_value_binds: HashSet<u32>,
     /// Bindings some `ref` borrow in this body is rooted at
     /// ([`Self::binding_ref_borrowed`]), collected on first use.
-    ref_borrowed_binds: std::cell::OnceCell<HashSet<u32>>,
+    ref_borrowed_binds: std::cell::OnceCell<(HashSet<u32>, HashSet<u32>)>,
     /// Which bindings may live without a cell, computed on first use.
     body_facts: std::cell::OnceCell<BodyFacts>,
     /// `let` bindings held as their value instead of a cell
@@ -2595,7 +2595,20 @@ impl<'a> Builder<'a> {
     }
 
     fn read_field(&mut self, base: Idx<Inst>, field: Ustr) -> Idx<Inst> {
-        self.emit_cur(Inst::Field { base, field })
+        self.emit_cur(Inst::Field {
+            base,
+            field,
+            nonthrowing: false,
+        })
+    }
+
+    /// A projection of a non-nil Rock value; still a mutable load at this point.
+    fn read_value_field(&mut self, base: Idx<Inst>, field: Ustr) -> Idx<Inst> {
+        self.emit_cur(Inst::Field {
+            base,
+            field,
+            nonthrowing: true,
+        })
     }
 
     fn write_field(&mut self, base: Idx<Inst>, field: Ustr, value: Idx<Inst>) -> Idx<Inst> {
@@ -2701,7 +2714,7 @@ impl<'a> Builder<'a> {
 
     fn emit_cur(&mut self, inst: Inst) -> Idx<Inst> {
         let inst = match inst {
-            Inst::Field { base, field } if self.callback_records.contains(&base) => {
+            Inst::Field { base, field, .. } if self.callback_records.contains(&base) => {
                 let index = self.emit_cur(Inst::Const(Lit::Str(field)));
                 Inst::Index {
                     base,
@@ -5119,6 +5132,8 @@ pub(crate) struct BodyFacts {
     may_capture: bool,
     /// Bindings at the root of an assignment or increment target.
     written: HashSet<u32>,
+    /// `None` for a whole use, otherwise the directly projected fields.
+    projected: HashMap<u32, Option<Vec<Ustr>>>,
 }
 
 impl BodyFacts {
@@ -5129,8 +5144,38 @@ impl BodyFacts {
                 .iter()
                 .any(|(_, s)| matches!(s, Statement::Defer(_))),
             written: HashSet::default(),
+            projected: HashMap::default(),
         };
+        let mut projected_bases = HashSet::default();
         for (_, e) in body.expr_arena.iter() {
+            if let Expr::FieldAccess { base, field } | Expr::SafeNav { base, field } = e
+                && let Expr::Var(binding) = body.expr_arena[*base]
+            {
+                projected_bases.insert(*base);
+                let fields = facts
+                    .projected
+                    .entry(raw(binding))
+                    .or_insert_with(|| Some(Vec::new()));
+                if let Some(fields) = fields
+                    && !fields.contains(field)
+                {
+                    fields.push(*field);
+                }
+            }
+        }
+        for (id, e) in body.expr_arena.iter() {
+            match e {
+                Expr::Var(binding) if !projected_bases.contains(&id) => {
+                    facts.projected.insert(raw(*binding), None);
+                }
+                Expr::Call {
+                    callee: Callee::Local(binding),
+                    ..
+                } => {
+                    facts.projected.insert(raw(*binding), None);
+                }
+                _ => {}
+            }
             let target = match e {
                 Expr::Lambda { .. } => {
                     facts.may_capture = true;

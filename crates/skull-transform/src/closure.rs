@@ -328,6 +328,7 @@ pub fn convert_closures_framed(
                         let f = frame.unwrap();
                         let sbase = env_frame_base(mf, &env_plans[&s], f.s_cell, &mut new);
                         mf.insts[id] = Inst::Field {
+                            nonthrowing: false,
                             base: sbase,
                             field: frame_field(f.slots[&c]),
                         };
@@ -339,16 +340,19 @@ pub fn convert_closures_framed(
                         new.push(il);
                         if boxed_c {
                             let f = mf.alloc_inst(Inst::Field {
+                                nonthrowing: false,
                                 base: il,
                                 field: field_of(&env_plans[&s], c),
                             });
                             new.push(f);
                             mf.insts[id] = Inst::Field {
+                                nonthrowing: false,
                                 base: f,
                                 field: Ustr::from("v"),
                             };
                         } else {
                             mf.insts[id] = Inst::Field {
+                                nonthrowing: false,
                                 base: il,
                                 field: field_of(&env_plans[&s], c),
                             };
@@ -358,6 +362,7 @@ pub fn convert_closures_framed(
                         let l = mf.alloc_inst(Inst::Load(c));
                         new.push(l);
                         mf.insts[id] = Inst::Field {
+                            nonthrowing: false,
                             base: l,
                             field: Ustr::from("v"),
                         };
@@ -399,6 +404,7 @@ pub fn convert_closures_framed(
                         let il = mf.alloc_inst(Inst::Load(env));
                         new.push(il);
                         let f = mf.alloc_inst(Inst::Field {
+                            nonthrowing: false,
                             base: il,
                             field: field_of(&env_plans[&s], c),
                         });
@@ -754,6 +760,7 @@ fn env_frame_base(
     let il = mf.alloc_inst(Inst::Load(env));
     new.push(il);
     let f = mf.alloc_inst(Inst::Field {
+        nonthrowing: false,
         base: il,
         field: field_of(plan, s_cell),
     });
@@ -794,6 +801,7 @@ fn slot_in_scope(
         let il = mf.alloc_inst(Inst::Load(env));
         new.push(il);
         let f = mf.alloc_inst(Inst::Field {
+            nonthrowing: false,
             base: il,
             field: field_of(&env_plans[&s], cc),
         });

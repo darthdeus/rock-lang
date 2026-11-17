@@ -38,6 +38,7 @@ fn dump_covers_aggregates_and_containers() {
     let fld = f.emit(
         bb,
         Inst::Field {
+            nonthrowing: false,
             base: st,
             field: ustr("a"),
         },

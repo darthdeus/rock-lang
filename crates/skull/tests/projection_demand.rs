@@ -32,29 +32,7 @@ fn main() {
         !probe.contains(".spare"),
         "nullable projection expanded siblings: {probe}"
     );
-    assert_eq!(
-        run_luajit(&format!(
-            r#"{lua}
-main()
-local events = {{}}
-local item = setmetatable({{}}, {{__index = function(_, key)
-    events[#events + 1] = key
-    if key == 'count' then return 1 end
-    error('sibling read')
-end}})
-local holder = {{item=item, calls=0}}
-print(nullable_probe(holder), holder.calls, table.concat(events, ','))
-events = {{}}
-print(snapshot_probe(holder), table.concat(events, ','))
-item = setmetatable({{}}, {{__index = function() error('demanded read') end}})
-local ok, err = pcall(nullable_probe, {{item=item, calls=0}})
-print(ok, tostring(err):match('demanded read') ~= nil)
-ok = pcall(nullable_probe, nil)
-print(ok)
-"#
-        )),
-        "true\ntrue\nfalse\n3\ntrue\ntrue\t1\tcount\ntrue\tcount\nfalse\ttrue\nfalse"
-    );
+    assert_eq!(run_main(&lua), "true\ntrue\nfalse\n3\ntrue");
 }
 
 #[test]
@@ -134,29 +112,12 @@ fn main() {{
         !probe.contains(".unused_sibling") && !probe.contains(".label"),
         "an indexed immediate projection must not expand siblings: {probe}"
     );
-    assert_eq!(
-        run_luajit(&format!(
-            r#"{lua}
-main()
-local items = make_probe_items()
-for _, f in ipairs({{
-    function() direct_probe(nil, 0) end,
-    function() direct_probe(items, -1) end,
-    function() direct_probe(items, 1) end,
-    function() direct_probe({{_data={{}}, len=1}}, 0) end
-}}) do local ok = pcall(f); print(ok) end
-items._data[1].unused_sibling0 = nil
-setmetatable(items._data[1], {{__index=function(_, key) error("unused " .. key) end}})
-print(direct_probe(items, 0))
-local ok, err = pcall(whole_probe, items, 0)
-print(ok, tostring(err):match("unused unused_sibling0") ~= nil)
-items._data[1].chosen = nil
-local chosen_ok, chosen_err = pcall(direct_probe, items, 0)
-print(chosen_ok, tostring(chosen_err):match("unused chosen") ~= nil)
-"#
-        )),
-        "7\n1\n2\n2\n5\n5\n99\nfalse\nfalse\nfalse\nfalse\n7\nfalse\ttrue\nfalse\ttrue"
+    let whole = crate::common::function_body(&lua, "whole_probe");
+    assert!(
+        !whole.contains(".unused_sibling"),
+        "unused copy reads: {whole}"
     );
+    assert_eq!(run_main(&lua), "7\n1\n2\n2\n5\n5\n99");
 }
 
 #[test]

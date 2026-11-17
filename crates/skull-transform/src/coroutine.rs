@@ -213,6 +213,7 @@ fn spill_cross_block_values(
                 let sv = step.alloc_inst(Inst::Load(s_cell));
                 new_list.push(sv);
                 step.alloc_inst(Inst::Field {
+                    nonthrowing: false,
                     base: sv,
                     field: vfield(v),
                 })
@@ -649,6 +650,7 @@ pub fn transform_coroutine(
                 &mut step,
                 bid,
                 Inst::Field {
+                    nonthrowing: false,
                     base: sv,
                     field: ustr::Ustr::from(STATE),
                 },
@@ -717,6 +719,7 @@ pub fn transform_coroutine(
                 &mut step,
                 bid,
                 Inst::Field {
+                    nonthrowing: false,
                     base: sv,
                     field: ustr::Ustr::from(STATE),
                 },
@@ -818,6 +821,7 @@ pub fn transform_coroutine(
         &mut step,
         entry,
         Inst::Field {
+            nonthrowing: false,
             base: frame,
             field: ustr::Ustr::from(STATE),
         },
@@ -838,6 +842,7 @@ pub fn transform_coroutine(
         &mut step,
         entry,
         Inst::Field {
+            nonthrowing: false,
             base: frame,
             field: ustr::Ustr::from("__on_resume"),
         },
@@ -891,6 +896,7 @@ pub fn transform_coroutine(
             &mut step,
             chk,
             Inst::Field {
+                nonthrowing: false,
                 base: sv,
                 field: ustr::Ustr::from("__layout"),
             },

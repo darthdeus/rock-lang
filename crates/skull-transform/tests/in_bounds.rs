@@ -52,6 +52,7 @@ impl Probe {
         self.emit(
             b,
             Inst::Field {
+                nonthrowing: false,
                 base,
                 field: u("len"),
             },
@@ -454,6 +455,7 @@ fn an_element_of_an_element_is_a_place() {
     let len = p.emit(
         b,
         Inst::Field {
+            nonthrowing: false,
             base: row,
             field: u("len"),
         },
@@ -495,6 +497,7 @@ fn an_element_of_an_element_is_a_place() {
     let len = p.emit(
         b,
         Inst::Field {
+            nonthrowing: false,
             base: row,
             field: u("len"),
         },
@@ -754,6 +757,7 @@ fn affine_probe(case: &str) -> ContainerKind {
     let len = p.emit(
         b,
         Inst::Field {
+            nonthrowing: false,
             base,
             field: u("len"),
         },
@@ -878,6 +882,7 @@ fn exposing_a_literal_backing_revokes_private_push() {
     p.emit(
         p.f.entry,
         Inst::Field {
+            nonthrowing: false,
             base: arr,
             field: u("_data"),
         },

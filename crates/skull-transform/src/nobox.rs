@@ -117,6 +117,7 @@ fn leaf_operand(
             // Opaque: read the field off the existing value.
             _ => {
                 let f = func.alloc_inst(Inst::Field {
+                    nonthrowing: false,
                     base: cur,
                     field: comp,
                 });

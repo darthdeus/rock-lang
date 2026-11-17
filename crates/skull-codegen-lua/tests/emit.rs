@@ -1981,19 +1981,31 @@ fn absent_pair(present: bool, x: int) -> bool { return pair(present, x) == null 
 }
 
 #[test]
-fn whole_gc_snapshot_retains_an_unused_child_error_probe() {
+fn whole_gc_snapshots_read_only_demanded_leaves() {
     let src = include_str!("../../../tests/values/demanded_value_copy.rock");
-    let lua = emit_clean(src, "consume");
-    let read = lua
-        .find(".ignored")
-        .expect("unused child must still be checked");
-    let mutation = lua.find("mutate_Holder(").expect("later source mutation");
-    assert!(read < mutation, "{lua}");
-    assert!(lua[read..mutation].contains(".kept"), "{lua}");
-    assert!(
-        !lua.contains("Snapshot_vt("),
-        "root snapshot need not be repacked:\n{lua}"
-    );
+    for name in ["consume", "read_only", "read_produced"] {
+        let lua = emit_clean(src, name);
+        assert!(
+            !lua.contains(".ignored"),
+            "unused child read in {name}:\n{lua}"
+        );
+        assert!(
+            !lua.contains("unused7"),
+            "unused leaf read in {name}:\n{lua}"
+        );
+        assert!(
+            !lua.contains(".spare"),
+            "unused nested leaf in {name}:\n{lua}"
+        );
+        assert!(
+            !lua.contains("Detail_ct("),
+            "child repack in {name}:\n{lua}"
+        );
+        assert!(
+            !lua.contains("Snapshot_vt("),
+            "root repack in {name}:\n{lua}"
+        );
+    }
 }
 
 #[test]

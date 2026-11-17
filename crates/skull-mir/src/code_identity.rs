@@ -1402,8 +1402,13 @@ impl BodyHasher {
                 self.string(cty.as_str());
                 self.inst_idx(*ptr);
             }
-            Inst::Field { base, field } => {
+            Inst::Field {
+                base,
+                field,
+                nonthrowing,
+            } => {
                 self.tag(76);
+                self.hash.write_u8(u8::from(*nonthrowing));
                 self.inst_idx(*base);
                 self.string(field.as_str());
             }

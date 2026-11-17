@@ -384,8 +384,16 @@ impl<'a> Builder<'a> {
     /// (`b.p.x = v`). Either write lands in `b`'s box, so that box is never lent
     /// to an argument slot. A parameter's lent box is copied before borrowing.
     pub(crate) fn binding_ref_borrowed(&self, b: Idx<BindingInfo>) -> bool {
-        self.ref_borrowed_binds
-            .get_or_init(|| {
+        let (borrowed, written) = self.binding_borrow_facts();
+        borrowed.contains(&raw(b)) || written.contains(&raw(b))
+    }
+
+    pub(crate) fn binding_ref_escapes(&self, b: Idx<BindingInfo>) -> bool {
+        self.binding_borrow_facts().0.contains(&raw(b))
+    }
+
+    fn binding_borrow_facts(&self) -> &(HashSet<u32>, HashSet<u32>) {
+        self.ref_borrowed_binds.get_or_init(|| {
                 let root = |mut e: Idx<Expr>| loop {
                     match &self.body.expr_arena[e] {
                         Expr::Var(b) => return Some(raw(*b)),
@@ -442,12 +450,19 @@ impl<'a> Builder<'a> {
                     | Expr::IncDec { target, .. } => field_write_root(*target),
                     _ => None,
                 });
-                args.chain(ref_lets)
-                    .filter_map(root)
-                    .chain(writes)
-                    .collect()
+                let mut borrowed: HashSet<_> = args.chain(ref_lets).filter_map(root).collect();
+                let mut written = HashSet::default();
+                for (_, e) in self.body.expr_arena.iter() {
+                    if let Expr::Assign { target, value } = e
+                        && matches!(self.body.expr_arena[*target], Expr::Var(b) if self.binding_is_ref(b))
+                        && let Some(b) = root(*value)
+                    {
+                        borrowed.insert(b);
+                    }
+                }
+                written.extend(writes);
+                (borrowed, written)
             })
-            .contains(&raw(b))
     }
 
     pub(crate) fn binding_value_is_shareable(&self, b: Idx<BindingInfo>) -> bool {

@@ -52,6 +52,7 @@ fn materialize_frame_inner(
                     let sv = mf.alloc_inst(Inst::Load(s_cell));
                     new.push(sv);
                     mf.insts[id] = Inst::Field {
+                        nonthrowing: false,
                         base: sv,
                         field: field_of(slots[&c]),
                     };
@@ -118,6 +119,7 @@ fn materialize_frame_inner(
                         minted.insert(t);
                         let sv = mf.alloc_inst(Inst::Load(s_cell));
                         let fld = mf.alloc_inst(Inst::Field {
+                            nonthrowing: false,
                             base: sv,
                             field: field_of(slots[&key_cell]),
                         });

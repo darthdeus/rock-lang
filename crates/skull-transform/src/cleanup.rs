@@ -730,6 +730,7 @@ mod tests {
         let cell = f.new_cell(None);
         let p = f.emit(f.entry, Inst::Load(cell));
         let field = |name: &str| Inst::Field {
+            nonthrowing: false,
             base: p,
             field: ustr::Ustr::from(name),
         };
@@ -760,6 +761,7 @@ mod tests {
                 f.emit(
                     f.entry,
                     Inst::Field {
+                        nonthrowing: false,
                         base: p,
                         field: ustr::Ustr::from(name),
                     },
@@ -792,6 +794,7 @@ mod tests {
             let read = f.emit(
                 f.entry,
                 Inst::Field {
+                    nonthrowing: false,
                     base: q,
                     field: ustr::Ustr::from("c"),
                 },

@@ -26,6 +26,7 @@ fn leaf_read(p: &mut Probe, index: Idx<Inst>, field: &str) -> (Idx<Inst>, Idx<In
     let col = p.body.emit(
         p.block,
         Inst::Field {
+            nonthrowing: false,
             base: p.vec,
             field: Ustr::from(field),
         },
@@ -76,6 +77,7 @@ fn unused_column_loads_after_the_check_are_dropped() {
     let unused = p.body.emit(
         p.block,
         Inst::Field {
+            nonthrowing: false,
             base: p.vec,
             field: Ustr::from("b"),
         },
@@ -92,6 +94,7 @@ fn an_unchecked_field_read_keeps_its_nil_error() {
     let unused = p.body.emit(
         p.block,
         Inst::Field {
+            nonthrowing: false,
             base: p.vec,
             field: Ustr::from("b"),
         },
@@ -128,6 +131,7 @@ fn a_column_slot_write_keeps_the_check() {
         let col = p.body.emit(
             p.block,
             Inst::Field {
+                nonthrowing: false,
                 base: p.vec,
                 field: Ustr::from("a"),
             },

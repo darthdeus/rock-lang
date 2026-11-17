@@ -30,6 +30,7 @@ fn native_view_reads_without_a_canonical_check_retain_their_error() {
         let read = body.emit(
             block,
             Inst::Field {
+                nonthrowing: false,
                 base,
                 field: skull_mir::lower::leaf_view_field("double"),
             },

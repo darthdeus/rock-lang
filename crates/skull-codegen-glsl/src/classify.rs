@@ -796,7 +796,7 @@ pub(crate) fn reject_position_read(
     span: Span,
 ) -> Result<(), CompilerError> {
     for (_, inst) in mf.insts.iter() {
-        if let Inst::Field { base, field } = inst {
+        if let Inst::Field { base, field, .. } = inst {
             if field.as_str() == "position"
                 && matches!(mf.insts[*base], Inst::Load(c) if c == varyings_cell)
             {

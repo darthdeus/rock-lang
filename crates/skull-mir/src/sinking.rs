@@ -5,8 +5,8 @@ use comfy_la_arena::Idx;
 use crate::mir::{Block, Inst, MirFunc};
 
 /// Whether evaluating this instruction can raise a language/runtime error.
-/// Allocation exhaustion is excluded. Projections are conservative because
-/// MIR does not carry a non-null proof on their base operand.
+/// Allocation exhaustion is excluded. Field reads carry the non-throwing
+/// fact when lowering proves a non-nil Rock value base.
 pub fn may_throw(inst: &Inst) -> bool {
     matches!(
         inst,
@@ -18,7 +18,10 @@ pub fn may_throw(inst: &Inst) -> bool {
             | Inst::UintShr(..)
             | Inst::Index { .. }
             | Inst::VecCheckedIndex { .. }
-            | Inst::Field { .. }
+            | Inst::Field {
+                nonthrowing: false,
+                ..
+            }
             | Inst::TupleIndex { .. }
             | Inst::Len { .. }
             | Inst::Call { .. }
@@ -110,7 +113,13 @@ pub fn always_inlinable(inst: &Inst) -> bool {
 fn is_barrier(inst: &Inst) -> bool {
     // A projection may enter a host callback that writes globals. Keep it
     // before a later global snapshot, just as an explicit call must stay.
-    !inst.produces_value() || may_throw(inst) || matches!(inst, Inst::Global(_))
+    !inst.produces_value() || ordered_read(inst) || matches!(inst, Inst::Global(_))
+}
+
+// Non-throwing fields can be deleted when unused, but remain mutable reads.
+// Their snapshot must not sink across a call or a storage write.
+fn ordered_read(inst: &Inst) -> bool {
+    may_throw(inst) || matches!(inst, Inst::Field { .. })
 }
 
 /// Restrict an existing same-block folding mask to preserve observable order.
@@ -142,7 +151,7 @@ pub fn preserve_effect_order_with(
         for (pos, &id) in insts.iter().enumerate().rev() {
             let k = raw(id);
             let inst = &func.insts[id];
-            if inlinable[k] && may_throw(inst) {
+            if inlinable[k] && ordered_read(inst) {
                 let end = limit[k].max(pos + 1);
                 if insts[pos + 1..end].iter().any(|&between| {
                     let between = &func.insts[between];
@@ -188,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn throwing_projections_and_calls_cannot_cross_a_write() {
+    fn projections_and_calls_cannot_cross_a_write() {
         for make in [
             (|v| Inst::Index {
                 base: v,
@@ -197,6 +206,12 @@ mod tests {
             }) as fn(Idx<Inst>) -> Inst,
             |v| Inst::VecCheckedIndex { vec: v, index: v },
             |v| Inst::Field {
+                nonthrowing: false,
+                base: v,
+                field: Ustr::from("value"),
+            },
+            |v| Inst::Field {
+                nonthrowing: true,
                 base: v,
                 field: Ustr::from("value"),
             },
@@ -286,6 +301,7 @@ mod tests {
         let read = func.emit(
             b,
             Inst::Field {
+                nonthrowing: false,
                 base: input,
                 field: Ustr::from("value"),
             },
@@ -312,6 +328,7 @@ mod tests {
         func.emit(
             b,
             Inst::Field {
+                nonthrowing: false,
                 base: input,
                 field: Ustr::from("value"),
             },

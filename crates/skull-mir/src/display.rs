@@ -301,7 +301,7 @@ fn fmt_inst(
             format!("enum_dyn {ty}::[v{}]({})", num[tag], parts.join(", "))
         }
 
-        Inst::Field { base, field } => format!("field v{}.{field}", v(*base)),
+        Inst::Field { base, field, .. } => format!("field v{}.{field}", v(*base)),
         Inst::TupleIndex { base, index } => format!("tuple_index v{}.{index}", v(*base)),
 
         Inst::Index { base, index, kind } => {

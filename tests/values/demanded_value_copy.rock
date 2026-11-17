@@ -27,21 +27,18 @@ fn consume(h: Holder) -> int {
     return saved.used + (saved.child?.kept ?? 0)
 }
 
-@nomangle inline(lua) fn observe_unused(h: Holder, fail: bool) = """
-    local value = h.snapshot
-    value.ignored = setmetatable({ spare = 31 }, { __index = function(_, key)
-        if key == 'kept' then
-            h.reads = h.reads + 1
-            if fail then error('unused leaf marker') end
-            return 71
-        end
-    end })
-"""
+fn read_only(h: Holder) -> int {
+    let saved = h.snapshot
+    mutate(h)
+    return saved.used + (saved.child?.kept ?? 0)
+}
 
-@nomangle inline(lua) fn raises_marker(f: fn()) -> bool = """
-    local ok, err = pcall(f)
-    return not ok and string.find(tostring(err), 'unused leaf marker', 1, true) ~= nil
-"""
+fn produced(h: Holder) -> Holder { h.reads += 1; return h }
+fn read_produced(h: Holder) -> int {
+    let saved = produced(h).snapshot
+    mutate(h)
+    return saved.used + (saved.child?.kept ?? 0)
+}
 
 @test(output = "19 8 180")
 fn selected_leaves_keep_the_original_snapshot() {
@@ -52,18 +49,21 @@ fn selected_leaves_keep_the_original_snapshot() {
     print("{saved_present} {saved_absent} {present.snapshot.used + (present.snapshot.child?.kept ?? 0)}")
 }
 
-@test(output = "19 1 1", backends = "lua")
-fn an_unused_leaf_read_is_observable() {
-    let h = holder(true)
-    observe_unused(h, false)
-    let result = consume(h)
-    print("{result} {h.reads} {h.mutations}")
+@test(output = "19 19")
+fn unused_nullable_children_do_not_affect_the_copy() {
+    let present = holder(true)
+    present.snapshot.ignored = Detail { kept: 23, spare: 31 }
+    let absent = holder(true)
+    print("{consume(present)} {consume(absent)}")
 }
 
-@test(output = "true 1 0", backends = "lua")
-fn an_unused_leaf_error_precedes_later_mutation() {
-    let h = holder(true)
-    observe_unused(h, true)
-    let failed = raises_marker(() => { let _ = consume(h) })
-    print("{failed} {h.reads} {h.mutations}")
+@test(output = "18 7 18 1")
+fn read_only_and_produced_copies_snapshot_before_mutation() {
+    let present = holder(true)
+    let absent = holder(false)
+    let producer = holder(true)
+    let a = read_only(present)
+    let b = read_only(absent)
+    let c = read_produced(producer)
+    print("{a} {b} {c} {producer.reads}")
 }

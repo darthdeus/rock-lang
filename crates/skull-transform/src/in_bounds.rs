@@ -457,7 +457,7 @@ fn relevant_values(func: &MirFunc, rpo: &[Idx<Block>]) -> Vec<bool> {
                 // A length read is tied to its place so a later use of the
                 // value (a modulo, a `len - 1`) can name the vector.
                 Inst::Len { base, .. } => mark(&[id, *base], &mut relevant),
-                Inst::Field { base, field } if field.as_str() == LEN => {
+                Inst::Field { base, field, .. } if field.as_str() == LEN => {
                     mark(&[id, *base], &mut relevant);
                 }
                 Inst::Store { value, .. } => mark(&[*value], &mut relevant),
@@ -705,7 +705,7 @@ fn place_of(func: &Body<'_>, id: Idx<Inst>) -> Option<Key> {
     let data = match &func.insts[id] {
         Inst::Load(c) => KeyData::Cell(*c),
         Inst::Global(g) => KeyData::Global(*g),
-        Inst::Field { base, field } => KeyData::Field(via(*base), *field),
+        Inst::Field { base, field, .. } => KeyData::Field(via(*base), *field),
         Inst::Index { base, index, .. } => KeyData::Elem(via(*base), via(*index)),
         _ => return None,
     };
@@ -913,7 +913,7 @@ impl Facts {
         };
         let allowed = match inst {
             Inst::Store { cell, value } if !func.cells[*cell].borrowed => Some(*value),
-            Inst::Field { base, field } if field.as_str() == LEN => Some(*base),
+            Inst::Field { base, field, .. } if field.as_str() == LEN => Some(*base),
             Inst::Len { base, .. } | Inst::VecCheckedIndex { vec: base, .. } => Some(*base),
             Inst::Index {
                 base,
@@ -1437,7 +1437,7 @@ fn step(facts: &mut Facts, func: &Body<'_>, ctx: &Ctx<'_>, id: Idx<Inst>, may_re
                 facts.le_len.insert((func.key(KeyData::Value(id)), v));
             }
         }
-        Inst::Field { base, field } if field.as_str() == LEN => {
+        Inst::Field { base, field, .. } if field.as_str() == LEN => {
             for v in facts.keys_of(func, *base) {
                 facts.le_len.insert((func.key(KeyData::Value(id)), v));
             }

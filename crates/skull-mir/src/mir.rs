@@ -652,6 +652,9 @@ pub enum Inst {
     // --- projections ---
     /// `base.field` (struct field, or an enum record-payload field).
     Field {
+        /// The base is a non-nil Rock value. Its fields have no getters and
+        /// reading them cannot fail; unused reads may be removed.
+        nonthrowing: bool,
         base: Idx<Inst>,
         field: Ustr,
     },
@@ -1538,7 +1541,7 @@ impl MirFunc {
     /// This does not authorize removing the original instruction's callback effects.
     pub fn field_projection(&self, id: Idx<Inst>) -> Option<(Idx<Inst>, Ustr)> {
         match self.insts[id] {
-            Inst::Field { base, field } => Some((base, field)),
+            Inst::Field { base, field, .. } => Some((base, field)),
             Inst::Index {
                 base,
                 index,

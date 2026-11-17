@@ -86,7 +86,7 @@ impl FnEmit<'_> {
                     ));
                 }
             },
-            Inst::Field { base, field } => {
+            Inst::Field { base, field, .. } => {
                 if self.is_uniform_base(*base) {
                     self.uniform_fields.get(field).copied().ok_or_else(|| {
                         err(self.span(), format!("shader profile: `{field}` is not a value field of the shader interface; a sampler field is opaque -- pass it directly to a texture call"))
@@ -280,7 +280,7 @@ impl FnEmit<'_> {
             Inst::UintToInt(x) => format!("int({})", self.render_val(*x)?),
             Inst::UintBitcastInt(x) => format!("uintBitsToInt({})", self.render_val(*x)?),
             Inst::IntBitcastUint(x) => format!("intBitsToUint({})", self.render_val(*x)?),
-            Inst::Field { base, field } => {
+            Inst::Field { base, field, .. } => {
                 if self.is_uniform_base(*base) {
                     field.as_str().to_string() // uniform global, not a struct member
                 } else {

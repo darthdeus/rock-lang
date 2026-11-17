@@ -405,7 +405,7 @@ fn leaf_form_path(
     subst: &[Option<Idx<Inst>>],
     x: Idx<Inst>,
 ) -> Option<(Idx<Inst>, String)> {
-    let Inst::Field { base, field } = &func.insts[x] else {
+    let Inst::Field { base, field, .. } = &func.insts[x] else {
         return None;
     };
     let rb = resolve_subst(subst, *base);

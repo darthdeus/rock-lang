@@ -370,6 +370,7 @@ impl<'a> Builder<'a> {
     /// leaf read/write goes through the ordinary Vec column machinery on this.
     pub(crate) fn map_col_data(&mut self, m: Idx<Inst>) -> Idx<Inst> {
         self.emit_cur(Inst::Field {
+            nonthrowing: false,
             base: m,
             field: crate::names::ustr("data"),
         })
@@ -398,6 +399,7 @@ impl<'a> Builder<'a> {
             let kind = self.nb_kind(base)?;
             let b = self.lower_expr(base)?;
             let buf = self.emit_cur(Inst::Field {
+                nonthrowing: false,
                 base: b,
                 field: crate::names::ustr("buf"),
             });

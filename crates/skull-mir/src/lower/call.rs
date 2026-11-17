@@ -3137,6 +3137,20 @@ impl<'a> Builder<'a> {
         shape: &ValueShape,
         range: std::ops::Range<usize>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let demand: Vec<bool> = (0..shape.leaf_count())
+            .map(|i| range.contains(&i))
+            .collect();
+        self.cdata_leaf_demand(v, shape, &demand)
+    }
+
+    /// Read selected leaves together, sharing parent loads and nullable guards.
+    pub(crate) fn cdata_leaf_demand(
+        &mut self,
+        v: Idx<Inst>,
+        shape: &ValueShape,
+        demand: &[bool],
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        debug_assert_eq!(demand.len(), shape.leaf_count());
         if let Some(es) =
             EnumPlan::for_name(self.ws, shape.name).and_then(|plan| plan.flat().cloned())
         {
@@ -3166,12 +3180,12 @@ impl<'a> Builder<'a> {
             }
             self.f.set_term(self.cur, Term::Goto(join));
             self.cur = join;
-            let selected = if range.start == 0 && range.end == shape.leaf_count() {
-                cells.as_slice()
-            } else {
-                &cells[range]
-            };
-            return Ok(self.load_cells(selected));
+            let selected: Vec<_> = cells
+                .iter()
+                .zip(demand)
+                .filter_map(|(&c, &used)| used.then_some(c))
+                .collect();
+            return Ok(self.load_cells(&selected));
         }
         // A shape with no nullable and no enum child anywhere is a plain key
         // walk: the paths come from the one rule the uniform packer reads a
@@ -3197,8 +3211,12 @@ impl<'a> Builder<'a> {
             );
             let paths = self.boxed_leaf_paths(shape, native_aliases)?;
             let mut loaded: Vec<(Vec<Ustr>, Idx<Inst>)> = Vec::new();
-            let mut out = Vec::with_capacity(range.len());
-            for path in paths.into_iter().skip(range.start).take(range.len()) {
+            let mut out = Vec::new();
+            for path in paths
+                .into_iter()
+                .zip(demand)
+                .filter_map(|(path, &used)| used.then_some(path))
+            {
                 let mut cur = v;
                 for depth in 1..=path.len() {
                     let prefix = &path[..depth];
@@ -3206,7 +3224,7 @@ impl<'a> Builder<'a> {
                         cur = *inst;
                         continue;
                     }
-                    cur = self.read_field(cur, path[depth - 1]);
+                    cur = self.read_value_field(cur, path[depth - 1]);
                     if depth < path.len() {
                         loaded.push((prefix.to_vec(), cur));
                     }
@@ -3226,9 +3244,9 @@ impl<'a> Builder<'a> {
         if storage == ValueStorage::LeafTable && !shape.nullable {
             return Ok(value_leaf_paths(shape)
                 .into_iter()
-                .skip(range.start)
-                .take(range.len())
-                .map(|path| self.read_field(v, path))
+                .zip(demand)
+                .filter_map(|(path, &used)| used.then_some(path))
+                .map(|path| self.read_value_field(v, path))
                 .collect());
         }
         // A GC-table box keys an inline child's leaves by dotted path: the
@@ -3241,13 +3259,11 @@ impl<'a> Builder<'a> {
                 FieldShape::Prim => 1,
                 FieldShape::Nested(sub) => sub.leaf_count(),
             };
-            let start = range.start.max(offset);
-            let end = range.end.min(offset + count);
+            let child_demand = &demand[offset..offset + count];
             offset += count;
-            if start >= end {
+            if !child_demand.iter().any(|&used| used) {
                 continue;
             }
-            let child_range = start - (offset - count)..end - (offset - count);
             if let Some(field) = inline
                 .as_ref()
                 .and_then(|layout| layout.get(i))
@@ -3256,21 +3272,21 @@ impl<'a> Builder<'a> {
                 for (key, _) in field
                     .keys()
                     .into_iter()
-                    .skip(child_range.start)
-                    .take(child_range.len())
+                    .zip(child_demand)
+                    .filter_map(|(key, &used)| used.then_some(key))
                 {
-                    out.push(self.read_field(v, key));
+                    out.push(self.read_value_field(v, key));
                 }
                 continue;
             }
-            let fv = self.read_field(v, *fname);
+            let fv = self.read_value_field(v, *fname);
             match fs {
                 FieldShape::Prim => out.push(fv),
                 FieldShape::Nested(sub) if sub.nullable => {
-                    out.extend(self.nullable_child_leaf_range(fv, sub, child_range)?)
+                    out.extend(self.nullable_child_leaf_demand(fv, sub, child_demand)?)
                 }
                 FieldShape::Nested(sub) => {
-                    out.extend(self.cdata_leaf_range(fv, sub, child_range)?)
+                    out.extend(self.cdata_leaf_demand(fv, sub, child_demand)?)
                 }
             }
         }
@@ -3283,6 +3299,23 @@ impl<'a> Builder<'a> {
     /// shape.nullable` arm exactly -- presence is `v ~= nil` as leaf 0, then
     /// the child's own leaves, nils on the absent arm -- because the two must
     /// agree leaf-for-leaf or `rebuild_from_leaves` indexes past the end.
+    fn nullable_child_leaf_demand(
+        &mut self,
+        fv: Idx<Inst>,
+        sub: &ValueShape,
+        demand: &[bool],
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let count = demand[1..].iter().filter(|&&used| used).count();
+        let mut leaves =
+            self.nullable_value_leaf_range(fv, sub, 0..count + 1, |s, value, shape| {
+                s.cdata_leaf_demand(value, shape, &demand[1..])
+            })?;
+        if !demand[0] {
+            leaves.remove(0);
+        }
+        Ok(leaves)
+    }
+
     fn nullable_child_leaf_range(
         &mut self,
         fv: Idx<Inst>,
@@ -3550,7 +3583,7 @@ impl<'a> Builder<'a> {
     /// The type of `owner.field` when its plan holds an ordinary value as one
     /// opaque slot: a declared `V?`, or a generic `T`/`T?` instantiated at a
     /// value.
-    fn opaque_value_child(
+    pub(crate) fn opaque_value_child(
         &self,
         owner: Ustr,
         owner_ty: Option<&MonoTy>,
@@ -3930,14 +3963,14 @@ impl<'a> Builder<'a> {
             let leaves: Vec<Idx<Inst>> = field
                 .keys()
                 .into_iter()
-                .map(|(key, _)| self.read_field(v, key))
+                .map(|(key, _)| self.read_value_field(v, key))
                 .collect();
             return Ok(match fs {
                 FieldShape::Prim => ValueRepr::Scalar(leaves[0]),
                 FieldShape::Nested(sub) => self.rebuild_from_leaves(sub, &leaves, &mut 0),
             });
         }
-        let fv = self.read_field(v, *fname);
+        let fv = self.read_value_field(v, *fname);
         Ok(match fs {
             FieldShape::Prim => {
                 if let Some(ty) = self.opaque_value_child(shape.name, owner_ty, *fname)? {

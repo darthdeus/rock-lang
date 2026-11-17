@@ -375,7 +375,7 @@ impl Emitter<'_> {
                 self.write_opnd(out, *ptr);
                 out.push(')');
             }
-            Inst::Field { base, field } => {
+            Inst::Field { base, field, .. } => {
                 self.write_opnd(out, *base);
                 write_field_key(out, field.as_str());
             }

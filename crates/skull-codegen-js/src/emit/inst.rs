@@ -540,7 +540,7 @@ impl Emitter<'_> {
             // A general field read is JS property access. NativeBuffer `.ptr`/
             // `.len`, a leaf VIEW field and Vec `._data`/`.len` are all the same
             // shape; a read THROUGH a buffer element is decomposed by lowering.
-            Inst::Field { base, field } => js_member(&self.render_val(*base)?, field)?,
+            Inst::Field { base, field, .. } => js_member(&self.render_val(*base)?, field)?,
             // Presence is a bool on the scalar ABI, so JS truthiness agrees with
             // luajit's `present and value or nil`.
             Inst::MakeNullableValue { present, value } => format!(
