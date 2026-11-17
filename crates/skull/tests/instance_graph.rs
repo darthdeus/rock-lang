@@ -572,59 +572,14 @@ fn rejections_of(
         .collect()
 }
 
-/// `f<T> -> f<[T]>` cannot be monomorphized: the instantiation type grows
-/// without bound. Plan S 7 records that it compiles and RUNS today, so this is
-/// a deliberate language-surface rejection, not a bug fix.
-#[test]
-fn changing_instance_recursion_is_rejected() {
-    let (ws, g) = ws_and_graph(
-        r#"
-fn depth<T>(x: T, n: int) -> int {
-    if n <= 0 { return 0 }
-    let wrapped: [T] = [x]
-    return 1 + depth(wrapped, n - 1)
-}
-fn main() { depth(1, 3) }
-"#,
-    );
-    let r = rejections_of(
-        &ws,
-        &g,
-        instance_graph::RejectionKind::ChangingInstanceRecursion,
-    );
-    assert_eq!(
-        r.len(),
-        1,
-        "expected exactly one polymorphic-recursion rejection, got {r:?}"
-    );
-    assert!(r[0].contains("depth"), "{r:?}");
-    // The WALK still had to terminate to produce that rejection -- detection is
-    // a post-pass, so `MAX_INSTANTIATION_DEPTH` is what stops the expansion.
-    assert!(
-        g.instances.len() < 500,
-        "instance explosion: {}",
-        g.instances.len()
-    );
-    // ...and the graph is NOT closed, which is what makes `is_closed` a test
-    // rather than a constant: the capped expansion left callees undiscovered.
-    let c = g.closure(&ws);
-    assert!(
-        !c.depth_capped.is_empty(),
-        "a capped expansion was not reported"
-    );
-    assert!(
-        !c.is_closed(),
-        "a graph with a cut expansion reported itself closed"
-    );
-}
-
 #[test]
 fn recursive_diagnostics_do_not_depend_on_type_interning_order() {
     let ws = ws_with_stdlib(
         r#"
 fn grow<T>(x: T, n: int) -> int {
     if n <= 0 { return 0 }
-    return grow([x], n - 1)
+    let wrapped: [T] = [x]
+    return 1 + grow(wrapped, n - 1)
 }
 fn first() -> int { return grow(1, 3) }
 fn second() -> int { return grow(true, 3) }
@@ -648,6 +603,23 @@ fn main() { first(); second() }
         "fixture produced no recursive diagnostic"
     );
     assert_eq!(expected, rejections_of(&ws, &reverse, kind));
+    assert!(expected[0].contains("grow"), "{expected:?}");
+    for g in [&forward, &reverse] {
+        assert!(
+            g.instances.len() < 500,
+            "instance explosion: {}",
+            g.instances.len()
+        );
+        let closure = g.closure(&ws);
+        assert!(
+            !closure.depth_capped.is_empty(),
+            "a capped expansion was not reported"
+        );
+        assert!(
+            !closure.is_closed(),
+            "a graph with a cut expansion reported itself closed"
+        );
+    }
 }
 
 /// The other decided rejections: mutual polymorphic recursion, where the type
@@ -1043,7 +1015,7 @@ fn main() {
 /// root went uninstantiated, and a program built against the whole stdlib always
 /// leaves some -- the corpus answers `closed: NO` for that reason. This pins the
 /// three properties that do hold; the depth-cap arm gets its positive from
-/// `changing_instance_recursion_is_rejected`.
+/// recursion diagnostic test.
 #[test]
 fn every_instance_is_expanded_or_a_boundary() {
     let (ws, g) = ws_and_graph(

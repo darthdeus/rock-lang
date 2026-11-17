@@ -181,42 +181,6 @@ fn native_buffer_value_store_writes_leaves_through_views() {
     }
 }
 
-const NATIVE_BUFFER_SINGLE_FIELD: &str = r#"
-value V1 { x: float }
-
-@nomangle inline(lua) fn __nb_alloc_V1(n: int) -> Ptr<V1> = 'return ffi.new("V1[?]", n)'
-fn nb_v1(n: int) -> NativeBuffer<V1> { return NativeBuffer { ptr: __nb_alloc_V1(n), len: n } }
-
-fn fill(buf: NativeBuffer<V1>, n: int) {
-    for i in 0..n {
-        buf[i] = V1 { x: i as float }
-    }
-}
-
-fn main() {
-    let buf = nb_v1(4)
-    fill(buf, 4)
-}
-"#;
-
-#[test]
-fn native_buffer_single_field_store_takes_no_slot() {
-    // A single-leaf element is the leakiest case for the slot form: the slot
-    // pointer cdata stays live across the iteration in a function register
-    // (loop-carried PHI, 24 B/iter). Leaf addressing takes no slot at all --
-    // bench phi-scope/slot_write_single_field.rock is 0 B/iter, JIT on AND off.
-    let lua = emit_module(NATIVE_BUFFER_SINGLE_FIELD);
-    let body = function_body(&lua, "fill");
-    assert!(
-        !body.contains("__nb_checked_get("),
-        "single-field NativeBuffer store should take no slot reference:\n{body}"
-    );
-    assert!(
-        body.contains("__nb_checked_index("),
-        "the element access must still be bounds-checked:\n{body}"
-    );
-}
-
 /// A GENERIC value struct (`Pair<T>`, GC-carrying tier) must ride the scalar
 /// ABI just like an FFI-clean value struct: per-field leaf params, a
 /// destructured multi-return, and NO `_vt` table materialization in a

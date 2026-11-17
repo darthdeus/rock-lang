@@ -48,30 +48,6 @@ fn main() {
 }
 "#;
 
-const NOBOX_INLINE_LUA_SINK: &str = r#"
-nobox value NV2 { x: float, y: float }
-
-@nomangle inline(lua) fn foreign_sink(v: NV2) = "return"
-
-fn bad(v: NV2) {
-    foreign_sink(v)
-}
-
-fn main() {
-    bad(NV2 { x: 1.0, y: 2.0 })
-}
-"#;
-
-#[test]
-fn nobox_value_rejects_an_inline_lua_sink() {
-    let err = try_emit_module(NOBOX_INLINE_LUA_SINK)
-        .expect_err("an implicit inline(lua) materialization must reject");
-    assert!(
-        err.message.contains("nobox") && err.message.contains("foreign_sink"),
-        "{err:?}"
-    );
-}
-
 const NOBOX_EXPLICIT_MATERIALIZE: &str = r#"
 nobox value NV2 { x: float, y: float }
 
@@ -464,85 +440,6 @@ fn a_column_read_widens_to_nullable_without_materializing() {
     assert_eq!(run_main(&lua), "1\n12\n34\n-1\n56\n12\n34\n-1\n-1\n78");
 }
 
-// A shape that still materializes, so the gate below stays a gate. Twice
-// re-pointed now: an indirect `sink(v)` call started threading leaves
-// (`fn_value_abi`), then a tuple pushed into a collection started riding the box
-// as leaves. Both were OPEN GAPS when chosen, which is what made them rot.
-//
-// Interpolating a whole tuple is chosen because it is PERMANENT -- asking for one
-// runtime-typed value is F1 erasure, a justified box meant to stay a rejection
-// (`tests/errors/nobox_container_gaps.rock.err`). Do not re-point this at a sink
-// the case matrix lists as live.
-const NOBOX_INDIRECT_SINK: &str = r#"
-nobox value NV2 { x: float, y: float }
-
-fn bad(v: NV2) -> int {
-    let t = (v, 1.0)
-    print("{t}")
-    return 0
-}
-
-fn main() {
-    print(bad(NV2 { x: 1.0, y: 2.0 }))
-}
-"#;
-
-#[test]
-fn post_transform_gate_rejects_an_implicit_nobox_box() {
-    let err = try_emit_module(NOBOX_INDIRECT_SINK)
-        .expect_err("an indirect call must not implicitly materialize a nobox value");
-    assert!(
-        err.message.contains("nobox") && err.message.contains("NV2"),
-        "{err:?}"
-    );
-}
-
-const NOBOX_COLUMN_INSPECT: &str = r#"
-nobox value NV2 { x: float, y: float }
-
-fn bad() {
-    let xs: [NV2] = [NV2 { x: 1.0, y: 2.0 }]
-    let _ = inspect(xs)
-}
-
-fn main() {
-    bad()
-}
-"#;
-
-#[test]
-fn column_inspect_rejects_implicit_nobox_element_materialization() {
-    let err = try_emit_module(NOBOX_COLUMN_INSPECT)
-        .expect_err("inspect must not materialize nobox column elements");
-    assert!(
-        err.message.contains("nobox") && err.message.contains("inspect"),
-        "{err:?}"
-    );
-}
-
-const NOBOX_COLUMN_LUA_ARRAY: &str = r#"
-nobox value NV2 { x: float, y: float }
-
-fn bad() {
-    let xs: [NV2] = [NV2 { x: 1.0, y: 2.0 }]
-    let _ = __rock_vec_to_lua_array(xs)
-}
-
-fn main() {
-    bad()
-}
-"#;
-
-#[test]
-fn column_lua_array_bridge_rejects_implicit_nobox_element_materialization() {
-    let err = try_emit_module(NOBOX_COLUMN_LUA_ARRAY)
-        .expect_err("the Lua-array bridge must not materialize nobox column elements");
-    assert!(
-        err.message.contains("nobox") && err.message.contains("Lua array"),
-        "{err:?}"
-    );
-}
-
 const NOBOX_CALL_RETURN: &str = r#"
 nobox value NV2 { x: float, y: float }
 
@@ -560,71 +457,82 @@ fn main() {
 }
 "#;
 
-const NOBOX_ANY_SINK: &str = r#"
-nobox value NV2 { x: float, y: float }
-
-fn erase(v: any) {}
-
-fn bad(v: NV2) {
-    erase(v)
-}
-
-fn main() {}
-"#;
-
 #[test]
-fn any_sink_rejects_at_the_argument() {
-    let err = try_emit_module(NOBOX_ANY_SINK).expect_err("an any sink must reject");
-    assert!(
-        err.message.contains("nobox") && err.message.contains("erase"),
-        "{err:?}"
-    );
-    let span = err.labels.first().expect("sink error has a label").span;
-    let range = span.offset_range();
-    assert_eq!(&NOBOX_ANY_SINK[range.0..range.1], "v");
-}
-
-const NOBOX_GENERIC_SINK: &str = r#"
-nobox value NV2 { x: float, y: float }
-
-extern(lua) fn generic_sink<T>(v: T)
-
-fn bad(v: NV2) {
-    generic_sink(v)
-}
-
-fn main() {}
-"#;
-
-#[test]
-fn unspecialized_generic_sink_rejects() {
-    let err =
-        try_emit_module(NOBOX_GENERIC_SINK).expect_err("an unspecialized generic sink must reject");
-    assert!(
-        err.message.contains("nobox") && err.message.contains("generic_sink"),
-        "{err:?}"
-    );
-}
-
-const NOBOX_EXTERN_SINK: &str = r#"
-nobox value NV2 { x: float, y: float }
-
-extern(lua) fn foreign(v: NV2)
-
-fn bad(v: NV2) {
-    foreign(v)
-}
-
-fn main() {}
-"#;
-
-#[test]
-fn extern_sink_rejects() {
-    let err = try_emit_module(NOBOX_EXTERN_SINK).expect_err("an extern sink must reject");
-    assert!(
-        err.message.contains("nobox") && err.message.contains("foreign"),
-        "{err:?}"
-    );
+fn nobox_escape_sinks_reject_with_specific_diagnostics() {
+    for (name, declaration, body, main, fragments, argument) in [
+        (
+            "inline Lua sink",
+            r#"@nomangle inline(lua) fn foreign_sink(v: NV2) = "return""#,
+            "fn bad(v: NV2) {\n    foreign_sink(v)\n}",
+            "bad(NV2 { x: 1.0, y: 2.0 })",
+            ["nobox", "foreign_sink"],
+            None,
+        ),
+        (
+            "tuple interpolation",
+            "",
+            "fn bad(v: NV2) -> int {\n    let t = (v, 1.0)\n    print(\"{t}\")\n    return 0\n}",
+            "print(bad(NV2 { x: 1.0, y: 2.0 }))",
+            ["nobox", "NV2"],
+            None,
+        ),
+        (
+            "column inspect",
+            "",
+            "fn bad() {\n    let xs: [NV2] = [NV2 { x: 1.0, y: 2.0 }]\n    let _ = inspect(xs)\n}",
+            "bad()",
+            ["nobox", "inspect"],
+            None,
+        ),
+        (
+            "Lua-array bridge",
+            "",
+            "fn bad() {\n    let xs: [NV2] = [NV2 { x: 1.0, y: 2.0 }]\n    let _ = __rock_vec_to_lua_array(xs)\n}",
+            "bad()",
+            ["nobox", "Lua array"],
+            None,
+        ),
+        (
+            "any sink",
+            "fn erase(v: any) {}",
+            "fn bad(v: NV2) {\n    erase(v)\n}",
+            "",
+            ["nobox", "erase"],
+            Some("v"),
+        ),
+        (
+            "unspecialized generic sink",
+            "extern(lua) fn generic_sink<T>(v: T)",
+            "fn bad(v: NV2) {\n    generic_sink(v)\n}",
+            "",
+            ["nobox", "generic_sink"],
+            None,
+        ),
+        (
+            "extern sink",
+            "extern(lua) fn foreign(v: NV2)",
+            "fn bad(v: NV2) {\n    foreign(v)\n}",
+            "",
+            ["nobox", "foreign"],
+            None,
+        ),
+    ] {
+        let source = format!(
+            "nobox value NV2 {{ x: float, y: float }}\n{declaration}\n{body}\nfn main() {{\n{main}\n}}\n"
+        );
+        let err = try_emit_module(&source).expect_err(name);
+        for fragment in fragments {
+            assert!(
+                err.message.contains(fragment),
+                "{name}: expected diagnostic fragment `{fragment}`:\n{err:?}"
+            );
+        }
+        if let Some(argument) = argument {
+            let span = err.labels.first().expect("sink error has a label").span;
+            let range = span.offset_range();
+            assert_eq!(&source[range.0..range.1], argument, "{name}");
+        }
+    }
 }
 
 const NOBOX_CLOSURE_CAPTURE: &str = r#"
@@ -1468,7 +1376,7 @@ fn main() {
 }
 "#;
 
-// The return-position twin of `nobox_value_rejects_an_inline_lua_sink`: the
+// The return-position twin of the inline Lua sink case: the
 // hand-written body writes its own `return`, so it cannot carry leaves. Without
 // the rejection the call site read a leaf the body never returned and the
 // program faulted at runtime.

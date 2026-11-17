@@ -290,22 +290,18 @@ const NATIVE_REQUIRED: &str = r#"
 fn fast_op(x: int) -> int { return x * 2 }
 @intrinsic
 fn portable_op(x: int) -> int { return x * 2 }
+fn caller(x: int) -> int { return fast_op(x) }
 fn main() {
-    let a = fast_op(1)
+    let a = caller(1)
     let b = portable_op(1)
 }
 "#;
 
-/// The artifact decides from its OWN mapping. luajit's mapping is the body slot
-/// (an `inline(lua)` body), so a Rock-only `@native_required` intrinsic is
-/// unavailable there -- and a table that maps it makes it available, which is
-/// what says the arm reads the mapping rather than rejecting everything.
-///
-/// An ORDINARY intrinsic is the nearest working control: it takes the portable
-/// fallback rung, so it stays realized with no mapping at all. Without it the
-/// rejection could pass because every intrinsic is excluded.
+/// A `@native_required` intrinsic needs the artifact's mapping, and its missing
+/// mapping severs the call while retaining the caller. A portable intrinsic is
+/// the control for the fallback path.
 #[test]
-fn native_required_availability_comes_from_the_artifact_mapping() {
+fn native_required_mapping_controls_fallback_and_severed_calls() {
     let ws = ws_with_stdlib(NATIVE_REQUIRED);
     let (g, roots) = graph_for(&ws);
     let f = g
@@ -352,15 +348,45 @@ fn native_required_availability_comes_from_the_artifact_mapping() {
             .all(|e| fn_name(&ws, e.instance.func) != "portable_op"),
         "the portable rung did not fire"
     );
+    let c = bare.census();
+    assert!(
+        c.sites_walked > 0,
+        "no site was walked, so 0 severed says nothing: {c:?}"
+    );
+    let named_severed = bare.render_severed(&ws, &g);
+    assert_eq!(
+        c.severed, 1,
+        "expected exactly the `fast_op` call to be severed, got {named_severed:?}"
+    );
+    assert!(
+        named_severed[0].contains("fast_op"),
+        "the severed call is not the one expected: {named_severed:?}"
+    );
+    assert_eq!(
+        c.severed_by_cause.get("native-mapping-missing").copied(),
+        Some(1),
+        "the severed call lost its cause: {:?}",
+        c.severed_by_cause
+    );
+    assert!(
+        bare.instances
+            .iter()
+            .any(|i| fn_name(&ws, i.func) == "caller"),
+        "the caller was dropped, so nothing would have emitted the call anyway"
+    );
 
-    // CONTROL: the same graph, the same target, one table entry different. If
-    // the arm rejected every intrinsic this would still be excluded.
+    // The same graph and target with one mapping added serves the call.
     let table = Supplies(&["fast_op"]);
     let mapped = realize_supplied(&ws, &g, LUAJIT_DESKTOP, &roots, FnBackend::Lua, &table);
     assert_eq!(
         named(&mapped),
         None,
         "a mapped `@native_required` intrinsic was still excluded"
+    );
+    assert_eq!(
+        mapped.census().severed,
+        0,
+        "mapping the callee left the call severed"
     );
 }
 
@@ -688,60 +714,6 @@ fn retention_is_reachability_not_a_declaration_filter() {
             "a boundary was enqueued as a Rock instance"
         );
     }
-}
-
-/// A retained caller whose concrete callee this artifact cannot realize is a
-/// SEVERED call -- the finding a declaration filter structurally cannot
-/// produce, because it never looks at an edge.
-#[test]
-fn a_retained_caller_naming_an_unrealizable_callee_is_severed() {
-    let ws = ws_with_stdlib(
-        r#"
-@intrinsic @native_required
-fn fast_op(x: int) -> int { return x * 2 }
-fn caller(x: int) -> int { return fast_op(x) }
-fn main() { let a = caller(1) }
-"#,
-    );
-    let (g, roots) = graph_for(&ws);
-    let view = realize(&ws, &g, LUAJIT_DESKTOP, &roots);
-    let c = view.census();
-    assert!(
-        c.sites_walked > 0,
-        "no site was walked, so 0 severed says nothing: {c:?}"
-    );
-    let named: Vec<String> = view.render_severed(&ws, &g);
-    assert_eq!(
-        c.severed, 1,
-        "expected exactly the `fast_op` call to be severed, got {named:?}"
-    );
-    assert!(
-        named[0].contains("fast_op"),
-        "the severed call is not the one expected: {named:?}"
-    );
-    assert_eq!(
-        c.severed_by_cause.get("native-mapping-missing").copied(),
-        Some(1),
-        "the severed call lost its cause: {:?}",
-        c.severed_by_cause
-    );
-    // The CALLER survives -- which is precisely why the severed call matters:
-    // emission would emit a call to a body that is not in the artifact.
-    assert!(
-        view.instances
-            .iter()
-            .any(|i| { fn_name(&ws, i.func) == "caller" }),
-        "the caller was dropped, so nothing would have emitted the call anyway"
-    );
-    // CONTROL: mapping the intrinsic removes the severed call without touching
-    // anything else.
-    let table = Supplies(&["fast_op"]);
-    let mapped = realize_supplied(&ws, &g, LUAJIT_DESKTOP, &roots, FnBackend::Lua, &table);
-    assert_eq!(
-        mapped.census().severed,
-        0,
-        "mapping the callee left the call severed"
-    );
 }
 
 /// Identity across artifacts is the shared `Instance`, NOT the spelling.
@@ -1318,211 +1290,129 @@ fn main() { let n = a(1) + b(2) }
     );
 }
 
-/// **The mapping question does not need a source body.** An `@intrinsic` this
-/// artifact maps in its OWN table is realized by that mapping -- there is no
-/// declaration whose body gets emitted, so which backend wrote the source body
-/// decides nothing. Asking for a backend sibling first rejects `nb_get` on JS
-/// as `foreign-to-artifact` even though `JsIntrinsics` maps it, which is the
-/// same PROXY shape the intrinsic arm was already caught by once:
-/// `skull_mir::intrinsics`' order is mapping > portable fallback > reject.
-#[test]
-fn a_natively_mapped_intrinsic_needs_no_backend_sibling() {
-    let ws = ws_with_stdlib(
-        r#"
+const REALIZATION_KINDS: &str = r#"
 @intrinsic inline(lua) fn mapped_probe(x: int) -> int = "return x * 2"
-fn main() { let n = mapped_probe(1) }
-"#,
-    );
-    let (g, roots) = graph_for(&ws);
-    let named = |view: &artifact::ArtifactView| realized_kind(&ws, view, "mapped_probe");
-    let severed_here = |view: &artifact::ArtifactView| severed_cause(&ws, view, "mapped_probe");
-
-    // CONTROL: with no table, JS has neither a body nor a mapping, so the call
-    // stays severed. The reorder alone must not admit it.
-    let unmapped = realize(&ws, &g, JAVASCRIPT_WEB, &roots);
-    assert_eq!(
-        severed_here(&unmapped),
-        Some(Unrealizable::ForeignToArtifact)
-    );
-    assert_eq!(
-        named(&unmapped),
-        None,
-        "an unmapped Lua-only body was realized on JS"
-    );
-
-    let table = Supplies(&["mapped_probe"]);
-    let mapped = realize_supplied(&ws, &g, JAVASCRIPT_WEB, &roots, FnBackend::Js, &table);
-    assert_eq!(
-        named(&mapped),
-        Some(artifact::Realization::NativeMapping),
-        "the JS artifact refused an intrinsic its own table maps"
-    );
-    assert_eq!(
-        severed_here(&mapped),
-        None,
-        "a mapped intrinsic is still a severed call"
-    );
-
-    // The luajit artifact is unmoved: its mapping IS the `inline(lua)` body.
-    let lua = realize(&ws, &g, LUAJIT_DESKTOP, &roots);
-    assert_eq!(named(&lua), Some(artifact::Realization::NativeMapping));
-}
-
-/// **A compile-time expansion has no body on ANY backend.** `@struct_expand` and
-/// friends are expanded at MIR lowering, so asking which backend declared the
-/// (never-emitted) opaque body is asking a question with no consumer -- and
-/// answering `foreign-to-artifact` severs a call every target actually expands.
-#[test]
-fn a_compile_time_expansion_needs_no_backend_sibling() {
-    let ws = ws_with_stdlib(
-        r#"
 @struct_expand inline(lua) fn expand_probe(x: int) -> int = "return 0"
-fn main() { let n = expand_probe(1) }
-"#,
-    );
-    let (g, roots) = graph_for(&ws);
-    let kind = |view: &artifact::ArtifactView| realized_kind(&ws, view, "expand_probe");
+inline(lua) fn bound_probe(x: int) -> int = "return x + 1"
+extern(ffi, "host") fn host_probe(n: int) -> int
+fn rock_bound(x: int) -> int { return rock_bound_callee(x) }
+fn rock_bound_callee(x: int) -> int { return x + 1 }
+fn main() {
+    let a = mapped_probe(1)
+    let b = expand_probe(2)
+    let c = bound_probe(3)
+    let d = host_probe(4)
+    let e = rock_bound(5)
+}
+"#;
 
-    // CONTROL: the luajit artifact already answers this, so the JS answer below
-    // is a divergence between two artifacts over ONE declaration.
-    let lua = realize(&ws, &g, LUAJIT_DESKTOP, &roots);
-    assert_eq!(
-        kind(&lua),
-        Some(artifact::Realization::CompileTimeExpansion)
-    );
+/// Target realization accounts for native mappings, compile-time expansion,
+/// and host bindings before deciding which Rock bodies to traverse.
+#[test]
+fn target_realization_uses_mappings_and_stops_at_boundaries() {
+    let ws = ws_with_stdlib(REALIZATION_KINDS);
+    let (g, all_roots) = graph_for(&ws);
+    let roots = main_roots(&ws, &all_roots);
+    assert_eq!(roots.len(), 1, "the fixture has no unique `main` root");
+    let kind = |view: &artifact::ArtifactView, name: &str| realized_kind(&ws, view, name);
+    let severed = |view: &artifact::ArtifactView, name: &str| severed_cause(&ws, view, name);
 
     let js = realize(&ws, &g, JAVASCRIPT_WEB, &roots);
+    for name in ["mapped_probe", "bound_probe", "host_probe"] {
+        assert_eq!(
+            severed(&js, name),
+            Some(Unrealizable::ForeignToArtifact),
+            "unmapped JS call to `{name}` was not severed"
+        );
+    }
+    assert_eq!(kind(&js, "mapped_probe"), None);
     assert_eq!(
-        kind(&js),
+        kind(&js, "expand_probe"),
         Some(artifact::Realization::CompileTimeExpansion),
         "the JS artifact asked for a backend body for an expansion that has none"
     );
     assert_eq!(
-        severed_cause(&ws, &js, "expand_probe"),
+        severed(&js, "expand_probe"),
         None,
         "an expansion the artifact performs is still a severed call"
     );
-}
-
-/// A backend may supply a declaration's body ITSELF, with a hand-written
-/// binding, instead of emitting the declaration's foreign body. The JS backend
-/// does exactly this for `phantom`, `vec_push`, `error` and 60-odd others
-/// (`skull_codegen_js::host_binding`), so an artifact view that only asks
-/// "which backend wrote the source body" severs calls the artifact serves --
-/// 2,433 sites for `phantom` alone on the corpus.
-///
-/// It is asked LAST, after the declaration's own body: where a real
-/// `inline(js)` sibling exists, that body is what the artifact emits.
-#[test]
-fn a_declaration_the_artifact_binds_itself_is_not_severed() {
-    let ws = ws_with_stdlib(
-        r#"
-inline(lua) fn bound_probe(x: int) -> int = "return x + 1"
-extern(ffi, "host") fn host_probe(n: int) -> int
-fn main() { let n = bound_probe(1) + host_probe(2) }
-"#,
-    );
-    let (g, roots) = graph_for(&ws);
-    let kind = |view, name| realized_kind(&ws, view, name);
-    let severed = |view, name| severed_cause(&ws, view, name);
-
-    // CONTROL: unbound, the two calls are severed under their own causes -- a
-    // Lua-only body and a host symbol the web platform has none of.
-    let plain = realize(&ws, &g, JAVASCRIPT_WEB, &roots);
     assert_eq!(
-        severed(&plain, "bound_probe"),
-        Some(Unrealizable::ForeignToArtifact)
-    );
-    // An `extern(ffi)` is a Lua-backend declaration, so JS fails to select a
-    // sibling before the class question is ever reached.
-    assert_eq!(
-        severed(&plain, "host_probe"),
-        Some(Unrealizable::ForeignToArtifact)
-    );
-
-    let bindings = Supplies(&["bound_probe", "host_probe"]);
-    let bound = realize_supplied(&ws, &g, JAVASCRIPT_WEB, &roots, FnBackend::Js, &bindings);
-    assert_eq!(
-        kind(&bound, "bound_probe"),
-        Some(artifact::Realization::HostBinding)
-    );
-    assert_eq!(
-        kind(&bound, "host_probe"),
-        Some(artifact::Realization::HostBinding)
-    );
-    assert_eq!(severed(&bound, "bound_probe"), None);
-    assert_eq!(severed(&bound, "host_probe"), None);
-    // A host binding has no Rock body here, so it is a BOUNDARY the artifact
-    // names -- never an instance whose callees would be enqueued.
-    let inst = bound
-        .realization
-        .keys()
-        .find(|i| fn_name(&ws, i.func) == "bound_probe")
-        .expect("bound_probe retained")
-        .clone();
-    assert!(bound.boundaries.contains_key(&inst));
-    assert!(!bound.instances.contains(&inst));
-
-    // A BINDING WINS OVER THE DECLARATION'S OWN BODY, because that is what the
-    // emitter does: `skull_codegen_js`'s callee walk skips a host-bound callee
-    // before it reaches the co-emit branches, so the body is never emitted.
-    // Classifying by the body instead would have the artifact traverse a Rock
-    // body emission never emits -- `map_new` is exactly that shape.
-    let lua = realize_supplied(&ws, &g, LUAJIT_DESKTOP, &roots, FnBackend::Lua, &bindings);
-    assert_eq!(
-        kind(&lua, "bound_probe"),
-        Some(artifact::Realization::HostBinding),
-        "the artifact emitted a body its own binding replaces"
-    );
-    // CONTROL: without the bindings the same declaration IS its own body, so
-    // the answer above is the BINDING's and not the declaration's.
-    let unbound_lua = realize(&ws, &g, LUAJIT_DESKTOP, &roots);
-    assert_eq!(
-        kind(&unbound_lua, "bound_probe"),
-        Some(artifact::Realization::ForeignBody(
-            skull::instance_graph::BoundaryClass::InlineBody
-        ))
-    );
-}
-
-/// A host-bound declaration with a ROCK body is not traversed. `map_new` is
-/// pure Rock (`transmute(table_new())`) and the JS backend renders it as
-/// `new Map()`, skipping its co-emission -- so a view that classified it by its
-/// body would walk into callees this artifact never emits.
-#[test]
-fn a_host_bound_rock_body_is_a_boundary_and_is_not_traversed() {
-    let ws = ws_with_stdlib(
-        r#"
-fn rock_bound(x: int) -> int { return rock_bound_callee(x) }
-fn rock_bound_callee(x: int) -> int { return x + 1 }
-fn main() { let n = rock_bound(1) }
-"#,
-    );
-    let (g, all_roots) = graph_for(&ws);
-    let roots = main_roots(&ws, &all_roots);
-    let named = |view, name| realized_kind(&ws, view, name);
-
-    // CONTROL first: unbound, it is a Rock body and its callee is reached.
-    let plain = realize(&ws, &g, JAVASCRIPT_WEB, &roots);
-    assert_eq!(
-        named(&plain, "rock_bound"),
+        kind(&js, "rock_bound"),
         Some(artifact::Realization::RockBody)
     );
     assert_eq!(
-        named(&plain, "rock_bound_callee"),
-        Some(artifact::Realization::RockBody)
+        kind(&js, "rock_bound_callee"),
+        Some(artifact::Realization::RockBody),
+        "the unbound Rock body did not reach its callee"
     );
 
-    let bindings = Supplies(&["rock_bound"]);
-    let bound = realize_supplied(&ws, &g, JAVASCRIPT_WEB, &roots, FnBackend::Js, &bindings);
+    let bindings = Supplies(&["mapped_probe", "bound_probe", "host_probe", "rock_bound"]);
+    let js_bound = realize_supplied(&ws, &g, JAVASCRIPT_WEB, &roots, FnBackend::Js, &bindings);
+    for (name, expected) in [
+        ("mapped_probe", artifact::Realization::NativeMapping),
+        ("expand_probe", artifact::Realization::CompileTimeExpansion),
+        ("bound_probe", artifact::Realization::HostBinding),
+        ("host_probe", artifact::Realization::HostBinding),
+        ("rock_bound", artifact::Realization::HostBinding),
+    ] {
+        assert_eq!(
+            kind(&js_bound, name),
+            Some(expected),
+            "wrong realization for `{name}`"
+        );
+    }
+    for name in ["mapped_probe", "bound_probe", "host_probe", "rock_bound"] {
+        assert_eq!(
+            severed(&js_bound, name),
+            None,
+            "JS binding for `{name}` left the call severed"
+        );
+    }
+
+    for name in ["bound_probe", "rock_bound"] {
+        let instance = js_bound
+            .realization
+            .keys()
+            .find(|i| fn_name(&ws, i.func) == name)
+            .unwrap_or_else(|| panic!("{name} was not retained"))
+            .clone();
+        assert!(
+            js_bound.boundaries.contains_key(&instance),
+            "{name} is not a boundary"
+        );
+        assert!(
+            !js_bound.instances.contains(&instance),
+            "{name} was traversed as Rock"
+        );
+    }
     assert_eq!(
-        named(&bound, "rock_bound"),
-        Some(artifact::Realization::HostBinding)
-    );
-    assert_eq!(
-        named(&bound, "rock_bound_callee"),
+        kind(&js_bound, "rock_bound_callee"),
         None,
         "the walk entered a body the artifact's own binding replaces"
+    );
+
+    let lua = realize(&ws, &g, LUAJIT_DESKTOP, &roots);
+    assert_eq!(
+        kind(&lua, "mapped_probe"),
+        Some(artifact::Realization::NativeMapping)
+    );
+    assert_eq!(
+        kind(&lua, "expand_probe"),
+        Some(artifact::Realization::CompileTimeExpansion)
+    );
+    assert_eq!(
+        kind(&lua, "bound_probe"),
+        Some(artifact::Realization::ForeignBody(
+            skull::instance_graph::BoundaryClass::InlineBody
+        )),
+        "without a binding the Lua artifact must select the declaration's body"
+    );
+
+    let lua_bound = realize_supplied(&ws, &g, LUAJIT_DESKTOP, &roots, FnBackend::Lua, &bindings);
+    assert_eq!(
+        kind(&lua_bound, "bound_probe"),
+        Some(artifact::Realization::HostBinding),
+        "the artifact emitted a body its own binding replaces"
     );
 }
 
