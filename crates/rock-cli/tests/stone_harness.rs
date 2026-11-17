@@ -142,6 +142,33 @@ impl StoneHarness {
         self.tempdir.path()
     }
 
+    #[cfg(unix)]
+    pub fn while_stopped(&self, writes: impl FnOnce()) {
+        struct Resume(libc::pid_t);
+        impl Drop for Resume {
+            fn drop(&mut self) {
+                unsafe { libc::kill(self.0, libc::SIGCONT) };
+            }
+        }
+        let child = self.child.lock().unwrap();
+        let pid = child.id() as libc::pid_t;
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
+        let _resume = Resume(pid);
+        let mut status = 0;
+        loop {
+            let result = unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED) };
+            if result == pid {
+                assert!(libc::WIFSTOPPED(status), "watcher exited before stopping");
+                break;
+            }
+            assert_eq!(
+                std::io::Error::last_os_error().kind(),
+                std::io::ErrorKind::Interrupted
+            );
+        }
+        writes();
+    }
+
     /// Path to `main.lua` produced by the most recent compile. Reads
     /// nothing -- caller does `fs::read_to_string` if needed.
     pub fn compiled_lua_path(&self) -> PathBuf {

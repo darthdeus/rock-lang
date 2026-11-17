@@ -9,7 +9,6 @@ use rock_host::process_management::{
 };
 use std::process::{Child, Stdio};
 use std::time::Duration;
-use wait_timeout::ChildExt;
 
 /// One node run's outcome. Unlike `lua_runner`, stderr stays separate: the JS
 /// executor's protocol lives on stdout and its error reports quote stderr
@@ -75,15 +74,24 @@ pub(crate) fn run_node_code_with_timeout(
     // outgrows the pipe buffer until it reads as a timeout.
     let stdout = drain(child.stdout.take().expect("node stdout is piped"));
     let stderr = drain(child.stderr.take().expect("node stderr is piped"));
-    let waited = child
-        .wait_timeout(timeout)
-        .map_err(|e| error(format!("failed to wait for node process: {e}")));
-    if !matches!(waited, Ok(Some(_))) {
+    let waited = crate::common::ProcessManager::wait_with_policy_and_tests::<()>(
+        &mut child,
+        crate::common::WaitPolicy::Test {
+            cpu_limit: timeout,
+            wall_limit: Duration::MAX,
+        },
+        false,
+        false,
+        None,
+        None,
+    )
+    .map_err(|e| error(format!("failed to wait for node process: {e}")));
+    if waited.is_err() {
         let _ = child.kill();
         let _ = child.wait();
     }
     unregister_child_process(pid);
-    if waited?.is_none() {
+    if waited?.timed_out {
         return Err(error(format!(
             "node process timed out after {} seconds",
             timeout.as_secs_f32()
@@ -112,6 +120,16 @@ pub(crate) fn run_node_code_streaming(code: &str) -> Result<i32, CompilerError> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scheduler_delay_does_not_spend_the_execution_budget() {
+        let run = super::run_node_code_with_timeout(
+            "setTimeout(() => console.log('finished'), 1250);",
+            std::time::Duration::from_secs(1),
+        )
+        .expect("idle time does not consume the Node CPU budget");
+        assert_eq!(run.stdout.trim(), "finished");
+    }
+
     #[test]
     fn output_larger_than_a_pipe_buffer_is_read_while_node_runs() {
         let run = super::run_node_code_with_timeout(

@@ -40,25 +40,34 @@ fn smoke_initial_write_triggers_one_reload() {
 }
 
 #[test]
+#[cfg(unix)]
 fn rapid_burst_coalesces() {
-    // Coalescing assumes consecutive writes land within the watcher's 100 ms
-    // debounce window. Writes 10 ms apart model a writer that the scheduler
-    // or the file-event stream delays between saves; splitting the burst
-    // takes a further 90 ms stall, and the bound of 3 tolerates two of them.
     let h = StoneHarness::spawn(&[]);
     let baseline = h.event_count();
-    for i in 0..10 {
-        h.write_file("a.rock", &format!("fn main() {{ let x = {} }}\n", i));
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    // Deliver the complete burst before the watcher can observe any write.
+    h.while_stopped(|| {
+        for i in 0..10 {
+            write_file_atomic(
+                &h,
+                "a.rock",
+                &format!("@nomangle fn final_value() -> int {{ {i} }}\n"),
+            );
+        }
+    });
     let log = h.await_settled_after(baseline, QUIESCENT, SETTLE_TIMEOUT);
-    assert!(
-        log.len() <= 3,
-        "10 rapid writes should coalesce to <=3 reloads, got {}: {:?}",
+    assert_eq!(
         log.len(),
-        log,
+        1,
+        "one observed burst must produce one reload: {log:?}"
     );
-    assert!(!log.is_empty(), "burst should produce at least one reload");
+    let script = format!("{}\nassert(final_value() == 9)\n", h.compiled_lua());
+    let run = rock_host::lua_runner::run_lua_code_with_timeout(&script, None)
+        .expect("run the reloaded program");
+    assert!(
+        run.success,
+        "the reload must contain the final write: {}",
+        run.combined()
+    );
 }
 
 #[test]
