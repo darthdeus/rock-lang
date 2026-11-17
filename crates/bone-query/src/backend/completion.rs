@@ -73,7 +73,7 @@ impl BoneWorkspace {
             return Vec::new();
         };
         let src = src.as_str();
-        let offset = offset_at_line_col(src, pos.line, pos.character);
+        let offset = byte_offset(src, pos);
         let mut items = lexical_gate(src, offset, space_triggered).unwrap_or_else(|| {
             let prefix_raw = ident_prefix(src, offset);
             let rq = Request {

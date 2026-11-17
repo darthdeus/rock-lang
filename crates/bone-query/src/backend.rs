@@ -2,8 +2,14 @@
 
 mod completion;
 mod macro_refs;
+mod protocol;
 mod rename_guard;
 
+pub use protocol::{LineIndex, offset_at_line_col, offset_to_position};
+use protocol::{
+    byte_offset, byte_offsets, byte_range, editor_uri, location, location_range, source_location,
+    span_range, utf16_col_at,
+};
 pub(crate) use rename_guard::RenameRefusal;
 use rename_guard::check_new_name;
 
@@ -631,7 +637,7 @@ impl BoneWorkspace {
         pos: Position,
     ) -> Option<(String, &BoneProject, &str, usize, &Workspace, ModuleId)> {
         let (path, proj, src) = self.open_file(path)?;
-        let offset = offset_at_line_col(src, pos.line, pos.character);
+        let offset = byte_offset(src, pos);
         let ws = proj.session.workspace();
         let mid = user_module_for_path(ws, &path)?;
         Some((path, proj, src, offset, ws, mid))
@@ -1077,7 +1083,7 @@ impl BoneWorkspace {
     pub fn hover(&self, path: &str, pos: Position) -> Option<Hover> {
         let (path, proj, src) = self.open_file(path)?;
         let path = path.as_str();
-        let offset = offset_at_line_col(src, pos.line, pos.character);
+        let offset = byte_offset(src, pos);
 
         // Enclosing expressions cover whitespace between their tokens.
         if src
@@ -1103,11 +1109,7 @@ impl BoneWorkspace {
                     kind: MarkupKind::Markdown,
                     value: format!("```\n{}```", format_hole_report(&hi)),
                 }),
-                range: Some(range_from_offsets(
-                    src,
-                    hi.span.offset_range().0,
-                    hi.span.offset_range().1,
-                )),
+                range: Some(byte_range(src, hi.span.offset_range())),
             });
         }
 
@@ -1129,11 +1131,7 @@ impl BoneWorkspace {
                 kind: MarkupKind::Markdown,
                 value: contents,
             }),
-            range: Some(range_from_offsets(
-                src,
-                span.offset_range().0,
-                span.offset_range().1,
-            )),
+            range: Some(byte_range(src, span.offset_range())),
         })
     }
 
@@ -1206,7 +1204,7 @@ impl BoneWorkspace {
             if let Some(span) =
                 macro_refs::macro_invocation_def(ast, &proj.session.registry, offset)
             {
-                return self.location_from_span(proj, &span);
+                return location(proj, &span, None);
             }
         }
         // A modules-v1 path segment navigates by what the resolver recorded
@@ -1219,7 +1217,7 @@ impl BoneWorkspace {
                 }
                 target => crate::query::segment_target_def(ws, target),
             }?;
-            return self.location_from_span(proj, &span);
+            return location(proj, &span, None);
         }
         let pat_def = raw
             .as_ref()
@@ -1227,7 +1225,7 @@ impl BoneWorkspace {
         let span = pat_def
             .or_else(|| crate::query::generic_param_def(ws, mid, offset))
             .or_else(|| crate::query::definition_at(ws, mid, inf, offset))?;
-        self.location_from_span(proj, &span)
+        location(proj, &span, None)
     }
 
     // goto-type-definition
@@ -1239,7 +1237,7 @@ impl BoneWorkspace {
         let (_, proj, _, offset, ws, mid) = self.cursor(path, pos)?;
         let inf = ws.inference(mid)?;
         let span = crate::query::type_definition_at(ws, mid, inf, offset)?;
-        self.location_from_span(proj, &span)
+        location(proj, &span, None)
     }
 
     // find-references
@@ -1249,8 +1247,8 @@ impl BoneWorkspace {
             return Vec::new();
         };
         let path = path.as_str();
-        let offset = offset_at_line_col(src, pos.line, pos.character);
-        let mut idx_cache: HashMap<String, LineIndex> = HashMap::new();
+        let offset = byte_offset(src, pos);
+        let mut idx_cache = HashMap::new();
         // Find-usages scopes to the specific overload under the cursor.
         self.all_reference_spans(
             proj,
@@ -1260,7 +1258,7 @@ impl BoneWorkspace {
             "references",
         )
         .into_iter()
-        .filter_map(|s| self.location_from_span_indexed(proj, &s.span, &mut idx_cache))
+        .filter_map(|s| location(proj, &s.span, Some(&mut idx_cache)))
         .collect()
     }
 
@@ -1270,7 +1268,7 @@ impl BoneWorkspace {
         let path = path_c.as_str();
         // A path with no URI has no locations either: `references` reports
         // that failure when it builds them.
-        let Ok(want) = Uri::from_file_path(&editor_path(path)) else {
+        let Ok(want) = editor_uri(path) else {
             return Vec::new();
         };
         self.references(path, pos)
@@ -1318,10 +1316,7 @@ impl BoneWorkspace {
         new_text.push_str(&match_indent);
 
         Some(MatchArmsFill {
-            range: Range {
-                start: offset_to_position(src, replace_start),
-                end: offset_to_position(src, close),
-            },
+            range: byte_range(src, (replace_start, close)),
             new_text,
             missing: arms.len(),
         })
@@ -1377,10 +1372,7 @@ impl BoneWorkspace {
         };
 
         Some(StructFieldsFill {
-            range: Range {
-                start: offset_to_position(src, content_end),
-                end: offset_to_position(src, close),
-            },
+            range: byte_range(src, (content_end, close)),
             new_text,
             missing: missing.len(),
         })
@@ -1412,10 +1404,7 @@ impl BoneWorkspace {
                 init_text.to_string()
             };
             edits.push(TextEdit {
-                range: Range {
-                    start: offset_to_position(src, s),
-                    end: offset_to_position(src, e),
-                },
+                range: byte_range(src, (s, e)),
                 new_text,
             });
         }
@@ -1428,10 +1417,7 @@ impl BoneWorkspace {
             .map(|i| le + i + 1)
             .unwrap_or(src.len());
         edits.push(TextEdit {
-            range: Range {
-                start: offset_to_position(src, line_start),
-                end: offset_to_position(src, line_end),
-            },
+            range: byte_range(src, (line_start, line_end)),
             new_text: String::new(),
         });
 
@@ -1458,7 +1444,7 @@ impl BoneWorkspace {
 
         let at = offset_to_position(src, gf.insert_at.min(src.len()));
         Some(GenerateFunctionEdit {
-            range: Range { start: at, end: at },
+            range: Range::new(at, at),
             new_text,
             fn_name: gf.name,
         })
@@ -1667,7 +1653,7 @@ impl BoneWorkspace {
             return Ok(None);
         };
         let path = path.as_str();
-        let offset = offset_at_line_col(src, pos.line, pos.character);
+        let offset = byte_offset(src, pos);
         // Find a name span even when the selected node covers an entire call.
         let here = self
             .rename_plan(proj, path, offset)?
@@ -1678,7 +1664,7 @@ impl BoneWorkspace {
                     && s.offset_range().0 <= offset
                     && offset < s.offset_range().1
             });
-        Ok(here.map(|here| range_from_offsets(src, here.offset_range().0, here.offset_range().1)))
+        Ok(here.map(|here| byte_range(src, here.offset_range())))
     }
 
     /// The edits renaming the symbol at `pos` to `new_name`: `Ok(None)` when
@@ -1694,7 +1680,7 @@ impl BoneWorkspace {
             return Ok(None);
         };
         let path = path.as_str();
-        let offset = offset_at_line_col(src, pos.line, pos.character);
+        let offset = byte_offset(src, pos);
         // Rename rewrites the whole (shared) overloaded name, not one overload.
         let sites = self.rename_plan(proj, path, offset)?;
         if sites.is_empty() {
@@ -1707,10 +1693,9 @@ impl BoneWorkspace {
             reason = "WorkspaceEdit Uri keys use immutable text for equality and hashing"
         )]
         let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
-        let mut idx_cache: HashMap<String, LineIndex> = HashMap::new();
+        let mut idx_cache = HashMap::new();
         for site in sites {
-            let Some(loc) = self.location_from_span_indexed(proj, &site.span, &mut idx_cache)
-            else {
+            let Some(loc) = location(proj, &site.span, Some(&mut idx_cache)) else {
                 continue;
             };
             // A shorthand token (`S { x }`) names both the field and a
@@ -1793,7 +1778,7 @@ impl BoneWorkspace {
         let Some(mid) = user_module_for_path(ws, path) else {
             return Vec::new();
         };
-        // One LineIndex for the file: a per-symbol `range_from_offsets` would do
+        // One LineIndex for the file: a per-symbol `byte_range` would do
         // an O(offset) scan from the file start for each symbol's two ends.
         let line_index = LineIndex::new(src);
         crate::query::document_symbols(ws, mid)
@@ -1823,18 +1808,13 @@ impl BoneWorkspace {
                 let Some(mid) = user_module_for_path(ws, file) else {
                     continue;
                 };
-                let uri = match Uri::from_file_path(&editor_path(file)) {
-                    Ok(uri) => uri,
-                    Err(error) => {
-                        proj.fallbacks.report(
-                            "workspace symbols",
-                            file,
-                            "construct URI",
-                            &error.to_string(),
-                            "omit symbols from this file; keep other files",
-                        );
-                        continue;
-                    }
+                let Some(uri) = source_location(
+                    proj,
+                    file,
+                    "workspace symbols",
+                    "omit symbols from this file; keep other files",
+                ) else {
+                    continue;
                 };
                 // Built lazily on the first match in this file: a Ctrl-T query
                 // skips most files, so don't index a file with no hit. Without it
@@ -2066,8 +2046,7 @@ impl BoneWorkspace {
             return Vec::new();
         };
         let path = path.as_str();
-        let start = offset_at_line_col(src, range.start.line, range.start.character);
-        let end = offset_at_line_col(src, range.end.line, range.end.character);
+        let (start, end) = byte_offsets(src, range);
         // Prefer the live session; reparse with RECOVERY if a broken buffer
         // dropped the module, so hints still show during partial edits (#21).
         let live = proj.session.workspace();
@@ -2142,81 +2121,6 @@ impl BoneWorkspace {
             .collect()
     }
 
-    // -- Shared span -> LSP conversion --------------------------------------
-
-    /// Resolve a span's file to its LSP [`Uri`] and source text: the session
-    /// buffer for a tracked file (incl. the stdlib, whose sources are seeded into
-    /// `texts`), else a disk read (untracked sibling). `Cow` borrows in the common
-    /// (tracked) case and only owns on the disk read.
-    fn span_uri_and_text<'a>(
-        &self,
-        proj: &'a BoneProject,
-        span: &Span,
-    ) -> Option<(Uri, Cow<'a, str>)> {
-        let file = span.file.as_str();
-        let uri = match Uri::from_file_path(&editor_path(file)) {
-            Ok(uri) => uri,
-            Err(error) => {
-                proj.fallbacks.report(
-                    "span location",
-                    file,
-                    "construct URI",
-                    &error.to_string(),
-                    "omit location",
-                );
-                return None;
-            }
-        };
-        let text = match proj.texts.get(file) {
-            Some(text) => Cow::Borrowed(text.as_str()),
-            None => match fs_err::read_to_string(file) {
-                Ok(text) => Cow::Owned(text),
-                Err(error) => {
-                    proj.fallbacks.report(
-                        "span location",
-                        file,
-                        "read source",
-                        &error.to_string(),
-                        "omit location",
-                    );
-                    return None;
-                }
-            },
-        };
-        Some((uri, text))
-    }
-
-    /// Convert a bone span to an LSP [`Location`]. Single-span use (definition);
-    /// loops over many spans (references/rename) use
-    /// [`location_from_span_indexed`] with a per-file [`LineIndex`].
-    fn location_from_span(&self, proj: &BoneProject, span: &Span) -> Option<Location> {
-        let (uri, text) = self.span_uri_and_text(proj, span)?;
-        Some(Location {
-            uri,
-            range: range_from_offsets(&text, span.offset_range().0, span.offset_range().1),
-        })
-    }
-
-    /// Like [`location_from_span`] but reuses a per-file [`LineIndex`] across a
-    /// batch of spans (references/rename emit many sites, often in one file): a
-    /// bare per-span `range_from_offsets` rescans from the file start each time
-    /// (O(sites * filesize)).
-    fn location_from_span_indexed(
-        &self,
-        proj: &BoneProject,
-        span: &Span,
-        cache: &mut HashMap<String, LineIndex>,
-    ) -> Option<Location> {
-        let (uri, text) = self.span_uri_and_text(proj, span)?;
-        let li = cache
-            .entry(span.file.as_str().to_string())
-            .or_insert_with(|| LineIndex::new(&text));
-        Some(Location {
-            uri,
-            range: li.range(&text, span.offset_range().0, span.offset_range().1),
-        })
-    }
-
     pub fn semantic_tokens(&self, path: &str) -> SemanticTokens {
         let path_c = self.canon(path);
         let path = path_c.as_str();
@@ -2230,9 +2134,7 @@ impl BoneWorkspace {
         let Some(src) = self.project(path).and_then(|p| p.texts.get(path)) else {
             return SemanticTokens::default();
         };
-        let lo = offset_at_line_col(src, range.start.line, range.start.character);
-        let hi = offset_at_line_col(src, range.end.line, range.end.character);
-        self.semantic_tokens_impl(path, Some((lo, hi)))
+        self.semantic_tokens_impl(path, Some(byte_offsets(src, range)))
     }
 
     fn semantic_tokens_impl(&self, path: &str, range: Option<(usize, usize)>) -> SemanticTokens {
@@ -2957,127 +2859,6 @@ fn semantic_name_map(ws: &Workspace) -> HashMap<Ustr, u32> {
     names
 }
 
-// ---------------------------------------------------------------------------
-// Coordinate-unit conversions (the single place these are gotten right)
-// ---------------------------------------------------------------------------
-
-/// 0-based LSP `(line, character)` -> 0-based **byte** offset into `src`.
-/// `character` counts UTF-16 code units, the protocol's default encoding. A
-/// column inside a surrogate pair snaps to the character's start; past the
-/// line's end it clamps there (before the line break), per the spec.
-pub fn offset_at_line_col(src: &str, line: u32, character: u32) -> usize {
-    let mut offset = 0usize;
-    for (i, line_str) in src.split_inclusive('\n').enumerate() {
-        if i == line as usize {
-            let text = line_str.strip_suffix('\n').unwrap_or(line_str);
-            let text = text.strip_suffix('\r').unwrap_or(text);
-            let mut units = 0u32;
-            for (byte, ch) in text.char_indices() {
-                units += ch.len_utf16() as u32;
-                if units > character {
-                    return offset + byte;
-                }
-            }
-            return offset + text.len();
-        }
-        offset += line_str.len();
-    }
-    src.len()
-}
-
-/// Byte offset -> 0-based LSP [`Position`], `character` in UTF-16 code units
-/// like [`offset_at_line_col`].
-pub fn offset_to_position(src: &str, offset: usize) -> Position {
-    let mut line = 0u32;
-    let mut col = 0u32;
-    let mut cur = 0usize;
-    for ch in src.chars() {
-        if cur >= offset {
-            break;
-        }
-        cur += ch.len_utf8();
-        if ch == '\n' {
-            line += 1;
-            col = 0;
-        } else {
-            col += ch.len_utf16() as u32;
-        }
-    }
-    Position::new(line, col)
-}
-
-/// The LSP character of byte `offset` on its own line, in UTF-16 code units.
-fn utf16_col_at(src: &str, offset: usize) -> u32 {
-    let Some(before) = src.get(..offset) else {
-        return 0;
-    };
-    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
-    before[line_start..].encode_utf16().count() as u32
-}
-
-/// A compiler `(line, col)`, where `col` counts Unicode scalars, as an LSP
-/// [`Position`] in UTF-16 code units. Without the file's text the column is
-/// passed through, which is exact for any line without astral characters.
-fn compiler_position(text: Option<&str>, line: usize, col: usize) -> Position {
-    let units = text.and_then(|t| t.split('\n').nth(line)).map(|l| {
-        let prefix = l.chars().take(col);
-        let (scalars, units) =
-            prefix.fold((0, 0u32), |(n, u), c| (n + 1, u + c.len_utf16() as u32));
-        units + (col - scalars) as u32
-    });
-    Position::new(line as u32, units.unwrap_or(col as u32))
-}
-
-/// Index line starts once for batches of span-to-position conversions.
-pub struct LineIndex {
-    line_starts: Vec<usize>,
-}
-
-impl LineIndex {
-    pub fn new(src: &str) -> Self {
-        let mut line_starts = vec![0usize];
-        for (i, b) in src.bytes().enumerate() {
-            if b == b'\n' {
-                line_starts.push(i + 1);
-            }
-        }
-        LineIndex { line_starts }
-    }
-
-    /// LSP [`Range`] for a byte span, both ends via [`LineIndex::position`].
-    pub fn range(&self, src: &str, start: usize, stop: usize) -> Range {
-        Range::new(self.position(src, start), self.position(src, stop))
-    }
-
-    /// 0-based byte `offset` -> 0-based LSP `(line, character)`. `character` counts
-    /// UTF-16 code units within the line, matching [`offset_to_position`].
-    pub fn position(&self, src: &str, offset: usize) -> Position {
-        let offset = offset.min(src.len());
-        // Last line start <= offset (partition_point gives the count of starts
-        // that are <=, so -1 is that line's index; line_starts[0]=0 so >=1).
-        let line = self.line_starts.partition_point(|&s| s <= offset) - 1;
-        let line_start = self.line_starts[line];
-        // Column = UTF-16 units from the line start up to (not past) offset.
-        let mut col = 0u32;
-        let mut cur = line_start;
-        for ch in src[line_start..].chars() {
-            if cur >= offset {
-                break;
-            }
-            cur += ch.len_utf8();
-            col += ch.len_utf16() as u32;
-        }
-        Position::new(line as u32, col)
-    }
-}
-
-fn range_from_offsets(src: &str, start: usize, stop: usize) -> Range {
-    Range::new(
-        offset_to_position(src, start),
-        offset_to_position(src, stop),
-    )
-}
-
 /// Leading whitespace of the line containing byte `pos`. Used to indent
 /// generated code (fill-struct-fields) to match the surrounding source.
 fn line_indent_at(src: &str, pos: usize) -> String {
@@ -3610,7 +3391,7 @@ pub fn last_completion_phase_timings() -> CompletionPhaseTimings {
 /// own filter uses (`ident_prefix`), exposed for the corpus recorder so the
 /// recorded prefix can never diverge from what the ranker matched against.
 pub fn ident_prefix_at(src: &str, pos: Position) -> &str {
-    crate::completion::classify::ident_prefix(src, offset_at_line_col(src, pos.line, pos.character))
+    crate::completion::classify::ident_prefix(src, byte_offset(src, pos))
 }
 
 /// True when the current line from its start up to `offset` is empty or only
@@ -3789,27 +3570,6 @@ pub(crate) fn compiler_error_to_diagnostic(
         _ => location_range(&e.location, text_of),
     };
     bone_diagnostic(range, e.message.clone(), e.level)
-}
-
-/// A compiler span's `(line, col)` range as an LSP range.
-fn span_range(s: &Span, text_of: crate::query::TextOf<'_, '_>) -> Range {
-    let text = text_of(s.file.as_str());
-    Range::new(
-        compiler_position(text, s.line_range().0, s.col_range().0),
-        compiler_position(text, s.line_range().1, s.col_range().1),
-    )
-}
-
-/// The one-column range at a label-less error's location.
-fn location_range(
-    loc: &rock_core::source_code::LineCol,
-    text_of: crate::query::TextOf<'_, '_>,
-) -> Range {
-    let text = text_of(loc.file.as_str());
-    Range::new(
-        compiler_position(text, loc.line, loc.col),
-        compiler_position(text, loc.line, loc.col + 1),
-    )
 }
 
 /// Publish each label in its own file. Use the primary location for an unlabeled error.
@@ -4204,7 +3964,7 @@ mod tests {
                 fs_err::remove_file(&target).unwrap();
             }
             let cause = fs_err::read_to_string(&target).unwrap_err().to_string();
-            assert!(bone.location_from_span(proj, &span).is_none());
+            assert!(location(proj, &span, None).is_none());
             let records = capture.take();
             assert_eq!(records.len(), 1, "missing source failure: {records:?}");
             assert!(
@@ -4216,16 +3976,13 @@ mod tests {
                     && records[0].contains("omit location"),
                 "source failure lost context: {records:?}"
             );
-            assert!(
-                bone.location_from_span_indexed(proj, &span, &mut HashMap::new())
-                    .is_none()
-            );
+            assert!(location(proj, &span, Some(&mut HashMap::new())).is_none());
             assert!(
                 capture.take().is_empty(),
                 "unchanged failure must not repeat"
             );
             fs_err::write(&target, "target").unwrap();
-            assert!(bone.location_from_span(proj, &span).is_some());
+            assert!(location(proj, &span, None).is_some());
             assert!(capture.take().is_empty());
             // Text changes release the existing project-scoped report keys.
             bone.update(
@@ -4253,7 +4010,7 @@ mod tests {
         span.file = Ustr::from(target);
         let cause = Uri::from_file_path(target).unwrap_err().to_string();
         capture.take();
-        assert!(bone.location_from_span(proj, &span).is_none());
+        assert!(location(proj, &span, None).is_none());
         let records = capture.take();
         assert_eq!(records.len(), 1, "missing URI failure: {records:?}");
         assert!(
@@ -4264,10 +4021,7 @@ mod tests {
                 && records[0].contains("omit location"),
             "URI failure lost context: {records:?}"
         );
-        assert!(
-            bone.location_from_span_indexed(proj, &span, &mut HashMap::new())
-                .is_none()
-        );
+        assert!(location(proj, &span, Some(&mut HashMap::new())).is_none());
         assert!(capture.take().is_empty());
     }
 
@@ -4292,22 +4046,16 @@ mod tests {
             if deleted {
                 fs_err::remove_file(&path).unwrap();
             }
-            let (_, text) = bone.span_uri_and_text(proj, &span).unwrap();
-            assert!(matches!(text, Cow::Borrowed(_)));
-            assert_eq!(text, source);
-            let location = bone.location_from_span(proj, &span).unwrap();
+            let loc = location(proj, &span, None).unwrap();
             assert_eq!(
-                location.uri,
+                loc.uri,
                 Uri::from_file_path(&editor_path(&file_id)).unwrap()
             );
             assert_eq!(
-                location.range,
+                loc.range,
                 Range::new(Position::new(1, 3), Position::new(1, 7))
             );
-            assert_eq!(
-                bone.location_from_span_indexed(proj, &span, &mut HashMap::new()),
-                Some(location)
-            );
+            assert_eq!(location(proj, &span, Some(&mut HashMap::new())), Some(loc));
         }
         assert!(capture.take().is_empty());
     }
@@ -4327,7 +4075,7 @@ mod tests {
             let proj = bone.projects.get(&BoneWorkspace::root_for(&main)).unwrap();
             let mut span = Span::unknown();
             span.file = Ustr::from("/invalid\nspan.rock");
-            assert!(bone.location_from_span(proj, &span).is_none());
+            assert!(location(proj, &span, None).is_none());
             reached_assertion = true;
             panic!("intentional assertion failure to verify cleanup");
         }));
