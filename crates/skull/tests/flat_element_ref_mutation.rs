@@ -1,7 +1,5 @@
 use crate::common::{require_luajit, run_luajit, try_emit_module};
 
-/// A `ref` to a missing Map key has no element to write; it raises at the
-/// borrow rather than writing a detached copy (C aborts the same program).
 #[test]
 fn ref_to_a_missing_map_key_raises_on_lua() {
     require_luajit();
@@ -24,8 +22,6 @@ fn main() {
     assert_eq!(out, "false\ttrue");
 }
 
-/// Recursion settles a `ref` result only when every return agrees: a recursive
-/// call that hands back a differently stored `ref` still rejects with a span.
 #[test]
 fn recursive_ref_return_of_differently_stored_ref_rejects() {
     let source = r#"
@@ -52,12 +48,6 @@ fn main() {
     assert!(!err.labels.is_empty());
 }
 
-/// A flat `ref` binding is a container and a slot under one static storage
-/// key, so it rebinds only to an element stored the same way
-/// (`tests/values/flat_element_ref.rock` runs the supported rebindings). Each
-/// mixed pairing here, either way round, would otherwise need the binding's
-/// storage to vary at run time; the boxed-first one used to copy the flat
-/// element into the binding and silently drop every later write.
 #[test]
 fn rebinding_a_ref_across_storage_shapes_rejects() {
     let cases = [

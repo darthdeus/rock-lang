@@ -28,8 +28,6 @@ fn main() {
 }
 "#;
 
-/// Copying a value element out reads every field; a later read of the same
-/// element raises any error the unused reads could, so those reads go.
 #[test]
 fn unused_field_reads_before_a_read_of_the_same_base_are_dropped() {
     let lua = emit_module(SOURCE);

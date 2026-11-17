@@ -1,17 +1,3 @@
-//! An `Iterator`-bounded body emits STANDALONE at each instantiation
-//!.
-//!
-//! A bounded fn's body holds placeholder `Inst::CallBoundMulti`s whose concrete
-//! `next` is known per instantiation. Those are resolved from a
-//! `ResolvedBoundTree`, and the tree reaches the body two ways: from the SITE
-//! when the inliner splices it, and from the specialization DEMAND when it is
-//! emitted on its own. One rewrite serves both
-//! (`skull_transform::bound::substitute_bound_call`).
-//!
-//! With inlining DISABLED there is no splice, so this is the arm that proves the
-//! demand path carries it -- and that is the plan's standing gate for E1, which
-//! runs with inlining off by construction.
-
 use crate::common::{
     InlineOffGuard, body_calls, bound_callee_name, definitions_matching, fn_name, function_body,
     key, scalar_ctx, ws_with_stdlib,
@@ -19,8 +5,6 @@ use crate::common::{
 use skull_mir::mir::{Inst, MirFunc};
 use skull_mir::monoty::{MonoCtor, MonoTy};
 
-/// A user fn taking an `Iterator`-bounded generic, called at one concrete
-/// chain. `total`'s body holds the placeholder; `main` is the concrete root.
 const BOUNDED: &str = r#"
 fn total<I: Iterator<int>>(it: I) -> int {
     let s = 0
@@ -34,10 +18,6 @@ fn main() {
 }
 "#;
 
-/// The same program with the bounded generic REMOVED -- `total` takes the
-/// concrete list. The admission control: it must emit with inlining disabled,
-/// so a rejection above is about the BOUND and not about the mode refusing to
-/// emit anything at all.
 const CONCRETE: &str = r#"
 fn total(xs: [int]) -> int {
     let s = 0
@@ -51,14 +31,6 @@ fn main() {
 }
 "#;
 
-/// A bounded body whose resolved witness is ITSELF bounded. `collect`'s
-/// placeholder resolves to `MapIter.next`, which holds a placeholder of its own
-/// for the inner `VecIter`. Only the second level needs the sub-tree that a
-/// resolved leaf carries, which is why one level of nesting cannot see this.
-///
-/// The terminal is what forces it: a `for` over the same chain drives `next`
-/// from the concrete loop header, where the witness is in hand. `.collect()`
-/// hands the chain to a bounded body, so the resolution has to travel.
 const NESTED: &str = r#"
 struct Item { id: int, p: float }
 
@@ -84,11 +56,6 @@ fn emit_err(src: &str) -> Option<String> {
     emit(src).err()
 }
 
-/// The lines of the top-level Lua function whose header line is `header`.
-/// The lines of the emitted definition `symbol`, read through the shape-aware
-/// harness helper: under the bound callee shape a definition's header is
-/// `__rock_mk_<symbol> = function(..) return function(..)`, so a scan for
-/// `function <symbol>` at column 0 finds nothing.
 fn body_of<'a>(lua: &'a str, symbol: &str) -> Vec<&'a str> {
     function_body(lua, symbol)
         .lines()
@@ -97,8 +64,6 @@ fn body_of<'a>(lua: &'a str, symbol: &str) -> Vec<&'a str> {
         .collect()
 }
 
-/// The one emitted specialization whose name starts with `prefix` and carries a
-/// `_spec_` instance suffix.
 fn specialization<'a>(lua: &'a str, prefix: &str) -> &'a str {
     let found: Vec<&str> = definitions_matching(lua, "_spec_")
         .into_iter()
@@ -108,14 +73,6 @@ fn specialization<'a>(lua: &'a str, prefix: &str) -> &'a str {
     found[0]
 }
 
-/// Three separate things, because each alone is satisfied by a broken build.
-///
-/// That emission SUCCEEDS says nothing on its own -- a build that dropped
-/// `total` entirely also reports no error. That a DEFINITION exists is checked
-/// on the definition line, which the caller's own call cannot satisfy. And that
-/// the definition RESOLVED its placeholder is checked by the concrete `next` in
-/// its body: the whole content of D-1 is that substitution, and a definition
-/// emitted with the placeholder still in it would pass the first two.
 #[test]
 fn a_bounded_body_emits_standalone_with_inlining_disabled() {
     let _inline = InlineOffGuard::on();
@@ -134,18 +91,6 @@ fn a_bounded_body_emits_standalone_with_inlining_disabled() {
     assert!(body_calls(main, &caller_name));
 }
 
-/// A resolved witness that is itself bounded resolves too, one level down.
-///
-/// The demand a substitution files for its witness must carry the witness's OWN
-/// tree -- the `sub` of the leaf that resolved it. Dropping it files the demand
-/// with an EMPTY tree, and `MapIter.next` then reaches its standalone emission
-/// with nothing to resolve generic #0 from. The splice path cannot see this: it
-/// recurses into the callee in place, so the sub-tree never has to travel.
-///
-/// Asserting the emitted `MapIter.next` calls a concrete `next` is the arm that
-/// distinguishes a real resolution from an emission that merely succeeded --
-/// the same reason the single-level test checks the callee and not just the
-/// absence of an error.
 #[test]
 fn a_witness_that_is_itself_bounded_resolves_from_the_leafs_sub_tree() {
     let _inline = InlineOffGuard::on();
@@ -161,11 +106,6 @@ fn a_witness_that_is_itself_bounded_resolves_from_the_leafs_sub_tree() {
     assert!(resolved_next);
 }
 
-/// The admission control for the sentinel. Not inverted: this asserts the
-/// CORRECT behavior and must stay green through D-1.
-///
-/// Without it the sentinel could be green because the mode rejects every
-/// program, which would say nothing about bounded bodies.
 #[test]
 fn an_unbounded_body_emits_with_inlining_disabled() {
     let _inline = InlineOffGuard::on();

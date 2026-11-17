@@ -1,19 +1,5 @@
-//! A `value` struct that nests a `nobox` field must not construct that field as
-//! a separate box. `E5_ct` takes nested fields WHOLE, so materializing the outer
-//! struct materialized the inner one -- which the guarantee forbids. The outer
-//! struct boxing is fine and expected; building it *through* a nobox box is not.
-//!
-//! Normalization flattens the nested ctor into its parent's leaves, so these
-//! assert the flattened emit plus a luajit round-trip. A nullable field makes
-//! the outer GC-tier, which has no cdata to write leaves into: it stores flat
-//! instead (dotted leaf keys plus a presence key) through `<Name>_lct`. The
-//! leaf-count sweep that separates this from the column threshold lives in
-//! `nobox_column_threshold.rs`. Design + work list:
-
 use crate::common::{emit_module, function_body, mangled_name, run_main};
 
-/// A global forces the outer struct to materialize with no `Vec` in the program,
-/// which is what separates this class from the `MAX_COLUMN_LEAVES` trigger.
 const GLOBAL_OUTER: &str = r#"
 nobox value NV2 { x: float, y: float }
 value E5 { pos: NV2, a: float, b: float, c: float }
@@ -25,8 +11,6 @@ fn main() {
 }
 "#;
 
-/// Two levels: the outer's IMMEDIATE operand is a non-nobox `Box2` literal, so a
-/// trigger that only matches "field operand is a literal nobox ctor" misses it.
 const TWO_LEVEL: &str = r#"
 nobox value NV2 { x: float, y: float }
 value Box2 { lo: NV2, hi: NV2 }
@@ -41,8 +25,6 @@ fn main() {
 }
 "#;
 
-/// One literal nobox field alongside an OPAQUE nested operand read off an
-/// existing cdata. The opaque sibling must be decomposed, not rejected.
 const MIXED_LITERAL_AND_OPAQUE: &str = r#"
 nobox value NV2 { x: float, y: float }
 value Pair { lo: NV2, hi: NV2, w: float }
@@ -58,11 +40,6 @@ fn main() {
 }
 "#;
 
-/// The MINIMAL cell: a nullable nobox field makes the outer GC-tier, so it
-/// materializes as a table rather than cdata. ONE field is enough -- the leaf
-/// count is not the discriminant here (that is the `[Opt]` column threshold,
-/// pinned separately in `nobox_column_threshold.rs`), and a global is what
-/// forces the outer to materialize at all.
 const NULLABLE_FIELD: &str = r#"
 nobox value NV2 { x: float, y: float }
 value Opt { pos: NV2? }
@@ -70,20 +47,6 @@ global G: Opt = Opt { pos: NV2 { x: 1.0, y: 2.0 } }
 fn main() { print("{G.pos?.x ?? -1.0}") }
 "#;
 
-/// A LOCAL the outer struct is bound to, reassembled by a spread that escapes
-/// somewhere unscalarized. SROA splits the local into per-field cells, and the
-/// `pos` cell then holds a whole `NV2` -- the box. Normalization alone cannot
-/// clear it: the reassembly reads `pos` through a `Load`, which is opaque to a
-/// ctor-tree walk, so the outer ctor is not a target; and SROA alone cannot
-/// split the `pos` cell while that whole-value read is its user. Only
-/// interleaving the two reaches it.
-///
-/// Every ingredient is load-bearing and each was measured alone. The nested
-/// field must be `nobox` (a plain `value` is no violation). The escape must be
-/// unscalarized -- an enum payload, since the value-struct call ABI scalarizes a
-/// direct call argument and the reassembly disappears. And the block boundary
-/// must be there, or copy-prop forwards the ctor to the use and the tree walk
-/// sees it whole.
 const SROA_SPLIT_REASSEMBLY: &str = r#"
 nobox value NV2 { x: float, y: float }
 value E3 { pos: NV2, a: float }
@@ -119,8 +82,6 @@ fn main() {
 }
 "#;
 
-/// Every leaf gets a DISTINCT value, so an ordering drift between the shape walk
-/// and the emitted writes cannot hide behind symmetric literals.
 #[test]
 fn a_nested_nobox_field_does_not_box_when_the_outer_materializes() {
     let lua = emit_module(GLOBAL_OUTER);

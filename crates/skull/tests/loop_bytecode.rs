@@ -1,15 +1,7 @@
-//! LuaJIT hot-counts a loop only at a LOOP (or FORL/ITERL) instruction, and
-//! its parser emits LOOP for a backward `goto` only when the `goto` sits in
-//! the label's own block. A backward jump from deeper, such as
-//! `if c then goto w1 end`, compiles to a bare JMP: a loop whose hot path
-//! takes it never starts a trace and runs interpreted.
-
 use crate::common::{definition_names, emit_module, function_body, run_luajit, run_main};
 
 const FIXTURE: &str = include_str!("fixtures/traceable_loops.rock");
 
-/// Every backward JMP in `lua`'s prototypes that no LOOP instruction covers,
-/// as `line:pc` per offending function.
 fn uncovered_backward_jumps(lua: &str) -> String {
     let driver = r#"
 local util = require("jit.util")

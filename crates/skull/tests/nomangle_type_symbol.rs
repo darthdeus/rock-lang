@@ -1,12 +1,4 @@
-//! `@nomangle` on a struct or value type keeps its declared name as the
-//! emitted type symbol under modules v1: the C typedef, `ffi.new`/`ffi.sizeof`
-//! strings and the `__ty` tag. Hand-written inline Lua that spells the type
-//! (host engine's graphics-stats cdef, vertex buffers, snapshot's Font remap) relies
-//! on that name.
-
 use crate::common::module_id;
-/// Inline Lua names the exempt types by their declared names; the program only
-/// runs if the typedef and the runtime tag use those names too.
 #[test]
 fn a_nomangle_v1_type_keeps_its_declared_symbol() {
     let emitted = crate::common::emit_v1_package(
@@ -39,9 +31,6 @@ fn main() {}
     assert_eq!(out, "0.5 AbiHandle 3");
 }
 
-/// A `@nomangle` struct owns its declared name among type symbols. A legacy
-/// type of that name (the stdlib's `Vec2`) would share the typedef, the
-/// constructor and the runtime tag, so emission rejects the pair.
 #[test]
 fn a_nomangle_type_cannot_take_a_legacy_types_symbol() {
     let ws = crate::common::ws_v1_package(

@@ -1,10 +1,3 @@
-//! Oracle for skull incremental codegen:
-//! after re-emitting only the bodies a (simulated) edit re-inferred, the assembled
-//! Lua must be BYTE-IDENTICAL to a fresh full emit of the edited workspace. The
-//! interesting case is editing an INLINED callee -- its callers' chunks contain its
-//! body, so they must re-emit too (the inline codegen-dep), even though a body edit
-//! never re-infers the callers.
-
 use crate::common::{body_id, definition_names, emit_full_of, name_matches, ws_of, ws_with_stdlib};
 use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
@@ -19,7 +12,6 @@ fn emit_overlay(
     emit_overlay_result(ws, cache, reinferred).expect("emit_overlay")
 }
 
-/// Drive one body edit through the cache and assert incremental == fresh.
 fn check_edit(v1: &str, v2: &str, edited: &[&str]) -> String {
     check_edit_with(ws_of, v1, v2, edited)
 }
@@ -109,9 +101,6 @@ fn numeric_selection_updates_in_full_incremental_and_overlay_emission() {
     check_edit(v1, &v2, &["choose"]);
 }
 
-/// [`check_edit`] over a chosen workspace builder. A fixture needing the stdlib
-/// (any `+`, any collection method) passes `common::ws_with_stdlib`; the bare
-/// `ws_of` keeps the cheap fixtures cheap.
 fn check_edit_with(build: fn(&str) -> Workspace, v1: &str, v2: &str, edited: &[&str]) -> String {
     let ws1 = build(v1);
     let (_full1, mut cache) = emit_full_of(&ws1, "emit_full v1");
@@ -146,9 +135,6 @@ fn inline_budget_eligibility_flip_fixture(large_helper: bool) -> String {
     src
 }
 
-/// A transitive callee that starts or stops shrinking a vector must
-/// invalidate the cached caller's bounds proof, in both incremental and
-/// overlay emission.
 #[test]
 fn transitive_effect_changes_rebuild_residual_callers_in_both_directions() {
     let grow = r#"
@@ -306,11 +292,6 @@ fn body_edit_to_a_function_with_lambdas_matches_a_full_emit() {
     }
 }
 
-/// The first overlay must ADD the Q specialization the edit made reachable
-/// (main.lua has no definition, so omitting it is a nil global at reload).
-/// A second edit to the generic must then reach Q too, which only holds if
-/// the instance graph is maintained across edits rather than frozen at the
-/// full build.
 #[test]
 fn a_later_edit_to_a_generic_reaches_an_instantiation_an_earlier_edit_added() {
     let types = "value P { x: float, y: float }\n\
@@ -359,10 +340,6 @@ fn a_later_edit_to_a_generic_reaches_an_instantiation_an_earlier_edit_added() {
     assert_eq!(o2.lua.matches("MARK2").count(), 2);
 }
 
-/// A pruned instance's chunk is forgotten, so an edit that brings the
-/// instantiation back rebuilds it from the edited generic instead of serving
-/// the chunk it had before it was pruned. A full reassembly never reaches the
-/// stale chunk, so only the return exposes it.
 #[test]
 fn an_instantiation_that_returns_after_being_pruned_is_rebuilt_not_reused() {
     let types = "value P { x: float, y: float }\n\
@@ -411,10 +388,6 @@ fn an_instantiation_that_returns_after_being_pruned_is_rebuilt_not_reused() {
     assert!(q_body.contains("MARK2"));
 }
 
-/// The overlay defines a non-generic library body the edit made reachable;
-/// specializations reach the overlay by a different route. The subject must
-/// be a stdlib fn: the compiled unit's own fns are roots, so they are never
-/// graph-added.
 #[test]
 fn an_overlay_carries_a_graph_added_library_body() {
     let v1 = "fn use_it(c: int) -> bool { return c == 32 }\n\
@@ -436,9 +409,6 @@ fn an_overlay_carries_a_graph_added_library_body() {
     assert!(defines(&overlay.lua));
 }
 
-/// Editing a generic `co fn` must re-emit its specialized coroutines, which
-/// only the declaration edge in their deps connects to it. The column-stored
-/// element is what makes the call specialize.
 #[test]
 fn a_body_edit_to_a_generic_coroutine_reemits_its_specializations() {
     let v1 = "nobox value P { x: float, y: float }\n\
@@ -466,10 +436,6 @@ fn a_body_edit_to_a_generic_coroutine_reemits_its_specializations() {
     check_edit_with(ws_with_stdlib, v1, &v2, &["walk"]);
 }
 
-/// A standalone `Iterator`-bounded body survives an incremental rebuild. Its
-/// placeholders are resolved from the demand's tree, not from the body, so the
-/// tree must live in the cache beside the chunk key. Inlining is off, so the
-/// bounded body has no splice to fall back on.
 #[test]
 fn a_standalone_bounded_body_survives_an_incremental_rebuild() {
     let _inline = crate::common::InlineOffGuard::on();
@@ -669,8 +635,6 @@ fn sample() -> int {
     assert!(flat_abis.iter().all(|abi| !abi.contains("RepId")));
 }
 
-/// A body edit that starts stringifying a payload-free enum needs that enum's
-/// names table, which the full build did not emit because nothing read it.
 #[test]
 fn newly_stringified_enum_gets_its_names_table_in_incremental_and_overlay() {
     let v1 = r#"
@@ -689,8 +653,6 @@ fn main() { print(describe(Mode::Busy)) }
     assert_eq!(crate::common::run_luajit(&run), "Mode::Busy");
 }
 
-/// Body edits whose only obligation is that the incremental assembly equals a
-/// fresh full emit of the edited source.
 #[test]
 fn body_edits_match_full_emission() {
     let enum_projection = r#"
@@ -743,8 +705,6 @@ value Config { chosen: int, spare: int, label: string }
     }
 }
 
-/// An inlinable helper's body edit keeps, keeps residual, or newly enables the
-/// splice into its caller; the caller's chunk must follow each decision.
 #[test]
 fn inline_decisions_follow_helper_edits() {
     let small = |value: i32| {
@@ -784,9 +744,6 @@ fn inline_decisions_follow_helper_edits() {
     }
 }
 
-/// Decorated bodies publish CodeRef slots. An overlay restages exactly the
-/// slots whose bodies changed, after their new definitions, under logical
-/// identity, and always ends in the transactional publication.
 #[test]
 fn overlays_restage_only_changed_code_refs() {
     let v1 = r#"
@@ -833,11 +790,6 @@ fn main() { let _ = helper() }
     }
 }
 
-/// A specialized body is not reached through its declaration's own chunk, so
-/// only the declaration edge in its deps re-emits it after the generic
-/// changes. The global initializer never runs an inliner, which forces a
-/// standalone specialized copy. A reload dofiles the overlay after main.lua,
-/// so the overlay must redefine that copy too.
 #[test]
 fn body_edit_to_a_generic_reemits_its_specializations() {
     let v1 = "value V2 { x: float, y: float }\n\
@@ -869,8 +821,6 @@ const ABI_FLIP_V2: &str = "value V2 { x: float, y: float }\n\
     f(V2 { x: 1.0, y: 2.0 })\
     }";
 
-/// Taking `foo` by value flips its scalar ABI width; the overlay must redefine
-/// `foo` and its caller rather than keep definitions built under the old ABI.
 #[test]
 fn an_overlay_reemits_a_definition_after_a_scalar_abi_width_flip() {
     let ws1 = ws_with_stdlib(ABI_FLIP_V1);
@@ -882,8 +832,6 @@ fn an_overlay_reemits_a_definition_after_a_scalar_abi_width_flip() {
     assert!(overlay.lua.contains("function foo_") && overlay.lua.contains("function use_ref"));
 }
 
-/// A graph-added specialization whose body fails construction fails closed on
-/// every route: full, incremental and overlay.
 #[test]
 fn a_failed_graph_added_body_is_rejected_by_every_emit_route() {
     let common = "nobox value NV2 { x: float, y: float }\n\
@@ -926,9 +874,6 @@ fn a_failed_graph_added_body_is_rejected_by_every_emit_route() {
     }
 }
 
-/// A caller edit adds or removes a specialization demand while a sibling
-/// instance of the same generic stays reached, so invalidation must be per
-/// instance. The fresh counts make the incremental equality non-vacuous.
 #[test]
 fn caller_edits_add_and_prune_specializations_per_instance() {
     let types = "value P { x: float, y: float }\n\
@@ -957,8 +902,6 @@ fn caller_edits_add_and_prune_specializations_per_instance() {
     check_edit_with(ws_with_stdlib, &both, &one, &["use_it"]);
 }
 
-/// A changed call graph that newly reaches an inline(lua) publisher repairs
-/// the artifact's scalar context to match a fresh emit.
 #[test]
 fn changed_call_graph_reaching_a_foreign_publisher_matches_full_emission() {
     let v1 = "fn helper() -> int { 3 }\ninline(lua) fn extra() -> int = \"return 7\"\nfn main() { let x = helper() }";
@@ -1002,10 +945,6 @@ fn main() {
 }
 "#;
 
-/// A `co fn` with lambdas in its step region and a detached defer region has
-/// one lambda topology per region under a single owner. Body-only edits, to
-/// another function or inside the defer region, must overlay; inserting a
-/// lambda into the region must refuse with the compatibility restart.
 #[test]
 fn multi_region_coroutine_topology_gates_overlays() {
     let ws1 = ws_with_stdlib(MULTI_REGION_COROUTINE);
@@ -1057,8 +996,6 @@ fn repeated_body_overlays_keep_the_fingerprint_of_a_full_emit() {
     }
 }
 
-/// An overlay of a `ref` callee's body updates the variant its flat-element
-/// caller runs, whether that caller is plain or specialized.
 #[test]
 fn flat_ref_callee_body_overlay_updates_its_callers() {
     crate::common::require_luajit();

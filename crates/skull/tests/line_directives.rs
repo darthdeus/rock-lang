@@ -1,7 +1,3 @@
-//! LuaJIT line directives (`ROCK_SKULL_LINE_DIRECTIVES`): a numbered program
-//! reports Rock file:line for its definitions and its own file:line for the
-//! generated code around them.
-
 use crate::common;
 use skull::mir_emit::ShapeOverrides;
 
@@ -51,8 +47,6 @@ fn generated_code_after_a_numbered_definition_is_numbered_by_its_place_in_main_l
     assert!(!lua.contains(skull_codegen_lua::LINE_DIRECTIVE_RESET));
 }
 
-/// Needs a LuaJIT that reads line directives (LuaJIT 2.1 commit c41d727d or
-/// later); `ROCK_LINE_DIRECTIVE_LUAJIT` names its executable.
 #[test]
 #[ignore = "needs ROCK_LINE_DIRECTIVE_LUAJIT: a LuaJIT 2.1 with line directives (c41d727d or later)"]
 fn errors_tracebacks_and_jit_util_report_rock_lines() {
@@ -96,8 +90,6 @@ print("linedefined=" .. info.linedefined)
     assert!((1..=7).contains(&linedefined));
 }
 
-/// A numbered statement reports its own Rock line, so a call on one line is
-/// not folded into a statement on the next.
 #[test]
 fn a_call_keeps_its_own_numbered_statement() {
     let src = "fn twice(n: int) -> int { return n * 2 }

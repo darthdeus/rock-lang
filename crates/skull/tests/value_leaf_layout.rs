@@ -1,14 +1,3 @@
-//! The two-walker agreement invariant behind leaf addressing.
-//!
-//! `value_leaf_paths` (over `ValueShape`) and `value_leaf_layout` (over the C
-//! layout) are SEPARATE recursive walks, and leaf values are matched to byte
-//! offsets POSITIONALLY. If they ever drift, every emitted `ffi.offsetof`
-//! assertion still passes -- each path/offset pair it checks is internally
-//! consistent -- while repr leaves land at the wrong addresses. So the runtime
-//! layout checks do not cover this; these do.
-//!
-//!
-
 use crate::common::{key, ws_of};
 use skull_mir::lower::{LeafSlot, RepArena};
 use ustr::Ustr;
@@ -30,8 +19,6 @@ value Deep3 { inner: Nested, tail: Flat }
 fn main() { }
 "#;
 
-/// The invariant itself, over every shape family the layout walk admits:
-/// primitives, nesting, mixed widths, bool packing, depth 3.
 #[test]
 fn leaf_walkers_agree_on_path_order() {
     let ws = ws_of(SHAPES);
@@ -51,11 +38,6 @@ fn leaf_walkers_agree_on_path_order() {
     }
 }
 
-/// A type with no C layout REJECTS naming itself, rather than returning a
-/// skippable `None`. The emission site turns this into a CompilerError: every
-/// name it passes is already in the FFI-clean set, so a missing layout is an
-/// invariant failure, and skipping it would emit a type whose offsets nothing
-/// validated.
 #[test]
 fn a_type_without_a_c_layout_rejects_by_name() {
     let ws = ws_of(SHAPES);
@@ -69,9 +51,6 @@ fn a_type_without_a_c_layout_rejects_by_name() {
     assert!(err.message.contains("NotAType"));
 }
 
-/// Offsets follow C rules, not declaration index: `Mixed` packs float@0, int@4,
-/// bool@8; `Bools` packs three 1-byte leaves at 0/1/2. Pinning the VALUES (not
-/// just agreement) is what catches a walk that is self-consistent but wrong.
 #[test]
 fn mixed_width_offsets_follow_c_layout() {
     let ws = ws_of(SHAPES);
@@ -91,7 +70,6 @@ fn mixed_width_offsets_follow_c_layout() {
     assert_eq!(bools, vec![("p", 0), ("q", 1), ("r", 2)]);
 }
 
-/// A nested leaf's offset is its parent's plus its own, and the path is dotted.
 #[test]
 fn nested_leaf_offsets_compose() {
     let ws = ws_of(SHAPES);
@@ -123,9 +101,6 @@ fn nested_leaf_offsets_compose() {
     );
 }
 
-/// Trailing padding: `Mixed` is float+int+bool = 9 bytes of members, rounded up
-/// to align 4 = 12. `DeepMixed` therefore starts `hi` at 12, not 9 -- the exact
-/// case that makes a FLATTENED cdef unsound and leaf addressing sound.
 #[test]
 fn nested_struct_trailing_padding_is_respected() {
     let ws = ws_of(SHAPES);
@@ -147,7 +122,6 @@ fn nested_struct_trailing_padding_is_respected() {
     );
 }
 
-/// `float` is f64 in a value's C layout; `f32` is the explicit 4-byte leaf.
 #[test]
 fn float_width_follows_the_declared_type() {
     let ws = ws_of(
@@ -192,8 +166,6 @@ fn main() {
 }
 "#;
 
-/// The load-time layout check is one line of data per type for a shared
-/// helper, and a mismatch still names the drifted size or leaf.
 #[test]
 fn layout_checks_share_one_failure_path() {
     let lua = crate::common::emit_module(LAYOUT_PROGRAM);
@@ -226,8 +198,6 @@ fn layout_checks_share_one_failure_path() {
     }
 }
 
-/// A nested leaf is also read through its flattened alias, so the alias must
-/// sit at the same offset as the leaf it stands for.
 #[test]
 fn a_nested_leaf_alias_at_another_offset_fails_the_load() {
     let lua = crate::common::emit_module(LAYOUT_PROGRAM);
@@ -259,10 +229,6 @@ fn main() {
 }
 "#;
 
-/// Corrupt the C side of the emitted program one way at a time -- the cdef
-/// LuaJIT lays out, never the compiler's expected offsets -- and require the
-/// load to fail with the diagnostic that names what moved. These edits do not
-/// depend on how the checks are encoded.
 fn assert_load_fails(lua: &str, edits: &[(&str, &str)], message: &str) {
     let mut edited = lua.to_string();
     for (from, to) in edits {
@@ -303,9 +269,6 @@ fn a_moved_nested_leaf_alias_fails_the_load() {
     );
 }
 
-/// The embedding struct composes offsets through the nested type, so a
-/// nested type laid out differently fails the embedding struct's own check
-/// even when the nested type's check is gone.
 #[test]
 fn a_reordered_embedded_type_fails_the_load() {
     let lua = crate::common::emit_module(MUTATION_PROGRAM);

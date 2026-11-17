@@ -1,4 +1,3 @@
-//! A call to a raising intrinsic ends its block: nothing after it is emitted.
 use crate::common::{emit_module, function_body, run_main};
 
 #[test]

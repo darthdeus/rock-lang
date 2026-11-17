@@ -1,10 +1,3 @@
-//! `native_buffer_alloc<T>` intrinsic. skull owns the
-//! value-struct cdef names, so a call resolves its concrete element type at the
-//! site and emits `__rock_nb_alloc("<ctype>", n)` wrapped in a `NativeBuffer` -- no
-//! per-type `__nb_alloc_*` boilerplate. The rejection of a non-allocatable
-//! element (heap struct, opaque generic `T`) is a HARD emit-time error covered
-//! by `tests/errors/native_buffer_alloc_*.rock.err`; here we pin the positive
-//! shape: the emitted ffi ctor carries the right ctype for value / int / float.
 use crate::common::{emit_module, function_body};
 
 const VALUE_ELEM: &str = r#"

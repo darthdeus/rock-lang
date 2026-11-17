@@ -1,19 +1,5 @@
-//! `static` locals across a hot reload. The private value cell + done-flag live
-//! in the global storage, so they survive a re-`dofile`; the done-flag guard then skips
-//! re-init and the value is PRESERVED. Editing the initializer changes the
-//! compiler's initializer identity, so the overlay clears both slots and the
-//! next reach RE-INITS with the new value.
-//!
-//!
-//! No arithmetic here on purpose: the no-stdlib emit harness can't resolve `+`
-//! (it routes through a stdlib op fn), so the static is observed via a bool
-//! toggle + assignment instead of a counter.
-
 use crate::common::{body_id, emit_full_of, emit_without_stdlib, run_luajit};
 
-/// Two in-process emits of the same string/int statics must be byte-identical.
-/// A process-seeded Ustr hash in the init key made consecutive `rock compile`
-/// runs reset live static cells on every hot reload.
 const STRING_STATIC: &str = "\
 global RESULT: string = \"\"
 fn probe() -> string {
@@ -31,9 +17,6 @@ fn static_initializer_hash_is_reproducible_across_two_emits() {
     assert_eq!(a, b);
 }
 
-/// `probe()` reads a static `n` (init 42); when the DO_SET global is set it
-/// overwrites `n` to 99. So after a reload we can tell PRESERVE (still 99) from
-/// RESET (back to the initializer).
 const PROBE: &str = "\
 global RESULT: int = 0
 global DO_SET: bool = false
@@ -45,9 +28,6 @@ fn probe() -> int {
 fn main() { RESULT = probe() }
 ";
 
-/// Run `before` with DO_SET (the static becomes 99), hot-reload `after` and
-/// run it with DO_SET off. RESULT tells PRESERVE (still 99) from RESET (the
-/// initializer re-ran).
 fn result_after_reload(before: &str, after: &str) -> String {
     run_luajit(&format!(
         "_G.HOT_RELOAD = false\n{before}\n\
@@ -60,10 +40,6 @@ fn result_after_reload(before: &str, after: &str) -> String {
     ))
 }
 
-/// The static's key hashes its initializer expression, not arena indices or
-/// sibling statements: reloading the same source or an unrelated edit of the
-/// body keeps the live value, and editing the initializer (42 -> 7) clears the
-/// cell and done-flag so the next reach re-inits.
 #[test]
 fn static_reload_preserves_unless_the_initializer_changed() {
     let before = emit_without_stdlib(PROBE);
@@ -85,9 +61,6 @@ fn static_reload_preserves_unless_the_initializer_changed() {
     }
 }
 
-/// A body edit that adds or removes a `static` changes no global's storage, so
-/// it reloads as an overlay: the live globals survive, a new static initializes
-/// on its first reach, and a removed one's cell is dropped from the storage.
 const COUNTER: &str = "\
 global TOTAL: int = 0
 @nomangle fn bump() -> int {
@@ -174,8 +147,6 @@ fn tagged<T>(v: T) -> T {
 fn main() {}
 ";
 
-/// A generic's static lives in its specialization's chunk, which the cache
-/// builds apart from the ordinary bodies; removing it drops its cells all the same.
 #[test]
 fn a_body_edit_that_removes_a_specialized_generics_static_drops_its_cells() {
     let after = SPECIALIZED.replace("    static seen = 0\n    seen = seen + 1\n", "");

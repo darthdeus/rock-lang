@@ -1,12 +1,3 @@
-//! Codegen + runtime contract: a PAYLOAD-FREE enum is an `int` value globally (the
-//! variant's declaration-order ordinal) -- construction lowers to an int const,
-//! `match`/`==` int-compare, a `value` struct field stores a plain int, and a `{x}`
-//! interp hole renders `<Enum>::<Variant>` from a static `__rock_enum_<E>_names`
-//! table. No singleton tables, no `__tag`, no `by_tag` for such enums.
-//!
-//! A `value` struct holding the enum field therefore scalarizes into a C-layout
-//! cdata with an int field (NOT a Lua table) and works across the scalar ABI
-//! (by-value pass).
 use crate::common::{emit_mir, emit_module, key, require_luajit, run_fn};
 
 #[test]
@@ -91,22 +82,11 @@ fn value_struct_with_enum_field_has_cdef_int_not_table() {
     assert_eq!(run_fn(&lua, "t"), "5 Add 5");
 }
 
-/// Compile `src`, run its `fn_name` under luajit, and return the stdout.
 fn run_skull_test(src: &str, fn_name: &str) -> String {
     require_luajit();
     run_fn(&emit_mir(src).lua, fn_name)
 }
 
-/// SENTINEL: a payload-free enum that ESCAPES into `any`
-/// -- here passed directly to the generic `inspect(any)` -- loses its static type
-/// and renders as the bare ordinal int, NOT `<Enum>::<Variant>`. A `{x}` interp
-/// hole renders correctly (the static type is known at the hole; see
-/// `strings/enum_format.rock`); this `inspect`/`any`-escape path is the
-/// deferred box-on-escape-into-`any` work.
-///
-/// This pins the CURRENT (wrong) behavior. When increment 4 lands, the output
-/// becomes "BlendMode::Additive" and this assertion goes red -- FLIP the expected
-/// value to "BlendMode::Additive" and delete the sentinel framing in that commit.
 #[test]
 fn payload_free_enum_inspect_any_escape_increment4_sentinel() {
     const SRC: &str = r#"

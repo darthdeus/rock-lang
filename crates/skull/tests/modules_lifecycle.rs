@@ -1,6 +1,3 @@
-//! Modules-v1 lifecycle discovery keeps private hooks discoverable and treats
-//! aliases/re-exports as one decorator identity.
-
 use crate::common::{V1Fragment, emit_v1_package, module_id, run_luajit, run_main, ws_v1_package};
 
 const MAIN: &str = r#"
@@ -175,9 +172,6 @@ fn main() {}
     assert!(error.message.contains("wire_functions::helper"));
 }
 
-/// Only a decorator claims an annotation spelling. A v1 fn that shares a
-/// builtin's name (host engine defines `fn shader`, `fn uniform`, `fn size`) must
-/// leave the builtin in force rather than making it an unknown annotation.
 #[test]
 fn v1_fn_named_like_a_builtin_annotation_keeps_the_builtin() {
     let fragments = [V1Fragment {

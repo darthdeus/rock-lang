@@ -1,19 +1,3 @@
-//! modules-v1 runtime identity. A v1 definition's identity is
-//! its DefKey (`<package>::<module path>::<name>`), which has two consequences
-//! the backend has to honor:
-//!
-//! - The key is not a Lua identifier, so every identifier the backend mints for
-//!   a global -- the global itself, its `__skull_ginit_` initializer -- must be
-//!   the key's identifier form, exactly as for functions.
-//! - The key is file-independent, so state identity is keyed on the LOGICAL
-//!   module: moving a definition between two fragments of one module keeps its
-//!   state, and two same-named globals in different modules never share it.
-//!   `(file, name)` gets the second half right only by accident (the DefKey is
-//!   already in the name) and the first half wrong.
-//!
-//! These execute the emitted chunk rather than grepping it: a symbol that is
-//! wrong in either the definition or a use fails to parse or reads nil.
-
 use crate::common::{V1Fragment, emit_v1_package, module_id, run_main};
 
 const MAIN: &str = r#"
@@ -102,10 +86,6 @@ fn v1_global_state_identity_is_its_def_key() {
     assert!(!emitted.lua.contains("global:a.rock::"));
 }
 
-/// The same logical module split across two fragments, with the global moved
-/// from one to the other. A file-keyed identity changes here, which would drop
-/// the live value on a hot reload and make the two programs' state images
-/// incompatible for no source-level reason.
 #[test]
 fn v1_global_identity_survives_a_move_between_fragments() {
     let front = r#"
@@ -172,8 +152,6 @@ fn main() {
     assert!(after.lua.contains(identity));
 }
 
-/// A v1 function's code key uses its module scope and signature: moving the
-/// function between fragments of one module must not change its code slot.
 #[test]
 fn v1_code_identity_uses_module_scope_and_signature() {
     let fragments = [
@@ -220,8 +198,6 @@ fn v1_code_identity_uses_module_scope_and_signature() {
     );
 }
 
-/// A `static` inside a v1 function is keyed on its owning callable, so the same
-/// rule reaches it through the owner's logical key.
 #[test]
 fn v1_static_identity_is_keyed_on_its_owner_code_key() {
     let emitted = emit_v1_package(
@@ -265,11 +241,6 @@ pub fn tick() -> int {
 }
 "#;
 
-/// A `static` cell and a hoisted nested `fn` are private globals named after
-/// their owning function (`__static_<owner>_..`, `__local_<owner>_..`). The
-/// owner of a v1 function is its DefKey, which is not a Lua identifier: the
-/// chunk died with `'(' expected near '::'` (found by migrating
-/// a library whose test declares a nested fn).
 #[test]
 fn v1_static_cells_and_nested_fns_emit_identifiers() {
     let emitted = emit_v1_package(

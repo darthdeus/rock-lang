@@ -1,7 +1,5 @@
 use crate::common::{self, function_body};
 
-/// `rN = rM` lines: a register copied unchanged from another. (`rN = cM` is
-/// also how a mutable cell is read, so it is not a copy here.)
 fn register_moves(body: &str) -> Vec<&str> {
     body.lines()
         .map(str::trim)
@@ -18,8 +16,6 @@ fn register_moves(body: &str) -> Vec<&str> {
         .collect()
 }
 
-// `y` is read before and after each yield, and `x` after the last one: both
-// cross a suspension, so the step must keep them in frame slots.
 const YIELD_ACROSS: &str = r#"
 global seed: int = 3
 
@@ -48,8 +44,6 @@ fn reused_int_to_float_across_a_yield_aliases_and_resumes_its_value() {
     assert_eq!(common::run_main(&lua), "42\n18\n7");
 }
 
-// `a` is one conversion, read by the comparison, by an arm and (in
-// `min_register`) after the selection.
 const SELECTION: &str = r#"
 fn min_param(x: int, b: float) -> float {
     let a = x as float

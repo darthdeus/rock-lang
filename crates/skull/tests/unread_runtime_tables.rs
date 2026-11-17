@@ -1,4 +1,3 @@
-//! Per-type runtime tables are emitted only when emitted code reads them.
 use crate::common::{emit_module, run_main};
 
 #[test]
@@ -39,8 +38,6 @@ fn main() { print("{G.pos?.x ?? -1.0}") }
     assert_eq!(run_main(&lua), "1");
 }
 
-/// A host appends `nobox` global accessors after assembly, and their `get`
-/// rebuilds the value through its leaf ctor.
 #[test]
 fn nobox_global_accessors_keep_their_leaf_ctor() {
     let lua = emit_module(

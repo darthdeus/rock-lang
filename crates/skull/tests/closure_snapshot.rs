@@ -1,14 +1,5 @@
-//! Codegen-shape contract for how a capturing lambda snapshots its captures into
-//! an env record. The pre-P2.6 IIFE
-//! by-value snapshot is gone: every capture is a record FIELD instead. A
-//! single-assignment capture is snapshotted BY VALUE (the field holds the value);
-//! a mutable capture is BOXED and the field holds the shared box table, so a later
-//! write is observed by reference. Neither renders an inline `function(` closure
-//! at the creation site. Record mechanics in depth: `env_record_hoist.rs`.
 use crate::common::{emit_module, function_body, run_main};
 
-/// Recognize empty and seeded box constructors on a cell or register assignment.
-/// Callers also check field access to distinguish boxes from collection literals.
 fn declares_box(body: &str) -> bool {
     body.lines().any(|l| {
         let t = l.trim();
@@ -23,10 +14,6 @@ fn declares_box(body: &str) -> bool {
     })
 }
 
-// A closure created ONCE (no loop), capturing single-assignment cells a, b --
-// the `sprite_mesh_submit` shape: `let a = ..; let b = ..; defer(() => use(a,b))`.
-// `defer` STORES the closure in a global so it escapes (can't be inlined away),
-// matching `queue_custom_draw` storing the draw fn in a batch for flush time.
 const NONLOOP_CAPTURE: &str = r#"
 @nomangle inline(lua) fn use_two(a: int, b: int) = "_G.__sink = (a or 0) + (b or 0)"
 
@@ -51,9 +38,6 @@ fn nonloop_capture_hoists_to_by_value_record() {
     assert!(!declares_box(body));
 }
 
-// A closure created INSIDE a loop, capturing a cell assigned inside the loop --
-// each iteration's env record must snapshot ITS value (per-iteration), which the
-// by-value field does directly (the field reads the loop-body local each time).
 const LOOP_CAPTURE: &str = r#"
 @nomangle inline(lua) fn use_one(a: int) = "_G.__sink = (a or 0)"
 
@@ -83,10 +67,6 @@ fn loop_capture_snapshots_per_iteration_via_record() {
     assert_eq!(out, "1\n2\n3");
 }
 
-// A captured cell mutated after capture (multi-store) lowers to a BOX
-// (`local c<N> = {}`, every store/load through `.v`); the record field holds the
-// shared box table (by reference), so the closure observes the later write. NOT
-// snapshotted by value.
 const MUTATED_CAPTURE: &str = r#"
 @nomangle inline(lua) fn use_one(a: int) = "_G.__sink = (a or 0)"
 
@@ -111,12 +91,6 @@ fn mutated_capture_lowers_to_box_threaded_into_record() {
     assert!(!body.contains("return function"));
 }
 
-// A VALUE struct bound per iteration by a `for` and captured. Scalarization
-// splits the binding into leaf cells, and every leaf must inherit the BINDING's
-// lifetime -- one snapshot per iteration, no box. SROA's alias-unification
-// (`Store(p, Load(cursor_dest))` treated as the same object) is correct for a
-// reference struct but hands a value binding the loop cursor's own storage,
-// which the exhausted path nils: every closure then reads that nil.
 const PER_ITER_VALUE_CAPTURE: &str = r#"
 value Pt2 { x: float, y: float }
 

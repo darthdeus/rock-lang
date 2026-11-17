@@ -1,7 +1,3 @@
-// Single harness for this crate's integration tests: one linked binary
-// instead of one per file. nextest still runs each test in its own
-// process, so isolation is unchanged.
-
 mod affine_bounds;
 mod common;
 mod compiler_admission;

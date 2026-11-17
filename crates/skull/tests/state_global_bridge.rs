@@ -1,26 +1,7 @@
-//! The `_G` state bridge's MISS path.
-//!
-//! `__rock_globals_install_bridge` puts a metatable on `_G` so a read or
-//! write of a Rock state global resolves through the global storage. Every other global
-//! that is absent from the raw table reaches the same metamethod -- and a global
-//! whose value is genuinely `nil` is absent every time, because `rawset(_G, k,
-//! nil)` cannot make it present. So the miss path runs on every such read, and
-//! it used to end in `return old_read(t, key)`: a Lua-level TAIL CALL, which
-//! spends one of LuaJIT's 15 `loopunroll` slots in every trace that records it.
-//! Measured on an application's combat bench, that link was 31.7% of the remaining
-//! tail-call budget.
-//!
-//! Which of the three pre-bridge fallback shapes applies -- function, table, or
-//! none -- cannot change between two calls of the metamethod, so it is resolved
-//! ONCE at install. `_G` normally has no metatable at all, so the resolved miss
-//! path is a plain `return nil` with no call in it.
-
 use crate::common::{emit_without_stdlib, run_luajit, ws_of};
 
 const SRC: &str = "global bar: int = 7\nfn main() {}\n";
 
-/// The body of `mt.<name> = function(..)` inside the installer, up to the
-/// matching `end` at that indentation.
 fn metamethod_body<'a>(lua: &'a str, name: &str) -> &'a str {
     let head = format!("\n  mt.{name} = function(");
     let at = lua
@@ -33,9 +14,6 @@ fn metamethod_body<'a>(lua: &'a str, name: &str) -> &'a str {
     &rest[..end]
 }
 
-/// The miss path resolves to a value, not to another Lua call. `old_read` and
-/// `old_write` are gone: they existed only to re-decide, per miss, a question
-/// the installer already knows the answer to.
 #[test]
 fn the_bridge_miss_path_is_not_a_tail_call() {
     let lua = emit_without_stdlib(SRC);
@@ -46,9 +24,6 @@ fn the_bridge_miss_path_is_not_a_tail_call() {
     assert!(write.trim_end().ends_with("rawset(t, key, value)"));
 }
 
-/// All four paths through the installed metamethods, driven under a real LuaJIT:
-/// a Rock state global, and each of the three pre-bridge fallback shapes, each
-/// captured by a REINSTALL, which is what a hot reload performs.
 #[test]
 fn every_fallback_shape_and_the_state_path_survive_a_reinstall() {
     let mut prog = emit_without_stdlib(SRC);
@@ -110,8 +85,6 @@ check("state write past a bare reinstall", _G.bar, 17)
     assert_eq!(out.lines().filter(|l| l.starts_with("ok ")).count(), 17);
 }
 
-/// A host attaches its own directory fields right after the bridge install,
-/// at the offset the emit reports, without searching the program for it.
 #[test]
 fn the_emit_reports_where_the_bridge_install_ends() {
     let ws = ws_of(SRC);

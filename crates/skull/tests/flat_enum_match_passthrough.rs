@@ -1,9 +1,5 @@
 use crate::common::{emit_module, function_body, mangled_name, run_luajit};
 
-// A `match` over a flat enum whose catch-all arm returns the scrutinee
-// (`other => other`) joins in the enum's leaves. The bind used to box the
-// scrutinee into a `{__variant ...}` table and the join unpacked it again,
-// one table per call on an interpreted path.
 const SRC: &str = r#"
 enum Src { Player, Named(string), Mob(int, int) }
 nobox value Ev { src: Src, n: int }

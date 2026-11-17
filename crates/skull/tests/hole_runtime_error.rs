@@ -1,9 +1,3 @@
-//! A reached value/expression hole (`?`) must compile to a readable runtime
-//! error, NOT silently become `nil`. Before this, a hole in a body hit the
-//! `lower_expr` catch-all, the whole enclosing function was dropped from the
-//! skipped list, and the program ran doing nothing -- a swallowed
-//! not-implemented marker (violates "NEVER swallow errors").
-
 use crate::common::emit_module;
 
 #[test]

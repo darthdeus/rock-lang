@@ -1,17 +1,5 @@
-//! Call-site specialization via the inliner. An `@inline` generic fn whose param/return bind to a VALUE
-//! struct at the call site is spliced as a PER-INSTANTIATION specialized snapshot:
-//! the body lowers as if hand-written for `V2`, so the value flows field-wise (no
-//! `V2_ct(..)` box, no boxed `__nb_checked_set` store). The bounds-checked slot
-//! accessor `__nb_checked_get` REMAINS -- it is how a scalarized store reaches the
-//! flat slot to write its fields in place; only the box + the boxed store vanish.
-//!
-//! Pre-P2 this test pinned the BOXED status quo (`V2_ct(..)` + `__nb_checked_set`);
-//! landing the feature flipped it to the zero-box assertions below (git `c42bd06ce`
-//! is the boxed-premise revision, for the before/after diff).
 use crate::common::{emit_module, function_body};
 
-// A generic `@inline` set/get over a `NativeBuffer<T>`, instantiated at the value
-// struct `V2`. Mirrors the FlatVec push/get shape (`buf[len] = v` / `return buf[i]`).
 const VALUE_INST: &str = r#"
 value V2 { x: float, y: float }
 
@@ -45,11 +33,6 @@ fn generic_inline_at_value_type_splices_zero_box() {
     assert!(!body.contains("__nb_checked_get"));
 }
 
-// A generic `@inline` fn calling `native_buffer_alloc<T>` -- the intrinsic the
-// shared (opaque-`T`) body cannot lower. Uses the stdlib `flat_vec_new<T>` /
-// `push`; specialized at `V2`, the ctype resolves and the body emits the
-// `__rock_nb_alloc("V2", ..)` it could not name generically. `nb_alloc` is a local
-// generic wrapper exercising the intrinsic directly too.
 const INTRINSIC_INST: &str = r#"
 value V2 { x: float, y: float }
 

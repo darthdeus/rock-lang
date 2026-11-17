@@ -1,10 +1,3 @@
-//! FlatVec<T> lowering-shape oracle. The stdlib FlatVec
-//! ops are `@inline` and specialize per element type at their call sites, so a
-//! push/read loop over `FlatVec<value>` must scalarize field-wise: NO per-push
-//! `<T>_ct(..)` box and NO boxed `__nb_checked_set` whole-value store. The
-//! bounds-checked slot accessor `__nb_checked_get` stays (it fetches the flat slot
-//! that a scalarized store then writes in place). Runtime correctness is
-//! `tests/values/flat_vec.rock`; this pins the emitted shape.
 use crate::common::{emit_module, function_body};
 
 const FLAT_VEC_LOOP: &str = r#"

@@ -1,12 +1,7 @@
-//! The whole-program half of the callee binding: the
-//! assembled artifact's second pass and executable incremental rebinding.
-
 use skull::mir_emit::{emit_full, emit_overlay};
 
 use crate::common::{body_id, bound_callee_name, emit_full_of, function_body, ws_with_stdlib};
 
-/// A program whose call graph has a chain (`top` -> `mid` -> `leaf`), a
-/// mutually recursive pair, and a leaf with no callees at all.
 const SRC: &str = "\
 fn leaf(a: int) -> int { a * 3 + 1 }
 fn mid(a: int) -> int { leaf(a) + leaf(a + 1) }
@@ -21,8 +16,6 @@ fn emit(src: &str) -> String {
     emit_full_of(&ws, "emit_full").0.lua
 }
 
-/// The byte offset of `needle`, which must occur exactly once.
-/// Load `script` under the host runner and require it to print PASS.
 fn assert_passes(script: &str) {
     let out =
         rock_host::lua_runner::run_lua_code_with_timeout(script, Some(test_utils::HANG_BACKSTOP))
@@ -39,9 +32,6 @@ fn only(lua: &str, needle: &str) -> usize {
     first
 }
 
-/// Every factory gets exactly one binding line, and EVERY binding line follows
-/// EVERY definition: a factory holds the only copy of its body, so a capture
-/// read before its own binding line ran would be main.lua's `nil`.
 #[test]
 fn every_binding_line_follows_every_definition() {
     let lua = emit(SRC);
@@ -65,8 +55,6 @@ fn every_binding_line_follows_every_definition() {
     }
 }
 
-/// The binding pass runs callees before callers: `mid` captures `leaf`, and
-/// `top` captures both, so each must already hold its final closure.
 #[test]
 fn binding_lines_are_ordered_callees_before_callers() {
     let lua = emit(SRC);
@@ -81,9 +69,6 @@ fn binding_lines_are_ordered_callees_before_callers() {
     assert!(mid_bind < top_bind);
 }
 
-/// A mutually recursive pair shares one call-graph component, so neither leg is
-/// captured -- the condensation rank cannot order them and their closures do
-/// not exist yet.
 #[test]
 fn a_mutually_recursive_pair_stays_a_global_lookup() {
     let lua = emit(SRC);
@@ -96,12 +81,6 @@ fn a_mutually_recursive_pair_stays_a_global_lookup() {
     assert!(recursive == "is_even_int" && body.contains("is_even_int("));
 }
 
-/// `MirEmit::emits_main` is the emitter's own answer to "does this artifact
-/// define the entry point", and the CLI appends `__rock_main_wrapper(main)` on
-/// it. It cannot be recovered from the text: under the bound shape `main`'s
-/// body lives in a factory and the string `function main(` appears nowhere, so
-/// the caller that used to search for it wrote a chunk that defined the whole
-/// game and then ran nothing.
 #[test]
 fn emits_main_is_reported() {
     let ws = ws_with_stdlib(SRC);

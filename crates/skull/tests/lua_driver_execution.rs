@@ -1,13 +1,6 @@
-//! Programs compiled by the shipped pipeline, then driven from Lua: each
-//! driver is a Lua expression over the `<test>` module's functions, called by
-//! their source names, so a test can hand a body boundary values Rock cannot
-//! spell (a raw table, an out-of-range number, a metatable that mutates).
-
 use crate::common;
 use std::collections::HashMap;
 
-/// Emit `src` as a program, alias each uniquely named `<test>` function to its
-/// source name, and print the Lua expression `driver` under luajit.
 fn run(src: &str, driver: &str) -> String {
     common::require_luajit();
     let ws = common::ws_with_stdlib(src);
@@ -169,9 +162,6 @@ fn shrunk(xs: [int], m: Map<string, int>) -> int {
     );
 }
 
-// Callee binding binds direct calls, so these run with inlining off to keep
-// the calls the binding is about.
-
 #[test]
 fn callee_binding_ignores_calls_removed_by_cleanup() {
     let _inline_off = common::InlineOffGuard::on();
@@ -195,8 +185,6 @@ fn callee_binding_short_names_skip_public_globals() {
     assert_eq!(run(src, "caller(3)"), "9");
 }
 
-/// A factory alias never takes a name that spliced inline(lua) text reads
-/// freely: the alias would capture the text's global.
 #[test]
 fn callee_binding_aliases_skip_names_inline_lua_reads() {
     let _inline_off = common::InlineOffGuard::on();
@@ -212,9 +200,6 @@ fn callee_binding_aliases_skip_names_inline_lua_reads() {
     );
 }
 
-/// Aliased captures called around a spliced inline(lua) body inside a loop,
-/// where the splice declares a local spelled like an alias, run the same as
-/// the source says.
 #[test]
 fn aliased_captures_around_a_spliced_body_in_a_loop_run_correctly() {
     let _inline_off = common::InlineOffGuard::on();
@@ -230,8 +215,6 @@ fn aliased_captures_around_a_spliced_body_in_a_loop_run_correctly() {
     assert_eq!(run(src, "caller(4)"), "34");
 }
 
-/// LuaJIT refuses to parse a function with more upvalues than
-/// `MAX_BOUND_CALLEES`, so a body with more bindable callees must still load.
 #[test]
 fn callee_binding_caps_at_the_lua_upvalue_limit() {
     let _inline_off = common::InlineOffGuard::on();
@@ -267,8 +250,6 @@ fn vec_push_method_appends() {
     assert_eq!(run(src, "add({_data = {}, len = 0}, 7)"), "2");
 }
 
-/// Each body proves `xs` non-empty, then calls something a foreign metamethod
-/// can hook to empty `xs`; the later `xs[0]` must still raise.
 #[test]
 fn foreign_metamethods_can_shrink_a_guarded_vector() {
     let src = r#"

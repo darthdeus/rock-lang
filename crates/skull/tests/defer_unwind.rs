@@ -1,7 +1,3 @@
-//! DEFER ON ERROR: a Lua function whose body
-//! registers an ordinary-fn `defer` enters itself through `__rock_defer_call`,
-//! which unwinds the registered cleanups when an error escapes and re-raises
-//! it. A function without `defer` carries none of that machinery.
 use crate::common::{emit_module, function_body, mangled_name, run_main};
 
 const FIXTURE: &str = r#"

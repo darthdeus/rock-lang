@@ -112,10 +112,6 @@ fn unused_bindings_preserve_live_slots_and_removal_during_the_walk() {
     );
 }
 
-/// The unused leaf's column is never read, while the element index is
-/// still taken per turn: as the bare slot where the loop proves it (these
-/// walks), and as the checked form where it cannot (`unused_vec_element`
-/// calls `clear` in its body, so its turn after the clear must raise).
 #[test]
 fn vector_leaves_are_already_dead_but_the_element_index_stays() {
     let lua = emit_module(SOURCE);

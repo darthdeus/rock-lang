@@ -1,23 +1,5 @@
-//! Codegen-shape contract: a plain `struct` whose only uses are field reads (and
-//! field writes) must NOT survive as a `{__ty=..}` Lua table after inlining.
-//!
-//! skull unboxes `value` structs (opt #1, `scalarize_value_cells`) but used to
-//! emit plain structs as a Lua table and lean on LuaJIT's allocation sinking
-//! (SINK) to elide them. SINK only fires on a compiled trace -- in the
-//! interpreter (application's aborted HUD/text loops) the table allocates every
-//! iteration. rock scalarizes plain structs into per-field locals at codegen, so
-//! the table never exists and rock pays 0 even interpreted. This pins skull to
-//! that parity: a non-escaping plain-struct cell is split into per-field cells.
-//!
-//! Mirrors `value_scalarize.rs`; the difference is plain structs are MUTABLE
-//! (field WRITES are legal and become field-cell stores), and a whole-struct use
-//! (pass-by-value, `==`, return, store as another struct's field) must keep the
-//! table.
 use crate::common::{emit_module, function_body};
 
-// A plain struct returned from an `@inline` helper and field-read across branch
-// arms (other blocks) -- the same single-block-value limitation that forces
-// `value` structs to allocate. The table must scalarize into per-field cells.
 const PLAIN_FIELD_LOOP: &str = r#"
 struct Props { a: int, b: int, c: int }
 
@@ -53,8 +35,6 @@ fn plain_struct_field_reads_dont_materialize_table() {
     assert!(!hot.contains("__ty = \"Props\""));
 }
 
-// Plain structs are mutable: a local struct whose fields are WRITTEN and then
-// read must still scalarize -- the field write becomes a per-field-cell store.
 const PLAIN_MUTATE_LOOP: &str = r#"
 struct Acc { sum: int, n: int }
 
@@ -81,10 +61,6 @@ fn plain_struct_field_writes_scalarize() {
     assert!(!hot.contains("__ty = \"Acc\""));
 }
 
-// A plain struct used as a WHOLE (passed by value to a function) must keep its
-// table -- the call escapes the aggregate, so SROA must not split the cell (a
-// half-rewrite would read never-stored per-field cells). Runs the field read
-// alongside to force the candidate shape.
 const PLAIN_WHOLE_USE: &str = r#"
 struct Box { w: int, h: int }
 

@@ -1,14 +1,3 @@
-//! Shared function metatables: the `__rock_fn_mt` runtime
-//! helper -- a shared metatable making an env record `{ __slot = <CodeRef>, <captures> }`
-//! callable as `f(...)` via `__call`, initialized once at load with the
-//! preservation idiom so pre- and post-reload records share metatable identity.
-//!
-//! It lives in the runtime prelude (`skull::runtime_prelude`) alongside its
-//! siblings `__ROCK_C_STRUCT` / `__rock_on_hot_reload` / the RNG -- the home for
-//! unconditional, load-time, reload-preserved runtime tables. (The plan said
-//! "stdlib inline(lua)"; an inline(lua) fn doesn't auto-run at load and a
-//! metatable is a table, not a callable, so the prelude bare-global form is what
-//! the design's `setmetatable({..}, __rock_fn_mt)` reference needs.)
 use crate::common::{emit_module, run_luajit};
 
 #[test]
@@ -47,7 +36,6 @@ end
     assert_eq!(run_luajit(&format!("{lua}{driver}")), "4/4 PASS");
 }
 
-/// An escaping Rock function value enables the shared CodeRef runtime.
 #[test]
 fn prelude_defines_shared_fn_metatable() {
     let lua = emit_module("fn main() { let f = () => 1; print(f()) }\n");
@@ -59,8 +47,6 @@ fn prelude_defines_shared_fn_metatable() {
     assert!(lua.contains("if not _G.__rock_fn_mt then"));
 }
 
-/// A hand-built CodeRef record routes a plain `f(args)` call through `__call`
-/// to the current slot body, reading its captured field.
 #[test]
 fn record_is_callable_via_call_metamethod() {
     let lua = emit_module("fn main() { let f = () => 1; print(f()) }\n");
@@ -74,10 +60,6 @@ fn record_is_callable_via_call_metamethod() {
     assert_eq!(out, "105");
 }
 
-/// Metatable identity is preserved across a reload: a record built before the
-/// re-`dofile` and one built after share the SAME metatable (the `or`/`if not`
-/// guard skips re-creation), so `getmetatable` compares equal -- required for
-/// snapshot deep-copy to recognize records by `getmetatable(x) == __rock_fn_mt`.
 #[test]
 fn metatable_identity_preserved_across_reload() {
     let prog = emit_module("fn main() { let f = () => 1; print(f()) }\n");
@@ -167,10 +149,6 @@ if not ok and _G.__rock_definition_plan_pending == nil
     assert_eq!(out, "PASS");
 }
 
-/// `__rock_c_struct_of` (stdlib) memoizes the `ffi.istype` scan over
-/// `__ROCK_C_STRUCT` per CTypeID in `__ROCK_C_STRUCT_BY_CTYPE`. The rows own
-/// that memo's lifetime: the emitter resets it AFTER the rows so a re-run of
-/// the scaffolding can never serve a memo entry built from rows it replaced.
 #[test]
 fn c_struct_registry_rows_reset_the_ctype_memo_after_themselves() {
     let lua = emit_module(

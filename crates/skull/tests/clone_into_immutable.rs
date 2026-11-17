@@ -1,9 +1,5 @@
 use crate::common::{emit_module, function_body, require_luajit, run_luajit};
 
-// `clone_into` gives the destination owner its own copy. On Lua a value with
-// no mutable heap storage is already that copy, so the call must be the
-// argument itself: the generic body allocated a `seen` table per call even
-// for a string. Vec, Map and boxed values keep the deep copy.
 const SRC: &str = r#"
 enum Mood { Calm, Angry }
 nobox value Pos { x: int, y: int }
@@ -42,7 +38,6 @@ inline(lua) fn tail_count(xs: [Wide]) -> int = """
     end
     return n
 """
-
 
 global OUT: [string] = []
 

@@ -1,23 +1,3 @@
-//! `@repr(opaque)`: the parameter-level representation contract
-//!.
-//!
-//! The 2.4 rejection fires on a parameter whose declared semantic type, under
-//! the call's substitution, is a container with a column-stored element --
-//! because an opaque body written against `[T]` reads a `_data` that column
-//! storage does not have. Some parameters make no such assumption: `vec_push`'s
-//! `item` is stored and never indexed, so a pushed COLUMN vec is not a layout
-//! violation. There is no TYPE that says this: retyping `item` to `any`/`any?`
-//! drops the inference edge that gives `vec_new()` its element -- measured,
-//! `tests/coroutines/basics.rock` loses `Coroutine<..>` and fails at `resume()`. Hence
-//! a contract carried beside the type rather than in it.
-//!
-//! Scope: it waives ONE parameter of ONE rule. It is not a nobox escape, it does
-//! not touch inference, mangling or specialization, and it is rejected where the
-//! body is not opaque, because there is no assumption there to waive.
-//!
-//! Every registry violation carries kind `Generic`, so `tests/errors/` cannot
-//! tell them apart from "unknown annotation `@repr`". That is why these assert
-//! MESSAGES.
 use crate::common::emit_rejection;
 
 const ON_A_ROCK_BODY: &str = r#"
@@ -65,10 +45,6 @@ const EXTRA_ARGUMENTS: &str = r#"
 fn main() { print("{f(1)}") }
 "#;
 
-/// `vec_push`'s signature (admitted in `tests/annotations/opaque_slot_admission.rock`),
-/// with the column container at the UNANNOTATED parameter.
-/// `T = P` makes `sink` a column `[P]`, and the contract on `item` must not
-/// reach it: the waiver is per parameter, not per call.
 const EXEMPTS_ONLY_THAT_PARAM: &str = r#"
 value P { x: float, y: float }
 
@@ -83,8 +59,6 @@ fn main() {
 }
 "#;
 
-/// Without the contract the same payload rejects. This is the fixture the
-/// annotation exists to change, and it must keep rejecting when it is absent.
 const UNANNOTATED_PAYLOAD_REJECTS: &str = r#"
 value P { x: float, y: float }
 
@@ -100,9 +74,6 @@ fn main() {
 }
 "#;
 
-/// The contract is about physical LAYOUT, not about the `nobox` guarantee. A
-/// nobox value crossing a boxed call boundary must still reject with the
-/// annotation present.
 const NOBOX_NOT_BYPASSED: &str = r#"
 nobox value NV { x: float, y: float }
 
@@ -113,8 +84,6 @@ nobox value NV { x: float, y: float }
 fn main() { print("{takes_nv(NV { x: 1.0, y: 2.0 })}") }
 "#;
 
-/// The same source without the annotation: whatever `takes_nv` does, the
-/// annotation must not change it. Compared against `NOBOX_NOT_BYPASSED`.
 const NOBOX_CONTROL: &str = r#"
 nobox value NV { x: float, y: float }
 
@@ -125,16 +94,12 @@ nobox value NV { x: float, y: float }
 fn main() { print("{takes_nv(NV { x: 1.0, y: 2.0 })}") }
 "#;
 
-/// A REGISTRY rejection: recorded by bone during lowering, before emit.
 fn registry_rejection(src: &str) -> String {
     let msgs = crate::common::bone_rejections(src);
     assert!(!msgs.is_empty());
     msgs.join(" | ")
 }
 
-/// A SKULL rejection: the 2.4 layout rule, raised at emit.
-/// The outcome of emitting, as a comparable value, so two sources can be
-/// asserted IDENTICAL rather than each asserted separately.
 fn outcome(src: &str) -> Result<(), String> {
     crate::common::try_emit_module(src)
         .map(|_| ())
@@ -178,23 +143,17 @@ fn repr_with_extra_arguments_rejects() {
     assert!(registry_rejection(EXTRA_ARGUMENTS).contains("@repr"));
 }
 
-/// The waiver is PER PARAMETER. Without this, annotating any parameter could
-/// silently disarm the rule for the whole call.
 #[test]
 fn the_waiver_does_not_reach_the_unannotated_parameter() {
     let msg = emit_rejection(EXEMPTS_ONLY_THAT_PARAM);
     assert!(msg.contains("column-stored `[P]`") && msg.contains("take"));
 }
 
-/// The fixture the annotation exists to change. If this stopped rejecting, the
-/// admission above would prove nothing.
 #[test]
 fn the_same_payload_without_the_contract_rejects() {
     assert!(emit_rejection(UNANNOTATED_PAYLOAD_REJECTS).contains("column-stored `[P]`"));
 }
 
-/// Not a nobox escape: the annotated and unannotated sources must reach the
-/// SAME outcome, whichever it is.
 #[test]
 fn repr_opaque_does_not_change_the_nobox_verdict() {
     assert_eq!(outcome(NOBOX_NOT_BYPASSED), outcome(NOBOX_CONTROL));

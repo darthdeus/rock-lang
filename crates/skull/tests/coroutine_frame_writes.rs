@@ -60,8 +60,6 @@ fn main() {
 }
 "#;
 
-/// Clearing an absent user field still invokes a host __newindex callback.
-/// Compiler-owned coroutine payload stores retain their separate nil-write proof.
 #[test]
 fn frame_stores_evaluate_rhs_once_clear_payloads_and_preserve_user_writes() {
     let lua = common::try_emit_module(FRAME_WRITES).expect("frame writes emit");
@@ -71,12 +69,6 @@ fn frame_stores_evaluate_rhs_once_clear_payloads_and_preserve_user_writes() {
     );
 }
 
-/// A conversion VALUE live across a yield keeps a valid slot: the spill store
-/// reads the operand's register and the resume segment reloads from the frame.
-/// Real lowering routes `let`-bound conversions through cells (each use folds
-/// its own), so only a hand-built body reaches the transform's value spill
-/// with a conversion; the step still runs the production transform and
-/// emitter end to end under LuaJIT.
 #[test]
 fn spilled_int_to_float_alias_reads_a_valid_slot_after_resume() {
     let ws = bone_semantic::prelude::Workspace::new();
@@ -148,10 +140,6 @@ fn spilled_int_to_float_alias_reads_a_valid_slot_after_resume() {
     assert_eq!(common::run_luajit(&driver), "10\n20");
 }
 
-/// A v1 enum has one runtime tag. The erased `resume()` rebuilds the yielded
-/// value from the frame slots, and that box must carry the same `__ty` as a
-/// constructed value (the spelling `__ROCK_TYPE_TABLE` is keyed on), not the
-/// enum's definition key.
 #[test]
 fn a_resumed_v1_enum_box_carries_the_types_runtime_tag() {
     let emitted = common::emit_v1_package(

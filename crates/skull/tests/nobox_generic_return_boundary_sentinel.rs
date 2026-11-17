@@ -1,60 +1,3 @@
-//! SENTINEL. `reject_nobox_boxed_call_args` checks ARGUMENT positions only, so
-//! a generic `-> V` instantiated at a `nobox` value crosses an opaque boundary
-//! unrejected and reads a key that does not exist.
-//!
-//! A `nobox` value field is FLATTENED into per-leaf keys: `struct Row { pos:
-//! Vec2 }` emits `{["pos.x"] = .., ["pos.y"] = ..}`, with no `pos` key at all.
-//! An `inline(lua)` body is an opaque string, so nothing adapts it to that
-//! representation -- exactly the reasoning in
-//! `inline_lua_column_container_param_sentinel.rs`, one position over.
-//!
-//! The two directions disagree, which is the whole finding. `field_set` takes
-//! its value as a PARAM, so the arg check fires and the program is rejected
-//! with "nobox value `Vec2` cannot cross boxed call boundary `field_set`".
-//! `field_get` hands the same value back as a generic RETURN, nothing checks
-//! it, and the emitted `o["pos"]` is nil -- a crash on a read, and in the
-//! stdlib's most reachable descriptor primitive.
-//!
-//! DISCRIMINANT, measured against the nearest working controls: it is not
-//! genericity and not struct-typedness. A plain `struct` field and an UNMARKED
-//! `value` field both round-trip through the identical generic `field_get`; a
-//! `nobox value` field is the only one that dies. The `nobox` mark is what
-//! makes the field flatten, so it is what removes the key the boundary reads.
-//!
-//! NOT the same hole as the declared-`embed` rejection in
-//! `bone-inference/src/expr.rs`, which refuses `ReadFieldRef`/`FieldRef` to an
-//! `embed` field. That predicate asks whether the field was SPELLED `embed`,
-//! not whether it is flattened, so a `nobox`-typed field walks straight past
-//! it. `tests/errors/embed_projection_only.rock.err` pins the spelled form and
-//! is unaffected by this.
-//!
-//! The return-position sibling now rejects both forms with the concrete
-//! substituted return type, while the three controls remain unchanged. This
-//! keeps the return boundary fail-closed even when the declaration spells a
-//! generic return.
-//! the FieldRef pull model is unblocked -- a
-//! position descriptor is `ReadFieldRef<T, Vec2>`, which is precisely this
-//! shape.
-//!
-//! THE FIX, with its blast radius measured. The sibling rule twenty lines up in
-//! the same file already does this correctly: the opaque-CONTAINER check reads
-//! every declared parameter slot AND the return, resolved under the concrete
-//! substitution through `declared_slot_hazard`. The nobox check walks the
-//! caller's argument expressions and stops there. Give it the same return arm.
-//!
-//! What must stay legal is not `v(x, y)` -- that has a ROCK body, so it never
-//! reaches this check at all. It is the opaque bodies that legitimately hand
-//! back nobox leaves, and they are already marked: `@scalar_abi` (imgui's
-//! `imgui_get_mouse_pos`, `imgui_get_cursor_screen_pos`,
-//! `imgui_get_content_region_avail`, `imgui_get_mouse_drag_delta` in both the
-//! Lua and JS lanes, plus `host_measure_text_vec2_for`) and `@gpu_only`
-//! (`texture`, `texture_size`, `frag_coord`), which this function already
-//! exempts. `fn_scalar_abi_spec` is the existing discriminant -- see this
-//! file's own line 10 -- so the arm is "declared return is nobox under the
-//! substitution AND the callee has no scalar-ABI spec". `field_get` is
-//! `@inline inline(lua)` with neither mark, which is why it should reject.
-
-/// The repro through the stdlib primitive that actually bites.
 const FIELD_GET_NOBOX: &str = r#"
 struct Row { pos: Vec2, tag: int }
 
@@ -68,9 +11,6 @@ fn main() {
 }
 "#;
 
-/// The same boundary with no `FieldRef` anywhere: a hand-written generic
-/// `inline(lua)` returning `V`. Proves the hole is the RETURN POSITION rather
-/// than anything the field-descriptor types do.
 const GENERIC_RETURN_NOBOX: &str = r#"
 struct Box2 { p: Vec2 }
 
@@ -84,9 +24,6 @@ fn main() {
 }
 "#;
 
-/// Control: the WRITE direction of the very same field, which IS rejected.
-/// Deleting the arg check would turn this green and is how you tell a real fix
-/// from the check being lost.
 const FIELD_SET_NOBOX: &str = r#"
 struct Row { pos: Vec2, tag: int }
 

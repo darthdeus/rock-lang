@@ -1,13 +1,3 @@
-//! `_G.__ROCK_NB_STORAGE`: the compiler's description of concrete NativeBuffer
-//! storage. A holder of a storage cdata asks
-//! it what the bytes mean -- element ctype, element width, and the leaf views
-//! minted over that element -- instead of reading a `__ty` spelling, which names
-//! the wrapper and never the element.
-//!
-//! Both halves come from the same generator: the primitive/sized element types
-//! from `NB_PRIM_ELEMS`, the value-struct ones from the layout oracle the
-//! emitter itself uses. So the widths here are the widths `ffi.new` allocates,
-//! and the view set is the set element access indexes.
 use crate::common::emit_module;
 
 const VALUE_ELEM: &str = r#"
@@ -50,19 +40,12 @@ fn a_value_element_registers_its_luajit_width_and_every_leaf_view() {
     }
 }
 
-/// The registration and the lookup have to agree on the ctype spelling, and only
-/// LuaJIT decides what a typedef'd anonymous struct is called. Registering
-/// through `ffi.typeof` is what makes them agree -- a registration keyed on the
-/// Rock/C name would never match the allocation's own ctype.
 #[test]
 fn the_registry_is_keyed_through_ffi_typeof() {
     let lua = emit_module(VALUE_ELEM);
     assert!(lua.contains("_G.__ROCK_NB_STORAGE[tostring(ct)]"));
 }
 
-/// The declared width is asserted against LuaJIT at load. A drift here is not a
-/// wrong number in a table: it is a byte image of the wrong length copied back
-/// over an allocation.
 #[test]
 fn a_width_that_disagrees_with_luajit_aborts_at_load() {
     let lua = emit_module(VALUE_ELEM);

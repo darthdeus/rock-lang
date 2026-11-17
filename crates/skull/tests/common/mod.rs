@@ -1,31 +1,19 @@
-//! Shared skull codegen-test harness: parse + semantic_pass, then either a full
-//! MIR emit against the real stdlib (`emit_mir` / `emit_module`) or a bare
-//! single-module workspace (`ws_of`). Each integration harness declares this
-//! module once; its test modules import helpers through `crate::common`.
-
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::{self, InstanceGraph};
 use skull_mir::lower::ScalarCtx;
 use ustr::Ustr;
 
-/// The shared process stdlib with `src` parsed as `file` after it.
 fn with_stdlib(src: &str, file: &str) -> skull_parser::stdlib::ModuleSet {
     let user = skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse");
     skull_parser::stdlib::ModuleSet::with_stdlib([user]).expect("stdlib parses")
 }
 
-/// The gated semantic pass every compile runs.
 fn semantic_pass(
     modules: &mut skull_parser::stdlib::ModuleSet,
 ) -> Result<Workspace, skull_parser::CompilerError> {
     skull::pipeline::semantic_pass(modules, &Default::default())
 }
 
-/// Panic if bone recorded any type/lowering/interface error. `semantic_pass`
-/// returns `Ok` with per-body diagnostics recorded on the workspace, so a
-/// fixture that stops typechecking (e.g. its helper name goes ambiguous
-/// against a new stdlib overload) would otherwise flow on with missing
-/// resolutions and turn shape assertions vacuously green.
 fn assert_no_bone_errors(ws: &Workspace) {
     let errs: Vec<_> = recorded_bone_errors(ws).map(|e| &e.message).collect();
     assert!(errs.is_empty());
@@ -44,11 +32,6 @@ fn recorded_bone_errors(ws: &Workspace) -> impl Iterator<Item = &skull_parser::C
         .chain(ws.modules.iter().flat_map(|m| m.interface_errors.iter()))
 }
 
-/// The messages bone recorded for `src`, without emitting.
-///
-/// [`try_emit_module`] deliberately PANICS on these (a bone error there means a
-/// malformed fixture), so a test whose subject IS a bone-level rejection --
-/// annotation-registry violations, for one -- cannot use it.
 pub fn bone_rejections(src: &str) -> Vec<String> {
     bone_rejection_errors(src)
         .into_iter()
@@ -56,7 +39,6 @@ pub fn bone_rejections(src: &str) -> Vec<String> {
         .collect()
 }
 
-/// [`bone_rejections`] with each error's location and labels.
 pub fn bone_rejection_errors(src: &str) -> Vec<skull_parser::CompilerError> {
     let mut modules = with_stdlib(src, "<test>");
     // BOTH channels. `semantic_pass` returns `Err` for a violation it treats as
@@ -70,10 +52,6 @@ pub fn bone_rejection_errors(src: &str) -> Vec<skull_parser::CompilerError> {
     recorded_bone_errors(&ws).cloned().collect()
 }
 
-/// Full MIR emit for `src` (the `<test>` module) through the skull pipeline
-/// (lower -> inline -> cleanup -> emit). Stdlib is loaded so int/float casts and
-/// `%`/arithmetic ops resolve to their stdlib helpers -- else the using fns fail
-/// to lower and are silently skipped.
 pub fn emit_mir(src: &str) -> skull::mir_emit::MirEmit {
     emit_at(&checked_workspace(src, "<test>"), "<test>").expect("emit")
 }
@@ -101,15 +79,11 @@ fn emit_at(
     skull::mir_emit::emit_workspace_mir(ws, module_id(ws, file))
 }
 
-/// A workspace of `src` (the `<test>` module) over the real stdlib -- for tests
-/// that inspect stdlib declarations (e.g. `@intrinsic` annotations).
 pub fn ws_with_stdlib(src: &str) -> Workspace {
     let mut modules = with_stdlib(src, "<test>");
     semantic_pass(&mut modules).expect("semantic_pass")
 }
 
-/// A workspace of `files` (`(file id, source)` pairs, in order) over the real
-/// stdlib.
 pub fn ws_of_files(files: &[(&str, &str)]) -> Workspace {
     semantic_pass(&mut parse_files(files).expect("parse")).expect("semantic_pass")
 }
@@ -128,22 +102,15 @@ fn parse_files(
     Ok(modules)
 }
 
-/// Emitted Lua for `src` (the common case; `emit_mir(src).lua`).
 pub fn emit_module(src: &str) -> String {
     emit_mir(src).lua
 }
 
-/// One fragment of a modules-v1 package fixture (fragment = file,
-/// logical module = its `mod` header). The FIRST fragment is the one emission
-/// starts from, so it owns `main`.
 pub struct V1Fragment<'a> {
     pub file: &'a str,
     pub src: &'a str,
 }
 
-/// A v1 package's workspace over the real stdlib. Each fragment carries the
-/// package tag the host's graph stamps, so its definitions register under their
-/// DefKeys (`<package>::<module path>::<name>`) instead of bare names.
 pub fn ws_v1_package(package: &str, fragments: &[V1Fragment]) -> Workspace {
     let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib([]).expect("stdlib parses");
     for fragment in fragments {
@@ -174,16 +141,12 @@ fn shared_test_package() -> skull_parser::PackageTag {
     }
 }
 
-/// Full MIR emit for a v1 package, rooted at its first fragment.
 pub fn emit_v1_package(package: &str, fragments: &[V1Fragment]) -> skull::mir_emit::MirEmit {
     let ws = ws_v1_package(package, fragments);
     let mid = module_id(&ws, fragments[0].file);
     skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit")
 }
 
-/// Like [`try_emit_module`] but with `Workspace.comptime_inputs` set before
-/// emission -- the seam the host CLI uses for `build_var`/`embed_string`
-///.
 pub fn try_emit_module_with(
     src: &str,
     inputs: bone_semantic::inference::ComptimeInputs,
@@ -191,9 +154,6 @@ pub fn try_emit_module_with(
     try_emit_module_with_file(src, "<test>", inputs)
 }
 
-/// [`try_emit_module_with`] with a caller-chosen module FILE path -- for
-/// fixtures where embed resolution must see a real on-disk file location
-/// (package-relative embeds).
 pub fn try_emit_module_with_file(
     src: &str,
     file: &str,
@@ -202,14 +162,10 @@ pub fn try_emit_module_with_file(
     emit_with_inputs(src, file, inputs).map(|e| e.lua)
 }
 
-/// Like [`emit_mir`] but surfaces the codegen `Result` (a rejection such as a
-/// reserved synthetic-name collision) instead of `.expect`ing success. Semantic
-/// errors still panic (a malformed test, not what these cases probe).
 pub fn try_emit_module(src: &str) -> Result<String, skull_parser::CompilerError> {
     emit_at(&checked_workspace(src, "<test>"), "<test>").map(|e| e.lua)
 }
 
-/// The message emission rejects `src` with; panics if it emits.
 pub fn emit_rejection(src: &str) -> String {
     match try_emit_module(src) {
         Ok(lua) => panic!("expected a rejection, emitted:\n{lua}"),
@@ -217,8 +173,6 @@ pub fn emit_rejection(src: &str) -> String {
     }
 }
 
-/// [`try_emit_module`] with identity storage enforced on the unpackaged
-/// `<test>` module, as bone fixtures do: the program's package is not exempt.
 pub fn try_emit_module_enforcing_identity_storage(
     src: &str,
 ) -> Result<String, skull_parser::CompilerError> {
@@ -233,10 +187,6 @@ pub fn try_emit_module_enforcing_identity_storage(
     skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
 }
 
-/// Like [`try_emit_module`] but with LuaJIT's frame-limit rejection OFF, so the
-/// emitted Lua of a body the check rejects is still produced. The
-/// boundary-agreement test needs it: without the Lua there is nothing to ask
-/// `loadfile` about, and "the compiler rejected it" would be unfalsifiable.
 pub fn emit_module_without_frame_limits(src: &str) -> String {
     emit_module_shaped(
         src,
@@ -248,8 +198,6 @@ pub fn emit_module_without_frame_limits(src: &str) -> String {
     )
 }
 
-/// The full program of `src`, parsed as module FILE `file`, under explicit
-/// emitted shapes.
 pub fn emit_module_shaped(
     src: &str,
     file: &str,
@@ -264,18 +212,12 @@ pub fn emit_module_shaped(
         .expect("emit under explicit shapes")
 }
 
-/// A temp path for one luajit program, unique per CALL: tests run in parallel
-/// in one binary, so a pid-only name lets one test's write race another's read
-/// and its cleanup delete the other's file.
 fn temp_lua_path() -> std::path::PathBuf {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::env::temp_dir().join(format!("skull_test_{}_{n}.lua", std::process::id()))
 }
 
-/// Whether the bundled LuaJIT can LOAD `prog` (parse only -- the chunk is never
-/// run), and the parse error when it cannot. This is the oracle the frame-limit
-/// model is measured against.
 pub fn luajit_loads(prog: &str) -> Result<(), String> {
     let path = temp_lua_path();
     std::fs::write(&path, prog).expect("write program");
@@ -294,8 +236,6 @@ pub fn luajit_loads(prog: &str) -> Result<(), String> {
     Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
 }
 
-/// The storage slots of the mutable global `identity` (`global:<file>::<name>`),
-/// read from the program's published global directory.
 pub fn global_slots(lua: &str, identity: &str) -> Vec<u32> {
     lua.split(&format!("identity=\"{identity}\""))
         .nth(1)
@@ -309,7 +249,6 @@ pub fn global_slots(lua: &str, identity: &str) -> Vec<u32> {
         .collect()
 }
 
-/// The parameter names of `name`'s emitted definition.
 pub fn function_params<'a>(lua: &'a str, name: &str) -> Vec<&'a str> {
     let body = function_body(lua, name);
     let open = body.find('(').expect("a parameter list");
@@ -321,23 +260,6 @@ pub fn function_params<'a>(lua: &'a str, name: &str) -> Vec<&'a str> {
     inner.split(',').map(str::trim).collect()
 }
 
-/// The body of the emitted definition named (or prefixed by) `name`. `name` is
-/// the rock identifier; the emitted definition is mangled
-/// (`hot_int_int_int`), so the prefix is resolved against the
-/// definitions the chunk actually carries.
-///
-/// Handles both emitted callee shapes: the global-lookup `function <name>(..)`
-/// and the callee-bound factory `__rock_mk_<name> = function(..) return
-/// function(..)`, whose body ends at the column-0 `end end` that closes the
-/// inner function and the factory together. A bound body's short parameters
-/// replace captured global names at direct call sites.
-///
-/// The NAME is resolved before the text is searched, which is what keeps the
-/// bound shape honest. A hoisted `<name>__lambda0` stays a plain global while
-/// its enclosing `<name>` moves into a factory, so a bare `function <name>`
-/// scan would silently return the HOIST; and `forward_wide` prefixes
-/// `forward_wide_indirect`, so a bare prefix scan would return whichever of the
-/// two happened to keep the global spelling.
 pub fn function_body<'a>(lua: &'a str, name: &str) -> &'a str {
     let resolved = resolve_definition(lua, name);
     let global = format!("\nfunction {resolved}(");
@@ -362,10 +284,6 @@ pub fn function_body<'a>(lua: &'a str, name: &str) -> &'a str {
     &rest[..end]
 }
 
-/// The name a call to `global` uses inside `caller`, accounting for a bound
-/// callee factory parameter. The corresponding binding line supplies the
-/// globals in the same order as the factory header supplies its parameters.
-/// Unbound callees keep their global spelling.
 pub fn bound_callee_name(lua: &str, caller: &str, global: &str) -> String {
     bound_callee_names(lua, caller)
         .into_iter()
@@ -374,8 +292,6 @@ pub fn bound_callee_name(lua: &str, caller: &str, global: &str) -> String {
         .unwrap_or_else(|| global.to_string())
 }
 
-/// Factory parameters and their binding arguments, independent of whether a
-/// corresponding global definition exists.
 pub fn bound_callee_names(lua: &str, caller: &str) -> Vec<(String, String)> {
     let caller = resolve_definition(lua, caller);
     let factory_head = format!(
@@ -422,9 +338,6 @@ pub fn bound_callee_names(lua: &str, caller: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The emitted definition `name` names: an exact name wins, then the first
-/// definition it prefixes WITHOUT crossing a synthetic `__` suffix (so `main`
-/// resolves to `main`, never to `main__lambda0`), then any prefix match.
 fn resolve_definition<'a>(lua: &'a str, name: &str) -> &'a str {
     let names = definition_names(lua);
     names
@@ -440,11 +353,6 @@ fn resolve_definition<'a>(lua: &'a str, name: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no definition of `{name}` in:\n{lua}"))
 }
 
-/// Every top-level definition's emitted name, in either shape, in EMISSION
-/// order. Order matters: a caller resolving a prefix takes the first match, and
-/// the bound shape splits the population between `function <name>(` globals and
-/// `__rock_mk_<name> = function(` factories, so scanning one kind and then the
-/// other would reorder the chunk.
 pub fn definition_names(lua: &str) -> Vec<&str> {
     let factory_head = format!("\n{}", skull_codegen_lua::CALLEE_FACTORY_PREFIX);
     let mut names: Vec<(usize, &str)> = Vec::new();
@@ -467,11 +375,6 @@ pub fn definition_names(lua: &str) -> Vec<&str> {
     names.into_iter().map(|(_, name)| name).collect()
 }
 
-/// Every emitted definition whose name contains `needle`, in emission order.
-/// The shape-aware replacement for counting `function <needle>` occurrences:
-/// under the bound shape a definition's header reads `__rock_mk_<name> =
-/// function(`, so a raw substring count reports zero and whatever was built on
-/// it passes or fails for the wrong reason.
 pub fn definitions_matching<'a>(lua: &'a str, needle: &str) -> Vec<&'a str> {
     definition_names(lua)
         .into_iter()
@@ -479,11 +382,6 @@ pub fn definitions_matching<'a>(lua: &'a str, needle: &str) -> Vec<&'a str> {
         .collect()
 }
 
-/// The body of the single emitted function whose name contains `needle`.
-/// Synthetic callables carry a generated suffix (`<mangled>__lambda0`) or a
-/// hash (`__local_go_<hash>_inner_0`), so they are found by pattern rather
-/// than spelled out. Panics if it is not unique -- an ambiguous match would
-/// silently assert against the wrong body.
 pub fn body_of_synthetic<'a>(lua: &'a str, needle: &str) -> &'a str {
     let names: Vec<&str> = definition_names(lua)
         .into_iter()
@@ -493,13 +391,6 @@ pub fn body_of_synthetic<'a>(lua: &'a str, needle: &str) -> &'a str {
     function_body(lua, names[0])
 }
 
-/// The full emitted (mangled) name of the top-level fn whose SOURCE name is
-/// `src`, read out of emitted `lua`. Every non-exempt fn mangles by signature
-/// (`free_loop` -> `free_loop`), so this recovers the base symbol from
-/// which a test builds the synthetic names it owns (`<mangled>__lambda<k>`,
-/// `<mangled>__step`, ...). The base symbol carries NO `__` (that prefix only
-/// appears on the synthetic derivations, and for a `co fn` a `__step`/`__resume`
-/// header can emit before the constructor), so skip `__`-bearing candidates.
 pub fn mangled_name(lua: &str, src: &str) -> String {
     definition_names(lua)
         .into_iter()
@@ -508,8 +399,6 @@ pub fn mangled_name(lua: &str, src: &str) -> String {
         .to_string()
 }
 
-/// Like [`try_emit_module`] but ALSO loads `lib` as an extra stdlib module, for
-/// a case that needs a body the module-file check classifies as stdlib.
 pub fn try_emit_with_stdlib_module(
     lib: &str,
     src: &str,
@@ -517,9 +406,6 @@ pub fn try_emit_with_stdlib_module(
     emit_at(&ws_with_stdlib_module(lib, src), "<test>").map(|e| e.lua)
 }
 
-/// Like [`ws_with_stdlib`] but ALSO loads `lib` as an extra stdlib module, so a
-/// case needs a body the emission-root predicate classifies as LIBRARY (and
-/// therefore prunable) rather than as own-project source.
 pub fn ws_with_stdlib_module(lib: &str, src: &str) -> Workspace {
     let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib([]).expect("stdlib parses");
     modules.push(
@@ -554,14 +440,10 @@ pub fn ws_with_dependency_module(lib: &str, src: &str) -> Workspace {
     ws
 }
 
-/// The id of the module parsed from `file`.
 pub fn module_id(ws: &Workspace, file: &str) -> bone_semantic::prelude::ModuleId {
     *ws.module_ids.get(&Ustr::from(file)).expect("module id")
 }
 
-/// The workspace key of a definition named `name`. A bare spelling resolves
-/// to the unique standalone declaration when present; named package keys are
-/// accepted verbatim. Legacy names with no namespace metadata stay bare.
 pub fn key(ws: &Workspace, name: &str) -> Ustr {
     let mut keys: Vec<Ustr> = ws
         .defs
@@ -608,14 +490,10 @@ pub fn key(ws: &Workspace, name: &str) -> Ustr {
     }
 }
 
-/// Whether an HIR definition key names the source spelling `name`.
 pub fn name_matches(actual: Ustr, name: &str) -> bool {
     actual.as_str() == name || bone_core::modules::display_name(actual.as_str()) == name
 }
 
-/// The `FuncRef` of the single workspace fn named `name`. Panics unless there is
-/// exactly one -- an ambiguous match would silently assert about another
-/// declaration.
 pub fn fn_ref(ws: &Workspace, name: &str) -> skull_mir::mir::FuncRef {
     let key = key(ws, name);
     let mut found = Vec::new();
@@ -633,7 +511,6 @@ pub fn fn_ref(ws: &Workspace, name: &str) -> skull_mir::mir::FuncRef {
     found[0]
 }
 
-/// The body id of the single workspace fn named `name`, as an edit list names it.
 pub fn body_id(
     ws: &Workspace,
     name: &str,
@@ -645,17 +522,14 @@ pub fn body_id(
     (f.module, bone_semantic::hir::BodyOwner::Function(f.func))
 }
 
-/// The source name of the workspace fn `f`.
 pub fn fn_name(ws: &Workspace, f: skull_mir::mir::FuncRef) -> &str {
     bone_core::modules::display_name(ws.module(f.module).functions[f.func].name.as_str())
 }
 
-/// A scalar context sharing `g`'s type interner.
 pub fn scalar_ctx(ws: &Workspace, g: &InstanceGraph) -> ScalarCtx {
     ScalarCtx::new(ws).sharing(g.interner().clone())
 }
 
-/// The full emission of `ws`'s user module, with its cache.
 pub fn emit_full_of(
     ws: &Workspace,
     what: &str,
@@ -664,7 +538,6 @@ pub fn emit_full_of(
     skull::mir_emit::emit_full(ws, mid).unwrap_or_else(|e| panic!("{what}: {e:?}"))
 }
 
-/// The instance graph from `ws`'s default emission roots, and those roots.
 pub fn graph_for(ws: &Workspace) -> (InstanceGraph, Vec<skull_mir::mir::FuncRef>) {
     let roots = skull::mir_emit::emission_roots(ws, None);
     (instance_graph::build(ws, roots.clone(), false), roots)
@@ -674,8 +547,6 @@ pub fn graph_of(ws: &Workspace) -> InstanceGraph {
     graph_for(ws).0
 }
 
-/// Whether `body` calls `symbol`: the name followed by `(`, not as the tail
-/// of a longer identifier.
 pub fn body_calls(body: &str, symbol: &str) -> bool {
     body.match_indices(symbol).any(|(at, _)| {
         let before = body[..at].chars().next_back();
@@ -684,9 +555,6 @@ pub fn body_calls(body: &str, symbol: &str) -> bool {
     })
 }
 
-/// The definition symbols the body of `caller` actually CALLS, restricted to
-/// derivations of `callee`. Read from the caller's emitted body, so a
-/// definition that exists but is never reached does not satisfy it.
 pub fn callees_named_in(lua: &str, caller: &str, callee: &str) -> Vec<String> {
     let body = function_body(lua, caller);
     let mut out: Vec<String> = definitions_of(lua, callee)
@@ -698,7 +566,6 @@ pub fn callees_named_in(lua: &str, caller: &str, callee: &str) -> Vec<String> {
     out
 }
 
-/// [`definition_names`] as owned strings.
 pub fn definition_symbols(lua: &str) -> Vec<String> {
     definition_names(lua)
         .into_iter()
@@ -706,7 +573,6 @@ pub fn definition_symbols(lua: &str) -> Vec<String> {
         .collect()
 }
 
-/// The non-synthetic emitted definitions whose names start with `name`.
 pub fn definitions_of(lua: &str, name: &str) -> Vec<String> {
     definition_symbols(lua)
         .into_iter()
@@ -714,13 +580,11 @@ pub fn definitions_of(lua: &str, name: &str) -> Vec<String> {
         .collect()
 }
 
-/// Single-module workspace (no stdlib) for incremental / hot-reload tests.
 pub fn ws_of(src: &str) -> Workspace {
     let module = skull_parser::parse_module_clean(src, Ustr::from("<t>")).expect("parse");
     bone_semantic::semantic_passes::semantic_pass(&mut [module]).expect("semantic_pass")
 }
 
-/// The program [`ws_of`] `src` emits.
 pub fn emit_without_stdlib(src: &str) -> String {
     let ws = ws_of(src);
     let mid = skull::user_module_id(&ws).unwrap();
@@ -729,9 +593,6 @@ pub fn emit_without_stdlib(src: &str) -> String {
         .lua
 }
 
-/// Panic unless `luajit` runs. Execution-oracle tests call this up front
-/// instead of skipping when the binary is absent: a host without luajit must
-/// report red for tests that never ran, never green.
 pub fn require_luajit() {
     if std::process::Command::new("luajit")
         .arg("-v")
@@ -753,7 +614,6 @@ fn luajit_output(prog: &str) -> std::process::Output {
     out
 }
 
-/// Run `prog` under luajit, returning its success flag and stdout + stderr.
 pub fn run_luajit_capturing(prog: &str) -> (bool, String) {
     let out = luajit_output(prog);
     let combined = format!(
@@ -764,8 +624,6 @@ pub fn run_luajit_capturing(prog: &str) -> (bool, String) {
     (out.status.success(), combined)
 }
 
-/// Run `prog` under luajit, returning trimmed stdout (panicking with stderr on a
-/// non-zero exit).
 pub fn run_luajit(prog: &str) -> String {
     let out = luajit_output(prog);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -773,18 +631,15 @@ pub fn run_luajit(prog: &str) -> String {
     stdout.trim().replace("\r\n", "\n")
 }
 
-/// Run the emitted chunk `lua`, then its `main`.
 pub fn run_main(lua: &str) -> String {
     run_fn(lua, "main")
 }
 
-/// Run the emitted chunk `lua`, then its function `name`.
 pub fn run_fn(lua: &str, name: &str) -> String {
     let resolved = resolve_definition(lua, name);
     run_luajit(&format!("{lua}\n{resolved}()\n"))
 }
 
-/// Emit `src` and run its `main`, returning trimmed stdout.
 pub fn compile_and_run(src: &str) -> String {
     run_main(&emit_module(src))
 }
@@ -813,8 +668,6 @@ impl AllocationActivationGuard {
     }
 }
 
-/// Whether `lua` builds a flat Vec header of `repr` (and of `elem`, when
-/// given), in either the per-Vec or the shared-header spelling.
 pub fn has_vec_header(lua: &str, repr: &str, elem: Option<&str>) -> bool {
     let (own, shared) = match elem {
         Some(elem) => (

@@ -1,9 +1,3 @@
-//! A read or call with one use in the same block renders inside that use, so
-//! its value never occupies a Lua local: no register, no copy into the cell or
-//! argument that consumes it, and no `nil` kill afterwards. The fold must keep
-//! every read ordered against the writes it could observe. A call whose result
-//! nothing reads is a bare call statement.
-
 use crate::common::{compile_and_run, emit_module, function_body, run_luajit, run_main};
 
 const SHAPES: &str = r#"

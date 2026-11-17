@@ -1,8 +1,3 @@
-//! Identity storage that only substitution shows: `fn stash<T>(x: T) { let v = [x] }` stores nothing bone can see, but
-//! `stash<Unit>` stores an identity struct in a Vec. The instance graph rejects
-//! it; emission makes the rejection fatal for the package whose call site
-//! instantiated it, and exempt packages keep compiling.
-
 use crate::common::{
     graph_of, try_emit_module, try_emit_module_enforcing_identity_storage, ws_with_stdlib,
     ws_with_stdlib_module,
@@ -66,8 +61,6 @@ fn main() {
     assert!(r[0].contains("stash"));
 }
 
-/// Controls: values, handles and scalars are ordinary storage, and an identity
-/// bound to a generic local or parameter is a borrow.
 #[test]
 fn substituted_values_handles_and_borrows_are_not_rejected() {
     let r = identity_rejections(
@@ -105,7 +98,6 @@ fn substitution_only_identity_storage_is_counted_not_fatal_for_an_exempt_package
     try_emit_module(STASH).expect("unpackaged programs are exempt");
 }
 
-/// A generic `T -> any` coercion erases the identity `erase<Unit>` binds.
 #[test]
 fn substituted_identity_erased_to_any_is_rejected() {
     let r = identity_rejections(
@@ -125,8 +117,6 @@ fn main() {
     );
 }
 
-/// Stdlib bodies are held to the rule under substitution too: only the exact
-/// Arena and Scene mechanisms carry a capability.
 #[test]
 fn substituted_identity_erased_to_any_in_a_stdlib_body_is_rejected() {
     let ws = ws_with_stdlib_module(
@@ -150,9 +140,6 @@ fn main() {
     );
 }
 
-/// Arena rows and Scene roots are the legal homes of an identity: every Arena
-/// and Scene operation instantiated at one stores it only through
-/// `ArenaStore<T>.data` and the registries' `@identity_erasure` capability.
 const ARENA_AND_SCENE_ROWS: &str = r#"
 struct Unit { hp: int }
 struct World { units: Arena<Unit> }

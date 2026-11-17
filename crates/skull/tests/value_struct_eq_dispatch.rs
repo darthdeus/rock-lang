@@ -1,12 +1,3 @@
-// RED premise: `a == b` on two operands of the SAME declared `value` struct
-// routed through the generic stdlib `__op_eq`/`__op_ne` walker even when the
-// struct carries no `nobox` annotation, because every `value` struct (cdata,
-// GC-carrying table, or leaf-table tier) already gets an unconditional
-// per-type `__eq` (`value_struct_metatypes` / `value_struct_gc_defs` in
-// `skull/src/lib.rs`) that native `==` reaches directly. `eq_route`
-// (`skull-mir/src/lower/dispatch.rs`) now recognizes same-named `value`
-// struct operands and routes to `EqRoute::Primitive`. What equality computes
-// is covered by tests/values/value_struct_equality.rock.
 use crate::common::{emit_module, function_body};
 
 const HANDLE_EQUALITY_FIXTURE: &str = r#"
@@ -30,8 +21,6 @@ fn vector_handle_equality_does_not_materialize_carriers() {
     assert!(!body.contains("Entity_vt("));
 }
 
-/// Every `value` struct, nullable or GC-carrying, has a per-type native `==`;
-/// a plain struct (no metatable) and a Vec have none and keep the walk.
 #[test]
 fn only_types_without_a_native_eq_take_the_structural_walk() {
     for (src, _name, walks) in [
@@ -65,10 +54,6 @@ fn only_types_without_a_native_eq_take_the_structural_walk() {
     }
 }
 
-// Scalar `value` operands arrive as leaf cells. Comparing them must stay
-// leaf-wise: packing both sides into `*_vt` tables to reach `__eq` allocated
-// two tables per comparison (application's per-frame `Task.state == ...` checks on
-// `Entity<T>`, which is generic and so never answers `nobox_value_name`).
 const SCALAR_LEAF_EQUALITY: &str = r#"
 value V2 { x: float, y: float }
 value Handle<T> { slot: int, generation: int }

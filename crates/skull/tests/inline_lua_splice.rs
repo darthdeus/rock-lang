@@ -1,9 +1,3 @@
-//! An `@inline inline(lua)` call splices its body into the caller. A parameter
-//! the body only reads takes the caller's local in place of a copy of it, so a
-//! body that declares nothing needs no `do` block. A pure expression the body
-//! reads at most once moves to that read. A parameter the body
-//! assigns, declares again or captures keeps its own local.
-
 use crate::common::{compile_and_run, emit_module, function_body, run_main};
 
 const SRC: &str = r#"

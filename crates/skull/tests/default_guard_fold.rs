@@ -1,8 +1,3 @@
-//! An inlined callee's default prologue tests a parameter the caller already
-//! stored. When that store is a constant in the same block, the test is
-//! decided, so neither it nor its fill may survive. The values must not move:
-//! omitted gets the default, a passed value stays, an explicit null stays null.
-
 use crate::common::{emit_module, function_body, run_main};
 
 const SHAPES: &str = r#"

@@ -70,9 +70,6 @@ fn shared_prefix_dependency_retains_only_reached_bodies() {
     assert_eq!(common::run_main(&incremental.lua), "0");
 }
 
-/// Under modules v1 a function's name is its DefKey (`<pkg>::<module>::<name>`),
-/// so the sim glue must find the registrar by its declared name: once host engine is
-/// v1, a bare-name lookup fails every sim build.
 #[test]
 fn v1_sim_glue_finds_register_sim_by_declared_name() {
     let fragments = [
@@ -94,8 +91,6 @@ fn v1_sim_glue_finds_register_sim_by_declared_name() {
     assert_eq!(registrations.len(), 1);
 }
 
-/// Two registrars in one v1 build are ambiguous; the glue must name both
-/// instead of silently calling whichever module came first.
 #[test]
 fn v1_sim_glue_rejects_two_register_sim_definitions() {
     let lib = |module: &str| {

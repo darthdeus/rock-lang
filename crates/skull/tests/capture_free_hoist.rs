@@ -1,7 +1,3 @@
-//! Capture-free hoisting: a lambda whose scope captures NOTHING
-//! hoists to a top-level `function <enclosing>__lambda<k>(<params>) ... end` and
-//! is referenced through one reusable logical CodeRef at the creation site. A
-//! capturing lambda carries that CodeRef plus its environment record.
 use crate::common::{emit_module, function_body, mangled_name, run_luajit, run_main};
 
 #[test]
@@ -67,9 +63,6 @@ fn main() {}
     assert_eq!(run_luajit(&format!("{lua}\npcall({choose})\n")), "second");
 }
 
-// `free_loop` creates a capture-free lambda (`() => { sink(42) }` closes over
-// nothing) in a loop; `capturing_loop` creates one that captures the loop
-// binding `x`. Same shape, different capture status.
 const FIXTURE: &str = r#"
 @nomangle inline(lua) fn sink(a: int) = "_G.__sink = a"
 
@@ -93,9 +86,6 @@ fn capturing_loop() -> [fn() -> int] {
 fn main() { let _ = free_loop() let _ = capturing_loop() }
 "#;
 
-/// SHAPE: the capture-free lambda hoists to a top-level `<free_loop>__lambda0`
-/// (the enclosing name mangled) and the creation site references it by name --
-/// no inline `function(` closure in `free_loop`'s body.
 #[test]
 fn capture_free_lambda_hoists_to_named_toplevel() {
     let lua = emit_module(FIXTURE);
@@ -109,8 +99,6 @@ fn capture_free_lambda_hoists_to_named_toplevel() {
     assert!(!body.contains("function("));
 }
 
-/// RUNTIME (RED until P3): two creations of the SAME capture-free lambda are the
-/// SAME fn value (a shared top-level global), not fresh per-creation closures.
 #[test]
 fn hoisted_lambda_shared_across_creations() {
     let src = r#"
@@ -125,11 +113,6 @@ fn main() { let _ = mk() }
     assert_eq!(out, "true");
 }
 
-/// TRANSITIVE capture (P2.6): an outer lambda that is locally-capture-free but
-/// whose INNER lambda reads an enclosing-FN cell captures that cell transitively.
-/// Both now hoist -- the outer as an env record threading the cell inward, the
-/// inner as an env record reading it from the outer's `__rock_env`. (Pre-P2.6 neither
-/// hoisted; the outer threaded the cell as an inline-closure upvalue.)
 #[test]
 fn transitive_root_capture_hoists_both() {
     let src = r#"
@@ -152,11 +135,6 @@ fn main() { let g = transitive(7) print("{g()}") }
     assert_eq!(out, "7");
 }
 
-/// DECLARATION SPLIT: a hoisted body's own cells are declared as `local`s in the
-/// hoisted fn (not the enclosing one, not NEITHER). A cell declared in neither
-/// function becomes an implicit Lua GLOBAL on first write (`c<N> = ..`), which
-/// this pins by asserting no `c<N>` global exists after running -- a vacuous
-/// green otherwise (write-then-read within one call reads back its own global).
 #[test]
 fn hoisted_body_declares_own_cells_no_global_leak() {
     let src = r#"

@@ -1,31 +1,9 @@
-//! Codegen-shape contract: an all-constant `MakeValueStruct` is hoisted to ONE
-//! function-owned module-scope constant, not rebuilt at each use.
-//!
-//! The application HUD/text path's `make_text_vertex` writes a nested
-//! `outline_color: FixVec2 { 0.0, 0.0 }` into every glyph vertex slot. opt #3 does
-//! not recurse into nested value-struct fields, so this becomes a literal
-//! `slot.outline_color = FixVec2_ct(0.0, 0.0)` per store. On a trace it sinks; in the
-//! interpreter (application's aborted HUD loops) it allocates a fresh cdata every store --
-//! the entire skull-vs-rock interpreter-path gap on the text loop (skull 8.25 vs
-//! rock 6.70 KB per draw_text call; `benchmarks/opt_showcase/07_text_interp_alloc.rock`).
-//! rock hoists an all-constant value-struct literal to a module-scope constant
-//! (`__rock_const_FixVec2_...`); skull emits `__skull_kc_<fn>_<g> = <Name>_ct(..)`
-//! once and references it. Value structs are immutable, so one shared cdata is
-//! sound, built once at chunk load (0 alloc on BOTH the traced and interpreted
-//! paths -- unlike a per-call function-entry local, which defeats SINK).
-//!
-//! Emitted in the function's OWN chunk (not shared scaffolding), so an incremental
-//! body-edit overlay carries the def with the function it serves.
 use crate::common::{V1Fragment, emit_module, emit_v1_package, function_body, run_main};
 
 fn count(hay: &str, needle: &str) -> usize {
     hay.matches(needle).count()
 }
 
-// Two nested const FixVec2 fields, both a DISTINCTIVE `FixVec2 { 3.0, 7.0 }`, written
-// into a NativeBuffer<Outer> slot. opt #3 lowers the store to
-// `slot.a = FixVec2_ct(3, 7); slot.b = FixVec2_ct(3, 7)`. Hoisting + dedup makes that
-// one module-scope `__skull_kc_..._N = FixVec2_ct(3.0, 7.0)` referenced twice.
 const TWO_CONST_NESTED: &str = r#"
 value FixVec2 { x: float, y: float }
 value Outer { a: FixVec2, b: FixVec2, c: float }
@@ -62,12 +40,6 @@ fn const_value_struct_ctor_is_hoisted_to_module_scope() {
     assert!(body.contains("__skull_kc_"));
 }
 
-// A package value's DefKey is qualified (`pkg::a::Id`); the hoist def must name
-// its ctor by the emitted type symbol, as an inline ctor does, or LuaJIT reads
-// the `::` as a label and rejects the chunk.
-// The constant `a::Pt` is a nested field of a boxed `Seg` element, the
-// read-only consumer `TWO_CONST_NESTED` hoists (`==` compares leaves and builds
-// no box).
 const PACKAGE_MAIN: &str = r#"
 value Seg { a: a::Pt, b: a::Pt, c: float }
 fn main() {

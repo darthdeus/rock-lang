@@ -1,5 +1,3 @@
-//! A failed `unwrap()` raises through one out-of-line helper instead of an
-//! inlined traceback-and-raise block at every site.
 use crate::common::{emit_module, function_body};
 
 const SRC: &str = r#"

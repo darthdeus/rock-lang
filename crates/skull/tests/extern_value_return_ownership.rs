@@ -1,34 +1,5 @@
-//! An `extern(ffi, ..)` fn returning a `value` struct must return storage it
-//! OWNS.
-//!
-//! The wrapper for such a fn passes an out-param and used to hand back a
-//! reference into it:
-//!
-//! ```lua
-//! function f()
-//!   local __out = ffi.new("S[1]")
-//!   lib.f(__out)
-//!   return __out[0]     -- a NON-OWNING reference into __out
-//! end
-//! ```
-//!
-//! LuaJIT does not keep the parent array alive through that reference -- it is
-//! collected as soon as `__out` goes out of scope, verified with an `ffi.gc`
-//! finalizer in `a_reference_into_a_collected_parent_is_use_after_free` below.
-//! Every later read is then a use-after-free, and it reads plausible values right
-//! up until something reuses the memory.
-//!
-//! Marking `Vec2` nobox (`0b1875dab`) changed allocation enough to make the reuse
-//! actually happen: `rock frame application --dump-state` began reporting
-//! `LAST_FRAME_GFX` (a `GraphicsStats` filled through exactly this wrapper) as
-//! garbage in 4 of 5 runs, and the garbage decoded to ASCII from the dump's own
-//! JSON buffer (`,"sh`, `cdat`, `ader`). With the stdlib's `Vec2` boxed the same
-//! binary was correct 5/5, which is what identified the trigger -- but the
-//! unsoundness is in this wrapper, not in the marking.
-
 use crate::common::emit_module;
 
-/// The `value` struct must be FFI-clean for the out-param wrapper to apply.
 const EXTERN_VALUE_RETURN: &str = r#"
 value Stats { a: int, b: int }
 
@@ -50,10 +21,6 @@ fn an_extern_value_return_does_not_hand_back_a_reference_into_its_out_param() {
     assert!(wrapper.contains("ffi.new(\"Stats\", __out[0])"));
 }
 
-/// The language-level fact the fix rests on, pinned so nobody has to re-derive it:
-/// LuaJIT collects the parent array while a reference into it is still held. This
-/// is why the bug read correct values most of the time -- and why an
-/// allocation-pattern change elsewhere could expose it.
 #[test]
 fn a_reference_into_a_collected_parent_is_use_after_free() {
     let probe = r#"

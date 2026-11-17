@@ -1,11 +1,5 @@
-//! ALIASING: a
-//! Vec or Map may not grow, shrink, rehash or reseat while a reference into one
-//! of its elements is live. Element references are only ever live for one
-//! call, so the check is at the call that receives one.
-
 use crate::common::bone_rejection_errors;
 
-/// The one relocation rejection of `src`, asserted to point at `at`.
 fn rejected_at(src: &str, at: &str) -> String {
     let errors = bone_rejection_errors(src);
     let relocations: Vec<_> = errors

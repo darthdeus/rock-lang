@@ -1,15 +1,3 @@
-//! Codegen-shape contract for `embed`: an embedded field has NO wrapper box.
-//! Its leaves are physical keys on the parent under a DOTTED path
-//! (`t["p.x"]`), so there is no nested table and no inner `__ty`.
-//!
-//! Dotted rather than an identifier-namespace scheme because `.` cannot appear
-//! in a Rock identifier: the encoding can never collide with a user field or a
-//! control key, and it is injective over paths (`a__b` is not -- `embed a: X`
-//! with field `b` and a plain field `a_b` both encode to it).
-//!
-//! Behavioral coverage is `tests/values/embed.rock`; this file pins the
-//! LAYOUT that makes the feature real, mirroring `tuple_scalarize.rs`.
-
 use crate::common::{emit_module, function_body};
 
 const EMBED_LEAVES: &str = r#"
@@ -76,8 +64,6 @@ fn embed_nobox_value_uses_the_owned_representation_fact() {
     assert!(!body.contains(r#""Pt""#));
 }
 
-// Recursive: an embed chain composes the whole path, so the deepest leaf is a
-// single key on the outermost parent -- no intermediate box at any level.
 const EMBED_NESTED: &str = r#"
 struct Inner { c: int }
 struct Mid { embed b: Inner, m: int }
@@ -104,9 +90,6 @@ fn nested_embed_composes_the_whole_path() {
     assert!(read.contains(r#"["a.b.c"]"#));
 }
 
-// The load-bearing one: SROA must read an embed field-store as LEAF-WISE, not
-// as an escape. If the store escaped, the parent would stop scalarizing and the
-// whole feature would be inert -- a flattened layout that still allocates.
 const EMBED_HOT_LOOP: &str = r#"
 struct Pt { x: int, y: int }
 struct Holder { embed p: Pt, tag: int }
@@ -134,8 +117,6 @@ fn embed_parent_still_scalarizes() {
     assert!(!hot.contains(r#"["p."#));
 }
 
-// CONTROL: a `value` parent is already contiguous cdata, so `embed` there is a
-// no-op GUARANTEE -- it asserts the layout and must NOT introduce dotted keys.
 const EMBED_VALUE_PARENT: &str = r#"
 value V2 { x: float, y: float }
 value ValueParent { embed v: V2, w: float }
@@ -169,10 +150,6 @@ fn type_table_uses_the_shared_plan_for_a_nobox_field() {
     assert!(lua.contains(r#"name = "p", type = "Pt", nullable = false, embed = true"#));
 }
 
-/// Reflection names an embedded child, and keys the flat-enum layout, by the
-/// spelling `__ROCK_TYPE_TABLE` and `__ty` use. Under modules v1 that is the
-/// minted symbol, not the DefKey, or the field walk (`inspect`, serialization,
-/// state images) finds no declaration and reads the embedded field as null.
 #[test]
 fn a_v1_embedded_child_is_reflected_by_its_minted_symbol() {
     let src = r#"

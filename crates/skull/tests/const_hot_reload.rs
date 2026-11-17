@@ -1,5 +1,3 @@
-//! `const` globals re-initialize on hot reload, while mutable globals keep their
-//! live value in the global storage.
 use crate::common::{emit_without_stdlib, run_luajit, ws_of};
 
 fn global_slot(lua: &str, name: &str) -> u32 {
@@ -35,10 +33,6 @@ fn const_reinits_on_hot_reload_but_session_global_is_preserved() {
     assert!(bar.contains("if __rock_globals_fresh then"));
 }
 
-/// RUNTIME proof (not just emit shape): simulate a hot reload under luajit.
-/// Edit `const FOO: 5 -> 10`, mutate the mutable global mid-session, re-dofile
-/// with HOT_RELOAD set. FOO must show the NEW literal (10); the mutable global's
-/// live value (set to 99 by "gameplay") must survive.
 #[test]
 fn const_value_edit_takes_effect_on_reload_runtime() {
     let program = |foo: i32| {
@@ -65,8 +59,6 @@ fn const_value_edit_takes_effect_on_reload_runtime() {
     assert!(out.trim().starts_with("PASS"));
 }
 
-/// Every read of a scalar `const` is emitted as its literal, so nothing names
-/// the global: it gets neither an initializer function nor an assignment.
 #[test]
 fn a_const_whose_reads_are_all_literals_emits_no_global() {
     let lua = emit_without_stdlib("const FOO: int = 5\nfn foo() -> int { FOO }\nfn main() {}\n");
@@ -77,8 +69,6 @@ fn a_const_whose_reads_are_all_literals_emits_no_global() {
     assert_eq!(out.trim(), "5");
 }
 
-/// A const initializer runs at load even when nothing reads the value, so one
-/// that is not a literal keeps its initializer.
 #[test]
 fn a_const_with_a_computed_initializer_keeps_it() {
     let lua = emit_without_stdlib(
@@ -90,8 +80,6 @@ fn a_const_with_a_computed_initializer_keeps_it() {
     assert_eq!(out.trim(), "true");
 }
 
-/// Inline Lua reaches a global by spelling its emitted name, which the
-/// compiler does not see as a read, so a const it spells stays a global.
 #[test]
 fn a_const_spelled_by_inline_lua_stays_a_global() {
     let lua = emit_without_stdlib(

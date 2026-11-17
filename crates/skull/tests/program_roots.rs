@@ -1,5 +1,3 @@
-//! A program target roots its entry point, not every function of its own
-//! sources; a library target (no `main`) keeps all of them.
 use crate::common::{self, definition_symbols, fn_ref, ws_with_dependency_module};
 use skull_mir::instance::Instance;
 

@@ -1,9 +1,3 @@
-//! Stdlib descriptors (`Ptr`, `NativeBuffer`) are `value`s whose Lua
-//! representation is the host object itself: a copy shares the cdata or the
-//! buffer table with its leaf views and never rebuilds it from `ptr`/`len`.
-//! Behavior: `tests/values/descriptor_copy.rock`. Recognition is by stdlib
-//! DefKey, so a user `value` with the same name keeps ordinary scalarization.
-
 use crate::common::{
     V1Fragment, emit_module, emit_v1_package, function_body, mangled_name, run_luajit,
 };

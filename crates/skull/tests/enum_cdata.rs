@@ -1,9 +1,3 @@
-//! Cut 1: a uniform single-scalar-payload
-//! enum is a `value`-struct-style cdata `{ int __tag; <T> _0; }` -- NO
-//! `{__variant}` table, reflection sacrificed for performance. It reuses the whole
-//! value-struct machinery: `<Enum>_ct` ctor, value-struct SROA (a local construct+
-//! match scalarizes to two int locals + int-tag compare, 0 alloc), value `__eq`
-//! (byte equality so escaping enums compare correctly), scalar ABI through calls.
 use crate::common::{emit_module, require_luajit, run_fn};
 
 const SRC: &str = r#"
@@ -52,9 +46,6 @@ fn cdata_enum_emits_ctype_and_no_table() {
     // not asserted here, since `emit_module` runs a lighter pass set than `rock compile`.)
 }
 
-// Cut 3: a cdata enum as a value-struct FIELD flattens into the host cdef
-// (`{ int z; Blend blend; }` with `Blend = { int __tag; int _0; }`), so the enum
-// is C-layout-storable (NativeBuffer / array element) -- the lever-2 storage win.
 const FIELD_SRC: &str = r#"
 enum Blend { Normal, Add(int), Mul(int) }
 value Cmd { z: int, blend: Blend }
@@ -88,8 +79,6 @@ fn cdata_enum_as_value_struct_field() {
     assert_eq!(run_fn(&prog, "t"), "15 30");
 }
 
-// Cut 2a: multi-field tuple payloads share positional slots `_0.._{n-1}`. A
-// variant with fewer fields pads the rest; the cdef widens to all slots.
 const MULTI_SRC: &str = r#"
 enum Shape { Circle(int), Rect(int, int), Point }
 fn area(s: Shape) -> int {
@@ -118,9 +107,6 @@ fn cdata_enum_multi_field_tuple() {
     assert_eq!(run_fn(&prog, "t"), "15 12 0");
 }
 
-// Cut 2b: record payloads -> named slots `_<field>`; a mixed tuple+record enum
-// shares both. The baked `__tostring` renders rock's exact format (tuple
-// `{ [1] = .. }`, record `{ field = .. }` sorted) -- static compile-time reflection.
 const RECORD_SRC: &str = r#"
 enum Shape { Circle(int), Box { w: int, h: int }, Point }
 fn area(s: Shape) -> int {
@@ -152,12 +138,6 @@ fn cdata_enum_record_payload() {
     assert_eq!(run_fn(&prog, "t"), "15 12 0 | Shape::Box { h = 4, w = 3 }");
 }
 
-// A cdata enum passed through a scalar-ABI call and then matched must NOT be
-// repacked into a cdata just to read its tag. The value arrives as leaves
-// (tag, _0); `match` should int-compare the tag leaf directly. The copy-prop
-// `Field(<Enum>_ct(tag,_0), __tag) -> tag` forwarding folds the repack away (an
-// immutable value cdata's field IS its operand), so the callee body has no
-// `<Enum>_ct(` ctor -- otherwise every enum passed+matched allocs per call.
 const PARAM_MATCH_SRC: &str = r#"
 enum Target { Screen, Canvas(int) }
 fn route(t: Target) -> int {

@@ -1,15 +1,3 @@
-//! Increment 2a/2b: a TABLE-represented
-//! payload enum constructed and matched WITHIN a body, never escaping, must not
-//! allocate the `{__variant, __ty, [1]=payload}` table. `skull-transform`'s SROA
-//! splits the non-escaping enum cell into per-field cells (`__variant`/`__ty`
-//! materialized as string consts, `_<i>` per positional payload read via
-//! `TupleIndex`), and the now-dead `MakeEnum` falls to DCE -- the analog of
-//! plain-struct SROA.
-//!
-//! These enums carry a ref-payload variant (`Named(string)`), so they are NOT
-//! cdata-eligible (cut 1 is single-scalar-payload) and keep the table -- exactly
-//! the case this SROA targets. (A single-scalar enum is now a value cdata instead;
-//! see `enum_cdata.rs`.) Escaping table enums keep the table.
 use crate::common::{emit_module, function_body, run_fn};
 
 const COALESCE_SRC: &str = r#"
@@ -95,8 +83,6 @@ fn nullable_enum_coalesce_preserves_evaluation_and_escaping_payloads() {
     );
 }
 
-// Direct ctor stores into `s` (the second guarded by an `if`), then match-with-
-// binding -- the non-escaping construct/match path. Only `w` (an int) is observed.
 const SRC: &str = r#"
 enum Shape { Circle(int), Named(string) }
 
@@ -133,9 +119,6 @@ fn nonescaping_payload_enum_does_not_allocate_table() {
     assert!(body.contains("\"Circle\""));
 }
 
-// A MIXED enum: payload variants + a unit variant (`Point` -> a singleton global,
-// not a MakeEnum). SROA must recognize the singleton-ref as the same enum's
-// `{__variant,__ty}` ctor so the cell stays uniform and splits (bite 1b).
 const MIXED_SRC: &str = r#"
 enum Shape { Circle(int), Named(string), Point }
 

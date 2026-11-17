@@ -1,24 +1,5 @@
-//! LuaJIT's parser caps expression and block nesting at 200 syntax levels
-//! (`LJ_MAX_XLEVEL`, `synlevel_begin` in `lj_parse.c`). Every `..` of a concat
-//! run is one level (concat is right-associative, so the parser recurses per
-//! operand), and so is every parenthesized operand. Past the cap the whole
-//! chunk fails to load with "chunk has too many syntax levels" and no Rock
-//! location, so no ordinary program may emit an expression whose depth grows
-//! with a field count or a statement count.
-//!
-//! Two emitters grew that way: the generated display helpers (`__tostring` and
-//! the C-struct `inspect`) concatenated three operands per field into one run,
-//! and the Lua emitter folded single-use values into their user without bound,
-//! so a wide struct interpolation became one long `..` run and a sequence of
-//! `total += x` became one expression with a parenthesis per statement.
-
 use crate::common::{function_body, luajit_loads, require_luajit, run_main, try_emit_module};
 
-/// A program with one value of each display tier, `n` fields wide: a cdata
-/// value struct, a GC-table value struct, a leaf-table value struct, GC values
-/// holding a `nobox` child inline (plain, and nullable absent and present), and
-/// a cdata enum with an `n`-wide tuple variant. Each is shown from its own function so no frame holds
-/// more than one wide value.
 fn display_tiers(n: usize) -> String {
     let list = |f: &dyn Fn(usize) -> String| (0..n).map(f).collect::<Vec<_>>().join(", ");
     let floats = list(&|i| format!("f{i}: float = {i}.5"));
@@ -60,7 +41,6 @@ fn main() {{
     )
 }
 
-/// What [`display_tiers`] prints, built field by field.
 fn display_tiers_expected(n: usize) -> String {
     let join = |f: &dyn Fn(usize) -> String| (0..n).map(f).collect::<Vec<_>>().join(", ");
     let floats = join(&|i| format!("f{i}: {i}.5"));
@@ -92,7 +72,6 @@ fn display_tiers_expected(n: usize) -> String {
     .join("\n")
 }
 
-/// The rendering of narrow values is a contract: pinned literally, not derived.
 #[test]
 fn narrow_display_helpers_render_expected_formats() {
     require_luajit();
@@ -118,8 +97,6 @@ fn wide_display_helpers_load_and_render() {
     assert_eq!(run_main(&lua), display_tiers_expected(n));
 }
 
-/// Interpolating a value renders it field by field inside the calling
-/// function, so the concat run is the caller's own expression.
 #[test]
 fn wide_value_interpolation_loads_and_renders() {
     require_luajit();
@@ -139,7 +116,6 @@ fn wide_value_interpolation_loads_and_renders() {
     assert_eq!(run_main(&lua), format!("<Row {{ {body} }}>"));
 }
 
-/// `sum(p0..p9)` adding the parameters cyclically in `statements` statements.
 fn accumulation(statements: usize) -> String {
     let params = (0..10)
         .map(|i| format!("p{i}: int"))
@@ -158,8 +134,6 @@ fn accumulation(statements: usize) -> String {
     )
 }
 
-/// Each `total += p` folds into the next, so without a bound the function
-/// returned one expression nested one parenthesis per statement.
 #[test]
 fn long_accumulation_loads_and_runs() {
     require_luajit();
@@ -168,8 +142,6 @@ fn long_accumulation_loads_and_runs() {
     assert_eq!(run_main(&lua), "1650");
 }
 
-/// The bound only splits what LuaJIT could not load: an accumulation well
-/// within the cap still folds into one expression.
 #[test]
 fn accumulation_within_the_budget_stays_one_expression() {
     let lua = try_emit_module(&accumulation(120)).expect("emits");

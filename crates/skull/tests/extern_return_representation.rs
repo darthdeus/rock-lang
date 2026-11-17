@@ -1,20 +1,3 @@
-//! An `extern(ffi, ..)` wrapper gives the callee's return the representation
-//! its DECLARED Rock type promises.
-//!
-//! The `ffi.cdef` lives inside an opaque `inline(lua)` body, so the declaration
-//! is the only contract the compiler has. LuaJIT hands back a BOXED cdata for a
-//! 64-bit C integer return, and every host engine resource handle is `uint64_t`, so a
-//! `-> int` extern that passed its return through produced a cdata where the
-//! declaration said number. That is not cosmetic: LuaJIT keys a table by cdata
-//! IDENTITY however its `__eq` compares, so a handle used as a `Map<int, V>` key
-//! only ever hit on the box that was inserted.
-//!
-//! A `newtype` is a representation ALIAS, not a distinct C type, so it must be
-//! followed: `newtype Handle(int)` is an `int` at the boundary. That matters
-//! prospectively -- B3 wants stronger handle newtypes, and not following one
-//! would make the better-typed declaration the loophole that reintroduces the
-//! boxed cdata.
-
 use crate::common::emit_module;
 
 const SRC: &str = r#"
@@ -50,7 +33,6 @@ fn main() {
 }
 "#;
 
-/// The emitted body of `function <name>(...)`, without its `end`.
 fn wrapper(lua: &str, name: &str) -> String {
     let body = lua
         .lines()
@@ -91,18 +73,6 @@ fn main() { print("x") }
     assert!(ffi_clean.is_ok());
 }
 
-/// Both sides, which is what makes either one evidence: the declarations whose C
-/// representation can arrive boxed are coerced, and the ones that cannot are
-/// left alone rather than paying for a conversion that means nothing.
-///
-/// A newtype APPLICATION substitutes, and the substitution has to COMPOSE.
-/// `Boxed<int>` is an `int` and `Boxed<float>` a `float` from one declaration;
-/// `Outer<T>(Pair<Pair<T>>)` at `Outer<int>` hands the inner `Pair` an argument
-/// that still mentions `Outer`'s `T`, so a binding that does not carry the
-/// environment its argument was written in loses it and rejects a concrete type
-/// as unbound. `Deep` does NOT cover that -- its `int` is written concretely
-/// inside the declaration -- which is why `ret_outer` is here. `Twice<A, B>`
-/// pins that binding is positional and an unused parameter does not leak.
 #[test]
 fn an_int_representation_is_coerced_through_every_alias_shape() {
     let lua = emit_module(SRC);
@@ -137,20 +107,6 @@ fn an_int_representation_is_coerced_through_every_alias_shape() {
     assert!(!w.contains("return"));
 }
 
-/// A `-> bool` extern's C return is declared `uint8_t`, so the wrapper owes the
-/// declaration a LUA BOOLEAN and the byte has to be compared. This is the same
-/// rule `Int` follows, not a second one: the `cdef` is opaque, the declaration
-/// is the contract, and the wrapper pays whatever the contract costs.
-///
-/// The `uint8_t` spelling is forced by LuaJIT: `crec_call` can only record a
-/// `bool`-returning C call with a Lua frame inside the trace above it, which a
-/// trace rooted at this one-line wrapper never has, so every such wrapper
-/// aborted `NYI: unsupported C function type` on becoming a trace root.
-///
-/// `ret_flag` is here and not with the pass-through group because a `newtype`
-/// is a representation ALIAS: `newtype Flag(bool)` is a `bool` at the boundary,
-/// and a better-typed declaration must not be the loophole that reintroduces
-/// the raw byte.
 #[test]
 fn a_bool_representation_is_compared_to_the_byte_the_cdef_returns() {
     let lua = emit_module(SRC);
@@ -162,10 +118,6 @@ fn a_bool_representation_is_compared_to_the_byte_the_cdef_returns() {
     }
 }
 
-/// A generic is unrealizable only when nothing BOUND it. `Boxed<T>` on a generic
-/// extern has no argument to substitute, so it lands on the same rejection a
-/// bare `-> T` gets -- and this is the arm that keeps the substitution from
-/// being an unconditional "assume it resolves".
 #[test]
 fn an_unbound_generic_representation_rejects() {
     let msg = reject(
@@ -178,10 +130,6 @@ fn main() { print("x") }
     assert!(msg.contains("ret_open") && msg.contains("unbound generic parameter"));
 }
 
-/// A newtype cycle wraps itself by value, so it has no finite representation
-/// and the front end rejects the definitions before the extern's alias walk
-/// sees them. The walk still terminates by visited identity on its own (see
-/// `ret_deep` above, which visits `Pair` twice with different arguments).
 #[test]
 fn a_self_referential_alias_rejects_at_definition() {
     let errs = crate::common::bone_rejections(
@@ -198,8 +146,6 @@ fn main() { print("x") }
     );
 }
 
-/// A generic alias cycle is the same cycle with arguments: `X<T>(Y<T>)` and
-/// `Y<U>(X<U>)` wrap each other by value whatever `T` is.
 #[test]
 fn a_generic_alias_cycle_rejects_at_definition() {
     let errs = crate::common::bone_rejections(
@@ -216,11 +162,6 @@ fn main() { print("x") }
     );
 }
 
-/// A wrapper whose body is `return lib.f(..)` is a `CALLT` into C, and a root
-/// trace that leaves the function through it aborts `leaving loop in root
-/// trace` (`rec_ret` requires a real `RET`). Every value-returning wrapper
-/// binds the result to a local and returns that instead; measured 166 -> 0
-/// aborts on the shipped LuaJIT.
 #[test]
 fn every_value_returning_wrapper_returns_through_a_local() {
     let lua = emit_module(SRC);
@@ -263,10 +204,6 @@ fn go() -> int { poll(-1) }
     assert!(go.contains("poll((-1), (false))"));
 }
 
-/// A modules-v1 extern is registered under its DefKey, but its wrapper is the
-/// published surface name (call sites spell it that way) and its C symbol is
-/// the declared name. Spelling either with the key emits `function
-/// pkg::ret_int()`, which is not Lua.
 #[test]
 fn a_v1_extern_wrapper_uses_the_declared_symbol() {
     let emitted = crate::common::emit_v1_package(
@@ -288,9 +225,6 @@ fn main() {}
     assert_eq!(out, "7\ttrue");
 }
 
-/// A v1 extern returning a value struct allocates its out-parameter by the
-/// struct's C typedef, which is the minted type symbol, not the DefKey
-/// (`ffi.new("pkg::Pair[1]")` is not a C declaration).
 #[test]
 fn a_v1_extern_value_return_allocates_by_the_type_symbol() {
     let emitted = crate::common::emit_v1_package(

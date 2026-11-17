@@ -1,5 +1,3 @@
-//! A constant argument reaches the reads of an inlined branching callee, so the
-//! callee's test on it folds and only the taken arm is emitted.
 use crate::common::{emit_module, function_body, run_main};
 
 const SRC: &str = r#"

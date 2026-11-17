@@ -1,19 +1,3 @@
-//! The remaining container axes of the 2.4 trigger
-//!: `Arena<T>`, `FlatVec<T>`, `NativeBuffer<T>`.
-//!
-//! 2.4 names five container constructors; only `[T]`/`Vec<T>` and `Map<K, V>`
-//! were implemented, and `TypeCtor::Nominal(_)` silently admitted the rest.
-//! Measured physical forms, which is what decides each axis:
-//!
-//! - `Arena<G>` at a column-eligible `G` is
-//!   `{generations, occupied, data = <COLUMN vec>, free_indices, occupied_count}`
-//!   -- its `data` has per-leaf arrays and no `_data`, on every target.
-//! - `FlatVec<G>` and `NativeBuffer<G>` differ BY TARGET, so their axes live in
-//!   `skull-codegen-js/tests/opaque_container_axes_js.rs`, where the JS emitter
-//!   harness is. This file is the target-independent half.
-//!
-//! Both answers come from `spec_key_has_target_storage`'s oracle rather than a
-//! second derivation.
 use crate::common::emit_rejection;
 
 const ARENA_PARAM: &str = r#"
@@ -29,8 +13,6 @@ fn main() {
 }
 "#;
 
-/// Bounds the Arena axis on the ELEMENT: a boxed element keeps `data._data`, so
-/// the identical body must stay valid.
 const ARENA_BOXED_ELEM: &str = r#"
 struct B { s: string }
 
@@ -50,16 +32,11 @@ fn an_arena_at_a_column_element_rejects() {
     assert!(msg.contains("Arena<G>") && msg.contains("probe"));
 }
 
-/// Bounds the axis on the ELEMENT. Without it, a change that rejected every
-/// `Arena` param would leave the case above green and read as progress.
 #[test]
 fn an_arena_at_a_boxed_element_is_admitted() {
     assert!(crate::common::try_emit_module(ARENA_BOXED_ELEM).is_ok());
 }
 
-/// The CONSTRUCTOR mirror (2.4): an opaque body whose declared RETURN is a
-/// container hand-builds its physical form, so it can mint boxed storage for a
-/// column-planned result. The argument rule cannot see a return.
 const CTOR_RETURNS_COLUMN_VEC: &str = r#"
 value G { x: float, y: float }
 
@@ -73,8 +50,6 @@ fn main() {
 }
 "#;
 
-/// Bounds it on the ELEMENT: the identical body is CORRECT at a boxed element,
-/// which is what the boxed representation is.
 const CTOR_RETURNS_BOXED_VEC: &str = r#"
 struct B { s: string }
 
@@ -88,11 +63,6 @@ fn main() {
 }
 "#;
 
-/// The stdlib constructors are exempt BY CONSTRUCTION (routed at
-/// `call.rs:172-201`) and must keep minting COLUMN storage for a column
-/// element. Measured with `vec_new`'s route removed: it minted boxed storage
-/// and the caller's column read died on nil, with nothing rejecting -- which is
-/// the gap the mirror clause closes.
 const STDLIB_CTORS_STILL_ROUTE: &str = r#"
 value G { x: float, y: float }
 

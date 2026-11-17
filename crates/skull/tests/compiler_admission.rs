@@ -1,5 +1,3 @@
-//! Recovery keeps a usable tree; the compile entry points still refuse it.
-
 use bone_core::modules::NsAliases;
 use bone_semantic::inference::{ComptimeInputs, Workspace};
 use bone_semantic::prelude::ModuleId;

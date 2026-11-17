@@ -1,17 +1,5 @@
-//! Emitted-shape contract for leaf-addressed `NativeBuffer<T>` elements.
-//!
-//! A behavioral test cannot see a surviving ctor -- `tests/native_buffer_
-//! leaf_addressing.rock` asserts VALUES, and every one of its cases is already
-//! green on the boxed path. What distinguishes the two representations is the
-//! emitted ACCESS SHAPE, so that is what these assert: no `<name>_ct(` on the
-//! buffer path, and no struct-slot reference.
-//!
-
 use crate::common::{emit_module, function_body};
 
-/// A NESTED value field is the case that forces a ctor today: `gen_leaf_stores`
-/// (skull-transform) writes immediate fields into the slot but does not descend,
-/// so the nested field is assigned whole as `slot.pos = V2_ct(x, y)`.
 const NESTED_STORE: &str = r#"
 value V2 { x: float, y: float }
 value Vert { pos: V2, uv: V2, id: int, w: float }
@@ -70,15 +58,6 @@ fn main() {
 }
 "#;
 
-/// S5: the debug bounds check is per ELEMENT ACCESS, not per leaf, and it must
-/// PRECEDE the leaf accesses it guards.
-///
-/// Two separate failures are possible and only one is a count: bounds-checking
-/// each of the K leaf writes (K times the cost the boxed path paid once, on the
-/// hot path), or checking AFTER writing, which reads and writes out of bounds
-/// before the check that was supposed to prevent it ever runs. Matched on the
-/// `checked` helper call rather than a specific name, so this survives naming
-/// the new helper.
 #[test]
 fn a_whole_element_store_bounds_checks_exactly_once_first() {
     let lua = emit_module(NESTED_STORE);
@@ -105,12 +84,6 @@ fn nested_value_read_takes_no_slot_reference() {
     assert!(!body.contains("__nb_checked_get("));
 }
 
-/// A read of ONE field must load one leaf. `is_dead_value` treats every
-/// `Inst::Index` as effectful because a Vec/NativeBuffer index errors on OOB --
-/// but a leaf index is a raw pointer read whose bounds check was already hoisted
-/// into `__nb_checked_index`, so the unused leaf loads are pure and dead.
-/// Without the exemption an 8-leaf element pays 8 loads per single-field read,
-/// in exactly the hot loops leaf addressing exists to speed up.
 const SINGLE_FIELD_READ: &str = r#"
 value V2 { x: float, y: float }
 value Vert { pos: V2, uv: V2, id: int, w: float }
@@ -144,9 +117,6 @@ fn a_single_field_leaf_read_loads_only_that_leaf() {
     assert!(body.contains("__nb_checked_index("));
 }
 
-/// An `f32` constructor rounds each leaf it builds. Once inlined into a store
-/// on a `float` leaf view, that rounding is the store's own, so it must not
-/// survive as a separate `__rock_f32` call per leaf (the vertex hot path).
 const F32_CTOR_STORE: &str = r#"
 value V2f { x: f32, y: f32 }
 value FVert { pos: V2f, w: f32, id: int, py: f32 }

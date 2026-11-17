@@ -1,21 +1,3 @@
-//! A `[T]` of a WIDE `nobox` value struct (more leaves than
-//! `MAX_COLUMN_LEAVES`) stores its leaves row-major in one `_data` table, the
-//! same strided layout wide flat enums use, instead of one column table per
-//! leaf.
-//!
-//! Why: every column is its own table, so a push or a whole-element read of a
-//! 50-leaf element resolves 50 string keys and bounds-checks 50 arrays. On a
-//! LuaJIT trace that costs about three IR constants and ten instructions per
-//! leaf, and a hot caller's root trace hits the 500-constant limit ("trace too
-//! long") inside the push.
-//! Row-major storage touches one table. Each push computes the row base once
-//! and adds each leaf offset in the store up to 12 leaves. Wider rows keep a
-//! running index to avoid spending one of LuaJIT's 500 constant slots per offset.
-//!
-//! Unlike the numeric flat-enum tier, these leaves may be bools, strings,
-//! closures and nil (an inactive enum payload slot, an absent nullable), so the
-//! backing stores every leaf RAW: `false` stays `false` and nil stays nil.
-
 use crate::common::{function_body, run_luajit, run_main, try_emit_module};
 
 const EVENT: &str = r#"

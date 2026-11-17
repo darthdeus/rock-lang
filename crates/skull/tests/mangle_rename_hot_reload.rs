@@ -1,38 +1,11 @@
-//! Hot-reload stability of the unified always-mangle scheme.
-//!
-//! skull mangles every non-exempt fn by its own `(name, declared parameter types)`
-//! ONLY (`skull-mir/src/mangle.rs`), so a fn's emitted symbol is
-//! decl-set-independent: adding or removing an unrelated overload of `foo`
-//! anywhere does NOT rename the existing `foo(int)` symbol. It stays
-//! `foo_int` with or without a `foo(string)` sibling.
-//!
-//! That is what makes a hot reload safe. A reload re-`dofile`s the chunk in the
-//! SAME lua state (an add-overload edit is an `Interface` edit -> `SkullReload::
-//! Full`, NOT a `ShapeChanged` restart). Because the symbol name is unchanged,
-//! the new `foo_int` overwrites the running `_G.foo_int` IN
-//! PLACE, and any surviving pre-reload code that resolves `foo(int)` by name (a
-//! suspended `co fn`, a preserved closure/callback) sees the NEW body -- no
-//! orphaned stale global.
-//!
-//! These tests were the sentinels pinning the OLD overload-driven-mangling bug
-//! (adding an overload renamed the unique `foo` and orphaned the running global,
-//! silent-stale). The fix (always-mangle) landed; the assertions are flipped to
-//! guard the correct behavior.
 use crate::common::{emit_without_stdlib, run_luajit};
 
-// v1: `foo(int)` body returns the version marker 51 (no arithmetic -- the
-// stdlib-free `ws_of` has no `__op_*`). `probe` calls `foo` BY NAME; under
-// always-mangle both emit as `foo_int` / `probe_0`, and `probe`'s body is `GETGLOBAL "foo_int"`.
 const V1: &str = "\
 fn foo(x: int) -> int { return 51 }
 fn probe() -> int { return foo(5) }
 fn main() {}
 ";
 
-// Reload target WITH the unrelated overload added. `foo(int)` body edited to
-// return 52; a `foo(string)` overload is added (the only other change). The int
-// overload STILL emits as `foo_int` -- the added overload does not
-// rename it.
 const V2_OVERLOAD: &str = "\
 fn foo(x: int) -> int { return 52 }
 fn foo(s: string) -> string { return s }
@@ -40,17 +13,6 @@ fn probe() -> int { return foo(5) }
 fn main() {}
 ";
 
-/// FLIPPED SENTINEL (was: pinned the orphan-on-rename bug; now: guards the fix).
-///
-/// Adding an unrelated `foo(string)` overload does NOT rename the emitted
-/// `foo(int)` symbol -- it stays `foo_int` in both v1 and v2. On the
-/// in-place hot reload the new body lands under the SAME name (52). No bare
-/// `foo` global was ever emitted (every non-exempt fn mangles), so there is
-/// nothing to orphan.
-///
-/// This assertion is the CORRECT behavior; if it regresses to the stale 51 the
-/// decl-set-independence of the mangle broke -- treat that as a real bug, do not
-/// re-invert.
 #[test]
 fn overload_add_orphans_running_global_sentinel() {
     let before = emit_without_stdlib(V1);

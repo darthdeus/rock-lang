@@ -1,13 +1,5 @@
 use crate::common::{emit_module, run_luajit};
 
-// `t[k] = nil` for an absent key leaves no node behind, so once a table's
-// free nodes run out every such store rehashes the whole hash part to make
-// room, drops the nil on the way, and rehashes again for the next one: the
-// same work forever at no net memory growth, costing in proportion to the
-// table's live entries (`benchmarks/nil_store_probe.lua`). So removing an
-// absent key must not store into the key's table at all, on every Map
-// representation. A `__newindex` metamethod on that table counts the stores
-// that reach an absent key.
 const SOURCE: &str = r#"
 struct Item { id: int }
 nobox value Column { a: int, b: int }
@@ -33,8 +25,6 @@ nobox value Column { a: int, b: int }
 fn main() {}
 "#;
 
-/// Stores to absent keys of `keyed(m)` while removing 100 absent keys and then
-/// one present key twice.
 fn absent_key_stores(lua: &str, build: &str, remove: &str, keyed: &str) -> String {
     run_luajit(&format!(
         r#"{lua}

@@ -1,7 +1,3 @@
-//! Package-qualified enum, value-record and handle text on the Lua backend. The structural
-//! contract lives in `tests/strings/enum_format.rock`; this holder pins the
-//! package and module segments a packaged program names.
-
 use crate::common::{V1Fragment, emit_v1_package, run_main};
 
 const MAIN: &str = r#"

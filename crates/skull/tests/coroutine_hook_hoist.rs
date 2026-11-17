@@ -1,19 +1,5 @@
-//! A co-fn lifecycle hook
-//! (`on_killed`/`on_resume`/`on_hot_reload`) must compile to a per-co-fn
-//! top-level Lua fn taking the frame `s`, stored as a compiler-owned CodeRef --
-//! NOT a per-construction closure over the frame table.
-//!
-//! Premise (verified: `worker__step` reads its param `seed` as `c<s>.c1` and
-//! the hook body reads `base` as `c<s>.c2` -- every cell a hook touches is a
-//! frame field, so the hook's only upvalue is the frame table). That is what
-//! makes hoisting to a fn taking `s` sound: the runtime tests below fire a hook
-//! that reads a frame value and assert it still observes the right value, so a
-//! dropped capture would go red.
 use crate::common::{emit_module, mangled_name, run_luajit};
 
-/// A co fn whose `on_killed` hook reads a frame local (`base`), derived from the
-/// ctor param `seed`. `main` exercises worker/resume/kill so all four fns
-/// (`worker`, `worker__step`, `worker__resume`, `__rock_coroutine_kill`) emit.
 const ON_KILLED: &str = r#"
 enum Ev { Tick(int) }
 global LOG: int = 0
@@ -32,9 +18,6 @@ fn main() {
 }
 "#;
 
-/// SHAPE: the `on_killed` hook hoists to a shared top-level `worker__on_killed`
-/// and the ctor stores its compiler-owned slot -- no inline closure per
-/// construction.
 #[test]
 fn on_killed_hook_hoisted_to_shared_toplevel_fn() {
     let lua = emit_module(ON_KILLED);
@@ -44,13 +27,6 @@ fn on_killed_hook_hoisted_to_shared_toplevel_fn() {
     assert!(!lua.contains("__on_killed = function"));
 }
 
-/// SNAPSHOT-SHAPE: EVERY function-typed field on a handle is shared between two
-/// constructions (a CodeRef, not a fresh per-construction closure)
-/// -- the property a deep-copy/snapshot needs, asserted over the whole table so
-/// a regression adding a per-construction closure to ANY field (a wrapped
-/// defer, a future channel helper) goes red, not just the hook fields. And
-/// firing still observes the right frame value (guards the premise: hoisting
-/// drops no capture).
 #[test]
 fn hook_fn_shared_across_constructions_and_still_fires() {
     let lua = emit_module(ON_KILLED);

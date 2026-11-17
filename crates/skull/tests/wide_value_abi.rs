@@ -1,5 +1,3 @@
-//! Check the concrete Lua ABI for values wide enough to pressure frame limits.
-
 use skull_mir::lower::{SIGNATURE_SCALAR_LANE_BUDGET, WIDE_VALUE_PAYLOAD_LEAF_CUT};
 
 use crate::common::{
@@ -7,8 +5,6 @@ use crate::common::{
     luajit_loads, run_main, try_emit_module,
 };
 
-/// The emitted Lua parameter list of the definition `name` names.
-/// `leaves` float fields, `f0 .. f{leaves-1}`.
 fn float_fields(leaves: usize) -> String {
     (0..leaves)
         .map(|k| format!("f{k}: float"))
@@ -23,17 +19,6 @@ fn float_inits(leaves: usize, base: &str) -> String {
         .join(", ")
 }
 
-// --- gate 1: the wide-uniform witness compiles, loads and computes ---------
-//
-// A retained wide-uniform shape: a 58-leaf ordinary
-// `value` built once, then passed to and returned from helpers inside a loop,
-// with other live locals in the caller. On the scalar wire the caller's frame
-// is past `LJ_MAX_SLOTS` and the compiler rejects the body; the retained
-// `generated-function.lua` witness keeps failing either way.
-
-/// The 27-field / 58-leaf shape of an application's `DungeonRelightU`, in a form that
-/// needs no application or host engine type: five 2-leaf `nobox` pairs, eleven 3-leaf
-/// `nobox` triples, one 4-leaf `nobox` quad and eleven plain floats.
 const WIDE_UNIFORM_SRC: &str = r#"
 nobox value P2 { x: float, y: float }
 nobox value P3 { x: float, y: float, z: float }
@@ -113,10 +98,6 @@ fn the_wide_uniform_witness_uses_one_slot_per_wide_value() {
     assert_eq!(run_main(&lua), "19.5");
 }
 
-/// Gate 3: the boxed wide value CONTAINS `nobox` values. The callee must read
-/// their fields out of the box without the implicit-materialization rejection
-/// seen with nested uniform fields, and must be able to build a
-/// new one from them.
 #[test]
 fn a_boxed_wide_value_carrying_nobox_fields_reads_and_writes_them() {
     let types = WIDE_UNIFORM_SRC.replace("fn main() { print(\"{queue_sprites(0.5, 3)}\") }", "");
@@ -143,8 +124,6 @@ fn main() {{ print(\"{{roundtrip(0.0)}}\") }}
     assert_eq!(function_params(&lua, "with_anchor").len(), 5);
 }
 
-/// The retained witness of the OLD ABI must keep failing; a compiler fix
-/// produces different Lua rather than making that file load.
 #[test]
 fn the_retained_old_abi_witness_still_fails_to_load() {
     let witness = include_str!("fixtures/generated-function.lua");
@@ -153,10 +132,6 @@ fn the_retained_old_abi_witness_still_fails_to_load() {
     assert!(err.contains("too complex"));
 }
 
-// --- gate 2: the cut, exactly ---------------------------------------------
-
-/// `payload` float leaves in an ordinary value, crossed at a parameter and at a
-/// return; `nullable` makes the parameter and return `T?`.
 fn cut_fixture(payload: usize, nullable: bool) -> String {
     let q = if nullable { "?" } else { "" };
     let read = if nullable {
@@ -190,10 +165,6 @@ fn a_value_one_leaf_over_the_cut_takes_the_aggregate_wire() {
     assert_eq!(function_params(&lua, "thru").len(), 1);
 }
 
-/// `K` compares the PAYLOAD leaf count, not `ValueShape::leaf_count()`, which
-/// also counts the nullable presence flag, so a nullable ORDINARY `value`
-/// takes the same wire as its payload: a presence lane plus its leaves at or
-/// under the cut, one boxed slot over it.
 #[test]
 fn a_nullable_ordinary_value_takes_the_cut_of_its_payload() {
     for (payload, lanes) in [
@@ -210,7 +181,6 @@ fn a_nullable_ordinary_value_takes_the_cut_of_its_payload() {
     }
 }
 
-/// A `nobox` value is never boxed, at any width.
 #[test]
 fn a_wide_nobox_value_keeps_its_scalar_lanes() {
     let payload = WIDE_VALUE_PAYLOAD_LEAF_CUT + 1;
@@ -228,20 +198,8 @@ fn a_wide_nobox_value_keeps_its_scalar_lanes() {
     assert_eq!(run_main(&lua), "1");
 }
 
-// --- gate 2: the per-signature lane budget --------------------------------
-
-/// The budget fixtures' member width. Every member must stay UNDER the cut, so
-/// the per-value rule cannot fire and the budget is the only actor; and five of
-/// them must be over the budget, with one boxed still over and two boxed under,
-/// so "widest first, until it fits" has a distinguishable answer. The
-/// preconditions are ASSERTED below rather than trusted, so a `K` or budget
-/// that moves this fixture out of its regime fails loudly instead of quietly
-/// testing nothing.
 const BUDGET_MEMBER: usize = 24;
-/// The `nobox` member of `budget_nobox_widest`, wider than `BUDGET_MEMBER` so
-/// that a budget ranking candidates by lanes alone would reach for it first.
 const BUDGET_NOBOX_WIDE: usize = 30;
-/// The narrow members of `budget_mixed`.
 const BUDGET_NARROW: usize = 12;
 
 fn budget_src() -> String {
@@ -289,9 +247,6 @@ fn main() {{
     )
 }
 
-/// Check the fixture regime and every budget decision against one emission, so
-/// a cut or budget change says which case moved without compiling the source
-/// again for the separate boxed and nobox assertions.
 #[test]
 #[expect(
     clippy::assertions_on_constants,
@@ -329,11 +284,6 @@ fn the_lane_budget_boxes_widest_ordinary_values_and_never_nobox_values() {
     assert_eq!(widest.len(), BUDGET_NOBOX_WIDE + 1 + BUDGET_MEMBER * 2);
 }
 
-// --- the wire is a property of the TYPE, so every call kind agrees ---------
-
-/// `value W` of one leaf MORE than the cut, with a constructor that puts `x` in
-/// `a0` and zero everywhere else. Derived from the constant so the fixture
-/// tracks the cut instead of pinning a width the cut can outgrow.
 fn over_cut_value() -> String {
     let n = WIDE_VALUE_PAYLOAD_LEAF_CUT + 1;
     let fields = (0..n)
@@ -347,10 +297,6 @@ fn over_cut_value() -> String {
     format!("value W {{ {fields} }}\nfn mkw(x: float) -> W {{ return W {{ {inits} }} }}\n")
 }
 
-/// Direct calls, calls through a function value, closures, methods/UFCS,
-/// generic instantiations and a `co fn` all target the same boxed wire. Every
-/// one of them runs; a disagreement is a Lua arity mismatch, which shows up as
-/// a nil arithmetic error rather than a wrong number.
 const CALL_KINDS_BODY: &str = r#"
 fn bump(w: W) -> W { return W { ..w, a0: w.a0 + 1.0 } }
 fn head(w: W) -> float { return w.a0 }
@@ -415,8 +361,6 @@ fn every_call_kind_agrees_on_the_boxed_wire() {
     assert_eq!(run_main(&lua), "1 1 1 1 0 1 3 1 2");
 }
 
-/// Value semantics survive the box: a callee that mutates its own copy of a
-/// boxed parameter must not be observable in the caller, and vice versa.
 #[test]
 fn a_boxed_parameter_does_not_alias_the_callers_value() {
     let src = format!(
@@ -447,10 +391,6 @@ fn main() {{
     assert_eq!(run_main(&lua), "1 99 7 99");
 }
 
-/// A callee that returns its boxed parameter returns a COPY. The parameter box
-/// is the caller's (borrowed, never written), and a caller may store the result
-/// into a place and write through it, which must not reach the argument. The
-/// forwarder lends its immutable argument; the mutable store owns the copy.
 #[test]
 fn a_forwarding_callee_lends_the_box_until_a_mutable_store() {
     let src = format!(
@@ -472,9 +412,6 @@ fn main() {{
     assert_eq!(run_main(&lua), "3 9");
 }
 
-/// The frame-limit diagnostic is what a wide `nobox` value still meets, and it
-/// still names the value: the ABI cut must not have turned a `nobox` rejection
-/// into a silent box.
 #[test]
 fn a_frame_limit_rejection_still_names_the_nobox_value() {
     let fields = float_fields(50);

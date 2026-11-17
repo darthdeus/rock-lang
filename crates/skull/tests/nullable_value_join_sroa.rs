@@ -1,10 +1,3 @@
-//! A nullable `value` read out of a field and consumed at once (`if let`,
-//! `unwrap()`) must not rebuild the value's box. The read copies the stored
-//! box on its present arm and joins the copy with `nil` in one cell; SROA
-//! used to keep that cell whole because a nil test is not a field read, so
-//! Lua allocated one table per nested value on every read. application's live mob
-//! poll (`if let pc = mob.attack_co`) paid two tables per mob per tick.
-
 use crate::common::{emit_module, function_body, run_luajit, run_main};
 
 #[test]
@@ -173,8 +166,6 @@ fn coalesce_return_binding_of_nullable_value_field_builds_no_box() {
     }
 }
 
-// GC-tier nullable returns carry presence and leaves, so both
-// escapes must keep the coalesce binding unboxed, including its nested value.
 #[test]
 fn escaping_coalesce_binding_returns_leaves_without_copying() {
     let checks = r#"

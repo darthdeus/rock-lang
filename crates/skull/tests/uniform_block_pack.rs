@@ -1,13 +1,3 @@
-//! `@uniform_expand` -- the std140 packer. The expansion emits one DIRECT typed store per primitive leaf, at the
-//! offsets `gpu_layout::uniform_block` computed, into views passed as params.
-//!
-//! What these pin that a layout unit test cannot: that the offsets reach the
-//! EMITTED code as literal indices, that a store is a store rather than a call,
-//! and that the byte offset became an ELEMENT index. `BloomBlurU` is the
-//! fixture throughout because its std140 layout diverges from its C layout, so
-//! the divergence is visible as a skipped index rather than as a number that
-//! happens to agree.
-
 use crate::common::{bone_rejections, emit_module, function_body, run_main};
 
 const CANONICAL_VALUES: &str = r#"
@@ -32,10 +22,6 @@ fn main() {
 }
 "#;
 
-/// The submitted packet is a compiler-owned logical value: it has scalar
-/// leaves and a semantic group fingerprint, but no std140 offsets or padding.
-/// The first assertion is deliberately the RED gate for the new intrinsic;
-/// the old compiler rejects its annotation before it can emit anything.
 #[test]
 fn uniform_values_expands_to_canonical_leaves() {
     let rejects = bone_rejections(CANONICAL_VALUES);
@@ -54,10 +40,6 @@ fn uniform_values_expands_to_canonical_leaves() {
     assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["true", "6"]);
 }
 
-/// `radius: float, direction: Vec2, resolution: float` -> std140 offsets
-/// 0, 8, 12, 16 -> element indices 0, 2, 3, 4. Index 1 is the four-byte hole
-/// std140 opens after the lone leading float, and its ABSENCE is the assertion
-/// that matters: the C layout would have packed `direction` at index 1.
 const BLOOM: &str = r#"
 value BloomBlurU { radius: float, direction: Vec2, resolution: float }
 
@@ -69,10 +51,6 @@ fn main() {
 }
 "#;
 
-/// The emitted body of `main`, which is where the expansion lands. The
-/// intrinsic's own dead Lua definition is still emitted (nothing calls it), so
-/// module-wide substring checks would match it and prove nothing.
-/// The store indices are the std140 offsets divided by four, as literals.
 #[test]
 fn bloom_blur_packs_at_its_std140_element_indices() {
     let lua = emit_module(BLOOM);
@@ -83,10 +61,6 @@ fn bloom_blur_packs_at_its_std140_element_indices() {
     assert!(!body.contains("[(1)] = "));
 }
 
-/// `WireView` must reach the EMITTED code as a choice of base, not just as a
-/// value in the plan: a 32-bit block `bool` and an `int` store through the int
-/// view while the float beside them stores through the float view. Each view is
-/// a distinct allocation, so the two are told apart by which local they index.
 #[test]
 fn int_and_bool_leaves_store_through_the_other_view() {
     let lua = emit_module(
@@ -136,10 +110,6 @@ fn main() {
     assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["-1"]);
 }
 
-/// Each leaf goes straight from a register into the view. Two ways that could
-/// regress: the call survives unexpanded, or the group gets PACKED into its
-/// leaf-table ctor first (which is what the same call emits without the
-/// expansion, and which allocates per pack).
 #[test]
 fn the_pack_is_stores_not_a_call_and_never_boxes() {
     let lua = emit_module(BLOOM);
@@ -148,13 +118,6 @@ fn the_pack_is_stores_not_a_call_and_never_boxes() {
     assert!(!body.contains("BloomBlurU_lct") && !body.contains("BloomBlurU_ct"));
 }
 
-/// A block packed out of a GLOBAL is read one leaf at a time, each leaf loaded
-/// right before its own store. Lowering the whole value first loads every leaf
-/// into a register before the first store, and in a trace that keeps all of
-/// them live in every exit snapshot taken during the pack -- the engine block's
-/// 41 leaves against LuaJIT's 16-register side-trace budget
-///. Pinned by register count: the packing
-/// function must declare fewer registers than the block has leaves.
 const GLOBAL_SOURCE: &str = r#"
 // `Mat4` is stored as a flat leaf table (keys like `c0.x`) while `Vec4`
 // nests, so the two storage conventions are both read through here.

@@ -1,23 +1,3 @@
-//! A function that holds several wide `nobox` values must still load: LuaJIT
-//! caps a function frame at 250 slots (`LJ_MAX_SLOTS`, "function or expression
-//! too complex") and at 200 active locals (`LJ_MAX_LOCVAR`, "function at line N
-//! has more than 200 local variables"), and a 50-leaf value costs one of each
-//! wherever it is live.
-//!
-//! The receive of a wide multi-return used to cost the width twice: the call
-//! wrote its results into one set of locals and every leaf was then copied into
-//! a second set that held the value. With three 50-leaf values live and a
-//! 52-slot call on top, that copy was the difference between 202 slots and 252.
-//! The result locals now ARE the value's locals.
-//!
-//! Past that ceiling the compiler REJECTS the body with a Rock span instead of
-//! emitting Lua that fails at `loadfile` with a chunk position and no source
-//! location (`skull_codegen_lua::frame_limits`). The model that decides this is
-//! a proven lower bound of LuaJIT's own count, so the core regression is an
-//! AGREEMENT test: for every member of a family that walks a boundary, the
-//! compiler's verdict must equal what the bundled LuaJIT does with the very Lua
-//! the emitter would have produced.
-
 use crate::common::{
     body_id, emit_module_without_frame_limits, function_body, luajit_loads, run_main,
     try_emit_module, ws_with_stdlib,
@@ -74,10 +54,6 @@ fn main() {{ assert(gather(-20) == null); print(gather(1).unwrap().checksum) }}
     assert_eq!(run_main(&lua), "210");
 }
 
-/// `held` values of a `leaves`-wide nobox struct, all live across the calls
-/// that read them back.
-/// The reader binds the complete value so field demand cannot move
-/// the fixture away from the frame boundary it tests.
 fn fixture(leaves: usize, held: usize) -> String {
     let fields: Vec<String> = (0..leaves).map(|k| format!("f{k}: float")).collect();
     let inits: Vec<String> = (0..leaves).map(|k| format!("f{k}: x + {k}.0")).collect();
@@ -124,10 +100,6 @@ fn a_wide_multi_return_lands_in_the_locals_that_hold_the_value() {
     assert!(!(next.trim_start().starts_with('r') && next.contains("= c")));
 }
 
-/// Four live 50-leaf `nobox` values plus a call is the shape that does not
-/// load. It must now be a Rock diagnostic with a source location, naming the
-/// limit, the emitter's count, and the `nobox` value that cannot be boxed for
-/// it -- not a `loadfile` failure after a successful compile.
 #[test]
 fn four_live_fifty_leaf_values_are_a_spanned_compile_error() {
     let err = try_emit_module(&fixture(50, 4))
@@ -148,22 +120,6 @@ fn four_live_fifty_leaf_values_are_a_spanned_compile_error() {
     assert!(load.contains("more than 200 local variables") || load.contains("too complex"));
 }
 
-// --- boundary agreement ----------------------------------------------------
-//
-// The model is a LOWER bound of LuaJIT's count, so it may miss an overflow but
-// must never invent one. Only the bundled LuaJIT can settle that, and only on
-// the Lua the emitter would actually have written -- which is why each point
-// emits twice: once through the production path (whose `Err` IS the verdict)
-// and once with the check off, to get the text `loadfile` judges.
-
-/// One point of a boundary family. Agreement is demanded EXACTLY, in both
-/// directions. The model is a lower bound in general -- it may miss an overflow
-/// in a shape it does not count -- but on these families it is exact by
-/// construction, and pinning it here is the whole point: a threshold that
-/// drifted one slot in the lenient direction would still reject SOMETHING in a
-/// wide enough window, so "the flip happened somewhere" is not a test.
-///
-/// Returns the shared verdict.
 fn verdicts_agree(tag: &str, src: &str) -> bool {
     let compiled = try_emit_module(src);
     let lua = emit_module_without_frame_limits(src);
@@ -181,8 +137,6 @@ fn verdicts_agree(tag: &str, src: &str) -> bool {
     }
 }
 
-/// Walk `lo..=hi` of a family and require the boundary to sit inside the
-/// window: a window with only one verdict pins nothing.
 fn walk(name: &str, lo: usize, hi: usize, mk: impl Fn(usize) -> String) {
     let verdicts: Vec<bool> = (lo..=hi)
         .map(|w| verdicts_agree(&format!("{name}_{w}"), &mk(w)))
@@ -198,9 +152,6 @@ fn walk(name: &str, lo: usize, hi: usize, mk: impl Fn(usize) -> String) {
     assert!(verdicts[flip..].iter().all(|ok| !*ok));
 }
 
-/// The declarations of a `leaves`-wide `nobox` value and the helpers that
-/// produce and read one.
-/// The reader binds the complete value to retain full transport for the boundary walkers.
 fn wide_decls(leaves: usize) -> String {
     let fields: Vec<String> = (0..leaves).map(|k| format!("f{k}: float")).collect();
     let inits: Vec<String> = (0..leaves).map(|k| format!("f{k}: x + {k}.0")).collect();
@@ -215,9 +166,6 @@ fn wide_decls(leaves: usize) -> String {
     )
 }
 
-/// `pad` scalar locals live across one wide receive and one wide call. `pad`
-/// steps the frame by exactly one slot and one local, which is what makes an
-/// off-by-one in either direction visible.
 fn padded_receive(leaves: usize, pad: usize) -> String {
     let mut src = wide_decls(leaves);
     src.push_str("fn run(x: float) -> float {\n");
@@ -232,9 +180,6 @@ fn padded_receive(leaves: usize, pad: usize) -> String {
     src
 }
 
-/// The same wide receive and call, inside a counted `for`. The loop adds its
-/// four hidden control locals and its own body-scoped register line, so a model
-/// that forgot either would disagree with LuaJIT here and nowhere else.
 fn padded_receive_in_loop(leaves: usize, pad: usize) -> String {
     let mut src = wide_decls(leaves);
     src.push_str("fn run(x: float) -> float {\n");
@@ -252,9 +197,6 @@ fn padded_receive_in_loop(leaves: usize, pad: usize) -> String {
     src
 }
 
-/// A wide producer written directly into a wide consumer's argument list, which
-/// the emitter splices as `use_w(mk(x), 0)` rather than materializing the
-/// leaves into locals first.
 fn nested_wide_call(leaves: usize, pad: usize) -> String {
     let mut src = wide_decls(leaves);
     src.push_str("fn run(x: float) -> float {\n");
@@ -269,8 +211,6 @@ fn nested_wide_call(leaves: usize, pad: usize) -> String {
     src
 }
 
-/// The wide value live inside a closure body, which is emitted as its own Lua
-/// function with its own frame.
 fn wide_in_closure(leaves: usize, pad: usize) -> String {
     let mut src = wide_decls(leaves);
     src.push_str("fn run(x: float) -> float {\n    let f = (y: float) => {\n");
@@ -286,10 +226,6 @@ fn wide_in_closure(leaves: usize, pad: usize) -> String {
     src
 }
 
-/// `pad` live locals and nothing wide: this family walks the LOCALS cap rather
-/// than the slot cap, one local per step. The accumulator goes through a call
-/// so the `+=` chain is not folded into one parenthesized expression, which
-/// would hit LuaJIT's separate 200-syntax-level cap first.
 fn flat_locals(pad: usize) -> String {
     let mut src = String::from("fn one(x: float, k: int) -> float { return x * float(k) + 1.0 }\n");
     src.push_str("fn run(x: float) -> float {\n");
@@ -303,9 +239,6 @@ fn flat_locals(pad: usize) -> String {
     src.push_str("    return total\n}\nfn main() { print(\"{run(1.0)}\") }\n");
     src
 }
-
-// The slot windows below straddle 250 exactly: the first member models 248
-// slots and the last 251, so an off-by-one in either direction moves a verdict.
 
 #[test]
 fn a_wide_receive_agrees_with_luajit_across_the_boundary() {
@@ -327,23 +260,16 @@ fn a_wide_value_in_a_closure_agrees_with_luajit_across_the_boundary() {
     walk("closure", 144, 147, |pad| wide_in_closure(50, pad));
 }
 
-/// The locals cap: 199, 200, 201 and 202 active locals, one per step.
 #[test]
 fn the_local_variable_cap_agrees_with_luajit_across_the_boundary() {
     walk("flat_locals", 198, 201, flat_locals);
 }
 
-/// The retained width witness: three live 50-leaf values load, four do not.
 #[test]
 fn the_held_wide_value_witness_agrees_with_luajit() {
     walk("held_values", 3, 4, |held| fixture(50, held));
 }
 
-/// The rejection must reach the INCREMENTAL re-emit path too, not only a fresh
-/// full build. the host watch command re-emits the edited body and reassembles; a body
-/// edit that pushes a function over the frame limit must fail the reload with
-/// the Rock diagnostic rather than publish Lua the engine cannot parse
-///.
 #[test]
 fn the_frame_limit_rejection_reaches_the_incremental_path() {
     let fits = padded_receive(50, 100);

@@ -1,20 +1,3 @@
-//! `[Opt]` where `Opt` is a `value` struct with a nullable `nobox` field, swept
-//! by LEAF COUNT.
-//!
-//! The sweep is the point. `MAX_COLUMN_LEAVES`
-//! (`skull-mir/src/lower/shape.rs`) makes the implicit STORAGE flip at 4 leaves
-//! -- flat columns at or below it, a boxed element above -- and that flip is
-//! invisible from any single repro: a 2-field `Opt` is 4 leaves (presence + x +
-//! y + a) and column-stores, a 3-field `Opt` is 5 and boxes. Both must round-trip,
-//! present and absent, and the count is what tells you which path a row exercised.
-//! An element explicitly marked `nobox` bypasses this heuristic and stays flat
-//! at any supported width -- columns up to the constant, one strided row
-//! backing above it (`nobox_wide_strided.rs`); for unmarked values the constant
-//! chooses between columns and a box.
-//!
-//! The GC-tier ctor itself (one field, no Vec) is pinned by
-//! `nobox_nested_ctor.rs`.
-
 use crate::common::{function_body, run_main, try_emit_module};
 
 const WIDE_NOBOX_OVERWRITE: &str = r#"
@@ -38,8 +21,6 @@ fn wide_nobox_vec_stays_flat_past_the_implicit_threshold() {
     assert_eq!(run_main(&lua), "6 10");
 }
 
-/// `n` float fields after `pos`, so the element carries `n + 3` leaves
-/// (presence, `pos.x`, `pos.y`, then the floats).
 fn source(extra: usize) -> String {
     let names = ["a", "b", "c", "d"];
     let fields: Vec<String> = (0..extra)
@@ -69,29 +50,6 @@ fn main() {{
     )
 }
 
-/// Column storage writes a leaf per column keyed by its dotted path; a boxed
-/// element CALLS the leaf ctor and stores one table. So the tier is "is the leaf
-/// ctor called at all", which is a property of the storage.
-///
-/// It deliberately does NOT match the ctor's ARGUMENTS. The previous form asked
-/// for `Opt_lct((true)`, pinning the presence leaf as a literal constant at the
-/// call -- and under instance-owned emission the same boxed store arrives as
-/// `Opt_lct(r1, .., r5)` with the leaves in registers. That read as
-/// "column-stored" for every row above the threshold and looked exactly like the
-/// storage tier having moved, when `Opt_lct` was still being called and every
-/// round-trip row above still passed. A spelling is not a tier.
-///
-/// The equality comparison line is excluded because the fixture's
-/// `V[1] == V[0]` MATERIALIZES both operands through the same ctor whatever
-/// the storage is -- at 3 leaves that comparison is the only `Opt_lct(` in
-/// the chunk. Matching the bare name therefore reports "boxed" for every row,
-/// which is the same failure from the other side. The tier is whether the
-/// STORE builds an element, not whether a same-type equality compares two
-/// materialized operands (same-named `value` struct equality is native `==`
-/// now, not a `__op_eq` call -- see `value_struct_eq_dispatch.rs` -- so the
-/// comparison line no longer names a callee; it is instead the only line
-/// where `Opt_lct(` appears TWICE, once per operand, whereas a genuine
-/// element store calls it exactly once).
 fn is_column_stored(lua: &str) -> bool {
     !lua.lines().any(|l| l.matches("Opt_lct(").count() == 1)
 }

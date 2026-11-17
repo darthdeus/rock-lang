@@ -1,13 +1,3 @@
-//! Driver contract for the `rock_shader` in-game shader-pipeline intrinsic
-//!. A call `rock_shader(vert, frag)`
-//! (two direct references to top-level `@shader` fns) collapses at emit to the
-//! pipeline key const `"<vert>+<frag>"`, and the driver emits exactly one
-//! top-level `__rock_shader_register` carrying the GLSL and semantic wires per DISTINCT pair -- N
-//! call sites of the same pair dedup to one registration. Re-emission is
-//! byte-identical (incremental byte-identity gate).
-//!
-//! The GLSL emit shape itself is pinned by the skull-codegen-glsl goldens; here
-//! we pin the driver wiring (collapse + dedup + top-level registration).
 use crate::common::{body_id, emit_mir, emit_module, function_body, module_id, ws_with_stdlib};
 use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
@@ -24,7 +14,6 @@ fn emit_overlay(
     emit_overlay_result(ws, cache, reinferred).expect("emit_overlay")
 }
 
-/// One shared vertex + one fragment, referenced from TWO call sites (two fns).
 const SRC: &str = r#"
 value QuadVert { aPos: Vec2, aTexCoord: Vec2 }
 value UiVertU  { uProjection: Mat4, uView: Mat4, uTransform: Mat4 }
@@ -56,8 +45,6 @@ fn call_collapses_to_key_const() {
     assert!(!body.contains("compile-time shader-pipeline intrinsic"));
 }
 
-/// The emission lists each registered shader's source, so a host can show
-/// it without parsing the registration out of the Lua.
 #[test]
 fn emission_lists_each_registered_shader_source() {
     let emit = emit_mir(SRC);
@@ -108,12 +95,6 @@ fn reemission_is_byte_identical() {
     assert_eq!(emit_module(SRC), emit_module(SRC));
 }
 
-// -- Hot-reload parity: a reload re-`dofile`s the chunk (full) or the overlay
-// (incremental body edit), and either must carry the EDITED shader source so the
-// engine's hash-idempotent register recompiles the GL program in place. --
-
-/// One shared vertex + a fragment whose magenta X channel is parameterized, so a
-/// "body edit" is a real content change to the generated GLSL.
 fn src_with_frag(x: &str) -> String {
     format!(
         r#"
@@ -244,12 +225,6 @@ fn new_shader_callsite_overlay_carries_registration() {
     );
 }
 
-// -- A3c: single-arg fullscreen form `rock_shader(frag)`. Key = the bare frag
-// name (never contains '+', so it cannot collide with a pair key); the driver
-// routes vert=None to `emit_shader_with_view`, which emits the same complete file
-// the A1 single-entry emitter produces (PIXEL body + fullscreen VERTEX
-// passthrough). No new GLSL emission -- resolution + routing only. --
-
 const FS_SRC: &str = r#"
 @shader(fragment)
 fn fs_frag(tc: Vec2) -> Vec4 {
@@ -259,9 +234,6 @@ fn fs_frag(tc: Vec2) -> Vec4 {
 fn make_fs() -> string { return rock_shader(fs_frag) }
 "#;
 
-/// A mixed workspace: one single-arg (fullscreen) and one two-arg (pair) call.
-/// Keys "fs_frag" and "ui_vert+ui_sim_solid_frag"; sorted-by-key emission puts
-/// the single first.
 const MIXED_SRC: &str = r#"
 value QuadVert { aPos: Vec2, aTexCoord: Vec2 }
 value UiVertU  { uProjection: Mat4, uView: Mat4, uTransform: Mat4 }

@@ -1,7 +1,3 @@
-//! The `@intrinsic` mechanism: the fail-closed
-//! key check catches a backend-table key that no `@intrinsic` declaration backs,
-//! and the generic-key pin fixes what a generic intrinsic's stable registry key
-//! is (the declared-signature mangle, NOT a monomorphization -- there is none).
 use crate::common::{name_matches, ws_of, ws_with_stdlib};
 
 use skull_codegen_lua::mangle_fn;
@@ -10,7 +6,6 @@ use skull_mir::intrinsics::{
     is_intrinsic, is_native_required, unbacked_entries,
 };
 
-/// A stand-in backend table: two entries, one of which no declaration backs.
 struct ToyTable;
 impl IntrinsicTable for ToyTable {
     fn backend(&self) -> &'static str {
@@ -33,9 +28,6 @@ impl IntrinsicTable for ToyTable {
     }
 }
 
-// Fail-closed: an entry whose (name, arity) matches no `@intrinsic` declaration
-// is surfaced (a test would go red), while a backed entry is not -- pure data,
-// no Workspace, so the checker's algorithm is exercised on its own.
 #[test]
 fn unbacked_entries_flags_only_the_drifted_key() {
     let declared = [(ustr::Ustr::from("sin"), 1usize)].into_iter().collect();
@@ -45,15 +37,12 @@ fn unbacked_entries_flags_only_the_drifted_key() {
     assert_eq!(un[0].arity, 2);
 }
 
-// An empty declaration set makes every entry unbacked (the fail-closed default:
-// with nothing declared, no key is legitimate).
 #[test]
 fn unbacked_entries_flags_all_when_nothing_declared() {
     let declared = std::collections::HashSet::default();
     assert_eq!(unbacked_entries(&ToyTable, &declared).len(), 2);
 }
 
-/// Find the workspace `Function` named `name` (first match).
 fn find_fn<'a>(
     ws: &'a bone_semantic::inference::Workspace,
     name: &str,
@@ -65,13 +54,6 @@ fn find_fn<'a>(
         .unwrap_or_else(|| panic!("no fn `{name}`"))
 }
 
-// The generic-key answer (plan: "verify EARLY"). A generic intrinsic is NOT
-// monomorphized; its stable registry key is the DECLARED-SIGNATURE mangle,
-// computed off the one declared `Function` (a FuncRef), so it cannot depend on
-// any call site's `T`. `gid` is overloaded (two defs) to force the mangle path:
-// `mangle_fn` encodes the generic parameter as its NAME (`T`), never a concrete
-// instantiation -- proving the key is call-site-`T`-independent even though the
-// two call sites below instantiate `T` at `int` and at `bool`.
 const GENERIC: &str = r#"
 @intrinsic fn gid<T>(x: T) -> T { return x }
 @intrinsic fn gid(a: int, b: int) -> int { return a }
@@ -103,9 +85,6 @@ fn generic_intrinsic_key_is_declared_signature_mangle() {
     assert!(expand_kind(gid_generic).is_none());
 }
 
-// `@struct_expand` is recognized as the `StructPairs` expansion intrinsic
-// through the ONE registry recognizer, and a generic `@struct_expand` fn's key
-// is likewise its declared mangle (always-mangle: even a unique name mangles).
 const EXPAND: &str = r#"
 value V2 { x: float, y: float }
 enum U { F(float), Vv(V2) }
@@ -133,9 +112,6 @@ fn struct_expand_is_an_expansion_intrinsic() {
     );
 }
 
-// The Layer-0 proving set is annotated `@intrinsic` in the stdlib, so
-// `declared_intrinsics` sees it -- the declaration side of the contract the toy
-// JS table is checked against with `unbacked_entries`.
 #[test]
 fn stdlib_layer0_proving_set_is_declared_intrinsic() {
     let ws = ws_with_stdlib("fn main() {}");
@@ -170,7 +146,6 @@ fn stdlib_layer0_proving_set_is_declared_intrinsic() {
     has("sb_new", 0);
 }
 
-/// A stdlib fn by name (first match), or panic.
 fn stdlib_fn<'a>(
     ws: &'a bone_semantic::inference::Workspace,
     name: &str,
@@ -182,9 +157,6 @@ fn stdlib_fn<'a>(
         .unwrap_or_else(|| panic!("no stdlib fn `{name}`"))
 }
 
-// The native-required subset is marked `@native_required` AND has a luajit
-// mapping (an `inline(lua)` body) -- the body-slot invariant `intrinsic_rejection`
-// enforces on user code, held by the stdlib itself.
 #[test]
 fn stdlib_native_required_set_has_luajit_mapping() {
     let ws = ws_with_stdlib("fn main() {}");

@@ -1,8 +1,3 @@
-//! Issue #44: nested coroutine steps must remain traceable through resume.
-//! Resumes call their step directly, without a pcall frame below the trace
-//! start, so returning from a nested step must not abort with
-//! `NYI: return to lower frame`.
-
 use crate::common::{definition_names, emit_module, function_body, mangled_name, run_luajit};
 
 const FIXTURE: &str = include_str!("fixtures/nested_coroutine_trace.rock");

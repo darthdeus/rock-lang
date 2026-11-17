@@ -1,9 +1,3 @@
-//! Expansion contract for the tier-1 comptime-input intrinsics
-//!: `build_var("NAME")` inlines the value the host
-//! resolved from `[build.vars]`, `embed_string("path")` inlines a tracked
-//! file's contents. Both take only string literals, resolve against
-//! `Workspace.comptime_inputs`, and reject with a span on every failure --
-//! undeclared var, missing file, path escape -- never a silent default.
 use bone_semantic::inference::{ComptimeInputs, ComptimeVarValue};
 
 use crate::common::{body_id, emit_full_of, function_body, name_matches, try_emit_module_with};
@@ -168,9 +162,6 @@ fn memory_inputs(files: &[(&str, &str)]) -> ComptimeInputs {
     }
 }
 
-/// A host without a filesystem supplies the embedded files itself: the read,
-/// and the fingerprint's re-read of it, see the supplied text and never the
-/// disk (no file of that name exists on disk here).
 #[test]
 fn embed_string_reads_host_supplied_files() {
     let src = r#"
@@ -195,13 +186,6 @@ fn broken() -> string {
         .expect_err("an embed the host did not supply must reject");
     assert!(err.message.contains("absent.txt") && err.message.contains("host supplied no file"));
 }
-
-// --- incremental invalidation: a comptime input change is a body edit ---
-// bone hashes only source text, so a body whose emitted code depends on a
-// build var's value or an embedded file's content never appears in
-// `reinferred`; the cache must detect stale inputs itself, and the change must
-// reach emit_incremental AND emit_overlay (byte-identity gates compare fresh
-// full builds and cannot see this class of staleness).
 
 fn ws_with_inputs(
     src: &str,
@@ -229,10 +213,6 @@ fn global_reinferred_of(
     panic!("no global named {name}");
 }
 
-/// Full builds at `before`, then `move_input` changes the input under an
-/// unrelated body edit, so only stale-input detection can re-emit its
-/// `consumers` readers. The incremental build must equal a fresh one, and the
-/// overlay must redefine every reader, the const `TAG` initializer included.
 fn assert_input_change_reaches_every_consumer(
     src: &str,
     before: (ComptimeInputs, &str),
@@ -322,13 +302,6 @@ fn main() {
         2,
     );
 }
-
-// --- global initializers ---
-// ALL in-tree production comptime reads happen in global initializers (application's
-// telemetry/build_info stamps, the profiler SHA, the cimgui prelude), which
-// emit through `UnitOut`, not a function Chunk. A read recorded only on
-// chunks leaves this whole shape invisible to the watch set and to overlay
-// staleness while every function-body fixture stays green.
 
 #[test]
 fn global_embed_read_joins_the_watch_file_set() {

@@ -77,13 +77,6 @@ print(first ~= second and second ~= third
     assert_eq!(run_luajit(&program), "true");
 }
 
-// --- The storage cell -----------------
-//
-// A mutable-global access reads the global storage through one chunk-level
-// local, `__rock_state_cell`, instead of the
-// `_G.__rock_globals` lookup. The table is never replaced, so the cell never
-// needs updating after the program assigns it.
-
 #[test]
 fn emission_reads_globals_through_the_storage_cell() {
     let lua = emit_module(FIXTURE);
@@ -91,17 +84,6 @@ fn emission_reads_globals_through_the_storage_cell() {
     assert!(lua.contains("__rock_state_cell[5]"));
     assert!(!lua.contains("__rock_globals[5]"));
 }
-
-// --- The storage table sized at creation --
-//
-// LuaJIT specialises a constant-key read to the table's CURRENT array/hash
-// split (`ULE asize` / `ABC` guard). A table that starts as `{}` and grows
-// lazily rehashes on every hash-part overflow as statics fill in, and each
-// rehash recomputed the array part from the populated keys, so a trace recorded
-// before a move carried a permanently failing guard: a doomed side exit with
-// the caller's floats live, 468 aborts a run at one site, plus the interpreted
-// remainder of every execution after. The emitter opens the storage at its
-// rehash fixpoint instead.
 
 #[test]
 fn the_program_opens_sized_storage_before_initializing() {
@@ -133,9 +115,6 @@ fn the_program_opens_sized_storage_before_initializing() {
     assert!(lua.contains("__rock_table_new(narr, nhash)"));
 }
 
-/// A program loaded again over its own live storage, as a reload does, keeps
-/// every global the running program wrote: no initializer runs a second time,
-/// and the table is the one the first load sized.
 #[test]
 fn a_reloaded_program_keeps_live_globals_and_its_storage_table() {
     let lua = emit_module(FIXTURE);
@@ -153,8 +132,6 @@ print(storage == __rock_globals, __rock_globals_fresh)
     assert_eq!(run_luajit(&program), "1\n2\n3\ntrue\tfalse");
 }
 
-/// A program whose mutable-global layout differs from the live storage's
-/// cannot load into it, because a slot would name a different global.
 #[test]
 fn a_program_with_a_different_global_layout_refuses_live_storage() {
     let before = emit_mir(FIXTURE).lua;

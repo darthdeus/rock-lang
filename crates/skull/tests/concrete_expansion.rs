@@ -1,5 +1,3 @@
-//! Expansion validation follows retained concrete instances, not generic source bodies.
-
 use crate::common::{run_main, try_emit_module};
 
 const STRUCT_VALID: &str = r#"

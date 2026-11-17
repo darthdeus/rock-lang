@@ -1,10 +1,3 @@
-//! An ORDINARY cdata-tier `value?` crosses a Rock-to-Rock Lua call as a
-//! presence lane plus its payload leaves, the wire a `nobox` `T?` already
-//! takes (a GC-tier `T?`, `Tag` below, keeps its boxed slot). A consumer
-//! that only needs presence (`??`, `== null`) reads the lane, so the
-//! non-escaping path builds no box; an escape (a field, a boxed local) boxes
-//! once, and to `nil` when absent.
-
 use crate::common::{emit_module, function_body, run_main};
 
 const OPTIONAL_VALUE: &str = r#"

@@ -1,9 +1,3 @@
-//! Always-mangle is decl-set-independent: a fn's emitted name is a pure function
-//! of its own `(name, signature)`, so it is IDENTICAL with or without a same-name
-//! inline(js)/extern(js) backend sibling or an unrelated overload declared
-//! elsewhere. This is what makes hot reload safe (see mangle_rename_hot_reload.rs)
-//! and what fixed the web renderer arc-2 regression where a web sibling silently
-//! renamed every previously-unique Lua definition and call site.
 use crate::common::emit_module;
 
 #[test]
@@ -52,9 +46,6 @@ fn dbl(s: string) -> string { return s }
 fn use_it() -> int { return dbl(21) }
 "#;
 
-/// The `dbl(int)` Lua definition mangles to the SAME name regardless of a js
-/// sibling or an unrelated overload -- and it always mangles (no bare `function
-/// dbl(`), because every non-exempt fn mangles by signature.
 #[test]
 fn dbl_int_name_is_decl_set_independent() {
     for (_label, src) in [
@@ -77,8 +68,6 @@ fn dbl_int_name_is_decl_set_independent() {
     }
 }
 
-/// A real (Lua-emittable) overload mangles both arms under the single-`_` scheme,
-/// with no `__` anywhere in the produced identifiers.
 #[test]
 fn real_lua_overload_mangles_both_arms() {
     let lua = emit_module(

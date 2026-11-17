@@ -1,19 +1,5 @@
-//! Loop-body value temps must be declared INSIDE the emitted `for ... do` block,
-//! not in the function-top `local r...` line.
-//!
-//! Why: LuaJIT prunes snapshot slots above a jump's free-slot watermark
-//! (`snap_usedef`, lj_snap.c). Top-declared temps sit BELOW the `for` loop's
-//! control slots, so every loop snapshot keeps them alive forever; a side trace
-//! at the loop exit then inherits every distinct temp value, and past ~16 live FP
-//! values `asm_head_side` hard-aborts with "NYI: register coalescing too complex"
-//! (no spill fallback), blacklisting the trace tree. Body-scoped `local`s sit
-//! ABOVE the loop control slots and get pruned, collapsing the inherited set to
-//! the genuinely-live values.
 use crate::common::{emit_module, function_body};
 
-/// Multi-use loop-body temps (`t1`/`t2` below are used twice, so they are not
-/// tree-folded and need real `r<N>` registers) get their `local` declaration
-/// inside the `for` block.
 #[test]
 fn loop_body_temps_declared_inside_for() {
     let src = r#"
@@ -43,8 +29,6 @@ fn main() { print("{hot(1.0, 2.0, 8)}") }
     assert!(decl.trim_start().starts_with("local r"));
 }
 
-/// A temp live across the loop (defined before, used after) must stay in the
-/// function-top declaration, NOT move inside the loop.
 #[test]
 fn cross_loop_temp_stays_at_function_top() {
     let src = r#"

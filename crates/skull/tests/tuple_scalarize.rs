@@ -1,16 +1,5 @@
-//! Codegen-shape contract: a tuple whose only uses are positional reads must
-//! NOT survive as a Lua table after inlining. Mirrors `plain_struct_scalarize.rs`
-//! for `Inst::MakeTuple`.
-//!
-//! The load-bearing case is a 2-tuple-element iterator (`next -> (bool, (A, B))`):
-//! the pair protocol that lets Arena/enumerate/zip iterators satisfy the
-//! `Iterator<T>` bound. `for (a, b) in it` construct-then-destructures the pair
-//! every iteration; the tuple must be split into scalars at codegen -- LuaJIT
-//! SINK only fires on compiled traces, and other backends have no SINK at all.
 use crate::common::{emit_module, function_body, run_main};
 
-// Straight-line pair iterator (the EnumIter/ZipIter shape): @inline `next`
-// builds a fresh 2-tuple per iteration, the `for` header destructures it.
 const PAIR_ITER_LOOP: &str = r#"
 struct PairIter { cur: int, limit: int }
 
@@ -43,10 +32,6 @@ fn pair_iter_tuple_scalarizes() {
     assert!(!hot.contains("{"));
 }
 
-// Skip-shape pair iterator (the ArenaPairIter shape): the done paths store
-// `phantom()` (nil) into the element cell alongside the tuple ctor stores.
-// SROA's every-store-is-a-ctor consistency check must tolerate the nil store,
-// not bail on the whole cell.
 const SKIP_PAIR_ITER_LOOP: &str = r#"
 struct SkipShapeIter { cur: int, limit: int }
 
@@ -83,9 +68,6 @@ fn skip_pair_iter_tuple_scalarizes() {
     assert!(!hot.contains("{"));
 }
 
-// A tuple used as a WHOLE (passed by value to a non-inlined fn) escapes; the
-// cell must keep its table -- a half-rewrite would read never-stored field
-// cells. The positional read alongside forces the candidate shape.
 const TUPLE_WHOLE_USE: &str = r#"
 fn second(p: (int, int)) -> int { return p.1 }
 
@@ -107,11 +89,6 @@ fn tuple_whole_use_keeps_table() {
     assert!(body.contains("{"));
 }
 
-// The option-B gate: bare
-// `for (e, v) in arena` desugars through the 2-tuple `pairs()` protocol, and
-// the per-iteration `(Entity<T>, T)` tuple must be removed by the compiler --
-// parity with the deleted 3-value `ArenaIter`. With `e` unused, the Entity
-// ctor must DCE away too: the loop body allocates NOTHING per iteration.
 const ARENA_BARE_LOOP_UNUSED_ENTITY: &str = r#"
 struct Mob { health: int }
 
@@ -137,8 +114,6 @@ fn arena_bare_loop_unused_entity_allocates_nothing() {
     assert!(!hot.contains("{"));
 }
 
-/// The arena as a loop's head walks its slots in a counted `for` that skips
-/// the free ones: no back edge and no `next` call.
 #[test]
 fn arena_bare_loop_is_a_counted_for() {
     for src in [ARENA_BARE_LOOP_UNUSED_ENTITY, ARENA_BARE_LOOP_USED_ENTITY] {
@@ -148,10 +123,6 @@ fn arena_bare_loop_is_a_counted_for() {
     }
 }
 
-// `Entity<T>` is a `value` struct (GC-carrying tier). An entity passed to a
-// scalar-ABI callee (`get(e)`) scalarizes into per-field leaf args -- NO
-// Entity table materializes even though the entity is "used". This is the full
-// two-tier win: the arena pair scan allocates nothing per iteration.
 const ARENA_BARE_LOOP_USED_ENTITY: &str = r#"
 struct Mob { health: int }
 
@@ -189,10 +160,6 @@ fn arena_bare_loop_used_entity_scalarizes_into_call() {
     );
 }
 
-// The door_at shape: a `for (e, d)` pair scan that RETURNS the matching entity.
-// GC-tier nullable returns carry presence and leaves. Both the
-// scan and its return must stay unboxed; a field sink still needs a tagged box
-// that compares equal across scans (the item-6 raw MakeStruct fallout).
 const ARENA_SCAN_RETURN_ENTITY: &str = r#"
 struct Mob { health: int, tag: int }
 struct Found { entity: Entity<Mob>? }
@@ -269,8 +236,6 @@ fn arena_entity_threads_through_enum_payload_without_boxing() {
     assert!(!hot.contains("Entity_vt("));
 }
 
-// GC-tier nullable bindings and returns carry presence and leaves.
-// The false arm must remain absent, rather than rebuilding a bogus present Bag.
 const NULLABLE_VALUE_RETURN: &str = r#"
 value Bag { xs: [int] }
 

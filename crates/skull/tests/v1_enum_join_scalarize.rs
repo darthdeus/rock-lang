@@ -1,7 +1,3 @@
-//! A value-producing `if` whose arms construct a flat enum joins its leaves in
-//! registers: the join never boxes the value into a `{__variant ...}` table
-//! only to unpack it again, in both standalone inputs and named packages.
-
 use crate::common::{V1Fragment, emit_module, emit_v1_package, function_body, mangled_name};
 
 const SRC: &str = r#"

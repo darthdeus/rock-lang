@@ -1,5 +1,3 @@
-//! Removed global markers use the ordinary unknown-annotation rejection.
-
 #[test]
 fn removed_global_markers_are_unknown_item_annotations() {
     for (name, src) in [

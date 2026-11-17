@@ -1,8 +1,3 @@
-//! A `<local> = nil` kill keeps a dead slot out of LuaJIT exit snapshots. A
-//! kill with only a call-free return after it changes no snapshot: LuaJIT
-//! drops every slot a return does not read. A kill before a return that still
-//! calls something stays, since the frame lives through that call.
-
 use crate::common::{emit_module, function_body, run_main};
 
 const SRC: &str = r#"

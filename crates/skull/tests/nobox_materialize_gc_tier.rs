@@ -1,23 +1,5 @@
-//! `materialize(v)` of a `nobox` value struct builds the ORDINARY box for that
-//! struct's tier, whatever the tier is. Any string, closure, array or flat-enum
-//! field puts the struct at the GC-carrying tier, where the box is the value
-//! table (`<Name>_vt`, shared metatable, declared keys) -- exactly what a plain
-//! `value` struct with the same fields builds, so inline Lua, reflection and
-//! serialization see an ordinary value.
-//!
-//! This file was `nobox_materialize_gc_tier_sentinel.rs`, which pinned the
-//! rejection. Two mechanisms produced it and both are fixed here:
-//! `flatten_nobox_nested_ctors` demanded CData storage of every ctor a `nobox`
-//! name triggered on, and `materialize_repr` was a second recursion that had
-//! never grown `pack`'s flat-enum and leaf-table arms.
-//!
-//! The mark only ever widened the EXPLICIT box. An implicit one is still
-//! rejected at the sink -- `an_implicit_box_of_a_gc_tier_value_is_still_rejected`
-//! is the control, and it fails if the fix leaked into the implicit path.
-
 use crate::common::{emit_module, function_body, run_main, try_emit_module};
 
-/// A string field. The minimal GC-tier cell.
 const STRING_FIELD: &str = r#"
 nobox value SRow { kind: int, label: string }
 inline(lua) fn show(v: any) -> string = "return tostring(v.kind) .. v.label"
@@ -27,9 +9,6 @@ fn main() {
 }
 "#;
 
-/// The same fields WITHOUT the mark. The two boxes must be the same shape: that
-/// is what "the explicit box is an ordinary value" means, and a value assertion
-/// alone cannot tell a `_vt` table from anything else that answers `.kind`.
 const STRING_FIELD_UNMARKED: &str = r#"
 value SRow { kind: int, label: string }
 inline(lua) fn show(v: any) -> string = "return tostring(v.kind) .. v.label"
@@ -48,11 +27,6 @@ fn main() {
 }
 "#;
 
-/// The LEAF-TABLE tier, the third storage a value struct can select: a nullable
-/// nobox field makes the outer GC-carrying but keeps it scalarizable, so its box
-/// is the dotted-key `<Name>_lct` table. Packing its DECLARED fields instead
-/// builds a one-argument call against a four-leaf ctor, which codegen rejects as
-/// "declared-form constructor selects a leaf-table plan".
 const LEAF_TABLE_TIER: &str = r#"
 nobox value NV2 { x: float, y: float }
 nobox value Opt { pos: NV2?, a: float }
@@ -63,8 +37,6 @@ fn main() {
 }
 "#;
 
-/// The control. Same struct, same sink, no `materialize` -- still rejected, at
-/// the argument's own span.
 const IMPLICIT_BOX: &str = r#"
 nobox value SRow { kind: int, label: string }
 inline(lua) fn show(v: any) -> string = "return tostring(v.kind) .. v.label"
@@ -74,10 +46,6 @@ fn main() {
 }
 "#;
 
-/// The CDATA tier, with a NESTED field: the explicit box flattens to one
-/// `<Name>_lct` allocation rather than building an inner cdata per field. This
-/// is the pass's second iteration -- the rewritten ctor keys are `lo.x`, not
-/// `lo`, so a re-resolution of the dotted path against them cannot work.
 const NESTED_CDATA_TIER: &str = r#"
 nobox value NV2 { x: float, y: float }
 nobox value Box2 { lo: NV2, hi: NV2 }
@@ -95,9 +63,6 @@ fn a_string_field_boxes_through_the_value_table() {
     assert_eq!(run_main(&lua), "1a");
 }
 
-/// The mark is the only variable, so the emitted constructor must be the same
-/// one. Read off `main` rather than restated here: a copy of the naming rule
-/// would keep agreeing with itself after the rule changed.
 #[test]
 fn the_marked_and_unmarked_boxes_are_the_same_shape() {
     let marked = emit_module(STRING_FIELD);
@@ -146,10 +111,6 @@ fn an_implicit_box_of_a_gc_tier_value_is_still_rejected() {
     assert!(err.location.line > 0);
 }
 
-// The live-body tests need a box that is still real: a tuple holding a `nobox`
-// value, interpolated whole, is the permanent sink (`nobox_values.rs`,
-// `NOBOX_TWO_SINKS_IN_ONE_BODY`). A GC-tier parent stored in a global was the
-// sink until its box keyed `nobox` fields as leaves.
 #[test]
 fn live_implicit_materialization_in_a_hoisted_closure_is_rejected() {
     let source = r#"

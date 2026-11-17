@@ -1,6 +1,3 @@
-//! A nullable-Entity Vec must keep one representation across field defaults,
-//! field assignment, mutation, and separately emitted consumers.
-
 use crate::common::{run_main, try_emit_module};
 
 const SRC: &str = r#"

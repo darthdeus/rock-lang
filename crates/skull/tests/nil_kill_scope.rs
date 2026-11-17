@@ -1,27 +1,5 @@
-//! The nil-kill pass and the local-declaration loop must agree on WHICH cells
-//! this body renders as bare `c<color>` locals.
-//!
-//! They did not. `referenced_cells_in_region` skips instructions the emitter
-//! suppresses, so a multi-return call whose destination cells feed the trailing
-//! arguments of the next call (`call_arg_forwards`) declares no locals for those
-//! cells -- while `nil_kills` still saw the suppressed producer's defs, gave
-//! them slots, and emitted `c<n> = nil` at their death point. That statement
-//! assigns a GLOBAL of that name: it does nothing for LuaJIT snapshot pressure
-//! (there is no local to drop) and, because skull installs an `_G` metatable for
-//! Rock state globals, it costs a `__newindex` metamethod dispatch every time it
-//! runs. Measured on an application's combat bench before the fix: 278 such statements in
-//! the artifact, ~68,000 metamethod dispatches per run.
-//!
-//! The invariant is checked over the WHOLE emitted artifact, stdlib included:
-//! any `<local> = nil` kill must name something the enclosing definition
-//! declares.
-
 use crate::common::emit_module;
 
-/// `noise` is big enough that the emitter calls it rather than inlining it, and
-/// takes a scalarised `value` struct, so each `noise(v(..))` is a multi-return
-/// producer whose destination cells feed the call's trailing arguments. This is
-/// the shape `application`/`host`'s `mote_curl` has, where the defect was found.
 const SRC: &str = r#"
 @pure fn h3(x: float, y: float, z: float) -> float {
     let h = sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453
@@ -77,9 +55,6 @@ fn main() {
 }
 "#;
 
-/// The bare local names a line declares: every `function(<params>)` parameter
-/// list on it (the top-level head and any nested `return function(..)` alike),
-/// plus a `local a, b, c` declaration list.
 fn declared_on(line: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = line;
@@ -114,8 +89,6 @@ fn declared_on(line: &str) -> Vec<String> {
     out
 }
 
-/// `Some(name)` when the line is a top-level definition head: `function N(`,
-/// `local function N(` or `N = function(`, all at column 0.
 fn definition_head(line: &str) -> Option<&str> {
     if line.starts_with(char::is_whitespace) {
         return None;
@@ -130,8 +103,6 @@ fn definition_head(line: &str) -> Option<&str> {
     (!name.contains(' ')).then_some(name)
 }
 
-/// `(definition, line number, killed name)` for every `<local> = nil` statement
-/// whose enclosing definition declares no such local.
 fn undeclared_kills(lua: &str) -> Vec<(String, usize, String)> {
     let mut out = Vec::new();
     let mut current: Option<String> = None;
@@ -172,9 +143,6 @@ fn undeclared_kills(lua: &str) -> Vec<(String, usize, String)> {
     out
 }
 
-/// Every `<local> = nil` kill in the artifact names a local its own definition
-/// declares. A kill of an undeclared name is a global store, which is never what
-/// the pass wants.
 #[test]
 fn every_nil_kill_names_a_declared_local() {
     let lua = emit_module(SRC);
@@ -189,8 +157,6 @@ fn every_nil_kill_names_a_declared_local() {
     assert!(bad.is_empty());
 }
 
-/// Occurrences of `b<N>(b<M>(`: a bound callee whose first argument is the
-/// call of another bound callee.
 fn nested_alias_calls(lua: &str) -> usize {
     fn alias_call(s: &str) -> Option<&str> {
         let digits = s.strip_prefix('b')?;

@@ -1,15 +1,3 @@
-//! Codegen-shape contract: a `value` struct whose only uses are field reads
-//! must NOT survive as a `<name>_ct(...)` cdata after inlining.
-//!
-//! skull keeps value structs unboxed (`ValueRepr::Group`) WITHIN a body, but a
-//! `@pure`/`@inline` helper that returns a value struct is lowered standalone,
-//! packs its return into a `MakeValueStruct` cdata, and the MIR inliner splices
-//! that packed cdata into the caller. The field reads then become
-//! `Field`-off-`MakeValueStruct`, and the cdata allocates once per iteration --
-//! LuaJIT cannot sink it across the side-trace split of a data-dependent branch
-//! (a nested grid update regression). The SROA forwarding pass in
-//! `skull-transform` forwards those reads to the ctor operands so DCE drops the
-//! cdata. rock scalarizes the same value struct away; this pins skull to parity.
 use crate::common::{emit_module, function_body, require_luajit, run_main};
 
 const VALUE_FIELD_LOOP: &str = r#"
@@ -45,12 +33,6 @@ fn main() {
 }
 "#;
 
-/// A value struct used BOTH by field reads AND as a whole struct (a boxed
-/// argument) must keep its cdata: the whole-struct use escapes, so SROA must not split the
-/// cell. The hazard is a half-rewrite -- forwarding the field reads to per-field
-/// cells while the escaping use blocks the store expansion, leaving the field
-/// cells unstored (uninitialized reads). Pins the `is_cand` re-check in
-/// `field_rewrites`. Runs under luajit so the uninit read is actually caught.
 const VALUE_FIELD_AND_WHOLE_USE: &str = r#"
 value Color { r: float, g: float, b: float, a: float }
 value FixVec3 { x: float, y: float, z: float }
@@ -109,17 +91,6 @@ fn value_struct_field_reads_dont_materialize_cdata() {
     assert!(!hot.contains("IVec2_ct("));
 }
 
-/// Storing a value-struct literal into a `NativeBuffer<value>` element writes
-/// the element's LEAVES through typed views -- no whole cdata copy
-/// (`__nb_checked_set(i, Vertex_ct(..))`), and no slot reference either.
-///
-/// This supersedes the slot-write form (`slot = buf[i]; slot.f = ..`) that a
-/// previous arc landed. That form sank to 0 B/element ON TRACE, but paid a
-/// 24 B slot reference plus a nested cdata per nested field everywhere sinking
-/// does not happen; leaf addressing is 0 on both. Measured on this repo's own
-/// benchmarks: `nativebuffer_value_store` 72.9 -> 0.9 B/vertex under
-/// `jit.off()`, unchanged at 0 with the JIT on.
-///
 const NATIVE_BUFFER_VALUE_STORE: &str = r#"
 value V2 { x: float, y: float }
 value Vert { pos: V2, uv: V2, w: float }
@@ -157,11 +128,6 @@ fn native_buffer_value_store_writes_leaves_through_views() {
     }
 }
 
-/// A GENERIC value struct (`Pair<T>`, GC-carrying tier) must ride the scalar
-/// ABI just like an FFI-clean value struct: per-field leaf params, a
-/// destructured multi-return, and NO `_vt` table materialization in a
-/// non-escaping caller. Pins the value-return boundary -- the
-/// mechanism the Entity<T> flip depends on for its per-iteration-table win.
 const GENERIC_VALUE_SCALARIZE: &str = r#"
 value Pair<T> { a: T, b: T }
 fn pair_sum(p: Pair<int>) -> int { return p.a + p.b }
@@ -194,14 +160,6 @@ value Rect { tl: V2, br: V2 }
 fn main() { let _ = nested_leaves(Rect { tl: V2 { x: 1.0, y: 2.0 }, br: V2 { x: 4.0, y: 8.0 } }) }
 "#;
 
-/// The `@scalar_abi` leaf-param namer must be INJECTIVE. `leaf_param_names`
-/// recursed into a nested value field with the base unchanged, so `Rect { tl, br }`
-/// emitted `function f(r__x, r__y, r__x, r__y)` -- Lua binds the later pair over
-/// the earlier, and a body naming its own leaves silently read `br` where it
-/// wrote `tl`. `leaf_paths_rec` (the column-key twin) had already solved this
-/// with dotted paths; the param namer never got the fix, and the comment there
-/// calling the case unreachable was scoped to `nobox` crossings -- an ordinary
-/// unmarked nested value reaches it today.
 #[test]
 fn nested_scalar_abi_leaf_params_are_injective() {
     let lua = emit_module(NESTED_SCALAR_ABI);
@@ -274,26 +232,6 @@ fn main() {
 }
 "#;
 
-/// FIXED -- was a sentinel. An UNMARKED `value` struct reaching a `@scalar_abi`
-/// fn through a FN VALUE used to compile clean and die at runtime; it is now a
-/// spanned rejection where the fn is taken by value.
-///
-/// THE MECHANISM: the two ends derived the ABI from different sources. A
-/// definition reads its `BackendFnAbiPlan`; an indirect call site has only the fn TYPE,
-/// so it reads `fn_value_abi`. Those agree by construction for an ordinary body
-/// -- the plan NARROWS an address-taken one (`scx.taken_by_ref`) to
-/// exactly the `nobox` shapes the type yields, which is what that narrowing
-/// exists for. `@scalar_abi` is the one thing that bypasses it, and deliberately:
-/// its hand-written `inline(lua)` body spells the leaf params (`r__tl__x`), so
-/// narrowing the definition would break the BODY instead of the call.
-///
-/// So the two cannot be reconciled by re-deriving either side, which is the case
-/// the old sentinel text named as the alternative. The definition scalarized to
-/// `probe(r__tl__x, r__tl__y, r__w)` while `apply` packed one `Box2_ct(...)`:
-/// the first leaf got the whole cdata and the rest went nil.
-///
-/// The `nobox` sibling below is the positive control and still emits, because
-/// there both ends DO agree -- which is exactly the fix the diagnostic suggests.
 #[test]
 fn unmarked_value_through_fn_value_rejects() {
     let err = crate::common::try_emit_module(UNMARKED_VALUE_VIA_FN_VALUE)
@@ -301,13 +239,6 @@ fn unmarked_value_through_fn_value_rejects() {
     assert!(err.message.contains("cannot be taken as a fn value") && err.message.contains("probe"));
 }
 
-/// The NULLABLE spelling of [`unmarked_value_through_fn_value_rejects`], and the
-/// property the `Nullable` peel in `fn_value_abi` ENDANGERED: before the peel a
-/// nullable fn-value type answered `None` and fell to the boxed ABI, so this
-/// mismatched for that reason rather than on its merits. After the peel the type
-/// answers, and it must still reject -- an UNMARKED value yields no leaves, so
-/// `fn_value_abi` returns `None` again and the `@scalar_abi` definition still
-/// disagrees with it. A peel that widened past `nobox` would turn this green.
 #[test]
 fn unmarked_value_through_a_nullable_fn_value_still_rejects() {
     let err = crate::common::try_emit_module(UNMARKED_VALUE_VIA_NULLABLE_FN_VALUE)
@@ -315,14 +246,6 @@ fn unmarked_value_through_a_nullable_fn_value_still_rejects() {
     assert!(err.message.contains("cannot be taken as a fn value") && err.message.contains("probe"));
 }
 
-/// POSITIVE CONTROL for the `value_leaf_name_collisions` rejection: a `__`-bearing
-/// field name only collides when it JOINS to an existing nested path, so `tl__z`
-/// beside a nested `tl: V2 { x, y }` is unambiguous and must still emit -- and the
-/// leaf params must stay distinct. Both routes are exercised (the fn is reached
-/// through a fn value, which narrows the ABI to what the fn TYPE alone yields), and
-/// the result is checked under luajit so a mis-ordered leaf splat is caught too.
-///
-/// The REJECTION cases live in `tests/errors/value_leaf_name_collision.rock.err`.
 #[test]
 fn non_colliding_underscore_field_still_scalarizes() {
     let lua = emit_module(UNDERSCORE_FIELD_NO_COLLISION);
@@ -334,11 +257,6 @@ fn non_colliding_underscore_field_still_scalarizes() {
     assert_eq!(crate::common::run_main(&lua), "217");
 }
 
-// `Mat4` is a leaf-form cdata: its ctor keys are dotted leaf paths
-// (`c0.x`), so a copy of a forwarded `Mat4` reads `Field(Field(ctor, c0), x)`.
-// Inside a closure body the binding's cell is forwarded to its ctor, and the
-// copy must fold those reads to the ctor's operands instead of building the
-// value twice.
 const LEAF_FORM_SAVED_IN_CLOSURE: &str = r#"
 global ACTIVE: bool = true
 global VIEW: Mat4 = mat4_identity()
@@ -374,9 +292,6 @@ fn leaf_form_value_copy_in_a_closure_builds_one_box() {
     assert_eq!(run_main(&lua), "true 1");
 }
 
-// Enums are immutable, so a copy of a value that holds an enum box can share
-// that box: only the value's own fields need fresh storage. The two arms of
-// `identified` copy `item` into a second owner; neither rebuilds its `kind`.
 const ENUM_CHILD_OF_A_COPIED_VALUE: &str = r#"
 enum QKind { Gold, Key(string), Bandage }
 enum QProp { Bound }
@@ -439,9 +354,6 @@ fn main() {
 }
 "#;
 
-/// A value that embeds itself by value, even through `Chain?`, has no finite
-/// layout, so the front end rejects its definition. The verdict must not
-/// depend on whether the program copies the value or only reads through it.
 #[test]
 fn a_recursive_value_rejects_at_definition_whatever_its_use() {
     for (_use_kind, src) in [

@@ -1,17 +1,3 @@
-//! modules-v1 nominal type emission. A v1 FUNCTION already had its
-//! identifier form; a v1 TYPE still handed its DefKey to every name the backend
-//! mints for it, and a DefKey is neither a Lua identifier nor a C one:
-//!
-//! ```text
-//! } v1ty::a::V2;                                   -- ffi.cdef
-//! v1ty::a::V2_ct = ffi.typeof("v1ty::a::V2")       -- Lua identifier + C type
-//! __rock_enum_v1ty::a::Color_names = { ... }
-//! return v1ty::a::V2_ct(v.x, v.y)                  -- a constructor call
-//! ```
-//!
-//! So a v1 package holding a value struct or an enum compiled clean and then
-//! died in LuaJIT. These controls execute the chunk.
-
 use crate::common::{InlineOffGuard, V1Fragment, emit_v1_package, run_main};
 
 const MAIN: &str = r#"
@@ -85,9 +71,6 @@ fn v1_value_struct_and_enum_emit_runnable_lua() {
     assert_eq!(out, "s=3 c=blue n=7 t=v1ty::a::Color::Blue");
 }
 
-/// The cdef, the `ffi.typeof` argument and the layout assertions name ONE C
-/// type, and a DefKey cannot be that name. The DefKey still appears in display
-/// text, which is what the digested names are NOT for.
 #[test]
 fn v1_nominal_types_mint_identifiers() {
     let emitted = package();
@@ -105,9 +88,6 @@ fn v1_nominal_types_mint_identifiers() {
     assert!(emitted.lua.contains("\"v1ty::a::Color::Blue\""));
 }
 
-/// The type table is a keyed registry the stdlib reads back, and one of its
-/// readers builds `_G[<key> .. \"_ct\"]` -- so the key, the `__ty` tag a value
-/// carries, and the emitted constructor must be ONE spelling.
 #[test]
 fn v1_type_table_key_matches_the_emitted_constructor() {
     let emitted = package();
@@ -163,13 +143,6 @@ fn tag(m: Move) -> string {
 }
 "#;
 
-/// A mixed enum's three variant forms, constructed and matched inside one v1
-/// module: the unit variant is an interned `__rock_enum_<E>_<V>` singleton
-/// (whose global name is minted from the enum's symbol), and the payload
-/// variants are tagged tables. It also pins the two call-position lowerings a
-/// v1 path needs: a path naming a tuple VARIANT must carry its arguments rather
-/// than lower as the unit form, and a path naming a NEWTYPE is called by name
-/// like its bare spelling, not as a value.
 #[test]
 fn v1_mixed_enum_variants_construct_and_match() {
     let emitted = emit_v1_package(
@@ -195,8 +168,6 @@ fn main() {
 }
 "#;
 
-/// A stdlib generic instantiated at a v1 nominal: `for m in moves` specializes
-/// `iter`/`next`/`len` at `Vec<v1spec::a::Step>`.
 const SPEC_MOD_A: &str = r#"
 mod a;
 
@@ -217,12 +188,6 @@ pub fn total() -> int {
 }
 "#;
 
-/// A specialized body's emitted symbol is built from the instantiation's
-/// CANONICAL identity, and a v1 nominal's canonical name is its DefKey. The
-/// two roles were the same string, so the symbol came out as
-/// `iter_arr_T_spec_a_n18_v1spec::a::Step_0_z` -- `rock compile`
-/// exited 0 and wrote a chunk LuaJIT refused with `')' expected near '::'`.
-/// Converting `libs/chess-core` hit this on the first `for m in moves`.
 #[test]
 fn a_generic_specialized_at_a_v1_nominal_emits_runnable_lua() {
     // Keep the specialized definition available for the identifier checks.

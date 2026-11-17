@@ -1,5 +1,3 @@
-//! `Arena<E>` and `[E]` project the same target-specific container plan.
-
 use crate::common::{key, ws_with_stdlib};
 use bone_semantic::inference::Workspace;
 use skull_mir::lower::{ContainerFamily, ContainerPlan, RepArena};
@@ -45,9 +43,6 @@ fn column_elem(
         .column_elem(&arena)
 }
 
-/// Both sides of admission, so a rule that admitted nothing (or everything)
-/// could not pass: an all-scalar value struct columnizes, and each rejection
-/// class is rejected for its own reason.
 #[test]
 fn the_container_plan_admits_and_rejects_on_the_vec_rule() {
     let ws = ws_with_stdlib(SRC);
@@ -97,9 +92,6 @@ fn the_container_plan_admits_and_rejects_on_the_vec_rule() {
     );
 }
 
-/// THE property: for every element type, `Arena<E>` and `[E]` give the same
-/// column answer. Asserted over a population with a non-zero admitted count and
-/// a non-zero rejected count, so agreement cannot be agreement about nothing.
 #[test]
 fn the_arena_and_vec_plans_cannot_disagree() {
     let ws = ws_with_stdlib(SRC);

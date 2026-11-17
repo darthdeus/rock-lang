@@ -1,19 +1,5 @@
-//! P1, delivered via the shared closure-conversion MIR pass (S3): lambdas inside a `co fn` hoist
-//! exactly like non-frame lambdas -- capture-free to a bare top-level fn,
-//! capturing to an env record -- with coroutine state captured through the
-//! frame table `s` itself (the record stores the step param under its stable
-//! emit-cell key; the body reads `<env>.c<S>.c<slot>`). Since S3 the conversion is materialized as MIR by
-//! `convert_closures`, so the env param is a COLORED cell (not the literal
-//! `__rock_env`) and the composed access is split across temps -- these pins
-//! discriminate the via-`s` collapse (body reads THROUGH the s-field) from a
-//! by-value loop-binding snapshot (body reads its own env field, never via `s`).
-//! The exact per-iteration/param VALUES are pinned on luajit by
-//! tests/closures/capture_semantics_cofn.rock; here we pin the emit SHAPE.
 use crate::common::{emit_module, function_body, function_params, mangled_name};
 
-/// Scan for `needle` followed by one-or-more ASCII digits followed by `tail`
-/// (e.g. `= c` + digits + `.c` pins a frame-field read `= c<S>.c<slot>` without
-/// hardcoding the s cell's raw id).
 fn contains_digit_bridge(hay: &str, needle: &str, tail: &str) -> bool {
     let mut rest = hay;
     while let Some(p) = rest.find(needle) {
@@ -27,9 +13,6 @@ fn contains_digit_bridge(hay: &str, needle: &str, tail: &str) -> bool {
     false
 }
 
-/// The parameter names of `function <name>(...)` in the emitted Lua (post-pass a
-/// hoisted body's first param is its colored env cell, then the lambda's own
-/// params).
 fn state_capture_field(step: &str, state_param: &str) -> Option<String> {
     let start = step.find("setmetatable({")? + "setmetatable({".len();
     let record = &step[start..];
@@ -57,9 +40,6 @@ fn main() {
 }
 "#;
 
-/// A capturing lambda with a param inside a co fn hoists to a sibling
-/// top-level fn taking `(__rock_env, <param>)`; the step builds an env record.
-/// The step body must hold NO inline closure (`function(` with no name).
 #[test]
 fn param_lambda_hoists_as_record_under_frame() {
     let lua = emit_module(PARAM_CAPTURE);
@@ -77,10 +57,6 @@ fn param_lambda_hoists_as_record_under_frame() {
     assert!(!step.contains("function("));
 }
 
-/// The frame capture collapses to `s`: the hoisted body reaches the captured
-/// co-fn local THROUGH the record's s field (`<env>` -> `.c<S>` -> `.c<slot>`,
-/// materialized via temps), so the body reads the s-field `.c<S>`. The lambda's
-/// own param stays a plain local (never a frame-field read).
 #[test]
 fn frame_capture_composes_env_then_frame() {
     let lua = emit_module(PARAM_CAPTURE);
@@ -109,8 +85,6 @@ fn main() {
 }
 "#;
 
-/// A capture-free lambda in a co fn hoists to a bare top-level fn referenced
-/// by name -- no record, no setmetatable, no inline closure.
 #[test]
 fn capture_free_lambda_hoists_bare_under_frame() {
     let lua = emit_module(CAPTURE_FREE);
@@ -137,9 +111,6 @@ fn main() {
 }
 "#;
 
-/// D4(b): a read-only captured loop binding snapshots BY VALUE into the record
-/// at creation (`c<N> = c<S>.c<N>` -- a frame-field read in the field value),
-/// and the hoisted body reads the snapshot from its own env, NOT through `s`.
 #[test]
 fn loop_binding_snapshots_by_value_into_record() {
     let lua = emit_module(LOOP_BINDING);
