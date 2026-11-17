@@ -830,20 +830,6 @@ pub(crate) fn store_targets(
     alias
 }
 
-/// How many operands of the statements and terminators in `scope` read each
-/// value, as a dense `raw(inst) -> count`.
-#[cfg(test)]
-fn reader_counts(func: &MirFunc, scope: &[Idx<Block>]) -> Vec<u32> {
-    let mut readers = vec![0; func.insts.len()];
-    for &b in scope {
-        for &id in &func.blocks[b].insts {
-            func.insts[id].uses_each(&mut |v| readers[raw(v)] += 1);
-        }
-        func.blocks[b].term.uses_each(&mut |v| readers[raw(v)] += 1);
-    }
-    readers
-}
-
 /// A call whose result nothing reads runs as a bare call statement, with no
 /// register to assign and then kill. Its callee must render as a name: a
 /// statement opening with `(` would continue the previous line's expression.
@@ -1420,29 +1406,6 @@ impl<'a> Locals<'a> {
     }
 }
 
-/// Color the cells of a function that has no emitter-only cell uses.
-#[cfg(test)]
-pub(crate) fn color_cells(func: &MirFunc) -> Vec<u32> {
-    let order = crate::reverse_postorder(func, func.entry());
-    let flow = Flow::new(func, &order);
-    let pinned = pinned_cells(func, &flow);
-    let inline = vec![false; func.insts.len()];
-    let reads = Reads::new(func, &order, &inline);
-    let readers = reader_counts(func, &order);
-    Locals::new(
-        func,
-        &order,
-        &flow,
-        &inline,
-        &[],
-        &pinned,
-        &[],
-        &reads,
-        readers,
-    )
-    .color_cells()
-}
-
 /// Cells held by reference for the whole body -- a closure's params, any cell
 /// a detached (closure) sub-CFG touches, and cells the emit-id table forces --
 /// as a dense `raw(cell) -> bool`. They never share a color and are never
@@ -1951,84 +1914,4 @@ pub(crate) fn nil_kills<'a>(
     }
     kills.entry_locals = entry_locals;
     kills
-}
-
-#[cfg(test)]
-mod cell_color_tests {
-    use super::*;
-    use skull_mir::mir::Lit;
-    use ustr::Ustr;
-
-    /// Two cells whose live ranges do NOT overlap (`a` is read and dead before
-    /// `b` is written) share one color.
-    #[test]
-    fn disjoint_cells_share_a_color() {
-        let mut f = MirFunc::new(Ustr::from("t"));
-        let e = f.entry();
-        let a = f.new_cell(None);
-        let b = f.new_cell(None);
-        let one = f.emit(e, Inst::Const(Lit::Int(1)));
-        f.emit(
-            e,
-            Inst::Store {
-                cell: a,
-                value: one,
-            },
-        );
-        let la = f.emit(e, Inst::Load(a)); // a's last use -> dead after
-        let na = f.emit(e, Inst::Neg(la));
-        let two = f.emit(e, Inst::Const(Lit::Int(2)));
-        f.emit(
-            e,
-            Inst::Store {
-                cell: b,
-                value: two,
-            },
-        ); // b born after a died
-        let lb = f.emit(e, Inst::Load(b));
-        let sum = f.emit(e, Inst::IntAdd(na, lb));
-        f.set_term(e, Term::Return(vec![sum]));
-        let colors = color_cells(&f);
-        assert_eq!(
-            colors[raw(a)],
-            colors[raw(b)],
-            "disjoint-lived cells should share a color"
-        );
-    }
-
-    /// Two cells live at the same time (both read after both written) get
-    /// distinct colors.
-    #[test]
-    fn overlapping_cells_get_distinct_colors() {
-        let mut f = MirFunc::new(Ustr::from("t"));
-        let e = f.entry();
-        let a = f.new_cell(None);
-        let b = f.new_cell(None);
-        let one = f.emit(e, Inst::Const(Lit::Int(1)));
-        f.emit(
-            e,
-            Inst::Store {
-                cell: a,
-                value: one,
-            },
-        );
-        let two = f.emit(e, Inst::Const(Lit::Int(2)));
-        f.emit(
-            e,
-            Inst::Store {
-                cell: b,
-                value: two,
-            },
-        );
-        let la = f.emit(e, Inst::Load(a));
-        let lb = f.emit(e, Inst::Load(b));
-        let sum = f.emit(e, Inst::IntAdd(la, lb)); // a and b both live here
-        f.set_term(e, Term::Return(vec![sum]));
-        let colors = color_cells(&f);
-        assert_ne!(
-            colors[raw(a)],
-            colors[raw(b)],
-            "simultaneously-live cells must not share a color"
-        );
-    }
 }

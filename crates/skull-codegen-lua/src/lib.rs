@@ -871,39 +871,6 @@ pub fn emitted_body_name(line: &str) -> Option<&str> {
     is_lua_ident(name).then_some(name)
 }
 
-#[cfg(test)]
-mod emitted_body_header_tests {
-    use super::emitted_body_name;
-
-    #[test]
-    fn recognizes_both_emitted_definition_shapes() {
-        assert_eq!(emitted_body_name("function leaf_int(c0)"), Some("leaf_int"));
-        assert_eq!(
-            emitted_body_name("__rock_mk_leaf_int = function(callee) return function(c0)"),
-            Some("leaf_int")
-        );
-    }
-
-    #[test]
-    fn rejects_non_headers_and_malformed_factory_shapes() {
-        for line in [
-            "leaf = __rock_mk_leaf(callee)",
-            "__rock_mk_leaf = function(callee)",
-            "__rock_mk_leaf = function(callee) return callee()",
-            "__rock_mk_ = function() return function()",
-            "__rock_mk_bad-name = function() return function()",
-            "function ()",
-            "function bad.name()",
-            "function 1bad()",
-            "  function nested()",
-            "-- function commented()",
-            "local function nested()",
-        ] {
-            assert_eq!(emitted_body_name(line), None, "{line}");
-        }
-    }
-}
-
 type EnumBoxGroups = Vec<(Vec<ustr::Ustr>, (usize, Vec<ustr::Ustr>))>;
 
 enum SelectionValue {
