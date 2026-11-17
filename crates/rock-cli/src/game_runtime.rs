@@ -135,3 +135,28 @@ impl GameCompiler {
             .ok_or_else(|| anyhow::anyhow!("compiler did not publish an Artifact fingerprint"))
     }
 }
+
+#[test]
+fn forced_compile_publishes_the_current_program_and_clears_the_overlay() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("main.rock");
+    let main = root.path().join("main.lua");
+    let overlay = root.path().join("incremental.lua");
+    let mut compiler =
+        GameCompiler::new(root.path().to_str().unwrap(), main.clone(), overlay.clone());
+
+    std::fs::write(&source, r#"fn main() { print("initial fixture") }"#).unwrap();
+    compiler.compile(&HashSet::new(), false).unwrap();
+    std::fs::write(&source, r#"fn main() { print("updated fixture") }"#).unwrap();
+    compiler.compile(&HashSet::from([source]), false).unwrap();
+    assert!(overlay.is_file());
+
+    let result = compiler.compile(&HashSet::new(), true).unwrap();
+    assert!(result.restart_reasons.is_empty());
+    assert!(
+        std::fs::read_to_string(main)
+            .unwrap()
+            .contains("updated fixture")
+    );
+    assert!(!overlay.exists());
+}
