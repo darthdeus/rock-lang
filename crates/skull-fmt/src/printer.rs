@@ -17,6 +17,18 @@ fn kw(name: Ustr) -> String {
     Tokenizer::unescape_lua_keyword(name.as_str()).to_string()
 }
 
+fn inline_comma_list(
+    open: impl Into<String>,
+    close: impl Into<String>,
+    docs: impl IntoIterator<Item = Doc>,
+) -> Doc {
+    Doc::concat([
+        Doc::text(open),
+        Doc::join(Doc::text(", "), docs),
+        Doc::text(close),
+    ])
+}
+
 pub(crate) struct Printer<'a> {
     ast: &'a Ast,
     src: &'a str,
@@ -491,11 +503,7 @@ impl<'a> Printer<'a> {
     fn record_body(&self, span: Span, entries: impl Iterator<Item = (Doc, Span)>) -> Doc {
         let (open, close) = span.line_range();
         if open == close {
-            return Doc::concat([
-                Doc::text("{ "),
-                Doc::join(Doc::text(", "), entries.map(|(doc, _)| doc)),
-                Doc::text(" }"),
-            ]);
+            return inline_comma_list("{ ", " }", entries.map(|(doc, _)| doc));
         }
         self.comma_block(entries, Some((open, close)), "{", "}")
     }
@@ -546,10 +554,10 @@ impl<'a> Printer<'a> {
         let name = Doc::text(kw(v.name.name));
         match &v.kind {
             EnumVariantKind::Unit => name,
-            EnumVariantKind::Tuple(tys) => {
-                let inner = Doc::join(Doc::text(", "), tys.iter().map(|t| self.type_expr(*t)));
-                Doc::concat([name, Doc::text("("), inner, Doc::text(")")])
-            }
+            EnumVariantKind::Tuple(tys) => Doc::concat([
+                name,
+                inline_comma_list("(", ")", tys.iter().map(|t| self.type_expr(*t))),
+            ]),
             EnumVariantKind::Record(fields) => {
                 let body = self.record_body(v.span, fields.iter().map(|f| (self.field(f), f.span)));
                 Doc::concat([name, Doc::text(" "), body])
@@ -631,11 +639,7 @@ impl<'a> Printer<'a> {
             }
             Doc::concat(parts)
         });
-        Doc::concat([
-            Doc::text("<"),
-            Doc::join(Doc::text(", "), items),
-            Doc::text(">"),
-        ])
+        inline_comma_list("<", ">", items)
     }
 
     /// A signature holding a comment [`Self::params_impl`] has no place for,
@@ -1462,9 +1466,7 @@ impl<'a> Printer<'a> {
             | ExprKind::Path { .. }
             | ExprKind::AnaphoricIdent(_) => self.raw(data.span),
 
-            ExprKind::Paren(inner) => {
-                Doc::concat([Doc::text("("), self.expr(*inner), Doc::text(")")])
-            }
+            ExprKind::Paren(inner) => Doc::surround("(", self.expr(*inner), ")"),
             ExprKind::Not(x) => Doc::concat([Doc::text("!"), self.expr(*x)]),
             ExprKind::BitNot(x) => Doc::concat([Doc::text("~"), self.expr(*x)]),
             // `- -1` must not print as the pre-decrement `--1`, and `- 1` must
@@ -1513,12 +1515,9 @@ impl<'a> Printer<'a> {
                 self.receiver(*x),
                 Doc::text(format!("?.{}", kw(field.name))),
             ]),
-            ExprKind::Index(x, idx) => Doc::concat([
-                self.expr(*x),
-                Doc::text("["),
-                self.expr(*idx),
-                Doc::text("]"),
-            ]),
+            ExprKind::Index(x, idx) => {
+                Doc::concat([self.expr(*x), Doc::surround("[", self.expr(*idx), "]")])
+            }
 
             // Multiline operators keep their authored placement.
             ExprKind::BinOp {
@@ -1575,9 +1574,7 @@ impl<'a> Printer<'a> {
                 }
                 CallSyntax::TypeArgs => Doc::concat([
                     self.expr(*func),
-                    Doc::text("<"),
-                    Doc::join(Doc::text(", "), args.iter().map(|a| self.expr(a.value))),
-                    Doc::text(">"),
+                    inline_comma_list("<", ">", args.iter().map(|a| self.expr(a.value))),
                 ]),
                 _ if !generic_args.is_empty() => {
                     self.generic_call(*func, generic_args, args, data.span)
@@ -1669,11 +1666,7 @@ impl<'a> Printer<'a> {
             });
             // Lambda params stay flat (they're short, and breaking empty `()`
             // produced a stray blank line on a wide enclosing line).
-            Doc::concat([
-                Doc::text("("),
-                Doc::join(Doc::text(", "), items),
-                Doc::text(")"),
-            ])
+            inline_comma_list("(", ")", items)
         };
         let mut head = vec![param_doc];
         if let Some(ret) = return_ty {
@@ -1721,9 +1714,7 @@ impl<'a> Printer<'a> {
             return Doc::concat([
                 Doc::text("match "),
                 self.expr(scrutinee),
-                Doc::text(" { "),
-                Doc::join(Doc::text(", "), arms.iter().map(|a| self.match_arm(a))),
-                Doc::text(" }"),
+                inline_comma_list(" { ", " }", arms.iter().map(|a| self.match_arm(a))),
             ]);
         }
         let bodies: Vec<Span> = arms.iter().map(|a| self.ast.b(&a.body).span).collect();
@@ -2035,11 +2026,7 @@ impl<'a> Printer<'a> {
             ]));
         }
         // Single-line source: stay inline.
-        Doc::concat([
-            Doc::text("("),
-            Doc::join(Doc::text(", "), docs),
-            Doc::text(")"),
-        ])
+        inline_comma_list("(", ")", docs)
     }
 
     /// Render `recv.m1(..).m2(..)...` as a member chain when it has >=2 method
@@ -2233,11 +2220,7 @@ impl<'a> Printer<'a> {
         let trailing = if items.len() == 1 { "," } else { "" };
         let docs: Vec<Doc> = items.iter().map(|i| self.expr(*i)).collect();
         if span.line_range().0 == span.line_range().1 && !docs.iter().any(Doc::has_hard_line) {
-            return Doc::concat([
-                Doc::text("("),
-                Doc::join(Doc::text(", "), docs),
-                Doc::text(format!("{trailing})")),
-            ]);
+            return inline_comma_list("(", format!("{trailing})"), docs);
         }
         Doc::concat([
             Doc::text("("),
@@ -2262,11 +2245,7 @@ impl<'a> Printer<'a> {
         if !force {
             let docs: Vec<Doc> = items.iter().map(|i| self.expr(*i)).collect();
             if !docs.iter().any(Doc::has_hard_line) {
-                return Doc::concat([
-                    Doc::text(open.to_string()),
-                    Doc::join(Doc::text(", "), docs),
-                    Doc::text(close.to_string()),
-                ]);
+                return inline_comma_list(open, close, docs);
             }
             // An element that renders across lines makes the array multi-line
             // on the next pass: expand one element per line now.
@@ -2421,11 +2400,7 @@ impl<'a> Printer<'a> {
                 ),
             ]);
         }
-        Doc::concat([
-            Doc::text(format!("{name} {{ ")),
-            Doc::join(Doc::text(", "), docs),
-            Doc::text(" }"),
-        ])
+        inline_comma_list(format!("{name} {{ "), " }", docs)
     }
 
     fn if_expr(
@@ -2549,7 +2524,7 @@ impl<'a> Printer<'a> {
             TypeExprKind::Ref(target) => {
                 let reference = Doc::concat([Doc::text("ref "), self.type_expr(*target)]);
                 if data.is_nullable {
-                    Doc::concat([Doc::text("("), reference, Doc::text(")")])
+                    Doc::surround("(", reference, ")")
                 } else {
                     reference
                 }
@@ -2557,20 +2532,14 @@ impl<'a> Printer<'a> {
             TypeExprKind::Ident(id) => Doc::text(kw(id.name)),
             // Paths print verbatim: no internal spacing decisions.
             TypeExprKind::Path(_) | TypeExprKind::AppPath { .. } => self.raw(data.span),
-            TypeExprKind::Array(el) => {
-                Doc::concat([Doc::text("["), self.type_expr(*el), Doc::text("]")])
-            }
+            TypeExprKind::Array(el) => Doc::surround("[", self.type_expr(*el), "]"),
             TypeExprKind::App { ctor, args } => Doc::concat([
                 Doc::text(kw(ctor.name)),
-                Doc::text("<"),
-                Doc::join(Doc::text(", "), args.iter().map(|a| self.type_expr(*a))),
-                Doc::text(">"),
+                inline_comma_list("<", ">", args.iter().map(|a| self.type_expr(*a))),
             ]),
-            TypeExprKind::Tuple(tys) => Doc::concat([
-                Doc::text("("),
-                Doc::join(Doc::text(", "), tys.iter().map(|t| self.type_expr(*t))),
-                Doc::text(")"),
-            ]),
+            TypeExprKind::Tuple(tys) => {
+                inline_comma_list("(", ")", tys.iter().map(|t| self.type_expr(*t)))
+            }
             // Recover the spelling of function types from the start of the source span.
             TypeExprKind::Function { params, ret } => {
                 let source = self.slice(data.span).trim_start();
@@ -2594,9 +2563,7 @@ impl<'a> Printer<'a> {
                     ""
                 };
                 Doc::concat([
-                    Doc::text(prefix),
-                    Doc::join(Doc::text(", "), params.iter().map(|p| self.type_expr(*p))),
-                    Doc::text(") -> "),
+                    inline_comma_list(prefix, ") -> ", params.iter().map(|p| self.type_expr(*p))),
                     self.type_expr(*ret),
                     Doc::text(suffix),
                 ])
@@ -2606,7 +2573,7 @@ impl<'a> Printer<'a> {
         };
         if data.is_nullable {
             if matches!(data.kind, TypeExprKind::Function { .. }) {
-                Doc::concat([Doc::text("("), inner, Doc::text(")?")])
+                Doc::surround("(", inner, ")?")
             } else {
                 Doc::concat([inner, Doc::text("?")])
             }
@@ -2622,11 +2589,7 @@ impl<'a> Printer<'a> {
             Pattern::Wildcard => Doc::text("_"),
             Pattern::Ident(id) => Doc::text(kw(id.name)),
             Pattern::Literal(e) => self.expr(*e),
-            Pattern::Tuple(ps) => Doc::concat([
-                Doc::text("("),
-                Doc::join(Doc::text(", "), ps.iter().map(|p| self.pattern(p))),
-                Doc::text(")"),
-            ]),
+            Pattern::Tuple(ps) => inline_comma_list("(", ")", ps.iter().map(|p| self.pattern(p))),
             Pattern::PathVariant { path, args } => {
                 let root = if path.from_root { "::" } else { "" };
                 let head = format!(
@@ -2640,9 +2603,7 @@ impl<'a> Printer<'a> {
                 match args {
                     Some(args) => Doc::concat([
                         Doc::text(head),
-                        Doc::text("("),
-                        Doc::join(Doc::text(", "), args.iter().map(|p| self.pattern(p))),
-                        Doc::text(")"),
+                        inline_comma_list("(", ")", args.iter().map(|p| self.pattern(p))),
                     ]),
                     None => Doc::text(head),
                 }
@@ -2671,12 +2632,7 @@ impl<'a> Printer<'a> {
                 if *rest {
                     entries.push(Doc::text(".."));
                 }
-                Doc::concat([
-                    Doc::text(head),
-                    Doc::text("{ "),
-                    Doc::join(Doc::text(", "), entries),
-                    Doc::text(" }"),
-                ])
+                Doc::concat([Doc::text(head), inline_comma_list("{ ", " }", entries)])
             }
             Pattern::Range {
                 start,

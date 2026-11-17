@@ -41,6 +41,10 @@ impl Doc {
         Doc::Concat(docs.into_iter().collect())
     }
 
+    pub(crate) fn surround(open: impl Into<String>, doc: Doc, close: impl Into<String>) -> Doc {
+        Self::concat([Self::text(open), doc, Self::text(close)])
+    }
+
     pub fn indent(d: Doc) -> Doc {
         Doc::Indent(Box::new(d))
     }
