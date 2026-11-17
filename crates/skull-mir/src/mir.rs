@@ -1169,6 +1169,26 @@ impl Term {
             Term::Unreachable | Term::Goto(_) => {}
         }
     }
+
+    /// Replace every block target of this terminator with `map(target)`.
+    pub fn remap_targets(&mut self, map: &impl Fn(Idx<Block>) -> Idx<Block>) {
+        match self {
+            Term::Goto(target) | Term::Yield { resume: target, .. } => *target = map(*target),
+            Term::Branch {
+                then_bb, else_bb, ..
+            } => {
+                *then_bb = map(*then_bb);
+                *else_bb = map(*else_bb);
+            }
+            Term::Switch { cases, default, .. } => {
+                for (_, target) in cases {
+                    *target = map(*target);
+                }
+                *default = map(*default);
+            }
+            Term::Return(_) | Term::Unreachable => {}
+        }
+    }
 }
 
 /// A basic block: its instructions in order, then one terminator. **No params**

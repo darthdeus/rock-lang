@@ -2515,36 +2515,8 @@ fn remap_term_clone(
     im: &HashMap<Idx<Inst>, Idx<Inst>>,
     bm: &HashMap<Idx<Block>, Idx<Block>>,
 ) {
-    let mi = |x: Idx<Inst>| im[&x];
-    match term {
-        Term::Return(vs) => vs.iter_mut().for_each(|v| *v = mi(*v)),
-        Term::Goto(b) => *b = bm[b],
-        Term::Branch {
-            cond,
-            then_bb,
-            else_bb,
-        } => {
-            *cond = mi(*cond);
-            *then_bb = bm[then_bb];
-            *else_bb = bm[else_bb];
-        }
-        Term::Switch {
-            discr,
-            cases,
-            default,
-        } => {
-            *discr = mi(*discr);
-            for (_, b) in cases.iter_mut() {
-                *b = bm[b];
-            }
-            *default = bm[default];
-        }
-        Term::Yield { values, resume } => {
-            values.iter_mut().for_each(|v| *v = mi(*v));
-            *resume = bm[resume];
-        }
-        Term::Unreachable => {}
-    }
+    term.remap_uses(&|x| im[&x]);
+    term.remap_targets(&|x| bm[&x]);
 }
 
 /// For each coalescable param whose arg is a plain `Load(c)` that still holds

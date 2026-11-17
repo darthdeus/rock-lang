@@ -154,39 +154,7 @@ fn chase(func: &MirFunc, mut b: Idx<Block>, hops: &mut Vec<Idx<Block>>) -> Idx<B
 }
 
 fn retarget(term: &mut Term, from: Idx<Block>, to: Idx<Block>) {
-    match term {
-        Term::Goto(t) => {
-            if *t == from {
-                *t = to;
-            }
-        }
-        Term::Branch {
-            then_bb, else_bb, ..
-        } => {
-            if *then_bb == from {
-                *then_bb = to;
-            }
-            if *else_bb == from {
-                *else_bb = to;
-            }
-        }
-        Term::Switch { cases, default, .. } => {
-            for (_, b) in cases {
-                if *b == from {
-                    *b = to;
-                }
-            }
-            if *default == from {
-                *default = to;
-            }
-        }
-        Term::Yield { resume, .. } => {
-            if *resume == from {
-                *resume = to;
-            }
-        }
-        Term::Return(_) | Term::Unreachable => {}
-    }
+    term.remap_targets(&|target| if target == from { to } else { target });
 }
 
 /// Whether any inst in `blocks` writes cell `c` (store, multi-call dest,
