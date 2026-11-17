@@ -3,7 +3,7 @@
 
 use glow::HasContext;
 use serial_test::serial;
-use std::ffi::c_char;
+use std::ffi::{c_char, CString};
 
 #[path = "support/host.rs"]
 mod host;
