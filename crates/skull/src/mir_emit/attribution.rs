@@ -50,6 +50,7 @@ pub struct EmitAttribution {
     pub cleanup: AttributionPhase,
     pub closure: AttributionPhase,
     pub counted_loop: AttributionPhase,
+    pub bounds: AttributionPhase,
     pub hoisted_inline: AttributionPhase,
     pub validation: AttributionPhase,
     pub regalloc: AttributionPhase,
@@ -97,6 +98,8 @@ pub struct BodyCost {
     pub cleanup: Duration,
     pub closure: Duration,
     pub counted_loop: Duration,
+    pub bounds: Duration,
+    pub bounds_elided: usize,
     pub hoisted_inline: Duration,
     pub validation: Duration,
     /// Lua printing, register allocation included.
@@ -267,6 +270,8 @@ pub(crate) struct PhaseTimes {
     pub(super) closure_work: bool,
     pub(super) counted_loop: Duration,
     pub(super) counted_loop_work: bool,
+    pub(super) bounds: Duration,
+    pub(super) bounds_elided: usize,
     pub(super) hoisted_inline: Duration,
     pub(super) hoisted_inline_work: bool,
     pub(super) validation: Duration,
@@ -292,6 +297,8 @@ impl PhaseTimes {
         self.closure_work |= o.closure_work;
         self.counted_loop += o.counted_loop;
         self.counted_loop_work |= o.counted_loop_work;
+        self.bounds += o.bounds;
+        self.bounds_elided += o.bounds_elided;
         self.hoisted_inline += o.hoisted_inline;
         self.hoisted_inline_work |= o.hoisted_inline_work;
         self.validation += o.validation;
@@ -414,6 +421,7 @@ pub(super) struct AttributionAccumulator {
     pub(super) cleanup_samples: Vec<u64>,
     pub(super) closure_samples: Vec<u64>,
     pub(super) counted_loop_samples: Vec<u64>,
+    pub(super) bounds_samples: Vec<u64>,
     pub(super) hoisted_inline_samples: Vec<u64>,
     pub(super) validation_samples: Vec<u64>,
     pub(super) regalloc_samples: Vec<u64>,
@@ -502,6 +510,7 @@ impl skull_transform::body_chain::PassObserver for ChainStats<'_> {
             BodyPass::Cleanup => (mir_live_instructions(mf), 0, 0),
             BodyPass::Closure => (mf.nested_fns.len(), 0, 0),
             BodyPass::CountedLoop => (mf.blocks.len(), 0, 0),
+            BodyPass::Bounds => (0, 0, 0),
         };
         self.started = Instant::now();
     }
@@ -527,6 +536,10 @@ impl skull_transform::body_chain::PassObserver for ChainStats<'_> {
             self.times.inline_work |= !records.is_empty();
         }
         self.work.add_scan(scan);
+    }
+
+    fn bounds_elided(&mut self, count: usize) {
+        self.times.bounds_elided += count;
     }
 
     fn load_store(&mut self) -> Option<&mut skull_transform::LoadStoreCensus> {
@@ -561,6 +574,7 @@ impl skull_transform::body_chain::PassObserver for ChainStats<'_> {
                 self.times.counted_loop += elapsed;
                 self.times.counted_loop_work |= mf.blocks.len() > self.before.0;
             }
+            BodyPass::Bounds => self.times.bounds += elapsed,
         }
     }
 }
@@ -672,6 +686,8 @@ impl AttributionAccumulator {
             cleanup: times.cleanup,
             closure: times.closure,
             counted_loop: times.counted_loop,
+            bounds: times.bounds,
+            bounds_elided: times.bounds_elided,
             hoisted_inline: times.hoisted_inline,
             validation: times.validation,
             emit: times.emit,
@@ -803,6 +819,14 @@ impl AttributionAccumulator {
             0,
         );
         record_phase(
+            &mut self.result.bounds,
+            &mut self.bounds_samples,
+            times.bounds,
+            times.bounds_elided > 0,
+            times.bounds_elided,
+            0,
+        );
+        record_phase(
             &mut self.result.hoisted_inline,
             &mut self.hoisted_inline_samples,
             times.hoisted_inline,
@@ -871,6 +895,7 @@ impl AttributionAccumulator {
             &mut self.result.counted_loop,
             &mut self.counted_loop_samples,
         );
+        finish_distribution(&mut self.result.bounds, &mut self.bounds_samples);
         finish_distribution(
             &mut self.result.hoisted_inline,
             &mut self.hoisted_inline_samples,

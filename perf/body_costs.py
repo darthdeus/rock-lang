@@ -45,16 +45,16 @@ from collections import Counter, defaultdict
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import output_census as census  # noqa: E402
 
-STAGES = ["lower", "inline", "cleanup", "closure", "counted_loop", "hoisted_inline",
+STAGES = ["lower", "inline", "cleanup", "closure", "counted_loop", "bounds", "hoisted_inline",
           "validation", "emit"]
 STAGE_LABEL = {"lower": "lower", "inline": "inline", "cleanup": "cleanup",
-               "closure": "closure conv.", "counted_loop": "loop recovery",
+               "closure": "closure conv.", "counted_loop": "loop recovery", "bounds": "bounds elimination",
                "hoisted_inline": "hoisted inline", "validation": "validation",
                "emit": "print (incl. regalloc)"}
 # Ranking weight of one byte of Lua against compile CPU: about LuaJIT's parse
 # time per byte, so a saving in output counts as load time saved.
 BYTE_NS = 10
-POST_SPLICE = ["cleanup", "closure", "counted_loop", "hoisted_inline", "validation", "emit"]
+POST_SPLICE = ["cleanup", "closure", "counted_loop", "bounds", "hoisted_inline", "validation", "emit"]
 
 
 # ---------------------------------------------------------------- loading

@@ -83,6 +83,8 @@ pub(crate) fn record(ws: &Workspace, body: &BodyCost) -> Value {
         "cleanup_ns": ns(body.cleanup),
         "closure_ns": ns(body.closure),
         "counted_loop_ns": ns(body.counted_loop),
+        "bounds_ns": ns(body.bounds),
+        "bounds_elided": body.bounds_elided,
         "hoisted_inline_ns": ns(body.hoisted_inline),
         "validation_ns": ns(body.validation),
         "emit_ns": ns(body.emit),

@@ -282,6 +282,7 @@ impl Assembly {
             ("cleanup mir", times.cleanup),
             ("closure conversion", times.closure),
             ("counted-loop recovery", times.counted_loop),
+            ("bounds-check elimination", times.bounds),
             ("hoisted-body inline", times.hoisted_inline),
             ("post-transform validation", times.validation),
             ("emit: regalloc", times.regalloc),

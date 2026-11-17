@@ -1373,6 +1373,22 @@ fn main() {
     }
 
     #[test]
+    fn body_phases_separate_bounds_elimination_from_loop_recovery() {
+        let ws = workspace_of(BOUNDED_SRC, "<bounds-timing-test>", true);
+        let mid = module_id(&ws, "<bounds-timing-test>");
+        let (emit, _) = emit_full(&ws, mid).expect("bounded emission");
+        for name in ["counted-loop recovery", "bounds-check elimination"] {
+            assert!(
+                emit.phases
+                    .iter()
+                    .any(|(phase, elapsed)| *phase == name && !elapsed.is_zero()),
+                "missing body phase {name}: {:?}",
+                emit.phases
+            );
+        }
+    }
+
+    #[test]
     fn body_attribution_reports_transform_populations() {
         let _inline = InlineOn::on();
         let bounded = workspace_of(BOUNDED_SRC, "<bound-plan-test>", true);

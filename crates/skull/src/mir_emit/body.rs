@@ -448,13 +448,15 @@ pub(crate) fn emit_nested_fns(
         let counted_before = nf.blocks.len();
         let tl = Instant::now();
         skull_transform::recover_counted_loops(ws, nf);
-        skull_transform::elide_bounds_checks_for_target(
+        times.counted_loop += tl.elapsed();
+        times.counted_loop_work |= nf.blocks.len() > counted_before;
+        let tb = Instant::now();
+        times.bounds_elided += skull_transform::elide_bounds_checks_for_target(
             Some(ws),
             nf,
             bone_core::hir::FnBackend::Lua,
         );
-        times.counted_loop += tl.elapsed();
-        times.counted_loop_work |= nf.blocks.len() > counted_before;
+        times.bounds += tb.elapsed();
         collect_callee_frefs(nf, deps);
         // A flat variant's text is another declaration's body.
         if let Some(source) = nf.flat_variant_source {

@@ -20,6 +20,7 @@ pub enum BodyPass {
     Cleanup,
     Closure,
     CountedLoop,
+    Bounds,
     /// Inlining into one hoisted body; its cleanup reports as `Cleanup`.
     HoistedInline,
 }
@@ -29,6 +30,7 @@ pub trait PassObserver {
     fn begin(&mut self, _pass: BodyPass, _mf: &MirFunc) {}
     fn end(&mut self, _pass: BodyPass, _mf: &MirFunc) {}
     fn inlined(&mut self, _pass: BodyPass, _records: &[SpliceRecord], _scan: InlineScanStats) {}
+    fn bounds_elided(&mut self, _count: usize) {}
     /// Where a post-inline cleanup charges the Load/Store traffic it unlinks,
     /// when the inline census is enabled.
     fn load_store(&mut self) -> Option<&mut LoadStoreCensus> {
@@ -163,19 +165,31 @@ fn convert(
     obs.end(BodyPass::Closure, mf);
     verify_after(mf, Stage::CONVERTED, BodyPass::Closure);
     if opts.counted_loops != CountedLoops::Skip {
-        obs.begin(BodyPass::CountedLoop, mf);
-        crate::recover_counted_loops(ws, mf);
-        crate::elide_bounds_checks_for_target(Some(ws), mf, opts.target);
+        recover_and_elide(ws, mf, opts, obs);
         if opts.counted_loops == CountedLoops::RootAndNested {
             for nf in &mut mf.nested_fns {
-                crate::recover_counted_loops(ws, nf);
-                crate::elide_bounds_checks_for_target(Some(ws), nf, opts.target);
+                recover_and_elide(ws, nf, opts, obs);
             }
         }
-        obs.end(BodyPass::CountedLoop, mf);
-        verify_after(mf, Stage::CONVERTED, BodyPass::CountedLoop);
     }
     Ok(())
+}
+
+fn recover_and_elide(
+    ws: &Workspace,
+    mf: &mut MirFunc,
+    opts: &ChainOptions<'_>,
+    obs: &mut dyn PassObserver,
+) {
+    obs.begin(BodyPass::CountedLoop, mf);
+    crate::recover_counted_loops(ws, mf);
+    obs.end(BodyPass::CountedLoop, mf);
+    verify_after(mf, Stage::CONVERTED, BodyPass::CountedLoop);
+    obs.begin(BodyPass::Bounds, mf);
+    let count = crate::elide_bounds_checks_for_target(Some(ws), mf, opts.target);
+    obs.bounds_elided(count);
+    obs.end(BodyPass::Bounds, mf);
+    verify_after(mf, Stage::CONVERTED, BodyPass::Bounds);
 }
 
 fn cleanup(

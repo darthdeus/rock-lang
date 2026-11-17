@@ -219,6 +219,7 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
     phase("cleanup mir", &attribution.cleanup);
     phase("closure conversion", &attribution.closure);
     phase("counted-loop recovery", &attribution.counted_loop);
+    phase("bounds-check elimination", &attribution.bounds);
     phase("hoisted-body inline", &attribution.hoisted_inline);
     phase("post-transform validation", &attribution.validation);
     phase("regalloc", &attribution.regalloc);
