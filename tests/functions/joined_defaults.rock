@@ -1,0 +1,38 @@
+@inline fn scaled(x: int, by: int? = 3) -> int { return x * (by ?? 10) }
+@inline fn bump(x: int, by: int = 1) -> int { return x + by }
+fn joined(flag: bool) -> int {
+    let by: int? = 2
+    if flag {
+        by = null
+    }
+    return scaled(5, by)
+}
+fn looped(n: int) -> int {
+    let by: int? = null
+    let total = 0
+    for i in 0..n {
+        total += scaled(1, by)
+        by = i
+    }
+    return total
+}
+fn labelled(n: int) -> int {
+    let total = 0
+    let i = 0
+    while i < n {
+        i += 1
+        if i == 2 {
+            continue
+        }
+        total = bump(total)
+        if i > 3 {
+            break
+        }
+        total = bump(total, i)
+    }
+    return total
+}
+@test(output = "50 10 13 7")
+fn joined_and_looped_arguments_keep_their_default_tests() {
+    print("{joined(true)} {joined(false)} {looped(4)} {labelled(6)}")
+}

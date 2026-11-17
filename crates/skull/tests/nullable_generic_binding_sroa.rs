@@ -23,8 +23,6 @@
 //! unmarked does no leaf splitting at all and is only opportunistically
 //! scalarized by SROA afterwards. Only the nullability QUERY was duplicated.
 
-use crate::common::compile_and_run;
-
 /// THE PROPERTY THE FIX ENDANGERED. `nonnull_value_struct` exists to LICENSE
 /// SROA; narrowing it could switch non-nullable values back to boxed emission
 /// and the corpus absent-row cases would still pass. So assert on the EMITTED code:
@@ -53,37 +51,5 @@ fn main() {
         "a non-nullable value through a generic `let` must stay scalarized, not \
          rebuild a cdata -- the SROA license this fix narrowed:\n{body}"
     );
-    assert_eq!(compile_and_run(SRC), "3");
-}
-
-/// THE SAME LICENSE, reached through SROA's OWN field cells rather than a
-/// generic binding. Splitting a value-struct local mints a cell per field, and a
-/// field cell that always holds a value ctor inherits the parent's non-null
-/// license so a later round can split it in turn. A cell that also takes a NIL
-/// store cannot: rebuilding it from its leaves fabricates a present value out of
-/// an absent one, and `Inner_ct(nil)` fails the cdata conversion.
-///
-/// Both arms are needed and the escape is what makes it reachable. The enum
-/// payload keeps the spread whole (a direct call argument scalarizes away), and
-/// the branch keeps two stores live on the cell so copy-prop cannot forward
-/// either to the use.
-#[test]
-fn an_sroa_field_cell_that_can_be_absent_is_not_licensed_to_rematerialize() {
-    const SRC: &str = r#"
-value Inner { x: float }
-value Outer { inner: Inner?, a: float }
-enum Part { One(Outer) }
-global FLAG: bool = true
-
-fn sink(p: Part) -> string {
-    match p { Part::One(o) => return "{o.inner?.x ?? -1.0} {o.a}" }
-}
-
-fn main() {
-    let o = Outer { inner: Inner { x: 3.0 }, a: 4.0 }
-    if FLAG { o = Outer { inner: null, a: 5.0 } }
-    print("{sink(Part::One(Outer { ..o, a: 8.0 }))}")
-}
-"#;
-    assert_eq!(compile_and_run(SRC), "-1 8");
+    assert_eq!(crate::common::run_main(&lua), "3");
 }

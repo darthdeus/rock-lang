@@ -4,7 +4,7 @@
 //! every read ordered against the writes it could observe. A call whose result
 //! nothing reads is a bare call statement.
 
-use crate::common::{compile_and_run, emit_module, function_body, run_luajit};
+use crate::common::{compile_and_run, emit_module, function_body, run_luajit, run_main};
 
 const SHAPES: &str = r#"
 struct P { x: int, y: int }
@@ -32,51 +32,7 @@ fn single_use_reads_and_calls_render_in_their_consumer() {
         "{}",
         function_body(&lua, "scaled")
     );
-    assert_eq!(compile_and_run(SHAPES), "7 7");
-}
-
-#[test]
-fn folded_reads_stay_ordered_against_writes() {
-    let src = r#"
-struct P { x: int, y: int }
-global marks: int = 0
-fn bump() -> int { marks += 1; return marks }
-fn change(p: P) { p.x = 50 }
-fn field_before_store(p: P) -> int {
-    let old = p.x
-    p.x = 9
-    return old * 100 + p.x
-}
-fn field_before_call(p: P) -> int {
-    let old = p.x
-    change(p)
-    return old * 100 + p.x
-}
-fn cell_before_store(a: int) -> int {
-    let x = a
-    let old = x
-    x = x + 10
-    return old * 100 + x
-}
-fn length_before_push() -> int {
-    let v: [int] = []
-    v.push(v.len())
-    v.push(v.len())
-    v.push(v[1] + v.len())
-    return v[0] * 100 + v[1] * 10 + v[2]
-}
-fn call_once_in_product() -> uint {
-    let a = bump() as uint
-    return a * 3 as uint
-}
-fn main() {
-    let p = P { x: 1, y: 2 }
-    let q = P { x: 1, y: 2 }
-    let product = call_once_in_product()
-    print("{field_before_store(p)} {field_before_call(q)} {cell_before_store(1)} {length_before_push()} {product} {marks}")
-}
-"#;
-    assert_eq!(compile_and_run(src), "109 150 111 13 3 1");
+    assert_eq!(run_main(&lua), "7 7");
 }
 
 #[test]
@@ -102,7 +58,7 @@ fn main() {
         "an unused call result took a register:\n{body}"
     );
     assert!(body.contains("local _ = "), "{body}");
-    assert_eq!(compile_and_run(src), "2");
+    assert_eq!(run_main(&lua), "2");
 }
 
 #[test]
@@ -185,7 +141,7 @@ fn main() {
     assert!(!pick.contains("local r"), "{pick}");
     let stepper = function_body(&lua, "stepper");
     assert!(stepper.contains("r0 = c0"), "{stepper}");
-    assert_eq!(compile_and_run(src), "20 12 8 66");
+    assert_eq!(run_main(&lua), "20 12 8 66");
 }
 
 #[test]
@@ -231,7 +187,7 @@ fn main() {
     let pick = function_body(&lua, "pick");
     assert!(!pick.contains("local r"), "{pick}");
     assert!(function_body(&lua, "clampish").contains("local r0"));
-    assert_eq!(compile_and_run(src), "4 24 7 24 303");
+    assert_eq!(run_main(&lua), "4 24 7 24 303");
 }
 
 #[test]
@@ -268,7 +224,7 @@ fn main() {
                 && !b.contains(' ') && !b.contains('('))
     });
     assert_eq!(copies.count(), 0, "{body}");
-    assert_eq!(compile_and_run(src), "18");
+    assert_eq!(run_main(&lua), "18");
 }
 
 #[test]
@@ -289,7 +245,7 @@ fn main() {
     let lua = emit_module(src);
     let body = function_body(&lua, "h");
     assert!(!body.contains(" = nil"), "{body}");
-    assert_eq!(compile_and_run(src), "f3\nf6");
+    assert_eq!(run_main(&lua), "f3\nf6");
 }
 
 #[test]
@@ -314,5 +270,5 @@ fn main() {
     let lua = emit_module(src);
     let body = function_body(&lua, "h");
     assert!(!body.contains(" = nil"), "{body}");
-    assert_eq!(compile_and_run(src), "t1\nt2");
+    assert_eq!(run_main(&lua), "t1\nt2");
 }

@@ -71,34 +71,6 @@ fn frame_stores_evaluate_rhs_once_clear_payloads_and_preserve_user_writes() {
     );
 }
 
-/// An `int as float` alias inside a coroutine step still reads a valid slot:
-/// `f` forwards to its operand's register for both its frame store and its
-/// pre-yield use, while a later-defined register (`tag`) shares the segment.
-/// The suspension boundary itself is crossed by frame cells (real lowering
-/// never leaves a conversion value live across a yield); the value-spill
-/// half is `spilled_int_to_float_alias_reads_a_valid_slot_after_resume`.
-const INT_FLOAT_ALIAS_ACROSS_YIELD: &str = r#"
-co fn scaled(n: int) -> Coroutine<float> {
-    let m = n * 2
-    let f = m as float
-    let tag = m + 100
-    yield f + (tag as float)
-    yield f + (tag as float) + 1.0
-}
-
-fn main() {
-    let c = scaled(5)
-    print(c.resume())
-    print(c.resume())
-}
-"#;
-
-#[test]
-fn int_to_float_alias_survives_a_yield() {
-    let lua = common::try_emit_module(INT_FLOAT_ALIAS_ACROSS_YIELD).expect("alias co emits");
-    assert_eq!(common::run_main(&lua), "120\n121");
-}
-
 /// A conversion VALUE live across a yield keeps a valid slot: the spill store
 /// reads the operand's register and the resume segment reloads from the frame.
 /// Real lowering routes `let`-bound conversions through cells (each use folds

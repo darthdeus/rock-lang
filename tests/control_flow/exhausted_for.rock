@@ -1,0 +1,9 @@
+fn scan(xs: [int], limit: int) -> bool {
+    let ok = true
+    for i in 0..xs.len() {
+        if xs[i] >= limit { ok = false; break }
+    }
+    ok
+}
+@test(output = "true false")
+fn a_for_loop_that_runs_out_skips_the_code_its_break_runs() { print("{scan([1, 2, 3], 10)} {scan([1, 20, 3], 10)}") }

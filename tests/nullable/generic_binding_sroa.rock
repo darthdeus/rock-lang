@@ -35,3 +35,19 @@ fn the_non_generic_twin_is_correct() {
     let (ok, v) = pick(a, 1)
     print("{ok} {v == null}")
 }
+
+value Inner { x: float }
+value Outer { inner: Inner?, a: float }
+enum Part { One(Outer) }
+global FLAG: bool = true
+
+fn sink(p: Part) -> string {
+    match p { Part::One(o) => return "{o.inner?.x ?? -1.0} {o.a}" }
+}
+
+@test(output = "-1 8")
+fn an_sroa_field_cell_that_can_be_absent_is_not_licensed_to_rematerialize() {
+    let o = Outer { inner: Inner { x: 3.0 }, a: 4.0 }
+    if FLAG { o = Outer { inner: null, a: 5.0 } }
+    print("{sink(Part::One(Outer { ..o, a: 8.0 }))}")
+}

@@ -1,0 +1,14 @@
+co fn scaled(n: int) -> Coroutine<float> {
+    let m = n * 2
+    let f = m as float
+    let tag = m + 100
+    yield f + (tag as float)
+    yield f + (tag as float) + 1.0
+}
+
+@test(output = "120\n121")
+fn int_to_float_alias_survives_a_yield() {
+    let c = scaled(5)
+    print(c.resume())
+    print(c.resume())
+}

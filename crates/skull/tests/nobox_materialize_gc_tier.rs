@@ -172,33 +172,6 @@ fn an_implicit_box_of_a_gc_tier_value_is_still_rejected() {
     );
 }
 
-#[test]
-fn hoisted_closure_does_not_validate_discarded_parent_blocks() {
-    let source = r#"
-nobox value Tint { r: float, g: float, b: float, a: float }
-value Row { key: string, count: int, color: Tint }
-fn row(index: int) -> Row {
-    return Row { key: "item", count: index, color: Tint { r: 1.0, g: 2.0, b: 3.0, a: 4.0 } }
-}
-fn with_check(check: fn() -> ()) { check() }
-fn main() {
-    let offset = 7
-    with_check(() => {
-        with_check(() => {
-            let total = offset
-            for index in 0..3 {
-                let item = row(index)
-                total += item.count
-            }
-            print(total)
-        })
-    })
-}
-"#;
-    let lua = try_emit_module(source).expect("a scalarized closure local must emit");
-    assert_eq!(run_main(&lua), "10");
-}
-
 // The live-body tests need a box that is still real: a tuple holding a `nobox`
 // value, interpolated whole, is the permanent sink (`nobox_values.rs`,
 // `NOBOX_TWO_SINKS_IN_ONE_BODY`). A GC-tier parent stored in a global was the

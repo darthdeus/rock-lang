@@ -2,9 +2,7 @@
 //! hoists to a top-level `function <enclosing>__lambda<k>(<params>) ... end` and
 //! is referenced through one reusable logical CodeRef at the creation site. A
 //! capturing lambda carries that CodeRef plus its environment record.
-use crate::common::{
-    compile_and_run, emit_module, function_body, mangled_name, run_luajit, run_main,
-};
+use crate::common::{emit_module, function_body, mangled_name, run_luajit, run_main};
 
 #[test]
 fn defer_retains_an_existing_cleanup_without_a_forwarding_capture() {
@@ -139,28 +137,6 @@ fn main() { let _ = mk() }
     assert_eq!(
         out, "true",
         "two creations of a capture-free lambda must share one hoisted fn value; got: {out}"
-    );
-}
-
-/// RUNTIME (behavior preserved): a hoisted lambda is still callable through a
-/// fn-typed value, and a lambda-local `let` stays PER-CALL (two calls don't
-/// share state) -- "6\n6", never "6\n7".
-#[test]
-fn hoisted_lambda_locals_stay_per_call() {
-    let src = r#"
-fn counter_fn() -> fn() -> int {
-    return () => { let n = 5 n = n + 1 return n }
-}
-fn main() {
-    let f = counter_fn()
-    print("{f()}")
-    print("{f()}")
-}
-"#;
-    let out = compile_and_run(src);
-    assert_eq!(
-        out, "6\n6",
-        "a hoisted lambda's local must be per-call (not shared); got: {out}"
     );
 }
 

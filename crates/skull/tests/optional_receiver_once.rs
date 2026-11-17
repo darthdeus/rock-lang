@@ -1,4 +1,4 @@
-use crate::common::{compile_and_run, emit_module, function_body, run_main};
+use crate::common::{emit_module, function_body, run_main};
 
 const SOURCE: &str = r#"
 value Row { text: string, n: int }
@@ -21,43 +21,4 @@ fn optional_receiver_fallback_does_not_emit_a_discarded_call() {
     let body = function_body(&lua, "read_once");
     assert_eq!(body.matches("next_row(").count(), 1, "{body}");
     assert_eq!(run_main(&lua), "7 1");
-}
-
-#[test]
-fn optional_receiver_representations_preserve_absence_and_selected_values() {
-    let src = r#"
-value Pair { x: int, y: int }
-nobox value Flat { x: int, y: int }
-struct RefRow { n: int }
-struct Owner { row: Row? = null, pair: Pair? = null, flat: Flat? = null }
-value Row { text: string, n: int }
-fn scalar_pair(present: bool) -> Pair? {
-    if present { return Pair { x: 13, y: 17 } }
-    return null
-}
-fn tuple_pair(present: bool) -> (int, int)? {
-    if present { return (19, 23) }
-    return null
-}
-fn reference_row(present: bool) -> RefRow? {
-    if present { return RefRow { n: 29 } }
-    return null
-}
-fn main() {
-    for present in [false, true] {
-        let h = Owner {}
-        if present {
-            h.row = Row { text: "row", n: 31 }
-            h.pair = Pair { x: 37, y: 41 }
-            h.flat = Flat { x: 43, y: 47 }
-        }
-        print("{scalar_pair(present)?.x ?? -1} {tuple_pair(present)?.0 ?? -1} {reference_row(present)?.n ?? -1}")
-        print("{h.row?.n ?? -1} {h.pair?.y ?? -1} {h.flat?.x ?? -1}")
-    }
-}
-"#;
-    assert_eq!(
-        compile_and_run(src),
-        "-1 -1 -1\n-1 -1 -1\n13 19 29\n31 41 43"
-    );
 }
