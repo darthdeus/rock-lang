@@ -284,19 +284,53 @@ fn main() {{ let _ = choose() }}
     }
     #[test]
     fn pruning_shared_and_cyclic_calls_matches_fresh_output() {
-        for definitions in [
-            "fn branch() -> int { return leaf() } fn leaf() -> int { return 1 }",
-            "fn branch() -> int { return leaf() + shared() } fn leaf() -> int { return 1 }",
-            "fn branch() -> int { return cycle(2) } fn cycle(n:int) -> int { if n == 0 { return shared() } return back(n-1) } fn back(n:int) -> int { return cycle(n) }",
-            "fn branch() -> int { return left() + right() } fn left() -> int { return shared() } fn right() -> int { return shared() }",
-            "fn branch() -> int { return other(2) } fn other(n:int) -> int { if n == 0 { return 0 } return branch() }",
+        for (definitions, supported) in [
+            (
+                "fn branch() -> int { return leaf() } fn leaf() -> int { return 1 }",
+                "branch()",
+            ),
+            (
+                "fn branch() -> int { return leaf() + shared() } fn leaf() -> int { return 1 }",
+                "branch()",
+            ),
+            (
+                "fn branch() -> int { return cycle(2) } fn cycle(n:int) -> int { if n == 0 { return shared() } return back(n-1) } fn back(n:int) -> int { return cycle(n) }",
+                "branch()",
+            ),
+            (
+                "fn branch() -> int { return left() + right() } fn left() -> int { return shared() } fn right() -> int { return shared() }",
+                "branch()",
+            ),
+            (
+                "fn branch() -> int { return other(2) } fn other(n:int) -> int { if n == 0 { return 0 } return branch() }",
+                "branch()",
+            ),
+            (
+                "fn branch()->int { return shared()+apparent() } fn apparent()->int { return shared() }",
+                "shared()",
+            ),
+            (
+                "fn branch()->int { return lost_a()+lost_b() } fn lost_a()->int { return shared()+support_a() } fn lost_b()->int { return shared()+support_b() } fn support_a()->int { return lost_a()+join() } fn support_b()->int { return lost_b()+join() } fn join()->int { return support_a()+support_b() }",
+                "shared()",
+            ),
+            (
+                "fn branch()->int { return dead_c()+lost_b() } fn dead_c()->int { return dead_a() } fn dead_a()->int { return dead_branch() } fn dead_branch()->int { return dead_c()+target() } fn target()->int { return lost_b() } fn lost_b()->int { return 7 }",
+                "target()",
+            ),
+            (
+                "fn branch()->int { return dead_c()+lost_b() } fn target()->int { return lost_b() } fn dead_branch()->int { return dead_c()+target() } fn dead_c()->int { return dead_a() } fn dead_a()->int { return dead_branch() } fn lost_b()->int { return 7 }",
+                "target()",
+            ),
+            (
+                "fn branch()->int { return a()+dead() } fn a()->int { return b() } fn b()->int { return a() } fn dead()->int { return leaf() } fn leaf()->int { return 1 }",
+                "a()",
+            ),
         ] {
-            for anchored in [false, true] {
+            for anchored in ["", "print(shared())", "print(anchor())"] {
                 let source = |called: bool| {
                     format!(
-                        "{definitions} fn shared() -> int {{ return 7 }} fn entry() -> int {{ return {} }} fn main() {{ print(entry()); {} }}",
+                        "{definitions} fn shared() -> int {{ return 7 }} fn anchor()->int {{ return hop() }} fn hop()->int {{ return {supported} }} fn entry() -> int {{ return {} }} fn main() {{ print(entry()); {anchored} }}",
                         if called { "branch()" } else { "0" },
-                        if anchored { "print(shared())" } else { "" },
                     )
                 };
                 assert_sequence(
