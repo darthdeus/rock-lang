@@ -37,3 +37,41 @@ fn f(v: int?) -> int {
     }
     x
 }
+
+//=== TEST CASE: loop_with_break_does_not_diverge_NonDiverging ===
+//! expect: must diverge
+fn f(v: int?) -> int {
+    let x = v else {
+        loop {
+            break
+        }
+    }
+    x
+}
+fn main() {}
+
+//=== TEST CASE: loop_with_expression_break_does_not_diverge_NonDiverging ===
+//! expect: must diverge
+fn f(v: int?, w: int?) -> int {
+    let x = v else {
+        loop {
+            let y = w ?? break
+            print(y)
+        }
+    }
+    x
+}
+fn main() {}
+
+//=== TEST CASE: loop_with_let_else_break_does_not_diverge_NonDiverging ===
+//! expect: must diverge
+fn f(v: int?, w: int?) -> int {
+    let x = v else {
+        loop {
+            let y = w else { break }
+            print(y)
+        }
+    }
+    x
+}
+fn main() {}

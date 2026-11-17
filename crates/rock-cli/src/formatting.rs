@@ -76,10 +76,8 @@ pub(crate) fn do_fmt(paths: &[String], check: bool) -> Result<()> {
                     }
                 }
             }
-            Err(e) => {
-                eprintln!("Error formatting '{}': {}", file_path, e);
-                return Err(e);
-            }
+            // The error already names the file; the caller prints it once.
+            Err(e) => return Err(e),
         }
     }
 
@@ -101,8 +99,12 @@ pub(crate) fn do_fmt(paths: &[String], check: bool) -> Result<()> {
 fn format_rock_file(file_path: &str) -> Result<String> {
     let source = rock_host::source_files::source_file_new_with_context(file_path)?;
     let input = source.contents;
-    let formatted = skull_fmt::try_format(&input, &skull_fmt::FormatConfig::default())
-        .map_err(|error| anyhow::anyhow!("failed to format {}: {}", file_path, error))?;
+    let formatted = skull_fmt::try_format_named(
+        &input,
+        &skull_fmt::FormatConfig::default(),
+        file_path,
+    )
+    .map_err(|error| anyhow::anyhow!("cannot format '{}':\n{}", file_path, error))?;
 
     // Defensive reparse: never overwrite a source file with output that no
     // longer parses. skull-fmt returns the input unchanged on a parse

@@ -281,3 +281,22 @@ fn let_else_bindings_across_yields() {
     let d = square_sides(Shape::Circle(1))
     print(d.resume() ?? -1)
 }
+
+fn settle(v: int?) -> int {
+    let x = v else {
+        // A break-free `loop` never completes, so it diverges; a nested
+        // loop's own `break` (inside `drain`) does not change that.
+        loop {
+            print("unreachable")
+            while true {
+                break
+            }
+        }
+    }
+    x
+}
+
+@test(output = "5")
+fn loop_without_break_diverges() {
+    print(settle(5))
+}

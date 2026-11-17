@@ -1,4 +1,5 @@
 use super::*;
+use bone_core::hir_walk;
 
 /// A `return`, CHECKED against the declared return rather than inferred and
 /// then coerced: a returned lambda has to record the type of the hole it
@@ -223,7 +224,7 @@ pub(crate) fn infer_statement(
                             comp_error!(
                                 c.body.expr_spans[else_e],
                                 "the `else` block of `let ... else` must diverge: end it with \
-                                 `return`, `break` or `continue`"
+                                 `return`, `break`, `continue`, or a loop that never breaks"
                             );
                         }
                     }
@@ -443,8 +444,9 @@ fn pin_shared_else(
 }
 
 /// Whether a statement list ends in a loop/function exit (`return`/`break`/
-/// `continue`), ignoring trailing comments. The one syntactic divergence test,
-/// shared by block `never` inference and guard narrowing.
+/// `continue`) or a loop that never completes, ignoring trailing comments.
+/// The one syntactic divergence test, shared by block `never` inference and
+/// guard narrowing.
 pub(crate) fn block_ends_in_exit(c: BodyCtx, statements: IdxRange<Statement>) -> bool {
     statements
         .into_iter()
@@ -453,8 +455,52 @@ pub(crate) fn block_ends_in_exit(c: BodyCtx, statements: IdxRange<Statement>) ->
             matches!(
                 c.body.statement_arena[s],
                 Statement::Return(_) | Statement::Break | Statement::Continue
-            )
+            ) || loop_never_exits(c, s)
         })
+}
+
+/// A trailing `while true` / `loop` with no `break` of its own never
+/// completes. Nested loops own their breaks, a lambda or nested fn cannot
+/// break out, and a `return` inside only strengthens the divergence.
+fn loop_never_exits(c: BodyCtx, s: Idx<Statement>) -> bool {
+    let Statement::While { cond, body } = c.body.statement_arena[s] else {
+        return false;
+    };
+    matches!(c.body.expr_arena[cond], Expr::Bool(true))
+        && !reaches_break(c.body, hir_walk::HirChild::Expr(body))
+}
+
+/// Whether a `break` at THIS loop's level is reachable inside `node`.
+fn reaches_break(body: &bone_core::hir::Body, node: hir_walk::HirChild) -> bool {
+    use hir_walk::HirChild;
+    match node {
+        HirChild::Expr(e) => match body.expr_arena[e] {
+            Expr::Break => return true,
+            // A lambda runs when called; its body cannot break this loop.
+            Expr::Lambda { .. } => return false,
+            _ => {}
+        },
+        HirChild::Statement(s) => match body.statement_arena[s] {
+            Statement::Break => return true,
+            // A nested loop owns every break in its BODY. Its header
+            // expression is murkier (`while w ?? break`), so a break there
+            // conservatively counts as escaping.
+            Statement::While { cond, .. } => {
+                return reaches_break(body, HirChild::Expr(cond));
+            }
+            Statement::For { iter, .. } => {
+                return reaches_break(body, HirChild::Expr(iter));
+            }
+            Statement::Fn { .. } => return false,
+            _ => {}
+        },
+        HirChild::Pattern(_) => return false,
+    }
+    let mut found = false;
+    body.for_each_child(node, |child| {
+        found = found || reaches_break(body, child);
+    });
+    found
 }
 
 pub(crate) fn infer_expr_used(

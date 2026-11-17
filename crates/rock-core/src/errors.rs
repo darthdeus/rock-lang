@@ -166,7 +166,7 @@ impl CompilerError {
 
     /// A `[E00] Error: message at file:line:col` line and nothing else. Line
     /// and column are the raw (zero-based) ones stored on the location.
-    fn one_line(&self) -> String {
+    pub fn one_line(&self) -> String {
         let location = match self.location.file.as_str() {
             UNKNOWN_FILE_NAME => String::new(),
             _ => format!(

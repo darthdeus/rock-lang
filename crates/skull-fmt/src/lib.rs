@@ -39,10 +39,20 @@ pub fn format_code(input: &str) -> String {
 
 /// Format with an explicit config, surfacing parse errors.
 pub fn try_format(input: &str, cfg: &FormatConfig) -> Result<String, String> {
-    let file: Ustr = "<fmt>".into();
-    let ast = skull_parser::parse_module(input, file).map_err(|e| format!("{e:?}"))?;
+    try_format_named(input, cfg, "<fmt>")
+}
+
+/// [`try_format`] with the source's real name in parse diagnostics.
+pub fn try_format_named(
+    input: &str,
+    cfg: &FormatConfig,
+    file_name: &str,
+) -> Result<String, String> {
+    let file: Ustr = file_name.into();
+    let ast = skull_parser::parse_module(input, file).map_err(|e| e.one_line())?;
     if !ast.recovery_errors.is_empty() {
-        return Err(format!("parse recovery errors: {:?}", ast.recovery_errors));
+        let lines: Vec<String> = ast.recovery_errors.iter().map(|e| e.one_line()).collect();
+        return Err(lines.join("\n"));
     }
 
     let trivia = trivia::Trivia::harvest(input, file)?;

@@ -213,8 +213,8 @@ single-variant enum pattern is irrefutable too.
 `let <pattern> = value else { ... }` accepts refutable patterns and
 nullable scrutinees: a nullable value unwraps exactly as in `if let`, the
 `else` block runs on a miss and must diverge (its type must be `never`:
-end with `return`, `break` or `continue`; Rock has no
-never-returning call to end it with), and
+end with `return`, `break`, `continue`, or a `loop`/`while true` that
+never breaks; Rock has no never-returning call to end it with), and
 the bindings join the enclosing scope. An `else` that can never run (an
 irrefutable pattern over a non-nullable value) is rejected. `let ... else`
 is a statement; in expression position use `if let` or `match`.
