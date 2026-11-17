@@ -729,3 +729,25 @@ OPERATION: completion
 EXPECTED:
 - duration: float
 ===
+
+TEST: complete_variant_in_let_else_pattern
+TYPE: completion
+---
+enum Shape {
+    Circle(int),
+    Square(int, int),
+}
+
+fn f(s: Shape) -> int {
+    let Shape::«cursor» = s else {
+        return 0
+    }
+    1
+}
+---
+OPERATION: completion
+---
+EXPECTED:
+- Circle
+- Square
+===

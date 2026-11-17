@@ -337,8 +337,11 @@ impl CursorAst {
             }
         }
         for (_, st) in self.ast.stmts.iter() {
-            if let StatementKind::WhileLet(wl) = &st.kind {
-                walk(&wl.pattern, f);
+            match &st.kind {
+                StatementKind::WhileLet(wl) => walk(&wl.pattern, f),
+                StatementKind::Let(l) => walk(&l.pattern, f),
+                StatementKind::For(fo) => walk(&fo.pattern, f),
+                _ => {}
             }
         }
     }
