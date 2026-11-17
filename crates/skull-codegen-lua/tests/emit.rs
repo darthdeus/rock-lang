@@ -68,6 +68,25 @@ fn luajit_ok(driver: &str, context: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+fn luajit_loads(lua: &str, context: &str) {
+    let path = std::env::temp_dir().join(format!(
+        "skull_lua_emit_{}_{:?}.lua",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::write(&path, lua).expect("write emitted Lua");
+    let out = std::process::Command::new("luajit")
+        .arg(&path)
+        .output()
+        .expect("spawn luajit");
+    let _ = std::fs::remove_file(path);
+    assert!(
+        out.status.success(),
+        "{}\n{context}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 fn emitted_symbol(lua: &str) -> &str {
     lua.lines()
         .find_map(|line| line.strip_prefix("function "))
@@ -457,6 +476,71 @@ fn spliced_lua_control_counts_toward_the_body_limits() {
     assert!(error.message.contains("LJ_MAX_VSTACK"), "{error:?}");
 }
 
+#[test]
+fn inert_lua_text_does_not_trigger_body_limit_rejections() {
+    let fake_control = "goto bb0\n::bb0::\n".repeat(16_370);
+    let fake_assignments = "r0 = 1\n".repeat(32_768);
+    let src = format!(
+        "@inline inline(lua) fn many() = \"\"\"\n\
+         local text = [=[\n{fake_control}]=]\n\
+         --[=[\n{fake_control}]=]\n\
+         local skipped\ngoto bb0\nskipped = [=[\n{fake_assignments}]=]\n::bb0::\n\
+         \"\"\"\nfn run() {{ many() }}"
+    );
+    let (lua, rejection) = emit_run(&src);
+    assert!(
+        rejection.is_none(),
+        "inert text caused a rejection: {rejection:?}"
+    );
+    luajit_loads(&lua, "inert long-bracket text must leave loadable Lua");
+}
+
+#[test]
+fn scalar_constant_arithmetic_folds_to_runtime_values() {
+    let lua = emit_clean(
+        "const BASE: int = 8; const INTEGER: int = BASE * 128; \
+         const SUM: float = 1.0 + 0.000001; \
+         const SCALED: float = (4.5 - 1.5) * 2.0; \
+         const QUOTIENT: float = 7 / 2; \
+         fn run() -> (int, float, float, float) { \
+           return (INTEGER, SUM, SCALED, QUOTIENT) \
+         }",
+        "run",
+    );
+    let symbol = emitted_symbol(&lua);
+    luajit_ok(
+        &format!(
+            "{lua}\nlocal i, s, p, q = {symbol}(); \
+             assert(i == 1024 and s == 1.000001 and p == 6 and q == 3.5)"
+        ),
+        &lua,
+    );
+}
+
+#[test]
+fn signed_and_unsigned_constant_bitwise_results_match_lua() {
+    let lua = emit_clean(
+        "fn masks() -> (int, uint, uint, uint) { \
+           let zero: uint = 0; let high: uint = 2147483648; \
+           let all: uint = 4294967295; let high_again: uint = 2147483648; \
+           return (~(~2147483647), ~(~zero), high | 1, all ^ high_again) \
+         }",
+        "masks",
+    );
+    assert!(
+        !lua.contains("bit.b"),
+        "constant masks should not call bit ops:\n{lua}"
+    );
+    let symbol = emitted_symbol(&lua);
+    luajit_ok(
+        &format!(
+            "{lua}\nlocal s, a, b, c = {symbol}(); \
+             assert(s == 2147483647 and a == 0 and b == 2147483649 and c == 2147483647)"
+        ),
+        &lua,
+    );
+}
+
 // --- Call-site default fill --
 //
 // The callee keeps its `if p == nil { p = default }` prologue for calls the
@@ -501,6 +585,10 @@ fn uint_checks_bind_shared_helpers_as_upvalues() {
     assert!(
         lua.contains("function(__rock_checked_u32, __rock_u32_shift_count) return function"),
         "{lua}"
+    );
+    assert_eq!(
+        skull_codegen_lua::emitted_body_name(lua.lines().next().unwrap()),
+        Some("checked_float_uint")
     );
 }
 
