@@ -37,17 +37,6 @@ pub fn resolve_standalone_bound_calls(
     incoming: &skull_mir::bound::ResolvedBoundTree,
     concrete_plans: &ConcretePlans,
 ) -> Result<(), CompilerError> {
-    resolve_standalone_bound_calls_inner(ws, scx, interner, mf, incoming, concrete_plans)
-}
-
-fn resolve_standalone_bound_calls_inner(
-    ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
-    interner: &MonoInterner,
-    mf: &mut MirFunc,
-    incoming: &skull_mir::bound::ResolvedBoundTree,
-    concrete_plans: &ConcretePlans,
-) -> Result<(), CompilerError> {
     let ids: Vec<(Idx<Inst>, usize)> = mf
         .insts
         .iter()
@@ -89,7 +78,7 @@ fn resolve_standalone_bound_calls_inner(
         )?;
     }
     for nf in &mut mf.nested_fns {
-        resolve_standalone_bound_calls_inner(ws, scx, interner, nf, incoming, concrete_plans)?;
+        resolve_standalone_bound_calls(ws, scx, interner, nf, incoming, concrete_plans)?;
     }
     Ok(())
 }
@@ -105,30 +94,6 @@ fn resolve_standalone_bound_calls_inner(
 /// A `CallerGeneric` leaf is the genuinely unresolved case: the enclosing body
 /// is still generic in that position, so nothing here can name a callee.
 pub(crate) fn substitute_bound_call(
-    func: &mut MirFunc,
-    call: Idx<Inst>,
-    already_split: bool,
-    leaf: &ResolvedBoundNext,
-    scx: &skull_mir::lower::ScalarCtx,
-    ws: &Workspace,
-    interner: &MonoInterner,
-    concrete_plans: &ConcretePlans,
-    what: &str,
-) -> Result<(), CompilerError> {
-    substitute_bound_call_inner(
-        func,
-        call,
-        already_split,
-        leaf,
-        scx,
-        ws,
-        interner,
-        concrete_plans,
-        what,
-    )
-}
-
-fn substitute_bound_call_inner(
     func: &mut MirFunc,
     call: Idx<Inst>,
     already_split: bool,

@@ -77,6 +77,32 @@ pub struct Inliner<'a> {
     pub plans: &'a ConcretePlans,
 }
 
+impl Inliner<'_> {
+    fn run(
+        &mut self,
+        ws: &Workspace,
+        mf: &mut MirFunc,
+        pass: BodyPass,
+        stage: Stage,
+        obs: &mut dyn PassObserver,
+    ) -> Result<HashSet<FuncRef>, ChainError> {
+        obs.begin(pass, mf);
+        let (callees, records, scan) = crate::inline_functions_with_plans(
+            ws,
+            self.scx,
+            self.self_ref,
+            mf,
+            self.cache,
+            self.plans,
+        )
+        .map_err(|error| ChainError { pass, error })?;
+        obs.inlined(pass, &records, scan);
+        obs.end(pass, mf);
+        verify_after(mf, stage, pass);
+        Ok(callees)
+    }
+}
+
 /// Run the MIR verifier on `mf` when [`skull_mir::verify::checks_enabled`],
 /// panicking on a violation. `what` names the pass that just ran.
 #[inline(always)]
@@ -101,7 +127,7 @@ pub struct ChainError {
 /// of flat variants among the hoisted bodies.
 pub fn prepare_body(
     ws: &Workspace,
-    inliner: Inliner<'_>,
+    mut inliner: Inliner<'_>,
     mf: &mut MirFunc,
     name: &str,
     opts: &ChainOptions<'_>,
@@ -109,25 +135,10 @@ pub fn prepare_body(
 ) -> Result<HashSet<FuncRef>, ChainError> {
     debug_verify(mf, Stage::LOWERED, &"lowering");
     let floor = inliner.cache.census_enabled().then_some(mf.insts.len());
-    obs.begin(BodyPass::Inline, mf);
-    let (mut spliced, records, scan) = crate::inline_functions_with_plans(
-        ws,
-        inliner.scx,
-        inliner.self_ref,
-        mf,
-        inliner.cache,
-        inliner.plans,
-    )
-    .map_err(|error| ChainError {
-        pass: BodyPass::Inline,
-        error,
-    })?;
-    obs.inlined(BodyPass::Inline, &records, scan);
-    obs.end(BodyPass::Inline, mf);
-    verify_after(mf, Stage::LOWERED, BodyPass::Inline);
+    let mut spliced = inliner.run(ws, mf, BodyPass::Inline, Stage::LOWERED, obs)?;
     convert(ws, mf, name, opts, obs, floor)?;
     if opts.inline_hoisted {
-        inline_hoisted(ws, inliner, &mut mf.nested_fns, &mut spliced, obs)?;
+        inline_hoisted(ws, &mut inliner, &mut mf.nested_fns, &mut spliced, obs)?;
     }
     Ok(spliced)
 }
@@ -221,45 +232,21 @@ fn cleanup(
 /// those bodies out.
 fn inline_hoisted(
     ws: &Workspace,
-    inliner: Inliner<'_>,
+    inliner: &mut Inliner<'_>,
     nested: &mut [MirFunc],
     spliced: &mut HashSet<FuncRef>,
     obs: &mut dyn PassObserver,
 ) -> Result<(), ChainError> {
-    let Inliner {
-        scx,
-        self_ref,
-        cache,
-        plans,
-    } = inliner;
     for nf in nested.iter_mut() {
         // Flat variants embed source without going through an inline splice.
         if let Some(source) = nf.flat_variant_source {
             spliced.insert(source);
         }
-        let floor = cache.census_enabled().then_some(nf.insts.len());
-        obs.begin(BodyPass::HoistedInline, nf);
-        let (callees, records, scan) = crate::inline_functions_with_plans(
-            ws, scx, self_ref, nf, cache, plans,
-        )
-        .map_err(|error| ChainError {
-            pass: BodyPass::HoistedInline,
-            error,
-        })?;
-        obs.inlined(BodyPass::HoistedInline, &records, scan);
-        obs.end(BodyPass::HoistedInline, nf);
-        verify_after(nf, Stage::CONVERTED, BodyPass::HoistedInline);
-        spliced.extend(callees);
-        cleanup(ws, nf, BodyPass::HoistedInline, obs, floor)?;
-        let mut children = std::mem::take(&mut nf.nested_fns);
-        let inliner = Inliner {
-            scx,
-            self_ref,
-            cache: &mut *cache,
-            plans,
-        };
-        inline_hoisted(ws, inliner, &mut children, spliced, obs)?;
-        nf.nested_fns = children;
+        let pass = BodyPass::HoistedInline;
+        let floor = inliner.cache.census_enabled().then_some(nf.insts.len());
+        spliced.extend(inliner.run(ws, nf, pass, Stage::CONVERTED, obs)?);
+        cleanup(ws, nf, pass, obs, floor)?;
+        inline_hoisted(ws, inliner, &mut nf.nested_fns, spliced, obs)?;
     }
     Ok(())
 }

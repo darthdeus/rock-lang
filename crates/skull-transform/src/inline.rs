@@ -26,7 +26,7 @@ use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::concrete::ConcretePlans;
 use skull_mir::instance::Instance;
-use skull_mir::lower::{BackendFnAbiPlan, BackendFnAbiPlanHandle, ScalarCtx};
+use skull_mir::lower::{BackendFnAbiPlanHandle, ScalarCtx};
 use skull_mir::mir::*;
 use ustr::Ustr;
 
@@ -732,7 +732,6 @@ struct UseIndex {
     /// Dense by instruction id; a splice's fresh instructions grow it. Most
     /// values have one or two users, which then need no allocation.
     users: Vec<SmallVec<[UseSite; 2]>>,
-    affected: HashSet<UseSite>,
 }
 
 #[cfg(test)]
@@ -847,14 +846,10 @@ impl UseIndex {
             return (0, 0, 0);
         }
         let sites = std::mem::take(self.slot(from));
-        self.affected.clear();
         let mut instructions = 0;
         let mut terminators = 0;
         let replacements = ThreadCell::new(0usize);
         for site in sites {
-            if !self.affected.insert(site) {
-                continue;
-            }
             match site {
                 UseSite::Inst(iid) => {
                     self.remove_inst(func, iid);
@@ -1091,19 +1086,20 @@ fn live_closure_at(header: &MirFunc, func: &MirFunc) -> LiveClosure {
     let mut live = LiveClosure::default();
     let mut blocks = vec![header.entry];
     let mut insts = Vec::new();
-    while let Some(bid) = blocks.pop() {
-        if !live.blocks.insert(bid) {
-            continue;
+    live.cells.extend(header.params.iter().copied());
+    loop {
+        while let Some(bid) = blocks.pop() {
+            if !live.blocks.insert(bid) {
+                continue;
+            }
+            let block = &func.blocks[bid];
+            insts.extend(block.insts.iter().copied());
+            block.term.uses_each(&mut |value| insts.push(value));
+            skull_mir::cfg::successors(&block.term, |target| blocks.push(target));
         }
-        let block = &func.blocks[bid];
-        insts.extend(block.insts.iter().copied());
-        block.term.uses_each(&mut |iid| insts.push(iid));
-        skull_mir::cfg::successors(&block.term, |target| blocks.push(target));
-    }
-    for param in &header.params {
-        live.cells.insert(*param);
-    }
-    while let Some(iid) = insts.pop() {
+        let Some(iid) = insts.pop() else {
+            break;
+        };
         if !live.insts.insert(iid) {
             continue;
         }
@@ -1114,15 +1110,6 @@ fn live_closure_at(header: &MirFunc, func: &MirFunc) -> LiveClosure {
         });
         if let Inst::Lambda { entry, .. } = inst {
             blocks.push(*entry);
-        }
-        while let Some(bid) = blocks.pop() {
-            if !live.blocks.insert(bid) {
-                continue;
-            }
-            let block = &func.blocks[bid];
-            insts.extend(block.insts.iter().copied());
-            block.term.uses_each(&mut |value| insts.push(value));
-            skull_mir::cfg::successors(&block.term, |target| blocks.push(target));
         }
     }
     if let Some(cell) = header.resume_arg {
@@ -1258,7 +1245,7 @@ fn compact_live_template(
 ) -> (MirFunc, HashMap<Idx<Block>, Idx<Block>>) {
     let nested = std::mem::take(&mut source.nested_fns);
     let facts = ArenaFacts::of(&source);
-    compact_region(&source, &source, &facts, nested, live)
+    compact_region(&source, &source, &facts, nested, live, &[])
 }
 
 /// [`compact_live_template`] with the header fields (name, identity, params,
@@ -1270,6 +1257,7 @@ fn compact_region(
     facts: &ArenaFacts,
     nested: Vec<MirFunc>,
     live: &LiveClosure,
+    extra_cleanup_loads: &[Idx<Cell>],
 ) -> (MirFunc, HashMap<Idx<Block>, Idx<Block>>) {
     let source_inst_span = arena.emit_inst_span();
     let source_cell_span = arena.emit_cell_span();
@@ -1373,6 +1361,11 @@ fn compact_region(
             (!live.blocks.contains(block)).then_some(mapped)
         })
         .collect();
+    cleanup_load_cells.extend(
+        extra_cleanup_loads
+            .iter()
+            .filter_map(|cell| cell_map.get(cell).copied()),
+    );
     cleanup_load_cells.sort_unstable_by_key(|cell| u32::from(cell.into_raw()));
     cleanup_load_cells.dedup();
     template.inline_cleanup_load_cells = cleanup_load_cells;
@@ -1507,31 +1500,15 @@ fn compact_region(
 /// whole arena, which made many lambdas in one large body quadratic.
 pub(crate) fn compact_split_body(header: &MirFunc, arena: &MirFunc, facts: &ArenaFacts) -> MirFunc {
     let live = live_closure_at(header, arena);
-    let (mut compact, _) = compact_region(header, arena, facts, Vec::new(), &live);
+    let (mut compact, _) = compact_region(
+        header,
+        arena,
+        facts,
+        Vec::new(),
+        &live,
+        &arena.inline_cleanup_load_cells,
+    );
     compact.param_default_materialized = arena.param_default_materialized.clone();
-    if !arena.inline_cleanup_load_cells.is_empty() {
-        // Live cells keep their relative order, so the compact id of a carried
-        // cell is its rank among the live cells.
-        let mut rank = HashMap::default();
-        for (id, _) in arena.cells.iter() {
-            if live.cells.contains(&id) {
-                let next = rank.len() as u32;
-                rank.insert(id, Idx::from_raw(comfy_la_arena::RawIdx::from_u32(next)));
-            }
-        }
-        let mut seen: HashSet<Idx<Cell>> =
-            compact.inline_cleanup_load_cells.iter().copied().collect();
-        for cell in &arena.inline_cleanup_load_cells {
-            if let Some(&mapped) = rank.get(cell)
-                && seen.insert(mapped)
-            {
-                compact.inline_cleanup_load_cells.push(mapped);
-            }
-        }
-        compact
-            .inline_cleanup_load_cells
-            .sort_unstable_by_key(|cell| u32::from(cell.into_raw()));
-    }
     compact
 }
 
@@ -1991,53 +1968,13 @@ fn get<'a>(
 /// `callee_instances`; a delivery record is only checked against it when one
 /// exists. A missing generic owner leaves the call residual rather than guessing
 /// a declaration-level body.
-enum Site {
-    /// `Inst::Call` — single (or void) result; `call_id` is the call's value.
-    Single {
-        bid: Idx<Block>,
-        idx: usize,
-        call_id: Idx<Inst>,
-        args: Vec<Idx<Inst>>,
-        inst: Instance,
-        abi: BackendFnAbiPlanHandle,
-    },
-    /// `Inst::CallMulti` — N leaves bound positionally into `dests`.
-    Multi {
-        bid: Idx<Block>,
-        idx: usize,
-        call_id: Idx<Inst>,
-        dests: Vec<Idx<Cell>>,
-        args: Vec<Idx<Inst>>,
-        inst: Instance,
-        abi: BackendFnAbiPlanHandle,
-    },
-}
-
-impl Site {
-    fn inst(&self) -> &Instance {
-        match self {
-            Site::Single { inst, .. } | Site::Multi { inst, .. } => inst,
-        }
-    }
-    fn fref(&self) -> FuncRef {
-        self.inst().func
-    }
-
-    fn abi(&self) -> &BackendFnAbiPlan {
-        match self {
-            Site::Single { abi, .. } | Site::Multi { abi, .. } => abi,
-        }
-    }
-    fn pos(&self) -> (Idx<Block>, usize) {
-        match self {
-            Site::Single { bid, idx, .. } | Site::Multi { bid, idx, .. } => (*bid, *idx),
-        }
-    }
-    fn call_id(&self) -> Idx<Inst> {
-        match self {
-            Site::Single { call_id, .. } | Site::Multi { call_id, .. } => *call_id,
-        }
-    }
+struct Site {
+    pos: (Idx<Block>, usize),
+    call_id: Idx<Inst>,
+    args: Vec<Idx<Inst>>,
+    dests: Option<Vec<Idx<Cell>>>,
+    inst: Instance,
+    abi: BackendFnAbiPlanHandle,
 }
 
 /// Resolve a lowered call's authoritative concrete owner. The delivery map is
@@ -2091,16 +2028,6 @@ fn call_target(
     Ok(Some((inst, abi)))
 }
 
-/// Whether candidate `cand` matches the call site's arg/result arity.
-fn arity_ok(cand: &CalleeBody, site: &Site) -> bool {
-    match site {
-        Site::Single { args, .. } => cand.func.params.len() == args.len() && cand.ret_arity <= 1,
-        Site::Multi { args, dests, .. } => {
-            cand.func.params.len() == args.len() && cand.ret_arity == dests.len()
-        }
-    }
-}
-
 /// Scan the caller for the next eligible call site (Call/CallMulti to a cached
 /// candidate with matching arity, not the caller itself), starting AT `resume`.
 ///
@@ -2150,59 +2077,44 @@ fn find_site(
         scan_stats.borrowed_block_scans += 1;
         scan_stats.instructions_scanned += insts.len().saturating_sub(start);
         for (idx, &iid) in insts.iter().enumerate().skip(start) {
-            let site = match &func.insts[iid] {
-                Inst::Call { func: fref, args } if *fref != self_ref => {
-                    scan_stats.call_instructions_examined += 1;
-                    let Some((inst, abi)) = call_target(func, iid, *fref, ws)? else {
-                        cache.rejection("missing_or_incomplete_concrete_owner");
-                        continue;
-                    };
-                    scan_stats.call_target_resolutions += 1;
-                    Site::Single {
-                        bid,
-                        idx,
-                        call_id: iid,
-                        args: args.clone(),
-                        inst,
-                        abi,
-                    }
-                }
-                Inst::CallMulti {
-                    dests,
-                    func: fref,
-                    args,
-                } if *fref != self_ref => {
-                    scan_stats.call_instructions_examined += 1;
-                    let Some((inst, abi)) = call_target(func, iid, *fref, ws)? else {
-                        cache.rejection("missing_or_incomplete_concrete_owner");
-                        continue;
-                    };
-                    scan_stats.call_target_resolutions += 1;
-                    Site::Multi {
-                        bid,
-                        idx,
-                        call_id: iid,
-                        dests: dests.clone(),
-                        args: args.clone(),
-                        inst,
-                        abi,
-                    }
-                }
+            let (fref, args, dests) = match &func.insts[iid] {
+                Inst::Call { func, args } => (*func, args, None),
+                Inst::CallMulti { func, args, dests } => (*func, args, Some(dests)),
                 _ => continue,
             };
-            let candidate = get(cache, ws, scx, site.inst(), concrete_plans)?;
+            if fref == self_ref {
+                continue;
+            }
+            scan_stats.call_instructions_examined += 1;
+            let Some((inst, abi)) = call_target(func, iid, fref, ws)? else {
+                cache.rejection("missing_or_incomplete_concrete_owner");
+                continue;
+            };
+            scan_stats.call_target_resolutions += 1;
+            let site = Site {
+                pos: (bid, idx),
+                call_id: iid,
+                args: args.clone(),
+                dests: dests.cloned(),
+                inst,
+                abi,
+            };
+            let candidate = get(cache, ws, scx, &site.inst, concrete_plans)?;
             let Some(cand) = candidate else {
                 continue;
             };
-            let reason = if cand.subject != *site.inst() {
+            let reason = if cand.subject != site.inst {
                 Some("candidate_subject_mismatch")
-            } else if cand.abi.as_ref() != site.abi() {
+            } else if cand.abi.as_ref() != site.abi.as_ref() {
                 Some("candidate_abi_mismatch")
-            } else if cand.abi.result_lanes() != site.abi().result_lanes() {
-                Some("candidate_result_lanes_mismatch")
-            } else if !arity_ok(cand, &site) {
+            } else if cand.func.params.len() != site.args.len()
+                || site
+                    .dests
+                    .as_ref()
+                    .map_or(cand.ret_arity > 1, |dests| cand.ret_arity != dests.len())
+            {
                 Some("candidate_arity_mismatch")
-            } else if site.inst().args.is_empty()
+            } else if site.inst.args.is_empty()
                 && cell_budget + cand.budget_cells() + cand.func.params.len() > CELL_BUDGET
                 && cell_budget + cand.budget_cells() + cand.func.params.len()
                     - site_coalesced_cells(func, cand, &site, pinned)
@@ -2235,8 +2147,7 @@ fn site_coalesced_cells(
     site: &Site,
     pinned: &HashSet<Idx<Cell>>,
 ) -> usize {
-    let (Site::Single { bid, idx, args, .. } | Site::Multi { bid, idx, args, .. }) = site;
-    for_each_coalesced(func, cand, args, (*bid, *idx), pinned, |_, _| {})
+    for_each_coalesced(func, cand, &site.args, site.pos, pinned, |_, _| {})
 }
 
 /// Charge each callee parameter the splice copied (rather than coalesced onto
@@ -2935,10 +2846,10 @@ fn splice(
 ) -> Result<(CloneMapStats, usize), CompilerError> {
     scratch.added_blocks.clear();
     let callee = &cand.func;
-    let (bid, idx) = site.pos();
-    let (Site::Single { args, .. } | Site::Multi { args, .. }) = &site;
-    let site_tree = func.bound_trees.remove(&site.call_id());
-    let site_resolved_tree = func.resolved_bound_trees.remove(&site.call_id());
+    let (bid, idx) = site.pos;
+    let args = &site.args;
+    let site_tree = func.bound_trees.remove(&site.call_id);
+    let site_resolved_tree = func.resolved_bound_trees.remove(&site.call_id);
     let coalesced_cells = coalesce_overrides(func, cand, args, (bid, idx), pinned, scratch);
     let maps = clone_body(func, callee, scratch, cand.kind);
     let repack_mark = func.insts.len();
@@ -2969,7 +2880,7 @@ fn splice(
     for &bid in scratch.block_map.values() {
         uses.add_term(func, bid);
     }
-    uses.remove_inst(func, site.call_id());
+    uses.remove_inst(func, site.call_id);
     match cand.kind {
         Kind::Straight => splice_straight(func, &site, cand, scratch, uses, &forwarded, census),
         Kind::General => splice_general(func, &site, cand, scratch, uses),
@@ -2985,7 +2896,7 @@ fn bind_params(
     uses: &mut UseIndex,
     prefix: &mut Vec<Idx<Inst>>,
 ) {
-    let (Site::Single { args, .. } | Site::Multi { args, .. }) = site;
+    let args = &site.args;
     for (i, (param, &arg)) in cand.func.params.iter().zip(args).enumerate() {
         if scratch.coalesced[i] {
             continue;
@@ -3015,7 +2926,7 @@ fn splice_straight(
     census: &mut InlineScanStats,
 ) {
     let callee = &cand.func;
-    let (bid, idx) = site.pos();
+    let (bid, idx) = site.pos;
     let old = std::mem::take(&mut func.blocks[bid].insts);
     let mut new_insts = old[..idx].to_vec();
     bind_params(func, site, cand, scratch, uses, &mut new_insts);
@@ -3027,8 +2938,8 @@ fn splice_straight(
             .filter(|inst| !forwarded.iter().any(|(read, _)| read == inst)),
     );
 
-    match site {
-        Site::Multi { dests, .. } => {
+    match &site.dests {
+        Some(dests) => {
             let values = match &callee.blocks[callee.entry].term {
                 Term::Return(values) => values,
                 _ => unreachable!("straight candidate entry must end in Return"),
@@ -3044,7 +2955,8 @@ fn splice_straight(
             new_insts.extend_from_slice(&old[idx + 1..]);
             func.blocks[bid].insts = new_insts;
         }
-        Site::Single { call_id, .. } => {
+        None => {
+            let call_id = site.call_id;
             // Preserve the old straight-line MIR shape: the returned value
             // replaces the call at its exact indexed users, including uses in
             // successor blocks. No bridge cell or whole-caller scan is needed.
@@ -3055,9 +2967,9 @@ fn splice_straight(
                 {
                     Some(value) => value,
                     None => {
-                        func.insts[*call_id] = Inst::Const(Lit::Nil);
-                        new_insts.push(*call_id);
-                        *call_id
+                        func.insts[call_id] = Inst::Const(Lit::Nil);
+                        new_insts.push(call_id);
+                        call_id
                     }
                 },
                 _ => unreachable!("straight candidate entry must end in Return"),
@@ -3065,8 +2977,8 @@ fn splice_straight(
             new_insts.extend_from_slice(&old[idx + 1..]);
             func.blocks[bid].insts = new_insts;
             let binding_started = census.enabled.then(Instant::now);
-            if to != *call_id {
-                let (instructions, terminators, replacements) = uses.replace(func, *call_id, to);
+            if to != call_id {
+                let (instructions, terminators, replacements) = uses.replace(func, call_id, to);
                 census.targeted_binding_users += instructions;
                 census.targeted_binding_terminators += terminators;
                 census.targeted_binding_replacements += replacements;
@@ -3090,7 +3002,7 @@ fn splice_general(
     scratch: &mut InlineScratch,
     uses: &mut UseIndex,
 ) {
-    let (bid, idx) = site.pos();
+    let (bid, idx) = site.pos;
     let callee = &cand.func;
     let entry_clone = scratch.block_map[&callee.entry];
 
@@ -3110,15 +3022,16 @@ fn splice_general(
     // Single-result: a result cell read back in the continuation. Repurpose the
     // call inst id in place as `Load(rc)` at the front of `cont` so downstream
     // refs (single-block, all in `cont`) resolve unchanged.
-    let result_cell = match site {
-        Site::Single { call_id, .. } => {
+    let result_cell = match &site.dests {
+        None => {
+            let call_id = site.call_id;
             let rc = func.new_cell(None);
             func.cells[rc].producer = CellProducer::InlineResult;
-            func.insts[*call_id] = Inst::Load(rc);
-            func.blocks[cont].insts.insert(0, *call_id);
+            func.insts[call_id] = Inst::Load(rc);
+            func.blocks[cont].insts.insert(0, call_id);
             Some(rc)
         }
-        Site::Multi { .. } => None,
+        Some(_) => None,
     };
 
     // Prefix: before | arg-stores; Goto the cloned entry. Coalesced params are
@@ -3138,8 +3051,8 @@ fn splice_general(
             _ => continue,
         };
         uses.remove_term(func, nb);
-        match site {
-            Site::Single { .. } => {
+        match &site.dests {
+            None => {
                 let rc = result_cell.unwrap();
                 let v = match vs.first() {
                     Some(v) => *v,
@@ -3154,7 +3067,7 @@ fn splice_general(
                 func.blocks[nb].insts.push(st);
                 uses.add_inst(func, st);
             }
-            Site::Multi { dests, .. } => {
+            Some(dests) => {
                 for (dest, rv) in dests.iter().zip(vs.iter()) {
                     let st = func.alloc_inst(Inst::Store {
                         cell: *dest,
@@ -3188,18 +3101,7 @@ fn splice_general(
 /// each, including ones the inlined bodies themselves introduced). These are the
 /// caller chunk's INLINE codegen dependencies: incremental emit must re-emit
 /// `func` when any of them change.
-pub fn inline_functions_with_plans(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    self_ref: FuncRef,
-    func: &mut MirFunc,
-    cache: &mut InlineCache,
-    concrete_plans: &ConcretePlans,
-) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>, InlineScanStats), CompilerError> {
-    inline_functions_inner(ws, scx, self_ref, func, cache, concrete_plans)
-}
-
-fn inline_functions_inner(
+pub(crate) fn inline_functions_with_plans(
     ws: &Workspace,
     scx: &ScalarCtx,
     self_ref: FuncRef,
@@ -3258,10 +3160,10 @@ fn inline_functions_inner(
         else {
             break;
         };
-        let pos = site.pos();
-        let fref = site.fref();
+        let pos = site.pos;
+        let fref = site.inst.func;
         if cache.census_enabled {
-            scan_stats.spliced_keys.push(site.inst().clone());
+            scan_stats.spliced_keys.push(site.inst.clone());
         }
         let original_calls = original_calls.get_or_insert_with(|| {
             top.iter()
@@ -3274,7 +3176,7 @@ fn inline_functions_inner(
                 })
                 .collect()
         });
-        let transitive = !original_calls.contains(&site.call_id());
+        let transitive = !original_calls.contains(&site.call_id);
         if uses.is_none() {
             let started = cache.census_enabled.then(Instant::now);
             let built = UseIndex::build(func);
@@ -3286,18 +3188,13 @@ fn inline_functions_inner(
             uses = Some(built);
         }
         let uses = uses.as_mut().expect("built above");
-        let argument_elements = match &site {
-            Site::Single { args, .. } | Site::Multi { args, .. } => args.len(),
-        };
-        let destination_elements = match &site {
-            Site::Single { .. } => 0,
-            Site::Multi { dests, .. } => dests.len(),
-        };
+        let argument_elements = site.args.len();
+        let destination_elements = site.dests.as_ref().map_or(0, Vec::len);
         let prefix = pos.1;
         let tail = func.blocks[pos.0].insts.len().saturating_sub(pos.1 + 1);
         // Re-borrow the candidate immutably for the splice (distinct from `func`).
         let (cands, census, scratch) = (&cache.cands, &mut cache.census, &mut cache.scratch);
-        let cand = cands[site.inst()]
+        let cand = cands[&site.inst]
             .as_ref()
             .expect("site implies a cached candidate");
         // SAFETY-of-borrows: `splice` mutates `func`, reads `cand` (in `cache`);
@@ -3312,8 +3209,7 @@ fn inline_functions_inner(
                 func.blocks.capacity(),
             )
         });
-        let result_cell =
-            usize::from(cand.kind == Kind::General && matches!(&site, Site::Single { .. }));
+        let result_cell = usize::from(cand.kind == Kind::General && site.dests.is_none());
         let blocks_before = func.blocks.len();
         let (maps, coalesced_cells) = splice(
             func,
