@@ -2,7 +2,6 @@
 mod abi_plan;
 mod common;
 mod gpu_layout;
-mod instance_args_subst_roundtrip;
 mod instance_identity;
 mod lower_concrete;
 mod monoty;

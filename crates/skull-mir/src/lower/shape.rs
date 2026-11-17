@@ -1700,40 +1700,7 @@ pub(crate) fn mono_nobox_value_shape(ws: &Workspace, ty: &MonoTy) -> Option<Valu
     })?
 }
 
-/// Rebuild the [`SpecSubst`] (callee generic `VarId` -> concrete type) for `fref`
-/// from a [`Vec<MonoTy>`] (trees in declaration order). The inliner holds only the
-/// arena-free key in its cache; this re-pairs it with the callee's generic
-/// `VarId`s to drive concrete lowering. An empty key belongs only to a
-/// non-generic declaration; an incomplete generic substitution has no key.
-/// The inverse of [`spec_subst_from_key`], and the E1 cut's premise: for a body
-/// emission actually writes, a [`Vec<MonoTy>`] carries nothing the [`SpecSubst`]
-/// does not.
-///
-/// `Some` only for a TOTAL rebuild -- every declared generic present in `subst`
-/// -- so the caller cannot mistake a partial answer for a key. This is what
-/// makes the two directions a round trip rather than a pair of lossy projections.
-///
-/// The declaration supplies the ORDER, which is the only thing a substitution
-/// lacks: a key is positional over `f.generics` and a subst is keyed by `VarId`.
-pub fn spec_key_from_subst(
-    ws: &Workspace,
-    fref: FuncRef,
-    subst: &SpecSubst,
-) -> Option<Vec<MonoTy>> {
-    let f = &ws.module(fref.module).functions[fref.func];
-    if f.generics.is_empty() {
-        return None;
-    }
-    let mut key: Vec<MonoTy> = Vec::with_capacity(f.generics.len());
-    for g in f.generics.iter() {
-        let Some(TypeExpr::Generic(var, _)) = static_ty(ws, *g) else {
-            return None;
-        };
-        key.push(subst.get(&var)?.clone());
-    }
-    Some(key)
-}
-
+/// Bind a concrete instance's argument types to the callee's generics in declaration order.
 pub fn spec_subst_from_key(ws: &Workspace, fref: FuncRef, key: &Vec<MonoTy>) -> SpecSubst {
     let f = &ws.module(fref.module).functions[fref.func];
     let mut subst = SpecSubst::default();

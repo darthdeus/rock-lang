@@ -1,12 +1,6 @@
 //! [`Instance`] is the ONE concrete-body identity, and [`MonoInterner`] is the
 //! one arena that makes it one.
 //!
-//! `spec_key_subst_roundtrip.rs` establishes that `(FuncRef, SpecKey)` and
-//! `(FuncRef, MonoSubst)` carry the same information. This file is the other
-//! half: that going through the ARENA -- which is what turns those into an
-//! identity with cheap equality -- loses nothing either, and that the symbol an
-//! instance publishes is the same encoder emission already spells a body with.
-//!
 //! Every arm here asserts its own population. A bridge that answered nothing,
 //! or a shape table that was empty, would otherwise read as a pass.
 
@@ -33,9 +27,6 @@ fn v2(ws: &bone_core::workspace::Workspace) -> MonoTy {
     }
 }
 
-/// The same shape table `spec_key_subst_roundtrip.rs` uses, so the two halves of
-/// the bridge are measured over one population rather than over whichever shapes
-/// each file happened to think of.
 fn arg_shapes(ws: &bone_core::workspace::Workspace) -> Vec<(&'static str, MonoTy)> {
     vec![
         ("scalar", MonoTy::Int),
@@ -82,6 +73,11 @@ fn interning_an_argument_list_round_trips_and_shares_ids_by_type() {
             &inst.arg_types(&interner),
             &vec![ty.clone()],
             "{what}: read back unchanged"
+        );
+        assert_eq!(
+            inst.subst(&ws, &interner).values().collect::<Vec<_>>(),
+            vec![ty],
+            "{what}: substitution binds the argument unchanged"
         );
     }
 
