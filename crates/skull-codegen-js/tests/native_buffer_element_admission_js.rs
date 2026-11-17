@@ -75,3 +75,19 @@ fn native_buffer_primitives_and_ffi_value_are_valid_controls() {
         "bool must have a concrete JS byte storage"
     );
 }
+
+#[test]
+fn unaligned_value_element_rejects_instead_of_reinterpreting_bytes() {
+    let error = emit_main(
+        r#"
+value Tiny { a: bool, b: bool }
+fn make_tiny(n: int) -> NativeBuffer<Tiny> { return native_buffer_alloc(n) }
+fn main() {
+    let buffer = make_tiny(1)
+    print("{buffer.len}")
+}
+"#,
+    )
+    .expect_err("a two-byte C element has no aligned TypedArray backing");
+    assert!(error.message.contains("multiple of 4"), "{}", error.message);
+}
