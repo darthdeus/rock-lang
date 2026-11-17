@@ -5,36 +5,8 @@ use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-
-// Fields this crate never reads are still shown through Debug in failure messages.
-#[allow(dead_code)]
-#[derive(Clone, Debug)]
-pub struct ReloadEvent {
-    pub n: u64,
-    pub files: Vec<PathBuf>,
-    pub decision: String, // "hot" | "restart"
-    pub compile_ms: f64,
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Debug)]
-pub struct CompileErrorEvent {
-    pub n: u64,
-    pub files: Vec<PathBuf>,
-    pub message: String,
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Debug)]
-pub enum Event {
-    Reload(ReloadEvent),
-    CompileError(CompileErrorEvent),
-    Ready,
-    Other(Value),
-}
 
 /// Backstop for `await_ready`: child spawn plus the seeded initial compile.
 /// Completion-led: ready or child death ends the wait; this only catches hangs.
@@ -49,9 +21,8 @@ pub struct StoneHarness {
     tempdir: tempfile::TempDir,
     child: Mutex<Child>,
     stdin: ChildStdin,
-    events: Arc<Mutex<Vec<Event>>>,
+    events: Arc<Mutex<Vec<Value>>>,
     stderr_buf: Arc<Mutex<String>>,
-    seq: AtomicU64,
 }
 
 impl StoneHarness {
@@ -90,7 +61,7 @@ impl StoneHarness {
         let stdout = child.stdout.take().expect("child stdout");
         let stderr = child.stderr.take().expect("child stderr");
 
-        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
         let events_w = events.clone();
 
         // stderr drain thread -- captures into a buffer so timeout panics
@@ -117,8 +88,7 @@ impl StoneHarness {
                 };
                 let kind = v.get("kind").and_then(|s| s.as_str()).unwrap_or("");
                 if kind == "event" {
-                    let ev = parse_event(&v);
-                    events_w.lock().unwrap().push(ev);
+                    events_w.lock().unwrap().push(v);
                 }
                 // responses are not captured in Phase A -- `ping`/`shutdown`
                 // are fire-and-forget for tests. Future phases may queue
@@ -132,7 +102,6 @@ impl StoneHarness {
             stdin,
             events,
             stderr_buf,
-            seq: AtomicU64::new(0),
         };
         h.await_ready();
         h
@@ -206,7 +175,7 @@ impl StoneHarness {
 
     /// Wait for `n_total` successful reloads, failing on any compile error.
     /// Tests expecting errors use `await_settled_after` and inspect `error_log`.
-    pub fn await_reload_count(&self, n_total: usize, timeout: Duration) -> Vec<ReloadEvent> {
+    pub fn await_reload_count(&self, n_total: usize, timeout: Duration) -> Vec<Value> {
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(error) = self.error_log().first() {
@@ -243,7 +212,7 @@ impl StoneHarness {
             .lock()
             .unwrap()
             .iter()
-            .filter(|event| matches!(event, Event::Reload(_) | Event::CompileError(_)))
+            .filter(|event| matches!(event["type"].as_str(), Some("reload" | "compile_error")))
             .count()
     }
 
@@ -254,7 +223,7 @@ impl StoneHarness {
     /// Use this for "make N writes, then assert how many reloads
     /// coalesced": the exact final count is host-dependent, but the
     /// settled count once events stop arriving is stable.
-    pub fn await_settled(&self, quiescent: Duration, timeout: Duration) -> Vec<ReloadEvent> {
+    pub fn await_settled(&self, quiescent: Duration, timeout: Duration) -> Vec<Value> {
         self.await_settled_impl(None, quiescent, timeout)
     }
 
@@ -270,7 +239,7 @@ impl StoneHarness {
         baseline: usize,
         quiescent: Duration,
         timeout: Duration,
-    ) -> Vec<ReloadEvent> {
+    ) -> Vec<Value> {
         self.await_settled_impl(Some(baseline), quiescent, timeout)
     }
 
@@ -279,7 +248,7 @@ impl StoneHarness {
         baseline: Option<usize>,
         quiescent: Duration,
         timeout: Duration,
-    ) -> Vec<ReloadEvent> {
+    ) -> Vec<Value> {
         let started = Instant::now();
         // First-event budget: the initial IncrementalProject::init takes ~17s at
         // full-suite load, so this must dwarf any per-compile latency. Each
@@ -330,29 +299,21 @@ impl StoneHarness {
         }
     }
 
-    /// Snapshot of all reload (success) events seen so far.
-    pub fn reload_log(&self) -> Vec<ReloadEvent> {
-        self.events
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|e| match e {
-                Event::Reload(r) => Some(r.clone()),
-                _ => None,
-            })
-            .collect()
+    pub fn reload_log(&self) -> Vec<Value> {
+        self.events_of("reload")
     }
 
-    /// Snapshot of all compile-error events seen so far.
-    pub fn error_log(&self) -> Vec<CompileErrorEvent> {
+    pub fn error_log(&self) -> Vec<Value> {
+        self.events_of("compile_error")
+    }
+
+    fn events_of(&self, kind: &str) -> Vec<Value> {
         self.events
             .lock()
             .unwrap()
             .iter()
-            .filter_map(|e| match e {
-                Event::CompileError(e) => Some(e.clone()),
-                _ => None,
-            })
+            .filter(|event| event["type"] == kind)
+            .cloned()
             .collect()
     }
 
@@ -364,7 +325,7 @@ impl StoneHarness {
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|e| matches!(e, Event::Ready));
+                .any(|event| event["type"] == "ready");
             if saw_ready {
                 return;
             }
@@ -425,20 +386,13 @@ impl StoneHarness {
             "child: {status}\nevents observed: {event_summary}\nchild stderr (tail):\n{err_tail}"
         )
     }
-
-    fn send(&mut self, cmd: &str, args: Value) {
-        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-        let msg = json!({"seq": seq, "cmd": cmd, "args": args});
-        let line = format!("{}\n", msg);
-        let _ = self.stdin.write_all(line.as_bytes());
-        let _ = self.stdin.flush();
-    }
 }
 
 impl Drop for StoneHarness {
     fn drop(&mut self) {
         // Ask politely first, then SIGKILL if the child wedges.
-        self.send("shutdown", json!({}));
+        let _ = writeln!(self.stdin, "{}", json!({"cmd": "shutdown"}));
+        let _ = self.stdin.flush();
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut child = self.child.lock().unwrap();
         loop {
@@ -461,47 +415,4 @@ fn settle_expectation(baseline: Option<usize>) -> String {
         || "the event stream to settle".to_string(),
         |n| format!("an event after baseline {n}"),
     )
-}
-
-fn parse_event(v: &Value) -> Event {
-    let ty = v.get("type").and_then(|s| s.as_str()).unwrap_or("");
-    match ty {
-        "ready" => Event::Ready,
-        "reload" => Event::Reload(ReloadEvent {
-            n: v.get("n").and_then(|n| n.as_u64()).unwrap_or(0),
-            files: v
-                .get("files")
-                .and_then(|f| f.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|s| s.as_str().map(PathBuf::from))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            decision: v
-                .get("decision")
-                .and_then(|s| s.as_str())
-                .unwrap_or("hot")
-                .to_string(),
-            compile_ms: v.get("compile_ms").and_then(|n| n.as_f64()).unwrap_or(0.0),
-        }),
-        "compile_error" => Event::CompileError(CompileErrorEvent {
-            n: v.get("n").and_then(|n| n.as_u64()).unwrap_or(0),
-            files: v
-                .get("files")
-                .and_then(|f| f.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|s| s.as_str().map(PathBuf::from))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            message: v
-                .get("message")
-                .and_then(|s| s.as_str())
-                .unwrap_or("")
-                .to_string(),
-        }),
-        _ => Event::Other(v.clone()),
-    }
 }

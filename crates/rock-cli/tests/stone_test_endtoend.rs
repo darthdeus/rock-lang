@@ -26,7 +26,7 @@ fn empty_initial_sources_ignore_output_and_compile_a_later_file() {
     std::fs::remove_file(h.root().join(".stone-test-out/old.rock")).unwrap();
     h.write_file("game.rock", "fn value() -> int { return 1 }\n");
     let log = h.await_reload_count(1, SETTLE_TIMEOUT);
-    assert_eq!(log.last().expect("first compile").decision, "restart");
+    assert_eq!(log.last().expect("first compile")["decision"], "restart");
 }
 
 #[test]
@@ -120,7 +120,7 @@ fn global_type_change_vec_to_arena_emits_restart_decision() {
     );
     let type_change = log.last().unwrap();
     assert_eq!(
-        type_change.decision, "restart",
+        type_change["decision"], "restart",
         "global type change must trigger restart, got: {:?}",
         type_change,
     );
@@ -217,7 +217,7 @@ fn function_body_change_keeps_hot_reload_decision() {
     let log = h.await_settled_after(baseline, QUIESCENT, SETTLE_TIMEOUT);
     assert!(log.len() >= 2);
     assert_eq!(
-        log.last().unwrap().decision,
+        log.last().unwrap()["decision"],
         "hot",
         "function body change must hot-reload, not restart: {:?}",
         log,
@@ -311,7 +311,7 @@ fn caller_body_edit_preserves_cross_module_generic_callback_abi() {
         &initial.replace("apply(7, unchanged)", "apply(17, unchanged)"),
     );
     let log = h.await_settled_after(baseline, QUIESCENT, SETTLE_TIMEOUT);
-    assert_eq!(log.last().expect("reload event").decision, "hot");
+    assert_eq!(log.last().expect("reload event")["decision"], "hot");
     let after = h.overlay_lua();
     assert!(!after.trim().is_empty(), "body edit must emit an overlay");
     let script = format!(
