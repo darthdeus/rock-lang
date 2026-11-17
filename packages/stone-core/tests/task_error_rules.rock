@@ -1,0 +1,142 @@
+struct TaskErrorProbe {
+    cleanups: int = 0,
+    sibling_steps: int = 0,
+}
+
+@intrinsic @nomangle inline(lua) fn task_error_try_call(f: fn()) -> bool = """
+    local ok = pcall(f)
+    return not ok
+"""
+
+@intrinsic @nomangle inline(js) fn task_error_try_call(f: fn()) -> bool = """
+    try { __rock_call(f); return false; }
+    catch (_) { return true; }
+"""
+
+co fn task_error_child(probe: TaskErrorProbe) -> Coroutine<Wait> {
+    defer { probe.cleanups += 1 }
+    yield wait_frame()
+    error("task child failed")
+}
+
+co fn task_error_during_prime() -> Coroutine<Wait> {
+    error("task prime failed")
+}
+
+co fn task_error_sibling(probe: TaskErrorProbe) -> Coroutine<Wait> {
+    while true {
+        probe.sibling_steps += 1
+        yield wait_frame()
+    }
+}
+
+@nomangle inline(lua) fn task_error_logs_begin() = """
+    _G.__rock_task_error_old_sink = _G.__rock_log_sink
+    _G.__rock_task_error_logs = {}
+    _G.__rock_log_sink = function(level, category, message)
+        if level == 0 then
+            local logs = _G.__rock_task_error_logs
+            logs[#logs + 1] = category .. ":" .. message
+        end
+    end
+"""
+
+@nomangle inline(lua) fn task_error_logs_end() -> string = """
+    local logs = _G.__rock_task_error_logs or {}
+    local errors = _G.__rock_logged_errors
+    if errors and errors.records and errors.take then
+        for _, record in ipairs(errors.records()) do
+            if string.find(record, "coroutine errored:", 1, true) then errors.take(record) end
+        end
+    end
+    _G.__rock_log_sink = _G.__rock_task_error_old_sink
+    _G.__rock_task_error_old_sink = nil
+    _G.__rock_task_error_logs = nil
+    return table.concat(logs, "\n")
+"""
+
+@nomangle inline(js) fn task_error_logs_begin() = """
+    __G.__rock_task_error_old_sink = __G.__rock_log_sink;
+    __G.__rock_task_error_logs = [];
+    __G.__rock_log_sink = function(level, category, message) {
+        if (level === 0) __G.__rock_task_error_logs.push(category + ":" + message);
+    };
+"""
+
+@nomangle inline(js) fn task_error_logs_end() -> string = """
+    var logs = __G.__rock_task_error_logs || [];
+    var errors = __G.__rock_logged_errors;
+    if (errors && errors.records && errors.take) {
+        var records = errors.records();
+        for (var i = 0; i < records.length; i++) {
+            if (String(records[i]).indexOf("coroutine errored:") >= 0) errors.take(records[i]);
+        }
+    }
+    __G.__rock_log_sink = __G.__rock_task_error_old_sink;
+    delete __G.__rock_task_error_old_sink;
+    delete __G.__rock_task_error_logs;
+    return logs.join("\n");
+"""
+
+@test
+fn raw_start_prime_error_releases_its_unreturned_task_state() {
+    let poller = CoroutinePoller { clock: task_clock_new() }
+    let raised = task_error_try_call(() => {
+        let _ = start(task_error_during_prime(), poller)
+    })
+
+    assert(raised, "raw start still propagates a constructor error")
+    assert_eq(poller.scope.live_count, 0, "an unreturned task does not leak its scope count")
+}
+
+@test
+fn child_error_reaches_poller_boundary_and_sibling_keeps_running() {
+    let probe = TaskErrorProbe {}
+    let poller = CoroutinePoller { clock: task_clock_new() }
+    let child = start(task_error_child(probe), poller)
+    let failed = run(poller, wait_for(child))
+    let sibling = run(poller, task_error_sibling(probe))
+    assert_eq(probe.sibling_steps, 1, "the sibling was eagerly primed")
+
+    task_error_logs_begin()
+    task_clock_advance(poller.clock, 1.0 / 60.0)
+    coroutine_poller_update(poller)
+    let logs = task_error_logs_end()
+
+    assert(logs.contains("CO:coroutine errored:") && logs.contains("task child failed"),
+        "the child's error reaches the poller boundary: {logs}")
+    assert_eq(probe.cleanups, 1, "the child's defer runs while the error propagates")
+    assert_eq(probe.sibling_steps, 2, "one task error does not stop the poller")
+    assert(failed.state.get() == null, "the failed poller-owned task is abandoned")
+    assert(sibling.state.get() != null, "the sibling remains live")
+    assert_eq(poller.entry_count, 1, "only the live sibling remains registered")
+}
+
+fn task_error_wait_predicate() -> bool {
+    error("wait predicate failed")
+    return false
+}
+
+co fn task_error_waiting(probe: TaskErrorProbe) -> Coroutine<Wait> {
+    defer { probe.cleanups += 1 }
+    yield wait_until(0, task_error_wait_predicate)
+}
+
+@test
+fn poller_wait_callback_error_kills_the_task_before_abandoning_it() {
+    let probe = TaskErrorProbe {}
+    let poller = CoroutinePoller { clock: task_clock_new() }
+    let task = run(poller, task_error_waiting(probe))
+    assert_eq(probe.cleanups, 0, "the cleanup is pending while the task is suspended")
+
+    task_error_logs_begin()
+    task_clock_advance(poller.clock, 1.0 / 60.0)
+    coroutine_poller_update(poller)
+    let logs = task_error_logs_end()
+
+    assert(logs.contains("CO:coroutine errored:") && logs.contains("wait predicate failed"),
+        "the poller logs the callback error: {logs}")
+    assert_eq(probe.cleanups, 1, "the callback failure kills the suspended coroutine")
+    assert(task.state.get() == null, "the failed task is abandoned")
+    assert_eq(poller.entry_count, 0)
+}

@@ -645,6 +645,28 @@ function __rock_defer_call(f, ...)
   __rock_defer_entering = true
   return __rock_defer_finish(base, xpcall(f, __rock_defer_mark, ...))
 end
+-- Only coroutines with terminal cleanup protect their step. On failure,
+-- feed their pending cleanup into the ordinary function defer unwinder.
+function __rock_coroutine_resume(f, s, arg)
+  local ok, val = xpcall(f, __rock_defer_mark, s, arg)
+  if ok then return val end
+  local base = __rock_defer_top
+  if s.__state == -1 then return __rock_defer_finish(base, false, val) end
+  s.__state = -1
+  if s.__on_killed then
+    __rock_defer_push(function() s.__on_killed(s) end)
+  end
+  if s.__defers then
+    for i = 1, #s.__defers do
+      local d = s.__defers[i]
+      __rock_defer_push(function() d(s) end)
+    end
+  end
+  local inner = s.__inner
+  s.__inner = nil
+  if inner then __rock_defer_push(function() __rock_coroutine_kill(inner) end) end
+  return __rock_defer_finish(base, false, val)
+end
 -- An xpcall message handler: the raise-site traceback of an error that was
 -- unwound through a defer, else the current one.
 function __rock_traceback(e)
@@ -2544,11 +2566,11 @@ mod tests {
             "expected the tagged+stamped frame table, got:\n{lua}"
         );
         assert!(
-            lua.contains("pcall(counter_0__step,"),
-            "expected name-referenced pcall, got:\n{lua}"
+            lua.contains("return counter_0__step(s, arg)"),
+            "expected a direct step call, got:\n{lua}"
         );
         // State machine: writes to the state field + a completed terminal -3
-        // (killed is -1, errored -2), over an ordinary CFG -- NOT the
+        // (killed is -1, interrupted is -2), over an ordinary CFG -- NOT the
         // emit-time goto-into-block re-entry labels.
         assert!(
             lua.contains(".__state ="),

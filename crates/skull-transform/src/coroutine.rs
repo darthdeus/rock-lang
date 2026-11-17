@@ -11,10 +11,9 @@
 //!   1. turns each `Term::Yield { value, resume }` block into `s.__state = k;
 //!      return value` (the `resume` block becomes a dispatch target),
 //!   2. turns a normal `return v` into `s.__return = v; s.__state = -3; return`
-//!      (-3 = completed normally, distinct from killed -1 / errored -2 so
-//!      `completed()` can tell a natural finish from a kill; every runtime
-//!      guard tests `< 0`, never an exact terminal). Both stamps (yield and
-//!      completion) are guarded on `state >= 0`: a body that killed its own
+//!      (-3 = completed normally, distinct from killed -1 so
+//!      `completed()` can tell a natural finish from a kill or error). Both stamps (yield and
+//!      completion) are guarded on `state != -1`: a body that killed its own
 //!      handle mid-run stays killed,
 //!   3. rewrites `CoroSetInner(x)` (the `await` pseudo-op) to `s.__inner = x`,
 //!   4. prepends a dispatch entry that branches on `s.__state` to the resume
@@ -625,7 +624,7 @@ pub fn transform_coroutine(
                     );
                 }
             }
-            // The stamp is guarded on `state >= 0` (mirror the completion
+            // The stamp is guarded on `state != -1` (mirror the completion
             // stamp): a body that killed its own handle mid-run must stay
             // killed, not resurrect via a positive resume state. The killed
             // arm returns nothing -- a dead coroutine's resume yields nil.
@@ -638,8 +637,8 @@ pub fn transform_coroutine(
                     field: ustr::Ustr::from(STATE),
                 },
             );
-            let zero = emit(&mut step, bid, Inst::Const(Lit::Int(0)));
-            let already_terminal = emit(&mut step, bid, Inst::IntLt(st, zero));
+            let killed = emit(&mut step, bid, Inst::Const(Lit::Int(-1)));
+            let already_terminal = emit(&mut step, bid, Inst::Eq(st, killed));
             let killed_bb = step.new_block();
             let stamp_bb = step.new_block();
             step.blocks[bid].term = Term::Branch {
@@ -670,7 +669,7 @@ pub fn transform_coroutine(
     let num_states = resume_of_state.len();
 
     // 3. Normal returns -> stash `s.__return`, mark completed (-3), bare
-    // return. The stamp is guarded on `state >= 0`: a body that killed its own
+    // return. The stamp is guarded on `state != -1`: a body that killed its own
     // handle mid-run (state already -1) must STAY killed -- neither clobber
     // the terminal to -3 (completed() would lie) nor keep a stashed result a
     // kill promised not to have.
@@ -706,8 +705,8 @@ pub fn transform_coroutine(
                     field: ustr::Ustr::from(STATE),
                 },
             );
-            let zero = emit(&mut step, bid, Inst::Const(Lit::Int(0)));
-            let already_terminal = emit(&mut step, bid, Inst::IntLt(st, zero));
+            let killed = emit(&mut step, bid, Inst::Const(Lit::Int(-1)));
+            let already_terminal = emit(&mut step, bid, Inst::Eq(st, killed));
             let killed_bb = step.new_block();
             let stamp_bb = step.new_block();
             step.blocks[bid].term = Term::Branch {
@@ -757,8 +756,7 @@ pub fn transform_coroutine(
     // LOGIC/values/spans are deliberately excluded so a layout-stable edit keeps
     // live coroutines running (the live-update feature). The ctor writes the
     // stamp; the step's entry (below) rejects a frame with a different one --
-    // through `error()`, so the pcall in `__advance` turns it into a clean
-    // errored kill.
+    // through `error()`, which propagates to the resumer.
     let mut canon = String::new();
     {
         use std::fmt::Write as _;
@@ -798,6 +796,47 @@ pub fn transform_coroutine(
 
     // 4. Dispatch entry: read s.__state, branch to each resume block; fall
     // through to the original entry (state 0). A chain of one block per state.
+    let entry = step.new_block();
+    let frame = emit(&mut step, entry, Inst::Load(s_cell));
+    let saved_state = emit(
+        &mut step,
+        entry,
+        Inst::Field {
+            base: frame,
+            field: ustr::Ustr::from(STATE),
+        },
+    );
+    // A raised step stays terminal without a protected call. A successful
+    // yield or return replaces this marker; explicit kill writes -1 instead.
+    let running = emit(&mut step, entry, Inst::Const(Lit::Int(-2)));
+    emit(
+        &mut step,
+        entry,
+        Inst::StoreField {
+            base: frame,
+            field: ustr::Ustr::from(STATE),
+            value: running,
+        },
+    );
+    let hook = emit(
+        &mut step,
+        entry,
+        Inst::Field {
+            base: frame,
+            field: ustr::Ustr::from("__on_resume"),
+        },
+    );
+    let nil = emit(&mut step, entry, Inst::Const(Lit::Nil));
+    let has_hook = emit(&mut step, entry, Inst::NotEq(hook, nil));
+    let call_hook = step.new_block();
+    emit(
+        &mut step,
+        call_hook,
+        Inst::CallValue {
+            callee: hook,
+            args: vec![frame],
+        },
+    );
     let orig_entry = step.entry;
     if num_states == 0 {
         let d = step.new_block();
@@ -808,17 +847,8 @@ pub fn transform_coroutine(
         let check_blocks: Vec<Idx<Block>> = (0..num_states).map(|_| step.new_block()).collect();
         for k in 0..num_states {
             let bid = check_blocks[k];
-            let sv = emit(&mut step, bid, Inst::Load(s_cell));
-            let st = emit(
-                &mut step,
-                bid,
-                Inst::Field {
-                    base: sv,
-                    field: ustr::Ustr::from(STATE),
-                },
-            );
             let kc = emit(&mut step, bid, Inst::Const(Lit::Int(k as i64 + 1)));
-            let eq = emit(&mut step, bid, Inst::Eq(st, kc));
+            let eq = emit(&mut step, bid, Inst::Eq(saved_state, kc));
             let else_bb = if k + 1 < num_states {
                 check_blocks[k + 1]
             } else {
@@ -835,9 +865,8 @@ pub fn transform_coroutine(
 
     // 4b. Layout-stamp check ABOVE the dispatch: a frame written by a
     // different layout (a live coroutine surviving a layout-shifting reload)
-    // must not be driven -- raise instead; `__advance`'s pcall turns it into a
-    // clean errored kill (on_killed fires, last_error explains, the poller
-    // logs). A fresh coroutine always matches (ctor + step emitted together).
+    // must not be driven. Cancel its old frame (including an awaited child),
+    // then raise. A fresh coroutine always matches (ctor + step emitted together).
     {
         let dispatch = step.entry;
         let chk = step.new_block();
@@ -853,6 +882,19 @@ pub fn transform_coroutine(
         let kc = emit(&mut step, chk, Inst::Const(Lit::Int(layout_hash)));
         let ne = emit(&mut step, chk, Inst::NotEq(lay, kc));
         let raise = step.new_block();
+        let kill = emit(
+            &mut step,
+            raise,
+            Inst::Global(ustr::Ustr::from("__rock_coroutine_kill")),
+        );
+        emit(
+            &mut step,
+            raise,
+            Inst::CallValue {
+                callee: kill,
+                args: vec![frame],
+            },
+        );
         let err_fn = emit(&mut step, raise, Inst::Global(ustr::Ustr::from("error")));
         let msg = emit(
             &mut step,
@@ -882,6 +924,14 @@ pub fn transform_coroutine(
         };
         step.entry = chk;
     }
+
+    step.blocks[entry].term = Term::Branch {
+        cond: has_hook,
+        then_bb: call_hook,
+        else_bb: step.entry,
+    };
+    step.blocks[call_hook].term = Term::Goto(step.entry);
+    step.entry = entry;
 
     // 5. The step is an ordinary fn `(s, __resume_arg)`.
     step.name = ustr::Ustr::from(format!("{}__step", func.name).as_str());

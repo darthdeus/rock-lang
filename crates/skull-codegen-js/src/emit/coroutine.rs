@@ -1,6 +1,7 @@
 //! Coroutine bodies and the JS coroutine constructor.
 
 use super::*;
+use skull_mir::mir::CoroHookKind;
 
 /// The code identities of `mf` and its nested bodies. Volatile build values
 /// are metadata, so a changed build clock does not read as a body edit.
@@ -116,7 +117,7 @@ pub(super) fn emit_coroutine_js(
 
 /// The JS Coroutine constructor + per-co-fn `__resume` (and `__advance` on the
 /// frame-slot channel), mirroring the Lua ctor contract field for field. The
-/// `try/catch` is the `pcall`; `undefined -> null` on the step's value so a
+/// cleanup protection matches Lua; `undefined -> null` on the step's value so a
 /// bare terminal return reads as nil.
 fn emit_js_constructor(
     plan: &skull_mir::lower::CoroutinePlan,
@@ -163,12 +164,16 @@ fn emit_js_constructor(
             js_string_lit(key)?
         ));
     }
-    // The step-raise recovery shared by both resume shapes: errored terminal,
-    // kill the delegated inner, run defers LIFO, fire on_killed.
-    let catch_body = "s.__state = -2; s.__error = (e && e.message !== undefined) ? e.message : e; \
-                      if (s.__inner) { __rock_coroutine_kill(s.__inner); s.__inner = null; } \
-                      __rock_coroutine_run_defers(s); \
-                      if (s.__on_killed) { __rock_call(s.__on_killed, s); }";
+    let step_call = if !defer_keys.is_empty()
+        || lowered
+            .hooks
+            .iter()
+            .any(|(kind, _)| *kind == CoroHookKind::OnKilled)
+    {
+        format!("__rock_coroutine_resume({step_name}, s, arg)")
+    } else {
+        format!("{step_name}(s, arg)")
+    };
     if let Some(ch) = channel {
         let mut box_fields = format!(
             "{{ __variant: s.{tag}, __ty: {ty}",
@@ -206,8 +211,7 @@ fn emit_js_constructor(
         return Ok(format!(
             "function {advance}(s, arg) {{\n\
              \x20 if (s.__state < 0) return true;\n\
-             \x20 if (s.__on_resume) __rock_call(s.__on_resume, s);\n\
-             \x20 try {{ {step_name}(s, arg); }} catch (e) {{ {catch_body} return true; }}\n\
+             \x20 {step_call};\n\
              \x20 return s.__state < 0;\n\
              }}\n\
              function {resume}(s, arg) {{\n\
@@ -228,9 +232,7 @@ fn emit_js_constructor(
     Ok(format!(
         "function {resume}(s, arg) {{\n\
          \x20 if (s.__state < 0) return null;\n\
-         \x20 if (s.__on_resume) __rock_call(s.__on_resume, s);\n\
-         \x20 var val;\n\
-         \x20 try {{ val = {step_name}(s, arg); }} catch (e) {{ {catch_body} return null; }}\n\
+         \x20 var val = {step_call};\n\
          \x20 return val === undefined ? null : val;\n\
          }}\n\
          function {name}({paramlist}) {{\n\

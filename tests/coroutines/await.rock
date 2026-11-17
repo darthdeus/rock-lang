@@ -3,6 +3,11 @@
 // yields, one value per resume, until the inner completes; then the outer
 // advances. A bare `inner()` statement in a co fn is a compile error.
 
+@intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
+    local ok = pcall(f)
+    return not ok
+"""
+
 co fn inner_vals() -> Coroutine<int, int, ()> {
     yield 1
     yield 2
@@ -266,19 +271,18 @@ fn test_yield_star_kill_propagates_two_deep() {
     print("kill2={KILL_LOG.len()}")
 }
 
-// ---- Error propagation ----
+// ---- Raised resume through await ----
 //
-// An inner coroutine's raise crosses the delegation
-// boundary (`yield_delegate_exit` re-raises the inner's last_error into the
-// outer), so the OUTER ends "errored" carrying the inner's message. Pinned for
-// BOTH delegate paths -- the flat-enum frame-slot channel and the boxed/scalar
-// path. A stamp-killed INNER must take the whole chain down loudly,
-// not read as a silent normal completion.
+// An inner coroutine's raise crosses the delegation boundary to the caller.
+// Both handles are terminal, neither is a normal completion, and later resumes
+// are no-ops. Pin both delegate paths: flat-enum frame slots and boxed/scalar.
 
 enum Ev {
     Tick(int),
     Act(() -> ()),
 }
+
+global FLAT_CHILD: Coroutine<Ev>? = null
 
 co fn inner_flat() -> Coroutine<Ev> {
     yield Ev::Tick(1)
@@ -287,7 +291,9 @@ co fn inner_flat() -> Coroutine<Ev> {
 
 co fn outer_flat() -> Coroutine<Ev> {
     yield Ev::Tick(0)
-    await inner_flat()
+    let child = inner_flat()
+    FLAT_CHILD = child
+    await child
     yield Ev::Tick(9)
 }
 
@@ -301,16 +307,23 @@ fn show(e: Ev?) -> string {
     }
 }
 
-@test(output = "Tick(0)\nTick(1)\nnil\nerrored\ntrue")
-fn test_yield_star_flat_inner_error_propagates() {
+@test(output = "Tick(0)\nTick(1)\ntrue\ndead\ntrue\nnil\ndead\ntrue")
+fn test_yield_star_flat_inner_error_reaches_caller() {
+    FLAT_CHILD = null
     let c = outer_flat()
     print(show(resume(c)))
     print(show(resume(c)))
-    print(show(resume(c)))
+    print(try_call(() => { let _ = resume(c) }))
     print(status(c))
-    let err = last_error(c)
-    print(err != null && err.contains("boom-flat"))
+    print(!completed(c))
+    print(show(resume(c)))
+    if let child = FLAT_CHILD {
+        print(status(child))
+        print(child.resume() == null)
+    }
 }
+
+global SCALAR_CHILD: Coroutine<int>? = null
 
 co fn inner_scalar() -> Coroutine<int> {
     yield 1
@@ -319,7 +332,9 @@ co fn inner_scalar() -> Coroutine<int> {
 
 co fn outer_scalar() -> Coroutine<int> {
     yield 0
-    await inner_scalar()
+    let child = inner_scalar()
+    SCALAR_CHILD = child
+    await child
     yield 9
 }
 
@@ -330,13 +345,18 @@ fn show_int(v: int?) -> string {
     return "{v}"
 }
 
-@test(output = "0\n1\nnil\nerrored\ntrue")
-fn test_yield_star_scalar_inner_error_propagates() {
+@test(output = "0\n1\ntrue\ndead\ntrue\nnil\ndead\ntrue")
+fn test_yield_star_scalar_inner_error_reaches_caller() {
+    SCALAR_CHILD = null
     let c = outer_scalar()
     print(show_int(resume(c)))
     print(show_int(resume(c)))
-    print(show_int(resume(c)))
+    print(try_call(() => { let _ = resume(c) }))
     print(status(c))
-    let err = last_error(c)
-    print(err != null && err.contains("boom-scalar"))
+    print(!completed(c))
+    print(show_int(resume(c)))
+    if let child = SCALAR_CHILD {
+        print(status(child))
+        print(child.resume() == null)
+    }
 }

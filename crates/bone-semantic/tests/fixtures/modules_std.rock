@@ -528,7 +528,6 @@
 // prelude: keys
 // prelude: keys_into
 // prelude: kill
-// prelude: last_error
 // prelude: le
 // prelude: len
 // prelude: length

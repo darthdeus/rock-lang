@@ -2003,30 +2003,13 @@ fn expect<T>(@unwraps value: T?, message: string) -> T {
 """
 
 @intrinsic inline(lua) fn status<Y, R, N>(c: Coroutine<Y, R, N>) -> string = """
-    if c.__state == -2 then return "errored" elseif c.__state < 0 then return "dead" else return "suspended" end
+    if c.__state < 0 then return "dead" else return "suspended" end
 """
 
-// Ran to its natural end (`return` / fall-off; terminal -3), as opposed to
-// killed (-1) or errored (-2) -- the only state where `result()` is
-// trustworthy: explicit `return`s are bone-coerced to R and a reachable
-// fall-off in a concrete non-unit co fn rejects at emit, so for a completed
-// coroutine `__return` holds the body's return value (nil iff R is unit or a
-// null-valued nullable). `status()` keeps reporting "dead" for both completed
-// and killed.
+// Only natural completion makes result() trustworthy. Cancellation and an
+// escaping error leave completed() false, even though status() is "dead".
 @intrinsic inline(lua) fn completed<Y, R, N>(c: Coroutine<Y, R, N>) -> bool = """
     return c.__state == -3
-"""
-
-// D6b: read the error message captured when a step-fn raised during a
-// `.resume()`. Returns `null` when the coroutine is suspended, dead
-// (killed), or completed normally. The runtime puts the coroutine into
-// the new "errored" terminal state on a step-fn raise; status() reports
-// "errored", subsequent resumes return null, and last_error() reads
-// whatever the body's `error("...")` raised. Avoid name collision with
-// the stdlib `extern(lua) fn error(message: string)` (the panic-style
-// thrower) -- that's a parking note from the design discussion.
-@intrinsic inline(lua) fn last_error<Y, R, N>(c: Coroutine<Y, R, N>) -> string? = """
-    return c.__error
 """
 
 // Generators-as-iterators: a `Coroutine<Y, R, ()>` iterates as itself via
@@ -2064,7 +2047,7 @@ fn next<Y, R>(c: Coroutine<Y, R, ()>) -> (bool, Y) {
 // on_killed hook. @nomangle: calls ITSELF by name and is called from kill()'s
 // inline(lua) body.
 @nomangle inline(lua) fn __rock_coroutine_kill(c: any) = """
-    if c.__state < 0 then return end
+    if c.__state == -1 or c.__state == -3 then return end
     c.__state = -1
     if c.__inner then __rock_coroutine_kill(c.__inner) end
     __rock_coroutine_run_defers(c)

@@ -1,11 +1,16 @@
-// Terminal states: completed, killed and errored.
+// Terminal states: completed and killed.
 //
 // ---- completed() ----
 //
-// The natural-finish terminal (-3) is distinct from killed (-1)
-// and errored (-2). It is the only state where `result()` is trustworthy --
-// the combinator layer (`take_result` in stone) keys on it to refuse
-// fabricating a nil-typed-as-R for killed/errored children.
+// The natural-finish terminal (-3) is distinct from killed (-1). It is the
+// only state where `result()` is trustworthy -- the combinator layer
+// (`take_result` in stone) keys on it to refuse fabricating a nil-typed-as-R
+// for a coroutine that did not finish normally.
+
+@intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
+    local ok = pcall(f)
+    return not ok
+"""
 
 global CP_LOG: [string] = []
 
@@ -24,7 +29,7 @@ co fn cp_boom() -> Coroutine<int> {
     error("boom-completed-probe")
 }
 
-@test(output = "pre:false done:true status:dead killed:false errored:false")
+@test(output = "pre:false done:true status:dead killed:false raised:true raised-status:dead complete:false later-null:true")
 fn test_completed_distinguishes_terminals() {
     let c = cp_done()
     resume(c)
@@ -40,9 +45,11 @@ fn test_completed_distinguishes_terminals() {
 
     let e = cp_boom()
     resume(e)
-    resume(e)
-    let errored = completed(e)
-    print("pre:{pre} done:{done} status:{s} killed:{killed} errored:{errored}")
+    let raised = try_call(() => { let _ = resume(e) })
+    let raised_status = status(e)
+    let complete = completed(e)
+    let later_null = e.resume() == null
+    print("pre:{pre} done:{done} status:{s} killed:{killed} raised:{raised} raised-status:{raised_status} complete:{complete} later-null:{later_null}")
 }
 
 co fn cp_falloff() -> Coroutine<int> {
@@ -59,16 +66,10 @@ fn test_unit_falloff_is_completed_and_kill_is_noop() {
     print("falloff:{f} kill-after:{completed(c)}")
 }
 
-// ---- Errored state ----
+// ---- Raised resume ----
 //
-// A step-fn raise during resume puts the
-// coroutine into a new "errored" terminal state, distinct from "dead".
-// resume returns null thereafter, status() reports "errored", and
-// last_error() returns the raised message.
-//
-// last_error() returns whatever Lua's `error()` builtin captured -- by
-// default Lua prepends "<chunk>:<line>:" to the user's message. We
-// substring-match in the test rather than asserting the full string.
+// A raise escapes resume. The coroutine is dead but is not reported as a
+// normal completion, and later resumes are no-ops.
 
 co fn bad() -> Coroutine<int> {
     yield 1
@@ -76,24 +77,18 @@ co fn bad() -> Coroutine<int> {
     yield 2
 }
 
-@test(output = "1\nnull\nerrored\ncaptured\nnull\nerrored")
-fn test_errored_state_basic() {
+@test(output = "1\ntrue\ndead\ntrue\nnull\ndead")
+fn test_raised_resume_is_terminal() {
     let c = bad()
     let v1 = c.resume()
     print(v1 ?? -1)                // 1
-    let v2 = c.resume()
-    if v2 == null { print("null") } else { print(v2) }  // "null"
-    print(c.status())              // errored
-    let msg = c.last_error() ?? ""
-    if msg.contains("BAD_MARKER") {
-        print("captured")
-    } else {
-        print("missing:{msg}")
-    }
-    // Subsequent resumes are no-ops; status / last_error remain.
+    let raised = try_call(() => { let _ = c.resume() })
+    print(raised)
+    print(c.status())
+    print(!c.completed())
     let v3 = c.resume()
     if v3 == null { print("null") } else { print(v3) }  // "null"
-    print(c.status())              // errored (terminal, idempotent)
+    print(c.status())
 }
 
 co fn clean() -> Coroutine<int> {
@@ -101,7 +96,7 @@ co fn clean() -> Coroutine<int> {
     yield 2
 }
 
-@test(output = "1\n2\nnull\ndead\nno_error\ndead")
+@test(output = "1\n2\nnull\ndead\ntrue\ndead")
 fn test_no_error_clean_path() {
     let c = clean()
     print(c.resume() ?? -1)        // 1
@@ -109,7 +104,7 @@ fn test_no_error_clean_path() {
     let v = c.resume()             // null (body fall-off transitions __state < 0)
     if v == null { print("null") } else { print(v) }
     print(c.status())              // "dead" (fall-off terminal)
-    print(c.last_error() ?? "no_error")  // "no_error" -- clean path didn't raise
+    print(c.completed())
     let v2 = c.resume()
     if v2 == null { /* dead */ }
     print(c.status())              // "dead" (idempotent)
@@ -118,6 +113,9 @@ fn test_no_error_clean_path() {
 global ERR_KILL_LOG: [string] = []
 
 co fn bad_with_hook() -> Coroutine<int> {
+    defer {
+        ERR_KILL_LOG.push("defer_fired")
+    }
     on_killed {
         ERR_KILL_LOG.push("hook_fired")
     }
@@ -125,29 +123,49 @@ co fn bad_with_hook() -> Coroutine<int> {
     error("body_raised")
 }
 
-// D6b: on_killed fires when the body raises -- the body's resources
-// need cleanup whether termination came from outside (kill) or inside
-// (raise). Idempotent: a follow-up explicit kill() does not re-fire.
-@test(output = "1\nhook_fired\nerrored\ncaptured\n1")
-fn test_errored_fires_on_killed() {
+// A body raise runs pending defers and on_killed exactly once before it
+// reaches the caller. A later kill on the dead handle does nothing.
+@test(output = "1\ntrue\ndead\ntrue\nnull\ndefer_fired,hook_fired\n2")
+fn test_resume_error_runs_cleanup_once() {
     ERR_KILL_LOG = []
     let c = bad_with_hook()
     let v = c.resume()
     print(v ?? -1)                 // 1
-    let v2 = c.resume()
-    if v2 == null { /* errored */ }
-    for label in ERR_KILL_LOG {
-        print(label)              // "hook_fired"
-    }
-    print(c.status())              // errored
-    let msg = c.last_error() ?? ""
-    if msg.contains("body_raised") {
-        print("captured")
-    } else {
-        print("missing:{msg}")
-    }
+    print(try_call(() => { let _ = c.resume() }))
+    print(c.status())
+    print(!completed(c))
+    if c.resume() == null { print("null") }
+    print(ERR_KILL_LOG.join(","))
     c.kill()
-    print(ERR_KILL_LOG.len())     // still 1 -- kill on errored coroutine no-ops
+    print(ERR_KILL_LOG.len())
+}
+
+global ON_RESUME_CALLS: int = 0
+
+co fn bad_on_resume() -> Coroutine<int> {
+    defer { ERR_KILL_LOG.push("resume-defer") }
+    on_killed { ERR_KILL_LOG.push("resume-killed") }
+    on_resume(() => {
+        ON_RESUME_CALLS += 1
+        if ON_RESUME_CALLS == 2 { error("on-resume-raised") }
+    })
+    yield 1
+    yield 2
+}
+
+@test(output = "1\ntrue\ndead\ntrue\nnull\nresume-defer,resume-killed\n2")
+fn test_on_resume_error_runs_cleanup_once() {
+    ERR_KILL_LOG = []
+    ON_RESUME_CALLS = 0
+    let c = bad_on_resume()
+    print(c.resume() ?? -1)
+    print(try_call(() => { let _ = c.resume() }))
+    print(c.status())
+    print(!c.completed())
+    if c.resume() == null { print("null") }
+    print(ERR_KILL_LOG.join(","))
+    c.kill()
+    print(ERR_KILL_LOG.len())
 }
 
 // ---- Killing its own handle ----

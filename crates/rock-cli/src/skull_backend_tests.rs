@@ -2007,6 +2007,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         live.expect_safe_restart(&v1);
     }
 
+    const EXPECT_LAYOUT_ERROR: &str = "local ok, err = pcall(pump); assert(not ok and tostring(err):find('frame layout changed', 1, true)); pump()";
+
     /// Layout drift, state renumber: yields are numbered by order, so a BodyOnly
     /// overlay that ADDS a yield point renumbers the state machine and a live
     /// coroutine's `__state` would dispatch to the wrong resume point (re-run or
@@ -2038,7 +2040,14 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         // renumbering: resume #2 stamp-kills the coroutine -> -1, no replay.
         assert_run(
             &live.baseline,
-            &["start()", "pump()", &overlay, "pump()", "pump()", "pump()"],
+            &[
+                "start()",
+                "pump()",
+                &overlay,
+                EXPECT_LAYOUT_ERROR,
+                "pump()",
+                "pump()",
+            ],
             "1\n-1\n-1\n-1",
             "a yield-renumbering overlay must stamp-kill the live coroutine, not teleport its resume point",
         );
@@ -2080,11 +2089,10 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
     }
 
-    /// A stamp-kill (or ANY error) of an outer coroutine suspended mid-`await`
+    /// A layout cancellation of an outer coroutine suspended mid-`await`
     /// must chain into the delegated inner: explicit `kill()` recurses through
-    /// `__inner` (firing the inner's on_killed), and the error path must match --
-    /// otherwise the inner is orphaned and its cleanup hook silently never runs
-    /// (found live: project mob soft-locked in attack state after a reload).
+    /// `__inner` (firing the inner's on_killed), and layout cancellation must match --
+    /// otherwise the inner is orphaned and its cleanup hook never runs.
     #[test]
     fn stamp_killed_outer_chains_kill_into_delegated_inner() {
         let prog = |extra: &str| {
@@ -2111,7 +2119,13 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         // pump #2: outer stamp-killed -> -1, and the inner's on_killed must fire.
         assert_run(
             &live.baseline,
-            &["start()", "pump()", &overlay, "pump()", "report()"],
+            &[
+                "start()",
+                "pump()",
+                &overlay,
+                EXPECT_LAYOUT_ERROR,
+                "report()",
+            ],
             "1\n-1\n1",
             "a stamp-killed outer must chain-kill its delegated inner (inner's on_killed fires exactly once)",
         );
@@ -2242,8 +2256,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         // Resuming the survivor: the v1 step's layout stamp (yield channel
         // widened by the Tick payload growing past the union width) rejects the
-        // v0 frame -- the coroutine dies cleanly through the pcall path and pump
-        // prints -1. Pre-stamp this CRASHED the consumer on the shifted frame
+        // v0 frame. The error reaches the caller and a later pump prints -1.
+        // Pre-stamp this crashed the consumer on the shifted frame
         // read, through the very tier the hot-reload contract once claimed was safe.
         assert_run(
             &live.baseline,
@@ -2253,7 +2267,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                 "_G.HOT_RELOAD = true",
                 &full1,
                 "print(_G.GEN ~= nil)",
-                "pump()",
+                EXPECT_LAYOUT_ERROR,
             ],
             "7\ntrue\n-1",
             "a shape-edit full reload must stamp-kill the surviving live coroutine, not corrupt it",

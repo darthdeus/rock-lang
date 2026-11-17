@@ -191,18 +191,9 @@ fn emit_coroutine_body(
     CoroutineBodyEmission { lua, body }
 }
 
-/// The constructor: build the state table (seed param fields + relocated
-/// on_killed/on_resume hooks) and return IT as the handle -- the object IS the
-/// frame, with `__`-prefixed method fields (`__resume`/`__result`/
-/// `__last_error`/`__status`/`__kill`/`__fire_hot_reload`, plus `__advance` on
-/// the frame-slot channel) driving the shared `<name>__step`. Method fields
-/// can't collide with user state: frame cells render as `c<N>`/`v<N>`. The
-/// state table is named `c<raw(s_cell)>` (NOT `s`) so a hook lambda
-/// referencing a frame cell renders `c<s>.c<slot>` — the same name the
-/// step's `FrameCtx` produces. A param's seeded field is `c<slot>` (its dense
-/// frame slot), which is BOTH the ctor's Lua param name and the table field
-/// name; the state-table local `c<raw(s_cell)>` keeps the raw id (a plain
-/// local, `s` has no slot).
+/// Construct the frame with step-bound resume/advance CodeRefs. Frame cells
+/// use dense `c<N>` slots; the frame local keeps its raw cell id so detached
+/// hooks and the step address the same fields.
 fn emit_constructor(
     plan: &CoroutinePlan,
     step_name: &str,
@@ -261,13 +252,16 @@ fn emit_constructor(
         ));
     }
 
-    // The pure readers (result/status/last_error/kill/fire_hot_reload) are NOT
-    // fields: they live in the stdlib as shared fns reading the frame directly
-    // (`c.__return`, `c.__state`, `__rock_coroutine_kill`). Only the step-bound
-    // methods remain per-construction. Each takes the object explicitly
-    // (`c.__X(c, ...)`) and reads ONLY its `s` param -- the bodies are already
-    // shared-fn-shaped, so hoisting them out of the ctor (Part B closure
-    // elimination) is a ctor-only change, no consumer churn.
+    let step_call = if !defer_keys.is_empty()
+        || lowered
+            .hooks
+            .iter()
+            .any(|(kind, _)| *kind == CoroHookKind::OnKilled)
+    {
+        format!("__rock_coroutine_resume({step_name}, s, arg)")
+    } else {
+        format!("{step_name}(s, arg)")
+    };
 
     // Frame-slot channel: the step writes yield leaves to reused `s.__y*` slots
     // and returns nothing. The OBJECT IS THE FRAME (one table per creation):
@@ -328,9 +322,7 @@ fn emit_constructor(
         return format!(
             "function {advance}(s, arg)\n\
              \x20 if s.{STATE} < 0 then return true end\n\
-             \x20 if s.__on_resume then s.__on_resume(s) end\n\
-             \x20 local ok, err = pcall({step_name}, s, arg)\n\
-             \x20 if not ok then s.{STATE} = -2; s.__error = err; if s.__inner then __rock_coroutine_kill(s.__inner); s.__inner = nil end; __rock_coroutine_run_defers(s); if s.__on_killed then s.__on_killed(s) end; return true end\n\
+             \x20 {step_call}\n\
              \x20 return s.{STATE} < 0\n\
              end\n\
              function {resume}(s, arg)\n\
@@ -357,10 +349,7 @@ fn emit_constructor(
     format!(
         "function {resume}(s, arg)\n\
          \x20 if s.{STATE} < 0 then return nil end\n\
-         \x20 if s.__on_resume then s.__on_resume(s) end\n\
-         \x20 local ok, val = pcall({step_name}, s, arg)\n\
-         \x20 if not ok then s.{STATE} = -2; s.__error = val; if s.__inner then __rock_coroutine_kill(s.__inner); s.__inner = nil end; __rock_coroutine_run_defers(s); if s.__on_killed then s.__on_killed(s) end; return nil end\n\
-         \x20 return val\n\
+         \x20 return {step_call}\n\
          end\n\
          function {name}({paramlist})\n\
          \x20 local {svar} = {{ {fields}, __resume = {resume_ref} }}\n\

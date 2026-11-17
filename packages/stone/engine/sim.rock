@@ -364,10 +364,10 @@ fn sim_teardown_procs() {
 // budget; true means the process should exit.
 fn runner_sim_advance(frame: int) -> bool {
     if SIM_HANDLE == null { return false }
-    // The poller removes an errored entry but retains this raw handle, so an
-    // error is terminal here just like natural coroutine completion.
+    // The poller abandons an errored task but retains this raw coroutine
+    // handle, so an error is terminal here just like natural completion.
     let state = status(SIM_HANDLE)
-    let terminal = state == "dead" || state == "errored" || SIM_END_REQUESTED
+    let terminal = state == "dead" || SIM_END_REQUESTED
     let over = SIM_FRAME_BUDGET > 0 && (current_tick - SIM_ENTRY_TICK_START) > SIM_FRAME_BUDGET
     if !terminal && !over { return false }
     perf_outer_frame_close(stone_get_time())

@@ -3,6 +3,11 @@
 // splice), on kill() (via __rock_coroutine_run_defers), and on error incl.
 // hot-reload stamp-kills (the ctor error branch). LIFO, per-body pcall'd.
 
+@intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
+    local ok = pcall(f)
+    return not ok
+"""
+
 global LOG: [string] = []
 
 co fn worker_done() -> Coroutine<int> {
@@ -155,7 +160,11 @@ fn test_co_defer_terminal_coverage() {
 
     let c = worker_error()
     resume(c)
-    resume(c)
+    let raised = try_call(() => { let _ = resume(c) })
+    assert(raised)
+    assert_eq(c.status(), "dead")
+    assert(!c.completed())
+    assert(c.resume() == null)
 
     let d = contains_str(LOG, "defer-done")
     let k = contains_str(LOG, "defer-killed")

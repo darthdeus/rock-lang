@@ -353,16 +353,9 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
     (
         "status",
         1,
-        Emission::Template(
-            "(function(c){return c.__state === -2 ? \"errored\" : (c.__state < 0 ? \"dead\" : \"suspended\");})($1)",
-        ),
+        Emission::Template("(function(c){return c.__state < 0 ? \"dead\" : \"suspended\";})($1)"),
     ),
     ("completed", 1, Emission::Template("($1.__state === -3)")),
-    (
-        "last_error",
-        1,
-        Emission::Template("(function(c){var v=c.__error;return v===undefined?null:v;})($1)"),
-    ),
     ("kill", 1, Emission::Template("__rock_coroutine_kill($1)")),
     (
         "fire_hot_reload",
@@ -1492,8 +1485,23 @@ function __rock_coroutine_run_defers(c) {
     }
   }
 }
+function __rock_coroutine_resume(f, s, arg) {
+  try { return f(s, arg); } catch (e) {
+    var base = __rock_defer_top;
+    if (s.__state === -1) __rock_defer_unwind(base, e);
+    s.__state = -1;
+    if (s.__on_killed) __rock_defer_push(() => __rock_call(s.__on_killed, s));
+    if (s.__defers) {
+      for (let d of s.__defers) __rock_defer_push(() => __rock_call(d, s));
+    }
+    var inner = s.__inner;
+    s.__inner = null;
+    if (inner) __rock_defer_push(() => __rock_coroutine_kill(inner));
+    __rock_defer_unwind(base, e);
+  }
+}
 function __rock_coroutine_kill(c) {
-  if (c.__state < 0) return;
+  if (c.__state === -1 || c.__state === -3) return;
   c.__state = -1;
   if (c.__inner) { __rock_coroutine_kill(c.__inner); }
   __rock_coroutine_run_defers(c);

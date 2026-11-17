@@ -1,6 +1,10 @@
-// JS-backend coroutine coverage (S4a): the echo shape (two yields, resume x3),
-// resume-with-value, terminal return via result(), status/kill/last_error.
-// Runs identically on luajit; the JS trampoline emission must match.
+// JS-backend coroutine coverage: yields, resume-with-value, terminal return,
+// status, kill and raised-resume propagation.
+
+@intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
+    local ok = pcall(f)
+    return not ok
+"""
 
 co fn echo_two() -> Coroutine<string> {
     yield "hello"
@@ -98,16 +102,14 @@ co fn boom() -> Coroutine<int> {
     error("kaboom")
 }
 
-// `last_error` is null-checked only: Lua prefixes `file:line:` to the raised
-// message while JS carries the bare message, so exact-print would diverge
-// (substring `contains` pulls stdlib `find`, out of the JS subset).
-@test(output = "1\nnil\nerrored\ntrue")
-fn errored_state_and_last_error() {
+@test(output = "1\ntrue\ndead\ntrue\nnil")
+fn raised_resume_reaches_caller() {
     let c = boom()
     print(c.resume())
-    print(c.resume())
+    print(try_call(() => { let _ = c.resume() }))
     print(c.status())
-    print(c.last_error() != null)
+    print(!c.completed())
+    if c.resume() == null { print("nil") } else { print("value") }
 }
 
 // Map iteration inside a co fn (materialize_frame must rewrite MapNext's framed

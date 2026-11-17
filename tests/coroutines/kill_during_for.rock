@@ -5,6 +5,11 @@
 // does not kill the generator, and a loop over an existing handle does not
 // own it.
 
+@intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
+    local ok = pcall(f)
+    return not ok
+"""
+
 global LOG: [string] = []
 
 co fn gen() -> Coroutine<int, (), ()> {
@@ -39,13 +44,18 @@ co fn outer_raises() -> Coroutine<int> {
     }
 }
 
-@test(output = "errored inner-defer,inner-killed")
+@test(output = "true\ndead\ntrue\nnull\ninner-defer,inner-killed\n2")
 fn test_outer_error_mid_for_kills_the_generator() {
     LOG = []
     let c = outer_raises()
     c.resume()
-    c.resume()
-    print("{c.status()} {LOG.join(",")}")
+    print(try_call(() => { let _ = c.resume() }))
+    print(c.status())
+    print(!c.completed())
+    if c.resume() == null { print("null") } else { print("value") }
+    kill(c)
+    print(LOG.join(","))
+    print(LOG.len())
 }
 
 // The loop ran to the end: the generator completed on its own, its defer

@@ -68,20 +68,24 @@ outer one. Coroutines with unit resume arguments can also be iterated with
 
 ## Completion and cleanup
 
-`status()` returns `"suspended"`, `"dead"`, or `"errored"`. Natural completion
-and cancellation both report `"dead"`; `completed()` distinguishes natural
+`status()` returns `"suspended"` or `"dead"`. Completion, cancellation, and
+errors report `"dead"`; `completed()` distinguishes natural
 completion from cancellation and error. `result()` supplies a value after a
 value-bearing return; it is null while suspended or after cancellation or
 error. A unit or nullable return can also yield a null result, so check
-`completed()` when the distinction matters. `last_error()` returns the captured
-message for an errored coroutine. Later resumes of a terminal coroutine return
-null.
+`completed()` when the distinction matters. An error escapes `resume` into
+its caller, unwinding any outer coroutines awaiting it. Every coroutine
+unwound by the error is terminal; later resumes return null.
 
 `kill()` cancels a live coroutine and is idempotent. Pending `defer` blocks run
 on normal scope exit and on termination, including cancellation and error.
-Cancellation propagates into an active `await` chain. During terminal cleanup,
-defers run in reverse order; an error in one is logged and does not prevent the
-remaining terminal defers from running.
+Cancellation propagates into an active `await` chain. Defers follow the
+ordinary function rule on error: pending defers run in reverse order, the
+original error propagates, and cleanup errors are appended to a string error
+(or logged for other error values). Coroutines with defers or an `on_killed`
+hook protect their step to perform this cleanup; other
+coroutines call their step directly. Cancellation keeps running all pending
+defers, logging a failing defer and continuing the remaining cleanup.
 
 A coroutine may declare `on_resume`, `on_killed`, and `on_hot_reload` hook
 blocks. `on_resume` runs at the start of each resume, including the first.

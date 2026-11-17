@@ -95,8 +95,7 @@ fn imgui_click_test_fixture(fail: bool = false, wide: bool = false) {
         activated = activated || hit
         if click.completed() { break }
     }
-    assert(click.completed() && click.last_error() == null,
-        "the production semantic click completes without a coroutine error")
+    assert(click.completed(), "the production semantic click completes")
     assert(activated, "the semantic click scrolls and activates the real bottom row button")
 }
 

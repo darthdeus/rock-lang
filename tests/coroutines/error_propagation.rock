@@ -1,0 +1,72 @@
+@intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = "local ok = pcall(f); return not ok"
+
+co fn fails_immediately() -> Coroutine<int> {
+    error("first-resume")
+    yield 1
+}
+
+@test
+fn first_resume_error_reaches_caller_and_is_terminal() {
+    let c = fails_immediately()
+    assert(try_call(() => { let _ = c.resume() }))
+    assert_eq(c.status(), "dead")
+    assert(!c.completed())
+    assert(c.resume() == null)
+}
+
+inline(lua) fn caught(body: fn()) -> string = """
+    local ok, err = pcall(body)
+    return ok and "no error" or tostring(err)
+"""
+inline(js) fn caught(body: fn()) -> string = """
+    try { __rock_call(body); return "no error"; }
+    catch (e) { return String(e.message === undefined ? e : e.message); }
+"""
+
+global CLEANUP: string = ""
+
+co fn failing_cleanup() -> Coroutine<int> {
+    on_killed { CLEANUP += "hook;"; error("hook failure") }
+    defer { CLEANUP += "first;" }
+    defer { CLEANUP += "second;"; error("cleanup failure") }
+    yield 1
+    error("original error")
+}
+
+@test
+fn cleanup_preserves_the_original_error_and_runs_remaining_defers() {
+    CLEANUP = ""
+    let c = failing_cleanup()
+    let _ = c.resume()
+    let message = caught(() => { let _ = c.resume() })
+    assert(message.contains("original error"))
+    assert(message.contains("defer raised while unwinding"))
+    assert(message.contains("cleanup failure"))
+    assert(message.contains("hook failure"))
+    assert_eq(CLEANUP, "second;first;hook;")
+    assert_eq(c.status(), "dead")
+    assert(!c.completed())
+    c.kill()
+    assert_eq(CLEANUP, "second;first;hook;")
+}
+
+global SELF: Coroutine<int>? = null
+
+co fn kills_itself_then_errors() -> Coroutine<int> {
+    on_killed { CLEANUP += "killed;" }
+    yield 1
+    if let c = SELF { c.kill() }
+    error("after cancellation")
+}
+
+@test
+fn error_after_self_cancellation_does_not_repeat_cleanup() {
+    CLEANUP = ""
+    let c = kills_itself_then_errors()
+    SELF = c
+    let _ = c.resume()
+    assert(try_call(() => { let _ = c.resume() }))
+    assert_eq(CLEANUP, "killed;")
+    assert_eq(c.status(), "dead")
+    assert(!c.completed())
+}

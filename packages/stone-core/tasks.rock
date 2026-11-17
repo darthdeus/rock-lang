@@ -140,9 +140,12 @@ pub fn start<R>(coroutine: Coroutine<Wait, R>, poller: CoroutinePoller,
     delay: float = 0) -> Task<R> {
     let active = if delay > 0.0 { Wait::Secs(delay) } else { Wait::Frame }
     let t = task_new_in(poller.scope, coroutine, poller.clock, active)
+    let returned = false
+    defer { if !returned { task_abandon(t) } }
     if delay <= 0.0 {
         let _ = poll(t, 0)
     }
+    returned = true
     return t
 }
 
@@ -198,13 +201,6 @@ pub fn task_poll_step<R>(pc: Task<R>, dt: float, frame: int) -> bool {
     if resume_now {
         let frame = resume(pc.coroutine)
         if frame == null {
-            // A raise inside the body must surface here: the poller is the
-            // top-level consumer and nothing else reads last_error, so an
-            // unreported errored coroutine is a swallowed error.
-            if status(pc.coroutine) == "errored" {
-                let err = last_error(pc.coroutine) ?? "<no message>"
-                log_error("CO", "coroutine errored: {err}")
-            }
             // Natural completion: state is already terminal (completed, -3),
             // so kill() is a no-op. Called for contract consistency — every
             // removal path goes through kill() so any future "eject alive"
@@ -217,6 +213,55 @@ pub fn task_poll_step<R>(pc: Task<R>, dt: float, frame: int) -> bool {
         resumed_state.active = frame
     }
     return true
+}
+
+// `start`/`poll`/`tick` stay raw so combinators see the original raise. The
+// poller uses this fixed-unit adapter at its owned boundary.
+@nomangle fn task_owned_step(task: Task, dt: float, frame: int, prime: bool) -> bool {
+    if prime { return task_poll_step(task, dt, frame) }
+    return task_tick_step(task, dt, frame)
+}
+
+fn task_step_error(task: Task, message: string) {
+    kill(task.coroutine)
+    log_error("CO", "coroutine errored: {message}")
+}
+
+@intrinsic @nomangle inline(lua) fn task_protected_step(
+    task: Task,
+    dt: float,
+    frame: int,
+    prime: bool,
+    on_error: fn(Task, string) -> (),
+) -> bool = """
+    local ok, live = pcall(task_owned_step, task, dt, frame, prime)
+    if not ok then
+        on_error(task, tostring(live))
+        return false
+    end
+    return live
+"""
+
+@intrinsic @nomangle inline(js) fn task_protected_step(
+    task: Task,
+    dt: float,
+    frame: int,
+    prime: bool,
+    on_error: fn(Task, string) -> (),
+) -> bool = """
+    try {
+        return task_owned_step(task, dt, frame, prime);
+    } catch (err) {
+        __rock_call(on_error, task, String(err));
+        return false;
+    }
+"""
+
+fn task_prime_owned(task: Task) {
+    let state = task.state.get() ?? return
+    if !task_protected_step(task, 0.0, state.clock.frame_index(), true, task_step_error) {
+        task_abandon(task)
+    }
 }
 
 // The poller borrows each coroutine through `live_task()` rather than owning
@@ -310,7 +355,7 @@ fn coroutine_poller_step(poller: CoroutinePoller, selected: Task?) {
             if let wanted = selected {
                 if !task_same_instance(task, wanted) { continue }
             }
-            if !task_tick_step(task, delta, frame) {
+            if !task_protected_step(task, delta, frame, false, task_step_error) {
                 if let current = entry.live_task() {
                     entry.last = current
                     if task_same_instance(current, task) {
@@ -332,10 +377,9 @@ fn coroutine_poller_step(poller: CoroutinePoller, selected: Task?) {
 
 /// Poll `t` unless it was already advanced this frame (an eager prime, a prior
 /// `poll`, or another `tick` stamped its clock frame). Returns whether the task is
-/// still live. A terminal task (completed / killed / errored) returns false
-/// WITHOUT re-polling: re-driving a dead frame re-fires its stale Wait's side
-/// effects (a Tween's update callback, an Until pred) and re-logs an errored
-/// body every poll. Combinators drive their children through `tick` so a child
+/// still live. A terminal task returns false WITHOUT re-polling: re-driving a
+/// dead frame re-fires its stale Wait's side effects (a Tween's update callback,
+/// an Until pred). Combinators drive their children through `tick` so a child
 /// re-reached within one frame advances at most once. Frame-aware on purpose,
 /// unlike the magic-free `poll`.
 pub fn tick<R>(t: Task<R>, dt: float) -> bool {
@@ -364,14 +408,12 @@ pub fn task_tick_step<R>(t: Task<R>, dt: float, frame: int) -> bool {
 //     exit and a kill of the combinator (or of a parent awaiting it) cascade
 //     to the whole child tree (structured concurrency; kill on an
 //     already-completed child is a no-op),
-//   - an errored child PROPAGATES: the combinator re-raises the child's error
-//     (killing the siblings via its defer) instead of reading the error as a
-//     completion. `await` re-raises an inner's error, so the failure travels
-//     all the way up the await chain. Race tie-break: children are scanned in
-//     slot order and a completion returns immediately, so a later sibling is
-//     not ticked that frame -- it dies suspended (never errors) rather than
-//     losing a would-be error. Joins tick ALL children before checking, so
-//     there every error surfaces.
+//   - a child error propagates through raw `tick`; the combinator's defer kills
+//     its siblings as the error travels up the await chain. Race tie-break:
+//     children are scanned in slot order and a completion returns immediately,
+//     so a later sibling is
+//     not ticked that frame -- it dies suspended rather than losing a would-be
+//     error. Joins tick all children before checking when none raises.
 //
 // The coroutine-argument forms start their children in an explicit poller's
 // store on its clock; the engine adds host-poller overloads.
@@ -384,8 +426,8 @@ pub fn task_tick_step<R>(t: Task<R>, dt: float, frame: int) -> bool {
 /// unit for R = (), and null is a legal value for nullable R. (A GENERIC-R co
 /// fn that falls off is still admitted -- unknown at the shared lowering -- so
 /// such a body instantiated non-unit can yield nil-as-R; don't write those.)
-/// Errored re-raises the child's error; killed / still-suspended raise instead
-/// of fabricating a nil typed as R.
+/// A child error propagates directly from `tick`; killed / still-suspended
+/// tasks raise instead of fabricating a nil typed as R.
 pub fn take_result<R>(t: Task<R>) -> R {
     if completed(t.coroutine) {
         // Neither fix the lint suggests exists here: `R` is generic so there is
@@ -394,25 +436,11 @@ pub fn take_result<R>(t: Task<R>) -> R {
         // rock: allow(transmute_of_nullable)
         return cast(result(t.coroutine))
     }
-    if status(t.coroutine) == "errored" {
-        let msg = last_error(t.coroutine) ?? "<no message>"
-        error("take_result: awaited task errored: {msg}")
-    }
     if status(t.coroutine) == "suspended" {
         error("take_result: task is still running")
     }
     error("take_result: awaited task was killed before completing")
     return phantom()   // unreachable: error() raised
-}
-
-/// Fail-fast probe for combinator loops: re-raise a child's error the frame it
-/// happens, so siblings die through the combinator's defer instead of running
-/// to completion under a doomed parent.
-pub fn raise_if_errored<R>(t: Task<R>) {
-    if status(t.coroutine) == "errored" {
-        let msg = last_error(t.coroutine) ?? "<no message>"
-        error("awaited task errored: {msg}")
-    }
 }
 
 /// Race two tasks; returns the index (0 or 1) of the first to complete.
@@ -424,10 +452,8 @@ pub co fn race2(a: Task, b: Task) -> Coroutine<Wait, int> {
     defer { stop(a); stop(b) }
     while true {
         let la = tick(a)
-        raise_if_errored(a)
         if !la { return 0 }
         let lb = tick(b)
-        raise_if_errored(b)
         if !lb { return 1 }
         yield wait_frame()
     }
@@ -443,13 +469,10 @@ pub co fn race3(a: Task, b: Task, c: Task) -> Coroutine<Wait, int> {
     defer { stop(a); stop(b); stop(c) }
     while true {
         let la = tick(a)
-        raise_if_errored(a)
         if !la { return 0 }
         let lb = tick(b)
-        raise_if_errored(b)
         if !lb { return 1 }
         let lc = tick(c)
-        raise_if_errored(c)
         if !lc { return 2 }
         yield wait_frame()
     }
@@ -469,7 +492,6 @@ pub co fn race_all(tasks: [Task]) -> Coroutine<Wait, int> {
     while true {
         for (i, t) in enumerate(tasks) {
             let live = tick(t)
-            raise_if_errored(t)
             if !live { return i }
         }
         yield wait_frame()
@@ -500,8 +522,6 @@ pub co fn join2<A, B>(a: Task<A>, b: Task<B>) -> Coroutine<Wait, (A, B)> {
     while true {
         let la = tick(a)
         let lb = tick(b)
-        raise_if_errored(a)
-        raise_if_errored(b)
         if !la && !lb { break }
         yield wait_frame()
     }
@@ -520,9 +540,6 @@ pub co fn join3<A, B, C>(a: Task<A>, b: Task<B>, c: Task<C>) -> Coroutine<Wait, 
         let la = tick(a)
         let lb = tick(b)
         let lc = tick(c)
-        raise_if_errored(a)
-        raise_if_errored(b)
-        raise_if_errored(c)
         if !la && !lb && !lc { break }
         yield wait_frame()
     }
@@ -543,7 +560,6 @@ pub co fn join_all<R>(tasks: [Task<R>]) -> Coroutine<Wait, [R]> {
         let any_live = false
         for t in tasks {
             if tick(t) { any_live = true }
-            raise_if_errored(t)
         }
         if !any_live { break }
         yield wait_frame()
@@ -626,7 +642,7 @@ pub fn run(poller: CoroutinePoller, coroutine: Coroutine<Wait>, delay: float = 0
     let t = task_new_in(poller.scope, coroutine, poller.clock, active)
     poll_task_owned(poller, t)
     if delay <= 0.0 {
-        let _ = poll(t, 0)
+        let _ = task_prime_owned(t)
     }
     return t
 }
@@ -645,7 +661,7 @@ pub fn run_into<T>(poller: CoroutinePoller, o: T, f: FieldRef<T, Task?>,
     let t = task_new_in(poller.scope, coroutine, poller.clock, Wait::Frame)
     field_set(o, f, t)
     poll_co_owned(poller, () => field_get(o, f), () => { field_set(o, f, null) })
-    let _ = poll(t, 0)
+    task_prime_owned(t)
     return t
 }
 
@@ -663,7 +679,7 @@ pub fn run_into<T>(poller: CoroutinePoller, e: Entity<T>, f: FieldRef<T, Task?>,
     )
 
     if e.get() != null {
-        let _ = poll(t, 0)
+        task_prime_owned(t)
     } else {
         task_abandon(t)
     }
@@ -682,7 +698,7 @@ pub fn run_while<T>(poller: CoroutinePoller, coroutine: Coroutine<Wait>, e: Enti
     let t = task_new_in(poller.scope, coroutine, poller.clock, active)
     poll_co_owned(poller, () => if e.get() != null { t } else { null })
     if delay <= 0.0 {
-        let _ = poll(t, 0)
+        let _ = task_prime_owned(t)
     }
     if e.get() == null { task_abandon(t) }
     return t

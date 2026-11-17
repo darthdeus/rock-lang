@@ -1401,33 +1401,13 @@ impl<'a> Builder<'a> {
         self.yield_delegate_exit(sub)
     }
 
-    /// The `await` epilogue (shared by the boxed + flat channels): clear the
-    /// active inner, re-raise the inner's error if any, evaluate to its return.
-    /// The inner object IS its frame, so `__error`/`__return` are direct field
-    /// reads (what the `__last_error`/`__result` methods read). Emitted into the
-    /// current block.
+    /// Clear the active inner and read its return after successful delegation.
     pub(crate) fn yield_delegate_exit(
         &mut self,
         sub: Idx<Inst>,
     ) -> Result<Idx<Inst>, CompilerError> {
         let clear = self.emit_cur(Inst::Const(Lit::Nil));
         self.emit_cur(Inst::CoroSetInner(clear));
-        let inner_err = self.read_field(sub, crate::names::ustr("__error"));
-        let nil2 = self.emit_cur(Inst::Const(Lit::Nil));
-        let has_err = self.emit_cur(Inst::NotEq(inner_err, nil2));
-        let raise = self.f.new_block();
-        let cont = self.f.new_block();
-        self.branch_to(has_err, raise, cont);
-        self.cur = raise;
-        // `error` is the Lua builtin (a global), NOT a rock fn — read it as a
-        // global and call indirectly, so re-raise works with no stdlib present.
-        let err_fn = self.emit_cur(Inst::Global(crate::names::ustr("error")));
-        self.emit_cur(Inst::CallValue {
-            callee: err_fn,
-            args: vec![inner_err],
-        });
-        self.f.set_term(self.cur, Term::Goto(cont));
-        self.cur = cont;
         Ok(self.read_field(sub, crate::names::ustr("__return")))
     }
 

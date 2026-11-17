@@ -5,7 +5,7 @@
 //! body, so they must re-emit too (the inline codegen-dep), even though a body edit
 //! never re-infers the callers.
 
-use crate::common::{body_id, emit_full_of, name_matches, ws_of, ws_with_stdlib};
+use crate::common::{body_id, definition_names, emit_full_of, name_matches, ws_of, ws_with_stdlib};
 use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
@@ -569,16 +569,9 @@ fn a_body_edit_to_a_generic_coroutine_reemits_its_specializations() {
     let ws = ws_with_stdlib(v1);
     let mid = skull::user_module_id(&ws).unwrap();
     let lua = emit_full(&ws, mid).expect("emit_full v1").0.lua;
-    let spec_steps = lua
-        .match_indices("__step(")
-        .map(|(i, _)| {
-            lua[..i]
-                .rsplit("function ")
-                .next()
-                .unwrap_or("")
-                .to_string()
-        })
-        .filter(|n| n.contains("_spec_"))
+    let spec_steps = definition_names(&lua)
+        .into_iter()
+        .filter(|name| name.contains("_spec_") && name.ends_with("__step"))
         .count();
     assert_eq!(
         spec_steps, 1,

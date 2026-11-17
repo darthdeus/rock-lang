@@ -16,7 +16,7 @@
 //!   - `build_vt_eq_defs` (emit.rs): `__rock_vt_eq["N"] = function(a, b) {..}`,
 //!     the type-aware eq registry for GC-carrying value structs.
 //!   - coroutine-op intrinsic templates (emit.rs:2530): `resume`/`result`/
-//!     `status`/`last_error`/`fire_hot_reload` render as `(function(c){..})(x)`
+//!     `status`/`fire_hot_reload` render as `(function(c){..})(x)`
 //!     IIFEs at the CONSUMER call site.
 //!
 //! The fixed runtime preamble in `lib.rs` (`JS_CALL_HELPER`, `JS_STRUCTURAL_EQ`,

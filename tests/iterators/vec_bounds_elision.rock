@@ -370,13 +370,15 @@ co fn writer(xs: [int]) -> Coroutine<int> {
 }
 
 @test(output = "0 1 true 10,11,")
-fn a_pop_across_a_yield_still_kills_the_coroutine() {
+fn a_pop_across_a_yield_raises_and_terminates_the_coroutine() {
     let xs = [1, 2, 3]
     let c = writer(xs)
     let a = c.resume() ?? -9
     let b = c.resume() ?? -9
     xs.pop()
-    // The resume reports the error by killing the coroutine.
+    assert(try_call(() => { let _ = c.resume() }))
+    assert_eq(c.status(), "dead")
+    assert(!c.completed())
     let dead = c.resume() == null
     print("{a} {b} {dead} {join(xs)}")
 }
