@@ -129,6 +129,7 @@ impl<'a> Builder<'a> {
         condition: bool,
         coerce_iterator: bool,
     ) -> Result<Idx<Inst>, CompilerError> {
+        let first_inst = self.f.insts.len();
         // Source cursor for instruction-level diagnostics: whatever is lowered
         // from here down came from `e` unless a nested `lower_expr` narrows it,
         // and the restore puts the enclosing expression back on the way out.
@@ -181,7 +182,10 @@ impl<'a> Builder<'a> {
                     ..
                 } if args.len() == 1 && self.ws.newtypes_by_name.contains_key(name)
             );
+        // Projections can forward an existing constructor from an inactive enum
+        // payload lane. Its logical type belongs to the producer, not this use.
         if !reuses_operand
+            && v.into_raw().into_u32() as usize >= first_inst
             && matches!(
                 self.f.insts[v],
                 Inst::MakeValueStruct { .. }
