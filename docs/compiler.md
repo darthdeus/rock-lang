@@ -136,3 +136,19 @@ code invoked during initialization can observe candidate definitions. Wire
 hooks run after publication, so their failure does not undo published code.
 `@wire(onchange=[...])` uses compiler dependency fingerprints to decide when a
 hook runs after a compatible publication, rather than observing runtime writes.
+
+## Splatting tuple boxes
+
+A tuple carrying a `nobox` element has two boxed forms, chosen by producer:
+a STORED box (container element, struct/record field, newtype wrap) is the
+multi-return wire put in a table -- leaves flat, `tuple_box_shape` is the
+oracle -- while an explicit `materialize(..)` box keeps one slot per element,
+the layout inline Lua reads. Readers decide by provenance: field/index reads
+and pattern destructures rebuild from the flat slots using the declared type
+(or, for a generic enum payload, the scrutinee's own instance), and the
+stdlib container bodies unpack flat at their generic returns. Any new reader
+of a packed splatting tuple must pick one of these two layouts explicitly;
+per-element reads of a stored box silently misgroup the leaves. Unifying on a
+single layout would require either giving `materialize` a new user contract
+(flat) or boxing stored elements per element (allocating per `nobox` leaf
+group); neither is justified until a measurement or a user need forces it.
