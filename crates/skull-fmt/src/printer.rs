@@ -405,6 +405,21 @@ impl<'a> Printer<'a> {
             return Doc::concat([sig, self.block(block)]);
         }
 
+        // A macro body's item declarations (`macro m() { fn f() {..} }`) are
+        // parked in `macro_items`, outside the block's statement list, so
+        // printing the block alone DELETED them. Keep such a body verbatim
+        // until the printer can interleave items with statements.
+        if f.is_macro && !f.macro_items.is_empty() {
+            let sig_start = f.keyword_span.unwrap_or(f.span);
+            let block_span = self.ast.b(&block).span;
+            let (sig_from, _) = sig_start.offset_range();
+            let (body_from, body_to) = block_span.offset_range();
+            return Doc::text(
+                self.slice_range(sig_from, body_from).to_string()
+                    + self.slice_range(body_from, body_to).trim_end(),
+            );
+        }
+
         let keyword = if f.is_macro { "macro" } else { "fn" };
         let coroutine = if f.is_coroutine { "co " } else { "" };
         let mut sig = vec![Doc::text(format!("{coroutine}{keyword} "))];
