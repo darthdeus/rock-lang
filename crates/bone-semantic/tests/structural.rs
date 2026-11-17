@@ -3,6 +3,7 @@
 // cross-module wiring, diagnostic spans). Type-level behavior belongs in
 // tests/fixtures/*.rock instead.
 
+use crate::test_support::{diagnostic_messages, diagnostics};
 use bone_core::modules::{NsAliases, PackageAliases};
 use bone_semantic::prelude::*;
 use rock_core::source_code::{IdentityStorage, PackageTag};
@@ -39,7 +40,7 @@ fn standalone_inline_module_paths_have_an_implicit_package() {
     )
     .expect("standalone module has an implicit package");
     assert!(ws.fragment_scopes.contains_key(&module.file));
-    let errors = all_errors(&ws);
+    let errors = diagnostics(&ws);
     assert!(errors.is_empty(), "{errors:?}");
 }
 
@@ -62,7 +63,7 @@ fn standalone_files_do_not_share_root_definitions() {
     let b = &ws.fragment_scopes[&ustr("b.rock")];
     assert_ne!(a.package, b.package);
     assert_ne!(a.package_name, b.package_name);
-    let errors = all_errors(&ws);
+    let errors = diagnostics(&ws);
     assert!(errors.is_empty(), "{errors:?}");
 }
 
@@ -148,27 +149,6 @@ fn fn_errors<'a>(ws: &'a Workspace, name: &str) -> &'a [CompilerError] {
 fn text<'a>(src: &'a str, span: &Span) -> &'a str {
     let (s, e) = span.offset_range();
     &src[s..e]
-}
-
-/// Every interface, lowering and body diagnostic in `ws`.
-fn all_errors(ws: &Workspace) -> Vec<&CompilerError> {
-    ws.modules
-        .iter()
-        .flat_map(|m| {
-            m.interface_errors
-                .iter()
-                .chain(m.lowering_errors.values().flatten())
-                .chain(
-                    ws.inference(m.id)
-                        .into_iter()
-                        .flat_map(|inf| inf.errors.values().flatten()),
-                )
-        })
-        .collect()
-}
-
-fn error_messages(ws: &Workspace) -> Vec<String> {
-    all_errors(ws).iter().map(|e| e.message.clone()).collect()
 }
 
 #[test]
@@ -302,7 +282,7 @@ fn missing_return_value_says_so_instead_of_unifying_unit() {
 
     let src = "fn f() -> string {\n    let w = undefined_symbol_here\n    let z = 1\n}";
     let ws = check(src).expect("recovered, not aborted");
-    let errs = all_errors(&ws);
+    let errs = diagnostics(&ws);
     assert!(
         errs.iter()
             .any(|e| e.message.contains("undefined_symbol_here")),
@@ -376,7 +356,7 @@ fn lambda_param_default_does_not_leak_into_fn_params() {
         ),
     ] {
         let ws = check(src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
-        let errors = all_errors(&ws);
+        let errors = diagnostics(&ws);
         assert!(errors.is_empty(), "{errors:?}");
         let fbody = fn_body(&ws, "f");
         let got: Vec<_> = fbody
@@ -655,7 +635,7 @@ fn cross_module_items_resolve() {
         );
         let mod_b = parse_in(b, "mod_b", (1, "shared"));
         let ws = semantic_pass(&mut [mod_a, mod_b]).expect("cross-module use should resolve");
-        let errors = error_messages(&ws);
+        let errors = diagnostic_messages(&ws);
         assert!(errors.is_empty(), "{b}: {errors:?}");
     }
 }
@@ -773,7 +753,7 @@ fn arena_borrow_errors(body: &str) -> Vec<String> {
          extern(lua) fn opaque()\n{body}"
     );
     modules.push(parse_rock_with_file(&src, "borrow.rock").unwrap());
-    error_messages(&semantic_pass(&mut modules).expect("valid Arena borrow fixture"))
+    diagnostic_messages(&semantic_pass(&mut modules).expect("valid Arena borrow fixture"))
 }
 
 #[test]
@@ -1032,7 +1012,7 @@ fn main() {
     .expect("semantic_pass");
     let expected = "No overload for `g` with argument types (float)\navailable overloads:\n  \
                     g(x: int) -> int\n  g(x: int) -> int\n  g(x: string) -> int\n  g(x: bool, y: int) -> int";
-    let msgs = error_messages(&ws);
+    let msgs = diagnostic_messages(&ws);
     assert!(msgs.iter().any(|m| m == expected), "{msgs:?}");
 }
 
@@ -1141,7 +1121,7 @@ fn identity_storage_errors(
     let std_module = parse_rock_with_file(std_src, std_file).expect("parse stdlib module");
     let mut user_module = parse_rock_with_file(user_src, "main.rock").expect("parse user module");
     user_module.package = package.map(|name| tag(1, name, Default::default()));
-    error_messages(&semantic_pass(&mut [std_module, user_module]).expect("semantic pass"))
+    diagnostic_messages(&semantic_pass(&mut [std_module, user_module]).expect("semantic pass"))
 }
 
 const MINI_ARENA_STORE: &str = "struct ArenaStore<T> {\n    generations: [int],\n    @identity_storage\n    data: [T],\n}\nstruct PlainStore<T> { data: [T] }";
@@ -1232,7 +1212,7 @@ fn identity_storage_exemption_follows_the_package_declaration() {
         module.package = Some(tag(1, "migrating", identity_storage));
         let ws = semantic_pass_into(Default::default(), &mut [module], &Default::default())
             .expect("semantic pass");
-        error_messages(&ws)
+        diagnostic_messages(&ws)
     };
     let exempt = declared(IdentityStorage::Exempt);
     assert!(exempt.is_empty(), "{exempt:?}");
@@ -1289,7 +1269,7 @@ fn identity_storage_module_exemption_follows_the_module_path() {
     };
 
     let ws = build(IdentityStorage::Enforced);
-    let errors = error_messages(&ws);
+    let errors = diagnostic_messages(&ws);
     for (_, _, mob) in files {
         assert!(
             errors
@@ -1318,7 +1298,7 @@ fn identity_storage_module_exemption_follows_the_module_path() {
     // A file without a header belongs to the root, which matches no prefix.
     assert!(ws.fragment_scopes.contains_key(&ustr("unheaded.rock")));
     assert_eq!(exemption_of("unheaded.rock"), None);
-    let errors = error_messages(&ws);
+    let errors = diagnostic_messages(&ws);
     assert!(
         !errors
             .iter()
@@ -1396,7 +1376,7 @@ fn annotation_resolution_errors(sources: &[(&str, &str)]) -> Vec<String> {
         .collect();
     match semantic_pass_with_aliases(&mut modules, &aliases(&[(1, "sample", &[])])) {
         Err(error) => vec![error.message],
-        Ok(ws) => error_messages(&ws),
+        Ok(ws) => diagnostic_messages(&ws),
     }
 }
 
@@ -1505,7 +1485,7 @@ fn standalone_struct_can_shadow_a_stdlib_name() {
     let source = "struct Scene { name: string }\nfn main() { let s = Scene { name: \"hi\" } print(s.name) }\n";
     modules.push(parse_rock_with_file(source, "user.rock").expect("user parses"));
     let ws = semantic_pass(&mut modules).expect("semantic pass");
-    let errors = all_errors(&ws);
+    let errors = diagnostics(&ws);
     assert!(errors.is_empty(), "{errors:?}");
 }
 
@@ -1737,7 +1717,7 @@ fn expanded_macros_are_not_callable_definitions() {
     );
     let checked = semantic_pass_with_aliases(&mut modules, &aliases)
         .expect("macro expansion and ordinary overloads still lower");
-    let errors = error_messages(&checked);
+    let errors = diagnostic_messages(&checked);
     assert!(errors.is_empty(), "{errors:?}");
 
     let stdlib = skull_parser::parse_module(SOURCE, ustr("<stdlib>/macro_provider.rock"))

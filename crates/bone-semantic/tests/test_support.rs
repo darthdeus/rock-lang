@@ -97,18 +97,36 @@ pub fn check_types(src: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Every body, lowering, and interface diagnostic in phase order.
+pub(crate) fn diagnostics(ws: &Workspace) -> Vec<&CompilerError> {
+    ws.inferences_iter()
+        .flat_map(|(_, inference)| inference.errors.values().flatten())
+        .chain(
+            ws.modules
+                .iter()
+                .flat_map(|module| module.lowering_errors.values().flatten()),
+        )
+        .chain(
+            ws.modules
+                .iter()
+                .flat_map(|module| module.interface_errors.iter()),
+        )
+        .collect()
+}
+
+pub(crate) fn diagnostic_messages(ws: &Workspace) -> Vec<String> {
+    diagnostics(ws)
+        .into_iter()
+        .map(|error| error.message.clone())
+        .collect()
+}
+
 /// The first body, lowering or interface error in source order: a fixture
 /// fails (and `@fail` passes) on it. `semantic_pass` Ok means "lowered and
 /// checked", not "no errors": these are collected per module and body.
 fn first_error(ws: &Workspace) -> Option<&CompilerError> {
-    ws.inferences_iter()
-        .flat_map(|(_, inf)| inf.errors.values().flatten())
-        .chain(
-            ws.modules
-                .iter()
-                .flat_map(|m| m.lowering_errors.values().flatten()),
-        )
-        .chain(ws.modules.iter().flat_map(|m| m.interface_errors.iter()))
+    diagnostics(ws)
+        .into_iter()
         .min_by_key(|e| e.location.offset)
 }
 
