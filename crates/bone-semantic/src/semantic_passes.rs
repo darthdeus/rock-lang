@@ -14,16 +14,10 @@ use crate::{hir::Module, prelude::*};
 struct LowerItem<'a> {
     module: &'a mut Module,
     rock_module: &'a Ast,
-    /// This file's module scope.
     fragment_scope: FragmentScope,
 }
 
-/// Best-effort classification of a decl's trailing generic defaults for the
-/// workspace map: walk from the last param backwards while each default
-/// classifies as index-free (a builtin or a bare named type that is not a
-/// sibling param), stop at the first param without one. Authoritative
-/// validation with spans is bone-lower's `validate_generic_defaults` -- an
-/// invalid decl stores a shorter (or empty) run here and rejects there.
+/// Record index-free trailing defaults. Lowering validates them and reports spans.
 fn trailing_generic_defaults(
     ast: &Ast,
     generics: &[skull_parser::Generic],
@@ -59,15 +53,11 @@ fn trailing_generic_defaults(
     out
 }
 
-/// The key the workspace maps use for a definition named `name` in module
-/// `path`: in a v1 fragment the canonical DefKey, so two same-named types in
-/// different logical modules stay distinct; stdlib items retain bare names.
 fn map_key(scope: &FragmentScope, path: &[ustr::Ustr], name: ustr::Ustr) -> ustr::Ustr {
     bone_core::modules::def_key(scope.package_name.as_ref(), path, name.as_str())
 }
 
-/// What one module declares that lowering reads workspace-wide before any
-/// body lowers.
+/// Declaration facts available before lowering the bodies.
 struct ModuleNominalFacts {
     /// Each nominal type's key and facts, in declaration order.
     types: Vec<(ustr::Ustr, NominalFacts)>,
@@ -107,7 +97,6 @@ fn module_nominal_facts(scope: &FragmentScope, rock_mod: &Ast) -> ModuleNominalF
     facts
 }
 
-/// Which kind of nominal type a definition is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NominalFlavor {
     Struct,
@@ -123,9 +112,6 @@ pub struct NominalFacts {
     pub defaults: Vec<bone_core::hir::GenericDefault>,
 }
 
-/// The nominal types `rock_mod` defines, keyed as the workspace maps key
-/// them (`scope` is the file's fragment scope),
-/// collected from the supplied AST with the same visitor as `lower_modules`.
 pub fn nominal_type_facts(
     scope: &FragmentScope,
     rock_mod: &Ast,
@@ -136,7 +122,6 @@ pub fn nominal_type_facts(
         .collect()
 }
 
-/// Expand macros and desugar the parse trees in place; reads no workspace.
 fn expand_and_desugar_trees(cooked: &mut [Ast]) {
     let _span = tracing::info_span!("expand_and_desugar").entered();
     skull_parser::macro_expand::expand_macros(cooked);
@@ -196,18 +181,8 @@ pub fn lower_modules_seeded(
         }
     }
 
-    // Record nominal generic parameters workspace-wide, BEFORE
-    // type lowering -- so the bare-generic check in `lower_type_expr_in` works
-    // cross-module (other modules aren't in `ws.modules` yet during this
-    // parallel lowering; this map is). Insert (not clear) so the incremental
-    // single-module re-lower augments rather than wipes other modules' entries.
-    // First declaration wins: a later duplicate (which gets its own `duplicate
-    // ... across modules` error below) must not overwrite the facts the first
-    // module lowers against, or the first module's uses fail first and mask it.
-    // A module refreshes its OWN entries (an arity edit must land); ownership
-    // tells those apart from another module's facts for the same name.
-    // Each module's facts are read in parallel; recording them stays in
-    // module order, since the first declaration wins.
+    // Resolve cross-module generic arity before lowering. Merge in module order so
+    // the first declaration wins, and let a relowered module refresh its own facts.
     let facts = rock_modules
         .par_iter()
         .map(|rock_mod| module_nominal_facts(&ws.fragment_scopes[&rock_mod.file], rock_mod))
@@ -226,8 +201,6 @@ pub fn lower_modules_seeded(
                     }
                 }
             }
-            // Whether this module may write `key`'s facts: a vacant slot, or one
-            // this same module owns (its own re-lower refreshing them).
             if ws
                 .type_generics
                 .get(&key)
@@ -257,7 +230,6 @@ pub fn lower_modules_seeded(
         })
         .collect_vec();
 
-    // Pass 1: struct & fn name declarations
     {
         let _span = tracing::info_span!("forward_decls").entered();
         let timer = Instant::now();
@@ -273,12 +245,8 @@ pub fn lower_modules_seeded(
     }
     let gap_timer = Instant::now();
 
-    // Annotation registry validation for NON-fn item positions. Fn items, params, and fields validate
-    // during lowering (build_function + the field/variant loops), which also
-    // covers nested/grafted fns. Resolve the raw name first so a v1 decorator
-    // that happens to share a compiler spelling cannot enter a builtin branch.
-    // Runs AFTER forward decls so the more specific rejections there (retired
-    // `@value`) fire first.
+    // Validate non-function annotations after more specific forward-declaration errors.
+    // Resolve their names so user decorators cannot enter builtin branches.
     for lower_item in items.iter_mut() {
         let mut ctx = LowerCtx::new(ws, lower_item.module, 0);
         let fragment_scope = lower_item.fragment_scope.clone();
@@ -300,8 +268,6 @@ pub fn lower_modules_seeded(
                     ItemKind::CompilerDirective(_)
                     | ItemKind::Comment(_)
                     | ItemKind::MacroInvocation { .. } => return Ok(()),
-                    // Module definitions are registered in build_namespaces; Module
-                    // blocks are walked via for_each_def_item, not as annotated items.
                     ItemKind::Use(_) | ItemKind::Module(_) => return Ok(()),
                 };
                 let mut item_scope = fragment_scope.clone();
@@ -333,16 +299,8 @@ pub fn lower_modules_seeded(
         for item in items.iter_mut() {
             let mid = item.module.module_id();
 
-            // Cross-module duplicate names are a recoverable INTERFACE error, not a
-            // fail-fast: record it in the offending module's `interface_errors` (the
-            // same channel `lower_type_expr_in` uses for "Unknown type name") and
-            // keep going, so the LSP/editor still gets partial results AND a
-            // persistent squiggle. A `comp_error!` here aborted the whole pass, so
-            // the error never reached `session.diagnostics()` -- it only surfaced
-            // transiently as `update_file`'s `Err`, invisible to `diagnostics_for`.
-            // The first declaration keeps the workspace slot: a later duplicate
-            // overwriting it would break the first module's own uses (e.g. a user
-            // `struct Scene` unseating stdlib `Scene<T>`) and mask this error.
+            // Keep the first declaration so its uses still lower. Record duplicates as
+            // interface errors so the editor can show them with partial results.
             let mut dup_errs: Vec<CompilerError> = Vec::new();
 
             let type_taken = |ws: &Workspace, name: &Ustr| {
@@ -411,7 +369,6 @@ pub fn lower_modules_seeded(
         ws.log_time("register names", timer);
     }
 
-    // Pass 2: field lowering
     let lower_field_timer = Instant::now();
     let ctxts = {
         let _span = tracing::info_span!("lower_fields").entered();
@@ -432,7 +389,6 @@ pub fn lower_modules_seeded(
 
     let lower_field_time = lower_field_timer.elapsed();
 
-    // Pass 3: function lowering
     let lower_times: Vec<(ModuleId, &'static str, std::time::Duration)>;
     {
         let _span = tracing::info_span!("lower_functions").entered();
@@ -463,7 +419,6 @@ pub fn lower_modules_seeded(
             .filter_map(|(module, time)| Some((module.module_id(), "lower functions", time?)))
             .collect();
 
-        // Each name's list gains every module's functions in module order.
         for module in modules.iter() {
             for (name, fns) in module.functions_by_name.iter() {
                 ws.functions_by_name
@@ -477,7 +432,6 @@ pub fn lower_modules_seeded(
         ws.log_time("lower functions", timer);
     }
 
-    // Register global names
     {
         let _span = tracing::info_span!("register_globals").entered();
         let timer = Instant::now();
@@ -491,9 +445,6 @@ pub fn lower_modules_seeded(
                         format!("duplicate global `{}` across modules", g.name),
                     ));
                 }
-                // Bare-name lookup prefers the function, which would leave the
-                // global unreachable. Registration keys are module-qualified
-                // under modules v1, so an item collision is diagnosed during namespace assembly.
                 if ws.functions_by_name.contains_key(&g.name) {
                     dup_errs.push(CompilerError::new_with_label(
                         g.span,
@@ -512,9 +463,6 @@ pub fn lower_modules_seeded(
 
     let ids: Vec<_> = modules.iter().map(|x| x.module_id()).collect_vec();
 
-    // Globals are inferred per-body inside `check_module` (`check_global`),
-    // which records type errors per `BodyOwner::Global` instead of failing the
-    // whole pass -- so there is no standalone fail-fast global-inference block.
     let gap_timer = Instant::now();
     ws.insert_modules(modules);
     ws.module_timings.extend(lower_times);
@@ -531,10 +479,7 @@ pub fn lower_modules_seeded(
     Ok(ids)
 }
 
-/// Two overloads of one family that no call can tell apart: same parameter
-/// types, generics and backend. Resolution ignores the return type and the
-/// parameter names, so either difference still leaves a tie. Decorators do
-/// not overload. Report only in modules lowered by this call.
+/// Overloads with the same inputs and backend conflict even if returns or parameter names differ.
 fn check_duplicate_definitions(ws: &mut Workspace, fresh: &[ModuleId]) {
     let same = |a: (ModuleId, Idx<crate::hir::Function>),
                 b: (ModuleId, Idx<crate::hir::Function>)| {
@@ -698,12 +643,8 @@ fn check_frame_ref_storage(ws: &mut Workspace, fresh: &[ModuleId]) {
     }
 }
 
-/// What an `embed f: T` field points at, once `T` is peeled of nullability.
 enum EmbedTarget {
     Struct(StructId),
-    /// Not embeddable: `embed` inlines a type's LEAVES into the parent, so the
-    /// target must be a nominal struct whose fields are known at the
-    /// declaration. The string names what was found, for the message.
     NotAStruct(&'static str),
 }
 
@@ -712,7 +653,6 @@ fn embed_target(ws: &Workspace, ty: TyId) -> EmbedTarget {
         return EmbedTarget::NotAStruct("a body-local type");
     };
     let arena = &ws.module(mid).ty_arena;
-    // Peel `?`: `embed f: Foo?` is a presence slot over the same leaves.
     if let TypeExpr::Nullable(inner) = arena[idx] {
         idx = inner;
     }
@@ -747,22 +687,10 @@ fn embed_target(ws: &Workspace, ty: TyId) -> EmbedTarget {
     }
 }
 
-/// Declaration-level legality for `embed` fields, workspace-wide (a target can
-/// live in another module, so this cannot run per-module during lowering).
-///
-/// Two rules, both from the storage model: the target must be a nominal struct
-/// (embed inlines its LEAVES into the parent, so they must be statically
-/// known), and the embed graph must be ACYCLIC -- a cycle has no finite layout,
-/// and unlike a boxed self-reference there is no pointer to break it.
-///
-/// Recoverable `interface_errors`, not fail-fast: same channel as an unknown
-/// type name in a signature, so the LSP still gets partial results. Errors are
-/// recorded only for the modules lowered by THIS call (`fresh`) -- an unchanged
-/// module keeps the entry it already carries, so an incremental edit cannot
-/// accumulate duplicates of another module's error.
+/// Embeds require known struct fields and an acyclic graph for finite storage.
+/// Record only fresh interface errors so incremental runs don't duplicate them.
 fn check_embed_site_legality(ws: &mut Workspace, fresh: &[ModuleId]) {
     let mut errs: Vec<(ModuleId, CompilerError)> = Vec::new();
-    // struct -> the structs it embeds, for the acyclicity walk.
     let mut edges: FxHashMap<StructId, Vec<(StructId, Span, Ustr)>> = FxHashMap::default();
 
     for m in ws.modules.iter() {
@@ -793,8 +721,7 @@ fn check_embed_site_legality(ws: &mut Workspace, fresh: &[ModuleId]) {
         }
     }
 
-    // Any struct on a cycle reports at its own embed field, so a mutual cycle
-    // names both sides rather than depending on visit order.
+    // Report cycles at every affected field, independent of traversal order.
     for (&sid, fields) in edges.iter() {
         for &(target, span, fname) in fields.iter() {
             if reaches(&edges, target, sid) {
@@ -819,7 +746,6 @@ fn check_embed_site_legality(ws: &mut Workspace, fresh: &[ModuleId]) {
     }
 }
 
-/// Is `goal` reachable from `from` through embed edges (inclusive of `from`)?
 fn reaches(
     edges: &FxHashMap<StructId, Vec<(StructId, Span, Ustr)>>,
     from: StructId,
@@ -842,7 +768,6 @@ fn reaches(
 }
 
 pub(crate) fn infer_modules(ws: &mut Workspace, ids: &[ModuleId]) -> Result<(), CompilerError> {
-    // Pass 4: inference
     {
         let _span = tracing::info_span!("infer_functions").entered();
         let timer = Instant::now();
@@ -985,11 +910,7 @@ fn is_type_publicly_accessible(
 
 /// One inaccessible type an exported definition's interface names.
 struct ClosureRequirement {
-    /// The nominal type's key.
     required: Ustr,
-    /// `public function`, `generic bound`, `field type of exported record`,
-    /// `payload of exported enum`, `payload of exported newtype`, or
-    /// `type of exported global`.
     reason: &'static str,
     span: Span,
 }
@@ -1006,7 +927,6 @@ fn export_reachability(ws: &Workspace) -> ExportReachability {
         .collect()
 }
 
-/// The first inaccessible type required by one exported definition.
 fn api_closure_failure_of(
     ws: &Workspace,
     reachability: &ExportReachability,
@@ -1022,8 +942,7 @@ fn api_closure_failure_of(
         ws.ns.package(pkg_id).is_some() && reachable_modules.contains(&meta.node);
     let is_exported = match meta.kind {
         bone_core::modules::DefKind::Callable => {
-            // Reachability first: it is two set lookups, and most
-            // callables are not reachable from their package's root.
+            // Check reachability before scanning members of every overload family.
             (reachable_defs.contains(def_key) || module_reachable)
                 && ws.functions_by_name.get(def_key).is_some_and(|fns| {
                     fns.iter()
@@ -1138,7 +1057,6 @@ pub fn pass_validate_api_closure(ws: &Workspace) -> Result<(), CompilerError> {
     if ws.fragment_scopes.is_empty() || ws.ns.packages.is_empty() {
         return Ok(());
     }
-    // The first failure in map order.
     let reachability = export_reachability(ws);
     let unsatisfied = ws.defs.par_iter().find_map_first(|(def_key, meta)| {
         api_closure_failure_of(ws, &reachability, def_key, meta).break_value()
@@ -1163,11 +1081,7 @@ pub fn semantic_pass(rock_modules: &mut [Ast]) -> Result<Workspace, CompilerErro
     semantic_pass_with_aliases(rock_modules, &bone_core::modules::NsAliases::default())
 }
 
-/// [`semantic_pass`] with the host graph's dependency-alias tables, so a v1
-/// package resolves its dependencies under the names its manifest declared.
-/// Standalone workspaces pass the default (empty) input. Every module is
-/// lowered; a set that begins with the shared process stdlib goes through
-/// [`semantic_pass_without_closure_gate`] instead.
+/// Lower an owned workspace with manifest dependency aliases and check API closure.
 pub fn semantic_pass_with_aliases(
     rock_modules: &mut [Ast],
     aliases: &bone_core::modules::NsAliases,
@@ -1177,11 +1091,7 @@ pub fn semantic_pass_with_aliases(
     Ok(ws)
 }
 
-/// The semantic pass over `modules` without the public-API closure gate, for
-/// a caller that applies it itself (the compile pipeline).
-///
-/// The shared prefix is made owned and lowered with the user modules. No
-/// session retains the result, so lowering records no editor facts.
+/// Lower shared stdlib and user modules without closure checking or editor facts.
 pub fn semantic_pass_without_closure_gate(
     modules: &mut ModuleSet,
     aliases: &bone_core::modules::NsAliases,
@@ -1193,10 +1103,8 @@ pub fn semantic_pass_without_closure_gate(
 /// semantic pass reports.
 pub type PreExpansionGate<'g> = &'g (dyn Fn(&[&Ast]) -> Vec<CompilerError> + Sync);
 
-/// Why [`semantic_pass_after_gate`] failed.
 #[derive(Debug)]
 pub enum PassFailure {
-    /// The gate's diagnostics: the pass reports nothing of its own then.
     Gate(Vec<CompilerError>),
     Pass(CompilerError),
 }
@@ -1321,7 +1229,6 @@ pub enum ScopeItem {
     },
 }
 
-/// The file's [`FragmentContribution`].
 pub fn contribute(rock_mod: &Ast) -> FragmentContribution {
     FragmentContribution {
         file: rock_mod.file,
@@ -1353,11 +1260,7 @@ fn scope_items(items: &[Item]) -> Vec<ScopeItem> {
         .collect()
 }
 
-/// The modules-v1 namespace builder. Runs before any lowering:
-/// it turns the v1 fragments' headers, inline mod blocks, and use
-/// declarations into the workspace's namespace tree, registers every v1
-/// definition under its canonical DefKey, and records per-fragment import
-/// scopes for the resolver. Standalone files receive one implicit package each.
+/// Build definition keys and import scopes before lowering. Standalone files each own a package.
 pub fn build_namespaces<'a>(
     ws: &mut Workspace,
     rock_modules: impl IntoIterator<Item = &'a Ast>,
@@ -1381,9 +1284,7 @@ pub fn assemble_namespaces(
     contributions: &[&FragmentContribution],
     aliases: &bone_core::modules::NsAliases,
 ) -> Result<(), CompilerError> {
-    // The host graph's alias tables land on the tree first, so a package
-    // resolves its dependencies under its manifest's names even when no v1
-    // file of the provider is being lowered yet.
+    // Manifest aliases can refer to a package without a lowered fragment.
     for input in &aliases.packages {
         let pkg = ws.ns.packages.entry(input.id).or_insert_with(|| NsPackage {
             id: input.id,
@@ -1394,7 +1295,6 @@ pub fn assemble_namespaces(
             pkg.aliases.insert(*alias, *target);
         }
     }
-    // Size the definition table once instead of rehashing it as it grows.
     let defs = contributions
         .iter()
         .flat_map(|contribution| &contribution.items)
@@ -1452,7 +1352,6 @@ pub fn assemble_namespaces(
                 "user packages cannot use the compiler-owned package name `std`".to_string(),
             ));
         }
-        // Ensure the package exists in the tree.
         ws.ns.packages.entry(pkg_id).or_insert_with(|| NsPackage {
             id: pkg_id,
             self_name: ustr::Ustr::from(&tag.self_name),
@@ -1481,8 +1380,6 @@ pub fn assemble_namespaces(
             ..Default::default()
         };
 
-        // Walk the file's items (recursing into inline mod blocks),
-        // registering owned definitions and collecting use declarations.
         let file = contribution.file;
         let mut errs: Vec<CompilerError> = Vec::new();
         if let Some(header) = &contribution.header
@@ -1550,17 +1447,12 @@ fn set_module_visibility(
     Ok(())
 }
 
-/// Every `use` target in a v1 fragment resolves where it is declared, once
-/// the whole tree exists (an unresolved path is a diagnostic).
-/// Fragment-local imports resolve from the fragment's scope, exactly as the
-/// lazy lookup will; shared export bindings resolve from the module that
-/// records them.
+/// Resolve imports after registration, from the fragment or exporting module.
 fn validate_v1_use_targets(
     ws: &Workspace,
     contributions: &[&FragmentContribution],
 ) -> Result<(), CompilerError> {
-    // Read-only per fragment; the first failing fragment in module order
-    // reports, as a sequential walk would.
+    // Find the first error in module order even when checking in parallel.
     let first_error = contributions.par_iter().find_map_first(|contribution| {
         if is_stdlib_module_file(contribution.file.as_str()) {
             return None;
@@ -1630,9 +1522,7 @@ fn validate_use_items(
     Ok(())
 }
 
-/// Build the compiler-owned `std` root from the trusted stdlib inputs. These
-/// definitions retain bare names in the lowering maps, so their namespace keys are
-/// their original bare names and no second implementation is introduced.
+/// Stdlib definition keys remain bare so lowering and imports share one definition.
 fn register_stdlib_items(
     ws: &mut Workspace,
     contribution: &FragmentContribution,
@@ -1703,9 +1593,7 @@ fn collect_use_leaves(
         segments,
         kind,
     } = tree;
-    // Subtrees parse with `allow_root = false` (`parse_use_tree`), so only
-    // the declaration's own tree carries the root anchor; `from_root` hands
-    // it down.
+    // Nested use paths inherit the declaration's root anchor.
     let path_root = *tree_root || from_root;
     let mut full = prefix.to_vec();
     full.extend(segments.iter().map(|segment| segment.name));
@@ -1742,10 +1630,6 @@ fn collect_use_leaves(
     ));
 }
 
-/// Register one file's items into the namespace tree under `path`,
-/// recursing into inline mod blocks. `scope` collects the fragment's own
-/// imports; shared (`pub`/`private`-prefixed) use declarations become node
-/// exports.
 fn source_module_context(scope: &FragmentScope, path: &[ustr::Ustr]) -> String {
     if path.is_empty()
         && scope
@@ -1771,9 +1655,7 @@ fn register_items(
     scope: &mut FragmentScope,
     errs: &mut Vec<CompilerError>,
 ) {
-    // Ensure ancestors exist so mid-path traversal always lands, and
-    // record each segment as a child of its parent (file headers create
-    // nodes without an inline `mod` item).
+    // Header-only module paths still need ancestors for name resolution.
     for i in 1..=path.len() {
         let child = &path[..i];
         let parent = &path[..i - 1];
@@ -1812,7 +1694,6 @@ fn register_items(
                     ));
                     continue;
                 }
-                // Record the child on the parent node.
                 {
                     let parent = ensure_namespace_node(ws, pkg_id, path, node_key);
                     if parent.owned_types.contains_key(block_name)
@@ -1833,7 +1714,6 @@ fn register_items(
                             .insert(*block_name, NsPackage::path_key(&child));
                     }
                 }
-                // Child visibility from the block header (`pub mod x { .. }`).
                 if let Some(vis) = block_vis {
                     if let Err(error) =
                         set_module_visibility(ws, pkg_id, &child, vis, *item_span, || {
@@ -1853,7 +1733,6 @@ fn register_items(
                 vis: item_vis,
                 span: item_span,
             } => {
-                // Ordinary definitions: register under the DefKey on the node.
                 let (bare, kind) = (*bare, *kind);
                 if path.is_empty() {
                     let pkg = ws.ns.packages.get(&pkg_id).expect("package");
@@ -1871,7 +1750,6 @@ fn register_items(
                     }
                 }
                 let node = ensure_namespace_node(ws, pkg_id, path, node_key);
-                // `def_key(package, path, bare)` without joining the path again.
                 def_key_buf.truncate(def_key_prefix);
                 def_key_buf.push_str(&bare);
                 let def_key = ustr::Ustr::from(&def_key_buf);
@@ -1929,9 +1807,7 @@ fn register_items(
                     node: node_key,
                     kind: def_kind,
                     name: bare,
-                    // Callable families use `callable_members`; retaining the
-                    // first declaration here keeps metadata deterministic for
-                    // tools that only need the family span/name.
+                    // Keep the first callable's location as stable family metadata.
                     vis,
                     span: *item_span,
                 };
@@ -1945,9 +1821,6 @@ fn register_items(
     }
 }
 
-/// Flatten one `use` declaration into fragment bindings, or into shared
-/// export bindings when it carries a visibility. Every leaf of a
-/// nested `pub use a::{b, c::*}` shares the declaration's visibility.
 fn flatten_use_decl(
     ws: &mut Workspace,
     pkg_id: u32,
@@ -1967,8 +1840,6 @@ fn flatten_use_decl(
     }
 }
 
-/// Record a shared export binding on the fragment's module node: a named
-/// binding under `local`, or a glob binding when `local` is `None`.
 fn share_export(
     ws: &mut Workspace,
     pkg_id: u32,
@@ -2125,18 +1996,10 @@ pub(crate) fn pass_register_forward_decls(
     module: &mut Module,
     scope: &FragmentScope,
 ) -> Result<(), CompilerError> {
-    // pass 1: register structs for forward decls. In a v1 fragment the
-    // registration key (and the HIR definition name) is the canonical
-    // DefKey, so per-logical-module duplicate checks fall out of the
-    // workspace merge while same-named types in different modules stay
-    // distinct.
     let start = scope.module_path.clone();
     for_each_def_item(rock_module.items.as_slice(), &start, &mut |item, path| {
         let def_key = |name: &ustr::Ustr| map_key(scope, path, *name);
         if let ItemKind::Struct(s) = &item.kind {
-            // `@value struct` is a retired form: the annotation set `is_value`
-            // without `is_c_repr` (a codegen drift). Only the `value Foo { ... }`
-            // keyword is canonical.
             if let Some(anno) = item.annotations.iter().find(|a| a.name.name == "value") {
                 comp_error!(
                     anno.span,
@@ -2213,8 +2076,6 @@ pub(crate) fn pass_register_forward_decls(
 }
 
 pub(crate) fn pass_lower_fields(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerError> {
-    // pass 2: lower fields. v1 fragments register under their DefKeys, so
-    // the walk carries each item's logical module path.
     let scope = ctx.fragment_scope().clone();
     let reg_key = |name: &ustr::Ustr, path: &[ustr::Ustr]| map_key(&scope, path, *name);
     let start = scope.module_path.clone();
@@ -2232,7 +2093,6 @@ pub(crate) fn pass_lower_fields(a: &Ast, ctx: &mut LowerCtx) -> Result<(), Compi
 }
 
 pub(crate) fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerError> {
-    // pass 3: lower function defs
     let scope = ctx.fragment_scope().clone();
     let reg_key = |name: &ustr::Ustr, path: &[ustr::Ustr]| map_key(&scope, path, *name);
     let start = scope.module_path.clone();
@@ -2243,33 +2103,8 @@ pub(crate) fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), Co
                     comp_error!(item.span, "macro `{}` survived expansion", f.name.name);
                 }
 
-                // A definition for an operator nothing dispatches by name can
-                // never be called, so accepting it is a swallow: `operator ==`
-                // used to compile clean and leave structural equality in place
-                // with no diagnostic anywhere, and the ordering ops failed at
-                // the USE site blaming the operand type rather than naming the
-                // ignored overload.
-                //
-                // The exemption is a declaration over PRIMITIVES, which is what
-                // the hardcoded implementations these names refer to actually
-                // are: the stdlib's `operator(lua) ==`/`<`/`&&`/`~` over int,
-                // float, string and bool, and `fn __op_eq(a: any, b: any)`, the
-                // structural equality codegen emits. Overloading for your OWN
-                // type is the thing that can never be dispatched.
-                //
-                // Three narrower guards were tried and measured wrong. Gating on
-                // a Rock body, or on the `operator` spelling, each let a user's
-                // `inline(lua) operator ==` or plain `fn __op_eq` through to be
-                // silently ignored -- the exact bug being fixed. Gating on the
-                // module's file id looked right and is a bad proxy: `bone-query`
-                // warms the stdlib from its real filesystem path, so the check
-                // called the stdlib a user module and rejected its own
-                // operators, taking 6 LSP completion suites with it.
-                //
-                // `is_synthetic` is load-bearing under this rule: `desugar`
-                // mints `__op_lt`/`__op_le`/`__op_gt`/`__op_ge` over the NEWTYPE
-                // (not a primitive), so every newtype over a primitive would
-                // reject without it.
+                // Primitive declarations serve hard-coded operators. Newtype desugaring
+                // creates the synthetic overloads needed to inherit those operators.
                 let fn_name = f.name.name.as_str();
                 let over_primitives = f.params.iter().all(|p| {
                     matches!(
@@ -2283,13 +2118,7 @@ pub(crate) fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), Co
                             | skull_parser::TypeExprKind::Any
                     )
                 });
-                // Only names the table CLASSIFIES are judged. The `__op_`
-                // namespace is wider than the parser's operator symbols --
-                // `__op_null_coalesce` (`??`) is a plain generic stdlib fn with
-                // no `operator` spelling -- and rejecting an unclassified name
-                // here would fail the whole stdlib. Keeping the table total over
-                // the parser is `operator_table_matches_the_parser`'s job, not a
-                // runtime arm's.
+                // The operator table excludes ordinary helpers such as __op_null_coalesce.
                 if !f.is_synthetic && !over_primitives {
                     if let Some((symbol, false)) = bone_core::hir::operator_entry(fn_name) {
                         comp_error!(
@@ -2332,8 +2161,6 @@ pub(crate) fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), Co
             | ItemKind::Enum(_)
             | ItemKind::Newtype(_) => {}
 
-            // Registered in build_namespaces.
-            // Module items are walked by for_each_def_item, not passed here.
             ItemKind::Use(_) | ItemKind::Module(_) => {}
 
             ItemKind::Global(g) => {

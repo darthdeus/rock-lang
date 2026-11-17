@@ -10,8 +10,7 @@ const INT_BUFFERS: &[&str] = &[
     "NativeBufferI32",
 ];
 
-/// The element both indexing and a `for` head read from a buffer nominal:
-/// `T` for `NativeBuffer<T>` / `FlatVec<T>`, `int` for the typed buffers.
+/// Buffer element type for indexing and `for` heads; typed buffers yield `int`.
 pub(crate) fn buffer_elem(gamma: &Gamma, ty: TyId) -> Option<TyId> {
     let TypeExpr::App {
         ctor: TypeCtor::Nominal(name),
@@ -40,7 +39,6 @@ pub(crate) fn for_elem_ty(
     Ok(match *gamma.get(iter_ty) {
         TypeExpr::Builtin(BuiltinTy::Error) => gamma.workspace.builtins.error(),
 
-        // [T]
         TypeExpr::App {
             ctor: TypeCtor::Array,
             params,
@@ -88,10 +86,7 @@ pub(crate) fn for_elem_ty(
     })
 }
 
-/// The element a `for` head binds for a value of `ty`, or `None` when the
-/// loop would not type-check: a builtin collection, else the user iterator
-/// protocol. Records nothing; a protocol hit may leave bindings the caller
-/// rolls back.
+/// Speculatively find the element type for a `for` head; protocol bindings roll back.
 pub fn iterable_elem(gamma: &mut Gamma, ty: TyId, span: Span) -> Option<TyId> {
     gamma.trial(|g| {
         let ty = resolve(g, ty, span);
@@ -106,10 +101,7 @@ pub fn iterable_elem(gamma: &mut Gamma, ty: TyId, span: Span) -> Option<TyId> {
     })
 }
 
-/// The element `ty` yields at an `Iterator<E>`-bounded parameter (a
-/// combinator receiver): itself when `next(ty)` resolves, else through the
-/// implicit `iter(ty)` coercion. `None` when no combinator call on it would
-/// type-check. Same rollback contract as [`iterable_elem`].
+/// Speculatively find the element yielded at an `Iterator<E>`-bounded parameter.
 pub fn iterator_elem(gamma: &mut Gamma, ty: TyId, span: Span) -> Option<TyId> {
     gamma.trial(|g| {
         let ty = resolve(g, ty, span);
@@ -121,10 +113,7 @@ pub fn iterator_elem(gamma: &mut Gamma, ty: TyId, span: Span) -> Option<TyId> {
     })
 }
 
-/// `next`'s return type under the iterator protocol: through an unbounded
-/// `iter(ty)` when one resolves, else on `ty` itself. `next_first` tries `ty`
-/// itself first, the order `implicit_iter_target` uses at bounded params;
-/// the `for` head (`resolve_for_iter_protocol`) prefers `iter`.
+/// Probe `next` on `ty` or its plain `iter` result; `next_first` controls priority.
 fn protocol_next_ret(gamma: &mut Gamma, ty: TyId, next_first: bool, span: Span) -> Option<TyId> {
     // An unresolved or failed type would bind to whatever `next` takes.
     if matches!(
@@ -157,9 +146,7 @@ fn protocol_next_ret(gamma: &mut Gamma, ty: TyId, next_first: bool, span: Span) 
         .map(|(_, ret, _)| ret)
 }
 
-/// Whether `enumerate(coll)` in for-position keeps its builtin template
-/// lowering (the types `for_elem_ty` knows). Everything else routes through
-/// the stdlib `EnumIter` combinator.
+/// Whether `enumerate(coll)` uses builtin lowering instead of `EnumIter`.
 pub(crate) fn builtin_enumerable(gamma: &Gamma, ty: TyId) -> bool {
     match *gamma.get(ty) {
         TypeExpr::App {
@@ -190,12 +177,8 @@ pub(crate) fn infer_for_elem(
     match c.body.expr_arena[iter] {
         Expr::Range { low, high } => infer_range_bounds(c, gamma, low, high),
 
-        // Builtin-collection `enumerate(coll)` keeps its template lowering
-        // (Map has no protocol iterator; the counted paths are co-fn safe).
-        // Arena uses EnumIter so native backends receive its iterator witnesses.
-        // `enumerate` over anything else -- an iterator chain -- falls through
-        // to the default arm: the call resolves to the stdlib `EnumIter`
-        // combinator and the result iterates via the protocol.
+        // Builtin collections keep template lowering (Map has no iterator
+        // protocol); Arena and iterator chains use `EnumIter`.
         Expr::Call {
             callee: Callee::Unresolved { name, .. },
             args,
@@ -219,13 +202,8 @@ pub(crate) fn infer_for_elem(
             let iter_ty = infer_expr(c, gamma, iter)?;
             let iter_ty = resolve(gamma, iter_ty, span);
 
-            // `[T]` routes through the stdlib iterator protocol (`VecIter`):
-            // the desugar + @inline + SROA + FORL recovery emit the same
-            // native numeric `for` the deleted skull template did. `Arena<T>`
-            // likewise routes through `ArenaPairIter` (fetch-outside skip
-            // shape; element = the `(Entity<T>, T)` tuple).
-            // `for_elem_ty` keeps its Array arm for builtin `enumerate(..)`;
-            // Arena enumeration resolves the ordinary EnumIter combinator.
+            // Arrays and arenas use protocol lowering here. Array's direct
+            // element rule remains for builtin `enumerate`; Arena uses EnumIter.
             let is_protocol_builtin = match *gamma.get(iter_ty) {
                 TypeExpr::App {
                     ctor: TypeCtor::Array,
@@ -243,27 +221,15 @@ pub(crate) fn infer_for_elem(
 
             match for_elem_ty(gamma, iter_ty, span) {
                 Ok(elem) => Ok(elem),
-                // Not a builtin collection: try the user iterator protocol
-                // `iter(coll) -> It`, `next(It) -> (bool, E)`. The recorded
-                // (iter_fn, next_fn) drive skull's for-loop desugar.
+                // User iterator witnesses drive the for-loop lowering.
                 Err(_not_builtin) => resolve_for_iter_protocol(c, gamma, iter, iter_ty, span),
             }
         }
     }
 }
 
-/// `for x in coll` where `coll` is not a builtin collection: resolve the user
-/// iterator protocol and record it keyed by the For's `iter` expr (for skull's
-/// desugar), returning the element type E. E is a single type for
-/// `next -> (bool, E)`, or a tuple for `next -> (bool, A, B, ...)` so
-/// `for (a, b) in coll` destructures.
-///
-/// Resolution order:
-/// - a bounded generic (`coll: I`, `I: Iterator<E>`) iterates as itself with a
-///   placeholder `next` (resolved per splice at concrete roots);
-/// - `iter(coll) -> It` when it resolves;
-/// - otherwise IDENTITY: a next-able type iterates as itself (bare combinator
-///   chains -- `for y in v.iter().map(f)` -- need no blanket `iter<I>`).
+/// Resolve and record a `for` iterator. Try a caller bound, then `iter(coll)`,
+/// then identity `next(coll)` so combinator chains need no blanket `iter<I>`.
 pub(crate) fn resolve_for_iter_protocol(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -314,7 +280,6 @@ pub(crate) fn resolve_for_iter_protocol(
                 ret,
             )
         }
-        // Identity: the collection IS the iterator if `next` resolves on it.
         Err(_) => (None, coll_ty),
     };
 
@@ -343,9 +308,7 @@ pub(crate) fn resolve_for_iter_protocol(
 
     let elem = for_iter_next_elem(gamma, next_ret, span)?;
 
-    // A bounded `next` (combinator chain) resolves its inner bounds HERE -- the
-    // for-loop is the mono root; the tree drives skull's placeholder
-    // substitution when the chain inlines.
+    // Resolve bounded `next` chains at the for-loop root; lowering uses this tree.
     let next_callee = &gamma.workspace.module(next_fn.0).functions[next_fn.1];
     let mut sub = BoundTree::default();
     if next_callee.has_iterator_bounds() {
@@ -366,17 +329,9 @@ pub(crate) fn resolve_for_iter_protocol(
     Ok(elem)
 }
 
-/// Check the `Iterator` bounds of `function` at an instantiation site and
-/// build the resolution tree: for each `I: Iterator<E>` with instantiation
-/// `C`, conformance is STRUCTURAL -- `next(C) -> (bool, E')` must resolve and
-/// `E'` unifies with `E` (which is HOW `E` gets inferred from `C`). The
-/// resolved `next` may itself be bounded (nested chains) -- recurse with its
-/// own substitution. An instantiation that is the enclosing fn's bounded
-/// generic records a `CallerGeneric` leaf (bound propagation).
-///
-/// The tree records generics already resolved: the call-site loop retries
-/// after each argument unification so a later lambda argument sees `E` already
-/// bound. `finalize` errors on bounds still unresolvable.
+/// Check each iterator bound structurally and record its `next` witness.
+/// Bounded calls are retried after each argument so later lambdas see inferred
+/// element types; `finalize` reports bounds that remain unresolved.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_iterator_bounds(
     c: BodyCtx,
@@ -413,7 +368,7 @@ pub(crate) fn check_iterator_bounds(
                         function.name
                     );
                 }
-                // Not yet determined -- the caller retries after more args unify.
+                // The caller retries after more arguments unify.
             }
 
             TypeExpr::Generic(var_id, gname) => {
@@ -427,9 +382,7 @@ pub(crate) fn check_iterator_bounds(
                 };
                 let elem_expected = substitute(gamma, elem_decl, subs, span)?;
                 if let Err(e) = unify(gamma, caller_elem, elem_expected, span) {
-                    // A quiet unify failure has no message, and overload
-                    // selection reports this one as the bounded candidate's
-                    // rejection.
+                    // Quiet overload scoring reports this candidate's rejection.
                     if !gamma.quiet {
                         return Err(e);
                     }
@@ -502,11 +455,8 @@ pub(crate) fn check_iterator_bounds(
     Ok(())
 }
 
-/// Element type for BOUND conformance: `next` must return exactly `(bool, E)`.
-/// A multi-value `next` (`(bool, A, B)`) can be CONSUMED by a `for` loop but
-/// not re-wrapped by a combinator: a generic body cannot destructure an
-/// unknown-arity splat. No stdlib iterator is multi-value anymore (pairs/
-/// enumerate/zip all yield tuple elements); only a user iterator hits this.
+/// Bound conformance requires exactly `(bool, E)`: generic combinators cannot
+/// destructure an unknown-arity multi-value return, though `for` can.
 pub(crate) fn bound_next_elem(
     gamma: &mut Gamma,
     next_ret: TyId,
@@ -543,20 +493,8 @@ pub(crate) fn bound_next_elem(
     Ok(resolve(gamma, next_ret.with_idx(elems[1]), span))
 }
 
-/// Resolve a unary call `name(recv)` by the receiver's TYPE alone (no arg expr) --
-/// the iterator protocol calls `iter(coll)` / `next(it)` on synthesized values.
-/// Reuses `select_overload` via the `recv_ty` slot, then instantiates generics
-/// and returns the resolved `(callee, return_ty, generic subs)`. Does NOT
-/// record into `resolved_overload_calls` (the caller stores it in
-/// `for_iter_protocol` / the bound tree).
-/// Implicit iterable->iterator coercion target for an argument at an
-/// `Iterator`-bounded param: `Some((witness, iter_ret))` iff the arg type is
-/// not itself an iterator (no `next(aty)`) but has a plain `iter(aty)`. The
-/// same rule the `for` head applies, extended to bounded call positions --
-/// `v.any(p)` means `v.iter().any(p)`. A caller bounded generic returns
-/// `None` (bound propagation handles it), as does an unresolved infer var.
-/// On success the `iter` resolution's unifications persist (the caller
-/// either commits them or rolls back a surrounding checkpoint).
+/// Try an implicit `iter(aty)` coercion when `aty` has no applicable `next`.
+/// Successful bindings remain for the caller to commit or roll back.
 pub(crate) fn implicit_iter_target(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -576,8 +514,7 @@ pub(crate) fn implicit_iter_target(
     let snap = gamma.out.checkpoint();
     match resolve_unary_by_recv(c, gamma, Ustr::from("iter"), a, span) {
         Ok((f, ret, subs)) => {
-            // A bounded `iter` fn can't be a coercion target (same restriction
-            // as the for head).
+            // Keep the for-head restriction: bounded `iter` functions cannot coerce.
             if gamma.workspace.module(f.0).functions[f.1].has_iterator_bounds() {
                 gamma.out.rollback_to(snap);
                 return None;
@@ -597,8 +534,7 @@ pub(crate) fn implicit_iter_target(
     }
 }
 
-/// The `VarId`s of a fn's `Iterator`-bounded generics -- the params declared
-/// as exactly one of these are the implicit-iter coercion positions.
+/// Generic variables whose parameters admit implicit iterable coercion.
 pub(crate) fn bounded_generic_vars(gamma: &Gamma, f: &Function) -> SmallVec<[VarId; 2]> {
     f.generics
         .iter()
@@ -611,8 +547,6 @@ pub(crate) fn bounded_generic_vars(gamma: &Gamma, f: &Function) -> SmallVec<[Var
         .collect()
 }
 
-/// Whether a declared (pre-substitution) param type is one of the fn's
-/// bounded generics.
 pub(crate) fn declared_is_bounded_generic(
     gamma: &Gamma,
     declared: TyId,
@@ -621,9 +555,7 @@ pub(crate) fn declared_is_bounded_generic(
     matches!(*gamma.get(declared), TypeExpr::Generic(v, _) if bounded.contains(&v))
 }
 
-/// `fit_cost`, trying the implicit-iter coercion first when the param is a
-/// bounded generic: a coerced fit costs +1 so an exact match (a concrete
-/// overload, or a real iterator arg) always outranks it.
+/// Add one point to fits that require implicit iteration.
 pub(crate) fn fit_cost_with_iter_coercion(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -640,6 +572,8 @@ pub(crate) fn fit_cost_with_iter_coercion(
     fit_cost(gamma, aty, pty, span)
 }
 
+/// Resolve a synthetic protocol call using its receiver type, without recording
+/// a source call expression.
 pub(crate) fn resolve_unary_by_recv(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -690,7 +624,6 @@ pub(crate) fn resolve_unary_by_recv(
     let param0 = function.param_decls.first().map(|p| p.ty);
     let ret = function.return_ty;
 
-    // The protocol is unary: exactly one required receiver parameter.
     if n_params != 1 || num_required != 1 {
         comp_error!(
             span,
@@ -712,9 +645,7 @@ pub(crate) fn resolve_unary_by_recv(
     Ok(((mid, fid), ret_res, subs))
 }
 
-/// Element type of a `next() -> (bool, E)` return: the tuple tail. `(bool, E)`
-/// yields `E`; `(bool, A, B, ...)` yields the tuple `(A, B, ...)`. The first
-/// element must be `bool` (the done flag) and there must be at least one element.
+/// Extract the yielded value or tuple from `next`'s bool-prefixed return.
 pub(crate) fn for_iter_next_elem(
     gamma: &mut Gamma,
     next_ret: TyId,

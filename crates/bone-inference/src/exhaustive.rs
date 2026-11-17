@@ -1,21 +1,15 @@
-//! Match exhaustiveness by the usefulness algorithm (Maranget, "Warnings for
-//! pattern matching"; the same scheme rustc uses). Arm patterns become rows
-//! of a matrix over typed columns. A column is split by the constructors of
-//! its type -- enum variants, `true`/`false`, `null`/non-null, the single
-//! constructor of a tuple or struct, or disjoint `int` segments cut at the
-//! arms' range bounds -- and each constructor specializes the matrix into its
-//! fields. A value no row matches comes back as a witness pattern.
+//! Match exhaustiveness uses a usefulness matrix of typed patterns. Columns
+//! split by their constructors or integer range segments; each constructor
+//! specializes the matrix, and uncovered values become witness patterns.
 //!
-//! Strings, floats and every other type without an enumerable constructor
-//! set are only covered by a wildcard or binding. A literal or range bound
-//! that is not an integer literal covers nothing, so coverage is only ever
-//! under-approximated and a non-exhaustive match is never accepted.
+//! Types without enumerable constructors need a wildcard. Unknown literals
+//! cover nothing, so coverage is conservative and cannot accept a non-exhaustive
+//! match.
 
 use super::*;
 use crate::hir::RecordPatField;
 use std::rc::Rc;
 
-/// Missing patterns listed in one diagnostic; the search stops past this.
 const MAX_REPORTED: usize = 10;
 
 const INT_MIN: i128 = i64::MIN as i128;
@@ -23,12 +17,9 @@ const INT_MAX: i128 = i64::MAX as i128;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Ctor {
-    /// Index into the enum's variants.
     Variant(usize),
-    /// The only constructor of a tuple, struct or unit.
     Single,
     Bool(bool),
-    /// Inclusive `int` interval.
     Int(i128, i128),
     Null,
     NonNull,
@@ -74,22 +65,18 @@ enum Shape {
     Opaque,
 }
 
-/// A value no arm matches, as a pattern tree over the column types.
 #[derive(Clone)]
 enum Wit {
     Wild,
     Ctor(Ctor, TyId, Vec<Wit>),
 }
 
-/// One unguarded arm: its pattern and, when the whole pattern is a bare
-/// variant name, the variant it tag-tests (see `unqualified_arm_variant`).
+/// An unguarded arm and its optional bare-variant tag test.
 pub(crate) struct ArmPattern {
     pub pattern: Idx<Pattern>,
     pub tag: Option<Ustr>,
 }
 
-/// The missing patterns of a `match` over `scrut_ty` whose unguarded arms are
-/// `arms`, rendered for the diagnostic; empty when the match is exhaustive.
 pub(crate) fn missing_match_patterns(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -248,7 +235,6 @@ impl Checker<'_, '_, '_> {
         }
     }
 
-    /// Field types of `ctor` on a value of type `ty`.
     fn ctor_fields(&mut self, ty: TyId, ctor: Ctor) -> Vec<TyId> {
         let shape = self.shape(ty);
         match (&*shape, ctor) {
@@ -286,8 +272,7 @@ impl Checker<'_, '_, '_> {
         }
     }
 
-    /// The matrix form of `pat` against a value of type `ty`. Nested bare
-    /// names are bindings: only a whole-arm name can be a variant tag.
+    /// Lower `pat` to the matrix form; nested bare names are bindings.
     fn lower(&mut self, pat: Idx<Pattern>, ty: TyId) -> Pat {
         let body = self.c.body;
         let shape = self.shape(ty);
@@ -390,8 +375,7 @@ impl Checker<'_, '_, '_> {
         }
     }
 
-    /// Record-pattern fields in declaration order; an omitted field is a
-    /// wildcard.
+    /// Lower record fields in declaration order, leaving omitted fields wild.
     fn lower_record_fields(
         &mut self,
         fields: IdxRange<RecordPatField>,
@@ -408,8 +392,7 @@ impl Checker<'_, '_, '_> {
         out
     }
 
-    /// Up to `limit` value vectors (one pattern per column of `tys`) that no
-    /// row of `rows` matches.
+    /// Generate up to `limit` uncovered witnesses for the columns in `tys`.
     fn missing(
         &mut self,
         rows: Vec<Vec<Pat>>,
@@ -440,15 +423,14 @@ impl Checker<'_, '_, '_> {
         let shape = self.shape(ty);
         let all = all_ctors(&shape, &heads);
         if all.is_empty() {
-            // No enumerable constructors: only wildcard rows cover the column.
+            // Only wildcard rows can cover a non-enumerable type.
             heads.clear();
         }
 
         let mut out = Vec::new();
         if heads.is_empty() {
-            // Every row has a wildcard head (or one that covers nothing), so
-            // the column is decided by the remaining columns. At the root a
-            // finite type lists its constructors; elsewhere `_` reads better.
+            // Resolve the remaining columns. List finite root constructors in
+            // diagnostics, but use `_` for nested payloads.
             let rest = self.missing(default_matrix(&rows), rest_tys, false, limit);
             if rest.is_empty() {
                 return out;
@@ -513,8 +495,7 @@ impl Checker<'_, '_, '_> {
         Wit::Ctor(ctor, ty, (0..n).map(|_| Wit::Wild).collect())
     }
 
-    /// The root witness. A bare variant with no constrained payload keeps the
-    /// plain variant-name form the enum check has always reported.
+    /// Keep an unconstrained variant witness in its bare-name form.
     fn render_top(&mut self, w: &Wit) -> String {
         if let Wit::Ctor(Ctor::Variant(i), ty, fields) = w
             && fields.iter().all(|f| matches!(f, Wit::Wild))
@@ -622,7 +603,6 @@ fn all_ctors(shape: &Shape, heads: &[Ctor]) -> Vec<Ctor> {
     }
 }
 
-/// Whether a head constructor matches every value of `ctor`.
 fn covers(head: Ctor, ctor: Ctor) -> bool {
     match (head, ctor) {
         (Ctor::Int(hlo, hhi), Ctor::Int(lo, hi)) => hlo <= lo && hi <= hhi,
@@ -631,7 +611,6 @@ fn covers(head: Ctor, ctor: Ctor) -> bool {
     }
 }
 
-/// Replace each row whose head is an or-pattern by one row per alternative.
 fn expand_or_heads(rows: Vec<Vec<Pat>>) -> Vec<Vec<Pat>> {
     if !rows.iter().any(|r| matches!(r[0], Pat::Or(_))) {
         return rows;
@@ -653,8 +632,6 @@ fn expand_or_heads(rows: Vec<Vec<Pat>>) -> Vec<Vec<Pat>> {
     out
 }
 
-/// Rows that match a value built by `ctor`, with the head replaced by its
-/// `arity` fields.
 fn specialize(rows: &[Vec<Pat>], ctor: Ctor, arity: usize) -> Vec<Vec<Pat>> {
     let mut out = Vec::new();
     for row in rows {
@@ -669,7 +646,6 @@ fn specialize(rows: &[Vec<Pat>], ctor: Ctor, arity: usize) -> Vec<Vec<Pat>> {
     out
 }
 
-/// Rows whose head matches anything, without the head.
 fn default_matrix(rows: &[Vec<Pat>]) -> Vec<Vec<Pat>> {
     rows.iter()
         .filter(|r| matches!(r[0], Pat::Wild))

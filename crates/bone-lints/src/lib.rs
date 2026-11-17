@@ -1,6 +1,4 @@
-//! Lints over bone's typechecked HIR. A pure downstream consumer: reads
-//! `Workspace`/`Body` produced by bone-semantic, never re-typechecks and never
-//! touches the typechecker core. Findings publish through the LSP as warnings.
+//! Lints over bone's typechecked HIR. Reads semantic results without re-typechecking.
 
 use bone_core::hir::{
     AnnoValue, BinOp, BindingInfo, BindingKind, BodyOwner, Callee, Expr, FnBackend, Function,
@@ -68,16 +66,8 @@ fn decorator_metadata_used_bindings(
         .collect()
 }
 
-/// Bindings the lint reports on:
-/// - every `Let`-kind binding -- `let`, destructuring `let`, `for`-loop vars,
-///   and match-arm / if-let pattern binds. A payload-less enum-variant arm
-///   (`None =>`) lowers to a `Let` binding named after the variant, not a user
-///   variable, so variant names are dropped.
-/// - the enclosing function's OWN params (`param_bindings`). Lambda params are
-///   `Param`-kind too but sit outside `param_bindings`, so they're excluded --
-///   a lambda that ignores an arg is idiomatic. Params are skipped entirely for
-///   an opaque body (`root` is `None`: `inline(lua)` / `extern`), whose Lua/C
-///   consumes them invisibly.
+/// Let bindings and the enclosing function's parameters, excluding enum-variant
+/// pattern names, lambda parameters, and parameters of opaque bodies.
 fn candidate_bindings(body: &Body, variants: &FxHashSet<Ustr>) -> Vec<Idx<BindingInfo>> {
     let mut out: Vec<Idx<BindingInfo>> = body
         .binding_arena
@@ -91,9 +81,7 @@ fn candidate_bindings(body: &Body, variants: &FxHashSet<Ustr>) -> Vec<Idx<Bindin
     out
 }
 
-/// Every enum-variant name across user modules. A bare variant in pattern
-/// position (`None =>`) lowers to a `Let` binding of that name; the lint must
-/// not report those as unused variables.
+/// Enum names that lower to `Let` bindings in bare pattern arms.
 pub(crate) fn enum_variant_names(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> FxHashSet<Ustr> {
     ws.user_modules(warm)
         .flat_map(|m| m.enums.iter())
@@ -101,10 +89,8 @@ pub(crate) fn enum_variant_names(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> 
         .collect()
 }
 
-/// Every binding read anywhere in the body. The expr arena is flat, so one
-/// pass catches reads at any nesting depth. A plain assignment target (`x =
-/// v`) is a write, not a read, so a write-only local still counts as unused;
-/// compound assign (`x += v`) and inc/dec read-then-write and DO count.
+/// Bindings read in the body. Plain assignment targets are writes; compound
+/// assignments and inc/dec read their targets.
 fn read_bindings(body: &Body) -> FxHashSet<Idx<BindingInfo>> {
     let mut write_targets: FxHashSet<Idx<Expr>> = FxHashSet::default();
     for (_, expr) in body.expr_arena.iter() {
@@ -131,9 +117,8 @@ fn read_bindings(body: &Body) -> FxHashSet<Idx<BindingInfo>> {
     read
 }
 
-/// Expr indices that are the LHS of a plain assignment. A bare `Var` target is
-/// a write; a tuple target recurses; field/index targets read their receiver
-/// so they are left as reads.
+/// Expression indices that are plain assignment targets. Tuple targets recurse;
+/// field and index targets still read their receivers.
 fn collect_write_targets(body: &Body, target: Idx<Expr>, out: &mut FxHashSet<Idx<Expr>>) {
     match &body.expr_arena[target] {
         Expr::Var(_) => {
@@ -148,12 +133,9 @@ fn collect_write_targets(body: &Body, target: Idx<Expr>, out: &mut FxHashSet<Idx
     }
 }
 
-/// Canonical lint name for suppression: `// rock: allow(unused_var)`.
 pub const UNUSED_VAR: &str = "unused_var";
 
-/// Every lint name the suppression/completion/code-action machinery knows. The
-/// single source: the LSP code action and the magic-comment completion both
-/// read this so they never drift a hardcoded name apart.
+/// Lint names recognized by selection, suppression, and completion.
 pub const KNOWN_LINTS: &[&str] = &[
     UNUSED_VAR,
     UNUSED_FN,
@@ -170,13 +152,8 @@ pub const KNOWN_LINTS: &[&str] = &[
     ACTION_CALLERS,
 ];
 
-/// Lints that are OFF unless the invocation names them. A MIGRATION lint has a
-/// finding on nearly every declaration written before it existed, so a
-/// default-on tier would bury the rest of the catalog and make every build's
-/// output useless until the migration finished. Naming it
-/// (`rock lint <path> --lints=method_syntax`) is what a file-at-a-time
-/// conversion needs: the sweep is readable, and the build/LSP surfaces stay
-/// quiet the whole time.
+/// Lints excluded from the default selection. These often produce broad
+/// migration or audit findings and must be selected explicitly.
 pub const OPT_IN_LINTS: &[&str] = &[
     BACKEND_SIBLING_MISMATCH,
     METHOD_SYNTAX,
@@ -189,13 +166,8 @@ pub const OPT_IN_LINTS: &[&str] = &[
 
 pub use rock_host::stick::ActionLayerPolicy;
 
-/// What an invocation asks of the lint engine: which lints run, and the knobs
-/// the lints themselves take. The default tier is the catalog minus
-/// [`OPT_IN_LINTS`]; [`LintOptions::only`] runs exactly the named set, opt-in
-/// ones included, and silences everything else.
-///
-/// This gates COMPUTATION, not just output: a silenced lint's analysis never
-/// runs, so an opt-in lint costs a build nothing.
+/// Selected lints and their options. The default excludes [`OPT_IN_LINTS`];
+/// [`LintOptions::only`] runs exactly the named set. Disabled analyses do not run.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LintOptions {
     action_policy: Option<std::sync::Arc<ActionLayerPolicy>>,
@@ -211,9 +183,7 @@ impl LintOptions {
         self
     }
 
-    /// Run exactly `names`. Names that aren't in [`KNOWN_LINTS`] are kept so a
-    /// caller can reject a typo through [`LintOptions::unknown`] -- silently
-    /// dropping one would run nothing and report success.
+    /// Run exactly `names`, retaining unknown names for [`LintOptions::unknown`].
     pub fn only(names: impl IntoIterator<Item = String>) -> Self {
         LintOptions {
             only: Some(names.into_iter().collect()),
@@ -221,19 +191,14 @@ impl LintOptions {
         }
     }
 
-    /// Drop these types from `method_syntax`'s candidate receivers. A project
-    /// converts one type at a time, so the sweep has to be narrowable from the
-    /// invocation -- the alternative is an `allow` comment on every call site of
-    /// a type the author is not converting today.
+    /// Exclude these receiver types from the `method_syntax` sweep.
     pub fn ignoring_types(mut self, names: impl IntoIterator<Item = Ustr>) -> Self {
         self.ignore_types = names.into_iter().collect();
         self
     }
 
-    /// Restrict `method_syntax` to these receiver types -- the whitelist form
-    /// of the same knob, for working one type at a time rather than subtracting
-    /// the rest. Composes with [`LintOptions::ignoring_types`], which subtracts
-    /// from whatever this leaves.
+    /// Restrict `method_syntax` to these receiver types. Composes with
+    /// [`LintOptions::ignoring_types`], which subtracts from this set.
     pub fn over_types(mut self, names: impl IntoIterator<Item = Ustr>) -> Self {
         self.only_types = Some(names.into_iter().collect());
         self
@@ -268,9 +233,7 @@ impl LintOptions {
     }
 }
 
-/// A name-tagged, rendered finding of any lint -- the type every SURFACE
-/// consumes (LSP diagnostics, `rock lint`, the build pass), so a surface never
-/// needs to know which lints exist or which cost class each belongs to.
+/// A rendered, name-tagged finding shared by the LSP, CLI, and build pass.
 #[derive(Clone, Debug)]
 pub struct Finding {
     pub lint: &'static str,
@@ -304,16 +267,15 @@ impl Finding {
     }
 }
 
-/// The coordinate delta produced by the same body edit that updates semantic
-/// spans. A cache never guesses from the new text: it consumes this metadata.
+/// Coordinate changes from the body edit that updated semantic spans.
+/// The cache uses this delta instead of inferring shifts from new text.
 pub use bone_core::text_edit::TextEditDelta;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LintCacheUpdate {
     pub full: bool,
-    /// The changed files were lowered again from scratch (an interface or
-    /// scope edit): their body owners, declarations and spans may all differ,
-    /// and no text-edit delta describes the change.
+    /// Changed files were lowered again, so owners and spans may differ without
+    /// a text-edit delta describing the change.
     pub relowered: bool,
     pub changed_files: FxHashSet<Ustr>,
     pub reinferred: Vec<(ModuleId, BodyOwner)>,
@@ -341,9 +303,8 @@ impl LintCacheUpdate {
         }
     }
 
-    /// An interface or scope edit that lowered `changed_files` again and
-    /// re-inferred `reinferred`. Module ids must be unchanged; the cache falls
-    /// back to a full rebuild when it cannot prove that.
+    /// An interface or scope edit that re-lowered `changed_files` and
+    /// re-inferred `reinferred`. Module ids must be unchanged; otherwise rebuild.
     pub fn relowered(
         changed_files: impl IntoIterator<Item = Ustr>,
         reinferred: impl IntoIterator<Item = (ModuleId, BodyOwner)>,
@@ -435,7 +396,6 @@ impl CachedFileFindings {
         }
     }
 
-    /// Give each of `module`'s bodies a raw row and derive every filtered row.
     fn index_bodies(&mut self, module: &Module) {
         for &owner in module.bodies.keys() {
             self.flat.entry(owner).or_default();
@@ -494,8 +454,8 @@ struct UnusedInvalidation {
     functions: FxHashSet<FunctionKey>,
     locations: FxHashSet<(Ustr, usize)>,
     seeds: FxHashSet<BodyKey>,
-    /// Bodies that called a changed declaration; their edges may name a
-    /// function whose index the relowering reassigned.
+    /// Callers of changed declarations; their edges may contain reassigned
+    /// function indices after relowering.
     callers: FxHashSet<BodyKey>,
 }
 
@@ -565,8 +525,7 @@ impl LintDependencyIndex {
         if action_enabled {
             index.build_action_rows(ws, warm);
         }
-        // Rendering every declaration (stdlib included) is only worth it when
-        // the sibling lint reads the rows; a selection change rebuilds.
+        // Declaration rendering is only needed when this lint is selected.
         if sibling_enabled {
             index.build_sibling_rows(ws);
         }
@@ -719,8 +678,8 @@ impl LintDependencyIndex {
         invalidation
     }
 
-    /// Keep stored declaration spans in step with a body edit, so a later
-    /// declaration change removes findings at their current offsets.
+    /// Shift indexed declaration spans with body edits so later invalidation
+    /// removes findings at their current offsets.
     fn shift_declarations(&mut self, edit: &TextEditDelta) {
         for declaration in self.declarations.values_mut() {
             edit.shift_span(&mut declaration.span);
@@ -903,7 +862,7 @@ impl LintDependencyIndex {
             self.declarations.remove(&function);
             self.reachable.remove(&function);
         }
-        // Current functions are pushed again below; stable ids may repeat old ones.
+        // Reinsert current functions below; their indices may reuse old ids.
         self.function_names.retain(|_, functions| {
             functions.retain(|candidate| !invalidation.functions.contains(candidate));
             !functions.is_empty()
@@ -943,10 +902,8 @@ impl LintDependencyIndex {
         invalidation
     }
 
-    /// Replace the non-function bodies (global initializers, defaults,
-    /// decorators) of relowered modules. They are always live, and their
-    /// owners may have been renumbered, so every old row is retracted and every
-    /// current one installed. Returns the reachability seeds.
+    /// Replace relowered non-function bodies. Their owners may be renumbered;
+    /// retract old edges, install current edges, and return reachability seeds.
     fn update_relowered_bodies(
         &mut self,
         ws: &Workspace,
@@ -1134,7 +1091,6 @@ impl LintDependencyIndex {
     }
 }
 
-/// Whether any of `files` now fingerprints differently from `fingerprints`.
 fn fingerprints_changed(
     fingerprints: &FxHashMap<Ustr, String>,
     ws: &Workspace,
@@ -1209,8 +1165,7 @@ fn action_declaration_fingerprint(module: &Module, policy: Option<&ActionLayerPo
     rows.join("\n")
 }
 
-/// `(action, file, name span)` for every action global that a production
-/// module among `modules` declares.
+/// Action globals declared by production modules, with their file and name span.
 fn action_declarations_in<'a>(
     modules: impl Iterator<Item = &'a Module> + 'a,
     policy: Option<&'a ActionLayerPolicy>,
@@ -1259,9 +1214,8 @@ fn action_edges_in_body(
         .collect()
 }
 
-/// The single reusable incremental lint derivation cache. It owns the local
-/// body entries and the last workspace-global result; reporting policy stays in
-/// the CLI/LSP adapters.
+/// Incremental lint derivation cache. Reporting policy stays in the CLI/LSP
+/// adapters.
 #[derive(Clone, Debug, Default)]
 pub struct IncrementalLintCache {
     initialized: bool,
@@ -1620,8 +1574,7 @@ impl IncrementalLintCache {
             .collect();
         stats.suppression_invalidations = suppression_changed_files.len();
 
-        // A relowered file's body owners may all differ, so its local entries
-        // are derived again whole, the way a rebuild derives them.
+        // Relowering may change every body owner, so derive those files anew.
         let reseeded_files: FxHashSet<Ustr> = if change.relowered {
             change
                 .changed_files
@@ -1647,8 +1600,8 @@ impl IncrementalLintCache {
 
         stats.body_updates = 1;
         self.warm = warm.clone();
-        // Relowering moves every declaration span in the file without a delta,
-        // so its declarations are treated as changed even when they look equal.
+        // Without span deltas, relowering invalidates declarations even if their
+        // fingerprints are unchanged.
         let declarations_changed = change.relowered
             || fingerprints_changed(
                 &self.dependency.declaration_fingerprints,
@@ -1883,8 +1836,7 @@ impl IncrementalLintCache {
             }
         }
 
-        // Every unused-fn and sibling finding in a relowered file sits on one of
-        // its own declarations, all of which are derived again below.
+        // These findings are rederived for reseeded files, so discard old rows.
         for file in &reseeded_files {
             if let Some(row) = self.global.get_mut(file) {
                 row.retain(|finding| !matches!(finding.lint, UNUSED_FN | BACKEND_SIBLING_MISMATCH));
@@ -1925,10 +1877,8 @@ impl IncrementalLintCache {
         (findings, stats)
     }
 
-    /// Whether a relowered update can be applied in place. The action-caller
-    /// rows (an opt-in lint) have no relowering path, a variant-name change
-    /// re-reads every body's match arms, and a relowered file must keep its
-    /// module id.
+    /// Whether a relowered update is safe in place. Action-caller rows have no
+    /// relowering path; variant changes affect every body; module IDs must remain stable.
     fn relowered_update_supported(
         &self,
         ws: &Workspace,
@@ -1953,8 +1903,7 @@ impl IncrementalLintCache {
         })
     }
 
-    /// Derive one file's local entries from scratch, exactly as [`rebuild`]
-    /// distributes a full pass over owners.
+    /// Derive one file's local entries from scratch, as [`rebuild`] does.
     fn reseed_file(
         &mut self,
         ws: &Workspace,
@@ -2118,9 +2067,7 @@ impl IncrementalLintCache {
                 }
                 continue;
             };
-            // A selection that reports the missing-policy notice is not
-            // cacheable and always takes `rebuild`, so these rows are the
-            // whole report.
+            // Missing-policy selections rebuild, so these rows are the report.
             let mut findings: Vec<Finding> = cached
                 .flat
                 .values()
@@ -2183,7 +2130,6 @@ fn install_edges<T: Copy + Eq + Hash>(
     rows.insert(body, edges);
 }
 
-/// Remove `value` from the set at `key`, dropping the set once it empties.
 fn remove_from_set<K: Eq + Hash, V: Eq + Hash>(
     map: &mut FxHashMap<K, FxHashSet<V>>,
     key: &K,
@@ -2226,6 +2172,7 @@ fn finding_offset(finding: &Finding) -> usize {
         .unwrap_or(finding.error.location.offset)
 }
 
+/// Deterministic diagnostic order: offset, lint, message, then label spans.
 fn cmp_by_offset(a: &Finding, b: &Finding) -> std::cmp::Ordering {
     finding_offset(a)
         .cmp(&finding_offset(b))
@@ -2260,9 +2207,7 @@ fn finding_owner(module: &Module, finding: &Finding) -> Option<BodyOwner> {
         .map(|interval| interval.val)
 }
 
-/// The lines of `source` containing `allow`, numbered and trimmed exactly as
-/// `str::lines` yields them. Every suppression comment names `allow`, so the
-/// scanners below visit only these instead of splitting the whole file.
+/// Lines containing `allow`, with the numbering and trimming of `str::lines`.
 fn allow_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
     let mut line_no = 0;
     let mut counted_to = 0;
@@ -2347,17 +2292,8 @@ fn missing_policy_advice(module: &Module, sel: &LintOptions) -> Option<Finding> 
     })
 }
 
-/// The lints that read only a body's HIR -- no inference, no other file. A
-/// file's findings change only when that file's own text changes, which is what
-/// lets the LSP cache them per file across unrelated edits.
-///
-/// `src` is the file's text, which some lints read. Findings are returned
-/// unsuppressed. A warm (stdlib) module lints to nothing: it is a read-only
-/// reference to the author, and every stdlib helper would false-flag.
-///
-/// `variants` and `types` are whole-workspace scans, so a caller linting EVERY
-/// module computes them once instead of once per file. `types` is only read by
-/// the opt-in `method_syntax` lint, so the default tier passes an empty set.
+/// Findings from lints that read one body's HIR without inference. Results are
+/// unsuppressed; callers apply the file's allow comments.
 fn flat_body_findings(
     module: &Module,
     owner: BodyOwner,
@@ -2474,8 +2410,7 @@ fn workspace_findings_by_file(
         out = unused_fns_by_file(ws, warm, edges);
     }
     if sel.enabled(BACKEND_SIBLING_MISMATCH) {
-        // Warm modules are SCANNED (half of every backend sibling set is stdlib) but
-        // not reported on, like every other lint's treatment of stdlib files.
+        // Warm declarations participate in sibling checks, but are not reported on.
         let warm_files: FxHashSet<Ustr> = warm.iter().map(|&mid| ws.module(mid).file).collect();
         for (file, findings) in backend_sibling_mismatches_by_file(ws) {
             if warm_files.contains(&file) {
@@ -2494,20 +2429,9 @@ fn workspace_findings_by_file(
     out
 }
 
-/// Every lint in the catalog, reported for the files in `sources`. The
-/// whole-workspace entry point behind `rock lint` and the build pass.
-///
-/// `sources` is the REPORT set: it names the files to report on and supplies
-/// each one's text for suppression. Every other non-warm module is still
-/// SCANNED -- the workspace lints need the whole call graph and every sibling
-/// decl -- but produces no findings, which is how a project's `stick.toml`
-/// dependencies stay silent without being invisible. Restricting the report set
-/// is also what keeps the pass off the compile hot path: a dependency's bodies
-/// are never walked for the per-body lints.
-///
-/// `sel` selects the tier: [`LintOptions::default`] is what a build and the
-/// LSP run (the catalog minus [`OPT_IN_LINTS`]); `rock lint --lints=<names>`
-/// runs exactly what it names.
+/// Run selected lints for `sources`, the files reported and the source text used
+/// for suppression. Other non-warm modules remain inputs to workspace lints but
+/// do not produce findings. The default selection excludes [`OPT_IN_LINTS`].
 pub fn lint_workspace(
     ws: &Workspace,
     warm: &FxHashSet<ModuleId>,
@@ -2529,9 +2453,7 @@ pub fn lint_workspace(
     .collect()
 }
 
-/// What every surface reports for one module, given its unsuppressed
-/// findings: the survivors of its allow comments, plus any missing-policy
-/// notice. The notice concerns project configuration and is never suppressed.
+/// Apply allow comments and add any unsuppressible missing-policy notice.
 fn report_findings(src: &str, raw: Vec<Finding>, advice: Option<&Finding>) -> Vec<Finding> {
     let mut out = filter_suppressed_findings(raw, src);
     out.extend(advice.cloned());
@@ -2539,10 +2461,8 @@ fn report_findings(src: &str, raw: Vec<Finding>, advice: Option<&Finding>) -> Ve
     out
 }
 
-/// `report` applied to each reported module's unsuppressed findings (its own
-/// and the workspace-wide ones on its file), in module order. `edges` are the
-/// user body edges a caller already derived, so the unused-fn walk does not
-/// derive them again.
+/// Apply `report` to each file's local and workspace findings in module order.
+/// Reuse `edges` when the caller has already derived them.
 fn lint_modules<'ws, T: Send>(
     ws: &'ws Workspace,
     warm: &'ws FxHashSet<ModuleId>,
@@ -2588,9 +2508,7 @@ fn lint_modules<'ws, T: Send>(
         .collect()
 }
 
-/// Drop findings silenced by a `// rock: allow(<lint>)` comment on the
-/// finding's own line or the line directly above it. `source` is the full text
-/// of the file the findings belong to.
+/// Drop findings with `// rock: allow(<lint>)` on their line or the line above.
 pub fn filter_suppressed_findings(findings: Vec<Finding>, source: &str) -> Vec<Finding> {
     if findings.is_empty() {
         return findings;
@@ -2598,10 +2516,8 @@ pub fn filter_suppressed_findings(findings: Vec<Finding>, source: &str) -> Vec<F
     filter_suppressed_findings_with_entries(findings, &suppression_entries(source))
 }
 
-/// Every `(line, lint)` a `// rock: allow(<lint>)` magic comment (standalone or
-/// trailing) names. Tolerates `//rock:allow`, extra whitespace, and a trailing
-/// justification arg: `allow(unused_var, "WIP")`. No typo-checking -- a
-/// misspelled name simply won't match.
+/// Parse standalone or trailing allow comments, including optional whitespace
+/// and justification arguments. Unknown lint names do not match.
 fn suppression_entries(source: &str) -> FxHashSet<(usize, &'static str)> {
     let mut allow = FxHashSet::default();
     for (n, line) in allow_lines(source) {
@@ -2647,14 +2563,10 @@ fn filter_suppressed_findings_with_entries(
         .collect()
 }
 
-/// Byte offset of the first `//` in `s`. A plain byte scan: lines are short,
-/// and a substring searcher's setup cost dominated this per-line call.
 fn find_comment_start(s: &str) -> Option<usize> {
     s.as_bytes().windows(2).position(|pair| pair == b"//")
 }
 
-/// The argument text after `rock: allow(` (whitespace-tolerant), if `s` starts
-/// with that head.
 fn allow_comment_args(s: &str) -> Option<&str> {
     let s = s.trim_start().strip_prefix("rock")?;
     let s = s.trim_start().strip_prefix(':')?;
@@ -2663,7 +2575,6 @@ fn allow_comment_args(s: &str) -> Option<&str> {
     Some(s.trim_start())
 }
 
-/// Whether allow arguments `args` name `lint_name` first.
 fn allow_args_name(args: &str, lint_name: &str) -> bool {
     let Some(rest) = args.strip_prefix(lint_name) else {
         return false;
@@ -2674,10 +2585,9 @@ fn allow_args_name(args: &str, lint_name: &str) -> bool {
     )
 }
 
-/// Canonical lint name for suppression: `// rock: allow(backend_sibling_mismatch)`.
 pub const BACKEND_SIBLING_MISMATCH: &str = "backend_sibling_mismatch";
 
-/// One decl, reduced to what the sibling comparison needs.
+/// Declaration data used by sibling comparison.
 #[derive(Clone, Debug)]
 struct SiblingDecl {
     name: Ustr,
@@ -2711,8 +2621,7 @@ fn sibling_decl(ws: &Workspace, mid: ModuleId, fid: Idx<Function>) -> SiblingDec
     }
 }
 
-/// The lint's name for a backend, and `None` for the portable `Any` rung (which
-/// is not a backend you can be missing from -- it serves all of them).
+/// Backend name, or `None` for portable `Any`, which serves every backend.
 fn backend_name(b: FnBackend) -> Option<&'static str> {
     match b {
         FnBackend::Lua => Some("lua"),
@@ -2721,28 +2630,11 @@ fn backend_name(b: FnBackend) -> Option<&'static str> {
     }
 }
 
-/// Declarations of one name that don't line up across the backends they target.
-///
-/// A name declared on two concrete backends is a *sibling set*: shared code
-/// calls it and each backend emits its own body, so the decls have to agree.
-/// They drift silently -- the split of `field_get` onto `ReadFieldRef<T, V>` left the
-/// `inline(js)` sibling on `FieldRef`, which nothing caught until a luajit build
-/// resolved to the js-only decl and emit rejected it. skull's emit check sees
-/// only the backend being built and only reached calls, so the OTHER backend's
-/// half stays broken until someone builds for it.
-///
-/// The set is keyed on the rendered param list (the overload key -- param
-/// names and return type are not part of it) and a portable `Any` body counts
-/// as serving every backend, so a wrapper-over-raw-extern pair is clean. A name
-/// on ONE backend is never reported: that is a platform-exclusive fn, not a
-/// drifted sibling, which is why this needs no opt-out annotation.
-///
-/// Whole-workspace and decl-level: no inference, no bodies, no call graph.
-/// Stdlib decls participate (half of every backend sibling set lives there);
-/// findings are attributed to the file of the offending decl.
-///
-/// Grouped by the source file of the decl each finding sits on; a file with no
-/// findings is absent.
+/// Report declarations whose overloads differ across concrete backends. The
+/// rendered parameter list is the overload key; portable `Any` declarations
+/// serve every backend, and names on only one backend are not mismatches.
+/// Stdlib declarations participate, but findings belong to the file of each
+/// offending declaration.
 pub(crate) fn backend_sibling_mismatches_by_file(ws: &Workspace) -> FxHashMap<Ustr, Vec<Finding>> {
     let mut out: FxHashMap<Ustr, Vec<Finding>> = FxHashMap::default();
     for decls in ws.functions_by_name.values() {
@@ -2754,8 +2646,7 @@ pub(crate) fn backend_sibling_mismatches_by_file(ws: &Workspace) -> FxHashMap<Us
     out
 }
 
-/// Whether `decls` carries declarations on two DIFFERENT concrete backends --
-/// the precondition for a sibling set. Reads only `Function.backend`, no types.
+/// Whether declarations span two concrete backends, the sibling-set precondition.
 fn spans_two_backends(ws: &Workspace, decls: &[(ModuleId, Idx<Function>)]) -> bool {
     let mut seen: Option<&'static str> = None;
     for &(mid, fid) in decls {
@@ -2774,9 +2665,7 @@ fn spans_two_backends(ws: &Workspace, decls: &[(ModuleId, Idx<Function>)]) -> bo
     false
 }
 
-/// The findings for ONE name's decl set, each paired with the file it belongs
-/// to. Empty for the overwhelmingly common case: fewer than two decls, or every
-/// decl on a single backend.
+/// Findings for one name's declaration set, paired with their source files.
 fn sibling_set_mismatches(
     ws: &Workspace,
     decls: &[(ModuleId, Idx<Function>)],
@@ -2784,10 +2673,7 @@ fn sibling_set_mismatches(
     if decls.len() < 2 {
         return Vec::new();
     }
-    // Cheap gate before the expensive part: a set is only interesting if its
-    // decls span two concrete backends. Rendering every param list first would
-    // pay a full type-render for every overload set in the workspace (stdlib
-    // included) to discard almost all of them -- ~1ms per build on a game.
+    // Avoid rendering signatures for name sets that cannot be siblings.
     if !spans_two_backends(ws, decls) {
         return Vec::new();
     }
@@ -2854,7 +2740,6 @@ fn sibling_set_mismatches(
     out
 }
 
-/// Canonical lint name for suppression: `// rock: allow(unused_fn)`.
 pub const UNUSED_FN: &str = "unused_fn";
 
 fn unused_fn(function: &Function) -> Finding {
@@ -2868,21 +2753,9 @@ fn unused_fn(function: &Function) -> Finding {
     )
 }
 
-/// Top-level user functions unreachable from any root. A whole-workspace
-/// reachability closure: seed the roots, follow call/reference edges, report
-/// what's left. Roots are functions that are reachable from outside the HIR
-/// call graph: `@nomangle` (called by original name from FFI or
-/// `inline(lua)`), `main`, and anything bearing a decorator (engine
-/// entry-points `@init`/`@update`/`@draw`/..., `@test`/`@sim`, and custom
-/// decorators whose machinery invokes the target). Bias is deliberately
-/// conservative -- over-marking reachable is a missed warning; under-marking
-/// false-flags live code.
-///
-/// The lint is only meaningful closed-world: a library's public API has no
-/// in-project caller yet isn't dead. Callers gate it to `bin` packages.
-///
-/// Grouped by the source file each dead function lives in; a file with no dead
-/// functions is absent.
+/// Report unreachable user functions by source file. Roots include `main`,
+/// JSON callbacks, and functions with non-implementation annotations. This
+/// closed-world lint is for bins and favors missed warnings over false flags.
 fn unused_fns_by_file(
     ws: &Workspace,
     warm: &FxHashSet<ModuleId>,
@@ -2903,10 +2776,7 @@ fn unused_fns_by_file(
                 stack.push((module.id, fid));
             }
         }
-        // Non-function bodies always run -- a global initializer, a struct's
-        // field defaults, a decorator body -- so any function they reference
-        // (incl. through a lambda, which is inline in the same expr arena) is a
-        // root. Missing these false-flags callbacks stored in globals.
+        // Non-function bodies run at initialization, so their references are roots.
         for (owner, body) in module.bodies.iter() {
             if matches!(owner, BodyOwner::Function(_)) {
                 continue;
@@ -2933,8 +2803,7 @@ fn unused_fns_by_file(
     let mut out: FxHashMap<Ustr, Vec<Finding>> = FxHashMap::default();
     for module in ws.user_modules(warm) {
         for (fid, f) in module.functions.iter() {
-            // A derived newtype operator is not user surface: there is no
-            // declaration to delete and its span points at the `newtype` line.
+            // Synthetic declarations have no user-written span to fix.
             if !reachable.contains(&(module.id, fid)) && !f.is_synthetic {
                 out.entry(module.file).or_default().push(unused_fn(f));
             }
@@ -2943,11 +2812,7 @@ fn unused_fns_by_file(
     out
 }
 
-/// A function is a reachability root iff it can be entered from outside the
-/// in-project call graph. See `unused_fns` for the rationale on each arm.
-/// No `extern(..)` form is a root: each declares a foreign symbol Rock calls.
-/// An `extern(ffi)` wrapper reached only by bare name from `inline(lua)` text
-/// is therefore reported; the lint does not read backend source.
+/// A function entered from outside the in-project call graph is a root.
 fn is_root(f: &Function) -> bool {
     f.json_field_for.is_some()
         || declared_name(f.name.as_str()) == "main"
@@ -2956,11 +2821,8 @@ fn is_root(f: &Function) -> bool {
             .any(|a| !is_implementation_anno(a.name.name.as_str()))
 }
 
-/// Builtin fn annotations that describe how a function is COMPILED, not how it
-/// is entered. Everything else -- `@test`/`@sim`, `@shader`, `@nomangle`, and
-/// every user `deco` -- is a root, so an annotation this list doesn't know
-/// keeps the conservative bias (root, no warning). Without the split, `@inline`
-/// or `@pure` alone silently exempts a fn from `unused_fn`.
+/// Builtin annotations that describe compilation, not entry. Unknown and user
+/// annotations remain roots to avoid flagging externally invoked functions.
 fn is_implementation_anno(name: &str) -> bool {
     matches!(
         name,
@@ -2980,15 +2842,8 @@ fn is_implementation_anno(name: &str) -> bool {
     )
 }
 
-/// Every function one body references: the resolved-call edges in its inference
-/// (calls, `for`-loop iterator protocol, and bounded-generic `next` chains --
-/// each a dispatch whose target name is not reliably textual at the call site)
-/// unioned with name-resolution of function-valued references. A function
-/// passed as a value (`take(cb)`) lowers to `Expr::Global(cb)`, never a call
-/// and never in the inference maps, so scanning `Global`/`SiblingRef` names is
-/// what keeps callbacks alive. The two nets are complementary: inference sees
-/// protocol dispatch the name-scan can't, the name-scan sees values inference
-/// can't. Works for any body owner (function, global initializer, defaults).
+/// References found by inference (including protocol dispatch) plus names of
+/// function values, which inference does not record as calls.
 fn body_edges(
     ws: &Workspace,
     mid: ModuleId,
@@ -3018,10 +2873,7 @@ fn body_edges(
     out
 }
 
-/// Every function a body's inference resolved a call/protocol edge to:
-/// overload-resolved calls (incl. operators and UFCS), implicit iterable
-/// coercions, the `iter`/`next` of a user `for`-loop, and bounded-generic `next`
-/// chains.
+/// Functions reached through resolved calls and iterator-protocol edges.
 fn inference_edges(bi: &BodyInference, out: &mut Vec<(ModuleId, Idx<Function>)>) {
     out.extend(bi.resolved_overload_calls.values().copied());
     out.extend(bi.implicit_iter_args.values().map(|w| w.func));
@@ -3049,8 +2901,6 @@ fn collect_bound_next(bn: &BoundNext, out: &mut Vec<(ModuleId, Idx<Function>)>) 
     }
 }
 
-/// Every user function keyed by name (single namespace, so a name can map to
-/// several overloads across modules -- all are marked reachable together).
 fn user_fn_names(
     ws: &Workspace,
     warm: &FxHashSet<ModuleId>,
@@ -3064,16 +2914,10 @@ fn user_fn_names(
     map
 }
 
-/// Canonical lint name for suppression: `// rock: allow(unused_pure_expr)`.
 pub(crate) const UNUSED_PURE_EXPR: &str = "unused_pure_expr";
 
-/// Statement-position expressions whose result is discarded but whose
-/// evaluation is side-effect-free. A flat HIR walk with no inference: only
-/// `Statement::Expr` is a true discard position -- a block's trailing
-/// expression lowers to `Body::root`/`Expr::Block.tail` (a VALUE position),
-/// never a statement, so tails and expression-position blocks are never
-/// touched. `is_pure` gates on the whole subtree, so a comparison with a call
-/// operand (`g() == x`) is not flagged.
+/// Flag discarded, side-effect-free statement expressions. Block tails are
+/// value positions, and the whole expression must be pure.
 pub(crate) fn unused_pure_exprs_in_body(body: &Body) -> Vec<Finding> {
     let mut out = Vec::new();
     for (_, stmt) in body.statement_arena.iter() {
@@ -3097,11 +2941,8 @@ pub(crate) fn unused_pure_exprs_in_body(body: &Body) -> Vec<Finding> {
     out
 }
 
-/// `Some(is_comparison)` iff `e`'s ROOT is a shape worth reporting when
-/// discarded. Comparisons carry the `==`-vs-`=` hint. The set is deliberately
-/// narrow: constructors (struct/array/enum literals), `if`/`match`/`block`, and
-/// anything with its own statement positions are excluded so we never
-/// double-report or flag an intentional expression-statement block.
+/// Whether the discarded root is reportable and whether it is a comparison.
+/// Exclude constructors and expressions with their own statement positions.
 fn reportable_root(body: &Body, e: Idx<Expr>) -> Option<bool> {
     match &body.expr_arena[e] {
         Expr::BinOp { op, .. } => Some(is_comparison_op(*op)),
@@ -3122,11 +2963,8 @@ fn is_comparison_op(op: BinOp) -> bool {
     )
 }
 
-/// Whole-subtree side-effect freedom. Conservative: any construct that can run
-/// user code (calls, UFCS/method calls, safe-nav calls), mutate (assign,
-/// compound assign, inc/dec), error (index -- OOB), or divert control
-/// (return/break/yield) makes the expression impure. Literals, reads, field
-/// projections, operators, and casts are pure iff their operands are.
+/// Conservative whole-subtree purity check; calls, mutation, indexing, and
+/// control flow are impure.
 fn is_pure(body: &Body, e: Idx<Expr>) -> bool {
     match &body.expr_arena[e] {
         Expr::Unit
@@ -3148,9 +2986,7 @@ fn is_pure(body: &Body, e: Idx<Expr>) -> bool {
         Expr::BinOp { lhs, rhs, .. } => is_pure(body, *lhs) && is_pure(body, *rhs),
         Expr::Tuple(elems) | Expr::Array(elems) => (*elems).into_iter().all(|x| is_pure(body, x)),
 
-        // Constructors: side-effect-free (allocation is not an observable
-        // effect), pure iff every operand is. Covers the canonical bug's RHS:
-        // `x == MobAiState::Wander` where `MobAiState::Wander` is an EnumVariant.
+        // Allocation is not an observable effect; constructor operands must be pure.
         Expr::EnumVariant { args, .. } => variant_args_pure(body, args),
         Expr::StructLiteral { fields, bases, .. } => {
             (*bases).into_iter().all(|b| is_pure(body, b))
@@ -3174,19 +3010,11 @@ fn variant_args_pure(body: &Body, args: &bone_core::hir::VariantArgs) -> bool {
     }
 }
 
-/// Canonical lint name for suppression: `// rock: allow(transmute_of_nullable)`.
 pub const TRANSMUTE_OF_NULLABLE: &str = "transmute_of_nullable";
 
-/// `cast`/`transmute` calls in one body whose argument is nullable and whose
-/// result is non-nullable. Both are the stdlib nullability-erasers; a call
-/// whose result KEEPS the `?` is preserving (adding/round-tripping a `?` is not
-/// laundering) and stays clean. Nesting needs no special-casing: each call is
-/// judged on its own arg/result pair, so an inner cast that preserves
-/// nullability inside an outer strip is clean at the inner site and flagged only
-/// at the outer one. Reads the body's inference (`bi`) for both types; without
-/// it nothing is judgeable. Matched by callee NAME -- user overloads named
-/// `cast`/`transmute` that strip a `?` are the same bug shape, so flagging them
-/// too is intended.
+/// Flag `cast`/`transmute` calls that erase a nullable argument's `?`. Each call
+/// is checked independently using inference; matching by name includes user
+/// overloads with the same nullability-erasing behavior.
 pub(crate) fn transmute_of_nullable_in_body(
     ws: &Workspace,
     bi: Option<&BodyInference>,
@@ -3235,46 +3063,33 @@ fn is_nullable(ws: &Workspace, bi: &BodyInference, ty: TyId) -> bool {
     matches!(head_type(ws, bi, ty), TypeExpr::Nullable(_))
 }
 
-/// Follow inference-var substitutions to a type's head constructor (mirrors
-/// `Workspace::render`'s `Infer` arm). An unbound var resolves to itself, so a
-/// genuinely-unknown type reads as non-nullable -- the conservative side (a
-/// missed warning, never a false strip).
+/// Resolve inference variables to the head constructor. An unbound variable is
+/// treated as non-nullable to avoid a false positive.
 pub(crate) fn head_type(ws: &Workspace, bi: &BodyInference, ty: TyId) -> TypeExpr {
     head_ty(ws, bi, ty).1
 }
 
-/// [`head_type`] keeping the resolved id. A nested `Idx<TypeExpr>` (a
-/// `Nullable`'s inner, an `App`'s params) indexes the arena of the type that
-/// CONTAINS it -- which substitution-following may have moved to another module
-/// -- so descending needs `resolved.with_idx(inner)`, never a bare
-/// `TyId::Local`.
+/// [`head_type`] with the resolved id, needed to descend into a nested type in
+/// the arena that owns it after substitution.
 fn head_ty(ws: &Workspace, bi: &BodyInference, ty: TyId) -> (TyId, TypeExpr) {
     ws.resolve_ty(Some(bi), ty).expect("body supplied")
 }
 
-/// Canonical lint name for suppression: `// rock: allow(method_syntax)`.
 pub(crate) const METHOD_SYNTAX: &str = "method_syntax";
 
-/// One direct call to an input observation primitive in a cold module. This
-/// is an opt-in migration census: the checked HIR has already resolved scopes
-/// and rejected malformed calls, while the source span identifies the caller
-/// that still needs an action/editor/tool/text classification.
+/// A direct call to an input observation primitive in a user module.
 #[derive(Clone, Debug)]
 pub(crate) struct RawInputSite {
     pub name: Ustr,
     pub span: Span,
 }
 
-/// Canonical lint name for the Phase 6 raw-input migration census.
 pub const RAW_INPUT_MIGRATION: &str = "action_layer_raw_input";
 
-/// The live census remains unsuppressed; this second opt-in lint makes every
-/// remaining site carry one of the accepted non-action classes in source.
+/// Require each raw-input site to carry an accepted non-action class marker.
 pub const RAW_INPUT_CLASSIFICATION: &str = "action_layer_raw_input_classification";
 
-/// Direct input observations are the census population. Action calls, input
-/// event injection, and tool-input helpers are intentionally separate APIs and
-/// therefore do not appear here.
+/// Action calls and input-event APIs are not raw observation sites.
 pub(crate) fn raw_input_sites_in_module(
     module: &Module,
     policy: &ActionLayerPolicy,
@@ -3381,10 +3196,8 @@ fn has_annotation(f: &Function, name: &str) -> bool {
         .any(|annotation| annotation.name.name.as_str() == name)
 }
 
-/// HIR-backed caller census for production project actions. Global declaration
-/// initializers and `@wire` refresh bodies are registration, not callers.
-/// The single finding that a policy names no action: on the first function
-/// of the first production module.
+/// HIR-backed caller census for production actions. The missing-population
+/// finding is attached to the first function of the first production module.
 fn empty_action_population(
     ws: &Workspace,
     warm: &FxHashSet<ModuleId>,
@@ -3456,19 +3269,8 @@ fn missing_action_caller(policy: &ActionLayerPolicy, action: Ustr, span: Span) -
     )
 }
 
-/// Prefix-form declarations in one module that the receiver form
-/// (`fn Type.name(recv, ..)`) expresses directly. The receiver form is pure
-/// surface sugar -- it desugars to exactly this free fn with param 0 typed by
-/// the path -- so every finding is a mechanical, signature-preserving rewrite,
-/// which is what lets a project convert a file at a time.
-///
-/// `types` is the workspace's nominal type names (see [`nominal_type_names`]).
-/// A candidate needs a param 0 whose type is one of them with NO type
-/// arguments: that is the only shape the receiver path can spell, so a
-/// container, nullable, tuple, builtin, or generic param 0 is never a
-/// candidate. `extern` decls are excluded because the parser REJECTS a receiver
-/// path on one; `@shader` entry points because their param 0 is the stage input,
-/// not a receiver.
+/// Prefix-form declarations that can use receiver syntax. Param 0 must be a
+/// bare user nominal type; extern and shader entry points are excluded.
 pub(crate) fn method_syntax_in_module(
     ws: &Workspace,
     module: &Module,
@@ -3507,13 +3309,8 @@ pub(crate) fn method_syntax_in_module(
     out
 }
 
-/// `m, n: int` -- the receiver form's parameter list: param 0 loses its type
-/// annotation (the receiver path carries it), the rest are unchanged.
-///
-/// A default's EXPRESSION is not in the signature (it lives in the body arena),
-/// so a decl carrying one renders as `m, ..` instead: a suggestion that silently
-/// dropped `= 3` reads as a complete new signature and is one paste away from
-/// changing behavior.
+/// Render the receiver-form parameter list. If any parameter has a default,
+/// use `..` rather than suggest a signature that drops its default expression.
 fn rewritten_params(ws: &Workspace, f: &Function) -> String {
     if f.param_decls.iter().any(|p| p.has_default) {
         return format!("{}, ..", f.param_decls[0].name);
@@ -3531,15 +3328,12 @@ fn rewritten_params(ws: &Workspace, f: &Function) -> String {
         .join(", ")
 }
 
-/// The name of a bare nominal type (`Mob`), and `None` for anything a receiver
-/// path cannot spell: a builtin, a generic param, a nullable, a tuple, a fn
-/// type, or an APPLIED nominal (`Pair<int>` -- the path form takes the decl's
-/// own generics, not concrete arguments).
+/// Return only bare nominal types; receiver paths cannot express other types or
+/// applied type arguments.
 fn nominal_name(ws: &Workspace, ty: TyId) -> Option<Ustr> {
     let te = match ty {
         TyId::Static(m, i) => ws.module(m).ty_arena[i],
-        // A decl's param types are lowered into the module arena; a body-local
-        // type here would be a different question than the one being asked.
+        // Declaration parameter types are static; body-local types are not candidates.
         TyId::Local(_) => return None,
     };
     match te {
@@ -3551,12 +3345,8 @@ fn nominal_name(ws: &Workspace, ty: TyId) -> Option<Ustr> {
     }
 }
 
-/// Whether the source at `name_span` spells this function's name -- i.e. the
-/// author wrote this declaration, here. A SYNTHESIZED decl fails it: a
-/// `newtype Hp(int)` mints ten operator fns (`__op_add(a: Hp, b: Hp)`) whose
-/// name span covers the newtype's name, and every one of them is a
-/// receiver-shaped signature nobody can rewrite. Same net catches a
-/// macro-expanded decl, whose span is retagged to the call site.
+/// Whether `name_span` spells this declaration's name. Synthetic and
+/// macro-expanded declarations point at other source text and are excluded.
 fn spelled_at(src: &str, name: Ustr, name_span: Span) -> bool {
     let (a, b) = name_span.offset_range();
     if b > src.len() || a > b || !src.is_char_boundary(a) || !src.is_char_boundary(b) {
@@ -3565,11 +3355,7 @@ fn spelled_at(src: &str, name: Ustr, name_span: Span) -> bool {
     &src[a..b] == declared_name(name.as_str())
 }
 
-/// Whether the decl was WRITTEN in receiver form. Both forms lower to the same
-/// HIR -- that is the point of the sugar -- so the surface is the only
-/// discriminant, and without it the lint reports every already-converted fn.
-/// `fn Mob.damage` puts a `.` immediately before the name; the prefix form
-/// cannot, since the only thing between `fn` and the name is whitespace.
+/// Whether the source uses receiver syntax; both forms lower to the same HIR.
 fn written_as_method(src: &str, fn_span: Span, name_span: Span) -> bool {
     let (start, end) = (fn_span.offset_range().0, name_span.offset_range().0);
     if end > src.len() || start > end {
@@ -3581,13 +3367,8 @@ fn written_as_method(src: &str, fn_span: Span, name_span: Span) -> bool {
     src[start..end].trim_end().ends_with('.')
 }
 
-/// Every nominal type name declared in a user module: structs, enums, and
-/// newtypes. `Vec`/`Map` are not here -- they lower to their own type
-/// constructors, never `Nominal` -- so a container param can't reach the lint
-/// through this set either.
-/// The names in `names` that no user module declares as a type. An ignore list
-/// fails OPEN -- a misspelled entry filters nothing and the type keeps showing
-/// up, which reads as the flag not working -- so the caller names them.
+/// Names from `names` that are not declared user nominal types. Callers reject
+/// these so a misspelled type filter cannot silently appear to work.
 pub fn unknown_type_names(ws: &Workspace, warm: &FxHashSet<ModuleId>, names: &[Ustr]) -> Vec<Ustr> {
     let known: FxHashSet<_> = nominal_type_names(ws, warm)
         .into_iter()
@@ -3600,9 +3381,7 @@ pub fn unknown_type_names(ws: &Workspace, warm: &FxHashSet<ModuleId>, names: &[U
         .collect()
 }
 
-/// How a row place left the scope its arena's lifetime governs. One kind per
-/// storage class, so a census can report the shape of the escape population
-/// as well as its size.
+/// How a row left the scope governed by its arena's lifetime.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EscapeKind {
     StoreGlobal,
@@ -3616,23 +3395,14 @@ pub enum EscapeKind {
     FfiArg,
 }
 
-/// How much a kind actually claims. A row's validity runs from the `get()`
-/// until something invalidates the slot -- `remove`, `clear`, Scene unload --
-/// so what matters is whether the row is HELD across such a point, not which
-/// direction the reference travelled.
+/// What the lint can claim about each escape kind.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EscapeClass {
-    /// The row outlives an invalidation point unconditionally. A defect.
+    /// The row may be held beyond an invalidation point.
     Hazard,
-    /// A hazard only if the consumer RETAINS the row. Nothing here computes a
-    /// retain summary, so these are reported without the claim: a lambda
-    /// consumed synchronously by `any(..)` and one stashed in a Scene closer
-    /// are the same shape to this lint.
+    /// A hazard only if retained; the lint has no interprocedural retention analysis.
     Unprovable,
-    /// Not a hazard. The row moved somewhere still governed by the program's
-    /// own rules -- the escape question simply moves with it. Reported because
-    /// it is where an intraprocedural check STOPS, which is what bounds the
-    /// census, not because the code is wrong.
+    /// Not itself a hazard; the intraprocedural check stops at this boundary.
     Propagation,
 }
 
@@ -3647,9 +3417,7 @@ impl EscapeKind {
             EscapeKind::ClosureCapture | EscapeKind::FfiArg | EscapeKind::AnyErasure => {
                 EscapeClass::Unprovable
             }
-            // A `return` runs nothing, so it cannot invalidate the slot: what
-            // crosses it is the reference, never the validity window. The
-            // accessor shape (`wall_at`, `Sound.data`) is CORRECT code.
+            // Returning a reference does not itself invalidate its slot.
             EscapeKind::Return => EscapeClass::Propagation,
         }
     }
@@ -3669,17 +3437,14 @@ impl EscapeKind {
     }
 }
 
-/// A `row_escape` finding: a row place -- a `T` read out of an `Arena<T>` or a
-/// `Scene<T>` root -- reaching storage that outlives the borrow.
 #[derive(Clone, Debug)]
 pub(crate) struct RowEscape {
     pub kind: EscapeKind,
-    /// Rendered type of the escaping row (`Mob`, `TrActor`).
+    /// Rendered type of the row.
     pub row_type: String,
     pub span: Span,
 }
 
-/// Canonical lint name for suppression: `// rock: allow(row_escape)`.
 pub const ROW_ESCAPE: &str = "row_escape";
 
 impl RowEscape {
@@ -3709,15 +3474,12 @@ mod row_escape;
 use row_escape::row_escapes_in_body;
 pub use row_escape::{RowPopulation, row_population};
 
-/// Where a body's TRAILING expression ends up, so `row_escape` can tell a
-/// returned row from a discarded one. A unit function's tail goes nowhere --
-/// `fn unload_sound(s: Sound) { s.handle.remove() }` drops the `T?` it produced.
+/// Where the body's trailing expression goes, if anywhere.
 fn tail_sink(module: &Module, owner: &BodyOwner) -> Option<EscapeKind> {
     match owner {
         BodyOwner::Function(fid) => module.functions[*fid].return_ty.map(|_| EscapeKind::Return),
         BodyOwner::Global(_) => Some(EscapeKind::StoreGlobal),
-        // A struct default / enum / newtype body's value is stored in the
-        // aggregate it belongs to.
+        // Aggregate defaults are stored in their containing value.
         _ => Some(EscapeKind::StoreField),
     }
 }
@@ -3732,20 +3494,10 @@ pub(crate) fn nominal_type_names(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> 
     out
 }
 
-/// Canonical lint name for suppression: `// rock: allow(task_null_abandon)`.
 pub(crate) const TASK_NULL_ABANDON: &str = "task_null_abandon";
 
-/// `task_null_abandon` for one body. A flat scan, not a walk: v1 asks only
-/// "does a `= null` land on a `Task?` place", and every such assignment is
-/// judged the same wherever it sits.
-///
-/// Deliberately NOT covered: overwriting a live slot with a *new* task
-/// (`m.co = start(...)`, which `replace` exists for). Distinguishing that from
-/// the first store into an empty slot needs liveness-at-assignment, and a false
-/// positive on every initial store would be worse than the miss. The two LEGAL
-/// null-assign shapes -- nulling a task just observed terminal, and completion
-/// cleanup inside the task's own terminal defer -- are equally invisible here,
-/// which is why the lint reports at `Warning` with the allow comment legal.
+/// Warn when assigning `null` to a `Task?` slot. This flat scan does not track
+/// liveness, so it cannot distinguish abandonment from valid cleanup.
 pub(crate) fn task_null_abandon_in_body(
     ws: &Workspace,
     bi: Option<&BodyInference>,
@@ -3783,9 +3535,8 @@ pub(crate) fn task_null_abandon_in_body(
     out
 }
 
-/// The type of an assignment TARGET. A bare local target carries no
-/// `expr_types` entry -- a `Var` is a reference to a binding, and the binding
-/// arena is where its type lives -- so the two shapes read different tables.
+/// The type of an assignment target; locals use binding types, other places use
+/// expression types.
 fn place_type(bi: &BodyInference, body: &Body, target: Idx<Expr>) -> Option<TyId> {
     match body.expr_arena[target] {
         Expr::Var(b) => bi.binding_types.get(b).copied(),
@@ -3793,8 +3544,7 @@ fn place_type(bi: &BodyInference, body: &Body, target: Idx<Expr>) -> Option<TyId
     }
 }
 
-/// A `Task<R>?` place. The `?` is required: a non-nullable `Task` field cannot
-/// take a `null` at all, so bone has already rejected that program.
+/// Whether a type is a nullable `Task` slot.
 fn is_task_slot(ws: &Workspace, bi: &BodyInference, ty: TyId) -> bool {
     let (id, TypeExpr::Nullable(inner)) = head_ty(ws, bi, ty) else {
         return false;
@@ -3805,9 +3555,7 @@ fn is_task_slot(ws: &Workspace, bi: &BodyInference, ty: TyId) -> bool {
     )
 }
 
-/// Re-spell an assignment target for the diagnostic (`m.co`, `e.get()?.co`,
-/// `SLOT`). `None` for a shape not covered here, which the diagnostic phrases
-/// around rather than naming wrongly -- the span already points at the place.
+/// Render a supported assignment target for the diagnostic.
 fn render_place(body: &Body, e: Idx<Expr>) -> Option<String> {
     Some(match body.expr_arena[e] {
         Expr::Var(b) => body.binding_arena[b].name.to_string(),
@@ -3821,7 +3569,7 @@ fn render_place(body: &Body, e: Idx<Expr>) -> Option<String> {
         } => {
             format!("{}?.{}()", render_place(body, receiver)?, method)
         }
-        // UFCS: `e.get()` lowers to a call whose first arg is the receiver.
+        // UFCS lowers the receiver to the first call argument.
         Expr::Call {
             callee: Callee::Unresolved { name, .. },
             args,
@@ -3834,8 +3582,7 @@ fn render_place(body: &Body, e: Idx<Expr>) -> Option<String> {
     })
 }
 
-/// The declared (last) segment of a DefKey; compiler-owned names are bare.
-/// Classifiers that key on a spelling (`main`, `Task`) must read this.
+/// Last segment of a DefKey, used when matching compiler-owned names.
 fn declared_name(name: &str) -> &str {
     name.rsplit("::").next().unwrap_or(name)
 }

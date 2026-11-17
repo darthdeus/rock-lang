@@ -1,34 +1,25 @@
 //! Projection-only enforcement for `embed` fields.
 //!
-//! An embedded field's leaves live in the parent, so no aggregate object exists
-//! to hand out: the field may be PROJECTED (leaf reads, place writes,
-//! whole-field ctor writes, a scalar-ABI round trip, presence tests) but never
-//! BOUND, RETURNED, CAPTURED, ERASED, or MATERIALIZED independently.
+//! Embedded leaves live in the parent, so the field has no aggregate value to
+//! bind, return, capture, erase, or materialize.
 //!
-//! The check runs as an allow-list over the flat expression arena rather than a
-//! recursive walk with a parent map: one pass marks every position that CONFERS
-//! legality on the expression sitting in it, a second pass rejects any embed
-//! field access not so marked. That ordering is fail-closed by construction --
-//! a new `Expr` variant confers nothing, so an unforeseen way to consume an
-//! embedded field rejects instead of slipping through.
+//! An allow-list pass marks legal projections before another pass rejects
+//! unmarked accesses. New expression forms are rejected until explicitly allowed.
 
 use super::*;
 
-/// Positions that keep an embedded field leaf-wise, keyed by the expression
-/// occupying them.
+/// Expressions in contexts that preserve embedded leaves.
 fn legal_positions(c: BodyCtx, gamma: &Gamma) -> FxHashSet<Idx<Expr>> {
     let mut ok: FxHashSet<Idx<Expr>> = FxHashSet::default();
 
     for (e, expr) in c.body.expr_arena.iter() {
         match *expr {
-            // `h.p.x`, `h.p?.x` -- projecting a leaf out of the embedded value.
             Expr::FieldAccess { base, .. } | Expr::SafeNav { base, .. } => {
                 ok.insert(base);
             }
 
-            // `h.p = Foo { .. }` / `h.p = null` -- a whole-field ctor write is
-            // leaf stores plus (for a nullable embed) a presence publish. The
-            // VALUE side is not marked: `x = h.p` binds.
+            // Whole-field writes lower to leaf stores and possibly a presence
+            // publish; the value side still materializes the aggregate.
             Expr::Assign { target, .. } | Expr::CompoundAssign { target, .. } => {
                 ok.insert(target);
             }
@@ -36,7 +27,7 @@ fn legal_positions(c: BodyCtx, gamma: &Gamma) -> FxHashSet<Idx<Expr>> {
                 ok.insert(target);
             }
 
-            // `h.p == other`, `h.p != null` -- lowered leaf-wise / presence-gated.
+            // Equality lowers leaf-wise; null checks are presence-gated.
             Expr::BinOp {
                 op: hir::BinOp::Eq | hir::BinOp::NotEq,
                 lhs,
@@ -46,15 +37,14 @@ fn legal_positions(c: BodyCtx, gamma: &Gamma) -> FxHashSet<Idx<Expr>> {
                 ok.insert(rhs);
             }
 
-            // `advance(h.p, dt)` -- legal only when the callee takes LEAVES.
             Expr::Call { callee, args, .. } => {
                 if scalar_abi_callee(gamma, e, callee) {
                     ok.extend(args);
                 }
             }
 
-            // `"{h.p}"` -- dump/serialize present the LOGICAL form.
             Expr::InterpolatedString(parts) => {
+                // Serialization presents the logical form.
                 for p in parts {
                     if let InterpPart::Value { expr, .. } = c.body.interp_part_arena[p] {
                         ok.insert(expr);
@@ -69,12 +59,10 @@ fn legal_positions(c: BodyCtx, gamma: &Gamma) -> FxHashSet<Idx<Expr>> {
     ok
 }
 
-/// Does this call hand its arguments over as scalar leaves?
+/// Whether a direct call passes arguments as scalar leaves.
 ///
-/// A direct call to a Rock-bodied fn rides the scalar ABI. A `@nomangle` /
-/// `extern` / `inline(<backend>)` callee receives a BOX (its body is an opaque
-/// string to the compiler), and a callee reached through a fn VALUE has no
-/// known decl at all -- both materialize the aggregate.
+/// Rock-bodied calls use the scalar ABI. Foreign, inline, `@nomangle`, and
+/// function-value calls materialize the aggregate.
 fn scalar_abi_callee(gamma: &Gamma, call: Idx<Expr>, callee: Callee) -> bool {
     match callee {
         Callee::Local(_) | Callee::Value(_) => false,
@@ -83,17 +71,15 @@ fn scalar_abi_callee(gamma: &Gamma, call: Idx<Expr>, callee: Callee) -> bool {
                 let f = &gamma.workspace.module(mid).functions[fid];
                 !f.is_extern && f.inline_body.is_none() && !fn_has_anno(f, "nomangle")
             }
-            // Unresolved at this point means inference already reported the
-            // call; don't pile on, and don't grant legality either.
+            // Inference already reported unresolved calls; do not grant legality.
             None => false,
         },
     }
 }
 
-/// The struct field `<base>.<field>` resolves to, when it is an `embed` one.
+/// Whether `<base>.<field>` is an embedded field.
 pub(crate) fn embed_field_of(gamma: &mut Gamma, base_ty: TyId, field: Ustr, span: Span) -> bool {
-    // A nullable owner still owns the field; the access itself is checked
-    // elsewhere.
+    // A nullable owner still owns the field; access validity is checked elsewhere.
     let ty = peel_nullable(gamma, base_ty, span);
     let TypeExpr::App {
         ctor: TypeCtor::Nominal(name),
@@ -111,10 +97,8 @@ pub(crate) fn embed_field_of(gamma: &mut Gamma, base_ty: TyId, field: Ustr, span
         .any(|f| f.name == field && f.is_embed)
 }
 
-/// Reject every use of an `embed` field that is not a projection.
 pub(crate) fn verify_embed_projection(c: BodyCtx, gamma: &mut Gamma) {
-    // O(1) bail for a workspace with no `embed` anywhere -- the common case, and
-    // this pass otherwise touches every field access in every body.
+    // Skip the arena scan when the workspace has no embedded fields.
     if !gamma.workspace.has_embed_fields {
         return;
     }
@@ -151,9 +135,8 @@ pub(crate) fn verify_embed_projection(c: BodyCtx, gamma: &mut Gamma) {
     let ok = legal_positions(c, gamma);
 
     for (e, field) in embedded {
-        // A `SafeNav` on an embedded field is itself a leaf projection
-        // (`h.p?.x` parses as SafeNav{base: h.p}), so only the ACCESS of the
-        // embedded field is judged here, never the leaf it produced.
+        // Safe navigation projects a leaf; judge the embedded-field access,
+        // not the leaf it produced.
         if ok.contains(&e) {
             continue;
         }

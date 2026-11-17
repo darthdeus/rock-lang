@@ -1,12 +1,6 @@
-//! `row_escape` -- a row place reaching storage that outlives its arena.
-//!
-//! A *row* is the `T` an `Arena<T>` stores, or the root `T` a `Scene<T>` owns.
-//! Both are handed out as ordinary references: `Entity<T>` is generation-checked,
-//! but the `T` it resolves to is not. A retained row can read dead state once
-//! the scene unloads or the slot is recycled.
-//!
-//! This opt-in `Advice` census measures escapes. Its intraprocedural analysis
-//! cannot prove their absence and does not enforce a lifetime boundary.
+//! `row_escape` measures where values from `Arena<T>` or `Scene<T>` leave the
+//! checked region. This opt-in, intraprocedural advice census is not a lifetime
+//! checker.
 
 use crate::{EscapeKind, RowEscape, head_type};
 use bone_core::hir::{
@@ -16,24 +10,20 @@ use bone_core::prelude::*;
 use bone_core::suspension::{SuspensionPolicy, uses_after_suspension};
 use bone_core::workspace::BodyInference;
 
-/// Handle types whose element/root `T` is a row. Each is a WEAK scalar identity
-/// (`stdlib/unified.rock`): the handle survives what it names, the `T` does not.
+/// Handles whose `T` is a row; the handle outlives the value it names.
 const HANDLES: [&str; 3] = ["Arena", "Entity", "Scene"];
 
-/// Where a row sits in a row-source call's result.
+/// Where a row appears in a source call's result.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum RowShape {
-    /// The result IS the row (`get`, `remove`): `T` or `T?`.
+    /// The result is `T` or `T?`.
     Direct,
-    /// The result is a tuple carrying the row at this index (`random`:
-    /// `(Entity<T>, T)?`).
+    /// The row is the tuple element at this index.
     TupleElem(usize),
 }
 
-/// `tail_sink` is where this body's TRAILING expression goes -- the enclosing
-/// function's return, a global's initial value, `None` for a body that
-/// discards it. Without it the rule cannot tell `fn f() -> Mob? { e.get() }`
-/// from `fn f() { e.remove() }`, and the second is not an escape at all.
+/// `tail_sink` identifies where the body's trailing expression goes. A returned
+/// row escapes; a discarded tail does not.
 pub(crate) fn row_escapes_in_body(
     ws: &Workspace,
     bi: Option<&BodyInference>,
@@ -53,24 +43,19 @@ pub(crate) fn row_escapes_in_body(
     dedup(out)
 }
 
-/// What the census EXAMINED. A finding count on its own cannot be read: zero
-/// escapes in a project with no `Arena` at all says nothing about escapes,
-/// so callers can distinguish an empty population from zero escapes.
+/// Census denominator, including whether the run found any row sources.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct RowPopulation {
-    /// Bodies carrying at least one row.
+    /// Bodies containing rows.
     pub bodies: usize,
-    /// Row SOURCES: call sites reading a row out of a handle, plus Arena loop
-    /// variables. The denominator -- what a finding count is a fraction of.
+    /// Calls and loop variables that produce rows; denominator for findings.
     pub sources: usize,
-    /// Locals that hold a row, after aliasing is closed over.
+    /// Locals holding rows after aliasing closure.
     pub bindings: usize,
 }
 
-/// The row population of the bodies a run REPORTS on. `report` is the same file
-/// set the findings are restricted to, so the numerator and denominator are
-/// measured over one population; passing an empty set measures every user
-/// module (tests and whole-workspace runs).
+/// Row population for the reported files, so counts share the findings'
+/// denominator. An empty `report` set includes every user module.
 pub fn row_population(
     ws: &Workspace,
     warm: &FxHashSet<ModuleId>,
@@ -100,21 +85,18 @@ pub fn row_population(
     pop
 }
 
-/// The row-valued expressions and bindings of one body, closed under aliasing.
+/// Row-valued expressions and bindings in one body.
 struct Rows {
     exprs: FxHashSet<Idx<Expr>>,
     bindings: FxHashSet<Idx<BindingInfo>>,
-    /// Expressions whose value is a TUPLE carrying a row, and at which index.
+    /// Tuple-valued expressions and the index carrying a row.
     tuples: FxHashMap<Idx<Expr>, usize>,
-    /// Row SOURCES before aliasing closure -- the census denominator. Counted
-    /// separately from `exprs`, which grows to include every alias.
+    /// Row sources before aliasing closure, kept separate from aliases.
     seeds: usize,
 }
 
 impl Rows {
-    /// Seed from the row SOURCES, then close over aliasing until nothing new
-    /// appears. The fixpoint matters because a row reaches its escape through
-    /// an unwrap and one or more plain `let`s far more often than directly.
+    /// Find row sources, then close over aliases to a fixed point.
     fn resolve(ws: &Workspace, bi: &BodyInference, body: &Body) -> Rows {
         let mut r = Rows {
             exprs: FxHashSet::default(),
@@ -144,10 +126,8 @@ impl Rows {
         r
     }
 
-    /// Loop variables bound by iterating an Arena. Which leaves are rows is
-    /// decided by the leaf's own TYPE rather than the loop's arity, so
-    /// `for m in a`, `for (e, m) in a` and `for e in a.keys()` all fall out of
-    /// one rule -- an `Entity<T>` leaf is the handle, never the row.
+    /// Seed row bindings from Arena loop variables. Each pattern leaf's type
+    /// distinguishes rows from `Entity<T>` handles.
     fn seed_loops(&mut self, ws: &Workspace, bi: &BodyInference, body: &Body) {
         for (_, stmt) in body.statement_arena.iter() {
             let Statement::For { pattern, iter, .. } = stmt else {
@@ -173,8 +153,7 @@ impl Rows {
                 Expr::Var(b) if self.bindings.contains(b) => {
                     self.exprs.insert(idx);
                 }
-                // `e.get() ?? return` / `?? fallback`: the value that flows on
-                // is the row whenever the left side produced one.
+                // The left value flows through null coalescing when present.
                 Expr::BinOp {
                     op: BinOp::NullCoalesce,
                     lhs,
@@ -182,8 +161,7 @@ impl Rows {
                 } if self.exprs.contains(lhs) => {
                     self.exprs.insert(idx);
                 }
-                // A cast does not change what the value IS. `as any` is an
-                // escape, reported separately -- it is still the same row.
+                // Casts preserve row identity; `as any` is reported separately.
                 Expr::As { value, .. } if self.exprs.contains(value) => {
                     self.exprs.insert(idx);
                 }
@@ -193,9 +171,7 @@ impl Rows {
                 Expr::TupleIndex { tuple, index } if self.tuples.get(tuple) == Some(index) => {
                     self.exprs.insert(idx);
                 }
-                // An unwrapper -- declared `(X?) -> X` -- forwards its argument.
-                // Keyed on the declared signature, not the name, so `unwrap`,
-                // `expect` and any project-local sibling are covered alike.
+                // Unwrappers forward their nullable argument, regardless of name.
                 Expr::Call { args, .. } if args.len() == 1 => {
                     let arg = (*args).into_iter().next().expect("len == 1");
                     if self.exprs.contains(&arg)
@@ -221,7 +197,7 @@ impl Rows {
                     {
                         self.bindings.insert(name);
                     }
-                    // A tuple-let picks out the aliased element.
+                    // Bind the row selected from the tuple.
                     if let Some(&i) = self.tuples.get(value)
                         && let bone_core::hir::Pattern::Tuple { elements } =
                             body.pattern_arena[*pattern]
@@ -247,8 +223,7 @@ impl Rows {
                 } if self.exprs.contains(receiver) => {
                     self.bindings.insert(*binding);
                 }
-                // `m = e.get()` into an ordinary local makes that local a row;
-                // only a store into a PLACE that outlives the row is an escape.
+                // A local assignment aliases the row; stores are checked separately.
                 Expr::Assign { target, value } if self.exprs.contains(value) => {
                     if let Expr::Var(b) = body.expr_arena[*target] {
                         self.bindings.insert(b);
@@ -261,8 +236,7 @@ impl Rows {
         before != (self.exprs.len(), self.bindings.len(), self.tuples.len())
     }
 
-    /// Stores into a place that outlives the row: a global, a `static` local, a
-    /// struct field, a collection slot.
+    /// Stores into places that may outlive the row.
     fn stores(
         &self,
         ws: &Workspace,
@@ -322,7 +296,6 @@ impl Rows {
             }
         }
 
-        // A trailing expression escapes only where it actually goes somewhere.
         if let (Some(root), Some(sink)) = (body.root, tail_sink) {
             if let Expr::Block { tail: Some(t), .. } = body.expr_arena[root] {
                 if self.exprs.contains(&t) {
@@ -332,9 +305,8 @@ impl Rows {
         }
     }
 
-    /// Rows passed as call arguments. Three positions are escapes; every other
-    /// call is an ordinary Rock-bodied helper, which this lint cannot judge
-    /// (no interprocedural retain summary -- see the doc).
+    /// Check row arguments to extern, `Any`, and container-storage calls. Other
+    /// calls have no interprocedural retention summary.
     fn calls(&self, ws: &Workspace, bi: &BodyInference, body: &Body, out: &mut Vec<RowEscape>) {
         for (idx, expr) in body.expr_arena.iter() {
             let Expr::Call { args, .. } = expr else {
@@ -352,8 +324,7 @@ impl Rows {
             }
             let f = callee_fn(ws, bi, idx);
 
-            // `bag.push(m)` / `map.insert(k, m)`: receiver is a container and
-            // the row is a later argument, so the row is being STORED in it.
+            // A row in a later argument is stored when the receiver is a container.
             let into_container = args
                 .first()
                 .is_some_and(|a| is_container(ws, bi, bi.expr_types.get(*a).copied()))
@@ -374,11 +345,8 @@ impl Rows {
         }
     }
 
-    /// A row read from inside a lambda that was bound outside it. The lambda
-    /// outlives the statement that built it, so the row it closed over is read
-    /// at a time nothing has re-validated. a handle-capturing `move_to`
-    /// captures the `Entity` and re-`get()`s inside -- which is why the handle
-    /// is excluded from `bindings` and this stays quiet on the correct idiom.
+    /// Capturing an outer row is unprovable without a retention summary. A
+    /// closure that captures a handle and fetches the row inside remains safe.
     fn captures(&self, ws: &Workspace, bi: &BodyInference, body: &Body, out: &mut Vec<RowEscape>) {
         for (lam, expr) in body.expr_arena.iter() {
             let Expr::Lambda { .. } = expr else { continue };
@@ -396,19 +364,9 @@ impl Rows {
         }
     }
 
-    /// A row still read after a suspension. Between the `yield` and the read,
-    /// arbitrary game code ran: the row may name a despawned entity, and
-    /// nothing re-binds a suspended body's locals. The failure mode is a
-    /// VACUOUS GREEN rather than a wrong value -- `Arena.insert` rebinds a
-    /// reused slot's `_data` instead of mutating in place, so a stale row never
-    /// aliases the new occupant. It freezes at the dead entity's values and
-    /// writes through it reach nothing, which is why "the mob did not move"
-    /// passes trivially.
-    ///
-    /// An evaluation-order walk carrying two binding sets: `live` (fetched,
-    /// nothing suspended since) and `crossed` (fetched, then suspended). A read
-    /// of a `crossed` binding is the finding. Liveness, not scope -- a row
-    /// finished with before the `yield` stays quiet.
+    /// Report row reads after suspension. The walk tracks live and suspended
+    /// bindings in evaluation order, so rows no longer used before suspension
+    /// are not reported.
     fn suspensions(
         &self,
         ws: &Workspace,
@@ -471,10 +429,7 @@ impl SuspensionPolicy for RowSuspensionPolicy<'_> {
     }
 }
 
-/// One finding per (kind, site). A row reached through several aliases lands on
-/// the same escape expression more than once; the site is the thing an author
-/// fixes, so reporting it twice is noise, and a census that double-counts it
-/// overstates the population it exists to measure.
+/// Keep one finding per escape kind and source site.
 fn dedup(mut found: Vec<RowEscape>) -> Vec<RowEscape> {
     let mut seen: FxHashSet<(EscapeKind, (usize, usize))> = FxHashSet::default();
     found.retain(|f| seen.insert((f.kind, f.span.offset_range())));
@@ -486,14 +441,8 @@ fn callee_fn<'a>(ws: &'a Workspace, bi: &BodyInference, call: Idx<Expr>) -> Opti
     Some(&ws.module(*mid).functions[*fid])
 }
 
-/// Whether `f` reads a row OUT of a handle, judged from its DECLARATION: param
-/// 0 is `Handle<G>` and the result is `G`, `G?`, or a tuple carrying `G`.
-///
-/// Structural rather than name-keyed on purpose. `get` names a method on a
-/// dozen unrelated types, and keying on it would both miss `remove` (which
-/// hands out a row whose slot is already free -- strictly worse to retain) and
-/// falsely match `Map.get`. The generic identity is what carries the meaning:
-/// `Arena<G>.len() -> int` mentions no `G` and is not a source.
+/// Whether a declaration returns its handle's generic row, directly or inside
+/// a tuple. Match the type structure rather than method names such as `get`.
 fn row_shape(ws: &Workspace, f: &Function) -> Option<RowShape> {
     let g = handle_generic(ws, f.param_decls.first()?.ty)?;
     let ret = f.return_ty?;
@@ -512,8 +461,7 @@ fn row_shape(ws: &Workspace, f: &Function) -> Option<RowShape> {
     None
 }
 
-/// `Some(G)` iff `ty` is `Arena<G>` / `Entity<G>` / `Scene<G>` for a declared
-/// generic `G`.
+/// Return the declared generic parameter of a row handle type.
 fn handle_generic(ws: &Workspace, ty: TyId) -> Option<VarId> {
     let (mid, _) = static_parts(ty)?;
     let TypeExpr::App {
@@ -533,9 +481,7 @@ fn handle_generic(ws: &Workspace, ty: TyId) -> Option<VarId> {
     }
 }
 
-/// Whether `f` forwards its argument out of a `?` -- declared `(X?) -> X` for
-/// the same `X`. `unwrap`, `expect`, and any project-local sibling: the value
-/// that comes out is the value that went in, so row-ness passes through.
+/// Whether `f` forwards a nullable argument unchanged, regardless of its name.
 fn is_unwrapper(ws: &Workspace, f: &Function) -> bool {
     let Some(p0) = f.param_decls.first() else {
         return false;
@@ -582,8 +528,7 @@ fn static_te(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
     Some(ws.module(mid).ty_arena[i])
 }
 
-/// Whether an inferred type is one of the weak handles -- the thing an author
-/// is SUPPOSED to store, so never a row.
+/// Whether an inferred type is a row handle rather than a row.
 fn is_handle(ws: &Workspace, bi: &BodyInference, ty: Option<TyId>) -> bool {
     matches!(
         ty.map(|t| head_type(ws, bi, t)),
@@ -608,10 +553,8 @@ fn is_any(ws: &Workspace, bi: &BodyInference, ty: Option<TyId>) -> bool {
     )
 }
 
-/// Whether a `for`'s iterable is an Arena, directly (`for m in mobs`) or
-/// through one of its iterator constructors (`mobs.values()`, `mobs.pairs()`).
-/// A combinator chain between the two is not followed -- see the doc's
-/// not-covered list.
+/// Whether a `for` iterates an Arena directly or through one of its iterator
+/// constructors. Combinator chains are not followed.
 fn iterates_an_arena(ws: &Workspace, bi: &BodyInference, body: &Body, iter: Idx<Expr>) -> bool {
     let is_arena = |e: Idx<Expr>| {
         matches!(

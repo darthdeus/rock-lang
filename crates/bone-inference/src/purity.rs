@@ -1,9 +1,7 @@
 use super::*;
 use bone_core::hir_walk::HirChild;
 
-/// True if `e` reaches a `return`/`break`/`continue` (statement or expr form)
-/// through block / if / match / loop bodies. Port of the retired checker's
-/// `block_contains_control_flow`.
+/// Whether control flow appears in a block, branch, match, or loop body.
 pub(crate) fn expr_contains_cf(c: BodyCtx, e: Idx<Expr>) -> bool {
     match c.body.expr_arena[e] {
         Expr::Return(_) | Expr::Break | Expr::Continue => true,
@@ -34,10 +32,8 @@ pub(crate) fn stmt_contains_cf(c: BodyCtx, s: Idx<Statement>) -> bool {
     }
 }
 
-/// Reject control flow (`return`/`break`/`continue`) inside an `if` that is a
-/// tuple-literal element of a destructure (`let (..)` / newtype) RHS: the
-/// cond-false path can't materialise a value to destructure. Port of rock's
-/// `ControlFlowInSubexpression` rule.
+/// Reject control flow inside an `if` used as a destructuring tuple element;
+/// its false path cannot produce a value for the destructure.
 pub(crate) fn reject_cf_in_destructure_rhs(
     c: BodyCtx,
     value: Idx<Expr>,
@@ -57,17 +53,12 @@ pub(crate) fn reject_cf_in_destructure_rhs(
     Ok(())
 }
 
-/// Does function `f` carry annotation `@name`?
 pub(crate) fn fn_has_anno(f: &Function, name: &str) -> bool {
     f.annotations.iter().any(|a| a.is_builtin(name))
 }
 
-/// Which hoisted construct is being checked -- they forbid different capture
-/// sets. A static INITIALIZER runs once so it may read nothing declared outside
-/// itself (params, locals, and sibling statics all snapshot the first reaching
-/// call). A nested fn BODY is hoisted to module scope with no enclosing frame,
-/// so it may not read enclosing params/locals -- but it MAY reference in-scope
-/// `static`s and sibling nested `fn`s, which are themselves module-level.
+/// Static initializers cannot capture locals; nested functions cannot capture
+/// enclosing locals but may refer to statics and sibling functions.
 #[derive(Copy, Clone)]
 pub(crate) enum CaptureCtx {
     StaticInit,
@@ -89,10 +80,8 @@ pub(crate) fn reject_static_init_captures(
     )
 }
 
-/// A nested fn's body may not capture the enclosing frame. `body` is the body
-/// block expr; `decl_span` spans the whole `fn ..(..) { .. }` statement so the
-/// fn's OWN params (declared in the signature, before the body block) count as
-/// inside -- only bindings declared outside the declaration are captures.
+/// Check captures using the full declaration span so the nested function's
+/// parameters count as local to its body.
 pub(crate) fn reject_nested_fn_captures(
     c: BodyCtx,
     body: Idx<Expr>,
@@ -107,10 +96,8 @@ pub(crate) fn reject_nested_fn_captures(
     )
 }
 
-/// Reject a binding reference (a `Var` read or a `Callee::Local` call) that
-/// escapes the hoisted construct. A binding whose declaration span is contained
-/// in `root_span` is local to the construct (a param, an inner `let`, a lambda
-/// param) and always allowed.
+/// Reject references to enclosing locals; declarations inside `root_span` are
+/// local to the hoisted construct.
 pub(crate) fn reject_captured_binding(
     c: BodyCtx,
     b: Idx<hir::BindingInfo>,
@@ -156,8 +143,7 @@ pub(crate) fn reject_captures(
 ) -> Result<(), CompilerError> {
     match node {
         HirChild::Expr(e) => match c.body.expr_arena[e] {
-            // Calling an enclosing local (a captured lambda) is a capture;
-            // calling a sibling nested fn / in-scope static is not.
+            // Calling an enclosing local is a capture; sibling functions are not.
             Expr::Var(b)
             | Expr::Call {
                 callee: Callee::Local(b),
@@ -165,12 +151,9 @@ pub(crate) fn reject_captures(
             } => reject_captured_binding(c, b, root_span, site, mode)?,
             _ => {}
         },
-        // A doubly-nested fn's body sits inside `root_span`, so any
-        // enclosing-frame read it makes is caught by ITS own reject pass;
-        // walking the body here is harmless (every ref is span-inside
-        // `root_span`).
+        // Nested function bodies are checked separately and lie inside this
+        // declaration span.
         HirChild::Statement(_) => {}
-        // A pattern binds and compares; it reads no enclosing local.
         HirChild::Pattern(_) => return Ok(()),
     }
     c.body.try_for_each_child(node, |child| {
@@ -178,9 +161,8 @@ pub(crate) fn reject_captures(
     })
 }
 
-/// Push an error at every construct in `node` that is not referentially
-/// transparent. Lambda and nested fn bodies are rejected whole rather than
-/// vetted, so the walk does not enter them.
+/// Report impure constructs in `node`; lambda and nested-function bodies are
+/// not traversed.
 pub(crate) fn verify_pure(
     c: BodyCtx,
     ws: &Workspace,
@@ -191,7 +173,6 @@ pub(crate) fn verify_pure(
     let descend = match node {
         HirChild::Expr(e) => verify_pure_expr(c, ws, resolved, e, errors),
         HirChild::Statement(s) => verify_pure_stmt(c, s, errors),
-        // A pattern binds and compares; it has no effect of its own.
         HirChild::Pattern(_) => false,
     };
     if descend {
@@ -200,7 +181,6 @@ pub(crate) fn verify_pure(
     }
 }
 
-/// The errors `e` itself raises; whether its children still need vetting.
 fn verify_pure_expr(
     c: BodyCtx,
     ws: &Workspace,
@@ -212,9 +192,7 @@ fn verify_pure_expr(
     let mut reject = |message: String| errors.push(CompilerError::new_with_label(span, message));
     match c.body.expr_arena[e] {
         Expr::Global(name) => {
-            // const globals are read-only (assignment/incdec rejected,
-            // re-initialized unconditionally on hot reload); reading one
-            // is pure. Only mutable globals break purity.
+            // Const globals are read-only; only mutable global reads break purity.
             if !ws.const_globals.contains(&name) {
                 reject(format!(
                     "`@pure` function reads global `{}` (mutable state)",
@@ -231,8 +209,7 @@ fn verify_pure_expr(
         Expr::IncDec { .. } => reject(
             "`@pure` function performs an increment/decrement (mutation)".to_string(),
         ),
-        // A function value's body is not vetted; only a resolved callee's
-        // annotation can be.
+        // Function values have no declaration whose purity can be checked.
         Expr::Call {
             callee: Callee::Local(_) | Callee::Value(_),
             ..
@@ -254,15 +231,12 @@ fn verify_pure_expr(
             "`@pure` function indexes a collection (reads potentially-mutable state)"
                 .to_string(),
         ),
-        // Array literals allocate a heap table -- identity observable across
-        // re-evaluation, so not dup-safe. Tuples are value-like (no heap
-        // identity) -- pure.
+        // Array identity is observable across evaluations; tuples are values.
         Expr::Array(_) => reject(
             "`@pure` function builds an array literal (allocates a heap table, identity observable)"
                 .to_string(),
         ),
-        // A `value` struct literal is byte-value (pure); a heap struct literal
-        // has observable identity.
+        // Heap struct identity is observable; value structs are byte-values.
         Expr::StructLiteral { name, .. } => {
             let is_value = ws
                 .struct_by_name
@@ -275,8 +249,7 @@ fn verify_pure_expr(
                 );
             }
         }
-        // A lambda captures and has closure identity; its body isn't vetted
-        // for purity here.
+        // Lambda identity and captured state are observable; its body is not vetted.
         Expr::Lambda { .. } => {
             reject(
                 "`@pure` function creates a lambda (closure identity / captured state not vetted)"
@@ -284,22 +257,18 @@ fn verify_pure_expr(
             );
             return false;
         }
-        // Match (incl. with-binding) and self-recursion are accepted: they are
-        // referentially transparent. rock rejects match-bind / self-recursion
-        // as scope-walker limitations; bone implements the intended rule.
+        // Match and recursion do not add impurity by themselves.
         _ => {}
     }
     true
 }
 
-/// The errors `s` itself raises; whether its children still need vetting.
 fn verify_pure_stmt(c: BodyCtx, s: Idx<Statement>, errors: &mut Vec<CompilerError>) -> bool {
     let message = match c.body.statement_arena[s] {
         Statement::Static { .. } => {
             "`@pure` function declares a `static` (writes module state)".to_string()
         }
-        // Conservative, like the lambda case: a nested fn's body is not vetted
-        // for purity here. Put the helper at top level if it must be `@pure`.
+        // The nested body is checked separately.
         Statement::Fn { .. } => {
             "`@pure` function declares a nested `fn` (its body is not vetted for purity)"
                 .to_string()

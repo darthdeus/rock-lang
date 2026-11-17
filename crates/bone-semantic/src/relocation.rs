@@ -1,21 +1,9 @@
-//! ALIASING: a
-//! Vec or Map may not grow, shrink, reorder or rehash while a reference into
-//! one of its elements is live, because the element moves and a write through
-//! the old reference lands in the superseded buffer.
+//! A live Vec or Map element reference forbids structural changes that can move it.
+//! Check the receiving call and later arguments, propagating callee effects by
+//! element type. Opaque calls can change any collection.
 //!
-//! Inference already rejects retaining an element reference (a `ref` local, a
-//! ref return). Coroutine retention is tracked through reference parameters,
-//! so an element reference is live only while its immediate call runs. The
-//! check is therefore at that call: every function gets a summary of the
-//! collections whose structure it may change, and a call that receives an
-//! element reference is rejected when its summary, or a later argument, may
-//! change a collection of that element type. Summaries follow parameters,
-//! fields, globals and call chains by element type; closures and foreign code
-//! are unknown and reject.
-//!
-//! The structural primitives are the stdlib functions marked `@relocates`
-//! (their first parameter changes structure) plus Map index assignment and a
-//! Vec `len` write.
+//! Structural writes include Map index assignment, Vec length writes, and
+//! stdlib primitives marked `@relocates` on their first argument.
 
 use std::collections::{BTreeMap, BTreeSet};
 

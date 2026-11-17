@@ -1,18 +1,7 @@
-//! Null-refinement / flow narrowing for inference.
-//!
-//! One home for the `if x != null { .. }` machinery: detect the null-check in a
-//! condition ([`detect_null_narrow`]), apply the resulting narrowings while
-//! inferring a branch ([`infer_branch`]), and the supporting helpers -- path
-//! keys/prefixes, the purity-aware condition effect check that guards mutable
-//! refinement ([`cond_has_effect`]), and the divergence test that lets a guard's
-//! narrowing escape into the rest of a block ([`stmt_guard_narrows`]).
-//!
-//! Locals and globals share one refinement set (`Gamma.refined_nonnull`), keyed
-//! on a [`Root`] + field path -- so `x.a` and `G.a` narrow through the same
-//! mechanism. A WHOLE local (`Root::Local`, empty path) is special-cased to peel
-//! its `binding_types` entry instead. Calls and yields invalidate the path set:
-//! a callee or resumer can reassign globals or mutate local fields through an
-//! alias. Whole-local bindings survive because callees cannot reassign them.
+//! Non-null refinements use a shared `(root, field path)` set for locals and
+//! globals; whole-local types are narrowed in `binding_types`. Calls and yields
+//! clear path refinements, and calls may revoke whole-local narrows assigned by
+//! a closure.
 
 use crate::expr::block_ends_in_exit;
 use bone_core::hir;
@@ -21,7 +10,6 @@ use bone_core::prelude::*;
 
 use crate::{BodyCtx, Gamma, Use, fn_has_anno, infer_expr_used, peel_nullable};
 
-/// The root of a refinement path: a local binding or a global (by name).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Root {
     Local(Idx<BindingInfo>),
@@ -34,13 +22,9 @@ impl Root {
     }
 }
 
-/// A refined non-null path: a root plus a field chain. `x` -> `(Local x, [])`,
-/// `G.inner` -> `(Global G, [inner])`.
 pub(crate) type Narrow = (Root, Vec<Ustr>);
 
-/// The `(root, field-path)` a path expression refers to (`x` -> `(Local x, [])`,
-/// `x.a.b` -> `(Local x, [a, b])`, `G.inner` -> `(Global G, [inner])`), or `None`
-/// if it isn't rooted in a local binding or a global.
+/// Root a field path in a local binding or global.
 pub(crate) fn path_key(c: BodyCtx, e: Idx<Expr>) -> Option<Narrow> {
     match c.body.expr_arena[e] {
         Expr::Var(b) => Some((Root::Local(b), vec![])),
@@ -56,8 +40,7 @@ pub(crate) fn path_key(c: BodyCtx, e: Idx<Expr>) -> Option<Narrow> {
     }
 }
 
-/// Every prefix of a path (`(r, [a, b])` -> `(r, [])`, `(r, [a])`, `(r, [a, b])`),
-/// so refining `r.a.b` also marks `r` and `r.a` non-null.
+/// Include ancestor paths because a field path requires each parent to be non-null.
 fn path_prefixes((root, fields): Narrow) -> Vec<Narrow> {
     (0..=fields.len())
         .map(|i| (root, fields[..i].to_vec()))
@@ -78,21 +61,8 @@ fn is_stdlib_null_predicate(gamma: &Gamma, e: Idx<Expr>) -> bool {
         })
 }
 
-/// `@pure`-aware effect check over a CONDITION expression: true if evaluating
-/// it could mutate a path -- a call to a callee that is not `@pure` (named,
-/// safe-nav or through a function value), a yield, or an assignment anywhere
-/// in the expression. Used to suppress mutable-path narrows from a condition
-/// whose own evaluation has an effect AFTER the null-check
-/// (`g != null && impure()`): `impure()` may null `g` before the body runs.
-/// Whole-local bindings are immune; their fields can change through aliases.
-///
-/// Every child is visited, whatever the parent: a call hides as easily in
-/// an index, an interpolation, a cast or a `match` arm as in an operand. A
-/// lambda literal is not entered, since creating it runs nothing.
-///
-/// Conditions have already been inferred: use the selected overload, including
-/// UFCS and safe-nav calls, rather than a spelling-based overload family.
-/// Arguments can still invalidate a path even when the selected callee is pure.
+/// Whether evaluating an already-inferred condition can invalidate a mutable
+/// path after its null check. Visit all children, but not lambda bodies.
 fn cond_has_effect(gamma: &Gamma, c: BodyCtx, e: Idx<Expr>) -> bool {
     let callee_pure = |e: Idx<Expr>| {
         gamma
@@ -135,8 +105,7 @@ fn child_has_effect(gamma: &Gamma, c: BodyCtx, child: bone_core::hir_walk::HirCh
     use bone_core::hir_walk::HirChild;
     match child {
         HirChild::Expr(e) => cond_has_effect(gamma, c, e),
-        // A statement inside a condition (a block arm) runs when the
-        // condition does; anything but a plain expression may write.
+        // Non-expression statements in a condition block may write.
         HirChild::Statement(s) => match c.body.statement_arena[s] {
             Statement::Expr(e) => cond_has_effect(gamma, c, e),
             Statement::Let { value, .. } => cond_has_effect(gamma, c, value),
@@ -147,9 +116,7 @@ fn child_has_effect(gamma: &Gamma, c: BodyCtx, child: bone_core::hir_walk::HirCh
     }
 }
 
-/// Locals declared outside a lambda and assigned inside one: the lambda may
-/// run at any call, so a whole-local narrow of such a binding does not
-/// survive an effect. Nested fns cannot capture, so only lambdas count.
+/// Outer locals assigned by lambdas, whose calls can revoke their narrows.
 pub(crate) fn closure_assigned_locals(body: &hir::Body) -> FxHashSet<Idx<BindingInfo>> {
     use bone_core::hir_walk::HirChild;
     let mut out = FxHashSet::default();
@@ -184,9 +151,7 @@ pub(crate) fn closure_assigned_locals(body: &hir::Body) -> FxHashSet<Idx<Binding
     out
 }
 
-/// Narrowings a condition implies for its then / else branches. Detects the
-/// null-check shape ([`detect_null_narrow_inner`]), then drops mutable paths if
-/// the condition's own evaluation could invalidate them ([`cond_has_effect`]).
+/// Narrowings for each branch, excluding paths the condition can invalidate.
 pub(crate) fn detect_null_narrow(
     gamma: &Gamma,
     c: BodyCtx,
@@ -262,11 +227,8 @@ fn detect_null_narrow_inner(
     }
 }
 
-/// Infer `branch` with `narrows` applied, restoring the prior state on exit. A
-/// whole local peels its `binding_types` entry; every other path (local field,
-/// whole global, global field) goes into `refined_nonnull`. A path cleared
-/// mid-branch by an intervening effect stays cleared -- we only undo what this
-/// branch itself added.
+/// Apply branch narrowings and restore only the facts this branch added, so an
+/// intervening effect's invalidations remain in force.
 pub(crate) fn infer_branch(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -299,8 +261,7 @@ pub(crate) fn infer_branch(
 
     let result = infer_expr_used(c, gamma, branch, used);
 
-    // Reverse order: `x != null && x.f != null` narrows `x` twice, and only the
-    // first save holds its type from before the branch.
+    // Restore the outermost type last when a path was narrowed more than once.
     for (b, old) in saved_bindings.into_iter().rev() {
         gamma.restore_local_narrow(b, old, refinement_epoch);
     }
@@ -312,9 +273,7 @@ pub(crate) fn infer_branch(
     result
 }
 
-/// Narrowings a guard STATEMENT leaks into the rest of its block: an `if` whose
-/// other path always diverges (`if x == null { return }`) narrows `x` for the
-/// statements that follow, since control only reaches them on the narrowed path.
+/// Narrowings that remain valid after an `if` statement whose other path exits.
 pub(crate) fn stmt_guard_narrows(gamma: &Gamma, c: BodyCtx, stmt: Idx<Statement>) -> Vec<Narrow> {
     let Statement::Expr(e) = c.body.statement_arena[stmt] else {
         return vec![];
@@ -350,8 +309,7 @@ pub(crate) fn stmt_guard_narrows(gamma: &Gamma, c: BodyCtx, stmt: Idx<Statement>
     }
 }
 
-/// Whether a branch always exits its enclosing block (its last non-comment
-/// statement is `return` / `break` / `continue` and it has no tail value).
+/// Whether a branch has no tail and its final statement exits or never completes.
 fn expr_diverges(c: BodyCtx, e: Idx<Expr>) -> bool {
     match c.body.expr_arena[e] {
         Expr::Block { statements, tail } => tail.is_none() && block_ends_in_exit(c, statements),

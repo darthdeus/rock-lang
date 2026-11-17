@@ -1,16 +1,8 @@
 use super::*;
 
-// Defer-to-use inference for unconstrained lambda params.
-// An overload ambiguity (cost tie) or
-// field-projection ambiguity whose operand is an unresolved lambda-param var
-// queues a pending constraint instead of erroring; when later unification pins
-// the var, the constraint re-resolves with full information. Strictly
-// error-path: a unique cheapest fit still pins eagerly, so programs that
-// resolve today keep their picks. All state is body-local (Gamma), so
-// bone-incremental's per-body model is untouched.
+// Defer tied overloads and ambiguous field projections until later constraints
+// pin the lambda parameter; unique cheapest overloads still resolve eagerly.
 
-/// The lambda param a deferrable var types (or is chained from, for result
-/// vars of deferred ops). Diagnostics only.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct DeferOrigin {
     pub(crate) name: Ustr,
@@ -48,7 +40,7 @@ impl Pending {
     }
 }
 
-/// First operand that resolves to a var sanctioned for deferral.
+/// First operand that resolves to a deferrable inference variable.
 pub(crate) fn deferrable_operand(
     gamma: &mut Gamma,
     tys: &[TyId],
@@ -65,9 +57,8 @@ pub(crate) fn deferrable_operand(
     None
 }
 
-/// First operand still unresolved at retry time. Any var qualifies: the entry
-/// was sanctioned for deferral when queued, and a var->var unification may
-/// have moved the wait onto an unmarked var.
+/// First operand still unresolved at retry time. Variable unification may have
+/// moved a queued constraint to a var that was not originally marked.
 fn unresolved_operand(gamma: &mut Gamma, tys: &[TyId], span: Span) -> Option<VarId> {
     for &t in tys {
         let r = resolve(gamma, t, span);
@@ -78,8 +69,7 @@ fn unresolved_operand(gamma: &mut Gamma, tys: &[TyId], span: Span) -> Option<Var
     None
 }
 
-/// Result var for a deferred op: named after the originating param and itself
-/// deferrable, so downstream ops on it chain (`x * 2 + 1`).
+/// Make a result var deferrable so later operations can chain from it.
 pub(crate) fn defer_result_var(gamma: &mut Gamma, origin: DeferOrigin, span: Span) -> TyId {
     let ty = gamma.fresh_callsite_var(origin.name, span);
     let r = resolve(gamma, ty, span);
@@ -96,14 +86,9 @@ pub(crate) fn queue_pending(gamma: &mut Gamma, v: VarId, p: Pending) {
     gamma.pending_by_var.entry(v).or_default().push(id);
 }
 
-/// Retry every pending whose key var got pinned, to fixpoint (a retry can pin
-/// further vars and make more entries ready). Runs at SEQUENCE POINTS only --
-/// after each statement and at end of body -- never from inside `unify`:
-/// unification also runs speculatively (`coerce`/`join`/`fit_cost` trial-keep
-/// bindings, `score_candidate` trial-rollbacks them), and a retry commits
-/// side effects (`record_resolved_call`) that no checkpoint can roll back.
-/// At a sequence point nothing speculative is in flight, so every binding in
-/// the substitution store is committed.
+/// Retry ready constraints to a fixpoint at statement and body-end sequence
+/// points. Do not retry inside `unify`: type work can be speculative there,
+/// while retries commit call records that substitution rollback cannot undo.
 pub(crate) fn drain_ready_pendings(gamma: &mut Gamma) -> Result<(), CompilerError> {
     if gamma.quiet || gamma.pending_by_var.is_empty() {
         return Ok(());
@@ -148,9 +133,8 @@ fn retry_pending(gamma: &mut Gamma, p: Pending) -> Result<(), CompilerError> {
             result,
         } => {
             let name = family.key();
-            // A queue entry can be a speculative duplicate (scoring infers
-            // spread operands and rolls back only the substitution trail); if
-            // an equivalent entry already committed this call, drop it.
+            // Scoring may queue a duplicate while rolling back substitutions;
+            // ignore it if this call has already committed.
             if gamma.out.resolved_overload_calls.contains_key(&call_expr) {
                 return Ok(());
             }
@@ -181,9 +165,8 @@ fn retry_pending(gamma: &mut Gamma, p: Pending) -> Result<(), CompilerError> {
                         call_expr,
                         span,
                     )?;
-                    // `result` is the hole the deferred expression left; a use
-                    // may have pinned it already (`print(..)` pins `any`, a
-                    // `float` slot widens an int ret) -- coerce, don't unify.
+                    // A use may have pinned the result hole already, so coerce
+                    // instead of unifying it again.
                     coerce(gamma, ret, result, span)
                 }
                 Err(SelectError::Tied(e)) => match unresolved_operand(gamma, &arg_tys, span) {
@@ -240,9 +223,8 @@ fn retry_pending(gamma: &mut Gamma, p: Pending) -> Result<(), CompilerError> {
     }
 }
 
-/// Field projection with deferral: `_.x` on an unpinned lambda param where
-/// several structs define the field waits for the pin. The single-match
-/// reverse inference and every error case stay in `struct_field_ty`.
+/// Defer an ambiguous field projection; `struct_field_ty` handles unique
+/// matches and all error cases.
 pub(crate) fn field_ty_or_defer(
     gamma: &mut Gamma,
     base_ty: TyId,
@@ -273,9 +255,6 @@ pub(crate) fn field_ty_or_defer(
     Ok(struct_field_ty(gamma, base_ty, field, span)?)
 }
 
-/// End of body: drain what the body tail pinned, then report anything still
-/// queued -- a never-used unconstrained lambda has no type; defer-to-use does
-/// not invent one.
 pub(crate) fn report_unpinned_lambda_params(gamma: &mut Gamma) {
     if let Err(e) = drain_ready_pendings(gamma) {
         gamma.body_errors.push(e);

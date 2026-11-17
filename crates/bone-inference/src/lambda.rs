@@ -54,9 +54,7 @@ pub(crate) fn infer_lambda(
                 .insert(pb, RefProvenance::Stable);
         }
 
-        // Defer-to-use: a param left as an unresolved var (fresh, or the
-        // callee's instantiated generic) may be pinned by a later use in this
-        // body -- sanction it so ambiguities on it queue instead of erroring.
+        // Later uses can pin unresolved params, so allow tied constraints to wait.
         let name = binding.name;
         let r = resolve(gamma, ty, expr_span);
         if let TypeExpr::Infer(v, _) = *gamma.get(r) {
@@ -81,20 +79,15 @@ pub(crate) fn infer_lambda(
         matches!(*gamma.get(r), TypeExpr::Builtin(BuiltinTy::Unit))
     });
 
-    // A lambda body is not the enclosing loop's body -- it runs when the
-    // lambda is CALLED -- so `break`/`continue` inside it is out of any loop.
+    // A lambda runs independently of its enclosing loop and defer body.
     let saved_loop_depth = std::mem::replace(&mut gamma.loop_depth, 0);
-    // A lambda's `return` returns from the LAMBDA, so it is fine even when the
-    // lambda is written inside a `defer` body.
     let saved_in_defer = std::mem::replace(&mut gamma.in_defer, false);
     let saved_ret = gamma.declared_ret_ty.replace(ret_var);
     let saved_returns = gamma.lambda_returns.replace(Vec::new());
     let saved_coro = gamma.coroutine_ret.take();
     let saved_ref_source = std::mem::replace(&mut gamma.allow_frame_ref_return_place, false);
-    // A lambda body runs at CALL time, after arbitrary intervening effects, and a
-    // global is read fresh on each call -- so no enclosing GLOBAL refinement holds
-    // inside it. Save + clear the global entries for the body, restore after.
-    // Locals are captured by the closure, so they keep their refinement.
+    // Calls can run later, so globals may have changed; captured locals keep
+    // their refinements.
     let saved_globals: Vec<Narrow> = gamma
         .refined_nonnull
         .iter()
@@ -124,9 +117,7 @@ pub(crate) fn infer_lambda(
     let mut ret_ty = ret_var;
     if iter_result && let Some((witness, it_ty)) = implicit_iter_target(c, gamma, ret_ty, expr_span)
     {
-        // Every value the lambda can produce is wrapped in `iter`: the tail and
-        // each `return`. MIR lowers through an `if`'s arms and a block's tail
-        // to the leaf values, so the witness goes on those leaves.
+        // MIR emits the iterator coercion at each result leaf.
         let mut leaves = Vec::new();
         result_leaves(c, body, &mut leaves);
         for r in returns {
@@ -150,7 +141,6 @@ pub(crate) fn infer_lambda(
     Ok(make_fn_ty(gamma, &param_tys, ret_ty, expr_span))
 }
 
-/// Build a `fn(P..) -> R` TyId, reifying each type into `gamma.out.ty_arena`.
 pub(crate) fn make_fn_ty(gamma: &mut Gamma, param_tys: &[TyId], ret: TyId, span: Span) -> TyId {
     let mut texps = Vec::with_capacity(param_tys.len());
     for pt in param_tys {
@@ -168,9 +158,7 @@ pub(crate) fn make_fn_ty(gamma: &mut Gamma, param_tys: &[TyId], ret: TyId, span:
     TyId::Local(idx)
 }
 
-/// The expressions whose values a result position `e` produces, looking
-/// through a block's tail and both arms of an `if` -- the same places MIR's
-/// return lowering looks through.
+/// Result expressions MIR lowers through for a return position.
 fn result_leaves(c: BodyCtx, e: Idx<Expr>, out: &mut Vec<Idx<Expr>>) {
     match c.body.expr_arena[e] {
         Expr::Block { tail, .. } => {

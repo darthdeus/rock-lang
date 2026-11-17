@@ -1,14 +1,7 @@
 use super::*;
 
-/// A match arm whose whole pattern is a bare `Name` is ambiguous: skull reads it
-/// as a nullary-variant tag test when the name is a variant of the scrutinee
-/// enum, and as an irrefutable binding otherwise -- so a typo'd variant silently
-/// becomes a catch-all. The parser already settles the same ambiguity by
-/// capitalization (`Color::Red` vs `value :: int`, `peek_is_uppercase_ident`),
-/// so an uppercase bare name against an enum scrutinee must be a real variant.
-///
-/// `Some(v)` means the arm tag-tests `v` (it covers a variant and catches
-/// nothing else); `None` means a genuine binding.
+/// Treat a bare uppercase name against an enum as a tag test, so a misspelled
+/// variant cannot silently become a catch-all. `None` means a genuine binding.
 pub(crate) fn unqualified_arm_variant(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -75,9 +68,7 @@ pub(crate) fn check_pattern(
         return bind_pattern_leaves_to(c, gamma, pat, er);
     }
 
-    // A structural pattern looks through `T?`: `null` is its own pattern (and
-    // exhaustiveness its own constructor), so a variant/record/newtype/tuple
-    // pattern matches the unwrapped value -- in match exactly as in `if let`.
+    // Structural patterns test the unwrapped value; `null` remains its own case.
     if let TypeExpr::Nullable(inner) = *gamma.get(er)
         && matches!(
             c.body.pattern_arena[pat],
@@ -283,8 +274,7 @@ pub(crate) fn check_pattern(
                     ctor: TypeCtor::Nominal(n),
                     params,
                 } if n == name => Some(params),
-                // An unresolved or generic scrutinee cannot be checked yet;
-                // mirror the old newtype-let behavior and trust the pattern.
+                // The scrutinee's nominal identity cannot be checked yet.
                 TypeExpr::Infer(..) | TypeExpr::Generic(..) => None,
                 _ => comp_error!(
                     name_span,
@@ -339,13 +329,11 @@ pub(crate) fn check_pattern(
     }
 }
 
-/// Whether `pat` introduces any binding; one walker, `Body::pattern_bindings`.
 pub(crate) fn pattern_binds(c: BodyCtx, pat: Idx<Pattern>) -> bool {
     !c.body.pattern_bindings(pat).is_empty()
 }
 
-/// Give every binding in `pat` the type `ty` -- the poisoned-scrutinee path,
-/// so a failed RHS leaves no binding unbound.
+/// Bind every leaf after the scrutinee has already failed inference.
 pub(crate) fn bind_pattern_leaves_to(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -358,9 +346,8 @@ pub(crate) fn bind_pattern_leaves_to(
     Ok(())
 }
 
-/// Whether `pat` alone covers every value of `scrut_ty`. Reuses the match
-/// exhaustiveness engine on a one-row matrix; coverage is under-approximated
-/// there, so `false` can mean "cannot prove it", never the reverse.
+/// Whether `pat` alone covers every value; coverage is conservative, so `false`
+/// may mean the checker cannot prove it.
 pub(crate) fn pattern_is_irrefutable(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -373,8 +360,6 @@ pub(crate) fn pattern_is_irrefutable(
     exhaustive::missing_match_patterns(c, gamma, scrut_ty, &arms, span).is_empty()
 }
 
-/// Reject a `let`/`for` pattern that can fail. `suggestion` finishes the
-/// diagnostic with the construct-appropriate way out.
 pub(crate) fn require_irrefutable(
     c: BodyCtx,
     gamma: &mut Gamma,

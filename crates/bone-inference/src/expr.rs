@@ -1,10 +1,7 @@
 use super::*;
 use bone_core::hir_walk;
 
-/// A `return`, CHECKED against the declared return rather than inferred and
-/// then coerced: a returned lambda has to record the type of the hole it
-/// fills, or the body and every indirect call site derive different fn-value
-/// ABIs from it. Same rule `let` follows.
+/// Contextual checking makes returned lambdas use the caller's fn-value ABI.
 fn infer_return(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -38,8 +35,6 @@ fn infer_return(
     Ok(())
 }
 
-/// The type of a `let` or `static` binding initialized by `value`: its
-/// annotation, which `value` is checked against, or else `value`'s type.
 fn infer_initialized_binding(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -54,7 +49,7 @@ fn infer_initialized_binding(
                 .get(value)
                 .copied()
                 .unwrap_or(Span::unknown());
-            // Bind to the annotation in case RHS fails, helps LSP
+            // Keep the annotated type available to editor queries after an initializer error.
             gamma.assign_named_type(name, ann)?;
             check_expr(c, gamma, value, ann, span)?;
             Ok(ann)
@@ -62,7 +57,6 @@ fn infer_initialized_binding(
         None => match infer_expr(c, gamma, value) {
             Ok(ty) => Ok(ty),
             Err(e) => {
-                // RHS failed, position name with "error" so downstream can still do something
                 let poison = gamma.workspace.builtins.error();
                 gamma.assign_named_type(name, poison)?;
                 Err(e)
@@ -71,9 +65,6 @@ fn infer_initialized_binding(
     }
 }
 
-/// The checks every write to `target` passes: a `const` global is read-only
-/// (field and index writes through it are out of scope and fall through), and
-/// a field write must name a writable, non-swizzle field.
 fn check_write_target(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -127,17 +118,13 @@ pub(crate) fn infer_statement(
         } => {
             let (pattern, value, else_block) = (*pattern, *value, *else_block);
 
-            // The plain `let name = value` fast path keeps annotation-directed
-            // inference of the initializer and frame-ref provenance tracking.
             if let Some(name) = c.body.pattern_single_bind(pattern)
                 && else_block.is_none()
             {
                 let binding_ty = infer_initialized_binding(c, gamma, name, value)?;
                 gamma.assign_named_type(name, binding_ty)?;
 
-                // `let Red = c` over an enum is a variant TAG TEST (match
-                // rule), which covers one variant -- refutable, so it needs an
-                // `else` unless the enum has only that variant.
+                // A bare enum variant handles only its tag and can make a pattern refutable.
                 if let Some(tag) = unqualified_arm_variant(c, gamma, pattern, binding_ty, span)? {
                     require_irrefutable(
                         c,
@@ -164,21 +151,14 @@ pub(crate) fn infer_statement(
                     Err(e) => (gamma.workspace.builtins.error(), Some(e)),
                 };
 
-                // With an `else`, a nullable scrutinee unwraps on the match
-                // path, exactly like `if let` / `while let`.
                 let scrut_ty = if else_block.is_some() {
                     peel_nullable(gamma, value_ty, span)
                 } else {
                     value_ty
                 };
 
-                // A single annotated binding (`let x: T = v else ..`) checks
-                // the unwrapped value against its annotation.
                 let expected = annotated_pattern_type(c, gamma, pattern, scrut_ty, span)?;
 
-                // A bare uppercase name against an enum scrutinee is a variant
-                // tag test, exactly as in a match arm (and a typo'd one is an
-                // error, not a catch-all binding).
                 let tag = unqualified_arm_variant(c, gamma, pattern, scrut_ty, span)?;
                 check_pattern(c, gamma, pattern, expected, span)?;
 
@@ -196,8 +176,7 @@ pub(crate) fn infer_statement(
                         let vt = resolve(gamma, value_ty, span);
                         let peeled = resolve(gamma, scrut_ty, span);
                         let nullable = !types_equal(gamma, vt, peeled);
-                        // A poisoned scrutinee already carries its diagnostic;
-                        // a "never runs" on top is a cascade.
+                        // Suppress the cascading error for a poisoned scrutinee.
                         let poisoned = matches!(gamma.get(vt), TypeExpr::Builtin(BuiltinTy::Error));
                         if !nullable
                             && !poisoned
@@ -260,7 +239,6 @@ pub(crate) fn infer_statement(
         } => {
             let (name, params, ret_ty, body) = (*name, *params, *ret_ty, *body);
 
-            // Params always carry a declared type (the signature is mandatory).
             let mut param_tys = Vec::with_capacity(params.len());
             for pb in params {
                 let ty = c.body.binding_arena[pb]
@@ -275,9 +253,7 @@ pub(crate) fn infer_statement(
                 param_tys.push(ty);
             }
 
-            // The nested body is hoisted and runs at call time, so no enclosing
-            // GLOBAL refinement holds inside it (mirrors `infer_lambda`); the
-            // enclosing return-context is saved and restored around it.
+            // A nested function reads globals at call time, after the enclosing checks.
             let saved_ret = gamma.declared_ret_ty.take();
             let saved_coro = gamma.coroutine_ret.take();
             let saved_returns = gamma.lambda_returns.take();
@@ -296,8 +272,7 @@ pub(crate) fn infer_statement(
             let result = (|| -> Result<(), CompilerError> {
                 match ret_ty {
                     Some(ret) => {
-                        // Concrete signature -> assign the name its fn type BEFORE
-                        // the body so a self-recursive call resolves.
+                        // Seed the signature before inferring self-recursive calls.
                         let fn_ty = make_fn_ty(gamma, &param_tys, ret, span);
                         gamma.assign_named_type(name, fn_ty)?;
                         gamma.declared_ret_ty = Some(ret);
@@ -314,10 +289,7 @@ pub(crate) fn infer_statement(
                         }
                     }
                     None => {
-                        // Inferred return: the body's tail is the return type (like
-                        // a lambda). A self-recursive call needs an explicit `-> T`;
-                        // an explicit `return X` in an inferred-return nested fn is
-                        // not type-linked (v1 -- annotate the return type instead).
+                        // An unannotated nested function gets its return type from its tail.
                         gamma.declared_ret_ty = None;
                         let body_ty = infer_expr(c, gamma, body)?;
                         let body_ty = resolve(gamma, body_ty, span);
@@ -394,8 +366,7 @@ pub(crate) fn infer_statement(
         }
     };
 
-    // Statement boundary: a sequence point, so any pinned lambda-param var is
-    // committed -- resolve the constraints deferred on it (defer.rs).
+    // Retry deferred lambda constraints at statement boundaries.
     drain_ready_pendings(gamma)?;
 
     Ok(())
@@ -417,9 +388,7 @@ fn annotated_pattern_type(
     Ok(ty)
 }
 
-/// The refinements that may be applied when entering `branch`. A branch
-/// target reachable from several points (an `if let` chain's shared else)
-/// gets NONE: a refinement proved on one arrival does not hold on the others.
+/// Refinements from one arrival don't hold at a shared else branch.
 fn branch_narrows<'n>(c: BodyCtx, branch: Idx<Expr>, narrows: &'n [Narrow]) -> &'n [Narrow] {
     if c.body.shared_branch_targets.contains(&branch) {
         &[]
@@ -428,10 +397,7 @@ fn branch_narrows<'n>(c: BodyCtx, branch: Idx<Expr>, narrows: &'n [Narrow]) -> &
     }
 }
 
-/// Type a shared chain `else` ONCE, here, before any clause refinement is in
-/// scope. Inference caches by index, so whichever arrival types it first wins
-/// for all of them -- and only the outermost chain node's context (the one
-/// before the chain narrowed anything) holds on every arrival.
+/// Type a shared else branch before clause refinements reach the inference cache.
 fn pin_shared_else(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -447,10 +413,6 @@ fn pin_shared_else(
     Ok(())
 }
 
-/// Whether a statement list ends in a loop/function exit (`return`/`break`/
-/// `continue`) or a loop that never completes, ignoring trailing comments.
-/// The one syntactic divergence test, shared by block `never` inference and
-/// guard narrowing.
 pub(crate) fn block_ends_in_exit(c: BodyCtx, statements: IdxRange<Statement>) -> bool {
     statements
         .into_iter()
@@ -463,9 +425,6 @@ pub(crate) fn block_ends_in_exit(c: BodyCtx, statements: IdxRange<Statement>) ->
         })
 }
 
-/// A trailing `while true` / `loop` with no `break` of its own never
-/// completes. Nested loops own their breaks, a lambda or nested fn cannot
-/// break out, and a `return` inside only strengthens the divergence.
 fn loop_never_exits(c: BodyCtx, s: Idx<Statement>) -> bool {
     let Statement::While { cond, body } = c.body.statement_arena[s] else {
         return false;
@@ -474,21 +433,17 @@ fn loop_never_exits(c: BodyCtx, s: Idx<Statement>) -> bool {
         && !reaches_break(c.body, hir_walk::HirChild::Expr(body))
 }
 
-/// Whether a `break` at THIS loop's level is reachable inside `node`.
 fn reaches_break(body: &bone_core::hir::Body, node: hir_walk::HirChild) -> bool {
     use hir_walk::HirChild;
     match node {
         HirChild::Expr(e) => match body.expr_arena[e] {
             Expr::Break => return true,
-            // A lambda runs when called; its body cannot break this loop.
             Expr::Lambda { .. } => return false,
             _ => {}
         },
         HirChild::Statement(s) => match body.statement_arena[s] {
             Statement::Break => return true,
-            // A nested loop owns every break in its BODY. Its header
-            // expression is murkier (`while w ?? break`), so a break there
-            // conservatively counts as escaping.
+            // A break in a nested loop's header can still exit this loop.
             Statement::While { cond, .. } => {
                 return reaches_break(body, HirChild::Expr(cond));
             }
@@ -599,9 +554,7 @@ pub(crate) fn infer_expr_used(
                 coerce(gamma, et, y, c.body.expr_spans[e])?;
             }
 
-            // Suspension hands control to the resumer, who may reassign globals
-            // or mutate aliased fields (the yielded value above was
-            // computed before suspending, so it still saw them).
+            // Apply the resumer's possible mutations after checking the yielded value.
             gamma.invalidate_mutable_refinements();
 
             n
@@ -622,8 +575,6 @@ pub(crate) fn infer_expr_used(
 
             coerce(gamma, inner_y, outer_y, c.body.expr_spans[e])?;
 
-            // `yield*` suspends repeatedly into the delegate; the resumer may
-            // reassign globals or mutate aliased fields between resumptions.
             gamma.invalidate_mutable_refinements();
 
             inner_r
@@ -631,8 +582,6 @@ pub(crate) fn infer_expr_used(
 
         Expr::UnaryMinus(inner, family) => {
             let inner_ty = infer_expr(c, gamma, *inner)?;
-            // TODO: do we actually want to call resolve after every infer? shouldn't that be part
-            // of infer? figure that out later
             let resolved = resolve(gamma, inner_ty, c.body.expr_spans[*inner]);
 
             match *gamma.get(resolved) {
@@ -674,7 +623,6 @@ pub(crate) fn infer_expr_used(
                 ),
                 _ => comp_error!(expr_span, "`{}` needs a variable, field, or element", op),
             }
-            // `CONST++` is a write with extra steps.
             check_write_target(c, gamma, *target, expr_span)?;
             let inner_ty = infer_expr(c, gamma, *target)?;
             let inner_ty = resolve(gamma, inner_ty, c.body.expr_spans[*target]);
@@ -698,9 +646,7 @@ pub(crate) fn infer_expr_used(
             let target = resolve(gamma, *target, expr_span);
             let value_span = c.body.expr_spans[value];
             match kind {
-                // `::` is the operand's expected type, so it reaches the operand
-                // through the same route as a `let`/param/return hole -- which is
-                // also what binds a bare `null` and an unannotated lambda param.
+                // `::` supplies context to a bare null or an unannotated lambda parameter.
                 AsKind::Ascribe => {
                     let target_str = gamma.render(target);
                     check_expr(c, gamma, value, target, value_span).map_err(|e| {
@@ -837,8 +783,6 @@ pub(crate) fn infer_expr_used(
             })?,
 
         Expr::Global(name) => match resolve_global(gamma, *name) {
-            // A global guarded by `if G != null` (with no intervening write /
-            // impure call / yield since) reads as its non-null inner type.
             Some(ty)
                 if gamma
                     .refined_nonnull
@@ -849,11 +793,7 @@ pub(crate) fn infer_expr_used(
 
             Some(ty) => ty,
 
-            // A backend-variant sibling pair (same name, same signature,
-            // different `backend`) is ONE logical fn; collapse it to a single
-            // representative before deciding value-ness, exactly as the call
-            // path does. Genuine overloads (different signatures) survive and
-            // still reject below.
+            // Backend siblings are a single logical function value.
             None => match &*collapse_backend_variants(
                 gamma,
                 &resolve_callee(gamma, &CallFamily::Resolved(*name)).visible,
@@ -862,9 +802,7 @@ pub(crate) fn infer_expr_used(
                     let function = &gamma.workspace.module(*mid).functions[*fid];
                     gamma.out.resolved_overload_calls.insert(e, (*mid, *fid));
 
-                    // A bounded fn only exists monomorphized-by-inlining at its
-                    // call sites; as a value it would need a runtime identity
-                    // its placeholder bound-calls can't have.
+                    // Bounded functions are specialized at calls and have no runtime identity to store.
                     if function.has_iterator_bounds() {
                         comp_error!(
                             expr_span,
@@ -912,14 +850,6 @@ pub(crate) fn infer_expr_used(
             hir::BinOp::Eq | hir::BinOp::NotEq => {
                 let (lhs_ty, rhs_ty) = infer_uint_aware_operands(c, gamma, *lhs, *rhs)?;
 
-                // Comparing a value KNOWN to be non-null against `null` is a
-                // category error: `null` can't inhabit it, so the check is dead.
-                // "Known non-null" is flow-sensitive -- it covers a declared
-                // non-nullable type AND a nullable refined to non-null by a guard
-                // or assignment (`redundant_optional_on` reads the inferred type,
-                // which reflects both). Exempts nullable / `any` / unresolved
-                // generics. Consistent with bone's `??`/`?.` rejection on a
-                // non-nullable; stricter than rock, which only narrows via guards.
                 let non_null_ty = match (c.body.expr_arena[*lhs], c.body.expr_arena[*rhs]) {
                     (_, Expr::Null) => Some(lhs_ty),
                     (Expr::Null, _) => Some(rhs_ty),
@@ -936,12 +866,7 @@ pub(crate) fn infer_expr_used(
                     }
                 }
 
-                // Fn values carry no meaningful identity: a capture-free lambda
-                // is ONE shared hoisted fn, a capturing lambda a per-creation
-                // env record, so `==` would
-                // compare representation artifacts. Null checks (`f != null`)
-                // are refinement, not identity -- exempt via `non_null_ty`
-                // being the literal-null case above.
+                // Equality would compare whether lambda representations are shared or freshly allocated.
                 if non_null_ty.is_none() {
                     for ty in [lhs_ty, rhs_ty] {
                         let peeled = peel_nullable(gamma, ty, expr_span);
@@ -1057,8 +982,6 @@ pub(crate) fn infer_expr_used(
                 let lhs_ty = infer_expr(c, gamma, *lhs)?;
                 unify(gamma, lhs_ty, bool_ty, c.body.expr_spans[*lhs])?;
 
-                // The RHS of `||` runs only when the LHS is false, so it sees the
-                // LHS's ELSE narrowings (dual of `&&`, which uses THEN narrowings).
                 let (_, else_narrows) = detect_null_narrow(gamma, c, *lhs);
 
                 let rhs_ty = infer_branch(
@@ -1162,7 +1085,6 @@ pub(crate) fn infer_expr_used(
         }
 
         Expr::Tuple(items) => {
-            // TODO: can we get rid of the allocations here?
             let tys = items.map(|x| infer_expr(c, gamma, x)).try_vec()?;
             tuple_of(gamma, &tys, expr_span)
         }
@@ -1260,10 +1182,7 @@ pub(crate) fn infer_expr_used(
             };
             let result_ty = gamma.app_with_ctor(ctor, &arg_tys, expr_span);
 
-            // Functional update `Ty { ..base, .. }`: each base must have the same
-            // nominal type as the literal (rule 6). A single base covers every
-            // unwritten field. Multiple bases of the same type would all supply
-            // every field (rule 5 collision), so only one is allowed.
+            // Each base supplies all unwritten fields, so two bases would collide.
             let has_base = !bases.is_empty();
             if bases.len() > 1 {
                 comp_error!(
@@ -1476,9 +1395,6 @@ pub(crate) fn infer_expr_used(
                 );
             }
             check_write_target(c, gamma, target, expr_span)?;
-            // Writing any refined path (local field, global, or global field)
-            // drops its refinement; re-established below if the stored value is
-            // non-null. A whole local is handled via `binding_types` instead.
             let path = path_key(c, target);
 
             if let Some(p) = &path {
@@ -1541,8 +1457,6 @@ pub(crate) fn infer_expr_used(
 
             let mut result: Option<TyId> = None;
             let mut seen_unguarded_wildcard = false;
-            // Exhaustiveness: only UNGUARDED arms contribute, since a guarded
-            // arm may not fire.
             let mut unguarded: Vec<exhaustive::ArmPattern> = Vec::new();
 
             for arm_idx in arms {
@@ -1584,11 +1498,7 @@ pub(crate) fn infer_expr_used(
                 }
             }
 
-            // Every value of the scrutinee must reach an arm; skull lowers an
-            // uncovered value to an unreachable block. Recovered (body_errors,
-            // not a hard `?`) so partial inference survives for the LSP, like
-            // the return-type mismatch. Message keeps the "Non-exhaustive
-            // match" prefix the LSP fill-arms code action links against.
+            // Keep partial inference and the diagnostic prefix used by the LSP fill-arms action.
             let missing =
                 exhaustive::missing_match_patterns(c, gamma, scrut_ty, &unguarded, expr_span);
             if !missing.is_empty() {
@@ -1949,12 +1859,7 @@ pub(crate) fn validate_frame_ref_return(
     );
 }
 
-/// Infer the common scalar type of a half-open range's bounds. Integer
-/// literals are context-sensitive here, just as they are in an assignment or
-/// call argument; non-literal `int`/`uint` mixtures remain rejected.
-/// Whether `ty` can be a number once it is concrete. A generic or unsolved
-/// operand is decided per instantiation at lowering; everything else is known
-/// now. Newtypes follow the same wrapped-representation rule as arithmetic.
+/// Check whether an operand could be numeric after generic instantiation.
 fn may_be_numeric(gamma: &mut Gamma, ty: TyId, span: Span) -> bool {
     let mut ty = peel_nullable(gamma, ty, span);
     // A newtype cycle is rejected at its own declaration; bound the walk.
@@ -2020,9 +1925,7 @@ pub(crate) fn infer_range_bounds(
     }
 }
 
-/// True when `ty` is a concrete non-nullable type, so `??` / `?.` on it is
-/// redundant (dead). Skips `Nullable` (the meaningful case), unresolved `Infer`,
-/// and `Error`/`Never`/`Any` -- don't reject on uncertainty.
+/// Reject redundant optional operations only when non-nullability is known.
 pub(crate) fn redundant_optional_on(gamma: &mut Gamma, ty: TyId, span: Span) -> bool {
     let r = resolve(gamma, ty, span);
     !matches!(
@@ -2035,10 +1938,6 @@ pub(crate) fn redundant_optional_on(gamma: &mut Gamma, ty: TyId, span: Span) -> 
     )
 }
 
-/// A block's statements, scoping and tail -- the shared body of the `Expr::Block`
-/// arm above and [`check_expr`]'s. `expected` is `Some` only on the checked
-/// path, where it is pushed to the TAIL; everything else is identical, which is
-/// the point: the two must not drift.
 #[allow(clippy::too_many_arguments)]
 fn infer_block(
     c: BodyCtx,
@@ -2050,14 +1949,7 @@ fn infer_block(
     expected: Option<TyId>,
 ) -> TyId {
     let mut g_saved = vec![];
-    // Snapshot the path-refinement set on entry; intersect on exit. This
-    // scopes to the block BOTH escaping guard narrows AND
-    // assignment-refinements (`x.f = nonNull` marks `x.f` non-null):
-    // flow-sensitively, a refinement established inside a block must not
-    // survive past it (the other control path didn't run it). Whole-local
-    // narrows peel `binding_types` and are restored via `g_saved`. The set
-    // is usually empty/small, so the clone is cheap (an empty FxHashSet
-    // clone doesn't allocate).
+    // Block-local guards and assignments must not refine paths outside the block.
     let refined_snapshot = gamma.refined_nonnull.clone();
 
     for statement in *statements {
@@ -2084,11 +1976,7 @@ fn infer_block(
     }
 
     let result = match tail {
-        // The ONE difference between inferring a block and checking one:
-        // a checked block pushes the hole down to its TAIL. Without it a
-        // lambda in tail position records its own type, which is narrower
-        // than the hole it fills, and the fn-value ABI disagrees at the
-        // two ends (`tests/nobox/fn_value_nullable_return.rock`).
+        // A checked tail uses the declared ABI for any returned function value.
         Some(tail) => match expected {
             Some(exp) => match check_expr(c, gamma, *tail, exp, c.body.expr_spans[*tail]) {
                 Ok(()) => exp,
@@ -2114,8 +2002,7 @@ fn infer_block(
         }
     };
 
-    // Reverse order: a local narrowed by two guards was saved twice, and only
-    // the first save holds its type from before the block.
+    // Unwind each guard's refinement in reverse to restore the original binding type.
     for (b, old, epoch) in g_saved.into_iter().rev() {
         gamma.restore_local_narrow(b, old, epoch);
     }
@@ -2156,10 +2043,7 @@ pub(crate) fn check_expr(
         return Ok(());
     }
 
-    // Integer literals are int by default, but a non-negative literal in a
-    // uint context is admitted without widening arbitrary int values. The
-    // range check stays here, before inference can erase the literal's
-    // provenance or a backend can narrow it.
+    // Contextual uint checking needs the original literal for the range check.
     if let Expr::Int(value) = c.body.expr_arena[e] {
         let expected_r = resolve(gamma, expected, span);
         if matches!(gamma.get(expected_r), TypeExpr::Builtin(BuiltinTy::Uint)) {
@@ -2179,14 +2063,8 @@ pub(crate) fn check_expr(
         }
     }
 
-    // A block fills the hole with its TAIL, so push `expected` through rather
-    // than inferring the block and coercing the result -- otherwise the arms
-    // below never see a tail expression, and a fn body whose tail is a lambda
-    // records the lambda's own narrower type.
     if let Expr::Block { statements, tail } = &c.body.expr_arena[e] {
         let ty = infer_block(c, gamma, statements, tail, Use::Value, span, Some(expected));
-        // No re-coerce: a tail was checked against `expected` already, and a
-        // tail-less block still has to answer for its unit/never type.
         if tail.is_none() {
             coerce(gamma, ty, expected, span)?;
         }
@@ -2197,8 +2075,6 @@ pub(crate) fn check_expr(
     if let Expr::Lambda { params, body } = c.body.expr_arena[e] {
         let exp_r = resolve(gamma, expected, span);
 
-        // Lambda literal is a valid value for a NULLABLe function param `(() ->())?`,
-        // so look through a nullable wrapper to reach the function type.
         let fn_ty = match *gamma.get(exp_r) {
             TypeExpr::Nullable(inner) => exp_r.with_idx(inner),
             _ => exp_r,
@@ -2216,14 +2092,7 @@ pub(crate) fn check_expr(
                 c.body.expr_spans[e],
             )?;
             coerce_contextual_lambda(gamma, lam_ty, expected, span)?;
-            // The EXPECTED type, not the lambda's own -- same as the `Array` and
-            // `SiblingRef` arms below. A lambda's inferred return is narrower than
-            // the hole it fills (`if c { P {..} } else { null }` infers `P`, the
-            // `null` arm does not widen it), and codegen reads this type to decide
-            // the fn-value ABI at BOTH ends. Recording the narrow one gives the
-            // body a return shape with no presence slot while the indirect call
-            // site, reading the declared fn type, binds one. Every RETURN position
-            // routes here for exactly that reason -- see the `Block` arm above.
+            // Use the expected type so indirect calls and returned closures agree on nullable return slots.
             gamma.assign_expr_type(c, e, exp_r)?;
             return Ok(());
         }
@@ -2302,12 +2171,7 @@ pub(crate) fn check_expr(
 
                 let fty = struct_field_ty(gamma, t_r, field, span)?;
 
-                // The write capability is INVARIANT in V, and `unify` alone does
-                // not deliver that: its `(_, Nullable)` arm widens on the right,
-                // so `unify(int, int?)` succeeds and a non-null field would hand
-                // out a `FieldRef<T, int?>` that `field_set(o, f, null)` writes
-                // nil through. A read-only `ReadFieldRef` keeps the widening --
-                // reading an `int` as `int?` is sound.
+                // A writable selector cannot widen its value type to nullable: field_set could store null.
                 if writable {
                     let (fty_r, v_r) = (resolve(gamma, fty, span), resolve(gamma, v, span));
                     let unbound_v =
@@ -2337,12 +2201,7 @@ pub(crate) fn check_expr(
 
     let aty = infer_expr(c, gamma, e)?;
 
-    // `/` is float division; its `float` result cannot fill an int-shaped hole.
-    // When coercion actually rejects a `float` against an `int` (NOT a
-    // re-bindable numeric var that coerce would widen, e.g. `min(1, x)`), and
-    // the expression is (or contains, through arithmetic operators / unary
-    // minus) a `/`, replace the bare unify error with a pointer at that `/`
-    // suggesting `./` (integer floor division).
+    // If a float from division cannot fit int, point at the division.
     if let Err(coerce_err) = coerce(gamma, aty, expected, span) {
         let exp_r = resolve(gamma, expected, span);
         let aty_r = resolve(gamma, aty, span);
@@ -2355,8 +2214,6 @@ pub(crate) fn check_expr(
                     "`/` is float division; its `float` result does not fit `int` -- use `./` for integer floor division"
                         .to_string(),
                 );
-                // When the `/` reached the hole through a local binding, keep a
-                // breadcrumb at the actual mismatch site.
                 if div_span != span {
                     err = err.with_label(
                         span,
@@ -2366,11 +2223,6 @@ pub(crate) fn check_expr(
                 return Err(err);
             }
         }
-        // Point a secondary label at where the expected type came from (the
-        // `: T` annotation, `-> T` return, or param decl) so the reader sees
-        // WHY this slot is `T`. Adds a label; keeps coerce's own message (its
-        // specific ones, e.g. the null->`any` note, survive). Skip when the
-        // origin is unknown or coincides with the mismatch site itself.
         if let Some(origin) = gamma.span_of(expected).or_else(|| gamma.span_of(exp_r)) {
             if origin != span && !origin.is_empty() {
                 let exp_str = gamma.render(exp_r);
@@ -2385,13 +2237,8 @@ pub(crate) fn check_expr(
     Ok(())
 }
 
-// The closed `as` conversion relation. A pair is admitted only if it is an
-// ordinary assignment-compatible one or one of the two explicit numeric
-// conversions; everything else is a spanned rejection, never a silent identity.
-//
-// `as` is not contextual: the target validates an already-inferred source, so
-// nothing here may bind an operand variable or discharge a constraint waiting on
-// one. That is `::`'s job.
+// A cast classifies an inferred operand without binding its variables.
+// A type ascription supplies an expected type.
 pub(crate) fn check_cast(
     gamma: &mut Gamma,
     from: TyId,
@@ -2414,10 +2261,7 @@ pub(crate) fn check_cast(
         ));
     }
 
-    // The same rule on the other side. A `_` in the target is an inference hole,
-    // so there is no written type to validate against: the relation would pass
-    // vacuously and the surrounding expectation would then bind the hole, which
-    // is how `let s: string = 42 as _` laundered a rejected pair.
+    // A target hole would let the enclosing expected type bypass cast validation.
     if has_unbound_infer(gamma, to_r) {
         let (from_str, to_str) = (gamma.render(from_r), gamma.render(to_r));
         return Err(CompilerError::new_with_label(
@@ -2430,9 +2274,6 @@ pub(crate) fn check_cast(
         ));
     }
 
-    // Explicit narrowing/widening between the two numeric builtins. `int -> float`
-    // is also assignment-compatible; `float -> int` is admitted ONLY here, which
-    // is what keeps it out of `::`.
     if matches!(
         (gamma.get(from_r), gamma.get(to_r)),
         (
@@ -2452,15 +2293,12 @@ pub(crate) fn check_cast(
         return Ok(());
     }
 
-    // `coerce` decides assignment compatibility by unifying, which records
-    // bindings. Ask it against a checkpoint and roll back whatever it wrote, so
-    // the answer is a classification and not inference evidence.
+    // Roll back the bindings from probing assignment compatibility.
     let snap = gamma.out.checkpoint();
     let compatible = gamma.trial(|g| coerce(g, from_r, to_r, span).is_ok());
     let erased = gamma.out.any_erasures_since(snap);
     gamma.out.rollback_to(snap);
     if compatible {
-        // The cast's value is the erased one.
         gamma.out.any_erasures.extend(erased);
         return Ok(());
     }
@@ -2617,12 +2455,7 @@ fn float_literal_value(c: BodyCtx, e: Idx<Expr>) -> Option<f64> {
     }
 }
 
-// Find the `/` (float division) responsible for a `float` value flowing into an
-// `int` hole. Float-ness reaches that hole through arithmetic operators
-// (`__op_*`), unary minus, and local `let` bindings, so the walk descends those
-// and follows a `Var` back to its initializer; a `float` from anywhere else (a
-// call's return type, a field, a reassignment) is not a syntactically-traceable
-// `/` and yields None. Returns the offending `/`'s span for the diagnostic.
+// Trace a division through arithmetic and binding initializers for diagnostics.
 pub(crate) fn find_float_div_span(c: BodyCtx, e: Idx<Expr>) -> Option<Span> {
     find_float_div_span_rec(c, e, 0)
 }
@@ -2662,10 +2495,6 @@ pub(crate) fn find_float_div_span_rec(c: BodyCtx, e: Idx<Expr>, depth: usize) ->
     }
 }
 
-// The `let`/`static` initializer expression for a simple single-name binding,
-// so the float-div walk can follow a local variable back to the `/` that made
-// it float. Params, tuple/loop/pattern bindings have no single initializer here
-// and yield None.
 pub(crate) fn binding_initializer(c: BodyCtx, b: Idx<BindingInfo>) -> Option<Idx<Expr>> {
     c.body
         .statement_arena

@@ -12,8 +12,6 @@ use bone_core::{
 
 use ustr::ustr;
 
-// Compilation storage + inference result structs now live in bone-core; re-export
-// them through the historical `bone::inference::*` path so consumers don't churn.
 pub use bone_core::modules::{AccessSite, NsVisibility, PackageId};
 pub use bone_core::workspace::{
     BodyInference, ComptimeInputs, ComptimeVarValue, InferenceResult, Substitutions, Workspace,
@@ -125,14 +123,9 @@ pub struct Gamma<'a> {
     /// leaving, so `return` has nothing to return from.
     pub in_defer: bool,
 
-    // TODO: this feels slow?
-    // Non-null refinements keyed on `(Root, field-path)` -- locals AND globals
-    // share this set (whole locals peel `binding_types` instead). Calls and
-    // yields clear it: globals can be reassigned and fields mutated via aliases.
+    // Path refinements expire on effects that can mutate fields or globals.
     pub(crate) refined_nonnull: FxHashSet<Narrow>,
-    /// Locals assigned inside a lambda declared in this body. A call may run
-    /// that lambda and null the local, so a whole-local narrow of one of
-    /// these is revoked by the same effects that clear `refined_nonnull`.
+    /// A call can revoke whole-local refinements for bindings a lambda writes.
     pub(crate) closure_assigned: FxHashSet<Idx<BindingInfo>>,
     /// Whole-local narrows of `closure_assigned` bindings in force, with the
     /// type each replaced; drained by [`Gamma::invalidate_mutable_refinements`].
@@ -145,14 +138,10 @@ pub struct Gamma<'a> {
 
     pub quiet: bool,
 
-    /// The enclosing fn's `Iterator` bounds: `(generic VarId, index into
-    /// `Function.generics`, declared element type)`. Set by `check_function`;
-    /// empty for unbounded fns and non-fn bodies.
+    /// (Generic variable, generic index, element type) for each Iterator bound.
     pub fn_bounds: Vec<(VarId, usize, TyId)>,
 
-    // Defer-to-use for unconstrained lambda params (defer.rs). Body-local by
-    // design; kept out of `BodyInference` so checkpoint/rollback (substitution
-    // trail only) never sees it -- deferral never queues under `quiet`.
+    // Trials never queue pending constraints, so their rollback needn't track them.
     pub(crate) deferrable_vars: FxHashMap<VarId, DeferOrigin>,
     pub(crate) pending: Vec<Option<Pending>>,
     pub(crate) pending_by_var: FxHashMap<VarId, SmallVec<[usize; 2]>>,
@@ -160,9 +149,7 @@ pub struct Gamma<'a> {
     pub(crate) allow_frame_ref_return_place: bool,
     pub(crate) ref_binding_provenance: FxHashMap<Idx<BindingInfo>, RefProvenance>,
 
-    /// The body of a lambda passed where the callee wants an `Iterator`-bounded
-    /// result (`flat_map`'s `fn(T) -> II`): an iterable result coerces to its
-    /// iterator, as an argument at a bounded param does. Taken by `infer_lambda`.
+    /// A lambda returning an iterable to an Iterator-bound slot needs a coercion.
     pub(crate) iter_result_lambda: Option<Idx<Expr>>,
     /// The values of the `return`s in the innermost lambda being inferred.
     pub(crate) lambda_returns: Option<Vec<Idx<Expr>>>,
@@ -177,10 +164,7 @@ pub struct BodyCtx<'a> {
 }
 
 impl<'a> Gamma<'a> {
-    /// An effect ran that may reassign a global, mutate a field through an
-    /// alias, or run a lambda: a call to a callee that is not `@pure`, a call
-    /// through a function value, or a suspension. Every path refinement and
-    /// every whole-local narrow a lambda could undo is dropped.
+    /// Drop paths and captured locals that a call or suspension can invalidate.
     pub(crate) fn invalidate_mutable_refinements(&mut self) {
         self.refined_nonnull.clear();
         self.refinement_epoch += 1;
@@ -199,8 +183,6 @@ impl<'a> Gamma<'a> {
         }
     }
 
-    /// Record a whole-local narrow of `b` from `old`, so an effect can revoke
-    /// it when a lambda in this body assigns `b`.
     pub(crate) fn note_local_narrow(&mut self, b: Idx<BindingInfo>, old: TyId) {
         if self.closure_assigned.contains(&b) {
             self.revocable_locals.push((b, old));
@@ -288,8 +270,7 @@ impl<'a> Gamma<'a> {
         g
     }
 
-    /// A `BodyCtx` for this Gamma's own body -- pending-constraint retries run
-    /// outside the syntactic walk, where no `c` is threaded through.
+    /// Deferred constraints retry outside the syntactic walk.
     pub(crate) fn body_ctx(&self) -> BodyCtx<'a> {
         let ws: &'a Workspace = self.workspace;
         BodyCtx {
@@ -314,8 +295,6 @@ impl<'a> Gamma<'a> {
         ty
     }
 
-    /// The enclosing fn's `Iterator` bound on the generic with this VarId, if
-    /// any: `(index into Function.generics, declared element type)`.
     pub(crate) fn fn_bound_for(&self, v: VarId) -> Option<(usize, TyId)> {
         self.fn_bounds
             .iter()
@@ -330,7 +309,6 @@ impl<'a> Gamma<'a> {
         r
     }
 
-    // Why returning &TypeExpr when it's copy now?
     pub fn get(&self, ty: TyId) -> &TypeExpr {
         match ty {
             TyId::Static(mid, idx) => &self.workspace.module(mid).ty_arena[idx],
@@ -350,15 +328,9 @@ impl<'a> Gamma<'a> {
         generics: &[TyId],
         span: Span,
     ) -> Result<(FxHashMap<VarId, TyId>, Vec<TyId>), CompilerError> {
-        // Each call site needs to substitute generics for real types.
-        //
-        // We begin by creating a substitution map, each TypeRef::Generic
-        // gains a new TypeRef::Infer, that is later replaced by `substitute()`
         let mut subs = FxHashMap::default();
         let mut fresh = Vec::with_capacity(generics.len());
 
-        // Only Generic TypeExprs which are Static (created during Lowering) are valid,
-        // each one gets a Local(TypeRef::Infer).
         for &g in generics {
             let (var_id, hint) = match *self.get(g) {
                 TypeExpr::Generic(var_id, hint) => (var_id, hint),
@@ -420,8 +392,6 @@ impl<'a> Gamma<'a> {
         self.check_reassigned_type("binding", old_ty, ty, span)
     }
 
-    /// Rejects an `expression` or `binding` given a type that differs from
-    /// the one it already had.
     fn check_reassigned_type(
         &mut self,
         what: &str,
@@ -457,8 +427,7 @@ impl<'a> Gamma<'a> {
     }
 }
 
-/// The default shapes a foreign function's Lua wrapper can render
-/// (`render_default_lit` in skull's `mir_emit/unit.rs`).
+/// Foreign wrappers can materialize only literal defaults.
 fn is_literal_default(body: &bone_core::hir::Body, e: Idx<Expr>) -> bool {
     match body.expr_arena[e] {
         Expr::Null
@@ -546,12 +515,7 @@ fn check_function(c: BodyCtx, gamma: &mut Gamma, f: &Function) -> Result<(), Com
     } else if let Some(ret) = f.return_ty {
         gamma.declared_ret_ty = Some(ret);
     } else {
-        // No annotation: a top-level fn returns `()`. Its tail is discarded
-        // (the `f.return_ty`-gated branch below takes the `else`), but an
-        // explicit `return <value>` is a real error -- you cannot return a
-        // value from a unit fn. (A NESTED un-annotated fn is inferred-return
-        // instead: it takes/replaces `declared_ret_ty` in `infer_expr`, so
-        // this default only governs the enclosing top-level body.)
+        // An unannotated top-level function discards its tail and rejects a value return.
         gamma.declared_ret_ty = Some(gamma.workspace.builtins.unit());
     }
 
@@ -570,7 +534,6 @@ fn check_function(c: BodyCtx, gamma: &mut Gamma, f: &Function) -> Result<(), Com
 
             (BindingKind::Param, None) => {
                 comp_error!(
-                    // TODO: better span
                     f.span,
                     "Parameter `{}` must have an annotated type",
                     binding.name
@@ -587,9 +550,7 @@ fn check_function(c: BodyCtx, gamma: &mut Gamma, f: &Function) -> Result<(), Com
     let is_foreign = f.inline_body.is_some() || f.is_extern;
     for (i, pb) in body.param_bindings.into_iter().enumerate() {
         if let Some(Some(dexpr)) = body.param_defaults.get(i) {
-            // A foreign wrapper has no Rock prologue to evaluate a default, and
-            // a spliced inline(lua) call has no wrapper at all: only a literal
-            // a call site or `default_fill_prologue` can render arrives.
+            // Inline and foreign calls have no Rock prologue to evaluate defaults.
             if is_foreign && !is_literal_default(c.body, *dexpr) {
                 gamma.body_errors.push(CompilerError::new_with_label(
                     c.body.expr_spans[*dexpr],
@@ -614,20 +575,13 @@ fn check_function(c: BodyCtx, gamma: &mut Gamma, f: &Function) -> Result<(), Com
     };
 
     if let (Some(ret_ty), false) = (f.return_ty, f.is_coroutine) {
-        // Return-type mismatch is recorded, but not propagated, so gamma.out is well formed
-        // and partial inference survives for the LSP. Anchor it at the value the body
-        // actually offers -- its tail expression -- not the whole `fn { .. }` span. A body
-        // that ends in a statement offers no value at all: a clearer, distinct message.
+        // Keep partial inference for the editor and report return mismatches at the tail.
         let tail = match c.body.expr_arena[body] {
             Expr::Block { tail, .. } => tail,
             _ => Some(body),
         };
         if let Some(tail) = tail {
-            // CHECKED against the declared return, like an explicit `return` and a
-            // declared `let`: a body whose tail is a lambda is otherwise inferred
-            // and merely coerced, so it records its own narrower type and the
-            // fn-value ABI disagrees at the two ends. The coerce still happens --
-            // it moved down to the tail, keeping this span.
+            // Contextual checking gives returned lambdas the declared fn-value ABI.
             if let Err(e) = check_expr(c, gamma, body, ret_ty, c.body.expr_spans[tail]) {
                 gamma.body_errors.push(e);
             } else if let Err(e) = validate_frame_ref_return(c, gamma, body, ret_ty) {
@@ -648,16 +602,12 @@ fn check_function(c: BodyCtx, gamma: &mut Gamma, f: &Function) -> Result<(), Com
             }
         }
     } else {
-        // no declared return (or coroutine): the body tail is discarded
         infer_expr_used(c, gamma, body, Use::Discard)?;
     }
 
     gamma.out.deps = gamma.dep_acc.take();
 
-    // `@pure` verification. Opaque (`inline(lua)`) bodies never reach here, so
-    // they're trusted -- matching rock. `@pure` + `@debug_impure` on one fn is a
-    // contradiction; a pure body may not read globals, mutate, or call a
-    // non-pure fn.
+    // Opaque bodies are trusted and exited above.
     if fn_has_anno(f, "pure") {
         if fn_has_anno(f, "debug_impure") {
             gamma.body_errors.push(CompilerError::new_with_label(

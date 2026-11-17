@@ -94,9 +94,7 @@ pub(crate) fn substitute(
     }
 }
 
-/// Map the children of a structural type and rebuild it only when a child
-/// changes. Child visits, reification, allocation, and span insertion follow
-/// the same order for substitution and resolution.
+/// Map children in arena order and rebuild a node only when needed.
 fn map_structural_type<E>(
     gamma: &mut Gamma,
     ty: TyId,
@@ -156,7 +154,6 @@ pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), Comp
         | (_, TypeExpr::Builtin(BuiltinTy::Never | BuiltinTy::Error)) => {}
 
         (TypeExpr::Generic(x, _), TypeExpr::Generic(y, _)) if x == y => {}
-        // (TypeExpr::Named(x), TypeExpr::Named(y)) if x == y => {}
         (TypeExpr::Infer(va, _), TypeExpr::Infer(vb, _)) if va == vb => {}
 
         (TypeExpr::Infer(va, _), _) => {
@@ -180,10 +177,7 @@ pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), Comp
             },
         ) => {
             if ctor_a != ctor_b {
-                // Both sides are plain nominals (structs/enums with no type
-                // args) far more often than generics; "different generic
-                // constructors" is nonsense for those. Only mention generics
-                // when a side actually has type parameters.
+                // Mention generic constructors only when either side has args.
                 let detail = if params_a.is_empty() && params_b.is_empty() {
                     ""
                 } else {
@@ -277,9 +271,7 @@ pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), Comp
             unify(gamma, a.with_idx(ra), b.with_idx(rb), span)?;
         }
 
-        // `unify(actual, expected)` by convention (coerce passes
-        // `from`/`to` in that order), so `b` is the expected type and `a` the
-        // found one -- matching the nominal-mismatch arm above.
+        // `coerce` passes actual before expected, so `b` is expected here.
         _ => {
             unify_fail!(
                 gamma,
@@ -354,9 +346,8 @@ fn map_children<E>(
     Ok(Some(alloc_contiguous(&mut gamma.out.ty_arena, nodes)))
 }
 
-// Allocates a fresh local nullable wrapper
 pub(crate) fn nullable_of(gamma: &mut Gamma, inner: TyId, span: Span) -> TyId {
-    // collapse T?? -> T?
+    // Keep nullable types canonical.
     if matches!(gamma.get(inner), TypeExpr::Nullable(_)) {
         return inner;
     }
@@ -368,7 +359,6 @@ pub(crate) fn nullable_of(gamma: &mut Gamma, inner: TyId, span: Span) -> TyId {
     TyId::Local(idx)
 }
 
-/// `ty` under one `ref`, unchanged when it is not a reference.
 pub(crate) fn peel_ref(gamma: &Gamma, ty: TyId) -> TyId {
     match *gamma.get(ty) {
         TypeExpr::App {
@@ -379,7 +369,6 @@ pub(crate) fn peel_ref(gamma: &Gamma, ty: TyId) -> TyId {
     }
 }
 
-// If `ty` resolves to Nullable, return the resolved inner
 pub(crate) fn peel_nullable(gamma: &mut Gamma, ty: TyId, span: Span) -> TyId {
     let ty = resolve(gamma, ty, span);
 
@@ -447,9 +436,7 @@ pub(crate) fn types_equal(gamma: &Gamma, a: TyId, b: TyId) -> bool {
     }
 }
 
-/// Whether inference variable `var` appears anywhere in `ty`'s tree, following
-/// bound variables. Binding `var` to such a type would make it infinite
-/// (`a := a?`), and every later walk of it would recurse forever.
+/// Whether `var` appears in `ty`, following substitutions to prevent infinite types.
 fn occurs_in(gamma: &Gamma, var: VarId, ty: TyId) -> bool {
     gamma.workspace.type_any(
         Some(&gamma.out),
@@ -458,7 +445,6 @@ fn occurs_in(gamma: &Gamma, var: VarId, ty: TyId) -> bool {
     )
 }
 
-/// Bind `var := ty`, rejecting a binding that would make the type infinite.
 fn bind_var_checked(
     gamma: &mut Gamma,
     var: VarId,
@@ -477,9 +463,7 @@ fn bind_var_checked(
     Ok(())
 }
 
-/// Whether `ty` still holds an unbound inference variable anywhere in its tree.
-/// Pure: reads the substitution store without writing to it, so a caller can ask
-/// whether a type stands on its own before deciding to admit it.
+/// Whether `ty` contains an unbound inference variable, without path compression.
 pub(crate) fn has_unbound_infer(gamma: &Gamma, ty: TyId) -> bool {
     gamma.workspace.type_any(Some(&gamma.out), ty, &mut |node| {
         matches!(node, TypeExpr::Infer(v, _) if gamma.out.substitutions.get(v).is_none())
@@ -509,9 +493,8 @@ fn coerce_impl(
     let from_r = resolve(gamma, from, span);
     let to_r = resolve(gamma, to, span);
 
-    // A stored function value keeps its declared return ABI. Lifting a `nobox`
-    // return into a nullable one adds a presence slot at indirect call sites.
-    // Lambda literals checked against the target type get that ABI directly.
+    // Stored functions keep their return ABI; only contextual lambda literals
+    // can adopt the target's nullable return shape.
     let function_return = |ty: TyId| {
         let ty = match *gamma.get(ty) {
             TypeExpr::Nullable(inner) => ty.with_idx(inner),
@@ -560,10 +543,8 @@ fn coerce_impl(
         return unify(gamma, from_r, to_r, span);
     }
 
-    // `null` (a `Nullable` whose inner is still an unconstrained `Infer`) may
-    // not be assigned to bare `any` -- `any` excludes null; use `any?`. A
-    // nullable VALUE with a concrete inner (e.g. `int?`) IS allowed (rock
-    // parity: only the null literal is rejected here).
+    // Bare `any` excludes the null literal, but accepts nullable values with a
+    // concrete inner type.
     if matches!(gamma.get(to_r), TypeExpr::Builtin(BuiltinTy::Any)) {
         if contains_frame_ref(gamma, from_r) {
             return Err(CompilerError::new_with_label(
@@ -628,13 +609,10 @@ fn coerce_impl(
         }
     }
 
-    // `FieldRef<T, V>` carries both capabilities, so it is the TOP of the lattice
-    // and coerces DOWN to either single-capability former: to `ReadFieldRef<T, V>`
-    // (invariant in T, covariant in V) and to `WriteFieldRef<T, V>` (invariant in
-    // both -- write-only contravariance in V would be sound but has no consumer).
-    // Nothing coerces the other way, and the two single-capability formers are
-    // INCOMPARABLE: `WriteFieldRef -> ReadFieldRef` is the whole-value extraction
-    // an embedded field must not offer.
+    // FieldRef carries read and write capabilities and coerces to either single-
+    // capability form. ReadFieldRef is covariant in V; WriteFieldRef is invariant.
+    // The single-capability forms stay incomparable to prevent whole-value reads
+    // through embedded fields.
     if let (
         TypeExpr::App {
             ctor: TypeCtor::Nominal(fname),
@@ -750,8 +728,7 @@ pub fn join(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<TyId, Com
     }
 }
 
-// Deep-copy `ty` (any arena) into gamma.out, remapping child indices. Only safe way to
-// move possibly Static into a local arena. Shallow copy leaves dangling indices.
+// Reify into the local arena so copied child indices cannot point into a static arena.
 pub(crate) fn reify(gamma: &mut Gamma, ty: TyId, span: Span) -> Idx<TypeExpr> {
     let node = match *gamma.get(ty) {
         TypeExpr::App { ctor, params } => TypeExpr::App {
@@ -853,8 +830,7 @@ pub fn coerce_to_interface(
             other => other.into(),
         })?;
 
-        // Structural interface conformance capability check:
-        // An external conversion cannot use a public getter to satisfy a publicly writable interface field.
+        // A public getter cannot satisfy a publicly writable interface field.
         if field.write_vis == NsVisibility::Pub {
             if let Some(skey) = from_key {
                 if gamma.workspace.interface_names.contains(&skey) {

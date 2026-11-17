@@ -3,10 +3,7 @@ use crate::hir::{FamilyTier, unary_operator_entry};
 use bone_core::modules::DefKind;
 use std::borrow::Cow;
 
-/// A call family's overloads as seen from the current access site.
-/// `hidden` holds the members the visibility filter removed; selection
-/// scores them only to tell an inaccessible matching overload apart from an
-/// ordinary no-fit.
+/// Hidden members are scored only to distinguish inaccessible fits from no fit.
 #[derive(Default)]
 pub(crate) struct Callees {
     pub(crate) visible: FnList,
@@ -20,8 +17,6 @@ pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> Callees {
     let ws = gamma.workspace;
     match *family {
         CallFamily::Resolved(key) => member_overloads(gamma, key),
-        // A merged family: every member's overloads, as lowering recorded
-        // them for the module the call was lowered in.
         CallFamily::Merged { file, .. } => {
             let members = ws
                 .module_ids
@@ -41,7 +36,6 @@ pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> Callees {
     }
 }
 
-/// The overloads registered under a canonical member key.
 fn member_overloads(gamma: &Gamma, key: Ustr) -> Callees {
     gamma.dep_acc.borrow_mut().insert(key);
     let ws = gamma.workspace;
@@ -91,10 +85,7 @@ fn candidate_tier(
         .min()
 }
 
-/// An exact best-fit tie between members of different lookup
-/// tiers goes to the nearest tier, so a module can override a std or
-/// imported function of the same signature. Candidates of one tier stay
-/// tied.
+/// Lookup tier breaks equal-cost ties across members, so a module can override an import.
 fn keep_nearest_tier(
     gamma: &Gamma,
     family: CallFamily,
@@ -104,9 +95,7 @@ fn keep_nearest_tier(
         .iter()
         .map(|&(mid, fid)| candidate_tier(gamma, family, mid, fid))
         .collect();
-    // Every candidate of a merged family comes from a recorded member; a
-    // candidate without a tier would mean it does not, so nothing is dropped
-    // and the tie is reported as it stands.
+    // If a candidate has no recorded tier, keep the original tie.
     let Some(nearest) = tiers
         .iter()
         .copied()
@@ -123,8 +112,6 @@ fn keep_nearest_tier(
     });
 }
 
-/// True if `ty` contains an unbound generic hole (an `Infer`/`Generic` node)
-/// anywhere in its structure -- already-bound vars read through.
 fn ty_has_generic_hole(gamma: &Gamma, ty: TyId) -> bool {
     gamma
         .workspace
@@ -135,13 +122,8 @@ fn ty_has_generic_hole(gamma: &Gamma, ty: TyId) -> bool {
         })
 }
 
-/// Genericity penalty of a param, measured BEFORE unification binds its vars: a
-/// bare hole (`T`) costs 2, a ctor/tuple/fn CONTAINING a hole (`[T]`, `Wrap<T>`,
-/// `(T, int)`) costs 1, a fully concrete param costs 0. Grades overload
-/// specificity -- `int` beats `[T]` beats `T` -- so a concrete overload always
-/// outranks a catch-all that also fits. The `Iterator`-bounded case is one
-/// instance (a bounded `it: I` is a bare hole -> 2), so bounds add no separate
-/// cost.
+/// Grade specificity before unification binds variables. A bare hole costs 2,
+/// a type containing a hole costs 1, and a concrete type costs 0.
 fn param_genericity(gamma: &mut Gamma, param: TyId, span: Span) -> usize {
     let p = resolve(gamma, param, span);
     if matches!(*gamma.get(p), TypeExpr::Infer(..) | TypeExpr::Generic(..)) {
@@ -151,8 +133,6 @@ fn param_genericity(gamma: &mut Gamma, param: TyId, span: Span) -> usize {
 }
 
 pub(crate) fn fit_cost(gamma: &mut Gamma, arg: TyId, param: TyId, span: Span) -> Option<usize> {
-    // Measured before the trial: a successful unify binds the param's holes, so
-    // its genericity has to be read here or it always looks concrete afterward.
     let penalty = param_genericity(gamma, param, span);
     let snap = gamma.out.checkpoint();
 
@@ -189,13 +169,7 @@ pub(crate) fn fit_cost(gamma: &mut Gamma, arg: TyId, param: TyId, span: Span) ->
                 _ => false,
             };
 
-            // A full field ref carries both capabilities: `FieldRef<T, V>` fits a
-            // `ReadFieldRef<T, V>` param (`field_get`) and a `WriteFieldRef<T, V>`
-            // one (`field_set`). Scoring has to know it
-            // too -- otherwise the coercion only survives the single-candidate
-            // bypass in `check_call`, and a second decl of the name (a backend
-            // sibling, an unrelated overload) makes every
-            // `field_get(o, f: FieldRef<..>)` a no-fit.
+            // Score full field references as either capability, as coercion does.
             let p_is_single_cap_from_fieldref = match (*gamma.get(a), *gamma.get(p)) {
                 (
                     TypeExpr::App {
@@ -237,10 +211,7 @@ pub(crate) fn fit_cost(gamma: &mut Gamma, arg: TyId, param: TyId, span: Span) ->
     }
 }
 
-/// Why `select_overload` failed: a cost tie between fitting candidates
-/// (deferrable when an operand is an unpinned lambda-param var) vs no
-/// candidate fitting at all (never deferrable -- an unresolved var unifies
-/// with anything, so a no-fit means some OTHER operand rejects everywhere).
+/// Only a tie is deferrable: an unpinned variable already fits any candidate.
 #[derive(Debug)]
 pub(crate) enum SelectError {
     Tied(CompilerError),
@@ -255,7 +226,6 @@ impl From<SelectError> for CompilerError {
     }
 }
 
-/// One candidate's signature for the "No overload" error list: `name(p: T, ..) -> R`.
 fn render_candidate_sig(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> String {
     let f = &gamma.workspace.module(mid).functions[fid];
     let params = f
@@ -275,11 +245,7 @@ fn render_candidate_sig(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> Str
     )
 }
 
-/// Backend-selection rank: a lower rank is the preferred representative when a
-/// group of same-signature backend-variant decls is collapsed. `Any` (portable
-/// Rock) wins, then `Lua` (native default), then `Js` -- so the luajit-servable
-/// variant is what a backend-agnostic pass records, and codegen only has to look
-/// for a sibling on the JS side (never the Lua side, which is the common path).
+/// Prefer portable, then Lua, so the native emitter usually keeps the representative.
 fn backend_rank(b: skull_parser::FnBackend) -> u8 {
     match b {
         skull_parser::FnBackend::Any => 0,
@@ -302,11 +268,7 @@ fn candidate_origin(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> String 
     }
 }
 
-/// See the call site in [`select_overload`]. Groups candidates by
-/// [`Workspace::backend_variant_key`]; a group whose backends are all distinct
-/// collapses to its lowest-rank member; a group with a repeated backend (a
-/// genuine duplicate) is kept whole so the tie still surfaces as an
-/// "Ambiguous overload" error.
+/// Keep same-backend duplicates so ambiguity is still diagnosed.
 pub(crate) fn collapse_backend_variants<'c>(
     gamma: &Gamma,
     candidates: &'c [(ModuleId, Idx<Function>)],
@@ -314,12 +276,7 @@ pub(crate) fn collapse_backend_variants<'c>(
     if candidates.len() <= 1 {
         return Cow::Borrowed(candidates);
     }
-    // Fast path: a cross-backend collapse is only possible when candidates span
-    // >= 2 distinct backends. If they all share one backend (the overwhelmingly
-    // common case -- an all-`Any` portable overload set, or an all-`Lua`
-    // inline(lua)/operator set), no group is ever "all distinct", so the result
-    // equals the input. Skip the grouping entirely -- this keeps the collapse
-    // off the hot overload path unless a backend variant is in play.
+    // An overload family with one backend never needs grouping.
     let first_backend = gamma.workspace.module(candidates[0].0).functions[candidates[0].1].backend;
     if candidates
         .iter()
@@ -357,8 +314,6 @@ pub(crate) fn collapse_backend_variants<'c>(
             })
         };
         if all_distinct {
-            // Collapse to the lowest-rank representative (stable: first among ties,
-            // but ranks are distinct here so there is no tie).
             let rep = *idxs
                 .iter()
                 .min_by_key(|&&i| backend_rank(backend_of(i)))
@@ -415,23 +370,12 @@ pub(crate) fn select_overload_with_generics(
     name: Ustr,
     span: Span,
 ) -> Result<(ModuleId, Idx<Function>), SelectError> {
-    // Collapse backend-variant decls (same name, same signature, different
-    // `backend`) to ONE representative BEFORE scoring, so a same-name pair like
-    // `extern(ffi,..) fn f` + `extern(js) fn f` never scores as a tie. Each
-    // codegen backend later selects its own variant. Genuine same-signature
-    // same-backend duplicates are NOT collapsed -- they still tie -> "Ambiguous
-    // overload", the error the plan requires them to keep. Different signatures
-    // stay distinct overloads (normal overload resolution).
     let collapsed = collapse_backend_variants(gamma, candidates);
     let candidates: &[(ModuleId, Idx<Function>)] = &collapsed;
 
     let mut best_cost: Option<usize> = None;
-    // Every candidate at `best_cost`, so a tie can NAME the tied signatures.
     let mut best_set: SmallVec<[(ModuleId, Idx<Function>); 4]> = SmallVec::new();
-    // The bound-conformance failure of an otherwise-fitting `Iterator`-bounded
-    // candidate (params fit, bounds did not). When EVERY candidate rejects,
-    // this is the near-miss the user needs to see -- the generic "No overload"
-    // headline alone hides e.g. "EnumIter's `next` yields multiple values".
+    // When no candidate fits, report a bound failure from an otherwise fitting candidate.
     let mut bound_fail: Option<CompilerError> = None;
 
     for &(mid, fid) in candidates {
@@ -662,7 +606,6 @@ fn home_module_hint(
             .collect()
     };
     if path.is_empty() {
-        // Declared in the caller's own module: already in scope.
         return None;
     }
     path.push(bare);
@@ -804,11 +747,7 @@ pub(crate) fn score_candidate_with_generics(
     generic_args: IdxRange<TypeExpr>,
     span: Span,
 ) -> Option<Result<usize, CompilerError>> {
-    // Scoring only reads the candidate's fit: every type it builds (fresh
-    // generics, substituted params, unification results) is garbage once the
-    // trail is rolled back, so drop them instead of keeping them in the
-    // body's arena. A spread argument is inferred while slots are mapped and
-    // records its type, so that path keeps what it allocated.
+    // Discard trial types unless spread inference recorded them in the body.
     let snap = gamma.out.checkpoint();
     let cost = fit_candidate(
         c,
@@ -854,7 +793,6 @@ fn fit_candidate(
 
     let mut total = 0usize;
 
-    // Receiver (fills slot 0) - named args never name it
     if let Some(r) = recv_ty {
         let pty = if subs.is_empty() {
             param_decls[0].ty
@@ -865,8 +803,6 @@ fn fit_candidate(
         let db = declared_is_bounded_generic(gamma, param_decls[0].ty, &bounded_vars);
         total += fit_cost_with_iter_coercion(c, gamma, r, pty, db, span)?;
     }
-
-    // Map named + positional args onto THIS candidate's slots
 
     let slots = reorder_call_args(
         c,
@@ -916,10 +852,7 @@ fn fit_candidate(
         }
     }
 
-    // An `Iterator`-bounded candidate only fits if its bounds hold for this
-    // instantiation: a bare `it: I` unifies with ANY arg (`[int]`, Arena, ..),
-    // so without this check a bounded combinator would tie with -- or shadow --
-    // the concrete overloads (`map([T], f)`, `map(Arena<T>, f)`).
+    // An unconstrained argument fit doesn't prove Iterator conformance.
     if f.has_iterator_bounds() {
         let mut tree = BoundTree::default();
         if let Err(error) =
@@ -927,8 +860,6 @@ fn fit_candidate(
         {
             return Some(Err(error));
         }
-        // A bounded `it: I` is a bare generic hole, so `param_genericity` already
-        // ranked it below any concrete overload -- no separate bounds cost here.
     }
 
     Some(Ok(total))
@@ -1032,9 +963,7 @@ fn map_nominal_spread_fields<T>(
         .collect()
 }
 
-/// The (name, type) of every field of a call-site spread operand. The operand
-/// must be a nominal struct with statically known fields (rule: not tuple, not
-/// array, not Map/any).
+/// Call spreads require statically known nominal struct fields.
 pub(crate) fn spread_struct_fields(
     gamma: &mut Gamma,
     op_ty: TyId,
@@ -1095,8 +1024,6 @@ pub(crate) fn reorder_call_args(
     let mut pos = 0usize;
 
     for &arg in args {
-        // Struct spread `..op`: each field of the operand fills the param slot
-        // of the same name (rules 2/4/5).
         if c.body.spread_args.contains(&arg) {
             let op_ty = infer_expr(c, gamma, arg)?;
             let aspan = c.body.expr_spans[arg];
@@ -1110,7 +1037,6 @@ pub(crate) fn reorder_call_args(
                     )
                 };
                 match slots[pi] {
-                    // rule 5: two spreads supplying the same param.
                     Some(SlotFill::SpreadField(..)) => {
                         slot_fail!(
                             report,
@@ -1119,7 +1045,6 @@ pub(crate) fn reorder_call_args(
                             fname
                         )
                     }
-                    // rule 4: a named/positional arg written BEFORE the spread.
                     Some(SlotFill::Direct(_)) => slot_fail!(
                         report,
                         span,
@@ -1133,7 +1058,6 @@ pub(crate) fn reorder_call_args(
         }
 
         match c.body.arg_names.get(&arg) {
-            // positional
             None => {
                 if pos >= param_decls.len() {
                     slot_fail!(
@@ -1162,7 +1086,7 @@ pub(crate) fn reorder_call_args(
                 };
 
                 match slots[pi] {
-                    // rule 3: a named arg AFTER a spread overrides that field.
+                    // An explicit named argument can override a preceding spread field.
                     Some(SlotFill::SpreadField(..)) | None => {
                         slots[pi] = Some(SlotFill::Direct(arg))
                     }
@@ -1260,9 +1184,7 @@ pub(crate) fn resolve_named_call_with_generics(
     );
 
     let Err(e) = res else { return res };
-    // An argument or receiver whose type already failed, such as one read from
-    // an unresolved signature type, reported its own error; no overload can be
-    // chosen for it, so the call is just as unknown.
+    // A failed operand already has a diagnostic. Suppress the cascading call error.
     let operands = recv_override
         .into_iter()
         .chain(
@@ -1280,11 +1202,7 @@ pub(crate) fn resolve_named_call_with_generics(
         return Err(e);
     }
 
-    // `recv.name(...)` that failed to resolve: if `recv` has a field `name`
-    // that isn't callable, the `()` is almost certainly a slip (a field read
-    // written as a call). Gate on the failure being about the receiver or the
-    // call itself, so a later-arg mismatch under a legit UFCS call keeps its
-    // real error.
+    // Suggest a field read only for failures at the call or receiver, not later arguments.
     let (recv_ty, recv_span) = match recv_override {
         Some(r) => (resolve(gamma, r, span), None),
         None if !args.is_empty() && c.body.method_call_recvs.contains(&args.start()) => {
@@ -1321,9 +1239,6 @@ pub(crate) fn resolve_named_call_with_generics(
     Err(e)
 }
 
-/// The method name as written at a method-syntax call: the receiver is
-/// `args[0]` for `recv.name(..)` and the `SafeNavCall` receiver for
-/// `recv?.name(..)`. `None` for a call written by name.
 fn written_method_name(
     c: BodyCtx,
     recv_override: Option<TyId>,
@@ -1387,10 +1302,7 @@ pub(crate) fn resolve_named_call_inner(
             .collect()
     };
 
-    // Method-syntax `recv.name(args)` / `recv?.name(args)`:
-    // - a fn-typed FIELD on the receiver wins over free fns (UFCS is only a fallback)
-    // - recv_override is Some exactly for SafeNavCall
-    // - plain method path carries receiver as args[0]
+    // A callable field wins over a free function with the same name.
     let method_recv: Option<TyId> = match recv_override {
         Some(r) => Some(resolve(gamma, r, span)),
 
@@ -1409,10 +1321,8 @@ pub(crate) fn resolve_named_call_inner(
 
             if matches!(gamma.get(field_ty), TypeExpr::Function { .. }) {
                 let call_args = if recv_override.is_some() {
-                    // safe-nav: receiver isn't in args, pass them as is
                     args
                 } else {
-                    // plain method call ... drop the receiver
                     let r = args.make_range();
 
                     IdxRange::new_exclusive(
@@ -1428,12 +1338,7 @@ pub(crate) fn resolve_named_call_inner(
         }
     }
 
-    // Bound-calls: `next(x)` / `iter(x)` (either spelling incl. UFCS) where
-    // `x: I` and the enclosing fn declares `I: Iterator<E>`. There is no
-    // concrete callee at check time -- the body is checked ONCE against the
-    // bound; skull lowers these as placeholders and the instantiation-time
-    // BoundTree substitutes the concrete `next` per splice. `iter(x)` is
-    // IDENTITY (types as `I`, lowers to the argument, no call).
+    // BoundTree supplies the concrete next at specialization. iter(x) on a bound is identity.
     if !gamma.fn_bounds.is_empty()
         && recv_override.is_none()
         && args.len() == 1
@@ -1503,9 +1408,6 @@ pub(crate) fn resolve_named_call_inner(
             }
         }
 
-        // Unary-operator desugars (`!x` -> `__not`, `-x` -> `__unm`) with no
-        // applicable overload read as operator errors naming the operand type,
-        // not as a missing internal function.
         if unary_operator_entry(name.as_str()).is_some() {
             let operand = args
                 .into_iter()
@@ -1524,10 +1426,7 @@ pub(crate) fn resolve_named_call_inner(
             ));
         }
 
-        // A v1 DefKey renders as its declared name; bare keys
-        // ARE the name. A v1 name whose nearest binding is a value shadows
-        // every callable of that name in a lower tier, so say
-        // what it binds to.
+        // A nearer value binding shadows callable names in lower lookup tiers.
         let meta = gamma.workspace.defs.get(&name);
         let shown = meta.map(|m| m.name).unwrap_or(name);
         let message = match meta.map(|m| m.kind) {
@@ -1567,10 +1466,7 @@ pub(crate) fn resolve_named_call_inner(
         }
 
         for a in args {
-            // A `.field` arg needs a FieldRef expected type to infer, so like a
-            // lambda it gets a fresh var (fits any candidate, stops
-            // discriminating) and stays out of `preinferred` -- so post-selection
-            // it falls through to `check_expr` against the winner's param.
+            // Field selectors and lambdas need the winning parameter type.
             let t = if matches!(c.body.expr_arena[a], Expr::Lambda { .. }) {
                 gamma.fresh_callsite_var(*Q_LAM, span)
             } else if matches!(c.body.expr_arena[a], Expr::SiblingRef(_)) {
@@ -1580,7 +1476,6 @@ pub(crate) fn resolve_named_call_inner(
                 let t = resolve(gamma, t, span);
                 preinferred.insert(a, t);
                 t
-                // Ok::<_, CompilerError>(t)
             };
 
             arg_tys.push(t);
@@ -1616,17 +1511,12 @@ pub(crate) fn resolve_named_call_inner(
                     ));
                 }
 
-                // Defer-to-use: a cost tie whose operand is an unpinned
-                // lambda-param var re-resolves when a later use pins it
-                // (defer.rs). Wins over the `__op_*` fallback below -- the
-                // deferred path records a real callee once it commits.
+                // Retry a tie once the lambda parameter is pinned, before giving an operator error.
                 if let SelectError::Tied(_) = e {
                     if !gamma.quiet {
                         if let Some((v, origin)) = deferrable_operand(gamma, &arg_tys, span) {
                             let result = defer_result_var(gamma, origin, span);
-                            // The callee's purity is unknown until it
-                            // resolves; clear path refinements as any
-                            // non-`@pure` call would.
+                            // Treat a deferred callee as impure until resolved.
                             gamma.invalidate_mutable_refinements();
                             queue_pending(
                                 gamma,
@@ -1685,11 +1575,7 @@ pub(crate) fn resolve_named_call_inner(
     )
 }
 
-/// The post-selection half of a named call: record the callee, instantiate
-/// its generics, coerce/check every arg against the substituted params, run
-/// bound conformance and the fn-eq ban, apply the callee's purity effect, and
-/// return the substituted return type. Shared by the eager path above and the
-/// pending-constraint retry (defer.rs).
+/// Commit a selected overload, including when a deferred constraint retries.
 pub(crate) fn commit_selected_call(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -1711,9 +1597,7 @@ pub(crate) fn commit_selected_call(
     let function = &ws.module(callee_mid).functions[callee_fn];
     let subs = instantiate_call_generics(gamma, function, generic_args, span)?;
 
-    // `Iterator`-bounded callee: conformance is (re)tried after every arg
-    // unification -- resolving `next(C)` is also what binds the bound's elem
-    // generic, and a LATER lambda arg (`map(it, x => ..)`) must see it bound.
+    // Resolve bounds between arguments so later lambdas see the element type.
     let has_bounds = function.has_iterator_bounds();
     let mut bound_tree = BoundTree::default();
 
@@ -1798,10 +1682,7 @@ pub(crate) fn commit_selected_call(
         }
         match fill {
             SlotFill::Direct(arg) => {
-                // Implicit iterable->iterator coercion at a bounded param:
-                // unify the param with `iter(arg)`'s result and record the
-                // insertion for skull to emit. Lambdas can't be iterators and
-                // need the expected type to infer, so they take the plain path.
+                // Lambdas need an expected function type and can't be iterator arguments.
                 let mut coerced = false;
                 if declared_is_bounded_generic(gamma, pty_decl, &bounded_vars)
                     && !matches!(c.body.expr_arena[arg], Expr::Lambda { .. })
@@ -1822,9 +1703,7 @@ pub(crate) fn commit_selected_call(
                         coerced = true;
                     }
                 }
-                // A callback whose result is an `Iterator`-bounded generic
-                // (`flat_map`'s `fn(T) -> II`): a lambda's iterable result
-                // coerces like a bounded arg.
+                // A lambda's iterable result also coerces to an Iterator-bound result.
                 let iter_result = !coerced
                     && matches!(*gamma.get(pty_decl), TypeExpr::Function { ret, .. }
                         if declared_is_bounded_generic(gamma, pty_decl.with_idx(ret), &bounded_vars));
@@ -1854,7 +1733,6 @@ pub(crate) fn commit_selected_call(
                     )?;
                 }
             }
-            // A spread-supplied field: check the field's type against the param.
             SlotFill::SpreadField(op, fty) => {
                 if frame_ref_target(gamma, pty).is_some() {
                     comp_error!(
@@ -1876,10 +1754,7 @@ pub(crate) fn commit_selected_call(
         gamma.out.bound_call_trees.insert(call_expr, bound_tree);
     }
 
-    // Persist the instantiation for skull's inliner call-site specialization.
-    // After arg unification, so `subs` points at the
-    // concrete types; a still-unbound var stays a var and readers resolve
-    // through `substitutions` like `expr_types`.
+    // Record type arguments after checking the actual arguments has pinned them.
     if !function.generics.is_empty() {
         let mut bindings = Vec::with_capacity(function.generics.len());
         for &g in function.generics.iter() {
@@ -1889,12 +1764,7 @@ pub(crate) fn commit_selected_call(
         gamma.out.call_generic_bindings.insert(call_expr, bindings);
     }
 
-    // A non-`@pure` callee may reassign globals or mutate fields through aliases.
-    // Args + receiver above were checked while the
-    // refinements still held (the call's effect is sequenced after them); a
-    // `@pure` callee provably can't mutate state (verify_pure_expr), so it
-    // preserves them. Done here, after arg checking, so nested impure calls in
-    // earlier args have already cleared in evaluation order.
+    // The call's effects occur after receiver and argument evaluation.
     let callee_pure = fn_has_anno(
         &gamma.workspace.module(callee_mid).functions[callee_fn],
         "pure",
@@ -1995,9 +1865,7 @@ pub(crate) fn call_fn_value(
     let what = format!("call to value of type {}", gamma.render(fn_ty));
     check_args(c, gamma, &param_tys, args, param_tys.len(), span, &what)?;
 
-    // A fn-value callee is opaque -- we can't prove it doesn't mutate state, so
-    // conservatively drop path refinements (args above were checked while
-    // they still held).
+    // A function value can mutate state through a capture.
     gamma.invalidate_mutable_refinements();
 
     Ok(resolve(gamma, fn_ty.with_idx(ret), span))

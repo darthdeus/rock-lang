@@ -5,8 +5,7 @@ pub(crate) fn resolve_struct(gamma: &Gamma, name: Ustr) -> Option<StructId> {
     gamma.workspace.struct_by_name.get(&name).copied()
 }
 
-/// A nominal declaration's generic parameters bound to the arguments of
-/// `app_ty`, the application `Name<params>`.
+/// Map a nominal declaration's generic variables to an application's arguments.
 pub(crate) fn generic_arg_subs(
     gamma: &Gamma,
     generics: &[TyId],
@@ -29,9 +28,7 @@ pub(crate) fn resolve_enum(gamma: &Gamma, name: Ustr) -> Option<EnumId> {
     gamma.workspace.enums_by_name.get(&name).copied()
 }
 
-/// Every struct in the workspace defining `field` -- the reverse field
-/// inference scan for an unresolved base (unique match pins the struct;
-/// several matches are ambiguous, deferrable on a lambda-param base).
+/// Find structs that define `field`, for inferring an unresolved base type.
 pub(crate) fn structs_with_field(gamma: &Gamma, field: Ustr) -> Vec<StructId> {
     let mut matches: Vec<StructId> = Vec::new();
 
@@ -89,8 +86,7 @@ impl From<StructFieldError> for CompilerError {
     }
 }
 
-// Resolve the type of `field` on a nominal struct, with generic subst.
-// `base_ty` must be resolved and peeled nullable for safe nav.
+// Resolve a field type on a resolved struct base, peeled for safe navigation.
 pub(crate) fn struct_field_ty(
     gamma: &mut Gamma,
     base_ty: TyId,
@@ -127,8 +123,7 @@ pub(crate) fn struct_field_ty(
             params,
         } => (*VEC, params),
 
-        // A type that already failed, such as an unresolved name in a
-        // signature, reported its own error; a field of it is just as unknown.
+        // Preserve the original error instead of reporting a missing field.
         TypeExpr::Builtin(BuiltinTy::Error) => return Ok(base_ty),
 
         TypeExpr::Infer(..) => {
@@ -160,9 +155,6 @@ pub(crate) fn struct_field_ty(
             let struct_ty = gamma.nominal_app(def.name, &fresh, span);
             unify(gamma, base_ty, struct_ty, span)?;
 
-            // `sid` was selected because it has this field (scan above), so the
-            // re-find succeeds -- but return an error rather than unwrap, so a
-            // future change to the scan degrades to a diagnostic, never a panic.
             let fty = def
                 .fields
                 .iter()
@@ -214,9 +206,7 @@ pub(crate) fn struct_field_ty(
     substitute(gamma, field_ty, &subs, span).map_err(StructFieldError::from)
 }
 
-/// The struct `base_ty` names and every field typed for that instance, with
-/// the struct's arguments substituted as [`struct_field_ty`] does. A `ref` or
-/// nullable base peels to its target. `None` when the base is not a struct.
+/// Return a struct's instance-specific field types, peeling refs and nullable.
 pub fn struct_fields_of(
     gamma: &mut Gamma,
     base_ty: TyId,
@@ -251,12 +241,8 @@ pub fn struct_fields_of(
     Some((name, fields))
 }
 
-/// GLSL-style swizzle read on the float vec structs:
-/// one alphabet (`xyzw` | `rgba`), every component within the receiver's arity,
-/// at most 4 components. Result: len 1 -> float, len N -> VecN. Reached only on
-/// a real-field miss, so len-1 `x/y/z/w` never arrive here (`r/g/b/a` do).
-/// `None` = not swizzle-shaped for this receiver (fall through to the plain
-/// missing-field error); `Some(Err)` = swizzle-shaped but invalid.
+/// Type an `xyzw` or `rgba` swizzle on a float vector. `None` means this is not
+/// a swizzle; `Some(Err)` means it is malformed or out of range.
 pub(crate) fn vec_swizzle_ty(
     gamma: &mut Gamma,
     struct_name: Ustr,
@@ -302,10 +288,7 @@ pub(crate) fn vec_swizzle_ty(
     Some(Ok(ty))
 }
 
-/// Reject `v.yx = ...` / `v.yx += ...`: a swizzle types as a read, so without
-/// this pre-check an assignment target would infer as a plain field and emit a
-/// broken store. Real fields (incl. len-1 `x/y/z/w`) pass through; invalid
-/// swizzle shapes fall through to the read-path diagnostics.
+/// Reject swizzle writes before the read-path type check can treat one as a field.
 pub(crate) fn reject_swizzle_write(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -341,7 +324,6 @@ pub(crate) fn reject_swizzle_write(
     Ok(())
 }
 
-/// Whether `ty` resolves to a `value` struct (C-layout / GC-tier both).
 fn ty_is_value_struct(gamma: &Gamma, ty: TyId) -> Option<Ustr> {
     let TypeExpr::App {
         ctor: TypeCtor::Nominal(name),
@@ -355,11 +337,7 @@ fn ty_is_value_struct(gamma: &Gamma, ty: TyId) -> Option<Ustr> {
         .then_some(name)
 }
 
-/// Whether a value-struct field write whose base is `base` targets a place
-/// (legal) rather than an rvalue temporary (rejected). A value struct reached
-/// through a mutable struct field, a container element (`Index`), a global, or
-/// a local or parameter (a chain of value projections off a `Var`) is a place;
-/// one produced by a call or literal is a temporary.
+/// Whether a value-struct field base reaches mutable storage rather than a temporary.
 fn value_field_write_is_place(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -369,42 +347,27 @@ fn value_field_write_is_place(
     let mut cur = base;
     loop {
         match c.body.expr_arena[cur] {
-            // Element of a container, or a global: mutable storage.
             Expr::Index { .. } | Expr::Global(_) => return Ok(true),
             Expr::FieldAccess { base: parent, .. } => {
                 let pty = infer_expr(c, gamma, parent)?;
                 let pty = resolve(gamma, pty, span);
-                // A value field of a MUTABLE (non-value) struct lives in that
-                // struct's storage -- but only if the struct ITSELF is reachable
-                // storage. `mk().p.x = 5` writes through a temporary that no one
-                // else can observe, and sharing (a hoisted constant, a returned
-                // interior box) makes that write land on storage the caller never
-                // named. Keep descending either way; the chain bottoms out at a
-                // Var / Global / Index.
+                // A mutable struct field is writable only if its storage is
+                // reachable; a temporary or shared interior value may not be.
                 if ty_is_value_struct(gamma, pty).is_none() {
                     return Ok(expr_is_reachable_storage(c, parent));
                 }
                 cur = parent;
             }
-            // A local or parameter owns its copy, so a write replaces that
-            // binding's whole value (#107) and no other copy observes it.
+            // Locals and parameters own their copies.
             Expr::Var(_) => return Ok(true),
-            // A call result or a literal is a temporary: the write is lost.
+            // Calls and literals produce temporaries.
             _ => return Ok(false),
         }
     }
 }
 
-/// Whether `e` names storage a second reference could reach -- a variable or a
-/// global, or a projection/element of one. A call result, a literal, or any other
-/// temporary is reachable only through the expression that made it, so a write
-/// into it is unobservable and rejects.
-///
-/// skull's `is_mutable_place` (`skull-mir/src/lower.rs`) is the read-side
-/// sibling: same temporary/place verdict, but it stops at the first
-/// container/global instead of walking to the root. Keep the temporary verdict
-/// in sync -- a write bone accepts that skull thinks cannot be reached is an
-/// aliasing bug.
+/// Whether `e` reaches storage through a place; keep temporary handling in sync
+/// with lowering to avoid accepting unobservable writes.
 fn expr_is_reachable_storage(c: BodyCtx, e: Idx<Expr>) -> bool {
     match c.body.expr_arena[e] {
         Expr::Var(_) | Expr::Global(_) => true,
@@ -415,14 +378,8 @@ fn expr_is_reachable_storage(c: BodyCtx, e: Idx<Expr>) -> bool {
     }
 }
 
-/// Reject a write to a `value` struct's field UNLESS it targets a mutable place.
-/// A write into an rvalue (`mk().x = 5`) would be lost on a temporary and
-/// rejects. A value local or parameter (`p.x = 5`) owns its copy, so the write
-/// replaces that binding's whole value; a value that LIVES in mutable storage --
-/// a field of a mutable struct (`mob.pos.x`), a container element
-/// (`buf[i].pos.x`), a global place (`CAST_ENV.value = x`) -- is writable in place.
-/// Fires from the assignment / compound-assign / inc-dec target when its BASE is a
-/// value-struct projection.
+/// Reject writes to value-struct fields on temporaries; writable places include
+/// locals, parameters, globals, and projections from mutable storage.
 pub(crate) fn reject_value_struct_field_write(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -561,7 +518,6 @@ impl AccessDenied {
     }
 }
 
-/// Single access predicate.
 pub fn field_access(
     gamma: &Gamma,
     struct_key: Ustr,
@@ -573,7 +529,7 @@ pub fn field_access(
         return Ok(());
     };
     let Some(meta) = gamma.workspace.defs.get(&struct_key) else {
-        // Compiler-owned definitions without metadata expose public fields.
+        // Compiler-owned definitions expose public fields.
         return Ok(());
     };
 
@@ -636,9 +592,8 @@ pub(crate) fn check_field_write_access(
             .map_err(|e| e.to_compiler_error(span))?;
     }
 
-    // Value-place and embed writeback: if `base_ty` is a value struct, or if `base` is an `embed`
-    // field on an enclosing struct, writing to this field writes into `base`'s storage.
-    // That enclosing field must also be writable!
+    // Writes through value or embedded fields also require writable access to
+    // the enclosing field.
     if let Expr::FieldAccess {
         base: parent,
         field: parent_field,
